@@ -213,13 +213,13 @@ jobs:
           tool: nextest
 
       - name: Build all targets
-        run: cargo build --workspace --all-targets --all-features
+        run: cargo build --workspace --all-targets --all-features --exclude exarch-python --exclude exarch-node
 
       - name: Run tests
-        run: cargo nextest run --workspace --all-features --no-fail-fast
+        run: cargo nextest run --workspace --all-features --no-fail-fast --exclude exarch-python --exclude exarch-node
 
       - name: Run doctests
-        run: cargo test --doc --workspace --all-features
+        run: cargo test --doc --workspace --all-features --exclude exarch-python --exclude exarch-node
 
   # Test Python bindings
   test-python:

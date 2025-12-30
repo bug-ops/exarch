@@ -19,7 +19,11 @@ use pyo3::types::PyDict;
 /// - `duration_ms`: Extraction duration in milliseconds
 #[pyfunction]
 #[allow(clippy::needless_pass_by_value)] // PyO3 requires owned String
-fn extract_archive(py: Python<'_>, archive_path: String, output_dir: String) -> PyResult<Py<PyAny>> {
+fn extract_archive(
+    py: Python<'_>,
+    archive_path: String,
+    output_dir: String,
+) -> PyResult<Py<PyAny>> {
     let config = exarch_core::SecurityConfig::default();
 
     match exarch_core::extract_archive(&archive_path, &output_dir, &config) {

@@ -1,6 +1,8 @@
 //! Benchmarks for exarch-core extraction.
 
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::Criterion;
+use criterion::criterion_group;
+use criterion::criterion_main;
 use exarch_core::SecurityConfig;
 
 fn benchmark_security_config(c: &mut Criterion) {

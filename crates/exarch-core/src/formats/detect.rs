@@ -34,10 +34,10 @@ pub fn detect_format(path: &Path) -> Result<ArchiveType> {
     match extension {
         "tar" => Ok(ArchiveType::Tar),
         "gz" | "tgz" => {
-            if let Some(stem) = path.file_stem() {
-                if stem.to_string_lossy().ends_with(".tar") {
-                    return Ok(ArchiveType::TarGz);
-                }
+            if let Some(stem) = path.file_stem()
+                && stem.to_string_lossy().ends_with(".tar")
+            {
+                return Ok(ArchiveType::TarGz);
             }
             Ok(ArchiveType::TarGz)
         }

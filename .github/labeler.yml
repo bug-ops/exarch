@@ -1,0 +1,59 @@
+# Auto-labeler configuration for exarch project
+# Labels PRs based on changed file paths
+
+core:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'crates/exarch-core/**/*'
+          - '!crates/exarch-core/tests/**'
+          - '!crates/exarch-core/benches/**'
+
+python:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'crates/exarch-python/**/*'
+
+node:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'crates/exarch-node/**/*'
+
+tests:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '**/tests/**/*'
+          - 'tests/**/*'
+          - '**/*_test.rs'
+          - '**/test_*.rs'
+
+benches:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '**/benches/**/*'
+          - 'benches/**/*'
+
+ci:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '.github/workflows/**/*'
+          - '.github/labeler.yml'
+
+docs:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '**/*.md'
+          - 'docs/**/*'
+
+dependencies:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '**/Cargo.toml'
+          - '**/Cargo.lock'
+          - '**/package.json'
+          - '**/package-lock.json'
+
+security:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'deny.toml'
+          - '.github/workflows/security.yml'

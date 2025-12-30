@@ -237,9 +237,22 @@ mod tests {
     }
 
     #[test]
-    fn test_safe_path_absolute() {
+    #[cfg(unix)]
+    fn test_safe_path_absolute_unix() {
         let config = SecurityConfig::default();
         let path = PathBuf::from("/etc/passwd");
+        let result = SafePath::new(path, &config);
+        assert!(matches!(
+            result,
+            Err(crate::ExtractionError::PathTraversal { .. })
+        ));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_safe_path_absolute_windows() {
+        let config = SecurityConfig::default();
+        let path = PathBuf::from("C:\\Windows\\System32\\config");
         let result = SafePath::new(path, &config);
         assert!(matches!(
             result,

@@ -459,16 +459,19 @@ mod tests {
 
     #[test]
     fn test_has_null_bytes() {
-        use std::ffi::OsStr;
-        use std::os::unix::ffi::OsStrExt;
-
         let normal = PathBuf::from("normal/path.txt");
         assert!(!has_null_bytes(&normal));
 
-        let bytes = b"file\0.txt";
-        let os_str = OsStr::from_bytes(bytes);
-        let with_null = PathBuf::from(os_str);
-        assert!(has_null_bytes(&with_null));
+        #[cfg(unix)]
+        {
+            use std::ffi::OsStr;
+            use std::os::unix::ffi::OsStrExt;
+
+            let bytes = b"file\0.txt";
+            let os_str = OsStr::from_bytes(bytes);
+            let with_null = PathBuf::from(os_str);
+            assert!(has_null_bytes(&with_null));
+        }
     }
 
     #[test]

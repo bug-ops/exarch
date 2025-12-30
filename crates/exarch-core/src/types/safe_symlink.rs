@@ -399,6 +399,7 @@ mod tests {
     // M-7: Test for circular symlink detection
     #[test]
     #[allow(clippy::unwrap_used)]
+    #[cfg(unix)]
     fn test_circular_symlink_chains() {
         let (temp, dest) = create_test_dest();
         let config = create_config_with_symlinks();
@@ -409,12 +410,9 @@ mod tests {
         let b_path = temp.path().join("b");
         let c_path = temp.path().join("c");
 
-        #[cfg(unix)]
-        {
-            std::os::unix::fs::symlink("b", &a_path).unwrap();
-            std::os::unix::fs::symlink("c", &b_path).unwrap();
-            std::os::unix::fs::symlink("a", &c_path).unwrap();
-        }
+        std::os::unix::fs::symlink("b", &a_path).unwrap();
+        std::os::unix::fs::symlink("c", &b_path).unwrap();
+        std::os::unix::fs::symlink("a", &c_path).unwrap();
 
         // Validation should not hang or panic
         let link = SafePath::validate(&PathBuf::from("link"), &dest, &config)

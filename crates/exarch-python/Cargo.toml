@@ -1,5 +1,6 @@
 [package]
 name = "exarch-python"
+description = "Python bindings for exarch-core"
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
@@ -7,20 +8,18 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "Python bindings for exarch-core"
 
 [lib]
 name = "exarch"
 crate-type = ["cdylib"]
 
 [dependencies]
-exarch-core = { path = "../exarch-core" }
-pyo3.workspace = true
+exarch-core.workspace = true
+pyo3 = { workspace = true, features = ["extension-module"] }
 
 [features]
-default = ["pyo3/extension-module"]
-abi3 = ["pyo3/abi3-py38"]
+default = []
+abi3 = ["pyo3/abi3-py39"]
 
-[lints.clippy]
-all = { level = "warn", priority = -1 }
-pedantic = { level = "warn", priority = -1 }
+[lints]
+workspace = true

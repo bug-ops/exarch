@@ -41,7 +41,7 @@ mod tests {
 
     #[test]
     fn test_trait_implementation() {
-        let mut format = TestFormat;
+        let format = TestFormat;
         assert_eq!(format.format_name(), "test");
     }
 }

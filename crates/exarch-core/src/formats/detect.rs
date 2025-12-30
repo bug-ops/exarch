@@ -49,6 +49,7 @@ pub fn detect_format(path: &Path) -> Result<ArchiveType> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use std::path::PathBuf;

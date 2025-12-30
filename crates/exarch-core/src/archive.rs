@@ -108,7 +108,7 @@ impl ArchiveBuilder {
     ///
     /// # Errors
     ///
-    /// Returns an error if archive_path or output_dir are not set,
+    /// Returns an error if `archive_path` or `output_dir` are not set,
     /// or if extraction fails.
     pub fn extract(self) -> Result<ExtractionReport> {
         let archive_path =

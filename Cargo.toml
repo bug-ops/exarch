@@ -18,25 +18,51 @@ keywords = ["archive", "extraction", "security", "tar", "zip"]
 categories = ["compression", "filesystem"]
 
 [workspace.dependencies]
-# Core dependencies
-tar = "0.4.44"
-zip = "7.0.0"
-thiserror = "2.0.17"
-flate2 = "1.1.5"
+# Workspace crates
+exarch-core = { path = "crates/exarch-core", version = "0.1.0" }
+exarch-python = { path = "crates/exarch-python", version = "0.1.0" }
+exarch-node = { path = "crates/exarch-node", version = "0.1.0" }
 
-# Dev dependencies
-tempfile = "3.24.0"
-criterion = "0.8.1"
-proptest = "1.9.0"
+# Dependencies (sorted alphabetically)
+criterion = "0.8"
+flate2 = "1.1"
+napi = "3.8"
+napi-build = "2.0"
+napi-derive = "3.0"
+proptest = "1.9"
+pyo3 = "0.27"
+tar = "0.4"
+tempfile = "3.24"
+thiserror = "2.0"
+zip = { version = "7.0", default-features = false }
 
-# Binding dependencies
-pyo3 = "0.27.2"
-napi = "3.8.1"
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+expect_used = "warn"
+unwrap_used = "warn"
+# Allow for stub implementations (TODO: remove when implementing)
+cast_precision_loss = "allow"
+missing_const_for_fn = "allow"
+no_effect_underscore_binding = "allow"
+struct_excessive_bools = "allow"
+unnecessary_literal_bound = "allow"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+
+[profile.dev]
+opt-level = 0
+lto = false
 
 [profile.release]
-lto = true
-codegen-units = 1
+opt-level = 3
+lto = "thin"
+codegen-units = 16
 strip = true
+panic = "abort"
 
 [profile.bench]
 inherits = "release"

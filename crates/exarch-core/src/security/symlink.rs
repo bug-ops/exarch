@@ -2,7 +2,8 @@
 
 use std::path::Path;
 
-use crate::{Result, SecurityConfig};
+use crate::Result;
+use crate::SecurityConfig;
 
 /// Validates that a symlink target is safe.
 ///
@@ -26,11 +27,7 @@ mod tests {
     #[test]
     fn test_validate_symlink_placeholder() {
         let config = SecurityConfig::default();
-        let result = validate_symlink(
-            &PathBuf::from("link"),
-            &PathBuf::from("target"),
-            &config,
-        );
+        let result = validate_symlink(&PathBuf::from("link"), &PathBuf::from("target"), &config);
         assert!(result.is_ok());
     }
 }

@@ -2,10 +2,13 @@
 
 use std::path::Path;
 
-use crate::{ExtractionReport, Result, SecurityConfig};
+use crate::ExtractionReport;
+use crate::Result;
+use crate::SecurityConfig;
 
 /// Main extraction engine.
 pub struct ExtractionEngine {
+    #[allow(dead_code)]
     config: SecurityConfig,
 }
 
@@ -21,7 +24,11 @@ impl ExtractionEngine {
     /// # Errors
     ///
     /// Returns an error if extraction fails or security checks are violated.
-    pub fn extract(&mut self, _archive_path: &Path, _output_dir: &Path) -> Result<ExtractionReport> {
+    pub fn extract(
+        &mut self,
+        _archive_path: &Path,
+        _output_dir: &Path,
+    ) -> Result<ExtractionReport> {
         // TODO: Implement extraction engine
         Ok(ExtractionReport::new())
     }

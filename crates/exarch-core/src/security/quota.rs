@@ -1,6 +1,8 @@
 //! Extraction quota tracking and validation.
 
-use crate::{ExtractionError, Result, SecurityConfig};
+use crate::ExtractionError;
+use crate::Result;
+use crate::SecurityConfig;
 
 /// Tracks resource usage during extraction.
 #[derive(Debug, Default)]
@@ -27,13 +29,19 @@ impl QuotaTracker {
 
         if self.files_extracted > config.max_file_count {
             return Err(ExtractionError::QuotaExceeded {
-                resource: format!("file count ({} > {})", self.files_extracted, config.max_file_count),
+                resource: format!(
+                    "file count ({} > {})",
+                    self.files_extracted, config.max_file_count
+                ),
             });
         }
 
         if self.bytes_written > config.max_total_size {
             return Err(ExtractionError::QuotaExceeded {
-                resource: format!("total size ({} > {})", self.bytes_written, config.max_total_size),
+                resource: format!(
+                    "total size ({} > {})",
+                    self.bytes_written, config.max_total_size
+                ),
             });
         }
 

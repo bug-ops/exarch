@@ -2,7 +2,9 @@
 
 use std::path::Path;
 
-use crate::{ExtractionReport, Result, SecurityConfig};
+use crate::ExtractionReport;
+use crate::Result;
+use crate::SecurityConfig;
 
 use super::traits::ArchiveFormat;
 
@@ -24,7 +26,11 @@ impl Default for TarArchive {
 }
 
 impl ArchiveFormat for TarArchive {
-    fn extract(&mut self, _output_dir: &Path, _config: &SecurityConfig) -> Result<ExtractionReport> {
+    fn extract(
+        &mut self,
+        _output_dir: &Path,
+        _config: &SecurityConfig,
+    ) -> Result<ExtractionReport> {
         // TODO: Implement tar extraction
         Ok(ExtractionReport::new())
     }

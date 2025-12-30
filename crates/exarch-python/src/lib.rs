@@ -1,7 +1,7 @@
 //! Python bindings for exarch-core.
 
-use pyo3::prelude::*;
 use pyo3::exceptions::PyRuntimeError;
+use pyo3::prelude::*;
 
 /// Extract an archive to the specified directory.
 ///
@@ -17,10 +17,7 @@ use pyo3::exceptions::PyRuntimeError;
 /// - `bytes_written`: Total bytes written
 /// - `duration_ms`: Extraction duration in milliseconds
 #[pyfunction]
-fn extract_archive(
-    archive_path: String,
-    output_dir: String,
-) -> PyResult<PyObject> {
+fn extract_archive(archive_path: String, output_dir: String) -> PyResult<PyObject> {
     Python::with_gil(|py| {
         let config = exarch_core::SecurityConfig::default();
 

@@ -1,6 +1,8 @@
 //! Zip bomb detection.
 
-use crate::{ExtractionError, Result, SecurityConfig};
+use crate::ExtractionError;
+use crate::Result;
+use crate::SecurityConfig;
 
 /// Validates compression ratio to detect potential zip bombs.
 ///

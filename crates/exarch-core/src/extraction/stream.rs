@@ -1,6 +1,7 @@
 //! Streaming extraction utilities.
 
-use std::io::{Read, Write};
+use std::io::Read;
+use std::io::Write;
 
 use crate::Result;
 

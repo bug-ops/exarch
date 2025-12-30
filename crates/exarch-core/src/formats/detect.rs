@@ -2,7 +2,8 @@
 
 use std::path::Path;
 
-use crate::{ExtractionError, Result};
+use crate::ExtractionError;
+use crate::Result;
 
 /// Supported archive formats.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

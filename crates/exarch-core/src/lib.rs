@@ -7,7 +7,8 @@
 //! # Examples
 //!
 //! ```no_run
-//! use exarch_core::{extract_archive, SecurityConfig};
+//! use exarch_core::SecurityConfig;
+//! use exarch_core::extract_archive;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let config = SecurityConfig::default();
@@ -31,7 +32,9 @@ pub mod security;
 
 // Re-export main API types
 pub use api::extract_archive;
-pub use archive::{Archive, ArchiveBuilder};
+pub use archive::Archive;
+pub use archive::ArchiveBuilder;
 pub use config::SecurityConfig;
-pub use error::{ExtractionError, Result};
+pub use error::ExtractionError;
+pub use error::Result;
 pub use report::ExtractionReport;

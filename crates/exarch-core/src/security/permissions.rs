@@ -2,7 +2,8 @@
 
 use std::path::Path;
 
-use crate::{Result, SecurityConfig};
+use crate::Result;
+use crate::SecurityConfig;
 
 /// Validates file permissions for security.
 ///

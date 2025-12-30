@@ -23,35 +23,60 @@ pub enum ExtractionError {
 
     /// Path traversal attempt detected.
     #[error("path traversal detected: {path}")]
-    PathTraversal { path: PathBuf },
+    PathTraversal {
+        /// The path that attempted traversal.
+        path: PathBuf,
+    },
 
     /// Symlink points outside extraction directory.
     #[error("symlink target outside extraction directory: {path}")]
-    SymlinkEscape { path: PathBuf },
+    SymlinkEscape {
+        /// The symlink path.
+        path: PathBuf,
+    },
 
     /// Hardlink target not in extraction directory.
     #[error("hardlink target outside extraction directory: {path}")]
-    HardlinkEscape { path: PathBuf },
+    HardlinkEscape {
+        /// The hardlink path.
+        path: PathBuf,
+    },
 
     /// Potential zip bomb detected.
-    #[error("potential zip bomb: compressed={compressed} bytes, uncompressed={uncompressed} bytes (ratio: {ratio:.2})")]
+    #[error(
+        "potential zip bomb: compressed={compressed} bytes, uncompressed={uncompressed} bytes (ratio: {ratio:.2})"
+    )]
     ZipBomb {
+        /// Compressed size in bytes.
         compressed: u64,
+        /// Uncompressed size in bytes.
         uncompressed: u64,
+        /// Compression ratio.
         ratio: f64,
     },
 
     /// File permissions are invalid or unsafe.
     #[error("invalid permissions for {path}: {mode:#o}")]
-    InvalidPermissions { path: PathBuf, mode: u32 },
+    InvalidPermissions {
+        /// The file path.
+        path: PathBuf,
+        /// The permission mode.
+        mode: u32,
+    },
 
     /// Extraction quota exceeded.
     #[error("quota exceeded: {resource}")]
-    QuotaExceeded { resource: String },
+    QuotaExceeded {
+        /// Description of the exceeded resource.
+        resource: String,
+    },
 
     /// Operation not permitted by security policy.
     #[error("operation denied by security policy: {reason}")]
-    SecurityViolation { reason: String },
+    SecurityViolation {
+        /// Reason for the violation.
+        reason: String,
+    },
 }
 
 #[cfg(test)]

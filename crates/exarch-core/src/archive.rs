@@ -1,8 +1,11 @@
 //! Archive types and builders.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::path::PathBuf;
 
-use crate::{ExtractionReport, Result, SecurityConfig};
+use crate::ExtractionReport;
+use crate::Result;
+use crate::SecurityConfig;
 
 /// Represents an archive file with associated metadata.
 #[derive(Debug)]
@@ -54,7 +57,8 @@ impl Archive {
 /// # Examples
 ///
 /// ```no_run
-/// use exarch_core::{ArchiveBuilder, SecurityConfig};
+/// use exarch_core::ArchiveBuilder;
+/// use exarch_core::SecurityConfig;
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let report = ArchiveBuilder::new()
@@ -107,17 +111,17 @@ impl ArchiveBuilder {
     /// Returns an error if archive_path or output_dir are not set,
     /// or if extraction fails.
     pub fn extract(self) -> Result<ExtractionReport> {
-        let archive_path = self.archive_path.ok_or_else(|| {
-            crate::ExtractionError::SecurityViolation {
-                reason: "archive path not set".to_string(),
-            }
-        })?;
+        let archive_path =
+            self.archive_path
+                .ok_or_else(|| crate::ExtractionError::SecurityViolation {
+                    reason: "archive path not set".to_string(),
+                })?;
 
-        let output_dir = self.output_dir.ok_or_else(|| {
-            crate::ExtractionError::SecurityViolation {
-                reason: "output directory not set".to_string(),
-            }
-        })?;
+        let output_dir =
+            self.output_dir
+                .ok_or_else(|| crate::ExtractionError::SecurityViolation {
+                    reason: "output directory not set".to_string(),
+                })?;
 
         let config = self.config.unwrap_or_default();
 

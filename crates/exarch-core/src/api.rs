@@ -2,7 +2,9 @@
 
 use std::path::Path;
 
-use crate::{ExtractionReport, Result, SecurityConfig};
+use crate::ExtractionReport;
+use crate::Result;
+use crate::SecurityConfig;
 
 /// Extracts an archive to the specified output directory.
 ///
@@ -26,7 +28,8 @@ use crate::{ExtractionReport, Result, SecurityConfig};
 /// # Examples
 ///
 /// ```no_run
-/// use exarch_core::{extract_archive, SecurityConfig};
+/// use exarch_core::SecurityConfig;
+/// use exarch_core::extract_archive;
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let config = SecurityConfig::default();

@@ -2,7 +2,9 @@
 
 use std::path::Path;
 
-use crate::{ExtractionReport, Result, SecurityConfig};
+use crate::ExtractionReport;
+use crate::Result;
+use crate::SecurityConfig;
 
 /// Trait for archive format handlers.
 pub trait ArchiveFormat {
@@ -24,7 +26,11 @@ mod tests {
     struct TestFormat;
 
     impl ArchiveFormat for TestFormat {
-        fn extract(&mut self, _output_dir: &Path, _config: &SecurityConfig) -> Result<ExtractionReport> {
+        fn extract(
+            &mut self,
+            _output_dir: &Path,
+            _config: &SecurityConfig,
+        ) -> Result<ExtractionReport> {
             Ok(ExtractionReport::new())
         }
 

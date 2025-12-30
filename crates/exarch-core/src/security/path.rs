@@ -2,7 +2,8 @@
 
 use std::path::Path;
 
-use crate::{Result, SecurityConfig};
+use crate::Result;
+use crate::SecurityConfig;
 
 /// Validates that a path does not contain traversal attempts.
 ///

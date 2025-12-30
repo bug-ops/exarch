@@ -17,7 +17,7 @@ use std::path::PathBuf;
 ///
 /// // Customize for specific needs
 /// let custom = SecurityConfig {
-///     max_file_size: 100 * 1024 * 1024, // 100 MB
+///     max_file_size: 100 * 1024 * 1024,   // 100 MB
 ///     max_total_size: 1024 * 1024 * 1024, // 1 GB
 ///     ..Default::default()
 /// };
@@ -72,11 +72,11 @@ impl Default for SecurityConfig {
     /// - `allow_absolute_paths`: false (deny)
     /// - `preserve_permissions`: false
     /// - `allowed_extensions`: empty (allow all)
-    /// - `banned_path_components`: [".git", ".ssh", ".gnupg"]
+    /// - `banned_path_components`: `[".git", ".ssh", ".gnupg"]`
     fn default() -> Self {
         Self {
-            max_file_size: 50 * 1024 * 1024,        // 50 MB
-            max_total_size: 500 * 1024 * 1024,      // 500 MB
+            max_file_size: 50 * 1024 * 1024,   // 50 MB
+            max_total_size: 500 * 1024 * 1024, // 500 MB
             max_compression_ratio: 100.0,
             max_file_count: 10_000,
             max_path_depth: 32,
@@ -156,7 +156,10 @@ impl SafePath {
         let depth = path.components().count();
         if depth > config.max_path_depth {
             return Err(ExtractionError::SecurityViolation {
-                reason: format!("path depth {} exceeds maximum {}", depth, config.max_path_depth),
+                reason: format!(
+                    "path depth {} exceeds maximum {}",
+                    depth, config.max_path_depth
+                ),
             });
         }
 
@@ -170,7 +173,7 @@ impl SafePath {
 
             if !config.is_path_component_allowed(&comp_str) {
                 return Err(ExtractionError::SecurityViolation {
-                    reason: format!("banned path component: {}", comp_str),
+                    reason: format!("banned path component: {comp_str}"),
                 });
             }
         }
@@ -226,7 +229,10 @@ mod tests {
         let config = SecurityConfig::default();
         let path = PathBuf::from("../etc/passwd");
         let result = SafePath::new(path, &config);
-        assert!(matches!(result, Err(crate::ExtractionError::PathTraversal { .. })));
+        assert!(matches!(
+            result,
+            Err(crate::ExtractionError::PathTraversal { .. })
+        ));
     }
 
     #[test]
@@ -234,7 +240,10 @@ mod tests {
         let config = SecurityConfig::default();
         let path = PathBuf::from("/etc/passwd");
         let result = SafePath::new(path, &config);
-        assert!(matches!(result, Err(crate::ExtractionError::PathTraversal { .. })));
+        assert!(matches!(
+            result,
+            Err(crate::ExtractionError::PathTraversal { .. })
+        ));
     }
 
     #[test]
@@ -242,7 +251,10 @@ mod tests {
         let config = SecurityConfig::default();
         let path = PathBuf::from("project/.git/config");
         let result = SafePath::new(path, &config);
-        assert!(matches!(result, Err(crate::ExtractionError::SecurityViolation { .. })));
+        assert!(matches!(
+            result,
+            Err(crate::ExtractionError::SecurityViolation { .. })
+        ));
     }
 
     #[test]

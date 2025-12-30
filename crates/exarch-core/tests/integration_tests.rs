@@ -87,9 +87,9 @@ fn test_symlink_workflow() {
     assert_eq!(symlink.target_path(), PathBuf::from("target.txt").as_path());
 
     // Create actual symlink on filesystem
-    let link_path = dest.join(&link);
     #[cfg(unix)]
     {
+        let link_path = dest.join(&link);
         std::os::unix::fs::symlink(&target, &link_path).unwrap();
         assert!(link_path.exists());
     }

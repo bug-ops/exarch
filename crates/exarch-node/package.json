@@ -1,0 +1,36 @@
+{
+  "name": "exarch",
+  "version": "0.1.0",
+  "description": "Memory-safe archive extraction library",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "keywords": [
+    "archive",
+    "extraction",
+    "security",
+    "tar",
+    "zip",
+    "napi-rs"
+  ],
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rabax/exarch"
+  },
+  "napi": {
+    "name": "exarch",
+    "triples": {
+      "defaults": true
+    }
+  },
+  "scripts": {
+    "build": "napi build --platform --release",
+    "build:debug": "napi build --platform"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^3.0.0"
+  },
+  "engines": {
+    "node": ">= 14"
+  }
+}

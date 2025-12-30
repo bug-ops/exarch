@@ -1,0 +1,25 @@
+[package]
+name = "exarch-node"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Node.js bindings for exarch-core"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+exarch-core = { path = "../exarch-core" }
+napi.workspace = true
+napi-derive = "3.5"
+
+[build-dependencies]
+napi-build = "2.3"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }

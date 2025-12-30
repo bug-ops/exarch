@@ -1,0 +1,38 @@
+[package]
+name = "exarch-core"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Memory-safe archive extraction library with security validation"
+
+[dependencies]
+tar.workspace = true
+zip.workspace = true
+thiserror.workspace = true
+flate2.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+proptest.workspace = true
+criterion.workspace = true
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+
+[lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+
+[[bench]]
+name = "extraction"
+harness = false

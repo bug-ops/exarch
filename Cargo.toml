@@ -1,0 +1,42 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/exarch-core",
+    "crates/exarch-python",
+    "crates/exarch-node",
+]
+
+[workspace.package]
+version = "0.1.0"
+authors = ["Exarch Contributors"]
+edition = "2024"
+rust-version = "1.85.0"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/rabax/exarch"
+homepage = "https://github.com/rabax/exarch"
+keywords = ["archive", "extraction", "security", "tar", "zip"]
+categories = ["compression", "filesystem"]
+
+[workspace.dependencies]
+# Core dependencies
+tar = "0.4.44"
+zip = "7.0.0"
+thiserror = "2.0.17"
+flate2 = "1.1.5"
+
+# Dev dependencies
+tempfile = "3.24.0"
+criterion = "0.8.1"
+proptest = "1.9.0"
+
+# Binding dependencies
+pyo3 = "0.27.2"
+napi = "3.8.1"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+
+[profile.bench]
+inherits = "release"

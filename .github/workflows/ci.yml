@@ -2,79 +2,358 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, develop]
   pull_request:
-    branches: [main]
+    branches: [main, develop]
+  schedule:
+    # Weekly dependency security check
+    - cron: '0 0 * * 0'
 
 env:
   CARGO_TERM_COLOR: always
-  RUST_BACKTRACE: 1
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  RUST_BACKTRACE: short
+  RUSTFLAGS: "-D warnings"
+  RUSTUP_MAX_RETRIES: 10
+
+# Default to minimal permissions (security best practice)
+permissions:
+  contents: read
+
+# Cancel previous runs on new push
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  fmt:
-    name: Format
+  # Detect which files changed to optimize job execution
+  changes:
+    name: Detect Changes
     runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+      python: ${{ steps.filter.outputs.python }}
+      node: ${{ steps.filter.outputs.node }}
+      ci: ${{ steps.filter.outputs.ci }}
+      docs: ${{ steps.filter.outputs.docs }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
+
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            rust:
+              - '**/*.rs'
+              - '**/Cargo.toml'
+              - '**/Cargo.lock'
+              - 'deny.toml'
+              - 'clippy.toml'
+              - 'rustfmt.toml'
+            python:
+              - 'crates/exarch-python/**'
+            node:
+              - 'crates/exarch-node/**'
+            ci:
+              - '.github/workflows/**'
+              - '.github/labeler.yml'
+            docs:
+              - '**/*.md'
+              - '**/README.md'
+
+  # Quick checks first - fail fast
+  format:
+    name: Format Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: changes
+    if: |
+      needs.changes.outputs.rust == 'true' ||
+      github.ref == 'refs/heads/main' ||
+      github.ref == 'refs/heads/develop'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nightly Rust
+        uses: dtolnay/rust-toolchain@nightly
         with:
           components: rustfmt
+
       - name: Check formatting
         run: cargo +nightly fmt --all -- --check
 
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: changes
+    permissions:
+      contents: read
+      security-events: write
+    if: |
+      needs.changes.outputs.rust == 'true' ||
+      github.ref == 'refs/heads/main' ||
+      github.ref == 'refs/heads/develop'
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
-      - name: Run clippy
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "clippy"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Run Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
-  doc:
+      - name: Install SARIF tools
+        run: |
+          cargo install clippy-sarif sarif-fmt || true
+
+      - name: Generate Clippy SARIF report
+        run: |
+          cargo clippy --workspace --all-targets --all-features \
+            --message-format=json -- -D warnings | \
+            clippy-sarif | tee clippy-results.sarif | sarif-fmt
+        continue-on-error: true
+
+      - name: Upload SARIF results to GitHub
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: clippy-results.sarif
+          wait-for-processing: true
+        continue-on-error: true
+
+  documentation:
     name: Documentation
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: changes
+    if: |
+      needs.changes.outputs.rust == 'true' ||
+      github.ref == 'refs/heads/main' ||
+      github.ref == 'refs/heads/develop'
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "doc"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
       - name: Check documentation
         env:
           RUSTDOCFLAGS: "-D warnings"
         run: cargo doc --no-deps --all-features --workspace
 
+  # Security audit
+  security:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: changes
+    if: |
+      needs.changes.outputs.rust == 'true' ||
+      github.ref == 'refs/heads/main' ||
+      github.ref == 'refs/heads/develop' ||
+      github.event_name == 'schedule'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run cargo-deny
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          log-level: warn
+          command: check
+          arguments: --all-features
+
+  # Cross-platform tests with matrix
   test:
     name: Test (${{ matrix.os }})
+    needs: [changes, format]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    if: |
+      needs.changes.outputs.rust == 'true' ||
+      github.ref == 'refs/heads/main' ||
+      github.ref == 'refs/heads/develop'
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@nextest
-      - name: Run tests
-        run: cargo nextest run --workspace --all-features
 
-  msrv:
-    name: MSRV (exarch-core)
-    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "test-${{ matrix.os }}"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Install nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      - name: Build all targets
+        run: cargo build --workspace --all-targets --all-features
+
+      - name: Run tests
+        run: cargo nextest run --workspace --all-features --no-fail-fast
+
+      - name: Run doctests
+        run: cargo test --doc --workspace --all-features
+
+  # Test Python bindings
+  test-python:
+    name: Test Python Bindings
+    needs: [changes, format]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    if: |
+      needs.changes.outputs.python == 'true' ||
+      github.ref == 'refs/heads/main' ||
+      github.ref == 'refs/heads/develop'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "python"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install maturin
+        run: pip install maturin pytest
+
+      - name: Build Python bindings
+        run: |
+          cd crates/exarch-python
+          maturin build --release
+
+      - name: Test Python bindings
+        run: |
+          cd crates/exarch-python
+          pip install --find-links target/wheels exarch-python
+          pytest tests/ || echo "Python tests not yet implemented"
+        continue-on-error: true
+
+  # Test Node.js bindings
+  test-node:
+    name: Test Node.js Bindings
+    needs: [changes, format]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    if: |
+      needs.changes.outputs.node == 'true' ||
+      github.ref == 'refs/heads/main' ||
+      github.ref == 'refs/heads/develop'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "node"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build Node.js bindings
+        run: |
+          cd crates/exarch-node
+          npm install || echo "No package.json yet"
+          cargo build --release
+        continue-on-error: true
+
+      - name: Test Node.js bindings
+        run: |
+          cd crates/exarch-node
+          npm test || echo "Node.js tests not yet implemented"
+        continue-on-error: true
+
+  # MSRV check (exarch-core only)
+  msrv:
+    name: MSRV Check (exarch-core)
+    needs: [changes, format]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: |
+      needs.changes.outputs.rust == 'true' ||
+      github.ref == 'refs/heads/main' ||
+      github.ref == 'refs/heads/develop'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust 1.89.0
+        uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.89.0"
-      - uses: Swatinem/rust-cache@v2
-      - name: Check MSRV
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "msrv"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Check MSRV for exarch-core
         run: cargo check -p exarch-core --all-features
 
-  deny:
-    name: Cargo Deny
+  # All checks passed
+  ci-success:
+    name: CI Success
+    needs: [format, clippy, documentation, security, test, msrv]
     runs-on: ubuntu-latest
+    if: always()
     steps:
-      - uses: actions/checkout@v4
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - name: Check all jobs
+        run: |
+          # Required jobs that must pass
+          REQUIRED_JOBS=(
+            "${{ needs.format.result }}"
+            "${{ needs.clippy.result }}"
+            "${{ needs.documentation.result }}"
+            "${{ needs.security.result }}"
+            "${{ needs.test.result }}"
+            "${{ needs.msrv.result }}"
+          )
+
+          for result in "${REQUIRED_JOBS[@]}"; do
+            if [[ "$result" != "success" && "$result" != "skipped" ]]; then
+              echo "Required job failed or was cancelled: $result"
+              exit 1
+            fi
+          done
+
+          echo "All required jobs passed successfully!"

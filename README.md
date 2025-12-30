@@ -1,51 +1,29 @@
-# Exarch
+# exarch
+
+[![CI](https://img.shields.io/github/actions/workflow/status/bug-ops/exarch/ci.yml?branch=main)](https://github.com/bug-ops/exarch/actions)
+[![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue)](LICENSE-MIT)
+[![MSRV](https://img.shields.io/badge/MSRV-1.89.0-blue)](https://github.com/bug-ops/exarch)
 
 Memory-safe archive extraction library with Python and Node.js bindings.
 
+> [!IMPORTANT]
+> **exarch** is designed as a secure replacement for vulnerable archive libraries like Python's `tarfile` and Node.js's `tar-fs`, which have known CVEs with CVSS scores up to 9.4.
+
 ## Features
 
-- **Security-First Design**: Built-in protection against common vulnerabilities
-  - Path traversal prevention
-  - Zip bomb detection
-  - Symlink/hardlink validation
-  - Configurable quotas and limits
-- **Multiple Formats**: Support for tar, tar.gz, tar.bz2, tar.xz, and zip
-- **Language Bindings**: Native Python and Node.js support
-- **Zero Unsafe Code**: Core library is 100% safe Rust (Edition 2024)
-- **Production Ready**: Comprehensive testing and security validation
+- **Security-first design** — Default-deny security model with protection against path traversal, symlink attacks, zip bombs, and more
+- **Type-driven safety** — Rust's type system ensures validated paths can only be constructed through security checks
+- **Multi-language support** — Native bindings for Python (PyO3) and Node.js (napi-rs)
+- **Zero unsafe code** — Core library contains no unsafe Rust code
+- **High performance** — Targets 500 MB/s for TAR and 300 MB/s for ZIP extraction
 
-## Quick Start
+## Packages
 
-### Rust
-
-```rust
-use exarch_core::{extract_archive, SecurityConfig};
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let config = SecurityConfig::default();
-    let report = extract_archive("archive.tar.gz", "/output/dir", &config)?;
-    println!("Extracted {} files", report.files_extracted);
-    Ok(())
-}
-```
-
-### Python
-
-```python
-import exarch
-
-report = exarch.extract_archive("archive.tar.gz", "/output/dir")
-print(f"Extracted {report['files_extracted']} files")
-```
-
-### Node.js
-
-```javascript
-const exarch = require('exarch');
-
-const report = exarch.extractArchive("archive.tar.gz", "/output/dir");
-console.log(`Extracted ${report.files_extracted} files`);
-```
+| Package | Description | Docs |
+|---------|-------------|------|
+| [exarch-core](crates/exarch-core) | Core Rust library | [![docs.rs](https://img.shields.io/docsrs/exarch-core)](https://docs.rs/exarch-core) |
+| [exarch-python](crates/exarch-python) | Python bindings | [PyPI](https://pypi.org/project/exarch) |
+| [exarch-node](crates/exarch-node) | Node.js bindings | [npm](https://www.npmjs.com/package/exarch) |
 
 ## Installation
 
@@ -55,6 +33,15 @@ console.log(`Extracted ${report.files_extracted} files`);
 [dependencies]
 exarch-core = "0.1"
 ```
+
+Or with cargo-add:
+
+```bash
+cargo add exarch-core
+```
+
+> [!NOTE]
+> Requires Rust 1.89.0 or later.
 
 ### Python
 
@@ -68,27 +55,101 @@ pip install exarch
 npm install exarch
 ```
 
-## Security Configuration
+## Quick Start
+
+### Rust
+
+```rust
+use exarch_core::{extract_archive, SecurityConfig};
+
+fn main() -> Result<(), exarch_core::ExtractionError> {
+    let config = SecurityConfig::default();
+    let report = extract_archive("archive.tar.gz", "/output/path", &config)?;
+
+    println!("Extracted {} files ({} bytes)",
+        report.files_extracted,
+        report.bytes_written);
+    Ok(())
+}
+```
+
+### Python
+
+```python
+import exarch
+
+result = exarch.extract_archive("archive.tar.gz", "/output/path")
+print(f"Extracted {result['files_extracted']} files")
+```
+
+### Node.js
+
+```javascript
+const exarch = require('exarch');
+
+const result = exarch.extractArchive('archive.tar.gz', '/output/path');
+console.log(`Extracted ${result.filesExtracted} files`);
+```
+
+## Security
+
+exarch provides defense-in-depth protection against common archive vulnerabilities:
+
+| Protection | Description | Default |
+|------------|-------------|---------|
+| Path traversal | Blocks `../` and absolute paths | Enabled |
+| Symlink attacks | Prevents symlinks escaping extraction directory | Enabled |
+| Hardlink attacks | Validates hardlink targets | Enabled |
+| Zip bombs | Detects high compression ratios | Enabled (100x limit) |
+| Permission sanitization | Strips setuid/setgid bits | Enabled |
+| Size limits | Configurable file and total size limits | 50MB / 10GB |
+
+> [!CAUTION]
+> Disabling security features is strongly discouraged. Only do so if you fully understand the risks and trust the archive source.
+
+### Security Configuration
 
 ```rust
 use exarch_core::SecurityConfig;
 
 let config = SecurityConfig {
-    max_file_size: 100 * 1024 * 1024,  // 100 MB
+    max_file_size: 100 * 1024 * 1024,   // 100 MB
     max_total_size: 1024 * 1024 * 1024, // 1 GB
-    allow_symlinks: false,
-    allow_hardlinks: false,
+    max_compression_ratio: 50.0,         // 50x compression limit
+    allow_symlinks: false,               // Block symlinks
+    allow_hardlinks: false,              // Block hardlinks
     ..Default::default()
 };
+```
+
+## Supported Formats
+
+- TAR (`.tar`)
+- TAR+GZIP (`.tar.gz`, `.tgz`)
+- TAR+BZIP2 (`.tar.bz2`)
+- TAR+XZ (`.tar.xz`, `.txz`)
+- ZIP (`.zip`)
+
+## Project Structure
+
+```
+exarch/
+├── crates/
+│   ├── exarch-core/     # Core Rust library
+│   ├── exarch-python/   # Python bindings (PyO3)
+│   └── exarch-node/     # Node.js bindings (napi-rs)
+├── benches/             # Criterion benchmarks
+├── examples/            # Usage examples
+└── tests/               # Integration tests
 ```
 
 ## Development
 
 ### Requirements
 
-- Rust 1.85.0 or later (Edition 2024)
-- Python 3.8+ (for Python bindings)
-- Node.js 14+ (for Node.js bindings)
+- Rust 1.89.0 or later (Edition 2024)
+- Python 3.9+ (for Python bindings)
+- Node.js 18+ (for Node.js bindings)
 
 ### Build
 
@@ -99,44 +160,30 @@ cargo build --workspace
 ### Test
 
 ```bash
-cargo test --workspace
+cargo nextest run --workspace --all-features
 ```
 
-### Format
+### Pre-commit Checks
 
 ```bash
-cargo +nightly fmt
+cargo +nightly fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features --workspace
+cargo deny check
 ```
 
-### Lint
+> [!TIP]
+> Run all checks before committing to ensure CI passes.
 
-```bash
-cargo clippy --workspace -- -D warnings
-```
+## Contributing
 
-## Project Structure
-
-```
-exarch/
-├── crates/
-│   ├── exarch-core/     # Core Rust library
-│   ├── exarch-python/   # Python bindings
-│   └── exarch-node/     # Node.js bindings
-├── benches/             # Benchmarks
-├── examples/            # Usage examples
-├── tests/               # Integration tests
-└── docs/                # Documentation
-```
+Contributions are welcome! Please read our contributing guidelines before submitting PRs.
 
 ## License
 
 Licensed under either of:
 
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
-- MIT license ([LICENSE-MIT](LICENSE-MIT))
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
+- MIT License ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
 
 at your option.
-
-## Contributing
-
-Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for details.

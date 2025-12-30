@@ -29,6 +29,7 @@ pub mod extraction;
 pub mod formats;
 pub mod report;
 pub mod security;
+pub mod types;
 
 // Re-export main API types
 pub use api::extract_archive;
@@ -38,3 +39,9 @@ pub use config::SecurityConfig;
 pub use error::ExtractionError;
 pub use error::Result;
 pub use report::ExtractionReport;
+
+// Re-export types module for easier access
+pub use types::DestDir;
+pub use types::EntryType;
+pub use types::SafePath;
+pub use types::SafeSymlink;

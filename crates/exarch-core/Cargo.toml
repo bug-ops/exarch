@@ -28,3 +28,7 @@ workspace = true
 [[bench]]
 name = "extraction"
 harness = false
+
+[[bench]]
+name = "validation"
+harness = false

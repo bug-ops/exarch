@@ -1,11 +1,16 @@
 //! Security configuration for archive extraction.
 
-use std::path::PathBuf;
-
 /// Security configuration with default-deny settings.
 ///
 /// This configuration controls various security checks performed during
 /// archive extraction to prevent common vulnerabilities.
+///
+/// # Performance Note
+///
+/// This struct contains heap-allocated collections (`Vec<String>`). For
+/// performance, pass by reference (`&SecurityConfig`) rather than cloning. If
+/// shared ownership is needed across threads, consider wrapping in
+/// `Arc<SecurityConfig>`.
 ///
 /// # Examples
 ///
@@ -72,7 +77,8 @@ impl Default for SecurityConfig {
     /// - `allow_absolute_paths`: false (deny)
     /// - `preserve_permissions`: false
     /// - `allowed_extensions`: empty (allow all)
-    /// - `banned_path_components`: `[".git", ".ssh", ".gnupg"]`
+    /// - `banned_path_components`: `[".git", ".ssh", ".gnupg", ".aws", ".kube",
+    ///   ".docker", ".env"]`
     fn default() -> Self {
         Self {
             max_file_size: 50 * 1024 * 1024,   // 50 MB
@@ -89,6 +95,10 @@ impl Default for SecurityConfig {
                 ".git".to_string(),
                 ".ssh".to_string(),
                 ".gnupg".to_string(),
+                ".aws".to_string(),
+                ".kube".to_string(),
+                ".docker".to_string(),
+                ".env".to_string(),
             ],
         }
     }
@@ -113,9 +123,15 @@ impl SecurityConfig {
     }
 
     /// Validates whether a path component is allowed.
+    ///
+    /// Comparison is case-insensitive to prevent bypass on case-insensitive
+    /// filesystems (Windows, macOS default).
     #[must_use]
     pub fn is_path_component_allowed(&self, component: &str) -> bool {
-        !self.banned_path_components.contains(&component.to_string())
+        !self
+            .banned_path_components
+            .iter()
+            .any(|banned| banned.eq_ignore_ascii_case(component))
     }
 
     /// Validates whether a file extension is allowed.
@@ -127,70 +143,6 @@ impl SecurityConfig {
         self.allowed_extensions
             .iter()
             .any(|ext| ext.eq_ignore_ascii_case(extension))
-    }
-}
-
-/// Newtype wrapper for validated safe paths.
-///
-/// Paths wrapped in `SafePath` have been validated to not contain
-/// path traversal attempts, absolute paths, or banned components.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct SafePath(PathBuf);
-
-impl SafePath {
-    /// Creates a new `SafePath` after validation.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the path contains traversal attempts,
-    /// is absolute, or contains banned components.
-    pub fn new(path: PathBuf, config: &SecurityConfig) -> crate::Result<Self> {
-        use crate::ExtractionError;
-
-        // Check for absolute paths
-        if path.is_absolute() && !config.allow_absolute_paths {
-            return Err(ExtractionError::PathTraversal { path });
-        }
-
-        // Check path depth
-        let depth = path.components().count();
-        if depth > config.max_path_depth {
-            return Err(ExtractionError::SecurityViolation {
-                reason: format!(
-                    "path depth {} exceeds maximum {}",
-                    depth, config.max_path_depth
-                ),
-            });
-        }
-
-        // Check for path traversal and banned components
-        for component in path.components() {
-            let comp_str = component.as_os_str().to_string_lossy();
-
-            if comp_str == ".." {
-                return Err(ExtractionError::PathTraversal { path: path.clone() });
-            }
-
-            if !config.is_path_component_allowed(&comp_str) {
-                return Err(ExtractionError::SecurityViolation {
-                    reason: format!("banned path component: {comp_str}"),
-                });
-            }
-        }
-
-        Ok(Self(path))
-    }
-
-    /// Returns the inner `PathBuf`.
-    #[must_use]
-    pub fn as_path(&self) -> &std::path::Path {
-        &self.0
-    }
-
-    /// Converts into the inner `PathBuf`.
-    #[must_use]
-    pub fn into_path_buf(self) -> PathBuf {
-        self.0
     }
 }
 
@@ -217,61 +169,6 @@ mod tests {
     }
 
     #[test]
-    fn test_safe_path_valid() {
-        let config = SecurityConfig::default();
-        let path = PathBuf::from("foo/bar/baz.txt");
-        let safe_path = SafePath::new(path.clone(), &config);
-        assert!(safe_path.is_ok());
-        assert_eq!(safe_path.unwrap().as_path(), path.as_path());
-    }
-
-    #[test]
-    fn test_safe_path_traversal() {
-        let config = SecurityConfig::default();
-        let path = PathBuf::from("../etc/passwd");
-        let result = SafePath::new(path, &config);
-        assert!(matches!(
-            result,
-            Err(crate::ExtractionError::PathTraversal { .. })
-        ));
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn test_safe_path_absolute_unix() {
-        let config = SecurityConfig::default();
-        let path = PathBuf::from("/etc/passwd");
-        let result = SafePath::new(path, &config);
-        assert!(matches!(
-            result,
-            Err(crate::ExtractionError::PathTraversal { .. })
-        ));
-    }
-
-    #[test]
-    #[cfg(windows)]
-    fn test_safe_path_absolute_windows() {
-        let config = SecurityConfig::default();
-        let path = PathBuf::from("C:\\Windows\\System32\\config");
-        let result = SafePath::new(path, &config);
-        assert!(matches!(
-            result,
-            Err(crate::ExtractionError::PathTraversal { .. })
-        ));
-    }
-
-    #[test]
-    fn test_safe_path_banned_component() {
-        let config = SecurityConfig::default();
-        let path = PathBuf::from("project/.git/config");
-        let result = SafePath::new(path, &config);
-        assert!(matches!(
-            result,
-            Err(crate::ExtractionError::SecurityViolation { .. })
-        ));
-    }
-
-    #[test]
     fn test_extension_allowed_empty_list() {
         let config = SecurityConfig::default();
         assert!(config.is_extension_allowed("txt"));
@@ -293,5 +190,11 @@ mod tests {
         assert!(config.is_path_component_allowed("src"));
         assert!(!config.is_path_component_allowed(".git"));
         assert!(!config.is_path_component_allowed(".ssh"));
+
+        // Case-insensitive matching prevents bypass
+        assert!(!config.is_path_component_allowed(".Git"));
+        assert!(!config.is_path_component_allowed(".GIT"));
+        assert!(!config.is_path_component_allowed(".SSH"));
+        assert!(!config.is_path_component_allowed(".Gnupg"));
     }
 }

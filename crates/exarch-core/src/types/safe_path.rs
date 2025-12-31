@@ -99,6 +99,13 @@ impl SafePath {
     /// ```
     #[allow(clippy::too_many_lines)] // Complex security validation logic
     pub fn validate(path: &Path, dest: &DestDir, config: &SecurityConfig) -> Result<Self> {
+        // Reject empty paths explicitly
+        if path.as_os_str().is_empty() {
+            return Err(ExtractionError::SecurityViolation {
+                reason: "empty path not allowed".into(),
+            });
+        }
+
         // 1. Check for null bytes
         if has_null_bytes(path) {
             return Err(ExtractionError::SecurityViolation {
@@ -113,7 +120,7 @@ impl SafePath {
             });
         }
 
-        // H-PERF-2: Single-pass validation and normalization
+        // Single-pass validation and normalization
         // Process all components in one iteration to:
         // - Validate (check ParentDir, RootDir, Prefix)
         // - Check banned components
@@ -136,7 +143,7 @@ impl SafePath {
 
                     // Only convert to string when banned components are configured
                     if has_banned_components {
-                        // M-PERF-1: Try zero-cost to_str() first for valid UTF-8
+                        // Try zero-cost to_str() first for valid UTF-8
                         let comp_str = comp
                             .to_str()
                             .map_or_else(|| comp.to_string_lossy(), Cow::Borrowed);
@@ -188,14 +195,15 @@ impl SafePath {
         // Verify resolved path stays within destination
         let resolved = dest.as_path().join(final_path.as_ref());
 
-        // M-PERF-2: Try canonicalization directly, handle NotFound gracefully
+        // Try canonicalization directly, handle NotFound gracefully
         // This avoids redundant exists() syscalls
 
         // Always canonicalize parent directory to prevent symlink-based bypass
         if let Some(parent) = resolved.parent() {
             match parent.canonicalize() {
                 Ok(canonical_parent) => {
-                    if !canonical_parent.starts_with(dest.as_path()) {
+                    // Use case-insensitive comparison on macOS/Windows
+                    if !paths_start_with(&canonical_parent, dest.as_path()) {
                         return Err(ExtractionError::PathTraversal {
                             path: path.to_path_buf(),
                         });
@@ -217,7 +225,8 @@ impl SafePath {
         // Try to canonicalize full path if it exists
         match resolved.canonicalize() {
             Ok(canonical) => {
-                if !canonical.starts_with(dest.as_path()) {
+                // Use case-insensitive comparison on macOS/Windows
+                if !paths_start_with(&canonical, dest.as_path()) {
                     return Err(ExtractionError::PathTraversal {
                         path: path.to_path_buf(),
                     });
@@ -225,7 +234,8 @@ impl SafePath {
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 // Path doesn't exist yet, check prefix
-                if !resolved.starts_with(dest.as_path()) {
+                // Use case-insensitive comparison on macOS/Windows
+                if !paths_start_with(&resolved, dest.as_path()) {
                     return Err(ExtractionError::PathTraversal {
                         path: path.to_path_buf(),
                     });
@@ -273,6 +283,24 @@ impl SafePath {
     }
 }
 
+/// Case-insensitive path prefix check for macOS/Windows.
+///
+/// On case-insensitive filesystems (macOS, Windows), attackers can bypass
+/// path validation using different case (e.g., `../../USERS/victim/.ssh/`).
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn paths_start_with(path: &Path, base: &Path) -> bool {
+    // Convert both paths to lowercase strings for comparison
+    let path_str = path.to_string_lossy().to_lowercase();
+    let base_str = base.to_string_lossy().to_lowercase();
+    path_str.starts_with(&base_str)
+}
+
+/// Case-sensitive path prefix check for Unix (not macOS).
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn paths_start_with(path: &Path, base: &Path) -> bool {
+    path.starts_with(base)
+}
+
 /// Checks if a path contains null bytes.
 #[cfg(unix)]
 fn has_null_bytes(path: &Path) -> bool {
@@ -306,7 +334,7 @@ mod tests {
         (temp, dest)
     }
 
-    // M-TEST-2: Empty path handling test
+    // Empty path handling test (MED-004)
     #[test]
     fn test_empty_path() {
         let (_temp, dest) = create_test_dest();
@@ -314,8 +342,8 @@ mod tests {
 
         let result = SafePath::validate(&PathBuf::from(""), &dest, &config);
         assert!(
-            matches!(result, Err(ExtractionError::PathTraversal { .. })),
-            "empty path should be rejected as invalid"
+            matches!(result, Err(ExtractionError::SecurityViolation { .. })),
+            "empty path should be explicitly rejected (MED-004)"
         );
     }
 
@@ -510,7 +538,7 @@ mod tests {
         let (_temp, dest) = create_test_dest();
         let config = SecurityConfig::default();
 
-        // H-PERF-2: Normalization now happens in single-pass validation
+        // Normalization now happens in single-pass validation
         // Path with . components should be normalized
         let path = PathBuf::from("foo/./bar/./baz.txt");
         let safe = SafePath::validate(&path, &dest, &config).expect("should be valid");
@@ -551,7 +579,7 @@ mod tests {
         assert_eq!(safe, cloned);
     }
 
-    // M-14: Test for empty path
+    // Test for empty path (MED-004)
     #[test]
     fn test_safe_path_empty() {
         let (_temp, dest) = create_test_dest();
@@ -560,18 +588,14 @@ mod tests {
         let path = PathBuf::from("");
         let result = SafePath::validate(&path, &dest, &config);
 
-        // Empty path joins to dest and resolves to dest itself
-        // which causes it to fail the parent canonicalization check
-        // This is expected behavior - document it
-        if let Ok(safe) = result {
-            // If it succeeds, it should be an empty path
-            assert_eq!(safe.as_path(), Path::new(""));
-        }
-        // Empty path may be rejected due to parent canonicalization
-        // This is acceptable behavior
+        // Empty paths are now explicitly rejected
+        assert!(
+            matches!(result, Err(ExtractionError::SecurityViolation { .. })),
+            "empty path should be explicitly rejected"
+        );
     }
 
-    // L-8: Path length boundary tests
+    // Path length boundary tests
     #[test]
     fn test_safe_path_at_max_depth() {
         let (_temp, dest) = create_test_dest();
@@ -592,7 +616,7 @@ mod tests {
         ));
     }
 
-    // L-9: Single component path test
+    // Single component path test
     #[test]
     #[allow(clippy::unwrap_used)]
     fn test_safe_path_single_component() {
@@ -607,7 +631,7 @@ mod tests {
         assert_eq!(safe.as_path(), Path::new("file.txt"));
     }
 
-    // L-6: Unicode edge case tests
+    // Unicode edge case tests
     #[test]
     fn test_safe_path_unicode() {
         let (_temp, dest) = create_test_dest();
@@ -624,7 +648,7 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    // L-7: Windows reserved names test
+    // Windows reserved names test
     #[test]
     #[cfg(windows)]
     fn test_safe_path_windows_reserved_names() {

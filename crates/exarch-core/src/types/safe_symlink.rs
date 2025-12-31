@@ -112,9 +112,11 @@ impl SafeSymlink {
             });
         }
 
-        // 2.5. Check target for banned components
+        // 2.5. Check target for banned components and depth (HIGH-005)
+        let mut target_depth = 0;
         for component in target.components() {
             if let std::path::Component::Normal(comp) = component {
+                target_depth += 1;
                 let comp_str = comp.to_string_lossy();
                 if !config.is_path_component_allowed(&comp_str) {
                     return Err(ExtractionError::SecurityViolation {
@@ -122,6 +124,16 @@ impl SafeSymlink {
                     });
                 }
             }
+        }
+
+        // Validate target depth against max_path_depth
+        if target_depth > config.max_path_depth {
+            return Err(ExtractionError::SecurityViolation {
+                reason: format!(
+                    "symlink target depth {target_depth} exceeds maximum {}",
+                    config.max_path_depth
+                ),
+            });
         }
 
         // 3. Verify parent directory chain doesn't contain symlinks (TOCTOU protection)
@@ -443,7 +455,7 @@ mod tests {
         );
     }
 
-    // M-7: Test for circular symlink detection
+    // Test for circular symlink detection
     #[test]
     #[allow(clippy::unwrap_used)]
     #[cfg(unix)]
@@ -470,7 +482,7 @@ mod tests {
         let _result = SafeSymlink::validate(&link, &target, &dest, &config);
     }
 
-    // M-10: Deep symlink nesting stress tests
+    // Deep symlink nesting stress tests
     #[test]
     fn test_safe_symlink_deep_nesting_stress() {
         let (_temp, dest) = create_test_dest();
@@ -505,7 +517,7 @@ mod tests {
         assert!(matches!(result, Err(ExtractionError::SymlinkEscape { .. })));
     }
 
-    // M-15: Test for symlink with banned target component
+    // Test for symlink with banned target component
     #[test]
     fn test_safe_symlink_target_banned_component() {
         let (_temp, dest) = create_test_dest();

@@ -211,7 +211,7 @@ impl EntryValidator {
             }
 
             EntryType::Hardlink { target } => {
-                // H-PERF-1: Hardlink tracker already validates the target path thoroughly
+                // Hardlink tracker already validates the target path thoroughly
                 // (checks absolute paths, path traversal, normalization, escape attempts)
                 // No need to call validate_path again - that would be redundant validation
                 self.hardlink_tracker.validate_hardlink(
@@ -565,8 +565,13 @@ mod tests {
         let (_temp, mut validator) = create_test_validator();
 
         // Empty directory should be valid
-        let result =
-            validator.validate_entry(Path::new("empty_dir/"), &EntryType::Directory, 0, None, None);
+        let result = validator.validate_entry(
+            Path::new("empty_dir/"),
+            &EntryType::Directory,
+            0,
+            None,
+            None,
+        );
 
         assert!(result.is_ok(), "empty directory should be valid");
         let entry = result.unwrap();
@@ -586,10 +591,13 @@ mod tests {
         for dir in &dirs {
             let result =
                 validator.validate_entry(Path::new(dir), &EntryType::Directory, 0, None, None);
-            assert!(result.is_ok(), "nested directory {} should be valid", dir);
+            assert!(result.is_ok(), "nested directory {dir} should be valid");
         }
 
         let report = validator.finish();
-        assert_eq!(report.files_validated, 0, "directories are not counted as files");
+        assert_eq!(
+            report.files_validated, 0,
+            "directories are not counted as files"
+        );
     }
 }

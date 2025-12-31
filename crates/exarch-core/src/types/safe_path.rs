@@ -202,7 +202,8 @@ impl SafePath {
                     }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    // Parent doesn't exist yet during extraction planning - that's OK
+                    // Parent doesn't exist yet during extraction planning -
+                    // that's OK
                 }
                 Err(e) => {
                     return Err(ExtractionError::Io(std::io::Error::new(

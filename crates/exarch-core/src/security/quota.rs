@@ -35,20 +35,20 @@ impl QuotaTracker {
         }
 
         // Update file count with overflow check
-        self.files_extracted = self
-            .files_extracted
-            .checked_add(1)
-            .ok_or(ExtractionError::QuotaExceeded {
-                resource: crate::QuotaResource::IntegerOverflow,
-            })?;
+        self.files_extracted =
+            self.files_extracted
+                .checked_add(1)
+                .ok_or(ExtractionError::QuotaExceeded {
+                    resource: crate::QuotaResource::IntegerOverflow,
+                })?;
 
         // Update bytes written with overflow check
-        self.bytes_written = self
-            .bytes_written
-            .checked_add(size)
-            .ok_or(ExtractionError::QuotaExceeded {
-                resource: crate::QuotaResource::IntegerOverflow,
-            })?;
+        self.bytes_written =
+            self.bytes_written
+                .checked_add(size)
+                .ok_or(ExtractionError::QuotaExceeded {
+                    resource: crate::QuotaResource::IntegerOverflow,
+                })?;
 
         // Check file count quota
         if self.files_extracted > config.max_file_count {
@@ -191,11 +191,7 @@ mod tests {
         assert_eq!(tracker.bytes_written(), 600);
 
         assert!(tracker.record_file(400, &config).is_ok());
-        assert_eq!(
-            tracker.bytes_written(),
-            1000,
-            "should be exactly at limit"
-        );
+        assert_eq!(tracker.bytes_written(), 1000, "should be exactly at limit");
 
         // One more byte should fail
         let result = tracker.record_file(1, &config);
@@ -203,7 +199,10 @@ mod tests {
             matches!(
                 result,
                 Err(ExtractionError::QuotaExceeded {
-                    resource: crate::QuotaResource::TotalSize { current: 1001, max: 1000 }
+                    resource: crate::QuotaResource::TotalSize {
+                        current: 1001,
+                        max: 1000
+                    }
                 })
             ),
             "exceeding total size should fail"
@@ -230,7 +229,10 @@ mod tests {
             matches!(
                 result,
                 Err(ExtractionError::QuotaExceeded {
-                    resource: crate::QuotaResource::FileSize { size: 5001, max: 5000 }
+                    resource: crate::QuotaResource::FileSize {
+                        size: 5001,
+                        max: 5000
+                    }
                 })
             ),
             "file exceeding limit should fail"
@@ -250,9 +252,6 @@ mod tests {
 
         // Second file should fail (max is 1)
         let result = tracker.record_file(100, &config);
-        assert!(matches!(
-            result,
-            Err(ExtractionError::QuotaExceeded { .. })
-        ));
+        assert!(matches!(result, Err(ExtractionError::QuotaExceeded { .. })));
     }
 }

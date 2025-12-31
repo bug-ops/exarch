@@ -123,8 +123,9 @@ impl HardlinkTracker {
 
         use std::path::Component;
 
-        // H-SEC-2: Reject Windows-specific absolute path components in target (before resolution)
-        // This prevents bypasses on Windows like C:\ or \\server\share
+        // H-SEC-2: Reject Windows-specific absolute path components in target (before
+        // resolution) This prevents bypasses on Windows like C:\ or
+        // \\server\share
         for component in target.components() {
             if matches!(component, Component::Prefix(_) | Component::RootDir) {
                 return Err(ExtractionError::HardlinkEscape {
@@ -143,10 +144,9 @@ impl HardlinkTracker {
         // Resolve target against destination
         let resolved = dest.as_path().join(target);
 
-        // H-PERF-3: Fast-path check - if path doesn't need normalization, skip it
-        let needs_normalization = resolved.components().any(|c| {
-            matches!(c, Component::ParentDir | Component::CurDir)
-        });
+        let needs_normalization = resolved
+            .components()
+            .any(|c| matches!(c, Component::ParentDir | Component::CurDir));
 
         if !needs_normalization {
             // Path is already normalized, just verify it's within destination
@@ -398,12 +398,8 @@ mod tests {
 
         // Create multiple hardlinks to the same target
         for i in 0..3 {
-            let link = SafePath::validate(
-                &PathBuf::from(format!("link{}", i)),
-                &dest,
-                &config,
-            )
-            .unwrap();
+            let link =
+                SafePath::validate(&PathBuf::from(format!("link{i}")), &dest, &config).unwrap();
 
             let result = tracker.validate_hardlink(&link, &target, &dest, &config);
             assert!(
@@ -430,13 +426,9 @@ mod tests {
 
         // Create hardlinks to different targets
         for i in 0..3 {
-            let link = SafePath::validate(
-                &PathBuf::from(format!("link{}", i)),
-                &dest,
-                &config,
-            )
-            .unwrap();
-            let target = PathBuf::from(format!("target{}.txt", i));
+            let link =
+                SafePath::validate(&PathBuf::from(format!("link{i}")), &dest, &config).unwrap();
+            let target = PathBuf::from(format!("target{i}.txt"));
 
             tracker
                 .validate_hardlink(&link, &target, &dest, &config)

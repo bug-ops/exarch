@@ -1,6 +1,7 @@
 //! Security configuration for archive extraction.
 
-/// Feature flags controlling what archive features are allowed during extraction.
+/// Feature flags controlling what archive features are allowed during
+/// extraction.
 ///
 /// All features default to `false` (deny-by-default security policy).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -275,10 +276,13 @@ mod tests {
         );
         assert_eq!(config.max_file_count, 10_000, "10k file count limit");
         assert_eq!(config.max_path_depth, 32, "32 level depth limit");
-        assert_eq!(
-            config.max_compression_ratio, 100.0,
-            "100x compression ratio limit"
-        );
+        #[allow(clippy::float_cmp)]
+        {
+            assert_eq!(
+                config.max_compression_ratio, 100.0,
+                "100x compression ratio limit"
+            );
+        }
     }
 
     #[test]

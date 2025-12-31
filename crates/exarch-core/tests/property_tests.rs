@@ -68,7 +68,7 @@ proptest! {
     ) {
         let (_temp, dest) = create_test_dest();
         let mut config = SecurityConfig::default();
-        config.allow_symlinks = true;
+        config.allowed.symlinks = true;
 
         let link = SafePath::validate(&PathBuf::from("a/b/link"), &dest, &config)
             .expect("link path should be valid");

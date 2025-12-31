@@ -112,11 +112,12 @@ impl DestDir {
             use std::os::unix::ffi::OsStrExt;
 
             // Use access() syscall to check effective write permissions
-            let path_cstring = CString::new(canonical.as_os_str().as_bytes())
-                .map_err(|_| ExtractionError::Io(std::io::Error::new(
+            let path_cstring = CString::new(canonical.as_os_str().as_bytes()).map_err(|_| {
+                ExtractionError::Io(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
                     "path contains null byte",
-                )))?;
+                ))
+            })?;
 
             // SAFETY: access() is safe to call with a valid C string.
             // The pointer is valid for the duration of the call.

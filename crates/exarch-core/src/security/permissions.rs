@@ -148,7 +148,6 @@ mod tests {
         assert_eq!(result.unwrap(), 0o000);
     }
 
-    // H-TEST-1: Sticky bit handling test
     #[test]
     fn test_sticky_bit_preservation() {
         let config = SecurityConfig::default();
@@ -160,11 +159,7 @@ mod tests {
         assert!(result.is_ok(), "sticky bit should be allowed");
 
         let sanitized = result.unwrap();
-        assert_eq!(
-            sanitized & 0o1000,
-            0o1000,
-            "sticky bit should be preserved"
-        );
+        assert_eq!(sanitized & 0o1000, 0o1000, "sticky bit should be preserved");
         assert_eq!(sanitized, 0o1755, "full mode should be preserved");
     }
 
@@ -192,7 +187,10 @@ mod tests {
 
         // World-writable should be allowed when config permits
         let result = sanitize_permissions(std::path::Path::new("file.txt"), 0o777, &config);
-        assert!(result.is_ok(), "world-writable should be allowed with config");
+        assert!(
+            result.is_ok(),
+            "world-writable should be allowed with config"
+        );
 
         let sanitized = result.unwrap();
         assert_eq!(

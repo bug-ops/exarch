@@ -172,7 +172,8 @@ impl SafeSymlink {
     }
 }
 
-/// Verifies that no component in the parent directory chain of `path` is a symlink.
+/// Verifies that no component in the parent directory chain of `path` is a
+/// symlink.
 ///
 /// This function provides protection against TOCTOU (Time-Of-Check-Time-Of-Use)
 /// race conditions where an attacker could replace a parent directory with a
@@ -180,9 +181,9 @@ impl SafeSymlink {
 ///
 /// # Security Note
 ///
-/// While this check significantly reduces the attack window, it doesn't eliminate
-/// TOCTOU risks entirely. For untrusted archives, extraction should always be
-/// performed in isolated environments (containers, chroot, etc.).
+/// While this check significantly reduces the attack window, it doesn't
+/// eliminate TOCTOU risks entirely. For untrusted archives, extraction should
+/// always be performed in isolated environments (containers, chroot, etc.).
 ///
 /// # Errors
 ///

@@ -96,9 +96,9 @@ pub fn convert_error(err: CoreError) -> PyErr {
             "cannot determine archive format from: {}",
             path.display()
         )),
-        CoreError::InvalidConfiguration { reason } => InvalidArchiveError::new_err(format!(
-            "invalid configuration: {reason}"
-        )),
+        CoreError::InvalidConfiguration { reason } => {
+            InvalidArchiveError::new_err(format!("invalid configuration: {reason}"))
+        }
     }
 }
 

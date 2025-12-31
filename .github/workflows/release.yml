@@ -1,0 +1,427 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  RUST_BACKTRACE: short
+  RUSTUP_MAX_RETRIES: 10
+
+permissions:
+  contents: write
+  id-token: write  # Required for trusted publishing (PyPI OIDC, npm provenance)
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Validate tag and extract version
+  validate:
+    name: Validate Release Tag
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          TAG="${{ github.ref_name }}"
+          VERSION="${TAG#v}"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Releasing version: $VERSION"
+
+      - name: Verify version matches Cargo.toml
+        run: |
+          CARGO_VERSION=$(grep -m 1 '^version = ' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+          TAG_VERSION="${{ steps.version.outputs.version }}"
+          if [ "$CARGO_VERSION" != "$TAG_VERSION" ]; then
+            echo "Error: Cargo.toml version ($CARGO_VERSION) does not match tag version ($TAG_VERSION)"
+            exit 1
+          fi
+          echo "Version validation successful: $TAG_VERSION"
+
+  # Build and publish Rust crate to crates.io
+  publish-crate:
+    name: Publish to crates.io
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "release"
+
+      - name: Verify package can be built
+        run: cargo build -p exarch-core --release --all-features
+
+      - name: Run tests
+        run: cargo test -p exarch-core --all-features
+
+      - name: Publish exarch-core to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          cd crates/exarch-core
+          cargo publish --token $CARGO_REGISTRY_TOKEN
+
+  # Build Python wheels for multiple platforms
+  build-python-wheels:
+    name: Build Python Wheels (${{ matrix.platform.name }})
+    needs: validate
+    runs-on: ${{ matrix.platform.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          # Linux x86_64
+          - name: linux-x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            maturin-args: --target x86_64-unknown-linux-gnu
+
+          # Linux aarch64
+          - name: linux-aarch64
+            os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            maturin-args: --target aarch64-unknown-linux-gnu
+
+          # macOS x86_64
+          - name: macos-x86_64
+            os: macos-13
+            target: x86_64-apple-darwin
+            maturin-args: --target x86_64-apple-darwin
+
+          # macOS aarch64 (Apple Silicon)
+          - name: macos-aarch64
+            os: macos-14
+            target: aarch64-apple-darwin
+            maturin-args: --target aarch64-apple-darwin
+
+          # Windows x86_64
+          - name: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            maturin-args: --target x86_64-pc-windows-msvc
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform.target }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Install maturin
+        run: pip install maturin
+
+      - name: Setup cross-compilation (Linux aarch64)
+        if: matrix.platform.name == 'linux-aarch64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "python-${{ matrix.platform.name }}"
+
+      - name: Build wheels
+        run: |
+          cd crates/exarch-python
+          maturin build --release ${{ matrix.platform.maturin-args }} --strip --out wheels
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.platform.name }}
+          path: crates/exarch-python/wheels/*.whl
+          retention-days: 7
+
+  # Publish Python wheels to PyPI using Trusted Publishing (OIDC)
+  # Setup: https://docs.pypi.org/trusted-publishers/adding-a-publisher/
+  publish-python:
+    name: Publish to PyPI
+    needs: [validate, build-python-wheels]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: pypi
+      url: https://pypi.org/project/exarch/
+    permissions:
+      id-token: write  # Required for trusted publishing
+    steps:
+      - name: Download all wheels
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: wheels-*
+          merge-multiple: true
+
+      - name: List wheels
+        run: ls -lh dist/
+
+      - name: Publish to PyPI (Trusted Publishing)
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+          skip-existing: true
+          verbose: true
+
+  # Build Node.js native addons for multiple platforms
+  build-node-bindings:
+    name: Build Node.js Bindings (${{ matrix.platform.name }})
+    needs: validate
+    runs-on: ${{ matrix.platform.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          # Linux x86_64
+          - name: linux-x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+
+          # Linux aarch64
+          - name: linux-aarch64
+            os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+
+          # macOS x86_64
+          - name: macos-x86_64
+            os: macos-13
+            target: x86_64-apple-darwin
+
+          # macOS aarch64 (Apple Silicon)
+          - name: macos-aarch64
+            os: macos-14
+            target: aarch64-apple-darwin
+
+          # Windows x86_64
+          - name: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform.target }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Setup cross-compilation (Linux aarch64)
+        if: matrix.platform.name == 'linux-aarch64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "node-${{ matrix.platform.name }}"
+
+      - name: Install dependencies
+        run: |
+          cd crates/exarch-node
+          npm install
+
+      - name: Build native addon
+        run: |
+          cd crates/exarch-node
+          npm run build -- --target ${{ matrix.platform.target }}
+
+      - name: Upload bindings
+        uses: actions/upload-artifact@v4
+        with:
+          name: bindings-${{ matrix.platform.name }}
+          path: |
+            crates/exarch-node/*.node
+            crates/exarch-node/index.js
+            crates/exarch-node/index.d.ts
+          retention-days: 7
+
+  # Publish Node.js package to npm with provenance
+  # Setup: Enable "Require two-factor authentication" or use automation tokens
+  # Provenance: https://docs.npmjs.com/generating-provenance-statements
+  publish-node:
+    name: Publish to npm
+    needs: [validate, build-node-bindings]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: npm
+      url: https://www.npmjs.com/package/exarch
+    permissions:
+      contents: read
+      id-token: write  # Required for npm provenance
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Download all bindings
+        uses: actions/download-artifact@v4
+        with:
+          path: bindings
+          pattern: bindings-*
+
+      - name: Prepare npm package
+        run: |
+          cd crates/exarch-node
+          mkdir -p native
+
+          # Copy platform-specific binaries
+          for platform_dir in ../../bindings/bindings-*; do
+            if [ -d "$platform_dir" ]; then
+              cp -v "$platform_dir"/*.node native/ || true
+            fi
+          done
+
+          ls -lh native/
+
+      - name: Publish to npm with provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          cd crates/exarch-node
+          npm publish --access public --provenance
+
+  # Create GitHub Release with artifacts
+  github-release:
+    name: Create GitHub Release
+    needs: [validate, publish-crate, publish-python, publish-node]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Download Python wheels
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts/python
+          pattern: wheels-*
+          merge-multiple: true
+
+      - name: Download Node.js bindings
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts/node
+          pattern: bindings-*
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          VERSION="${{ needs.validate.outputs.version }}"
+
+          # Get the previous tag
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+
+          if [ -z "$PREV_TAG" ]; then
+            echo "First release - no previous tag found"
+            CHANGELOG="Initial release v$VERSION"
+          else
+            echo "Generating changelog from $PREV_TAG to v$VERSION"
+            CHANGELOG=$(git log $PREV_TAG..HEAD --pretty=format:"- %s (%h)" --no-merges)
+          fi
+
+          # Save to file for multiline handling
+          echo "$CHANGELOG" > changelog.txt
+
+          cat >> changelog.txt << EOF
+
+          ## Installation
+
+          ### Rust
+          \`\`\`toml
+          [dependencies]
+          exarch-core = "$VERSION"
+          \`\`\`
+
+          ### Python
+          \`\`\`bash
+          pip install exarch==$VERSION
+          \`\`\`
+
+          ### Node.js
+          \`\`\`bash
+          npm install exarch@$VERSION
+          \`\`\`
+
+          ## Artifacts
+
+          - Python wheels for Linux (x86_64, aarch64), macOS (x86_64, aarch64), Windows (x86_64)
+          - Node.js native addons for Linux (x86_64, aarch64), macOS (x86_64, aarch64), Windows (x86_64)
+          - Published to [crates.io](https://crates.io/crates/exarch-core), [PyPI](https://pypi.org/project/exarch), and [npm](https://www.npmjs.com/package/exarch)
+          EOF
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          name: Release v${{ needs.validate.outputs.version }}
+          body_path: changelog.txt
+          draft: false
+          prerelease: false
+          files: |
+            release-artifacts/python/*.whl
+            release-artifacts/node/**/*.node
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  # Final success check
+  release-success:
+    name: Release Success
+    needs: [publish-crate, publish-python, publish-node, github-release]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Check all release jobs
+        run: |
+          REQUIRED_JOBS=(
+            "${{ needs.publish-crate.result }}"
+            "${{ needs.publish-python.result }}"
+            "${{ needs.publish-node.result }}"
+            "${{ needs.github-release.result }}"
+          )
+
+          for result in "${REQUIRED_JOBS[@]}"; do
+            if [[ "$result" != "success" ]]; then
+              echo "Release job failed: $result"
+              exit 1
+            fi
+          done
+
+          echo "All release jobs completed successfully!"

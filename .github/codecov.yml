@@ -1,0 +1,45 @@
+# Codecov configuration for exarch project
+# Documentation: https://docs.codecov.io/docs/codecov-yaml
+
+coverage:
+  status:
+    project:
+      default:
+        target: 70%          # Minimum coverage requirement
+        threshold: 2%        # Allow 2% drop from previous coverage
+        if_ci_failed: error  # Fail if CI failed
+    patch:
+      default:
+        target: 80%          # New code should be well-tested
+        threshold: 1%
+
+  precision: 2               # Show coverage to 2 decimal places
+  round: down                # Round down coverage percentages
+
+# Comment configuration
+comment:
+  layout: "reach,diff,flags,files"
+  behavior: default
+  require_changes: false     # Always post comment
+  after_n_builds: 1          # Wait for all builds
+
+# Coverage flags for different components
+flags:
+  rust:
+    paths:
+      - crates/exarch-core/src/
+    carryforward: true       # Use previous coverage if no new data
+
+# Ignore patterns
+ignore:
+  - "tests/"
+  - "benches/"
+  - "examples/"
+  - "crates/exarch-python/src/"
+  - "crates/exarch-node/src/"
+  - "**/target/"
+  - "**/*.md"
+
+# GitHub checks configuration
+github_checks:
+  annotations: true          # Show inline annotations in PR

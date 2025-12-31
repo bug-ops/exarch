@@ -1,8 +1,9 @@
 # exarch
 
-[![CI](https://img.shields.io/github/actions/workflow/status/rabax/exarch/ci.yml?branch=main)](https://github.com/rabax/exarch/actions)
+[![CI](https://img.shields.io/github/actions/workflow/status/bug-ops/exarch/ci.yml?branch=main)](https://github.com/bug-ops/exarch/actions)
+[![codecov](https://codecov.io/gh/bug-ops/exarch/graph/badge.svg?token=AKF1TLTVCA)](https://codecov.io/gh/bug-ops/exarch)
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue)](LICENSE-MIT)
-[![MSRV](https://img.shields.io/badge/MSRV-1.89.0-blue)](https://github.com/rabax/exarch)
+[![MSRV](https://img.shields.io/badge/MSRV-1.89.0-blue)](https://github.com/bug-ops/exarch)
 
 Memory-safe archive extraction library with Python and Node.js bindings.
 

@@ -157,9 +157,6 @@ mod tests {
     #[test]
     fn test_format_size_edge_cases() {
         // u64::MAX = 18446744073709551615 bytes ≈ 17179869184 GB
-        assert_eq!(
-            HumanFormatter::format_size(u64::MAX),
-            "17179869184.0 GB"
-        );
+        assert_eq!(HumanFormatter::format_size(u64::MAX), "17179869184.0 GB");
     }
 }

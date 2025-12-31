@@ -1,7 +1,14 @@
 //! Python bindings for `SecurityConfig`.
 
 use exarch_core::SecurityConfig as CoreConfig;
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+
+/// Maximum length for file extension strings (e.g., ".tar.gz")
+const MAX_EXTENSION_LENGTH: usize = 255;
+
+/// Maximum length for path component strings
+const MAX_COMPONENT_LENGTH: usize = 255;
 
 /// Security configuration for archive extraction.
 ///
@@ -85,9 +92,18 @@ impl PySecurityConfig {
     }
 
     /// Sets the maximum compression ratio.
-    fn max_compression_ratio(mut slf: PyRefMut<'_, Self>, ratio: f64) -> PyRefMut<'_, Self> {
+    ///
+    /// # Errors
+    ///
+    /// Returns `ValueError` if ratio is not a positive finite number.
+    fn max_compression_ratio(mut slf: PyRefMut<'_, Self>, ratio: f64) -> PyResult<PyRefMut<'_, Self>> {
+        if !ratio.is_finite() || ratio <= 0.0 {
+            return Err(PyValueError::new_err(
+                "compression ratio must be a positive finite number"
+            ));
+        }
         slf.inner.max_compression_ratio = ratio;
-        slf
+        Ok(slf)
     }
 
     /// Sets the maximum file count.
@@ -138,15 +154,43 @@ impl PySecurityConfig {
     }
 
     /// Adds an allowed file extension.
-    fn add_allowed_extension(mut slf: PyRefMut<'_, Self>, ext: String) -> PyRefMut<'_, Self> {
+    ///
+    /// # Errors
+    ///
+    /// Returns `ValueError` if extension exceeds maximum length or contains null bytes.
+    fn add_allowed_extension(mut slf: PyRefMut<'_, Self>, ext: String) -> PyResult<PyRefMut<'_, Self>> {
+        if ext.contains('\0') {
+            return Err(PyValueError::new_err(
+                "extension contains null bytes - potential security issue"
+            ));
+        }
+        if ext.len() > MAX_EXTENSION_LENGTH {
+            return Err(PyValueError::new_err(format!(
+                "extension exceeds maximum length of {MAX_EXTENSION_LENGTH} characters"
+            )));
+        }
         slf.inner.allowed_extensions.push(ext);
-        slf
+        Ok(slf)
     }
 
     /// Adds a banned path component.
-    fn add_banned_component(mut slf: PyRefMut<'_, Self>, component: String) -> PyRefMut<'_, Self> {
+    ///
+    /// # Errors
+    ///
+    /// Returns `ValueError` if component exceeds maximum length or contains null bytes.
+    fn add_banned_component(mut slf: PyRefMut<'_, Self>, component: String) -> PyResult<PyRefMut<'_, Self>> {
+        if component.contains('\0') {
+            return Err(PyValueError::new_err(
+                "component contains null bytes - potential security issue"
+            ));
+        }
+        if component.len() > MAX_COMPONENT_LENGTH {
+            return Err(PyValueError::new_err(format!(
+                "component exceeds maximum length of {MAX_COMPONENT_LENGTH} characters"
+            )));
+        }
         slf.inner.banned_path_components.push(component);
-        slf
+        Ok(slf)
     }
 
     /// Finalizes the configuration (for API consistency).
@@ -197,8 +241,14 @@ impl PySecurityConfig {
     }
 
     #[setter]
-    fn set_max_compression_ratio(&mut self, value: f64) {
+    fn set_max_compression_ratio(&mut self, value: f64) -> PyResult<()> {
+        if !value.is_finite() || value <= 0.0 {
+            return Err(PyValueError::new_err(
+                "compression ratio must be a positive finite number"
+            ));
+        }
         self.inner.max_compression_ratio = value;
+        Ok(())
     }
 
     #[getter]
@@ -231,6 +281,12 @@ impl PySecurityConfig {
         self.inner.preserve_permissions = value;
     }
 
+    /// Returns a copy of the allowed extensions list.
+    ///
+    /// # Performance
+    ///
+    /// This method clones the entire list on each access. If you need to access
+    /// the extensions multiple times, cache the result in a local variable.
     #[getter]
     fn get_allowed_extensions(&self) -> Vec<String> {
         self.inner.allowed_extensions.clone()
@@ -241,6 +297,12 @@ impl PySecurityConfig {
         self.inner.allowed_extensions = value;
     }
 
+    /// Returns a copy of the banned path components list.
+    ///
+    /// # Performance
+    ///
+    /// This method clones the entire list on each access. If you need to access
+    /// the components multiple times, cache the result in a local variable.
     #[getter]
     fn get_banned_path_components(&self) -> Vec<String> {
         self.inner.banned_path_components.clone()
@@ -252,6 +314,11 @@ impl PySecurityConfig {
     }
 
     /// Returns a debug string representation.
+    ///
+    /// # Performance
+    ///
+    /// This method allocates a new string on every call using `format!`.
+    /// This is acceptable for debugging/logging but avoid calling in hot paths.
     fn __repr__(&self) -> String {
         format!(
             "SecurityConfig(max_file_size={}, max_total_size={}, max_compression_ratio={:.1}, max_file_count={}, max_path_depth={})",
@@ -281,41 +348,345 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = PySecurityConfig::new();
-        assert_eq!(config.get_max_file_size(), 50 * 1024 * 1024);
-        assert_eq!(config.get_max_total_size(), 500 * 1024 * 1024);
-        assert_eq!(config.get_max_file_count(), 10_000);
-        assert!(!config.get_preserve_permissions());
+        assert_eq!(
+            config.get_max_file_size(),
+            50 * 1024 * 1024,
+            "Default max_file_size should be 50 MB"
+        );
+        assert_eq!(
+            config.get_max_total_size(),
+            500 * 1024 * 1024,
+            "Default max_total_size should be 500 MB"
+        );
+        assert_eq!(
+            config.get_max_file_count(),
+            10_000,
+            "Default max_file_count should be 10,000"
+        );
+        assert!(
+            !config.get_preserve_permissions(),
+            "Default preserve_permissions should be false"
+        );
+    }
+
+    #[test]
+    fn test_default_static_method() {
+        let config = PySecurityConfig::default();
+        assert_eq!(
+            config.get_max_file_size(),
+            50 * 1024 * 1024,
+            "Static default() should have same values as new()"
+        );
     }
 
     #[test]
     fn test_permissive_config() {
         let config = PySecurityConfig::permissive();
-        assert!(config.inner.allowed.symlinks);
-        assert!(config.inner.allowed.hardlinks);
-        assert!(config.inner.allowed.absolute_paths);
-        assert!(config.get_preserve_permissions());
+        assert!(config.inner.allowed.symlinks, "Permissive config should allow symlinks");
+        assert!(config.inner.allowed.hardlinks, "Permissive config should allow hardlinks");
+        assert!(
+            config.inner.allowed.absolute_paths,
+            "Permissive config should allow absolute paths"
+        );
+        assert!(
+            config.get_preserve_permissions(),
+            "Permissive config should preserve permissions"
+        );
     }
 
     #[test]
-    fn test_property_setters() {
+    fn test_builder_pattern_method_chaining() {
+        pyo3::prepare_freethreaded_python();
+        Python::attach(|py| {
+            let config = PySecurityConfig::new();
+            let py_config = Py::new(py, config).expect("Failed to create Py object");
+
+            let result = py_config.borrow_mut(py)
+                .max_file_size(100_000_000)
+                .max_total_size(1_000_000_000)
+                .max_file_count(50_000);
+
+            assert_eq!(
+                result.get_max_file_size(),
+                100_000_000,
+                "Builder pattern should set max_file_size"
+            );
+            assert_eq!(
+                result.get_max_total_size(),
+                1_000_000_000,
+                "Builder pattern should set max_total_size"
+            );
+            assert_eq!(
+                result.get_max_file_count(),
+                50_000,
+                "Builder pattern should set max_file_count"
+            );
+        });
+    }
+
+    #[test]
+    fn test_builder_compression_ratio_valid() {
+        pyo3::prepare_freethreaded_python();
+        Python::attach(|py| {
+            let config = PySecurityConfig::new();
+            let py_config = Py::new(py, config).expect("Failed to create Py object");
+
+            let result = py_config.borrow_mut(py).max_compression_ratio(200.0);
+            assert!(result.is_ok(), "Should accept valid compression ratio");
+            assert_eq!(
+                result.unwrap().get_max_compression_ratio(),
+                200.0,
+                "Compression ratio should be set"
+            );
+        });
+    }
+
+    #[test]
+    fn test_builder_compression_ratio_rejects_nan() {
+        pyo3::prepare_freethreaded_python();
+        Python::attach(|py| {
+            let config = PySecurityConfig::new();
+            let py_config = Py::new(py, config).expect("Failed to create Py object");
+
+            let result = py_config.borrow_mut(py).max_compression_ratio(f64::NAN);
+            assert!(result.is_err(), "Should reject NaN compression ratio");
+        });
+    }
+
+    #[test]
+    fn test_builder_compression_ratio_rejects_infinity() {
+        pyo3::prepare_freethreaded_python();
+        Python::attach(|py| {
+            let config = PySecurityConfig::new();
+            let py_config = Py::new(py, config).expect("Failed to create Py object");
+
+            let result = py_config.borrow_mut(py).max_compression_ratio(f64::INFINITY);
+            assert!(result.is_err(), "Should reject infinite compression ratio");
+        });
+    }
+
+    #[test]
+    fn test_builder_compression_ratio_rejects_negative() {
+        pyo3::prepare_freethreaded_python();
+        Python::attach(|py| {
+            let config = PySecurityConfig::new();
+            let py_config = Py::new(py, config).expect("Failed to create Py object");
+
+            let result = py_config.borrow_mut(py).max_compression_ratio(-10.0);
+            assert!(result.is_err(), "Should reject negative compression ratio");
+        });
+    }
+
+    #[test]
+    fn test_builder_compression_ratio_rejects_zero() {
+        pyo3::prepare_freethreaded_python();
+        Python::attach(|py| {
+            let config = PySecurityConfig::new();
+            let py_config = Py::new(py, config).expect("Failed to create Py object");
+
+            let result = py_config.borrow_mut(py).max_compression_ratio(0.0);
+            assert!(result.is_err(), "Should reject zero compression ratio");
+        });
+    }
+
+    #[test]
+    fn test_property_setters_all_numeric() {
         let mut config = PySecurityConfig::new();
+
         config.set_max_file_size(100_000_000);
-        assert_eq!(config.get_max_file_size(), 100_000_000);
+        assert_eq!(
+            config.get_max_file_size(),
+            100_000_000,
+            "Property setter should update max_file_size"
+        );
+
+        config.set_max_total_size(2_000_000_000);
+        assert_eq!(
+            config.get_max_total_size(),
+            2_000_000_000,
+            "Property setter should update max_total_size"
+        );
+
+        config.set_max_file_count(20_000);
+        assert_eq!(
+            config.get_max_file_count(),
+            20_000,
+            "Property setter should update max_file_count"
+        );
+
+        config.set_max_path_depth(64);
+        assert_eq!(
+            config.get_max_path_depth(),
+            64,
+            "Property setter should update max_path_depth"
+        );
+    }
+
+    #[test]
+    fn test_property_setter_compression_ratio_valid() {
+        let mut config = PySecurityConfig::new();
+        let result = config.set_max_compression_ratio(150.0);
+        assert!(result.is_ok(), "Should accept valid compression ratio: {:?}", result.err());
+        assert_eq!(config.get_max_compression_ratio(), 150.0);
+    }
+
+    #[test]
+    fn test_property_setter_compression_ratio_rejects_invalid() {
+        let mut config = PySecurityConfig::new();
+        assert!(
+            config.set_max_compression_ratio(f64::NAN).is_err(),
+            "Should reject NaN"
+        );
+        assert!(
+            config.set_max_compression_ratio(f64::INFINITY).is_err(),
+            "Should reject Infinity"
+        );
+        assert!(
+            config.set_max_compression_ratio(-5.0).is_err(),
+            "Should reject negative"
+        );
+    }
+
+    #[test]
+    fn test_property_setter_preserve_permissions() {
+        let mut config = PySecurityConfig::new();
+        assert!(!config.get_preserve_permissions());
+
+        config.set_preserve_permissions(true);
+        assert!(
+            config.get_preserve_permissions(),
+            "Property setter should update preserve_permissions"
+        );
+    }
+
+    #[test]
+    fn test_add_allowed_extension_valid() {
+        pyo3::prepare_freethreaded_python();
+        Python::attach(|py| {
+            let config = PySecurityConfig::new();
+            let py_config = Py::new(py, config).expect("Failed to create Py object");
+
+            let result = py_config.borrow_mut(py).add_allowed_extension(".txt".to_string());
+            assert!(result.is_ok(), "Should accept valid extension");
+
+            let extensions = py_config.borrow(py).get_allowed_extensions();
+            assert!(
+                extensions.contains(&".txt".to_string()),
+                "Extension should be added to list"
+            );
+        });
+    }
+
+    #[test]
+    fn test_add_allowed_extension_rejects_null_bytes() {
+        pyo3::prepare_freethreaded_python();
+        Python::attach(|py| {
+            let config = PySecurityConfig::new();
+            let py_config = Py::new(py, config).expect("Failed to create Py object");
+
+            let result = py_config.borrow_mut(py).add_allowed_extension(".txt\0".to_string());
+            assert!(result.is_err(), "Should reject extension with null bytes");
+        });
+    }
+
+    #[test]
+    fn test_add_allowed_extension_rejects_too_long() {
+        pyo3::prepare_freethreaded_python();
+        Python::attach(|py| {
+            let config = PySecurityConfig::new();
+            let py_config = Py::new(py, config).expect("Failed to create Py object");
+
+            let long_ext = "x".repeat(MAX_EXTENSION_LENGTH + 1);
+            let result = py_config.borrow_mut(py).add_allowed_extension(long_ext);
+            assert!(result.is_err(), "Should reject extension exceeding max length");
+        });
+    }
+
+    #[test]
+    fn test_add_banned_component_valid() {
+        pyo3::prepare_freethreaded_python();
+        Python::attach(|py| {
+            let config = PySecurityConfig::new();
+            let py_config = Py::new(py, config).expect("Failed to create Py object");
+
+            let result = py_config.borrow_mut(py).add_banned_component("node_modules".to_string());
+            assert!(result.is_ok(), "Should accept valid component");
+
+            let components = py_config.borrow(py).get_banned_path_components();
+            assert!(
+                components.contains(&"node_modules".to_string()),
+                "Component should be added to list"
+            );
+        });
+    }
+
+    #[test]
+    fn test_add_banned_component_rejects_null_bytes() {
+        pyo3::prepare_freethreaded_python();
+        Python::attach(|py| {
+            let config = PySecurityConfig::new();
+            let py_config = Py::new(py, config).expect("Failed to create Py object");
+
+            let result = py_config.borrow_mut(py).add_banned_component("bad\0".to_string());
+            assert!(result.is_err(), "Should reject component with null bytes");
+        });
+    }
+
+    #[test]
+    fn test_add_banned_component_rejects_too_long() {
+        pyo3::prepare_freethreaded_python();
+        Python::attach(|py| {
+            let config = PySecurityConfig::new();
+            let py_config = Py::new(py, config).expect("Failed to create Py object");
+
+            let long_component = "x".repeat(MAX_COMPONENT_LENGTH + 1);
+            let result = py_config.borrow_mut(py).add_banned_component(long_component);
+            assert!(result.is_err(), "Should reject component exceeding max length");
+        });
     }
 
     #[test]
     fn test_validation_methods() {
         let config = PySecurityConfig::new();
-        assert!(config.is_path_component_allowed("src"));
-        assert!(!config.is_path_component_allowed(".git"));
-        assert!(!config.is_path_component_allowed(".ssh"));
+        assert!(
+            config.is_path_component_allowed("src"),
+            "Should allow normal path components"
+        );
+        assert!(
+            !config.is_path_component_allowed(".git"),
+            "Should reject .git directory"
+        );
+        assert!(
+            !config.is_path_component_allowed(".ssh"),
+            "Should reject .ssh directory"
+        );
+    }
+
+    #[test]
+    fn test_is_extension_allowed_empty_list() {
+        let config = PySecurityConfig::new();
+        assert!(
+            config.is_extension_allowed("txt"),
+            "Empty allowed_extensions list should allow all extensions"
+        );
     }
 
     #[test]
     fn test_repr() {
         let config = PySecurityConfig::new();
         let repr = config.__repr__();
-        assert!(repr.contains("SecurityConfig"));
-        assert!(repr.contains("max_file_size"));
+        assert!(repr.contains("SecurityConfig"), "repr should contain class name");
+        assert!(repr.contains("max_file_size"), "repr should contain max_file_size");
+    }
+
+    #[test]
+    fn test_as_core() {
+        let config = PySecurityConfig::new();
+        let core_config = config.as_core();
+        assert_eq!(
+            core_config.max_file_size,
+            50 * 1024 * 1024,
+            "as_core() should return reference to inner config"
+        );
     }
 }

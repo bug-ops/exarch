@@ -132,7 +132,55 @@ mod tests {
             path: PathBuf::from("../etc/passwd"),
         };
         let py_err = convert_error(err);
-        assert!(py_err.to_string().contains("path traversal"));
+        let err_str = py_err.to_string();
+        assert!(
+            err_str.contains("path traversal"),
+            "Expected 'path traversal' in error message, got: {}",
+            err_str
+        );
+        assert!(
+            err_str.contains("../etc/passwd"),
+            "Expected path in error message, got: {}",
+            err_str
+        );
+    }
+
+    #[test]
+    fn test_symlink_escape_conversion() {
+        let err = CoreError::SymlinkEscape {
+            path: PathBuf::from("/etc/passwd"),
+        };
+        let py_err = convert_error(err);
+        let err_str = py_err.to_string();
+        assert!(
+            err_str.contains("symlink target outside"),
+            "Expected 'symlink target outside' in error message, got: {}",
+            err_str
+        );
+        assert!(
+            err_str.contains("/etc/passwd"),
+            "Expected path in error message, got: {}",
+            err_str
+        );
+    }
+
+    #[test]
+    fn test_hardlink_escape_conversion() {
+        let err = CoreError::HardlinkEscape {
+            path: PathBuf::from("/etc/shadow"),
+        };
+        let py_err = convert_error(err);
+        let err_str = py_err.to_string();
+        assert!(
+            err_str.contains("hardlink target outside"),
+            "Expected 'hardlink target outside' in error message, got: {}",
+            err_str
+        );
+        assert!(
+            err_str.contains("/etc/shadow"),
+            "Expected path in error message, got: {}",
+            err_str
+        );
     }
 
     #[test]
@@ -143,11 +191,46 @@ mod tests {
             ratio: 1000.0,
         };
         let py_err = convert_error(err);
-        assert!(py_err.to_string().contains("zip bomb"));
+        let err_str = py_err.to_string();
+        assert!(
+            err_str.contains("zip bomb"),
+            "Expected 'zip bomb' in error message, got: {}",
+            err_str
+        );
+        assert!(
+            err_str.contains("1000"),
+            "Expected compression ratio in error message, got: {}",
+            err_str
+        );
     }
 
     #[test]
-    fn test_quota_exceeded_conversion() {
+    fn test_invalid_permissions_conversion() {
+        let err = CoreError::InvalidPermissions {
+            path: PathBuf::from("malicious.sh"),
+            mode: 0o777,
+        };
+        let py_err = convert_error(err);
+        let err_str = py_err.to_string();
+        assert!(
+            err_str.contains("invalid permissions"),
+            "Expected 'invalid permissions' in error message, got: {}",
+            err_str
+        );
+        assert!(
+            err_str.contains("777"),
+            "Expected permissions mode in error message, got: {}",
+            err_str
+        );
+        assert!(
+            err_str.contains("malicious.sh"),
+            "Expected filename in error message, got: {}",
+            err_str
+        );
+    }
+
+    #[test]
+    fn test_quota_exceeded_file_count_conversion() {
         let err = CoreError::QuotaExceeded {
             resource: CoreQuotaResource::FileCount {
                 current: 11,
@@ -155,7 +238,191 @@ mod tests {
             },
         };
         let py_err = convert_error(err);
-        assert!(py_err.to_string().contains("quota exceeded"));
-        assert!(py_err.to_string().contains("file count"));
+        let err_str = py_err.to_string();
+        assert!(
+            err_str.contains("quota exceeded"),
+            "Expected 'quota exceeded' in error message, got: {}",
+            err_str
+        );
+        assert!(
+            err_str.contains("file count"),
+            "Expected 'file count' in error message, got: {}",
+            err_str
+        );
+    }
+
+    #[test]
+    fn test_quota_exceeded_total_size_conversion() {
+        let err = CoreError::QuotaExceeded {
+            resource: CoreQuotaResource::TotalSize {
+                current: 1_000_000,
+                max: 500_000,
+            },
+        };
+        let py_err = convert_error(err);
+        let err_str = py_err.to_string();
+        assert!(
+            err_str.contains("quota exceeded"),
+            "Expected 'quota exceeded' in error message, got: {}",
+            err_str
+        );
+        assert!(
+            err_str.contains("total size"),
+            "Expected 'total size' in error message, got: {}",
+            err_str
+        );
+    }
+
+    #[test]
+    fn test_quota_exceeded_file_size_conversion() {
+        let err = CoreError::QuotaExceeded {
+            resource: CoreQuotaResource::FileSize {
+                size: 100_000_000,
+                max: 50_000_000,
+            },
+        };
+        let py_err = convert_error(err);
+        let err_str = py_err.to_string();
+        assert!(
+            err_str.contains("quota exceeded"),
+            "Expected 'quota exceeded' in error message, got: {}",
+            err_str
+        );
+        assert!(
+            err_str.contains("file size"),
+            "Expected 'file size' in error message, got: {}",
+            err_str
+        );
+    }
+
+    #[test]
+    fn test_quota_exceeded_integer_overflow_conversion() {
+        let err = CoreError::QuotaExceeded {
+            resource: CoreQuotaResource::IntegerOverflow,
+        };
+        let py_err = convert_error(err);
+        let err_str = py_err.to_string();
+        assert!(
+            err_str.contains("quota exceeded"),
+            "Expected 'quota exceeded' in error message, got: {}",
+            err_str
+        );
+        assert!(
+            err_str.contains("integer overflow"),
+            "Expected 'integer overflow' in error message, got: {}",
+            err_str
+        );
+    }
+
+    #[test]
+    fn test_security_violation_conversion() {
+        let err = CoreError::SecurityViolation {
+            reason: "test violation".to_string(),
+        };
+        let py_err = convert_error(err);
+        let err_str = py_err.to_string();
+        assert!(
+            err_str.contains("security policy"),
+            "Expected 'security policy' in error message, got: {}",
+            err_str
+        );
+        assert!(
+            err_str.contains("test violation"),
+            "Expected reason in error message, got: {}",
+            err_str
+        );
+    }
+
+    #[test]
+    fn test_unsupported_format_conversion() {
+        let err = CoreError::UnsupportedFormat;
+        let py_err = convert_error(err);
+        let err_str = py_err.to_string();
+        assert!(
+            err_str.contains("unsupported archive format"),
+            "Expected 'unsupported archive format' in error message, got: {}",
+            err_str
+        );
+    }
+
+    #[test]
+    fn test_invalid_archive_conversion() {
+        let err = CoreError::InvalidArchive("corrupted header".to_string());
+        let py_err = convert_error(err);
+        let err_str = py_err.to_string();
+        assert!(
+            err_str.contains("invalid archive"),
+            "Expected 'invalid archive' in error message, got: {}",
+            err_str
+        );
+        assert!(
+            err_str.contains("corrupted header"),
+            "Expected reason in error message, got: {}",
+            err_str
+        );
+    }
+
+    #[test]
+    fn test_io_error_conversion() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file not found");
+        let err = CoreError::Io(io_err);
+        let py_err = convert_error(err);
+        let err_str = py_err.to_string();
+        assert!(
+            err_str.contains("file not found"),
+            "Expected 'file not found' in error message, got: {}",
+            err_str
+        );
+    }
+
+    #[test]
+    fn test_register_exceptions_adds_all_types() {
+        pyo3::prepare_freethreaded_python();
+        Python::attach(|py| {
+            let module = PyModule::new(py, "test_module").expect("Failed to create test module");
+            register_exceptions(&module.as_borrowed()).expect("Failed to register exceptions");
+
+            // Verify all exception types are registered
+            assert!(
+                module.getattr("ExtractionError").is_ok(),
+                "ExtractionError not registered"
+            );
+            assert!(
+                module.getattr("PathTraversalError").is_ok(),
+                "PathTraversalError not registered"
+            );
+            assert!(
+                module.getattr("SymlinkEscapeError").is_ok(),
+                "SymlinkEscapeError not registered"
+            );
+            assert!(
+                module.getattr("HardlinkEscapeError").is_ok(),
+                "HardlinkEscapeError not registered"
+            );
+            assert!(
+                module.getattr("ZipBombError").is_ok(),
+                "ZipBombError not registered"
+            );
+            assert!(
+                module.getattr("InvalidPermissionsError").is_ok(),
+                "InvalidPermissionsError not registered"
+            );
+            assert!(
+                module.getattr("QuotaExceededError").is_ok(),
+                "QuotaExceededError not registered"
+            );
+            assert!(
+                module.getattr("SecurityViolationError").is_ok(),
+                "SecurityViolationError not registered"
+            );
+            assert!(
+                module.getattr("UnsupportedFormatError").is_ok(),
+                "UnsupportedFormatError not registered"
+            );
+            assert!(
+                module.getattr("InvalidArchiveError").is_ok(),
+                "InvalidArchiveError not registered"
+            );
+        });
     }
 }

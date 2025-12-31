@@ -2,6 +2,8 @@
 
 [![CI](https://img.shields.io/github/actions/workflow/status/bug-ops/exarch/ci.yml?branch=main)](https://github.com/bug-ops/exarch/actions)
 [![codecov](https://codecov.io/gh/bug-ops/exarch/graph/badge.svg?token=AKF1TLTVCA)](https://codecov.io/gh/bug-ops/exarch)
+[![crates.io](https://img.shields.io/crates/v/exarch-core)](https://crates.io/crates/exarch-core)
+[![docs.rs](https://img.shields.io/docsrs/exarch-core)](https://docs.rs/exarch-core)
 [![PyPI](https://img.shields.io/pypi/v/exarch)](https://pypi.org/project/exarch)
 [![npm](https://img.shields.io/npm/v/exarch-rs)](https://www.npmjs.com/package/exarch-rs)
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue)](LICENSE-MIT)

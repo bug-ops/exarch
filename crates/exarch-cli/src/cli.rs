@@ -60,7 +60,7 @@ pub struct ExtractArgs {
     pub max_file_size: Option<u64>,
 
     /// Maximum compression ratio
-    #[arg(long, default_value = "100")]
+    #[arg(long, default_value = "100", value_parser = clap::value_parser!(u32).range(1..))]
     pub max_compression_ratio: u32,
 
     /// Allow symlinks (within extraction directory)
@@ -143,8 +143,11 @@ fn parse_byte_size(s: &str) -> Result<u64, String> {
 
     num_str
         .parse::<u64>()
-        .map(|n| n * multiplier)
         .map_err(|_| format!("invalid byte size: {s}"))
+        .and_then(|n| {
+            n.checked_mul(multiplier)
+                .ok_or_else(|| format!("byte size overflow: {s}"))
+        })
 }
 
 #[cfg(test)]
@@ -161,5 +164,13 @@ mod tests {
         assert_eq!(parse_byte_size("1T").unwrap(), 1024_u64.pow(4));
         assert!(parse_byte_size("invalid").is_err());
         assert!(parse_byte_size("").is_err());
+    }
+
+    #[test]
+    fn test_parse_byte_size_overflow() {
+        // Test overflow scenarios
+        assert!(parse_byte_size("18446744073709551615K").is_err()); // u64::MAX / 1024 + 1
+        assert!(parse_byte_size("18014398509481984M").is_err()); // u64::MAX / (1024^2) + 1
+        assert!(parse_byte_size("17592186044416G").is_err()); // u64::MAX / (1024^3) + 1
     }
 }

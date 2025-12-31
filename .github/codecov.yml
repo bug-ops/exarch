@@ -48,6 +48,20 @@ flags:
     carryforward: true
     target: 60%              # CLI 60%+ coverage
 
+  # Python bindings
+  exarch-python:
+    paths:
+      - crates/exarch-python/
+    carryforward: true
+    target: 50%              # Python bindings 50%+ coverage
+
+  # Node.js bindings
+  exarch-node:
+    paths:
+      - crates/exarch-node/
+    carryforward: true
+    target: 50%              # Node.js bindings 50%+ coverage
+
 # Ignore patterns
 ignore:
   - "tests/"                 # Test files themselves

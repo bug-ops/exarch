@@ -74,6 +74,7 @@ missing_docs = "warn"
 [profile.dev]
 opt-level = 0
 lto = false
+incremental = true
 
 [profile.release]
 opt-level = 3

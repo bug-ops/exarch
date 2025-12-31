@@ -10,10 +10,10 @@ use human::HumanFormatter;
 use json::JsonFormatter;
 
 /// Creates an output formatter based on CLI flags
-pub fn create_formatter(json: bool, verbose: bool) -> Box<dyn OutputFormatter> {
+pub fn create_formatter(json: bool, verbose: bool, quiet: bool) -> Box<dyn OutputFormatter> {
     if json {
         Box::new(JsonFormatter)
     } else {
-        Box::new(HumanFormatter::new(verbose))
+        Box::new(HumanFormatter::new(verbose, quiet))
     }
 }

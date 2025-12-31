@@ -8,14 +8,16 @@ use exarch_core::ExtractionReport;
 
 pub struct HumanFormatter {
     verbose: bool,
+    quiet: bool,
     use_colors: bool,
     term: Term,
 }
 
 impl HumanFormatter {
-    pub fn new(verbose: bool) -> Self {
+    pub fn new(verbose: bool, quiet: bool) -> Self {
         Self {
             verbose,
+            quiet,
             use_colors: console::colors_enabled(),
             term: Term::stdout(),
         }
@@ -40,6 +42,10 @@ impl HumanFormatter {
 
 impl OutputFormatter for HumanFormatter {
     fn format_extraction_result(&self, report: &ExtractionReport) -> Result<()> {
+        if self.quiet {
+            return Ok(());
+        }
+
         if self.use_colors {
             let _ = self.term.write_line(&format!(
                 "{} Extraction complete",
@@ -73,6 +79,7 @@ impl OutputFormatter for HumanFormatter {
     }
 
     fn format_error(&self, error: &anyhow::Error) {
+        // Always show errors, even in quiet mode
         if self.use_colors {
             let _ = self
                 .term
@@ -83,6 +90,10 @@ impl OutputFormatter for HumanFormatter {
     }
 
     fn format_success(&self, message: &str) {
+        if self.quiet {
+            return;
+        }
+
         if self.use_colors {
             let _ = self
                 .term
@@ -93,6 +104,10 @@ impl OutputFormatter for HumanFormatter {
     }
 
     fn format_warning(&self, message: &str) {
+        if self.quiet {
+            return;
+        }
+
         if self.use_colors {
             let _ = self
                 .term
@@ -100,5 +115,51 @@ impl OutputFormatter for HumanFormatter {
         } else {
             let _ = self.term.write_line(&format!("WARNING: {message}"));
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_size_bytes() {
+        assert_eq!(HumanFormatter::format_size(0), "0 B");
+        assert_eq!(HumanFormatter::format_size(512), "512 B");
+        assert_eq!(HumanFormatter::format_size(1023), "1023 B");
+    }
+
+    #[test]
+    fn test_format_size_kilobytes() {
+        assert_eq!(HumanFormatter::format_size(1024), "1.0 KB");
+        assert_eq!(HumanFormatter::format_size(2048), "2.0 KB");
+        assert_eq!(HumanFormatter::format_size(1536), "1.5 KB");
+    }
+
+    #[test]
+    fn test_format_size_megabytes() {
+        assert_eq!(HumanFormatter::format_size(1024 * 1024), "1.0 MB");
+        assert_eq!(HumanFormatter::format_size(2 * 1024 * 1024), "2.0 MB");
+        assert_eq!(HumanFormatter::format_size(1536 * 1024), "1.5 MB");
+    }
+
+    #[test]
+    fn test_format_size_gigabytes() {
+        assert_eq!(HumanFormatter::format_size(1024 * 1024 * 1024), "1.0 GB");
+        assert_eq!(
+            HumanFormatter::format_size(2 * 1024 * 1024 * 1024),
+            "2.0 GB"
+        );
+        assert_eq!(HumanFormatter::format_size(1536 * 1024 * 1024), "1.5 GB");
+    }
+
+    #[test]
+    fn test_format_size_edge_cases() {
+        // u64::MAX = 18446744073709551615 bytes ≈ 17179869184 GB
+        assert_eq!(
+            HumanFormatter::format_size(u64::MAX),
+            "17179869184.0 GB"
+        );
     }
 }

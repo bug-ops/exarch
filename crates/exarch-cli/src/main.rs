@@ -12,7 +12,7 @@ use clap::Parser;
 fn main() -> Result<()> {
     let cli = cli::Cli::parse();
 
-    let formatter = output::create_formatter(cli.json, cli.verbose);
+    let formatter = output::create_formatter(cli.json, cli.verbose, cli.quiet);
 
     match &cli.command {
         cli::Commands::Extract(args) => commands::extract::execute(args, &*formatter),

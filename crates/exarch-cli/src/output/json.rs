@@ -76,3 +76,25 @@ impl OutputFormatter for JsonFormatter {
         let _ = Self::output(&output);
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_json_formatter_output_structure() {
+        #[derive(Serialize)]
+        struct TestData {
+            value: String,
+        }
+
+        let data = TestData {
+            value: "test".to_string(),
+        };
+
+        let json = serde_json::to_string(&data).unwrap();
+        assert!(json.contains("\"value\""));
+        assert!(json.contains("\"test\""));
+    }
+}

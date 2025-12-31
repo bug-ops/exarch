@@ -22,18 +22,19 @@ categories = ["compression", "filesystem"]
 exarch-core = { path = "crates/exarch-core", version = "0.1.0" }
 
 # Dependencies (sorted alphabetically)
-bzip2 = "0.5"
+bzip2 = "0.6"
 criterion = "0.8"
 flate2 = "1.1"
 libc = "0.2"
-napi = "3.8"
-napi-build = "2.0"
-napi-derive = "3.0"
+napi = "3.8.1"
+napi-build = "2.3.1"
+napi-derive = "3.5.0"
 proptest = "1.9"
 pyo3 = "0.27"
 tar = "0.4"
 tempfile = "3.24"
 thiserror = "2.0"
+tokio = { version = "1.48", features = ["rt"] }
 xz2 = "0.1"
 zip = { version = "7.0", default-features = false }
 zstd = "0.13"

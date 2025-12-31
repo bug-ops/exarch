@@ -308,7 +308,7 @@ jobs:
       - name: Check MSRV for exarch-core
         run: cargo check -p exarch-core --all-features
 
-  # Code coverage (Linux only for speed)
+  # Code coverage (Linux only for speed) - per-package coverage
   coverage:
     name: Code Coverage
     needs: [changes, format]
@@ -342,40 +342,109 @@ jobs:
         with:
           tool: nextest
 
-      - name: Generate coverage report
+      # Generate coverage for exarch-core
+      - name: Generate coverage for exarch-core
         run: |
-          cargo llvm-cov --all-features --workspace \
-            --exclude exarch-python --exclude exarch-node \
-            --lcov --output-path lcov.info nextest
+          cargo llvm-cov --all-features -p exarch-core \
+            --lcov --output-path lcov-core.info nextest
 
-      - name: Generate HTML coverage report
+      - name: Upload exarch-core coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: lcov-core.info
+          fail_ci_if_error: false
+          verbose: true
+          flags: exarch-core
+          name: exarch-core-coverage
+
+      # Generate coverage for exarch-cli
+      - name: Generate coverage for exarch-cli
+        run: |
+          cargo llvm-cov --all-features -p exarch-cli \
+            --lcov --output-path lcov-cli.info nextest
+
+      - name: Upload exarch-cli coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: lcov-cli.info
+          fail_ci_if_error: false
+          verbose: true
+          flags: exarch-cli
+          name: exarch-cli-coverage
+
+      # Generate coverage for exarch-python (if exists)
+      - name: Generate coverage for exarch-python
+        continue-on-error: true
+        run: |
+          cargo llvm-cov --all-features -p exarch-python \
+            --lcov --output-path lcov-python.info nextest || echo "No tests for exarch-python yet"
+
+      - name: Upload exarch-python coverage to Codecov
+        if: hashFiles('lcov-python.info') != ''
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: lcov-python.info
+          fail_ci_if_error: false
+          verbose: true
+          flags: exarch-python
+          name: exarch-python-coverage
+
+      # Generate coverage for exarch-node (if exists)
+      - name: Generate coverage for exarch-node
+        continue-on-error: true
+        run: |
+          cargo llvm-cov --all-features -p exarch-node \
+            --lcov --output-path lcov-node.info nextest || echo "No tests for exarch-node yet"
+
+      - name: Upload exarch-node coverage to Codecov
+        if: hashFiles('lcov-node.info') != ''
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: lcov-node.info
+          fail_ci_if_error: false
+          verbose: true
+          flags: exarch-node
+          name: exarch-node-coverage
+
+      # Generate combined HTML report for local viewing
+      - name: Generate HTML coverage report (all packages)
         run: |
           cargo llvm-cov --all-features --workspace \
             --exclude exarch-python --exclude exarch-node \
             --html nextest
 
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v4
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          files: lcov.info
-          fail_ci_if_error: false
-          verbose: true
-          flags: rust
-          name: rust-coverage
+      # Generate combined lcov for archival
+      - name: Generate combined coverage report
+        run: |
+          cargo llvm-cov --all-features --workspace \
+            --exclude exarch-python --exclude exarch-node \
+            --lcov --output-path lcov-combined.info nextest
 
       - name: Archive coverage reports
         uses: actions/upload-artifact@v4
         with:
           name: coverage-report
           path: |
-            lcov.info
+            lcov-*.info
             target/llvm-cov/html/
           retention-days: 30
 
       - name: Coverage summary
         if: always()
         run: |
+          echo "=== Coverage Summary by Package ==="
+          echo ""
+          echo "exarch-core:"
+          cargo llvm-cov --all-features -p exarch-core --summary-only nextest || true
+          echo ""
+          echo "exarch-cli:"
+          cargo llvm-cov --all-features -p exarch-cli --summary-only nextest || true
+          echo ""
+          echo "=== Combined Coverage ==="
           cargo llvm-cov --all-features --workspace \
             --exclude exarch-python --exclude exarch-node \
             --summary-only nextest || true

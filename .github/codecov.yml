@@ -3,11 +3,14 @@
 
 coverage:
   status:
+    # Project-level coverage (overall)
     project:
       default:
-        target: 70%          # Minimum coverage requirement
+        target: 70%          # Minimum overall coverage requirement
         threshold: 2%        # Allow 2% drop from previous coverage
         if_ci_failed: error  # Fail if CI failed
+
+    # Patch coverage (new code)
     patch:
       default:
         target: 80%          # New code should be well-tested
@@ -21,24 +24,96 @@ comment:
   layout: "reach,diff,flags,files"
   behavior: default
   require_changes: false     # Always post comment
-  after_n_builds: 1          # Wait for all builds
+  after_n_builds: 2          # Wait for exarch-core and exarch-cli builds (Python/Node may not have tests yet)
 
-# Coverage flags for different components
+# Coverage flags for different packages
 flags:
-  rust:
+  # Core library - highest coverage requirements (security-critical)
+  exarch-core:
     paths:
       - crates/exarch-core/src/
     carryforward: true       # Use previous coverage if no new data
+    target: 80%              # Core requires 80%+ coverage
+    statuses:
+      - type: project
+        target: 80%
+        threshold: 2%
+      - type: patch
+        target: 85%
+
+  # CLI application
+  exarch-cli:
+    paths:
+      - crates/exarch-cli/src/
+    carryforward: true
+    target: 60%              # CLI 60%+ coverage
+    statuses:
+      - type: project
+        target: 60%
+        threshold: 2%
+      - type: patch
+        target: 70%
+
+  # Python bindings (tests may not exist yet)
+  exarch-python:
+    paths:
+      - crates/exarch-python/src/
+    carryforward: true
+    target: 70%              # FFI bindings 70%+ coverage
+    statuses:
+      - type: project
+        target: 70%
+        threshold: 5%
+        informational: true  # Don't block CI if missing
+      - type: patch
+        target: 80%
+        informational: true
+
+  # Node.js bindings (tests may not exist yet)
+  exarch-node:
+    paths:
+      - crates/exarch-node/src/
+    carryforward: true
+    target: 70%              # FFI bindings 70%+ coverage
+    statuses:
+      - type: project
+        target: 70%
+        threshold: 5%
+        informational: true  # Don't block CI if missing
+      - type: patch
+        target: 80%
+        informational: true
 
 # Ignore patterns
 ignore:
-  - "tests/"
-  - "benches/"
-  - "examples/"
-  - "crates/exarch-python/src/"
-  - "crates/exarch-node/src/"
-  - "**/target/"
-  - "**/*.md"
+  - "tests/"                 # Test files themselves
+  - "benches/"              # Benchmark files
+  - "examples/"             # Example code
+  - "**/target/"            # Build artifacts
+  - "**/*.md"               # Documentation
+  - ".local/"               # Working documents
+
+# Component coverage requirements
+component_management:
+  default_rules:
+    statuses:
+      - type: project
+        target: auto
+      - type: patch
+        target: auto
+
+  individual_components:
+    # Security validators must have 100% coverage
+    - component_id: security
+      name: Security Validators
+      paths:
+        - crates/exarch-core/src/security/**
+      statuses:
+        - type: project
+          target: 100%
+          threshold: 0%
+        - type: patch
+          target: 100%
 
 # GitHub checks configuration
 github_checks:

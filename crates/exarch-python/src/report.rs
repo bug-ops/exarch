@@ -104,7 +104,8 @@ impl PyExtractionReport {
     ///
     /// # Performance
     ///
-    /// This method allocates a new string on every call (delegates to `__str__`).
+    /// This method allocates a new string on every call (delegates to
+    /// `__str__`).
     fn __repr__(&self) -> String {
         self.__str__()
     }
@@ -134,15 +135,35 @@ mod tests {
 
         let py_report = PyExtractionReport::from(core_report);
 
-        assert_eq!(py_report.files_extracted(), 10, "files_extracted should be 10");
-        assert_eq!(py_report.directories_created(), 5, "directories_created should be 5");
-        assert_eq!(py_report.symlinks_created(), 2, "symlinks_created should be 2");
-        assert_eq!(py_report.bytes_written(), 1024, "bytes_written should be 1024");
+        assert_eq!(
+            py_report.files_extracted(),
+            10,
+            "files_extracted should be 10"
+        );
+        assert_eq!(
+            py_report.directories_created(),
+            5,
+            "directories_created should be 5"
+        );
+        assert_eq!(
+            py_report.symlinks_created(),
+            2,
+            "symlinks_created should be 2"
+        );
+        assert_eq!(
+            py_report.bytes_written(),
+            1024,
+            "bytes_written should be 1024"
+        );
         assert_eq!(py_report.duration_ms(), 500, "duration_ms should be 500");
         assert_eq!(py_report.files_skipped(), 1, "files_skipped should be 1");
         assert_eq!(py_report.total_items(), 17, "total_items should be 17");
         assert!(py_report.has_warnings(), "should have warnings");
-        assert_eq!(py_report.warnings().len(), 1, "warnings list should have 1 item");
+        assert_eq!(
+            py_report.warnings().len(),
+            1,
+            "warnings list should have 1 item"
+        );
     }
 
     #[test]
@@ -150,14 +171,45 @@ mod tests {
         let core_report = CoreReport::new();
         let py_report = PyExtractionReport::from(core_report);
 
-        assert_eq!(py_report.files_extracted(), 0, "files_extracted should default to 0");
-        assert_eq!(py_report.directories_created(), 0, "directories_created should default to 0");
-        assert_eq!(py_report.symlinks_created(), 0, "symlinks_created should default to 0");
-        assert_eq!(py_report.bytes_written(), 0, "bytes_written should default to 0");
-        assert_eq!(py_report.files_skipped(), 0, "files_skipped should default to 0");
-        assert_eq!(py_report.total_items(), 0, "total_items should be 0 for empty report");
-        assert!(!py_report.has_warnings(), "should not have warnings by default");
-        assert_eq!(py_report.warnings().len(), 0, "warnings list should be empty");
+        assert_eq!(
+            py_report.files_extracted(),
+            0,
+            "files_extracted should default to 0"
+        );
+        assert_eq!(
+            py_report.directories_created(),
+            0,
+            "directories_created should default to 0"
+        );
+        assert_eq!(
+            py_report.symlinks_created(),
+            0,
+            "symlinks_created should default to 0"
+        );
+        assert_eq!(
+            py_report.bytes_written(),
+            0,
+            "bytes_written should default to 0"
+        );
+        assert_eq!(
+            py_report.files_skipped(),
+            0,
+            "files_skipped should default to 0"
+        );
+        assert_eq!(
+            py_report.total_items(),
+            0,
+            "total_items should be 0 for empty report"
+        );
+        assert!(
+            !py_report.has_warnings(),
+            "should not have warnings by default"
+        );
+        assert_eq!(
+            py_report.warnings().len(),
+            0,
+            "warnings list should be empty"
+        );
     }
 
     #[test]
@@ -192,7 +244,10 @@ mod tests {
         let core_report = CoreReport::new();
         let py_report = PyExtractionReport::from(core_report);
         let s = py_report.__str__();
-        assert!(s.contains("ExtractionReport"), "__str__ should contain class name");
+        assert!(
+            s.contains("ExtractionReport"),
+            "__str__ should contain class name"
+        );
         assert!(s.contains("files="), "__str__ should contain files field");
         assert!(s.contains("dirs="), "__str__ should contain dirs field");
         assert!(s.contains("bytes="), "__str__ should contain bytes field");
@@ -223,7 +278,11 @@ mod tests {
         let warnings2 = py_report.warnings();
 
         assert_eq!(warnings1.len(), 2, "First call should return 2 warnings");
-        assert_eq!(warnings2.len(), 2, "Second call should also return 2 warnings");
+        assert_eq!(
+            warnings2.len(),
+            2,
+            "Second call should also return 2 warnings"
+        );
         assert_eq!(warnings1, warnings2, "Both calls should return equal lists");
     }
 }

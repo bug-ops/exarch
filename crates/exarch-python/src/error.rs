@@ -377,7 +377,7 @@ mod tests {
 
     #[test]
     fn test_register_exceptions_adds_all_types() {
-        pyo3::prepare_freethreaded_python();
+        pyo3::Python::initialize();
         Python::attach(|py| {
             let module = PyModule::new(py, "test_module").expect("Failed to create test module");
             register_exceptions(&module.as_borrowed()).expect("Failed to register exceptions");

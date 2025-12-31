@@ -29,7 +29,8 @@ use report::PyExtractionReport;
 /// # Arguments
 ///
 /// * `archive_path` - Path to the archive file (str or pathlib.Path)
-/// * `output_dir` - Directory where files will be extracted (str or pathlib.Path)
+/// * `output_dir` - Directory where files will be extracted (str or
+///   pathlib.Path)
 /// * `config` - Optional `SecurityConfig` (uses secure defaults if None)
 ///
 /// # Returns
@@ -98,13 +99,15 @@ fn extract_archive(
     let output_dir = path_to_string(py, output_dir)?;
 
     // Get config reference or use default
-    // Note: We need to create a default config if None is provided, since we need a reference
+    // Note: We need to create a default config if None is provided, since we need a
+    // reference
     let default_config = exarch_core::SecurityConfig::default();
     let config_ref = config.map_or(&default_config, |c| c.as_core());
 
     // Release GIL during I/O-heavy extraction
-    // NOTE: TOCTOU race condition - archive contents can change between check and extraction.
-    // This is an accepted limitation when releasing the GIL for performance.
+    // NOTE: TOCTOU race condition - archive contents can change between check and
+    // extraction. This is an accepted limitation when releasing the GIL for
+    // performance.
     let report = py
         .detach(|| exarch_core::extract_archive(&archive_path, &output_dir, config_ref))
         .map_err(convert_error)?;
@@ -181,11 +184,15 @@ mod tests {
 
     #[test]
     fn test_module_metadata() {
-        pyo3::prepare_freethreaded_python();
+        pyo3::Python::initialize();
         Python::attach(|py| {
             let module = PyModule::new(py, "test_exarch").expect("Failed to create module");
             let result = exarch(&module.as_borrowed());
-            assert!(result.is_ok(), "Module initialization failed: {:?}", result.err());
+            assert!(
+                result.is_ok(),
+                "Module initialization failed: {:?}",
+                result.err()
+            );
 
             // Verify module has __doc__ and __version__
             assert!(
@@ -217,42 +224,56 @@ mod tests {
 
     #[test]
     fn test_path_to_string_with_string() {
-        pyo3::prepare_freethreaded_python();
+        pyo3::Python::initialize();
         Python::attach(|py| {
             let path = PyString::new(py, "/tmp/test.tar.gz").into_any();
             let result = path_to_string(py, &path.as_borrowed());
-            assert!(result.is_ok(), "Failed to convert string path: {:?}", result.err());
+            assert!(
+                result.is_ok(),
+                "Failed to convert string path: {:?}",
+                result.err()
+            );
             assert_eq!(result.unwrap(), "/tmp/test.tar.gz");
         });
     }
 
     #[test]
     fn test_path_to_string_empty() {
-        pyo3::prepare_freethreaded_python();
+        pyo3::Python::initialize();
         Python::attach(|py| {
             let path = PyString::new(py, "").into_any();
             let result = path_to_string(py, &path.as_borrowed());
-            assert!(result.is_ok(), "Failed to convert empty path: {:?}", result.err());
+            assert!(
+                result.is_ok(),
+                "Failed to convert empty path: {:?}",
+                result.err()
+            );
             assert_eq!(result.unwrap(), "");
         });
     }
 
     #[test]
     fn test_path_to_string_with_path_object() {
-        pyo3::prepare_freethreaded_python();
+        pyo3::Python::initialize();
         Python::attach(|py| {
             let pathlib = py.import("pathlib").expect("Failed to import pathlib");
             let path_class = pathlib.getattr("Path").expect("Failed to get Path class");
-            let path = path_class.call1(("/tmp/test.tar.gz",)).expect("Failed to create Path object");
+            let path = path_class
+                .call1(("/tmp/test.tar.gz",))
+                .expect("Failed to create Path object");
             let result = path_to_string(py, &path.as_borrowed());
-            assert!(result.is_ok(), "Failed to convert Path object: {:?}", result.err());
+            assert!(
+                result.is_ok(),
+                "Failed to convert Path object: {:?}",
+                result.err()
+            );
             assert_eq!(result.unwrap(), "/tmp/test.tar.gz");
         });
     }
 
     #[test]
     fn test_path_to_string_rejects_null_bytes() {
-        pyo3::prepare_freethreaded_python();
+        pyo3::Python::initialize();
         Python::attach(|py| {
             let path = PyString::new(py, "/tmp/test\0malicious.tar.gz").into_any();
             let result = path_to_string(py, &path.as_borrowed());
@@ -268,7 +289,7 @@ mod tests {
 
     #[test]
     fn test_path_to_string_rejects_too_long() {
-        pyo3::prepare_freethreaded_python();
+        pyo3::Python::initialize();
         Python::attach(|py| {
             let long_path = "x".repeat(MAX_PATH_LENGTH + 1);
             let path = PyString::new(py, &long_path).into_any();
@@ -285,7 +306,7 @@ mod tests {
 
     #[test]
     fn test_path_to_string_accepts_max_length() {
-        pyo3::prepare_freethreaded_python();
+        pyo3::Python::initialize();
         Python::attach(|py| {
             let max_path = "x".repeat(MAX_PATH_LENGTH);
             let path = PyString::new(py, &max_path).into_any();

@@ -140,6 +140,48 @@ pub fn convert_error(err: CoreError) -> Error {
             msg.push_str(&e_str);
             Error::new(Status::GenericFailure, msg)
         }
+        CoreError::SourceNotFound { path } => {
+            let path_str = sanitize_path_for_error(&path);
+            let mut msg = String::with_capacity(40 + path_str.len());
+            msg.push_str("SOURCE_NOT_FOUND: source path not found: ");
+            msg.push_str(&path_str);
+            Error::new(Status::GenericFailure, msg)
+        }
+        CoreError::SourceNotAccessible { path } => {
+            let path_str = sanitize_path_for_error(&path);
+            let mut msg = String::with_capacity(60 + path_str.len());
+            msg.push_str("SOURCE_NOT_ACCESSIBLE: source path is not accessible: ");
+            msg.push_str(&path_str);
+            Error::new(Status::GenericFailure, msg)
+        }
+        CoreError::OutputExists { path } => {
+            let path_str = sanitize_path_for_error(&path);
+            let mut msg = String::with_capacity(50 + path_str.len());
+            msg.push_str("OUTPUT_EXISTS: output file already exists: ");
+            msg.push_str(&path_str);
+            Error::new(Status::GenericFailure, msg)
+        }
+        CoreError::InvalidCompressionLevel { level } => {
+            let mut msg = String::with_capacity(60);
+            let _ = write!(
+                &mut msg,
+                "INVALID_COMPRESSION_LEVEL: invalid compression level {level}, must be 1-9"
+            );
+            Error::new(Status::GenericFailure, msg)
+        }
+        CoreError::UnknownFormat { path } => {
+            let path_str = sanitize_path_for_error(&path);
+            let mut msg = String::with_capacity(60 + path_str.len());
+            msg.push_str("UNKNOWN_FORMAT: cannot determine archive format from: ");
+            msg.push_str(&path_str);
+            Error::new(Status::GenericFailure, msg)
+        }
+        CoreError::InvalidConfiguration { reason } => {
+            let mut msg = String::with_capacity(40 + reason.len());
+            msg.push_str("INVALID_CONFIGURATION: invalid configuration: ");
+            msg.push_str(&reason);
+            Error::new(Status::GenericFailure, msg)
+        }
     }
 }
 

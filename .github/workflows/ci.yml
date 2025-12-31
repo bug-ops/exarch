@@ -199,7 +199,7 @@ jobs:
       - name: Run doctests
         run: cargo test --doc --workspace --all-features --exclude exarch-python --exclude exarch-node
 
-  # Test Python bindings
+  # Test Python bindings with coverage
   test-python:
     name: Test Python Bindings
     needs: [changes, format]
@@ -226,22 +226,30 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install maturin
-        run: pip install maturin pytest
+      - name: Install maturin and test dependencies
+        run: pip install maturin pytest pytest-cov
 
       - name: Build Python bindings
         run: |
           cd crates/exarch-python
           maturin build --release
 
-      - name: Test Python bindings
+      - name: Test Python bindings with coverage
         run: |
           cd crates/exarch-python
           pip install --find-links target/wheels exarch-python
-          pytest tests/ || echo "Python tests not yet implemented"
+          pytest tests/ --cov=exarch --cov-report=xml:coverage.xml || echo "Python tests not yet implemented"
         continue-on-error: true
 
-  # Test Node.js bindings
+      - name: Upload Python coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: crates/exarch-python/coverage.xml
+          flags: exarch-python
+          fail_ci_if_error: false
+
+  # Test Node.js bindings with coverage
   test-node:
     name: Test Node.js Bindings
     needs: [changes, format]
@@ -275,11 +283,19 @@ jobs:
           cargo build --release
         continue-on-error: true
 
-      - name: Test Node.js bindings
+      - name: Test Node.js bindings with coverage
         run: |
           cd crates/exarch-node
-          npm test || echo "Node.js tests not yet implemented"
+          npm run test:coverage || echo "Node.js tests not yet implemented"
         continue-on-error: true
+
+      - name: Upload Node.js coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: crates/exarch-node/coverage/lcov.info
+          flags: exarch-node
+          fail_ci_if_error: false
 
   # MSRV check (exarch-core only)
   msrv:
@@ -308,7 +324,7 @@ jobs:
       - name: Check MSRV for exarch-core
         run: cargo check -p exarch-core --all-features
 
-  # Code coverage (Linux only for speed)
+  # Code coverage (Linux only) - codecov auto-distributes by paths
   coverage:
     name: Code Coverage
     needs: [changes, format]
@@ -348,12 +364,6 @@ jobs:
             --exclude exarch-python --exclude exarch-node \
             --lcov --output-path lcov.info nextest
 
-      - name: Generate HTML coverage report
-        run: |
-          cargo llvm-cov --all-features --workspace \
-            --exclude exarch-python --exclude exarch-node \
-            --html nextest
-
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4
         with:
@@ -361,24 +371,6 @@ jobs:
           files: lcov.info
           fail_ci_if_error: false
           verbose: true
-          flags: rust
-          name: rust-coverage
-
-      - name: Archive coverage reports
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-report
-          path: |
-            lcov.info
-            target/llvm-cov/html/
-          retention-days: 30
-
-      - name: Coverage summary
-        if: always()
-        run: |
-          cargo llvm-cov --all-features --workspace \
-            --exclude exarch-python --exclude exarch-node \
-            --summary-only nextest || true
 
   # All checks passed
   ci-success:

@@ -124,6 +124,48 @@ pub enum ExtractionError {
         /// Reason for the violation.
         reason: String,
     },
+
+    /// Source path not found.
+    #[error("source path not found: {path}")]
+    SourceNotFound {
+        /// The source path.
+        path: PathBuf,
+    },
+
+    /// Source path is not accessible.
+    #[error("source path is not accessible: {path}")]
+    SourceNotAccessible {
+        /// The source path.
+        path: PathBuf,
+    },
+
+    /// Output file already exists.
+    #[error("output file already exists: {path}")]
+    OutputExists {
+        /// The output path.
+        path: PathBuf,
+    },
+
+    /// Invalid compression level.
+    #[error("invalid compression level {level}, must be 1-9")]
+    InvalidCompressionLevel {
+        /// The invalid compression level.
+        level: u8,
+    },
+
+    /// Cannot determine archive format.
+    #[error("cannot determine archive format from: {path}")]
+    UnknownFormat {
+        /// The path with unknown format.
+        path: PathBuf,
+    },
+
+    /// Invalid configuration provided.
+    #[error("invalid configuration: {reason}")]
+    InvalidConfiguration {
+        /// Reason for the configuration error.
+        reason: String,
+    },
 }
 
 impl ExtractionError {
@@ -448,5 +490,74 @@ mod tests {
         };
         let display = err.to_string();
         assert!(display.contains("1.00") || display.contains("1.0"));
+    }
+
+    #[test]
+    fn test_source_not_found_error() {
+        let err = ExtractionError::SourceNotFound {
+            path: PathBuf::from("/nonexistent/path"),
+        };
+        let display = err.to_string();
+        assert!(display.contains("source path not found"));
+        assert!(display.contains("/nonexistent/path"));
+        assert!(!err.is_security_violation());
+    }
+
+    #[test]
+    fn test_source_not_accessible_error() {
+        let err = ExtractionError::SourceNotAccessible {
+            path: PathBuf::from("/restricted/path"),
+        };
+        let display = err.to_string();
+        assert!(display.contains("source path is not accessible"));
+        assert!(display.contains("/restricted/path"));
+        assert!(!err.is_security_violation());
+    }
+
+    #[test]
+    fn test_output_exists_error() {
+        let err = ExtractionError::OutputExists {
+            path: PathBuf::from("output.tar.gz"),
+        };
+        let display = err.to_string();
+        assert!(display.contains("output file already exists"));
+        assert!(display.contains("output.tar.gz"));
+        assert!(!err.is_security_violation());
+    }
+
+    #[test]
+    fn test_invalid_compression_level_error() {
+        let err = ExtractionError::InvalidCompressionLevel { level: 0 };
+        let display = err.to_string();
+        assert!(display.contains("invalid compression level"));
+        assert!(display.contains('0'));
+        assert!(display.contains("must be 1-9"));
+        assert!(!err.is_security_violation());
+
+        let err = ExtractionError::InvalidCompressionLevel { level: 10 };
+        let display = err.to_string();
+        assert!(display.contains("10"));
+    }
+
+    #[test]
+    fn test_unknown_format_error() {
+        let err = ExtractionError::UnknownFormat {
+            path: PathBuf::from("archive.rar"),
+        };
+        let display = err.to_string();
+        assert!(display.contains("cannot determine archive format"));
+        assert!(display.contains("archive.rar"));
+        assert!(!err.is_security_violation());
+    }
+
+    #[test]
+    fn test_invalid_configuration_error() {
+        let err = ExtractionError::InvalidConfiguration {
+            reason: "output path not set".to_string(),
+        };
+        let display = err.to_string();
+        assert!(display.contains("invalid configuration"));
+        assert!(display.contains("output path not set"));
+        assert!(!err.is_security_violation());
     }
 }

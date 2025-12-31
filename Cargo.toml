@@ -20,8 +20,6 @@ categories = ["compression", "filesystem"]
 [workspace.dependencies]
 # Workspace crates
 exarch-core = { path = "crates/exarch-core", version = "0.1.0" }
-exarch-python = { path = "crates/exarch-python", version = "0.1.0" }
-exarch-node = { path = "crates/exarch-node", version = "0.1.0" }
 
 # Dependencies (sorted alphabetically)
 criterion = "0.8"

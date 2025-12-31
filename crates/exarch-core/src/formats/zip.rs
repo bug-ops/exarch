@@ -509,7 +509,13 @@ enum CompressionMethod {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::items_after_statements,
+    clippy::uninlined_format_args,
+    clippy::field_reassign_with_default
+)]
 mod tests {
     use super::*;
     use std::io::Cursor;

@@ -3,6 +3,8 @@
 use std::path::Path;
 
 use crate::ExtractionReport;
+use crate::NoopProgress;
+use crate::ProgressCallback;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::creation::CreationConfig;
@@ -49,10 +51,57 @@ pub fn extract_archive<P: AsRef<Path>, Q: AsRef<Path>>(
     output_dir: Q,
     config: &SecurityConfig,
 ) -> Result<ExtractionReport> {
-    // TODO: Implement archive extraction
+    let mut noop = NoopProgress;
+    extract_archive_with_progress(archive_path, output_dir, config, &mut noop)
+}
+
+/// Extracts an archive with progress reporting.
+///
+/// Same as `extract_archive` but accepts a `ProgressCallback` for
+/// real-time progress updates during extraction.
+///
+/// # Arguments
+///
+/// * `archive_path` - Path to the archive file
+/// * `output_dir` - Directory where files will be extracted
+/// * `config` - Security configuration for the extraction
+/// * `progress` - Callback for progress updates
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - Archive file cannot be opened
+/// - Archive format is unsupported
+/// - Security validation fails
+/// - I/O operations fail
+///
+/// # Examples
+///
+/// ```no_run
+/// use exarch_core::NoopProgress;
+/// use exarch_core::SecurityConfig;
+/// use exarch_core::extract_archive_with_progress;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let config = SecurityConfig::default();
+/// let mut progress = NoopProgress;
+/// let report =
+///     extract_archive_with_progress("archive.tar.gz", "/tmp/output", &config, &mut progress)?;
+/// println!("Extracted {} files", report.files_extracted);
+/// # Ok(())
+/// # }
+/// ```
+pub fn extract_archive_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
+    archive_path: P,
+    output_dir: Q,
+    config: &SecurityConfig,
+    progress: &mut dyn ProgressCallback,
+) -> Result<ExtractionReport> {
+    // TODO: Implement archive extraction with progress
     let _archive_path = archive_path.as_ref();
     let _output_dir = output_dir.as_ref();
     let _config = config;
+    let _progress = progress;
 
     // Placeholder implementation
     Ok(ExtractionReport::new())
@@ -95,19 +144,81 @@ pub fn create_archive<P: AsRef<Path>, Q: AsRef<Path>>(
     sources: &[Q],
     config: &CreationConfig,
 ) -> Result<CreationReport> {
+    let mut noop = NoopProgress;
+    create_archive_with_progress(output_path, sources, config, &mut noop)
+}
+
+/// Creates an archive with progress reporting.
+///
+/// Same as `create_archive` but accepts a `ProgressCallback` for
+/// real-time progress updates during creation.
+///
+/// # Arguments
+///
+/// * `output_path` - Path to the output archive file
+/// * `sources` - Source files and directories to include
+/// * `config` - Creation configuration
+/// * `progress` - Callback for progress updates
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - Cannot determine archive format
+/// - Source files don't exist
+/// - I/O operations fail
+/// - Configuration is invalid
+///
+/// # Examples
+///
+/// ```no_run
+/// use exarch_core::NoopProgress;
+/// use exarch_core::create_archive_with_progress;
+/// use exarch_core::creation::CreationConfig;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let config = CreationConfig::default();
+/// let mut progress = NoopProgress;
+/// let report = create_archive_with_progress(
+///     "output.tar.gz",
+///     &["src/", "Cargo.toml"],
+///     &config,
+///     &mut progress,
+/// )?;
+/// println!("Created archive with {} files", report.files_added);
+/// # Ok(())
+/// # }
+/// ```
+pub fn create_archive_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
+    output_path: P,
+    sources: &[Q],
+    config: &CreationConfig,
+    progress: &mut dyn ProgressCallback,
+) -> Result<CreationReport> {
     let output = output_path.as_ref();
 
     // Determine format from extension or config
     let format = determine_creation_format(output, config)?;
 
-    // Dispatch to format-specific creator
+    // Dispatch to format-specific creator with progress
     match format {
-        ArchiveType::Tar => crate::creation::tar::create_tar(output, sources, config),
-        ArchiveType::TarGz => crate::creation::tar::create_tar_gz(output, sources, config),
-        ArchiveType::TarBz2 => crate::creation::tar::create_tar_bz2(output, sources, config),
-        ArchiveType::TarXz => crate::creation::tar::create_tar_xz(output, sources, config),
-        ArchiveType::TarZst => crate::creation::tar::create_tar_zst(output, sources, config),
-        ArchiveType::Zip => crate::creation::zip::create_zip(output, sources, config),
+        ArchiveType::Tar => {
+            crate::creation::tar::create_tar_with_progress(output, sources, config, progress)
+        }
+        ArchiveType::TarGz => {
+            crate::creation::tar::create_tar_gz_with_progress(output, sources, config, progress)
+        }
+        ArchiveType::TarBz2 => {
+            crate::creation::tar::create_tar_bz2_with_progress(output, sources, config, progress)
+        }
+        ArchiveType::TarXz => {
+            crate::creation::tar::create_tar_xz_with_progress(output, sources, config, progress)
+        }
+        ArchiveType::TarZst => {
+            crate::creation::tar::create_tar_zst_with_progress(output, sources, config, progress)
+        }
+        ArchiveType::Zip => {
+            crate::creation::zip::create_zip_with_progress(output, sources, config, progress)
+        }
     }
 }
 

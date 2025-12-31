@@ -2,10 +2,12 @@
 
 use crate::cli::CreateArgs;
 use crate::output::OutputFormatter;
+use crate::progress::CliProgress;
 use anyhow::Context;
 use anyhow::Result;
 use exarch_core::CreationConfig;
-use exarch_core::create_archive;
+use exarch_core::NoopProgress;
+use exarch_core::create_archive_with_progress;
 
 pub fn execute(args: &CreateArgs, formatter: &dyn OutputFormatter, quiet: bool) -> Result<()> {
     // Check if output exists
@@ -35,9 +37,16 @@ pub fn execute(args: &CreateArgs, formatter: &dyn OutputFormatter, quiet: bool) 
     // Add user exclude patterns to defaults
     config.exclude_patterns.extend(args.exclude.iter().cloned());
 
-    // Create archive
-    let report = create_archive(&args.output, &args.sources, &config)
-        .with_context(|| format!("Failed to create archive: {}", args.output.display()))?;
+    // Create archive with progress if TTY is detected
+    let report = if !quiet && CliProgress::should_show() {
+        let mut progress = CliProgress::new(100, "Creating");
+        create_archive_with_progress(&args.output, &args.sources, &config, &mut progress)
+            .with_context(|| format!("Failed to create archive: {}", args.output.display()))?
+    } else {
+        let mut noop = NoopProgress;
+        create_archive_with_progress(&args.output, &args.sources, &config, &mut noop)
+            .with_context(|| format!("Failed to create archive: {}", args.output.display()))?
+    };
 
     if !quiet {
         formatter.format_creation_result(&args.output, &report)?;

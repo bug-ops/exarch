@@ -1358,3 +1358,77 @@ fn test_create_tar_gz_matches_gzip_extension() {
         assert!(archive.exists());
     }
 }
+
+// ============================================================================
+// Completion Command Tests
+// ============================================================================
+
+#[test]
+fn test_completion_bash() {
+    exarch_cmd()
+        .arg("completion")
+        .arg("bash")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("_exarch"));
+}
+
+#[test]
+fn test_completion_zsh() {
+    exarch_cmd()
+        .arg("completion")
+        .arg("zsh")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("_exarch"));
+}
+
+#[test]
+fn test_completion_fish() {
+    exarch_cmd()
+        .arg("completion")
+        .arg("fish")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("exarch"));
+}
+
+#[test]
+fn test_completion_powershell() {
+    exarch_cmd()
+        .arg("completion")
+        .arg("powershell")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("exarch"));
+}
+
+#[test]
+fn test_completion_elvish() {
+    exarch_cmd()
+        .arg("completion")
+        .arg("elvish")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("exarch"));
+}
+
+#[test]
+fn test_completion_help() {
+    exarch_cmd()
+        .arg("completion")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Generate shell completions"));
+}
+
+#[test]
+fn test_completion_invalid_shell() {
+    exarch_cmd()
+        .arg("completion")
+        .arg("invalid_shell")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid value"));
+}

@@ -4,6 +4,7 @@
 //! compression levels and security options.
 
 use crate::ExtractionError;
+use crate::ProgressCallback;
 use crate::Result;
 use crate::creation::config::CreationConfig;
 use crate::creation::filters;
@@ -48,6 +49,34 @@ pub fn create_zip<P: AsRef<Path>, Q: AsRef<Path>>(
 ) -> Result<CreationReport> {
     let file = File::create(output.as_ref())?;
     create_zip_internal(file, sources, config)
+}
+
+/// Creates a ZIP archive with progress reporting.
+///
+/// # Errors
+///
+/// Returns an error if output file cannot be created or I/O operations fail.
+#[allow(dead_code)] // Phase 4: will be used by CLI
+pub fn create_zip_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
+    output: P,
+    sources: &[Q],
+    config: &CreationConfig,
+    progress: &mut dyn ProgressCallback,
+) -> Result<CreationReport> {
+    let file = File::create(output.as_ref())?;
+    create_zip_internal_with_progress(file, sources, config, progress)
+}
+
+/// Internal function that creates ZIP with any writer and progress reporting.
+fn create_zip_internal_with_progress<W: Write + Seek, P: AsRef<Path>>(
+    writer: W,
+    sources: &[P],
+    config: &CreationConfig,
+    _progress: &mut dyn ProgressCallback,
+) -> Result<CreationReport> {
+    // TODO: Integrate progress callbacks
+    // For now, delegate to the non-progress version
+    create_zip_internal(writer, sources, config)
 }
 
 /// Internal function that creates ZIP with any writer.

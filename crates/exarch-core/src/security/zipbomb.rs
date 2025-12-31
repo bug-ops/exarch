@@ -14,7 +14,15 @@ pub fn validate_compression_ratio(
     uncompressed_size: u64,
     config: &SecurityConfig,
 ) -> Result<()> {
+    // HIGH-001: Fix bypass for stored compression with compressed_size == 0
+    // Reject invalid entries where compressed_size is 0 but uncompressed_size > 0
     if compressed_size == 0 {
+        if uncompressed_size > 0 {
+            return Err(ExtractionError::InvalidArchive(
+                "compressed_size is 0 but uncompressed_size > 0 (invalid archive metadata)".into(),
+            ));
+        }
+        // Both zero is OK (empty file)
         return Ok(());
     }
 
@@ -53,8 +61,13 @@ mod tests {
     #[test]
     fn test_validate_compression_ratio_zero_compressed() {
         let config = SecurityConfig::default();
+
+        // HIGH-001: Zero compressed with non-zero uncompressed is invalid
         let result = validate_compression_ratio(0, 1000, &config);
-        assert!(result.is_ok());
+        assert!(
+            matches!(result, Err(ExtractionError::InvalidArchive(_))),
+            "zero compressed with non-zero uncompressed should be rejected"
+        );
     }
 
     // H-TEST-3: Division by zero edge cases test
@@ -71,13 +84,12 @@ mod tests {
     fn test_compressed_size_zero_with_large_uncompressed() {
         let config = SecurityConfig::default();
 
-        // Compressed size zero with data - would be infinite ratio (potential zip bomb)
-        // Current implementation treats compressed_size == 0 as OK
-        // This is acceptable as it represents an edge case in archive format
+        // HIGH-001: Compressed size zero with uncompressed > 0 is INVALID
+        // This prevents zip bomb bypass for stored compression
         let result = validate_compression_ratio(0, 1_000_000, &config);
         assert!(
-            result.is_ok(),
-            "compressed_size == 0 is handled by early return"
+            matches!(result, Err(ExtractionError::InvalidArchive(_))),
+            "compressed_size == 0 but uncompressed_size > 0 should be rejected (HIGH-001 fix)"
         );
     }
 

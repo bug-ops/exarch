@@ -111,8 +111,8 @@ use crate::security::validator::ValidatedEntryType;
 use crate::types::DestDir;
 use crate::types::EntryType;
 use crate::types::SafePath;
-use crate::types::SafeSymlink;
 
+use super::common;
 use super::traits::ArchiveFormat;
 
 /// TAR archive handler with streaming extraction.
@@ -204,12 +204,12 @@ impl<R: Read> TarArchive<R> {
             }
 
             ValidatedEntryType::Directory => {
-                Self::create_directory(&validated, dest, report)?;
+                common::create_directory(&validated, dest, report)?;
                 Ok(None)
             }
 
             ValidatedEntryType::Symlink(safe_symlink) => {
-                Self::create_symlink(&safe_symlink, dest, report)?;
+                common::create_symlink(&safe_symlink, dest, report)?;
                 Ok(None)
             }
 
@@ -267,57 +267,6 @@ impl<R: Read> TarArchive<R> {
         )?;
 
         Ok(())
-    }
-
-    /// Creates a directory.
-    fn create_directory(
-        validated: &ValidatedEntry,
-        dest: &DestDir,
-        report: &mut ExtractionReport,
-    ) -> Result<()> {
-        let dir_path = dest.join(&validated.safe_path);
-
-        // create_dir_all is idempotent
-        create_dir_all(&dir_path)?;
-
-        report.directories_created += 1;
-
-        Ok(())
-    }
-
-    /// Creates a symbolic link.
-    #[allow(unused_variables)] // Parameters used only on Unix
-    fn create_symlink(
-        safe_symlink: &SafeSymlink,
-        dest: &DestDir,
-        report: &mut ExtractionReport,
-    ) -> Result<()> {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::symlink;
-
-            let link_path = dest.as_path().join(safe_symlink.link_path());
-            let target_path = safe_symlink.target_path();
-
-            // Create parent directories
-            if let Some(parent) = link_path.parent() {
-                create_dir_all(parent)?;
-            }
-
-            // Create symlink
-            symlink(target_path, &link_path)?;
-
-            report.symlinks_created += 1;
-
-            Ok(())
-        }
-
-        #[cfg(not(unix))]
-        {
-            Err(ExtractionError::SecurityViolation {
-                reason: "symlinks are not supported on this platform".into(),
-            })
-        }
     }
 
     /// Creates a hardlink in the second pass.

@@ -15,7 +15,7 @@ categories.workspace = true
 flate2.workspace = true
 tar.workspace = true
 thiserror.workspace = true
-zip = { workspace = true, features = ["deflate"] }
+zip = { workspace = true, features = ["deflate", "deflate64", "bzip2", "zstd", "time"] }
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true

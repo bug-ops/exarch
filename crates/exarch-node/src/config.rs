@@ -362,6 +362,14 @@ impl SecurityConfig {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::float_cmp,
+    clippy::unreadable_literal,
+    clippy::manual_string_new,
+    clippy::uninlined_format_args
+)]
 mod tests {
     use super::*;
 

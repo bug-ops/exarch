@@ -30,7 +30,7 @@
 //!
 //! This library uses a secure-by-default approach. All potentially dangerous
 //! features are disabled by default and must be explicitly enabled. See
-//! [`SecurityConfig`] for configuration options.
+//! `SecurityConfig` for configuration options.
 //!
 //! # Repository
 //!
@@ -212,6 +212,12 @@ pub fn extract_archive_sync(
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::uninlined_format_args,
+    clippy::manual_string_new
+)]
 mod tests {
     use super::*;
 

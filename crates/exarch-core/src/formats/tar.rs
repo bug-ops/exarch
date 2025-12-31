@@ -248,15 +248,15 @@ impl<R: Read> TarArchive<R> {
         // Ensure all data is written before setting permissions
         buffered_writer.flush()?;
 
-        // Set permissions if configured
+        // Set permissions if configured (Unix only)
+        #[cfg(unix)]
         if let Some(mode) = validated.mode {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let permissions = std::fs::Permissions::from_mode(mode);
-                std::fs::set_permissions(&output_path, permissions)?;
-            }
+            use std::os::unix::fs::PermissionsExt;
+            let permissions = std::fs::Permissions::from_mode(mode);
+            std::fs::set_permissions(&output_path, permissions)?;
         }
+        #[cfg(not(unix))]
+        let _ = validated.mode; // Silence unused warning on non-Unix
 
         // Update report
         report.files_extracted += 1;
@@ -286,6 +286,7 @@ impl<R: Read> TarArchive<R> {
     }
 
     /// Creates a symbolic link.
+    #[allow(unused_variables)] // Parameters used only on Unix
     fn create_symlink(
         safe_symlink: &SafeSymlink,
         dest: &DestDir,
@@ -320,6 +321,7 @@ impl<R: Read> TarArchive<R> {
     }
 
     /// Creates a hardlink in the second pass.
+    #[allow(unused_variables)] // Parameters used only on Unix
     fn create_hardlink(
         info: &HardlinkInfo,
         dest: &DestDir,
@@ -415,6 +417,7 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
 }
 
 /// Information about a hardlink for deferred creation.
+#[allow(dead_code)] // Fields used only on Unix
 struct HardlinkInfo {
     link_path: SafePath,
     target_path: SafePath,

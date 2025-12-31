@@ -35,7 +35,7 @@ impl ArchiveFormat for TarArchive {
         Ok(ExtractionReport::new())
     }
 
-    fn format_name(&self) -> &str {
+    fn format_name(&self) -> &'static str {
         "tar"
     }
 }

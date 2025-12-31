@@ -35,7 +35,7 @@ impl ArchiveFormat for ZipArchive {
         Ok(ExtractionReport::new())
     }
 
-    fn format_name(&self) -> &str {
+    fn format_name(&self) -> &'static str {
         "zip"
     }
 }

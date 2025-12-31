@@ -308,6 +308,7 @@ version = "0.1.0"
 dependencies = [
  "criterion",
  "flate2",
+ "libc",
  "proptest",
  "tar",
  "tempfile",

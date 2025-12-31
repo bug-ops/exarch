@@ -16,7 +16,7 @@ pub trait ArchiveFormat {
     fn extract(&mut self, output_dir: &Path, config: &SecurityConfig) -> Result<ExtractionReport>;
 
     /// Returns the archive format name.
-    fn format_name(&self) -> &str;
+    fn format_name(&self) -> &'static str;
 }
 
 #[cfg(test)]
@@ -34,7 +34,7 @@ mod tests {
             Ok(ExtractionReport::new())
         }
 
-        fn format_name(&self) -> &str {
+        fn format_name(&self) -> &'static str {
             "test"
         }
     }

@@ -6,6 +6,53 @@ use thiserror::Error;
 /// Result type alias using `ExtractionError`.
 pub type Result<T> = std::result::Result<T, ExtractionError>;
 
+/// Represents a specific quota resource that was exceeded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QuotaResource {
+    /// File count quota exceeded.
+    FileCount {
+        /// Current file count.
+        current: usize,
+        /// Maximum allowed file count.
+        max: usize,
+    },
+    /// Total size quota exceeded.
+    TotalSize {
+        /// Current total size in bytes.
+        current: u64,
+        /// Maximum allowed total size in bytes.
+        max: u64,
+    },
+    /// Single file size quota exceeded.
+    FileSize {
+        /// File size in bytes.
+        size: u64,
+        /// Maximum allowed file size in bytes.
+        max: u64,
+    },
+    /// Integer overflow detected in quota tracking.
+    IntegerOverflow,
+}
+
+impl std::fmt::Display for QuotaResource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::FileCount { current, max } => {
+                write!(f, "quota exceeded: file count ({current} > {max})")
+            }
+            Self::TotalSize { current, max } => {
+                write!(f, "quota exceeded: total size ({current} > {max})")
+            }
+            Self::FileSize { size, max } => {
+                write!(f, "quota exceeded: single file size ({size} > {max})")
+            }
+            Self::IntegerOverflow => {
+                write!(f, "quota exceeded: integer overflow in quota tracking")
+            }
+        }
+    }
+}
+
 /// Errors that can occur during archive extraction.
 #[derive(Error, Debug)]
 pub enum ExtractionError {
@@ -65,10 +112,10 @@ pub enum ExtractionError {
     },
 
     /// Extraction quota exceeded.
-    #[error("quota exceeded: {resource}")]
+    #[error("{resource}")]
     QuotaExceeded {
         /// Description of the exceeded resource.
-        resource: String,
+        resource: QuotaResource,
     },
 
     /// Operation not permitted by security policy.
@@ -171,8 +218,16 @@ impl ExtractionError {
     pub fn context(&self) -> Option<&str> {
         match self {
             Self::InvalidArchive(msg) => Some(msg),
-            Self::QuotaExceeded { resource } => Some(resource),
             Self::SecurityViolation { reason } => Some(reason),
+            _ => None,
+        }
+    }
+
+    /// Returns the quota resource that was exceeded, if applicable.
+    #[must_use]
+    pub const fn quota_resource(&self) -> Option<&QuotaResource> {
+        match self {
+            Self::QuotaExceeded { resource } => Some(resource),
             _ => None,
         }
     }
@@ -281,11 +336,6 @@ mod tests {
         let err = ExtractionError::InvalidArchive("bad header".into());
         assert_eq!(err.context(), Some("bad header"));
 
-        let err = ExtractionError::QuotaExceeded {
-            resource: "file size".into(),
-        };
-        assert_eq!(err.context(), Some("file size"));
-
         let err = ExtractionError::SecurityViolation {
             reason: "not allowed".into(),
         };
@@ -338,12 +388,28 @@ mod tests {
     #[test]
     fn test_quota_exceeded_error() {
         let err = ExtractionError::QuotaExceeded {
-            resource: "file count".to_string(),
+            resource: QuotaResource::FileCount {
+                current: 11,
+                max: 10,
+            },
         };
         let display = err.to_string();
         assert!(display.contains("quota exceeded"));
         assert!(display.contains("file count"));
+        assert!(display.contains("11"));
+        assert!(display.contains("10"));
         assert!(err.is_security_violation());
+
+        // Test quota_resource accessor
+        let quota = err.quota_resource();
+        assert!(quota.is_some());
+        assert_eq!(
+            quota,
+            Some(&QuotaResource::FileCount {
+                current: 11,
+                max: 10
+            })
+        );
     }
 
     // L-10: Error source chain test

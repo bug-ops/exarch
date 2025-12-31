@@ -36,7 +36,7 @@ use super::SafePath;
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let dest = DestDir::new(PathBuf::from("/tmp"))?;
 /// let mut config = SecurityConfig::default();
-/// config.allow_symlinks = true;
+/// config.allowed.symlinks = true;
 ///
 /// let link = SafePath::validate(&PathBuf::from("mylink"), &dest, &config)?;
 /// let target = PathBuf::from("../target.txt");
@@ -83,7 +83,7 @@ impl SafeSymlink {
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let dest = DestDir::new(PathBuf::from("/tmp"))?;
     /// let mut config = SecurityConfig::default();
-    /// config.allow_symlinks = true;
+    /// config.allowed.symlinks = true;
     ///
     /// let link = SafePath::validate(&PathBuf::from("dir/link"), &dest, &config)?;
     /// let target = PathBuf::from("../file.txt");
@@ -99,7 +99,7 @@ impl SafeSymlink {
         config: &SecurityConfig,
     ) -> Result<Self> {
         // 1. Verify symlinks are allowed
-        if !config.allow_symlinks {
+        if !config.allowed.symlinks {
             return Err(ExtractionError::SecurityViolation {
                 reason: "symlinks not allowed".into(),
             });
@@ -124,7 +124,12 @@ impl SafeSymlink {
             }
         }
 
-        // 3. Resolve target against link's parent directory
+        // 3. Verify parent directory chain doesn't contain symlinks (TOCTOU protection)
+        // This prevents race conditions where an attacker replaces a parent directory
+        // with a symlink between validation and extraction time.
+        verify_parent_not_symlink(link.as_path(), dest)?;
+
+        // 4. Resolve target against link's parent directory
         let link_parent = link.as_path().parent().unwrap_or_else(|| Path::new(""));
         let link_parent_full = dest.as_path().join(link_parent);
 
@@ -134,7 +139,7 @@ impl SafeSymlink {
         // Normalize the path by resolving .. and . components manually
         resolved = normalize_symlink_target(&resolved);
 
-        // 4. Verify resolved target is within dest
+        // 5. Verify resolved target is within dest
         // We can't use canonicalize here because the target might not exist yet
         // Instead, we check if the normalized path starts with dest
         if !resolved.starts_with(dest.as_path()) {
@@ -165,6 +170,47 @@ impl SafeSymlink {
     pub fn target_path(&self) -> &Path {
         &self.target_path
     }
+}
+
+/// Verifies that no component in the parent directory chain of `path` is a symlink.
+///
+/// This function provides protection against TOCTOU (Time-Of-Check-Time-Of-Use)
+/// race conditions where an attacker could replace a parent directory with a
+/// symlink between validation and extraction time.
+///
+/// # Security Note
+///
+/// While this check significantly reduces the attack window, it doesn't eliminate
+/// TOCTOU risks entirely. For untrusted archives, extraction should always be
+/// performed in isolated environments (containers, chroot, etc.).
+///
+/// # Errors
+///
+/// Returns `SymlinkEscape` if any parent component is a symlink.
+fn verify_parent_not_symlink(path: &Path, dest: &DestDir) -> Result<()> {
+    let mut current = dest.as_path().to_path_buf();
+
+    // Walk through each component of the path
+    for component in path.components() {
+        current.push(component);
+
+        // Check if current path exists and is a symlink
+        if current.exists() {
+            let metadata = std::fs::symlink_metadata(&current).map_err(|_| {
+                ExtractionError::SymlinkEscape {
+                    path: path.to_path_buf(),
+                }
+            })?;
+
+            if metadata.is_symlink() {
+                return Err(ExtractionError::SymlinkEscape {
+                    path: path.to_path_buf(),
+                });
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Normalizes a symlink target by manually resolving .. and . components.
@@ -213,7 +259,7 @@ mod tests {
     /// Creates a `SecurityConfig` with symlinks enabled for testing.
     fn create_config_with_symlinks() -> SecurityConfig {
         let mut config = SecurityConfig::default();
-        config.allow_symlinks = true;
+        config.allowed.symlinks = true;
         config
     }
 
@@ -238,7 +284,7 @@ mod tests {
     fn test_safe_symlink_reject_when_disabled() {
         let (_temp, dest) = create_test_dest();
         let mut config = SecurityConfig::default();
-        config.allow_symlinks = false;
+        config.allowed.symlinks = false;
 
         let link = SafePath::validate(&PathBuf::from("link"), &dest, &config)
             .expect("link path should be valid");
@@ -475,5 +521,86 @@ mod tests {
             matches!(result, Err(ExtractionError::SecurityViolation { .. })),
             "symlink to banned component should be rejected"
         );
+    }
+
+    #[test]
+    fn test_safe_symlink_self_reference() {
+        let (_temp, dest) = create_test_dest();
+        let config = create_config_with_symlinks();
+
+        let link = SafePath::validate(&PathBuf::from("link"), &dest, &config)
+            .expect("link path should be valid");
+
+        // Symlink to itself (link -> link)
+        let target = PathBuf::from("link");
+
+        let result = SafeSymlink::validate(&link, &target, &dest, &config);
+        assert!(
+            result.is_ok(),
+            "self-referential symlink should be allowed (validation doesn't follow)"
+        );
+    }
+
+    #[test]
+    fn test_safe_symlink_empty_target() {
+        let (_temp, dest) = create_test_dest();
+        let config = create_config_with_symlinks();
+
+        let link = SafePath::validate(&PathBuf::from("link"), &dest, &config)
+            .expect("link path should be valid");
+
+        // Empty target
+        let target = PathBuf::from("");
+
+        let result = SafeSymlink::validate(&link, &target, &dest, &config);
+        // Empty target should resolve to link's parent directory
+        assert!(result.is_ok(), "empty target should be allowed");
+    }
+
+    #[test]
+    fn test_safe_symlink_current_dir_target() {
+        let (_temp, dest) = create_test_dest();
+        let config = create_config_with_symlinks();
+
+        let link = SafePath::validate(&PathBuf::from("subdir/link"), &dest, &config)
+            .expect("link path should be valid");
+
+        // Target is current directory (.)
+        let target = PathBuf::from(".");
+
+        let result = SafeSymlink::validate(&link, &target, &dest, &config);
+        assert!(result.is_ok(), "current dir target should be allowed");
+    }
+
+    #[test]
+    fn test_safe_symlink_parent_dir_target() {
+        let (_temp, dest) = create_test_dest();
+        let config = create_config_with_symlinks();
+
+        let link = SafePath::validate(&PathBuf::from("a/b/link"), &dest, &config)
+            .expect("link path should be valid");
+
+        // Target is parent directory (..)
+        let target = PathBuf::from("..");
+
+        let result = SafeSymlink::validate(&link, &target, &dest, &config);
+        assert!(result.is_ok(), "parent dir target should be allowed");
+    }
+
+    #[test]
+    fn test_safe_symlink_getters() {
+        let (_temp, dest) = create_test_dest();
+        let config = create_config_with_symlinks();
+
+        let link = SafePath::validate(&PathBuf::from("mylink"), &dest, &config)
+            .expect("link path should be valid");
+        let target = PathBuf::from("target.txt");
+
+        let symlink =
+            SafeSymlink::validate(&link, &target, &dest, &config).expect("symlink should be valid");
+
+        // Test getters
+        assert_eq!(symlink.link_path(), Path::new("mylink"));
+        assert_eq!(symlink.target_path(), Path::new("target.txt"));
     }
 }

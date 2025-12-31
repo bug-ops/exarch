@@ -1,5 +1,25 @@
 //! Security configuration for archive extraction.
 
+/// Feature flags controlling what archive features are allowed during extraction.
+///
+/// All features default to `false` (deny-by-default security policy).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AllowedFeatures {
+    /// Allow symlinks in extracted archives.
+    pub symlinks: bool,
+
+    /// Allow hardlinks in extracted archives.
+    pub hardlinks: bool,
+
+    /// Allow absolute paths in archive entries.
+    pub absolute_paths: bool,
+
+    /// Allow world-writable files (mode 0o002).
+    ///
+    /// World-writable files pose security risks in multi-user environments.
+    pub world_writable: bool,
+}
+
 /// Security configuration with default-deny settings.
 ///
 /// This configuration controls various security checks performed during
@@ -44,14 +64,10 @@ pub struct SecurityConfig {
     /// Maximum path depth allowed.
     pub max_path_depth: usize,
 
-    /// Allow symlinks in extracted archives.
-    pub allow_symlinks: bool,
-
-    /// Allow hardlinks in extracted archives.
-    pub allow_hardlinks: bool,
-
-    /// Allow absolute paths in archive entries.
-    pub allow_absolute_paths: bool,
+    /// Feature flags controlling what archive features are allowed.
+    ///
+    /// Use this to enable symlinks, hardlinks, absolute paths, etc.
+    pub allowed: AllowedFeatures,
 
     /// Preserve file permissions from archive.
     pub preserve_permissions: bool,
@@ -72,9 +88,7 @@ impl Default for SecurityConfig {
     /// - `max_compression_ratio`: 100.0
     /// - `max_file_count`: 10,000
     /// - `max_path_depth`: 32
-    /// - `allow_symlinks`: false (deny)
-    /// - `allow_hardlinks`: false (deny)
-    /// - `allow_absolute_paths`: false (deny)
+    /// - `allowed`: All features disabled (deny-by-default)
     /// - `preserve_permissions`: false
     /// - `allowed_extensions`: empty (allow all)
     /// - `banned_path_components`: `[".git", ".ssh", ".gnupg", ".aws", ".kube",
@@ -86,9 +100,7 @@ impl Default for SecurityConfig {
             max_compression_ratio: 100.0,
             max_file_count: 10_000,
             max_path_depth: 32,
-            allow_symlinks: false,
-            allow_hardlinks: false,
-            allow_absolute_paths: false,
+            allowed: AllowedFeatures::default(), // All false
             preserve_permissions: false,
             allowed_extensions: Vec::new(),
             banned_path_components: vec![
@@ -112,9 +124,12 @@ impl SecurityConfig {
     #[must_use]
     pub fn permissive() -> Self {
         Self {
-            allow_symlinks: true,
-            allow_hardlinks: true,
-            allow_absolute_paths: true,
+            allowed: AllowedFeatures {
+                symlinks: true,
+                hardlinks: true,
+                absolute_paths: true,
+                world_writable: true,
+            },
             preserve_permissions: true,
             max_compression_ratio: 1000.0,
             banned_path_components: Vec::new(),
@@ -154,18 +169,18 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = SecurityConfig::default();
-        assert!(!config.allow_symlinks);
-        assert!(!config.allow_hardlinks);
-        assert!(!config.allow_absolute_paths);
+        assert!(!config.allowed.symlinks);
+        assert!(!config.allowed.hardlinks);
+        assert!(!config.allowed.absolute_paths);
         assert_eq!(config.max_file_size, 50 * 1024 * 1024);
     }
 
     #[test]
     fn test_permissive_config() {
         let config = SecurityConfig::permissive();
-        assert!(config.allow_symlinks);
-        assert!(config.allow_hardlinks);
-        assert!(config.allow_absolute_paths);
+        assert!(config.allowed.symlinks);
+        assert!(config.allowed.hardlinks);
+        assert!(config.allowed.absolute_paths);
     }
 
     #[test]
@@ -196,5 +211,92 @@ mod tests {
         assert!(!config.is_path_component_allowed(".GIT"));
         assert!(!config.is_path_component_allowed(".SSH"));
         assert!(!config.is_path_component_allowed(".Gnupg"));
+    }
+
+    // M-TEST-3: Config field validation
+    #[test]
+    fn test_config_default_security_flags() {
+        let config = SecurityConfig::default();
+
+        // All security-sensitive flags should be false by default (deny-by-default)
+        assert!(
+            !config.allowed.symlinks,
+            "symlinks should be denied by default"
+        );
+        assert!(
+            !config.allowed.hardlinks,
+            "hardlinks should be denied by default"
+        );
+        assert!(
+            !config.allowed.absolute_paths,
+            "absolute paths should be denied by default"
+        );
+        assert!(
+            !config.preserve_permissions,
+            "permissions should not be preserved by default"
+        );
+        assert!(
+            !config.allowed.world_writable,
+            "world-writable should be denied by default"
+        );
+    }
+
+    #[test]
+    fn test_config_permissive_security_flags() {
+        let config = SecurityConfig::permissive();
+
+        // Permissive config should allow all features
+        assert!(config.allowed.symlinks, "permissive allows symlinks");
+        assert!(config.allowed.hardlinks, "permissive allows hardlinks");
+        assert!(
+            config.allowed.absolute_paths,
+            "permissive allows absolute paths"
+        );
+        assert!(
+            config.preserve_permissions,
+            "permissive preserves permissions"
+        );
+        assert!(
+            config.allowed.world_writable,
+            "permissive allows world-writable"
+        );
+    }
+
+    #[test]
+    fn test_config_quota_limits() {
+        let config = SecurityConfig::default();
+
+        // Verify default quota values are sensible
+        assert_eq!(config.max_file_size, 50 * 1024 * 1024, "50 MB file limit");
+        assert_eq!(
+            config.max_total_size,
+            500 * 1024 * 1024,
+            "500 MB total limit"
+        );
+        assert_eq!(config.max_file_count, 10_000, "10k file count limit");
+        assert_eq!(config.max_path_depth, 32, "32 level depth limit");
+        assert_eq!(
+            config.max_compression_ratio, 100.0,
+            "100x compression ratio limit"
+        );
+    }
+
+    #[test]
+    fn test_config_banned_components_not_empty() {
+        let config = SecurityConfig::default();
+
+        // Default should ban common sensitive directories
+        assert!(
+            !config.banned_path_components.is_empty(),
+            "should have banned components by default"
+        );
+        assert!(
+            config.banned_path_components.contains(&".git".to_string()),
+            "should ban .git"
+        );
+        assert!(
+            config.banned_path_components.contains(&".ssh".to_string()),
+            "should ban .ssh"
+        );
     }
 }

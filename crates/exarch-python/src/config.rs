@@ -353,6 +353,12 @@ impl PySecurityConfig {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::uninlined_format_args,
+    clippy::float_cmp
+)]
 mod tests {
     use super::*;
 
@@ -417,13 +423,17 @@ mod tests {
         Python::attach(|py| {
             let config = PySecurityConfig::new();
             let py_config = Py::new(py, config).expect("Failed to create Py object");
+            let obj = py_config.bind(py);
 
-            let result = py_config
-                .borrow_mut(py)
-                .max_file_size(100_000_000)
-                .max_total_size(1_000_000_000)
-                .max_file_count(50_000);
+            // Call methods through Python API
+            obj.call_method1("max_file_size", (100_000_000_u64,))
+                .expect("max_file_size call failed");
+            obj.call_method1("max_total_size", (1_000_000_000_u64,))
+                .expect("max_total_size call failed");
+            obj.call_method1("max_file_count", (50_000_usize,))
+                .expect("max_file_count call failed");
 
+            let result = py_config.borrow(py);
             assert_eq!(
                 result.get_max_file_size(),
                 100_000_000,
@@ -448,11 +458,12 @@ mod tests {
         Python::attach(|py| {
             let config = PySecurityConfig::new();
             let py_config = Py::new(py, config).expect("Failed to create Py object");
+            let obj = py_config.bind(py);
 
-            let result = py_config.borrow_mut(py).max_compression_ratio(200.0);
+            let result = obj.call_method1("max_compression_ratio", (200.0_f64,));
             assert!(result.is_ok(), "Should accept valid compression ratio");
             assert_eq!(
-                result.unwrap().get_max_compression_ratio(),
+                py_config.borrow(py).get_max_compression_ratio(),
                 200.0,
                 "Compression ratio should be set"
             );
@@ -465,8 +476,9 @@ mod tests {
         Python::attach(|py| {
             let config = PySecurityConfig::new();
             let py_config = Py::new(py, config).expect("Failed to create Py object");
+            let obj = py_config.bind(py);
 
-            let result = py_config.borrow_mut(py).max_compression_ratio(f64::NAN);
+            let result = obj.call_method1("max_compression_ratio", (f64::NAN,));
             assert!(result.is_err(), "Should reject NaN compression ratio");
         });
     }
@@ -477,10 +489,9 @@ mod tests {
         Python::attach(|py| {
             let config = PySecurityConfig::new();
             let py_config = Py::new(py, config).expect("Failed to create Py object");
+            let obj = py_config.bind(py);
 
-            let result = py_config
-                .borrow_mut(py)
-                .max_compression_ratio(f64::INFINITY);
+            let result = obj.call_method1("max_compression_ratio", (f64::INFINITY,));
             assert!(result.is_err(), "Should reject infinite compression ratio");
         });
     }
@@ -491,8 +502,9 @@ mod tests {
         Python::attach(|py| {
             let config = PySecurityConfig::new();
             let py_config = Py::new(py, config).expect("Failed to create Py object");
+            let obj = py_config.bind(py);
 
-            let result = py_config.borrow_mut(py).max_compression_ratio(-10.0);
+            let result = obj.call_method1("max_compression_ratio", (-10.0_f64,));
             assert!(result.is_err(), "Should reject negative compression ratio");
         });
     }
@@ -503,8 +515,9 @@ mod tests {
         Python::attach(|py| {
             let config = PySecurityConfig::new();
             let py_config = Py::new(py, config).expect("Failed to create Py object");
+            let obj = py_config.bind(py);
 
-            let result = py_config.borrow_mut(py).max_compression_ratio(0.0);
+            let result = obj.call_method1("max_compression_ratio", (0.0_f64,));
             assert!(result.is_err(), "Should reject zero compression ratio");
         });
     }
@@ -589,10 +602,9 @@ mod tests {
         Python::attach(|py| {
             let config = PySecurityConfig::new();
             let py_config = Py::new(py, config).expect("Failed to create Py object");
+            let obj = py_config.bind(py);
 
-            let result = py_config
-                .borrow_mut(py)
-                .add_allowed_extension(".txt".to_string());
+            let result = obj.call_method1("add_allowed_extension", (".txt",));
             assert!(result.is_ok(), "Should accept valid extension");
 
             let extensions = py_config.borrow(py).get_allowed_extensions();
@@ -609,10 +621,9 @@ mod tests {
         Python::attach(|py| {
             let config = PySecurityConfig::new();
             let py_config = Py::new(py, config).expect("Failed to create Py object");
+            let obj = py_config.bind(py);
 
-            let result = py_config
-                .borrow_mut(py)
-                .add_allowed_extension(".txt\0".to_string());
+            let result = obj.call_method1("add_allowed_extension", (".txt\0",));
             assert!(result.is_err(), "Should reject extension with null bytes");
         });
     }
@@ -623,9 +634,10 @@ mod tests {
         Python::attach(|py| {
             let config = PySecurityConfig::new();
             let py_config = Py::new(py, config).expect("Failed to create Py object");
+            let obj = py_config.bind(py);
 
             let long_ext = "x".repeat(MAX_EXTENSION_LENGTH + 1);
-            let result = py_config.borrow_mut(py).add_allowed_extension(long_ext);
+            let result = obj.call_method1("add_allowed_extension", (long_ext,));
             assert!(
                 result.is_err(),
                 "Should reject extension exceeding max length"
@@ -639,10 +651,9 @@ mod tests {
         Python::attach(|py| {
             let config = PySecurityConfig::new();
             let py_config = Py::new(py, config).expect("Failed to create Py object");
+            let obj = py_config.bind(py);
 
-            let result = py_config
-                .borrow_mut(py)
-                .add_banned_component("node_modules".to_string());
+            let result = obj.call_method1("add_banned_component", ("node_modules",));
             assert!(result.is_ok(), "Should accept valid component");
 
             let components = py_config.borrow(py).get_banned_path_components();
@@ -659,10 +670,9 @@ mod tests {
         Python::attach(|py| {
             let config = PySecurityConfig::new();
             let py_config = Py::new(py, config).expect("Failed to create Py object");
+            let obj = py_config.bind(py);
 
-            let result = py_config
-                .borrow_mut(py)
-                .add_banned_component("bad\0".to_string());
+            let result = obj.call_method1("add_banned_component", ("bad\0",));
             assert!(result.is_err(), "Should reject component with null bytes");
         });
     }
@@ -673,11 +683,10 @@ mod tests {
         Python::attach(|py| {
             let config = PySecurityConfig::new();
             let py_config = Py::new(py, config).expect("Failed to create Py object");
+            let obj = py_config.bind(py);
 
             let long_component = "x".repeat(MAX_COMPONENT_LENGTH + 1);
-            let result = py_config
-                .borrow_mut(py)
-                .add_banned_component(long_component);
+            let result = obj.call_method1("add_banned_component", (long_component,));
             assert!(
                 result.is_err(),
                 "Should reject component exceeding max length"

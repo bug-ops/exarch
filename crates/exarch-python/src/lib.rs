@@ -178,6 +178,11 @@ fn exarch(m: &Bound<'_, PyModule>) -> PyResult<()> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::uninlined_format_args
+)]
 mod tests {
     use super::*;
     use pyo3::types::PyString;

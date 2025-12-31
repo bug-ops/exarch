@@ -14,11 +14,15 @@ crate-type = ["cdylib"]
 
 [dependencies]
 exarch-core.workspace = true
-napi = { workspace = true, features = ["async", "napi4"] }
+napi = { workspace = true, features = ["async", "napi4", "error_anyhow", "tokio_rt"] }
 napi-derive.workspace = true
+tokio.workspace = true
 
 [build-dependencies]
 napi-build.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
 
 [lints]
 workspace = true

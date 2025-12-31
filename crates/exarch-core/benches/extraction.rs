@@ -3,6 +3,8 @@
 //! CRIT-006: Comprehensive extraction benchmarks for measuring optimization
 //! effectiveness.
 
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use criterion::BenchmarkId;
 use criterion::Criterion;
 use criterion::Throughput;

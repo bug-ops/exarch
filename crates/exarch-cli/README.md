@@ -76,7 +76,7 @@ exarch [OPTIONS] <COMMAND>
 | Command | Description | Status |
 |---------|-------------|--------|
 | `extract` | Extract archive contents | Available |
-| `create` | Create a new archive | Coming soon |
+| `create` | Create a new archive | Available |
 | `list` | List archive contents | Coming soon |
 | `verify` | Verify archive integrity | Coming soon |
 
@@ -134,6 +134,52 @@ exarch extract --allow-symlinks trusted-source.tar
 > [!CAUTION]
 > Only use `--allow-symlinks` and `--allow-hardlinks` with archives from trusted sources. These options can be exploited by malicious archives.
 
+## Create Command
+
+Create archives from files and directories:
+
+```bash
+exarch create [OPTIONS] <OUTPUT> <SOURCES>...
+```
+
+### Examples
+
+```bash
+# Create tar.gz from directory
+exarch create backup.tar.gz ./src
+
+# Create from multiple sources
+exarch create project.tar.gz src/ Cargo.toml README.md
+
+# Create ZIP with maximum compression
+exarch create -l 9 archive.zip ./data
+
+# Exclude patterns
+exarch create backup.tar.gz ./project --exclude "*.log" --exclude "target/"
+
+# Include hidden files
+exarch create backup.tar.gz ./project --include-hidden
+
+# Overwrite existing archive
+exarch create -f backup.tar.gz ./src
+```
+
+### Create Options
+
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--compression-level` | `-l` | Compression level (1-9, default: 6) |
+| `--follow-symlinks` | | Follow symbolic links |
+| `--include-hidden` | | Include hidden files |
+| `--exclude` | `-x` | Exclude pattern (repeatable) |
+| `--strip-prefix` | | Strip path prefix |
+| `--force` | `-f` | Overwrite existing file |
+| `--quiet` | `-q` | Suppress output |
+| `--json` | | Output JSON format |
+
+> [!TIP]
+> Archive format is detected from the output file extension. Supported formats: `.tar`, `.tar.gz`, `.tar.bz2`, `.tar.xz`, `.tar.zst`, `.zip`
+
 ## Output Modes
 
 ### Human-readable (default)
@@ -183,12 +229,12 @@ exarch is designed with security as a primary concern, protecting against common
 
 | Format | Extension | Extraction | Creation |
 |--------|-----------|------------|----------|
-| TAR | `.tar` | Yes | Coming soon |
-| TAR + gzip | `.tar.gz`, `.tgz` | Yes | Coming soon |
-| TAR + bzip2 | `.tar.bz2`, `.tbz2` | Yes | Coming soon |
-| TAR + xz | `.tar.xz`, `.txz` | Yes | Coming soon |
-| TAR + zstd | `.tar.zst`, `.tzst` | Yes | Coming soon |
-| ZIP | `.zip` | Yes | Coming soon |
+| TAR | `.tar` | Yes | Yes |
+| TAR + gzip | `.tar.gz`, `.tgz` | Yes | Yes |
+| TAR + bzip2 | `.tar.bz2`, `.tbz2` | Yes | Yes |
+| TAR + xz | `.tar.xz`, `.txz` | Yes | Yes |
+| TAR + zstd | `.tar.zst`, `.tzst` | Yes | Yes |
+| ZIP | `.zip` | Yes | Yes |
 
 ## Development
 

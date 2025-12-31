@@ -79,16 +79,56 @@ exarch-core provides defense-in-depth protection against common archive vulnerab
 > [!CAUTION]
 > Default configuration blocks symlinks and hardlinks. Enable only when you trust the archive source.
 
+## Archive Creation
+
+Create archives with secure defaults:
+
+```rust
+use exarch_core::{create_archive, CreationConfig};
+
+// Simple creation with defaults
+let config = CreationConfig::default();
+let report = create_archive("backup.tar.gz", &["src/", "Cargo.toml"], &config)?;
+println!("Created {} files", report.files_added);
+```
+
+### Builder Pattern
+
+```rust
+use exarch_core::ArchiveCreator;
+
+let report = ArchiveCreator::new()
+    .output("project.tar.gz")
+    .add_source("src/")
+    .add_source("Cargo.toml")
+    .add_source("README.md")
+    .compression_level(9)
+    .exclude("*.log")
+    .exclude("target/")
+    .create()?;
+```
+
+### CreationConfig Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `follow_symlinks` | `false` | Follow symbolic links |
+| `include_hidden` | `false` | Include hidden files (.*) |
+| `compression_level` | `6` | Compression level (1-9) |
+| `exclude_patterns` | `[".git", ".DS_Store", "*.tmp"]` | Glob patterns to exclude |
+| `strip_prefix` | `None` | Strip prefix from paths |
+| `preserve_permissions` | `true` | Preserve Unix permissions |
+
 ## Supported Formats
 
-| Format | Extensions | Compression |
-|--------|------------|-------------|
-| TAR | `.tar` | None |
-| TAR+GZIP | `.tar.gz`, `.tgz` | gzip |
-| TAR+BZIP2 | `.tar.bz2`, `.tbz2` | bzip2 |
-| TAR+XZ | `.tar.xz`, `.txz` | xz/lzma |
-| TAR+ZSTD | `.tar.zst`, `.tzst` | zstandard |
-| ZIP | `.zip` | deflate, deflate64, bzip2, zstd |
+| Extension | Format | Compression | Extraction | Creation |
+|-----------|--------|-------------|------------|----------|
+| `.tar` | TAR | None | Yes | Yes |
+| `.tar.gz`, `.tgz` | TAR | Gzip | Yes | Yes |
+| `.tar.bz2`, `.tbz2` | TAR | Bzip2 | Yes | Yes |
+| `.tar.xz`, `.txz` | TAR | XZ | Yes | Yes |
+| `.tar.zst`, `.tzst` | TAR | Zstd | Yes | Yes |
+| `.zip` | ZIP | Deflate | Yes | Yes |
 
 ## API Overview
 

@@ -527,6 +527,7 @@ dependencies = [
  "tar",
  "tempfile",
  "thiserror",
+ "walkdir",
  "xz2",
  "zip",
  "zstd",

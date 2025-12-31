@@ -89,6 +89,30 @@ pub struct CreateArgs {
     /// Source files or directories to archive
     #[arg(value_name = "SOURCE", required = true)]
     pub sources: Vec<PathBuf>,
+
+    /// Compression level (1-9)
+    #[arg(short = 'l', long, value_parser = clap::value_parser!(u8).range(1..=9))]
+    pub compression_level: Option<u8>,
+
+    /// Follow symbolic links
+    #[arg(long)]
+    pub follow_symlinks: bool,
+
+    /// Include hidden files
+    #[arg(long)]
+    pub include_hidden: bool,
+
+    /// Exclude pattern (glob, can be repeated)
+    #[arg(long = "exclude", short = 'x', value_name = "PATTERN")]
+    pub exclude: Vec<String>,
+
+    /// Strip path prefix from entries
+    #[arg(long, value_name = "PREFIX")]
+    pub strip_prefix: Option<PathBuf>,
+
+    /// Overwrite output file if exists
+    #[arg(short = 'f', long)]
+    pub force: bool,
 }
 
 #[derive(clap::Args)]

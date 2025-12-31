@@ -3,10 +3,12 @@
 use super::formatter::JsonOutput;
 use super::formatter::OutputFormatter;
 use anyhow::Result;
+use exarch_core::CreationReport;
 use exarch_core::ExtractionReport;
 use serde::Serialize;
 use std::io::Write;
 use std::io::{self};
+use std::path::Path;
 
 pub struct JsonFormatter;
 
@@ -38,6 +40,40 @@ impl OutputFormatter for JsonFormatter {
         };
 
         let output = JsonOutput::success("extract", data);
+        Self::output(&output)
+    }
+
+    fn format_creation_result(&self, output_path: &Path, report: &CreationReport) -> Result<()> {
+        #[derive(Serialize)]
+        struct CreationOutput {
+            output_path: String,
+            files_added: usize,
+            directories_added: usize,
+            symlinks_added: usize,
+            bytes_written: u64,
+            bytes_compressed: u64,
+            compression_ratio: f64,
+            compression_percentage: f64,
+            files_skipped: usize,
+            duration_ms: u128,
+            warnings: Vec<String>,
+        }
+
+        let data = CreationOutput {
+            output_path: output_path.display().to_string(),
+            files_added: report.files_added,
+            directories_added: report.directories_added,
+            symlinks_added: report.symlinks_added,
+            bytes_written: report.bytes_written,
+            bytes_compressed: report.bytes_compressed,
+            compression_ratio: report.compression_ratio(),
+            compression_percentage: report.compression_percentage(),
+            files_skipped: report.files_skipped,
+            duration_ms: report.duration.as_millis(),
+            warnings: report.warnings.clone(),
+        };
+
+        let output = JsonOutput::success("create", data);
         Self::output(&output)
     }
 

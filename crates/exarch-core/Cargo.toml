@@ -18,6 +18,7 @@ lru.workspace = true
 smallvec.workspace = true
 tar.workspace = true
 thiserror.workspace = true
+walkdir.workspace = true
 xz2.workspace = true
 zip = { workspace = true, features = ["deflate", "deflate64", "bzip2", "zstd", "time"] }
 zstd.workspace = true
@@ -33,6 +34,10 @@ tempfile.workspace = true
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "creation"
+harness = false
 
 [[bench]]
 name = "extraction"

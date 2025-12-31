@@ -1,13 +1,18 @@
 //! Output formatter trait for CLI results.
 
 use anyhow::Result;
+use exarch_core::CreationReport;
 use exarch_core::ExtractionReport;
 use serde::Serialize;
+use std::path::Path;
 
 /// Common output formatter trait
 pub trait OutputFormatter {
     /// Format extraction result
     fn format_extraction_result(&self, report: &ExtractionReport) -> Result<()>;
+
+    /// Format archive creation result
+    fn format_creation_result(&self, output_path: &Path, report: &CreationReport) -> Result<()>;
 
     /// Format error message
     #[allow(dead_code)]

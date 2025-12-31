@@ -16,7 +16,7 @@ fn main() -> Result<()> {
 
     match &cli.command {
         cli::Commands::Extract(args) => commands::extract::execute(args, &*formatter),
-        cli::Commands::Create(args) => commands::create::execute(args, &*formatter),
+        cli::Commands::Create(args) => commands::create::execute(args, &*formatter, cli.quiet),
         cli::Commands::List(args) => commands::list::execute(args, &*formatter),
         cli::Commands::Verify(args) => commands::verify::execute(args, &*formatter),
     }

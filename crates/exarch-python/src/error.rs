@@ -79,6 +79,26 @@ pub fn convert_error(err: CoreError) -> PyErr {
             InvalidArchiveError::new_err(format!("invalid archive: {msg}"))
         }
         CoreError::Io(e) => PyErr::from(e),
+        CoreError::SourceNotFound { path } => {
+            InvalidArchiveError::new_err(format!("source path not found: {}", path.display()))
+        }
+        CoreError::SourceNotAccessible { path } => InvalidArchiveError::new_err(format!(
+            "source path is not accessible: {}",
+            path.display()
+        )),
+        CoreError::OutputExists { path } => {
+            InvalidArchiveError::new_err(format!("output file already exists: {}", path.display()))
+        }
+        CoreError::InvalidCompressionLevel { level } => {
+            InvalidArchiveError::new_err(format!("invalid compression level {level}, must be 1-9"))
+        }
+        CoreError::UnknownFormat { path } => UnsupportedFormatError::new_err(format!(
+            "cannot determine archive format from: {}",
+            path.display()
+        )),
+        CoreError::InvalidConfiguration { reason } => InvalidArchiveError::new_err(format!(
+            "invalid configuration: {reason}"
+        )),
     }
 }
 

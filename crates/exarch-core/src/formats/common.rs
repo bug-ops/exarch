@@ -5,6 +5,8 @@
 
 use std::fs::create_dir_all;
 
+#[cfg(not(unix))]
+use crate::ExtractionError;
 use crate::ExtractionReport;
 use crate::Result;
 use crate::security::validator::ValidatedEntry;

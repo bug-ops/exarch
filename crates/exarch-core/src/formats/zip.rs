@@ -354,15 +354,15 @@ impl<R: Read + Seek> ZipArchive<R> {
         // Ensure all buffered data is written to disk
         buffered_writer.flush()?;
 
-        // Set permissions if configured
+        // Set permissions if configured (Unix only)
+        #[cfg(unix)]
         if let Some(mode) = validated.mode {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let permissions = std::fs::Permissions::from_mode(mode);
-                std::fs::set_permissions(&output_path, permissions)?;
-            }
+            use std::os::unix::fs::PermissionsExt;
+            let permissions = std::fs::Permissions::from_mode(mode);
+            std::fs::set_permissions(&output_path, permissions)?;
         }
+        #[cfg(not(unix))]
+        let _ = validated.mode; // Silence unused warning on non-Unix
 
         // Update report (overflow already checked above)
         report.files_extracted += 1;

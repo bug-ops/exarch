@@ -1,8 +1,10 @@
 //! Output formatter trait for CLI results.
 
 use anyhow::Result;
+use exarch_core::ArchiveManifest;
 use exarch_core::CreationReport;
 use exarch_core::ExtractionReport;
+use exarch_core::VerificationReport;
 use serde::Serialize;
 use std::path::Path;
 
@@ -14,6 +16,15 @@ pub trait OutputFormatter {
     /// Format archive creation result
     fn format_creation_result(&self, output_path: &Path, report: &CreationReport) -> Result<()>;
 
+    /// Format archive manifest (short format - paths only)
+    fn format_manifest_short(&self, manifest: &ArchiveManifest) -> Result<()>;
+
+    /// Format archive manifest (long format - detailed)
+    fn format_manifest_long(&self, manifest: &ArchiveManifest, human_readable: bool) -> Result<()>;
+
+    /// Format verification report
+    fn format_verification_report(&self, report: &VerificationReport) -> Result<()>;
+
     /// Format error message
     #[allow(dead_code)]
     fn format_error(&self, error: &anyhow::Error);
@@ -23,6 +34,7 @@ pub trait OutputFormatter {
     fn format_success(&self, message: &str);
 
     /// Format warning message
+    #[allow(dead_code)]
     fn format_warning(&self, message: &str);
 }
 

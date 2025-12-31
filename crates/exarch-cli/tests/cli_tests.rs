@@ -891,21 +891,64 @@ fn test_create_verbose_output() {
 }
 
 #[test]
-fn test_list_not_implemented() {
+fn test_list_archive() {
     exarch_cmd()
         .arg("list")
         .arg(fixture_path("sample.tar.gz"))
         .assert()
-        .failure();
+        .success()
+        .stdout(predicates::str::contains("sample.txt"));
 }
 
 #[test]
-fn test_verify_not_implemented() {
+fn test_list_archive_json_output() {
+    let output = exarch_cmd()
+        .arg("list")
+        .arg("--json")
+        .arg(fixture_path("sample.tar.gz"))
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: serde_json::Value = serde_json::from_slice(&output).expect("invalid JSON output");
+    assert_eq!(json["status"], "success");
+    assert_eq!(json["operation"], "list");
+    assert!(json["data"]["entries"].is_array());
+    assert!(json["data"]["total_entries"].is_number());
+}
+
+#[test]
+fn test_verify_archive_safe() {
     exarch_cmd()
         .arg("verify")
         .arg(fixture_path("sample.tar.gz"))
         .assert()
-        .failure();
+        .success()
+        .stdout(predicates::str::contains("Archive verification"));
+}
+
+#[test]
+fn test_verify_archive_json_output() {
+    let output = exarch_cmd()
+        .arg("verify")
+        .arg("--json")
+        .arg(fixture_path("sample.tar.gz"))
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: serde_json::Value = serde_json::from_slice(&output).expect("invalid JSON output");
+    assert_eq!(json["status"], "success");
+    assert_eq!(json["operation"], "verify");
+    assert!(json["data"]["status"].is_string());
+    assert!(json["data"]["total_entries"].is_number());
+    assert!(json["data"]["issues"].is_array());
+    assert!(json["data"]["integrity_status"].is_string());
+    assert!(json["data"]["security_status"].is_string());
 }
 
 #[test]

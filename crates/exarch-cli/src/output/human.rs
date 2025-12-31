@@ -4,8 +4,11 @@ use super::formatter::OutputFormatter;
 use anyhow::Result;
 use console::Term;
 use console::style;
+use exarch_core::ArchiveManifest;
 use exarch_core::CreationReport;
 use exarch_core::ExtractionReport;
+use exarch_core::IssueSeverity;
+use exarch_core::VerificationReport;
 use std::path::Path;
 
 pub struct HumanFormatter {
@@ -199,6 +202,136 @@ impl OutputFormatter for HumanFormatter {
         } else {
             let _ = self.term.write_line(&format!("WARNING: {message}"));
         }
+    }
+
+    fn format_manifest_short(&self, manifest: &ArchiveManifest) -> Result<()> {
+        if self.quiet {
+            return Ok(());
+        }
+
+        for entry in &manifest.entries {
+            let _ = self.term.write_line(&format!("{}", entry.path.display()));
+        }
+
+        Ok(())
+    }
+
+    fn format_manifest_long(&self, manifest: &ArchiveManifest, human_readable: bool) -> Result<()> {
+        if self.quiet {
+            return Ok(());
+        }
+
+        for entry in &manifest.entries {
+            let size_str = if human_readable {
+                Self::format_size(entry.size)
+            } else {
+                entry.size.to_string()
+            };
+
+            let mode_str = entry
+                .mode
+                .map_or_else(|| "-".to_string(), |m| format!("{m:o}"));
+
+            let type_char = match entry.entry_type {
+                exarch_core::ManifestEntryType::File => "-",
+                exarch_core::ManifestEntryType::Directory => "d",
+                exarch_core::ManifestEntryType::Symlink => "l",
+                exarch_core::ManifestEntryType::Hardlink => "h",
+            };
+
+            let _ = self.term.write_line(&format!(
+                "{}{:<6} {:>10}  {}",
+                type_char,
+                mode_str,
+                size_str,
+                entry.path.display()
+            ));
+        }
+
+        let _ = self.term.write_line("");
+        let _ = self.term.write_line(&format!(
+            "Total: {} files, {}",
+            Self::format_number(manifest.total_entries),
+            Self::format_size(manifest.total_size)
+        ));
+
+        Ok(())
+    }
+
+    fn format_verification_report(&self, report: &VerificationReport) -> Result<()> {
+        if self.quiet {
+            return Ok(());
+        }
+
+        // Header
+        if self.use_colors {
+            let status_str = match report.status {
+                exarch_core::VerificationStatus::Pass => style("PASSED").green().bold(),
+                exarch_core::VerificationStatus::Warning => style("WARNING").yellow().bold(),
+                exarch_core::VerificationStatus::Fail => style("FAILED").red().bold(),
+            };
+            let _ = self
+                .term
+                .write_line(&format!("Archive verification: {status_str}"));
+        } else {
+            let _ = self
+                .term
+                .write_line(&format!("Archive verification: {}", report.status));
+        }
+
+        // Summary
+        let _ = self
+            .term
+            .write_line(&format!("  Integrity: {}", report.integrity_status));
+        let _ = self
+            .term
+            .write_line(&format!("  Security: {}", report.security_status));
+        let _ = self.term.write_line(&format!(
+            "  Total entries: {}",
+            Self::format_number(report.total_entries)
+        ));
+
+        if report.suspicious_entries > 0 {
+            let _ = self.term.write_line(&format!(
+                "  Suspicious entries: {}",
+                report.suspicious_entries
+            ));
+        }
+
+        // Issues
+        if !report.issues.is_empty() {
+            let _ = self.term.write_line("");
+            let _ = self.term.write_line("Issues:");
+
+            for issue in &report.issues {
+                let severity_str = if self.use_colors {
+                    match issue.severity {
+                        IssueSeverity::Critical => style("CRITICAL").red().bold().to_string(),
+                        IssueSeverity::High => style("HIGH").red().to_string(),
+                        IssueSeverity::Medium => style("MEDIUM").yellow().to_string(),
+                        IssueSeverity::Low => style("LOW").blue().to_string(),
+                        IssueSeverity::Info => style("INFO").cyan().to_string(),
+                    }
+                } else {
+                    format!("[{}]", issue.severity)
+                };
+
+                if let Some(ref path) = issue.entry_path {
+                    let _ = self.term.write_line(&format!(
+                        "  {} {}: {}",
+                        severity_str,
+                        path.display(),
+                        issue.message
+                    ));
+                } else {
+                    let _ = self
+                        .term
+                        .write_line(&format!("  {} {}", severity_str, issue.message));
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 

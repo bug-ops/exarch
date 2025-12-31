@@ -29,6 +29,7 @@ pub mod creation;
 pub mod error;
 pub mod extraction;
 pub mod formats;
+pub mod inspection;
 pub mod report;
 pub mod security;
 pub mod types;
@@ -36,6 +37,8 @@ pub mod types;
 // Re-export main API types
 pub use api::create_archive;
 pub use api::extract_archive;
+pub use api::list_archive;
+pub use api::verify_archive;
 pub use archive::Archive;
 pub use archive::ArchiveBuilder;
 pub use config::SecurityConfig;
@@ -48,6 +51,17 @@ pub use report::ExtractionReport;
 pub use creation::ArchiveCreator;
 pub use creation::CreationConfig;
 pub use creation::CreationReport;
+
+// Re-export inspection types
+pub use inspection::ArchiveEntry;
+pub use inspection::ArchiveManifest;
+pub use inspection::CheckStatus;
+pub use inspection::IssueCategory;
+pub use inspection::IssueSeverity;
+pub use inspection::ManifestEntryType;
+pub use inspection::VerificationIssue;
+pub use inspection::VerificationReport;
+pub use inspection::VerificationStatus;
 
 // Re-export types module for easier access
 pub use types::DestDir;

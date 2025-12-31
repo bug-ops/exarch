@@ -3,18 +3,26 @@
 //! These tests use proptest to generate arbitrary inputs and verify
 //! security properties hold across a wide range of cases.
 
-#![allow(clippy::expect_used, clippy::field_reassign_with_default)]
+#![allow(
+    clippy::expect_used,
+    clippy::field_reassign_with_default,
+    clippy::unwrap_used
+)]
 
-use exarch_core::copy::{copy_with_buffer, CopyBuffer};
-use exarch_core::security::{HardlinkTracker, QuotaTracker};
+use std::io::Cursor;
+use std::path::PathBuf;
+
+use exarch_core::ExtractionError;
+use exarch_core::QuotaResource;
 use exarch_core::SecurityConfig;
-use exarch_core::{ExtractionError, QuotaResource};
+use exarch_core::copy::CopyBuffer;
+use exarch_core::copy::copy_with_buffer;
+use exarch_core::security::HardlinkTracker;
+use exarch_core::security::QuotaTracker;
 use exarch_core::types::DestDir;
 use exarch_core::types::SafePath;
 use exarch_core::types::SafeSymlink;
 use proptest::prelude::*;
-use std::io::Cursor;
-use std::path::PathBuf;
 use tempfile::TempDir;
 
 fn create_test_dest() -> (TempDir, DestDir) {

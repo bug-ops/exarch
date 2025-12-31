@@ -24,7 +24,7 @@ Memory-safe archive extraction library with Python and Node.js bindings.
 |---------|-------------|------|
 | [exarch-core](crates/exarch-core) | Core Rust library | [![docs.rs](https://img.shields.io/docsrs/exarch-core)](https://docs.rs/exarch-core) |
 | [exarch-python](crates/exarch-python) | Python bindings | [PyPI](https://pypi.org/project/exarch) |
-| [exarch-node](crates/exarch-node) | Node.js bindings | [npm](https://www.npmjs.com/package/exarch) |
+| [exarch-node](crates/exarch-node) | Node.js bindings | [npm](https://www.npmjs.com/package/exarch-rs) |
 
 ## Installation
 
@@ -50,7 +50,7 @@ pip install exarch
 ### Node.js
 
 ```bash
-npm install exarch
+npm install exarch-rs
 ```
 
 > [!NOTE]

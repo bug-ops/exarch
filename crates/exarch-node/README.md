@@ -1,10 +1,10 @@
-# exarch
+# exarch-rs
 
-[![npm](https://img.shields.io/npm/v/exarch)](https://www.npmjs.com/package/exarch)
-[![Node](https://img.shields.io/node/v/exarch)](https://nodejs.org)
+[![npm](https://img.shields.io/npm/v/exarch-rs)](https://www.npmjs.com/package/exarch-rs)
+[![Node](https://img.shields.io/node/v/exarch-rs)](https://nodejs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-Ready-blue)](https://www.typescriptlang.org/)
-[![CI](https://img.shields.io/github/actions/workflow/status/rabax/exarch/ci.yml?branch=main)](https://github.com/rabax/exarch/actions)
-[![License](https://img.shields.io/npm/l/exarch)](../../LICENSE-MIT)
+[![CI](https://img.shields.io/github/actions/workflow/status/bug-ops/exarch/ci.yml?branch=main)](https://github.com/bug-ops/exarch/actions)
+[![License](https://img.shields.io/npm/l/exarch-rs)](../../LICENSE-MIT)
 
 Memory-safe archive extraction library for Node.js.
 
@@ -17,16 +17,16 @@ This package provides Node.js bindings for [exarch-core](../exarch-core), a Rust
 
 ```bash
 # npm
-npm install exarch
+npm install exarch-rs
 
 # yarn
-yarn add exarch
+yarn add exarch-rs
 
 # pnpm
-pnpm add exarch
+pnpm add exarch-rs
 
 # bun
-bun add exarch
+bun add exarch-rs
 ```
 
 > [!NOTE]
@@ -39,7 +39,7 @@ bun add exarch
 ## Quick Start
 
 ```javascript
-const { extractArchive } = require('exarch');
+const { extractArchive } = require('exarch-rs');
 
 // Async (recommended)
 const result = await extractArchive('archive.tar.gz', '/output/path');
@@ -51,7 +51,7 @@ console.log(`Extracted ${result.filesExtracted} files`);
 ### Async API (Recommended)
 
 ```javascript
-const { extractArchive } = require('exarch');
+const { extractArchive } = require('exarch-rs');
 
 const result = await extractArchive('archive.tar.gz', '/output/path');
 
@@ -63,7 +63,7 @@ console.log(`Duration: ${result.durationMs}ms`);
 ### Sync API
 
 ```javascript
-const { extractArchiveSync } = require('exarch');
+const { extractArchiveSync } = require('exarch-rs');
 
 const result = extractArchiveSync('archive.tar.gz', '/output/path');
 console.log(`Extracted ${result.filesExtracted} files`);
@@ -75,7 +75,7 @@ console.log(`Extracted ${result.filesExtracted} files`);
 ### ES Modules
 
 ```javascript
-import { extractArchive } from 'exarch';
+import { extractArchive } from 'exarch-rs';
 
 const result = await extractArchive('archive.tar.gz', '/output/path');
 ```
@@ -83,7 +83,7 @@ const result = await extractArchive('archive.tar.gz', '/output/path');
 ### TypeScript
 
 ```typescript
-import { extractArchive, SecurityConfig, ExtractionReport } from 'exarch';
+import { extractArchive, SecurityConfig, ExtractionReport } from 'exarch-rs';
 
 const result: ExtractionReport = await extractArchive('archive.tar.gz', '/output/path');
 console.log(`Extracted ${result.filesExtracted} files`);
@@ -92,7 +92,7 @@ console.log(`Extracted ${result.filesExtracted} files`);
 ### Custom Security Configuration
 
 ```typescript
-import { extractArchive, SecurityConfig } from 'exarch';
+import { extractArchive, SecurityConfig } from 'exarch-rs';
 
 const config = new SecurityConfig()
   .maxFileSize(100 * 1024 * 1024)   // 100 MB per file
@@ -105,7 +105,7 @@ const result = await extractArchive('archive.tar.gz', '/output', config);
 ### Error Handling
 
 ```javascript
-const { extractArchive } = require('exarch');
+const { extractArchive } = require('exarch-rs');
 
 try {
   const result = await extractArchive('archive.tar.gz', '/output');
@@ -196,8 +196,8 @@ const fs = require('fs');
 fs.createReadStream('archive.tar')
   .pipe(tar.extract('/output'));  // May extract outside target directory!
 
-// SAFE - exarch validates all paths
-const { extractArchive } = require('exarch');
+// SAFE - exarch-rs validates all paths
+const { extractArchive } = require('exarch-rs');
 await extractArchive('archive.tar', '/output');  // Protected by default
 ```
 
@@ -207,7 +207,7 @@ This package is built using [napi-rs](https://napi.rs/).
 
 ```bash
 # Clone repository
-git clone https://github.com/rabax/exarch
+git clone https://github.com/bug-ops/exarch
 cd exarch/crates/exarch-node
 
 # Install dependencies

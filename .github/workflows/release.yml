@@ -279,7 +279,7 @@ jobs:
     timeout-minutes: 10
     environment:
       name: npm
-      url: https://www.npmjs.com/package/exarch
+      url: https://www.npmjs.com/package/exarch-rs
     permissions:
       contents: read
       id-token: write  # Required for npm provenance
@@ -379,14 +379,14 @@ jobs:
 
           ### Node.js
           \`\`\`bash
-          npm install exarch@$VERSION
+          npm install exarch-rs@$VERSION
           \`\`\`
 
           ## Artifacts
 
           - Python wheels for Linux (x86_64, aarch64), macOS (x86_64, aarch64), Windows (x86_64)
           - Node.js native addons for Linux (x86_64, aarch64), macOS (x86_64, aarch64), Windows (x86_64)
-          - Published to [crates.io](https://crates.io/crates/exarch-core), [PyPI](https://pypi.org/project/exarch), and [npm](https://www.npmjs.com/package/exarch)
+          - Published to [crates.io](https://crates.io/crates/exarch-core), [PyPI](https://pypi.org/project/exarch), and [npm](https://www.npmjs.com/package/exarch-rs)
           EOF
 
       - name: Create Release

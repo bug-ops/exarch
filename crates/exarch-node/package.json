@@ -1,5 +1,5 @@
 {
-  "name": "exarch",
+  "name": "exarch-rs",
   "version": "0.1.0",
   "description": "Memory-safe archive extraction library",
   "main": "index.js",
@@ -10,7 +10,8 @@
     "security",
     "tar",
     "zip",
-    "napi-rs"
+    "napi-rs",
+    "rust"
   ],
   "license": "MIT OR Apache-2.0",
   "repository": {
@@ -18,7 +19,7 @@
     "url": "https://github.com/bug-ops/exarch"
   },
   "napi": {
-    "name": "exarch",
+    "name": "exarch-rs",
     "triples": {
       "defaults": true
     }

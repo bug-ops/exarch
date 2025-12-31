@@ -12,8 +12,8 @@ authors = ["Exarch Contributors"]
 edition = "2024"
 rust-version = "1.89.0"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/rabax/exarch"
-homepage = "https://github.com/rabax/exarch"
+repository = "https://github.com/bug-ops/exarch"
+homepage = "https://github.com/bug-ops/exarch"
 keywords = ["archive", "extraction", "security", "tar", "zip"]
 categories = ["compression", "filesystem"]
 
@@ -24,13 +24,16 @@ exarch-core = { path = "crates/exarch-core", version = "0.1.0" }
 # Dependencies (sorted alphabetically)
 bzip2 = "0.6"
 criterion = "0.8"
+dhat = "0.3"
 flate2 = "1.1"
 libc = "0.2"
+lru = "0.16"
 napi = "3.8.1"
 napi-build = "2.3.1"
 napi-derive = "3.5.0"
 proptest = "1.9"
 pyo3 = "0.27"
+smallvec = "1.15"
 tar = "0.4"
 tempfile = "3.24"
 thiserror = "2.0"

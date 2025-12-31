@@ -3,8 +3,8 @@
 [![npm](https://img.shields.io/npm/v/exarch)](https://www.npmjs.com/package/exarch)
 [![Node](https://img.shields.io/node/v/exarch)](https://nodejs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-Ready-blue)](https://www.typescriptlang.org/)
-[![CI](https://img.shields.io/github/actions/workflow/status/bug-ops/exarch/ci.yml?branch=main)](https://github.com/bug-ops/exarch/actions)
-[![License](https://img.shields.io/npm/l/exarch)](LICENSE-MIT)
+[![CI](https://img.shields.io/github/actions/workflow/status/rabax/exarch/ci.yml?branch=main)](https://github.com/rabax/exarch/actions)
+[![License](https://img.shields.io/npm/l/exarch)](../../LICENSE-MIT)
 
 Memory-safe archive extraction library for Node.js.
 
@@ -34,47 +34,72 @@ bun add exarch
 
 ## Requirements
 
-- Node.js >= 18.0.0
+- Node.js >= 14
 
 ## Quick Start
 
 ```javascript
-const exarch = require('exarch');
+const { extractArchive } = require('exarch');
 
-const result = exarch.extractArchive('archive.tar.gz', '/output/path');
+// Async (recommended)
+const result = await extractArchive('archive.tar.gz', '/output/path');
 console.log(`Extracted ${result.filesExtracted} files`);
 ```
 
 ## Usage
 
-### CommonJS
+### Async API (Recommended)
 
 ```javascript
 const { extractArchive } = require('exarch');
 
-const result = extractArchive('archive.tar.gz', '/output/path');
+const result = await extractArchive('archive.tar.gz', '/output/path');
 
 console.log(`Files extracted: ${result.filesExtracted}`);
 console.log(`Bytes written: ${result.bytesWritten}`);
 console.log(`Duration: ${result.durationMs}ms`);
 ```
 
+### Sync API
+
+```javascript
+const { extractArchiveSync } = require('exarch');
+
+const result = extractArchiveSync('archive.tar.gz', '/output/path');
+console.log(`Extracted ${result.filesExtracted} files`);
+```
+
+> [!TIP]
+> Prefer the async API to avoid blocking the event loop during extraction.
+
 ### ES Modules
 
 ```javascript
 import { extractArchive } from 'exarch';
 
-const result = extractArchive('archive.tar.gz', '/output/path');
-console.log(`Extracted ${result.filesExtracted} files`);
+const result = await extractArchive('archive.tar.gz', '/output/path');
 ```
 
 ### TypeScript
 
 ```typescript
-import { extractArchive, ExtractionReport } from 'exarch';
+import { extractArchive, SecurityConfig, ExtractionReport } from 'exarch';
 
-const result: ExtractionReport = extractArchive('archive.tar.gz', '/output/path');
+const result: ExtractionReport = await extractArchive('archive.tar.gz', '/output/path');
 console.log(`Extracted ${result.filesExtracted} files`);
+```
+
+### Custom Security Configuration
+
+```typescript
+import { extractArchive, SecurityConfig } from 'exarch';
+
+const config = new SecurityConfig()
+  .maxFileSize(100 * 1024 * 1024)   // 100 MB per file
+  .maxTotalSize(1024 * 1024 * 1024) // 1 GB total
+  .maxFileCount(10_000);             // Max 10k files
+
+const result = await extractArchive('archive.tar.gz', '/output', config);
 ```
 
 ### Error Handling
@@ -83,18 +108,19 @@ console.log(`Extracted ${result.filesExtracted} files`);
 const { extractArchive } = require('exarch');
 
 try {
-  const result = extractArchive('archive.tar.gz', '/output');
+  const result = await extractArchive('archive.tar.gz', '/output');
   console.log(`Success: ${result.filesExtracted} files`);
 } catch (error) {
+  // Error codes: PATH_TRAVERSAL, SYMLINK_ESCAPE, ZIP_BOMB, QUOTA_EXCEEDED, etc.
   console.error(`Extraction failed: ${error.message}`);
 }
 ```
 
 ## API
 
-### `extractArchive(archivePath, outputDir)`
+### `extractArchive(archivePath, outputDir, config?)`
 
-Extract an archive to the specified directory with security validation.
+Extract an archive asynchronously with security validation.
 
 **Parameters:**
 
@@ -102,8 +128,17 @@ Extract an archive to the specified directory with security validation.
 |------|------|-------------|
 | `archivePath` | `string` | Path to the archive file |
 | `outputDir` | `string` | Directory where files will be extracted |
+| `config` | `SecurityConfig` | Optional security configuration |
+
+**Returns:** `Promise<ExtractionReport>`
+
+### `extractArchiveSync(archivePath, outputDir, config?)`
+
+Synchronous version. Blocks the event loop until extraction completes.
 
 **Returns:** `ExtractionReport`
+
+### `ExtractionReport`
 
 ```typescript
 interface ExtractionReport {
@@ -113,9 +148,17 @@ interface ExtractionReport {
 }
 ```
 
-**Throws:**
+### `SecurityConfig`
 
-- `Error` - If extraction fails due to security violations or I/O errors
+Builder-style security configuration.
+
+```typescript
+const config = new SecurityConfig()
+  .maxFileSize(bytes)       // Max size per file
+  .maxTotalSize(bytes)      // Max total extraction size
+  .maxFileCount(count)      // Max number of files
+  .maxCompressionRatio(n);  // Max compression ratio (zip bomb detection)
+```
 
 ## Security Features
 
@@ -131,15 +174,18 @@ The library provides built-in protection against:
 | Size limits | Enforces file and total size limits |
 
 > [!CAUTION]
-> Unlike many Node.js archive libraries, exarch applies security validation by default. This may cause some archives to fail extraction if they contain potentially malicious content.
+> Unlike many Node.js archive libraries, exarch applies security validation by default.
 
 ## Supported Formats
 
-- TAR (`.tar`)
-- TAR+GZIP (`.tar.gz`, `.tgz`)
-- TAR+BZIP2 (`.tar.bz2`)
-- TAR+XZ (`.tar.xz`, `.txz`)
-- ZIP (`.zip`)
+| Format | Extensions |
+|--------|------------|
+| TAR | `.tar` |
+| TAR+GZIP | `.tar.gz`, `.tgz` |
+| TAR+BZIP2 | `.tar.bz2`, `.tbz2` |
+| TAR+XZ | `.tar.xz`, `.txz` |
+| TAR+ZSTD | `.tar.zst`, `.tzst` |
+| ZIP | `.zip` |
 
 ## Comparison with tar-fs
 
@@ -152,7 +198,7 @@ fs.createReadStream('archive.tar')
 
 // SAFE - exarch validates all paths
 const { extractArchive } = require('exarch');
-extractArchive('archive.tar', '/output');  // Protected by default
+await extractArchive('archive.tar', '/output');  // Protected by default
 ```
 
 ## Development
@@ -161,7 +207,7 @@ This package is built using [napi-rs](https://napi.rs/).
 
 ```bash
 # Clone repository
-git clone https://github.com/bug-ops/exarch
+git clone https://github.com/rabax/exarch
 cd exarch/crates/exarch-node
 
 # Install dependencies
@@ -176,14 +222,14 @@ npm test
 
 ## Related Packages
 
-- [exarch-core](../exarch-core) - Core Rust library
-- [exarch (PyPI)](../exarch-python) - Python bindings
+- [exarch-core](../exarch-core) — Core Rust library
+- [exarch (PyPI)](../exarch-python) — Python bindings
 
 ## License
 
 Licensed under either of:
 
-- Apache License, Version 2.0 ([LICENSE-APACHE](../../LICENSE-APACHE) or <http://www.apache.org/licenses/LICENSE-2.0>)
-- MIT License ([LICENSE-MIT](../../LICENSE-MIT) or <http://opensource.org/licenses/MIT>)
+- Apache License, Version 2.0 ([LICENSE-APACHE](../../LICENSE-APACHE))
+- MIT License ([LICENSE-MIT](../../LICENSE-MIT))
 
 at your option.

@@ -26,6 +26,7 @@ exarch-node = { path = "crates/exarch-node", version = "0.1.0" }
 # Dependencies (sorted alphabetically)
 criterion = "0.8"
 flate2 = "1.1"
+libc = "0.2"
 napi = "3.8"
 napi-build = "2.0"
 napi-derive = "3.0"

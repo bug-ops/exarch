@@ -90,9 +90,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     needs: changes
-    permissions:
-      contents: read
-      security-events: write
     if: |
       needs.changes.outputs.rust == 'true' ||
       github.ref == 'refs/heads/main' ||
@@ -113,25 +110,6 @@ jobs:
 
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-
-      - name: Install SARIF tools
-        run: |
-          cargo install clippy-sarif sarif-fmt || true
-
-      - name: Generate Clippy SARIF report
-        run: |
-          cargo clippy --workspace --all-targets --all-features \
-            --message-format=json -- -D warnings | \
-            clippy-sarif | tee clippy-results.sarif | sarif-fmt
-        continue-on-error: true
-
-      - name: Upload SARIF results to GitHub
-        uses: github/codeql-action/upload-sarif@v3
-        if: always()
-        with:
-          sarif_file: clippy-results.sarif
-          wait-for-processing: true
-        continue-on-error: true
 
   documentation:
     name: Documentation

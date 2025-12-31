@@ -159,4 +159,75 @@ mod tests {
         let debug = format!("{directory:?}");
         assert_eq!(debug, "Directory");
     }
+
+    // M-TEST-5: EntryType variant edge cases
+    #[test]
+    fn test_entry_type_symlink_empty_target() {
+        let entry = EntryType::Symlink {
+            target: PathBuf::from(""),
+        };
+        assert!(entry.is_symlink(), "empty target should still be symlink");
+    }
+
+    #[test]
+    fn test_entry_type_hardlink_empty_target() {
+        let entry = EntryType::Hardlink {
+            target: PathBuf::from(""),
+        };
+        assert!(entry.is_hardlink(), "empty target should still be hardlink");
+    }
+
+    #[test]
+    fn test_entry_type_symlink_with_special_chars() {
+        let entry = EntryType::Symlink {
+            target: PathBuf::from("../../../etc/passwd"),
+        };
+        assert!(
+            entry.is_symlink(),
+            "path traversal target should be recognized as symlink"
+        );
+    }
+
+    #[test]
+    fn test_entry_type_hardlink_absolute_target() {
+        let entry = EntryType::Hardlink {
+            target: PathBuf::from("/etc/passwd"),
+        };
+        assert!(
+            entry.is_hardlink(),
+            "absolute target should be recognized as hardlink"
+        );
+    }
+
+    #[test]
+    fn test_entry_type_inequality() {
+        let file = EntryType::File;
+        let dir = EntryType::Directory;
+        assert_ne!(file, dir, "file should not equal directory");
+
+        let symlink1 = EntryType::Symlink {
+            target: PathBuf::from("a"),
+        };
+        let symlink2 = EntryType::Symlink {
+            target: PathBuf::from("b"),
+        };
+        assert_ne!(symlink1, symlink2, "different targets should not be equal");
+    }
+
+    #[test]
+    fn test_entry_type_hash() {
+        use std::collections::HashSet;
+
+        let mut set = HashSet::new();
+        set.insert(EntryType::File);
+        set.insert(EntryType::Directory);
+        set.insert(EntryType::Symlink {
+            target: PathBuf::from("target"),
+        });
+        set.insert(EntryType::Hardlink {
+            target: PathBuf::from("original"),
+        });
+
+        assert_eq!(set.len(), 4, "all variants should hash uniquely");
+    }
 }

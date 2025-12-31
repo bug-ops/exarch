@@ -97,6 +97,7 @@ impl SafePath {
     /// # Ok(())
     /// # }
     /// ```
+    #[allow(clippy::too_many_lines)] // Complex security validation logic
     pub fn validate(path: &Path, dest: &DestDir, config: &SecurityConfig) -> Result<Self> {
         // 1. Check for null bytes
         if has_null_bytes(path) {
@@ -106,14 +107,23 @@ impl SafePath {
         }
 
         // 2. Check for absolute paths
-        if path.is_absolute() && !config.allow_absolute_paths {
+        if path.is_absolute() && !config.allowed.absolute_paths {
             return Err(ExtractionError::PathTraversal {
                 path: path.to_path_buf(),
             });
         }
 
-        // 3. Check for parent directory traversal and banned components
+        // H-PERF-2: Single-pass validation and normalization
+        // Process all components in one iteration to:
+        // - Validate (check ParentDir, RootDir, Prefix)
+        // - Check banned components
+        // - Count depth
+        // - Normalize (skip CurDir components)
         let mut depth = 0;
+        let mut normalized = PathBuf::new();
+        let mut needs_normalization = false;
+        let has_banned_components = !config.banned_path_components.is_empty();
+
         for component in path.components() {
             match component {
                 Component::ParentDir => {
@@ -125,30 +135,40 @@ impl SafePath {
                     depth += 1;
 
                     // Only convert to string when banned components are configured
-                    if !config.banned_path_components.is_empty() {
-                        let comp_str = comp.to_string_lossy();
+                    if has_banned_components {
+                        // M-PERF-1: Try zero-cost to_str() first for valid UTF-8
+                        let comp_str = comp
+                            .to_str()
+                            .map_or_else(|| comp.to_string_lossy(), Cow::Borrowed);
+
                         if !config.is_path_component_allowed(&comp_str) {
                             return Err(ExtractionError::SecurityViolation {
                                 reason: format!("banned path component: {comp_str}"),
                             });
                         }
                     }
+
+                    // Add to normalized path
+                    normalized.push(component);
                 }
                 Component::CurDir => {
-                    // Will be normalized away
+                    // Skip . components (normalization)
+                    needs_normalization = true;
                 }
                 Component::RootDir | Component::Prefix(_) => {
                     // For absolute paths on Windows
-                    if !config.allow_absolute_paths {
+                    if !config.allowed.absolute_paths {
                         return Err(ExtractionError::PathTraversal {
                             path: path.to_path_buf(),
                         });
                     }
+                    // Preserve root/prefix for absolute paths
+                    normalized.push(component);
                 }
             }
         }
 
-        // 4. Check path depth
+        // Check path depth
         if depth > config.max_path_depth {
             return Err(ExtractionError::SecurityViolation {
                 reason: format!(
@@ -158,52 +178,84 @@ impl SafePath {
             });
         }
 
-        // 5. Normalize path (remove . components)
-        let normalized = normalize_path(path);
+        // Use normalized path if normalization was needed, otherwise use original
+        let final_path = if needs_normalization {
+            Cow::Owned(normalized)
+        } else {
+            Cow::Borrowed(path)
+        };
 
-        // 6. Verify resolved path stays within destination
-        let resolved = dest.as_path().join(normalized.as_ref());
+        // Verify resolved path stays within destination
+        let resolved = dest.as_path().join(final_path.as_ref());
+
+        // M-PERF-2: Try canonicalization directly, handle NotFound gracefully
+        // This avoids redundant exists() syscalls
 
         // Always canonicalize parent directory to prevent symlink-based bypass
-        if let Some(parent) = resolved.parent().filter(|p| p.exists()) {
-            let canonical_parent = parent.canonicalize().map_err(|e| {
-                ExtractionError::Io(std::io::Error::new(
-                    e.kind(),
-                    format!("failed to canonicalize parent: {e}"),
-                ))
-            })?;
-
-            if !canonical_parent.starts_with(dest.as_path()) {
-                return Err(ExtractionError::PathTraversal {
-                    path: path.to_path_buf(),
-                });
+        if let Some(parent) = resolved.parent() {
+            match parent.canonicalize() {
+                Ok(canonical_parent) => {
+                    if !canonical_parent.starts_with(dest.as_path()) {
+                        return Err(ExtractionError::PathTraversal {
+                            path: path.to_path_buf(),
+                        });
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    // Parent doesn't exist yet during extraction planning -
+                    // that's OK
+                }
+                Err(e) => {
+                    return Err(ExtractionError::Io(std::io::Error::new(
+                        e.kind(),
+                        format!("failed to canonicalize parent: {e}"),
+                    )));
+                }
             }
         }
 
-        // Use canonicalize for full path if it exists
-        if resolved.exists() {
-            let canonical = resolved.canonicalize().map_err(|e| {
-                ExtractionError::Io(std::io::Error::new(
+        // Try to canonicalize full path if it exists
+        match resolved.canonicalize() {
+            Ok(canonical) => {
+                if !canonical.starts_with(dest.as_path()) {
+                    return Err(ExtractionError::PathTraversal {
+                        path: path.to_path_buf(),
+                    });
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // Path doesn't exist yet, check prefix
+                if !resolved.starts_with(dest.as_path()) {
+                    return Err(ExtractionError::PathTraversal {
+                        path: path.to_path_buf(),
+                    });
+                }
+            }
+            Err(e) => {
+                return Err(ExtractionError::Io(std::io::Error::new(
                     e.kind(),
                     format!("failed to canonicalize path: {e}"),
-                ))
-            })?;
-
-            if !canonical.starts_with(dest.as_path()) {
-                return Err(ExtractionError::PathTraversal {
-                    path: path.to_path_buf(),
-                });
-            }
-        } else {
-            // Path doesn't exist yet, check prefix
-            if !resolved.starts_with(dest.as_path()) {
-                return Err(ExtractionError::PathTraversal {
-                    path: path.to_path_buf(),
-                });
+                )));
             }
         }
 
-        Ok(Self(normalized.into_owned()))
+        Ok(Self(final_path.into_owned()))
+    }
+
+    /// Creates a `SafePath` without validation (INTERNAL USE ONLY).
+    ///
+    /// # Safety
+    ///
+    /// This bypasses all validation checks. The caller MUST ensure that:
+    /// - The path has been validated by equivalent checks elsewhere
+    /// - The path is relative (not absolute)
+    /// - The path contains no `..` components
+    /// - The path resolves within the destination directory
+    ///
+    /// This is only used internally when path has already been validated
+    /// through a different mechanism (e.g., hardlink validation).
+    pub(crate) fn new_unchecked(path: PathBuf) -> Self {
+        Self(path)
     }
 
     /// Returns the path as a `&Path`.
@@ -234,40 +286,6 @@ fn has_null_bytes(path: &Path) -> bool {
     path.to_str().is_none_or(|s| s.contains('\0'))
 }
 
-/// Normalizes a path by removing `.` components.
-///
-/// This function removes redundant current directory components but does NOT
-/// resolve `..` components (those are rejected during validation).
-///
-/// Uses `Cow<Path>` to avoid allocation when no normalization is needed.
-fn normalize_path(path: &Path) -> Cow<'_, Path> {
-    // Fast path: Check if normalization is needed
-    let has_cur_dir = path.components().any(|c| matches!(c, Component::CurDir));
-
-    if !has_cur_dir {
-        return Cow::Borrowed(path);
-    }
-
-    // Slow path: Normalize only if needed
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {
-                // Skip . components
-            }
-            Component::ParentDir => {
-                // Should have been caught in validation, but keep for safety
-                normalized.push(component);
-            }
-            _ => {
-                normalized.push(component);
-            }
-        }
-    }
-
-    Cow::Owned(normalized)
-}
-
 #[cfg(test)]
 #[allow(
     clippy::expect_used,
@@ -286,6 +304,19 @@ mod tests {
         let temp = TempDir::new().expect("failed to create temp dir");
         let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
         (temp, dest)
+    }
+
+    // M-TEST-2: Empty path handling test
+    #[test]
+    fn test_empty_path() {
+        let (_temp, dest) = create_test_dest();
+        let config = SecurityConfig::default();
+
+        let result = SafePath::validate(&PathBuf::from(""), &dest, &config);
+        assert!(
+            matches!(result, Err(ExtractionError::PathTraversal { .. })),
+            "empty path should be rejected as invalid"
+        );
     }
 
     #[test]
@@ -354,7 +385,7 @@ mod tests {
     fn test_safe_path_allow_absolute_when_configured() {
         let (_temp, dest) = create_test_dest();
         let mut config = SecurityConfig::default();
-        config.allow_absolute_paths = true;
+        config.allowed.absolute_paths = true;
 
         // Create a temporary file to test with
         let test_file = dest.as_path().join("test.txt");
@@ -476,20 +507,23 @@ mod tests {
 
     #[test]
     fn test_normalize_path() {
+        let (_temp, dest) = create_test_dest();
+        let config = SecurityConfig::default();
+
+        // H-PERF-2: Normalization now happens in single-pass validation
         // Path with . components should be normalized
         let path = PathBuf::from("foo/./bar/./baz.txt");
-        let normalized = normalize_path(&path);
-        assert_eq!(normalized.as_ref(), Path::new("foo/bar/baz.txt"));
+        let safe = SafePath::validate(&path, &dest, &config).expect("should be valid");
+        assert_eq!(safe.as_path(), Path::new("foo/bar/baz.txt"));
 
         let path = PathBuf::from("./foo/bar");
-        let normalized = normalize_path(&path);
-        assert_eq!(normalized.as_ref(), Path::new("foo/bar"));
+        let safe = SafePath::validate(&path, &dest, &config).expect("should be valid");
+        assert_eq!(safe.as_path(), Path::new("foo/bar"));
 
-        // Path without . components should be borrowed (no allocation)
+        // Path without . components should remain unchanged
         let path = PathBuf::from("foo/bar/baz.txt");
-        let normalized = normalize_path(&path);
-        assert!(matches!(normalized, Cow::Borrowed(_)));
-        assert_eq!(normalized.as_ref(), Path::new("foo/bar/baz.txt"));
+        let safe = SafePath::validate(&path, &dest, &config).expect("should be valid");
+        assert_eq!(safe.as_path(), Path::new("foo/bar/baz.txt"));
     }
 
     #[test]
@@ -605,5 +639,73 @@ mod tests {
             // Note: Windows filesystem may reject these, but we don't
             // explicitly block
         }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_symlink_in_parent_chain() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
+        let config = SecurityConfig::default();
+
+        // Create: dest/parent_dir -> /tmp (symlink to outside)
+        let parent_symlink = temp.path().join("parent_dir");
+        symlink("/tmp", &parent_symlink).expect("failed to create symlink");
+
+        // Try to create path through symlinked parent
+        let malicious_path = PathBuf::from("parent_dir/evil.txt");
+
+        let result = SafePath::validate(&malicious_path, &dest, &config);
+        assert!(
+            matches!(result, Err(ExtractionError::PathTraversal { .. })),
+            "symlink in parent chain should be detected and rejected"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_symlink_in_middle_of_path() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
+        let config = SecurityConfig::default();
+
+        // Create legitimate directory
+        let legit_dir = temp.path().join("legit");
+        std::fs::create_dir(&legit_dir).expect("failed to create dir");
+
+        // Create symlink within that directory pointing outside
+        let symlink_path = legit_dir.join("escape");
+        symlink("/etc", &symlink_path).expect("failed to create symlink");
+
+        // Try to access through the symlink
+        let malicious_path = PathBuf::from("legit/escape/passwd");
+
+        let result = SafePath::validate(&malicious_path, &dest, &config);
+        assert!(
+            matches!(result, Err(ExtractionError::PathTraversal { .. })),
+            "symlink in middle of path should be detected"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_legitimate_file_in_real_directory() {
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
+        let config = SecurityConfig::default();
+
+        // Create real directory (not symlink)
+        let real_dir = temp.path().join("real_dir");
+        std::fs::create_dir(&real_dir).expect("failed to create dir");
+
+        // Path through real directory should work
+        let safe_path = PathBuf::from("real_dir/file.txt");
+
+        let result = SafePath::validate(&safe_path, &dest, &config);
+        assert!(result.is_ok(), "path through real directory should succeed");
     }
 }

@@ -17,6 +17,9 @@ tar.workspace = true
 thiserror.workspace = true
 zip = { workspace = true, features = ["deflate"] }
 
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
 [dev-dependencies]
 criterion.workspace = true
 proptest.workspace = true

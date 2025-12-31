@@ -37,6 +37,7 @@ pub use archive::Archive;
 pub use archive::ArchiveBuilder;
 pub use config::SecurityConfig;
 pub use error::ExtractionError;
+pub use error::QuotaResource;
 pub use error::Result;
 pub use report::ExtractionReport;
 

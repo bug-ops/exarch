@@ -72,7 +72,7 @@ fn test_symlink_workflow() {
     let temp = TempDir::new().unwrap();
     let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
     let mut config = SecurityConfig::default();
-    config.allow_symlinks = true;
+    config.allowed.symlinks = true;
 
     // Create target file
     let target_path = temp.path().join("target.txt");
@@ -162,7 +162,7 @@ fn test_relative_symlink_resolution() {
     let temp = TempDir::new().unwrap();
     let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
     let mut config = SecurityConfig::default();
-    config.allow_symlinks = true;
+    config.allowed.symlinks = true;
 
     // Create directory structure: a/b/target.txt and a/link.txt -> b/target.txt
     let a_dir = temp.path().join("a");

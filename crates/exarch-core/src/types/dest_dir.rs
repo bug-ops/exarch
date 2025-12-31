@@ -105,18 +105,27 @@ impl DestDir {
             ))
         })?;
 
-        // Check write permissions (Unix only)
+        // M-CODE-6: Check write permissions using libc::access() (Unix only)
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            let metadata = std::fs::metadata(&canonical)?;
-            let permissions = metadata.permissions();
-            let mode = permissions.mode();
+            use std::ffi::CString;
+            use std::os::unix::ffi::OsStrExt;
 
-            // NOTE: This only checks the owner write bit (0o200), not group or other bits.
-            // This is a simplified check. For production use, consider using the `access()`
-            // syscall to check effective write permissions for the current process.
-            if mode & 0o200 == 0 {
+            // Use access() syscall to check effective write permissions
+            let path_cstring = CString::new(canonical.as_os_str().as_bytes()).map_err(|_| {
+                ExtractionError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "path contains null byte",
+                ))
+            })?;
+
+            // SAFETY: access() is safe to call with a valid C string.
+            // The pointer is valid for the duration of the call.
+            // access() does not modify the string and returns immediately.
+            #[allow(unsafe_code)]
+            let result = unsafe { libc::access(path_cstring.as_ptr(), libc::W_OK) };
+
+            if result != 0 {
                 return Err(ExtractionError::Io(std::io::Error::new(
                     std::io::ErrorKind::PermissionDenied,
                     format!("directory is not writable: {}", canonical.display()),
@@ -263,5 +272,52 @@ mod tests {
         let dest = DestDir::new(temp.path().to_path_buf()).expect("should create");
         let cloned = dest.clone();
         assert_eq!(dest, cloned);
+    }
+
+    #[test]
+    fn test_dest_dir_with_symlink() {
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let real_dir = temp.path().join("real");
+        fs::create_dir(&real_dir).expect("failed to create real dir");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            let symlink_path = temp.path().join("link");
+            symlink(&real_dir, &symlink_path).expect("failed to create symlink");
+
+            // Should resolve symlink and create valid DestDir
+            let dest = DestDir::new(symlink_path).expect("should create from symlink");
+            assert!(
+                dest.as_path().is_absolute(),
+                "should be absolute canonical path"
+            );
+            // Canonical path should resolve to the real directory
+            assert_eq!(
+                dest.as_path(),
+                real_dir.canonicalize().unwrap(),
+                "should resolve symlink to real path"
+            );
+        }
+    }
+
+    #[test]
+    fn test_dest_dir_nested_path() {
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let nested = temp.path().join("a").join("b").join("c");
+        fs::create_dir_all(&nested).expect("failed to create nested dirs");
+
+        let dest = DestDir::new(nested).expect("should create from nested path");
+        assert!(dest.as_path().is_absolute());
+    }
+
+    #[test]
+    fn test_dest_dir_into_path_buf() {
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let dest = DestDir::new(temp.path().to_path_buf()).expect("should create");
+        let path = dest.clone().into_path_buf();
+
+        assert!(path.is_absolute(), "converted path should be absolute");
+        assert_eq!(path, dest.as_path(), "should match original path");
     }
 }

@@ -16,6 +16,8 @@ pub enum ArchiveType {
     TarBz2,
     /// XZ-compressed tar archive.
     TarXz,
+    /// Zstd-compressed tar archive.
+    TarZst,
     /// ZIP archive.
     Zip,
 }
@@ -43,6 +45,7 @@ pub fn detect_format(path: &Path) -> Result<ArchiveType> {
         }
         "bz2" | "tbz" | "tbz2" => Ok(ArchiveType::TarBz2),
         "xz" | "txz" => Ok(ArchiveType::TarXz),
+        "zst" | "tzst" => Ok(ArchiveType::TarZst),
         "zip" => Ok(ArchiveType::Zip),
         _ => Err(ExtractionError::UnsupportedFormat),
     }
@@ -67,6 +70,36 @@ mod tests {
 
         let path2 = PathBuf::from("archive.tgz");
         assert_eq!(detect_format(&path2).unwrap(), ArchiveType::TarGz);
+    }
+
+    #[test]
+    fn test_detect_tar_bz2() {
+        let path = PathBuf::from("archive.tar.bz2");
+        assert_eq!(detect_format(&path).unwrap(), ArchiveType::TarBz2);
+
+        let path2 = PathBuf::from("archive.tbz");
+        assert_eq!(detect_format(&path2).unwrap(), ArchiveType::TarBz2);
+
+        let path3 = PathBuf::from("archive.tbz2");
+        assert_eq!(detect_format(&path3).unwrap(), ArchiveType::TarBz2);
+    }
+
+    #[test]
+    fn test_detect_tar_xz() {
+        let path = PathBuf::from("archive.tar.xz");
+        assert_eq!(detect_format(&path).unwrap(), ArchiveType::TarXz);
+
+        let path2 = PathBuf::from("archive.txz");
+        assert_eq!(detect_format(&path2).unwrap(), ArchiveType::TarXz);
+    }
+
+    #[test]
+    fn test_detect_tar_zst() {
+        let path = PathBuf::from("archive.tar.zst");
+        assert_eq!(detect_format(&path).unwrap(), ArchiveType::TarZst);
+
+        let path2 = PathBuf::from("archive.tzst");
+        assert_eq!(detect_format(&path2).unwrap(), ArchiveType::TarZst);
     }
 
     #[test]

@@ -17,9 +17,9 @@
 //! Transparent decompression is supported via:
 //!
 //! - **gzip** (.tar.gz, .tgz): Via `flate2` crate
-//! - **bzip2** (.tar.bz2): Future (Phase 5)
-//! - **xz** (.tar.xz): Future (Phase 5)
-//! - **zstd** (.tar.zst): Future (Phase 5)
+//! - **bzip2** (.tar.bz2, .tbz2): Via `bzip2` crate
+//! - **xz** (.tar.xz, .txz): Via `xz2` crate
+//! - **zstd** (.tar.zst, .tzst): Via `zstd` crate
 //!
 //! # Security Features
 //!
@@ -472,6 +472,97 @@ pub fn open_tar_gz<P: AsRef<Path>>(
     Ok(TarArchive::new(decoder))
 }
 
+/// Opens a bzip2-compressed TAR archive (.tar.bz2).
+///
+/// The file is wrapped in `BufReader` for optimal performance.
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be opened.
+///
+/// # Examples
+///
+/// ```no_run
+/// use exarch_core::SecurityConfig;
+/// use exarch_core::formats::tar::open_tar_bz2;
+/// use exarch_core::formats::traits::ArchiveFormat;
+/// use std::path::Path;
+///
+/// let mut archive = open_tar_bz2("archive.tar.bz2")?;
+/// let config = SecurityConfig::default();
+/// let report = archive.extract(Path::new("/output"), &config)?;
+/// # Ok::<(), exarch_core::ExtractionError>(())
+/// ```
+pub fn open_tar_bz2<P: AsRef<Path>>(
+    path: P,
+) -> Result<TarArchive<bzip2::read::BzDecoder<BufReader<File>>>> {
+    let file = File::open(path)?;
+    let buffered = BufReader::new(file);
+    let decoder = bzip2::read::BzDecoder::new(buffered);
+    Ok(TarArchive::new(decoder))
+}
+
+/// Opens an xz-compressed TAR archive (.tar.xz).
+///
+/// The file is wrapped in `BufReader` for optimal performance.
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be opened.
+///
+/// # Examples
+///
+/// ```no_run
+/// use exarch_core::SecurityConfig;
+/// use exarch_core::formats::tar::open_tar_xz;
+/// use exarch_core::formats::traits::ArchiveFormat;
+/// use std::path::Path;
+///
+/// let mut archive = open_tar_xz("archive.tar.xz")?;
+/// let config = SecurityConfig::default();
+/// let report = archive.extract(Path::new("/output"), &config)?;
+/// # Ok::<(), exarch_core::ExtractionError>(())
+/// ```
+pub fn open_tar_xz<P: AsRef<Path>>(
+    path: P,
+) -> Result<TarArchive<xz2::read::XzDecoder<BufReader<File>>>> {
+    let file = File::open(path)?;
+    let buffered = BufReader::new(file);
+    let decoder = xz2::read::XzDecoder::new(buffered);
+    Ok(TarArchive::new(decoder))
+}
+
+/// Opens a zstd-compressed TAR archive (.tar.zst).
+///
+/// The file is wrapped in `BufReader` for optimal performance.
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be opened or if decompression
+/// initialization fails.
+///
+/// # Examples
+///
+/// ```no_run
+/// use exarch_core::SecurityConfig;
+/// use exarch_core::formats::tar::open_tar_zst;
+/// use exarch_core::formats::traits::ArchiveFormat;
+/// use std::path::Path;
+///
+/// let mut archive = open_tar_zst("archive.tar.zst")?;
+/// let config = SecurityConfig::default();
+/// let report = archive.extract(Path::new("/output"), &config)?;
+/// # Ok::<(), exarch_core::ExtractionError>(())
+/// ```
+pub fn open_tar_zst<P: AsRef<Path>>(
+    path: P,
+) -> Result<TarArchive<zstd::Decoder<'static, BufReader<File>>>> {
+    let file = File::open(path)?;
+    let buffered = BufReader::new(file);
+    let decoder = zstd::Decoder::with_buffer(buffered)?;
+    Ok(TarArchive::new(decoder))
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -735,6 +826,78 @@ mod tests {
 
         // Extract
         let decoder = flate2::read::GzDecoder::new(Cursor::new(gz_data));
+        let mut archive = TarArchive::new(decoder);
+
+        let temp = TempDir::new().unwrap();
+        let config = SecurityConfig::default();
+
+        let report = archive.extract(temp.path(), &config).unwrap();
+
+        assert_eq!(report.files_extracted, 1);
+        assert!(temp.path().join("file.txt").exists());
+    }
+
+    #[test]
+    fn test_extract_bzip2_compressed() {
+        use bzip2::Compression;
+        use bzip2::write::BzEncoder;
+
+        // Create TAR archive
+        let tar_data = create_test_tar(vec![("file.txt", b"compressed")]);
+
+        // Compress with bzip2
+        let mut encoder = BzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&tar_data).unwrap();
+        let bz2_data = encoder.finish().unwrap();
+
+        // Extract
+        let decoder = bzip2::read::BzDecoder::new(Cursor::new(bz2_data));
+        let mut archive = TarArchive::new(decoder);
+
+        let temp = TempDir::new().unwrap();
+        let config = SecurityConfig::default();
+
+        let report = archive.extract(temp.path(), &config).unwrap();
+
+        assert_eq!(report.files_extracted, 1);
+        assert!(temp.path().join("file.txt").exists());
+    }
+
+    #[test]
+    fn test_extract_xz_compressed() {
+        use xz2::write::XzEncoder;
+
+        // Create TAR archive
+        let tar_data = create_test_tar(vec![("file.txt", b"compressed")]);
+
+        // Compress with xz
+        let mut encoder = XzEncoder::new(Vec::new(), 6);
+        encoder.write_all(&tar_data).unwrap();
+        let xz_data = encoder.finish().unwrap();
+
+        // Extract
+        let decoder = xz2::read::XzDecoder::new(Cursor::new(xz_data));
+        let mut archive = TarArchive::new(decoder);
+
+        let temp = TempDir::new().unwrap();
+        let config = SecurityConfig::default();
+
+        let report = archive.extract(temp.path(), &config).unwrap();
+
+        assert_eq!(report.files_extracted, 1);
+        assert!(temp.path().join("file.txt").exists());
+    }
+
+    #[test]
+    fn test_extract_zstd_compressed() {
+        // Create TAR archive
+        let tar_data = create_test_tar(vec![("file.txt", b"compressed")]);
+
+        // Compress with zstd
+        let zst_data = zstd::encode_all(&tar_data[..], 3).unwrap();
+
+        // Extract
+        let decoder = zstd::Decoder::with_buffer(Cursor::new(zst_data)).unwrap();
         let mut archive = TarArchive::new(decoder);
 
         let temp = TempDir::new().unwrap();

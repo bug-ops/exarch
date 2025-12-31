@@ -12,10 +12,13 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+bzip2.workspace = true
 flate2.workspace = true
 tar.workspace = true
 thiserror.workspace = true
+xz2.workspace = true
 zip = { workspace = true, features = ["deflate", "deflate64", "bzip2", "zstd", "time"] }
+zstd.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true

@@ -8,5 +8,9 @@ pub mod zip;
 
 // Re-export main types for convenience
 pub use tar::TarArchive;
+pub use tar::open_tar_bz2;
+pub use tar::open_tar_gz;
+pub use tar::open_tar_xz;
+pub use tar::open_tar_zst;
 pub use traits::ArchiveFormat;
 pub use zip::ZipArchive;

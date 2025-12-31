@@ -4,6 +4,7 @@ members = [
     "crates/exarch-core",
     "crates/exarch-python",
     "crates/exarch-node",
+    "crates/exarch-cli",
 ]
 
 [workspace.package]
@@ -41,6 +42,17 @@ tokio = { version = "1.48", features = ["rt"] }
 xz2 = "0.1"
 zip = { version = "7.0", default-features = false }
 zstd = "0.13"
+
+# CLI dependencies
+clap = { version = "4.5", features = ["derive", "cargo", "wrap_help", "color"] }
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+console = "0.16"
+
+# CLI testing
+assert_cmd = "2.1"
+predicates = "3.1"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }

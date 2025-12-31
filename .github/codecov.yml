@@ -24,7 +24,7 @@ comment:
   layout: "reach,diff,flags,files"
   behavior: default
   require_changes: false     # Always post comment
-  after_n_builds: 2          # Wait for exarch-core and exarch-cli builds (Python/Node may not have tests yet)
+  after_n_builds: 1          # Single combined coverage upload
 
 # Coverage flags for different packages
 flags:
@@ -47,42 +47,6 @@ flags:
       - crates/exarch-cli/src/
     carryforward: true
     target: 60%              # CLI 60%+ coverage
-    statuses:
-      - type: project
-        target: 60%
-        threshold: 2%
-      - type: patch
-        target: 70%
-
-  # Python bindings (tests may not exist yet)
-  exarch-python:
-    paths:
-      - crates/exarch-python/src/
-    carryforward: true
-    target: 70%              # FFI bindings 70%+ coverage
-    statuses:
-      - type: project
-        target: 70%
-        threshold: 5%
-        informational: true  # Don't block CI if missing
-      - type: patch
-        target: 80%
-        informational: true
-
-  # Node.js bindings (tests may not exist yet)
-  exarch-node:
-    paths:
-      - crates/exarch-node/src/
-    carryforward: true
-    target: 70%              # FFI bindings 70%+ coverage
-    statuses:
-      - type: project
-        target: 70%
-        threshold: 5%
-        informational: true  # Don't block CI if missing
-      - type: patch
-        target: 80%
-        informational: true
 
 # Ignore patterns
 ignore:

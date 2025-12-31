@@ -22,7 +22,7 @@ categories = ["compression", "filesystem"]
 exarch-core = { path = "crates/exarch-core", version = "0.1.0" }
 
 # Dependencies (sorted alphabetically)
-bzip2 = "0.5"
+bzip2 = "0.6"
 criterion = "0.8"
 flate2 = "1.1"
 libc = "0.2"

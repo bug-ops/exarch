@@ -15,7 +15,7 @@
   "license": "MIT OR Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/rabax/exarch"
+    "url": "https://github.com/bug-ops/exarch"
   },
   "napi": {
     "name": "exarch",

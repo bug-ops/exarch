@@ -1,8 +1,8 @@
 # exarch
 
-[![CI](https://img.shields.io/github/actions/workflow/status/bug-ops/exarch/ci.yml?branch=main)](https://github.com/bug-ops/exarch/actions)
+[![CI](https://img.shields.io/github/actions/workflow/status/rabax/exarch/ci.yml?branch=main)](https://github.com/rabax/exarch/actions)
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue)](LICENSE-MIT)
-[![MSRV](https://img.shields.io/badge/MSRV-1.89.0-blue)](https://github.com/bug-ops/exarch)
+[![MSRV](https://img.shields.io/badge/MSRV-1.89.0-blue)](https://github.com/rabax/exarch)
 
 Memory-safe archive extraction library with Python and Node.js bindings.
 
@@ -15,7 +15,7 @@ Memory-safe archive extraction library with Python and Node.js bindings.
 - **Type-driven safety** — Rust's type system ensures validated paths can only be constructed through security checks
 - **Multi-language support** — Native bindings for Python (PyO3) and Node.js (napi-rs)
 - **Zero unsafe code** — Core library contains no unsafe Rust code
-- **High performance** — Targets 500 MB/s for TAR and 300 MB/s for ZIP extraction
+- **High performance** — Optimized I/O with reusable buffers and streaming extraction
 
 ## Packages
 
@@ -34,14 +34,8 @@ Memory-safe archive extraction library with Python and Node.js bindings.
 exarch-core = "0.1"
 ```
 
-Or with cargo-add:
-
-```bash
-cargo add exarch-core
-```
-
-> [!NOTE]
-> Requires Rust 1.89.0 or later.
+> [!IMPORTANT]
+> Requires Rust 1.89.0 or later (Edition 2024).
 
 ### Python
 
@@ -49,11 +43,17 @@ cargo add exarch-core
 pip install exarch
 ```
 
+> [!NOTE]
+> Requires Python 3.9 or later.
+
 ### Node.js
 
 ```bash
 npm install exarch
 ```
+
+> [!NOTE]
+> Requires Node.js 14 or later.
 
 ## Quick Start
 
@@ -79,15 +79,16 @@ fn main() -> Result<(), exarch_core::ExtractionError> {
 import exarch
 
 result = exarch.extract_archive("archive.tar.gz", "/output/path")
-print(f"Extracted {result['files_extracted']} files")
+print(f"Extracted {result.files_extracted} files")
 ```
 
 ### Node.js
 
 ```javascript
-const exarch = require('exarch');
+const { extractArchive } = require('exarch');
 
-const result = exarch.extractArchive('archive.tar.gz', '/output/path');
+// Async (recommended)
+const result = await extractArchive('archive.tar.gz', '/output/path');
 console.log(`Extracted ${result.filesExtracted} files`);
 ```
 
@@ -98,14 +99,14 @@ exarch provides defense-in-depth protection against common archive vulnerabiliti
 | Protection | Description | Default |
 |------------|-------------|---------|
 | Path traversal | Blocks `../` and absolute paths | Enabled |
-| Symlink attacks | Prevents symlinks escaping extraction directory | Enabled |
-| Hardlink attacks | Validates hardlink targets | Enabled |
+| Symlink attacks | Prevents symlinks escaping extraction directory | Blocked |
+| Hardlink attacks | Validates hardlink targets within extraction directory | Blocked |
 | Zip bombs | Detects high compression ratios | Enabled (100x limit) |
 | Permission sanitization | Strips setuid/setgid bits | Enabled |
-| Size limits | Configurable file and total size limits | 50MB / 10GB |
+| Size limits | Configurable file and total size limits | 50 MB / 10 GB |
 
 > [!CAUTION]
-> Disabling security features is strongly discouraged. Only do so if you fully understand the risks and trust the archive source.
+> Enabling symlinks or hardlinks should only be done when you fully trust the archive source.
 
 ### Security Configuration
 
@@ -116,19 +117,20 @@ let config = SecurityConfig {
     max_file_size: 100 * 1024 * 1024,   // 100 MB
     max_total_size: 1024 * 1024 * 1024, // 1 GB
     max_compression_ratio: 50.0,         // 50x compression limit
-    allow_symlinks: false,               // Block symlinks
-    allow_hardlinks: false,              // Block hardlinks
     ..Default::default()
 };
 ```
 
 ## Supported Formats
 
-- TAR (`.tar`)
-- TAR+GZIP (`.tar.gz`, `.tgz`)
-- TAR+BZIP2 (`.tar.bz2`)
-- TAR+XZ (`.tar.xz`, `.txz`)
-- ZIP (`.zip`)
+| Format | Extensions | Compression |
+|--------|------------|-------------|
+| TAR | `.tar` | None |
+| TAR+GZIP | `.tar.gz`, `.tgz` | gzip |
+| TAR+BZIP2 | `.tar.bz2`, `.tbz2` | bzip2 |
+| TAR+XZ | `.tar.xz`, `.txz` | xz/lzma |
+| TAR+ZSTD | `.tar.zst`, `.tzst` | zstandard |
+| ZIP | `.zip` | deflate, deflate64, bzip2, zstd |
 
 ## Project Structure
 
@@ -149,7 +151,7 @@ exarch/
 
 - Rust 1.89.0 or later (Edition 2024)
 - Python 3.9+ (for Python bindings)
-- Node.js 18+ (for Node.js bindings)
+- Node.js 14+ (for Node.js bindings)
 
 ### Build
 
@@ -160,15 +162,15 @@ cargo build --workspace
 ### Test
 
 ```bash
-cargo nextest run --workspace --all-features
+cargo nextest run --workspace
 ```
 
 ### Pre-commit Checks
 
 ```bash
 cargo +nightly fmt --all -- --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace
 cargo deny check
 ```
 
@@ -183,7 +185,7 @@ Contributions are welcome! Please read our contributing guidelines before submit
 
 Licensed under either of:
 
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
-- MIT License ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT License ([LICENSE-MIT](LICENSE-MIT))
 
 at your option.

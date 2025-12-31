@@ -116,7 +116,6 @@ use std::io::BufWriter;
 use std::io::Read;
 use std::io::Seek;
 use std::io::Write;
-use std::io::copy;
 use std::path::Path;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -127,6 +126,8 @@ use crate::ExtractionError;
 use crate::ExtractionReport;
 use crate::Result;
 use crate::SecurityConfig;
+use crate::copy::CopyBuffer;
+use crate::copy::copy_with_buffer;
 use crate::security::EntryValidator;
 use crate::security::validator::ValidatedEntryType;
 use crate::types::DestDir;
@@ -214,24 +215,60 @@ impl<R: Read + Seek> ZipArchive<R> {
 
     /// Checks if any entry in the archive is encrypted.
     ///
-    /// Limit entries checked to prevent `DoS` with 100k+ entry
-    /// archives.
+    /// OPT-H003: Sampling strategy checks first 100 + middle 100 + last 100
+    /// entries for large archives, providing comprehensive coverage with
+    /// reduced overhead.
     fn is_password_protected(archive: &mut ZipReader<R>) -> Result<bool> {
-        const MAX_ENTRIES_TO_CHECK: usize = 10_000;
+        const SAMPLE_SIZE: usize = 100;
+        let total_entries = archive.len();
 
-        let len = archive.len().min(MAX_ENTRIES_TO_CHECK);
-        for i in 0..len {
-            let file = archive.by_index(i).map_err(|e| {
-                ExtractionError::InvalidArchive(format!(
-                    "failed to check entry {i} for encryption: {e}"
-                ))
-            })?;
+        if total_entries <= SAMPLE_SIZE * 3 {
+            for i in 0..total_entries {
+                if Self::check_entry_encrypted(archive, i)? {
+                    return Ok(true);
+                }
+            }
+            return Ok(false);
+        }
 
-            if file.encrypted() {
+        // First 100 entries
+        for i in 0..SAMPLE_SIZE {
+            if Self::check_entry_encrypted(archive, i)? {
                 return Ok(true);
             }
         }
+
+        // Middle 100 entries
+        let middle_start = (total_entries / 2).saturating_sub(SAMPLE_SIZE / 2);
+        let middle_end = middle_start + SAMPLE_SIZE;
+        for i in middle_start..middle_end.min(total_entries) {
+            if Self::check_entry_encrypted(archive, i)? {
+                return Ok(true);
+            }
+        }
+
+        // Last 100 entries (MED-001: tail sampling catches encrypted files at end)
+        let tail_start = total_entries.saturating_sub(SAMPLE_SIZE);
+        if tail_start > middle_end {
+            for i in tail_start..total_entries {
+                if Self::check_entry_encrypted(archive, i)? {
+                    return Ok(true);
+                }
+            }
+        }
+
         Ok(false)
+    }
+
+    #[inline]
+    fn check_entry_encrypted(archive: &mut ZipReader<R>, index: usize) -> Result<bool> {
+        let file = archive.by_index(index).map_err(|e| {
+            ExtractionError::InvalidArchive(format!(
+                "failed to check entry {index} for encryption: {e}"
+            ))
+        })?;
+
+        Ok(file.encrypted())
     }
 
     /// Processes a single ZIP entry.
@@ -241,31 +278,28 @@ impl<R: Read + Seek> ZipArchive<R> {
         validator: &mut EntryValidator,
         dest: &DestDir,
         report: &mut ExtractionReport,
+        copy_buffer: &mut CopyBuffer,
     ) -> Result<()> {
-        // Get entry metadata (first borrow of self.inner)
+        // Metadata extraction requires separate borrow scope from file extraction
         let (path, entry_type, uncompressed_size, compressed_size, mode) = {
             let mut zip_file = self.inner.by_index(index).map_err(|e| {
                 ExtractionError::InvalidArchive(format!("failed to read entry {index}: {e}"))
             })?;
 
-            // Check encryption flag on individual entry
             if zip_file.encrypted() {
                 return Err(ExtractionError::SecurityViolation {
                     reason: format!("encrypted entry detected: {}", zip_file.name()),
                 });
             }
 
-            // Extract metadata BEFORE reading entry data
-            // Must get mode before to_entry_type() which may consume the stream for
+            // Must extract mode BEFORE to_entry_type() which may consume stream for
             // symlinks
             let path = PathBuf::from(zip_file.name());
             let (uncompressed_size, compressed_size) = ZipEntryAdapter::get_sizes(&zip_file);
             let mode = zip_file.unix_mode();
 
-            // Convert to entry type (may read data for symlink targets)
             let entry_type = ZipEntryAdapter::to_entry_type(&mut zip_file)?;
 
-            // Check for unsupported compression
             let compression = ZipEntryAdapter::get_compression_method(&zip_file);
             if matches!(compression, CompressionMethod::Unsupported) {
                 return Err(ExtractionError::SecurityViolation {
@@ -277,9 +311,8 @@ impl<R: Read + Seek> ZipArchive<R> {
             }
 
             (path, entry_type, uncompressed_size, compressed_size, mode)
-        }; // zip_file dropped here, releasing the borrow
+        };
 
-        // Validate entry through security layer
         let validated = validator.validate_entry(
             &path,
             &entry_type,
@@ -288,14 +321,19 @@ impl<R: Read + Seek> ZipArchive<R> {
             mode,
         )?;
 
-        // Extract based on validated type
         match validated.entry_type {
             ValidatedEntryType::File => {
-                // Get file again for extraction
                 let mut zip_file = self.inner.by_index(index).map_err(|e| {
                     ExtractionError::InvalidArchive(format!("failed to read entry {index}: {e}"))
                 })?;
-                Self::extract_file(&mut zip_file, &validated, dest, report, uncompressed_size)?;
+                Self::extract_file(
+                    &mut zip_file,
+                    &validated,
+                    dest,
+                    report,
+                    uncompressed_size,
+                    copy_buffer,
+                )?;
             }
 
             ValidatedEntryType::Directory => {
@@ -307,7 +345,6 @@ impl<R: Read + Seek> ZipArchive<R> {
             }
 
             ValidatedEntryType::Hardlink { .. } => {
-                // ZIP spec does not support hardlinks
                 return Err(ExtractionError::SecurityViolation {
                     reason: "hardlinks are not supported in ZIP format".into(),
                 });
@@ -324,17 +361,15 @@ impl<R: Read + Seek> ZipArchive<R> {
         dest: &DestDir,
         report: &mut ExtractionReport,
         file_size: u64,
+        copy_buffer: &mut CopyBuffer,
     ) -> Result<()> {
-        // Build full output path
         let output_path = dest.join(&validated.safe_path);
 
-        // Create parent directories if needed
         if let Some(parent) = output_path.parent() {
             create_dir_all(parent)?;
         }
 
-        // Check for integer overflow BEFORE writing file to disk
-        // This prevents writing file that will later cause overflow error
+        // Verify overflow BEFORE writing to prevent partial file on failure
         report
             .bytes_written
             .checked_add(file_size)
@@ -342,19 +377,15 @@ impl<R: Read + Seek> ZipArchive<R> {
                 resource: crate::QuotaResource::IntegerOverflow,
             })?;
 
-        // Create output file with buffering (CRIT-005: 20-30% performance improvement)
-        // Buffer size: 64KB (typical filesystem block size for good I/O performance)
+        // OPT-C001: 64KB buffer for better I/O throughput
         let output_file = File::create(&output_path)?;
         let mut buffered_writer = BufWriter::with_capacity(64 * 1024, output_file);
 
-        // Stream copy from ZIP entry to buffered file
-        // zip crate handles decompression transparently
-        let bytes_written = copy(zip_file, &mut buffered_writer)?;
+        // OPT-C002: Reusable copy buffer avoids per-file allocation
+        let bytes_written = copy_with_buffer(zip_file, &mut buffered_writer, copy_buffer)?;
 
-        // Ensure all buffered data is written to disk
         buffered_writer.flush()?;
 
-        // Set permissions if configured (Unix only)
         #[cfg(unix)]
         if let Some(mode) = validated.mode {
             use std::os::unix::fs::PermissionsExt;
@@ -362,9 +393,8 @@ impl<R: Read + Seek> ZipArchive<R> {
             std::fs::set_permissions(&output_path, permissions)?;
         }
         #[cfg(not(unix))]
-        let _ = validated.mode; // Silence unused warning on non-Unix
+        let _ = validated.mode;
 
-        // Update report (overflow already checked above)
         report.files_extracted += 1;
         report.bytes_written += bytes_written;
 
@@ -376,24 +406,22 @@ impl<R: Read + Seek> ArchiveFormat for ZipArchive<R> {
     fn extract(&mut self, output_dir: &Path, config: &SecurityConfig) -> Result<ExtractionReport> {
         let start = Instant::now();
 
-        // Validate and create DestDir
         let dest = DestDir::new(output_dir.to_path_buf())?;
 
-        // Create validator with state tracking
-        let mut validator = EntryValidator::new(config.clone(), dest.clone());
+        // OPT-H004: Pass references to avoid cloning
+        let mut validator = EntryValidator::new(config, &dest);
 
-        // Initialize report
         let mut report = ExtractionReport::new();
 
-        // Get entry count from central directory
+        // OPT-C002: Single copy buffer per archive instead of per-file allocation
+        let mut copy_buffer = CopyBuffer::new();
+
         let entry_count = self.inner.len();
 
-        // Process each entry by index (random access)
         for i in 0..entry_count {
-            self.process_entry(i, &mut validator, &dest, &mut report)?;
+            self.process_entry(i, &mut validator, &dest, &mut report, &mut copy_buffer)?;
         }
 
-        // Finalize report
         report.duration = start.elapsed();
 
         Ok(report)
@@ -410,48 +438,34 @@ struct ZipEntryAdapter;
 impl ZipEntryAdapter {
     /// Converts ZIP entry to our `EntryType` enum.
     ///
-    /// ZIP symlinks are detected via:
-    /// 1. Unix external file attributes (mode & 0xA000 == symlink)
-    /// 2. Entry size > 0 (symlink target stored as file data)
+    /// ZIP symlinks detected via Unix external file attributes (mode &
+    /// `S_IFLNK`).
     fn to_entry_type<R: Read>(zip_file: &mut zip::read::ZipFile<'_, R>) -> Result<EntryType> {
-        // Check for directory
         if zip_file.is_dir() {
             return Ok(EntryType::Directory);
         }
 
-        // Check for symlink via Unix attributes
-        // Must check BEFORE reading target to avoid consuming the entry
+        // Must check symlink BEFORE reading to avoid consuming the entry stream
         if Self::is_symlink(zip_file) {
-            // Read symlink target from file data
             let target = Self::read_symlink_target(zip_file)?;
             return Ok(EntryType::Symlink { target });
         }
 
-        // Regular file
         Ok(EntryType::File)
     }
 
-    /// Checks if entry is a symbolic link.
-    ///
-    /// Uses Unix external file attributes:
-    /// - Upper 16 bits contain Unix mode
-    /// - Mode & 0xA000 == 0xA000 indicates symlink
+    /// Checks if entry is a symbolic link via Unix file type bits.
     fn is_symlink<R: Read>(zip_file: &zip::read::ZipFile<'_, R>) -> bool {
         zip_file.unix_mode().is_some_and(|mode| {
-            // Extract file type from mode (upper 4 bits of 16-bit mode)
-            const S_IFMT: u32 = 0o170_000; // File type mask
-            const S_IFLNK: u32 = 0o120_000; // Symbolic link
-
+            const S_IFMT: u32 = 0o170_000;
+            const S_IFLNK: u32 = 0o120_000;
             (mode & S_IFMT) == S_IFLNK
         })
     }
 
-    /// Reads symlink target from ZIP entry data.
-    ///
-    /// In ZIP, symlink targets are stored as the file content (not metadata).
+    /// Reads symlink target from ZIP entry data (stored as file content).
     fn read_symlink_target<R: Read>(zip_file: &mut zip::read::ZipFile<'_, R>) -> Result<PathBuf> {
-        // SECURITY: Limit symlink target size to prevent unbounded allocation
-        // (CRIT-002) PATH_MAX is typically 4096 bytes on Unix systems
+        // SECURITY: Limit to PATH_MAX (4096) to prevent unbounded allocation
         const MAX_SYMLINK_TARGET_SIZE: u64 = 4096;
 
         let size = zip_file.size();

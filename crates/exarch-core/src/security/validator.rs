@@ -61,7 +61,7 @@ pub enum ValidatedEntryType {
 ///
 /// # Lifecycle
 ///
-/// 1. Create with `EntryValidator::new(config, dest)`
+/// 1. Create with `EntryValidator::new(&config, &dest)`
 /// 2. For each entry, call `validate_entry()`
 /// 3. After all entries processed, call `finish()` for final report
 ///
@@ -79,7 +79,7 @@ pub enum ValidatedEntryType {
 /// let dest = DestDir::new(PathBuf::from("/tmp"))?;
 /// let config = SecurityConfig::default();
 ///
-/// let mut validator = EntryValidator::new(config, dest);
+/// let mut validator = EntryValidator::new(&config, &dest);
 ///
 /// // Validate a file entry
 /// let entry = validator.validate_entry(
@@ -95,17 +95,19 @@ pub enum ValidatedEntryType {
 /// # Ok(())
 /// # }
 /// ```
-pub struct EntryValidator {
-    config: SecurityConfig,
-    dest: DestDir,
+/// OPT-H004: Validator uses references to avoid cloning config and dest.
+/// This eliminates 1 clone per extraction (`SecurityConfig` + `DestDir`).
+pub struct EntryValidator<'a> {
+    config: &'a SecurityConfig,
+    dest: &'a DestDir,
     quota_tracker: QuotaTracker,
     hardlink_tracker: HardlinkTracker,
 }
 
-impl EntryValidator {
-    /// Creates a new entry validator.
+impl<'a> EntryValidator<'a> {
+    /// Creates a new entry validator with the given security configuration.
     #[must_use]
-    pub fn new(config: SecurityConfig, dest: DestDir) -> Self {
+    pub fn new(config: &'a SecurityConfig, dest: &'a DestDir) -> Self {
         Self {
             config,
             dest,
@@ -153,7 +155,7 @@ impl EntryValidator {
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let dest = DestDir::new(PathBuf::from("/tmp"))?;
     /// let config = SecurityConfig::default();
-    /// let mut validator = EntryValidator::new(config, dest);
+    /// let mut validator = EntryValidator::new(&config, &dest);
     ///
     /// let entry = validator.validate_entry(
     ///     Path::new("file.txt"),
@@ -173,60 +175,45 @@ impl EntryValidator {
         compressed_size: Option<u64>,
         mode: Option<u32>,
     ) -> Result<ValidatedEntry> {
-        // 1. Validate path (always required)
-        let safe_path = validate_path(path, &self.dest, &self.config)?;
+        let safe_path = validate_path(path, self.dest, self.config)?;
 
-        // 2. Check quota (for files only)
         if matches!(entry_type, EntryType::File) {
             self.quota_tracker
-                .record_file(uncompressed_size, &self.config)?;
+                .record_file(uncompressed_size, self.config)?;
         }
 
-        // 3. Check compression ratio (if compressed size available)
         if let Some(compressed) = compressed_size {
-            validate_compression_ratio(compressed, uncompressed_size, &self.config)?;
+            validate_compression_ratio(compressed, uncompressed_size, self.config)?;
         }
 
-        // 4. Validate based on entry type
         let (validated_type, sanitized_mode) = match entry_type {
             EntryType::File => {
-                // Sanitize permissions if present
                 let sanitized = if let Some(m) = mode {
-                    Some(sanitize_permissions(safe_path.as_path(), m, &self.config)?)
+                    Some(sanitize_permissions(safe_path.as_path(), m, self.config)?)
                 } else {
                     None
                 };
-
                 (ValidatedEntryType::File, sanitized)
             }
 
-            EntryType::Directory => {
-                // Directories don't need permission sanitization
-                (ValidatedEntryType::Directory, None)
-            }
+            EntryType::Directory => (ValidatedEntryType::Directory, None),
 
             EntryType::Symlink { target } => {
-                let safe_symlink = validate_symlink(&safe_path, target, &self.dest, &self.config)?;
+                let safe_symlink = validate_symlink(&safe_path, target, self.dest, self.config)?;
                 (ValidatedEntryType::Symlink(safe_symlink), None)
             }
 
             EntryType::Hardlink { target } => {
-                // Hardlink tracker already validates the target path thoroughly
-                // (checks absolute paths, path traversal, normalization, escape attempts)
-                // No need to call validate_path again - that would be redundant validation
+                // Hardlink tracker validates: absolute paths, traversal, normalization, escapes
                 self.hardlink_tracker.validate_hardlink(
                     &safe_path,
                     target,
-                    &self.dest,
-                    &self.config,
+                    self.dest,
+                    self.config,
                 )?;
 
-                // Target is already validated by hardlink_tracker, safe to construct SafePath
-                // SAFETY: validate_hardlink has already verified:
-                // - Target is relative
-                // - No Windows-specific absolute path components
-                // - Normalized path is within destination
-                // - No path traversal attempts
+                // SAFETY: validate_hardlink verified target is relative, normalized, within
+                // dest
                 let target_safe = SafePath::new_unchecked(target.clone());
 
                 (
@@ -238,7 +225,6 @@ impl EntryValidator {
             }
         };
 
-        // 5. Return validated entry
         Ok(ValidatedEntry {
             safe_path,
             entry_type: validated_type,
@@ -284,17 +270,12 @@ mod tests {
     use std::path::PathBuf;
     use tempfile::TempDir;
 
-    fn create_test_validator() -> (TempDir, EntryValidator) {
+    #[test]
+    fn test_entry_validator_new() {
         let temp = TempDir::new().expect("failed to create temp dir");
         let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
         let config = SecurityConfig::default();
-        let validator = EntryValidator::new(config, dest);
-        (temp, validator)
-    }
-
-    #[test]
-    fn test_entry_validator_new() {
-        let (_temp, validator) = create_test_validator();
+        let validator = EntryValidator::new(&config, &dest);
         let report = validator.finish();
         assert_eq!(report.files_validated, 0);
         assert_eq!(report.total_bytes, 0);
@@ -303,7 +284,10 @@ mod tests {
 
     #[test]
     fn test_validate_file_entry() {
-        let (_temp, mut validator) = create_test_validator();
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
+        let config = SecurityConfig::default();
+        let mut validator = EntryValidator::new(&config, &dest);
 
         let result = validator.validate_entry(
             Path::new("file.txt"),
@@ -322,7 +306,10 @@ mod tests {
 
     #[test]
     fn test_validate_directory_entry() {
-        let (_temp, mut validator) = create_test_validator();
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
+        let config = SecurityConfig::default();
+        let mut validator = EntryValidator::new(&config, &dest);
 
         let result =
             validator.validate_entry(Path::new("dir"), &EntryType::Directory, 0, None, None);
@@ -335,7 +322,10 @@ mod tests {
 
     #[test]
     fn test_validate_path_traversal_rejected() {
-        let (_temp, mut validator) = create_test_validator();
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
+        let config = SecurityConfig::default();
+        let mut validator = EntryValidator::new(&config, &dest);
 
         let result = validator.validate_entry(
             Path::new("../etc/passwd"),
@@ -354,7 +344,7 @@ mod tests {
         let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
         let mut config = SecurityConfig::default();
         config.max_file_size = 100;
-        let mut validator = EntryValidator::new(config, dest);
+        let mut validator = EntryValidator::new(&config, &dest);
 
         let result = validator.validate_entry(
             Path::new("large.txt"),
@@ -373,7 +363,7 @@ mod tests {
         let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
         let mut config = SecurityConfig::default();
         config.max_file_count = 2;
-        let mut validator = EntryValidator::new(config, dest);
+        let mut validator = EntryValidator::new(&config, &dest);
 
         assert!(
             validator
@@ -410,7 +400,10 @@ mod tests {
 
     #[test]
     fn test_zip_bomb_detected() {
-        let (_temp, mut validator) = create_test_validator();
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
+        let config = SecurityConfig::default();
+        let mut validator = EntryValidator::new(&config, &dest);
 
         let result = validator.validate_entry(
             Path::new("bomb.txt"),
@@ -425,7 +418,10 @@ mod tests {
 
     #[test]
     fn test_validation_report() {
-        let (_temp, mut validator) = create_test_validator();
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
+        let config = SecurityConfig::default();
+        let mut validator = EntryValidator::new(&config, &dest);
 
         validator
             .validate_entry(
@@ -454,7 +450,10 @@ mod tests {
 
     #[test]
     fn test_sanitize_permissions_setuid() {
-        let (_temp, mut validator) = create_test_validator();
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
+        let config = SecurityConfig::default();
+        let mut validator = EntryValidator::new(&config, &dest);
 
         let result = validator.validate_entry(
             Path::new("file.txt"),
@@ -475,7 +474,7 @@ mod tests {
         let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
         let mut config = SecurityConfig::default();
         config.allowed.symlinks = true;
-        let mut validator = EntryValidator::new(config, dest);
+        let mut validator = EntryValidator::new(&config, &dest);
 
         let result = validator.validate_entry(
             Path::new("link"),
@@ -498,7 +497,7 @@ mod tests {
         let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
         let mut config = SecurityConfig::default();
         config.allowed.hardlinks = true;
-        let mut validator = EntryValidator::new(config, dest);
+        let mut validator = EntryValidator::new(&config, &dest);
 
         let result = validator.validate_entry(
             Path::new("link"),
@@ -524,7 +523,7 @@ mod tests {
         let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
         let mut config = SecurityConfig::default();
         config.allowed.hardlinks = true;
-        let mut validator = EntryValidator::new(config, dest);
+        let mut validator = EntryValidator::new(&config, &dest);
 
         // Validate multiple entry types
         validator
@@ -562,7 +561,10 @@ mod tests {
     // M-TEST-1: Empty directory handling
     #[test]
     fn test_empty_directory_validation() {
-        let (_temp, mut validator) = create_test_validator();
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
+        let config = SecurityConfig::default();
+        let mut validator = EntryValidator::new(&config, &dest);
 
         // Empty directory should be valid
         let result = validator.validate_entry(
@@ -584,7 +586,10 @@ mod tests {
 
     #[test]
     fn test_nested_empty_directories() {
-        let (_temp, mut validator) = create_test_validator();
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
+        let config = SecurityConfig::default();
+        let mut validator = EntryValidator::new(&config, &dest);
 
         // Multiple nested empty directories
         let dirs = ["a/", "a/b/", "a/b/c/"];
@@ -598,6 +603,68 @@ mod tests {
         assert_eq!(
             report.files_validated, 0,
             "directories are not counted as files"
+        );
+    }
+
+    // OPT-H004: Test validator uses references (no cloning)
+    #[test]
+    fn test_validator_uses_references() {
+        let temp = TempDir::new().unwrap();
+        let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
+        let config = SecurityConfig::default();
+
+        // Create validator with references
+        let validator = EntryValidator::new(&config, &dest);
+
+        // Verify config and dest are still accessible (not moved)
+        assert_eq!(
+            config.max_file_size,
+            SecurityConfig::default().max_file_size
+        );
+        // Note: dest.as_path() may be canonicalized on macOS (/var vs /private/var)
+        // Just verify dest is still accessible
+        let _ = dest.as_path();
+
+        // Validator can still be used
+        drop(validator);
+    }
+
+    // OPT-H004: Test multiple validators can share same config
+    #[test]
+    fn test_multiple_validators_share_config() {
+        let temp1 = TempDir::new().unwrap();
+        let temp2 = TempDir::new().unwrap();
+        let dest1 = DestDir::new(temp1.path().to_path_buf()).unwrap();
+        let dest2 = DestDir::new(temp2.path().to_path_buf()).unwrap();
+        let config = SecurityConfig::default();
+
+        // Create two validators sharing the same config reference
+        let mut validator1 = EntryValidator::new(&config, &dest1);
+        let mut validator2 = EntryValidator::new(&config, &dest2);
+
+        // Both validators work independently
+        let result1 = validator1.validate_entry(
+            Path::new("file1.txt"),
+            &EntryType::File,
+            1024,
+            None,
+            Some(0o644),
+        );
+        assert!(result1.is_ok());
+
+        let result2 = validator2.validate_entry(
+            Path::new("file2.txt"),
+            &EntryType::File,
+            2048,
+            None,
+            Some(0o644),
+        );
+        assert!(result2.is_ok());
+
+        // Config is still accessible
+        assert_eq!(
+            config.max_file_size,
+            SecurityConfig::default().max_file_size
         );
     }
 }

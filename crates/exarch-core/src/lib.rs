@@ -24,6 +24,7 @@
 pub mod api;
 pub mod archive;
 pub mod config;
+pub mod copy;
 pub mod error;
 pub mod extraction;
 pub mod formats;

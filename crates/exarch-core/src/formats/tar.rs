@@ -94,16 +94,18 @@ use std::io::BufReader;
 use std::io::BufWriter;
 use std::io::Read;
 use std::io::Write;
-use std::io::copy;
 use std::path::Path;
 use std::time::Instant;
 
+use smallvec::SmallVec;
 use tar::Archive;
 
 use crate::ExtractionError;
 use crate::ExtractionReport;
 use crate::Result;
 use crate::SecurityConfig;
+use crate::copy::CopyBuffer;
+use crate::copy::copy_with_buffer;
 use crate::error::QuotaResource;
 use crate::security::validator::EntryValidator;
 use crate::security::validator::ValidatedEntry;
@@ -182,8 +184,8 @@ impl<R: Read> TarArchive<R> {
         validator: &mut EntryValidator,
         dest: &DestDir,
         report: &mut ExtractionReport,
+        copy_buffer: &mut CopyBuffer,
     ) -> Result<Option<HardlinkInfo>> {
-        // Extract entry metadata
         let path = entry
             .path()
             .map_err(|e| ExtractionError::InvalidArchive(format!("invalid path: {e}")))?
@@ -193,13 +195,11 @@ impl<R: Read> TarArchive<R> {
         let size = TarEntryAdapter::get_uncompressed_size(&entry)?;
         let mode = entry.header().mode().ok();
 
-        // Validate entry through security layer
         let validated = validator.validate_entry(&path, &entry_type, size, None, mode)?;
 
-        // Extract based on validated type
         match validated.entry_type {
             ValidatedEntryType::File => {
-                Self::extract_file(entry, &validated, dest, report)?;
+                Self::extract_file(entry, &validated, dest, report, copy_buffer)?;
                 Ok(None)
             }
 
@@ -214,7 +214,7 @@ impl<R: Read> TarArchive<R> {
             }
 
             ValidatedEntryType::Hardlink { target } => {
-                // Defer hardlink creation to second pass
+                // Two-pass: defer hardlink creation until target files exist
                 Ok(Some(HardlinkInfo {
                     link_path: validated.safe_path,
                     target_path: target,
@@ -229,26 +229,21 @@ impl<R: Read> TarArchive<R> {
         validated: &ValidatedEntry,
         dest: &DestDir,
         report: &mut ExtractionReport,
+        copy_buffer: &mut CopyBuffer,
     ) -> Result<()> {
-        // Build full output path
         let output_path = dest.join(&validated.safe_path);
 
-        // Create parent directories if needed
         if let Some(parent) = output_path.parent() {
             create_dir_all(parent)?;
         }
 
-        // Create output file with buffering for optimal write performance
         let output_file = File::create(&output_path)?;
-        let mut buffered_writer = BufWriter::new(output_file);
+        let mut buffered_writer = BufWriter::with_capacity(64 * 1024, output_file);
 
-        // Stream copy from TAR entry to buffered file
-        let bytes_written = copy(&mut entry, &mut buffered_writer)?;
+        let bytes_written = copy_with_buffer(&mut entry, &mut buffered_writer, copy_buffer)?;
 
-        // Ensure all data is written before setting permissions
         buffered_writer.flush()?;
 
-        // Set permissions if configured (Unix only)
         #[cfg(unix)]
         if let Some(mode) = validated.mode {
             use std::os::unix::fs::PermissionsExt;
@@ -256,9 +251,8 @@ impl<R: Read> TarArchive<R> {
             std::fs::set_permissions(&output_path, permissions)?;
         }
         #[cfg(not(unix))]
-        let _ = validated.mode; // Silence unused warning on non-Unix
+        let _ = validated.mode;
 
-        // Update report
         report.files_extracted += 1;
         report.bytes_written = report.bytes_written.checked_add(bytes_written).ok_or(
             ExtractionError::QuotaExceeded {
@@ -270,7 +264,7 @@ impl<R: Read> TarArchive<R> {
     }
 
     /// Creates a hardlink in the second pass.
-    #[allow(unused_variables)] // Parameters used only on Unix
+    #[allow(unused_variables)]
     fn create_hardlink(
         info: &HardlinkInfo,
         dest: &DestDir,
@@ -283,7 +277,6 @@ impl<R: Read> TarArchive<R> {
             let link_path = dest.join(&info.link_path);
             let target_path = dest.join(&info.target_path);
 
-            // Verify target exists (should always pass due to two-pass)
             if !target_path.exists() {
                 return Err(ExtractionError::InvalidArchive(format!(
                     "hardlink target does not exist: {}",
@@ -291,12 +284,10 @@ impl<R: Read> TarArchive<R> {
                 )));
             }
 
-            // Create parent directories
             if let Some(parent) = link_path.parent() {
                 create_dir_all(parent)?;
             }
 
-            // Create hardlink
             hard_link(&target_path, &link_path)?;
 
             report.files_extracted += 1;
@@ -317,20 +308,16 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
     fn extract(&mut self, output_dir: &Path, config: &SecurityConfig) -> Result<ExtractionReport> {
         let start = Instant::now();
 
-        // Validate and create DestDir
         let dest = DestDir::new(output_dir.to_path_buf())?;
 
-        // Create validator with state tracking
-        let mut validator = EntryValidator::new(config.clone(), dest.clone());
+        let mut validator = EntryValidator::new(config, &dest);
 
-        // Initialize report
         let mut report = ExtractionReport::new();
 
-        // Collect hardlinks in first pass (two-pass extraction)
-        // Most archives have <16 hardlinks; pre-allocate to avoid reallocations
-        let mut hardlinks = Vec::with_capacity(16);
+        let mut hardlinks: SmallVec<[HardlinkInfo; 8]> = SmallVec::new();
 
-        // Iterate over TAR entries (streaming)
+        let mut copy_buffer = CopyBuffer::new();
+
         let entries = self
             .inner
             .entries()
@@ -341,20 +328,18 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
                 ExtractionError::InvalidArchive(format!("failed to read entry: {e}"))
             })?;
 
-            // Process entry (validation + extraction or defer)
             if let Some(hardlink_info) =
-                Self::process_entry(entry, &mut validator, &dest, &mut report)?
+                Self::process_entry(entry, &mut validator, &dest, &mut report, &mut copy_buffer)?
             {
                 hardlinks.push(hardlink_info);
             }
         }
 
-        // Second pass: Create hardlinks
+        // Two-pass extraction: create hardlinks after all target files exist
         for hardlink_info in &hardlinks {
             Self::create_hardlink(hardlink_info, &dest, &mut report)?;
         }
 
-        // Finalize report
         report.duration = start.elapsed();
 
         Ok(report)
@@ -1295,6 +1280,141 @@ mod tests {
                 assert!(msg.contains("hardlink target does not exist"));
             }
             _ => panic!("Expected InvalidArchive error for missing hardlink target"),
+        }
+    }
+
+    // OPT-H001: Test SmallVec stack allocation for hardlinks
+    #[test]
+    #[cfg(unix)]
+    fn test_hardlink_collection_stack_allocation() {
+        // Test with 7 hardlinks - should stay on stack (SmallVec<[T; 8]>)
+        let mut builder = tar::Builder::new(Vec::new());
+
+        // Add target file
+        let mut header = tar::Header::new_gnu();
+        header.set_size(5);
+        header.set_mode(0o644);
+        header.set_entry_type(tar::EntryType::Regular);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, "target.txt", &b"data\n"[..])
+            .unwrap();
+
+        // Add 7 hardlinks (stays on stack)
+        for i in 0..7 {
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Link);
+            header.set_link_name("target.txt").unwrap();
+            header.set_size(0);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, format!("link{i}.txt"), &[] as &[u8])
+                .unwrap();
+        }
+
+        let tar_data = builder.into_inner().unwrap();
+        let mut archive = TarArchive::new(Cursor::new(tar_data));
+
+        let temp = TempDir::new().unwrap();
+        let mut config = SecurityConfig::default();
+        config.allowed.hardlinks = true;
+
+        let report = archive.extract(temp.path(), &config).unwrap();
+
+        // 1 target file + 7 hardlinks = 8 files extracted
+        assert_eq!(report.files_extracted, 8);
+        for i in 0..7 {
+            assert!(temp.path().join(format!("link{i}.txt")).exists());
+        }
+    }
+
+    // OPT-H001: Test SmallVec heap spillover for hardlinks
+    #[test]
+    #[cfg(unix)]
+    fn test_hardlink_collection_heap_spillover() {
+        // Test with 20 hardlinks - should spill to heap
+        let mut builder = tar::Builder::new(Vec::new());
+
+        // Add target file
+        let mut header = tar::Header::new_gnu();
+        header.set_size(5);
+        header.set_mode(0o644);
+        header.set_entry_type(tar::EntryType::Regular);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, "target.txt", &b"data\n"[..])
+            .unwrap();
+
+        // Add 20 hardlinks (spills to heap)
+        for i in 0..20 {
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Link);
+            header.set_link_name("target.txt").unwrap();
+            header.set_size(0);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, format!("link{i}.txt"), &[] as &[u8])
+                .unwrap();
+        }
+
+        let tar_data = builder.into_inner().unwrap();
+        let mut archive = TarArchive::new(Cursor::new(tar_data));
+
+        let temp = TempDir::new().unwrap();
+        let mut config = SecurityConfig::default();
+        config.allowed.hardlinks = true;
+
+        let report = archive.extract(temp.path(), &config).unwrap();
+
+        // 1 target file + 20 hardlinks = 21 files extracted
+        assert_eq!(report.files_extracted, 21);
+        for i in 0..20 {
+            assert!(temp.path().join(format!("link{i}.txt")).exists());
+        }
+    }
+
+    // OPT-H001: Test SmallVec boundary at exactly 8 hardlinks
+    #[test]
+    #[cfg(unix)]
+    fn test_hardlink_collection_boundary() {
+        // Test with exactly 8 hardlinks - boundary case
+        let mut builder = tar::Builder::new(Vec::new());
+
+        // Add target file
+        let mut header = tar::Header::new_gnu();
+        header.set_size(5);
+        header.set_mode(0o644);
+        header.set_entry_type(tar::EntryType::Regular);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, "target.txt", &b"data\n"[..])
+            .unwrap();
+
+        // Add exactly 8 hardlinks (boundary case)
+        for i in 0..8 {
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Link);
+            header.set_link_name("target.txt").unwrap();
+            header.set_size(0);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, format!("link{i}.txt"), &[] as &[u8])
+                .unwrap();
+        }
+
+        let tar_data = builder.into_inner().unwrap();
+        let mut archive = TarArchive::new(Cursor::new(tar_data));
+
+        let temp = TempDir::new().unwrap();
+        let mut config = SecurityConfig::default();
+        config.allowed.hardlinks = true;
+
+        let report = archive.extract(temp.path(), &config).unwrap();
+
+        // 1 target file + 8 hardlinks = 9 files extracted
+        assert_eq!(report.files_extracted, 9);
+        for i in 0..8 {
+            assert!(temp.path().join(format!("link{i}.txt")).exists());
         }
     }
 }

@@ -2,8 +2,8 @@
 
 [![PyPI](https://img.shields.io/pypi/v/exarch)](https://pypi.org/project/exarch)
 [![Python](https://img.shields.io/pypi/pyversions/exarch)](https://pypi.org/project/exarch)
-[![CI](https://img.shields.io/github/actions/workflow/status/bug-ops/exarch/ci.yml?branch=main)](https://github.com/bug-ops/exarch/actions)
-[![License](https://img.shields.io/pypi/l/exarch)](LICENSE-MIT)
+[![CI](https://img.shields.io/github/actions/workflow/status/rabax/exarch/ci.yml?branch=main)](https://github.com/rabax/exarch/actions)
+[![License](https://img.shields.io/pypi/l/exarch)](../../LICENSE-MIT)
 
 Memory-safe archive extraction library for Python.
 
@@ -19,7 +19,7 @@ pip install exarch
 ```
 
 > [!TIP]
-> Use `uv pip install exarch` for faster installation (10-100x faster than pip).
+> Use `uv pip install exarch` for faster installation.
 
 ### Alternative Package Managers
 
@@ -41,9 +41,7 @@ pipenv install exarch
 import exarch
 
 result = exarch.extract_archive("archive.tar.gz", "/output/path")
-print(f"Extracted {result['files_extracted']} files")
-print(f"Total bytes: {result['bytes_written']}")
-print(f"Duration: {result['duration_ms']}ms")
+print(f"Extracted {result.files_extracted} files")
 ```
 
 ## Usage
@@ -53,16 +51,34 @@ print(f"Duration: {result['duration_ms']}ms")
 ```python
 import exarch
 
-# Extract with default security settings
-result = exarch.extract_archive(
-    archive_path="archive.tar.gz",
-    output_dir="/safe/output/directory"
-)
+result = exarch.extract_archive("archive.tar.gz", "/output/path")
 
-# Check results
-print(f"Files extracted: {result['files_extracted']}")
-print(f"Bytes written: {result['bytes_written']}")
-print(f"Duration: {result['duration_ms']}ms")
+print(f"Files extracted: {result.files_extracted}")
+print(f"Bytes written: {result.bytes_written}")
+print(f"Duration: {result.duration_ms}ms")
+```
+
+### With pathlib.Path
+
+```python
+from pathlib import Path
+import exarch
+
+archive = Path("archive.tar.gz")
+output = Path("/output/path")
+
+result = exarch.extract_archive(archive, output)
+```
+
+### Custom Security Configuration
+
+```python
+import exarch
+
+config = exarch.SecurityConfig()
+config = config.max_file_size(100 * 1024 * 1024)  # 100 MB
+
+result = exarch.extract_archive("archive.tar.gz", "/output", config)
 ```
 
 ### Error Handling
@@ -72,13 +88,20 @@ import exarch
 
 try:
     result = exarch.extract_archive("archive.tar.gz", "/output")
-except RuntimeError as e:
+    print(f"Extracted {result.files_extracted} files")
+except exarch.PathTraversalError as e:
+    print(f"Blocked path traversal: {e}")
+except exarch.ZipBombError as e:
+    print(f"Zip bomb detected: {e}")
+except exarch.SecurityViolationError as e:
+    print(f"Security violation: {e}")
+except exarch.ExtractionError as e:
     print(f"Extraction failed: {e}")
 ```
 
 ## API Reference
 
-### `extract_archive(archive_path, output_dir)`
+### `extract_archive(archive_path, output_dir, config=None)`
 
 Extract an archive to the specified directory with security validation.
 
@@ -86,22 +109,42 @@ Extract an archive to the specified directory with security validation.
 
 | Name | Type | Description |
 |------|------|-------------|
-| `archive_path` | `str` | Path to the archive file |
-| `output_dir` | `str` | Directory where files will be extracted |
+| `archive_path` | `str \| Path` | Path to the archive file |
+| `output_dir` | `str \| Path` | Directory where files will be extracted |
+| `config` | `SecurityConfig` | Optional security configuration |
 
-**Returns:**
+**Returns:** `ExtractionReport`
 
-A dictionary with extraction statistics:
-
-| Key | Type | Description |
-|-----|------|-------------|
+| Attribute | Type | Description |
+|-----------|------|-------------|
 | `files_extracted` | `int` | Number of files extracted |
 | `bytes_written` | `int` | Total bytes written |
 | `duration_ms` | `int` | Extraction duration in milliseconds |
 
 **Raises:**
 
-- `RuntimeError` - If extraction fails due to security violations or I/O errors
+| Exception | Description |
+|-----------|-------------|
+| `PathTraversalError` | Path traversal attempt detected |
+| `SymlinkEscapeError` | Symlink points outside extraction directory |
+| `HardlinkEscapeError` | Hardlink target outside extraction directory |
+| `ZipBombError` | Potential zip bomb detected |
+| `QuotaExceededError` | Resource quota exceeded |
+| `SecurityViolationError` | Security policy violation |
+| `UnsupportedFormatError` | Archive format not supported |
+| `InvalidArchiveError` | Archive is corrupted |
+| `IOError` | I/O operation failed |
+
+### `SecurityConfig`
+
+Builder-style security configuration.
+
+```python
+config = exarch.SecurityConfig()
+config = config.max_file_size(100 * 1024 * 1024)   # 100 MB per file
+config = config.max_total_size(1024 * 1024 * 1024) # 1 GB total
+config = config.max_file_count(10_000)              # Max 10k files
+```
 
 ## Security Features
 
@@ -117,15 +160,18 @@ The library provides built-in protection against:
 | Size limits | Enforces file and total size limits |
 
 > [!CAUTION]
-> Unlike Python's standard `tarfile` module, exarch applies security validation by default. This may cause some archives to fail extraction if they contain potentially malicious content.
+> Unlike Python's standard `tarfile` module, exarch applies security validation by default.
 
 ## Supported Formats
 
-- TAR (`.tar`)
-- TAR+GZIP (`.tar.gz`, `.tgz`)
-- TAR+BZIP2 (`.tar.bz2`)
-- TAR+XZ (`.tar.xz`, `.txz`)
-- ZIP (`.zip`)
+| Format | Extensions |
+|--------|------------|
+| TAR | `.tar` |
+| TAR+GZIP | `.tar.gz`, `.tgz` |
+| TAR+BZIP2 | `.tar.bz2`, `.tbz2` |
+| TAR+XZ | `.tar.xz`, `.txz` |
+| TAR+ZSTD | `.tar.zst`, `.tzst` |
+| ZIP | `.zip` |
 
 ## Comparison with tarfile
 
@@ -146,7 +192,7 @@ This package is built using [PyO3](https://pyo3.rs/) and [maturin](https://githu
 
 ```bash
 # Clone repository
-git clone https://github.com/bug-ops/exarch
+git clone https://github.com/rabax/exarch
 cd exarch/crates/exarch-python
 
 # Build with maturin
@@ -159,14 +205,14 @@ pytest tests/
 
 ## Related Packages
 
-- [exarch-core](../exarch-core) - Core Rust library
-- [exarch (npm)](../exarch-node) - Node.js bindings
+- [exarch-core](../exarch-core) — Core Rust library
+- [exarch (npm)](../exarch-node) — Node.js bindings
 
 ## License
 
 Licensed under either of:
 
-- Apache License, Version 2.0 ([LICENSE-APACHE](../../LICENSE-APACHE) or <http://www.apache.org/licenses/LICENSE-2.0>)
-- MIT License ([LICENSE-MIT](../../LICENSE-MIT) or <http://opensource.org/licenses/MIT>)
+- Apache License, Version 2.0 ([LICENSE-APACHE](../../LICENSE-APACHE))
+- MIT License ([LICENSE-MIT](../../LICENSE-MIT))
 
 at your option.

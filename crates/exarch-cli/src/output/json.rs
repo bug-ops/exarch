@@ -3,8 +3,10 @@
 use super::formatter::JsonOutput;
 use super::formatter::OutputFormatter;
 use anyhow::Result;
+use exarch_core::ArchiveManifest;
 use exarch_core::CreationReport;
 use exarch_core::ExtractionReport;
+use exarch_core::VerificationReport;
 use serde::Serialize;
 use std::io::Write;
 use std::io::{self};
@@ -110,6 +112,137 @@ impl OutputFormatter for JsonFormatter {
             },
         );
         let _ = Self::output(&output);
+    }
+
+    fn format_manifest_short(&self, manifest: &ArchiveManifest) -> Result<()> {
+        #[derive(Serialize)]
+        struct ManifestEntry {
+            path: String,
+        }
+
+        #[derive(Serialize)]
+        struct ManifestOutput {
+            format: String,
+            total_entries: usize,
+            entries: Vec<ManifestEntry>,
+        }
+
+        let entries = manifest
+            .entries
+            .iter()
+            .map(|e| ManifestEntry {
+                path: e.path.display().to_string(),
+            })
+            .collect();
+
+        let data = ManifestOutput {
+            format: format!("{:?}", manifest.format),
+            total_entries: manifest.total_entries,
+            entries,
+        };
+
+        let output = JsonOutput::success("list", data);
+        Self::output(&output)
+    }
+
+    fn format_manifest_long(
+        &self,
+        manifest: &ArchiveManifest,
+        _human_readable: bool,
+    ) -> Result<()> {
+        #[derive(Serialize)]
+        struct ManifestEntry {
+            path: String,
+            entry_type: String,
+            size: u64,
+            compressed_size: Option<u64>,
+            mode: Option<u32>,
+            modified: Option<u64>,
+        }
+
+        #[derive(Serialize)]
+        struct ManifestOutput {
+            format: String,
+            total_entries: usize,
+            total_size: u64,
+            entries: Vec<ManifestEntry>,
+        }
+
+        let entries = manifest
+            .entries
+            .iter()
+            .map(|e| ManifestEntry {
+                path: e.path.display().to_string(),
+                entry_type: format!("{}", e.entry_type),
+                size: e.size,
+                compressed_size: e.compressed_size,
+                mode: e.mode,
+                modified: e.modified.and_then(|t| {
+                    t.duration_since(std::time::UNIX_EPOCH)
+                        .ok()
+                        .map(|d| d.as_secs())
+                }),
+            })
+            .collect();
+
+        let data = ManifestOutput {
+            format: format!("{:?}", manifest.format),
+            total_entries: manifest.total_entries,
+            total_size: manifest.total_size,
+            entries,
+        };
+
+        let output = JsonOutput::success("list", data);
+        Self::output(&output)
+    }
+
+    fn format_verification_report(&self, report: &VerificationReport) -> Result<()> {
+        #[derive(Serialize)]
+        struct VerificationIssue {
+            severity: String,
+            category: String,
+            entry_path: Option<String>,
+            message: String,
+            context: Option<String>,
+        }
+
+        #[derive(Serialize)]
+        struct VerificationOutput {
+            status: String,
+            integrity_status: String,
+            security_status: String,
+            total_entries: usize,
+            suspicious_entries: usize,
+            total_size: u64,
+            format: String,
+            issues: Vec<VerificationIssue>,
+        }
+
+        let issues = report
+            .issues
+            .iter()
+            .map(|i| VerificationIssue {
+                severity: format!("{}", i.severity),
+                category: format!("{}", i.category),
+                entry_path: i.entry_path.as_ref().map(|p| p.display().to_string()),
+                message: i.message.clone(),
+                context: i.context.clone(),
+            })
+            .collect();
+
+        let data = VerificationOutput {
+            status: format!("{}", report.status),
+            integrity_status: format!("{}", report.integrity_status),
+            security_status: format!("{}", report.security_status),
+            total_entries: report.total_entries,
+            suspicious_entries: report.suspicious_entries,
+            total_size: report.total_size,
+            format: format!("{:?}", report.format),
+            issues,
+        };
+
+        let output = JsonOutput::success("verify", data);
+        Self::output(&output)
     }
 }
 

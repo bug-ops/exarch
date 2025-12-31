@@ -1,4 +1,4 @@
-//! High-level public API for archive extraction and creation.
+//! High-level public API for archive extraction, creation, and inspection.
 
 use std::path::Path;
 
@@ -9,6 +9,8 @@ use crate::creation::CreationConfig;
 use crate::creation::CreationReport;
 use crate::formats::detect::ArchiveType;
 use crate::formats::detect::detect_format;
+use crate::inspection::ArchiveManifest;
+use crate::inspection::VerificationReport;
 
 /// Extracts an archive to the specified output directory.
 ///
@@ -107,6 +109,97 @@ pub fn create_archive<P: AsRef<Path>, Q: AsRef<Path>>(
         ArchiveType::TarZst => crate::creation::tar::create_tar_zst(output, sources, config),
         ArchiveType::Zip => crate::creation::zip::create_zip(output, sources, config),
     }
+}
+
+/// Lists archive contents without extracting.
+///
+/// Returns a manifest containing metadata for all entries in the archive.
+/// No files are written to disk during this operation.
+///
+/// # Arguments
+///
+/// * `archive_path` - Path to archive file
+/// * `config` - Security configuration (quota limits apply)
+///
+/// # Errors
+///
+/// Returns error if:
+/// - Archive file cannot be opened
+/// - Archive format is unsupported or corrupted
+/// - Quota limits exceeded (file count, total size)
+///
+/// # Examples
+///
+/// ```no_run
+/// use exarch_core::SecurityConfig;
+/// use exarch_core::list_archive;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let config = SecurityConfig::default();
+/// let manifest = list_archive("archive.tar.gz", &config)?;
+///
+/// println!("Archive contains {} files", manifest.total_entries);
+/// for entry in manifest.entries {
+///     println!("{}: {} bytes", entry.path.display(), entry.size);
+/// }
+/// # Ok(())
+/// # }
+/// ```
+pub fn list_archive<P: AsRef<Path>>(
+    archive_path: P,
+    config: &SecurityConfig,
+) -> Result<ArchiveManifest> {
+    crate::inspection::list_archive(archive_path, config)
+}
+
+/// Verifies archive integrity and security without extracting.
+///
+/// Performs comprehensive validation:
+/// - Integrity checks (structure, checksums)
+/// - Security checks (path traversal, zip bombs, CVEs)
+/// - Policy checks (file types, permissions)
+///
+/// # Arguments
+///
+/// * `archive_path` - Path to archive file
+/// * `config` - Security configuration for validation
+///
+/// # Errors
+///
+/// Returns error if:
+/// - Archive file cannot be opened
+/// - Archive is severely corrupted (cannot read structure)
+///
+/// Security violations are reported in `VerificationReport.issues`,
+/// not as errors.
+///
+/// # Examples
+///
+/// ```no_run
+/// use exarch_core::SecurityConfig;
+/// use exarch_core::VerificationStatus;
+/// use exarch_core::verify_archive;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let config = SecurityConfig::default();
+/// let report = verify_archive("archive.tar.gz", &config)?;
+///
+/// if report.status == VerificationStatus::Pass {
+///     println!("Archive is safe to extract");
+/// } else {
+///     eprintln!("Security issues found:");
+///     for issue in report.issues {
+///         eprintln!("  [{}] {}", issue.severity, issue.message);
+///     }
+/// }
+/// # Ok(())
+/// # }
+/// ```
+pub fn verify_archive<P: AsRef<Path>>(
+    archive_path: P,
+    config: &SecurityConfig,
+) -> Result<VerificationReport> {
+    crate::inspection::verify_archive(archive_path, config)
 }
 
 /// Determines archive format from output path or config.

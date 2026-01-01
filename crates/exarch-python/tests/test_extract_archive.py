@@ -1,7 +1,6 @@
 """Integration tests for extract_archive function."""
 
 import pytest
-from pathlib import Path
 
 # TODO: Import exarch module once the extension is built
 # from exarch import extract_archive, SecurityConfig

@@ -1,8 +1,10 @@
 """CVE regression tests for exarch-python."""
 
-import pytest
-import exarch
 from pathlib import Path
+
+import pytest
+
+import exarch
 
 
 def test_cve_path_traversal(malicious_traversal_tar, temp_dir):
@@ -60,8 +62,8 @@ def test_symlink_allowed_within_directory(temp_dir):
     """
     Test that symlinks within the extraction directory are allowed when configured.
     """
-    import tarfile
     import io
+    import tarfile
 
     # Create archive with safe symlink (points to file within archive)
     archive_path = temp_dir / "safe_symlink.tar"
@@ -97,8 +99,8 @@ def test_absolute_path_blocked(temp_dir):
     """
     Test that absolute paths in archives are blocked.
     """
-    import tarfile
     import io
+    import tarfile
 
     # Create archive with absolute path
     archive_path = temp_dir / "absolute_path.tar"
@@ -136,7 +138,6 @@ def test_hardlink_escape(temp_dir):
     Verify that hardlinks pointing outside extraction directory are blocked.
     """
     import tarfile
-    import io
 
     # Create archive with hardlink escape attempt
     archive_path = temp_dir / "hardlink_escape.tar"

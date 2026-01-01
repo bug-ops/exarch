@@ -235,6 +235,11 @@ jobs:
           uv pip install --system maturin
           uv pip install --system --group dev
 
+      - name: Format check with ruff
+        run: |
+          cd crates/exarch-python
+          uv run --system ruff format --check .
+
       - name: Lint with ruff
         run: |
           cd crates/exarch-python
@@ -298,10 +303,15 @@ jobs:
           cd crates/exarch-node
           npm install
 
+      - name: Format check with Biome
+        run: |
+          cd crates/exarch-node
+          npm run format:check
+
       - name: Lint with Biome
         run: |
           cd crates/exarch-node
-          npm run check:ci
+          npm run lint
 
       - name: Build Node.js bindings
         run: |

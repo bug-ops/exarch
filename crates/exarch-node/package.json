@@ -1,6 +1,6 @@
 {
   "name": "exarch-rs",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Memory-safe archive extraction library with built-in security validation",
   "main": "index.js",
   "types": "index.d.ts",

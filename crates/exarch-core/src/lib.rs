@@ -30,6 +30,7 @@ pub mod error;
 pub mod extraction;
 pub mod formats;
 pub mod inspection;
+pub mod io;
 pub mod report;
 pub mod security;
 pub mod types;

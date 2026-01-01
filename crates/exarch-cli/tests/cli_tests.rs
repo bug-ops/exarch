@@ -1,9 +1,6 @@
 //! Integration tests for exarch-cli.
 //!
 //! Note: Tests use `unwrap`/`expect` which is acceptable in test code.
-//!
-//! Tests marked with `#[ignore]` require the exarch-core extraction engine
-//! to be fully implemented (currently a placeholder).
 
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::expect_used)]
@@ -53,8 +50,8 @@ fn test_extract_help() {
         .stdout(predicate::str::contains("Extract archive contents"));
 }
 
-/// Tests that extraction runs successfully (placeholder returns empty report).
-/// This test verifies CLI wiring, not actual extraction.
+/// Tests that extraction runs successfully.
+/// This test verifies CLI wiring and basic extraction.
 #[test]
 fn test_extract_runs_successfully() {
     let temp = TempDir::new().expect("failed to create temp dir");
@@ -68,9 +65,8 @@ fn test_extract_runs_successfully() {
         .stdout(predicate::str::contains("Extraction complete"));
 }
 
-/// Tests actual file extraction - requires core implementation.
+/// Tests actual file extraction.
 #[test]
-#[ignore = "requires exarch-core extraction engine implementation"]
 fn test_extract_creates_files() {
     let temp = TempDir::new().expect("failed to create temp dir");
 
@@ -103,14 +99,11 @@ fn test_extract_json_output_format() {
     let json: serde_json::Value = serde_json::from_slice(&output).expect("invalid JSON output");
     assert_eq!(json["status"], "success");
     assert_eq!(json["operation"], "extract");
-    // Verify structure exists, not specific values (placeholder returns 0)
     assert!(json["data"]["files_extracted"].is_number());
 }
 
-/// Tests JSON output with actual extraction counts - requires core
-/// implementation.
+/// Tests JSON output with actual extraction counts.
 #[test]
-#[ignore = "requires exarch-core extraction engine implementation"]
 fn test_extract_json_output_counts() {
     let temp = TempDir::new().expect("failed to create temp dir");
 
@@ -129,10 +122,8 @@ fn test_extract_json_output_counts() {
     assert!(json["data"]["files_extracted"].as_u64().unwrap() > 0);
 }
 
-/// Tests error handling for non-existent archives - requires core
-/// implementation.
+/// Tests error handling for non-existent archives.
 #[test]
-#[ignore = "requires exarch-core extraction engine implementation"]
 fn test_extract_nonexistent_archive() {
     let temp = TempDir::new().expect("failed to create temp dir");
 
@@ -142,7 +133,7 @@ fn test_extract_nonexistent_archive() {
         .arg(temp.path())
         .assert()
         .failure()
-        .stderr(predicate::str::contains("ERROR"));
+        .stderr(predicate::str::contains("Error:"));
 }
 
 #[test]
@@ -719,10 +710,6 @@ fn test_roundtrip_tar_gz_single_file() {
         .arg(&extract_dir)
         .assert()
         .success();
-
-    // Verify extracted file exists (placeholder may not actually extract)
-    // This test verifies CLI wiring, actual extraction tested when core is
-    // implemented
 }
 
 #[test]

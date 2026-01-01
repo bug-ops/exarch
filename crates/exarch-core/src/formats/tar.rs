@@ -520,22 +520,10 @@ pub fn open_tar_zst<P: AsRef<Path>>(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::test_utils::create_test_tar;
     use std::io::Cursor;
     use std::io::Write;
     use tempfile::TempDir;
-
-    /// Helper: Create in-memory TAR archive for testing
-    fn create_test_tar(entries: Vec<(&str, &[u8])>) -> Vec<u8> {
-        let mut ar = tar::Builder::new(Vec::new());
-        for (path, data) in entries {
-            let mut header = tar::Header::new_gnu();
-            header.set_size(data.len() as u64);
-            header.set_mode(0o644);
-            header.set_cksum();
-            ar.append_data(&mut header, path, data).unwrap();
-        }
-        ar.into_inner().unwrap()
-    }
 
     #[test]
     fn test_tar_archive_new() {

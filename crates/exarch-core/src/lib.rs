@@ -33,6 +33,7 @@ pub mod inspection;
 pub mod io;
 pub mod report;
 pub mod security;
+pub mod test_utils;
 pub mod types;
 
 // Re-export main API types

@@ -499,28 +499,12 @@ enum CompressionMethod {
 )]
 mod tests {
     use super::*;
+    use crate::test_utils::create_test_zip;
     use std::io::Cursor;
     use std::io::Write;
     use tempfile::TempDir;
     use zip::write::SimpleFileOptions;
     use zip::write::ZipWriter;
-
-    /// Helper: Create in-memory ZIP archive for testing
-    fn create_test_zip(entries: Vec<(&str, &[u8])>) -> Vec<u8> {
-        let buffer = Vec::new();
-        let mut zip = ZipWriter::new(Cursor::new(buffer));
-
-        let options = SimpleFileOptions::default()
-            .compression_method(zip::CompressionMethod::Stored)
-            .unix_permissions(0o644);
-
-        for (path, data) in entries {
-            zip.start_file(path, options).unwrap();
-            zip.write_all(data).unwrap();
-        }
-
-        zip.finish().unwrap().into_inner()
-    }
 
     #[test]
     fn test_zip_archive_new() {

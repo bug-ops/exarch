@@ -89,7 +89,6 @@
 //! ```
 
 use std::fs::File;
-use std::fs::create_dir_all;
 use std::io::BufReader;
 use std::io::Read;
 use std::path::Path;
@@ -240,6 +239,7 @@ impl<R: Read> TarArchive<R> {
     ) -> Result<()> {
         #[cfg(unix)]
         {
+            use std::fs::create_dir_all;
             use std::fs::hard_link;
 
             let link_path = dest.join(&info.link_path);

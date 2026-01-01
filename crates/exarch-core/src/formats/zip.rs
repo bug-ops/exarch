@@ -110,12 +110,8 @@
 //! // ... extract with config
 //! ```
 
-use std::fs::File;
-use std::fs::create_dir_all;
-use std::io::BufWriter;
 use std::io::Read;
 use std::io::Seek;
-use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -127,7 +123,6 @@ use crate::ExtractionReport;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::copy::CopyBuffer;
-use crate::copy::copy_with_buffer;
 use crate::security::EntryValidator;
 use crate::security::validator::ValidatedEntryType;
 use crate::types::DestDir;
@@ -363,42 +358,14 @@ impl<R: Read + Seek> ZipArchive<R> {
         file_size: u64,
         copy_buffer: &mut CopyBuffer,
     ) -> Result<()> {
-        let output_path = dest.join(&validated.safe_path);
-
-        if let Some(parent) = output_path.parent() {
-            create_dir_all(parent)?;
-        }
-
-        // Verify overflow BEFORE writing to prevent partial file on failure
-        report
-            .bytes_written
-            .checked_add(file_size)
-            .ok_or(ExtractionError::QuotaExceeded {
-                resource: crate::QuotaResource::IntegerOverflow,
-            })?;
-
-        // OPT-C001: 64KB buffer for better I/O throughput
-        let output_file = File::create(&output_path)?;
-        let mut buffered_writer = BufWriter::with_capacity(64 * 1024, output_file);
-
-        // OPT-C002: Reusable copy buffer avoids per-file allocation
-        let bytes_written = copy_with_buffer(zip_file, &mut buffered_writer, copy_buffer)?;
-
-        buffered_writer.flush()?;
-
-        #[cfg(unix)]
-        if let Some(mode) = validated.mode {
-            use std::os::unix::fs::PermissionsExt;
-            let permissions = std::fs::Permissions::from_mode(mode);
-            std::fs::set_permissions(&output_path, permissions)?;
-        }
-        #[cfg(not(unix))]
-        let _ = validated.mode;
-
-        report.files_extracted += 1;
-        report.bytes_written += bytes_written;
-
-        Ok(())
+        common::extract_file_generic(
+            zip_file,
+            validated,
+            dest,
+            report,
+            Some(file_size),
+            copy_buffer,
+        )
     }
 }
 

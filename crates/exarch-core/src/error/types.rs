@@ -1,4 +1,4 @@
-//! Error types for archive extraction operations.
+//! Core error types for archive extraction operations.
 
 use std::path::PathBuf;
 use thiserror::Error;

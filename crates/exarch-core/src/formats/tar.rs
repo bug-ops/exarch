@@ -89,11 +89,8 @@
 //! ```
 
 use std::fs::File;
-use std::fs::create_dir_all;
 use std::io::BufReader;
-use std::io::BufWriter;
 use std::io::Read;
-use std::io::Write;
 use std::path::Path;
 use std::time::Instant;
 
@@ -105,8 +102,6 @@ use crate::ExtractionReport;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::copy::CopyBuffer;
-use crate::copy::copy_with_buffer;
-use crate::error::QuotaResource;
 use crate::security::validator::EntryValidator;
 use crate::security::validator::ValidatedEntry;
 use crate::security::validator::ValidatedEntryType;
@@ -231,36 +226,8 @@ impl<R: Read> TarArchive<R> {
         report: &mut ExtractionReport,
         copy_buffer: &mut CopyBuffer,
     ) -> Result<()> {
-        let output_path = dest.join(&validated.safe_path);
-
-        if let Some(parent) = output_path.parent() {
-            create_dir_all(parent)?;
-        }
-
-        let output_file = File::create(&output_path)?;
-        let mut buffered_writer = BufWriter::with_capacity(64 * 1024, output_file);
-
-        let bytes_written = copy_with_buffer(&mut entry, &mut buffered_writer, copy_buffer)?;
-
-        buffered_writer.flush()?;
-
-        #[cfg(unix)]
-        if let Some(mode) = validated.mode {
-            use std::os::unix::fs::PermissionsExt;
-            let permissions = std::fs::Permissions::from_mode(mode);
-            std::fs::set_permissions(&output_path, permissions)?;
-        }
-        #[cfg(not(unix))]
-        let _ = validated.mode;
-
-        report.files_extracted += 1;
-        report.bytes_written = report.bytes_written.checked_add(bytes_written).ok_or(
-            ExtractionError::QuotaExceeded {
-                resource: QuotaResource::IntegerOverflow,
-            },
-        )?;
-
-        Ok(())
+        let size = entry.header().size().ok();
+        common::extract_file_generic(&mut entry, validated, dest, report, size, copy_buffer)
     }
 
     /// Creates a hardlink in the second pass.
@@ -272,6 +239,7 @@ impl<R: Read> TarArchive<R> {
     ) -> Result<()> {
         #[cfg(unix)]
         {
+            use std::fs::create_dir_all;
             use std::fs::hard_link;
 
             let link_path = dest.join(&info.link_path);

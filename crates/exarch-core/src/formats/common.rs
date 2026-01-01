@@ -1,56 +1,14 @@
 //! Common extraction utilities shared between archive formats.
 //!
 //! This module provides shared functionality for TAR and ZIP extractors
-//! to avoid code duplication.
+//! to avoid code duplication. It is an internal module not exposed in
+//! the public API.
 //!
-//! # Example
+//! # Functions
 //!
-//! ```no_run
-//! use exarch_core::ExtractionReport;
-//! use exarch_core::SecurityConfig;
-//! use exarch_core::copy::CopyBuffer;
-//! use exarch_core::formats::common::create_directory;
-//! use exarch_core::formats::common::extract_file_generic;
-//! use exarch_core::security::validator::ValidatedEntry;
-//! use exarch_core::types::DestDir;
-//! use exarch_core::types::EntryType;
-//! use exarch_core::types::SafePath;
-//! use std::io::Cursor;
-//! use std::path::PathBuf;
-//!
-//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! // Set up extraction context
-//! let dest = DestDir::new(PathBuf::from("/tmp/output"))?;
-//! let config = SecurityConfig::default();
-//! let mut report = ExtractionReport::default();
-//! let mut copy_buffer = CopyBuffer::new();
-//!
-//! // Create a directory entry
-//! let dir_entry = ValidatedEntry {
-//!     safe_path: SafePath::validate(&PathBuf::from("mydir"), &dest, &config)?,
-//!     mode: Some(0o755),
-//!     entry_type: EntryType::Directory,
-//! };
-//! create_directory(&dir_entry, &dest, &mut report)?;
-//!
-//! // Extract a file entry
-//! let file_entry = ValidatedEntry {
-//!     safe_path: SafePath::validate(&PathBuf::from("mydir/file.txt"), &dest, &config)?,
-//!     mode: Some(0o644),
-//!     entry_type: EntryType::RegularFile,
-//! };
-//! let mut reader = Cursor::new(b"file contents");
-//! extract_file_generic(
-//!     &mut reader,
-//!     &file_entry,
-//!     &dest,
-//!     &mut report,
-//!     Some(13), // expected size
-//!     &mut copy_buffer,
-//! )?;
-//! # Ok(())
-//! # }
-//! ```
+//! - [`extract_file_generic`]: Generic file extraction with buffered I/O
+//! - [`create_directory`]: Directory creation (idempotent)
+//! - [`create_symlink`]: Symbolic link creation (Unix only)
 
 use std::fs::File;
 use std::fs::create_dir_all;

@@ -14,7 +14,6 @@ categories.workspace = true
 [dependencies]
 bzip2.workspace = true
 flate2.workspace = true
-lru.workspace = true
 sevenz-rust2.workspace = true
 smallvec.workspace = true
 tar.workspace = true

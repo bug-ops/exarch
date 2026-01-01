@@ -46,3 +46,7 @@ harness = false
 [[bench]]
 name = "validation"
 harness = false
+
+[[bench]]
+name = "progress"
+harness = false

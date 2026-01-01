@@ -191,6 +191,97 @@ pub enum EntryType {
     },
 }
 
+/// Collects all entries from sources into a vector for single-pass processing.
+///
+/// This function performs a single directory traversal and collects all
+/// filtered entries into memory, avoiding the need to traverse the directory
+/// tree twice (once for counting, once for processing).
+///
+/// # Examples
+///
+/// ```no_run
+/// use exarch_core::creation::CreationConfig;
+/// use exarch_core::creation::walker::collect_entries;
+/// use std::path::Path;
+///
+/// let config = CreationConfig::default();
+/// let sources = [Path::new("./src")];
+/// let entries = collect_entries(&sources, &config)?;
+/// println!("Total entries: {}", entries.len());
+/// # Ok::<(), exarch_core::ExtractionError>(())
+/// ```
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - Source path does not exist
+/// - Directory traversal fails
+/// - File metadata cannot be read
+pub fn collect_entries<P: AsRef<Path>>(
+    sources: &[P],
+    config: &CreationConfig,
+) -> Result<Vec<FilteredEntry>> {
+    let mut entries = Vec::new();
+
+    for source in sources {
+        let path = source.as_ref();
+
+        if !path.exists() {
+            return Err(ExtractionError::SourceNotFound {
+                path: path.to_path_buf(),
+            });
+        }
+
+        if path.is_dir() {
+            let walker = FilteredWalker::new(path, config);
+            for entry in walker.walk() {
+                entries.push(entry?);
+            }
+        } else {
+            // For single files, we need to create a FilteredEntry manually
+            // This matches the behavior in tar.rs and zip.rs
+            let metadata = std::fs::metadata(path)?;
+            let size = if metadata.is_file() {
+                metadata.len()
+            } else {
+                0
+            };
+
+            let entry_type = if metadata.is_symlink() {
+                let target = std::fs::read_link(path)?;
+                EntryType::Symlink { target }
+            } else if metadata.is_dir() {
+                EntryType::Directory
+            } else {
+                EntryType::File
+            };
+
+            // Compute archive path using the same logic as in the format modules
+            let archive_path = if let Some(parent) = path.parent() {
+                filters::compute_archive_path(path, parent, config)?
+            } else {
+                path.file_name()
+                    .ok_or_else(|| {
+                        ExtractionError::Io(std::io::Error::other(format!(
+                            "cannot determine filename for {}",
+                            path.display()
+                        )))
+                    })?
+                    .into()
+            };
+
+            entries.push(FilteredEntry {
+                path: path.to_path_buf(),
+                archive_path,
+                entry_type,
+                size,
+            });
+        }
+    }
+
+    Ok(entries)
+}
+
 /// Gets the file size from metadata in a cross-platform way.
 #[cfg(unix)]
 fn get_file_size(metadata: &Metadata) -> u64 {
@@ -228,8 +319,8 @@ mod tests {
         let walker = FilteredWalker::new(root, &config);
         let entries: Vec<_> = walker.walk().collect::<Result<Vec<_>>>().unwrap();
 
-        // Should find: root dir, file1, file2, subdir, file3
-        assert!(entries.len() >= 4, "expected at least 4 entries");
+        // Should find exactly: root dir, file1, file2, subdir, file3 = 5 entries
+        assert_eq!(entries.len(), 5, "expected exactly 5 entries");
 
         let paths: Vec<_> = entries
             .iter()
@@ -504,5 +595,150 @@ mod tests {
                 target: PathBuf::from("b")
             }
         );
+    }
+
+    #[test]
+    fn test_collect_entries_empty_sources() {
+        let config = CreationConfig::default();
+        let sources: Vec<&Path> = vec![];
+
+        let entries = collect_entries(&sources, &config).unwrap();
+
+        assert_eq!(entries.len(), 0);
+    }
+
+    #[test]
+    fn test_collect_entries_nonexistent_source() {
+        let config = CreationConfig::default();
+        let sources = [Path::new("/nonexistent/path/that/does/not/exist")];
+
+        let result = collect_entries(&sources, &config);
+
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ExtractionError::SourceNotFound { .. }
+        ));
+    }
+
+    #[test]
+    fn test_collect_entries_mixed_files_and_directories() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+
+        // Create mixed structure
+        fs::write(root.join("single_file.txt"), "standalone").unwrap();
+        fs::create_dir(root.join("dir1")).unwrap();
+        fs::write(root.join("dir1/file1.txt"), "content1").unwrap();
+        fs::write(root.join("dir1/file2.txt"), "content2").unwrap();
+        fs::create_dir(root.join("dir2")).unwrap();
+        fs::write(root.join("dir2/file3.txt"), "content3").unwrap();
+
+        let config = CreationConfig::default().with_include_hidden(true);
+        let sources = [
+            root.join("single_file.txt"),
+            root.join("dir1"),
+            root.join("dir2"),
+        ];
+
+        let entries = collect_entries(&sources, &config).unwrap();
+
+        // Should have: single_file.txt (1) + dir1 entries (2 files + 1 dir = 3) + dir2
+        // entries (1 file + 1 dir = 2) = 6 total
+        assert!(
+            entries.len() >= 5,
+            "Expected at least 5 entries (files and dirs), got {}",
+            entries.len()
+        );
+
+        let paths: Vec<_> = entries
+            .iter()
+            .map(|e| e.archive_path.to_str().unwrap())
+            .collect();
+
+        assert!(paths.iter().any(|p| p.contains("single_file.txt")));
+        assert!(paths.iter().any(|p| p.contains("file1.txt")));
+        assert!(paths.iter().any(|p| p.contains("file2.txt")));
+        assert!(paths.iter().any(|p| p.contains("file3.txt")));
+    }
+
+    #[test]
+    fn test_collect_entries_large_directory_count() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+
+        // Create a directory with known number of entries
+        for i in 0..50 {
+            fs::write(root.join(format!("file_{i}.txt")), format!("content {i}")).unwrap();
+        }
+        fs::create_dir(root.join("subdir")).unwrap();
+        for i in 0..30 {
+            fs::write(
+                root.join(format!("subdir/file_{i}.txt")),
+                format!("sub content {i}"),
+            )
+            .unwrap();
+        }
+
+        let config = CreationConfig::default().with_include_hidden(true);
+        let sources = [root];
+
+        let entries = collect_entries(&sources, &config).unwrap();
+
+        // Should have: 50 files in root + 1 subdir + 1 root dir + 30 files in subdir =
+        // 82
+        assert!(
+            entries.len() >= 80,
+            "Expected at least 80 entries, got {}",
+            entries.len()
+        );
+    }
+
+    #[test]
+    fn test_collect_entries_single_file() {
+        let temp = TempDir::new().unwrap();
+        let file_path = temp.path().join("test.txt");
+        fs::write(&file_path, "content").unwrap();
+
+        let config = CreationConfig::default();
+        let sources = [&file_path];
+
+        let entries = collect_entries(&sources, &config).unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].entry_type, EntryType::File);
+        assert!(
+            entries[0]
+                .archive_path
+                .to_str()
+                .unwrap()
+                .contains("test.txt")
+        );
+    }
+
+    #[test]
+    fn test_collect_entries_respects_filters() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+
+        fs::write(root.join("keep.txt"), "keep").unwrap();
+        fs::write(root.join("skip.tmp"), "skip").unwrap();
+        fs::write(root.join(".hidden"), "hidden").unwrap();
+
+        let config = CreationConfig::default()
+            .with_exclude_patterns(vec!["*.tmp".to_string()])
+            .with_include_hidden(false);
+
+        let sources = [root];
+        let entries = collect_entries(&sources, &config).unwrap();
+
+        let paths: Vec<_> = entries
+            .iter()
+            .map(|e| e.archive_path.to_str().unwrap())
+            .collect();
+
+        assert!(paths.iter().any(|p| p.contains("keep.txt")));
+        assert!(!paths.iter().any(|p| p.contains("skip.tmp")));
+        assert!(!paths.iter().any(|p| p.contains(".hidden")));
     }
 }

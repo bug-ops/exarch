@@ -14,10 +14,16 @@ mod report;
 /// Maximum path length in bytes (Linux/macOS `PATH_MAX` is typically 4096)
 const MAX_PATH_LENGTH: usize = 4096;
 
+use config::PyCreationConfig;
 use config::PySecurityConfig;
 use error::convert_error;
 use error::register_exceptions;
+use report::PyArchiveEntry;
+use report::PyArchiveManifest;
+use report::PyCreationReport;
 use report::PyExtractionReport;
+use report::PyVerificationIssue;
+use report::PyVerificationReport;
 
 /// Extract an archive to the specified directory.
 ///
@@ -108,9 +114,13 @@ fn extract_archive(
     // NOTE: TOCTOU race condition - archive contents can change between check and
     // extraction. This is an accepted limitation when releasing the GIL for
     // performance.
-    let report = py
-        .detach(|| exarch_core::extract_archive(&archive_path, &output_dir, config_ref))
-        .map_err(convert_error)?;
+    let report = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        py.detach(|| exarch_core::extract_archive(&archive_path, &output_dir, config_ref))
+    }))
+    .map_err(|_| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Internal panic during extraction")
+    })?
+    .map_err(convert_error)?;
 
     Ok(PyExtractionReport::from(report))
 }
@@ -154,6 +164,311 @@ fn path_to_string(py: Python<'_>, path: &Bound<'_, PyAny>) -> PyResult<String> {
     Ok(path_str)
 }
 
+/// Create an archive from source files and directories.
+///
+/// # Arguments
+///
+/// * `output_path` - Path to output archive file (str or pathlib.Path)
+/// * `sources` - List of source files/directories to include (str or
+///   pathlib.Path)
+/// * `config` - Optional `CreationConfig` (uses defaults if None)
+///
+/// # Returns
+///
+/// `CreationReport` with creation statistics
+///
+/// # Raises
+///
+/// * `ValueError` - Invalid arguments
+/// * `IOError` - I/O operation failed
+/// * `UnsupportedFormatError` - Archive format not supported
+///
+/// # Examples
+///
+/// ```python
+/// from exarch import create_archive, CreationConfig
+///
+/// # Use defaults
+/// report = create_archive("output.tar.gz", ["source_dir/"])
+/// print(f"Created archive with {report.files_added} files")
+///
+/// # Customize configuration
+/// config = CreationConfig().compression_level(9)
+/// report = create_archive("output.tar.gz", ["src/"], config)
+/// ```
+#[pyfunction]
+#[pyo3(signature = (output_path, sources, config=None))]
+fn create_archive(
+    py: Python<'_>,
+    output_path: &Bound<'_, PyAny>,
+    sources: &Bound<'_, PyAny>,
+    config: Option<&PyCreationConfig>,
+) -> PyResult<PyCreationReport> {
+    let output_path = path_to_string(py, output_path)?;
+
+    // Convert sources to Vec<String>
+    let sources_list: Vec<Bound<'_, PyAny>> = sources.extract()?;
+    let source_paths: Vec<String> = sources_list
+        .iter()
+        .map(|s| path_to_string(py, s))
+        .collect::<PyResult<_>>()?;
+
+    let default_config = exarch_core::creation::CreationConfig::default();
+    let config_ref = config.map_or(&default_config, |c| c.as_core());
+
+    let report = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        py.detach(|| exarch_core::create_archive(&output_path, &source_paths, config_ref))
+    }))
+    .map_err(|_| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Internal panic during archive creation")
+    })?
+    .map_err(convert_error)?;
+
+    Ok(PyCreationReport::from(report))
+}
+
+/// List archive contents without extracting.
+///
+/// # Arguments
+///
+/// * `archive_path` - Path to archive file (str or pathlib.Path)
+/// * `config` - Optional `SecurityConfig` (uses secure defaults if None)
+///
+/// # Returns
+///
+/// `ArchiveManifest` with entry metadata
+///
+/// # Raises
+///
+/// * `ValueError` - Invalid arguments
+/// * `IOError` - I/O operation failed
+/// * `UnsupportedFormatError` - Archive format not supported
+///
+/// # Examples
+///
+/// ```python
+/// from exarch import list_archive
+///
+/// manifest = list_archive("archive.tar.gz")
+/// for entry in manifest.entries:
+///     print(f"{entry.path}: {entry.size} bytes")
+/// ```
+#[pyfunction]
+#[pyo3(signature = (archive_path, config=None))]
+fn list_archive(
+    py: Python<'_>,
+    archive_path: &Bound<'_, PyAny>,
+    config: Option<&PySecurityConfig>,
+) -> PyResult<PyArchiveManifest> {
+    let archive_path = path_to_string(py, archive_path)?;
+
+    let default_config = exarch_core::SecurityConfig::default();
+    let config_ref = config.map_or(&default_config, |c| c.as_core());
+
+    let manifest = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        py.detach(|| exarch_core::list_archive(&archive_path, config_ref))
+    }))
+    .map_err(|_| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Internal panic during archive listing")
+    })?
+    .map_err(convert_error)?;
+
+    Ok(PyArchiveManifest::from(manifest))
+}
+
+/// Verify archive integrity and security.
+///
+/// # Arguments
+///
+/// * `archive_path` - Path to archive file (str or pathlib.Path)
+/// * `config` - Optional `SecurityConfig` (uses secure defaults if None)
+///
+/// # Returns
+///
+/// `VerificationReport` with validation results
+///
+/// # Raises
+///
+/// * `ValueError` - Invalid arguments
+/// * `IOError` - I/O operation failed
+/// * `UnsupportedFormatError` - Archive format not supported
+///
+/// # Examples
+///
+/// ```python
+/// from exarch import verify_archive
+///
+/// report = verify_archive("archive.tar.gz")
+/// if report.is_safe():
+///     print("Archive is safe to extract")
+/// else:
+///     for issue in report.issues:
+///         print(f"[{issue.severity}] {issue.message}")
+/// ```
+#[pyfunction]
+#[pyo3(signature = (archive_path, config=None))]
+fn verify_archive(
+    py: Python<'_>,
+    archive_path: &Bound<'_, PyAny>,
+    config: Option<&PySecurityConfig>,
+) -> PyResult<PyVerificationReport> {
+    let archive_path = path_to_string(py, archive_path)?;
+
+    let default_config = exarch_core::SecurityConfig::default();
+    let config_ref = config.map_or(&default_config, |c| c.as_core());
+
+    let report = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        py.detach(|| exarch_core::verify_archive(&archive_path, config_ref))
+    }))
+    .map_err(|_| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+            "Internal panic during archive verification",
+        )
+    })?
+    .map_err(convert_error)?;
+
+    Ok(PyVerificationReport::from(report))
+}
+
+/// Create an archive with progress callback.
+///
+/// # Arguments
+///
+/// * `output_path` - Path to output archive file (str or pathlib.Path)
+/// * `sources` - List of source files/directories to include (str or
+///   pathlib.Path)
+/// * `config` - Optional `CreationConfig` (uses defaults if None)
+/// * `progress` - Optional progress callback function
+///
+/// Progress callback signature: `(path: str, total: int, current: int,
+/// bytes_written: int) -> None`
+///
+/// # Returns
+///
+/// `CreationReport` with creation statistics
+///
+/// # Raises
+///
+/// * `ValueError` - Invalid arguments
+/// * `IOError` - I/O operation failed
+/// * `UnsupportedFormatError` - Archive format not supported
+///
+/// # Examples
+///
+/// ```python
+/// from exarch import create_archive_with_progress
+///
+/// def progress(path: str, total: int, current: int, bytes: int):
+///     print(f"{current}/{total}: {path} ({bytes} bytes)")
+///
+/// report = create_archive_with_progress(
+///     "output.tar.gz", ["src/"], None, progress
+/// )
+/// ```
+#[pyfunction]
+#[pyo3(signature = (output_path, sources, config=None, progress=None))]
+fn create_archive_with_progress(
+    py: Python<'_>,
+    output_path: &Bound<'_, PyAny>,
+    sources: &Bound<'_, PyAny>,
+    config: Option<&PyCreationConfig>,
+    progress: Option<Py<PyAny>>,
+) -> PyResult<PyCreationReport> {
+    let output_path = path_to_string(py, output_path)?;
+
+    // Convert sources to Vec<String>
+    let sources_list: Vec<Bound<'_, PyAny>> = sources.extract()?;
+    let source_paths: Vec<String> = sources_list
+        .iter()
+        .map(|s| path_to_string(py, s))
+        .collect::<PyResult<_>>()?;
+
+    let default_config = exarch_core::creation::CreationConfig::default();
+    let config_ref = config.map_or(&default_config, |c| c.as_core());
+
+    // Create progress callback adapter
+    if let Some(py_callback) = progress {
+        let mut callback = PyProgressAdapter::new(py_callback);
+
+        // CRITICAL: Do NOT release GIL when using Python callback!
+        // Python callback requires GIL to call into Python.
+        let report = exarch_core::create_archive_with_progress(
+            &output_path,
+            &source_paths,
+            config_ref,
+            &mut callback,
+        )
+        .map_err(convert_error)?;
+
+        Ok(PyCreationReport::from(report))
+    } else {
+        // No progress callback - can release GIL
+        let mut noop = exarch_core::NoopProgress;
+        let report = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            py.detach(|| {
+                exarch_core::create_archive_with_progress(
+                    &output_path,
+                    &source_paths,
+                    config_ref,
+                    &mut noop,
+                )
+            })
+        }))
+        .map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "Internal panic during archive creation with progress",
+            )
+        })?
+        .map_err(convert_error)?;
+
+        Ok(PyCreationReport::from(report))
+    }
+}
+
+/// Adapter that calls Python callback from Rust.
+struct PyProgressAdapter {
+    callback: Py<PyAny>,
+    accumulated_bytes: u64,
+}
+
+impl PyProgressAdapter {
+    fn new(callback: Py<PyAny>) -> Self {
+        Self {
+            callback,
+            accumulated_bytes: 0,
+        }
+    }
+}
+
+impl exarch_core::ProgressCallback for PyProgressAdapter {
+    fn on_entry_start(&mut self, path: &std::path::Path, total: usize, current: usize) {
+        Python::attach(|py| {
+            let path_str = path.to_string_lossy().into_owned();
+            let _ = self
+                .callback
+                .call1(py, (path_str, total, current, self.accumulated_bytes));
+        });
+    }
+
+    fn on_bytes_written(&mut self, bytes: u64) {
+        self.accumulated_bytes += bytes;
+    }
+
+    fn on_entry_complete(&mut self, _path: &std::path::Path) {
+        // No-op: not exposed to Python (simplification)
+    }
+
+    fn on_complete(&mut self) {
+        // No-op: Python can detect completion when function returns
+    }
+}
+
+// SAFETY: We only call into Python when holding GIL via Python::attach
+// This is required because ProgressCallback trait requires Send.
+// The Py<PyAny> is Send-safe when accessed via GIL (Python::attach).
+#[allow(unsafe_code)]
+unsafe impl Send for PyProgressAdapter {}
+
 /// Python module definition.
 #[pymodule]
 fn exarch(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -164,12 +479,24 @@ fn exarch(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
 
-    // Top-level function
+    // Top-level functions
     m.add_function(wrap_pyfunction!(extract_archive, m)?)?;
+    m.add_function(wrap_pyfunction!(create_archive, m)?)?;
+    m.add_function(wrap_pyfunction!(create_archive_with_progress, m)?)?;
+    m.add_function(wrap_pyfunction!(list_archive, m)?)?;
+    m.add_function(wrap_pyfunction!(verify_archive, m)?)?;
 
-    // Classes
+    // Configuration classes
     m.add_class::<PySecurityConfig>()?;
+    m.add_class::<PyCreationConfig>()?;
+
+    // Report classes
     m.add_class::<PyExtractionReport>()?;
+    m.add_class::<PyCreationReport>()?;
+    m.add_class::<PyArchiveManifest>()?;
+    m.add_class::<PyArchiveEntry>()?;
+    m.add_class::<PyVerificationReport>()?;
+    m.add_class::<PyVerificationIssue>()?;
 
     // Exception types
     register_exceptions(m)?;

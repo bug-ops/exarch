@@ -40,6 +40,9 @@
 //!
 //! MIT OR Apache-2.0
 
+// Allow trailing_empty_array from napi macro - this is expected behavior
+#![allow(clippy::trailing_empty_array)]
+
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
@@ -48,9 +51,13 @@ mod error;
 mod report;
 mod utils;
 
+use config::CreationConfig;
 use config::SecurityConfig;
 use error::convert_error;
+use report::ArchiveManifest;
+use report::CreationReport;
 use report::ExtractionReport;
+use report::VerificationReport;
 use utils::validate_path;
 
 /// Extract an archive to the specified directory (async).
@@ -127,12 +134,9 @@ pub async fn extract_archive(
     validate_path(&archive_path)?;
     validate_path(&output_dir)?;
 
-    // Get config reference or use default
-    let default_config = exarch_core::SecurityConfig::default();
-    let config_ref = config.map_or(&default_config, |c| c.as_core());
-
-    // Use Arc to share config across thread boundary without cloning
-    let config_arc = std::sync::Arc::new(config_ref.clone());
+    // Get owned config - clone only when config is Some, use default otherwise
+    let config_owned: exarch_core::SecurityConfig =
+        config.map(|c| c.as_core().clone()).unwrap_or_default();
 
     // Run extraction on tokio thread pool
     //
@@ -146,7 +150,7 @@ pub async fn extract_archive(
     // For maximum security with untrusted archives, use extractArchiveSync()
     // or ensure exclusive file access (e.g., flock) during extraction.
     let report = tokio::task::spawn_blocking(move || {
-        exarch_core::extract_archive(&archive_path, &output_dir, &config_arc)
+        exarch_core::extract_archive(&archive_path, &output_dir, &config_owned)
     })
     .await
     .map_err(|e| Error::from_reason(format!("task execution failed: {e}")))?
@@ -211,6 +215,309 @@ pub fn extract_archive_sync(
     Ok(ExtractionReport::from(report))
 }
 
+/// Create an archive from source files and directories (async).
+///
+/// # Arguments
+///
+/// * `output_path` - Path to output archive file
+/// * `sources` - Array of source files/directories to include
+/// * `config` - Optional `CreationConfig` (uses defaults if omitted)
+///
+/// # Returns
+///
+/// Promise resolving to `CreationReport` with creation statistics
+///
+/// # Errors
+///
+/// Returns error if path validation fails, archive creation fails, or I/O
+/// errors occur.
+///
+/// # Examples
+///
+/// ```javascript
+/// // Use defaults
+/// const report = await createArchive('output.tar.gz', ['source_dir/']);
+/// console.log(`Created archive with ${report.filesAdded} files`);
+///
+/// // Customize configuration
+/// const config = new CreationConfig().compressionLevel(9);
+/// const report = await createArchive('output.tar.gz', ['src/'], config);
+/// ```
+#[napi]
+#[allow(clippy::needless_pass_by_value)]
+pub async fn create_archive(
+    output_path: String,
+    sources: Vec<String>,
+    config: Option<&CreationConfig>,
+) -> Result<CreationReport> {
+    validate_path(&output_path)?;
+    for source in &sources {
+        validate_path(source)?;
+    }
+
+    // Get owned config - clone only when config is Some, use default otherwise
+    let config_owned: exarch_core::creation::CreationConfig =
+        config.map(|c| c.as_core().clone()).unwrap_or_default();
+
+    let report = tokio::task::spawn_blocking(move || {
+        let sources_refs: Vec<&str> = sources.iter().map(String::as_str).collect();
+        exarch_core::create_archive(&output_path, &sources_refs, &config_owned)
+    })
+    .await
+    .map_err(|e| Error::from_reason(format!("task execution failed: {e}")))?
+    .map_err(convert_error)?;
+
+    Ok(CreationReport::from(report))
+}
+
+/// Create an archive from source files and directories (sync).
+///
+/// Synchronous version of `createArchive`. Blocks the event loop until
+/// creation completes. Prefer the async version for most use cases.
+///
+/// # Arguments
+///
+/// * `output_path` - Path to output archive file
+/// * `sources` - Array of source files/directories to include
+/// * `config` - Optional `CreationConfig` (uses defaults if omitted)
+///
+/// # Returns
+///
+/// `CreationReport` with creation statistics
+///
+/// # Errors
+///
+/// Returns error if path validation fails, archive creation fails, or I/O
+/// errors occur.
+///
+/// # Examples
+///
+/// ```javascript
+/// // Use defaults
+/// const report = createArchiveSync('output.tar.gz', ['source_dir/']);
+/// console.log(`Created archive with ${report.filesAdded} files`);
+/// ```
+#[napi]
+#[allow(clippy::needless_pass_by_value)]
+pub fn create_archive_sync(
+    output_path: String,
+    sources: Vec<String>,
+    config: Option<&CreationConfig>,
+) -> Result<CreationReport> {
+    validate_path(&output_path)?;
+    for source in &sources {
+        validate_path(source)?;
+    }
+
+    let default_config = exarch_core::creation::CreationConfig::default();
+    let config_ref = config.map_or(&default_config, |c| c.as_core());
+
+    let sources_refs: Vec<&str> = sources.iter().map(String::as_str).collect();
+
+    let report = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        exarch_core::create_archive(&output_path, &sources_refs, config_ref)
+    }))
+    .map_err(|_| Error::from_reason("Internal panic during archive creation"))?
+    .map_err(convert_error)?;
+
+    Ok(CreationReport::from(report))
+}
+
+/// List archive contents without extracting (async).
+///
+/// # Arguments
+///
+/// * `archive_path` - Path to archive file
+/// * `config` - Optional `SecurityConfig` (uses secure defaults if omitted)
+///
+/// # Returns
+///
+/// Promise resolving to `ArchiveManifest` with entry metadata
+///
+/// # Errors
+///
+/// Returns error if path validation fails, archive is invalid, or I/O errors
+/// occur.
+///
+/// # Examples
+///
+/// ```javascript
+/// const manifest = await listArchive('archive.tar.gz');
+/// for (const entry of manifest.entries) {
+///     console.log(`${entry.path}: ${entry.size} bytes`);
+/// }
+/// ```
+#[napi]
+#[allow(clippy::needless_pass_by_value)]
+pub async fn list_archive(
+    archive_path: String,
+    config: Option<&SecurityConfig>,
+) -> Result<ArchiveManifest> {
+    validate_path(&archive_path)?;
+
+    // Get owned config - clone only when config is Some, use default otherwise
+    let config_owned: exarch_core::SecurityConfig =
+        config.map(|c| c.as_core().clone()).unwrap_or_default();
+
+    let manifest = tokio::task::spawn_blocking(move || {
+        exarch_core::list_archive(&archive_path, &config_owned)
+    })
+    .await
+    .map_err(|e| Error::from_reason(format!("task execution failed: {e}")))?
+    .map_err(convert_error)?;
+
+    Ok(ArchiveManifest::from(manifest))
+}
+
+/// List archive contents without extracting (sync).
+///
+/// Synchronous version of `listArchive`. Blocks the event loop until
+/// listing completes. Prefer the async version for most use cases.
+///
+/// # Arguments
+///
+/// * `archive_path` - Path to archive file
+/// * `config` - Optional `SecurityConfig` (uses secure defaults if omitted)
+///
+/// # Returns
+///
+/// `ArchiveManifest` with entry metadata
+///
+/// # Errors
+///
+/// Returns error if path validation fails, archive is invalid, or I/O errors
+/// occur.
+///
+/// # Examples
+///
+/// ```javascript
+/// const manifest = listArchiveSync('archive.tar.gz');
+/// for (const entry of manifest.entries) {
+///     console.log(`${entry.path}: ${entry.size} bytes`);
+/// }
+/// ```
+#[napi]
+#[allow(clippy::needless_pass_by_value)]
+pub fn list_archive_sync(
+    archive_path: String,
+    config: Option<&SecurityConfig>,
+) -> Result<ArchiveManifest> {
+    validate_path(&archive_path)?;
+
+    let default_config = exarch_core::SecurityConfig::default();
+    let config_ref = config.map_or(&default_config, |c| c.as_core());
+
+    let manifest = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        exarch_core::list_archive(&archive_path, config_ref)
+    }))
+    .map_err(|_| Error::from_reason("Internal panic during archive listing"))?
+    .map_err(convert_error)?;
+
+    Ok(ArchiveManifest::from(manifest))
+}
+
+/// Verify archive integrity and security (async).
+///
+/// # Arguments
+///
+/// * `archive_path` - Path to archive file
+/// * `config` - Optional `SecurityConfig` (uses secure defaults if omitted)
+///
+/// # Returns
+///
+/// Promise resolving to `VerificationReport` with validation results
+///
+/// # Errors
+///
+/// Returns error if path validation fails, archive is invalid, or I/O errors
+/// occur.
+///
+/// # Examples
+///
+/// ```javascript
+/// const report = await verifyArchive('archive.tar.gz');
+/// if (report.status === 'PASS') {
+///     console.log('Archive is safe to extract');
+/// } else {
+///     for (const issue of report.issues) {
+///         console.log(`[${issue.severity}] ${issue.message}`);
+///     }
+/// }
+/// ```
+#[napi]
+#[allow(clippy::needless_pass_by_value)]
+pub async fn verify_archive(
+    archive_path: String,
+    config: Option<&SecurityConfig>,
+) -> Result<VerificationReport> {
+    validate_path(&archive_path)?;
+
+    // Get owned config - clone only when config is Some, use default otherwise
+    let config_owned: exarch_core::SecurityConfig =
+        config.map(|c| c.as_core().clone()).unwrap_or_default();
+
+    let report = tokio::task::spawn_blocking(move || {
+        exarch_core::verify_archive(&archive_path, &config_owned)
+    })
+    .await
+    .map_err(|e| Error::from_reason(format!("task execution failed: {e}")))?
+    .map_err(convert_error)?;
+
+    Ok(VerificationReport::from(report))
+}
+
+/// Verify archive integrity and security (sync).
+///
+/// Synchronous version of `verifyArchive`. Blocks the event loop until
+/// verification completes. Prefer the async version for most use cases.
+///
+/// # Arguments
+///
+/// * `archive_path` - Path to archive file
+/// * `config` - Optional `SecurityConfig` (uses secure defaults if omitted)
+///
+/// # Returns
+///
+/// `VerificationReport` with validation results
+///
+/// # Errors
+///
+/// Returns error if path validation fails, archive is invalid, or I/O errors
+/// occur.
+///
+/// # Examples
+///
+/// ```javascript
+/// const report = verifyArchiveSync('archive.tar.gz');
+/// if (report.status === 'PASS') {
+///     console.log('Archive is safe to extract');
+/// }
+/// ```
+#[napi]
+#[allow(clippy::needless_pass_by_value)]
+pub fn verify_archive_sync(
+    archive_path: String,
+    config: Option<&SecurityConfig>,
+) -> Result<VerificationReport> {
+    validate_path(&archive_path)?;
+
+    let default_config = exarch_core::SecurityConfig::default();
+    let config_ref = config.map_or(&default_config, |c| c.as_core());
+
+    let report = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        exarch_core::verify_archive(&archive_path, config_ref)
+    }))
+    .map_err(|_| Error::from_reason("Internal panic during archive verification"))?
+    .map_err(convert_error)?;
+
+    Ok(VerificationReport::from(report))
+}
+
+// NOTE: Progress callback support (createArchiveWithProgress) is planned for
+// a future release. The napi-rs 3.x ThreadsafeFunction API requires additional
+// work to properly bridge Rust ProgressCallback trait to JavaScript callbacks.
+// For now, use createArchive/createArchiveSync without progress tracking.
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -220,12 +527,6 @@ pub fn extract_archive_sync(
 )]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_module_exports_functions() {
-        // This test just ensures the module compiles and exports the expected
-        // functions. Runtime tests would require actual archive files.
-    }
 
     // CR-004: Path validation tests
     #[tokio::test]
@@ -424,5 +725,243 @@ mod tests {
             );
         }
         // If it succeeds, path validation passed (which is what we're testing)
+    }
+
+    // CR-004: create_archive path validation tests
+    #[tokio::test]
+    async fn test_create_archive_rejects_null_byte_in_output_path() {
+        let result = create_archive(
+            "/tmp/output\0malicious.tar".to_string(),
+            vec!["source/".to_string()],
+            None,
+        )
+        .await;
+
+        assert!(result.is_err(), "should reject null bytes in output path");
+        assert!(
+            result.unwrap_err().to_string().contains("null bytes"),
+            "error message should mention null bytes"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_archive_rejects_null_byte_in_source_path() {
+        let result = create_archive(
+            "/tmp/output.tar".to_string(),
+            vec!["source\0malicious/".to_string()],
+            None,
+        )
+        .await;
+
+        assert!(result.is_err(), "should reject null bytes in source path");
+        assert!(
+            result.unwrap_err().to_string().contains("null bytes"),
+            "error message should mention null bytes"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_archive_rejects_excessively_long_output_path() {
+        let long_path = "x".repeat(5000);
+        let result = create_archive(long_path, vec!["source/".to_string()], None).await;
+
+        assert!(result.is_err(), "should reject excessively long paths");
+        assert!(
+            result.unwrap_err().to_string().contains("maximum length"),
+            "error message should mention length limit"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_archive_rejects_excessively_long_source_path() {
+        let long_path = "x".repeat(5000);
+        let result = create_archive("/tmp/output.tar".to_string(), vec![long_path], None).await;
+
+        assert!(result.is_err(), "should reject excessively long paths");
+        assert!(
+            result.unwrap_err().to_string().contains("maximum length"),
+            "error message should mention length limit"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_archive_accepts_empty_sources_array() {
+        // Empty sources array should pass boundary validation
+        // Core library will handle actual validation
+        let result = create_archive("/tmp/output.tar".to_string(), vec![], None).await;
+
+        // If it fails, ensure it's not a boundary path validation error
+        if let Err(e) = result {
+            let err_msg = e.to_string();
+            assert!(
+                !err_msg.contains("null bytes") && !err_msg.contains("maximum length"),
+                "should not fail on boundary path validation, got: {}",
+                err_msg
+            );
+        }
+    }
+
+    #[test]
+    fn test_create_archive_sync_rejects_null_byte_in_output_path() {
+        let result = create_archive_sync(
+            "/tmp/output\0malicious.tar".to_string(),
+            vec!["source/".to_string()],
+            None,
+        );
+
+        assert!(result.is_err(), "should reject null bytes in output path");
+        assert!(
+            result.unwrap_err().to_string().contains("null bytes"),
+            "error message should mention null bytes"
+        );
+    }
+
+    #[test]
+    fn test_create_archive_sync_rejects_null_byte_in_source_path() {
+        let result = create_archive_sync(
+            "/tmp/output.tar".to_string(),
+            vec!["source\0malicious/".to_string()],
+            None,
+        );
+
+        assert!(result.is_err(), "should reject null bytes in source path");
+        assert!(
+            result.unwrap_err().to_string().contains("null bytes"),
+            "error message should mention null bytes"
+        );
+    }
+
+    #[test]
+    fn test_create_archive_sync_rejects_excessively_long_output_path() {
+        let long_path = "x".repeat(5000);
+        let result = create_archive_sync(long_path, vec!["source/".to_string()], None);
+
+        assert!(result.is_err(), "should reject excessively long paths");
+        assert!(
+            result.unwrap_err().to_string().contains("maximum length"),
+            "error message should mention length limit"
+        );
+    }
+
+    #[test]
+    fn test_create_archive_sync_rejects_excessively_long_source_path() {
+        let long_path = "x".repeat(5000);
+        let result = create_archive_sync("/tmp/output.tar".to_string(), vec![long_path], None);
+
+        assert!(result.is_err(), "should reject excessively long paths");
+        assert!(
+            result.unwrap_err().to_string().contains("maximum length"),
+            "error message should mention length limit"
+        );
+    }
+
+    #[test]
+    fn test_create_archive_sync_accepts_empty_sources_array() {
+        // Empty sources array should pass boundary validation
+        let result = create_archive_sync("/tmp/output.tar".to_string(), vec![], None);
+
+        // If it fails, ensure it's not a boundary path validation error
+        if let Err(e) = result {
+            let err_msg = e.to_string();
+            assert!(
+                !err_msg.contains("null bytes") && !err_msg.contains("maximum length"),
+                "should not fail on boundary path validation, got: {}",
+                err_msg
+            );
+        }
+    }
+
+    // CR-004: list_archive path validation tests
+    #[tokio::test]
+    async fn test_list_archive_rejects_null_byte_in_archive_path() {
+        let result = list_archive("/tmp/test\0malicious.tar".to_string(), None).await;
+
+        assert!(result.is_err(), "should reject null bytes in archive path");
+        assert!(
+            result.unwrap_err().to_string().contains("null bytes"),
+            "error message should mention null bytes"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_list_archive_rejects_excessively_long_archive_path() {
+        let long_path = "x".repeat(5000);
+        let result = list_archive(long_path, None).await;
+
+        assert!(result.is_err(), "should reject excessively long paths");
+        assert!(
+            result.unwrap_err().to_string().contains("maximum length"),
+            "error message should mention length limit"
+        );
+    }
+
+    #[test]
+    fn test_list_archive_sync_rejects_null_byte_in_archive_path() {
+        let result = list_archive_sync("/tmp/test\0malicious.tar".to_string(), None);
+
+        assert!(result.is_err(), "should reject null bytes in archive path");
+        assert!(
+            result.unwrap_err().to_string().contains("null bytes"),
+            "error message should mention null bytes"
+        );
+    }
+
+    #[test]
+    fn test_list_archive_sync_rejects_excessively_long_archive_path() {
+        let long_path = "x".repeat(5000);
+        let result = list_archive_sync(long_path, None);
+
+        assert!(result.is_err(), "should reject excessively long paths");
+        assert!(
+            result.unwrap_err().to_string().contains("maximum length"),
+            "error message should mention length limit"
+        );
+    }
+
+    // CR-004: verify_archive path validation tests
+    #[tokio::test]
+    async fn test_verify_archive_rejects_null_byte_in_archive_path() {
+        let result = verify_archive("/tmp/test\0malicious.tar".to_string(), None).await;
+
+        assert!(result.is_err(), "should reject null bytes in archive path");
+        assert!(
+            result.unwrap_err().to_string().contains("null bytes"),
+            "error message should mention null bytes"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_verify_archive_rejects_excessively_long_archive_path() {
+        let long_path = "x".repeat(5000);
+        let result = verify_archive(long_path, None).await;
+
+        assert!(result.is_err(), "should reject excessively long paths");
+        assert!(
+            result.unwrap_err().to_string().contains("maximum length"),
+            "error message should mention length limit"
+        );
+    }
+
+    #[test]
+    fn test_verify_archive_sync_rejects_null_byte_in_archive_path() {
+        let result = verify_archive_sync("/tmp/test\0malicious.tar".to_string(), None);
+
+        assert!(result.is_err(), "should reject null bytes in archive path");
+        assert!(
+            result.unwrap_err().to_string().contains("null bytes"),
+            "error message should mention null bytes"
+        );
+    }
+
+    #[test]
+    fn test_verify_archive_sync_rejects_excessively_long_archive_path() {
+        let long_path = "x".repeat(5000);
+        let result = verify_archive_sync(long_path, None);
+
+        assert!(result.is_err(), "should reject excessively long paths");
+        assert!(
+            result.unwrap_err().to_string().contains("maximum length"),
+            "error message should mention length limit"
+        );
     }
 }

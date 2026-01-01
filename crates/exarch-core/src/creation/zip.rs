@@ -11,6 +11,7 @@ use crate::creation::filters;
 use crate::creation::report::CreationReport;
 use crate::creation::walker::EntryType;
 use crate::creation::walker::FilteredWalker;
+use crate::creation::walker::collect_entries;
 use std::fs::File;
 use std::io::Read;
 use std::io::Seek;
@@ -41,7 +42,7 @@ use zip::write::SimpleFileOptions;
 /// - Source path does not exist
 /// - Output file cannot be created
 /// - I/O error during archive creation
-#[allow(dead_code)] // Phase 2: will be used by CLI
+#[allow(dead_code)] // Will be used by CLI
 pub fn create_zip<P: AsRef<Path>, Q: AsRef<Path>>(
     output: P,
     sources: &[Q],
@@ -53,10 +54,78 @@ pub fn create_zip<P: AsRef<Path>, Q: AsRef<Path>>(
 
 /// Creates a ZIP archive with progress reporting.
 ///
+/// This function provides real-time progress updates during archive creation
+/// through callback functions. Useful for displaying progress bars or logging
+/// in interactive applications.
+///
+/// # Parameters
+///
+/// - `output`: Path where the ZIP archive will be created
+/// - `sources`: Slice of source paths to include in the archive
+/// - `config`: Configuration controlling filtering, permissions, compression,
+///   and archiving behavior
+/// - `progress`: Mutable reference to a progress callback implementation
+///
+/// # Progress Callbacks
+///
+/// The `progress` callback receives four types of events:
+///
+/// 1. `on_entry_start`: Called before processing each file/directory
+/// 2. `on_bytes_written`: Called for each chunk of data written (typically
+///    every 64 KB)
+/// 3. `on_entry_complete`: Called after successfully processing an entry
+/// 4. `on_complete`: Called once when the entire archive is finished
+///
+/// Note: Callbacks are invoked frequently during large file processing. For
+/// better performance with very large files, consider batching updates.
+///
+/// # Examples
+///
+/// ```no_run
+/// use exarch_core::ProgressCallback;
+/// use exarch_core::creation::CreationConfig;
+/// use exarch_core::creation::zip::create_zip_with_progress;
+/// use std::path::Path;
+///
+/// struct SimpleProgress;
+///
+/// impl ProgressCallback for SimpleProgress {
+///     fn on_entry_start(&mut self, path: &Path, total: usize, current: usize) {
+///         println!("[{}/{}] Processing: {}", current, total, path.display());
+///     }
+///
+///     fn on_bytes_written(&mut self, bytes: u64) {
+///         // Called frequently - consider rate limiting
+///     }
+///
+///     fn on_entry_complete(&mut self, path: &Path) {
+///         println!("Completed: {}", path.display());
+///     }
+///
+///     fn on_complete(&mut self) {
+///         println!("Archive creation complete!");
+///     }
+/// }
+///
+/// let config = CreationConfig::default();
+/// let mut progress = SimpleProgress;
+/// let report = create_zip_with_progress(
+///     Path::new("output.zip"),
+///     &[Path::new("src")],
+///     &config,
+///     &mut progress,
+/// )?;
+/// # Ok::<(), exarch_core::ExtractionError>(())
+/// ```
+///
 /// # Errors
 ///
-/// Returns an error if output file cannot be created or I/O operations fail.
-#[allow(dead_code)] // Phase 4: will be used by CLI
+/// Returns an error if:
+/// - Source path does not exist
+/// - Output file cannot be created
+/// - I/O error during archive creation
+/// - File metadata cannot be read
+#[allow(dead_code)] // Will be used by CLI
 pub fn create_zip_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
     output: P,
     sources: &[Q],
@@ -72,11 +141,75 @@ fn create_zip_internal_with_progress<W: Write + Seek, P: AsRef<Path>>(
     writer: W,
     sources: &[P],
     config: &CreationConfig,
-    _progress: &mut dyn ProgressCallback,
+    progress: &mut dyn ProgressCallback,
 ) -> Result<CreationReport> {
-    // TODO: Integrate progress callbacks
-    // For now, delegate to the non-progress version
-    create_zip_internal(writer, sources, config)
+    let mut zip = ZipWriter::new(writer);
+    let mut report = CreationReport::default();
+    let start = std::time::Instant::now();
+
+    // Configure ZIP file options with compression level
+    let options = if config.compression_level == Some(0) {
+        SimpleFileOptions::default().compression_method(CompressionMethod::Stored)
+    } else {
+        let level = config.compression_level.unwrap_or(6);
+        SimpleFileOptions::default()
+            .compression_method(CompressionMethod::Deflated)
+            .compression_level(Some(i64::from(level)))
+    };
+
+    // Single-pass collection of entries (avoids double directory traversal)
+    let entries = collect_entries(sources, config)?;
+    let total_entries = entries.len();
+
+    // Reusable buffer for file copying (fixes HIGH #2)
+    let mut buffer = vec![0u8; 64 * 1024]; // 64 KB
+
+    for (idx, entry) in entries.iter().enumerate() {
+        let current_entry = idx + 1;
+
+        match &entry.entry_type {
+            EntryType::File => {
+                progress.on_entry_start(&entry.archive_path, total_entries, current_entry);
+                add_file_to_zip_with_progress_and_buffer(
+                    &mut zip,
+                    &entry.path,
+                    &entry.archive_path,
+                    config,
+                    &mut report,
+                    &options,
+                    progress,
+                    &mut buffer,
+                )?;
+                progress.on_entry_complete(&entry.archive_path);
+            }
+            EntryType::Directory => {
+                progress.on_entry_start(&entry.archive_path, total_entries, current_entry);
+                let dir_path = format!("{}/", normalize_zip_path(&entry.archive_path)?);
+                zip.add_directory(&dir_path, options)
+                    .map_err(|e| std::io::Error::other(format!("failed to add directory: {e}")))?;
+                report.directories_added += 1;
+                progress.on_entry_complete(&entry.archive_path);
+            }
+            EntryType::Symlink { .. } => {
+                progress.on_entry_start(&entry.archive_path, total_entries, current_entry);
+                if !config.follow_symlinks {
+                    report.files_skipped += 1;
+                    report.add_warning(format!("Skipped symlink: {}", entry.path.display()));
+                }
+                progress.on_entry_complete(&entry.archive_path);
+            }
+        }
+    }
+
+    // Finish writing ZIP
+    zip.finish()
+        .map_err(|e| std::io::Error::other(format!("failed to finish ZIP archive: {e}")))?;
+
+    report.duration = start.elapsed();
+
+    progress.on_complete();
+
+    Ok(report)
 }
 
 /// Internal function that creates ZIP with any writer.
@@ -242,6 +375,102 @@ fn add_file_to_zip<W: Write + Seek>(
     Ok(())
 }
 
+/// Adds a single file to the ZIP archive with progress reporting and reusable
+/// buffer.
+#[allow(clippy::too_many_arguments)]
+fn add_file_to_zip_with_progress_and_buffer<W: Write + Seek>(
+    zip: &mut ZipWriter<W>,
+    file_path: &Path,
+    archive_path: &Path,
+    config: &CreationConfig,
+    report: &mut CreationReport,
+    options: &SimpleFileOptions,
+    progress: &mut dyn ProgressCallback,
+    buffer: &mut [u8],
+) -> Result<()> {
+    let mut file = File::open(file_path)?;
+    let metadata = file.metadata()?;
+    let size = metadata.len();
+
+    // Check file size limit
+    if let Some(max_size) = config.max_file_size
+        && size > max_size
+    {
+        report.files_skipped += 1;
+        report.add_warning(format!(
+            "Skipped file (too large): {} ({} bytes)",
+            file_path.display(),
+            size
+        ));
+        return Ok(());
+    }
+
+    // Configure options with permissions if needed
+    let file_options = if config.preserve_permissions {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            options.unix_permissions(metadata.permissions().mode())
+        }
+        #[cfg(not(unix))]
+        {
+            *options
+        }
+    } else {
+        *options
+    };
+
+    let archive_name = normalize_zip_path(archive_path)?;
+
+    zip.start_file(&archive_name, file_options)
+        .map_err(|e| std::io::Error::other(format!("failed to start file in ZIP: {e}")))?;
+
+    // Copy file contents with progress tracking and reusable buffer
+    let mut bytes_written = 0u64;
+    loop {
+        let bytes_read = file.read(buffer)?;
+        if bytes_read == 0 {
+            break;
+        }
+        zip.write_all(&buffer[..bytes_read])?;
+        bytes_written += bytes_read as u64;
+        progress.on_bytes_written(bytes_read as u64);
+    }
+
+    report.files_added += 1;
+    report.bytes_written += bytes_written;
+
+    Ok(())
+}
+
+/// Adds a single file to the ZIP archive with progress reporting.
+///
+/// This function allocates its own buffer. Consider using
+/// `add_file_to_zip_with_progress_and_buffer` for better performance when
+/// processing multiple files.
+#[allow(dead_code)]
+fn add_file_to_zip_with_progress<W: Write + Seek>(
+    zip: &mut ZipWriter<W>,
+    file_path: &Path,
+    archive_path: &Path,
+    config: &CreationConfig,
+    report: &mut CreationReport,
+    options: &SimpleFileOptions,
+    progress: &mut dyn ProgressCallback,
+) -> Result<()> {
+    let mut buffer = vec![0u8; 64 * 1024]; // 64 KB
+    add_file_to_zip_with_progress_and_buffer(
+        zip,
+        file_path,
+        archive_path,
+        config,
+        report,
+        options,
+        progress,
+        &mut buffer,
+    )
+}
+
 /// Normalizes a path for ZIP archive format.
 ///
 /// ZIP format requires forward slashes (/) as path separators, regardless
@@ -310,8 +539,10 @@ mod tests {
 
         let report = create_zip(&output, &[source_dir.path()], &config).unwrap();
 
-        assert!(report.files_added >= 3);
-        assert!(report.directories_added >= 1);
+        // Should have exactly 3 files: file1.txt, file2.txt, subdir/file3.txt
+        assert_eq!(report.files_added, 3);
+        // Should have exactly 2 directories: root and subdir
+        assert_eq!(report.directories_added, 2);
         assert!(output.exists());
     }
 
@@ -639,5 +870,96 @@ mod tests {
 
         let warning = &report.warnings[0];
         assert!(warning.contains("Skipped symlink"));
+    }
+
+    #[test]
+    fn test_create_zip_with_progress_callback() {
+        #[derive(Debug, Default, Clone)]
+        struct TestProgress {
+            entries_started: Vec<String>,
+            entries_completed: Vec<String>,
+            bytes_written: u64,
+            completed: bool,
+        }
+
+        impl ProgressCallback for TestProgress {
+            fn on_entry_start(&mut self, path: &Path, _total: usize, _current: usize) {
+                self.entries_started
+                    .push(path.to_string_lossy().to_string());
+            }
+
+            fn on_bytes_written(&mut self, bytes: u64) {
+                self.bytes_written += bytes;
+            }
+
+            fn on_entry_complete(&mut self, path: &Path) {
+                self.entries_completed
+                    .push(path.to_string_lossy().to_string());
+            }
+
+            fn on_complete(&mut self) {
+                self.completed = true;
+            }
+        }
+
+        let temp = TempDir::new().unwrap();
+        let output = temp.path().join("output.zip");
+
+        // Create source directory with multiple files
+        let source_dir = TempDir::new().unwrap();
+        fs::write(source_dir.path().join("file1.txt"), "content1").unwrap();
+        fs::write(source_dir.path().join("file2.txt"), "content2").unwrap();
+        fs::create_dir(source_dir.path().join("subdir")).unwrap();
+        fs::write(source_dir.path().join("subdir/file3.txt"), "content3").unwrap();
+
+        let config = CreationConfig::default()
+            .with_exclude_patterns(vec![])
+            .with_include_hidden(true);
+
+        let mut progress = TestProgress::default();
+
+        let report =
+            create_zip_with_progress(&output, &[source_dir.path()], &config, &mut progress)
+                .unwrap();
+
+        // Verify report
+        assert_eq!(report.files_added, 3);
+        assert!(report.directories_added >= 1);
+
+        // Verify callbacks were invoked
+        assert!(
+            progress.entries_started.len() >= 3,
+            "Expected at least 3 entry starts, got {}",
+            progress.entries_started.len()
+        );
+        assert!(
+            progress.entries_completed.len() >= 3,
+            "Expected at least 3 entry completions, got {}",
+            progress.entries_completed.len()
+        );
+        assert!(
+            progress.bytes_written > 0,
+            "Expected bytes written > 0, got {}",
+            progress.bytes_written
+        );
+        assert!(progress.completed, "Expected on_complete to be called");
+
+        // Verify specific entries
+        let has_file1 = progress
+            .entries_started
+            .iter()
+            .any(|p| p.contains("file1.txt"));
+        let has_file2 = progress
+            .entries_started
+            .iter()
+            .any(|p| p.contains("file2.txt"));
+        let has_file3 = progress
+            .entries_started
+            .iter()
+            .any(|p| p.contains("file3.txt"));
+
+        assert!(has_file1, "Expected file1.txt in progress callbacks");
+        assert!(has_file2, "Expected file2.txt in progress callbacks");
+        assert!(has_file3, "Expected file3.txt in progress callbacks");
     }
 }

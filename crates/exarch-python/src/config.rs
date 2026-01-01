@@ -1,6 +1,7 @@
-//! Python bindings for `SecurityConfig`.
+//! Python bindings for `SecurityConfig` and `CreationConfig`.
 
-use exarch_core::SecurityConfig as CoreConfig;
+use exarch_core::SecurityConfig as CoreSecurityConfig;
+use exarch_core::creation::CreationConfig as CoreCreationConfig;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
@@ -45,7 +46,7 @@ const MAX_COMPONENT_LENGTH: usize = 255;
 #[pyclass(name = "SecurityConfig")]
 #[derive(Clone)]
 pub struct PySecurityConfig {
-    inner: CoreConfig,
+    inner: CoreSecurityConfig,
 }
 
 #[pymethods]
@@ -54,7 +55,7 @@ impl PySecurityConfig {
     #[new]
     fn new() -> Self {
         Self {
-            inner: CoreConfig::default(),
+            inner: CoreSecurityConfig::default(),
         }
     }
 
@@ -73,7 +74,7 @@ impl PySecurityConfig {
     #[staticmethod]
     fn permissive() -> Self {
         Self {
-            inner: CoreConfig::permissive(),
+            inner: CoreSecurityConfig::permissive(),
         }
     }
 
@@ -343,11 +344,199 @@ impl PySecurityConfig {
 }
 
 impl PySecurityConfig {
-    /// Returns a reference to the inner `CoreConfig`.
+    /// Returns a reference to the inner `CoreSecurityConfig`.
     ///
     /// This is used internally to pass the configuration to the Rust extraction
     /// API.
-    pub fn as_core(&self) -> &CoreConfig {
+    pub fn as_core(&self) -> &CoreSecurityConfig {
+        &self.inner
+    }
+}
+
+/// Configuration for archive creation.
+///
+/// Controls how archives are created from filesystem sources.
+///
+/// # Attributes
+///
+/// * `compression_level` - Compression level (1-9), default: 6
+/// * `preserve_permissions` - Preserve file permissions, default: True
+/// * `follow_symlinks` - Follow symlinks when adding files, default: False
+/// * `include_hidden` - Include hidden files, default: False
+/// * `exclude_patterns` - List of exclude patterns
+/// * `max_file_size` - Maximum file size in bytes (None = no limit)
+///
+/// # Examples
+///
+/// ```python
+/// # Use defaults
+/// config = CreationConfig()
+///
+/// # Customize with builder pattern
+/// config = (CreationConfig()
+///     .compression_level(9)
+///     .follow_symlinks(True))
+/// ```
+#[pyclass(name = "CreationConfig")]
+#[derive(Clone)]
+pub struct PyCreationConfig {
+    inner: CoreCreationConfig,
+}
+
+#[pymethods]
+impl PyCreationConfig {
+    /// Creates a new `CreationConfig` with default settings.
+    #[new]
+    fn new() -> Self {
+        Self {
+            inner: CoreCreationConfig::default(),
+        }
+    }
+
+    /// Creates a `CreationConfig` with default settings.
+    #[staticmethod]
+    fn default() -> Self {
+        Self::new()
+    }
+
+    /// Sets the compression level (1-9).
+    ///
+    /// # Errors
+    ///
+    /// Returns `ValueError` if level is not in range 1-9.
+    fn compression_level(mut slf: PyRefMut<'_, Self>, level: u8) -> PyResult<PyRefMut<'_, Self>> {
+        if !(1..=9).contains(&level) {
+            return Err(PyValueError::new_err(
+                "compression level must be in range 1-9",
+            ));
+        }
+        slf.inner.compression_level = Some(level);
+        Ok(slf)
+    }
+
+    /// Sets whether to preserve permissions.
+    #[pyo3(signature = (preserve=true))]
+    fn preserve_permissions(mut slf: PyRefMut<'_, Self>, preserve: bool) -> PyRefMut<'_, Self> {
+        slf.inner.preserve_permissions = preserve;
+        slf
+    }
+
+    /// Sets whether to follow symlinks.
+    #[pyo3(signature = (follow=true))]
+    fn follow_symlinks(mut slf: PyRefMut<'_, Self>, follow: bool) -> PyRefMut<'_, Self> {
+        slf.inner.follow_symlinks = follow;
+        slf
+    }
+
+    /// Sets whether to include hidden files.
+    #[pyo3(signature = (include=true))]
+    fn include_hidden(mut slf: PyRefMut<'_, Self>, include: bool) -> PyRefMut<'_, Self> {
+        slf.inner.include_hidden = include;
+        slf
+    }
+
+    /// Sets exclude patterns.
+    fn exclude_patterns(mut slf: PyRefMut<'_, Self>, patterns: Vec<String>) -> PyRefMut<'_, Self> {
+        slf.inner.exclude_patterns = patterns;
+        slf
+    }
+
+    /// Sets maximum file size in bytes.
+    fn max_file_size(mut slf: PyRefMut<'_, Self>, size: Option<u64>) -> PyRefMut<'_, Self> {
+        slf.inner.max_file_size = size;
+        slf
+    }
+
+    /// Finalizes the configuration.
+    fn build(slf: PyRefMut<'_, Self>) -> PyRefMut<'_, Self> {
+        slf
+    }
+
+    // Property getters and setters
+
+    #[getter]
+    fn get_compression_level(&self) -> Option<u8> {
+        self.inner.compression_level
+    }
+
+    #[setter]
+    fn set_compression_level(&mut self, value: Option<u8>) -> PyResult<()> {
+        if let Some(level) = value
+            && !(1..=9).contains(&level)
+        {
+            return Err(PyValueError::new_err(
+                "compression level must be in range 1-9",
+            ));
+        }
+        self.inner.compression_level = value;
+        Ok(())
+    }
+
+    #[getter]
+    fn get_preserve_permissions(&self) -> bool {
+        self.inner.preserve_permissions
+    }
+
+    #[setter]
+    fn set_preserve_permissions(&mut self, value: bool) {
+        self.inner.preserve_permissions = value;
+    }
+
+    #[getter]
+    fn get_follow_symlinks(&self) -> bool {
+        self.inner.follow_symlinks
+    }
+
+    #[setter]
+    fn set_follow_symlinks(&mut self, value: bool) {
+        self.inner.follow_symlinks = value;
+    }
+
+    #[getter]
+    fn get_include_hidden(&self) -> bool {
+        self.inner.include_hidden
+    }
+
+    #[setter]
+    fn set_include_hidden(&mut self, value: bool) {
+        self.inner.include_hidden = value;
+    }
+
+    #[getter]
+    fn get_exclude_patterns(&self) -> Vec<String> {
+        self.inner.exclude_patterns.clone()
+    }
+
+    #[setter]
+    fn set_exclude_patterns(&mut self, value: Vec<String>) {
+        self.inner.exclude_patterns = value;
+    }
+
+    #[getter]
+    fn get_max_file_size(&self) -> Option<u64> {
+        self.inner.max_file_size
+    }
+
+    #[setter]
+    fn set_max_file_size(&mut self, value: Option<u64>) {
+        self.inner.max_file_size = value;
+    }
+
+    /// Returns a debug string representation.
+    fn __repr__(&self) -> String {
+        format!(
+            "CreationConfig(compression_level={:?}, preserve_permissions={}, follow_symlinks={}, include_hidden={})",
+            self.inner.compression_level,
+            self.inner.preserve_permissions,
+            self.inner.follow_symlinks,
+            self.inner.include_hidden
+        )
+    }
+}
+
+impl PyCreationConfig {
+    /// Returns a reference to the inner `CoreCreationConfig`.
+    pub fn as_core(&self) -> &CoreCreationConfig {
         &self.inner
     }
 }

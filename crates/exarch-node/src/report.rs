@@ -494,4 +494,221 @@ mod tests {
             Some("Attempt to escape directory".to_string())
         );
     }
+
+    // CR-004: Overflow/saturating conversion tests
+    #[test]
+    fn test_extraction_report_saturates_files_extracted_at_u32_max() {
+        let mut core_report = CoreReport::new();
+        // Set to value > u32::MAX
+        core_report.files_extracted = (u32::MAX as usize) + 1000;
+
+        let report = ExtractionReport::from(core_report);
+
+        assert_eq!(
+            report.files_extracted,
+            u32::MAX,
+            "files_extracted should saturate to u32::MAX"
+        );
+    }
+
+    #[test]
+    fn test_extraction_report_saturates_bytes_written_at_i64_max() {
+        let mut core_report = CoreReport::new();
+        // Set to value > i64::MAX
+        core_report.bytes_written = u64::MAX;
+
+        let report = ExtractionReport::from(core_report);
+
+        assert_eq!(
+            report.bytes_written,
+            i64::MAX,
+            "bytes_written should saturate to i64::MAX"
+        );
+    }
+
+    #[test]
+    fn test_extraction_report_saturates_duration_ms_at_i64_max() {
+        let mut core_report = CoreReport::new();
+        // Create a very large duration that exceeds i64::MAX milliseconds
+        // i64::MAX ms is about 292 million years, so use u64::MAX seconds
+        core_report.duration = Duration::from_secs(u64::MAX);
+
+        let report = ExtractionReport::from(core_report);
+
+        assert_eq!(
+            report.duration_ms,
+            i64::MAX,
+            "duration_ms should saturate to i64::MAX"
+        );
+    }
+
+    #[test]
+    fn test_creation_report_saturates_files_added_at_u32_max() {
+        let mut core_report = exarch_core::creation::CreationReport::new();
+        core_report.files_added = (u32::MAX as usize) + 1000;
+
+        let report = CreationReport::from(core_report);
+
+        assert_eq!(
+            report.files_added,
+            u32::MAX,
+            "files_added should saturate to u32::MAX"
+        );
+    }
+
+    #[test]
+    fn test_creation_report_saturates_bytes_written_at_i64_max() {
+        let mut core_report = exarch_core::creation::CreationReport::new();
+        core_report.bytes_written = u64::MAX;
+
+        let report = CreationReport::from(core_report);
+
+        assert_eq!(
+            report.bytes_written,
+            i64::MAX,
+            "bytes_written should saturate to i64::MAX"
+        );
+    }
+
+    #[test]
+    fn test_creation_report_saturates_bytes_compressed_at_i64_max() {
+        let mut core_report = exarch_core::creation::CreationReport::new();
+        core_report.bytes_compressed = u64::MAX;
+
+        let report = CreationReport::from(core_report);
+
+        assert_eq!(
+            report.bytes_compressed,
+            i64::MAX,
+            "bytes_compressed should saturate to i64::MAX"
+        );
+    }
+
+    #[test]
+    fn test_archive_manifest_saturates_total_entries_at_u32_max() {
+        use exarch_core::formats::detect::ArchiveType;
+
+        let mut core_manifest = exarch_core::inspection::ArchiveManifest::new(ArchiveType::TarGz);
+        core_manifest.total_entries = (u32::MAX as usize) + 1000;
+
+        let manifest = ArchiveManifest::from(core_manifest);
+
+        assert_eq!(
+            manifest.total_entries,
+            u32::MAX,
+            "total_entries should saturate to u32::MAX"
+        );
+    }
+
+    #[test]
+    fn test_archive_manifest_saturates_total_size_at_i64_max() {
+        use exarch_core::formats::detect::ArchiveType;
+
+        let mut core_manifest = exarch_core::inspection::ArchiveManifest::new(ArchiveType::TarGz);
+        core_manifest.total_size = u64::MAX;
+
+        let manifest = ArchiveManifest::from(core_manifest);
+
+        assert_eq!(
+            manifest.total_size,
+            i64::MAX,
+            "total_size should saturate to i64::MAX"
+        );
+    }
+
+    #[test]
+    fn test_archive_entry_saturates_size_at_i64_max() {
+        use std::path::PathBuf;
+
+        let core_entry = exarch_core::inspection::ArchiveEntry {
+            path: PathBuf::from("test.txt"),
+            entry_type: exarch_core::inspection::ManifestEntryType::File,
+            size: u64::MAX,
+            compressed_size: None,
+            mode: None,
+            modified: None,
+            symlink_target: None,
+            hardlink_target: None,
+        };
+
+        let entry = ArchiveEntry::from(core_entry);
+
+        assert_eq!(entry.size, i64::MAX, "size should saturate to i64::MAX");
+    }
+
+    #[test]
+    fn test_archive_entry_saturates_compressed_size_at_i64_max() {
+        use std::path::PathBuf;
+
+        let core_entry = exarch_core::inspection::ArchiveEntry {
+            path: PathBuf::from("test.txt"),
+            entry_type: exarch_core::inspection::ManifestEntryType::File,
+            size: 1024,
+            compressed_size: Some(u64::MAX),
+            mode: None,
+            modified: None,
+            symlink_target: None,
+            hardlink_target: None,
+        };
+
+        let entry = ArchiveEntry::from(core_entry);
+
+        assert_eq!(
+            entry.compressed_size,
+            Some(i64::MAX),
+            "compressed_size should saturate to i64::MAX"
+        );
+    }
+
+    #[test]
+    fn test_verification_report_saturates_total_entries_at_u32_max() {
+        use exarch_core::formats::detect::ArchiveType;
+        use exarch_core::inspection::CheckStatus;
+        use exarch_core::inspection::VerificationStatus;
+
+        let core_report = exarch_core::inspection::VerificationReport {
+            status: VerificationStatus::Pass,
+            integrity_status: CheckStatus::Pass,
+            security_status: CheckStatus::Pass,
+            issues: vec![],
+            total_entries: (u32::MAX as usize) + 1000,
+            suspicious_entries: 0,
+            total_size: 5000,
+            format: ArchiveType::TarGz,
+        };
+
+        let report = VerificationReport::from(core_report);
+
+        assert_eq!(
+            report.total_entries,
+            u32::MAX,
+            "total_entries should saturate to u32::MAX"
+        );
+    }
+
+    #[test]
+    fn test_verification_report_saturates_suspicious_entries_at_u32_max() {
+        use exarch_core::formats::detect::ArchiveType;
+        use exarch_core::inspection::CheckStatus;
+        use exarch_core::inspection::VerificationStatus;
+
+        let core_report = exarch_core::inspection::VerificationReport {
+            status: VerificationStatus::Fail,
+            integrity_status: CheckStatus::Pass,
+            security_status: CheckStatus::Fail,
+            issues: vec![],
+            total_entries: 100,
+            suspicious_entries: (u32::MAX as usize) + 1000,
+            total_size: 5000,
+            format: ArchiveType::TarGz,
+        };
+
+        let report = VerificationReport::from(core_report);
+
+        assert_eq!(
+            report.suspicious_entries,
+            u32::MAX,
+            "suspicious_entries should saturate to u32::MAX"
+        );
+    }
 }

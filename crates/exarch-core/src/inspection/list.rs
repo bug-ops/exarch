@@ -66,6 +66,9 @@ pub fn list_archive<P: AsRef<Path>>(
         ArchiveType::TarXz => list_tar_xz(archive_path, format, config),
         ArchiveType::TarZst => list_tar_zst(archive_path, format, config),
         ArchiveType::Zip => list_zip(archive_path, format, config),
+        ArchiveType::SevenZ => Err(crate::ExtractionError::InvalidArchive(
+            "7z archive listing not yet supported".into(),
+        )),
     }
 }
 

@@ -34,6 +34,7 @@ napi-build = "2.3"
 napi-derive = "3.5"
 proptest = "1.9"
 pyo3 = "0.27"
+sevenz-rust2 = "0.20"
 smallvec = "1.15"
 tar = "0.4"
 tempfile = "3.24"
@@ -45,13 +46,13 @@ zip = { version = "7.0", default-features = false }
 zstd = "0.13"
 
 # CLI dependencies
+anyhow = "1.0"
 clap = { version = "4.5", features = ["derive", "cargo", "wrap_help", "color"] }
 clap_complete = "4.5"
-anyhow = "1.0"
+console = "0.16"
+indicatif = { version = "0.18", features = ["improved_unicode"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-console = "0.16"
-indicatif = { version = "0.17", features = ["improved_unicode"] }
 
 # CLI testing
 assert_cmd = "2.1"

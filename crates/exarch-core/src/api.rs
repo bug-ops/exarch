@@ -2,6 +2,7 @@
 
 use std::path::Path;
 
+use crate::ExtractionError;
 use crate::ExtractionReport;
 use crate::NoopProgress;
 use crate::ProgressCallback;
@@ -111,6 +112,7 @@ pub fn extract_archive_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
         ArchiveType::TarXz => extract_tar_xz(archive_path, output_dir, config),
         ArchiveType::TarZst => extract_tar_zst(archive_path, output_dir, config),
         ArchiveType::Zip => extract_zip(archive_path, output_dir, config),
+        ArchiveType::SevenZ => extract_7z(archive_path, output_dir, config),
     }
 }
 
@@ -213,6 +215,20 @@ fn extract_zip(
 
     let file = File::open(archive_path)?;
     let mut archive = ZipArchive::new(file)?;
+    archive.extract(output_dir, config)
+}
+
+fn extract_7z(
+    archive_path: &Path,
+    output_dir: &Path,
+    config: &SecurityConfig,
+) -> Result<ExtractionReport> {
+    use crate::formats::SevenZArchive;
+    use crate::formats::traits::ArchiveFormat;
+    use std::fs::File;
+
+    let file = File::open(archive_path)?;
+    let mut archive = SevenZArchive::new(file)?;
     archive.extract(output_dir, config)
 }
 
@@ -328,6 +344,9 @@ pub fn create_archive_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
         ArchiveType::Zip => {
             crate::creation::zip::create_zip_with_progress(output, sources, config, progress)
         }
+        ArchiveType::SevenZ => Err(ExtractionError::InvalidArchive(
+            "7z archive creation not yet supported".into(),
+        )),
     }
 }
 
@@ -517,5 +536,29 @@ mod tests {
         let path = PathBuf::from("archive.rar");
         let result = determine_creation_format(&path, &config);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_extract_archive_7z_not_implemented() {
+        let dest = tempfile::TempDir::new().unwrap();
+        let path = PathBuf::from("test.7z");
+
+        let result = extract_archive(&path, dest.path(), &SecurityConfig::default());
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_create_archive_7z_not_supported() {
+        let dest = tempfile::TempDir::new().unwrap();
+        let archive_path = dest.path().join("output.7z");
+
+        let result = create_archive(&archive_path, &[] as &[&str], &CreationConfig::default());
+
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ExtractionError::InvalidArchive(_)
+        ));
     }
 }

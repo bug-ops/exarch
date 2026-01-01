@@ -48,12 +48,16 @@ jobs:
           fi
           echo "Version validation successful: $TAG_VERSION"
 
-  # Build and publish Rust crate to crates.io
-  publish-crate:
+  # Build and publish Rust crates to crates.io using Trusted Publishing (OIDC)
+  # Setup: https://crates.io/docs/trusted-publishing
+  publish-crates:
     name: Publish to crates.io
     needs: validate
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write  # Required for trusted publishing
     steps:
       - uses: actions/checkout@v6
 
@@ -65,18 +69,26 @@ jobs:
         with:
           shared-key: "release"
 
-      - name: Verify package can be built
-        run: cargo build -p exarch-core --release --all-features
+      - name: Verify packages can be built
+        run: |
+          cargo build -p exarch-core --release --all-features
+          cargo build -p exarch-cli --release --all-features
 
       - name: Run tests
-        run: cargo test -p exarch-core --all-features
-
-      - name: Publish exarch-core to crates.io
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
-          cd crates/exarch-core
-          cargo publish --token $CARGO_REGISTRY_TOKEN
+          cargo test -p exarch-core --all-features
+          cargo test -p exarch-cli --all-features
+
+      - name: Authenticate with crates.io (Trusted Publishing)
+        id: crates-io-auth
+        uses: rust-lang/crates-io-auth-action@v1
+
+      - name: Publish crates to crates.io
+        uses: katyo/publish-crates@v2
+        with:
+          registry-token: ${{ steps.crates-io-auth.outputs.token }}
+          ignore-unpublished-changes: true
+          publish-delay: 10000
 
   # Build Python wheels for multiple platforms
   build-python-wheels:
@@ -269,9 +281,9 @@ jobs:
             crates/exarch-node/index.d.ts
           retention-days: 7
 
-  # Publish Node.js package to npm with provenance
-  # Setup: Enable "Require two-factor authentication" or use automation tokens
-  # Provenance: https://docs.npmjs.com/generating-provenance-statements
+  # Publish Node.js package to npm using Trusted Publishing (OIDC)
+  # Setup: https://docs.npmjs.com/trusted-publishers/
+  # No NPM_TOKEN needed - uses OIDC authentication
   publish-node:
     name: Publish to npm
     needs: [validate, build-node-bindings]
@@ -282,14 +294,14 @@ jobs:
       url: https://www.npmjs.com/package/exarch-rs
     permissions:
       contents: read
-      id-token: write  # Required for npm provenance
+      id-token: write  # Required for trusted publishing (OIDC)
     steps:
       - uses: actions/checkout@v6
 
       - name: Set up Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: '20'
+          node-version: '22'  # npm OIDC requires npm CLI v11.5.1+
           registry-url: 'https://registry.npmjs.org'
 
       - name: Download all bindings
@@ -312,17 +324,15 @@ jobs:
 
           ls -lh native/
 
-      - name: Publish to npm with provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Publish to npm (Trusted Publishing)
         run: |
           cd crates/exarch-node
-          npm publish --access public --provenance
+          npm publish --access public
 
   # Create GitHub Release with artifacts
   github-release:
     name: Create GitHub Release
-    needs: [validate, publish-crate, publish-python, publish-node]
+    needs: [validate, publish-crates, publish-python, publish-node]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -404,14 +414,14 @@ jobs:
   # Final success check
   release-success:
     name: Release Success
-    needs: [publish-crate, publish-python, publish-node, github-release]
+    needs: [publish-crates, publish-python, publish-node, github-release]
     runs-on: ubuntu-latest
     if: always()
     steps:
       - name: Check all release jobs
         run: |
           REQUIRED_JOBS=(
-            "${{ needs.publish-crate.result }}"
+            "${{ needs.publish-crates.result }}"
             "${{ needs.publish-python.result }}"
             "${{ needs.publish-node.result }}"
             "${{ needs.github-release.result }}"

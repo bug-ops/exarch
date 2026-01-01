@@ -114,13 +114,13 @@ jobs:
 
           # macOS x86_64
           - name: macos-x86_64
-            os: macos-13
+            os: macos-15-intel
             target: x86_64-apple-darwin
             maturin-args: --target x86_64-apple-darwin
 
           # macOS aarch64 (Apple Silicon)
           - name: macos-aarch64
-            os: macos-14
+            os: macos-latest
             target: aarch64-apple-darwin
             maturin-args: --target aarch64-apple-darwin
 
@@ -222,12 +222,12 @@ jobs:
 
           # macOS x86_64
           - name: macos-x86_64
-            os: macos-13
+            os: macos-15-intel
             target: x86_64-apple-darwin
 
           # macOS aarch64 (Apple Silicon)
           - name: macos-aarch64
-            os: macos-14
+            os: macos-latest
             target: aarch64-apple-darwin
 
           # Windows x86_64

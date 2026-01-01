@@ -159,9 +159,8 @@ jobs:
           shared-key: "python-${{ matrix.platform.name }}"
 
       - name: Build wheels
-        run: |
-          cd crates/exarch-python
-          maturin build --release ${{ matrix.platform.maturin-args }} --strip --out wheels -i python3.11
+        working-directory: crates/exarch-python
+        run: maturin build --release ${{ matrix.platform.maturin-args }} --strip --out wheels -i python3.11
 
       - name: Upload wheels
         uses: actions/upload-artifact@v4
@@ -262,14 +261,12 @@ jobs:
           shared-key: "node-${{ matrix.platform.name }}"
 
       - name: Install dependencies
-        run: |
-          cd crates/exarch-node
-          npm install
+        working-directory: crates/exarch-node
+        run: npm install
 
       - name: Build native addon
-        run: |
-          cd crates/exarch-node
-          npm run build -- --target ${{ matrix.platform.target }}
+        working-directory: crates/exarch-node
+        run: npm run build -- --target ${{ matrix.platform.target }}
 
       - name: Upload bindings
         uses: actions/upload-artifact@v4
@@ -311,8 +308,8 @@ jobs:
           pattern: bindings-*
 
       - name: Prepare npm package
+        working-directory: crates/exarch-node
         run: |
-          cd crates/exarch-node
           mkdir -p native
 
           # Copy platform-specific binaries
@@ -324,10 +321,16 @@ jobs:
 
           ls -lh native/
 
+      - name: Install dependencies
+        working-directory: crates/exarch-node
+        run: npm ci
+
+      - name: Update npm for trusted publishing
+        run: npm install -g npm@latest
+
       - name: Publish to npm (Trusted Publishing)
-        run: |
-          cd crates/exarch-node
-          npm publish --access public --ignore-scripts
+        working-directory: crates/exarch-node
+        run: npm publish --access public --ignore-scripts
 
   # Create GitHub Release with artifacts
   github-release:

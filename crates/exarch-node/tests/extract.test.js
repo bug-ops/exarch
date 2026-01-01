@@ -1,10 +1,7 @@
 /**
  * Tests for archive extraction functions
- *
- * NOTE: Extraction tests are skipped until exarch-core extract_archive API is fully implemented.
- * The current implementation is a placeholder (see exarch-core/src/api.rs).
  */
-const { describe, it, beforeEach } = require('node:test');
+const { describe, it, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -42,19 +39,29 @@ describe('extractArchive (async)', () => {
     fs.mkdirSync(outputDir);
   });
 
-  // TODO: Enable when core extract_archive is implemented
-  it.skip('should extract a valid archive', async () => {
+  afterEach(() => {
+    if (tempDir && fs.existsSync(tempDir)) {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('should extract a valid archive', async () => {
     createValidArchive(archivePath, tempDir);
 
     const report = await extractArchive(archivePath, outputDir);
 
-    assert.ok(report.filesExtracted >= 1);
+    assert.strictEqual(report.filesExtracted, 1);
     assert.ok(report.bytesWritten >= 13);
     assert.ok(report.durationMs >= 0);
+
+    // Verify extracted file exists and has correct content
+    const extractedFile = path.join(outputDir, 'hello.txt');
+    assert.ok(fs.existsSync(extractedFile), 'Extracted file should exist');
+    const content = fs.readFileSync(extractedFile, 'utf8');
+    assert.strictEqual(content, 'Hello, World!');
   });
 
-  // TODO: Enable when core extract_archive is implemented
-  it.skip('should accept custom SecurityConfig', async () => {
+  it('should accept custom SecurityConfig', async () => {
     createValidArchive(archivePath, tempDir);
 
     const config = new SecurityConfig();
@@ -62,15 +69,6 @@ describe('extractArchive (async)', () => {
     const report = await extractArchive(archivePath, outputDir, config);
 
     assert.ok(report.filesExtracted >= 1);
-  });
-
-  it('should return empty report for valid archive (placeholder)', async () => {
-    createValidArchive(archivePath, tempDir);
-
-    const report = await extractArchive(archivePath, outputDir);
-
-    // Core extract_archive is currently a placeholder
-    assert.strictEqual(report.filesExtracted, 0);
   });
 });
 
@@ -86,18 +84,28 @@ describe('extractArchiveSync', () => {
     fs.mkdirSync(outputDir);
   });
 
-  // TODO: Enable when core extract_archive is implemented
-  it.skip('should extract a valid archive synchronously', () => {
+  afterEach(() => {
+    if (tempDir && fs.existsSync(tempDir)) {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('should extract a valid archive synchronously', () => {
     createValidArchive(archivePath, tempDir);
 
     const report = extractArchiveSync(archivePath, outputDir);
 
-    assert.ok(report.filesExtracted >= 1);
+    assert.strictEqual(report.filesExtracted, 1);
     assert.ok(report.bytesWritten >= 13);
+
+    // Verify extracted file exists and has correct content
+    const extractedFile = path.join(outputDir, 'hello.txt');
+    assert.ok(fs.existsSync(extractedFile), 'Extracted file should exist');
+    const content = fs.readFileSync(extractedFile, 'utf8');
+    assert.strictEqual(content, 'Hello, World!');
   });
 
-  // TODO: Enable when core extract_archive is implemented
-  it.skip('should accept custom SecurityConfig', () => {
+  it('should accept custom SecurityConfig', () => {
     createValidArchive(archivePath, tempDir);
 
     const config = new SecurityConfig();
@@ -105,14 +113,5 @@ describe('extractArchiveSync', () => {
     const report = extractArchiveSync(archivePath, outputDir, config);
 
     assert.ok(report.filesExtracted >= 1);
-  });
-
-  it('should return empty report for valid archive (placeholder)', () => {
-    createValidArchive(archivePath, tempDir);
-
-    const report = extractArchiveSync(archivePath, outputDir);
-
-    // Core extract_archive is currently a placeholder
-    assert.strictEqual(report.filesExtracted, 0);
   });
 });

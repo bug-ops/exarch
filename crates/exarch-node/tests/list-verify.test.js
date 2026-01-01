@@ -1,7 +1,7 @@
 /**
  * Tests for listArchive and verifyArchive functions
  */
-const { describe, it, beforeEach } = require('node:test');
+const { describe, it, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -36,6 +36,12 @@ describe('listArchive (async)', () => {
   beforeEach(() => {
     tempDir = createTempDir();
     archivePath = path.join(tempDir, 'test.tar.gz');
+  });
+
+  afterEach(() => {
+    if (tempDir && fs.existsSync(tempDir)) {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
   });
 
   it('should list archive contents', async () => {
@@ -78,6 +84,12 @@ describe('listArchiveSync', () => {
     archivePath = path.join(tempDir, 'test.tar.gz');
   });
 
+  afterEach(() => {
+    if (tempDir && fs.existsSync(tempDir)) {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it('should list archive contents synchronously', () => {
     createValidArchive(archivePath, tempDir);
 
@@ -96,6 +108,12 @@ describe('verifyArchive (async)', () => {
   beforeEach(() => {
     tempDir = createTempDir();
     archivePath = path.join(tempDir, 'test.tar.gz');
+  });
+
+  afterEach(() => {
+    if (tempDir && fs.existsSync(tempDir)) {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
   });
 
   it('should verify a valid archive', async () => {
@@ -135,6 +153,12 @@ describe('verifyArchiveSync', () => {
   beforeEach(() => {
     tempDir = createTempDir();
     archivePath = path.join(tempDir, 'test.tar.gz');
+  });
+
+  afterEach(() => {
+    if (tempDir && fs.existsSync(tempDir)) {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
   });
 
   it('should verify archive synchronously', () => {

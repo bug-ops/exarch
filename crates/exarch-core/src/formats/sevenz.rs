@@ -282,7 +282,7 @@ mod tests {
     // 7z format magic bytes for signature validation
     const SEVENZ_MAGIC: [u8; 6] = [0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C];
 
-    /// Test that format_name returns correct value.
+    /// Test that `format_name` returns correct value.
     /// This test doesn't require a valid archive.
     #[test]
     fn test_format_name() {

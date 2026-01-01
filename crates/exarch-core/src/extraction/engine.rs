@@ -29,7 +29,10 @@ impl ExtractionEngine {
         _archive_path: &Path,
         _output_dir: &Path,
     ) -> Result<ExtractionReport> {
-        // TODO: Implement extraction engine
+        // Note: Extraction is handled directly by format-specific implementations
+        // (TarArchive::extract and ZipArchive::extract) to avoid unnecessary
+        // abstraction. This module remains as a potential future extension
+        // point for streaming extraction.
         Ok(ExtractionReport::new())
     }
 }

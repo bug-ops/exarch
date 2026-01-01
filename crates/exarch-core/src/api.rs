@@ -95,16 +95,125 @@ pub fn extract_archive_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
     archive_path: P,
     output_dir: Q,
     config: &SecurityConfig,
-    progress: &mut dyn ProgressCallback,
+    _progress: &mut dyn ProgressCallback,
 ) -> Result<ExtractionReport> {
-    // TODO: Implement archive extraction with progress
-    let _archive_path = archive_path.as_ref();
-    let _output_dir = output_dir.as_ref();
-    let _config = config;
-    let _progress = progress;
+    let archive_path = archive_path.as_ref();
+    let output_dir = output_dir.as_ref();
 
-    // Placeholder implementation
-    Ok(ExtractionReport::new())
+    // Detect archive format from file extension
+    let format = detect_format(archive_path)?;
+
+    // Dispatch to format-specific extraction
+    match format {
+        ArchiveType::Tar => extract_tar(archive_path, output_dir, config),
+        ArchiveType::TarGz => extract_tar_gz(archive_path, output_dir, config),
+        ArchiveType::TarBz2 => extract_tar_bz2(archive_path, output_dir, config),
+        ArchiveType::TarXz => extract_tar_xz(archive_path, output_dir, config),
+        ArchiveType::TarZst => extract_tar_zst(archive_path, output_dir, config),
+        ArchiveType::Zip => extract_zip(archive_path, output_dir, config),
+    }
+}
+
+fn extract_tar(
+    archive_path: &Path,
+    output_dir: &Path,
+    config: &SecurityConfig,
+) -> Result<ExtractionReport> {
+    use crate::formats::TarArchive;
+    use crate::formats::traits::ArchiveFormat;
+    use std::fs::File;
+    use std::io::BufReader;
+
+    let file = File::open(archive_path)?;
+    let reader = BufReader::new(file);
+    let mut archive = TarArchive::new(reader);
+    archive.extract(output_dir, config)
+}
+
+fn extract_tar_gz(
+    archive_path: &Path,
+    output_dir: &Path,
+    config: &SecurityConfig,
+) -> Result<ExtractionReport> {
+    use crate::formats::TarArchive;
+    use crate::formats::traits::ArchiveFormat;
+    use flate2::read::GzDecoder;
+    use std::fs::File;
+    use std::io::BufReader;
+
+    let file = File::open(archive_path)?;
+    let reader = BufReader::new(file);
+    let decoder = GzDecoder::new(reader);
+    let mut archive = TarArchive::new(decoder);
+    archive.extract(output_dir, config)
+}
+
+fn extract_tar_bz2(
+    archive_path: &Path,
+    output_dir: &Path,
+    config: &SecurityConfig,
+) -> Result<ExtractionReport> {
+    use crate::formats::TarArchive;
+    use crate::formats::traits::ArchiveFormat;
+    use bzip2::read::BzDecoder;
+    use std::fs::File;
+    use std::io::BufReader;
+
+    let file = File::open(archive_path)?;
+    let reader = BufReader::new(file);
+    let decoder = BzDecoder::new(reader);
+    let mut archive = TarArchive::new(decoder);
+    archive.extract(output_dir, config)
+}
+
+fn extract_tar_xz(
+    archive_path: &Path,
+    output_dir: &Path,
+    config: &SecurityConfig,
+) -> Result<ExtractionReport> {
+    use crate::formats::TarArchive;
+    use crate::formats::traits::ArchiveFormat;
+    use std::fs::File;
+    use std::io::BufReader;
+    use xz2::read::XzDecoder;
+
+    let file = File::open(archive_path)?;
+    let reader = BufReader::new(file);
+    let decoder = XzDecoder::new(reader);
+    let mut archive = TarArchive::new(decoder);
+    archive.extract(output_dir, config)
+}
+
+fn extract_tar_zst(
+    archive_path: &Path,
+    output_dir: &Path,
+    config: &SecurityConfig,
+) -> Result<ExtractionReport> {
+    use crate::formats::TarArchive;
+    use crate::formats::traits::ArchiveFormat;
+    use std::fs::File;
+    use std::io::BufReader;
+    use zstd::stream::read::Decoder as ZstdDecoder;
+
+    let file = File::open(archive_path)?;
+    let reader = BufReader::new(file);
+    let decoder = ZstdDecoder::new(reader)?;
+    let mut archive = TarArchive::new(decoder);
+    archive.extract(output_dir, config)
+}
+
+fn extract_zip(
+    archive_path: &Path,
+    output_dir: &Path,
+    config: &SecurityConfig,
+) -> Result<ExtractionReport> {
+    use crate::formats::ZipArchive;
+    use crate::formats::traits::ArchiveFormat;
+    use std::fs::File;
+
+    let file = File::open(archive_path)?;
+    let mut archive = ZipArchive::new(file)?;
+    archive.extract(output_dir, config)
 }
 
 /// Creates an archive from source files and directories.
@@ -331,14 +440,15 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
-    fn test_extract_archive_placeholder() {
+    fn test_extract_archive_nonexistent_file() {
         let config = SecurityConfig::default();
         let result = extract_archive(
-            PathBuf::from("test.tar"),
+            PathBuf::from("nonexistent_test.tar"),
             PathBuf::from("/tmp/test"),
             &config,
         );
-        assert!(result.is_ok());
+        // Should fail because file doesn't exist
+        assert!(result.is_err());
     }
 
     #[test]

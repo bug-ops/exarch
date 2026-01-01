@@ -41,34 +41,46 @@ def sample_tar_gz(temp_dir):
     return archive_path
 
 
-@pytest.fixture
-def malicious_traversal_tar(temp_dir):
-    """Create an archive with path traversal attempt."""
-    archive_path = temp_dir / "traversal.tar"
-
-    with tarfile.open(archive_path, "w") as tar:
-        # Add a file with path traversal (../../../etc/passwd)
-        malicious_data = b"malicious content"
-        tarinfo = tarfile.TarInfo(name="../../../etc/passwd")
-        tarinfo.size = len(malicious_data)
-        tar.addfile(tarinfo, io.BytesIO(malicious_data))
-
-    return archive_path
+@pytest.fixture(scope="session")
+def fixtures_dir():
+    """Return fixtures directory path (session-scoped)."""
+    path = Path(__file__).parent / "fixtures"
+    if not path.exists():
+        pytest.fail(f"Fixtures directory missing: {path}")
+    return path
 
 
 @pytest.fixture
-def malicious_symlink_escape(temp_dir):
-    """Create an archive with symlink escape attempt."""
-    archive_path = temp_dir / "symlink_escape.tar"
+def malicious_traversal_tar(fixtures_dir):
+    """Return path to CVE-2025-4517 path traversal test archive."""
+    path = fixtures_dir / "cve-2025-4517-traversal.tar.gz"
+    if not path.exists():
+        pytest.fail(
+            f"Test fixture missing: {path}. Run: python tests/fixtures/generate_fixtures.py"
+        )
+    return path
 
-    with tarfile.open(archive_path, "w") as tar:
-        # Add a symlink pointing outside extraction directory
-        linkinfo = tarfile.TarInfo(name="evil_link")
-        linkinfo.type = tarfile.SYMTYPE
-        linkinfo.linkname = "/etc/passwd"
-        tar.addfile(linkinfo)
 
-    return archive_path
+@pytest.fixture
+def malicious_symlink_escape(fixtures_dir):
+    """Return path to CVE-2024-12905 symlink escape test archive."""
+    path = fixtures_dir / "cve-2024-12905-symlink-escape.tar"
+    if not path.exists():
+        pytest.fail(
+            f"Test fixture missing: {path}. Run: python tests/fixtures/generate_fixtures.py"
+        )
+    return path
+
+
+@pytest.fixture
+def malicious_hardlink_escape(fixtures_dir):
+    """Return path to CVE-2025-48387 hardlink escape test archive."""
+    path = fixtures_dir / "cve-2025-48387-hardlink.tar"
+    if not path.exists():
+        pytest.fail(
+            f"Test fixture missing: {path}. Run: python tests/fixtures/generate_fixtures.py"
+        )
+    return path
 
 
 @pytest.fixture

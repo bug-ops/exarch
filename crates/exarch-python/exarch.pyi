@@ -7,7 +7,7 @@ and other common vulnerabilities.
 """
 
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable
 
 __version__: str
 
@@ -133,7 +133,7 @@ class CreationConfig:
         """Sets exclude patterns."""
         ...
 
-    def max_file_size(self, size: Optional[int]) -> CreationConfig:
+    def max_file_size(self, size: int | None) -> CreationConfig:
         """Sets maximum file size in bytes."""
         ...
 
@@ -283,26 +283,26 @@ class ArchiveEntry:
         ...
 
     @property
-    def compressed_size(self) -> Optional[int]:
+    def compressed_size(self) -> int | None:
         """Compressed size in bytes (if available)."""
         ...
 
     @property
-    def mode(self) -> Optional[int]:
+    def mode(self) -> int | None:
         """File permissions (Unix mode)."""
         ...
 
     @property
-    def symlink_target(self) -> Optional[str]:
+    def symlink_target(self) -> str | None:
         """Symlink target (if applicable)."""
         ...
 
     @property
-    def hardlink_target(self) -> Optional[str]:
+    def hardlink_target(self) -> str | None:
         """Hardlink target (if applicable)."""
         ...
 
-    def compression_ratio(self) -> Optional[float]:
+    def compression_ratio(self) -> float | None:
         """Returns the compression ratio if compressed size is available."""
         ...
 
@@ -348,7 +348,7 @@ class VerificationIssue:
         ...
 
     @property
-    def path(self) -> Optional[str]:
+    def path(self) -> str | None:
         """Entry path that triggered issue (if applicable)."""
         ...
 
@@ -358,7 +358,7 @@ class VerificationIssue:
         ...
 
     @property
-    def context(self) -> Optional[str]:
+    def context(self) -> str | None:
         """Optional context."""
         ...
 
@@ -411,7 +411,7 @@ class VerificationReport:
 def extract_archive(
     archive_path: str | Path,
     output_dir: str | Path,
-    config: Optional[SecurityConfig] = None,
+    config: SecurityConfig | None = None,
 ) -> ExtractionReport:
     """
     Extract an archive to the specified directory.
@@ -447,7 +447,7 @@ def extract_archive(
 def create_archive(
     output_path: str | Path,
     sources: list[str | Path],
-    config: Optional[CreationConfig] = None,
+    config: CreationConfig | None = None,
 ) -> CreationReport:
     """
     Create an archive from source files and directories.
@@ -468,13 +468,13 @@ def create_archive(
     ...
 
 ProgressCallbackFn = Callable[[str, int, int, int], None]
-"""Progress callback function type: (path: str, total: int, current: int, bytes_written: int) -> None"""
+"""Progress callback: (path, total, current, bytes_written) -> None."""
 
 def create_archive_with_progress(
     output_path: str | Path,
     sources: list[str | Path],
-    config: Optional[CreationConfig] = None,
-    progress: Optional[ProgressCallbackFn] = None,
+    config: CreationConfig | None = None,
+    progress: ProgressCallbackFn | None = None,
 ) -> CreationReport:
     """
     Create an archive with progress reporting.
@@ -502,7 +502,7 @@ def create_archive_with_progress(
 
 def list_archive(
     archive_path: str | Path,
-    config: Optional[SecurityConfig] = None,
+    config: SecurityConfig | None = None,
 ) -> ArchiveManifest:
     """
     List archive contents without extracting.
@@ -523,7 +523,7 @@ def list_archive(
 
 def verify_archive(
     archive_path: str | Path,
-    config: Optional[SecurityConfig] = None,
+    config: SecurityConfig | None = None,
 ) -> VerificationReport:
     """
     Verify archive integrity and security.
@@ -544,36 +544,45 @@ def verify_archive(
 
 class PathTraversalError(ValueError):
     """Path traversal attempt detected."""
+
     ...
 
 class SymlinkEscapeError(ValueError):
     """Symlink points outside extraction directory."""
+
     ...
 
 class HardlinkEscapeError(ValueError):
     """Hardlink target outside extraction directory."""
+
     ...
 
 class ZipBombError(ValueError):
     """Potential zip bomb detected."""
+
     ...
 
 class InvalidPermissionsError(ValueError):
     """File permissions are invalid or unsafe."""
+
     ...
 
 class QuotaExceededError(ValueError):
     """Resource quota exceeded."""
+
     ...
 
 class SecurityViolationError(ValueError):
     """Security policy violation."""
+
     ...
 
 class UnsupportedFormatError(ValueError):
     """Archive format not supported."""
+
     ...
 
 class InvalidArchiveError(ValueError):
     """Archive is corrupted."""
+
     ...

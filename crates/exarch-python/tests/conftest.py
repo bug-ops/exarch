@@ -1,10 +1,11 @@
 """Pytest configuration for exarch-python integration tests."""
 
-import pytest
-import tempfile
-import tarfile
 import io
+import tarfile
+import tempfile
 from pathlib import Path
+
+import pytest
 
 
 @pytest.fixture

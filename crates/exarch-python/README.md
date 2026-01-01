@@ -2,7 +2,7 @@
 
 [![PyPI](https://img.shields.io/pypi/v/exarch)](https://pypi.org/project/exarch)
 [![Python](https://img.shields.io/pypi/pyversions/exarch)](https://pypi.org/project/exarch)
-[![CI](https://img.shields.io/github/actions/workflow/status/rabax/exarch/ci.yml?branch=main)](https://github.com/rabax/exarch/actions)
+[![CI](https://img.shields.io/github/actions/workflow/status/bug-ops/exarch/ci.yml?branch=main)](https://github.com/bug-ops/exarch/actions)
 [![License](https://img.shields.io/pypi/l/exarch)](../../LICENSE-MIT)
 
 Memory-safe archive extraction library for Python.
@@ -192,7 +192,7 @@ This package is built using [PyO3](https://pyo3.rs/) and [maturin](https://githu
 
 ```bash
 # Clone repository
-git clone https://github.com/rabax/exarch
+git clone https://github.com/bug-ops/exarch
 cd exarch/crates/exarch-python
 
 # Build with maturin

@@ -73,8 +73,8 @@ impl SecurityConfig {
     /// # Errors
     ///
     /// Returns error if size is negative.
-    #[napi]
-    pub fn max_file_size(&mut self, size: i64) -> Result<&Self> {
+    #[napi(js_name = "setMaxFileSize")]
+    pub fn set_max_file_size(&mut self, size: i64) -> Result<&Self> {
         if size < 0 {
             return Err(Error::from_reason("max file size cannot be negative"));
         }
@@ -90,8 +90,8 @@ impl SecurityConfig {
     /// # Errors
     ///
     /// Returns error if size is negative.
-    #[napi]
-    pub fn max_total_size(&mut self, size: i64) -> Result<&Self> {
+    #[napi(js_name = "setMaxTotalSize")]
+    pub fn set_max_total_size(&mut self, size: i64) -> Result<&Self> {
         if size < 0 {
             return Err(Error::from_reason("max total size cannot be negative"));
         }
@@ -107,8 +107,8 @@ impl SecurityConfig {
     /// # Errors
     ///
     /// Returns error if ratio is not a positive finite number.
-    #[napi]
-    pub fn max_compression_ratio(&mut self, ratio: f64) -> Result<&Self> {
+    #[napi(js_name = "setMaxCompressionRatio")]
+    pub fn set_max_compression_ratio(&mut self, ratio: f64) -> Result<&Self> {
         if !ratio.is_finite() || ratio <= 0.0 {
             return Err(Error::from_reason(
                 "compression ratio must be a positive finite number",
@@ -119,50 +119,50 @@ impl SecurityConfig {
     }
 
     /// Sets the maximum file count.
-    #[napi]
-    pub fn max_file_count(&mut self, count: u32) -> &Self {
+    #[napi(js_name = "setMaxFileCount")]
+    pub fn set_max_file_count(&mut self, count: u32) -> &Self {
         self.inner.max_file_count = count as usize;
         self
     }
 
     /// Sets the maximum path depth.
-    #[napi]
-    pub fn max_path_depth(&mut self, depth: u32) -> &Self {
+    #[napi(js_name = "setMaxPathDepth")]
+    pub fn set_max_path_depth(&mut self, depth: u32) -> &Self {
         self.inner.max_path_depth = depth as usize;
         self
     }
 
     /// Allows or denies symlinks.
-    #[napi]
-    pub fn allow_symlinks(&mut self, allow: Option<bool>) -> &Self {
+    #[napi(js_name = "setAllowSymlinks")]
+    pub fn set_allow_symlinks(&mut self, allow: Option<bool>) -> &Self {
         self.inner.allowed.symlinks = allow.unwrap_or(true);
         self
     }
 
     /// Allows or denies hardlinks.
-    #[napi]
-    pub fn allow_hardlinks(&mut self, allow: Option<bool>) -> &Self {
+    #[napi(js_name = "setAllowHardlinks")]
+    pub fn set_allow_hardlinks(&mut self, allow: Option<bool>) -> &Self {
         self.inner.allowed.hardlinks = allow.unwrap_or(true);
         self
     }
 
     /// Allows or denies absolute paths.
-    #[napi]
-    pub fn allow_absolute_paths(&mut self, allow: Option<bool>) -> &Self {
+    #[napi(js_name = "setAllowAbsolutePaths")]
+    pub fn set_allow_absolute_paths(&mut self, allow: Option<bool>) -> &Self {
         self.inner.allowed.absolute_paths = allow.unwrap_or(true);
         self
     }
 
     /// Allows or denies world-writable files.
-    #[napi]
-    pub fn allow_world_writable(&mut self, allow: Option<bool>) -> &Self {
+    #[napi(js_name = "setAllowWorldWritable")]
+    pub fn set_allow_world_writable(&mut self, allow: Option<bool>) -> &Self {
         self.inner.allowed.world_writable = allow.unwrap_or(true);
         self
     }
 
     /// Sets whether to preserve permissions from archive.
-    #[napi]
-    pub fn preserve_permissions(&mut self, preserve: Option<bool>) -> &Self {
+    #[napi(js_name = "setPreservePermissions")]
+    pub fn set_preserve_permissions(&mut self, preserve: Option<bool>) -> &Self {
         self.inner.preserve_permissions = preserve.unwrap_or(true);
         self
     }
@@ -408,9 +408,9 @@ impl CreationConfig {
     /// # Errors
     ///
     /// Returns error if level is not in range 1-9.
-    #[napi]
+    #[napi(js_name = "setCompressionLevel")]
     #[allow(clippy::cast_possible_truncation)] // level is validated to be 1-9
-    pub fn compression_level(&mut self, level: u32) -> Result<&Self> {
+    pub fn set_compression_level(&mut self, level: u32) -> Result<&Self> {
         if !(1..=9).contains(&level) {
             return Err(Error::from_reason(
                 "compression level must be between 1 and 9",
@@ -423,8 +423,8 @@ impl CreationConfig {
     /// Sets whether to preserve file permissions from source.
     ///
     /// Default: true.
-    #[napi]
-    pub fn preserve_permissions(&mut self, preserve: Option<bool>) -> &Self {
+    #[napi(js_name = "setPreservePermissions")]
+    pub fn set_preserve_permissions(&mut self, preserve: Option<bool>) -> &Self {
         self.inner.preserve_permissions = preserve.unwrap_or(true);
         self
     }
@@ -435,8 +435,8 @@ impl CreationConfig {
     ///
     /// Security note: Following symlinks may include unintended files
     /// from outside the source directory.
-    #[napi]
-    pub fn follow_symlinks(&mut self, follow: Option<bool>) -> &Self {
+    #[napi(js_name = "setFollowSymlinks")]
+    pub fn set_follow_symlinks(&mut self, follow: Option<bool>) -> &Self {
         self.inner.follow_symlinks = follow.unwrap_or(true);
         self
     }
@@ -444,8 +444,8 @@ impl CreationConfig {
     /// Sets whether to include hidden files (files starting with '.').
     ///
     /// Default: false.
-    #[napi]
-    pub fn include_hidden(&mut self, include: Option<bool>) -> &Self {
+    #[napi(js_name = "setIncludeHidden")]
+    pub fn set_include_hidden(&mut self, include: Option<bool>) -> &Self {
         self.inner.include_hidden = include.unwrap_or(true);
         self
     }
@@ -457,8 +457,8 @@ impl CreationConfig {
     /// # Errors
     ///
     /// Returns error if size is negative.
-    #[napi]
-    pub fn max_file_size(&mut self, size: i64) -> Result<&Self> {
+    #[napi(js_name = "setMaxFileSize")]
+    pub fn set_max_file_size(&mut self, size: i64) -> Result<&Self> {
         if size < 0 {
             return Err(Error::from_reason("max file size cannot be negative"));
         }
@@ -579,9 +579,9 @@ mod tests {
     #[test]
     fn test_builder_pattern_method_chaining() {
         let mut config = SecurityConfig::new();
-        config.max_file_size(100_000_000).unwrap();
-        config.max_total_size(1_000_000_000).unwrap();
-        config.max_file_count(50_000);
+        config.set_max_file_size(100_000_000).unwrap();
+        config.set_max_total_size(1_000_000_000).unwrap();
+        config.set_max_file_count(50_000);
 
         assert_eq!(config.get_max_file_size(), 100_000_000);
         assert_eq!(config.get_max_total_size(), 1_000_000_000);
@@ -591,7 +591,7 @@ mod tests {
     #[test]
     fn test_builder_compression_ratio_valid() {
         let mut config = SecurityConfig::new();
-        let result = config.max_compression_ratio(200.0);
+        let result = config.set_max_compression_ratio(200.0);
         assert!(result.is_ok());
         assert_eq!(config.get_max_compression_ratio(), 200.0);
     }
@@ -599,28 +599,28 @@ mod tests {
     #[test]
     fn test_builder_compression_ratio_rejects_nan() {
         let mut config = SecurityConfig::new();
-        let result = config.max_compression_ratio(f64::NAN);
+        let result = config.set_max_compression_ratio(f64::NAN);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_builder_compression_ratio_rejects_infinity() {
         let mut config = SecurityConfig::new();
-        let result = config.max_compression_ratio(f64::INFINITY);
+        let result = config.set_max_compression_ratio(f64::INFINITY);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_builder_compression_ratio_rejects_negative() {
         let mut config = SecurityConfig::new();
-        let result = config.max_compression_ratio(-10.0);
+        let result = config.set_max_compression_ratio(-10.0);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_builder_compression_ratio_rejects_zero() {
         let mut config = SecurityConfig::new();
-        let result = config.max_compression_ratio(0.0);
+        let result = config.set_max_compression_ratio(0.0);
         assert!(result.is_err());
     }
 
@@ -703,7 +703,7 @@ mod tests {
     #[test]
     fn test_max_file_size_negative_value() {
         let mut config = SecurityConfig::new();
-        let result = config.max_file_size(-1);
+        let result = config.set_max_file_size(-1);
         assert!(result.is_err(), "negative file size should be rejected");
         assert!(
             result.unwrap_err().to_string().contains("negative"),
@@ -714,7 +714,7 @@ mod tests {
     #[test]
     fn test_max_file_size_i64_max() {
         let mut config = SecurityConfig::new();
-        let result = config.max_file_size(i64::MAX);
+        let result = config.set_max_file_size(i64::MAX);
         assert!(result.is_ok(), "i64::MAX should be accepted");
         assert_eq!(
             config.get_max_file_size(),
@@ -726,7 +726,7 @@ mod tests {
     #[test]
     fn test_max_total_size_negative_value() {
         let mut config = SecurityConfig::new();
-        let result = config.max_total_size(-1);
+        let result = config.set_max_total_size(-1);
         assert!(result.is_err(), "negative total size should be rejected");
         assert!(
             result.unwrap_err().to_string().contains("negative"),
@@ -737,7 +737,7 @@ mod tests {
     #[test]
     fn test_max_total_size_i64_max() {
         let mut config = SecurityConfig::new();
-        let result = config.max_total_size(i64::MAX);
+        let result = config.set_max_total_size(i64::MAX);
         assert!(result.is_ok(), "i64::MAX should be accepted");
         assert_eq!(
             config.get_max_total_size(),
@@ -749,7 +749,7 @@ mod tests {
     #[test]
     fn test_max_file_count_u32_max() {
         let mut config = SecurityConfig::new();
-        config.max_file_count(u32::MAX);
+        config.set_max_file_count(u32::MAX);
         assert_eq!(
             config.get_max_file_count(),
             u32::MAX,
@@ -760,7 +760,7 @@ mod tests {
     #[test]
     fn test_max_path_depth_u32_max() {
         let mut config = SecurityConfig::new();
-        config.max_path_depth(u32::MAX);
+        config.set_max_path_depth(u32::MAX);
         assert_eq!(
             config.get_max_path_depth(),
             u32::MAX,
@@ -771,7 +771,7 @@ mod tests {
     #[test]
     fn test_max_file_size_zero() {
         let mut config = SecurityConfig::new();
-        let result = config.max_file_size(0);
+        let result = config.set_max_file_size(0);
         assert!(result.is_ok(), "zero file size should be accepted");
         assert_eq!(config.get_max_file_size(), 0);
     }
@@ -780,12 +780,12 @@ mod tests {
     #[test]
     fn test_property_getters_return_correct_values() {
         let mut config = SecurityConfig::new();
-        config.max_file_size(100_000_000).unwrap();
-        config.max_total_size(1_000_000_000).unwrap();
-        config.max_compression_ratio(250.0).unwrap();
-        config.max_file_count(50_000);
-        config.max_path_depth(64);
-        config.preserve_permissions(Some(true));
+        config.set_max_file_size(100_000_000).unwrap();
+        config.set_max_total_size(1_000_000_000).unwrap();
+        config.set_max_compression_ratio(250.0).unwrap();
+        config.set_max_file_count(50_000);
+        config.set_max_path_depth(64);
+        config.set_preserve_permissions(Some(true));
 
         assert_eq!(
             config.get_max_file_size(),
@@ -967,8 +967,8 @@ mod tests {
     #[test]
     fn test_builder_pattern_with_build() {
         let mut config = SecurityConfig::new();
-        config.max_file_size(100_000_000).unwrap();
-        config.max_total_size(1_000_000_000).unwrap();
+        config.set_max_file_size(100_000_000).unwrap();
+        config.set_max_total_size(1_000_000_000).unwrap();
         let result = config.build();
 
         assert_eq!(
@@ -983,14 +983,14 @@ mod tests {
     #[test]
     fn test_builder_compression_ratio_rejects_negative_infinity() {
         let mut config = SecurityConfig::new();
-        let result = config.max_compression_ratio(f64::NEG_INFINITY);
+        let result = config.set_max_compression_ratio(f64::NEG_INFINITY);
         assert!(result.is_err(), "negative infinity should be rejected");
     }
 
     #[test]
     fn test_builder_compression_ratio_accepts_very_small_positive() {
         let mut config = SecurityConfig::new();
-        let result = config.max_compression_ratio(0.000001);
+        let result = config.set_max_compression_ratio(0.000001);
         assert!(
             result.is_ok(),
             "very small positive values should be accepted"
@@ -1001,7 +1001,7 @@ mod tests {
     #[test]
     fn test_builder_compression_ratio_accepts_very_large() {
         let mut config = SecurityConfig::new();
-        let result = config.max_compression_ratio(1_000_000.0);
+        let result = config.set_max_compression_ratio(1_000_000.0);
         assert!(result.is_ok(), "very large values should be accepted");
         assert_eq!(config.get_max_compression_ratio(), 1_000_000.0);
     }
@@ -1010,7 +1010,7 @@ mod tests {
     #[test]
     fn test_security_config_clone() {
         let mut config = SecurityConfig::new();
-        let _ = config.max_file_size(100_000_000).unwrap();
+        let _ = config.set_max_file_size(100_000_000).unwrap();
 
         let cloned = config.clone();
         assert_eq!(
@@ -1119,11 +1119,11 @@ mod tests {
     #[test]
     fn test_creation_config_builder() {
         let mut config = CreationConfig::new();
-        config.compression_level(9).unwrap();
-        config.preserve_permissions(Some(false));
-        config.follow_symlinks(Some(true));
-        config.include_hidden(Some(true));
-        config.max_file_size(1_000_000).unwrap();
+        config.set_compression_level(9).unwrap();
+        config.set_preserve_permissions(Some(false));
+        config.set_follow_symlinks(Some(true));
+        config.set_include_hidden(Some(true));
+        config.set_max_file_size(1_000_000).unwrap();
 
         assert_eq!(config.get_compression_level(), Some(9));
         assert!(!config.get_preserve_permissions());
@@ -1135,21 +1135,21 @@ mod tests {
     #[test]
     fn test_creation_config_compression_level_rejects_invalid() {
         let mut config = CreationConfig::new();
-        assert!(config.compression_level(0).is_err());
-        assert!(config.compression_level(10).is_err());
+        assert!(config.set_compression_level(0).is_err());
+        assert!(config.set_compression_level(10).is_err());
     }
 
     #[test]
     fn test_creation_config_compression_level_accepts_valid() {
         let mut config = CreationConfig::new();
-        assert!(config.compression_level(1).is_ok());
-        assert!(config.compression_level(9).is_ok());
+        assert!(config.set_compression_level(1).is_ok());
+        assert!(config.set_compression_level(9).is_ok());
     }
 
     #[test]
     fn test_creation_config_max_file_size_negative() {
         let mut config = CreationConfig::new();
-        let result = config.max_file_size(-1);
+        let result = config.set_max_file_size(-1);
         assert!(result.is_err());
         assert!(
             result

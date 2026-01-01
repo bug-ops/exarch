@@ -34,7 +34,7 @@ bun add exarch-rs
 
 ## Requirements
 
-- Node.js >= 14
+- Node.js >= 18
 
 ## Quick Start
 

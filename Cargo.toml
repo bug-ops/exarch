@@ -8,7 +8,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 authors = ["Exarch Contributors"]
 edition = "2024"
 rust-version = "1.89.0"
@@ -20,7 +20,7 @@ categories = ["compression", "filesystem"]
 
 [workspace.dependencies]
 # Workspace crates
-exarch-core = { path = "crates/exarch-core", version = "0.1.0" }
+exarch-core = { path = "crates/exarch-core", version = "0.1.1" }
 
 # Dependencies (sorted alphabetically)
 bzip2 = "0.6"
@@ -29,9 +29,9 @@ dhat = "0.3"
 flate2 = "1.1"
 libc = "0.2"
 lru = "0.16"
-napi = "3.8.1"
-napi-build = "2.3.1"
-napi-derive = "3.5.0"
+napi = "3.8"
+napi-build = "2.3"
+napi-derive = "3.5"
 proptest = "1.9"
 pyo3 = "0.27"
 smallvec = "1.15"

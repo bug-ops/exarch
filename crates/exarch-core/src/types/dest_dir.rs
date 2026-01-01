@@ -171,6 +171,32 @@ impl DestDir {
         self.0.join(safe_path.as_path())
     }
 
+    /// Joins a `Path` to this destination directory.
+    ///
+    /// This is a convenience method for joining arbitrary paths that
+    /// have already been validated (e.g., from `SafeSymlink.link_path()`).
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use exarch_core::types::DestDir;
+    /// use std::path::Path;
+    /// use std::path::PathBuf;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let dest = DestDir::new(PathBuf::from("/tmp"))?;
+    /// let path = Path::new("foo/bar.txt");
+    ///
+    /// let final_path = dest.join_path(path);
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[inline]
+    #[must_use]
+    pub fn join_path(&self, path: &Path) -> PathBuf {
+        self.0.join(path)
+    }
+
     /// Converts into the inner `PathBuf`.
     #[inline]
     #[must_use]

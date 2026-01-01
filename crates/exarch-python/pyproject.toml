@@ -4,25 +4,42 @@ build-backend = "maturin"
 
 [project]
 name = "exarch"
-version = "0.1.0"
-description = "Memory-safe archive extraction library"
+version = "0.1.1"
+description = "Memory-safe archive extraction library with built-in security validation"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.9"
 license = { text = "MIT OR Apache-2.0" }
-keywords = ["archive", "extraction", "security", "tar", "zip"]
+keywords = ["archive", "extraction", "security", "tar", "zip", "gzip", "path-traversal", "zip-bomb"]
+authors = [
+    { name = "Exarch Contributors" }
+]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "License :: OSI Approved :: Apache Software License",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: Implementation :: CPython",
     "Programming Language :: Rust",
+    "Topic :: Security",
+    "Topic :: System :: Archiving",
+    "Topic :: System :: Archiving :: Compression",
+    "Typing :: Typed",
 ]
+
+[project.urls]
+Homepage = "https://github.com/bug-ops/exarch"
+Repository = "https://github.com/bug-ops/exarch"
+Documentation = "https://github.com/bug-ops/exarch#readme"
+Issues = "https://github.com/bug-ops/exarch/issues"
 
 [tool.maturin]
 features = ["pyo3/extension-module"]

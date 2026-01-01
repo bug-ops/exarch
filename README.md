@@ -22,14 +22,6 @@ Memory-safe archive extraction library with Python and Node.js bindings.
 - **Zero unsafe code** — Core library contains no unsafe Rust code
 - **High performance** — Optimized I/O with reusable buffers and streaming extraction
 
-## Packages
-
-| Package | Description | Docs |
-|---------|-------------|------|
-| [exarch-core](crates/exarch-core) | Core Rust library | [![docs.rs](https://img.shields.io/docsrs/exarch-core)](https://docs.rs/exarch-core) |
-| [exarch-python](crates/exarch-python) | Python bindings | [PyPI](https://pypi.org/project/exarch) |
-| [exarch-node](crates/exarch-node) | Node.js bindings | [npm](https://www.npmjs.com/package/exarch-rs) |
-
 ## Installation
 
 ### Rust
@@ -58,7 +50,7 @@ npm install exarch-rs
 ```
 
 > [!NOTE]
-> Requires Node.js 14 or later.
+> Requires Node.js 18 or later.
 
 ## Quick Start
 
@@ -143,6 +135,7 @@ let config = SecurityConfig {
 exarch/
 ├── crates/
 │   ├── exarch-core/     # Core Rust library
+│   ├── exarch-cli/      # Command-line utility
 │   ├── exarch-python/   # Python bindings (PyO3)
 │   └── exarch-node/     # Node.js bindings (napi-rs)
 ├── benches/             # Criterion benchmarks
@@ -156,7 +149,7 @@ exarch/
 
 - Rust 1.89.0 or later (Edition 2024)
 - Python 3.9+ (for Python bindings)
-- Node.js 14+ (for Node.js bindings)
+- Node.js 18+ (for Node.js bindings)
 
 ### Build
 

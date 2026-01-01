@@ -1,7 +1,7 @@
 {
   "name": "exarch-rs",
-  "version": "0.1.0",
-  "description": "Memory-safe archive extraction library",
+  "version": "0.1.1",
+  "description": "Memory-safe archive extraction library with built-in security validation",
   "main": "index.js",
   "types": "index.d.ts",
   "keywords": [
@@ -10,13 +10,24 @@
     "security",
     "tar",
     "zip",
+    "gzip",
+    "bzip2",
+    "xz",
+    "zstd",
+    "path-traversal",
+    "zip-bomb",
     "napi-rs",
     "rust"
   ],
+  "author": "Exarch Contributors",
   "license": "MIT OR Apache-2.0",
+  "homepage": "https://github.com/bug-ops/exarch",
   "repository": {
     "type": "git",
     "url": "https://github.com/bug-ops/exarch"
+  },
+  "bugs": {
+    "url": "https://github.com/bug-ops/exarch/issues"
   },
   "napi": {
     "name": "exarch-rs",
@@ -26,12 +37,13 @@
   },
   "scripts": {
     "build": "napi build --platform --release",
-    "build:debug": "napi build --platform"
+    "build:debug": "napi build --platform",
+    "test": "node --test"
   },
   "devDependencies": {
-    "@napi-rs/cli": "^3.0.0"
+    "@napi-rs/cli": "^3.5"
   },
   "engines": {
-    "node": ">= 14"
+    "node": ">= 18"
   }
 }

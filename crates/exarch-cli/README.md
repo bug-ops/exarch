@@ -73,12 +73,12 @@ exarch [OPTIONS] <COMMAND>
 
 ### Commands
 
-| Command | Description | Status |
-|---------|-------------|--------|
-| `extract` | Extract archive contents | Available |
-| `create` | Create a new archive | Available |
-| `list` | List archive contents | Coming soon |
-| `verify` | Verify archive integrity | Coming soon |
+| Command | Description |
+|---------|-------------|
+| `extract` | Extract archive contents |
+| `create` | Create a new archive |
+| `list` | List archive contents |
+| `verify` | Verify archive integrity |
 
 ### Global Options
 
@@ -256,9 +256,9 @@ cargo clippy -p exarch-cli -- -D warnings
 ## Roadmap
 
 - [x] **Phase 1**: Foundation - CLI parsing, error handling, output formatting
-- [ ] **Phase 2**: Archive creation functionality
-- [ ] **Phase 3**: List and verify commands
-- [ ] **Phase 4**: Progress bars, shell completions
+- [x] **Phase 2**: Archive creation functionality
+- [x] **Phase 3**: List and verify commands
+- [x] **Phase 4**: Progress bars, shell completions
 - [ ] **Phase 5**: Distribution (Homebrew, apt, releases)
 
 ## Related Crates

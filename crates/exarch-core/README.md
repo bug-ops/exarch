@@ -2,13 +2,13 @@
 
 [![Crates.io](https://img.shields.io/crates/v/exarch-core)](https://crates.io/crates/exarch-core)
 [![docs.rs](https://img.shields.io/docsrs/exarch-core)](https://docs.rs/exarch-core)
-[![CI](https://img.shields.io/github/actions/workflow/status/rabax/exarch/ci.yml?branch=main)](https://github.com/rabax/exarch/actions)
-[![MSRV](https://img.shields.io/badge/MSRV-1.89.0-blue)](https://github.com/rabax/exarch)
+[![CI](https://img.shields.io/github/actions/workflow/status/bug-ops/exarch/ci.yml?branch=main)](https://github.com/bug-ops/exarch/actions)
+[![MSRV](https://img.shields.io/badge/MSRV-1.89.0-blue)](https://github.com/bug-ops/exarch)
 [![License](https://img.shields.io/crates/l/exarch-core)](../../LICENSE-MIT)
 
 Memory-safe archive extraction library with security validation.
 
-This crate is part of the [exarch](https://github.com/rabax/exarch) workspace.
+This crate is part of the [exarch](https://github.com/bug-ops/exarch) workspace.
 
 ## Installation
 

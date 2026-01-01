@@ -6,14 +6,19 @@
 use crate::ExtractionError;
 use crate::ProgressCallback;
 use crate::Result;
+use crate::creation::compression::compression_level_to_bzip2;
+use crate::creation::compression::compression_level_to_flate2;
+use crate::creation::compression::compression_level_to_xz;
+use crate::creation::compression::compression_level_to_zstd;
 use crate::creation::config::CreationConfig;
 use crate::creation::filters;
+use crate::creation::progress::ProgressReader;
 use crate::creation::report::CreationReport;
 use crate::creation::walker::EntryType;
 use crate::creation::walker::FilteredWalker;
 use crate::creation::walker::collect_entries;
+use crate::io::CountingWriter;
 use std::fs::File;
-use std::io::Read;
 use std::io::Write;
 use std::path::Path;
 use tar::Builder;
@@ -374,117 +379,6 @@ pub fn create_tar_zst_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
     Ok(report)
 }
 
-/// Context for progress reporting.
-///
-/// This struct consolidates progress-related state to reduce argument count
-/// in helper functions.
-struct ProgressContext<'a> {
-    progress: &'a mut dyn ProgressCallback,
-    current_entry: usize,
-    total_entries: usize,
-}
-
-impl<'a> ProgressContext<'a> {
-    fn new(progress: &'a mut dyn ProgressCallback, total_entries: usize) -> Self {
-        Self {
-            progress,
-            current_entry: 0,
-            total_entries,
-        }
-    }
-
-    fn on_entry_start(&mut self, path: &Path) {
-        self.current_entry += 1;
-        self.progress
-            .on_entry_start(path, self.total_entries, self.current_entry);
-    }
-
-    fn on_entry_complete(&mut self, path: &Path) {
-        self.progress.on_entry_complete(path);
-    }
-
-    fn on_complete(&mut self) {
-        self.progress.on_complete();
-    }
-}
-
-/// Wrapper reader that tracks bytes read and reports progress.
-struct ProgressTrackingReader<'a, R> {
-    inner: R,
-    progress: &'a mut dyn ProgressCallback,
-    bytes_since_last_update: u64,
-    batch_threshold: u64,
-}
-
-impl<'a, R> ProgressTrackingReader<'a, R> {
-    fn new(inner: R, progress: &'a mut dyn ProgressCallback) -> Self {
-        Self {
-            inner,
-            progress,
-            bytes_since_last_update: 0,
-            batch_threshold: 1024 * 1024, // 1 MB batching threshold
-        }
-    }
-
-    fn flush_progress(&mut self) {
-        if self.bytes_since_last_update > 0 {
-            self.progress.on_bytes_written(self.bytes_since_last_update);
-            self.bytes_since_last_update = 0;
-        }
-    }
-}
-
-impl<R: Read> Read for ProgressTrackingReader<'_, R> {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let bytes_read = self.inner.read(buf)?;
-        if bytes_read > 0 {
-            self.bytes_since_last_update += bytes_read as u64;
-            if self.bytes_since_last_update >= self.batch_threshold {
-                self.progress.on_bytes_written(self.bytes_since_last_update);
-                self.bytes_since_last_update = 0;
-            }
-        }
-        Ok(bytes_read)
-    }
-}
-
-impl<R> Drop for ProgressTrackingReader<'_, R> {
-    fn drop(&mut self) {
-        self.flush_progress();
-    }
-}
-
-/// Wrapper writer that tracks bytes written for accurate compression reporting.
-struct CountingWriter<W> {
-    inner: W,
-    bytes_written: u64,
-}
-
-impl<W> CountingWriter<W> {
-    fn new(inner: W) -> Self {
-        Self {
-            inner,
-            bytes_written: 0,
-        }
-    }
-
-    fn total_bytes(&self) -> u64 {
-        self.bytes_written
-    }
-}
-
-impl<W: Write> Write for CountingWriter<W> {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let bytes = self.inner.write(buf)?;
-        self.bytes_written += bytes as u64;
-        Ok(bytes)
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.inner.flush()
-    }
-}
-
 /// Internal function that creates TAR with any writer and progress reporting.
 fn create_tar_internal_with_progress<W: Write, P: AsRef<Path>>(
     writer: W,
@@ -501,34 +395,37 @@ fn create_tar_internal_with_progress<W: Write, P: AsRef<Path>>(
     let entries = collect_entries(sources, config)?;
     let total_entries = entries.len();
 
-    // Create progress context with batching
-    let mut context = ProgressContext::new(progress, total_entries);
+    // Manual entry counting (we can't use ProgressTracker because we need to
+    // pass progress to nested functions for byte-level progress)
+    let mut current_entry = 0usize;
 
     // Reusable buffer for file copying (fixes HIGH #2)
     let mut buffer = vec![0u8; 64 * 1024]; // 64 KB
 
     for entry in &entries {
+        current_entry += 1;
+
         match &entry.entry_type {
             EntryType::File => {
-                context.on_entry_start(&entry.archive_path);
+                progress.on_entry_start(&entry.archive_path, total_entries, current_entry);
                 add_file_to_tar_with_progress_impl(
                     &mut builder,
                     &entry.path,
                     &entry.archive_path,
                     config,
                     &mut report,
-                    context.progress,
+                    progress,
                     &mut buffer,
                 )?;
-                context.on_entry_complete(&entry.archive_path);
+                progress.on_entry_complete(&entry.archive_path);
             }
             EntryType::Directory => {
-                context.on_entry_start(&entry.archive_path);
+                progress.on_entry_start(&entry.archive_path, total_entries, current_entry);
                 report.directories_added += 1;
-                context.on_entry_complete(&entry.archive_path);
+                progress.on_entry_complete(&entry.archive_path);
             }
             EntryType::Symlink { target } => {
-                context.on_entry_start(&entry.archive_path);
+                progress.on_entry_start(&entry.archive_path, total_entries, current_entry);
                 if config.follow_symlinks {
                     add_file_to_tar_with_progress_impl(
                         &mut builder,
@@ -536,13 +433,13 @@ fn create_tar_internal_with_progress<W: Write, P: AsRef<Path>>(
                         &entry.archive_path,
                         config,
                         &mut report,
-                        context.progress,
+                        progress,
                         &mut buffer,
                     )?;
                 } else {
                     add_symlink_to_tar(&mut builder, &entry.archive_path, target, &mut report)?;
                 }
-                context.on_entry_complete(&entry.archive_path);
+                progress.on_entry_complete(&entry.archive_path);
             }
         }
     }
@@ -556,7 +453,7 @@ fn create_tar_internal_with_progress<W: Write, P: AsRef<Path>>(
     report.bytes_compressed = counting_writer.total_bytes();
     report.duration = start.elapsed();
 
-    context.on_complete();
+    progress.on_complete();
 
     Ok(report)
 }
@@ -699,8 +596,8 @@ fn add_file_to_tar_with_progress_impl<W: Write>(
 
     // Use progress-tracking reader with batched updates (1 MB batches)
     // Note: tar crate's append_data does its own buffering internally,
-    // so we use ProgressTrackingReader wrapper instead of manual buffer
-    let mut tracked_file = ProgressTrackingReader::new(file, progress);
+    // so we use ProgressReader wrapper instead of manual buffer
+    let mut tracked_file = ProgressReader::new(file, progress);
     builder.append_data(&mut header, archive_path, &mut tracked_file)?;
 
     report.files_added += 1;
@@ -771,51 +668,6 @@ fn set_permissions(header: &mut Header, metadata: &std::fs::Metadata) {
         if let Ok(duration) = modified.duration_since(std::time::UNIX_EPOCH) {
             header.set_mtime(duration.as_secs());
         }
-    }
-}
-
-/// Converts compression level (1-9) to flate2 compression level.
-fn compression_level_to_flate2(level: Option<u8>) -> flate2::Compression {
-    match level {
-        None | Some(6) => flate2::Compression::default(),
-        Some(1..=3) => flate2::Compression::fast(),
-        Some(7..=9) => flate2::Compression::best(),
-        Some(n) => flate2::Compression::new(u32::from(n)),
-    }
-}
-
-/// Converts compression level (1-9) to bzip2 compression level.
-fn compression_level_to_bzip2(level: Option<u8>) -> bzip2::Compression {
-    match level {
-        None | Some(6) => bzip2::Compression::default(),
-        Some(1) => bzip2::Compression::fast(),
-        Some(7..=9) => bzip2::Compression::best(),
-        Some(n @ 2..=6) => bzip2::Compression::new(u32::from(n)),
-        Some(n) => bzip2::Compression::new(u32::from(n.min(9))),
-    }
-}
-
-/// Converts compression level (1-9) to xz compression level.
-fn compression_level_to_xz(level: Option<u8>) -> u32 {
-    match level {
-        None | Some(6) => 6,
-        Some(n) => u32::from(n),
-    }
-}
-
-/// Converts compression level (1-9) to zstd compression level.
-#[allow(clippy::match_same_arms)] // Different semantic meanings
-fn compression_level_to_zstd(level: Option<u8>) -> i32 {
-    match level {
-        // Default compression level
-        None | Some(6) => 3,
-        Some(1) => 1,
-        Some(2) => 2,
-        Some(7) => 10,
-        Some(8) => 15,
-        Some(9) => 19,
-        // All other levels (3-5, 0, 10+) map to default
-        _ => 3,
     }
 }
 
@@ -1113,134 +965,7 @@ mod tests {
         assert_eq!(compression_level_to_zstd(Some(9)), 19);
     }
 
-    #[test]
-    fn test_progress_tracking_reader_reports_bytes() {
-        use std::io::Cursor;
-
-        #[derive(Debug, Default)]
-        struct ByteCounter {
-            total_bytes: u64,
-        }
-
-        impl ProgressCallback for ByteCounter {
-            fn on_entry_start(&mut self, _path: &Path, _total: usize, _current: usize) {}
-
-            fn on_bytes_written(&mut self, bytes: u64) {
-                self.total_bytes += bytes;
-            }
-
-            fn on_entry_complete(&mut self, _path: &Path) {}
-
-            fn on_complete(&mut self) {}
-        }
-
-        let data = b"Hello, World!";
-        let reader = Cursor::new(data);
-        let mut progress = ByteCounter::default();
-        let mut tracking_reader = ProgressTrackingReader::new(reader, &mut progress);
-
-        let mut buffer = vec![0u8; 5];
-        let bytes_read = tracking_reader.read(&mut buffer).unwrap();
-
-        // Drop the reader to flush progress
-        drop(tracking_reader);
-
-        assert_eq!(bytes_read, 5);
-        assert_eq!(progress.total_bytes, 5);
-        assert_eq!(&buffer[..bytes_read], b"Hello");
-    }
-
-    #[test]
-    fn test_progress_tracking_reader_handles_eof() {
-        use std::io::Cursor;
-
-        #[derive(Debug, Default)]
-        struct ByteCounter {
-            total_bytes: u64,
-        }
-
-        impl ProgressCallback for ByteCounter {
-            fn on_entry_start(&mut self, _path: &Path, _total: usize, _current: usize) {}
-
-            fn on_bytes_written(&mut self, bytes: u64) {
-                self.total_bytes += bytes;
-            }
-
-            fn on_entry_complete(&mut self, _path: &Path) {}
-
-            fn on_complete(&mut self) {}
-        }
-
-        let data = b"";
-        let reader = Cursor::new(data);
-        let mut progress = ByteCounter::default();
-        let mut tracking_reader = ProgressTrackingReader::new(reader, &mut progress);
-
-        let mut buffer = vec![0u8; 10];
-        let bytes_read = tracking_reader.read(&mut buffer).unwrap();
-
-        // Drop tracking reader before accessing progress
-        drop(tracking_reader);
-
-        assert_eq!(bytes_read, 0);
-        assert_eq!(progress.total_bytes, 0);
-    }
-
-    #[test]
-    fn test_progress_tracking_reader_multiple_reads() {
-        use std::io::Cursor;
-
-        #[derive(Debug, Default)]
-        struct ByteCounter {
-            total_bytes: u64,
-            call_count: usize,
-        }
-
-        impl ProgressCallback for ByteCounter {
-            fn on_entry_start(&mut self, _path: &Path, _total: usize, _current: usize) {}
-
-            fn on_bytes_written(&mut self, bytes: u64) {
-                self.total_bytes += bytes;
-                self.call_count += 1;
-            }
-
-            fn on_entry_complete(&mut self, _path: &Path) {}
-
-            fn on_complete(&mut self) {}
-        }
-
-        let data = vec![0u8; 25]; // 25 bytes of zeros
-        let reader = Cursor::new(data);
-        let mut progress = ByteCounter::default();
-
-        let mut buffer = vec![0u8; 10];
-        {
-            let mut tracking_reader = ProgressTrackingReader::new(reader, &mut progress);
-
-            // First read - should get 10 bytes
-            let bytes1 = tracking_reader.read(&mut buffer).unwrap();
-            assert_eq!(bytes1, 10);
-
-            // Second read - should get 10 bytes
-            let bytes2 = tracking_reader.read(&mut buffer).unwrap();
-            assert_eq!(bytes2, 10);
-
-            // Third read - should get remaining 5 bytes
-            let bytes3 = tracking_reader.read(&mut buffer).unwrap();
-            assert_eq!(bytes3, 5);
-
-            // Fourth read - should get EOF (0 bytes)
-            let bytes4 = tracking_reader.read(&mut buffer).unwrap();
-            assert_eq!(bytes4, 0);
-
-            // Drop will flush the batched bytes
-        }
-
-        // With batching, we may get fewer calls but same total bytes
-        assert_eq!(progress.total_bytes, 25);
-        // The call count will be fewer due to batching (1 MB threshold)
-        assert!(progress.call_count >= 1);
-    }
+    // NOTE: Progress tracking reader tests are now in creation/progress.rs
 
     #[test]
     fn test_create_tar_with_progress_callback() {

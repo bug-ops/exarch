@@ -1,5 +1,6 @@
 //! Extraction operation reporting.
 
+use std::path::Path;
 use std::time::Duration;
 
 /// Report of an archive extraction operation.
@@ -52,6 +53,82 @@ impl ExtractionReport {
     pub fn has_warnings(&self) -> bool {
         !self.warnings.is_empty()
     }
+}
+
+/// Callback trait for progress reporting during archive operations.
+///
+/// Implement this trait to receive progress updates during extraction or
+/// creation. The trait requires `Send` to allow use in multi-threaded contexts.
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::ProgressCallback;
+/// use std::path::Path;
+///
+/// struct SimpleProgress;
+///
+/// impl ProgressCallback for SimpleProgress {
+///     fn on_entry_start(&mut self, path: &Path, total: usize, current: usize) {
+///         println!("Processing {}/{}: {}", current, total, path.display());
+///     }
+///
+///     fn on_bytes_written(&mut self, bytes: u64) {
+///         // Track bytes written
+///     }
+///
+///     fn on_entry_complete(&mut self, path: &Path) {
+///         println!("Completed: {}", path.display());
+///     }
+///
+///     fn on_complete(&mut self) {
+///         println!("Operation complete");
+///     }
+/// }
+/// ```
+pub trait ProgressCallback: Send {
+    /// Called when starting to process an entry.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path of the entry being processed
+    /// * `total` - Total number of entries in the archive
+    /// * `current` - Current entry number (1-indexed)
+    fn on_entry_start(&mut self, path: &Path, total: usize, current: usize);
+
+    /// Called when bytes are written during extraction or read during creation.
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - Number of bytes written/read in this update
+    fn on_bytes_written(&mut self, bytes: u64);
+
+    /// Called when an entry has been completely processed.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path of the entry that was completed
+    fn on_entry_complete(&mut self, path: &Path);
+
+    /// Called when the entire operation is complete.
+    fn on_complete(&mut self);
+}
+
+/// No-op implementation of `ProgressCallback` that does nothing.
+///
+/// Use this when you don't need progress reporting but the API requires
+/// a callback implementation.
+#[derive(Debug, Default)]
+pub struct NoopProgress;
+
+impl ProgressCallback for NoopProgress {
+    fn on_entry_start(&mut self, _path: &Path, _total: usize, _current: usize) {}
+
+    fn on_bytes_written(&mut self, _bytes: u64) {}
+
+    fn on_entry_complete(&mut self, _path: &Path) {}
+
+    fn on_complete(&mut self) {}
 }
 
 #[cfg(test)]

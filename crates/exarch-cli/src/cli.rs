@@ -2,6 +2,7 @@
 
 use clap::Parser;
 use clap::Subcommand;
+use clap_complete::Shell;
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -35,6 +36,15 @@ pub enum Commands {
     List(ListArgs),
     /// Verify archive integrity
     Verify(VerifyArgs),
+    /// Generate shell completions
+    Completion(CompletionArgs),
+}
+
+#[derive(clap::Args)]
+pub struct CompletionArgs {
+    /// Shell to generate completions for
+    #[arg(value_enum)]
+    pub shell: Shell,
 }
 
 #[derive(clap::Args)]

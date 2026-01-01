@@ -5,6 +5,7 @@ mod cli;
 mod commands;
 mod error;
 mod output;
+mod progress;
 
 use anyhow::Result;
 use clap::Parser;
@@ -19,5 +20,9 @@ fn main() -> Result<()> {
         cli::Commands::Create(args) => commands::create::execute(args, &*formatter, cli.quiet),
         cli::Commands::List(args) => commands::list::execute(args, &*formatter),
         cli::Commands::Verify(args) => commands::verify::execute(args, &*formatter),
+        cli::Commands::Completion(args) => {
+            commands::completion::execute(args.shell);
+            Ok(())
+        }
     }
 }

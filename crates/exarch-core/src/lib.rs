@@ -36,7 +36,9 @@ pub mod types;
 
 // Re-export main API types
 pub use api::create_archive;
+pub use api::create_archive_with_progress;
 pub use api::extract_archive;
+pub use api::extract_archive_with_progress;
 pub use api::list_archive;
 pub use api::verify_archive;
 pub use archive::Archive;
@@ -46,6 +48,8 @@ pub use error::ExtractionError;
 pub use error::QuotaResource;
 pub use error::Result;
 pub use report::ExtractionReport;
+pub use report::NoopProgress;
+pub use report::ProgressCallback;
 
 // Re-export creation types
 pub use creation::ArchiveCreator;

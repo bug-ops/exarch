@@ -4,6 +4,7 @@
 //! compression options: uncompressed, gzip, bzip2, xz, and zstd.
 
 use crate::ExtractionError;
+use crate::ProgressCallback;
 use crate::Result;
 use crate::creation::config::CreationConfig;
 use crate::creation::filters;
@@ -189,6 +190,114 @@ pub fn create_tar_zst<P: AsRef<Path>, Q: AsRef<Path>>(
     // builder.into_inner() But we rely on Drop to finish the encoder
 
     Ok(report)
+}
+
+/// Creates an uncompressed TAR archive with progress reporting.
+///
+/// # Errors
+///
+/// Returns an error if output file cannot be created or I/O operations fail.
+#[allow(dead_code)] // Phase 4: will be used by CLI
+pub fn create_tar_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
+    output: P,
+    sources: &[Q],
+    config: &CreationConfig,
+    progress: &mut dyn ProgressCallback,
+) -> Result<CreationReport> {
+    let file = File::create(output.as_ref())?;
+    create_tar_internal_with_progress(file, sources, config, progress)
+}
+
+/// Creates a gzip-compressed TAR archive with progress reporting.
+///
+/// # Errors
+///
+/// Returns an error if output file cannot be created, compression fails, or I/O
+/// operations fail.
+#[allow(dead_code)] // Phase 4: will be used by CLI
+pub fn create_tar_gz_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
+    output: P,
+    sources: &[Q],
+    config: &CreationConfig,
+    progress: &mut dyn ProgressCallback,
+) -> Result<CreationReport> {
+    let file = File::create(output.as_ref())?;
+    let level = compression_level_to_flate2(config.compression_level);
+    let encoder = flate2::write::GzEncoder::new(file, level);
+    create_tar_internal_with_progress(encoder, sources, config, progress)
+}
+
+/// Creates a bzip2-compressed TAR archive with progress reporting.
+///
+/// # Errors
+///
+/// Returns an error if output file cannot be created, compression fails, or I/O
+/// operations fail.
+#[allow(dead_code)] // Phase 4: will be used by CLI
+pub fn create_tar_bz2_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
+    output: P,
+    sources: &[Q],
+    config: &CreationConfig,
+    progress: &mut dyn ProgressCallback,
+) -> Result<CreationReport> {
+    let file = File::create(output.as_ref())?;
+    let level = compression_level_to_bzip2(config.compression_level);
+    let encoder = bzip2::write::BzEncoder::new(file, level);
+    create_tar_internal_with_progress(encoder, sources, config, progress)
+}
+
+/// Creates an xz-compressed TAR archive with progress reporting.
+///
+/// # Errors
+///
+/// Returns an error if output file cannot be created, compression fails, or I/O
+/// operations fail.
+#[allow(dead_code)] // Phase 4: will be used by CLI
+pub fn create_tar_xz_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
+    output: P,
+    sources: &[Q],
+    config: &CreationConfig,
+    progress: &mut dyn ProgressCallback,
+) -> Result<CreationReport> {
+    let file = File::create(output.as_ref())?;
+    let level = compression_level_to_xz(config.compression_level);
+    let encoder = xz2::write::XzEncoder::new(file, level);
+    create_tar_internal_with_progress(encoder, sources, config, progress)
+}
+
+/// Creates a zstd-compressed TAR archive with progress reporting.
+///
+/// # Errors
+///
+/// Returns an error if output file cannot be created, compression fails, or I/O
+/// operations fail.
+#[allow(dead_code)] // Phase 4: will be used by CLI
+pub fn create_tar_zst_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
+    output: P,
+    sources: &[Q],
+    config: &CreationConfig,
+    progress: &mut dyn ProgressCallback,
+) -> Result<CreationReport> {
+    let file = File::create(output.as_ref())?;
+    let level = compression_level_to_zstd(config.compression_level);
+    let mut encoder = zstd::Encoder::new(file, level)?;
+    encoder.include_checksum(true)?;
+
+    let report = create_tar_internal_with_progress(encoder, sources, config, progress)?;
+
+    Ok(report)
+}
+
+/// Internal function that creates TAR with any writer and progress reporting.
+fn create_tar_internal_with_progress<W: Write, P: AsRef<Path>>(
+    writer: W,
+    sources: &[P],
+    config: &CreationConfig,
+    _progress: &mut dyn ProgressCallback,
+) -> Result<CreationReport> {
+    // TODO: Integrate progress callbacks
+    // For now, delegate to the non-progress version
+    create_tar_internal(writer, sources, config)
 }
 
 /// Internal function that creates TAR with any writer.

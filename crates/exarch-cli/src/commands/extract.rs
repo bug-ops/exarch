@@ -3,11 +3,13 @@
 use crate::cli::ExtractArgs;
 use crate::error::add_archive_context;
 use crate::output::OutputFormatter;
+use crate::progress::CliProgress;
 use anyhow::Context;
 use anyhow::Result;
+use exarch_core::NoopProgress;
 use exarch_core::SecurityConfig;
 use exarch_core::config::AllowedFeatures;
-use exarch_core::extract_archive;
+use exarch_core::extract_archive_with_progress;
 use std::env;
 
 pub fn execute(args: &ExtractArgs, formatter: &dyn OutputFormatter) -> Result<()> {
@@ -31,10 +33,20 @@ pub fn execute(args: &ExtractArgs, formatter: &dyn OutputFormatter) -> Result<()
         ..Default::default()
     };
 
-    let report = add_archive_context(
-        extract_archive(&args.archive, &output_dir, &config),
-        &args.archive,
-    )?;
+    // Use progress bar if TTY is detected (not quiet, not JSON, is terminal)
+    let report = if CliProgress::should_show() {
+        let mut progress = CliProgress::new(100, "Extracting");
+        add_archive_context(
+            extract_archive_with_progress(&args.archive, &output_dir, &config, &mut progress),
+            &args.archive,
+        )?
+    } else {
+        let mut noop = NoopProgress;
+        add_archive_context(
+            extract_archive_with_progress(&args.archive, &output_dir, &config, &mut noop),
+            &args.archive,
+        )?
+    };
 
     formatter.format_extraction_result(&report)?;
 

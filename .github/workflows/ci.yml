@@ -232,23 +232,22 @@ jobs:
       - name: Install dependencies
         run: |
           cd crates/exarch-python
-          uv pip install --system maturin
-          uv pip install --system --group dev
+          uv pip install --system maturin ruff mypy pytest pytest-cov
 
       - name: Format check with ruff
         run: |
           cd crates/exarch-python
-          uv run --system ruff format --check .
+          ruff format --check .
 
       - name: Lint with ruff
         run: |
           cd crates/exarch-python
-          uv run --system ruff check .
+          ruff check .
 
       - name: Type check with mypy
         run: |
           cd crates/exarch-python
-          uv run --system mypy . --ignore-missing-imports || true
+          mypy . --ignore-missing-imports || true
 
       - name: Build Python bindings
         run: |
@@ -261,7 +260,7 @@ jobs:
       - name: Test Python bindings with coverage
         run: |
           cd crates/exarch-python
-          uv run --system pytest tests/ -v --cov --cov-report=xml:coverage.xml
+          pytest tests/ -v --cov --cov-report=xml:coverage.xml
 
       - name: Upload Python coverage to Codecov
         uses: codecov/codecov-action@v4

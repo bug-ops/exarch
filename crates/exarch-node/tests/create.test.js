@@ -115,10 +115,10 @@ describe('createArchiveSync', () => {
 
     const config = new CreationConfig();
     config.addExcludePattern('*.log');
-    const report = createArchiveSync(outputPath, [sourceDir], config);
+    createArchiveSync(outputPath, [sourceDir], config);
 
     const manifest = listArchiveSync(outputPath);
-    const logEntries = manifest.entries.filter(e => e.path.endsWith('.log'));
+    const logEntries = manifest.entries.filter((e) => e.path.endsWith('.log'));
     assert.strictEqual(logEntries.length, 0);
   });
 });

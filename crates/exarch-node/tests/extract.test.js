@@ -4,7 +4,7 @@
  * NOTE: Extraction tests are skipped until exarch-core extract_archive API is fully implemented.
  * The current implementation is a placeholder (see exarch-core/src/api.rs).
  */
-const { describe, it, beforeEach, skip } = require('node:test');
+const { describe, it, beforeEach } = require('node:test');
 const assert = require('node:assert');
 const fs = require('node:fs');
 const path = require('node:path');

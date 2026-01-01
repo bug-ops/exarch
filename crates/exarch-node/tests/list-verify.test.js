@@ -46,7 +46,7 @@ describe('listArchive (async)', () => {
     assert.ok(manifest.totalEntries >= 1);
     assert.ok(manifest.entries.length >= 1);
     // Find the hello.txt entry
-    const helloEntry = manifest.entries.find(e => e.path.endsWith('hello.txt'));
+    const helloEntry = manifest.entries.find((e) => e.path.endsWith('hello.txt'));
     assert.ok(helloEntry, 'should find hello.txt in archive');
     assert.strictEqual(helloEntry.entryType, 'File');
     assert.strictEqual(helloEntry.size, 13);
@@ -84,7 +84,7 @@ describe('listArchiveSync', () => {
     const manifest = listArchiveSync(archivePath);
 
     assert.ok(manifest.totalEntries >= 1);
-    const helloEntry = manifest.entries.find(e => e.path.endsWith('hello.txt'));
+    const helloEntry = manifest.entries.find((e) => e.path.endsWith('hello.txt'));
     assert.ok(helloEntry, 'should find hello.txt in archive');
   });
 });

@@ -226,8 +226,24 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install maturin and test dependencies
-        run: pip install maturin pytest pytest-cov
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install dependencies
+        run: |
+          cd crates/exarch-python
+          uv pip install --system maturin
+          uv pip install --system --group dev
+
+      - name: Lint with ruff
+        run: |
+          cd crates/exarch-python
+          uv run --system ruff check .
+
+      - name: Type check with mypy
+        run: |
+          cd crates/exarch-python
+          uv run --system mypy . --ignore-missing-imports || true
 
       - name: Build Python bindings
         run: |
@@ -235,12 +251,12 @@ jobs:
           maturin build --release
 
       - name: Install Python bindings
-        run: pip install target/wheels/*.whl
+        run: uv pip install --system target/wheels/*.whl
 
       - name: Test Python bindings with coverage
         run: |
           cd crates/exarch-python
-          pytest tests/ -v --cov --cov-report=xml:coverage.xml
+          uv run --system pytest tests/ -v --cov --cov-report=xml:coverage.xml
 
       - name: Upload Python coverage to Codecov
         uses: codecov/codecov-action@v4
@@ -277,10 +293,19 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Build Node.js bindings
+      - name: Install dependencies
         run: |
           cd crates/exarch-node
           npm install
+
+      - name: Lint with Biome
+        run: |
+          cd crates/exarch-node
+          npm run check:ci
+
+      - name: Build Node.js bindings
+        run: |
+          cd crates/exarch-node
           npm run build
 
       - name: Test Node.js bindings

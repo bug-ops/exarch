@@ -41,5 +41,29 @@ Repository = "https://github.com/bug-ops/exarch"
 Documentation = "https://github.com/bug-ops/exarch#readme"
 Issues = "https://github.com/bug-ops/exarch/issues"
 
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=6.0",
+    "mypy>=1.0",
+    "ruff>=0.8",
+    "maturin>=1.0",
+]
+
 [tool.maturin]
 features = ["pyo3/extension-module"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+
+[tool.mypy]
+python_version = "3.9"
+strict = true
+disallow_untyped_defs = true
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP"]

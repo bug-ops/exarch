@@ -361,6 +361,185 @@ impl SecurityConfig {
     }
 }
 
+/// Configuration for archive creation operations.
+///
+/// Controls how archives are created from filesystem sources, including
+/// security options, compression settings, and file filtering.
+///
+/// # Defaults
+///
+/// | Setting | Default Value |
+/// |---------|--------------|
+/// | `compression_level` | 6 (balanced) |
+/// | `preserve_permissions` | true |
+/// | `follow_symlinks` | false (secure) |
+/// | `include_hidden` | false |
+/// | `max_file_size` | None (no limit) |
+/// | `exclude_patterns` | `[".git", ".DS_Store", "*.tmp"]` |
+#[napi]
+#[derive(Debug, Clone)]
+pub struct CreationConfig {
+    inner: exarch_core::creation::CreationConfig,
+}
+
+#[napi]
+impl CreationConfig {
+    /// Creates a new `CreationConfig` with secure defaults.
+    #[napi(constructor)]
+    pub fn new() -> Self {
+        Self {
+            inner: exarch_core::creation::CreationConfig::default(),
+        }
+    }
+
+    /// Creates a `CreationConfig` with secure defaults.
+    ///
+    /// This is equivalent to calling `new CreationConfig()`.
+    #[napi(factory)]
+    pub fn default() -> Self {
+        Self::new()
+    }
+
+    /// Sets the compression level (1-9).
+    ///
+    /// Higher values provide better compression but slower speed.
+    /// Default: 6 (balanced).
+    ///
+    /// # Errors
+    ///
+    /// Returns error if level is not in range 1-9.
+    #[napi]
+    #[allow(clippy::cast_possible_truncation)] // level is validated to be 1-9
+    pub fn compression_level(&mut self, level: u32) -> Result<&Self> {
+        if !(1..=9).contains(&level) {
+            return Err(Error::from_reason(
+                "compression level must be between 1 and 9",
+            ));
+        }
+        self.inner.compression_level = Some(level as u8);
+        Ok(self)
+    }
+
+    /// Sets whether to preserve file permissions from source.
+    ///
+    /// Default: true.
+    #[napi]
+    pub fn preserve_permissions(&mut self, preserve: Option<bool>) -> &Self {
+        self.inner.preserve_permissions = preserve.unwrap_or(true);
+        self
+    }
+
+    /// Sets whether to follow symlinks when adding files.
+    ///
+    /// Default: false (store symlinks as symlinks).
+    ///
+    /// Security note: Following symlinks may include unintended files
+    /// from outside the source directory.
+    #[napi]
+    pub fn follow_symlinks(&mut self, follow: Option<bool>) -> &Self {
+        self.inner.follow_symlinks = follow.unwrap_or(true);
+        self
+    }
+
+    /// Sets whether to include hidden files (files starting with '.').
+    ///
+    /// Default: false.
+    #[napi]
+    pub fn include_hidden(&mut self, include: Option<bool>) -> &Self {
+        self.inner.include_hidden = include.unwrap_or(true);
+        self
+    }
+
+    /// Sets maximum size for a single file in bytes.
+    ///
+    /// Files larger than this limit will be skipped.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if size is negative.
+    #[napi]
+    pub fn max_file_size(&mut self, size: i64) -> Result<&Self> {
+        if size < 0 {
+            return Err(Error::from_reason("max file size cannot be negative"));
+        }
+        #[allow(clippy::cast_sign_loss)]
+        {
+            self.inner.max_file_size = if size == 0 { None } else { Some(size as u64) };
+        }
+        Ok(self)
+    }
+
+    /// Adds an exclude pattern.
+    ///
+    /// Files matching this pattern will be skipped.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if pattern contains null bytes.
+    #[napi]
+    pub fn add_exclude_pattern(&mut self, pattern: String) -> Result<&Self> {
+        if pattern.contains('\0') {
+            return Err(Error::from_reason(
+                "pattern contains null bytes - potential security issue",
+            ));
+        }
+        self.inner.exclude_patterns.push(pattern);
+        Ok(self)
+    }
+
+    /// Finalizes the configuration (for API consistency).
+    #[napi]
+    pub fn build(&self) -> &Self {
+        self
+    }
+
+    // Property getters
+
+    /// Compression level (1-9).
+    #[napi(getter)]
+    pub fn get_compression_level(&self) -> Option<u32> {
+        self.inner.compression_level.map(u32::from)
+    }
+
+    /// Whether to preserve permissions.
+    #[napi(getter)]
+    pub fn get_preserve_permissions(&self) -> bool {
+        self.inner.preserve_permissions
+    }
+
+    /// Whether to follow symlinks.
+    #[napi(getter)]
+    pub fn get_follow_symlinks(&self) -> bool {
+        self.inner.follow_symlinks
+    }
+
+    /// Whether to include hidden files.
+    #[napi(getter)]
+    pub fn get_include_hidden(&self) -> bool {
+        self.inner.include_hidden
+    }
+
+    /// Maximum file size in bytes.
+    #[napi(getter)]
+    #[allow(clippy::cast_possible_wrap)]
+    pub fn get_max_file_size(&self) -> Option<i64> {
+        self.inner.max_file_size.map(|s| s as i64)
+    }
+
+    /// List of exclude patterns.
+    #[napi(getter)]
+    pub fn get_exclude_patterns(&self) -> Vec<String> {
+        self.inner.exclude_patterns.clone()
+    }
+}
+
+impl CreationConfig {
+    /// Returns a reference to the inner `CoreCreationConfig`.
+    pub fn as_core(&self) -> &exarch_core::creation::CreationConfig {
+        &self.inner
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -923,5 +1102,82 @@ mod tests {
             config.has_banned_path_component(".git".to_string()),
             ".git should be in default banned components"
         );
+    }
+
+    // CreationConfig tests
+    #[test]
+    fn test_creation_config_default() {
+        let config = CreationConfig::new();
+        assert_eq!(config.get_compression_level(), Some(6));
+        assert!(config.get_preserve_permissions());
+        assert!(!config.get_follow_symlinks());
+        assert!(!config.get_include_hidden());
+        assert_eq!(config.get_max_file_size(), None);
+        assert_eq!(config.get_exclude_patterns().len(), 3);
+    }
+
+    #[test]
+    fn test_creation_config_builder() {
+        let mut config = CreationConfig::new();
+        config.compression_level(9).unwrap();
+        config.preserve_permissions(Some(false));
+        config.follow_symlinks(Some(true));
+        config.include_hidden(Some(true));
+        config.max_file_size(1_000_000).unwrap();
+
+        assert_eq!(config.get_compression_level(), Some(9));
+        assert!(!config.get_preserve_permissions());
+        assert!(config.get_follow_symlinks());
+        assert!(config.get_include_hidden());
+        assert_eq!(config.get_max_file_size(), Some(1_000_000));
+    }
+
+    #[test]
+    fn test_creation_config_compression_level_rejects_invalid() {
+        let mut config = CreationConfig::new();
+        assert!(config.compression_level(0).is_err());
+        assert!(config.compression_level(10).is_err());
+    }
+
+    #[test]
+    fn test_creation_config_compression_level_accepts_valid() {
+        let mut config = CreationConfig::new();
+        assert!(config.compression_level(1).is_ok());
+        assert!(config.compression_level(9).is_ok());
+    }
+
+    #[test]
+    fn test_creation_config_max_file_size_negative() {
+        let mut config = CreationConfig::new();
+        let result = config.max_file_size(-1);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("cannot be negative")
+        );
+    }
+
+    #[test]
+    fn test_creation_config_add_exclude_pattern() {
+        let mut config = CreationConfig::new();
+        config.add_exclude_pattern("*.log".to_string()).unwrap();
+        let patterns = config.get_exclude_patterns();
+        assert!(patterns.contains(&"*.log".to_string()));
+    }
+
+    #[test]
+    fn test_creation_config_add_exclude_pattern_rejects_null() {
+        let mut config = CreationConfig::new();
+        let result = config.add_exclude_pattern("bad\0pattern".to_string());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_creation_config_as_core() {
+        let config = CreationConfig::new();
+        let core = config.as_core();
+        assert_eq!(core.compression_level, Some(6));
     }
 }

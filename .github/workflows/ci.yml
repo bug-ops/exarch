@@ -234,12 +234,13 @@ jobs:
           cd crates/exarch-python
           maturin build --release
 
+      - name: Install Python bindings
+        run: pip install target/wheels/*.whl
+
       - name: Test Python bindings with coverage
         run: |
           cd crates/exarch-python
-          pip install --find-links target/wheels exarch-python
-          pytest tests/ --cov=exarch --cov-report=xml:coverage.xml || echo "Python tests not yet implemented"
-        continue-on-error: true
+          pytest tests/ -v --cov --cov-report=xml:coverage.xml
 
       - name: Upload Python coverage to Codecov
         uses: codecov/codecov-action@v4
@@ -279,23 +280,13 @@ jobs:
       - name: Build Node.js bindings
         run: |
           cd crates/exarch-node
-          npm install || echo "No package.json yet"
-          cargo build --release
-        continue-on-error: true
+          npm install
+          npm run build
 
-      - name: Test Node.js bindings with coverage
+      - name: Test Node.js bindings
         run: |
           cd crates/exarch-node
-          npm run test:coverage || echo "Node.js tests not yet implemented"
-        continue-on-error: true
-
-      - name: Upload Node.js coverage to Codecov
-        uses: codecov/codecov-action@v4
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          files: crates/exarch-node/coverage/lcov.info
-          flags: exarch-node
-          fail_ci_if_error: false
+          npm test
 
   # MSRV check (exarch-core only)
   msrv:

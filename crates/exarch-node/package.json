@@ -38,7 +38,8 @@
   "scripts": {
     "build": "napi build --platform --release",
     "build:debug": "napi build --platform",
-    "test": "node --test"
+    "test": "node --test tests/*.test.js",
+    "test:coverage": "node --test --experimental-test-coverage tests/*.test.js"
   },
   "devDependencies": {
     "@napi-rs/cli": "^3.5"

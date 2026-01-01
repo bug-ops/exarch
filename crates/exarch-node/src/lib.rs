@@ -706,7 +706,7 @@ mod tests {
     #[test]
     fn test_extract_archive_sync_with_custom_config() {
         let mut config = SecurityConfig::new();
-        config.max_file_size(1_000_000).unwrap();
+        config.set_max_file_size(1_000_000).unwrap();
 
         // Test that valid paths pass boundary validation with custom config
         let result = extract_archive_sync(

@@ -161,7 +161,7 @@ jobs:
       - name: Build wheels
         run: |
           cd crates/exarch-python
-          maturin build --release ${{ matrix.platform.maturin-args }} --strip --out wheels
+          maturin build --release ${{ matrix.platform.maturin-args }} --strip --out wheels -i python3.11
 
       - name: Upload wheels
         uses: actions/upload-artifact@v4

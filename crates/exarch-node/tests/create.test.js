@@ -1,7 +1,7 @@
 /**
  * Tests for archive creation functions
  */
-const { describe, it, beforeEach } = require('node:test');
+const { describe, it, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -37,6 +37,12 @@ describe('createArchive (async)', () => {
     fs.mkdirSync(sourceDir);
     createTestFiles(sourceDir);
     outputPath = path.join(tempDir, 'output.tar.gz');
+  });
+
+  afterEach(() => {
+    if (tempDir && fs.existsSync(tempDir)) {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
   });
 
   it('should create a tar.gz archive', async () => {
@@ -93,6 +99,12 @@ describe('createArchiveSync', () => {
     fs.mkdirSync(sourceDir);
     createTestFiles(sourceDir);
     outputPath = path.join(tempDir, 'output.tar.gz');
+  });
+
+  afterEach(() => {
+    if (tempDir && fs.existsSync(tempDir)) {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
   });
 
   it('should create archive synchronously', () => {

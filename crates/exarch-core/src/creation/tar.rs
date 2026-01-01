@@ -982,9 +982,7 @@ mod tests {
         }
     }
 
-    // TODO(Phase 3): Re-enable when extraction API is fully implemented
     #[test]
-    #[ignore = "requires fully implemented extraction API"]
     #[cfg(unix)]
     fn test_create_tar_preserves_permissions() {
         use std::os::unix::fs::PermissionsExt;
@@ -1040,9 +1038,7 @@ mod tests {
         assert!(report.duration.as_nanos() > 0);
     }
 
-    // TODO(Phase 3): Re-enable when extraction API is fully implemented
     #[test]
-    #[ignore = "requires fully implemented extraction API"]
     fn test_create_tar_roundtrip() {
         let temp = TempDir::new().unwrap();
         let output = temp.path().join("output.tar.gz");

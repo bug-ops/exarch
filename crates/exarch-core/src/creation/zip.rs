@@ -184,10 +184,14 @@ fn create_zip_internal_with_progress<W: Write + Seek, P: AsRef<Path>>(
             }
             EntryType::Directory => {
                 progress.on_entry_start(&entry.archive_path, total_entries, current_entry);
-                let dir_path = format!("{}/", normalize_zip_path(&entry.archive_path)?);
-                zip.add_directory(&dir_path, options)
-                    .map_err(|e| std::io::Error::other(format!("failed to add directory: {e}")))?;
-                report.directories_added += 1;
+                // Skip root directory entry (empty path becomes "/" which is invalid)
+                if !entry.archive_path.as_os_str().is_empty() {
+                    let dir_path = format!("{}/", normalize_zip_path(&entry.archive_path)?);
+                    zip.add_directory(&dir_path, options).map_err(|e| {
+                        std::io::Error::other(format!("failed to add directory: {e}"))
+                    })?;
+                    report.directories_added += 1;
+                }
                 progress.on_entry_complete(&entry.archive_path);
             }
             EntryType::Symlink { .. } => {

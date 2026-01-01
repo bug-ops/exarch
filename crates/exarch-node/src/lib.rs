@@ -208,9 +208,13 @@ pub fn extract_archive_sync(
     let default_config = exarch_core::SecurityConfig::default();
     let config_ref = config.map_or(&default_config, |c| c.as_core());
 
-    // Run extraction synchronously
-    let report = exarch_core::extract_archive(&archive_path, &output_dir, config_ref)
-        .map_err(convert_error)?;
+    // Run extraction synchronously with panic safety
+    // CRITICAL: Never panic across FFI boundary
+    let report = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        exarch_core::extract_archive(&archive_path, &output_dir, config_ref)
+    }))
+    .map_err(|_| Error::from_reason("Internal panic during archive extraction"))?
+    .map_err(convert_error)?;
 
     Ok(ExtractionReport::from(report))
 }

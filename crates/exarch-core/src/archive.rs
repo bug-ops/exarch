@@ -46,9 +46,7 @@ impl Archive {
     ///
     /// Returns an error if extraction fails or security checks are violated.
     pub fn extract<P: AsRef<Path>>(&self, output_dir: P) -> Result<ExtractionReport> {
-        let _output_dir = output_dir.as_ref();
-        // TODO: Implement extraction
-        Ok(ExtractionReport::new())
+        crate::api::extract_archive(&self.path, output_dir.as_ref(), &self.config)
     }
 }
 

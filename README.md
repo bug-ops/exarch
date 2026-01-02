@@ -9,18 +9,19 @@
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue)](LICENSE-MIT)
 [![MSRV](https://img.shields.io/badge/MSRV-1.89.0-blue)](https://github.com/bug-ops/exarch)
 
-Memory-safe archive extraction library with Python and Node.js bindings.
+Memory-safe archive extraction and creation library with Python and Node.js bindings.
 
 > [!IMPORTANT]
 > **exarch** is designed as a secure replacement for vulnerable archive libraries like Python's `tarfile` and Node.js's `tar-fs`, which have known CVEs with CVSS scores up to 9.4.
 
 ## Features
 
+- **Extract and create archives** — Full support for TAR and ZIP (extract and create), plus 7z extraction
 - **Security-first design** — Default-deny security model with protection against path traversal, symlink attacks, zip bombs, and more
 - **Type-driven safety** — Rust's type system ensures validated paths can only be constructed through security checks
 - **Multi-language support** — Native bindings for Python (PyO3) and Node.js (napi-rs)
 - **Zero unsafe code** — Core library contains no unsafe Rust code
-- **High performance** — Optimized I/O with reusable buffers and streaming extraction
+- **High performance** — Optimized I/O with reusable buffers and streaming operations
 
 ## Installation
 
@@ -54,7 +55,9 @@ npm install exarch-rs
 
 ## Quick Start
 
-### Rust
+### Extraction
+
+#### Rust
 
 ```rust
 use exarch_core::{extract_archive, SecurityConfig};
@@ -70,7 +73,7 @@ fn main() -> Result<(), exarch_core::ExtractionError> {
 }
 ```
 
-### Python
+#### Python
 
 ```python
 import exarch
@@ -79,7 +82,7 @@ result = exarch.extract_archive("archive.tar.gz", "/output/path")
 print(f"Extracted {result.files_extracted} files")
 ```
 
-### Node.js
+#### Node.js
 
 ```javascript
 const { extractArchive } = require('exarch');
@@ -87,6 +90,43 @@ const { extractArchive } = require('exarch');
 // Async (recommended)
 const result = await extractArchive('archive.tar.gz', '/output/path');
 console.log(`Extracted ${result.filesExtracted} files`);
+```
+
+### Creation
+
+#### Rust
+
+```rust
+use exarch_core::{create_archive, creation::CreationConfig};
+
+fn main() -> Result<(), exarch_core::ExtractionError> {
+    let config = CreationConfig::default();
+    let report = create_archive("output.tar.gz", &["src/", "Cargo.toml"], &config)?;
+
+    println!("Created archive with {} files ({} bytes)",
+        report.files_added,
+        report.bytes_written);
+    Ok(())
+}
+```
+
+#### Python
+
+```python
+import exarch
+
+result = exarch.create_archive("output.tar.gz", ["src/", "Cargo.toml"])
+print(f"Created archive with {result.files_added} files")
+```
+
+#### Node.js
+
+```javascript
+const { createArchive } = require('exarch');
+
+// Async (recommended)
+const result = await createArchive('output.tar.gz', ['src/', 'package.json']);
+console.log(`Created archive with ${result.filesAdded} files`);
 ```
 
 ## Security
@@ -120,14 +160,18 @@ let config = SecurityConfig {
 
 ## Supported Formats
 
-| Format | Extensions | Compression |
-|--------|------------|-------------|
-| TAR | `.tar` | None |
-| TAR+GZIP | `.tar.gz`, `.tgz` | gzip |
-| TAR+BZIP2 | `.tar.bz2`, `.tbz2` | bzip2 |
-| TAR+XZ | `.tar.xz`, `.txz` | xz/lzma |
-| TAR+ZSTD | `.tar.zst`, `.tzst` | zstandard |
-| ZIP | `.zip` | deflate, deflate64, bzip2, zstd |
+| Format | Extensions | Extract | Create | Compression |
+|--------|------------|:-------:|:------:|-------------|
+| TAR | `.tar` | ✅ | ✅ | None |
+| TAR+GZIP | `.tar.gz`, `.tgz` | ✅ | ✅ | gzip |
+| TAR+BZIP2 | `.tar.bz2`, `.tbz2` | ✅ | ✅ | bzip2 |
+| TAR+XZ | `.tar.xz`, `.txz` | ✅ | ✅ | xz/lzma |
+| TAR+ZSTD | `.tar.zst`, `.tzst` | ✅ | ✅ | zstandard |
+| ZIP | `.zip` | ✅ | ✅ | deflate, deflate64, bzip2, zstd |
+| 7z | `.7z` | ✅ | — | lzma, lzma2 |
+
+> [!NOTE]
+> 7z creation is not yet supported. Solid and encrypted 7z archives are rejected for security reasons.
 
 ## Project Structure
 

@@ -5,7 +5,7 @@
 [![CI](https://img.shields.io/github/actions/workflow/status/bug-ops/exarch/ci.yml?branch=main)](https://github.com/bug-ops/exarch/actions)
 [![License](https://img.shields.io/pypi/l/exarch)](../../LICENSE-MIT)
 
-Memory-safe archive extraction library for Python.
+Memory-safe archive extraction and creation library for Python.
 
 > [!IMPORTANT]
 > **exarch** is designed as a secure replacement for vulnerable archive libraries like Python's `tarfile`, which has known CVEs with CVSS scores up to 9.4.
@@ -37,11 +37,22 @@ pipenv install exarch
 
 ## Quick Start
 
+### Extraction
+
 ```python
 import exarch
 
 result = exarch.extract_archive("archive.tar.gz", "/output/path")
 print(f"Extracted {result.files_extracted} files")
+```
+
+### Creation
+
+```python
+import exarch
+
+result = exarch.create_archive("backup.tar.gz", ["src/", "Cargo.toml"])
+print(f"Created archive with {result.files_added} files")
 ```
 
 ## Usage
@@ -164,14 +175,18 @@ The library provides built-in protection against:
 
 ## Supported Formats
 
-| Format | Extensions |
-|--------|------------|
-| TAR | `.tar` |
-| TAR+GZIP | `.tar.gz`, `.tgz` |
-| TAR+BZIP2 | `.tar.bz2`, `.tbz2` |
-| TAR+XZ | `.tar.xz`, `.txz` |
-| TAR+ZSTD | `.tar.zst`, `.tzst` |
-| ZIP | `.zip` |
+| Format | Extensions | Extract | Create |
+|--------|------------|:-------:|:------:|
+| TAR | `.tar` | ✅ | ✅ |
+| TAR+GZIP | `.tar.gz`, `.tgz` | ✅ | ✅ |
+| TAR+BZIP2 | `.tar.bz2`, `.tbz2` | ✅ | ✅ |
+| TAR+XZ | `.tar.xz`, `.txz` | ✅ | ✅ |
+| TAR+ZSTD | `.tar.zst`, `.tzst` | ✅ | ✅ |
+| ZIP | `.zip` | ✅ | ✅ |
+| 7z | `.7z` | ✅ | — |
+
+> [!NOTE]
+> 7z creation is not yet supported. Solid and encrypted 7z archives are rejected for security reasons.
 
 ## Comparison with tarfile
 

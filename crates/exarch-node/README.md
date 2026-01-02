@@ -6,7 +6,7 @@
 [![CI](https://img.shields.io/github/actions/workflow/status/bug-ops/exarch/ci.yml?branch=main)](https://github.com/bug-ops/exarch/actions)
 [![License](https://img.shields.io/npm/l/exarch-rs)](../../LICENSE-MIT)
 
-Memory-safe archive extraction library for Node.js.
+Memory-safe archive extraction and creation library for Node.js.
 
 > [!IMPORTANT]
 > **exarch** is designed as a secure replacement for vulnerable archive libraries like `tar-fs`, which has known CVEs with CVSS scores up to 9.4.
@@ -38,12 +38,24 @@ bun add exarch-rs
 
 ## Quick Start
 
+### Extraction
+
 ```javascript
 const { extractArchive } = require('exarch-rs');
 
 // Async (recommended)
 const result = await extractArchive('archive.tar.gz', '/output/path');
 console.log(`Extracted ${result.filesExtracted} files`);
+```
+
+### Creation
+
+```javascript
+const { createArchive } = require('exarch-rs');
+
+// Async (recommended)
+const result = await createArchive('backup.tar.gz', ['src/', 'package.json']);
+console.log(`Created archive with ${result.filesAdded} files`);
 ```
 
 ## Usage
@@ -178,14 +190,18 @@ The library provides built-in protection against:
 
 ## Supported Formats
 
-| Format | Extensions |
-|--------|------------|
-| TAR | `.tar` |
-| TAR+GZIP | `.tar.gz`, `.tgz` |
-| TAR+BZIP2 | `.tar.bz2`, `.tbz2` |
-| TAR+XZ | `.tar.xz`, `.txz` |
-| TAR+ZSTD | `.tar.zst`, `.tzst` |
-| ZIP | `.zip` |
+| Format | Extensions | Extract | Create |
+|--------|------------|:-------:|:------:|
+| TAR | `.tar` | ✅ | ✅ |
+| TAR+GZIP | `.tar.gz`, `.tgz` | ✅ | ✅ |
+| TAR+BZIP2 | `.tar.bz2`, `.tbz2` | ✅ | ✅ |
+| TAR+XZ | `.tar.xz`, `.txz` | ✅ | ✅ |
+| TAR+ZSTD | `.tar.zst`, `.tzst` | ✅ | ✅ |
+| ZIP | `.zip` | ✅ | ✅ |
+| 7z | `.7z` | ✅ | — |
+
+> [!NOTE]
+> 7z creation is not yet supported. Solid and encrypted 7z archives are rejected for security reasons.
 
 ## Comparison with tar-fs
 

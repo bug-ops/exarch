@@ -190,3 +190,103 @@ fn test_7z_solid_archive_with_file_count_quota() {
     let result = archive.extract(temp.path(), &config);
     assert!(matches!(result, Err(ExtractionError::QuotaExceeded { .. })));
 }
+
+// ============================================================================
+// Phase 10.5: Symlink/Hardlink Detection Integration Tests
+// ============================================================================
+
+/// Test: Unix symlink extraction (documented limitation - extracted as file)
+#[test]
+#[cfg(unix)]
+fn test_7z_unix_symlink_extracted_as_file() {
+    let data = load_fixture("symlink-unix.7z");
+    let cursor = Cursor::new(data);
+    let mut archive = SevenZArchive::new(cursor).unwrap();
+
+    let temp = TempDir::new().unwrap();
+    let config = SecurityConfig::default();
+
+    // Current behavior: succeeds, extracts symlink as file
+    let result = archive.extract(temp.path(), &config);
+    assert!(
+        result.is_ok(),
+        "Unix symlink should extract as file (documented limitation): {result:?}"
+    );
+
+    let report = result.unwrap();
+    assert_eq!(
+        report.files_extracted, 2,
+        "should extract exactly 2 files (target.txt and link.txt)"
+    );
+
+    // Verify link.txt exists as regular file (not symlink)
+    let link_path = temp.path().join("symlink-test/link.txt");
+    assert!(link_path.exists(), "link.txt should exist");
+    assert!(link_path.is_file(), "link.txt should be a regular file");
+
+    // Verify it's not a symlink (symlink_metadata doesn't follow symlinks)
+    let metadata = std::fs::symlink_metadata(&link_path).unwrap();
+    assert!(
+        !metadata.file_type().is_symlink(),
+        "should NOT create actual symlink"
+    );
+
+    // Content should be the target path (symlink metadata stored as file data)
+    let content = std::fs::read_to_string(&link_path).unwrap();
+    assert_eq!(
+        content.trim(),
+        "target.txt",
+        "file should contain symlink target path"
+    );
+}
+
+/// Test: Hardlink extraction (documented limitation - extracted as separate
+/// files)
+#[test]
+fn test_7z_hardlink_extracted_as_duplicate_files() {
+    let data = load_fixture("hardlink.7z");
+    let cursor = Cursor::new(data);
+    let mut archive = SevenZArchive::new(cursor).unwrap();
+
+    let temp = TempDir::new().unwrap();
+    let config = SecurityConfig::default();
+
+    let result = archive.extract(temp.path(), &config);
+    assert!(
+        result.is_ok(),
+        "hardlink should extract as separate files: {result:?}"
+    );
+
+    let report = result.unwrap();
+    assert_eq!(report.files_extracted, 2, "should extract both files");
+
+    // Both files should exist as separate regular files
+    let original = temp.path().join("hardlink-test/original.txt");
+    let link = temp.path().join("hardlink-test/link.txt");
+
+    assert!(original.exists(), "original.txt should exist");
+    assert!(link.exists(), "link.txt should exist");
+    assert!(original.is_file(), "original.txt should be a file");
+    assert!(link.is_file(), "link.txt should be a file");
+
+    // Content should be identical (both files have same data)
+    let original_content = std::fs::read_to_string(&original).unwrap();
+    let link_content = std::fs::read_to_string(&link).unwrap();
+    assert_eq!(
+        original_content, link_content,
+        "both files should have identical content"
+    );
+
+    // Verify they are NOT hardlinked (different inodes on Unix)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let original_meta = std::fs::metadata(&original).unwrap();
+        let link_meta = std::fs::metadata(&link).unwrap();
+        assert_ne!(
+            original_meta.ino(),
+            link_meta.ino(),
+            "files should NOT be hardlinked (different inodes)"
+        );
+    }
+}

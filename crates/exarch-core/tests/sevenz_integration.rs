@@ -86,7 +86,13 @@ fn test_7z_solid_archive_rejected_at_new() {
     let data = load_fixture("solid.7z");
     let cursor = Cursor::new(data);
 
-    let result = SevenZArchive::new(cursor);
+    // new() now succeeds (just caches is_solid flag)
+    let mut archive = SevenZArchive::new(cursor).unwrap();
+
+    // Rejection happens in extract() with default config
+    let temp = TempDir::new().unwrap();
+    let result = archive.extract(temp.path(), &SecurityConfig::default());
+
     assert!(result.is_err());
     assert!(matches!(
         result.unwrap_err(),
@@ -132,6 +138,52 @@ fn test_7z_quota_total_size() {
     let temp = TempDir::new().unwrap();
     let config = SecurityConfig {
         max_total_size: 10, // Very small limit
+        ..SecurityConfig::default()
+    };
+
+    let result = archive.extract(temp.path(), &config);
+    assert!(matches!(result, Err(ExtractionError::QuotaExceeded { .. })));
+}
+
+// ============================================================================
+// Phase 10.4: Solid Archive Integration Tests
+// ============================================================================
+
+/// M-4: Integration test for solid extraction success
+#[test]
+fn test_7z_solid_archive_extraction_success() {
+    let data = load_fixture("solid.7z");
+    let cursor = Cursor::new(data);
+    let mut archive = SevenZArchive::new(cursor).unwrap();
+
+    let temp = TempDir::new().unwrap();
+    let config = SecurityConfig {
+        allow_solid_archives: true,
+        max_solid_block_memory: 100 * 1024 * 1024, // 100 MB
+        ..SecurityConfig::default()
+    };
+
+    let report = archive.extract(temp.path(), &config).unwrap();
+
+    assert!(
+        report.files_extracted > 0,
+        "should extract files from solid archive"
+    );
+    assert_eq!(archive.format_name(), "7z");
+}
+
+/// M-4: Integration test for solid + file count quota interaction
+#[test]
+fn test_7z_solid_archive_with_file_count_quota() {
+    let data = load_fixture("solid.7z");
+    let cursor = Cursor::new(data);
+    let mut archive = SevenZArchive::new(cursor).unwrap();
+
+    let temp = TempDir::new().unwrap();
+    let config = SecurityConfig {
+        allow_solid_archives: true,
+        max_solid_block_memory: 100 * 1024 * 1024,
+        max_file_count: 1, // Solid has more than 1 file
         ..SecurityConfig::default()
     };
 

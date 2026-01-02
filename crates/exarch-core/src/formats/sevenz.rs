@@ -9,6 +9,7 @@
 //! - Path traversal prevention
 //! - Decompression bomb detection
 //! - Memory exhaustion protection for solid blocks
+//! - Windows symlink detection (via reparse point attributes)
 //!
 //! # Supported Compression Methods
 //!
@@ -17,6 +18,22 @@
 //! - `PPMd`
 //! - DEFLATE
 //! - Copy (stored)
+//!
+//! # Symlink and Hardlink Limitations
+//!
+//! Due to sevenz-rust2 0.20 API limitations, symlink and hardlink detection
+//! is incomplete:
+//!
+//! - **Windows symlinks**: Detected via `FILE_ATTRIBUTE_REPARSE_POINT` and
+//!   rejected
+//! - **Unix symlinks**: Cannot be detected, extracted as regular files (target
+//!   path becomes file content)
+//! - **Hardlinks**: Cannot be detected, extracted as separate files (data
+//!   duplication)
+//!
+//! **Security Impact**: Symlinks are NOT created during extraction, preventing
+//! CVE-2024-12905 class symlink escape attacks. However, users may experience
+//! silent feature loss when extracting archives with Unix symlinks.
 //!
 //! # Solid Archives
 //!
@@ -265,7 +282,9 @@ impl<R: Read + Seek> SevenZArchive<R> {
          -> std::result::Result<bool, sevenz_rust2::Error> {
             // Convert entry metadata
             let path = PathBuf::from(&entry.name);
-            let entry_type = SevenZEntryAdapter::to_entry_type(entry);
+            let entry_type = SevenZEntryAdapter::to_entry_type(entry).map_err(|e| {
+                sevenz_rust2::Error::Other(format!("entry type detection failed: {e}").into())
+            })?;
 
             // Re-validate (defense in depth)
             let validated = validator
@@ -422,13 +441,37 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
 ///
 /// # Known Limitations (sevenz-rust2 0.20)
 ///
-/// - **Symlinks**: Not detected. The 7z format supports symlinks but
-///   sevenz-rust2 doesn't expose `is_symlink()` or similar. Non-directory
-///   entries are treated as files.
-/// - **Hardlinks**: Not detected for the same reason.
-/// - **Unix mode**: Not exposed, so permission sanitization cannot be applied.
+/// - **Symlinks (Unix)**: Not reliably detectable. The 7z format supports Unix
+///   symlinks, but sevenz-rust2 does not expose entry type information.
+///   Symlinks may be extracted as regular files containing the target path.
 ///
-/// These limitations are documented in the security review.
+/// - **Symlinks (Windows)**: Partially detectable via
+///   `FILE_ATTRIBUTE_REPARSE_POINT` in Windows attributes. Archives created on
+///   Windows with symlinks will be rejected with a `SecurityViolation` error.
+///
+/// - **Hardlinks**: Not detectable. Hardlinks will be extracted as separate
+///   files (duplication instead of linking).
+///
+/// - **Unix mode**: Not exposed, so permission sanitization cannot be applied
+///   to 7z archives.
+///
+/// # Security Implications
+///
+/// The lack of symlink detection means:
+/// - **No symlink escapes** (good): Symlinks are not created, so they cannot
+///   escape the extraction directory.
+/// - **Silent feature loss** (bad): Users may expect symlinks to work but they
+///   will be extracted as files.
+/// - **Defense-in-depth gap**: We cannot explicitly validate and reject
+///   archives with symlinks (except Windows reparse points).
+///
+/// # Future Work
+///
+/// When sevenz-rust2 adds symlink detection APIs:
+/// 1. Update `to_entry_type()` to return `EntryType::Symlink { target }`
+/// 2. Integrate with existing `validate_symlink()` validator
+/// 3. Add tests for symlink escapes (similar to TAR/ZIP)
+/// 4. Remove Windows-only detection workaround
 struct SevenZEntryAdapter;
 
 impl SevenZEntryAdapter {
@@ -436,19 +479,55 @@ impl SevenZEntryAdapter {
     ///
     /// # Security Note
     ///
-    /// Due to sevenz-rust2 API limitations, this function cannot detect
-    /// symlinks or hardlinks. All non-directory entries are classified as
-    /// files. If the archive contains symlinks, they will be treated as
-    /// regular files during extraction (when implemented).
-    fn to_entry_type(entry: &sevenz_rust2::ArchiveEntry) -> EntryType {
-        // Phase 10.2: Only files and directories
-        // TODO(Phase 10.3): Investigate if sevenz-rust2 exposes symlink/hardlink info
-        if entry.is_directory() {
-            return EntryType::Directory;
+    /// Due to sevenz-rust2 API limitations, this function cannot reliably
+    /// detect symlinks or hardlinks:
+    ///
+    /// - **Windows symlinks**: Detected via `FILE_ATTRIBUTE_REPARSE_POINT` and
+    ///   rejected
+    /// - **Unix symlinks**: Not detectable, extracted as regular files
+    ///   (documented limitation)
+    /// - **Hardlinks**: Not detectable, extracted as separate files
+    ///
+    /// # Errors
+    ///
+    /// Returns `SecurityViolation` if Windows reparse point is detected
+    /// (symlinks on Windows).
+    fn to_entry_type(entry: &sevenz_rust2::ArchiveEntry) -> Result<EntryType> {
+        // SECURITY: Check Windows attributes for reparse points FIRST
+        // This applies to BOTH files AND directories (e.g., directory junctions)
+        if Self::is_windows_reparse_point(entry) {
+            return Err(ExtractionError::SecurityViolation {
+                reason: format!(
+                    "symlink detected in 7z archive: {} \
+                     (Windows reparse point attribute set). \
+                     7z symlink extraction is not supported due to sevenz-rust2 API limitations.",
+                    entry.name
+                ),
+            });
         }
 
-        // Default: regular file (may be symlink - API limitation)
-        EntryType::File
+        if entry.is_directory() {
+            return Ok(EntryType::Directory);
+        }
+
+        // Default: regular file
+        // KNOWN LIMITATION: Unix symlinks cannot be detected and will be extracted as
+        // files
+        Ok(EntryType::File)
+    }
+
+    /// Checks if Windows attributes indicate a reparse point
+    /// (symlink/junction).
+    ///
+    /// **Limitation:** Only detects symlinks created on Windows.
+    /// Unix symlinks in 7z archives may not have Windows attributes.
+    ///
+    /// Reference: <https://learn.microsoft.com/en-us/windows/win32/fileio/file-attribute-constants>
+    fn is_windows_reparse_point(entry: &sevenz_rust2::ArchiveEntry) -> bool {
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+
+        entry.has_windows_attributes
+            && (entry.windows_attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0
     }
 }
 
@@ -690,14 +769,9 @@ mod tests {
         // Verify our validator is properly integrated
         assert!(archive.is_ok());
 
-        // TODO: When path-traversal.7z fixture is available, add:
-        // let data = load_fixture("path-traversal.7z");
-        // let cursor = Cursor::new(data);
-        // let mut archive = SevenZArchive::new(cursor).unwrap();
-        // let temp = TempDir::new().unwrap();
-        // let result = archive.extract(temp.path(),
-        // &SecurityConfig::default()); assert!(matches!(result,
-        // Err(ExtractionError::PathTraversal { .. })));
+        // NOTE: Path traversal testing is covered by integration tests using
+        // actual 7z fixtures. Additional unit-level fixture testing can be
+        // added here if needed in the future.
     }
 
     /// Test: Solid archive extracts when allowed
@@ -868,6 +942,126 @@ mod tests {
                 assert!(
                     reason.contains("solid") && reason.contains("allow_solid_archives"),
                     "error should mention 'solid' and 'allow_solid_archives', got: {reason}"
+                );
+            }
+            other => panic!("expected SecurityViolation, got {other:?}"),
+        }
+    }
+
+    // ============================================================================
+    // Phase 10.5: Symlink/Hardlink Detection Tests
+    // ============================================================================
+
+    /// Test: Windows reparse point detection (TRUE case)
+    #[test]
+    fn test_windows_reparse_point_detected() {
+        let mut entry = sevenz_rust2::ArchiveEntry::new_file("symlink.txt");
+        entry.has_windows_attributes = true;
+        entry.windows_attributes = 0x0400; // FILE_ATTRIBUTE_REPARSE_POINT
+
+        assert!(
+            SevenZEntryAdapter::is_windows_reparse_point(&entry),
+            "reparse point attribute should be detected"
+        );
+
+        let result = SevenZEntryAdapter::to_entry_type(&entry);
+        assert!(result.is_err(), "should return error for reparse point");
+        assert!(
+            matches!(
+                result.unwrap_err(),
+                ExtractionError::SecurityViolation { .. }
+            ),
+            "should be SecurityViolation error"
+        );
+    }
+
+    /// Test: Windows reparse point NOT detected (has attributes, but not
+    /// reparse point)
+    #[test]
+    fn test_windows_reparse_point_not_set() {
+        let mut entry = sevenz_rust2::ArchiveEntry::new_file("file.txt");
+        entry.has_windows_attributes = true;
+        entry.windows_attributes = 0x0080; // FILE_ATTRIBUTE_NORMAL
+
+        assert!(
+            !SevenZEntryAdapter::is_windows_reparse_point(&entry),
+            "normal file should not be detected as reparse point"
+        );
+
+        let result = SevenZEntryAdapter::to_entry_type(&entry);
+        assert!(result.is_ok(), "normal file should succeed");
+        assert_eq!(result.unwrap(), EntryType::File);
+    }
+
+    /// Test: No Windows attributes (Unix archive)
+    #[test]
+    fn test_no_windows_attributes() {
+        let mut entry = sevenz_rust2::ArchiveEntry::new_file("file.txt");
+        entry.has_windows_attributes = false;
+        entry.windows_attributes = 0; // Should be ignored
+
+        assert!(
+            !SevenZEntryAdapter::is_windows_reparse_point(&entry),
+            "entry without Windows attributes should not be detected as reparse point"
+        );
+
+        let result = SevenZEntryAdapter::to_entry_type(&entry);
+        assert!(result.is_ok(), "file without attributes should succeed");
+        assert_eq!(result.unwrap(), EntryType::File);
+    }
+
+    /// Test: Windows reparse point with other attributes combined
+    #[test]
+    fn test_windows_reparse_point_with_other_attributes() {
+        let mut entry = sevenz_rust2::ArchiveEntry::new_file("symlink.txt");
+        entry.has_windows_attributes = true;
+        entry.windows_attributes = 0x0400 | 0x0020; // REPARSE_POINT | ARCHIVE
+
+        assert!(
+            SevenZEntryAdapter::is_windows_reparse_point(&entry),
+            "reparse point should be detected even with other attributes"
+        );
+
+        let result = SevenZEntryAdapter::to_entry_type(&entry);
+        assert!(result.is_err(), "should return error for reparse point");
+    }
+
+    /// Test: Directory entry should not trigger reparse point check
+    #[test]
+    fn test_directory_junction_reparse_point_rejected() {
+        let mut entry = sevenz_rust2::ArchiveEntry::new_directory("dir/");
+        entry.has_windows_attributes = true;
+        entry.windows_attributes = 0x0400; // REPARSE_POINT (directory junction)
+
+        // SECURITY: Reparse point check happens FIRST, even for directories
+        // This catches directory junctions (Windows symlink directories)
+        let result = SevenZEntryAdapter::to_entry_type(&entry);
+        assert!(result.is_err(), "directory junction should be rejected");
+        assert!(matches!(
+            result.unwrap_err(),
+            ExtractionError::SecurityViolation { .. }
+        ));
+    }
+
+    /// Test: Error message for Windows reparse point
+    #[test]
+    fn test_windows_reparse_point_error_message() {
+        let mut entry = sevenz_rust2::ArchiveEntry::new_file("link.txt");
+        entry.has_windows_attributes = true;
+        entry.windows_attributes = 0x0400;
+
+        let result = SevenZEntryAdapter::to_entry_type(&entry);
+        assert!(result.is_err());
+
+        match result.unwrap_err() {
+            ExtractionError::SecurityViolation { reason } => {
+                assert!(
+                    reason.contains("symlink") && reason.contains("link.txt"),
+                    "error should mention 'symlink' and entry name, got: {reason}"
+                );
+                assert!(
+                    reason.contains("sevenz-rust2"),
+                    "error should mention library limitation, got: {reason}"
                 );
             }
             other => panic!("expected SecurityViolation, got {other:?}"),

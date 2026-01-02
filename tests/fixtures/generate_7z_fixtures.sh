@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Generate 7z test fixtures for exarch-core
 # Requires: p7zip (7z command)
+# shellcheck disable=SC2035
 
 set -euo pipefail
 
@@ -57,6 +58,27 @@ dd if=/dev/zero of=large/50kb.bin bs=1024 count=50 2>/dev/null
 7z a -t7z -ms=off "$FIXTURES_DIR/large-file.7z" large/* > /dev/null
 echo "✓ Created large-file.7z (50 KB file)"
 
+# 7. symlink-unix.7z - Unix symlink (requires symlink support)
+# Test for symlink support instead of checking OS name
+if ln -s /dev/null "/tmp/test_symlink_support_$$" 2>/dev/null; then
+    rm -f "/tmp/test_symlink_support_$$"
+    mkdir symlink-test
+    echo "target file content" > symlink-test/target.txt
+    ln -s target.txt symlink-test/link.txt
+    7z a -t7z -ms=off "$FIXTURES_DIR/symlink-unix.7z" symlink-test/* > /dev/null
+    echo "✓ Created symlink-unix.7z (Unix symlink)"
+else
+    echo "⚠ Skipping symlink-unix.7z (symlink support not available)"
+fi
+
+# 8. hardlink.7z - Hardlink
+mkdir hardlink-test
+echo "original content" > hardlink-test/original.txt
+ln hardlink-test/original.txt hardlink-test/link.txt  # Hard link
+7z a -t7z -ms=off "$FIXTURES_DIR/hardlink.7z" hardlink-test/* > /dev/null
+echo "✓ Created hardlink.7z (hardlink)"
+
 echo ""
 echo "All fixtures generated successfully!"
 echo "Note: path-traversal.7z requires manual crafting (see README.md)"
+echo "Note: symlink-windows.7z requires Windows with symlink support"

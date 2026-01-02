@@ -95,15 +95,29 @@ pub struct SecurityConfig {
     /// Default: `false` (solid archives rejected)
     pub allow_solid_archives: bool,
 
-    /// Maximum memory for decompressing solid blocks (bytes).
+    /// Maximum memory for solid archive extraction (bytes).
     ///
-    /// This limit applies to the decompressed size of a solid block,
-    /// not the entire archive. Solid blocks larger than this limit
-    /// will be rejected.
+    /// **7z Solid Archive Memory Model:**
+    ///
+    /// Solid compression in 7z stores multiple files in a single compressed
+    /// block. Extracting ANY file requires decompressing the ENTIRE solid block
+    /// into memory, which can cause memory exhaustion attacks.
+    ///
+    /// **Validation Strategy:**
+    /// - Pre-validates total uncompressed size of all files in archive
+    /// - This is a conservative heuristic (assumes single solid block)
+    /// - Reason: `sevenz-rust2` v0.20 doesn't expose solid block boundaries
+    ///
+    /// **Security Guarantee:**
+    /// - Total uncompressed data cannot exceed this limit
+    /// - Combined with `max_file_size`, prevents unbounded memory growth
+    /// - Enforced ONLY when `allow_solid_archives` is `true`
     ///
     /// **Note**: Only applies when `allow_solid_archives` is `true`.
     ///
     /// Default: 512 MB (536,870,912 bytes)
+    ///
+    /// **Recommendation:** Set to 1-2x available RAM for trusted archives only.
     pub max_solid_block_memory: u64,
 }
 

@@ -30,7 +30,8 @@
 //!   that exhaust available memory
 //!
 //! **Default Policy**: Solid archives are **rejected** by default.
-//! Use `SecurityConfig::allow_solid_archives` to enable.
+//! Use `SecurityConfig::allow_solid_archives = true` to enable extraction with
+//! memory limits enforced via `max_solid_block_memory`.
 //!
 //! # Examples
 //!
@@ -82,6 +83,7 @@ use crate::ExtractionError;
 use crate::ExtractionReport;
 use crate::Result;
 use crate::SecurityConfig;
+use crate::error::QuotaResource;
 use crate::security::EntryValidator;
 use crate::security::validator::ValidatedEntryType;
 use crate::types::DestDir;
@@ -166,6 +168,7 @@ struct CachedEntry {
 pub struct SevenZArchive<R: Read + Seek> {
     source: R,
     entries: Vec<CachedEntry>,
+    is_solid: bool,
 }
 
 impl<R: Read + Seek> SevenZArchive<R> {
@@ -208,12 +211,9 @@ impl<R: Read + Seek> SevenZArchive<R> {
             ExtractionError::InvalidArchive(format!("failed to open 7z archive: {e}"))
         })?;
 
-        // Step 2: SECURITY - Reject solid archives immediately (fail-fast)
-        if archive.is_solid {
-            return Err(ExtractionError::SecurityViolation {
-                reason: "solid 7z archives are not supported in this version".into(),
-            });
-        }
+        // Step 2: SECURITY - Cache solid flag for later validation
+        // NOTE: Actual enforcement happens in extract() via SecurityConfig
+        let is_solid = archive.is_solid;
 
         // Step 3: Cache entry metadata to avoid re-parsing during extraction
         let entries: Vec<CachedEntry> = archive
@@ -229,7 +229,11 @@ impl<R: Read + Seek> SevenZArchive<R> {
         // Step 4: Rewind for actual extraction
         source.rewind().map_err(ExtractionError::Io)?;
 
-        Ok(Self { source, entries })
+        Ok(Self {
+            source,
+            entries,
+            is_solid,
+        })
     }
 }
 
@@ -326,6 +330,39 @@ impl<R: Read + Seek> SevenZArchive<R> {
 
 impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
     fn extract(&mut self, output_dir: &Path, config: &SecurityConfig) -> Result<ExtractionReport> {
+        // Step 0: Validate solid archive policy
+        if self.is_solid {
+            if !config.allow_solid_archives {
+                return Err(ExtractionError::SecurityViolation {
+                    reason: "solid 7z archives are not allowed (enable allow_solid_archives)"
+                        .into(),
+                });
+            }
+
+            // SECURITY: Heuristic pre-check validates total uncompressed size
+            // Uses checked_add to detect overflow (defense in depth)
+            // Reason: sevenz-rust2 0.20 doesn't expose solid block boundaries
+            // This is conservative: assumes worst case of single solid block
+            let total_uncompressed: u64 = self
+                .entries
+                .iter()
+                .try_fold(0u64, |acc, e| acc.checked_add(e.size))
+                .ok_or(ExtractionError::QuotaExceeded {
+                    resource: QuotaResource::TotalSize {
+                        current: u64::MAX,
+                        max: config.max_solid_block_memory,
+                    },
+                })?;
+            if total_uncompressed > config.max_solid_block_memory {
+                return Err(ExtractionError::QuotaExceeded {
+                    resource: QuotaResource::TotalSize {
+                        current: total_uncompressed,
+                        max: config.max_solid_block_memory,
+                    },
+                });
+            }
+        }
+
         // Step 1: Initialize extraction context
         let dest = DestDir::new(output_dir.to_path_buf())?;
 
@@ -341,7 +378,8 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
         // - symlink detection: Not exposed, non-directory entries treated as files
         let mut prevalidator = EntryValidator::new(config, &dest);
         for entry in &self.entries {
-            let path = PathBuf::from(&entry.name);
+            // OPT-H002: Use Path::new instead of PathBuf::from to avoid allocation
+            let path = Path::new(&entry.name);
             let entry_type = if entry.is_directory {
                 EntryType::Directory
             } else {
@@ -352,7 +390,7 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
             // skipped. Defense relies on max_total_size and max_file_size
             // quotas.
             let validated =
-                prevalidator.validate_entry(&path, &entry_type, entry.size, None, None)?;
+                prevalidator.validate_entry(path, &entry_type, entry.size, None, None)?;
 
             match validated.entry_type {
                 ValidatedEntryType::File | ValidatedEntryType::Directory => {
@@ -544,8 +582,13 @@ mod tests {
         let data = load_fixture("solid.7z");
         let cursor = Cursor::new(data);
 
-        // Should fail in new() due to is_solid check
-        let result = SevenZArchive::new(cursor);
+        // new() should now succeed (just caches is_solid flag)
+        let mut archive = SevenZArchive::new(cursor).unwrap();
+
+        // Rejection happens in extract() with default config
+        let temp = TempDir::new().unwrap();
+        let result = archive.extract(temp.path(), &SecurityConfig::default());
+
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
@@ -655,5 +698,179 @@ mod tests {
         // let result = archive.extract(temp.path(),
         // &SecurityConfig::default()); assert!(matches!(result,
         // Err(ExtractionError::PathTraversal { .. })));
+    }
+
+    /// Test: Solid archive extracts when allowed
+    #[test]
+    fn test_solid_archive_allowed_with_config() {
+        let data = load_fixture("solid.7z");
+        let cursor = Cursor::new(data);
+        let mut archive = SevenZArchive::new(cursor).unwrap();
+
+        let temp = TempDir::new().unwrap();
+        let config = SecurityConfig {
+            allow_solid_archives: true,
+            max_solid_block_memory: 100 * 1024 * 1024, // 100 MB
+            ..SecurityConfig::default()
+        };
+
+        let result = archive.extract(temp.path(), &config);
+        assert!(result.is_ok(), "solid archive should extract: {result:?}");
+        assert!(result.unwrap().files_extracted > 0);
+    }
+
+    /// Test: Solid archive rejected by default config
+    #[test]
+    fn test_solid_archive_rejected_by_default() {
+        let data = load_fixture("solid.7z");
+        let cursor = Cursor::new(data);
+        let mut archive = SevenZArchive::new(cursor).unwrap();
+
+        let temp = TempDir::new().unwrap();
+        let config = SecurityConfig::default();
+
+        let result = archive.extract(temp.path(), &config);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ExtractionError::SecurityViolation { .. }
+        ));
+    }
+
+    /// Test: Solid archive memory limit exceeded
+    #[test]
+    fn test_solid_archive_memory_limit_exceeded() {
+        let data = load_fixture("solid.7z");
+        let cursor = Cursor::new(data);
+        let mut archive = SevenZArchive::new(cursor).unwrap();
+
+        let temp = TempDir::new().unwrap();
+        let config = SecurityConfig {
+            allow_solid_archives: true,
+            max_solid_block_memory: 1, // 1 byte (too small)
+            ..SecurityConfig::default()
+        };
+
+        let result = archive.extract(temp.path(), &config);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ExtractionError::QuotaExceeded { .. }
+        ));
+    }
+
+    /// Test: Non-solid archives work regardless of solid config
+    #[test]
+    fn test_non_solid_archive_unaffected_by_solid_config() {
+        let data = load_fixture("simple.7z");
+        let cursor = Cursor::new(data);
+        let mut archive = SevenZArchive::new(cursor).unwrap();
+
+        let temp = TempDir::new().unwrap();
+        let config = SecurityConfig::default(); // allow_solid_archives = false
+
+        let result = archive.extract(temp.path(), &config);
+        assert!(result.is_ok(), "non-solid should work: {result:?}");
+    }
+
+    // ============================================================================
+    // Phase 10.4 Review Fixes: Additional Tests
+    // ============================================================================
+
+    /// Test H-3: Verify `is_solid` flag is correctly detected
+    #[test]
+    fn test_is_solid_flag_detected_correctly() {
+        // Solid archive should have is_solid = true
+        let solid_data = load_fixture("solid.7z");
+        let solid_cursor = Cursor::new(solid_data);
+        let solid_archive = SevenZArchive::new(solid_cursor).unwrap();
+        assert!(solid_archive.is_solid, "solid.7z should have is_solid=true");
+
+        // Non-solid archive should have is_solid = false
+        let non_solid_data = load_fixture("simple.7z");
+        let non_solid_cursor = Cursor::new(non_solid_data);
+        let non_solid_archive = SevenZArchive::new(non_solid_cursor).unwrap();
+        assert!(
+            !non_solid_archive.is_solid,
+            "simple.7z should have is_solid=false"
+        );
+    }
+
+    /// Test H-1: Boundary condition - exact limit should PASS
+    #[test]
+    fn test_solid_archive_memory_limit_exact_boundary() {
+        let data = load_fixture("solid.7z");
+
+        // First read to get total size
+        let archive_for_size = SevenZArchive::new(Cursor::new(data.clone())).unwrap();
+        let total_size: u64 = archive_for_size.entries.iter().map(|e| e.size).sum();
+
+        // Now test with exact limit
+        let mut archive = SevenZArchive::new(Cursor::new(data)).unwrap();
+        let temp = TempDir::new().unwrap();
+        let config = SecurityConfig {
+            allow_solid_archives: true,
+            max_solid_block_memory: total_size, // Exact match
+            ..SecurityConfig::default()
+        };
+
+        let result = archive.extract(temp.path(), &config);
+        assert!(
+            result.is_ok(),
+            "exact limit should allow extraction: {result:?}"
+        );
+    }
+
+    /// Test H-1: Boundary condition - one byte under limit should FAIL
+    #[test]
+    fn test_solid_archive_memory_limit_one_under_boundary() {
+        let data = load_fixture("solid.7z");
+
+        // First read to get total size
+        let archive_for_size = SevenZArchive::new(Cursor::new(data.clone())).unwrap();
+        let total_size: u64 = archive_for_size.entries.iter().map(|e| e.size).sum();
+
+        // Ensure we have at least 2 bytes of content to make test meaningful
+        if total_size < 2 {
+            return; // Skip test if fixture is too small
+        }
+
+        // Now test with one byte under
+        let mut archive = SevenZArchive::new(Cursor::new(data)).unwrap();
+        let temp = TempDir::new().unwrap();
+        let config = SecurityConfig {
+            allow_solid_archives: true,
+            max_solid_block_memory: total_size - 1, // One byte under
+            ..SecurityConfig::default()
+        };
+
+        let result = archive.extract(temp.path(), &config);
+        assert!(result.is_err(), "one byte under limit should reject");
+        assert!(matches!(
+            result.unwrap_err(),
+            ExtractionError::QuotaExceeded { .. }
+        ));
+    }
+
+    /// Test H-2: Verify error message contains helpful info
+    #[test]
+    fn test_solid_archive_rejected_error_message() {
+        let data = load_fixture("solid.7z");
+        let cursor = Cursor::new(data);
+        let mut archive = SevenZArchive::new(cursor).unwrap();
+
+        let temp = TempDir::new().unwrap();
+        let result = archive.extract(temp.path(), &SecurityConfig::default());
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ExtractionError::SecurityViolation { reason } => {
+                assert!(
+                    reason.contains("solid") && reason.contains("allow_solid_archives"),
+                    "error should mention 'solid' and 'allow_solid_archives', got: {reason}"
+                );
+            }
+            other => panic!("expected SecurityViolation, got {other:?}"),
+        }
     }
 }

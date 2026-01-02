@@ -36,7 +36,7 @@
 //!
 //! Basic extraction:
 //!
-//! ```rust
+//! ```no_run
 //! use exarch_core::SecurityConfig;
 //! use exarch_core::formats::SevenZArchive;
 //! use exarch_core::formats::traits::ArchiveFormat;

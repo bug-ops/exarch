@@ -4,7 +4,8 @@
 //!
 //! # Security Features
 //!
-//! - Encrypted archives rejected by default
+//! - Encrypted archives rejected (AES-256, AES-128, `ZipCrypto`, all encryption
+//!   methods)
 //! - Solid archives rejected by default (configurable)
 //! - Path traversal prevention
 //! - Decompression bomb detection
@@ -222,7 +223,8 @@ impl<R: Read + Seek> SevenZArchive<R> {
             let err_str = e.to_string().to_lowercase();
             if err_str.contains("encrypt") || err_str.contains("password") {
                 return ExtractionError::SecurityViolation {
-                    reason: "encrypted 7z archives are not supported".into(),
+                    reason: "encrypted 7z archive detected. Password-protected archives are not supported. \
+                             Decrypt the archive externally and try again.".into(),
                 };
             }
             ExtractionError::InvalidArchive(format!("failed to open 7z archive: {e}"))

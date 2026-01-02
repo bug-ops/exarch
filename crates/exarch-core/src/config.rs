@@ -78,6 +78,33 @@ pub struct SecurityConfig {
 
     /// List of banned path components (e.g., ".git", ".ssh").
     pub banned_path_components: Vec<String>,
+
+    /// Allow extraction from solid 7z archives.
+    ///
+    /// Solid archives compress multiple files together as a single block.
+    /// While this provides better compression ratios, it has security
+    /// implications:
+    ///
+    /// - **Memory exhaustion**: Extracting a single file requires decompressing
+    ///   the entire solid block into memory
+    /// - **Denial of service**: Malicious archives can create large solid
+    ///   blocks that exhaust available memory
+    ///
+    /// **Security Recommendation**: Only enable for trusted archives.
+    ///
+    /// Default: `false` (solid archives rejected)
+    pub allow_solid_archives: bool,
+
+    /// Maximum memory for decompressing solid blocks (bytes).
+    ///
+    /// This limit applies to the decompressed size of a solid block,
+    /// not the entire archive. Solid blocks larger than this limit
+    /// will be rejected.
+    ///
+    /// **Note**: Only applies when `allow_solid_archives` is `true`.
+    ///
+    /// Default: 512 MB (536,870,912 bytes)
+    pub max_solid_block_memory: u64,
 }
 
 impl Default for SecurityConfig {
@@ -94,6 +121,8 @@ impl Default for SecurityConfig {
     /// - `allowed_extensions`: empty (allow all)
     /// - `banned_path_components`: `[".git", ".ssh", ".gnupg", ".aws", ".kube",
     ///   ".docker", ".env"]`
+    /// - `allow_solid_archives`: false (solid archives rejected)
+    /// - `max_solid_block_memory`: 512 MB
     fn default() -> Self {
         Self {
             max_file_size: 50 * 1024 * 1024,   // 50 MB
@@ -113,6 +142,8 @@ impl Default for SecurityConfig {
                 ".docker".to_string(),
                 ".env".to_string(),
             ],
+            allow_solid_archives: false,
+            max_solid_block_memory: 512 * 1024 * 1024, // 512 MB
         }
     }
 }
@@ -120,8 +151,8 @@ impl Default for SecurityConfig {
 impl SecurityConfig {
     /// Creates a permissive configuration for trusted archives.
     ///
-    /// This configuration allows symlinks, hardlinks, and absolute paths.
-    /// Use only when extracting archives from trusted sources.
+    /// This configuration allows symlinks, hardlinks, absolute paths, and
+    /// solid archives. Use only when extracting archives from trusted sources.
     #[must_use]
     pub fn permissive() -> Self {
         Self {
@@ -134,6 +165,8 @@ impl SecurityConfig {
             preserve_permissions: true,
             max_compression_ratio: 1000.0,
             banned_path_components: Vec::new(),
+            allow_solid_archives: true,
+            max_solid_block_memory: 1024 * 1024 * 1024, // 1 GB for permissive
             ..Default::default()
         }
     }
@@ -301,6 +334,38 @@ mod tests {
         assert!(
             config.banned_path_components.contains(&".ssh".to_string()),
             "should ban .ssh"
+        );
+    }
+
+    #[test]
+    fn test_config_solid_archives_default() {
+        let config = SecurityConfig::default();
+
+        // Solid archives should be denied by default (security)
+        assert!(
+            !config.allow_solid_archives,
+            "solid archives should be denied by default"
+        );
+        assert_eq!(
+            config.max_solid_block_memory,
+            512 * 1024 * 1024,
+            "max solid block memory should be 512 MB"
+        );
+    }
+
+    #[test]
+    fn test_config_permissive_solid_archives() {
+        let config = SecurityConfig::permissive();
+
+        // Permissive config should allow solid archives
+        assert!(
+            config.allow_solid_archives,
+            "permissive config should allow solid archives"
+        );
+        assert_eq!(
+            config.max_solid_block_memory,
+            1024 * 1024 * 1024,
+            "permissive should have 1 GB solid block limit"
         );
     }
 }

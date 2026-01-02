@@ -15,6 +15,7 @@ use criterion::Throughput;
 use criterion::criterion_group;
 use criterion::criterion_main;
 use exarch_core::SecurityConfig;
+use exarch_core::formats::SevenZArchive;
 use exarch_core::formats::ZipArchive;
 use exarch_core::formats::traits::ArchiveFormat;
 use std::io::Cursor;
@@ -228,12 +229,94 @@ fn benchmark_compression_methods(c: &mut Criterion) {
     group.finish();
 }
 
+/// Load 7z fixture from tests/fixtures/
+fn load_7z_fixture(name: &str) -> Vec<u8> {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let fixture_path = std::path::PathBuf::from(manifest_dir)
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("tests/fixtures")
+        .join(name);
+
+    std::fs::read(&fixture_path).unwrap_or_else(|e| {
+        panic!(
+            "Failed to load 7z fixture {name}. Run tests/fixtures/generate_7z_fixtures.sh first. Error: {e}"
+        )
+    })
+}
+
+fn benchmark_sevenz_simple(c: &mut Criterion) {
+    let mut group = c.benchmark_group("sevenz_extraction");
+
+    let simple_data = load_7z_fixture("simple.7z");
+    group.throughput(Throughput::Elements(2)); // 2 files
+
+    group.bench_function("simple_7z", |b| {
+        b.iter(|| {
+            let temp = TempDir::new().unwrap();
+            let cursor = Cursor::new(simple_data.clone());
+            let mut archive = SevenZArchive::new(cursor).unwrap();
+            archive
+                .extract(temp.path(), &SecurityConfig::default())
+                .unwrap();
+        });
+    });
+
+    group.finish();
+}
+
+fn benchmark_sevenz_nested_dirs(c: &mut Criterion) {
+    let mut group = c.benchmark_group("sevenz_nested");
+
+    let nested_data = load_7z_fixture("nested-dirs.7z");
+    group.throughput(Throughput::Elements(3)); // Approximate file count
+
+    group.bench_function("nested_dirs_7z", |b| {
+        b.iter(|| {
+            let temp = TempDir::new().unwrap();
+            let cursor = Cursor::new(nested_data.clone());
+            let mut archive = SevenZArchive::new(cursor).unwrap();
+            archive
+                .extract(temp.path(), &SecurityConfig::default())
+                .unwrap();
+        });
+    });
+
+    group.finish();
+}
+
+fn benchmark_sevenz_large_file(c: &mut Criterion) {
+    let mut group = c.benchmark_group("sevenz_large_file");
+
+    let large_data = load_7z_fixture("large-file.7z");
+    let size_bytes: u64 = 50 * 1024; // 50 KB
+    group.throughput(Throughput::Bytes(size_bytes));
+
+    group.bench_function("large_file_7z", |b| {
+        b.iter(|| {
+            let temp = TempDir::new().unwrap();
+            let cursor = Cursor::new(large_data.clone());
+            let mut archive = SevenZArchive::new(cursor).unwrap();
+            archive
+                .extract(temp.path(), &SecurityConfig::default())
+                .unwrap();
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     benchmark_security_config,
     benchmark_many_small_files,
     benchmark_large_files,
     benchmark_nested_directories,
-    benchmark_compression_methods
+    benchmark_compression_methods,
+    benchmark_sevenz_simple,
+    benchmark_sevenz_nested_dirs,
+    benchmark_sevenz_large_file
 );
 criterion_main!(benches);

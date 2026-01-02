@@ -5,6 +5,15 @@ use std::path::Path;
 use crate::ExtractionError;
 use crate::Result;
 
+/// 7z format magic bytes (signature).
+///
+/// 7z archives start with the signature: `37 7A BC AF 27 1C`
+/// This is the string "7z" followed by format version bytes.
+///
+/// This constant is defined for future magic byte detection implementation.
+#[allow(dead_code)]
+const SEVENZ_MAGIC: [u8; 6] = [0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C];
+
 /// Supported archive formats.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArchiveType {
@@ -20,6 +29,8 @@ pub enum ArchiveType {
     TarZst,
     /// ZIP archive.
     Zip,
+    /// 7z archive.
+    SevenZ,
 }
 
 /// Detects the archive type from a file path.
@@ -33,7 +44,8 @@ pub fn detect_format(path: &Path) -> Result<ArchiveType> {
         .and_then(|e| e.to_str())
         .ok_or(ExtractionError::UnsupportedFormat)?;
 
-    match extension {
+    let ext_lower = extension.to_ascii_lowercase();
+    match ext_lower.as_str() {
         "tar" => Ok(ArchiveType::Tar),
         "gz" | "tgz" => {
             if let Some(stem) = path.file_stem()
@@ -47,6 +59,7 @@ pub fn detect_format(path: &Path) -> Result<ArchiveType> {
         "xz" | "txz" => Ok(ArchiveType::TarXz),
         "zst" | "tzst" => Ok(ArchiveType::TarZst),
         "zip" => Ok(ArchiveType::Zip),
+        "7z" => Ok(ArchiveType::SevenZ),
         _ => Err(ExtractionError::UnsupportedFormat),
     }
 }
@@ -109,11 +122,39 @@ mod tests {
     }
 
     #[test]
+    fn test_detect_7z() {
+        let path = PathBuf::from("archive.7z");
+        assert_eq!(detect_format(&path).unwrap(), ArchiveType::SevenZ);
+    }
+
+    #[test]
+    fn test_detect_7z_case_insensitive() {
+        let path = PathBuf::from("ARCHIVE.7Z");
+        assert_eq!(detect_format(&path).unwrap(), ArchiveType::SevenZ);
+
+        let path2 = PathBuf::from("Archive.7Z");
+        assert_eq!(detect_format(&path2).unwrap(), ArchiveType::SevenZ);
+    }
+
+    #[test]
     fn test_detect_unsupported() {
         let path = PathBuf::from("archive.rar");
         assert!(matches!(
             detect_format(&path),
             Err(ExtractionError::UnsupportedFormat)
         ));
+    }
+
+    #[test]
+    fn test_archive_type_sevenz_equality() {
+        assert_eq!(ArchiveType::SevenZ, ArchiveType::SevenZ);
+        assert_ne!(ArchiveType::SevenZ, ArchiveType::Zip);
+    }
+
+    #[test]
+    fn test_archive_type_sevenz_debug() {
+        let format = ArchiveType::SevenZ;
+        let debug_str = format!("{format:?}");
+        assert_eq!(debug_str, "SevenZ");
     }
 }

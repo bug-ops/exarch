@@ -14,7 +14,7 @@ Command-line utility for secure archive extraction and creation. Built on [exarc
 - **Zip bomb detection** - Configurable compression ratio limits
 - **Symlink/hardlink validation** - Prevents symlink escape attacks
 - **Quota enforcement** - File count, total size, and per-file limits
-- **Multiple formats** - TAR (gz, bz2, xz, zstd) and ZIP support
+- **Multiple formats** - TAR (gz, bz2, xz, zstd), ZIP, and 7z support
 - **Multiple output modes** - Human-readable and JSON output
 
 ## Installation
@@ -229,12 +229,16 @@ exarch is designed with security as a primary concern, protecting against common
 
 | Format | Extension | Extraction | Creation |
 |--------|-----------|------------|----------|
-| TAR | `.tar` | Yes | Yes |
-| TAR + gzip | `.tar.gz`, `.tgz` | Yes | Yes |
-| TAR + bzip2 | `.tar.bz2`, `.tbz2` | Yes | Yes |
-| TAR + xz | `.tar.xz`, `.txz` | Yes | Yes |
-| TAR + zstd | `.tar.zst`, `.tzst` | Yes | Yes |
-| ZIP | `.zip` | Yes | Yes |
+| TAR | `.tar` | ✅ | ✅ |
+| TAR + gzip | `.tar.gz`, `.tgz` | ✅ | ✅ |
+| TAR + bzip2 | `.tar.bz2`, `.tbz2` | ✅ | ✅ |
+| TAR + xz | `.tar.xz`, `.txz` | ✅ | ✅ |
+| TAR + zstd | `.tar.zst`, `.tzst` | ✅ | ✅ |
+| ZIP | `.zip` | ✅ | ✅ |
+| 7z | `.7z` | ✅ | — |
+
+> [!NOTE]
+> 7z creation is not yet supported. Solid and encrypted 7z archives are rejected for security reasons.
 
 ## Development
 

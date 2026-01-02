@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-01-02
+
+### Added
+- **7z format support** (extraction only) via `sevenz-rust2` crate
+  - LZMA, LZMA2, and BCJ filter support
+  - Solid archive extraction with configurable memory limits
+  - Windows symlink detection via reparse point attributes
+  - Directory junction detection and rejection
+- Encrypted archive detection with actionable error messages
+- Updated documentation to highlight both extraction and creation capabilities
+
+### Security
+- Reject encrypted 7z archives by default (no password support for security)
+- Reject solid archives exceeding memory limits (default: 100 MB)
+- Windows symlink/junction detection prevents escape attacks
+- Unix symlinks in 7z archives extracted as regular files (safe default)
+
+### Documentation
+- Updated all package READMEs to show extraction and creation examples
+- Added 7z format to supported formats tables across all packages
+- Clarified 7z limitations (extraction only, no encrypted/solid with high memory)
+
 ## [0.1.2] - 2026-01-01
 
 ### Added
@@ -100,7 +122,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 64KB reusable copy buffers
 - LRU cache for symlink target resolution
 
-[Unreleased]: https://github.com/bug-ops/exarch/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/bug-ops/exarch/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/bug-ops/exarch/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/bug-ops/exarch/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/bug-ops/exarch/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/bug-ops/exarch/releases/tag/v0.1.0

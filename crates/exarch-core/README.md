@@ -6,7 +6,7 @@
 [![MSRV](https://img.shields.io/badge/MSRV-1.89.0-blue)](https://github.com/bug-ops/exarch)
 [![License](https://img.shields.io/crates/l/exarch-core)](../../LICENSE-MIT)
 
-Memory-safe archive extraction library with security validation.
+Memory-safe archive extraction and creation library with security validation.
 
 This crate is part of the [exarch](https://github.com/bug-ops/exarch) workspace.
 
@@ -123,12 +123,16 @@ let report = ArchiveCreator::new()
 
 | Extension | Format | Compression | Extraction | Creation |
 |-----------|--------|-------------|------------|----------|
-| `.tar` | TAR | None | Yes | Yes |
-| `.tar.gz`, `.tgz` | TAR | Gzip | Yes | Yes |
-| `.tar.bz2`, `.tbz2` | TAR | Bzip2 | Yes | Yes |
-| `.tar.xz`, `.txz` | TAR | XZ | Yes | Yes |
-| `.tar.zst`, `.tzst` | TAR | Zstd | Yes | Yes |
-| `.zip` | ZIP | Deflate | Yes | Yes |
+| `.tar` | TAR | None | ✅ | ✅ |
+| `.tar.gz`, `.tgz` | TAR | Gzip | ✅ | ✅ |
+| `.tar.bz2`, `.tbz2` | TAR | Bzip2 | ✅ | ✅ |
+| `.tar.xz`, `.txz` | TAR | XZ | ✅ | ✅ |
+| `.tar.zst`, `.tzst` | TAR | Zstd | ✅ | ✅ |
+| `.zip` | ZIP | Deflate | ✅ | ✅ |
+| `.7z` | 7z | LZMA/LZMA2 | ✅ | — |
+
+> [!NOTE]
+> 7z creation is not yet supported. Solid and encrypted 7z archives are rejected for security reasons.
 
 ## API Overview
 

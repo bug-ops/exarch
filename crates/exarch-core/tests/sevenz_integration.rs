@@ -107,10 +107,20 @@ fn test_7z_encrypted_archive_rejected_at_new() {
 
     let result = SevenZArchive::new(cursor);
     assert!(result.is_err());
-    assert!(matches!(
-        result.unwrap_err(),
-        ExtractionError::SecurityViolation { .. }
-    ));
+    let err = result.unwrap_err();
+    assert!(matches!(err, ExtractionError::SecurityViolation { .. }));
+
+    // Verify error message is helpful
+    let msg = err.to_string();
+    assert!(msg.contains("encrypted"), "error should mention encryption");
+    assert!(
+        msg.contains("not supported"),
+        "error should say not supported"
+    );
+    assert!(
+        msg.contains("Decrypt") || msg.contains("decrypt"),
+        "error should suggest decrypting externally"
+    );
 }
 
 #[test]

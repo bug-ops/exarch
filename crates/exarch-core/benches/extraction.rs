@@ -1,14 +1,25 @@
-//! Benchmarks for exarch-core extraction.
+//! Comprehensive extraction benchmarks for exarch.
 //!
-//! CRIT-006: Comprehensive extraction benchmarks for measuring optimization
-//! effectiveness.
+//! Measures extraction throughput across:
+//! - Different archive formats (TAR, TAR+GZIP, TAR+ZSTD, ZIP, 7z)
+//! - Different archive sizes (1MB, 10MB, 100MB)
+//! - Different file structures (many small, few large, mixed)
+//!
+//! Performance targets from CLAUDE.md:
+//! - TAR extraction: 500 MB/s
+//! - ZIP extraction: 300 MB/s
+//! - Path validation: < 1 us
 
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
-    clippy::items_after_statements
+    clippy::items_after_statements,
+    clippy::similar_names,
+    missing_docs
 )]
 
+use criterion::measurement::WallTime;
+use criterion::BenchmarkGroup;
 use criterion::BenchmarkId;
 use criterion::Criterion;
 use criterion::Throughput;
@@ -20,9 +31,87 @@ use exarch_core::formats::ZipArchive;
 use exarch_core::formats::traits::ArchiveFormat;
 use std::io::Cursor;
 use std::io::Write;
+use std::path::PathBuf;
 use tempfile::TempDir;
 use zip::write::SimpleFileOptions;
 use zip::write::ZipWriter;
+
+/// Returns path to benchmark fixtures directory.
+fn fixtures_dir() -> PathBuf {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    PathBuf::from(manifest_dir)
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("benches/fixtures")
+}
+
+/// Returns path to test fixtures directory.
+fn test_fixtures_dir() -> PathBuf {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    PathBuf::from(manifest_dir)
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("tests/fixtures")
+}
+
+/// Returns fixture path if it exists, otherwise None.
+fn get_fixture(name: &str) -> Option<PathBuf> {
+    let path = fixtures_dir().join(name);
+    if path.exists() { Some(path) } else { None }
+}
+
+/// Gets the uncompressed size of a fixture for throughput calculation.
+fn get_fixture_size(name: &str) -> u64 {
+    // Pre-calculated sizes based on fixture generation
+    match name {
+        "small_files.tar" | "small_files.tar.gz" | "small_files.tar.bz2" | "small_files.tar.xz"
+        | "small_files.tar.zst" | "small_files.zip" | "small_files.7z" => 1024 * 1000, // ~1MB
+        "medium_files.tar" | "medium_files.tar.gz" | "medium_files.zip" | "medium_files.7z" => {
+            100 * 100 * 1024
+        } // ~10MB
+        "large_file.tar" | "large_file.tar.gz" | "large_file.zip" | "large_file.7z" => {
+            100 * 1024 * 1024
+        } // 100MB
+        "compressible_large.tar" | "compressible_large.tar.gz" | "compressible_large.zip" => {
+            100 * 1024 * 1024
+        } // 100MB
+        "nested_dirs.tar" | "nested_dirs.tar.gz" | "nested_dirs.zip" => 20 * 3 * 1024, // ~60KB
+        "many_files.tar" | "many_files.tar.gz" | "many_files.zip" => 10000 * 20, // ~200KB
+        "mixed.tar" | "mixed.tar.gz" | "mixed.zip" => {
+            500 * 1024 + 50 * 100 * 1024 + 5 * 1024 * 1024
+        } // ~10.5MB
+        _ => 0,
+    }
+}
+
+/// Benchmark helper that extracts an archive and measures throughput.
+fn bench_extraction(
+    group: &mut BenchmarkGroup<'_, WallTime>,
+    name: &str,
+    fixture_name: &str,
+    config: &SecurityConfig,
+) {
+    let Some(fixture) = get_fixture(fixture_name) else {
+        eprintln!("Skipping {name}: fixture {fixture_name} not found. Run generate_fixtures.sh");
+        return;
+    };
+
+    let size = get_fixture_size(fixture_name);
+    if size > 0 {
+        group.throughput(Throughput::Bytes(size));
+    }
+
+    group.bench_with_input(BenchmarkId::new(name, fixture_name), &fixture, |b, path| {
+        b.iter(|| {
+            let temp = TempDir::new().unwrap();
+            exarch_core::extract_archive(path, temp.path(), config).unwrap();
+        });
+    });
+}
 
 /// Creates a ZIP archive with many small files.
 fn create_many_small_files_zip(file_count: usize) -> Vec<u8> {
@@ -231,14 +320,7 @@ fn benchmark_compression_methods(c: &mut Criterion) {
 
 /// Load 7z fixture from tests/fixtures/
 fn load_7z_fixture(name: &str) -> Vec<u8> {
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let fixture_path = std::path::PathBuf::from(manifest_dir)
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join("tests/fixtures")
-        .join(name);
+    let fixture_path = test_fixtures_dir().join(name);
 
     std::fs::read(&fixture_path).unwrap_or_else(|e| {
         panic!(
@@ -308,6 +390,101 @@ fn benchmark_sevenz_large_file(c: &mut Criterion) {
     group.finish();
 }
 
+/// File count scaling benchmark.
+fn benchmark_file_count_scaling(c: &mut Criterion) {
+    let mut group = c.benchmark_group("file_count_scaling");
+
+    for count in [100, 500, 1000, 5000] {
+        let zip_data = {
+            let buffer = Vec::new();
+            let mut zip = ZipWriter::new(Cursor::new(buffer));
+            let options =
+                SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+
+            for i in 0..count {
+                let filename = format!("file{i:05}.txt");
+                zip.start_file(&filename, options).unwrap();
+                zip.write_all(b"x").unwrap();
+            }
+
+            zip.finish().unwrap().into_inner()
+        };
+
+        group.throughput(Throughput::Elements(count as u64));
+        group.bench_with_input(BenchmarkId::new("files", count), &zip_data, |b, data| {
+            let config = SecurityConfig::default();
+            b.iter(|| {
+                let temp = TempDir::new().unwrap();
+                let cursor = Cursor::new(data.clone());
+                let mut archive = ZipArchive::new(cursor).unwrap();
+                archive.extract(temp.path(), &config).unwrap();
+            });
+        });
+    }
+
+    group.finish();
+}
+
+/// Directory depth scaling benchmark.
+fn benchmark_depth_scaling(c: &mut Criterion) {
+    let mut group = c.benchmark_group("depth_scaling");
+
+    for depth in [5, 10, 20, 50] {
+        let zip_data = {
+            let buffer = Vec::new();
+            let mut zip = ZipWriter::new(Cursor::new(buffer));
+            let options =
+                SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+
+            // Create nested path
+            let mut path = String::new();
+            for level in 0..depth {
+                path.push_str(&format!("level{level}/"));
+            }
+            path.push_str("file.txt");
+
+            zip.start_file(&path, options).unwrap();
+            zip.write_all(b"content").unwrap();
+
+            zip.finish().unwrap().into_inner()
+        };
+
+        group.bench_with_input(BenchmarkId::new("depth", depth), &zip_data, |b, data| {
+            let config = SecurityConfig::default();
+            b.iter(|| {
+                let temp = TempDir::new().unwrap();
+                let cursor = Cursor::new(data.clone());
+                let mut archive = ZipArchive::new(cursor).unwrap();
+                archive.extract(temp.path(), &config).unwrap();
+            });
+        });
+    }
+
+    group.finish();
+}
+
+/// File-based extraction benchmarks (uses fixtures from benches/fixtures/).
+fn benchmark_file_extraction(c: &mut Criterion) {
+    let mut group = c.benchmark_group("file_extraction");
+    let config = SecurityConfig::default();
+
+    // TAR extraction
+    bench_extraction(&mut group, "tar_small", "small_files.tar", &config);
+    bench_extraction(&mut group, "tar_gz_small", "small_files.tar.gz", &config);
+    bench_extraction(&mut group, "tar_medium", "medium_files.tar", &config);
+    bench_extraction(&mut group, "tar_gz_medium", "medium_files.tar.gz", &config);
+
+    // ZIP extraction
+    bench_extraction(&mut group, "zip_small", "small_files.zip", &config);
+    bench_extraction(&mut group, "zip_medium", "medium_files.zip", &config);
+
+    // Mixed structures
+    bench_extraction(&mut group, "nested", "nested_dirs.tar.gz", &config);
+    bench_extraction(&mut group, "mixed", "mixed.tar.gz", &config);
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     benchmark_security_config,
@@ -317,6 +494,9 @@ criterion_group!(
     benchmark_compression_methods,
     benchmark_sevenz_simple,
     benchmark_sevenz_nested_dirs,
-    benchmark_sevenz_large_file
+    benchmark_sevenz_large_file,
+    benchmark_file_count_scaling,
+    benchmark_depth_scaling,
+    benchmark_file_extraction,
 );
 criterion_main!(benches);

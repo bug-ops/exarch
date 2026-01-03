@@ -164,31 +164,7 @@ impl HardlinkTracker {
             return Ok(());
         }
 
-        // Normalize the path by removing . and .. components
-        //
-        // # Normalization Algorithm (L-DOC-1)
-        //
-        // The algorithm processes each path component sequentially:
-        //
-        // 1. **ParentDir (..)**: Pop last component from normalized path
-        //    - If pop fails (no components to remove), it's an escape attempt → Error
-        //    - Example: `/tmp/a/b/..` → `/tmp/a`
-        //    - Example: `/tmp/../..` → Error (escapes /tmp)
-        //
-        // 2. **CurDir (.)**: Skipped, doesn't change path
-        //    - Example: `/tmp/./a` → `/tmp/a`
-        //
-        // 3. **Normal**: Pushed to normalized path
-        //    - Example: `file.txt` → added to path
-        //
-        // 4. **Prefix/RootDir**: Kept from resolved path (comes from dest, not target)
-        //    - These are safe because they come from the trusted destination path
-        //
-        // This approach:
-        // - Prevents path traversal attacks (../../../etc/passwd)
-        // - Handles Windows absolute paths in target (checked above)
-        // - Works without filesystem access (targets may not exist yet)
-        // - Time complexity: O(n) where n is number of components
+        // Normalize path: resolve .. and . components, detect escape attempts
         let mut normalized = PathBuf::new();
         for component in resolved.components() {
             match component {

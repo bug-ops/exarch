@@ -239,7 +239,6 @@ pub fn collect_entries<P: AsRef<Path>>(
             }
         } else {
             // For single files, we need to create a FilteredEntry manually
-            // This matches the behavior in tar.rs and zip.rs
             let metadata = std::fs::metadata(path)?;
             let size = if metadata.is_file() {
                 metadata.len()
@@ -256,7 +255,6 @@ pub fn collect_entries<P: AsRef<Path>>(
                 EntryType::File
             };
 
-            // Compute archive path using the same logic as in the format modules
             let archive_path = if let Some(parent) = path.parent() {
                 filters::compute_archive_path(path, parent, config)?
             } else {

@@ -370,7 +370,6 @@ mod tests {
         let mut buffer = vec![0u8; 5];
         let bytes_read = tracking_reader.read(&mut buffer).unwrap();
 
-        // Drop the reader to flush progress
         drop(tracking_reader);
 
         assert_eq!(bytes_read, 5);

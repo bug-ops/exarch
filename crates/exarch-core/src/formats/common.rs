@@ -105,10 +105,7 @@ pub fn extract_file_generic<R: Read>(
     #[cfg(not(unix))]
     let _ = validated.mode; // Suppress unused field warning
 
-    // Update statistics
     report.files_extracted += 1;
-    // Use checked_add for safety, though the pre-check should prevent overflow
-    // if expected_size was accurate
     report.bytes_written =
         report
             .bytes_written

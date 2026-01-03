@@ -500,6 +500,95 @@ fn benchmark_file_extraction(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmarks for permission optimization verification.
+///
+/// Measures the performance impact of atomic permission setting during file
+/// creation vs separate chmod syscall. This validates the claimed 50% syscall
+/// reduction for permission-related operations.
+#[cfg(unix)]
+fn benchmark_permission_optimization(c: &mut Criterion) {
+    use std::fs::File;
+    use std::fs::OpenOptions;
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut group = c.benchmark_group("permission_optimization");
+
+    // Benchmark 1: Atomic mode setting during file creation (optimized)
+    group.bench_function("atomic_mode_setting", |b| {
+        b.iter(|| {
+            let temp = TempDir::new().unwrap();
+            let file_path = temp.path().join("test.txt");
+
+            // Create file with mode set atomically (1 syscall)
+            let mut opts = OpenOptions::new();
+            opts.write(true).create(true).truncate(true).mode(0o644);
+
+            let mut file = opts.open(&file_path).unwrap();
+            file.write_all(b"test data").unwrap();
+        });
+    });
+
+    // Benchmark 2: Separate chmod after creation (traditional approach)
+    group.bench_function("separate_chmod", |b| {
+        b.iter(|| {
+            let temp = TempDir::new().unwrap();
+            let file_path = temp.path().join("test.txt");
+
+            // Create file (1 syscall)
+            let mut file = File::create(&file_path).unwrap();
+            file.write_all(b"test data").unwrap();
+            drop(file);
+
+            // Set permissions separately (2nd syscall)
+            let perms = std::fs::Permissions::from_mode(0o644);
+            std::fs::set_permissions(&file_path, perms).unwrap();
+        });
+    });
+
+    // Benchmark 3: Many files with atomic mode setting
+    group.bench_function("atomic_many_files", |b| {
+        b.iter(|| {
+            let temp = TempDir::new().unwrap();
+
+            for i in 0..100 {
+                let file_path = temp.path().join(format!("file{i}.txt"));
+                let mut opts = OpenOptions::new();
+                opts.write(true).create(true).truncate(true).mode(0o644);
+
+                let mut file = opts.open(&file_path).unwrap();
+                file.write_all(b"data").unwrap();
+            }
+        });
+    });
+
+    // Benchmark 4: Many files with separate chmod
+    group.bench_function("chmod_many_files", |b| {
+        b.iter(|| {
+            let temp = TempDir::new().unwrap();
+
+            for i in 0..100 {
+                let file_path = temp.path().join(format!("file{i}.txt"));
+                let mut file = File::create(&file_path).unwrap();
+                file.write_all(b"data").unwrap();
+                drop(file);
+
+                let perms = std::fs::Permissions::from_mode(0o644);
+                std::fs::set_permissions(&file_path, perms).unwrap();
+            }
+        });
+    });
+
+    group.finish();
+}
+
+/// H3: Non-Unix fallback benchmark (no-op for permission setting).
+#[cfg(not(unix))]
+fn benchmark_permission_optimization(_c: &mut Criterion) {
+    // No-op on non-Unix platforms
+}
+
 criterion_group!(
     benches,
     benchmark_security_config,
@@ -513,5 +602,6 @@ criterion_group!(
     benchmark_file_count_scaling,
     benchmark_depth_scaling,
     benchmark_file_extraction,
+    benchmark_permission_optimization,
 );
 criterion_main!(benches);

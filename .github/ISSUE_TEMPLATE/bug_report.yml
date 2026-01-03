@@ -1,0 +1,122 @@
+name: Bug Report
+description: Report a bug or unexpected behavior
+title: "[Bug]: "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug! Please fill out the form below.
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Which component is affected?
+      options:
+        - exarch-core (Rust library)
+        - exarch-python (Python bindings)
+        - exarch-node (Node.js bindings)
+        - exarch-cli (Command-line tool)
+        - Documentation
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Bug Description
+      description: A clear description of the bug
+      placeholder: Describe what happened...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What did you expect to happen?
+      placeholder: Describe what you expected...
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to Reproduce
+      description: How can we reproduce this bug?
+      placeholder: |
+        1. Create an archive with...
+        2. Run extract_archive(...)
+        3. See error...
+    validations:
+      required: true
+
+  - type: textarea
+    id: code
+    attributes:
+      label: Code Example
+      description: Minimal code to reproduce the issue
+      render: rust
+      placeholder: |
+        use exarch_core::{extract_archive, SecurityConfig};
+
+        fn main() {
+            let config = SecurityConfig::default();
+            let result = extract_archive("test.tar.gz", "/tmp/out", &config);
+            // Error occurs here
+        }
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Your environment details
+      placeholder: |
+        - OS: macOS 14.0 / Ubuntu 22.04 / Windows 11
+        - Rust version: 1.89.0
+        - exarch version: 0.2.2
+        - Python version (if applicable): 3.12
+        - Node.js version (if applicable): 20.0
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Error Output / Logs
+      description: Any error messages or logs
+      render: text
+
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Severity
+      description: How severe is this bug?
+      options:
+        - Low - Minor inconvenience
+        - Medium - Significant impact but workaround exists
+        - High - Major functionality broken
+        - Critical - Security vulnerability or data loss
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: security
+    attributes:
+      label: Security
+      description: Security-related checks
+      options:
+        - label: This is NOT a security vulnerability (for security issues, email security@bug-ops.com instead)
+          required: true
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Checklist
+      options:
+        - label: I have searched existing issues to ensure this is not a duplicate
+          required: true
+        - label: I have provided all requested information
+          required: true

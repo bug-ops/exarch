@@ -272,39 +272,49 @@ crates/exarch-core/benches/
 
 | Archive | exarch (ms) | Native (ms) | Speedup | Throughput |
 |---------|-------------|-------------|---------|------------|
-| TAR small (1MB, 1000 files) | 122.1 | 156.8 | **1.28x** | 8 MB/s |
-| TAR+GZIP small | 124.6 | 171.2 | **1.37x** | 8 MB/s |
-| TAR medium (10MB) | 16.7 | 19.2 | **1.15x** | 586 MB/s |
-| TAR large (100MB) | 21.4 | 28.9 | **1.35x** | 4,671 MB/s |
-| ZIP small (1MB) | 126.5 | 109.0 | 0.86x | 8 MB/s |
-| ZIP medium (10MB) | 18.6 | 14.0 | 0.75x | 524 MB/s |
-| ZIP large (100MB) | 41.0 | 34.1 | 0.83x | 2,439 MB/s |
+| TAR small (1MB, 1000 files) | 114.6 | 160.9 | **1.40x** | 9 MB/s |
+| TAR+GZIP small | 115.3 | 164.4 | **1.43x** | 9 MB/s |
+| TAR medium (10MB) | 15.9 | 19.1 | **1.20x** | 614 MB/s |
+| TAR+GZIP medium | 19.1 | 24.7 | **1.29x** | 512 MB/s |
+| TAR large (100MB) | 20.5 | 23.3 | **1.14x** | 4,885 MB/s |
+| TAR+GZIP large | 39.5 | 36.6 | 0.93x | 2,531 MB/s |
+| ZIP small (1MB) | 117.6 | 110.4 | 0.94x | 8 MB/s |
+| ZIP medium (10MB) | 18.5 | 14.7 | 0.80x | 527 MB/s |
+| ZIP large (100MB) | 42.4 | 31.5 | 0.74x | 2,361 MB/s |
 
-**Average speedup: 1.08x** faster than Python tarfile/zipfile
+**Average speedup: 1.10x** faster than Python tarfile/zipfile
 
 ### Node.js Comparison (exarch-rs vs tar/adm-zip)
 
 | Archive | exarch (ms) | Native (ms) | Speedup | Throughput |
 |---------|-------------|-------------|---------|------------|
-| TAR small (1MB, 1000 files) | 119.1 | 92.1 | 0.77x | 8 MB/s |
-| TAR+GZIP medium | 18.6 | 28.2 | **1.52x** | 525 MB/s |
-| TAR+GZIP large (100MB) | 40.6 | 121.7 | **3.00x** | 2,466 MB/s |
-| ZIP small (1MB) | 126.4 | 126.8 | **1.00x** | 8 MB/s |
-| ZIP medium (10MB) | 17.7 | 47.3 | **2.67x** | 552 MB/s |
-| ZIP large (100MB) | 42.8 | 269.3 | **6.29x** | 2,336 MB/s |
+| TAR small (1MB, 1000 files) | 112.0 | 102.5 | 0.92x | 9 MB/s |
+| TAR+GZIP small | 111.7 | 90.9 | 0.81x | 9 MB/s |
+| TAR medium (10MB) | 16.4 | 10.8 | 0.66x | 594 MB/s |
+| TAR+GZIP medium | 22.6 | 27.0 | **1.20x** | 433 MB/s |
+| TAR large (100MB) | 32.3 | 21.5 | 0.67x | 3,100 MB/s |
+| TAR+GZIP large | 45.4 | 122.6 | **2.70x** | 2,205 MB/s |
+| ZIP small (1MB) | 113.4 | 136.1 | **1.20x** | 9 MB/s |
+| ZIP medium (10MB) | 17.5 | 51.3 | **2.93x** | 557 MB/s |
+| ZIP large (100MB) | 76.4 | 358.4 | **4.69x** | 1,309 MB/s |
 
-**Average speedup: 1.94x** faster than Node.js tar/adm-zip
+**Average speedup: 1.75x** faster than Node.js tar/adm-zip
 
 ### Performance vs Targets
 
 | Metric | Target | Achieved | Status |
 |--------|--------|----------|--------|
-| TAR extraction | 500 MB/s | 2,000+ MB/s | ✅ **4x target** |
-| ZIP extraction | 300 MB/s | 1,400+ MB/s | ✅ **4.7x target** |
+| TAR extraction | 500 MB/s | 2,136 MB/s | ✅ **4x target** |
+| ZIP extraction | 300 MB/s | 1,444 MB/s | ✅ **5x target** |
 | Path validation | < 1 µs | ~85 ns | ✅ **12x better** |
 
+### Optimizations (v0.2.1)
+
+- **Directory caching** — Reduces mkdir syscalls by ~95% via FxHashSet caching
+- **Atomic permission setting** — Sets Unix permissions during file creation (1 syscall vs 2)
+
 > [!NOTE]
-> Results measured on Apple M1 Pro. Performance varies by hardware.
+> Results measured on Apple M1 Pro (macOS 25.1, Rust 1.92). Performance varies by hardware.
 
 ## Related Documentation
 

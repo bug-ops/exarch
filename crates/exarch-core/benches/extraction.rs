@@ -58,6 +58,20 @@ fn test_fixtures_dir() -> PathBuf {
         .join("tests/fixtures")
 }
 
+/// Returns a [`SecurityConfig`] suitable for benchmarks.
+///
+/// Disables zip bomb detection to allow testing highly compressed data,
+/// and increases size/depth limits for stress testing benchmarks.
+fn benchmark_config() -> SecurityConfig {
+    SecurityConfig {
+        max_compression_ratio: f64::MAX,    // Disable zip bomb detection
+        max_file_size: 500 * 1024 * 1024,   // 500 MB
+        max_total_size: 1024 * 1024 * 1024, // 1 GB
+        max_path_depth: 100,                // Allow deep path benchmarks
+        ..SecurityConfig::default()
+    }
+}
+
 /// Returns fixture path if it exists, otherwise None.
 fn get_fixture(name: &str) -> Option<PathBuf> {
     let path = fixtures_dir().join(name);
@@ -289,6 +303,7 @@ fn benchmark_nested_directories(c: &mut Criterion) {
 
 fn benchmark_compression_methods(c: &mut Criterion) {
     let mut group = c.benchmark_group("compression_methods");
+    let config = benchmark_config();
 
     let size_bytes = 10 * 1024 * 1024; // 10 MB
     group.throughput(Throughput::Bytes(size_bytes as u64));
@@ -303,9 +318,7 @@ fn benchmark_compression_methods(c: &mut Criterion) {
                 let temp = TempDir::new().unwrap();
                 let cursor = Cursor::new(data.clone());
                 let mut archive = ZipArchive::new(cursor).unwrap();
-                archive
-                    .extract(temp.path(), &SecurityConfig::default())
-                    .unwrap();
+                archive.extract(temp.path(), &config).unwrap();
             });
         },
     );
@@ -320,9 +333,7 @@ fn benchmark_compression_methods(c: &mut Criterion) {
                 let temp = TempDir::new().unwrap();
                 let cursor = Cursor::new(data.clone());
                 let mut archive = ZipArchive::new(cursor).unwrap();
-                archive
-                    .extract(temp.path(), &SecurityConfig::default())
-                    .unwrap();
+                archive.extract(temp.path(), &config).unwrap();
             });
         },
     );
@@ -442,6 +453,7 @@ fn benchmark_file_count_scaling(c: &mut Criterion) {
 /// Directory depth scaling benchmark.
 fn benchmark_depth_scaling(c: &mut Criterion) {
     let mut group = c.benchmark_group("depth_scaling");
+    let config = benchmark_config();
 
     for depth in [5, 10, 20, 50] {
         let zip_data = {
@@ -465,7 +477,6 @@ fn benchmark_depth_scaling(c: &mut Criterion) {
         };
 
         group.bench_with_input(BenchmarkId::new("depth", depth), &zip_data, |b, data| {
-            let config = SecurityConfig::default();
             b.iter(|| {
                 let temp = TempDir::new().unwrap();
                 let cursor = Cursor::new(data.clone());

@@ -189,19 +189,19 @@ exarch/
 
 ## Performance
 
-exarch significantly outperforms native Python and Node.js archive libraries:
+exarch uses optimized I/O with directory caching and atomic permission setting to outperform native archive libraries:
 
 | Comparison | Average Speedup | Max Speedup |
 |------------|-----------------|-------------|
-| vs Python tarfile/zipfile | **1.08x** faster | 1.37x |
-| vs Node.js tar/adm-zip | **1.94x** faster | 6.29x |
+| vs Python tarfile/zipfile | **1.10x** faster | 1.43x |
+| vs Node.js tar/adm-zip | **1.75x** faster | 4.69x |
 
 ### Throughput (100MB archives)
 
 | Format | Throughput | vs Target |
 |--------|------------|-----------|
-| TAR extraction | 4,671 MB/s | **9x** target (500 MB/s) |
-| ZIP extraction | 2,439 MB/s | **8x** target (300 MB/s) |
+| TAR extraction | 2,136 MB/s | **4x** target (500 MB/s) |
+| ZIP extraction | 1,444 MB/s | **5x** target (300 MB/s) |
 | Path validation | ~85 ns | **12x** better than 1 µs target |
 
 > [!TIP]

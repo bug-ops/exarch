@@ -79,7 +79,7 @@ use crate::types::SafeSymlink;
 ///
 /// # Examples
 ///
-/// ```no_run
+/// ```ignore
 /// use exarch_core::formats::common::DirCache;
 /// use std::path::Path;
 ///
@@ -93,7 +93,7 @@ use crate::types::SafeSymlink;
 /// # Ok::<(), std::io::Error>(())
 /// ```
 #[derive(Debug)]
-pub struct DirCache {
+pub(super) struct DirCache {
     created: FxHashSet<PathBuf>,
 }
 
@@ -105,16 +105,14 @@ impl DirCache {
     ///
     /// # Examples
     ///
-    /// ```
-    /// use exarch_core::formats::common::DirCache;
-    ///
+    /// ```ignore
     /// let cache = DirCache::new();
     /// ```
     ///
     /// [`with_capacity`]: Self::with_capacity
     #[must_use]
     #[inline]
-    pub fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self::with_capacity(128)
     }
 
@@ -124,14 +122,12 @@ impl DirCache {
     ///
     /// # Examples
     ///
-    /// ```
-    /// use exarch_core::formats::common::DirCache;
-    ///
+    /// ```ignore
     /// // For archives with many unique directories
     /// let cache = DirCache::with_capacity(1000);
     /// ```
     #[must_use]
-    pub fn with_capacity(capacity: usize) -> Self {
+    pub(super) fn with_capacity(capacity: usize) -> Self {
         use rustc_hash::FxBuildHasher;
         Self {
             created: FxHashSet::with_capacity_and_hasher(capacity, FxBuildHasher),
@@ -175,21 +171,16 @@ impl DirCache {
     ///
     /// # Examples
     ///
-    /// ```no_run
-    /// use exarch_core::formats::common::DirCache;
-    /// use std::path::Path;
-    ///
+    /// ```ignore
     /// let mut cache = DirCache::new();
     /// let created = cache.ensure_parent_dir(Path::new("a/b/file.txt"))?;
     /// assert!(created); // First call creates directory
     ///
     /// let created = cache.ensure_parent_dir(Path::new("a/b/file2.txt"))?;
     /// assert!(!created); // Second call finds cached directory
-    ///
-    /// # Ok::<(), std::io::Error>(())
     /// ```
     #[inline]
-    pub fn ensure_parent_dir(&mut self, file_path: &Path) -> std::io::Result<bool> {
+    pub(super) fn ensure_parent_dir(&mut self, file_path: &Path) -> std::io::Result<bool> {
         if let Some(parent) = file_path.parent() {
             if parent.as_os_str().is_empty() {
                 return Ok(false);
@@ -224,21 +215,16 @@ impl DirCache {
     ///
     /// # Examples
     ///
-    /// ```no_run
-    /// use exarch_core::formats::common::DirCache;
-    /// use std::path::Path;
-    ///
+    /// ```ignore
     /// let mut cache = DirCache::new();
     /// let created = cache.ensure_dir(Path::new("a/b/c"))?;
     /// assert!(created); // First call creates directory
     ///
     /// let created = cache.ensure_dir(Path::new("a/b/c"))?;
     /// assert!(!created); // Second call finds cached directory
-    ///
-    /// # Ok::<(), std::io::Error>(())
     /// ```
     #[inline]
-    pub fn ensure_dir(&mut self, dir_path: &Path) -> std::io::Result<bool> {
+    pub(super) fn ensure_dir(&mut self, dir_path: &Path) -> std::io::Result<bool> {
         if dir_path.as_os_str().is_empty() {
             return Ok(false);
         }

@@ -579,7 +579,7 @@ dependencies = [
 
 [[package]]
 name = "exarch-cli"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -596,7 +596,7 @@ dependencies = [
 
 [[package]]
 name = "exarch-core"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "bzip2",
  "criterion",
@@ -618,7 +618,7 @@ dependencies = [
 
 [[package]]
 name = "exarch-node"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "exarch-core",
  "napi",
@@ -629,7 +629,7 @@ dependencies = [
 
 [[package]]
 name = "exarch-python"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "exarch-core",
  "pyo3",

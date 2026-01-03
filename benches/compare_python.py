@@ -88,8 +88,8 @@ def benchmark_tar_extraction(
     # Exarch extraction
     def extract_exarch():
         with tempfile.TemporaryDirectory() as tmpdir:
-            config = exarch.SecurityConfig()
-            exarch.extract(str(archive_path), tmpdir, config)
+            config = exarch.SecurityConfig().max_file_size(500*1024*1024).max_total_size(1024*1024*1024)
+            exarch.extract_archive(str(archive_path), tmpdir, config)
 
     exarch_time = time_function(extract_exarch, iterations)
 
@@ -118,8 +118,8 @@ def benchmark_zip_extraction(
     # Exarch extraction
     def extract_exarch():
         with tempfile.TemporaryDirectory() as tmpdir:
-            config = exarch.SecurityConfig()
-            exarch.extract(str(archive_path), tmpdir, config)
+            config = exarch.SecurityConfig().max_file_size(500*1024*1024).max_total_size(1024*1024*1024)
+            exarch.extract_archive(str(archive_path), tmpdir, config)
 
     exarch_time = time_function(extract_exarch, iterations)
 

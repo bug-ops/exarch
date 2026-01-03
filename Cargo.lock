@@ -604,6 +604,7 @@ dependencies = [
  "flate2",
  "libc",
  "proptest",
+ "rustc-hash 2.1.1",
  "sevenz-rust2",
  "smallvec",
  "tar",

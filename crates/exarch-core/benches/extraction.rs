@@ -18,13 +18,13 @@
     missing_docs
 )]
 
-use criterion::measurement::WallTime;
 use criterion::BenchmarkGroup;
 use criterion::BenchmarkId;
 use criterion::Criterion;
 use criterion::Throughput;
 use criterion::criterion_group;
 use criterion::criterion_main;
+use criterion::measurement::WallTime;
 use exarch_core::SecurityConfig;
 use exarch_core::formats::SevenZArchive;
 use exarch_core::formats::ZipArchive;
@@ -68,19 +68,25 @@ fn get_fixture(name: &str) -> Option<PathBuf> {
 fn get_fixture_size(name: &str) -> u64 {
     // Pre-calculated sizes based on fixture generation
     match name {
-        "small_files.tar" | "small_files.tar.gz" | "small_files.tar.bz2" | "small_files.tar.xz"
-        | "small_files.tar.zst" | "small_files.zip" | "small_files.7z" => 1024 * 1000, // ~1MB
+        "small_files.tar"
+        | "small_files.tar.gz"
+        | "small_files.tar.bz2"
+        | "small_files.tar.xz"
+        | "small_files.tar.zst"
+        | "small_files.zip"
+        | "small_files.7z" => 1024 * 1000, // ~1MB
         "medium_files.tar" | "medium_files.tar.gz" | "medium_files.zip" | "medium_files.7z" => {
             100 * 100 * 1024
         } // ~10MB
-        "large_file.tar" | "large_file.tar.gz" | "large_file.zip" | "large_file.7z" => {
-            100 * 1024 * 1024
-        } // 100MB
-        "compressible_large.tar" | "compressible_large.tar.gz" | "compressible_large.zip" => {
-            100 * 1024 * 1024
-        } // 100MB
+        "large_file.tar"
+        | "large_file.tar.gz"
+        | "large_file.zip"
+        | "large_file.7z"
+        | "compressible_large.tar"
+        | "compressible_large.tar.gz"
+        | "compressible_large.zip" => 100 * 1024 * 1024, // 100MB
         "nested_dirs.tar" | "nested_dirs.tar.gz" | "nested_dirs.zip" => 20 * 3 * 1024, // ~60KB
-        "many_files.tar" | "many_files.tar.gz" | "many_files.zip" => 10000 * 20, // ~200KB
+        "many_files.tar" | "many_files.tar.gz" | "many_files.zip" => 10000 * 20,       // ~200KB
         "mixed.tar" | "mixed.tar.gz" | "mixed.zip" => {
             500 * 1024 + 50 * 100 * 1024 + 5 * 1024 * 1024
         } // ~10.5MB
@@ -242,9 +248,15 @@ fn benchmark_large_files(c: &mut Criterion) {
                     let temp = TempDir::new().unwrap();
                     let cursor = Cursor::new(data.clone());
                     let mut archive = ZipArchive::new(cursor).unwrap();
-                    archive
-                        .extract(temp.path(), &SecurityConfig::default())
-                        .unwrap();
+
+                    // Use config with increased limits for benchmarks
+                    let config = SecurityConfig {
+                        max_file_size: 200 * 1024 * 1024,  // 200 MB
+                        max_total_size: 500 * 1024 * 1024, // 500 MB
+                        ..SecurityConfig::default()
+                    };
+
+                    archive.extract(temp.path(), &config).unwrap();
                 });
             },
         );
@@ -410,7 +422,9 @@ fn benchmark_file_count_scaling(c: &mut Criterion) {
             zip.finish().unwrap().into_inner()
         };
 
-        group.throughput(Throughput::Elements(count as u64));
+        #[allow(clippy::cast_sign_loss)]
+        let count_u64 = count as u64;
+        group.throughput(Throughput::Elements(count_u64));
         group.bench_with_input(BenchmarkId::new("files", count), &zip_data, |b, data| {
             let config = SecurityConfig::default();
             b.iter(|| {
@@ -439,7 +453,8 @@ fn benchmark_depth_scaling(c: &mut Criterion) {
             // Create nested path
             let mut path = String::new();
             for level in 0..depth {
-                path.push_str(&format!("level{level}/"));
+                use std::fmt::Write;
+                write!(&mut path, "level{level}/").unwrap();
             }
             path.push_str("file.txt");
 

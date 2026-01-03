@@ -159,8 +159,7 @@ fn benchmark_symlink_validation(c: &mut Criterion) {
     // Disabled symlinks (should fail very fast)
     group.bench_function("disabled_reject", |b| {
         let disabled_config = SecurityConfig::default(); // symlinks disabled
-        let link =
-            SafePath::validate(&PathBuf::from("link"), &dest, &disabled_config).unwrap();
+        let link = SafePath::validate(&PathBuf::from("link"), &dest, &disabled_config).unwrap();
         let target = PathBuf::from("target.txt");
         b.iter(|| {
             validate_symlink(
@@ -204,9 +203,8 @@ fn benchmark_hardlink_validation(c: &mut Criterion) {
         b.iter(|| {
             let mut tracker = HardlinkTracker::new();
             for i in 0..100 {
-                let link =
-                    SafePath::validate(&PathBuf::from(format!("link_{i}")), &dest, &config)
-                        .unwrap();
+                let link = SafePath::validate(&PathBuf::from(format!("link_{i}")), &dest, &config)
+                    .unwrap();
                 let target = PathBuf::from(format!("target_{i}.txt"));
                 let _ = tracker.validate_hardlink(&link, &target, &dest, &config);
             }
@@ -220,9 +218,8 @@ fn benchmark_hardlink_validation(c: &mut Criterion) {
             let mut tracker = HardlinkTracker::new();
             let target = PathBuf::from("shared_target.txt");
             for i in 0..100 {
-                let link =
-                    SafePath::validate(&PathBuf::from(format!("link_{i}")), &dest, &config)
-                        .unwrap();
+                let link = SafePath::validate(&PathBuf::from(format!("link_{i}")), &dest, &config)
+                    .unwrap();
                 let _ = tracker.validate_hardlink(&link, &target, &dest, &config);
             }
             black_box(tracker.count())
@@ -375,13 +372,8 @@ fn benchmark_entry_validator(c: &mut Criterion) {
             // Add files
             for i in 0..80 {
                 let path = PathBuf::from(format!("dir_{}/file_{}.txt", i % 10, i));
-                let _ = validator.validate_entry(
-                    &path,
-                    &EntryType::File,
-                    1024,
-                    Some(512),
-                    Some(0o644),
-                );
+                let _ =
+                    validator.validate_entry(&path, &EntryType::File, 1024, Some(512), Some(0o644));
             }
 
             // Add symlinks
@@ -446,7 +438,7 @@ fn benchmark_validation_throughput(c: &mut Criterion) {
     group.finish();
 }
 
-/// SecurityConfig creation benchmark.
+/// `SecurityConfig` creation benchmark.
 fn benchmark_security_config(c: &mut Criterion) {
     let mut group = c.benchmark_group("security_config");
 

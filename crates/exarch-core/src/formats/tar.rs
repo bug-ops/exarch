@@ -180,6 +180,7 @@ impl<R: Read> TarArchive<R> {
         dest: &DestDir,
         report: &mut ExtractionReport,
         copy_buffer: &mut CopyBuffer,
+        dir_cache: &mut common::DirCache,
     ) -> Result<Option<HardlinkInfo>> {
         let path = entry
             .path()
@@ -194,17 +195,17 @@ impl<R: Read> TarArchive<R> {
 
         match validated.entry_type {
             ValidatedEntryType::File => {
-                Self::extract_file(entry, &validated, dest, report, copy_buffer)?;
+                Self::extract_file(entry, &validated, dest, report, copy_buffer, dir_cache)?;
                 Ok(None)
             }
 
             ValidatedEntryType::Directory => {
-                common::create_directory(&validated, dest, report)?;
+                common::create_directory(&validated, dest, report, dir_cache)?;
                 Ok(None)
             }
 
             ValidatedEntryType::Symlink(safe_symlink) => {
-                common::create_symlink(&safe_symlink, dest, report)?;
+                common::create_symlink(&safe_symlink, dest, report, dir_cache)?;
                 Ok(None)
             }
 
@@ -225,9 +226,18 @@ impl<R: Read> TarArchive<R> {
         dest: &DestDir,
         report: &mut ExtractionReport,
         copy_buffer: &mut CopyBuffer,
+        dir_cache: &mut common::DirCache,
     ) -> Result<()> {
         let size = entry.header().size().ok();
-        common::extract_file_generic(&mut entry, validated, dest, report, size, copy_buffer)
+        common::extract_file_generic(
+            &mut entry,
+            validated,
+            dest,
+            report,
+            size,
+            copy_buffer,
+            dir_cache,
+        )
     }
 
     /// Creates a hardlink in the second pass.
@@ -236,10 +246,10 @@ impl<R: Read> TarArchive<R> {
         info: &HardlinkInfo,
         dest: &DestDir,
         report: &mut ExtractionReport,
+        dir_cache: &mut common::DirCache,
     ) -> Result<()> {
         #[cfg(unix)]
         {
-            use std::fs::create_dir_all;
             use std::fs::hard_link;
 
             let link_path = dest.join(&info.link_path);
@@ -252,9 +262,8 @@ impl<R: Read> TarArchive<R> {
                 )));
             }
 
-            if let Some(parent) = link_path.parent() {
-                create_dir_all(parent)?;
-            }
+            // Create parent directories using cache
+            dir_cache.ensure_parent_dir(&link_path)?;
 
             hard_link(&target_path, &link_path)?;
 
@@ -286,6 +295,8 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
 
         let mut copy_buffer = CopyBuffer::new();
 
+        let mut dir_cache = common::DirCache::new();
+
         let entries = self
             .inner
             .entries()
@@ -296,16 +307,21 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
                 ExtractionError::InvalidArchive(format!("failed to read entry: {e}"))
             })?;
 
-            if let Some(hardlink_info) =
-                Self::process_entry(entry, &mut validator, &dest, &mut report, &mut copy_buffer)?
-            {
+            if let Some(hardlink_info) = Self::process_entry(
+                entry,
+                &mut validator,
+                &dest,
+                &mut report,
+                &mut copy_buffer,
+                &mut dir_cache,
+            )? {
                 hardlinks.push(hardlink_info);
             }
         }
 
         // Two-pass extraction: create hardlinks after all target files exist
         for hardlink_info in &hardlinks {
-            Self::create_hardlink(hardlink_info, &dest, &mut report)?;
+            Self::create_hardlink(hardlink_info, &dest, &mut report, &mut dir_cache)?;
         }
 
         report.duration = start.elapsed();

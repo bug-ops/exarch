@@ -107,6 +107,7 @@ use crate::security::validator::ValidatedEntryType;
 use crate::types::DestDir;
 use crate::types::EntryType;
 
+use super::common;
 use super::traits::ArchiveFormat;
 
 /// RAII guard for temporary files.
@@ -269,13 +270,16 @@ impl<R: Read + Seek> SevenZArchive<R> {
     /// - Enforces quotas during extraction
     /// - Uses atomic writes (temp + rename)
     /// - Creates directories only after validation
+    /// - Uses directory cache to reduce mkdir syscalls
     fn extract_with_callback(
         source: &mut R,
         dest: &DestDir,
         validator: &mut EntryValidator,
+        dir_cache: &mut common::DirCache,
     ) -> Result<ExtractionReport> {
         // Use RefCell for interior mutability in closure
         let report = RefCell::new(ExtractionReport::new());
+        let dir_cache = RefCell::new(dir_cache);
 
         // Extraction callback - called for each entry
         let extract_fn = |entry: &sevenz_rust2::ArchiveEntry,
@@ -299,16 +303,15 @@ impl<R: Read + Seek> SevenZArchive<R> {
             match validated.entry_type {
                 ValidatedEntryType::Directory => {
                     let dest_path = dest.join_path(validated.safe_path.as_path());
-                    std::fs::create_dir_all(&dest_path)?;
+                    // Use cache to avoid redundant mkdir syscalls
+                    dir_cache.borrow_mut().ensure_dir(&dest_path)?;
                     report.borrow_mut().directories_created += 1;
                 }
                 ValidatedEntryType::File => {
                     let dest_path = dest.join_path(validated.safe_path.as_path());
 
-                    // Create parent directories
-                    if let Some(parent) = dest_path.parent() {
-                        std::fs::create_dir_all(parent)?;
-                    }
+                    // Create parent directories using cache
+                    dir_cache.borrow_mut().ensure_parent_dir(&dest_path)?;
 
                     // Atomic write (temp + rename) with unique temp file name
                     let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -431,7 +434,8 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
         // Note: sevenz-rust2 still parses archive internally, but we avoid
         // double parsing in our validation logic
         let mut validator = EntryValidator::new(config, &dest);
-        Self::extract_with_callback(&mut self.source, &dest, &mut validator)
+        let mut dir_cache = common::DirCache::new();
+        Self::extract_with_callback(&mut self.source, &dest, &mut validator, &mut dir_cache)
     }
 
     fn format_name(&self) -> &'static str {

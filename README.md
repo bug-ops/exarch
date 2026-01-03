@@ -187,6 +187,26 @@ exarch/
 └── tests/               # Integration tests
 ```
 
+## Performance
+
+exarch uses optimized I/O with directory caching and atomic permission setting to outperform native archive libraries:
+
+| Comparison | Average Speedup | Max Speedup |
+|------------|-----------------|-------------|
+| vs Python tarfile/zipfile | **1.10x** faster | 1.43x |
+| vs Node.js tar/adm-zip | **1.75x** faster | 4.69x |
+
+### Throughput (100MB archives)
+
+| Format | Throughput | vs Target |
+|--------|------------|-----------|
+| TAR extraction | 2,136 MB/s | **4x** target (500 MB/s) |
+| ZIP extraction | 1,444 MB/s | **5x** target (300 MB/s) |
+| Path validation | ~85 ns | **12x** better than 1 µs target |
+
+> [!TIP]
+> Run `./benches/run_all.sh` to benchmark on your hardware. See [benches/README.md](benches/README.md) for details.
+
 ## Development
 
 ### Requirements

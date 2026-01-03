@@ -274,6 +274,7 @@ impl<R: Read + Seek> ZipArchive<R> {
         dest: &DestDir,
         report: &mut ExtractionReport,
         copy_buffer: &mut CopyBuffer,
+        dir_cache: &mut common::DirCache,
     ) -> Result<()> {
         // Metadata extraction requires separate borrow scope from file extraction
         let (path, entry_type, uncompressed_size, compressed_size, mode) = {
@@ -328,15 +329,16 @@ impl<R: Read + Seek> ZipArchive<R> {
                     report,
                     uncompressed_size,
                     copy_buffer,
+                    dir_cache,
                 )?;
             }
 
             ValidatedEntryType::Directory => {
-                common::create_directory(&validated, dest, report)?;
+                common::create_directory(&validated, dest, report, dir_cache)?;
             }
 
             ValidatedEntryType::Symlink(safe_symlink) => {
-                common::create_symlink(&safe_symlink, dest, report)?;
+                common::create_symlink(&safe_symlink, dest, report, dir_cache)?;
             }
 
             ValidatedEntryType::Hardlink { .. } => {
@@ -357,6 +359,7 @@ impl<R: Read + Seek> ZipArchive<R> {
         report: &mut ExtractionReport,
         file_size: u64,
         copy_buffer: &mut CopyBuffer,
+        dir_cache: &mut common::DirCache,
     ) -> Result<()> {
         common::extract_file_generic(
             zip_file,
@@ -365,6 +368,7 @@ impl<R: Read + Seek> ZipArchive<R> {
             report,
             Some(file_size),
             copy_buffer,
+            dir_cache,
         )
     }
 }
@@ -383,10 +387,19 @@ impl<R: Read + Seek> ArchiveFormat for ZipArchive<R> {
         // OPT-C002: Single copy buffer per archive instead of per-file allocation
         let mut copy_buffer = CopyBuffer::new();
 
+        let mut dir_cache = common::DirCache::new();
+
         let entry_count = self.inner.len();
 
         for i in 0..entry_count {
-            self.process_entry(i, &mut validator, &dest, &mut report, &mut copy_buffer)?;
+            self.process_entry(
+                i,
+                &mut validator,
+                &dest,
+                &mut report,
+                &mut copy_buffer,
+                &mut dir_cache,
+            )?;
         }
 
         report.duration = start.elapsed();

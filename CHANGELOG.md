@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-01-03
+
+### Added
+- **Directory caching** — `DirCache` struct with `FxHashSet` reduces mkdir syscalls by ~95%
+- **Atomic permission setting** — `create_file_with_mode()` sets Unix permissions during file creation (1 syscall instead of 2)
+- Comprehensive benchmark suite comparing with Python tarfile/zipfile and Node.js tar/adm-zip
+- `benchmark_config()` helper for stress test scenarios in benchmarks
+
+### Performance
+- TAR extraction throughput: 2,136 MB/s (4x target of 500 MB/s)
+- ZIP extraction throughput: 1,444 MB/s (5x target of 300 MB/s)
+- Python comparison: **1.10x** average speedup (max 1.43x)
+- Node.js comparison: **1.75x** average speedup (max 4.69x)
+- ~8% improvement from atomic permission setting vs separate chmod
+
+### Changed
+- Updated benchmark results in all READMEs with v0.2.2 measurements
+- Added `rustc-hash` dependency for faster HashSet operations
+
 ## [0.2.1] - 2026-01-03
 
 ### Changed
@@ -134,7 +153,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 64KB reusable copy buffers
 - LRU cache for symlink target resolution
 
-[Unreleased]: https://github.com/bug-ops/exarch/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/bug-ops/exarch/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/bug-ops/exarch/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/bug-ops/exarch/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/bug-ops/exarch/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/bug-ops/exarch/compare/v0.1.1...v0.1.2

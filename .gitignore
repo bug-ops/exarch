@@ -58,3 +58,7 @@ index.d.ts
 
 # Benchmarks
 /target/criterion/
+benches/fixtures/*.tar
+benches/fixtures/*.tar.*
+benches/fixtures/*.zip
+benches/fixtures/*.7z

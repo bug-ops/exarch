@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-01-03
+
+### Changed
+- Remove unused `extraction/` module (stub implementations)
+- Remove unused `add_file_to_zip_with_progress` function (superseded by buffer-reusing version)
+- Clean up verbose comments across core library
+- Remove outdated TODO comments
+
+### Internal
+- Code cleanup: -176 lines of dead code and verbose comments
+- Improved code maintainability and readability
+
 ## [0.2.0] - 2026-01-02
 
 ### Added
@@ -122,7 +134,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 64KB reusable copy buffers
 - LRU cache for symlink target resolution
 
-[Unreleased]: https://github.com/bug-ops/exarch/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/bug-ops/exarch/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/bug-ops/exarch/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/bug-ops/exarch/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/bug-ops/exarch/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/bug-ops/exarch/compare/v0.1.0...v0.1.1

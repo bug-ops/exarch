@@ -8,7 +8,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.2.1"
 authors = ["Exarch Contributors"]
 edition = "2024"
 rust-version = "1.89.0"
@@ -19,7 +19,7 @@ keywords = ["archive", "extraction", "security", "tar", "zip"]
 categories = ["compression", "filesystem"]
 
 [workspace.dependencies]
-exarch-core = { path = "crates/exarch-core", version = "0.2.0" }
+exarch-core = { path = "crates/exarch-core", version = "0.2.1" }
 anyhow = "1.0"
 assert_cmd = "2.1"
 bzip2 = "0.6"
@@ -57,7 +57,6 @@ pedantic = { level = "warn", priority = -1 }
 nursery = { level = "warn", priority = -1 }
 expect_used = "warn"
 unwrap_used = "warn"
-# Allow for stub implementations (TODO: remove when implementing)
 cast_precision_loss = "allow"
 missing_const_for_fn = "allow"
 no_effect_underscore_binding = "allow"

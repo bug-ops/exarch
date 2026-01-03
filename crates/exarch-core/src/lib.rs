@@ -27,7 +27,6 @@ pub mod config;
 pub mod copy;
 pub mod creation;
 pub mod error;
-pub mod extraction;
 pub mod formats;
 pub mod inspection;
 pub mod io;

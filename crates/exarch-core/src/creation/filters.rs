@@ -110,8 +110,6 @@ pub fn matches_pattern(path: &Path, pattern: &str) -> bool {
         }
     }
 
-    // Also check the full path string for patterns like "*.ext"
-    // Only convert to string once
     if let Some(path_str) = path.to_str()
         && pattern_matches(path_str, pattern)
     {

@@ -447,34 +447,6 @@ fn add_file_to_zip_with_progress_and_buffer<W: Write + Seek>(
     Ok(())
 }
 
-/// Adds a single file to the ZIP archive with progress reporting.
-///
-/// This function allocates its own buffer. Consider using
-/// `add_file_to_zip_with_progress_and_buffer` for better performance when
-/// processing multiple files.
-#[allow(dead_code)]
-fn add_file_to_zip_with_progress<W: Write + Seek>(
-    zip: &mut ZipWriter<W>,
-    file_path: &Path,
-    archive_path: &Path,
-    config: &CreationConfig,
-    report: &mut CreationReport,
-    options: &SimpleFileOptions,
-    progress: &mut dyn ProgressCallback,
-) -> Result<()> {
-    let mut buffer = vec![0u8; 64 * 1024]; // 64 KB
-    add_file_to_zip_with_progress_and_buffer(
-        zip,
-        file_path,
-        archive_path,
-        config,
-        report,
-        options,
-        progress,
-        &mut buffer,
-    )
-}
-
 /// Normalizes a path for ZIP archive format.
 ///
 /// ZIP format requires forward slashes (/) as path separators, regardless

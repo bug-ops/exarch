@@ -263,7 +263,7 @@ jobs:
           pytest tests/ -v --cov --cov-report=xml:coverage.xml
 
       - name: Upload Python coverage to Codecov
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: crates/exarch-python/coverage.xml
@@ -390,7 +390,7 @@ jobs:
             --lcov --output-path lcov.info nextest
 
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: lcov.info

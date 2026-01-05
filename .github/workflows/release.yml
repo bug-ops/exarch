@@ -183,7 +183,7 @@ jobs:
       id-token: write  # Required for trusted publishing
     steps:
       - name: Download all wheels
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           path: dist
           pattern: wheels-*
@@ -302,7 +302,7 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
 
       - name: Download all bindings
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           path: bindings
           pattern: bindings-*
@@ -344,14 +344,14 @@ jobs:
           fetch-depth: 0
 
       - name: Download Python wheels
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           path: release-artifacts/python
           pattern: wheels-*
           merge-multiple: true
 
       - name: Download Node.js bindings
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           path: release-artifacts/node
           pattern: bindings-*

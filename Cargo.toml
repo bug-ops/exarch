@@ -46,7 +46,7 @@ smallvec = "1.15"
 tar = "0.4"
 tempfile = "3.24"
 thiserror = "2.0"
-tokio = "1.48"
+tokio = "1.49"
 walkdir = "2.5"
 xz2 = "0.1"
 zip = { version = "7.0", default-features = false }

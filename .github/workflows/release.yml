@@ -163,7 +163,7 @@ jobs:
         run: maturin build --release ${{ matrix.platform.maturin-args }} --strip --out wheels -i python3.11
 
       - name: Upload wheels
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: wheels-${{ matrix.platform.name }}
           path: crates/exarch-python/wheels/*.whl
@@ -269,7 +269,7 @@ jobs:
         run: npm run build -- --target ${{ matrix.platform.target }}
 
       - name: Upload bindings
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: bindings-${{ matrix.platform.name }}
           path: |

@@ -43,7 +43,7 @@ const MAX_COMPONENT_LENGTH: usize = 255;
 /// # Use permissive configuration for trusted archives
 /// config = SecurityConfig.permissive()
 /// ```
-#[pyclass(name = "SecurityConfig")]
+#[pyclass(name = "SecurityConfig", skip_from_py_object)]
 #[derive(Clone)]
 pub struct PySecurityConfig {
     inner: CoreSecurityConfig,
@@ -377,7 +377,7 @@ impl PySecurityConfig {
 ///     .compression_level(9)
 ///     .follow_symlinks(True))
 /// ```
-#[pyclass(name = "CreationConfig")]
+#[pyclass(name = "CreationConfig", skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyCreationConfig {
     inner: CoreCreationConfig,

@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-02-06
+
+### Added
+- Python musllinux wheel builds for x86_64 and aarch64 (Alpine Linux support)
+
+### Security
+- Fix CVE-2026-25727: update `zip` 7.4.0 to resolve stack exhaustion DoS in transitive `time` dependency
+
+### Changed
+- Bump `pyo3` to 0.28, `clap` to latest minor, `zip` to 7.4.0
+- Bump CI actions: `lewagon/wait-on-check-action` 1.5.0, `softprops/action-gh-release` v2, `codecov/codecov-action` v5
+- Migrate biome config to v2 format
+
 ## [0.2.2] - 2026-01-03
 
 ### Added
@@ -153,7 +166,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 64KB reusable copy buffers
 - LRU cache for symlink target resolution
 
-[Unreleased]: https://github.com/bug-ops/exarch/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/bug-ops/exarch/compare/v0.2.3...HEAD
+[0.2.3]: https://github.com/bug-ops/exarch/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/bug-ops/exarch/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/bug-ops/exarch/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/bug-ops/exarch/compare/v0.1.2...v0.2.0

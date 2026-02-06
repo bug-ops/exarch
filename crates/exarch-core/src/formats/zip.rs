@@ -266,7 +266,13 @@ impl<R: Read + Seek> ZipArchive<R> {
         Ok(file.encrypted())
     }
 
-    /// Processes a single ZIP entry.
+    /// Processes a single ZIP entry with a single `by_index()` call.
+    ///
+    /// Branches on entry type (directory/symlink/file) within the same
+    /// borrow scope. For directories and symlinks, the zip file is
+    /// explicitly dropped before calling extraction helpers. For files,
+    /// the zip file remains alive through validation and is reused for
+    /// data extraction.
     fn process_entry(
         &mut self,
         index: usize,
@@ -276,77 +282,76 @@ impl<R: Read + Seek> ZipArchive<R> {
         copy_buffer: &mut CopyBuffer,
         dir_cache: &mut common::DirCache,
     ) -> Result<()> {
-        // Metadata extraction requires separate borrow scope from file extraction
-        let (path, entry_type, uncompressed_size, compressed_size, mode) = {
-            let mut zip_file = self.inner.by_index(index).map_err(|e| {
-                ExtractionError::InvalidArchive(format!("failed to read entry {index}: {e}"))
-            })?;
+        let mut zip_file = self.inner.by_index(index).map_err(|e| {
+            ExtractionError::InvalidArchive(format!("failed to read entry {index}: {e}"))
+        })?;
 
-            if zip_file.encrypted() {
-                return Err(ExtractionError::SecurityViolation {
-                    reason: format!("encrypted entry detected: {}", zip_file.name()),
-                });
-            }
+        if zip_file.encrypted() {
+            return Err(ExtractionError::SecurityViolation {
+                reason: format!("encrypted entry detected: {}", zip_file.name()),
+            });
+        }
 
-            // Must extract mode BEFORE to_entry_type() which may consume stream for
-            // symlinks
-            let path = PathBuf::from(zip_file.name());
-            let (uncompressed_size, compressed_size) = ZipEntryAdapter::get_sizes(&zip_file);
-            let mode = zip_file.unix_mode();
+        let path = PathBuf::from(zip_file.name());
+        let (uncompressed_size, compressed_size) = ZipEntryAdapter::get_sizes(&zip_file);
+        let mode = zip_file.unix_mode();
 
-            let entry_type = ZipEntryAdapter::to_entry_type(&mut zip_file)?;
+        let compression = ZipEntryAdapter::get_compression_method(&zip_file);
+        if matches!(compression, CompressionMethod::Unsupported) {
+            return Err(ExtractionError::SecurityViolation {
+                reason: format!(
+                    "unsupported compression method: {:?}",
+                    zip_file.compression()
+                ),
+            });
+        }
 
-            let compression = ZipEntryAdapter::get_compression_method(&zip_file);
-            if matches!(compression, CompressionMethod::Unsupported) {
-                return Err(ExtractionError::SecurityViolation {
-                    reason: format!(
-                        "unsupported compression method: {:?}",
-                        zip_file.compression()
-                    ),
-                });
-            }
-
-            (path, entry_type, uncompressed_size, compressed_size, mode)
-        };
-
-        let validated = validator.validate_entry(
-            &path,
-            &entry_type,
-            uncompressed_size,
-            Some(compressed_size),
-            mode,
-            Some(dir_cache),
-        )?;
-
-        match validated.entry_type {
-            ValidatedEntryType::File => {
-                let mut zip_file = self.inner.by_index(index).map_err(|e| {
-                    ExtractionError::InvalidArchive(format!("failed to read entry {index}: {e}"))
-                })?;
-                Self::extract_file(
-                    &mut zip_file,
-                    &validated,
-                    dest,
-                    report,
-                    uncompressed_size,
-                    copy_buffer,
-                    dir_cache,
-                )?;
-            }
-
-            ValidatedEntryType::Directory => {
-                common::create_directory(&validated, dest, report, dir_cache)?;
-            }
-
-            ValidatedEntryType::Symlink(safe_symlink) => {
+        if zip_file.is_dir() {
+            drop(zip_file);
+            let validated = validator.validate_entry(
+                &path,
+                &EntryType::Directory,
+                uncompressed_size,
+                Some(compressed_size),
+                mode,
+                Some(dir_cache),
+            )?;
+            common::create_directory(&validated, dest, report, dir_cache)?;
+        } else if ZipEntryAdapter::is_symlink_from_mode(mode) {
+            let target = ZipEntryAdapter::read_symlink_target(&mut zip_file)?;
+            drop(zip_file);
+            let entry_type = EntryType::Symlink { target };
+            let validated = validator.validate_entry(
+                &path,
+                &entry_type,
+                uncompressed_size,
+                Some(compressed_size),
+                mode,
+                Some(dir_cache),
+            )?;
+            if let ValidatedEntryType::Symlink(safe_symlink) = validated.entry_type {
                 common::create_symlink(&safe_symlink, dest, report, dir_cache)?;
             }
-
-            ValidatedEntryType::Hardlink { .. } => {
-                return Err(ExtractionError::SecurityViolation {
-                    reason: "hardlinks are not supported in ZIP format".into(),
-                });
-            }
+        } else {
+            // File: validate BEFORE writing (security invariant preserved),
+            // then extract with the same zip_file (stream still at position 0)
+            let validated = validator.validate_entry(
+                &path,
+                &EntryType::File,
+                uncompressed_size,
+                Some(compressed_size),
+                mode,
+                Some(dir_cache),
+            )?;
+            Self::extract_file(
+                &mut zip_file,
+                &validated,
+                dest,
+                report,
+                uncompressed_size,
+                copy_buffer,
+                dir_cache,
+            )?;
         }
 
         Ok(())
@@ -413,34 +418,16 @@ impl<R: Read + Seek> ArchiveFormat for ZipArchive<R> {
     }
 }
 
-/// Adapter to convert `zip::ZipFile` to our `EntryType` enum.
+/// Adapter to convert `zip::ZipFile` metadata to internal types.
 struct ZipEntryAdapter;
 
 impl ZipEntryAdapter {
-    /// Converts ZIP entry to our `EntryType` enum.
-    ///
-    /// ZIP symlinks detected via Unix external file attributes (mode &
-    /// `S_IFLNK`).
-    fn to_entry_type<R: Read>(zip_file: &mut zip::read::ZipFile<'_, R>) -> Result<EntryType> {
-        if zip_file.is_dir() {
-            return Ok(EntryType::Directory);
-        }
-
-        // Must check symlink BEFORE reading to avoid consuming the entry stream
-        if Self::is_symlink(zip_file) {
-            let target = Self::read_symlink_target(zip_file)?;
-            return Ok(EntryType::Symlink { target });
-        }
-
-        Ok(EntryType::File)
-    }
-
-    /// Checks if entry is a symbolic link via Unix file type bits.
-    fn is_symlink<R: Read>(zip_file: &zip::read::ZipFile<'_, R>) -> bool {
-        zip_file.unix_mode().is_some_and(|mode| {
+    /// Checks if an entry is a symbolic link by examining Unix mode bits.
+    fn is_symlink_from_mode(mode: Option<u32>) -> bool {
+        mode.is_some_and(|m| {
             const S_IFMT: u32 = 0o170_000;
             const S_IFLNK: u32 = 0o120_000;
-            (mode & S_IFMT) == S_IFLNK
+            (m & S_IFMT) == S_IFLNK
         })
     }
 
@@ -1275,5 +1262,15 @@ mod tests {
 
         assert_eq!(report.files_extracted, 3);
         assert!(temp.path().join("file with spaces.txt").exists());
+    }
+
+    #[test]
+    fn test_is_symlink_from_mode() {
+        assert!(ZipEntryAdapter::is_symlink_from_mode(Some(0o120_777)));
+        assert!(ZipEntryAdapter::is_symlink_from_mode(Some(0o120_755)));
+        assert!(!ZipEntryAdapter::is_symlink_from_mode(Some(0o100_644)));
+        assert!(!ZipEntryAdapter::is_symlink_from_mode(Some(0o040_755)));
+        assert!(!ZipEntryAdapter::is_symlink_from_mode(Some(0o755)));
+        assert!(!ZipEntryAdapter::is_symlink_from_mode(None));
     }
 }

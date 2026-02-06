@@ -153,7 +153,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: '3.11'
+          python-version: '3.9'
 
       - name: Install maturin
         run: pip install maturin
@@ -176,13 +176,13 @@ jobs:
         with:
           target: ${{ matrix.platform.target }}
           manylinux: ${{ matrix.platform.manylinux }}
-          args: --release --strip --out wheels -i python3.11
+          args: --release --strip --out wheels -i python3.9
           working-directory: crates/exarch-python
 
       - name: Build wheels
         if: ${{ !matrix.platform.manylinux }}
         working-directory: crates/exarch-python
-        run: maturin build --release ${{ matrix.platform.maturin-args }} --strip --out wheels -i python3.11
+        run: maturin build --release ${{ matrix.platform.maturin-args }} --strip --out wheels -i python3.9
 
       - name: Upload wheels
         uses: actions/upload-artifact@v6

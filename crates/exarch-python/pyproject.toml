@@ -51,7 +51,7 @@ dev = [
 ]
 
 [tool.maturin]
-features = ["pyo3/extension-module"]
+features = ["pyo3/extension-module", "abi3"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

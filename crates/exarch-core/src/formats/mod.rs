@@ -1,6 +1,6 @@
 //! Archive format implementations.
 
-mod common;
+pub(crate) mod common;
 pub mod compression;
 pub mod detect;
 pub mod sevenz;

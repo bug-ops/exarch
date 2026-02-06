@@ -315,6 +315,7 @@ impl<R: Read + Seek> ZipArchive<R> {
             uncompressed_size,
             Some(compressed_size),
             mode,
+            Some(dir_cache),
         )?;
 
         match validated.entry_type {

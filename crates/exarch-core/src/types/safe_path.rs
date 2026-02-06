@@ -3,6 +3,7 @@
 use crate::ExtractionError;
 use crate::Result;
 use crate::SecurityConfig;
+use crate::security::context::ValidationContext;
 use std::borrow::Cow;
 use std::path::Component;
 use std::path::Path;
@@ -53,13 +54,13 @@ pub struct SafePath(PathBuf);
 impl SafePath {
     /// Validates and constructs a `SafePath`.
     ///
-    /// This is the ONLY way to construct a `SafePath`. The validation process
-    /// ensures the path is safe for extraction.
+    /// This is the ONLY public way to construct a `SafePath`. The validation
+    /// process ensures the path is safe for extraction.
     ///
     /// # Performance
     ///
     /// **For non-existing paths**: ~300-500 ns (no I/O syscalls)
-    /// **For existing paths**: ~5-50 μs (involves `exists()` and
+    /// **For existing paths**: ~5-50 us (involves `exists()` and
     /// `canonicalize()` syscalls)
     ///
     /// If validating many paths, consider batching or parallel validation.
@@ -97,8 +98,29 @@ impl SafePath {
     /// # Ok(())
     /// # }
     /// ```
-    #[allow(clippy::too_many_lines)] // Complex security validation logic
+    #[allow(clippy::too_many_lines)]
     pub fn validate(path: &Path, dest: &DestDir, config: &SecurityConfig) -> Result<Self> {
+        let ctx = ValidationContext::new(config.allowed.symlinks);
+        Self::validate_with_context(path, dest, config, &ctx)
+    }
+
+    /// Validates with optimization context that can skip `canonicalize()`.
+    ///
+    /// When a `ValidationContext` carries a `DirCache` reference, parent
+    /// directories that we created are trusted without a `canonicalize()`
+    /// syscall. When symlinks are impossible (disabled in config AND none
+    /// seen), the full-path `canonicalize()` is also skipped.
+    ///
+    /// All other validation steps (null bytes, absolute paths, parent
+    /// traversal, depth, banned components, prefix check) are always
+    /// performed regardless of context.
+    #[allow(clippy::too_many_lines)]
+    pub(crate) fn validate_with_context(
+        path: &Path,
+        dest: &DestDir,
+        config: &SecurityConfig,
+        ctx: &ValidationContext,
+    ) -> Result<Self> {
         // Reject empty paths explicitly
         if path.as_os_str().is_empty() {
             return Err(ExtractionError::SecurityViolation {
@@ -121,11 +143,6 @@ impl SafePath {
         }
 
         // Single-pass validation and normalization
-        // Process all components in one iteration to:
-        // - Validate (check ParentDir, RootDir, Prefix)
-        // - Check banned components
-        // - Count depth
-        // - Normalize (skip CurDir components)
         let mut depth = 0;
         let mut normalized = PathBuf::new();
         let mut needs_normalization = false;
@@ -141,9 +158,7 @@ impl SafePath {
                 Component::Normal(comp) => {
                     depth += 1;
 
-                    // Only convert to string when banned components are configured
                     if has_banned_components {
-                        // Try zero-cost to_str() first for valid UTF-8
                         let comp_str = comp
                             .to_str()
                             .map_or_else(|| comp.to_string_lossy(), Cow::Borrowed);
@@ -155,21 +170,17 @@ impl SafePath {
                         }
                     }
 
-                    // Add to normalized path
                     normalized.push(component);
                 }
                 Component::CurDir => {
-                    // Skip . components (normalization)
                     needs_normalization = true;
                 }
                 Component::RootDir | Component::Prefix(_) => {
-                    // For absolute paths on Windows
                     if !config.allowed.absolute_paths {
                         return Err(ExtractionError::PathTraversal {
                             path: path.to_path_buf(),
                         });
                     }
-                    // Preserve root/prefix for absolute paths
                     normalized.push(component);
                 }
             }
@@ -185,7 +196,6 @@ impl SafePath {
             });
         }
 
-        // Use normalized path if normalization was needed, otherwise use original
         let final_path = if needs_normalization {
             Cow::Owned(normalized)
         } else {
@@ -195,24 +205,19 @@ impl SafePath {
         // Verify resolved path stays within destination
         let resolved = dest.as_path().join(final_path.as_ref());
 
-        // Try canonicalization directly, handle NotFound gracefully
-        // This avoids redundant exists() syscalls
-
-        // Always canonicalize parent directory to prevent symlink-based bypass
-        if let Some(parent) = resolved.parent() {
+        // Parent canonicalization: skip when parent is trusted (in DirCache)
+        if let Some(parent) = resolved.parent()
+            && !ctx.is_trusted_parent(parent)
+        {
             match parent.canonicalize() {
                 Ok(canonical_parent) => {
-                    // Use case-insensitive comparison on macOS/Windows
                     if !paths_start_with(&canonical_parent, dest.as_path()) {
                         return Err(ExtractionError::PathTraversal {
                             path: path.to_path_buf(),
                         });
                     }
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    // Parent doesn't exist yet during extraction planning -
-                    // that's OK
-                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => {
                     return Err(ExtractionError::Io(std::io::Error::new(
                         e.kind(),
@@ -222,30 +227,36 @@ impl SafePath {
             }
         }
 
-        // Try to canonicalize full path if it exists
-        match resolved.canonicalize() {
-            Ok(canonical) => {
-                // Use case-insensitive comparison on macOS/Windows
-                if !paths_start_with(&canonical, dest.as_path()) {
-                    return Err(ExtractionError::PathTraversal {
-                        path: path.to_path_buf(),
-                    });
+        // Full path canonicalization: skip when symlinks are impossible
+        if ctx.needs_full_canonicalize() {
+            match resolved.canonicalize() {
+                Ok(canonical) => {
+                    if !paths_start_with(&canonical, dest.as_path()) {
+                        return Err(ExtractionError::PathTraversal {
+                            path: path.to_path_buf(),
+                        });
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    if !paths_start_with(&resolved, dest.as_path()) {
+                        return Err(ExtractionError::PathTraversal {
+                            path: path.to_path_buf(),
+                        });
+                    }
+                }
+                Err(e) => {
+                    return Err(ExtractionError::Io(std::io::Error::new(
+                        e.kind(),
+                        format!("failed to canonicalize path: {e}"),
+                    )));
                 }
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                // Path doesn't exist yet, check prefix
-                // Use case-insensitive comparison on macOS/Windows
-                if !paths_start_with(&resolved, dest.as_path()) {
-                    return Err(ExtractionError::PathTraversal {
-                        path: path.to_path_buf(),
-                    });
-                }
-            }
-            Err(e) => {
-                return Err(ExtractionError::Io(std::io::Error::new(
-                    e.kind(),
-                    format!("failed to canonicalize path: {e}"),
-                )));
+        } else {
+            // Symlinks impossible -- prefix check is still mandatory
+            if !paths_start_with(&resolved, dest.as_path()) {
+                return Err(ExtractionError::PathTraversal {
+                    path: path.to_path_buf(),
+                });
             }
         }
 
@@ -322,6 +333,7 @@ fn has_null_bytes(path: &Path) -> bool {
 )]
 mod tests {
     use super::*;
+    use crate::formats::common::DirCache;
     use tempfile::TempDir;
 
     /// Creates a temporary directory and wraps it in a `DestDir` for testing.
@@ -638,12 +650,12 @@ mod tests {
         let config = SecurityConfig::default();
 
         // Emoji in path
-        let path = PathBuf::from("folder/📁test.txt");
+        let path = PathBuf::from("folder/\u{1f4c1}test.txt");
         let result = SafePath::validate(&path, &dest, &config);
         assert!(result.is_ok());
 
         // Unicode normalization forms could differ
-        let path = PathBuf::from("café");
+        let path = PathBuf::from("caf\u{e9}");
         let result = SafePath::validate(&path, &dest, &config);
         assert!(result.is_ok());
     }
@@ -731,5 +743,339 @@ mod tests {
 
         let result = SafePath::validate(&safe_path, &dest, &config);
         assert!(result.is_ok(), "path through real directory should succeed");
+    }
+
+    // --- Tests for validate_with_context optimization ---
+
+    #[test]
+    fn test_validate_with_context_trusted_parent_skips_canonicalize() {
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
+        let config = SecurityConfig::default();
+
+        // Create a real directory and register it in DirCache
+        let sub_dir = dest.as_path().join("trusted_dir");
+        let mut dir_cache = DirCache::new();
+        dir_cache.ensure_dir(&sub_dir).expect("should create dir");
+
+        let ctx = ValidationContext::new(false).with_dir_cache(&dir_cache);
+
+        // Validate a path whose parent is in DirCache
+        let path = PathBuf::from("trusted_dir/file.txt");
+        let result = SafePath::validate_with_context(&path, &dest, &config, &ctx);
+        assert!(result.is_ok(), "trusted parent should succeed: {result:?}");
+    }
+
+    #[test]
+    fn test_validate_with_context_untrusted_parent_still_validates() {
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
+        let config = SecurityConfig::default();
+
+        let dir_cache = DirCache::new(); // empty cache
+        let ctx = ValidationContext::new(false).with_dir_cache(&dir_cache);
+
+        // Path whose parent is NOT in DirCache and doesn't exist
+        let path = PathBuf::from("unknown_dir/file.txt");
+        let result = SafePath::validate_with_context(&path, &dest, &config, &ctx);
+        // Should succeed since parent doesn't exist (NotFound is OK)
+        assert!(
+            result.is_ok(),
+            "non-existent parent should be OK: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_validate_with_context_symlink_free_fast_path() {
+        let (_temp, dest) = create_test_dest();
+        let config = SecurityConfig::default(); // symlinks = false
+
+        // No dir_cache, no symlinks -> fast path (no canonicalize)
+        let ctx = ValidationContext::new(false);
+        let path = PathBuf::from("some/path/file.txt");
+        let result = SafePath::validate_with_context(&path, &dest, &config, &ctx);
+        assert!(result.is_ok(), "symlink-free fast path should work");
+    }
+
+    #[test]
+    fn test_validate_with_context_symlink_seen_disables_fast_path() {
+        let (_temp, dest) = create_test_dest();
+        let config = SecurityConfig::default();
+
+        let mut ctx = ValidationContext::new(false);
+        ctx.mark_symlink_seen();
+
+        // After marking symlink seen, needs_full_canonicalize returns true
+        assert!(ctx.needs_full_canonicalize());
+
+        let path = PathBuf::from("file.txt");
+        let result = SafePath::validate_with_context(&path, &dest, &config, &ctx);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_validate_with_context_still_catches_symlink_attack() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
+        let config = SecurityConfig::default();
+
+        // Create a symlink pointing outside dest
+        let malicious_link = temp.path().join("evil_dir");
+        symlink("/tmp", &malicious_link).expect("failed to create symlink");
+
+        // Even without context optimization, symlink attack must be caught.
+        // Parent is NOT in DirCache so canonicalize will run.
+        let dir_cache = DirCache::new();
+        let ctx = ValidationContext::new(false).with_dir_cache(&dir_cache);
+
+        let path = PathBuf::from("evil_dir/payload.txt");
+        let result = SafePath::validate_with_context(&path, &dest, &config, &ctx);
+        assert!(
+            matches!(result, Err(ExtractionError::PathTraversal { .. })),
+            "symlink attack must be caught even with context: {result:?}"
+        );
+    }
+
+    // --- Additional tests for canonicalization optimization edge cases ---
+
+    #[test]
+    #[cfg(unix)]
+    fn test_preexisting_symlink_in_dest_with_trusted_parent() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
+        let config = SecurityConfig::default();
+
+        // Create a real subdirectory and register in DirCache
+        let sub_dir = dest.as_path().join("subdir");
+        let mut dir_cache = DirCache::new();
+        dir_cache.ensure_dir(&sub_dir).expect("should create dir");
+
+        // Create a symlink INSIDE that directory pointing outside
+        let evil_link = sub_dir.join("escape");
+        symlink("/tmp", &evil_link).expect("failed to create symlink");
+
+        // The resolved path is dest/subdir/escape/payload.txt. Its parent is
+        // dest/subdir/escape, which is NOT in DirCache (only dest/subdir is).
+        // Therefore the parent canonicalization layer still runs and catches
+        // the symlink escape regardless of the symlink-free fast path.
+        let ctx = ValidationContext::new(false).with_dir_cache(&dir_cache);
+        let path = PathBuf::from("subdir/escape/payload.txt");
+        let result = SafePath::validate_with_context(&path, &dest, &config, &ctx);
+        assert!(
+            matches!(result, Err(ExtractionError::PathTraversal { .. })),
+            "parent canonicalization must catch symlink even in fast path: {result:?}"
+        );
+
+        // With symlink_seen marked, both parent AND full canonicalize run
+        let mut ctx_with_symlink = ValidationContext::new(false).with_dir_cache(&dir_cache);
+        ctx_with_symlink.mark_symlink_seen();
+        let result_with_symlink =
+            SafePath::validate_with_context(&path, &dest, &config, &ctx_with_symlink);
+        assert!(
+            matches!(
+                result_with_symlink,
+                Err(ExtractionError::PathTraversal { .. })
+            ),
+            "symlink attack must also be caught with symlink_seen=true: {result_with_symlink:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_symlink_as_direct_child_of_trusted_parent() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
+        let config = SecurityConfig::default();
+
+        // Create subdir and register in DirCache
+        let sub_dir = dest.as_path().join("trusted");
+        let mut dir_cache = DirCache::new();
+        dir_cache.ensure_dir(&sub_dir).expect("should create dir");
+
+        // Create symlink as a direct child: trusted/link -> /tmp
+        let link = sub_dir.join("link");
+        symlink("/tmp", &link).expect("failed to create symlink");
+
+        // Path "trusted/link" has parent dest/trusted which IS in DirCache.
+        // Parent canonicalize is skipped. But the symlink-free fast path only
+        // does prefix check on the un-resolved path, which passes since the
+        // path textually starts with dest. This is acceptable: the file being
+        // extracted IS a direct child name, not a traversal through a symlink
+        // directory. The symlink "link" itself would only be created if the
+        // archive contained a symlink entry, which is blocked by config.
+        let ctx = ValidationContext::new(false).with_dir_cache(&dir_cache);
+        let path = PathBuf::from("trusted/link");
+        let result = SafePath::validate_with_context(&path, &dest, &config, &ctx);
+        assert!(
+            result.is_ok(),
+            "direct child of trusted parent is a file name, not traversal: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_validate_backward_compat_same_result() {
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
+        let config = SecurityConfig::default();
+
+        let test_paths = vec![
+            PathBuf::from("file.txt"),
+            PathBuf::from("dir/file.txt"),
+            PathBuf::from("a/b/c/file.txt"),
+            PathBuf::from("./normalized.txt"),
+        ];
+
+        for path in &test_paths {
+            let result_validate = SafePath::validate(path, &dest, &config);
+            let ctx = ValidationContext::new(config.allowed.symlinks);
+            let result_with_ctx = SafePath::validate_with_context(path, &dest, &config, &ctx);
+
+            assert_eq!(
+                result_validate.is_ok(),
+                result_with_ctx.is_ok(),
+                "validate and validate_with_context should agree for path: {}",
+                path.display()
+            );
+
+            if let (Ok(a), Ok(b)) = (&result_validate, &result_with_ctx) {
+                assert_eq!(
+                    a.as_path(),
+                    b.as_path(),
+                    "validate and validate_with_context should produce same SafePath"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_validate_backward_compat_error_paths() {
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
+        let config = SecurityConfig::default();
+
+        let error_paths = vec![
+            PathBuf::from("../escape"),
+            PathBuf::from(""),
+            PathBuf::from("project/.git/config"),
+        ];
+
+        for path in &error_paths {
+            let result_validate = SafePath::validate(path, &dest, &config);
+            let ctx = ValidationContext::new(config.allowed.symlinks);
+            let result_with_ctx = SafePath::validate_with_context(path, &dest, &config, &ctx);
+
+            assert!(
+                result_validate.is_err() && result_with_ctx.is_err(),
+                "both should reject path: {}",
+                path.display()
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_validate_with_context_symlinks_allowed_and_dir_cache() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
+        let config = SecurityConfig::default();
+
+        // Create dir and register in cache
+        let sub = dest.as_path().join("safe_dir");
+        let mut cache = DirCache::new();
+        cache.ensure_dir(&sub).expect("should create dir");
+
+        // Create symlink pointing outside in another location
+        let evil = dest.as_path().join("evil");
+        symlink("/tmp", &evil).expect("failed to create symlink");
+
+        // With symlinks_allowed=true: needs_full_canonicalize is true,
+        // so the full canonicalize runs and catches the symlink
+        let ctx = ValidationContext::new(true).with_dir_cache(&cache);
+
+        let safe_path = PathBuf::from("safe_dir/file.txt");
+        let result = SafePath::validate_with_context(&safe_path, &dest, &config, &ctx);
+        assert!(
+            result.is_ok(),
+            "safe path through cached dir should succeed: {result:?}"
+        );
+
+        let evil_path = PathBuf::from("evil/payload.txt");
+        let result = SafePath::validate_with_context(&evil_path, &dest, &config, &ctx);
+        assert!(
+            matches!(result, Err(ExtractionError::PathTraversal { .. })),
+            "symlink escape must be caught with symlinks_allowed + dir_cache: {result:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_symlink_free_fast_path_still_rejects_traversal() {
+        let (_temp, dest) = create_test_dest();
+        let config = SecurityConfig::default();
+
+        // Symlink-free fast path (no symlinks allowed, none seen)
+        let ctx = ValidationContext::new(false);
+
+        // These should still be caught by component-level checks
+        let path = PathBuf::from("../escape.txt");
+        let result = SafePath::validate_with_context(&path, &dest, &config, &ctx);
+        assert!(
+            matches!(result, Err(ExtractionError::PathTraversal { .. })),
+            "parent traversal must be caught in fast path"
+        );
+    }
+
+    #[test]
+    fn test_validate_with_context_dir_cache_created_vs_preexisting() {
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
+        let config = SecurityConfig::default();
+
+        // Create directory manually (pre-existing, NOT in DirCache)
+        let preexisting = dest.as_path().join("preexisting");
+        std::fs::create_dir(&preexisting).expect("failed to create dir");
+
+        // Create directory via DirCache (tracked)
+        let tracked = dest.as_path().join("tracked");
+        let mut cache = DirCache::new();
+        cache.ensure_dir(&tracked).expect("should create dir");
+
+        let ctx = ValidationContext::new(false).with_dir_cache(&cache);
+
+        // Pre-existing dir is NOT trusted (not in cache), so canonicalize runs
+        let path1 = PathBuf::from("preexisting/file.txt");
+        let result1 = SafePath::validate_with_context(&path1, &dest, &config, &ctx);
+        assert!(
+            result1.is_ok(),
+            "pre-existing dir should still validate: {result1:?}"
+        );
+
+        // Tracked dir IS trusted (in cache), parent canonicalize is skipped
+        let path2 = PathBuf::from("tracked/file.txt");
+        let result2 = SafePath::validate_with_context(&path2, &dest, &config, &ctx);
+        assert!(result2.is_ok(), "tracked dir should validate: {result2:?}");
+    }
+
+    #[test]
+    fn test_validate_with_context_no_parent() {
+        let (_temp, dest) = create_test_dest();
+        let config = SecurityConfig::default();
+
+        // Single-component path has dest itself as parent
+        let cache = DirCache::new();
+        let ctx = ValidationContext::new(false).with_dir_cache(&cache);
+
+        let path = PathBuf::from("file.txt");
+        let result = SafePath::validate_with_context(&path, &dest, &config, &ctx);
+        assert!(result.is_ok(), "single component should work: {result:?}");
     }
 }

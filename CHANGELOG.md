@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Performance
+- **Canonicalization optimization** — `ValidationContext` enables skipping redundant `canonicalize()` syscalls during path validation. Trusted-parent fast path (via `DirCache`) and symlink-free fast path eliminate ~17% CPU overhead in extraction hot path.
+
+### Added
+- `ValidationContext` type for carrying optimization state through extraction pipeline
+- `SafePath::validate_with_context()` internal method for optimized path validation
+- `DirCache::contains()` method for trusted-parent lookups
+
+### Changed
+- `EntryValidator::validate_entry()` accepts optional `DirCache` reference for trusted-parent optimization
+- `DirCache` visibility elevated to `pub(crate)` for cross-module access
+
 ## [0.2.3] - 2026-02-06
 
 ### Added

@@ -93,7 +93,7 @@ use crate::types::SafeSymlink;
 /// # Ok::<(), std::io::Error>(())
 /// ```
 #[derive(Debug)]
-pub(super) struct DirCache {
+pub struct DirCache {
     created: FxHashSet<PathBuf>,
 }
 
@@ -112,7 +112,7 @@ impl DirCache {
     /// [`with_capacity`]: Self::with_capacity
     #[must_use]
     #[inline]
-    pub(super) fn new() -> Self {
+    pub fn new() -> Self {
         Self::with_capacity(128)
     }
 
@@ -127,7 +127,7 @@ impl DirCache {
     /// let cache = DirCache::with_capacity(1000);
     /// ```
     #[must_use]
-    pub(super) fn with_capacity(capacity: usize) -> Self {
+    pub fn with_capacity(capacity: usize) -> Self {
         use rustc_hash::FxBuildHasher;
         Self {
             created: FxHashSet::with_capacity_and_hasher(capacity, FxBuildHasher),
@@ -147,6 +147,12 @@ impl DirCache {
                 _ => break,
             }
         }
+    }
+
+    /// Checks if a path is in the cache (i.e., was created by us).
+    #[inline]
+    pub fn contains(&self, path: &Path) -> bool {
+        self.created.contains(path)
     }
 
     /// Ensures parent directory exists, using cache to skip redundant mkdir
@@ -180,7 +186,7 @@ impl DirCache {
     /// assert!(!created); // Second call finds cached directory
     /// ```
     #[inline]
-    pub(super) fn ensure_parent_dir(&mut self, file_path: &Path) -> std::io::Result<bool> {
+    pub fn ensure_parent_dir(&mut self, file_path: &Path) -> std::io::Result<bool> {
         if let Some(parent) = file_path.parent() {
             if parent.as_os_str().is_empty() {
                 return Ok(false);
@@ -224,7 +230,7 @@ impl DirCache {
     /// assert!(!created); // Second call finds cached directory
     /// ```
     #[inline]
-    pub(super) fn ensure_dir(&mut self, dir_path: &Path) -> std::io::Result<bool> {
+    pub fn ensure_dir(&mut self, dir_path: &Path) -> std::io::Result<bool> {
         if dir_path.as_os_str().is_empty() {
             return Ok(false);
         }
@@ -740,6 +746,37 @@ mod tests {
         let cache = DirCache::with_capacity(1000);
         // Just verify it constructs without panic
         assert_eq!(cache.created.len(), 0, "should start empty");
+    }
+
+    /// Test `DirCache::contains` method
+    #[test]
+    fn test_dir_cache_contains() {
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let mut cache = DirCache::new();
+
+        let dir_path = temp.path().join("a/b/c");
+
+        // Before creation, should not contain
+        assert!(
+            !cache.contains(&dir_path),
+            "should not contain before creation"
+        );
+
+        // Create directory
+        cache.ensure_dir(&dir_path).expect("should create dir");
+
+        // After creation, should contain
+        assert!(cache.contains(&dir_path), "should contain after creation");
+
+        // Ancestors should also be cached
+        assert!(
+            cache.contains(&temp.path().join("a/b")),
+            "ancestor should be cached"
+        );
+        assert!(
+            cache.contains(&temp.path().join("a")),
+            "ancestor should be cached"
+        );
     }
 
     /// H1: Test `create_file_with_mode()` with Unix mode 0o644

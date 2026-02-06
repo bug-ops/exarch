@@ -7,8 +7,9 @@ use std::path::Path;
 
 use crate::Result;
 use crate::SecurityConfig;
+use crate::formats::common::DirCache;
+use crate::security::context::ValidationContext;
 use crate::security::hardlink::HardlinkTracker;
-use crate::security::path::validate_path;
 use crate::security::permissions::sanitize_permissions;
 use crate::security::quota::QuotaTracker;
 use crate::security::symlink::validate_symlink;
@@ -58,6 +59,7 @@ pub enum ValidatedEntryType {
 /// - Quota tracking (file count, total size)
 /// - Compression ratio monitoring (zip bomb detection)
 /// - Hardlink target tracking
+/// - Symlink-seen flag (for canonicalize optimization)
 ///
 /// # Lifecycle
 ///
@@ -88,6 +90,7 @@ pub enum ValidatedEntryType {
 ///     1024,        // uncompressed size
 ///     Some(512),   // compressed size
 ///     Some(0o644), // mode
+///     None,        // dir_cache
 /// )?;
 ///
 /// let report = validator.finish();
@@ -102,6 +105,7 @@ pub struct EntryValidator<'a> {
     dest: &'a DestDir,
     quota_tracker: QuotaTracker,
     hardlink_tracker: HardlinkTracker,
+    symlink_seen: bool,
 }
 
 impl<'a> EntryValidator<'a> {
@@ -113,6 +117,7 @@ impl<'a> EntryValidator<'a> {
             dest,
             quota_tracker: QuotaTracker::new(),
             hardlink_tracker: HardlinkTracker::new(),
+            symlink_seen: false,
         }
     }
 
@@ -124,13 +129,8 @@ impl<'a> EntryValidator<'a> {
     /// 3. Compression ratio validation (zip bomb detection)
     /// 4. Type-specific validation (symlink, hardlink, permissions)
     ///
-    /// # Performance
-    ///
-    /// Typical execution time per entry:
-    /// - Regular file (non-existing): ~1-2 μs
-    /// - Regular file (existing): ~10-50 μs (canonicalization)
-    /// - Symlink: ~10-50 μs (target resolution)
-    /// - Hardlink: ~5-10 μs (tracking update)
+    /// When `dir_cache` is provided, path validation can skip expensive
+    /// `canonicalize()` syscalls for parents that were created by us.
     ///
     /// # Errors
     ///
@@ -141,32 +141,6 @@ impl<'a> EntryValidator<'a> {
     /// - `ExtractionError::SymlinkEscape` - Symlink target escapes
     /// - `ExtractionError::HardlinkEscape` - Hardlink target escapes
     /// - `ExtractionError::InvalidPermissions` - Dangerous permissions
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// use exarch_core::SecurityConfig;
-    /// use exarch_core::security::EntryValidator;
-    /// use exarch_core::types::DestDir;
-    /// use exarch_core::types::EntryType;
-    /// use std::path::Path;
-    /// use std::path::PathBuf;
-    ///
-    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// let dest = DestDir::new(PathBuf::from("/tmp"))?;
-    /// let config = SecurityConfig::default();
-    /// let mut validator = EntryValidator::new(&config, &dest);
-    ///
-    /// let entry = validator.validate_entry(
-    ///     Path::new("file.txt"),
-    ///     &EntryType::File,
-    ///     1024,
-    ///     None,
-    ///     Some(0o644),
-    /// )?;
-    /// # Ok(())
-    /// # }
-    /// ```
     pub fn validate_entry(
         &mut self,
         path: &Path,
@@ -174,8 +148,17 @@ impl<'a> EntryValidator<'a> {
         uncompressed_size: u64,
         compressed_size: Option<u64>,
         mode: Option<u32>,
+        dir_cache: Option<&DirCache>,
     ) -> Result<ValidatedEntry> {
-        let safe_path = validate_path(path, self.dest, self.config)?;
+        let mut ctx = ValidationContext::new(self.config.allowed.symlinks);
+        if let Some(cache) = dir_cache {
+            ctx = ctx.with_dir_cache(cache);
+        }
+        if self.symlink_seen {
+            ctx.mark_symlink_seen();
+        }
+
+        let safe_path = SafePath::validate_with_context(path, self.dest, self.config, &ctx)?;
 
         if matches!(entry_type, EntryType::File) {
             self.quota_tracker
@@ -200,6 +183,7 @@ impl<'a> EntryValidator<'a> {
 
             EntryType::Symlink { target } => {
                 let safe_symlink = validate_symlink(&safe_path, target, self.dest, self.config)?;
+                self.symlink_seen = true;
                 (ValidatedEntryType::Symlink(safe_symlink), None)
             }
 
@@ -295,6 +279,7 @@ mod tests {
             1024,
             None,
             Some(0o644),
+            None,
         );
 
         assert!(result.is_ok());
@@ -312,7 +297,7 @@ mod tests {
         let mut validator = EntryValidator::new(&config, &dest);
 
         let result =
-            validator.validate_entry(Path::new("dir"), &EntryType::Directory, 0, None, None);
+            validator.validate_entry(Path::new("dir"), &EntryType::Directory, 0, None, None, None);
 
         assert!(result.is_ok());
         let entry = result.unwrap();
@@ -333,6 +318,7 @@ mod tests {
             1024,
             None,
             Some(0o644),
+            None,
         );
 
         assert!(result.is_err());
@@ -352,6 +338,7 @@ mod tests {
             1000,
             None,
             Some(0o644),
+            None,
         );
 
         assert!(result.is_err());
@@ -372,7 +359,8 @@ mod tests {
                     &EntryType::File,
                     100,
                     None,
-                    Some(0o644)
+                    Some(0o644),
+                    None,
                 )
                 .is_ok()
         );
@@ -383,7 +371,8 @@ mod tests {
                     &EntryType::File,
                     100,
                     None,
-                    Some(0o644)
+                    Some(0o644),
+                    None,
                 )
                 .is_ok()
         );
@@ -394,6 +383,7 @@ mod tests {
             100,
             None,
             Some(0o644),
+            None,
         );
         assert!(result.is_err());
     }
@@ -411,6 +401,7 @@ mod tests {
             1_000_000,
             Some(100),
             Some(0o644),
+            None,
         );
 
         assert!(result.is_err());
@@ -430,6 +421,7 @@ mod tests {
                 1024,
                 None,
                 Some(0o644),
+                None,
             )
             .unwrap();
 
@@ -440,6 +432,7 @@ mod tests {
                 2048,
                 None,
                 Some(0o644),
+                None,
             )
             .unwrap();
 
@@ -461,6 +454,7 @@ mod tests {
             1024,
             None,
             Some(0o4755),
+            None,
         );
 
         assert!(result.is_ok());
@@ -484,11 +478,13 @@ mod tests {
             0,
             None,
             None,
+            None,
         );
 
         assert!(result.is_ok());
         let entry = result.unwrap();
         assert!(matches!(entry.entry_type, ValidatedEntryType::Symlink(_)));
+        assert!(validator.symlink_seen);
     }
 
     #[test]
@@ -505,6 +501,7 @@ mod tests {
                 target: PathBuf::from("target.txt"),
             },
             0,
+            None,
             None,
             None,
         );
@@ -533,11 +530,12 @@ mod tests {
                 1024,
                 None,
                 Some(0o644),
+                None,
             )
             .unwrap();
 
         validator
-            .validate_entry(Path::new("dir"), &EntryType::Directory, 0, None, None)
+            .validate_entry(Path::new("dir"), &EntryType::Directory, 0, None, None, None)
             .unwrap();
 
         validator
@@ -547,6 +545,7 @@ mod tests {
                     target: PathBuf::from("file1.txt"),
                 },
                 0,
+                None,
                 None,
                 None,
             )
@@ -573,6 +572,7 @@ mod tests {
             0,
             None,
             None,
+            None,
         );
 
         assert!(result.is_ok(), "empty directory should be valid");
@@ -594,8 +594,14 @@ mod tests {
         // Multiple nested empty directories
         let dirs = ["a/", "a/b/", "a/b/c/"];
         for dir in &dirs {
-            let result =
-                validator.validate_entry(Path::new(dir), &EntryType::Directory, 0, None, None);
+            let result = validator.validate_entry(
+                Path::new(dir),
+                &EntryType::Directory,
+                0,
+                None,
+                None,
+                None,
+            );
             assert!(result.is_ok(), "nested directory {dir} should be valid");
         }
 
@@ -649,6 +655,7 @@ mod tests {
             1024,
             None,
             Some(0o644),
+            None,
         );
         assert!(result1.is_ok());
 
@@ -658,6 +665,7 @@ mod tests {
             2048,
             None,
             Some(0o644),
+            None,
         );
         assert!(result2.is_ok());
 
@@ -666,5 +674,57 @@ mod tests {
             config.max_file_size,
             SecurityConfig::default().max_file_size
         );
+    }
+
+    #[test]
+    fn test_validate_entry_with_dir_cache() {
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
+        let config = SecurityConfig::default();
+        let mut validator = EntryValidator::new(&config, &dest);
+
+        let sub = dest.as_path().join("subdir");
+        let mut dir_cache = DirCache::new();
+        dir_cache.ensure_dir(&sub).expect("should create dir");
+
+        let result = validator.validate_entry(
+            Path::new("subdir/file.txt"),
+            &EntryType::File,
+            100,
+            None,
+            Some(0o644),
+            Some(&dir_cache),
+        );
+        assert!(
+            result.is_ok(),
+            "entry with dir_cache should validate: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_symlink_seen_flag_propagates() {
+        let temp = TempDir::new().unwrap();
+        let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
+        let mut config = SecurityConfig::default();
+        config.allowed.symlinks = true;
+        let mut validator = EntryValidator::new(&config, &dest);
+
+        assert!(!validator.symlink_seen);
+
+        // Validate a symlink entry
+        validator
+            .validate_entry(
+                Path::new("link"),
+                &EntryType::Symlink {
+                    target: PathBuf::from("target.txt"),
+                },
+                0,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        assert!(validator.symlink_seen);
     }
 }

@@ -293,8 +293,10 @@ impl<R: Read + Seek> SevenZArchive<R> {
             })?;
 
             // Re-validate (defense in depth)
+            // NOTE: DirCache is behind RefCell, cannot pass shared reference through
+            // closure
             let validated = validator
-                .validate_entry(&path, &entry_type, entry.size, None, None)
+                .validate_entry(&path, &entry_type, entry.size, None, None, None)
                 .map_err(|e| {
                     sevenz_rust2::Error::Other(format!("validation failed: {e}").into())
                 })?;
@@ -414,7 +416,7 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
             // skipped. Defense relies on max_total_size and max_file_size
             // quotas.
             let validated =
-                prevalidator.validate_entry(path, &entry_type, entry.size, None, None)?;
+                prevalidator.validate_entry(path, &entry_type, entry.size, None, None, None)?;
 
             match validated.entry_type {
                 ValidatedEntryType::File | ValidatedEntryType::Directory => {

@@ -191,7 +191,8 @@ impl<R: Read> TarArchive<R> {
         let size = TarEntryAdapter::get_uncompressed_size(&entry)?;
         let mode = entry.header().mode().ok();
 
-        let validated = validator.validate_entry(&path, &entry_type, size, None, mode)?;
+        let validated =
+            validator.validate_entry(&path, &entry_type, size, None, mode, Some(dir_cache))?;
 
         match validated.entry_type {
             ValidatedEntryType::File => {

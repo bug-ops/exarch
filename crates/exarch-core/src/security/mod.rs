@@ -1,5 +1,6 @@
 //! Security validation modules.
 
+pub(crate) mod context;
 pub mod hardlink;
 pub mod path;
 pub mod permissions;

@@ -62,3 +62,6 @@ benches/fixtures/*.tar
 benches/fixtures/*.tar.*
 benches/fixtures/*.zip
 benches/fixtures/*.7z
+
+# Profiling
+dhat-heap.json

@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- ci-success gate now includes test-python and test-node jobs to prevent merging PRs with failing binding tests (#56)
 - Python bindings now support Python 3.9-3.13 with proper CI testing and abi3 wheels (#55)
 
 ### Performance

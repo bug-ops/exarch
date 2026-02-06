@@ -405,7 +405,7 @@ jobs:
   # All checks passed
   ci-success:
     name: CI Success
-    needs: [format, clippy, documentation, security, test, msrv]
+    needs: [format, clippy, documentation, security, test, test-python, test-node, msrv]
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -418,6 +418,8 @@ jobs:
             "${{ needs.documentation.result }}"
             "${{ needs.security.result }}"
             "${{ needs.test.result }}"
+            "${{ needs.test-python.result }}"
+            "${{ needs.test-node.result }}"
             "${{ needs.msrv.result }}"
           )
 

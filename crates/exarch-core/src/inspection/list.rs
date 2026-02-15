@@ -258,10 +258,10 @@ fn list_zip(
         let size = entry.size();
         let compressed_size = Some(entry.compressed_size());
         let mode = entry.unix_mode();
-        #[allow(deprecated, clippy::cast_sign_loss)]
+        #[allow(clippy::cast_sign_loss)]
         let modified = entry.last_modified().and_then(|dt| {
-            dt.to_time().ok().and_then(|t| {
-                let timestamp = t.unix_timestamp().max(0) as u64;
+            time::PrimitiveDateTime::try_from(dt).ok().and_then(|t| {
+                let timestamp = t.assume_utc().unix_timestamp().max(0) as u64;
                 SystemTime::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(timestamp))
             })
         });

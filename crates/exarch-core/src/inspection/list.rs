@@ -259,7 +259,11 @@ fn list_zip(
         let compressed_size = Some(entry.compressed_size());
         let mode = entry.unix_mode();
         let modified = entry.last_modified().map(|dt| {
-            let days = days_from_civil(i64::from(dt.year()), u32::from(dt.month()), u32::from(dt.day()));
+            let days = days_from_civil(
+                i64::from(dt.year()),
+                u32::from(dt.month()),
+                u32::from(dt.day()),
+            );
             let secs = days * 86400
                 + i64::from(dt.hour()) * 3600
                 + i64::from(dt.minute()) * 60

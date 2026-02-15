@@ -10,7 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Upgrade `zip` dependency from 7.x to 8.0 (breaking: removed deprecated `DateTime::to_time()`)
 - Upgrade `tempfile` dependency from 3.24 to 3.25
-- Replace `DateTime::to_time()` with manual civil-date conversion for ZIP timestamp handling
+- Replace deprecated `DateTime::to_time()` with `time::PrimitiveDateTime` conversion for ZIP timestamps
+- Add `time` as direct dependency (previously transitive via `zip`)
 
 ## [0.2.4] - 2026-02-06
 

@@ -258,19 +258,12 @@ fn list_zip(
         let size = entry.size();
         let compressed_size = Some(entry.compressed_size());
         let mode = entry.unix_mode();
-        let modified = entry.last_modified().map(|dt| {
-            let days = days_from_civil(
-                i64::from(dt.year()),
-                u32::from(dt.month()),
-                u32::from(dt.day()),
-            );
-            let secs = days * 86400
-                + i64::from(dt.hour()) * 3600
-                + i64::from(dt.minute()) * 60
-                + i64::from(dt.second());
-            #[allow(clippy::cast_sign_loss)]
-            let secs = secs.max(0) as u64;
-            SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs)
+        #[allow(clippy::cast_sign_loss)]
+        let modified = entry.last_modified().and_then(|dt| {
+            time::PrimitiveDateTime::try_from(dt).ok().and_then(|t| {
+                let timestamp = t.assume_utc().unix_timestamp().max(0) as u64;
+                SystemTime::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(timestamp))
+            })
         });
 
         let symlink_target = if entry_type == ManifestEntryType::Symlink {
@@ -348,18 +341,6 @@ fn is_zip_symlink<R: std::io::Read + std::io::Seek>(entry: &zip::read::ZipFile<'
     let _ = entry;
 
     false
-}
-
-/// Convert a civil date to days since Unix epoch (Chrono-free algorithm).
-/// Based on Howard Hinnant's `days_from_civil`.
-fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = y.div_euclid(400);
-    let yoe = y.rem_euclid(400) as u64;
-    let doy = if m > 2 { m - 3 } else { m + 9 };
-    let doy = (153 * u64::from(doy) + 2) / 5 + u64::from(d) - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe.cast_signed() - 719_468
 }
 
 #[cfg(test)]

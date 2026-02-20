@@ -7,8 +7,7 @@
 
 Memory-safe archive extraction and creation library for Python.
 
-> [!IMPORTANT]
-> **exarch** is designed as a secure replacement for vulnerable archive libraries like Python's `tarfile`, which has known CVEs with CVSS scores up to 9.4.
+> **Important:** exarch is designed as a secure replacement for vulnerable archive libraries like Python's `tarfile`, which has known CVEs with CVSS scores up to 9.4.
 
 This package provides Python bindings for [exarch-core](../exarch-core), a Rust library with built-in protection against common archive vulnerabilities.
 
@@ -18,8 +17,7 @@ This package provides Python bindings for [exarch-core](../exarch-core), a Rust 
 pip install exarch
 ```
 
-> [!TIP]
-> Use `uv pip install exarch` for faster installation.
+> **Tip:** Use `uv pip install exarch` for faster installation.
 
 ### Alternative Package Managers
 
@@ -170,8 +168,7 @@ The library provides built-in protection against:
 | Permission sanitization | Strips setuid/setgid bits |
 | Size limits | Enforces file and total size limits |
 
-> [!CAUTION]
-> Unlike Python's standard `tarfile` module, exarch applies security validation by default.
+> **Caution:** Unlike Python's standard `tarfile` module, exarch applies security validation by default.
 
 ## Supported Formats
 
@@ -185,8 +182,7 @@ The library provides built-in protection against:
 | ZIP | `.zip` | ✅ | ✅ |
 | 7z | `.7z` | ✅ | — |
 
-> [!NOTE]
-> 7z creation is not yet supported. Solid and encrypted 7z archives are rejected for security reasons.
+> **Note:** 7z creation is not yet supported. Solid and encrypted 7z archives are rejected for security reasons.
 
 ## Comparison with tarfile
 

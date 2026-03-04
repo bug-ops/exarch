@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- macOS ARM64 wheel no longer embeds a dynamic path to Homebrew's liblzma; xz2 is now statically linked via `xz2/static` feature (#66)
+
 ## [0.2.5] - 2026-02-20
 
 ### Changed

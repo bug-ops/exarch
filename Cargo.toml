@@ -48,7 +48,7 @@ thiserror = "2.0"
 time = "0.3"
 tokio = "1.49"
 walkdir = "2.5"
-xz2 = "0.1"
+xz2 = { version = "0.1", features = ["static"] }
 zip = { version = "8.0", default-features = false }
 zstd = "0.13"
 

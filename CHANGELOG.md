@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.2.6] - 2026-03-04
 
+### Fixed
+- macOS ARM64 wheel no longer embeds a dynamic path to Homebrew's liblzma; xz2 is now statically linked via `xz2/static` feature (#66)
+
 ### Changed
 
 - Bump `maturin` from 1.12.3 to 1.12.6

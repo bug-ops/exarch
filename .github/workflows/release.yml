@@ -185,7 +185,7 @@ jobs:
         run: maturin build --release ${{ matrix.platform.maturin-args }} --strip --out wheels -i python3.9
 
       - name: Upload wheels
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: wheels-${{ matrix.platform.name }}
           path: crates/exarch-python/wheels/*.whl
@@ -205,7 +205,7 @@ jobs:
       id-token: write  # Required for trusted publishing
     steps:
       - name: Download all wheels
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           path: dist
           pattern: wheels-*
@@ -291,7 +291,7 @@ jobs:
         run: npm run build -- --target ${{ matrix.platform.target }}
 
       - name: Upload bindings
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: bindings-${{ matrix.platform.name }}
           path: |
@@ -324,7 +324,7 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
 
       - name: Download all bindings
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           path: bindings
           pattern: bindings-*
@@ -366,14 +366,14 @@ jobs:
           fetch-depth: 0
 
       - name: Download Python wheels
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           path: release-artifacts/python
           pattern: wheels-*
           merge-multiple: true
 
       - name: Download Node.js bindings
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           path: release-artifacts/node
           pattern: bindings-*

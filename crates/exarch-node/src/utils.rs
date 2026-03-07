@@ -15,8 +15,8 @@ const MAX_PATH_LENGTH: usize = 4096;
 ///
 /// Returns error if path contains null bytes or exceeds maximum length.
 pub fn validate_path(path: &str) -> Result<()> {
-    // Use constant-time null byte check to prevent timing side-channel attacks
-    // The fold operation processes every byte regardless of when null is found
+    // Constant-time null byte check (processes every byte regardless of match)
+    #[allow(clippy::needless_bitwise_bool)]
     let has_null = path.bytes().fold(false, |acc, b| acc | (b == 0));
 
     if has_null {

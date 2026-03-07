@@ -42,6 +42,10 @@
 //! | Directories | ✅ Yes | Created recursively |
 //! | Symlinks | ✅ Yes | Unix only, requires `config.allowed.symlinks = true` |
 //! | Hardlinks | ✅ Yes | Two-pass extraction, requires `config.allowed.hardlinks = true` |
+//! | Continuous | ✅ Yes | Treated as regular file |
+//! | GNU sparse | ✅ Yes | Treated as regular file |
+//! | PAX headers (`XHeader`, `XGlobalHeader`) | Skipped | Format-internal metadata |
+//! | GNU metadata (`GNULongName`, `GNULongLink`) | Skipped | Format-internal metadata |
 //! | Char devices | ❌ No | Rejected with `UnsupportedFeature` error |
 //! | Block devices | ❌ No | Rejected with `UnsupportedFeature` error |
 //! | FIFOs | ❌ No | Rejected with `UnsupportedFeature` error |
@@ -182,6 +186,11 @@ impl<R: Read> TarArchive<R> {
         copy_buffer: &mut CopyBuffer,
         dir_cache: &mut common::DirCache,
     ) -> Result<Option<HardlinkInfo>> {
+        // Skip TAR metadata entries (PAX headers, GNU long names/links, sparse)
+        if TarEntryAdapter::is_metadata_entry(&entry) {
+            return Ok(None);
+        }
+
         let path = entry
             .path()
             .map_err(|e| ExtractionError::InvalidArchive(format!("invalid path: {e}")))?
@@ -346,12 +355,28 @@ struct HardlinkInfo {
 struct TarEntryAdapter;
 
 impl TarEntryAdapter {
+    /// Returns `true` for TAR metadata entries that should be skipped.
+    ///
+    /// PAX extended headers and GNU long name/link entries are format-internal
+    /// records, not user files. The `tar` crate consumes `XHeader`,
+    /// `GNULongName`, and `GNULongLink` internally in `next_entry()`, so
+    /// they normally never reach our iterator. `XGlobalHeader` does reach
+    /// us. All four are checked here as defense-in-depth.
+    fn is_metadata_entry<R: Read>(tar_entry: &tar::Entry<'_, R>) -> bool {
+        use tar::EntryType as TarType;
+
+        matches!(
+            tar_entry.header().entry_type(),
+            TarType::XHeader | TarType::XGlobalHeader | TarType::GNULongName | TarType::GNULongLink
+        )
+    }
+
     /// Converts `tar::EntryType` to our `EntryType` enum.
     fn to_entry_type<R: Read>(tar_entry: &tar::Entry<'_, R>) -> Result<EntryType> {
         use tar::EntryType as TarType;
 
         match tar_entry.header().entry_type() {
-            TarType::Regular => Ok(EntryType::File),
+            TarType::Regular | TarType::Continuous | TarType::GNUSparse => Ok(EntryType::File),
 
             TarType::Directory => Ok(EntryType::Directory),
 
@@ -767,6 +792,210 @@ mod tests {
         let result = archive.extract(temp.path(), &config);
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_extract_pax_headers_skipped() {
+        let mut builder = tar::Builder::new(Vec::new());
+
+        // Add a PAX global header entry
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::XGlobalHeader);
+        let pax_data = b"16 comment=hi\n";
+        header.set_size(pax_data.len() as u64);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, "././@PaxHeader", &pax_data[..])
+            .unwrap();
+
+        // Add a PAX extended header entry
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::XHeader);
+        header.set_size(pax_data.len() as u64);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, "././@PaxHeader", &pax_data[..])
+            .unwrap();
+
+        // Add a regular file
+        let mut header = tar::Header::new_gnu();
+        header.set_size(5);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, "hello.txt", &b"hello"[..])
+            .unwrap();
+
+        let tar_data = builder.into_inner().unwrap();
+        let mut archive = TarArchive::new(Cursor::new(tar_data));
+
+        let temp = TempDir::new().unwrap();
+        let config = SecurityConfig::default();
+
+        let report = archive.extract(temp.path(), &config).unwrap();
+
+        assert_eq!(report.files_extracted, 1);
+        assert!(temp.path().join("hello.txt").exists());
+    }
+
+    #[test]
+    fn test_extract_gnu_long_name_skipped() {
+        let mut builder = tar::Builder::new(Vec::new());
+
+        // Add a GNU long name entry
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::GNULongName);
+        let long_name = b"very_long_filename.txt";
+        header.set_size(long_name.len() as u64);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, "././@LongLink", &long_name[..])
+            .unwrap();
+
+        // Add a regular file
+        let mut header = tar::Header::new_gnu();
+        header.set_size(4);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, "file.txt", &b"data"[..])
+            .unwrap();
+
+        let tar_data = builder.into_inner().unwrap();
+        let mut archive = TarArchive::new(Cursor::new(tar_data));
+
+        let temp = TempDir::new().unwrap();
+        let config = SecurityConfig::default();
+
+        let report = archive.extract(temp.path(), &config).unwrap();
+
+        assert_eq!(report.files_extracted, 1);
+        assert!(temp.path().join("very_long_filename.txt").exists());
+    }
+
+    #[test]
+    fn test_extract_gnu_long_link_skipped() {
+        let mut builder = tar::Builder::new(Vec::new());
+
+        // Add a GNU long link entry (metadata, should be skipped)
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::GNULongLink);
+        let long_link = b"target.txt";
+        header.set_size(long_link.len() as u64);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, "././@LongLink", &long_link[..])
+            .unwrap();
+
+        // Add a regular file
+        let mut header = tar::Header::new_gnu();
+        header.set_size(4);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, "file.txt", &b"data"[..])
+            .unwrap();
+
+        let tar_data = builder.into_inner().unwrap();
+        let mut archive = TarArchive::new(Cursor::new(tar_data));
+
+        let temp = TempDir::new().unwrap();
+        let config = SecurityConfig::default();
+
+        let report = archive.extract(temp.path(), &config).unwrap();
+
+        assert_eq!(report.files_extracted, 1);
+        assert!(temp.path().join("file.txt").exists());
+    }
+
+    #[test]
+    fn test_extract_gnu_sparse_as_file() {
+        let mut builder = tar::Builder::new(Vec::new());
+
+        // GNUSparse entries are treated as regular files by to_entry_type().
+        // The `tar` crate may reject a malformed sparse header at read time,
+        // which would manifest as an InvalidArchive error rather than a
+        // SecurityViolation. Either outcome is acceptable — we verify the
+        // entry type mapping is handled without panicking.
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::GNUSparse);
+        header.set_size(6);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, "sparse.txt", &b"sparse"[..])
+            .unwrap();
+
+        let tar_data = builder.into_inner().unwrap();
+        let mut archive = TarArchive::new(Cursor::new(tar_data));
+
+        let temp = TempDir::new().unwrap();
+        let config = SecurityConfig::default();
+
+        // Either succeeds (extracted as regular file) or fails with
+        // InvalidArchive due to missing GNU sparse extension headers.
+        // A SecurityViolation must NOT be returned for this entry type.
+        match archive.extract(temp.path(), &config) {
+            Ok(report) => {
+                assert_eq!(report.files_extracted, 1);
+                assert!(temp.path().join("sparse.txt").exists());
+            }
+            Err(ExtractionError::InvalidArchive(_)) => {
+                // Acceptable: tar crate rejects malformed sparse header
+            }
+            Err(e) => panic!("unexpected error for GNUSparse entry: {e}"),
+        }
+    }
+
+    #[test]
+    fn test_unsupported_entry_type_unknown_byte() {
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        // b'Z' is not a known entry type byte
+        header.set_entry_type(tar::EntryType::__Nonexhaustive(b'Z'));
+        header.set_size(0);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, "unknown", &[] as &[u8])
+            .unwrap();
+
+        let tar_data = builder.into_inner().unwrap();
+        let mut archive = TarArchive::new(Cursor::new(tar_data));
+
+        let temp = TempDir::new().unwrap();
+        let config = SecurityConfig::default();
+
+        let result = archive.extract(temp.path(), &config);
+
+        assert!(
+            matches!(result, Err(ExtractionError::SecurityViolation { .. })),
+            "expected SecurityViolation, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_extract_continuous_entry_as_file() {
+        let mut builder = tar::Builder::new(Vec::new());
+
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Continuous);
+        header.set_size(7);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, "cont.txt", &b"content"[..])
+            .unwrap();
+
+        let tar_data = builder.into_inner().unwrap();
+        let mut archive = TarArchive::new(Cursor::new(tar_data));
+
+        let temp = TempDir::new().unwrap();
+        let config = SecurityConfig::default();
+
+        let report = archive.extract(temp.path(), &config).unwrap();
+
+        assert_eq!(report.files_extracted, 1);
+        assert!(temp.path().join("cont.txt").exists());
     }
 
     #[test]

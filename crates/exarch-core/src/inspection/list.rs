@@ -153,6 +153,11 @@ fn list_tar_entries<R: std::io::Read>(
             ExtractionError::InvalidArchive(format!("failed to read TAR entry: {e}"))
         })?;
 
+        // Skip TAR metadata entries (PAX headers, GNU long names/links)
+        if is_tar_metadata_entry(&entry) {
+            continue;
+        }
+
         // Check file count quota
         if manifest.total_entries >= config.max_file_count {
             return Err(ExtractionError::QuotaExceeded {
@@ -299,6 +304,17 @@ fn list_zip(
     Ok(manifest)
 }
 
+/// Returns `true` for TAR metadata entries that should be skipped.
+fn is_tar_metadata_entry<R: std::io::Read>(entry: &tar::Entry<'_, R>) -> bool {
+    matches!(
+        entry.header().entry_type(),
+        tar::EntryType::XHeader
+            | tar::EntryType::XGlobalHeader
+            | tar::EntryType::GNULongName
+            | tar::EntryType::GNULongLink
+    )
+}
+
 fn convert_tar_entry_type<R: std::io::Read>(
     entry: &tar::Entry<'_, R>,
 ) -> Result<ManifestEntryType> {
@@ -311,7 +327,7 @@ fn convert_tar_entry_type<R: std::io::Read>(
                 "special files (char/block devices, FIFOs) are not supported".to_string(),
             ))
         }
-        // All other types (Regular, Continuous, GNULongName, etc.) treated as files
+        // Regular, Continuous, GNUSparse treated as files
         _ => Ok(ManifestEntryType::File),
     }
 }

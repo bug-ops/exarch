@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.7] - 2026-03-07
+
+### Fixed
+
+- PAX archive extraction fails with `SecurityViolation` for `XGlobalHeader` entries (#69)
+- TAR `Continuous` and `GNUSparse` entry types incorrectly rejected as unsupported
+- `list_archive()` inconsistently reported PAX metadata as regular files
+
+### Changed
+
+- Suppress `clippy::needless_bitwise_bool` for intentional constant-time null byte check in exarch-node
+
 ## [0.2.6] - 2026-03-04
 
 ### Fixed
@@ -203,7 +215,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 64KB reusable copy buffers
 - LRU cache for symlink target resolution
 
-[Unreleased]: https://github.com/bug-ops/exarch/compare/v0.2.6...HEAD
+[Unreleased]: https://github.com/bug-ops/exarch/compare/v0.2.7...HEAD
+[0.2.7]: https://github.com/bug-ops/exarch/compare/v0.2.6...v0.2.7
 [0.2.6]: https://github.com/bug-ops/exarch/compare/v0.2.5...v0.2.6
 [0.2.5]: https://github.com/bug-ops/exarch/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/bug-ops/exarch/compare/v0.2.3...v0.2.4

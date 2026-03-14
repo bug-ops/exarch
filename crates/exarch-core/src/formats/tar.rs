@@ -197,7 +197,7 @@ impl<R: Read> TarArchive<R> {
             .into_owned();
 
         let entry_type = TarEntryAdapter::to_entry_type(&entry)?;
-        let size = TarEntryAdapter::get_uncompressed_size(&entry)?;
+        let size = TarEntryAdapter::get_uncompressed_size(&entry);
         let mode = entry.header().mode().ok();
 
         let validated =
@@ -238,7 +238,7 @@ impl<R: Read> TarArchive<R> {
         copy_buffer: &mut CopyBuffer,
         dir_cache: &mut common::DirCache,
     ) -> Result<()> {
-        let size = entry.header().size().ok();
+        let size = Some(entry.size());
         common::extract_file_generic(
             &mut entry,
             validated,
@@ -429,11 +429,9 @@ impl TarEntryAdapter {
         }
     }
 
-    /// Gets uncompressed size from TAR header.
-    fn get_uncompressed_size<R: Read>(tar_entry: &tar::Entry<'_, R>) -> Result<u64> {
-        tar_entry.header().size().map_err(|e| {
-            ExtractionError::InvalidArchive(format!("invalid size in TAR header: {e}"))
-        })
+    /// Gets uncompressed size from TAR entry.
+    fn get_uncompressed_size<R: Read>(tar_entry: &tar::Entry<'_, R>) -> u64 {
+        tar_entry.size()
     }
 }
 
@@ -1573,6 +1571,105 @@ mod tests {
         for i in 0..20 {
             assert!(temp.path().join(format!("link{i}.txt")).exists());
         }
+    }
+
+    // Builds a raw TAR archive with a PAX extended header that advertises
+    // `pax_size` for the file, while the ustar header carries size=0.
+    // This is exactly the structure that exploits the PAX quota bypass (issue #82).
+    fn create_tar_with_pax_size_override(filename: &str, pax_size: u64, data: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+
+        // PAX key-value: "<len> size=<N>\n" where len equals the total record byte
+        // count.
+        let kv_suffix = format!(" size={pax_size}\n");
+        let mut total = 1 + kv_suffix.len(); // start with 1 digit
+        loop {
+            let digits = total.to_string().len();
+            let candidate = digits + kv_suffix.len();
+            if candidate == total {
+                break;
+            }
+            total = candidate;
+        }
+        let pax_data = format!("{total}{kv_suffix}");
+        let pax_bytes = pax_data.as_bytes();
+
+        // PAX extended header (type 'x') with the computed size
+        let mut pax_header = tar::Header::new_ustar();
+        pax_header.set_entry_type(tar::EntryType::XHeader);
+        pax_header.set_size(pax_bytes.len() as u64);
+        pax_header.set_mode(0o644);
+        pax_header.set_path("././@PaxHeader").unwrap();
+        pax_header.set_cksum();
+        out.extend_from_slice(pax_header.as_bytes());
+        out.extend_from_slice(pax_bytes);
+        let pax_pad = (512 - pax_bytes.len() % 512) % 512;
+        out.extend(std::iter::repeat_n(0u8, pax_pad));
+
+        // Regular file header with ustar size=0 (triggers the bypass pre-fix)
+        let mut file_header = tar::Header::new_ustar();
+        file_header.set_entry_type(tar::EntryType::Regular);
+        file_header.set_size(0);
+        file_header.set_mode(0o644);
+        file_header.set_path(filename).unwrap();
+        file_header.set_cksum();
+        out.extend_from_slice(file_header.as_bytes());
+        out.extend_from_slice(data);
+        let data_pad = if data.is_empty() {
+            0
+        } else {
+            (512 - data.len() % 512) % 512
+        };
+        out.extend(std::iter::repeat_n(0u8, data_pad));
+
+        // End-of-archive: two 512-byte zero blocks
+        out.extend(std::iter::repeat_n(0u8, 1024));
+        out
+    }
+
+    #[test]
+    fn test_pax_size_override_bypasses_max_file_size_quota() {
+        // Regression for issue #82: PAX size must be used for quota, not ustar size.
+        // File has PAX size=2MB but ustar size=0; limit is 1MB — must be rejected.
+        const PAX_SIZE: u64 = 2 * 1024 * 1024;
+        let data = vec![0u8; usize::try_from(PAX_SIZE).unwrap()];
+        let tar_data = create_tar_with_pax_size_override("big.bin", PAX_SIZE, &data);
+
+        let mut archive = TarArchive::new(Cursor::new(tar_data));
+        let temp = TempDir::new().unwrap();
+        let config = SecurityConfig {
+            max_file_size: 1024 * 1024,
+            ..Default::default()
+        };
+
+        let result = archive.extract(temp.path(), &config);
+        assert!(
+            result.is_err(),
+            "expected quota error for PAX file size override, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_pax_size_override_bypasses_max_total_size_quota() {
+        // Regression for issue #82: PAX size must be used for total-size quota.
+        // File has PAX size=600KB but ustar size=0; total limit is 500KB — must be
+        // rejected.
+        const PAX_SIZE: u64 = 600 * 1024;
+        let data = vec![0u8; usize::try_from(PAX_SIZE).unwrap()];
+        let tar_data = create_tar_with_pax_size_override("big.bin", PAX_SIZE, &data);
+
+        let mut archive = TarArchive::new(Cursor::new(tar_data));
+        let temp = TempDir::new().unwrap();
+        let config = SecurityConfig {
+            max_total_size: 500 * 1024,
+            ..Default::default()
+        };
+
+        let result = archive.extract(temp.path(), &config);
+        assert!(
+            result.is_err(),
+            "expected quota error for PAX total size override, got: {result:?}"
+        );
     }
 
     // OPT-H001: Test SmallVec boundary at exactly 8 hardlinks

@@ -262,7 +262,9 @@ fn list_zip(
         let entry_type = convert_zip_entry_type(&entry);
         let size = entry.size();
         let compressed_size = Some(entry.compressed_size());
-        let mode = entry.unix_mode();
+        // Strip file-type bits (S_IFREG, S_IFDIR, etc.) from external_attributes >> 16,
+        // keeping only the permission bits so the display matches TAR output.
+        let mode = entry.unix_mode().map(|m| m & 0o7777);
         #[allow(clippy::cast_sign_loss)]
         let modified = entry.last_modified().and_then(|dt| {
             time::PrimitiveDateTime::try_from(dt).ok().and_then(|t| {
@@ -366,6 +368,74 @@ mod tests {
     use flate2::write::GzEncoder;
     use std::io::Write;
     use tempfile::NamedTempFile;
+
+    /// Writes a minimal single-file ZIP archive where `external_attributes`
+    /// encodes a full Unix stat(2) mode (file-type bits + permission bits)
+    /// in the high 16 bits, as produced by system `zip(1)`, Python's
+    /// `zipfile`, and other Unix-aware tools.
+    ///
+    /// `unix_mode` is what `ZipFile::unix_mode()` should return (i.e.
+    /// `external_attributes >> 16`). The zip crate's write API masks
+    /// `unix_permissions` to 0o777, so we construct the binary ZIP
+    /// structure directly to reproduce archives from external tools.
+    /// Uses empty content (CRC32 = 0) to avoid a CRC32 dependency in tests.
+    #[allow(clippy::cast_possible_truncation)]
+    fn zip_with_raw_unix_mode(filename: &str, unix_mode: u32) -> Vec<u8> {
+        let external_attributes = unix_mode << 16;
+        let name_bytes = filename.as_bytes();
+        let name_len = name_bytes.len() as u16;
+
+        let mut buf: Vec<u8> = Vec::new();
+
+        // Local file header (empty stored entry, CRC32 = 0)
+        let local_offset = buf.len() as u32;
+        buf.extend_from_slice(b"PK\x03\x04"); // signature
+        buf.extend_from_slice(&20u16.to_le_bytes()); // version needed
+        buf.extend_from_slice(&0u16.to_le_bytes()); // general purpose flags
+        buf.extend_from_slice(&0u16.to_le_bytes()); // compression method: stored
+        buf.extend_from_slice(&0u16.to_le_bytes()); // last mod time
+        buf.extend_from_slice(&0u16.to_le_bytes()); // last mod date
+        buf.extend_from_slice(&0u32.to_le_bytes()); // CRC32
+        buf.extend_from_slice(&0u32.to_le_bytes()); // compressed size
+        buf.extend_from_slice(&0u32.to_le_bytes()); // uncompressed size
+        buf.extend_from_slice(&name_len.to_le_bytes());
+        buf.extend_from_slice(&0u16.to_le_bytes()); // extra field length
+        buf.extend_from_slice(name_bytes);
+        // no content bytes
+
+        // Central directory entry
+        let central_offset = buf.len() as u32;
+        buf.extend_from_slice(b"PK\x01\x02"); // signature
+        buf.extend_from_slice(&0x031eu16.to_le_bytes()); // version made by: Unix (3) + spec 3.0
+        buf.extend_from_slice(&20u16.to_le_bytes()); // version needed
+        buf.extend_from_slice(&0u16.to_le_bytes()); // flags
+        buf.extend_from_slice(&0u16.to_le_bytes()); // compression
+        buf.extend_from_slice(&0u16.to_le_bytes()); // mod time
+        buf.extend_from_slice(&0u16.to_le_bytes()); // mod date
+        buf.extend_from_slice(&0u32.to_le_bytes()); // CRC32
+        buf.extend_from_slice(&0u32.to_le_bytes()); // compressed size
+        buf.extend_from_slice(&0u32.to_le_bytes()); // uncompressed size
+        buf.extend_from_slice(&name_len.to_le_bytes());
+        buf.extend_from_slice(&0u16.to_le_bytes()); // extra length
+        buf.extend_from_slice(&0u16.to_le_bytes()); // comment length
+        buf.extend_from_slice(&0u16.to_le_bytes()); // disk number start
+        buf.extend_from_slice(&0u16.to_le_bytes()); // internal file attributes
+        buf.extend_from_slice(&external_attributes.to_le_bytes()); // external attributes
+        buf.extend_from_slice(&local_offset.to_le_bytes()); // local header offset
+        buf.extend_from_slice(name_bytes);
+
+        // End of central directory record
+        let central_size = (buf.len() as u32) - central_offset;
+        buf.extend_from_slice(b"PK\x05\x06"); // signature
+        buf.extend_from_slice(&0u16.to_le_bytes()); // disk number
+        buf.extend_from_slice(&0u16.to_le_bytes()); // disk with central dir
+        buf.extend_from_slice(&1u16.to_le_bytes()); // entries on this disk
+        buf.extend_from_slice(&1u16.to_le_bytes()); // total entries
+        buf.extend_from_slice(&central_size.to_le_bytes());
+        buf.extend_from_slice(&central_offset.to_le_bytes());
+        buf.extend_from_slice(&0u16.to_le_bytes()); // comment length
+        buf
+    }
 
     #[test]
     fn test_list_archive_empty_tar() {
@@ -559,5 +629,83 @@ mod tests {
                 resource: QuotaResource::FileCount { .. },
             })
         ));
+    }
+
+    #[test]
+    fn test_zip_mode_strips_s_ifreg_bits() {
+        // Archives from Unix tools store the full stat(2) mode in external_attributes.
+        // 0o100644 = S_IFREG (0o100000) | 0o644. After listing, only 0o644 must remain.
+        let zip_bytes = zip_with_raw_unix_mode("file.txt", 0o100_644);
+        let mut temp_file = NamedTempFile::with_suffix(".zip").unwrap();
+        temp_file.write_all(&zip_bytes).unwrap();
+        temp_file.flush().unwrap();
+
+        let config = SecurityConfig::default();
+        let manifest = list_archive(temp_file.path(), &config).unwrap();
+
+        assert_eq!(manifest.total_entries, 1);
+        assert_eq!(manifest.entries[0].mode, Some(0o644));
+    }
+
+    #[test]
+    fn test_zip_mode_strips_s_ifdir_bits() {
+        // 0o040755 = S_IFDIR (0o040000) | 0o755. After listing, only 0o755 must remain.
+        let zip_bytes = zip_with_raw_unix_mode("mydir/", 0o040_755);
+        let mut temp_file = NamedTempFile::with_suffix(".zip").unwrap();
+        temp_file.write_all(&zip_bytes).unwrap();
+        temp_file.flush().unwrap();
+
+        let config = SecurityConfig::default();
+        let manifest = list_archive(temp_file.path(), &config).unwrap();
+
+        assert_eq!(manifest.total_entries, 1);
+        assert_eq!(manifest.entries[0].mode, Some(0o755));
+    }
+
+    #[test]
+    fn test_zip_mode_permission_bits_unchanged() {
+        // When no file-type bits are present, permission bits must be preserved as-is.
+        let zip_bytes = zip_with_raw_unix_mode("file.txt", 0o644);
+        let mut temp_file = NamedTempFile::with_suffix(".zip").unwrap();
+        temp_file.write_all(&zip_bytes).unwrap();
+        temp_file.flush().unwrap();
+
+        let config = SecurityConfig::default();
+        let manifest = list_archive(temp_file.path(), &config).unwrap();
+
+        assert_eq!(manifest.total_entries, 1);
+        assert_eq!(manifest.entries[0].mode, Some(0o644));
+    }
+
+    #[test]
+    fn test_tar_and_zip_mode_consistent() {
+        // TAR and ZIP must both store only permission bits in ArchiveEntry.mode.
+        let tar_file = NamedTempFile::with_suffix(".tar").unwrap();
+        {
+            let mut builder = tar::Builder::new(std::fs::File::create(tar_file.path()).unwrap());
+            let data = b"content";
+            let mut header = tar::Header::new_gnu();
+            header.set_path("file.txt").unwrap();
+            header.set_size(data.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder.append(&header, &data[..]).unwrap();
+            builder.into_inner().unwrap();
+        }
+
+        // ZIP with full S_IFREG mode, as written by an external Unix tool.
+        let zip_bytes = zip_with_raw_unix_mode("file.txt", 0o100_644);
+        let zip_file = NamedTempFile::with_suffix(".zip").unwrap();
+        {
+            let mut f = std::fs::File::create(zip_file.path()).unwrap();
+            f.write_all(&zip_bytes).unwrap();
+        }
+
+        let config = SecurityConfig::default();
+        let tar_manifest = list_archive(tar_file.path(), &config).unwrap();
+        let zip_manifest = list_archive(zip_file.path(), &config).unwrap();
+
+        assert_eq!(tar_manifest.entries[0].mode, zip_manifest.entries[0].mode);
+        assert_eq!(tar_manifest.entries[0].mode, Some(0o644));
     }
 }

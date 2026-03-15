@@ -23,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `--allow-world-writable` CLI flag and `allow_world_writable` `SecurityConfig` option to opt in to preserving world-writable permissions (#84)
 
+### Changed
+
+- Removed stale `RUSTSEC-2025-0119` ignore entry from `deny.toml`; the advisory no longer matches any dependency in the tree (#76)
+
 ## [0.2.7] - 2026-03-07
 
 ### Fixed

@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `SecurityConfig.allowed_extensions` and `SecurityConfig.banned_path_components` were missing from Python type stubs (`exarch.pyi`), causing pyright to report `reportAttributeAccessIssue` (#72)
 - Use `entry.size()` instead of `entry.header().size()` for TAR quota enforcement to prevent PAX size bypass (#82)
+- Honor `--force` flag in `extract` subcommand; without `--force`, fail with a clear error listing conflicting files (#77)
 
 ## [0.2.7] - 2026-03-07
 

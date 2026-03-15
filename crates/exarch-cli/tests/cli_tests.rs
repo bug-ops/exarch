@@ -1419,3 +1419,56 @@ fn test_completion_invalid_shell() {
         .failure()
         .stderr(predicate::str::contains("invalid value"));
 }
+
+// ============================================================================
+// --force Flag Tests (Extract)
+// ============================================================================
+
+/// Without --force, extracting into a directory with conflicting files fails
+/// and the error message lists the conflicting files.
+#[test]
+fn test_extract_without_force_fails_on_conflict() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+
+    // First extraction populates the output directory.
+    exarch_cmd()
+        .arg("extract")
+        .arg(fixture_path("sample.tar.gz"))
+        .arg(temp.path())
+        .assert()
+        .success();
+
+    // Second extraction must fail because destination files already exist.
+    exarch_cmd()
+        .arg("extract")
+        .arg(fixture_path("sample.tar.gz"))
+        .arg(temp.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("already exist").and(predicate::str::contains("--force")));
+}
+
+/// With --force, extracting into a directory with conflicting files succeeds
+/// and silently overwrites them.
+#[test]
+fn test_extract_with_force_overwrites_conflicts() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+
+    // First extraction populates the output directory.
+    exarch_cmd()
+        .arg("extract")
+        .arg(fixture_path("sample.tar.gz"))
+        .arg(temp.path())
+        .assert()
+        .success();
+
+    // Second extraction with --force must succeed.
+    exarch_cmd()
+        .arg("extract")
+        .arg("--force")
+        .arg(fixture_path("sample.tar.gz"))
+        .arg(temp.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Extraction complete"));
+}

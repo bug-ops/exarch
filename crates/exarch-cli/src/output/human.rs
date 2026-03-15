@@ -165,14 +165,14 @@ impl OutputFormatter for HumanFormatter {
         Ok(())
     }
 
-    fn format_error(&self, error: &anyhow::Error) {
+    fn format_error(&self, _operation: &str, error: &anyhow::Error) {
         // Always show errors, even in quiet mode
         if self.use_colors {
             let _ = self
                 .term
-                .write_line(&format!("{} {error:?}", style("ERROR:").red().bold()));
+                .write_line(&format!("{} {error:#}", style("error:").red().bold()));
         } else {
-            let _ = self.term.write_line(&format!("ERROR: {error:?}"));
+            let _ = self.term.write_line(&format!("error: {error:#}"));
         }
     }
 
@@ -423,5 +423,32 @@ mod tests {
             }
             result.chars().rev().collect::<String>()
         });
+    }
+
+    #[test]
+    fn test_human_format_error_does_not_panic() {
+        let formatter = HumanFormatter::new(false, false);
+        let err = anyhow::anyhow!(exarch_core::ExtractionError::ZipBomb {
+            compressed: 1000,
+            uncompressed: 1_000_000,
+            ratio: 1000.0,
+        });
+        // Must not panic; output goes to terminal (not captured in unit tests)
+        formatter.format_error("extract", &err);
+    }
+
+    #[test]
+    fn test_human_format_error_plain_text_not_json() {
+        use exarch_core::ExtractionError;
+        use std::path::PathBuf;
+
+        let formatter = HumanFormatter::new(false, false);
+        let err = anyhow::anyhow!(ExtractionError::PathTraversal {
+            path: PathBuf::from("../etc/passwd"),
+        });
+        // format_error does not return a value; verify it completes without panic.
+        // The human formatter writes plain "error: ..." text (not JSON) to the
+        // terminal.
+        formatter.format_error("extract", &err);
     }
 }

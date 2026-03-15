@@ -4,86 +4,74 @@
 //! contextual errors (anyhow) with actionable guidance.
 
 use anyhow::Result;
-use anyhow::anyhow;
 use exarch_core::ExtractionError;
 use std::path::Path;
 
-/// Converts `ExtractionError` to user-friendly anyhow error with context
+/// Converts `ExtractionError` to user-friendly anyhow error with context.
+///
+/// The original `ExtractionError` is preserved as the error source so that
+/// callers can downcast via the anyhow chain (used by JSON error output).
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 pub fn convert_extraction_error(err: ExtractionError, archive: &Path) -> anyhow::Error {
-    match err {
-        ExtractionError::PathTraversal { path } => {
-            anyhow!(
-                "Security violation: Archive '{}' attempted path traversal with '{}'\n\
-                 HINT: This archive may be malicious. Do not extract from untrusted sources.",
-                archive.display(),
-                path.display()
-            )
-        }
+    let context = match &err {
+        ExtractionError::PathTraversal { path } => format!(
+            "Security violation: Archive '{}' attempted path traversal with '{}'\n\
+             HINT: This archive may be malicious. Do not extract from untrusted sources.",
+            archive.display(),
+            path.display()
+        ),
         ExtractionError::ZipBomb {
             compressed,
             uncompressed,
             ratio,
-        } => {
-            anyhow!(
-                "Security violation: Archive '{}' appears to be a zip bomb\n\
-                 Compression ratio: {}:1 ({}KB → {}MB)\n\
-                 HINT: Use --max-compression-ratio to allow higher ratios if legitimate.",
-                archive.display(),
-                ratio as u64,
-                compressed / 1024,
-                uncompressed / 1024 / 1024
-            )
-        }
-        ExtractionError::QuotaExceeded { resource } => {
-            anyhow!(
-                "Extraction limit exceeded for '{}': {}\n\
-                 HINT: Use --max-files, --max-total-size, or --max-file-size to increase limits.",
-                archive.display(),
-                resource
-            )
-        }
-        ExtractionError::SymlinkEscape { path } => {
-            anyhow!(
-                "Symlink rejected in '{}': {}\n\
-                 HINT: Use --allow-symlinks to extract symlinks (only if trusted source).",
-                archive.display(),
-                path.display()
-            )
-        }
-        ExtractionError::HardlinkEscape { path } => {
-            anyhow!(
-                "Hardlink rejected in '{}': {}\n\
-                 HINT: Use --allow-hardlinks to extract hardlinks (only if trusted source).",
-                archive.display(),
-                path.display()
-            )
-        }
+        } => format!(
+            "Security violation: Archive '{}' appears to be a zip bomb\n\
+             Compression ratio: {}:1 ({}KB → {}MB)\n\
+             HINT: Use --max-compression-ratio to allow higher ratios if legitimate.",
+            archive.display(),
+            *ratio as u64,
+            compressed / 1024,
+            uncompressed / 1024 / 1024
+        ),
+        ExtractionError::QuotaExceeded { resource } => format!(
+            "Extraction limit exceeded for '{}': {}\n\
+             HINT: Use --max-files, --max-total-size, or --max-file-size to increase limits.",
+            archive.display(),
+            resource
+        ),
+        ExtractionError::SymlinkEscape { path } => format!(
+            "Symlink rejected in '{}': {}\n\
+             HINT: Use --allow-symlinks to extract symlinks (only if trusted source).",
+            archive.display(),
+            path.display()
+        ),
+        ExtractionError::HardlinkEscape { path } => format!(
+            "Hardlink rejected in '{}': {}\n\
+             HINT: Use --allow-hardlinks to extract hardlinks (only if trusted source).",
+            archive.display(),
+            path.display()
+        ),
         ExtractionError::Io(io_err) => {
-            anyhow!(
+            format!(
                 "I/O error while processing '{}': {}",
                 archive.display(),
                 io_err
             )
         }
-        ExtractionError::UnsupportedFormat => {
-            anyhow!(
-                "Archive format not supported: {}\n\
-                 HINT: Supported formats: tar, tar.gz, tar.bz2, tar.xz, tar.zstd, zip",
-                archive.display()
-            )
-        }
-        ExtractionError::InvalidArchive(reason) => {
-            anyhow!(
-                "Invalid archive '{}': {}\n\
-                 HINT: The archive may be corrupted or malformed.",
-                archive.display(),
-                reason
-            )
-        }
-        _ => anyhow::Error::from(err)
-            .context(format!("Error processing archive '{}'", archive.display())),
-    }
+        ExtractionError::UnsupportedFormat => format!(
+            "Archive format not supported: {}\n\
+             HINT: Supported formats: tar, tar.gz, tar.bz2, tar.xz, tar.zstd, zip",
+            archive.display()
+        ),
+        ExtractionError::InvalidArchive(reason) => format!(
+            "Invalid archive '{}': {}\n\
+             HINT: The archive may be corrupted or malformed.",
+            archive.display(),
+            reason
+        ),
+        _ => format!("Error processing archive '{}'", archive.display()),
+    };
+    anyhow::Error::from(err).context(context)
 }
 
 /// Adds context to a generic error about archive operations

@@ -5,12 +5,35 @@ use super::formatter::OutputFormatter;
 use anyhow::Result;
 use exarch_core::ArchiveManifest;
 use exarch_core::CreationReport;
+use exarch_core::ExtractionError;
 use exarch_core::ExtractionReport;
 use exarch_core::VerificationReport;
 use serde::Serialize;
 use std::io::Write;
 use std::io::{self};
 use std::path::Path;
+
+fn extraction_error_kind(err: &ExtractionError) -> String {
+    match err {
+        ExtractionError::Io(_) => "IoError",
+        ExtractionError::UnsupportedFormat => "UnsupportedFormat",
+        ExtractionError::InvalidArchive(_) => "InvalidArchive",
+        ExtractionError::PathTraversal { .. } => "PathTraversal",
+        ExtractionError::SymlinkEscape { .. } => "SymlinkEscape",
+        ExtractionError::HardlinkEscape { .. } => "HardlinkEscape",
+        ExtractionError::ZipBomb { .. } => "ZipBomb",
+        ExtractionError::InvalidPermissions { .. } => "InvalidPermissions",
+        ExtractionError::QuotaExceeded { .. } => "QuotaExceeded",
+        ExtractionError::SecurityViolation { .. } => "SecurityViolation",
+        ExtractionError::SourceNotFound { .. } => "SourceNotFound",
+        ExtractionError::SourceNotAccessible { .. } => "SourceNotAccessible",
+        ExtractionError::OutputExists { .. } => "OutputExists",
+        ExtractionError::InvalidCompressionLevel { .. } => "InvalidCompressionLevel",
+        ExtractionError::UnknownFormat { .. } => "UnknownFormat",
+        ExtractionError::InvalidConfiguration { .. } => "InvalidConfiguration",
+    }
+    .to_string()
+}
 
 pub struct JsonFormatter;
 
@@ -79,8 +102,13 @@ impl OutputFormatter for JsonFormatter {
         Self::output(&output)
     }
 
-    fn format_error(&self, error: &anyhow::Error) {
-        let output = JsonOutput::<()>::error("unknown", format!("{error:?}"));
+    fn format_error(&self, operation: &str, error: &anyhow::Error) {
+        let kind = error
+            .chain()
+            .find_map(|e| e.downcast_ref::<ExtractionError>())
+            .map_or_else(|| "Error".to_string(), extraction_error_kind);
+        let message = format!("{error:#}");
+        let output = JsonOutput::<()>::error(operation, kind, message);
         let _ = Self::output(&output);
     }
 
@@ -250,20 +278,139 @@ impl OutputFormatter for JsonFormatter {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use exarch_core::QuotaResource;
+    use std::path::PathBuf;
+
+    fn error_kind(err: &ExtractionError) -> String {
+        extraction_error_kind(err)
+    }
 
     #[test]
-    fn test_json_formatter_output_structure() {
-        #[derive(Serialize)]
-        struct TestData {
-            value: String,
-        }
+    fn test_json_error_output_structure() {
+        let output = JsonOutput::<()>::error("extract", "ZipBomb", "zip bomb detected");
+        let json = serde_json::to_string(&output).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
 
-        let data = TestData {
-            value: "test".to_string(),
+        assert_eq!(v["operation"], "extract");
+        assert_eq!(v["status"], "error");
+        assert_eq!(v["error"]["kind"], "ZipBomb");
+        assert_eq!(v["error"]["message"], "zip bomb detected");
+        assert!(v["data"].is_null());
+    }
+
+    #[test]
+    fn test_json_error_no_data_field() {
+        let output = JsonOutput::<()>::error("extract", "PathTraversal", "traversal attempt");
+        let json = serde_json::to_string(&output).unwrap();
+        // data field should be absent (skip_serializing_if = None)
+        assert!(!json.contains("\"data\""));
+    }
+
+    #[test]
+    fn test_extraction_error_kind_zip_bomb() {
+        let err = ExtractionError::ZipBomb {
+            compressed: 1000,
+            uncompressed: 1_000_000,
+            ratio: 1000.0,
         };
+        assert_eq!(error_kind(&err), "ZipBomb");
+    }
 
-        let json = serde_json::to_string(&data).unwrap();
-        assert!(json.contains("\"value\""));
-        assert!(json.contains("\"test\""));
+    #[test]
+    fn test_extraction_error_kind_path_traversal() {
+        let err = ExtractionError::PathTraversal {
+            path: PathBuf::from("../etc/passwd"),
+        };
+        assert_eq!(error_kind(&err), "PathTraversal");
+    }
+
+    #[test]
+    fn test_extraction_error_kind_symlink_escape() {
+        let err = ExtractionError::SymlinkEscape {
+            path: PathBuf::from("link"),
+        };
+        assert_eq!(error_kind(&err), "SymlinkEscape");
+    }
+
+    #[test]
+    fn test_extraction_error_kind_hardlink_escape() {
+        let err = ExtractionError::HardlinkEscape {
+            path: PathBuf::from("hardlink"),
+        };
+        assert_eq!(error_kind(&err), "HardlinkEscape");
+    }
+
+    #[test]
+    fn test_extraction_error_kind_quota_exceeded() {
+        let err = ExtractionError::QuotaExceeded {
+            resource: QuotaResource::FileCount {
+                current: 11,
+                max: 10,
+            },
+        };
+        assert_eq!(error_kind(&err), "QuotaExceeded");
+    }
+
+    #[test]
+    fn test_extraction_error_kind_invalid_archive() {
+        let err = ExtractionError::InvalidArchive("corrupted header".to_string());
+        assert_eq!(error_kind(&err), "InvalidArchive");
+    }
+
+    #[test]
+    fn test_extraction_error_kind_io_error() {
+        let err = ExtractionError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "file not found",
+        ));
+        assert_eq!(error_kind(&err), "IoError");
+    }
+
+    #[test]
+    fn test_extraction_error_kind_unsupported_format() {
+        let err = ExtractionError::UnsupportedFormat;
+        assert_eq!(error_kind(&err), "UnsupportedFormat");
+    }
+
+    #[test]
+    fn test_extraction_error_kind_security_violation() {
+        let err = ExtractionError::SecurityViolation {
+            reason: "denied".to_string(),
+        };
+        assert_eq!(error_kind(&err), "SecurityViolation");
+    }
+
+    #[test]
+    fn test_format_error_downcasts_extraction_error() {
+        // Verify that format_error correctly resolves the kind from an anyhow chain
+        // containing an ExtractionError.
+        let extraction_err = ExtractionError::ZipBomb {
+            compressed: 100,
+            uncompressed: 100_000,
+            ratio: 1000.0,
+        };
+        let anyhow_err = anyhow::Error::new(extraction_err);
+
+        // Downcast manually, same logic as format_error uses
+        let kind = anyhow_err
+            .chain()
+            .find_map(|e| e.downcast_ref::<ExtractionError>())
+            .map_or_else(|| "Error".to_string(), extraction_error_kind);
+
+        assert_eq!(kind, "ZipBomb");
+    }
+
+    #[test]
+    fn test_format_error_unknown_error_uses_generic_kind() {
+        // A plain anyhow error with no ExtractionError in chain should use "Error" as
+        // kind
+        let anyhow_err = anyhow::anyhow!("something went wrong");
+
+        let kind = anyhow_err
+            .chain()
+            .find_map(|e| e.downcast_ref::<ExtractionError>())
+            .map_or_else(|| "Error".to_string(), extraction_error_kind);
+
+        assert_eq!(kind, "Error");
     }
 }

@@ -25,9 +25,8 @@ pub trait OutputFormatter {
     /// Format verification report
     fn format_verification_report(&self, report: &VerificationReport) -> Result<()>;
 
-    /// Format error message
-    #[allow(dead_code)]
-    fn format_error(&self, error: &anyhow::Error);
+    /// Format error message for the given operation
+    fn format_error(&self, operation: &str, error: &anyhow::Error);
 
     /// Format success message
     #[allow(dead_code)]
@@ -46,7 +45,14 @@ pub struct JsonOutput<T> {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<T>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
+    pub error: Option<JsonError>,
+}
+
+/// Structured error object in JSON output
+#[derive(Debug, Serialize)]
+pub struct JsonError {
+    pub kind: String,
+    pub message: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -67,13 +73,19 @@ impl<T: Serialize> JsonOutput<T> {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn error(operation: impl Into<String>, error: impl Into<String>) -> JsonOutput<()> {
+    pub fn error(
+        operation: impl Into<String>,
+        kind: impl Into<String>,
+        message: impl Into<String>,
+    ) -> JsonOutput<()> {
         JsonOutput {
             operation: operation.into(),
             status: Status::Error,
             data: None,
-            error: Some(error.into()),
+            error: Some(JsonError {
+                kind: kind.into(),
+                message: message.into(),
+            }),
         }
     }
 }

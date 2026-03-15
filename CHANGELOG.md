@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Honor `--force` flag in `extract` subcommand; without `--force`, fail with a clear error listing conflicting files (#77)
 - Encrypted ZIP archives now correctly report a security violation instead of a misleading "corrupted or malformed" hint (#83)
 - `list -l` showed raw Unix file-type bits (e.g. `100644`) for ZIP entries instead of normalized permission bits (e.g. `644`); `ArchiveEntry.mode` now strips `S_IFREG`/`S_IFDIR` bits from ZIP `external_attributes` (#80)
+- `list` quota error message reported `current` equal to the limit instead of the actual would-be count (e.g. `10000 > 10000` instead of `10001 > 10000`) for both TAR and ZIP archives (#91)
 
 ## [0.2.7] - 2026-03-07
 

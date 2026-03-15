@@ -162,7 +162,7 @@ fn list_tar_entries<R: std::io::Read>(
         if manifest.total_entries >= config.max_file_count {
             return Err(ExtractionError::QuotaExceeded {
                 resource: QuotaResource::FileCount {
-                    current: manifest.total_entries,
+                    current: manifest.total_entries + 1,
                     max: config.max_file_count,
                 },
             });
@@ -242,7 +242,7 @@ fn list_zip(
         if manifest.total_entries >= config.max_file_count {
             return Err(ExtractionError::QuotaExceeded {
                 resource: QuotaResource::FileCount {
-                    current: manifest.total_entries,
+                    current: manifest.total_entries + 1,
                     max: config.max_file_count,
                 },
             });
@@ -623,12 +623,43 @@ mod tests {
         };
 
         let result = list_archive(temp_file.path(), &config);
-        assert!(matches!(
-            result,
+        match result {
             Err(ExtractionError::QuotaExceeded {
-                resource: QuotaResource::FileCount { .. },
-            })
-        ));
+                resource: QuotaResource::FileCount { current, max },
+            }) => {
+                assert_eq!(max, 1);
+                assert_eq!(current, 2, "current must be max+1 (off-by-one fix)");
+            }
+            other => panic!("expected FileCount quota error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_list_zip_quota_exceeded_file_count() {
+        let temp_file = NamedTempFile::with_suffix(".zip").unwrap();
+        let file = std::fs::File::create(temp_file.path()).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        zip.start_file("a.txt", options).unwrap();
+        zip.start_file("b.txt", options).unwrap();
+        zip.finish().unwrap();
+
+        let config = SecurityConfig {
+            max_file_count: 1,
+            ..Default::default()
+        };
+
+        let result = list_archive(temp_file.path(), &config);
+        match result {
+            Err(ExtractionError::QuotaExceeded {
+                resource: QuotaResource::FileCount { current, max },
+            }) => {
+                assert_eq!(max, 1);
+                assert_eq!(current, 2, "current must be max+1 (off-by-one fix)");
+            }
+            other => panic!("expected FileCount quota error, got {other:?}"),
+        }
     }
 
     #[test]

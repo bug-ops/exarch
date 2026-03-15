@@ -469,6 +469,135 @@ mod tests {
     }
 
     #[test]
+    fn test_verification_issue_from_hardlink_escape() {
+        let error = ExtractionError::HardlinkEscape {
+            path: PathBuf::from("link"),
+        };
+        let issue = VerificationIssue::from_error(&error, None);
+        assert_eq!(issue.severity, IssueSeverity::Critical);
+        assert_eq!(issue.category, IssueCategory::HardlinkEscape);
+        assert!(issue.message.contains("Hardlink escape"));
+    }
+
+    #[test]
+    fn test_verification_issue_from_quota_exceeded() {
+        let error = ExtractionError::QuotaExceeded {
+            resource: crate::error::QuotaResource::FileCount {
+                current: 11,
+                max: 10,
+            },
+        };
+        let issue = VerificationIssue::from_error(&error, None);
+        assert_eq!(issue.severity, IssueSeverity::High);
+        assert_eq!(issue.category, IssueCategory::QuotaExceeded);
+    }
+
+    #[test]
+    fn test_verification_issue_from_invalid_permissions() {
+        let error = ExtractionError::InvalidPermissions {
+            path: PathBuf::from("file.txt"),
+            mode: 0o777,
+        };
+        let issue = VerificationIssue::from_error(&error, None);
+        assert_eq!(issue.severity, IssueSeverity::Medium);
+        assert_eq!(issue.category, IssueCategory::InvalidPermissions);
+        assert!(issue.message.contains("Invalid permissions"));
+    }
+
+    #[test]
+    fn test_verification_issue_from_unsupported_format() {
+        let error = ExtractionError::UnsupportedFormat;
+        let issue = VerificationIssue::from_error(&error, None);
+        assert_eq!(issue.severity, IssueSeverity::High);
+        assert_eq!(issue.category, IssueCategory::InvalidArchive);
+        assert!(issue.message.contains("Unsupported archive format"));
+    }
+
+    #[test]
+    fn test_verification_issue_from_invalid_archive() {
+        let error = ExtractionError::InvalidArchive("bad header".into());
+        let issue = VerificationIssue::from_error(&error, None);
+        assert_eq!(issue.severity, IssueSeverity::High);
+        assert_eq!(issue.category, IssueCategory::InvalidArchive);
+        assert!(issue.message.contains("Invalid archive"));
+    }
+
+    #[test]
+    fn test_verification_issue_from_security_violation() {
+        let error = ExtractionError::SecurityViolation {
+            reason: "encrypted".into(),
+        };
+        let issue = VerificationIssue::from_error(&error, None);
+        assert_eq!(issue.severity, IssueSeverity::High);
+        assert_eq!(issue.category, IssueCategory::SuspiciousPath);
+        assert!(issue.message.contains("Security violation"));
+    }
+
+    #[test]
+    fn test_verification_issue_from_source_not_found() {
+        let error = ExtractionError::SourceNotFound {
+            path: PathBuf::from("/missing"),
+        };
+        let issue = VerificationIssue::from_error(&error, None);
+        assert_eq!(issue.severity, IssueSeverity::High);
+        assert_eq!(issue.category, IssueCategory::InvalidArchive);
+        assert!(issue.message.contains("Source not found"));
+    }
+
+    #[test]
+    fn test_verification_issue_from_source_not_accessible() {
+        let error = ExtractionError::SourceNotAccessible {
+            path: PathBuf::from("/restricted"),
+        };
+        let issue = VerificationIssue::from_error(&error, None);
+        assert_eq!(issue.severity, IssueSeverity::High);
+        assert_eq!(issue.category, IssueCategory::InvalidArchive);
+        assert!(issue.message.contains("Source not accessible"));
+    }
+
+    #[test]
+    fn test_verification_issue_from_output_exists() {
+        let error = ExtractionError::OutputExists {
+            path: PathBuf::from("out/"),
+        };
+        let issue = VerificationIssue::from_error(&error, None);
+        assert_eq!(issue.severity, IssueSeverity::Medium);
+        assert_eq!(issue.category, IssueCategory::InvalidArchive);
+        assert!(issue.message.contains("Output already exists"));
+    }
+
+    #[test]
+    fn test_verification_issue_from_invalid_compression_level() {
+        let error = ExtractionError::InvalidCompressionLevel { level: 0 };
+        let issue = VerificationIssue::from_error(&error, None);
+        assert_eq!(issue.severity, IssueSeverity::Medium);
+        assert_eq!(issue.category, IssueCategory::InvalidArchive);
+        assert!(issue.message.contains("Invalid compression level"));
+    }
+
+    #[test]
+    fn test_verification_issue_from_unknown_format() {
+        let error = ExtractionError::UnknownFormat {
+            path: PathBuf::from("archive.rar"),
+        };
+        let issue = VerificationIssue::from_error(&error, None);
+        assert_eq!(issue.severity, IssueSeverity::High);
+        assert_eq!(issue.category, IssueCategory::InvalidArchive);
+        assert!(issue.message.contains("Unknown format"));
+    }
+
+    #[test]
+    fn test_verification_issue_from_invalid_configuration() {
+        let error = ExtractionError::InvalidConfiguration {
+            reason: "bad config".into(),
+        };
+        let issue = VerificationIssue::from_error(&error, None);
+        assert_eq!(issue.severity, IssueSeverity::High);
+        assert_eq!(issue.category, IssueCategory::InvalidArchive);
+        assert!(issue.message.contains("Invalid configuration"));
+    }
+
+    #[test]
     fn test_verification_report_issues_by_severity() {
         let report = VerificationReport {
             status: VerificationStatus::Warning,

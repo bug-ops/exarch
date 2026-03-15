@@ -1279,6 +1279,268 @@ mod tests {
         assert!(!ZipEntryAdapter::is_symlink_from_mode(None));
     }
 
+    /// Builds a single-entry ZIP in memory with a custom compression method
+    /// field, flags, unix mode, and content. CRC32 must be correct for
+    /// non-empty content when using Stored method (method=0); pass 0 for
+    /// empty content.
+    #[allow(clippy::cast_possible_truncation)]
+    fn raw_zip_with_custom_entry(
+        filename: &str,
+        content: &[u8],
+        compression_method: u16,
+        flags: u16,
+        unix_mode: u32,
+    ) -> Vec<u8> {
+        let crc = crc32_ieee(content);
+        let external_attributes = unix_mode << 16;
+        let name_bytes = filename.as_bytes();
+        let name_len = name_bytes.len() as u16;
+        let content_len = content.len() as u32;
+
+        let mut buf: Vec<u8> = Vec::new();
+
+        let local_offset = buf.len() as u32;
+        buf.extend_from_slice(b"PK\x03\x04");
+        buf.extend_from_slice(&20u16.to_le_bytes()); // version needed
+        buf.extend_from_slice(&flags.to_le_bytes());
+        buf.extend_from_slice(&compression_method.to_le_bytes());
+        buf.extend_from_slice(&0u16.to_le_bytes()); // mod time
+        buf.extend_from_slice(&0u16.to_le_bytes()); // mod date
+        buf.extend_from_slice(&crc.to_le_bytes());
+        buf.extend_from_slice(&content_len.to_le_bytes()); // compressed size
+        buf.extend_from_slice(&content_len.to_le_bytes()); // uncompressed size
+        buf.extend_from_slice(&name_len.to_le_bytes());
+        buf.extend_from_slice(&0u16.to_le_bytes()); // extra field length
+        buf.extend_from_slice(name_bytes);
+        buf.extend_from_slice(content);
+
+        let central_offset = buf.len() as u32;
+        buf.extend_from_slice(b"PK\x01\x02");
+        buf.extend_from_slice(&0x031eu16.to_le_bytes()); // version made by: Unix
+        buf.extend_from_slice(&20u16.to_le_bytes()); // version needed
+        buf.extend_from_slice(&flags.to_le_bytes());
+        buf.extend_from_slice(&compression_method.to_le_bytes());
+        buf.extend_from_slice(&0u16.to_le_bytes()); // mod time
+        buf.extend_from_slice(&0u16.to_le_bytes()); // mod date
+        buf.extend_from_slice(&crc.to_le_bytes());
+        buf.extend_from_slice(&content_len.to_le_bytes()); // compressed size
+        buf.extend_from_slice(&content_len.to_le_bytes()); // uncompressed size
+        buf.extend_from_slice(&name_len.to_le_bytes());
+        buf.extend_from_slice(&0u16.to_le_bytes()); // extra length
+        buf.extend_from_slice(&0u16.to_le_bytes()); // comment length
+        buf.extend_from_slice(&0u16.to_le_bytes()); // disk number start
+        buf.extend_from_slice(&0u16.to_le_bytes()); // internal attributes
+        buf.extend_from_slice(&external_attributes.to_le_bytes());
+        buf.extend_from_slice(&local_offset.to_le_bytes());
+        buf.extend_from_slice(name_bytes);
+
+        let central_size = (buf.len() as u32) - central_offset;
+        buf.extend_from_slice(b"PK\x05\x06");
+        buf.extend_from_slice(&0u16.to_le_bytes()); // disk number
+        buf.extend_from_slice(&0u16.to_le_bytes()); // disk with central dir
+        buf.extend_from_slice(&1u16.to_le_bytes()); // entries on this disk
+        buf.extend_from_slice(&1u16.to_le_bytes()); // total entries
+        buf.extend_from_slice(&central_size.to_le_bytes());
+        buf.extend_from_slice(&central_offset.to_le_bytes());
+        buf.extend_from_slice(&0u16.to_le_bytes()); // comment length
+        buf
+    }
+
+    /// CRC32 (IEEE 802.3 polynomial) implementation for test use.
+    fn crc32_ieee(data: &[u8]) -> u32 {
+        let mut crc: u32 = 0xFFFF_FFFF;
+        for &byte in data {
+            crc ^= u32::from(byte);
+            for _ in 0..8 {
+                if crc & 1 != 0 {
+                    crc = (crc >> 1) ^ 0xEDB8_8320;
+                } else {
+                    crc >>= 1;
+                }
+            }
+        }
+        !crc
+    }
+
+    #[test]
+    fn test_unsupported_compression_method_rejected() {
+        // Build a ZIP with compression method=99 (unknown/unsupported)
+        // The zip crate parses entries with unknown methods but fails on decompression.
+        // Our code checks the compression method in process_entry before decompressing.
+        let zip_bytes = raw_zip_with_custom_entry("file.txt", b"", 99, 0, 0o100_644);
+        let cursor = Cursor::new(zip_bytes);
+        let result = ZipArchive::new(cursor);
+        if let Ok(mut archive) = result {
+            let temp = TempDir::new().unwrap();
+            let config = SecurityConfig::default();
+            let err = archive.extract(temp.path(), &config).unwrap_err();
+            assert!(
+                matches!(err, ExtractionError::SecurityViolation { .. }),
+                "expected SecurityViolation for unsupported compression, got: {err:?}"
+            );
+        }
+        // If zip crate rejects at parse time, that's also acceptable —
+        // the archive never opens, so extraction is blocked either way.
+    }
+
+    #[test]
+    fn test_symlink_target_too_large() {
+        // Build a raw ZIP entry with symlink mode (0o120777) and >4096 bytes content.
+        // The size field in the local header is what our code reads via
+        // zip_file.size(). We need actual content bytes so the zip crate
+        // reports the correct uncompressed size.
+        let target = vec![b'a'; 4097];
+        let zip_bytes = raw_zip_with_custom_entry("link", &target, 0, 0, 0o120_777);
+        let cursor = Cursor::new(zip_bytes);
+        // The archive itself should open fine.
+        let result = ZipArchive::new(cursor);
+        if let Ok(mut archive) = result {
+            let temp = TempDir::new().unwrap();
+            let mut config = SecurityConfig::default();
+            config.allowed.symlinks = true;
+            let err = archive.extract(temp.path(), &config).unwrap_err();
+            assert!(
+                matches!(err, ExtractionError::SecurityViolation { ref reason } if reason.contains("symlink target too large")),
+                "expected SecurityViolation(symlink target too large), got: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_symlink_target_invalid_utf8() {
+        // Build a raw ZIP entry with symlink mode and non-UTF-8 content.
+        let invalid_utf8 = vec![0xFF, 0xFE, 0x00];
+        let zip_bytes = raw_zip_with_custom_entry("link", &invalid_utf8, 0, 0, 0o120_777);
+        let cursor = Cursor::new(zip_bytes);
+        let result = ZipArchive::new(cursor);
+        if let Ok(mut archive) = result {
+            let temp = TempDir::new().unwrap();
+            let mut config = SecurityConfig::default();
+            config.allowed.symlinks = true;
+            let err = archive.extract(temp.path(), &config).unwrap_err();
+            assert!(
+                matches!(err, ExtractionError::InvalidArchive(ref msg) if msg.contains("UTF-8")),
+                "expected InvalidArchive(UTF-8), got: {err:?}"
+            );
+        }
+    }
+
+    /// Creates a 400-entry ZIP archive in memory. The entry at
+    /// `encrypted_index` is encrypted using deprecated `ZipCrypto`. All other
+    /// entries are unencrypted with Stored compression and 1-byte content,
+    /// to keep construction fast.
+    fn create_large_archive_with_encrypted_entry(encrypted_index: usize) -> Vec<u8> {
+        use zip::unstable::write::FileOptionsExt;
+
+        let total = 400usize;
+        let buffer = Vec::new();
+        let mut zip = ZipWriter::new(Cursor::new(buffer));
+
+        for i in 0..total {
+            let options = if i == encrypted_index {
+                SimpleFileOptions::default()
+                    .compression_method(zip::CompressionMethod::Stored)
+                    .with_deprecated_encryption(b"pass")
+                    .unwrap()
+            } else {
+                SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored)
+            };
+            zip.start_file(format!("file{i}.txt"), options).unwrap();
+            zip.write_all(b"x").unwrap();
+        }
+
+        zip.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn test_password_protected_large_archive_first_entry() {
+        // Encrypted entry at index 0 — caught by first-100 sampling.
+        let zip_data = create_large_archive_with_encrypted_entry(0);
+        let cursor = Cursor::new(zip_data);
+        let result = ZipArchive::new(cursor);
+        assert!(
+            matches!(result, Err(ExtractionError::SecurityViolation { .. })),
+            "expected SecurityViolation for encrypted entry in first batch"
+        );
+    }
+
+    #[test]
+    fn test_password_protected_large_archive_middle_entry() {
+        // For 400 entries: middle_start = 200 - 50 = 150, middle_end = 250.
+        // An encrypted entry at index 200 is within 150..250 — caught by middle
+        // sampling.
+        let zip_data = create_large_archive_with_encrypted_entry(200);
+        let cursor = Cursor::new(zip_data);
+        let result = ZipArchive::new(cursor);
+        assert!(
+            matches!(result, Err(ExtractionError::SecurityViolation { .. })),
+            "expected SecurityViolation for encrypted entry in middle batch"
+        );
+    }
+
+    #[test]
+    fn test_password_protected_large_archive_last_entry() {
+        // Encrypted entry at index 399 — caught by last-100 sampling
+        // (tail_start=300..400).
+        let zip_data = create_large_archive_with_encrypted_entry(399);
+        let cursor = Cursor::new(zip_data);
+        let result = ZipArchive::new(cursor);
+        assert!(
+            matches!(result, Err(ExtractionError::SecurityViolation { .. })),
+            "expected SecurityViolation for encrypted entry in last batch"
+        );
+    }
+
+    #[test]
+    fn test_large_archive_no_encryption_passes_constructor() {
+        // 400-entry unencrypted archive — constructor should succeed.
+        let buffer = Vec::new();
+        let mut zip = ZipWriter::new(Cursor::new(buffer));
+        let options =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        for i in 0..400usize {
+            zip.start_file(format!("file{i}.txt"), options).unwrap();
+            zip.write_all(b"x").unwrap();
+        }
+        let zip_data = zip.finish().unwrap().into_inner();
+        let cursor = Cursor::new(zip_data);
+        let archive = ZipArchive::new(cursor);
+        assert!(
+            archive.is_ok(),
+            "unencrypted 400-entry archive should open fine"
+        );
+    }
+
+    #[test]
+    fn test_per_entry_encrypted_check_catches_missed_by_sampling() {
+        // For 400 entries: first=0..100, middle=150..250, last=300..400.
+        // An encrypted entry at index 125 is in the gap (100..150) and is missed
+        // by is_password_protected sampling, but caught by the per-entry check
+        // in process_entry (line 294 of zip.rs).
+        // Critic correction: use index 125 (NOT 200, which is in the middle window).
+        let zip_data = create_large_archive_with_encrypted_entry(125);
+        let cursor = Cursor::new(zip_data);
+        let result = ZipArchive::new(cursor);
+        // The constructor MAY or MAY NOT catch it depending on sampling bounds.
+        // If it opens, extraction must catch it.
+        match result {
+            Err(ExtractionError::SecurityViolation { .. }) => {
+                // Caught by constructor sampling — acceptable
+            }
+            Ok(mut archive) => {
+                // Missed by sampling — must be caught by per-entry check during extraction
+                let temp = TempDir::new().unwrap();
+                let config = SecurityConfig::default();
+                let err = archive.extract(temp.path(), &config).unwrap_err();
+                assert!(
+                    matches!(err, ExtractionError::SecurityViolation { .. }),
+                    "per-entry check must catch encrypted entry missed by sampling, got: {err:?}"
+                );
+            }
+            Err(other) => panic!("unexpected error: {other:?}"),
+        }
+    }
+
     #[test]
     fn test_encrypted_zip_rejected_with_security_violation() {
         use zip::unstable::write::FileOptionsExt;

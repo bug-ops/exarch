@@ -44,4 +44,14 @@ mod tests {
         let format = TestFormat;
         assert_eq!(format.format_name(), "test");
     }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn test_trait_extract_returns_report() {
+        let mut format = TestFormat;
+        let temp = tempfile::TempDir::new().unwrap();
+        let config = SecurityConfig::default();
+        let report = format.extract(temp.path(), &config).unwrap();
+        assert_eq!(report.files_extracted, 0);
+    }
 }

@@ -752,6 +752,249 @@ mod tests {
     }
 
     #[test]
+    fn test_list_archive_tar_bz2() {
+        use bzip2::Compression as BzCompression;
+        use bzip2::write::BzEncoder;
+        use std::io::Write;
+
+        let mut temp_file = NamedTempFile::with_suffix(".tar.bz2").unwrap();
+
+        let mut builder = tar::Builder::new(Vec::new());
+        let data = b"bzip2 content";
+        let mut header = tar::Header::new_gnu();
+        header.set_path("file.txt").unwrap();
+        header.set_size(data.len() as u64);
+        header.set_cksum();
+        builder.append(&header, &data[..]).unwrap();
+        let tar_data = builder.into_inner().unwrap();
+
+        let mut encoder = BzEncoder::new(Vec::new(), BzCompression::default());
+        encoder.write_all(&tar_data).unwrap();
+        let compressed = encoder.finish().unwrap();
+
+        temp_file.write_all(&compressed).unwrap();
+        temp_file.flush().unwrap();
+
+        let config = SecurityConfig::default();
+        let manifest = list_archive(temp_file.path(), &config).unwrap();
+
+        assert_eq!(manifest.total_entries, 1);
+        assert_eq!(manifest.format, ArchiveType::TarBz2);
+        assert_eq!(manifest.entries[0].path, PathBuf::from("file.txt"));
+    }
+
+    #[test]
+    fn test_list_archive_tar_xz() {
+        use std::io::Write;
+        use xz2::write::XzEncoder;
+
+        let mut temp_file = NamedTempFile::with_suffix(".tar.xz").unwrap();
+
+        let mut builder = tar::Builder::new(Vec::new());
+        let data = b"xz content";
+        let mut header = tar::Header::new_gnu();
+        header.set_path("file.txt").unwrap();
+        header.set_size(data.len() as u64);
+        header.set_cksum();
+        builder.append(&header, &data[..]).unwrap();
+        let tar_data = builder.into_inner().unwrap();
+
+        let mut encoder = XzEncoder::new(Vec::new(), 1);
+        encoder.write_all(&tar_data).unwrap();
+        let compressed = encoder.finish().unwrap();
+
+        temp_file.write_all(&compressed).unwrap();
+        temp_file.flush().unwrap();
+
+        let config = SecurityConfig::default();
+        let manifest = list_archive(temp_file.path(), &config).unwrap();
+
+        assert_eq!(manifest.total_entries, 1);
+        assert_eq!(manifest.format, ArchiveType::TarXz);
+    }
+
+    #[test]
+    fn test_list_archive_tar_zst() {
+        use std::io::Write;
+        use zstd::stream::write::Encoder as ZstdEncoder;
+
+        let mut temp_file = NamedTempFile::with_suffix(".tar.zst").unwrap();
+
+        let mut builder = tar::Builder::new(Vec::new());
+        let data = b"zstd content";
+        let mut header = tar::Header::new_gnu();
+        header.set_path("file.txt").unwrap();
+        header.set_size(data.len() as u64);
+        header.set_cksum();
+        builder.append(&header, &data[..]).unwrap();
+        let tar_data = builder.into_inner().unwrap();
+
+        let mut encoder = ZstdEncoder::new(Vec::new(), 1).unwrap();
+        encoder.write_all(&tar_data).unwrap();
+        let compressed = encoder.finish().unwrap();
+
+        temp_file.write_all(&compressed).unwrap();
+        temp_file.flush().unwrap();
+
+        let config = SecurityConfig::default();
+        let manifest = list_archive(temp_file.path(), &config).unwrap();
+
+        assert_eq!(manifest.total_entries, 1);
+        assert_eq!(manifest.format, ArchiveType::TarZst);
+    }
+
+    #[test]
+    fn test_list_archive_7z_unsupported() {
+        // .7z listing is not yet supported — must return InvalidArchive.
+        let mut temp_file = NamedTempFile::with_suffix(".7z").unwrap();
+        // Write a minimal 7z magic signature so detect_format returns SevenZ.
+        temp_file.write_all(b"7z\xbc\xaf\x27\x1c\x00\x04").unwrap();
+        temp_file.flush().unwrap();
+
+        let config = SecurityConfig::default();
+        let result = list_archive(temp_file.path(), &config);
+        assert!(
+            matches!(result, Err(ExtractionError::InvalidArchive(_))),
+            "expected InvalidArchive for 7z, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_list_tar_special_file_rejected() {
+        let mut temp_file = NamedTempFile::with_suffix(".tar").unwrap();
+        let mut builder = tar::Builder::new(Vec::new());
+
+        let mut header = tar::Header::new_gnu();
+        header.set_path("chardev").unwrap();
+        header.set_size(0);
+        header.set_entry_type(tar::EntryType::Char);
+        header.set_cksum();
+        builder.append(&header, &[][..]).unwrap();
+
+        let data = builder.into_inner().unwrap();
+        temp_file.write_all(&data).unwrap();
+        temp_file.flush().unwrap();
+
+        let config = SecurityConfig::default();
+        let result = list_archive(temp_file.path(), &config);
+        assert!(
+            matches!(result, Err(ExtractionError::InvalidArchive(_))),
+            "expected InvalidArchive for char device entry, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_list_zip_quota_exceeded_total_size() {
+        let temp_file = NamedTempFile::with_suffix(".zip").unwrap();
+        let file = std::fs::File::create(temp_file.path()).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        zip.start_file("big.bin", options).unwrap();
+        zip.write_all(&vec![0u8; 600]).unwrap();
+        zip.finish().unwrap();
+
+        let config = SecurityConfig {
+            max_total_size: 100,
+            ..Default::default()
+        };
+        let result = list_archive(temp_file.path(), &config);
+        assert!(
+            matches!(
+                result,
+                Err(ExtractionError::QuotaExceeded {
+                    resource: crate::error::QuotaResource::TotalSize { .. }
+                })
+            ),
+            "expected TotalSize quota error, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_list_tar_quota_exceeded_total_size() {
+        let mut temp_file = NamedTempFile::with_suffix(".tar").unwrap();
+        let mut builder = tar::Builder::new(Vec::new());
+
+        let data = vec![0u8; 600];
+        let mut header = tar::Header::new_gnu();
+        header.set_path("big.bin").unwrap();
+        header.set_size(data.len() as u64);
+        header.set_cksum();
+        builder.append(&header, &data[..]).unwrap();
+
+        let archive_data = builder.into_inner().unwrap();
+        temp_file.write_all(&archive_data).unwrap();
+        temp_file.flush().unwrap();
+
+        let config = SecurityConfig {
+            max_total_size: 100,
+            ..Default::default()
+        };
+        let result = list_archive(temp_file.path(), &config);
+        assert!(
+            matches!(
+                result,
+                Err(ExtractionError::QuotaExceeded {
+                    resource: crate::error::QuotaResource::TotalSize { .. }
+                })
+            ),
+            "expected TotalSize quota error, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_list_zip_path_traversal() {
+        // ZIP with ../etc/passwd entry — enclosed_name() returns None for traversal
+        // paths, triggering PathTraversal error in list_zip (lines 268-270).
+        let temp_file = NamedTempFile::with_suffix(".zip").unwrap();
+        let file = std::fs::File::create(temp_file.path()).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        zip.start_file("../etc/passwd", options).unwrap();
+        zip.write_all(b"malicious").unwrap();
+        zip.finish().unwrap();
+
+        let config = SecurityConfig::default();
+        let result = list_archive(temp_file.path(), &config);
+        assert!(
+            matches!(result, Err(ExtractionError::PathTraversal { .. })),
+            "expected PathTraversal error, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_list_zip_by_index_encrypted_error_path() {
+        // Cover the encrypted entry check at list.rs line 260 (entry.encrypted() ==
+        // true). ZipCrypto entries succeed at by_index() time but are flagged
+        // as encrypted by the entry metadata, triggering
+        // SecurityViolation::EncryptedArchive.
+        use std::io::Write;
+        use zip::ZipWriter;
+        use zip::unstable::write::FileOptionsExt;
+        use zip::write::SimpleFileOptions;
+
+        let mut writer = ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let options = SimpleFileOptions::default()
+            .with_deprecated_encryption(b"password")
+            .unwrap();
+        writer.start_file("secret.txt", options).unwrap();
+        writer.write_all(b"secret data").unwrap();
+        let zip_data = writer.finish().unwrap().into_inner();
+
+        let mut temp_file = NamedTempFile::with_suffix(".zip").unwrap();
+        temp_file.write_all(&zip_data).unwrap();
+        temp_file.flush().unwrap();
+
+        let config = SecurityConfig::default();
+        let result = list_archive(temp_file.path(), &config);
+        assert!(
+            matches!(result, Err(ExtractionError::SecurityViolation { .. })),
+            "expected SecurityViolation for encrypted ZIP in list, got: {result:?}"
+        );
+    }
+
+    #[test]
     fn test_tar_and_zip_mode_consistent() {
         // TAR and ZIP must both store only permission bits in ArchiveEntry.mode.
         let tar_file = NamedTempFile::with_suffix(".tar").unwrap();

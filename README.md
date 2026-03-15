@@ -97,7 +97,7 @@ console.log(`Extracted ${result.filesExtracted} files`);
 #### Rust
 
 ```rust
-use exarch_core::{create_archive, creation::CreationConfig};
+use exarch_core::{create_archive, CreationConfig};
 
 fn main() -> Result<(), exarch_core::ExtractionError> {
     let config = CreationConfig::default();

@@ -23,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `--allow-world-writable` CLI flag and `allow_world_writable` `SecurityConfig` option to opt in to preserving world-writable permissions (#84)
+- CVE regression tests for CVE-2024-12718 (Python tarfile filter bypass via `./..` paths), CVE-2024-12905 (tar-fs symlink chain escape), CVE-2025-48387 (tar-fs hardlink traversal outside destination), and Windows backslash path handling; archives with raw `..` paths are constructed at the byte level to reproduce real attacker-controlled inputs (#74)
 
 ### Changed
 

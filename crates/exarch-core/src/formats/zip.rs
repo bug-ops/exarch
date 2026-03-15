@@ -257,13 +257,13 @@ impl<R: Read + Seek> ZipArchive<R> {
 
     #[inline]
     fn check_entry_encrypted(archive: &mut ZipReader<R>, index: usize) -> Result<bool> {
-        let file = archive.by_index(index).map_err(|e| {
-            ExtractionError::InvalidArchive(format!(
+        match archive.by_index(index) {
+            Ok(file) => Ok(file.encrypted()),
+            Err(e) if e.to_string().contains("Password required to decrypt file") => Ok(true),
+            Err(e) => Err(ExtractionError::InvalidArchive(format!(
                 "failed to check entry {index} for encryption: {e}"
-            ))
-        })?;
-
-        Ok(file.encrypted())
+            ))),
+        }
     }
 
     /// Processes a single ZIP entry with a single `by_index()` call.
@@ -283,6 +283,11 @@ impl<R: Read + Seek> ZipArchive<R> {
         dir_cache: &mut common::DirCache,
     ) -> Result<()> {
         let mut zip_file = self.inner.by_index(index).map_err(|e| {
+            if e.to_string().contains("Password required to decrypt file") {
+                return ExtractionError::SecurityViolation {
+                    reason: "archive is password-protected.\n  Password-protected ZIP archives are not supported. Decrypt the archive externally and try again.".into(),
+                };
+            }
             ExtractionError::InvalidArchive(format!("failed to read entry {index}: {e}"))
         })?;
 
@@ -1272,5 +1277,34 @@ mod tests {
         assert!(!ZipEntryAdapter::is_symlink_from_mode(Some(0o040_755)));
         assert!(!ZipEntryAdapter::is_symlink_from_mode(Some(0o755)));
         assert!(!ZipEntryAdapter::is_symlink_from_mode(None));
+    }
+
+    #[test]
+    fn test_encrypted_zip_rejected_with_security_violation() {
+        use zip::unstable::write::FileOptionsExt;
+
+        let buffer = Vec::new();
+        let mut writer = ZipWriter::new(Cursor::new(buffer));
+        let options = SimpleFileOptions::default()
+            .with_deprecated_encryption(b"password123")
+            .unwrap();
+        writer.start_file("secret.txt", options).unwrap();
+        writer.write_all(b"secret data").unwrap();
+        let zip_data = writer.finish().unwrap().into_inner();
+
+        let cursor = Cursor::new(zip_data);
+        let result = ZipArchive::new(cursor);
+        let Err(err) = result else {
+            panic!("expected error for encrypted ZIP, got Ok");
+        };
+        match err {
+            ExtractionError::SecurityViolation { reason } => {
+                assert!(
+                    reason.contains("password") || reason.contains("encrypted"),
+                    "expected password/encryption mention in reason: {reason}"
+                );
+            }
+            other => panic!("expected SecurityViolation, got: {other}"),
+        }
     }
 }

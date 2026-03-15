@@ -13,7 +13,29 @@ use std::path::Path;
 /// callers can downcast via the anyhow chain (used by JSON error output).
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 pub fn convert_extraction_error(err: ExtractionError, archive: &Path) -> anyhow::Error {
+    // Handle PartialExtraction before the borrow below.
+    if let ExtractionError::PartialExtraction {
+        ref source,
+        ref report,
+    } = err
+    {
+        let files = report.files_extracted;
+        let dirs = report.directories_created;
+        let symlinks = report.symlinks_created;
+        let items = files + dirs + symlinks;
+        // Recursively convert the inner error to get the inner message.
+        // We use to_ffi_message as a fallback since we can't move source out.
+        let inner_msg = source.to_ffi_message(false).description;
+        return anyhow::Error::from(err).context(format!(
+            "{inner_msg}\n\n\
+             WARNING: Extraction was stopped. {items} items ({files} files, {dirs} directories, {symlinks} symlinks) \
+             were written to disk before the error.\n\
+             HINT: Inspect or remove the output directory before re-running.",
+        ));
+    }
+
     let context = match &err {
+        ExtractionError::PartialExtraction { .. } => unreachable!(),
         ExtractionError::PathTraversal { path } => format!(
             "Security violation: Archive '{}' attempted path traversal with '{}'\n\
              HINT: This archive may be malicious. Do not extract from untrusted sources.",

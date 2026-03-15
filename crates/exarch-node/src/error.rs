@@ -182,6 +182,7 @@ pub fn convert_error(err: CoreError) -> Error {
             msg.push_str(&reason);
             Error::new(Status::GenericFailure, msg)
         }
+        CoreError::PartialExtraction { source, .. } => convert_error(*source),
     }
 }
 

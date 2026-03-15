@@ -175,6 +175,8 @@ impl ExtractionError {
                 description: format!("invalid configuration: {reason}"),
                 context: None,
             },
+
+            Self::PartialExtraction { source, .. } => source.to_ffi_message(sanitize_paths),
         }
     }
 
@@ -200,6 +202,7 @@ impl ExtractionError {
             Self::InvalidCompressionLevel { .. } => "INVALID_COMPRESSION_LEVEL",
             Self::UnknownFormat { .. } => "UNKNOWN_FORMAT",
             Self::InvalidConfiguration { .. } => "INVALID_CONFIGURATION",
+            Self::PartialExtraction { source, .. } => source.error_code(),
         }
     }
 }

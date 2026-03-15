@@ -1,6 +1,7 @@
 //! JSON output formatter for machine-readable results.
 
 use super::formatter::JsonOutput;
+use super::formatter::JsonPartialReport;
 use super::formatter::OutputFormatter;
 use anyhow::Result;
 use exarch_core::ArchiveManifest;
@@ -31,6 +32,7 @@ fn extraction_error_kind(err: &ExtractionError) -> String {
         ExtractionError::InvalidCompressionLevel { .. } => "InvalidCompressionLevel",
         ExtractionError::UnknownFormat { .. } => "UnknownFormat",
         ExtractionError::InvalidConfiguration { .. } => "InvalidConfiguration",
+        ExtractionError::PartialExtraction { source, .. } => return extraction_error_kind(source),
     }
     .to_string()
 }
@@ -103,12 +105,33 @@ impl OutputFormatter for JsonFormatter {
     }
 
     fn format_error(&self, operation: &str, error: &anyhow::Error) {
-        let kind = error
+        let extraction_err = error
             .chain()
-            .find_map(|e| e.downcast_ref::<ExtractionError>())
-            .map_or_else(|| "Error".to_string(), extraction_error_kind);
+            .find_map(|e| e.downcast_ref::<ExtractionError>());
+
+        let kind = extraction_err.map_or_else(|| "Error".to_string(), extraction_error_kind);
         let message = format!("{error:#}");
-        let output = JsonOutput::<()>::error(operation, kind, message);
+
+        // Check if the error chain contains a PartialExtraction to include
+        // partial_report
+        let partial_report = extraction_err.and_then(|e| {
+            if let ExtractionError::PartialExtraction { report, .. } = e {
+                Some(JsonPartialReport {
+                    files_extracted: report.files_extracted,
+                    directories_created: report.directories_created,
+                    symlinks_created: report.symlinks_created,
+                    bytes_written: report.bytes_written,
+                })
+            } else {
+                None
+            }
+        });
+
+        let output = if let Some(pr) = partial_report {
+            JsonOutput::<()>::error_with_partial(operation, kind, message, pr)
+        } else {
+            JsonOutput::<()>::error(operation, kind, message)
+        };
         let _ = Self::output(&output);
     }
 

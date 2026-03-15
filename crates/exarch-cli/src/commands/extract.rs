@@ -6,11 +6,12 @@ use crate::output::OutputFormatter;
 use crate::progress::CliProgress;
 use anyhow::Context;
 use anyhow::Result;
+use exarch_core::ExtractionOptions;
 use exarch_core::ManifestEntryType;
 use exarch_core::NoopProgress;
 use exarch_core::SecurityConfig;
 use exarch_core::config::AllowedFeatures;
-use exarch_core::extract_archive_with_progress;
+use exarch_core::extract_archive_full;
 use exarch_core::list_archive;
 use std::env;
 
@@ -20,7 +21,7 @@ pub fn execute(args: &ExtractArgs, formatter: &dyn OutputFormatter) -> Result<()
         None => env::current_dir().context("failed to get current directory")?,
     };
 
-    if !args.force {
+    if !args.force && !args.atomic {
         let manifest = list_archive(&args.archive, &SecurityConfig::default())
             .with_context(|| format!("failed to list archive: {}", args.archive.display()))?;
 
@@ -57,17 +58,30 @@ pub fn execute(args: &ExtractArgs, formatter: &dyn OutputFormatter) -> Result<()
         ..Default::default()
     };
 
+    let options = ExtractionOptions {
+        atomic: args.atomic,
+    };
+
+    // When --atomic + --force: remove existing destination after successful
+    // extraction (handled inside extract_atomic via rename semantics) but we
+    // must pre-remove if it exists so rename can succeed (on most platforms
+    // rename over an existing non-empty dir fails).
+    if args.atomic && args.force && output_dir.exists() {
+        std::fs::remove_dir_all(&output_dir)
+            .with_context(|| format!("failed to remove existing dir: {}", output_dir.display()))?;
+    }
+
     // Use progress bar if TTY is detected (not quiet, not JSON, is terminal)
     let report = if CliProgress::should_show() {
         let mut progress = CliProgress::new(100, "Extracting");
         add_archive_context(
-            extract_archive_with_progress(&args.archive, &output_dir, &config, &mut progress),
+            extract_archive_full(&args.archive, &output_dir, &config, &options, &mut progress),
             &args.archive,
         )?
     } else {
         let mut noop = NoopProgress;
         add_archive_context(
-            extract_archive_with_progress(&args.archive, &output_dir, &config, &mut noop),
+            extract_archive_full(&args.archive, &output_dir, &config, &options, &mut noop),
             &args.archive,
         )?
     };

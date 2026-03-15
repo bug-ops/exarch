@@ -99,6 +99,7 @@ pub fn convert_error(err: CoreError) -> PyErr {
         CoreError::InvalidConfiguration { reason } => {
             InvalidArchiveError::new_err(format!("invalid configuration: {reason}"))
         }
+        CoreError::PartialExtraction { source, .. } => convert_error(*source),
     }
 }
 

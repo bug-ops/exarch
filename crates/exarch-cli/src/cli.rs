@@ -92,6 +92,14 @@ pub struct ExtractArgs {
     /// Overwrite existing files
     #[arg(long)]
     pub force: bool,
+
+    /// Extract atomically: use a temp dir, rename on success, clean up on
+    /// failure. When combined with --force, the existing destination is
+    /// removed after successful extraction (just before rename), not
+    /// before, to minimize the window where neither old nor new data
+    /// exists.
+    #[arg(long)]
+    pub atomic: bool,
 }
 
 #[derive(clap::Args)]

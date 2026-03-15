@@ -22,6 +22,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `PartialExtraction` error variant wrapping the original error and a partial `ExtractionReport` snapshot when extraction fails after writing files to disk (#89)
+- `ExtractionOptions` struct with `atomic: bool` field for controlling extraction behavior (#89)
+- `extract_archive_full()` and `extract_archive_with_options()` public API functions accepting `ExtractionOptions` (#89)
+- `--atomic` CLI flag: extracts into a temporary directory in the same parent, renames on success, and cleans up on failure to ensure the destination is never in a partial state (#89)
+- JSON error output includes a `partial_report` field (`files_extracted`, `directories_created`, `symlinks_created`, `bytes_written`) when extraction is stopped mid-archive (#89)
 - `--allow-world-writable` CLI flag and `allow_world_writable` `SecurityConfig` option to opt in to preserving world-writable permissions (#84)
 - CVE regression tests for CVE-2024-12718 (Python tarfile filter bypass via `./..` paths), CVE-2024-12905 (tar-fs symlink chain escape), CVE-2025-48387 (tar-fs hardlink traversal outside destination), and Windows backslash path handling; archives with raw `..` paths are constructed at the byte level to reproduce real attacker-controlled inputs (#74)
 

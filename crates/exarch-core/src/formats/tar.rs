@@ -314,24 +314,53 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
 
         for entry_result in entries {
             let entry = entry_result.map_err(|e| {
-                ExtractionError::InvalidArchive(format!("failed to read entry: {e}"))
+                let raw = ExtractionError::InvalidArchive(format!("failed to read entry: {e}"));
+                if report.total_items() > 0 {
+                    ExtractionError::PartialExtraction {
+                        source: Box::new(raw),
+                        report: std::mem::take(&mut report),
+                    }
+                } else {
+                    raw
+                }
             })?;
 
-            if let Some(hardlink_info) = Self::process_entry(
+            match Self::process_entry(
                 entry,
                 &mut validator,
                 &dest,
                 &mut report,
                 &mut copy_buffer,
                 &mut dir_cache,
-            )? {
-                hardlinks.push(hardlink_info);
+            ) {
+                Ok(Some(hardlink_info)) => hardlinks.push(hardlink_info),
+                Ok(None) => {}
+                Err(e) => {
+                    return Err(if report.total_items() > 0 {
+                        ExtractionError::PartialExtraction {
+                            source: Box::new(e),
+                            report: std::mem::take(&mut report),
+                        }
+                    } else {
+                        e
+                    });
+                }
             }
         }
 
         // Two-pass extraction: create hardlinks after all target files exist
         for hardlink_info in &hardlinks {
-            Self::create_hardlink(hardlink_info, &dest, &mut report, &mut dir_cache)?;
+            if let Err(e) = Self::create_hardlink(hardlink_info, &dest, &mut report, &mut dir_cache)
+            {
+                return Err(if report.total_items() > 0 {
+                    ExtractionError::PartialExtraction {
+                        source: Box::new(e),
+                        report: std::mem::take(&mut report),
+                    }
+                } else {
+                    e
+                });
+            }
         }
 
         report.duration = start.elapsed();
@@ -1444,7 +1473,12 @@ mod tests {
         let result = archive.extract(temp.path(), &config);
 
         assert!(result.is_err());
+        // A directory was created before the symlink escape, so the error is
+        // wrapped in PartialExtraction. Unwrap one level to check the source.
         match result {
+            Err(ExtractionError::PartialExtraction { source, .. }) => {
+                assert!(matches!(*source, ExtractionError::SymlinkEscape { .. }));
+            }
             Err(ExtractionError::SymlinkEscape { .. }) => {}
             other => panic!("Expected SymlinkEscape error for symlink escape, got: {other:?}"),
         }

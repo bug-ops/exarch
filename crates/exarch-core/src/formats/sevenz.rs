@@ -437,7 +437,18 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
         // double parsing in our validation logic
         let mut validator = EntryValidator::new(config, &dest);
         let mut dir_cache = common::DirCache::new();
-        Self::extract_with_callback(&mut self.source, &dest, &mut validator, &mut dir_cache)
+        match Self::extract_with_callback(&mut self.source, &dest, &mut validator, &mut dir_cache) {
+            Ok(report) => Ok(report),
+            Err(e) => {
+                // 7z pre-validates all paths before extracting, so any error
+                // from extract_with_callback means partial extraction occurred.
+                // We wrap unconditionally since partial state may be on disk.
+                Err(ExtractionError::PartialExtraction {
+                    source: Box::new(e),
+                    report: ExtractionReport::new(),
+                })
+            }
+        }
     }
 
     fn format_name(&self) -> &'static str {

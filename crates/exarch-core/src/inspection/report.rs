@@ -157,6 +157,7 @@ pub struct VerificationIssue {
 impl VerificationIssue {
     /// Creates a verification issue from an extraction error.
     #[must_use]
+    #[allow(clippy::too_many_lines)]
     pub fn from_error(error: &ExtractionError, entry_path: Option<PathBuf>) -> Self {
         let (severity, category, message) = match error {
             ExtractionError::PathTraversal { path } => (
@@ -249,6 +250,9 @@ impl VerificationIssue {
                 IssueCategory::InvalidArchive,
                 format!("Invalid configuration: {reason}"),
             ),
+            ExtractionError::PartialExtraction { source, .. } => {
+                return Self::from_error(source, entry_path);
+            }
         };
 
         Self {

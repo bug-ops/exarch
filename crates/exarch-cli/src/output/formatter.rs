@@ -48,11 +48,23 @@ pub struct JsonOutput<T> {
     pub error: Option<JsonError>,
 }
 
+/// Partial extraction report included in error JSON when extraction was stopped
+/// mid-archive.
+#[derive(Debug, Serialize)]
+pub struct JsonPartialReport {
+    pub files_extracted: usize,
+    pub directories_created: usize,
+    pub symlinks_created: usize,
+    pub bytes_written: u64,
+}
+
 /// Structured error object in JSON output
 #[derive(Debug, Serialize)]
 pub struct JsonError {
     pub kind: String,
     pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub partial_report: Option<JsonPartialReport>,
 }
 
 #[derive(Debug, Serialize)]
@@ -85,6 +97,25 @@ impl<T: Serialize> JsonOutput<T> {
             error: Some(JsonError {
                 kind: kind.into(),
                 message: message.into(),
+                partial_report: None,
+            }),
+        }
+    }
+
+    pub fn error_with_partial(
+        operation: impl Into<String>,
+        kind: impl Into<String>,
+        message: impl Into<String>,
+        partial_report: JsonPartialReport,
+    ) -> JsonOutput<()> {
+        JsonOutput {
+            operation: operation.into(),
+            status: Status::Error,
+            data: None,
+            error: Some(JsonError {
+                kind: kind.into(),
+                message: message.into(),
+                partial_report: Some(partial_report),
             }),
         }
     }

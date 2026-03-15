@@ -403,14 +403,23 @@ impl<R: Read + Seek> ArchiveFormat for ZipArchive<R> {
         let entry_count = self.inner.len();
 
         for i in 0..entry_count {
-            self.process_entry(
+            if let Err(e) = self.process_entry(
                 i,
                 &mut validator,
                 &dest,
                 &mut report,
                 &mut copy_buffer,
                 &mut dir_cache,
-            )?;
+            ) {
+                return Err(if report.total_items() > 0 {
+                    ExtractionError::PartialExtraction {
+                        source: Box::new(e),
+                        report: std::mem::take(&mut report),
+                    }
+                } else {
+                    e
+                });
+            }
         }
 
         report.duration = start.elapsed();

@@ -209,6 +209,23 @@ impl SecurityConfig {
     }
 }
 
+/// Options controlling extraction behavior (non-security).
+///
+/// Separate from `SecurityConfig` to keep security settings focused.
+/// These options control operational behavior like atomicity.
+#[derive(Debug, Clone, Default)]
+pub struct ExtractionOptions {
+    /// Extract atomically: use a temp dir in the same parent as the output
+    /// directory, rename on success, and delete on failure.
+    ///
+    /// When enabled, extraction is all-or-nothing: if extraction fails,
+    /// the output directory will not be created. This prevents partial
+    /// extraction artifacts from remaining on disk.
+    ///
+    /// Note: cleanup is best-effort if the process is terminated via SIGKILL.
+    pub atomic: bool,
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::field_reassign_with_default)]
 mod tests {

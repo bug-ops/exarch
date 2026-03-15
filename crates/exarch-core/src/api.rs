@@ -8,6 +8,7 @@ use crate::NoopProgress;
 use crate::ProgressCallback;
 use crate::Result;
 use crate::SecurityConfig;
+use crate::config::ExtractionOptions;
 use crate::creation::CreationConfig;
 use crate::creation::CreationReport;
 use crate::formats::detect::ArchiveType;
@@ -113,6 +114,130 @@ pub fn extract_archive_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
         ArchiveType::TarZst => extract_tar_zst(archive_path, output_dir, config),
         ArchiveType::Zip => extract_zip(archive_path, output_dir, config),
         ArchiveType::SevenZ => extract_7z(archive_path, output_dir, config),
+    }
+}
+
+/// Extracts an archive with extraction options and optional progress reporting.
+///
+/// This is the most flexible extraction API. Use this when you need both
+/// `ExtractionOptions` (e.g., atomic mode) and progress reporting.
+///
+/// # Arguments
+///
+/// * `archive_path` - Path to the archive file
+/// * `output_dir` - Directory where files will be extracted
+/// * `config` - Security configuration for the extraction
+/// * `options` - Extraction behavior options (e.g., atomic mode)
+/// * `progress` - Callback for progress updates
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - Archive file cannot be opened
+/// - Archive format is unsupported
+/// - Security validation fails
+/// - I/O operations fail
+/// - Atomic temp dir creation or rename fails
+pub fn extract_archive_full<P: AsRef<Path>, Q: AsRef<Path>>(
+    archive_path: P,
+    output_dir: Q,
+    config: &SecurityConfig,
+    options: &ExtractionOptions,
+    progress: &mut dyn ProgressCallback,
+) -> Result<ExtractionReport> {
+    if options.atomic {
+        extract_atomic(archive_path, output_dir, config, progress)
+    } else {
+        extract_archive_with_progress(archive_path, output_dir, config, progress)
+    }
+}
+
+/// Extracts an archive with extraction options (no progress reporting).
+///
+/// Same as `extract_archive_full` but uses a no-op progress callback.
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - Archive file cannot be opened
+/// - Archive format is unsupported
+/// - Security validation fails
+/// - I/O operations fail
+/// - Atomic temp dir creation or rename fails
+pub fn extract_archive_with_options<P: AsRef<Path>, Q: AsRef<Path>>(
+    archive_path: P,
+    output_dir: Q,
+    config: &SecurityConfig,
+    options: &ExtractionOptions,
+) -> Result<ExtractionReport> {
+    let mut noop = NoopProgress;
+    extract_archive_full(archive_path, output_dir, config, options, &mut noop)
+}
+
+fn extract_atomic<P: AsRef<Path>, Q: AsRef<Path>>(
+    archive_path: P,
+    output_dir: Q,
+    config: &SecurityConfig,
+    progress: &mut dyn ProgressCallback,
+) -> Result<ExtractionReport> {
+    let output_dir = output_dir.as_ref();
+
+    // Canonicalize output_dir to resolve any symlinks in the path before
+    // computing the parent, so temp dir lands on the same filesystem.
+    // If output_dir doesn't exist yet, use its lexical parent.
+    let canonical_output = if output_dir.exists() {
+        output_dir.canonicalize().map_err(ExtractionError::Io)?
+    } else {
+        output_dir.to_path_buf()
+    };
+
+    let parent =
+        canonical_output
+            .parent()
+            .ok_or_else(|| ExtractionError::InvalidConfiguration {
+                reason: "output directory has no parent".into(),
+            })?;
+
+    std::fs::create_dir_all(parent).map_err(ExtractionError::Io)?;
+
+    let temp_dir = tempfile::tempdir_in(parent).map_err(|e| {
+        ExtractionError::Io(std::io::Error::new(
+            e.kind(),
+            format!(
+                "failed to create temp directory in {}: {e}",
+                parent.display()
+            ),
+        ))
+    })?;
+
+    let result = extract_archive_with_progress(archive_path, temp_dir.path(), config, progress);
+
+    match result {
+        Ok(report) => {
+            // Consume TempDir to prevent Drop cleanup, then rename.
+            let temp_path = temp_dir.keep();
+            std::fs::rename(&temp_path, output_dir).map_err(|e| {
+                // Rename failed: clean up temp dir
+                let _ = std::fs::remove_dir_all(&temp_path);
+                // Map AlreadyExists to OutputExists for caller clarity
+                if e.kind() == std::io::ErrorKind::AlreadyExists {
+                    ExtractionError::OutputExists {
+                        path: output_dir.to_path_buf(),
+                    }
+                } else {
+                    ExtractionError::Io(std::io::Error::new(
+                        e.kind(),
+                        format!("failed to rename temp dir to {}: {e}", output_dir.display()),
+                    ))
+                }
+            })?;
+
+            Ok(report)
+        }
+        Err(e) => {
+            // TempDir Drop runs here: cleans up temp dir automatically.
+            Err(e)
+        }
     }
 }
 
@@ -560,5 +685,124 @@ mod tests {
             result.unwrap_err(),
             ExtractionError::InvalidArchive(_)
         ));
+    }
+
+    #[test]
+    fn test_extract_archive_full_non_atomic_delegates_to_normal() {
+        let dest = tempfile::TempDir::new().unwrap();
+        let options = ExtractionOptions { atomic: false };
+        let result = extract_archive_full(
+            PathBuf::from("nonexistent.tar.gz"),
+            dest.path(),
+            &SecurityConfig::default(),
+            &options,
+            &mut NoopProgress,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_extract_archive_with_options_delegates() {
+        let dest = tempfile::TempDir::new().unwrap();
+        let options = ExtractionOptions { atomic: false };
+        let result = extract_archive_with_options(
+            PathBuf::from("nonexistent.tar.gz"),
+            dest.path(),
+            &SecurityConfig::default(),
+            &options,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_extract_atomic_success() {
+        use crate::create_archive;
+        use crate::creation::CreationConfig;
+
+        // Create a valid tar.gz to extract
+        let archive_dir = tempfile::TempDir::new().unwrap();
+        let archive_path = archive_dir.path().join("test.tar.gz");
+
+        // Create a simple archive with one file
+        let src_dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(src_dir.path().join("hello.txt"), b"hello world").unwrap();
+        create_archive(&archive_path, &[src_dir.path()], &CreationConfig::default()).unwrap();
+
+        let parent = tempfile::TempDir::new().unwrap();
+        let output_dir = parent.path().join("extracted");
+
+        let options = ExtractionOptions { atomic: true };
+        let result = extract_archive_with_options(
+            &archive_path,
+            &output_dir,
+            &SecurityConfig::default(),
+            &options,
+        );
+
+        assert!(result.is_ok());
+        assert!(output_dir.exists());
+        // No temp dir remnants
+        let temp_entries: Vec<_> = std::fs::read_dir(parent.path()).unwrap().collect();
+        assert_eq!(
+            temp_entries.len(),
+            1,
+            "Expected only the output dir, found temp remnants"
+        );
+    }
+
+    #[test]
+    fn test_extract_atomic_failure_cleans_up() {
+        let parent = tempfile::TempDir::new().unwrap();
+        let output_dir = parent.path().join("extracted");
+
+        let options = ExtractionOptions { atomic: true };
+        let result = extract_archive_with_options(
+            PathBuf::from("nonexistent_archive.tar.gz"),
+            &output_dir,
+            &SecurityConfig::default(),
+            &options,
+        );
+
+        assert!(result.is_err());
+        // Output dir must not exist
+        assert!(!output_dir.exists());
+        // No temp dir remnants in parent
+        let temp_entries: Vec<_> = std::fs::read_dir(parent.path()).unwrap().collect();
+        assert!(
+            temp_entries.is_empty(),
+            "Temp dir not cleaned up after failure"
+        );
+    }
+
+    #[test]
+    fn test_extract_atomic_output_already_exists_fails() {
+        use crate::create_archive;
+        use crate::creation::CreationConfig;
+
+        let parent = tempfile::TempDir::new().unwrap();
+        let output_dir = parent.path().join("extracted");
+        std::fs::create_dir_all(&output_dir).unwrap();
+        // Create a file in output_dir so it's non-empty (rename over non-empty dir
+        // fails on most OSes)
+        std::fs::write(output_dir.join("existing.txt"), b"old content").unwrap();
+
+        let archive_dir = tempfile::TempDir::new().unwrap();
+        let archive_path = archive_dir.path().join("test.tar.gz");
+        let src_dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(src_dir.path().join("new.txt"), b"new content").unwrap();
+        create_archive(&archive_path, &[src_dir.path()], &CreationConfig::default()).unwrap();
+
+        let options = ExtractionOptions { atomic: true };
+        let result = extract_archive_with_options(
+            &archive_path,
+            &output_dir,
+            &SecurityConfig::default(),
+            &options,
+        );
+
+        // Should fail with OutputExists or Io (platform dependent rename semantics)
+        assert!(result.is_err());
+        // Output dir must still have old content (not corrupted)
+        assert!(output_dir.join("existing.txt").exists());
     }
 }

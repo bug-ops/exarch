@@ -166,6 +166,16 @@ pub enum ExtractionError {
         /// Reason for the configuration error.
         reason: String,
     },
+
+    /// Extraction stopped mid-archive with partial output on disk.
+    #[error("{source}")]
+    PartialExtraction {
+        /// The original error that stopped extraction.
+        #[source]
+        source: Box<Self>,
+        /// Report of what was written before the error.
+        report: crate::ExtractionReport,
+    },
 }
 
 impl ExtractionError {
@@ -195,17 +205,20 @@ impl ExtractionError {
     /// assert!(!err.is_security_violation());
     /// ```
     #[must_use]
-    pub const fn is_security_violation(&self) -> bool {
-        matches!(
-            self,
-            Self::PathTraversal { .. }
-                | Self::SymlinkEscape { .. }
-                | Self::HardlinkEscape { .. }
-                | Self::ZipBomb { .. }
-                | Self::InvalidPermissions { .. }
-                | Self::QuotaExceeded { .. }
-                | Self::SecurityViolation { .. }
-        )
+    pub fn is_security_violation(&self) -> bool {
+        match self {
+            Self::PartialExtraction { source, .. } => source.is_security_violation(),
+            _ => matches!(
+                self,
+                Self::PathTraversal { .. }
+                    | Self::SymlinkEscape { .. }
+                    | Self::HardlinkEscape { .. }
+                    | Self::ZipBomb { .. }
+                    | Self::InvalidPermissions { .. }
+                    | Self::QuotaExceeded { .. }
+                    | Self::SecurityViolation { .. }
+            ),
+        }
     }
 
     /// Returns `true` if this error is potentially recoverable.
@@ -229,15 +242,18 @@ impl ExtractionError {
     /// assert!(!err.is_recoverable()); // Cannot continue
     /// ```
     #[must_use]
-    pub const fn is_recoverable(&self) -> bool {
-        matches!(
-            self,
-            Self::PathTraversal { .. }
-                | Self::SymlinkEscape { .. }
-                | Self::HardlinkEscape { .. }
-                | Self::InvalidPermissions { .. }
-                | Self::SecurityViolation { .. }
-        )
+    pub fn is_recoverable(&self) -> bool {
+        match self {
+            Self::PartialExtraction { source, .. } => source.is_recoverable(),
+            _ => matches!(
+                self,
+                Self::PathTraversal { .. }
+                    | Self::SymlinkEscape { .. }
+                    | Self::HardlinkEscape { .. }
+                    | Self::InvalidPermissions { .. }
+                    | Self::SecurityViolation { .. }
+            ),
+        }
     }
 
     /// Returns a context string for this error, if available.
@@ -261,15 +277,17 @@ impl ExtractionError {
         match self {
             Self::InvalidArchive(msg) => Some(msg),
             Self::SecurityViolation { reason } => Some(reason),
+            Self::PartialExtraction { source, .. } => source.context(),
             _ => None,
         }
     }
 
     /// Returns the quota resource that was exceeded, if applicable.
     #[must_use]
-    pub const fn quota_resource(&self) -> Option<&QuotaResource> {
+    pub fn quota_resource(&self) -> Option<&QuotaResource> {
         match self {
             Self::QuotaExceeded { resource } => Some(resource),
+            Self::PartialExtraction { source, .. } => source.quota_resource(),
             _ => None,
         }
     }
@@ -559,5 +577,70 @@ mod tests {
         assert!(display.contains("invalid configuration"));
         assert!(display.contains("output path not set"));
         assert!(!err.is_security_violation());
+    }
+
+    #[test]
+    fn test_partial_extraction_display_shows_source() {
+        use crate::ExtractionReport;
+        let source = ExtractionError::QuotaExceeded {
+            resource: QuotaResource::FileCount {
+                current: 11,
+                max: 10,
+            },
+        };
+        let err = ExtractionError::PartialExtraction {
+            source: Box::new(source),
+            report: ExtractionReport::new(),
+        };
+        let display = err.to_string();
+        assert!(display.contains("quota exceeded"));
+    }
+
+    #[test]
+    fn test_partial_extraction_delegates_is_security_violation() {
+        use crate::ExtractionReport;
+        let security_err = ExtractionError::PathTraversal {
+            path: PathBuf::from("../etc/passwd"),
+        };
+        let err = ExtractionError::PartialExtraction {
+            source: Box::new(security_err),
+            report: ExtractionReport::new(),
+        };
+        assert!(err.is_security_violation());
+
+        let non_security_err = ExtractionError::InvalidArchive("bad".into());
+        let err2 = ExtractionError::PartialExtraction {
+            source: Box::new(non_security_err),
+            report: ExtractionReport::new(),
+        };
+        assert!(!err2.is_security_violation());
+    }
+
+    #[test]
+    fn test_partial_extraction_delegates_is_recoverable() {
+        use crate::ExtractionReport;
+        let recoverable = ExtractionError::PathTraversal {
+            path: PathBuf::from("../etc/passwd"),
+        };
+        let err = ExtractionError::PartialExtraction {
+            source: Box::new(recoverable),
+            report: ExtractionReport::new(),
+        };
+        assert!(err.is_recoverable());
+    }
+
+    #[test]
+    fn test_partial_extraction_delegates_error_code() {
+        use crate::ExtractionReport;
+        let source = ExtractionError::ZipBomb {
+            compressed: 100,
+            uncompressed: 100_000,
+            ratio: 1000.0,
+        };
+        let err = ExtractionError::PartialExtraction {
+            source: Box::new(source),
+            report: ExtractionReport::new(),
+        };
+        assert_eq!(err.error_code(), "ZIP_BOMB");
     }
 }

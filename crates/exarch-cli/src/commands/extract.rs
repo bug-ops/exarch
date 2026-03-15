@@ -6,10 +6,12 @@ use crate::output::OutputFormatter;
 use crate::progress::CliProgress;
 use anyhow::Context;
 use anyhow::Result;
+use exarch_core::ManifestEntryType;
 use exarch_core::NoopProgress;
 use exarch_core::SecurityConfig;
 use exarch_core::config::AllowedFeatures;
 use exarch_core::extract_archive_with_progress;
+use exarch_core::list_archive;
 use std::env;
 
 pub fn execute(args: &ExtractArgs, formatter: &dyn OutputFormatter) -> Result<()> {
@@ -17,6 +19,28 @@ pub fn execute(args: &ExtractArgs, formatter: &dyn OutputFormatter) -> Result<()
         Some(dir) => dir.clone(),
         None => env::current_dir().context("failed to get current directory")?,
     };
+
+    if !args.force {
+        let manifest = list_archive(&args.archive, &SecurityConfig::default())
+            .with_context(|| format!("failed to list archive: {}", args.archive.display()))?;
+
+        let conflicts: Vec<_> = manifest
+            .entries
+            .iter()
+            .filter(|e| e.entry_type == ManifestEntryType::File)
+            .map(|e| output_dir.join(&e.path))
+            .filter(|p| p.exists())
+            .collect();
+
+        if !conflicts.is_empty() {
+            let list = conflicts
+                .iter()
+                .map(|p| format!("  {}", p.display()))
+                .collect::<Vec<_>>()
+                .join("\n");
+            anyhow::bail!("destination files already exist (use --force to overwrite):\n{list}");
+        }
+    }
 
     let config = SecurityConfig {
         max_file_count: args.max_files,

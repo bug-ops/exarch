@@ -166,13 +166,12 @@ impl OutputFormatter for HumanFormatter {
     }
 
     fn format_error(&self, _operation: &str, error: &anyhow::Error) {
-        // Always show errors, even in quiet mode
+        // Always show errors on stderr, even in quiet mode
+        let stderr = Term::stderr();
         if self.use_colors {
-            let _ = self
-                .term
-                .write_line(&format!("{} {error:#}", style("error:").red().bold()));
+            let _ = stderr.write_line(&format!("{} {error:#}", style("Error:").red().bold()));
         } else {
-            let _ = self.term.write_line(&format!("error: {error:#}"));
+            let _ = stderr.write_line(&format!("Error: {error:#}"));
         }
     }
 

@@ -323,14 +323,16 @@ fn list_zip(
 
 /// Returns `true` if the path contains traversal attempts.
 ///
-/// Mirrors zip crate `enclosed_name()` semantics: rejects paths with
-/// `..` components or absolute prefixes.
+/// Mirrors zip crate `enclosed_name()` semantics: rejects paths with `..`
+/// components, Unix root (`/`), or Windows drive prefixes (`C:\`).
 fn contains_traversal(path: &Path) -> bool {
     use std::path::Component;
-    if path.is_absolute() {
-        return true;
-    }
-    path.components().any(|c| matches!(c, Component::ParentDir))
+    path.components().any(|c| {
+        matches!(
+            c,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    })
 }
 
 /// Returns `true` for TAR metadata entries that should be skipped.

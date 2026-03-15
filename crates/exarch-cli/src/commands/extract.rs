@@ -51,7 +51,7 @@ pub fn execute(args: &ExtractArgs, formatter: &dyn OutputFormatter) -> Result<()
             symlinks: args.allow_symlinks,
             hardlinks: args.allow_hardlinks,
             absolute_paths: false,
-            world_writable: false,
+            world_writable: args.allow_world_writable,
         },
         preserve_permissions: args.preserve_permissions,
         ..Default::default()

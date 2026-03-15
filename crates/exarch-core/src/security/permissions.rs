@@ -1,6 +1,5 @@
 //! File permission validation and sanitization.
 
-use crate::ExtractionError;
 use crate::Result;
 use crate::SecurityConfig;
 
@@ -10,9 +9,8 @@ use crate::SecurityConfig;
 /// lead to privilege escalation:
 /// - Setuid bit (04000): Allows execution with file owner's privileges
 /// - Setgid bit (02000): Allows execution with file group's privileges
-///
-/// World-writable files (0002) are rejected by default as they pose
-/// security risks in multi-user environments.
+/// - World-writable bit (0002): Stripped by default unless
+///   `allow_world_writable` is set
 ///
 /// # Performance
 ///
@@ -20,8 +18,7 @@ use crate::SecurityConfig;
 ///
 /// # Errors
 ///
-/// Returns `ExtractionError::InvalidPermissions` if world-writable files
-/// are detected (mode has the world-writable bit set).
+/// Returns `ExtractionError::InvalidPermissions` only for truly invalid modes.
 ///
 /// # Examples
 ///
@@ -40,12 +37,16 @@ use crate::SecurityConfig;
 /// let sanitized = sanitize_permissions(Path::new("file.txt"), 0o2755, &config).unwrap();
 /// assert_eq!(sanitized, 0o755);
 ///
-/// // Both bits stripped
+/// // Both setuid and setgid bits stripped
 /// let sanitized = sanitize_permissions(Path::new("file.txt"), 0o6755, &config).unwrap();
 /// assert_eq!(sanitized, 0o755);
+///
+/// // World-writable bit is stripped by default
+/// let sanitized = sanitize_permissions(Path::new("file.txt"), 0o777, &config).unwrap();
+/// assert_eq!(sanitized, 0o775);
 /// ```
 pub fn sanitize_permissions(
-    path: &std::path::Path,
+    _path: &std::path::Path,
     mode: u32,
     config: &SecurityConfig,
 ) -> Result<u32> {
@@ -57,14 +58,9 @@ pub fn sanitize_permissions(
     // Strip setgid bit (02000)
     sanitized &= !0o2000;
 
-    // M-CODE-1: Check world-writable using config flag
-    // Reject world-writable (0002) unless explicitly allowed
-    // World-writable files pose security risks in multi-user environments
-    if !config.allowed.world_writable && (sanitized & 0o002) != 0 {
-        return Err(ExtractionError::InvalidPermissions {
-            path: path.to_path_buf(),
-            mode: sanitized,
-        });
+    // M-CODE-1: Strip world-writable bit (0002) unless explicitly allowed
+    if !config.allowed.world_writable {
+        sanitized &= !0o002;
     }
 
     Ok(sanitized)
@@ -111,13 +107,10 @@ mod tests {
     }
 
     #[test]
-    fn test_sanitize_permissions_reject_world_writable() {
+    fn test_sanitize_permissions_strip_world_writable() {
         let config = SecurityConfig::default();
         let result = sanitize_permissions(std::path::Path::new("file.txt"), 0o777, &config);
-        assert!(matches!(
-            result,
-            Err(ExtractionError::InvalidPermissions { .. })
-        ));
+        assert_eq!(result.unwrap(), 0o775);
     }
 
     #[test]
@@ -205,14 +198,27 @@ mod tests {
     }
 
     #[test]
-    fn test_world_writable_rejected_by_default() {
+    fn test_world_writable_stripped_by_default() {
         let config = SecurityConfig::default();
 
-        // World-writable should be rejected by default
         let result = sanitize_permissions(std::path::Path::new("file.txt"), 0o777, &config);
-        assert!(
-            matches!(result, Err(ExtractionError::InvalidPermissions { .. })),
-            "world-writable should be rejected by default"
+        assert_eq!(
+            result.unwrap(),
+            0o775,
+            "world-writable bit should be stripped by default"
+        );
+    }
+
+    #[test]
+    fn test_world_writable_bit_only_stripped() {
+        let config = SecurityConfig::default();
+
+        // 0o666 = rw-rw-rw-, only other-write (0o002) should be stripped -> 0o664
+        let result = sanitize_permissions(std::path::Path::new("file.txt"), 0o666, &config);
+        assert_eq!(
+            result.unwrap(),
+            0o664,
+            "only world-writable bit should be stripped, not group-write"
         );
     }
 }

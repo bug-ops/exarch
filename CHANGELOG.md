@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Use `entry.size()` instead of `entry.header().size()` for TAR quota enforcement to prevent PAX size bypass (#82)
 - Honor `--force` flag in `extract` subcommand; without `--force`, fail with a clear error listing conflicting files (#77)
 - `list -l` showed raw Unix file-type bits (e.g. `100644`) for ZIP entries instead of normalized permission bits (e.g. `644`); `ArchiveEntry.mode` now strips `S_IFREG`/`S_IFDIR` bits from ZIP `external_attributes` (#80)
+- World-writable files now have the write-other bit stripped by default instead of aborting extraction (consistent with setuid/setgid stripping) (#84)
+
+### Added
+
+- `--allow-world-writable` CLI flag and `allow_world_writable` `SecurityConfig` option to opt in to preserving world-writable permissions (#84)
 
 ## [0.2.7] - 2026-03-07
 

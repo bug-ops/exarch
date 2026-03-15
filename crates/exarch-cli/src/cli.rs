@@ -81,6 +81,10 @@ pub struct ExtractArgs {
     #[arg(long)]
     pub allow_hardlinks: bool,
 
+    /// Allow world-writable files in extracted archives
+    #[arg(long)]
+    pub allow_world_writable: bool,
+
     /// Preserve file permissions from archive
     #[arg(long)]
     pub preserve_permissions: bool,

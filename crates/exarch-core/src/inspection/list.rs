@@ -173,6 +173,10 @@ fn list_tar_entries<R: std::io::Read>(
             .map_err(|e| ExtractionError::InvalidArchive(format!("invalid path: {e}")))?
             .into_owned();
 
+        if contains_traversal(&path) {
+            return Err(ExtractionError::PathTraversal { path });
+        }
+
         let entry_type = convert_tar_entry_type(&entry)?;
         let size = entry.size();
         let mode = entry.header().mode().ok();
@@ -317,6 +321,18 @@ fn list_zip(
     Ok(manifest)
 }
 
+/// Returns `true` if the path contains traversal attempts.
+///
+/// Mirrors zip crate `enclosed_name()` semantics: rejects paths with
+/// `..` components or absolute prefixes.
+fn contains_traversal(path: &Path) -> bool {
+    use std::path::Component;
+    if path.is_absolute() {
+        return true;
+    }
+    path.components().any(|c| matches!(c, Component::ParentDir))
+}
+
 /// Returns `true` for TAR metadata entries that should be skipped.
 fn is_tar_metadata_entry<R: std::io::Read>(entry: &tar::Entry<'_, R>) -> bool {
     matches!(
@@ -379,6 +395,55 @@ mod tests {
     use flate2::write::GzEncoder;
     use std::io::Write;
     use tempfile::NamedTempFile;
+
+    /// Builds a raw TAR archive containing a single entry with the given path
+    /// string.
+    ///
+    /// The `tar` crate's `set_path()` rejects `..` components and absolute
+    /// paths for safety, so we write the name directly into the 512-byte
+    /// header block to create adversarial archives for testing path
+    /// traversal detection.
+    fn tar_with_raw_path(path: &str) -> Vec<u8> {
+        // A TAR header is exactly 512 bytes. The name field is bytes 0..100.
+        // We start with a zeroed block and fill in the minimal fields:
+        // name (0), mode (100), uid (108), gid (116), size (124), mtime (136),
+        // checksum (148), typeflag (156). All numeric fields are NUL-terminated
+        // octal strings as per the POSIX ustar spec.
+        let mut block = [0u8; 512];
+
+        // Name field: first 100 bytes, NUL-terminated.
+        let name_bytes = path.as_bytes();
+        debug_assert!(
+            name_bytes.len() <= 99,
+            "tar_with_raw_path: path exceeds POSIX TAR name field limit (99 bytes)"
+        );
+        let name_len = name_bytes.len().min(99);
+        block[..name_len].copy_from_slice(&name_bytes[..name_len]);
+
+        // Mode: 0000644
+        block[100..107].copy_from_slice(b"0000644");
+        // UID: 0000000
+        block[108..115].copy_from_slice(b"0000000");
+        // GID: 0000000
+        block[116..123].copy_from_slice(b"0000000");
+        // Size: 0 bytes (empty file)
+        block[124..135].copy_from_slice(b"00000000000");
+        // Mtime: 0
+        block[136..147].copy_from_slice(b"00000000000");
+        // Typeflag: '0' (regular file)
+        block[156] = b'0';
+
+        // Checksum: sum of all bytes in the header (checksum field treated as spaces).
+        block[148..156].copy_from_slice(b"        ");
+        let checksum: u32 = block.iter().map(|&b| u32::from(b)).sum();
+        let checksum_str = format!("{checksum:06o}\0 ");
+        block[148..156].copy_from_slice(checksum_str.as_bytes());
+
+        // Two 512-byte zero blocks mark end-of-archive.
+        let mut tar = block.to_vec();
+        tar.extend_from_slice(&[0u8; 1024]);
+        tar
+    }
 
     /// Writes a minimal single-file ZIP archive where `external_attributes`
     /// encodes a full Unix stat(2) mode (file-type bits + permission bits)
@@ -960,6 +1025,115 @@ mod tests {
         assert!(
             matches!(result, Err(ExtractionError::PathTraversal { .. })),
             "expected PathTraversal error, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_list_tar_path_traversal_dotdot() {
+        let mut temp_file = NamedTempFile::with_suffix(".tar").unwrap();
+        temp_file
+            .write_all(&tar_with_raw_path("../escape.txt"))
+            .unwrap();
+        temp_file.flush().unwrap();
+
+        let config = SecurityConfig::default();
+        let result = list_archive(temp_file.path(), &config);
+        assert!(
+            matches!(
+                &result,
+                Err(ExtractionError::PathTraversal { path }) if path == &PathBuf::from("../escape.txt")
+            ),
+            "expected PathTraversal {{ path: ../escape.txt }}, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_list_tar_path_traversal_nested() {
+        let mut temp_file = NamedTempFile::with_suffix(".tar").unwrap();
+        temp_file
+            .write_all(&tar_with_raw_path("foo/../../escape.txt"))
+            .unwrap();
+        temp_file.flush().unwrap();
+
+        let config = SecurityConfig::default();
+        let result = list_archive(temp_file.path(), &config);
+        assert!(
+            matches!(result, Err(ExtractionError::PathTraversal { .. })),
+            "expected PathTraversal error for nested ../ in TAR, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_list_tar_path_traversal_absolute() {
+        let mut temp_file = NamedTempFile::with_suffix(".tar").unwrap();
+        temp_file
+            .write_all(&tar_with_raw_path("/etc/passwd"))
+            .unwrap();
+        temp_file.flush().unwrap();
+
+        let config = SecurityConfig::default();
+        let result = list_archive(temp_file.path(), &config);
+        assert!(
+            matches!(result, Err(ExtractionError::PathTraversal { .. })),
+            "expected PathTraversal error for absolute path in TAR, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_list_tar_gz_path_traversal() {
+        let mut temp_file = NamedTempFile::with_suffix(".tar.gz").unwrap();
+        let tar_data = tar_with_raw_path("../escape.txt");
+        let mut encoder = GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&tar_data).unwrap();
+        let compressed = encoder.finish().unwrap();
+
+        temp_file.write_all(&compressed).unwrap();
+        temp_file.flush().unwrap();
+
+        let config = SecurityConfig::default();
+        let result = list_archive(temp_file.path(), &config);
+        assert!(
+            matches!(result, Err(ExtractionError::PathTraversal { .. })),
+            "expected PathTraversal error for tar.gz with ../ entry, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_list_tar_path_traversal_mixed_entries_fail_fast() {
+        // A safe entry followed by a traversal entry — verifies fail-fast behavior:
+        // error must be returned immediately on the traversal entry, not after
+        // accumulating the safe entry into a partial manifest.
+        let mut temp_file = NamedTempFile::with_suffix(".tar").unwrap();
+        let mut builder = tar::Builder::new(Vec::new());
+
+        let safe_data = b"safe content";
+        let mut header = tar::Header::new_gnu();
+        header.set_path("hello.txt").unwrap();
+        header.set_size(safe_data.len() as u64);
+        header.set_cksum();
+        builder.append(&header, &safe_data[..]).unwrap();
+        let safe_tar = builder.into_inner().unwrap();
+
+        // safe_tar ends with the two zero-block end-of-archive marker. Strip it and
+        // append the raw traversal entry + end-of-archive to create a two-entry
+        // archive. The tar crate always writes exactly two 512-byte zero blocks
+        // (1024 bytes total) as the end-of-archive marker per POSIX ustar §3.4.
+        // Verified with tar 0.4.x; a future major version bump should re-check this.
+        let eof_marker_len = 1024;
+        let tar_body = &safe_tar[..safe_tar.len() - eof_marker_len];
+        let traversal_entry = tar_with_raw_path("../escape.txt");
+        // tar_with_raw_path includes end-of-archive, so use it as-is after the body.
+        let mut combined = tar_body.to_vec();
+        combined.extend_from_slice(&traversal_entry);
+
+        temp_file.write_all(&combined).unwrap();
+        temp_file.flush().unwrap();
+
+        let config = SecurityConfig::default();
+        let result = list_archive(temp_file.path(), &config);
+        assert!(
+            matches!(result, Err(ExtractionError::PathTraversal { .. })),
+            "expected PathTraversal error for mixed-entry TAR, got: {result:?}"
         );
     }
 

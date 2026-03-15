@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `list` quota error message reported `current` equal to the limit instead of the actual would-be count (e.g. `10000 > 10000` instead of `10001 > 10000`) for both TAR and ZIP archives (#91)
 - `list` command reported a misleading "invalid archive" error for encrypted ZIP archives instead of a security violation; now correctly reports `SecurityViolation: archive is password-protected` (#96)
 - Extracted file permissions now honor the sanitized mode, bypassing the process umask (#97)
+- `list` command now rejects TAR entries with path traversal (`../`) and absolute paths, matching ZIP behavior (#104)
 
 ### Added
 

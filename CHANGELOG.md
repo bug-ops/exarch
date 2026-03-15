@@ -27,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Removed stale `RUSTSEC-2025-0119` ignore entry from `deny.toml`; the advisory no longer matches any dependency in the tree (#76)
+- Updated yanked transitive crates: `js-sys` 0.3.86 → 0.3.91, `wasm-bindgen` 0.2.109 → 0.2.114, `web-sys` 0.3.86 → 0.3.91 (#75)
 
 ## [0.2.7] - 2026-03-07
 

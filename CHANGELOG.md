@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.8] - 2026-03-15
+
 ### Fixed
 
 - When `--json` is specified and a command fails, the CLI now emits a structured JSON error object `{"operation":"...","status":"error","error":{"kind":"...","message":"..."}}` instead of plain text (#87)
@@ -245,7 +247,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 64KB reusable copy buffers
 - LRU cache for symlink target resolution
 
-[Unreleased]: https://github.com/bug-ops/exarch/compare/v0.2.7...HEAD
+[Unreleased]: https://github.com/bug-ops/exarch/compare/v0.2.8...HEAD
+[0.2.8]: https://github.com/bug-ops/exarch/compare/v0.2.7...v0.2.8
 [0.2.7]: https://github.com/bug-ops/exarch/compare/v0.2.6...v0.2.7
 [0.2.6]: https://github.com/bug-ops/exarch/compare/v0.2.5...v0.2.6
 [0.2.5]: https://github.com/bug-ops/exarch/compare/v0.2.4...v0.2.5

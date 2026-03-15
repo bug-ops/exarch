@@ -249,8 +249,19 @@ fn list_zip(
         }
 
         let entry = archive.by_index(i).map_err(|e| {
+            if e.to_string().contains("Password required to decrypt file") {
+                return ExtractionError::SecurityViolation {
+                    reason: "archive is password-protected".into(),
+                };
+            }
             ExtractionError::InvalidArchive(format!("failed to read ZIP entry: {e}"))
         })?;
+
+        if entry.encrypted() {
+            return Err(ExtractionError::SecurityViolation {
+                reason: "archive is password-protected".into(),
+            });
+        }
 
         let path = entry
             .enclosed_name()
@@ -706,6 +717,38 @@ mod tests {
 
         assert_eq!(manifest.total_entries, 1);
         assert_eq!(manifest.entries[0].mode, Some(0o644));
+    }
+
+    #[test]
+    fn test_list_zip_encrypted_returns_security_violation() {
+        use std::io::Cursor;
+        use zip::ZipWriter;
+        use zip::unstable::write::FileOptionsExt;
+        use zip::write::SimpleFileOptions;
+
+        let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+        let options = SimpleFileOptions::default()
+            .with_deprecated_encryption(b"password")
+            .unwrap();
+        writer.start_file("secret.txt", options).unwrap();
+        writer.write_all(b"secret data").unwrap();
+        let zip_data = writer.finish().unwrap().into_inner();
+
+        let mut temp_file = NamedTempFile::with_suffix(".zip").unwrap();
+        temp_file.write_all(&zip_data).unwrap();
+        temp_file.flush().unwrap();
+
+        let config = SecurityConfig::default();
+        let result = list_archive(temp_file.path(), &config);
+        match result {
+            Err(ExtractionError::SecurityViolation { reason }) => {
+                assert!(
+                    reason.contains("password-protected"),
+                    "expected 'password-protected' in reason: {reason}"
+                );
+            }
+            other => panic!("expected SecurityViolation, got: {other:?}"),
+        }
     }
 
     #[test]

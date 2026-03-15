@@ -8,6 +8,8 @@
     clippy::field_reassign_with_default
 )]
 
+mod security;
+
 use exarch_core::ExtractionError;
 use exarch_core::SecurityConfig;
 use exarch_core::types::DestDir;

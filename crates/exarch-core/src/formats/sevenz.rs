@@ -390,7 +390,7 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
         }
 
         // Step 1: Initialize extraction context
-        let dest = DestDir::new(output_dir.to_path_buf())?;
+        let dest = DestDir::new_or_create(output_dir.to_path_buf())?;
 
         // Pre-validate all paths BEFORE extraction using cached metadata
         // SECURITY NOTE: Pre-validation prevents partial extraction on malicious

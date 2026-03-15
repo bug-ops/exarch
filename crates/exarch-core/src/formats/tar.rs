@@ -295,7 +295,7 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
     fn extract(&mut self, output_dir: &Path, config: &SecurityConfig) -> Result<ExtractionReport> {
         let start = Instant::now();
 
-        let dest = DestDir::new(output_dir.to_path_buf())?;
+        let dest = DestDir::new_or_create(output_dir.to_path_buf())?;
 
         let mut validator = EntryValidator::new(config, &dest);
 

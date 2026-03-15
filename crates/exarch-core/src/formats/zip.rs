@@ -388,7 +388,7 @@ impl<R: Read + Seek> ArchiveFormat for ZipArchive<R> {
     fn extract(&mut self, output_dir: &Path, config: &SecurityConfig) -> Result<ExtractionReport> {
         let start = Instant::now();
 
-        let dest = DestDir::new(output_dir.to_path_buf())?;
+        let dest = DestDir::new_or_create(output_dir.to_path_buf())?;
 
         // OPT-H004: Pass references to avoid cloning
         let mut validator = EntryValidator::new(config, &dest);

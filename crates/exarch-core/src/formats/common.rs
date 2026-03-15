@@ -249,19 +249,20 @@ impl Default for DirCache {
     }
 }
 
-/// Creates a file with optional permissions set atomically during creation.
+/// Creates a file with permissions enforced after creation to bypass umask.
 ///
-/// On Unix platforms, this function uses `OpenOptions::mode()` to set file
-/// permissions during the `open()` syscall, reducing from 2 syscalls
-/// (create + chmod) to 1 syscall (create with mode).
+/// On Unix platforms, this function uses `OpenOptions::mode()` to hint the
+/// desired mode during `open()`, then calls `set_permissions()` to enforce
+/// the exact sanitized mode. The second call is required because
+/// `OpenOptions::mode()` is subject to the process umask and the resulting
+/// permissions may be narrower than requested.
 ///
 /// On non-Unix platforms, permissions are not supported and mode is ignored.
 ///
 /// # Performance
 ///
-/// - Unix: 1 syscall (open with mode)
+/// - Unix: 2 syscalls (open with mode hint + `set_permissions` to bypass umask)
 /// - Non-Unix: 1 syscall (create)
-/// - Traditional approach: 2 syscalls (create + chmod)
 ///
 /// For archives with 1000 files, this reduces 2000 syscalls to 1000 syscalls
 /// (50% reduction in permission-related syscalls).
@@ -292,7 +293,9 @@ impl Default for DirCache {
 #[cfg(unix)]
 fn create_file_with_mode(path: &Path, mode: Option<u32>) -> std::io::Result<File> {
     use std::fs::OpenOptions;
+    use std::fs::Permissions;
     use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::fs::PermissionsExt;
 
     let mut opts = OpenOptions::new();
     opts.write(true).create(true).truncate(true);
@@ -302,7 +305,16 @@ fn create_file_with_mode(path: &Path, mode: Option<u32>) -> std::io::Result<File
         opts.mode(m);
     }
 
-    opts.open(path)
+    let file = opts.open(path)?;
+
+    // OpenOptions::mode() is subject to the process umask, which may reduce
+    // the requested permissions. Call set_permissions() explicitly to enforce
+    // the exact sanitized mode, bypassing umask.
+    if let Some(m) = mode {
+        std::fs::set_permissions(path, Permissions::from_mode(m))?;
+    }
+
+    Ok(file)
 }
 
 /// Creates a file (non-Unix platforms ignore mode parameter).
@@ -332,12 +344,11 @@ fn create_file_with_mode(path: &Path, _mode: Option<u32>) -> std::io::Result<Fil
 /// - Permission preservation (Unix only, set atomically during file creation)
 /// - Quota tracking with overflow protection
 ///
-/// # Performance Optimization
+/// # Permission Enforcement
 ///
-/// On Unix, file permissions are set atomically during file creation using
-/// `OpenOptions::mode()`, reducing syscalls from 2 (create + chmod) to 1
-/// (create with mode). This provides a 10-15% speedup for archives with
-/// many files.
+/// On Unix, file permissions are enforced via `set_permissions()` after
+/// creation to bypass the process umask. This ensures the exact sanitized
+/// mode from `SecurityConfig` is applied, regardless of the caller's umask.
 ///
 /// # Correctness
 ///
@@ -390,17 +401,12 @@ pub fn extract_file_generic<R: Read>(
             })?;
     }
 
-    // Create file with permissions set atomically (Unix optimization)
-    // On Unix: mode is set during open() - 1 syscall
-    // On Windows: mode is ignored - 1 syscall
-    // Traditional: create() + set_permissions() - 2 syscalls
+    // Create file and enforce exact sanitized permissions (Unix only).
+    // set_permissions() is called inside create_file_with_mode to bypass umask.
     let output_file = create_file_with_mode(&output_path, validated.mode)?;
     let mut buffered_writer = BufWriter::with_capacity(64 * 1024, output_file);
     let bytes_written = copy_with_buffer(reader, &mut buffered_writer, copy_buffer)?;
     buffered_writer.flush()?;
-
-    // Permissions already set during file creation on Unix
-    // No additional chmod syscall needed
 
     report.files_extracted += 1;
     report.bytes_written =
@@ -909,6 +915,100 @@ mod tests {
         assert_ne!(
             permission_bits, 0,
             "file should have non-zero permissions with mode=None"
+        );
+    }
+
+    /// Verify that extracted file permissions match the sanitized mode even
+    /// when the process umask would otherwise reduce them.
+    ///
+    /// A file with mode 0o777 in the archive is sanitized to 0o775 by default
+    /// (world-writable bit stripped). The extracted file must have exactly
+    /// 0o775, not 0o755 (which would happen if umask 022 were applied on top).
+    #[cfg(unix)]
+    #[test]
+    fn test_extract_file_permissions_bypass_umask() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
+        let mut report = ExtractionReport::default();
+        let mut copy_buffer = CopyBuffer::new();
+        let mut dir_cache = DirCache::new();
+
+        let config = SecurityConfig::default();
+
+        // Mode 0o777 in archive, sanitized to 0o775 (world-writable stripped)
+        let sanitized_mode = 0o775u32;
+        let validated = ValidatedEntry {
+            safe_path: SafePath::validate(&PathBuf::from("perm_test.txt"), &dest, &config)
+                .expect("path should be valid"),
+            mode: Some(sanitized_mode),
+            entry_type: ValidatedEntryType::File,
+        };
+
+        let mut reader = Cursor::new(b"content");
+
+        extract_file_generic(
+            &mut reader,
+            &validated,
+            &dest,
+            &mut report,
+            None,
+            &mut copy_buffer,
+            &mut dir_cache,
+        )
+        .expect("extraction should succeed");
+
+        let extracted = temp.path().join("perm_test.txt");
+        assert!(extracted.exists(), "file should exist");
+
+        let metadata = std::fs::metadata(&extracted).expect("should read metadata");
+        let permission_bits = metadata.permissions().mode() & 0o777;
+
+        assert_eq!(
+            permission_bits, 0o775,
+            "extracted file must have exact sanitized mode 0o775, got 0o{permission_bits:o}; \
+             umask may have incorrectly reduced permissions"
+        );
+    }
+
+    /// Verify that `create_file_with_mode` bypasses umask by explicitly setting
+    /// a strict umask (0o077) before creating the file. Without the
+    /// `set_permissions` call, umask 0o077 would reduce 0o755 to 0o700.
+    /// With the fix, the file must retain the full 0o755 mode.
+    ///
+    /// Uses `libc::umask` to set and restore the process umask around the test.
+    /// nextest runs each test in its own process, so umask mutation is safe.
+    #[cfg(unix)]
+    #[test]
+    #[allow(unsafe_code)]
+    fn test_create_file_with_mode_bypasses_strict_umask() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let file_path = temp.path().join("strict_umask_test.txt");
+
+        // Set a strict umask that would strip group+other bits entirely.
+        // Without set_permissions(), 0o755 & ~0o077 = 0o700.
+        // SAFETY: single-threaded test process (nextest isolation), umask is
+        // process-global but safe to mutate here. Restored unconditionally.
+        let previous_umask = unsafe { libc::umask(0o077) };
+
+        let result = create_file_with_mode(&file_path, Some(0o755));
+
+        // Restore previous umask unconditionally before any assert.
+        unsafe { libc::umask(previous_umask) };
+
+        let file = result.expect("should create file under strict umask");
+        drop(file);
+
+        let metadata = std::fs::metadata(&file_path).expect("should read metadata");
+        let permission_bits = metadata.permissions().mode() & 0o777;
+
+        assert_eq!(
+            permission_bits, 0o755,
+            "file must have exact mode 0o755 despite strict umask 0o077; \
+             got 0o{permission_bits:o} — set_permissions bypass not working"
         );
     }
 }

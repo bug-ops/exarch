@@ -136,6 +136,30 @@ impl DestDir {
         Ok(Self(canonical))
     }
 
+    /// Creates a new `DestDir`, creating the directory (and all parents) if it
+    /// does not exist.
+    ///
+    /// Equivalent to `mkdir -p` followed by [`DestDir::new`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the directory cannot be created or if validation
+    /// fails.
+    pub fn new_or_create(path: impl Into<PathBuf>) -> Result<Self> {
+        let path = path.into();
+        std::fs::create_dir_all(&path).map_err(|e| {
+            ExtractionError::Io(std::io::Error::new(
+                e.kind(),
+                format!(
+                    "failed to create destination directory '{}': {}",
+                    path.display(),
+                    e
+                ),
+            ))
+        })?;
+        Self::new(path)
+    }
+
     /// Returns the path as a `&Path`.
     #[inline]
     #[must_use]
@@ -345,5 +369,68 @@ mod tests {
 
         assert!(path.is_absolute(), "converted path should be absolute");
         assert_eq!(path, dest.as_path(), "should match original path");
+    }
+
+    #[test]
+    fn test_dest_dir_new_or_create_nonexistent() {
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let new_dir = temp.path().join("new_dir");
+        assert!(!new_dir.exists());
+
+        let dest = DestDir::new_or_create(&new_dir).expect("should create nonexistent dir");
+        assert!(new_dir.exists());
+        assert!(dest.as_path().is_absolute());
+    }
+
+    #[test]
+    fn test_dest_dir_new_or_create_nested() {
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let nested = temp.path().join("a").join("b").join("c");
+        assert!(!nested.exists());
+
+        let dest = DestDir::new_or_create(&nested).expect("should create nested dirs");
+        assert!(nested.exists());
+        assert!(dest.as_path().is_absolute());
+    }
+
+    #[test]
+    fn test_dest_dir_new_or_create_existing() {
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let dest =
+            DestDir::new_or_create(temp.path().to_path_buf()).expect("should work on existing dir");
+        assert!(dest.as_path().is_absolute());
+    }
+
+    #[test]
+    fn test_dest_dir_new_or_create_not_a_directory() {
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let file_path = temp.path().join("file.txt");
+        fs::write(&file_path, "test").expect("failed to write file");
+
+        let result = DestDir::new_or_create(file_path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_dest_dir_new_or_create_unwritable_parent() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let readonly_parent = temp.path().join("readonly_parent");
+        fs::create_dir(&readonly_parent).expect("failed to create dir");
+
+        let mut perms = fs::metadata(&readonly_parent)
+            .expect("failed to get metadata")
+            .permissions();
+        perms.set_mode(0o555);
+        fs::set_permissions(&readonly_parent, perms.clone()).expect("failed to set permissions");
+
+        let result = DestDir::new_or_create(readonly_parent.join("child"));
+
+        perms.set_mode(0o755);
+        fs::set_permissions(&readonly_parent, perms).expect("failed to restore permissions");
+
+        assert!(result.is_err());
     }
 }

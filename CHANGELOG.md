@@ -23,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `--allow-world-writable` CLI flag and `allow_world_writable` `SecurityConfig` option to opt in to preserving world-writable permissions (#84)
 
+### Changed
+
+- Updated yanked transitive crates: `js-sys` 0.3.86 → 0.3.91, `wasm-bindgen` 0.2.109 → 0.2.114, `web-sys` 0.3.86 → 0.3.91 (#75)
+
 ## [0.2.7] - 2026-03-07
 
 ### Fixed

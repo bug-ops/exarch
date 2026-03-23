@@ -49,7 +49,7 @@ time = "0.3"
 tokio = "1.50"
 walkdir = "2.5"
 xz2 = { version = "0.1", features = ["static"] }
-zip = { version = "8.2", default-features = false }
+zip = { version = "8.3", default-features = false }
 zstd = "0.13"
 
 [workspace.lints.clippy]

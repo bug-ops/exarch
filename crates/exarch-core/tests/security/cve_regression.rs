@@ -1,5 +1,5 @@
-//! CVE regression tests: CVE-2024-12718, CVE-2024-12905, CVE-2025-48387,
-//! CVE-2026-24842, and Windows backslash path traversal.
+//! CVE regression tests: CVE-2024-12718, CVE-2024-12905, CVE-2025-29787,
+//! CVE-2025-48387, CVE-2026-24842, and Windows backslash path traversal.
 //!
 //! Each test constructs a minimal archive reproducing the attack vector and
 //! verifies that extraction fails with the expected security error.
@@ -10,6 +10,7 @@ use exarch_core::ExtractionError;
 use exarch_core::SecurityConfig;
 use exarch_core::formats::ArchiveFormat;
 use exarch_core::formats::TarArchive;
+use exarch_core::formats::ZipArchive;
 use exarch_core::test_utils::TarTestBuilder;
 use std::io::Cursor;
 use tempfile::TempDir;
@@ -491,6 +492,219 @@ fn test_cve_2026_24842_safe_deep_nested_hardlink_allowed() {
     assert!(
         result.is_ok(),
         "valid internal deep-nested hardlink must be allowed, got: {result:?}"
+    );
+}
+
+// ── CVE-2025-29787: ZIP symlink zip-slip ─────────────────────────────────────
+//
+// The vulnerability pattern: a ZIP archive contains a symlink pointing outside
+// the extraction root, followed by a file entry routed through that symlink.
+//
+// Attack chain:
+//   Entry 1: symlink  `up`            -> `../..`
+//   Entry 2: file     `up/etc/passwd` content=`ESCAPE`
+//
+// exarch is NOT vulnerable. `SafeSymlink::validate` rejects the escaping
+// symlink before it is written to disk, so entry 2 is never extracted.
+//
+// ZIP symlinks use Unix external attributes (mode 0o120_777 = S_IFLNK | 0o777).
+// The `zip` crate's `unix_permissions()` strips the file-type nibble, so this
+// helper assembles the raw ZIP bytes to preserve the mode exactly.
+
+// Unix symlink file-type constant: S_IFLNK (octal 0120000).
+const S_IFLNK: u32 = 0o120_000;
+
+/// CRC32 (IEEE 802.3 polynomial) for raw ZIP construction.
+fn crc32_ieee(data: &[u8]) -> u32 {
+    let mut crc: u32 = 0xFFFF_FFFF;
+    for &byte in data {
+        crc ^= u32::from(byte);
+        for _ in 0..8 {
+            if crc & 1 != 0 {
+                crc = (crc >> 1) ^ 0xEDB8_8320;
+            } else {
+                crc >>= 1;
+            }
+        }
+    }
+    !crc
+}
+
+struct RawZipEntry<'a> {
+    name: &'a str,
+    content: &'a [u8],
+    /// Unix file mode (e.g. `S_IFLNK | 0o777` for symlink, `0o100_644` for
+    /// regular).
+    unix_mode: u32,
+}
+
+/// Builds a multi-entry ZIP in memory with correct Unix file-type bits in the
+/// external attributes field. The `zip` crate's high-level API strips the
+/// file-type nibble, making it impossible to mark entries as symlinks without
+/// raw byte assembly.
+fn build_raw_zip(entries: &[RawZipEntry<'_>]) -> Vec<u8> {
+    let mut buf: Vec<u8> = Vec::new();
+    // Collect (local_offset, name_len, external_attributes, crc, content_len) per
+    // entry.
+    let mut meta: Vec<(u32, u16, u32, u32, u32)> = Vec::new();
+
+    for entry in entries {
+        let crc = crc32_ieee(entry.content);
+        let name_bytes = entry.name.as_bytes();
+        let name_len = name_bytes.len() as u16;
+        let content_len = entry.content.len() as u32;
+        let external_attributes = entry.unix_mode << 16;
+
+        let local_offset = buf.len() as u32;
+        meta.push((
+            local_offset,
+            name_len,
+            external_attributes,
+            crc,
+            content_len,
+        ));
+
+        // Local file header
+        buf.extend_from_slice(b"PK\x03\x04");
+        buf.extend_from_slice(&20u16.to_le_bytes()); // version needed
+        buf.extend_from_slice(&0u16.to_le_bytes()); // flags
+        buf.extend_from_slice(&0u16.to_le_bytes()); // compression: Stored
+        buf.extend_from_slice(&0u16.to_le_bytes()); // mod time
+        buf.extend_from_slice(&0u16.to_le_bytes()); // mod date
+        buf.extend_from_slice(&crc.to_le_bytes());
+        buf.extend_from_slice(&content_len.to_le_bytes()); // compressed size
+        buf.extend_from_slice(&content_len.to_le_bytes()); // uncompressed size
+        buf.extend_from_slice(&name_len.to_le_bytes());
+        buf.extend_from_slice(&0u16.to_le_bytes()); // extra field length
+        buf.extend_from_slice(name_bytes);
+        buf.extend_from_slice(entry.content);
+    }
+
+    let central_dir_offset = buf.len() as u32;
+
+    for (i, entry) in entries.iter().enumerate() {
+        let (local_offset, name_len, external_attributes, crc, content_len) = meta[i];
+        let name_bytes = entry.name.as_bytes();
+
+        // Central directory file header
+        buf.extend_from_slice(b"PK\x01\x02");
+        buf.extend_from_slice(&0x031eu16.to_le_bytes()); // version made by: Unix
+        buf.extend_from_slice(&20u16.to_le_bytes()); // version needed
+        buf.extend_from_slice(&0u16.to_le_bytes()); // flags
+        buf.extend_from_slice(&0u16.to_le_bytes()); // compression: Stored
+        buf.extend_from_slice(&0u16.to_le_bytes()); // mod time
+        buf.extend_from_slice(&0u16.to_le_bytes()); // mod date
+        buf.extend_from_slice(&crc.to_le_bytes());
+        buf.extend_from_slice(&content_len.to_le_bytes()); // compressed size
+        buf.extend_from_slice(&content_len.to_le_bytes()); // uncompressed size
+        buf.extend_from_slice(&name_len.to_le_bytes());
+        buf.extend_from_slice(&0u16.to_le_bytes()); // extra length
+        buf.extend_from_slice(&0u16.to_le_bytes()); // comment length
+        buf.extend_from_slice(&0u16.to_le_bytes()); // disk number start
+        buf.extend_from_slice(&0u16.to_le_bytes()); // internal attributes
+        buf.extend_from_slice(&external_attributes.to_le_bytes());
+        buf.extend_from_slice(&local_offset.to_le_bytes());
+        buf.extend_from_slice(name_bytes);
+    }
+
+    let central_dir_size = (buf.len() as u32) - central_dir_offset;
+    let entry_count = entries.len() as u16;
+
+    // End of central directory record
+    buf.extend_from_slice(b"PK\x05\x06");
+    buf.extend_from_slice(&0u16.to_le_bytes()); // disk number
+    buf.extend_from_slice(&0u16.to_le_bytes()); // disk with central dir
+    buf.extend_from_slice(&entry_count.to_le_bytes());
+    buf.extend_from_slice(&entry_count.to_le_bytes());
+    buf.extend_from_slice(&central_dir_size.to_le_bytes());
+    buf.extend_from_slice(&central_dir_offset.to_le_bytes());
+    buf.extend_from_slice(&0u16.to_le_bytes()); // comment length
+
+    buf
+}
+
+/// Build the CVE-2025-29787 attack ZIP: symlink `up -> ../..` followed by
+/// a file `up/etc/passwd` with content `ESCAPE`.
+fn build_cve_2025_29787_zip() -> Vec<u8> {
+    build_raw_zip(&[
+        RawZipEntry {
+            name: "up",
+            content: b"../..",
+            unix_mode: S_IFLNK | 0o777,
+        },
+        RawZipEntry {
+            name: "up/etc/passwd",
+            content: b"ESCAPE",
+            unix_mode: 0o100_644,
+        },
+    ])
+}
+
+/// When `allow_symlinks` is enabled, `SafeSymlink::validate` rejects the
+/// escaping symlink before it is written to disk. The archive must return a
+/// `SymlinkEscape` error and no file must escape the extraction root.
+#[test]
+#[cfg(unix)]
+fn test_cve_2025_29787_zip_slip_blocked_with_symlinks_enabled() {
+    let dest = TempDir::new().unwrap();
+    let mut config = SecurityConfig::default();
+    config.allowed.symlinks = true;
+
+    let data = build_cve_2025_29787_zip();
+    let mut archive = ZipArchive::new(Cursor::new(data)).unwrap();
+
+    let result = archive.extract(dest.path(), &config);
+
+    assert!(
+        result.is_err(),
+        "extraction must fail: escaping symlink must be rejected"
+    );
+    assert!(
+        matches!(result.unwrap_err(), ExtractionError::SymlinkEscape { .. }),
+        "expected SymlinkEscape"
+    );
+
+    // The symlink must not have been written to disk.
+    assert!(
+        !dest.path().join("up").exists(),
+        "symlink 'up' must not be written to disk"
+    );
+
+    // The payload file must not exist inside the extraction root.
+    assert!(
+        !dest.path().join("up/etc/passwd").exists(),
+        "payload file must not be extracted"
+    );
+
+    // The real /etc/passwd must not have been overwritten.
+    if std::path::Path::new("/etc/passwd").exists() {
+        let content = std::fs::read("/etc/passwd").unwrap();
+        assert_ne!(
+            content, b"ESCAPE",
+            "/etc/passwd must not have been overwritten by the attack"
+        );
+    }
+}
+
+/// With symlinks disabled (the default), the archive is rejected at the first
+/// symlink entry with a `SecurityViolation` before the escape is attempted.
+#[test]
+fn test_cve_2025_29787_zip_slip_blocked_with_symlinks_disabled() {
+    let dest = TempDir::new().unwrap();
+    let config = SecurityConfig::default(); // symlinks = false
+
+    let data = build_cve_2025_29787_zip();
+    let mut archive = ZipArchive::new(Cursor::new(data)).unwrap();
+
+    let result = archive.extract(dest.path(), &config);
+
+    assert!(
+        result.is_err(),
+        "extraction must fail when symlinks are disabled"
+    );
+    assert!(
+        !dest.path().join("up").exists(),
+        "symlink 'up' must not be written when symlinks are disabled"
     );
 }
 

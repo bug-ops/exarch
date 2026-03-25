@@ -39,6 +39,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add CVE-2025-29787 regression test (ZIP symlink zip-slip). exarch is not
+  vulnerable: `SafeSymlink::validate` rejects the escaping symlink before it is
+  written to disk, so the follow-on file entry cannot escape the extraction
+  root (#133).
+
 - `exarch list` and `exarch verify` now accept `--max-files` and `--max-total-size`
   flags, mirroring `exarch extract`. Archives with more than 10 000 entries (e.g.
   ZIP64 archives) can now be listed or verified by passing `--max-files <N>` (#122).

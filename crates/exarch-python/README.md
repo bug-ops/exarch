@@ -7,7 +7,8 @@
 
 Memory-safe archive extraction and creation library for Python.
 
-> **Important:** exarch is designed as a secure replacement for vulnerable archive libraries like Python's `tarfile`, which has known CVEs with CVSS scores up to 9.4.
+> [!IMPORTANT]
+> exarch is designed as a secure replacement for vulnerable archive libraries like Python's `tarfile`, which has known CVEs with CVSS scores up to 9.4.
 
 This package provides Python bindings for [exarch-core](../exarch-core), a Rust library with built-in protection against common archive vulnerabilities.
 
@@ -17,7 +18,8 @@ This package provides Python bindings for [exarch-core](../exarch-core), a Rust 
 pip install exarch
 ```
 
-> **Tip:** Use `uv pip install exarch` for faster installation.
+> [!TIP]
+> Use `uv pip install exarch` for faster installation.
 
 ### Alternative Package Managers
 
@@ -127,8 +129,12 @@ Extract an archive to the specified directory with security validation.
 | Attribute | Type | Description |
 |-----------|------|-------------|
 | `files_extracted` | `int` | Number of files extracted |
+| `directories_created` | `int` | Number of directories created |
+| `symlinks_created` | `int` | Number of symlinks created |
 | `bytes_written` | `int` | Total bytes written |
 | `duration_ms` | `int` | Extraction duration in milliseconds |
+| `files_skipped` | `int` | Number of files skipped (e.g. duplicates) |
+| `warnings` | `list[str]` | Warning messages generated during extraction |
 
 **Raises:**
 
@@ -150,9 +156,10 @@ Builder-style security configuration.
 
 ```python
 config = exarch.SecurityConfig()
-config = config.max_file_size(100 * 1024 * 1024)   # 100 MB per file
-config = config.max_total_size(1024 * 1024 * 1024) # 1 GB total
-config = config.max_file_count(10_000)              # Max 10k files
+config = config.max_file_size(100 * 1024 * 1024)    # 100 MB per file
+config = config.max_total_size(1024 * 1024 * 1024)  # 1 GB total
+config = config.max_file_count(10_000)               # Max 10k files
+config = config.allow_solid_archives(True)           # Allow solid 7z archives
 ```
 
 ## Security Features
@@ -168,7 +175,8 @@ The library provides built-in protection against:
 | Permission sanitization | Strips setuid/setgid bits |
 | Size limits | Enforces file and total size limits |
 
-> **Caution:** Unlike Python's standard `tarfile` module, exarch applies security validation by default.
+> [!CAUTION]
+> Unlike Python's standard `tarfile` module, exarch applies security validation by default.
 
 ## Supported Formats
 
@@ -182,7 +190,8 @@ The library provides built-in protection against:
 | ZIP | `.zip` | ✅ | ✅ | ✅ | ✅ |
 | 7z | `.7z` | ✅ | — | ✅ | ✅ |
 
-> **Note:** 7z creation is not yet supported. Solid and encrypted 7z archives are rejected for security reasons. Unix symlinks inside 7z archives are reported as regular files (sevenz-rust2 API limitation).
+> [!NOTE]
+> 7z creation is not yet supported. Solid and encrypted 7z archives are rejected for security reasons. Unix symlinks inside 7z archives are reported as regular files (sevenz-rust2 API limitation).
 
 ## Comparison with tarfile
 

@@ -8,7 +8,8 @@
 
 Memory-safe archive extraction and creation library for Node.js.
 
-> **Important:** exarch is designed as a secure replacement for vulnerable archive libraries like `tar-fs`, which has known CVEs with CVSS scores up to 9.4.
+> [!IMPORTANT]
+> exarch is designed as a secure replacement for vulnerable archive libraries like `tar-fs`, which has known CVEs with CVSS scores up to 9.4.
 
 This package provides Node.js bindings for [exarch-core](../exarch-core), a Rust library with built-in protection against common archive vulnerabilities.
 
@@ -28,7 +29,8 @@ pnpm add exarch-rs
 bun add exarch-rs
 ```
 
-> **Note:** This package includes TypeScript definitions. No need for separate `@types` package.
+> [!NOTE]
+> This package includes TypeScript definitions. No need for a separate `@types` package.
 
 ## Requirements
 
@@ -79,7 +81,8 @@ const result = extractArchiveSync('archive.tar.gz', '/output/path');
 console.log(`Extracted ${result.filesExtracted} files`);
 ```
 
-> **Tip:** Prefer the async API to avoid blocking the event loop during extraction.
+> [!TIP]
+> Prefer the async API to avoid blocking the event loop during extraction.
 
 ### ES Modules
 
@@ -151,9 +154,13 @@ Synchronous version. Blocks the event loop until extraction completes.
 
 ```typescript
 interface ExtractionReport {
-  filesExtracted: number;  // Number of files extracted
-  bytesWritten: number;    // Total bytes written
-  durationMs: number;      // Extraction duration in milliseconds
+  filesExtracted: number;     // Number of files extracted
+  directoriesCreated: number; // Number of directories created
+  symlinksCreated: number;    // Number of symlinks created
+  bytesWritten: number;       // Total bytes written
+  durationMs: number;         // Extraction duration in milliseconds
+  filesSkipped: number;       // Files skipped (e.g. duplicates)
+  warnings: string[];         // Warning messages from extraction
 }
 ```
 
@@ -163,10 +170,11 @@ Builder-style security configuration.
 
 ```typescript
 const config = new SecurityConfig()
-  .maxFileSize(bytes)       // Max size per file
-  .maxTotalSize(bytes)      // Max total extraction size
-  .maxFileCount(count)      // Max number of files
-  .maxCompressionRatio(n);  // Max compression ratio (zip bomb detection)
+  .maxFileSize(bytes)              // Max size per file
+  .maxTotalSize(bytes)             // Max total extraction size
+  .maxFileCount(count)             // Max number of files
+  .maxCompressionRatio(n)          // Max compression ratio (zip bomb detection)
+  .setAllowSolidArchives(true);    // Allow solid 7z archives (default: false)
 ```
 
 ## Security Features
@@ -182,7 +190,8 @@ The library provides built-in protection against:
 | Permission sanitization | Strips setuid/setgid bits |
 | Size limits | Enforces file and total size limits |
 
-> **Caution:** Unlike many Node.js archive libraries, exarch applies security validation by default.
+> [!CAUTION]
+> Unlike many Node.js archive libraries, exarch applies security validation by default.
 
 ## Supported Formats
 
@@ -196,7 +205,8 @@ The library provides built-in protection against:
 | ZIP | `.zip` | ✅ | ✅ | ✅ | ✅ |
 | 7z | `.7z` | ✅ | — | ✅ | ✅ |
 
-> **Note:** 7z creation is not yet supported. Solid and encrypted 7z archives are rejected for security reasons. Unix symlinks inside 7z archives are reported as regular files (sevenz-rust2 API limitation).
+> [!NOTE]
+> 7z creation is not yet supported. Solid and encrypted 7z archives are rejected for security reasons. Unix symlinks inside 7z archives are reported as regular files (sevenz-rust2 API limitation).
 
 ## Comparison with tar-fs
 

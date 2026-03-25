@@ -66,9 +66,10 @@ fn main() -> Result<(), exarch_core::ExtractionError> {
     let config = SecurityConfig::default();
     let report = extract_archive("archive.tar.gz", "/output/path", &config)?;
 
-    println!("Extracted {} files ({} bytes)",
+    println!("Extracted {} files ({} bytes, {} skipped)",
         report.files_extracted,
-        report.bytes_written);
+        report.bytes_written,
+        report.files_skipped);
     Ok(())
 }
 ```

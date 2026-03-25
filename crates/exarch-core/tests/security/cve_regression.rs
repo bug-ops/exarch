@@ -317,7 +317,11 @@ fn test_rustsec_2026_0067_symlink_dir_chmod_default_config() {
 
     let temp = TempDir::new().unwrap();
     let mut archive = TarArchive::new(Cursor::new(tar_data));
-    let result = archive.extract(temp.path(), &SecurityConfig::default());
+    let result = archive.extract(
+        temp.path(),
+        &SecurityConfig::default(),
+        &ExtractionOptions::default(),
+    );
 
     assert!(
         matches!(
@@ -351,7 +355,7 @@ fn test_rustsec_2026_0067_symlink_dir_chmod_symlinks_allowed() {
     config.allowed.symlinks = true;
 
     let mut archive = TarArchive::new(Cursor::new(tar_data));
-    let result = archive.extract(temp.path(), &config);
+    let result = archive.extract(temp.path(), &config, &ExtractionOptions::default());
 
     assert!(
         matches!(result, Err(ExtractionError::SymlinkEscape { .. })),

@@ -2,6 +2,9 @@
 
 use std::fs::File;
 use std::io::BufReader;
+use std::io::ErrorKind;
+use std::io::Read;
+use std::io::Seek;
 use std::path::Path;
 use std::path::PathBuf;
 use std::time::SystemTime;
@@ -329,17 +332,27 @@ fn list_sevenz(
 
     let mut file = File::open(archive_path)?;
     let password = Password::empty();
-    let archive = Archive::read(&mut file, &password).map_err(|e| {
-        let err_str = e.to_string().to_lowercase();
-        if err_str.contains("encrypt") || err_str.contains("password") {
-            return ExtractionError::SecurityViolation {
-                reason: "encrypted 7z archive detected. Password-protected archives are not \
-                         supported. Decrypt the archive externally and try again."
-                    .into(),
-            };
+    let archive = match Archive::read(&mut file, &password) {
+        Ok(a) => a,
+        Err(e) => {
+            let err_str = e.to_string().to_lowercase();
+            if err_str.contains("encrypt") || err_str.contains("password") {
+                return Err(ExtractionError::SecurityViolation {
+                    reason: "encrypted 7z archive detected. Password-protected archives are not \
+                             supported. Decrypt the archive externally and try again."
+                        .into(),
+                });
+            }
+            // Handle valid empty 7z archives: sevenz-rust2 fails with UnexpectedEof on
+            // 32-byte archives that contain no files.
+            if is_empty_sevenz_file(&e, &mut file) {
+                return Ok(ArchiveManifest::new(format));
+            }
+            return Err(ExtractionError::InvalidArchive(format!(
+                "failed to open 7z archive: {e}"
+            )));
         }
-        ExtractionError::InvalidArchive(format!("failed to open 7z archive: {e}"))
-    })?;
+    };
 
     let mut manifest = ArchiveManifest::new(format);
 
@@ -367,7 +380,18 @@ fn list_sevenz(
 
         let entry_type = sevenz_manifest_entry_type(entry);
         let size = entry.size;
-        let compressed_size = entry.has_stream.then_some(entry.compressed_size);
+        let compressed_size = if archive.is_solid {
+            // In solid archives, only the first entry per block has a meaningful
+            // compressed_size. Remaining entries report 0, which is a valid artifact of
+            // solid block compression — omit to avoid false positives in zip bomb
+            // detection.
+            entry
+                .has_stream
+                .then_some(entry.compressed_size)
+                .filter(|&cs| cs > 0)
+        } else {
+            entry.has_stream.then_some(entry.compressed_size)
+        };
         let modified = entry
             .has_last_modified_date
             .then(|| SystemTime::from(entry.last_modified_date));
@@ -414,6 +438,37 @@ fn sevenz_manifest_entry_type(entry: &sevenz_rust2::ArchiveEntry) -> ManifestEnt
         return ManifestEntryType::Symlink;
     }
     ManifestEntryType::File
+}
+
+/// Checks whether a sevenz-rust2 parse failure is due to a valid empty 7z
+/// archive.
+///
+/// sevenz-rust2 fails with `UnexpectedEof` on valid 32-byte empty archives (0
+/// files). Requires: `UnexpectedEof` I/O error + valid 7z magic + file size ==
+/// 32 bytes exactly.
+fn is_empty_sevenz_file(err: &sevenz_rust2::Error, file: &mut File) -> bool {
+    const SEVENZ_MAGIC: [u8; 6] = [0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C];
+    // A valid empty 7z archive is exactly 32 bytes:
+    // signature (6) + version (2) + StartHeader CRC (4) + StartHeader (20).
+    const EMPTY_ARCHIVE_SIZE: u64 = 32;
+
+    let is_eof = matches!(err, sevenz_rust2::Error::Io(io_err, _) if io_err.kind() == ErrorKind::UnexpectedEof);
+    if !is_eof {
+        return false;
+    }
+
+    let Ok(size) = file.seek(std::io::SeekFrom::End(0)) else {
+        return false;
+    };
+    if size != EMPTY_ARCHIVE_SIZE {
+        return false;
+    }
+
+    let Ok(_) = file.seek(std::io::SeekFrom::Start(0)) else {
+        return false;
+    };
+    let mut magic = [0u8; 6];
+    file.read_exact(&mut magic).is_ok() && magic == SEVENZ_MAGIC
 }
 
 /// Returns `true` if the path contains traversal attempts.
@@ -1314,15 +1369,12 @@ mod tests {
     fn test_list_sevenz_empty() {
         let path = std::path::Path::new("../../tests/fixtures/empty.7z");
         let config = SecurityConfig::default();
-        // Empty 7z archives may fail to parse with sevenz-rust2 (known limitation).
-        // Accept either a successful empty manifest or an InvalidArchive error.
-        match list_archive(path, &config) {
-            Ok(manifest) => {
-                assert_eq!(manifest.total_entries, 0, "empty.7z should have no entries");
-            }
-            Err(ExtractionError::InvalidArchive(_)) => {}
-            Err(e) => panic!("unexpected error for empty.7z: {e}"),
-        }
+        let manifest = list_archive(path, &config).unwrap();
+        assert_eq!(manifest.total_entries, 0, "empty.7z should have no entries");
+        assert_eq!(
+            manifest.total_size, 0,
+            "empty.7z should have zero total size"
+        );
     }
 
     #[test]
@@ -1535,6 +1587,27 @@ mod tests {
     }
 
     #[test]
+    fn test_list_sevenz_solid_compressed_size() {
+        // Entries in solid archives should not have compressed_size=Some(0) with
+        // size>0. That combination would trigger a false positive in zip bomb
+        // detection.
+        let path = std::path::Path::new("../../tests/fixtures/solid.7z");
+        let config = SecurityConfig::default();
+        let manifest = list_archive(path, &config).unwrap();
+        for entry in &manifest.entries {
+            if entry.size > 0 {
+                assert_ne!(
+                    entry.compressed_size,
+                    Some(0),
+                    "entry {:?} has compressed_size=Some(0) with size={}, which is a false positive trigger",
+                    entry.path,
+                    entry.size
+                );
+            }
+        }
+    }
+
+    #[test]
     fn test_list_sevenz_unix_symlink_reported_as_file() {
         // Unix symlinks in 7z archives cannot be detected by sevenz-rust2 API.
         // They are reported as ManifestEntryType::File (known limitation).
@@ -1554,5 +1627,30 @@ mod tests {
                 entry.path.display()
             );
         }
+    }
+
+    #[test]
+    fn test_verify_sevenz_solid_no_false_positive() {
+        use crate::inspection::report::IssueSeverity;
+
+        let path = std::path::Path::new("../../tests/fixtures/solid.7z");
+        let config = SecurityConfig {
+            allow_solid_archives: true,
+            ..SecurityConfig::default()
+        };
+        let report = crate::verify_archive(path, &config).unwrap();
+        assert_ne!(
+            report.status,
+            crate::inspection::report::VerificationStatus::Fail,
+            "solid.7z should not fail verification when solid archives are allowed"
+        );
+        let has_false_positive = report.issues.iter().any(|issue| {
+            issue.severity == IssueSeverity::High
+                && issue.message.to_lowercase().contains("compressed_size")
+        });
+        assert!(
+            !has_false_positive,
+            "solid.7z verification should not produce High-severity compressed_size issue"
+        );
     }
 }

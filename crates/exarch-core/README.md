@@ -119,18 +119,18 @@ let report = ArchiveCreator::new()
 
 ## Supported Formats
 
-| Extension | Format | Compression | Extraction | Creation |
-|-----------|--------|-------------|------------|----------|
-| `.tar` | TAR | None | ✅ | ✅ |
-| `.tar.gz`, `.tgz` | TAR | Gzip | ✅ | ✅ |
-| `.tar.bz2`, `.tbz2` | TAR | Bzip2 | ✅ | ✅ |
-| `.tar.xz`, `.txz` | TAR | XZ | ✅ | ✅ |
-| `.tar.zst`, `.tzst` | TAR | Zstd | ✅ | ✅ |
-| `.zip` | ZIP | Deflate | ✅ | ✅ |
-| `.7z` | 7z | LZMA/LZMA2 | ✅ | — |
+| Extension | Format | Compression | Extract | Create | List | Verify |
+|-----------|--------|-------------|:-------:|:------:|:----:|:------:|
+| `.tar` | TAR | None | ✅ | ✅ | ✅ | ✅ |
+| `.tar.gz`, `.tgz` | TAR | Gzip | ✅ | ✅ | ✅ | ✅ |
+| `.tar.bz2`, `.tbz2` | TAR | Bzip2 | ✅ | ✅ | ✅ | ✅ |
+| `.tar.xz`, `.txz` | TAR | XZ | ✅ | ✅ | ✅ | ✅ |
+| `.tar.zst`, `.tzst` | TAR | Zstd | ✅ | ✅ | ✅ | ✅ |
+| `.zip` | ZIP | Deflate | ✅ | ✅ | ✅ | ✅ |
+| `.7z` | 7z | LZMA/LZMA2 | ✅ | — | ✅ | ✅ |
 
 > [!NOTE]
-> 7z creation is not yet supported. Solid and encrypted 7z archives are rejected for security reasons.
+> 7z creation is not yet supported. Solid and encrypted 7z archives are rejected for security reasons. Unix symlinks inside 7z archives are reported as regular files (sevenz-rust2 API limitation).
 
 ## API Overview
 

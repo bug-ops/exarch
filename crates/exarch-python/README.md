@@ -172,17 +172,17 @@ The library provides built-in protection against:
 
 ## Supported Formats
 
-| Format | Extensions | Extract | Create |
-|--------|------------|:-------:|:------:|
-| TAR | `.tar` | ✅ | ✅ |
-| TAR+GZIP | `.tar.gz`, `.tgz` | ✅ | ✅ |
-| TAR+BZIP2 | `.tar.bz2`, `.tbz2` | ✅ | ✅ |
-| TAR+XZ | `.tar.xz`, `.txz` | ✅ | ✅ |
-| TAR+ZSTD | `.tar.zst`, `.tzst` | ✅ | ✅ |
-| ZIP | `.zip` | ✅ | ✅ |
-| 7z | `.7z` | ✅ | — |
+| Format | Extensions | Extract | Create | List | Verify |
+|--------|------------|:-------:|:------:|:----:|:------:|
+| TAR | `.tar` | ✅ | ✅ | ✅ | ✅ |
+| TAR+GZIP | `.tar.gz`, `.tgz` | ✅ | ✅ | ✅ | ✅ |
+| TAR+BZIP2 | `.tar.bz2`, `.tbz2` | ✅ | ✅ | ✅ | ✅ |
+| TAR+XZ | `.tar.xz`, `.txz` | ✅ | ✅ | ✅ | ✅ |
+| TAR+ZSTD | `.tar.zst`, `.tzst` | ✅ | ✅ | ✅ | ✅ |
+| ZIP | `.zip` | ✅ | ✅ | ✅ | ✅ |
+| 7z | `.7z` | ✅ | — | ✅ | ✅ |
 
-> **Note:** 7z creation is not yet supported. Solid and encrypted 7z archives are rejected for security reasons.
+> **Note:** 7z creation is not yet supported. Solid and encrypted 7z archives are rejected for security reasons. Unix symlinks inside 7z archives are reported as regular files (sevenz-rust2 API limitation).
 
 ## Comparison with tarfile
 

@@ -227,15 +227,15 @@ exarch is designed with security as a primary concern, protecting against common
 
 ## Supported Formats
 
-| Format | Extension | Extraction | Creation |
-|--------|-----------|------------|----------|
-| TAR | `.tar` | ✅ | ✅ |
-| TAR + gzip | `.tar.gz`, `.tgz` | ✅ | ✅ |
-| TAR + bzip2 | `.tar.bz2`, `.tbz2` | ✅ | ✅ |
-| TAR + xz | `.tar.xz`, `.txz` | ✅ | ✅ |
-| TAR + zstd | `.tar.zst`, `.tzst` | ✅ | ✅ |
-| ZIP | `.zip` | ✅ | ✅ |
-| 7z | `.7z` | ✅ | — |
+| Format | Extension | Extract | Create | List | Verify |
+|--------|-----------|:-------:|:------:|:----:|:------:|
+| TAR | `.tar` | ✅ | ✅ | ✅ | ✅ |
+| TAR + gzip | `.tar.gz`, `.tgz` | ✅ | ✅ | ✅ | ✅ |
+| TAR + bzip2 | `.tar.bz2`, `.tbz2` | ✅ | ✅ | ✅ | ✅ |
+| TAR + xz | `.tar.xz`, `.txz` | ✅ | ✅ | ✅ | ✅ |
+| TAR + zstd | `.tar.zst`, `.tzst` | ✅ | ✅ | ✅ | ✅ |
+| ZIP | `.zip` | ✅ | ✅ | ✅ | ✅ |
+| 7z | `.7z` | ✅ | — | ✅ | ✅ |
 
 > [!NOTE]
 > 7z creation is not yet supported. Solid and encrypted 7z archives are rejected for security reasons.

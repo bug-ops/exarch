@@ -16,7 +16,7 @@ Memory-safe archive extraction and creation library with Python and Node.js bind
 
 ## Features
 
-- **Extract and create archives** — Full support for TAR and ZIP (extract and create), plus 7z extraction
+- **Extract, create, list, and verify archives** — Full support for TAR and ZIP (all operations), plus 7z extraction, listing, and verification
 - **Security-first design** — Default-deny security model with protection against path traversal, symlink attacks, zip bombs, and more
 - **Type-driven safety** — Rust's type system ensures validated paths can only be constructed through security checks
 - **Multi-language support** — Native bindings for Python (PyO3) and Node.js (napi-rs)
@@ -160,18 +160,18 @@ let config = SecurityConfig {
 
 ## Supported Formats
 
-| Format | Extensions | Extract | Create | Compression |
-|--------|------------|:-------:|:------:|-------------|
-| TAR | `.tar` | ✅ | ✅ | None |
-| TAR+GZIP | `.tar.gz`, `.tgz` | ✅ | ✅ | gzip |
-| TAR+BZIP2 | `.tar.bz2`, `.tbz2` | ✅ | ✅ | bzip2 |
-| TAR+XZ | `.tar.xz`, `.txz` | ✅ | ✅ | xz/lzma |
-| TAR+ZSTD | `.tar.zst`, `.tzst` | ✅ | ✅ | zstandard |
-| ZIP | `.zip` | ✅ | ✅ | deflate, deflate64, bzip2, zstd |
-| 7z | `.7z` | ✅ | — | lzma, lzma2 |
+| Format | Extensions | Extract | Create | List | Verify | Compression |
+|--------|------------|:-------:|:------:|:----:|:------:|-------------|
+| TAR | `.tar` | ✅ | ✅ | ✅ | ✅ | None |
+| TAR+GZIP | `.tar.gz`, `.tgz` | ✅ | ✅ | ✅ | ✅ | gzip |
+| TAR+BZIP2 | `.tar.bz2`, `.tbz2` | ✅ | ✅ | ✅ | ✅ | bzip2 |
+| TAR+XZ | `.tar.xz`, `.txz` | ✅ | ✅ | ✅ | ✅ | xz/lzma |
+| TAR+ZSTD | `.tar.zst`, `.tzst` | ✅ | ✅ | ✅ | ✅ | zstandard |
+| ZIP | `.zip` | ✅ | ✅ | ✅ | ✅ | deflate, deflate64, bzip2, zstd |
+| 7z | `.7z` | ✅ | — | ✅ | ✅ | lzma, lzma2 |
 
 > [!NOTE]
-> 7z creation is not yet supported. Solid and encrypted 7z archives are rejected for security reasons.
+> 7z creation is not yet supported. Solid and encrypted 7z archives are rejected for security reasons. Unix symlinks inside 7z archives are reported as regular files (sevenz-rust2 API limitation).
 
 ## Project Structure
 

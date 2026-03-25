@@ -8,8 +8,7 @@
 
 Memory-safe archive extraction and creation library for Node.js.
 
-> [!IMPORTANT]
-> exarch is designed as a secure replacement for vulnerable archive libraries like `tar-fs`, which has known CVEs with CVSS scores up to 9.4.
+**Important:** exarch is designed as a secure replacement for vulnerable archive libraries like `tar-fs`, which has known CVEs with CVSS scores up to 9.4.
 
 This package provides Node.js bindings for [exarch-core](../exarch-core), a Rust library with built-in protection against common archive vulnerabilities.
 
@@ -29,8 +28,7 @@ pnpm add exarch-rs
 bun add exarch-rs
 ```
 
-> [!NOTE]
-> This package includes TypeScript definitions. No need for a separate `@types` package.
+**Note:** This package includes TypeScript definitions. No need for a separate `@types` package.
 
 ## Requirements
 
@@ -81,8 +79,7 @@ const result = extractArchiveSync('archive.tar.gz', '/output/path');
 console.log(`Extracted ${result.filesExtracted} files`);
 ```
 
-> [!TIP]
-> Prefer the async API to avoid blocking the event loop during extraction.
+**Tip:** Prefer the async API to avoid blocking the event loop during extraction.
 
 ### ES Modules
 
@@ -190,8 +187,7 @@ The library provides built-in protection against:
 | Permission sanitization | Strips setuid/setgid bits |
 | Size limits | Enforces file and total size limits |
 
-> [!CAUTION]
-> Unlike many Node.js archive libraries, exarch applies security validation by default.
+**Caution:** Unlike many Node.js archive libraries, exarch applies security validation by default.
 
 ## Supported Formats
 
@@ -205,8 +201,7 @@ The library provides built-in protection against:
 | ZIP | `.zip` | ✅ | ✅ | ✅ | ✅ |
 | 7z | `.7z` | ✅ | — | ✅ | ✅ |
 
-> [!NOTE]
-> 7z creation is not yet supported. Solid and encrypted 7z archives are rejected for security reasons. Unix symlinks inside 7z archives are reported as regular files (sevenz-rust2 API limitation).
+**Note:** 7z creation is not yet supported. Solid and encrypted 7z archives are rejected for security reasons. Unix symlinks inside 7z archives are reported as regular files (sevenz-rust2 API limitation).
 
 ## Comparison with tar-fs
 

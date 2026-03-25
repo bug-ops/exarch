@@ -1006,10 +1006,9 @@ mod tests {
     }
 
     #[test]
-    fn test_list_archive_7z_unsupported() {
-        // .7z listing is not yet supported — must return InvalidArchive.
+    fn test_list_sevenz_corrupt() {
+        // A truncated 7z header (valid magic, invalid body) must return InvalidArchive.
         let mut temp_file = NamedTempFile::with_suffix(".7z").unwrap();
-        // Write a minimal 7z magic signature so detect_format returns SevenZ.
         temp_file.write_all(b"7z\xbc\xaf\x27\x1c\x00\x04").unwrap();
         temp_file.flush().unwrap();
 
@@ -1017,7 +1016,7 @@ mod tests {
         let result = list_archive(temp_file.path(), &config);
         assert!(
             matches!(result, Err(ExtractionError::InvalidArchive(_))),
-            "expected InvalidArchive for 7z, got: {result:?}"
+            "expected InvalidArchive for truncated 7z, got: {result:?}"
         );
     }
 
@@ -1371,5 +1370,185 @@ mod tests {
             crate::inspection::report::VerificationStatus::Fail,
             "simple.7z should not fail verification"
         );
+    }
+
+    #[test]
+    fn test_list_sevenz_format_field() {
+        let path = std::path::Path::new("../../tests/fixtures/simple.7z");
+        let config = SecurityConfig::default();
+        let manifest = list_archive(path, &config).unwrap();
+        assert_eq!(
+            manifest.format,
+            crate::formats::detect::ArchiveType::SevenZ,
+            "manifest format should be SevenZ"
+        );
+    }
+
+    /// Unit test for `sevenz_manifest_entry_type` — reparse point detection.
+    /// Does not require a fixture; constructs `ArchiveEntry` values directly.
+    #[test]
+    fn test_sevenz_manifest_entry_type_reparse_point() {
+        use sevenz_rust2::ArchiveEntry;
+
+        let mut entry = ArchiveEntry::new_file("link");
+        entry.has_windows_attributes = true;
+        entry.windows_attributes = 0x0000_0400; // FILE_ATTRIBUTE_REPARSE_POINT
+        assert_eq!(
+            sevenz_manifest_entry_type(&entry),
+            ManifestEntryType::Symlink,
+            "reparse point should be detected as Symlink"
+        );
+    }
+
+    #[test]
+    fn test_sevenz_manifest_entry_type_regular_file() {
+        use sevenz_rust2::ArchiveEntry;
+
+        let entry = ArchiveEntry::new_file("file.txt");
+        assert_eq!(
+            sevenz_manifest_entry_type(&entry),
+            ManifestEntryType::File,
+            "regular file should be File"
+        );
+    }
+
+    #[test]
+    fn test_sevenz_manifest_entry_type_directory() {
+        use sevenz_rust2::ArchiveEntry;
+
+        let mut entry = ArchiveEntry::new_file("dir/");
+        entry.is_directory = true;
+        assert_eq!(
+            sevenz_manifest_entry_type(&entry),
+            ManifestEntryType::Directory,
+            "directory entry should be Directory"
+        );
+    }
+
+    /// Creates a minimal in-memory 7z archive with a single file entry
+    /// and returns the archive bytes. Uses stored (no compression) method
+    /// to keep test archives fast.
+    fn make_sevenz_archive(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        use sevenz_rust2::ArchiveEntry;
+        use sevenz_rust2::ArchiveWriter;
+        use sevenz_rust2::EncoderConfiguration;
+        use sevenz_rust2::EncoderMethod;
+        use std::io::Cursor;
+
+        let buf = Cursor::new(Vec::new());
+        let mut writer = ArchiveWriter::new(buf).unwrap();
+        writer.set_content_methods(vec![EncoderConfiguration::new(EncoderMethod::COPY)]);
+        for (name, data) in entries {
+            let mut entry = ArchiveEntry::new_file(name);
+            entry.has_stream = true;
+            entry.size = data.len() as u64;
+            writer
+                .push_archive_entry(entry, Some(std::io::Cursor::new(*data)))
+                .unwrap();
+        }
+        writer.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn test_list_sevenz_path_traversal_dotdot() {
+        // Create an archive with a traversal entry name; list should reject it.
+        let archive_bytes = make_sevenz_archive(&[("../escape.txt", b"evil")]);
+        let mut temp_file = NamedTempFile::with_suffix(".7z").unwrap();
+        temp_file.write_all(&archive_bytes).unwrap();
+        temp_file.flush().unwrap();
+
+        let config = SecurityConfig::default();
+        let result = list_archive(temp_file.path(), &config);
+        assert!(
+            matches!(result, Err(ExtractionError::PathTraversal { .. })),
+            "expected PathTraversal error for ../ entry, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_list_sevenz_quota_file_count() {
+        // Create an archive with 3 files and set a quota of 2.
+        let archive_bytes =
+            make_sevenz_archive(&[("a.txt", b"a"), ("b.txt", b"b"), ("c.txt", b"c")]);
+        let mut temp_file = NamedTempFile::with_suffix(".7z").unwrap();
+        temp_file.write_all(&archive_bytes).unwrap();
+        temp_file.flush().unwrap();
+
+        let mut config = SecurityConfig::default();
+        config.max_file_count = 2;
+        let result = list_archive(temp_file.path(), &config);
+        assert!(
+            matches!(
+                result,
+                Err(ExtractionError::QuotaExceeded {
+                    resource: crate::error::QuotaResource::FileCount { .. }
+                })
+            ),
+            "expected FileCount QuotaExceeded, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_list_sevenz_quota_total_size() {
+        // Create a file with 100 bytes and set a total-size quota of 50 bytes.
+        let data = vec![0u8; 100];
+        let archive_bytes = make_sevenz_archive(&[("big.bin", &data)]);
+        let mut temp_file = NamedTempFile::with_suffix(".7z").unwrap();
+        temp_file.write_all(&archive_bytes).unwrap();
+        temp_file.flush().unwrap();
+
+        let mut config = SecurityConfig::default();
+        config.max_total_size = 50;
+        let result = list_archive(temp_file.path(), &config);
+        assert!(
+            matches!(
+                result,
+                Err(ExtractionError::QuotaExceeded {
+                    resource: crate::error::QuotaResource::TotalSize { .. }
+                })
+            ),
+            "expected TotalSize QuotaExceeded, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_list_sevenz_hardlink_reported_as_file() {
+        // 7z has no hardlink concept — entries appear as regular files.
+        let path = std::path::Path::new("../../tests/fixtures/hardlink.7z");
+        let config = SecurityConfig::default();
+        let manifest = list_archive(path, &config).unwrap();
+        assert!(
+            manifest.total_entries > 0,
+            "hardlink.7z should have entries"
+        );
+        for entry in &manifest.entries {
+            assert_ne!(
+                entry.entry_type,
+                ManifestEntryType::Hardlink,
+                "7z format never produces Hardlink entries (no API support)"
+            );
+        }
+    }
+
+    #[test]
+    fn test_list_sevenz_unix_symlink_reported_as_file() {
+        // Unix symlinks in 7z archives cannot be detected by sevenz-rust2 API.
+        // They are reported as ManifestEntryType::File (known limitation).
+        let path = std::path::Path::new("../../tests/fixtures/symlink-unix.7z");
+        let config = SecurityConfig::default();
+        let manifest = list_archive(path, &config).unwrap();
+        assert!(
+            manifest.total_entries > 0,
+            "symlink-unix.7z should have entries"
+        );
+        // All entries should be File or Directory — no Symlink (API limitation).
+        for entry in &manifest.entries {
+            assert_ne!(
+                entry.entry_type,
+                ManifestEntryType::Symlink,
+                "Unix symlinks in 7z are undetectable and reported as File: {}",
+                entry.path.display()
+            );
+        }
     }
 }

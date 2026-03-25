@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Fix two-hop symlink chain bypass in `SafeSymlink` and `SafeHardlink` validation
+  (GHSA-83g3-92jg-28cx variant — #116). String-based `..` normalization did not
+  account for on-disk symlinks written by earlier archive entries; a second symlink
+  whose target traversed through a previously extracted symlink could redirect
+  subsequent `..` steps outside the extraction root. The fix replaces string
+  normalization with a component-by-component on-disk walk that calls
+  `fs::canonicalize` whenever an on-disk symlink is encountered, verifying
+  containment within the destination directory after every step.
+  Requires `--allow-symlinks` AND `--allow-hardlinks` (both non-default) to
+  trigger; hardlink escape is additionally blocked by OS restrictions on
+  macOS for root-owned files.
+
 ### Added
 
 - `list_archive` and `verify_archive` now support 7z archives, consistent with

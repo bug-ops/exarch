@@ -83,6 +83,7 @@
 //! ```
 
 use std::cell::RefCell;
+use std::io::ErrorKind;
 use std::io::Read;
 use std::io::Seek;
 use std::path::Path;
@@ -219,17 +220,32 @@ impl<R: Read + Seek> SevenZArchive<R> {
     pub fn new(mut source: R) -> Result<Self> {
         // Step 1: Verify it's a valid 7z archive by reading metadata
         let password = Password::empty();
-        let archive = Archive::read(&mut source, &password).map_err(|e| {
-            // SECURITY: Check if error indicates encryption
-            let err_str = e.to_string().to_lowercase();
-            if err_str.contains("encrypt") || err_str.contains("password") {
-                return ExtractionError::SecurityViolation {
-                    reason: "encrypted 7z archive detected. Password-protected archives are not supported. \
-                             Decrypt the archive externally and try again.".into(),
-                };
+        let archive = match Archive::read(&mut source, &password) {
+            Ok(a) => a,
+            Err(e) => {
+                // SECURITY: Check if error indicates encryption
+                let err_str = e.to_string().to_lowercase();
+                if err_str.contains("encrypt") || err_str.contains("password") {
+                    return Err(ExtractionError::SecurityViolation {
+                        reason: "encrypted 7z archive detected. Password-protected archives are not supported. \
+                                 Decrypt the archive externally and try again.".into(),
+                    });
+                }
+                // Handle valid empty 7z archives: sevenz-rust2 fails with UnexpectedEof on
+                // 32-byte archives that contain no files. Check for a valid 7z signature
+                // and small file size before treating as an empty archive.
+                if is_empty_sevenz_archive(&e, &mut source) {
+                    return Ok(Self {
+                        source,
+                        entries: vec![],
+                        is_solid: false,
+                    });
+                }
+                return Err(ExtractionError::InvalidArchive(format!(
+                    "failed to open 7z archive: {e}"
+                )));
             }
-            ExtractionError::InvalidArchive(format!("failed to open 7z archive: {e}"))
-        })?;
+        };
 
         // Step 2: SECURITY - Cache solid flag for later validation
         // NOTE: Actual enforcement happens in extract() via SecurityConfig
@@ -432,6 +448,12 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
             }
         }
 
+        // Empty archives: skip extraction entirely — decompress_with_extract_fn
+        // would fail with UnexpectedEof on valid 32-byte empty 7z archives.
+        if self.entries.is_empty() {
+            return Ok(ExtractionReport::new());
+        }
+
         // Step 3: Extract with FRESH validator to avoid quota double-counting
         // Note: sevenz-rust2 still parses archive internally, but we avoid
         // double parsing in our validation logic
@@ -548,6 +570,42 @@ impl SevenZEntryAdapter {
         entry.has_windows_attributes
             && (entry.windows_attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0
     }
+}
+
+/// Checks whether a sevenz-rust2 parse failure is due to a valid empty 7z
+/// archive.
+///
+/// sevenz-rust2 fails with `UnexpectedEof` on valid 32-byte empty archives (0
+/// files). We detect this by requiring:
+/// 1. The error is an I/O error with `ErrorKind::UnexpectedEof`
+/// 2. The file starts with the 7z magic signature
+/// 3. The file size is exactly 32 bytes (the only valid empty archive size)
+fn is_empty_sevenz_archive<R: Read + Seek>(err: &sevenz_rust2::Error, source: &mut R) -> bool {
+    const SEVENZ_MAGIC: [u8; 6] = [0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C];
+    // A valid empty 7z archive is exactly 32 bytes:
+    // signature (6) + version (2) + StartHeader CRC (4) + StartHeader (20).
+    // Files shorter than 32 bytes are truncated/corrupt, not empty archives.
+    const EMPTY_ARCHIVE_SIZE: u64 = 32;
+
+    let is_eof = matches!(err, sevenz_rust2::Error::Io(io_err, _) if io_err.kind() == ErrorKind::UnexpectedEof);
+    if !is_eof {
+        return false;
+    }
+
+    // Check file size
+    let Ok(size) = source.seek(std::io::SeekFrom::End(0)) else {
+        return false;
+    };
+    if size != EMPTY_ARCHIVE_SIZE {
+        return false;
+    }
+
+    // Check 7z magic signature
+    let Ok(_) = source.seek(std::io::SeekFrom::Start(0)) else {
+        return false;
+    };
+    let mut magic = [0u8; 6];
+    source.read_exact(&mut magic).is_ok() && magic == SEVENZ_MAGIC
 }
 
 /// Converts sevenz-rust2 errors to our `ExtractionError` type.
@@ -711,14 +769,6 @@ mod tests {
     #[test]
     fn test_empty_archive() {
         let data = load_fixture("empty.7z");
-        let cursor = Cursor::new(data.clone());
-
-        // Empty 7z archives may fail to parse with sevenz-rust2
-        // This is a known limitation - skip test if parsing fails
-        if SevenZArchive::new(cursor).is_err() {
-            return;
-        }
-
         let cursor = Cursor::new(data);
         let mut archive = SevenZArchive::new(cursor).unwrap();
 
@@ -729,6 +779,20 @@ mod tests {
 
         assert_eq!(report.files_extracted, 0);
         assert_eq!(report.directories_created, 0);
+    }
+
+    #[test]
+    fn test_empty_archive_extract() {
+        let path = std::path::Path::new("../../tests/fixtures/empty.7z");
+        let file = std::fs::File::open(path).unwrap();
+        let mut archive = SevenZArchive::new(file).unwrap();
+
+        let temp = TempDir::new().unwrap();
+        let config = SecurityConfig::default();
+
+        let report = archive.extract(temp.path(), &config).unwrap();
+        assert_eq!(report.files_extracted, 0);
+        assert_eq!(report.bytes_written, 0);
     }
 
     #[test]

@@ -81,6 +81,10 @@ pub struct ExtractArgs {
     #[arg(long)]
     pub allow_hardlinks: bool,
 
+    /// Allow solid 7z archives (multiple files compressed as one block)
+    #[arg(long)]
+    pub allow_solid_archives: bool,
+
     /// Allow world-writable files in extracted archives
     #[arg(long)]
     pub allow_world_writable: bool,
@@ -226,6 +230,16 @@ mod tests {
         assert_eq!(parse_byte_size("1T").unwrap(), 1024_u64.pow(4));
         assert!(parse_byte_size("invalid").is_err());
         assert!(parse_byte_size("").is_err());
+    }
+
+    #[test]
+    fn test_allow_solid_archives_flag() {
+        let cli =
+            Cli::try_parse_from(["exarch", "extract", "a.7z", "--allow-solid-archives"]).unwrap();
+        let Commands::Extract(args) = cli.command else {
+            panic!("expected Extract command");
+        };
+        assert!(args.allow_solid_archives);
     }
 
     #[test]

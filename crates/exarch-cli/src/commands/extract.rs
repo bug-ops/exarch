@@ -55,6 +55,7 @@ pub fn execute(args: &ExtractArgs, formatter: &dyn OutputFormatter) -> Result<()
             world_writable: args.allow_world_writable,
         },
         preserve_permissions: args.preserve_permissions,
+        allow_solid_archives: args.allow_solid_archives,
         ..Default::default()
     };
 

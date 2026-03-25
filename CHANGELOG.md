@@ -52,6 +52,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   passed with `--allow-solid-archives` but without `--force` or `--atomic` (#124).
   `--allow-solid-archives` is also exposed in the `list` and `verify` subcommands.
 - Expose `allow_solid_archives` in Python and Node.js bindings (`SecurityConfig`) (#127)
+- TAR hardlink entries now copy file content instead of creating real OS hardlinks,
+  preventing shared-inode corruption when a duplicate entry overwrites a hardlink path
+  (GHSA-2367-c296-3mp2 variant, #130).
 - Upgrade `tar` dependency to 0.4.45 to address RUSTSEC-2026-0067 (symlink
   `chmod` escape in `unpack_in`) and RUSTSEC-2026-0068 (PAX size header
   ignored when base header size is non-zero) (#112)

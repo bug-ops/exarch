@@ -344,6 +344,74 @@ fn test_rustsec_2026_0067_symlink_dir_chmod_symlinks_allowed() {
     );
 }
 
+// ── GHSA-2367-c296-3mp2 variant: hardlink inode corruption (issue #130) ──────
+//
+// When a TAR archive contains a hardlink entry whose link name is later reused
+// by a plain-file entry, the two-pass extraction model creates the OS hardlink
+// (second pass) after the plain file is written (first pass). With
+// `fs::hard_link` both paths would share an inode; a subsequent write to either
+// path silently corrupts the other. The fix replaces `hard_link` with
+// `fs::copy` so each extracted file has its own independent inode.
+
+#[test]
+fn test_ghsa_2367_hardlink_does_not_corrupt_target() {
+    // Archive: legit.txt → hardlink link_to_legit→legit.txt → plain link_to_legit
+    // ATTACK. Two-pass: first pass extracts legit.txt and plain link_to_legit;
+    // second pass calls fs::copy for the hardlink (which overwrites
+    // link_to_legit with a copy of legit.txt). legit.txt must always contain
+    // "legit\n".
+    let tar_data = TarTestBuilder::new()
+        .add_file("legit.txt", b"legit\n")
+        .add_hardlink("link_to_legit", "legit.txt")
+        .add_file("link_to_legit", b"ATTACK\n")
+        .build();
+
+    let temp = TempDir::new().unwrap();
+    let mut config = SecurityConfig::default();
+    config.allowed.hardlinks = true;
+
+    let mut archive = TarArchive::new(Cursor::new(tar_data));
+    // Extraction may succeed or fail depending on platform duplicate-file handling,
+    // but legit.txt must never be corrupted.
+    let _ = archive.extract(temp.path(), &config);
+
+    let legit = std::fs::read_to_string(temp.path().join("legit.txt")).unwrap();
+    assert_eq!(
+        legit, "legit\n",
+        "legit.txt was corrupted via hardlink inode sharing"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn test_ghsa_2367_hardlink_produces_independent_inode() {
+    use std::os::unix::fs::MetadataExt;
+
+    // Simple two-entry archive: legit.txt + hardlink to it.
+    let tar_data = TarTestBuilder::new()
+        .add_file("legit.txt", b"legit\n")
+        .add_hardlink("link_to_legit", "legit.txt")
+        .build();
+
+    let temp = TempDir::new().unwrap();
+    let mut config = SecurityConfig::default();
+    config.allowed.hardlinks = true;
+
+    let mut archive = TarArchive::new(Cursor::new(tar_data));
+    archive.extract(temp.path(), &config).unwrap();
+
+    let ino_legit = std::fs::metadata(temp.path().join("legit.txt"))
+        .unwrap()
+        .ino();
+    let ino_link = std::fs::metadata(temp.path().join("link_to_legit"))
+        .unwrap()
+        .ino();
+    assert_ne!(
+        ino_legit, ino_link,
+        "hardlink created a shared inode — content-copy was not applied"
+    );
+}
+
 // ── Windows backslash path traversal ─────────────────────────────────────────
 //
 // Archives created on Windows may use `\` as a path separator.  On Windows

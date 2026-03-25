@@ -250,44 +250,39 @@ impl<R: Read> TarArchive<R> {
         )
     }
 
-    /// Creates a hardlink in the second pass.
-    #[allow(unused_variables)]
+    /// Creates a hardlink in the second pass by copying content.
+    ///
+    /// Uses `fs::copy` instead of `fs::hard_link` to avoid shared-inode
+    /// corruption: a real OS hardlink would allow a subsequent write to
+    /// `link_path` to silently overwrite `target_path` (GHSA-2367-c296-3mp2
+    /// variant, issue #130).
     fn create_hardlink(
         info: &HardlinkInfo,
         dest: &DestDir,
         report: &mut ExtractionReport,
         dir_cache: &mut common::DirCache,
     ) -> Result<()> {
-        #[cfg(unix)]
-        {
-            use std::fs::hard_link;
+        let link_path = dest.join(&info.link_path);
+        let target_path = dest.join(&info.target_path);
 
-            let link_path = dest.join(&info.link_path);
-            let target_path = dest.join(&info.target_path);
-
-            if !target_path.exists() {
-                return Err(ExtractionError::InvalidArchive(format!(
-                    "hardlink target does not exist: {}",
-                    info.target_path.as_path().display()
-                )));
-            }
-
-            // Create parent directories using cache
-            dir_cache.ensure_parent_dir(&link_path)?;
-
-            hard_link(&target_path, &link_path)?;
-
-            report.files_extracted += 1;
-
-            Ok(())
+        if !target_path.exists() {
+            return Err(ExtractionError::InvalidArchive(format!(
+                "hardlink target does not exist: {}",
+                info.target_path.as_path().display()
+            )));
         }
 
-        #[cfg(not(unix))]
-        {
-            Err(ExtractionError::SecurityViolation {
-                reason: "hardlinks are not supported on this platform".into(),
-            })
-        }
+        // Create parent directories using cache
+        dir_cache.ensure_parent_dir(&link_path)?;
+
+        // Copy content to a new independent inode. Any subsequent write to
+        // `link_path` cannot corrupt `target_path` because they are separate files.
+        let bytes_copied = std::fs::copy(&target_path, &link_path)?;
+
+        report.files_extracted += 1;
+        report.bytes_written += bytes_copied;
+
+        Ok(())
     }
 }
 

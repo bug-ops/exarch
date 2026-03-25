@@ -9,8 +9,13 @@ use exarch_core::VerificationStatus;
 use exarch_core::verify_archive;
 
 pub fn execute(args: &VerifyArgs, formatter: &dyn OutputFormatter) -> Result<()> {
-    // Build config
-    let config = SecurityConfig::default();
+    let config = SecurityConfig {
+        max_file_count: args.max_files,
+        max_total_size: args
+            .max_total_size
+            .unwrap_or_else(|| SecurityConfig::default().max_total_size),
+        ..Default::default()
+    };
 
     // Verify archive
     let report = verify_archive(&args.archive, &config)?;

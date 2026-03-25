@@ -150,6 +150,14 @@ pub struct ListArgs {
     /// Show sizes in human-readable format
     #[arg(short = 'H', long)]
     pub human_readable: bool,
+
+    /// Maximum number of entries to list
+    #[arg(long, default_value = "10000")]
+    pub max_files: usize,
+
+    /// Maximum total size of entries in bytes (supports K, M, G, T suffixes)
+    #[arg(long, value_parser = parse_byte_size)]
+    pub max_total_size: Option<u64>,
 }
 
 #[derive(clap::Args)]
@@ -165,6 +173,14 @@ pub struct VerifyArgs {
     /// Run security validation
     #[arg(long)]
     pub check_security: bool,
+
+    /// Maximum number of entries to verify
+    #[arg(long, default_value = "10000")]
+    pub max_files: usize,
+
+    /// Maximum total size of entries in bytes (supports K, M, G, T suffixes)
+    #[arg(long, value_parser = parse_byte_size)]
+    pub max_total_size: Option<u64>,
 }
 
 /// Parse byte size with optional suffix (K, M, G, T)
@@ -218,5 +234,85 @@ mod tests {
         assert!(parse_byte_size("18446744073709551615K").is_err()); // u64::MAX / 1024 + 1
         assert!(parse_byte_size("18014398509481984M").is_err()); // u64::MAX / (1024^2) + 1
         assert!(parse_byte_size("17592186044416G").is_err()); // u64::MAX / (1024^3) + 1
+    }
+
+    #[test]
+    fn test_list_args_default_max_files() {
+        let cli = Cli::parse_from(["exarch", "list", "archive.zip"]);
+        let Commands::List(args) = cli.command else {
+            panic!("expected list command");
+        };
+        assert_eq!(args.max_files, 10000);
+        assert!(args.max_total_size.is_none());
+    }
+
+    #[test]
+    fn test_list_args_max_files_override() {
+        let cli = Cli::parse_from(["exarch", "list", "--max-files", "99999", "archive.zip"]);
+        let Commands::List(args) = cli.command else {
+            panic!("expected list command");
+        };
+        assert_eq!(args.max_files, 99999);
+    }
+
+    #[test]
+    fn test_list_args_max_total_size_override() {
+        let cli = Cli::parse_from(["exarch", "list", "--max-total-size", "2G", "archive.zip"]);
+        let Commands::List(args) = cli.command else {
+            panic!("expected list command");
+        };
+        assert_eq!(args.max_total_size, Some(2 * 1024 * 1024 * 1024));
+    }
+
+    #[test]
+    fn test_verify_args_default_max_files() {
+        let cli = Cli::parse_from(["exarch", "verify", "archive.zip"]);
+        let Commands::Verify(args) = cli.command else {
+            panic!("expected verify command");
+        };
+        assert_eq!(args.max_files, 10000);
+        assert!(args.max_total_size.is_none());
+    }
+
+    #[test]
+    fn test_verify_args_max_files_override() {
+        let cli = Cli::parse_from(["exarch", "verify", "--max-files", "65537", "archive.zip"]);
+        let Commands::Verify(args) = cli.command else {
+            panic!("expected verify command");
+        };
+        assert_eq!(args.max_files, 65537);
+    }
+
+    #[test]
+    fn test_verify_args_max_total_size_override() {
+        let cli = Cli::parse_from([
+            "exarch",
+            "verify",
+            "--max-total-size",
+            "500M",
+            "archive.zip",
+        ]);
+        let Commands::Verify(args) = cli.command else {
+            panic!("expected verify command");
+        };
+        assert_eq!(args.max_total_size, Some(500 * 1024 * 1024));
+    }
+
+    #[test]
+    fn test_list_args_both_flags() {
+        let cli = Cli::parse_from([
+            "exarch",
+            "list",
+            "--max-files",
+            "1000000",
+            "--max-total-size",
+            "10G",
+            "archive.zip",
+        ]);
+        let Commands::List(args) = cli.command else {
+            panic!("expected list command");
+        };
+        assert_eq!(args.max_files, 1_000_000);
+        assert_eq!(args.max_total_size, Some(10 * 1024 * 1024 * 1024));
     }
 }

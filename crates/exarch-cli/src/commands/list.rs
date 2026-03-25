@@ -7,8 +7,13 @@ use exarch_core::SecurityConfig;
 use exarch_core::list_archive;
 
 pub fn execute(args: &ListArgs, formatter: &dyn OutputFormatter) -> Result<()> {
-    // Build config with default quota limits
-    let config = SecurityConfig::default();
+    let config = SecurityConfig {
+        max_file_count: args.max_files,
+        max_total_size: args
+            .max_total_size
+            .unwrap_or_else(|| SecurityConfig::default().max_total_size),
+        ..Default::default()
+    };
 
     // List archive
     let manifest = list_archive(&args.archive, &config)?;

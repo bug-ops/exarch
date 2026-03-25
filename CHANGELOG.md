@@ -23,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `exarch list` and `exarch verify` now accept `--max-files` and `--max-total-size`
+  flags, mirroring `exarch extract`. Archives with more than 10 000 entries (e.g.
+  ZIP64 archives) can now be listed or verified by passing `--max-files <N>` (#122).
+
 - `list_archive` and `verify_archive` now support 7z archives, consistent with
   TAR and ZIP (#79). Entries are iterated via `sevenz-rust2::Archive::read`
   (no decompression); solid archives are safe to list. Quota limits, path

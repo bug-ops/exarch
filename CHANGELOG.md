@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `list_archive` and `verify_archive` now support 7z archives, consistent with
+  TAR and ZIP (#79). Entries are iterated via `sevenz-rust2::Archive::read`
+  (no decompression); solid archives are safe to list. Quota limits, path
+  traversal checks, and encryption rejection apply identically to other formats.
+
 ### Fixed
 
 - Upgrade `tar` dependency to 0.4.45 to address RUSTSEC-2026-0067 (symlink

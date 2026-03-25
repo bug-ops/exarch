@@ -66,9 +66,7 @@ pub fn list_archive<P: AsRef<Path>>(
         ArchiveType::TarXz => list_tar_xz(archive_path, format, config),
         ArchiveType::TarZst => list_tar_zst(archive_path, format, config),
         ArchiveType::Zip => list_zip(archive_path, format, config),
-        ArchiveType::SevenZ => Err(crate::ExtractionError::InvalidArchive(
-            "7z archive listing not yet supported".into(),
-        )),
+        ArchiveType::SevenZ => list_sevenz(archive_path, format, config),
     }
 }
 
@@ -319,6 +317,103 @@ fn list_zip(
     }
 
     Ok(manifest)
+}
+
+fn list_sevenz(
+    archive_path: &Path,
+    format: ArchiveType,
+    config: &SecurityConfig,
+) -> Result<ArchiveManifest> {
+    use sevenz_rust2::Archive;
+    use sevenz_rust2::Password;
+
+    let mut file = File::open(archive_path)?;
+    let password = Password::empty();
+    let archive = Archive::read(&mut file, &password).map_err(|e| {
+        let err_str = e.to_string().to_lowercase();
+        if err_str.contains("encrypt") || err_str.contains("password") {
+            return ExtractionError::SecurityViolation {
+                reason: "encrypted 7z archive detected. Password-protected archives are not \
+                         supported. Decrypt the archive externally and try again."
+                    .into(),
+            };
+        }
+        ExtractionError::InvalidArchive(format!("failed to open 7z archive: {e}"))
+    })?;
+
+    let mut manifest = ArchiveManifest::new(format);
+
+    for entry in &archive.files {
+        // Anti-items represent deletions in incremental archives; skip them.
+        if entry.is_anti_item {
+            continue;
+        }
+
+        // Check file count quota
+        if manifest.total_entries >= config.max_file_count {
+            return Err(ExtractionError::QuotaExceeded {
+                resource: QuotaResource::FileCount {
+                    current: manifest.total_entries + 1,
+                    max: config.max_file_count,
+                },
+            });
+        }
+
+        let path = PathBuf::from(&entry.name);
+
+        if contains_traversal(&path) {
+            return Err(ExtractionError::PathTraversal { path });
+        }
+
+        let entry_type = sevenz_manifest_entry_type(entry);
+        let size = entry.size;
+        let compressed_size = entry.has_stream.then_some(entry.compressed_size);
+        let modified = entry
+            .has_last_modified_date
+            .then(|| SystemTime::from(entry.last_modified_date));
+
+        let archive_entry = ArchiveEntry {
+            path,
+            entry_type,
+            size,
+            compressed_size,
+            mode: None,
+            modified,
+            symlink_target: None,
+            hardlink_target: None,
+        };
+
+        // Check total size quota
+        if manifest.total_size + archive_entry.size > config.max_total_size {
+            return Err(ExtractionError::QuotaExceeded {
+                resource: QuotaResource::TotalSize {
+                    current: manifest.total_size + archive_entry.size,
+                    max: config.max_total_size,
+                },
+            });
+        }
+
+        manifest.add_entry(archive_entry);
+    }
+
+    Ok(manifest)
+}
+
+// Windows FILE_ATTRIBUTE_REPARSE_POINT flag — indicates symlinks and junctions.
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+
+fn sevenz_manifest_entry_type(entry: &sevenz_rust2::ArchiveEntry) -> ManifestEntryType {
+    if entry.is_directory {
+        return ManifestEntryType::Directory;
+    }
+    // Detect Windows reparse points (symlinks) via FILE_ATTRIBUTE_REPARSE_POINT.
+    // Unix symlinks cannot be detected with this API; they are reported as files.
+    if entry.has_windows_attributes
+        && (entry.windows_attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0
+    {
+        return ManifestEntryType::Symlink;
+    }
+    ManifestEntryType::File
 }
 
 /// Returns `true` if the path contains traversal attempts.
@@ -1200,5 +1295,81 @@ mod tests {
 
         assert_eq!(tar_manifest.entries[0].mode, zip_manifest.entries[0].mode);
         assert_eq!(tar_manifest.entries[0].mode, Some(0o644));
+    }
+
+    #[test]
+    fn test_list_sevenz_simple() {
+        let path = std::path::Path::new("../../tests/fixtures/simple.7z");
+        let config = SecurityConfig::default();
+        let manifest = list_archive(path, &config).unwrap();
+        assert!(manifest.total_entries > 0, "simple.7z should have entries");
+        for entry in &manifest.entries {
+            assert!(
+                !entry.path.as_os_str().is_empty(),
+                "entry path should not be empty"
+            );
+        }
+    }
+
+    #[test]
+    fn test_list_sevenz_empty() {
+        let path = std::path::Path::new("../../tests/fixtures/empty.7z");
+        let config = SecurityConfig::default();
+        // Empty 7z archives may fail to parse with sevenz-rust2 (known limitation).
+        // Accept either a successful empty manifest or an InvalidArchive error.
+        match list_archive(path, &config) {
+            Ok(manifest) => {
+                assert_eq!(manifest.total_entries, 0, "empty.7z should have no entries");
+            }
+            Err(ExtractionError::InvalidArchive(_)) => {}
+            Err(e) => panic!("unexpected error for empty.7z: {e}"),
+        }
+    }
+
+    #[test]
+    fn test_list_sevenz_nested_dirs() {
+        let path = std::path::Path::new("../../tests/fixtures/nested-dirs.7z");
+        let config = SecurityConfig::default();
+        let manifest = list_archive(path, &config).unwrap();
+        assert!(manifest.total_entries > 0);
+        let has_dir = manifest
+            .entries
+            .iter()
+            .any(|e| e.entry_type == ManifestEntryType::Directory);
+        assert!(has_dir, "nested-dirs.7z should contain directory entries");
+    }
+
+    #[test]
+    fn test_list_sevenz_encrypted_rejected() {
+        let path = std::path::Path::new("../../tests/fixtures/encrypted.7z");
+        let config = SecurityConfig::default();
+        let result = list_archive(path, &config);
+        assert!(result.is_err(), "encrypted archive should return an error");
+        let err_str = result.unwrap_err().to_string().to_lowercase();
+        assert!(
+            err_str.contains("encrypt") || err_str.contains("password"),
+            "error should mention encryption, got: {err_str}"
+        );
+    }
+
+    #[test]
+    fn test_list_sevenz_solid() {
+        // Solid archives are safe to list (no decompression needed for metadata).
+        let path = std::path::Path::new("../../tests/fixtures/solid.7z");
+        let config = SecurityConfig::default();
+        let manifest = list_archive(path, &config).unwrap();
+        assert!(manifest.total_entries > 0, "solid.7z should have entries");
+    }
+
+    #[test]
+    fn test_verify_sevenz_simple() {
+        let path = std::path::Path::new("../../tests/fixtures/simple.7z");
+        let config = SecurityConfig::default();
+        let report = crate::verify_archive(path, &config).unwrap();
+        assert_ne!(
+            report.status,
+            crate::inspection::report::VerificationStatus::Fail,
+            "simple.7z should not fail verification"
+        );
     }
 }

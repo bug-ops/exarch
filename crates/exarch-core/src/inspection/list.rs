@@ -1474,8 +1474,10 @@ mod tests {
         temp_file.write_all(&archive_bytes).unwrap();
         temp_file.flush().unwrap();
 
-        let mut config = SecurityConfig::default();
-        config.max_file_count = 2;
+        let config = SecurityConfig {
+            max_file_count: 2,
+            ..Default::default()
+        };
         let result = list_archive(temp_file.path(), &config);
         assert!(
             matches!(
@@ -1497,8 +1499,10 @@ mod tests {
         temp_file.write_all(&archive_bytes).unwrap();
         temp_file.flush().unwrap();
 
-        let mut config = SecurityConfig::default();
-        config.max_total_size = 50;
+        let config = SecurityConfig {
+            max_total_size: 50,
+            ..Default::default()
+        };
         let result = list_archive(temp_file.path(), &config);
         assert!(
             matches!(

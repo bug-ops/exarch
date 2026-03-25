@@ -102,6 +102,7 @@ use smallvec::SmallVec;
 use tar::Archive;
 
 use crate::ExtractionError;
+use crate::ExtractionOptions;
 use crate::ExtractionReport;
 use crate::Result;
 use crate::SecurityConfig;
@@ -185,6 +186,7 @@ impl<R: Read> TarArchive<R> {
         report: &mut ExtractionReport,
         copy_buffer: &mut CopyBuffer,
         dir_cache: &mut common::DirCache,
+        skip_duplicates: bool,
     ) -> Result<Option<HardlinkInfo>> {
         // Skip TAR metadata entries (PAX headers, GNU long names/links, sparse)
         if TarEntryAdapter::is_metadata_entry(&entry) {
@@ -205,7 +207,15 @@ impl<R: Read> TarArchive<R> {
 
         match validated.entry_type {
             ValidatedEntryType::File => {
-                Self::extract_file(entry, &validated, dest, report, copy_buffer, dir_cache)?;
+                Self::extract_file(
+                    entry,
+                    &validated,
+                    dest,
+                    report,
+                    copy_buffer,
+                    dir_cache,
+                    skip_duplicates,
+                )?;
                 Ok(None)
             }
 
@@ -215,7 +225,7 @@ impl<R: Read> TarArchive<R> {
             }
 
             ValidatedEntryType::Symlink(safe_symlink) => {
-                common::create_symlink(&safe_symlink, dest, report, dir_cache)?;
+                common::create_symlink(&safe_symlink, dest, report, dir_cache, skip_duplicates)?;
                 Ok(None)
             }
 
@@ -237,6 +247,7 @@ impl<R: Read> TarArchive<R> {
         report: &mut ExtractionReport,
         copy_buffer: &mut CopyBuffer,
         dir_cache: &mut common::DirCache,
+        skip_duplicates: bool,
     ) -> Result<()> {
         let size = Some(entry.size());
         common::extract_file_generic(
@@ -247,6 +258,7 @@ impl<R: Read> TarArchive<R> {
             size,
             copy_buffer,
             dir_cache,
+            skip_duplicates,
         )
     }
 
@@ -261,6 +273,7 @@ impl<R: Read> TarArchive<R> {
         dest: &DestDir,
         report: &mut ExtractionReport,
         dir_cache: &mut common::DirCache,
+        skip_duplicates: bool,
     ) -> Result<()> {
         let link_path = dest.join(&info.link_path);
         let target_path = dest.join(&info.target_path);
@@ -275,6 +288,21 @@ impl<R: Read> TarArchive<R> {
         // Create parent directories using cache
         dir_cache.ensure_parent_dir(&link_path)?;
 
+        if link_path.exists() {
+            if skip_duplicates {
+                report.files_skipped += 1;
+                report.warnings.push(format!(
+                    "skipped duplicate hardlink: {}",
+                    info.link_path.as_path().display()
+                ));
+                return Ok(());
+            }
+            return Err(ExtractionError::InvalidArchive(format!(
+                "duplicate entry: {}",
+                info.link_path.as_path().display()
+            )));
+        }
+
         // Copy content to a new independent inode. Any subsequent write to
         // `link_path` cannot corrupt `target_path` because they are separate files.
         let bytes_copied = std::fs::copy(&target_path, &link_path)?;
@@ -287,8 +315,14 @@ impl<R: Read> TarArchive<R> {
 }
 
 impl<R: Read> ArchiveFormat for TarArchive<R> {
-    fn extract(&mut self, output_dir: &Path, config: &SecurityConfig) -> Result<ExtractionReport> {
+    fn extract(
+        &mut self,
+        output_dir: &Path,
+        config: &SecurityConfig,
+        options: &ExtractionOptions,
+    ) -> Result<ExtractionReport> {
         let start = Instant::now();
+        let skip_duplicates = options.skip_duplicates;
 
         let dest = DestDir::new_or_create(output_dir.to_path_buf())?;
 
@@ -327,6 +361,7 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
                 &mut report,
                 &mut copy_buffer,
                 &mut dir_cache,
+                skip_duplicates,
             ) {
                 Ok(Some(hardlink_info)) => hardlinks.push(hardlink_info),
                 Ok(None) => {}
@@ -345,8 +380,13 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
 
         // Two-pass extraction: create hardlinks after all target files exist
         for hardlink_info in &hardlinks {
-            if let Err(e) = Self::create_hardlink(hardlink_info, &dest, &mut report, &mut dir_cache)
-            {
+            if let Err(e) = Self::create_hardlink(
+                hardlink_info,
+                &dest,
+                &mut report,
+                &mut dir_cache,
+                skip_duplicates,
+            ) {
                 return Err(if report.total_items() > 0 {
                     ExtractionError::PartialExtraction {
                         source: Box::new(e),
@@ -604,7 +644,9 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default();
 
-        let report = archive.extract(temp.path(), &config).unwrap();
+        let report = archive
+            .extract(temp.path(), &config, &ExtractionOptions::default())
+            .unwrap();
 
         assert_eq!(report.files_extracted, 1);
         assert_eq!(report.directories_created, 0);
@@ -649,7 +691,9 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default();
 
-        let report = archive.extract(temp.path(), &config).unwrap();
+        let report = archive
+            .extract(temp.path(), &config, &ExtractionOptions::default())
+            .unwrap();
 
         assert_eq!(report.files_extracted, 1);
         assert_eq!(report.directories_created, 2);
@@ -688,7 +732,9 @@ mod tests {
         let mut config = SecurityConfig::default();
         config.allowed.symlinks = true;
 
-        let report = archive.extract(temp.path(), &config).unwrap();
+        let report = archive
+            .extract(temp.path(), &config, &ExtractionOptions::default())
+            .unwrap();
 
         assert_eq!(report.files_extracted, 1);
         assert_eq!(report.symlinks_created, 1);
@@ -727,7 +773,9 @@ mod tests {
         let mut config = SecurityConfig::default();
         config.allowed.hardlinks = true;
 
-        let report = archive.extract(temp.path(), &config).unwrap();
+        let report = archive
+            .extract(temp.path(), &config, &ExtractionOptions::default())
+            .unwrap();
 
         assert_eq!(report.files_extracted, 2);
         assert!(temp.path().join("hardlink.txt").exists());
@@ -745,7 +793,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = archive.extract(temp.path(), &config);
+        let result = archive.extract(temp.path(), &config, &ExtractionOptions::default());
 
         assert!(result.is_err());
     }
@@ -767,7 +815,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default();
 
-        let result = archive.extract(temp.path(), &config);
+        let result = archive.extract(temp.path(), &config, &ExtractionOptions::default());
 
         assert!(result.is_err());
     }
@@ -789,7 +837,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default();
 
-        let result = archive.extract(temp.path(), &config);
+        let result = archive.extract(temp.path(), &config, &ExtractionOptions::default());
 
         assert!(result.is_err());
     }
@@ -811,7 +859,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default();
 
-        let result = archive.extract(temp.path(), &config);
+        let result = archive.extract(temp.path(), &config, &ExtractionOptions::default());
 
         assert!(result.is_err());
     }
@@ -854,7 +902,9 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default();
 
-        let report = archive.extract(temp.path(), &config).unwrap();
+        let report = archive
+            .extract(temp.path(), &config, &ExtractionOptions::default())
+            .unwrap();
 
         assert_eq!(report.files_extracted, 1);
         assert!(temp.path().join("hello.txt").exists());
@@ -889,7 +939,9 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default();
 
-        let report = archive.extract(temp.path(), &config).unwrap();
+        let report = archive
+            .extract(temp.path(), &config, &ExtractionOptions::default())
+            .unwrap();
 
         assert_eq!(report.files_extracted, 1);
         assert!(temp.path().join("very_long_filename.txt").exists());
@@ -924,7 +976,9 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default();
 
-        let report = archive.extract(temp.path(), &config).unwrap();
+        let report = archive
+            .extract(temp.path(), &config, &ExtractionOptions::default())
+            .unwrap();
 
         assert_eq!(report.files_extracted, 1);
         assert!(temp.path().join("file.txt").exists());
@@ -957,7 +1011,7 @@ mod tests {
         // Either succeeds (extracted as regular file) or fails with
         // InvalidArchive due to missing GNU sparse extension headers.
         // A SecurityViolation must NOT be returned for this entry type.
-        match archive.extract(temp.path(), &config) {
+        match archive.extract(temp.path(), &config, &ExtractionOptions::default()) {
             Ok(report) => {
                 assert_eq!(report.files_extracted, 1);
                 assert!(temp.path().join("sparse.txt").exists());
@@ -987,7 +1041,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default();
 
-        let result = archive.extract(temp.path(), &config);
+        let result = archive.extract(temp.path(), &config, &ExtractionOptions::default());
 
         assert!(
             matches!(result, Err(ExtractionError::SecurityViolation { .. })),
@@ -1014,7 +1068,9 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default();
 
-        let report = archive.extract(temp.path(), &config).unwrap();
+        let report = archive
+            .extract(temp.path(), &config, &ExtractionOptions::default())
+            .unwrap();
 
         assert_eq!(report.files_extracted, 1);
         assert!(temp.path().join("cont.txt").exists());
@@ -1040,7 +1096,9 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default();
 
-        let report = archive.extract(temp.path(), &config).unwrap();
+        let report = archive
+            .extract(temp.path(), &config, &ExtractionOptions::default())
+            .unwrap();
 
         assert_eq!(report.files_extracted, 1);
         assert!(temp.path().join("file.txt").exists());
@@ -1066,7 +1124,9 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default();
 
-        let report = archive.extract(temp.path(), &config).unwrap();
+        let report = archive
+            .extract(temp.path(), &config, &ExtractionOptions::default())
+            .unwrap();
 
         assert_eq!(report.files_extracted, 1);
         assert!(temp.path().join("file.txt").exists());
@@ -1091,7 +1151,9 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default();
 
-        let report = archive.extract(temp.path(), &config).unwrap();
+        let report = archive
+            .extract(temp.path(), &config, &ExtractionOptions::default())
+            .unwrap();
 
         assert_eq!(report.files_extracted, 1);
         assert!(temp.path().join("file.txt").exists());
@@ -1112,7 +1174,9 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default();
 
-        let report = archive.extract(temp.path(), &config).unwrap();
+        let report = archive
+            .extract(temp.path(), &config, &ExtractionOptions::default())
+            .unwrap();
 
         assert_eq!(report.files_extracted, 1);
         assert!(temp.path().join("file.txt").exists());
@@ -1126,7 +1190,9 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default();
 
-        let report = archive.extract(temp.path(), &config).unwrap();
+        let report = archive
+            .extract(temp.path(), &config, &ExtractionOptions::default())
+            .unwrap();
 
         assert_eq!(report.files_extracted, 0);
         assert_eq!(report.directories_created, 0);
@@ -1140,7 +1206,9 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default();
 
-        let report = archive.extract(temp.path(), &config).unwrap();
+        let report = archive
+            .extract(temp.path(), &config, &ExtractionOptions::default())
+            .unwrap();
 
         assert_eq!(report.files_extracted, 1);
         assert!(temp.path().join("empty.txt").exists());
@@ -1164,7 +1232,9 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default();
 
-        let report = archive.extract(temp.path(), &config).unwrap();
+        let report = archive
+            .extract(temp.path(), &config, &ExtractionOptions::default())
+            .unwrap();
 
         assert_eq!(report.files_extracted, 3);
         assert!(temp.path().join("file1.txt").exists());
@@ -1187,7 +1257,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = archive.extract(temp.path(), &config);
+        let result = archive.extract(temp.path(), &config, &ExtractionOptions::default());
 
         assert!(result.is_err());
     }
@@ -1206,7 +1276,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = archive.extract(temp.path(), &config);
+        let result = archive.extract(temp.path(), &config, &ExtractionOptions::default());
 
         assert!(result.is_err());
     }
@@ -1231,7 +1301,9 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default();
 
-        let report = archive.extract(temp.path(), &config).unwrap();
+        let report = archive
+            .extract(temp.path(), &config, &ExtractionOptions::default())
+            .unwrap();
 
         assert_eq!(report.files_extracted, 1);
 
@@ -1260,7 +1332,9 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default();
 
-        let report = archive.extract(temp.path(), &config).unwrap();
+        let report = archive
+            .extract(temp.path(), &config, &ExtractionOptions::default())
+            .unwrap();
 
         assert_eq!(report.files_extracted, 1);
 
@@ -1278,7 +1352,9 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default();
 
-        let report = archive.extract(temp.path(), &config).unwrap();
+        let report = archive
+            .extract(temp.path(), &config, &ExtractionOptions::default())
+            .unwrap();
 
         assert_eq!(report.bytes_written, 10);
     }
@@ -1301,7 +1377,9 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default();
 
-        let report = archive.extract(temp.path(), &config).unwrap();
+        let report = archive
+            .extract(temp.path(), &config, &ExtractionOptions::default())
+            .unwrap();
 
         assert_eq!(report.files_extracted, 0);
         assert_eq!(report.directories_created, 1);
@@ -1328,7 +1406,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default(); // symlinks disabled by default
 
-        let result = archive.extract(temp.path(), &config);
+        let result = archive.extract(temp.path(), &config, &ExtractionOptions::default());
 
         assert!(result.is_err());
     }
@@ -1353,7 +1431,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default(); // hardlinks disabled by default
 
-        let result = archive.extract(temp.path(), &config);
+        let result = archive.extract(temp.path(), &config, &ExtractionOptions::default());
 
         assert!(result.is_err());
     }
@@ -1366,7 +1444,9 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default();
 
-        let report = archive.extract(temp.path(), &config).unwrap();
+        let report = archive
+            .extract(temp.path(), &config, &ExtractionOptions::default())
+            .unwrap();
 
         assert!(report.duration.as_nanos() > 0);
     }
@@ -1393,7 +1473,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default();
 
-        let result = archive.extract(temp.path(), &config);
+        let result = archive.extract(temp.path(), &config, &ExtractionOptions::default());
 
         assert!(result.is_err());
         match result {
@@ -1424,7 +1504,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default();
 
-        let result = archive.extract(temp.path(), &config);
+        let result = archive.extract(temp.path(), &config, &ExtractionOptions::default());
 
         assert!(result.is_err());
         match result {
@@ -1465,7 +1545,7 @@ mod tests {
         let mut config = SecurityConfig::default();
         config.allowed.symlinks = true;
 
-        let result = archive.extract(temp.path(), &config);
+        let result = archive.extract(temp.path(), &config, &ExtractionOptions::default());
 
         assert!(result.is_err());
         // A directory was created before the symlink escape, so the error is
@@ -1501,7 +1581,7 @@ mod tests {
         let mut config = SecurityConfig::default();
         config.allowed.hardlinks = true;
 
-        let result = archive.extract(temp.path(), &config);
+        let result = archive.extract(temp.path(), &config, &ExtractionOptions::default());
 
         assert!(result.is_err());
         match result {
@@ -1548,7 +1628,9 @@ mod tests {
         let mut config = SecurityConfig::default();
         config.allowed.hardlinks = true;
 
-        let report = archive.extract(temp.path(), &config).unwrap();
+        let report = archive
+            .extract(temp.path(), &config, &ExtractionOptions::default())
+            .unwrap();
 
         // 1 target file + 7 hardlinks = 8 files extracted
         assert_eq!(report.files_extracted, 8);
@@ -1593,7 +1675,9 @@ mod tests {
         let mut config = SecurityConfig::default();
         config.allowed.hardlinks = true;
 
-        let report = archive.extract(temp.path(), &config).unwrap();
+        let report = archive
+            .extract(temp.path(), &config, &ExtractionOptions::default())
+            .unwrap();
 
         // 1 target file + 20 hardlinks = 21 files extracted
         assert_eq!(report.files_extracted, 21);
@@ -1671,7 +1755,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = archive.extract(temp.path(), &config);
+        let result = archive.extract(temp.path(), &config, &ExtractionOptions::default());
         assert!(
             result.is_err(),
             "expected quota error for PAX file size override, got: {result:?}"
@@ -1694,7 +1778,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = archive.extract(temp.path(), &config);
+        let result = archive.extract(temp.path(), &config, &ExtractionOptions::default());
         assert!(
             result.is_err(),
             "expected quota error for PAX total size override, got: {result:?}"
@@ -1737,12 +1821,71 @@ mod tests {
         let mut config = SecurityConfig::default();
         config.allowed.hardlinks = true;
 
-        let report = archive.extract(temp.path(), &config).unwrap();
+        let report = archive
+            .extract(temp.path(), &config, &ExtractionOptions::default())
+            .unwrap();
 
         // 1 target file + 8 hardlinks = 9 files extracted
         assert_eq!(report.files_extracted, 9);
         for i in 0..8 {
             assert!(temp.path().join(format!("link{i}.txt")).exists());
         }
+    }
+
+    /// Build a TAR archive in-memory with two entries sharing the same path.
+    fn create_duplicate_entry_tar(path: &str, content1: &[u8], content2: &[u8]) -> Vec<u8> {
+        let mut builder = tar::Builder::new(Vec::new());
+
+        let mut header = tar::Header::new_gnu();
+        header.set_size(content1.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder.append_data(&mut header, path, content1).unwrap();
+
+        let mut header = tar::Header::new_gnu();
+        header.set_size(content2.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder.append_data(&mut header, path, content2).unwrap();
+
+        builder.into_inner().unwrap()
+    }
+
+    #[test]
+    fn test_duplicate_entry_skip_default() {
+        let tar_data = create_duplicate_entry_tar("legit.txt", b"first", b"second");
+        let mut archive = TarArchive::new(Cursor::new(tar_data));
+
+        let temp = TempDir::new().unwrap();
+        let config = SecurityConfig::default();
+        let options = ExtractionOptions::default(); // skip_duplicates = true
+
+        let report = archive.extract(temp.path(), &config, &options).unwrap();
+
+        // First entry extracted, second skipped
+        assert_eq!(report.files_extracted, 1);
+        assert_eq!(report.files_skipped, 1);
+        assert_eq!(report.warnings.len(), 1);
+        assert!(report.warnings[0].contains("legit.txt"));
+
+        // File content is from the first entry
+        let content = std::fs::read(temp.path().join("legit.txt")).unwrap();
+        assert_eq!(content, b"first");
+    }
+
+    #[test]
+    fn test_duplicate_entry_error_when_disabled() {
+        let tar_data = create_duplicate_entry_tar("legit.txt", b"first", b"second");
+        let mut archive = TarArchive::new(Cursor::new(tar_data));
+
+        let temp = TempDir::new().unwrap();
+        let config = SecurityConfig::default();
+        let options = ExtractionOptions {
+            atomic: false,
+            skip_duplicates: false,
+        };
+
+        let result = archive.extract(temp.path(), &config, &options);
+        assert!(result.is_err());
     }
 }

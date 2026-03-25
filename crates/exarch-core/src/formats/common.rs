@@ -376,6 +376,7 @@ fn create_file_with_mode(path: &Path, _mode: Option<u32>) -> std::io::Result<Fil
 /// - Quota would be exceeded (checked before write)
 /// - File creation fails
 /// - I/O error during copy
+#[allow(clippy::too_many_arguments)]
 #[inline]
 pub fn extract_file_generic<R: Read>(
     reader: &mut R,
@@ -385,11 +386,27 @@ pub fn extract_file_generic<R: Read>(
     expected_size: Option<u64>,
     copy_buffer: &mut CopyBuffer,
     dir_cache: &mut DirCache,
+    skip_duplicates: bool,
 ) -> Result<()> {
     let output_path = dest.join(&validated.safe_path);
 
     // Create parent directories if needed using cache
     dir_cache.ensure_parent_dir(&output_path)?;
+
+    if output_path.exists() {
+        if skip_duplicates {
+            report.files_skipped += 1;
+            report.warnings.push(format!(
+                "skipped duplicate entry: {}",
+                validated.safe_path.as_path().display()
+            ));
+            return Ok(());
+        }
+        return Err(ExtractionError::InvalidArchive(format!(
+            "duplicate entry: {}",
+            validated.safe_path.as_path().display()
+        )));
+    }
 
     // CRITICAL: Check quota BEFORE writing (prevents partial files on overflow)
     if let Some(size) = expected_size {
@@ -491,13 +508,15 @@ pub fn create_directory(
 /// - Platform does not support symlinks
 /// - Parent directory creation fails
 /// - Symlink creation fails (including when target path already exists)
-/// - A file or symlink already exists at the link path
+/// - A file or symlink already exists at the link path and `skip_duplicates` is
+///   false
 #[allow(unused_variables)]
 pub fn create_symlink(
     safe_symlink: &SafeSymlink,
     dest: &DestDir,
     report: &mut ExtractionReport,
     dir_cache: &mut DirCache,
+    skip_duplicates: bool,
 ) -> Result<()> {
     #[cfg(unix)]
     {
@@ -508,6 +527,21 @@ pub fn create_symlink(
 
         // Create parent directories using cache
         dir_cache.ensure_parent_dir(&link_path)?;
+
+        if link_path.exists() || link_path.symlink_metadata().is_ok() {
+            if skip_duplicates {
+                report.files_skipped += 1;
+                report.warnings.push(format!(
+                    "skipped duplicate symlink: {}",
+                    safe_symlink.link_path().display()
+                ));
+                return Ok(());
+            }
+            return Err(ExtractionError::InvalidArchive(format!(
+                "duplicate entry: {}",
+                safe_symlink.link_path().display()
+            )));
+        }
 
         // Create symlink
         symlink(target_path, &link_path)?;
@@ -572,6 +606,7 @@ mod tests {
             expected_size,
             &mut copy_buffer,
             &mut dir_cache,
+            true,
         );
 
         // Should return QuotaExceeded with IntegerOverflow
@@ -956,6 +991,7 @@ mod tests {
             None,
             &mut copy_buffer,
             &mut dir_cache,
+            true,
         )
         .expect("extraction should succeed");
 

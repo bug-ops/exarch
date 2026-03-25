@@ -213,7 +213,7 @@ impl SecurityConfig {
 ///
 /// Separate from `SecurityConfig` to keep security settings focused.
 /// These options control operational behavior like atomicity.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ExtractionOptions {
     /// Extract atomically: use a temp dir in the same parent as the output
     /// directory, rename on success, and delete on failure.
@@ -224,6 +224,22 @@ pub struct ExtractionOptions {
     ///
     /// Note: cleanup is best-effort if the process is terminated via SIGKILL.
     pub atomic: bool,
+
+    /// Skip duplicate entries silently instead of aborting.
+    ///
+    /// When `true` (default), if an archive contains two entries with the same
+    /// destination path, the second entry is skipped and a warning is recorded
+    /// in `ExtractionReport`. When `false`, duplicate entries cause an error.
+    pub skip_duplicates: bool,
+}
+
+impl Default for ExtractionOptions {
+    fn default() -> Self {
+        Self {
+            atomic: false,
+            skip_duplicates: true,
+        }
+    }
 }
 
 #[cfg(test)]

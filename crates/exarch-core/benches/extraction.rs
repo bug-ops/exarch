@@ -25,6 +25,7 @@ use criterion::Throughput;
 use criterion::criterion_group;
 use criterion::criterion_main;
 use criterion::measurement::WallTime;
+use exarch_core::ExtractionOptions;
 use exarch_core::SecurityConfig;
 use exarch_core::formats::SevenZArchive;
 use exarch_core::formats::ZipArchive;
@@ -236,7 +237,11 @@ fn benchmark_many_small_files(c: &mut Criterion) {
                     let cursor = Cursor::new(data.clone());
                     let mut archive = ZipArchive::new(cursor).unwrap();
                     archive
-                        .extract(temp.path(), &SecurityConfig::default())
+                        .extract(
+                            temp.path(),
+                            &SecurityConfig::default(),
+                            &ExtractionOptions::default(),
+                        )
                         .unwrap();
                 });
             },
@@ -270,7 +275,9 @@ fn benchmark_large_files(c: &mut Criterion) {
                         ..SecurityConfig::default()
                     };
 
-                    archive.extract(temp.path(), &config).unwrap();
+                    archive
+                        .extract(temp.path(), &config, &ExtractionOptions::default())
+                        .unwrap();
                 });
             },
         );
@@ -292,7 +299,11 @@ fn benchmark_nested_directories(c: &mut Criterion) {
                 let cursor = Cursor::new(data.clone());
                 let mut archive = ZipArchive::new(cursor).unwrap();
                 archive
-                    .extract(temp.path(), &SecurityConfig::default())
+                    .extract(
+                        temp.path(),
+                        &SecurityConfig::default(),
+                        &ExtractionOptions::default(),
+                    )
                     .unwrap();
             });
         });
@@ -318,7 +329,9 @@ fn benchmark_compression_methods(c: &mut Criterion) {
                 let temp = TempDir::new().unwrap();
                 let cursor = Cursor::new(data.clone());
                 let mut archive = ZipArchive::new(cursor).unwrap();
-                archive.extract(temp.path(), &config).unwrap();
+                archive
+                    .extract(temp.path(), &config, &ExtractionOptions::default())
+                    .unwrap();
             });
         },
     );
@@ -333,7 +346,9 @@ fn benchmark_compression_methods(c: &mut Criterion) {
                 let temp = TempDir::new().unwrap();
                 let cursor = Cursor::new(data.clone());
                 let mut archive = ZipArchive::new(cursor).unwrap();
-                archive.extract(temp.path(), &config).unwrap();
+                archive
+                    .extract(temp.path(), &config, &ExtractionOptions::default())
+                    .unwrap();
             });
         },
     );
@@ -364,7 +379,11 @@ fn benchmark_sevenz_simple(c: &mut Criterion) {
             let cursor = Cursor::new(simple_data.clone());
             let mut archive = SevenZArchive::new(cursor).unwrap();
             archive
-                .extract(temp.path(), &SecurityConfig::default())
+                .extract(
+                    temp.path(),
+                    &SecurityConfig::default(),
+                    &ExtractionOptions::default(),
+                )
                 .unwrap();
         });
     });
@@ -384,7 +403,11 @@ fn benchmark_sevenz_nested_dirs(c: &mut Criterion) {
             let cursor = Cursor::new(nested_data.clone());
             let mut archive = SevenZArchive::new(cursor).unwrap();
             archive
-                .extract(temp.path(), &SecurityConfig::default())
+                .extract(
+                    temp.path(),
+                    &SecurityConfig::default(),
+                    &ExtractionOptions::default(),
+                )
                 .unwrap();
         });
     });
@@ -405,7 +428,11 @@ fn benchmark_sevenz_large_file(c: &mut Criterion) {
             let cursor = Cursor::new(large_data.clone());
             let mut archive = SevenZArchive::new(cursor).unwrap();
             archive
-                .extract(temp.path(), &SecurityConfig::default())
+                .extract(
+                    temp.path(),
+                    &SecurityConfig::default(),
+                    &ExtractionOptions::default(),
+                )
                 .unwrap();
         });
     });
@@ -442,7 +469,9 @@ fn benchmark_file_count_scaling(c: &mut Criterion) {
                 let temp = TempDir::new().unwrap();
                 let cursor = Cursor::new(data.clone());
                 let mut archive = ZipArchive::new(cursor).unwrap();
-                archive.extract(temp.path(), &config).unwrap();
+                archive
+                    .extract(temp.path(), &config, &ExtractionOptions::default())
+                    .unwrap();
             });
         });
     }
@@ -481,7 +510,9 @@ fn benchmark_depth_scaling(c: &mut Criterion) {
                 let temp = TempDir::new().unwrap();
                 let cursor = Cursor::new(data.clone());
                 let mut archive = ZipArchive::new(cursor).unwrap();
-                archive.extract(temp.path(), &config).unwrap();
+                archive
+                    .extract(temp.path(), &config, &ExtractionOptions::default())
+                    .unwrap();
             });
         });
     }

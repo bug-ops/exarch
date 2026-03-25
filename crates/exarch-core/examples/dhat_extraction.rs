@@ -16,6 +16,7 @@
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;
 
+use exarch_core::ExtractionOptions;
 use exarch_core::SecurityConfig;
 use exarch_core::formats::TarArchive;
 use exarch_core::formats::ZipArchive;
@@ -68,7 +69,9 @@ fn profile_zip_extraction(file_count: usize, file_size: usize) {
 
     let cursor = Cursor::new(zip_data);
     let mut archive = ZipArchive::new(cursor).unwrap();
-    archive.extract(temp.path(), &config).unwrap();
+    archive
+        .extract(temp.path(), &config, &ExtractionOptions::default())
+        .unwrap();
 }
 
 fn profile_tar_extraction(file_count: usize, file_size: usize) {
@@ -80,7 +83,9 @@ fn profile_tar_extraction(file_count: usize, file_size: usize) {
 
     let cursor = Cursor::new(tar_data);
     let mut archive = TarArchive::new(cursor);
-    archive.extract(temp.path(), &config).unwrap();
+    archive
+        .extract(temp.path(), &config, &ExtractionOptions::default())
+        .unwrap();
 }
 
 fn main() {

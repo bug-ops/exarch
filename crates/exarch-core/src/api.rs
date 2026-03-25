@@ -97,6 +97,17 @@ pub fn extract_archive_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
     archive_path: P,
     output_dir: Q,
     config: &SecurityConfig,
+    progress: &mut dyn ProgressCallback,
+) -> Result<ExtractionReport> {
+    let options = ExtractionOptions::default();
+    extract_archive_with_progress_and_options(archive_path, output_dir, config, &options, progress)
+}
+
+fn extract_archive_with_progress_and_options<P: AsRef<Path>, Q: AsRef<Path>>(
+    archive_path: P,
+    output_dir: Q,
+    config: &SecurityConfig,
+    options: &ExtractionOptions,
     _progress: &mut dyn ProgressCallback,
 ) -> Result<ExtractionReport> {
     let archive_path = archive_path.as_ref();
@@ -107,13 +118,13 @@ pub fn extract_archive_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
 
     // Dispatch to format-specific extraction
     match format {
-        ArchiveType::Tar => extract_tar(archive_path, output_dir, config),
-        ArchiveType::TarGz => extract_tar_gz(archive_path, output_dir, config),
-        ArchiveType::TarBz2 => extract_tar_bz2(archive_path, output_dir, config),
-        ArchiveType::TarXz => extract_tar_xz(archive_path, output_dir, config),
-        ArchiveType::TarZst => extract_tar_zst(archive_path, output_dir, config),
-        ArchiveType::Zip => extract_zip(archive_path, output_dir, config),
-        ArchiveType::SevenZ => extract_7z(archive_path, output_dir, config),
+        ArchiveType::Tar => extract_tar(archive_path, output_dir, config, options),
+        ArchiveType::TarGz => extract_tar_gz(archive_path, output_dir, config, options),
+        ArchiveType::TarBz2 => extract_tar_bz2(archive_path, output_dir, config, options),
+        ArchiveType::TarXz => extract_tar_xz(archive_path, output_dir, config, options),
+        ArchiveType::TarZst => extract_tar_zst(archive_path, output_dir, config, options),
+        ArchiveType::Zip => extract_zip(archive_path, output_dir, config, options),
+        ArchiveType::SevenZ => extract_7z(archive_path, output_dir, config, options),
     }
 }
 
@@ -146,9 +157,15 @@ pub fn extract_archive_full<P: AsRef<Path>, Q: AsRef<Path>>(
     progress: &mut dyn ProgressCallback,
 ) -> Result<ExtractionReport> {
     if options.atomic {
-        extract_atomic(archive_path, output_dir, config, progress)
+        extract_atomic(archive_path, output_dir, config, options, progress)
     } else {
-        extract_archive_with_progress(archive_path, output_dir, config, progress)
+        extract_archive_with_progress_and_options(
+            archive_path,
+            output_dir,
+            config,
+            options,
+            progress,
+        )
     }
 }
 
@@ -178,6 +195,7 @@ fn extract_atomic<P: AsRef<Path>, Q: AsRef<Path>>(
     archive_path: P,
     output_dir: Q,
     config: &SecurityConfig,
+    options: &ExtractionOptions,
     progress: &mut dyn ProgressCallback,
 ) -> Result<ExtractionReport> {
     let output_dir = output_dir.as_ref();
@@ -210,7 +228,13 @@ fn extract_atomic<P: AsRef<Path>, Q: AsRef<Path>>(
         ))
     })?;
 
-    let result = extract_archive_with_progress(archive_path, temp_dir.path(), config, progress);
+    let result = extract_archive_with_progress_and_options(
+        archive_path,
+        temp_dir.path(),
+        config,
+        options,
+        progress,
+    );
 
     match result {
         Ok(report) => {
@@ -245,6 +269,7 @@ fn extract_tar(
     archive_path: &Path,
     output_dir: &Path,
     config: &SecurityConfig,
+    options: &ExtractionOptions,
 ) -> Result<ExtractionReport> {
     use crate::formats::TarArchive;
     use crate::formats::traits::ArchiveFormat;
@@ -254,13 +279,14 @@ fn extract_tar(
     let file = File::open(archive_path)?;
     let reader = BufReader::new(file);
     let mut archive = TarArchive::new(reader);
-    archive.extract(output_dir, config)
+    archive.extract(output_dir, config, options)
 }
 
 fn extract_tar_gz(
     archive_path: &Path,
     output_dir: &Path,
     config: &SecurityConfig,
+    options: &ExtractionOptions,
 ) -> Result<ExtractionReport> {
     use crate::formats::TarArchive;
     use crate::formats::traits::ArchiveFormat;
@@ -272,13 +298,14 @@ fn extract_tar_gz(
     let reader = BufReader::new(file);
     let decoder = GzDecoder::new(reader);
     let mut archive = TarArchive::new(decoder);
-    archive.extract(output_dir, config)
+    archive.extract(output_dir, config, options)
 }
 
 fn extract_tar_bz2(
     archive_path: &Path,
     output_dir: &Path,
     config: &SecurityConfig,
+    options: &ExtractionOptions,
 ) -> Result<ExtractionReport> {
     use crate::formats::TarArchive;
     use crate::formats::traits::ArchiveFormat;
@@ -290,13 +317,14 @@ fn extract_tar_bz2(
     let reader = BufReader::new(file);
     let decoder = BzDecoder::new(reader);
     let mut archive = TarArchive::new(decoder);
-    archive.extract(output_dir, config)
+    archive.extract(output_dir, config, options)
 }
 
 fn extract_tar_xz(
     archive_path: &Path,
     output_dir: &Path,
     config: &SecurityConfig,
+    options: &ExtractionOptions,
 ) -> Result<ExtractionReport> {
     use crate::formats::TarArchive;
     use crate::formats::traits::ArchiveFormat;
@@ -308,13 +336,14 @@ fn extract_tar_xz(
     let reader = BufReader::new(file);
     let decoder = XzDecoder::new(reader);
     let mut archive = TarArchive::new(decoder);
-    archive.extract(output_dir, config)
+    archive.extract(output_dir, config, options)
 }
 
 fn extract_tar_zst(
     archive_path: &Path,
     output_dir: &Path,
     config: &SecurityConfig,
+    options: &ExtractionOptions,
 ) -> Result<ExtractionReport> {
     use crate::formats::TarArchive;
     use crate::formats::traits::ArchiveFormat;
@@ -326,13 +355,14 @@ fn extract_tar_zst(
     let reader = BufReader::new(file);
     let decoder = ZstdDecoder::new(reader)?;
     let mut archive = TarArchive::new(decoder);
-    archive.extract(output_dir, config)
+    archive.extract(output_dir, config, options)
 }
 
 fn extract_zip(
     archive_path: &Path,
     output_dir: &Path,
     config: &SecurityConfig,
+    options: &ExtractionOptions,
 ) -> Result<ExtractionReport> {
     use crate::formats::ZipArchive;
     use crate::formats::traits::ArchiveFormat;
@@ -340,13 +370,14 @@ fn extract_zip(
 
     let file = File::open(archive_path)?;
     let mut archive = ZipArchive::new(file)?;
-    archive.extract(output_dir, config)
+    archive.extract(output_dir, config, options)
 }
 
 fn extract_7z(
     archive_path: &Path,
     output_dir: &Path,
     config: &SecurityConfig,
+    options: &ExtractionOptions,
 ) -> Result<ExtractionReport> {
     use crate::formats::SevenZArchive;
     use crate::formats::traits::ArchiveFormat;
@@ -354,7 +385,7 @@ fn extract_7z(
 
     let file = File::open(archive_path)?;
     let mut archive = SevenZArchive::new(file)?;
-    archive.extract(output_dir, config)
+    archive.extract(output_dir, config, options)
 }
 
 /// Creates an archive from source files and directories.
@@ -690,7 +721,10 @@ mod tests {
     #[test]
     fn test_extract_archive_full_non_atomic_delegates_to_normal() {
         let dest = tempfile::TempDir::new().unwrap();
-        let options = ExtractionOptions { atomic: false };
+        let options = ExtractionOptions {
+            atomic: false,
+            skip_duplicates: true,
+        };
         let result = extract_archive_full(
             PathBuf::from("nonexistent.tar.gz"),
             dest.path(),
@@ -704,7 +738,10 @@ mod tests {
     #[test]
     fn test_extract_archive_with_options_delegates() {
         let dest = tempfile::TempDir::new().unwrap();
-        let options = ExtractionOptions { atomic: false };
+        let options = ExtractionOptions {
+            atomic: false,
+            skip_duplicates: true,
+        };
         let result = extract_archive_with_options(
             PathBuf::from("nonexistent.tar.gz"),
             dest.path(),
@@ -731,7 +768,10 @@ mod tests {
         let parent = tempfile::TempDir::new().unwrap();
         let output_dir = parent.path().join("extracted");
 
-        let options = ExtractionOptions { atomic: true };
+        let options = ExtractionOptions {
+            atomic: true,
+            skip_duplicates: true,
+        };
         let result = extract_archive_with_options(
             &archive_path,
             &output_dir,
@@ -755,7 +795,10 @@ mod tests {
         let parent = tempfile::TempDir::new().unwrap();
         let output_dir = parent.path().join("extracted");
 
-        let options = ExtractionOptions { atomic: true };
+        let options = ExtractionOptions {
+            atomic: true,
+            skip_duplicates: true,
+        };
         let result = extract_archive_with_options(
             PathBuf::from("nonexistent_archive.tar.gz"),
             &output_dir,
@@ -792,7 +835,10 @@ mod tests {
         std::fs::write(src_dir.path().join("new.txt"), b"new content").unwrap();
         create_archive(&archive_path, &[src_dir.path()], &CreationConfig::default()).unwrap();
 
-        let options = ExtractionOptions { atomic: true };
+        let options = ExtractionOptions {
+            atomic: true,
+            skip_duplicates: true,
+        };
         let result = extract_archive_with_options(
             &archive_path,
             &output_dir,

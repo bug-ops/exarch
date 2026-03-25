@@ -55,6 +55,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- TAR/ZIP extraction no longer aborts on duplicate entry names; conflicting entries are now
+  skipped with a warning recorded in `ExtractionReport.files_skipped` (#129). The new
+  `ExtractionOptions.skip_duplicates` field (default `true`) controls this behavior.
+
 - Fix `list` and `verify` crash on valid empty 7z archives (#117)
 - Fix `verify` false positive [HIGH] for solid 7z archive entries where
   `compressed_size=0` is a normal artifact of solid block compression (#118)

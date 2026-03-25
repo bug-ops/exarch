@@ -99,6 +99,7 @@ use sevenz_rust2::Password;
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 use crate::ExtractionError;
+use crate::ExtractionOptions;
 use crate::ExtractionReport;
 use crate::Result;
 use crate::SecurityConfig;
@@ -292,6 +293,7 @@ impl<R: Read + Seek> SevenZArchive<R> {
         dest: &DestDir,
         validator: &mut EntryValidator,
         dir_cache: &mut common::DirCache,
+        skip_duplicates: bool,
     ) -> Result<ExtractionReport> {
         // Use RefCell for interior mutability in closure
         let report = RefCell::new(ExtractionReport::new());
@@ -330,6 +332,24 @@ impl<R: Read + Seek> SevenZArchive<R> {
 
                     // Create parent directories using cache
                     dir_cache.borrow_mut().ensure_parent_dir(&dest_path)?;
+
+                    if dest_path.exists() {
+                        if skip_duplicates {
+                            report.borrow_mut().files_skipped += 1;
+                            report.borrow_mut().warnings.push(format!(
+                                "skipped duplicate entry: {}",
+                                validated.safe_path.as_path().display()
+                            ));
+                            return Ok(true);
+                        }
+                        return Err(sevenz_rust2::Error::Other(
+                            format!(
+                                "duplicate entry: {}",
+                                validated.safe_path.as_path().display()
+                            )
+                            .into(),
+                        ));
+                    }
 
                     // Atomic write (temp + rename) with unique temp file name
                     let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -371,7 +391,12 @@ impl<R: Read + Seek> SevenZArchive<R> {
 }
 
 impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
-    fn extract(&mut self, output_dir: &Path, config: &SecurityConfig) -> Result<ExtractionReport> {
+    fn extract(
+        &mut self,
+        output_dir: &Path,
+        config: &SecurityConfig,
+        options: &ExtractionOptions,
+    ) -> Result<ExtractionReport> {
         // Step 0: Validate solid archive policy
         if self.is_solid {
             if !config.allow_solid_archives {
@@ -459,7 +484,13 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
         // double parsing in our validation logic
         let mut validator = EntryValidator::new(config, &dest);
         let mut dir_cache = common::DirCache::new();
-        match Self::extract_with_callback(&mut self.source, &dest, &mut validator, &mut dir_cache) {
+        match Self::extract_with_callback(
+            &mut self.source,
+            &dest,
+            &mut validator,
+            &mut dir_cache,
+            options.skip_duplicates,
+        ) {
             Ok(report) => Ok(report),
             Err(e) => {
                 // 7z pre-validates all paths before extracting, so any error
@@ -706,7 +737,9 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default();
 
-        let report = archive.extract(temp.path(), &config).unwrap();
+        let report = archive
+            .extract(temp.path(), &config, &ExtractionOptions::default())
+            .unwrap();
 
         assert_eq!(report.files_extracted, 2);
         assert!(temp.path().join("simple/file1.txt").exists());
@@ -726,7 +759,9 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default();
 
-        let report = archive.extract(temp.path(), &config).unwrap();
+        let report = archive
+            .extract(temp.path(), &config, &ExtractionOptions::default())
+            .unwrap();
 
         assert!(report.files_extracted >= 1);
         assert!(temp.path().join("nested/subdir1/subdir2/deep.txt").exists());
@@ -743,7 +778,11 @@ mod tests {
 
         // Rejection happens in extract() with default config
         let temp = TempDir::new().unwrap();
-        let result = archive.extract(temp.path(), &SecurityConfig::default());
+        let result = archive.extract(
+            temp.path(),
+            &SecurityConfig::default(),
+            &ExtractionOptions::default(),
+        );
 
         assert!(result.is_err());
         assert!(matches!(
@@ -775,7 +814,9 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default();
 
-        let report = archive.extract(temp.path(), &config).unwrap();
+        let report = archive
+            .extract(temp.path(), &config, &ExtractionOptions::default())
+            .unwrap();
 
         assert_eq!(report.files_extracted, 0);
         assert_eq!(report.directories_created, 0);
@@ -790,7 +831,9 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default();
 
-        let report = archive.extract(temp.path(), &config).unwrap();
+        let report = archive
+            .extract(temp.path(), &config, &ExtractionOptions::default())
+            .unwrap();
         assert_eq!(report.files_extracted, 0);
         assert_eq!(report.bytes_written, 0);
     }
@@ -807,7 +850,7 @@ mod tests {
             ..SecurityConfig::default()
         };
 
-        let result = archive.extract(temp.path(), &config);
+        let result = archive.extract(temp.path(), &config, &ExtractionOptions::default());
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
@@ -830,7 +873,7 @@ mod tests {
             ..SecurityConfig::default()
         };
 
-        let result = archive.extract(temp.path(), &config);
+        let result = archive.extract(temp.path(), &config, &ExtractionOptions::default());
         assert!(
             result.is_ok(),
             "2 files should not exceed quota of 3: {result:?}"
@@ -871,7 +914,7 @@ mod tests {
             ..SecurityConfig::default()
         };
 
-        let result = archive.extract(temp.path(), &config);
+        let result = archive.extract(temp.path(), &config, &ExtractionOptions::default());
         assert!(result.is_ok(), "solid archive should extract: {result:?}");
         assert!(result.unwrap().files_extracted > 0);
     }
@@ -886,7 +929,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default();
 
-        let result = archive.extract(temp.path(), &config);
+        let result = archive.extract(temp.path(), &config, &ExtractionOptions::default());
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
@@ -908,7 +951,7 @@ mod tests {
             ..SecurityConfig::default()
         };
 
-        let result = archive.extract(temp.path(), &config);
+        let result = archive.extract(temp.path(), &config, &ExtractionOptions::default());
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
@@ -926,7 +969,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default(); // allow_solid_archives = false
 
-        let result = archive.extract(temp.path(), &config);
+        let result = archive.extract(temp.path(), &config, &ExtractionOptions::default());
         assert!(result.is_ok(), "non-solid should work: {result:?}");
     }
 
@@ -971,7 +1014,7 @@ mod tests {
             ..SecurityConfig::default()
         };
 
-        let result = archive.extract(temp.path(), &config);
+        let result = archive.extract(temp.path(), &config, &ExtractionOptions::default());
         assert!(
             result.is_ok(),
             "exact limit should allow extraction: {result:?}"
@@ -1001,7 +1044,7 @@ mod tests {
             ..SecurityConfig::default()
         };
 
-        let result = archive.extract(temp.path(), &config);
+        let result = archive.extract(temp.path(), &config, &ExtractionOptions::default());
         assert!(result.is_err(), "one byte under limit should reject");
         assert!(matches!(
             result.unwrap_err(),
@@ -1017,7 +1060,11 @@ mod tests {
         let mut archive = SevenZArchive::new(cursor).unwrap();
 
         let temp = TempDir::new().unwrap();
-        let result = archive.extract(temp.path(), &SecurityConfig::default());
+        let result = archive.extract(
+            temp.path(),
+            &SecurityConfig::default(),
+            &ExtractionOptions::default(),
+        );
 
         assert!(result.is_err());
         match result.unwrap_err() {

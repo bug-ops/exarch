@@ -7,6 +7,7 @@
 #![allow(clippy::unwrap_used, clippy::cast_possible_truncation)]
 
 use exarch_core::ExtractionError;
+use exarch_core::ExtractionOptions;
 use exarch_core::SecurityConfig;
 use exarch_core::formats::ArchiveFormat;
 use exarch_core::formats::TarArchive;
@@ -88,7 +89,11 @@ fn test_cve_2024_12718_dotslash_prefix_traversal() {
 
     let temp = TempDir::new().unwrap();
     let mut archive = TarArchive::new(Cursor::new(tar_data));
-    let result = archive.extract(temp.path(), &SecurityConfig::default());
+    let result = archive.extract(
+        temp.path(),
+        &SecurityConfig::default(),
+        &ExtractionOptions::default(),
+    );
 
     assert!(
         matches!(result, Err(ExtractionError::PathTraversal { .. })),
@@ -103,7 +108,11 @@ fn test_cve_2024_12718_dotslash_complex_traversal() {
 
     let temp = TempDir::new().unwrap();
     let mut archive = TarArchive::new(Cursor::new(tar_data));
-    let result = archive.extract(temp.path(), &SecurityConfig::default());
+    let result = archive.extract(
+        temp.path(),
+        &SecurityConfig::default(),
+        &ExtractionOptions::default(),
+    );
 
     assert!(
         matches!(result, Err(ExtractionError::PathTraversal { .. })),
@@ -125,7 +134,11 @@ fn test_cve_2024_12718_multiple_traversal_variants() {
         let tar_data = make_raw_tar(&[(path, b"x")]);
         let temp = TempDir::new().unwrap();
         let mut archive = TarArchive::new(Cursor::new(tar_data));
-        let result = archive.extract(temp.path(), &SecurityConfig::default());
+        let result = archive.extract(
+            temp.path(),
+            &SecurityConfig::default(),
+            &ExtractionOptions::default(),
+        );
 
         let path_str = std::str::from_utf8(path).unwrap_or("<binary>");
         assert!(
@@ -153,7 +166,11 @@ fn test_cve_2024_12905_symlink_outside_dest_rejected_by_default() {
 
     let temp = TempDir::new().unwrap();
     let mut archive = TarArchive::new(Cursor::new(tar_data));
-    let result = archive.extract(temp.path(), &SecurityConfig::default());
+    let result = archive.extract(
+        temp.path(),
+        &SecurityConfig::default(),
+        &ExtractionOptions::default(),
+    );
 
     assert!(
         matches!(
@@ -178,7 +195,7 @@ fn test_cve_2024_12905_symlink_outside_dest_rejected_when_allowed() {
     config.allowed.symlinks = true;
 
     let mut archive = TarArchive::new(Cursor::new(tar_data));
-    let result = archive.extract(temp.path(), &config);
+    let result = archive.extract(temp.path(), &config, &ExtractionOptions::default());
 
     assert!(
         matches!(result, Err(ExtractionError::SymlinkEscape { .. })),
@@ -199,7 +216,7 @@ fn test_cve_2024_12905_deep_symlink_chain() {
     config.allowed.symlinks = true;
 
     let mut archive = TarArchive::new(Cursor::new(tar_data));
-    let result = archive.extract(temp.path(), &config);
+    let result = archive.extract(temp.path(), &config, &ExtractionOptions::default());
 
     assert!(
         matches!(result, Err(ExtractionError::SymlinkEscape { .. })),
@@ -222,7 +239,11 @@ fn test_cve_2025_48387_hardlink_outside_dest_rejected_by_default() {
 
     let temp = TempDir::new().unwrap();
     let mut archive = TarArchive::new(Cursor::new(tar_data));
-    let result = archive.extract(temp.path(), &SecurityConfig::default());
+    let result = archive.extract(
+        temp.path(),
+        &SecurityConfig::default(),
+        &ExtractionOptions::default(),
+    );
 
     assert!(
         matches!(
@@ -246,7 +267,7 @@ fn test_cve_2025_48387_hardlink_outside_dest_rejected_when_allowed() {
     config.allowed.hardlinks = true;
 
     let mut archive = TarArchive::new(Cursor::new(tar_data));
-    let result = archive.extract(temp.path(), &config);
+    let result = archive.extract(temp.path(), &config, &ExtractionOptions::default());
 
     assert!(
         matches!(result, Err(ExtractionError::HardlinkEscape { .. })),
@@ -266,7 +287,7 @@ fn test_cve_2025_48387_absolute_hardlink_rejected() {
     config.allowed.hardlinks = true;
 
     let mut archive = TarArchive::new(Cursor::new(tar_data));
-    let result = archive.extract(temp.path(), &config);
+    let result = archive.extract(temp.path(), &config, &ExtractionOptions::default());
 
     assert!(
         matches!(result, Err(ExtractionError::HardlinkEscape { .. })),
@@ -374,7 +395,7 @@ fn test_ghsa_2367_hardlink_does_not_corrupt_target() {
     let mut archive = TarArchive::new(Cursor::new(tar_data));
     // Extraction may succeed or fail depending on platform duplicate-file handling,
     // but legit.txt must never be corrupted.
-    let _ = archive.extract(temp.path(), &config);
+    let _ = archive.extract(temp.path(), &config, &ExtractionOptions::default());
 
     let legit = std::fs::read_to_string(temp.path().join("legit.txt")).unwrap();
     assert_eq!(
@@ -399,7 +420,9 @@ fn test_ghsa_2367_hardlink_produces_independent_inode() {
     config.allowed.hardlinks = true;
 
     let mut archive = TarArchive::new(Cursor::new(tar_data));
-    archive.extract(temp.path(), &config).unwrap();
+    archive
+        .extract(temp.path(), &config, &ExtractionOptions::default())
+        .unwrap();
 
     let ino_legit = std::fs::metadata(temp.path().join("legit.txt"))
         .unwrap()
@@ -724,7 +747,11 @@ fn test_windows_backslash_parent_traversal() {
 
     let temp = TempDir::new().unwrap();
     let mut archive = TarArchive::new(Cursor::new(tar_data));
-    let result = archive.extract(temp.path(), &SecurityConfig::default());
+    let result = archive.extract(
+        temp.path(),
+        &SecurityConfig::default(),
+        &ExtractionOptions::default(),
+    );
 
     assert!(
         result.is_err(),
@@ -739,7 +766,11 @@ fn test_windows_backslash_deep_traversal() {
 
     let temp = TempDir::new().unwrap();
     let mut archive = TarArchive::new(Cursor::new(tar_data));
-    let result = archive.extract(temp.path(), &SecurityConfig::default());
+    let result = archive.extract(
+        temp.path(),
+        &SecurityConfig::default(),
+        &ExtractionOptions::default(),
+    );
 
     assert!(
         result.is_err(),
@@ -758,7 +789,11 @@ fn test_windows_backslash_treated_as_filename_on_unix() {
 
     let temp = TempDir::new().unwrap();
     let mut archive = TarArchive::new(Cursor::new(tar_data));
-    let result = archive.extract(temp.path(), &SecurityConfig::default());
+    let result = archive.extract(
+        temp.path(),
+        &SecurityConfig::default(),
+        &ExtractionOptions::default(),
+    );
 
     // Extraction should succeed — the path is not a traversal on Unix.
     assert!(
@@ -782,7 +817,11 @@ fn test_windows_absolute_path_treated_as_filename_on_unix() {
 
     let temp = TempDir::new().unwrap();
     let mut archive = TarArchive::new(Cursor::new(tar_data));
-    let result = archive.extract(temp.path(), &SecurityConfig::default());
+    let result = archive.extract(
+        temp.path(),
+        &SecurityConfig::default(),
+        &ExtractionOptions::default(),
+    );
 
     // Extraction should succeed and the file must be inside the destination.
     assert!(

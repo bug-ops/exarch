@@ -150,6 +150,17 @@ impl PySecurityConfig {
         slf
     }
 
+    /// Allows or denies solid 7z archives.
+    ///
+    /// Solid archives require reading all preceding entries to decompress any
+    /// entry, which may allow a crafted archive to consume excessive
+    /// memory. Disabled by default.
+    #[pyo3(signature = (allow=true))]
+    fn allow_solid_archives(mut slf: PyRefMut<'_, Self>, allow: bool) -> PyRefMut<'_, Self> {
+        slf.inner.allow_solid_archives = allow;
+        slf
+    }
+
     /// Sets whether to preserve permissions from archive.
     #[pyo3(signature = (preserve=true))]
     fn preserve_permissions(mut slf: PyRefMut<'_, Self>, preserve: bool) -> PyRefMut<'_, Self> {

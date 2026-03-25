@@ -18,6 +18,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Confirm and test CVE-2026-24842: hardlink `linkpath` validation correctly uses the
+  extraction root (`dest`) as the resolution base, not the entry's parent directory.
+  A crafted entry `a/b/c/d/link` with `linkpath = ../../../../etc/passwd` is blocked
+  because `dest/../../../../etc/passwd` escapes the root and is detected immediately.
+  The mismatch described in the CVE does not exist in this implementation; added CVE
+  regression test `tests/cve/cve_2026_24842.rs` to prevent future regressions (#131).
+
 - Fix two-hop symlink chain bypass in `SafeSymlink` and `SafeHardlink` validation
   (GHSA-83g3-92jg-28cx variant — #116). String-based `..` normalization did not
   account for on-disk symlinks written by earlier archive entries; a second symlink

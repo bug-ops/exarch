@@ -162,6 +162,10 @@ pub struct ListArgs {
     /// Maximum total size of entries in bytes (supports K, M, G, T suffixes)
     #[arg(long, value_parser = parse_byte_size)]
     pub max_total_size: Option<u64>,
+
+    /// Allow solid 7z archives (higher memory usage during listing)
+    #[arg(long)]
+    pub allow_solid_archives: bool,
 }
 
 #[derive(clap::Args)]
@@ -185,6 +189,10 @@ pub struct VerifyArgs {
     /// Maximum total size of entries in bytes (supports K, M, G, T suffixes)
     #[arg(long, value_parser = parse_byte_size)]
     pub max_total_size: Option<u64>,
+
+    /// Allow solid 7z archives (higher memory usage during verification)
+    #[arg(long)]
+    pub allow_solid_archives: bool,
 }
 
 /// Parse byte size with optional suffix (K, M, G, T)

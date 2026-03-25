@@ -38,6 +38,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fix `verify` false positive [HIGH] for solid 7z archive entries where
   `compressed_size=0` is a normal artifact of solid block compression (#118)
 - Add `--allow-solid-archives` flag to CLI `extract` command (#119)
+- `--allow-solid-archives` is now propagated to the conflict-detection `list_archive` call
+  in `extract`, fixing a `SecurityViolation` at the list step when solid 7z archives are
+  passed with `--allow-solid-archives` but without `--force` or `--atomic` (#124).
+  `--allow-solid-archives` is also exposed in the `list` and `verify` subcommands.
 - Upgrade `tar` dependency to 0.4.45 to address RUSTSEC-2026-0067 (symlink
   `chmod` escape in `unpack_in`) and RUSTSEC-2026-0068 (PAX size header
   ignored when base header size is non-zero) (#112)

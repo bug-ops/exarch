@@ -22,8 +22,14 @@ pub fn execute(args: &ExtractArgs, formatter: &dyn OutputFormatter) -> Result<()
     };
 
     if !args.force && !args.atomic {
-        let manifest = list_archive(&args.archive, &SecurityConfig::default())
-            .with_context(|| format!("failed to list archive: {}", args.archive.display()))?;
+        let manifest = list_archive(
+            &args.archive,
+            &SecurityConfig {
+                allow_solid_archives: args.allow_solid_archives,
+                ..Default::default()
+            },
+        )
+        .with_context(|| format!("failed to list archive: {}", args.archive.display()))?;
 
         let conflicts: Vec<_> = manifest
             .entries

@@ -12,6 +12,7 @@ pub fn execute(args: &ListArgs, formatter: &dyn OutputFormatter) -> Result<()> {
         max_total_size: args
             .max_total_size
             .unwrap_or_else(|| SecurityConfig::default().max_total_size),
+        allow_solid_archives: args.allow_solid_archives,
         ..Default::default()
     };
 

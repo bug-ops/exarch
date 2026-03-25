@@ -8,7 +8,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.8"
+version = "0.2.9"
 authors = ["Exarch Contributors"]
 edition = "2024"
 rust-version = "1.89.0"
@@ -19,7 +19,7 @@ keywords = ["archive", "extraction", "security", "tar", "zip"]
 categories = ["compression", "filesystem"]
 
 [workspace.dependencies]
-exarch-core = { path = "crates/exarch-core", version = "0.2.8" }
+exarch-core = { path = "crates/exarch-core", version = "0.2.9" }
 anyhow = "1.0"
 assert_cmd = "2.1"
 bzip2 = "0.6"
@@ -35,7 +35,7 @@ napi = "3.8"
 napi-build = "2.3"
 napi-derive = "3.5"
 predicates = "3.1"
-proptest = "1.10"
+proptest = "1.11"
 pyo3 = "0.28"
 rustc-hash = "2.1"
 serde = "1.0"
@@ -43,13 +43,13 @@ serde_json = "1.0"
 sevenz-rust2 = "0.20"
 smallvec = "1.15"
 tar = "0.4"
-tempfile = "3.26"
+tempfile = "3.27"
 thiserror = "2.0"
 time = "0.3"
 tokio = "1.50"
 walkdir = "2.5"
 xz2 = { version = "0.1", features = ["static"] }
-zip = { version = "8.3", default-features = false }
+zip = { version = "8.4", default-features = false }
 zstd = "0.13"
 
 [workspace.lints.clippy]

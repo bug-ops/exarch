@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Upgrade `tar` dependency to 0.4.45 to address RUSTSEC-2026-0067 (symlink
+  `chmod` escape in `unpack_in`) and RUSTSEC-2026-0068 (PAX size header
+  ignored when base header size is non-zero) (#112)
+- `SafePath::validate` no longer returns a false positive `PathTraversal` error
+  for archive root entries (`.` or `./`) produced by `tar -C /dir .` (#113)
+
 ## [0.2.8] - 2026-03-15
 
 ### Fixed

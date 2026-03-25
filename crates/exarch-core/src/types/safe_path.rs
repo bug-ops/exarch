@@ -128,6 +128,13 @@ impl SafePath {
             });
         }
 
+        // Archive root entries ("." or "./") represent the extraction directory
+        // itself. They are produced by `tar -C /dir .` and are always safe.
+        // Return immediately — no further validation needed.
+        if path == Path::new(".") || path == Path::new("./") {
+            return Ok(Self(PathBuf::new()));
+        }
+
         // 1. Check for null bytes
         if has_null_bytes(path) {
             return Err(ExtractionError::SecurityViolation {
@@ -1077,5 +1084,63 @@ mod tests {
         let path = PathBuf::from("file.txt");
         let result = SafePath::validate_with_context(&path, &dest, &config, &ctx);
         assert!(result.is_ok(), "single component should work: {result:?}");
+    }
+
+    // --- Tests for archive root entry handling (issue #113) ---
+
+    #[test]
+    fn test_archive_root_dot_is_accepted() {
+        let (_temp, dest) = create_test_dest();
+        let config = SecurityConfig::default();
+
+        // "." is the archive root directory — produced by `tar -C /dir .`
+        let result = SafePath::validate(Path::new("."), &dest, &config);
+        assert!(
+            result.is_ok(),
+            "archive root '.' must be accepted: {result:?}"
+        );
+        assert_eq!(result.expect("safe").as_path(), Path::new(""));
+    }
+
+    #[test]
+    fn test_archive_root_dot_slash_is_accepted() {
+        let (_temp, dest) = create_test_dest();
+        let config = SecurityConfig::default();
+
+        // "./" is an alternate form of the archive root directory entry
+        let result = SafePath::validate(Path::new("./"), &dest, &config);
+        assert!(
+            result.is_ok(),
+            "archive root './' must be accepted: {result:?}"
+        );
+        assert_eq!(result.expect("safe").as_path(), Path::new(""));
+    }
+
+    #[test]
+    fn test_archive_root_dot_dot_still_rejected() {
+        let (_temp, dest) = create_test_dest();
+        let config = SecurityConfig::default();
+
+        // ".." must still be rejected — it is a traversal attempt, not an archive root
+        let result = SafePath::validate(Path::new(".."), &dest, &config);
+        assert!(
+            matches!(result, Err(ExtractionError::PathTraversal { .. })),
+            "'..' must be rejected as path traversal"
+        );
+    }
+
+    #[test]
+    fn test_archive_root_dot_dot_slash_still_rejected() {
+        let (_temp, dest) = create_test_dest();
+        let config = SecurityConfig::default();
+
+        let paths = ["./..", "./../../etc", "../foo", "./../etc/passwd"];
+        for p in paths {
+            let result = SafePath::validate(Path::new(p), &dest, &config);
+            assert!(
+                matches!(result, Err(ExtractionError::PathTraversal { .. })),
+                "path '{p}' must be rejected as path traversal"
+            );
+        }
     }
 }

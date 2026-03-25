@@ -1,5 +1,5 @@
-//! CVE regression tests: CVE-2024-12718, CVE-2024-12905, CVE-2025-48387, and
-//! Windows backslash path traversal.
+//! CVE regression tests: CVE-2024-12718, CVE-2024-12905, CVE-2025-48387,
+//! CVE-2026-24842, and Windows backslash path traversal.
 //!
 //! Each test constructs a minimal archive reproducing the attack vector and
 //! verifies that extraction fails with the expected security error.
@@ -409,6 +409,88 @@ fn test_ghsa_2367_hardlink_produces_independent_inode() {
     assert_ne!(
         ino_legit, ino_link,
         "hardlink created a shared inode — content-copy was not applied"
+    );
+}
+
+// ── CVE-2026-24842: hardlink root-anchor mismatch ────────────────────────────
+//
+// A crafted archive could place the hardlink entry deep in a subdirectory
+// (e.g. a/b/c/d/link) and set linkpath to ../../../../etc/passwd.  If the
+// validator resolved linkpath relative to the entry's parent directory instead
+// of the extraction root (dest), the result would be dest/etc/passwd — which
+// looks safe.  At creation time, however, fs::hard_link uses dest as the base,
+// so dest/../../../../etc/passwd escapes.
+//
+// The correct behaviour: validate_hardlink uses dest as the base for both
+// containment check and creation, so the escape is detected during validation.
+
+#[test]
+fn test_cve_2026_24842_deep_nested_hardlink_escape_rejected_by_default() {
+    // Default config: hardlinks are disabled, so the entry is rejected before
+    // any path resolution.
+    let tar_data = TarTestBuilder::new()
+        .add_hardlink("a/b/c/d/link", "../../../../etc/passwd")
+        .build();
+
+    let temp = TempDir::new().unwrap();
+    let mut archive = TarArchive::new(Cursor::new(tar_data));
+    let result = archive.extract(temp.path(), &SecurityConfig::default());
+
+    assert!(
+        matches!(
+            result,
+            Err(ExtractionError::SecurityViolation { .. } | ExtractionError::HardlinkEscape { .. })
+        ),
+        "deep nested hardlink escape must be rejected with default config, got: {result:?}"
+    );
+}
+
+#[test]
+fn test_cve_2026_24842_deep_nested_hardlink_escape_rejected_when_allowed() {
+    // With hardlinks enabled, linkpath ../../../../etc/passwd from a/b/c/d/
+    // resolves to dest/../../../../etc/passwd from dest — which escapes — and
+    // must be rejected with HardlinkEscape.
+    let tar_data = TarTestBuilder::new()
+        .add_hardlink("a/b/c/d/link", "../../../../etc/passwd")
+        .build();
+
+    let temp = TempDir::new().unwrap();
+    let mut config = SecurityConfig::default();
+    config.allowed.hardlinks = true;
+
+    let mut archive = TarArchive::new(Cursor::new(tar_data));
+    let result = archive.extract(temp.path(), &config);
+
+    assert!(
+        matches!(result, Err(ExtractionError::HardlinkEscape { .. })),
+        "deep nested hardlink escape must be rejected even with hardlinks allowed, got: {result:?}"
+    );
+
+    assert!(
+        !temp.path().join("a/b/c/d/link").exists(),
+        "hardlink must not be written to disk after escape rejection"
+    );
+}
+
+#[test]
+fn test_cve_2026_24842_safe_deep_nested_hardlink_allowed() {
+    // A valid hardlink in a deep directory pointing to a target within dest
+    // must be allowed (avoid false positives).
+    let tar_data = TarTestBuilder::new()
+        .add_file("target.txt", b"content")
+        .add_hardlink("a/b/c/d/link", "target.txt")
+        .build();
+
+    let temp = TempDir::new().unwrap();
+    let mut config = SecurityConfig::default();
+    config.allowed.hardlinks = true;
+
+    let mut archive = TarArchive::new(Cursor::new(tar_data));
+    let result = archive.extract(temp.path(), &config);
+
+    assert!(
+        result.is_ok(),
+        "valid internal deep-nested hardlink must be allowed, got: {result:?}"
     );
 }
 

@@ -273,6 +273,77 @@ fn test_cve_2025_48387_absolute_hardlink_rejected() {
     );
 }
 
+// ── RUSTSEC-2026-0067 / CVE-2026-33056: tar-rs symlink+directory chmod ───────
+//
+// tar-rs < 0.4.45 followed symlinks when applying chmod during directory entry
+// extraction.  An archive that creates `subdir -> ../external` (symlink) and
+// then a directory entry `subdir` would chmod the external directory on the
+// host filesystem.  Fixed in tar-rs 0.4.45.
+//
+// exarch blocks this at the security layer: the symlink entry is rejected
+// (symlinks disabled by default), so the subsequent directory entry either
+// also fails or is harmless because the symlink was never written.
+
+#[test]
+fn test_rustsec_2026_0067_symlink_dir_chmod_default_config() {
+    // Default config: symlinks are disabled; the symlink entry must be rejected
+    // before tar-rs ever has a chance to follow it for the directory chmod.
+    let tar_data = TarTestBuilder::new()
+        .add_symlink("subdir", "../external")
+        .add_directory("subdir/")
+        .build();
+
+    let temp = TempDir::new().unwrap();
+    let mut archive = TarArchive::new(Cursor::new(tar_data));
+    let result = archive.extract(temp.path(), &SecurityConfig::default());
+
+    assert!(
+        matches!(
+            result,
+            Err(ExtractionError::SecurityViolation { .. }
+                | ExtractionError::SymlinkEscape { .. }
+                | ExtractionError::PathTraversal { .. })
+        ),
+        "symlink+dir chmod attack must be rejected with default config, got: {result:?}"
+    );
+
+    // No files must exist outside the extraction root.
+    let external = temp.path().parent().unwrap().join("external");
+    assert!(
+        !external.exists(),
+        "extraction must not create directories outside root"
+    );
+}
+
+#[test]
+fn test_rustsec_2026_0067_symlink_dir_chmod_symlinks_allowed() {
+    // With symlinks enabled, the symlink `subdir -> ../external` points outside
+    // the extraction root and must be rejected with SymlinkEscape.
+    let tar_data = TarTestBuilder::new()
+        .add_symlink("subdir", "../external")
+        .add_directory("subdir/")
+        .build();
+
+    let temp = TempDir::new().unwrap();
+    let mut config = SecurityConfig::default();
+    config.allowed.symlinks = true;
+
+    let mut archive = TarArchive::new(Cursor::new(tar_data));
+    let result = archive.extract(temp.path(), &config);
+
+    assert!(
+        matches!(result, Err(ExtractionError::SymlinkEscape { .. })),
+        "symlink escaping root must be rejected even when symlinks are allowed, got: {result:?}"
+    );
+
+    // No files must exist outside the extraction root.
+    let external = temp.path().parent().unwrap().join("external");
+    assert!(
+        !external.exists(),
+        "extraction must not create directories outside root"
+    );
+}
+
 // ── Windows backslash path traversal ─────────────────────────────────────────
 //
 // Archives created on Windows may use `\` as a path separator.  On Windows

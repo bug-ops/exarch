@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Tests
+
+- Add regression tests for RUSTSEC-2026-0067 symlink+directory chmod attack
+  (CVE-2026-33056 / GHSA-j4xf-2g29-59ph). Two new test cases verify that an
+  archive combining `subdir -> ../external` (symlink) followed by a directory
+  entry `subdir` is rejected before tar-rs can chmod the external directory —
+  both with default config (symlinks disabled) and with `allow_symlinks = true`
+  (#132).
+
 ### Security
 
 - Fix two-hop symlink chain bypass in `SafeSymlink` and `SafeHardlink` validation

@@ -56,6 +56,7 @@
 //! Basic extraction:
 //!
 //! ```no_run
+//! use exarch_core::ExtractionOptions;
 //! use exarch_core::SecurityConfig;
 //! use exarch_core::formats::SevenZArchive;
 //! use exarch_core::formats::traits::ArchiveFormat;
@@ -65,7 +66,11 @@
 //! # fn main() -> Result<(), exarch_core::ExtractionError> {
 //! let file = File::open("archive.7z")?;
 //! let mut archive = SevenZArchive::new(file)?;
-//! let report = archive.extract(Path::new("/output"), &SecurityConfig::default())?;
+//! let report = archive.extract(
+//!     Path::new("/output"),
+//!     &SecurityConfig::default(),
+//!     &ExtractionOptions::default(),
+//! )?;
 //! println!("Extracted {} files", report.files_extracted);
 //! # Ok(())
 //! # }
@@ -74,6 +79,7 @@
 //! Allow solid archives with memory limit:
 //!
 //! ```no_run
+//! use exarch_core::ExtractionOptions;
 //! use exarch_core::SecurityConfig;
 //!
 //! let mut config = SecurityConfig::default();
@@ -173,6 +179,7 @@ struct CachedEntry {
 /// # Examples
 ///
 /// ```no_run
+/// use exarch_core::ExtractionOptions;
 /// use exarch_core::SecurityConfig;
 /// use exarch_core::formats::SevenZArchive;
 /// use exarch_core::formats::traits::ArchiveFormat;
@@ -181,7 +188,11 @@ struct CachedEntry {
 ///
 /// let file = File::open("archive.7z")?;
 /// let mut archive = SevenZArchive::new(file)?;
-/// let report = archive.extract(Path::new("/output"), &SecurityConfig::default())?;
+/// let report = archive.extract(
+///     Path::new("/output"),
+///     &SecurityConfig::default(),
+///     &ExtractionOptions::default(),
+/// )?;
 /// println!("Extracted {} files", report.files_extracted);
 /// # Ok::<(), exarch_core::ExtractionError>(())
 /// ```

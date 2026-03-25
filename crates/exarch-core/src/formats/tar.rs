@@ -62,6 +62,7 @@
 //! Basic extraction:
 //!
 //! ```no_run
+//! use exarch_core::ExtractionOptions;
 //! use exarch_core::SecurityConfig;
 //! use exarch_core::formats::TarArchive;
 //! use exarch_core::formats::traits::ArchiveFormat;
@@ -70,7 +71,11 @@
 //!
 //! let file = File::open("archive.tar")?;
 //! let mut archive = TarArchive::new(file);
-//! let report = archive.extract(Path::new("/output"), &SecurityConfig::default())?;
+//! let report = archive.extract(
+//!     Path::new("/output"),
+//!     &SecurityConfig::default(),
+//!     &ExtractionOptions::default(),
+//! )?;
 //! println!("Extracted {} files", report.files_extracted);
 //! # Ok::<(), exarch_core::ExtractionError>(())
 //! ```
@@ -78,6 +83,7 @@
 //! Gzip-compressed TAR:
 //!
 //! ```no_run
+//! use exarch_core::ExtractionOptions;
 //! use exarch_core::SecurityConfig;
 //! use exarch_core::formats::TarArchive;
 //! use exarch_core::formats::traits::ArchiveFormat;
@@ -88,7 +94,11 @@
 //! let file = File::open("archive.tar.gz")?;
 //! let decoder = GzDecoder::new(file);
 //! let mut archive = TarArchive::new(decoder);
-//! let report = archive.extract(Path::new("/output"), &SecurityConfig::default())?;
+//! let report = archive.extract(
+//!     Path::new("/output"),
+//!     &SecurityConfig::default(),
+//!     &ExtractionOptions::default(),
+//! )?;
 //! # Ok::<(), exarch_core::ExtractionError>(())
 //! ```
 
@@ -129,6 +139,7 @@ use super::traits::ArchiveFormat;
 /// # Examples
 ///
 /// ```no_run
+/// use exarch_core::ExtractionOptions;
 /// use exarch_core::SecurityConfig;
 /// use exarch_core::formats::TarArchive;
 /// use exarch_core::formats::traits::ArchiveFormat;
@@ -138,7 +149,7 @@ use super::traits::ArchiveFormat;
 /// let file = File::open("archive.tar")?;
 /// let mut archive = TarArchive::new(file);
 /// let config = SecurityConfig::default();
-/// let report = archive.extract(Path::new("/output"), &config)?;
+/// let report = archive.extract(Path::new("/output"), &config, &ExtractionOptions::default())?;
 /// # Ok::<(), exarch_core::ExtractionError>(())
 /// ```
 pub struct TarArchive<R: Read> {
@@ -510,6 +521,7 @@ impl TarEntryAdapter {
 /// # Examples
 ///
 /// ```no_run
+/// use exarch_core::ExtractionOptions;
 /// use exarch_core::SecurityConfig;
 /// use exarch_core::formats::tar::open_tar_gz;
 /// use exarch_core::formats::traits::ArchiveFormat;
@@ -517,7 +529,7 @@ impl TarEntryAdapter {
 ///
 /// let mut archive = open_tar_gz("archive.tar.gz")?;
 /// let config = SecurityConfig::default();
-/// let report = archive.extract(Path::new("/output"), &config)?;
+/// let report = archive.extract(Path::new("/output"), &config, &ExtractionOptions::default())?;
 /// # Ok::<(), exarch_core::ExtractionError>(())
 /// ```
 pub fn open_tar_gz<P: AsRef<Path>>(
@@ -540,6 +552,7 @@ pub fn open_tar_gz<P: AsRef<Path>>(
 /// # Examples
 ///
 /// ```no_run
+/// use exarch_core::ExtractionOptions;
 /// use exarch_core::SecurityConfig;
 /// use exarch_core::formats::tar::open_tar_bz2;
 /// use exarch_core::formats::traits::ArchiveFormat;
@@ -547,7 +560,7 @@ pub fn open_tar_gz<P: AsRef<Path>>(
 ///
 /// let mut archive = open_tar_bz2("archive.tar.bz2")?;
 /// let config = SecurityConfig::default();
-/// let report = archive.extract(Path::new("/output"), &config)?;
+/// let report = archive.extract(Path::new("/output"), &config, &ExtractionOptions::default())?;
 /// # Ok::<(), exarch_core::ExtractionError>(())
 /// ```
 pub fn open_tar_bz2<P: AsRef<Path>>(
@@ -570,6 +583,7 @@ pub fn open_tar_bz2<P: AsRef<Path>>(
 /// # Examples
 ///
 /// ```no_run
+/// use exarch_core::ExtractionOptions;
 /// use exarch_core::SecurityConfig;
 /// use exarch_core::formats::tar::open_tar_xz;
 /// use exarch_core::formats::traits::ArchiveFormat;
@@ -577,7 +591,7 @@ pub fn open_tar_bz2<P: AsRef<Path>>(
 ///
 /// let mut archive = open_tar_xz("archive.tar.xz")?;
 /// let config = SecurityConfig::default();
-/// let report = archive.extract(Path::new("/output"), &config)?;
+/// let report = archive.extract(Path::new("/output"), &config, &ExtractionOptions::default())?;
 /// # Ok::<(), exarch_core::ExtractionError>(())
 /// ```
 pub fn open_tar_xz<P: AsRef<Path>>(
@@ -601,6 +615,7 @@ pub fn open_tar_xz<P: AsRef<Path>>(
 /// # Examples
 ///
 /// ```no_run
+/// use exarch_core::ExtractionOptions;
 /// use exarch_core::SecurityConfig;
 /// use exarch_core::formats::tar::open_tar_zst;
 /// use exarch_core::formats::traits::ArchiveFormat;
@@ -608,7 +623,7 @@ pub fn open_tar_xz<P: AsRef<Path>>(
 ///
 /// let mut archive = open_tar_zst("archive.tar.zst")?;
 /// let config = SecurityConfig::default();
-/// let report = archive.extract(Path::new("/output"), &config)?;
+/// let report = archive.extract(Path::new("/output"), &config, &ExtractionOptions::default())?;
 /// # Ok::<(), exarch_core::ExtractionError>(())
 /// ```
 pub fn open_tar_zst<P: AsRef<Path>>(

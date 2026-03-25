@@ -85,6 +85,7 @@
 //! Basic extraction:
 //!
 //! ```no_run
+//! use exarch_core::ExtractionOptions;
 //! use exarch_core::SecurityConfig;
 //! use exarch_core::formats::ZipArchive;
 //! use exarch_core::formats::traits::ArchiveFormat;
@@ -93,7 +94,11 @@
 //!
 //! let file = File::open("archive.zip")?;
 //! let mut archive = ZipArchive::new(file)?;
-//! let report = archive.extract(Path::new("/output"), &SecurityConfig::default())?;
+//! let report = archive.extract(
+//!     Path::new("/output"),
+//!     &SecurityConfig::default(),
+//!     &ExtractionOptions::default(),
+//! )?;
 //! println!("Extracted {} files", report.files_extracted);
 //! # Ok::<(), exarch_core::ExtractionError>(())
 //! ```
@@ -101,6 +106,7 @@
 //! Custom security configuration:
 //!
 //! ```no_run
+//! use exarch_core::ExtractionOptions;
 //! use exarch_core::SecurityConfig;
 //!
 //! let mut config = SecurityConfig::default();
@@ -155,6 +161,7 @@ use super::traits::ArchiveFormat;
 /// # Examples
 ///
 /// ```no_run
+/// use exarch_core::ExtractionOptions;
 /// use exarch_core::SecurityConfig;
 /// use exarch_core::formats::ZipArchive;
 /// use exarch_core::formats::traits::ArchiveFormat;
@@ -163,7 +170,11 @@ use super::traits::ArchiveFormat;
 ///
 /// let file = File::open("archive.zip")?;
 /// let mut archive = ZipArchive::new(file)?;
-/// let report = archive.extract(Path::new("/output"), &SecurityConfig::default())?;
+/// let report = archive.extract(
+///     Path::new("/output"),
+///     &SecurityConfig::default(),
+///     &ExtractionOptions::default(),
+/// )?;
 /// println!("Extracted {} files", report.files_extracted);
 /// # Ok::<(), exarch_core::ExtractionError>(())
 /// ```

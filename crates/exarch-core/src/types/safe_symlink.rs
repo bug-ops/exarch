@@ -141,24 +141,16 @@ impl SafeSymlink {
         // with a symlink between validation and extraction time.
         verify_parent_not_symlink(link.as_path(), dest)?;
 
-        // 4. Resolve target against link's parent directory
+        // 4. Resolve target against link's parent directory, following any
+        // on-disk symlinks encountered during traversal.
+        //
+        // String-based normalization is insufficient: a target component that
+        // is already a symlink written to disk by a previous entry can redirect
+        // subsequent `..` traversal outside the extraction root (two-hop chain,
+        // GHSA-83g3-92jg-28cx variant — issue #116).
         let link_parent = link.as_path().parent().unwrap_or_else(|| Path::new(""));
         let link_parent_full = dest.as_path().join(link_parent);
-
-        // Join target to link's parent directory
-        let mut resolved = link_parent_full.join(target);
-
-        // Normalize the path by resolving .. and . components manually
-        resolved = normalize_symlink_target(&resolved);
-
-        // 5. Verify resolved target is within dest
-        // We can't use canonicalize here because the target might not exist yet
-        // Instead, we check if the normalized path starts with dest
-        if !resolved.starts_with(dest.as_path()) {
-            return Err(ExtractionError::SymlinkEscape {
-                path: link.as_path().to_path_buf(),
-            });
-        }
+        resolve_through_symlinks(&link_parent_full, target, dest.as_path(), link.as_path())?;
 
         Ok(Self {
             link_path: link.as_path().to_path_buf(),
@@ -226,31 +218,86 @@ fn verify_parent_not_symlink(path: &Path, dest: &DestDir) -> Result<()> {
     Ok(())
 }
 
-/// Normalizes a symlink target by manually resolving .. and . components.
+/// Resolves `target` step by step from `start`, following any on-disk symlinks
+/// encountered during traversal and verifying containment within `dest` after
+/// every component.
 ///
-/// This function is used instead of `canonicalize` because the target might
-/// not exist yet during extraction planning.
-fn normalize_symlink_target(path: &Path) -> PathBuf {
-    // Pre-allocate with expected capacity to avoid reallocations
-    let component_count = path.components().count();
-    let mut components = Vec::with_capacity(component_count);
+/// Unlike pure string normalization, this function calls `fs::canonicalize`
+/// whenever it steps into a path that is a symlink on disk. This closes the
+/// two-hop symlink chain bypass: a target component that is already a symlink
+/// (written by a previous archive entry) is resolved to its real on-disk
+/// location before any subsequent `..` traversal is applied.
+///
+/// Non-existent path components (targets that have not been extracted yet) are
+/// handled transparently — `symlink_metadata` failure is treated as "not a
+/// symlink", so the function degrades gracefully to string-based normalization
+/// for paths that do not yet exist on disk.
+///
+/// # Errors
+///
+/// Returns `SymlinkEscape` if:
+/// - The resolved path escapes `dest` at any step.
+/// - `fs::canonicalize` fails for a symlink component (e.g., `ELOOP` for
+///   circular chains).
+pub(crate) fn resolve_through_symlinks(
+    start: &Path,
+    target: &Path,
+    dest: &Path,
+    link_path: &Path,
+) -> Result<PathBuf> {
+    let mut current = start.to_path_buf();
 
-    for component in path.components() {
+    for component in target.components() {
         match component {
             std::path::Component::ParentDir => {
-                // Pop the last component if possible
-                components.pop();
+                // If the current accumulated path is an on-disk symlink, resolve
+                // it before applying `..` so the pop operates on the real
+                // filesystem topology rather than the string representation.
+                if std::fs::symlink_metadata(&current)
+                    .map(|m| m.file_type().is_symlink())
+                    .unwrap_or(false)
+                {
+                    current = std::fs::canonicalize(&current).map_err(|_| {
+                        ExtractionError::SymlinkEscape {
+                            path: link_path.to_path_buf(),
+                        }
+                    })?;
+                }
+                if !current.pop() {
+                    return Err(ExtractionError::SymlinkEscape {
+                        path: link_path.to_path_buf(),
+                    });
+                }
             }
-            std::path::Component::CurDir => {
-                // Skip . components
+            std::path::Component::CurDir => {}
+            std::path::Component::Normal(name) => {
+                current.push(name);
+                // Resolve the component immediately if it is a symlink so that
+                // any subsequent `..` steps use the real resolved path.
+                if std::fs::symlink_metadata(&current)
+                    .map(|m| m.file_type().is_symlink())
+                    .unwrap_or(false)
+                {
+                    current = std::fs::canonicalize(&current).map_err(|_| {
+                        ExtractionError::SymlinkEscape {
+                            path: link_path.to_path_buf(),
+                        }
+                    })?;
+                }
             }
             _ => {
-                components.push(component);
+                current.push(component);
             }
+        }
+
+        if !current.starts_with(dest) {
+            return Err(ExtractionError::SymlinkEscape {
+                path: link_path.to_path_buf(),
+            });
         }
     }
 
-    components.iter().collect()
+    Ok(current)
 }
 
 #[cfg(test)]
@@ -380,24 +427,6 @@ mod tests {
 
         let result = SafeSymlink::validate(&link, &target, &dest, &config);
         assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_normalize_symlink_target() {
-        // Test basic normalization
-        let path = PathBuf::from("/tmp/a/b/../c/./d");
-        let normalized = normalize_symlink_target(&path);
-        assert_eq!(normalized, PathBuf::from("/tmp/a/c/d"));
-
-        // Test multiple parent dirs
-        let path = PathBuf::from("/tmp/a/b/c/../../d");
-        let normalized = normalize_symlink_target(&path);
-        assert_eq!(normalized, PathBuf::from("/tmp/a/d"));
-
-        // Test current dir removal
-        let path = PathBuf::from("/tmp/./a/./b");
-        let normalized = normalize_symlink_target(&path);
-        assert_eq!(normalized, PathBuf::from("/tmp/a/b"));
     }
 
     #[test]
@@ -615,5 +644,46 @@ mod tests {
         // Test getters
         assert_eq!(symlink.link_path(), Path::new("mylink"));
         assert_eq!(symlink.target_path(), Path::new("target.txt"));
+    }
+
+    /// Two-hop symlink chain: the second symlink's target traverses through a
+    /// symlink already written to disk, escaping the extraction root via
+    /// on-disk resolution even though string-based normalization would
+    /// pass.
+    ///
+    /// Attack chain (GHSA-83g3-92jg-28cx variant, issue #116):
+    ///   Entry 1: dir   a/b/c/
+    ///   Entry 2: link  a/b/c/up  ->  ../..   (resolves to a/ — safe, written)
+    ///   Entry 3: link  a/b/escape -> c/up/../.. (string: a/b/ — PASS; disk:
+    /// escapes dest)
+    #[test]
+    #[cfg(unix)]
+    #[allow(clippy::unwrap_used)]
+    fn test_safe_symlink_two_hop_chain_rejected() {
+        use std::os::unix::fs;
+
+        let (temp, dest) = create_test_dest();
+        let config = create_config_with_symlinks();
+
+        // Set up the on-disk state that entry 2 would produce.
+        let a = temp.path().join("a");
+        let b = a.join("b");
+        let c = b.join("c");
+        std::fs::create_dir_all(&c).unwrap();
+        // a/b/c/up -> ../..  (resolves to a/)
+        fs::symlink("../..", c.join("up")).unwrap();
+
+        // Now validate entry 3: a/b/escape -> c/up/../..
+        // String normalization gives a/b/ (within dest) — but on disk, c/up
+        // resolves outside, so the chain escapes.
+        let link = SafePath::validate(&PathBuf::from("a/b/escape"), &dest, &config)
+            .expect("link path should be valid");
+        let target = PathBuf::from("c/up/../..");
+
+        let result = SafeSymlink::validate(&link, &target, &dest, &config);
+        assert!(
+            matches!(result, Err(ExtractionError::SymlinkEscape { .. })),
+            "two-hop symlink chain must be rejected"
+        );
     }
 }

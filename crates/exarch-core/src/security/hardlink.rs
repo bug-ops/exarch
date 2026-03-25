@@ -9,6 +9,7 @@ use crate::Result;
 use crate::SecurityConfig;
 use crate::types::DestDir;
 use crate::types::SafePath;
+use crate::types::safe_symlink::resolve_through_symlinks;
 
 /// Tracks hardlink targets during extraction.
 ///
@@ -141,64 +142,22 @@ impl HardlinkTracker {
             });
         }
 
-        // Resolve target against destination
-        let resolved = dest.as_path().join(target);
-
-        let needs_normalization = resolved
-            .components()
-            .any(|c| matches!(c, Component::ParentDir | Component::CurDir));
-
-        if !needs_normalization {
-            // Path is already normalized, just verify it's within destination
-            if !resolved.starts_with(dest.as_path()) {
-                return Err(ExtractionError::HardlinkEscape {
-                    path: link_path.as_path().to_path_buf(),
-                });
-            }
-
-            // Track this hardlink target (H-PERF-6: use entry API)
-            self.seen_targets
-                .entry(resolved)
-                .or_insert_with(|| link_path.as_path().to_path_buf());
-
-            return Ok(());
-        }
-
-        // Normalize path: resolve .. and . components, detect escape attempts
-        let mut normalized = PathBuf::new();
-        for component in resolved.components() {
-            match component {
-                Component::ParentDir => {
-                    if !normalized.pop() {
-                        // Tried to go above root - escape attempt
-                        return Err(ExtractionError::HardlinkEscape {
-                            path: link_path.as_path().to_path_buf(),
-                        });
-                    }
-                }
-                Component::CurDir => {
-                    // Skip current directory markers
-                }
-                // Keep Prefix/RootDir from resolved path (they come from dest, which is trusted)
-                _ => {
-                    normalized.push(component);
-                }
-            }
-        }
-
-        // Verify the normalized path is within destination
-        // Note: We need to canonicalize the destination for proper comparison
-        // since dest might have symlinks
-        let dest_canonical = dest.as_path();
-        if !normalized.starts_with(dest_canonical) {
-            return Err(ExtractionError::HardlinkEscape {
+        // Resolve target against destination, following any on-disk symlinks
+        // encountered during traversal.
+        //
+        // String-based normalization is insufficient: if a previously extracted
+        // symlink lies on the target path, a hardlink target can escape the
+        // extraction root via on-disk resolution even though string normalization
+        // would pass (two-hop chain bypass, GHSA-83g3-92jg-28cx variant — #116).
+        let resolved =
+            resolve_through_symlinks(dest.as_path(), target, dest.as_path(), link_path.as_path())
+                .map_err(|_| ExtractionError::HardlinkEscape {
                 path: link_path.as_path().to_path_buf(),
-            });
-        }
+            })?;
 
-        // Track this hardlink target using normalized path (H-PERF-6: use entry API)
+        // Track this hardlink target (H-PERF-6: use entry API)
         self.seen_targets
-            .entry(normalized)
+            .entry(resolved)
             .or_insert_with(|| link_path.as_path().to_path_buf());
 
         Ok(())
@@ -413,5 +372,45 @@ mod tests {
 
         // Three different targets
         assert_eq!(tracker.count(), 3, "should track each unique target");
+    }
+
+    /// Hardlink target that traverses through an already-extracted symlink must
+    /// be rejected (two-hop chain, GHSA-83g3-92jg-28cx variant — issue #116).
+    ///
+    /// Entry 2 (symlink a/b/c/up -> ../..) is on disk when hardlink is
+    /// validated. Target a/b/escape/../../etc/passwd: string normalization
+    /// → dest/a/etc/passwd (looks safe), but if a/b/escape is an on-disk
+    /// symlink resolving outside dest, the hardlink must be rejected.
+    #[test]
+    #[cfg(unix)]
+    #[allow(clippy::unwrap_used)]
+    fn test_hardlink_two_hop_chain_rejected() {
+        use std::fs;
+        use std::os::unix;
+
+        let (temp, dest) = create_test_dest();
+        let mut config = SecurityConfig::default();
+        config.allowed.hardlinks = true;
+
+        // Simulate on-disk state after extracting the two symlink entries.
+        let a = temp.path().join("a");
+        let b = a.join("b");
+        let c = b.join("c");
+        fs::create_dir_all(&c).unwrap();
+        // a/b/c/up -> ../..  (first hop: resolves to a/)
+        unix::fs::symlink("../..", c.join("up")).unwrap();
+        // a/b/escape -> c/up/../..  (second hop: resolves outside dest on disk)
+        unix::fs::symlink("c/up/../..", b.join("escape")).unwrap();
+
+        let mut tracker = HardlinkTracker::new();
+        let link = SafePath::validate(&PathBuf::from("exfil"), &dest, &config).unwrap();
+        // Target traverses through the escape symlink
+        let target = PathBuf::from("a/b/escape/../../etc/passwd");
+
+        let result = tracker.validate_hardlink(&link, &target, &dest, &config);
+        assert!(
+            matches!(result, Err(ExtractionError::HardlinkEscape { .. })),
+            "hardlink through two-hop symlink chain must be rejected"
+        );
     }
 }

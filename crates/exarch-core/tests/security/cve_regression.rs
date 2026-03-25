@@ -462,7 +462,11 @@ fn test_cve_2026_24842_deep_nested_hardlink_escape_rejected_by_default() {
 
     let temp = TempDir::new().unwrap();
     let mut archive = TarArchive::new(Cursor::new(tar_data));
-    let result = archive.extract(temp.path(), &SecurityConfig::default());
+    let result = archive.extract(
+        temp.path(),
+        &SecurityConfig::default(),
+        &ExtractionOptions::default(),
+    );
 
     assert!(
         matches!(
@@ -487,7 +491,7 @@ fn test_cve_2026_24842_deep_nested_hardlink_escape_rejected_when_allowed() {
     config.allowed.hardlinks = true;
 
     let mut archive = TarArchive::new(Cursor::new(tar_data));
-    let result = archive.extract(temp.path(), &config);
+    let result = archive.extract(temp.path(), &config, &ExtractionOptions::default());
 
     assert!(
         matches!(result, Err(ExtractionError::HardlinkEscape { .. })),
@@ -514,7 +518,7 @@ fn test_cve_2026_24842_safe_deep_nested_hardlink_allowed() {
     config.allowed.hardlinks = true;
 
     let mut archive = TarArchive::new(Cursor::new(tar_data));
-    let result = archive.extract(temp.path(), &config);
+    let result = archive.extract(temp.path(), &config, &ExtractionOptions::default());
 
     assert!(
         result.is_ok(),
@@ -680,7 +684,7 @@ fn test_cve_2025_29787_zip_slip_blocked_with_symlinks_enabled() {
     let data = build_cve_2025_29787_zip();
     let mut archive = ZipArchive::new(Cursor::new(data)).unwrap();
 
-    let result = archive.extract(dest.path(), &config);
+    let result = archive.extract(dest.path(), &config, &ExtractionOptions::default());
 
     assert!(
         result.is_err(),
@@ -723,7 +727,7 @@ fn test_cve_2025_29787_zip_slip_blocked_with_symlinks_disabled() {
     let data = build_cve_2025_29787_zip();
     let mut archive = ZipArchive::new(Cursor::new(data)).unwrap();
 
-    let result = archive.extract(dest.path(), &config);
+    let result = archive.extract(dest.path(), &config, &ExtractionOptions::default());
 
     assert!(
         result.is_err(),

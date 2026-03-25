@@ -160,6 +160,17 @@ impl SecurityConfig {
         self
     }
 
+    /// Allows or denies solid 7z archives.
+    ///
+    /// Solid archives require reading all preceding entries to decompress any
+    /// entry, which may allow a crafted archive to consume excessive
+    /// memory. Disabled by default.
+    #[napi(js_name = "setAllowSolidArchives")]
+    pub fn set_allow_solid_archives(&mut self, allow: Option<bool>) -> &Self {
+        self.inner.allow_solid_archives = allow.unwrap_or(true);
+        self
+    }
+
     /// Sets whether to preserve permissions from archive.
     #[napi(js_name = "setPreservePermissions")]
     pub fn set_preserve_permissions(&mut self, preserve: Option<bool>) -> &Self {

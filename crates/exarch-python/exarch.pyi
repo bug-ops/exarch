@@ -73,6 +73,10 @@ class SecurityConfig:
         """Allows or denies world-writable files."""
         ...
 
+    def allow_solid_archives(self, allow: bool = True) -> SecurityConfig:
+        """Allows or denies solid 7z archives."""
+        ...
+
     def preserve_permissions(self, preserve: bool = True) -> SecurityConfig:
         """Sets whether to preserve permissions from archive."""
         ...

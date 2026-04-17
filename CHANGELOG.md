@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Extract, list, and verify additional ZIP-based formats. JVM artifacts
+  (`.jar`, `.war`, `.ear`), Java-ecosystem packaging (`.nar`, `.nbm`),
+  mobile and desktop app bundles (`.apk`, `.aab`, `.ipa`, `.appx`,
+  `.msix`), Python wheels (`.whl`), IDE/browser extensions (`.vsix`,
+  `.xpi`), and EPUBs (`.epub`) now route through the existing ZIP
+  extractor rather than returning `UnsupportedFormat`. Creation for
+  these extensions is explicitly rejected (mirrors `.7z`): they all
+  sit on ZIP but require extra structure - signing, manifests,
+  ordering rules - that exarch doesn't produce, so silently emitting
+  a bare ZIP would be misleading. Callers who need the override can
+  set `CreationConfig::format = Some(ArchiveType::Zip)`.
+
 ## [0.2.9] - 2026-03-25
 
 ### Tests

@@ -14,6 +14,25 @@ use crate::Result;
 #[allow(dead_code)]
 const SEVENZ_MAGIC: [u8; 6] = [0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C];
 
+/// File extensions that use the ZIP container but add extra structure
+/// (signing, manifests, ordering rules) on top. Extraction treats them
+/// as ZIP; creation is rejected separately in
+/// `api::reject_zip_family_creation`. Kept as a single source of truth
+/// so the two call sites don't drift.
+pub(crate) const ZIP_FAMILY_ALIASES: &[&str] = &[
+    "jar", "war", "ear", "nar", "nbm", "apk", "aab", "ipa", "appx", "msix", "whl", "vsix", "xpi",
+    "epub",
+];
+
+/// Returns true if `ext` (case-insensitive) names a ZIP-family alias.
+/// Plain `.zip` is deliberately *not* included - callers can test it
+/// separately when they need to distinguish "bare ZIP" from "ZIP under
+/// another name".
+pub(crate) fn is_zip_family_alias(ext: &str) -> bool {
+    let lower = ext.to_ascii_lowercase();
+    ZIP_FAMILY_ALIASES.contains(&lower.as_str())
+}
+
 /// Supported archive formats.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArchiveType {
@@ -60,6 +79,10 @@ pub fn detect_format(path: &Path) -> Result<ArchiveType> {
         "zst" | "tzst" => Ok(ArchiveType::TarZst),
         "zip" => Ok(ArchiveType::Zip),
         "7z" => Ok(ArchiveType::SevenZ),
+        // JVM artifacts, app bundles, Python wheels, IDE/browser
+        // extensions, EPUBs - all ZIP under the hood, so they extract
+        // through the same path. See `ZIP_FAMILY_ALIASES` for the list.
+        ext if ZIP_FAMILY_ALIASES.contains(&ext) => Ok(ArchiveType::Zip),
         _ => Err(ExtractionError::UnsupportedFormat),
     }
 }
@@ -119,6 +142,31 @@ mod tests {
     fn test_detect_zip() {
         let path = PathBuf::from("archive.zip");
         assert_eq!(detect_format(&path).unwrap(), ArchiveType::Zip);
+    }
+
+    #[test]
+    fn test_detect_zip_family_extensions() {
+        // Each of these is a ZIP underneath and should resolve to
+        // ArchiveType::Zip so the existing extractor picks it up. Upper-case
+        // variants cover Windows-authored filenames.
+        for ext in [
+            "jar", "war", "ear", "nar", "nbm", "apk", "aab", "ipa", "appx", "msix", "whl", "vsix",
+            "xpi", "epub",
+        ] {
+            let path = PathBuf::from(format!("archive.{ext}"));
+            assert_eq!(
+                detect_format(&path).unwrap(),
+                ArchiveType::Zip,
+                "{ext} should detect as ZIP",
+            );
+
+            let upper = PathBuf::from(format!("archive.{}", ext.to_ascii_uppercase()));
+            assert_eq!(
+                detect_format(&upper).unwrap(),
+                ArchiveType::Zip,
+                "{ext} uppercase should detect as ZIP",
+            );
+        }
     }
 
     #[test]

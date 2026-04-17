@@ -13,6 +13,7 @@ use crate::creation::CreationConfig;
 use crate::creation::CreationReport;
 use crate::formats::detect::ArchiveType;
 use crate::formats::detect::detect_format;
+use crate::formats::detect::is_zip_family_alias;
 use crate::inspection::ArchiveManifest;
 use crate::inspection::VerificationReport;
 
@@ -477,6 +478,18 @@ pub fn create_archive_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
 ) -> Result<CreationReport> {
     let output = output_path.as_ref();
 
+    // Block creation for the ZIP-family extensions (mirrors the 7z block
+    // below). They're all ZIP underneath but add extra requirements -
+    // signing (apk/aab/ipa/appx/msix), checksum manifests (whl), ordering
+    // and stored-compression rules (epub), descriptor files
+    // (war/ear/vsix/nbm) - which exarch doesn't produce. Silently emitting
+    // a bare ZIP with one of these extensions would be misleading, so we
+    // error instead. Callers who need the override can set
+    // CreationConfig::format = Some(ArchiveType::Zip).
+    if config.format.is_none() {
+        reject_zip_family_creation(output)?;
+    }
+
     // Determine format from extension or config
     let format = determine_creation_format(output, config)?;
 
@@ -597,6 +610,27 @@ pub fn verify_archive<P: AsRef<Path>>(
     crate::inspection::verify_archive(archive_path, config)
 }
 
+/// Rejects creation for ZIP-family extensions that aren't plain `.zip`.
+///
+/// See the call site in `create_archive_with_progress` for the rationale.
+/// Returns `Ok(())` for anything else - `.zip`, tar variants, unknown
+/// extensions (those get caught later by `detect_format`).
+fn reject_zip_family_creation(output: &Path) -> Result<()> {
+    let Some(ext) = output.extension().and_then(|e| e.to_str()) else {
+        return Ok(());
+    };
+    if is_zip_family_alias(ext) {
+        let ext_lower = ext.to_ascii_lowercase();
+        return Err(ExtractionError::InvalidArchive(format!(
+            "creation for .{ext_lower} isn't supported: the format is ZIP-based but \
+             requires extra structure (signing, manifests, ordering) that exarch \
+             doesn't produce. Use .zip, or set CreationConfig::format = \
+             Some(ArchiveType::Zip) to override."
+        )));
+    }
+    Ok(())
+}
+
 /// Determines archive format from output path or config.
 fn determine_creation_format(output: &Path, config: &CreationConfig) -> Result<ArchiveType> {
     // If format explicitly set in config, use it
@@ -702,6 +736,39 @@ mod tests {
         let result = extract_archive(&path, dest.path(), &SecurityConfig::default());
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_create_archive_zip_family_not_supported() {
+        // Mirrors test_create_archive_7z_not_supported. Spot-checks a couple
+        // of extensions rather than every one - the integration test
+        // covers the full list.
+        let dest = tempfile::TempDir::new().unwrap();
+        for ext in ["apk", "whl", "EPUB"] {
+            let archive_path = dest.path().join(format!("output.{ext}"));
+            let result = create_archive(&archive_path, &[] as &[&str], &CreationConfig::default());
+            assert!(
+                matches!(result, Err(ExtractionError::InvalidArchive(_))),
+                ".{ext} should be rejected, got {result:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn test_create_archive_zip_family_override_bypasses_guard() {
+        // Explicit CreationConfig::format = Some(Zip) is the escape hatch -
+        // skips the ZIP-family guard. Caller takes responsibility for the
+        // resulting file not being spec-valid.
+        let dest = tempfile::TempDir::new().unwrap();
+        let src = dest.path().join("source.txt");
+        std::fs::write(&src, b"hello").unwrap();
+        let archive_path = dest.path().join("output.apk");
+        let config = CreationConfig::default().with_format(Some(ArchiveType::Zip));
+        let result = create_archive(&archive_path, &[&src], &config);
+        assert!(
+            result.is_ok(),
+            "explicit format override should bypass the guard, got {result:?}",
+        );
     }
 
     #[test]

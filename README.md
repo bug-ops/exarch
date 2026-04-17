@@ -169,7 +169,11 @@ let config = SecurityConfig {
 | TAR+XZ | `.tar.xz`, `.txz` | ✅ | ✅ | ✅ | ✅ | xz/lzma |
 | TAR+ZSTD | `.tar.zst`, `.tzst` | ✅ | ✅ | ✅ | ✅ | zstandard |
 | ZIP | `.zip` | ✅ | ✅ | ✅ | ✅ | deflate, deflate64, bzip2, zstd |
+| ZIP-family | `.jar`, `.war`, `.ear`, `.nar`, `.nbm`, `.apk`, `.aab`, `.ipa`, `.appx`, `.msix`, `.whl`, `.vsix`, `.xpi`, `.epub` | ✅ | — | ✅ | ✅ | deflate, deflate64, bzip2, zstd |
 | 7z | `.7z` | ✅ | — | ✅ | ✅ | lzma, lzma2 |
+
+> [!NOTE]
+> ZIP-family formats share the ZIP container but add extra structure - signing (`.apk`/`.aab`/`.ipa`/`.appx`/`.msix`), checksum manifests (`.whl`), ordering rules (`.epub`), or descriptor files (`.war`/`.ear`/`.vsix`/`.nbm`) - which exarch doesn't produce. Creation is rejected to avoid silently emitting a bare ZIP with a misleading extension; callers who want that can set `CreationConfig::format = Some(ArchiveType::Zip)` explicitly.
 
 > [!NOTE]
 > 7z creation is not yet supported. Solid and encrypted 7z archives are rejected for security reasons. Unix symlinks inside 7z archives are reported as regular files (sevenz-rust2 API limitation).

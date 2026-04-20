@@ -14,12 +14,13 @@ use crate::Result;
 #[allow(dead_code)]
 const SEVENZ_MAGIC: [u8; 6] = [0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C];
 
-/// File extensions that use the ZIP container but add extra structure
-/// (signing, manifests, ordering rules) on top. Extraction treats them
-/// as ZIP; creation is rejected separately in
-/// `api::reject_zip_family_creation`. Kept as a single source of truth
-/// so the two call sites don't drift.
-pub(crate) const ZIP_FAMILY_ALIASES: &[&str] = &[
+/// File extensions that wrap a ZIP container with extra structure.
+///
+/// Signing, manifests, and ordering rules sit on top of the ZIP bytes
+/// for these formats. Extraction treats them as ZIP; creation is
+/// rejected separately in `api::reject_zip_family_creation`. Kept as a
+/// single source of truth so the two call sites don't drift.
+pub const ZIP_FAMILY_ALIASES: &[&str] = &[
     "jar", "war", "ear", "nar", "nbm", "apk", "aab", "ipa", "appx", "msix", "whl", "vsix", "xpi",
     "epub",
 ];
@@ -148,11 +149,9 @@ mod tests {
     fn test_detect_zip_family_extensions() {
         // Each of these is a ZIP underneath and should resolve to
         // ArchiveType::Zip so the existing extractor picks it up. Upper-case
-        // variants cover Windows-authored filenames.
-        for ext in [
-            "jar", "war", "ear", "nar", "nbm", "apk", "aab", "ipa", "appx", "msix", "whl", "vsix",
-            "xpi", "epub",
-        ] {
+        // variants cover Windows-authored filenames. Driving off
+        // ZIP_FAMILY_ALIASES keeps the test from drifting if the list changes.
+        for ext in ZIP_FAMILY_ALIASES {
             let path = PathBuf::from(format!("archive.{ext}"));
             assert_eq!(
                 detect_format(&path).unwrap(),

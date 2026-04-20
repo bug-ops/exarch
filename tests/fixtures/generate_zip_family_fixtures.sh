@@ -13,7 +13,9 @@
 #                   followed by container.xml and content files
 #   - simple.vsix : extension.vsixmanifest + [Content_Types].xml
 #
-# Requires: zip (Info-ZIP), sha256sum, base64
+# Requires: zip (Info-ZIP), sha256sum, base64, xxd, GNU stat (-c%s).
+# Tested on Linux; not portable to macOS/BSD without tweaks (bare
+# `mktemp -d`, `sha256sum`, `stat -c%s` are GNU-isms).
 # shellcheck disable=SC2035
 
 set -euo pipefail

@@ -13,6 +13,7 @@ use exarch_core::create_archive;
 use exarch_core::creation::CreationConfig;
 use exarch_core::extract_archive;
 use exarch_core::formats::detect::ArchiveType;
+use exarch_core::formats::detect::ZIP_FAMILY_ALIASES;
 use exarch_core::list_archive;
 use exarch_core::verify_archive;
 use std::path::Path;
@@ -141,10 +142,7 @@ fn verify_works_for_every_fixture() {
 fn inferred_creation_is_rejected_for_zip_family() {
     let dest = TempDir::new().unwrap();
     let config = CreationConfig::default();
-    for ext in [
-        "jar", "war", "ear", "nar", "nbm", "apk", "aab", "ipa", "appx", "msix", "whl", "vsix",
-        "xpi", "epub",
-    ] {
+    for ext in ZIP_FAMILY_ALIASES {
         let output = dest.path().join(format!("out.{ext}"));
         let result = create_archive(&output, &[] as &[&str], &config);
         match result {

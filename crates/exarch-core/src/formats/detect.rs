@@ -35,9 +35,14 @@ pub enum ArchiveType {
 
 /// Detects the archive type from a file path.
 ///
+/// `.gz` files are only accepted when the stem ends with `.tar`
+/// (i.e. `archive.tar.gz`). A bare `archive.gz` returns
+/// [`ExtractionError::UnsupportedFormat`].
+///
 /// # Errors
 ///
-/// Returns an error if the format cannot be determined.
+/// Returns [`ExtractionError::UnsupportedFormat`] if the extension is
+/// unrecognised or if a `.gz` file has no `.tar` stem.
 pub fn detect_format(path: &Path) -> Result<ArchiveType> {
     let extension = path
         .extension()
@@ -47,13 +52,15 @@ pub fn detect_format(path: &Path) -> Result<ArchiveType> {
     let ext_lower = extension.to_ascii_lowercase();
     match ext_lower.as_str() {
         "tar" => Ok(ArchiveType::Tar),
-        "gz" | "tgz" => {
+        "tgz" => Ok(ArchiveType::TarGz),
+        "gz" => {
             if let Some(stem) = path.file_stem()
                 && stem.to_string_lossy().ends_with(".tar")
             {
-                return Ok(ArchiveType::TarGz);
+                Ok(ArchiveType::TarGz)
+            } else {
+                Err(ExtractionError::UnsupportedFormat)
             }
-            Ok(ArchiveType::TarGz)
         }
         "bz2" | "tbz" | "tbz2" => Ok(ArchiveType::TarBz2),
         "xz" | "txz" => Ok(ArchiveType::TarXz),
@@ -77,12 +84,21 @@ mod tests {
     }
 
     #[test]
-    fn test_detect_tar_gz() {
+    fn test_detect_tar_gz_still_works() {
         let path = PathBuf::from("archive.tar.gz");
         assert_eq!(detect_format(&path).unwrap(), ArchiveType::TarGz);
 
         let path2 = PathBuf::from("archive.tgz");
         assert_eq!(detect_format(&path2).unwrap(), ArchiveType::TarGz);
+    }
+
+    #[test]
+    fn test_detect_bare_gz_returns_unsupported() {
+        let path = PathBuf::from("archive.gz");
+        assert!(matches!(
+            detect_format(&path),
+            Err(ExtractionError::UnsupportedFormat)
+        ));
     }
 
     #[test]

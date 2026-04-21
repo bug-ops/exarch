@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `detect_format` now returns `UnsupportedFormat` for bare `.gz` files (no `.tar`
+  stem) instead of silently routing them to `open_tar_gz` and producing
+  `InvalidArchive` at runtime. `.tar.gz` and `.tgz` paths are unaffected (#155).
+
 ## [0.2.9] - 2026-03-25
 
 ### Tests

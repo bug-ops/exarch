@@ -43,8 +43,9 @@ Issues = "https://github.com/bug-ops/exarch/issues"
 
 [dependency-groups]
 dev = [
-    "pytest>=8.0",
+    "pytest>=9.0.3",
     "pytest-cov>=6.0",
+    "Pygments>=2.20.0",
     "mypy>=1.0",
     "ruff>=0.8",
     "maturin>=1.0",

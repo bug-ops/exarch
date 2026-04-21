@@ -253,10 +253,7 @@ pub(crate) fn resolve_through_symlinks(
                 // If the current accumulated path is an on-disk symlink, resolve
                 // it before applying `..` so the pop operates on the real
                 // filesystem topology rather than the string representation.
-                if std::fs::symlink_metadata(&current)
-                    .map(|m| m.file_type().is_symlink())
-                    .unwrap_or(false)
-                {
+                if std::fs::symlink_metadata(&current).is_ok_and(|m| m.file_type().is_symlink()) {
                     current = std::fs::canonicalize(&current).map_err(|_| {
                         ExtractionError::SymlinkEscape {
                             path: link_path.to_path_buf(),
@@ -274,10 +271,7 @@ pub(crate) fn resolve_through_symlinks(
                 current.push(name);
                 // Resolve the component immediately if it is a symlink so that
                 // any subsequent `..` steps use the real resolved path.
-                if std::fs::symlink_metadata(&current)
-                    .map(|m| m.file_type().is_symlink())
-                    .unwrap_or(false)
-                {
+                if std::fs::symlink_metadata(&current).is_ok_and(|m| m.file_type().is_symlink()) {
                     current = std::fs::canonicalize(&current).map_err(|_| {
                         ExtractionError::SymlinkEscape {
                             path: link_path.to_path_buf(),

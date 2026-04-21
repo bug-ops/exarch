@@ -20,6 +20,8 @@
 
 set -euo pipefail
 
+[[ "$(uname)" == "Linux" ]] || { echo "Requires Linux (GNU stat, sha256sum)"; exit 1; }
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FIXTURES_DIR="$SCRIPT_DIR/zip-family"
 TEMP_DIR=$(mktemp -d)

@@ -624,8 +624,8 @@ fn reject_zip_family_creation(output: &Path) -> Result<()> {
         return Err(ExtractionError::InvalidArchive(format!(
             "creation for .{ext_lower} isn't supported: the format is ZIP-based but \
              requires extra structure (signing, manifests, ordering) that exarch \
-             doesn't produce. Use .zip, or set CreationConfig::format = \
-             Some(ArchiveType::Zip) to override."
+             doesn't produce. Use .zip, or set CreationConfig::format = Some(\
+             exarch_core::formats::detect::ArchiveType::Zip) to override."
         )));
     }
     Ok(())

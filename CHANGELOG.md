@@ -19,7 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sit on ZIP but require extra structure - signing, manifests,
   ordering rules - that exarch doesn't produce, so silently emitting
   a bare ZIP would be misleading. Callers who need the override can
-  set `CreationConfig::format = Some(ArchiveType::Zip)`.
+  set `CreationConfig::format = Some(exarch_core::formats::detect::ArchiveType::Zip)`.
 ### Fixed
 
 - `detect_format` now returns `UnsupportedFormat` for bare `.gz` files (no `.tar`

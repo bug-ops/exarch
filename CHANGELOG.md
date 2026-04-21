@@ -20,6 +20,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ordering rules - that exarch doesn't produce, so silently emitting
   a bare ZIP would be misleading. Callers who need the override can
   set `CreationConfig::format = Some(ArchiveType::Zip)`.
+### Fixed
+
+- `detect_format` now returns `UnsupportedFormat` for bare `.gz` files (no `.tar`
+  stem) instead of silently routing them to `open_tar_gz` and producing
+  `InvalidArchive` at runtime. `.tar.gz` and `.tgz` paths are unaffected (#155).
 
 ## [0.2.9] - 2026-03-25
 

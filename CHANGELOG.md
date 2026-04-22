@@ -26,6 +26,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stem) instead of silently routing them to `open_tar_gz` and producing
   `InvalidArchive` at runtime. `.tar.gz` and `.tgz` paths are unaffected (#155).
 
+### Security
+
+- Update `unicode-segmentation` from 1.13.1 (yanked) to 1.13.2 via `cargo update`.
+  Pulled transitively through `convert_case` (napi-derive) and `indicatif` (exarch-cli).
+  `cargo deny check` now reports no yanked crates; advisories, bans, licenses, and
+  sources all pass.
+
 ## [0.2.9] - 2026-03-25
 
 ### Tests

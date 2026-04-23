@@ -267,8 +267,11 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: '20'
-          registry-url: 'https://registry.npmjs.org'
+          node-version: '22'
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10
 
       - name: Setup cross-compilation (Linux aarch64)
         if: matrix.platform.name == 'linux-aarch64'
@@ -284,11 +287,11 @@ jobs:
 
       - name: Install dependencies
         working-directory: crates/exarch-node
-        run: npm install
+        run: pnpm install --no-frozen-lockfile
 
       - name: Build native addon
         working-directory: crates/exarch-node
-        run: npm run build -- --target ${{ matrix.platform.target }}
+        run: pnpm run build --target ${{ matrix.platform.target }}
 
       - name: Upload bindings
         uses: actions/upload-artifact@v7
@@ -320,8 +323,12 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: '22'
+          node-version: '24'
           registry-url: 'https://registry.npmjs.org'
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10
 
       - name: Download all bindings
         uses: actions/download-artifact@v8
@@ -334,7 +341,6 @@ jobs:
         run: |
           mkdir -p native
 
-          # Copy platform-specific binaries
           for platform_dir in ../../bindings/bindings-*; do
             if [ -d "$platform_dir" ]; then
               cp -v "$platform_dir"/*.node native/ || true
@@ -345,14 +351,11 @@ jobs:
 
       - name: Install dependencies
         working-directory: crates/exarch-node
-        run: npm ci
-
-      - name: Update npm for trusted publishing
-        run: npm install -g npm@latest
+        run: pnpm install --no-frozen-lockfile
 
       - name: Publish to npm (Trusted Publishing)
         working-directory: crates/exarch-node
-        run: npm publish --access public --ignore-scripts
+        run: pnpm publish --access public --no-git-checks --provenance --ignore-scripts
 
   # Create GitHub Release with artifacts
   github-release:

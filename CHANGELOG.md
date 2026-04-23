@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `detect_format` now uses `is_zip_family_alias` for ZIP-family extension
+  matching, ensuring the dedicated case-insensitive helper is the single
+  source of truth rather than a duplicated inline `contains` call.
+
 ### Added
 
 - Extract, list, and verify additional ZIP-based formats. JVM artifacts

@@ -90,7 +90,7 @@ pub fn detect_format(path: &Path) -> Result<ArchiveType> {
         // JVM artifacts, app bundles, Python wheels, IDE/browser
         // extensions, EPUBs - all ZIP under the hood, so they extract
         // through the same path. See `ZIP_FAMILY_ALIASES` for the list.
-        ext if ZIP_FAMILY_ALIASES.contains(&ext) => Ok(ArchiveType::Zip),
+        ext if is_zip_family_alias(ext) => Ok(ArchiveType::Zip),
         _ => Err(ExtractionError::UnsupportedFormat),
     }
 }

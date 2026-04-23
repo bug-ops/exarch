@@ -7,11 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-
-- `detect_format` now uses `is_zip_family_alias` for ZIP-family extension
-  matching, ensuring the dedicated case-insensitive helper is the single
-  source of truth rather than a duplicated inline `contains` call.
+## [0.3.0] - 2026-04-23
 
 ### Added
 
@@ -27,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a bare ZIP would be misleading. Callers who need the override can
   set `CreationConfig::format = Some(exarch_core::formats::detect::ArchiveType::Zip)`.
 ### Fixed
+
+- `detect_format` now uses `is_zip_family_alias` for ZIP-family extension
+  matching, ensuring the dedicated case-insensitive helper is the single
+  source of truth rather than a duplicated inline `contains` call.
 
 - `detect_format` now returns `UnsupportedFormat` for bare `.gz` files (no `.tar`
   stem) instead of silently routing them to `open_tar_gz` and producing
@@ -352,7 +352,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 64KB reusable copy buffers
 - LRU cache for symlink target resolution
 
-[Unreleased]: https://github.com/bug-ops/exarch/compare/v0.2.9...HEAD
+[Unreleased]: https://github.com/bug-ops/exarch/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/bug-ops/exarch/compare/v0.2.9...v0.3.0
 [0.2.9]: https://github.com/bug-ops/exarch/compare/v0.2.8...v0.2.9
 [0.2.8]: https://github.com/bug-ops/exarch/compare/v0.2.7...v0.2.8
 [0.2.7]: https://github.com/bug-ops/exarch/compare/v0.2.6...v0.2.7

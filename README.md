@@ -7,7 +7,7 @@
 [![PyPI](https://img.shields.io/pypi/v/exarch)](https://pypi.org/project/exarch)
 [![npm](https://img.shields.io/npm/v/exarch-rs)](https://www.npmjs.com/package/exarch-rs)
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue)](LICENSE-MIT)
-[![MSRV](https://img.shields.io/badge/MSRV-1.89.0-blue)](https://github.com/bug-ops/exarch)
+[![MSRV](https://img.shields.io/badge/MSRV-1.93.0-blue)](https://github.com/bug-ops/exarch)
 
 Memory-safe archive extraction and creation library with Python and Node.js bindings.
 
@@ -33,7 +33,7 @@ exarch-core = "0.3"
 ```
 
 > [!IMPORTANT]
-> Requires Rust 1.89.0 or later (Edition 2024).
+> Requires Rust 1.93.0 or later (Edition 2024).
 
 ### Python
 
@@ -216,7 +216,7 @@ exarch uses optimized I/O with directory caching and atomic permission setting t
 
 ### Requirements
 
-- Rust 1.89.0 or later (Edition 2024)
+- Rust 1.93.0 or later (Edition 2024)
 - Python 3.9+ (for Python bindings)
 - Node.js 18+ (for Node.js bindings)
 

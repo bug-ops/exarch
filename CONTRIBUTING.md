@@ -10,7 +10,7 @@ Please be respectful and constructive in all interactions. We welcome contributo
 
 ### Prerequisites
 
-- **Rust** 1.89.0 or later (Edition 2024)
+- **Rust** 1.93.0 or later (Edition 2024)
 - **Python** 3.9+ (for Python bindings development)
 - **Node.js** 18+ (for Node.js bindings development)
 - **cargo-nextest** for running tests

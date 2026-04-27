@@ -63,7 +63,7 @@ sudo mv exarch /usr/local/bin/
 </details>
 
 > [!IMPORTANT]
-> Requires Rust 1.89.0 or later for building from source.
+> Requires Rust 1.93.0 or later for building from source.
 
 ## Usage
 

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Raised MSRV from 1.89.0 to 1.93.0 to accommodate `sevenz-rust2` 0.21.0 (required by `nt-time` 0.15)
+
 ## [0.3.0] - 2026-04-23
 
 ### Added

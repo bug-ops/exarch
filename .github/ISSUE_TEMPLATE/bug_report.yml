@@ -75,7 +75,7 @@ body:
       description: Your environment details
       placeholder: |
         - OS: macOS 14.0 / Ubuntu 22.04 / Windows 11
-        - Rust version: 1.89.0
+        - Rust version: 1.93.0
         - exarch version: 0.2.2
         - Python version (if applicable): 3.12
         - Node.js version (if applicable): 20.0

@@ -285,7 +285,7 @@ mod tests {
         core_report.files_extracted = 100_000;
         core_report.directories_created = 50_000;
         core_report.bytes_written = 10_000_000_000; // 10 GB
-        core_report.duration = Duration::from_secs(3600); // 1 hour
+        core_report.duration = Duration::from_hours(1);
 
         let report = ExtractionReport::from(core_report);
 
@@ -312,7 +312,7 @@ mod tests {
     #[test]
     fn test_extraction_report_duration_hours() {
         let mut core_report = CoreReport::new();
-        core_report.duration = Duration::from_secs(7200); // 2 hours
+        core_report.duration = Duration::from_hours(2);
 
         let report = ExtractionReport::from(core_report);
 

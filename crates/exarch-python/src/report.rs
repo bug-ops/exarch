@@ -609,7 +609,7 @@ mod tests {
         core_report.files_extracted = 100_000;
         core_report.directories_created = 50_000;
         core_report.bytes_written = 10_000_000_000; // 10 GB
-        core_report.duration = Duration::from_secs(3600); // 1 hour
+        core_report.duration = Duration::from_hours(1);
 
         let py_report = PyExtractionReport::from(core_report);
 

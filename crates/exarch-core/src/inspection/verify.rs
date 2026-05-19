@@ -70,6 +70,7 @@ pub fn verify_archive<P: AsRef<Path>>(
     archive_path: P,
     config: &SecurityConfig,
 ) -> Result<VerificationReport> {
+    config.validate()?;
     let archive_path = archive_path.as_ref();
 
     // List archive to get all entries
@@ -545,6 +546,22 @@ mod tests {
                 .iter()
                 .any(|i| i.category == IssueCategory::SuspiciousPath),
             "Should have SuspiciousPath issue for .sh extension"
+        );
+    }
+
+    #[test]
+    fn verify_archive_rejects_invalid_security_config() {
+        let config = SecurityConfig {
+            max_path_depth: 0,
+            ..SecurityConfig::default()
+        };
+        let result = crate::verify_archive("any.tar.gz", &config);
+        assert!(
+            matches!(
+                result,
+                Err(crate::ExtractionError::InvalidConfiguration { .. })
+            ),
+            "verify_archive must return InvalidConfiguration for zero max_path_depth"
         );
     }
 }

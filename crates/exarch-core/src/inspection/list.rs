@@ -59,6 +59,7 @@ pub fn list_archive<P: AsRef<Path>>(
     archive_path: P,
     config: &SecurityConfig,
 ) -> Result<ArchiveManifest> {
+    config.validate()?;
     let archive_path = archive_path.as_ref();
     let format = detect_format(archive_path)?;
 
@@ -1762,6 +1763,22 @@ mod tests {
         assert!(
             !has_false_positive,
             "solid.7z verification should not produce High-severity compressed_size issue"
+        );
+    }
+
+    #[test]
+    fn list_archive_rejects_invalid_security_config() {
+        let config = SecurityConfig {
+            max_file_size: 0,
+            ..SecurityConfig::default()
+        };
+        let result = crate::list_archive("any.tar.gz", &config);
+        assert!(
+            matches!(
+                result,
+                Err(crate::ExtractionError::InvalidConfiguration { .. })
+            ),
+            "list_archive must return InvalidConfiguration for zero max_file_size"
         );
     }
 }

@@ -393,19 +393,13 @@ pub fn extract_file_generic<R: Read>(
     // Create parent directories if needed using cache
     dir_cache.ensure_parent_dir(&output_path)?;
 
-    if output_path.exists() {
-        if skip_duplicates {
-            report.files_skipped += 1;
-            report.warnings.push(format!(
-                "skipped duplicate entry: {}",
-                validated.safe_path.as_path().display()
-            ));
-            return Ok(());
-        }
-        return Err(ExtractionError::InvalidArchive(format!(
-            "duplicate entry: {}",
+    if output_path.exists() && skip_duplicates {
+        report.files_skipped += 1;
+        report.warnings.push(format!(
+            "skipped duplicate entry: {}",
             validated.safe_path.as_path().display()
-        )));
+        ));
+        return Ok(());
     }
 
     // CRITICAL: Check quota BEFORE writing (prevents partial files on overflow)
@@ -508,8 +502,7 @@ pub fn create_directory(
 /// - Platform does not support symlinks
 /// - Parent directory creation fails
 /// - Symlink creation fails (including when target path already exists)
-/// - A file or symlink already exists at the link path and `skip_duplicates` is
-///   false
+/// - Removing an existing path fails when `skip_duplicates` is false
 #[allow(unused_variables)]
 pub fn create_symlink(
     safe_symlink: &SafeSymlink,
@@ -537,10 +530,7 @@ pub fn create_symlink(
                 ));
                 return Ok(());
             }
-            return Err(ExtractionError::InvalidArchive(format!(
-                "duplicate entry: {}",
-                safe_symlink.link_path().display()
-            )));
+            std::fs::remove_file(&link_path)?;
         }
 
         // Create symlink
@@ -1046,5 +1036,47 @@ mod tests {
             "file must have exact mode 0o755 despite strict umask 0o077; \
              got 0o{permission_bits:o} — set_permissions bypass not working"
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_duplicate_symlink_overwrites_when_skip_disabled() {
+        use crate::config::AllowedFeatures;
+        use crate::types::SafeSymlink;
+
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
+        let config = SecurityConfig {
+            allowed: AllowedFeatures {
+                symlinks: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        // Create the target file so the symlink has somewhere to point
+        std::fs::write(temp.path().join("target.txt"), b"data").expect("write target");
+
+        let link_safe_path =
+            SafePath::validate(&PathBuf::from("link.txt"), &dest, &config).expect("safe path");
+        // Validate before the symlink exists on disk
+        let safe_symlink =
+            SafeSymlink::validate(&link_safe_path, Path::new("target.txt"), &dest, &config)
+                .expect("safe symlink");
+
+        let mut report = ExtractionReport::default();
+        let mut dir_cache = DirCache::new();
+
+        // First creation
+        create_symlink(&safe_symlink, &dest, &mut report, &mut dir_cache, false)
+            .expect("first create_symlink should succeed");
+        assert_eq!(report.symlinks_created, 1);
+
+        // Second creation with skip_duplicates=false must overwrite without error
+        create_symlink(&safe_symlink, &dest, &mut report, &mut dir_cache, false)
+            .expect("second create_symlink should overwrite");
+        assert_eq!(report.symlinks_created, 2);
+        assert_eq!(report.files_skipped, 0);
+        assert!(temp.path().join("link.txt").exists());
     }
 }

@@ -58,7 +58,7 @@ impl std::fmt::Display for QuotaResource {
 pub enum ExtractionError {
     /// I/O operation failed.
     #[error("I/O error: {0}")]
-    Io(#[from] std::io::Error),
+    Io(std::io::Error),
 
     /// Archive format is unsupported or unrecognized.
     #[error("unsupported archive format")]
@@ -176,6 +176,12 @@ pub enum ExtractionError {
         /// Report of what was written before the error.
         report: crate::ExtractionReport,
     },
+}
+
+impl From<std::io::Error> for ExtractionError {
+    fn from(e: std::io::Error) -> Self {
+        Self::Io(e)
+    }
 }
 
 impl ExtractionError {
@@ -485,6 +491,34 @@ mod tests {
             // IO error may or may not have a source
             let _source = inner.source();
         }
+    }
+
+    // Regression test for #177: ExtractionError::Io must not expose the inner
+    // std::io::Error as an error source. The manual From impl intentionally omits
+    // #[source] so callers building error chains (anyhow, thiserror) do not append
+    // the OS message a second time after ExtractionError::Io's own Display.
+    #[test]
+    fn test_io_error_no_source_chain() {
+        use std::error::Error;
+
+        let os_message = "permission denied";
+        let io_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, os_message);
+        let err: ExtractionError = io_err.into();
+
+        // Display must contain the OS message exactly once.
+        let display = err.to_string();
+        assert_eq!(
+            display.matches(os_message).count(),
+            1,
+            "OS error message duplicated in Display: {display:?}"
+        );
+
+        // source() must be None — no chain continuation that would re-print the
+        // message.
+        assert!(
+            err.source().is_none(),
+            "ExtractionError::Io must not expose inner io::Error as source"
+        );
     }
 
     // L-11: ZipBomb edge case tests

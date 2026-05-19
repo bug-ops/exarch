@@ -71,7 +71,7 @@ pub fn execute(args: &ExtractArgs, formatter: &dyn OutputFormatter) -> Result<()
 
     let options = ExtractionOptions {
         atomic: args.atomic,
-        skip_duplicates: true,
+        skip_duplicates: !args.force,
     };
 
     // When --atomic + --force: remove existing destination after successful

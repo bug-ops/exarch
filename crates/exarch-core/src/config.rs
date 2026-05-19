@@ -185,6 +185,57 @@ impl SecurityConfig {
         }
     }
 
+    /// Validates that the configuration values are logically consistent.
+    ///
+    /// Returns an error if any field has a value that would make security
+    /// enforcement impossible (zero limits or non-positive ratio).
+    ///
+    /// # Errors
+    ///
+    /// Returns `ExtractionError::InvalidConfiguration` if:
+    /// - `max_compression_ratio` is not positive
+    /// - `max_file_size` is zero
+    /// - `max_total_size` is zero
+    /// - `max_path_depth` is zero
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::SecurityConfig;
+    ///
+    /// let config = SecurityConfig::default();
+    /// assert!(config.validate().is_ok());
+    ///
+    /// let bad = SecurityConfig {
+    ///     max_file_size: 0,
+    ///     ..SecurityConfig::default()
+    /// };
+    /// assert!(bad.validate().is_err());
+    /// ```
+    pub fn validate(&self) -> crate::Result<()> {
+        if !self.max_compression_ratio.is_finite() || self.max_compression_ratio <= 0.0 {
+            return Err(crate::ExtractionError::InvalidConfiguration {
+                reason: "max_compression_ratio must be positive".into(),
+            });
+        }
+        if self.max_file_size == 0 {
+            return Err(crate::ExtractionError::InvalidConfiguration {
+                reason: "max_file_size must not be zero".into(),
+            });
+        }
+        if self.max_total_size == 0 {
+            return Err(crate::ExtractionError::InvalidConfiguration {
+                reason: "max_total_size must not be zero".into(),
+            });
+        }
+        if self.max_path_depth == 0 {
+            return Err(crate::ExtractionError::InvalidConfiguration {
+                reason: "max_path_depth must not be zero".into(),
+            });
+        }
+        Ok(())
+    }
+
     /// Validates whether a path component is allowed.
     ///
     /// Comparison is case-insensitive to prevent bypass on case-insensitive
@@ -414,5 +465,76 @@ mod tests {
             1024 * 1024 * 1024,
             "permissive should have 1 GB solid block limit"
         );
+    }
+
+    // Regression tests for #172: SecurityConfig::validate() must reject configs
+    // that would make security enforcement impossible.
+
+    #[test]
+    fn test_validate_default_is_ok() {
+        assert!(SecurityConfig::default().validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_rejects_negative_compression_ratio() {
+        let cfg = SecurityConfig {
+            max_compression_ratio: -1.0,
+            ..SecurityConfig::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_zero_compression_ratio() {
+        let cfg = SecurityConfig {
+            max_compression_ratio: 0.0,
+            ..SecurityConfig::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_zero_max_file_size() {
+        let cfg = SecurityConfig {
+            max_file_size: 0,
+            ..SecurityConfig::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_zero_max_total_size() {
+        let cfg = SecurityConfig {
+            max_total_size: 0,
+            ..SecurityConfig::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_zero_max_path_depth() {
+        let cfg = SecurityConfig {
+            max_path_depth: 0,
+            ..SecurityConfig::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_nan_compression_ratio() {
+        let cfg = SecurityConfig {
+            max_compression_ratio: f64::NAN,
+            ..SecurityConfig::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_infinite_compression_ratio() {
+        let cfg = SecurityConfig {
+            max_compression_ratio: f64::INFINITY,
+            ..SecurityConfig::default()
+        };
+        assert!(cfg.validate().is_err());
     }
 }

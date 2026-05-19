@@ -36,9 +36,8 @@ pub(crate) fn verify_manifest(
     let mut issues = Vec::new();
     let mut suspicious_entries = 0;
 
-    let temp_dir = std::env::temp_dir().join("exarch-verify");
-    std::fs::create_dir_all(&temp_dir)?;
-    let temp_dest = DestDir::new(temp_dir)?;
+    let temp_dir = tempfile::TempDir::new()?;
+    let temp_dest = DestDir::new(temp_dir.path())?;
 
     let mut quota_tracker = QuotaTracker::new();
 

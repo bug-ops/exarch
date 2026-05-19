@@ -175,7 +175,7 @@ impl OutputFormatter for HumanFormatter {
         }
     }
 
-    fn format_success(&self, message: &str) {
+    fn format_success(&self, _operation: &str, message: &str) {
         if self.quiet {
             return;
         }
@@ -189,7 +189,7 @@ impl OutputFormatter for HumanFormatter {
         }
     }
 
-    fn format_warning(&self, message: &str) {
+    fn format_warning(&self, _operation: &str, message: &str) {
         if self.quiet {
             return;
         }

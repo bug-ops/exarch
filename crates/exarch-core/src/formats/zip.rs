@@ -222,48 +222,14 @@ impl<R: Read + Seek> ZipArchive<R> {
 
     /// Checks if any entry in the archive is encrypted.
     ///
-    /// OPT-H003: Sampling strategy checks first 100 + middle 100 + last 100
-    /// entries for large archives, providing comprehensive coverage with
-    /// reduced overhead.
+    /// Scans all entries via metadata-only reads (no decompression). Stops
+    /// early on the first encrypted entry found.
     fn is_password_protected(archive: &mut ZipReader<R>) -> Result<bool> {
-        const SAMPLE_SIZE: usize = 100;
-        let total_entries = archive.len();
-
-        if total_entries <= SAMPLE_SIZE * 3 {
-            for i in 0..total_entries {
-                if Self::check_entry_encrypted(archive, i)? {
-                    return Ok(true);
-                }
-            }
-            return Ok(false);
-        }
-
-        // First 100 entries
-        for i in 0..SAMPLE_SIZE {
+        for i in 0..archive.len() {
             if Self::check_entry_encrypted(archive, i)? {
                 return Ok(true);
             }
         }
-
-        // Middle 100 entries
-        let middle_start = (total_entries / 2).saturating_sub(SAMPLE_SIZE / 2);
-        let middle_end = middle_start + SAMPLE_SIZE;
-        for i in middle_start..middle_end.min(total_entries) {
-            if Self::check_entry_encrypted(archive, i)? {
-                return Ok(true);
-            }
-        }
-
-        // Last 100 entries (MED-001: tail sampling catches encrypted files at end)
-        let tail_start = total_entries.saturating_sub(SAMPLE_SIZE);
-        if tail_start > middle_end {
-            for i in tail_start..total_entries {
-                if Self::check_entry_encrypted(archive, i)? {
-                    return Ok(true);
-                }
-            }
-        }
-
         Ok(false)
     }
 
@@ -1540,7 +1506,7 @@ mod tests {
 
     #[test]
     fn test_password_protected_large_archive_first_entry() {
-        // Encrypted entry at index 0 — caught by first-100 sampling.
+        // Encrypted entry at index 0 — detected by full scan.
         let zip_data = create_large_archive_with_encrypted_entry(0);
         let cursor = Cursor::new(zip_data);
         let result = ZipArchive::new(cursor);
@@ -1552,9 +1518,7 @@ mod tests {
 
     #[test]
     fn test_password_protected_large_archive_middle_entry() {
-        // For 400 entries: middle_start = 200 - 50 = 150, middle_end = 250.
-        // An encrypted entry at index 200 is within 150..250 — caught by middle
-        // sampling.
+        // Encrypted entry at index 200 — detected by full scan.
         let zip_data = create_large_archive_with_encrypted_entry(200);
         let cursor = Cursor::new(zip_data);
         let result = ZipArchive::new(cursor);
@@ -1566,8 +1530,7 @@ mod tests {
 
     #[test]
     fn test_password_protected_large_archive_last_entry() {
-        // Encrypted entry at index 399 — caught by last-100 sampling
-        // (tail_start=300..400).
+        // Encrypted entry at index 399 — detected by full scan.
         let zip_data = create_large_archive_with_encrypted_entry(399);
         let cursor = Cursor::new(zip_data);
         let result = ZipArchive::new(cursor);
@@ -1598,42 +1561,16 @@ mod tests {
     }
 
     #[test]
-    fn test_per_entry_encrypted_check_catches_missed_by_sampling() {
-        // For 400 entries: first=0..100, middle=150..250, last=300..400.
-        // An encrypted entry at index 125 is in the gap (100..150) and is missed
-        // by is_password_protected sampling, but caught by the per-entry check
-        // in process_entry.
-        // Entries 0..125 are unencrypted and extracted successfully before the
-        // encrypted entry is hit, so the error is wrapped in PartialExtraction.
+    fn test_encrypted_entry_at_gap_index_is_detected_by_full_scan() {
+        // Index 125 was previously in the gap between first-100 and middle-100
+        // sampling windows. The full scan now catches it at construction time.
         let zip_data = create_large_archive_with_encrypted_entry(125);
         let cursor = Cursor::new(zip_data);
         let result = ZipArchive::new(cursor);
-        // The constructor MAY or MAY NOT catch it depending on sampling bounds.
-        // If it opens, extraction must catch it.
-        match result {
-            Err(ExtractionError::SecurityViolation { .. }) => {
-                // Caught by constructor sampling — acceptable
-            }
-            Ok(mut archive) => {
-                // Missed by sampling — must be caught by per-entry check during extraction.
-                // Since entries 0..125 were written first, the error is wrapped in
-                // PartialExtraction. Unwrap one level to check the underlying cause.
-                let temp = TempDir::new().unwrap();
-                let config = SecurityConfig::default();
-                let err = archive
-                    .extract(temp.path(), &config, &ExtractionOptions::default())
-                    .unwrap_err();
-                let source = match err {
-                    ExtractionError::PartialExtraction { source, .. } => *source,
-                    other => other,
-                };
-                assert!(
-                    matches!(source, ExtractionError::SecurityViolation { .. }),
-                    "per-entry check must catch encrypted entry missed by sampling, got: {source:?}"
-                );
-            }
-            Err(other) => panic!("unexpected error: {other:?}"),
-        }
+        assert!(
+            matches!(result, Err(ExtractionError::SecurityViolation { .. })),
+            "full scan must detect encrypted entry at index 125"
+        );
     }
 
     /// Build a raw ZIP with two local entries sharing the same path.
@@ -1752,6 +1689,51 @@ mod tests {
                 assert!(
                     reason.contains("password") || reason.contains("encrypted"),
                     "expected password/encryption mention in reason: {reason}"
+                );
+            }
+            other => panic!("expected SecurityViolation, got: {other}"),
+        }
+    }
+
+    // Regression test for #171: full scan must catch an encrypted entry at any
+    // interior position.
+    #[test]
+    fn test_encrypted_entry_not_at_boundary_is_detected() {
+        use zip::unstable::write::FileOptionsExt;
+
+        let buffer = Vec::new();
+        let mut writer = ZipWriter::new(Cursor::new(buffer));
+
+        let plain = SimpleFileOptions::default();
+        let encrypted = SimpleFileOptions::default()
+            .with_deprecated_encryption(b"secret")
+            .unwrap();
+
+        // 7 entries: indices 0..6. Encrypted entry is at index 3 (interior).
+        // Verifies that the full scan catches all positions, not just boundaries.
+        for i in 0..7u8 {
+            if i == 3 {
+                writer
+                    .start_file(format!("file{i}.txt"), encrypted)
+                    .unwrap();
+            } else {
+                writer.start_file(format!("file{i}.txt"), plain).unwrap();
+            }
+            writer.write_all(b"data").unwrap();
+        }
+        let zip_data = writer.finish().unwrap().into_inner();
+
+        let cursor = Cursor::new(zip_data);
+        let result = ZipArchive::new(cursor);
+        assert!(
+            result.is_err(),
+            "archive with encrypted entry at index 3 must be rejected"
+        );
+        match result.err().unwrap() {
+            ExtractionError::SecurityViolation { reason } => {
+                assert!(
+                    reason.contains("password") || reason.contains("encrypted"),
+                    "unexpected reason: {reason}"
                 );
             }
             other => panic!("expected SecurityViolation, got: {other}"),

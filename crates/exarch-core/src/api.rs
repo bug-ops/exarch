@@ -111,6 +111,8 @@ fn extract_archive_with_progress_and_options<P: AsRef<Path>, Q: AsRef<Path>>(
     options: &ExtractionOptions,
     _progress: &mut dyn ProgressCallback,
 ) -> Result<ExtractionReport> {
+    config.validate()?;
+
     let archive_path = archive_path.as_ref();
     let output_dir = output_dir.as_ref();
 

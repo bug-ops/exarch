@@ -5,15 +5,6 @@ use std::path::Path;
 use crate::ExtractionError;
 use crate::Result;
 
-/// 7z format magic bytes (signature).
-///
-/// 7z archives start with the signature: `37 7A BC AF 27 1C`
-/// This is the string "7z" followed by format version bytes.
-///
-/// This constant is defined for future magic byte detection implementation.
-#[allow(dead_code)]
-const SEVENZ_MAGIC: [u8; 6] = [0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C];
-
 /// File extensions that wrap a ZIP container with extra structure.
 ///
 /// Signing, manifests, and ordering rules sit on top of the ZIP bytes

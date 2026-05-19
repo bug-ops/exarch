@@ -436,4 +436,57 @@ mod tests {
 
         assert_eq!(kind, "Error");
     }
+
+    // Regression tests for issue #192: JSON error message must not duplicate text
+    // that ExtractionError::Display already emits.
+
+    #[test]
+    fn test_json_message_quota_exceeded_no_duplication() {
+        use crate::error::convert_extraction_error;
+        use exarch_core::QuotaResource;
+        use std::path::Path;
+
+        let err = ExtractionError::QuotaExceeded {
+            resource: QuotaResource::FileCount {
+                current: 11,
+                max: 10,
+            },
+        };
+        // ExtractionError::Display emits "quota exceeded: file count (11 > 10)"
+        let display_text = err.to_string();
+        let anyhow_err = convert_extraction_error(err, Path::new("archive.tar.gz"));
+        let message = format!("{anyhow_err:#}");
+
+        // The context must NOT repeat the Display text verbatim
+        let display_occurrences = message.matches(&display_text).count();
+        assert!(
+            display_occurrences <= 1,
+            "JSON message duplicates ExtractionError display text ({display_occurrences} occurrences): {message}"
+        );
+    }
+
+    #[test]
+    fn test_json_message_zip_bomb_no_duplication() {
+        use crate::error::convert_extraction_error;
+        use std::path::Path;
+
+        let compressed = 1_024_u64;
+        let uncompressed = 1_024 * 1_024 * 150_u64;
+        let ratio = 150.0_f64;
+        let err = ExtractionError::ZipBomb {
+            compressed,
+            uncompressed,
+            ratio,
+        };
+        // ExtractionError::Display emits the ratio info
+        let display_text = err.to_string();
+        let anyhow_err = convert_extraction_error(err, Path::new("bomb.zip"));
+        let message = format!("{anyhow_err:#}");
+
+        let display_occurrences = message.matches(&display_text).count();
+        assert!(
+            display_occurrences <= 1,
+            "JSON message duplicates ExtractionError display text ({display_occurrences} occurrences): {message}"
+        );
+    }
 }

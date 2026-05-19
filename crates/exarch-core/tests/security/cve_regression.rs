@@ -12,9 +12,71 @@ use exarch_core::SecurityConfig;
 use exarch_core::formats::ArchiveFormat;
 use exarch_core::formats::TarArchive;
 use exarch_core::formats::ZipArchive;
-use exarch_core::test_utils::TarTestBuilder;
 use std::io::Cursor;
 use tempfile::TempDir;
+
+struct TarTestBuilder {
+    builder: tar::Builder<Vec<u8>>,
+}
+
+impl TarTestBuilder {
+    fn new() -> Self {
+        Self {
+            builder: tar::Builder::new(Vec::new()),
+        }
+    }
+
+    fn add_file(mut self, path: &str, data: &[u8]) -> Self {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(data.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        self.builder.append_data(&mut header, path, data).unwrap();
+        self
+    }
+
+    fn add_directory(mut self, path: &str) -> Self {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(0);
+        header.set_mode(0o755);
+        header.set_entry_type(tar::EntryType::Directory);
+        header.set_cksum();
+        self.builder
+            .append_data(&mut header, path, std::io::empty())
+            .unwrap();
+        self
+    }
+
+    fn add_symlink(mut self, path: &str, target: &str) -> Self {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(0);
+        header.set_mode(0o777);
+        header.set_entry_type(tar::EntryType::Symlink);
+        header.set_link_name(target).unwrap();
+        header.set_cksum();
+        self.builder
+            .append_data(&mut header, path, std::io::empty())
+            .unwrap();
+        self
+    }
+
+    fn add_hardlink(mut self, path: &str, target: &str) -> Self {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(0);
+        header.set_mode(0o644);
+        header.set_entry_type(tar::EntryType::Link);
+        header.set_link_name(target).unwrap();
+        header.set_cksum();
+        self.builder
+            .append_data(&mut header, path, std::io::empty())
+            .unwrap();
+        self
+    }
+
+    fn build(self) -> Vec<u8> {
+        self.builder.into_inner().unwrap()
+    }
+}
 
 /// Creates a minimal POSIX ustar TAR archive where each entry has an arbitrary
 /// raw path (bypassing the `tar` crate's path sanitization).

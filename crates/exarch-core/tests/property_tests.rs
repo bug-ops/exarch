@@ -9,14 +9,11 @@
     clippy::unwrap_used
 )]
 
-use std::io::Cursor;
 use std::path::PathBuf;
 
 use exarch_core::ExtractionError;
 use exarch_core::QuotaResource;
 use exarch_core::SecurityConfig;
-use exarch_core::copy::CopyBuffer;
-use exarch_core::copy::copy_with_buffer;
 use exarch_core::security::HardlinkTracker;
 use exarch_core::security::QuotaTracker;
 use exarch_core::types::DestDir;
@@ -359,66 +356,6 @@ proptest! {
             matches!(result, Err(ExtractionError::ZipBomb { .. })),
             "extreme compression ratio should be detected"
         );
-    }
-
-    // ========================================================================
-    // COPY BUFFER PROPERTY TESTS
-    // ========================================================================
-
-    /// Copy buffer should preserve data integrity for arbitrary inputs.
-    #[test]
-    fn prop_copy_preserves_data(
-        data in prop::collection::vec(any::<u8>(), 0..100_000)
-    ) {
-        let mut buffer = CopyBuffer::new();
-        let mut input = Cursor::new(&data);
-        let mut output = Vec::new();
-
-        let result = copy_with_buffer(&mut input, &mut output, &mut buffer);
-
-        prop_assert!(result.is_ok(), "copy should succeed");
-        prop_assert_eq!(result.unwrap(), data.len() as u64, "should report correct size");
-        prop_assert_eq!(output, data, "output must match input exactly");
-    }
-
-    /// Copy buffer should handle various chunk sizes correctly.
-    #[test]
-    fn prop_copy_handles_various_sizes(
-        size in 0usize..500_000
-    ) {
-        let mut buffer = CopyBuffer::new();
-        let data = vec![0x42u8; size];
-        let mut input = Cursor::new(&data);
-        let mut output = Vec::new();
-
-        let result = copy_with_buffer(&mut input, &mut output, &mut buffer);
-
-        prop_assert!(result.is_ok(), "copy should succeed for size {}", size);
-        prop_assert_eq!(output.len(), size, "output size must match input");
-        prop_assert!(output.iter().all(|&b| b == 0x42), "all bytes must be preserved");
-    }
-
-    /// Reusing buffer should produce identical results.
-    #[test]
-    fn prop_copy_buffer_reusable(
-        data1 in prop::collection::vec(any::<u8>(), 0..10_000),
-        data2 in prop::collection::vec(any::<u8>(), 0..10_000)
-    ) {
-        let mut buffer = CopyBuffer::new();
-
-        // First copy
-        let mut input1 = Cursor::new(&data1);
-        let mut output1 = Vec::new();
-        let result1 = copy_with_buffer(&mut input1, &mut output1, &mut buffer);
-        prop_assert!(result1.is_ok());
-        prop_assert_eq!(output1, data1);
-
-        // Second copy with same buffer
-        let mut input2 = Cursor::new(&data2);
-        let mut output2 = Vec::new();
-        let result2 = copy_with_buffer(&mut input2, &mut output2, &mut buffer);
-        prop_assert!(result2.is_ok());
-        prop_assert_eq!(output2, data2);
     }
 
     // ========================================================================

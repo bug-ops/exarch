@@ -8,22 +8,14 @@
 //! All functions in this module may panic on I/O errors since they are
 //! designed for test use only where panics are acceptable.
 
-#![allow(clippy::unwrap_used, clippy::missing_panics_doc)]
+#![allow(clippy::unwrap_used, clippy::missing_panics_doc, dead_code)]
 
 use std::io::Cursor;
 use std::io::Write;
 
-/// Creates an in-memory TAR archive from a list of entries.
+/// Creates an in-memory TAR archive from a list of `(path, content)` entries.
 ///
-/// Each entry is a tuple of (path, content). Files are created with mode 0o644.
-///
-/// # Examples
-///
-/// ```
-/// use exarch_core::test_utils::create_test_tar;
-///
-/// let tar_data = create_test_tar(vec![("file.txt", b"hello"), ("dir/nested.txt", b"world")]);
-/// ```
+/// All files are created with mode `0o644`.
 #[must_use]
 pub fn create_test_tar(entries: Vec<(&str, &[u8])>) -> Vec<u8> {
     let mut ar = tar::Builder::new(Vec::new());
@@ -37,18 +29,9 @@ pub fn create_test_tar(entries: Vec<(&str, &[u8])>) -> Vec<u8> {
     ar.into_inner().unwrap()
 }
 
-/// Creates an in-memory ZIP archive from a list of entries.
+/// Creates an in-memory ZIP archive from a list of `(path, content)` entries.
 ///
-/// Each entry is a tuple of (path, content). Files are stored uncompressed
-/// with mode 0o644.
-///
-/// # Examples
-///
-/// ```
-/// use exarch_core::test_utils::create_test_zip;
-///
-/// let zip_data = create_test_zip(vec![("file.txt", b"hello"), ("dir/nested.txt", b"world")]);
-/// ```
+/// Files are stored uncompressed with mode `0o644`.
 #[must_use]
 pub fn create_test_zip(entries: Vec<(&str, &[u8])>) -> Vec<u8> {
     use zip::write::SimpleFileOptions;
@@ -69,21 +52,8 @@ pub fn create_test_zip(entries: Vec<(&str, &[u8])>) -> Vec<u8> {
     zip.finish().unwrap().into_inner()
 }
 
-/// Builder for creating TAR test archives with various entry types.
-///
-/// Supports files, directories, symlinks, and hardlinks.
-///
-/// # Examples
-///
-/// ```
-/// use exarch_core::test_utils::TarTestBuilder;
-///
-/// let tar_data = TarTestBuilder::new()
-///     .add_file("file.txt", b"content")
-///     .add_directory("dir/")
-///     .add_symlink("link", "file.txt")
-///     .build();
-/// ```
+/// Builder for creating TAR test archives with files, directories, symlinks,
+/// and hardlinks.
 pub struct TarTestBuilder {
     builder: tar::Builder<Vec<u8>>,
 }
@@ -176,18 +146,8 @@ impl Default for TarTestBuilder {
     }
 }
 
-/// Builder for creating ZIP test archives with various entry types.
-///
-/// # Examples
-///
-/// ```
-/// use exarch_core::test_utils::ZipTestBuilder;
-///
-/// let zip_data = ZipTestBuilder::new()
-///     .add_file("file.txt", b"content")
-///     .add_directory("dir/")
-///     .build();
-/// ```
+/// Builder for creating ZIP test archives with files, directories, and
+/// symlinks.
 pub struct ZipTestBuilder {
     zip: zip::ZipWriter<Cursor<Vec<u8>>>,
 }

@@ -23,28 +23,7 @@ use crate::ExtractionError;
 /// between memory usage and I/O performance.
 const COPY_BUFFER_SIZE: usize = 64 * 1024;
 
-/// Stack-allocated buffer for efficient file copying.
-///
-/// Uses a fixed-size array on the stack to avoid heap allocations
-/// during copy operations. The buffer is reusable across multiple
-/// copy operations within the same extraction session.
-///
-/// # Examples
-///
-/// ```no_run
-/// # use std::io::{Read, Write};
-/// # use exarch_core::copy::{CopyBuffer, copy_with_buffer};
-/// # use exarch_core::ExtractionError;
-/// # fn example() -> Result<(), ExtractionError> {
-/// let mut buffer = CopyBuffer::new();
-/// let mut input = std::fs::File::open("input.txt")?;
-/// let mut output = std::fs::File::create("output.txt")?;
-///
-/// let bytes_copied = copy_with_buffer(&mut input, &mut output, &mut buffer)?;
-/// println!("Copied {} bytes", bytes_copied);
-/// # Ok(())
-/// # }
-/// ```
+/// Stack-allocated reusable buffer used internally by [`copy_with_buffer`].
 #[derive(Debug)]
 pub struct CopyBuffer {
     // Stack allocation is intentional for performance (avoids heap overhead)
@@ -68,7 +47,8 @@ impl CopyBuffer {
     /// Returns the buffer size in bytes.
     #[inline]
     #[must_use]
-    pub fn size(&self) -> usize {
+    #[allow(dead_code, clippy::unused_self)]
+    pub(crate) fn size(&self) -> usize {
         COPY_BUFFER_SIZE
     }
 }
@@ -97,23 +77,6 @@ impl Default for CopyBuffer {
 ///
 /// Quota overflow is explicitly checked using `checked_add`, ensuring
 /// that malicious archives cannot bypass size limits via integer overflow.
-///
-/// # Examples
-///
-/// ```no_run
-/// # use std::io::{Read, Write};
-/// # use exarch_core::copy::{CopyBuffer, copy_with_buffer};
-/// # use exarch_core::ExtractionError;
-/// # fn example() -> Result<(), ExtractionError> {
-/// let mut buffer = CopyBuffer::new();
-/// let mut input = std::fs::File::open("large_file.bin")?;
-/// let mut output = std::fs::File::create("output.bin")?;
-///
-/// let total = copy_with_buffer(&mut input, &mut output, &mut buffer)?;
-/// println!("Copied {} bytes without heap allocation", total);
-/// # Ok(())
-/// # }
-/// ```
 #[inline]
 pub fn copy_with_buffer<R: Read, W: Write>(
     reader: &mut R,
@@ -149,6 +112,7 @@ pub fn copy_with_buffer<R: Read, W: Write>(
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
     use std::io::Cursor;
 
     #[test]
@@ -363,6 +327,53 @@ mod tests {
                 assert_eq!(e.kind(), ErrorKind::Other);
             }
             _ => panic!("expected IO error"),
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn prop_copy_preserves_data(
+            data in prop::collection::vec(any::<u8>(), 0..100_000)
+        ) {
+            let mut buffer = CopyBuffer::new();
+            let mut input = Cursor::new(&data);
+            let mut output = Vec::new();
+            let result = copy_with_buffer(&mut input, &mut output, &mut buffer);
+            prop_assert!(result.is_ok(), "copy should succeed");
+            prop_assert_eq!(result.unwrap(), data.len() as u64, "should report correct size");
+            prop_assert_eq!(output, data, "output must match input exactly");
+        }
+
+        #[test]
+        fn prop_copy_handles_various_sizes(
+            size in 0usize..500_000
+        ) {
+            let mut buffer = CopyBuffer::new();
+            let data = vec![0x42u8; size];
+            let mut input = Cursor::new(&data);
+            let mut output = Vec::new();
+            let result = copy_with_buffer(&mut input, &mut output, &mut buffer);
+            prop_assert!(result.is_ok(), "copy should succeed for size {}", size);
+            prop_assert_eq!(output.len(), size, "output size must match input");
+            prop_assert!(output.iter().all(|&b| b == 0x42), "all bytes must be preserved");
+        }
+
+        #[test]
+        fn prop_copy_buffer_reusable(
+            data1 in prop::collection::vec(any::<u8>(), 0..10_000),
+            data2 in prop::collection::vec(any::<u8>(), 0..10_000)
+        ) {
+            let mut buffer = CopyBuffer::new();
+            let mut input1 = Cursor::new(&data1);
+            let mut output1 = Vec::new();
+            let result1 = copy_with_buffer(&mut input1, &mut output1, &mut buffer);
+            prop_assert!(result1.is_ok());
+            prop_assert_eq!(output1, data1);
+            let mut input2 = Cursor::new(&data2);
+            let mut output2 = Vec::new();
+            let result2 = copy_with_buffer(&mut input2, &mut output2, &mut buffer);
+            prop_assert!(result2.is_ok());
+            prop_assert_eq!(output2, data2);
         }
     }
 }

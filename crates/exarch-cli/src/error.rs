@@ -36,11 +36,10 @@ pub fn convert_extraction_error(err: ExtractionError, archive: &Path) -> anyhow:
 
     let context = match &err {
         ExtractionError::PartialExtraction { .. } => unreachable!(),
-        ExtractionError::PathTraversal { path } => format!(
-            "Security violation: Archive '{}' attempted path traversal with '{}'\n\
+        ExtractionError::PathTraversal { .. } => format!(
+            "Security violation: Archive '{}' attempted path traversal\n\
              HINT: This archive may be malicious. Do not extract from untrusted sources.",
             archive.display(),
-            path.display()
         ),
         ExtractionError::ZipBomb { .. } => format!(
             "Security violation: Archive '{}' appears to be a zip bomb\n\
@@ -122,6 +121,19 @@ mod tests {
         let msg = format!("{converted:?}");
         assert!(msg.contains("zip bomb"));
         assert!(msg.contains("bomb.zip"));
+    }
+
+    #[test]
+    fn test_path_traversal_path_appears_once() {
+        let path = PathBuf::from("../../../etc/passwd");
+        let err = ExtractionError::PathTraversal { path };
+        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"));
+        let msg = format!("{converted:#}");
+        assert_eq!(
+            msg.matches("../../../etc/passwd").count(),
+            1,
+            "path should appear exactly once, got: {msg}"
+        );
     }
 
     #[test]

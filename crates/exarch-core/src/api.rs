@@ -478,6 +478,8 @@ pub fn create_archive_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
     config: &CreationConfig,
     progress: &mut dyn ProgressCallback,
 ) -> Result<CreationReport> {
+    config.validate()?;
+
     let output = output_path.as_ref();
 
     // Block creation for the ZIP-family extensions (mirrors the 7z block
@@ -738,6 +740,26 @@ mod tests {
         let result = extract_archive(&path, dest.path(), &SecurityConfig::default());
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_create_archive_invalid_compression_level_rejected_before_io() {
+        let dest = tempfile::TempDir::new().unwrap();
+        let archive_path = dest.path().join("output.tar.gz");
+        let config = CreationConfig {
+            compression_level: Some(15),
+            ..CreationConfig::default()
+        };
+        let result = create_archive(&archive_path, &[] as &[&str], &config);
+        assert!(
+            matches!(
+                result,
+                Err(ExtractionError::InvalidCompressionLevel { level: 15 })
+            ),
+            "expected InvalidCompressionLevel, got {result:?}",
+        );
+        // Verify no I/O happened — output file must not exist
+        assert!(!archive_path.exists(), "output file must not be created");
     }
 
     #[test]

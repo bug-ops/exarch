@@ -197,6 +197,8 @@ impl SecurityConfig {
     /// - `max_file_size` is zero
     /// - `max_total_size` is zero
     /// - `max_path_depth` is zero
+    /// - `max_file_count` is zero
+    /// - `max_solid_block_memory` is zero
     ///
     /// # Examples
     ///
@@ -231,6 +233,16 @@ impl SecurityConfig {
         if self.max_path_depth == 0 {
             return Err(crate::ExtractionError::InvalidConfiguration {
                 reason: "max_path_depth must not be zero".into(),
+            });
+        }
+        if self.max_file_count == 0 {
+            return Err(crate::ExtractionError::InvalidConfiguration {
+                reason: "max_file_count must not be zero".into(),
+            });
+        }
+        if self.max_solid_block_memory == 0 {
+            return Err(crate::ExtractionError::InvalidConfiguration {
+                reason: "max_solid_block_memory must not be zero".into(),
             });
         }
         Ok(())
@@ -533,6 +545,24 @@ mod tests {
     fn test_validate_rejects_infinite_compression_ratio() {
         let cfg = SecurityConfig {
             max_compression_ratio: f64::INFINITY,
+            ..SecurityConfig::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_zero_max_file_count() {
+        let cfg = SecurityConfig {
+            max_file_count: 0,
+            ..SecurityConfig::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_zero_max_solid_block_memory() {
+        let cfg = SecurityConfig {
+            max_solid_block_memory: 0,
             ..SecurityConfig::default()
         };
         assert!(cfg.validate().is_err());

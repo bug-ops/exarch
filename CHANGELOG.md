@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - ZIP password-protection detection now performs a full linear scan of all entries instead of a 3-sample strategy, preventing false negatives for archives with encrypted entries outside the first/middle/last 100 positions (#171).
 - `SecurityConfig::validate()` added: construction-time validation rejects `max_compression_ratio <= 0`, `max_file_size == 0`, `max_total_size == 0`, and `max_path_depth == 0`; `extract_archive` and `create_archive` call `validate()` and return an error for invalid configs (#172).
+- `CreationConfig::validate()` is now called in `create_archive_with_progress`, ensuring invalid creation configs are caught before any I/O occurs (#180).
+- `SecurityConfig::validate()` now rejects `max_file_count == 0` and `max_solid_block_memory == 0` to prevent undefined extraction behavior (#181).
 
 ## [0.3.1] - 2026-05-19
 

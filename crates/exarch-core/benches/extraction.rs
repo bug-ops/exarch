@@ -241,6 +241,7 @@ fn benchmark_many_small_files(c: &mut Criterion) {
                             temp.path(),
                             &SecurityConfig::default(),
                             &ExtractionOptions::default(),
+                            &mut exarch_core::NoopProgress,
                         )
                         .unwrap();
                 });
@@ -276,7 +277,12 @@ fn benchmark_large_files(c: &mut Criterion) {
                     };
 
                     archive
-                        .extract(temp.path(), &config, &ExtractionOptions::default())
+                        .extract(
+                            temp.path(),
+                            &config,
+                            &ExtractionOptions::default(),
+                            &mut exarch_core::NoopProgress,
+                        )
                         .unwrap();
                 });
             },
@@ -303,6 +309,7 @@ fn benchmark_nested_directories(c: &mut Criterion) {
                         temp.path(),
                         &SecurityConfig::default(),
                         &ExtractionOptions::default(),
+                        &mut exarch_core::NoopProgress,
                     )
                     .unwrap();
             });
@@ -330,7 +337,12 @@ fn benchmark_compression_methods(c: &mut Criterion) {
                 let cursor = Cursor::new(data.clone());
                 let mut archive = ZipArchive::new(cursor).unwrap();
                 archive
-                    .extract(temp.path(), &config, &ExtractionOptions::default())
+                    .extract(
+                        temp.path(),
+                        &config,
+                        &ExtractionOptions::default(),
+                        &mut exarch_core::NoopProgress,
+                    )
                     .unwrap();
             });
         },
@@ -347,7 +359,12 @@ fn benchmark_compression_methods(c: &mut Criterion) {
                 let cursor = Cursor::new(data.clone());
                 let mut archive = ZipArchive::new(cursor).unwrap();
                 archive
-                    .extract(temp.path(), &config, &ExtractionOptions::default())
+                    .extract(
+                        temp.path(),
+                        &config,
+                        &ExtractionOptions::default(),
+                        &mut exarch_core::NoopProgress,
+                    )
                     .unwrap();
             });
         },
@@ -383,6 +400,7 @@ fn benchmark_sevenz_simple(c: &mut Criterion) {
                     temp.path(),
                     &SecurityConfig::default(),
                     &ExtractionOptions::default(),
+                    &mut exarch_core::NoopProgress,
                 )
                 .unwrap();
         });
@@ -407,6 +425,7 @@ fn benchmark_sevenz_nested_dirs(c: &mut Criterion) {
                     temp.path(),
                     &SecurityConfig::default(),
                     &ExtractionOptions::default(),
+                    &mut exarch_core::NoopProgress,
                 )
                 .unwrap();
         });
@@ -432,6 +451,7 @@ fn benchmark_sevenz_large_file(c: &mut Criterion) {
                     temp.path(),
                     &SecurityConfig::default(),
                     &ExtractionOptions::default(),
+                    &mut exarch_core::NoopProgress,
                 )
                 .unwrap();
         });
@@ -470,7 +490,12 @@ fn benchmark_file_count_scaling(c: &mut Criterion) {
                 let cursor = Cursor::new(data.clone());
                 let mut archive = ZipArchive::new(cursor).unwrap();
                 archive
-                    .extract(temp.path(), &config, &ExtractionOptions::default())
+                    .extract(
+                        temp.path(),
+                        &config,
+                        &ExtractionOptions::default(),
+                        &mut exarch_core::NoopProgress,
+                    )
                     .unwrap();
             });
         });
@@ -511,7 +536,12 @@ fn benchmark_depth_scaling(c: &mut Criterion) {
                 let cursor = Cursor::new(data.clone());
                 let mut archive = ZipArchive::new(cursor).unwrap();
                 archive
-                    .extract(temp.path(), &config, &ExtractionOptions::default())
+                    .extract(
+                        temp.path(),
+                        &config,
+                        &ExtractionOptions::default(),
+                        &mut exarch_core::NoopProgress,
+                    )
                     .unwrap();
             });
         });

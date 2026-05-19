@@ -109,7 +109,7 @@ fn extract_archive_with_progress_and_options<P: AsRef<Path>, Q: AsRef<Path>>(
     output_dir: Q,
     config: &SecurityConfig,
     options: &ExtractionOptions,
-    _progress: &mut dyn ProgressCallback,
+    progress: &mut dyn ProgressCallback,
 ) -> Result<ExtractionReport> {
     config.validate()?;
 
@@ -121,13 +121,13 @@ fn extract_archive_with_progress_and_options<P: AsRef<Path>, Q: AsRef<Path>>(
 
     // Dispatch to format-specific extraction
     match format {
-        ArchiveType::Tar => extract_tar(archive_path, output_dir, config, options),
-        ArchiveType::TarGz => extract_tar_gz(archive_path, output_dir, config, options),
-        ArchiveType::TarBz2 => extract_tar_bz2(archive_path, output_dir, config, options),
-        ArchiveType::TarXz => extract_tar_xz(archive_path, output_dir, config, options),
-        ArchiveType::TarZst => extract_tar_zst(archive_path, output_dir, config, options),
-        ArchiveType::Zip => extract_zip(archive_path, output_dir, config, options),
-        ArchiveType::SevenZ => extract_7z(archive_path, output_dir, config, options),
+        ArchiveType::Tar => extract_tar(archive_path, output_dir, config, options, progress),
+        ArchiveType::TarGz => extract_tar_gz(archive_path, output_dir, config, options, progress),
+        ArchiveType::TarBz2 => extract_tar_bz2(archive_path, output_dir, config, options, progress),
+        ArchiveType::TarXz => extract_tar_xz(archive_path, output_dir, config, options, progress),
+        ArchiveType::TarZst => extract_tar_zst(archive_path, output_dir, config, options, progress),
+        ArchiveType::Zip => extract_zip(archive_path, output_dir, config, options, progress),
+        ArchiveType::SevenZ => extract_7z(archive_path, output_dir, config, options, progress),
     }
 }
 
@@ -273,6 +273,7 @@ fn extract_tar(
     output_dir: &Path,
     config: &SecurityConfig,
     options: &ExtractionOptions,
+    progress: &mut dyn ProgressCallback,
 ) -> Result<ExtractionReport> {
     use crate::formats::TarArchive;
     use crate::formats::traits::ArchiveFormat;
@@ -282,7 +283,7 @@ fn extract_tar(
     let file = File::open(archive_path)?;
     let reader = BufReader::new(file);
     let mut archive = TarArchive::new(reader);
-    archive.extract(output_dir, config, options)
+    archive.extract(output_dir, config, options, progress)
 }
 
 fn extract_tar_gz(
@@ -290,6 +291,7 @@ fn extract_tar_gz(
     output_dir: &Path,
     config: &SecurityConfig,
     options: &ExtractionOptions,
+    progress: &mut dyn ProgressCallback,
 ) -> Result<ExtractionReport> {
     use crate::formats::TarArchive;
     use crate::formats::traits::ArchiveFormat;
@@ -301,7 +303,7 @@ fn extract_tar_gz(
     let reader = BufReader::new(file);
     let decoder = GzDecoder::new(reader);
     let mut archive = TarArchive::new(decoder);
-    archive.extract(output_dir, config, options)
+    archive.extract(output_dir, config, options, progress)
 }
 
 fn extract_tar_bz2(
@@ -309,6 +311,7 @@ fn extract_tar_bz2(
     output_dir: &Path,
     config: &SecurityConfig,
     options: &ExtractionOptions,
+    progress: &mut dyn ProgressCallback,
 ) -> Result<ExtractionReport> {
     use crate::formats::TarArchive;
     use crate::formats::traits::ArchiveFormat;
@@ -320,7 +323,7 @@ fn extract_tar_bz2(
     let reader = BufReader::new(file);
     let decoder = BzDecoder::new(reader);
     let mut archive = TarArchive::new(decoder);
-    archive.extract(output_dir, config, options)
+    archive.extract(output_dir, config, options, progress)
 }
 
 fn extract_tar_xz(
@@ -328,6 +331,7 @@ fn extract_tar_xz(
     output_dir: &Path,
     config: &SecurityConfig,
     options: &ExtractionOptions,
+    progress: &mut dyn ProgressCallback,
 ) -> Result<ExtractionReport> {
     use crate::formats::TarArchive;
     use crate::formats::traits::ArchiveFormat;
@@ -339,7 +343,7 @@ fn extract_tar_xz(
     let reader = BufReader::new(file);
     let decoder = XzDecoder::new(reader);
     let mut archive = TarArchive::new(decoder);
-    archive.extract(output_dir, config, options)
+    archive.extract(output_dir, config, options, progress)
 }
 
 fn extract_tar_zst(
@@ -347,6 +351,7 @@ fn extract_tar_zst(
     output_dir: &Path,
     config: &SecurityConfig,
     options: &ExtractionOptions,
+    progress: &mut dyn ProgressCallback,
 ) -> Result<ExtractionReport> {
     use crate::formats::TarArchive;
     use crate::formats::traits::ArchiveFormat;
@@ -358,7 +363,7 @@ fn extract_tar_zst(
     let reader = BufReader::new(file);
     let decoder = ZstdDecoder::new(reader)?;
     let mut archive = TarArchive::new(decoder);
-    archive.extract(output_dir, config, options)
+    archive.extract(output_dir, config, options, progress)
 }
 
 fn extract_zip(
@@ -366,6 +371,7 @@ fn extract_zip(
     output_dir: &Path,
     config: &SecurityConfig,
     options: &ExtractionOptions,
+    progress: &mut dyn ProgressCallback,
 ) -> Result<ExtractionReport> {
     use crate::formats::ZipArchive;
     use crate::formats::traits::ArchiveFormat;
@@ -373,7 +379,7 @@ fn extract_zip(
 
     let file = File::open(archive_path)?;
     let mut archive = ZipArchive::new(file)?;
-    archive.extract(output_dir, config, options)
+    archive.extract(output_dir, config, options, progress)
 }
 
 fn extract_7z(
@@ -381,6 +387,7 @@ fn extract_7z(
     output_dir: &Path,
     config: &SecurityConfig,
     options: &ExtractionOptions,
+    progress: &mut dyn ProgressCallback,
 ) -> Result<ExtractionReport> {
     use crate::formats::SevenZArchive;
     use crate::formats::traits::ArchiveFormat;
@@ -388,7 +395,7 @@ fn extract_7z(
 
     let file = File::open(archive_path)?;
     let mut archive = SevenZArchive::new(file)?;
-    archive.extract(output_dir, config, options)
+    archive.extract(output_dir, config, options, progress)
 }
 
 /// Creates an archive from source files and directories.
@@ -941,5 +948,177 @@ mod tests {
         assert!(result.is_err());
         // Output dir must still have old content (not corrupted)
         assert!(output_dir.join("existing.txt").exists());
+    }
+
+    // Regression test for issue #170: progress callback silently dropped
+    #[test]
+    fn test_progress_callback_invoked_during_extraction() {
+        use crate::ProgressCallback;
+        use std::path::Path;
+
+        struct TrackingProgress {
+            started: usize,
+            completed: usize,
+            finished: bool,
+        }
+
+        impl ProgressCallback for TrackingProgress {
+            fn on_entry_start(&mut self, _path: &Path, _total: usize, _current: usize) {
+                self.started += 1;
+            }
+
+            fn on_bytes_written(&mut self, _bytes: u64) {}
+
+            fn on_entry_complete(&mut self, _path: &Path) {
+                self.completed += 1;
+            }
+
+            fn on_complete(&mut self) {
+                self.finished = true;
+            }
+        }
+
+        let archive_dir = tempfile::TempDir::new().unwrap();
+        let archive_path = archive_dir.path().join("test.tar.gz");
+        let src_dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(src_dir.path().join("a.txt"), b"hello").unwrap();
+        std::fs::write(src_dir.path().join("b.txt"), b"world").unwrap();
+        create_archive(&archive_path, &[src_dir.path()], &CreationConfig::default()).unwrap();
+
+        let dest = tempfile::TempDir::new().unwrap();
+        let mut progress = TrackingProgress {
+            started: 0,
+            completed: 0,
+            finished: false,
+        };
+
+        let report = extract_archive_with_progress(
+            &archive_path,
+            dest.path(),
+            &SecurityConfig::default(),
+            &mut progress,
+        )
+        .unwrap();
+
+        assert!(report.files_extracted >= 2, "expected at least 2 files");
+        assert!(progress.started >= 2, "on_entry_start not called");
+        assert!(progress.completed >= 2, "on_entry_complete not called");
+        assert!(progress.finished, "on_complete not called");
+    }
+
+    // Regression test for issue #170: ZIP format
+    #[test]
+    fn test_progress_callback_invoked_during_zip_extraction() {
+        use crate::ProgressCallback;
+        use std::path::Path;
+
+        struct TrackingProgress {
+            started: usize,
+            completed: usize,
+            finished: bool,
+        }
+
+        impl ProgressCallback for TrackingProgress {
+            fn on_entry_start(&mut self, _path: &Path, _total: usize, _current: usize) {
+                self.started += 1;
+            }
+
+            fn on_bytes_written(&mut self, _bytes: u64) {}
+
+            fn on_entry_complete(&mut self, _path: &Path) {
+                self.completed += 1;
+            }
+
+            fn on_complete(&mut self) {
+                self.finished = true;
+            }
+        }
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let archive_path = tmp.path().join("test.zip");
+        let src_dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(src_dir.path().join("x.txt"), b"foo").unwrap();
+        std::fs::write(src_dir.path().join("y.txt"), b"bar").unwrap();
+        let config = CreationConfig::default().with_format(Some(ArchiveType::Zip));
+        create_archive(&archive_path, &[src_dir.path()], &config).unwrap();
+
+        let dest = tempfile::TempDir::new().unwrap();
+        let mut progress = TrackingProgress {
+            started: 0,
+            completed: 0,
+            finished: false,
+        };
+        let report = extract_archive_with_progress(
+            &archive_path,
+            dest.path(),
+            &SecurityConfig::default(),
+            &mut progress,
+        )
+        .unwrap();
+
+        assert!(report.files_extracted >= 2, "expected at least 2 files");
+        assert!(progress.started >= 2, "on_entry_start not called for ZIP");
+        assert!(
+            progress.completed >= 2,
+            "on_entry_complete not called for ZIP"
+        );
+        assert!(progress.finished, "on_complete not called for ZIP");
+    }
+
+    // Regression test for issue #170: 7z format
+    #[test]
+    fn test_progress_callback_invoked_during_sevenz_extraction() {
+        use crate::ProgressCallback;
+        use std::path::Path;
+
+        struct TrackingProgress {
+            started: usize,
+            completed: usize,
+            finished: bool,
+        }
+
+        impl ProgressCallback for TrackingProgress {
+            fn on_entry_start(&mut self, _path: &Path, _total: usize, _current: usize) {
+                self.started += 1;
+            }
+
+            fn on_bytes_written(&mut self, _bytes: u64) {}
+
+            fn on_entry_complete(&mut self, _path: &Path) {
+                self.completed += 1;
+            }
+
+            fn on_complete(&mut self) {
+                self.finished = true;
+            }
+        }
+
+        let fixture =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/simple.7z");
+
+        let dest = tempfile::TempDir::new().unwrap();
+        let mut progress = TrackingProgress {
+            started: 0,
+            completed: 0,
+            finished: false,
+        };
+        let report = extract_archive_with_progress(
+            &fixture,
+            dest.path(),
+            &SecurityConfig::default(),
+            &mut progress,
+        )
+        .unwrap();
+
+        assert!(
+            report.files_extracted >= 1,
+            "expected at least 1 file from simple.7z"
+        );
+        assert!(progress.started >= 1, "on_entry_start not called for 7z");
+        assert!(
+            progress.completed >= 1,
+            "on_entry_complete not called for 7z"
+        );
+        assert!(progress.finished, "on_complete not called for 7z");
     }
 }

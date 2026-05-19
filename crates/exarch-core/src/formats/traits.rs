@@ -4,12 +4,15 @@ use std::path::Path;
 
 use crate::ExtractionOptions;
 use crate::ExtractionReport;
+use crate::ProgressCallback;
 use crate::Result;
 use crate::SecurityConfig;
 
 /// Trait for archive format handlers.
 pub trait ArchiveFormat {
     /// Extracts the archive to the specified directory.
+    ///
+    /// `progress` receives per-entry callbacks during extraction.
     ///
     /// # Errors
     ///
@@ -19,6 +22,7 @@ pub trait ArchiveFormat {
         output_dir: &Path,
         config: &SecurityConfig,
         options: &ExtractionOptions,
+        progress: &mut dyn ProgressCallback,
     ) -> Result<ExtractionReport>;
 
     /// Returns the archive format name.
@@ -37,6 +41,7 @@ mod tests {
             _output_dir: &Path,
             _config: &SecurityConfig,
             _options: &ExtractionOptions,
+            _progress: &mut dyn ProgressCallback,
         ) -> Result<ExtractionReport> {
             Ok(ExtractionReport::new())
         }
@@ -59,7 +64,10 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         let config = SecurityConfig::default();
         let options = ExtractionOptions::default();
-        let report = format.extract(temp.path(), &config, &options).unwrap();
+        let mut noop = crate::NoopProgress;
+        let report = format
+            .extract(temp.path(), &config, &options, &mut noop)
+            .unwrap();
         assert_eq!(report.files_extracted, 0);
     }
 }

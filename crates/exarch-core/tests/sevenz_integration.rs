@@ -33,6 +33,7 @@ fn test_7z_extraction_via_trait() {
             temp.path(),
             &SecurityConfig::default(),
             &ExtractionOptions::default(),
+            &mut exarch_core::NoopProgress,
         )
         .unwrap();
 
@@ -57,7 +58,12 @@ fn test_7z_security_config_integration() {
         ..SecurityConfig::default()
     };
 
-    let result = archive.extract(temp.path(), &config, &ExtractionOptions::default());
+    let result = archive.extract(
+        temp.path(),
+        &config,
+        &ExtractionOptions::default(),
+        &mut exarch_core::NoopProgress,
+    );
     assert!(matches!(result, Err(ExtractionError::QuotaExceeded { .. })));
 }
 
@@ -82,6 +88,7 @@ fn test_7z_nested_directories() {
             temp.path(),
             &SecurityConfig::default(),
             &ExtractionOptions::default(),
+            &mut exarch_core::NoopProgress,
         )
         .unwrap();
 
@@ -104,6 +111,7 @@ fn test_7z_solid_archive_rejected_at_new() {
         temp.path(),
         &SecurityConfig::default(),
         &ExtractionOptions::default(),
+        &mut exarch_core::NoopProgress,
     );
 
     assert!(result.is_err());
@@ -148,7 +156,12 @@ fn test_7z_quota_file_count() {
         ..SecurityConfig::default()
     };
 
-    let result = archive.extract(temp.path(), &config, &ExtractionOptions::default());
+    let result = archive.extract(
+        temp.path(),
+        &config,
+        &ExtractionOptions::default(),
+        &mut exarch_core::NoopProgress,
+    );
     assert!(matches!(result, Err(ExtractionError::QuotaExceeded { .. })));
 }
 
@@ -164,7 +177,12 @@ fn test_7z_quota_total_size() {
         ..SecurityConfig::default()
     };
 
-    let result = archive.extract(temp.path(), &config, &ExtractionOptions::default());
+    let result = archive.extract(
+        temp.path(),
+        &config,
+        &ExtractionOptions::default(),
+        &mut exarch_core::NoopProgress,
+    );
     assert!(matches!(result, Err(ExtractionError::QuotaExceeded { .. })));
 }
 
@@ -187,7 +205,12 @@ fn test_7z_solid_archive_extraction_success() {
     };
 
     let report = archive
-        .extract(temp.path(), &config, &ExtractionOptions::default())
+        .extract(
+            temp.path(),
+            &config,
+            &ExtractionOptions::default(),
+            &mut exarch_core::NoopProgress,
+        )
         .unwrap();
 
     assert!(
@@ -212,7 +235,12 @@ fn test_7z_solid_archive_with_file_count_quota() {
         ..SecurityConfig::default()
     };
 
-    let result = archive.extract(temp.path(), &config, &ExtractionOptions::default());
+    let result = archive.extract(
+        temp.path(),
+        &config,
+        &ExtractionOptions::default(),
+        &mut exarch_core::NoopProgress,
+    );
     assert!(matches!(result, Err(ExtractionError::QuotaExceeded { .. })));
 }
 
@@ -232,7 +260,12 @@ fn test_7z_unix_symlink_extracted_as_file() {
     let config = SecurityConfig::default();
 
     // Current behavior: succeeds, extracts symlink as file
-    let result = archive.extract(temp.path(), &config, &ExtractionOptions::default());
+    let result = archive.extract(
+        temp.path(),
+        &config,
+        &ExtractionOptions::default(),
+        &mut exarch_core::NoopProgress,
+    );
     assert!(
         result.is_ok(),
         "Unix symlink should extract as file (documented limitation): {result:?}"
@@ -276,7 +309,12 @@ fn test_7z_hardlink_extracted_as_duplicate_files() {
     let temp = TempDir::new().unwrap();
     let config = SecurityConfig::default();
 
-    let result = archive.extract(temp.path(), &config, &ExtractionOptions::default());
+    let result = archive.extract(
+        temp.path(),
+        &config,
+        &ExtractionOptions::default(),
+        &mut exarch_core::NoopProgress,
+    );
     assert!(
         result.is_ok(),
         "hardlink should extract as separate files: {result:?}"

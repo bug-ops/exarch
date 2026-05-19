@@ -70,7 +70,12 @@ fn profile_zip_extraction(file_count: usize, file_size: usize) {
     let cursor = Cursor::new(zip_data);
     let mut archive = ZipArchive::new(cursor).unwrap();
     archive
-        .extract(temp.path(), &config, &ExtractionOptions::default())
+        .extract(
+            temp.path(),
+            &config,
+            &ExtractionOptions::default(),
+            &mut exarch_core::NoopProgress,
+        )
         .unwrap();
 }
 
@@ -84,7 +89,12 @@ fn profile_tar_extraction(file_count: usize, file_size: usize) {
     let cursor = Cursor::new(tar_data);
     let mut archive = TarArchive::new(cursor);
     archive
-        .extract(temp.path(), &config, &ExtractionOptions::default())
+        .extract(
+            temp.path(),
+            &config,
+            &ExtractionOptions::default(),
+            &mut exarch_core::NoopProgress,
+        )
         .unwrap();
 }
 

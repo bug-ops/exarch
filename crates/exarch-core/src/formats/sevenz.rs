@@ -70,6 +70,7 @@
 //!     Path::new("/output"),
 //!     &SecurityConfig::default(),
 //!     &ExtractionOptions::default(),
+//!     &mut exarch_core::NoopProgress,
 //! )?;
 //! println!("Extracted {} files", report.files_extracted);
 //! # Ok(())
@@ -107,6 +108,7 @@ static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 use crate::ExtractionError;
 use crate::ExtractionOptions;
 use crate::ExtractionReport;
+use crate::ProgressCallback;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::error::QuotaResource;
@@ -192,6 +194,7 @@ struct CachedEntry {
 ///     Path::new("/output"),
 ///     &SecurityConfig::default(),
 ///     &ExtractionOptions::default(),
+///     &mut exarch_core::NoopProgress,
 /// )?;
 /// println!("Extracted {} files", report.files_extracted);
 /// # Ok::<(), exarch_core::ExtractionError>(())
@@ -407,6 +410,7 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
         output_dir: &Path,
         config: &SecurityConfig,
         options: &ExtractionOptions,
+        progress: &mut dyn ProgressCallback,
     ) -> Result<ExtractionReport> {
         // Step 0: Validate solid archive policy
         if self.is_solid {
@@ -495,6 +499,13 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
         // double parsing in our validation logic
         let mut validator = EntryValidator::new(config, &dest);
         let mut dir_cache = common::DirCache::new();
+
+        let total = self.entries.len();
+        for (idx, entry) in self.entries.iter().enumerate() {
+            let entry_path = std::path::Path::new(&entry.name);
+            progress.on_entry_start(entry_path, total, idx.saturating_add(1));
+        }
+
         match Self::extract_with_callback(
             &mut self.source,
             &dest,
@@ -502,7 +513,14 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
             &mut dir_cache,
             options.skip_duplicates,
         ) {
-            Ok(report) => Ok(report),
+            Ok(report) => {
+                for entry in &self.entries {
+                    let entry_path = std::path::Path::new(&entry.name);
+                    progress.on_entry_complete(entry_path);
+                }
+                progress.on_complete();
+                Ok(report)
+            }
             Err(e) => {
                 // 7z pre-validates all paths before extracting, so any error
                 // from extract_with_callback means partial extraction occurred.
@@ -749,7 +767,12 @@ mod tests {
         let config = SecurityConfig::default();
 
         let report = archive
-            .extract(temp.path(), &config, &ExtractionOptions::default())
+            .extract(
+                temp.path(),
+                &config,
+                &ExtractionOptions::default(),
+                &mut crate::NoopProgress,
+            )
             .unwrap();
 
         assert_eq!(report.files_extracted, 2);
@@ -771,7 +794,12 @@ mod tests {
         let config = SecurityConfig::default();
 
         let report = archive
-            .extract(temp.path(), &config, &ExtractionOptions::default())
+            .extract(
+                temp.path(),
+                &config,
+                &ExtractionOptions::default(),
+                &mut crate::NoopProgress,
+            )
             .unwrap();
 
         assert!(report.files_extracted >= 1);
@@ -793,6 +821,7 @@ mod tests {
             temp.path(),
             &SecurityConfig::default(),
             &ExtractionOptions::default(),
+            &mut crate::NoopProgress,
         );
 
         assert!(result.is_err());
@@ -826,7 +855,12 @@ mod tests {
         let config = SecurityConfig::default();
 
         let report = archive
-            .extract(temp.path(), &config, &ExtractionOptions::default())
+            .extract(
+                temp.path(),
+                &config,
+                &ExtractionOptions::default(),
+                &mut crate::NoopProgress,
+            )
             .unwrap();
 
         assert_eq!(report.files_extracted, 0);
@@ -843,7 +877,12 @@ mod tests {
         let config = SecurityConfig::default();
 
         let report = archive
-            .extract(temp.path(), &config, &ExtractionOptions::default())
+            .extract(
+                temp.path(),
+                &config,
+                &ExtractionOptions::default(),
+                &mut crate::NoopProgress,
+            )
             .unwrap();
         assert_eq!(report.files_extracted, 0);
         assert_eq!(report.bytes_written, 0);
@@ -861,7 +900,12 @@ mod tests {
             ..SecurityConfig::default()
         };
 
-        let result = archive.extract(temp.path(), &config, &ExtractionOptions::default());
+        let result = archive.extract(
+            temp.path(),
+            &config,
+            &ExtractionOptions::default(),
+            &mut crate::NoopProgress,
+        );
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
@@ -884,7 +928,12 @@ mod tests {
             ..SecurityConfig::default()
         };
 
-        let result = archive.extract(temp.path(), &config, &ExtractionOptions::default());
+        let result = archive.extract(
+            temp.path(),
+            &config,
+            &ExtractionOptions::default(),
+            &mut crate::NoopProgress,
+        );
         assert!(
             result.is_ok(),
             "2 files should not exceed quota of 3: {result:?}"
@@ -925,7 +974,12 @@ mod tests {
             ..SecurityConfig::default()
         };
 
-        let result = archive.extract(temp.path(), &config, &ExtractionOptions::default());
+        let result = archive.extract(
+            temp.path(),
+            &config,
+            &ExtractionOptions::default(),
+            &mut crate::NoopProgress,
+        );
         assert!(result.is_ok(), "solid archive should extract: {result:?}");
         assert!(result.unwrap().files_extracted > 0);
     }
@@ -940,7 +994,12 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default();
 
-        let result = archive.extract(temp.path(), &config, &ExtractionOptions::default());
+        let result = archive.extract(
+            temp.path(),
+            &config,
+            &ExtractionOptions::default(),
+            &mut crate::NoopProgress,
+        );
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
@@ -962,7 +1021,12 @@ mod tests {
             ..SecurityConfig::default()
         };
 
-        let result = archive.extract(temp.path(), &config, &ExtractionOptions::default());
+        let result = archive.extract(
+            temp.path(),
+            &config,
+            &ExtractionOptions::default(),
+            &mut crate::NoopProgress,
+        );
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
@@ -980,7 +1044,12 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default(); // allow_solid_archives = false
 
-        let result = archive.extract(temp.path(), &config, &ExtractionOptions::default());
+        let result = archive.extract(
+            temp.path(),
+            &config,
+            &ExtractionOptions::default(),
+            &mut crate::NoopProgress,
+        );
         assert!(result.is_ok(), "non-solid should work: {result:?}");
     }
 
@@ -1025,7 +1094,12 @@ mod tests {
             ..SecurityConfig::default()
         };
 
-        let result = archive.extract(temp.path(), &config, &ExtractionOptions::default());
+        let result = archive.extract(
+            temp.path(),
+            &config,
+            &ExtractionOptions::default(),
+            &mut crate::NoopProgress,
+        );
         assert!(
             result.is_ok(),
             "exact limit should allow extraction: {result:?}"
@@ -1055,7 +1129,12 @@ mod tests {
             ..SecurityConfig::default()
         };
 
-        let result = archive.extract(temp.path(), &config, &ExtractionOptions::default());
+        let result = archive.extract(
+            temp.path(),
+            &config,
+            &ExtractionOptions::default(),
+            &mut crate::NoopProgress,
+        );
         assert!(result.is_err(), "one byte under limit should reject");
         assert!(matches!(
             result.unwrap_err(),
@@ -1075,6 +1154,7 @@ mod tests {
             temp.path(),
             &SecurityConfig::default(),
             &ExtractionOptions::default(),
+            &mut crate::NoopProgress,
         );
 
         assert!(result.is_err());

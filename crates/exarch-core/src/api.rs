@@ -524,9 +524,7 @@ pub fn create_archive_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
         ArchiveType::Zip => {
             crate::creation::zip::create_zip_with_progress(output, sources, config, progress)
         }
-        ArchiveType::SevenZ => Err(ExtractionError::InvalidArchive(
-            "7z archive creation not yet supported".into(),
-        )),
+        ArchiveType::SevenZ => Err(ExtractionError::UnsupportedFormat),
     }
 }
 
@@ -812,7 +810,7 @@ mod tests {
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
-            ExtractionError::InvalidArchive(_)
+            ExtractionError::UnsupportedFormat
         ));
     }
 

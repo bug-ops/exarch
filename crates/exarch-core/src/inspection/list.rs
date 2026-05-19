@@ -234,17 +234,38 @@ fn list_tar_entries<R: std::io::Read>(
 
 fn list_zip(
     archive_path: &Path,
-    format: ArchiveType,
+    _format: ArchiveType,
     config: &SecurityConfig,
 ) -> Result<ArchiveManifest> {
     let file = File::open(archive_path)?;
     let mut archive = zip::ZipArchive::new(file)
         .map_err(|e| ExtractionError::InvalidArchive(format!("failed to open ZIP archive: {e}")))?;
+    list_zip_reader(&mut archive, config)
+}
 
-    let mut manifest = ArchiveManifest::new(format);
+/// Lists entries from an already-opened TAR reader.
+///
+/// Used by `ArchiveFormat::list()` implementations to avoid re-opening the
+/// archive. `format` is passed through into `ArchiveManifest` as-is.
+pub(crate) fn list_tar_reader<R: Read>(
+    reader: R,
+    format: ArchiveType,
+    config: &SecurityConfig,
+) -> Result<ArchiveManifest> {
+    let archive = tar::Archive::new(reader);
+    list_tar_entries(archive, format, config)
+}
+
+/// Lists entries from an already-opened ZIP archive.
+///
+/// Used by `ArchiveFormat::list()` to avoid re-opening the archive.
+pub(crate) fn list_zip_reader<R: Read + Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    config: &SecurityConfig,
+) -> Result<ArchiveManifest> {
+    let mut manifest = ArchiveManifest::new(ArchiveType::Zip);
 
     for i in 0..archive.len() {
-        // Check file count quota
         if manifest.total_entries >= config.max_file_count {
             return Err(ExtractionError::QuotaExceeded {
                 resource: QuotaResource::FileCount {
@@ -279,8 +300,6 @@ fn list_zip(
         let entry_type = convert_zip_entry_type(&entry);
         let size = entry.size();
         let compressed_size = Some(entry.compressed_size());
-        // Strip file-type bits (S_IFREG, S_IFDIR, etc.) from external_attributes >> 16,
-        // keeping only the permission bits so the display matches TAR output.
         let mode = entry.unix_mode().map(|m| m & 0o7777);
         #[allow(clippy::cast_sign_loss)]
         let modified = entry.last_modified().and_then(|dt| {
@@ -307,7 +326,6 @@ fn list_zip(
             hardlink_target: None,
         };
 
-        // Check total size quota
         if manifest.total_size + archive_entry.size > config.max_total_size {
             return Err(ExtractionError::QuotaExceeded {
                 resource: QuotaResource::TotalSize {
@@ -323,17 +341,19 @@ fn list_zip(
     Ok(manifest)
 }
 
-fn list_sevenz(
-    archive_path: &Path,
-    format: ArchiveType,
+/// Lists entries from an already-opened 7z source reader.
+///
+/// Used by `ArchiveFormat::list()` to avoid re-opening the archive. The reader
+/// must be positioned at the beginning of the 7z stream.
+pub(crate) fn list_sevenz_reader<R: Read + Seek>(
+    mut source: R,
     config: &SecurityConfig,
 ) -> Result<ArchiveManifest> {
     use sevenz_rust2::Archive;
     use sevenz_rust2::Password;
 
-    let mut file = File::open(archive_path)?;
     let password = Password::empty();
-    let archive = match Archive::read(&mut file, &password) {
+    let archive = match Archive::read(&mut source, &password) {
         Ok(a) => a,
         Err(e) => {
             let err_str = e.to_string().to_lowercase();
@@ -344,10 +364,8 @@ fn list_sevenz(
                         .into(),
                 });
             }
-            // Handle valid empty 7z archives: sevenz-rust2 fails with UnexpectedEof on
-            // 32-byte archives that contain no files.
-            if is_empty_sevenz_file(&e, &mut file) {
-                return Ok(ArchiveManifest::new(format));
+            if is_empty_sevenz_archive_reader(&e, &mut source) {
+                return Ok(ArchiveManifest::new(ArchiveType::SevenZ));
             }
             return Err(ExtractionError::InvalidArchive(format!(
                 "failed to open 7z archive: {e}"
@@ -355,15 +373,49 @@ fn list_sevenz(
         }
     };
 
-    let mut manifest = ArchiveManifest::new(format);
+    list_sevenz_archive(&archive, config)
+}
+
+/// Checks whether a sevenz-rust2 parse failure is due to a valid empty 7z
+/// archive, using a generic seekable reader.
+fn is_empty_sevenz_archive_reader<R: Read + Seek>(
+    err: &sevenz_rust2::Error,
+    source: &mut R,
+) -> bool {
+    const SEVENZ_MAGIC: [u8; 6] = [0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C];
+    const EMPTY_ARCHIVE_SIZE: u64 = 32;
+
+    let is_eof = matches!(err, sevenz_rust2::Error::Io(io_err, _) if io_err.kind() == ErrorKind::UnexpectedEof);
+    if !is_eof {
+        return false;
+    }
+
+    let Ok(size) = source.seek(std::io::SeekFrom::End(0)) else {
+        return false;
+    };
+    if size != EMPTY_ARCHIVE_SIZE {
+        return false;
+    }
+
+    let Ok(_) = source.seek(std::io::SeekFrom::Start(0)) else {
+        return false;
+    };
+    let mut magic = [0u8; 6];
+    source.read_exact(&mut magic).is_ok() && magic == SEVENZ_MAGIC
+}
+
+/// Builds a manifest from a parsed 7z archive structure.
+fn list_sevenz_archive(
+    archive: &sevenz_rust2::Archive,
+    config: &SecurityConfig,
+) -> Result<ArchiveManifest> {
+    let mut manifest = ArchiveManifest::new(ArchiveType::SevenZ);
 
     for entry in &archive.files {
-        // Anti-items represent deletions in incremental archives; skip them.
         if entry.is_anti_item {
             continue;
         }
 
-        // Check file count quota
         if manifest.total_entries >= config.max_file_count {
             return Err(ExtractionError::QuotaExceeded {
                 resource: QuotaResource::FileCount {
@@ -382,10 +434,6 @@ fn list_sevenz(
         let entry_type = sevenz_manifest_entry_type(entry);
         let size = entry.size;
         let compressed_size = if archive.is_solid {
-            // In solid archives, only the first entry per block has a meaningful
-            // compressed_size. Remaining entries report 0, which is a valid artifact of
-            // solid block compression — omit to avoid false positives in zip bomb
-            // detection.
             entry
                 .has_stream
                 .then_some(entry.compressed_size)
@@ -408,7 +456,6 @@ fn list_sevenz(
             hardlink_target: None,
         };
 
-        // Check total size quota
         if manifest.total_size + archive_entry.size > config.max_total_size {
             return Err(ExtractionError::QuotaExceeded {
                 resource: QuotaResource::TotalSize {
@@ -422,6 +469,15 @@ fn list_sevenz(
     }
 
     Ok(manifest)
+}
+
+fn list_sevenz(
+    archive_path: &Path,
+    _format: ArchiveType,
+    config: &SecurityConfig,
+) -> Result<ArchiveManifest> {
+    let mut file = File::open(archive_path)?;
+    list_sevenz_reader(&mut file, config)
 }
 
 // Windows FILE_ATTRIBUTE_REPARSE_POINT flag — indicates symlinks and junctions.
@@ -442,36 +498,6 @@ fn sevenz_manifest_entry_type(entry: &sevenz_rust2::ArchiveEntry) -> ManifestEnt
 }
 
 /// Checks whether a sevenz-rust2 parse failure is due to a valid empty 7z
-/// archive.
-///
-/// sevenz-rust2 fails with `UnexpectedEof` on valid 32-byte empty archives (0
-/// files). Requires: `UnexpectedEof` I/O error + valid 7z magic + file size ==
-/// 32 bytes exactly.
-fn is_empty_sevenz_file(err: &sevenz_rust2::Error, file: &mut File) -> bool {
-    const SEVENZ_MAGIC: [u8; 6] = [0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C];
-    // A valid empty 7z archive is exactly 32 bytes:
-    // signature (6) + version (2) + StartHeader CRC (4) + StartHeader (20).
-    const EMPTY_ARCHIVE_SIZE: u64 = 32;
-
-    let is_eof = matches!(err, sevenz_rust2::Error::Io(io_err, _) if io_err.kind() == ErrorKind::UnexpectedEof);
-    if !is_eof {
-        return false;
-    }
-
-    let Ok(size) = file.seek(std::io::SeekFrom::End(0)) else {
-        return false;
-    };
-    if size != EMPTY_ARCHIVE_SIZE {
-        return false;
-    }
-
-    let Ok(_) = file.seek(std::io::SeekFrom::Start(0)) else {
-        return false;
-    };
-    let mut magic = [0u8; 6];
-    file.read_exact(&mut magic).is_ok() && magic == SEVENZ_MAGIC
-}
-
 /// Returns `true` if the path contains traversal attempts.
 ///
 /// Mirrors zip crate `enclosed_name()` semantics: rejects paths with `..`

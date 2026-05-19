@@ -533,6 +533,17 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
         }
     }
 
+    fn list(&mut self, config: &SecurityConfig) -> Result<crate::inspection::ArchiveManifest> {
+        use crate::inspection::list::list_sevenz_reader;
+        self.source.rewind().map_err(ExtractionError::Io)?;
+        list_sevenz_reader(&mut self.source, config)
+    }
+
+    fn verify(&mut self, config: &SecurityConfig) -> Result<crate::inspection::VerificationReport> {
+        let manifest = self.list(config)?;
+        crate::inspection::verify::verify_manifest(&manifest, config)
+    }
+
     fn format_name(&self) -> &'static str {
         "7z"
     }
@@ -1287,5 +1298,30 @@ mod tests {
             }
             other => panic!("expected SecurityViolation, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_list_returns_manifest_with_entries() {
+        let data = load_fixture("simple.7z");
+        let mut archive = SevenZArchive::new(Cursor::new(data)).unwrap();
+        let config = SecurityConfig::default();
+
+        let manifest = archive.list(&config).unwrap();
+
+        assert!(
+            manifest.total_entries > 0,
+            "simple.7z must have at least one entry"
+        );
+    }
+
+    #[test]
+    fn test_verify_clean_sevenz_is_safe() {
+        let data = load_fixture("simple.7z");
+        let mut archive = SevenZArchive::new(Cursor::new(data)).unwrap();
+        let config = SecurityConfig::default();
+
+        let report = archive.verify(&config).unwrap();
+
+        assert!(report.is_safe());
     }
 }

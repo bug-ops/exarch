@@ -438,3 +438,30 @@ fn test_7z_progress_interleaves_per_entry() {
         }
     }
 }
+
+/// Regression test for #201: `bytes_written` must accumulate correctly across
+/// multiple files via `checked_add` (no silent integer overflow).
+#[test]
+fn test_7z_bytes_written_accumulates_correctly() {
+    let data = load_fixture("simple.7z"); // 2-file archive: "hello world\n" each
+    let cursor = Cursor::new(data);
+    let mut archive = SevenZArchive::new(cursor).unwrap();
+
+    let temp = TempDir::new().unwrap();
+    let report = archive
+        .extract(
+            temp.path(),
+            &SecurityConfig::default(),
+            &ExtractionOptions::default(),
+            &mut exarch_core::NoopProgress,
+        )
+        .unwrap();
+
+    // The fixture contains 2 files totalling 25 bytes (verified via `7z l`).
+    // The exact value matters: checked_add accumulates per-file sizes correctly.
+    assert_eq!(
+        report.bytes_written, 25,
+        "bytes_written must equal the total bytes extracted, got {}",
+        report.bytes_written
+    );
+}

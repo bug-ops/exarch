@@ -16,7 +16,11 @@ use exarch_core::types::DestDir;
 use exarch_core::types::SafePath;
 use exarch_core::types::SafeSymlink;
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::thread;
+use tempfile::NamedTempFile;
 use tempfile::TempDir;
 
 #[test]
@@ -202,4 +206,46 @@ fn test_depth_limit_enforced() {
         result,
         Err(ExtractionError::SecurityViolation { .. })
     ));
+}
+
+/// Regression test for #200: `verify_archive` must not share a temp dir across
+/// concurrent calls (TOCTOU race). Each call must create an isolated temp dir.
+#[test]
+fn verify_archive_concurrent_calls_do_not_collide() {
+    // Build a minimal valid tar archive to use as fixture.
+    fn make_tar() -> Vec<u8> {
+        let mut builder = tar::Builder::new(Vec::new());
+        let data = b"regression test content";
+        let mut header = tar::Header::new_gnu();
+        header.set_path("hello.txt").unwrap();
+        header.set_size(data.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder.append(&header, &data[..]).unwrap();
+        builder.into_inner().unwrap()
+    }
+
+    // Write the fixture to a temp file that all threads will share (read-only).
+    let mut fixture = NamedTempFile::with_suffix(".tar").unwrap();
+    fixture.write_all(&make_tar()).unwrap();
+    fixture.flush().unwrap();
+    let fixture_path = Arc::new(fixture.path().to_path_buf());
+
+    let handles: Vec<_> = (0..8)
+        .map(|_| {
+            let path = Arc::clone(&fixture_path);
+            thread::spawn(move || {
+                let config = SecurityConfig::default();
+                exarch_core::verify_archive(path.as_ref(), &config)
+            })
+        })
+        .collect();
+
+    for handle in handles {
+        let result = handle.join().expect("thread panicked");
+        assert!(
+            result.is_ok(),
+            "concurrent verify_archive failed: {result:?}"
+        );
+    }
 }

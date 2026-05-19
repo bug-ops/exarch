@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Removed dead constant `SEVENZ_MAGIC` and its `#[allow(dead_code)]` suppression from `formats/detect.rs`; the constant was unused in format detection logic (#175).
+
 ### Fixed
 
 - ZIP password-protection detection now performs a full linear scan of all entries instead of a 3-sample strategy, preventing false negatives for archives with encrypted entries outside the first/middle/last 100 positions (#171).

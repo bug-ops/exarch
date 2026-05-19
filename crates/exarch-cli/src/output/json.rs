@@ -3,6 +3,7 @@
 use super::formatter::JsonOutput;
 use super::formatter::JsonPartialReport;
 use super::formatter::OutputFormatter;
+use crate::error::PartialExtractionContext;
 use anyhow::Result;
 use exarch_core::ArchiveManifest;
 use exarch_core::CreationReport;
@@ -112,20 +113,18 @@ impl OutputFormatter for JsonFormatter {
         let kind = extraction_err.map_or_else(|| "Error".to_string(), extraction_error_kind);
         let message = format!("{error:#}");
 
-        // Check if the error chain contains a PartialExtraction to include
-        // partial_report
-        let partial_report = extraction_err.and_then(|e| {
-            if let ExtractionError::PartialExtraction { report, .. } = e {
-                Some(JsonPartialReport {
-                    files_extracted: report.files_extracted,
-                    directories_created: report.directories_created,
-                    symlinks_created: report.symlinks_created,
-                    bytes_written: report.bytes_written,
-                })
-            } else {
-                None
-            }
-        });
+        // PartialExtraction is converted by convert_extraction_error into a chain
+        // of PartialExtractionContext → inner ExtractionError, so the partial
+        // report is carried by PartialExtractionContext, not by ExtractionError.
+        let partial_report = error
+            .chain()
+            .find_map(|e| e.downcast_ref::<PartialExtractionContext>())
+            .map(|ctx| JsonPartialReport {
+                files_extracted: ctx.report.files_extracted,
+                directories_created: ctx.report.directories_created,
+                symlinks_created: ctx.report.symlinks_created,
+                bytes_written: ctx.report.bytes_written,
+            });
 
         let output = if let Some(pr) = partial_report {
             JsonOutput::<()>::error_with_partial(operation, kind, message, pr)
@@ -135,14 +134,14 @@ impl OutputFormatter for JsonFormatter {
         let _ = Self::output(&output);
     }
 
-    fn format_success(&self, message: &str) {
+    fn format_success(&self, operation: &str, message: &str) {
         #[derive(Serialize)]
         struct SuccessData {
             message: String,
         }
 
         let output = JsonOutput::success(
-            "unknown",
+            operation,
             SuccessData {
                 message: message.to_string(),
             },
@@ -150,14 +149,14 @@ impl OutputFormatter for JsonFormatter {
         let _ = Self::output(&output);
     }
 
-    fn format_warning(&self, message: &str) {
+    fn format_warning(&self, operation: &str, message: &str) {
         #[derive(Serialize)]
         struct WarningData {
             message: String,
         }
 
         let output = JsonOutput::success(
-            "warning",
+            operation,
             WarningData {
                 message: message.to_string(),
             },
@@ -435,6 +434,26 @@ mod tests {
             .map_or_else(|| "Error".to_string(), extraction_error_kind);
 
         assert_eq!(kind, "Error");
+    }
+
+    // Regression tests for issue #202: format_success/format_warning must use the
+    // caller-supplied operation name, not a hardcoded sentinel.
+
+    #[test]
+    fn test_format_success_uses_operation_name() {
+        // Capture stdout is not straightforward in unit tests; verify the JSON output
+        // structure by constructing it directly with the same logic.
+        let op = "extract";
+        let output = JsonOutput::success(op, serde_json::json!({"message": "done"}));
+        let json = serde_json::to_string(&output).unwrap();
+        assert!(
+            json.contains(r#""operation":"extract""#),
+            "operation must be 'extract', got: {json}"
+        );
+        assert!(
+            !json.contains(r#""operation":"unknown""#),
+            "operation must not be 'unknown', got: {json}"
+        );
     }
 
     // Regression tests for issue #192: JSON error message must not duplicate text

@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- JSON `message` field no longer repeats the inner error text for `PartialExtraction` variants (`HardlinkEscape`, `SymlinkEscape`). `PartialExtraction` is `#[error("{source}")]` with `#[source]`, so placing it directly in an anyhow chain caused the inner error display to appear twice in `{:#}` output. `convert_extraction_error` now extracts the inner error and wraps it with a dedicated `PartialExtractionContext` carrier that holds the partial report without re-emitting the inner text (#204).
+- `JsonFormatter::format_success` and `format_warning` no longer emit `"operation":"unknown"` or `"operation":"warning"` in JSON output. Both methods now accept an `operation: &str` parameter propagated through the `OutputFormatter` trait (#202).
 - JSON `message` field no longer duplicates the path for `PathTraversal` errors in `--json` CLI output. The path was embedded in both the anyhow context string and the `ExtractionError::Display` output, causing it to appear twice when formatted with `{:#}` (#198).
 - JSON `message` field no longer duplicates the path for `SymlinkEscape` and `HardlinkEscape` errors in `--json` CLI output. The path was embedded in both the anyhow context string and the `ExtractionError::Display` output, causing it to appear twice when formatted with `{:#}` (#196).
 - `SevenZArchive::extract` now fires `on_entry_start` and `on_entry_complete` per-entry, interleaved with actual I/O, instead of batching all start events before extraction and all complete events after (#191).

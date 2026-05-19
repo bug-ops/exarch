@@ -5,7 +5,37 @@
 
 use anyhow::Result;
 use exarch_core::ExtractionError;
+use exarch_core::ExtractionReport;
+use std::fmt;
 use std::path::Path;
+
+/// Carrier for partial-extraction progress embedded in the anyhow error chain.
+///
+/// `ExtractionError::PartialExtraction` uses `#[error("{source}")]` with
+/// `#[source]`, so placing it directly in an anyhow chain causes the inner
+/// error text to appear twice in `{:#}` output (once via Display, once via the
+/// source chain).  This type carries the report without re-emitting the inner
+/// error text in its own Display, keeping the anyhow chain clean.
+#[derive(Debug)]
+pub struct PartialExtractionContext {
+    pub(crate) report: ExtractionReport,
+}
+
+impl fmt::Display for PartialExtractionContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let r = &self.report;
+        let items = r.files_extracted + r.directories_created + r.symlinks_created;
+        write!(
+            f,
+            "WARNING: Extraction was stopped. {items} items ({} files, {} directories, {} symlinks) \
+             were written to disk before the error.\n\
+             HINT: Inspect or remove the output directory before re-running.",
+            r.files_extracted, r.directories_created, r.symlinks_created,
+        )
+    }
+}
+
+impl std::error::Error for PartialExtractionContext {}
 
 /// Converts `ExtractionError` to user-friendly anyhow error with context.
 ///
@@ -14,24 +44,14 @@ use std::path::Path;
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 pub fn convert_extraction_error(err: ExtractionError, archive: &Path) -> anyhow::Error {
     // Handle PartialExtraction before the borrow below.
-    if let ExtractionError::PartialExtraction {
-        ref source,
-        ref report,
-    } = err
-    {
-        let files = report.files_extracted;
-        let dirs = report.directories_created;
-        let symlinks = report.symlinks_created;
-        let items = files + dirs + symlinks;
-        // Recursively convert the inner error to get the inner message.
-        // We use to_ffi_message as a fallback since we can't move source out.
-        let inner_msg = source.to_ffi_message(false).description;
-        return anyhow::Error::from(err).context(format!(
-            "{inner_msg}\n\n\
-             WARNING: Extraction was stopped. {items} items ({files} files, {dirs} directories, {symlinks} symlinks) \
-             were written to disk before the error.\n\
-             HINT: Inspect or remove the output directory before re-running.",
-        ));
+    //
+    // `PartialExtraction` is `#[error("{source}")]` with `#[source]`, so
+    // placing it in an anyhow chain causes the inner error text to appear
+    // twice in `{:#}` output.  Instead, we extract the inner error and wrap
+    // it with `PartialExtractionContext`, which carries the partial report
+    // without duplicating the inner Display text.
+    if let ExtractionError::PartialExtraction { source, report } = err {
+        return anyhow::Error::from(*source).context(PartialExtractionContext { report });
     }
 
     let context = match &err {
@@ -169,5 +189,68 @@ mod tests {
         let converted = convert_extraction_error(err, Path::new("archive.tar.gz"));
         let msg = format!("{converted:?}");
         assert!(msg.contains("I/O error"));
+    }
+
+    // Regression tests for issue #204: PartialExtraction wrapping HardlinkEscape /
+    // SymlinkEscape must not repeat the inner error text more than once.
+
+    #[test]
+    fn test_partial_hardlink_escape_inner_text_appears_once() {
+        use exarch_core::ExtractionReport;
+        use std::time::Duration;
+
+        let inner = ExtractionError::HardlinkEscape {
+            path: PathBuf::from("hardlink_escape_path"),
+        };
+        let report = ExtractionReport {
+            files_extracted: 1,
+            directories_created: 0,
+            symlinks_created: 0,
+            bytes_written: 0,
+            duration: Duration::from_millis(0),
+            files_skipped: 0,
+            warnings: vec![],
+        };
+        let err = ExtractionError::PartialExtraction {
+            source: Box::new(inner),
+            report,
+        };
+        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"));
+        let msg = format!("{converted:#}");
+        let occurrences = msg.matches("hardlink_escape_path").count();
+        assert_eq!(
+            occurrences, 1,
+            "inner error path should appear exactly once, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_partial_symlink_escape_inner_text_appears_once() {
+        use exarch_core::ExtractionReport;
+        use std::time::Duration;
+
+        let inner = ExtractionError::SymlinkEscape {
+            path: PathBuf::from("symlink_escape_path"),
+        };
+        let report = ExtractionReport {
+            files_extracted: 2,
+            directories_created: 1,
+            symlinks_created: 0,
+            bytes_written: 100,
+            duration: Duration::from_millis(0),
+            files_skipped: 0,
+            warnings: vec![],
+        };
+        let err = ExtractionError::PartialExtraction {
+            source: Box::new(inner),
+            report,
+        };
+        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"));
+        let msg = format!("{converted:#}");
+        let occurrences = msg.matches("symlink_escape_path").count();
+        assert_eq!(
+            occurrences, 1,
+            "inner error path should appear exactly once, got: {msg}"
+        );
     }
 }

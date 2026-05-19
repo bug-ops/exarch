@@ -4,10 +4,10 @@ build-backend = "maturin"
 
 [project]
 name = "exarch"
-version = "0.3.0"
+version = "0.3.1"
 description = "Memory-safe archive extraction library with built-in security validation"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = { text = "MIT OR Apache-2.0" }
 keywords = ["archive", "extraction", "security", "tar", "zip", "gzip", "path-traversal", "zip-bomb"]
 authors = [

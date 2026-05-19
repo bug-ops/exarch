@@ -11,11 +11,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Raised MSRV from 1.89.0 to 1.93.0 to accommodate `sevenz-rust2` 0.21.0 (required by `nt-time` 0.15)
+- Raised MSRV from 1.89.0 to 1.93.0 to accommodate `sevenz-rust2` 0.21.0 (required by `nt-time` 0.15) (#163).
 
 ### Fixed
 
 - `extract` command now correctly applies user-supplied quota flags (`--max-total-size`, `--max-file-size`, `--max-files`, `--max-compression-ratio`) to the conflict-detection pre-pass. Previously the pre-pass used default limits, causing a spurious quota error for archives larger than 500 MiB even when a higher limit was specified (#166).
+
+### CI
+
+- Drop Python 3.9 (EOL October 2025) from the test matrix; add Python 3.14.
+- Release workflow updated to build wheels against Python 3.10 minimum.
+
+### Dependencies
+
+- `sevenz-rust2` 0.20.2 → 0.21.0 (#162)
+- `assert_cmd` 2.2.0 → 2.2.2, `clap` 4.6.0 → 4.6.1, `clap_complete` 4.6.2 → 4.6.5, `libc` 0.2.185 → 0.2.186, `napi` 3.8.4 → 3.9.0, `napi-build` 2.3.1 → 2.3.2, `napi-derive` 3.5.3 → 3.5.6, `tokio` 1.51.1 → 1.52.1, `zip` 8.5.1 → 8.6.0 (#161, #164, #165, #167)
+- Python dev dependencies updated (`maturin` 1.13.3, `mypy` 2.1.0, `pytest` 9.0.3, `pytest-cov` 7.1.0, `ruff` 0.15.13); minimum Python version raised to 3.10 (3.9 EOL)
+- Node.js dev dependencies updated (`@biomejs/biome` 2.4.15, `@napi-rs/cli` 3.6.2); migrated from npm to pnpm
 
 ## [0.3.0] - 2026-04-23
 

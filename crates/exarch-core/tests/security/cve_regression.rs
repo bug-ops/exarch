@@ -93,6 +93,7 @@ fn test_cve_2024_12718_dotslash_prefix_traversal() {
         temp.path(),
         &SecurityConfig::default(),
         &ExtractionOptions::default(),
+        &mut exarch_core::NoopProgress,
     );
 
     assert!(
@@ -112,6 +113,7 @@ fn test_cve_2024_12718_dotslash_complex_traversal() {
         temp.path(),
         &SecurityConfig::default(),
         &ExtractionOptions::default(),
+        &mut exarch_core::NoopProgress,
     );
 
     assert!(
@@ -138,6 +140,7 @@ fn test_cve_2024_12718_multiple_traversal_variants() {
             temp.path(),
             &SecurityConfig::default(),
             &ExtractionOptions::default(),
+            &mut exarch_core::NoopProgress,
         );
 
         let path_str = std::str::from_utf8(path).unwrap_or("<binary>");
@@ -170,6 +173,7 @@ fn test_cve_2024_12905_symlink_outside_dest_rejected_by_default() {
         temp.path(),
         &SecurityConfig::default(),
         &ExtractionOptions::default(),
+        &mut exarch_core::NoopProgress,
     );
 
     assert!(
@@ -195,7 +199,12 @@ fn test_cve_2024_12905_symlink_outside_dest_rejected_when_allowed() {
     config.allowed.symlinks = true;
 
     let mut archive = TarArchive::new(Cursor::new(tar_data));
-    let result = archive.extract(temp.path(), &config, &ExtractionOptions::default());
+    let result = archive.extract(
+        temp.path(),
+        &config,
+        &ExtractionOptions::default(),
+        &mut exarch_core::NoopProgress,
+    );
 
     assert!(
         matches!(result, Err(ExtractionError::SymlinkEscape { .. })),
@@ -216,7 +225,12 @@ fn test_cve_2024_12905_deep_symlink_chain() {
     config.allowed.symlinks = true;
 
     let mut archive = TarArchive::new(Cursor::new(tar_data));
-    let result = archive.extract(temp.path(), &config, &ExtractionOptions::default());
+    let result = archive.extract(
+        temp.path(),
+        &config,
+        &ExtractionOptions::default(),
+        &mut exarch_core::NoopProgress,
+    );
 
     assert!(
         matches!(result, Err(ExtractionError::SymlinkEscape { .. })),
@@ -243,6 +257,7 @@ fn test_cve_2025_48387_hardlink_outside_dest_rejected_by_default() {
         temp.path(),
         &SecurityConfig::default(),
         &ExtractionOptions::default(),
+        &mut exarch_core::NoopProgress,
     );
 
     assert!(
@@ -267,7 +282,12 @@ fn test_cve_2025_48387_hardlink_outside_dest_rejected_when_allowed() {
     config.allowed.hardlinks = true;
 
     let mut archive = TarArchive::new(Cursor::new(tar_data));
-    let result = archive.extract(temp.path(), &config, &ExtractionOptions::default());
+    let result = archive.extract(
+        temp.path(),
+        &config,
+        &ExtractionOptions::default(),
+        &mut exarch_core::NoopProgress,
+    );
 
     assert!(
         matches!(result, Err(ExtractionError::HardlinkEscape { .. })),
@@ -287,7 +307,12 @@ fn test_cve_2025_48387_absolute_hardlink_rejected() {
     config.allowed.hardlinks = true;
 
     let mut archive = TarArchive::new(Cursor::new(tar_data));
-    let result = archive.extract(temp.path(), &config, &ExtractionOptions::default());
+    let result = archive.extract(
+        temp.path(),
+        &config,
+        &ExtractionOptions::default(),
+        &mut exarch_core::NoopProgress,
+    );
 
     assert!(
         matches!(result, Err(ExtractionError::HardlinkEscape { .. })),
@@ -321,6 +346,7 @@ fn test_rustsec_2026_0067_symlink_dir_chmod_default_config() {
         temp.path(),
         &SecurityConfig::default(),
         &ExtractionOptions::default(),
+        &mut exarch_core::NoopProgress,
     );
 
     assert!(
@@ -355,7 +381,12 @@ fn test_rustsec_2026_0067_symlink_dir_chmod_symlinks_allowed() {
     config.allowed.symlinks = true;
 
     let mut archive = TarArchive::new(Cursor::new(tar_data));
-    let result = archive.extract(temp.path(), &config, &ExtractionOptions::default());
+    let result = archive.extract(
+        temp.path(),
+        &config,
+        &ExtractionOptions::default(),
+        &mut exarch_core::NoopProgress,
+    );
 
     assert!(
         matches!(result, Err(ExtractionError::SymlinkEscape { .. })),
@@ -399,7 +430,12 @@ fn test_ghsa_2367_hardlink_does_not_corrupt_target() {
     let mut archive = TarArchive::new(Cursor::new(tar_data));
     // Extraction may succeed or fail depending on platform duplicate-file handling,
     // but legit.txt must never be corrupted.
-    let _ = archive.extract(temp.path(), &config, &ExtractionOptions::default());
+    let _ = archive.extract(
+        temp.path(),
+        &config,
+        &ExtractionOptions::default(),
+        &mut exarch_core::NoopProgress,
+    );
 
     let legit = std::fs::read_to_string(temp.path().join("legit.txt")).unwrap();
     assert_eq!(
@@ -425,7 +461,12 @@ fn test_ghsa_2367_hardlink_produces_independent_inode() {
 
     let mut archive = TarArchive::new(Cursor::new(tar_data));
     archive
-        .extract(temp.path(), &config, &ExtractionOptions::default())
+        .extract(
+            temp.path(),
+            &config,
+            &ExtractionOptions::default(),
+            &mut exarch_core::NoopProgress,
+        )
         .unwrap();
 
     let ino_legit = std::fs::metadata(temp.path().join("legit.txt"))
@@ -466,6 +507,7 @@ fn test_cve_2026_24842_deep_nested_hardlink_escape_rejected_by_default() {
         temp.path(),
         &SecurityConfig::default(),
         &ExtractionOptions::default(),
+        &mut exarch_core::NoopProgress,
     );
 
     assert!(
@@ -491,7 +533,12 @@ fn test_cve_2026_24842_deep_nested_hardlink_escape_rejected_when_allowed() {
     config.allowed.hardlinks = true;
 
     let mut archive = TarArchive::new(Cursor::new(tar_data));
-    let result = archive.extract(temp.path(), &config, &ExtractionOptions::default());
+    let result = archive.extract(
+        temp.path(),
+        &config,
+        &ExtractionOptions::default(),
+        &mut exarch_core::NoopProgress,
+    );
 
     assert!(
         matches!(result, Err(ExtractionError::HardlinkEscape { .. })),
@@ -518,7 +565,12 @@ fn test_cve_2026_24842_safe_deep_nested_hardlink_allowed() {
     config.allowed.hardlinks = true;
 
     let mut archive = TarArchive::new(Cursor::new(tar_data));
-    let result = archive.extract(temp.path(), &config, &ExtractionOptions::default());
+    let result = archive.extract(
+        temp.path(),
+        &config,
+        &ExtractionOptions::default(),
+        &mut exarch_core::NoopProgress,
+    );
 
     assert!(
         result.is_ok(),
@@ -684,7 +736,12 @@ fn test_cve_2025_29787_zip_slip_blocked_with_symlinks_enabled() {
     let data = build_cve_2025_29787_zip();
     let mut archive = ZipArchive::new(Cursor::new(data)).unwrap();
 
-    let result = archive.extract(dest.path(), &config, &ExtractionOptions::default());
+    let result = archive.extract(
+        dest.path(),
+        &config,
+        &ExtractionOptions::default(),
+        &mut exarch_core::NoopProgress,
+    );
 
     assert!(
         result.is_err(),
@@ -727,7 +784,12 @@ fn test_cve_2025_29787_zip_slip_blocked_with_symlinks_disabled() {
     let data = build_cve_2025_29787_zip();
     let mut archive = ZipArchive::new(Cursor::new(data)).unwrap();
 
-    let result = archive.extract(dest.path(), &config, &ExtractionOptions::default());
+    let result = archive.extract(
+        dest.path(),
+        &config,
+        &ExtractionOptions::default(),
+        &mut exarch_core::NoopProgress,
+    );
 
     assert!(
         result.is_err(),
@@ -759,6 +821,7 @@ fn test_windows_backslash_parent_traversal() {
         temp.path(),
         &SecurityConfig::default(),
         &ExtractionOptions::default(),
+        &mut exarch_core::NoopProgress,
     );
 
     assert!(
@@ -778,6 +841,7 @@ fn test_windows_backslash_deep_traversal() {
         temp.path(),
         &SecurityConfig::default(),
         &ExtractionOptions::default(),
+        &mut exarch_core::NoopProgress,
     );
 
     assert!(
@@ -801,6 +865,7 @@ fn test_windows_backslash_treated_as_filename_on_unix() {
         temp.path(),
         &SecurityConfig::default(),
         &ExtractionOptions::default(),
+        &mut exarch_core::NoopProgress,
     );
 
     // Extraction should succeed — the path is not a traversal on Unix.
@@ -829,6 +894,7 @@ fn test_windows_absolute_path_treated_as_filename_on_unix() {
         temp.path(),
         &SecurityConfig::default(),
         &ExtractionOptions::default(),
+        &mut exarch_core::NoopProgress,
     );
 
     // Extraction should succeed and the file must be inside the destination.

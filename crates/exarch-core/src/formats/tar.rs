@@ -75,6 +75,7 @@
 //!     Path::new("/output"),
 //!     &SecurityConfig::default(),
 //!     &ExtractionOptions::default(),
+//!     &mut exarch_core::NoopProgress,
 //! )?;
 //! println!("Extracted {} files", report.files_extracted);
 //! # Ok::<(), exarch_core::ExtractionError>(())
@@ -98,6 +99,7 @@
 //!     Path::new("/output"),
 //!     &SecurityConfig::default(),
 //!     &ExtractionOptions::default(),
+//!     &mut exarch_core::NoopProgress,
 //! )?;
 //! # Ok::<(), exarch_core::ExtractionError>(())
 //! ```
@@ -114,6 +116,7 @@ use tar::Archive;
 use crate::ExtractionError;
 use crate::ExtractionOptions;
 use crate::ExtractionReport;
+use crate::ProgressCallback;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::copy::CopyBuffer;
@@ -149,7 +152,12 @@ use super::traits::ArchiveFormat;
 /// let file = File::open("archive.tar")?;
 /// let mut archive = TarArchive::new(file);
 /// let config = SecurityConfig::default();
-/// let report = archive.extract(Path::new("/output"), &config, &ExtractionOptions::default())?;
+/// let report = archive.extract(
+///     Path::new("/output"),
+///     &config,
+///     &ExtractionOptions::default(),
+///     &mut exarch_core::NoopProgress,
+/// )?;
 /// # Ok::<(), exarch_core::ExtractionError>(())
 /// ```
 pub struct TarArchive<R: Read> {
@@ -331,6 +339,7 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
         output_dir: &Path,
         config: &SecurityConfig,
         options: &ExtractionOptions,
+        progress: &mut dyn ProgressCallback,
     ) -> Result<ExtractionReport> {
         let start = Instant::now();
         let skip_duplicates = options.skip_duplicates;
@@ -346,6 +355,8 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
         let mut copy_buffer = CopyBuffer::new();
 
         let mut dir_cache = common::DirCache::new();
+
+        let mut current_entry: usize = 0;
 
         let entries = self
             .inner
@@ -365,6 +376,15 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
                 }
             })?;
 
+            // TAR is streaming: total entry count is not known upfront, so pass 0.
+            let entry_path = entry
+                .path()
+                .ok()
+                .map(std::borrow::Cow::into_owned)
+                .unwrap_or_default();
+            current_entry = current_entry.saturating_add(1);
+            progress.on_entry_start(&entry_path, 0, current_entry);
+
             match Self::process_entry(
                 entry,
                 &mut validator,
@@ -374,8 +394,13 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
                 &mut dir_cache,
                 skip_duplicates,
             ) {
-                Ok(Some(hardlink_info)) => hardlinks.push(hardlink_info),
-                Ok(None) => {}
+                Ok(Some(hardlink_info)) => {
+                    progress.on_entry_complete(&entry_path);
+                    hardlinks.push(hardlink_info);
+                }
+                Ok(None) => {
+                    progress.on_entry_complete(&entry_path);
+                }
                 Err(e) => {
                     return Err(if report.total_items() > 0 {
                         ExtractionError::PartialExtraction {
@@ -409,6 +434,7 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
             }
         }
 
+        progress.on_complete();
         report.duration = start.elapsed();
 
         Ok(report)
@@ -529,7 +555,12 @@ impl TarEntryAdapter {
 ///
 /// let mut archive = open_tar_gz("archive.tar.gz")?;
 /// let config = SecurityConfig::default();
-/// let report = archive.extract(Path::new("/output"), &config, &ExtractionOptions::default())?;
+/// let report = archive.extract(
+///     Path::new("/output"),
+///     &config,
+///     &ExtractionOptions::default(),
+///     &mut exarch_core::NoopProgress,
+/// )?;
 /// # Ok::<(), exarch_core::ExtractionError>(())
 /// ```
 pub fn open_tar_gz<P: AsRef<Path>>(
@@ -560,7 +591,12 @@ pub fn open_tar_gz<P: AsRef<Path>>(
 ///
 /// let mut archive = open_tar_bz2("archive.tar.bz2")?;
 /// let config = SecurityConfig::default();
-/// let report = archive.extract(Path::new("/output"), &config, &ExtractionOptions::default())?;
+/// let report = archive.extract(
+///     Path::new("/output"),
+///     &config,
+///     &ExtractionOptions::default(),
+///     &mut exarch_core::NoopProgress,
+/// )?;
 /// # Ok::<(), exarch_core::ExtractionError>(())
 /// ```
 pub fn open_tar_bz2<P: AsRef<Path>>(
@@ -591,7 +627,12 @@ pub fn open_tar_bz2<P: AsRef<Path>>(
 ///
 /// let mut archive = open_tar_xz("archive.tar.xz")?;
 /// let config = SecurityConfig::default();
-/// let report = archive.extract(Path::new("/output"), &config, &ExtractionOptions::default())?;
+/// let report = archive.extract(
+///     Path::new("/output"),
+///     &config,
+///     &ExtractionOptions::default(),
+///     &mut exarch_core::NoopProgress,
+/// )?;
 /// # Ok::<(), exarch_core::ExtractionError>(())
 /// ```
 pub fn open_tar_xz<P: AsRef<Path>>(
@@ -623,7 +664,12 @@ pub fn open_tar_xz<P: AsRef<Path>>(
 ///
 /// let mut archive = open_tar_zst("archive.tar.zst")?;
 /// let config = SecurityConfig::default();
-/// let report = archive.extract(Path::new("/output"), &config, &ExtractionOptions::default())?;
+/// let report = archive.extract(
+///     Path::new("/output"),
+///     &config,
+///     &ExtractionOptions::default(),
+///     &mut exarch_core::NoopProgress,
+/// )?;
 /// # Ok::<(), exarch_core::ExtractionError>(())
 /// ```
 pub fn open_tar_zst<P: AsRef<Path>>(
@@ -660,7 +706,12 @@ mod tests {
         let config = SecurityConfig::default();
 
         let report = archive
-            .extract(temp.path(), &config, &ExtractionOptions::default())
+            .extract(
+                temp.path(),
+                &config,
+                &ExtractionOptions::default(),
+                &mut crate::NoopProgress,
+            )
             .unwrap();
 
         assert_eq!(report.files_extracted, 1);
@@ -707,7 +758,12 @@ mod tests {
         let config = SecurityConfig::default();
 
         let report = archive
-            .extract(temp.path(), &config, &ExtractionOptions::default())
+            .extract(
+                temp.path(),
+                &config,
+                &ExtractionOptions::default(),
+                &mut crate::NoopProgress,
+            )
             .unwrap();
 
         assert_eq!(report.files_extracted, 1);
@@ -748,7 +804,12 @@ mod tests {
         config.allowed.symlinks = true;
 
         let report = archive
-            .extract(temp.path(), &config, &ExtractionOptions::default())
+            .extract(
+                temp.path(),
+                &config,
+                &ExtractionOptions::default(),
+                &mut crate::NoopProgress,
+            )
             .unwrap();
 
         assert_eq!(report.files_extracted, 1);
@@ -789,7 +850,12 @@ mod tests {
         config.allowed.hardlinks = true;
 
         let report = archive
-            .extract(temp.path(), &config, &ExtractionOptions::default())
+            .extract(
+                temp.path(),
+                &config,
+                &ExtractionOptions::default(),
+                &mut crate::NoopProgress,
+            )
             .unwrap();
 
         assert_eq!(report.files_extracted, 2);
@@ -808,7 +874,12 @@ mod tests {
             ..Default::default()
         };
 
-        let result = archive.extract(temp.path(), &config, &ExtractionOptions::default());
+        let result = archive.extract(
+            temp.path(),
+            &config,
+            &ExtractionOptions::default(),
+            &mut crate::NoopProgress,
+        );
 
         assert!(result.is_err());
     }
@@ -830,7 +901,12 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default();
 
-        let result = archive.extract(temp.path(), &config, &ExtractionOptions::default());
+        let result = archive.extract(
+            temp.path(),
+            &config,
+            &ExtractionOptions::default(),
+            &mut crate::NoopProgress,
+        );
 
         assert!(result.is_err());
     }
@@ -852,7 +928,12 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default();
 
-        let result = archive.extract(temp.path(), &config, &ExtractionOptions::default());
+        let result = archive.extract(
+            temp.path(),
+            &config,
+            &ExtractionOptions::default(),
+            &mut crate::NoopProgress,
+        );
 
         assert!(result.is_err());
     }
@@ -874,7 +955,12 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default();
 
-        let result = archive.extract(temp.path(), &config, &ExtractionOptions::default());
+        let result = archive.extract(
+            temp.path(),
+            &config,
+            &ExtractionOptions::default(),
+            &mut crate::NoopProgress,
+        );
 
         assert!(result.is_err());
     }
@@ -918,7 +1004,12 @@ mod tests {
         let config = SecurityConfig::default();
 
         let report = archive
-            .extract(temp.path(), &config, &ExtractionOptions::default())
+            .extract(
+                temp.path(),
+                &config,
+                &ExtractionOptions::default(),
+                &mut crate::NoopProgress,
+            )
             .unwrap();
 
         assert_eq!(report.files_extracted, 1);
@@ -955,7 +1046,12 @@ mod tests {
         let config = SecurityConfig::default();
 
         let report = archive
-            .extract(temp.path(), &config, &ExtractionOptions::default())
+            .extract(
+                temp.path(),
+                &config,
+                &ExtractionOptions::default(),
+                &mut crate::NoopProgress,
+            )
             .unwrap();
 
         assert_eq!(report.files_extracted, 1);
@@ -992,7 +1088,12 @@ mod tests {
         let config = SecurityConfig::default();
 
         let report = archive
-            .extract(temp.path(), &config, &ExtractionOptions::default())
+            .extract(
+                temp.path(),
+                &config,
+                &ExtractionOptions::default(),
+                &mut crate::NoopProgress,
+            )
             .unwrap();
 
         assert_eq!(report.files_extracted, 1);
@@ -1026,7 +1127,12 @@ mod tests {
         // Either succeeds (extracted as regular file) or fails with
         // InvalidArchive due to missing GNU sparse extension headers.
         // A SecurityViolation must NOT be returned for this entry type.
-        match archive.extract(temp.path(), &config, &ExtractionOptions::default()) {
+        match archive.extract(
+            temp.path(),
+            &config,
+            &ExtractionOptions::default(),
+            &mut crate::NoopProgress,
+        ) {
             Ok(report) => {
                 assert_eq!(report.files_extracted, 1);
                 assert!(temp.path().join("sparse.txt").exists());
@@ -1056,7 +1162,12 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default();
 
-        let result = archive.extract(temp.path(), &config, &ExtractionOptions::default());
+        let result = archive.extract(
+            temp.path(),
+            &config,
+            &ExtractionOptions::default(),
+            &mut crate::NoopProgress,
+        );
 
         assert!(
             matches!(result, Err(ExtractionError::SecurityViolation { .. })),
@@ -1084,7 +1195,12 @@ mod tests {
         let config = SecurityConfig::default();
 
         let report = archive
-            .extract(temp.path(), &config, &ExtractionOptions::default())
+            .extract(
+                temp.path(),
+                &config,
+                &ExtractionOptions::default(),
+                &mut crate::NoopProgress,
+            )
             .unwrap();
 
         assert_eq!(report.files_extracted, 1);
@@ -1112,7 +1228,12 @@ mod tests {
         let config = SecurityConfig::default();
 
         let report = archive
-            .extract(temp.path(), &config, &ExtractionOptions::default())
+            .extract(
+                temp.path(),
+                &config,
+                &ExtractionOptions::default(),
+                &mut crate::NoopProgress,
+            )
             .unwrap();
 
         assert_eq!(report.files_extracted, 1);
@@ -1140,7 +1261,12 @@ mod tests {
         let config = SecurityConfig::default();
 
         let report = archive
-            .extract(temp.path(), &config, &ExtractionOptions::default())
+            .extract(
+                temp.path(),
+                &config,
+                &ExtractionOptions::default(),
+                &mut crate::NoopProgress,
+            )
             .unwrap();
 
         assert_eq!(report.files_extracted, 1);
@@ -1167,7 +1293,12 @@ mod tests {
         let config = SecurityConfig::default();
 
         let report = archive
-            .extract(temp.path(), &config, &ExtractionOptions::default())
+            .extract(
+                temp.path(),
+                &config,
+                &ExtractionOptions::default(),
+                &mut crate::NoopProgress,
+            )
             .unwrap();
 
         assert_eq!(report.files_extracted, 1);
@@ -1190,7 +1321,12 @@ mod tests {
         let config = SecurityConfig::default();
 
         let report = archive
-            .extract(temp.path(), &config, &ExtractionOptions::default())
+            .extract(
+                temp.path(),
+                &config,
+                &ExtractionOptions::default(),
+                &mut crate::NoopProgress,
+            )
             .unwrap();
 
         assert_eq!(report.files_extracted, 1);
@@ -1206,7 +1342,12 @@ mod tests {
         let config = SecurityConfig::default();
 
         let report = archive
-            .extract(temp.path(), &config, &ExtractionOptions::default())
+            .extract(
+                temp.path(),
+                &config,
+                &ExtractionOptions::default(),
+                &mut crate::NoopProgress,
+            )
             .unwrap();
 
         assert_eq!(report.files_extracted, 0);
@@ -1222,7 +1363,12 @@ mod tests {
         let config = SecurityConfig::default();
 
         let report = archive
-            .extract(temp.path(), &config, &ExtractionOptions::default())
+            .extract(
+                temp.path(),
+                &config,
+                &ExtractionOptions::default(),
+                &mut crate::NoopProgress,
+            )
             .unwrap();
 
         assert_eq!(report.files_extracted, 1);
@@ -1248,7 +1394,12 @@ mod tests {
         let config = SecurityConfig::default();
 
         let report = archive
-            .extract(temp.path(), &config, &ExtractionOptions::default())
+            .extract(
+                temp.path(),
+                &config,
+                &ExtractionOptions::default(),
+                &mut crate::NoopProgress,
+            )
             .unwrap();
 
         assert_eq!(report.files_extracted, 3);
@@ -1272,7 +1423,12 @@ mod tests {
             ..Default::default()
         };
 
-        let result = archive.extract(temp.path(), &config, &ExtractionOptions::default());
+        let result = archive.extract(
+            temp.path(),
+            &config,
+            &ExtractionOptions::default(),
+            &mut crate::NoopProgress,
+        );
 
         assert!(result.is_err());
     }
@@ -1291,7 +1447,12 @@ mod tests {
             ..Default::default()
         };
 
-        let result = archive.extract(temp.path(), &config, &ExtractionOptions::default());
+        let result = archive.extract(
+            temp.path(),
+            &config,
+            &ExtractionOptions::default(),
+            &mut crate::NoopProgress,
+        );
 
         assert!(result.is_err());
     }
@@ -1317,7 +1478,12 @@ mod tests {
         let config = SecurityConfig::default();
 
         let report = archive
-            .extract(temp.path(), &config, &ExtractionOptions::default())
+            .extract(
+                temp.path(),
+                &config,
+                &ExtractionOptions::default(),
+                &mut crate::NoopProgress,
+            )
             .unwrap();
 
         assert_eq!(report.files_extracted, 1);
@@ -1348,7 +1514,12 @@ mod tests {
         let config = SecurityConfig::default();
 
         let report = archive
-            .extract(temp.path(), &config, &ExtractionOptions::default())
+            .extract(
+                temp.path(),
+                &config,
+                &ExtractionOptions::default(),
+                &mut crate::NoopProgress,
+            )
             .unwrap();
 
         assert_eq!(report.files_extracted, 1);
@@ -1368,7 +1539,12 @@ mod tests {
         let config = SecurityConfig::default();
 
         let report = archive
-            .extract(temp.path(), &config, &ExtractionOptions::default())
+            .extract(
+                temp.path(),
+                &config,
+                &ExtractionOptions::default(),
+                &mut crate::NoopProgress,
+            )
             .unwrap();
 
         assert_eq!(report.bytes_written, 10);
@@ -1393,7 +1569,12 @@ mod tests {
         let config = SecurityConfig::default();
 
         let report = archive
-            .extract(temp.path(), &config, &ExtractionOptions::default())
+            .extract(
+                temp.path(),
+                &config,
+                &ExtractionOptions::default(),
+                &mut crate::NoopProgress,
+            )
             .unwrap();
 
         assert_eq!(report.files_extracted, 0);
@@ -1421,7 +1602,12 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default(); // symlinks disabled by default
 
-        let result = archive.extract(temp.path(), &config, &ExtractionOptions::default());
+        let result = archive.extract(
+            temp.path(),
+            &config,
+            &ExtractionOptions::default(),
+            &mut crate::NoopProgress,
+        );
 
         assert!(result.is_err());
     }
@@ -1446,7 +1632,12 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default(); // hardlinks disabled by default
 
-        let result = archive.extract(temp.path(), &config, &ExtractionOptions::default());
+        let result = archive.extract(
+            temp.path(),
+            &config,
+            &ExtractionOptions::default(),
+            &mut crate::NoopProgress,
+        );
 
         assert!(result.is_err());
     }
@@ -1460,7 +1651,12 @@ mod tests {
         let config = SecurityConfig::default();
 
         let report = archive
-            .extract(temp.path(), &config, &ExtractionOptions::default())
+            .extract(
+                temp.path(),
+                &config,
+                &ExtractionOptions::default(),
+                &mut crate::NoopProgress,
+            )
             .unwrap();
 
         assert!(report.duration.as_nanos() > 0);
@@ -1488,7 +1684,12 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default();
 
-        let result = archive.extract(temp.path(), &config, &ExtractionOptions::default());
+        let result = archive.extract(
+            temp.path(),
+            &config,
+            &ExtractionOptions::default(),
+            &mut crate::NoopProgress,
+        );
 
         assert!(result.is_err());
         match result {
@@ -1519,7 +1720,12 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default();
 
-        let result = archive.extract(temp.path(), &config, &ExtractionOptions::default());
+        let result = archive.extract(
+            temp.path(),
+            &config,
+            &ExtractionOptions::default(),
+            &mut crate::NoopProgress,
+        );
 
         assert!(result.is_err());
         match result {
@@ -1560,7 +1766,12 @@ mod tests {
         let mut config = SecurityConfig::default();
         config.allowed.symlinks = true;
 
-        let result = archive.extract(temp.path(), &config, &ExtractionOptions::default());
+        let result = archive.extract(
+            temp.path(),
+            &config,
+            &ExtractionOptions::default(),
+            &mut crate::NoopProgress,
+        );
 
         assert!(result.is_err());
         // A directory was created before the symlink escape, so the error is
@@ -1596,7 +1807,12 @@ mod tests {
         let mut config = SecurityConfig::default();
         config.allowed.hardlinks = true;
 
-        let result = archive.extract(temp.path(), &config, &ExtractionOptions::default());
+        let result = archive.extract(
+            temp.path(),
+            &config,
+            &ExtractionOptions::default(),
+            &mut crate::NoopProgress,
+        );
 
         assert!(result.is_err());
         match result {
@@ -1644,7 +1860,12 @@ mod tests {
         config.allowed.hardlinks = true;
 
         let report = archive
-            .extract(temp.path(), &config, &ExtractionOptions::default())
+            .extract(
+                temp.path(),
+                &config,
+                &ExtractionOptions::default(),
+                &mut crate::NoopProgress,
+            )
             .unwrap();
 
         // 1 target file + 7 hardlinks = 8 files extracted
@@ -1691,7 +1912,12 @@ mod tests {
         config.allowed.hardlinks = true;
 
         let report = archive
-            .extract(temp.path(), &config, &ExtractionOptions::default())
+            .extract(
+                temp.path(),
+                &config,
+                &ExtractionOptions::default(),
+                &mut crate::NoopProgress,
+            )
             .unwrap();
 
         // 1 target file + 20 hardlinks = 21 files extracted
@@ -1770,7 +1996,12 @@ mod tests {
             ..Default::default()
         };
 
-        let result = archive.extract(temp.path(), &config, &ExtractionOptions::default());
+        let result = archive.extract(
+            temp.path(),
+            &config,
+            &ExtractionOptions::default(),
+            &mut crate::NoopProgress,
+        );
         assert!(
             result.is_err(),
             "expected quota error for PAX file size override, got: {result:?}"
@@ -1793,7 +2024,12 @@ mod tests {
             ..Default::default()
         };
 
-        let result = archive.extract(temp.path(), &config, &ExtractionOptions::default());
+        let result = archive.extract(
+            temp.path(),
+            &config,
+            &ExtractionOptions::default(),
+            &mut crate::NoopProgress,
+        );
         assert!(
             result.is_err(),
             "expected quota error for PAX total size override, got: {result:?}"
@@ -1837,7 +2073,12 @@ mod tests {
         config.allowed.hardlinks = true;
 
         let report = archive
-            .extract(temp.path(), &config, &ExtractionOptions::default())
+            .extract(
+                temp.path(),
+                &config,
+                &ExtractionOptions::default(),
+                &mut crate::NoopProgress,
+            )
             .unwrap();
 
         // 1 target file + 8 hardlinks = 9 files extracted
@@ -1875,7 +2116,9 @@ mod tests {
         let config = SecurityConfig::default();
         let options = ExtractionOptions::default(); // skip_duplicates = true
 
-        let report = archive.extract(temp.path(), &config, &options).unwrap();
+        let report = archive
+            .extract(temp.path(), &config, &options, &mut crate::NoopProgress)
+            .unwrap();
 
         // First entry extracted, second skipped
         assert_eq!(report.files_extracted, 1);
@@ -1900,7 +2143,9 @@ mod tests {
             skip_duplicates: false,
         };
 
-        let report = archive.extract(temp.path(), &config, &options).unwrap();
+        let report = archive
+            .extract(temp.path(), &config, &options, &mut crate::NoopProgress)
+            .unwrap();
 
         // Both entries extracted (second overwrites first)
         assert_eq!(report.files_extracted, 2);

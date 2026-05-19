@@ -433,6 +433,16 @@ impl<R: Read + Seek> ArchiveFormat for ZipArchive<R> {
         Ok(report)
     }
 
+    fn list(&mut self, config: &SecurityConfig) -> Result<crate::inspection::ArchiveManifest> {
+        use crate::inspection::list::list_zip_reader;
+        list_zip_reader(&mut self.inner, config)
+    }
+
+    fn verify(&mut self, config: &SecurityConfig) -> Result<crate::inspection::VerificationReport> {
+        let manifest = self.list(config)?;
+        crate::inspection::verify::verify_manifest(&manifest, config)
+    }
+
     fn format_name(&self) -> &'static str {
         "zip"
     }
@@ -1920,5 +1930,41 @@ mod tests {
             }
             other => panic!("expected SecurityViolation, got: {other}"),
         }
+    }
+
+    #[test]
+    fn test_list_returns_manifest_with_entries() {
+        let zip_data = create_test_zip(vec![("a.txt", b"hello"), ("b.txt", b"world")]);
+        let mut archive = ZipArchive::new(Cursor::new(zip_data)).unwrap();
+        let config = SecurityConfig::default();
+
+        let manifest = archive.list(&config).unwrap();
+
+        assert_eq!(manifest.total_entries, 2);
+        assert_eq!(manifest.total_size, 10);
+    }
+
+    #[test]
+    fn test_list_empty_zip_returns_empty_manifest() {
+        let zip_data = create_test_zip(vec![]);
+        let mut archive = ZipArchive::new(Cursor::new(zip_data)).unwrap();
+        let config = SecurityConfig::default();
+
+        let manifest = archive.list(&config).unwrap();
+
+        assert_eq!(manifest.total_entries, 0);
+        assert_eq!(manifest.total_size, 0);
+    }
+
+    #[test]
+    fn test_verify_clean_zip_is_safe() {
+        let zip_data = create_test_zip(vec![("safe.txt", b"data")]);
+        let mut archive = ZipArchive::new(Cursor::new(zip_data)).unwrap();
+        let config = SecurityConfig::default();
+
+        let report = archive.verify(&config).unwrap();
+
+        assert!(report.is_safe());
+        assert_eq!(report.total_entries, 1);
     }
 }

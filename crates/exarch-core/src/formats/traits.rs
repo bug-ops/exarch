@@ -7,8 +7,14 @@ use crate::ExtractionReport;
 use crate::ProgressCallback;
 use crate::Result;
 use crate::SecurityConfig;
+use crate::inspection::ArchiveManifest;
+use crate::inspection::VerificationReport;
 
 /// Trait for archive format handlers.
+///
+/// Implementors provide extraction, listing, and verification for a single
+/// archive format. Every new format must implement all three operations so that
+/// adding a format requires touching one trait implementation only.
 pub trait ArchiveFormat {
     /// Extracts the archive to the specified directory.
     ///
@@ -24,6 +30,29 @@ pub trait ArchiveFormat {
         options: &ExtractionOptions,
         progress: &mut dyn ProgressCallback,
     ) -> Result<ExtractionReport>;
+
+    /// Lists the archive contents without writing any files to disk.
+    ///
+    /// Returns a manifest of all entries with their metadata. Quota limits
+    /// from `config` are applied to reject oversized archives early.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the archive is corrupted, encrypted, or a quota
+    /// limit is exceeded.
+    fn list(&mut self, config: &SecurityConfig) -> Result<ArchiveManifest>;
+
+    /// Verifies the archive's integrity and security without extracting.
+    ///
+    /// Performs path-traversal, symlink, zip-bomb, quota, and permission
+    /// checks. Security issues are collected in the returned report rather
+    /// than propagated as errors, so callers get the complete picture.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error only if the archive cannot be read at all (I/O
+    /// failure, encryption). Individual security issues appear in the report.
+    fn verify(&mut self, config: &SecurityConfig) -> Result<VerificationReport>;
 
     /// Returns the archive format name.
     fn format_name(&self) -> &'static str;
@@ -44,6 +73,16 @@ mod tests {
             _progress: &mut dyn ProgressCallback,
         ) -> Result<ExtractionReport> {
             Ok(ExtractionReport::new())
+        }
+
+        fn list(&mut self, _config: &SecurityConfig) -> Result<ArchiveManifest> {
+            use crate::formats::detect::ArchiveType;
+            Ok(ArchiveManifest::new(ArchiveType::Tar))
+        }
+
+        fn verify(&mut self, config: &SecurityConfig) -> Result<VerificationReport> {
+            let manifest = self.list(config)?;
+            crate::inspection::verify::verify_manifest(&manifest, config)
         }
 
         fn format_name(&self) -> &'static str {
@@ -69,5 +108,43 @@ mod tests {
             .extract(temp.path(), &config, &options, &mut noop)
             .unwrap();
         assert_eq!(report.files_extracted, 0);
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn test_trait_list_returns_empty_manifest() {
+        let mut format = TestFormat;
+        let config = SecurityConfig::default();
+        let manifest = format.list(&config).unwrap();
+        assert_eq!(manifest.total_entries, 0);
+        assert_eq!(manifest.total_size, 0);
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn test_trait_verify_returns_clean_report_for_empty_archive() {
+        let mut format = TestFormat;
+        let config = SecurityConfig::default();
+        let report = format.verify(&config).unwrap();
+        assert_eq!(report.total_entries, 0);
+        assert!(report.is_safe());
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn test_trait_list_via_dyn_dispatch() {
+        let mut format: Box<dyn ArchiveFormat> = Box::new(TestFormat);
+        let config = SecurityConfig::default();
+        let manifest = format.list(&config).unwrap();
+        assert_eq!(manifest.total_entries, 0);
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn test_trait_verify_via_dyn_dispatch() {
+        let mut format: Box<dyn ArchiveFormat> = Box::new(TestFormat);
+        let config = SecurityConfig::default();
+        let report = format.verify(&config).unwrap();
+        assert!(report.is_safe());
     }
 }

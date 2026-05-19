@@ -8,6 +8,7 @@ use crate::Result;
 use crate::SecurityConfig;
 use crate::inspection::list::list_archive;
 use crate::inspection::manifest::ArchiveEntry;
+use crate::inspection::manifest::ArchiveManifest;
 use crate::inspection::manifest::ManifestEntryType;
 use crate::inspection::report::CheckStatus;
 use crate::inspection::report::IssueCategory;
@@ -22,6 +23,51 @@ use crate::security::symlink::validate_symlink;
 use crate::security::zipbomb::validate_compression_ratio;
 use crate::types::DestDir;
 use crate::types::EntryType;
+
+/// Verifies an already-listed manifest against the security config.
+///
+/// Used by `ArchiveFormat::verify()` to avoid re-opening the archive.
+/// Performs the same checks as `verify_archive` but starts from a manifest
+/// produced by `ArchiveFormat::list()`.
+pub(crate) fn verify_manifest(
+    manifest: &ArchiveManifest,
+    config: &SecurityConfig,
+) -> Result<VerificationReport> {
+    let mut issues = Vec::new();
+    let mut suspicious_entries = 0;
+
+    let temp_dir = std::env::temp_dir().join("exarch-verify");
+    std::fs::create_dir_all(&temp_dir)?;
+    let temp_dest = DestDir::new(temp_dir)?;
+
+    let mut quota_tracker = QuotaTracker::new();
+
+    for entry in &manifest.entries {
+        let entry_issues = verify_entry(entry, config, &temp_dest, &mut quota_tracker);
+        if !entry_issues.is_empty() {
+            suspicious_entries += 1;
+            issues.extend(entry_issues);
+        }
+        let heuristic_issues = check_heuristics(entry);
+        issues.extend(heuristic_issues);
+    }
+
+    issues.sort_by(|a, b| a.severity.cmp(&b.severity).reverse());
+
+    let status = determine_status(&issues);
+    let security_status = determine_security_status(&issues);
+
+    Ok(VerificationReport {
+        status,
+        integrity_status: CheckStatus::Pass,
+        security_status,
+        issues,
+        total_entries: manifest.total_entries,
+        suspicious_entries,
+        total_size: manifest.total_size,
+        format: manifest.format,
+    })
+}
 
 /// Verifies archive integrity and security without extracting.
 ///
@@ -41,8 +87,8 @@ use crate::types::EntryType;
 /// - Archive file cannot be opened
 /// - Archive is severely corrupted (cannot read structure)
 ///
-/// Security violations are reported in `VerificationReport.issues`,
-/// not as errors.
+/// Security violations are reported in `VerificationReport.issues`, not as
+/// errors.
 ///
 /// # Examples
 ///

@@ -10,10 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Removed dead constant `SEVENZ_MAGIC` and its `#[allow(dead_code)]` suppression from `formats/detect.rs`; the constant was unused in format detection logic (#175).
+- `ArchiveFormat` trait extended with `fn list()` and `fn verify()` methods, providing a single implementation point for all format operations (#174).
 
 ### Fixed
 
 - `extract_archive_with_progress` now correctly invokes the `ProgressCallback` for all archive formats (TAR, ZIP, 7z). Previously the callback was silently discarded because `ArchiveFormat::extract` did not accept a progress parameter (#170).
+- `create_archive()` now returns `Error::UnsupportedFormat` instead of `Error::InvalidArchive` when a `.7z` output path is requested, correctly signaling that 7z creation is not supported (#182).
 - ZIP password-protection detection now performs a full linear scan of all entries instead of a 3-sample strategy, preventing false negatives for archives with encrypted entries outside the first/middle/last 100 positions (#171).
 - `SecurityConfig::validate()` added: construction-time validation rejects `max_compression_ratio <= 0`, `max_file_size == 0`, `max_total_size == 0`, and `max_path_depth == 0`; `extract_archive` and `create_archive` call `validate()` and return an error for invalid configs (#172).
 - `CreationConfig::validate()` is now called in `create_archive_with_progress`, ensuring invalid creation configs are caught before any I/O occurs (#180).

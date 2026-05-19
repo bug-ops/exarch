@@ -161,8 +161,8 @@ use super::traits::ArchiveFormat;
 /// # Ok::<(), exarch_core::ExtractionError>(())
 /// ```
 pub struct TarArchive<R: Read> {
-    /// Underlying `tar::Archive` reader
-    inner: Archive<R>,
+    /// Underlying `tar::Archive` reader; `None` after `list()` consumes it.
+    inner: Option<Archive<R>>,
 }
 
 impl<R: Read> TarArchive<R> {
@@ -193,7 +193,7 @@ impl<R: Read> TarArchive<R> {
     #[must_use]
     pub fn new(reader: R) -> Self {
         Self {
-            inner: Archive::new(reader),
+            inner: Some(Archive::new(reader)),
         }
     }
 
@@ -358,8 +358,10 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
 
         let mut current_entry: usize = 0;
 
-        let entries = self
-            .inner
+        let inner = self.inner.as_mut().ok_or_else(|| {
+            ExtractionError::InvalidArchive("archive reader already consumed by list()".into())
+        })?;
+        let entries = inner
             .entries()
             .map_err(|e| ExtractionError::InvalidArchive(format!("failed to read entries: {e}")))?;
 
@@ -438,6 +440,25 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
         report.duration = start.elapsed();
 
         Ok(report)
+    }
+
+    fn list(&mut self, config: &SecurityConfig) -> Result<crate::inspection::ArchiveManifest> {
+        use crate::formats::detect::ArchiveType;
+        use crate::inspection::list::list_tar_reader;
+
+        // Consume the inner archive — TAR readers are forward-only streams.
+        // After list() returns, extract() will return an error if called.
+        let inner = self.inner.take().ok_or_else(|| {
+            crate::ExtractionError::InvalidArchive(
+                "archive reader already consumed by list()".into(),
+            )
+        })?;
+        list_tar_reader(inner.into_inner(), ArchiveType::Tar, config)
+    }
+
+    fn verify(&mut self, config: &SecurityConfig) -> Result<crate::inspection::VerificationReport> {
+        let manifest = self.list(config)?;
+        crate::inspection::verify::verify_manifest(&manifest, config)
     }
 
     fn format_name(&self) -> &'static str {
@@ -2154,5 +2175,41 @@ mod tests {
         // File content is from the second (overwriting) entry
         let content = std::fs::read(temp.path().join("legit.txt")).unwrap();
         assert_eq!(content, b"second");
+    }
+
+    #[test]
+    fn test_list_returns_manifest_with_entries() {
+        let tar_data = create_test_tar(vec![("a.txt", b"hello"), ("b.txt", b"world")]);
+        let mut archive = TarArchive::new(Cursor::new(tar_data));
+        let config = SecurityConfig::default();
+
+        let manifest = archive.list(&config).unwrap();
+
+        assert_eq!(manifest.total_entries, 2);
+        assert_eq!(manifest.total_size, 10);
+    }
+
+    #[test]
+    fn test_list_empty_archive_returns_empty_manifest() {
+        let tar_data = create_test_tar(vec![]);
+        let mut archive = TarArchive::new(Cursor::new(tar_data));
+        let config = SecurityConfig::default();
+
+        let manifest = archive.list(&config).unwrap();
+
+        assert_eq!(manifest.total_entries, 0);
+        assert_eq!(manifest.total_size, 0);
+    }
+
+    #[test]
+    fn test_verify_clean_archive_is_safe() {
+        let tar_data = create_test_tar(vec![("safe.txt", b"data")]);
+        let mut archive = TarArchive::new(Cursor::new(tar_data));
+        let config = SecurityConfig::default();
+
+        let report = archive.verify(&config).unwrap();
+
+        assert!(report.is_safe());
+        assert_eq!(report.total_entries, 1);
     }
 }

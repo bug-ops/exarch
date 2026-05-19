@@ -42,24 +42,15 @@ pub fn convert_extraction_error(err: ExtractionError, archive: &Path) -> anyhow:
             archive.display(),
             path.display()
         ),
-        ExtractionError::ZipBomb {
-            compressed,
-            uncompressed,
-            ratio,
-        } => format!(
+        ExtractionError::ZipBomb { .. } => format!(
             "Security violation: Archive '{}' appears to be a zip bomb\n\
-             Compression ratio: {}:1 ({}KB → {}MB)\n\
              HINT: Use --max-compression-ratio to allow higher ratios if legitimate.",
             archive.display(),
-            *ratio as u64,
-            compressed / 1024,
-            uncompressed / 1024 / 1024
         ),
-        ExtractionError::QuotaExceeded { resource } => format!(
-            "Extraction limit exceeded for '{}': {}\n\
+        ExtractionError::QuotaExceeded { .. } => format!(
+            "Extraction limit exceeded for '{}'\n\
              HINT: Use --max-files, --max-total-size, or --max-file-size to increase limits.",
             archive.display(),
-            resource
         ),
         ExtractionError::SymlinkEscape { path } => format!(
             "Symlink rejected in '{}': {}\n\
@@ -132,7 +123,7 @@ mod tests {
         let converted = convert_extraction_error(err, Path::new("bomb.zip"));
         let msg = format!("{converted:?}");
         assert!(msg.contains("zip bomb"));
-        assert!(msg.contains("150:1"));
+        assert!(msg.contains("bomb.zip"));
     }
 
     #[test]

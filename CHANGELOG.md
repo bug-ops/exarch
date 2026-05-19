@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `SevenZArchive::extract` now fires `on_entry_start` and `on_entry_complete` per-entry, interleaved with actual I/O, instead of batching all start events before extraction and all complete events after (#191).
 - `SevenZArchive::verify` now calls `config.validate()` before any archive I/O, matching the guard applied by the public `verify_archive` entrypoint (#191).
+- JSON error output no longer duplicates the error message for `QuotaExceeded` and `ZipBomb` errors when using `--json`. The `message` field previously contained the `ExtractionError::Display` text twice due to `anyhow`'s `{:#}` formatter chaining the context string with the inner error display (#192).
 - `extract_archive_with_progress` now correctly invokes the `ProgressCallback` for all archive formats (TAR, ZIP, 7z). Previously the callback was silently discarded because `ArchiveFormat::extract` did not accept a progress parameter (#170).
 - `create_archive()` now returns `Error::UnsupportedFormat` instead of `Error::InvalidArchive` when a `.7z` output path is requested, correctly signaling that 7z creation is not supported (#182).
 - ZIP password-protection detection now performs a full linear scan of all entries instead of a 3-sample strategy, preventing false negatives for archives with encrypted entries outside the first/middle/last 100 positions (#171).

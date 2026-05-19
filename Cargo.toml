@@ -8,8 +8,8 @@ members = [
 ]
 
 [workspace.package]
-version = "0.3.0"
-authors = ["Exarch Contributors"]
+version = "0.3.1"
+authors = ["bug-ops"]
 edition = "2024"
 rust-version = "1.93.0"
 license = "MIT OR Apache-2.0"
@@ -19,7 +19,7 @@ keywords = ["archive", "extraction", "security", "tar", "zip"]
 categories = ["compression", "filesystem"]
 
 [workspace.dependencies]
-exarch-core = { path = "crates/exarch-core", version = "0.3.0" }
+exarch-core = { path = "crates/exarch-core", version = "0.3.1" }
 anyhow = "1.0"
 assert_cmd = "2.2"
 bzip2 = "0.6"

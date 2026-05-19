@@ -7,9 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-05-19
+
 ### Changed
 
 - Raised MSRV from 1.89.0 to 1.93.0 to accommodate `sevenz-rust2` 0.21.0 (required by `nt-time` 0.15)
+
+### Fixed
+
+- `extract` command now correctly applies user-supplied quota flags (`--max-total-size`, `--max-file-size`, `--max-files`, `--max-compression-ratio`) to the conflict-detection pre-pass. Previously the pre-pass used default limits, causing a spurious quota error for archives larger than 500 MiB even when a higher limit was specified (#166).
 
 ## [0.3.0] - 2026-04-23
 
@@ -356,7 +362,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 64KB reusable copy buffers
 - LRU cache for symlink target resolution
 
-[Unreleased]: https://github.com/bug-ops/exarch/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/bug-ops/exarch/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/bug-ops/exarch/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/bug-ops/exarch/compare/v0.2.9...v0.3.0
 [0.2.9]: https://github.com/bug-ops/exarch/compare/v0.2.8...v0.2.9
 [0.2.8]: https://github.com/bug-ops/exarch/compare/v0.2.7...v0.2.8

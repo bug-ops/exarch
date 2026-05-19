@@ -110,7 +110,11 @@ pub trait ProgressCallback: Send {
     /// * `path` - Path of the entry that was completed
     fn on_entry_complete(&mut self, path: &Path);
 
-    /// Called when the entire operation is complete.
+    /// Called when the entire operation completes successfully.
+    ///
+    /// Not called if the operation fails or results in a partial extraction.
+    /// Implementors must not rely on this method for cleanup — use `Drop`
+    /// instead.
     fn on_complete(&mut self);
 }
 

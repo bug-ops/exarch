@@ -4,10 +4,14 @@
 
 use exarch_core::ExtractionError;
 use exarch_core::ExtractionOptions;
+use exarch_core::ProgressCallback;
 use exarch_core::SecurityConfig;
 use exarch_core::formats::SevenZArchive;
 use exarch_core::formats::traits::ArchiveFormat;
 use std::io::Cursor;
+use std::path::Path;
+use std::sync::Arc;
+use std::sync::Mutex;
 use tempfile::TempDir;
 
 fn load_fixture(name: &str) -> Vec<u8> {
@@ -351,5 +355,86 @@ fn test_7z_hardlink_extracted_as_duplicate_files() {
             link_meta.ino(),
             "files should NOT be hardlinked (different inodes)"
         );
+    }
+}
+
+// ============================================================================
+// Regression test: progress callbacks fire per-entry (not bulk)
+// ============================================================================
+
+#[derive(Debug, PartialEq)]
+enum ProgressEvent {
+    Start(String),
+    Complete(String),
+}
+
+struct RecordingProgress {
+    events: Arc<Mutex<Vec<ProgressEvent>>>,
+}
+
+impl ProgressCallback for RecordingProgress {
+    fn on_entry_start(&mut self, path: &Path, _total: usize, _index: usize) {
+        self.events
+            .lock()
+            .unwrap()
+            .push(ProgressEvent::Start(path.to_string_lossy().into_owned()));
+    }
+
+    fn on_entry_complete(&mut self, path: &Path) {
+        self.events
+            .lock()
+            .unwrap()
+            .push(ProgressEvent::Complete(path.to_string_lossy().into_owned()));
+    }
+
+    fn on_bytes_written(&mut self, _bytes: u64) {}
+
+    fn on_complete(&mut self) {}
+}
+
+/// Regression test for #191: `on_entry_start` and `on_entry_complete` must
+/// interleave per-entry (start(A), complete(A), start(B), complete(B)),
+/// not be batched (all starts then all completes).
+#[test]
+fn test_7z_progress_interleaves_per_entry() {
+    let data = load_fixture("simple.7z"); // 2-file archive
+    let cursor = Cursor::new(data);
+    let mut archive = SevenZArchive::new(cursor).unwrap();
+
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut progress = RecordingProgress {
+        events: Arc::clone(&events),
+    };
+
+    let temp = TempDir::new().unwrap();
+    archive
+        .extract(
+            temp.path(),
+            &SecurityConfig::default(),
+            &ExtractionOptions::default(),
+            &mut progress,
+        )
+        .unwrap();
+
+    let events = events.lock().unwrap();
+    // Must have at least 4 events for 2 files
+    assert!(
+        events.len() >= 4,
+        "expected at least 4 events (start+complete per file), got {}: {events:?}",
+        events.len()
+    );
+
+    // Verify interleaving: every Start must be immediately followed by Complete
+    // for the same path, i.e. no two consecutive Starts.
+    for pair in events.chunks(2) {
+        match pair {
+            [ProgressEvent::Start(s), ProgressEvent::Complete(c)] => {
+                assert_eq!(
+                    s, c,
+                    "start and complete paths must match: start={s}, complete={c}"
+                );
+            }
+            _ => panic!("expected (Start, Complete) pairs but got: {pair:?}"),
+        }
     }
 }

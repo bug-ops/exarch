@@ -117,54 +117,8 @@ pub fn verify_archive<P: AsRef<Path>>(
     config: &SecurityConfig,
 ) -> Result<VerificationReport> {
     config.validate()?;
-    let archive_path = archive_path.as_ref();
-
-    // List archive to get all entries
     let manifest = list_archive(archive_path, config)?;
-
-    // Collect security issues
-    let mut issues = Vec::new();
-    let mut suspicious_entries = 0;
-
-    // Use temporary destination for validation
-    let temp_dir = std::env::temp_dir().join("exarch-verify");
-    std::fs::create_dir_all(&temp_dir)?;
-    let temp_dest = DestDir::new(temp_dir)?;
-
-    // Track quota during verification
-    let mut quota_tracker = QuotaTracker::new();
-
-    for entry in &manifest.entries {
-        // Validate entry and collect issues
-        let entry_issues = verify_entry(entry, config, &temp_dest, &mut quota_tracker);
-
-        if !entry_issues.is_empty() {
-            suspicious_entries += 1;
-            issues.extend(entry_issues);
-        }
-
-        // Add heuristic checks
-        let heuristic_issues = check_heuristics(entry);
-        issues.extend(heuristic_issues);
-    }
-
-    // Sort issues by severity (critical first)
-    issues.sort_by(|a, b| a.severity.cmp(&b.severity).reverse());
-
-    // Determine overall status
-    let status = determine_status(&issues);
-    let security_status = determine_security_status(&issues);
-
-    Ok(VerificationReport {
-        status,
-        integrity_status: CheckStatus::Pass,
-        security_status,
-        issues,
-        total_entries: manifest.total_entries,
-        suspicious_entries,
-        total_size: manifest.total_size,
-        format: manifest.format,
-    })
+    verify_manifest(&manifest, config)
 }
 
 fn verify_entry(

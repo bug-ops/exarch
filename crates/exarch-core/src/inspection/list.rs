@@ -1607,6 +1607,117 @@ mod tests {
         }
     }
 
+    // Regression for #166: caller-supplied max_total_size must not be silently
+    // discarded.
+    #[test]
+    fn test_list_archive_custom_max_total_size_honoured_tar() {
+        let mut temp_file = NamedTempFile::with_suffix(".tar").unwrap();
+        let mut builder = tar::Builder::new(Vec::new());
+
+        let data = vec![0u8; 600];
+        let mut header = tar::Header::new_gnu();
+        header.set_path("file.bin").unwrap();
+        header.set_size(data.len() as u64);
+        header.set_cksum();
+        builder.append(&header, &data[..]).unwrap();
+        temp_file.write_all(&builder.into_inner().unwrap()).unwrap();
+        temp_file.flush().unwrap();
+
+        // Small limit — must reject.
+        let small = SecurityConfig {
+            max_total_size: 100,
+            ..Default::default()
+        };
+        assert!(
+            matches!(
+                list_archive(temp_file.path(), &small),
+                Err(ExtractionError::QuotaExceeded {
+                    resource: QuotaResource::TotalSize { .. }
+                })
+            ),
+            "expected TotalSize quota error with limit=100"
+        );
+
+        // Large limit (simulates --max-total-size 1G) — must succeed.
+        let large = SecurityConfig {
+            max_total_size: 1024 * 1024 * 1024,
+            ..Default::default()
+        };
+        assert!(
+            list_archive(temp_file.path(), &large).is_ok(),
+            "list_archive must succeed when caller supplies a large max_total_size (regression #166)"
+        );
+    }
+
+    #[test]
+    fn test_list_archive_custom_max_total_size_honoured_zip() {
+        let temp_file = NamedTempFile::with_suffix(".zip").unwrap();
+        {
+            let file = std::fs::File::create(temp_file.path()).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            zip.start_file("file.bin", options).unwrap();
+            zip.write_all(&vec![0u8; 600]).unwrap();
+            zip.finish().unwrap();
+        }
+
+        let small = SecurityConfig {
+            max_total_size: 100,
+            ..Default::default()
+        };
+        assert!(
+            matches!(
+                list_archive(temp_file.path(), &small),
+                Err(ExtractionError::QuotaExceeded {
+                    resource: QuotaResource::TotalSize { .. }
+                })
+            ),
+            "expected TotalSize quota error with limit=100"
+        );
+
+        let large = SecurityConfig {
+            max_total_size: 1024 * 1024 * 1024,
+            ..Default::default()
+        };
+        assert!(
+            list_archive(temp_file.path(), &large).is_ok(),
+            "list_archive must succeed when caller supplies a large max_total_size (regression #166)"
+        );
+    }
+
+    #[test]
+    fn test_list_archive_custom_max_total_size_honoured_sevenz() {
+        let data = vec![0u8; 600];
+        let archive_bytes = make_sevenz_archive(&[("file.bin", &data)]);
+        let mut temp_file = NamedTempFile::with_suffix(".7z").unwrap();
+        temp_file.write_all(&archive_bytes).unwrap();
+        temp_file.flush().unwrap();
+
+        let small = SecurityConfig {
+            max_total_size: 100,
+            ..Default::default()
+        };
+        assert!(
+            matches!(
+                list_archive(temp_file.path(), &small),
+                Err(ExtractionError::QuotaExceeded {
+                    resource: QuotaResource::TotalSize { .. }
+                })
+            ),
+            "expected TotalSize quota error with limit=100"
+        );
+
+        let large = SecurityConfig {
+            max_total_size: 1024 * 1024 * 1024,
+            ..Default::default()
+        };
+        assert!(
+            list_archive(temp_file.path(), &large).is_ok(),
+            "list_archive must succeed when caller supplies a large max_total_size (regression #166)"
+        );
+    }
+
     #[test]
     fn test_list_sevenz_unix_symlink_reported_as_file() {
         // Unix symlinks in 7z archives cannot be detected by sevenz-rust2 API.

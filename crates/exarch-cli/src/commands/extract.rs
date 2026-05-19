@@ -25,6 +25,10 @@ pub fn execute(args: &ExtractArgs, formatter: &dyn OutputFormatter) -> Result<()
         let manifest = list_archive(
             &args.archive,
             &SecurityConfig {
+                max_file_count: args.max_files,
+                max_total_size: args.max_total_size.unwrap_or(500 * 1024 * 1024),
+                max_file_size: args.max_file_size.unwrap_or(50 * 1024 * 1024),
+                max_compression_ratio: f64::from(args.max_compression_ratio),
                 allow_solid_archives: args.allow_solid_archives,
                 ..Default::default()
             },

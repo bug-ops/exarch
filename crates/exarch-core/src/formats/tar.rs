@@ -1889,7 +1889,7 @@ mod tests {
     }
 
     #[test]
-    fn test_duplicate_entry_error_when_disabled() {
+    fn test_duplicate_entry_overwrites_when_skip_disabled() {
         let tar_data = create_duplicate_entry_tar("legit.txt", b"first", b"second");
         let mut archive = TarArchive::new(Cursor::new(tar_data));
 
@@ -1900,7 +1900,14 @@ mod tests {
             skip_duplicates: false,
         };
 
-        let result = archive.extract(temp.path(), &config, &options);
-        assert!(result.is_err());
+        let report = archive.extract(temp.path(), &config, &options).unwrap();
+
+        // Both entries extracted (second overwrites first)
+        assert_eq!(report.files_extracted, 2);
+        assert_eq!(report.files_skipped, 0);
+
+        // File content is from the second (overwriting) entry
+        let content = std::fs::read(temp.path().join("legit.txt")).unwrap();
+        assert_eq!(content, b"second");
     }
 }

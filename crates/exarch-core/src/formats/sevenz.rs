@@ -399,10 +399,10 @@ impl<R: Read + Seek> SevenZArchive<R> {
                         let mut temp_file = std::fs::File::create(&temp_path)?;
                         let bytes_written = std::io::copy(reader, &mut temp_file)?;
                         let mut r = report.borrow_mut();
-                        r.bytes_written = r
-                            .bytes_written
-                            .checked_add(bytes_written)
-                            .ok_or_else(|| sevenz_rust2::Error::Other("bytes_written overflow".into()))?;
+                        r.bytes_written =
+                            r.bytes_written.checked_add(bytes_written).ok_or_else(|| {
+                                sevenz_rust2::Error::Other("bytes_written overflow".into())
+                            })?;
                     }
                     std::fs::rename(&temp_path, &dest_path)?;
                     guard.persist(); // Success - don't cleanup

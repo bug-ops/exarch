@@ -213,7 +213,7 @@ impl SecurityConfig {
     /// assert!(bad.validate().is_err());
     /// ```
     pub fn validate(&self) -> crate::Result<()> {
-        if self.max_compression_ratio <= 0.0 {
+        if !self.max_compression_ratio.is_finite() || self.max_compression_ratio <= 0.0 {
             return Err(crate::ExtractionError::InvalidConfiguration {
                 reason: "max_compression_ratio must be positive".into(),
             });
@@ -515,6 +515,24 @@ mod tests {
     fn test_validate_rejects_zero_max_path_depth() {
         let cfg = SecurityConfig {
             max_path_depth: 0,
+            ..SecurityConfig::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_nan_compression_ratio() {
+        let cfg = SecurityConfig {
+            max_compression_ratio: f64::NAN,
+            ..SecurityConfig::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_infinite_compression_ratio() {
+        let cfg = SecurityConfig {
+            max_compression_ratio: f64::INFINITY,
             ..SecurityConfig::default()
         };
         assert!(cfg.validate().is_err());

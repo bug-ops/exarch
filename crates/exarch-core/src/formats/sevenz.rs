@@ -89,6 +89,7 @@
 //! // ... extract with config
 //! ```
 
+use std::cell::Cell;
 use std::cell::RefCell;
 use std::io::ErrorKind;
 use std::io::Read;
@@ -295,6 +296,10 @@ impl<R: Read + Seek> SevenZArchive<R> {
     /// This uses the `decompress_with_extract` API which provides a callback
     /// for each entry. We use this to inject our security validation logic.
     ///
+    /// Progress callbacks are fired per-entry inside the extraction closure so
+    /// that `on_entry_start` / `on_entry_complete` interleave with actual I/O
+    /// rather than being batched before and after the entire extraction.
+    ///
     /// # Security
     ///
     /// - Re-validates paths in callback (defense in depth)
@@ -308,18 +313,29 @@ impl<R: Read + Seek> SevenZArchive<R> {
         validator: &mut EntryValidator,
         dir_cache: &mut common::DirCache,
         skip_duplicates: bool,
+        progress: &mut dyn ProgressCallback,
+        total: usize,
     ) -> Result<ExtractionReport> {
-        // Use RefCell for interior mutability in closure
+        // Use RefCell/Cell for interior mutability in the FnMut closure.
+        // `progress` is borrowed exclusively for the duration of this call,
+        // so wrapping it in RefCell is safe — no re-entrancy can occur.
         let report = RefCell::new(ExtractionReport::new());
         let dir_cache = RefCell::new(dir_cache);
+        let progress = RefCell::new(progress);
+        let current_idx = Cell::new(0usize);
 
         // Extraction callback - called for each entry
         let extract_fn = |entry: &sevenz_rust2::ArchiveEntry,
                           reader: &mut dyn Read,
                           _dest_dir: &PathBuf|
          -> std::result::Result<bool, sevenz_rust2::Error> {
+            let entry_path = PathBuf::from(&entry.name);
+            let idx = current_idx.get().saturating_add(1);
+            current_idx.set(idx);
+            progress
+                .borrow_mut()
+                .on_entry_start(entry_path.as_path(), total, idx);
             // Convert entry metadata
-            let path = PathBuf::from(&entry.name);
             let entry_type = SevenZEntryAdapter::to_entry_type(entry).map_err(|e| {
                 sevenz_rust2::Error::Other(format!("entry type detection failed: {e}").into())
             })?;
@@ -328,7 +344,7 @@ impl<R: Read + Seek> SevenZArchive<R> {
             // NOTE: DirCache is behind RefCell, cannot pass shared reference through
             // closure
             let validated = validator
-                .validate_entry(&path, &entry_type, entry.size, None, None, None)
+                .validate_entry(&entry_path, &entry_type, entry.size, None, None, None)
                 .map_err(|e| {
                     sevenz_rust2::Error::Other(format!("validation failed: {e}").into())
                 })?;
@@ -354,6 +370,9 @@ impl<R: Read + Seek> SevenZArchive<R> {
                                 "skipped duplicate entry: {}",
                                 validated.safe_path.as_path().display()
                             ));
+                            progress
+                                .borrow_mut()
+                                .on_entry_complete(entry_path.as_path());
                             return Ok(true);
                         }
                         return Err(sevenz_rust2::Error::Other(
@@ -393,6 +412,9 @@ impl<R: Read + Seek> SevenZArchive<R> {
                 }
             }
 
+            progress
+                .borrow_mut()
+                .on_entry_complete(entry_path.as_path());
             Ok(true) // Continue extraction
         };
 
@@ -499,12 +521,7 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
         // double parsing in our validation logic
         let mut validator = EntryValidator::new(config, &dest);
         let mut dir_cache = common::DirCache::new();
-
         let total = self.entries.len();
-        for (idx, entry) in self.entries.iter().enumerate() {
-            let entry_path = std::path::Path::new(&entry.name);
-            progress.on_entry_start(entry_path, total, idx.saturating_add(1));
-        }
 
         match Self::extract_with_callback(
             &mut self.source,
@@ -512,12 +529,10 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
             &mut validator,
             &mut dir_cache,
             options.skip_duplicates,
+            progress,
+            total,
         ) {
             Ok(report) => {
-                for entry in &self.entries {
-                    let entry_path = std::path::Path::new(&entry.name);
-                    progress.on_entry_complete(entry_path);
-                }
                 progress.on_complete();
                 Ok(report)
             }
@@ -540,6 +555,7 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
     }
 
     fn verify(&mut self, config: &SecurityConfig) -> Result<crate::inspection::VerificationReport> {
+        config.validate()?;
         let manifest = self.list(config)?;
         crate::inspection::verify::verify_manifest(&manifest, config)
     }

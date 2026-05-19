@@ -10,11 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **BREAKING**: Internal modules `copy`, `io`, and `test_utils` in `exarch-core` are now `pub(crate)` instead of `pub`. These were never part of the public API; any external code referencing `exarch_core::copy`, `exarch_core::io`, or `exarch_core::test_utils` directly will no longer compile (#173).
+- `verify_archive` now delegates to `verify_manifest` after calling `list_archive`, eliminating ~80 lines of duplicated entry-processing logic (#190).
+- `ProgressCallback::on_complete` doc comment clarified: the method is called only on successful completion; implementors must not use it for cleanup.
 - Removed dead constant `SEVENZ_MAGIC` and its `#[allow(dead_code)]` suppression from `formats/detect.rs`; the constant was unused in format detection logic (#175).
 - `ArchiveFormat` trait extended with `fn list()` and `fn verify()` methods, providing a single implementation point for all format operations (#174).
 
 ### Fixed
 
+- `SevenZArchive::extract` now fires `on_entry_start` and `on_entry_complete` per-entry, interleaved with actual I/O, instead of batching all start events before extraction and all complete events after (#191).
+- `SevenZArchive::verify` now calls `config.validate()` before any archive I/O, matching the guard applied by the public `verify_archive` entrypoint (#191).
 - `extract_archive_with_progress` now correctly invokes the `ProgressCallback` for all archive formats (TAR, ZIP, 7z). Previously the callback was silently discarded because `ArchiveFormat::extract` did not accept a progress parameter (#170).
 - `create_archive()` now returns `Error::UnsupportedFormat` instead of `Error::InvalidArchive` when a `.7z` output path is requested, correctly signaling that 7z creation is not supported (#182).
 - ZIP password-protection detection now performs a full linear scan of all entries instead of a 3-sample strategy, preventing false negatives for archives with encrypted entries outside the first/middle/last 100 positions (#171).

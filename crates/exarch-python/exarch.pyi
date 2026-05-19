@@ -6,8 +6,8 @@ with built-in protection against path traversal, zip bombs, symlink attacks,
 and other common vulnerabilities.
 """
 
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 __version__: str
 

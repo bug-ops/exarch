@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `verify_archive` no longer shares a static `/tmp/exarch-verify` directory across concurrent calls. Each invocation now uses an isolated `tempfile::TempDir` scoped to its lifetime, eliminating the TOCTOU race and persistent state pollution (#200).
+- 7z extraction callback now accumulates `bytes_written` via `checked_add` instead of unchecked `+=`, preventing silent integer wraparound in release builds and matching the project-wide convention established in `copy_with_buffer` (#201).
 - JSON `message` field no longer repeats the inner error text for `PartialExtraction` variants (`HardlinkEscape`, `SymlinkEscape`). `PartialExtraction` is `#[error("{source}")]` with `#[source]`, so placing it directly in an anyhow chain caused the inner error display to appear twice in `{:#}` output. `convert_extraction_error` now extracts the inner error and wraps it with a dedicated `PartialExtractionContext` carrier that holds the partial report without re-emitting the inner text (#204).
 - `JsonFormatter::format_success` and `format_warning` no longer emit `"operation":"unknown"` or `"operation":"warning"` in JSON output. Both methods now accept an `operation: &str` parameter propagated through the `OutputFormatter` trait (#202).
 - JSON `message` field no longer duplicates the path for `PathTraversal` errors in `--json` CLI output. The path was embedded in both the anyhow context string and the `ExtractionError::Display` output, causing it to appear twice when formatted with `{:#}` (#198).

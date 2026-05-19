@@ -24,15 +24,15 @@
 pub mod api;
 pub mod archive;
 pub mod config;
-pub mod copy;
+pub(crate) mod copy;
 pub mod creation;
 pub mod error;
 pub mod formats;
 pub mod inspection;
-pub mod io;
+pub(crate) mod io;
 pub mod report;
 pub mod security;
-pub mod test_utils;
+pub(crate) mod test_utils;
 pub mod types;
 
 // Re-export main API types

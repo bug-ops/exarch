@@ -18,24 +18,6 @@ use std::io::Write;
 ///
 /// The counter only increments on successful writes. If a write operation
 /// fails partway through, only the successfully written bytes are counted.
-///
-/// # Examples
-///
-/// ```
-/// use exarch_core::io::CountingWriter;
-/// use std::io::Write;
-///
-/// let mut buffer = Vec::new();
-/// let mut writer = CountingWriter::new(&mut buffer);
-///
-/// writer.write_all(b"Hello, ")?;
-/// writer.write_all(b"World!")?;
-/// writer.flush()?;
-///
-/// assert_eq!(writer.total_bytes(), 13);
-/// assert_eq!(buffer, b"Hello, World!");
-/// # Ok::<(), std::io::Error>(())
-/// ```
 pub struct CountingWriter<W> {
     /// Inner writer being wrapped
     inner: W,
@@ -44,21 +26,7 @@ pub struct CountingWriter<W> {
 }
 
 impl<W> CountingWriter<W> {
-    /// Creates a new counting writer.
-    ///
-    /// # Parameters
-    ///
-    /// - `inner`: The writer to wrap
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use exarch_core::io::CountingWriter;
-    /// use std::io::Write;
-    ///
-    /// let buffer: Vec<u8> = Vec::new();
-    /// let writer = CountingWriter::new(buffer);
-    /// ```
+    /// Creates a new counting writer wrapping `inner`.
     #[must_use]
     pub fn new(inner: W) -> Self {
         Self {
@@ -69,90 +37,33 @@ impl<W> CountingWriter<W> {
 
     /// Returns the total number of bytes successfully written.
     ///
-    /// This count includes all bytes from successful write operations,
-    /// including those from `write`, `write_all`, and `write_fmt`.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use exarch_core::io::CountingWriter;
-    /// use std::io::Write;
-    ///
-    /// let mut buffer = Vec::new();
-    /// let mut writer = CountingWriter::new(&mut buffer);
-    ///
-    /// writer.write_all(b"test")?;
-    /// assert_eq!(writer.total_bytes(), 4);
-    ///
-    /// writer.write_all(b"data")?;
-    /// assert_eq!(writer.total_bytes(), 8);
-    /// # Ok::<(), std::io::Error>(())
-    /// ```
+    /// Only counts bytes from successful writes; partial failures do not
+    /// increment the counter for the failed portion.
     #[must_use]
     pub fn total_bytes(&self) -> u64 {
         self.bytes_written
     }
 
     /// Consumes the counting writer and returns the inner writer.
-    ///
-    /// This is useful when you need to retrieve the underlying writer
-    /// after all writing is complete.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use exarch_core::io::CountingWriter;
-    /// use std::io::Write;
-    ///
-    /// let buffer = Vec::new();
-    /// let mut writer = CountingWriter::new(buffer);
-    ///
-    /// writer.write_all(b"test")?;
-    ///
-    /// let buffer = writer.into_inner();
-    /// assert_eq!(buffer, b"test");
-    /// # Ok::<(), std::io::Error>(())
-    /// ```
     #[must_use]
-    pub fn into_inner(self) -> W {
+    #[allow(dead_code)]
+    pub(crate) fn into_inner(self) -> W {
         self.inner
     }
 
     /// Returns a reference to the inner writer.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use exarch_core::io::CountingWriter;
-    ///
-    /// let buffer = Vec::new();
-    /// let writer = CountingWriter::new(buffer);
-    ///
-    /// let inner_ref: &Vec<u8> = writer.get_ref();
-    /// ```
     #[must_use]
-    pub fn get_ref(&self) -> &W {
+    #[allow(dead_code)]
+    pub(crate) fn get_ref(&self) -> &W {
         &self.inner
     }
 
     /// Returns a mutable reference to the inner writer.
     ///
-    /// # Safety
-    ///
     /// If you write to the inner writer directly (bypassing the
     /// `CountingWriter`), the byte count will not be updated.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use exarch_core::io::CountingWriter;
-    ///
-    /// let buffer = Vec::new();
-    /// let mut writer = CountingWriter::new(buffer);
-    ///
-    /// let inner_mut: &mut Vec<u8> = writer.get_mut();
-    /// ```
-    pub fn get_mut(&mut self) -> &mut W {
+    #[allow(dead_code)]
+    pub(crate) fn get_mut(&mut self) -> &mut W {
         &mut self.inner
     }
 }

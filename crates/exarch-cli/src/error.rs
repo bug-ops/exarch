@@ -52,17 +52,15 @@ pub fn convert_extraction_error(err: ExtractionError, archive: &Path) -> anyhow:
              HINT: Use --max-files, --max-total-size, or --max-file-size to increase limits.",
             archive.display(),
         ),
-        ExtractionError::SymlinkEscape { path } => format!(
-            "Symlink rejected in '{}': {}\n\
+        ExtractionError::SymlinkEscape { .. } => format!(
+            "Symlink rejected in '{}'\n\
              HINT: Use --allow-symlinks to extract symlinks (only if trusted source).",
             archive.display(),
-            path.display()
         ),
-        ExtractionError::HardlinkEscape { path } => format!(
-            "Hardlink rejected in '{}': {}\n\
+        ExtractionError::HardlinkEscape { .. } => format!(
+            "Hardlink rejected in '{}'\n\
              HINT: Use --allow-hardlinks to extract hardlinks (only if trusted source).",
             archive.display(),
-            path.display()
         ),
         ExtractionError::Io(io_err) => {
             format!(
@@ -124,6 +122,32 @@ mod tests {
         let msg = format!("{converted:?}");
         assert!(msg.contains("zip bomb"));
         assert!(msg.contains("bomb.zip"));
+    }
+
+    #[test]
+    fn test_symlink_escape_path_appears_once() {
+        let path = PathBuf::from("link/to/escape");
+        let err = ExtractionError::SymlinkEscape { path };
+        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"));
+        let msg = format!("{converted:#}");
+        assert_eq!(
+            msg.matches("link/to/escape").count(),
+            1,
+            "path should appear exactly once, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_hardlink_escape_path_appears_once() {
+        let path = PathBuf::from("hard/link/escape");
+        let err = ExtractionError::HardlinkEscape { path };
+        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"));
+        let msg = format!("{converted:#}");
+        assert_eq!(
+            msg.matches("hard/link/escape").count(),
+            1,
+            "path should appear exactly once, got: {msg}"
+        );
     }
 
     #[test]

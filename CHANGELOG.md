@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- JSON `message` field no longer duplicates the path for `SymlinkEscape` and `HardlinkEscape` errors in `--json` CLI output. The path was embedded in both the anyhow context string and the `ExtractionError::Display` output, causing it to appear twice when formatted with `{:#}` (#196).
 - `SevenZArchive::extract` now fires `on_entry_start` and `on_entry_complete` per-entry, interleaved with actual I/O, instead of batching all start events before extraction and all complete events after (#191).
 - `SevenZArchive::verify` now calls `config.validate()` before any archive I/O, matching the guard applied by the public `verify_archive` entrypoint (#191).
 - JSON error output no longer duplicates the error message for `QuotaExceeded` and `ZipBomb` errors when using `--json`. The `message` field previously contained the `ExtractionError::Display` text twice due to `anyhow`'s `{:#}` formatter chaining the context string with the inner error display (#192).

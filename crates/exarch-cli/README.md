@@ -127,6 +127,7 @@ exarch extract --allow-symlinks trusted-source.tar
 | `--max-total-size` | - | Maximum total extracted size (supports K/M/G/T suffixes) |
 | `--max-file-size` | - | Maximum single file size |
 | `--max-compression-ratio` | 100 | Maximum compression ratio (zip bomb protection) |
+| `--allowed-extensions` | — | Extract only entries whose extension is in the allowlist (repeatable; comma-separated values accepted; leading dots optional) |
 | `--allow-symlinks` | false | Allow symlinks (within extraction directory) |
 | `--allow-hardlinks` | false | Allow hardlinks (within extraction directory) |
 | `--preserve-permissions` | false | Preserve file permissions from archive |

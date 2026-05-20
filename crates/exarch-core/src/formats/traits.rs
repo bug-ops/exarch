@@ -7,6 +7,8 @@ use crate::ExtractionReport;
 use crate::ProgressCallback;
 use crate::Result;
 use crate::SecurityConfig;
+use crate::creation::CreationConfig;
+use crate::creation::CreationReport;
 use crate::inspection::ArchiveManifest;
 use crate::inspection::VerificationReport;
 
@@ -55,6 +57,60 @@ pub trait ArchiveFormat {
     fn verify(&mut self, config: &SecurityConfig) -> Result<VerificationReport>;
 
     /// Returns the archive format name.
+    fn format_name(&self) -> &'static str;
+}
+
+/// Trait for archive creation format handlers.
+///
+/// Parallels [`ArchiveFormat`] for the write side. Each format that supports
+/// creation implements this trait so that `create_archive_with_progress`
+/// can dispatch through trait objects instead of a manual match expression.
+///
+/// # Examples
+///
+/// ```no_run
+/// use exarch_core::ProgressCallback;
+/// use exarch_core::Result;
+/// use exarch_core::creation::CreationConfig;
+/// use exarch_core::creation::CreationReport;
+/// use exarch_core::creation::TarGzCreator;
+/// use exarch_core::formats::traits::FormatCreator;
+/// use std::path::Path;
+///
+/// fn create_via_trait(
+///     creator: &dyn FormatCreator,
+///     output: &Path,
+///     sources: &[&Path],
+///     config: &CreationConfig,
+///     progress: &mut dyn ProgressCallback,
+/// ) -> Result<CreationReport> {
+///     creator.create(output, sources, config, progress)
+/// }
+///
+/// # fn main() -> Result<()> {
+/// let creator = TarGzCreator;
+/// let config = CreationConfig::default();
+/// let mut noop = exarch_core::NoopProgress;
+/// create_via_trait(&creator, Path::new("out.tar.gz"), &[], &config, &mut noop)?;
+/// # Ok(())
+/// # }
+/// ```
+pub trait FormatCreator {
+    /// Creates an archive at `output` from the given `sources`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if source paths are invalid, I/O fails, or
+    /// the compression configuration is unsupported.
+    fn create(
+        &self,
+        output: &Path,
+        sources: &[&Path],
+        config: &CreationConfig,
+        progress: &mut dyn ProgressCallback,
+    ) -> Result<CreationReport>;
+
+    /// Returns the format name for diagnostics.
     fn format_name(&self) -> &'static str;
 }
 

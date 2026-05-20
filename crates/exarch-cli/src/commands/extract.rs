@@ -10,7 +10,7 @@ use exarch_core::ExtractionOptions;
 use exarch_core::ManifestEntryType;
 use exarch_core::NoopProgress;
 use exarch_core::SecurityConfig;
-use exarch_core::extract_archive_full;
+use exarch_core::extract_archive_with_options_and_progress;
 use exarch_core::list_archive;
 use std::env;
 
@@ -78,14 +78,26 @@ pub fn execute(args: &ExtractArgs, formatter: &dyn OutputFormatter) -> Result<()
     let report = if CliProgress::should_show() {
         let mut progress = CliProgress::new(100, "Extracting");
         add_archive_context(
-            extract_archive_full(&args.archive, &output_dir, &config, &options, &mut progress),
+            extract_archive_with_options_and_progress(
+                &args.archive,
+                &output_dir,
+                &config,
+                &options,
+                &mut progress,
+            ),
             &args.archive,
             args.allow_symlinks,
         )?
     } else {
         let mut noop = NoopProgress;
         add_archive_context(
-            extract_archive_full(&args.archive, &output_dir, &config, &options, &mut noop),
+            extract_archive_with_options_and_progress(
+                &args.archive,
+                &output_dir,
+                &config,
+                &options,
+                &mut noop,
+            ),
             &args.archive,
             args.allow_symlinks,
         )?

@@ -17,4 +17,5 @@ pub use tar::open_tar_gz;
 pub use tar::open_tar_xz;
 pub use tar::open_tar_zst;
 pub use traits::ArchiveFormat;
+pub use traits::FormatCreator;
 pub use zip::ZipArchive;

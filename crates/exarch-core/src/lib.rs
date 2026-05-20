@@ -39,8 +39,8 @@ pub mod types;
 pub use api::create_archive;
 pub use api::create_archive_with_progress;
 pub use api::extract_archive;
-pub use api::extract_archive_full;
 pub use api::extract_archive_with_options;
+pub use api::extract_archive_with_options_and_progress;
 pub use api::extract_archive_with_progress;
 pub use api::list_archive;
 pub use api::verify_archive;
@@ -60,6 +60,7 @@ pub use report::ProgressCallback;
 pub use creation::ArchiveCreator;
 pub use creation::CreationConfig;
 pub use creation::CreationReport;
+pub use formats::traits::FormatCreator;
 
 // Re-export inspection types
 pub use inspection::ArchiveEntry;

@@ -17,8 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `extract_archive_full` renamed to `extract_archive_with_options_and_progress` for API naming consistency. The old name was ambiguous; the new name describes both parameters the function accepts (#219).
+- Introduced `FormatCreator` trait in `exarch-core::formats::traits` for archive creation dispatch. The trait mirrors `ArchiveFormat` on the write side and replaces the manual `match` in `create_archive_with_progress` with six unit struct implementors (`TarCreator`, `TarGzCreator`, `TarBz2Creator`, `TarXzCreator`, `TarZstCreator`, `ZipCreator`) and a `creator_for_format` helper (#220).
 - Added 15 fluent builder methods to `SecurityConfig` (`with_max_file_size`, `with_max_total_size`, `with_max_compression_ratio`, `with_max_file_count`, `with_max_path_depth`, `with_allowed`, `with_allow_symlinks`, `with_allow_hardlinks`, `with_allow_absolute_paths`, `with_allow_world_writable`, `with_preserve_permissions`, `with_allowed_extensions`, `with_banned_path_components`, `with_allow_solid_archives`, `with_max_solid_block_memory`) and 2 to `ExtractionOptions` (`with_atomic`, `with_skip_duplicates`) (#218).
-
 - `TarArchive::list()` and `TarArchive::extract()` now have `///` doc comments explaining that `list()` consumes the internal reader (TAR is forward-only) and that calling `extract()` on the same instance afterward returns `InvalidArchive`. Callers must open a fresh instance for extraction (#211).
 - `CopyBuffer::size()` visibility corrected from `pub(crate)` to `pub`, consistent with the other items in the crate-internal `mod copy`. The `pub(crate)` module boundary in `lib.rs` already enforces the encapsulation; redundant `pub(crate)` on items inside a `pub(crate)` module triggers the `redundant_pub_crate` clippy lint (#203).
 
@@ -31,6 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- CLI no longer emits `"HINT: Use --allow-symlinks"` when `--allow-symlinks` is already active and a symlink escape is blocked. The hint is now suppressed when the flag is set, since the escape is a genuine security violation rather than a configuration issue (#213).
 - `verify_archive` no longer shares a static `/tmp/exarch-verify` directory across concurrent calls. Each invocation now uses an isolated `tempfile::TempDir` scoped to its lifetime, eliminating the TOCTOU race and persistent state pollution (#200).
 - 7z extraction callback now accumulates `bytes_written` via `checked_add` instead of unchecked `+=`, preventing silent integer wraparound in release builds and matching the project-wide convention established in `copy_with_buffer` (#201).
 - JSON `message` field no longer repeats the inner error text for `PartialExtraction` variants (`HardlinkEscape`, `SymlinkEscape`). `PartialExtraction` is `#[error("{source}")]` with `#[source]`, so placing it directly in an anyhow chain caused the inner error display to appear twice in `{:#}` output. `convert_extraction_error` now extracts the inner error and wraps it with a dedicated `PartialExtractionContext` carrier that holds the partial report without re-emitting the inner text (#204).

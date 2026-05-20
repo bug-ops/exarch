@@ -671,6 +671,101 @@ fn set_permissions(header: &mut Header, metadata: &std::fs::Metadata) {
     }
 }
 
+/// Format creator for uncompressed TAR archives.
+pub struct TarCreator;
+
+/// Format creator for gzip-compressed TAR archives.
+pub struct TarGzCreator;
+
+/// Format creator for bzip2-compressed TAR archives.
+pub struct TarBz2Creator;
+
+/// Format creator for xz-compressed TAR archives.
+pub struct TarXzCreator;
+
+/// Format creator for zstd-compressed TAR archives.
+pub struct TarZstCreator;
+
+impl crate::formats::traits::FormatCreator for TarCreator {
+    fn create(
+        &self,
+        output: &Path,
+        sources: &[&Path],
+        config: &CreationConfig,
+        progress: &mut dyn ProgressCallback,
+    ) -> crate::Result<crate::creation::CreationReport> {
+        create_tar_with_progress(output, sources, config, progress)
+    }
+
+    fn format_name(&self) -> &'static str {
+        "tar"
+    }
+}
+
+impl crate::formats::traits::FormatCreator for TarGzCreator {
+    fn create(
+        &self,
+        output: &Path,
+        sources: &[&Path],
+        config: &CreationConfig,
+        progress: &mut dyn ProgressCallback,
+    ) -> crate::Result<crate::creation::CreationReport> {
+        create_tar_gz_with_progress(output, sources, config, progress)
+    }
+
+    fn format_name(&self) -> &'static str {
+        "tar.gz"
+    }
+}
+
+impl crate::formats::traits::FormatCreator for TarBz2Creator {
+    fn create(
+        &self,
+        output: &Path,
+        sources: &[&Path],
+        config: &CreationConfig,
+        progress: &mut dyn ProgressCallback,
+    ) -> crate::Result<crate::creation::CreationReport> {
+        create_tar_bz2_with_progress(output, sources, config, progress)
+    }
+
+    fn format_name(&self) -> &'static str {
+        "tar.bz2"
+    }
+}
+
+impl crate::formats::traits::FormatCreator for TarXzCreator {
+    fn create(
+        &self,
+        output: &Path,
+        sources: &[&Path],
+        config: &CreationConfig,
+        progress: &mut dyn ProgressCallback,
+    ) -> crate::Result<crate::creation::CreationReport> {
+        create_tar_xz_with_progress(output, sources, config, progress)
+    }
+
+    fn format_name(&self) -> &'static str {
+        "tar.xz"
+    }
+}
+
+impl crate::formats::traits::FormatCreator for TarZstCreator {
+    fn create(
+        &self,
+        output: &Path,
+        sources: &[&Path],
+        config: &CreationConfig,
+        progress: &mut dyn ProgressCallback,
+    ) -> crate::Result<crate::creation::CreationReport> {
+        create_tar_zst_with_progress(output, sources, config, progress)
+    }
+
+    fn format_name(&self) -> &'static str {
+        "tar.zst"
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)] // Allow unwrap in tests for brevity
 mod tests {

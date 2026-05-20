@@ -21,6 +21,7 @@ create_exception!(exarch, QuotaExceededError, ExtractionError);
 create_exception!(exarch, SecurityViolationError, ExtractionError);
 create_exception!(exarch, UnsupportedFormatError, ExtractionError);
 create_exception!(exarch, InvalidArchiveError, ExtractionError);
+create_exception!(exarch, PartialExtractionError, ExtractionError);
 
 /// Converts Rust extraction errors to Python exceptions.
 ///
@@ -100,7 +101,22 @@ pub fn convert_error(err: CoreError) -> PyErr {
         CoreError::InvalidConfiguration { reason } => {
             PyValueError::new_err(format!("invalid configuration: {reason}"))
         }
-        CoreError::PartialExtraction { source, .. } => convert_error(*source),
+        CoreError::PartialExtraction { source, report } => {
+            let source_err = convert_error(*source);
+            Python::attach(|py| {
+                let msg = source_err.value(py).str().map_or_else(
+                    |_| "partial extraction failed".to_string(),
+                    |s| s.to_string_lossy().into_owned(),
+                );
+                let err = PartialExtractionError::new_err(msg);
+                let exc_value = err.value(py);
+                // setattr with a u64 value cannot fail in practice; silencing the result
+                // to preserve the `PyErr → PyErr` conversion signature.
+                let _ = exc_value.setattr("files_extracted", report.files_extracted);
+                let _ = exc_value.setattr("bytes_written", report.bytes_written);
+                err
+            })
+        }
     }
 }
 
@@ -139,6 +155,10 @@ pub fn register_exceptions(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add(
         "InvalidArchiveError",
         m.py().get_type::<InvalidArchiveError>(),
+    )?;
+    m.add(
+        "PartialExtractionError",
+        m.py().get_type::<PartialExtractionError>(),
     )?;
     Ok(())
 }
@@ -449,6 +469,37 @@ mod tests {
             assert!(
                 module.getattr("InvalidArchiveError").is_ok(),
                 "InvalidArchiveError not registered"
+            );
+        });
+    }
+
+    /// Regression test for #210: `convert_error` must produce a
+    /// `PartialExtractionError` (not a bare `QuotaExceededError`) when the
+    /// source error is wrapped in `CoreError::PartialExtraction`.
+    #[test]
+    fn test_partial_extraction_python_exposes_report() {
+        use exarch_core::ExtractionReport;
+        use exarch_core::QuotaResource;
+
+        let report = ExtractionReport {
+            files_extracted: 3,
+            bytes_written: 1024,
+            ..ExtractionReport::default()
+        };
+        let source = CoreError::QuotaExceeded {
+            resource: QuotaResource::FileCount { current: 4, max: 3 },
+        };
+        let err = CoreError::PartialExtraction {
+            source: Box::new(source),
+            report,
+        };
+
+        let py_err = convert_error(err);
+        Python::attach(|py| {
+            assert!(
+                py_err.is_instance_of::<PartialExtractionError>(py),
+                "expected PartialExtractionError, got: {}",
+                py_err
             );
         });
     }

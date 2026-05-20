@@ -19,7 +19,8 @@ impl Archive {
     ///
     /// # Errors
     ///
-    /// Returns an error if the file doesn't exist or cannot be accessed.
+    /// This constructor is infallible. I/O errors surface later when
+    /// [`Archive::extract`] is called.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
         Ok(Self {
@@ -111,13 +112,13 @@ impl ArchiveBuilder {
     pub fn extract(self) -> Result<ExtractionReport> {
         let archive_path =
             self.archive_path
-                .ok_or_else(|| crate::ExtractionError::SecurityViolation {
+                .ok_or_else(|| crate::ExtractionError::InvalidConfiguration {
                     reason: "archive path not set".to_string(),
                 })?;
 
         let output_dir =
             self.output_dir
-                .ok_or_else(|| crate::ExtractionError::SecurityViolation {
+                .ok_or_else(|| crate::ExtractionError::InvalidConfiguration {
                     reason: "output directory not set".to_string(),
                 })?;
 
@@ -145,13 +146,19 @@ mod tests {
     fn test_archive_builder_missing_path() {
         let builder = ArchiveBuilder::new().output_dir("/tmp/test");
         let result = builder.extract();
-        assert!(result.is_err());
+        assert!(matches!(
+            result,
+            Err(crate::ExtractionError::InvalidConfiguration { .. })
+        ));
     }
 
     #[test]
     fn test_archive_builder_missing_output() {
         let builder = ArchiveBuilder::new().archive("test.tar");
         let result = builder.extract();
-        assert!(result.is_err());
+        assert!(matches!(
+            result,
+            Err(crate::ExtractionError::InvalidConfiguration { .. })
+        ));
     }
 }

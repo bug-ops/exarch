@@ -17,16 +17,23 @@ pub struct Archive {
 impl Archive {
     /// Creates a new `Archive` from a file path.
     ///
-    /// # Errors
-    ///
     /// This constructor is infallible. I/O errors surface later when
     /// [`Archive::extract`] is called.
-    pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use exarch_core::Archive;
+    ///
+    /// let archive = Archive::open("archive.tar.gz");
+    /// ```
+    #[must_use]
+    pub fn open<P: AsRef<Path>>(path: P) -> Self {
         let path = path.as_ref().to_path_buf();
-        Ok(Self {
+        Self {
             path,
             config: SecurityConfig::default(),
-        })
+        }
     }
 
     /// Returns the path to the archive file.

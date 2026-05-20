@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `SecurityConfig::allowed_extensions` filter is now enforced during extraction across all three format handlers (TAR, ZIP, 7z). When the list is non-empty, files whose extension is not in the allowlist are skipped and recorded in `ExtractionReport::files_skipped` with a warning (#230).
 - `create_archive` now rejects ZIP-family alias extensions (`.apk`, `.jar`, `.whl`, `.epub`, `.war`, `.ear`, `.aab`, `.ipa`, `.appx`, `.msix`, `.vsix`, `.nbm`) when the output format is inferred (i.e., `CreationConfig::format` is `None`). Set `CreationConfig::format = Some(ArchiveType::Zip)` to override (#231).
 
+### Breaking Changes
+
+- **`Archive::open`** now returns `Self` instead of `Result<Self>`. Callers must remove `?` or `.unwrap()` (#243).
+
 ### Changed
 
 - `verify_entry` in `exarch-core::inspection::verify` now calls `validate_path` once per entry and caches the result, eliminating a redundant second call (and the associated `canonicalize` syscalls) for symlink and hardlink entries (#236).

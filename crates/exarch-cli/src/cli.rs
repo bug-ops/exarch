@@ -104,6 +104,15 @@ pub struct ExtractArgs {
     /// exists.
     #[arg(long)]
     pub atomic: bool,
+
+    /// Only extract files whose extension is in this list.
+    ///
+    /// Can be repeated (`--allowed-extensions txt --allowed-extensions pdf`) or
+    /// comma-separated (`--allowed-extensions txt,pdf`). The leading dot is
+    /// optional and matching is case-insensitive. When omitted, all extensions
+    /// are allowed.
+    #[arg(long = "allowed-extensions", value_name = "EXT")]
+    pub allowed_extensions: Vec<String>,
 }
 
 #[derive(clap::Args)]

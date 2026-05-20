@@ -3,17 +3,18 @@
 use console::Term;
 use exarch_core::ProgressCallback;
 use indicatif::ProgressBar;
-use indicatif::ProgressState;
 use indicatif::ProgressStyle;
-use std::fmt::Write;
 use std::path::Path;
 
 /// CLI progress bar wrapper implementing `ProgressCallback`.
 ///
-/// Displays a progress bar with file count, bytes processed, speed, and ETA
-/// when running in a TTY. Automatically cleans up on drop.
+/// Displays a progress bar driven by entry count (`{pos}/{len} files`).
+/// Bytes written are shown in the message suffix and updated independently so
+/// that byte accumulation does not corrupt the entry counter. Automatically
+/// cleans up on drop.
 pub struct CliProgress {
     bar: ProgressBar,
+    label: String,
     bytes_written: u64,
 }
 
@@ -23,31 +24,17 @@ impl CliProgress {
     /// # Arguments
     ///
     /// * `total` - Total number of entries to process
-    /// * `message` - Message to display (e.g., "Extracting", "Creating")
+    /// * `message` - Label displayed before the bar (e.g., "Extracting")
     #[must_use]
     pub fn new(total: usize, message: &str) -> Self {
         let bar = ProgressBar::new(total as u64);
 
-        // Template: "Extracting [████████░░░░] 42/100 files (15.2 MB, 5.1 MB/s, 12s)"
+        // Template: "Extracting [████████░░░░] 42/100 files"
+        // Bytes are appended via set_message to keep pos/len as entry counts.
         bar.set_style(
             ProgressStyle::default_bar()
-                .template(
-                    "{msg} [{bar:40.cyan/blue}] {pos}/{len} files ({bytes}, {bytes_per_sec}, {eta})",
-                )
+                .template("{msg} [{bar:40.cyan/blue}] {pos}/{len} files")
                 .unwrap_or_else(|_| ProgressStyle::default_bar())
-                .with_key("bytes", |state: &ProgressState, w: &mut dyn Write| {
-                    write!(w, "{}", humanize_bytes(state.pos())).unwrap_or(());
-                })
-                .with_key("bytes_per_sec", |state: &ProgressState, w: &mut dyn Write| {
-                    let per_sec = state.per_sec();
-                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                    let bytes_per_sec = per_sec as u64;
-                    write!(w, "{}/s", humanize_bytes(bytes_per_sec)).unwrap_or(());
-                })
-                .with_key("eta", |state: &ProgressState, w: &mut dyn Write| {
-                    let eta = state.eta();
-                    write!(w, "{}", humanize_duration(eta)).unwrap_or(());
-                })
                 .progress_chars("█▓░"),
         );
 
@@ -55,6 +42,7 @@ impl CliProgress {
 
         Self {
             bar,
+            label: message.to_string(),
             bytes_written: 0,
         }
     }
@@ -73,13 +61,15 @@ impl Drop for CliProgress {
 }
 
 impl ProgressCallback for CliProgress {
-    fn on_entry_start(&mut self, _path: &Path, _total: usize, _current: usize) {
-        // Entry start is handled by on_entry_complete incrementing the counter
-    }
+    fn on_entry_start(&mut self, _path: &Path, _total: usize, _current: usize) {}
 
     fn on_bytes_written(&mut self, bytes: u64) {
         self.bytes_written += bytes;
-        self.bar.set_position(self.bytes_written);
+        self.bar.set_message(format!(
+            "{} ({})",
+            self.label,
+            humanize_bytes(self.bytes_written)
+        ));
     }
 
     fn on_entry_complete(&mut self, _path: &Path) {
@@ -151,18 +141,6 @@ fn humanize_bytes(bytes: u64) -> String {
     }
 }
 
-/// Converts duration to human-readable format.
-fn humanize_duration(duration: std::time::Duration) -> String {
-    let secs = duration.as_secs();
-    if secs >= 3600 {
-        format!("{}h{}m", secs / 3600, (secs % 3600) / 60)
-    } else if secs >= 60 {
-        format!("{}m{}s", secs / 60, secs % 60)
-    } else {
-        format!("{secs}s")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -176,20 +154,6 @@ mod tests {
         assert_eq!(humanize_bytes(1024 * 1024), "1.0 MB");
         assert_eq!(humanize_bytes(1024 * 1024 * 1024), "1.0 GB");
         assert_eq!(humanize_bytes(1024_u64.pow(4)), "1.0 TB");
-    }
-
-    #[test]
-    fn test_humanize_duration() {
-        assert_eq!(humanize_duration(std::time::Duration::from_secs(0)), "0s");
-        assert_eq!(humanize_duration(std::time::Duration::from_secs(30)), "30s");
-        assert_eq!(
-            humanize_duration(std::time::Duration::from_secs(90)),
-            "1m30s"
-        );
-        assert_eq!(
-            humanize_duration(std::time::Duration::from_secs(3661)),
-            "1h1m"
-        );
     }
 
     #[test]

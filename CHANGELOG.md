@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - `verify_entry` in `exarch-core::inspection::verify` now calls `validate_path` once per entry and caches the result, eliminating a redundant second call (and the associated `canonicalize` syscalls) for symlink and hardlink entries (#236).
+- Upgraded `zip` dependency from 8.6.0 to 9.0.0-pre2; adapted `ZipFile::name()` call sites to propagate the new `Result<Cow<str>, ZipError>` return type (#238).
 
 ### Fixed
 

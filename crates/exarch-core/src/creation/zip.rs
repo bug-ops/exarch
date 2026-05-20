@@ -615,7 +615,7 @@ mod tests {
             if entry.is_dir() {
                 dir_entries += 1;
                 assert!(
-                    entry.name().ends_with('/'),
+                    entry.name().unwrap().ends_with('/'),
                     "Directory entry should end with /"
                 );
             }
@@ -650,7 +650,7 @@ mod tests {
 
         for i in 0..archive.len() {
             let entry = archive.by_index(i).unwrap();
-            if entry.name().contains("test.txt")
+            if entry.name().unwrap().contains("test.txt")
                 && let Some(mode) = entry.unix_mode()
             {
                 assert_eq!(mode & 0o777, 0o755, "Permissions should be preserved");
@@ -710,7 +710,7 @@ mod tests {
 
         for i in 0..archive.len() {
             let mut entry = archive.by_index(i).unwrap();
-            let outpath = extract_dir.path().join(entry.name());
+            let outpath = extract_dir.path().join(entry.name().unwrap().as_ref());
 
             if entry.is_dir() {
                 fs::create_dir_all(&outpath).unwrap();
@@ -753,7 +753,7 @@ mod tests {
 
         for i in 0..archive.len() {
             let entry = archive.by_index(i).unwrap();
-            let name = entry.name();
+            let name = entry.name().unwrap();
             // ZIP paths should never contain backslashes
             assert!(
                 !name.contains('\\'),

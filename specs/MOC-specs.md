@@ -17,15 +17,15 @@ status: moc
 
 ## Active Specs
 
-| ID | Feature | Phase | Status |
-|----|---------|-------|--------|
-| 001 | [[001-security-pipeline/spec\|Security Pipeline]] | specify | draft |
-| 002 | [[002-format-handlers/spec\|Format Handlers]] | specify | draft |
-| 003 | [[003-config-api/spec\|Configuration API]] | specify | draft |
-| 004 | [[004-progress-tracking/spec\|Progress Tracking]] | specify | draft |
-| 005 | [[005-cli/spec\|CLI]] | specify | draft |
-| 006 | [[006-python-bindings/spec\|Python Bindings]] | specify | draft |
-| 007 | [[007-node-bindings/spec\|Node.js Bindings]] | specify | draft |
+| ID | Feature | Phase | Status | Tasks |
+|----|---------|-------|--------|-------|
+| 001 | [[001-security-pipeline/spec\|Security Pipeline]] | tasks | draft | [[001-security-pipeline/tasks\|2 open]] |
+| 002 | [[002-format-handlers/spec\|Format Handlers]] | tasks | draft | [[002-format-handlers/tasks\|1 open]] |
+| 003 | [[003-config-api/spec\|Configuration API]] | tasks | done | [[003-config-api/tasks\|none]] |
+| 004 | [[004-progress-tracking/spec\|Progress Tracking]] | tasks | done | [[004-progress-tracking/tasks\|none]] |
+| 005 | [[005-cli/spec\|CLI]] | tasks | draft | [[005-cli/tasks\|2 open]] |
+| 006 | [[006-python-bindings/spec\|Python Bindings]] | tasks | done | [[006-python-bindings/tasks\|none]] |
+| 007 | [[007-node-bindings/spec\|Node.js Bindings]] | tasks | done | [[007-node-bindings/tasks\|none]] |
 
 ## Completed Specs
 

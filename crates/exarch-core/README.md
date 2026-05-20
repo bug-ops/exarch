@@ -14,7 +14,7 @@ This crate is part of the [exarch](https://github.com/bug-ops/exarch) workspace.
 
 ```toml
 [dependencies]
-exarch-core = "0.3"
+exarch-core = "0.4"
 ```
 
 > [!IMPORTANT]
@@ -38,17 +38,21 @@ fn main() -> Result<(), exarch_core::ExtractionError> {
 
 ### Custom Security Configuration
 
+> [!IMPORTANT]
+> Since v0.4.0, `SecurityConfig`, `AllowedFeatures`, and `ExtractionOptions` are `#[non_exhaustive]`. Use `Default::default()` plus the fluent `with_*` builder methods instead of struct literal syntax.
+
 ```rust
 use exarch_core::SecurityConfig;
 
-let config = SecurityConfig {
-    max_file_size: 100 * 1024 * 1024,    // 100 MB per file
-    max_total_size: 1024 * 1024 * 1024,  // 1 GB total
-    max_file_count: 10_000,               // Max 10k files
-    max_compression_ratio: 50.0,          // 50x compression limit
-    ..Default::default()
-};
+let config = SecurityConfig::default()
+    .with_max_file_size(100 * 1024 * 1024)    // 100 MB per file
+    .with_max_total_size(1024 * 1024 * 1024)  // 1 GB total
+    .with_max_file_count(10_000)              // Max 10k files
+    .with_max_compression_ratio(50.0)         // 50x compression limit
+    .with_allowed_extensions(vec![".tar".into(), ".gz".into()]); // optional allowlist
 ```
+
+Available builders on `SecurityConfig`: `with_max_file_size`, `with_max_total_size`, `with_max_compression_ratio`, `with_max_file_count`, `with_max_path_depth`, `with_allowed`, `with_allow_symlinks`, `with_allow_hardlinks`, `with_allow_absolute_paths`, `with_allow_world_writable`, `with_preserve_permissions`, `with_allowed_extensions`, `with_banned_path_components`, `with_allow_solid_archives`, `with_max_solid_block_memory`. On `ExtractionOptions`: `with_atomic`, `with_skip_duplicates`.
 
 ### Builder Pattern
 
@@ -60,6 +64,9 @@ let report = ArchiveBuilder::new()
     .output_dir("/output/path")
     .extract()?;
 ```
+
+> [!WARNING]
+> **Breaking change in v0.4.0:** `Archive::open` now returns `Self` directly instead of `Result<Self>`. Drop the `?` or `.unwrap()` at call sites; I/O errors now surface on `extract()` instead.
 
 ## Security Features
 

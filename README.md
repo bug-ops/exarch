@@ -19,6 +19,8 @@ Memory-safe archive extraction and creation library with Python and Node.js bind
 - **Extract, create, list, and verify archives** — Full support for TAR and ZIP (all operations), plus 7z extraction, listing, and verification
 - **Security-first design** — Default-deny security model with protection against path traversal, symlink attacks, zip bombs, and more
 - **Type-driven safety** — Rust's type system ensures validated paths can only be constructed through security checks
+- **Extension allowlists** — Optional `allowed_extensions` filter restricts extraction to a specific set of file extensions across TAR, ZIP, and 7z handlers
+- **Fluent configuration** — 15 `with_*` builder methods on `SecurityConfig` and 2 on `ExtractionOptions` for ergonomic setup
 - **Multi-language support** — Native bindings for Python (PyO3) and Node.js (napi-rs)
 - **Zero unsafe code** — Core library contains no unsafe Rust code
 - **High performance** — Optimized I/O with reusable buffers and streaming operations
@@ -29,7 +31,7 @@ Memory-safe archive extraction and creation library with Python and Node.js bind
 
 ```toml
 [dependencies]
-exarch-core = "0.3"
+exarch-core = "0.4"
 ```
 
 > [!IMPORTANT]
@@ -151,13 +153,15 @@ exarch provides defense-in-depth protection against common archive vulnerabiliti
 ```rust
 use exarch_core::SecurityConfig;
 
-let config = SecurityConfig {
-    max_file_size: 100 * 1024 * 1024,   // 100 MB
-    max_total_size: 1024 * 1024 * 1024, // 1 GB
-    max_compression_ratio: 50.0,         // 50x compression limit
-    ..Default::default()
-};
+let config = SecurityConfig::default()
+    .with_max_file_size(100 * 1024 * 1024)    // 100 MB
+    .with_max_total_size(1024 * 1024 * 1024)  // 1 GB
+    .with_max_compression_ratio(50.0)         // 50x compression limit
+    .with_allowed_extensions(vec![".tar".into(), ".gz".into()]); // optional allowlist
 ```
+
+> [!IMPORTANT]
+> `SecurityConfig`, `AllowedFeatures`, and `ExtractionOptions` are `#[non_exhaustive]` since v0.4.0. Use `Default::default()` plus the fluent `with_*` builder methods instead of struct literal syntax.
 
 ## Supported Formats
 

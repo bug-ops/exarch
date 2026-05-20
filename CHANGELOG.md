@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Shell completion generation via `exarch completion <shell>` (bash, zsh, fish, powershell, elvish). Output goes to stdout for piping into the appropriate completions directory (#232).
+- `--verbose` flag now prints one line per extracted entry to stderr, including entry name, size, and type. `--quiet` takes precedence when both flags are provided (#233).
+
 ### Fixed
 
 - `ArchiveBuilder::extract` now returns `ExtractionError::InvalidConfiguration` instead of `ExtractionError::SecurityViolation` when `archive_path` or `output_dir` are not set. The previous variant caused `error_code()` to return `"SECURITY_VIOLATION"` for what is a caller configuration mistake (#235).

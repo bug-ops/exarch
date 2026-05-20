@@ -16,8 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `ArchiveBuilder::extract` now returns `ExtractionError::InvalidConfiguration` instead of `ExtractionError::SecurityViolation` when `archive_path` or `output_dir` are not set. The previous variant caused `error_code()` to return `"SECURITY_VIOLATION"` for what is a caller configuration mistake (#235).
 - Corrected the `Archive::open` doc-comment which incorrectly claimed the constructor validates file existence. The function is infallible; I/O errors surface on `extract()` (#237).
-
 - `create_tar_zst_with_progress` now calls `zstd::Encoder::finish()` explicitly and propagates any I/O error via `?`. Previously the encoder relied on `Drop` to call `try_finish()`, which silently discarded flush errors and could produce a truncated `.tar.zst` archive on disk-full or other I/O failure (#226).
+- CLI no longer emits `"HINT: Use --allow-symlinks"` when `--allow-symlinks` is already active and a symlink escape is blocked. The hint is now suppressed when the flag is set, since the escape is a genuine security violation rather than a configuration issue (#213).
 
 ### Removed
 
@@ -26,10 +26,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Refactored `TarArchive` internal extraction helpers: introduced a private `ExtractionContext<'_, '_>` struct that groups the six shared parameters (`validator`, `dest`, `report`, `copy_buffer`, `dir_cache`, `skip_duplicates`) previously threaded individually through `process_entry` (7 params), `extract_file` (7 params), and `create_hardlink` (5 params). Signatures now accept `ctx: &mut ExtractionContext<'_, '_>` instead (#222).
-
-### Fixed
-
-- CLI no longer emits `"HINT: Use --allow-symlinks"` when `--allow-symlinks` is already active and a symlink escape is blocked. The hint is now suppressed when the flag is set, since the escape is a genuine security violation rather than a configuration issue (#213).
 
 ### Breaking Changes
 

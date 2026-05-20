@@ -143,12 +143,14 @@ THEN stdout contains valid JSON with all report fields; stderr contains no progr
 | FR-063 | `extract` SHALL support: `--max-files N`, `--max-total-size SIZE` (K/M/G/T suffixes), `--max-file-size SIZE`, `--max-compression-ratio N`, `--allow-symlinks`, `--allow-hardlinks`, `--allow-solid-archives`, `--allow-world-writable`, `--preserve-permissions`, `--force`, `--atomic` | must |
 | FR-064 | `create` SHALL support: `-l/--compression-level 1-9`, `--follow-symlinks`, `--include-hidden`, `-x/--exclude PATTERN` (repeatable glob), `--strip-prefix PREFIX`, `-f/--force` | must |
 | FR-065 | `list` and `verify` SHALL support: `-l/--long`, `-H/--human-readable`, `--max-files N`, `--max-total-size SIZE`, `--allow-solid-archives` | must |
-| FR-066 | `completion` SHALL generate shell completion scripts for bash, zsh, fish, and PowerShell | should |
+| FR-066 | `completion <SHELL>` SHALL generate shell completion scripts for bash, zsh, fish, powershell, and elvish; output goes to stdout for piping into the appropriate completions directory | must |
 | FR-067 | WHEN extraction or creation fails, THE CLI SHALL exit with a non-zero exit code and print the error to stderr | must |
 | FR-068 | WHEN `--quiet` is set, THE CLI SHALL suppress progress bars and informational output; only errors go to stderr | must |
-| FR-069 | WHEN `--verbose` is set, THE CLI SHALL print per-entry details during extraction and creation | should |
+| FR-069 | WHEN `--verbose` is set, THE CLI SHALL print one line per extracted entry to stderr including entry type indicator (`f`/`d`/`l`), uncompressed size, and relative path; `--quiet` takes precedence when both are set | must |
 | FR-070 | THE CLI progress bar SHALL use `indicatif` in human mode and be suppressed in `--json` and `--quiet` modes | must |
 | FR-071 | Human-readable output SHALL use SI suffixes (K, M, G) for byte counts when `-H/--human-readable` is set | should |
+| FR-072 | WHEN `--allow-symlinks` is already active and a symlink escape is blocked, THE CLI SHALL NOT emit the `--allow-symlinks` hint; the hint is only relevant when symlinks are not yet enabled | must |
+| FR-073 | WHEN `--json` is used, the JSON `message` field for `PartialExtraction`, `PathTraversal`, `SymlinkEscape`, `HardlinkEscape`, `QuotaExceeded`, and `ZipBomb` errors SHALL NOT repeat inner error text that already appears in the structured fields | must |
 
 ## 4. Non-Functional Requirements
 
@@ -194,7 +196,7 @@ exarch list <ARCHIVE>
 exarch verify <ARCHIVE>
     [--max-files N] [--max-total-size SIZE] [--allow-solid-archives]
 
-exarch completion <SHELL>    # bash | zsh | fish | powershell | elvish
+exarch completion <SHELL>    # bash | zsh | fish | powershell | elvish  (output to stdout)
 ```
 
 ## 6. Edge Cases and Error Handling

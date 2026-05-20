@@ -18,7 +18,7 @@ related:
 # Feature: exarch System
 
 > [!info] Metadata
-> **Version**: 0.3.1
+> **Version**: 0.4.0
 > **MSRV**: Rust 1.93.0
 > **License**: MIT OR Apache-2.0
 > **Crates**: exarch-core, exarch-cli, exarch-python, exarch-node
@@ -181,7 +181,7 @@ THEN extraction runs on the libuv thread pool, files are extracted, and an Extra
 | FR-010 | WHEN a 7z archive is detected as solid and `allow_solid_archives` is false, THE SYSTEM SHALL reject extraction | must |
 | FR-011 | WHEN a 7z solid archive extraction is permitted, THE SYSTEM SHALL reject it if the total uncompressed size exceeds `max_solid_block_memory` | must |
 | FR-012 | WHEN the path depth of an entry exceeds `max_path_depth`, THE SYSTEM SHALL reject the entry | must |
-| FR-013 | WHEN `allowed_extensions` is non-empty and an entry's extension is not in the list, THE SYSTEM SHALL skip the entry | should |
+| FR-013 | WHEN `allowed_extensions` is non-empty and an entry's extension is not in the list, THE SYSTEM SHALL skip the entry and record it in `ExtractionReport::files_skipped` with a warning | must |
 
 ### 3.2 Format Support
 
@@ -198,11 +198,13 @@ THEN extraction runs on the libuv thread pool, files are extracted, and an Extra
 
 | ID | Requirement | Priority |
 |----|------------|----------|
-| FR-030 | `SecurityConfig` SHALL use a fluent builder API (`with_*` methods returning `Self`) and implement `Default` with secure deny-by-default settings | must |
-| FR-031 | `SecurityConfig::validate()` SHALL return an error if any limit field is zero or `max_compression_ratio` is not a positive finite number | must |
-| FR-032 | `CreationConfig` SHALL support: `follow_symlinks`, `include_hidden`, `max_file_size`, `exclude_patterns`, `strip_prefix`, `compression_level` (1-9), `preserve_permissions`, `format` override | must |
-| FR-033 | `ExtractionOptions` SHALL support: `atomic` (temp-dir + rename), `skip_duplicates` (default true) | must |
-| FR-034 | WHEN `ExtractionOptions::atomic` is true, THE SYSTEM SHALL extract to a temp dir in the same parent as the output directory and atomically rename on success; on failure it SHALL delete the temp dir | must |
+| FR-030 | `SecurityConfig` SHALL use a fluent builder API (15 `with_*` methods returning `Self`) and implement `Default` with secure deny-by-default settings | must |
+| FR-031 | `SecurityConfig` SHALL be annotated `#[non_exhaustive]`; external crates must use `Default::default()` or builder methods — struct literal construction is rejected at compile time | must |
+| FR-032 | `SecurityConfig::validate()` SHALL return an error if any limit field is zero (including `max_file_count` and `max_solid_block_memory`), `max_compression_ratio` is not a positive finite number, or any field contains an invalid value | must |
+| FR-033 | `CreationConfig` SHALL support: `follow_symlinks`, `include_hidden`, `max_file_size`, `exclude_patterns`, `strip_prefix`, `compression_level` (1-9), `preserve_permissions`, `format` override | must |
+| FR-034 | `ExtractionOptions` SHALL be annotated `#[non_exhaustive]` and SHALL support: `atomic` (temp-dir + rename), `skip_duplicates` (default true); fluent builders `with_atomic` and `with_skip_duplicates` are provided | must |
+| FR-035 | WHEN `ExtractionOptions::atomic` is true, THE SYSTEM SHALL extract to a temp dir in the same parent as the output directory and atomically rename on success; on failure it SHALL delete the temp dir | must |
+| FR-036 | `AllowedFeatures` SHALL be annotated `#[non_exhaustive]` so new flags do not break downstream struct literals | must |
 
 ### 3.4 Progress Reporting
 
@@ -230,7 +232,9 @@ THEN extraction runs on the libuv thread pool, files are extracted, and an Extra
 | FR-063 | `extract` SHALL support: `--max-files`, `--max-total-size` (with K/M/G/T suffixes), `--max-file-size`, `--max-compression-ratio`, `--allow-symlinks`, `--allow-hardlinks`, `--allow-solid-archives`, `--allow-world-writable`, `--preserve-permissions`, `--force`, `--atomic` | must |
 | FR-064 | `create` SHALL support: `--compression-level` (1-9), `--follow-symlinks`, `--include-hidden`, `--exclude` (repeatable glob), `--strip-prefix`, `--force` | must |
 | FR-065 | `list` and `verify` SHALL support: `--long`, `--human-readable`, `--max-files`, `--max-total-size`, `--allow-solid-archives` | must |
-| FR-066 | `completion` SHALL generate shell completion scripts for bash, zsh, fish, and PowerShell | should |
+| FR-066 | `completion <SHELL>` SHALL generate shell completion scripts for bash, zsh, fish, powershell, and elvish; output goes to stdout | must |
+| FR-067 | WHEN `--verbose` is set, THE CLI SHALL print one line per extracted entry to stderr including entry type, size, and path; `--quiet` takes precedence over `--verbose` | must |
+| FR-068 | WHEN `--allow-symlinks` is already active and a symlink escape is blocked, THE CLI SHALL NOT emit the `--allow-symlinks` hint (genuine security violation, not a configuration gap) | must |
 
 ### 3.7 Python Bindings
 
@@ -288,6 +292,9 @@ THEN extraction runs on the libuv thread pool, files are extracted, and an Extra
 | `VerificationReport` | Security and integrity check results | `status: VerificationStatus`, `issues: Vec<VerificationIssue>`, `total_entries` |
 | `VerificationIssue` | A single identified security or integrity issue | `severity: IssueSeverity`, `category: IssueCategory`, `message`, `path` |
 | `ArchiveType` | Enum of supported archive formats | `Tar`, `TarGz`, `TarBz2`, `TarXz`, `TarZst`, `Zip`, `SevenZ` |
+| `ArchiveFormat` | Trait for read-side format dispatch | Methods: `extract`, `list`, `verify`, `format_name` |
+| `FormatCreator` | Trait for write-side format dispatch | Methods: `create`, `format_name`; implemented by `TarCreator`, `TarGzCreator`, `TarBz2Creator`, `TarXzCreator`, `TarZstCreator`, `ZipCreator` via `creator_for_format()` helper |
+| `ExtractionContext` | Private TAR helper struct grouping six shared extraction parameters | `validator`, `dest`, `report`, `copy_buffer`, `dir_cache`, `skip_duplicates` |
 
 ## 6. Edge Cases and Error Handling
 
@@ -296,7 +303,7 @@ THEN extraction runs on the libuv thread pool, files are extracted, and an Extra
 | Archive path does not exist | `ExtractionError::Io` returned immediately |
 | Extension unrecognized or bare `.gz` without `.tar` stem | `ExtractionError::UnsupportedFormat` |
 | ZIP-family alias (`.apk`, `.whl`) extraction | Proceeds as ZIP |
-| ZIP-family alias creation without format override | `ExtractionError::InvalidArchive` with explanation |
+| ZIP-family alias creation without format override | `ExtractionError::InvalidArchive` with explanation naming the alias and referencing `CreationConfig::format` override |
 | 7z creation | `ExtractionError::UnsupportedFormat` |
 | Duplicate entry paths in archive | Logged as warning in `ExtractionReport.warnings` when `skip_duplicates` is true; error when false |
 | Atomic extraction to existing non-empty directory | `ExtractionError::OutputExists` on rename failure; temp dir cleaned up |
@@ -363,6 +370,12 @@ THEN extraction runs on the libuv thread pool, files are extracted, and an Extra
 - [NEEDS CLARIFICATION: Is there a plan to support 7z creation in a future version, or is read-only permanently by design?]
 - [NEEDS CLARIFICATION: Windows path separator handling in path validation — is there a CI job that runs the test suite on Windows?]
 - [NEEDS CLARIFICATION: Should `ProgressCallback` expose a cancellation mechanism (e.g., return bool to abort)?]
+
+> [!danger] Breaking Changes in v0.4.0
+> - **`Archive::open`** now returns `Self` (was `Result<Self>`). Remove `?` or `.unwrap()` at call sites (#243).
+> - **`SecurityConfig`**, **`AllowedFeatures`**, and **`ExtractionOptions`** are now `#[non_exhaustive]`. Struct literal construction no longer compiles; use `Default::default()` plus builder methods (#221).
+> - Internal modules `copy`, `io`, `test_utils` in `exarch-core` are now `pub(crate)`. External references to `exarch_core::copy`, `exarch_core::io`, or `exarch_core::test_utils` no longer compile (#173).
+> - `extract_archive_full` renamed to `extract_archive_with_options_and_progress` (#219).
 
 ## 10. See Also
 

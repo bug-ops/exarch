@@ -135,7 +135,7 @@ THEN extraction respects those settings
 | FR-072 | WHEN paths contain null bytes or exceed 4096 bytes, THE SYSTEM SHALL raise `ValueError` at the Python boundary before calling into Rust | must |
 | FR-073 | WHEN no Python progress callback is provided, THE SYSTEM SHALL release the GIL during extraction/creation | must |
 | FR-074 | WHEN a Python progress callback is provided, THE SYSTEM SHALL NOT release the GIL (callback requires GIL to invoke Python) | must |
-| FR-075 | Rust `ExtractionError` variants SHALL map to specific Python exception types registered on the module | must |
+| FR-075 | Rust `ExtractionError` variants SHALL map to specific Python exception types; `SourceNotFound`/`OutputExists` → `PyIOError`; `InvalidCompressionLevel`/`InvalidConfiguration` → `PyValueError`; `PartialExtraction` → `PartialExtractionError` with `files_extracted` and `bytes_written` attributes | must |
 | FR-076 | ALL Python exception types SHALL be subclasses of `ExarchError(Exception)` | must |
 | FR-077 | `PySecurityConfig` and `PyCreationConfig` SHALL expose the same fluent builder API as the Rust counterparts | must |
 | FR-078 | `PyExtractionReport`, `PyCreationReport`, `PyArchiveManifest`, and `PyVerificationReport` SHALL expose all fields as Python attributes | must |
@@ -175,7 +175,18 @@ ExarchError(Exception)
   InvalidArchiveError(ExarchError)
   SecurityViolationError(ExarchError)
   InvalidPermissionsError(ExarchError)
+  PartialExtractionError(ExarchError)   # exposes files_extracted, bytes_written
 ```
+
+> [!note] Error mapping corrections in v0.4.0 (#209)
+> - `SourceNotFound`, `SourceNotAccessible`, and `OutputExists` now raise
+>   `PyIOError` (was `InvalidArchiveError`).
+> - `InvalidCompressionLevel` and `InvalidConfiguration` now raise
+>   `PyValueError` (was `InvalidArchiveError`).
+> - `PartialExtractionError` now exposes `files_extracted` and `bytes_written`
+>   attributes for caller inspection (#210).
+> These corrections allow Python callers to distinguish I/O failures, validation
+> errors, and archive corruption with specific `except` clauses.
 
 ### Python API Surface
 
@@ -198,6 +209,9 @@ def verify_archive(archive_path, config=None) -> VerificationReport
 | Path exceeds 4096 bytes | `ValueError` at Python boundary |
 | Path is `pathlib.Path` | Converted to `str` via `.as_os_str()` before Rust call |
 | Rust returns `ExtractionError::PathTraversal` | `PathTraversalError` raised in Python |
+| Rust returns `ExtractionError::SourceNotFound` or `OutputExists` | `PyIOError` raised (not `InvalidArchiveError`) |
+| Rust returns `ExtractionError::InvalidCompressionLevel` or `InvalidConfiguration` | `PyValueError` raised (not `InvalidArchiveError`) |
+| Rust returns `ExtractionError::PartialExtraction` | `PartialExtractionError` raised; `files_extracted` and `bytes_written` attributes populated |
 | Progress callback raises Python exception | Exception propagates through `PyProgressAdapter`; extraction aborted |
 | GIL state with progress callback | GIL held throughout; no concurrent Python threads during extraction |
 

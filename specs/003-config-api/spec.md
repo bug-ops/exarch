@@ -116,15 +116,16 @@ THEN no files are present in the output directory; the temp dir is cleaned up
 
 | ID | Requirement | Priority |
 |----|------------|----------|
-| FR-030 | `SecurityConfig` SHALL use a fluent builder API (`with_*` methods returning `Self`) and implement `Default` with secure deny-by-default settings | must |
-| FR-031 | `SecurityConfig` SHALL be annotated `#[non_exhaustive]` so new fields do not constitute a breaking change for struct literal construction | must |
-| FR-032 | `SecurityConfig::validate()` SHALL return an error if any limit field is zero or `max_compression_ratio` is not a positive finite number | must |
+| FR-030 | `SecurityConfig` SHALL expose 15 fluent builder methods: `with_max_file_size`, `with_max_total_size`, `with_max_compression_ratio`, `with_max_file_count`, `with_max_path_depth`, `with_allowed`, `with_allow_symlinks`, `with_allow_hardlinks`, `with_allow_absolute_paths`, `with_allow_world_writable`, `with_preserve_permissions`, `with_allowed_extensions`, `with_banned_path_components`, `with_allow_solid_archives`, `with_max_solid_block_memory`; each returns `Self` | must |
+| FR-031 | `SecurityConfig`, `AllowedFeatures`, and `ExtractionOptions` SHALL be annotated `#[non_exhaustive]`; external crates must use `Default::default()` plus builder methods — struct literal construction is a compile error | must |
+| FR-032 | `SecurityConfig::validate()` SHALL return `InvalidConfiguration` if: any numeric limit is zero (`max_file_size`, `max_total_size`, `max_file_count`, `max_path_depth`, `max_solid_block_memory`), or `max_compression_ratio` is zero, negative, or NaN | must |
 | FR-033 | `CreationConfig` SHALL support: `follow_symlinks`, `include_hidden`, `max_file_size`, `exclude_patterns` (glob), `strip_prefix`, `compression_level` (1–9), `preserve_permissions`, `format` override | must |
-| FR-034 | `ExtractionOptions` SHALL support: `atomic` (temp-dir + rename), `skip_duplicates` (default true) | must |
+| FR-034 | `ExtractionOptions` SHALL support: `atomic` (temp-dir + rename) via `with_atomic`, `skip_duplicates` (default true) via `with_skip_duplicates` | must |
 | FR-035 | WHEN `ExtractionOptions::atomic` is true, THE SYSTEM SHALL extract to a temp dir in the same parent as the output directory and atomically rename on success | must |
 | FR-036 | WHEN atomic extraction fails, THE SYSTEM SHALL delete the temp dir before returning the error | must |
 | FR-037 | All three config types SHALL implement `Default` with documented defaults | must |
 | FR-038 | `AllowedFeatures` SHALL be a separate struct with boolean flags: `symlinks`, `hardlinks`, `absolute_paths`, `world_writable`; all default to false | must |
+| FR-039 | `CreationConfig::validate()` SHALL be called inside `create_archive_with_progress` before any I/O; invalid configurations SHALL be rejected early | must |
 
 ## 4. Non-Functional Requirements
 
@@ -167,7 +168,7 @@ THEN no files are present in the output directory; the temp dir is cleaned up
 
 | Scenario | Expected Behavior |
 |----------|-------------------|
-| `SecurityConfig` with zero `max_file_size` | `validate()` returns `InvalidConfiguration` |
+| `SecurityConfig` with zero `max_file_size`, `max_total_size`, `max_path_depth`, `max_file_count`, or `max_solid_block_memory` | `validate()` returns `InvalidConfiguration` |
 | `SecurityConfig` with `max_compression_ratio` of 0.0, negative, or NaN | `validate()` returns `InvalidConfiguration` |
 | `compression_level` outside 1–9 | `CreationConfig` builder panics or returns error at construction |
 | `atomic = true` and output on a different filesystem than temp dir | `fs::rename` may fail; caller receives `ExtractionError::Io` |

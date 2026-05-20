@@ -140,9 +140,11 @@ fn verify_entry(
         },
     };
 
-    // Path validation
-    if let Err(e) = validate_path(&entry.path, dest, config) {
-        issues.push(VerificationIssue::from_error(&e, Some(entry.path.clone())));
+    // Path validation — result cached to avoid repeated syscalls for
+    // symlink/hardlink checks
+    let path_result = validate_path(&entry.path, dest, config);
+    if let Err(ref e) = path_result {
+        issues.push(VerificationIssue::from_error(e, Some(entry.path.clone())));
     }
 
     // Quota validation using record_file (combines all checks)
@@ -158,18 +160,16 @@ fn verify_entry(
     }
 
     // Symlink validation
-    if let EntryType::Symlink { ref target } = entry_type {
-        // Safe path for link
-        if let Ok(safe_link_path) = validate_path(&entry.path, dest, config)
-            && let Err(e) = validate_symlink(&safe_link_path, target, dest, config)
-        {
-            issues.push(VerificationIssue::from_error(&e, Some(entry.path.clone())));
-        }
+    if let EntryType::Symlink { ref target } = entry_type
+        && let Ok(ref safe_link_path) = path_result
+        && let Err(e) = validate_symlink(safe_link_path, target, dest, config)
+    {
+        issues.push(VerificationIssue::from_error(&e, Some(entry.path.clone())));
     }
 
     // Hardlink validation (similar to symlink)
     if let EntryType::Hardlink { ref target } = entry_type
-        && let Ok(safe_link_path) = validate_path(&entry.path, dest, config)
+        && let Ok(ref safe_link_path) = path_result
         && let Err(e) = validate_path(target, dest, config)
     {
         issues.push(VerificationIssue {

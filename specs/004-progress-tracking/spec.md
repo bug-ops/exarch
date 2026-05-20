@@ -115,7 +115,7 @@ THEN on_entry_start and on_entry_complete are called for each source file added
 | FR-041 | THE SYSTEM SHALL provide a `NoopProgress` implementation that satisfies `ProgressCallback` with no runtime overhead | must |
 | FR-042 | `on_complete` SHALL NOT be called if extraction fails or is partial | must |
 | FR-043 | `ProgressCallback` SHALL be `Send` so it can be used across thread boundaries (Node.js, Python) | must |
-| FR-044 | Format handlers SHALL accept `&mut dyn ProgressCallback` and call it consistently for each entry | must |
+| FR-044 | Format handlers SHALL accept `&mut dyn ProgressCallback` and call it consistently for each entry; callbacks SHALL fire per-entry interleaved with actual I/O (not batched before or after) | must |
 | FR-045 | `on_bytes_written` SHALL be called with the number of bytes written in the current chunk, not a cumulative total | must |
 | FR-046 | `on_entry_start` SHALL receive the total number of entries (if known) and the current entry index | must |
 
@@ -144,8 +144,18 @@ ProgressCallback: Send
   on_entry_start(&mut self, path: &Path, total: usize, current: usize)
   on_bytes_written(&mut self, bytes: u64)
   on_entry_complete(&mut self, path: &Path)
-  on_complete(&mut self)  // NOT called on failure
+  on_complete(&mut self)  // NOT called on failure; called only on full success
 ```
+
+> [!note] v0.4.0 clarification
+> `on_complete` is called only on successful completion. Implementors must not
+> use it for cleanup — use the `Err` return path from `extract_archive` instead.
+
+> [!note] ExtractionContext
+> `ExtractionContext<'_, '_>` is a private TAR helper struct introduced in v0.4.0
+> that groups `validator`, `dest`, `report`, `copy_buffer`, `dir_cache`, and
+> `skip_duplicates` to reduce helper function arity. It is not part of the public
+> API but is documented here because `ProgressCallback` is passed through it.
 
 ## 6. Edge Cases and Error Handling
 
@@ -162,9 +172,9 @@ ProgressCallback: Send
 
 | ID | Metric | Target |
 |----|--------|--------|
-| SC-001 | `on_complete` not called on failure | Regression test (see issue #170) |
+| SC-001 | `on_complete` not called on failure | Regression test (issue #170, fixed in v0.4.0) |
 | SC-002 | Progress overhead vs no-progress | < 5% throughput penalty (measured in bench) |
-| SC-003 | All format handlers call progress callbacks | Integration test with a counting progress impl |
+| SC-003 | All format handlers (TAR, ZIP, 7z) call progress callbacks per-entry | Fixed in v0.4.0 (#170, #191) |
 
 ## 8. Agent Boundaries
 

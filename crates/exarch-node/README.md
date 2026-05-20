@@ -167,11 +167,13 @@ Builder-style security configuration.
 
 ```typescript
 const config = new SecurityConfig()
-  .maxFileSize(bytes)              // Max size per file
-  .maxTotalSize(bytes)             // Max total extraction size
-  .maxFileCount(count)             // Max number of files
-  .maxCompressionRatio(n)          // Max compression ratio (zip bomb detection)
-  .setAllowSolidArchives(true);    // Allow solid 7z archives (default: false)
+  .maxFileSize(bytes)                        // Max size per file
+  .maxTotalSize(bytes)                       // Max total extraction size
+  .maxFileCount(count)                       // Max number of files
+  .maxCompressionRatio(n)                    // Max compression ratio (zip bomb detection)
+  .allowedExtensions([".txt", ".md"])        // Restrict to a set of extensions
+  .bannedPathComponents(["__MACOSX"])        // Skip these path components
+  .setAllowSolidArchives(true);              // Allow solid 7z archives (default: false)
 ```
 
 ## Security Features
@@ -202,6 +204,8 @@ The library provides built-in protection against:
 | 7z | `.7z` | ✅ | — | ✅ | ✅ |
 
 **Note:** 7z creation is not yet supported. Solid and encrypted 7z archives are rejected for security reasons. Unix symlinks inside 7z archives are reported as regular files (sevenz-rust2 API limitation).
+
+**Note:** Since v0.4.0, partial extraction failures return the `ExtractionReport` accumulated up to the failure point without the inner error text being duplicated, and the report is now correctly delivered across the FFI boundary instead of being dropped early.
 
 ## Comparison with tar-fs
 

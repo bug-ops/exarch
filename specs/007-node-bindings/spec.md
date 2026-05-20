@@ -129,7 +129,7 @@ THEN extraction respects those settings
 | FR-080 | THE SYSTEM SHALL expose async Node.js functions returning Promises: `extractArchive`, `createArchive`, `listArchive`, `verifyArchive` | must |
 | FR-081 | ALL async operations SHALL run on the libuv thread pool, not the main event loop thread | must |
 | FR-082 | WHEN paths contain null bytes or exceed 4096 bytes, THE SYSTEM SHALL throw a synchronous JavaScript Error before spawning a thread | must |
-| FR-083 | Rust `ExtractionError` variants SHALL map to named JavaScript Error types | must |
+| FR-083 | Rust `ExtractionError` variants SHALL map to named JavaScript Error types; `PartialExtraction` SHALL include `filesExtracted` and `bytesWritten` in the error message for caller inspection | must |
 | FR-084 | `SecurityConfig` and `CreationConfig` SHALL be exposed as JavaScript classes with fluent builder methods | must |
 | FR-085 | `ExtractionReport`, `CreationReport`, `ArchiveManifest`, and `VerificationReport` SHALL be exposed as JavaScript objects with typed fields | must |
 | FR-086 | napi-rs SHALL generate TypeScript `.d.ts` files for all exported functions and classes | must |
@@ -214,6 +214,14 @@ class CreationConfig {
 | `UnsupportedFormat` | `UnsupportedFormatError` |
 | `InvalidArchive` | `InvalidArchiveError` |
 | `Io` | `IoError` |
+| `PartialExtraction` | `PartialExtractionError`; error message includes `filesExtracted` and `bytesWritten` fields |
+
+> [!note] PartialExtraction fix in v0.4.0 (#210)
+> Prior to v0.4.0, the Node.js `PartialExtraction` error message did not include
+> the partial report data. In v0.4.0 the error message includes `filesExtracted`
+> and `bytesWritten` so callers can inspect how much was extracted before the
+> failure. The 7z handler was also fixed to populate a non-empty report when at
+> least one entry was written before the failure (#207, #216).
 
 ## 6. Edge Cases and Error Handling
 
@@ -223,6 +231,7 @@ class CreationConfig {
 | Path contains null byte | Synchronous `Error` thrown before Promise creation |
 | Path exceeds 4096 bytes | Synchronous `Error` thrown before Promise creation |
 | Rust returns `ExtractionError::PathTraversal` | Promise rejects with `PathTraversalError` |
+| Rust returns `ExtractionError::PartialExtraction` | Promise rejects with `PartialExtractionError`; message includes `filesExtracted` and `bytesWritten` |
 | Thread pool exhausted | Promise eventually resolves when thread becomes available; no timeout |
 | `sources` array is empty for `createArchive` | [NEEDS CLARIFICATION: reject immediately or produce empty archive?] |
 

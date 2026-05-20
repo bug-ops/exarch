@@ -7,7 +7,7 @@ tags:
   - security
   - rust
 created: 2026-05-20
-status: draft
+status: done
 related:
   - "[[spec]]"
   - "[[001-exarch-system/plan]]"
@@ -21,16 +21,16 @@ related:
 > **Plan**: [[001-exarch-system/plan]]
 > **Total tasks**: 2
 
-> [!warning] Scope
-> The security pipeline is substantially implemented. The only open gap is
-> FR-011 / FR-013: `allowed_extensions` is defined in `SecurityConfig` but
-> the `EntryValidator` never reads it, so extension filtering is silently
-> skipped during extraction. GitHub issue #230 tracks this.
+> [!note] Completed in v0.4.0
+> Both open tasks were resolved in v0.4.0. `allowed_extensions` filtering
+> (FR-011) is now enforced by `EntryValidator` across TAR, ZIP, and 7z
+> handlers (#230, #242). Skipped entries are recorded in
+> `ExtractionReport::files_skipped` with a warning.
 
 ## Progress
 
-- [ ] T001: Enforce `allowed_extensions` in `EntryValidator`
-- [ ] T002: Add integration tests for extension filtering
+- [x] T001: Enforce `allowed_extensions` in `EntryValidator`
+- [x] T002: Add integration tests for extension filtering
 
 ---
 

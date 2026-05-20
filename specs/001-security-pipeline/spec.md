@@ -146,7 +146,7 @@ THEN the written file has those bits cleared; ValidatedEntry.mode reflects the s
 | FR-008 | WHEN a hardlink entry is encountered and `allowed.hardlinks` is true, THE SYSTEM SHALL validate that the hardlink target path is within `output_dir` and references a path previously seen in this archive | must |
 | FR-009 | WHEN extracting files on Unix, THE SYSTEM SHALL strip setuid (0o4000) and setgid (0o2000) bits from all file permissions | must |
 | FR-010 | WHEN the path depth of an entry exceeds `max_path_depth`, THE SYSTEM SHALL reject the entry with `ExtractionError::PathTraversal` | must |
-| FR-011 | WHEN `allowed_extensions` is non-empty and an entry's extension is not in the list, THE SYSTEM SHALL skip the entry | should |
+| FR-011 | WHEN `allowed_extensions` is non-empty and an entry's extension is not in the list, THE SYSTEM SHALL skip the entry and record it in `ExtractionReport::files_skipped` with a warning | must |
 | FR-012 | WHEN the file count across all entries exceeds `max_file_count`, THE SYSTEM SHALL reject further entries with `QuotaExceeded { resource: FileCount }` | must |
 | FR-013 | WHEN `allowed.world_writable` is false and a file entry has world-writable permissions (`mode & 0o002 != 0`), THE SYSTEM SHALL strip that bit or reject the entry | must |
 
@@ -194,7 +194,8 @@ THEN the written file has those bits cleared; ValidatedEntry.mode reflects the s
 | Hardlink with `allowed.hardlinks = false` | Entry skipped |
 | Hardlink to a path not previously seen | `ExtractionError::HardlinkEscape` |
 | setuid/setgid bits on Unix | Stripped silently; `ValidatedEntry.mode` reflects sanitized value |
-| `SecurityConfig` with zero limit | `SecurityConfig::validate()` returns `InvalidConfiguration` before extraction begins |
+| `SecurityConfig` with zero `max_file_size`, `max_total_size`, `max_path_depth`, `max_file_count`, or `max_solid_block_memory` | `SecurityConfig::validate()` returns `InvalidConfiguration` before extraction begins |
+| `SecurityConfig` with `max_compression_ratio` of 0.0, negative, or NaN | `SecurityConfig::validate()` returns `InvalidConfiguration` before extraction begins |
 
 ## 7. Success Criteria
 
@@ -230,7 +231,9 @@ THEN the written file has those bits cleared; ValidatedEntry.mode reflects the s
 
 - [NEEDS CLARIFICATION: Should `ProgressCallback` expose a cancellation mechanism (return bool) so callers can abort mid-stream from the security callback?]
 - [NEEDS CLARIFICATION: Windows path separator handling (`\` vs `/`) — is there a CI job covering Windows path validation edge cases?]
-- [NEEDS CLARIFICATION: Should world-writable entries be stripped or rejected? Current behavior unclear.]
+
+> [!note] Resolved in v0.4.0
+> World-writable entries: behavior clarified — the `allow_world_writable` bit is stripped (not rejection), matching setuid/setgid treatment. `allowed_extensions` filtering (FR-011) is now fully implemented across TAR, ZIP, and 7z in v0.4.0 (#230, #242). `SecurityConfig::validate()` now also rejects `max_file_count == 0` and `max_solid_block_memory == 0` in addition to the previously documented zero-limit fields (#181).
 
 ## 10. See Also
 

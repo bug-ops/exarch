@@ -79,12 +79,13 @@ exarch [OPTIONS] <COMMAND>
 | `create` | Create a new archive |
 | `list` | List archive contents |
 | `verify` | Verify archive integrity |
+| `completion` | Generate shell completion script (bash, zsh, fish, powershell, elvish) |
 
 ### Global Options
 
 | Option | Short | Description |
 |--------|-------|-------------|
-| `--verbose` | `-v` | Enable verbose output |
+| `--verbose` | `-v` | Print one line per entry to stderr (name, size, type). Overridden by `--quiet`. |
 | `--quiet` | `-q` | Suppress non-error output |
 | `--json` | `-j` | Output results in JSON format |
 | `--help` | `-h` | Print help |
@@ -126,6 +127,7 @@ exarch extract --allow-symlinks trusted-source.tar
 | `--max-total-size` | - | Maximum total extracted size (supports K/M/G/T suffixes) |
 | `--max-file-size` | - | Maximum single file size |
 | `--max-compression-ratio` | 100 | Maximum compression ratio (zip bomb protection) |
+| `--allowed-extensions` | — | Extract only entries whose extension is in the allowlist (repeatable; comma-separated values accepted; leading dots optional) |
 | `--allow-symlinks` | false | Allow symlinks (within extraction directory) |
 | `--allow-hardlinks` | false | Allow hardlinks (within extraction directory) |
 | `--preserve-permissions` | false | Preserve file permissions from archive |
@@ -179,6 +181,30 @@ exarch create -f backup.tar.gz ./src
 
 > [!TIP]
 > Archive format is detected from the output file extension. Supported formats: `.tar`, `.tar.gz`, `.tar.bz2`, `.tar.xz`, `.tar.zst`, `.zip`
+
+> [!CAUTION]
+> Since v0.4.0, `create` rejects ZIP-family alias extensions (`.apk`, `.jar`, `.whl`, `.epub`, `.war`, `.ear`, `.aab`, `.ipa`, `.appx`, `.msix`, `.vsix`, `.nbm`) when format inference is left to the file extension. These containers require extra structure (signing, manifests, ordering) that exarch doesn't produce.
+
+## Shell Completion
+
+Generate completion scripts for your shell:
+
+```bash
+# bash
+exarch completion bash > /usr/local/etc/bash_completion.d/exarch
+
+# zsh
+exarch completion zsh > ${fpath[1]}/_exarch
+
+# fish
+exarch completion fish > ~/.config/fish/completions/exarch.fish
+
+# PowerShell
+exarch completion powershell | Out-String | Invoke-Expression
+
+# elvish
+exarch completion elvish > ~/.config/elvish/lib/exarch.elv
+```
 
 ## Output Modes
 
@@ -262,7 +288,7 @@ cargo clippy -p exarch-cli -- -D warnings
 - [x] **Phase 1**: Foundation - CLI parsing, error handling, output formatting
 - [x] **Phase 2**: Archive creation functionality
 - [x] **Phase 3**: List and verify commands
-- [x] **Phase 4**: Progress bars, shell completions
+- [x] **Phase 4**: Progress bars, shell completions, per-entry verbose output
 - [ ] **Phase 5**: Distribution (Homebrew, apt, releases)
 
 ## Related Crates

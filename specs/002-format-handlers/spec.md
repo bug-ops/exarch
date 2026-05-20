@@ -22,6 +22,7 @@ related:
 > [!info] Metadata
 > **Subsystem**: exarch-core / formats
 > **MSRV**: Rust 1.93.0
+> **zip dependency**: 9.0.0-pre2
 > **Source**: extracted from [[001-exarch-system/spec]]
 
 ## 1. Overview
@@ -151,6 +152,8 @@ THEN ExtractionError::UnsupportedFormat is returned immediately
 | FR-027 | WHEN a 7z solid archive extraction is permitted, THE SYSTEM SHALL reject it if total uncompressed size exceeds `max_solid_block_memory` | must |
 | FR-028 | Every format handler SHALL route all entries through `EntryValidator` before writing to disk | must |
 | FR-029 | WHEN listing or verifying an archive, THE SYSTEM SHALL NOT write any files to disk | must |
+| FR-030 | WHEN `allowed_extensions` in `SecurityConfig` is non-empty, ALL three format handlers (TAR, ZIP, 7z) SHALL skip entries whose extension is not in the allowlist and record them in `ExtractionReport::files_skipped` | must |
+| FR-031 | `ArchiveFormat::extract` SHALL accept and invoke a `ProgressCallback` for every entry; ZIP-family alias creation without an explicit `CreationConfig::format` override SHALL be rejected with `ExtractionError::InvalidArchive` naming the alias | must |
 
 ## 4. Non-Functional Requirements
 
@@ -168,10 +171,11 @@ THEN ExtractionError::UnsupportedFormat is returned immediately
 |--------|-------------|----------------|
 | `ArchiveType` | Enum of supported archive formats | `Tar`, `TarGz`, `TarBz2`, `TarXz`, `TarZst`, `Zip`, `SevenZ` |
 | `ArchiveFormat` | Trait implemented by every format handler | Methods: `extract`, `list`, `verify`, `format_name` |
-| `FormatCreator` | Trait for archive creation; implemented by TAR variants and ZIP | Methods: `create`, `format_name` |
-| `TarArchive<R>` | TAR handler generic over decompressor type | Implements `ArchiveFormat` |
-| `ZipArchive` | ZIP handler | Implements `ArchiveFormat` and `FormatCreator` |
-| `SevenZArchive` | 7z handler (read-only) | Implements `ArchiveFormat` only |
+| `FormatCreator` | Trait for archive creation; implemented by six unit structs | `TarCreator`, `TarGzCreator`, `TarBz2Creator`, `TarXzCreator`, `TarZstCreator`, `ZipCreator`; dispatched via `creator_for_format()` |
+| `TarArchive<R>` | TAR handler generic over decompressor type | Implements `ArchiveFormat`; `list()` consumes the internal reader (TAR is forward-only); do not call `extract()` on the same instance |
+| `ZipArchive` | ZIP handler | Implements `ArchiveFormat` and `FormatCreator`; `ZipFile::name()` returns `Result<Cow<str>, ZipError>` in zip 9.x |
+| `SevenZArchive` | 7z handler (read-only) | Implements `ArchiveFormat` only; fires `on_entry_start`/`on_entry_complete` per-entry, interleaved with I/O |
+| `ExtractionContext<'_, '_>` | Private TAR helper struct reducing extraction helper arity | Groups `validator`, `dest`, `report`, `copy_buffer`, `dir_cache`, `skip_duplicates` |
 
 ### ArchiveType Detection Rules
 
@@ -203,6 +207,20 @@ FormatCreator:
   create(output, sources, config, progress) -> Result<CreationReport>
   format_name() -> &'static str
 ```
+
+> [!note] zip dependency
+> Upgraded from 8.6.0 to 9.0.0-pre2 in v0.4.0. `ZipFile::name()` now returns
+> `Result<Cow<str>, ZipError>` instead of `&str`; all call sites propagate the
+> new error via `?`.
+
+> [!note] TarArchive forward-only constraint
+> `TarArchive::list()` consumes the internal reader because TAR is forward-only.
+> Callers must open a fresh `TarArchive` instance to call `extract()` after `list()`.
+
+> [!note] 7z progress ordering fixed in v0.4.0
+> Prior to v0.4.0, `SevenZArchive::extract` batched all `on_entry_start` calls
+> before extraction and all `on_entry_complete` calls after. In v0.4.0, callbacks
+> fire per-entry, interleaved with actual I/O (#191).
 
 ## 6. Edge Cases and Error Handling
 

@@ -7,7 +7,7 @@ tags:
   - cli
   - rust
 created: 2026-05-20
-status: draft
+status: done
 related:
   - "[[spec]]"
   - "[[001-exarch-system/plan]]"
@@ -21,27 +21,22 @@ related:
 > **Plan**: [[001-exarch-system/plan]]
 > **Total tasks**: 2
 
-> [!warning] Scope
-> The core CLI (all subcommands, JSON output, progress bar, exit codes) is
-> fully implemented. Two `should`-priority requirements remain open:
+> [!note] Completed in v0.4.0
+> Both open CLI tasks were resolved in v0.4.0:
 >
-> - FR-066: `completion` subcommand — the command exists and generates valid
->   scripts, but the `CompletionArgs` struct does not appear in the CLI help
->   text with full shell option descriptions and the `--json` flag is accepted
->   but has no effect on completion output (correct behaviour, but untested).
->   Issue #232 tracks adding a CLI integration test that exercises the
->   `completion` subcommand end-to-end.
+> - **T001 (FR-066 / #232)**: `exarch completion <shell>` is fully implemented
+>   and tested for bash, zsh, fish, powershell, and elvish. Output goes to
+>   stdout for piping. Integration test added.
 >
-> - FR-069: `--verbose` per-entry output — the `verbose` flag is parsed and
->   stored in `HumanFormatter`, but the only verbose-gated output is two extra
->   summary lines after extraction (symlink count and duration). Per-entry
->   details (path, size, type) during active extraction or creation are not
->   printed. Issue #233 tracks implementing the per-entry verbose path.
+> - **T002 (FR-069 / #233)**: `--verbose` now prints one line per extracted
+>   entry to stderr including entry type (`f`/`d`/`l`), uncompressed size, and
+>   relative path. `--quiet` takes precedence when both flags are set. Verbose
+>   lines do not appear in `--json` mode.
 
 ## Progress
 
-- [ ] T001: Integration test for `completion` subcommand
-- [ ] T002: Per-entry verbose output during extraction and creation
+- [x] T001: Integration test for `completion` subcommand
+- [x] T002: Per-entry verbose output during extraction and creation
 
 ---
 
@@ -55,51 +50,47 @@ graph TD
 
 ---
 
-### T001: Integration test for `completion` subcommand
+### T001: Integration test for `completion` subcommand (done)
 
-**Context**: The `completion` command is implemented in
-`crates/exarch-cli/src/commands/completion.rs` with a unit test that verifies
-no panic occurs. There is no integration test confirming that the generated
-script is non-empty, written to stdout, and produces no stderr output. FR-066
-acceptance criteria require a verifiable completion script for each shell.
+**Context**: `exarch completion <shell>` generates completion scripts for bash,
+zsh, fish, powershell, and elvish. Output goes to stdout. Integration tests
+verify non-empty output containing `"exarch"` and zero stderr for each shell.
 **Spec reference**: [[spec#FR-066]], [[spec#US-005]]
-**GitHub issue**: #232
+**GitHub issue**: #232 (closed in v0.4.0)
 **Acceptance criteria**:
-- [ ] Integration test runs `exarch completion bash` and asserts stdout is non-empty and contains the string `"exarch"`
-- [ ] Same check for `zsh`, `fish`, and `powershell`
-- [ ] Test asserts stderr is empty and exit code is 0
-- [ ] Test for an unsupported shell name asserts exit code is non-zero
-- [ ] Tests pass under `cargo nextest run -p exarch-cli` (or the workspace nextest invocation)
+- [x] Integration test runs `exarch completion bash` and asserts stdout is non-empty and contains the string `"exarch"`
+- [x] Same check for `zsh`, `fish`, `powershell`, and `elvish`
+- [x] Test asserts stderr is empty and exit code is 0
+- [x] Test for an unsupported shell name asserts exit code is non-zero
+- [x] Tests pass under `cargo nextest run -p exarch-cli`
 **Dependencies**: none
 **Files**:
-- `crates/exarch-cli/tests/` — new integration test file `completion.rs` or extend existing CLI tests
+- `crates/exarch-cli/tests/` — `completion.rs` integration test
 **Complexity**: low
 
 ---
 
-### T002: Per-entry verbose output during extraction and creation
+### T002: Per-entry verbose output during extraction and creation (done)
 
-**Context**: FR-069 states: "WHEN `--verbose` is set, THE CLI SHALL print
-per-entry details during extraction and creation." Currently `HumanFormatter`
-gates only two extra lines on `self.verbose` (symlink count and duration in the
-post-extraction summary). No per-entry output is emitted during the extraction
-loop. The `ProgressCallback` path is the right place to hook verbose per-entry
-logging so it interleaves with the progress bar correctly.
+**Context**: `--verbose` now prints one line per extracted entry to stderr.
+Each line includes the entry type indicator (`f`/`d`/`l`), uncompressed size,
+and relative path. `--quiet` takes precedence. Verbose output is suppressed
+in `--json` mode.
 **Spec reference**: [[spec#FR-069]], [[spec#US-006]]
-**GitHub issue**: #233
+**GitHub issue**: #233 (closed in v0.4.0)
 **Acceptance criteria**:
-- [ ] When `--verbose` is active, each extracted entry path is printed to stderr during extraction (one line per entry)
-- [ ] Each verbose line includes: entry type indicator (`f`/`d`/`l`), uncompressed size, and relative path
-- [ ] Verbose lines go to stderr (not stdout), preserving `--json` stdout cleanliness
-- [ ] Verbose lines do not appear when `--quiet` or `--json` is set
-- [ ] During `create`, each added file path is printed to stderr when `--verbose` is set
-- [ ] Integration test: run `exarch extract <archive> --verbose 2>verbose.log` and assert `verbose.log` contains all entry paths
-- [ ] No changes to `ExtractionReport`, `CreationReport`, or `ProgressCallback` trait signatures
+- [x] When `--verbose` is active, each extracted entry path is printed to stderr during extraction (one line per entry)
+- [x] Each verbose line includes: entry type indicator (`f`/`d`/`l`), uncompressed size, and relative path
+- [x] Verbose lines go to stderr (not stdout), preserving `--json` stdout cleanliness
+- [x] Verbose lines do not appear when `--quiet` or `--json` is set
+- [x] During `create`, each added file path is printed to stderr when `--verbose` is set
+- [x] Integration test verifies verbose log contains all entry paths
+- [x] No changes to `ExtractionReport`, `CreationReport`, or `ProgressCallback` trait signatures
 **Dependencies**: none
 **Files**:
-- `crates/exarch-cli/src/progress.rs` — `CliProgress` implementation; add per-entry callback
-- `crates/exarch-cli/src/output/human.rs` — add `print_verbose_entry()` helper if needed
-- `crates/exarch-cli/tests/` — integration test for verbose output
+- `crates/exarch-cli/src/progress.rs` — `CliProgress` per-entry verbose callback
+- `crates/exarch-cli/src/output/human.rs` — `print_verbose_entry()` helper
+- `crates/exarch-cli/tests/` — verbose output integration test
 **Complexity**: medium
 
 ---

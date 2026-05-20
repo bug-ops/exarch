@@ -48,7 +48,7 @@ impl CopyBuffer {
     #[inline]
     #[must_use]
     #[allow(dead_code, clippy::unused_self)]
-    pub(crate) fn size(&self) -> usize {
+    pub fn size(&self) -> usize {
         COPY_BUFFER_SIZE
     }
 }

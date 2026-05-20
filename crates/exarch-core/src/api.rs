@@ -101,10 +101,10 @@ pub fn extract_archive_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
     progress: &mut dyn ProgressCallback,
 ) -> Result<ExtractionReport> {
     let options = ExtractionOptions::default();
-    extract_archive_with_progress_and_options(archive_path, output_dir, config, &options, progress)
+    extract_impl(archive_path, output_dir, config, &options, progress)
 }
 
-fn extract_archive_with_progress_and_options<P: AsRef<Path>, Q: AsRef<Path>>(
+fn extract_impl<P: AsRef<Path>, Q: AsRef<Path>>(
     archive_path: P,
     output_dir: Q,
     config: &SecurityConfig,
@@ -152,7 +152,7 @@ fn extract_archive_with_progress_and_options<P: AsRef<Path>, Q: AsRef<Path>>(
 /// - Security validation fails
 /// - I/O operations fail
 /// - Atomic temp dir creation or rename fails
-pub fn extract_archive_full<P: AsRef<Path>, Q: AsRef<Path>>(
+pub fn extract_archive_with_options_and_progress<P: AsRef<Path>, Q: AsRef<Path>>(
     archive_path: P,
     output_dir: Q,
     config: &SecurityConfig,
@@ -162,19 +162,14 @@ pub fn extract_archive_full<P: AsRef<Path>, Q: AsRef<Path>>(
     if options.atomic {
         extract_atomic(archive_path, output_dir, config, options, progress)
     } else {
-        extract_archive_with_progress_and_options(
-            archive_path,
-            output_dir,
-            config,
-            options,
-            progress,
-        )
+        extract_impl(archive_path, output_dir, config, options, progress)
     }
 }
 
 /// Extracts an archive with extraction options (no progress reporting).
 ///
-/// Same as `extract_archive_full` but uses a no-op progress callback.
+/// Same as `extract_archive_with_options_and_progress` but uses a no-op
+/// progress callback.
 ///
 /// # Errors
 ///
@@ -191,7 +186,7 @@ pub fn extract_archive_with_options<P: AsRef<Path>, Q: AsRef<Path>>(
     options: &ExtractionOptions,
 ) -> Result<ExtractionReport> {
     let mut noop = NoopProgress;
-    extract_archive_full(archive_path, output_dir, config, options, &mut noop)
+    extract_archive_with_options_and_progress(archive_path, output_dir, config, options, &mut noop)
 }
 
 fn extract_atomic<P: AsRef<Path>, Q: AsRef<Path>>(
@@ -231,13 +226,7 @@ fn extract_atomic<P: AsRef<Path>, Q: AsRef<Path>>(
         ))
     })?;
 
-    let result = extract_archive_with_progress_and_options(
-        archive_path,
-        temp_dir.path(),
-        config,
-        options,
-        progress,
-    );
+    let result = extract_impl(archive_path, temp_dir.path(), config, options, progress);
 
     match result {
         Ok(report) => {
@@ -504,26 +493,21 @@ pub fn create_archive_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
     // Determine format from extension or config
     let format = determine_creation_format(output, config)?;
 
-    // Dispatch to format-specific creator with progress
+    let source_refs: Vec<&Path> = sources.iter().map(AsRef::as_ref).collect();
+    let creator = creator_for_format(format)?;
+    creator.create(output, &source_refs, config, progress)
+}
+
+fn creator_for_format(
+    format: ArchiveType,
+) -> Result<Box<dyn crate::formats::traits::FormatCreator>> {
     match format {
-        ArchiveType::Tar => {
-            crate::creation::tar::create_tar_with_progress(output, sources, config, progress)
-        }
-        ArchiveType::TarGz => {
-            crate::creation::tar::create_tar_gz_with_progress(output, sources, config, progress)
-        }
-        ArchiveType::TarBz2 => {
-            crate::creation::tar::create_tar_bz2_with_progress(output, sources, config, progress)
-        }
-        ArchiveType::TarXz => {
-            crate::creation::tar::create_tar_xz_with_progress(output, sources, config, progress)
-        }
-        ArchiveType::TarZst => {
-            crate::creation::tar::create_tar_zst_with_progress(output, sources, config, progress)
-        }
-        ArchiveType::Zip => {
-            crate::creation::zip::create_zip_with_progress(output, sources, config, progress)
-        }
+        ArchiveType::Tar => Ok(Box::new(crate::creation::TarCreator)),
+        ArchiveType::TarGz => Ok(Box::new(crate::creation::TarGzCreator)),
+        ArchiveType::TarBz2 => Ok(Box::new(crate::creation::TarBz2Creator)),
+        ArchiveType::TarXz => Ok(Box::new(crate::creation::TarXzCreator)),
+        ArchiveType::TarZst => Ok(Box::new(crate::creation::TarZstCreator)),
+        ArchiveType::Zip => Ok(Box::new(crate::creation::ZipCreator)),
         ArchiveType::SevenZ => Err(ExtractionError::UnsupportedFormat),
     }
 }
@@ -815,13 +799,13 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_archive_full_non_atomic_delegates_to_normal() {
+    fn test_extract_archive_with_options_and_progress_non_atomic_delegates_to_normal() {
         let dest = tempfile::TempDir::new().unwrap();
         let options = ExtractionOptions {
             atomic: false,
             skip_duplicates: true,
         };
-        let result = extract_archive_full(
+        let result = extract_archive_with_options_and_progress(
             PathBuf::from("nonexistent.tar.gz"),
             dest.path(),
             &SecurityConfig::default(),

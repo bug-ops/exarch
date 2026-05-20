@@ -470,6 +470,25 @@ fn normalize_zip_path(path: &Path) -> Result<String> {
     Ok(normalized)
 }
 
+/// Format creator for ZIP archives.
+pub struct ZipCreator;
+
+impl crate::formats::traits::FormatCreator for ZipCreator {
+    fn create(
+        &self,
+        output: &std::path::Path,
+        sources: &[&std::path::Path],
+        config: &CreationConfig,
+        progress: &mut dyn ProgressCallback,
+    ) -> crate::Result<crate::creation::CreationReport> {
+        create_zip_with_progress(output, sources, config, progress)
+    }
+
+    fn format_name(&self) -> &'static str {
+        "zip"
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)] // Allow unwrap in tests for brevity
 mod tests {

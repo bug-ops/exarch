@@ -276,12 +276,23 @@ impl<R: Read + Seek> ZipArchive<R> {
         })?;
 
         if zip_file.encrypted() {
+            let name = zip_file
+                .name()
+                .map_or_else(|_| format!("<entry {index}>"), std::borrow::Cow::into_owned);
             return Err(ExtractionError::SecurityViolation {
-                reason: format!("encrypted entry detected: {}", zip_file.name()),
+                reason: format!("encrypted entry detected: {name}"),
             });
         }
 
-        let path = PathBuf::from(zip_file.name());
+        let path = PathBuf::from(
+            zip_file
+                .name()
+                .map_err(|e| {
+                    ExtractionError::InvalidArchive(format!("invalid entry name at {index}: {e}"))
+                })?
+                .as_ref(),
+        );
+
         let (uncompressed_size, compressed_size) = ZipEntryAdapter::get_sizes(&zip_file);
         let mode = zip_file.unix_mode();
 
@@ -412,7 +423,15 @@ impl<R: Read + Seek> ArchiveFormat for ZipArchive<R> {
                 let zf = self.inner.by_index(i).map_err(|e| {
                     ExtractionError::InvalidArchive(format!("failed to open zip entry {i}: {e}"))
                 })?;
-                std::path::PathBuf::from(zf.name())
+                std::path::PathBuf::from(
+                    zf.name()
+                        .map_err(|e| {
+                            ExtractionError::InvalidArchive(format!(
+                                "invalid entry name at {i}: {e}"
+                            ))
+                        })?
+                        .as_ref(),
+                )
             };
             progress.on_entry_start(&entry_path, entry_count, i.saturating_add(1));
 

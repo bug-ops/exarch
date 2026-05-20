@@ -290,10 +290,14 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
             });
         }
 
+        let raw_name = entry
+            .name()
+            .map_err(|e| ExtractionError::InvalidArchive(format!("invalid entry name: {e}")))?
+            .into_owned();
         let path = entry
             .enclosed_name()
             .ok_or_else(|| ExtractionError::PathTraversal {
-                path: PathBuf::from(entry.name()),
+                path: PathBuf::from(&raw_name),
             })?;
         let path = path.clone();
 

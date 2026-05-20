@@ -97,6 +97,7 @@ use std::io::Seek;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process;
+use std::rc::Rc;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
@@ -316,10 +317,9 @@ impl<R: Read + Seek> SevenZArchive<R> {
         progress: &mut dyn ProgressCallback,
         total: usize,
     ) -> Result<ExtractionReport> {
-        // Use RefCell/Cell for interior mutability in the FnMut closure.
-        // `progress` is borrowed exclusively for the duration of this call,
-        // so wrapping it in RefCell is safe — no re-entrancy can occur.
-        let report = RefCell::new(ExtractionReport::new());
+        // Rc keeps report alive after closure drops on Err.
+        let report = Rc::new(RefCell::new(ExtractionReport::new()));
+        let report_out = Rc::clone(&report);
         let dir_cache = RefCell::new(dir_cache);
         let progress = RefCell::new(progress);
         let current_idx = Cell::new(0usize);
@@ -422,11 +422,22 @@ impl<R: Read + Seek> SevenZArchive<R> {
             Ok(true) // Continue extraction
         };
 
-        // Call sevenz-rust2 extraction
-        sevenz_rust2::decompress_with_extract_fn(source, dest.as_path(), extract_fn)?;
+        let result = sevenz_rust2::decompress_with_extract_fn(source, dest.as_path(), extract_fn);
+        drop(report); // release closure-side Rc so borrow succeeds
+        let accumulated = report_out.borrow().clone();
 
-        // Extract report from RefCell
-        Ok(report.into_inner())
+        let e = match result {
+            Ok(()) => return Ok(accumulated),
+            Err(e) => ExtractionError::from(e),
+        };
+        if accumulated.total_items() > 0 {
+            Err(ExtractionError::PartialExtraction {
+                source: Box::new(e),
+                report: accumulated,
+            })
+        } else {
+            Err(e)
+        }
     }
 }
 
@@ -527,7 +538,7 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
         let mut dir_cache = common::DirCache::new();
         let total = self.entries.len();
 
-        match Self::extract_with_callback(
+        let report = Self::extract_with_callback(
             &mut self.source,
             &dest,
             &mut validator,
@@ -535,21 +546,9 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
             options.skip_duplicates,
             progress,
             total,
-        ) {
-            Ok(report) => {
-                progress.on_complete();
-                Ok(report)
-            }
-            Err(e) => {
-                // 7z pre-validates all paths before extracting, so any error
-                // from extract_with_callback means partial extraction occurred.
-                // We wrap unconditionally since partial state may be on disk.
-                Err(ExtractionError::PartialExtraction {
-                    source: Box::new(e),
-                    report: ExtractionReport::new(),
-                })
-            }
-        }
+        )?;
+        progress.on_complete();
+        Ok(report)
     }
 
     fn list(&mut self, config: &SecurityConfig) -> Result<crate::inspection::ArchiveManifest> {

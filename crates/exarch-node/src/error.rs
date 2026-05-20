@@ -182,7 +182,18 @@ pub fn convert_error(err: CoreError) -> Error {
             msg.push_str(&reason);
             Error::new(Status::GenericFailure, msg)
         }
-        CoreError::PartialExtraction { source, .. } => convert_error(*source),
+        CoreError::PartialExtraction { source, report } => {
+            let inner = convert_error(*source);
+            let mut msg = String::with_capacity(inner.reason.len() + 64);
+            msg.push_str("PARTIAL_EXTRACTION: ");
+            msg.push_str(&inner.reason);
+            let _ = write!(
+                &mut msg,
+                " | filesExtracted={}, bytesWritten={}",
+                report.files_extracted, report.bytes_written
+            );
+            Error::new(Status::GenericFailure, msg)
+        }
     }
 }
 
@@ -348,5 +359,41 @@ mod tests {
         let err_str = napi_err.to_string();
         assert!(err_str.contains("IO_ERROR"));
         assert!(err_str.contains("file not found"));
+    }
+
+    /// Regression test for #210: `convert_error` must embed `filesExtracted`
+    /// and `bytesWritten` in the error message for `PartialExtraction`.
+    #[test]
+    fn test_partial_extraction_node_message_format() {
+        use exarch_core::ExtractionReport;
+        use exarch_core::QuotaResource;
+
+        let report = ExtractionReport {
+            files_extracted: 3,
+            bytes_written: 1024,
+            ..ExtractionReport::default()
+        };
+        let source = CoreError::QuotaExceeded {
+            resource: QuotaResource::FileCount { current: 4, max: 3 },
+        };
+        let err = CoreError::PartialExtraction {
+            source: Box::new(source),
+            report,
+        };
+
+        let napi_err = convert_error(err);
+        let msg = napi_err.reason.clone();
+        assert!(
+            msg.contains("PARTIAL_EXTRACTION"),
+            "message must contain PARTIAL_EXTRACTION, got: {msg}"
+        );
+        assert!(
+            msg.contains("filesExtracted=3"),
+            "message must contain filesExtracted=3, got: {msg}"
+        );
+        assert!(
+            msg.contains("bytesWritten=1024"),
+            "message must contain bytesWritten=1024, got: {msg}"
+        );
     }
 }

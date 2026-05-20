@@ -8,6 +8,8 @@ use exarch_core::ProgressCallback;
 use exarch_core::SecurityConfig;
 use exarch_core::formats::SevenZArchive;
 use exarch_core::formats::traits::ArchiveFormat;
+use sevenz_rust2::ArchiveEntry;
+use sevenz_rust2::ArchiveWriter;
 use std::io::Cursor;
 use std::path::Path;
 use std::sync::Arc;
@@ -463,5 +465,113 @@ fn test_7z_bytes_written_accumulates_correctly() {
         report.bytes_written, 25,
         "bytes_written must equal the total bytes extracted, got {}",
         report.bytes_written
+    );
+}
+
+// ============================================================================
+// Regression tests for issues #207 and #210: PartialExtraction report
+// ============================================================================
+
+/// Regression test for #207: the `ExtractionReport` accumulated before a quota
+/// error must survive and be returned inside `PartialExtraction`.
+///
+/// Previously, `SevenZArchive::extract` used a local `accumulated` variable
+/// inside the closure that was dropped when `decompress_with_extract_fn`
+/// returned `Err`, so `PartialExtraction` always carried an empty report.
+#[test]
+fn test_7z_partial_extraction_accurate_report() {
+    // Build an in-memory 7z archive with two entries sharing the same path.
+    // The extraction callback writes the first entry successfully, then fails
+    // with a "duplicate entry" error on the second — triggering PartialExtraction.
+    // Pre-validation cannot detect this because it only validates paths, not
+    // on-disk state.
+    let mut buf = std::io::Cursor::new(Vec::<u8>::new());
+    {
+        let mut writer = ArchiveWriter::new(&mut buf).unwrap();
+        writer
+            .push_archive_entry(
+                ArchiveEntry::new_file("file.txt"),
+                Some(b"first content".as_ref()),
+            )
+            .unwrap();
+        writer
+            .push_archive_entry(
+                ArchiveEntry::new_file("file.txt"),
+                Some(b"second content".as_ref()),
+            )
+            .unwrap();
+        writer.finish().unwrap();
+    }
+    buf.set_position(0);
+    let data = buf.into_inner();
+
+    let cursor = Cursor::new(data);
+    let mut archive = SevenZArchive::new(cursor).unwrap();
+    let out_temp = TempDir::new().unwrap();
+
+    // skip_duplicates=false so the second "file.txt" triggers an error after
+    // the first has already been written to disk.
+    let options = ExtractionOptions {
+        skip_duplicates: false,
+        ..ExtractionOptions::default()
+    };
+    let result = archive.extract(
+        out_temp.path(),
+        &SecurityConfig::default(),
+        &options,
+        &mut exarch_core::NoopProgress,
+    );
+
+    let Err(ExtractionError::PartialExtraction { report, .. }) = result else {
+        panic!("expected PartialExtraction, got: {result:?}");
+    };
+    assert!(
+        report.files_extracted > 0,
+        "report must record at least one extracted file, got files_extracted={}",
+        report.files_extracted
+    );
+    assert!(
+        report.bytes_written > 0,
+        "report must record bytes written, got bytes_written={}",
+        report.bytes_written
+    );
+}
+
+/// Regression test for #207: when the very first entry triggers a security
+/// error (zero items extracted), the result must NOT be wrapped in
+/// `PartialExtraction` — the raw error is returned directly.
+///
+/// This matches the TAR/ZIP behavior added in the same fix.
+#[test]
+fn test_7z_no_partial_extraction_when_zero_items() {
+    // Build an in-memory 7z archive whose first (and only) entry has a
+    // path-traversal name so validation fails immediately.
+    let mut buf = std::io::Cursor::new(Vec::<u8>::new());
+    {
+        let mut writer = ArchiveWriter::new(&mut buf).unwrap();
+        let entry = ArchiveEntry::new_file("../evil.txt");
+        writer
+            .push_archive_entry(entry, Some(b"pwned".as_ref()))
+            .unwrap();
+        writer.finish().unwrap();
+    }
+    buf.set_position(0);
+    let data = buf.into_inner();
+
+    let cursor = Cursor::new(data);
+    let mut archive = SevenZArchive::new(cursor).unwrap();
+    let out_temp = TempDir::new().unwrap();
+
+    let result = archive.extract(
+        out_temp.path(),
+        &SecurityConfig::default(),
+        &ExtractionOptions::default(),
+        &mut exarch_core::NoopProgress,
+    );
+
+    assert!(result.is_err(), "expected an error, got Ok");
+    assert!(
+        !matches!(result, Err(ExtractionError::PartialExtraction { .. })),
+        "must NOT be PartialExtraction when zero items were written; got: {result:?}"
     );
 }

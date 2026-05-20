@@ -89,12 +89,14 @@ pub fn execute(args: &ExtractArgs, formatter: &dyn OutputFormatter) -> Result<()
         add_archive_context(
             extract_archive_full(&args.archive, &output_dir, &config, &options, &mut progress),
             &args.archive,
+            args.allow_symlinks,
         )?
     } else {
         let mut noop = NoopProgress;
         add_archive_context(
             extract_archive_full(&args.archive, &output_dir, &config, &options, &mut noop),
             &args.archive,
+            args.allow_symlinks,
         )?
     };
 

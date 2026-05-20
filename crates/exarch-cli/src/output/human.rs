@@ -175,34 +175,6 @@ impl OutputFormatter for HumanFormatter {
         }
     }
 
-    fn format_success(&self, _operation: &str, message: &str) {
-        if self.quiet {
-            return;
-        }
-
-        if self.use_colors {
-            let _ = self
-                .term
-                .write_line(&format!("{} {message}", style("✓").green().bold()));
-        } else {
-            let _ = self.term.write_line(message);
-        }
-    }
-
-    fn format_warning(&self, _operation: &str, message: &str) {
-        if self.quiet {
-            return;
-        }
-
-        if self.use_colors {
-            let _ = self
-                .term
-                .write_line(&format!("{} {message}", style("⚠").yellow().bold()));
-        } else {
-            let _ = self.term.write_line(&format!("WARNING: {message}"));
-        }
-    }
-
     fn format_manifest_short(&self, manifest: &ArchiveManifest) -> Result<()> {
         if self.quiet {
             return Ok(());

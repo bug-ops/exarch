@@ -41,8 +41,16 @@ impl std::error::Error for PartialExtractionContext {}
 ///
 /// The original `ExtractionError` is preserved as the error source so that
 /// callers can downcast via the anyhow chain (used by JSON error output).
+///
+/// `allow_symlinks` suppresses the `--allow-symlinks` hint for `SymlinkEscape`
+/// errors when the flag is already active — in that case the escape is a
+/// genuine security violation, not a configuration issue.
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-pub fn convert_extraction_error(err: ExtractionError, archive: &Path) -> anyhow::Error {
+pub fn convert_extraction_error(
+    err: ExtractionError,
+    archive: &Path,
+    allow_symlinks: bool,
+) -> anyhow::Error {
     // Handle PartialExtraction before the borrow below.
     //
     // `PartialExtraction` is `#[error("{source}")]` with `#[source]`, so
@@ -71,11 +79,17 @@ pub fn convert_extraction_error(err: ExtractionError, archive: &Path) -> anyhow:
              HINT: Use --max-files, --max-total-size, or --max-file-size to increase limits.",
             archive.display(),
         ),
-        ExtractionError::SymlinkEscape { .. } => format!(
-            "Symlink rejected in '{}'\n\
-             HINT: Use --allow-symlinks to extract symlinks (only if trusted source).",
-            archive.display(),
-        ),
+        ExtractionError::SymlinkEscape { .. } => {
+            if allow_symlinks {
+                format!("Symlink escape blocked in '{}'", archive.display())
+            } else {
+                format!(
+                    "Symlink rejected in '{}'\n\
+                     HINT: Use --allow-symlinks to extract symlinks (only if trusted source).",
+                    archive.display(),
+                )
+            }
+        }
         ExtractionError::HardlinkEscape { .. } => format!(
             "Hardlink rejected in '{}'\n\
              HINT: Use --allow-hardlinks to extract hardlinks (only if trusted source).",
@@ -104,12 +118,16 @@ pub fn convert_extraction_error(err: ExtractionError, archive: &Path) -> anyhow:
     anyhow::Error::from(err).context(context)
 }
 
-/// Adds context to a generic error about archive operations
+/// Adds context to a generic error about archive operations.
+///
+/// `allow_symlinks` is forwarded to [`convert_extraction_error`] to suppress
+/// the `--allow-symlinks` hint when the flag is already active.
 pub fn add_archive_context<T>(
     result: Result<T, ExtractionError>,
     archive: &Path,
+    allow_symlinks: bool,
 ) -> anyhow::Result<T> {
-    result.map_err(|e| convert_extraction_error(e, archive))
+    result.map_err(|e| convert_extraction_error(e, archive, allow_symlinks))
 }
 
 #[cfg(test)]
@@ -123,7 +141,7 @@ mod tests {
         let err = ExtractionError::PathTraversal {
             path: PathBuf::from("../../../etc/passwd"),
         };
-        let converted = convert_extraction_error(err, Path::new("malicious.zip"));
+        let converted = convert_extraction_error(err, Path::new("malicious.zip"), false);
         let msg = format!("{converted:?}");
         assert!(msg.contains("path traversal"));
         assert!(msg.contains("malicious.zip"));
@@ -137,7 +155,7 @@ mod tests {
             uncompressed: 1024 * 1024 * 150,
             ratio: 150.0,
         };
-        let converted = convert_extraction_error(err, Path::new("bomb.zip"));
+        let converted = convert_extraction_error(err, Path::new("bomb.zip"), false);
         let msg = format!("{converted:?}");
         assert!(msg.contains("zip bomb"));
         assert!(msg.contains("bomb.zip"));
@@ -147,7 +165,7 @@ mod tests {
     fn test_path_traversal_path_appears_once() {
         let path = PathBuf::from("../../../etc/passwd");
         let err = ExtractionError::PathTraversal { path };
-        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"));
+        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"), false);
         let msg = format!("{converted:#}");
         assert_eq!(
             msg.matches("../../../etc/passwd").count(),
@@ -160,7 +178,7 @@ mod tests {
     fn test_symlink_escape_path_appears_once() {
         let path = PathBuf::from("link/to/escape");
         let err = ExtractionError::SymlinkEscape { path };
-        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"));
+        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"), false);
         let msg = format!("{converted:#}");
         assert_eq!(
             msg.matches("link/to/escape").count(),
@@ -170,10 +188,34 @@ mod tests {
     }
 
     #[test]
+    fn test_symlink_escape_hint_suppressed_when_flag_active() {
+        let path = PathBuf::from("link/to/escape");
+        let err = ExtractionError::SymlinkEscape { path };
+        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"), true);
+        let msg = format!("{converted:#}");
+        assert!(
+            !msg.contains("--allow-symlinks"),
+            "hint must be suppressed when --allow-symlinks is active, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_symlink_escape_hint_shown_when_flag_inactive() {
+        let path = PathBuf::from("link/to/escape");
+        let err = ExtractionError::SymlinkEscape { path };
+        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"), false);
+        let msg = format!("{converted:#}");
+        assert!(
+            msg.contains("--allow-symlinks"),
+            "hint must be shown when --allow-symlinks is not active, got: {msg}"
+        );
+    }
+
+    #[test]
     fn test_hardlink_escape_path_appears_once() {
         let path = PathBuf::from("hard/link/escape");
         let err = ExtractionError::HardlinkEscape { path };
-        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"));
+        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"), false);
         let msg = format!("{converted:#}");
         assert_eq!(
             msg.matches("hard/link/escape").count(),
@@ -186,7 +228,7 @@ mod tests {
     fn test_convert_io_error() {
         let io_err = io::Error::new(io::ErrorKind::NotFound, "file not found");
         let err = ExtractionError::Io(io_err);
-        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"));
+        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"), false);
         let msg = format!("{converted:?}");
         assert!(msg.contains("I/O error"));
     }
@@ -215,7 +257,7 @@ mod tests {
             source: Box::new(inner),
             report,
         };
-        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"));
+        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"), false);
         let msg = format!("{converted:#}");
         let occurrences = msg.matches("hardlink_escape_path").count();
         assert_eq!(
@@ -245,7 +287,7 @@ mod tests {
             source: Box::new(inner),
             report,
         };
-        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"));
+        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"), false);
         let msg = format!("{converted:#}");
         let occurrences = msg.matches("symlink_escape_path").count();
         assert_eq!(

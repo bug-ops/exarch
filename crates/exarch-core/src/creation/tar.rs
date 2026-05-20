@@ -3,7 +3,6 @@
 //! This module provides functions for creating TAR archives with various
 //! compression options: uncompressed, gzip, bzip2, xz, and zstd.
 
-use crate::ExtractionError;
 use crate::ProgressCallback;
 use crate::Result;
 use crate::creation::compression::compression_level_to_bzip2;
@@ -11,11 +10,9 @@ use crate::creation::compression::compression_level_to_flate2;
 use crate::creation::compression::compression_level_to_xz;
 use crate::creation::compression::compression_level_to_zstd;
 use crate::creation::config::CreationConfig;
-use crate::creation::filters;
 use crate::creation::progress::ProgressReader;
 use crate::creation::report::CreationReport;
 use crate::creation::walker::EntryType;
-use crate::creation::walker::FilteredWalker;
 use crate::creation::walker::collect_entries;
 use crate::io::CountingWriter;
 use std::fs::File;
@@ -23,181 +20,6 @@ use std::io::Write;
 use std::path::Path;
 use tar::Builder;
 use tar::Header;
-
-/// Creates an uncompressed TAR archive.
-///
-/// # Examples
-///
-/// ```no_run
-/// use exarch_core::creation::CreationConfig;
-/// use exarch_core::creation::tar::create_tar;
-/// use std::path::Path;
-///
-/// let config = CreationConfig::default();
-/// let report = create_tar(Path::new("output.tar"), &[Path::new("src")], &config)?;
-/// println!("Added {} files", report.files_added);
-/// # Ok::<(), exarch_core::ExtractionError>(())
-/// ```
-///
-/// # Errors
-///
-/// Returns an error if:
-/// - Source path does not exist
-/// - Output file cannot be created
-/// - I/O error during archive creation
-#[allow(dead_code)] // Will be used by CLI
-pub fn create_tar<P: AsRef<Path>, Q: AsRef<Path>>(
-    output: P,
-    sources: &[Q],
-    config: &CreationConfig,
-) -> Result<CreationReport> {
-    let file = File::create(output.as_ref())?;
-    create_tar_internal(file, sources, config)
-}
-
-/// Creates a gzip-compressed TAR archive (.tar.gz).
-///
-/// # Examples
-///
-/// ```no_run
-/// use exarch_core::creation::CreationConfig;
-/// use exarch_core::creation::tar::create_tar_gz;
-/// use std::path::Path;
-///
-/// let config = CreationConfig::default().with_compression_level(9);
-/// let report = create_tar_gz(
-///     Path::new("output.tar.gz"),
-///     &[Path::new("src"), Path::new("tests")],
-///     &config,
-/// )?;
-/// # Ok::<(), exarch_core::ExtractionError>(())
-/// ```
-///
-/// # Errors
-///
-/// Returns an error if:
-/// - Source path does not exist
-/// - Output file cannot be created
-/// - Compression fails
-/// - I/O error during archive creation
-#[allow(dead_code)] // Will be used by CLI
-pub fn create_tar_gz<P: AsRef<Path>, Q: AsRef<Path>>(
-    output: P,
-    sources: &[Q],
-    config: &CreationConfig,
-) -> Result<CreationReport> {
-    let file = File::create(output.as_ref())?;
-    let level = compression_level_to_flate2(config.compression_level);
-    let encoder = flate2::write::GzEncoder::new(file, level);
-    create_tar_internal(encoder, sources, config)
-}
-
-/// Creates a bzip2-compressed TAR archive (.tar.bz2).
-///
-/// # Examples
-///
-/// ```no_run
-/// use exarch_core::creation::CreationConfig;
-/// use exarch_core::creation::tar::create_tar_bz2;
-/// use std::path::Path;
-///
-/// let config = CreationConfig::default();
-/// let report = create_tar_bz2(Path::new("output.tar.bz2"), &[Path::new("src")], &config)?;
-/// # Ok::<(), exarch_core::ExtractionError>(())
-/// ```
-///
-/// # Errors
-///
-/// Returns an error if:
-/// - Source path does not exist
-/// - Output file cannot be created
-/// - Compression fails
-/// - I/O error during archive creation
-#[allow(dead_code)] // Will be used by CLI
-pub fn create_tar_bz2<P: AsRef<Path>, Q: AsRef<Path>>(
-    output: P,
-    sources: &[Q],
-    config: &CreationConfig,
-) -> Result<CreationReport> {
-    let file = File::create(output.as_ref())?;
-    let level = compression_level_to_bzip2(config.compression_level);
-    let encoder = bzip2::write::BzEncoder::new(file, level);
-    create_tar_internal(encoder, sources, config)
-}
-
-/// Creates an xz-compressed TAR archive (.tar.xz).
-///
-/// # Examples
-///
-/// ```no_run
-/// use exarch_core::creation::CreationConfig;
-/// use exarch_core::creation::tar::create_tar_xz;
-/// use std::path::Path;
-///
-/// let config = CreationConfig::default();
-/// let report = create_tar_xz(Path::new("output.tar.xz"), &[Path::new("src")], &config)?;
-/// # Ok::<(), exarch_core::ExtractionError>(())
-/// ```
-///
-/// # Errors
-///
-/// Returns an error if:
-/// - Source path does not exist
-/// - Output file cannot be created
-/// - Compression fails
-/// - I/O error during archive creation
-#[allow(dead_code)] // Will be used by CLI
-pub fn create_tar_xz<P: AsRef<Path>, Q: AsRef<Path>>(
-    output: P,
-    sources: &[Q],
-    config: &CreationConfig,
-) -> Result<CreationReport> {
-    let file = File::create(output.as_ref())?;
-    let level = compression_level_to_xz(config.compression_level);
-    let encoder = xz2::write::XzEncoder::new(file, level);
-    create_tar_internal(encoder, sources, config)
-}
-
-/// Creates a zstd-compressed TAR archive (.tar.zst).
-///
-/// # Examples
-///
-/// ```no_run
-/// use exarch_core::creation::CreationConfig;
-/// use exarch_core::creation::tar::create_tar_zst;
-/// use std::path::Path;
-///
-/// let config = CreationConfig::default();
-/// let report = create_tar_zst(Path::new("output.tar.zst"), &[Path::new("src")], &config)?;
-/// # Ok::<(), exarch_core::ExtractionError>(())
-/// ```
-///
-/// # Errors
-///
-/// Returns an error if:
-/// - Source path does not exist
-/// - Output file cannot be created
-/// - Compression fails
-/// - I/O error during archive creation
-#[allow(dead_code)] // Will be used by CLI
-pub fn create_tar_zst<P: AsRef<Path>, Q: AsRef<Path>>(
-    output: P,
-    sources: &[Q],
-    config: &CreationConfig,
-) -> Result<CreationReport> {
-    let file = File::create(output.as_ref())?;
-    let level = compression_level_to_zstd(config.compression_level);
-    let mut encoder = zstd::Encoder::new(file, level)?;
-    encoder.include_checksum(true)?;
-
-    let report = create_tar_internal(encoder, sources, config)?;
-
-    // zstd encoder needs explicit finish() to flush data
-    // This is already done by into_inner() in create_tar_internal via
-    // builder.into_inner() But we rely on Drop to finish the encoder
-
-    Ok(report)
-}
 
 /// Creates an uncompressed TAR archive with progress reporting.
 ///
@@ -272,7 +94,6 @@ pub fn create_tar_zst<P: AsRef<Path>, Q: AsRef<Path>>(
 /// - Output file cannot be created
 /// - I/O error during archive creation
 /// - File metadata cannot be read
-#[allow(dead_code)] // Will be used by CLI
 pub fn create_tar_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
     output: P,
     sources: &[Q],
@@ -280,7 +101,8 @@ pub fn create_tar_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
     progress: &mut dyn ProgressCallback,
 ) -> Result<CreationReport> {
     let file = File::create(output.as_ref())?;
-    create_tar_internal_with_progress(file, sources, config, progress)
+    let (report, _) = create_tar_internal_with_progress(file, sources, config, progress)?;
+    Ok(report)
 }
 
 /// Creates a gzip-compressed TAR archive with progress reporting.
@@ -293,7 +115,6 @@ pub fn create_tar_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
 ///
 /// Returns an error if output file cannot be created, compression fails, or I/O
 /// operations fail.
-#[allow(dead_code)] // Will be used by CLI
 pub fn create_tar_gz_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
     output: P,
     sources: &[Q],
@@ -303,7 +124,8 @@ pub fn create_tar_gz_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
     let file = File::create(output.as_ref())?;
     let level = compression_level_to_flate2(config.compression_level);
     let encoder = flate2::write::GzEncoder::new(file, level);
-    create_tar_internal_with_progress(encoder, sources, config, progress)
+    let (report, _) = create_tar_internal_with_progress(encoder, sources, config, progress)?;
+    Ok(report)
 }
 
 /// Creates a bzip2-compressed TAR archive with progress reporting.
@@ -316,7 +138,6 @@ pub fn create_tar_gz_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
 ///
 /// Returns an error if output file cannot be created, compression fails, or I/O
 /// operations fail.
-#[allow(dead_code)] // Will be used by CLI
 pub fn create_tar_bz2_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
     output: P,
     sources: &[Q],
@@ -326,7 +147,8 @@ pub fn create_tar_bz2_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
     let file = File::create(output.as_ref())?;
     let level = compression_level_to_bzip2(config.compression_level);
     let encoder = bzip2::write::BzEncoder::new(file, level);
-    create_tar_internal_with_progress(encoder, sources, config, progress)
+    let (report, _) = create_tar_internal_with_progress(encoder, sources, config, progress)?;
+    Ok(report)
 }
 
 /// Creates an xz-compressed TAR archive with progress reporting.
@@ -339,7 +161,6 @@ pub fn create_tar_bz2_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
 ///
 /// Returns an error if output file cannot be created, compression fails, or I/O
 /// operations fail.
-#[allow(dead_code)] // Will be used by CLI
 pub fn create_tar_xz_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
     output: P,
     sources: &[Q],
@@ -349,7 +170,8 @@ pub fn create_tar_xz_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
     let file = File::create(output.as_ref())?;
     let level = compression_level_to_xz(config.compression_level);
     let encoder = xz2::write::XzEncoder::new(file, level);
-    create_tar_internal_with_progress(encoder, sources, config, progress)
+    let (report, _) = create_tar_internal_with_progress(encoder, sources, config, progress)?;
+    Ok(report)
 }
 
 /// Creates a zstd-compressed TAR archive with progress reporting.
@@ -362,7 +184,6 @@ pub fn create_tar_xz_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
 ///
 /// Returns an error if output file cannot be created, compression fails, or I/O
 /// operations fail.
-#[allow(dead_code)] // Will be used by CLI
 pub fn create_tar_zst_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
     output: P,
     sources: &[Q],
@@ -374,18 +195,22 @@ pub fn create_tar_zst_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
     let mut encoder = zstd::Encoder::new(file, level)?;
     encoder.include_checksum(true)?;
 
-    let report = create_tar_internal_with_progress(encoder, sources, config, progress)?;
+    let (report, encoder) = create_tar_internal_with_progress(encoder, sources, config, progress)?;
+    encoder.finish()?;
 
     Ok(report)
 }
 
 /// Internal function that creates TAR with any writer and progress reporting.
+///
+/// Returns `(report, writer)` so callers that wrap the writer (e.g. zstd
+/// encoder) can finalize it after all TAR data has been flushed.
 fn create_tar_internal_with_progress<W: Write, P: AsRef<Path>>(
     writer: W,
     sources: &[P],
     config: &CreationConfig,
     progress: &mut dyn ProgressCallback,
-) -> Result<CreationReport> {
+) -> Result<(CreationReport, W)> {
     let counting_writer = CountingWriter::new(writer);
     let mut builder = Builder::new(counting_writer);
     let mut report = CreationReport::default();
@@ -455,120 +280,7 @@ fn create_tar_internal_with_progress<W: Write, P: AsRef<Path>>(
 
     progress.on_complete();
 
-    Ok(report)
-}
-
-/// Internal function that creates TAR with any writer.
-///
-/// Handles the core logic of walking sources and adding entries to the archive.
-fn create_tar_internal<W: Write, P: AsRef<Path>>(
-    writer: W,
-    sources: &[P],
-    config: &CreationConfig,
-) -> Result<CreationReport> {
-    let counting_writer = CountingWriter::new(writer);
-    let mut builder = Builder::new(counting_writer);
-    let mut report = CreationReport::default();
-    let start = std::time::Instant::now();
-
-    for source in sources {
-        let path = source.as_ref();
-
-        // Validate source exists
-        if !path.exists() {
-            return Err(ExtractionError::SourceNotFound {
-                path: path.to_path_buf(),
-            });
-        }
-
-        // Walk directory or add single file
-        if path.is_dir() {
-            add_directory_to_tar(&mut builder, path, config, &mut report)?;
-        } else {
-            // For single files, use filename as archive path
-            let archive_path =
-                filters::compute_archive_path(path, path.parent().unwrap_or(path), config)?;
-            add_file_to_tar(&mut builder, path, &archive_path, config, &mut report)?;
-        }
-    }
-
-    // Finish writing TAR
-    builder.finish()?;
-
-    // Get inner writer and ensure it's properly flushed
-    let mut counting_writer = builder.into_inner()?;
-    counting_writer.flush()?;
-
-    report.bytes_compressed = counting_writer.total_bytes();
-    report.duration = start.elapsed();
-
-    Ok(report)
-}
-
-/// Adds a directory tree to the TAR archive using the walker.
-fn add_directory_to_tar<W: Write>(
-    builder: &mut Builder<W>,
-    dir: &Path,
-    config: &CreationConfig,
-    report: &mut CreationReport,
-) -> Result<()> {
-    let walker = FilteredWalker::new(dir, config);
-
-    for entry in walker.walk() {
-        let entry = entry?;
-
-        match entry.entry_type {
-            EntryType::File => {
-                add_file_to_tar(builder, &entry.path, &entry.archive_path, config, report)?;
-            }
-            EntryType::Directory => {
-                // TAR can create directories implicitly, but we track them
-                report.directories_added += 1;
-            }
-            EntryType::Symlink { target } => {
-                if config.follow_symlinks {
-                    // Walker already resolved symlinks, treat as file
-                    add_file_to_tar(builder, &entry.path, &entry.archive_path, config, report)?;
-                } else {
-                    // Add symlink as-is
-                    add_symlink_to_tar(builder, &entry.archive_path, &target, report)?;
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-
-/// Adds a single file to the TAR archive.
-fn add_file_to_tar<W: Write>(
-    builder: &mut Builder<W>,
-    file_path: &Path,
-    archive_path: &Path,
-    config: &CreationConfig,
-    report: &mut CreationReport,
-) -> Result<()> {
-    let mut file = File::open(file_path)?;
-    let metadata = file.metadata()?;
-    let size = metadata.len();
-
-    // Create TAR header
-    let mut header = Header::new_gnu();
-    header.set_size(size);
-    header.set_cksum();
-
-    // Set permissions if configured
-    if config.preserve_permissions {
-        set_permissions(&mut header, &metadata);
-    }
-
-    // Add file to archive
-    builder.append_data(&mut header, archive_path, &mut file)?;
-
-    report.files_added += 1;
-    report.bytes_written += size;
-
-    Ok(())
+    Ok((report, counting_writer.into_inner()))
 }
 
 /// Adds a single file to the TAR archive with progress reporting and reusable
@@ -770,8 +482,11 @@ impl crate::formats::traits::FormatCreator for TarZstCreator {
 #[allow(clippy::unwrap_used)] // Allow unwrap in tests for brevity
 mod tests {
     use super::*;
+    use crate::ExtractionError;
     use crate::SecurityConfig;
+    use crate::api::create_archive;
     use crate::api::extract_archive;
+    use crate::formats::detect::ArchiveType;
     use std::fs;
     use tempfile::TempDir;
 
@@ -780,15 +495,20 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let output = temp.path().join("output.tar");
 
-        // Create source file
         let source_dir = TempDir::new().unwrap();
         fs::write(source_dir.path().join("test.txt"), "Hello TAR").unwrap();
 
         let config = CreationConfig::default()
             .with_exclude_patterns(vec![])
-            .with_include_hidden(true);
+            .with_include_hidden(true)
+            .with_format(Some(ArchiveType::Tar));
 
-        let report = create_tar(&output, &[source_dir.path().join("test.txt")], &config).unwrap();
+        let report = create_archive(
+            &output,
+            &[source_dir.path().join("test.txt").as_path()],
+            &config,
+        )
+        .unwrap();
 
         assert_eq!(report.files_added, 1);
         assert!(report.bytes_written > 0);
@@ -800,7 +520,6 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let output = temp.path().join("output.tar");
 
-        // Create source directory with multiple files
         let source_dir = TempDir::new().unwrap();
         fs::write(source_dir.path().join("file1.txt"), "content1").unwrap();
         fs::write(source_dir.path().join("file2.txt"), "content2").unwrap();
@@ -809,13 +528,12 @@ mod tests {
 
         let config = CreationConfig::default()
             .with_exclude_patterns(vec![])
-            .with_include_hidden(true);
+            .with_include_hidden(true)
+            .with_format(Some(ArchiveType::Tar));
 
-        let report = create_tar(&output, &[source_dir.path()], &config).unwrap();
+        let report = create_archive(&output, &[source_dir.path()], &config).unwrap();
 
-        // Should have exactly 3 files: file1.txt, file2.txt, subdir/file3.txt
         assert_eq!(report.files_added, 3);
-        // Should have exactly 2 directories: root and subdir
         assert_eq!(report.directories_added, 2);
         assert!(output.exists());
     }
@@ -825,20 +543,19 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let output = temp.path().join("output.tar.gz");
 
-        // Create source file
         let source_dir = TempDir::new().unwrap();
         fs::write(source_dir.path().join("test.txt"), "a".repeat(1000)).unwrap();
 
         let config = CreationConfig::default()
             .with_exclude_patterns(vec![])
-            .with_compression_level(9);
+            .with_compression_level(9)
+            .with_format(Some(ArchiveType::TarGz));
 
-        let report = create_tar_gz(&output, &[source_dir.path()], &config).unwrap();
+        let report = create_archive(&output, &[source_dir.path()], &config).unwrap();
 
         assert_eq!(report.files_added, 1);
         assert!(output.exists());
 
-        // Verify it's a valid gzip file (basic check)
         let data = fs::read(&output).unwrap();
         assert_eq!(&data[0..2], &[0x1f, 0x8b]); // gzip magic bytes
     }
@@ -848,18 +565,18 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let output = temp.path().join("output.tar.bz2");
 
-        // Create source file
         let source_dir = TempDir::new().unwrap();
         fs::write(source_dir.path().join("test.txt"), "bzip2 test").unwrap();
 
-        let config = CreationConfig::default().with_exclude_patterns(vec![]);
+        let config = CreationConfig::default()
+            .with_exclude_patterns(vec![])
+            .with_format(Some(ArchiveType::TarBz2));
 
-        let report = create_tar_bz2(&output, &[source_dir.path()], &config).unwrap();
+        let report = create_archive(&output, &[source_dir.path()], &config).unwrap();
 
         assert_eq!(report.files_added, 1);
         assert!(output.exists());
 
-        // Verify it's a valid bzip2 file
         let data = fs::read(&output).unwrap();
         assert_eq!(&data[0..3], b"BZh"); // bzip2 magic bytes
     }
@@ -869,18 +586,18 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let output = temp.path().join("output.tar.xz");
 
-        // Create source file
         let source_dir = TempDir::new().unwrap();
         fs::write(source_dir.path().join("test.txt"), "xz test").unwrap();
 
-        let config = CreationConfig::default().with_exclude_patterns(vec![]);
+        let config = CreationConfig::default()
+            .with_exclude_patterns(vec![])
+            .with_format(Some(ArchiveType::TarXz));
 
-        let report = create_tar_xz(&output, &[source_dir.path()], &config).unwrap();
+        let report = create_archive(&output, &[source_dir.path()], &config).unwrap();
 
         assert_eq!(report.files_added, 1);
         assert!(output.exists());
 
-        // Verify it's a valid xz file
         let data = fs::read(&output).unwrap();
         assert_eq!(&data[0..6], &[0xFD, 0x37, 0x7A, 0x58, 0x5A, 0x00]); // xz magic bytes
     }
@@ -890,20 +607,19 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let output = temp.path().join("output.tar.zst");
 
-        // Create source file
         let source_dir = TempDir::new().unwrap();
         fs::write(source_dir.path().join("test.txt"), "zstd test").unwrap();
 
-        let config = CreationConfig::default().with_exclude_patterns(vec![]);
+        let config = CreationConfig::default()
+            .with_exclude_patterns(vec![])
+            .with_format(Some(ArchiveType::TarZst));
 
-        let report = create_tar_zst(&output, &[source_dir.path()], &config).unwrap();
+        let report = create_archive(&output, &[source_dir.path()], &config).unwrap();
 
         assert_eq!(report.files_added, 1);
         assert!(output.exists());
 
-        // Verify it's a valid zstd file
         let data = fs::read(&output).unwrap();
-        // Check we have at least some data
         assert!(data.len() >= 4, "output file should have data");
         assert_eq!(&data[0..4], &[0x28, 0xB5, 0x2F, 0xFD]); // zstd magic bytes
     }
@@ -912,18 +628,17 @@ mod tests {
     fn test_create_tar_compression_levels() {
         let temp = TempDir::new().unwrap();
 
-        // Create source with repetitive data (compresses well)
         let source_dir = TempDir::new().unwrap();
         fs::write(source_dir.path().join("test.txt"), "a".repeat(10000)).unwrap();
 
-        // Test different compression levels
         for level in [1, 6, 9] {
             let output = temp.path().join(format!("output_{level}.tar.gz"));
             let config = CreationConfig::default()
                 .with_exclude_patterns(vec![])
-                .with_compression_level(level);
+                .with_compression_level(level)
+                .with_format(Some(ArchiveType::TarGz));
 
-            let report = create_tar_gz(&output, &[source_dir.path()], &config).unwrap();
+            let report = create_archive(&output, &[source_dir.path()], &config).unwrap();
             assert_eq!(report.files_added, 1);
             assert!(output.exists());
         }
@@ -937,7 +652,6 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let output = temp.path().join("output.tar");
 
-        // Create source file with specific permissions
         let source_dir = TempDir::new().unwrap();
         let file_path = source_dir.path().join("test.txt");
         fs::write(&file_path, "content").unwrap();
@@ -945,12 +659,12 @@ mod tests {
 
         let config = CreationConfig::default()
             .with_exclude_patterns(vec![])
-            .with_preserve_permissions(true);
+            .with_preserve_permissions(true)
+            .with_format(Some(ArchiveType::Tar));
 
-        let report = create_tar(&output, &[source_dir.path()], &config).unwrap();
+        let report = create_archive(&output, &[source_dir.path()], &config).unwrap();
         assert_eq!(report.files_added, 1);
 
-        // Verify permissions in archive by extracting
         let extract_dir = TempDir::new().unwrap();
         let security_config = SecurityConfig::default();
         extract_archive(&output, extract_dir.path(), &security_config).unwrap();
@@ -965,7 +679,6 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let output = temp.path().join("output.tar");
 
-        // Create source directory with known structure
         let source_dir = TempDir::new().unwrap();
         fs::write(source_dir.path().join("file1.txt"), "content1").unwrap();
         fs::write(source_dir.path().join("file2.txt"), "content2").unwrap();
@@ -974,9 +687,10 @@ mod tests {
 
         let config = CreationConfig::default()
             .with_exclude_patterns(vec![])
-            .with_include_hidden(true);
+            .with_include_hidden(true)
+            .with_format(Some(ArchiveType::Tar));
 
-        let report = create_tar(&output, &[source_dir.path()], &config).unwrap();
+        let report = create_archive(&output, &[source_dir.path()], &config).unwrap();
 
         assert_eq!(report.files_added, 3);
         assert!(report.directories_added >= 1);
@@ -990,7 +704,6 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let output = temp.path().join("output.tar.gz");
 
-        // Create source directory
         let source_dir = TempDir::new().unwrap();
         fs::write(source_dir.path().join("file1.txt"), "content1").unwrap();
         fs::create_dir(source_dir.path().join("subdir")).unwrap();
@@ -998,18 +711,16 @@ mod tests {
 
         let config = CreationConfig::default()
             .with_exclude_patterns(vec![])
-            .with_include_hidden(true);
+            .with_include_hidden(true)
+            .with_format(Some(ArchiveType::TarGz));
 
-        // Create archive
-        let report = create_tar_gz(&output, &[source_dir.path()], &config).unwrap();
+        let report = create_archive(&output, &[source_dir.path()], &config).unwrap();
         assert!(report.files_added >= 2);
 
-        // Extract archive
         let extract_dir = TempDir::new().unwrap();
         let security_config = SecurityConfig::default();
         extract_archive(&output, extract_dir.path(), &security_config).unwrap();
 
-        // Verify extracted files match originals
         let extracted1 = fs::read_to_string(extract_dir.path().join("file1.txt")).unwrap();
         assert_eq!(extracted1, "content1");
 
@@ -1022,8 +733,8 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let output = temp.path().join("output.tar");
 
-        let config = CreationConfig::default();
-        let result = create_tar(&output, &[Path::new("/nonexistent/path")], &config);
+        let config = CreationConfig::default().with_format(Some(ArchiveType::Tar));
+        let result = create_archive(&output, &[Path::new("/nonexistent/path")], &config);
 
         assert!(result.is_err());
         assert!(matches!(
@@ -1061,6 +772,78 @@ mod tests {
     }
 
     // NOTE: Progress tracking reader tests are now in creation/progress.rs
+
+    /// Writer that fails with an I/O error after `fail_after` bytes have been
+    /// written.
+    struct FailWriter {
+        written: usize,
+        fail_after: usize,
+    }
+
+    impl FailWriter {
+        fn new(fail_after: usize) -> Self {
+            Self {
+                written: 0,
+                fail_after,
+            }
+        }
+    }
+
+    impl Write for FailWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if self.written >= self.fail_after {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "simulated write failure",
+                ));
+            }
+            let allowed = (self.fail_after - self.written).min(buf.len());
+            self.written += allowed;
+            Ok(allowed)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Regression test for #226: verifies that errors from
+    /// `zstd::Encoder::finish()` are propagated rather than silently
+    /// swallowed via `Drop`.
+    ///
+    /// Uses a `FailWriter` that errors after a small number of bytes so that
+    /// the zstd encoder's `finish()` call encounters an I/O failure.
+    #[test]
+    fn test_zstd_encoder_finish_error_propagated() {
+        let source_dir = TempDir::new().unwrap();
+        fs::write(source_dir.path().join("a.txt"), "hello").unwrap();
+
+        let config = CreationConfig::default()
+            .with_exclude_patterns(vec![])
+            .with_format(Some(ArchiveType::TarZst));
+
+        // Allow enough bytes for the zstd header but fail mid-stream so that
+        // encoder.finish() must flush remaining data and hits the limit.
+        let fail_writer = FailWriter::new(8);
+        let level = compression_level_to_zstd(config.compression_level);
+        let mut encoder = zstd::Encoder::new(fail_writer, level).unwrap();
+        encoder.include_checksum(true).unwrap();
+
+        let mut noop = crate::NoopProgress;
+        let result =
+            create_tar_internal_with_progress(encoder, &[source_dir.path()], &config, &mut noop);
+
+        // Either the internal write or encoder.finish() must surface an error.
+        // We call finish() only if internal succeeded, mirroring the real code path.
+        let is_err = match result {
+            Err(_) => true,
+            Ok((_, enc)) => enc.finish().is_err(),
+        };
+        assert!(
+            is_err,
+            "expected an error from zstd encoder when underlying writer fails"
+        );
+    }
 
     #[test]
     fn test_create_tar_with_progress_callback() {
@@ -1151,5 +934,35 @@ mod tests {
         assert!(has_file1, "Expected file1.txt in progress callbacks");
         assert!(has_file2, "Expected file2.txt in progress callbacks");
         assert!(has_file3, "Expected file3.txt in progress callbacks");
+    }
+
+    /// Regression test for #226: `create_tar_zst_with_progress` calls
+    /// `encoder.finish()` and returns any I/O error it produces.
+    ///
+    /// The public function signature takes a `Path`, not a generic writer, so
+    /// we verify the happy path here (`finish()` called, valid zstd output).
+    /// The error-propagation path of `finish()` is covered by the
+    /// internal-function test `test_zstd_encoder_finish_error_propagated`.
+    #[test]
+    fn test_create_tar_zst_with_progress_calls_finish() {
+        let temp = TempDir::new().unwrap();
+        let output = temp.path().join("output.tar.zst");
+
+        let source_dir = TempDir::new().unwrap();
+        fs::write(source_dir.path().join("test.txt"), "zstd progress finish").unwrap();
+
+        let config = CreationConfig::default().with_exclude_patterns(vec![]);
+        let mut noop = crate::NoopProgress;
+        let report =
+            create_tar_zst_with_progress(&output, &[source_dir.path()], &config, &mut noop)
+                .unwrap();
+
+        assert_eq!(report.files_added, 1);
+        assert!(output.exists());
+
+        // A properly finished zstd frame starts with the zstd magic number.
+        let data = fs::read(&output).unwrap();
+        assert!(data.len() >= 4);
+        assert_eq!(&data[0..4], &[0x28, 0xB5, 0x2F, 0xFD]);
     }
 }

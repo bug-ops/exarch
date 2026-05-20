@@ -9,14 +9,10 @@ use exarch_core::VerificationStatus;
 use exarch_core::verify_archive;
 
 pub fn execute(args: &VerifyArgs, formatter: &dyn OutputFormatter) -> Result<()> {
-    let config = SecurityConfig {
-        max_file_count: args.max_files,
-        max_total_size: args
-            .max_total_size
-            .unwrap_or_else(|| SecurityConfig::default().max_total_size),
-        allow_solid_archives: args.allow_solid_archives,
-        ..Default::default()
-    };
+    let config = SecurityConfig::default()
+        .with_max_file_count(args.max_files)
+        .with_max_total_size(args.max_total_size.unwrap_or(500 * 1024 * 1024))
+        .with_allow_solid_archives(args.allow_solid_archives);
 
     // Verify archive
     let report = verify_archive(&args.archive, &config)?;

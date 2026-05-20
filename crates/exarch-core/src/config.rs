@@ -5,6 +5,7 @@
 ///
 /// All features default to `false` (deny-by-default security policy).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct AllowedFeatures {
     /// Allow symlinks in extracted archives.
     pub symlinks: bool,
@@ -41,14 +42,14 @@ pub struct AllowedFeatures {
 /// // Use secure defaults
 /// let config = SecurityConfig::default();
 ///
-/// // Customize for specific needs
-/// let custom = SecurityConfig {
-///     max_file_size: 100 * 1024 * 1024,   // 100 MB
-///     max_total_size: 1024 * 1024 * 1024, // 1 GB
-///     ..Default::default()
-/// };
+/// // Customize via fluent builder
+/// let custom = SecurityConfig::default()
+///     .with_max_file_size(100 * 1024 * 1024)
+///     .with_max_total_size(1024 * 1024 * 1024)
+///     .with_allow_symlinks(true);
 /// ```
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct SecurityConfig {
     /// Maximum size for a single file in bytes.
     pub max_file_size: u64,
@@ -208,10 +209,7 @@ impl SecurityConfig {
     /// let config = SecurityConfig::default();
     /// assert!(config.validate().is_ok());
     ///
-    /// let bad = SecurityConfig {
-    ///     max_file_size: 0,
-    ///     ..SecurityConfig::default()
-    /// };
+    /// let bad = SecurityConfig::default().with_max_file_size(0);
     /// assert!(bad.validate().is_err());
     /// ```
     pub fn validate(&self) -> crate::Result<()> {
@@ -248,6 +246,272 @@ impl SecurityConfig {
         Ok(())
     }
 
+    /// Sets the maximum size for a single extracted file in bytes.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::SecurityConfig;
+    ///
+    /// let config = SecurityConfig::default().with_max_file_size(100 * 1024 * 1024);
+    /// assert_eq!(config.max_file_size, 100 * 1024 * 1024);
+    /// ```
+    #[must_use]
+    #[inline]
+    pub fn with_max_file_size(mut self, size: u64) -> Self {
+        self.max_file_size = size;
+        self
+    }
+
+    /// Sets the maximum total size for all extracted files in bytes.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::SecurityConfig;
+    ///
+    /// let config = SecurityConfig::default().with_max_total_size(1024 * 1024 * 1024);
+    /// assert_eq!(config.max_total_size, 1024 * 1024 * 1024);
+    /// ```
+    #[must_use]
+    #[inline]
+    pub fn with_max_total_size(mut self, size: u64) -> Self {
+        self.max_total_size = size;
+        self
+    }
+
+    /// Sets the maximum allowed compression ratio (uncompressed / compressed).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::SecurityConfig;
+    ///
+    /// let config = SecurityConfig::default().with_max_compression_ratio(50.0);
+    /// assert_eq!(config.max_compression_ratio, 50.0);
+    /// ```
+    #[must_use]
+    #[inline]
+    pub fn with_max_compression_ratio(mut self, ratio: f64) -> Self {
+        self.max_compression_ratio = ratio;
+        self
+    }
+
+    /// Sets the maximum number of files that can be extracted.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::SecurityConfig;
+    ///
+    /// let config = SecurityConfig::default().with_max_file_count(500);
+    /// assert_eq!(config.max_file_count, 500);
+    /// ```
+    #[must_use]
+    #[inline]
+    pub fn with_max_file_count(mut self, count: usize) -> Self {
+        self.max_file_count = count;
+        self
+    }
+
+    /// Sets the maximum path depth allowed.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::SecurityConfig;
+    ///
+    /// let config = SecurityConfig::default().with_max_path_depth(16);
+    /// assert_eq!(config.max_path_depth, 16);
+    /// ```
+    #[must_use]
+    #[inline]
+    pub fn with_max_path_depth(mut self, depth: usize) -> Self {
+        self.max_path_depth = depth;
+        self
+    }
+
+    /// Sets the feature flags controlling allowed archive features.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::SecurityConfig;
+    /// use exarch_core::config::AllowedFeatures;
+    ///
+    /// let features = AllowedFeatures::default();
+    /// let config = SecurityConfig::default().with_allowed(features);
+    /// assert!(!config.allowed.symlinks);
+    /// ```
+    #[must_use]
+    #[inline]
+    pub fn with_allowed(mut self, allowed: AllowedFeatures) -> Self {
+        self.allowed = allowed;
+        self
+    }
+
+    /// Enables or disables symlinks in extracted archives.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::SecurityConfig;
+    ///
+    /// let config = SecurityConfig::default().with_allow_symlinks(true);
+    /// assert!(config.allowed.symlinks);
+    /// ```
+    #[must_use]
+    #[inline]
+    pub fn with_allow_symlinks(mut self, allow: bool) -> Self {
+        self.allowed.symlinks = allow;
+        self
+    }
+
+    /// Enables or disables hardlinks in extracted archives.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::SecurityConfig;
+    ///
+    /// let config = SecurityConfig::default().with_allow_hardlinks(true);
+    /// assert!(config.allowed.hardlinks);
+    /// ```
+    #[must_use]
+    #[inline]
+    pub fn with_allow_hardlinks(mut self, allow: bool) -> Self {
+        self.allowed.hardlinks = allow;
+        self
+    }
+
+    /// Enables or disables absolute paths in archive entries.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::SecurityConfig;
+    ///
+    /// let config = SecurityConfig::default().with_allow_absolute_paths(true);
+    /// assert!(config.allowed.absolute_paths);
+    /// ```
+    #[must_use]
+    #[inline]
+    pub fn with_allow_absolute_paths(mut self, allow: bool) -> Self {
+        self.allowed.absolute_paths = allow;
+        self
+    }
+
+    /// Enables or disables world-writable files.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::SecurityConfig;
+    ///
+    /// let config = SecurityConfig::default().with_allow_world_writable(true);
+    /// assert!(config.allowed.world_writable);
+    /// ```
+    #[must_use]
+    #[inline]
+    pub fn with_allow_world_writable(mut self, allow: bool) -> Self {
+        self.allowed.world_writable = allow;
+        self
+    }
+
+    /// Enables or disables preserving file permissions from the archive.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::SecurityConfig;
+    ///
+    /// let config = SecurityConfig::default().with_preserve_permissions(true);
+    /// assert!(config.preserve_permissions);
+    /// ```
+    #[must_use]
+    #[inline]
+    pub fn with_preserve_permissions(mut self, preserve: bool) -> Self {
+        self.preserve_permissions = preserve;
+        self
+    }
+
+    /// Sets the list of allowed file extensions.
+    ///
+    /// An empty list allows all extensions.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::SecurityConfig;
+    ///
+    /// let config = SecurityConfig::default()
+    ///     .with_allowed_extensions(vec!["txt".to_string(), "pdf".to_string()]);
+    /// assert!(config.is_extension_allowed("txt"));
+    /// assert!(!config.is_extension_allowed("exe"));
+    /// ```
+    #[must_use]
+    #[inline]
+    pub fn with_allowed_extensions(mut self, extensions: Vec<String>) -> Self {
+        self.allowed_extensions = extensions;
+        self
+    }
+
+    /// Sets the list of banned path components.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::SecurityConfig;
+    ///
+    /// let config = SecurityConfig::default().with_banned_path_components(vec![".git".to_string()]);
+    /// assert!(!config.is_path_component_allowed(".git"));
+    /// assert!(config.is_path_component_allowed(".ssh"));
+    /// ```
+    #[must_use]
+    #[inline]
+    pub fn with_banned_path_components(mut self, components: Vec<String>) -> Self {
+        self.banned_path_components = components;
+        self
+    }
+
+    /// Enables or disables extraction from solid 7z archives.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::SecurityConfig;
+    ///
+    /// let config = SecurityConfig::default().with_allow_solid_archives(true);
+    /// assert!(config.allow_solid_archives);
+    /// ```
+    #[must_use]
+    #[inline]
+    pub fn with_allow_solid_archives(mut self, allow: bool) -> Self {
+        self.allow_solid_archives = allow;
+        self
+    }
+
+    /// Sets the maximum memory for solid archive extraction in bytes.
+    ///
+    /// Only applies when `allow_solid_archives` is `true`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::SecurityConfig;
+    ///
+    /// let config = SecurityConfig::default()
+    ///     .with_allow_solid_archives(true)
+    ///     .with_max_solid_block_memory(1024 * 1024 * 1024);
+    /// assert_eq!(config.max_solid_block_memory, 1024 * 1024 * 1024);
+    /// ```
+    #[must_use]
+    #[inline]
+    pub fn with_max_solid_block_memory(mut self, size: u64) -> Self {
+        self.max_solid_block_memory = size;
+        self
+    }
+
     /// Validates whether a path component is allowed.
     ///
     /// Comparison is case-insensitive to prevent bypass on case-insensitive
@@ -277,6 +541,7 @@ impl SecurityConfig {
 /// Separate from `SecurityConfig` to keep security settings focused.
 /// These options control operational behavior like atomicity.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ExtractionOptions {
     /// Extract atomically: use a temp dir in the same parent as the output
     /// directory, rename on success, and delete on failure.
@@ -302,6 +567,45 @@ impl Default for ExtractionOptions {
             atomic: false,
             skip_duplicates: true,
         }
+    }
+}
+
+impl ExtractionOptions {
+    /// Enables or disables atomic extraction.
+    ///
+    /// When enabled, extraction is all-or-nothing: the output directory is not
+    /// created if extraction fails.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::ExtractionOptions;
+    ///
+    /// let opts = ExtractionOptions::default().with_atomic(true);
+    /// assert!(opts.atomic);
+    /// ```
+    #[must_use]
+    #[inline]
+    pub fn with_atomic(mut self, atomic: bool) -> Self {
+        self.atomic = atomic;
+        self
+    }
+
+    /// Enables or disables skipping duplicate entries silently.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::ExtractionOptions;
+    ///
+    /// let opts = ExtractionOptions::default().with_skip_duplicates(false);
+    /// assert!(!opts.skip_duplicates);
+    /// ```
+    #[must_use]
+    #[inline]
+    pub fn with_skip_duplicates(mut self, skip: bool) -> Self {
+        self.skip_duplicates = skip;
+        self
     }
 }
 

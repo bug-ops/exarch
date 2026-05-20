@@ -10,7 +10,6 @@ use exarch_core::ExtractionOptions;
 use exarch_core::ManifestEntryType;
 use exarch_core::NoopProgress;
 use exarch_core::SecurityConfig;
-use exarch_core::config::AllowedFeatures;
 use exarch_core::extract_archive_full;
 use exarch_core::list_archive;
 use std::env;
@@ -24,14 +23,12 @@ pub fn execute(args: &ExtractArgs, formatter: &dyn OutputFormatter) -> Result<()
     if !args.force && !args.atomic {
         let manifest = list_archive(
             &args.archive,
-            &SecurityConfig {
-                max_file_count: args.max_files,
-                max_total_size: args.max_total_size.unwrap_or(500 * 1024 * 1024),
-                max_file_size: args.max_file_size.unwrap_or(50 * 1024 * 1024),
-                max_compression_ratio: f64::from(args.max_compression_ratio),
-                allow_solid_archives: args.allow_solid_archives,
-                ..Default::default()
-            },
+            &SecurityConfig::default()
+                .with_max_file_count(args.max_files)
+                .with_max_total_size(args.max_total_size.unwrap_or(500 * 1024 * 1024))
+                .with_max_file_size(args.max_file_size.unwrap_or(50 * 1024 * 1024))
+                .with_max_compression_ratio(f64::from(args.max_compression_ratio))
+                .with_allow_solid_archives(args.allow_solid_archives),
         )
         .with_context(|| format!("failed to list archive: {}", args.archive.display()))?;
 
@@ -53,26 +50,20 @@ pub fn execute(args: &ExtractArgs, formatter: &dyn OutputFormatter) -> Result<()
         }
     }
 
-    let config = SecurityConfig {
-        max_file_count: args.max_files,
-        max_total_size: args.max_total_size.unwrap_or(500 * 1024 * 1024),
-        max_file_size: args.max_file_size.unwrap_or(50 * 1024 * 1024),
-        max_compression_ratio: f64::from(args.max_compression_ratio),
-        allowed: AllowedFeatures {
-            symlinks: args.allow_symlinks,
-            hardlinks: args.allow_hardlinks,
-            absolute_paths: false,
-            world_writable: args.allow_world_writable,
-        },
-        preserve_permissions: args.preserve_permissions,
-        allow_solid_archives: args.allow_solid_archives,
-        ..Default::default()
-    };
+    let config = SecurityConfig::default()
+        .with_max_file_count(args.max_files)
+        .with_max_total_size(args.max_total_size.unwrap_or(500 * 1024 * 1024))
+        .with_max_file_size(args.max_file_size.unwrap_or(50 * 1024 * 1024))
+        .with_max_compression_ratio(f64::from(args.max_compression_ratio))
+        .with_allow_symlinks(args.allow_symlinks)
+        .with_allow_hardlinks(args.allow_hardlinks)
+        .with_allow_world_writable(args.allow_world_writable)
+        .with_preserve_permissions(args.preserve_permissions)
+        .with_allow_solid_archives(args.allow_solid_archives);
 
-    let options = ExtractionOptions {
-        atomic: args.atomic,
-        skip_duplicates: !args.force,
-    };
+    let options = ExtractionOptions::default()
+        .with_atomic(args.atomic)
+        .with_skip_duplicates(!args.force);
 
     // When --atomic + --force: remove existing destination after successful
     // extraction (handled inside extract_atomic via rename semantics) but we

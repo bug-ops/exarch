@@ -59,10 +59,7 @@ fn test_7z_security_config_integration() {
     let mut archive = SevenZArchive::new(cursor).unwrap();
 
     let temp = TempDir::new().unwrap();
-    let config = SecurityConfig {
-        max_file_size: 1024, // 1 KB limit
-        ..SecurityConfig::default()
-    };
+    let config = SecurityConfig::default().with_max_file_size(1024);
 
     let result = archive.extract(
         temp.path(),
@@ -157,10 +154,7 @@ fn test_7z_quota_file_count() {
     let mut archive = SevenZArchive::new(cursor).unwrap();
 
     let temp = TempDir::new().unwrap();
-    let config = SecurityConfig {
-        max_file_count: 1, // Only 1 file allowed
-        ..SecurityConfig::default()
-    };
+    let config = SecurityConfig::default().with_max_file_count(1);
 
     let result = archive.extract(
         temp.path(),
@@ -178,10 +172,7 @@ fn test_7z_quota_total_size() {
     let mut archive = SevenZArchive::new(cursor).unwrap();
 
     let temp = TempDir::new().unwrap();
-    let config = SecurityConfig {
-        max_total_size: 10, // Very small limit
-        ..SecurityConfig::default()
-    };
+    let config = SecurityConfig::default().with_max_total_size(10);
 
     let result = archive.extract(
         temp.path(),
@@ -204,11 +195,9 @@ fn test_7z_solid_archive_extraction_success() {
     let mut archive = SevenZArchive::new(cursor).unwrap();
 
     let temp = TempDir::new().unwrap();
-    let config = SecurityConfig {
-        allow_solid_archives: true,
-        max_solid_block_memory: 100 * 1024 * 1024, // 100 MB
-        ..SecurityConfig::default()
-    };
+    let config = SecurityConfig::default()
+        .with_allow_solid_archives(true)
+        .with_max_solid_block_memory(100 * 1024 * 1024);
 
     let report = archive
         .extract(
@@ -234,12 +223,10 @@ fn test_7z_solid_archive_with_file_count_quota() {
     let mut archive = SevenZArchive::new(cursor).unwrap();
 
     let temp = TempDir::new().unwrap();
-    let config = SecurityConfig {
-        allow_solid_archives: true,
-        max_solid_block_memory: 100 * 1024 * 1024,
-        max_file_count: 1, // Solid has more than 1 file
-        ..SecurityConfig::default()
-    };
+    let config = SecurityConfig::default()
+        .with_allow_solid_archives(true)
+        .with_max_solid_block_memory(100 * 1024 * 1024)
+        .with_max_file_count(1);
 
     let result = archive.extract(
         temp.path(),
@@ -511,10 +498,7 @@ fn test_7z_partial_extraction_accurate_report() {
 
     // skip_duplicates=false so the second "file.txt" triggers an error after
     // the first has already been written to disk.
-    let options = ExtractionOptions {
-        skip_duplicates: false,
-        ..ExtractionOptions::default()
-    };
+    let options = ExtractionOptions::default().with_skip_duplicates(false);
     let result = archive.extract(
         out_temp.path(),
         &SecurityConfig::default(),

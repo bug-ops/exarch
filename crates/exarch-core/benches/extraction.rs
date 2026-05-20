@@ -64,13 +64,11 @@ fn test_fixtures_dir() -> PathBuf {
 /// Disables zip bomb detection to allow testing highly compressed data,
 /// and increases size/depth limits for stress testing benchmarks.
 fn benchmark_config() -> SecurityConfig {
-    SecurityConfig {
-        max_compression_ratio: f64::MAX,    // Disable zip bomb detection
-        max_file_size: 500 * 1024 * 1024,   // 500 MB
-        max_total_size: 1024 * 1024 * 1024, // 1 GB
-        max_path_depth: 100,                // Allow deep path benchmarks
-        ..SecurityConfig::default()
-    }
+    SecurityConfig::default()
+        .with_max_compression_ratio(f64::MAX)
+        .with_max_file_size(500 * 1024 * 1024)
+        .with_max_total_size(1024 * 1024 * 1024)
+        .with_max_path_depth(100)
 }
 
 /// Returns fixture path if it exists, otherwise None.
@@ -270,11 +268,9 @@ fn benchmark_large_files(c: &mut Criterion) {
                     let mut archive = ZipArchive::new(cursor).unwrap();
 
                     // Use config with increased limits for benchmarks
-                    let config = SecurityConfig {
-                        max_file_size: 200 * 1024 * 1024,  // 200 MB
-                        max_total_size: 500 * 1024 * 1024, // 500 MB
-                        ..SecurityConfig::default()
-                    };
+                    let config = SecurityConfig::default()
+                        .with_max_file_size(200 * 1024 * 1024)
+                        .with_max_total_size(500 * 1024 * 1024);
 
                     archive
                         .extract(

@@ -75,6 +75,12 @@ pub struct SecurityConfig {
     pub preserve_permissions: bool,
 
     /// List of allowed file extensions (empty = allow all).
+    ///
+    /// Extensions are matched case-insensitively (e.g., `"txt"` matches both
+    /// `file.txt` and `file.TXT`). The leading dot must be omitted.
+    ///
+    /// When this list is non-empty, files without a file extension are treated
+    /// as not allowed and will be skipped during extraction.
     pub allowed_extensions: Vec<String>,
 
     /// List of banned path components (e.g., ".git", ".ssh").
@@ -525,6 +531,9 @@ impl SecurityConfig {
     }
 
     /// Validates whether a file extension is allowed.
+    ///
+    /// When `allowed_extensions` is empty, all extensions are permitted.
+    /// When it is non-empty, only listed extensions are permitted.
     #[must_use]
     pub fn is_extension_allowed(&self, extension: &str) -> bool {
         if self.allowed_extensions.is_empty() {
@@ -533,6 +542,36 @@ impl SecurityConfig {
         self.allowed_extensions
             .iter()
             .any(|ext| ext.eq_ignore_ascii_case(extension))
+    }
+
+    /// Returns `true` if a file with the given optional extension may be
+    /// extracted.
+    ///
+    /// When `allowed_extensions` is non-empty and `extension` is `None`
+    /// (the file has no extension), the file is treated as not allowed.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::SecurityConfig;
+    ///
+    /// let config = SecurityConfig::default().with_allowed_extensions(vec!["txt".to_string()]);
+    ///
+    /// assert!(config.is_path_extension_allowed(Some("txt")));
+    /// assert!(!config.is_path_extension_allowed(Some("exe")));
+    /// // Files without an extension are blocked when the allowlist is non-empty.
+    /// assert!(!config.is_path_extension_allowed(None));
+    ///
+    /// // Empty allowlist permits everything, including extension-less files.
+    /// let permissive = SecurityConfig::default();
+    /// assert!(permissive.is_path_extension_allowed(None));
+    /// ```
+    #[must_use]
+    pub fn is_path_extension_allowed(&self, extension: Option<&str>) -> bool {
+        if self.allowed_extensions.is_empty() {
+            return true;
+        }
+        extension.is_some_and(|ext| self.is_extension_allowed(ext))
     }
 }
 

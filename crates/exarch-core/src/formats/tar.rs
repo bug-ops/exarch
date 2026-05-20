@@ -216,6 +216,18 @@ impl<R: Read> TarArchive<R> {
         let size = TarEntryAdapter::get_uncompressed_size(&entry);
         let mode = entry.header().mode().ok();
 
+        if matches!(entry_type, EntryType::File) {
+            let ext = path.extension().and_then(|e| e.to_str());
+            if !ctx.config.is_path_extension_allowed(ext) {
+                ctx.report.files_skipped += 1;
+                ctx.report.warnings.push(format!(
+                    "skipped entry with disallowed extension: {}",
+                    path.display()
+                ));
+                return Ok(None);
+            }
+        }
+
         let validated = ctx.validator.validate_entry(
             &path,
             &entry_type,
@@ -369,6 +381,7 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
             copy_buffer: &mut copy_buffer,
             dir_cache: &mut dir_cache,
             skip_duplicates,
+            config,
         };
 
         for entry_result in entries {
@@ -485,6 +498,7 @@ struct ExtractionContext<'a, 'v> {
     copy_buffer: &'a mut CopyBuffer,
     dir_cache: &'a mut common::DirCache,
     skip_duplicates: bool,
+    config: &'v SecurityConfig,
 }
 
 #[allow(dead_code)] // Fields used only on Unix
@@ -726,6 +740,7 @@ pub fn open_tar_zst<P: AsRef<Path>>(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::NoopProgress;
     use crate::test_utils::create_test_tar;
     use std::io::Cursor;
     use std::io::Write;
@@ -2231,5 +2246,71 @@ mod tests {
 
         assert!(report.is_safe());
         assert_eq!(report.total_entries, 1);
+    }
+
+    #[test]
+    fn test_allowed_extensions_filters_out_disallowed() {
+        let tar_data = create_test_tar(vec![("keep.txt", b"keep"), ("skip.exe", b"skip")]);
+        let dest = tempfile::tempdir().unwrap();
+        let config = SecurityConfig::default().with_allowed_extensions(vec!["txt".to_string()]);
+
+        let report = TarArchive::new(Cursor::new(tar_data))
+            .extract(
+                dest.path(),
+                &config,
+                &ExtractionOptions::default(),
+                &mut NoopProgress,
+            )
+            .unwrap();
+
+        assert_eq!(report.files_extracted, 1);
+        assert_eq!(report.files_skipped, 1);
+        assert!(dest.path().join("keep.txt").exists());
+        assert!(!dest.path().join("skip.exe").exists());
+        assert!(report.warnings.iter().any(|w| w.contains("skip.exe")));
+    }
+
+    #[test]
+    fn test_empty_allowed_extensions_allows_all() {
+        let tar_data = create_test_tar(vec![("a.txt", b"a"), ("b.exe", b"b")]);
+        let dest = tempfile::tempdir().unwrap();
+        let config = SecurityConfig::default(); // empty = allow all
+
+        let report = TarArchive::new(Cursor::new(tar_data))
+            .extract(
+                dest.path(),
+                &config,
+                &ExtractionOptions::default(),
+                &mut NoopProgress,
+            )
+            .unwrap();
+
+        assert_eq!(report.files_extracted, 2);
+        assert_eq!(report.files_skipped, 0);
+    }
+
+    #[test]
+    fn test_extension_less_files_blocked_when_allowlist_nonempty() {
+        // A file without any extension must be blocked when an allowlist is set.
+        let tar_data = create_test_tar(vec![("Makefile", b"all:"), ("keep.txt", b"ok")]);
+        let dest = tempfile::tempdir().unwrap();
+        let config = SecurityConfig::default().with_allowed_extensions(vec!["txt".to_string()]);
+
+        let report = TarArchive::new(Cursor::new(tar_data))
+            .extract(
+                dest.path(),
+                &config,
+                &ExtractionOptions::default(),
+                &mut NoopProgress,
+            )
+            .unwrap();
+
+        assert_eq!(report.files_extracted, 1, "only .txt should be extracted");
+        assert_eq!(
+            report.files_skipped, 1,
+            "extension-less file must be skipped"
+        );
+        assert!(!dest.path().join("Makefile").exists());
+        assert!(dest.path().join("keep.txt").exists());
     }
 }

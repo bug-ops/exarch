@@ -5,19 +5,21 @@ use clap::CommandFactory;
 use clap_complete::Shell;
 use std::io;
 
-/// Generates shell completions for the specified shell.
+/// Generates shell completions for the specified shell and writes them to
+/// stdout.
 ///
-/// # Arguments
-///
-/// * `shell` - Target shell (bash, zsh, fish, powershell, elvish)
+/// Invoke as `exarch completion <shell>` and redirect to the appropriate
+/// completions directory for your shell.
 ///
 /// # Examples
 ///
-/// ```no_run
-/// use clap_complete::Shell;
-/// use exarch_cli::commands::completion;
+/// Install completions for zsh:
 ///
-/// completion::execute(Shell::Bash);
+/// ```text
+/// exarch completion zsh > ~/.zsh/completions/_exarch
+/// exarch completion bash > ~/.bash_completion.d/exarch
+/// exarch completion fish > ~/.config/fish/completions/exarch.fish
+/// exarch completion powershell | Out-File $PROFILE.CurrentUserAllHosts
 /// ```
 pub fn execute(shell: Shell) {
     let mut cmd = Cli::command();

@@ -13,7 +13,10 @@ use std::process;
 
 fn run(cli: &cli::Cli, formatter: &dyn OutputFormatter) -> (anyhow::Result<()>, &'static str) {
     match &cli.command {
-        cli::Commands::Extract(args) => (commands::extract::execute(args, formatter), "extract"),
+        cli::Commands::Extract(args) => (
+            commands::extract::execute(args, formatter, cli.verbose, cli.quiet),
+            "extract",
+        ),
         cli::Commands::Create(args) => (
             commands::create::execute(args, formatter, cli.quiet),
             "create",

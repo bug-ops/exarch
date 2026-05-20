@@ -4,17 +4,41 @@ use crate::cli::ExtractArgs;
 use crate::error::add_archive_context;
 use crate::output::OutputFormatter;
 use crate::progress::CliProgress;
+use crate::progress::VerboseProgress;
 use anyhow::Context;
 use anyhow::Result;
 use exarch_core::ExtractionOptions;
+use exarch_core::ExtractionReport;
 use exarch_core::ManifestEntryType;
 use exarch_core::NoopProgress;
+use exarch_core::ProgressCallback;
 use exarch_core::SecurityConfig;
 use exarch_core::extract_archive_with_options_and_progress;
 use exarch_core::list_archive;
 use std::env;
+use std::path::Path;
 
-pub fn execute(args: &ExtractArgs, formatter: &dyn OutputFormatter) -> Result<()> {
+fn run_extraction(
+    archive: &Path,
+    output_dir: &Path,
+    config: &SecurityConfig,
+    options: &ExtractionOptions,
+    progress: &mut dyn ProgressCallback,
+    allow_symlinks: bool,
+) -> Result<ExtractionReport> {
+    add_archive_context(
+        extract_archive_with_options_and_progress(archive, output_dir, config, options, progress),
+        archive,
+        allow_symlinks,
+    )
+}
+
+pub fn execute(
+    args: &ExtractArgs,
+    formatter: &dyn OutputFormatter,
+    verbose: bool,
+    quiet: bool,
+) -> Result<()> {
     let output_dir = match &args.output_dir {
         Some(dir) => dir.clone(),
         None => env::current_dir().context("failed to get current directory")?,
@@ -74,31 +98,40 @@ pub fn execute(args: &ExtractArgs, formatter: &dyn OutputFormatter) -> Result<()
             .with_context(|| format!("failed to remove existing dir: {}", output_dir.display()))?;
     }
 
-    // Use progress bar if TTY is detected (not quiet, not JSON, is terminal)
-    let report = if CliProgress::should_show() {
-        let mut progress = CliProgress::new(100, "Extracting");
-        add_archive_context(
-            extract_archive_with_options_and_progress(
-                &args.archive,
-                &output_dir,
-                &config,
-                &options,
-                &mut progress,
-            ),
+    let report = if quiet {
+        run_extraction(
             &args.archive,
+            &output_dir,
+            &config,
+            &options,
+            &mut NoopProgress,
+            args.allow_symlinks,
+        )?
+    } else if verbose {
+        run_extraction(
+            &args.archive,
+            &output_dir,
+            &config,
+            &options,
+            &mut VerboseProgress::new(),
+            args.allow_symlinks,
+        )?
+    } else if CliProgress::should_show() {
+        run_extraction(
+            &args.archive,
+            &output_dir,
+            &config,
+            &options,
+            &mut CliProgress::new(100, "Extracting"),
             args.allow_symlinks,
         )?
     } else {
-        let mut noop = NoopProgress;
-        add_archive_context(
-            extract_archive_with_options_and_progress(
-                &args.archive,
-                &output_dir,
-                &config,
-                &options,
-                &mut noop,
-            ),
+        run_extraction(
             &args.archive,
+            &output_dir,
+            &config,
+            &options,
+            &mut NoopProgress,
             args.allow_symlinks,
         )?
     };

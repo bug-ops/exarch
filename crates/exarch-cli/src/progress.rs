@@ -91,6 +91,46 @@ impl ProgressCallback for CliProgress {
     }
 }
 
+/// Per-entry verbose progress that prints one line per archive entry to stderr.
+///
+/// Activated when `--verbose` is set and `--quiet` is not. Prints each entry
+/// name as it starts processing. No TTY detection is required — output is
+/// always plain text.
+///
+/// # Examples
+///
+/// ```no_run
+/// use exarch_core::ProgressCallback;
+/// use std::path::Path;
+///
+/// let mut p = VerboseProgress::new();
+/// p.on_entry_start(Path::new("data/file.txt"), 10, 0);
+/// p.on_entry_complete(Path::new("data/file.txt"));
+/// p.on_complete();
+/// ```
+#[derive(Debug, Default)]
+pub struct VerboseProgress;
+
+impl VerboseProgress {
+    /// Creates a new `VerboseProgress` instance.
+    #[must_use]
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl ProgressCallback for VerboseProgress {
+    fn on_entry_start(&mut self, path: &Path, _total: usize, _current: usize) {
+        eprintln!("  extract  {}", path.display());
+    }
+
+    fn on_bytes_written(&mut self, _bytes: u64) {}
+
+    fn on_entry_complete(&mut self, _path: &Path) {}
+
+    fn on_complete(&mut self) {}
+}
+
 /// Converts bytes to human-readable format (KB, MB, GB, TB).
 fn humanize_bytes(bytes: u64) -> String {
     const KB: u64 = 1024;
@@ -150,6 +190,15 @@ mod tests {
             humanize_duration(std::time::Duration::from_secs(3661)),
             "1h1m"
         );
+    }
+
+    #[test]
+    fn test_verbose_progress_no_panic() {
+        let mut p = VerboseProgress::new();
+        p.on_entry_start(Path::new("data/file.txt"), 10, 0);
+        p.on_bytes_written(512);
+        p.on_entry_complete(Path::new("data/file.txt"));
+        p.on_complete();
     }
 
     #[test]

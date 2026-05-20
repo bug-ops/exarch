@@ -55,8 +55,10 @@ jobs:
               - 'rustfmt.toml'
             python:
               - 'crates/exarch-python/**'
+              - 'crates/exarch-core/**'
             node:
               - 'crates/exarch-node/**'
+              - 'crates/exarch-core/**'
             ci:
               - '.github/workflows/**'
               - '.github/labeler.yml'

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-05-20
+
 ### Added
 
 - `extract` subcommand now accepts `--allowed-extensions <EXT>` (repeatable; comma-separated values also accepted) and passes the parsed list to `SecurityConfig::with_allowed_extensions()`, exposing the core extension filter at the CLI level (#246).
@@ -19,11 +21,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Breaking Changes
 
 - **`Archive::open`** now returns `Self` instead of `Result<Self>`. Callers must remove `?` or `.unwrap()` (#243).
+- `SecurityConfig`, `AllowedFeatures`, and `ExtractionOptions` are now `#[non_exhaustive]`. External crates can no longer construct these structs via struct literal syntax; use `Default::default()` or the new fluent builder methods instead (#221).
+- Internal modules `copy`, `io`, and `test_utils` in `exarch-core` are now `pub(crate)` instead of `pub`. These were never part of the public API; any external code referencing `exarch_core::copy`, `exarch_core::io`, or `exarch_core::test_utils` directly will no longer compile (#173).
 
 ### Changed
 
 - `verify_entry` in `exarch-core::inspection::verify` now calls `validate_path` once per entry and caches the result, eliminating a redundant second call (and the associated `canonicalize` syscalls) for symlink and hardlink entries (#236).
 - Upgraded `zip` dependency from 8.6.0 to 9.0.0-pre2; adapted `ZipFile::name()` call sites to propagate the new `Result<Cow<str>, ZipError>` return type (#238).
+- Refactored `TarArchive` internal extraction helpers: introduced a private `ExtractionContext<'_, '_>` struct that groups the six shared parameters (`validator`, `dest`, `report`, `copy_buffer`, `dir_cache`, `skip_duplicates`) previously threaded individually through `process_entry` (7 params), `extract_file` (7 params), and `create_hardlink` (5 params). Signatures now accept `ctx: &mut ExtractionContext<'_, '_>` instead (#222).
+- `extract_archive_full` renamed to `extract_archive_with_options_and_progress` for API naming consistency. The old name was ambiguous; the new name describes both parameters the function accepts (#219).
+- Introduced `FormatCreator` trait in `exarch-core::formats::traits` for archive creation dispatch. The trait mirrors `ArchiveFormat` on the write side and replaces the manual `match` in `create_archive_with_progress` with six unit struct implementors (`TarCreator`, `TarGzCreator`, `TarBz2Creator`, `TarXzCreator`, `TarZstCreator`, `ZipCreator`) and a `creator_for_format` helper (#220).
+- Added 15 fluent builder methods to `SecurityConfig` (`with_max_file_size`, `with_max_total_size`, `with_max_compression_ratio`, `with_max_file_count`, `with_max_path_depth`, `with_allowed`, `with_allow_symlinks`, `with_allow_hardlinks`, `with_allow_absolute_paths`, `with_allow_world_writable`, `with_preserve_permissions`, `with_allowed_extensions`, `with_banned_path_components`, `with_allow_solid_archives`, `with_max_solid_block_memory`) and 2 to `ExtractionOptions` (`with_atomic`, `with_skip_duplicates`) (#218).
+- `TarArchive::list()` and `TarArchive::extract()` now have `///` doc comments explaining that `list()` consumes the internal reader (TAR is forward-only) and that calling `extract()` on the same instance afterward returns `InvalidArchive`. Callers must open a fresh instance for extraction (#211).
+- `CopyBuffer::size()` visibility corrected from `pub(crate)` to `pub`, consistent with the other items in the crate-internal `mod copy`. The `pub(crate)` module boundary in `lib.rs` already enforces the encapsulation; redundant `pub(crate)` on items inside a `pub(crate)` module triggers the `redundant_pub_crate` clippy lint (#203).
+- `verify_archive` now delegates to `verify_manifest` after calling `list_archive`, eliminating ~80 lines of duplicated entry-processing logic (#190).
+- `ProgressCallback::on_complete` doc comment clarified: the method is called only on successful completion; implementors must not use it for cleanup.
+- `ArchiveFormat` trait extended with `fn list()` and `fn verify()` methods, providing a single implementation point for all format operations (#174).
+
+### Removed
+
+- Removed 5 non-progress public functions (`create_tar`, `create_tar_gz`, `create_tar_bz2`, `create_tar_xz`, `create_tar_zst`) from `exarch-core::creation::tar` that were annotated `#[allow(dead_code)]` and unreachable from the crate's public surface. The public API already routes through `FormatCreator` trait objects using the `_with_progress` variants (#227).
+- Removed dead `format_success` and `format_warning` methods from the `OutputFormatter` trait and both implementations (`HumanFormatter`, `JsonFormatter`). Neither method was called from any command handler (#208).
+- Removed dead constant `SEVENZ_MAGIC` and its `#[allow(dead_code)]` suppression from `formats/detect.rs`; the constant was unused in format detection logic (#175).
 
 ### Fixed
 
@@ -33,37 +52,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ArchiveBuilder::extract` now returns `ExtractionError::InvalidConfiguration` instead of `ExtractionError::SecurityViolation` when `archive_path` or `output_dir` are not set. The previous variant caused `error_code()` to return `"SECURITY_VIOLATION"` for what is a caller configuration mistake (#235).
 - Corrected the `Archive::open` doc-comment which incorrectly claimed the constructor validates file existence. The function is infallible; I/O errors surface on `extract()` (#237).
 - `create_tar_zst_with_progress` now calls `zstd::Encoder::finish()` explicitly and propagates any I/O error via `?`. Previously the encoder relied on `Drop` to call `try_finish()`, which silently discarded flush errors and could produce a truncated `.tar.zst` archive on disk-full or other I/O failure (#226).
-- CLI no longer emits `"HINT: Use --allow-symlinks"` when `--allow-symlinks` is already active and a symlink escape is blocked. The hint is now suppressed when the flag is set, since the escape is a genuine security violation rather than a configuration issue (#213).
-
-### Removed
-
-- Removed 5 non-progress public functions (`create_tar`, `create_tar_gz`, `create_tar_bz2`, `create_tar_xz`, `create_tar_zst`) from `exarch-core::creation::tar` that were annotated `#[allow(dead_code)]` and unreachable from the crate's public surface. The public API already routes through `FormatCreator` trait objects using the `_with_progress` variants (#227).
-
-### Changed
-
-- Refactored `TarArchive` internal extraction helpers: introduced a private `ExtractionContext<'_, '_>` struct that groups the six shared parameters (`validator`, `dest`, `report`, `copy_buffer`, `dir_cache`, `skip_duplicates`) previously threaded individually through `process_entry` (7 params), `extract_file` (7 params), and `create_hardlink` (5 params). Signatures now accept `ctx: &mut ExtractionContext<'_, '_>` instead (#222).
-
-### Breaking Changes
-
-- `SecurityConfig`, `AllowedFeatures`, and `ExtractionOptions` are now `#[non_exhaustive]`. External crates can no longer construct these structs via struct literal syntax; use `Default::default()` or the new fluent builder methods instead (#221).
-
-### Changed
-
-- `extract_archive_full` renamed to `extract_archive_with_options_and_progress` for API naming consistency. The old name was ambiguous; the new name describes both parameters the function accepts (#219).
-- Introduced `FormatCreator` trait in `exarch-core::formats::traits` for archive creation dispatch. The trait mirrors `ArchiveFormat` on the write side and replaces the manual `match` in `create_archive_with_progress` with six unit struct implementors (`TarCreator`, `TarGzCreator`, `TarBz2Creator`, `TarXzCreator`, `TarZstCreator`, `ZipCreator`) and a `creator_for_format` helper (#220).
-- Added 15 fluent builder methods to `SecurityConfig` (`with_max_file_size`, `with_max_total_size`, `with_max_compression_ratio`, `with_max_file_count`, `with_max_path_depth`, `with_allowed`, `with_allow_symlinks`, `with_allow_hardlinks`, `with_allow_absolute_paths`, `with_allow_world_writable`, `with_preserve_permissions`, `with_allowed_extensions`, `with_banned_path_components`, `with_allow_solid_archives`, `with_max_solid_block_memory`) and 2 to `ExtractionOptions` (`with_atomic`, `with_skip_duplicates`) (#218).
-- `TarArchive::list()` and `TarArchive::extract()` now have `///` doc comments explaining that `list()` consumes the internal reader (TAR is forward-only) and that calling `extract()` on the same instance afterward returns `InvalidArchive`. Callers must open a fresh instance for extraction (#211).
-- `CopyBuffer::size()` visibility corrected from `pub(crate)` to `pub`, consistent with the other items in the crate-internal `mod copy`. The `pub(crate)` module boundary in `lib.rs` already enforces the encapsulation; redundant `pub(crate)` on items inside a `pub(crate)` module triggers the `redundant_pub_crate` clippy lint (#203).
-
-- **BREAKING**: Internal modules `copy`, `io`, and `test_utils` in `exarch-core` are now `pub(crate)` instead of `pub`. These were never part of the public API; any external code referencing `exarch_core::copy`, `exarch_core::io`, or `exarch_core::test_utils` directly will no longer compile (#173).
-- `verify_archive` now delegates to `verify_manifest` after calling `list_archive`, eliminating ~80 lines of duplicated entry-processing logic (#190).
-- `ProgressCallback::on_complete` doc comment clarified: the method is called only on successful completion; implementors must not use it for cleanup.
-- Removed dead `format_success` and `format_warning` methods from the `OutputFormatter` trait and both implementations (`HumanFormatter`, `JsonFormatter`). Neither method was called from any command handler (#208).
-- Removed dead constant `SEVENZ_MAGIC` and its `#[allow(dead_code)]` suppression from `formats/detect.rs`; the constant was unused in format detection logic (#175).
-- `ArchiveFormat` trait extended with `fn list()` and `fn verify()` methods, providing a single implementation point for all format operations (#174).
-
-### Fixed
-
 - CLI no longer emits `"HINT: Use --allow-symlinks"` when `--allow-symlinks` is already active and a symlink escape is blocked. The hint is now suppressed when the flag is set, since the escape is a genuine security violation rather than a configuration issue (#213).
 - `verify_archive` no longer shares a static `/tmp/exarch-verify` directory across concurrent calls. Each invocation now uses an isolated `tempfile::TempDir` scoped to its lifetime, eliminating the TOCTOU race and persistent state pollution (#200).
 - 7z extraction callback now accumulates `bytes_written` via `checked_add` instead of unchecked `+=`, preventing silent integer wraparound in release builds and matching the project-wide convention established in `copy_with_buffer` (#201).
@@ -448,7 +436,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 64KB reusable copy buffers
 - LRU cache for symlink target resolution
 
-[Unreleased]: https://github.com/bug-ops/exarch/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/bug-ops/exarch/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/bug-ops/exarch/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/bug-ops/exarch/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/bug-ops/exarch/compare/v0.2.9...v0.3.0
 [0.2.9]: https://github.com/bug-ops/exarch/compare/v0.2.8...v0.2.9

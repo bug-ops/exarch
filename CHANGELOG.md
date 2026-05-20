@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `create_tar_zst_with_progress` now calls `zstd::Encoder::finish()` explicitly and propagates any I/O error via `?`. Previously the encoder relied on `Drop` to call `try_finish()`, which silently discarded flush errors and could produce a truncated `.tar.zst` archive on disk-full or other I/O failure (#226).
+
+### Removed
+
+- Removed 5 non-progress public functions (`create_tar`, `create_tar_gz`, `create_tar_bz2`, `create_tar_xz`, `create_tar_zst`) from `exarch-core::creation::tar` that were annotated `#[allow(dead_code)]` and unreachable from the crate's public surface. The public API already routes through `FormatCreator` trait objects using the `_with_progress` variants (#227).
+
 ### Changed
 
 - Refactored `TarArchive` internal extraction helpers: introduced a private `ExtractionContext<'_, '_>` struct that groups the six shared parameters (`validator`, `dest`, `report`, `copy_buffer`, `dir_cache`, `skip_duplicates`) previously threaded individually through `process_entry` (7 params), `extract_file` (7 params), and `create_hardlink` (5 params). Signatures now accept `ctx: &mut ExtractionContext<'_, '_>` instead (#222).

@@ -33,6 +33,16 @@ fn run_extraction(
     )
 }
 
+/// Expands a list of extension tokens that may contain comma-separated values
+/// into individual lowercase extension strings without leading dots.
+fn parse_extensions(raw: &[String]) -> Vec<String> {
+    raw.iter()
+        .flat_map(|s| s.split(','))
+        .map(|ext| ext.trim().trim_start_matches('.').to_lowercase())
+        .filter(|ext| !ext.is_empty())
+        .collect()
+}
+
 pub fn execute(
     args: &ExtractArgs,
     formatter: &dyn OutputFormatter,
@@ -44,18 +54,19 @@ pub fn execute(
         None => env::current_dir().context("failed to get current directory")?,
     };
 
-    if !args.force && !args.atomic {
-        let manifest = list_archive(
-            &args.archive,
-            &SecurityConfig::default()
-                .with_max_file_count(args.max_files)
-                .with_max_total_size(args.max_total_size.unwrap_or(500 * 1024 * 1024))
-                .with_max_file_size(args.max_file_size.unwrap_or(50 * 1024 * 1024))
-                .with_max_compression_ratio(f64::from(args.max_compression_ratio))
-                .with_allow_solid_archives(args.allow_solid_archives),
-        )
+    let list_config = SecurityConfig::default()
+        .with_max_file_count(args.max_files)
+        .with_max_total_size(args.max_total_size.unwrap_or(500 * 1024 * 1024))
+        .with_max_file_size(args.max_file_size.unwrap_or(50 * 1024 * 1024))
+        .with_max_compression_ratio(f64::from(args.max_compression_ratio))
+        .with_allow_solid_archives(args.allow_solid_archives);
+
+    // Always list the archive: needed for conflict detection and for obtaining
+    // the real entry count that drives the progress bar.
+    let manifest = list_archive(&args.archive, &list_config)
         .with_context(|| format!("failed to list archive: {}", args.archive.display()))?;
 
+    if !args.force && !args.atomic {
         let conflicts: Vec<_> = manifest
             .entries
             .iter()
@@ -74,6 +85,8 @@ pub fn execute(
         }
     }
 
+    let allowed_extensions = parse_extensions(&args.allowed_extensions);
+
     let config = SecurityConfig::default()
         .with_max_file_count(args.max_files)
         .with_max_total_size(args.max_total_size.unwrap_or(500 * 1024 * 1024))
@@ -83,7 +96,22 @@ pub fn execute(
         .with_allow_hardlinks(args.allow_hardlinks)
         .with_allow_world_writable(args.allow_world_writable)
         .with_preserve_permissions(args.preserve_permissions)
-        .with_allow_solid_archives(args.allow_solid_archives);
+        .with_allow_solid_archives(args.allow_solid_archives)
+        .with_allowed_extensions(allowed_extensions);
+
+    let entry_count = if config.allowed_extensions.is_empty() {
+        manifest.entries.len()
+    } else {
+        manifest
+            .entries
+            .iter()
+            .filter(|e| e.entry_type == ManifestEntryType::File)
+            .filter(|e| {
+                let ext = e.path.extension().and_then(|s| s.to_str());
+                config.is_path_extension_allowed(ext)
+            })
+            .count()
+    };
 
     let options = ExtractionOptions::default()
         .with_atomic(args.atomic)
@@ -122,7 +150,7 @@ pub fn execute(
             &output_dir,
             &config,
             &options,
-            &mut CliProgress::new(100, "Extracting"),
+            &mut CliProgress::new(entry_count, "Extracting"),
             args.allow_symlinks,
         )?
     } else {
@@ -139,4 +167,50 @@ pub fn execute(
     formatter.format_extraction_result(&report)?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_extensions_comma_split() {
+        let raw = vec!["zip,tar,gz".to_string()];
+        assert_eq!(parse_extensions(&raw), vec!["zip", "tar", "gz"]);
+    }
+
+    #[test]
+    fn parse_extensions_strips_leading_dot() {
+        let raw = vec![".zip".to_string(), ".TAR".to_string()];
+        assert_eq!(parse_extensions(&raw), vec!["zip", "tar"]);
+    }
+
+    #[test]
+    fn parse_extensions_trims_whitespace() {
+        let raw = vec![" zip , tar ".to_string()];
+        assert_eq!(parse_extensions(&raw), vec!["zip", "tar"]);
+    }
+
+    #[test]
+    fn parse_extensions_lowercases() {
+        let raw = vec!["ZIP".to_string(), "TAR.GZ".to_string()];
+        assert_eq!(parse_extensions(&raw), vec!["zip", "tar.gz"]);
+    }
+
+    #[test]
+    fn parse_extensions_empty_input() {
+        assert_eq!(parse_extensions(&[]), Vec::<String>::new());
+    }
+
+    #[test]
+    fn parse_extensions_filters_empty_tokens() {
+        let raw = vec!["zip,,tar".to_string()];
+        assert_eq!(parse_extensions(&raw), vec!["zip", "tar"]);
+    }
+
+    #[test]
+    fn parse_extensions_mixed_repeatable_and_comma() {
+        let raw = vec!["zip,tar".to_string(), ".GZ".to_string()];
+        assert_eq!(parse_extensions(&raw), vec!["zip", "tar", "gz"]);
+    }
 }

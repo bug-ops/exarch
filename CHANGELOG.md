@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `extract` subcommand now accepts `--allowed-extensions <EXT>` (repeatable; comma-separated values also accepted) and passes the parsed list to `SecurityConfig::with_allowed_extensions()`, exposing the core extension filter at the CLI level (#246).
+
 - Shell completion generation via `exarch completion <shell>` (bash, zsh, fish, powershell, elvish). Output goes to stdout for piping into the appropriate completions directory (#232).
 - `--verbose` flag now prints one line per extracted entry to stderr, including entry name, size, and type. `--quiet` takes precedence when both flags are provided (#233).
 - `SecurityConfig::allowed_extensions` filter is now enforced during extraction across all three format handlers (TAR, ZIP, 7z). When the list is non-empty, files whose extension is not in the allowlist are skipped and recorded in `ExtractionReport::files_skipped` with a warning (#230).
@@ -24,6 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Upgraded `zip` dependency from 8.6.0 to 9.0.0-pre2; adapted `ZipFile::name()` call sites to propagate the new `Result<Cow<str>, ZipError>` return type (#238).
 
 ### Fixed
+
+- `CliProgress` bar now receives the actual archive entry count instead of the hardcoded value of 100; byte throughput is shown via `set_message` so that the `{pos}/{len} files` counter tracks only entries and does not race with cumulative byte values (#245).
+- `CliProgress` entry count is pre-filtered when `--allowed-extensions` is active, so the progress bar reaches 100% even when a subset of entries is extracted (#245, #246).
 
 - `ArchiveBuilder::extract` now returns `ExtractionError::InvalidConfiguration` instead of `ExtractionError::SecurityViolation` when `archive_path` or `output_dir` are not set. The previous variant caused `error_code()` to return `"SECURITY_VIOLATION"` for what is a caller configuration mistake (#235).
 - Corrected the `Archive::open` doc-comment which incorrectly claimed the constructor validates file existence. The function is infallible; I/O errors surface on `extract()` (#237).

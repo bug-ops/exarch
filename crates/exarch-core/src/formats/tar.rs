@@ -200,12 +200,7 @@ impl<R: Read> TarArchive<R> {
     /// Processes a single TAR entry.
     fn process_entry(
         entry: tar::Entry<'_, R>,
-        validator: &mut EntryValidator,
-        dest: &DestDir,
-        report: &mut ExtractionReport,
-        copy_buffer: &mut CopyBuffer,
-        dir_cache: &mut common::DirCache,
-        skip_duplicates: bool,
+        ctx: &mut ExtractionContext<'_, '_>,
     ) -> Result<Option<HardlinkInfo>> {
         // Skip TAR metadata entries (PAX headers, GNU long names/links, sparse)
         if TarEntryAdapter::is_metadata_entry(&entry) {
@@ -221,30 +216,34 @@ impl<R: Read> TarArchive<R> {
         let size = TarEntryAdapter::get_uncompressed_size(&entry);
         let mode = entry.header().mode().ok();
 
-        let validated =
-            validator.validate_entry(&path, &entry_type, size, None, mode, Some(dir_cache))?;
+        let validated = ctx.validator.validate_entry(
+            &path,
+            &entry_type,
+            size,
+            None,
+            mode,
+            Some(ctx.dir_cache),
+        )?;
 
         match validated.entry_type {
             ValidatedEntryType::File => {
-                Self::extract_file(
-                    entry,
-                    &validated,
-                    dest,
-                    report,
-                    copy_buffer,
-                    dir_cache,
-                    skip_duplicates,
-                )?;
+                Self::extract_file(entry, &validated, ctx)?;
                 Ok(None)
             }
 
             ValidatedEntryType::Directory => {
-                common::create_directory(&validated, dest, report, dir_cache)?;
+                common::create_directory(&validated, ctx.dest, ctx.report, ctx.dir_cache)?;
                 Ok(None)
             }
 
             ValidatedEntryType::Symlink(safe_symlink) => {
-                common::create_symlink(&safe_symlink, dest, report, dir_cache, skip_duplicates)?;
+                common::create_symlink(
+                    &safe_symlink,
+                    ctx.dest,
+                    ctx.report,
+                    ctx.dir_cache,
+                    ctx.skip_duplicates,
+                )?;
                 Ok(None)
             }
 
@@ -262,22 +261,18 @@ impl<R: Read> TarArchive<R> {
     fn extract_file(
         mut entry: tar::Entry<'_, R>,
         validated: &ValidatedEntry,
-        dest: &DestDir,
-        report: &mut ExtractionReport,
-        copy_buffer: &mut CopyBuffer,
-        dir_cache: &mut common::DirCache,
-        skip_duplicates: bool,
+        ctx: &mut ExtractionContext<'_, '_>,
     ) -> Result<()> {
         let size = Some(entry.size());
         common::extract_file_generic(
             &mut entry,
             validated,
-            dest,
-            report,
+            ctx.dest,
+            ctx.report,
             size,
-            copy_buffer,
-            dir_cache,
-            skip_duplicates,
+            ctx.copy_buffer,
+            ctx.dir_cache,
+            ctx.skip_duplicates,
         )
     }
 
@@ -287,15 +282,9 @@ impl<R: Read> TarArchive<R> {
     /// corruption: a real OS hardlink would allow a subsequent write to
     /// `link_path` to silently overwrite `target_path` (GHSA-2367-c296-3mp2
     /// variant, issue #130).
-    fn create_hardlink(
-        info: &HardlinkInfo,
-        dest: &DestDir,
-        report: &mut ExtractionReport,
-        dir_cache: &mut common::DirCache,
-        skip_duplicates: bool,
-    ) -> Result<()> {
-        let link_path = dest.join(&info.link_path);
-        let target_path = dest.join(&info.target_path);
+    fn create_hardlink(info: &HardlinkInfo, ctx: &mut ExtractionContext<'_, '_>) -> Result<()> {
+        let link_path = ctx.dest.join(&info.link_path);
+        let target_path = ctx.dest.join(&info.target_path);
 
         if !target_path.exists() {
             return Err(ExtractionError::InvalidArchive(format!(
@@ -305,12 +294,12 @@ impl<R: Read> TarArchive<R> {
         }
 
         // Create parent directories using cache
-        dir_cache.ensure_parent_dir(&link_path)?;
+        ctx.dir_cache.ensure_parent_dir(&link_path)?;
 
         if link_path.exists() {
-            if skip_duplicates {
-                report.files_skipped += 1;
-                report.warnings.push(format!(
+            if ctx.skip_duplicates {
+                ctx.report.files_skipped += 1;
+                ctx.report.warnings.push(format!(
                     "skipped duplicate hardlink: {}",
                     info.link_path.as_path().display()
                 ));
@@ -326,8 +315,8 @@ impl<R: Read> TarArchive<R> {
         // `link_path` cannot corrupt `target_path` because they are separate files.
         let bytes_copied = std::fs::copy(&target_path, &link_path)?;
 
-        report.files_extracted += 1;
-        report.bytes_written += bytes_copied;
+        ctx.report.files_extracted += 1;
+        ctx.report.bytes_written += bytes_copied;
 
         Ok(())
     }
@@ -373,13 +362,22 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
             .entries()
             .map_err(|e| ExtractionError::InvalidArchive(format!("failed to read entries: {e}")))?;
 
+        let mut ctx = ExtractionContext {
+            validator: &mut validator,
+            dest: &dest,
+            report: &mut report,
+            copy_buffer: &mut copy_buffer,
+            dir_cache: &mut dir_cache,
+            skip_duplicates,
+        };
+
         for entry_result in entries {
             let entry = entry_result.map_err(|e| {
                 let raw = ExtractionError::InvalidArchive(format!("failed to read entry: {e}"));
-                if report.total_items() > 0 {
+                if ctx.report.total_items() > 0 {
                     ExtractionError::PartialExtraction {
                         source: Box::new(raw),
-                        report: std::mem::take(&mut report),
+                        report: std::mem::take(ctx.report),
                     }
                 } else {
                     raw
@@ -395,15 +393,7 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
             current_entry = current_entry.saturating_add(1);
             progress.on_entry_start(&entry_path, 0, current_entry);
 
-            match Self::process_entry(
-                entry,
-                &mut validator,
-                &dest,
-                &mut report,
-                &mut copy_buffer,
-                &mut dir_cache,
-                skip_duplicates,
-            ) {
+            match Self::process_entry(entry, &mut ctx) {
                 Ok(Some(hardlink_info)) => {
                     progress.on_entry_complete(&entry_path);
                     hardlinks.push(hardlink_info);
@@ -412,10 +402,10 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
                     progress.on_entry_complete(&entry_path);
                 }
                 Err(e) => {
-                    return Err(if report.total_items() > 0 {
+                    return Err(if ctx.report.total_items() > 0 {
                         ExtractionError::PartialExtraction {
                             source: Box::new(e),
-                            report: std::mem::take(&mut report),
+                            report: std::mem::take(ctx.report),
                         }
                     } else {
                         e
@@ -426,17 +416,11 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
 
         // Two-pass extraction: create hardlinks after all target files exist
         for hardlink_info in &hardlinks {
-            if let Err(e) = Self::create_hardlink(
-                hardlink_info,
-                &dest,
-                &mut report,
-                &mut dir_cache,
-                skip_duplicates,
-            ) {
-                return Err(if report.total_items() > 0 {
+            if let Err(e) = Self::create_hardlink(hardlink_info, &mut ctx) {
+                return Err(if ctx.report.total_items() > 0 {
                     ExtractionError::PartialExtraction {
                         source: Box::new(e),
-                        report: std::mem::take(&mut report),
+                        report: std::mem::take(ctx.report),
                     }
                 } else {
                     e
@@ -494,7 +478,15 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
     }
 }
 
-/// Information about a hardlink for deferred creation.
+struct ExtractionContext<'a, 'v> {
+    validator: &'a mut EntryValidator<'v>,
+    dest: &'a DestDir,
+    report: &'a mut ExtractionReport,
+    copy_buffer: &'a mut CopyBuffer,
+    dir_cache: &'a mut common::DirCache,
+    skip_duplicates: bool,
+}
+
 #[allow(dead_code)] // Fields used only on Unix
 struct HardlinkInfo {
     link_path: SafePath,

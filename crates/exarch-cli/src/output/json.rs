@@ -134,36 +134,6 @@ impl OutputFormatter for JsonFormatter {
         let _ = Self::output(&output);
     }
 
-    fn format_success(&self, operation: &str, message: &str) {
-        #[derive(Serialize)]
-        struct SuccessData {
-            message: String,
-        }
-
-        let output = JsonOutput::success(
-            operation,
-            SuccessData {
-                message: message.to_string(),
-            },
-        );
-        let _ = Self::output(&output);
-    }
-
-    fn format_warning(&self, operation: &str, message: &str) {
-        #[derive(Serialize)]
-        struct WarningData {
-            message: String,
-        }
-
-        let output = JsonOutput::success(
-            operation,
-            WarningData {
-                message: message.to_string(),
-            },
-        );
-        let _ = Self::output(&output);
-    }
-
     fn format_manifest_short(&self, manifest: &ArchiveManifest) -> Result<()> {
         #[derive(Serialize)]
         struct ManifestEntry {
@@ -436,26 +406,6 @@ mod tests {
         assert_eq!(kind, "Error");
     }
 
-    // Regression tests for issue #202: format_success/format_warning must use the
-    // caller-supplied operation name, not a hardcoded sentinel.
-
-    #[test]
-    fn test_format_success_uses_operation_name() {
-        // Capture stdout is not straightforward in unit tests; verify the JSON output
-        // structure by constructing it directly with the same logic.
-        let op = "extract";
-        let output = JsonOutput::success(op, serde_json::json!({"message": "done"}));
-        let json = serde_json::to_string(&output).unwrap();
-        assert!(
-            json.contains(r#""operation":"extract""#),
-            "operation must be 'extract', got: {json}"
-        );
-        assert!(
-            !json.contains(r#""operation":"unknown""#),
-            "operation must not be 'unknown', got: {json}"
-        );
-    }
-
     // Regression tests for issue #192: JSON error message must not duplicate text
     // that ExtractionError::Display already emits.
 
@@ -473,7 +423,7 @@ mod tests {
         };
         // ExtractionError::Display emits "quota exceeded: file count (11 > 10)"
         let display_text = err.to_string();
-        let anyhow_err = convert_extraction_error(err, Path::new("archive.tar.gz"));
+        let anyhow_err = convert_extraction_error(err, Path::new("archive.tar.gz"), false);
         let message = format!("{anyhow_err:#}");
 
         // The context must NOT repeat the Display text verbatim
@@ -499,7 +449,7 @@ mod tests {
         };
         // ExtractionError::Display emits the ratio info
         let display_text = err.to_string();
-        let anyhow_err = convert_extraction_error(err, Path::new("bomb.zip"));
+        let anyhow_err = convert_extraction_error(err, Path::new("bomb.zip"), false);
         let message = format!("{anyhow_err:#}");
 
         let display_occurrences = message.matches(&display_text).count();

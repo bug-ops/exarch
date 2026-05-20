@@ -7,11 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- CLI no longer emits `"HINT: Use --allow-symlinks"` when `--allow-symlinks` is already active and a symlink escape is blocked. The hint is now suppressed when the flag is set, since the escape is a genuine security violation rather than a configuration issue (#213).
+
 ### Changed
 
 - **BREAKING**: Internal modules `copy`, `io`, and `test_utils` in `exarch-core` are now `pub(crate)` instead of `pub`. These were never part of the public API; any external code referencing `exarch_core::copy`, `exarch_core::io`, or `exarch_core::test_utils` directly will no longer compile (#173).
 - `verify_archive` now delegates to `verify_manifest` after calling `list_archive`, eliminating ~80 lines of duplicated entry-processing logic (#190).
 - `ProgressCallback::on_complete` doc comment clarified: the method is called only on successful completion; implementors must not use it for cleanup.
+- Removed dead `format_success` and `format_warning` methods from the `OutputFormatter` trait and both implementations (`HumanFormatter`, `JsonFormatter`). Neither method was called from any command handler (#208).
 - Removed dead constant `SEVENZ_MAGIC` and its `#[allow(dead_code)]` suppression from `formats/detect.rs`; the constant was unused in format detection logic (#175).
 - `ArchiveFormat` trait extended with `fn list()` and `fn verify()` methods, providing a single implementation point for all format operations (#174).
 

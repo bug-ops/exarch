@@ -27,14 +27,6 @@ pub trait OutputFormatter {
 
     /// Format error message for the given operation
     fn format_error(&self, operation: &str, error: &anyhow::Error);
-
-    /// Format success message for the given operation.
-    #[allow(dead_code)]
-    fn format_success(&self, operation: &str, message: &str);
-
-    /// Format warning message for the given operation.
-    #[allow(dead_code)]
-    fn format_warning(&self, operation: &str, message: &str);
 }
 
 /// Generic JSON output structure

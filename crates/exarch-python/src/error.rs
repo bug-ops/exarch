@@ -4,6 +4,8 @@ use exarch_core::ExtractionError as CoreError;
 use exarch_core::QuotaResource as CoreQuotaResource;
 use pyo3::create_exception;
 use pyo3::exceptions::PyException;
+use pyo3::exceptions::PyIOError;
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 // Base exception for all extraction errors
@@ -80,24 +82,23 @@ pub fn convert_error(err: CoreError) -> PyErr {
         }
         CoreError::Io(e) => PyErr::from(e),
         CoreError::SourceNotFound { path } => {
-            InvalidArchiveError::new_err(format!("source path not found: {}", path.display()))
+            PyIOError::new_err(format!("source path not found: {}", path.display()))
         }
-        CoreError::SourceNotAccessible { path } => InvalidArchiveError::new_err(format!(
-            "source path is not accessible: {}",
-            path.display()
-        )),
+        CoreError::SourceNotAccessible { path } => {
+            PyIOError::new_err(format!("source path is not accessible: {}", path.display()))
+        }
         CoreError::OutputExists { path } => {
-            InvalidArchiveError::new_err(format!("output file already exists: {}", path.display()))
+            PyIOError::new_err(format!("output file already exists: {}", path.display()))
         }
         CoreError::InvalidCompressionLevel { level } => {
-            InvalidArchiveError::new_err(format!("invalid compression level {level}, must be 1-9"))
+            PyValueError::new_err(format!("invalid compression level {level}, must be 1-9"))
         }
         CoreError::UnknownFormat { path } => UnsupportedFormatError::new_err(format!(
             "cannot determine archive format from: {}",
             path.display()
         )),
         CoreError::InvalidConfiguration { reason } => {
-            InvalidArchiveError::new_err(format!("invalid configuration: {reason}"))
+            PyValueError::new_err(format!("invalid configuration: {reason}"))
         }
         CoreError::PartialExtraction { source, .. } => convert_error(*source),
     }

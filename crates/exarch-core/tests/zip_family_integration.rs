@@ -5,7 +5,11 @@
 //! Each format shares the ZIP container but has its own shape quirks - the
 //! tests below pick the bits that are actually load-bearing for extraction.
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::cast_possible_truncation
+)]
 
 use exarch_core::ExtractionError;
 use exarch_core::SecurityConfig;
@@ -185,4 +189,145 @@ fn explicit_format_override_allows_zip_family_creation() {
     create_archive(&output, &[&src], &config)
         .expect("explicit ArchiveType::Zip should bypass the guard");
     assert!(output.exists());
+}
+
+/// Build a ZIP in memory with a valid first entry followed by a path-traversal
+/// entry.
+///
+/// Uses raw byte assembly so the traversal path (`../escape.txt`) bypasses the
+/// `zip` crate's own path sanitisation and reaches `exarch-core`'s validator.
+fn build_zip_with_traversal() -> Vec<u8> {
+    // CRC-32 IEEE 802.3 polynomial — matches the ZIP spec.
+    fn crc32(data: &[u8]) -> u32 {
+        let mut crc: u32 = 0xFFFF_FFFF;
+        for &b in data {
+            crc ^= u32::from(b);
+            for _ in 0..8 {
+                if crc & 1 != 0 {
+                    crc = (crc >> 1) ^ 0xEDB8_8320;
+                } else {
+                    crc >>= 1;
+                }
+            }
+        }
+        !crc
+    }
+
+    struct Entry<'a> {
+        name: &'a [u8],
+        content: &'a [u8],
+    }
+
+    let entries = [
+        Entry {
+            name: b"safe.txt",
+            content: b"safe content",
+        },
+        Entry {
+            name: b"../escape.txt",
+            content: b"escaped",
+        },
+    ];
+
+    let mut buf: Vec<u8> = Vec::new();
+    let mut offsets: Vec<u32> = Vec::new();
+
+    for e in &entries {
+        let crc = crc32(e.content);
+        let name_len = e.name.len() as u16;
+        let data_len = e.content.len() as u32;
+        offsets.push(buf.len() as u32);
+
+        buf.extend_from_slice(b"PK\x03\x04");
+        buf.extend_from_slice(&20u16.to_le_bytes());
+        buf.extend_from_slice(&0u16.to_le_bytes()); // flags
+        buf.extend_from_slice(&0u16.to_le_bytes()); // compression: Stored
+        buf.extend_from_slice(&0u16.to_le_bytes()); // mod time
+        buf.extend_from_slice(&0u16.to_le_bytes()); // mod date
+        buf.extend_from_slice(&crc.to_le_bytes());
+        buf.extend_from_slice(&data_len.to_le_bytes());
+        buf.extend_from_slice(&data_len.to_le_bytes());
+        buf.extend_from_slice(&name_len.to_le_bytes());
+        buf.extend_from_slice(&0u16.to_le_bytes()); // extra field len
+        buf.extend_from_slice(e.name);
+        buf.extend_from_slice(e.content);
+    }
+
+    let central_dir_start = buf.len() as u32;
+
+    for (i, e) in entries.iter().enumerate() {
+        let crc = crc32(e.content);
+        let name_len = e.name.len() as u16;
+        let data_len = e.content.len() as u32;
+
+        buf.extend_from_slice(b"PK\x01\x02");
+        buf.extend_from_slice(&0x031eu16.to_le_bytes()); // made by Unix
+        buf.extend_from_slice(&20u16.to_le_bytes());
+        buf.extend_from_slice(&0u16.to_le_bytes());
+        buf.extend_from_slice(&0u16.to_le_bytes());
+        buf.extend_from_slice(&0u16.to_le_bytes());
+        buf.extend_from_slice(&0u16.to_le_bytes());
+        buf.extend_from_slice(&crc.to_le_bytes());
+        buf.extend_from_slice(&data_len.to_le_bytes());
+        buf.extend_from_slice(&data_len.to_le_bytes());
+        buf.extend_from_slice(&name_len.to_le_bytes());
+        buf.extend_from_slice(&0u16.to_le_bytes()); // extra len
+        buf.extend_from_slice(&0u16.to_le_bytes()); // comment len
+        buf.extend_from_slice(&0u16.to_le_bytes()); // disk start
+        buf.extend_from_slice(&0u16.to_le_bytes()); // internal attr
+        buf.extend_from_slice(&(0o100_644u32 << 16).to_le_bytes()); // external attr
+        buf.extend_from_slice(&offsets[i].to_le_bytes());
+        buf.extend_from_slice(e.name);
+    }
+
+    let central_dir_size = (buf.len() as u32) - central_dir_start;
+    let count = entries.len() as u16;
+
+    buf.extend_from_slice(b"PK\x05\x06");
+    buf.extend_from_slice(&0u16.to_le_bytes());
+    buf.extend_from_slice(&0u16.to_le_bytes());
+    buf.extend_from_slice(&count.to_le_bytes());
+    buf.extend_from_slice(&count.to_le_bytes());
+    buf.extend_from_slice(&central_dir_size.to_le_bytes());
+    buf.extend_from_slice(&central_dir_start.to_le_bytes());
+    buf.extend_from_slice(&0u16.to_le_bytes());
+
+    buf
+}
+
+/// ZIP with a valid first entry followed by a path-traversal entry must return
+/// `PartialExtraction` wrapping a `PathTraversal` source, with at least one
+/// file already written to disk.
+#[test]
+fn zip_partial_extraction_stops_on_path_traversal() {
+    let data = build_zip_with_traversal();
+
+    let archive_dir = TempDir::new().expect("temp dir for archive");
+    let archive_path = archive_dir.path().join("traversal.zip");
+    std::fs::write(&archive_path, &data).expect("write zip to disk");
+
+    let dest = TempDir::new().expect("temp dir for extraction");
+    let config = SecurityConfig::default();
+
+    let result = extract_archive(&archive_path, dest.path(), &config);
+
+    match result {
+        Err(ExtractionError::PartialExtraction { source, report }) => {
+            assert!(
+                matches!(*source, ExtractionError::PathTraversal { .. }),
+                "source error must be PathTraversal, got: {source:?}"
+            );
+            assert!(
+                report.files_extracted >= 1,
+                "at least one file must have been extracted before the error, got: {}",
+                report.files_extracted
+            );
+            assert!(
+                report.bytes_written > 0,
+                "bytes_written must be > 0, got: {}",
+                report.bytes_written
+            );
+        }
+        other => panic!("expected PartialExtraction, got: {other:?}"),
+    }
 }

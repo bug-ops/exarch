@@ -264,6 +264,7 @@ impl<R: Read + Seek> ZipArchive<R> {
         copy_buffer: &mut CopyBuffer,
         dir_cache: &mut common::DirCache,
         skip_duplicates: bool,
+        config: &SecurityConfig,
     ) -> Result<()> {
         let mut zip_file = self.inner.by_index(index).map_err(|e| {
             if e.to_string().contains("Password required to decrypt file") {
@@ -321,6 +322,15 @@ impl<R: Read + Seek> ZipArchive<R> {
                 common::create_symlink(&safe_symlink, dest, report, dir_cache, skip_duplicates)?;
             }
         } else {
+            let ext = path.extension().and_then(|e| e.to_str());
+            if !config.is_path_extension_allowed(ext) {
+                report.files_skipped += 1;
+                report.warnings.push(format!(
+                    "skipped entry with disallowed extension: {}",
+                    path.display()
+                ));
+                return Ok(());
+            }
             // File: validate BEFORE writing (security invariant preserved),
             // then extract with the same zip_file (stream still at position 0)
             let validated = validator.validate_entry(
@@ -414,6 +424,7 @@ impl<R: Read + Seek> ArchiveFormat for ZipArchive<R> {
                 &mut copy_buffer,
                 &mut dir_cache,
                 skip_duplicates,
+                config,
             ) {
                 return Err(if report.total_items() > 0 {
                     ExtractionError::PartialExtraction {
@@ -1966,5 +1977,76 @@ mod tests {
 
         assert!(report.is_safe());
         assert_eq!(report.total_entries, 1);
+    }
+
+    #[test]
+    fn test_allowed_extensions_filters_out_disallowed() {
+        use crate::NoopProgress;
+        let zip_data = create_test_zip(vec![("keep.txt", b"keep"), ("skip.exe", b"skip")]);
+        let dest = tempfile::tempdir().unwrap();
+        let config = SecurityConfig::default().with_allowed_extensions(vec!["txt".to_string()]);
+
+        let report = ZipArchive::new(Cursor::new(zip_data))
+            .unwrap()
+            .extract(
+                dest.path(),
+                &config,
+                &ExtractionOptions::default(),
+                &mut NoopProgress,
+            )
+            .unwrap();
+
+        assert_eq!(report.files_extracted, 1);
+        assert_eq!(report.files_skipped, 1);
+        assert!(dest.path().join("keep.txt").exists());
+        assert!(!dest.path().join("skip.exe").exists());
+        assert!(report.warnings.iter().any(|w| w.contains("skip.exe")));
+    }
+
+    #[test]
+    fn test_empty_allowed_extensions_allows_all() {
+        use crate::NoopProgress;
+        let zip_data = create_test_zip(vec![("a.txt", b"a"), ("b.exe", b"b")]);
+        let dest = tempfile::tempdir().unwrap();
+        let config = SecurityConfig::default();
+
+        let report = ZipArchive::new(Cursor::new(zip_data))
+            .unwrap()
+            .extract(
+                dest.path(),
+                &config,
+                &ExtractionOptions::default(),
+                &mut NoopProgress,
+            )
+            .unwrap();
+
+        assert_eq!(report.files_extracted, 2);
+        assert_eq!(report.files_skipped, 0);
+    }
+
+    #[test]
+    fn test_extension_less_files_blocked_when_allowlist_nonempty() {
+        use crate::NoopProgress;
+        let zip_data = create_test_zip(vec![("Makefile", b"all:"), ("keep.txt", b"ok")]);
+        let dest = tempfile::tempdir().unwrap();
+        let config = SecurityConfig::default().with_allowed_extensions(vec!["txt".to_string()]);
+
+        let report = ZipArchive::new(Cursor::new(zip_data))
+            .unwrap()
+            .extract(
+                dest.path(),
+                &config,
+                &ExtractionOptions::default(),
+                &mut NoopProgress,
+            )
+            .unwrap();
+
+        assert_eq!(report.files_extracted, 1, "only .txt should be extracted");
+        assert_eq!(
+            report.files_skipped, 1,
+            "extension-less file must be skipped"
+        );
+        assert!(!dest.path().join("Makefile").exists());
+        assert!(dest.path().join("keep.txt").exists());
     }
 }

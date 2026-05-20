@@ -308,6 +308,7 @@ impl<R: Read + Seek> SevenZArchive<R> {
     /// - Uses atomic writes (temp + rename)
     /// - Creates directories only after validation
     /// - Uses directory cache to reduce mkdir syscalls
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     fn extract_with_callback(
         source: &mut R,
         dest: &DestDir,
@@ -316,6 +317,7 @@ impl<R: Read + Seek> SevenZArchive<R> {
         skip_duplicates: bool,
         progress: &mut dyn ProgressCallback,
         total: usize,
+        config: &SecurityConfig,
     ) -> Result<ExtractionReport> {
         // Rc keeps report alive after closure drops on Err.
         let report = Rc::new(RefCell::new(ExtractionReport::new()));
@@ -339,6 +341,23 @@ impl<R: Read + Seek> SevenZArchive<R> {
             let entry_type = SevenZEntryAdapter::to_entry_type(entry).map_err(|e| {
                 sevenz_rust2::Error::Other(format!("entry type detection failed: {e}").into())
             })?;
+
+            // Extension filter runs before validate_entry to avoid quota
+            // double-counting for skipped files.
+            if matches!(entry_type, EntryType::File) {
+                let ext = entry_path.extension().and_then(|e| e.to_str());
+                if !config.is_path_extension_allowed(ext) {
+                    report.borrow_mut().files_skipped += 1;
+                    report.borrow_mut().warnings.push(format!(
+                        "skipped entry with disallowed extension: {}",
+                        entry_path.display()
+                    ));
+                    progress
+                        .borrow_mut()
+                        .on_entry_complete(entry_path.as_path());
+                    return Ok(true);
+                }
+            }
 
             // Re-validate (defense in depth)
             // NOTE: DirCache is behind RefCell, cannot pass shared reference through
@@ -546,6 +565,7 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
             options.skip_duplicates,
             progress,
             total,
+            config,
         )?;
         progress.on_complete();
         Ok(report)
@@ -1342,5 +1362,97 @@ mod tests {
         let report = archive.verify(&config).unwrap();
 
         assert!(report.is_safe());
+    }
+
+    #[test]
+    fn test_allowed_extensions_filters_out_disallowed() {
+        // mixed-extensions.7z contains document.txt, program.exe, readme.txt
+        let data = load_fixture("mixed-extensions.7z");
+        let dest = TempDir::new().unwrap();
+
+        let config = SecurityConfig::default().with_allowed_extensions(vec!["txt".to_string()]);
+
+        let report = SevenZArchive::new(Cursor::new(data))
+            .unwrap()
+            .extract(
+                dest.path(),
+                &config,
+                &ExtractionOptions::default(),
+                &mut crate::NoopProgress,
+            )
+            .unwrap();
+
+        assert_eq!(
+            report.files_extracted, 2,
+            "only .txt files should be extracted"
+        );
+        assert_eq!(report.files_skipped, 1, ".exe file should be skipped");
+        assert!(
+            !dest
+                .path()
+                .join("mixed-ext-fixture")
+                .join("program.exe")
+                .exists(),
+            ".exe must not be extracted"
+        );
+        assert!(
+            dest.path()
+                .join("mixed-ext-fixture")
+                .join("document.txt")
+                .exists(),
+            ".txt files must be extracted"
+        );
+        assert!(report.warnings.iter().any(|w| w.contains("program.exe")));
+    }
+
+    #[test]
+    fn test_empty_allowed_extensions_allows_all() {
+        let data = load_fixture("simple.7z");
+        let dest = TempDir::new().unwrap();
+        let config = SecurityConfig::default(); // empty = allow all
+
+        let report = SevenZArchive::new(Cursor::new(data))
+            .unwrap()
+            .extract(
+                dest.path(),
+                &config,
+                &ExtractionOptions::default(),
+                &mut crate::NoopProgress,
+            )
+            .unwrap();
+
+        assert_eq!(report.files_skipped, 0);
+        assert!(report.files_extracted > 0);
+    }
+
+    #[test]
+    fn test_extension_less_files_blocked_when_allowlist_nonempty() {
+        // no-extension.7z contains document.txt and Makefile (no extension)
+        let data = load_fixture("no-extension.7z");
+        let dest = TempDir::new().unwrap();
+        let config = SecurityConfig::default().with_allowed_extensions(vec!["txt".to_string()]);
+
+        let report = SevenZArchive::new(Cursor::new(data))
+            .unwrap()
+            .extract(
+                dest.path(),
+                &config,
+                &ExtractionOptions::default(),
+                &mut crate::NoopProgress,
+            )
+            .unwrap();
+
+        assert_eq!(report.files_extracted, 1, "only .txt should be extracted");
+        assert_eq!(
+            report.files_skipped, 1,
+            "extension-less file must be skipped"
+        );
+        assert!(!dest.path().join("no-ext-fixture").join("Makefile").exists());
+        assert!(
+            dest.path()
+                .join("no-ext-fixture")
+                .join("document.txt")
+                .exists()
+        );
     }
 }

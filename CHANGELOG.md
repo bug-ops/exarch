@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Shell completion generation via `exarch completion <shell>` (bash, zsh, fish, powershell, elvish). Output goes to stdout for piping into the appropriate completions directory (#232).
 - `--verbose` flag now prints one line per extracted entry to stderr, including entry name, size, and type. `--quiet` takes precedence when both flags are provided (#233).
+- `SecurityConfig::allowed_extensions` filter is now enforced during extraction across all three format handlers (TAR, ZIP, 7z). When the list is non-empty, files whose extension is not in the allowlist are skipped and recorded in `ExtractionReport::files_skipped` with a warning (#230).
+- `create_archive` now rejects ZIP-family alias extensions (`.apk`, `.jar`, `.whl`, `.epub`, `.war`, `.ear`, `.aab`, `.ipa`, `.appx`, `.msix`, `.vsix`, `.nbm`) when the output format is inferred (i.e., `CreationConfig::format` is `None`). Set `CreationConfig::format = Some(ArchiveType::Zip)` to override (#231).
 
 ### Changed
 

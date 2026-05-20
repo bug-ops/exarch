@@ -334,6 +334,14 @@ impl<R: Read> TarArchive<R> {
 }
 
 impl<R: Read> ArchiveFormat for TarArchive<R> {
+    /// Extracts the archive contents to `output_dir`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ExtractionError::InvalidArchive`] if [`list`](Self::list) was
+    /// called on this instance before `extract`. Because TAR is a forward-only
+    /// stream, `list` consumes the internal reader; calling `extract` afterward
+    /// is not possible. Open a fresh [`TarArchive`] instance instead.
     fn extract(
         &mut self,
         output_dir: &Path,
@@ -442,6 +450,26 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
         Ok(report)
     }
 
+    /// Lists the entries in the archive without extracting them.
+    ///
+    /// # Reader consumption
+    ///
+    /// TAR is a forward-only stream format. This method consumes the internal
+    /// reader via `self.inner.take()`. After `list()` returns, the reader is
+    /// gone and any subsequent call to [`extract`](Self::extract) on **the same
+    /// instance** will return `Err(ExtractionError::InvalidArchive(...))`.
+    ///
+    /// To extract after listing, open a **new** [`TarArchive`] from the
+    /// original source:
+    ///
+    /// ```ignore
+    /// // Correct: two independent instances
+    /// let mut archive1 = TarArchive::open(&path)?;
+    /// let manifest = archive1.list(&config)?;
+    ///
+    /// let mut archive2 = TarArchive::open(&path)?;
+    /// let report = archive2.extract(&dest, &config, &options, &mut NoopProgress)?;
+    /// ```
     fn list(&mut self, config: &SecurityConfig) -> Result<crate::inspection::ArchiveManifest> {
         use crate::formats::detect::ArchiveType;
         use crate::inspection::list::list_tar_reader;

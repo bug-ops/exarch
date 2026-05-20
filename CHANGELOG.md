@@ -13,6 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `TarArchive::list()` and `TarArchive::extract()` now have `///` doc comments explaining that `list()` consumes the internal reader (TAR is forward-only) and that calling `extract()` on the same instance afterward returns `InvalidArchive`. Callers must open a fresh instance for extraction (#211).
+- `CopyBuffer::size()` visibility corrected from `pub(crate)` to `pub`, consistent with the other items in the crate-internal `mod copy`. The `pub(crate)` module boundary in `lib.rs` already enforces the encapsulation; redundant `pub(crate)` on items inside a `pub(crate)` module triggers the `redundant_pub_crate` clippy lint (#203).
+
 - **BREAKING**: Internal modules `copy`, `io`, and `test_utils` in `exarch-core` are now `pub(crate)` instead of `pub`. These were never part of the public API; any external code referencing `exarch_core::copy`, `exarch_core::io`, or `exarch_core::test_utils` directly will no longer compile (#173).
 - `verify_archive` now delegates to `verify_manifest` after calling `list_archive`, eliminating ~80 lines of duplicated entry-processing logic (#190).
 - `ProgressCallback::on_complete` doc comment clarified: the method is called only on successful completion; implementors must not use it for cleanup.

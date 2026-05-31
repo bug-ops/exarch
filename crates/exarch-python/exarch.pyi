@@ -451,6 +451,12 @@ def extract_archive(
         UnsupportedFormatError: Archive format not supported
         InvalidArchiveError: Archive is corrupted
         IOError: I/O operation failed
+
+    Note:
+        When extraction fails after some files have already been written to disk,
+        the specific exception (e.g. ``SymlinkEscapeError``) is raised with
+        ``files_extracted`` and ``bytes_written`` attributes attached. Detect a
+        partial extraction via ``hasattr(e, "files_extracted")``.
     """
     ...
 
@@ -552,47 +558,123 @@ def verify_archive(
     """
     ...
 
-class PathTraversalError(ValueError):
-    """Path traversal attempt detected."""
+class ExtractionError(Exception):
+    """Base exception for all extraction errors."""
 
     ...
 
-class SymlinkEscapeError(ValueError):
-    """Symlink points outside extraction directory."""
+class PathTraversalError(ExtractionError):
+    """
+    Path traversal attempt detected.
 
-    ...
+    When raised during ``extract_archive``, the following attributes are
+    available if some files were already written before the error occurred:
 
-class HardlinkEscapeError(ValueError):
-    """Hardlink target outside extraction directory."""
+    Attributes:
+        files_extracted: Number of files successfully extracted before the error.
+        bytes_written: Total bytes written to disk before the error.
+    """
 
-    ...
+    files_extracted: int
+    bytes_written: int
 
-class ZipBombError(ValueError):
-    """Potential zip bomb detected."""
+class SymlinkEscapeError(ExtractionError):
+    """
+    Symlink points outside extraction directory.
 
-    ...
+    When raised during ``extract_archive``, the following attributes are
+    available if some files were already written before the error occurred:
 
-class InvalidPermissionsError(ValueError):
-    """File permissions are invalid or unsafe."""
+    Attributes:
+        files_extracted: Number of files successfully extracted before the error.
+        bytes_written: Total bytes written to disk before the error.
+    """
 
-    ...
+    files_extracted: int
+    bytes_written: int
 
-class QuotaExceededError(ValueError):
-    """Resource quota exceeded."""
+class HardlinkEscapeError(ExtractionError):
+    """
+    Hardlink target outside extraction directory.
 
-    ...
+    When raised during ``extract_archive``, the following attributes are
+    available if some files were already written before the error occurred:
 
-class SecurityViolationError(ValueError):
-    """Security policy violation."""
+    Attributes:
+        files_extracted: Number of files successfully extracted before the error.
+        bytes_written: Total bytes written to disk before the error.
+    """
 
-    ...
+    files_extracted: int
+    bytes_written: int
 
-class UnsupportedFormatError(ValueError):
+class ZipBombError(ExtractionError):
+    """
+    Potential zip bomb detected.
+
+    When raised during ``extract_archive``, the following attributes are
+    available if some files were already written before the error occurred:
+
+    Attributes:
+        files_extracted: Number of files successfully extracted before the error.
+        bytes_written: Total bytes written to disk before the error.
+    """
+
+    files_extracted: int
+    bytes_written: int
+
+class InvalidPermissionsError(ExtractionError):
+    """
+    File permissions are invalid or unsafe.
+
+    When raised during ``extract_archive``, the following attributes are
+    available if some files were already written before the error occurred:
+
+    Attributes:
+        files_extracted: Number of files successfully extracted before the error.
+        bytes_written: Total bytes written to disk before the error.
+    """
+
+    files_extracted: int
+    bytes_written: int
+
+class QuotaExceededError(ExtractionError):
+    """
+    Resource quota exceeded.
+
+    When raised during ``extract_archive``, the following attributes are
+    available if some files were already written before the error occurred:
+
+    Attributes:
+        files_extracted: Number of files successfully extracted before the error.
+        bytes_written: Total bytes written to disk before the error.
+    """
+
+    files_extracted: int
+    bytes_written: int
+
+class SecurityViolationError(ExtractionError):
+    """
+    Security policy violation.
+
+    When raised during ``extract_archive``, the following attributes are
+    available if some files were already written before the error occurred:
+
+    Attributes:
+        files_extracted: Number of files successfully extracted before the error.
+        bytes_written: Total bytes written to disk before the error.
+    """
+
+    files_extracted: int
+    bytes_written: int
+
+class UnsupportedFormatError(ExtractionError):
     """Archive format not supported."""
 
     ...
 
-class InvalidArchiveError(ValueError):
+class InvalidArchiveError(ExtractionError):
     """Archive is corrupted."""
 
     ...
+

@@ -183,9 +183,12 @@ pub fn convert_error(err: CoreError) -> Error {
             Error::new(Status::GenericFailure, msg)
         }
         CoreError::PartialExtraction { source, report } => {
+            // Preserve the specific error code (SYMLINK_ESCAPE, QUOTA_EXCEEDED, etc.) from
+            // the inner source so JavaScript callers can distinguish the error type. The
+            // partial-extraction report fields from #210 are appended for caller
+            // inspection.
             let inner = convert_error(*source);
             let mut msg = String::with_capacity(inner.reason.len() + 64);
-            msg.push_str("PARTIAL_EXTRACTION: ");
             msg.push_str(&inner.reason);
             let _ = write!(
                 &mut msg,
@@ -361,10 +364,12 @@ mod tests {
         assert!(err_str.contains("file not found"));
     }
 
-    /// Regression test for #210: `convert_error` must embed `filesExtracted`
-    /// and `bytesWritten` in the error message for `PartialExtraction`.
+    /// Regression test for #251 + #210: `convert_error` must preserve the
+    /// specific error code from the inner source (e.g. `QUOTA_EXCEEDED`,
+    /// not `PARTIAL_EXTRACTION`), while still appending `filesExtracted`
+    /// and `bytesWritten` for caller inspection.
     #[test]
-    fn test_partial_extraction_node_message_format() {
+    fn test_partial_extraction_preserves_specific_code_with_report() {
         use exarch_core::ExtractionReport;
         use exarch_core::QuotaResource;
 
@@ -383,9 +388,11 @@ mod tests {
 
         let napi_err = convert_error(err);
         let msg = napi_err.reason.clone();
+        // Must carry the specific error code, not the generic PARTIAL_EXTRACTION
+        // prefix.
         assert!(
-            msg.contains("PARTIAL_EXTRACTION"),
-            "message must contain PARTIAL_EXTRACTION, got: {msg}"
+            msg.starts_with("QUOTA_EXCEEDED"),
+            "message must start with QUOTA_EXCEEDED, got: {msg}"
         );
         assert!(
             msg.contains("filesExtracted=3"),
@@ -395,5 +402,89 @@ mod tests {
             msg.contains("bytesWritten=1024"),
             "message must contain bytesWritten=1024, got: {msg}"
         );
+    }
+
+    // Regression tests for #251: security error variants must also preserve
+    // their specific error code and carry the #210 report fields.
+    //
+    // Helper that asserts the produced error reason starts with the given code
+    // and contains the expected report fields.
+    fn assert_partial_node_report(napi_err: &Error, expected_code: &str, files: usize, bytes: u64) {
+        let msg = &napi_err.reason;
+        assert!(
+            msg.starts_with(expected_code),
+            "message must start with {expected_code}, got: {msg}"
+        );
+        assert!(
+            msg.contains(&format!("filesExtracted={files}")),
+            "message must contain filesExtracted={files}, got: {msg}"
+        );
+        assert!(
+            msg.contains(&format!("bytesWritten={bytes}")),
+            "message must contain bytesWritten={bytes}, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_partial_extraction_symlink_escape_preserves_code_and_report() {
+        use exarch_core::ExtractionReport;
+
+        let report = ExtractionReport {
+            files_extracted: 2,
+            bytes_written: 512,
+            ..ExtractionReport::default()
+        };
+        let source = CoreError::SymlinkEscape {
+            path: PathBuf::from("/etc/passwd"),
+        };
+        let err = CoreError::PartialExtraction {
+            source: Box::new(source),
+            report,
+        };
+
+        let napi_err = convert_error(err);
+        assert_partial_node_report(&napi_err, "SYMLINK_ESCAPE", 2, 512);
+    }
+
+    #[test]
+    fn test_partial_extraction_hardlink_escape_preserves_code_and_report() {
+        use exarch_core::ExtractionReport;
+
+        let report = ExtractionReport {
+            files_extracted: 2,
+            bytes_written: 512,
+            ..ExtractionReport::default()
+        };
+        let source = CoreError::HardlinkEscape {
+            path: PathBuf::from("/etc/shadow"),
+        };
+        let err = CoreError::PartialExtraction {
+            source: Box::new(source),
+            report,
+        };
+
+        let napi_err = convert_error(err);
+        assert_partial_node_report(&napi_err, "HARDLINK_ESCAPE", 2, 512);
+    }
+
+    #[test]
+    fn test_partial_extraction_security_violation_preserves_code_and_report() {
+        use exarch_core::ExtractionReport;
+
+        let report = ExtractionReport {
+            files_extracted: 2,
+            bytes_written: 512,
+            ..ExtractionReport::default()
+        };
+        let source = CoreError::SecurityViolation {
+            reason: "test policy violation".to_string(),
+        };
+        let err = CoreError::PartialExtraction {
+            source: Box::new(source),
+            report,
+        };
+
+        let napi_err = convert_error(err);
+        assert_partial_node_report(&napi_err, "SECURITY_VIOLATION", 2, 512);
     }
 }

@@ -21,7 +21,6 @@ create_exception!(exarch, QuotaExceededError, ExtractionError);
 create_exception!(exarch, SecurityViolationError, ExtractionError);
 create_exception!(exarch, UnsupportedFormatError, ExtractionError);
 create_exception!(exarch, InvalidArchiveError, ExtractionError);
-create_exception!(exarch, PartialExtractionError, ExtractionError);
 
 /// Converts Rust extraction errors to Python exceptions.
 ///
@@ -102,19 +101,17 @@ pub fn convert_error(err: CoreError) -> PyErr {
             PyValueError::new_err(format!("invalid configuration: {reason}"))
         }
         CoreError::PartialExtraction { source, report } => {
+            // Recover the specific exception type (SymlinkEscapeError, HardlinkEscapeError,
+            // etc.) so callers can catch the precise error. The partial-extraction report
+            // attributes from #210 are attached to that concrete exception instead.
             let source_err = convert_error(*source);
             Python::attach(|py| {
-                let msg = source_err.value(py).str().map_or_else(
-                    |_| "partial extraction failed".to_string(),
-                    |s| s.to_string_lossy().into_owned(),
-                );
-                let err = PartialExtractionError::new_err(msg);
-                let exc_value = err.value(py);
-                // setattr with a u64 value cannot fail in practice; silencing the result
-                // to preserve the `PyErr → PyErr` conversion signature.
+                let exc_value = source_err.value(py);
+                // setattr failures are silenced to preserve the `PyErr → PyErr` signature;
+                // the workspace forbids unwrap/expect outside tests.
                 let _ = exc_value.setattr("files_extracted", report.files_extracted);
                 let _ = exc_value.setattr("bytes_written", report.bytes_written);
-                err
+                source_err
             })
         }
     }
@@ -155,10 +152,6 @@ pub fn register_exceptions(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add(
         "InvalidArchiveError",
         m.py().get_type::<InvalidArchiveError>(),
-    )?;
-    m.add(
-        "PartialExtractionError",
-        m.py().get_type::<PartialExtractionError>(),
     )?;
     Ok(())
 }
@@ -473,11 +466,12 @@ mod tests {
         });
     }
 
-    /// Regression test for #210: `convert_error` must produce a
-    /// `PartialExtractionError` (not a bare `QuotaExceededError`) when the
-    /// source error is wrapped in `CoreError::PartialExtraction`.
+    /// Regression test for #251 + #210: `convert_error` must surface the
+    /// specific exception type from the inner source and attach
+    /// `files_extracted` and `bytes_written` attributes for the
+    /// partial-extraction report.
     #[test]
-    fn test_partial_extraction_python_exposes_report() {
+    fn test_partial_extraction_preserves_specific_type_with_report() {
         use exarch_core::ExtractionReport;
         use exarch_core::QuotaResource;
 
@@ -496,11 +490,121 @@ mod tests {
 
         let py_err = convert_error(err);
         Python::attach(|py| {
+            // Must be the specific concrete type.
             assert!(
-                py_err.is_instance_of::<PartialExtractionError>(py),
-                "expected PartialExtractionError, got: {}",
+                py_err.is_instance_of::<QuotaExceededError>(py),
+                "expected QuotaExceededError, got: {}",
                 py_err
             );
+            // Report attributes must be present on the concrete exception.
+            let exc_value = py_err.value(py);
+            let files: u64 = exc_value
+                .getattr("files_extracted")
+                .expect("files_extracted missing")
+                .extract()
+                .expect("files_extracted not u64");
+            let bytes: u64 = exc_value
+                .getattr("bytes_written")
+                .expect("bytes_written missing")
+                .extract()
+                .expect("bytes_written not u64");
+            assert_eq!(files, 3);
+            assert_eq!(bytes, 1024);
         });
+    }
+
+    // Regression tests for #251: security error variants must surface their
+    // specific type and carry the #210 report attributes.
+    //
+    // Helper that verifies the given `py_err` from a PartialExtraction is
+    // the expected specific type and has the expected report attributes.
+    fn assert_partial_extraction_report<T: pyo3::PyTypeInfo>(
+        py_err: &PyErr,
+        expected_files: usize,
+        expected_bytes: u64,
+    ) {
+        Python::attach(|py| {
+            assert!(
+                py_err.is_instance_of::<T>(py),
+                "expected specific error type, got: {}",
+                py_err
+            );
+            let exc_value = py_err.value(py);
+            let files: usize = exc_value
+                .getattr("files_extracted")
+                .expect("files_extracted missing")
+                .extract()
+                .expect("files_extracted extraction failed");
+            let bytes: u64 = exc_value
+                .getattr("bytes_written")
+                .expect("bytes_written missing")
+                .extract()
+                .expect("bytes_written extraction failed");
+            assert_eq!(files, expected_files, "files_extracted mismatch");
+            assert_eq!(bytes, expected_bytes, "bytes_written mismatch");
+        });
+    }
+
+    #[test]
+    fn test_partial_extraction_symlink_escape_preserves_type_and_report() {
+        use exarch_core::ExtractionReport;
+
+        let report = ExtractionReport {
+            files_extracted: 2,
+            bytes_written: 512,
+            ..ExtractionReport::default()
+        };
+        let source = CoreError::SymlinkEscape {
+            path: PathBuf::from("/etc/passwd"),
+        };
+        let err = CoreError::PartialExtraction {
+            source: Box::new(source),
+            report,
+        };
+
+        let py_err = convert_error(err);
+        assert_partial_extraction_report::<SymlinkEscapeError>(&py_err, 2, 512);
+    }
+
+    #[test]
+    fn test_partial_extraction_hardlink_escape_preserves_type_and_report() {
+        use exarch_core::ExtractionReport;
+
+        let report = ExtractionReport {
+            files_extracted: 2,
+            bytes_written: 512,
+            ..ExtractionReport::default()
+        };
+        let source = CoreError::HardlinkEscape {
+            path: PathBuf::from("/etc/shadow"),
+        };
+        let err = CoreError::PartialExtraction {
+            source: Box::new(source),
+            report,
+        };
+
+        let py_err = convert_error(err);
+        assert_partial_extraction_report::<HardlinkEscapeError>(&py_err, 2, 512);
+    }
+
+    #[test]
+    fn test_partial_extraction_security_violation_preserves_type_and_report() {
+        use exarch_core::ExtractionReport;
+
+        let report = ExtractionReport {
+            files_extracted: 2,
+            bytes_written: 512,
+            ..ExtractionReport::default()
+        };
+        let source = CoreError::SecurityViolation {
+            reason: "test policy violation".to_string(),
+        };
+        let err = CoreError::PartialExtraction {
+            source: Box::new(source),
+            report,
+        };
+
+        let py_err = convert_error(err);
+        assert_partial_extraction_report::<SecurityViolationError>(&py_err, 2, 512);
     }
 }

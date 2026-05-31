@@ -677,4 +677,3 @@ class InvalidArchiveError(ExtractionError):
     """Archive is corrupted."""
 
     ...
-

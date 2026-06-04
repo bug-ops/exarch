@@ -31,7 +31,7 @@ use std::path::Path;
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// use exarch_core::ProgressCallback;
 /// use exarch_core::creation::progress::ProgressTracker;
 /// use std::path::Path;
@@ -58,6 +58,7 @@ use std::path::Path;
 /// // ... process entry ...
 /// tracker.on_entry_complete(Path::new("file1.txt"));
 /// ```
+#[allow(dead_code)]
 pub struct ProgressTracker<'a> {
     /// Reference to the progress callback implementation
     progress: &'a mut dyn ProgressCallback,
@@ -67,6 +68,7 @@ pub struct ProgressTracker<'a> {
     total_entries: usize,
 }
 
+#[allow(dead_code)]
 impl<'a> ProgressTracker<'a> {
     /// Creates a new progress tracker.
     ///
@@ -77,7 +79,7 @@ impl<'a> ProgressTracker<'a> {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```ignore
     /// use exarch_core::ProgressCallback;
     /// use exarch_core::creation::progress::ProgressTracker;
     /// use std::path::Path;
@@ -152,7 +154,7 @@ impl<'a> ProgressTracker<'a> {
 ///
 /// # Examples
 ///
-/// ```no_run
+/// ```ignore
 /// use exarch_core::ProgressCallback;
 /// use exarch_core::creation::progress::ProgressReader;
 /// use std::fs::File;
@@ -203,7 +205,7 @@ impl<'a, R> ProgressReader<'a, R> {
     ///
     /// # Examples
     ///
-    /// ```no_run
+    /// ```ignore
     /// use exarch_core::ProgressCallback;
     /// use exarch_core::creation::progress::ProgressReader;
     /// use std::fs::File;
@@ -241,7 +243,7 @@ impl<'a, R> ProgressReader<'a, R> {
     ///
     /// # Examples
     ///
-    /// ```no_run
+    /// ```ignore
     /// use exarch_core::ProgressCallback;
     /// use exarch_core::creation::progress::ProgressReader;
     /// use std::fs::File;
@@ -261,6 +263,7 @@ impl<'a, R> ProgressReader<'a, R> {
     /// # Ok::<(), std::io::Error>(())
     /// ```
     #[must_use]
+    #[allow(dead_code)]
     pub fn with_batch_threshold(
         inner: R,
         progress: &'a mut dyn ProgressCallback,

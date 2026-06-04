@@ -68,14 +68,31 @@ pub trait ArchiveFormat {
 ///
 /// # Examples
 ///
-/// ```no_run
+/// ```
 /// use exarch_core::ProgressCallback;
 /// use exarch_core::Result;
 /// use exarch_core::creation::CreationConfig;
 /// use exarch_core::creation::CreationReport;
-/// use exarch_core::creation::TarGzCreator;
 /// use exarch_core::formats::traits::FormatCreator;
 /// use std::path::Path;
+///
+/// struct NoopCreator;
+///
+/// impl FormatCreator for NoopCreator {
+///     fn create(
+///         &self,
+///         _output: &Path,
+///         _sources: &[&Path],
+///         _config: &CreationConfig,
+///         _progress: &mut dyn ProgressCallback,
+///     ) -> Result<CreationReport> {
+///         Ok(CreationReport::default())
+///     }
+///
+///     fn format_name(&self) -> &'static str {
+///         "noop"
+///     }
+/// }
 ///
 /// fn create_via_trait(
 ///     creator: &dyn FormatCreator,
@@ -87,13 +104,10 @@ pub trait ArchiveFormat {
 ///     creator.create(output, sources, config, progress)
 /// }
 ///
-/// # fn main() -> Result<()> {
-/// let creator = TarGzCreator;
+/// let creator = NoopCreator;
 /// let config = CreationConfig::default();
 /// let mut noop = exarch_core::NoopProgress;
-/// create_via_trait(&creator, Path::new("out.tar.gz"), &[], &config, &mut noop)?;
-/// # Ok(())
-/// # }
+/// create_via_trait(&creator, Path::new("out.tar.gz"), &[], &config, &mut noop).unwrap();
 /// ```
 pub trait FormatCreator {
     /// Creates an archive at `output` from the given `sources`.

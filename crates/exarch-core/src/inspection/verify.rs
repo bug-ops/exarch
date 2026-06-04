@@ -196,9 +196,7 @@ fn verify_entry(
 }
 
 fn check_permissions(mode: u32, config: &SecurityConfig) -> Result<()> {
-    // Use a dummy path for permission validation
-    let dummy_path = Path::new("");
-    let sanitized = sanitize_permissions(dummy_path, mode, config)?;
+    let sanitized = sanitize_permissions(mode, config)?;
     if sanitized == mode {
         Ok(())
     } else {

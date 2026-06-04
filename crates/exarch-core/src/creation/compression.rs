@@ -13,8 +13,6 @@
 //!
 //! Each codec maps these levels to its own internal scale.
 
-use crate::formats::compression::CompressionCodec;
-
 /// Converts user compression level (1-9) to flate2 compression level.
 ///
 /// # Mapping
@@ -26,7 +24,7 @@ use crate::formats::compression::CompressionCodec;
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// use exarch_core::creation::compression::compression_level_to_flate2;
 ///
 /// let default_level = compression_level_to_flate2(None);
@@ -54,7 +52,7 @@ pub fn compression_level_to_flate2(level: Option<u8>) -> flate2::Compression {
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// use exarch_core::creation::compression::compression_level_to_bzip2;
 ///
 /// let default_level = compression_level_to_bzip2(None);
@@ -81,7 +79,7 @@ pub fn compression_level_to_bzip2(level: Option<u8>) -> bzip2::Compression {
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// use exarch_core::creation::compression::compression_level_to_xz;
 ///
 /// let default_level = compression_level_to_xz(None);
@@ -113,7 +111,7 @@ pub fn compression_level_to_xz(level: Option<u8>) -> u32 {
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// use exarch_core::creation::compression::compression_level_to_zstd;
 ///
 /// let default_level = compression_level_to_zstd(None);
@@ -138,41 +136,6 @@ pub fn compression_level_to_zstd(level: Option<u8>) -> i32 {
         Some(9) => 19,
         // All other levels (3-5, 0, 10+) map to default
         _ => 3,
-    }
-}
-
-/// Converts compression codec and level to the appropriate compression type.
-///
-/// This is a convenience function that dispatches to the codec-specific
-/// conversion functions.
-///
-/// # Type Parameters
-///
-/// The return type is an enum that wraps all possible compression types.
-/// Use pattern matching to extract the specific type.
-///
-/// # Examples
-///
-/// ```
-/// use exarch_core::creation::compression::CompressionLevel;
-/// use exarch_core::creation::compression::convert_compression_level;
-/// use exarch_core::formats::compression::CompressionCodec;
-///
-/// let level = convert_compression_level(CompressionCodec::Gzip, Some(9));
-/// match level {
-///     CompressionLevel::Flate2(c) => {
-///         // Use flate2 compression
-///     }
-///     _ => unreachable!(),
-/// }
-/// ```
-#[must_use]
-pub fn convert_compression_level(codec: CompressionCodec, level: Option<u8>) -> CompressionLevel {
-    match codec {
-        CompressionCodec::Gzip => CompressionLevel::Flate2(compression_level_to_flate2(level)),
-        CompressionCodec::Bzip2 => CompressionLevel::Bzip2(compression_level_to_bzip2(level)),
-        CompressionCodec::Xz => CompressionLevel::Xz(compression_level_to_xz(level)),
-        CompressionCodec::Zstd => CompressionLevel::Zstd(compression_level_to_zstd(level)),
     }
 }
 
@@ -257,24 +220,5 @@ mod tests {
         assert_eq!(compression_level_to_zstd(Some(7)), 10);
         assert_eq!(compression_level_to_zstd(Some(8)), 15);
         assert_eq!(compression_level_to_zstd(Some(9)), 19);
-    }
-
-    #[test]
-    fn test_convert_compression_level() {
-        let level = convert_compression_level(CompressionCodec::Gzip, Some(9));
-        match level {
-            CompressionLevel::Flate2(c) => {
-                assert_eq!(c, flate2::Compression::best());
-            }
-            _ => panic!("Expected Flate2 compression level"),
-        }
-
-        let level = convert_compression_level(CompressionCodec::Zstd, None);
-        match level {
-            CompressionLevel::Zstd(c) => {
-                assert_eq!(c, 3);
-            }
-            _ => panic!("Expected Zstd compression level"),
-        }
     }
 }

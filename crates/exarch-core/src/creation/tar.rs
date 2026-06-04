@@ -223,9 +223,6 @@ fn create_tar_internal_with_progress<W: Write, P: AsRef<Path>>(
 
     let mut tracker = ProgressTracker::new(progress, total_entries);
 
-    // Reusable buffer for file copying (fixes HIGH #2)
-    let mut buffer = vec![0u8; 64 * 1024]; // 64 KB
-
     for entry in &entries {
         match &entry.entry_type {
             EntryType::File => {
@@ -237,7 +234,6 @@ fn create_tar_internal_with_progress<W: Write, P: AsRef<Path>>(
                     config,
                     &mut report,
                     tracker.callback(),
-                    &mut buffer,
                 )?;
                 tracker.on_entry_complete(&entry.archive_path);
             }
@@ -256,7 +252,6 @@ fn create_tar_internal_with_progress<W: Write, P: AsRef<Path>>(
                         config,
                         &mut report,
                         tracker.callback(),
-                        &mut buffer,
                     )?;
                 } else {
                     add_symlink_to_tar(&mut builder, &entry.archive_path, target, &mut report)?;
@@ -280,8 +275,7 @@ fn create_tar_internal_with_progress<W: Write, P: AsRef<Path>>(
     Ok((report, counting_writer.into_inner()))
 }
 
-/// Adds a single file to the TAR archive with progress reporting and reusable
-/// buffer.
+/// Adds a single file to the TAR archive with progress reporting.
 fn add_file_to_tar_with_progress_impl<W: Write>(
     builder: &mut Builder<W>,
     file_path: &Path,
@@ -289,7 +283,6 @@ fn add_file_to_tar_with_progress_impl<W: Write>(
     config: &CreationConfig,
     report: &mut CreationReport,
     progress: &mut dyn ProgressCallback,
-    _buffer: &mut [u8],
 ) -> Result<()> {
     let file = File::open(file_path)?;
     let metadata = file.metadata()?;
@@ -303,9 +296,6 @@ fn add_file_to_tar_with_progress_impl<W: Write>(
         set_permissions(&mut header, &metadata);
     }
 
-    // Use progress-tracking reader with batched updates (1 MB batches)
-    // Note: tar crate's append_data does its own buffering internally,
-    // so we use ProgressReader wrapper instead of manual buffer
     let mut tracked_file = ProgressReader::new(file, progress);
     builder.append_data(&mut header, archive_path, &mut tracked_file)?;
 

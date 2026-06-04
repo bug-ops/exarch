@@ -4,14 +4,13 @@
 //! compression levels and security options.
 
 use crate::ArchiveError;
+use crate::NoopProgress;
 use crate::ProgressCallback;
 use crate::Result;
 use crate::creation::config::CreationConfig;
-use crate::creation::filters;
 use crate::creation::progress::ProgressTracker;
 use crate::creation::report::CreationReport;
 use crate::creation::walker::EntryType;
-use crate::creation::walker::FilteredWalker;
 use crate::creation::walker::collect_entries;
 use std::fs::File;
 use std::io::Read;
@@ -162,8 +161,7 @@ fn create_zip_internal_with_progress<W: Write + Seek, P: AsRef<Path>>(
 
     let mut tracker = ProgressTracker::new(progress, total_entries);
 
-    // Reusable buffer for file copying (fixes HIGH #2)
-    let mut buffer = vec![0u8; 64 * 1024]; // 64 KB
+    let mut buffer = vec![0u8; 64 * 1024];
 
     for entry in &entries {
         match &entry.entry_type {
@@ -215,167 +213,12 @@ fn create_zip_internal_with_progress<W: Write + Seek, P: AsRef<Path>>(
     Ok(report)
 }
 
-/// Internal function that creates ZIP with any writer.
-///
-/// Handles the core logic of walking sources and adding entries to the archive.
 fn create_zip_internal<W: Write + Seek, P: AsRef<Path>>(
     writer: W,
     sources: &[P],
     config: &CreationConfig,
 ) -> Result<CreationReport> {
-    let mut zip = ZipWriter::new(writer);
-    let mut report = CreationReport::default();
-    let start = std::time::Instant::now();
-
-    // Configure ZIP file options with compression level
-    let options = if config.compression_level == Some(0) {
-        SimpleFileOptions::default().compression_method(CompressionMethod::Stored)
-    } else {
-        // Convert compression level (1-9) to zip crate level
-        let level = config.compression_level.unwrap_or(6);
-        SimpleFileOptions::default()
-            .compression_method(CompressionMethod::Deflated)
-            .compression_level(Some(i64::from(level)))
-    };
-
-    for source in sources {
-        let path = source.as_ref();
-
-        // Validate source exists
-        if !path.exists() {
-            return Err(ArchiveError::SourceNotFound {
-                path: path.to_path_buf(),
-            });
-        }
-
-        // Walk directory or add single file
-        if path.is_dir() {
-            add_directory_to_zip(&mut zip, path, config, &mut report, &options)?;
-        } else {
-            // For single files, use filename as archive path
-            let archive_path =
-                filters::compute_archive_path(path, path.parent().unwrap_or(path), config)?;
-            add_file_to_zip(&mut zip, path, &archive_path, config, &mut report, &options)?;
-        }
-    }
-
-    // Finish writing ZIP
-    zip.finish()
-        .map_err(|e| std::io::Error::other(format!("failed to finish ZIP archive: {e}")))?;
-
-    report.duration = start.elapsed();
-
-    Ok(report)
-}
-
-/// Adds a directory tree to the ZIP archive using the walker.
-fn add_directory_to_zip<W: Write + Seek>(
-    zip: &mut ZipWriter<W>,
-    dir: &Path,
-    config: &CreationConfig,
-    report: &mut CreationReport,
-    options: &SimpleFileOptions,
-) -> Result<()> {
-    let walker = FilteredWalker::new(dir, config);
-
-    for entry in walker.walk() {
-        let entry = entry?;
-
-        match entry.entry_type {
-            EntryType::File => {
-                add_file_to_zip(
-                    zip,
-                    &entry.path,
-                    &entry.archive_path,
-                    config,
-                    report,
-                    options,
-                )?;
-            }
-            EntryType::Directory => {
-                // ZIP requires explicit directory entries with trailing /
-                let dir_path = format!("{}/", normalize_zip_path(&entry.archive_path)?);
-                zip.add_directory(&dir_path, *options)
-                    .map_err(|e| std::io::Error::other(format!("failed to add directory: {e}")))?;
-                report.directories_added += 1;
-            }
-            EntryType::Symlink { .. } => {
-                if !config.follow_symlinks {
-                    // ZIP doesn't have native symlink support like TAR
-                    // Skip symlinks when not following them
-                    report.files_skipped += 1;
-                    report.add_warning(format!("Skipped symlink: {}", entry.path.display()));
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-
-/// Adds a single file to the ZIP archive.
-fn add_file_to_zip<W: Write + Seek>(
-    zip: &mut ZipWriter<W>,
-    file_path: &Path,
-    archive_path: &Path,
-    config: &CreationConfig,
-    report: &mut CreationReport,
-    options: &SimpleFileOptions,
-) -> Result<()> {
-    let mut file = File::open(file_path)?;
-    let metadata = file.metadata()?;
-    let size = metadata.len();
-
-    // Check file size limit
-    if let Some(max_size) = config.max_file_size
-        && size > max_size
-    {
-        report.files_skipped += 1;
-        report.add_warning(format!(
-            "Skipped file (too large): {} ({} bytes)",
-            file_path.display(),
-            size
-        ));
-        return Ok(());
-    }
-
-    // Configure options with permissions if needed
-    let file_options = if config.preserve_permissions {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            options.unix_permissions(metadata.permissions().mode())
-        }
-        #[cfg(not(unix))]
-        {
-            *options
-        }
-    } else {
-        *options
-    };
-
-    // Convert archive_path to ZIP format (forward slashes)
-    let archive_name = normalize_zip_path(archive_path)?;
-
-    zip.start_file(&archive_name, file_options)
-        .map_err(|e| std::io::Error::other(format!("failed to start file in ZIP: {e}")))?;
-
-    // Copy file contents with 64KB buffer for better throughput
-    let mut buffer = vec![0u8; 64 * 1024]; // 64 KB
-    let mut bytes_written = 0u64;
-    loop {
-        let bytes_read = file.read(&mut buffer)?;
-        if bytes_read == 0 {
-            break;
-        }
-        zip.write_all(&buffer[..bytes_read])?;
-        bytes_written += bytes_read as u64;
-    }
-
-    report.files_added += 1;
-    report.bytes_written += bytes_written;
-
-    Ok(())
+    create_zip_internal_with_progress(writer, sources, config, &mut NoopProgress)
 }
 
 /// Adds a single file to the ZIP archive with progress reporting and reusable
@@ -535,8 +378,9 @@ mod tests {
 
         // Should have exactly 3 files: file1.txt, file2.txt, subdir/file3.txt
         assert_eq!(report.files_added, 3);
-        // Should have exactly 2 directories: root and subdir
-        assert_eq!(report.directories_added, 2);
+        // Should have exactly 1 directory: subdir (root is omitted — empty archive path
+        // is invalid in ZIP)
+        assert_eq!(report.directories_added, 1);
         assert!(output.exists());
     }
 

@@ -54,12 +54,28 @@ pub fn execute(
         None => env::current_dir().context("failed to get current directory")?,
     };
 
-    let list_config = SecurityConfig::default()
+    let allowed_extensions = parse_extensions(&args.allowed_extensions);
+
+    let config = SecurityConfig::default()
         .with_max_file_count(args.max_files)
         .with_max_total_size(args.max_total_size.unwrap_or(500 * 1024 * 1024))
         .with_max_file_size(args.max_file_size.unwrap_or(50 * 1024 * 1024))
         .with_max_compression_ratio(f64::from(args.max_compression_ratio))
-        .with_allow_solid_archives(args.allow_solid_archives);
+        .with_allow_symlinks(args.allow_symlinks)
+        .with_allow_hardlinks(args.allow_hardlinks)
+        .with_allow_world_writable(args.allow_world_writable)
+        .with_preserve_permissions(args.preserve_permissions)
+        .with_allow_solid_archives(args.allow_solid_archives)
+        .with_allowed_extensions(allowed_extensions);
+
+    // list_config shares quota params with config but uses safe defaults for
+    // security flags — listing must not be blocked by allow_symlinks etc.
+    let list_config = SecurityConfig::default()
+        .with_max_file_count(config.max_file_count)
+        .with_max_total_size(config.max_total_size)
+        .with_max_file_size(config.max_file_size)
+        .with_max_compression_ratio(config.max_compression_ratio)
+        .with_allow_solid_archives(config.allow_solid_archives);
 
     // Always list the archive: needed for conflict detection and for obtaining
     // the real entry count that drives the progress bar.
@@ -84,20 +100,6 @@ pub fn execute(
             anyhow::bail!("destination files already exist (use --force to overwrite):\n{list}");
         }
     }
-
-    let allowed_extensions = parse_extensions(&args.allowed_extensions);
-
-    let config = SecurityConfig::default()
-        .with_max_file_count(args.max_files)
-        .with_max_total_size(args.max_total_size.unwrap_or(500 * 1024 * 1024))
-        .with_max_file_size(args.max_file_size.unwrap_or(50 * 1024 * 1024))
-        .with_max_compression_ratio(f64::from(args.max_compression_ratio))
-        .with_allow_symlinks(args.allow_symlinks)
-        .with_allow_hardlinks(args.allow_hardlinks)
-        .with_allow_world_writable(args.allow_world_writable)
-        .with_preserve_permissions(args.preserve_permissions)
-        .with_allow_solid_archives(args.allow_solid_archives)
-        .with_allowed_extensions(allowed_extensions);
 
     let entry_count = if config.allowed_extensions.is_empty() {
         manifest.entries.len()
@@ -126,43 +128,22 @@ pub fn execute(
             .with_context(|| format!("failed to remove existing dir: {}", output_dir.display()))?;
     }
 
-    let report = if quiet {
-        run_extraction(
-            &args.archive,
-            &output_dir,
-            &config,
-            &options,
-            &mut NoopProgress,
-            args.allow_symlinks,
-        )?
-    } else if verbose {
-        run_extraction(
-            &args.archive,
-            &output_dir,
-            &config,
-            &options,
-            &mut VerboseProgress::new(),
-            args.allow_symlinks,
-        )?
-    } else if CliProgress::should_show() {
-        run_extraction(
-            &args.archive,
-            &output_dir,
-            &config,
-            &options,
-            &mut CliProgress::new(entry_count, "Extracting"),
-            args.allow_symlinks,
-        )?
+    let mut progress: Box<dyn ProgressCallback> = if verbose {
+        Box::new(VerboseProgress::new())
+    } else if !quiet && CliProgress::should_show() {
+        Box::new(CliProgress::new(entry_count, "Extracting"))
     } else {
-        run_extraction(
-            &args.archive,
-            &output_dir,
-            &config,
-            &options,
-            &mut NoopProgress,
-            args.allow_symlinks,
-        )?
+        Box::new(NoopProgress)
     };
+
+    let report = run_extraction(
+        &args.archive,
+        &output_dir,
+        &config,
+        &options,
+        progress.as_mut(),
+        args.allow_symlinks,
+    )?;
 
     formatter.format_extraction_result(&report)?;
 

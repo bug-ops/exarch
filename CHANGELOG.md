@@ -45,6 +45,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Node.js: `SecurityConfig` now exposes `allowSolidArchives` getter, consistent with all other
   boolean permission getters (`allowSymlinks`, `allowHardlinks`, `allowAbsolutePaths`,
   `allowWorldWritable`) (#261).
+- Python: `UnknownFormatError` is now a distinct exception subclass of `UnsupportedFormatError`,
+  raised when an archive format cannot be determined from the file path or magic bytes
+  (`CoreError::UnknownFormat`). Callers catching `UnsupportedFormatError` continue to work
+  unchanged; callers that need to distinguish "format unknown" from "format known but unsupported"
+  can now catch the narrower type (#260).
+- Python: `extract_archive_with_progress(archive_path, output_dir, config, progress)` binding
+  added, mirroring `create_archive_with_progress`. The GIL is held when a callback is provided
+  and released otherwise. `exarch.pyi` and the stub are updated (#263).
+- Node.js: `extractArchiveWithProgress(archivePath, outputDir, config?, progress?)` async binding
+  added, accepting an optional `ThreadsafeFunction` progress callback with signature
+  `(path: string, total: bigint, current: bigint, bytesWritten: bigint) => void` (#263).
 
 ### Fixed
 

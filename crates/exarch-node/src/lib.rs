@@ -44,6 +44,8 @@
 #![allow(clippy::trailing_empty_array)]
 
 use napi::bindgen_prelude::*;
+use napi::threadsafe_function::ThreadsafeFunction;
+use napi::threadsafe_function::ThreadsafeFunctionCallMode;
 use napi_derive::napi;
 
 mod config;
@@ -535,10 +537,144 @@ pub fn verify_archive_sync(
     Ok(VerificationReport::from(report))
 }
 
-// NOTE: Progress callback support (createArchiveWithProgress) is planned for
-// a future release. The napi-rs 3.x ThreadsafeFunction API requires additional
-// work to properly bridge Rust ProgressCallback trait to JavaScript callbacks.
-// For now, use createArchive/createArchiveSync without progress tracking.
+/// Extract an archive to the specified directory with a progress callback
+/// (async).
+///
+/// The `progress` callback is called once per entry with
+/// `(path, total, current, bytesWritten)` where:
+/// - `path` — entry path inside the archive
+/// - `total` — total number of entries as `bigint` (0 for TAR-family formats
+///   because the entry count is unknown until the stream is fully read)
+/// - `current` — 1-based index of the current entry as `bigint`
+/// - `bytesWritten` — cumulative bytes written to disk so far as `bigint`
+///   (always 0 during extraction because the core library does not emit
+///   byte-level progress events for extraction; only entry-level events fire)
+///
+/// Extraction runs on the tokio blocking thread pool. The progress callback is
+/// dispatched back to the JavaScript thread via a threadsafe function.
+///
+/// # Arguments
+///
+/// * `archive_path` - Path to the archive file
+/// * `output_dir` - Directory where files will be extracted
+/// * `config` - Optional `SecurityConfig` (uses secure defaults if omitted)
+/// * `progress` - Optional progress callback `(path: string, total: bigint,
+///   current: bigint, bytesWritten: bigint) => void`
+///
+/// # Returns
+///
+/// Promise resolving to `ExtractionReport` with extraction statistics
+///
+/// # Errors
+///
+/// Returns error for security violations or I/O errors. Error messages are
+/// prefixed with error codes for discrimination in JavaScript. See
+/// `extractArchive` for the full list of error codes.
+///
+/// # Examples
+///
+/// ```javascript
+/// const report = await extractArchiveWithProgress(
+///   'archive.tar.gz',
+///   '/tmp/output',
+///   null,
+///   (path, total, current, bytesWritten) => {
+///     console.log(`${current}/${total}: ${path}`);
+///   },
+/// );
+/// console.log(`Extracted ${report.filesExtracted} files`);
+/// ```
+#[napi]
+#[allow(clippy::needless_pass_by_value, clippy::trailing_empty_array)]
+pub async fn extract_archive_with_progress(
+    archive_path: String,
+    output_dir: String,
+    config: Option<&SecurityConfig>,
+    progress: Option<ThreadsafeFunction<(String, i64, i64, i64)>>,
+) -> Result<ExtractionReport> {
+    validate_path(&archive_path)?;
+    validate_path(&output_dir)?;
+
+    let config_owned: exarch_core::SecurityConfig =
+        config.map(|c| c.as_core().clone()).unwrap_or_default();
+
+    let report = tokio::task::spawn_blocking(move || {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_extract_with_optional_progress(&archive_path, &output_dir, &config_owned, progress)
+                .map_err(convert_error)
+        }))
+        .map_err(|_| Error::from_reason("Internal panic during archive extraction with progress"))
+        .flatten()
+    })
+    .await
+    .map_err(|e| Error::from_reason(format!("task join error: {e}")))
+    .flatten()?;
+
+    Ok(ExtractionReport::from(report))
+}
+
+/// Runs `extract_archive_with_progress` routing to the JS callback when present
+/// or to [`exarch_core::NoopProgress`] when absent.
+fn run_extract_with_optional_progress(
+    archive_path: &str,
+    output_dir: &str,
+    config: &exarch_core::SecurityConfig,
+    progress: Option<ThreadsafeFunction<(String, i64, i64, i64)>>,
+) -> exarch_core::Result<exarch_core::ExtractionReport> {
+    progress.map_or_else(
+        || {
+            let mut noop = exarch_core::NoopProgress;
+            exarch_core::extract_archive_with_progress(archive_path, output_dir, config, &mut noop)
+        },
+        |tsfn| {
+            let mut callback = NodeProgressAdapter::new(tsfn);
+            exarch_core::extract_archive_with_progress(
+                archive_path,
+                output_dir,
+                config,
+                &mut callback,
+            )
+        },
+    )
+}
+
+/// Adapter that calls a JavaScript progress callback from a Rust worker thread.
+struct NodeProgressAdapter {
+    tsfn: ThreadsafeFunction<(String, i64, i64, i64)>,
+    accumulated_bytes: i64,
+    total: usize,
+}
+
+impl NodeProgressAdapter {
+    fn new(tsfn: ThreadsafeFunction<(String, i64, i64, i64)>) -> Self {
+        Self {
+            tsfn,
+            accumulated_bytes: 0,
+            total: 0,
+        }
+    }
+}
+
+impl exarch_core::ProgressCallback for NodeProgressAdapter {
+    fn on_entry_start(&mut self, path: &std::path::Path, total: usize, current: usize) {
+        self.total = total;
+        let path_str = path.to_string_lossy().into_owned();
+        let total_i64 = i64::try_from(total).unwrap_or(i64::MAX);
+        let current_i64 = i64::try_from(current).unwrap_or(i64::MAX);
+        self.tsfn.call(
+            Ok((path_str, total_i64, current_i64, self.accumulated_bytes)),
+            ThreadsafeFunctionCallMode::NonBlocking,
+        );
+    }
+
+    fn on_bytes_written(&mut self, bytes: u64) {
+        self.accumulated_bytes = self.accumulated_bytes.saturating_add(bytes.cast_signed());
+    }
+
+    fn on_entry_complete(&mut self, _path: &std::path::Path) {}
+
+    fn on_complete(&mut self) {}
+}
 
 #[cfg(test)]
 #[allow(

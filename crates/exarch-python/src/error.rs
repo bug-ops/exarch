@@ -20,6 +20,10 @@ create_exception!(exarch, InvalidPermissionsError, ExtractionError);
 create_exception!(exarch, QuotaExceededError, ExtractionError);
 create_exception!(exarch, SecurityViolationError, ExtractionError);
 create_exception!(exarch, UnsupportedFormatError, ExtractionError);
+// Subclass of UnsupportedFormatError: raised when the format cannot be
+// identified at all (as opposed to being known but unsupported). Callers
+// catching the parent still work.
+create_exception!(exarch, UnknownFormatError, UnsupportedFormatError);
 create_exception!(exarch, InvalidArchiveError, ExtractionError);
 
 /// Converts Rust extraction errors to Python exceptions.
@@ -90,7 +94,7 @@ pub fn convert_error(err: CoreError) -> PyErr {
         CoreError::InvalidCompressionLevel { level } => {
             PyValueError::new_err(format!("invalid compression level {level}, must be 1-9"))
         }
-        CoreError::UnknownFormat { path } => UnsupportedFormatError::new_err(format!(
+        CoreError::UnknownFormat { path } => UnknownFormatError::new_err(format!(
             "cannot determine archive format from: {}",
             path.display()
         )),
@@ -145,6 +149,10 @@ pub fn register_exceptions(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add(
         "UnsupportedFormatError",
         m.py().get_type::<UnsupportedFormatError>(),
+    )?;
+    m.add(
+        "UnknownFormatError",
+        m.py().get_type::<UnknownFormatError>(),
     )?;
     m.add(
         "InvalidArchiveError",
@@ -387,6 +395,20 @@ mod tests {
             "Expected path in error message, got: {}",
             err_str
         );
+        // UnknownFormatError must be the concrete type
+        Python::attach(|py| {
+            assert!(
+                py_err.is_instance_of::<UnknownFormatError>(py),
+                "expected UnknownFormatError, got: {}",
+                py_err
+            );
+            // Must also be catchable as UnsupportedFormatError (subclass)
+            assert!(
+                py_err.is_instance_of::<UnsupportedFormatError>(py),
+                "expected UnsupportedFormatError (parent), got: {}",
+                py_err
+            );
+        });
     }
 
     #[test]
@@ -462,6 +484,10 @@ mod tests {
             assert!(
                 module.getattr("UnsupportedFormatError").is_ok(),
                 "UnsupportedFormatError not registered"
+            );
+            assert!(
+                module.getattr("UnknownFormatError").is_ok(),
+                "UnknownFormatError not registered"
             );
             assert!(
                 module.getattr("InvalidArchiveError").is_ok(),

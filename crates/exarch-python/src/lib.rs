@@ -425,6 +425,111 @@ fn create_archive_with_progress(
     }
 }
 
+/// Extract an archive with progress callback.
+///
+/// # Arguments
+///
+/// * `archive_path` - Path to the archive file (str or pathlib.Path)
+/// * `output_dir` - Directory where files will be extracted (str or
+///   pathlib.Path)
+/// * `config` - Optional `SecurityConfig` (uses secure defaults if None)
+/// * `progress` - Optional progress callback function
+///
+/// Progress callback signature: `(path: str, total: int, current: int,
+/// bytes_written: int) -> None`
+///
+/// # Returns
+///
+/// `ExtractionReport` with extraction statistics
+///
+/// # Raises
+///
+/// * `ValueError` - Invalid arguments
+/// * `PathTraversalError` - Path traversal attempt detected
+/// * `SymlinkEscapeError` - Symlink points outside extraction directory
+/// * `HardlinkEscapeError` - Hardlink target outside extraction directory
+/// * `ZipBombError` - Potential zip bomb detected
+/// * `InvalidPermissionsError` - File permissions are invalid or unsafe
+/// * `QuotaExceededError` - Resource quota exceeded
+/// * `SecurityViolationError` - Security policy violation
+/// * `UnsupportedFormatError` - Archive format not supported
+/// * `InvalidArchiveError` - Archive is corrupted
+/// * `IOError` - I/O operation failed
+///
+/// # Security Considerations
+///
+/// ## GIL Release and TOCTOU
+///
+/// When a progress callback is provided the GIL is held during extraction so
+/// that the callback can safely call into Python. Without a callback the GIL
+/// is released for performance, but the TOCTOU caveat from `extract_archive`
+/// still applies.
+///
+/// # Examples
+///
+/// ```python
+/// from exarch import extract_archive_with_progress
+///
+/// def progress(path: str, total: int, current: int, bytes: int):
+///     print(f"{current}/{total}: {path} ({bytes} bytes)")
+///
+/// report = extract_archive_with_progress(
+///     "archive.tar.gz", "/tmp/output", None, progress
+/// )
+/// ```
+#[pyfunction]
+#[pyo3(signature = (archive_path, output_dir, config=None, progress=None))]
+fn extract_archive_with_progress(
+    py: Python<'_>,
+    archive_path: &Bound<'_, PyAny>,
+    output_dir: &Bound<'_, PyAny>,
+    config: Option<&PySecurityConfig>,
+    progress: Option<Py<PyAny>>,
+) -> PyResult<PyExtractionReport> {
+    let archive_path = path_to_string(py, archive_path)?;
+    let output_dir = path_to_string(py, output_dir)?;
+
+    let default_config = exarch_core::SecurityConfig::default();
+    let config_ref = config.map_or(&default_config, |c| c.as_core());
+
+    if let Some(py_callback) = progress {
+        let mut callback = PyProgressAdapter::new(py_callback);
+
+        // CRITICAL: Do NOT release GIL when using Python callback!
+        // Python callback requires GIL to call into Python.
+        let report = exarch_core::extract_archive_with_progress(
+            &archive_path,
+            &output_dir,
+            config_ref,
+            &mut callback,
+        )
+        .map_err(convert_error)?;
+
+        Ok(PyExtractionReport::from(report))
+    } else {
+        // No progress callback - can release GIL
+        let mut noop = exarch_core::NoopProgress;
+        let report = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            py.detach(|| {
+                exarch_core::extract_archive_with_progress(
+                    &archive_path,
+                    &output_dir,
+                    config_ref,
+                    &mut noop,
+                )
+            })
+        }))
+        .map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "Internal panic during archive extraction with progress",
+            )
+        })?
+        .map_err(convert_error)?;
+
+        Ok(PyExtractionReport::from(report))
+    }
+}
+
 /// Adapter that calls Python callback from Rust.
 struct PyProgressAdapter {
     callback: Py<PyAny>,
@@ -481,6 +586,7 @@ fn exarch(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // Top-level functions
     m.add_function(wrap_pyfunction!(extract_archive, m)?)?;
+    m.add_function(wrap_pyfunction!(extract_archive_with_progress, m)?)?;
     m.add_function(wrap_pyfunction!(create_archive, m)?)?;
     m.add_function(wrap_pyfunction!(create_archive_with_progress, m)?)?;
     m.add_function(wrap_pyfunction!(list_archive, m)?)?;

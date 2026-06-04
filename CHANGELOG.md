@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `sevenz`: eliminate `Rc`/`RefCell` interior mutability in `extract_with_callback`; state is now owned by a local context struct, matching the `tar.rs` and `zip.rs` patterns (#273, #258).
+- `sevenz`: narrow `std::process` import to `std::process::id` to prevent accidental use of `process::exit` in library code (#270).
+
 - ZIP symlink extraction tests (`test_extract_symlink_via_unix_attributes`,
   `test_symlink_disabled_by_default`) are no longer ignored; they now use raw ZIP construction
   with correct unix mode bits to exercise the security-critical symlink detection path (#271).

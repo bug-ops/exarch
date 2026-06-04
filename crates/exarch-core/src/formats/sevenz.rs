@@ -89,15 +89,12 @@
 //! // ... extract with config
 //! ```
 
-use std::cell::Cell;
-use std::cell::RefCell;
 use std::io::ErrorKind;
 use std::io::Read;
 use std::io::Seek;
 use std::path::Path;
 use std::path::PathBuf;
-use std::process;
-use std::rc::Rc;
+use std::process::id;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
@@ -319,12 +316,19 @@ impl<R: Read + Seek> SevenZArchive<R> {
         total: usize,
         config: &SecurityConfig,
     ) -> Result<ExtractionReport> {
-        // Rc keeps report alive after closure drops on Err.
-        let report = Rc::new(RefCell::new(ExtractionReport::new()));
-        let report_out = Rc::clone(&report);
-        let dir_cache = RefCell::new(dir_cache);
-        let progress = RefCell::new(progress);
-        let current_idx = Cell::new(0usize);
+        struct SzContext<'a> {
+            report: ExtractionReport,
+            dir_cache: &'a mut common::DirCache,
+            progress: &'a mut dyn ProgressCallback,
+            current_idx: usize,
+        }
+
+        let mut ctx = SzContext {
+            report: ExtractionReport::new(),
+            dir_cache,
+            progress,
+            current_idx: 0,
+        };
 
         // Extraction callback - called for each entry
         let extract_fn = |entry: &sevenz_rust2::ArchiveEntry,
@@ -332,11 +336,11 @@ impl<R: Read + Seek> SevenZArchive<R> {
                           _dest_dir: &PathBuf|
          -> std::result::Result<bool, sevenz_rust2::Error> {
             let entry_path = PathBuf::from(&entry.name);
-            let idx = current_idx.get().saturating_add(1);
-            current_idx.set(idx);
-            progress
-                .borrow_mut()
+            ctx.current_idx = ctx.current_idx.saturating_add(1);
+            let idx = ctx.current_idx;
+            ctx.progress
                 .on_entry_start(entry_path.as_path(), total, idx);
+
             // Convert entry metadata
             let entry_type = SevenZEntryAdapter::to_entry_type(entry).map_err(|e| {
                 sevenz_rust2::Error::Other(format!("entry type detection failed: {e}").into())
@@ -347,21 +351,17 @@ impl<R: Read + Seek> SevenZArchive<R> {
             if matches!(entry_type, EntryType::File) {
                 let ext = entry_path.extension().and_then(|e| e.to_str());
                 if !config.is_path_extension_allowed(ext) {
-                    report.borrow_mut().files_skipped += 1;
-                    report.borrow_mut().warnings.push(format!(
+                    ctx.report.files_skipped += 1;
+                    ctx.report.warnings.push(format!(
                         "skipped entry with disallowed extension: {}",
                         entry_path.display()
                     ));
-                    progress
-                        .borrow_mut()
-                        .on_entry_complete(entry_path.as_path());
+                    ctx.progress.on_entry_complete(entry_path.as_path());
                     return Ok(true);
                 }
             }
 
             // Re-validate (defense in depth)
-            // NOTE: DirCache is behind RefCell, cannot pass shared reference through
-            // closure
             let validated = validator
                 .validate_entry(&entry_path, &entry_type, entry.size, None, None, None)
                 .map_err(|e| {
@@ -373,25 +373,23 @@ impl<R: Read + Seek> SevenZArchive<R> {
                 ValidatedEntryType::Directory => {
                     let dest_path = dest.join_path(validated.safe_path.as_path());
                     // Use cache to avoid redundant mkdir syscalls
-                    dir_cache.borrow_mut().ensure_dir(&dest_path)?;
-                    report.borrow_mut().directories_created += 1;
+                    ctx.dir_cache.ensure_dir(&dest_path)?;
+                    ctx.report.directories_created += 1;
                 }
                 ValidatedEntryType::File => {
                     let dest_path = dest.join_path(validated.safe_path.as_path());
 
                     // Create parent directories using cache
-                    dir_cache.borrow_mut().ensure_parent_dir(&dest_path)?;
+                    ctx.dir_cache.ensure_parent_dir(&dest_path)?;
 
                     if dest_path.exists() {
                         if skip_duplicates {
-                            report.borrow_mut().files_skipped += 1;
-                            report.borrow_mut().warnings.push(format!(
+                            ctx.report.files_skipped += 1;
+                            ctx.report.warnings.push(format!(
                                 "skipped duplicate entry: {}",
                                 validated.safe_path.as_path().display()
                             ));
-                            progress
-                                .borrow_mut()
-                                .on_entry_complete(entry_path.as_path());
+                            ctx.progress.on_entry_complete(entry_path.as_path());
                             return Ok(true);
                         }
                         return Err(sevenz_rust2::Error::Other(
@@ -405,7 +403,7 @@ impl<R: Read + Seek> SevenZArchive<R> {
 
                     // Atomic write (temp + rename) with unique temp file name
                     let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-                    let pid = process::id();
+                    let pid = id();
                     let original_name = dest_path
                         .file_name()
                         .map_or_else(|| "file".to_string(), |n| n.to_string_lossy().to_string());
@@ -417,16 +415,18 @@ impl<R: Read + Seek> SevenZArchive<R> {
                     {
                         let mut temp_file = std::fs::File::create(&temp_path)?;
                         let bytes_written = std::io::copy(reader, &mut temp_file)?;
-                        let mut r = report.borrow_mut();
-                        r.bytes_written =
-                            r.bytes_written.checked_add(bytes_written).ok_or_else(|| {
+                        ctx.report.bytes_written = ctx
+                            .report
+                            .bytes_written
+                            .checked_add(bytes_written)
+                            .ok_or_else(|| {
                                 sevenz_rust2::Error::Other("bytes_written overflow".into())
                             })?;
                     }
                     std::fs::rename(&temp_path, &dest_path)?;
                     guard.persist(); // Success - don't cleanup
 
-                    report.borrow_mut().files_extracted += 1;
+                    ctx.report.files_extracted += 1;
                 }
                 _ => {
                     return Err(sevenz_rust2::Error::Other(
@@ -435,15 +435,12 @@ impl<R: Read + Seek> SevenZArchive<R> {
                 }
             }
 
-            progress
-                .borrow_mut()
-                .on_entry_complete(entry_path.as_path());
+            ctx.progress.on_entry_complete(entry_path.as_path());
             Ok(true) // Continue extraction
         };
 
         let result = sevenz_rust2::decompress_with_extract_fn(source, dest.as_path(), extract_fn);
-        drop(report); // release closure-side Rc so borrow succeeds
-        let accumulated = report_out.borrow().clone();
+        let accumulated = ctx.report;
 
         let e = match result {
             Ok(()) => return Ok(accumulated),

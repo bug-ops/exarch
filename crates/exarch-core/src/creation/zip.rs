@@ -8,6 +8,7 @@ use crate::ProgressCallback;
 use crate::Result;
 use crate::creation::config::CreationConfig;
 use crate::creation::filters;
+use crate::creation::progress::ProgressTracker;
 use crate::creation::report::CreationReport;
 use crate::creation::walker::EntryType;
 use crate::creation::walker::FilteredWalker;
@@ -42,7 +43,6 @@ use zip::write::SimpleFileOptions;
 /// - Source path does not exist
 /// - Output file cannot be created
 /// - I/O error during archive creation
-#[allow(dead_code)] // Will be used by CLI
 pub fn create_zip<P: AsRef<Path>, Q: AsRef<Path>>(
     output: P,
     sources: &[Q],
@@ -125,7 +125,6 @@ pub fn create_zip<P: AsRef<Path>, Q: AsRef<Path>>(
 /// - Output file cannot be created
 /// - I/O error during archive creation
 /// - File metadata cannot be read
-#[allow(dead_code)] // Will be used by CLI
 pub fn create_zip_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
     output: P,
     sources: &[Q],
@@ -161,15 +160,15 @@ fn create_zip_internal_with_progress<W: Write + Seek, P: AsRef<Path>>(
     let entries = collect_entries(sources, config)?;
     let total_entries = entries.len();
 
+    let mut tracker = ProgressTracker::new(progress, total_entries);
+
     // Reusable buffer for file copying (fixes HIGH #2)
     let mut buffer = vec![0u8; 64 * 1024]; // 64 KB
 
-    for (idx, entry) in entries.iter().enumerate() {
-        let current_entry = idx + 1;
-
+    for entry in &entries {
         match &entry.entry_type {
             EntryType::File => {
-                progress.on_entry_start(&entry.archive_path, total_entries, current_entry);
+                tracker.on_entry_start(&entry.archive_path);
                 add_file_to_zip_with_progress_and_buffer(
                     &mut zip,
                     &entry.path,
@@ -177,13 +176,13 @@ fn create_zip_internal_with_progress<W: Write + Seek, P: AsRef<Path>>(
                     config,
                     &mut report,
                     &options,
-                    progress,
+                    tracker.callback(),
                     &mut buffer,
                 )?;
-                progress.on_entry_complete(&entry.archive_path);
+                tracker.on_entry_complete(&entry.archive_path);
             }
             EntryType::Directory => {
-                progress.on_entry_start(&entry.archive_path, total_entries, current_entry);
+                tracker.on_entry_start(&entry.archive_path);
                 // Skip root directory entry (empty path becomes "/" which is invalid)
                 if !entry.archive_path.as_os_str().is_empty() {
                     let dir_path = format!("{}/", normalize_zip_path(&entry.archive_path)?);
@@ -192,15 +191,15 @@ fn create_zip_internal_with_progress<W: Write + Seek, P: AsRef<Path>>(
                     })?;
                     report.directories_added += 1;
                 }
-                progress.on_entry_complete(&entry.archive_path);
+                tracker.on_entry_complete(&entry.archive_path);
             }
             EntryType::Symlink { .. } => {
-                progress.on_entry_start(&entry.archive_path, total_entries, current_entry);
+                tracker.on_entry_start(&entry.archive_path);
                 if !config.follow_symlinks {
                     report.files_skipped += 1;
                     report.add_warning(format!("Skipped symlink: {}", entry.path.display()));
                 }
-                progress.on_entry_complete(&entry.archive_path);
+                tracker.on_entry_complete(&entry.archive_path);
             }
         }
     }
@@ -211,7 +210,7 @@ fn create_zip_internal_with_progress<W: Write + Seek, P: AsRef<Path>>(
 
     report.duration = start.elapsed();
 
-    progress.on_complete();
+    tracker.on_complete();
 
     Ok(report)
 }

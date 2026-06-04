@@ -58,7 +58,6 @@ use std::path::Path;
 /// // ... process entry ...
 /// tracker.on_entry_complete(Path::new("file1.txt"));
 /// ```
-#[allow(dead_code)]
 pub struct ProgressTracker<'a> {
     /// Reference to the progress callback implementation
     progress: &'a mut dyn ProgressCallback,
@@ -68,7 +67,6 @@ pub struct ProgressTracker<'a> {
     total_entries: usize,
 }
 
-#[allow(dead_code)]
 impl<'a> ProgressTracker<'a> {
     /// Creates a new progress tracker.
     ///
@@ -132,6 +130,16 @@ impl<'a> ProgressTracker<'a> {
     /// processed.
     pub fn on_complete(&mut self) {
         self.progress.on_complete();
+    }
+
+    /// Returns a mutable reference to the underlying progress callback.
+    ///
+    /// Use this to pass the callback into nested helpers that perform
+    /// byte-level progress reporting, while keeping the tracker in scope
+    /// for entry-level accounting. The borrow is sequential — call this
+    /// only between `on_entry_start` and the next tracker call.
+    pub fn callback(&mut self) -> &mut dyn ProgressCallback {
+        self.progress
     }
 }
 

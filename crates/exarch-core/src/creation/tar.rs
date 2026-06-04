@@ -11,6 +11,7 @@ use crate::creation::compression::compression_level_to_xz;
 use crate::creation::compression::compression_level_to_zstd;
 use crate::creation::config::CreationConfig;
 use crate::creation::progress::ProgressReader;
+use crate::creation::progress::ProgressTracker;
 use crate::creation::report::CreationReport;
 use crate::creation::walker::EntryType;
 use crate::creation::walker::collect_entries;
@@ -220,37 +221,33 @@ fn create_tar_internal_with_progress<W: Write, P: AsRef<Path>>(
     let entries = collect_entries(sources, config)?;
     let total_entries = entries.len();
 
-    // Manual entry counting (we can't use ProgressTracker because we need to
-    // pass progress to nested functions for byte-level progress)
-    let mut current_entry = 0usize;
+    let mut tracker = ProgressTracker::new(progress, total_entries);
 
     // Reusable buffer for file copying (fixes HIGH #2)
     let mut buffer = vec![0u8; 64 * 1024]; // 64 KB
 
     for entry in &entries {
-        current_entry += 1;
-
         match &entry.entry_type {
             EntryType::File => {
-                progress.on_entry_start(&entry.archive_path, total_entries, current_entry);
+                tracker.on_entry_start(&entry.archive_path);
                 add_file_to_tar_with_progress_impl(
                     &mut builder,
                     &entry.path,
                     &entry.archive_path,
                     config,
                     &mut report,
-                    progress,
+                    tracker.callback(),
                     &mut buffer,
                 )?;
-                progress.on_entry_complete(&entry.archive_path);
+                tracker.on_entry_complete(&entry.archive_path);
             }
             EntryType::Directory => {
-                progress.on_entry_start(&entry.archive_path, total_entries, current_entry);
+                tracker.on_entry_start(&entry.archive_path);
                 report.directories_added += 1;
-                progress.on_entry_complete(&entry.archive_path);
+                tracker.on_entry_complete(&entry.archive_path);
             }
             EntryType::Symlink { target } => {
-                progress.on_entry_start(&entry.archive_path, total_entries, current_entry);
+                tracker.on_entry_start(&entry.archive_path);
                 if config.follow_symlinks {
                     add_file_to_tar_with_progress_impl(
                         &mut builder,
@@ -258,13 +255,13 @@ fn create_tar_internal_with_progress<W: Write, P: AsRef<Path>>(
                         &entry.archive_path,
                         config,
                         &mut report,
-                        progress,
+                        tracker.callback(),
                         &mut buffer,
                     )?;
                 } else {
                     add_symlink_to_tar(&mut builder, &entry.archive_path, target, &mut report)?;
                 }
-                progress.on_entry_complete(&entry.archive_path);
+                tracker.on_entry_complete(&entry.archive_path);
             }
         }
     }
@@ -278,7 +275,7 @@ fn create_tar_internal_with_progress<W: Write, P: AsRef<Path>>(
     report.bytes_compressed = counting_writer.total_bytes();
     report.duration = start.elapsed();
 
-    progress.on_complete();
+    tracker.on_complete();
 
     Ok((report, counting_writer.into_inner()))
 }

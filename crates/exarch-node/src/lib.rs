@@ -639,9 +639,15 @@ fn run_extract_with_optional_progress(
 }
 
 /// Adapter that calls a JavaScript progress callback from a Rust worker thread.
+///
+/// The JavaScript callback receives `(path: string, total: number, current:
+/// number, bytesWritten: number)` where `bytesWritten` is the number of bytes
+/// written **for the current entry so far** (starts at 0 when the entry begins,
+/// grows as chunks are flushed to disk; always 0 during extraction because the
+/// core library does not emit byte-level progress events for extraction).
 struct NodeProgressAdapter {
     tsfn: ThreadsafeFunction<(String, i64, i64, i64)>,
-    accumulated_bytes: i64,
+    current_entry_bytes: i64,
     total: usize,
 }
 
@@ -649,7 +655,7 @@ impl NodeProgressAdapter {
     fn new(tsfn: ThreadsafeFunction<(String, i64, i64, i64)>) -> Self {
         Self {
             tsfn,
-            accumulated_bytes: 0,
+            current_entry_bytes: 0,
             total: 0,
         }
     }
@@ -657,18 +663,19 @@ impl NodeProgressAdapter {
 
 impl exarch_core::ProgressCallback for NodeProgressAdapter {
     fn on_entry_start(&mut self, path: &std::path::Path, total: usize, current: usize) {
+        self.current_entry_bytes = 0;
         self.total = total;
         let path_str = path.to_string_lossy().into_owned();
         let total_i64 = i64::try_from(total).unwrap_or(i64::MAX);
         let current_i64 = i64::try_from(current).unwrap_or(i64::MAX);
         self.tsfn.call(
-            Ok((path_str, total_i64, current_i64, self.accumulated_bytes)),
+            Ok((path_str, total_i64, current_i64, self.current_entry_bytes)),
             ThreadsafeFunctionCallMode::NonBlocking,
         );
     }
 
     fn on_bytes_written(&mut self, bytes: u64) {
-        self.accumulated_bytes = self.accumulated_bytes.saturating_add(bytes.cast_signed());
+        self.current_entry_bytes = self.current_entry_bytes.saturating_add(bytes.cast_signed());
     }
 
     fn on_entry_complete(&mut self, _path: &std::path::Path) {}

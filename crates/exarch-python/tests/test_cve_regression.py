@@ -263,3 +263,53 @@ def test_partial_extraction_preserves_hardlink_escape_type(temp_dir):
     err = exc_info.value
     assert getattr(err, "files_extracted", None) is not None
     assert err.files_extracted >= 1
+
+
+def test_progress_bytes_written_not_stale(temp_dir):
+    """
+    Regression test for #285.
+
+    PyProgressAdapter was passing stale `bytes_written` (accumulated from all
+    previous entries) to the Python callback at `on_entry_start`. The bug only
+    manifests through `create_archive_with_progress` because `on_bytes_written`
+    is only called during creation, not extraction.
+
+    The fix resets `current_entry_bytes` to 0 at the start of each entry, so
+    `bytes_written` at `on_entry_start` is always 0 regardless of how many
+    bytes the preceding entries wrote.
+
+    Failure signature of the original bug: file2's on_entry_start call would
+    report bytes_written == 1024 (stale from file1) instead of 0.
+    """
+    small = b"x" * 1024  # 1 KB
+    large = b"y" * (100 * 1024)  # 100 KB
+
+    src_dir = temp_dir / "src"
+    src_dir.mkdir()
+    (src_dir / "small.txt").write_bytes(small)
+    (src_dir / "large.txt").write_bytes(large)
+
+    archive = temp_dir / "two_files.tar.gz"
+
+    # entry_start_bytes[name] = bytes_written received at on_entry_start
+    entry_start_bytes: dict = {}
+
+    def callback(path: str, total: int, current: int, bytes_written: int) -> None:
+        name = path.split("/")[-1].split("\\")[-1]
+        if name not in entry_start_bytes:
+            entry_start_bytes[name] = bytes_written
+
+    exarch.create_archive_with_progress(archive, [src_dir], None, callback)
+
+    assert "small.txt" in entry_start_bytes, "callback never fired for small.txt"
+    assert "large.txt" in entry_start_bytes, "callback never fired for large.txt"
+
+    # Both entries must start with bytes_written == 0.
+    # The original bug: large.txt received bytes_written == 1024 (stale from small.txt).
+    assert entry_start_bytes["small.txt"] == 0, (
+        f"small.txt: expected bytes_written=0 at entry start, got {entry_start_bytes['small.txt']}"
+    )
+    assert entry_start_bytes["large.txt"] == 0, (
+        f"large.txt: expected bytes_written=0 at entry start, "
+        f"got {entry_start_bytes['large.txt']} (stale value — original #285 bug)"
+    )

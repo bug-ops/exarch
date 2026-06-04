@@ -171,6 +171,29 @@ impl SecurityConfig {
         self
     }
 
+    /// Sets the maximum memory that may be used to decompress a solid 7z block.
+    ///
+    /// Solid archives decompress entire blocks into memory before individual
+    /// entries can be read. This limit caps that allocation to prevent
+    /// memory exhaustion from crafted archives. Default: 512 MB.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if size is negative or zero.
+    #[napi(js_name = "setMaxSolidBlockMemory")]
+    pub fn set_max_solid_block_memory(&mut self, size: i64) -> Result<&Self> {
+        if size <= 0 {
+            return Err(Error::from_reason(
+                "max solid block memory must be a positive number",
+            ));
+        }
+        #[allow(clippy::cast_sign_loss)]
+        {
+            self.inner.max_solid_block_memory = size as u64;
+        }
+        Ok(self)
+    }
+
     /// Sets whether to preserve permissions from archive.
     #[napi(js_name = "setPreservePermissions")]
     pub fn set_preserve_permissions(&mut self, preserve: Option<bool>) -> &Self {
@@ -317,6 +340,13 @@ impl SecurityConfig {
     #[napi(getter)]
     pub fn get_allow_solid_archives(&self) -> bool {
         self.inner.allow_solid_archives
+    }
+
+    /// Maximum memory in bytes for decompressing a solid 7z block.
+    #[napi(getter)]
+    #[allow(clippy::cast_possible_wrap)]
+    pub fn get_max_solid_block_memory(&self) -> i64 {
+        self.inner.max_solid_block_memory as i64
     }
 
     /// List of allowed file extensions.
@@ -849,6 +879,54 @@ mod tests {
             config.get_allow_solid_archives(),
             "allow_solid_archives getter should reflect setter value"
         );
+    }
+
+    #[test]
+    fn test_max_solid_block_memory_default() {
+        let config = SecurityConfig::new();
+        assert_eq!(
+            config.get_max_solid_block_memory(),
+            512 * 1024 * 1024,
+            "max_solid_block_memory should default to 512 MB"
+        );
+    }
+
+    #[test]
+    fn test_max_solid_block_memory_round_trip() {
+        let mut config = SecurityConfig::new();
+        let result = config.set_max_solid_block_memory(256 * 1024 * 1024);
+        assert!(result.is_ok());
+        assert_eq!(
+            config.get_max_solid_block_memory(),
+            256 * 1024 * 1024,
+            "getter should reflect set value"
+        );
+    }
+
+    #[test]
+    fn test_max_solid_block_memory_rejects_negative() {
+        let mut config = SecurityConfig::new();
+        let result = config.set_max_solid_block_memory(-1);
+        assert!(result.is_err(), "negative value should be rejected");
+        assert!(
+            result.unwrap_err().to_string().contains("positive"),
+            "error should mention positive requirement"
+        );
+    }
+
+    #[test]
+    fn test_max_solid_block_memory_rejects_zero() {
+        let mut config = SecurityConfig::new();
+        let result = config.set_max_solid_block_memory(0);
+        assert!(result.is_err(), "zero should be rejected");
+    }
+
+    #[test]
+    fn test_max_solid_block_memory_accepts_one_byte() {
+        let mut config = SecurityConfig::new();
+        let result = config.set_max_solid_block_memory(1);
+        assert!(result.is_ok(), "1 byte should be accepted");
+        assert_eq!(config.get_max_solid_block_memory(), 1);
     }
 
     #[test]

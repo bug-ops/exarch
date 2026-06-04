@@ -281,7 +281,7 @@ def test_progress_bytes_written_not_stale(temp_dir):
     Failure signature of the original bug: file2's on_entry_start call would
     report bytes_written == len(SMALL) (stale from file1) instead of 0.
     """
-    SMALL = b"x" * 1024          # 1 KB
+    SMALL = b"x" * 1024  # 1 KB
     LARGE = b"y" * (100 * 1024)  # 100 KB
 
     src_dir = temp_dir / "src"

@@ -279,15 +279,15 @@ def test_progress_bytes_written_not_stale(temp_dir):
     bytes the preceding entries wrote.
 
     Failure signature of the original bug: file2's on_entry_start call would
-    report bytes_written == len(SMALL) (stale from file1) instead of 0.
+    report bytes_written == 1024 (stale from file1) instead of 0.
     """
-    SMALL = b"x" * 1024  # 1 KB
-    LARGE = b"y" * (100 * 1024)  # 100 KB
+    small = b"x" * 1024  # 1 KB
+    large = b"y" * (100 * 1024)  # 100 KB
 
     src_dir = temp_dir / "src"
     src_dir.mkdir()
-    (src_dir / "small.txt").write_bytes(SMALL)
-    (src_dir / "large.txt").write_bytes(LARGE)
+    (src_dir / "small.txt").write_bytes(small)
+    (src_dir / "large.txt").write_bytes(large)
 
     archive = temp_dir / "two_files.tar.gz"
 

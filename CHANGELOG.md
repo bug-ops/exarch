@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `check_permissions` in `inspection/verify.rs` now passes the actual entry path to
   `InvalidPermissions` instead of an empty `PathBuf`, so error messages include the
   offending archive entry (#286).
+- ZIP archives created via the non-progress `create_zip` path no longer include a spurious `"/"` root directory entry. The entry was an artefact of formatting an empty archive path as `"{}/"`; it has been absent from the `create_zip_with_progress` path since #289 (#290).
 
 ### Breaking Changes
 
@@ -48,6 +49,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `creation/tar`: replace manual entry counter with `ProgressTracker`; add `ProgressTracker::callback()` accessor to enable byte-level progress in nested helpers without lifetime conflicts (#284).
 - `creation/zip`: same `ProgressTracker` wiring as tar, removing manual `idx + 1` counter (#284).
+- `creation/zip`: `create_zip_internal` now delegates to `create_zip_internal_with_progress` via `NoopProgress`, eliminating ~167 lines of duplicate traversal, compression-option, and file-add logic (#290).
+- `creation/tar`: dead `_buffer: &mut [u8]` parameter removed from `add_file_to_tar_with_progress_impl`; the two 64 KB heap allocations at the former call sites are eliminated (#291).
 - `api`: collapse five identical `extract_tar*` private functions into a single generic `extract_tar_with_decoder` helper parametrised by a decoder closure; eliminates ~80 lines of structural duplication (#254).
 - `sevenz`: eliminate `Rc`/`RefCell` interior mutability in `extract_with_callback`; state is now owned by a local context struct, matching the `tar.rs` and `zip.rs` patterns (#273, #258).
 - `sevenz`: narrow `std::process` import to `std::process::id` to prevent accidental use of `process::exit` in library code (#270).

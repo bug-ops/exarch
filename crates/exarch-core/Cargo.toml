@@ -34,8 +34,17 @@ criterion.workspace = true
 dhat.workspace = true
 proptest.workspace = true
 
+[features]
+# Exposes security primitives as `pub` for external benchmarks and integration
+# tests that cannot access pub(crate) items. Not intended for production use.
+testing = []
+
 [lints]
 workspace = true
+
+[[test]]
+name = "property_tests"
+required-features = ["testing"]
 
 [[bench]]
 name = "creation"
@@ -48,6 +57,7 @@ harness = false
 [[bench]]
 name = "validation"
 harness = false
+required-features = ["testing"]
 
 [[bench]]
 name = "progress"

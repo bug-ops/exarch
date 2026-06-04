@@ -35,7 +35,7 @@ use crate::types::safe_symlink::resolve_through_symlinks;
 ///
 /// # Examples
 ///
-/// ```no_run
+/// ```ignore
 /// use exarch_core::SecurityConfig;
 /// use exarch_core::security::HardlinkTracker;
 /// use exarch_core::types::DestDir;
@@ -86,7 +86,7 @@ impl HardlinkTracker {
     ///
     /// # Examples
     ///
-    /// ```no_run
+    /// ```ignore
     /// use exarch_core::SecurityConfig;
     /// use exarch_core::security::HardlinkTracker;
     /// use exarch_core::types::DestDir;
@@ -169,10 +169,11 @@ impl HardlinkTracker {
     pub fn count(&self) -> usize {
         self.seen_targets.len()
     }
+}
 
-    /// Checks if a target path has been seen before.
-    #[must_use]
-    pub fn has_target(&self, target: &Path) -> bool {
+#[cfg(test)]
+impl HardlinkTracker {
+    pub(crate) fn has_target(&self, target: &Path) -> bool {
         self.seen_targets.contains_key(target)
     }
 }

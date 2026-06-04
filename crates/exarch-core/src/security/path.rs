@@ -32,7 +32,7 @@ use crate::types::SafePath;
 ///
 /// # Examples
 ///
-/// ```no_run
+/// ```ignore
 /// use exarch_core::SecurityConfig;
 /// use exarch_core::security::validate_path;
 /// use exarch_core::types::DestDir;

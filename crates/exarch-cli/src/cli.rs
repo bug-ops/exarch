@@ -81,6 +81,22 @@ pub struct ExtractArgs {
     #[arg(long)]
     pub allow_hardlinks: bool,
 
+    /// Maximum path depth allowed (default: 32, minimum: 1)
+    #[arg(long, default_value = "32")]
+    pub max_path_depth: usize,
+
+    /// Banned path component; can be repeated.
+    ///
+    /// When specified, replaces the default ban list (.git, .ssh, .gnupg,
+    /// .aws, .kube, .docker, .env). Use an empty value to allow all
+    /// components.
+    #[arg(long = "banned-component", value_name = "COMPONENT")]
+    pub banned_components: Vec<String>,
+
+    /// Allow absolute paths in archive entries
+    #[arg(long)]
+    pub allow_absolute_paths: bool,
+
     /// Allow solid 7z archives (multiple files compressed as one block)
     #[arg(long)]
     pub allow_solid_archives: bool,
@@ -261,6 +277,79 @@ mod tests {
             panic!("expected Extract command");
         };
         assert!(args.allow_solid_archives);
+    }
+
+    #[test]
+    fn test_max_path_depth_default() {
+        let cli = Cli::parse_from(["exarch", "extract", "archive.tar.gz"]);
+        let Commands::Extract(args) = cli.command else {
+            panic!("expected Extract command");
+        };
+        assert_eq!(args.max_path_depth, 32);
+    }
+
+    #[test]
+    fn test_max_path_depth_override() {
+        let cli = Cli::parse_from([
+            "exarch",
+            "extract",
+            "--max-path-depth",
+            "8",
+            "archive.tar.gz",
+        ]);
+        let Commands::Extract(args) = cli.command else {
+            panic!("expected Extract command");
+        };
+        assert_eq!(args.max_path_depth, 8);
+    }
+
+    #[test]
+    fn test_banned_component_repeatable() {
+        let cli = Cli::parse_from([
+            "exarch",
+            "extract",
+            "--banned-component",
+            ".secrets",
+            "--banned-component",
+            ".private",
+            "archive.tar.gz",
+        ]);
+        let Commands::Extract(args) = cli.command else {
+            panic!("expected Extract command");
+        };
+        assert_eq!(args.banned_components, vec![".secrets", ".private"]);
+    }
+
+    #[test]
+    fn test_banned_component_empty_by_default() {
+        let cli = Cli::parse_from(["exarch", "extract", "archive.tar.gz"]);
+        let Commands::Extract(args) = cli.command else {
+            panic!("expected Extract command");
+        };
+        assert!(args.banned_components.is_empty());
+    }
+
+    #[test]
+    fn test_allow_absolute_paths_flag() {
+        let cli = Cli::parse_from([
+            "exarch",
+            "extract",
+            "--allow-absolute-paths",
+            "archive.tar.gz",
+        ]);
+        let Commands::Extract(args) = cli.command else {
+            panic!("expected Extract command");
+        };
+        assert!(args.allow_absolute_paths);
+    }
+
+    #[test]
+    fn test_allow_absolute_paths_default_false() {
+        let cli = Cli::parse_from(["exarch", "extract", "archive.tar.gz"]);
+        let Commands::Extract(args) = cli.command else {
+            panic!("expected Extract command");
+        };
+        assert!(!args.allow_absolute_paths);
     }
 
     #[test]

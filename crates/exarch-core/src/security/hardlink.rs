@@ -169,7 +169,6 @@ impl HardlinkTracker {
     pub fn count(&self) -> usize {
         self.seen_targets.len()
     }
-
 }
 
 #[cfg(test)]

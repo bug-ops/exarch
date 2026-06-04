@@ -4,34 +4,24 @@
 //! sources with security and configuration options.
 
 pub mod filters;
-pub mod walker;
+pub(crate) mod walker;
 
-pub mod compression;
+pub(crate) mod compression;
 pub mod config;
 pub mod creator;
-pub mod progress;
+pub(crate) mod progress;
 pub mod report;
 pub mod tar;
 pub mod zip;
 
 // Re-exports for public API
 pub use compression::CompressionLevel;
-pub use compression::compression_level_to_bzip2;
-pub use compression::compression_level_to_flate2;
-pub use compression::compression_level_to_xz;
-pub use compression::compression_level_to_zstd;
-pub use compression::convert_compression_level;
 pub use config::CreationConfig;
 pub use creator::ArchiveCreator;
-pub use progress::ProgressReader;
-pub use progress::ProgressTracker;
 pub use report::CreationReport;
-pub use tar::TarBz2Creator;
-pub use tar::TarCreator;
-pub use tar::TarGzCreator;
-pub use tar::TarXzCreator;
-pub use tar::TarZstCreator;
-pub use walker::EntryType;
-pub use walker::FilteredEntry;
-pub use walker::FilteredWalker;
-pub use zip::ZipCreator;
+pub(crate) use tar::TarBz2Creator;
+pub(crate) use tar::TarCreator;
+pub(crate) use tar::TarGzCreator;
+pub(crate) use tar::TarXzCreator;
+pub(crate) use tar::TarZstCreator;
+pub(crate) use zip::ZipCreator;

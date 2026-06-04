@@ -22,7 +22,6 @@ use criterion::criterion_main;
 use exarch_core::create_archive;
 use exarch_core::creation::CreationConfig;
 use exarch_core::creation::filters;
-use exarch_core::creation::walker::FilteredWalker;
 use exarch_core::formats::detect::ArchiveType;
 use std::fs;
 use std::hint::black_box;
@@ -313,9 +312,13 @@ fn benchmark_directory_walker(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::new("walk", file_count), &file_count, |b, _| {
             b.iter(|| {
-                let walker = FilteredWalker::new(black_box(&source_dir), black_box(&config));
-                let count = walker.walk().filter(|r| r.is_ok()).count();
-                black_box(count);
+                let output = temp.path().join("bench_walk.tar");
+                let _ = create_archive(
+                    black_box(&output),
+                    black_box(&[source_dir.as_path()]),
+                    black_box(&config),
+                );
+                fs::remove_file(&output).ok();
             });
         });
     }
@@ -380,9 +383,13 @@ fn benchmark_filtered_walking(c: &mut Criterion) {
     let default_config = CreationConfig::default();
     group.bench_function("default_filters", |b| {
         b.iter(|| {
-            let walker = FilteredWalker::new(black_box(&source_dir), black_box(&default_config));
-            let count = walker.walk().filter(|r| r.is_ok()).count();
-            black_box(count);
+            let output = temp.path().join("bench_filtered_default.tar");
+            let _ = create_archive(
+                black_box(&output),
+                black_box(&[source_dir.as_path()]),
+                black_box(&default_config),
+            );
+            fs::remove_file(&output).ok();
         });
     });
 
@@ -390,10 +397,13 @@ fn benchmark_filtered_walking(c: &mut Criterion) {
     let include_hidden_config = CreationConfig::default().with_include_hidden(true);
     group.bench_function("include_hidden", |b| {
         b.iter(|| {
-            let walker =
-                FilteredWalker::new(black_box(&source_dir), black_box(&include_hidden_config));
-            let count = walker.walk().filter(|r| r.is_ok()).count();
-            black_box(count);
+            let output = temp.path().join("bench_filtered_hidden.tar");
+            let _ = create_archive(
+                black_box(&output),
+                black_box(&[source_dir.as_path()]),
+                black_box(&include_hidden_config),
+            );
+            fs::remove_file(&output).ok();
         });
     });
 
@@ -403,9 +413,13 @@ fn benchmark_filtered_walking(c: &mut Criterion) {
         .with_exclude_patterns(vec![]);
     group.bench_function("no_filters", |b| {
         b.iter(|| {
-            let walker = FilteredWalker::new(black_box(&source_dir), black_box(&no_filter_config));
-            let count = walker.walk().filter(|r| r.is_ok()).count();
-            black_box(count);
+            let output = temp.path().join("bench_filtered_none.tar");
+            let _ = create_archive(
+                black_box(&output),
+                black_box(&[source_dir.as_path()]),
+                black_box(&no_filter_config),
+            );
+            fs::remove_file(&output).ok();
         });
     });
 

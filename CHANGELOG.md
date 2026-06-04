@@ -16,7 +16,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `sevenz`: eliminate `Rc`/`RefCell` interior mutability in `extract_with_callback`; state is now owned by a local context struct, matching the `tar.rs` and `zip.rs` patterns (#273, #258).
 - `sevenz`: narrow `std::process` import to `std::process::id` to prevent accidental use of `process::exit` in library code (#270).
-
+- Internal creation helpers (`compression_level_to_*`, `ProgressReader`, `ProgressTracker`,
+  `FilteredEntry`, `FilteredWalker`) are no longer accessible via `pub use` at the crate root;
+  they remain available within `exarch-core` through their submodule paths but are internal
+  implementation details. The parent modules `creation::compression`, `creation::progress`, and
+  `creation::walker` are now `pub(crate)` (#280).
+- `sanitize_permissions` signature no longer accepts a `_path: &Path` parameter that was
+  unused. Call sites that passed a dummy path must be updated to omit the argument (#279).
 - ZIP symlink extraction tests (`test_extract_symlink_via_unix_attributes`,
   `test_symlink_disabled_by_default`) are no longer ignored; they now use raw ZIP construction
   with correct unix mode bits to exercise the security-critical symlink detection path (#271).

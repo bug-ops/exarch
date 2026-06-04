@@ -508,7 +508,9 @@ fn creator_for_format(
         ArchiveType::TarXz => Ok(Box::new(crate::creation::TarXzCreator)),
         ArchiveType::TarZst => Ok(Box::new(crate::creation::TarZstCreator)),
         ArchiveType::Zip => Ok(Box::new(crate::creation::ZipCreator)),
-        ArchiveType::SevenZ => Err(ExtractionError::UnsupportedFormat),
+        ArchiveType::SevenZ => Err(ExtractionError::InvalidConfiguration {
+            reason: "7z archive creation is not supported".into(),
+        }),
     }
 }
 
@@ -794,7 +796,7 @@ mod tests {
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
-            ExtractionError::UnsupportedFormat
+            ExtractionError::InvalidConfiguration { .. }
         ));
     }
 

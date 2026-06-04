@@ -74,9 +74,6 @@ pub fn convert_error(err: CoreError) -> PyErr {
         CoreError::SecurityViolation { reason } => SecurityViolationError::new_err(format!(
             "operation denied by security policy: {reason}"
         )),
-        CoreError::UnsupportedFormat => {
-            UnsupportedFormatError::new_err("unsupported archive format")
-        }
         CoreError::InvalidArchive(msg) => {
             InvalidArchiveError::new_err(format!("invalid archive: {msg}"))
         }
@@ -374,13 +371,20 @@ mod tests {
     }
 
     #[test]
-    fn test_unsupported_format_conversion() {
-        let err = CoreError::UnsupportedFormat;
+    fn test_unknown_format_conversion() {
+        let err = CoreError::UnknownFormat {
+            path: PathBuf::from("archive.rar"),
+        };
         let py_err = convert_error(err);
         let err_str = py_err.to_string();
         assert!(
-            err_str.contains("unsupported archive format"),
-            "Expected 'unsupported archive format' in error message, got: {}",
+            err_str.contains("cannot determine archive format"),
+            "Expected 'cannot determine archive format' in error message, got: {}",
+            err_str
+        );
+        assert!(
+            err_str.contains("archive.rar"),
+            "Expected path in error message, got: {}",
             err_str
         );
     }

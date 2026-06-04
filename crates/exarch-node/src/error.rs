@@ -123,10 +123,6 @@ pub fn convert_error(err: CoreError) -> Error {
             msg.push_str(&reason);
             Error::new(Status::GenericFailure, msg)
         }
-        CoreError::UnsupportedFormat => Error::new(
-            Status::GenericFailure,
-            "UNSUPPORTED_FORMAT: unsupported archive format",
-        ),
         CoreError::InvalidArchive(archive_msg) => {
             let mut msg = String::with_capacity(30 + archive_msg.len());
             msg.push_str("INVALID_ARCHIVE: invalid archive: ");
@@ -336,12 +332,14 @@ mod tests {
     }
 
     #[test]
-    fn test_unsupported_format_conversion() {
-        let err = CoreError::UnsupportedFormat;
+    fn test_unknown_format_conversion() {
+        let err = CoreError::UnknownFormat {
+            path: std::path::PathBuf::from("archive.rar"),
+        };
         let napi_err = convert_error(err);
         let err_str = napi_err.to_string();
-        assert!(err_str.contains("UNSUPPORTED_FORMAT"));
-        assert!(err_str.contains("unsupported archive format"));
+        assert!(err_str.contains("UNKNOWN_FORMAT"));
+        assert!(err_str.contains("cannot determine archive format"));
     }
 
     #[test]

@@ -402,7 +402,8 @@ mod tests {
     fn test_builder_full_config() {
         let config = CreationConfig::default()
             .with_follow_symlinks(true)
-            .with_compression_level(9);
+            .with_compression_level(9)
+            .unwrap();
 
         let creator = ArchiveCreator::new()
             .output("test.tar.gz")

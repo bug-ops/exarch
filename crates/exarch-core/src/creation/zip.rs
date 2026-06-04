@@ -552,7 +552,8 @@ mod tests {
 
         let config = CreationConfig::default()
             .with_exclude_patterns(vec![])
-            .with_compression_level(9);
+            .with_compression_level(9)
+            .unwrap();
 
         let report = create_zip(&output, &[source_dir.path()], &config).unwrap();
 
@@ -577,7 +578,8 @@ mod tests {
             let output = temp.path().join(format!("output_{level}.zip"));
             let config = CreationConfig::default()
                 .with_exclude_patterns(vec![])
-                .with_compression_level(level);
+                .with_compression_level(level)
+                .unwrap();
 
             let report = create_zip(&output, &[source_dir.path()], &config).unwrap();
             assert_eq!(report.files_added, 1);

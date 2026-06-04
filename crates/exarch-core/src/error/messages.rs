@@ -101,12 +101,6 @@ impl ExtractionError {
                 context: None,
             },
 
-            Self::UnsupportedFormat => FfiErrorMessage {
-                code: "UNSUPPORTED_FORMAT",
-                description: "unsupported archive format".into(),
-                context: None,
-            },
-
             Self::InvalidArchive(reason) => FfiErrorMessage {
                 code: "INVALID_ARCHIVE",
                 description: format!("invalid archive: {reason}"),
@@ -192,7 +186,6 @@ impl ExtractionError {
             Self::ZipBomb { .. } => "ZIP_BOMB",
             Self::QuotaExceeded { .. } => "QUOTA_EXCEEDED",
             Self::SecurityViolation { .. } => "SECURITY_VIOLATION",
-            Self::UnsupportedFormat => "UNSUPPORTED_FORMAT",
             Self::InvalidArchive(_) => "INVALID_ARCHIVE",
             Self::Io(_) => "IO_ERROR",
             Self::InvalidPermissions { .. } => "INVALID_PERMISSIONS",
@@ -299,7 +292,9 @@ mod tests {
             ExtractionError::SecurityViolation {
                 reason: "test".into(),
             },
-            ExtractionError::UnsupportedFormat,
+            ExtractionError::UnknownFormat {
+                path: PathBuf::from("test.rar"),
+            },
             ExtractionError::InvalidArchive("test".into()),
             ExtractionError::Io(std::io::Error::other("test")),
             ExtractionError::InvalidPermissions {

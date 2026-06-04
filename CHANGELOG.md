@@ -7,8 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `ValidationReport` is now re-exported at the crate root as `exarch_core::ValidationReport`
+  (was only accessible as `exarch_core::security::ValidationReport`) (#256).
+
 ### Breaking Changes
 
+- **`ExtractionError::UnsupportedFormat`** has been removed. All format-detection failures now
+  return `ExtractionError::UnknownFormat { path }`, which carries the path that could not be
+  identified. Match arms on `UnsupportedFormat` must be updated to `UnknownFormat { .. }` (#255).
+- **7z archive creation** now returns `ExtractionError::InvalidConfiguration` instead of
+  `ExtractionError::UnsupportedFormat` when the output path has a `.7z` extension, since the
+  format is recognised but creation is unsupported (#255).
+- **`CreationConfig::with_compression_level`** now returns `Result<Self, ExtractionError>` instead
+  of `Self`. Call sites must handle the error with `?` or `.unwrap()`; the method no longer panics
+  on out-of-range input (#257). The real validation gate is `CreationConfig::validate()`, which is
+  invoked by the creation pipeline; this change removes the panic from the public builder surface.
 - **Python**: `PartialExtractionError` has been removed from the public API. In 0.4.0 it was
   always raised when extraction failed after some files were already written. Code written
   against 0.4.0 that used `except PartialExtractionError` must be updated: catch the specific

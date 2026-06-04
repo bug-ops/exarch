@@ -60,10 +60,6 @@ pub enum ExtractionError {
     #[error("I/O error: {0}")]
     Io(std::io::Error),
 
-    /// Archive format is unsupported or unrecognized.
-    #[error("unsupported archive format")]
-    UnsupportedFormat,
-
     /// Archive is corrupted or invalid.
     #[error("invalid archive: {0}")]
     InvalidArchive(String),
@@ -207,7 +203,7 @@ impl ExtractionError {
     /// };
     /// assert!(err.is_security_violation());
     ///
-    /// let err = ExtractionError::UnsupportedFormat;
+    /// let err = ExtractionError::InvalidArchive("corrupted header".to_string());
     /// assert!(!err.is_security_violation());
     /// ```
     #[must_use]
@@ -271,11 +267,14 @@ impl ExtractionError {
     ///
     /// ```
     /// use exarch_core::ExtractionError;
+    /// use std::path::PathBuf;
     ///
     /// let err = ExtractionError::InvalidArchive("bad header".to_string());
     /// assert_eq!(err.context(), Some("bad header"));
     ///
-    /// let err = ExtractionError::UnsupportedFormat;
+    /// let err = ExtractionError::UnknownFormat {
+    ///     path: PathBuf::from("archive.rar"),
+    /// };
     /// assert_eq!(err.context(), None);
     /// ```
     #[must_use]
@@ -305,8 +304,13 @@ mod tests {
 
     #[test]
     fn test_error_display() {
-        let err = ExtractionError::UnsupportedFormat;
-        assert_eq!(err.to_string(), "unsupported archive format");
+        let err = ExtractionError::UnknownFormat {
+            path: PathBuf::from("archive.rar"),
+        };
+        assert_eq!(
+            err.to_string(),
+            "cannot determine archive format from: archive.rar"
+        );
     }
 
     #[test]
@@ -362,7 +366,9 @@ mod tests {
         assert!(err.is_security_violation());
 
         // Not security violations
-        let err = ExtractionError::UnsupportedFormat;
+        let err = ExtractionError::UnknownFormat {
+            path: PathBuf::from("archive.rar"),
+        };
         assert!(!err.is_security_violation());
 
         let err = ExtractionError::InvalidArchive("bad".into());
@@ -386,7 +392,9 @@ mod tests {
         let err = ExtractionError::InvalidArchive("corrupted".into());
         assert!(!err.is_recoverable());
 
-        let err = ExtractionError::UnsupportedFormat;
+        let err = ExtractionError::UnknownFormat {
+            path: PathBuf::from("archive.rar"),
+        };
         assert!(!err.is_recoverable());
 
         let err = ExtractionError::ZipBomb {
@@ -407,7 +415,9 @@ mod tests {
         };
         assert_eq!(err.context(), Some("not allowed"));
 
-        let err = ExtractionError::UnsupportedFormat;
+        let err = ExtractionError::UnknownFormat {
+            path: PathBuf::from("archive.rar"),
+        };
         assert_eq!(err.context(), None);
 
         let err = ExtractionError::PathTraversal {

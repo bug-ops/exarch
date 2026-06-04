@@ -205,11 +205,6 @@ impl VerificationIssue {
                 IssueCategory::InvalidArchive,
                 format!("I/O error: {io_err}"),
             ),
-            ExtractionError::UnsupportedFormat => (
-                IssueSeverity::High,
-                IssueCategory::InvalidArchive,
-                "Unsupported archive format".to_string(),
-            ),
             ExtractionError::InvalidArchive(msg) => (
                 IssueSeverity::High,
                 IssueCategory::InvalidArchive,
@@ -506,15 +501,6 @@ mod tests {
         assert_eq!(issue.severity, IssueSeverity::Medium);
         assert_eq!(issue.category, IssueCategory::InvalidPermissions);
         assert!(issue.message.contains("Invalid permissions"));
-    }
-
-    #[test]
-    fn test_verification_issue_from_unsupported_format() {
-        let error = ExtractionError::UnsupportedFormat;
-        let issue = VerificationIssue::from_error(&error, None);
-        assert_eq!(issue.severity, IssueSeverity::High);
-        assert_eq!(issue.category, IssueCategory::InvalidArchive);
-        assert!(issue.message.contains("Unsupported archive format"));
     }
 
     #[test]

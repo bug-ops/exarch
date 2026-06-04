@@ -15,13 +15,16 @@ use std::path::PathBuf;
 /// ```
 /// use exarch_core::creation::CreationConfig;
 ///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// // Use secure defaults
 /// let config = CreationConfig::default();
 ///
 /// // Customize for specific needs
 /// let custom = CreationConfig::default()
 ///     .with_follow_symlinks(true)
-///     .with_compression_level(9);
+///     .with_compression_level(9)?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct CreationConfig {
@@ -158,15 +161,16 @@ impl CreationConfig {
 
     /// Sets the compression level.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if the compression level is not in the range 1-9.
-    /// Use `validate()` for non-panicking validation.
-    #[must_use]
-    pub fn with_compression_level(mut self, level: u8) -> Self {
-        assert!((1..=9).contains(&level), "compression level must be 1-9");
+    /// Returns [`ExtractionError::InvalidCompressionLevel`] if `level` is not
+    /// in the range 1–9.
+    pub fn with_compression_level(mut self, level: u8) -> Result<Self> {
+        if !(1..=9).contains(&level) {
+            return Err(ExtractionError::InvalidCompressionLevel { level });
+        }
         self.compression_level = Some(level);
-        self
+        Ok(self)
     }
 
     /// Sets whether to preserve permissions.
@@ -220,6 +224,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn test_creation_config_builder() {
         let config = CreationConfig::default()
             .with_follow_symlinks(true)
@@ -228,6 +233,7 @@ mod tests {
             .with_exclude_patterns(vec!["*.log".to_string()])
             .with_strip_prefix(Some(PathBuf::from("/base")))
             .with_compression_level(9)
+            .unwrap()
             .with_preserve_permissions(false)
             .with_format(Some(ArchiveType::TarGz));
 
@@ -242,14 +248,15 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn test_creation_config_validate_valid() {
         let config = CreationConfig::default();
         assert!(config.validate().is_ok());
 
-        let config = CreationConfig::default().with_compression_level(1);
+        let config = CreationConfig::default().with_compression_level(1).unwrap();
         assert!(config.validate().is_ok());
 
-        let config = CreationConfig::default().with_compression_level(9);
+        let config = CreationConfig::default().with_compression_level(9).unwrap();
         assert!(config.validate().is_ok());
 
         let config = CreationConfig {
@@ -286,9 +293,15 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "compression level must be 1-9")]
     fn test_creation_config_builder_invalid_compression() {
-        let _config = CreationConfig::default().with_compression_level(0);
+        assert!(matches!(
+            CreationConfig::default().with_compression_level(0),
+            Err(ExtractionError::InvalidCompressionLevel { level: 0 })
+        ));
+        assert!(matches!(
+            CreationConfig::default().with_compression_level(10),
+            Err(ExtractionError::InvalidCompressionLevel { level: 10 })
+        ));
     }
 
     #[test]

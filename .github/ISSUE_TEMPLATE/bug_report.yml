@@ -108,7 +108,7 @@ body:
       label: Security
       description: Security-related checks
       options:
-        - label: This is NOT a security vulnerability (for security issues, email security@bug-ops.com instead)
+        - label: This is NOT a security vulnerability (for security issues, use GitHub's private security advisory feature instead)
           required: true
 
   - type: checkboxes

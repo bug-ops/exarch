@@ -67,7 +67,7 @@ status: permanent
 
 - Before v1.0.0: implement only the minimum necessary functionality; avoid additional abstractions and premature optimization
 - Before v1.0.0: no backward-compatibility guarantees — document breaking changes in `CHANGELOG.md`
-- 7z creation is not supported (read-only); callers receive `UnsupportedFormat`
+- 7z creation is not supported (read-only); callers receive `InvalidConfiguration`
 - ZIP-family aliases (`.jar`, `.apk`, `.whl`, etc.) are extracted as ZIP but creation is rejected unless the caller explicitly overrides `CreationConfig::format`
 
 ## VIII. Git Workflow

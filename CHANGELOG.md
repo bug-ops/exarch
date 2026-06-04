@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Specifications in `specs/` updated to replace stale `UnsupportedFormat` references with
+  `UnknownFormat { path }` (format-detection failures) and `InvalidConfiguration` (7z creation),
+  matching the post-#255 Rust API. Python exception hierarchy updated to include
+  `UnknownFormatError(UnsupportedFormatError)` (#265, #264).
+
 ### Added
 
 - `ValidationReport` is now re-exported at the crate root as `exarch_core::ValidationReport`

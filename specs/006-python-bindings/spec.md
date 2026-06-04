@@ -174,6 +174,7 @@ ExarchError(Exception)
   SecurityViolationError(ExarchError)  # may carry files_extracted, bytes_written
   InvalidPermissionsError(ExarchError) # may carry files_extracted, bytes_written
   UnsupportedFormatError(ExarchError)
+    UnknownFormatError(UnsupportedFormatError)
   InvalidArchiveError(ExarchError)
 ```
 

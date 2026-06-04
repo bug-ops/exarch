@@ -190,3 +190,76 @@ def test_hardlink_escape(malicious_hardlink_escape, temp_dir):
 
     # Verify no hardlinks were created
     assert not (output_dir2 / "evil_hardlink").exists()
+
+
+def _make_tar_gz(path, entries):
+    """Build a .tar.gz at `path` from (TarInfo, data-or-None) entries."""
+    import io
+    import tarfile
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        for info, data in entries:
+            if data is None:
+                tar.addfile(info)
+            else:
+                info.size = len(data)
+                tar.addfile(info, io.BytesIO(data))
+    path.write_bytes(buf.getvalue())
+
+
+def test_partial_extraction_preserves_symlink_escape_type(temp_dir):
+    """
+    Regression test for #251.
+
+    When a security error occurs after a regular file has already been written,
+    the core wraps it in PartialExtraction. The binding must still raise the
+    specific exception type (not a generic one) and expose the partial report
+    via `files_extracted` / `bytes_written` attributes (the #210 capability).
+    """
+    import tarfile
+
+    archive = temp_dir / "partial_symlink.tar.gz"
+    regular = tarfile.TarInfo("dist/file.txt")
+    regular.type = tarfile.REGTYPE
+    link = tarfile.TarInfo("dist/link")
+    link.type = tarfile.SYMTYPE
+    link.linkname = "../../outside.txt"
+    _make_tar_gz(archive, [(regular, b"ok"), (link, None)])
+
+    output_dir = temp_dir / "out"
+    output_dir.mkdir()
+    config = exarch.SecurityConfig().allow_symlinks(True).allow_hardlinks(False)
+
+    with pytest.raises(exarch.SymlinkEscapeError) as exc_info:
+        exarch.extract_archive(archive, output_dir, config)
+
+    # #210 report attributes are attached to the specific exception.
+    err = exc_info.value
+    assert getattr(err, "files_extracted", None) is not None
+    assert err.files_extracted >= 1
+    assert err.bytes_written >= len(b"ok")
+
+
+def test_partial_extraction_preserves_hardlink_escape_type(temp_dir):
+    """Regression test for #251 (hardlink variant)."""
+    import tarfile
+
+    archive = temp_dir / "partial_hardlink.tar.gz"
+    regular = tarfile.TarInfo("dist/file.txt")
+    regular.type = tarfile.REGTYPE
+    hard = tarfile.TarInfo("dist/hard")
+    hard.type = tarfile.LNKTYPE
+    hard.linkname = "../../outside.txt"
+    _make_tar_gz(archive, [(regular, b"ok"), (hard, None)])
+
+    output_dir = temp_dir / "out"
+    output_dir.mkdir()
+    config = exarch.SecurityConfig().allow_hardlinks(True)
+
+    with pytest.raises(exarch.HardlinkEscapeError) as exc_info:
+        exarch.extract_archive(archive, output_dir, config)
+
+    err = exc_info.value
+    assert getattr(err, "files_extracted", None) is not None
+    assert err.files_extracted >= 1

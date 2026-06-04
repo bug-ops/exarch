@@ -135,7 +135,7 @@ THEN extraction respects those settings
 | FR-072 | WHEN paths contain null bytes or exceed 4096 bytes, THE SYSTEM SHALL raise `ValueError` at the Python boundary before calling into Rust | must |
 | FR-073 | WHEN no Python progress callback is provided, THE SYSTEM SHALL release the GIL during extraction/creation | must |
 | FR-074 | WHEN a Python progress callback is provided, THE SYSTEM SHALL NOT release the GIL (callback requires GIL to invoke Python) | must |
-| FR-075 | Rust `ExtractionError` variants SHALL map to specific Python exception types; `SourceNotFound`/`OutputExists` → `PyIOError`; `InvalidCompressionLevel`/`InvalidConfiguration` → `PyValueError`; `PartialExtraction` → `PartialExtractionError` with `files_extracted` and `bytes_written` attributes | must |
+| FR-075 | Rust `ExtractionError` variants SHALL map to specific Python exception types; `SourceNotFound`/`OutputExists` → `PyIOError`; `InvalidCompressionLevel`/`InvalidConfiguration` → `PyValueError`; `PartialExtraction` → the specific inner exception type (e.g. `SymlinkEscapeError`, `QuotaExceededError`) with `files_extracted` and `bytes_written` attributes attached to that exception | must |
 | FR-076 | ALL Python exception types SHALL be subclasses of `ExarchError(Exception)` | must |
 | FR-077 | `PySecurityConfig` and `PyCreationConfig` SHALL expose the same fluent builder API as the Rust counterparts | must |
 | FR-078 | `PyExtractionReport`, `PyCreationReport`, `PyArchiveManifest`, and `PyVerificationReport` SHALL expose all fields as Python attributes | must |
@@ -166,25 +166,33 @@ THEN extraction respects those settings
 
 ```
 ExarchError(Exception)
-  PathTraversalError(ExarchError)
-  SymlinkEscapeError(ExarchError)
-  HardlinkEscapeError(ExarchError)
-  ZipBombError(ExarchError)
-  QuotaExceededError(ExarchError)
+  PathTraversalError(ExarchError)      # may carry files_extracted, bytes_written
+  SymlinkEscapeError(ExarchError)      # may carry files_extracted, bytes_written
+  HardlinkEscapeError(ExarchError)     # may carry files_extracted, bytes_written
+  ZipBombError(ExarchError)            # may carry files_extracted, bytes_written
+  QuotaExceededError(ExarchError)      # may carry files_extracted, bytes_written
+  SecurityViolationError(ExarchError)  # may carry files_extracted, bytes_written
+  InvalidPermissionsError(ExarchError) # may carry files_extracted, bytes_written
   UnsupportedFormatError(ExarchError)
   InvalidArchiveError(ExarchError)
-  SecurityViolationError(ExarchError)
-  InvalidPermissionsError(ExarchError)
-  PartialExtractionError(ExarchError)   # exposes files_extracted, bytes_written
 ```
 
-> [!note] Error mapping corrections in v0.4.0 (#209)
+The `files_extracted` and `bytes_written` attributes are present on the raised
+exception when `exarch-core` wraps the inner error in `CoreError::PartialExtraction`
+(i.e. when at least one file was written to disk before the security check failed).
+Use `hasattr(e, "files_extracted")` to detect whether a partial extraction occurred.
+`ExarchError` is the catch-all base for any extraction failure.
+
+> [!note] Error mapping corrections (#209, #210, #251)
 > - `SourceNotFound`, `SourceNotAccessible`, and `OutputExists` now raise
 >   `PyIOError` (was `InvalidArchiveError`).
 > - `InvalidCompressionLevel` and `InvalidConfiguration` now raise
 >   `PyValueError` (was `InvalidArchiveError`).
-> - `PartialExtractionError` now exposes `files_extracted` and `bytes_written`
->   attributes for caller inspection (#210).
+> - In v0.4.0, `PartialExtraction` incorrectly collapsed all partial-extraction
+>   failures into a generic `PartialExtractionError` (#216). Fixed in v0.4.1
+>   (#251): the specific inner exception type is raised (e.g. `SymlinkEscapeError`)
+>   with `files_extracted` and `bytes_written` attached directly to it (#210).
+>   `PartialExtractionError` has been removed from the public API.
 > These corrections allow Python callers to distinguish I/O failures, validation
 > errors, and archive corruption with specific `except` clauses.
 
@@ -211,7 +219,7 @@ def verify_archive(archive_path, config=None) -> VerificationReport
 | Rust returns `ExtractionError::PathTraversal` | `PathTraversalError` raised in Python |
 | Rust returns `ExtractionError::SourceNotFound` or `OutputExists` | `PyIOError` raised (not `InvalidArchiveError`) |
 | Rust returns `ExtractionError::InvalidCompressionLevel` or `InvalidConfiguration` | `PyValueError` raised (not `InvalidArchiveError`) |
-| Rust returns `ExtractionError::PartialExtraction` | `PartialExtractionError` raised; `files_extracted` and `bytes_written` attributes populated |
+| Rust returns `ExtractionError::PartialExtraction` | The specific inner exception (e.g. `SymlinkEscapeError`) is raised; `files_extracted` and `bytes_written` attributes are attached; detect partiality via `hasattr(e, "files_extracted")` |
 | Progress callback raises Python exception | Exception propagates through `PyProgressAdapter`; extraction aborted |
 | GIL state with progress callback | GIL held throughout; no concurrent Python threads during extraction |
 

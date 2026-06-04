@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- **Python**: `PartialExtractionError` has been removed from the public API. In 0.4.0 it was
+  always raised when extraction failed after some files were already written. Code written
+  against 0.4.0 that used `except PartialExtractionError` must be updated: catch the specific
+  exception type (`SymlinkEscapeError`, `QuotaExceededError`, etc.) or use `except
+  ExtractionError` as the catch-all. To detect whether output was partial, use
+  `getattr(e, "files_extracted", None) is not None` (#251).
+
+### Fixed
+
+- Python: `extract_archive` now raises the specific exception type (`SymlinkEscapeError`,
+  `HardlinkEscapeError`, `QuotaExceededError`, etc.) instead of the generic
+  `PartialExtractionError` when extraction fails after some files have been written to disk.
+  The `files_extracted` and `bytes_written` report attributes from #210 are attached directly
+  to the concrete exception (#251).
+- Node.js: `extract_archive` error messages now begin with the specific error code
+  (`SYMLINK_ESCAPE`, `QUOTA_EXCEEDED`, etc.) instead of always prefixing `PARTIAL_EXTRACTION`
+  when the error occurs after partial output has been written. The `filesExtracted` and
+  `bytesWritten` fields are still appended to the message (#251).
+
 ## [0.4.0] - 2026-05-20
 
 ### Added

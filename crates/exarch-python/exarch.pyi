@@ -418,6 +418,9 @@ class VerificationReport:
         """Returns true if there are any critical severity issues."""
         ...
 
+ProgressCallbackFn = Callable[[str, int, int, int], None]
+"""Progress callback: (path, total, current, bytes_written) -> None."""
+
 def extract_archive(
     archive_path: str | Path,
     output_dir: str | Path,
@@ -460,6 +463,63 @@ def extract_archive(
     """
     ...
 
+def extract_archive_with_progress(
+    archive_path: str | Path,
+    output_dir: str | Path,
+    config: SecurityConfig | None = None,
+    progress: ProgressCallbackFn | None = None,
+) -> ExtractionReport:
+    """
+    Extract an archive to the specified directory with progress reporting.
+
+    Args:
+        archive_path: Path to the archive file (str or pathlib.Path)
+        output_dir: Directory where files will be extracted (str or pathlib.Path)
+        config: Optional SecurityConfig (uses secure defaults if None)
+        progress: Optional callback function for progress updates
+
+    Returns:
+        ExtractionReport with extraction statistics
+
+    Raises:
+        ValueError: Invalid argument type, null bytes in path, or path too long
+        PathTraversalError: Path traversal attempt detected
+        SymlinkEscapeError: Symlink points outside extraction directory
+        HardlinkEscapeError: Hardlink target outside extraction directory
+        ZipBombError: Potential zip bomb detected
+        InvalidPermissionsError: File permissions are invalid or unsafe
+        QuotaExceededError: Resource quota exceeded
+        SecurityViolationError: Security policy violation
+        UnsupportedFormatError: Archive format not supported
+        InvalidArchiveError: Archive is corrupted
+        IOError: I/O operation failed
+
+    Note:
+        When a progress callback is provided, the GIL is held during extraction
+        so that the callback can safely call into Python. Without a callback,
+        the GIL is released for performance.
+
+        Progress callback limitations:
+
+        - The ``bytes_written`` argument reflects ``on_bytes_written`` events
+          from the core library. Extraction does not emit byte-level progress,
+          only entry-level events, so ``bytes_written`` will always be 0 during
+          extraction.
+        - For TAR-family formats (tar, tar.gz, tar.bz2, tar.xz, tar.zst) the
+          ``total`` argument is 0 because the entry count is unknown until the
+          stream is fully read.
+
+        When extraction fails after some files have already been written to disk,
+        the specific exception (e.g. ``SymlinkEscapeError``) is raised with
+        ``files_extracted`` and ``bytes_written`` attributes attached.
+
+    Example:
+        >>> def progress(path: str, total: int, current: int, bytes: int):
+        ...     print(f"{current}/{total}: {path} ({bytes} bytes)")
+        >>> report = extract_archive_with_progress("archive.tar.gz", "/tmp/out", None, progress)
+    """
+    ...
+
 def create_archive(
     output_path: str | Path,
     sources: list[str | Path],
@@ -482,9 +542,6 @@ def create_archive(
         UnsupportedFormatError: Archive format not supported
     """
     ...
-
-ProgressCallbackFn = Callable[[str, int, int, int], None]
-"""Progress callback: (path, total, current, bytes_written) -> None."""
 
 def create_archive_with_progress(
     output_path: str | Path,
@@ -670,6 +727,18 @@ class SecurityViolationError(ExtractionError):
 
 class UnsupportedFormatError(ExtractionError):
     """Archive format not supported."""
+
+    ...
+
+class UnknownFormatError(UnsupportedFormatError):
+    """
+    Archive format cannot be determined from the file path or magic bytes.
+
+    This is a subclass of ``UnsupportedFormatError`` so existing callers that
+    catch the parent continue to work, while callers that need to distinguish
+    "we know the format but don't support it" from "we cannot identify the
+    format at all" can catch this narrower type.
+    """
 
     ...
 

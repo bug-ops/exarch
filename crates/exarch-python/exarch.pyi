@@ -77,6 +77,15 @@ class SecurityConfig:
         """Allows or denies solid 7z archives."""
         ...
 
+    def max_solid_block_memory(self, size: int) -> SecurityConfig:
+        """
+        Sets the maximum memory budget in bytes for decompressing a solid 7z block.
+
+        Only enforced when ``allow_solid_archives`` is ``True``. Raises
+        ``ValueError`` if *size* is zero.
+        """
+        ...
+
     def preserve_permissions(self, preserve: bool = True) -> SecurityConfig:
         """Sets whether to preserve permissions from archive."""
         ...

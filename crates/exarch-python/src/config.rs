@@ -161,6 +161,29 @@ impl PySecurityConfig {
         slf
     }
 
+    /// Sets the maximum memory budget in bytes for decompressing a solid 7z
+    /// block.
+    ///
+    /// Only enforced when `allow_solid_archives` is `True`. A crafted solid
+    /// archive can force the decompressor to buffer many preceding entries in
+    /// memory before reaching the target entry; this limit caps that buffer.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ValueError` if `size` is zero.
+    fn max_solid_block_memory(
+        mut slf: PyRefMut<'_, Self>,
+        size: u64,
+    ) -> PyResult<PyRefMut<'_, Self>> {
+        if size == 0 {
+            return Err(PyValueError::new_err(
+                "max_solid_block_memory must not be zero",
+            ));
+        }
+        slf.inner.max_solid_block_memory = size;
+        Ok(slf)
+    }
+
     /// Sets whether to preserve permissions from archive.
     #[pyo3(signature = (preserve=true))]
     fn preserve_permissions(mut slf: PyRefMut<'_, Self>, preserve: bool) -> PyRefMut<'_, Self> {
@@ -302,6 +325,22 @@ impl PySecurityConfig {
     #[setter]
     fn set_preserve_permissions(&mut self, value: bool) {
         self.inner.preserve_permissions = value;
+    }
+
+    #[getter]
+    fn get_max_solid_block_memory(&self) -> u64 {
+        self.inner.max_solid_block_memory
+    }
+
+    #[setter]
+    fn set_max_solid_block_memory(&mut self, value: u64) -> PyResult<()> {
+        if value == 0 {
+            return Err(PyValueError::new_err(
+                "max_solid_block_memory must not be zero",
+            ));
+        }
+        self.inner.max_solid_block_memory = value;
+        Ok(())
     }
 
     /// Returns a copy of the allowed extensions list.
@@ -942,6 +981,68 @@ mod tests {
             core_config.max_file_size,
             50 * 1024 * 1024,
             "as_core() should return reference to inner config"
+        );
+    }
+
+    #[test]
+    fn test_default_max_solid_block_memory() {
+        let config = PySecurityConfig::new();
+        assert_eq!(
+            config.get_max_solid_block_memory(),
+            512 * 1024 * 1024,
+            "Default max_solid_block_memory should be 512 MB"
+        );
+    }
+
+    #[test]
+    fn test_builder_max_solid_block_memory_valid() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let config = PySecurityConfig::new();
+            let py_config = Py::new(py, config).expect("Failed to create Py object");
+            let obj = py_config.bind(py);
+
+            let result = obj.call_method1("max_solid_block_memory", (256 * 1024 * 1024_u64,));
+            assert!(result.is_ok(), "Should accept valid memory size");
+            assert_eq!(
+                py_config.borrow(py).get_max_solid_block_memory(),
+                256 * 1024 * 1024,
+                "max_solid_block_memory should be updated"
+            );
+        });
+    }
+
+    #[test]
+    fn test_builder_max_solid_block_memory_rejects_zero() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let config = PySecurityConfig::new();
+            let py_config = Py::new(py, config).expect("Failed to create Py object");
+            let obj = py_config.bind(py);
+
+            let result = obj.call_method1("max_solid_block_memory", (0_u64,));
+            assert!(result.is_err(), "Should reject zero memory size");
+        });
+    }
+
+    #[test]
+    fn test_property_setter_max_solid_block_memory_valid() {
+        let mut config = PySecurityConfig::new();
+        let result = config.set_max_solid_block_memory(128 * 1024 * 1024);
+        assert!(result.is_ok(), "Should accept valid memory size");
+        assert_eq!(
+            config.get_max_solid_block_memory(),
+            128 * 1024 * 1024,
+            "Property setter should update max_solid_block_memory"
+        );
+    }
+
+    #[test]
+    fn test_property_setter_max_solid_block_memory_rejects_zero() {
+        let mut config = PySecurityConfig::new();
+        assert!(
+            config.set_max_solid_block_memory(0).is_err(),
+            "Should reject zero"
         );
     }
 }

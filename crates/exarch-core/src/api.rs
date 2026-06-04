@@ -121,11 +121,29 @@ fn extract_impl<P: AsRef<Path>, Q: AsRef<Path>>(
 
     // Dispatch to format-specific extraction
     match format {
-        ArchiveType::Tar => extract_tar(archive_path, output_dir, config, options, progress),
-        ArchiveType::TarGz => extract_tar_gz(archive_path, output_dir, config, options, progress),
-        ArchiveType::TarBz2 => extract_tar_bz2(archive_path, output_dir, config, options, progress),
-        ArchiveType::TarXz => extract_tar_xz(archive_path, output_dir, config, options, progress),
-        ArchiveType::TarZst => extract_tar_zst(archive_path, output_dir, config, options, progress),
+        ArchiveType::Tar => {
+            extract_tar_with_decoder(archive_path, output_dir, config, options, progress, Ok)
+        }
+        ArchiveType::TarGz => {
+            extract_tar_with_decoder(archive_path, output_dir, config, options, progress, |r| {
+                Ok(flate2::read::GzDecoder::new(r))
+            })
+        }
+        ArchiveType::TarBz2 => {
+            extract_tar_with_decoder(archive_path, output_dir, config, options, progress, |r| {
+                Ok(bzip2::read::BzDecoder::new(r))
+            })
+        }
+        ArchiveType::TarXz => {
+            extract_tar_with_decoder(archive_path, output_dir, config, options, progress, |r| {
+                Ok(xz2::read::XzDecoder::new(r))
+            })
+        }
+        ArchiveType::TarZst => {
+            extract_tar_with_decoder(archive_path, output_dir, config, options, progress, |r| {
+                Ok(zstd::stream::read::Decoder::new(r)?)
+            })
+        }
         ArchiveType::Zip => extract_zip(archive_path, output_dir, config, options, progress),
         ArchiveType::SevenZ => extract_7z(archive_path, output_dir, config, options, progress),
     }
@@ -257,100 +275,31 @@ fn extract_atomic<P: AsRef<Path>, Q: AsRef<Path>>(
     }
 }
 
-fn extract_tar(
+/// Opens `archive_path`, wraps it in a `BufReader`, passes it to
+/// `make_decoder`, and extracts the resulting TAR stream.
+///
+/// `make_decoder` builds a decoder (e.g. `GzDecoder`, `XzDecoder`) from the
+/// buffered file reader. For uncompressed TAR pass `Ok` as the identity
+/// closure. The closure may be fallible (e.g. zstd requires a constructor call
+/// that can fail with an I/O error).
+fn extract_tar_with_decoder<R, F>(
     archive_path: &Path,
     output_dir: &Path,
     config: &SecurityConfig,
     options: &ExtractionOptions,
     progress: &mut dyn ProgressCallback,
-) -> Result<ExtractionReport> {
+    make_decoder: F,
+) -> Result<ExtractionReport>
+where
+    R: std::io::Read,
+    F: FnOnce(std::io::BufReader<std::fs::File>) -> Result<R>,
+{
     use crate::formats::TarArchive;
     use crate::formats::traits::ArchiveFormat;
-    use std::fs::File;
-    use std::io::BufReader;
 
-    let file = File::open(archive_path)?;
-    let reader = BufReader::new(file);
-    let mut archive = TarArchive::new(reader);
-    archive.extract(output_dir, config, options, progress)
-}
-
-fn extract_tar_gz(
-    archive_path: &Path,
-    output_dir: &Path,
-    config: &SecurityConfig,
-    options: &ExtractionOptions,
-    progress: &mut dyn ProgressCallback,
-) -> Result<ExtractionReport> {
-    use crate::formats::TarArchive;
-    use crate::formats::traits::ArchiveFormat;
-    use flate2::read::GzDecoder;
-    use std::fs::File;
-    use std::io::BufReader;
-
-    let file = File::open(archive_path)?;
-    let reader = BufReader::new(file);
-    let decoder = GzDecoder::new(reader);
-    let mut archive = TarArchive::new(decoder);
-    archive.extract(output_dir, config, options, progress)
-}
-
-fn extract_tar_bz2(
-    archive_path: &Path,
-    output_dir: &Path,
-    config: &SecurityConfig,
-    options: &ExtractionOptions,
-    progress: &mut dyn ProgressCallback,
-) -> Result<ExtractionReport> {
-    use crate::formats::TarArchive;
-    use crate::formats::traits::ArchiveFormat;
-    use bzip2::read::BzDecoder;
-    use std::fs::File;
-    use std::io::BufReader;
-
-    let file = File::open(archive_path)?;
-    let reader = BufReader::new(file);
-    let decoder = BzDecoder::new(reader);
-    let mut archive = TarArchive::new(decoder);
-    archive.extract(output_dir, config, options, progress)
-}
-
-fn extract_tar_xz(
-    archive_path: &Path,
-    output_dir: &Path,
-    config: &SecurityConfig,
-    options: &ExtractionOptions,
-    progress: &mut dyn ProgressCallback,
-) -> Result<ExtractionReport> {
-    use crate::formats::TarArchive;
-    use crate::formats::traits::ArchiveFormat;
-    use std::fs::File;
-    use std::io::BufReader;
-    use xz2::read::XzDecoder;
-
-    let file = File::open(archive_path)?;
-    let reader = BufReader::new(file);
-    let decoder = XzDecoder::new(reader);
-    let mut archive = TarArchive::new(decoder);
-    archive.extract(output_dir, config, options, progress)
-}
-
-fn extract_tar_zst(
-    archive_path: &Path,
-    output_dir: &Path,
-    config: &SecurityConfig,
-    options: &ExtractionOptions,
-    progress: &mut dyn ProgressCallback,
-) -> Result<ExtractionReport> {
-    use crate::formats::TarArchive;
-    use crate::formats::traits::ArchiveFormat;
-    use std::fs::File;
-    use std::io::BufReader;
-    use zstd::stream::read::Decoder as ZstdDecoder;
-
-    let file = File::open(archive_path)?;
-    let reader = BufReader::new(file);
-    let decoder = ZstdDecoder::new(reader)?;
+    let file = std::fs::File::open(archive_path)?;
+    let reader = std::io::BufReader::new(file);
+    let decoder = make_decoder(reader)?;
     let mut archive = TarArchive::new(decoder);
     archive.extract(output_dir, config, options, progress)
 }

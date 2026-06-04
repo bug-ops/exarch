@@ -21,6 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `creation/tar`: replace manual entry counter with `ProgressTracker`; add `ProgressTracker::callback()` accessor to enable byte-level progress in nested helpers without lifetime conflicts (#284).
+- `creation/zip`: same `ProgressTracker` wiring as tar, removing manual `idx + 1` counter (#284).
+- `api`: collapse five identical `extract_tar*` private functions into a single generic `extract_tar_with_decoder` helper parametrised by a decoder closure; eliminates ~80 lines of structural duplication (#254).
 - `sevenz`: eliminate `Rc`/`RefCell` interior mutability in `extract_with_callback`; state is now owned by a local context struct, matching the `tar.rs` and `zip.rs` patterns (#273, #258).
 - `sevenz`: narrow `std::process` import to `std::process::id` to prevent accidental use of `process::exit` in library code (#270).
 - Internal creation helpers (`compression_level_to_*`, `ProgressReader`, `ProgressTracker`,

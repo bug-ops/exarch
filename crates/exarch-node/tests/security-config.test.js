@@ -112,6 +112,19 @@ describe('SecurityConfig', () => {
       assert.strictEqual(config.allowWorldWritable, true);
     });
 
+    it('should default allowSolidArchives to false', () => {
+      const config = new SecurityConfig();
+
+      assert.strictEqual(config.allowSolidArchives, false);
+    });
+
+    it('should set allow solid archives', () => {
+      const config = new SecurityConfig();
+      config.setAllowSolidArchives(true);
+
+      assert.strictEqual(config.allowSolidArchives, true);
+    });
+
     it('should set preserve permissions', () => {
       const config = new SecurityConfig();
       config.setPreservePermissions(true);

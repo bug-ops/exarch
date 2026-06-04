@@ -31,8 +31,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ExtractionError` as the catch-all. To detect whether output was partial, use
   `getattr(e, "files_extracted", None) is not None` (#251).
 
+### Added
+
+- Node.js: `SecurityConfig` now exposes `allowSolidArchives` getter, consistent with all other
+  boolean permission getters (`allowSymlinks`, `allowHardlinks`, `allowAbsolutePaths`,
+  `allowWorldWritable`) (#261).
+
 ### Fixed
 
+- Node.js: async operations (`extractArchive`, `createArchive`, `listArchive`, `verifyArchive`)
+  now wrap the core call with `catch_unwind` inside `spawn_blocking`, preventing panics in
+  `exarch-core` from crossing the FFI boundary and aborting the Node.js process. Panics are
+  converted to JavaScript errors with a descriptive message (#262).
 - Python: `extract_archive` now raises the specific exception type (`SymlinkEscapeError`,
   `HardlinkEscapeError`, `QuotaExceededError`, etc.) instead of the generic
   `PartialExtractionError` when extraction fails after some files have been written to disk.

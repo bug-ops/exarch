@@ -4,14 +4,14 @@
 //! contextual errors (anyhow) with actionable guidance.
 
 use anyhow::Result;
-use exarch_core::ExtractionError;
+use exarch_core::ArchiveError;
 use exarch_core::ExtractionReport;
 use std::fmt;
 use std::path::Path;
 
 /// Carrier for partial-extraction progress embedded in the anyhow error chain.
 ///
-/// `ExtractionError::PartialExtraction` uses `#[error("{source}")]` with
+/// `ArchiveError::PartialExtraction` uses `#[error("{source}")]` with
 /// `#[source]`, so placing it directly in an anyhow chain causes the inner
 /// error text to appear twice in `{:#}` output (once via Display, once via the
 /// source chain).  This type carries the report without re-emitting the inner
@@ -37,9 +37,9 @@ impl fmt::Display for PartialExtractionContext {
 
 impl std::error::Error for PartialExtractionContext {}
 
-/// Converts `ExtractionError` to user-friendly anyhow error with context.
+/// Converts `ArchiveError` to user-friendly anyhow error with context.
 ///
-/// The original `ExtractionError` is preserved as the error source so that
+/// The original `ArchiveError` is preserved as the error source so that
 /// callers can downcast via the anyhow chain (used by JSON error output).
 ///
 /// `allow_symlinks` suppresses the `--allow-symlinks` hint for `SymlinkEscape`
@@ -47,7 +47,7 @@ impl std::error::Error for PartialExtractionContext {}
 /// genuine security violation, not a configuration issue.
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 pub fn convert_extraction_error(
-    err: ExtractionError,
+    err: ArchiveError,
     archive: &Path,
     allow_symlinks: bool,
 ) -> anyhow::Error {
@@ -58,28 +58,28 @@ pub fn convert_extraction_error(
     // twice in `{:#}` output.  Instead, we extract the inner error and wrap
     // it with `PartialExtractionContext`, which carries the partial report
     // without duplicating the inner Display text.
-    if let ExtractionError::PartialExtraction { source, report } = err {
+    if let ArchiveError::PartialExtraction { source, report } = err {
         return anyhow::Error::from(*source).context(PartialExtractionContext { report });
     }
 
     let context = match &err {
-        ExtractionError::PartialExtraction { .. } => unreachable!(),
-        ExtractionError::PathTraversal { .. } => format!(
+        ArchiveError::PartialExtraction { .. } => unreachable!(),
+        ArchiveError::PathTraversal { .. } => format!(
             "Security violation: Archive '{}' attempted path traversal\n\
              HINT: This archive may be malicious. Do not extract from untrusted sources.",
             archive.display(),
         ),
-        ExtractionError::ZipBomb { .. } => format!(
+        ArchiveError::ZipBomb { .. } => format!(
             "Security violation: Archive '{}' appears to be a zip bomb\n\
              HINT: Use --max-compression-ratio to allow higher ratios if legitimate.",
             archive.display(),
         ),
-        ExtractionError::QuotaExceeded { .. } => format!(
+        ArchiveError::QuotaExceeded { .. } => format!(
             "Extraction limit exceeded for '{}'\n\
              HINT: Use --max-files, --max-total-size, or --max-file-size to increase limits.",
             archive.display(),
         ),
-        ExtractionError::SymlinkEscape { .. } => {
+        ArchiveError::SymlinkEscape { .. } => {
             if allow_symlinks {
                 format!("Symlink escape blocked in '{}'", archive.display())
             } else {
@@ -90,39 +90,39 @@ pub fn convert_extraction_error(
                 )
             }
         }
-        ExtractionError::HardlinkEscape { .. } => format!(
+        ArchiveError::HardlinkEscape { .. } => format!(
             "Hardlink rejected in '{}'\n\
              HINT: Use --allow-hardlinks to extract hardlinks (only if trusted source).",
             archive.display(),
         ),
-        ExtractionError::Io(io_err) => {
+        ArchiveError::Io(io_err) => {
             format!(
                 "I/O error while processing '{}': {}",
                 archive.display(),
                 io_err
             )
         }
-        ExtractionError::UnknownFormat { path } => format!(
+        ArchiveError::UnknownFormat { path } => format!(
             "Cannot determine archive format: {}\n\
              HINT: Supported formats: tar, tar.gz, tar.bz2, tar.xz, tar.zstd, zip",
             path.display()
         ),
-        ExtractionError::InvalidArchive(reason) => format!(
+        ArchiveError::InvalidArchive(reason) => format!(
             "Invalid archive '{}': {}\n\
              HINT: The archive may be corrupted or malformed.",
             archive.display(),
             reason
         ),
-        ExtractionError::InvalidConfiguration { reason } => format!(
+        ArchiveError::InvalidConfiguration { reason } => format!(
             "Invalid configuration: {reason}\n\
              HINT: Check the flags you passed and their allowed value ranges.",
         ),
-        ExtractionError::SourceNotFound { path } => format!(
+        ArchiveError::SourceNotFound { path } => format!(
             "Source path not found: {}\n\
              HINT: Verify the archive path exists and is readable.",
             path.display(),
         ),
-        ExtractionError::SourceNotAccessible { path } => format!(
+        ArchiveError::SourceNotAccessible { path } => format!(
             "Source path is not accessible: {}\n\
              HINT: Check file permissions on the archive.",
             path.display(),
@@ -137,7 +137,7 @@ pub fn convert_extraction_error(
 /// `allow_symlinks` is forwarded to [`convert_extraction_error`] to suppress
 /// the `--allow-symlinks` hint when the flag is already active.
 pub fn add_archive_context<T>(
-    result: Result<T, ExtractionError>,
+    result: Result<T, ArchiveError>,
     archive: &Path,
     allow_symlinks: bool,
 ) -> anyhow::Result<T> {
@@ -152,7 +152,7 @@ mod tests {
 
     #[test]
     fn test_convert_path_traversal_error() {
-        let err = ExtractionError::PathTraversal {
+        let err = ArchiveError::PathTraversal {
             path: PathBuf::from("../../../etc/passwd"),
         };
         let converted = convert_extraction_error(err, Path::new("malicious.zip"), false);
@@ -164,7 +164,7 @@ mod tests {
 
     #[test]
     fn test_convert_zip_bomb_error() {
-        let err = ExtractionError::ZipBomb {
+        let err = ArchiveError::ZipBomb {
             compressed: 1024,
             uncompressed: 1024 * 1024 * 150,
             ratio: 150.0,
@@ -178,7 +178,7 @@ mod tests {
     #[test]
     fn test_path_traversal_path_appears_once() {
         let path = PathBuf::from("../../../etc/passwd");
-        let err = ExtractionError::PathTraversal { path };
+        let err = ArchiveError::PathTraversal { path };
         let converted = convert_extraction_error(err, Path::new("archive.tar.gz"), false);
         let msg = format!("{converted:#}");
         assert_eq!(
@@ -191,7 +191,7 @@ mod tests {
     #[test]
     fn test_symlink_escape_path_appears_once() {
         let path = PathBuf::from("link/to/escape");
-        let err = ExtractionError::SymlinkEscape { path };
+        let err = ArchiveError::SymlinkEscape { path };
         let converted = convert_extraction_error(err, Path::new("archive.tar.gz"), false);
         let msg = format!("{converted:#}");
         assert_eq!(
@@ -204,7 +204,7 @@ mod tests {
     #[test]
     fn test_symlink_escape_hint_suppressed_when_flag_active() {
         let path = PathBuf::from("link/to/escape");
-        let err = ExtractionError::SymlinkEscape { path };
+        let err = ArchiveError::SymlinkEscape { path };
         let converted = convert_extraction_error(err, Path::new("archive.tar.gz"), true);
         let msg = format!("{converted:#}");
         assert!(
@@ -216,7 +216,7 @@ mod tests {
     #[test]
     fn test_symlink_escape_hint_shown_when_flag_inactive() {
         let path = PathBuf::from("link/to/escape");
-        let err = ExtractionError::SymlinkEscape { path };
+        let err = ArchiveError::SymlinkEscape { path };
         let converted = convert_extraction_error(err, Path::new("archive.tar.gz"), false);
         let msg = format!("{converted:#}");
         assert!(
@@ -228,7 +228,7 @@ mod tests {
     #[test]
     fn test_hardlink_escape_path_appears_once() {
         let path = PathBuf::from("hard/link/escape");
-        let err = ExtractionError::HardlinkEscape { path };
+        let err = ArchiveError::HardlinkEscape { path };
         let converted = convert_extraction_error(err, Path::new("archive.tar.gz"), false);
         let msg = format!("{converted:#}");
         assert_eq!(
@@ -241,7 +241,7 @@ mod tests {
     #[test]
     fn test_convert_io_error() {
         let io_err = io::Error::new(io::ErrorKind::NotFound, "file not found");
-        let err = ExtractionError::Io(io_err);
+        let err = ArchiveError::Io(io_err);
         let converted = convert_extraction_error(err, Path::new("archive.tar.gz"), false);
         let msg = format!("{converted:?}");
         assert!(msg.contains("I/O error"));
@@ -255,7 +255,7 @@ mod tests {
         use exarch_core::ExtractionReport;
         use std::time::Duration;
 
-        let inner = ExtractionError::HardlinkEscape {
+        let inner = ArchiveError::HardlinkEscape {
             path: PathBuf::from("hardlink_escape_path"),
         };
         let report = ExtractionReport {
@@ -267,7 +267,7 @@ mod tests {
             files_skipped: 0,
             warnings: vec![],
         };
-        let err = ExtractionError::PartialExtraction {
+        let err = ArchiveError::PartialExtraction {
             source: Box::new(inner),
             report,
         };
@@ -285,7 +285,7 @@ mod tests {
         use exarch_core::ExtractionReport;
         use std::time::Duration;
 
-        let inner = ExtractionError::SymlinkEscape {
+        let inner = ArchiveError::SymlinkEscape {
             path: PathBuf::from("symlink_escape_path"),
         };
         let report = ExtractionReport {
@@ -297,7 +297,7 @@ mod tests {
             files_skipped: 0,
             warnings: vec![],
         };
-        let err = ExtractionError::PartialExtraction {
+        let err = ArchiveError::PartialExtraction {
             source: Box::new(inner),
             report,
         };

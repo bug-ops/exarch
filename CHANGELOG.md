@@ -11,8 +11,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `PyProgressAdapter` and `NodeProgressAdapter` now reset `bytes_written` to 0 at the start of each entry, eliminating stale values from previous entries (#285).
 
+### Breaking Changes
+
+- **`ExtractionError` renamed to `ArchiveError`** across the entire public API (#253). The error
+  type now covers all archive operations (extraction, creation, listing, verification), not just
+  extraction. Update all match arms, `use` imports, and type aliases:
+  `use exarch_core::ArchiveError;`. The Python base exception is now `exarch.ArchiveError`
+  (was `exarch.ExtractionError`).
+
 ### Changed
 
+- `extract_archive_with_progress` now delegates to `extract_archive_with_options_and_progress`
+  (the canonical implementation) instead of calling the internal `extract_impl` directly.
+  All four `extract_archive*` convenience wrappers now form a clean delegation chain through the
+  single canonical function (#259).
 - Specifications in `specs/` updated to replace stale `UnsupportedFormat` references with
   `UnknownFormat { path }` (format-detection failures) and `InvalidConfiguration` (7z creation),
   matching the post-#255 Rust API. Python exception hierarchy updated to include

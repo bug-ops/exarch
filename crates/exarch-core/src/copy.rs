@@ -15,7 +15,7 @@ use std::io::Read;
 use std::io::Write;
 use std::io::{self};
 
-use crate::ExtractionError;
+use crate::ArchiveError;
 
 /// Optimal buffer size for I/O operations (64KB).
 ///
@@ -82,7 +82,7 @@ pub fn copy_with_buffer<R: Read, W: Write>(
     reader: &mut R,
     writer: &mut W,
     buffer: &mut CopyBuffer,
-) -> Result<u64, ExtractionError> {
+) -> Result<u64, ArchiveError> {
     let mut total: u64 = 0;
 
     loop {
@@ -90,17 +90,17 @@ pub fn copy_with_buffer<R: Read, W: Write>(
             Ok(0) => break,
             Ok(n) => n,
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-            Err(e) => return Err(ExtractionError::Io(e)),
+            Err(e) => return Err(ArchiveError::Io(e)),
         };
 
         writer
             .write_all(&buffer.buf[..bytes_read])
-            .map_err(ExtractionError::Io)?;
+            .map_err(ArchiveError::Io)?;
 
         // SECURITY: Detect overflow to prevent quota bypass
         total = total
             .checked_add(bytes_read as u64)
-            .ok_or(ExtractionError::QuotaExceeded {
+            .ok_or(ArchiveError::QuotaExceeded {
                 resource: crate::QuotaResource::IntegerOverflow,
             })?;
     }
@@ -323,7 +323,7 @@ mod tests {
 
         assert!(result.is_err(), "copy should propagate write errors");
         match result {
-            Err(ExtractionError::Io(e)) => {
+            Err(ArchiveError::Io(e)) => {
                 assert_eq!(e.kind(), ErrorKind::Other);
             }
             _ => panic!("expected IO error"),

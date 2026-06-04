@@ -85,7 +85,7 @@ use tar::Header;
 ///     &config,
 ///     &mut progress,
 /// )?;
-/// # Ok::<(), exarch_core::ExtractionError>(())
+/// # Ok::<(), exarch_core::ArchiveError>(())
 /// ```
 ///
 /// # Errors
@@ -479,7 +479,7 @@ impl crate::formats::traits::FormatCreator for TarZstCreator {
 #[allow(clippy::unwrap_used)] // Allow unwrap in tests for brevity
 mod tests {
     use super::*;
-    use crate::ExtractionError;
+    use crate::ArchiveError;
     use crate::SecurityConfig;
     use crate::api::create_archive;
     use crate::api::extract_archive;
@@ -738,7 +738,7 @@ mod tests {
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
-            ExtractionError::SourceNotFound { .. }
+            ArchiveError::SourceNotFound { .. }
         ));
     }
 

@@ -78,7 +78,7 @@
 //!     &mut exarch_core::NoopProgress,
 //! )?;
 //! println!("Extracted {} files", report.files_extracted);
-//! # Ok::<(), exarch_core::ExtractionError>(())
+//! # Ok::<(), exarch_core::ArchiveError>(())
 //! ```
 //!
 //! Gzip-compressed TAR:
@@ -101,7 +101,7 @@
 //!     &ExtractionOptions::default(),
 //!     &mut exarch_core::NoopProgress,
 //! )?;
-//! # Ok::<(), exarch_core::ExtractionError>(())
+//! # Ok::<(), exarch_core::ArchiveError>(())
 //! ```
 
 use std::fs::File;
@@ -113,7 +113,7 @@ use std::time::Instant;
 use smallvec::SmallVec;
 use tar::Archive;
 
-use crate::ExtractionError;
+use crate::ArchiveError;
 use crate::ExtractionOptions;
 use crate::ExtractionReport;
 use crate::ProgressCallback;
@@ -158,7 +158,7 @@ use super::traits::ArchiveFormat;
 ///     &ExtractionOptions::default(),
 ///     &mut exarch_core::NoopProgress,
 /// )?;
-/// # Ok::<(), exarch_core::ExtractionError>(())
+/// # Ok::<(), exarch_core::ArchiveError>(())
 /// ```
 pub struct TarArchive<R: Read> {
     /// Underlying `tar::Archive` reader; `None` after `list()` consumes it.
@@ -209,7 +209,7 @@ impl<R: Read> TarArchive<R> {
 
         let path = entry
             .path()
-            .map_err(|e| ExtractionError::InvalidArchive(format!("invalid path: {e}")))?
+            .map_err(|e| ArchiveError::InvalidArchive(format!("invalid path: {e}")))?
             .into_owned();
 
         let entry_type = TarEntryAdapter::to_entry_type(&entry)?;
@@ -299,7 +299,7 @@ impl<R: Read> TarArchive<R> {
         let target_path = ctx.dest.join(&info.target_path);
 
         if !target_path.exists() {
-            return Err(ExtractionError::InvalidArchive(format!(
+            return Err(ArchiveError::InvalidArchive(format!(
                 "hardlink target does not exist: {}",
                 info.target_path.as_path().display()
             )));
@@ -317,7 +317,7 @@ impl<R: Read> TarArchive<R> {
                 ));
                 return Ok(());
             }
-            return Err(ExtractionError::InvalidArchive(format!(
+            return Err(ArchiveError::InvalidArchive(format!(
                 "duplicate entry: {}",
                 info.link_path.as_path().display()
             )));
@@ -339,7 +339,7 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
     ///
     /// # Errors
     ///
-    /// Returns [`ExtractionError::InvalidArchive`] if [`list`](Self::list) was
+    /// Returns [`ArchiveError::InvalidArchive`] if [`list`](Self::list) was
     /// called on this instance before `extract`. Because TAR is a forward-only
     /// stream, `list` consumes the internal reader; calling `extract` afterward
     /// is not possible. Open a fresh [`TarArchive`] instance instead.
@@ -368,11 +368,11 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
         let mut current_entry: usize = 0;
 
         let inner = self.inner.as_mut().ok_or_else(|| {
-            ExtractionError::InvalidArchive("archive reader already consumed by list()".into())
+            ArchiveError::InvalidArchive("archive reader already consumed by list()".into())
         })?;
         let entries = inner
             .entries()
-            .map_err(|e| ExtractionError::InvalidArchive(format!("failed to read entries: {e}")))?;
+            .map_err(|e| ArchiveError::InvalidArchive(format!("failed to read entries: {e}")))?;
 
         let mut ctx = ExtractionContext {
             validator: &mut validator,
@@ -386,9 +386,9 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
 
         for entry_result in entries {
             let entry = entry_result.map_err(|e| {
-                let raw = ExtractionError::InvalidArchive(format!("failed to read entry: {e}"));
+                let raw = ArchiveError::InvalidArchive(format!("failed to read entry: {e}"));
                 if ctx.report.total_items() > 0 {
-                    ExtractionError::PartialExtraction {
+                    ArchiveError::PartialExtraction {
                         source: Box::new(raw),
                         report: std::mem::take(ctx.report),
                     }
@@ -416,7 +416,7 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
                 }
                 Err(e) => {
                     return Err(if ctx.report.total_items() > 0 {
-                        ExtractionError::PartialExtraction {
+                        ArchiveError::PartialExtraction {
                             source: Box::new(e),
                             report: std::mem::take(ctx.report),
                         }
@@ -431,7 +431,7 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
         for hardlink_info in &hardlinks {
             if let Err(e) = Self::create_hardlink(hardlink_info, &mut ctx) {
                 return Err(if ctx.report.total_items() > 0 {
-                    ExtractionError::PartialExtraction {
+                    ArchiveError::PartialExtraction {
                         source: Box::new(e),
                         report: std::mem::take(ctx.report),
                     }
@@ -454,7 +454,7 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
     /// TAR is a forward-only stream format. This method consumes the internal
     /// reader via `self.inner.take()`. After `list()` returns, the reader is
     /// gone and any subsequent call to [`extract`](Self::extract) on **the same
-    /// instance** will return `Err(ExtractionError::InvalidArchive(...))`.
+    /// instance** will return `Err(ArchiveError::InvalidArchive(...))`.
     ///
     /// To extract after listing, open a **new** [`TarArchive`] from the
     /// original source:
@@ -474,9 +474,7 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
         // Consume the inner archive — TAR readers are forward-only streams.
         // After list() returns, extract() will return an error if called.
         let inner = self.inner.take().ok_or_else(|| {
-            crate::ExtractionError::InvalidArchive(
-                "archive reader already consumed by list()".into(),
-            )
+            crate::ArchiveError::InvalidArchive("archive reader already consumed by list()".into())
         })?;
         list_tar_reader(inner.into_inner(), ArchiveType::Tar, config)
     }
@@ -540,11 +538,9 @@ impl TarEntryAdapter {
                 let target = tar_entry
                     .link_name()
                     .map_err(|e| {
-                        ExtractionError::InvalidArchive(format!("failed to read symlink name: {e}"))
+                        ArchiveError::InvalidArchive(format!("failed to read symlink name: {e}"))
                     })?
-                    .ok_or_else(|| {
-                        ExtractionError::InvalidArchive("symlink missing target".into())
-                    })?
+                    .ok_or_else(|| ArchiveError::InvalidArchive("symlink missing target".into()))?
                     .into_owned();
                 Ok(EntryType::Symlink { target })
             }
@@ -553,30 +549,26 @@ impl TarEntryAdapter {
                 let target = tar_entry
                     .link_name()
                     .map_err(|e| {
-                        ExtractionError::InvalidArchive(format!(
-                            "failed to read hardlink name: {e}"
-                        ))
+                        ArchiveError::InvalidArchive(format!("failed to read hardlink name: {e}"))
                     })?
-                    .ok_or_else(|| {
-                        ExtractionError::InvalidArchive("hardlink missing target".into())
-                    })?
+                    .ok_or_else(|| ArchiveError::InvalidArchive("hardlink missing target".into()))?
                     .into_owned();
                 Ok(EntryType::Hardlink { target })
             }
 
-            TarType::Char => Err(ExtractionError::SecurityViolation {
+            TarType::Char => Err(ArchiveError::SecurityViolation {
                 reason: "character device entries not supported".into(),
             }),
 
-            TarType::Block => Err(ExtractionError::SecurityViolation {
+            TarType::Block => Err(ArchiveError::SecurityViolation {
                 reason: "block device entries not supported".into(),
             }),
 
-            TarType::Fifo => Err(ExtractionError::SecurityViolation {
+            TarType::Fifo => Err(ArchiveError::SecurityViolation {
                 reason: "FIFO entries not supported".into(),
             }),
 
-            _ => Err(ExtractionError::SecurityViolation {
+            _ => Err(ArchiveError::SecurityViolation {
                 reason: format!(
                     "unsupported entry type: {:?}",
                     tar_entry.header().entry_type()
@@ -616,7 +608,7 @@ impl TarEntryAdapter {
 ///     &ExtractionOptions::default(),
 ///     &mut exarch_core::NoopProgress,
 /// )?;
-/// # Ok::<(), exarch_core::ExtractionError>(())
+/// # Ok::<(), exarch_core::ArchiveError>(())
 /// ```
 pub fn open_tar_gz<P: AsRef<Path>>(
     path: P,
@@ -652,7 +644,7 @@ pub fn open_tar_gz<P: AsRef<Path>>(
 ///     &ExtractionOptions::default(),
 ///     &mut exarch_core::NoopProgress,
 /// )?;
-/// # Ok::<(), exarch_core::ExtractionError>(())
+/// # Ok::<(), exarch_core::ArchiveError>(())
 /// ```
 pub fn open_tar_bz2<P: AsRef<Path>>(
     path: P,
@@ -688,7 +680,7 @@ pub fn open_tar_bz2<P: AsRef<Path>>(
 ///     &ExtractionOptions::default(),
 ///     &mut exarch_core::NoopProgress,
 /// )?;
-/// # Ok::<(), exarch_core::ExtractionError>(())
+/// # Ok::<(), exarch_core::ArchiveError>(())
 /// ```
 pub fn open_tar_xz<P: AsRef<Path>>(
     path: P,
@@ -725,7 +717,7 @@ pub fn open_tar_xz<P: AsRef<Path>>(
 ///     &ExtractionOptions::default(),
 ///     &mut exarch_core::NoopProgress,
 /// )?;
-/// # Ok::<(), exarch_core::ExtractionError>(())
+/// # Ok::<(), exarch_core::ArchiveError>(())
 /// ```
 pub fn open_tar_zst<P: AsRef<Path>>(
     path: P,
@@ -1193,7 +1185,7 @@ mod tests {
                 assert_eq!(report.files_extracted, 1);
                 assert!(temp.path().join("sparse.txt").exists());
             }
-            Err(ExtractionError::InvalidArchive(_)) => {
+            Err(ArchiveError::InvalidArchive(_)) => {
                 // Acceptable: tar crate rejects malformed sparse header
             }
             Err(e) => panic!("unexpected error for GNUSparse entry: {e}"),
@@ -1226,7 +1218,7 @@ mod tests {
         );
 
         assert!(
-            matches!(result, Err(ExtractionError::SecurityViolation { .. })),
+            matches!(result, Err(ArchiveError::SecurityViolation { .. })),
             "expected SecurityViolation, got: {result:?}"
         );
     }
@@ -1749,7 +1741,7 @@ mod tests {
 
         assert!(result.is_err());
         match result {
-            Err(ExtractionError::PathTraversal { .. }) => {}
+            Err(ArchiveError::PathTraversal { .. }) => {}
             _ => panic!("Expected PathTraversal error"),
         }
     }
@@ -1785,7 +1777,7 @@ mod tests {
 
         assert!(result.is_err());
         match result {
-            Err(ExtractionError::PathTraversal { .. }) => {}
+            Err(ArchiveError::PathTraversal { .. }) => {}
             _ => panic!("Expected PathTraversal error for absolute path"),
         }
     }
@@ -1833,10 +1825,10 @@ mod tests {
         // A directory was created before the symlink escape, so the error is
         // wrapped in PartialExtraction. Unwrap one level to check the source.
         match result {
-            Err(ExtractionError::PartialExtraction { source, .. }) => {
-                assert!(matches!(*source, ExtractionError::SymlinkEscape { .. }));
+            Err(ArchiveError::PartialExtraction { source, .. }) => {
+                assert!(matches!(*source, ArchiveError::SymlinkEscape { .. }));
             }
-            Err(ExtractionError::SymlinkEscape { .. }) => {}
+            Err(ArchiveError::SymlinkEscape { .. }) => {}
             other => panic!("Expected SymlinkEscape error for symlink escape, got: {other:?}"),
         }
     }
@@ -1872,7 +1864,7 @@ mod tests {
 
         assert!(result.is_err());
         match result {
-            Err(ExtractionError::InvalidArchive(msg)) => {
+            Err(ArchiveError::InvalidArchive(msg)) => {
                 assert!(msg.contains("hardlink target does not exist"));
             }
             _ => panic!("Expected InvalidArchive error for missing hardlink target"),

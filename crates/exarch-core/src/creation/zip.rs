@@ -3,7 +3,7 @@
 //! This module provides functions for creating ZIP archives with configurable
 //! compression levels and security options.
 
-use crate::ExtractionError;
+use crate::ArchiveError;
 use crate::ProgressCallback;
 use crate::Result;
 use crate::creation::config::CreationConfig;
@@ -34,7 +34,7 @@ use zip::write::SimpleFileOptions;
 /// let config = CreationConfig::default();
 /// let report = create_zip(Path::new("output.zip"), &[Path::new("src")], &config)?;
 /// println!("Added {} files", report.files_added);
-/// # Ok::<(), exarch_core::ExtractionError>(())
+/// # Ok::<(), exarch_core::ArchiveError>(())
 /// ```
 ///
 /// # Errors
@@ -115,7 +115,7 @@ pub fn create_zip<P: AsRef<Path>, Q: AsRef<Path>>(
 ///     &config,
 ///     &mut progress,
 /// )?;
-/// # Ok::<(), exarch_core::ExtractionError>(())
+/// # Ok::<(), exarch_core::ArchiveError>(())
 /// ```
 ///
 /// # Errors
@@ -243,7 +243,7 @@ fn create_zip_internal<W: Write + Seek, P: AsRef<Path>>(
 
         // Validate source exists
         if !path.exists() {
-            return Err(ExtractionError::SourceNotFound {
+            return Err(ArchiveError::SourceNotFound {
                 path: path.to_path_buf(),
             });
         }
@@ -453,7 +453,7 @@ fn add_file_to_zip_with_progress_and_buffer<W: Write + Seek>(
 fn normalize_zip_path(path: &Path) -> Result<String> {
     // Convert to string
     let path_str = path.to_str().ok_or_else(|| {
-        ExtractionError::Io(std::io::Error::other(format!(
+        ArchiveError::Io(std::io::Error::other(format!(
             "path is not valid UTF-8: {}",
             path.display()
         )))
@@ -778,7 +778,7 @@ mod tests {
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
-            ExtractionError::SourceNotFound { .. }
+            ArchiveError::SourceNotFound { .. }
         ));
     }
 

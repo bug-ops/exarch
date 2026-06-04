@@ -18,7 +18,7 @@
 //!
 //! Requires: `--allow-symlinks` AND `--allow-hardlinks` (both non-default).
 
-use exarch_core::ExtractionError;
+use exarch_core::ArchiveError;
 use exarch_core::SecurityConfig;
 use exarch_core::formats::TarArchive;
 use exarch_core::formats::traits::ArchiveFormat;
@@ -101,7 +101,7 @@ fn two_hop_symlink_chain_is_rejected() {
     assert!(
         matches!(
             err,
-            ExtractionError::SymlinkEscape { .. } | ExtractionError::HardlinkEscape { .. }
+            ArchiveError::SymlinkEscape { .. } | ArchiveError::HardlinkEscape { .. }
         ),
         "expected SymlinkEscape or HardlinkEscape, got: {err:?}"
     );

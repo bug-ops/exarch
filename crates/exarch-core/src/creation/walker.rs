@@ -4,7 +4,7 @@
 //! based on configuration options like hidden files, exclude patterns, and size
 //! limits.
 
-use crate::ExtractionError;
+use crate::ArchiveError;
 use crate::Result;
 use crate::creation::config::CreationConfig;
 use crate::creation::filters;
@@ -98,8 +98,8 @@ impl<'a> FilteredWalker<'a> {
                     }
                 }
                 Err(e) => {
-                    // Convert walkdir error to ExtractionError
-                    Some(Err(ExtractionError::Io(std::io::Error::other(format!(
+                    // Convert walkdir error to ArchiveError
+                    Some(Err(ArchiveError::Io(std::io::Error::other(format!(
                         "walkdir error: {e}"
                     )))))
                 }
@@ -114,7 +114,7 @@ impl<'a> FilteredWalker<'a> {
     fn build_filtered_entry(&self, entry: &walkdir::DirEntry) -> Result<Option<FilteredEntry>> {
         let path = entry.path().to_path_buf();
         let metadata = entry.metadata().map_err(|e| {
-            ExtractionError::Io(std::io::Error::other(format!(
+            ArchiveError::Io(std::io::Error::other(format!(
                 "cannot read metadata for {}: {e}",
                 path.display()
             )))
@@ -123,7 +123,7 @@ impl<'a> FilteredWalker<'a> {
         // Determine entry type
         let entry_type = if metadata.is_symlink() {
             let target = std::fs::read_link(&path).map_err(|e| {
-                ExtractionError::Io(std::io::Error::other(format!(
+                ArchiveError::Io(std::io::Error::other(format!(
                     "cannot read symlink target for {}: {e}",
                     path.display()
                 )))
@@ -208,7 +208,7 @@ pub enum EntryType {
 /// let sources = [Path::new("./src")];
 /// let entries = collect_entries(&sources, &config)?;
 /// println!("Total entries: {}", entries.len());
-/// # Ok::<(), exarch_core::ExtractionError>(())
+/// # Ok::<(), exarch_core::ArchiveError>(())
 /// ```
 ///
 /// # Errors
@@ -227,7 +227,7 @@ pub fn collect_entries<P: AsRef<Path>>(
         let path = source.as_ref();
 
         if !path.exists() {
-            return Err(ExtractionError::SourceNotFound {
+            return Err(ArchiveError::SourceNotFound {
                 path: path.to_path_buf(),
             });
         }
@@ -260,7 +260,7 @@ pub fn collect_entries<P: AsRef<Path>>(
             } else {
                 path.file_name()
                     .ok_or_else(|| {
-                        ExtractionError::Io(std::io::Error::other(format!(
+                        ArchiveError::Io(std::io::Error::other(format!(
                             "cannot determine filename for {}",
                             path.display()
                         )))
@@ -615,7 +615,7 @@ mod tests {
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
-            ExtractionError::SourceNotFound { .. }
+            ArchiveError::SourceNotFound { .. }
         ));
     }
 

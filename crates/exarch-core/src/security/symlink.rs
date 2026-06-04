@@ -25,8 +25,8 @@ use crate::types::SafeSymlink;
 ///
 /// Returns an error if symlinks are not allowed or if the target
 /// escapes the extraction directory:
-/// - `ExtractionError::SecurityViolation` if symlinks disabled
-/// - `ExtractionError::SymlinkEscape` if target is outside destination
+/// - `ArchiveError::SecurityViolation` if symlinks disabled
+/// - `ArchiveError::SymlinkEscape` if target is outside destination
 ///
 /// # Examples
 ///

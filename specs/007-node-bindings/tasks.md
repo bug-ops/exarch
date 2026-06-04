@@ -24,7 +24,7 @@ related:
 > [!note] No open work
 > The Node.js bindings subsystem is fully implemented. napi-rs wrappers expose
 > all core operations as async Promises backed by a tokio runtime. `SecurityConfig`
-> and `CreationConfig` are mapped to JavaScript objects. All `ExtractionError`
+> and `CreationConfig` are mapped to JavaScript objects. All `ArchiveError`
 > variants are translated to `ExarchError`. Report types (`ExtractionReport`,
 > `CreationReport`, `ArchiveManifest`, `VerificationReport`) are serialized to
 > plain JavaScript objects. No functional requirements from the spec remain

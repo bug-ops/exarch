@@ -1,6 +1,6 @@
 //! Validated safe symlink type.
 
-use crate::ExtractionError;
+use crate::ArchiveError;
 use crate::Result;
 use crate::SecurityConfig;
 use std::path::Path;
@@ -100,14 +100,14 @@ impl SafeSymlink {
     ) -> Result<Self> {
         // 1. Verify symlinks are allowed
         if !config.allowed.symlinks {
-            return Err(ExtractionError::SecurityViolation {
+            return Err(ArchiveError::SecurityViolation {
                 reason: "symlinks not allowed".into(),
             });
         }
 
         // 2. Validate target is relative
         if target.is_absolute() {
-            return Err(ExtractionError::SymlinkEscape {
+            return Err(ArchiveError::SymlinkEscape {
                 path: link.as_path().to_path_buf(),
             });
         }
@@ -119,7 +119,7 @@ impl SafeSymlink {
                 target_depth += 1;
                 let comp_str = comp.to_string_lossy();
                 if !config.is_path_component_allowed(&comp_str) {
-                    return Err(ExtractionError::SecurityViolation {
+                    return Err(ArchiveError::SecurityViolation {
                         reason: format!("symlink target contains banned component: {comp_str}"),
                     });
                 }
@@ -128,7 +128,7 @@ impl SafeSymlink {
 
         // Validate target depth against max_path_depth
         if target_depth > config.max_path_depth {
-            return Err(ExtractionError::SecurityViolation {
+            return Err(ArchiveError::SecurityViolation {
                 reason: format!(
                     "symlink target depth {target_depth} exceeds maximum {}",
                     config.max_path_depth
@@ -201,14 +201,13 @@ fn verify_parent_not_symlink(path: &Path, dest: &DestDir) -> Result<()> {
 
         // Check if current path exists and is a symlink
         if current.exists() {
-            let metadata = std::fs::symlink_metadata(&current).map_err(|_| {
-                ExtractionError::SymlinkEscape {
+            let metadata =
+                std::fs::symlink_metadata(&current).map_err(|_| ArchiveError::SymlinkEscape {
                     path: path.to_path_buf(),
-                }
-            })?;
+                })?;
 
             if metadata.is_symlink() {
-                return Err(ExtractionError::SymlinkEscape {
+                return Err(ArchiveError::SymlinkEscape {
                     path: path.to_path_buf(),
                 });
             }
@@ -255,13 +254,13 @@ pub(crate) fn resolve_through_symlinks(
                 // filesystem topology rather than the string representation.
                 if std::fs::symlink_metadata(&current).is_ok_and(|m| m.file_type().is_symlink()) {
                     current = std::fs::canonicalize(&current).map_err(|_| {
-                        ExtractionError::SymlinkEscape {
+                        ArchiveError::SymlinkEscape {
                             path: link_path.to_path_buf(),
                         }
                     })?;
                 }
                 if !current.pop() {
-                    return Err(ExtractionError::SymlinkEscape {
+                    return Err(ArchiveError::SymlinkEscape {
                         path: link_path.to_path_buf(),
                     });
                 }
@@ -273,7 +272,7 @@ pub(crate) fn resolve_through_symlinks(
                 // any subsequent `..` steps use the real resolved path.
                 if std::fs::symlink_metadata(&current).is_ok_and(|m| m.file_type().is_symlink()) {
                     current = std::fs::canonicalize(&current).map_err(|_| {
-                        ExtractionError::SymlinkEscape {
+                        ArchiveError::SymlinkEscape {
                             path: link_path.to_path_buf(),
                         }
                     })?;
@@ -285,7 +284,7 @@ pub(crate) fn resolve_through_symlinks(
         }
 
         if !current.starts_with(dest) {
-            return Err(ExtractionError::SymlinkEscape {
+            return Err(ArchiveError::SymlinkEscape {
                 path: link_path.to_path_buf(),
             });
         }
@@ -347,7 +346,7 @@ mod tests {
         let result = SafeSymlink::validate(&link, &target, &dest, &config);
         assert!(matches!(
             result,
-            Err(ExtractionError::SecurityViolation { .. })
+            Err(ArchiveError::SecurityViolation { .. })
         ));
     }
 
@@ -362,7 +361,7 @@ mod tests {
         let target = PathBuf::from("/etc/passwd");
 
         let result = SafeSymlink::validate(&link, &target, &dest, &config);
-        assert!(matches!(result, Err(ExtractionError::SymlinkEscape { .. })));
+        assert!(matches!(result, Err(ArchiveError::SymlinkEscape { .. })));
     }
 
     #[test]
@@ -376,7 +375,7 @@ mod tests {
         let target = PathBuf::from("C:\\Windows\\System32");
 
         let result = SafeSymlink::validate(&link, &target, &dest, &config);
-        assert!(matches!(result, Err(ExtractionError::SymlinkEscape { .. })));
+        assert!(matches!(result, Err(ArchiveError::SymlinkEscape { .. })));
     }
 
     #[test]
@@ -391,7 +390,7 @@ mod tests {
         let target = PathBuf::from("../../../../etc/passwd");
 
         let result = SafeSymlink::validate(&link, &target, &dest, &config);
-        assert!(matches!(result, Err(ExtractionError::SymlinkEscape { .. })));
+        assert!(matches!(result, Err(ArchiveError::SymlinkEscape { .. })));
     }
 
     #[test]
@@ -537,7 +536,7 @@ mod tests {
         let target = PathBuf::from("../".repeat(50) + "file.txt");
 
         let result = SafeSymlink::validate(&link, &target, &dest, &config);
-        assert!(matches!(result, Err(ExtractionError::SymlinkEscape { .. })));
+        assert!(matches!(result, Err(ArchiveError::SymlinkEscape { .. })));
     }
 
     // Test for symlink with banned target component
@@ -554,7 +553,7 @@ mod tests {
 
         let result = SafeSymlink::validate(&link, &target, &dest, &config);
         assert!(
-            matches!(result, Err(ExtractionError::SecurityViolation { .. })),
+            matches!(result, Err(ArchiveError::SecurityViolation { .. })),
             "symlink to banned component should be rejected"
         );
     }
@@ -676,7 +675,7 @@ mod tests {
 
         let result = SafeSymlink::validate(&link, &target, &dest, &config);
         assert!(
-            matches!(result, Err(ExtractionError::SymlinkEscape { .. })),
+            matches!(result, Err(ArchiveError::SymlinkEscape { .. })),
             "two-hop symlink chain must be rejected"
         );
     }

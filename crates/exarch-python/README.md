@@ -104,7 +104,7 @@ except exarch.ZipBombError as e:
     print(f"Zip bomb detected: {e}")
 except exarch.SecurityViolationError as e:
     print(f"Security violation: {e}")
-except exarch.ExtractionError as e:
+except exarch.ArchiveError as e:
     print(f"Extraction failed: {e}")
 ```
 

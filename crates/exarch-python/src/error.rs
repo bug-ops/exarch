@@ -1,6 +1,6 @@
 //! Python exception types for archive extraction errors.
 
-use exarch_core::ExtractionError as CoreError;
+use exarch_core::ArchiveError as CoreError;
 use exarch_core::QuotaResource as CoreQuotaResource;
 use pyo3::create_exception;
 use pyo3::exceptions::PyException;
@@ -9,22 +9,22 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 // Base exception for all extraction errors
-create_exception!(exarch, ExtractionError, PyException);
+create_exception!(exarch, ArchiveError, PyException);
 
 // Specific exception types
-create_exception!(exarch, PathTraversalError, ExtractionError);
-create_exception!(exarch, SymlinkEscapeError, ExtractionError);
-create_exception!(exarch, HardlinkEscapeError, ExtractionError);
-create_exception!(exarch, ZipBombError, ExtractionError);
-create_exception!(exarch, InvalidPermissionsError, ExtractionError);
-create_exception!(exarch, QuotaExceededError, ExtractionError);
-create_exception!(exarch, SecurityViolationError, ExtractionError);
-create_exception!(exarch, UnsupportedFormatError, ExtractionError);
+create_exception!(exarch, PathTraversalError, ArchiveError);
+create_exception!(exarch, SymlinkEscapeError, ArchiveError);
+create_exception!(exarch, HardlinkEscapeError, ArchiveError);
+create_exception!(exarch, ZipBombError, ArchiveError);
+create_exception!(exarch, InvalidPermissionsError, ArchiveError);
+create_exception!(exarch, QuotaExceededError, ArchiveError);
+create_exception!(exarch, SecurityViolationError, ArchiveError);
+create_exception!(exarch, UnsupportedFormatError, ArchiveError);
 // Subclass of UnsupportedFormatError: raised when the format cannot be
 // identified at all (as opposed to being known but unsupported). Callers
 // catching the parent still work.
 create_exception!(exarch, UnknownFormatError, UnsupportedFormatError);
-create_exception!(exarch, InvalidArchiveError, ExtractionError);
+create_exception!(exarch, InvalidArchiveError, ArchiveError);
 
 /// Converts Rust extraction errors to Python exceptions.
 ///
@@ -120,7 +120,7 @@ pub fn convert_error(err: CoreError) -> PyErr {
 
 /// Registers all exception types with the Python module.
 pub fn register_exceptions(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add("ExtractionError", m.py().get_type::<ExtractionError>())?;
+    m.add("ArchiveError", m.py().get_type::<ArchiveError>())?;
     m.add(
         "PathTraversalError",
         m.py().get_type::<PathTraversalError>(),
@@ -450,8 +450,8 @@ mod tests {
 
             // Verify all exception types are registered
             assert!(
-                module.getattr("ExtractionError").is_ok(),
-                "ExtractionError not registered"
+                module.getattr("ArchiveError").is_ok(),
+                "ArchiveError not registered"
             );
             assert!(
                 module.getattr("PathTraversalError").is_ok(),

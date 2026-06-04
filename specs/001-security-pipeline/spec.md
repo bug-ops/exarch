@@ -59,13 +59,13 @@ components are rejected before I/O begins
 ```
 GIVEN an archive containing a path traversal entry (e.g. "../etc/passwd")
 WHEN extract_archive() is called
-THEN extraction fails with ExtractionError::PathTraversal before any file is written
+THEN extraction fails with ArchiveError::PathTraversal before any file is written
 ```
 
 ```
 GIVEN an archive entry path containing a banned component (e.g. ".git/config")
 WHEN extract_archive() is called
-THEN extraction fails with ExtractionError::PathTraversal (banned component)
+THEN extraction fails with ArchiveError::PathTraversal (banned component)
 ```
 
 ### US-002: Zip Bomb Detection
@@ -78,7 +78,7 @@ SO THAT a malicious archive cannot exhaust disk space or memory
 ```
 GIVEN an archive entry where uncompressed_size / compressed_size > max_compression_ratio
 WHEN the entry is validated
-THEN the entry is rejected with ExtractionError::ZipBomb before any bytes are written
+THEN the entry is rejected with ArchiveError::ZipBomb before any bytes are written
 ```
 
 ### US-003: Symlink and Hardlink Control
@@ -97,7 +97,7 @@ THEN the entry is skipped (not an error)
 ```
 GIVEN a symlink entry and SecurityConfig with allowed.symlinks = true
 WHEN the resolved target escapes output_dir
-THEN extraction fails with ExtractionError::SymlinkEscape
+THEN extraction fails with ArchiveError::SymlinkEscape
 ```
 
 ### US-004: Quota Enforcement
@@ -110,13 +110,13 @@ SO THAT a single archive cannot exhaust disk space
 ```
 GIVEN a file entry whose uncompressed size exceeds max_file_size
 WHEN the entry is validated
-THEN extraction fails with ExtractionError::QuotaExceeded { resource: FileSizeBytes }
+THEN extraction fails with ArchiveError::QuotaExceeded { resource: FileSizeBytes }
 ```
 
 ```
 GIVEN cumulative uncompressed size across entries exceeds max_total_size
 WHEN the next entry is validated
-THEN extraction fails with ExtractionError::QuotaExceeded { resource: TotalSizeBytes }
+THEN extraction fails with ArchiveError::QuotaExceeded { resource: TotalSizeBytes }
 ```
 
 ### US-005: Permission Sanitization
@@ -145,7 +145,7 @@ THEN the written file has those bits cleared; ValidatedEntry.mode reflects the s
 | FR-007 | WHEN a hardlink entry is encountered and `allowed.hardlinks` is false, THE SYSTEM SHALL skip the entry | must |
 | FR-008 | WHEN a hardlink entry is encountered and `allowed.hardlinks` is true, THE SYSTEM SHALL validate that the hardlink target path is within `output_dir` and references a path previously seen in this archive | must |
 | FR-009 | WHEN extracting files on Unix, THE SYSTEM SHALL strip setuid (0o4000) and setgid (0o2000) bits from all file permissions | must |
-| FR-010 | WHEN the path depth of an entry exceeds `max_path_depth`, THE SYSTEM SHALL reject the entry with `ExtractionError::PathTraversal` | must |
+| FR-010 | WHEN the path depth of an entry exceeds `max_path_depth`, THE SYSTEM SHALL reject the entry with `ArchiveError::PathTraversal` | must |
 | FR-011 | WHEN `allowed_extensions` is non-empty and an entry's extension is not in the list, THE SYSTEM SHALL skip the entry and record it in `ExtractionReport::files_skipped` with a warning | must |
 | FR-012 | WHEN the file count across all entries exceeds `max_file_count`, THE SYSTEM SHALL reject further entries with `QuotaExceeded { resource: FileCount }` | must |
 | FR-013 | WHEN `allowed.world_writable` is false and a file entry has world-writable permissions (`mode & 0o002 != 0`), THE SYSTEM SHALL strip that bit or reject the entry | must |
@@ -180,19 +180,19 @@ THEN the written file has those bits cleared; ValidatedEntry.mode reflects the s
 
 | Scenario | Expected Behavior |
 |----------|-------------------|
-| Path traversal `../` or absolute path | `ExtractionError::PathTraversal` |
-| Null byte in path | `ExtractionError::PathTraversal` |
-| Banned component (e.g. `.git`) in path | `ExtractionError::PathTraversal` (banned component) |
-| Path depth > `max_path_depth` | `ExtractionError::PathTraversal` (depth exceeded) |
-| File exceeds `max_file_size` | `ExtractionError::QuotaExceeded { resource: FileSizeBytes }` |
-| Total size exceeds `max_total_size` | `ExtractionError::QuotaExceeded { resource: TotalSizeBytes }` |
-| File count exceeds `max_file_count` | `ExtractionError::QuotaExceeded { resource: FileCount }` |
-| Compression ratio > `max_compression_ratio` | `ExtractionError::ZipBomb` (before any bytes written) |
+| Path traversal `../` or absolute path | `ArchiveError::PathTraversal` |
+| Null byte in path | `ArchiveError::PathTraversal` |
+| Banned component (e.g. `.git`) in path | `ArchiveError::PathTraversal` (banned component) |
+| Path depth > `max_path_depth` | `ArchiveError::PathTraversal` (depth exceeded) |
+| File exceeds `max_file_size` | `ArchiveError::QuotaExceeded { resource: FileSizeBytes }` |
+| Total size exceeds `max_total_size` | `ArchiveError::QuotaExceeded { resource: TotalSizeBytes }` |
+| File count exceeds `max_file_count` | `ArchiveError::QuotaExceeded { resource: FileCount }` |
+| Compression ratio > `max_compression_ratio` | `ArchiveError::ZipBomb` (before any bytes written) |
 | Compression ratio not available (TAR streams) | Zip bomb check skipped for that entry; quota still enforced |
 | Symlink with `allowed.symlinks = false` | Entry skipped (not an error) |
-| Symlink pointing outside `output_dir` | `ExtractionError::SymlinkEscape` |
+| Symlink pointing outside `output_dir` | `ArchiveError::SymlinkEscape` |
 | Hardlink with `allowed.hardlinks = false` | Entry skipped |
-| Hardlink to a path not previously seen | `ExtractionError::HardlinkEscape` |
+| Hardlink to a path not previously seen | `ArchiveError::HardlinkEscape` |
 | setuid/setgid bits on Unix | Stripped silently; `ValidatedEntry.mode` reflects sanitized value |
 | `SecurityConfig` with zero `max_file_size`, `max_total_size`, `max_path_depth`, `max_file_count`, or `max_solid_block_memory` | `SecurityConfig::validate()` returns `InvalidConfiguration` before extraction begins |
 | `SecurityConfig` with `max_compression_ratio` of 0.0, negative, or NaN | `SecurityConfig::validate()` returns `InvalidConfiguration` before extraction begins |
@@ -225,7 +225,7 @@ THEN the written file has those bits cleared; ValidatedEntry.mode reflects the s
 - Remove existing security checks or lower default quota limits without a security review
 - Add `#[allow(unsafe_code)]` in any security module
 - Call `canonicalize()` inside the hot per-entry validation path
-- Allow `ExtractionError` variants to be constructed outside `exarch-core`
+- Allow `ArchiveError` variants to be constructed outside `exarch-core`
 
 ## 9. Open Questions
 

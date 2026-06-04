@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use crate::error::ExtractionError;
+use crate::error::ArchiveError;
 use crate::formats::detect::ArchiveType;
 
 /// Result of archive verification.
@@ -158,24 +158,24 @@ impl VerificationIssue {
     /// Creates a verification issue from an extraction error.
     #[must_use]
     #[allow(clippy::too_many_lines)]
-    pub fn from_error(error: &ExtractionError, entry_path: Option<PathBuf>) -> Self {
+    pub fn from_error(error: &ArchiveError, entry_path: Option<PathBuf>) -> Self {
         let (severity, category, message) = match error {
-            ExtractionError::PathTraversal { path } => (
+            ArchiveError::PathTraversal { path } => (
                 IssueSeverity::Critical,
                 IssueCategory::PathTraversal,
                 format!("Path traversal detected: {}", path.display()),
             ),
-            ExtractionError::SymlinkEscape { path } => (
+            ArchiveError::SymlinkEscape { path } => (
                 IssueSeverity::Critical,
                 IssueCategory::SymlinkEscape,
                 format!("Symlink escape: {}", path.display()),
             ),
-            ExtractionError::HardlinkEscape { path } => (
+            ArchiveError::HardlinkEscape { path } => (
                 IssueSeverity::Critical,
                 IssueCategory::HardlinkEscape,
                 format!("Hardlink escape: {}", path.display()),
             ),
-            ExtractionError::ZipBomb {
+            ArchiveError::ZipBomb {
                 compressed,
                 uncompressed,
                 ratio,
@@ -186,12 +186,12 @@ impl VerificationIssue {
                     "Potential zip bomb: {ratio:.1}x compression ratio (compressed={compressed}, uncompressed={uncompressed})"
                 ),
             ),
-            ExtractionError::QuotaExceeded { resource } => (
+            ArchiveError::QuotaExceeded { resource } => (
                 IssueSeverity::High,
                 IssueCategory::QuotaExceeded,
                 format!("{resource}"),
             ),
-            ExtractionError::InvalidPermissions { path, mode } => (
+            ArchiveError::InvalidPermissions { path, mode } => (
                 IssueSeverity::Medium,
                 IssueCategory::InvalidPermissions,
                 format!(
@@ -200,52 +200,52 @@ impl VerificationIssue {
                     mode
                 ),
             ),
-            ExtractionError::Io(io_err) => (
+            ArchiveError::Io(io_err) => (
                 IssueSeverity::High,
                 IssueCategory::InvalidArchive,
                 format!("I/O error: {io_err}"),
             ),
-            ExtractionError::InvalidArchive(msg) => (
+            ArchiveError::InvalidArchive(msg) => (
                 IssueSeverity::High,
                 IssueCategory::InvalidArchive,
                 format!("Invalid archive: {msg}"),
             ),
-            ExtractionError::SecurityViolation { reason } => (
+            ArchiveError::SecurityViolation { reason } => (
                 IssueSeverity::High,
                 IssueCategory::SuspiciousPath,
                 format!("Security violation: {reason}"),
             ),
-            ExtractionError::SourceNotFound { path } => (
+            ArchiveError::SourceNotFound { path } => (
                 IssueSeverity::High,
                 IssueCategory::InvalidArchive,
                 format!("Source not found: {}", path.display()),
             ),
-            ExtractionError::SourceNotAccessible { path } => (
+            ArchiveError::SourceNotAccessible { path } => (
                 IssueSeverity::High,
                 IssueCategory::InvalidArchive,
                 format!("Source not accessible: {}", path.display()),
             ),
-            ExtractionError::OutputExists { path } => (
+            ArchiveError::OutputExists { path } => (
                 IssueSeverity::Medium,
                 IssueCategory::InvalidArchive,
                 format!("Output already exists: {}", path.display()),
             ),
-            ExtractionError::InvalidCompressionLevel { level } => (
+            ArchiveError::InvalidCompressionLevel { level } => (
                 IssueSeverity::Medium,
                 IssueCategory::InvalidArchive,
                 format!("Invalid compression level: {level}"),
             ),
-            ExtractionError::UnknownFormat { path } => (
+            ArchiveError::UnknownFormat { path } => (
                 IssueSeverity::High,
                 IssueCategory::InvalidArchive,
                 format!("Unknown format: {}", path.display()),
             ),
-            ExtractionError::InvalidConfiguration { reason } => (
+            ArchiveError::InvalidConfiguration { reason } => (
                 IssueSeverity::High,
                 IssueCategory::InvalidArchive,
                 format!("Invalid configuration: {reason}"),
             ),
-            ExtractionError::PartialExtraction { source, .. } => {
+            ArchiveError::PartialExtraction { source, .. } => {
                 return Self::from_error(source, entry_path);
             }
         };
@@ -383,7 +383,7 @@ mod tests {
 
     #[test]
     fn test_verification_issue_from_path_traversal() {
-        let error = ExtractionError::PathTraversal {
+        let error = ArchiveError::PathTraversal {
             path: PathBuf::from("../../etc/passwd"),
         };
         let issue = VerificationIssue::from_error(&error, None);
@@ -395,7 +395,7 @@ mod tests {
 
     #[test]
     fn test_verification_issue_from_symlink_escape() {
-        let error = ExtractionError::SymlinkEscape {
+        let error = ArchiveError::SymlinkEscape {
             path: PathBuf::from("link"),
         };
         let issue = VerificationIssue::from_error(&error, Some(PathBuf::from("link")));
@@ -407,7 +407,7 @@ mod tests {
 
     #[test]
     fn test_verification_issue_from_zip_bomb() {
-        let error = ExtractionError::ZipBomb {
+        let error = ArchiveError::ZipBomb {
             compressed: 1000,
             uncompressed: 1_000_000,
             ratio: 1000.0,
@@ -421,7 +421,7 @@ mod tests {
 
     #[test]
     fn test_verification_issue_from_io_error() {
-        let error = ExtractionError::Io(io::Error::new(io::ErrorKind::NotFound, "not found"));
+        let error = ArchiveError::Io(io::Error::new(io::ErrorKind::NotFound, "not found"));
         let issue = VerificationIssue::from_error(&error, None);
 
         assert_eq!(issue.severity, IssueSeverity::High);
@@ -469,7 +469,7 @@ mod tests {
 
     #[test]
     fn test_verification_issue_from_hardlink_escape() {
-        let error = ExtractionError::HardlinkEscape {
+        let error = ArchiveError::HardlinkEscape {
             path: PathBuf::from("link"),
         };
         let issue = VerificationIssue::from_error(&error, None);
@@ -480,7 +480,7 @@ mod tests {
 
     #[test]
     fn test_verification_issue_from_quota_exceeded() {
-        let error = ExtractionError::QuotaExceeded {
+        let error = ArchiveError::QuotaExceeded {
             resource: crate::error::QuotaResource::FileCount {
                 current: 11,
                 max: 10,
@@ -493,7 +493,7 @@ mod tests {
 
     #[test]
     fn test_verification_issue_from_invalid_permissions() {
-        let error = ExtractionError::InvalidPermissions {
+        let error = ArchiveError::InvalidPermissions {
             path: PathBuf::from("file.txt"),
             mode: 0o777,
         };
@@ -505,7 +505,7 @@ mod tests {
 
     #[test]
     fn test_verification_issue_from_invalid_archive() {
-        let error = ExtractionError::InvalidArchive("bad header".into());
+        let error = ArchiveError::InvalidArchive("bad header".into());
         let issue = VerificationIssue::from_error(&error, None);
         assert_eq!(issue.severity, IssueSeverity::High);
         assert_eq!(issue.category, IssueCategory::InvalidArchive);
@@ -514,7 +514,7 @@ mod tests {
 
     #[test]
     fn test_verification_issue_from_security_violation() {
-        let error = ExtractionError::SecurityViolation {
+        let error = ArchiveError::SecurityViolation {
             reason: "encrypted".into(),
         };
         let issue = VerificationIssue::from_error(&error, None);
@@ -525,7 +525,7 @@ mod tests {
 
     #[test]
     fn test_verification_issue_from_source_not_found() {
-        let error = ExtractionError::SourceNotFound {
+        let error = ArchiveError::SourceNotFound {
             path: PathBuf::from("/missing"),
         };
         let issue = VerificationIssue::from_error(&error, None);
@@ -536,7 +536,7 @@ mod tests {
 
     #[test]
     fn test_verification_issue_from_source_not_accessible() {
-        let error = ExtractionError::SourceNotAccessible {
+        let error = ArchiveError::SourceNotAccessible {
             path: PathBuf::from("/restricted"),
         };
         let issue = VerificationIssue::from_error(&error, None);
@@ -547,7 +547,7 @@ mod tests {
 
     #[test]
     fn test_verification_issue_from_output_exists() {
-        let error = ExtractionError::OutputExists {
+        let error = ArchiveError::OutputExists {
             path: PathBuf::from("out/"),
         };
         let issue = VerificationIssue::from_error(&error, None);
@@ -558,7 +558,7 @@ mod tests {
 
     #[test]
     fn test_verification_issue_from_invalid_compression_level() {
-        let error = ExtractionError::InvalidCompressionLevel { level: 0 };
+        let error = ArchiveError::InvalidCompressionLevel { level: 0 };
         let issue = VerificationIssue::from_error(&error, None);
         assert_eq!(issue.severity, IssueSeverity::Medium);
         assert_eq!(issue.category, IssueCategory::InvalidArchive);
@@ -567,7 +567,7 @@ mod tests {
 
     #[test]
     fn test_verification_issue_from_unknown_format() {
-        let error = ExtractionError::UnknownFormat {
+        let error = ArchiveError::UnknownFormat {
             path: PathBuf::from("archive.rar"),
         };
         let issue = VerificationIssue::from_error(&error, None);
@@ -578,7 +578,7 @@ mod tests {
 
     #[test]
     fn test_verification_issue_from_invalid_configuration() {
-        let error = ExtractionError::InvalidConfiguration {
+        let error = ArchiveError::InvalidConfiguration {
             reason: "bad config".into(),
         };
         let issue = VerificationIssue::from_error(&error, None);

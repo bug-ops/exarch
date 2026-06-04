@@ -25,7 +25,7 @@ exarch-core = "0.4"
 ```rust
 use exarch_core::{extract_archive, SecurityConfig};
 
-fn main() -> Result<(), exarch_core::ExtractionError> {
+fn main() -> Result<(), exarch_core::ArchiveError> {
     let config = SecurityConfig::default();
     let report = extract_archive("archive.tar.gz", "/output/dir", &config)?;
 
@@ -156,19 +156,19 @@ let report = ArchiveCreator::new()
 | [`CreationConfig`](https://docs.rs/exarch-core/latest/exarch_core/struct.CreationConfig.html) | Configuration for archive creation |
 | [`ExtractionReport`](https://docs.rs/exarch-core/latest/exarch_core/struct.ExtractionReport.html) | Extraction statistics, warnings, and skipped-entry counts |
 | [`CreationReport`](https://docs.rs/exarch-core/latest/exarch_core/struct.CreationReport.html) | Creation statistics and results |
-| [`ExtractionError`](https://docs.rs/exarch-core/latest/exarch_core/enum.ExtractionError.html) | Error types for all operations |
+| [`ArchiveError`](https://docs.rs/exarch-core/latest/exarch_core/enum.ArchiveError.html) | Error types for all operations |
 
 ### Error Handling
 
 ```rust
-use exarch_core::{extract_archive, ExtractionError, SecurityConfig};
+use exarch_core::{extract_archive, ArchiveError, SecurityConfig};
 
 match extract_archive("archive.tar.gz", "/output", &SecurityConfig::default()) {
     Ok(report) => println!("Extracted {} files", report.files_extracted),
-    Err(ExtractionError::PathTraversal { path, .. }) => {
+    Err(ArchiveError::PathTraversal { path, .. }) => {
         eprintln!("Blocked path traversal: {}", path.display());
     }
-    Err(ExtractionError::QuotaExceeded { resource }) => {
+    Err(ArchiveError::QuotaExceeded { resource }) => {
         eprintln!("Resource limit exceeded: {:?}", resource);
     }
     Err(e) => eprintln!("Extraction failed: {}", e),

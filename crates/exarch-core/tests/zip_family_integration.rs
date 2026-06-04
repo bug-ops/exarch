@@ -11,7 +11,7 @@
     clippy::cast_possible_truncation
 )]
 
-use exarch_core::ExtractionError;
+use exarch_core::ArchiveError;
 use exarch_core::SecurityConfig;
 use exarch_core::create_archive;
 use exarch_core::creation::CreationConfig;
@@ -150,7 +150,7 @@ fn inferred_creation_is_rejected_for_zip_family() {
         let output = dest.path().join(format!("out.{ext}"));
         let result = create_archive(&output, &[] as &[&str], &config);
         match result {
-            Err(ExtractionError::InvalidArchive(msg)) => {
+            Err(ArchiveError::InvalidArchive(msg)) => {
                 assert!(
                     msg.contains(ext),
                     ".{ext} error should mention the extension (got: {msg})",
@@ -312,9 +312,9 @@ fn zip_partial_extraction_stops_on_path_traversal() {
     let result = extract_archive(&archive_path, dest.path(), &config);
 
     match result {
-        Err(ExtractionError::PartialExtraction { source, report }) => {
+        Err(ArchiveError::PartialExtraction { source, report }) => {
             assert!(
-                matches!(*source, ExtractionError::PathTraversal { .. }),
+                matches!(*source, ArchiveError::PathTraversal { .. }),
                 "source error must be PathTraversal, got: {source:?}"
             );
             assert!(

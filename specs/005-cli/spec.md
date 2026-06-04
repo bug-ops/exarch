@@ -218,7 +218,7 @@ exarch completion <SHELL>    # bash | zsh | fish | powershell | elvish  (output 
 | SC-001 | All subcommands produce correct output in human mode | Manual and integration tests |
 | SC-002 | `--json` output is valid JSON parseable by `jq` | Integration test with JSON schema validation |
 | SC-003 | Progress bar suppressed with `--json` and `--quiet` | Integration test checking stderr |
-| SC-004 | Exit code non-zero on all error paths | Test matrix covering each `ExtractionError` variant |
+| SC-004 | Exit code non-zero on all error paths | Test matrix covering each `ArchiveError` variant |
 
 ## 8. Agent Boundaries
 

@@ -64,7 +64,7 @@ npm install exarch-rs
 ```rust
 use exarch_core::{extract_archive, SecurityConfig};
 
-fn main() -> Result<(), exarch_core::ExtractionError> {
+fn main() -> Result<(), exarch_core::ArchiveError> {
     let config = SecurityConfig::default();
     let report = extract_archive("archive.tar.gz", "/output/path", &config)?;
 
@@ -102,7 +102,7 @@ console.log(`Extracted ${result.filesExtracted} files`);
 ```rust
 use exarch_core::{create_archive, CreationConfig};
 
-fn main() -> Result<(), exarch_core::ExtractionError> {
+fn main() -> Result<(), exarch_core::ArchiveError> {
     let config = CreationConfig::default();
     let report = create_archive("output.tar.gz", &["src/", "Cargo.toml"], &config)?;
 

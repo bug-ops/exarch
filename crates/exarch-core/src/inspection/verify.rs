@@ -3,7 +3,7 @@
 use std::path::Path;
 use std::path::PathBuf;
 
-use crate::ExtractionError;
+use crate::ArchiveError;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::inspection::list::list_archive;
@@ -200,7 +200,7 @@ fn check_permissions(mode: u32, config: &SecurityConfig) -> Result<()> {
     if sanitized == mode {
         Ok(())
     } else {
-        Err(ExtractionError::InvalidPermissions {
+        Err(ArchiveError::InvalidPermissions {
             path: PathBuf::new(),
             mode,
         })
@@ -556,7 +556,7 @@ mod tests {
         assert!(
             matches!(
                 result,
-                Err(crate::ExtractionError::InvalidConfiguration { .. })
+                Err(crate::ArchiveError::InvalidConfiguration { .. })
             ),
             "verify_archive must return InvalidConfiguration for zero max_path_depth"
         );

@@ -71,7 +71,7 @@ THEN all entries are written to output_dir, no entry escapes output_dir,
 ```
 GIVEN an archive containing a path traversal entry (e.g. "../etc/passwd")
 WHEN I call extract_archive()
-THEN extraction fails with ExtractionError::PathTraversal before any file is written
+THEN extraction fails with ArchiveError::PathTraversal before any file is written
 ```
 
 ### US-002: Archive Creation (Rust API)
@@ -90,7 +90,7 @@ THEN an archive is produced containing all source files, and CreationReport.file
 ```
 GIVEN a 7z output path
 WHEN I call create_archive()
-THEN the call fails with ExtractionError::InvalidConfiguration
+THEN the call fails with ArchiveError::InvalidConfiguration
 ```
 
 ### US-003: Archive Inspection
@@ -190,7 +190,7 @@ THEN extraction runs on the libuv thread pool, files are extracted, and an Extra
 | FR-020 | WHEN an archive path has extension `.tar`, `.tgz`, `.tar.gz`, `.tar.bz2`, `.tbz`, `.tbz2`, `.tar.xz`, `.txz`, `.tar.zst`, `.tzst`, THE SYSTEM SHALL extract it as a TAR archive with the appropriate decompressor | must |
 | FR-021 | WHEN an archive path has extension `.zip` or any ZIP-family alias (`.jar`, `.war`, `.apk`, `.whl`, etc.), THE SYSTEM SHALL extract it as a ZIP archive | must |
 | FR-022 | WHEN an archive path has extension `.7z`, THE SYSTEM SHALL extract it using the 7z handler (extraction only) | must |
-| FR-023 | WHEN format detection is ambiguous or the extension is unrecognized, THE SYSTEM SHALL return `ExtractionError::UnknownFormat { path }` | must |
+| FR-023 | WHEN format detection is ambiguous or the extension is unrecognized, THE SYSTEM SHALL return `ArchiveError::UnknownFormat { path }` | must |
 | FR-024 | WHEN creating archives, THE SYSTEM SHALL support TAR (all compression variants) and ZIP; 7z creation SHALL return `InvalidConfiguration` | must |
 | FR-025 | WHEN creating archives for ZIP-family aliases without an explicit `CreationConfig::format` override, THE SYSTEM SHALL return an error explaining that the format requires extra structure | should |
 
@@ -245,7 +245,7 @@ THEN extraction runs on the libuv thread pool, files are extracted, and an Extra
 | FR-072 | WHEN paths contain null bytes or exceed 4096 bytes, THE SYSTEM SHALL raise `ValueError` at the Python boundary before calling into Rust | must |
 | FR-073 | WHEN no Python progress callback is provided, THE SYSTEM SHALL release the GIL during extraction/creation | must |
 | FR-074 | WHEN a Python progress callback is provided, THE SYSTEM SHALL NOT release the GIL (callback requires GIL to call Python) | must |
-| FR-075 | Rust `ExtractionError` variants SHALL map to specific Python exception types registered on the module | must |
+| FR-075 | Rust `ArchiveError` variants SHALL map to specific Python exception types registered on the module | must |
 
 ### 3.8 Node.js Bindings
 
@@ -254,7 +254,7 @@ THEN extraction runs on the libuv thread pool, files are extracted, and an Extra
 | FR-080 | THE SYSTEM SHALL expose async Node.js functions that return Promises: `extractArchive`, `createArchive`, `listArchive`, `verifyArchive` | must |
 | FR-081 | ALL async operations SHALL run on the libuv thread pool (not the main event loop thread) | must |
 | FR-082 | WHEN paths contain null bytes or exceed 4096 bytes, THE SYSTEM SHALL reject with a JavaScript Error before spawning a thread | must |
-| FR-083 | Rust `ExtractionError` variants SHALL map to named JavaScript Error types | must |
+| FR-083 | Rust `ArchiveError` variants SHALL map to named JavaScript Error types | must |
 
 ## 4. Non-Functional Requirements
 
@@ -300,26 +300,26 @@ THEN extraction runs on the libuv thread pool, files are extracted, and an Extra
 
 | Scenario | Expected Behavior |
 |----------|-------------------|
-| Archive path does not exist | `ExtractionError::Io` returned immediately |
-| Extension unrecognized or bare `.gz` without `.tar` stem | `ExtractionError::UnknownFormat { path }` |
+| Archive path does not exist | `ArchiveError::Io` returned immediately |
+| Extension unrecognized or bare `.gz` without `.tar` stem | `ArchiveError::UnknownFormat { path }` |
 | ZIP-family alias (`.apk`, `.whl`) extraction | Proceeds as ZIP |
-| ZIP-family alias creation without format override | `ExtractionError::InvalidArchive` with explanation naming the alias and referencing `CreationConfig::format` override |
-| 7z creation | `ExtractionError::InvalidConfiguration` |
+| ZIP-family alias creation without format override | `ArchiveError::InvalidArchive` with explanation naming the alias and referencing `CreationConfig::format` override |
+| 7z creation | `ArchiveError::InvalidConfiguration` |
 | Duplicate entry paths in archive | Logged as warning in `ExtractionReport.warnings` when `skip_duplicates` is true; error when false |
-| Atomic extraction to existing non-empty directory | `ExtractionError::OutputExists` on rename failure; temp dir cleaned up |
-| Path traversal `../` or absolute path | `ExtractionError::PathTraversal` |
-| File exceeds `max_file_size` | `ExtractionError::QuotaExceeded { resource: FileSizeBytes }` |
-| Total size exceeds `max_total_size` | `ExtractionError::QuotaExceeded { resource: TotalSizeBytes }` |
-| File count exceeds `max_file_count` | `ExtractionError::QuotaExceeded { resource: FileCount }` |
-| Compression ratio > `max_compression_ratio` | `ExtractionError::ZipBomb` |
+| Atomic extraction to existing non-empty directory | `ArchiveError::OutputExists` on rename failure; temp dir cleaned up |
+| Path traversal `../` or absolute path | `ArchiveError::PathTraversal` |
+| File exceeds `max_file_size` | `ArchiveError::QuotaExceeded { resource: FileSizeBytes }` |
+| Total size exceeds `max_total_size` | `ArchiveError::QuotaExceeded { resource: TotalSizeBytes }` |
+| File count exceeds `max_file_count` | `ArchiveError::QuotaExceeded { resource: FileCount }` |
+| Compression ratio > `max_compression_ratio` | `ArchiveError::ZipBomb` |
 | Symlink with `allowed.symlinks = false` | Entry skipped (not an error) |
-| Symlink pointing outside output_dir | `ExtractionError::SymlinkEscape` |
+| Symlink pointing outside output_dir | `ArchiveError::SymlinkEscape` |
 | Hardlink with `allowed.hardlinks = false` | Entry skipped |
-| Hardlink to a path not previously seen in this archive | `ExtractionError::HardlinkEscape` |
+| Hardlink to a path not previously seen in this archive | `ArchiveError::HardlinkEscape` |
 | setuid/setgid bits on Unix | Stripped silently; `mode` in `ValidatedEntry` reflects sanitized value |
-| Solid 7z archive with `allow_solid_archives = false` | `ExtractionError::InvalidArchive` or format-specific rejection |
-| Path depth > `max_path_depth` | `ExtractionError::PathTraversal` (depth exceeded) |
-| Banned component (`.git`) in path | `ExtractionError::PathTraversal` (banned component) |
+| Solid 7z archive with `allow_solid_archives = false` | `ArchiveError::InvalidArchive` or format-specific rejection |
+| Path depth > `max_path_depth` | `ArchiveError::PathTraversal` (depth exceeded) |
+| Banned component (`.git`) in path | `ArchiveError::PathTraversal` (banned component) |
 | `SecurityConfig` with zero limit | `SecurityConfig::validate()` returns `InvalidConfiguration` before extraction begins |
 | Python: null byte in path | `ValueError` raised at Python boundary |
 | Python: path exceeds 4096 bytes | `ValueError` raised at Python boundary |

@@ -199,7 +199,7 @@ impl SecurityConfig {
     ///
     /// # Errors
     ///
-    /// Returns `ExtractionError::InvalidConfiguration` if:
+    /// Returns `ArchiveError::InvalidConfiguration` if:
     /// - `max_compression_ratio` is not positive
     /// - `max_file_size` is zero
     /// - `max_total_size` is zero
@@ -220,32 +220,32 @@ impl SecurityConfig {
     /// ```
     pub fn validate(&self) -> crate::Result<()> {
         if !self.max_compression_ratio.is_finite() || self.max_compression_ratio <= 0.0 {
-            return Err(crate::ExtractionError::InvalidConfiguration {
+            return Err(crate::ArchiveError::InvalidConfiguration {
                 reason: "max_compression_ratio must be positive".into(),
             });
         }
         if self.max_file_size == 0 {
-            return Err(crate::ExtractionError::InvalidConfiguration {
+            return Err(crate::ArchiveError::InvalidConfiguration {
                 reason: "max_file_size must not be zero".into(),
             });
         }
         if self.max_total_size == 0 {
-            return Err(crate::ExtractionError::InvalidConfiguration {
+            return Err(crate::ArchiveError::InvalidConfiguration {
                 reason: "max_total_size must not be zero".into(),
             });
         }
         if self.max_path_depth == 0 {
-            return Err(crate::ExtractionError::InvalidConfiguration {
+            return Err(crate::ArchiveError::InvalidConfiguration {
                 reason: "max_path_depth must not be zero".into(),
             });
         }
         if self.max_file_count == 0 {
-            return Err(crate::ExtractionError::InvalidConfiguration {
+            return Err(crate::ArchiveError::InvalidConfiguration {
                 reason: "max_file_count must not be zero".into(),
             });
         }
         if self.max_solid_block_memory == 0 {
-            return Err(crate::ExtractionError::InvalidConfiguration {
+            return Err(crate::ArchiveError::InvalidConfiguration {
                 reason: "max_solid_block_memory must not be zero".into(),
             });
         }

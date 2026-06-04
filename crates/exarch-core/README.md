@@ -157,6 +157,7 @@ let report = ArchiveCreator::new()
 | [`ExtractionReport`](https://docs.rs/exarch-core/latest/exarch_core/struct.ExtractionReport.html) | Extraction statistics, warnings, and skipped-entry counts |
 | [`CreationReport`](https://docs.rs/exarch-core/latest/exarch_core/struct.CreationReport.html) | Creation statistics and results |
 | [`ArchiveError`](https://docs.rs/exarch-core/latest/exarch_core/enum.ArchiveError.html) | Error types for all operations |
+| [`ValidationReport`](https://docs.rs/exarch-core/latest/exarch_core/struct.ValidationReport.html) | Per-entry verification result (re-exported at crate root) |
 
 ### Error Handling
 

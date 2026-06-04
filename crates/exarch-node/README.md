@@ -161,6 +161,34 @@ interface ExtractionReport {
 }
 ```
 
+### `extractArchiveWithProgress(archivePath, outputDir, config?, progress?)`
+
+Async extraction with an optional progress callback.
+
+```typescript
+import { extractArchiveWithProgress } from 'exarch-rs';
+
+const result = await extractArchiveWithProgress(
+  'archive.tar.gz',
+  '/output/path',
+  undefined,  // SecurityConfig or undefined
+  (path, total, current, bytesWritten) => {
+    console.log(`[${current}/${total}] ${path} (${bytesWritten} bytes)`);
+  }
+);
+```
+
+**Parameters:**
+
+| Name | Type | Description |
+|------|------|-------------|
+| `archivePath` | `string` | Path to the archive file |
+| `outputDir` | `string` | Directory where files will be extracted |
+| `config` | `SecurityConfig \| undefined` | Optional security configuration |
+| `progress` | `(path: string, total: bigint, current: bigint, bytesWritten: bigint) => void \| undefined` | Optional progress callback |
+
+**Returns:** `Promise<ExtractionReport>`
+
 ### `SecurityConfig`
 
 Builder-style security configuration.
@@ -175,6 +203,8 @@ const config = new SecurityConfig()
   .bannedPathComponents(["__MACOSX"])        // Skip these path components
   .setAllowSolidArchives(true);              // Allow solid 7z archives (default: false)
 ```
+
+**Getters:** `allowSymlinks`, `allowHardlinks`, `allowAbsolutePaths`, `allowWorldWritable`, `allowSolidArchives` — each returns the corresponding boolean policy value.
 
 ## Security Features
 

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `PyProgressAdapter` and `NodeProgressAdapter` now reset `bytes_written` to 0 at the start of each entry, eliminating stale values from previous entries (#285).
+
 ### Changed
 
 - Specifications in `specs/` updated to replace stale `UnsupportedFormat` references with

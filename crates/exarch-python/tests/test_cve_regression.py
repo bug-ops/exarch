@@ -270,49 +270,42 @@ def test_progress_bytes_written_not_stale(temp_dir):
     Regression test for #285.
 
     PyProgressAdapter was passing stale `bytes_written` (accumulated from all
-    previous entries) to the Python callback at `on_entry_start`.  The fix
-    resets `current_entry_bytes` to 0 at the start of each entry, so the very
-    first callback invocation for every entry always receives 0 regardless of
-    how large the preceding entries were.
+    previous entries) to the Python callback at `on_entry_start`. The bug only
+    manifests through `create_archive_with_progress` because `on_bytes_written`
+    is only called during creation, not extraction.
 
-    Failure signature of the original bug: entry 2's on_entry_start call would
-    report bytes_written == 1024 (entry 1's total) instead of 0.
+    The fix resets `current_entry_bytes` to 0 at the start of each entry, so
+    `bytes_written` at `on_entry_start` is always 0 regardless of how many
+    bytes the preceding entries wrote.
+
+    Failure signature of the original bug: file2's on_entry_start call would
+    report bytes_written == len(SMALL) (stale from file1) instead of 0.
     """
-    import io
-    import tarfile
-
     SMALL = b"x" * 1024          # 1 KB
     LARGE = b"y" * (100 * 1024)  # 100 KB
 
+    src_dir = temp_dir / "src"
+    src_dir.mkdir()
+    (src_dir / "small.txt").write_bytes(SMALL)
+    (src_dir / "large.txt").write_bytes(LARGE)
+
     archive = temp_dir / "two_files.tar.gz"
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-        for name, data in [("small.txt", SMALL), ("large.txt", LARGE)]:
-            info = tarfile.TarInfo(name=name)
-            info.size = len(data)
-            tar.addfile(info, io.BytesIO(data))
-    archive.write_bytes(buf.getvalue())
 
-    output_dir = temp_dir / "out"
-    output_dir.mkdir()
-
-    # entry_start_bytes[name] = bytes_written value received at on_entry_start
+    # entry_start_bytes[name] = bytes_written received at on_entry_start
     entry_start_bytes: dict = {}
 
     def callback(path: str, total: int, current: int, bytes_written: int) -> None:
-        # Record only the first call per entry (on_entry_start fires once per
-        # entry before any bytes are written, so bytes_written must be 0).
         name = path.split("/")[-1].split("\\")[-1]
         if name not in entry_start_bytes:
             entry_start_bytes[name] = bytes_written
 
-    exarch.extract_archive_with_progress(archive, output_dir, None, callback)
+    exarch.create_archive_with_progress(archive, [src_dir], None, callback)
 
     assert "small.txt" in entry_start_bytes, "callback never fired for small.txt"
     assert "large.txt" in entry_start_bytes, "callback never fired for large.txt"
 
     # Both entries must start with bytes_written == 0.
-    # The original bug: large.txt would receive bytes_written == 1024 (stale from small.txt).
+    # The original bug: large.txt received bytes_written == 1024 (stale from small.txt).
     assert entry_start_bytes["small.txt"] == 0, (
         f"small.txt: expected bytes_written=0 at entry start, got {entry_start_bytes['small.txt']}"
     )

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `verify` CLI command now accepts a `--strict` flag. When set, a verification report with
+  `Warning` status causes the process to exit with code 2 instead of 0. Without the flag,
+  the previous behaviour (exit 0 on warnings) is unchanged (#269).
+- `ValidationReport` is now re-exported at the crate root as `exarch_core::ValidationReport`
+  (was only accessible as `exarch_core::security::ValidationReport`) (#256).
+
 ### Fixed
 
 - `PyProgressAdapter` and `NodeProgressAdapter` now reset `bytes_written` to 0 at the start of each entry, eliminating stale values from previous entries (#285).
@@ -39,11 +47,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `UnknownFormat { path }` (format-detection failures) and `InvalidConfiguration` (7z creation),
   matching the post-#255 Rust API. Python exception hierarchy updated to include
   `UnknownFormatError(UnsupportedFormatError)` (#265, #264).
-
-### Added
-
-- `ValidationReport` is now re-exported at the crate root as `exarch_core::ValidationReport`
-  (was only accessible as `exarch_core::security::ValidationReport`) (#256).
 
 ### Changed
 

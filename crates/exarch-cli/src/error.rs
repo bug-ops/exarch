@@ -9,6 +9,21 @@ use exarch_core::ExtractionReport;
 use std::fmt;
 use std::path::Path;
 
+/// Sentinel error returned by `verify::execute` when `--strict` is active and
+/// the archive has a `Warning`-status verification report. `main` maps this to
+/// exit code 2 without printing an error message (the formatter already
+/// reported the warning details to stdout/stderr before this is returned).
+#[derive(Debug)]
+pub struct StrictWarning;
+
+impl fmt::Display for StrictWarning {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Archive has warnings (--strict mode)")
+    }
+}
+
+impl std::error::Error for StrictWarning {}
+
 /// Carrier for partial-extraction progress embedded in the anyhow error chain.
 ///
 /// `ArchiveError::PartialExtraction` uses `#[error("{source}")]` with

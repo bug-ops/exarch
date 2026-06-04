@@ -8,6 +8,7 @@ mod output;
 mod progress;
 
 use clap::Parser;
+use error::StrictWarning;
 use output::OutputFormatter;
 use std::process;
 
@@ -36,6 +37,9 @@ fn main() {
 
     let (result, operation) = run(&cli, &*formatter);
     if let Err(err) = result {
+        if err.is::<StrictWarning>() {
+            process::exit(2);
+        }
         formatter.format_error(operation, &err);
         process::exit(1);
     }

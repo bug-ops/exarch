@@ -148,6 +148,18 @@ exarch provides defense-in-depth protection against common archive vulnerabiliti
 > [!CAUTION]
 > Enabling symlinks or hardlinks should only be done when you fully trust the archive source.
 
+### CLI: Strict Verification
+
+The `verify` command accepts `--strict` to treat warnings as errors:
+
+```bash
+# Exit 0 — only hard failures are errors
+exarch verify archive.tar.gz
+
+# Exit 2 if any warnings are found (e.g. setuid bits), exit 1 on failure
+exarch verify --strict archive.tar.gz
+```
+
 ### Security Configuration
 
 ```rust

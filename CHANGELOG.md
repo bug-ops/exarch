@@ -48,6 +48,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- CLI: `convert_extraction_error` now has explicit match arms for `InvalidConfiguration`,
+  `SourceNotFound`, and `SourceNotAccessible`, each producing an actionable message with the
+  relevant path or reason. Previously these variants fell through to a generic wildcard arm (#274).
+- CLI: `SecurityConfig` quota parameters (`max_file_count`, `max_total_size`, `max_file_size`,
+  `max_compression_ratio`, `allow_solid_archives`) are now defined once in `execute()` and
+  reused for the pre-listing phase, eliminating silent drift if quota defaults change (#267).
+- CLI: The four near-identical `run_extraction` call sites in `extract` are unified into a single
+  call via `Box<dyn ProgressCallback>`, removing the copy-paste maintenance burden (#268).
+
 - Node.js: async operations (`extractArchive`, `createArchive`, `listArchive`, `verifyArchive`)
   now wrap the core call with `catch_unwind` inside `spawn_blocking`, preventing panics in
   `exarch-core` from crossing the FFI boundary and aborting the Node.js process. Panics are

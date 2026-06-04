@@ -113,6 +113,20 @@ pub fn convert_extraction_error(
             archive.display(),
             reason
         ),
+        ExtractionError::InvalidConfiguration { reason } => format!(
+            "Invalid configuration: {reason}\n\
+             HINT: Check the flags you passed and their allowed value ranges.",
+        ),
+        ExtractionError::SourceNotFound { path } => format!(
+            "Source path not found: {}\n\
+             HINT: Verify the archive path exists and is readable.",
+            path.display(),
+        ),
+        ExtractionError::SourceNotAccessible { path } => format!(
+            "Source path is not accessible: {}\n\
+             HINT: Check file permissions on the archive.",
+            path.display(),
+        ),
         _ => format!("Error processing archive '{}'", archive.display()),
     };
     anyhow::Error::from(err).context(context)

@@ -185,6 +185,40 @@ exarch create -f backup.tar.gz ./src
 > [!CAUTION]
 > Since v0.4.0, `create` rejects ZIP-family alias extensions (`.apk`, `.jar`, `.whl`, `.epub`, `.war`, `.ear`, `.aab`, `.ipa`, `.appx`, `.msix`, `.vsix`, `.nbm`) when format inference is left to the file extension. These containers require extra structure (signing, manifests, ordering) that exarch doesn't produce.
 
+## Verify Command
+
+Check archive integrity and security before extraction:
+
+```bash
+exarch verify [OPTIONS] <ARCHIVE>
+```
+
+### Examples
+
+```bash
+# Verify integrity and report any security warnings
+exarch verify archive.tar.gz
+
+# Treat warnings as errors (exit 2 on warnings, exit 1 on failure)
+exarch verify --strict archive.tar.gz
+
+# Verify with JSON output for scripting
+exarch verify --json archive.tar.gz | jq '.data.status'
+```
+
+### Verify Options
+
+| Option | Description |
+|--------|-------------|
+| `--strict` | Exit with code 2 if the report contains warnings (e.g. setuid bits, world-writable files). Without this flag, warnings result in exit 0. |
+| `--max-files` | Maximum number of entries to scan |
+| `--max-total-size` | Maximum total archive size to scan |
+| `--allow-solid-archives` | Allow solid 7z archives during verification |
+| `--json` | Output results in JSON format |
+
+> [!TIP]
+> Use `--strict` in CI pipelines to fail on archives with suspicious permissions or other non-fatal anomalies.
+
 ## Shell Completion
 
 Generate completion scripts for your shell:

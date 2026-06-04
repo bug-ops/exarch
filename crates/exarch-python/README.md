@@ -145,10 +145,35 @@ Extract an archive to the specified directory with security validation.
 | `QuotaExceededError` | Resource quota exceeded |
 | `SecurityViolationError` | Security policy violation |
 | `UnsupportedFormatError` | Archive format not supported |
+| `UnknownFormatError` | Archive format cannot be determined from path or magic bytes (subclass of `UnsupportedFormatError`) |
 | `InvalidArchiveError` | Archive is corrupted |
 | `IOError` | I/O operation failed |
 
 **Note:** Since v0.4.0, `create_archive` raises `FileNotFoundError` for missing sources, `FileExistsError` when the output already exists without overwrite, and `ValueError` for invalid compression levels — matching standard Python conventions.
+
+### `extract_archive_with_progress(archive_path, output_dir, config, progress)`
+
+Extract an archive with a progress callback. The GIL is held when a callback is provided and released otherwise.
+
+**Parameters:**
+
+| Name | Type | Description |
+|------|------|-------------|
+| `archive_path` | `str \| Path` | Path to the archive file |
+| `output_dir` | `str \| Path` | Directory where files will be extracted |
+| `config` | `SecurityConfig \| None` | Optional security configuration |
+| `progress` | `Callable[[str, int, int, int], None] \| None` | Optional progress callback: `(path, total_files, current_file, bytes_written)` |
+
+```python
+import exarch
+
+def on_progress(path: str, total: int, current: int, bytes_written: int) -> None:
+    print(f"[{current}/{total}] {path} ({bytes_written} bytes)")
+
+result = exarch.extract_archive_with_progress(
+    "archive.tar.gz", "/output", config=None, progress=on_progress
+)
+```
 
 ### `SecurityConfig`
 

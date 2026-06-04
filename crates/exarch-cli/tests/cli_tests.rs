@@ -917,6 +917,72 @@ fn test_verify_archive_safe() {
 }
 
 #[test]
+fn test_verify_strict_passes_on_clean_archive() {
+    exarch_cmd()
+        .arg("verify")
+        .arg("--strict")
+        .arg(fixture_path("sample.tar.gz"))
+        .assert()
+        .success();
+}
+
+/// Builds a tar.gz archive at `path` containing one file with a setuid bit set.
+/// The setuid bit triggers an `InvalidPermissions` issue (Medium severity),
+/// which causes the verification report to have `VerificationStatus::Warning`.
+#[cfg(unix)]
+fn create_setuid_tar_gz(path: &std::path::Path) {
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
+
+    let file = std::fs::File::create(path).expect("create archive");
+    let gz = GzEncoder::new(file, Compression::default());
+    let mut builder = tar::Builder::new(gz);
+    let mut header = tar::Header::new_gnu();
+    header.set_size(4);
+    header.set_mode(0o4755); // setuid bit — triggers InvalidPermissions Medium issue
+    header.set_path("binary").expect("set path");
+    header.set_cksum();
+    builder
+        .append_data(&mut header, "binary", &b"data"[..])
+        .expect("append entry");
+    let gz = builder.into_inner().expect("get gz encoder");
+    gz.finish().expect("finish gzip stream");
+}
+
+/// On Unix, an archive containing a setuid file produces a Warning-severity
+/// verification report. With --strict, the CLI must exit with code 2.
+#[test]
+#[cfg(unix)]
+fn test_verify_strict_exits_2_on_warning() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive_path = temp.path().join("setuid.tar.gz");
+    create_setuid_tar_gz(&archive_path);
+
+    exarch_cmd()
+        .arg("verify")
+        .arg("--strict")
+        .arg(&archive_path)
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("warnings"));
+}
+
+/// Without --strict, the same setuid archive must still exit 0.
+#[test]
+#[cfg(unix)]
+fn test_verify_without_strict_exits_0_on_warning() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive_path = temp.path().join("setuid_lenient.tar.gz");
+    create_setuid_tar_gz(&archive_path);
+
+    exarch_cmd()
+        .arg("verify")
+        .arg(&archive_path)
+        .assert()
+        .success();
+}
+
+#[test]
 fn test_verify_archive_json_output() {
     let output = exarch_cmd()
         .arg("verify")

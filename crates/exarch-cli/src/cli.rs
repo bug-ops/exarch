@@ -202,6 +202,10 @@ pub struct VerifyArgs {
     /// Allow solid 7z archives (higher memory usage during verification)
     #[arg(long)]
     pub allow_solid_archives: bool,
+
+    /// Treat warnings as errors and exit with status code 2
+    #[arg(long)]
+    pub strict: bool,
 }
 
 /// Parse byte size with optional suffix (K, M, G, T)

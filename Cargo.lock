@@ -553,10 +553,12 @@ dependencies = [
  "clap_complete",
  "console",
  "exarch-core",
+ "flate2",
  "indicatif",
  "predicates",
  "serde",
  "serde_json",
+ "tar",
  "tempfile",
 ]
 

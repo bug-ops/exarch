@@ -170,10 +170,11 @@ impl HardlinkTracker {
         self.seen_targets.len()
     }
 
-    /// Checks if a target path has been seen before.
-    #[must_use]
-    #[allow(dead_code)]
-    pub fn has_target(&self, target: &Path) -> bool {
+}
+
+#[cfg(test)]
+impl HardlinkTracker {
+    pub(crate) fn has_target(&self, target: &Path) -> bool {
         self.seen_targets.contains_key(target)
     }
 }

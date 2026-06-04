@@ -1,6 +1,6 @@
 //! Validated destination directory type.
 
-use crate::ExtractionError;
+use crate::ArchiveError;
 use crate::Result;
 use std::path::Path;
 use std::path::PathBuf;
@@ -83,7 +83,7 @@ impl DestDir {
         let path = path.into();
         // Verify path exists
         if !path.exists() {
-            return Err(ExtractionError::Io(std::io::Error::new(
+            return Err(ArchiveError::Io(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 format!("destination directory does not exist: {}", path.display()),
             )));
@@ -91,7 +91,7 @@ impl DestDir {
 
         // Verify it's a directory
         if !path.is_dir() {
-            return Err(ExtractionError::Io(std::io::Error::new(
+            return Err(ArchiveError::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 format!("path is not a directory: {}", path.display()),
             )));
@@ -99,7 +99,7 @@ impl DestDir {
 
         // Canonicalize to absolute path
         let canonical = path.canonicalize().map_err(|e| {
-            ExtractionError::Io(std::io::Error::new(
+            ArchiveError::Io(std::io::Error::new(
                 e.kind(),
                 format!("failed to canonicalize path {}: {}", path.display(), e),
             ))
@@ -113,7 +113,7 @@ impl DestDir {
 
             // Use access() syscall to check effective write permissions
             let path_cstring = CString::new(canonical.as_os_str().as_bytes()).map_err(|_| {
-                ExtractionError::Io(std::io::Error::new(
+                ArchiveError::Io(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
                     "path contains null byte",
                 ))
@@ -126,7 +126,7 @@ impl DestDir {
             let result = unsafe { libc::access(path_cstring.as_ptr(), libc::W_OK) };
 
             if result != 0 {
-                return Err(ExtractionError::Io(std::io::Error::new(
+                return Err(ArchiveError::Io(std::io::Error::new(
                     std::io::ErrorKind::PermissionDenied,
                     format!("directory is not writable: {}", canonical.display()),
                 )));
@@ -148,7 +148,7 @@ impl DestDir {
     pub fn new_or_create(path: impl Into<PathBuf>) -> Result<Self> {
         let path = path.into();
         std::fs::create_dir_all(&path).map_err(|e| {
-            ExtractionError::Io(std::io::Error::new(
+            ArchiveError::Io(std::io::Error::new(
                 e.kind(),
                 format!(
                     "failed to create destination directory '{}': {}",
@@ -251,7 +251,7 @@ mod tests {
         let path = PathBuf::from("/nonexistent/directory/that/does/not/exist");
         let result = DestDir::new(path);
         assert!(result.is_err());
-        assert!(matches!(result, Err(ExtractionError::Io(_))));
+        assert!(matches!(result, Err(ArchiveError::Io(_))));
     }
 
     #[test]
@@ -262,7 +262,7 @@ mod tests {
 
         let result = DestDir::new(file_path);
         assert!(result.is_err());
-        assert!(matches!(result, Err(ExtractionError::Io(_))));
+        assert!(matches!(result, Err(ArchiveError::Io(_))));
     }
 
     #[test]

@@ -11,7 +11,7 @@
 
 use std::path::PathBuf;
 
-use exarch_core::ExtractionError;
+use exarch_core::ArchiveError;
 use exarch_core::QuotaResource;
 use exarch_core::SecurityConfig;
 use exarch_core::security::HardlinkTracker;
@@ -184,7 +184,7 @@ proptest! {
         if num_files > max_files {
             let result = tracker.record_file(100, &config);
             prop_assert!(
-                matches!(result, Err(ExtractionError::QuotaExceeded { .. })),
+                matches!(result, Err(ArchiveError::QuotaExceeded { .. })),
                 "exceeding file count should fail"
             );
         }
@@ -214,7 +214,7 @@ proptest! {
                 // Quota was exceeded - this is the security boundary
                 // Verify it's a quota error
                 prop_assert!(
-                    matches!(result, Err(ExtractionError::QuotaExceeded { .. })),
+                    matches!(result, Err(ArchiveError::QuotaExceeded { .. })),
                     "error should be QuotaExceeded"
                 );
                 break;
@@ -246,7 +246,7 @@ proptest! {
             prop_assert_eq!(tracker.bytes_written(), file_size);
         } else {
             prop_assert!(
-                matches!(result, Err(ExtractionError::QuotaExceeded {
+                matches!(result, Err(ArchiveError::QuotaExceeded {
                     resource: QuotaResource::FileSize { .. }
                 })),
                 "file exceeding size limit should fail"
@@ -323,7 +323,7 @@ proptest! {
         let result = validate_compression_ratio(0, uncompressed, &config);
 
         prop_assert!(
-            matches!(result, Err(ExtractionError::InvalidArchive(_))),
+            matches!(result, Err(ArchiveError::InvalidArchive(_))),
             "zero compressed with non-zero uncompressed must be rejected"
         );
     }
@@ -353,7 +353,7 @@ proptest! {
         let result = validate_compression_ratio(compressed, uncompressed, &config);
 
         prop_assert!(
-            matches!(result, Err(ExtractionError::ZipBomb { .. })),
+            matches!(result, Err(ArchiveError::ZipBomb { .. })),
             "extreme compression ratio should be detected"
         );
     }
@@ -398,7 +398,7 @@ proptest! {
         let result = tracker.validate_hardlink(&link, &target, &dest, &config);
 
         prop_assert!(
-            matches!(result, Err(ExtractionError::HardlinkEscape { .. })),
+            matches!(result, Err(ArchiveError::HardlinkEscape { .. })),
             "excessive parent traversal should be rejected"
         );
     }
@@ -517,7 +517,7 @@ proptest! {
         let result = SafeSymlink::validate(&link, &target_path, &dest, &config);
 
         prop_assert!(
-            matches!(result, Err(ExtractionError::SecurityViolation { .. })),
+            matches!(result, Err(ArchiveError::SecurityViolation { .. })),
             "symlinks should be rejected when disabled"
         );
     }

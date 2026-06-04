@@ -2,7 +2,7 @@
 
 use exarch_core::security::EntryValidator;
 use exarch_core::types::{DestDir, EntryType};
-use exarch_core::{ExtractionError, SecurityConfig};
+use exarch_core::{ArchiveError, SecurityConfig};
 use std::path::Path;
 use tempfile::TempDir;
 
@@ -23,7 +23,7 @@ fn test_42_zip_bomb_simulation() {
         Some(0o644),
     );
 
-    assert!(matches!(result, Err(ExtractionError::ZipBomb { .. })));
+    assert!(matches!(result, Err(ArchiveError::ZipBomb { .. })));
 }
 
 #[test]
@@ -43,7 +43,7 @@ fn test_high_compression_ratio_individual() {
         Some(0o644),
     );
 
-    assert!(matches!(result, Err(ExtractionError::ZipBomb { .. })));
+    assert!(matches!(result, Err(ArchiveError::ZipBomb { .. })));
 }
 
 #[test]
@@ -103,7 +103,7 @@ fn test_just_over_compression_ratio() {
         Some(0o644),
     );
 
-    assert!(matches!(result, Err(ExtractionError::ZipBomb { .. })));
+    assert!(matches!(result, Err(ArchiveError::ZipBomb { .. })));
 }
 
 #[test]

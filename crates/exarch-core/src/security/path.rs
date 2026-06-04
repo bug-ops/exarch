@@ -27,9 +27,8 @@ use crate::types::SafePath;
 /// # Errors
 ///
 /// Returns an error if the path contains:
-/// - `ExtractionError::PathTraversal` for `..` or absolute paths
-/// - `ExtractionError::SecurityViolation` for banned components or excessive
-///   depth
+/// - `ArchiveError::PathTraversal` for `..` or absolute paths
+/// - `ArchiveError::SecurityViolation` for banned components or excessive depth
 ///
 /// # Examples
 ///

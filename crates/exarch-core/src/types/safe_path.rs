@@ -1,6 +1,6 @@
 //! Validated safe path type for archive extraction.
 
-use crate::ExtractionError;
+use crate::ArchiveError;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::security::context::ValidationContext;
@@ -78,9 +78,9 @@ impl SafePath {
     /// # Errors
     ///
     /// Returns an error if any validation step fails:
-    /// - `ExtractionError::PathTraversal` for `..` or absolute paths
-    /// - `ExtractionError::SecurityViolation` for banned components or
-    ///   excessive depth
+    /// - `ArchiveError::PathTraversal` for `..` or absolute paths
+    /// - `ArchiveError::SecurityViolation` for banned components or excessive
+    ///   depth
     ///
     /// # Examples
     ///
@@ -123,7 +123,7 @@ impl SafePath {
     ) -> Result<Self> {
         // Reject empty paths explicitly
         if path.as_os_str().is_empty() {
-            return Err(ExtractionError::SecurityViolation {
+            return Err(ArchiveError::SecurityViolation {
                 reason: "empty path not allowed".into(),
             });
         }
@@ -137,14 +137,14 @@ impl SafePath {
 
         // 1. Check for null bytes
         if has_null_bytes(path) {
-            return Err(ExtractionError::SecurityViolation {
+            return Err(ArchiveError::SecurityViolation {
                 reason: format!("path contains null bytes: {}", path.display()),
             });
         }
 
         // 2. Check for absolute paths
         if path.is_absolute() && !config.allowed.absolute_paths {
-            return Err(ExtractionError::PathTraversal {
+            return Err(ArchiveError::PathTraversal {
                 path: path.to_path_buf(),
             });
         }
@@ -158,7 +158,7 @@ impl SafePath {
         for component in path.components() {
             match component {
                 Component::ParentDir => {
-                    return Err(ExtractionError::PathTraversal {
+                    return Err(ArchiveError::PathTraversal {
                         path: path.to_path_buf(),
                     });
                 }
@@ -171,7 +171,7 @@ impl SafePath {
                             .map_or_else(|| comp.to_string_lossy(), Cow::Borrowed);
 
                         if !config.is_path_component_allowed(&comp_str) {
-                            return Err(ExtractionError::SecurityViolation {
+                            return Err(ArchiveError::SecurityViolation {
                                 reason: format!("banned path component: {comp_str}"),
                             });
                         }
@@ -184,7 +184,7 @@ impl SafePath {
                 }
                 Component::RootDir | Component::Prefix(_) => {
                     if !config.allowed.absolute_paths {
-                        return Err(ExtractionError::PathTraversal {
+                        return Err(ArchiveError::PathTraversal {
                             path: path.to_path_buf(),
                         });
                     }
@@ -195,7 +195,7 @@ impl SafePath {
 
         // Check path depth
         if depth > config.max_path_depth {
-            return Err(ExtractionError::SecurityViolation {
+            return Err(ArchiveError::SecurityViolation {
                 reason: format!(
                     "path depth {} exceeds maximum {}",
                     depth, config.max_path_depth
@@ -219,14 +219,14 @@ impl SafePath {
             match parent.canonicalize() {
                 Ok(canonical_parent) => {
                     if !paths_start_with(&canonical_parent, dest.as_path()) {
-                        return Err(ExtractionError::PathTraversal {
+                        return Err(ArchiveError::PathTraversal {
                             path: path.to_path_buf(),
                         });
                     }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => {
-                    return Err(ExtractionError::Io(std::io::Error::new(
+                    return Err(ArchiveError::Io(std::io::Error::new(
                         e.kind(),
                         format!("failed to canonicalize parent: {e}"),
                     )));
@@ -239,20 +239,20 @@ impl SafePath {
             match resolved.canonicalize() {
                 Ok(canonical) => {
                     if !paths_start_with(&canonical, dest.as_path()) {
-                        return Err(ExtractionError::PathTraversal {
+                        return Err(ArchiveError::PathTraversal {
                             path: path.to_path_buf(),
                         });
                     }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                     if !paths_start_with(&resolved, dest.as_path()) {
-                        return Err(ExtractionError::PathTraversal {
+                        return Err(ArchiveError::PathTraversal {
                             path: path.to_path_buf(),
                         });
                     }
                 }
                 Err(e) => {
-                    return Err(ExtractionError::Io(std::io::Error::new(
+                    return Err(ArchiveError::Io(std::io::Error::new(
                         e.kind(),
                         format!("failed to canonicalize path: {e}"),
                     )));
@@ -261,7 +261,7 @@ impl SafePath {
         } else {
             // Symlinks impossible -- prefix check is still mandatory
             if !paths_start_with(&resolved, dest.as_path()) {
-                return Err(ExtractionError::PathTraversal {
+                return Err(ArchiveError::PathTraversal {
                     path: path.to_path_buf(),
                 });
             }
@@ -361,7 +361,7 @@ mod tests {
 
         let result = SafePath::validate(&PathBuf::from(""), &dest, &config);
         assert!(
-            matches!(result, Err(ExtractionError::SecurityViolation { .. })),
+            matches!(result, Err(ArchiveError::SecurityViolation { .. })),
             "empty path should be explicitly rejected (MED-004)"
         );
     }
@@ -393,7 +393,7 @@ mod tests {
         for path in paths {
             let result = SafePath::validate(&path, &dest, &config);
             assert!(
-                matches!(result, Err(ExtractionError::PathTraversal { .. })),
+                matches!(result, Err(ArchiveError::PathTraversal { .. })),
                 "path should be rejected: {}",
                 path.display()
             );
@@ -408,7 +408,7 @@ mod tests {
 
         let path = PathBuf::from("/etc/passwd");
         let result = SafePath::validate(&path, &dest, &config);
-        assert!(matches!(result, Err(ExtractionError::PathTraversal { .. })));
+        assert!(matches!(result, Err(ArchiveError::PathTraversal { .. })));
     }
 
     #[test]
@@ -424,7 +424,7 @@ mod tests {
 
         for path in paths {
             let result = SafePath::validate(&path, &dest, &config);
-            assert!(matches!(result, Err(ExtractionError::PathTraversal { .. })));
+            assert!(matches!(result, Err(ArchiveError::PathTraversal { .. })));
         }
     }
 
@@ -453,7 +453,7 @@ mod tests {
         let result = SafePath::validate(&path, &dest, &config);
         assert!(matches!(
             result,
-            Err(ExtractionError::SecurityViolation { .. })
+            Err(ArchiveError::SecurityViolation { .. })
         ));
 
         // 3 components - should be allowed
@@ -476,7 +476,7 @@ mod tests {
         for path in paths {
             let result = SafePath::validate(&path, &dest, &config);
             assert!(
-                matches!(result, Err(ExtractionError::SecurityViolation { .. })),
+                matches!(result, Err(ArchiveError::SecurityViolation { .. })),
                 "path should be rejected: {}",
                 path.display()
             );
@@ -513,7 +513,7 @@ mod tests {
             let result = SafePath::validate(&path, &dest, &config);
             assert!(matches!(
                 result,
-                Err(ExtractionError::SecurityViolation { .. })
+                Err(ArchiveError::SecurityViolation { .. })
             ));
         }
 
@@ -530,7 +530,7 @@ mod tests {
             let result = SafePath::validate(&path, &dest, &config);
             assert!(matches!(
                 result,
-                Err(ExtractionError::SecurityViolation { .. })
+                Err(ArchiveError::SecurityViolation { .. })
             ));
         }
     }
@@ -609,7 +609,7 @@ mod tests {
 
         // Empty paths are now explicitly rejected
         assert!(
-            matches!(result, Err(ExtractionError::SecurityViolation { .. })),
+            matches!(result, Err(ArchiveError::SecurityViolation { .. })),
             "empty path should be explicitly rejected"
         );
     }
@@ -631,7 +631,7 @@ mod tests {
         let result = SafePath::validate(&path, &dest, &config);
         assert!(matches!(
             result,
-            Err(ExtractionError::SecurityViolation { .. })
+            Err(ArchiveError::SecurityViolation { .. })
         ));
     }
 
@@ -702,7 +702,7 @@ mod tests {
 
         let result = SafePath::validate(&malicious_path, &dest, &config);
         assert!(
-            matches!(result, Err(ExtractionError::PathTraversal { .. })),
+            matches!(result, Err(ArchiveError::PathTraversal { .. })),
             "symlink in parent chain should be detected and rejected"
         );
     }
@@ -729,7 +729,7 @@ mod tests {
 
         let result = SafePath::validate(&malicious_path, &dest, &config);
         assert!(
-            matches!(result, Err(ExtractionError::PathTraversal { .. })),
+            matches!(result, Err(ArchiveError::PathTraversal { .. })),
             "symlink in middle of path should be detected"
         );
     }
@@ -841,7 +841,7 @@ mod tests {
         let path = PathBuf::from("evil_dir/payload.txt");
         let result = SafePath::validate_with_context(&path, &dest, &config, &ctx);
         assert!(
-            matches!(result, Err(ExtractionError::PathTraversal { .. })),
+            matches!(result, Err(ArchiveError::PathTraversal { .. })),
             "symlink attack must be caught even with context: {result:?}"
         );
     }
@@ -874,7 +874,7 @@ mod tests {
         let path = PathBuf::from("subdir/escape/payload.txt");
         let result = SafePath::validate_with_context(&path, &dest, &config, &ctx);
         assert!(
-            matches!(result, Err(ExtractionError::PathTraversal { .. })),
+            matches!(result, Err(ArchiveError::PathTraversal { .. })),
             "parent canonicalization must catch symlink even in fast path: {result:?}"
         );
 
@@ -884,10 +884,7 @@ mod tests {
         let result_with_symlink =
             SafePath::validate_with_context(&path, &dest, &config, &ctx_with_symlink);
         assert!(
-            matches!(
-                result_with_symlink,
-                Err(ExtractionError::PathTraversal { .. })
-            ),
+            matches!(result_with_symlink, Err(ArchiveError::PathTraversal { .. })),
             "symlink attack must also be caught with symlink_seen=true: {result_with_symlink:?}"
         );
     }
@@ -1018,7 +1015,7 @@ mod tests {
         let evil_path = PathBuf::from("evil/payload.txt");
         let result = SafePath::validate_with_context(&evil_path, &dest, &config, &ctx);
         assert!(
-            matches!(result, Err(ExtractionError::PathTraversal { .. })),
+            matches!(result, Err(ArchiveError::PathTraversal { .. })),
             "symlink escape must be caught with symlinks_allowed + dir_cache: {result:?}"
         );
     }
@@ -1036,7 +1033,7 @@ mod tests {
         let path = PathBuf::from("../escape.txt");
         let result = SafePath::validate_with_context(&path, &dest, &config, &ctx);
         assert!(
-            matches!(result, Err(ExtractionError::PathTraversal { .. })),
+            matches!(result, Err(ArchiveError::PathTraversal { .. })),
             "parent traversal must be caught in fast path"
         );
     }
@@ -1124,7 +1121,7 @@ mod tests {
         // ".." must still be rejected — it is a traversal attempt, not an archive root
         let result = SafePath::validate(Path::new(".."), &dest, &config);
         assert!(
-            matches!(result, Err(ExtractionError::PathTraversal { .. })),
+            matches!(result, Err(ArchiveError::PathTraversal { .. })),
             "'..' must be rejected as path traversal"
         );
     }
@@ -1138,7 +1135,7 @@ mod tests {
         for p in paths {
             let result = SafePath::validate(Path::new(p), &dest, &config);
             assert!(
-                matches!(result, Err(ExtractionError::PathTraversal { .. })),
+                matches!(result, Err(ArchiveError::PathTraversal { .. })),
                 "path '{p}' must be rejected as path traversal"
             );
         }

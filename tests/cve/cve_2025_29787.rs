@@ -19,7 +19,7 @@
 //! With symlinks disabled (default) the archive is rejected at entry 1 with
 //! `SecurityViolation` — that branch is also covered.
 
-use exarch_core::ExtractionError;
+use exarch_core::ArchiveError;
 use exarch_core::SecurityConfig;
 use exarch_core::formats::ZipArchive;
 use exarch_core::formats::traits::ArchiveFormat;
@@ -173,7 +173,7 @@ fn zip_symlink_zip_slip_blocked_with_symlinks_enabled() {
 
     let err = result.unwrap_err();
     assert!(
-        matches!(err, ExtractionError::SymlinkEscape { .. }),
+        matches!(err, ArchiveError::SymlinkEscape { .. }),
         "expected SymlinkEscape, got: {err:?}"
     );
 

@@ -1,6 +1,6 @@
 //! Zip bomb detection.
 
-use crate::ExtractionError;
+use crate::ArchiveError;
 use crate::Result;
 use crate::SecurityConfig;
 
@@ -18,7 +18,7 @@ pub fn validate_compression_ratio(
     // Reject invalid entries where compressed_size is 0 but uncompressed_size > 0
     if compressed_size == 0 {
         if uncompressed_size > 0 {
-            return Err(ExtractionError::InvalidArchive(
+            return Err(ArchiveError::InvalidArchive(
                 "compressed_size is 0 but uncompressed_size > 0 (invalid archive metadata)".into(),
             ));
         }
@@ -30,7 +30,7 @@ pub fn validate_compression_ratio(
     let ratio = uncompressed_size as f64 / compressed_size as f64;
 
     if ratio > config.max_compression_ratio {
-        return Err(ExtractionError::ZipBomb {
+        return Err(ArchiveError::ZipBomb {
             compressed: compressed_size,
             uncompressed: uncompressed_size,
             ratio,
@@ -55,7 +55,7 @@ mod tests {
     fn test_validate_compression_ratio_bomb() {
         let config = SecurityConfig::default();
         let result = validate_compression_ratio(1000, 1_000_000, &config);
-        assert!(matches!(result, Err(ExtractionError::ZipBomb { .. })));
+        assert!(matches!(result, Err(ArchiveError::ZipBomb { .. })));
     }
 
     #[test]
@@ -65,7 +65,7 @@ mod tests {
         // HIGH-001: Zero compressed with non-zero uncompressed is invalid
         let result = validate_compression_ratio(0, 1000, &config);
         assert!(
-            matches!(result, Err(ExtractionError::InvalidArchive(_))),
+            matches!(result, Err(ArchiveError::InvalidArchive(_))),
             "zero compressed with non-zero uncompressed should be rejected"
         );
     }
@@ -88,7 +88,7 @@ mod tests {
         // This prevents zip bomb bypass for stored compression
         let result = validate_compression_ratio(0, 1_000_000, &config);
         assert!(
-            matches!(result, Err(ExtractionError::InvalidArchive(_))),
+            matches!(result, Err(ArchiveError::InvalidArchive(_))),
             "compressed_size == 0 but uncompressed_size > 0 should be rejected (HIGH-001 fix)"
         );
     }
@@ -101,7 +101,7 @@ mod tests {
         // This should trigger zip bomb detection
         let result = validate_compression_ratio(1, 1_000_000, &config);
         assert!(
-            matches!(result, Err(ExtractionError::ZipBomb { .. })),
+            matches!(result, Err(ArchiveError::ZipBomb { .. })),
             "extremely high compression ratio should be detected as zip bomb"
         );
     }

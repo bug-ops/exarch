@@ -1,6 +1,6 @@
 //! Error conversion for Node.js bindings.
 
-use exarch_core::ExtractionError as CoreError;
+use exarch_core::ArchiveError as CoreError;
 use exarch_core::QuotaResource as CoreQuotaResource;
 use napi::bindgen_prelude::*;
 use std::path::Path;

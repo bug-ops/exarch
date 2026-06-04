@@ -2,7 +2,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use exarch_core::ExtractionError;
+use exarch_core::ArchiveError;
 use exarch_core::ExtractionOptions;
 use exarch_core::ProgressCallback;
 use exarch_core::SecurityConfig;
@@ -67,7 +67,7 @@ fn test_7z_security_config_integration() {
         &ExtractionOptions::default(),
         &mut exarch_core::NoopProgress,
     );
-    assert!(matches!(result, Err(ExtractionError::QuotaExceeded { .. })));
+    assert!(matches!(result, Err(ArchiveError::QuotaExceeded { .. })));
 }
 
 #[test]
@@ -120,7 +120,7 @@ fn test_7z_solid_archive_rejected_at_new() {
     assert!(result.is_err());
     assert!(matches!(
         result.unwrap_err(),
-        ExtractionError::SecurityViolation { .. }
+        ArchiveError::SecurityViolation { .. }
     ));
 }
 
@@ -132,7 +132,7 @@ fn test_7z_encrypted_archive_rejected_at_new() {
     let result = SevenZArchive::new(cursor);
     assert!(result.is_err());
     let err = result.unwrap_err();
-    assert!(matches!(err, ExtractionError::SecurityViolation { .. }));
+    assert!(matches!(err, ArchiveError::SecurityViolation { .. }));
 
     // Verify error message is helpful
     let msg = err.to_string();
@@ -162,7 +162,7 @@ fn test_7z_quota_file_count() {
         &ExtractionOptions::default(),
         &mut exarch_core::NoopProgress,
     );
-    assert!(matches!(result, Err(ExtractionError::QuotaExceeded { .. })));
+    assert!(matches!(result, Err(ArchiveError::QuotaExceeded { .. })));
 }
 
 #[test]
@@ -180,7 +180,7 @@ fn test_7z_quota_total_size() {
         &ExtractionOptions::default(),
         &mut exarch_core::NoopProgress,
     );
-    assert!(matches!(result, Err(ExtractionError::QuotaExceeded { .. })));
+    assert!(matches!(result, Err(ArchiveError::QuotaExceeded { .. })));
 }
 
 // ============================================================================
@@ -234,7 +234,7 @@ fn test_7z_solid_archive_with_file_count_quota() {
         &ExtractionOptions::default(),
         &mut exarch_core::NoopProgress,
     );
-    assert!(matches!(result, Err(ExtractionError::QuotaExceeded { .. })));
+    assert!(matches!(result, Err(ArchiveError::QuotaExceeded { .. })));
 }
 
 // ============================================================================
@@ -506,7 +506,7 @@ fn test_7z_partial_extraction_accurate_report() {
         &mut exarch_core::NoopProgress,
     );
 
-    let Err(ExtractionError::PartialExtraction { report, .. }) = result else {
+    let Err(ArchiveError::PartialExtraction { report, .. }) = result else {
         panic!("expected PartialExtraction, got: {result:?}");
     };
     assert!(
@@ -555,7 +555,7 @@ fn test_7z_no_partial_extraction_when_zero_items() {
 
     assert!(result.is_err(), "expected an error, got Ok");
     assert!(
-        !matches!(result, Err(ExtractionError::PartialExtraction { .. })),
+        !matches!(result, Err(ArchiveError::PartialExtraction { .. })),
         "must NOT be PartialExtraction when zero items were written; got: {result:?}"
     );
 }

@@ -25,7 +25,7 @@ related:
 > The Python bindings subsystem is fully implemented. PyO3 wrappers for all
 > core operations (`extract`, `create`, `list`, `verify`) are in place. The
 > GIL is released during I/O, `SecurityConfig` and `CreationConfig` are
-> exposed as Python classes, `ExarchError` maps all `ExtractionError` variants,
+> exposed as Python classes, `ExarchError` maps all `ArchiveError` variants,
 > and `exarch.pyi` provides complete type stubs. All functional requirements
 > from the spec are satisfied.
 

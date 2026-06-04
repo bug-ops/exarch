@@ -103,7 +103,7 @@ THEN the GIL is held (callback requires GIL to call Python)
 ### US-004: Pythonic Error Types
 
 AS A Python developer
-I WANT Rust ExtractionError variants to map to specific Python exception classes
+I WANT Rust ArchiveError variants to map to specific Python exception classes
 SO THAT I can catch specific error types in a try/except block
 
 **Acceptance criteria:**
@@ -135,7 +135,7 @@ THEN extraction respects those settings
 | FR-072 | WHEN paths contain null bytes or exceed 4096 bytes, THE SYSTEM SHALL raise `ValueError` at the Python boundary before calling into Rust | must |
 | FR-073 | WHEN no Python progress callback is provided, THE SYSTEM SHALL release the GIL during extraction/creation | must |
 | FR-074 | WHEN a Python progress callback is provided, THE SYSTEM SHALL NOT release the GIL (callback requires GIL to invoke Python) | must |
-| FR-075 | Rust `ExtractionError` variants SHALL map to specific Python exception types; `SourceNotFound`/`OutputExists` → `PyIOError`; `InvalidCompressionLevel`/`InvalidConfiguration` → `PyValueError`; `PartialExtraction` → the specific inner exception type (e.g. `SymlinkEscapeError`, `QuotaExceededError`) with `files_extracted` and `bytes_written` attributes attached to that exception | must |
+| FR-075 | Rust `ArchiveError` variants SHALL map to specific Python exception types; `SourceNotFound`/`OutputExists` → `PyIOError`; `InvalidCompressionLevel`/`InvalidConfiguration` → `PyValueError`; `PartialExtraction` → the specific inner exception type (e.g. `SymlinkEscapeError`, `QuotaExceededError`) with `files_extracted` and `bytes_written` attributes attached to that exception | must |
 | FR-076 | ALL Python exception types SHALL be subclasses of `ExarchError(Exception)` | must |
 | FR-077 | `PySecurityConfig` and `PyCreationConfig` SHALL expose the same fluent builder API as the Rust counterparts | must |
 | FR-078 | `PyExtractionReport`, `PyCreationReport`, `PyArchiveManifest`, and `PyVerificationReport` SHALL expose all fields as Python attributes | must |
@@ -190,10 +190,10 @@ Use `hasattr(e, "files_extracted")` to detect whether a partial extraction occur
 > - `InvalidCompressionLevel` and `InvalidConfiguration` now raise
 >   `PyValueError` (was `InvalidArchiveError`).
 > - In v0.4.0, `PartialExtraction` incorrectly collapsed all partial-extraction
->   failures into a generic `PartialExtractionError` (#216). Fixed in v0.4.1
+>   failures into a generic `PartialArchiveError` (#216). Fixed in v0.4.1
 >   (#251): the specific inner exception type is raised (e.g. `SymlinkEscapeError`)
 >   with `files_extracted` and `bytes_written` attached directly to it (#210).
->   `PartialExtractionError` has been removed from the public API.
+>   `PartialArchiveError` has been removed from the public API.
 > These corrections allow Python callers to distinguish I/O failures, validation
 > errors, and archive corruption with specific `except` clauses.
 
@@ -217,10 +217,10 @@ def verify_archive(archive_path, config=None) -> VerificationReport
 | Path contains null byte | `ValueError` at Python boundary |
 | Path exceeds 4096 bytes | `ValueError` at Python boundary |
 | Path is `pathlib.Path` | Converted to `str` via `.as_os_str()` before Rust call |
-| Rust returns `ExtractionError::PathTraversal` | `PathTraversalError` raised in Python |
-| Rust returns `ExtractionError::SourceNotFound` or `OutputExists` | `PyIOError` raised (not `InvalidArchiveError`) |
-| Rust returns `ExtractionError::InvalidCompressionLevel` or `InvalidConfiguration` | `PyValueError` raised (not `InvalidArchiveError`) |
-| Rust returns `ExtractionError::PartialExtraction` | The specific inner exception (e.g. `SymlinkEscapeError`) is raised; `files_extracted` and `bytes_written` attributes are attached; detect partiality via `hasattr(e, "files_extracted")` |
+| Rust returns `ArchiveError::PathTraversal` | `PathTraversalError` raised in Python |
+| Rust returns `ArchiveError::SourceNotFound` or `OutputExists` | `PyIOError` raised (not `InvalidArchiveError`) |
+| Rust returns `ArchiveError::InvalidCompressionLevel` or `InvalidConfiguration` | `PyValueError` raised (not `InvalidArchiveError`) |
+| Rust returns `ArchiveError::PartialExtraction` | The specific inner exception (e.g. `SymlinkEscapeError`) is raised; `files_extracted` and `bytes_written` attributes are attached; detect partiality via `hasattr(e, "files_extracted")` |
 | Progress callback raises Python exception | Exception propagates through `PyProgressAdapter`; extraction aborted |
 | GIL state with progress callback | GIL held throughout; no concurrent Python threads during extraction |
 
@@ -230,7 +230,7 @@ def verify_archive(archive_path, config=None) -> VerificationReport
 |----|--------|--------|
 | SC-001 | All Python functions return correct report objects | `pytest` test coverage for each function |
 | SC-002 | GIL released when no callback provided | Verified by thread concurrency test |
-| SC-003 | All `ExtractionError` variants map to Python exceptions | Test for each variant |
+| SC-003 | All `ArchiveError` variants map to Python exceptions | Test for each variant |
 | SC-004 | Path boundary validation catches null bytes and long paths | Unit tests at Python boundary |
 | SC-005 | `maturin develop` + `pytest` passes on CI | CI job for Python crate |
 
@@ -239,7 +239,7 @@ def verify_archive(archive_path, config=None) -> VerificationReport
 ### Always (without asking)
 - Validate paths at the Python boundary before calling into Rust
 - Release GIL during Rust calls when no Python progress callback is present
-- Map every `ExtractionError` variant to a Python exception subclass of `ExarchError`
+- Map every `ArchiveError` variant to a Python exception subclass of `ExarchError`
 - Keep all security logic in `exarch-core`; Python crate contains only type mapping
 
 ### Ask First
@@ -250,7 +250,7 @@ def verify_archive(archive_path, config=None) -> VerificationReport
 ### Never
 - Implement security validation in the Python crate
 - Hold the GIL during long I/O operations without a progress callback
-- Expose `ExtractionError` as a raw Rust type to Python callers
+- Expose `ArchiveError` as a raw Rust type to Python callers
 
 ## 9. Open Questions
 

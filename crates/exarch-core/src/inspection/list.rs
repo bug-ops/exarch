@@ -11,7 +11,7 @@ use std::time::SystemTime;
 
 use flate2::read::GzDecoder;
 
-use crate::ExtractionError;
+use crate::ArchiveError;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::error::QuotaResource;
@@ -148,12 +148,11 @@ fn list_tar_entries<R: std::io::Read>(
 
     let entries = archive
         .entries()
-        .map_err(|e| ExtractionError::InvalidArchive(format!("failed to read TAR entries: {e}")))?;
+        .map_err(|e| ArchiveError::InvalidArchive(format!("failed to read TAR entries: {e}")))?;
 
     for entry_result in entries {
-        let entry = entry_result.map_err(|e| {
-            ExtractionError::InvalidArchive(format!("failed to read TAR entry: {e}"))
-        })?;
+        let entry = entry_result
+            .map_err(|e| ArchiveError::InvalidArchive(format!("failed to read TAR entry: {e}")))?;
 
         // Skip TAR metadata entries (PAX headers, GNU long names/links)
         if is_tar_metadata_entry(&entry) {
@@ -162,7 +161,7 @@ fn list_tar_entries<R: std::io::Read>(
 
         // Check file count quota
         if manifest.total_entries >= config.max_file_count {
-            return Err(ExtractionError::QuotaExceeded {
+            return Err(ArchiveError::QuotaExceeded {
                 resource: QuotaResource::FileCount {
                     current: manifest.total_entries + 1,
                     max: config.max_file_count,
@@ -172,11 +171,11 @@ fn list_tar_entries<R: std::io::Read>(
 
         let path = entry
             .path()
-            .map_err(|e| ExtractionError::InvalidArchive(format!("invalid path: {e}")))?
+            .map_err(|e| ArchiveError::InvalidArchive(format!("invalid path: {e}")))?
             .into_owned();
 
         if contains_traversal(&path) {
-            return Err(ExtractionError::PathTraversal { path });
+            return Err(ArchiveError::PathTraversal { path });
         }
 
         let entry_type = convert_tar_entry_type(&entry)?;
@@ -191,9 +190,7 @@ fn list_tar_entries<R: std::io::Read>(
             tar::EntryType::Symlink | tar::EntryType::Link => {
                 let target = entry
                     .link_name()
-                    .map_err(|e| {
-                        ExtractionError::InvalidArchive(format!("invalid link target: {e}"))
-                    })?
+                    .map_err(|e| ArchiveError::InvalidArchive(format!("invalid link target: {e}")))?
                     .map(std::borrow::Cow::into_owned);
 
                 if entry.header().entry_type() == tar::EntryType::Symlink {
@@ -218,7 +215,7 @@ fn list_tar_entries<R: std::io::Read>(
 
         // Check total size quota
         if manifest.total_size + archive_entry.size > config.max_total_size {
-            return Err(ExtractionError::QuotaExceeded {
+            return Err(ArchiveError::QuotaExceeded {
                 resource: QuotaResource::TotalSize {
                     current: manifest.total_size + archive_entry.size,
                     max: config.max_total_size,
@@ -239,7 +236,7 @@ fn list_zip(
 ) -> Result<ArchiveManifest> {
     let file = File::open(archive_path)?;
     let mut archive = zip::ZipArchive::new(file)
-        .map_err(|e| ExtractionError::InvalidArchive(format!("failed to open ZIP archive: {e}")))?;
+        .map_err(|e| ArchiveError::InvalidArchive(format!("failed to open ZIP archive: {e}")))?;
     list_zip_reader(&mut archive, config)
 }
 
@@ -267,7 +264,7 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
 
     for i in 0..archive.len() {
         if manifest.total_entries >= config.max_file_count {
-            return Err(ExtractionError::QuotaExceeded {
+            return Err(ArchiveError::QuotaExceeded {
                 resource: QuotaResource::FileCount {
                     current: manifest.total_entries + 1,
                     max: config.max_file_count,
@@ -277,26 +274,26 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
 
         let entry = archive.by_index(i).map_err(|e| {
             if e.to_string().contains("Password required to decrypt file") {
-                return ExtractionError::SecurityViolation {
+                return ArchiveError::SecurityViolation {
                     reason: "archive is password-protected".into(),
                 };
             }
-            ExtractionError::InvalidArchive(format!("failed to read ZIP entry: {e}"))
+            ArchiveError::InvalidArchive(format!("failed to read ZIP entry: {e}"))
         })?;
 
         if entry.encrypted() {
-            return Err(ExtractionError::SecurityViolation {
+            return Err(ArchiveError::SecurityViolation {
                 reason: "archive is password-protected".into(),
             });
         }
 
         let raw_name = entry
             .name()
-            .map_err(|e| ExtractionError::InvalidArchive(format!("invalid entry name: {e}")))?
+            .map_err(|e| ArchiveError::InvalidArchive(format!("invalid entry name: {e}")))?
             .into_owned();
         let path = entry
             .enclosed_name()
-            .ok_or_else(|| ExtractionError::PathTraversal {
+            .ok_or_else(|| ArchiveError::PathTraversal {
                 path: PathBuf::from(&raw_name),
             })?;
         let path = path.clone();
@@ -331,7 +328,7 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
         };
 
         if manifest.total_size + archive_entry.size > config.max_total_size {
-            return Err(ExtractionError::QuotaExceeded {
+            return Err(ArchiveError::QuotaExceeded {
                 resource: QuotaResource::TotalSize {
                     current: manifest.total_size + archive_entry.size,
                     max: config.max_total_size,
@@ -362,7 +359,7 @@ pub(crate) fn list_sevenz_reader<R: Read + Seek>(
         Err(e) => {
             let err_str = e.to_string().to_lowercase();
             if err_str.contains("encrypt") || err_str.contains("password") {
-                return Err(ExtractionError::SecurityViolation {
+                return Err(ArchiveError::SecurityViolation {
                     reason: "encrypted 7z archive detected. Password-protected archives are not \
                              supported. Decrypt the archive externally and try again."
                         .into(),
@@ -371,7 +368,7 @@ pub(crate) fn list_sevenz_reader<R: Read + Seek>(
             if is_empty_sevenz_archive_reader(&e, &mut source) {
                 return Ok(ArchiveManifest::new(ArchiveType::SevenZ));
             }
-            return Err(ExtractionError::InvalidArchive(format!(
+            return Err(ArchiveError::InvalidArchive(format!(
                 "failed to open 7z archive: {e}"
             )));
         }
@@ -421,7 +418,7 @@ fn list_sevenz_archive(
         }
 
         if manifest.total_entries >= config.max_file_count {
-            return Err(ExtractionError::QuotaExceeded {
+            return Err(ArchiveError::QuotaExceeded {
                 resource: QuotaResource::FileCount {
                     current: manifest.total_entries + 1,
                     max: config.max_file_count,
@@ -432,7 +429,7 @@ fn list_sevenz_archive(
         let path = PathBuf::from(&entry.name);
 
         if contains_traversal(&path) {
-            return Err(ExtractionError::PathTraversal { path });
+            return Err(ArchiveError::PathTraversal { path });
         }
 
         let entry_type = sevenz_manifest_entry_type(entry);
@@ -461,7 +458,7 @@ fn list_sevenz_archive(
         };
 
         if manifest.total_size + archive_entry.size > config.max_total_size {
-            return Err(ExtractionError::QuotaExceeded {
+            return Err(ArchiveError::QuotaExceeded {
                 resource: QuotaResource::TotalSize {
                     current: manifest.total_size + archive_entry.size,
                     max: config.max_total_size,
@@ -535,7 +532,7 @@ fn convert_tar_entry_type<R: std::io::Read>(
         tar::EntryType::Symlink => Ok(ManifestEntryType::Symlink),
         tar::EntryType::Link => Ok(ManifestEntryType::Hardlink),
         tar::EntryType::Char | tar::EntryType::Block | tar::EntryType::Fifo => {
-            Err(ExtractionError::InvalidArchive(
+            Err(ArchiveError::InvalidArchive(
                 "special files (char/block devices, FIFOs) are not supported".to_string(),
             ))
         }
@@ -883,7 +880,7 @@ mod tests {
 
         let result = list_archive(temp_file.path(), &config);
         match result {
-            Err(ExtractionError::QuotaExceeded {
+            Err(ArchiveError::QuotaExceeded {
                 resource: QuotaResource::FileCount { current, max },
             }) => {
                 assert_eq!(max, 1);
@@ -911,7 +908,7 @@ mod tests {
 
         let result = list_archive(temp_file.path(), &config);
         match result {
-            Err(ExtractionError::QuotaExceeded {
+            Err(ArchiveError::QuotaExceeded {
                 resource: QuotaResource::FileCount { current, max },
             }) => {
                 assert_eq!(max, 1);
@@ -989,7 +986,7 @@ mod tests {
         let config = SecurityConfig::default();
         let result = list_archive(temp_file.path(), &config);
         match result {
-            Err(ExtractionError::SecurityViolation { reason }) => {
+            Err(ArchiveError::SecurityViolation { reason }) => {
                 assert!(
                     reason.contains("password-protected"),
                     "expected 'password-protected' in reason: {reason}"
@@ -1101,7 +1098,7 @@ mod tests {
         let config = SecurityConfig::default();
         let result = list_archive(temp_file.path(), &config);
         assert!(
-            matches!(result, Err(ExtractionError::InvalidArchive(_))),
+            matches!(result, Err(ArchiveError::InvalidArchive(_))),
             "expected InvalidArchive for truncated 7z, got: {result:?}"
         );
     }
@@ -1125,7 +1122,7 @@ mod tests {
         let config = SecurityConfig::default();
         let result = list_archive(temp_file.path(), &config);
         assert!(
-            matches!(result, Err(ExtractionError::InvalidArchive(_))),
+            matches!(result, Err(ArchiveError::InvalidArchive(_))),
             "expected InvalidArchive for char device entry, got: {result:?}"
         );
     }
@@ -1149,7 +1146,7 @@ mod tests {
         assert!(
             matches!(
                 result,
-                Err(ExtractionError::QuotaExceeded {
+                Err(ArchiveError::QuotaExceeded {
                     resource: crate::error::QuotaResource::TotalSize { .. }
                 })
             ),
@@ -1181,7 +1178,7 @@ mod tests {
         assert!(
             matches!(
                 result,
-                Err(ExtractionError::QuotaExceeded {
+                Err(ArchiveError::QuotaExceeded {
                     resource: crate::error::QuotaResource::TotalSize { .. }
                 })
             ),
@@ -1205,7 +1202,7 @@ mod tests {
         let config = SecurityConfig::default();
         let result = list_archive(temp_file.path(), &config);
         assert!(
-            matches!(result, Err(ExtractionError::PathTraversal { .. })),
+            matches!(result, Err(ArchiveError::PathTraversal { .. })),
             "expected PathTraversal error, got: {result:?}"
         );
     }
@@ -1223,7 +1220,7 @@ mod tests {
         assert!(
             matches!(
                 &result,
-                Err(ExtractionError::PathTraversal { path }) if path == &PathBuf::from("../escape.txt")
+                Err(ArchiveError::PathTraversal { path }) if path == &PathBuf::from("../escape.txt")
             ),
             "expected PathTraversal {{ path: ../escape.txt }}, got: {result:?}"
         );
@@ -1240,7 +1237,7 @@ mod tests {
         let config = SecurityConfig::default();
         let result = list_archive(temp_file.path(), &config);
         assert!(
-            matches!(result, Err(ExtractionError::PathTraversal { .. })),
+            matches!(result, Err(ArchiveError::PathTraversal { .. })),
             "expected PathTraversal error for nested ../ in TAR, got: {result:?}"
         );
     }
@@ -1256,7 +1253,7 @@ mod tests {
         let config = SecurityConfig::default();
         let result = list_archive(temp_file.path(), &config);
         assert!(
-            matches!(result, Err(ExtractionError::PathTraversal { .. })),
+            matches!(result, Err(ArchiveError::PathTraversal { .. })),
             "expected PathTraversal error for absolute path in TAR, got: {result:?}"
         );
     }
@@ -1275,7 +1272,7 @@ mod tests {
         let config = SecurityConfig::default();
         let result = list_archive(temp_file.path(), &config);
         assert!(
-            matches!(result, Err(ExtractionError::PathTraversal { .. })),
+            matches!(result, Err(ArchiveError::PathTraversal { .. })),
             "expected PathTraversal error for tar.gz with ../ entry, got: {result:?}"
         );
     }
@@ -1314,7 +1311,7 @@ mod tests {
         let config = SecurityConfig::default();
         let result = list_archive(temp_file.path(), &config);
         assert!(
-            matches!(result, Err(ExtractionError::PathTraversal { .. })),
+            matches!(result, Err(ArchiveError::PathTraversal { .. })),
             "expected PathTraversal error for mixed-entry TAR, got: {result:?}"
         );
     }
@@ -1345,7 +1342,7 @@ mod tests {
         let config = SecurityConfig::default();
         let result = list_archive(temp_file.path(), &config);
         assert!(
-            matches!(result, Err(ExtractionError::SecurityViolation { .. })),
+            matches!(result, Err(ArchiveError::SecurityViolation { .. })),
             "expected SecurityViolation for encrypted ZIP in list, got: {result:?}"
         );
     }
@@ -1543,7 +1540,7 @@ mod tests {
         let config = SecurityConfig::default();
         let result = list_archive(temp_file.path(), &config);
         assert!(
-            matches!(result, Err(ExtractionError::PathTraversal { .. })),
+            matches!(result, Err(ArchiveError::PathTraversal { .. })),
             "expected PathTraversal error for ../ entry, got: {result:?}"
         );
     }
@@ -1565,7 +1562,7 @@ mod tests {
         assert!(
             matches!(
                 result,
-                Err(ExtractionError::QuotaExceeded {
+                Err(ArchiveError::QuotaExceeded {
                     resource: crate::error::QuotaResource::FileCount { .. }
                 })
             ),
@@ -1590,7 +1587,7 @@ mod tests {
         assert!(
             matches!(
                 result,
-                Err(ExtractionError::QuotaExceeded {
+                Err(ArchiveError::QuotaExceeded {
                     resource: crate::error::QuotaResource::TotalSize { .. }
                 })
             ),
@@ -1662,7 +1659,7 @@ mod tests {
         assert!(
             matches!(
                 list_archive(temp_file.path(), &small),
-                Err(ExtractionError::QuotaExceeded {
+                Err(ArchiveError::QuotaExceeded {
                     resource: QuotaResource::TotalSize { .. }
                 })
             ),
@@ -1700,7 +1697,7 @@ mod tests {
         assert!(
             matches!(
                 list_archive(temp_file.path(), &small),
-                Err(ExtractionError::QuotaExceeded {
+                Err(ArchiveError::QuotaExceeded {
                     resource: QuotaResource::TotalSize { .. }
                 })
             ),
@@ -1732,7 +1729,7 @@ mod tests {
         assert!(
             matches!(
                 list_archive(temp_file.path(), &small),
-                Err(ExtractionError::QuotaExceeded {
+                Err(ArchiveError::QuotaExceeded {
                     resource: QuotaResource::TotalSize { .. }
                 })
             ),
@@ -1806,7 +1803,7 @@ mod tests {
         assert!(
             matches!(
                 result,
-                Err(crate::ExtractionError::InvalidConfiguration { .. })
+                Err(crate::ArchiveError::InvalidConfiguration { .. })
             ),
             "list_archive must return InvalidConfiguration for zero max_file_size"
         );

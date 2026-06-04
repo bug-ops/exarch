@@ -1,10 +1,10 @@
-//! Core error types for archive extraction operations.
+//! Core error types for archive operations.
 
 use std::path::PathBuf;
 use thiserror::Error;
 
-/// Result type alias using `ExtractionError`.
-pub type Result<T> = std::result::Result<T, ExtractionError>;
+/// Result type alias using [`ArchiveError`].
+pub type Result<T> = std::result::Result<T, ArchiveError>;
 
 /// Represents a specific quota resource that was exceeded.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,9 +53,10 @@ impl std::fmt::Display for QuotaResource {
     }
 }
 
-/// Errors that can occur during archive extraction.
+/// Errors that can occur during archive operations (extraction, creation,
+/// listing, verification).
 #[derive(Error, Debug)]
-pub enum ExtractionError {
+pub enum ArchiveError {
     /// I/O operation failed.
     #[error("I/O error: {0}")]
     Io(std::io::Error),
@@ -174,13 +175,13 @@ pub enum ExtractionError {
     },
 }
 
-impl From<std::io::Error> for ExtractionError {
+impl From<std::io::Error> for ArchiveError {
     fn from(e: std::io::Error) -> Self {
         Self::Io(e)
     }
 }
 
-impl ExtractionError {
+impl ArchiveError {
     /// Returns `true` if this error represents a security violation.
     ///
     /// Security violations include:
@@ -195,15 +196,15 @@ impl ExtractionError {
     /// # Examples
     ///
     /// ```
-    /// use exarch_core::ExtractionError;
+    /// use exarch_core::ArchiveError;
     /// use std::path::PathBuf;
     ///
-    /// let err = ExtractionError::PathTraversal {
+    /// let err = ArchiveError::PathTraversal {
     ///     path: PathBuf::from("../etc/passwd"),
     /// };
     /// assert!(err.is_security_violation());
     ///
-    /// let err = ExtractionError::InvalidArchive("corrupted header".to_string());
+    /// let err = ArchiveError::InvalidArchive("corrupted header".to_string());
     /// assert!(!err.is_security_violation());
     /// ```
     #[must_use]
@@ -232,15 +233,15 @@ impl ExtractionError {
     /// # Examples
     ///
     /// ```
-    /// use exarch_core::ExtractionError;
+    /// use exarch_core::ArchiveError;
     /// use std::path::PathBuf;
     ///
-    /// let err = ExtractionError::PathTraversal {
+    /// let err = ArchiveError::PathTraversal {
     ///     path: PathBuf::from("../etc/passwd"),
     /// };
     /// assert!(err.is_recoverable()); // Could skip this entry
     ///
-    /// let err = ExtractionError::InvalidArchive("corrupted header".to_string());
+    /// let err = ArchiveError::InvalidArchive("corrupted header".to_string());
     /// assert!(!err.is_recoverable()); // Cannot continue
     /// ```
     #[must_use]
@@ -266,13 +267,13 @@ impl ExtractionError {
     /// # Examples
     ///
     /// ```
-    /// use exarch_core::ExtractionError;
+    /// use exarch_core::ArchiveError;
     /// use std::path::PathBuf;
     ///
-    /// let err = ExtractionError::InvalidArchive("bad header".to_string());
+    /// let err = ArchiveError::InvalidArchive("bad header".to_string());
     /// assert_eq!(err.context(), Some("bad header"));
     ///
-    /// let err = ExtractionError::UnknownFormat {
+    /// let err = ArchiveError::UnknownFormat {
     ///     path: PathBuf::from("archive.rar"),
     /// };
     /// assert_eq!(err.context(), None);
@@ -304,7 +305,7 @@ mod tests {
 
     #[test]
     fn test_error_display() {
-        let err = ExtractionError::UnknownFormat {
+        let err = ArchiveError::UnknownFormat {
             path: PathBuf::from("archive.rar"),
         };
         assert_eq!(
@@ -315,7 +316,7 @@ mod tests {
 
     #[test]
     fn test_path_traversal_error() {
-        let err = ExtractionError::PathTraversal {
+        let err = ArchiveError::PathTraversal {
             path: PathBuf::from("../etc/passwd"),
         };
         assert!(err.to_string().contains("path traversal"));
@@ -324,7 +325,7 @@ mod tests {
 
     #[test]
     fn test_zip_bomb_error() {
-        let err = ExtractionError::ZipBomb {
+        let err = ArchiveError::ZipBomb {
             compressed: 1000,
             uncompressed: 1_000_000,
             ratio: 1000.0,
@@ -336,68 +337,68 @@ mod tests {
     #[test]
     fn test_io_error_conversion() {
         let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file not found");
-        let err: ExtractionError = io_err.into();
-        assert!(matches!(err, ExtractionError::Io(_)));
+        let err: ArchiveError = io_err.into();
+        assert!(matches!(err, ArchiveError::Io(_)));
     }
 
     #[test]
     fn test_is_security_violation() {
         // Security violations
-        let err = ExtractionError::PathTraversal {
+        let err = ArchiveError::PathTraversal {
             path: PathBuf::from("../etc/passwd"),
         };
         assert!(err.is_security_violation());
 
-        let err = ExtractionError::SymlinkEscape {
+        let err = ArchiveError::SymlinkEscape {
             path: PathBuf::from("link"),
         };
         assert!(err.is_security_violation());
 
-        let err = ExtractionError::ZipBomb {
+        let err = ArchiveError::ZipBomb {
             compressed: 1000,
             uncompressed: 1_000_000,
             ratio: 1000.0,
         };
         assert!(err.is_security_violation());
 
-        let err = ExtractionError::SecurityViolation {
+        let err = ArchiveError::SecurityViolation {
             reason: "test".into(),
         };
         assert!(err.is_security_violation());
 
         // Not security violations
-        let err = ExtractionError::UnknownFormat {
+        let err = ArchiveError::UnknownFormat {
             path: PathBuf::from("archive.rar"),
         };
         assert!(!err.is_security_violation());
 
-        let err = ExtractionError::InvalidArchive("bad".into());
+        let err = ArchiveError::InvalidArchive("bad".into());
         assert!(!err.is_security_violation());
     }
 
     #[test]
     fn test_is_recoverable() {
         // Recoverable errors
-        let err = ExtractionError::PathTraversal {
+        let err = ArchiveError::PathTraversal {
             path: PathBuf::from("../etc/passwd"),
         };
         assert!(err.is_recoverable());
 
-        let err = ExtractionError::SecurityViolation {
+        let err = ArchiveError::SecurityViolation {
             reason: "test".into(),
         };
         assert!(err.is_recoverable());
 
         // Non-recoverable errors
-        let err = ExtractionError::InvalidArchive("corrupted".into());
+        let err = ArchiveError::InvalidArchive("corrupted".into());
         assert!(!err.is_recoverable());
 
-        let err = ExtractionError::UnknownFormat {
+        let err = ArchiveError::UnknownFormat {
             path: PathBuf::from("archive.rar"),
         };
         assert!(!err.is_recoverable());
 
-        let err = ExtractionError::ZipBomb {
+        let err = ArchiveError::ZipBomb {
             compressed: 1000,
             uncompressed: 1_000_000,
             ratio: 1000.0,
@@ -407,20 +408,20 @@ mod tests {
 
     #[test]
     fn test_context() {
-        let err = ExtractionError::InvalidArchive("bad header".into());
+        let err = ArchiveError::InvalidArchive("bad header".into());
         assert_eq!(err.context(), Some("bad header"));
 
-        let err = ExtractionError::SecurityViolation {
+        let err = ArchiveError::SecurityViolation {
             reason: "not allowed".into(),
         };
         assert_eq!(err.context(), Some("not allowed"));
 
-        let err = ExtractionError::UnknownFormat {
+        let err = ArchiveError::UnknownFormat {
             path: PathBuf::from("archive.rar"),
         };
         assert_eq!(err.context(), None);
 
-        let err = ExtractionError::PathTraversal {
+        let err = ArchiveError::PathTraversal {
             path: PathBuf::from("../etc/passwd"),
         };
         assert_eq!(err.context(), None);
@@ -428,7 +429,7 @@ mod tests {
 
     #[test]
     fn test_symlink_escape_error() {
-        let err = ExtractionError::SymlinkEscape {
+        let err = ArchiveError::SymlinkEscape {
             path: PathBuf::from("malicious/link"),
         };
         let display = err.to_string();
@@ -439,7 +440,7 @@ mod tests {
 
     #[test]
     fn test_hardlink_escape_error() {
-        let err = ExtractionError::HardlinkEscape {
+        let err = ArchiveError::HardlinkEscape {
             path: PathBuf::from("malicious/hardlink"),
         };
         let display = err.to_string();
@@ -450,7 +451,7 @@ mod tests {
 
     #[test]
     fn test_invalid_permissions_error() {
-        let err = ExtractionError::InvalidPermissions {
+        let err = ArchiveError::InvalidPermissions {
             path: PathBuf::from("file.txt"),
             mode: 0o777,
         };
@@ -463,7 +464,7 @@ mod tests {
 
     #[test]
     fn test_quota_exceeded_error() {
-        let err = ExtractionError::QuotaExceeded {
+        let err = ArchiveError::QuotaExceeded {
             resource: QuotaResource::FileCount {
                 current: 11,
                 max: 10,
@@ -494,26 +495,26 @@ mod tests {
         use std::error::Error;
 
         let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "inner error");
-        let err: ExtractionError = io_err.into();
+        let err: ArchiveError = io_err.into();
 
         // Verify source chain works
-        if let ExtractionError::Io(ref inner) = err {
+        if let ArchiveError::Io(ref inner) = err {
             // IO error may or may not have a source
             let _source = inner.source();
         }
     }
 
-    // Regression test for #177: ExtractionError::Io must not expose the inner
+    // Regression test for #177: ArchiveError::Io must not expose the inner
     // std::io::Error as an error source. The manual From impl intentionally omits
     // #[source] so callers building error chains (anyhow, thiserror) do not append
-    // the OS message a second time after ExtractionError::Io's own Display.
+    // the OS message a second time after ArchiveError::Io's own Display.
     #[test]
     fn test_io_error_no_source_chain() {
         use std::error::Error;
 
         let os_message = "permission denied";
         let io_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, os_message);
-        let err: ExtractionError = io_err.into();
+        let err: ArchiveError = io_err.into();
 
         // Display must contain the OS message exactly once.
         let display = err.to_string();
@@ -527,7 +528,7 @@ mod tests {
         // message.
         assert!(
             err.source().is_none(),
-            "ExtractionError::Io must not expose inner io::Error as source"
+            "ArchiveError::Io must not expose inner io::Error as source"
         );
     }
 
@@ -535,7 +536,7 @@ mod tests {
     #[test]
     fn test_zip_bomb_edge_cases() {
         // Zero compressed size (would cause division by zero in ratio calc)
-        let err = ExtractionError::ZipBomb {
+        let err = ArchiveError::ZipBomb {
             compressed: 0,
             uncompressed: 1000,
             ratio: f64::INFINITY,
@@ -545,7 +546,7 @@ mod tests {
         assert!(display.contains("zip bomb"));
 
         // Equal sizes (ratio = 1.0)
-        let err = ExtractionError::ZipBomb {
+        let err = ArchiveError::ZipBomb {
             compressed: 1000,
             uncompressed: 1000,
             ratio: 1.0,
@@ -556,7 +557,7 @@ mod tests {
 
     #[test]
     fn test_source_not_found_error() {
-        let err = ExtractionError::SourceNotFound {
+        let err = ArchiveError::SourceNotFound {
             path: PathBuf::from("/nonexistent/path"),
         };
         let display = err.to_string();
@@ -567,7 +568,7 @@ mod tests {
 
     #[test]
     fn test_source_not_accessible_error() {
-        let err = ExtractionError::SourceNotAccessible {
+        let err = ArchiveError::SourceNotAccessible {
             path: PathBuf::from("/restricted/path"),
         };
         let display = err.to_string();
@@ -578,7 +579,7 @@ mod tests {
 
     #[test]
     fn test_output_exists_error() {
-        let err = ExtractionError::OutputExists {
+        let err = ArchiveError::OutputExists {
             path: PathBuf::from("output.tar.gz"),
         };
         let display = err.to_string();
@@ -589,21 +590,21 @@ mod tests {
 
     #[test]
     fn test_invalid_compression_level_error() {
-        let err = ExtractionError::InvalidCompressionLevel { level: 0 };
+        let err = ArchiveError::InvalidCompressionLevel { level: 0 };
         let display = err.to_string();
         assert!(display.contains("invalid compression level"));
         assert!(display.contains('0'));
         assert!(display.contains("must be 1-9"));
         assert!(!err.is_security_violation());
 
-        let err = ExtractionError::InvalidCompressionLevel { level: 10 };
+        let err = ArchiveError::InvalidCompressionLevel { level: 10 };
         let display = err.to_string();
         assert!(display.contains("10"));
     }
 
     #[test]
     fn test_unknown_format_error() {
-        let err = ExtractionError::UnknownFormat {
+        let err = ArchiveError::UnknownFormat {
             path: PathBuf::from("archive.rar"),
         };
         let display = err.to_string();
@@ -614,7 +615,7 @@ mod tests {
 
     #[test]
     fn test_invalid_configuration_error() {
-        let err = ExtractionError::InvalidConfiguration {
+        let err = ArchiveError::InvalidConfiguration {
             reason: "output path not set".to_string(),
         };
         let display = err.to_string();
@@ -626,13 +627,13 @@ mod tests {
     #[test]
     fn test_partial_extraction_display_shows_source() {
         use crate::ExtractionReport;
-        let source = ExtractionError::QuotaExceeded {
+        let source = ArchiveError::QuotaExceeded {
             resource: QuotaResource::FileCount {
                 current: 11,
                 max: 10,
             },
         };
-        let err = ExtractionError::PartialExtraction {
+        let err = ArchiveError::PartialExtraction {
             source: Box::new(source),
             report: ExtractionReport::new(),
         };
@@ -643,17 +644,17 @@ mod tests {
     #[test]
     fn test_partial_extraction_delegates_is_security_violation() {
         use crate::ExtractionReport;
-        let security_err = ExtractionError::PathTraversal {
+        let security_err = ArchiveError::PathTraversal {
             path: PathBuf::from("../etc/passwd"),
         };
-        let err = ExtractionError::PartialExtraction {
+        let err = ArchiveError::PartialExtraction {
             source: Box::new(security_err),
             report: ExtractionReport::new(),
         };
         assert!(err.is_security_violation());
 
-        let non_security_err = ExtractionError::InvalidArchive("bad".into());
-        let err2 = ExtractionError::PartialExtraction {
+        let non_security_err = ArchiveError::InvalidArchive("bad".into());
+        let err2 = ArchiveError::PartialExtraction {
             source: Box::new(non_security_err),
             report: ExtractionReport::new(),
         };
@@ -663,10 +664,10 @@ mod tests {
     #[test]
     fn test_partial_extraction_delegates_is_recoverable() {
         use crate::ExtractionReport;
-        let recoverable = ExtractionError::PathTraversal {
+        let recoverable = ArchiveError::PathTraversal {
             path: PathBuf::from("../etc/passwd"),
         };
-        let err = ExtractionError::PartialExtraction {
+        let err = ArchiveError::PartialExtraction {
             source: Box::new(recoverable),
             report: ExtractionReport::new(),
         };
@@ -676,12 +677,12 @@ mod tests {
     #[test]
     fn test_partial_extraction_delegates_error_code() {
         use crate::ExtractionReport;
-        let source = ExtractionError::ZipBomb {
+        let source = ArchiveError::ZipBomb {
             compressed: 100,
             uncompressed: 100_000,
             ratio: 1000.0,
         };
-        let err = ExtractionError::PartialExtraction {
+        let err = ArchiveError::PartialExtraction {
             source: Box::new(source),
             report: ExtractionReport::new(),
         };

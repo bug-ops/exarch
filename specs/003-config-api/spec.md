@@ -83,7 +83,7 @@ SO THAT extraction does not start with a zero or non-finite limit
 ```
 GIVEN SecurityConfig::default().with_max_file_size(0)
 WHEN validate() is called
-THEN it returns ExtractionError::InvalidConfiguration before extraction begins
+THEN it returns ArchiveError::InvalidConfiguration before extraction begins
 ```
 
 ### US-004: Archive Creation Configuration
@@ -171,9 +171,9 @@ THEN no files are present in the output directory; the temp dir is cleaned up
 | `SecurityConfig` with zero `max_file_size`, `max_total_size`, `max_path_depth`, `max_file_count`, or `max_solid_block_memory` | `validate()` returns `InvalidConfiguration` |
 | `SecurityConfig` with `max_compression_ratio` of 0.0, negative, or NaN | `validate()` returns `InvalidConfiguration` |
 | `compression_level` outside 1–9 | `CreationConfig` builder panics or returns error at construction |
-| `atomic = true` and output on a different filesystem than temp dir | `fs::rename` may fail; caller receives `ExtractionError::Io` |
-| `skip_duplicates = false` and duplicate entry | `ExtractionError::InvalidArchive` (duplicate entry) |
-| Atomic extraction fails mid-archive | Temp dir deleted; `ExtractionError` returned; no files in output dir |
+| `atomic = true` and output on a different filesystem than temp dir | `fs::rename` may fail; caller receives `ArchiveError::Io` |
+| `skip_duplicates = false` and duplicate entry | `ArchiveError::InvalidArchive` (duplicate entry) |
+| Atomic extraction fails mid-archive | Temp dir deleted; `ArchiveError` returned; no files in output dir |
 
 ## 7. Success Criteria
 

@@ -17,7 +17,7 @@
 //! 3. The specific symlink+directory chmod attack pattern is blocked even when
 //!    the symlink uses a relative (`../`) escape.
 
-use exarch_core::ExtractionError;
+use exarch_core::ArchiveError;
 use exarch_core::formats::TarArchive;
 use exarch_core::formats::traits::ArchiveFormat;
 use exarch_core::SecurityConfig;
@@ -131,7 +131,7 @@ fn test_rustsec_2026_0067_symlink_dir_chmod_blocked() {
     let result = ArchiveFormat::extract(&mut archive, temp.path(), &config);
 
     match result {
-        Err(ExtractionError::SymlinkEscape { .. } | ExtractionError::PathTraversal { .. }) => {
+        Err(ArchiveError::SymlinkEscape { .. } | ArchiveError::PathTraversal { .. }) => {
             // Ideal: exarch's security layer rejected the escape attempt.
         }
         Err(other) => {

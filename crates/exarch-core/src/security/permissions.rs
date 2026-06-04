@@ -18,7 +18,7 @@ use crate::SecurityConfig;
 ///
 /// # Errors
 ///
-/// Returns `ExtractionError::InvalidPermissions` only for truly invalid modes.
+/// Returns `ArchiveError::InvalidPermissions` only for truly invalid modes.
 ///
 /// # Examples
 ///

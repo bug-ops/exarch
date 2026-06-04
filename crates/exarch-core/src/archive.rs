@@ -119,13 +119,13 @@ impl ArchiveBuilder {
     pub fn extract(self) -> Result<ExtractionReport> {
         let archive_path =
             self.archive_path
-                .ok_or_else(|| crate::ExtractionError::InvalidConfiguration {
+                .ok_or_else(|| crate::ArchiveError::InvalidConfiguration {
                     reason: "archive path not set".to_string(),
                 })?;
 
         let output_dir =
             self.output_dir
-                .ok_or_else(|| crate::ExtractionError::InvalidConfiguration {
+                .ok_or_else(|| crate::ArchiveError::InvalidConfiguration {
                     reason: "output directory not set".to_string(),
                 })?;
 
@@ -155,7 +155,7 @@ mod tests {
         let result = builder.extract();
         assert!(matches!(
             result,
-            Err(crate::ExtractionError::InvalidConfiguration { .. })
+            Err(crate::ArchiveError::InvalidConfiguration { .. })
         ));
     }
 
@@ -165,7 +165,7 @@ mod tests {
         let result = builder.extract();
         assert!(matches!(
             result,
-            Err(crate::ExtractionError::InvalidConfiguration { .. })
+            Err(crate::ArchiveError::InvalidConfiguration { .. })
         ));
     }
 }

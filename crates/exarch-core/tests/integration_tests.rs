@@ -10,7 +10,7 @@
 
 mod security;
 
-use exarch_core::ExtractionError;
+use exarch_core::ArchiveError;
 use exarch_core::SecurityConfig;
 use exarch_core::types::DestDir;
 use exarch_core::types::SafePath;
@@ -116,7 +116,7 @@ fn test_path_traversal_blocked() {
     for path in paths {
         let result = SafePath::validate(&PathBuf::from(path), &dest, &config);
         assert!(
-            matches!(result, Err(ExtractionError::PathTraversal { .. })),
+            matches!(result, Err(ArchiveError::PathTraversal { .. })),
             "Path {path} should be rejected"
         );
     }
@@ -133,7 +133,7 @@ fn test_banned_components_blocked() {
     for path in paths {
         let result = SafePath::validate(&PathBuf::from(path), &dest, &config);
         assert!(
-            matches!(result, Err(ExtractionError::SecurityViolation { .. })),
+            matches!(result, Err(ArchiveError::SecurityViolation { .. })),
             "Path {path} should be rejected"
         );
     }
@@ -204,7 +204,7 @@ fn test_depth_limit_enforced() {
     let result = SafePath::validate(&PathBuf::from(bad_path), &dest, &config);
     assert!(matches!(
         result,
-        Err(ExtractionError::SecurityViolation { .. })
+        Err(ArchiveError::SecurityViolation { .. })
     ));
 }
 

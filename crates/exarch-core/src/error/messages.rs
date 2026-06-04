@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use super::types::ExtractionError;
+use super::types::ArchiveError;
 
 /// Error message for FFI consumption.
 ///
@@ -23,7 +23,7 @@ pub struct FfiErrorMessage {
     pub context: Option<String>,
 }
 
-impl ExtractionError {
+impl ArchiveError {
     /// Formats error for FFI consumption.
     ///
     /// # Arguments
@@ -35,10 +35,10 @@ impl ExtractionError {
     /// # Examples
     ///
     /// ```
-    /// use exarch_core::ExtractionError;
+    /// use exarch_core::ArchiveError;
     /// use std::path::PathBuf;
     ///
-    /// let error = ExtractionError::PathTraversal {
+    /// let error = ArchiveError::PathTraversal {
     ///     path: PathBuf::from("/etc/passwd"),
     /// };
     ///
@@ -222,7 +222,7 @@ mod tests {
 
     #[test]
     fn test_path_sanitization() {
-        let error = ExtractionError::PathTraversal {
+        let error = ArchiveError::PathTraversal {
             path: PathBuf::from("/etc/passwd"),
         };
 
@@ -240,19 +240,19 @@ mod tests {
     fn test_error_codes_match() {
         let test_cases = vec![
             (
-                ExtractionError::PathTraversal {
+                ArchiveError::PathTraversal {
                     path: PathBuf::from("test"),
                 },
                 "PATH_TRAVERSAL",
             ),
             (
-                ExtractionError::SymlinkEscape {
+                ArchiveError::SymlinkEscape {
                     path: PathBuf::from("test"),
                 },
                 "SYMLINK_ESCAPE",
             ),
             (
-                ExtractionError::ZipBomb {
+                ArchiveError::ZipBomb {
                     compressed: 100,
                     uncompressed: 10000,
                     ratio: 100.0,
@@ -272,49 +272,49 @@ mod tests {
         use super::super::types::QuotaResource;
 
         let errors = vec![
-            ExtractionError::PathTraversal {
+            ArchiveError::PathTraversal {
                 path: PathBuf::from("test"),
             },
-            ExtractionError::SymlinkEscape {
+            ArchiveError::SymlinkEscape {
                 path: PathBuf::from("test"),
             },
-            ExtractionError::HardlinkEscape {
+            ArchiveError::HardlinkEscape {
                 path: PathBuf::from("test"),
             },
-            ExtractionError::ZipBomb {
+            ArchiveError::ZipBomb {
                 compressed: 100,
                 uncompressed: 10000,
                 ratio: 100.0,
             },
-            ExtractionError::QuotaExceeded {
+            ArchiveError::QuotaExceeded {
                 resource: QuotaResource::IntegerOverflow,
             },
-            ExtractionError::SecurityViolation {
+            ArchiveError::SecurityViolation {
                 reason: "test".into(),
             },
-            ExtractionError::UnknownFormat {
+            ArchiveError::UnknownFormat {
                 path: PathBuf::from("test.rar"),
             },
-            ExtractionError::InvalidArchive("test".into()),
-            ExtractionError::Io(std::io::Error::other("test")),
-            ExtractionError::InvalidPermissions {
+            ArchiveError::InvalidArchive("test".into()),
+            ArchiveError::Io(std::io::Error::other("test")),
+            ArchiveError::InvalidPermissions {
                 path: PathBuf::from("test"),
                 mode: 0o777,
             },
-            ExtractionError::SourceNotFound {
+            ArchiveError::SourceNotFound {
                 path: PathBuf::from("test"),
             },
-            ExtractionError::SourceNotAccessible {
+            ArchiveError::SourceNotAccessible {
                 path: PathBuf::from("test"),
             },
-            ExtractionError::OutputExists {
+            ArchiveError::OutputExists {
                 path: PathBuf::from("test"),
             },
-            ExtractionError::InvalidCompressionLevel { level: 10 },
-            ExtractionError::UnknownFormat {
+            ArchiveError::InvalidCompressionLevel { level: 10 },
+            ArchiveError::UnknownFormat {
                 path: PathBuf::from("test"),
             },
-            ExtractionError::InvalidConfiguration {
+            ArchiveError::InvalidConfiguration {
                 reason: "test".into(),
             },
         ];

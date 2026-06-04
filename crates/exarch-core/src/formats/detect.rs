@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use crate::ExtractionError;
+use crate::ArchiveError;
 use crate::Result;
 
 /// File extensions that wrap a ZIP container with extra structure.
@@ -48,18 +48,19 @@ pub enum ArchiveType {
 ///
 /// `.gz` files are only accepted when the stem ends with `.tar`
 /// (i.e. `archive.tar.gz`). A bare `archive.gz` returns
-/// [`ExtractionError::UnknownFormat`].
+/// [`ArchiveError::UnknownFormat`].
 ///
 /// # Errors
 ///
-/// Returns [`ExtractionError::UnknownFormat`] if the extension is
+/// Returns [`ArchiveError::UnknownFormat`] if the extension is
 /// unrecognised or if a `.gz` file has no `.tar` stem.
 pub fn detect_format(path: &Path) -> Result<ArchiveType> {
-    let extension = path.extension().and_then(|e| e.to_str()).ok_or_else(|| {
-        ExtractionError::UnknownFormat {
-            path: path.to_path_buf(),
-        }
-    })?;
+    let extension =
+        path.extension()
+            .and_then(|e| e.to_str())
+            .ok_or_else(|| ArchiveError::UnknownFormat {
+                path: path.to_path_buf(),
+            })?;
 
     let ext_lower = extension.to_ascii_lowercase();
     match ext_lower.as_str() {
@@ -71,7 +72,7 @@ pub fn detect_format(path: &Path) -> Result<ArchiveType> {
             {
                 Ok(ArchiveType::TarGz)
             } else {
-                Err(ExtractionError::UnknownFormat {
+                Err(ArchiveError::UnknownFormat {
                     path: path.to_path_buf(),
                 })
             }
@@ -85,7 +86,7 @@ pub fn detect_format(path: &Path) -> Result<ArchiveType> {
         // extensions, EPUBs - all ZIP under the hood, so they extract
         // through the same path. See `ZIP_FAMILY_ALIASES` for the list.
         ext if is_zip_family_alias(ext) => Ok(ArchiveType::Zip),
-        _ => Err(ExtractionError::UnknownFormat {
+        _ => Err(ArchiveError::UnknownFormat {
             path: path.to_path_buf(),
         }),
     }
@@ -117,7 +118,7 @@ mod tests {
         let path = PathBuf::from("archive.gz");
         assert!(matches!(
             detect_format(&path),
-            Err(ExtractionError::UnknownFormat { .. })
+            Err(ArchiveError::UnknownFormat { .. })
         ));
     }
 
@@ -127,7 +128,7 @@ mod tests {
         let err = detect_format(&path).unwrap_err();
         assert!(matches!(
             err,
-            ExtractionError::UnknownFormat { path: ref p } if p == &PathBuf::from("archive.gz")
+            ArchiveError::UnknownFormat { path: ref p } if p == &PathBuf::from("archive.gz")
         ));
     }
 
@@ -210,7 +211,7 @@ mod tests {
         let path = PathBuf::from("archive.rar");
         assert!(matches!(
             detect_format(&path),
-            Err(ExtractionError::UnknownFormat { .. })
+            Err(ArchiveError::UnknownFormat { .. })
         ));
     }
 
@@ -220,7 +221,7 @@ mod tests {
         let err = detect_format(&path).unwrap_err();
         assert!(matches!(
             err,
-            ExtractionError::UnknownFormat { path: ref p } if p == &PathBuf::from("archive.rar")
+            ArchiveError::UnknownFormat { path: ref p } if p == &PathBuf::from("archive.rar")
         ));
     }
 

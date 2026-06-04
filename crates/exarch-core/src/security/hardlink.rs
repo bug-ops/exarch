@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
 
-use crate::ExtractionError;
+use crate::ArchiveError;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::types::DestDir;
@@ -117,7 +117,7 @@ impl HardlinkTracker {
     ) -> Result<()> {
         // Check if hardlinks are allowed
         if !config.allowed.hardlinks {
-            return Err(ExtractionError::SecurityViolation {
+            return Err(ArchiveError::SecurityViolation {
                 reason: "hardlinks not allowed".into(),
             });
         }
@@ -129,7 +129,7 @@ impl HardlinkTracker {
         // \\server\share
         for component in target.components() {
             if matches!(component, Component::Prefix(_) | Component::RootDir) {
-                return Err(ExtractionError::HardlinkEscape {
+                return Err(ArchiveError::HardlinkEscape {
                     path: link_path.as_path().to_path_buf(),
                 });
             }
@@ -137,7 +137,7 @@ impl HardlinkTracker {
 
         // Also reject absolute targets (redundant with above, but keeps existing check)
         if target.is_absolute() {
-            return Err(ExtractionError::HardlinkEscape {
+            return Err(ArchiveError::HardlinkEscape {
                 path: link_path.as_path().to_path_buf(),
             });
         }
@@ -151,7 +151,7 @@ impl HardlinkTracker {
         // would pass (two-hop chain bypass, GHSA-83g3-92jg-28cx variant — #116).
         let resolved =
             resolve_through_symlinks(dest.as_path(), target, dest.as_path(), link_path.as_path())
-                .map_err(|_| ExtractionError::HardlinkEscape {
+                .map_err(|_| ArchiveError::HardlinkEscape {
                 path: link_path.as_path().to_path_buf(),
             })?;
 
@@ -244,10 +244,7 @@ mod tests {
         let target = PathBuf::from("/etc/passwd");
 
         let result = tracker.validate_hardlink(&link, &target, &dest, &config);
-        assert!(matches!(
-            result,
-            Err(ExtractionError::HardlinkEscape { .. })
-        ));
+        assert!(matches!(result, Err(ArchiveError::HardlinkEscape { .. })));
     }
 
     #[test]
@@ -261,10 +258,7 @@ mod tests {
         let target = PathBuf::from("../../etc/passwd");
 
         let result = tracker.validate_hardlink(&link, &target, &dest, &config);
-        assert!(matches!(
-            result,
-            Err(ExtractionError::HardlinkEscape { .. })
-        ));
+        assert!(matches!(result, Err(ArchiveError::HardlinkEscape { .. })));
     }
 
     #[test]
@@ -409,7 +403,7 @@ mod tests {
 
         let result = tracker.validate_hardlink(&link, &target, &dest, &config);
         assert!(
-            matches!(result, Err(ExtractionError::HardlinkEscape { .. })),
+            matches!(result, Err(ArchiveError::HardlinkEscape { .. })),
             "hardlink through two-hop symlink chain must be rejected"
         );
     }

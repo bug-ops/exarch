@@ -45,7 +45,7 @@ graph TD
 ### T001: Improve ZIP-family alias creation error message
 
 **Context**: `reject_zip_family_creation()` in `api.rs` already returns
-`ExtractionError::InvalidArchive` when a caller tries to create an archive with
+`ArchiveError::InvalidArchive` when a caller tries to create an archive with
 a ZIP-family alias extension (e.g. `.apk`, `.whl`) without an explicit
 `CreationConfig::format` override. However the current error string does not
 tell the user which extension was detected or how to bypass the guard. FR-025
@@ -75,14 +75,14 @@ Single task; can be merged independently.
 
 ### Common patterns
 
-- The existing error is constructed with `ExtractionError::InvalidArchive`.
+- The existing error is constructed with `ArchiveError::InvalidArchive`.
   Extend the message string inline — no new error variant needed.
 - Retrieve the extension from the `output` path argument already available in
   `reject_zip_family_creation()`.
 
 ### Gotchas
 
-- `ExtractionError::InvalidArchive` carries a `String` message field; confirm
+- `ArchiveError::InvalidArchive` carries a `String` message field; confirm
   the exact field name before editing.
 - Keep the message concise — it will appear in CLI stderr output and in Python
   / Node.js `ExarchError` messages.

@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use crate::creation::config::CreationConfig;
 use crate::creation::report::CreationReport;
-use crate::error::ExtractionError;
+use crate::error::ArchiveError;
 use crate::error::Result;
 use crate::formats::detect::ArchiveType;
 
@@ -27,7 +27,7 @@ use crate::formats::detect::ArchiveType;
 ///     .create()?;
 ///
 /// println!("Created archive with {} files", report.files_added);
-/// # Ok::<(), exarch_core::ExtractionError>(())
+/// # Ok::<(), exarch_core::ArchiveError>(())
 /// ```
 #[derive(Debug, Default)]
 pub struct ArchiveCreator {
@@ -243,17 +243,17 @@ impl ArchiveCreator {
     ///     .output("backup.tar.gz")
     ///     .add_source("src/")
     ///     .create()?;
-    /// # Ok::<(), exarch_core::ExtractionError>(())
+    /// # Ok::<(), exarch_core::ArchiveError>(())
     /// ```
     pub fn create(self) -> Result<CreationReport> {
-        let output_path =
-            self.output_path
-                .ok_or_else(|| ExtractionError::InvalidConfiguration {
-                    reason: "output path not set".to_string(),
-                })?;
+        let output_path = self
+            .output_path
+            .ok_or_else(|| ArchiveError::InvalidConfiguration {
+                reason: "output path not set".to_string(),
+            })?;
 
         if self.sources.is_empty() {
-            return Err(ExtractionError::InvalidConfiguration {
+            return Err(ArchiveError::InvalidConfiguration {
                 reason: "no source paths provided".to_string(),
             });
         }
@@ -340,7 +340,7 @@ mod tests {
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
-            ExtractionError::InvalidConfiguration { .. }
+            ArchiveError::InvalidConfiguration { .. }
         ));
     }
 
@@ -352,7 +352,7 @@ mod tests {
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
-            ExtractionError::InvalidConfiguration { .. }
+            ArchiveError::InvalidConfiguration { .. }
         ));
     }
 

@@ -107,7 +107,7 @@ exarch/
     │   │   ├── report.rs               # ExtractionReport, ProgressCallback, NoopProgress
     │   │   ├── error/
     │   │   │   ├── mod.rs
-    │   │   │   ├── types.rs            # ExtractionError enum
+    │   │   │   ├── types.rs            # ArchiveError enum
     │   │   │   └── messages.rs         # FfiErrorMessage for FFI-safe error passing
     │   │   ├── formats/
     │   │   │   ├── mod.rs              # re-exports TarArchive, ZipArchive, SevenZArchive

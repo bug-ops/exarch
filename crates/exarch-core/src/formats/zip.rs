@@ -101,7 +101,7 @@
 //!     &mut exarch_core::NoopProgress,
 //! )?;
 //! println!("Extracted {} files", report.files_extracted);
-//! # Ok::<(), exarch_core::ExtractionError>(())
+//! # Ok::<(), exarch_core::ArchiveError>(())
 //! ```
 //!
 //! Custom security configuration:
@@ -125,7 +125,7 @@ use std::time::Instant;
 
 use zip::ZipArchive as ZipReader;
 
-use crate::ExtractionError;
+use crate::ArchiveError;
 use crate::ExtractionOptions;
 use crate::ExtractionReport;
 use crate::ProgressCallback;
@@ -179,7 +179,7 @@ use super::traits::ArchiveFormat;
 ///     &mut exarch_core::NoopProgress,
 /// )?;
 /// println!("Extracted {} files", report.files_extracted);
-/// # Ok::<(), exarch_core::ExtractionError>(())
+/// # Ok::<(), exarch_core::ArchiveError>(())
 /// ```
 pub struct ZipArchive<R: Read + Seek> {
     inner: ZipReader<R>,
@@ -206,16 +206,16 @@ impl<R: Read + Seek> ZipArchive<R> {
     ///
     /// let file = File::open("archive.zip")?;
     /// let archive = ZipArchive::new(file)?;
-    /// # Ok::<(), exarch_core::ExtractionError>(())
+    /// # Ok::<(), exarch_core::ArchiveError>(())
     /// ```
     pub fn new(reader: R) -> Result<Self> {
         let mut inner = ZipReader::new(reader).map_err(|e| {
-            ExtractionError::InvalidArchive(format!("failed to open ZIP archive: {e}"))
+            ArchiveError::InvalidArchive(format!("failed to open ZIP archive: {e}"))
         })?;
 
         // Detect password protection early (CRIT-003: robust check with entry limit)
         if Self::is_password_protected(&mut inner)? {
-            return Err(ExtractionError::SecurityViolation {
+            return Err(ArchiveError::SecurityViolation {
                 reason: "password-protected ZIP archives are not supported".into(),
             });
         }
@@ -241,7 +241,7 @@ impl<R: Read + Seek> ZipArchive<R> {
         match archive.by_index(index) {
             Ok(file) => Ok(file.encrypted()),
             Err(e) if e.to_string().contains("Password required to decrypt file") => Ok(true),
-            Err(e) => Err(ExtractionError::InvalidArchive(format!(
+            Err(e) => Err(ArchiveError::InvalidArchive(format!(
                 "failed to check entry {index} for encryption: {e}"
             ))),
         }
@@ -268,18 +268,18 @@ impl<R: Read + Seek> ZipArchive<R> {
     ) -> Result<()> {
         let mut zip_file = self.inner.by_index(index).map_err(|e| {
             if e.to_string().contains("Password required to decrypt file") {
-                return ExtractionError::SecurityViolation {
+                return ArchiveError::SecurityViolation {
                     reason: "archive is password-protected.\n  Password-protected ZIP archives are not supported. Decrypt the archive externally and try again.".into(),
                 };
             }
-            ExtractionError::InvalidArchive(format!("failed to read entry {index}: {e}"))
+            ArchiveError::InvalidArchive(format!("failed to read entry {index}: {e}"))
         })?;
 
         if zip_file.encrypted() {
             let name = zip_file
                 .name()
                 .map_or_else(|_| format!("<entry {index}>"), std::borrow::Cow::into_owned);
-            return Err(ExtractionError::SecurityViolation {
+            return Err(ArchiveError::SecurityViolation {
                 reason: format!("encrypted entry detected: {name}"),
             });
         }
@@ -288,7 +288,7 @@ impl<R: Read + Seek> ZipArchive<R> {
             zip_file
                 .name()
                 .map_err(|e| {
-                    ExtractionError::InvalidArchive(format!("invalid entry name at {index}: {e}"))
+                    ArchiveError::InvalidArchive(format!("invalid entry name at {index}: {e}"))
                 })?
                 .as_ref(),
         );
@@ -298,7 +298,7 @@ impl<R: Read + Seek> ZipArchive<R> {
 
         let compression = ZipEntryAdapter::get_compression_method(&zip_file);
         if matches!(compression, CompressionMethod::Unsupported) {
-            return Err(ExtractionError::SecurityViolation {
+            return Err(ArchiveError::SecurityViolation {
                 reason: format!(
                     "unsupported compression method: {:?}",
                     zip_file.compression()
@@ -421,14 +421,12 @@ impl<R: Read + Seek> ArchiveFormat for ZipArchive<R> {
             let entry_path = {
                 // Borrow ends before process_entry to satisfy the borrow checker.
                 let zf = self.inner.by_index(i).map_err(|e| {
-                    ExtractionError::InvalidArchive(format!("failed to open zip entry {i}: {e}"))
+                    ArchiveError::InvalidArchive(format!("failed to open zip entry {i}: {e}"))
                 })?;
                 std::path::PathBuf::from(
                     zf.name()
                         .map_err(|e| {
-                            ExtractionError::InvalidArchive(format!(
-                                "invalid entry name at {i}: {e}"
-                            ))
+                            ArchiveError::InvalidArchive(format!("invalid entry name at {i}: {e}"))
                         })?
                         .as_ref(),
                 )
@@ -446,7 +444,7 @@ impl<R: Read + Seek> ArchiveFormat for ZipArchive<R> {
                 config,
             ) {
                 return Err(if report.total_items() > 0 {
-                    ExtractionError::PartialExtraction {
+                    ArchiveError::PartialExtraction {
                         source: Box::new(e),
                         report: std::mem::take(&mut report),
                     }
@@ -498,7 +496,7 @@ impl ZipEntryAdapter {
 
         let size = zip_file.size();
         if size > MAX_SYMLINK_TARGET_SIZE {
-            return Err(ExtractionError::SecurityViolation {
+            return Err(ArchiveError::SecurityViolation {
                 reason: format!(
                     "symlink target too large: {size} bytes (max {MAX_SYMLINK_TARGET_SIZE})"
                 ),
@@ -513,11 +511,11 @@ impl ZipEntryAdapter {
             .take(MAX_SYMLINK_TARGET_SIZE)
             .read_to_end(&mut target_bytes)
             .map_err(|e| {
-                ExtractionError::InvalidArchive(format!("failed to read symlink target: {e}"))
+                ArchiveError::InvalidArchive(format!("failed to read symlink target: {e}"))
             })?;
 
         let target_str = std::str::from_utf8(&target_bytes).map_err(|_| {
-            ExtractionError::InvalidArchive("symlink target is not valid UTF-8".into())
+            ArchiveError::InvalidArchive("symlink target is not valid UTF-8".into())
         })?;
 
         Ok(PathBuf::from(target_str))
@@ -881,7 +879,7 @@ mod tests {
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
-            ExtractionError::PathTraversal { .. }
+            ArchiveError::PathTraversal { .. }
         ));
     }
 
@@ -1123,7 +1121,7 @@ mod tests {
         );
 
         match result {
-            Err(ExtractionError::SecurityViolation { reason }) => {
+            Err(ArchiveError::SecurityViolation { reason }) => {
                 assert!(
                     reason.contains("symlinks not allowed") || reason.contains("symlink"),
                     "error should mention symlinks: {reason}"
@@ -1549,7 +1547,7 @@ mod tests {
                 )
                 .unwrap_err();
             assert!(
-                matches!(err, ExtractionError::SecurityViolation { .. }),
+                matches!(err, ArchiveError::SecurityViolation { .. }),
                 "expected SecurityViolation for unsupported compression, got: {err:?}"
             );
         }
@@ -1581,7 +1579,7 @@ mod tests {
                 )
                 .unwrap_err();
             assert!(
-                matches!(err, ExtractionError::SecurityViolation { ref reason } if reason.contains("symlink target too large")),
+                matches!(err, ArchiveError::SecurityViolation { ref reason } if reason.contains("symlink target too large")),
                 "expected SecurityViolation(symlink target too large), got: {err:?}"
             );
         }
@@ -1607,7 +1605,7 @@ mod tests {
                 )
                 .unwrap_err();
             assert!(
-                matches!(err, ExtractionError::InvalidArchive(ref msg) if msg.contains("UTF-8")),
+                matches!(err, ArchiveError::InvalidArchive(ref msg) if msg.contains("UTF-8")),
                 "expected InvalidArchive(UTF-8), got: {err:?}"
             );
         }
@@ -1647,7 +1645,7 @@ mod tests {
         let cursor = Cursor::new(zip_data);
         let result = ZipArchive::new(cursor);
         assert!(
-            matches!(result, Err(ExtractionError::SecurityViolation { .. })),
+            matches!(result, Err(ArchiveError::SecurityViolation { .. })),
             "expected SecurityViolation for encrypted entry in first batch"
         );
     }
@@ -1659,7 +1657,7 @@ mod tests {
         let cursor = Cursor::new(zip_data);
         let result = ZipArchive::new(cursor);
         assert!(
-            matches!(result, Err(ExtractionError::SecurityViolation { .. })),
+            matches!(result, Err(ArchiveError::SecurityViolation { .. })),
             "expected SecurityViolation for encrypted entry in middle batch"
         );
     }
@@ -1671,7 +1669,7 @@ mod tests {
         let cursor = Cursor::new(zip_data);
         let result = ZipArchive::new(cursor);
         assert!(
-            matches!(result, Err(ExtractionError::SecurityViolation { .. })),
+            matches!(result, Err(ArchiveError::SecurityViolation { .. })),
             "expected SecurityViolation for encrypted entry in last batch"
         );
     }
@@ -1704,7 +1702,7 @@ mod tests {
         let cursor = Cursor::new(zip_data);
         let result = ZipArchive::new(cursor);
         assert!(
-            matches!(result, Err(ExtractionError::SecurityViolation { .. })),
+            matches!(result, Err(ArchiveError::SecurityViolation { .. })),
             "full scan must detect encrypted entry at index 125"
         );
     }
@@ -1823,7 +1821,7 @@ mod tests {
             panic!("expected error for encrypted ZIP, got Ok");
         };
         match err {
-            ExtractionError::SecurityViolation { reason } => {
+            ArchiveError::SecurityViolation { reason } => {
                 assert!(
                     reason.contains("password") || reason.contains("encrypted"),
                     "expected password/encryption mention in reason: {reason}"
@@ -1868,7 +1866,7 @@ mod tests {
             "archive with encrypted entry at index 3 must be rejected"
         );
         match result.err().unwrap() {
-            ExtractionError::SecurityViolation { reason } => {
+            ArchiveError::SecurityViolation { reason } => {
                 assert!(
                     reason.contains("password") || reason.contains("encrypted"),
                     "unexpected reason: {reason}"

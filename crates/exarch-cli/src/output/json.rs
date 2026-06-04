@@ -5,9 +5,9 @@ use super::formatter::JsonPartialReport;
 use super::formatter::OutputFormatter;
 use crate::error::PartialExtractionContext;
 use anyhow::Result;
+use exarch_core::ArchiveError;
 use exarch_core::ArchiveManifest;
 use exarch_core::CreationReport;
-use exarch_core::ExtractionError;
 use exarch_core::ExtractionReport;
 use exarch_core::VerificationReport;
 use serde::Serialize;
@@ -15,24 +15,24 @@ use std::io::Write;
 use std::io::{self};
 use std::path::Path;
 
-fn extraction_error_kind(err: &ExtractionError) -> String {
+fn extraction_error_kind(err: &ArchiveError) -> String {
     match err {
-        ExtractionError::Io(_) => "IoError",
-        ExtractionError::InvalidArchive(_) => "InvalidArchive",
-        ExtractionError::PathTraversal { .. } => "PathTraversal",
-        ExtractionError::SymlinkEscape { .. } => "SymlinkEscape",
-        ExtractionError::HardlinkEscape { .. } => "HardlinkEscape",
-        ExtractionError::ZipBomb { .. } => "ZipBomb",
-        ExtractionError::InvalidPermissions { .. } => "InvalidPermissions",
-        ExtractionError::QuotaExceeded { .. } => "QuotaExceeded",
-        ExtractionError::SecurityViolation { .. } => "SecurityViolation",
-        ExtractionError::SourceNotFound { .. } => "SourceNotFound",
-        ExtractionError::SourceNotAccessible { .. } => "SourceNotAccessible",
-        ExtractionError::OutputExists { .. } => "OutputExists",
-        ExtractionError::InvalidCompressionLevel { .. } => "InvalidCompressionLevel",
-        ExtractionError::UnknownFormat { .. } => "UnknownFormat",
-        ExtractionError::InvalidConfiguration { .. } => "InvalidConfiguration",
-        ExtractionError::PartialExtraction { source, .. } => return extraction_error_kind(source),
+        ArchiveError::Io(_) => "IoError",
+        ArchiveError::InvalidArchive(_) => "InvalidArchive",
+        ArchiveError::PathTraversal { .. } => "PathTraversal",
+        ArchiveError::SymlinkEscape { .. } => "SymlinkEscape",
+        ArchiveError::HardlinkEscape { .. } => "HardlinkEscape",
+        ArchiveError::ZipBomb { .. } => "ZipBomb",
+        ArchiveError::InvalidPermissions { .. } => "InvalidPermissions",
+        ArchiveError::QuotaExceeded { .. } => "QuotaExceeded",
+        ArchiveError::SecurityViolation { .. } => "SecurityViolation",
+        ArchiveError::SourceNotFound { .. } => "SourceNotFound",
+        ArchiveError::SourceNotAccessible { .. } => "SourceNotAccessible",
+        ArchiveError::OutputExists { .. } => "OutputExists",
+        ArchiveError::InvalidCompressionLevel { .. } => "InvalidCompressionLevel",
+        ArchiveError::UnknownFormat { .. } => "UnknownFormat",
+        ArchiveError::InvalidConfiguration { .. } => "InvalidConfiguration",
+        ArchiveError::PartialExtraction { source, .. } => return extraction_error_kind(source),
     }
     .to_string()
 }
@@ -105,16 +105,14 @@ impl OutputFormatter for JsonFormatter {
     }
 
     fn format_error(&self, operation: &str, error: &anyhow::Error) {
-        let extraction_err = error
-            .chain()
-            .find_map(|e| e.downcast_ref::<ExtractionError>());
+        let extraction_err = error.chain().find_map(|e| e.downcast_ref::<ArchiveError>());
 
         let kind = extraction_err.map_or_else(|| "Error".to_string(), extraction_error_kind);
         let message = format!("{error:#}");
 
         // PartialExtraction is converted by convert_extraction_error into a chain
-        // of PartialExtractionContext → inner ExtractionError, so the partial
-        // report is carried by PartialExtractionContext, not by ExtractionError.
+        // of PartialExtractionContext → inner ArchiveError, so the partial
+        // report is carried by PartialExtractionContext, not by ArchiveError.
         let partial_report = error
             .chain()
             .find_map(|e| e.downcast_ref::<PartialExtractionContext>())
@@ -272,7 +270,7 @@ mod tests {
     use exarch_core::QuotaResource;
     use std::path::PathBuf;
 
-    fn error_kind(err: &ExtractionError) -> String {
+    fn error_kind(err: &ArchiveError) -> String {
         extraction_error_kind(err)
     }
 
@@ -299,7 +297,7 @@ mod tests {
 
     #[test]
     fn test_extraction_error_kind_zip_bomb() {
-        let err = ExtractionError::ZipBomb {
+        let err = ArchiveError::ZipBomb {
             compressed: 1000,
             uncompressed: 1_000_000,
             ratio: 1000.0,
@@ -309,7 +307,7 @@ mod tests {
 
     #[test]
     fn test_extraction_error_kind_path_traversal() {
-        let err = ExtractionError::PathTraversal {
+        let err = ArchiveError::PathTraversal {
             path: PathBuf::from("../etc/passwd"),
         };
         assert_eq!(error_kind(&err), "PathTraversal");
@@ -317,7 +315,7 @@ mod tests {
 
     #[test]
     fn test_extraction_error_kind_symlink_escape() {
-        let err = ExtractionError::SymlinkEscape {
+        let err = ArchiveError::SymlinkEscape {
             path: PathBuf::from("link"),
         };
         assert_eq!(error_kind(&err), "SymlinkEscape");
@@ -325,7 +323,7 @@ mod tests {
 
     #[test]
     fn test_extraction_error_kind_hardlink_escape() {
-        let err = ExtractionError::HardlinkEscape {
+        let err = ArchiveError::HardlinkEscape {
             path: PathBuf::from("hardlink"),
         };
         assert_eq!(error_kind(&err), "HardlinkEscape");
@@ -333,7 +331,7 @@ mod tests {
 
     #[test]
     fn test_extraction_error_kind_quota_exceeded() {
-        let err = ExtractionError::QuotaExceeded {
+        let err = ArchiveError::QuotaExceeded {
             resource: QuotaResource::FileCount {
                 current: 11,
                 max: 10,
@@ -344,13 +342,13 @@ mod tests {
 
     #[test]
     fn test_extraction_error_kind_invalid_archive() {
-        let err = ExtractionError::InvalidArchive("corrupted header".to_string());
+        let err = ArchiveError::InvalidArchive("corrupted header".to_string());
         assert_eq!(error_kind(&err), "InvalidArchive");
     }
 
     #[test]
     fn test_extraction_error_kind_io_error() {
-        let err = ExtractionError::Io(std::io::Error::new(
+        let err = ArchiveError::Io(std::io::Error::new(
             std::io::ErrorKind::NotFound,
             "file not found",
         ));
@@ -359,7 +357,7 @@ mod tests {
 
     #[test]
     fn test_extraction_error_kind_unknown_format() {
-        let err = ExtractionError::UnknownFormat {
+        let err = ArchiveError::UnknownFormat {
             path: std::path::PathBuf::from("archive.rar"),
         };
         assert_eq!(error_kind(&err), "UnknownFormat");
@@ -367,7 +365,7 @@ mod tests {
 
     #[test]
     fn test_extraction_error_kind_security_violation() {
-        let err = ExtractionError::SecurityViolation {
+        let err = ArchiveError::SecurityViolation {
             reason: "denied".to_string(),
         };
         assert_eq!(error_kind(&err), "SecurityViolation");
@@ -376,8 +374,8 @@ mod tests {
     #[test]
     fn test_format_error_downcasts_extraction_error() {
         // Verify that format_error correctly resolves the kind from an anyhow chain
-        // containing an ExtractionError.
-        let extraction_err = ExtractionError::ZipBomb {
+        // containing an ArchiveError.
+        let extraction_err = ArchiveError::ZipBomb {
             compressed: 100,
             uncompressed: 100_000,
             ratio: 1000.0,
@@ -387,7 +385,7 @@ mod tests {
         // Downcast manually, same logic as format_error uses
         let kind = anyhow_err
             .chain()
-            .find_map(|e| e.downcast_ref::<ExtractionError>())
+            .find_map(|e| e.downcast_ref::<ArchiveError>())
             .map_or_else(|| "Error".to_string(), extraction_error_kind);
 
         assert_eq!(kind, "ZipBomb");
@@ -395,20 +393,20 @@ mod tests {
 
     #[test]
     fn test_format_error_unknown_error_uses_generic_kind() {
-        // A plain anyhow error with no ExtractionError in chain should use "Error" as
+        // A plain anyhow error with no ArchiveError in chain should use "Error" as
         // kind
         let anyhow_err = anyhow::anyhow!("something went wrong");
 
         let kind = anyhow_err
             .chain()
-            .find_map(|e| e.downcast_ref::<ExtractionError>())
+            .find_map(|e| e.downcast_ref::<ArchiveError>())
             .map_or_else(|| "Error".to_string(), extraction_error_kind);
 
         assert_eq!(kind, "Error");
     }
 
     // Regression tests for issue #192: JSON error message must not duplicate text
-    // that ExtractionError::Display already emits.
+    // that ArchiveError::Display already emits.
 
     #[test]
     fn test_json_message_quota_exceeded_no_duplication() {
@@ -416,13 +414,13 @@ mod tests {
         use exarch_core::QuotaResource;
         use std::path::Path;
 
-        let err = ExtractionError::QuotaExceeded {
+        let err = ArchiveError::QuotaExceeded {
             resource: QuotaResource::FileCount {
                 current: 11,
                 max: 10,
             },
         };
-        // ExtractionError::Display emits "quota exceeded: file count (11 > 10)"
+        // ArchiveError::Display emits "quota exceeded: file count (11 > 10)"
         let display_text = err.to_string();
         let anyhow_err = convert_extraction_error(err, Path::new("archive.tar.gz"), false);
         let message = format!("{anyhow_err:#}");
@@ -431,7 +429,7 @@ mod tests {
         let display_occurrences = message.matches(&display_text).count();
         assert!(
             display_occurrences <= 1,
-            "JSON message duplicates ExtractionError display text ({display_occurrences} occurrences): {message}"
+            "JSON message duplicates ArchiveError display text ({display_occurrences} occurrences): {message}"
         );
     }
 
@@ -443,12 +441,12 @@ mod tests {
         let compressed = 1_024_u64;
         let uncompressed = 1_024 * 1_024 * 150_u64;
         let ratio = 150.0_f64;
-        let err = ExtractionError::ZipBomb {
+        let err = ArchiveError::ZipBomb {
             compressed,
             uncompressed,
             ratio,
         };
-        // ExtractionError::Display emits the ratio info
+        // ArchiveError::Display emits the ratio info
         let display_text = err.to_string();
         let anyhow_err = convert_extraction_error(err, Path::new("bomb.zip"), false);
         let message = format!("{anyhow_err:#}");
@@ -456,7 +454,7 @@ mod tests {
         let display_occurrences = message.matches(&display_text).count();
         assert!(
             display_occurrences <= 1,
-            "JSON message duplicates ExtractionError display text ({display_occurrences} occurrences): {message}"
+            "JSON message duplicates ArchiveError display text ({display_occurrences} occurrences): {message}"
         );
     }
 }

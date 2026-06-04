@@ -63,7 +63,7 @@
 //! use std::fs::File;
 //! use std::path::Path;
 //!
-//! # fn main() -> Result<(), exarch_core::ExtractionError> {
+//! # fn main() -> Result<(), exarch_core::ArchiveError> {
 //! let file = File::open("archive.7z")?;
 //! let mut archive = SevenZArchive::new(file)?;
 //! let report = archive.extract(
@@ -104,7 +104,7 @@ use sevenz_rust2::Password;
 // Atomic counter for generating unique temporary file names
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-use crate::ExtractionError;
+use crate::ArchiveError;
 use crate::ExtractionOptions;
 use crate::ExtractionReport;
 use crate::ProgressCallback;
@@ -196,7 +196,7 @@ struct CachedEntry {
 ///     &mut exarch_core::NoopProgress,
 /// )?;
 /// println!("Extracted {} files", report.files_extracted);
-/// # Ok::<(), exarch_core::ExtractionError>(())
+/// # Ok::<(), exarch_core::ArchiveError>(())
 /// ```
 #[derive(Debug)]
 pub struct SevenZArchive<R: Read + Seek> {
@@ -229,7 +229,7 @@ impl<R: Read + Seek> SevenZArchive<R> {
     ///
     /// let file = File::open("archive.7z")?;
     /// let archive = SevenZArchive::new(file)?;
-    /// # Ok::<(), exarch_core::ExtractionError>(())
+    /// # Ok::<(), exarch_core::ArchiveError>(())
     /// ```
     pub fn new(mut source: R) -> Result<Self> {
         // Step 1: Verify it's a valid 7z archive by reading metadata
@@ -240,7 +240,7 @@ impl<R: Read + Seek> SevenZArchive<R> {
                 // SECURITY: Check if error indicates encryption
                 let err_str = e.to_string().to_lowercase();
                 if err_str.contains("encrypt") || err_str.contains("password") {
-                    return Err(ExtractionError::SecurityViolation {
+                    return Err(ArchiveError::SecurityViolation {
                         reason: "encrypted 7z archive detected. Password-protected archives are not supported. \
                                  Decrypt the archive externally and try again.".into(),
                     });
@@ -255,7 +255,7 @@ impl<R: Read + Seek> SevenZArchive<R> {
                         is_solid: false,
                     });
                 }
-                return Err(ExtractionError::InvalidArchive(format!(
+                return Err(ArchiveError::InvalidArchive(format!(
                     "failed to open 7z archive: {e}"
                 )));
             }
@@ -277,7 +277,7 @@ impl<R: Read + Seek> SevenZArchive<R> {
             .collect();
 
         // Step 4: Rewind for actual extraction
-        source.rewind().map_err(ExtractionError::Io)?;
+        source.rewind().map_err(ArchiveError::Io)?;
 
         Ok(Self {
             source,
@@ -444,10 +444,10 @@ impl<R: Read + Seek> SevenZArchive<R> {
 
         let e = match result {
             Ok(()) => return Ok(accumulated),
-            Err(e) => ExtractionError::from(e),
+            Err(e) => ArchiveError::from(e),
         };
         if accumulated.total_items() > 0 {
-            Err(ExtractionError::PartialExtraction {
+            Err(ArchiveError::PartialExtraction {
                 source: Box::new(e),
                 report: accumulated,
             })
@@ -468,7 +468,7 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
         // Step 0: Validate solid archive policy
         if self.is_solid {
             if !config.allow_solid_archives {
-                return Err(ExtractionError::SecurityViolation {
+                return Err(ArchiveError::SecurityViolation {
                     reason: "solid 7z archives are not allowed (enable allow_solid_archives)"
                         .into(),
                 });
@@ -482,14 +482,14 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
                 .entries
                 .iter()
                 .try_fold(0u64, |acc, e| acc.checked_add(e.size))
-                .ok_or(ExtractionError::QuotaExceeded {
+                .ok_or(ArchiveError::QuotaExceeded {
                     resource: QuotaResource::TotalSize {
                         current: u64::MAX,
                         max: config.max_solid_block_memory,
                     },
                 })?;
             if total_uncompressed > config.max_solid_block_memory {
-                return Err(ExtractionError::QuotaExceeded {
+                return Err(ArchiveError::QuotaExceeded {
                     resource: QuotaResource::TotalSize {
                         current: total_uncompressed,
                         max: config.max_solid_block_memory,
@@ -534,7 +534,7 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
                 _ => {
                     // KNOWN LIMITATION: sevenz-rust2 doesn't expose symlink/hardlink detection.
                     // If entry type detection improves, this will catch them.
-                    return Err(ExtractionError::SecurityViolation {
+                    return Err(ArchiveError::SecurityViolation {
                         reason: "symlinks/hardlinks not yet supported for 7z".into(),
                     });
                 }
@@ -570,7 +570,7 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
 
     fn list(&mut self, config: &SecurityConfig) -> Result<crate::inspection::ArchiveManifest> {
         use crate::inspection::list::list_sevenz_reader;
-        self.source.rewind().map_err(ExtractionError::Io)?;
+        self.source.rewind().map_err(ArchiveError::Io)?;
         list_sevenz_reader(&mut self.source, config)
     }
 
@@ -644,7 +644,7 @@ impl SevenZEntryAdapter {
         // SECURITY: Check Windows attributes for reparse points FIRST
         // This applies to BOTH files AND directories (e.g., directory junctions)
         if Self::is_windows_reparse_point(entry) {
-            return Err(ExtractionError::SecurityViolation {
+            return Err(ArchiveError::SecurityViolation {
                 reason: format!(
                     "symlink detected in 7z archive: {} \
                      (Windows reparse point attribute set). \
@@ -715,8 +715,8 @@ fn is_empty_sevenz_archive<R: Read + Seek>(err: &sevenz_rust2::Error, source: &m
     source.read_exact(&mut magic).is_ok() && magic == SEVENZ_MAGIC
 }
 
-/// Converts sevenz-rust2 errors to our `ExtractionError` type.
-impl From<sevenz_rust2::Error> for ExtractionError {
+/// Converts sevenz-rust2 errors to our `ArchiveError` type.
+impl From<sevenz_rust2::Error> for ArchiveError {
     fn from(err: sevenz_rust2::Error) -> Self {
         let err_str = err.to_string();
         let err_lower = err_str.to_lowercase();
@@ -783,7 +783,7 @@ mod tests {
         assert!(result.is_err(), "invalid archive should fail to parse");
 
         // Verify the error is InvalidArchive (not security violation)
-        assert!(matches!(result, Err(ExtractionError::InvalidArchive(_))));
+        assert!(matches!(result, Err(ArchiveError::InvalidArchive(_))));
     }
 
     /// Test that invalid magic bytes are rejected.
@@ -794,7 +794,7 @@ mod tests {
 
         let result = SevenZArchive::new(cursor);
         assert!(result.is_err());
-        assert!(matches!(result, Err(ExtractionError::InvalidArchive(_))));
+        assert!(matches!(result, Err(ArchiveError::InvalidArchive(_))));
     }
 
     #[test]
@@ -874,7 +874,7 @@ mod tests {
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
-            ExtractionError::SecurityViolation { .. }
+            ArchiveError::SecurityViolation { .. }
         ));
     }
 
@@ -888,7 +888,7 @@ mod tests {
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
-            ExtractionError::SecurityViolation { .. }
+            ArchiveError::SecurityViolation { .. }
         ));
     }
 
@@ -956,7 +956,7 @@ mod tests {
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
-            ExtractionError::QuotaExceeded { .. }
+            ArchiveError::QuotaExceeded { .. }
         ));
     }
 
@@ -1050,7 +1050,7 @@ mod tests {
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
-            ExtractionError::SecurityViolation { .. }
+            ArchiveError::SecurityViolation { .. }
         ));
     }
 
@@ -1077,7 +1077,7 @@ mod tests {
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
-            ExtractionError::QuotaExceeded { .. }
+            ArchiveError::QuotaExceeded { .. }
         ));
     }
 
@@ -1185,7 +1185,7 @@ mod tests {
         assert!(result.is_err(), "one byte under limit should reject");
         assert!(matches!(
             result.unwrap_err(),
-            ExtractionError::QuotaExceeded { .. }
+            ArchiveError::QuotaExceeded { .. }
         ));
     }
 
@@ -1206,7 +1206,7 @@ mod tests {
 
         assert!(result.is_err());
         match result.unwrap_err() {
-            ExtractionError::SecurityViolation { reason } => {
+            ArchiveError::SecurityViolation { reason } => {
                 assert!(
                     reason.contains("solid") && reason.contains("allow_solid_archives"),
                     "error should mention 'solid' and 'allow_solid_archives', got: {reason}"
@@ -1235,10 +1235,7 @@ mod tests {
         let result = SevenZEntryAdapter::to_entry_type(&entry);
         assert!(result.is_err(), "should return error for reparse point");
         assert!(
-            matches!(
-                result.unwrap_err(),
-                ExtractionError::SecurityViolation { .. }
-            ),
+            matches!(result.unwrap_err(), ArchiveError::SecurityViolation { .. }),
             "should be SecurityViolation error"
         );
     }
@@ -1307,7 +1304,7 @@ mod tests {
         assert!(result.is_err(), "directory junction should be rejected");
         assert!(matches!(
             result.unwrap_err(),
-            ExtractionError::SecurityViolation { .. }
+            ArchiveError::SecurityViolation { .. }
         ));
     }
 
@@ -1322,7 +1319,7 @@ mod tests {
         assert!(result.is_err());
 
         match result.unwrap_err() {
-            ExtractionError::SecurityViolation { reason } => {
+            ArchiveError::SecurityViolation { reason } => {
                 assert!(
                     reason.contains("symlink") && reason.contains("link.txt"),
                     "error should mention 'symlink' and entry name, got: {reason}"

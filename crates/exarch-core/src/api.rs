@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use crate::ExtractionError;
+use crate::ArchiveError;
 use crate::ExtractionReport;
 use crate::NoopProgress;
 use crate::ProgressCallback;
@@ -101,7 +101,7 @@ pub fn extract_archive_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
     progress: &mut dyn ProgressCallback,
 ) -> Result<ExtractionReport> {
     let options = ExtractionOptions::default();
-    extract_impl(archive_path, output_dir, config, &options, progress)
+    extract_archive_with_options_and_progress(archive_path, output_dir, config, &options, progress)
 }
 
 fn extract_impl<P: AsRef<Path>, Q: AsRef<Path>>(
@@ -151,8 +151,10 @@ fn extract_impl<P: AsRef<Path>, Q: AsRef<Path>>(
 
 /// Extracts an archive with extraction options and optional progress reporting.
 ///
-/// This is the most flexible extraction API. Use this when you need both
-/// `ExtractionOptions` (e.g., atomic mode) and progress reporting.
+/// This is the canonical extraction implementation. All other
+/// `extract_archive*` functions are thin wrappers that delegate here. Use this
+/// directly when you need both [`ExtractionOptions`] (e.g., atomic mode) and a
+/// progress callback.
 ///
 /// # Arguments
 ///
@@ -170,6 +172,30 @@ fn extract_impl<P: AsRef<Path>, Q: AsRef<Path>>(
 /// - Security validation fails
 /// - I/O operations fail
 /// - Atomic temp dir creation or rename fails
+///
+/// # Examples
+///
+/// ```no_run
+/// use exarch_core::ExtractionOptions;
+/// use exarch_core::NoopProgress;
+/// use exarch_core::SecurityConfig;
+/// use exarch_core::extract_archive_with_options_and_progress;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let config = SecurityConfig::default();
+/// let options = ExtractionOptions::default().with_atomic(true);
+/// let mut progress = NoopProgress;
+/// let report = extract_archive_with_options_and_progress(
+///     "archive.tar.gz",
+///     "/tmp/output",
+///     &config,
+///     &options,
+///     &mut progress,
+/// )?;
+/// println!("Extracted {} files", report.files_extracted);
+/// # Ok(())
+/// # }
+/// ```
 pub fn extract_archive_with_options_and_progress<P: AsRef<Path>, Q: AsRef<Path>>(
     archive_path: P,
     output_dir: Q,
@@ -186,8 +212,9 @@ pub fn extract_archive_with_options_and_progress<P: AsRef<Path>, Q: AsRef<Path>>
 
 /// Extracts an archive with extraction options (no progress reporting).
 ///
-/// Same as `extract_archive_with_options_and_progress` but uses a no-op
-/// progress callback.
+/// Convenience wrapper around [`extract_archive_with_options_and_progress`]
+/// that passes a no-op progress callback. Use this when you need
+/// [`ExtractionOptions`] but do not require progress updates.
 ///
 /// # Errors
 ///
@@ -197,6 +224,22 @@ pub fn extract_archive_with_options_and_progress<P: AsRef<Path>, Q: AsRef<Path>>
 /// - Security validation fails
 /// - I/O operations fail
 /// - Atomic temp dir creation or rename fails
+///
+/// # Examples
+///
+/// ```no_run
+/// use exarch_core::ExtractionOptions;
+/// use exarch_core::SecurityConfig;
+/// use exarch_core::extract_archive_with_options;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let config = SecurityConfig::default();
+/// let options = ExtractionOptions::default().with_atomic(true);
+/// let report = extract_archive_with_options("archive.tar.gz", "/tmp/output", &config, &options)?;
+/// println!("Extracted {} files", report.files_extracted);
+/// # Ok(())
+/// # }
+/// ```
 pub fn extract_archive_with_options<P: AsRef<Path>, Q: AsRef<Path>>(
     archive_path: P,
     output_dir: Q,
@@ -220,22 +263,21 @@ fn extract_atomic<P: AsRef<Path>, Q: AsRef<Path>>(
     // computing the parent, so temp dir lands on the same filesystem.
     // If output_dir doesn't exist yet, use its lexical parent.
     let canonical_output = if output_dir.exists() {
-        output_dir.canonicalize().map_err(ExtractionError::Io)?
+        output_dir.canonicalize().map_err(ArchiveError::Io)?
     } else {
         output_dir.to_path_buf()
     };
 
-    let parent =
-        canonical_output
-            .parent()
-            .ok_or_else(|| ExtractionError::InvalidConfiguration {
-                reason: "output directory has no parent".into(),
-            })?;
+    let parent = canonical_output
+        .parent()
+        .ok_or_else(|| ArchiveError::InvalidConfiguration {
+            reason: "output directory has no parent".into(),
+        })?;
 
-    std::fs::create_dir_all(parent).map_err(ExtractionError::Io)?;
+    std::fs::create_dir_all(parent).map_err(ArchiveError::Io)?;
 
     let temp_dir = tempfile::tempdir_in(parent).map_err(|e| {
-        ExtractionError::Io(std::io::Error::new(
+        ArchiveError::Io(std::io::Error::new(
             e.kind(),
             format!(
                 "failed to create temp directory in {}: {e}",
@@ -255,11 +297,11 @@ fn extract_atomic<P: AsRef<Path>, Q: AsRef<Path>>(
                 let _ = std::fs::remove_dir_all(&temp_path);
                 // Map AlreadyExists to OutputExists for caller clarity
                 if e.kind() == std::io::ErrorKind::AlreadyExists {
-                    ExtractionError::OutputExists {
+                    ArchiveError::OutputExists {
                         path: output_dir.to_path_buf(),
                     }
                 } else {
-                    ExtractionError::Io(std::io::Error::new(
+                    ArchiveError::Io(std::io::Error::new(
                         e.kind(),
                         format!("failed to rename temp dir to {}: {e}", output_dir.display()),
                     ))
@@ -457,7 +499,7 @@ fn creator_for_format(
         ArchiveType::TarXz => Ok(Box::new(crate::creation::TarXzCreator)),
         ArchiveType::TarZst => Ok(Box::new(crate::creation::TarZstCreator)),
         ArchiveType::Zip => Ok(Box::new(crate::creation::ZipCreator)),
-        ArchiveType::SevenZ => Err(ExtractionError::InvalidConfiguration {
+        ArchiveType::SevenZ => Err(ArchiveError::InvalidConfiguration {
             reason: "7z archive creation is not supported".into(),
         }),
     }
@@ -565,7 +607,7 @@ fn reject_zip_family_creation(output: &Path) -> Result<()> {
     };
     if is_zip_family_alias(ext) {
         let ext_lower = ext.to_ascii_lowercase();
-        return Err(ExtractionError::InvalidArchive(format!(
+        return Err(ArchiveError::InvalidArchive(format!(
             "creation for .{ext_lower} isn't supported: the format is ZIP-based but \
              requires extra structure (signing, manifests, ordering) that exarch \
              doesn't produce. Use .zip, or set CreationConfig::format = Some(\
@@ -694,7 +736,7 @@ mod tests {
         assert!(
             matches!(
                 result,
-                Err(ExtractionError::InvalidCompressionLevel { level: 15 })
+                Err(ArchiveError::InvalidCompressionLevel { level: 15 })
             ),
             "expected InvalidCompressionLevel, got {result:?}",
         );
@@ -712,7 +754,7 @@ mod tests {
             let archive_path = dest.path().join(format!("output.{ext}"));
             let result = create_archive(&archive_path, &[] as &[&str], &CreationConfig::default());
             assert!(
-                matches!(result, Err(ExtractionError::InvalidArchive(_))),
+                matches!(result, Err(ArchiveError::InvalidArchive(_))),
                 ".{ext} should be rejected, got {result:?}",
             );
         }
@@ -745,7 +787,7 @@ mod tests {
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
-            ExtractionError::InvalidConfiguration { .. }
+            ArchiveError::InvalidConfiguration { .. }
         ));
     }
 

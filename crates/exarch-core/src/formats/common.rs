@@ -19,7 +19,7 @@ use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 
-use crate::ExtractionError;
+use crate::ArchiveError;
 use crate::ExtractionReport;
 use crate::Result;
 use crate::copy::CopyBuffer;
@@ -407,7 +407,7 @@ pub fn extract_file_generic<R: Read>(
         report
             .bytes_written
             .checked_add(size)
-            .ok_or(ExtractionError::QuotaExceeded {
+            .ok_or(ArchiveError::QuotaExceeded {
                 resource: QuotaResource::IntegerOverflow,
             })?;
     }
@@ -424,7 +424,7 @@ pub fn extract_file_generic<R: Read>(
         report
             .bytes_written
             .checked_add(bytes_written)
-            .ok_or(ExtractionError::QuotaExceeded {
+            .ok_or(ArchiveError::QuotaExceeded {
                 resource: QuotaResource::IntegerOverflow,
             })?;
 
@@ -543,7 +543,7 @@ pub fn create_symlink(
 
     #[cfg(not(unix))]
     {
-        Err(ExtractionError::SecurityViolation {
+        Err(ArchiveError::SecurityViolation {
             reason: "symlinks are not supported on this platform".into(),
         })
     }
@@ -553,7 +553,7 @@ pub fn create_symlink(
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::ExtractionError;
+    use crate::ArchiveError;
     use crate::ExtractionReport;
     use crate::SecurityConfig;
     use crate::copy::CopyBuffer;
@@ -603,7 +603,7 @@ mod tests {
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
-            ExtractionError::QuotaExceeded {
+            ArchiveError::QuotaExceeded {
                 resource: QuotaResource::IntegerOverflow
             }
         ));

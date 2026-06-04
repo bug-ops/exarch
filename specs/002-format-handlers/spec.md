@@ -90,7 +90,7 @@ SO THAT I am not silently given a bare ZIP file named .apk
 ```
 GIVEN an output path with a ZIP-family alias extension and no CreationConfig::format override
 WHEN create_archive() is called
-THEN the call fails with ExtractionError::InvalidArchive with an explanatory message
+THEN the call fails with ArchiveError::InvalidArchive with an explanatory message
 ```
 
 ### US-004: 7z Extraction Only
@@ -109,7 +109,7 @@ THEN extraction proceeds through the security pipeline and files are written to 
 ```
 GIVEN a .7z output path
 WHEN create_archive() is called
-THEN the call fails with ExtractionError::InvalidConfiguration
+THEN the call fails with ArchiveError::InvalidConfiguration
 ```
 
 ### US-005: Solid 7z Rejection by Default
@@ -135,7 +135,7 @@ SO THAT I do not need to specify the format explicitly
 ```
 GIVEN an archive path with an unrecognized extension
 WHEN any archive operation is called
-THEN ExtractionError::UnknownFormat { path } is returned immediately
+THEN ArchiveError::UnknownFormat { path } is returned immediately
 ```
 
 ## 3. Functional Requirements
@@ -145,15 +145,15 @@ THEN ExtractionError::UnknownFormat { path } is returned immediately
 | FR-020 | WHEN an archive path has extension `.tar`, `.tgz`, `.tar.gz`, `.tar.bz2`, `.tbz`, `.tbz2`, `.tar.xz`, `.txz`, `.tar.zst`, `.tzst`, THE SYSTEM SHALL extract it as a TAR archive with the appropriate decompressor | must |
 | FR-021 | WHEN an archive path has extension `.zip` or any ZIP-family alias, THE SYSTEM SHALL extract it as a ZIP archive | must |
 | FR-022 | WHEN an archive path has extension `.7z`, THE SYSTEM SHALL extract it using the 7z handler | must |
-| FR-023 | WHEN format detection finds an unrecognized or ambiguous extension (e.g. bare `.gz` without `.tar` stem), THE SYSTEM SHALL return `ExtractionError::UnknownFormat { path }` | must |
+| FR-023 | WHEN format detection finds an unrecognized or ambiguous extension (e.g. bare `.gz` without `.tar` stem), THE SYSTEM SHALL return `ArchiveError::UnknownFormat { path }` | must |
 | FR-024 | WHEN creating archives, THE SYSTEM SHALL support TAR (all compression variants) and ZIP; 7z creation SHALL return `InvalidConfiguration` | must |
-| FR-025 | WHEN creating archives for ZIP-family aliases without an explicit `CreationConfig::format` override, THE SYSTEM SHALL return `ExtractionError::InvalidArchive` with an explanation | should |
+| FR-025 | WHEN creating archives for ZIP-family aliases without an explicit `CreationConfig::format` override, THE SYSTEM SHALL return `ArchiveError::InvalidArchive` with an explanation | should |
 | FR-026 | WHEN a 7z archive is solid and `allow_solid_archives` is false, THE SYSTEM SHALL reject extraction before decompressing the solid block | must |
 | FR-027 | WHEN a 7z solid archive extraction is permitted, THE SYSTEM SHALL reject it if total uncompressed size exceeds `max_solid_block_memory` | must |
 | FR-028 | Every format handler SHALL route all entries through `EntryValidator` before writing to disk | must |
 | FR-029 | WHEN listing or verifying an archive, THE SYSTEM SHALL NOT write any files to disk | must |
 | FR-030 | WHEN `allowed_extensions` in `SecurityConfig` is non-empty, ALL three format handlers (TAR, ZIP, 7z) SHALL skip entries whose extension is not in the allowlist and record them in `ExtractionReport::files_skipped` | must |
-| FR-031 | `ArchiveFormat::extract` SHALL accept and invoke a `ProgressCallback` for every entry; ZIP-family alias creation without an explicit `CreationConfig::format` override SHALL be rejected with `ExtractionError::InvalidArchive` naming the alias | must |
+| FR-031 | `ArchiveFormat::extract` SHALL accept and invoke a `ProgressCallback` for every entry; ZIP-family alias creation without an explicit `CreationConfig::format` override SHALL be rejected with `ArchiveError::InvalidArchive` naming the alias | must |
 
 ## 4. Non-Functional Requirements
 
@@ -226,14 +226,14 @@ FormatCreator:
 
 | Scenario | Expected Behavior |
 |----------|-------------------|
-| Archive path does not exist | `ExtractionError::Io` returned immediately |
-| Extension unrecognized or bare `.gz` without `.tar` stem | `ExtractionError::UnknownFormat { path }` |
+| Archive path does not exist | `ArchiveError::Io` returned immediately |
+| Extension unrecognized or bare `.gz` without `.tar` stem | `ArchiveError::UnknownFormat { path }` |
 | ZIP-family alias extraction | Proceeds as ZIP |
-| ZIP-family alias creation without format override | `ExtractionError::InvalidArchive` with explanation |
-| 7z creation | `ExtractionError::InvalidConfiguration` |
+| ZIP-family alias creation without format override | `ArchiveError::InvalidArchive` with explanation |
+| 7z creation | `ArchiveError::InvalidConfiguration` |
 | Solid 7z with `allow_solid_archives = false` | Extraction rejected before decompressing |
-| Solid 7z with total uncompressed size > `max_solid_block_memory` | `ExtractionError::QuotaExceeded` or format-specific rejection |
-| Corrupt archive (unreadable headers) | `ExtractionError::InvalidArchive`; `verify_archive` returns `VerificationReport` with issues |
+| Solid 7z with total uncompressed size > `max_solid_block_memory` | `ArchiveError::QuotaExceeded` or format-specific rejection |
+| Corrupt archive (unreadable headers) | `ArchiveError::InvalidArchive`; `verify_archive` returns `VerificationReport` with issues |
 | Compression ratio unavailable per-entry (TAR streams) | Zip bomb check skipped for that entry; total quota still enforced |
 
 ## 7. Success Criteria

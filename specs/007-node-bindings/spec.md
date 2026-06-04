@@ -86,7 +86,7 @@ THEN a JavaScript Error is thrown synchronously
 ### US-003: Named JavaScript Error Types
 
 AS A Node.js developer
-I WANT Rust ExtractionError variants to produce named JS Error objects
+I WANT Rust ArchiveError variants to produce named JS Error objects
 SO THAT I can differentiate errors in a catch block by type name
 
 **Acceptance criteria:**
@@ -129,7 +129,7 @@ THEN extraction respects those settings
 | FR-080 | THE SYSTEM SHALL expose async Node.js functions returning Promises: `extractArchive`, `createArchive`, `listArchive`, `verifyArchive` | must |
 | FR-081 | ALL async operations SHALL run on the libuv thread pool, not the main event loop thread | must |
 | FR-082 | WHEN paths contain null bytes or exceed 4096 bytes, THE SYSTEM SHALL throw a synchronous JavaScript Error before spawning a thread | must |
-| FR-083 | Rust `ExtractionError` variants SHALL map to named JavaScript Error types; when `PartialExtraction` wraps an inner error, the error message SHALL begin with the specific inner error code (e.g. `SYMLINK_ESCAPE`, `QUOTA_EXCEEDED`) and SHALL append `filesExtracted` and `bytesWritten` fields for caller inspection | must |
+| FR-083 | Rust `ArchiveError` variants SHALL map to named JavaScript Error types; when `PartialExtraction` wraps an inner error, the error message SHALL begin with the specific inner error code (e.g. `SYMLINK_ESCAPE`, `QUOTA_EXCEEDED`) and SHALL append `filesExtracted` and `bytesWritten` fields for caller inspection | must |
 | FR-084 | `SecurityConfig` and `CreationConfig` SHALL be exposed as JavaScript classes with fluent builder methods | must |
 | FR-085 | `ExtractionReport`, `CreationReport`, `ArchiveManifest`, and `VerificationReport` SHALL be exposed as JavaScript objects with typed fields | must |
 | FR-086 | napi-rs SHALL generate TypeScript `.d.ts` files for all exported functions and classes | must |
@@ -204,7 +204,7 @@ class CreationConfig {
 
 ### JavaScript Error Mapping
 
-| Rust `ExtractionError` variant | JavaScript Error name |
+| Rust `ArchiveError` variant | JavaScript Error name |
 |---|---|
 | `PathTraversal` | `PathTraversalError` |
 | `SymlinkEscape` | `SymlinkEscapeError` |
@@ -234,8 +234,8 @@ class CreationConfig {
 | Path is `null` or `undefined` | TypeError thrown by napi-rs before boundary check |
 | Path contains null byte | Synchronous `Error` thrown before Promise creation |
 | Path exceeds 4096 bytes | Synchronous `Error` thrown before Promise creation |
-| Rust returns `ExtractionError::PathTraversal` | Promise rejects with `PathTraversalError` |
-| Rust returns `ExtractionError::PartialExtraction` | Promise rejects with the specific inner error code as prefix (e.g. `SYMLINK_ESCAPE: ...`); message appends `filesExtracted` and `bytesWritten` |
+| Rust returns `ArchiveError::PathTraversal` | Promise rejects with `PathTraversalError` |
+| Rust returns `ArchiveError::PartialExtraction` | Promise rejects with the specific inner error code as prefix (e.g. `SYMLINK_ESCAPE: ...`); message appends `filesExtracted` and `bytesWritten` |
 | Thread pool exhausted | Promise eventually resolves when thread becomes available; no timeout |
 | `sources` array is empty for `createArchive` | [NEEDS CLARIFICATION: reject immediately or produce empty archive?] |
 
@@ -245,7 +245,7 @@ class CreationConfig {
 |----|--------|--------|
 | SC-001 | All async functions resolve with correct report objects | `npm test` passes |
 | SC-002 | Event loop not blocked during extraction | Test with concurrent timer; timer fires during extraction |
-| SC-003 | All `ExtractionError` variants produce named JS Errors | Test for each variant |
+| SC-003 | All `ArchiveError` variants produce named JS Errors | Test for each variant |
 | SC-004 | Path boundary validation throws synchronously | Unit test: no Promise.reject, synchronous throw |
 | SC-005 | TypeScript definitions are valid and complete | `tsc --noEmit` passes on test file |
 
@@ -254,7 +254,7 @@ class CreationConfig {
 ### Always (without asking)
 - Validate paths synchronously at the JS boundary before creating a Promise
 - Run all I/O on the libuv thread pool via napi-rs async pattern
-- Map every `ExtractionError` variant to a named JS Error
+- Map every `ArchiveError` variant to a named JS Error
 - Keep all security logic in `exarch-core`; Node.js crate contains only type mapping
 
 ### Ask First

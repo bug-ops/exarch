@@ -615,12 +615,12 @@ def verify_archive(
     """
     ...
 
-class ExtractionError(Exception):
+class ArchiveError(Exception):
     """Base exception for all extraction errors."""
 
     ...
 
-class PathTraversalError(ExtractionError):
+class PathTraversalError(ArchiveError):
     """
     Path traversal attempt detected.
 
@@ -635,7 +635,7 @@ class PathTraversalError(ExtractionError):
     files_extracted: int
     bytes_written: int
 
-class SymlinkEscapeError(ExtractionError):
+class SymlinkEscapeError(ArchiveError):
     """
     Symlink points outside extraction directory.
 
@@ -650,7 +650,7 @@ class SymlinkEscapeError(ExtractionError):
     files_extracted: int
     bytes_written: int
 
-class HardlinkEscapeError(ExtractionError):
+class HardlinkEscapeError(ArchiveError):
     """
     Hardlink target outside extraction directory.
 
@@ -665,7 +665,7 @@ class HardlinkEscapeError(ExtractionError):
     files_extracted: int
     bytes_written: int
 
-class ZipBombError(ExtractionError):
+class ZipBombError(ArchiveError):
     """
     Potential zip bomb detected.
 
@@ -680,7 +680,7 @@ class ZipBombError(ExtractionError):
     files_extracted: int
     bytes_written: int
 
-class InvalidPermissionsError(ExtractionError):
+class InvalidPermissionsError(ArchiveError):
     """
     File permissions are invalid or unsafe.
 
@@ -695,7 +695,7 @@ class InvalidPermissionsError(ExtractionError):
     files_extracted: int
     bytes_written: int
 
-class QuotaExceededError(ExtractionError):
+class QuotaExceededError(ArchiveError):
     """
     Resource quota exceeded.
 
@@ -710,7 +710,7 @@ class QuotaExceededError(ExtractionError):
     files_extracted: int
     bytes_written: int
 
-class SecurityViolationError(ExtractionError):
+class SecurityViolationError(ArchiveError):
     """
     Security policy violation.
 
@@ -725,7 +725,7 @@ class SecurityViolationError(ExtractionError):
     files_extracted: int
     bytes_written: int
 
-class UnsupportedFormatError(ExtractionError):
+class UnsupportedFormatError(ArchiveError):
     """Archive format not supported."""
 
     ...
@@ -742,7 +742,7 @@ class UnknownFormatError(UnsupportedFormatError):
 
     ...
 
-class InvalidArchiveError(ExtractionError):
+class InvalidArchiveError(ArchiveError):
     """Archive is corrupted."""
 
     ...

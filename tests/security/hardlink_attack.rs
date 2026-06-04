@@ -2,7 +2,7 @@
 
 use exarch_core::security::EntryValidator;
 use exarch_core::types::{DestDir, EntryType};
-use exarch_core::{ExtractionError, SecurityConfig};
+use exarch_core::{ArchiveError, SecurityConfig};
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
@@ -27,7 +27,7 @@ fn test_hardlink_absolute_target() {
 
     assert!(matches!(
         result,
-        Err(ExtractionError::HardlinkEscape { .. })
+        Err(ArchiveError::HardlinkEscape { .. })
     ));
 }
 
@@ -52,7 +52,7 @@ fn test_hardlink_parent_traversal() {
 
     assert!(matches!(
         result,
-        Err(ExtractionError::HardlinkEscape { .. })
+        Err(ArchiveError::HardlinkEscape { .. })
     ));
 }
 
@@ -76,7 +76,7 @@ fn test_hardlink_disabled_by_default() {
 
     assert!(matches!(
         result,
-        Err(ExtractionError::SecurityViolation { .. })
+        Err(ArchiveError::SecurityViolation { .. })
     ));
 }
 
@@ -183,6 +183,6 @@ fn test_hardlink_chain_escape() {
 
     assert!(matches!(
         result,
-        Err(ExtractionError::HardlinkEscape { .. })
+        Err(ArchiveError::HardlinkEscape { .. })
     ));
 }

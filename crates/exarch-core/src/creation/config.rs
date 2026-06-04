@@ -1,6 +1,6 @@
 //! Configuration for archive creation operations.
 
-use crate::ExtractionError;
+use crate::ArchiveError;
 use crate::Result;
 use crate::formats::detect::ArchiveType;
 use std::path::PathBuf;
@@ -163,11 +163,11 @@ impl CreationConfig {
     ///
     /// # Errors
     ///
-    /// Returns [`ExtractionError::InvalidCompressionLevel`] if `level` is not
+    /// Returns [`ArchiveError::InvalidCompressionLevel`] if `level` is not
     /// in the range 1–9.
     pub fn with_compression_level(mut self, level: u8) -> Result<Self> {
         if !(1..=9).contains(&level) {
-            return Err(ExtractionError::InvalidCompressionLevel { level });
+            return Err(ArchiveError::InvalidCompressionLevel { level });
         }
         self.compression_level = Some(level);
         Ok(self)
@@ -197,7 +197,7 @@ impl CreationConfig {
         if let Some(level) = self.compression_level
             && !(1..=9).contains(&level)
         {
-            return Err(ExtractionError::InvalidCompressionLevel { level });
+            return Err(ArchiveError::InvalidCompressionLevel { level });
         }
         Ok(())
     }
@@ -277,7 +277,7 @@ mod tests {
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
-            ExtractionError::InvalidCompressionLevel { level: 0 }
+            ArchiveError::InvalidCompressionLevel { level: 0 }
         ));
 
         let config = CreationConfig {
@@ -288,7 +288,7 @@ mod tests {
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
-            ExtractionError::InvalidCompressionLevel { level: 10 }
+            ArchiveError::InvalidCompressionLevel { level: 10 }
         ));
     }
 
@@ -296,11 +296,11 @@ mod tests {
     fn test_creation_config_builder_invalid_compression() {
         assert!(matches!(
             CreationConfig::default().with_compression_level(0),
-            Err(ExtractionError::InvalidCompressionLevel { level: 0 })
+            Err(ArchiveError::InvalidCompressionLevel { level: 0 })
         ));
         assert!(matches!(
             CreationConfig::default().with_compression_level(10),
-            Err(ExtractionError::InvalidCompressionLevel { level: 10 })
+            Err(ArchiveError::InvalidCompressionLevel { level: 10 })
         ));
     }
 

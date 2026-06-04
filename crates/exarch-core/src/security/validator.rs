@@ -135,12 +135,12 @@ impl<'a> EntryValidator<'a> {
     /// # Errors
     ///
     /// Returns an error if any validation fails. Common errors:
-    /// - `ExtractionError::PathTraversal` - Path escapes destination
-    /// - `ExtractionError::QuotaExceeded` - Size or count limits exceeded
-    /// - `ExtractionError::ZipBomb` - Compression ratio too high
-    /// - `ExtractionError::SymlinkEscape` - Symlink target escapes
-    /// - `ExtractionError::HardlinkEscape` - Hardlink target escapes
-    /// - `ExtractionError::InvalidPermissions` - Dangerous permissions
+    /// - `ArchiveError::PathTraversal` - Path escapes destination
+    /// - `ArchiveError::QuotaExceeded` - Size or count limits exceeded
+    /// - `ArchiveError::ZipBomb` - Compression ratio too high
+    /// - `ArchiveError::SymlinkEscape` - Symlink target escapes
+    /// - `ArchiveError::HardlinkEscape` - Hardlink target escapes
+    /// - `ArchiveError::InvalidPermissions` - Dangerous permissions
     pub fn validate_entry(
         &mut self,
         path: &Path,

@@ -399,7 +399,7 @@ mod tests {
     #[test]
     fn test_human_format_error_does_not_panic() {
         let formatter = HumanFormatter::new(false, false);
-        let err = anyhow::anyhow!(exarch_core::ExtractionError::ZipBomb {
+        let err = anyhow::anyhow!(exarch_core::ArchiveError::ZipBomb {
             compressed: 1000,
             uncompressed: 1_000_000,
             ratio: 1000.0,
@@ -410,11 +410,11 @@ mod tests {
 
     #[test]
     fn test_human_format_error_plain_text_not_json() {
-        use exarch_core::ExtractionError;
+        use exarch_core::ArchiveError;
         use std::path::PathBuf;
 
         let formatter = HumanFormatter::new(false, false);
-        let err = anyhow::anyhow!(ExtractionError::PathTraversal {
+        let err = anyhow::anyhow!(ArchiveError::PathTraversal {
             path: PathBuf::from("../etc/passwd"),
         });
         // format_error does not return a value; verify it completes without panic.

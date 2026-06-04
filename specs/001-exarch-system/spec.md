@@ -90,7 +90,7 @@ THEN an archive is produced containing all source files, and CreationReport.file
 ```
 GIVEN a 7z output path
 WHEN I call create_archive()
-THEN the call fails with ExtractionError::UnsupportedFormat
+THEN the call fails with ExtractionError::InvalidConfiguration
 ```
 
 ### US-003: Archive Inspection
@@ -190,8 +190,8 @@ THEN extraction runs on the libuv thread pool, files are extracted, and an Extra
 | FR-020 | WHEN an archive path has extension `.tar`, `.tgz`, `.tar.gz`, `.tar.bz2`, `.tbz`, `.tbz2`, `.tar.xz`, `.txz`, `.tar.zst`, `.tzst`, THE SYSTEM SHALL extract it as a TAR archive with the appropriate decompressor | must |
 | FR-021 | WHEN an archive path has extension `.zip` or any ZIP-family alias (`.jar`, `.war`, `.apk`, `.whl`, etc.), THE SYSTEM SHALL extract it as a ZIP archive | must |
 | FR-022 | WHEN an archive path has extension `.7z`, THE SYSTEM SHALL extract it using the 7z handler (extraction only) | must |
-| FR-023 | WHEN format detection is ambiguous or the extension is unrecognized, THE SYSTEM SHALL return `ExtractionError::UnsupportedFormat` | must |
-| FR-024 | WHEN creating archives, THE SYSTEM SHALL support TAR (all compression variants) and ZIP; 7z creation SHALL return `UnsupportedFormat` | must |
+| FR-023 | WHEN format detection is ambiguous or the extension is unrecognized, THE SYSTEM SHALL return `ExtractionError::UnknownFormat { path }` | must |
+| FR-024 | WHEN creating archives, THE SYSTEM SHALL support TAR (all compression variants) and ZIP; 7z creation SHALL return `InvalidConfiguration` | must |
 | FR-025 | WHEN creating archives for ZIP-family aliases without an explicit `CreationConfig::format` override, THE SYSTEM SHALL return an error explaining that the format requires extra structure | should |
 
 ### 3.3 Configuration API
@@ -301,10 +301,10 @@ THEN extraction runs on the libuv thread pool, files are extracted, and an Extra
 | Scenario | Expected Behavior |
 |----------|-------------------|
 | Archive path does not exist | `ExtractionError::Io` returned immediately |
-| Extension unrecognized or bare `.gz` without `.tar` stem | `ExtractionError::UnsupportedFormat` |
+| Extension unrecognized or bare `.gz` without `.tar` stem | `ExtractionError::UnknownFormat { path }` |
 | ZIP-family alias (`.apk`, `.whl`) extraction | Proceeds as ZIP |
 | ZIP-family alias creation without format override | `ExtractionError::InvalidArchive` with explanation naming the alias and referencing `CreationConfig::format` override |
-| 7z creation | `ExtractionError::UnsupportedFormat` |
+| 7z creation | `ExtractionError::InvalidConfiguration` |
 | Duplicate entry paths in archive | Logged as warning in `ExtractionReport.warnings` when `skip_duplicates` is true; error when false |
 | Atomic extraction to existing non-empty directory | `ExtractionError::OutputExists` on rename failure; temp dir cleaned up |
 | Path traversal `../` or absolute path | `ExtractionError::PathTraversal` |

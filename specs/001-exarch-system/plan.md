@@ -83,7 +83,7 @@ graph TD
 | Security pipeline ordering | path → quota → compression ratio → type-specific | Cheap checks first; fail fast before I/O | Post-write validation (rejected: leaves partial output) |
 | `SafePath` as newtype | Cannot be constructed without passing validation | Type-safe guarantee that a path is safe | Runtime flag on `PathBuf` (rejected: not statically enforced) |
 | `EntryValidator` holds references | `&SecurityConfig`, `&DestDir` | No cloning per entry; measurable perf benefit | Clone per entry (rejected: measurable overhead at 10k+ files) |
-| 7z creation unsupported | Return `UnsupportedFormat` | `sevenz-rust2` write support is experimental | Expose write path (deferred: correctness risk) |
+| 7z creation unsupported | Return `InvalidConfiguration` | `sevenz-rust2` write support is experimental | Expose write path (deferred: correctness risk) |
 | ZIP-family aliases rejected for creation | Return `InvalidArchive` with explanation | Silently producing a bare ZIP with `.apk` extension is misleading | Allow it silently (rejected: would confuse callers expecting valid APK structure) |
 | Atomic extraction via temp-dir + rename | `ExtractionOptions::atomic` | All-or-nothing semantics on same filesystem | Copy-then-delete (rejected: not atomic) |
 | Deny-by-default for symlinks/hardlinks | `AllowedFeatures` all false | Defense in depth; explicit opt-in | Allow-by-default (rejected: too many CVE-pattern escapes) |
@@ -255,8 +255,8 @@ pub enum ValidatedEntryType {
 | `.zip` | `Zip` |
 | `.jar`, `.war`, `.ear`, `.nar`, `.nbm`, `.apk`, `.aab`, `.ipa`, `.appx`, `.msix`, `.whl`, `.vsix`, `.xpi`, `.epub` | `Zip` (extraction) / error (creation) |
 | `.7z` | `SevenZ` |
-| `.gz` (no `.tar` stem) | Error: `UnsupportedFormat` |
-| anything else | Error: `UnsupportedFormat` |
+| `.gz` (no `.tar` stem) | Error: `UnknownFormat { path }` |
+| anything else | Error: `UnknownFormat { path }` |
 
 > [!note]
 > Detection is extension-based, case-insensitive. Magic byte detection is NOT currently implemented — format is inferred from the file extension only.
@@ -377,6 +377,7 @@ ExarchError(Exception)
   ZipBombError(ExarchError)
   QuotaExceededError(ExarchError)
   UnsupportedFormatError(ExarchError)
+    UnknownFormatError(UnsupportedFormatError)
   InvalidArchiveError(ExarchError)
   SecurityViolationError(ExarchError)
   InvalidPermissionsError(ExarchError)

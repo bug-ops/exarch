@@ -211,7 +211,8 @@ class CreationConfig {
 | `HardlinkEscape` | `HardlinkEscapeError` |
 | `ZipBomb` | `ZipBombError` |
 | `QuotaExceeded` | `QuotaExceededError` |
-| `UnsupportedFormat` | `UnsupportedFormatError` |
+| `UnknownFormat` | `UnknownFormatError` |
+| `InvalidConfiguration` | `InvalidConfigurationError` |
 | `InvalidArchive` | `InvalidArchiveError` |
 | `Io` | `IoError` |
 | `PartialExtraction` | The specific inner error code (e.g. `SYMLINK_ESCAPE: ...`) is preserved; `filesExtracted` and `bytesWritten` are appended to the message |

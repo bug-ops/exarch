@@ -60,7 +60,6 @@ impl std::error::Error for PartialExtractionContext {}
 /// `allow_symlinks` suppresses the `--allow-symlinks` hint for `SymlinkEscape`
 /// errors when the flag is already active — in that case the escape is a
 /// genuine security violation, not a configuration issue.
-#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 pub fn convert_extraction_error(
     err: ArchiveError,
     archive: &Path,
@@ -142,7 +141,21 @@ pub fn convert_extraction_error(
              HINT: Check file permissions on the archive.",
             path.display(),
         ),
-        _ => format!("Error processing archive '{}'", archive.display()),
+        ArchiveError::OutputExists { path } => format!(
+            "Output path already exists: {}\n\
+             HINT: Use --force to overwrite.",
+            path.display(),
+        ),
+        ArchiveError::InvalidPermissions { path, mode } => format!(
+            "Invalid permissions {mode:#o} for {}: blocked by security policy.",
+            path.display(),
+        ),
+        ArchiveError::InvalidCompressionLevel { level } => {
+            format!("Invalid compression level {level}: must be between 1 and 9.")
+        }
+        ArchiveError::SecurityViolation { reason } => {
+            format!("Operation denied by security policy: {reason}")
+        }
     };
     anyhow::Error::from(err).context(context)
 }
@@ -292,6 +305,58 @@ mod tests {
         assert_eq!(
             occurrences, 1,
             "inner error path should appear exactly once, got: {msg}"
+        );
+    }
+
+    // Regression tests for issue #295: four explicit arms must produce actionable
+    // messages.
+
+    #[test]
+    fn test_output_exists_contains_path_and_hint() {
+        let path = PathBuf::from("/tmp/output");
+        let err = ArchiveError::OutputExists { path };
+        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"), false);
+        let msg = format!("{converted:#}");
+        assert!(msg.contains("/tmp/output"), "path missing: {msg}");
+        assert!(msg.contains("--force"), "hint missing: {msg}");
+    }
+
+    #[test]
+    fn test_invalid_permissions_contains_mode_and_path() {
+        let path = PathBuf::from("evil/file");
+        let err = ArchiveError::InvalidPermissions { path, mode: 0o4755 };
+        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"), false);
+        let msg = format!("{converted:#}");
+        assert!(msg.contains("evil/file"), "path missing: {msg}");
+        assert!(
+            msg.contains("security policy"),
+            "policy text missing: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_invalid_compression_level_contains_level() {
+        let err = ArchiveError::InvalidCompressionLevel { level: 0 };
+        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"), false);
+        let msg = format!("{converted:#}");
+        assert!(msg.contains('0'), "level missing: {msg}");
+        assert!(msg.contains("between 1 and 9"), "range hint missing: {msg}");
+    }
+
+    #[test]
+    fn test_security_violation_contains_reason() {
+        let err = ArchiveError::SecurityViolation {
+            reason: "absolute path detected".to_string(),
+        };
+        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"), false);
+        let msg = format!("{converted:#}");
+        assert!(
+            msg.contains("absolute path detected"),
+            "reason missing: {msg}"
+        );
+        assert!(
+            msg.contains("security policy"),
+            "policy text missing: {msg}"
         );
     }
 

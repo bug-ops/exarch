@@ -18,7 +18,7 @@ related:
 # Feature: exarch System
 
 > [!info] Metadata
-> **Version**: 0.4.0
+> **Version**: 0.4.1
 > **MSRV**: Rust 1.93.0
 > **License**: MIT OR Apache-2.0
 > **Crates**: exarch-core, exarch-cli, exarch-python, exarch-node

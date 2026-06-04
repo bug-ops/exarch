@@ -313,6 +313,12 @@ impl SecurityConfig {
         self.inner.allowed.world_writable
     }
 
+    /// Whether solid 7z archives are allowed.
+    #[napi(getter)]
+    pub fn get_allow_solid_archives(&self) -> bool {
+        self.inner.allow_solid_archives
+    }
+
     /// List of allowed file extensions.
     ///
     /// Note: This getter clones the underlying data. For performance-critical
@@ -826,6 +832,22 @@ mod tests {
         assert!(
             config.get_preserve_permissions(),
             "preserve_permissions getter should return set value"
+        );
+    }
+
+    #[test]
+    fn test_allow_solid_archives_default_and_round_trip() {
+        let config = SecurityConfig::new();
+        assert!(
+            !config.get_allow_solid_archives(),
+            "allow_solid_archives should default to false"
+        );
+
+        let mut config = SecurityConfig::new();
+        config.set_allow_solid_archives(Some(true));
+        assert!(
+            config.get_allow_solid_archives(),
+            "allow_solid_archives getter should reflect setter value"
         );
     }
 

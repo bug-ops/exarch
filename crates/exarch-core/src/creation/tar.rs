@@ -549,6 +549,7 @@ mod tests {
         let config = CreationConfig::default()
             .with_exclude_patterns(vec![])
             .with_compression_level(9)
+            .unwrap()
             .with_format(Some(ArchiveType::TarGz));
 
         let report = create_archive(&output, &[source_dir.path()], &config).unwrap();
@@ -636,6 +637,7 @@ mod tests {
             let config = CreationConfig::default()
                 .with_exclude_patterns(vec![])
                 .with_compression_level(level)
+                .unwrap()
                 .with_format(Some(ArchiveType::TarGz));
 
             let report = create_archive(&output, &[source_dir.path()], &config).unwrap();

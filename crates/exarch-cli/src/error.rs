@@ -102,10 +102,10 @@ pub fn convert_extraction_error(
                 io_err
             )
         }
-        ExtractionError::UnsupportedFormat => format!(
-            "Archive format not supported: {}\n\
+        ExtractionError::UnknownFormat { path } => format!(
+            "Cannot determine archive format: {}\n\
              HINT: Supported formats: tar, tar.gz, tar.bz2, tar.xz, tar.zstd, zip",
-            archive.display()
+            path.display()
         ),
         ExtractionError::InvalidArchive(reason) => format!(
             "Invalid archive '{}': {}\n\

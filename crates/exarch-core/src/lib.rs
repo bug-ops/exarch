@@ -73,6 +73,11 @@ pub use inspection::VerificationIssue;
 pub use inspection::VerificationReport;
 pub use inspection::VerificationStatus;
 
+// Re-export security types
+/// Summary statistics produced by the validation pipeline; see
+/// [`security::ValidationReport`].
+pub use security::ValidationReport;
+
 // Re-export types module for easier access
 pub use types::DestDir;
 pub use types::EntryType;

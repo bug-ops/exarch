@@ -18,7 +18,6 @@ use std::path::Path;
 fn extraction_error_kind(err: &ExtractionError) -> String {
     match err {
         ExtractionError::Io(_) => "IoError",
-        ExtractionError::UnsupportedFormat => "UnsupportedFormat",
         ExtractionError::InvalidArchive(_) => "InvalidArchive",
         ExtractionError::PathTraversal { .. } => "PathTraversal",
         ExtractionError::SymlinkEscape { .. } => "SymlinkEscape",
@@ -359,9 +358,11 @@ mod tests {
     }
 
     #[test]
-    fn test_extraction_error_kind_unsupported_format() {
-        let err = ExtractionError::UnsupportedFormat;
-        assert_eq!(error_kind(&err), "UnsupportedFormat");
+    fn test_extraction_error_kind_unknown_format() {
+        let err = ExtractionError::UnknownFormat {
+            path: std::path::PathBuf::from("archive.rar"),
+        };
+        assert_eq!(error_kind(&err), "UnknownFormat");
     }
 
     #[test]

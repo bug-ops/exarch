@@ -48,17 +48,18 @@ pub enum ArchiveType {
 ///
 /// `.gz` files are only accepted when the stem ends with `.tar`
 /// (i.e. `archive.tar.gz`). A bare `archive.gz` returns
-/// [`ExtractionError::UnsupportedFormat`].
+/// [`ExtractionError::UnknownFormat`].
 ///
 /// # Errors
 ///
-/// Returns [`ExtractionError::UnsupportedFormat`] if the extension is
+/// Returns [`ExtractionError::UnknownFormat`] if the extension is
 /// unrecognised or if a `.gz` file has no `.tar` stem.
 pub fn detect_format(path: &Path) -> Result<ArchiveType> {
-    let extension = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .ok_or(ExtractionError::UnsupportedFormat)?;
+    let extension = path.extension().and_then(|e| e.to_str()).ok_or_else(|| {
+        ExtractionError::UnknownFormat {
+            path: path.to_path_buf(),
+        }
+    })?;
 
     let ext_lower = extension.to_ascii_lowercase();
     match ext_lower.as_str() {
@@ -70,7 +71,9 @@ pub fn detect_format(path: &Path) -> Result<ArchiveType> {
             {
                 Ok(ArchiveType::TarGz)
             } else {
-                Err(ExtractionError::UnsupportedFormat)
+                Err(ExtractionError::UnknownFormat {
+                    path: path.to_path_buf(),
+                })
             }
         }
         "bz2" | "tbz" | "tbz2" => Ok(ArchiveType::TarBz2),
@@ -82,7 +85,9 @@ pub fn detect_format(path: &Path) -> Result<ArchiveType> {
         // extensions, EPUBs - all ZIP under the hood, so they extract
         // through the same path. See `ZIP_FAMILY_ALIASES` for the list.
         ext if is_zip_family_alias(ext) => Ok(ArchiveType::Zip),
-        _ => Err(ExtractionError::UnsupportedFormat),
+        _ => Err(ExtractionError::UnknownFormat {
+            path: path.to_path_buf(),
+        }),
     }
 }
 
@@ -108,11 +113,21 @@ mod tests {
     }
 
     #[test]
-    fn test_detect_bare_gz_returns_unsupported() {
+    fn test_detect_bare_gz_returns_unknown_format() {
         let path = PathBuf::from("archive.gz");
         assert!(matches!(
             detect_format(&path),
-            Err(ExtractionError::UnsupportedFormat)
+            Err(ExtractionError::UnknownFormat { .. })
+        ));
+    }
+
+    #[test]
+    fn test_detect_bare_gz_error_carries_path() {
+        let path = PathBuf::from("archive.gz");
+        let err = detect_format(&path).unwrap_err();
+        assert!(matches!(
+            err,
+            ExtractionError::UnknownFormat { path: ref p } if p == &PathBuf::from("archive.gz")
         ));
     }
 
@@ -191,11 +206,21 @@ mod tests {
     }
 
     #[test]
-    fn test_detect_unsupported() {
+    fn test_detect_unknown_format() {
         let path = PathBuf::from("archive.rar");
         assert!(matches!(
             detect_format(&path),
-            Err(ExtractionError::UnsupportedFormat)
+            Err(ExtractionError::UnknownFormat { .. })
+        ));
+    }
+
+    #[test]
+    fn test_detect_unknown_format_error_carries_path() {
+        let path = PathBuf::from("archive.rar");
+        let err = detect_format(&path).unwrap_err();
+        assert!(matches!(
+            err,
+            ExtractionError::UnknownFormat { path: ref p } if p == &PathBuf::from("archive.rar")
         ));
     }
 

@@ -197,7 +197,8 @@ fn benchmark_compression_levels(c: &mut Criterion) {
                     let output = temp.path().join("output.tar.gz");
                     let config = CreationConfig::default()
                         .with_format(Some(ArchiveType::TarGz))
-                        .with_compression_level(*level);
+                        .with_compression_level(*level)
+                        .unwrap();
                     let _ = create_archive(
                         black_box(&output),
                         black_box(&[&source_dir]),

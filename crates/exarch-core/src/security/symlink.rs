@@ -30,7 +30,7 @@ use crate::types::SafeSymlink;
 ///
 /// # Examples
 ///
-/// ```no_run
+/// ```ignore
 /// use exarch_core::SecurityConfig;
 /// use exarch_core::security::validate_symlink;
 /// use exarch_core::types::DestDir;

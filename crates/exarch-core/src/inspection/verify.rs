@@ -1,7 +1,6 @@
 //! Archive verification implementation.
 
 use std::path::Path;
-use std::path::PathBuf;
 
 use crate::ArchiveError;
 use crate::Result;
@@ -187,7 +186,7 @@ fn verify_entry(
 
     // Permission validation
     if let Some(mode) = entry.mode
-        && let Err(e) = check_permissions(mode, config)
+        && let Err(e) = check_permissions(&entry.path, mode, config)
     {
         issues.push(VerificationIssue::from_error(&e, Some(entry.path.clone())));
     }
@@ -195,13 +194,13 @@ fn verify_entry(
     issues
 }
 
-fn check_permissions(mode: u32, config: &SecurityConfig) -> Result<()> {
-    let sanitized = sanitize_permissions(mode, config)?;
+fn check_permissions(path: &Path, mode: u32, config: &SecurityConfig) -> Result<()> {
+    let sanitized = sanitize_permissions(mode, config);
     if sanitized == mode {
         Ok(())
     } else {
         Err(ArchiveError::InvalidPermissions {
-            path: PathBuf::new(),
+            path: path.to_path_buf(),
             mode,
         })
     }
@@ -295,6 +294,7 @@ fn determine_security_status(issues: &[VerificationIssue]) -> CheckStatus {
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::path::PathBuf;
     use tempfile::NamedTempFile;
 
     #[test]

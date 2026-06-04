@@ -171,11 +171,7 @@ impl<'a> EntryValidator<'a> {
 
         let (validated_type, sanitized_mode) = match entry_type {
             EntryType::File => {
-                let sanitized = if let Some(m) = mode {
-                    Some(sanitize_permissions(m, self.config)?)
-                } else {
-                    None
-                };
+                let sanitized = mode.map(|m| sanitize_permissions(m, self.config));
                 (ValidatedEntryType::File, sanitized)
             }
 

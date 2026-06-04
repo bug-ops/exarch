@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - `PyProgressAdapter` and `NodeProgressAdapter` now reset `bytes_written` to 0 at the start of each entry, eliminating stale values from previous entries (#285).
+- `check_permissions` in `inspection/verify.rs` now passes the actual entry path to
+  `InvalidPermissions` instead of an empty `PathBuf`, so error messages include the
+  offending archive entry (#286).
 
 ### Breaking Changes
 
@@ -25,6 +28,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (the canonical implementation) instead of calling the internal `extract_impl` directly.
   All four `extract_archive*` convenience wrappers now form a clean delegation chain through the
   single canonical function (#259).
+- Security primitives `validate_path`, `validate_symlink`, `sanitize_permissions`,
+  `validate_compression_ratio`, `QuotaTracker`, and `HardlinkTracker` are now `pub(crate)`
+  and no longer part of the public API. External benchmarks and integration tests that
+  reference these directly must add `--features testing` (#281).
+- `sanitize_permissions` return type changed from `Result<u32>` to `u32` — the function
+  never fails; callers no longer need `?` or `.unwrap()`.
 - Specifications in `specs/` updated to replace stale `UnsupportedFormat` references with
   `UnknownFormat { path }` (format-detection failures) and `InvalidConfiguration` (7z creation),
   matching the post-#255 Rust API. Python exception hierarchy updated to include

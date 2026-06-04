@@ -61,12 +61,20 @@ pub fn execute(
         .with_max_total_size(args.max_total_size.unwrap_or(500 * 1024 * 1024))
         .with_max_file_size(args.max_file_size.unwrap_or(50 * 1024 * 1024))
         .with_max_compression_ratio(f64::from(args.max_compression_ratio))
+        .with_max_path_depth(args.max_path_depth)
         .with_allow_symlinks(args.allow_symlinks)
         .with_allow_hardlinks(args.allow_hardlinks)
+        .with_allow_absolute_paths(args.allow_absolute_paths)
         .with_allow_world_writable(args.allow_world_writable)
         .with_preserve_permissions(args.preserve_permissions)
         .with_allow_solid_archives(args.allow_solid_archives)
         .with_allowed_extensions(allowed_extensions);
+
+    let config = if args.banned_components.is_empty() {
+        config
+    } else {
+        config.with_banned_path_components(args.banned_components.clone())
+    };
 
     // list_config shares quota params with config but uses safe defaults for
     // security flags — listing must not be blocked by allow_symlinks etc.

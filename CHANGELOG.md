@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `extract` command now exposes three previously hidden `SecurityConfig` fields as CLI flags:
+  `--max-path-depth <N>` (default 32), `--banned-component <COMPONENT>` (repeatable; replaces
+  the default ban list when provided), and `--allow-absolute-paths` (flag). Operators can now
+  tune path depth and component ban lists without recompiling (#303).
+
 ### Tests
 
 - Added integration tests for `ExtractionOptions::skip_duplicates`: covers `skip_duplicates=true` (first entry kept, duplicate skipped with warning) and `skip_duplicates=false` (second entry overwrites first) for TAR archives. Documents that the `zip` crate 8.x deduplicates entries at parse time, making the flag a no-op for ZIP (#302).

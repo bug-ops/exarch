@@ -531,32 +531,38 @@ fn extract_archive_with_progress(
 }
 
 /// Adapter that calls Python callback from Rust.
+///
+/// The Python callback receives `(path: str, total: int, current: int,
+/// bytes_written: int)` where `bytes_written` is the number of bytes written
+/// **for the current entry so far** (starts at 0 when the entry begins, grows
+/// as chunks are flushed to disk).
 struct PyProgressAdapter {
     callback: Py<PyAny>,
-    accumulated_bytes: u64,
+    current_entry_bytes: u64,
 }
 
 impl PyProgressAdapter {
     fn new(callback: Py<PyAny>) -> Self {
         Self {
             callback,
-            accumulated_bytes: 0,
+            current_entry_bytes: 0,
         }
     }
 }
 
 impl exarch_core::ProgressCallback for PyProgressAdapter {
     fn on_entry_start(&mut self, path: &std::path::Path, total: usize, current: usize) {
+        self.current_entry_bytes = 0;
         Python::attach(|py| {
             let path_str = path.to_string_lossy().into_owned();
             let _ = self
                 .callback
-                .call1(py, (path_str, total, current, self.accumulated_bytes));
+                .call1(py, (path_str, total, current, self.current_entry_bytes));
         });
     }
 
     fn on_bytes_written(&mut self, bytes: u64) {
-        self.accumulated_bytes += bytes;
+        self.current_entry_bytes += bytes;
     }
 
     fn on_entry_complete(&mut self, _path: &std::path::Path) {

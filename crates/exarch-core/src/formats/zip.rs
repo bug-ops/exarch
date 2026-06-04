@@ -1075,39 +1075,14 @@ mod tests {
         assert_eq!(permissions.mode() & 0o7777, 0o755);
     }
 
-    // CRIT-007/CRIT-008: Symlink test requires proper ZIP creation
-    // The zip crate's unix_permissions() method does not preserve file type bits
-    // when writing to ZIP archives. It stores mode 0o120777 as 0o100777.
-    // This is a limitation of the zip crate's API, not our extraction logic.
-    // Our symlink detection code is correct and will work with real ZIP files
-    // created by standard tools (like Info-ZIP, 7-Zip, etc.)
-    //
-    // TODO: Find proper way to create symlink entries with zip crate or use
-    // a different library for testing
     #[test]
     #[cfg(unix)]
-    #[ignore = "zip crate does not preserve file type bits in unix_permissions()"]
     fn test_extract_symlink_via_unix_attributes() {
-        let buffer = Vec::new();
-        let mut zip = ZipWriter::new(Cursor::new(buffer));
-
-        // Create target file
-        let options = SimpleFileOptions::default().unix_permissions(0o644);
-        zip.start_file("target.txt", options).unwrap();
-        zip.write_all(b"data").unwrap();
-
-        // CRIT-007/CRIT-008 FIX: Create symlink entry with proper Unix mode
-        // Symlink: mode = 0o120777 (S_IFLNK | 0o777)
-        // The zip crate stores unix_permissions in the external file attributes
-        const S_IFLNK: u32 = 0o120_000; // Symlink file type
-        let symlink_mode = S_IFLNK | 0o777; // Full rwx permissions for symlink
-
-        let options = SimpleFileOptions::default().unix_permissions(symlink_mode);
-        zip.start_file("link.txt", options).unwrap();
-        zip.write_all(b"target.txt").unwrap(); // Target stored as content
-
-        let zip_data = zip.finish().unwrap().into_inner();
-        let cursor = Cursor::new(zip_data);
+        // raw_zip_with_custom_entry places mode bits in the external attributes
+        // high word (unix_mode << 16), which is how real ZIP tools encode them.
+        // This bypasses the zip crate writer's lossy unix_permissions() path.
+        let zip_bytes = raw_zip_with_custom_entry("link", b"target.txt", 0, 0, 0o120_777);
+        let cursor = Cursor::new(zip_bytes);
         let mut archive = ZipArchive::new(cursor).unwrap();
 
         let temp = TempDir::new().unwrap();
@@ -1123,36 +1098,18 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(report.files_extracted, 1, "should have 1 regular file");
         assert_eq!(report.symlinks_created, 1, "should have 1 symlink");
 
-        // Verify symlink exists
-        let link_path = temp.path().join("link.txt");
-        assert!(link_path.exists(), "symlink should exist");
-
-        // Verify it's actually a symlink
+        let link_path = temp.path().join("link");
         let metadata = std::fs::symlink_metadata(&link_path).unwrap();
-        assert!(metadata.is_symlink(), "link.txt should be a symlink");
+        assert!(metadata.is_symlink(), "link should be a symlink");
     }
 
-    // CRIT-007: See comment above - same issue with zip crate
     #[test]
     #[cfg(unix)]
-    #[ignore = "zip crate does not preserve file type bits in unix_permissions()"]
     fn test_symlink_disabled_by_default() {
-        let buffer = Vec::new();
-        let mut zip = ZipWriter::new(Cursor::new(buffer));
-
-        // CRIT-007 FIX: Create symlink entry with proper Unix mode
-        const S_IFLNK: u32 = 0o120_000;
-        let symlink_mode = S_IFLNK | 0o777;
-
-        let options = SimpleFileOptions::default().unix_permissions(symlink_mode);
-        zip.start_file("link.txt", options).unwrap();
-        zip.write_all(b"target.txt").unwrap();
-
-        let zip_data = zip.finish().unwrap().into_inner();
-        let cursor = Cursor::new(zip_data);
+        let zip_bytes = raw_zip_with_custom_entry("link", b"target.txt", 0, 0, 0o120_777);
+        let cursor = Cursor::new(zip_bytes);
         let mut archive = ZipArchive::new(cursor).unwrap();
 
         let temp = TempDir::new().unwrap();
@@ -1165,13 +1122,6 @@ mod tests {
             &mut crate::NoopProgress,
         );
 
-        // Should fail because symlinks are not allowed
-        assert!(
-            result.is_err(),
-            "extraction should fail when symlinks are disabled"
-        );
-
-        // Verify it's a SecurityViolation error
         match result {
             Err(ExtractionError::SecurityViolation { reason }) => {
                 assert!(
@@ -1184,63 +1134,29 @@ mod tests {
         }
     }
 
-    // Debug test showing zip crate limitation
-    #[test]
-    #[cfg(unix)]
-    #[ignore = "debug test showing zip crate limitation"]
-    fn test_debug_zip_unix_mode() {
-        // Debug test to understand how unix_permissions() works
-        let buffer = Vec::new();
-        let mut zip = ZipWriter::new(Cursor::new(buffer));
-
-        const S_IFLNK: u32 = 0o120_000;
-        let symlink_mode = S_IFLNK | 0o777;
-
-        let options = SimpleFileOptions::default().unix_permissions(symlink_mode);
-        zip.start_file("link.txt", options).unwrap();
-        zip.write_all(b"target.txt").unwrap();
-
-        let zip_data = zip.finish().unwrap().into_inner();
-
-        // Read it back
-        let mut reader = zip::ZipArchive::new(Cursor::new(zip_data)).unwrap();
-        let file = reader.by_index(0).unwrap();
-
-        if let Some(mode) = file.unix_mode() {
-            eprintln!("Mode retrieved: {:o} (decimal: {})", mode, mode);
-            eprintln!("Expected symlink mode: {:o}", symlink_mode);
-
-            const S_IFMT: u32 = 0o170_000;
-            const S_IFLNK_CHECK: u32 = 0o120_000;
-            eprintln!("File type bits: {:o}", mode & S_IFMT);
-            eprintln!("Is symlink: {}", (mode & S_IFMT) == S_IFLNK_CHECK);
-        } else {
-            panic!("No Unix mode set!");
-        }
-    }
-
     #[test]
     fn test_hardlink_rejected() {
-        // HIGH-011: ZIP doesn't have native hardlink support
-        // This test verifies that hardlink entries are rejected at the format level
-
-        // ZIP format doesn't support hardlinks in the spec
-        // If an entry has the hardlink type in ValidatedEntryType, it should be
-        // rejected
-
-        // Create a minimal test to verify the hardlink rejection path exists
+        // ZIP spec has no hardlink type; ValidatedEntryType::Hardlink is
+        // unreachable for any real ZIP entry. Verify that a well-formed ZIP
+        // extracts cleanly without triggering any hardlink-related error path.
         let zip_data = create_test_zip(vec![("file.txt", b"content")]);
         let cursor = Cursor::new(zip_data);
-        let archive = ZipArchive::new(cursor).unwrap();
+        let mut archive = ZipArchive::new(cursor).unwrap();
 
-        // Verify the format is ZIP
-        assert_eq!(archive.format_name(), "zip");
+        let temp = TempDir::new().unwrap();
+        let config = SecurityConfig::default();
 
-        // ZIP format does not support hardlinks - any hardlink entry
-        // would be rejected in process_entry() ValidatedEntryType::Hardlink
-        // branch The rejection path is tested implicitly by the type
-        // system (ZIP entries can only be File, Directory, or Symlink,
-        // never Hardlink)
+        let report = archive
+            .extract(
+                temp.path(),
+                &config,
+                &ExtractionOptions::default(),
+                &mut crate::NoopProgress,
+            )
+            .unwrap();
+
+        assert_eq!(report.files_extracted, 1);
+        assert!(temp.path().join("file.txt").exists());
     }
 
     #[test]

@@ -12,6 +12,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ValidationReport` is now re-exported at the crate root as `exarch_core::ValidationReport`
   (was only accessible as `exarch_core::security::ValidationReport`) (#256).
 
+### Changed
+
+- ZIP symlink extraction tests (`test_extract_symlink_via_unix_attributes`,
+  `test_symlink_disabled_by_default`) are no longer ignored; they now use raw ZIP construction
+  with correct unix mode bits to exercise the security-critical symlink detection path (#271).
+- `test_hardlink_rejected` rewritten to perform a real extraction and assert successful completion,
+  documenting that `ValidatedEntryType::Hardlink` is unreachable for any real ZIP entry (#272).
+- Removed `test_debug_zip_unix_mode` debug test that was permanently ignored.
+
 ### Breaking Changes
 
 - **`ExtractionError::UnsupportedFormat`** has been removed. All format-detection failures now

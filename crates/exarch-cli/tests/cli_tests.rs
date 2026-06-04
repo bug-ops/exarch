@@ -950,7 +950,8 @@ fn create_setuid_tar_gz(path: &std::path::Path) {
 }
 
 /// On Unix, an archive containing a setuid file produces a Warning-severity
-/// verification report. With --strict, the CLI must exit with code 2.
+/// verification report. With --strict, the CLI must exit with code 2 and
+/// must not write any unstructured text to stderr.
 #[test]
 #[cfg(unix)]
 fn test_verify_strict_exits_2_on_warning() {
@@ -964,7 +965,7 @@ fn test_verify_strict_exits_2_on_warning() {
         .arg(&archive_path)
         .assert()
         .code(2)
-        .stderr(predicate::str::contains("warnings"));
+        .stderr(predicate::str::is_empty());
 }
 
 /// Without --strict, the same setuid archive must still exit 0.
@@ -980,6 +981,44 @@ fn test_verify_without_strict_exits_0_on_warning() {
         .arg(&archive_path)
         .assert()
         .success();
+}
+
+/// --quiet suppresses all non-error output; --strict must not bypass this
+/// by writing directly to stderr.
+#[test]
+#[cfg(unix)]
+fn test_verify_strict_quiet_produces_no_stderr() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive_path = temp.path().join("setuid_quiet.tar.gz");
+    create_setuid_tar_gz(&archive_path);
+
+    exarch_cmd()
+        .arg("--quiet")
+        .arg("verify")
+        .arg("--strict")
+        .arg(&archive_path)
+        .assert()
+        .code(2)
+        .stderr(predicate::str::is_empty());
+}
+
+/// --json mode must not mix unstructured text into stderr alongside
+/// structured JSON on stdout.
+#[test]
+#[cfg(unix)]
+fn test_verify_strict_json_produces_no_stderr() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive_path = temp.path().join("setuid_json.tar.gz");
+    create_setuid_tar_gz(&archive_path);
+
+    exarch_cmd()
+        .arg("--json")
+        .arg("verify")
+        .arg("--strict")
+        .arg(&archive_path)
+        .assert()
+        .code(2)
+        .stderr(predicate::str::is_empty());
 }
 
 #[test]

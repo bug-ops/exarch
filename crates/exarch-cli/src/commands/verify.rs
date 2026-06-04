@@ -23,7 +23,6 @@ pub fn execute(args: &VerifyArgs, formatter: &dyn OutputFormatter) -> Result<()>
         VerificationStatus::Pass => Ok(()),
         VerificationStatus::Warning => {
             if args.strict {
-                eprintln!("Archive has warnings; exiting with code 2 (--strict)");
                 return Err(anyhow::Error::new(StrictWarning));
             }
             Ok(())

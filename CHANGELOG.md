@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- CLI: `convert_extraction_error` now has explicit match arms for `OutputExists`,
+  `InvalidPermissions`, `InvalidCompressionLevel`, and `SecurityViolation`, each producing an
+  actionable message with the relevant path or reason. Previously these variants fell through to a
+  generic wildcard arm (#295).
 - `PyProgressAdapter` and `NodeProgressAdapter` now reset `bytes_written` to 0 at the start of each entry, eliminating stale values from previous entries (#285).
 - `check_permissions` in `inspection/verify.rs` now passes the actual entry path to
   `InvalidPermissions` instead of an empty `PathBuf`, so error messages include the

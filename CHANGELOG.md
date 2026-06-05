@@ -26,6 +26,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Absolute entry paths (e.g. `/etc/shadow`) and Windows drive/UNC paths (e.g. `C:\...`,
+  `\\server\share\...`) are now stripped centrally in `SafePath::validate_with_context` when
+  `allow_absolute_paths` is enabled, instead of in each format handler separately. The three
+  per-format pre-stripping workarounds in `tar.rs`, `zip.rs`, and `sevenz.rs` have been
+  removed. Also fixes bare-slash entries (`/`) returning `io::Error` instead of
+  `PathTraversalError` (#347, #348).
 - `exarch create --quiet --json` now emits JSON to stdout instead of
   suppressing it. `--quiet` no longer silences `--json` output for any
   command (#357).

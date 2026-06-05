@@ -439,11 +439,7 @@ impl<R: Read + Seek> SevenZArchive<R> {
                           reader: &mut dyn Read,
                           _dest_dir: &PathBuf|
          -> std::result::Result<bool, sevenz_rust2::Error> {
-            let entry_path = strip_absolute_entry_name(&entry.name, config)
-                .map_err(|e| {
-                    sevenz_rust2::Error::Other(format!("path validation failed: {e}").into())
-                })?
-                .into_owned();
+            let entry_path = std::path::PathBuf::from(&entry.name);
             ctx.current_idx = ctx.current_idx.saturating_add(1);
             let idx = ctx.current_idx;
             ctx.progress
@@ -552,7 +548,7 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
         // - symlink detection: Not exposed, non-directory entries treated as files
         let mut prevalidator = EntryValidator::new(config, &dest);
         for entry in &self.entries {
-            let path = strip_absolute_entry_name(&entry.name, config)?;
+            let path = std::path::PathBuf::from(&entry.name);
             let entry_type = if entry.is_directory {
                 EntryType::Directory
             } else {
@@ -751,39 +747,6 @@ fn is_empty_sevenz_archive<R: Read + Seek>(err: &sevenz_rust2::Error, source: &m
     };
     let mut magic = [0u8; 6];
     source.read_exact(&mut magic).is_ok() && magic == SEVENZ_MAGIC
-}
-
-/// Strips the leading `/` from absolute entry names when `allow_absolute_paths`
-/// is enabled, preventing `PathBuf::join` from discarding the destination
-/// prefix.
-///
-/// Returns a `Cow<Path>`: borrowed when the name is already relative, owned
-/// when the leading slash is stripped. Returns `PathTraversal` if the stripped
-/// name is empty or still contains a `..` component.
-fn strip_absolute_entry_name<'a>(
-    name: &'a str,
-    config: &SecurityConfig,
-) -> Result<std::borrow::Cow<'a, Path>> {
-    let raw = Path::new(name);
-    if name.starts_with('/') && config.allowed.absolute_paths {
-        let stripped = name.trim_start_matches('/');
-        if stripped.is_empty() {
-            return Err(ArchiveError::PathTraversal {
-                path: raw.to_path_buf(),
-            });
-        }
-        let p = PathBuf::from(stripped);
-        if p.components()
-            .any(|c| matches!(c, std::path::Component::ParentDir))
-        {
-            return Err(ArchiveError::PathTraversal {
-                path: raw.to_path_buf(),
-            });
-        }
-        Ok(std::borrow::Cow::Owned(p))
-    } else {
-        Ok(std::borrow::Cow::Borrowed(raw))
-    }
 }
 
 /// Converts sevenz-rust2 errors to our `ArchiveError` type.
@@ -1539,49 +1502,6 @@ mod tests {
                 .unwrap();
         }
         writer.finish().unwrap().into_inner()
-    }
-
-    #[test]
-    fn test_strip_absolute_entry_name_relative_passthrough() {
-        let config = SecurityConfig::default();
-        let result = strip_absolute_entry_name("relative/path.txt", &config).unwrap();
-        assert_eq!(result.as_ref(), std::path::Path::new("relative/path.txt"));
-    }
-
-    #[test]
-    fn test_strip_absolute_entry_name_absolute_with_flag() {
-        let config = SecurityConfig::default().with_allow_absolute_paths(true);
-        let result = strip_absolute_entry_name("/etc/shadow", &config).unwrap();
-        assert_eq!(result.as_ref(), std::path::Path::new("etc/shadow"));
-    }
-
-    #[test]
-    fn test_strip_absolute_entry_name_absolute_without_flag() {
-        // Without the flag, absolute paths are passed through unchanged so that
-        // SafePath::validate can apply its own rejection logic.
-        let config = SecurityConfig::default();
-        let result = strip_absolute_entry_name("/etc/shadow", &config).unwrap();
-        assert_eq!(result.as_ref(), std::path::Path::new("/etc/shadow"));
-    }
-
-    #[test]
-    fn test_strip_absolute_entry_name_bare_slash_rejected() {
-        let config = SecurityConfig::default().with_allow_absolute_paths(true);
-        let result = strip_absolute_entry_name("/", &config);
-        assert!(
-            matches!(result, Err(ArchiveError::PathTraversal { .. })),
-            "bare slash must be rejected"
-        );
-    }
-
-    #[test]
-    fn test_strip_absolute_entry_name_traversal_after_root_rejected() {
-        let config = SecurityConfig::default().with_allow_absolute_paths(true);
-        let result = strip_absolute_entry_name("/../etc/passwd", &config);
-        assert!(
-            matches!(result, Err(ArchiveError::PathTraversal { .. })),
-            "traversal after root must be rejected"
-        );
     }
 
     #[test]

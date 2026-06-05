@@ -342,22 +342,13 @@ impl<R: Read + Seek> SevenZArchive<R> {
 
                 dir_cache.ensure_parent_dir(&dest_path)?;
 
-                if dest_path.exists() {
-                    if skip_duplicates {
-                        report.files_skipped += 1;
-                        report.warnings.push(format!(
-                            "skipped duplicate entry: {}",
-                            validated.safe_path.as_path().display()
-                        ));
-                        return Ok(0);
-                    }
-                    return Err(sevenz_rust2::Error::Other(
-                        format!(
-                            "duplicate entry: {}",
-                            validated.safe_path.as_path().display()
-                        )
-                        .into(),
+                if dest_path.exists() && skip_duplicates {
+                    report.files_skipped += 1;
+                    report.warnings.push(format!(
+                        "skipped duplicate entry: {}",
+                        validated.safe_path.as_path().display()
                     ));
+                    return Ok(0);
                 }
 
                 // Atomic write (temp + rename) with unique temp file name

@@ -1,4 +1,4 @@
-//! Node.js bindings for `SecurityConfig`.
+//! Node.js bindings for `SecurityConfig` and `ExtractionOptions`.
 
 use exarch_core::SecurityConfig as CoreConfig;
 use napi::bindgen_prelude::Error;
@@ -583,6 +583,72 @@ impl CreationConfig {
 impl CreationConfig {
     /// Returns a reference to the inner `CoreCreationConfig`.
     pub fn as_core(&self) -> &exarch_core::creation::CreationConfig {
+        &self.inner
+    }
+}
+
+/// Options controlling extraction behavior (non-security).
+///
+/// Separate from `SecurityConfig` to keep security settings focused.
+/// These options control operational behavior such as duplicate handling.
+///
+/// # Defaults
+///
+/// | Setting | Default Value |
+/// |---------|--------------|
+/// | `skipDuplicates` | `true` |
+#[napi]
+#[derive(Debug, Clone)]
+pub struct ExtractionOptions {
+    inner: exarch_core::ExtractionOptions,
+}
+
+#[napi]
+impl ExtractionOptions {
+    /// Creates a new `ExtractionOptions` with defaults.
+    #[napi(constructor)]
+    pub fn new() -> Self {
+        Self {
+            inner: exarch_core::ExtractionOptions::default(),
+        }
+    }
+
+    /// Creates an `ExtractionOptions` with defaults.
+    ///
+    /// This is equivalent to calling `new ExtractionOptions()`.
+    #[napi(factory)]
+    pub fn default() -> Self {
+        Self::new()
+    }
+
+    /// Sets whether duplicate archive entries are skipped silently.
+    ///
+    /// When `true` (default), duplicate entries produce a warning in the
+    /// report. When `false`, a duplicate entry causes an error.
+    #[napi(js_name = "withSkipDuplicates")]
+    pub fn with_skip_duplicates(&mut self, skip: Option<bool>) -> &Self {
+        self.inner.skip_duplicates = skip.unwrap_or(true);
+        self
+    }
+
+    /// Finalizes the configuration (for API consistency).
+    #[napi]
+    pub fn build(&self) -> &Self {
+        self
+    }
+
+    /// Whether duplicate entries are skipped silently.
+    #[napi(getter)]
+    pub fn get_skip_duplicates(&self) -> bool {
+        self.inner.skip_duplicates
+    }
+}
+
+impl ExtractionOptions {
+    /// Returns a reference to the inner `CoreExtractionOptions`.
+    ///
+    /// Used internally to pass options to the Rust extraction API.
+    pub fn as_core(&self) -> &exarch_core::ExtractionOptions {
         &self.inner
     }
 }

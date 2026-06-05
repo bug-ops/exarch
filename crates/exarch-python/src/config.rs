@@ -1,5 +1,7 @@
-//! Python bindings for `SecurityConfig` and `CreationConfig`.
+//! Python bindings for `SecurityConfig`, `CreationConfig`, and
+//! `ExtractionOptions`.
 
+use exarch_core::ExtractionOptions as CoreExtractionOptions;
 use exarch_core::SecurityConfig as CoreSecurityConfig;
 use exarch_core::creation::CreationConfig as CoreCreationConfig;
 use pyo3::exceptions::PyValueError;
@@ -587,6 +589,90 @@ impl PyCreationConfig {
 impl PyCreationConfig {
     /// Returns a reference to the inner `CoreCreationConfig`.
     pub fn as_core(&self) -> &CoreCreationConfig {
+        &self.inner
+    }
+}
+
+/// Options controlling extraction behavior (non-security).
+///
+/// Separate from `SecurityConfig` to keep security settings focused.
+/// These options control operational behavior such as duplicate handling.
+///
+/// # Attributes
+///
+/// * `skip_duplicates` - Skip duplicate entries silently instead of aborting
+///   (default: `True`)
+///
+/// # Examples
+///
+/// ```python
+/// # Use defaults
+/// opts = ExtractionOptions()
+///
+/// # Disable duplicate skipping
+/// opts = ExtractionOptions().with_skip_duplicates(False)
+/// ```
+#[pyclass(name = "ExtractionOptions", skip_from_py_object)]
+#[derive(Clone)]
+pub struct PyExtractionOptions {
+    inner: CoreExtractionOptions,
+}
+
+#[pymethods]
+impl PyExtractionOptions {
+    /// Creates a new `ExtractionOptions` with defaults.
+    #[new]
+    fn new() -> Self {
+        Self {
+            inner: CoreExtractionOptions::default(),
+        }
+    }
+
+    /// Creates an `ExtractionOptions` with defaults.
+    ///
+    /// This is equivalent to calling `ExtractionOptions()`.
+    #[staticmethod]
+    fn default() -> Self {
+        Self::new()
+    }
+
+    /// Sets whether duplicate archive entries are skipped silently.
+    ///
+    /// When `True` (default), duplicate entries produce a warning in the
+    /// report. When `False`, a duplicate entry causes an error.
+    #[pyo3(signature = (skip=true))]
+    fn with_skip_duplicates(mut slf: PyRefMut<'_, Self>, skip: bool) -> PyRefMut<'_, Self> {
+        slf.inner.skip_duplicates = skip;
+        slf
+    }
+
+    /// Finalizes the configuration (for API consistency).
+    fn build(slf: PyRefMut<'_, Self>) -> PyRefMut<'_, Self> {
+        slf
+    }
+
+    #[getter]
+    fn get_skip_duplicates(&self) -> bool {
+        self.inner.skip_duplicates
+    }
+
+    #[setter]
+    fn set_skip_duplicates(&mut self, value: bool) {
+        self.inner.skip_duplicates = value;
+    }
+
+    /// Returns a debug string representation.
+    fn __repr__(&self) -> String {
+        format!(
+            "ExtractionOptions(skip_duplicates={})",
+            self.inner.skip_duplicates
+        )
+    }
+}
+
+impl PyExtractionOptions {
+    /// Returns a reference to the inner `CoreExtractionOptions`.
+    pub fn as_core(&self) -> &CoreExtractionOptions {
         &self.inner
     }
 }

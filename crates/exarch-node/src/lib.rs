@@ -54,6 +54,7 @@ mod report;
 mod utils;
 
 use config::CreationConfig;
+use config::ExtractionOptions;
 use config::SecurityConfig;
 use error::convert_error;
 use report::ArchiveManifest;
@@ -119,8 +120,12 @@ use utils::validate_path;
 /// console.log(`Extracted ${report.filesExtracted} files`);
 ///
 /// // Customize security settings
-/// const config = new SecurityConfig().maxFileSize(100 * 1024 * 1024);
+/// const config = new SecurityConfig().setMaxFileSize(100 * 1024 * 1024);
 /// const report = await extractArchive('archive.tar.gz', '/tmp/output', config);
+///
+/// // Customize extraction options
+/// const opts = new ExtractionOptions().withSkipDuplicates(false);
+/// const report = await extractArchive('archive.tar.gz', '/tmp/output', null, opts);
 /// ```
 #[napi]
 #[allow(clippy::needless_pass_by_value, clippy::trailing_empty_array)]
@@ -128,6 +133,7 @@ pub async fn extract_archive(
     archive_path: String,
     output_dir: String,
     config: Option<&SecurityConfig>,
+    options: Option<&ExtractionOptions>,
 ) -> Result<ExtractionReport> {
     // Validate paths at boundary
     // NOTE: Defense-in-depth - paths are validated here and again in core
@@ -136,9 +142,11 @@ pub async fn extract_archive(
     validate_path(&archive_path)?;
     validate_path(&output_dir)?;
 
-    // Get owned config - clone only when config is Some, use default otherwise
+    // Get owned config/options - clone only when Some, use default otherwise
     let config_owned: exarch_core::SecurityConfig =
         config.map(|c| c.as_core().clone()).unwrap_or_default();
+    let options_owned: exarch_core::ExtractionOptions =
+        options.map(|o| o.as_core().clone()).unwrap_or_default();
 
     // Run extraction on tokio thread pool
     //
@@ -153,8 +161,13 @@ pub async fn extract_archive(
     // or ensure exclusive file access (e.g., flock) during extraction.
     let report = tokio::task::spawn_blocking(move || {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            exarch_core::extract_archive(&archive_path, &output_dir, &config_owned)
-                .map_err(convert_error)
+            exarch_core::extract_archive_with_options(
+                &archive_path,
+                &output_dir,
+                &config_owned,
+                &options_owned,
+            )
+            .map_err(convert_error)
         }))
         .map_err(|_| Error::from_reason("Internal panic during archive extraction"))
         .flatten()
@@ -194,7 +207,7 @@ pub async fn extract_archive(
 /// console.log(`Extracted ${report.filesExtracted} files`);
 ///
 /// // Customize security settings
-/// const config = new SecurityConfig().maxFileSize(100 * 1024 * 1024);
+/// const config = new SecurityConfig().setMaxFileSize(100 * 1024 * 1024);
 /// const report = extractArchiveSync('archive.tar.gz', '/tmp/output', config);
 /// ```
 #[napi]
@@ -203,6 +216,7 @@ pub fn extract_archive_sync(
     archive_path: String,
     output_dir: String,
     config: Option<&SecurityConfig>,
+    options: Option<&ExtractionOptions>,
 ) -> Result<ExtractionReport> {
     // Validate paths at boundary
     // NOTE: Defense-in-depth - paths are validated here and again in core
@@ -211,14 +225,21 @@ pub fn extract_archive_sync(
     validate_path(&archive_path)?;
     validate_path(&output_dir)?;
 
-    // Get config reference or use default
     let default_config = exarch_core::SecurityConfig::default();
     let config_ref = config.map_or(&default_config, |c| c.as_core());
+
+    let default_options = exarch_core::ExtractionOptions::default();
+    let options_ref = options.map_or(&default_options, |o| o.as_core());
 
     // Run extraction synchronously with panic safety
     // CRITICAL: Never panic across FFI boundary
     let report = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        exarch_core::extract_archive(&archive_path, &output_dir, config_ref)
+        exarch_core::extract_archive_with_options(
+            &archive_path,
+            &output_dir,
+            config_ref,
+            options_ref,
+        )
     }))
     .map_err(|_| Error::from_reason("Internal panic during archive extraction"))?
     .map_err(convert_error)?;
@@ -558,6 +579,7 @@ pub fn verify_archive_sync(
 /// * `archive_path` - Path to the archive file
 /// * `output_dir` - Directory where files will be extracted
 /// * `config` - Optional `SecurityConfig` (uses secure defaults if omitted)
+/// * `options` - Optional `ExtractionOptions` (uses defaults if omitted)
 /// * `progress` - Optional progress callback `(path: string, total: bigint,
 ///   current: bigint, bytesWritten: bigint) => void`
 ///
@@ -578,6 +600,7 @@ pub fn verify_archive_sync(
 ///   'archive.tar.gz',
 ///   '/tmp/output',
 ///   null,
+///   null,
 ///   (path, total, current, bytesWritten) => {
 ///     console.log(`${current}/${total}: ${path}`);
 ///   },
@@ -590,6 +613,7 @@ pub async fn extract_archive_with_progress(
     archive_path: String,
     output_dir: String,
     config: Option<&SecurityConfig>,
+    options: Option<&ExtractionOptions>,
     progress: Option<ThreadsafeFunction<(String, i64, i64, i64)>>,
 ) -> Result<ExtractionReport> {
     validate_path(&archive_path)?;
@@ -597,11 +621,19 @@ pub async fn extract_archive_with_progress(
 
     let config_owned: exarch_core::SecurityConfig =
         config.map(|c| c.as_core().clone()).unwrap_or_default();
+    let options_owned: exarch_core::ExtractionOptions =
+        options.map(|o| o.as_core().clone()).unwrap_or_default();
 
     let report = tokio::task::spawn_blocking(move || {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            run_extract_with_optional_progress(&archive_path, &output_dir, &config_owned, progress)
-                .map_err(convert_error)
+            run_extract_with_optional_progress(
+                &archive_path,
+                &output_dir,
+                &config_owned,
+                &options_owned,
+                progress,
+            )
+            .map_err(convert_error)
         }))
         .map_err(|_| Error::from_reason("Internal panic during archive extraction with progress"))
         .flatten()
@@ -613,25 +645,33 @@ pub async fn extract_archive_with_progress(
     Ok(ExtractionReport::from(report))
 }
 
-/// Runs `extract_archive_with_progress` routing to the JS callback when present
-/// or to [`exarch_core::NoopProgress`] when absent.
+/// Runs `extract_archive_with_options_and_progress` routing to the JS callback
+/// when present or to [`exarch_core::NoopProgress`] when absent.
 fn run_extract_with_optional_progress(
     archive_path: &str,
     output_dir: &str,
     config: &exarch_core::SecurityConfig,
+    options: &exarch_core::ExtractionOptions,
     progress: Option<ThreadsafeFunction<(String, i64, i64, i64)>>,
 ) -> exarch_core::Result<exarch_core::ExtractionReport> {
     progress.map_or_else(
         || {
             let mut noop = exarch_core::NoopProgress;
-            exarch_core::extract_archive_with_progress(archive_path, output_dir, config, &mut noop)
-        },
-        |tsfn| {
-            let mut callback = NodeProgressAdapter::new(tsfn);
-            exarch_core::extract_archive_with_progress(
+            exarch_core::extract_archive_with_options_and_progress(
                 archive_path,
                 output_dir,
                 config,
+                options,
+                &mut noop,
+            )
+        },
+        |tsfn| {
+            let mut callback = NodeProgressAdapter::new(tsfn);
+            exarch_core::extract_archive_with_options_and_progress(
+                archive_path,
+                output_dir,
+                config,
+                options,
                 &mut callback,
             )
         },
@@ -700,6 +740,7 @@ mod tests {
             "/tmp/test\0malicious.tar".to_string(),
             "/tmp/output".to_string(),
             None,
+            None,
         )
         .await;
 
@@ -716,6 +757,7 @@ mod tests {
             "/tmp/test.tar".to_string(),
             "/tmp/output\0malicious".to_string(),
             None,
+            None,
         )
         .await;
 
@@ -729,7 +771,7 @@ mod tests {
     #[tokio::test]
     async fn test_extract_archive_rejects_excessively_long_archive_path() {
         let long_path = "x".repeat(5000);
-        let result = extract_archive(long_path, "/tmp/output".to_string(), None).await;
+        let result = extract_archive(long_path, "/tmp/output".to_string(), None, None).await;
 
         assert!(result.is_err(), "should reject excessively long paths");
         assert!(
@@ -741,7 +783,7 @@ mod tests {
     #[tokio::test]
     async fn test_extract_archive_rejects_excessively_long_output_dir() {
         let long_path = "x".repeat(5000);
-        let result = extract_archive("/tmp/test.tar".to_string(), long_path, None).await;
+        let result = extract_archive("/tmp/test.tar".to_string(), long_path, None, None).await;
 
         assert!(result.is_err(), "should reject excessively long paths");
         assert!(
@@ -754,7 +796,7 @@ mod tests {
     async fn test_extract_archive_accepts_empty_paths() {
         // Empty paths should be accepted at boundary validation
         // Core library will handle actual path validation
-        let result = extract_archive("".to_string(), "".to_string(), None).await;
+        let result = extract_archive("".to_string(), "".to_string(), None, None).await;
 
         // If it fails, ensure it's not a boundary path validation error
         // (empty paths pass boundary validation; core handles semantic validation)
@@ -776,6 +818,7 @@ mod tests {
             "/tmp/test\0malicious.tar".to_string(),
             "/tmp/output".to_string(),
             None,
+            None,
         );
 
         assert!(result.is_err(), "should reject null bytes in archive path");
@@ -791,6 +834,7 @@ mod tests {
             "/tmp/test.tar".to_string(),
             "/tmp/output\0malicious".to_string(),
             None,
+            None,
         );
 
         assert!(result.is_err(), "should reject null bytes in output path");
@@ -803,7 +847,7 @@ mod tests {
     #[test]
     fn test_extract_archive_sync_rejects_excessively_long_archive_path() {
         let long_path = "x".repeat(5000);
-        let result = extract_archive_sync(long_path, "/tmp/output".to_string(), None);
+        let result = extract_archive_sync(long_path, "/tmp/output".to_string(), None, None);
 
         assert!(result.is_err(), "should reject excessively long paths");
         assert!(
@@ -815,7 +859,7 @@ mod tests {
     #[test]
     fn test_extract_archive_sync_rejects_excessively_long_output_dir() {
         let long_path = "x".repeat(5000);
-        let result = extract_archive_sync("/tmp/test.tar".to_string(), long_path, None);
+        let result = extract_archive_sync("/tmp/test.tar".to_string(), long_path, None, None);
 
         assert!(result.is_err(), "should reject excessively long paths");
         assert!(
@@ -832,6 +876,7 @@ mod tests {
         let result = extract_archive_sync(
             "/tmp/valid_test_path.tar".to_string(),
             "/tmp/valid_output_path".to_string(),
+            None,
             None,
         );
 
@@ -853,6 +898,7 @@ mod tests {
         let result = extract_archive_sync(
             "relative_test.tar".to_string(),
             "relative_output".to_string(),
+            None,
             None,
         );
 
@@ -878,6 +924,7 @@ mod tests {
             "custom_test.tar".to_string(),
             "custom_output".to_string(),
             Some(&config),
+            None,
         );
 
         // If it fails, ensure it's not a path validation error

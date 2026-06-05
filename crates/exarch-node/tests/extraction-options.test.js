@@ -63,6 +63,32 @@ describe('ExtractionOptions', () => {
       assert.strictEqual(result, opts);
     });
   });
+
+  describe('withAtomic()', () => {
+    it('should have atomic defaulting to false', () => {
+      const opts = new ExtractionOptions();
+      assert.strictEqual(opts.atomic, false);
+    });
+
+    it('should set atomic to true via withAtomic', () => {
+      const opts = new ExtractionOptions();
+      opts.withAtomic(true);
+      assert.strictEqual(opts.atomic, true);
+    });
+  });
+
+  describe('withSkipDuplicates() round-trip', () => {
+    it('should have skipDuplicates defaulting to true', () => {
+      const opts = new ExtractionOptions();
+      assert.strictEqual(opts.skipDuplicates, true);
+    });
+
+    it('should set skipDuplicates to false via withSkipDuplicates', () => {
+      const opts = new ExtractionOptions();
+      opts.withSkipDuplicates(false);
+      assert.strictEqual(opts.skipDuplicates, false);
+    });
+  });
 });
 
 describe('extractArchiveSync with ExtractionOptions', () => {

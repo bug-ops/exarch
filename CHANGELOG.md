@@ -45,12 +45,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Tests
 
+- Python and Node.js bindings: added round-trip tests for `ExtractionOptions.atomic`
+  and `skip_duplicates` — each field is covered by a default-value test and a
+  setter/getter round-trip test. Added `# Examples` doc section to the Python
+  `with_atomic` method (#332).
 - Added integration tests for `ExtractionOptions::skip_duplicates`: covers `skip_duplicates=true` (first entry kept, duplicate skipped with warning) and `skip_duplicates=false` (second entry overwrites first) for TAR archives. Documents that the `zip` crate 8.x deduplicates entries at parse time, making the flag a no-op for ZIP (#302).
 - Added 7z integration tests for `skip_duplicates`: `skip_duplicates=true` keeps the first
   entry and records a warning; `skip_duplicates=false` overwrites with the last entry (#314).
 
 ### Fixed
 
+- Python: `exarch.pyi` `SecurityConfig` and `CreationConfig` builder methods
+  (`max_file_size`, `max_total_size`, `max_compression_ratio`, `max_file_count`,
+  `max_path_depth`, `max_solid_block_memory`, `preserve_permissions`,
+  `compression_level`, `follow_symlinks`, `include_hidden`, `exclude_patterns`,
+  `max_file_size`) were missing the `with_` prefix; renamed to match the Rust
+  implementation (`with_max_file_size`, `with_compression_level`, etc.) so type
+  checkers accept valid code (#334).
 - Python: `SecurityConfig` and `CreationConfig` scalar getters (`max_file_size`, `max_total_size`, `max_compression_ratio`, `max_file_count`, `max_path_depth`, `max_solid_block_memory`, `preserve_permissions`, `compression_level`, `follow_symlinks`, `include_hidden`, `exclude_patterns`) now return their values correctly instead of a bound method. Builder methods were renamed to `with_<field>` (e.g. `with_max_file_size(...)`) to eliminate the PyO3 name collision (#315).
 - 7z force-overwrite now removes existing file before re-extraction when `skip_duplicates=false`; previously it returned a `PartialExtraction` error instead of overwriting (#323).
 - Node.js: `index.d.ts` now declares `setMaxSolidBlockMemory(size: number): this` and `get maxSolidBlockMemory(): number` for `SecurityConfig`; the file is committed to the repository so TypeScript consumers have correct types without building from source (#311).

@@ -37,23 +37,23 @@ class SecurityConfig:
         """
         ...
 
-    def max_file_size(self, size: int) -> SecurityConfig:
+    def with_max_file_size(self, size: int) -> SecurityConfig:
         """Sets the maximum file size in bytes."""
         ...
 
-    def max_total_size(self, size: int) -> SecurityConfig:
+    def with_max_total_size(self, size: int) -> SecurityConfig:
         """Sets the maximum total size in bytes."""
         ...
 
-    def max_compression_ratio(self, ratio: float) -> SecurityConfig:
+    def with_max_compression_ratio(self, ratio: float) -> SecurityConfig:
         """Sets the maximum compression ratio."""
         ...
 
-    def max_file_count(self, count: int) -> SecurityConfig:
+    def with_max_file_count(self, count: int) -> SecurityConfig:
         """Sets the maximum file count."""
         ...
 
-    def max_path_depth(self, depth: int) -> SecurityConfig:
+    def with_max_path_depth(self, depth: int) -> SecurityConfig:
         """Sets the maximum path depth."""
         ...
 
@@ -77,7 +77,7 @@ class SecurityConfig:
         """Allows or denies solid 7z archives."""
         ...
 
-    def max_solid_block_memory(self, size: int) -> SecurityConfig:
+    def with_max_solid_block_memory(self, size: int) -> SecurityConfig:
         """
         Sets the maximum memory budget in bytes for decompressing a solid 7z block.
 
@@ -86,7 +86,7 @@ class SecurityConfig:
         """
         ...
 
-    def preserve_permissions(self, preserve: bool = True) -> SecurityConfig:
+    def with_preserve_permissions(self, preserve: bool = True) -> SecurityConfig:
         """Sets whether to preserve permissions from archive."""
         ...
 
@@ -201,27 +201,27 @@ class CreationConfig:
         """Creates a CreationConfig with default settings."""
         ...
 
-    def compression_level(self, level: int) -> CreationConfig:
+    def with_compression_level(self, level: int) -> CreationConfig:
         """Sets the compression level (1-9)."""
         ...
 
-    def preserve_permissions(self, preserve: bool = True) -> CreationConfig:
+    def with_preserve_permissions(self, preserve: bool = True) -> CreationConfig:
         """Sets whether to preserve permissions."""
         ...
 
-    def follow_symlinks(self, follow: bool = True) -> CreationConfig:
+    def with_follow_symlinks(self, follow: bool = True) -> CreationConfig:
         """Sets whether to follow symlinks."""
         ...
 
-    def include_hidden(self, include: bool = True) -> CreationConfig:
+    def with_include_hidden(self, include: bool = True) -> CreationConfig:
         """Sets whether to include hidden files."""
         ...
 
-    def exclude_patterns(self, patterns: list[str]) -> CreationConfig:
+    def with_exclude_patterns(self, patterns: list[str]) -> CreationConfig:
         """Sets exclude patterns."""
         ...
 
-    def max_file_size(self, size: int | None) -> CreationConfig:
+    def with_max_file_size(self, size: int | None) -> CreationConfig:
         """Sets maximum file size in bytes."""
         ...
 

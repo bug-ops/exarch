@@ -6,11 +6,7 @@ const assert = require('node:assert');
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
-const {
-  ExtractionOptions,
-  extractArchiveSync,
-  createArchiveSync,
-} = require('../index.js');
+const { ExtractionOptions, extractArchiveSync, createArchiveSync } = require('../index.js');
 
 function createTempDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'exarch-test-'));

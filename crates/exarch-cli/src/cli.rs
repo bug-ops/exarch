@@ -161,6 +161,17 @@ pub struct CreateArgs {
     #[arg(long, value_name = "PREFIX")]
     pub strip_prefix: Option<PathBuf>,
 
+    /// Maximum size for a single file in bytes (supports K, M, G, T suffixes)
+    #[arg(long, value_name = "BYTES", value_parser = parse_byte_size)]
+    pub max_file_size: Option<u64>,
+
+    /// Preserve file permissions when creating the archive.
+    ///
+    /// Pass `--preserve-permissions=false` to create a portable archive
+    /// without platform-specific permission bits.
+    #[arg(long, action = clap::ArgAction::Set, default_value_t = true)]
+    pub preserve_permissions: bool,
+
     /// Overwrite output file if exists
     #[arg(short = 'f', long)]
     pub force: bool,
@@ -438,5 +449,60 @@ mod tests {
         };
         assert_eq!(args.max_files, 1_000_000);
         assert_eq!(args.max_total_size, Some(10 * 1024 * 1024 * 1024));
+    }
+
+    #[test]
+    fn test_create_args_max_file_size_parsed() {
+        let cli = Cli::parse_from([
+            "exarch",
+            "create",
+            "--max-file-size",
+            "50M",
+            "out.tar.gz",
+            "src/",
+        ]);
+        let Commands::Create(args) = cli.command else {
+            panic!("expected Create command");
+        };
+        assert_eq!(args.max_file_size, Some(50 * 1024 * 1024));
+    }
+
+    #[test]
+    fn test_create_args_preserve_permissions_default() {
+        let cli = Cli::parse_from(["exarch", "create", "out.tar.gz", "src/"]);
+        let Commands::Create(args) = cli.command else {
+            panic!("expected Create command");
+        };
+        assert!(args.preserve_permissions);
+    }
+
+    #[test]
+    fn test_create_args_preserve_permissions_explicit() {
+        let cli = Cli::parse_from([
+            "exarch",
+            "create",
+            "--preserve-permissions=true",
+            "out.tar.gz",
+            "src/",
+        ]);
+        let Commands::Create(args) = cli.command else {
+            panic!("expected Create command");
+        };
+        assert!(args.preserve_permissions);
+    }
+
+    #[test]
+    fn test_create_args_preserve_permissions_false() {
+        let cli = Cli::parse_from([
+            "exarch",
+            "create",
+            "--preserve-permissions=false",
+            "out.tar.gz",
+            "src/",
+        ]);
+        let Commands::Create(args) = cli.command else {
+            panic!("expected Create command");
+        };
+        assert!(!args.preserve_permissions);
     }
 }

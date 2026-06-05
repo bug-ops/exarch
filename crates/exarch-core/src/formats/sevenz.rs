@@ -288,6 +288,109 @@ impl<R: Read + Seek> SevenZArchive<R> {
 }
 
 impl<R: Read + Seek> SevenZArchive<R> {
+    /// Processes a single 7z entry: validates, extracts file or creates
+    /// directory.
+    ///
+    /// Returns `(continue, bytes_written)` on success so the caller can
+    /// invoke `on_bytes_written` and `on_entry_complete` after this returns,
+    /// guaranteeing both callbacks are always paired with `on_entry_start`.
+    #[allow(clippy::too_many_arguments)]
+    fn process_entry_inner(
+        entry: &sevenz_rust2::ArchiveEntry,
+        reader: &mut dyn Read,
+        entry_path: &std::path::Path,
+        validator: &mut EntryValidator,
+        dest: &DestDir,
+        report: &mut ExtractionReport,
+        dir_cache: &mut common::DirCache,
+        skip_duplicates: bool,
+        config: &SecurityConfig,
+    ) -> std::result::Result<u64, sevenz_rust2::Error> {
+        let entry_type = SevenZEntryAdapter::to_entry_type(entry).map_err(|e| {
+            sevenz_rust2::Error::Other(format!("entry type detection failed: {e}").into())
+        })?;
+
+        // Extension filter runs before validate_entry to avoid quota
+        // double-counting for skipped files.
+        if matches!(entry_type, EntryType::File) {
+            let ext = entry_path.extension().and_then(|e| e.to_str());
+            if !config.is_path_extension_allowed(ext) {
+                report.files_skipped += 1;
+                report.warnings.push(format!(
+                    "skipped entry with disallowed extension: {}",
+                    entry_path.display()
+                ));
+                return Ok(0);
+            }
+        }
+
+        // Re-validate (defense in depth)
+        let validated = validator
+            .validate_entry(entry_path, &entry_type, entry.size, None, None, None)
+            .map_err(|e| sevenz_rust2::Error::Other(format!("validation failed: {e}").into()))?;
+
+        // Extract based on type
+        match validated.entry_type {
+            ValidatedEntryType::Directory => {
+                let dest_path = dest.join_path(validated.safe_path.as_path());
+                dir_cache.ensure_dir(&dest_path)?;
+                report.directories_created += 1;
+                Ok(0)
+            }
+            ValidatedEntryType::File => {
+                let dest_path = dest.join_path(validated.safe_path.as_path());
+
+                dir_cache.ensure_parent_dir(&dest_path)?;
+
+                if dest_path.exists() {
+                    if skip_duplicates {
+                        report.files_skipped += 1;
+                        report.warnings.push(format!(
+                            "skipped duplicate entry: {}",
+                            validated.safe_path.as_path().display()
+                        ));
+                        return Ok(0);
+                    }
+                    return Err(sevenz_rust2::Error::Other(
+                        format!(
+                            "duplicate entry: {}",
+                            validated.safe_path.as_path().display()
+                        )
+                        .into(),
+                    ));
+                }
+
+                // Atomic write (temp + rename) with unique temp file name
+                let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+                let pid = id();
+                let original_name = dest_path
+                    .file_name()
+                    .map_or_else(|| "file".to_string(), |n| n.to_string_lossy().to_string());
+                let temp_name = format!(".{original_name}.exarch-tmp-{pid}-{counter}");
+                let temp_path = dest_path.with_file_name(&temp_name);
+
+                let temp_guard = TempFileGuard::new(temp_path.clone());
+                let bytes_written = {
+                    let mut temp_file = std::fs::File::create(&temp_path)?;
+                    let n = std::io::copy(reader, &mut temp_file)?;
+                    report.bytes_written =
+                        report.bytes_written.checked_add(n).ok_or_else(|| {
+                            sevenz_rust2::Error::Other("bytes_written overflow".into())
+                        })?;
+                    n
+                };
+                std::fs::rename(&temp_path, &dest_path)?;
+                temp_guard.persist();
+
+                report.files_extracted += 1;
+                Ok(bytes_written)
+            }
+            _ => Err(sevenz_rust2::Error::Other(
+                "symlinks/hardlinks not supported".into(),
+            )),
+        }
+    }
+
     /// Extract archive using sevenz-rust2 callback API with security
     /// validation.
     ///
@@ -341,102 +444,33 @@ impl<R: Read + Seek> SevenZArchive<R> {
             ctx.progress
                 .on_entry_start(entry_path.as_path(), total, idx);
 
-            // Convert entry metadata
-            let entry_type = SevenZEntryAdapter::to_entry_type(entry).map_err(|e| {
-                sevenz_rust2::Error::Other(format!("entry type detection failed: {e}").into())
-            })?;
+            let result = Self::process_entry_inner(
+                entry,
+                reader,
+                &entry_path,
+                validator,
+                dest,
+                &mut ctx.report,
+                ctx.dir_cache,
+                skip_duplicates,
+                config,
+            );
 
-            // Extension filter runs before validate_entry to avoid quota
-            // double-counting for skipped files.
-            if matches!(entry_type, EntryType::File) {
-                let ext = entry_path.extension().and_then(|e| e.to_str());
-                if !config.is_path_extension_allowed(ext) {
-                    ctx.report.files_skipped += 1;
-                    ctx.report.warnings.push(format!(
-                        "skipped entry with disallowed extension: {}",
-                        entry_path.display()
-                    ));
+            // INVARIANT: every branch below must call on_entry_complete exactly once.
+            // Fire on_bytes_written before on_entry_complete on success.
+            match result {
+                Ok(bytes_written) => {
+                    if bytes_written > 0 {
+                        ctx.progress.on_bytes_written(bytes_written);
+                    }
                     ctx.progress.on_entry_complete(entry_path.as_path());
-                    return Ok(true);
+                    Ok(true)
+                }
+                Err(e) => {
+                    ctx.progress.on_entry_complete(entry_path.as_path());
+                    Err(e)
                 }
             }
-
-            // Re-validate (defense in depth)
-            let validated = validator
-                .validate_entry(&entry_path, &entry_type, entry.size, None, None, None)
-                .map_err(|e| {
-                    sevenz_rust2::Error::Other(format!("validation failed: {e}").into())
-                })?;
-
-            // Extract based on type
-            match validated.entry_type {
-                ValidatedEntryType::Directory => {
-                    let dest_path = dest.join_path(validated.safe_path.as_path());
-                    // Use cache to avoid redundant mkdir syscalls
-                    ctx.dir_cache.ensure_dir(&dest_path)?;
-                    ctx.report.directories_created += 1;
-                }
-                ValidatedEntryType::File => {
-                    let dest_path = dest.join_path(validated.safe_path.as_path());
-
-                    // Create parent directories using cache
-                    ctx.dir_cache.ensure_parent_dir(&dest_path)?;
-
-                    if dest_path.exists() {
-                        if skip_duplicates {
-                            ctx.report.files_skipped += 1;
-                            ctx.report.warnings.push(format!(
-                                "skipped duplicate entry: {}",
-                                validated.safe_path.as_path().display()
-                            ));
-                            ctx.progress.on_entry_complete(entry_path.as_path());
-                            return Ok(true);
-                        }
-                        return Err(sevenz_rust2::Error::Other(
-                            format!(
-                                "duplicate entry: {}",
-                                validated.safe_path.as_path().display()
-                            )
-                            .into(),
-                        ));
-                    }
-
-                    // Atomic write (temp + rename) with unique temp file name
-                    let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-                    let pid = id();
-                    let original_name = dest_path
-                        .file_name()
-                        .map_or_else(|| "file".to_string(), |n| n.to_string_lossy().to_string());
-                    let temp_name = format!(".{original_name}.exarch-tmp-{pid}-{counter}");
-                    let temp_path = dest_path.with_file_name(&temp_name);
-
-                    // Guard ensures temp file cleanup on error
-                    let guard = TempFileGuard::new(temp_path.clone());
-                    {
-                        let mut temp_file = std::fs::File::create(&temp_path)?;
-                        let bytes_written = std::io::copy(reader, &mut temp_file)?;
-                        ctx.report.bytes_written = ctx
-                            .report
-                            .bytes_written
-                            .checked_add(bytes_written)
-                            .ok_or_else(|| {
-                                sevenz_rust2::Error::Other("bytes_written overflow".into())
-                            })?;
-                    }
-                    std::fs::rename(&temp_path, &dest_path)?;
-                    guard.persist(); // Success - don't cleanup
-
-                    ctx.report.files_extracted += 1;
-                }
-                _ => {
-                    return Err(sevenz_rust2::Error::Other(
-                        "symlinks/hardlinks not supported".into(),
-                    ));
-                }
-            }
-
-            ctx.progress.on_entry_complete(entry_path.as_path());
-            Ok(true) // Continue extraction
         };
 
         let result = sevenz_rust2::decompress_with_extract_fn(source, dest.as_path(), extract_fn);

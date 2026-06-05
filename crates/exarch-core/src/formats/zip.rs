@@ -138,6 +138,7 @@ use crate::types::DestDir;
 use crate::types::EntryType;
 
 use super::common;
+use super::common::EntryCompleteGuard;
 use super::traits::ArchiveFormat;
 
 /// ZIP archive handler with random-access extraction.
@@ -265,6 +266,7 @@ impl<R: Read + Seek> ZipArchive<R> {
         dir_cache: &mut common::DirCache,
         skip_duplicates: bool,
         config: &SecurityConfig,
+        progress: &mut dyn ProgressCallback,
     ) -> Result<()> {
         let mut zip_file = self.inner.by_index(index).map_err(|e| {
             if e.to_string().contains("Password required to decrypt file") {
@@ -361,6 +363,7 @@ impl<R: Read + Seek> ZipArchive<R> {
                 copy_buffer,
                 dir_cache,
                 skip_duplicates,
+                progress,
             )?;
         }
 
@@ -378,6 +381,7 @@ impl<R: Read + Seek> ZipArchive<R> {
         copy_buffer: &mut CopyBuffer,
         dir_cache: &mut common::DirCache,
         skip_duplicates: bool,
+        progress: &mut dyn ProgressCallback,
     ) -> Result<()> {
         common::extract_file_generic(
             zip_file,
@@ -388,6 +392,7 @@ impl<R: Read + Seek> ZipArchive<R> {
             copy_buffer,
             dir_cache,
             skip_duplicates,
+            progress,
         )
     }
 }
@@ -432,8 +437,9 @@ impl<R: Read + Seek> ArchiveFormat for ZipArchive<R> {
                 )
             };
             progress.on_entry_start(&entry_path, entry_count, i.saturating_add(1));
+            let mut guard = EntryCompleteGuard::new(progress, &entry_path);
 
-            if let Err(e) = self.process_entry(
+            let result = self.process_entry(
                 i,
                 &mut validator,
                 &dest,
@@ -442,7 +448,11 @@ impl<R: Read + Seek> ArchiveFormat for ZipArchive<R> {
                 &mut dir_cache,
                 skip_duplicates,
                 config,
-            ) {
+                guard.progress_mut(),
+            );
+
+            if let Err(e) = result {
+                drop(guard);
                 return Err(if report.total_items() > 0 {
                     ArchiveError::PartialExtraction {
                         source: Box::new(e),
@@ -452,7 +462,7 @@ impl<R: Read + Seek> ArchiveFormat for ZipArchive<R> {
                     e
                 });
             }
-            progress.on_entry_complete(&entry_path);
+            guard.complete();
         }
 
         progress.on_complete();

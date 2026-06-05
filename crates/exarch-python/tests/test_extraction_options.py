@@ -85,3 +85,27 @@ class TestExtractionOptions:
         # opts = ExtractionOptions()
         # report = extract_archive(sample_tar_gz, output, options=opts)
         # assert report.files_extracted >= 1
+
+    def test_atomic_default(self):
+        """Test that atomic defaults to False."""
+        pytest.skip("Requires compiled Python extension module")
+        # opts = ExtractionOptions()
+        # assert opts.atomic is False
+
+    def test_atomic_round_trip(self):
+        """Test with_atomic(True) sets the flag and returns self."""
+        pytest.skip("Requires compiled Python extension module")
+        # opts = ExtractionOptions().with_atomic(True)
+        # assert opts.atomic is True
+
+    def test_skip_duplicates_default(self):
+        """Test that skip_duplicates defaults to True."""
+        pytest.skip("Requires compiled Python extension module")
+        # opts = ExtractionOptions()
+        # assert opts.skip_duplicates is True
+
+    def test_skip_duplicates_round_trip(self):
+        """Test with_skip_duplicates(True) sets the flag after toggling."""
+        pytest.skip("Requires compiled Python extension module")
+        # opts = ExtractionOptions().with_skip_duplicates(True)
+        # assert opts.skip_duplicates is True

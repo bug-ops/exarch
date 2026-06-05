@@ -673,6 +673,14 @@ impl PyExtractionOptions {
     /// **Important:** atomic mode requires that the output directory does not
     /// already exist. If it does, extraction raises ``OutputExistsError``.
     /// Non-atomic mode extracts into an existing directory without error.
+    ///
+    /// # Examples
+    ///
+    /// ```python
+    /// from exarch import ExtractionOptions
+    /// opts = ExtractionOptions().with_atomic(True)
+    /// assert opts.atomic == True
+    /// ```
     #[pyo3(name = "with_atomic")]
     #[pyo3(signature = (atomic=true))]
     fn with_atomic(mut slf: PyRefMut<'_, Self>, atomic: bool) -> PyRefMut<'_, Self> {

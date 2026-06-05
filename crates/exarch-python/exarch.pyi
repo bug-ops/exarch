@@ -117,7 +117,6 @@ class SecurityConfig:
 
     @allowed_extensions.setter
     def allowed_extensions(self, value: list[str]) -> None: ...
-
     @property
     def banned_path_components(self) -> list[str]:
         """List of banned path components."""

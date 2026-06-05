@@ -207,31 +207,10 @@ impl<R: Read> TarArchive<R> {
             return Ok(None);
         }
 
-        let raw_path = entry
+        let path = entry
             .path()
             .map_err(|e| ArchiveError::InvalidArchive(format!("invalid path: {e}")))?
             .into_owned();
-
-        let path = if raw_path.to_str().is_some_and(|s| s.starts_with('/'))
-            && ctx.config.allowed.absolute_paths
-        {
-            let stripped = raw_path
-                .to_str()
-                .map(|s| s.trim_start_matches('/'))
-                .unwrap_or_default();
-            if stripped.is_empty() {
-                return Err(ArchiveError::PathTraversal { path: raw_path });
-            }
-            let p = std::path::PathBuf::from(stripped);
-            if p.components()
-                .any(|c| matches!(c, std::path::Component::ParentDir))
-            {
-                return Err(ArchiveError::PathTraversal { path: raw_path });
-            }
-            p
-        } else {
-            raw_path
-        };
 
         let entry_type = TarEntryAdapter::to_entry_type(&entry)?;
         let size = TarEntryAdapter::get_uncompressed_size(&entry);

@@ -286,25 +286,7 @@ impl<R: Read + Seek> ZipArchive<R> {
             .into_owned();
         let path = match zip_file.enclosed_name() {
             Some(p) => p,
-            None if config.allowed.absolute_paths => {
-                let stripped = raw_name.trim_start_matches('/');
-                if stripped.is_empty() {
-                    return Err(ArchiveError::PathTraversal {
-                        path: PathBuf::from(&raw_name),
-                    });
-                }
-                let p = PathBuf::from(stripped);
-                // SafePath::validate will enforce the remaining security checks;
-                // we only need to pre-reject clear traversal here.
-                if p.components()
-                    .any(|c| matches!(c, std::path::Component::ParentDir))
-                {
-                    return Err(ArchiveError::PathTraversal {
-                        path: PathBuf::from(&raw_name),
-                    });
-                }
-                p
-            }
+            None if config.allowed.absolute_paths => PathBuf::from(&raw_name),
             None => {
                 return Err(ArchiveError::PathTraversal {
                     path: PathBuf::from(&raw_name),

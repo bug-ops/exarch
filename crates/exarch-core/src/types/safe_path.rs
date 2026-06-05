@@ -188,9 +188,19 @@ impl SafePath {
                             path: path.to_path_buf(),
                         });
                     }
-                    normalized.push(component);
+                    // Skip root/prefix so final_path stays relative; dest.join()
+                    // would otherwise discard dest entirely for absolute paths.
+                    needs_normalization = true;
                 }
             }
+        }
+
+        // Bare absolute paths like `/` or `C:\` produce an empty normalized
+        // path after stripping the root/prefix component. Reject them.
+        if needs_normalization && normalized.as_os_str().is_empty() && depth == 0 {
+            return Err(ArchiveError::PathTraversal {
+                path: path.to_path_buf(),
+            });
         }
 
         // Check path depth
@@ -434,12 +444,29 @@ mod tests {
         let mut config = SecurityConfig::default();
         config.allowed.absolute_paths = true;
 
-        // Create a temporary file to test with
-        let test_file = dest.as_path().join("test.txt");
-        std::fs::write(&test_file, "test").expect("failed to write test file");
+        // Verify that an external absolute path is stripped to a relative path
+        // so dest.join() resolves inside dest, not at the original absolute location.
+        let result = SafePath::validate(Path::new("/some/external/path"), &dest, &config);
+        assert!(
+            result.is_ok(),
+            "absolute path with flag should succeed: {result:?}"
+        );
+        let safe = result.expect("safe");
+        assert_eq!(safe.as_path(), Path::new("some/external/path"));
+    }
 
-        let result = SafePath::validate(&test_file, &dest, &config);
-        assert!(result.is_ok());
+    #[test]
+    #[cfg(unix)]
+    fn test_safe_path_bare_slash_rejected_when_absolute_allowed() {
+        let (_temp, dest) = create_test_dest();
+        let mut config = SecurityConfig::default();
+        config.allowed.absolute_paths = true;
+
+        let result = SafePath::validate(Path::new("/"), &dest, &config);
+        assert!(
+            matches!(result, Err(ArchiveError::PathTraversal { .. })),
+            "bare '/' must be rejected as PathTraversal even with allow_absolute_paths"
+        );
     }
 
     #[test]

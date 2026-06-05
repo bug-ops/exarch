@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Performance
+
+- `ZipArchive::extract()` now calls `by_index()` exactly once per entry instead of twice.
+  The local file header seek+read was previously performed once for the progress callback and
+  again inside `process_entry`; the two calls are now merged, halving header I/O on archives
+  with many small entries (#341).
+
 ### Fixed
 
 - Python `ExtractionOptions` tests no longer unconditionally skip: replaced the

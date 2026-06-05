@@ -614,6 +614,8 @@ impl PyCreationConfig {
 ///
 /// * `skip_duplicates` - Skip duplicate entries silently instead of aborting
 ///   (default: `True`)
+/// * `atomic` - Extract to a temp dir then rename atomically on success
+///   (default: `False`)
 ///
 /// # Examples
 ///
@@ -623,6 +625,9 @@ impl PyCreationConfig {
 ///
 /// # Disable duplicate skipping
 /// opts = ExtractionOptions().with_skip_duplicates(False)
+///
+/// # Enable atomic extraction
+/// opts = ExtractionOptions().with_atomic(True)
 /// ```
 #[pyclass(name = "ExtractionOptions", skip_from_py_object)]
 #[derive(Clone)]
@@ -658,6 +663,23 @@ impl PyExtractionOptions {
         slf
     }
 
+    /// Sets whether extraction uses a temporary directory for atomic commits.
+    ///
+    /// When `True`, files are extracted to a temp dir in the same parent as
+    /// the output directory, then atomically renamed on completion. On failure
+    /// the temp dir is removed, leaving the output directory untouched.
+    /// Default: `False`.
+    ///
+    /// **Important:** atomic mode requires that the output directory does not
+    /// already exist. If it does, extraction raises ``OutputExistsError``.
+    /// Non-atomic mode extracts into an existing directory without error.
+    #[pyo3(name = "with_atomic")]
+    #[pyo3(signature = (atomic=true))]
+    fn with_atomic(mut slf: PyRefMut<'_, Self>, atomic: bool) -> PyRefMut<'_, Self> {
+        slf.inner.atomic = atomic;
+        slf
+    }
+
     /// Finalizes the configuration (for API consistency).
     fn build(slf: PyRefMut<'_, Self>) -> PyRefMut<'_, Self> {
         slf
@@ -673,11 +695,21 @@ impl PyExtractionOptions {
         self.inner.skip_duplicates = value;
     }
 
+    #[getter]
+    fn get_atomic(&self) -> bool {
+        self.inner.atomic
+    }
+
+    #[setter]
+    fn set_atomic(&mut self, value: bool) {
+        self.inner.atomic = value;
+    }
+
     /// Returns a debug string representation.
     fn __repr__(&self) -> String {
         format!(
-            "ExtractionOptions(skip_duplicates={})",
-            self.inner.skip_duplicates
+            "ExtractionOptions(skip_duplicates={}, atomic={})",
+            self.inner.skip_duplicates, self.inner.atomic
         )
     }
 }

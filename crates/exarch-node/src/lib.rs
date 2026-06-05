@@ -564,10 +564,10 @@ pub fn verify_archive_sync(
 /// The `progress` callback is called once per entry with
 /// `(path, total, current, bytesWritten)` where:
 /// - `path` — entry path inside the archive
-/// - `total` — total number of entries as `bigint` (0 for TAR-family formats
+/// - `total` — total number of entries as `number` (0 for TAR-family formats
 ///   because the entry count is unknown until the stream is fully read)
-/// - `current` — 1-based index of the current entry as `bigint`
-/// - `bytesWritten` — cumulative bytes written to disk so far as `bigint`
+/// - `current` — 1-based index of the current entry as `number`
+/// - `bytesWritten` — cumulative bytes written to disk so far as `number`
 ///   (always 0 during extraction because the core library does not emit
 ///   byte-level progress events for extraction; only entry-level events fire)
 ///
@@ -580,8 +580,8 @@ pub fn verify_archive_sync(
 /// * `output_dir` - Directory where files will be extracted
 /// * `config` - Optional `SecurityConfig` (uses secure defaults if omitted)
 /// * `options` - Optional `ExtractionOptions` (uses defaults if omitted)
-/// * `progress` - Optional progress callback `(path: string, total: bigint,
-///   current: bigint, bytesWritten: bigint) => void`
+/// * `progress` - Optional progress callback `(path: string, total: number,
+///   current: number, bytesWritten: number) => void`
 ///
 /// # Returns
 ///

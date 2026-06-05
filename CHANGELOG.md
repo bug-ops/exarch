@@ -79,6 +79,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   out-of-range level (0 or >9) now returns `ArchiveError::InvalidCompressionLevel` instead of
   silently clamping or panicking (#308).
 
+### Added
+
 - `extract` command now exposes three previously hidden `SecurityConfig` fields as CLI flags:
   `--max-path-depth <N>` (default 32), `--banned-component <COMPONENT>` (repeatable; replaces
   the default ban list when provided), and `--allow-absolute-paths` (flag). Operators can now
@@ -106,6 +108,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added integration tests for `ExtractionOptions::skip_duplicates`: covers `skip_duplicates=true` (first entry kept, duplicate skipped with warning) and `skip_duplicates=false` (second entry overwrites first) for TAR archives. Documents that the `zip` crate 8.x deduplicates entries at parse time, making the flag a no-op for ZIP (#302).
 - Added 7z integration tests for `skip_duplicates`: `skip_duplicates=true` keeps the first
   entry and records a warning; `skip_duplicates=false` overwrites with the last entry (#314).
+
+### Fixed
 
 - Python: `exarch.pyi` `SecurityConfig` and `CreationConfig` builder methods
   (`max_file_size`, `max_total_size`, `max_compression_ratio`, `max_file_count`,

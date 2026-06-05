@@ -40,7 +40,7 @@ const MAX_COMPONENT_LENGTH: usize = 255;
 /// # Customize with builder pattern
 /// config = (SecurityConfig()
 ///     .with_max_file_size(100 * 1024 * 1024)
-///     .allow_symlinks(True))
+///     .with_allow_symlinks(True))
 ///
 /// # Use permissive configuration for trusted archives
 /// config = SecurityConfig.permissive()
@@ -126,28 +126,28 @@ impl PySecurityConfig {
 
     /// Allows or denies symlinks.
     #[pyo3(signature = (allow=true))]
-    fn allow_symlinks(mut slf: PyRefMut<'_, Self>, allow: bool) -> PyRefMut<'_, Self> {
+    fn with_allow_symlinks(mut slf: PyRefMut<'_, Self>, allow: bool) -> PyRefMut<'_, Self> {
         slf.inner.allowed.symlinks = allow;
         slf
     }
 
     /// Allows or denies hardlinks.
     #[pyo3(signature = (allow=true))]
-    fn allow_hardlinks(mut slf: PyRefMut<'_, Self>, allow: bool) -> PyRefMut<'_, Self> {
+    fn with_allow_hardlinks(mut slf: PyRefMut<'_, Self>, allow: bool) -> PyRefMut<'_, Self> {
         slf.inner.allowed.hardlinks = allow;
         slf
     }
 
     /// Allows or denies absolute paths.
     #[pyo3(signature = (allow=true))]
-    fn allow_absolute_paths(mut slf: PyRefMut<'_, Self>, allow: bool) -> PyRefMut<'_, Self> {
+    fn with_allow_absolute_paths(mut slf: PyRefMut<'_, Self>, allow: bool) -> PyRefMut<'_, Self> {
         slf.inner.allowed.absolute_paths = allow;
         slf
     }
 
     /// Allows or denies world-writable files.
     #[pyo3(signature = (allow=true))]
-    fn allow_world_writable(mut slf: PyRefMut<'_, Self>, allow: bool) -> PyRefMut<'_, Self> {
+    fn with_allow_world_writable(mut slf: PyRefMut<'_, Self>, allow: bool) -> PyRefMut<'_, Self> {
         slf.inner.allowed.world_writable = allow;
         slf
     }
@@ -158,7 +158,7 @@ impl PySecurityConfig {
     /// entry, which may allow a crafted archive to consume excessive
     /// memory. Disabled by default.
     #[pyo3(signature = (allow=true))]
-    fn allow_solid_archives(mut slf: PyRefMut<'_, Self>, allow: bool) -> PyRefMut<'_, Self> {
+    fn with_allow_solid_archives(mut slf: PyRefMut<'_, Self>, allow: bool) -> PyRefMut<'_, Self> {
         slf.inner.allow_solid_archives = allow;
         slf
     }

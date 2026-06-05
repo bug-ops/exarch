@@ -181,13 +181,14 @@ Builder-style security configuration.
 
 ```python
 config = exarch.SecurityConfig()
-config = config.max_file_size(100 * 1024 * 1024)        # 100 MB per file
-config = config.max_total_size(1024 * 1024 * 1024)      # 1 GB total
-config = config.max_file_count(10_000)                   # Max 10k files
-config = config.max_compression_ratio(50.0)              # Zip bomb threshold
-config = config.allowed_extensions([".txt", ".md"])      # Extension allowlist
-config = config.banned_path_components(["__MACOSX"])     # Skip components
-config = config.allow_solid_archives(True)               # Allow solid 7z archives
+config = config.with_max_file_size(100 * 1024 * 1024)   # 100 MB per file
+config = config.with_max_total_size(1024 * 1024 * 1024) # 1 GB total
+config = config.with_max_file_count(10_000)              # Max 10k files
+config = config.with_max_compression_ratio(50.0)        # Zip bomb threshold
+config = config.add_allowed_extension(".txt")            # Extension allowlist
+config = config.add_allowed_extension(".md")
+config = config.add_banned_component("__MACOSX")         # Skip components
+config = config.with_allow_solid_archives(True)          # Allow solid 7z archives
 ```
 
 ## Security Features

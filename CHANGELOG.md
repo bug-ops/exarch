@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `exarch create --quiet --json` now emits JSON to stdout instead of
   suppressing it. `--quiet` no longer silences `--json` output for any
   command (#357).
+- Node.js `SecurityConfig` JSDoc table now lists all 7 default `banned_path_components`
+  (`.git`, `.ssh`, `.gnupg`, `.aws`, `.kube`, `.docker`, `.env`); previously only `.git` and
+  `.ssh` were shown, which could mislead users into thinking the remaining five needed to be
+  added manually (#355).
 - `exarch list --json -l` now includes `symlink_target` and `hardlink_target` in
   the JSON output for symlink and hardlink entries. Previously the fields were
   populated in `exarch-core` but silently dropped by the CLI JSON formatter (#346).
@@ -35,6 +39,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now assert extracted file contents match the original source bytes (#335).
 
 ### Breaking Changes
+
+- **Python `SecurityConfig` builder methods** `allow_symlinks`, `allow_hardlinks`,
+  `allow_absolute_paths`, `allow_world_writable`, and `allow_solid_archives` have been renamed
+  to `with_allow_symlinks`, `with_allow_hardlinks`, `with_allow_absolute_paths`,
+  `with_allow_world_writable`, and `with_allow_solid_archives` to match the `with_` prefix
+  convention used by all other builder methods in the class. Update call sites by prepending
+  `with_` to each method name (#354).
 
 - **`ArchiveCreator::compression_level`** now returns `Result<Self, ArchiveError>` instead of
   `Self`. Call sites must propagate the error with `?` or handle it explicitly; passing an

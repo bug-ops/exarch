@@ -47,7 +47,7 @@ def test_cve_symlink_escape(malicious_symlink_escape, temp_dir):
     # Test that even with symlinks enabled, escape is detected
     output_dir2 = temp_dir / "output2"
     output_dir2.mkdir()
-    config = exarch.SecurityConfig().allow_symlinks(True)
+    config = exarch.SecurityConfig().with_allow_symlinks(True)
 
     with pytest.raises(exarch.SymlinkEscapeError):
         exarch.extract_archive(malicious_symlink_escape, output_dir2, config)
@@ -100,7 +100,7 @@ def test_symlink_allowed_within_directory(temp_dir):
     output_dir.mkdir()
 
     # Allow symlinks within extraction directory
-    config = exarch.SecurityConfig().allow_symlinks(True)
+    config = exarch.SecurityConfig().with_allow_symlinks(True)
 
     report = exarch.extract_archive(archive_path, output_dir, config)
 
@@ -184,7 +184,7 @@ def test_hardlink_escape(malicious_hardlink_escape, temp_dir):
     output_dir2 = temp_dir / "output2"
     output_dir2.mkdir()
 
-    config = exarch.SecurityConfig().allow_hardlinks(True)
+    config = exarch.SecurityConfig().with_allow_hardlinks(True)
     with pytest.raises(exarch.HardlinkEscapeError):
         exarch.extract_archive(malicious_hardlink_escape, output_dir2, config)
 
@@ -229,7 +229,7 @@ def test_partial_extraction_preserves_symlink_escape_type(temp_dir):
 
     output_dir = temp_dir / "out"
     output_dir.mkdir()
-    config = exarch.SecurityConfig().allow_symlinks(True).allow_hardlinks(False)
+    config = exarch.SecurityConfig().with_allow_symlinks(True).with_allow_hardlinks(False)
 
     with pytest.raises(exarch.SymlinkEscapeError) as exc_info:
         exarch.extract_archive(archive, output_dir, config)
@@ -255,7 +255,7 @@ def test_partial_extraction_preserves_hardlink_escape_type(temp_dir):
 
     output_dir = temp_dir / "out"
     output_dir.mkdir()
-    config = exarch.SecurityConfig().allow_hardlinks(True)
+    config = exarch.SecurityConfig().with_allow_hardlinks(True)
 
     with pytest.raises(exarch.HardlinkEscapeError) as exc_info:
         exarch.extract_archive(archive, output_dir, config)

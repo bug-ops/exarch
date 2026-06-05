@@ -15,6 +15,8 @@
 use exarch_core::ExtractionOptions;
 use exarch_core::SecurityConfig;
 use exarch_core::extract_archive_with_options;
+use sevenz_rust2::ArchiveEntry;
+use sevenz_rust2::ArchiveWriter;
 use std::io::Write as _;
 use tempfile::NamedTempFile;
 use tempfile::TempDir;
@@ -89,6 +91,86 @@ fn tar_skip_duplicates_true_keeps_first_entry() {
 fn tar_skip_duplicates_false_overwrites_with_last_entry() {
     let data = make_tar_with_duplicate("file.txt", b"first", b"second");
     let archive = write_tar(&data);
+    let dest = TempDir::new().unwrap();
+    let config = SecurityConfig::default();
+    let options = ExtractionOptions::default().with_skip_duplicates(false);
+
+    let report = extract_archive_with_options(archive.path(), dest.path(), &config, &options)
+        .expect("extraction with skip_duplicates=false must succeed");
+
+    assert_eq!(
+        report.files_extracted, 2,
+        "both entries must be counted as extracted (second overwrites first)"
+    );
+    assert_eq!(report.files_skipped, 0, "no entries must be skipped");
+
+    let content = std::fs::read(dest.path().join("file.txt")).unwrap();
+    assert_eq!(
+        content, b"second",
+        "second entry must have overwritten the first"
+    );
+}
+
+// ============================================================================
+// 7z skip_duplicates tests
+// ============================================================================
+
+/// Build a 7z archive in memory containing two entries with the same path but
+/// different content.
+fn make_sevenz_with_duplicate(path: &str, first: &[u8], second: &[u8]) -> NamedTempFile {
+    let mut f = NamedTempFile::with_suffix(".7z").unwrap();
+    {
+        let mut writer = ArchiveWriter::new(&mut f).unwrap();
+        writer
+            .push_archive_entry(ArchiveEntry::new_file(path), Some(first))
+            .unwrap();
+        writer
+            .push_archive_entry(ArchiveEntry::new_file(path), Some(second))
+            .unwrap();
+        writer.finish().unwrap();
+    }
+    f
+}
+
+/// `skip_duplicates=true` (default): first entry extracted, second skipped.
+/// The file on disk must contain the content of the FIRST entry.
+#[test]
+fn sevenz_skip_duplicates_true_keeps_first_entry() {
+    let archive = make_sevenz_with_duplicate("file.txt", b"first", b"second");
+    let dest = TempDir::new().unwrap();
+    let config = SecurityConfig::default();
+    let options = ExtractionOptions::default(); // skip_duplicates = true
+
+    let report = extract_archive_with_options(archive.path(), dest.path(), &config, &options)
+        .expect("extraction with skip_duplicates=true must succeed");
+
+    assert_eq!(
+        report.files_extracted, 1,
+        "only the first entry is extracted"
+    );
+    assert_eq!(
+        report.files_skipped, 1,
+        "second entry must be counted as skipped"
+    );
+    assert_eq!(
+        report.warnings.len(),
+        1,
+        "exactly one duplicate warning expected"
+    );
+    assert!(
+        report.warnings[0].contains("file.txt"),
+        "warning must identify the duplicate path"
+    );
+
+    let content = std::fs::read(dest.path().join("file.txt")).unwrap();
+    assert_eq!(content, b"first", "first entry content must be preserved");
+}
+
+/// `skip_duplicates=false`: both entries processed; second overwrites first.
+/// The file on disk must contain the content of the SECOND entry.
+#[test]
+fn sevenz_skip_duplicates_false_overwrites_with_last_entry() {
+    let archive = make_sevenz_with_duplicate("file.txt", b"first", b"second");
     let dest = TempDir::new().unwrap();
     let config = SecurityConfig::default();
     let options = ExtractionOptions::default().with_skip_duplicates(false);

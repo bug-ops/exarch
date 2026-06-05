@@ -31,6 +31,8 @@ pub fn execute(args: &CreateArgs, formatter: &dyn OutputFormatter, quiet: bool) 
         include_hidden: args.include_hidden,
         compression_level: args.compression_level,
         strip_prefix: args.strip_prefix.clone(),
+        max_file_size: args.max_file_size,
+        preserve_permissions: args.preserve_permissions,
         ..Default::default()
     };
 

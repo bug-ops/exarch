@@ -29,7 +29,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let report = ArchiveCreator::new()
         .output("example.zip")
         .add_source("example_file.txt")
-        .compression_level(9)
+        .compression_level(9)?
         .create()?;
     println!("  Created ZIP with {} files", report.files_added);
 

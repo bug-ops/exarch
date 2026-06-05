@@ -23,7 +23,7 @@ use crate::formats::detect::ArchiveType;
 ///     .output("backup.tar.gz")
 ///     .add_source("src/")
 ///     .add_source("Cargo.toml")
-///     .compression_level(9)
+///     .compression_level(9)?
 ///     .create()?;
 ///
 /// println!("Created archive with {} files", report.files_added);
@@ -124,17 +124,26 @@ impl ArchiveCreator {
     ///
     /// Higher values provide better compression but slower speed.
     ///
+    /// # Errors
+    ///
+    /// Returns [`ArchiveError::InvalidCompressionLevel`] if `level` is not in
+    /// the range 1–9.
+    ///
     /// # Examples
     ///
     /// ```
     /// use exarch_core::creation::ArchiveCreator;
     ///
-    /// let creator = ArchiveCreator::new().compression_level(9); // Maximum compression
+    /// let creator = ArchiveCreator::new().compression_level(9)?; // Maximum compression
+    ///
+    /// # Ok::<(), exarch_core::ArchiveError>(())
     /// ```
-    #[must_use]
-    pub fn compression_level(mut self, level: u8) -> Self {
+    pub fn compression_level(mut self, level: u8) -> Result<Self> {
+        if !(1..=9).contains(&level) {
+            return Err(ArchiveError::InvalidCompressionLevel { level });
+        }
         self.config.compression_level = Some(level);
-        self
+        Ok(self)
     }
 
     /// Sets whether to follow symlinks.
@@ -306,6 +315,7 @@ mod tests {
     fn test_builder_config_methods() {
         let creator = ArchiveCreator::new()
             .compression_level(9)
+            .unwrap()
             .follow_symlinks(true)
             .include_hidden(true)
             .exclude("*.log")
@@ -358,9 +368,26 @@ mod tests {
 
     #[test]
     fn test_builder_compression_level() {
-        let creator = ArchiveCreator::new().compression_level(9);
-
+        let creator = ArchiveCreator::new().compression_level(9).unwrap();
         assert_eq!(creator.config.compression_level, Some(9));
+    }
+
+    #[test]
+    fn test_builder_compression_level_mid() {
+        let creator = ArchiveCreator::new().compression_level(5).unwrap();
+        assert_eq!(creator.config.compression_level, Some(5));
+    }
+
+    #[test]
+    fn test_builder_compression_level_invalid() {
+        assert!(matches!(
+            ArchiveCreator::new().compression_level(0),
+            Err(ArchiveError::InvalidCompressionLevel { level: 0 })
+        ));
+        assert!(matches!(
+            ArchiveCreator::new().compression_level(10),
+            Err(ArchiveError::InvalidCompressionLevel { level: 10 })
+        ));
     }
 
     #[test]

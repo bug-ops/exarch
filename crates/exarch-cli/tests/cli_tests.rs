@@ -635,6 +635,61 @@ fn test_create_compression_level_max() {
 }
 
 // ============================================================================
+// #306 — CLI create flags: --max-file-size, --preserve-permissions
+// ============================================================================
+
+#[test]
+fn test_create_max_file_size_flag_accepted() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("test.tar.gz");
+
+    exarch_cmd()
+        .arg("create")
+        .arg("--max-file-size")
+        .arg("10M")
+        .arg(&archive)
+        .arg(fixture_path("sample.txt"))
+        .assert()
+        .success();
+
+    assert!(archive.exists());
+}
+
+#[test]
+fn test_create_preserve_permissions_default_true() {
+    // --preserve-permissions=true explicitly mirrors the default behaviour
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("perms.tar.gz");
+
+    exarch_cmd()
+        .arg("create")
+        .arg("--preserve-permissions=true")
+        .arg(&archive)
+        .arg(fixture_path("sample.txt"))
+        .assert()
+        .success();
+
+    assert!(archive.exists());
+}
+
+#[test]
+fn test_create_preserve_permissions_false() {
+    // --preserve-permissions=false must be accepted without error
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("noperms.tar.gz");
+
+    exarch_cmd()
+        .arg("create")
+        .arg("--preserve-permissions=false")
+        .arg(&archive)
+        .arg(fixture_path("sample.txt"))
+        .assert()
+        .success();
+
+    assert!(archive.exists());
+}
+
+// ============================================================================
 // Error Handling Tests
 // ============================================================================
 

@@ -7,12 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- **`ArchiveCreator::compression_level`** now returns `Result<Self, ArchiveError>` instead of
+  `Self`. Call sites must propagate the error with `?` or handle it explicitly; passing an
+  out-of-range level (0 or >9) now returns `ArchiveError::InvalidCompressionLevel` instead of
+  silently clamping or panicking (#308).
+
 ### Added
 
 - `extract` command now exposes three previously hidden `SecurityConfig` fields as CLI flags:
   `--max-path-depth <N>` (default 32), `--banned-component <COMPONENT>` (repeatable; replaces
   the default ban list when provided), and `--allow-absolute-paths` (flag). Operators can now
   tune path depth and component ban lists without recompiling (#303).
+- `create` CLI subcommand: `--max-file-size <BYTES>` flag (supports K/M/G/T suffixes) skips
+  source files larger than the given threshold during archive creation (#306).
+- `create` CLI subcommand: `--preserve-permissions` flag (default: true) controls whether
+  Unix file permissions are stored in the archive; pass `--preserve-permissions=false` to
+  create a portable archive without platform-specific permission bits (#306).
 
 ### Tests
 

@@ -342,13 +342,23 @@ impl<R: Read + Seek> SevenZArchive<R> {
 
                 dir_cache.ensure_parent_dir(&dest_path)?;
 
-                if dest_path.exists() && skip_duplicates {
-                    report.files_skipped += 1;
-                    report.warnings.push(format!(
-                        "skipped duplicate entry: {}",
-                        validated.safe_path.as_path().display()
-                    ));
-                    return Ok(0);
+                if dest_path.exists() {
+                    if skip_duplicates {
+                        report.files_skipped += 1;
+                        report.warnings.push(format!(
+                            "skipped duplicate entry: {}",
+                            validated.safe_path.as_path().display()
+                        ));
+                        return Ok(0);
+                    }
+                    // 7z uses temp+rename (unlike TAR/ZIP which truncate in-place via
+                    // File::create). Remove the existing path first so `rename`
+                    // can succeed.
+                    if dest_path.is_dir() {
+                        std::fs::remove_dir_all(&dest_path)?;
+                    } else {
+                        std::fs::remove_file(&dest_path)?;
+                    }
                 }
 
                 // Atomic write (temp + rename) with unique temp file name

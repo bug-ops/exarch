@@ -1649,3 +1649,161 @@ fn test_extract_with_force_overwrites_conflicts() {
         .success()
         .stdout(predicate::str::contains("Extraction complete"));
 }
+
+// ============================================================================
+// symlink_target in JSON list output (#346)
+// ============================================================================
+
+/// Builds a minimal ZIP archive containing a single symlink entry using raw
+/// bytes. The symlink target is stored as the file content with `S_IFLNK` mode
+/// bits set in the central-directory `external_attributes` field.
+fn make_zip_with_symlink(link_name: &str, target: &str) -> Vec<u8> {
+    let content = target.as_bytes();
+    let crc = {
+        let mut c: u32 = 0xFFFF_FFFF;
+        for &b in content {
+            c ^= u32::from(b);
+            for _ in 0..8 {
+                if c & 1 != 0 {
+                    c = (c >> 1) ^ 0xEDB8_8320;
+                } else {
+                    c >>= 1;
+                }
+            }
+        }
+        c ^ 0xFFFF_FFFF
+    };
+    let external_attributes: u32 = 0o120_777 << 16;
+    let name_bytes = link_name.as_bytes();
+    let name_len = u16::try_from(name_bytes.len()).unwrap();
+    let content_len = u32::try_from(content.len()).unwrap();
+
+    let mut buf: Vec<u8> = Vec::new();
+
+    let local_offset = u32::try_from(buf.len()).unwrap();
+    buf.extend_from_slice(b"PK\x03\x04");
+    buf.extend_from_slice(&20u16.to_le_bytes());
+    buf.extend_from_slice(&0u16.to_le_bytes());
+    buf.extend_from_slice(&0u16.to_le_bytes());
+    buf.extend_from_slice(&0u16.to_le_bytes());
+    buf.extend_from_slice(&0u16.to_le_bytes());
+    buf.extend_from_slice(&crc.to_le_bytes());
+    buf.extend_from_slice(&content_len.to_le_bytes());
+    buf.extend_from_slice(&content_len.to_le_bytes());
+    buf.extend_from_slice(&name_len.to_le_bytes());
+    buf.extend_from_slice(&0u16.to_le_bytes());
+    buf.extend_from_slice(name_bytes);
+    buf.extend_from_slice(content);
+
+    let central_offset = u32::try_from(buf.len()).unwrap();
+    buf.extend_from_slice(b"PK\x01\x02");
+    buf.extend_from_slice(&0x031eu16.to_le_bytes());
+    buf.extend_from_slice(&20u16.to_le_bytes());
+    buf.extend_from_slice(&0u16.to_le_bytes());
+    buf.extend_from_slice(&0u16.to_le_bytes());
+    buf.extend_from_slice(&0u16.to_le_bytes());
+    buf.extend_from_slice(&0u16.to_le_bytes());
+    buf.extend_from_slice(&crc.to_le_bytes());
+    buf.extend_from_slice(&content_len.to_le_bytes());
+    buf.extend_from_slice(&content_len.to_le_bytes());
+    buf.extend_from_slice(&name_len.to_le_bytes());
+    buf.extend_from_slice(&0u16.to_le_bytes());
+    buf.extend_from_slice(&0u16.to_le_bytes());
+    buf.extend_from_slice(&0u16.to_le_bytes());
+    buf.extend_from_slice(&0u16.to_le_bytes());
+    buf.extend_from_slice(&external_attributes.to_le_bytes());
+    buf.extend_from_slice(&local_offset.to_le_bytes());
+    buf.extend_from_slice(name_bytes);
+
+    let central_size = u32::try_from(buf.len()).unwrap() - central_offset;
+    buf.extend_from_slice(b"PK\x05\x06");
+    buf.extend_from_slice(&0u16.to_le_bytes());
+    buf.extend_from_slice(&0u16.to_le_bytes());
+    buf.extend_from_slice(&1u16.to_le_bytes());
+    buf.extend_from_slice(&1u16.to_le_bytes());
+    buf.extend_from_slice(&central_size.to_le_bytes());
+    buf.extend_from_slice(&central_offset.to_le_bytes());
+    buf.extend_from_slice(&0u16.to_le_bytes());
+
+    buf
+}
+
+/// `exarch list --json -l` must include `symlink_target` for symlink entries
+/// (regression test for issue #346).
+#[test]
+fn test_list_json_long_symlink_target() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("symlink.zip");
+    let zip_bytes = make_zip_with_symlink("link.txt", "target.txt");
+    std::fs::write(&archive, &zip_bytes).expect("failed to write zip fixture");
+
+    let output = exarch_cmd()
+        .arg("list")
+        .arg("--json")
+        .arg("-l")
+        .arg(&archive)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: serde_json::Value = serde_json::from_slice(&output).expect("invalid JSON output");
+    let entries = json["data"]["entries"]
+        .as_array()
+        .expect("entries must be array");
+    let symlink = entries
+        .iter()
+        .find(|e| e["entry_type"] == "Symlink")
+        .expect("expected a Symlink entry in the listing");
+
+    assert_eq!(
+        symlink["symlink_target"].as_str(),
+        Some("target.txt"),
+        "symlink_target must equal the link target stored in the archive"
+    );
+}
+
+/// Regular file entries must NOT contain `symlink_target` or `hardlink_target`
+/// keys in JSON output, pinning the `skip_serializing_if` contract (#346).
+#[test]
+fn test_list_json_long_regular_file_omits_link_fields() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("regular.tar.gz");
+
+    exarch_cmd()
+        .arg("create")
+        .arg(&archive)
+        .arg(fixture_path("sample.txt"))
+        .assert()
+        .success();
+
+    let output = exarch_cmd()
+        .arg("list")
+        .arg("--json")
+        .arg("-l")
+        .arg(&archive)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: serde_json::Value = serde_json::from_slice(&output).expect("invalid JSON output");
+    let entries = json["data"]["entries"]
+        .as_array()
+        .expect("entries must be array");
+    let file_entry = entries
+        .iter()
+        .find(|e| e["entry_type"] == "File")
+        .expect("expected a File entry in the listing");
+
+    assert!(
+        file_entry.get("symlink_target").is_none(),
+        "regular file entry must not contain symlink_target key"
+    );
+    assert!(
+        file_entry.get("hardlink_target").is_none(),
+        "regular file entry must not contain hardlink_target key"
+    );
+}

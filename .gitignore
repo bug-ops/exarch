@@ -35,7 +35,6 @@ yarn-debug.log*
 yarn-error.log*
 *.node
 index.js
-index.d.ts
 
 # IDEs
 .idea/

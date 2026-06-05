@@ -32,6 +32,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Node.js: `index.d.ts` now declares `setMaxSolidBlockMemory(size: number): this` and `get maxSolidBlockMemory(): number` for `SecurityConfig`; the file is committed to the repository so TypeScript consumers have correct types without building from source (#311).
+- Python: `exarch.pyi` now declares `allowed_extensions` and `banned_path_components` as `@property` with setters, replacing bare class-level annotations that did not express read/write semantics (#312).
 - `verify --strict` no longer writes an unstructured message to stderr that bypassed `--quiet` suppression and `--json` mode. Exit code 2 already conveys the strict-warning condition (#298).
 - `ProgressCallback::on_bytes_written` is now called during extraction for TAR, ZIP, and 7z formats; previously the method was documented but never invoked (#304).
 - `ProgressCallback::on_entry_complete` is now guaranteed to be called for every entry for which `on_entry_start` was called, including entries that fail mid-extraction; previously a failure left the callback pair unbalanced (#305).

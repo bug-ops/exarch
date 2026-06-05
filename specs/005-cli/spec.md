@@ -140,17 +140,19 @@ THEN stdout contains valid JSON with all report fields; stderr contains no progr
 | FR-060 | THE CLI SHALL provide subcommands: `extract`, `create`, `list`, `verify`, `completion` | must |
 | FR-061 | THE CLI SHALL support global flags: `--verbose`, `--quiet`, `--json` | must |
 | FR-062 | WHEN `--json` is set, THE CLI SHALL output machine-readable JSON to stdout; human-readable text and progress output SHALL go to stderr | must |
-| FR-063 | `extract` SHALL support: `--max-files N`, `--max-total-size SIZE` (K/M/G/T suffixes), `--max-file-size SIZE`, `--max-compression-ratio N`, `--allow-symlinks`, `--allow-hardlinks`, `--allow-solid-archives`, `--allow-world-writable`, `--preserve-permissions`, `--force`, `--atomic` | must |
-| FR-064 | `create` SHALL support: `-l/--compression-level 1-9`, `--follow-symlinks`, `--include-hidden`, `-x/--exclude PATTERN` (repeatable glob), `--strip-prefix PREFIX`, `-f/--force` | must |
-| FR-065 | `list` and `verify` SHALL support: `-l/--long`, `-H/--human-readable`, `--max-files N`, `--max-total-size SIZE`, `--allow-solid-archives` | must |
+| FR-063 | `extract` SHALL support: `--max-files N`, `--max-total-size SIZE` (K/M/G/T suffixes), `--max-file-size SIZE`, `--max-compression-ratio N`, `--allow-symlinks`, `--allow-hardlinks`, `--allow-solid-archives`, `--allow-world-writable`, `--preserve-permissions`, `--force`, `--atomic`, `--max-path-depth N` (default 32), `--banned-component COMPONENT` (repeatable; replaces the default ban list when provided), `--allow-absolute-paths` (flag; also applies to the listing pre-pass) | must |
+| FR-064 | `create` SHALL support: `-l/--compression-level 1-9`, `--follow-symlinks`, `--include-hidden`, `-x/--exclude PATTERN` (repeatable glob), `--strip-prefix PREFIX`, `-f/--force`, `--max-file-size SIZE` (K/M/G/T suffixes; skips source files larger than threshold), `--preserve-permissions BOOL` (default true; pass `--preserve-permissions=false` for portable archive without Unix permission bits) | must |
+| FR-065 | `list` and `verify` SHALL support: `-l/--long`, `-H/--human-readable`, `--max-files N`, `--max-total-size SIZE`, `--allow-solid-archives`, `--allow-absolute-paths` | must |
 | FR-066 | `completion <SHELL>` SHALL generate shell completion scripts for bash, zsh, fish, powershell, and elvish; output goes to stdout for piping into the appropriate completions directory | must |
 | FR-067 | WHEN extraction or creation fails, THE CLI SHALL exit with a non-zero exit code and print the error to stderr | must |
-| FR-068 | WHEN `--quiet` is set, THE CLI SHALL suppress progress bars and informational output; only errors go to stderr | must |
+| FR-068 | WHEN `--quiet` is set, THE CLI SHALL suppress progress bars and informational output; only errors go to stderr; `--quiet` SHALL NOT suppress `--json` output — `--json` always emits to stdout regardless of `--quiet` | must |
 | FR-069 | WHEN `--verbose` is set, THE CLI SHALL print one line per extracted entry to stderr including entry type indicator (`f`/`d`/`l`), uncompressed size, and relative path; `--quiet` takes precedence when both are set | must |
 | FR-070 | THE CLI progress bar SHALL use `indicatif` in human mode and be suppressed in `--json` and `--quiet` modes | must |
 | FR-071 | Human-readable output SHALL use SI suffixes (K, M, G) for byte counts when `-H/--human-readable` is set | should |
 | FR-072 | WHEN `--allow-symlinks` is already active and a symlink escape is blocked, THE CLI SHALL NOT emit the `--allow-symlinks` hint; the hint is only relevant when symlinks are not yet enabled | must |
 | FR-073 | WHEN `--json` is used, the JSON `message` field for `PartialExtraction`, `PathTraversal`, `SymlinkEscape`, `HardlinkEscape`, `QuotaExceeded`, and `ZipBomb` errors SHALL NOT repeat inner error text that already appears in the structured fields | must |
+| FR-074 | `verify` SHALL support `--strict` flag: when set, a `VerificationReport` with `Warning` status causes the process to exit with code 2 instead of 0; without the flag, exit 0 on warnings is unchanged | must |
+| FR-075 | WHEN `list -l` or `list --json -l` is run and an entry is a symlink or hardlink, THE CLI SHALL include the target path in the output; text format: `l755  0  link.txt -> target.txt`; JSON format: `symlink_target` and `hardlink_target` fields populated | must |
 
 ## 4. Non-Functional Requirements
 
@@ -168,8 +170,8 @@ THEN stdout contains valid JSON with all report fields; stderr contains no progr
 |--------|-------------|----------------|
 | `Cli` | Root clap struct | Global flags (`--verbose`, `--quiet`, `--json`), `Commands` enum |
 | `Commands` | Enum of subcommands | `Extract(ExtractArgs)`, `Create(CreateArgs)`, `List(ListArgs)`, `Verify(VerifyArgs)`, `Completion(CompletionArgs)` |
-| `ExtractArgs` | Arguments for `extract` subcommand | `archive`, `output_dir`, security overrides, `--force`, `--atomic` |
-| `CreateArgs` | Arguments for `create` subcommand | `output`, `sources`, creation options |
+| `ExtractArgs` | Arguments for `extract` subcommand | `archive`, `output_dir`, security overrides, `--force`, `--atomic`, `--max-path-depth`, `--banned-component`, `--allow-absolute-paths` |
+| `CreateArgs` | Arguments for `create` subcommand | `output`, `sources`, creation options, `--max-file-size`, `--preserve-permissions` |
 | `ListArgs` | Arguments for `list` subcommand | `archive`, display options |
 | `VerifyArgs` | Arguments for `verify` subcommand | `archive`, inspection options |
 | `OutputFormatter` | Trait for human vs JSON output | Methods: `print_extraction_report`, `print_creation_report`, `print_manifest`, `print_verification_report` |
@@ -184,17 +186,21 @@ exarch extract <ARCHIVE> [OUTPUT_DIR]
     [--max-compression-ratio N] [--allow-symlinks] [--allow-hardlinks]
     [--allow-solid-archives] [--allow-world-writable]
     [--preserve-permissions] [--force] [--atomic]
+    [--max-path-depth N] [--banned-component COMPONENT]... [--allow-absolute-paths]
 
 exarch create <OUTPUT> <SOURCE>...
     [-l/--compression-level 1-9] [--follow-symlinks] [--include-hidden]
     [-x/--exclude PATTERN]... [--strip-prefix PREFIX] [-f/--force]
+    [--max-file-size SIZE] [--preserve-permissions=BOOL]
 
 exarch list <ARCHIVE>
     [-l/--long] [-H/--human-readable]
     [--max-files N] [--max-total-size SIZE] [--allow-solid-archives]
+    [--allow-absolute-paths]
 
 exarch verify <ARCHIVE>
     [--max-files N] [--max-total-size SIZE] [--allow-solid-archives]
+    [--strict]
 
 exarch completion <SHELL>    # bash | zsh | fish | powershell | elvish  (output to stdout)
 ```
@@ -206,7 +212,8 @@ exarch completion <SHELL>    # bash | zsh | fish | powershell | elvish  (output 
 | Archive does not exist | Error printed to stderr; exit code non-zero |
 | Output directory does not exist | Created automatically (unless `--force` is required) |
 | Extraction fails (security violation) | Error with variant name printed to stderr; exit code non-zero |
-| `--json` and `--quiet` combined | JSON on stdout; nothing on stderr |
+| `--json` and `--quiet` combined | JSON on stdout (never suppressed by `--quiet`); nothing on stderr |
+| `verify --strict` with Warning report | Exit code 2 (was 0 without `--strict`) |
 | SIZE suffix parsing (e.g. `--max-total-size 500M`) | K=1024, M=1024², G=1024³, T=1024⁴ |
 | `completion` for unsupported shell | Error; exit code non-zero |
 | `verify` on archive with issues | Issues printed; exit code non-zero when status is Fail |

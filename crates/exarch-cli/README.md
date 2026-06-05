@@ -128,6 +128,9 @@ exarch extract --allow-symlinks trusted-source.tar
 | `--max-file-size` | - | Maximum single file size |
 | `--max-compression-ratio` | 100 | Maximum compression ratio (zip bomb protection) |
 | `--allowed-extensions` | — | Extract only entries whose extension is in the allowlist (repeatable; comma-separated values accepted; leading dots optional) |
+| `--max-path-depth` | 32 | Maximum path depth for extracted entries |
+| `--banned-component` | — | Banned path component (repeatable; replaces the default ban list when provided) |
+| `--allow-absolute-paths` | false | Allow entries with absolute paths (stripped to relative on extraction) |
 | `--allow-symlinks` | false | Allow symlinks (within extraction directory) |
 | `--allow-hardlinks` | false | Allow hardlinks (within extraction directory) |
 | `--preserve-permissions` | false | Preserve file permissions from archive |
@@ -175,6 +178,8 @@ exarch create -f backup.tar.gz ./src
 | `--include-hidden` | | Include hidden files |
 | `--exclude` | `-x` | Exclude pattern (repeatable) |
 | `--strip-prefix` | | Strip path prefix |
+| `--max-file-size` | — | Skip source files larger than this threshold (supports K/M/G/T suffixes) |
+| `--preserve-permissions` | true | Store Unix permissions in the archive; pass `--preserve-permissions=false` for a portable archive |
 | `--force` | `-f` | Overwrite existing file |
 | `--quiet` | `-q` | Suppress output |
 | `--json` | | Output JSON format |

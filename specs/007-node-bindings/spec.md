@@ -45,7 +45,6 @@ named JavaScript error types, and TypeScript type definitions.
 ### Out of Scope
 
 - Streaming Node.js readable/writable interfaces
-- Progress callbacks from Node.js (no equivalent of `PyProgressAdapter`)
 - Electron or browser support (Node.js native addon only)
 - CommonJS-only distribution (ESM and CJS both supported by napi-rs)
 
@@ -126,12 +125,15 @@ THEN extraction respects those settings
 
 | ID | Requirement | Priority |
 |----|------------|----------|
-| FR-080 | THE SYSTEM SHALL expose async Node.js functions returning Promises: `extractArchive`, `createArchive`, `listArchive`, `verifyArchive` | must |
+| FR-080 | THE SYSTEM SHALL expose async Node.js functions returning Promises: `extractArchive`, `extractArchiveWithProgress`, `createArchive`, `listArchive`, `verifyArchive` | must |
 | FR-081 | ALL async operations SHALL run on the libuv thread pool, not the main event loop thread | must |
 | FR-082 | WHEN paths contain null bytes or exceed 4096 bytes, THE SYSTEM SHALL throw a synchronous JavaScript Error before spawning a thread | must |
 | FR-083 | Rust `ArchiveError` variants SHALL map to named JavaScript Error types; when `PartialExtraction` wraps an inner error, the error message SHALL begin with the specific inner error code (e.g. `SYMLINK_ESCAPE`, `QUOTA_EXCEEDED`) and SHALL append `filesExtracted` and `bytesWritten` fields for caller inspection | must |
-| FR-084 | `SecurityConfig` and `CreationConfig` SHALL be exposed as JavaScript classes with fluent builder methods | must |
+| FR-084 | `SecurityConfig` and `CreationConfig` SHALL be exposed as JavaScript classes with fluent builder methods; `SecurityConfig` SHALL expose `allowSolidArchives` getter consistent with `allowSymlinks`, `allowHardlinks`, `allowAbsolutePaths`, `allowWorldWritable` | must |
 | FR-085 | `ExtractionReport`, `CreationReport`, `ArchiveManifest`, and `VerificationReport` SHALL be exposed as JavaScript objects with typed fields | must |
+| FR-088 | `ExtractionOptions` SHALL be exposed as a JavaScript class with builder methods `withAtomic(bool?)` and `withSkipDuplicates(bool?)`; both `extractArchive` and `extractArchiveWithProgress` SHALL accept an optional `options` parameter | must |
+| FR-089 | ALL async operations SHALL wrap the core call with `catch_unwind` inside `spawn_blocking`; panics in `exarch-core` SHALL be converted to JavaScript errors and SHALL NOT abort the Node.js process | must |
+| FR-090 | `extractArchiveWithProgress(archivePath, outputDir, config?, progress?)` SHALL accept an optional `ThreadsafeFunction` callback with signature `(path: string, total: number, current: number, bytesWritten: number) => void`; numeric callback arguments are `number` (not `bigint`) | must |
 | FR-086 | napi-rs SHALL generate TypeScript `.d.ts` files for all exported functions and classes | must |
 | FR-087 | ALL path arguments SHALL accept `string` type in JavaScript | must |
 
@@ -163,7 +165,15 @@ THEN extraction respects those settings
 function extractArchive(
     archivePath: string,
     outputDir: string,
-    config?: SecurityConfig
+    config?: SecurityConfig,
+    options?: ExtractionOptions
+): Promise<ExtractionReport>
+
+function extractArchiveWithProgress(
+    archivePath: string,
+    outputDir: string,
+    config?: SecurityConfig,
+    progress?: (path: string, total: number, current: number, bytesWritten: number) => void
 ): Promise<ExtractionReport>
 
 function createArchive(
@@ -191,6 +201,14 @@ class SecurityConfig {
     allowSymlinks(allow: boolean): this
     allowHardlinks(allow: boolean): this
     allowSolidArchives(allow: boolean): this
+    setMaxSolidBlockMemory(size: number): this
+    // Getters (boolean)
+    get allowSymlinks(): boolean
+    get allowHardlinks(): boolean
+    get allowAbsolutePaths(): boolean
+    get allowWorldWritable(): boolean
+    get allowSolidArchives(): boolean
+    get maxSolidBlockMemory(): number
 }
 
 class CreationConfig {
@@ -200,7 +218,19 @@ class CreationConfig {
     exclude(pattern: string): this
     stripPrefix(prefix: string): this
 }
+
+class ExtractionOptions {
+    withAtomic(atomic?: boolean): this
+    withSkipDuplicates(skip?: boolean): this
+    get atomic(): boolean
+}
 ```
+
+> [!note] v0.5.0: `ExtractionOptions` and `extractArchiveWithProgress`
+> Both functions now accept an optional `ExtractionOptions` parameter. The progress callback
+> arguments (`total`, `current`, `bytesWritten`) are `number` (NAPI-RS maps `i64` to `number`),
+> not `bigint`. `index.d.ts` is committed to the repository so TypeScript consumers have correct
+> types without building from source.
 
 ### JavaScript Error Mapping
 
@@ -259,8 +289,8 @@ class CreationConfig {
 
 ### Ask First
 - Adding new async functions not yet in `exarch-core`
-- Adding progress callback support for Node.js (requires careful GIL/event-loop design)
 - Changing the TypeScript interface (breaking change for downstream consumers)
+- Expanding `ThreadsafeFunction` callback signature (breaks callers)
 
 ### Never
 - Block the Node.js event loop with synchronous Rust I/O
@@ -270,8 +300,13 @@ class CreationConfig {
 ## 9. Open Questions
 
 - [NEEDS CLARIFICATION: What is the minimum supported Node.js version? (LTS policy — 18+, 20+?)]
-- [NEEDS CLARIFICATION: Should progress callbacks be supported from Node.js? Requires thread-safe channel from Rust back to JS event loop.]
 - [NEEDS CLARIFICATION: Should empty `sources` array in `createArchive` produce an empty archive or reject with an error?]
+
+> [!note] Resolved in v0.4.1
+> Progress callbacks for Node.js are now supported. `extractArchiveWithProgress` accepts an
+> optional `ThreadsafeFunction` callback with signature
+> `(path: string, total: number, current: number, bytesWritten: number) => void` (#263).
+> Numeric arguments are `number`, not `bigint` — corrected in #326.
 
 ## 10. See Also
 
@@ -279,5 +314,5 @@ class CreationConfig {
 - [[MOC-specs]] — all specifications
 - [[001-security-pipeline/spec]] — security pipeline invoked by Node.js bindings
 - [[003-config-api/spec]] — `SecurityConfig` and `CreationConfig` types
-- [[004-progress-tracking/spec]] — `ProgressCallback` (currently no Node.js callback support)
+- [[004-progress-tracking/spec]] — `ProgressCallback` and `NodeProgressAdapter` (progress callbacks supported via `ThreadsafeFunction` since v0.4.1)
 - [[001-exarch-system/spec]] — original monolithic spec (archived)

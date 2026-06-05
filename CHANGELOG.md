@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-06-05
+
 ### Added
 
 - `detect_format` now falls back to magic-byte inspection when the file extension
@@ -202,8 +204,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   matching the post-#255 Rust API. Python exception hierarchy updated to include
   `UnknownFormatError(UnsupportedFormatError)` (#265, #264).
 
-### Changed
-
 - `creation/tar`: replace manual entry counter with `ProgressTracker`; add `ProgressTracker::callback()` accessor to enable byte-level progress in nested helpers without lifetime conflicts (#284).
 - `creation/zip`: same `ProgressTracker` wiring as tar, removing manual `idx + 1` counter (#284).
 - `creation/zip`: `create_zip_internal` now delegates to `create_zip_internal_with_progress` via `NoopProgress`, eliminating ~167 lines of duplicate traversal, compression-option, and file-add logic (#290).
@@ -225,8 +225,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   documenting that `ValidatedEntryType::Hardlink` is unreachable for any real ZIP entry (#272).
 - Removed `test_debug_zip_unix_mode` debug test that was permanently ignored.
 
-### Breaking Changes
-
 - **`ExtractionError::UnsupportedFormat`** has been removed. All format-detection failures now
   return `ExtractionError::UnknownFormat { path }`, which carries the path that could not be
   identified. Match arms on `UnsupportedFormat` must be updated to `UnknownFormat { .. }` (#255).
@@ -244,8 +242,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ExtractionError` as the catch-all. To detect whether output was partial, use
   `getattr(e, "files_extracted", None) is not None` (#251).
 
-### Added
-
 - Node.js: `SecurityConfig` now exposes `allowSolidArchives` getter, consistent with all other
   boolean permission getters (`allowSymlinks`, `allowHardlinks`, `allowAbsolutePaths`,
   `allowWorldWritable`) (#261).
@@ -260,8 +256,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Node.js: `extractArchiveWithProgress(archivePath, outputDir, config?, progress?)` async binding
   added, accepting an optional `ThreadsafeFunction` progress callback with signature
   `(path: string, total: bigint, current: bigint, bytesWritten: bigint) => void` (#263).
-
-### Fixed
 
 - CLI: `convert_extraction_error` now has explicit match arms for `InvalidConfiguration`,
   `SourceNotFound`, and `SourceNotAccessible`, each producing an actionable message with the
@@ -714,7 +708,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 64KB reusable copy buffers
 - LRU cache for symlink target resolution
 
-[Unreleased]: https://github.com/bug-ops/exarch/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/bug-ops/exarch/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/bug-ops/exarch/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/bug-ops/exarch/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/bug-ops/exarch/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/bug-ops/exarch/compare/v0.3.0...v0.3.1

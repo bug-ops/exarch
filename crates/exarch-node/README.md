@@ -235,8 +235,6 @@ The library provides built-in protection against:
 
 **Note:** 7z creation is not yet supported. Solid and encrypted 7z archives are rejected for security reasons. Unix symlinks inside 7z archives are reported as regular files (sevenz-rust2 API limitation).
 
-**Note:** Since v0.4.0, partial extraction failures return the `ExtractionReport` accumulated up to the failure point without the inner error text being duplicated, and the report is now correctly delivered across the FFI boundary instead of being dropped early.
-
 ## Comparison with tar-fs
 
 ```javascript

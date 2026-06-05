@@ -48,7 +48,6 @@ using both file extension and a fixed set of ZIP-family aliases.
 - Archive encryption or signing
 - 7z archive creation (extraction only — `FormatCreator` not implemented for 7z)
 - Streaming/incremental extraction over network (local files only)
-- Magic byte detection (format is determined from extension only)
 
 ## 2. User Stories
 
@@ -128,14 +127,26 @@ THEN extraction fails before decompressing the solid block
 ### US-006: Format Detection
 
 AS A developer
-I WANT the correct handler selected automatically from the archive extension
-SO THAT I do not need to specify the format explicitly
+I WANT the correct handler selected automatically from the archive path
+SO THAT I do not need to specify the format explicitly, even for files with missing or ambiguous extensions
 
 **Acceptance criteria:**
 ```
 GIVEN an archive path with an unrecognized extension
 WHEN any archive operation is called
 THEN ArchiveError::UnknownFormat { path } is returned immediately
+```
+
+```
+GIVEN an archive whose extension is absent, unrecognized, or contradicts the file content
+WHEN any archive operation is called
+THEN detect_format falls back to magic-byte inspection and selects the correct handler
+```
+
+```
+GIVEN an archive where magic bytes and extension disagree
+WHEN any archive operation is called
+THEN magic bytes take precedence over the extension
 ```
 
 ## 3. Functional Requirements
@@ -145,7 +156,7 @@ THEN ArchiveError::UnknownFormat { path } is returned immediately
 | FR-020 | WHEN an archive path has extension `.tar`, `.tgz`, `.tar.gz`, `.tar.bz2`, `.tbz`, `.tbz2`, `.tar.xz`, `.txz`, `.tar.zst`, `.tzst`, THE SYSTEM SHALL extract it as a TAR archive with the appropriate decompressor | must |
 | FR-021 | WHEN an archive path has extension `.zip` or any ZIP-family alias, THE SYSTEM SHALL extract it as a ZIP archive | must |
 | FR-022 | WHEN an archive path has extension `.7z`, THE SYSTEM SHALL extract it using the 7z handler | must |
-| FR-023 | WHEN format detection finds an unrecognized or ambiguous extension (e.g. bare `.gz` without `.tar` stem), THE SYSTEM SHALL return `ArchiveError::UnknownFormat { path }` | must |
+| FR-023 | WHEN format detection cannot identify an archive via extension, THE SYSTEM SHALL fall back to magic-byte inspection (ZIP local-file header / EOCD, GZIP, BZ2, XZ, Zstd, 7z, TAR USTAR); when magic bytes and extension disagree, magic takes precedence; if neither resolves a format, THE SYSTEM SHALL return `ArchiveError::UnknownFormat { path }` | must |
 | FR-024 | WHEN creating archives, THE SYSTEM SHALL support TAR (all compression variants) and ZIP; 7z creation SHALL return `InvalidConfiguration` | must |
 | FR-025 | WHEN creating archives for ZIP-family aliases without an explicit `CreationConfig::format` override, THE SYSTEM SHALL return `ArchiveError::InvalidArchive` with an explanation | should |
 | FR-026 | WHEN a 7z archive is solid and `allow_solid_archives` is false, THE SYSTEM SHALL reject extraction before decompressing the solid block | must |
@@ -189,10 +200,14 @@ THEN ArchiveError::UnknownFormat { path } is returned immediately
 | `.zip` | `Zip` |
 | `.jar`, `.war`, `.ear`, `.nar`, `.nbm`, `.apk`, `.aab`, `.ipa`, `.appx`, `.msix`, `.whl`, `.vsix`, `.xpi`, `.epub` | `Zip` (extraction) / error (creation) |
 | `.7z` | `SevenZ` |
-| `.gz` (no `.tar` stem), anything else | `UnknownFormat { path }` |
+| `.gz` (no `.tar` stem), anything else | Try magic-byte fallback; `UnknownFormat { path }` if magic also fails |
 
-> [!note]
-> Format detection is extension-based, case-insensitive. Magic byte detection is NOT currently implemented.
+> [!note] v0.5.0: magic-byte fallback
+> `detect_format` now falls back to magic-byte inspection when the file extension is absent,
+> unrecognised, or contradicts the file content. Seven signatures are recognised: ZIP (local-file
+> header, EOCD, split-archive marker), GZIP, BZ2, XZ, Zstd, 7z, and TAR USTAR. When magic bytes
+> and extension disagree, magic takes precedence. Archive creation (`determine_creation_format`)
+> remains extension-only so stale on-disk bytes cannot override the caller's intent.
 
 ### Trait Signatures
 
@@ -265,7 +280,11 @@ FormatCreator:
 ## 9. Open Questions
 
 - [NEEDS CLARIFICATION: Is there a plan to support 7z creation in a future version, or is read-only permanently by design?]
-- [NEEDS CLARIFICATION: Should magic byte detection be added alongside extension detection for robustness?]
+
+> [!note] Resolved in v0.5.0
+> Magic-byte detection has been implemented alongside extension detection. `detect_format` now
+> uses both extension and a magic-byte fallback (#353). `determine_creation_format` (used during
+> archive creation) remains extension-only by design.
 
 ## 10. See Also
 

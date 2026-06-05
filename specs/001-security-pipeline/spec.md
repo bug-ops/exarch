@@ -176,6 +176,23 @@ THEN the written file has those bits cleared; ValidatedEntry.mode reflects the s
 | `HardlinkTracker` | Records all file paths seen in this archive to validate hardlink targets | `seen: HashSet<PathBuf>` |
 | `DestDir` | Canonicalized output directory; used as the trust boundary for symlink/hardlink validation | Wraps `PathBuf` |
 
+> [!note] v0.4.1 API changes
+> `sanitize_permissions` return type changed from `Result<u32>` to `u32` — the function
+> never fails; callers no longer need `?` or `.unwrap()`.
+> The `_path: &Path` parameter previously accepted by `sanitize_permissions` has been
+> removed; call sites must omit that argument.
+> All security primitives (`validate_path`, `validate_symlink`, `sanitize_permissions`,
+> `validate_compression_ratio`, `QuotaTracker`, `HardlinkTracker`) are now `pub(crate)`;
+> external benchmarks or integration tests that reference them directly must add
+> `--features testing`.
+
+> [!note] v0.5.0: centralized absolute-path stripping
+> Absolute entry paths and Windows drive/UNC paths (e.g. `C:\...`, `\\server\share\...`) are
+> now stripped centrally inside `SafePath::validate_with_context` when `allow_absolute_paths`
+> is enabled. The per-format pre-stripping workarounds that previously existed in `tar.rs`,
+> `zip.rs`, and `sevenz.rs` have been removed. Bare-slash entries (`/`) now return
+> `PathTraversalError` instead of `io::Error`.
+
 ## 6. Edge Cases and Error Handling
 
 | Scenario | Expected Behavior |

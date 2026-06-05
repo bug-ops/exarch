@@ -85,7 +85,7 @@ result = exarch.extract_archive(archive, output)
 import exarch
 
 config = exarch.SecurityConfig()
-config = config.max_file_size(100 * 1024 * 1024)  # 100 MB
+config = config.with_max_file_size(100 * 1024 * 1024)  # 100 MB
 
 result = exarch.extract_archive("archive.tar.gz", "/output", config)
 ```

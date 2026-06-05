@@ -16,6 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `exarch create --quiet --json` now emits JSON to stdout instead of
+  suppressing it. `--quiet` no longer silences `--json` output for any
+  command (#357).
 - `exarch list --json -l` now includes `symlink_target` and `hardlink_target` in
   the JSON output for symlink and hardlink entries. Previously the fields were
   populated in `exarch-core` but silently dropped by the CLI JSON formatter (#346).

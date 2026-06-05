@@ -111,6 +111,80 @@ class SecurityConfig:
         ...
 
     @property
+    def max_file_size(self) -> int:
+        """Maximum size for a single file in bytes (default: 50 MB)."""
+        ...
+
+    @max_file_size.setter
+    def max_file_size(self, value: int) -> None: ...
+    @property
+    def max_total_size(self) -> int:
+        """Maximum total size for all files in bytes (default: 500 MB)."""
+        ...
+
+    @max_total_size.setter
+    def max_total_size(self, value: int) -> None: ...
+    @property
+    def max_compression_ratio(self) -> float:
+        """Maximum compression ratio allowed (default: 100.0)."""
+        ...
+
+    @max_compression_ratio.setter
+    def max_compression_ratio(self, value: float) -> None: ...
+    @property
+    def max_file_count(self) -> int:
+        """Maximum number of files (default: 10,000)."""
+        ...
+
+    @max_file_count.setter
+    def max_file_count(self, value: int) -> None: ...
+    @property
+    def max_path_depth(self) -> int:
+        """Maximum path depth allowed (default: 32)."""
+        ...
+
+    @max_path_depth.setter
+    def max_path_depth(self, value: int) -> None: ...
+    @property
+    def preserve_permissions(self) -> bool:
+        """Whether to preserve file permissions from archive (default: False)."""
+        ...
+
+    @preserve_permissions.setter
+    def preserve_permissions(self, value: bool) -> None: ...
+    @property
+    def max_solid_block_memory(self) -> int:
+        """Maximum memory budget in bytes for decompressing a solid 7z block (default: 512 MB)."""
+        ...
+
+    @max_solid_block_memory.setter
+    def max_solid_block_memory(self, value: int) -> None: ...
+    @property
+    def allow_symlinks(self) -> bool:
+        """Whether symlinks are allowed (default: False)."""
+        ...
+
+    @property
+    def allow_hardlinks(self) -> bool:
+        """Whether hardlinks are allowed (default: False)."""
+        ...
+
+    @property
+    def allow_absolute_paths(self) -> bool:
+        """Whether absolute paths are allowed (default: False)."""
+        ...
+
+    @property
+    def allow_world_writable(self) -> bool:
+        """Whether world-writable files are allowed (default: False)."""
+        ...
+
+    @property
+    def allow_solid_archives(self) -> bool:
+        """Whether solid 7z archives are allowed (default: False)."""
+        ...
+
+    @property
     def allowed_extensions(self) -> list[str]:
         """List of allowed file extensions (empty = allow all)."""
         ...

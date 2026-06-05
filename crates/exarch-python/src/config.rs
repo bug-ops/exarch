@@ -332,6 +332,36 @@ impl PySecurityConfig {
         self.inner.preserve_permissions = value;
     }
 
+    /// Returns whether symlinks are allowed.
+    #[getter]
+    fn get_allow_symlinks(&self) -> bool {
+        self.inner.allowed.symlinks
+    }
+
+    /// Returns whether hardlinks are allowed.
+    #[getter]
+    fn get_allow_hardlinks(&self) -> bool {
+        self.inner.allowed.hardlinks
+    }
+
+    /// Returns whether absolute paths are allowed.
+    #[getter]
+    fn get_allow_absolute_paths(&self) -> bool {
+        self.inner.allowed.absolute_paths
+    }
+
+    /// Returns whether world-writable files are allowed.
+    #[getter]
+    fn get_allow_world_writable(&self) -> bool {
+        self.inner.allowed.world_writable
+    }
+
+    /// Returns whether solid 7z archives are allowed.
+    #[getter]
+    fn get_allow_solid_archives(&self) -> bool {
+        self.inner.allow_solid_archives
+    }
+
     #[getter]
     fn get_max_solid_block_memory(&self) -> u64 {
         self.inner.max_solid_block_memory

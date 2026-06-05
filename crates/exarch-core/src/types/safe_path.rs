@@ -16,7 +16,8 @@ use super::DestDir;
 /// `SafePath` represents a path that has been validated to not contain:
 /// - Path traversal attempts (`..`)
 /// - Null bytes
-/// - Absolute paths (unless explicitly allowed)
+/// - Absolute paths (unless explicitly allowed; leading root is stripped so
+///   `dest.join()` always stays inside `dest`)
 /// - Banned path components
 /// - Excessive path depth
 ///
@@ -25,7 +26,7 @@ use super::DestDir;
 /// - Can ONLY be constructed through validation
 /// - NO `From<PathBuf>` implementation (security critical)
 /// - Always resolves within the destination directory
-/// - Normalized to remove redundant components
+/// - Normalized to remove redundant components (`.`, root prefix)
 ///
 /// # Examples
 ///
@@ -68,17 +69,26 @@ impl SafePath {
     /// # Validation Steps
     ///
     /// 1. Check for null bytes in path
-    /// 2. Validate path is not absolute (unless allowed by config)
+    /// 2. Reject absolute paths when `allow_absolute_paths = false`
     /// 3. Check for parent directory traversal (`..`)
     /// 4. Validate path depth does not exceed maximum
     /// 5. Check for banned path components
-    /// 6. Normalize path components (remove `.`)
+    /// 6. Normalize path components: strip root/prefix so `dest.join()` stays
+    ///    inside `dest`; remove `.` (current-dir) components
     /// 7. Verify resolved path stays within destination directory
+    ///
+    /// When `allow_absolute_paths = true` the root component (`/` on Unix,
+    /// drive prefix on Windows) is stripped here, making the path relative
+    /// before `dest.join()` is applied. This is the centralized stripping
+    /// point for TAR and 7z entries; ZIP entries whose `enclosed_name()`
+    /// returns `None` are pre-handled in `resolve_entry_path` before reaching
+    /// this method.
     ///
     /// # Errors
     ///
     /// Returns an error if any validation step fails:
-    /// - `ArchiveError::PathTraversal` for `..` or absolute paths
+    /// - `ArchiveError::PathTraversal` for `..`, bare root paths, or absolute
+    ///   paths when the flag is not set
     /// - `ArchiveError::SecurityViolation` for banned components or excessive
     ///   depth
     ///
@@ -188,8 +198,12 @@ impl SafePath {
                             path: path.to_path_buf(),
                         });
                     }
-                    // Skip root/prefix so final_path stays relative; dest.join()
+                    // Strip root/prefix so final_path stays relative; dest.join()
                     // would otherwise discard dest entirely for absolute paths.
+                    // This is the canonical stripping point — format handlers
+                    // (tar, sevenz) pass raw entry names straight through.
+                    // ZIP is the exception: zip::ZipFile::enclosed_name() may
+                    // return None for rooted names, handled in resolve_entry_path.
                     needs_normalization = true;
                 }
             }

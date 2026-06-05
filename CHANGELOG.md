@@ -17,6 +17,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   extension-only detection so stale on-disk bytes cannot override the caller's
   intent (#353).
 
+### Changed
+
+- ZIP extraction with `allow_absolute_paths = true`: entries whose raw name begins with `/`
+  (e.g. `/etc/passwd`) are now written inside the destination directory after the leading
+  slash is stripped (producing `<dest>/etc/passwd`), consistent with the TAR and 7z behavior
+  introduced in #350. Without the flag the behavior is unchanged — such entries are still
+  rejected with `PathTraversal`. This alignment was made explicit during the `process_entry`
+  refactor (#352).
+
 ### Performance
 
 - `ZipArchive::extract()` now calls `by_index()` exactly once per entry instead of twice.

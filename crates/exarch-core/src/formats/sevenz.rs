@@ -439,7 +439,11 @@ impl<R: Read + Seek> SevenZArchive<R> {
                           reader: &mut dyn Read,
                           _dest_dir: &PathBuf|
          -> std::result::Result<bool, sevenz_rust2::Error> {
-            let entry_path = PathBuf::from(&entry.name);
+            let entry_path = strip_absolute_entry_name(&entry.name, config)
+                .map_err(|e| {
+                    sevenz_rust2::Error::Other(format!("path validation failed: {e}").into())
+                })?
+                .into_owned();
             ctx.current_idx = ctx.current_idx.saturating_add(1);
             let idx = ctx.current_idx;
             ctx.progress
@@ -548,8 +552,7 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
         // - symlink detection: Not exposed, non-directory entries treated as files
         let mut prevalidator = EntryValidator::new(config, &dest);
         for entry in &self.entries {
-            // OPT-H002: Use Path::new instead of PathBuf::from to avoid allocation
-            let path = Path::new(&entry.name);
+            let path = strip_absolute_entry_name(&entry.name, config)?;
             let entry_type = if entry.is_directory {
                 EntryType::Directory
             } else {
@@ -560,7 +563,7 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
             // skipped. Defense relies on max_total_size and max_file_size
             // quotas.
             let validated =
-                prevalidator.validate_entry(path, &entry_type, entry.size, None, None, None)?;
+                prevalidator.validate_entry(&path, &entry_type, entry.size, None, None, None)?;
 
             match validated.entry_type {
                 ValidatedEntryType::File | ValidatedEntryType::Directory => {
@@ -748,6 +751,39 @@ fn is_empty_sevenz_archive<R: Read + Seek>(err: &sevenz_rust2::Error, source: &m
     };
     let mut magic = [0u8; 6];
     source.read_exact(&mut magic).is_ok() && magic == SEVENZ_MAGIC
+}
+
+/// Strips the leading `/` from absolute entry names when `allow_absolute_paths`
+/// is enabled, preventing `PathBuf::join` from discarding the destination
+/// prefix.
+///
+/// Returns a `Cow<Path>`: borrowed when the name is already relative, owned
+/// when the leading slash is stripped. Returns `PathTraversal` if the stripped
+/// name is empty or still contains a `..` component.
+fn strip_absolute_entry_name<'a>(
+    name: &'a str,
+    config: &SecurityConfig,
+) -> Result<std::borrow::Cow<'a, Path>> {
+    let raw = Path::new(name);
+    if name.starts_with('/') && config.allowed.absolute_paths {
+        let stripped = name.trim_start_matches('/');
+        if stripped.is_empty() {
+            return Err(ArchiveError::PathTraversal {
+                path: raw.to_path_buf(),
+            });
+        }
+        let p = PathBuf::from(stripped);
+        if p.components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return Err(ArchiveError::PathTraversal {
+                path: raw.to_path_buf(),
+            });
+        }
+        Ok(std::borrow::Cow::Owned(p))
+    } else {
+        Ok(std::borrow::Cow::Borrowed(raw))
+    }
 }
 
 /// Converts sevenz-rust2 errors to our `ArchiveError` type.
@@ -1482,6 +1518,133 @@ mod tests {
                 .join("no-ext-fixture")
                 .join("document.txt")
                 .exists()
+        );
+    }
+
+    fn make_sevenz_archive(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        use sevenz_rust2::ArchiveEntry;
+        use sevenz_rust2::ArchiveWriter;
+        use sevenz_rust2::EncoderConfiguration;
+        use sevenz_rust2::EncoderMethod;
+
+        let buf = Cursor::new(Vec::new());
+        let mut writer = ArchiveWriter::new(buf).unwrap();
+        writer.set_content_methods(vec![EncoderConfiguration::new(EncoderMethod::COPY)]);
+        for (name, data) in entries {
+            let mut entry = ArchiveEntry::new_file(name);
+            entry.has_stream = true;
+            entry.size = data.len() as u64;
+            writer
+                .push_archive_entry(entry, Some(Cursor::new(*data)))
+                .unwrap();
+        }
+        writer.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn test_strip_absolute_entry_name_relative_passthrough() {
+        let config = SecurityConfig::default();
+        let result = strip_absolute_entry_name("relative/path.txt", &config).unwrap();
+        assert_eq!(result.as_ref(), std::path::Path::new("relative/path.txt"));
+    }
+
+    #[test]
+    fn test_strip_absolute_entry_name_absolute_with_flag() {
+        let config = SecurityConfig::default().with_allow_absolute_paths(true);
+        let result = strip_absolute_entry_name("/etc/shadow", &config).unwrap();
+        assert_eq!(result.as_ref(), std::path::Path::new("etc/shadow"));
+    }
+
+    #[test]
+    fn test_strip_absolute_entry_name_absolute_without_flag() {
+        // Without the flag, absolute paths are passed through unchanged so that
+        // SafePath::validate can apply its own rejection logic.
+        let config = SecurityConfig::default();
+        let result = strip_absolute_entry_name("/etc/shadow", &config).unwrap();
+        assert_eq!(result.as_ref(), std::path::Path::new("/etc/shadow"));
+    }
+
+    #[test]
+    fn test_strip_absolute_entry_name_bare_slash_rejected() {
+        let config = SecurityConfig::default().with_allow_absolute_paths(true);
+        let result = strip_absolute_entry_name("/", &config);
+        assert!(
+            matches!(result, Err(ArchiveError::PathTraversal { .. })),
+            "bare slash must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_strip_absolute_entry_name_traversal_after_root_rejected() {
+        let config = SecurityConfig::default().with_allow_absolute_paths(true);
+        let result = strip_absolute_entry_name("/../etc/passwd", &config);
+        assert!(
+            matches!(result, Err(ArchiveError::PathTraversal { .. })),
+            "traversal after root must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_7z_absolute_path_rejected_by_default() {
+        let data = make_sevenz_archive(&[("/etc/shadow", b"secret")]);
+        let mut archive = SevenZArchive::new(Cursor::new(data)).unwrap();
+
+        let temp = TempDir::new().unwrap();
+        let config = SecurityConfig::default();
+
+        let result = archive.extract(
+            temp.path(),
+            &config,
+            &ExtractionOptions::default(),
+            &mut crate::NoopProgress,
+        );
+        assert!(
+            result.is_err(),
+            "absolute path must be rejected by default, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_7z_absolute_path_with_flag_writes_to_dest() {
+        let data = make_sevenz_archive(&[("/etc/shadow", b"content")]);
+        let mut archive = SevenZArchive::new(Cursor::new(data)).unwrap();
+
+        let temp = TempDir::new().unwrap();
+        let config = SecurityConfig::default().with_allow_absolute_paths(true);
+
+        let report = archive
+            .extract(
+                temp.path(),
+                &config,
+                &ExtractionOptions::default(),
+                &mut crate::NoopProgress,
+            )
+            .unwrap();
+
+        assert_eq!(report.files_extracted, 1);
+        assert!(
+            temp.path().join("etc/shadow").exists(),
+            "file must land inside dest, not at real /etc/shadow"
+        );
+    }
+
+    #[test]
+    fn test_7z_absolute_path_traversal_still_rejected_with_flag() {
+        let data = make_sevenz_archive(&[("/../etc/passwd", b"secret")]);
+        let mut archive = SevenZArchive::new(Cursor::new(data)).unwrap();
+
+        let temp = TempDir::new().unwrap();
+        let config = SecurityConfig::default().with_allow_absolute_paths(true);
+
+        let result = archive.extract(
+            temp.path(),
+            &config,
+            &ExtractionOptions::default(),
+            &mut crate::NoopProgress,
+        );
+        assert!(
+            result.is_err(),
+            "traversal-after-root must be rejected even with allow_absolute_paths"
         );
     }
 }

@@ -207,10 +207,31 @@ impl<R: Read> TarArchive<R> {
             return Ok(None);
         }
 
-        let path = entry
+        let raw_path = entry
             .path()
             .map_err(|e| ArchiveError::InvalidArchive(format!("invalid path: {e}")))?
             .into_owned();
+
+        let path = if raw_path.to_str().is_some_and(|s| s.starts_with('/'))
+            && ctx.config.allowed.absolute_paths
+        {
+            let stripped = raw_path
+                .to_str()
+                .map(|s| s.trim_start_matches('/'))
+                .unwrap_or_default();
+            if stripped.is_empty() {
+                return Err(ArchiveError::PathTraversal { path: raw_path });
+            }
+            let p = std::path::PathBuf::from(stripped);
+            if p.components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+            {
+                return Err(ArchiveError::PathTraversal { path: raw_path });
+            }
+            p
+        } else {
+            raw_path
+        };
 
         let entry_type = TarEntryAdapter::to_entry_type(&entry)?;
         let size = TarEntryAdapter::get_uncompressed_size(&entry);
@@ -2244,6 +2265,87 @@ mod tests {
 
         assert!(report.is_safe());
         assert_eq!(report.total_entries, 1);
+    }
+
+    fn create_tar_with_absolute_path(path_bytes: &[u8], content: &[u8]) -> Vec<u8> {
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        header.set_size(content.len() as u64);
+        header.set_mode(0o644);
+        let mut name_field = [0u8; 100];
+        let len = path_bytes.len().min(100);
+        name_field[..len].copy_from_slice(&path_bytes[..len]);
+        header.as_gnu_mut().unwrap().name = name_field;
+        header.set_cksum();
+        builder.append(&header, content).unwrap();
+        builder.into_inner().unwrap()
+    }
+
+    #[test]
+    fn test_tar_absolute_path_rejected_by_default() {
+        let tar_data = create_tar_with_absolute_path(b"/etc/shadow", b"secret");
+        let mut archive = TarArchive::new(Cursor::new(tar_data));
+
+        let temp = TempDir::new().unwrap();
+        let config = SecurityConfig::default();
+
+        let result = archive.extract(
+            temp.path(),
+            &config,
+            &ExtractionOptions::default(),
+            &mut NoopProgress,
+        );
+        assert!(result.is_err(), "absolute path must be rejected by default");
+        assert!(
+            matches!(result.unwrap_err(), ArchiveError::PathTraversal { .. }),
+            "expected PathTraversal"
+        );
+    }
+
+    #[test]
+    fn test_tar_absolute_path_with_flag_writes_to_dest() {
+        let tar_data = create_tar_with_absolute_path(b"/etc/shadow", b"content");
+        let mut archive = TarArchive::new(Cursor::new(tar_data));
+
+        let temp = TempDir::new().unwrap();
+        let config = SecurityConfig::default().with_allow_absolute_paths(true);
+
+        let report = archive
+            .extract(
+                temp.path(),
+                &config,
+                &ExtractionOptions::default(),
+                &mut NoopProgress,
+            )
+            .unwrap();
+
+        assert_eq!(report.files_extracted, 1);
+        assert!(
+            temp.path().join("etc/shadow").exists(),
+            "file must land inside dest, not at real /etc/shadow"
+        );
+    }
+
+    #[test]
+    fn test_tar_absolute_path_traversal_still_rejected_with_flag() {
+        // Even with allow_absolute_paths, `/../etc/passwd` contains `..` and
+        // must be rejected regardless.
+        let tar_data = create_tar_with_absolute_path(b"/../etc/passwd", b"secret");
+        let mut archive = TarArchive::new(Cursor::new(tar_data));
+
+        let temp = TempDir::new().unwrap();
+        let config = SecurityConfig::default().with_allow_absolute_paths(true);
+
+        let result = archive.extract(
+            temp.path(),
+            &config,
+            &ExtractionOptions::default(),
+            &mut NoopProgress,
+        );
+        assert!(
+            result.is_err(),
+            "traversal-after-root must be rejected even with allow_absolute_paths"
+        );
     }
 
     #[test]

@@ -72,7 +72,7 @@ pub enum ArchiveType {
 /// Detects the archive type from a file path using two-phase detection.
 ///
 /// This function is for **reading** existing archives. For creating archives,
-/// use [`detect_format_from_extension`] directly so that stale on-disk bytes
+/// use `detect_format_from_extension` directly so that stale on-disk bytes
 /// do not override the user's intended output format.
 ///
 /// **Phase 1 — extension:** maps the file extension to an [`ArchiveType`] using

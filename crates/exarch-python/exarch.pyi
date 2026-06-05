@@ -90,12 +90,6 @@ class SecurityConfig:
         """Sets whether to preserve permissions from archive."""
         ...
 
-    allowed_extensions: list[str]
-    """List of allowed file extensions (empty = allow all)."""
-
-    banned_path_components: list[str]
-    """List of banned path components."""
-
     def add_allowed_extension(self, ext: str) -> SecurityConfig:
         """Adds an allowed file extension."""
         ...
@@ -115,6 +109,22 @@ class SecurityConfig:
     def is_extension_allowed(self, extension: str) -> bool:
         """Checks if a file extension is allowed."""
         ...
+
+    @property
+    def allowed_extensions(self) -> list[str]:
+        """List of allowed file extensions (empty = allow all)."""
+        ...
+
+    @allowed_extensions.setter
+    def allowed_extensions(self, value: list[str]) -> None: ...
+
+    @property
+    def banned_path_components(self) -> list[str]:
+        """List of banned path components."""
+        ...
+
+    @banned_path_components.setter
+    def banned_path_components(self, value: list[str]) -> None: ...
 
 class CreationConfig:
     """

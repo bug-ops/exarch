@@ -175,6 +175,10 @@ impl OutputFormatter for JsonFormatter {
             compressed_size: Option<u64>,
             mode: Option<u32>,
             modified: Option<u64>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            symlink_target: Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            hardlink_target: Option<String>,
         }
 
         #[derive(Serialize)]
@@ -199,6 +203,8 @@ impl OutputFormatter for JsonFormatter {
                         .ok()
                         .map(|d| d.as_secs())
                 }),
+                symlink_target: e.symlink_target.as_ref().map(|p| p.display().to_string()),
+                hardlink_target: e.hardlink_target.as_ref().map(|p| p.display().to_string()),
             })
             .collect();
 

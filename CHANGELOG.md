@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Python `ExtractionOptions` tests no longer unconditionally skip: replaced the
+  `pytest.skip(...)` guard with `pytest.importorskip("exarch")` at module level so all 14
+  round-trip assertions execute when the extension is built (#342).
 - Roundtrip integration tests now verify extracted file contents against the source data for
   all supported formats (tar.gz, tar.bz2, tar.xz, tar.zst, zip). Previously, tests only
   asserted that extraction succeeded and files existed, which would have allowed silent data

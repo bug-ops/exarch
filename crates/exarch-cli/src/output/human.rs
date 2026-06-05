@@ -210,13 +210,29 @@ impl OutputFormatter for HumanFormatter {
                 exarch_core::ManifestEntryType::Hardlink => "h",
             };
 
-            let _ = self.term.write_line(&format!(
-                "{}{:<6} {:>10}  {}",
-                type_char,
-                mode_str,
-                size_str,
-                entry.path.display()
-            ));
+            let link_target = match entry.entry_type {
+                exarch_core::ManifestEntryType::Symlink => entry.symlink_target.as_ref(),
+                exarch_core::ManifestEntryType::Hardlink => entry.hardlink_target.as_ref(),
+                _ => None,
+            };
+            if let Some(target) = link_target {
+                let _ = self.term.write_line(&format!(
+                    "{}{:<6} {:>10}  {} -> {}",
+                    type_char,
+                    mode_str,
+                    size_str,
+                    entry.path.display(),
+                    target.display()
+                ));
+            } else {
+                let _ = self.term.write_line(&format!(
+                    "{}{:<6} {:>10}  {}",
+                    type_char,
+                    mode_str,
+                    size_str,
+                    entry.path.display()
+                ));
+            }
         }
 
         let _ = self.term.write_line("");

@@ -1322,12 +1322,12 @@ fn test_create_json_output_structure_complete() {
     assert!(json["data"]["compression_ratio"].is_number());
 }
 
+// Regression test for issue #357: --json must never be silenced by --quiet.
 #[test]
-fn test_create_quiet_with_json_produces_no_output() {
+fn test_create_quiet_with_json_still_produces_output() {
     let temp = TempDir::new().expect("failed to create temp dir");
     let archive = temp.path().join("test.tar.gz");
 
-    // --quiet takes precedence, even with --json
     let output = exarch_cmd()
         .arg("--quiet")
         .arg("--json")
@@ -1340,8 +1340,11 @@ fn test_create_quiet_with_json_produces_no_output() {
         .stdout
         .clone();
 
-    // In quiet mode, should have no output
-    assert!(output.is_empty());
+    let json: serde_json::Value =
+        serde_json::from_slice(&output).expect("--quiet --json must emit valid JSON");
+    assert_eq!(json["operation"], "create");
+    assert_eq!(json["status"], "success");
+    assert!(json["data"]["files_added"].is_number());
 }
 
 #[test]

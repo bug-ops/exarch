@@ -291,12 +291,29 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
             .name()
             .map_err(|e| ArchiveError::InvalidArchive(format!("invalid entry name: {e}")))?
             .into_owned();
-        let path = entry
-            .enclosed_name()
-            .ok_or_else(|| ArchiveError::PathTraversal {
-                path: PathBuf::from(&raw_name),
-            })?;
-        let path = path.clone();
+        let path = match entry.enclosed_name() {
+            Some(p) => p.clone(),
+            None if config.allowed.absolute_paths => {
+                let stripped = raw_name.trim_start_matches('/');
+                if stripped.is_empty() {
+                    return Err(ArchiveError::PathTraversal {
+                        path: PathBuf::from(&raw_name),
+                    });
+                }
+                let p = PathBuf::from(stripped);
+                if contains_traversal(&p, config) {
+                    return Err(ArchiveError::PathTraversal {
+                        path: PathBuf::from(&raw_name),
+                    });
+                }
+                p
+            }
+            None => {
+                return Err(ArchiveError::PathTraversal {
+                    path: PathBuf::from(&raw_name),
+                });
+            }
+        };
 
         let entry_type = convert_zip_entry_type(&entry);
         let size = entry.size();
@@ -572,6 +589,7 @@ fn is_zip_symlink<R: std::io::Read + std::io::Seek>(entry: &zip::read::ZipFile<'
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::test_utils::create_raw_zip_entry;
     use flate2::write::GzEncoder;
     use std::io::Write;
     use tempfile::NamedTempFile;
@@ -1877,6 +1895,94 @@ mod tests {
                 Err(crate::ArchiveError::InvalidConfiguration { .. })
             ),
             "list_archive must return InvalidConfiguration for zero max_file_size"
+        );
+    }
+
+    // --- Regression tests for #325: allow_absolute_paths for ZIP listing ---
+
+    // The zip 8.x crate's `enclosed_name()` already strips a single leading `/`,
+    // so `/etc/passwd` becomes `Some("etc/passwd")` — the path is safe without
+    // needing our fallback. The fallback activates only when `enclosed_name()`
+    // returns `None`, which happens for traversal patterns like `/../etc/passwd`.
+    #[test]
+    fn test_list_zip_absolute_path_stripped_by_zip_crate() {
+        // /etc/passwd: enclosed_name() returns Some("etc/passwd") — accepted even
+        // without allow_absolute_paths because the zip crate already strips `/`.
+        let zip_bytes = create_raw_zip_entry("/etc/passwd", b"");
+        let mut temp_file = NamedTempFile::with_suffix(".zip").unwrap();
+        temp_file.write_all(&zip_bytes).unwrap();
+        temp_file.flush().unwrap();
+
+        let config = SecurityConfig::default();
+        let manifest = list_archive(temp_file.path(), &config).unwrap();
+        assert_eq!(manifest.total_entries, 1);
+        assert_eq!(manifest.entries[0].path, PathBuf::from("etc/passwd"));
+    }
+
+    #[test]
+    fn test_list_zip_absolute_path_allowed_when_configured() {
+        let zip_bytes = create_raw_zip_entry("/etc/passwd", b"");
+        let mut temp_file = NamedTempFile::with_suffix(".zip").unwrap();
+        temp_file.write_all(&zip_bytes).unwrap();
+        temp_file.flush().unwrap();
+
+        let config = SecurityConfig::default().with_allow_absolute_paths(true);
+        let manifest = list_archive(temp_file.path(), &config).unwrap();
+        assert_eq!(manifest.total_entries, 1);
+        assert_eq!(manifest.entries[0].path, PathBuf::from("etc/passwd"));
+    }
+
+    #[test]
+    fn test_list_zip_traversal_absolute_path_rejected_by_default() {
+        // /../etc/passwd: enclosed_name() returns None (traversal after root).
+        // Our fallback does NOT apply (allow_absolute_paths is false), so the
+        // entry is rejected with PathTraversal.
+        let zip_bytes = create_raw_zip_entry("/../etc/passwd", b"");
+        let mut temp_file = NamedTempFile::with_suffix(".zip").unwrap();
+        temp_file.write_all(&zip_bytes).unwrap();
+        temp_file.flush().unwrap();
+
+        let config = SecurityConfig::default();
+        let result = list_archive(temp_file.path(), &config);
+        assert!(
+            matches!(result, Err(ArchiveError::PathTraversal { .. })),
+            "absolute path with traversal must be rejected by default, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_list_zip_traversal_absolute_path_still_rejected_when_allowed() {
+        // Even with allow_absolute_paths, /../etc/passwd must be rejected
+        // because after stripping `/` the remaining `../etc/passwd` still
+        // contains `..` which contains_traversal() catches.
+        let zip_bytes = create_raw_zip_entry("/../etc/passwd", b"");
+        let mut temp_file = NamedTempFile::with_suffix(".zip").unwrap();
+        temp_file.write_all(&zip_bytes).unwrap();
+        temp_file.flush().unwrap();
+
+        let config = SecurityConfig::default().with_allow_absolute_paths(true);
+        let result = list_archive(temp_file.path(), &config);
+        assert!(
+            matches!(result, Err(ArchiveError::PathTraversal { .. })),
+            "traversal inside absolute path must still be rejected even when allowed, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_list_zip_absolute_path_with_traversal_still_rejected() {
+        // /foo/../../../etc/passwd: enclosed_name() returns None (would go above
+        // root). Our fallback strips `/` to get `foo/../../../etc/passwd`, then
+        // contains_traversal() rejects the remaining `..` components.
+        let zip_bytes = create_raw_zip_entry("/foo/../../../etc/passwd", b"");
+        let mut temp_file = NamedTempFile::with_suffix(".zip").unwrap();
+        temp_file.write_all(&zip_bytes).unwrap();
+        temp_file.flush().unwrap();
+
+        let config = SecurityConfig::default().with_allow_absolute_paths(true);
+        let result = list_archive(temp_file.path(), &config);
+        assert!(
+            matches!(result, Err(ArchiveError::PathTraversal { .. })),
+            "traversal inside absolute path must still be rejected, got: {result:?}"
         );
     }
 }

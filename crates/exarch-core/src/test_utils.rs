@@ -52,6 +52,66 @@ pub fn create_test_zip(entries: Vec<(&str, &[u8])>) -> Vec<u8> {
     zip.finish().unwrap().into_inner()
 }
 
+/// Creates a raw in-memory ZIP with a single entry whose name is written
+/// verbatim into the local file header and central directory, bypassing any
+/// normalization that the `zip` crate applies via `start_file`. Use this to
+/// craft entries with absolute paths or traversal sequences that
+/// `enclosed_name()` returns `None` for.
+#[must_use]
+#[allow(clippy::cast_possible_truncation)]
+pub fn create_raw_zip_entry(entry_name: &str, content: &[u8]) -> Vec<u8> {
+    let name_bytes = entry_name.as_bytes();
+    let name_len = name_bytes.len() as u16;
+    let content_len = content.len() as u32;
+    let mut buf: Vec<u8> = Vec::new();
+
+    let local_offset = buf.len() as u32;
+    buf.extend_from_slice(b"PK\x03\x04");
+    buf.extend_from_slice(&20u16.to_le_bytes());
+    buf.extend_from_slice(&0u16.to_le_bytes()); // flags
+    buf.extend_from_slice(&0u16.to_le_bytes()); // stored
+    buf.extend_from_slice(&0u16.to_le_bytes());
+    buf.extend_from_slice(&0u16.to_le_bytes());
+    buf.extend_from_slice(&0u32.to_le_bytes()); // CRC32
+    buf.extend_from_slice(&content_len.to_le_bytes());
+    buf.extend_from_slice(&content_len.to_le_bytes());
+    buf.extend_from_slice(&name_len.to_le_bytes());
+    buf.extend_from_slice(&0u16.to_le_bytes()); // extra length
+    buf.extend_from_slice(name_bytes);
+    buf.extend_from_slice(content);
+
+    let central_offset = buf.len() as u32;
+    buf.extend_from_slice(b"PK\x01\x02");
+    buf.extend_from_slice(&0x031eu16.to_le_bytes());
+    buf.extend_from_slice(&20u16.to_le_bytes());
+    buf.extend_from_slice(&0u16.to_le_bytes());
+    buf.extend_from_slice(&0u16.to_le_bytes());
+    buf.extend_from_slice(&0u16.to_le_bytes());
+    buf.extend_from_slice(&0u16.to_le_bytes());
+    buf.extend_from_slice(&0u32.to_le_bytes());
+    buf.extend_from_slice(&content_len.to_le_bytes());
+    buf.extend_from_slice(&content_len.to_le_bytes());
+    buf.extend_from_slice(&name_len.to_le_bytes());
+    buf.extend_from_slice(&0u16.to_le_bytes()); // extra length
+    buf.extend_from_slice(&0u16.to_le_bytes()); // comment length
+    buf.extend_from_slice(&0u16.to_le_bytes()); // disk start
+    buf.extend_from_slice(&0u16.to_le_bytes()); // internal attrs
+    buf.extend_from_slice(&(0o100_644u32 << 16).to_le_bytes());
+    buf.extend_from_slice(&local_offset.to_le_bytes());
+    buf.extend_from_slice(name_bytes);
+
+    let central_size = (buf.len() as u32) - central_offset;
+    buf.extend_from_slice(b"PK\x05\x06");
+    buf.extend_from_slice(&0u16.to_le_bytes());
+    buf.extend_from_slice(&0u16.to_le_bytes());
+    buf.extend_from_slice(&1u16.to_le_bytes());
+    buf.extend_from_slice(&1u16.to_le_bytes());
+    buf.extend_from_slice(&central_size.to_le_bytes());
+    buf.extend_from_slice(&central_offset.to_le_bytes());
+    buf.extend_from_slice(&0u16.to_le_bytes());
+    buf
+}
+
 /// Builder for creating TAR test archives with files, directories, symlinks,
 /// and hardlinks.
 pub struct TarTestBuilder {

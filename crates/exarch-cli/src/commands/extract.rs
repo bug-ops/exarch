@@ -81,8 +81,6 @@ pub fn execute(
     // hardlinks, world-writable, permissions). allow_absolute_paths,
     // max_path_depth, and banned_path_components are propagated so listing
     // rejects paths that extraction would also reject on traversal grounds.
-    // Note: depth and component checks are enforced later by SafePath::validate,
-    // not by the listing phase.
     let list_config = SecurityConfig::default()
         .with_max_file_count(config.max_file_count)
         .with_max_total_size(config.max_total_size)
@@ -103,7 +101,14 @@ pub fn execute(
             .entries
             .iter()
             .filter(|e| e.entry_type == ManifestEntryType::File)
-            .map(|e| output_dir.join(&e.path))
+            .map(|e| {
+                let relative = if args.allow_absolute_paths && e.path.is_absolute() {
+                    e.path.strip_prefix("/").unwrap_or(&e.path)
+                } else {
+                    &e.path
+                };
+                output_dir.join(relative)
+            })
             .filter(|p| p.exists())
             .collect();
 

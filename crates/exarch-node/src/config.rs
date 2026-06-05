@@ -597,6 +597,7 @@ impl CreationConfig {
 /// | Setting | Default Value |
 /// |---------|--------------|
 /// | `skipDuplicates` | `true` |
+/// | `atomic` | `false` |
 #[napi]
 #[derive(Debug, Clone)]
 pub struct ExtractionOptions {
@@ -631,6 +632,23 @@ impl ExtractionOptions {
         self
     }
 
+    /// Sets whether extraction uses a temporary directory for atomic commits.
+    ///
+    /// When `true`, files are extracted to a temp dir in the same parent as
+    /// the output directory, then atomically renamed on completion. On failure
+    /// the temp dir is removed, leaving the output directory untouched.
+    /// Default: `false`.
+    ///
+    /// **Important:** atomic mode requires that the output directory does not
+    /// already exist. If it does, extraction fails with an
+    /// output-already-exists error. Non-atomic mode extracts into an
+    /// existing directory without error.
+    #[napi(js_name = "withAtomic")]
+    pub fn with_atomic(&mut self, atomic: Option<bool>) -> &Self {
+        self.inner.atomic = atomic.unwrap_or(true);
+        self
+    }
+
     /// Finalizes the configuration (for API consistency).
     #[napi]
     pub fn build(&self) -> &Self {
@@ -641,6 +659,12 @@ impl ExtractionOptions {
     #[napi(getter)]
     pub fn get_skip_duplicates(&self) -> bool {
         self.inner.skip_duplicates
+    }
+
+    /// Whether atomic extraction is enabled.
+    #[napi(getter)]
+    pub fn get_atomic(&self) -> bool {
+        self.inner.atomic
     }
 }
 

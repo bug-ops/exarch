@@ -95,6 +95,57 @@ export declare class CreationConfig {
 }
 
 /**
+ * Options controlling extraction behavior (non-security).
+ *
+ * Separate from `SecurityConfig` to keep security settings focused.
+ * These options control operational behavior such as duplicate handling.
+ *
+ * # Defaults
+ *
+ * | Setting | Default Value |
+ * |---------|--------------|
+ * | `skipDuplicates` | `true` |
+ * | `atomic` | `false` |
+ */
+export declare class ExtractionOptions {
+  /** Creates a new `ExtractionOptions` with defaults. */
+  constructor()
+  /**
+   * Creates an `ExtractionOptions` with defaults.
+   *
+   * This is equivalent to calling `new ExtractionOptions()`.
+   */
+  static default(): ExtractionOptions
+  /**
+   * Sets whether duplicate archive entries are skipped silently.
+   *
+   * When `true` (default), duplicate entries produce a warning in the
+   * report. When `false`, a duplicate entry causes an error.
+   */
+  withSkipDuplicates(skip?: boolean | undefined | null): this
+  /**
+   * Sets whether extraction uses a temporary directory for atomic commits.
+   *
+   * When `true`, files are extracted to a temp dir in the same parent as
+   * the output directory, then atomically renamed on completion. On failure
+   * the temp dir is removed, leaving the output directory untouched.
+   * Default: `false`.
+   *
+   * **Important:** atomic mode requires that the output directory does not
+   * already exist. If it does, extraction fails with an
+   * output-already-exists error. Non-atomic mode extracts into an
+   * existing directory without error.
+   */
+  withAtomic(atomic?: boolean | undefined | null): this
+  /** Finalizes the configuration (for API consistency). */
+  build(): this
+  /** Whether duplicate entries are skipped silently. */
+  get skipDuplicates(): boolean
+  /** Whether atomic extraction is enabled. */
+  get atomic(): boolean
+}
+
+/**
  * Security configuration for archive extraction.
  *
  * All security features default to deny (secure-by-default policy).
@@ -456,11 +507,15 @@ export interface CreationReport {
  * console.log(`Extracted ${report.filesExtracted} files`);
  *
  * // Customize security settings
- * const config = new SecurityConfig().maxFileSize(100 * 1024 * 1024);
+ * const config = new SecurityConfig().setMaxFileSize(100 * 1024 * 1024);
  * const report = await extractArchive('archive.tar.gz', '/tmp/output', config);
+ *
+ * // Customize extraction options
+ * const opts = new ExtractionOptions().withSkipDuplicates(false);
+ * const report = await extractArchive('archive.tar.gz', '/tmp/output', null, opts);
  * ```
  */
-export declare function extractArchive(archivePath: string, outputDir: string, config?: SecurityConfig | undefined | null): Promise<ExtractionReport>
+export declare function extractArchive(archivePath: string, outputDir: string, config?: SecurityConfig | undefined | null, options?: ExtractionOptions | undefined | null): Promise<ExtractionReport>
 
 /**
  * Extract an archive to the specified directory (sync).
@@ -491,11 +546,11 @@ export declare function extractArchive(archivePath: string, outputDir: string, c
  * console.log(`Extracted ${report.filesExtracted} files`);
  *
  * // Customize security settings
- * const config = new SecurityConfig().maxFileSize(100 * 1024 * 1024);
+ * const config = new SecurityConfig().setMaxFileSize(100 * 1024 * 1024);
  * const report = extractArchiveSync('archive.tar.gz', '/tmp/output', config);
  * ```
  */
-export declare function extractArchiveSync(archivePath: string, outputDir: string, config?: SecurityConfig | undefined | null): ExtractionReport
+export declare function extractArchiveSync(archivePath: string, outputDir: string, config?: SecurityConfig | undefined | null, options?: ExtractionOptions | undefined | null): ExtractionReport
 
 /**
  * Extract an archive to the specified directory with a progress callback
@@ -504,10 +559,10 @@ export declare function extractArchiveSync(archivePath: string, outputDir: strin
  * The `progress` callback is called once per entry with
  * `(path, total, current, bytesWritten)` where:
  * - `path` — entry path inside the archive
- * - `total` — total number of entries as `bigint` (0 for TAR-family formats
+ * - `total` — total number of entries as `number` (0 for TAR-family formats
  *   because the entry count is unknown until the stream is fully read)
- * - `current` — 1-based index of the current entry as `bigint`
- * - `bytesWritten` — cumulative bytes written to disk so far as `bigint`
+ * - `current` — 1-based index of the current entry as `number`
+ * - `bytesWritten` — cumulative bytes written to disk so far as `number`
  *   (always 0 during extraction because the core library does not emit
  *   byte-level progress events for extraction; only entry-level events fire)
  *
@@ -519,8 +574,9 @@ export declare function extractArchiveSync(archivePath: string, outputDir: strin
  * * `archive_path` - Path to the archive file
  * * `output_dir` - Directory where files will be extracted
  * * `config` - Optional `SecurityConfig` (uses secure defaults if omitted)
- * * `progress` - Optional progress callback `(path: string, total: bigint,
- *   current: bigint, bytesWritten: bigint) => void`
+ * * `options` - Optional `ExtractionOptions` (uses defaults if omitted)
+ * * `progress` - Optional progress callback `(path: string, total: number,
+ *   current: number, bytesWritten: number) => void`
  *
  * # Returns
  *
@@ -539,6 +595,7 @@ export declare function extractArchiveSync(archivePath: string, outputDir: strin
  *   'archive.tar.gz',
  *   '/tmp/output',
  *   null,
+ *   null,
  *   (path, total, current, bytesWritten) => {
  *     console.log(`${current}/${total}: ${path}`);
  *   },
@@ -546,7 +603,7 @@ export declare function extractArchiveSync(archivePath: string, outputDir: strin
  * console.log(`Extracted ${report.filesExtracted} files`);
  * ```
  */
-export declare function extractArchiveWithProgress(archivePath: string, outputDir: string, config?: SecurityConfig | undefined | null, progress?: (((err: Error | null, arg: [string, number, number, number]) => any)) | undefined | null): Promise<ExtractionReport>
+export declare function extractArchiveWithProgress(archivePath: string, outputDir: string, config?: SecurityConfig | undefined | null, options?: ExtractionOptions | undefined | null, progress?: (((err: Error | null, arg: [string, number, number, number]) => any)) | undefined | null): Promise<ExtractionReport>
 
 /**
  * Report of an archive extraction operation.

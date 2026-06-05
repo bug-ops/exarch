@@ -151,12 +151,39 @@ class ExtractionOptions:
         """
         ...
 
+    def with_atomic(self, atomic: bool = True) -> ExtractionOptions:
+        """
+        Sets whether extraction uses a temporary directory for atomic commits.
+
+        When ``True``, files are extracted to a temp dir in the same parent as
+        the output directory, then atomically renamed on completion. On failure
+        the temp dir is removed, leaving the output directory untouched.
+        Default: ``False``.
+
+        **Important:** atomic mode requires that the output directory does not
+        already exist. If it does, extraction raises ``OutputExistsError``.
+        Non-atomic mode extracts into an existing directory without error.
+        """
+        ...
+
     def build(self) -> ExtractionOptions:
         """Finalizes the configuration."""
         ...
 
-    skip_duplicates: bool
-    """Whether to skip duplicate entries silently (default: True)."""
+    @property
+    def skip_duplicates(self) -> bool:
+        """Whether to skip duplicate entries silently (default: True)."""
+        ...
+
+    @skip_duplicates.setter
+    def skip_duplicates(self, value: bool) -> None: ...
+    @property
+    def atomic(self) -> bool:
+        """Whether atomic extraction is enabled (default: False)."""
+        ...
+
+    @atomic.setter
+    def atomic(self, value: bool) -> None: ...
 
 class CreationConfig:
     """

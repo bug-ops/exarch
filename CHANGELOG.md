@@ -25,10 +25,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `create` CLI subcommand: `--preserve-permissions` flag (default: true) controls whether
   Unix file permissions are stored in the archive; pass `--preserve-permissions=false` to
   create a portable archive without platform-specific permission bits (#306).
+- Python and Node.js bindings now expose `ExtractionOptions` with `skip_duplicates`. Python:
+  `ExtractionOptions` class with `with_skip_duplicates(skip=True)` builder. Node.js:
+  `ExtractionOptions` class with `withSkipDuplicates(skip?)` builder. Both `extract_archive`
+  and `extract_archive_with_progress` accept an optional `options` parameter (#313).
 
 ### Tests
 
 - Added integration tests for `ExtractionOptions::skip_duplicates`: covers `skip_duplicates=true` (first entry kept, duplicate skipped with warning) and `skip_duplicates=false` (second entry overwrites first) for TAR archives. Documents that the `zip` crate 8.x deduplicates entries at parse time, making the flag a no-op for ZIP (#302).
+- Added 7z integration tests for `skip_duplicates`: `skip_duplicates=true` keeps the first
+  entry and records a warning; `skip_duplicates=false` overwrites with the last entry (#314).
 
 ### Fixed
 
@@ -37,6 +43,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `verify --strict` no longer writes an unstructured message to stderr that bypassed `--quiet` suppression and `--json` mode. Exit code 2 already conveys the strict-warning condition (#298).
 - `ProgressCallback::on_bytes_written` is now called during extraction for TAR, ZIP, and 7z formats; previously the method was documented but never invoked (#304).
 - `ProgressCallback::on_entry_complete` is now guaranteed to be called for every entry for which `on_entry_start` was called, including entries that fail mid-extraction; previously a failure left the callback pair unbalanced (#305).
+- 7z extraction with `skip_duplicates=false` now overwrites the existing file instead of
+  returning an error. Previously a duplicate entry with `skip_duplicates=false` would fail;
+  now it falls through to the atomic temp+rename overwrite path (#314).
 
 ## [0.4.1] - 2026-06-05
 

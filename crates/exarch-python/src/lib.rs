@@ -15,6 +15,7 @@ mod report;
 const MAX_PATH_LENGTH: usize = 4096;
 
 use config::PyCreationConfig;
+use config::PyExtractionOptions;
 use config::PySecurityConfig;
 use error::convert_error;
 use error::register_exceptions;
@@ -76,7 +77,7 @@ use report::PyVerificationReport;
 /// # Examples
 ///
 /// ```python
-/// from exarch import extract_archive, SecurityConfig
+/// from exarch import extract_archive, SecurityConfig, ExtractionOptions
 /// from pathlib import Path
 ///
 /// # Use secure defaults with string paths
@@ -91,31 +92,43 @@ use report::PyVerificationReport;
 /// # Customize security settings
 /// config = SecurityConfig().max_file_size(100 * 1024 * 1024)
 /// report = extract_archive("archive.tar.gz", "/tmp/output", config)
+///
+/// # Customize extraction options
+/// opts = ExtractionOptions().with_skip_duplicates(False)
+/// report = extract_archive("archive.tar.gz", "/tmp/output", None, opts)
 /// ```
 #[pyfunction]
-#[pyo3(signature = (archive_path, output_dir, config=None))]
+#[pyo3(signature = (archive_path, output_dir, config=None, options=None))]
 fn extract_archive(
     py: Python<'_>,
     archive_path: &Bound<'_, PyAny>,
     output_dir: &Bound<'_, PyAny>,
     config: Option<&PySecurityConfig>,
+    options: Option<&PyExtractionOptions>,
 ) -> PyResult<PyExtractionReport> {
     // Convert Path-like objects to strings
     let archive_path = path_to_string(py, archive_path)?;
     let output_dir = path_to_string(py, output_dir)?;
 
-    // Get config reference or use default
-    // Note: We need to create a default config if None is provided, since we need a
-    // reference
     let default_config = exarch_core::SecurityConfig::default();
     let config_ref = config.map_or(&default_config, |c| c.as_core());
+
+    let default_options = exarch_core::ExtractionOptions::default();
+    let options_ref = options.map_or(&default_options, |o| o.as_core());
 
     // Release GIL during I/O-heavy extraction
     // NOTE: TOCTOU race condition - archive contents can change between check and
     // extraction. This is an accepted limitation when releasing the GIL for
     // performance.
     let report = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        py.detach(|| exarch_core::extract_archive(&archive_path, &output_dir, config_ref))
+        py.detach(|| {
+            exarch_core::extract_archive_with_options(
+                &archive_path,
+                &output_dir,
+                config_ref,
+                options_ref,
+            )
+        })
     }))
     .map_err(|_| {
         PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Internal panic during extraction")
@@ -478,13 +491,14 @@ fn create_archive_with_progress(
 /// )
 /// ```
 #[pyfunction]
-#[pyo3(signature = (archive_path, output_dir, config=None, progress=None))]
+#[pyo3(signature = (archive_path, output_dir, config=None, progress=None, options=None))]
 fn extract_archive_with_progress(
     py: Python<'_>,
     archive_path: &Bound<'_, PyAny>,
     output_dir: &Bound<'_, PyAny>,
     config: Option<&PySecurityConfig>,
     progress: Option<Py<PyAny>>,
+    options: Option<&PyExtractionOptions>,
 ) -> PyResult<PyExtractionReport> {
     let archive_path = path_to_string(py, archive_path)?;
     let output_dir = path_to_string(py, output_dir)?;
@@ -492,15 +506,19 @@ fn extract_archive_with_progress(
     let default_config = exarch_core::SecurityConfig::default();
     let config_ref = config.map_or(&default_config, |c| c.as_core());
 
+    let default_options = exarch_core::ExtractionOptions::default();
+    let options_ref = options.map_or(&default_options, |o| o.as_core());
+
     if let Some(py_callback) = progress {
         let mut callback = PyProgressAdapter::new(py_callback);
 
         // CRITICAL: Do NOT release GIL when using Python callback!
         // Python callback requires GIL to call into Python.
-        let report = exarch_core::extract_archive_with_progress(
+        let report = exarch_core::extract_archive_with_options_and_progress(
             &archive_path,
             &output_dir,
             config_ref,
+            options_ref,
             &mut callback,
         )
         .map_err(convert_error)?;
@@ -511,10 +529,11 @@ fn extract_archive_with_progress(
         let mut noop = exarch_core::NoopProgress;
         let report = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             py.detach(|| {
-                exarch_core::extract_archive_with_progress(
+                exarch_core::extract_archive_with_options_and_progress(
                     &archive_path,
                     &output_dir,
                     config_ref,
+                    options_ref,
                     &mut noop,
                 )
             })
@@ -601,6 +620,7 @@ fn exarch(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Configuration classes
     m.add_class::<PySecurityConfig>()?;
     m.add_class::<PyCreationConfig>()?;
+    m.add_class::<PyExtractionOptions>()?;
 
     // Report classes
     m.add_class::<PyExtractionReport>()?;

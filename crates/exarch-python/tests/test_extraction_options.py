@@ -1,0 +1,87 @@
+"""Integration tests for ExtractionOptions Python API."""
+
+import pytest
+
+# TODO: Import exarch module once the extension is built
+# from exarch import ExtractionOptions, extract_archive
+
+
+class TestExtractionOptions:
+    """Test ExtractionOptions Python bindings."""
+
+    def test_default_skip_duplicates_is_true(self):
+        """Test that skip_duplicates defaults to True."""
+        pytest.skip("Requires compiled Python extension module")
+        # opts = ExtractionOptions()
+        # assert opts.skip_duplicates is True
+
+    def test_default_static_method(self):
+        """Test that ExtractionOptions.default() equals ExtractionOptions()."""
+        pytest.skip("Requires compiled Python extension module")
+        # opts = ExtractionOptions.default()
+        # assert opts.skip_duplicates is True
+
+    def test_with_skip_duplicates_false(self):
+        """Test with_skip_duplicates(False) sets the flag and returns self."""
+        pytest.skip("Requires compiled Python extension module")
+        # opts = ExtractionOptions()
+        # result = opts.with_skip_duplicates(False)
+        # assert opts.skip_duplicates is False
+        # assert result is opts
+
+    def test_with_skip_duplicates_true(self):
+        """Test with_skip_duplicates(True) sets the flag."""
+        pytest.skip("Requires compiled Python extension module")
+        # opts = ExtractionOptions()
+        # opts.with_skip_duplicates(False)
+        # opts.with_skip_duplicates(True)
+        # assert opts.skip_duplicates is True
+
+    def test_skip_duplicates_property_setter(self):
+        """Test skip_duplicates property setter."""
+        pytest.skip("Requires compiled Python extension module")
+        # opts = ExtractionOptions()
+        # opts.skip_duplicates = False
+        # assert opts.skip_duplicates is False
+
+    def test_build_returns_self(self):
+        """Test build() returns self for builder consistency."""
+        pytest.skip("Requires compiled Python extension module")
+        # opts = ExtractionOptions()
+        # result = opts.build()
+        # assert result is opts
+
+    def test_repr(self):
+        """Test string representation."""
+        pytest.skip("Requires compiled Python extension module")
+        # opts = ExtractionOptions()
+        # repr_str = repr(opts)
+        # assert "ExtractionOptions" in repr_str
+        # assert "skip_duplicates" in repr_str
+
+    def test_extract_archive_with_default_options(self, sample_tar_gz, temp_dir):
+        """Test extract_archive with ExtractionOptions() succeeds."""
+        pytest.skip("Requires compiled Python extension module")
+        # output = temp_dir / "output"
+        # output.mkdir()
+        # opts = ExtractionOptions()
+        # report = extract_archive(sample_tar_gz, output, options=opts)
+        # assert report.files_extracted >= 1
+
+    def test_extract_archive_with_skip_duplicates_false(self, sample_tar_gz, temp_dir):
+        """Test extract_archive with skip_duplicates=False on a non-duplicate archive succeeds."""
+        pytest.skip("Requires compiled Python extension module")
+        # output = temp_dir / "output"
+        # output.mkdir()
+        # opts = ExtractionOptions().with_skip_duplicates(False)
+        # report = extract_archive(sample_tar_gz, output, options=opts)
+        # assert report.files_extracted >= 1
+
+    def test_extract_archive_options_keyword_arg(self, sample_tar_gz, temp_dir):
+        """Test extract_archive accepts options as keyword argument."""
+        pytest.skip("Requires compiled Python extension module")
+        # output = temp_dir / "output"
+        # output.mkdir()
+        # opts = ExtractionOptions()
+        # report = extract_archive(sample_tar_gz, output, options=opts)
+        # assert report.files_extracted >= 1

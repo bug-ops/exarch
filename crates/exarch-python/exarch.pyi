@@ -126,6 +126,39 @@ class SecurityConfig:
     @banned_path_components.setter
     def banned_path_components(self, value: list[str]) -> None: ...
 
+class ExtractionOptions:
+    """
+    Options controlling extraction behavior (non-security).
+
+    Separate from SecurityConfig to keep security settings focused.
+    These options control operational behavior such as duplicate handling.
+    """
+
+    def __init__(self) -> None:
+        """Creates a new ExtractionOptions with defaults."""
+        ...
+
+    @staticmethod
+    def default() -> ExtractionOptions:
+        """Creates an ExtractionOptions with defaults."""
+        ...
+
+    def with_skip_duplicates(self, skip: bool = True) -> ExtractionOptions:
+        """
+        Sets whether duplicate archive entries are skipped silently.
+
+        When ``True`` (default), duplicate entries produce a warning in the
+        report. When ``False``, a duplicate entry causes an error.
+        """
+        ...
+
+    def build(self) -> ExtractionOptions:
+        """Finalizes the configuration."""
+        ...
+
+    skip_duplicates: bool
+    """Whether to skip duplicate entries silently (default: True)."""
+
 class CreationConfig:
     """
     Configuration for archive creation.
@@ -444,6 +477,7 @@ def extract_archive(
     archive_path: str | Path,
     output_dir: str | Path,
     config: SecurityConfig | None = None,
+    options: ExtractionOptions | None = None,
 ) -> ExtractionReport:
     """
     Extract an archive to the specified directory.
@@ -487,6 +521,7 @@ def extract_archive_with_progress(
     output_dir: str | Path,
     config: SecurityConfig | None = None,
     progress: ProgressCallbackFn | None = None,
+    options: ExtractionOptions | None = None,
 ) -> ExtractionReport:
     """
     Extract an archive to the specified directory with progress reporting.

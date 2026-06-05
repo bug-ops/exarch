@@ -55,6 +55,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and 7z archives are accepted during listing when the flag is set (previously silently rejected
   regardless of config) (#318). The `--allow-absolute-paths` CLI flag now consistently applies
   to both the listing and extraction phases.
+- ZIP listing with `--allow-absolute-paths`: entries whose names return `None` from
+  `enclosed_name()` (traversal-after-root patterns like `/../etc/passwd`) were always rejected
+  with `PathTraversal` regardless of the flag. The listing side now checks the flag for this
+  case, strips the leading `/`, and passes the result through `contains_traversal`; bare `/`
+  or empty-after-strip paths are rejected. True traversal components (`..`) are still rejected
+  even with the flag set (#325).
+- ZIP extraction with `--allow-absolute-paths`: the extraction path in `zip.rs` previously built
+  the entry path from the raw `name()` string, causing `SafePath::validate` to see an absolute
+  path and subsequently `dest.join(absolute)` to discard `dest` — resulting in `PathTraversal`
+  even when the flag was set. Extraction now uses `enclosed_name()` with the same fallback strip
+  logic as listing, so the flag works end-to-end for ZIP (#325).
+- Conflict scan during `exarch extract` now uses the same relative path that `list_archive`
+  produces for each entry. Previously `output_dir.join(e.path)` silently discarded `output_dir`
+  when `e.path` was absolute (stdlib `Path::join` semantics), causing conflict checks to probe
+  real filesystem paths instead of the intended destination (#327).
 - `verify --strict` no longer writes an unstructured message to stderr that bypassed `--quiet` suppression and `--json` mode. Exit code 2 already conveys the strict-warning condition (#298).
 - `ProgressCallback::on_bytes_written` is now called during extraction for TAR, ZIP, and 7z formats; previously the method was documented but never invoked (#304).
 - `ProgressCallback::on_entry_complete` is now guaranteed to be called for every entry for which `on_entry_start` was called, including entries that fail mid-extraction; previously a failure left the callback pair unbalanced (#305).

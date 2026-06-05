@@ -255,7 +255,7 @@ impl<R: Read + Seek> ZipArchive<R> {
     /// explicitly dropped before calling extraction helpers. For files,
     /// the zip file remains alive through validation and is reused for
     /// data extraction.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     fn process_entry(
         &mut self,
         index: usize,
@@ -286,14 +286,39 @@ impl<R: Read + Seek> ZipArchive<R> {
             });
         }
 
-        let path = PathBuf::from(
-            zip_file
-                .name()
-                .map_err(|e| {
-                    ArchiveError::InvalidArchive(format!("invalid entry name at {index}: {e}"))
-                })?
-                .as_ref(),
-        );
+        let raw_name = zip_file
+            .name()
+            .map_err(|e| {
+                ArchiveError::InvalidArchive(format!("invalid entry name at {index}: {e}"))
+            })?
+            .into_owned();
+        let path = match zip_file.enclosed_name() {
+            Some(p) => p,
+            None if config.allowed.absolute_paths => {
+                let stripped = raw_name.trim_start_matches('/');
+                if stripped.is_empty() {
+                    return Err(ArchiveError::PathTraversal {
+                        path: PathBuf::from(&raw_name),
+                    });
+                }
+                let p = PathBuf::from(stripped);
+                // SafePath::validate will enforce the remaining security checks;
+                // we only need to pre-reject clear traversal here.
+                if p.components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir))
+                {
+                    return Err(ArchiveError::PathTraversal {
+                        path: PathBuf::from(&raw_name),
+                    });
+                }
+                p
+            }
+            None => {
+                return Err(ArchiveError::PathTraversal {
+                    path: PathBuf::from(&raw_name),
+                });
+            }
+        };
 
         let (uncompressed_size, compressed_size) = ZipEntryAdapter::get_sizes(&zip_file);
         let mode = zip_file.unix_mode();
@@ -568,6 +593,8 @@ enum CompressionMethod {
 )]
 mod tests {
     use super::*;
+    use crate::NoopProgress;
+    use crate::test_utils::create_raw_zip_entry;
     use crate::test_utils::create_test_zip;
     use std::io::Cursor;
     use std::io::Write;
@@ -894,22 +921,31 @@ mod tests {
     }
 
     #[test]
-    fn test_absolute_path_rejected() {
-        let zip_data = create_test_zip(vec![("/etc/shadow", b"malicious")]);
+    fn test_absolute_path_sanitized_by_zip_crate() {
+        // zip 8.x enclosed_name() strips the leading `/` from simple absolute
+        // paths like `/etc/shadow`, returning Some("etc/shadow"). Extraction
+        // must write to <dest>/etc/shadow, never to the real /etc/shadow.
+        let zip_data = create_test_zip(vec![("/etc/shadow", b"content")]);
         let cursor = Cursor::new(zip_data);
         let mut archive = ZipArchive::new(cursor).unwrap();
 
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default();
 
-        let result = archive.extract(
-            temp.path(),
-            &config,
-            &ExtractionOptions::default(),
-            &mut crate::NoopProgress,
-        );
+        let report = archive
+            .extract(
+                temp.path(),
+                &config,
+                &ExtractionOptions::default(),
+                &mut crate::NoopProgress,
+            )
+            .unwrap();
 
-        assert!(result.is_err());
+        assert_eq!(report.files_extracted, 1);
+        assert!(
+            temp.path().join("etc/shadow").exists(),
+            "file must land inside dest, not at real /etc/shadow"
+        );
     }
 
     #[test]
@@ -1991,5 +2027,80 @@ mod tests {
         );
         assert!(!dest.path().join("Makefile").exists());
         assert!(dest.path().join("keep.txt").exists());
+    }
+
+    #[test]
+    fn test_extract_zip_traversal_after_root_rejected_by_default() {
+        // `/../etc/passwd` has a traversal component after root; enclosed_name()
+        // returns None for this pattern. Without allow_absolute_paths the entry
+        // must be rejected as PathTraversal.
+        let zip_data = create_raw_zip_entry("/../etc/passwd", b"secret");
+        let cursor = Cursor::new(zip_data);
+        let mut archive = ZipArchive::new(cursor).unwrap();
+
+        let temp = TempDir::new().unwrap();
+        let config = SecurityConfig::default();
+
+        let result = archive.extract(
+            temp.path(),
+            &config,
+            &ExtractionOptions::default(),
+            &mut NoopProgress,
+        );
+        assert!(
+            result.is_err(),
+            "traversal-after-root must be rejected by default"
+        );
+    }
+
+    #[test]
+    fn test_extract_zip_traversal_after_root_still_rejected_with_flag() {
+        // Even with allow_absolute_paths, `/../etc/passwd` contains `..` and
+        // must be rejected regardless.
+        let zip_data = create_raw_zip_entry("/../etc/passwd", b"secret");
+        let cursor = Cursor::new(zip_data);
+        let mut archive = ZipArchive::new(cursor).unwrap();
+
+        let temp = TempDir::new().unwrap();
+        let config = SecurityConfig::default().with_allow_absolute_paths(true);
+
+        let result = archive.extract(
+            temp.path(),
+            &config,
+            &ExtractionOptions::default(),
+            &mut NoopProgress,
+        );
+        assert!(
+            result.is_err(),
+            "traversal-after-root must be rejected even with allow_absolute_paths"
+        );
+    }
+
+    #[test]
+    fn test_extract_zip_absolute_path_with_flag_writes_to_dest() {
+        // `/etc/passwd` raw in ZIP: enclosed_name() returns Some("etc/passwd"),
+        // so extraction must write <dest>/etc/passwd without error.
+        // Empty content keeps CRC32 = 0 which matches the raw ZIP header.
+        let zip_data = create_raw_zip_entry("/etc/passwd", b"");
+        let cursor = Cursor::new(zip_data);
+        let mut archive = ZipArchive::new(cursor).unwrap();
+
+        let temp = TempDir::new().unwrap();
+        let config = SecurityConfig::default().with_allow_absolute_paths(true);
+
+        let report = archive
+            .extract(
+                temp.path(),
+                &config,
+                &ExtractionOptions::default(),
+                &mut NoopProgress,
+            )
+            .unwrap();
+
+        assert_eq!(report.files_extracted, 1);
+        assert!(
+            temp.path().join("etc/passwd").exists(),
+            "file must land inside dest, not at real /etc/passwd"
+        );
     }
 }

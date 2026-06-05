@@ -172,8 +172,11 @@ impl OutputFormatter for JsonFormatter {
             path: String,
             entry_type: String,
             size: u64,
+            #[serde(skip_serializing_if = "Option::is_none")]
             compressed_size: Option<u64>,
+            #[serde(skip_serializing_if = "Option::is_none")]
             mode: Option<u32>,
+            #[serde(skip_serializing_if = "Option::is_none")]
             modified: Option<u64>,
             #[serde(skip_serializing_if = "Option::is_none")]
             symlink_target: Option<String>,

@@ -1763,3 +1763,47 @@ fn test_list_json_long_symlink_target() {
         "symlink_target must equal the link target stored in the archive"
     );
 }
+
+/// Regular file entries must NOT contain `symlink_target` or `hardlink_target`
+/// keys in JSON output, pinning the `skip_serializing_if` contract (#346).
+#[test]
+fn test_list_json_long_regular_file_omits_link_fields() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("regular.tar.gz");
+
+    exarch_cmd()
+        .arg("create")
+        .arg(&archive)
+        .arg(fixture_path("sample.txt"))
+        .assert()
+        .success();
+
+    let output = exarch_cmd()
+        .arg("list")
+        .arg("--json")
+        .arg("-l")
+        .arg(&archive)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: serde_json::Value = serde_json::from_slice(&output).expect("invalid JSON output");
+    let entries = json["data"]["entries"]
+        .as_array()
+        .expect("entries must be array");
+    let file_entry = entries
+        .iter()
+        .find(|e| e["entry_type"] == "File")
+        .expect("expected a File entry in the listing");
+
+    assert!(
+        file_entry.get("symlink_target").is_none(),
+        "regular file entry must not contain symlink_target key"
+    );
+    assert!(
+        file_entry.get("hardlink_target").is_none(),
+        "regular file entry must not contain hardlink_target key"
+    );
+}

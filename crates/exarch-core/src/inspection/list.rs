@@ -17,6 +17,8 @@ use crate::SecurityConfig;
 use crate::error::QuotaResource;
 use crate::formats::detect::ArchiveType;
 use crate::formats::detect::detect_format;
+use crate::formats::zip::read_zip_symlink_target;
+use crate::formats::zip::zip_mode_is_symlink;
 use crate::inspection::manifest::ArchiveEntry;
 use crate::inspection::manifest::ArchiveManifest;
 use crate::inspection::manifest::ManifestEntryType;
@@ -327,8 +329,15 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
             })
         });
 
+        // Drop `entry` before conditionally re-opening the archive for symlink
+        // target data: the borrow checker requires the mutable borrow to end.
+        drop(entry);
+
         let symlink_target = if entry_type == ManifestEntryType::Symlink {
-            Some(path.clone())
+            let mut sym_entry = archive.by_index(i).map_err(|e| {
+                ArchiveError::InvalidArchive(format!("failed to re-read ZIP entry {i}: {e}"))
+            })?;
+            Some(read_zip_symlink_target(&mut sym_entry)?)
         } else {
             None
         };
@@ -571,18 +580,7 @@ fn convert_zip_entry_type<R: std::io::Read + std::io::Seek>(
 }
 
 fn is_zip_symlink<R: std::io::Read + std::io::Seek>(entry: &zip::read::ZipFile<'_, R>) -> bool {
-    #[cfg(unix)]
-    {
-        if let Some(mode) = entry.unix_mode() {
-            const S_IFLNK: u32 = 0o120_000;
-            return (mode & S_IFLNK) == S_IFLNK;
-        }
-    }
-
-    #[cfg(not(unix))]
-    let _ = entry;
-
-    false
+    zip_mode_is_symlink(entry.unix_mode())
 }
 
 #[cfg(test)]
@@ -836,6 +834,26 @@ mod tests {
         assert_eq!(
             manifest.entries[0].symlink_target,
             Some(PathBuf::from("target.txt"))
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_list_zip_symlink_target_is_actual_target() {
+        use crate::test_utils::create_zip_with_symlink;
+        use std::io::Cursor;
+
+        let zip_bytes = create_zip_with_symlink("link", "target.txt");
+        let mut archive = zip::ZipArchive::new(Cursor::new(zip_bytes)).unwrap();
+        let config = SecurityConfig::default();
+        let manifest = list_zip_reader(&mut archive, &config).unwrap();
+
+        assert_eq!(manifest.total_entries, 1);
+        assert_eq!(manifest.entries[0].entry_type, ManifestEntryType::Symlink);
+        assert_eq!(
+            manifest.entries[0].symlink_target,
+            Some(PathBuf::from("target.txt")),
+            "symlink_target must be the actual link target, not the entry path"
         );
     }
 

@@ -96,6 +96,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 7z extraction with `skip_duplicates=false` now overwrites the existing file instead of
   returning an error. Previously a duplicate entry with `skip_duplicates=false` would fail;
   now it falls through to the atomic temp+rename overwrite path (#314).
+- `list_archive` now reports the correct `symlink_target` for ZIP symlink entries. Previously
+  `ArchiveManifest` entries were set to the entry's own path instead of reading the actual
+  target from the entry data (where the ZIP spec stores it). The symlink detection mask in the
+  listing path has also been corrected to use `S_IFMT & S_IFLNK`, matching the extraction path (#336).
 
 ## [0.4.1] - 2026-06-05
 

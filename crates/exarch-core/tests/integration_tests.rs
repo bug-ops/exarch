@@ -12,6 +12,10 @@ mod security;
 
 use exarch_core::ArchiveError;
 use exarch_core::SecurityConfig;
+use exarch_core::create_archive;
+use exarch_core::creation::CreationConfig;
+use exarch_core::extract_archive;
+use exarch_core::formats::detect::ArchiveType;
 use exarch_core::types::DestDir;
 use exarch_core::types::SafePath;
 use exarch_core::types::SafeSymlink;
@@ -249,3 +253,72 @@ fn verify_archive_concurrent_calls_do_not_collide() {
         );
     }
 }
+
+// ============================================================================
+// Roundtrip tests: create → extract → verify content
+// ============================================================================
+
+/// Source layout written by all roundtrip tests.
+///
+/// Returns `(src_dir, files)` where `files` is a list of `(relative_path,
+/// content)` pairs that can be used to assert the extracted output.
+fn make_roundtrip_source() -> (TempDir, Vec<(&'static str, &'static [u8])>) {
+    let src = TempDir::new().unwrap();
+    let files: Vec<(&str, &[u8])> = vec![
+        ("hello.txt", b"hello world"),
+        ("data.bin", b"\x00\x01\x02\x03\xfe\xff"),
+        ("nested/deep.txt", b"deep content"),
+        ("nested/sub/leaf.txt", b"leaf content"),
+    ];
+    for (rel, content) in &files {
+        let dest = src.path().join(rel);
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(&dest, content).unwrap();
+    }
+    (src, files)
+}
+
+fn assert_roundtrip_content(extract_dir: &TempDir, files: &[(&str, &[u8])]) {
+    for (rel, expected) in files {
+        let path = extract_dir.path().join(rel);
+        let actual =
+            fs::read(&path).unwrap_or_else(|e| panic!("cannot read extracted file {rel}: {e}"));
+        assert_eq!(
+            actual.as_slice(),
+            *expected,
+            "content mismatch for {rel}: got {} bytes, expected {} bytes",
+            actual.len(),
+            expected.len()
+        );
+    }
+}
+
+macro_rules! roundtrip_test {
+    ($name:ident, $ext:literal, $format:expr) => {
+        #[test]
+        fn $name() {
+            let (src, files) = make_roundtrip_source();
+            let archive_dir = TempDir::new().unwrap();
+            let archive = archive_dir.path().join(concat!("out.", $ext));
+
+            let config = CreationConfig::default()
+                .with_include_hidden(true)
+                .with_format(Some($format));
+            create_archive(&archive, &[src.path()], &config).unwrap();
+            assert!(archive.exists(), "archive file must exist after creation");
+
+            let extract_dir = TempDir::new().unwrap();
+            extract_archive(&archive, extract_dir.path(), &SecurityConfig::default()).unwrap();
+
+            assert_roundtrip_content(&extract_dir, &files);
+        }
+    };
+}
+
+roundtrip_test!(roundtrip_tar_gz, "tar.gz", ArchiveType::TarGz);
+roundtrip_test!(roundtrip_tar_bz2, "tar.bz2", ArchiveType::TarBz2);
+roundtrip_test!(roundtrip_tar_xz, "tar.xz", ArchiveType::TarXz);
+roundtrip_test!(roundtrip_tar_zst, "tar.zst", ArchiveType::TarZst);
+roundtrip_test!(roundtrip_zip, "zip", ArchiveType::Zip);

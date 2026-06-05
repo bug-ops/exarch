@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Roundtrip integration tests now verify extracted file contents against the source data for
+  all supported formats (tar.gz, tar.bz2, tar.xz, tar.zst, zip). Previously, tests only
+  asserted that extraction succeeded and files existed, which would have allowed silent data
+  corruption to go undetected (#335).
+- CLI roundtrip tests (`test_roundtrip_tar_gz_single_file`, `test_roundtrip_zip_directory`)
+  now assert extracted file contents match the original source bytes (#335).
+
 ### Breaking Changes
 
 - **`ArchiveCreator::compression_level`** now returns `Result<Self, ArchiveError>` instead of

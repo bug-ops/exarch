@@ -742,12 +742,11 @@ fn test_create_no_sources() {
 fn test_roundtrip_tar_gz_single_file() {
     let temp = TempDir::new().expect("failed to create temp dir");
     let src_file = temp.path().join("original.txt");
-    let content = "Hello, World!";
+    let content = b"Hello, World!";
     std::fs::write(&src_file, content).expect("failed to write source file");
 
     let archive = temp.path().join("roundtrip.tar.gz");
 
-    // Create archive
     exarch_cmd()
         .arg("create")
         .arg(&archive)
@@ -755,7 +754,6 @@ fn test_roundtrip_tar_gz_single_file() {
         .assert()
         .success();
 
-    // Extract archive
     let extract_dir = temp.path().join("extracted");
     std::fs::create_dir(&extract_dir).expect("failed to create extract dir");
 
@@ -765,6 +763,14 @@ fn test_roundtrip_tar_gz_single_file() {
         .arg(&extract_dir)
         .assert()
         .success();
+
+    let extracted =
+        std::fs::read(extract_dir.join("original.txt")).expect("extracted file must exist");
+    assert_eq!(
+        extracted.as_slice(),
+        content,
+        "extracted content must match source"
+    );
 }
 
 #[test]
@@ -772,12 +778,11 @@ fn test_roundtrip_zip_directory() {
     let temp = TempDir::new().expect("failed to create temp dir");
     let src_dir = temp.path().join("source");
     std::fs::create_dir(&src_dir).expect("failed to create source dir");
-    std::fs::write(src_dir.join("file1.txt"), "content1").expect("failed to write file1");
-    std::fs::write(src_dir.join("file2.txt"), "content2").expect("failed to write file2");
+    std::fs::write(src_dir.join("file1.txt"), b"content1").expect("failed to write file1");
+    std::fs::write(src_dir.join("file2.txt"), b"content2").expect("failed to write file2");
 
     let archive = temp.path().join("roundtrip.zip");
 
-    // Create archive
     exarch_cmd()
         .arg("create")
         .arg(&archive)
@@ -785,7 +790,6 @@ fn test_roundtrip_zip_directory() {
         .assert()
         .success();
 
-    // Extract archive
     let extract_dir = temp.path().join("extracted");
     std::fs::create_dir(&extract_dir).expect("failed to create extract dir");
 
@@ -796,8 +800,21 @@ fn test_roundtrip_zip_directory() {
         .assert()
         .success();
 
-    // Verify roundtrip completed
-    assert!(archive.exists());
+    let actual1 =
+        std::fs::read(extract_dir.join("file1.txt")).expect("file1.txt must be extracted");
+    assert_eq!(
+        actual1.as_slice(),
+        b"content1",
+        "file1.txt content must match"
+    );
+
+    let actual2 =
+        std::fs::read(extract_dir.join("file2.txt")).expect("file2.txt must be extracted");
+    assert_eq!(
+        actual2.as_slice(),
+        b"content2",
+        "file2.txt content must match"
+    );
 }
 
 // ============================================================================

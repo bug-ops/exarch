@@ -30,7 +30,7 @@ const MAX_COMPONENT_LENGTH: usize = 255;
 /// | `allow_world_writable` | false |
 /// | `preserve_permissions` | false |
 /// | `allowed_extensions` | empty (all allowed) |
-/// | `banned_path_components` | `.git`, `.ssh` |
+/// | `banned_path_components` | `.git`, `.ssh`, `.gnupg`, `.aws`, `.kube`, `.docker`, `.env` |
 #[napi]
 #[derive(Debug, Clone)]
 pub struct SecurityConfig {

@@ -57,23 +57,23 @@ class SecurityConfig:
         """Sets the maximum path depth."""
         ...
 
-    def allow_symlinks(self, allow: bool = True) -> SecurityConfig:
+    def with_allow_symlinks(self, allow: bool = True) -> SecurityConfig:
         """Allows or denies symlinks."""
         ...
 
-    def allow_hardlinks(self, allow: bool = True) -> SecurityConfig:
+    def with_allow_hardlinks(self, allow: bool = True) -> SecurityConfig:
         """Allows or denies hardlinks."""
         ...
 
-    def allow_absolute_paths(self, allow: bool = True) -> SecurityConfig:
+    def with_allow_absolute_paths(self, allow: bool = True) -> SecurityConfig:
         """Allows or denies absolute paths."""
         ...
 
-    def allow_world_writable(self, allow: bool = True) -> SecurityConfig:
+    def with_allow_world_writable(self, allow: bool = True) -> SecurityConfig:
         """Allows or denies world-writable files."""
         ...
 
-    def allow_solid_archives(self, allow: bool = True) -> SecurityConfig:
+    def with_allow_solid_archives(self, allow: bool = True) -> SecurityConfig:
         """Allows or denies solid 7z archives."""
         ...
 
@@ -81,7 +81,7 @@ class SecurityConfig:
         """
         Sets the maximum memory budget in bytes for decompressing a solid 7z block.
 
-        Only enforced when ``allow_solid_archives`` is ``True``. Raises
+        Only enforced when ``with_allow_solid_archives`` is called with ``True``. Raises
         ``ValueError`` if *size* is zero.
         """
         ...

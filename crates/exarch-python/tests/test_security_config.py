@@ -24,7 +24,7 @@ class TestSecurityConfig:
         # config = (SecurityConfig()
         #     .with_max_file_size(100_000_000)
         #     .with_max_total_size(1_000_000_000)
-        #     .allow_symlinks(True))
+        #     .with_allow_symlinks(True))
         # assert config.max_file_size == 100_000_000
         # assert config.max_total_size == 1_000_000_000
 

@@ -38,6 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Python: `SecurityConfig` and `CreationConfig` scalar getters (`max_file_size`, `max_total_size`, `max_compression_ratio`, `max_file_count`, `max_path_depth`, `max_solid_block_memory`, `preserve_permissions`, `compression_level`, `follow_symlinks`, `include_hidden`, `exclude_patterns`) now return their values correctly instead of a bound method. Builder methods were renamed to `with_<field>` (e.g. `with_max_file_size(...)`) to eliminate the PyO3 name collision (#315).
 - Node.js: `index.d.ts` now declares `setMaxSolidBlockMemory(size: number): this` and `get maxSolidBlockMemory(): number` for `SecurityConfig`; the file is committed to the repository so TypeScript consumers have correct types without building from source (#311).
 - Python: `exarch.pyi` now declares `allowed_extensions` and `banned_path_components` as `@property` with setters, replacing bare class-level annotations that did not express read/write semantics (#312).
 - `verify --strict` no longer writes an unstructured message to stderr that bypassed `--quiet` suppression and `--json` mode. Exit code 2 already conveys the strict-warning condition (#298).

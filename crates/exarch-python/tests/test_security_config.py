@@ -22,8 +22,8 @@ class TestSecurityConfig:
         """Test builder pattern method chaining."""
         pytest.skip("Requires compiled Python extension module")
         # config = (SecurityConfig()
-        #     .max_file_size(100_000_000)
-        #     .max_total_size(1_000_000_000)
+        #     .with_max_file_size(100_000_000)
+        #     .with_max_total_size(1_000_000_000)
         #     .allow_symlinks(True))
         # assert config.max_file_size == 100_000_000
         # assert config.max_total_size == 1_000_000_000
@@ -48,17 +48,17 @@ class TestSecurityConfig:
         # config = SecurityConfig()
         #
         # # Should accept valid values
-        # config.max_compression_ratio(150.0)
+        # config.with_max_compression_ratio(150.0)
         #
         # # Should reject invalid values
         # with pytest.raises(ValueError):
-        #     config.max_compression_ratio(float('inf'))
+        #     config.with_max_compression_ratio(float('inf'))
         #
         # with pytest.raises(ValueError):
-        #     config.max_compression_ratio(float('nan'))
+        #     config.with_max_compression_ratio(float('nan'))
         #
         # with pytest.raises(ValueError):
-        #     config.max_compression_ratio(-10.0)
+        #     config.with_max_compression_ratio(-10.0)
 
     def test_extension_validation(self):
         """Test extension string validation."""

@@ -248,16 +248,17 @@ impl<R: Read + Seek> ZipArchive<R> {
         }
     }
 
-    /// Processes a single ZIP entry with a single `by_index()` call.
+    /// Processes a single ZIP entry using an already-opened `ZipFile`.
     ///
-    /// Branches on entry type (directory/symlink/file) within the same
-    /// borrow scope. For directories and symlinks, the zip file is
-    /// explicitly dropped before calling extraction helpers. For files,
-    /// the zip file remains alive through validation and is reused for
-    /// data extraction.
+    /// The caller is responsible for opening the entry via `by_index` exactly
+    /// once and passing it here, so the local header is read only once per
+    /// entry. Branches on entry type (directory/symlink/file) within the same
+    /// borrow scope. For directories and symlinks, the zip file is explicitly
+    /// dropped before calling extraction helpers. For files, the zip file
+    /// remains alive through validation and is reused for data extraction.
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     fn process_entry(
-        &mut self,
+        mut zip_file: zip::read::ZipFile<'_, R>,
         index: usize,
         validator: &mut EntryValidator,
         dest: &DestDir,
@@ -268,15 +269,6 @@ impl<R: Read + Seek> ZipArchive<R> {
         config: &SecurityConfig,
         progress: &mut dyn ProgressCallback,
     ) -> Result<()> {
-        let mut zip_file = self.inner.by_index(index).map_err(|e| {
-            if e.to_string().contains("Password required to decrypt file") {
-                return ArchiveError::SecurityViolation {
-                    reason: "archive is password-protected.\n  Password-protected ZIP archives are not supported. Decrypt the archive externally and try again.".into(),
-                };
-            }
-            ArchiveError::InvalidArchive(format!("failed to read entry {index}: {e}"))
-        })?;
-
         if zip_file.encrypted() {
             let name = zip_file
                 .name()
@@ -448,23 +440,27 @@ impl<R: Read + Seek> ArchiveFormat for ZipArchive<R> {
         let entry_count = self.inner.len();
 
         for i in 0..entry_count {
-            let entry_path = {
-                // Borrow ends before process_entry to satisfy the borrow checker.
-                let zf = self.inner.by_index(i).map_err(|e| {
-                    ArchiveError::InvalidArchive(format!("failed to open zip entry {i}: {e}"))
-                })?;
-                std::path::PathBuf::from(
-                    zf.name()
-                        .map_err(|e| {
-                            ArchiveError::InvalidArchive(format!("invalid entry name at {i}: {e}"))
-                        })?
-                        .as_ref(),
-                )
-            };
+            let zip_file = self.inner.by_index(i).map_err(|e| {
+                if e.to_string().contains("Password required to decrypt file") {
+                    return ArchiveError::SecurityViolation {
+                        reason: "archive is password-protected.\n  Password-protected ZIP archives are not supported. Decrypt the archive externally and try again.".into(),
+                    };
+                }
+                ArchiveError::InvalidArchive(format!("failed to open zip entry {i}: {e}"))
+            })?;
+            let entry_path = PathBuf::from(
+                zip_file
+                    .name()
+                    .map_err(|e| {
+                        ArchiveError::InvalidArchive(format!("invalid entry name at {i}: {e}"))
+                    })?
+                    .as_ref(),
+            );
             progress.on_entry_start(&entry_path, entry_count, i.saturating_add(1));
             let mut guard = EntryCompleteGuard::new(progress, &entry_path);
 
-            let result = self.process_entry(
+            let result = Self::process_entry(
+                zip_file,
                 i,
                 &mut validator,
                 &dest,

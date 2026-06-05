@@ -39,7 +39,7 @@ const MAX_COMPONENT_LENGTH: usize = 255;
 ///
 /// # Customize with builder pattern
 /// config = (SecurityConfig()
-///     .max_file_size(100 * 1024 * 1024)
+///     .with_max_file_size(100 * 1024 * 1024)
 ///     .allow_symlinks(True))
 ///
 /// # Use permissive configuration for trusted archives
@@ -83,13 +83,13 @@ impl PySecurityConfig {
     // Builder pattern methods - return Self for chaining
 
     /// Sets the maximum file size in bytes.
-    fn max_file_size(mut slf: PyRefMut<'_, Self>, size: u64) -> PyRefMut<'_, Self> {
+    fn with_max_file_size(mut slf: PyRefMut<'_, Self>, size: u64) -> PyRefMut<'_, Self> {
         slf.inner.max_file_size = size;
         slf
     }
 
     /// Sets the maximum total size in bytes.
-    fn max_total_size(mut slf: PyRefMut<'_, Self>, size: u64) -> PyRefMut<'_, Self> {
+    fn with_max_total_size(mut slf: PyRefMut<'_, Self>, size: u64) -> PyRefMut<'_, Self> {
         slf.inner.max_total_size = size;
         slf
     }
@@ -99,7 +99,7 @@ impl PySecurityConfig {
     /// # Errors
     ///
     /// Returns `ValueError` if ratio is not a positive finite number.
-    fn max_compression_ratio(
+    fn with_max_compression_ratio(
         mut slf: PyRefMut<'_, Self>,
         ratio: f64,
     ) -> PyResult<PyRefMut<'_, Self>> {
@@ -113,13 +113,13 @@ impl PySecurityConfig {
     }
 
     /// Sets the maximum file count.
-    fn max_file_count(mut slf: PyRefMut<'_, Self>, count: usize) -> PyRefMut<'_, Self> {
+    fn with_max_file_count(mut slf: PyRefMut<'_, Self>, count: usize) -> PyRefMut<'_, Self> {
         slf.inner.max_file_count = count;
         slf
     }
 
     /// Sets the maximum path depth.
-    fn max_path_depth(mut slf: PyRefMut<'_, Self>, depth: usize) -> PyRefMut<'_, Self> {
+    fn with_max_path_depth(mut slf: PyRefMut<'_, Self>, depth: usize) -> PyRefMut<'_, Self> {
         slf.inner.max_path_depth = depth;
         slf
     }
@@ -173,7 +173,7 @@ impl PySecurityConfig {
     /// # Errors
     ///
     /// Returns `ValueError` if `size` is zero.
-    fn max_solid_block_memory(
+    fn with_max_solid_block_memory(
         mut slf: PyRefMut<'_, Self>,
         size: u64,
     ) -> PyResult<PyRefMut<'_, Self>> {
@@ -188,7 +188,10 @@ impl PySecurityConfig {
 
     /// Sets whether to preserve permissions from archive.
     #[pyo3(signature = (preserve=true))]
-    fn preserve_permissions(mut slf: PyRefMut<'_, Self>, preserve: bool) -> PyRefMut<'_, Self> {
+    fn with_preserve_permissions(
+        mut slf: PyRefMut<'_, Self>,
+        preserve: bool,
+    ) -> PyRefMut<'_, Self> {
         slf.inner.preserve_permissions = preserve;
         slf
     }
@@ -426,8 +429,8 @@ impl PySecurityConfig {
 ///
 /// # Customize with builder pattern
 /// config = (CreationConfig()
-///     .compression_level(9)
-///     .follow_symlinks(True))
+///     .with_compression_level(9)
+///     .with_follow_symlinks(True))
 /// ```
 #[pyclass(name = "CreationConfig", skip_from_py_object)]
 #[derive(Clone)]
@@ -456,7 +459,10 @@ impl PyCreationConfig {
     /// # Errors
     ///
     /// Returns `ValueError` if level is not in range 1-9.
-    fn compression_level(mut slf: PyRefMut<'_, Self>, level: u8) -> PyResult<PyRefMut<'_, Self>> {
+    fn with_compression_level(
+        mut slf: PyRefMut<'_, Self>,
+        level: u8,
+    ) -> PyResult<PyRefMut<'_, Self>> {
         if !(1..=9).contains(&level) {
             return Err(PyValueError::new_err(
                 "compression level must be in range 1-9",
@@ -468,33 +474,39 @@ impl PyCreationConfig {
 
     /// Sets whether to preserve permissions.
     #[pyo3(signature = (preserve=true))]
-    fn preserve_permissions(mut slf: PyRefMut<'_, Self>, preserve: bool) -> PyRefMut<'_, Self> {
+    fn with_preserve_permissions(
+        mut slf: PyRefMut<'_, Self>,
+        preserve: bool,
+    ) -> PyRefMut<'_, Self> {
         slf.inner.preserve_permissions = preserve;
         slf
     }
 
     /// Sets whether to follow symlinks.
     #[pyo3(signature = (follow=true))]
-    fn follow_symlinks(mut slf: PyRefMut<'_, Self>, follow: bool) -> PyRefMut<'_, Self> {
+    fn with_follow_symlinks(mut slf: PyRefMut<'_, Self>, follow: bool) -> PyRefMut<'_, Self> {
         slf.inner.follow_symlinks = follow;
         slf
     }
 
     /// Sets whether to include hidden files.
     #[pyo3(signature = (include=true))]
-    fn include_hidden(mut slf: PyRefMut<'_, Self>, include: bool) -> PyRefMut<'_, Self> {
+    fn with_include_hidden(mut slf: PyRefMut<'_, Self>, include: bool) -> PyRefMut<'_, Self> {
         slf.inner.include_hidden = include;
         slf
     }
 
     /// Sets exclude patterns.
-    fn exclude_patterns(mut slf: PyRefMut<'_, Self>, patterns: Vec<String>) -> PyRefMut<'_, Self> {
+    fn with_exclude_patterns(
+        mut slf: PyRefMut<'_, Self>,
+        patterns: Vec<String>,
+    ) -> PyRefMut<'_, Self> {
         slf.inner.exclude_patterns = patterns;
         slf
     }
 
     /// Sets maximum file size in bytes.
-    fn max_file_size(mut slf: PyRefMut<'_, Self>, size: Option<u64>) -> PyRefMut<'_, Self> {
+    fn with_max_file_size(mut slf: PyRefMut<'_, Self>, size: Option<u64>) -> PyRefMut<'_, Self> {
         slf.inner.max_file_size = size;
         slf
     }
@@ -751,12 +763,12 @@ mod tests {
             let obj = py_config.bind(py);
 
             // Call methods through Python API
-            obj.call_method1("max_file_size", (100_000_000_u64,))
-                .expect("max_file_size call failed");
-            obj.call_method1("max_total_size", (1_000_000_000_u64,))
-                .expect("max_total_size call failed");
-            obj.call_method1("max_file_count", (50_000_usize,))
-                .expect("max_file_count call failed");
+            obj.call_method1("with_max_file_size", (100_000_000_u64,))
+                .expect("with_max_file_size call failed");
+            obj.call_method1("with_max_total_size", (1_000_000_000_u64,))
+                .expect("with_max_total_size call failed");
+            obj.call_method1("with_max_file_count", (50_000_usize,))
+                .expect("with_max_file_count call failed");
 
             let result = py_config.borrow(py);
             assert_eq!(
@@ -785,7 +797,7 @@ mod tests {
             let py_config = Py::new(py, config).expect("Failed to create Py object");
             let obj = py_config.bind(py);
 
-            let result = obj.call_method1("max_compression_ratio", (200.0_f64,));
+            let result = obj.call_method1("with_max_compression_ratio", (200.0_f64,));
             assert!(result.is_ok(), "Should accept valid compression ratio");
             assert_eq!(
                 py_config.borrow(py).get_max_compression_ratio(),
@@ -803,7 +815,7 @@ mod tests {
             let py_config = Py::new(py, config).expect("Failed to create Py object");
             let obj = py_config.bind(py);
 
-            let result = obj.call_method1("max_compression_ratio", (f64::NAN,));
+            let result = obj.call_method1("with_max_compression_ratio", (f64::NAN,));
             assert!(result.is_err(), "Should reject NaN compression ratio");
         });
     }
@@ -816,7 +828,7 @@ mod tests {
             let py_config = Py::new(py, config).expect("Failed to create Py object");
             let obj = py_config.bind(py);
 
-            let result = obj.call_method1("max_compression_ratio", (f64::INFINITY,));
+            let result = obj.call_method1("with_max_compression_ratio", (f64::INFINITY,));
             assert!(result.is_err(), "Should reject infinite compression ratio");
         });
     }
@@ -829,7 +841,7 @@ mod tests {
             let py_config = Py::new(py, config).expect("Failed to create Py object");
             let obj = py_config.bind(py);
 
-            let result = obj.call_method1("max_compression_ratio", (-10.0_f64,));
+            let result = obj.call_method1("with_max_compression_ratio", (-10.0_f64,));
             assert!(result.is_err(), "Should reject negative compression ratio");
         });
     }
@@ -842,7 +854,7 @@ mod tests {
             let py_config = Py::new(py, config).expect("Failed to create Py object");
             let obj = py_config.bind(py);
 
-            let result = obj.call_method1("max_compression_ratio", (0.0_f64,));
+            let result = obj.call_method1("with_max_compression_ratio", (0.0_f64,));
             assert!(result.is_err(), "Should reject zero compression ratio");
         });
     }
@@ -1088,12 +1100,12 @@ mod tests {
             let py_config = Py::new(py, config).expect("Failed to create Py object");
             let obj = py_config.bind(py);
 
-            let result = obj.call_method1("max_solid_block_memory", (256 * 1024 * 1024_u64,));
+            let result = obj.call_method1("with_max_solid_block_memory", (256 * 1024 * 1024_u64,));
             assert!(result.is_ok(), "Should accept valid memory size");
             assert_eq!(
                 py_config.borrow(py).get_max_solid_block_memory(),
                 256 * 1024 * 1024,
-                "max_solid_block_memory should be updated"
+                "with_max_solid_block_memory should be updated"
             );
         });
     }
@@ -1106,7 +1118,7 @@ mod tests {
             let py_config = Py::new(py, config).expect("Failed to create Py object");
             let obj = py_config.bind(py);
 
-            let result = obj.call_method1("max_solid_block_memory", (0_u64,));
+            let result = obj.call_method1("with_max_solid_block_memory", (0_u64,));
             assert!(result.is_err(), "Should reject zero memory size");
         });
     }

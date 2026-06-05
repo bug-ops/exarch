@@ -174,7 +174,7 @@ fn list_tar_entries<R: std::io::Read>(
             .map_err(|e| ArchiveError::InvalidArchive(format!("invalid path: {e}")))?
             .into_owned();
 
-        if contains_traversal(&path) {
+        if contains_traversal(&path, config) {
             return Err(ArchiveError::PathTraversal { path });
         }
 
@@ -428,7 +428,7 @@ fn list_sevenz_archive(
 
         let path = PathBuf::from(&entry.name);
 
-        if contains_traversal(&path) {
+        if contains_traversal(&path, config) {
             return Err(ArchiveError::PathTraversal { path });
         }
 
@@ -501,15 +501,15 @@ fn sevenz_manifest_entry_type(entry: &sevenz_rust2::ArchiveEntry) -> ManifestEnt
 /// Checks whether a sevenz-rust2 parse failure is due to a valid empty 7z
 /// Returns `true` if the path contains traversal attempts.
 ///
-/// Mirrors zip crate `enclosed_name()` semantics: rejects paths with `..`
-/// components, Unix root (`/`), or Windows drive prefixes (`C:\`).
-fn contains_traversal(path: &Path) -> bool {
+/// `ParentDir` (`..`) is always rejected. `RootDir` and `Prefix` (Windows drive
+/// paths such as `C:\`) are rejected only when `config.allowed.absolute_paths`
+/// is false, matching the behaviour of `SafePath::validate`.
+fn contains_traversal(path: &Path, config: &SecurityConfig) -> bool {
     use std::path::Component;
-    path.components().any(|c| {
-        matches!(
-            c,
-            Component::ParentDir | Component::RootDir | Component::Prefix(_)
-        )
+    path.components().any(|c| match c {
+        Component::ParentDir => true,
+        Component::Prefix(_) | Component::RootDir => !config.allowed.absolute_paths,
+        _ => false,
     })
 }
 
@@ -1255,6 +1255,77 @@ mod tests {
         assert!(
             matches!(result, Err(ArchiveError::PathTraversal { .. })),
             "expected PathTraversal error for absolute path in TAR, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_list_tar_absolute_path_allowed_when_flag_set() {
+        // Regression for #318: allow_absolute_paths must also take effect during
+        // the listing phase, not only during extraction.
+        let mut temp_file = NamedTempFile::with_suffix(".tar").unwrap();
+        temp_file
+            .write_all(&tar_with_raw_path("/etc/passwd"))
+            .unwrap();
+        temp_file.flush().unwrap();
+
+        let config = SecurityConfig::default().with_allow_absolute_paths(true);
+        let result = list_archive(temp_file.path(), &config);
+        assert!(
+            result.is_ok(),
+            "list_archive must accept absolute paths when allow_absolute_paths=true, got: {result:?}"
+        );
+        let manifest = result.unwrap();
+        assert_eq!(manifest.total_entries, 1);
+    }
+
+    #[test]
+    fn test_list_sevenz_absolute_path_allowed_when_flag_set() {
+        // Regression for #318: allow_absolute_paths must propagate to 7z listing.
+        let archive_bytes = make_sevenz_archive(&[("/absolute/path.txt", b"data")]);
+        let mut temp_file = NamedTempFile::with_suffix(".7z").unwrap();
+        temp_file.write_all(&archive_bytes).unwrap();
+        temp_file.flush().unwrap();
+
+        let config = SecurityConfig::default().with_allow_absolute_paths(true);
+        let result = list_archive(temp_file.path(), &config);
+        assert!(
+            result.is_ok(),
+            "list_archive must accept absolute paths in 7z when allow_absolute_paths=true, got: {result:?}"
+        );
+    }
+
+    /// Unit test for `contains_traversal` — verifies that `Prefix` (Windows
+    /// drive paths) is gated by `allow_absolute_paths`, matching
+    /// `SafePath::validate`. On Unix there is no native way to produce a
+    /// `Prefix` component via the filesystem, so we test the function logic
+    /// directly with a crafted `PathBuf`.
+    #[test]
+    fn test_contains_traversal_prefix_gated_by_flag() {
+        // A path whose string representation starts with a Windows-style drive
+        // prefix. On Windows this produces Component::Prefix; on Unix the entire
+        // string is treated as a relative path component (no Prefix produced), so
+        // this test exercises the flag-gating logic via the RootDir path instead.
+        // The critical invariant — Prefix and RootDir share the same gate — is
+        // verified by the match arm `Component::Prefix(_) | Component::RootDir`.
+        let absolute = PathBuf::from("/absolute/path.txt");
+
+        let config_deny = SecurityConfig::default(); // absolute_paths = false
+        assert!(
+            contains_traversal(&absolute, &config_deny),
+            "absolute path must be rejected when allow_absolute_paths=false"
+        );
+
+        let config_allow = SecurityConfig::default().with_allow_absolute_paths(true);
+        assert!(
+            !contains_traversal(&absolute, &config_allow),
+            "absolute path must be accepted when allow_absolute_paths=true"
+        );
+
+        // ParentDir must always be rejected regardless of the flag.
+        let dotdot = PathBuf::from("../escape.txt");
+        assert!(
+            contains_traversal(&dotdot, &config_allow),
+            "ParentDir must be rejected even when allow_absolute_paths=true"
         );
     }
 

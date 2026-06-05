@@ -29,6 +29,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ExtractionOptions` class with `with_skip_duplicates(skip=True)` builder. Node.js:
   `ExtractionOptions` class with `withSkipDuplicates(skip?)` builder. Both `extract_archive`
   and `extract_archive_with_progress` accept an optional `options` parameter (#313).
+- Python and Node.js bindings expose `ExtractionOptions.atomic`. Python: `with_atomic(bool)`
+  builder and `atomic` getter/setter. Node.js: `withAtomic(bool?)` builder and `atomic` getter.
+  Atomic mode extracts to a staging directory first, then renames it to the destination — the
+  output directory must not pre-exist (#322).
 
 ### Tests
 
@@ -41,6 +45,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Python: `SecurityConfig` and `CreationConfig` scalar getters (`max_file_size`, `max_total_size`, `max_compression_ratio`, `max_file_count`, `max_path_depth`, `max_solid_block_memory`, `preserve_permissions`, `compression_level`, `follow_symlinks`, `include_hidden`, `exclude_patterns`) now return their values correctly instead of a bound method. Builder methods were renamed to `with_<field>` (e.g. `with_max_file_size(...)`) to eliminate the PyO3 name collision (#315).
 - 7z force-overwrite now removes existing file before re-extraction when `skip_duplicates=false`; previously it returned a `PartialExtraction` error instead of overwriting (#323).
 - Node.js: `index.d.ts` now declares `setMaxSolidBlockMemory(size: number): this` and `get maxSolidBlockMemory(): number` for `SecurityConfig`; the file is committed to the repository so TypeScript consumers have correct types without building from source (#311).
+- Node.js: `index.d.ts` regenerated to include `ExtractionOptions` class and the fourth
+  `options` parameter on all `extract*` signatures; the file was stale after PR #324 (#330).
+- Node.js: `extractArchiveWithProgress` JSDoc corrected — numeric callback arguments
+  (`total`, `current`, `bytesWritten`) were documented as `bigint` but NAPI-RS maps `i64` to
+  `number` (#326).
 - Python: `exarch.pyi` now declares `allowed_extensions` and `banned_path_components` as `@property` with setters, replacing bare class-level annotations that did not express read/write semantics (#312).
 - `list_archive` now respects `SecurityConfig::allowed.absolute_paths`; absolute paths in TAR
   and 7z archives are accepted during listing when the flag is set (previously silently rejected

@@ -76,14 +76,22 @@ pub fn execute(
         config.with_banned_path_components(args.banned_components.clone())
     };
 
-    // list_config shares quota params with config but uses safe defaults for
-    // security flags — listing must not be blocked by allow_symlinks etc.
+    // list_config shares quota and path-filtering params with config but uses
+    // safe defaults for flags that only apply during extraction (symlinks,
+    // hardlinks, world-writable, permissions). allow_absolute_paths,
+    // max_path_depth, and banned_path_components are propagated so listing
+    // rejects paths that extraction would also reject on traversal grounds.
+    // Note: depth and component checks are enforced later by SafePath::validate,
+    // not by the listing phase.
     let list_config = SecurityConfig::default()
         .with_max_file_count(config.max_file_count)
         .with_max_total_size(config.max_total_size)
         .with_max_file_size(config.max_file_size)
         .with_max_compression_ratio(config.max_compression_ratio)
-        .with_allow_solid_archives(config.allow_solid_archives);
+        .with_allow_solid_archives(config.allow_solid_archives)
+        .with_allow_absolute_paths(config.allowed.absolute_paths)
+        .with_max_path_depth(config.max_path_depth)
+        .with_banned_path_components(config.banned_path_components.clone());
 
     // Always list the archive: needed for conflict detection and for obtaining
     // the real entry count that drives the progress bar.

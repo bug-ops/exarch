@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `detect_format` now falls back to magic-byte inspection when the file extension
+  is absent, unrecognised, or contradicts the file content. Seven signatures are
+  recognised: ZIP (local-file header, EOCD, split-archive marker), GZIP, BZ2, XZ,
+  Zstd, 7z, and TAR USTAR. When magic bytes and extension disagree, magic takes
+  precedence. Archive creation is unaffected — `determine_creation_format` uses
+  extension-only detection so stale on-disk bytes cannot override the caller's
+  intent (#353).
+
 ### Performance
 
 - `ZipArchive::extract()` now calls `by_index()` exactly once per entry instead of twice.

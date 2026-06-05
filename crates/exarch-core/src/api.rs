@@ -13,6 +13,7 @@ use crate::creation::CreationConfig;
 use crate::creation::CreationReport;
 use crate::formats::detect::ArchiveType;
 use crate::formats::detect::detect_format;
+use crate::formats::detect::detect_format_from_extension;
 use crate::formats::detect::is_zip_family_alias;
 use crate::inspection::ArchiveManifest;
 use crate::inspection::VerificationReport;
@@ -618,14 +619,18 @@ fn reject_zip_family_creation(output: &Path) -> Result<()> {
 }
 
 /// Determines archive format from output path or config.
+///
+/// Uses extension-only detection; magic-byte detection is intentionally
+/// excluded so that a pre-existing output file with stale bytes cannot
+/// override the caller's intended format.
 fn determine_creation_format(output: &Path, config: &CreationConfig) -> Result<ArchiveType> {
     // If format explicitly set in config, use it
     if let Some(format) = config.format {
         return Ok(format);
     }
 
-    // Auto-detect from extension
-    detect_format(output)
+    // Auto-detect from extension only — never from magic bytes.
+    detect_format_from_extension(output)
 }
 
 #[cfg(test)]
@@ -712,6 +717,24 @@ mod tests {
         let path = PathBuf::from("archive.rar");
         let result = determine_creation_format(&path, &config);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_determine_creation_format_ignores_stale_magic_bytes() {
+        // Regression for C1: a pre-existing output file whose bytes match a
+        // different format must not override the extension-derived format.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("backup.zip");
+        // Write gzip magic bytes into a file named .zip
+        std::fs::write(&path, b"\x1f\x8b\x08\x00\x00\x00\x00\x00").unwrap();
+
+        let config = CreationConfig::default();
+        let format = determine_creation_format(&path, &config).unwrap();
+        assert_eq!(
+            format,
+            ArchiveType::Zip,
+            "creation format must follow extension, not stale on-disk magic bytes"
+        );
     }
 
     #[test]

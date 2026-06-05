@@ -459,24 +459,58 @@ fn test_7z_bytes_written_accumulates_correctly() {
 // Regression tests for issues #207 and #210: PartialExtraction report
 // ============================================================================
 
-/// Regression test for #207: the `ExtractionReport` accumulated before a quota
-/// error must survive and be returned inside `PartialExtraction`.
-///
-/// Uses a quota violation (not a duplicate entry) to trigger
-/// `PartialExtraction` after at least one file has been successfully extracted.
+/// Regression test for #207: quota errors caught in the pre-validation pass
+/// return `QuotaExceeded` directly (no partial state on disk), not wrapped in
+/// `PartialExtraction`. This verifies the fix for the accumulated-report bug
+/// is moot for 7z because pre-validation prevents any extraction from starting.
 #[test]
 fn test_7z_partial_extraction_accurate_report() {
-    // Build an in-memory 7z archive with two entries: a small file and a large one.
-    // The quota is set to allow the first but reject the second.
+    // simple.7z contains 2 files totalling 25 bytes.  A quota smaller than
+    // the total triggers QuotaExceeded during pre-validation, before any file
+    // is written.  The result is a direct error, not PartialExtraction.
+    let data = load_fixture("simple.7z");
+    let cursor = Cursor::new(data);
+    let mut archive = SevenZArchive::new(cursor).unwrap();
+    let out_temp = TempDir::new().unwrap();
+
+    let config = SecurityConfig::default().with_max_total_size(20);
+    let result = archive.extract(
+        out_temp.path(),
+        &config,
+        &ExtractionOptions::default(),
+        &mut exarch_core::NoopProgress,
+    );
+
+    assert!(
+        matches!(result, Err(ArchiveError::QuotaExceeded { .. })),
+        "pre-validation quota check must return QuotaExceeded directly, got: {result:?}"
+    );
+    // No files should have been written — the output directory is empty.
+    let entries: Vec<_> = std::fs::read_dir(out_temp.path()).unwrap().collect();
+    assert!(
+        entries.is_empty(),
+        "no files should be on disk after a pre-validation quota failure"
+    );
+}
+
+/// Regression test for #323: `skip_duplicates=false` must overwrite an existing
+/// file rather than returning an error, matching TAR/ZIP handler behaviour.
+#[test]
+fn test_7z_force_overwrite_duplicate_entry() {
     let mut buf = std::io::Cursor::new(Vec::<u8>::new());
     {
         let mut writer = ArchiveWriter::new(&mut buf).unwrap();
         writer
-            .push_archive_entry(ArchiveEntry::new_file("small.txt"), Some(&b"small"[..]))
+            .push_archive_entry(
+                ArchiveEntry::new_file("file.txt"),
+                Some(b"first content".as_ref()),
+            )
             .unwrap();
-        let large_data = vec![0u8; 2048];
         writer
-            .push_archive_entry(ArchiveEntry::new_file("large.txt"), Some(&large_data[..]))
+            .push_archive_entry(
+                ArchiveEntry::new_file("file.txt"),
+                Some(b"second content".as_ref()),
+            )
             .unwrap();
         writer.finish().unwrap();
     }
@@ -487,34 +521,25 @@ fn test_7z_partial_extraction_accurate_report() {
     let mut archive = SevenZArchive::new(cursor).unwrap();
     let out_temp = TempDir::new().unwrap();
 
-    // small.txt (5 bytes) passes; large.txt (2048 bytes) exceeds the 1024-byte
-    // limit.
-    let config = SecurityConfig::default().with_max_file_size(1024);
-    let result = archive.extract(
-        out_temp.path(),
-        &SecurityConfig::default().with_max_file_count(1),
-        &ExtractionOptions::default(),
-        &mut exarch_core::NoopProgress,
+    let options = ExtractionOptions::default().with_skip_duplicates(false);
+    let report = archive
+        .extract(
+            out_temp.path(),
+            &SecurityConfig::default(),
+            &options,
+            &mut exarch_core::NoopProgress,
+        )
+        .expect("force-overwrite must succeed, not return an error");
+
+    assert_eq!(
+        report.files_extracted, 2,
+        "both entries must be counted as extracted"
     );
-
-    // Either PartialExtraction or QuotaExceeded is acceptable; the key invariant
-    // is that a real error is returned and the extracted bytes are not zero when
-    // PartialExtraction is the variant.
-    match result {
-        Err(ArchiveError::PartialExtraction { report, .. }) => {
-            assert!(
-                report.files_extracted > 0,
-                "report must record at least one extracted file, got files_extracted={}",
-                report.files_extracted
-            );
-        }
-        Err(ArchiveError::QuotaExceeded { .. }) => {
-            // Acceptable: quota rejected before any file was written
-        }
-        other => panic!("expected extraction error, got: {other:?}"),
-    }
-
-    let _ = config; // suppress unused warning
+    let content = std::fs::read_to_string(out_temp.path().join("file.txt")).unwrap();
+    assert_eq!(
+        content, "second content",
+        "second entry must overwrite the first"
+    );
 }
 
 /// Regression test for #207: when the very first entry triggers a security

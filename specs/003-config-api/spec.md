@@ -94,10 +94,14 @@ SO THAT I can produce well-formed archives without manual format handling
 
 **Acceptance criteria:**
 ```
-GIVEN CreationConfig::default().with_compression_level(9).with_exclude_patterns(vec!["*.log"])
+GIVEN CreationConfig::default().with_compression_level(9)?.with_exclude_patterns(vec!["*.log"])
 WHEN create_archive() is called
 THEN all .log files are excluded and maximum compression is applied
 ```
+
+> [!note] `with_compression_level` returns `Result`
+> Since v0.4.1 / v0.5.0, `with_compression_level` returns `Result<Self, ArchiveError>`.
+> Builder chains must propagate the error with `?` before chaining further methods.
 
 ### US-005: Atomic Extraction
 
@@ -119,7 +123,7 @@ THEN no files are present in the output directory; the temp dir is cleaned up
 | FR-030 | `SecurityConfig` SHALL expose 15 fluent builder methods: `with_max_file_size`, `with_max_total_size`, `with_max_compression_ratio`, `with_max_file_count`, `with_max_path_depth`, `with_allowed`, `with_allow_symlinks`, `with_allow_hardlinks`, `with_allow_absolute_paths`, `with_allow_world_writable`, `with_preserve_permissions`, `with_allowed_extensions`, `with_banned_path_components`, `with_allow_solid_archives`, `with_max_solid_block_memory`; each returns `Self` | must |
 | FR-031 | `SecurityConfig`, `AllowedFeatures`, and `ExtractionOptions` SHALL be annotated `#[non_exhaustive]`; external crates must use `Default::default()` plus builder methods — struct literal construction is a compile error | must |
 | FR-032 | `SecurityConfig::validate()` SHALL return `InvalidConfiguration` if: any numeric limit is zero (`max_file_size`, `max_total_size`, `max_file_count`, `max_path_depth`, `max_solid_block_memory`), or `max_compression_ratio` is zero, negative, or NaN | must |
-| FR-033 | `CreationConfig` SHALL support: `follow_symlinks`, `include_hidden`, `max_file_size`, `exclude_patterns` (glob), `strip_prefix`, `compression_level` (1–9), `preserve_permissions`, `format` override | must |
+| FR-033 | `CreationConfig` SHALL support: `follow_symlinks`, `include_hidden`, `max_file_size`, `exclude_patterns` (glob), `strip_prefix`, `compression_level` (1–9), `preserve_permissions`, `format` override; `with_compression_level` returns `Result<Self, ArchiveError>` — callers must propagate the error with `?`; passing a level outside 1–9 returns `ArchiveError::InvalidCompressionLevel` instead of panicking | must |
 | FR-034 | `ExtractionOptions` SHALL support: `atomic` (temp-dir + rename) via `with_atomic`, `skip_duplicates` (default true) via `with_skip_duplicates` | must |
 | FR-035 | WHEN `ExtractionOptions::atomic` is true, THE SYSTEM SHALL extract to a temp dir in the same parent as the output directory and atomically rename on success | must |
 | FR-036 | WHEN atomic extraction fails, THE SYSTEM SHALL delete the temp dir before returning the error | must |
@@ -170,7 +174,7 @@ THEN no files are present in the output directory; the temp dir is cleaned up
 |----------|-------------------|
 | `SecurityConfig` with zero `max_file_size`, `max_total_size`, `max_path_depth`, `max_file_count`, or `max_solid_block_memory` | `validate()` returns `InvalidConfiguration` |
 | `SecurityConfig` with `max_compression_ratio` of 0.0, negative, or NaN | `validate()` returns `InvalidConfiguration` |
-| `compression_level` outside 1–9 | `CreationConfig` builder panics or returns error at construction |
+| `compression_level` outside 1–9 (0 or > 9) | `ArchiveCreator::compression_level` (and `CreationConfig::with_compression_level`) returns `Err(ArchiveError::InvalidCompressionLevel)`; callers must handle with `?` or explicit match |
 | `atomic = true` and output on a different filesystem than temp dir | `fs::rename` may fail; caller receives `ArchiveError::Io` |
 | `skip_duplicates = false` and duplicate entry | `ArchiveError::InvalidArchive` (duplicate entry) |
 | Atomic extraction fails mid-archive | Temp dir deleted; `ArchiveError` returned; no files in output dir |
@@ -203,8 +207,12 @@ THEN no files are present in the output directory; the temp dir is cleaned up
 
 ## 9. Open Questions
 
-- [NEEDS CLARIFICATION: Should `CreationConfig::compression_level` validate range at construction (panic/error) or defer to the compression backend?]
 - [NEEDS CLARIFICATION: Should `ExtractionOptions` include a `max_concurrency` field for future parallel extraction?]
+
+> [!note] Resolved in v0.4.1 and v0.5.0
+> `CreationConfig::with_compression_level` (and `ArchiveCreator::compression_level`) now returns
+> `Result<Self, ArchiveError>` rather than `Self`. Passing a level of 0 or > 9 returns
+> `ArchiveError::InvalidCompressionLevel`; the panic at the former call site is eliminated (#257, #308).
 
 ## 10. See Also
 

@@ -5,6 +5,7 @@ tags:
   - sdd
   - constitution
 created: 2026-05-20
+updated: 2026-06-05
 status: permanent
 ---
 
@@ -29,7 +30,7 @@ status: permanent
 - CLI: `clap` 4.x with derive macros
 - Python bindings: `pyo3` 0.28, `maturin`, GIL released during I/O
 - Node.js bindings: `napi-rs` 3.x, async Promises via tokio thread pool
-- Compression: `flate2` (gz), `bzip2` (bz2), `xz2` (xz, static), `zstd` (zst), `zip` 8.x, `sevenz-rust2` (7z)
+- Compression: `flate2` (gz), `bzip2` (bz2), `xz2` (xz, static), `zstd` (zst), `zip` 9.0.0-pre2, `sevenz-rust2` (7z)
 - Testing: `cargo nextest`, `proptest` for property-based tests, `criterion` + `dhat` for benchmarks
 
 ## III. Testing (NON-NEGOTIABLE)
@@ -56,6 +57,10 @@ status: permanent
 - Default limits: 50 MB per file, 500 MB total, 100× compression ratio, 10,000 files, depth 32
 - Path component matching is case-insensitive to prevent bypass on case-insensitive filesystems
 - Security issues detected during `verify_archive` are reported in `VerificationReport.issues`, not propagated as errors (complete picture for the caller)
+- `ValidationReport` is re-exported at crate root as `exarch_core::ValidationReport` (v0.4.1)
+- The error type covering all archive operations is `ArchiveError` (renamed from `ExtractionError` in v0.4.1); all public API surfaces use this name
+- Security primitives (`validate_path`, `validate_symlink`, `sanitize_permissions`, `validate_compression_ratio`, `QuotaTracker`, `HardlinkTracker`) are `pub(crate)` and not part of the public API; external tests must use `--features testing`
+- Absolute-path stripping for entries with `allow_absolute_paths` enabled is performed centrally in `SafePath::validate_with_context`, not in per-format handlers (v0.5.0)
 
 ## VI. Performance
 

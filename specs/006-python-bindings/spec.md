@@ -121,7 +121,7 @@ SO THAT I can customize security limits in idiomatic Python
 
 **Acceptance criteria:**
 ```
-GIVEN SecurityConfig().max_file_size(200 * 1024 * 1024).allow_symlinks(True)
+GIVEN SecurityConfig().with_max_file_size(200 * 1024 * 1024).with_allow_symlinks(True)
 WHEN passed to extract_archive()
 THEN extraction respects those settings
 ```
@@ -130,7 +130,7 @@ THEN extraction respects those settings
 
 | ID | Requirement | Priority |
 |----|------------|----------|
-| FR-070 | THE SYSTEM SHALL expose Python functions: `extract_archive`, `create_archive`, `create_archive_with_progress`, `list_archive`, `verify_archive` | must |
+| FR-070 | THE SYSTEM SHALL expose Python functions: `extract_archive`, `extract_archive_with_progress`, `create_archive`, `create_archive_with_progress`, `list_archive`, `verify_archive` | must |
 | FR-071 | ALL Python functions SHALL accept `str` or `pathlib.Path` for path arguments | must |
 | FR-072 | WHEN paths contain null bytes or exceed 4096 bytes, THE SYSTEM SHALL raise `ValueError` at the Python boundary before calling into Rust | must |
 | FR-073 | WHEN no Python progress callback is provided, THE SYSTEM SHALL release the GIL during extraction/creation | must |
@@ -154,7 +154,7 @@ THEN extraction respects those settings
 
 | Entity | Description | Key Attributes |
 |--------|-------------|----------------|
-| `PySecurityConfig` | Python class wrapping `SecurityConfig` | Same fluent builder methods: `max_file_size()`, `allow_symlinks()`, etc. |
+| `PySecurityConfig` | Python class wrapping `SecurityConfig` | Fluent builder methods all use `with_` prefix: `with_max_file_size()`, `with_allow_symlinks()`, `with_allow_hardlinks()`, `with_allow_absolute_paths()`, `with_allow_world_writable()`, `with_allow_solid_archives()`, etc.; scalar getters (`max_file_size`, `max_total_size`, etc.) return values directly |
 | `PyCreationConfig` | Python class wrapping `CreationConfig` | Same fluent builder methods |
 | `PyExtractionReport` | Python class wrapping `ExtractionReport` | `files_extracted`, `bytes_written`, `duration`, `warnings` |
 | `PyCreationReport` | Python class wrapping `CreationReport` | `files_added`, `bytes_written`, `duration` |
@@ -165,18 +165,26 @@ THEN extraction respects those settings
 ### Python Exception Hierarchy
 
 ```
-ExarchError(Exception)
-  PathTraversalError(ExarchError)      # may carry files_extracted, bytes_written
-  SymlinkEscapeError(ExarchError)      # may carry files_extracted, bytes_written
-  HardlinkEscapeError(ExarchError)     # may carry files_extracted, bytes_written
-  ZipBombError(ExarchError)            # may carry files_extracted, bytes_written
-  QuotaExceededError(ExarchError)      # may carry files_extracted, bytes_written
-  SecurityViolationError(ExarchError)  # may carry files_extracted, bytes_written
-  InvalidPermissionsError(ExarchError) # may carry files_extracted, bytes_written
-  UnsupportedFormatError(ExarchError)
-    UnknownFormatError(UnsupportedFormatError)
-  InvalidArchiveError(ExarchError)
+ExarchError(Exception)           # catch-all alias; same class as ArchiveError
+ArchiveError(Exception)          # base exception (renamed from ExtractionError in v0.4.1)
+  PathTraversalError(ArchiveError)      # may carry files_extracted, bytes_written
+  SymlinkEscapeError(ArchiveError)      # may carry files_extracted, bytes_written
+  HardlinkEscapeError(ArchiveError)     # may carry files_extracted, bytes_written
+  ZipBombError(ArchiveError)            # may carry files_extracted, bytes_written
+  QuotaExceededError(ArchiveError)      # may carry files_extracted, bytes_written
+  SecurityViolationError(ArchiveError)  # may carry files_extracted, bytes_written
+  InvalidPermissionsError(ArchiveError) # may carry files_extracted, bytes_written
+  UnsupportedFormatError(ArchiveError)
+    UnknownFormatError(UnsupportedFormatError)  # raised for CoreError::UnknownFormat
+  InvalidArchiveError(ArchiveError)
 ```
+
+> [!note] v0.4.1: error rename and `UnknownFormatError`
+> The Python base exception is now `exarch.ArchiveError` (was `exarch.ExtractionError`).
+> `UnknownFormatError` is a distinct subclass of `UnsupportedFormatError`, raised when the
+> archive format cannot be identified from path or magic bytes. Callers catching the broader
+> `UnsupportedFormatError` continue to work unchanged; those that need to distinguish "format
+> unknown" from "format known but unsupported" can catch the narrower type (#260).
 
 The `files_extracted` and `bytes_written` attributes are present on the raised
 exception when `exarch-core` wraps the inner error in `CoreError::PartialExtraction`
@@ -202,12 +210,37 @@ Use `hasattr(e, "files_extracted")` to detect whether a partial extraction occur
 ```python
 # Module: exarch
 
-def extract_archive(archive_path, output_dir, config=None) -> ExtractionReport
+def extract_archive(archive_path, output_dir, config=None, options=None) -> ExtractionReport
+def extract_archive_with_progress(archive_path, output_dir, config=None, progress=None) -> ExtractionReport
+    # GIL held when progress callback is provided; released otherwise
 def create_archive(output_path, sources, config=None) -> CreationReport
 def create_archive_with_progress(output_path, sources, config=None, progress=None) -> CreationReport
 def list_archive(archive_path, config=None) -> ArchiveManifest
 def verify_archive(archive_path, config=None) -> VerificationReport
+
+class ExtractionOptions:
+    def with_atomic(self, atomic: bool = True) -> ExtractionOptions
+    def with_skip_duplicates(self, skip: bool = True) -> ExtractionOptions
+    @property
+    def atomic(self) -> bool
+    @atomic.setter
+    def atomic(self, value: bool) -> None
+    @property
+    def skip_duplicates(self) -> bool
 ```
+
+> [!note] v0.5.0: `ExtractionOptions` and `extract_archive_with_progress` added
+> Both `extract_archive` and `extract_archive_with_progress` accept an optional `options`
+> parameter of type `ExtractionOptions`. `ExtractionOptions.atomic` triggers staging-directory
+> extraction with atomic rename; `ExtractionOptions.skip_duplicates` (default `True`) skips
+> duplicate entries. `with_atomic` and `with_skip_duplicates` are the fluent builder methods.
+
+> [!note] v0.5.0: builder method naming
+> All Python `SecurityConfig` builder methods that previously omitted `with_` (`allow_symlinks`,
+> `allow_hardlinks`, `allow_absolute_paths`, `allow_world_writable`, `allow_solid_archives`)
+> have been renamed to `with_allow_symlinks`, `with_allow_hardlinks`, `with_allow_absolute_paths`,
+> `with_allow_world_writable`, `with_allow_solid_archives` to match the `with_` prefix
+> convention. Update all call sites accordingly (#354).
 
 ## 6. Edge Cases and Error Handling
 
@@ -255,7 +288,10 @@ def verify_archive(archive_path, config=None) -> VerificationReport
 ## 9. Open Questions
 
 - [NEEDS CLARIFICATION: Should an async Python interface (asyncio) be provided via `pyo3-asyncio` in a future version?]
-- [NEEDS CLARIFICATION: What Python version range does the abi3 build target? (e.g., 3.8+)]
+
+> [!note] Resolved in v0.3.1
+> Python version range: minimum Python 3.10. Python 3.9 support was dropped when it reached
+> EOL in October 2025. The abi3 wheel covers 3.10–3.14+.
 
 ## 10. See Also
 

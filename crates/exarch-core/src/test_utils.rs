@@ -206,6 +206,85 @@ impl Default for TarTestBuilder {
     }
 }
 
+/// Creates a raw ZIP archive containing a single symlink entry.
+///
+/// The ZIP spec encodes symlink targets as uncompressed file data, with
+/// `S_IFLNK` mode bits stored in the high 16 bits of the central directory's
+/// external attributes field. This bypasses the zip crate writer's
+/// `unix_permissions()` path, which does not set external attributes reliably.
+#[must_use]
+pub fn create_zip_with_symlink(link_path: &str, target: &str) -> Vec<u8> {
+    let content = target.as_bytes();
+    let crc = {
+        let mut c: u32 = 0xFFFF_FFFF;
+        for &b in content {
+            c ^= u32::from(b);
+            for _ in 0..8 {
+                if c & 1 != 0 {
+                    c = (c >> 1) ^ 0xEDB8_8320;
+                } else {
+                    c >>= 1;
+                }
+            }
+        }
+        c ^ 0xFFFF_FFFF
+    };
+    // S_IFLNK | rwxrwxrwx — encodes mode in high word of external attributes
+    let external_attributes: u32 = 0o120_777 << 16;
+    let name_bytes = link_path.as_bytes();
+    let name_len = u16::try_from(name_bytes.len()).unwrap();
+    let content_len = u32::try_from(content.len()).unwrap();
+
+    let mut buf: Vec<u8> = Vec::new();
+
+    let local_offset = u32::try_from(buf.len()).unwrap();
+    buf.extend_from_slice(b"PK\x03\x04");
+    buf.extend_from_slice(&20u16.to_le_bytes());
+    buf.extend_from_slice(&0u16.to_le_bytes()); // flags
+    buf.extend_from_slice(&0u16.to_le_bytes()); // compression: Stored
+    buf.extend_from_slice(&0u16.to_le_bytes()); // mod time
+    buf.extend_from_slice(&0u16.to_le_bytes()); // mod date
+    buf.extend_from_slice(&crc.to_le_bytes());
+    buf.extend_from_slice(&content_len.to_le_bytes());
+    buf.extend_from_slice(&content_len.to_le_bytes());
+    buf.extend_from_slice(&name_len.to_le_bytes());
+    buf.extend_from_slice(&0u16.to_le_bytes()); // extra field length
+    buf.extend_from_slice(name_bytes);
+    buf.extend_from_slice(content);
+
+    let central_offset = u32::try_from(buf.len()).unwrap();
+    buf.extend_from_slice(b"PK\x01\x02");
+    buf.extend_from_slice(&0x031eu16.to_le_bytes()); // version made by: Unix
+    buf.extend_from_slice(&20u16.to_le_bytes());
+    buf.extend_from_slice(&0u16.to_le_bytes()); // flags
+    buf.extend_from_slice(&0u16.to_le_bytes()); // compression
+    buf.extend_from_slice(&0u16.to_le_bytes()); // mod time
+    buf.extend_from_slice(&0u16.to_le_bytes()); // mod date
+    buf.extend_from_slice(&crc.to_le_bytes());
+    buf.extend_from_slice(&content_len.to_le_bytes());
+    buf.extend_from_slice(&content_len.to_le_bytes());
+    buf.extend_from_slice(&name_len.to_le_bytes());
+    buf.extend_from_slice(&0u16.to_le_bytes()); // extra length
+    buf.extend_from_slice(&0u16.to_le_bytes()); // comment length
+    buf.extend_from_slice(&0u16.to_le_bytes()); // disk number start
+    buf.extend_from_slice(&0u16.to_le_bytes()); // internal attributes
+    buf.extend_from_slice(&external_attributes.to_le_bytes());
+    buf.extend_from_slice(&local_offset.to_le_bytes());
+    buf.extend_from_slice(name_bytes);
+
+    let central_size = u32::try_from(buf.len()).unwrap() - central_offset;
+    buf.extend_from_slice(b"PK\x05\x06");
+    buf.extend_from_slice(&0u16.to_le_bytes()); // disk number
+    buf.extend_from_slice(&0u16.to_le_bytes()); // disk with central dir
+    buf.extend_from_slice(&1u16.to_le_bytes()); // entries on this disk
+    buf.extend_from_slice(&1u16.to_le_bytes()); // total entries
+    buf.extend_from_slice(&central_size.to_le_bytes());
+    buf.extend_from_slice(&central_offset.to_le_bytes());
+    buf.extend_from_slice(&0u16.to_le_bytes()); // comment length
+
+    buf
+}
+
 /// Builder for creating ZIP test archives with files, directories, and
 /// symlinks.
 pub struct ZipTestBuilder {

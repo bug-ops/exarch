@@ -573,6 +573,26 @@ impl ZipEntryAdapter {
     }
 }
 
+/// Reads the symlink target stored as file data in a ZIP entry.
+///
+/// The ZIP spec stores symlink targets as the uncompressed file content of the
+/// entry, not in any metadata field. This function enforces a hard cap of 4096
+/// bytes (`PATH_MAX`) to prevent unbounded allocation.
+pub(crate) fn read_zip_symlink_target<R: Read>(
+    zip_file: &mut zip::read::ZipFile<'_, R>,
+) -> Result<PathBuf> {
+    ZipEntryAdapter::read_symlink_target(zip_file)
+}
+
+/// Returns `true` if `mode` has the `S_IFLNK` file-type bits set.
+///
+/// Uses the correct POSIX mask (`S_IFMT`) to isolate the file-type field before
+/// comparing — without the mask, mode bits from the permission bits can
+/// spuriously match `S_IFLNK`.
+pub(crate) fn zip_mode_is_symlink(mode: Option<u32>) -> bool {
+    ZipEntryAdapter::is_symlink_from_mode(mode)
+}
+
 /// Compression methods supported by ZIP.
 #[derive(Debug, Clone, Copy)]
 enum CompressionMethod {

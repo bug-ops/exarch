@@ -212,7 +212,9 @@ impl<R: Read> TarArchive<R> {
             .map_err(|e| ArchiveError::InvalidArchive(format!("invalid path: {e}")))?
             .into_owned();
 
-        let path = if raw_path.is_absolute() && ctx.config.allowed.absolute_paths {
+        let path = if raw_path.to_str().is_some_and(|s| s.starts_with('/'))
+            && ctx.config.allowed.absolute_paths
+        {
             let stripped = raw_path
                 .to_str()
                 .map(|s| s.trim_start_matches('/'))

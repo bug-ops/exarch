@@ -765,7 +765,7 @@ fn strip_absolute_entry_name<'a>(
     config: &SecurityConfig,
 ) -> Result<std::borrow::Cow<'a, Path>> {
     let raw = Path::new(name);
-    if raw.is_absolute() && config.allowed.absolute_paths {
+    if name.starts_with('/') && config.allowed.absolute_paths {
         let stripped = name.trim_start_matches('/');
         if stripped.is_empty() {
             return Err(ArchiveError::PathTraversal {

@@ -98,12 +98,20 @@ pub trait ProgressCallback: Send {
 
     /// Called when bytes are written during extraction or read during creation.
     ///
+    /// Granularity is per-entry: called once after the full entry is written.
+    /// Partial writes on failure are not reported. Not called for entries that
+    /// produce no output (directories, skipped entries).
+    ///
     /// # Arguments
     ///
     /// * `bytes` - Number of bytes written/read in this update
     fn on_bytes_written(&mut self, bytes: u64);
 
     /// Called when an entry has been completely processed.
+    ///
+    /// Always called after [`on_entry_start`](Self::on_entry_start) for the
+    /// same entry, including when extraction of that entry fails. Callers can
+    /// rely on this pairing for cleanup or progress accounting.
     ///
     /// # Arguments
     ///

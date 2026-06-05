@@ -21,6 +21,7 @@ use std::path::PathBuf;
 
 use crate::ArchiveError;
 use crate::ExtractionReport;
+use crate::ProgressCallback;
 use crate::Result;
 use crate::copy::CopyBuffer;
 use crate::copy::copy_with_buffer;
@@ -28,6 +29,51 @@ use crate::error::QuotaResource;
 use crate::security::validator::ValidatedEntry;
 use crate::types::DestDir;
 use crate::types::SafeSymlink;
+
+/// RAII guard that calls `on_entry_complete` when dropped.
+///
+/// Ensures `on_entry_complete` is always paired with `on_entry_start`, even
+/// when extraction fails mid-entry and the caller returns early via `?`.
+pub struct EntryCompleteGuard<'a> {
+    progress: &'a mut dyn ProgressCallback,
+    path: &'a std::path::Path,
+    fired: bool,
+}
+
+impl<'a> EntryCompleteGuard<'a> {
+    /// Creates a new guard. `on_entry_complete` will fire on drop unless
+    /// `disarm` is called first.
+    pub fn new(progress: &'a mut dyn ProgressCallback, path: &'a std::path::Path) -> Self {
+        Self {
+            progress,
+            path,
+            fired: false,
+        }
+    }
+
+    /// Returns a mutable reference to the underlying progress callback.
+    ///
+    /// Use this to pass the callback to nested helpers while keeping the guard
+    /// in scope for RAII completion.
+    pub fn progress_mut(&mut self) -> &mut dyn ProgressCallback {
+        self.progress
+    }
+
+    /// Fire `on_entry_complete` immediately and prevent the drop from firing
+    /// again.
+    pub fn complete(mut self) {
+        self.progress.on_entry_complete(self.path);
+        self.fired = true;
+    }
+}
+
+impl Drop for EntryCompleteGuard<'_> {
+    fn drop(&mut self) {
+        if !self.fired {
+            self.progress.on_entry_complete(self.path);
+        }
+    }
+}
 
 /// Cache for tracking created directories during extraction.
 ///
@@ -387,6 +433,7 @@ pub fn extract_file_generic<R: Read>(
     copy_buffer: &mut CopyBuffer,
     dir_cache: &mut DirCache,
     skip_duplicates: bool,
+    progress: &mut dyn ProgressCallback,
 ) -> Result<()> {
     let output_path = dest.join(&validated.safe_path);
 
@@ -418,6 +465,10 @@ pub fn extract_file_generic<R: Read>(
     let mut buffered_writer = BufWriter::with_capacity(64 * 1024, output_file);
     let bytes_written = copy_with_buffer(reader, &mut buffered_writer, copy_buffer)?;
     buffered_writer.flush()?;
+
+    if bytes_written > 0 {
+        progress.on_bytes_written(bytes_written);
+    }
 
     report.files_extracted += 1;
     report.bytes_written =
@@ -555,6 +606,7 @@ mod tests {
     use super::*;
     use crate::ArchiveError;
     use crate::ExtractionReport;
+    use crate::NoopProgress;
     use crate::SecurityConfig;
     use crate::copy::CopyBuffer;
     use crate::security::validator::ValidatedEntry;
@@ -597,6 +649,7 @@ mod tests {
             &mut copy_buffer,
             &mut dir_cache,
             true,
+            &mut NoopProgress,
         );
 
         // Should return QuotaExceeded with IntegerOverflow
@@ -982,6 +1035,7 @@ mod tests {
             &mut copy_buffer,
             &mut dir_cache,
             true,
+            &mut NoopProgress,
         )
         .expect("extraction should succeed");
 

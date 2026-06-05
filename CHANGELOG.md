@@ -33,6 +33,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - `verify --strict` no longer writes an unstructured message to stderr that bypassed `--quiet` suppression and `--json` mode. Exit code 2 already conveys the strict-warning condition (#298).
+- `ProgressCallback::on_bytes_written` is now called during extraction for TAR, ZIP, and 7z formats; previously the method was documented but never invoked (#304).
+- `ProgressCallback::on_entry_complete` is now guaranteed to be called for every entry for which `on_entry_start` was called, including entries that fail mid-extraction; previously a failure left the callback pair unbalanced (#305).
 
 ## [0.4.1] - 2026-06-05
 

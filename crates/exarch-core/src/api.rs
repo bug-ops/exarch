@@ -1096,4 +1096,451 @@ mod tests {
         );
         assert!(progress.finished, "on_complete not called for 7z");
     }
+
+    // Regression test for issue #304: on_bytes_written must be called with > 0
+    // bytes when extracting non-empty files from TAR archives.
+    #[test]
+    fn test_on_bytes_written_called_for_tar() {
+        use crate::ProgressCallback;
+        use std::path::Path;
+
+        struct ByteTracker {
+            total: u64,
+        }
+
+        impl ProgressCallback for ByteTracker {
+            fn on_entry_start(&mut self, _path: &Path, _total: usize, _current: usize) {}
+
+            fn on_bytes_written(&mut self, bytes: u64) {
+                self.total += bytes;
+            }
+
+            fn on_entry_complete(&mut self, _path: &Path) {}
+
+            fn on_complete(&mut self) {}
+        }
+
+        let archive_dir = tempfile::TempDir::new().unwrap();
+        let archive_path = archive_dir.path().join("test.tar.gz");
+        let src_dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(src_dir.path().join("hello.txt"), b"hello world").unwrap();
+        create_archive(&archive_path, &[src_dir.path()], &CreationConfig::default()).unwrap();
+
+        let dest = tempfile::TempDir::new().unwrap();
+        let mut progress = ByteTracker { total: 0 };
+        let report = extract_archive_with_progress(
+            &archive_path,
+            dest.path(),
+            &SecurityConfig::default(),
+            &mut progress,
+        )
+        .unwrap();
+
+        assert!(
+            report.bytes_written > 0,
+            "report.bytes_written must be > 0, got {}",
+            report.bytes_written
+        );
+        assert!(
+            progress.total > 0,
+            "on_bytes_written must be called with > 0 bytes for TAR, got {}",
+            progress.total
+        );
+    }
+
+    // Regression test for issue #304: on_bytes_written must be called with > 0
+    // bytes when extracting non-empty files from ZIP archives.
+    #[test]
+    fn test_on_bytes_written_called_for_zip() {
+        use crate::ProgressCallback;
+        use std::path::Path;
+
+        struct ByteTracker {
+            total: u64,
+        }
+
+        impl ProgressCallback for ByteTracker {
+            fn on_entry_start(&mut self, _path: &Path, _total: usize, _current: usize) {}
+
+            fn on_bytes_written(&mut self, bytes: u64) {
+                self.total += bytes;
+            }
+
+            fn on_entry_complete(&mut self, _path: &Path) {}
+
+            fn on_complete(&mut self) {}
+        }
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let archive_path = tmp.path().join("test.zip");
+        let src_dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(src_dir.path().join("data.txt"), b"hello world").unwrap();
+        let config = CreationConfig::default().with_format(Some(ArchiveType::Zip));
+        create_archive(&archive_path, &[src_dir.path()], &config).unwrap();
+
+        let dest = tempfile::TempDir::new().unwrap();
+        let mut progress = ByteTracker { total: 0 };
+        let report = extract_archive_with_progress(
+            &archive_path,
+            dest.path(),
+            &SecurityConfig::default(),
+            &mut progress,
+        )
+        .unwrap();
+
+        assert!(
+            report.bytes_written > 0,
+            "report.bytes_written must be > 0, got {}",
+            report.bytes_written
+        );
+        assert!(
+            progress.total > 0,
+            "on_bytes_written must be called with > 0 bytes for ZIP, got {}",
+            progress.total
+        );
+    }
+
+    // Regression test for issue #304: on_bytes_written must be called with > 0
+    // bytes when extracting non-empty files from 7z archives.
+    #[test]
+    fn test_on_bytes_written_called_for_sevenz() {
+        use crate::ProgressCallback;
+        use std::path::Path;
+
+        struct ByteTracker {
+            total: u64,
+        }
+
+        impl ProgressCallback for ByteTracker {
+            fn on_entry_start(&mut self, _path: &Path, _total: usize, _current: usize) {}
+
+            fn on_bytes_written(&mut self, bytes: u64) {
+                self.total += bytes;
+            }
+
+            fn on_entry_complete(&mut self, _path: &Path) {}
+
+            fn on_complete(&mut self) {}
+        }
+
+        let fixture =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/simple.7z");
+
+        let dest = tempfile::TempDir::new().unwrap();
+        let mut progress = ByteTracker { total: 0 };
+        let report = extract_archive_with_progress(
+            &fixture,
+            dest.path(),
+            &SecurityConfig::default(),
+            &mut progress,
+        )
+        .unwrap();
+
+        assert!(
+            report.bytes_written > 0,
+            "report.bytes_written must be > 0, got {}",
+            report.bytes_written
+        );
+        assert!(
+            progress.total > 0,
+            "on_bytes_written must be called with > 0 bytes for 7z, got {}",
+            progress.total
+        );
+    }
+
+    // Regression test for BYTES-1: on_bytes_written must be called when TAR
+    // hardlinks are extracted (copy path in create_hardlink).
+    #[test]
+    fn test_tar_hardlink_calls_on_bytes_written() {
+        use crate::ProgressCallback;
+        use crate::formats::TarArchive;
+        use crate::formats::traits::ArchiveFormat;
+        use std::io::Cursor;
+        use std::path::Path;
+
+        struct ByteTracker {
+            total: u64,
+        }
+
+        impl ProgressCallback for ByteTracker {
+            fn on_entry_start(&mut self, _path: &Path, _total: usize, _current: usize) {}
+
+            fn on_bytes_written(&mut self, bytes: u64) {
+                self.total += bytes;
+            }
+
+            fn on_entry_complete(&mut self, _path: &Path) {}
+
+            fn on_complete(&mut self) {}
+        }
+
+        // Build a TAR with one regular file and one hardlink pointing to it.
+        let content = b"hello hardlink";
+        let tar_data = {
+            let mut builder = tar::Builder::new(Vec::new());
+
+            let mut header = tar::Header::new_gnu();
+            header.set_size(content.len() as u64);
+            header.set_mode(0o644);
+            header.set_entry_type(tar::EntryType::Regular);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "original.txt", content.as_ref())
+                .unwrap();
+
+            let mut hdr = tar::Header::new_gnu();
+            hdr.set_size(0);
+            hdr.set_mode(0o644);
+            hdr.set_entry_type(tar::EntryType::Link);
+            hdr.set_link_name("original.txt").unwrap();
+            hdr.set_cksum();
+            builder
+                .append_data(&mut hdr, "link.txt", std::io::empty())
+                .unwrap();
+
+            builder.into_inner().unwrap()
+        };
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let mut config = SecurityConfig::default();
+        config.allowed.hardlinks = true;
+
+        let mut archive = TarArchive::new(Cursor::new(tar_data));
+        let mut progress = ByteTracker { total: 0 };
+        let report = archive
+            .extract(
+                temp.path(),
+                &config,
+                &ExtractionOptions::default(),
+                &mut progress,
+            )
+            .unwrap();
+
+        // The hardlink copies the file content — bytes should be reported twice.
+        let expected = (content.len() as u64) * 2;
+        assert_eq!(
+            progress.total, expected,
+            "on_bytes_written must report bytes for both original and hardlink copy, \
+             got {} (report.bytes_written={})",
+            progress.total, report.bytes_written
+        );
+    }
+
+    // Regression test for issue #305: on_entry_complete must be called even
+    // when TAR extraction fails mid-entry due to a path traversal violation.
+    #[test]
+    fn test_tar_on_entry_complete_called_on_path_traversal_error() {
+        use crate::ProgressCallback;
+        use crate::formats::TarArchive;
+        use crate::formats::traits::ArchiveFormat;
+        use std::io::Cursor;
+        use std::path::Path;
+
+        struct SymmetryTracker {
+            started: usize,
+            completed: usize,
+        }
+
+        impl ProgressCallback for SymmetryTracker {
+            fn on_entry_start(&mut self, _path: &Path, _total: usize, _current: usize) {
+                self.started += 1;
+            }
+
+            fn on_bytes_written(&mut self, _bytes: u64) {}
+
+            fn on_entry_complete(&mut self, _path: &Path) {
+                self.completed += 1;
+            }
+
+            fn on_complete(&mut self) {}
+        }
+
+        // Build a minimal TAR with a path-traversal entry at raw bytes level
+        // (bypassing the `tar` crate's sanitization).
+        let tar_data = make_raw_tar_single(b"../../etc/passwd", b"evil");
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let mut archive = TarArchive::new(Cursor::new(tar_data));
+        let mut progress = SymmetryTracker {
+            started: 0,
+            completed: 0,
+        };
+        let result = archive.extract(
+            temp.path(),
+            &SecurityConfig::default(),
+            &ExtractionOptions::default(),
+            &mut progress,
+        );
+
+        assert!(result.is_err(), "traversal entry must be rejected");
+        assert_eq!(
+            progress.started, progress.completed,
+            "on_entry_complete must be called for every on_entry_start, \
+             even when extraction fails: started={}, completed={}",
+            progress.started, progress.completed
+        );
+    }
+
+    // Regression test for issue #305: on_entry_complete must be called even
+    // when ZIP extraction fails mid-entry due to a path traversal violation.
+    #[test]
+    fn test_zip_on_entry_complete_called_on_path_traversal_error() {
+        use crate::ProgressCallback;
+        use crate::formats::ZipArchive;
+        use crate::formats::traits::ArchiveFormat;
+        use std::io::Cursor;
+        use std::path::Path;
+
+        struct SymmetryTracker {
+            started: usize,
+            completed: usize,
+        }
+
+        impl ProgressCallback for SymmetryTracker {
+            fn on_entry_start(&mut self, _path: &Path, _total: usize, _current: usize) {
+                self.started += 1;
+            }
+
+            fn on_bytes_written(&mut self, _bytes: u64) {}
+
+            fn on_entry_complete(&mut self, _path: &Path) {
+                self.completed += 1;
+            }
+
+            fn on_complete(&mut self) {}
+        }
+
+        // Build a ZIP with a traversal path using zip::ZipWriter.
+        let zip_data = make_zip_with_traversal(b"../../etc/passwd", b"evil");
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let mut archive = ZipArchive::new(Cursor::new(zip_data)).unwrap();
+        let mut progress = SymmetryTracker {
+            started: 0,
+            completed: 0,
+        };
+        let result = archive.extract(
+            temp.path(),
+            &SecurityConfig::default(),
+            &ExtractionOptions::default(),
+            &mut progress,
+        );
+
+        assert!(result.is_err(), "traversal entry must be rejected");
+        assert_eq!(
+            progress.started, progress.completed,
+            "on_entry_complete must be called for every on_entry_start in ZIP, \
+             even when extraction fails: started={}, completed={}",
+            progress.started, progress.completed
+        );
+    }
+
+    // Builds a single-entry POSIX ustar TAR with an arbitrary raw path,
+    // bypassing the `tar` crate's path sanitization.
+    fn make_raw_tar_single(path: &[u8], data: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut header = [0u8; 512];
+
+        let path_len = path.len().min(100);
+        header[..path_len].copy_from_slice(&path[..path_len]);
+        header[100..108].copy_from_slice(b"0000644\0");
+        header[108..116].copy_from_slice(b"0000000\0");
+        header[116..124].copy_from_slice(b"0000000\0");
+        let size_str = format!("{:011o}\0", data.len());
+        header[124..136].copy_from_slice(size_str.as_bytes());
+        header[136..148].copy_from_slice(b"00000000000\0");
+        header[156] = b'0';
+        header[257..263].copy_from_slice(b"ustar ");
+        header[263..265].copy_from_slice(b" \0");
+        header[148..156].copy_from_slice(b"        ");
+        let checksum: u32 = header.iter().map(|&b| u32::from(b)).sum();
+        let ck_str = format!("{checksum:06o}\0 ");
+        header[148..156].copy_from_slice(ck_str.as_bytes());
+
+        out.extend_from_slice(&header);
+        out.extend_from_slice(data);
+        let rem = data.len() % 512;
+        if rem != 0 {
+            out.extend(std::iter::repeat_n(0u8, 512 - rem));
+        }
+        out.extend(std::iter::repeat_n(0u8, 1024));
+        out
+    }
+
+    // Builds a single-entry ZIP with a raw traversal path by writing the
+    // local file header and central directory manually.
+    #[allow(clippy::cast_possible_truncation)]
+    fn make_zip_with_traversal(path: &[u8], data: &[u8]) -> Vec<u8> {
+        let mut buf: Vec<u8> = Vec::new();
+
+        let crc = crc32_ieee(data);
+        let name_len = path.len() as u16;
+        let content_len = data.len() as u32;
+
+        let local_offset: u32 = 0;
+
+        // Local file header
+        buf.extend_from_slice(b"PK\x03\x04");
+        buf.extend_from_slice(&20u16.to_le_bytes()); // version needed
+        buf.extend_from_slice(&0u16.to_le_bytes()); // flags
+        buf.extend_from_slice(&0u16.to_le_bytes()); // compression: Stored
+        buf.extend_from_slice(&0u16.to_le_bytes()); // mod time
+        buf.extend_from_slice(&0u16.to_le_bytes()); // mod date
+        buf.extend_from_slice(&crc.to_le_bytes());
+        buf.extend_from_slice(&content_len.to_le_bytes());
+        buf.extend_from_slice(&content_len.to_le_bytes());
+        buf.extend_from_slice(&name_len.to_le_bytes());
+        buf.extend_from_slice(&0u16.to_le_bytes()); // extra field length
+        buf.extend_from_slice(path);
+        buf.extend_from_slice(data);
+
+        let central_dir_offset = buf.len() as u32;
+
+        // Central directory file header
+        buf.extend_from_slice(b"PK\x01\x02");
+        buf.extend_from_slice(&0x031eu16.to_le_bytes()); // version made by: Unix
+        buf.extend_from_slice(&20u16.to_le_bytes()); // version needed
+        buf.extend_from_slice(&0u16.to_le_bytes()); // flags
+        buf.extend_from_slice(&0u16.to_le_bytes()); // compression
+        buf.extend_from_slice(&0u16.to_le_bytes()); // mod time
+        buf.extend_from_slice(&0u16.to_le_bytes()); // mod date
+        buf.extend_from_slice(&crc.to_le_bytes());
+        buf.extend_from_slice(&content_len.to_le_bytes());
+        buf.extend_from_slice(&content_len.to_le_bytes());
+        buf.extend_from_slice(&name_len.to_le_bytes());
+        buf.extend_from_slice(&0u16.to_le_bytes()); // extra field len
+        buf.extend_from_slice(&0u16.to_le_bytes()); // file comment len
+        buf.extend_from_slice(&0u16.to_le_bytes()); // disk number start
+        buf.extend_from_slice(&0u16.to_le_bytes()); // internal attrs
+        buf.extend_from_slice(&(0o100_644u32 << 16).to_le_bytes()); // external attrs
+        buf.extend_from_slice(&local_offset.to_le_bytes());
+        buf.extend_from_slice(path);
+
+        let central_dir_size = (buf.len() as u32) - central_dir_offset;
+
+        // End of central directory
+        buf.extend_from_slice(b"PK\x05\x06");
+        buf.extend_from_slice(&0u16.to_le_bytes()); // disk number
+        buf.extend_from_slice(&0u16.to_le_bytes()); // disk with central dir
+        buf.extend_from_slice(&1u16.to_le_bytes()); // entries on this disk
+        buf.extend_from_slice(&1u16.to_le_bytes()); // total entries
+        buf.extend_from_slice(&central_dir_size.to_le_bytes());
+        buf.extend_from_slice(&central_dir_offset.to_le_bytes());
+        buf.extend_from_slice(&0u16.to_le_bytes()); // comment length
+        buf
+    }
+
+    // CRC-32 (IEEE 802.3) used to produce valid ZIP checksums in helpers above.
+    fn crc32_ieee(data: &[u8]) -> u32 {
+        let mut crc: u32 = 0xFFFF_FFFF;
+        for &byte in data {
+            let mut val = crc ^ u32::from(byte);
+            for _ in 0..8 {
+                let mask = (val & 1).wrapping_neg();
+                val = (val >> 1) ^ (0xEDB8_8320 & mask);
+            }
+            crc = val;
+        }
+        !crc
+    }
 }

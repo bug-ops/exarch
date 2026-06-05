@@ -285,6 +285,7 @@ impl<R: Read> TarArchive<R> {
             ctx.copy_buffer,
             ctx.dir_cache,
             ctx.skip_duplicates,
+            ctx.progress,
         )
     }
 
@@ -329,6 +330,7 @@ impl<R: Read> TarArchive<R> {
 
         ctx.report.files_extracted += 1;
         ctx.report.bytes_written += bytes_copied;
+        ctx.progress.on_bytes_written(bytes_copied);
 
         Ok(())
     }
@@ -382,6 +384,7 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
             dir_cache: &mut dir_cache,
             skip_duplicates,
             config,
+            progress,
         };
 
         for entry_result in entries {
@@ -404,17 +407,19 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
                 .map(std::borrow::Cow::into_owned)
                 .unwrap_or_default();
             current_entry = current_entry.saturating_add(1);
-            progress.on_entry_start(&entry_path, 0, current_entry);
+            ctx.progress.on_entry_start(&entry_path, 0, current_entry);
 
+            // INVARIANT: every branch below must call on_entry_complete exactly once.
             match Self::process_entry(entry, &mut ctx) {
                 Ok(Some(hardlink_info)) => {
-                    progress.on_entry_complete(&entry_path);
+                    ctx.progress.on_entry_complete(&entry_path);
                     hardlinks.push(hardlink_info);
                 }
                 Ok(None) => {
-                    progress.on_entry_complete(&entry_path);
+                    ctx.progress.on_entry_complete(&entry_path);
                 }
                 Err(e) => {
+                    ctx.progress.on_entry_complete(&entry_path);
                     return Err(if ctx.report.total_items() > 0 {
                         ArchiveError::PartialExtraction {
                             source: Box::new(e),
@@ -441,7 +446,7 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
             }
         }
 
-        progress.on_complete();
+        ctx.progress.on_complete();
         report.duration = start.elapsed();
 
         Ok(report)
@@ -497,6 +502,7 @@ struct ExtractionContext<'a, 'v> {
     dir_cache: &'a mut common::DirCache,
     skip_duplicates: bool,
     config: &'v SecurityConfig,
+    progress: &'a mut dyn ProgressCallback,
 }
 
 #[allow(dead_code)] // Fields used only on Unix

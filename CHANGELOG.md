@@ -19,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `exarch list --json -l` now includes `symlink_target` and `hardlink_target` in
   the JSON output for symlink and hardlink entries. Previously the fields were
   populated in `exarch-core` but silently dropped by the CLI JSON formatter (#346).
+- `exarch list -l` now displays symlink and hardlink targets in the long text format:
+  entries render as `l755  0  link.txt -> target.txt` instead of omitting the target (#349).
 - Python `ExtractionOptions` tests no longer unconditionally skip: replaced the
   `pytest.skip(...)` guard with `pytest.importorskip("exarch")` at module level so all 14
   round-trip assertions execute when the extension is built (#342).

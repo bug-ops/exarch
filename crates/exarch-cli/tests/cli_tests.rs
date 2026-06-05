@@ -959,6 +959,67 @@ fn test_list_archive() {
         .stdout(predicates::str::contains("sample.txt"));
 }
 
+/// Regression test for #349: `list -l` must display symlink targets as `link ->
+/// target`.
+#[test]
+fn test_list_long_shows_symlink_target() {
+    exarch_cmd()
+        .arg("list")
+        .arg("-l")
+        .arg(fixture_path("symlink.zip"))
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("link.txt -> target.txt"));
+}
+
+/// Regression test for #349: `list -l` must display hardlink targets as `link
+/// -> target`.
+#[test]
+fn test_list_long_shows_hardlink_target() {
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
+
+    let temp = TempDir::new().expect("create temp dir");
+    let archive_path = temp.path().join("hardlink.tar.gz");
+
+    let file = std::fs::File::create(&archive_path).expect("create archive");
+    let gz = GzEncoder::new(file, Compression::default());
+    let mut builder = tar::Builder::new(gz);
+
+    let mut header = tar::Header::new_gnu();
+    header.set_size(4);
+    header.set_mode(0o644);
+    header.set_path("target.txt").expect("set path");
+    header.set_cksum();
+    builder
+        .append_data(&mut header, "target.txt", &b"data"[..])
+        .expect("append file entry");
+
+    let mut link_header = tar::Header::new_gnu();
+    link_header.set_size(0);
+    link_header.set_mode(0o644);
+    link_header.set_entry_type(tar::EntryType::Link);
+    link_header.set_path("link.txt").expect("set link path");
+    link_header
+        .set_link_name("target.txt")
+        .expect("set link name");
+    link_header.set_cksum();
+    builder
+        .append(&link_header, &b""[..] as &[u8])
+        .expect("append hardlink entry");
+
+    let gz = builder.into_inner().expect("get gz encoder");
+    gz.finish().expect("finish gzip");
+
+    exarch_cmd()
+        .arg("list")
+        .arg("-l")
+        .arg(&archive_path)
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("link.txt -> target.txt"));
+}
+
 #[test]
 fn test_list_archive_json_output() {
     let output = exarch_cmd()

@@ -14,7 +14,7 @@ This crate is part of the [exarch](https://github.com/bug-ops/exarch) workspace.
 
 ```toml
 [dependencies]
-exarch-core = "0.4"
+exarch-core = "0.5"
 ```
 
 > [!IMPORTANT]
@@ -64,9 +64,6 @@ let report = ArchiveBuilder::new()
     .output_dir("/output/path")
     .extract()?;
 ```
-
-> [!WARNING]
-> **Breaking change in v0.4.0:** `Archive::open` now returns `Self` directly instead of `Result<Self>`. Drop the `?` or `.unwrap()` at call sites; I/O errors now surface on `extract()` instead.
 
 ## Security Features
 

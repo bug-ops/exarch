@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "exarch"
-version = "0.4.1"
+version = "0.5.0"
 description = "Memory-safe archive extraction library with built-in security validation"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -22,11 +22,11 @@ classifiers = [
     "Operating System :: Microsoft :: Windows",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Programming Language :: Python :: Implementation :: CPython",
     "Programming Language :: Rust",
     "Topic :: Security",
@@ -59,7 +59,7 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 
 [tool.mypy]
-python_version = "3.9"
+python_version = "3.10"
 strict = true
 disallow_untyped_defs = true
 

@@ -48,8 +48,8 @@
     "check:ci": "biome check ."
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.4.15",
-    "@napi-rs/cli": "^3.6.2"
+    "@biomejs/biome": "^2.5.0",
+    "@napi-rs/cli": "^3.7.1"
   },
   "engines": {
     "node": ">= 18"

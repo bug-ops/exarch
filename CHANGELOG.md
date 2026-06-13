@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Refreshed transitive dependencies via `cargo update` (18 lock entries updated, no direct manifest changes).
+- `@biomejs/biome` bumped from `^2.4.15` to `^2.5.0` in `exarch-node`.
+- `@napi-rs/cli` bumped from `^3.6.2` to `^3.7.1` in `exarch-node`.
+- `pytest-cov` minimum raised from `>=6.0` to `>=7.0` in `exarch-python`.
+- `mypy` minimum raised from `>=1.0` to `>=2.0` in `exarch-python`.
+- `ruff` minimum raised from `>=0.8` to `>=0.15` in `exarch-python`.
+- `maturin` minimum raised from `>=1.0` to `>=1.14` in `exarch-python`.
+
 ## [0.5.0] - 2026-06-05
 
 ### Added

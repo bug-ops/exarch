@@ -1,5 +1,5 @@
 [build-system]
-requires = ["maturin>=1.0,<2.0"]
+requires = ["maturin>=1.14,<2.0"]
 build-backend = "maturin"
 
 [project]
@@ -44,11 +44,11 @@ Issues = "https://github.com/bug-ops/exarch/issues"
 [dependency-groups]
 dev = [
     "pytest>=9.0.3",
-    "pytest-cov>=6.0",
+    "pytest-cov>=7.0",
     "Pygments>=2.20.0",
-    "mypy>=1.0",
-    "ruff>=0.8",
-    "maturin>=1.0",
+    "mypy>=2.0",
+    "ruff>=0.15",
+    "maturin>=1.14",
 ]
 
 [tool.maturin]

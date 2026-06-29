@@ -99,6 +99,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
 use sevenz_rust2::Archive;
+use sevenz_rust2::ArchiveReader;
 use sevenz_rust2::Password;
 
 // Atomic counter for generating unique temporary file names
@@ -434,10 +435,16 @@ impl<R: Read + Seek> SevenZArchive<R> {
             current_idx: 0,
         };
 
-        // Extraction callback - called for each entry
-        let extract_fn = |entry: &sevenz_rust2::ArchiveEntry,
-                          reader: &mut dyn Read,
-                          _dest_dir: &PathBuf|
+        // Extraction callback - called for each entry.
+        //
+        // We use ArchiveReader::for_each_entries directly instead of
+        // decompress_with_extract_fn so that sevenz-rust2's own path-safety
+        // check (added in 0.21.1) does not fire before our EntryValidator runs.
+        // EntryValidator is the authoritative guard for all path security
+        // (traversal, absolute paths, symlinks); the upstream check is
+        // redundant and breaks allow_absolute_paths support.
+        let mut extract_fn = |entry: &sevenz_rust2::ArchiveEntry,
+                              reader: &mut dyn Read|
          -> std::result::Result<bool, sevenz_rust2::Error> {
             let entry_path = std::path::PathBuf::from(&entry.name);
             ctx.current_idx = ctx.current_idx.saturating_add(1);
@@ -474,7 +481,9 @@ impl<R: Read + Seek> SevenZArchive<R> {
             }
         };
 
-        let result = sevenz_rust2::decompress_with_extract_fn(source, dest.as_path(), extract_fn);
+        let mut archive_reader =
+            ArchiveReader::new(source, Password::empty()).map_err(ArchiveError::from)?;
+        let result = archive_reader.for_each_entries(&mut extract_fn);
         let accumulated = ctx.report;
 
         let e = match result {

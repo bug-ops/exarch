@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **7z backslash path traversal (#376)**: Entry names with embedded `\` (e.g. `..\..\x`)
+  are now normalized to `/`-separated paths before validation. Previously, on Unix, such
+  names were treated as a single path component and slipped past traversal detection; they
+  are now correctly rejected as `PathTraversal` errors.
+
+- **DRY: centralized entry-name normalization (#365)**: Extracted
+  `formats::common::normalize_entry_name` as the single shared point for `\` → `/`
+  normalization. The 7z handler now calls this helper in the pre-validation loop, the
+  extraction callback, and the list/verify path (`inspection/list.rs`), so that all three
+  operations agree on traversal detection. `SafePath::validate` documents the caller contract
+  that entry names must be normalized before `PathBuf` construction.
+
 ### Changed
 
 - Refreshed transitive dependencies via `cargo update` (18 lock entries updated, no direct manifest changes).

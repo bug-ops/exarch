@@ -446,7 +446,7 @@ impl<R: Read + Seek> SevenZArchive<R> {
         let mut extract_fn = |entry: &sevenz_rust2::ArchiveEntry,
                               reader: &mut dyn Read|
          -> std::result::Result<bool, sevenz_rust2::Error> {
-            let entry_path = std::path::PathBuf::from(&entry.name);
+            let entry_path = std::path::PathBuf::from(common::normalize_entry_name(&entry.name));
             ctx.current_idx = ctx.current_idx.saturating_add(1);
             let idx = ctx.current_idx;
             ctx.progress
@@ -557,7 +557,7 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
         // - symlink detection: Not exposed, non-directory entries treated as files
         let mut prevalidator = EntryValidator::new(config, &dest);
         for entry in &self.entries {
-            let path = std::path::PathBuf::from(&entry.name);
+            let path = std::path::PathBuf::from(common::normalize_entry_name(&entry.name));
             let entry_type = if entry.is_directory {
                 EntryType::Directory
             } else {
@@ -1511,6 +1511,34 @@ mod tests {
                 .unwrap();
         }
         writer.finish().unwrap().into_inner()
+    }
+
+    /// Test #376: entry names with embedded `\` must be treated as path
+    /// separators.
+    ///
+    /// On Unix, `PathBuf::from("..\\..\\x")` would produce a single component,
+    /// bypassing traversal detection. After normalization `\` → `/`, the name
+    /// becomes `../../x` and must be rejected.
+    #[test]
+    fn test_7z_backslash_entry_rejected() {
+        let data = make_sevenz_archive(&[("..\\..\\x", b"payload")]);
+        let mut archive = SevenZArchive::new(Cursor::new(data)).unwrap();
+
+        let temp = TempDir::new().unwrap();
+        let result = archive.extract(
+            temp.path(),
+            &SecurityConfig::default(),
+            &ExtractionOptions::default(),
+            &mut crate::NoopProgress,
+        );
+        assert!(
+            result.is_err(),
+            "backslash-encoded traversal must be rejected, got: {result:?}"
+        );
+        assert!(
+            matches!(result.unwrap_err(), ArchiveError::PathTraversal { .. }),
+            "expected PathTraversal error"
+        );
     }
 
     #[test]

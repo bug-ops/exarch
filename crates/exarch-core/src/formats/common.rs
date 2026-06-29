@@ -295,6 +295,34 @@ impl Default for DirCache {
     }
 }
 
+/// Normalizes a raw archive entry name by replacing backslashes with forward
+/// slashes.
+///
+/// Windows-created archives (particularly 7z) may embed `\` as a path
+/// separator. On Unix, `\` is a valid filename character, so
+/// `PathBuf::from("..\\..\\x")` produces a single path component rather than
+/// three — bypassing traversal detection. Callers must normalize before
+/// constructing a `PathBuf` and passing to `SafePath::validate`.
+///
+/// This is a no-op for entry names that contain no `\`.
+///
+/// # Examples
+///
+/// ```ignore
+/// # use exarch_core::formats::common::normalize_entry_name;
+/// assert_eq!(normalize_entry_name("foo\\bar\\baz.txt"), "foo/bar/baz.txt");
+/// assert_eq!(normalize_entry_name("plain/path.txt"), "plain/path.txt");
+/// ```
+#[inline]
+#[must_use]
+pub fn normalize_entry_name(name: &str) -> String {
+    if name.contains('\\') {
+        name.replace('\\', "/")
+    } else {
+        name.to_owned()
+    }
+}
+
 /// Creates a file with permissions enforced after creation to bypass umask.
 ///
 /// On Unix platforms, this function uses `OpenOptions::mode()` to hint the

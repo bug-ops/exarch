@@ -15,6 +15,7 @@ use crate::ArchiveError;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::error::QuotaResource;
+use crate::formats::common::normalize_entry_name;
 use crate::formats::detect::ArchiveType;
 use crate::formats::detect::detect_format;
 use crate::formats::zip::read_zip_symlink_target;
@@ -452,7 +453,7 @@ fn list_sevenz_archive(
             });
         }
 
-        let path = PathBuf::from(&entry.name);
+        let path = PathBuf::from(normalize_entry_name(&entry.name));
 
         if contains_traversal(&path, config) {
             return Err(ArchiveError::PathTraversal { path });

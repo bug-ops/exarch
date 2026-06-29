@@ -84,6 +84,15 @@ impl SafePath {
     /// returns `None` are pre-handled in `resolve_entry_path` before reaching
     /// this method.
     ///
+    /// # Caller contract
+    ///
+    /// Callers MUST normalize `\` to `/` in entry names before constructing a
+    /// `PathBuf` and passing it here. On Unix, `\` is a valid filename
+    /// character, so `PathBuf::from("..\\..\\x")` yields a single component
+    /// rather than three — defeating traversal detection. Use
+    /// `formats::common::normalize_entry_name` for 7z (and any format that
+    /// stores Windows-style paths) before calling `validate`.
+    ///
     /// # Errors
     ///
     /// Returns an error if any validation step fails:

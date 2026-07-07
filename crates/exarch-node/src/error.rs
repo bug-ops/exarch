@@ -385,7 +385,7 @@ mod tests {
         };
 
         let napi_err = convert_error(err);
-        let msg = napi_err.reason.clone();
+        let msg = &napi_err.reason;
         // Must carry the specific error code, not the generic PARTIAL_EXTRACTION
         // prefix.
         assert!(

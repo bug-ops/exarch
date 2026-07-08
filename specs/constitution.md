@@ -5,7 +5,7 @@ tags:
   - sdd
   - constitution
 created: 2026-05-20
-updated: 2026-06-05
+updated: 2026-07-09
 status: permanent
 ---
 
@@ -28,7 +28,7 @@ status: permanent
 
 - Language: Rust, MSRV 1.93.0
 - CLI: `clap` 4.x with derive macros
-- Python bindings: `pyo3` 0.28, `maturin`, GIL released during I/O
+- Python bindings: `pyo3` 0.29, `maturin`, GIL released during I/O
 - Node.js bindings: `napi-rs` 3.x, async Promises via tokio thread pool
 - Compression: `flate2` (gz), `bzip2` (bz2), `xz2` (xz, static), `zstd` (zst), `zip` 9.0.0-pre2, `sevenz-rust2` (7z)
 - Testing: `cargo nextest`, `proptest` for property-based tests, `criterion` + `dhat` for benchmarks
@@ -61,6 +61,8 @@ status: permanent
 - The error type covering all archive operations is `ArchiveError` (renamed from `ExtractionError` in v0.4.1); all public API surfaces use this name
 - Security primitives (`validate_path`, `validate_symlink`, `sanitize_permissions`, `validate_compression_ratio`, `QuotaTracker`, `HardlinkTracker`) are `pub(crate)` and not part of the public API; external tests must use `--features testing`
 - Absolute-path stripping for entries with `allow_absolute_paths` enabled is performed centrally in `SafePath::validate_with_context`, not in per-format handlers (v0.5.0)
+- Format handlers MUST NOT drive an upstream extraction API that performs its own path-safety checks ahead of `EntryValidator` — this silently disables the deny-by-default policy for that format. The 7z handler was found doing exactly this after a `sevenz-rust2` 0.21.1 dependency bump and was fixed by switching to an API with no built-in check (v0.5.1, #374, #375)
+- Archive entry names MUST be normalized (`\` → `/`) via `formats::common::normalize_entry_name` before being passed to `SafePath::validate`, wherever the underlying format may embed Windows-style separators (currently: 7z). `SafePath::validate` documents this as a caller contract — it does not normalize internally (v0.5.1, #365, #376)
 
 ## VI. Performance
 

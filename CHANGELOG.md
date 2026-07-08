@@ -7,7 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-07-09
+
 ### Fixed
+
+- **7z `allow_absolute_paths` bypassed by upstream path check (#374, #375)**: `sevenz-rust2`
+  0.21.1 added an internal path-safety check inside `decompress_with_extract_fn` that blocked
+  absolute-path entries before `EntryValidator` ever saw them, breaking the
+  `allow_absolute_paths` flag for 7z archives. `extract_with_callback` now uses
+  `ArchiveReader::for_each_entries` directly, which has no built-in path check, restoring
+  `EntryValidator` as the sole and authoritative guard for 7z path security (traversal,
+  absolute paths, symlinks).
 
 - **7z backslash path traversal (#376)**: Entry names with embedded `\` (e.g. `..\..\x`)
   are now normalized to `/`-separated paths before validation. Previously, on Unix, such
@@ -21,11 +31,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   operations agree on traversal detection. `SafePath::validate` documents the caller contract
   that entry names must be normalized before `PathBuf` construction.
 
+- **RUSTSEC-2026-0204 (#380)**: Bumped `crossbeam-epoch` (transitive, via criterion's
+  `rayon` -> `crossbeam-deque` chain) from 0.9.18 to 0.9.20, remediating an invalid pointer
+  dereference in its `fmt::Pointer`/`fmt::Display` implementations.
+
 ### Changed
 
+- `pyo3` bumped from `0.28.3` to `0.29.0`.
+- `sevenz-rust2` bumped to `0.21.3`; `napi`/`napi-derive`, `anyhow`, `time`, `rustc-hash`,
+  `clap_complete`, `console`, and `indicatif` bumped to their latest compatible patch/minor
+  releases.
 - Refreshed transitive dependencies via `cargo update` (18 lock entries updated, no direct manifest changes).
-- `@biomejs/biome` bumped from `^2.4.15` to `^2.5.0` in `exarch-node`.
-- `@napi-rs/cli` bumped from `^3.6.2` to `^3.7.1` in `exarch-node`.
+- `@biomejs/biome` bumped from `^2.4.15` to `^2.5.3` in `exarch-node`.
+- `@napi-rs/cli` bumped from `^3.6.2` to `^3.7.2` in `exarch-node`.
 - `pytest-cov` minimum raised from `>=6.0` to `>=7.0` in `exarch-python`.
 - `mypy` minimum raised from `>=1.0` to `>=2.0` in `exarch-python`.
 - `ruff` minimum raised from `>=0.8` to `>=0.15` in `exarch-python`.
@@ -732,7 +750,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 64KB reusable copy buffers
 - LRU cache for symlink target resolution
 
-[Unreleased]: https://github.com/bug-ops/exarch/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/bug-ops/exarch/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/bug-ops/exarch/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/bug-ops/exarch/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/bug-ops/exarch/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/bug-ops/exarch/compare/v0.3.1...v0.4.0

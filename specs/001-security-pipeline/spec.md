@@ -8,6 +8,7 @@ tags:
   - security
   - rust
 created: 2026-05-20
+updated: 2026-07-09
 status: draft
 related:
   - "[[constitution]]"
@@ -193,6 +194,29 @@ THEN the written file has those bits cleared; ValidatedEntry.mode reflects the s
 > `zip.rs`, and `sevenz.rs` have been removed. Bare-slash entries (`/`) now return
 > `PathTraversalError` instead of `io::Error`.
 
+> [!note] v0.5.1: caller contract — entry names must be normalized before validation
+> `SafePath::validate` now documents an explicit caller contract: raw archive entry names
+> MUST have `\` normalized to `/` before `PathBuf` construction and before being passed to
+> `SafePath::validate`. `SafePath` itself does not perform this normalization. The 7z handler
+> is the current caller of concern — on Unix, `PathBuf::from("..\\..\\x")` collapses to a
+> single path component, silently bypassing traversal detection (#365, #376). The shared
+> `formats::common::normalize_entry_name` helper is the single normalization point; it is
+> applied by the 7z handler in the pre-validation loop, the extraction callback, and the
+> list/verify path (see [[002-format-handlers/spec]] for the format-level fix). ZIP is
+> unaffected (the `zip` crate handles Windows-style paths internally via `enclosed_name`);
+> TAR is intentionally left un-normalized because `\` is a legal Unix filename character in
+> TAR archives.
+
+> [!note] v0.5.1: `EntryValidator` restored as sole guard for 7z path security
+> `sevenz-rust2` 0.21.1 added an internal path-safety check inside
+> `decompress_with_extract_fn` that silently rejected absolute-path entries before
+> `EntryValidator` ever ran, breaking `allowed.absolute_paths = true` for 7z archives
+> (#374). The 7z handler now drives extraction via `ArchiveReader::for_each_entries`, which
+> has no built-in path check, so `EntryValidator` is once again the sole and authoritative
+> guard for 7z traversal, absolute-path, and symlink checks (#375). No change to
+> `EntryValidator` or `SafePath` themselves was required — the fix is entirely in how the 7z
+> handler drives the upstream crate.
+
 ## 6. Edge Cases and Error Handling
 
 | Scenario | Expected Behavior |
@@ -248,6 +272,14 @@ THEN the written file has those bits cleared; ValidatedEntry.mode reflects the s
 
 - [NEEDS CLARIFICATION: Should `ProgressCallback` expose a cancellation mechanism (return bool) so callers can abort mid-stream from the security callback?]
 - [NEEDS CLARIFICATION: Windows path separator handling (`\` vs `/`) — is there a CI job covering Windows path validation edge cases?]
+
+> [!note] Partially addressed in v0.5.1
+> The specific Unix-side bypass — a 7z entry name containing `\` collapsing into a single
+> `PathBuf` component and evading traversal detection — is fixed via
+> `formats::common::normalize_entry_name` (#365, #376; see the caller-contract note above).
+> The broader question of dedicated Windows CI coverage for path validation edge cases
+> remains open; `.claude/rules/continuous-improvement.md` flags this as a known gap to test
+> before merging any path-related change.
 
 > [!note] Resolved in v0.4.0
 > World-writable entries: behavior clarified — the `allow_world_writable` bit is stripped (not rejection), matching setuid/setgid treatment. `allowed_extensions` filtering (FR-011) is now fully implemented across TAR, ZIP, and 7z in v0.4.0 (#230, #242). `SecurityConfig::validate()` now also rejects `max_file_count == 0` and `max_solid_block_memory == 0` in addition to the previously documented zero-limit fields (#181).

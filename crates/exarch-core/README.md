@@ -130,11 +130,18 @@ let report = ArchiveCreator::new()
 | `.tar.bz2`, `.tbz2` | TAR | Bzip2 | ✅ | ✅ | ✅ | ✅ |
 | `.tar.xz`, `.txz` | TAR | XZ | ✅ | ✅ | ✅ | ✅ |
 | `.tar.zst`, `.tzst` | TAR | Zstd | ✅ | ✅ | ✅ | ✅ |
-| `.zip` | ZIP | Deflate | ✅ | ✅ | ✅ | ✅ |
+| `.zip` | ZIP | Deflate, Deflate64, Bzip2, Zstd | ✅ | ✅ | ✅ | ✅ |
+| `.jar`, `.war`, `.ear`, `.nar`, `.nbm`, `.apk`, `.aab`, `.ipa`, `.appx`, `.msix`, `.whl`, `.vsix`, `.xpi`, `.epub` | ZIP-family | Deflate, Deflate64, Bzip2, Zstd | ✅ | — | ✅ | ✅ |
 | `.7z` | 7z | LZMA/LZMA2 | ✅ | — | ✅ | ✅ |
 
 > [!NOTE]
+> ZIP-family formats share the ZIP container but add extra structure — signing (`.apk`/`.aab`/`.ipa`/`.appx`/`.msix`), checksum manifests (`.whl`), ordering rules (`.epub`), or descriptor files (`.war`/`.ear`/`.vsix`/`.nbm`) — which exarch-core doesn't produce. Creation is rejected to avoid silently emitting a bare ZIP with a misleading extension; callers who want that can set `CreationConfig::format = Some(ArchiveType::Zip)` explicitly.
+
+> [!NOTE]
 > 7z creation is not yet supported. Solid and encrypted 7z archives are rejected for security reasons. Unix symlinks inside 7z archives are reported as regular files (sevenz-rust2 API limitation).
+
+> [!NOTE]
+> `detect_format` falls back to magic-byte inspection when the file extension is absent, unrecognised, or contradicts the file content. When magic bytes and extension disagree, magic bytes take precedence. Archive creation always uses extension-only detection.
 
 ## API Overview
 

@@ -8,6 +8,7 @@ tags:
   - archive
   - rust
 created: 2026-05-20
+updated: 2026-07-09
 status: draft
 related:
   - "[[constitution]]"
@@ -185,7 +186,7 @@ THEN magic bytes take precedence over the extension
 | `FormatCreator` | Trait for archive creation; implemented by six unit structs | `TarCreator`, `TarGzCreator`, `TarBz2Creator`, `TarXzCreator`, `TarZstCreator`, `ZipCreator`; dispatched via `creator_for_format()` |
 | `TarArchive<R>` | TAR handler generic over decompressor type | Implements `ArchiveFormat`; `list()` consumes the internal reader (TAR is forward-only); do not call `extract()` on the same instance |
 | `ZipArchive` | ZIP handler | Implements `ArchiveFormat` and `FormatCreator`; `ZipFile::name()` returns `Result<Cow<str>, ZipError>` in zip 9.x |
-| `SevenZArchive` | 7z handler (read-only) | Implements `ArchiveFormat` only; fires `on_entry_start`/`on_entry_complete` per-entry, interleaved with I/O |
+| `SevenZArchive` | 7z handler (read-only) | Implements `ArchiveFormat` only; fires `on_entry_start`/`on_entry_complete` per-entry, interleaved with I/O; extraction drives `sevenz_rust2::ArchiveReader::for_each_entries` directly (not `decompress_with_extract_fn`) so `EntryValidator` remains the sole path-security guard (v0.5.1); entry names are normalized via `formats::common::normalize_entry_name` before validation |
 | `ExtractionContext<'_, '_>` | Private TAR helper struct reducing extraction helper arity | Groups `validator`, `dest`, `report`, `copy_buffer`, `dir_cache`, `skip_duplicates` |
 
 ### ArchiveType Detection Rules
@@ -237,6 +238,31 @@ FormatCreator:
 > before extraction and all `on_entry_complete` calls after. In v0.4.0, callbacks
 > fire per-entry, interleaved with actual I/O (#191).
 
+> [!note] v0.5.1: `allow_absolute_paths` restored for 7z (#374, #375)
+> `sevenz-rust2` 0.21.1 added an internal path-safety check inside
+> `decompress_with_extract_fn` that silently blocked absolute-path entries before
+> `EntryValidator` ever saw them, breaking `SecurityConfig::allowed.absolute_paths = true`
+> for 7z archives — extraction would simply skip such entries instead of writing them
+> (stripped) inside `output_dir`. `SevenZArchive::extract_with_callback` now drives
+> extraction via `ArchiveReader::for_each_entries` directly, which has no built-in path
+> check, restoring `EntryValidator` as the sole and authoritative guard for 7z path
+> security (traversal, absolute paths, symlinks). This was an unresolved bug for one
+> release cycle (introduced transitively by the `sevenz-rust2` 0.21.1 dependency bump) and
+> is now fixed; no `SecurityConfig` or public API change was required.
+
+> [!note] v0.5.1: 7z backslash path-traversal fixed (#365, #376)
+> Entry names containing `\` (e.g. `..\..\x`, produced by archives written on Windows) were
+> previously passed straight into `PathBuf::from(&entry.name)`. On Unix, `\` is a legal
+> filename character, so the whole string became a single path component and slipped past
+> `SafePath`'s `..` traversal check. All three 7z entry-name sites — the extraction
+> pre-validation loop, the extraction callback, and the list/verify path
+> (`inspection/list.rs`) — now call the shared `formats::common::normalize_entry_name`
+> helper to replace `\` with `/` before constructing a `PathBuf`, so extract, list, and
+> verify agree on traversal detection. Such entries are now correctly rejected with
+> `ArchiveError::PathTraversal`. ZIP is unaffected (the `zip` crate resolves Windows-style
+> paths internally via `enclosed_name`); TAR is intentionally left un-normalized because `\`
+> is a legal Unix filename character in TAR archives.
+
 ## 6. Edge Cases and Error Handling
 
 | Scenario | Expected Behavior |
@@ -250,6 +276,8 @@ FormatCreator:
 | Solid 7z with total uncompressed size > `max_solid_block_memory` | `ArchiveError::QuotaExceeded` or format-specific rejection |
 | Corrupt archive (unreadable headers) | `ArchiveError::InvalidArchive`; `verify_archive` returns `VerificationReport` with issues |
 | Compression ratio unavailable per-entry (TAR streams) | Zip bomb check skipped for that entry; total quota still enforced |
+| 7z entry with absolute path and `allowed.absolute_paths = true` | Written inside `output_dir` with the leading `/` stripped, same as TAR/ZIP (fixed in v0.5.1, #375; previously silently skipped) |
+| 7z entry name containing `\` (e.g. `..\..\x`) | Normalized to `/` via `normalize_entry_name` before validation; rejected with `ArchiveError::PathTraversal` (fixed in v0.5.1, #376; previously bypassed traversal detection on Unix) |
 
 ## 7. Success Criteria
 

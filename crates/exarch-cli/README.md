@@ -300,6 +300,7 @@ exarch is designed with security as a primary concern, protecting against common
 | TAR + xz | `.tar.xz`, `.txz` | ✅ | ✅ | ✅ | ✅ |
 | TAR + zstd | `.tar.zst`, `.tzst` | ✅ | ✅ | ✅ | ✅ |
 | ZIP | `.zip` | ✅ | ✅ | ✅ | ✅ |
+| ZIP-family | `.jar`, `.war`, `.ear`, `.nar`, `.nbm`, `.apk`, `.aab`, `.ipa`, `.appx`, `.msix`, `.whl`, `.vsix`, `.xpi`, `.epub` | ✅ | — | ✅ | ✅ |
 | 7z | `.7z` | ✅ | — | ✅ | ✅ |
 
 > [!NOTE]

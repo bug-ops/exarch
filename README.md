@@ -17,6 +17,7 @@ Memory-safe archive extraction and creation library with Python and Node.js bind
 ## Features
 
 - **Extract, create, list, and verify archives** — Full support for TAR and ZIP (all operations), plus 7z extraction, listing, and verification
+- **Format auto-detection** — Falls back to magic-byte inspection when the file extension is absent, unrecognised, or contradicts the file content
 - **Security-first design** — Default-deny security model with protection against path traversal, symlink attacks, zip bombs, and more
 - **Type-driven safety** — Rust's type system ensures validated paths can only be constructed through security checks
 - **Extension allowlists** — Optional `allowed_extensions` filter restricts extraction to a specific set of file extensions across TAR, ZIP, and 7z handlers

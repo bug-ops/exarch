@@ -216,9 +216,10 @@ The library provides built-in protection against:
 | TAR+XZ | `.tar.xz`, `.txz` | ✅ | ✅ | ✅ | ✅ |
 | TAR+ZSTD | `.tar.zst`, `.tzst` | ✅ | ✅ | ✅ | ✅ |
 | ZIP | `.zip` | ✅ | ✅ | ✅ | ✅ |
+| ZIP-family | `.jar`, `.war`, `.ear`, `.nar`, `.nbm`, `.apk`, `.aab`, `.ipa`, `.appx`, `.msix`, `.whl`, `.vsix`, `.xpi`, `.epub` | ✅ | — | ✅ | ✅ |
 | 7z | `.7z` | ✅ | — | ✅ | ✅ |
 
-**Note:** 7z creation is not yet supported. Solid and encrypted 7z archives are rejected for security reasons. Unix symlinks inside 7z archives are reported as regular files (sevenz-rust2 API limitation).
+**Note:** ZIP-family formats share the ZIP container but add extra structure (signing, checksum manifests, ordering rules) that exarch doesn't produce, so creation is rejected for those extensions. 7z creation is not yet supported. Solid and encrypted 7z archives are rejected for security reasons. Unix symlinks inside 7z archives are reported as regular files (sevenz-rust2 API limitation).
 
 ## Comparison with tarfile
 

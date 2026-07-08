@@ -9,6 +9,7 @@ tags:
   - ffi
   - rust
 created: 2026-05-20
+updated: 2026-07-09
 status: draft
 related:
   - "[[constitution]]"
@@ -23,7 +24,7 @@ related:
 > [!info] Metadata
 > **Subsystem**: exarch-python
 > **MSRV**: Rust 1.93.0
-> **Build**: maturin + pyo3 0.28
+> **Build**: maturin + pyo3 0.29
 > **Source**: extracted from [[001-exarch-system/spec]]
 
 ## 1. Overview

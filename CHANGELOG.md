@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **CLI binary releases**: `exarch-cli` release binaries are now built and attached to every
+  GitHub release for Linux (x86_64, aarch64), macOS (x86_64, aarch64), and Windows (x86_64) as
+  `exarch-<version>-<target>.tar.gz` / `.zip` archives with `.sha256` checksums.
+- **`scripts/install.sh`**: a POSIX-sh installer that downloads, checksum-verifies, and installs
+  the correct prebuilt `exarch` binary for the host platform. Also attached to every release.
+- `skills/exarch-cli/SKILL.md` now documents both install methods above as secondary alternatives
+  to `cargo install exarch-cli`.
+
 ## [0.5.1] - 2026-07-09
 
 ### Fixed

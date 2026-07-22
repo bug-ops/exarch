@@ -191,6 +191,111 @@ jobs:
           path: crates/exarch-python/wheels/*.whl
           retention-days: 7
 
+  # Build exarch-cli binaries for multiple platforms
+  build-cli-binaries:
+    name: Build CLI Binary (${{ matrix.platform.name }})
+    needs: validate
+    runs-on: ${{ matrix.platform.os }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          # Linux x86_64
+          - name: linux-x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+
+          # Linux aarch64
+          - name: linux-aarch64
+            os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            archive: tar.gz
+
+          # macOS x86_64
+          - name: macos-x86_64
+            os: macos-15-intel
+            target: x86_64-apple-darwin
+            archive: tar.gz
+
+          # macOS aarch64 (Apple Silicon)
+          - name: macos-aarch64
+            os: macos-latest
+            target: aarch64-apple-darwin
+            archive: tar.gz
+
+          # Windows x86_64
+          - name: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform.target }}
+
+      - name: Setup cross-compilation (Linux aarch64)
+        if: matrix.platform.name == 'linux-aarch64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "cli-${{ matrix.platform.name }}"
+
+      - name: Build exarch-cli
+        run: cargo build -p exarch-cli --release --target ${{ matrix.platform.target }}
+
+      - name: Package archive (Unix)
+        if: matrix.platform.archive == 'tar.gz'
+        run: |
+          VERSION="${{ needs.validate.outputs.version }}"
+          NAME="exarch-${VERSION}-${{ matrix.platform.target }}"
+          STAGE="$(mktemp -d)/${NAME}"
+          mkdir -p "$STAGE"
+          cp "target/${{ matrix.platform.target }}/release/exarch" "$STAGE/"
+          cp LICENSE-MIT LICENSE-APACHE README.md "$STAGE/"
+          tar -C "$(dirname "$STAGE")" -czf "${NAME}.tar.gz" "${NAME}"
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "${NAME}.tar.gz" > "${NAME}.tar.gz.sha256"
+          else
+            shasum -a 256 "${NAME}.tar.gz" > "${NAME}.tar.gz.sha256"
+          fi
+
+      - name: Package archive (Windows)
+        if: matrix.platform.archive == 'zip'
+        shell: pwsh
+        run: |
+          $Version = "${{ needs.validate.outputs.version }}"
+          $Name = "exarch-$Version-${{ matrix.platform.target }}"
+          $Stage = Join-Path $Env:RUNNER_TEMP $Name
+          New-Item -ItemType Directory -Path $Stage | Out-Null
+          Copy-Item "target/${{ matrix.platform.target }}/release/exarch.exe" -Destination $Stage
+          Copy-Item LICENSE-MIT, LICENSE-APACHE, README.md -Destination $Stage
+          Compress-Archive -Path $Stage -DestinationPath "$Name.zip"
+          (Get-FileHash "$Name.zip" -Algorithm SHA256).Hash.ToLower() + "  $Name.zip" | Out-File -Encoding ascii "$Name.zip.sha256"
+
+      - name: Upload CLI archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: cli-${{ matrix.platform.name }}
+          path: |
+            exarch-*.tar.gz
+            exarch-*.tar.gz.sha256
+            exarch-*.zip
+            exarch-*.zip.sha256
+          retention-days: 7
+
   # Publish Python wheels to PyPI using Trusted Publishing (OIDC)
   # Setup: https://docs.pypi.org/trusted-publishers/adding-a-publisher/
   publish-python:
@@ -360,7 +465,7 @@ jobs:
   # Create GitHub Release with artifacts
   github-release:
     name: Create GitHub Release
-    needs: [validate, publish-crates, publish-python, publish-node]
+    needs: [validate, publish-crates, publish-python, publish-node, build-cli-binaries]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -380,6 +485,13 @@ jobs:
         with:
           path: release-artifacts/node
           pattern: bindings-*
+
+      - name: Download CLI binaries
+        uses: actions/download-artifact@v8
+        with:
+          path: release-artifacts/cli
+          pattern: cli-*
+          merge-multiple: true
 
       - name: Generate changelog
         id: changelog
@@ -420,10 +532,20 @@ jobs:
           npm install exarch-rs@$VERSION
           \`\`\`
 
+          ### Rust CLI
+          \`\`\`bash
+          cargo install exarch-cli
+          \`\`\`
+          Or download a prebuilt \`exarch-$VERSION-<target>\` archive from this release's assets
+          (or run \`curl -fsSL https://raw.githubusercontent.com/bug-ops/exarch/main/scripts/install.sh | sh\`),
+          both of which skip the Rust toolchain requirement.
+
           ## Artifacts
 
           - Python wheels for Linux (x86_64, aarch64), Linux musl (x86_64, aarch64), macOS (x86_64, aarch64), Windows (x86_64)
           - Node.js native addons for Linux (x86_64, aarch64), macOS (x86_64, aarch64), Windows (x86_64)
+          - CLI binaries for Linux (x86_64, aarch64), macOS (x86_64, aarch64), Windows (x86_64) as
+            \`exarch-$VERSION-<target>.tar.gz\` / \`.zip\` with \`.sha256\` checksums, plus \`install.sh\`
           - Published to [crates.io](https://crates.io/crates/exarch-core), [PyPI](https://pypi.org/project/exarch), and [npm](https://www.npmjs.com/package/exarch-rs)
           EOF
 
@@ -437,6 +559,11 @@ jobs:
           files: |
             release-artifacts/python/*.whl
             release-artifacts/node/**/*.node
+            release-artifacts/cli/*.tar.gz
+            release-artifacts/cli/*.tar.gz.sha256
+            release-artifacts/cli/*.zip
+            release-artifacts/cli/*.zip.sha256
+            scripts/install.sh
           token: ${{ secrets.GITHUB_TOKEN }}
 
   # Final success check

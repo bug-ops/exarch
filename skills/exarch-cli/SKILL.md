@@ -20,17 +20,54 @@ job, not a bug to route around (see "Do not reach for `--allow-*` reflexively" b
 
 ## Install
 
+First check whether a Rust toolchain is present: `command -v cargo`.
+
+**`cargo` available (recommended):**
+
 ```bash
 cargo install exarch-cli
 ```
 
-This installs a binary named `exarch` (not `exarch-cli`). Inside this workspace, use the debug
-build instead:
+This installs a binary named `exarch` (not `exarch-cli`) and is the fastest path to a working
+binary since it doesn't require identifying the target triple. Inside this workspace, use the
+debug build instead:
 
 ```bash
 cargo build -p exarch-cli
 ./target/debug/exarch --help
 ```
+
+**`cargo` NOT available:**
+
+*Linux / macOS* — run the install script, no toolchain required, checksum-verified:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/bug-ops/exarch/main/scripts/install.sh | sh
+```
+
+Installs to `~/.local/bin` (override with `EXARCH_INSTALL_DIR`). If the script itself can't run
+(e.g. a restricted shell), fall back to a manual download: get `exarch-<version>-<target>.tar.gz`
+plus its `.sha256` from [GitHub Releases](https://github.com/bug-ops/exarch/releases) —
+`<target>` is `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `x86_64-apple-darwin`, or
+`aarch64-apple-darwin` — then verify and extract:
+
+```bash
+sha256sum -c exarch-<version>-<target>.tar.gz.sha256   # macOS: shasum -a 256 -c
+tar -xzf exarch-<version>-<target>.tar.gz
+```
+
+*Windows* — no install script; download `exarch-<version>-x86_64-pc-windows-msvc.zip` plus its
+`.sha256` from [GitHub Releases](https://github.com/bug-ops/exarch/releases), then verify and
+extract in PowerShell:
+
+```powershell
+(Get-FileHash exarch-<version>-x86_64-pc-windows-msvc.zip -Algorithm SHA256).Hash
+# compare (case-insensitively) against the hash in the .sha256 file, then:
+Expand-Archive exarch-<version>-x86_64-pc-windows-msvc.zip -DestinationPath .
+```
+
+`CertUtil -hashfile exarch-<version>-x86_64-pc-windows-msvc.zip SHA256` is an equivalent,
+cmd-only alternative to `Get-FileHash`.
 
 ## Global flags
 

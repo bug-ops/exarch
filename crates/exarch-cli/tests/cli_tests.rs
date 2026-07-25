@@ -1176,6 +1176,181 @@ fn test_verify_archive_json_output() {
     assert!(json["data"]["security_status"].is_string());
 }
 
+/// Builds a tar.gz archive at `path` containing one symlink entry pointing
+/// outside the extraction root. Verification rejects the symlink, producing a
+/// `VerificationStatus::Fail` report.
+fn create_symlink_escape_tar_gz(path: &std::path::Path) {
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
+
+    let file = std::fs::File::create(path).expect("create archive");
+    let gz = GzEncoder::new(file, Compression::default());
+    let mut builder = tar::Builder::new(gz);
+    let mut header = tar::Header::new_gnu();
+    header.set_size(0);
+    header.set_entry_type(tar::EntryType::Symlink);
+    header.set_path("evil_link").expect("set path");
+    header.set_link_name("/etc/passwd").expect("set link name");
+    header.set_cksum();
+    builder
+        .append_data(&mut header, "evil_link", std::io::empty())
+        .expect("append entry");
+    let gz = builder.into_inner().expect("get gz encoder");
+    gz.finish().expect("finish gzip stream");
+}
+
+/// Regression test for issue #387: `verify --json` on a FAIL-status archive
+/// must print exactly one top-level JSON document, and the process must still
+/// exit non-zero.
+#[test]
+fn test_verify_json_fail_prints_single_document() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive_path = temp.path().join("symlink_escape.tar.gz");
+    create_symlink_escape_tar_gz(&archive_path);
+
+    let output = exarch_cmd()
+        .arg("verify")
+        .arg("--json")
+        .arg(&archive_path)
+        .assert()
+        .failure()
+        .code(1)
+        .get_output()
+        .stdout
+        .clone();
+
+    let stdout = std::str::from_utf8(&output).expect("stdout is not valid UTF-8");
+    let mut deserializer =
+        serde_json::Deserializer::from_str(stdout).into_iter::<serde_json::Value>();
+    let first = deserializer
+        .next()
+        .expect("expected at least one JSON document")
+        .expect("first JSON document is invalid");
+    assert!(
+        deserializer.next().is_none(),
+        "stdout must contain exactly one top-level JSON document, got extra trailing data: {stdout}"
+    );
+
+    assert_eq!(first["operation"], "verify");
+    assert_eq!(first["status"], "success");
+    assert_eq!(first["data"]["status"], "FAIL");
+}
+
+/// Regression test for issue #387: the human-readable path must still print
+/// an error message on stderr and exit non-zero for a FAIL-status archive.
+#[test]
+fn test_verify_fail_human_readable_prints_error() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive_path = temp.path().join("symlink_escape.tar.gz");
+    create_symlink_escape_tar_gz(&archive_path);
+
+    exarch_cmd()
+        .arg("verify")
+        .arg(&archive_path)
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("Archive verification failed"));
+}
+
+/// Regression test for issue #386: `extract --json` must populate the
+/// structured `error.partial_report` field when extraction is stopped
+/// mid-archive after some entries were already written.
+#[test]
+fn test_extract_json_partial_report_populated() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive_path = temp.path().join("partial.tar.gz");
+
+    {
+        use flate2::Compression;
+        use flate2::write::GzEncoder;
+
+        let file = std::fs::File::create(&archive_path).expect("create archive");
+        let gz = GzEncoder::new(file, Compression::default());
+        let mut builder = tar::Builder::new(gz);
+        builder
+            .append_data(
+                &mut {
+                    let mut h = tar::Header::new_gnu();
+                    h.set_size(4);
+                    h.set_mode(0o644);
+                    h.set_cksum();
+                    h
+                },
+                "small.txt",
+                &b"data"[..],
+            )
+            .expect("append small entry");
+        let big = vec![0_u8; 2_000_000];
+        builder
+            .append_data(
+                &mut {
+                    let mut h = tar::Header::new_gnu();
+                    h.set_size(big.len() as u64);
+                    h.set_mode(0o644);
+                    h.set_cksum();
+                    h
+                },
+                "big.bin",
+                big.as_slice(),
+            )
+            .expect("append big entry");
+        let gz = builder.into_inner().expect("get gz encoder");
+        gz.finish().expect("finish gzip stream");
+    }
+
+    let output_dir = temp.path().join("out");
+    let output = exarch_cmd()
+        .arg("extract")
+        .arg("--json")
+        .arg("--max-file-size")
+        .arg("1000000")
+        .arg(&archive_path)
+        .arg(&output_dir)
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: serde_json::Value = serde_json::from_slice(&output).expect("invalid JSON output");
+    assert_eq!(json["status"], "error");
+    let partial_report = &json["error"]["partial_report"];
+    assert!(
+        !partial_report.is_null(),
+        "error.partial_report must be populated, got: {json}"
+    );
+    assert!(partial_report["files_extracted"].as_u64().unwrap() >= 1);
+}
+
+/// Regression test for issue #386: `error.partial_report` must stay
+/// absent/null for failures that never wrote anything to disk. Guards
+/// against a broken fix that always populates `partial_report` regardless
+/// of whether extraction actually made progress.
+#[test]
+fn test_extract_json_partial_report_absent_when_nothing_extracted() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let output_dir = temp.path().join("out");
+
+    let output = exarch_cmd()
+        .arg("extract")
+        .arg("--json")
+        .arg("nonexistent.tar.gz")
+        .arg(&output_dir)
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: serde_json::Value = serde_json::from_slice(&output).expect("invalid JSON output");
+    assert_eq!(json["status"], "error");
+    assert!(
+        json["error"]["partial_report"].is_null(),
+        "error.partial_report must be absent/null when no entries were extracted, got: {json}"
+    );
+}
+
 #[test]
 fn test_global_verbose_flag() {
     let temp = TempDir::new().expect("failed to create temp dir");

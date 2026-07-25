@@ -9,6 +9,7 @@ mod progress;
 
 use clap::Parser;
 use error::StrictWarning;
+use error::VerificationFailed;
 use output::OutputFormatter;
 use std::process;
 
@@ -39,6 +40,17 @@ fn main() {
     if let Err(err) = result {
         if err.is::<StrictWarning>() {
             process::exit(2);
+        }
+        // The verification report (already emitted by the formatter) fully
+        // describes a Fail status. In --json mode, printing a second error
+        // envelope here would produce two concatenated top-level JSON
+        // documents on stdout, so it's skipped; human-readable output still
+        // gets the error message on stderr.
+        if err.is::<VerificationFailed>() {
+            if !cli.json {
+                formatter.format_error(operation, &err);
+            }
+            process::exit(1);
         }
         formatter.format_error(operation, &err);
         process::exit(1);

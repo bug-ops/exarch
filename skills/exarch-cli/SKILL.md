@@ -173,15 +173,11 @@ Run `verify` before `extract` on any archive from an untrusted source to inspect
 writing anything to disk. Archives over 500 MB need `--max-total-size` raised explicitly or
 `verify` will fail with `QuotaExceeded` before it can report anything else.
 
-> [!WARNING]
-> **When the archive has `status: "FAIL"`, `verify --json` prints TWO concatenated top-level
-> JSON objects to stdout, not one.** Verified live (with and without `--strict`) on an archive
-> containing a bare symlink entry: stdout contains a `status: "success"` envelope with the full
-> report (`data.status: "FAIL"`, findings in `data.issues`), immediately followed by a second
-> `status: "error"` envelope (`error.kind: "Error"`, generic message `"Archive verification
-> failed"`). The process exits `1` in both cases. A naive `json.loads(stdout)` will fail on this
-> output — split on the `}\n{` boundary, or use a streaming/multi-document JSON parser, and treat
-> the first object's `data` as the authoritative report.
+When the archive has `status: "FAIL"`, `verify --json` prints exactly one top-level JSON
+document to stdout — a `status: "success"` envelope carrying the full report (`data.status:
+"FAIL"`, findings in `data.issues`). Verified live on an archive containing a bare symlink
+entry: a single valid JSON document, parseable with a plain `json.loads(stdout)`. The process
+still exits `1` for a FAIL status.
 
 ### `completion <SHELL>`
 
@@ -228,14 +224,17 @@ Every subcommand's `--json` output uses the same envelope:
 
 `data` is absent on error, `error` is absent on success.
 
-For `extract`, when some files were already written before a mid-archive failure, the JSON
-schema has a structured `error.partial_report` field defined for exactly this case — but as of
-0.5.1 it is never actually populated; verified live against a two-entry archive where the first
-entry extracts and the second exceeds `--max-file-size`. The partial-progress counts are instead
-embedded as free text inside `error.message`, prefixed `"WARNING: Extraction was stopped. N
-items (X files, Y directories, Z symlinks) were written to disk before the error."`. Parse that
-prefix (or just treat any `error.message` starting with `"WARNING:"` as "some data was written")
-if you need this information — do not branch on an `error.partial_report` object appearing.
+**`verify` is the one exception to "top-level `status` tells you whether it worked":** a FAIL-status
+archive still yields a `status: "success"` envelope (the verification *ran* successfully — it just
+found the archive unsafe), with the outcome in `data.status` (`"PASS"` / `"WARNING"` / `"FAIL"`).
+For `verify`, branch on `data.status` (or the process exit code), not on top-level `status`.
+
+For `extract`, when some files were already written before a mid-archive failure, `error` carries
+a structured `error.partial_report` object (`files_extracted`, `directories_created`,
+`symlinks_created`, `bytes_written`). Verified live against a two-entry archive where the first
+entry extracts and the second exceeds `--max-file-size`. The same progress counts also appear as
+free text inside `error.message` (prefixed `"WARNING: Extraction was stopped. ..."`) — prefer the
+structured `error.partial_report` field over parsing that text.
 
 ### Verified examples
 
@@ -268,8 +267,8 @@ Error (`extract`, path traversal):
 }
 ```
 
-Error (`extract`, mid-archive quota failure with partial progress — note there is no
-`partial_report` field, only the `"WARNING:"`-prefixed text in `message`):
+Error (`extract`, mid-archive quota failure with partial progress — note the structured
+`error.partial_report` field):
 
 ```json
 {
@@ -277,7 +276,13 @@ Error (`extract`, mid-archive quota failure with partial progress — note there
   "status": "error",
   "error": {
     "kind": "QuotaExceeded",
-    "message": "WARNING: Extraction was stopped. 1 items (1 files, 0 directories, 0 symlinks) were written to disk before the error.\nHINT: Inspect or remove the output directory before re-running.: quota exceeded: single file size (100 > 10)"
+    "message": "WARNING: Extraction was stopped. 1 items (1 files, 0 directories, 0 symlinks) were written to disk before the error.\nHINT: Inspect or remove the output directory before re-running.: quota exceeded: single file size (2000000 > 1000000)",
+    "partial_report": {
+      "files_extracted": 1,
+      "directories_created": 0,
+      "symlinks_created": 0,
+      "bytes_written": 4
+    }
   }
 }
 ```
@@ -297,7 +302,7 @@ across versions.
 | Code | Meaning |
 |---|---|
 | `0` | Success. |
-| `1` | Operation failed (see `error.kind` in JSON mode, or stderr in text mode). |
+| `1` | Operation failed (see `error.kind` in JSON mode, or stderr in text mode). **Exception:** `verify --json` on a FAIL-status archive also exits `1`, but prints a `status: "success"` envelope with `data.status: "FAIL"` — there is no `error` object in this case. Check `data.status`, not top-level `status`, for `verify`. |
 | `2` | `verify --strict` only: the archive is otherwise valid but has warning-level findings, treated as failure because `--strict` was passed. |
 
 ## Security model (context, not a full manual)

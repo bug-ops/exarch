@@ -17,6 +17,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `skills/exarch-cli/SKILL.md` now documents both install methods above as secondary alternatives
   to `cargo install exarch-cli`.
 
+### Fixed
+
+- **`verify --json` printed two concatenated top-level JSON documents on FAIL (#387)**: the
+  verification report (with `data.status == "FAIL"`) was always printed, and then the command
+  bailed with an error that `main`'s top-level handler also serialized to stdout, breaking
+  single-document JSON parsing. `verify::execute` now returns a sentinel error that `main`
+  recognizes and skips re-printing in `--json` mode; human-readable output still prints the
+  "Archive verification failed" message on stderr as before. The command still exits non-zero
+  on FAIL in both modes.
+- **`extract --json` never populated `error.partial_report` (#386)**: `format_error` looked up
+  `PartialExtractionContext` via `error.chain().find_map(downcast_ref)`, which never matches
+  because `anyhow::Error::context(...)` requires a direct top-level `downcast_ref` to see
+  through the context wrapper. Switched to `error.downcast_ref::<PartialExtractionContext>()`,
+  so partial extraction progress is now correctly reported in JSON error output.
+
 ## [0.5.1] - 2026-07-09
 
 ### Fixed

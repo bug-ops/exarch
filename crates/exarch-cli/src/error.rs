@@ -24,6 +24,26 @@ impl fmt::Display for StrictWarning {
 
 impl std::error::Error for StrictWarning {}
 
+/// Sentinel error returned by `verify::execute` when the verification report
+/// has `Fail` status.
+///
+/// The verification report itself (already emitted by the formatter, with
+/// `data.status == "FAIL"` in JSON mode) fully describes the failure, so
+/// `main` must not print a second error envelope for `--json` output — doing
+/// so would emit two concatenated top-level JSON documents on stdout. For
+/// human-readable output, `main` still prints this sentinel via
+/// `format_error` and exits non-zero, matching prior behavior.
+#[derive(Debug)]
+pub struct VerificationFailed;
+
+impl fmt::Display for VerificationFailed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Archive verification failed")
+    }
+}
+
+impl std::error::Error for VerificationFailed {}
+
 /// Carrier for partial-extraction progress embedded in the anyhow error chain.
 ///
 /// `ArchiveError::PartialExtraction` uses `#[error("{source}")]` with

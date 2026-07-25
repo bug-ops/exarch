@@ -110,18 +110,21 @@ impl OutputFormatter for JsonFormatter {
         let kind = extraction_err.map_or_else(|| "Error".to_string(), extraction_error_kind);
         let message = format!("{error:#}");
 
-        // PartialExtraction is converted by convert_extraction_error into a chain
-        // of PartialExtractionContext → inner ArchiveError, so the partial
-        // report is carried by PartialExtractionContext, not by ArchiveError.
-        let partial_report = error
-            .chain()
-            .find_map(|e| e.downcast_ref::<PartialExtractionContext>())
-            .map(|ctx| JsonPartialReport {
-                files_extracted: ctx.report.files_extracted,
-                directories_created: ctx.report.directories_created,
-                symlinks_created: ctx.report.symlinks_created,
-                bytes_written: ctx.report.bytes_written,
-            });
+        // PartialExtraction is converted by convert_extraction_error into a
+        // PartialExtractionContext attached via `.context()`, so the partial
+        // report must be recovered with a direct top-level downcast: anyhow
+        // sees through `.context()` layers for the context type itself, but
+        // `.chain()` yields the wrapper's Display/Debug impl, never the
+        // context value, so `.chain().find_map(downcast_ref)` never matches.
+        let partial_report =
+            error
+                .downcast_ref::<PartialExtractionContext>()
+                .map(|ctx| JsonPartialReport {
+                    files_extracted: ctx.report.files_extracted,
+                    directories_created: ctx.report.directories_created,
+                    symlinks_created: ctx.report.symlinks_created,
+                    bytes_written: ctx.report.bytes_written,
+                });
 
         let output = if let Some(pr) = partial_report {
             JsonOutput::<()>::error_with_partial(operation, kind, message, pr)

@@ -2,9 +2,9 @@
 
 use crate::cli::VerifyArgs;
 use crate::error::StrictWarning;
+use crate::error::VerificationFailed;
 use crate::output::OutputFormatter;
 use anyhow::Result;
-use anyhow::bail;
 use exarch_core::SecurityConfig;
 use exarch_core::VerificationStatus;
 use exarch_core::verify_archive;
@@ -27,8 +27,6 @@ pub fn execute(args: &VerifyArgs, formatter: &dyn OutputFormatter) -> Result<()>
             }
             Ok(())
         }
-        VerificationStatus::Fail => {
-            bail!("Archive verification failed")
-        }
+        VerificationStatus::Fail => Err(anyhow::Error::new(VerificationFailed)),
     }
 }

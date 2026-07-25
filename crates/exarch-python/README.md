@@ -167,8 +167,10 @@ Extract an archive with a progress callback. The GIL is held when a callback is 
 ```python
 import exarch
 
+
 def on_progress(path: str, total: int, current: int, bytes_written: int) -> None:
     print(f"[{current}/{total}] {path} ({bytes_written} bytes)")
+
 
 result = exarch.extract_archive_with_progress(
     "archive.tar.gz", "/output", config=None, progress=on_progress
@@ -181,14 +183,14 @@ Builder-style security configuration.
 
 ```python
 config = exarch.SecurityConfig()
-config = config.with_max_file_size(100 * 1024 * 1024)   # 100 MB per file
-config = config.with_max_total_size(1024 * 1024 * 1024) # 1 GB total
-config = config.with_max_file_count(10_000)              # Max 10k files
-config = config.with_max_compression_ratio(50.0)        # Zip bomb threshold
-config = config.add_allowed_extension(".txt")            # Extension allowlist
+config = config.with_max_file_size(100 * 1024 * 1024)  # 100 MB per file
+config = config.with_max_total_size(1024 * 1024 * 1024)  # 1 GB total
+config = config.with_max_file_count(10_000)  # Max 10k files
+config = config.with_max_compression_ratio(50.0)  # Zip bomb threshold
+config = config.add_allowed_extension(".txt")  # Extension allowlist
 config = config.add_allowed_extension(".md")
-config = config.add_banned_component("__MACOSX")         # Skip components
-config = config.with_allow_solid_archives(True)          # Allow solid 7z archives
+config = config.add_banned_component("__MACOSX")  # Skip components
+config = config.with_allow_solid_archives(True)  # Allow solid 7z archives
 ```
 
 ## Security Features
@@ -226,11 +228,13 @@ The library provides built-in protection against:
 ```python
 # UNSAFE - tarfile has known vulnerabilities (CVE-2007-4559)
 import tarfile
+
 with tarfile.open("archive.tar.gz") as tar:
     tar.extractall("/output")  # May extract outside target directory!
 
 # SAFE - exarch validates all paths
 import exarch
+
 exarch.extract_archive("archive.tar.gz", "/output")  # Protected by default
 ```
 

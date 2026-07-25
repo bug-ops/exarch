@@ -31,6 +31,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   because `anyhow::Error::context(...)` requires a direct top-level `downcast_ref` to see
   through the context wrapper. Switched to `error.downcast_ref::<PartialExtractionContext>()`,
   so partial extraction progress is now correctly reported in JSON error output.
+- **`exarch-python` CI failing `ruff format --check` on `README.md`**: ruff 0.16.0 started
+  formatting Python code blocks embedded in Markdown files, which flagged pre-existing
+  inline-comment spacing and blank-line inconsistencies in `crates/exarch-python/README.md`.
+  Reformatted the file with the new ruff to match.
 
 ## [0.5.1] - 2026-07-09
 

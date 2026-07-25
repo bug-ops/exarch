@@ -47,7 +47,7 @@ dev = [
     "pytest-cov>=7.0",
     "Pygments>=2.20.0",
     "mypy>=2.0",
-    "ruff>=0.15",
+    "ruff==0.16.0",
     "maturin>=1.14",
 ]
 

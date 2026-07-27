@@ -39,7 +39,16 @@ cargo install --path crates/exarch-cli
 <details>
 <summary>Pre-built binaries</summary>
 
-Download from [GitHub Releases](https://github.com/bug-ops/exarch/releases/latest):
+**Linux / macOS** — run the install script, no Rust toolchain required, checksum-verified:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/bug-ops/exarch/main/scripts/install.sh | sh
+```
+
+Installs to `~/.local/bin` (override with `EXARCH_INSTALL_DIR`).
+
+**Manual download** — get the archive and its `.sha256` checksum from
+[GitHub Releases](https://github.com/bug-ops/exarch/releases/latest):
 
 | Platform | Architecture | Download |
 |----------|--------------|----------|
@@ -53,6 +62,7 @@ After downloading:
 
 ```bash
 # Linux/macOS
+sha256sum -c exarch-*.tar.gz.sha256   # macOS: shasum -a 256 -c
 tar -xzf exarch-*.tar.gz
 chmod +x exarch
 sudo mv exarch /usr/local/bin/

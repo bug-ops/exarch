@@ -16,8 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `exarch-<version>-<target>.tar.gz` / `.zip` archives with `.sha256` checksums.
 - **`scripts/install.sh`**: a POSIX-sh installer that downloads, checksum-verifies, and installs
   the correct prebuilt `exarch` binary for the host platform. Also attached to every release.
-- `skills/exarch-cli/SKILL.md` now documents both install methods above as secondary alternatives
-  to `cargo install exarch-cli`.
+- `skills/exarch-cli/SKILL.md` and `crates/exarch-cli/README.md` now document both install
+  methods above as secondary alternatives to `cargo install exarch-cli`.
 
 ### Fixed
 

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-07-27
+
 ### Added
 
 - **CLI binary releases**: `exarch-cli` release binaries are now built and attached to every
@@ -35,6 +37,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   formatting Python code blocks embedded in Markdown files, which flagged pre-existing
   inline-comment spacing and blank-line inconsistencies in `crates/exarch-python/README.md`.
   Reformatted the file with the new ruff to match.
+
+### Changed
+
+- `anyhow`, `clap`, `libc`, `napi`/`napi-derive`, `serde_json`, `thiserror`, `time`, and `tokio`
+  bumped to their latest compatible patch/minor releases via automated dependency updates
+  (`Cargo.lock` only, no direct manifest changes).
+- `@biomejs/biome` bumped from `^2.5.3` to `^2.5.5` in `exarch-node`.
+- `@napi-rs/cli` bumped from `^3.7.2` to `^3.7.4` in `exarch-node`.
+- Refreshed `exarch-python` dev dependencies via `uv lock` (lock-only, no manifest changes).
 
 ## [0.5.1] - 2026-07-09
 
@@ -779,7 +790,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 64KB reusable copy buffers
 - LRU cache for symlink target resolution
 
-[Unreleased]: https://github.com/bug-ops/exarch/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/bug-ops/exarch/compare/v0.5.2...HEAD
+[0.5.2]: https://github.com/bug-ops/exarch/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/bug-ops/exarch/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/bug-ops/exarch/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/bug-ops/exarch/compare/v0.4.0...v0.4.1

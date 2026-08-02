@@ -24,7 +24,7 @@ comment:
   layout: "reach,diff,flags,files"
   behavior: default
   require_changes: false     # Always post comment
-  after_n_builds: 1          # Single combined coverage upload
+  after_n_builds: 2          # coverage job (core+cli) + test-python (3.12 leg only)
 
 # Coverage flags for different packages
 flags:

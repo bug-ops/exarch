@@ -271,12 +271,24 @@ jobs:
       - name: Install Python bindings
         run: uv pip install --system target/wheels/*.whl
 
+      - name: Test Python bindings
+        if: matrix.python-version != '3.12'
+        run: |
+          cd crates/exarch-python
+          pytest tests/ -v
+
+      # Coverage is only measured once (Python version doesn't change which
+      # lines of the Rust-backed bindings get exercised), so only one matrix
+      # leg uploads to Codecov — uploading all 5 would just duplicate the
+      # same flag's data and race codecov.yml's after_n_builds threshold.
       - name: Test Python bindings with coverage
+        if: matrix.python-version == '3.12'
         run: |
           cd crates/exarch-python
           pytest tests/ -v --cov --cov-report=xml:coverage.xml
 
       - name: Upload Python coverage to Codecov
+        if: matrix.python-version == '3.12'
         uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -408,6 +420,7 @@ jobs:
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: lcov.info
+          flags: exarch-core, exarch-cli
           fail_ci_if_error: false
           verbose: true
 

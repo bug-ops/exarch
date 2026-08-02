@@ -2,49 +2,28 @@
 
 use napi::bindgen_prelude::*;
 
-/// Maximum path length in bytes (Linux/macOS `PATH_MAX` is typically 4096)
-const MAX_PATH_LENGTH: usize = 4096;
+use crate::error::convert_error;
 
 /// Validates a path string for security issues.
 ///
-/// Rejects:
-/// - Paths containing null bytes (potential injection attacks)
-/// - Paths exceeding `MAX_PATH_LENGTH` bytes (`DoS` prevention)
+/// Delegates to the shared boundary check in `exarch_core`; see
+/// [`exarch_core::validate_raw_path_str`] for the exact rules (null bytes,
+/// maximum length). Errors are routed through [`convert_error`] so they
+/// carry the same `SECURITY_VIOLATION:` code prefix as every other
+/// security-policy rejection surfaced by this crate.
 ///
 /// # Errors
 ///
 /// Returns error if path contains null bytes or exceeds maximum length.
 pub fn validate_path(path: &str) -> Result<()> {
-    // Constant-time null byte check (processes every byte regardless of match)
-    #[allow(clippy::needless_bitwise_bool)]
-    let has_null = path.bytes().fold(false, |acc, b| acc | (b == 0));
-
-    if has_null {
-        return Err(Error::from_reason(
-            "path contains null bytes - potential security issue",
-        ));
-    }
-
-    if path.len() > MAX_PATH_LENGTH {
-        // Pre-allocate string to avoid multiple allocations
-        use std::fmt::Write;
-        let mut msg = String::with_capacity(80);
-        // Writing to a String never fails
-        let _ = write!(
-            &mut msg,
-            "path exceeds maximum length of {MAX_PATH_LENGTH} bytes (got {} bytes)",
-            path.len()
-        );
-        return Err(Error::from_reason(msg));
-    }
-
-    Ok(())
+    exarch_core::validate_raw_path_str(path).map_err(convert_error)
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use exarch_core::MAX_PATH_LENGTH;
 
     #[test]
     fn test_validate_path_accepts_normal() {

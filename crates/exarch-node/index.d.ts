@@ -165,7 +165,7 @@ export declare class ExtractionOptions {
  * | `allow_world_writable` | false |
  * | `preserve_permissions` | false |
  * | `allowed_extensions` | empty (all allowed) |
- * | `banned_path_components` | `.git`, `.ssh` |
+ * | `banned_path_components` | `.git`, `.ssh`, `.gnupg`, `.aws`, `.kube`, `.docker`, `.env` |
  */
 export declare class SecurityConfig {
   /** Creates a new `SecurityConfig` with secure defaults. */

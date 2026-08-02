@@ -4,15 +4,11 @@
 //! built-in protection against path traversal, zip bombs, symlink attacks,
 //! and other common vulnerabilities.
 
-use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 mod config;
 mod error;
 mod report;
-
-/// Maximum path length in bytes (Linux/macOS `PATH_MAX` is typically 4096)
-const MAX_PATH_LENGTH: usize = 4096;
 
 use config::PyCreationConfig;
 use config::PyExtractionOptions;
@@ -46,7 +42,7 @@ use report::PyVerificationReport;
 ///
 /// # Raises
 ///
-/// * `ValueError` - Invalid argument type, null bytes in path, or path too long
+/// * `ValueError` - Invalid argument type
 /// * `PathTraversalError` - Path traversal attempt detected
 /// * `SymlinkEscapeError` - Symlink points outside extraction directory
 /// * `HardlinkEscapeError` - Hardlink target outside extraction directory
@@ -144,8 +140,11 @@ fn extract_archive(
 ///
 /// # Security
 ///
-/// - Rejects paths containing null bytes (potential injection attacks)
-/// - Rejects paths exceeding `MAX_PATH_LENGTH` bytes (`DoS` prevention)
+/// Delegates to the shared boundary check in `exarch_core`; see
+/// [`exarch_core::validate_raw_path_str`] for the exact rules (null bytes,
+/// maximum length). Errors are routed through [`convert_error`] so they
+/// surface as `SecurityViolationError`, the same exception type used for
+/// every other security-policy rejection raised by this module.
 fn path_to_string(py: Python<'_>, path: &Bound<'_, PyAny>) -> PyResult<String> {
     // Try direct string extraction first
     let path_str = if let Ok(s) = path.extract::<String>() {
@@ -158,21 +157,7 @@ fn path_to_string(py: Python<'_>, path: &Bound<'_, PyAny>) -> PyResult<String> {
         result.extract()?
     };
 
-    // Validate: reject null bytes (security)
-    if path_str.contains('\0') {
-        return Err(PyValueError::new_err(
-            "path contains null bytes - potential security issue",
-        ));
-    }
-
-    // Validate: reject excessively long paths (DoS prevention)
-    if path_str.len() > MAX_PATH_LENGTH {
-        return Err(PyValueError::new_err(format!(
-            "path exceeds maximum length of {} bytes (got {} bytes)",
-            MAX_PATH_LENGTH,
-            path_str.len()
-        )));
-    }
+    exarch_core::validate_raw_path_str(&path_str).map_err(convert_error)?;
 
     Ok(path_str)
 }
@@ -593,12 +578,6 @@ impl exarch_core::ProgressCallback for PyProgressAdapter {
     }
 }
 
-// SAFETY: We only call into Python when holding GIL via Python::attach
-// This is required because ProgressCallback trait requires Send.
-// The Py<PyAny> is Send-safe when accessed via GIL (Python::attach).
-#[allow(unsafe_code)]
-unsafe impl Send for PyProgressAdapter {}
-
 /// Python module definition.
 #[pymodule]
 fn exarch(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -644,6 +623,7 @@ fn exarch(m: &Bound<'_, PyModule>) -> PyResult<()> {
 )]
 mod tests {
     use super::*;
+    use exarch_core::MAX_PATH_LENGTH;
     use pyo3::types::PyString;
 
     #[test]

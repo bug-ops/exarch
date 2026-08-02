@@ -34,6 +34,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **TAR metadata-entry decompression bomb (#414)**: GNU long-name (`L`), GNU long-link (`K`),
+  and PAX extended header (`x`/`g`) records are buffered fully into memory by the `tar` crate's
+  internals before any entry reaches `exarch-core`'s validator or quota tracker, so a crafted
+  record declaring a multi-gigabyte length backed by a tiny compressed stream caused unbounded
+  allocation with no quota enforcement (measured: a 765 KB `.tar.gz` reached 4.95 GB peak RSS on
+  `extract`, 3.29 GB on `verify`, 2.49 GB on `list`). Added `SecurityConfig::max_tar_metadata_bytes`
+  (default 4 MiB, 16 MiB for `SecurityConfig::permissive()`) enforced by a new
+  `formats::tar_metadata_limit` read-budget mechanism: a reader wrapper meters bytes the `tar`
+  crate reads while searching for the next entry (headers, long-name/long-link/PAX records, GNU
+  sparse extension blocks) and errors once the budget is exceeded, before any oversized
+  allocation completes. Applied uniformly to `extract_archive`, `list_archive`, and
+  `verify_archive` (including `TarArchive`'s `ArchiveFormat` trait methods), since all three
+  previously opened `tar::Archive` independently.
+
+  An initial version of this fix re-parsed TAR headers in a shadow parser to reject an oversized
+  *declared* size before the `tar` crate could buffer it. Three rounds of adversarial review each
+  found a fresh case where that shadow parser's belief about entry framing diverged from the
+  `tar` crate's own (an untracked PAX `size=` override hiding a bomb behind a mis-framed decoy
+  entry; the same bypass again when the overriding PAX header had invalid magic, since `tar` only
+  honors an override when the header is `is_recognized_header`; and again via a PAX global header
+  draining `tar`'s override state without draining the shadow parser's mirrored state) — three
+  independent divergences in three rounds, each closed individually but never provably
+  exhaustive. The mechanism actually shipped replaces the shadow parser entirely: it never parses
+  a header, typeflag, magic byte, or PAX record, so there is exactly one parser (the `tar`
+  crate's own) and nothing left to diverge from it. Every yielded entry is fully drained (bounded,
+  not run to true EOF — an unbounded drain would let a crafted GNU sparse entry's synthesized
+  zero-padding become a separate unbounded CPU sink) before the budget re-arms for the next gap,
+  so the budget never depends on any declared size, override, or magic validity.
+
+  A follow-up review found that the drained-on-drop bound above was itself sourced from the
+  caller's `max_file_size` quota — a value `inspection::verify::listing_config_for_verify` (the
+  `verify_archive` pre-listing pass) legitimately relaxes to `u64::MAX` so metadata-only listing
+  does not false-reject large files. A GNU old-format sparse entry (`typeflag 'S'`) can declare a
+  `realsize` field up to `u64::MAX` (via GNU base-256 encoding) while backed by a single physical
+  block, so the relaxed quota silently defeated the drain bound on `verify` specifically,
+  reintroducing an unbounded, memory-invisible (drained to `io::sink`, so no corresponding heap
+  growth) CPU-exhaustion hang scaling linearly with the attacker-chosen `realsize` (measured: a
+  113-byte `.tar.gz` drove `verify` to 3.98 s at a 400 GiB `realsize`, with throughput implying a
+  `u64::MAX` value would hang for years).
+
+  Two successive fixes that instead sourced the drain bound from a fixed value (first
+  `max_tar_metadata_bytes`, 4 MiB, on the shared `list`/`verify` path; then, after that turned out
+  to false-reject any archive with a single entry over ~8 MiB, an "absolute cap" of 16 MiB applied
+  everywhere) were each found to reopen the same class of bug in the opposite direction: `list`,
+  `verify`, and even `extract` (via the CLI's `list_archive` pre-flight) rejected perfectly
+  ordinary archives — a ~765 KB legitimate file was rejected with a `SecurityViolation` — because
+  `list`/`verify` never read entry content at all, so the drain is the *only* thing consuming a
+  legitimate entry's real bytes to reach the next header, and any *fixed* cap on total drained
+  output eventually clips some legitimate entry's real content, however generous the cap.
+
+  The mechanism that actually shipped bounds the drain by **synthesized** bytes instead of total
+  output: `formats::tar_metadata_limit::BudgetedReader` now tracks a monotonic count of bytes
+  actually read from the underlying reader, and `TarEntryGuard::drop` drains in a loop comparing
+  bytes output so far against bytes actually read during the same drain. A legitimate entry's
+  drain consumes real bytes 1:1 with what it outputs, so this "synthetic" gap stays at (or within
+  a read-chunk's rounding of) zero regardless of entry size, and the entry always drains to
+  completion; GNU sparse zero-padding is the opposite — `tar` yields it from `io::repeat(0)` with
+  no corresponding read — so the gap grows every iteration and trips a small, fixed,
+  non-configurable cap almost immediately regardless of the declared `realsize`. This closes both
+  directions of the bug from one mechanism, without ever inspecting a header field to tell the two
+  cases apart.
 - Bumped `sevenz-rust2` from 0.21.3 to 0.21.4, fixing an integer overflow when summing
   attacker-controlled coder stream counts while parsing a 7z block header (upstream #127).
   Malformed archives previously could panic in debug builds and bypassed the stream-count
@@ -64,6 +125,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Regression test coverage mapping node-tar GHSA vulnerability classes onto the TAR extraction
+  pipeline (#399): GHSA-vmf3 (PAX/GNU long-name/long-link record smuggling and stream
+  re-framing), GHSA-gvwx / GHSA-w8wr (NUL byte and malformed-field handling in PAX and GNU
+  long-name records), and GHSA-23hp (declared-vs-actual entry size mismatches). All 13 cases
+  currently pass — protection is inherited from the `tar` crate dependency, so these lock in
+  that behavior against a future dependency bump.
+- Regression test coverage for the `max_tar_metadata_bytes` read-budget mechanism (#414):
+  `tests/security/tar_metadata_bomb.rs` covers `extract`/`list`/`verify`/`extract_archive`
+  against oversized `L`/`K`/`x` records, a false-positive check for legitimate long paths, and
+  the three historical shadow-parser bypass shapes (untracked PAX `size=` override,
+  invalid-magic variant, and PAX-global-header state drain) reconstructed to confirm the budget
+  mechanism rejects all three regardless — none of those shapes are individually meaningful to
+  it any more, since it does not parse headers at all. `tests/tar_alloc_bound.rs` (its own
+  top-level test binary, since `dhat`'s counting allocator is process-wide) measures actual peak
+  heap usage — not just the returned error — across the historical shapes and ~100
+  proptest-generated adversarial archives (random typeflags, magic validity, and declared sizes
+  up to 4 GiB), asserting it stays orders of magnitude below the historical multi-GB measurements
+  regardless of what the archive contains.
+  `tests/security/tar_budget_parity.rs` guards against the mechanism's one real assumption (that
+  `tar`'s iterator reads less than the budget between yields once every entry is drained) with a
+  proptest comparing budgeted extraction output against a plain, unwrapped `tar::Archive` read
+  for well-formed archives with long paths and many files, so a future `tar` crate bump that
+  invalidates the assumption fails loudly here rather than silently rejecting legitimate archives
+  in production.
+- Regression test coverage for the synthesized-bytes drain bound above (#414): direct unit tests
+  in `formats::tar_metadata_limit` confirm a legitimate entry (comfortably larger than the
+  synthetic-bytes cap) drains to true completion, and that a real GNU old-format sparse header
+  with an extreme `realsize` still stops draining within a small, bounded number of real bytes
+  read. `tests/security/tar_metadata_bomb.rs` reconstructs the same sparse-header shape and
+  asserts `verify_archive`, `list_archive`, and `extract_archive` all reject it within a bounded
+  wall-clock time regardless of the claimed size, not just bounded heap usage. A companion test
+  reproduces the exact false-positive size table found during this fix's own review (legitimate
+  archives with a single 3/6/9/12/30/45 MiB entry) against `list_archive`, `verify_archive`, and
+  `extract_archive`, and a further test confirms `extract` still fully skips a legitimately large
+  (45 MiB) disallowed-extension entry and continues extracting the rest, checked through both
+  `TarArchive::extract` directly and the public `extract_archive` API. `tests/tar_alloc_bound.rs`
+  was extended to measure `list_archive` and `verify_archive` in addition to `extract`, and its
+  random-archive generator now emits real GNU sparse header fields for typeflag `'S'` steps
+  instead of an empty (and therefore non-sparse-triggering) header, so the fuzz corpus actually
+  exercises the zero-padding code path this mechanism bounds.
+
+  A known, accepted residual limitation of the synthesized-bytes design: a *legitimate* GNU
+  sparse file with a real hole larger than the synthetic-bytes cap is indistinguishable, by pure
+  byte accounting, from the attack shape when skipped unread on `list_archive`/`verify_archive` —
+  both produce output with no corresponding read. This affects those two functions directly and,
+  transitively, the `exarch` CLI's `extract` command (which runs its own `list_archive`
+  pre-flight for progress-bar/conflict detection ahead of the actual extraction); it does *not*
+  affect the `extract_archive`/`TarArchive::extract` library functions, which read the entry
+  themselves and never reach the guard's drain unread. Accepted as a documented trade-off (P3
+  follow-up filed separately) rather than fixed here, since it requires a real hole combined with
+  several MiB of real data to reproduce and this PR has already been through four rounds of
+  adversarial review. Pinned by a dedicated regression test in each of `tests/security/tar_metadata_bomb.rs`
+  (`list_archive`/`verify_archive`/library `extract`) and `exarch-cli/tests/cli_tests.rs` (the CLI
+  command specifically), so a future change to the cap cannot silently move this threshold
+  without a test noticing.
 - Regression test coverage for GHSA-qh76-45cr-8xrc / CVE-2026-61725 (7z Zip-Slip via
   `sevenz_rust2::decompress()`), confirming `SevenZArchive::extract` rejects both
   relative-traversal and absolute-path 7z entries via `EntryValidator` before any file is

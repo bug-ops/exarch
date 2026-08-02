@@ -19,6 +19,10 @@ use crate::error::QuotaResource;
 use crate::formats::common::normalize_entry_name;
 use crate::formats::detect::ArchiveType;
 use crate::formats::detect::detect_format;
+use crate::formats::tar_metadata_limit::TarReadBudget;
+use crate::formats::tar_metadata_limit::budget_violation;
+use crate::formats::tar_metadata_limit::budgeted_reader;
+use crate::formats::tar_metadata_limit::budgeted_tar_entries;
 use crate::formats::zip::read_zip_symlink_target;
 use crate::formats::zip::zip_mode_is_symlink;
 use crate::inspection::manifest::ArchiveEntry;
@@ -86,8 +90,9 @@ fn list_tar(
 ) -> Result<ArchiveManifest> {
     let file = File::open(archive_path)?;
     let reader = BufReader::new(file);
-    let archive = tar::Archive::new(reader);
-    list_tar_entries(archive, format, config)
+    let (budgeted, budget) = budgeted_reader(reader, config.max_tar_metadata_bytes);
+    let archive = tar::Archive::new(budgeted);
+    list_tar_entries(archive, budget, format, config)
 }
 
 fn list_tar_gz(
@@ -98,8 +103,9 @@ fn list_tar_gz(
     let file = File::open(archive_path)?;
     let reader = BufReader::new(file);
     let decoder = GzDecoder::new(reader);
-    let archive = tar::Archive::new(decoder);
-    list_tar_entries(archive, format, config)
+    let (budgeted, budget) = budgeted_reader(decoder, config.max_tar_metadata_bytes);
+    let archive = tar::Archive::new(budgeted);
+    list_tar_entries(archive, budget, format, config)
 }
 
 fn list_tar_bz2(
@@ -112,8 +118,9 @@ fn list_tar_bz2(
     let file = File::open(archive_path)?;
     let reader = BufReader::new(file);
     let decoder = BzDecoder::new(reader);
-    let archive = tar::Archive::new(decoder);
-    list_tar_entries(archive, format, config)
+    let (budgeted, budget) = budgeted_reader(decoder, config.max_tar_metadata_bytes);
+    let archive = tar::Archive::new(budgeted);
+    list_tar_entries(archive, budget, format, config)
 }
 
 fn list_tar_xz(
@@ -126,8 +133,9 @@ fn list_tar_xz(
     let file = File::open(archive_path)?;
     let reader = BufReader::new(file);
     let decoder = XzDecoder::new(reader);
-    let archive = tar::Archive::new(decoder);
-    list_tar_entries(archive, format, config)
+    let (budgeted, budget) = budgeted_reader(decoder, config.max_tar_metadata_bytes);
+    let archive = tar::Archive::new(budgeted);
+    list_tar_entries(archive, budget, format, config)
 }
 
 fn list_tar_zst(
@@ -140,25 +148,34 @@ fn list_tar_zst(
     let file = File::open(archive_path)?;
     let reader = BufReader::new(file);
     let decoder = ZstdDecoder::new(reader)?;
-    let archive = tar::Archive::new(decoder);
-    list_tar_entries(archive, format, config)
+    let (budgeted, budget) = budgeted_reader(decoder, config.max_tar_metadata_bytes);
+    let archive = tar::Archive::new(budgeted);
+    list_tar_entries(archive, budget, format, config)
 }
 
+/// Lists entries from a TAR archive already wrapped in a [`budgeted_reader`].
+///
+/// `budget` must be the handle returned alongside the reader that `archive`
+/// wraps — passed explicitly (rather than re-derived) so the reader and the
+/// budget used to arm/disarm around it can never be a mismatched pair.
 fn list_tar_entries<R: std::io::Read>(
-    mut archive: tar::Archive<R>,
+    mut archive: tar::Archive<crate::formats::tar_metadata_limit::BudgetedReader<R>>,
+    budget: TarReadBudget,
     format: ArchiveType,
     config: &SecurityConfig,
 ) -> Result<ArchiveManifest> {
     let mut manifest = ArchiveManifest::new(format);
     let mut quota = QuotaTracker::new();
 
-    let entries = archive
-        .entries()
+    let mut entries = budgeted_tar_entries(&mut archive, budget)
         .map_err(|e| ArchiveError::InvalidArchive(format!("failed to read TAR entries: {e}")))?;
 
-    for entry_result in entries {
-        let entry = entry_result
-            .map_err(|e| ArchiveError::InvalidArchive(format!("failed to read TAR entry: {e}")))?;
+    while let Some(entry_result) = entries.next_entry() {
+        let entry = entry_result.map_err(|e| {
+            budget_violation(&e).unwrap_or_else(|| {
+                ArchiveError::InvalidArchive(format!("failed to read TAR entry: {e}"))
+            })
+        })?;
 
         // Skip TAR metadata entries (PAX headers, GNU long names/links)
         if is_tar_metadata_entry(&entry) {
@@ -173,6 +190,11 @@ fn list_tar_entries<R: std::io::Read>(
         // and extraction fully equivalent — extraction's QuotaTracker only
         // records EntryType::File, while listing records every entry type
         // (directories, symlinks, hardlinks too), a pre-existing divergence.
+        //
+        // A quota rejection here (the `?`) aborts the loop without an
+        // explicit `entry.abandon()`; harmless — the guard's bounded drain
+        // on drop is pointless I/O in that case, not a correctness
+        // requirement (see `TarEntryGuard::abandon`).
         quota.record_file(size, config)?;
 
         let path = entry
@@ -235,17 +257,20 @@ fn list_zip(
     list_zip_reader(&mut archive, config)
 }
 
-/// Lists entries from an already-opened TAR reader.
+/// Lists entries from an already budget-wrapped TAR reader.
 ///
 /// Used by `ArchiveFormat::list()` implementations to avoid re-opening the
-/// archive. `format` is passed through into `ArchiveManifest` as-is.
+/// archive. `format` is passed through into `ArchiveManifest` as-is. `budget`
+/// must be the handle returned alongside `reader` from the same
+/// `budgeted_reader` call.
 pub(crate) fn list_tar_reader<R: Read>(
-    reader: R,
+    reader: crate::formats::tar_metadata_limit::BudgetedReader<R>,
+    budget: TarReadBudget,
     format: ArchiveType,
     config: &SecurityConfig,
 ) -> Result<ArchiveManifest> {
     let archive = tar::Archive::new(reader);
-    list_tar_entries(archive, format, config)
+    list_tar_entries(archive, budget, format, config)
 }
 
 /// Lists entries from an already-opened ZIP archive.

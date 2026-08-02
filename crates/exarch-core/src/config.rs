@@ -126,6 +126,45 @@ pub struct SecurityConfig {
     ///
     /// **Recommendation:** Set to 1-2x available RAM for trusted archives only.
     pub max_solid_block_memory: u64,
+
+    /// Maximum bytes the TAR reader may consume for headers and metadata
+    /// records in the gap between two consecutive entries.
+    ///
+    /// **TAR Metadata Buffering Model:**
+    ///
+    /// GNU long-name (`L`), GNU long-link (`K`), and PAX extended header
+    /// (`x`/`g`) records are buffered fully into memory by the underlying
+    /// `tar` crate *before* any entry reaches the entry validator or quota
+    /// tracker — a crafted record can declare a multi-gigabyte length backed
+    /// by a tiny compressed stream, exhausting memory with no quota
+    /// enforcement (metadata-entry decompression bomb).
+    ///
+    /// **Enforcement Strategy:**
+    /// - A read-budget wrapper meters bytes the `tar` crate reads while
+    ///   searching for the next entry (headers, long-name/long-link/PAX
+    ///   records, GNU sparse extension blocks) and returns an error once
+    ///   `max_tar_metadata_bytes` is exceeded, before any oversized allocation
+    ///   completes
+    /// - Applies uniformly to `extract`, `list`, and `verify`
+    /// - The window this bounds contains no entry *data* — only metadata — so
+    ///   it does not interact with `max_file_size`/`max_total_size`. Draining
+    ///   an unread entry before the next header search is a separate concern
+    ///   (see `formats::tar_metadata_limit`'s module docs) bounded by
+    ///   synthesized-byte accounting, not by this or any other quota value
+    /// - Legitimate long-path/xattr metadata records are at most a few
+    ///   kilobytes each, and a GNU tar sparse file with heavy fragmentation can
+    ///   use up to a few thousand 512-byte extension blocks; either or both
+    ///   share this single budget (not "plus" each other), so the default
+    ///   leaves headroom for either shape, not necessarily both at their
+    ///   extremes simultaneously
+    /// - The real peak memory this bounds is roughly 5x the configured value
+    ///   (GNU sparse extension blocks expand into multiple `EntryIo` records
+    ///   per block before the growth is charged against this budget), not an
+    ///   exact multiple — treat it as an order-of-magnitude ceiling, not a
+    ///   tight bound
+    ///
+    /// Default: 4 MiB (4,194,304 bytes)
+    pub max_tar_metadata_bytes: u64,
 }
 
 impl Default for SecurityConfig {
@@ -144,6 +183,7 @@ impl Default for SecurityConfig {
     ///   ".docker", ".env"]`
     /// - `allow_solid_archives`: false (solid archives rejected)
     /// - `max_solid_block_memory`: 512 MB
+    /// - `max_tar_metadata_bytes`: 4 MiB
     fn default() -> Self {
         Self {
             max_file_size: 50 * 1024 * 1024,   // 50 MB
@@ -165,6 +205,7 @@ impl Default for SecurityConfig {
             ],
             allow_solid_archives: false,
             max_solid_block_memory: 512 * 1024 * 1024, // 512 MB
+            max_tar_metadata_bytes: 4 * 1024 * 1024,   // 4 MiB
         }
     }
 }
@@ -188,6 +229,7 @@ impl SecurityConfig {
             banned_path_components: Vec::new(),
             allow_solid_archives: true,
             max_solid_block_memory: 1024 * 1024 * 1024, // 1 GB for permissive
+            max_tar_metadata_bytes: 16 * 1024 * 1024,   // 16 MiB for permissive
             ..Default::default()
         }
     }
@@ -247,6 +289,11 @@ impl SecurityConfig {
         if self.max_solid_block_memory == 0 {
             return Err(crate::ArchiveError::InvalidConfiguration {
                 reason: "max_solid_block_memory must not be zero".into(),
+            });
+        }
+        if self.max_tar_metadata_bytes == 0 {
+            return Err(crate::ArchiveError::InvalidConfiguration {
+                reason: "max_tar_metadata_bytes must not be zero".into(),
             });
         }
         Ok(())
@@ -515,6 +562,25 @@ impl SecurityConfig {
     #[inline]
     pub fn with_max_solid_block_memory(mut self, size: u64) -> Self {
         self.max_solid_block_memory = size;
+        self
+    }
+
+    /// Sets the maximum bytes the TAR reader may consume for headers and
+    /// metadata records (GNU long-name/long-link, PAX extended headers, GNU
+    /// sparse extension blocks) in the gap between two consecutive entries.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::SecurityConfig;
+    ///
+    /// let config = SecurityConfig::default().with_max_tar_metadata_bytes(64 * 1024);
+    /// assert_eq!(config.max_tar_metadata_bytes, 64 * 1024);
+    /// ```
+    #[must_use]
+    #[inline]
+    pub fn with_max_tar_metadata_bytes(mut self, size: u64) -> Self {
+        self.max_tar_metadata_bytes = size;
         self
     }
 
@@ -822,6 +888,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_config_tar_metadata_bytes_default() {
+        let config = SecurityConfig::default();
+        assert_eq!(
+            config.max_tar_metadata_bytes,
+            4 * 1024 * 1024,
+            "max TAR metadata bytes should be 4 MiB by default"
+        );
+    }
+
+    #[test]
+    fn test_config_permissive_tar_metadata_bytes() {
+        let config = SecurityConfig::permissive();
+        assert_eq!(
+            config.max_tar_metadata_bytes,
+            16 * 1024 * 1024,
+            "permissive should have 16 MiB TAR metadata budget"
+        );
+    }
+
+    #[test]
+    fn test_with_max_tar_metadata_bytes_builder() {
+        let config = SecurityConfig::default().with_max_tar_metadata_bytes(2048);
+        assert_eq!(config.max_tar_metadata_bytes, 2048);
+    }
+
     // Regression tests for #172: SecurityConfig::validate() must reject configs
     // that would make security enforcement impossible.
 
@@ -906,6 +998,15 @@ mod tests {
     fn test_validate_rejects_zero_max_solid_block_memory() {
         let cfg = SecurityConfig {
             max_solid_block_memory: 0,
+            ..SecurityConfig::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_zero_max_tar_metadata_bytes() {
+        let cfg = SecurityConfig {
+            max_tar_metadata_bytes: 0,
             ..SecurityConfig::default()
         };
         assert!(cfg.validate().is_err());

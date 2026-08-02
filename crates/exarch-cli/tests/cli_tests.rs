@@ -2137,3 +2137,94 @@ fn test_list_json_long_regular_file_omits_link_fields() {
         "regular file entry must not contain hardlink_target key"
     );
 }
+
+/// Builds a tar.gz archive at `path` containing one file entry nested under
+/// `component`, so a `--banned-component` flag matching `component` triggers
+/// `ArchiveError::SecurityViolation` during extraction.
+fn create_tar_gz_with_component(path: &std::path::Path, component: &str) {
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
+
+    let file = std::fs::File::create(path).expect("create archive");
+    let gz = GzEncoder::new(file, Compression::default());
+    let mut builder = tar::Builder::new(gz);
+    let data = b"payload";
+    let entry_path = format!("{component}/file.txt");
+    let mut header = tar::Header::new_gnu();
+    header.set_size(data.len() as u64);
+    header.set_mode(0o644);
+    header.set_path(&entry_path).expect("set path");
+    header.set_cksum();
+    builder
+        .append_data(&mut header, &entry_path, &data[..])
+        .expect("append entry");
+    let gz = builder.into_inner().expect("get gz encoder");
+    gz.finish().expect("finish gzip stream");
+}
+
+/// Regression test for issue #403: the `SecurityViolation` reason must appear
+/// exactly once in `--json` output, not doubled by redundant anyhow context.
+#[test]
+fn test_extract_security_violation_json_reason_appears_once() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive_path = temp.path().join("banned.tar.gz");
+    create_tar_gz_with_component(&archive_path, ".customdir");
+    let out_dir = temp.path().join("out");
+    std::fs::create_dir_all(&out_dir).expect("create out dir");
+
+    let output = exarch_cmd()
+        .arg("extract")
+        .arg(&archive_path)
+        .arg(&out_dir)
+        .arg("--banned-component")
+        .arg(".customdir")
+        .arg("--json")
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: serde_json::Value = serde_json::from_slice(&output).expect("invalid JSON output");
+    assert_eq!(json["status"], "error");
+    assert_eq!(json["error"]["kind"], "SecurityViolation");
+    let message = json["error"]["message"]
+        .as_str()
+        .expect("error.message must be a string");
+    assert_eq!(
+        message.matches("banned path component: .customdir").count(),
+        1,
+        "reason should appear exactly once, got: {message}"
+    );
+}
+
+/// Regression test for issue #403: same duplication check as
+/// [`test_extract_security_violation_json_reason_appears_once`], for the
+/// human-readable (non-JSON) output path.
+#[test]
+fn test_extract_security_violation_text_reason_appears_once() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive_path = temp.path().join("banned.tar.gz");
+    create_tar_gz_with_component(&archive_path, ".customdir");
+    let out_dir = temp.path().join("out");
+    std::fs::create_dir_all(&out_dir).expect("create out dir");
+
+    let output = exarch_cmd()
+        .arg("extract")
+        .arg(&archive_path)
+        .arg(&out_dir)
+        .arg("--banned-component")
+        .arg(".customdir")
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+
+    let stderr = std::str::from_utf8(&output).expect("stderr is not valid UTF-8");
+    assert_eq!(
+        stderr.matches("banned path component: .customdir").count(),
+        1,
+        "reason should appear exactly once, got: {stderr}"
+    );
+}

@@ -596,7 +596,7 @@ def extract_archive(
         ExtractionReport with extraction statistics
 
     Raises:
-        ValueError: Invalid argument type, null bytes in path, or path too long
+        ValueError: Invalid argument type
         PathTraversalError: Path traversal attempt detected
         SymlinkEscapeError: Symlink points outside extraction directory
         HardlinkEscapeError: Hardlink target outside extraction directory
@@ -636,7 +636,7 @@ def extract_archive_with_progress(
         ExtractionReport with extraction statistics
 
     Raises:
-        ValueError: Invalid argument type, null bytes in path, or path too long
+        ValueError: Invalid argument type
         PathTraversalError: Path traversal attempt detected
         SymlinkEscapeError: Symlink points outside extraction directory
         HardlinkEscapeError: Hardlink target outside extraction directory

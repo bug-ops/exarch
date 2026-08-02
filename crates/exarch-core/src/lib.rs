@@ -76,6 +76,12 @@ pub use inspection::VerificationStatus;
 /// Summary statistics produced by the validation pipeline; see
 /// [`security::ValidationReport`].
 pub use security::ValidationReport;
+/// Maximum length, in bytes, of a raw path string accepted at the FFI
+/// boundary. Shared by `exarch-python` and `exarch-node`.
+pub use security::boundary::MAX_PATH_LENGTH;
+/// Validates a raw, caller-supplied path string before it enters the
+/// archive pipeline. Shared by `exarch-python` and `exarch-node`.
+pub use security::boundary::validate_raw_path_str;
 
 // Re-export types module for easier access
 pub use types::DestDir;

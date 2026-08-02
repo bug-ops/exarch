@@ -1,5 +1,6 @@
 //! Security validation modules.
 
+pub(crate) mod boundary;
 pub(crate) mod context;
 pub(crate) mod hardlink;
 pub(crate) mod path;

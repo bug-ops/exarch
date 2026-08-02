@@ -77,6 +77,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   archives). The reason now appears exactly once, and the CLI's own context adds a hint naming
   the actual policy flags (`--allow-symlinks`, `--allow-hardlinks`, `--allow-solid-archives`,
   `--banned-component`) instead of repeating the source error's text.
+- **Redundant `unsafe impl Send` on `PyProgressAdapter` in `exarch-python` (#405)**: pyo3 0.29's
+  `Py<T>` is `Send` for all `T` unconditionally, so `PyProgressAdapter { callback: Py<PyAny>, .. }`
+  already auto-derives `Send`. Removed the manual `unsafe impl Send` block; no `unsafe` code was
+  actually required.
+- **Stale generated `exarch-node/index.d.ts` (#404)**: the napi-rs generated type declarations
+  still listed only 2 of the 7 default `banned_path_components` entries in the `SecurityConfig`
+  doc comment table, out of sync with the Rust source. Regenerated via `napi build`.
 
 ### Changed
 
@@ -87,6 +94,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   current call sites (each site returns the error immediately afterwards, so evaluating
   `std::mem::take(report)` unconditionally rather than only inside the `total_items() > 0` branch
   is unobservable).
+- **Deduplicated FFI boundary path validation between `exarch-python` and `exarch-node` (#406)**:
+  both bindings independently rejected null bytes and paths over 4096 bytes for raw path strings
+  supplied by callers, and the two implementations had drifted (a full-scan fold vs. a
+  short-circuiting `contains` for the null-byte check, and no consistent check order). Both now
+  call the new `exarch_core::validate_raw_path_str()`, which owns `MAX_PATH_LENGTH`, checks length
+  before scanning for a null byte (rejecting oversized input in O(1) before the O(n) scan runs),
+  and returns `ArchiveError::SecurityViolation`. Each binding routes that error through its
+  existing `convert_error()` — the same converter used for every other security rejection — instead
+  of hand-rolling a bespoke exception. This changes the concrete exception raised for null-byte and
+  path-length rejections: Python now raises `SecurityViolationError` (previously a bare
+  `ValueError`) and Node.js error messages now carry the `SECURITY_VIOLATION:` code prefix
+  (previously unprefixed). Both were already documented as possible outcomes of these checks;
+  acceptable pre-1.0 per the project's no-backward-compatibility policy.
 
 ## [0.5.2] - 2026-07-27
 

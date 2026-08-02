@@ -29,6 +29,7 @@ use crate::inspection::manifest::ArchiveEntry;
 use crate::inspection::manifest::ArchiveManifest;
 use crate::inspection::manifest::ManifestEntryType;
 use crate::security::quota::QuotaTracker;
+use crate::types::safe_path::has_null_bytes;
 
 /// Lists archive contents without extracting.
 ///
@@ -202,6 +203,12 @@ fn list_tar_entries<R: std::io::Read>(
             .map_err(|e| ArchiveError::InvalidArchive(format!("invalid path: {e}")))?
             .into_owned();
 
+        if !config.relaxed_for_verify_preflight && has_null_bytes(&path) {
+            return Err(ArchiveError::SecurityViolation {
+                reason: format!("path contains null bytes: {}", path.display()),
+            });
+        }
+
         if contains_traversal(&path, config) {
             return Err(ArchiveError::PathTraversal { path });
         }
@@ -219,8 +226,30 @@ fn list_tar_entries<R: std::io::Read>(
                     .link_name()
                     .map_err(|e| ArchiveError::InvalidArchive(format!("invalid link target: {e}")))?
                     .map(std::borrow::Cow::into_owned);
+                let is_symlink = entry.header().entry_type() == tar::EntryType::Symlink;
+                let kind = if is_symlink { "symlink" } else { "hardlink" };
 
-                if entry.header().entry_type() == tar::EntryType::Symlink {
+                match &target {
+                    Some(t) => validate_link_target(t, kind, config)?,
+                    // `link_name()` returns `None` when neither the ustar
+                    // linkname field nor a PAX `linkpath` override is
+                    // present — a structurally different case from an
+                    // empty-string target (see `validate_link_target`).
+                    // `extract` rejects this via `to_entry_type`
+                    // (formats/tar.rs) with the same message; mirrored here
+                    // for list/extract parity, still relaxed for verify's
+                    // pre-flight pass since `verify_entry` already turns a
+                    // missing target into an empty one via
+                    // `unwrap_or_default()` and reports it gracefully.
+                    None if !config.relaxed_for_verify_preflight => {
+                        return Err(ArchiveError::InvalidArchive(format!(
+                            "{kind} missing target"
+                        )));
+                    }
+                    None => {}
+                }
+
+                if is_symlink {
                     (target.clone(), None)
                 } else {
                     (None, target.clone())
@@ -321,6 +350,18 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
                     });
                 }
                 let p = PathBuf::from(stripped);
+                // NUL before traversal, matching `list_tar_entries`'s check
+                // order. `enclosed_name()` already rejects NUL bytes
+                // internally and returns `None` for them (caught by the
+                // other two match arms), so this is the only branch where a
+                // NUL byte can reach `p`: it bypasses `enclosed_name()`
+                // entirely by reading `raw_name` straight from the ZIP
+                // central directory.
+                if !config.relaxed_for_verify_preflight && has_null_bytes(&p) {
+                    return Err(ArchiveError::SecurityViolation {
+                        reason: format!("path contains null bytes: {}", p.display()),
+                    });
+                }
                 if contains_traversal(&p, config) {
                     return Err(ArchiveError::PathTraversal {
                         path: PathBuf::from(&raw_name),
@@ -355,7 +396,9 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
             let mut sym_entry = archive.by_index(i).map_err(|e| {
                 ArchiveError::InvalidArchive(format!("failed to re-read ZIP entry {i}: {e}"))
             })?;
-            Some(read_zip_symlink_target(&mut sym_entry)?)
+            let target = read_zip_symlink_target(&mut sym_entry)?;
+            validate_link_target(&target, "symlink", config)?;
+            Some(target)
         } else {
             None
         };
@@ -441,6 +484,14 @@ fn is_empty_sevenz_archive_reader<R: Read + Seek>(
 }
 
 /// Builds a manifest from a parsed 7z archive structure.
+///
+/// No NUL-byte check is applied to `entry.name`, unlike `list_tar_entries`
+/// and `list_zip_reader`: `sevenz_rust2::Archive::read` decodes each name as
+/// UTF-16 and stops at the first zero code unit while parsing the header
+/// (see `sevenz-rust2::reader`'s `NamesReader`), so an embedded NUL cannot
+/// survive into `entry.name` here. This is a format-parser guarantee, not a
+/// scope decision — it would need re-checking if `sevenz-rust2` ever changes
+/// that truncation behavior.
 fn list_sevenz_archive(
     archive: &sevenz_rust2::Archive,
     config: &SecurityConfig,
@@ -524,6 +575,37 @@ fn sevenz_manifest_entry_type(entry: &sevenz_rust2::ArchiveEntry) -> ManifestEnt
     ManifestEntryType::File
 }
 
+/// Checks a symlink/hardlink target parsed during listing for emptiness and
+/// NUL bytes — the same two conditions `SafeSymlink::validate` and
+/// `HardlinkTracker::validate_hardlink` reject during extraction (#424).
+/// `kind` is `"symlink"` or `"hardlink"`, matching the wording used by those
+/// extraction-side checks.
+///
+/// This does not give `list` full parity with `extract`: unlike the
+/// extraction-side validators, it does not check
+/// `config.allowed.symlinks`/`hardlinks`, reject absolute targets, or detect
+/// traversal within the target — only emptiness and NUL bytes. Skipped
+/// entirely when `config.relaxed_for_verify_preflight` is set (see that
+/// field's doc), so `verify_archive`'s pre-flight listing pass can defer to
+/// `verify_entry`'s own equivalent checks and report a graceful
+/// `VerificationIssue` instead of aborting.
+fn validate_link_target(target: &Path, kind: &str, config: &SecurityConfig) -> Result<()> {
+    if config.relaxed_for_verify_preflight {
+        return Ok(());
+    }
+    if target.as_os_str().is_empty() {
+        return Err(ArchiveError::SecurityViolation {
+            reason: format!("{kind} target is empty"),
+        });
+    }
+    if has_null_bytes(target) {
+        return Err(ArchiveError::SecurityViolation {
+            reason: format!("{kind} target contains null bytes"),
+        });
+    }
+    Ok(())
+}
+
 /// Checks whether a sevenz-rust2 parse failure is due to a valid empty 7z
 /// Returns `true` if the path contains traversal attempts.
 ///
@@ -590,6 +672,8 @@ mod tests {
     use std::assert_matches;
 
     use crate::test_utils::create_raw_zip_entry;
+    use crate::test_utils::tar_with_pax_linkpath;
+    use crate::test_utils::tar_with_pax_nul_path;
     use flate2::write::GzEncoder;
     use std::io::Write;
     use tempfile::NamedTempFile;
@@ -856,6 +940,10 @@ mod tests {
             manifest.entries[0].symlink_target,
             Some(PathBuf::from("target.txt")),
             "symlink_target must be the actual link target, not the entry path"
+        );
+        assert_eq!(
+            manifest.entries[0].hardlink_target, None,
+            "ZIP has no hardlink concept — hardlink_target must always be None"
         );
     }
 
@@ -1997,6 +2085,339 @@ mod tests {
             result,
             Err(ArchiveError::PathTraversal { .. }),
             "traversal inside absolute path must still be rejected, got: {result:?}"
+        );
+    }
+
+    // --- Regression tests for #430: list() must reject NUL bytes in entry
+    // paths, matching extract()/verify() ---
+
+    #[test]
+    fn test_list_tar_pax_path_nul_byte_rejected() {
+        let mut temp_file = NamedTempFile::with_suffix(".tar").unwrap();
+        temp_file
+            .write_all(&tar_with_pax_nul_path(b"foo\0bar.txt", b"hello"))
+            .unwrap();
+        temp_file.flush().unwrap();
+
+        let config = SecurityConfig::default();
+        let result = list_archive(temp_file.path(), &config);
+        match result {
+            Err(ArchiveError::SecurityViolation { reason }) => {
+                assert!(reason.contains("null bytes"), "reason: {reason}");
+            }
+            other => {
+                panic!("expected SecurityViolation for NUL byte in PAX path, got: {other:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn test_list_zip_nul_byte_rejected_as_path_traversal_by_default() {
+        // Under default config, `enclosed_name()` already rejects NUL bytes
+        // internally, so this hits the pre-existing `None => PathTraversal`
+        // fallback rather than the new NUL-byte check — must not regress.
+        let zip_bytes = create_raw_zip_entry("foo\0bar.txt", b"");
+        let mut temp_file = NamedTempFile::with_suffix(".zip").unwrap();
+        temp_file.write_all(&zip_bytes).unwrap();
+        temp_file.flush().unwrap();
+
+        let config = SecurityConfig::default();
+        let result = list_archive(temp_file.path(), &config);
+        assert_matches!(
+            result,
+            Err(ArchiveError::PathTraversal { .. }),
+            "NUL byte in ZIP filename must be rejected by default, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_list_zip_nul_byte_rejected_with_allow_absolute_paths() {
+        // The actual bypass closed by #430: allow_absolute_paths routes
+        // through the raw-name fallback, bypassing enclosed_name()'s NUL
+        // check entirely, so only the new has_null_bytes() check catches it.
+        let zip_bytes = create_raw_zip_entry("foo\0bar.txt", b"");
+        let mut temp_file = NamedTempFile::with_suffix(".zip").unwrap();
+        temp_file.write_all(&zip_bytes).unwrap();
+        temp_file.flush().unwrap();
+
+        let config = SecurityConfig::default().with_allow_absolute_paths(true);
+        let result = list_archive(temp_file.path(), &config);
+        match result {
+            Err(ArchiveError::SecurityViolation { reason }) => {
+                assert!(reason.contains("null bytes"), "reason: {reason}");
+            }
+            other => panic!(
+                "expected SecurityViolation for NUL byte in ZIP filename with allow_absolute_paths, got: {other:?}"
+            ),
+        }
+    }
+
+    // --- Regression tests for #430 follow-up: list() must reject NUL bytes
+    // and emptiness in symlink/hardlink targets, matching extract()'s
+    // SafeSymlink/HardlinkTracker checks (#424) ---
+
+    #[test]
+    fn test_list_tar_symlink_target_nul_byte_rejected() {
+        let mut temp_file = NamedTempFile::with_suffix(".tar").unwrap();
+        temp_file
+            .write_all(&tar_with_pax_linkpath(b"foo\0bar", b'2'))
+            .unwrap();
+        temp_file.flush().unwrap();
+
+        let config = SecurityConfig::default();
+        let result = list_archive(temp_file.path(), &config);
+        match result {
+            Err(ArchiveError::SecurityViolation { reason }) => {
+                assert_eq!(reason, "symlink target contains null bytes");
+            }
+            other => {
+                panic!("expected SecurityViolation for NUL byte in symlink target, got: {other:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn test_list_tar_symlink_target_empty_rejected() {
+        let mut temp_file = NamedTempFile::with_suffix(".tar").unwrap();
+        temp_file
+            .write_all(&tar_with_pax_linkpath(b"", b'2'))
+            .unwrap();
+        temp_file.flush().unwrap();
+
+        let config = SecurityConfig::default();
+        let result = list_archive(temp_file.path(), &config);
+        match result {
+            Err(ArchiveError::SecurityViolation { reason }) => {
+                assert_eq!(reason, "symlink target is empty");
+            }
+            other => panic!("expected SecurityViolation for empty symlink target, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_list_tar_hardlink_target_nul_byte_rejected() {
+        let mut temp_file = NamedTempFile::with_suffix(".tar").unwrap();
+        temp_file
+            .write_all(&tar_with_pax_linkpath(b"foo\0bar", b'1'))
+            .unwrap();
+        temp_file.flush().unwrap();
+
+        let config = SecurityConfig::default();
+        let result = list_archive(temp_file.path(), &config);
+        match result {
+            Err(ArchiveError::SecurityViolation { reason }) => {
+                assert_eq!(reason, "hardlink target contains null bytes");
+            }
+            other => {
+                panic!("expected SecurityViolation for NUL byte in hardlink target, got: {other:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn test_list_tar_hardlink_target_empty_rejected() {
+        let mut temp_file = NamedTempFile::with_suffix(".tar").unwrap();
+        temp_file
+            .write_all(&tar_with_pax_linkpath(b"", b'1'))
+            .unwrap();
+        temp_file.flush().unwrap();
+
+        let config = SecurityConfig::default();
+        let result = list_archive(temp_file.path(), &config);
+        match result {
+            Err(ArchiveError::SecurityViolation { reason }) => {
+                assert_eq!(reason, "hardlink target is empty");
+            }
+            other => panic!("expected SecurityViolation for empty hardlink target, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_list_zip_symlink_target_nul_byte_rejected() {
+        use crate::test_utils::create_zip_with_symlink;
+        use std::io::Cursor;
+
+        let zip_bytes = create_zip_with_symlink("link", "foo\0bar");
+        let mut archive = zip::ZipArchive::new(Cursor::new(zip_bytes)).unwrap();
+        let config = SecurityConfig::default();
+        let result = list_zip_reader(&mut archive, &config);
+        match result {
+            Err(ArchiveError::SecurityViolation { reason }) => {
+                assert_eq!(reason, "symlink target contains null bytes");
+            }
+            other => panic!(
+                "expected SecurityViolation for NUL byte in ZIP symlink target, got: {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_list_zip_symlink_target_empty_rejected() {
+        use crate::test_utils::create_zip_with_symlink;
+        use std::io::Cursor;
+
+        let zip_bytes = create_zip_with_symlink("link", "");
+        let mut archive = zip::ZipArchive::new(Cursor::new(zip_bytes)).unwrap();
+        let config = SecurityConfig::default();
+        let result = list_zip_reader(&mut archive, &config);
+        match result {
+            Err(ArchiveError::SecurityViolation { reason }) => {
+                assert_eq!(reason, "symlink target is empty");
+            }
+            other => {
+                panic!("expected SecurityViolation for empty ZIP symlink target, got: {other:?}")
+            }
+        }
+    }
+
+    // --- Regression tests for #430 follow-up (round 3): a symlink/hardlink
+    // entry with no link target at all (no ustar linkname field, no PAX
+    // `linkpath` override — `entry.link_name()` returns `None`) must be
+    // rejected by bare `list`, matching extract's `to_entry_type` wording,
+    // while `relaxed_for_verify_preflight` must skip this check (and the
+    // entry-path NUL and link-target emptiness/NUL checks) so verify's
+    // pre-flight listing pass can defer to `verify_entry`'s own graceful
+    // checks instead of aborting ---
+
+    #[test]
+    fn test_list_tar_symlink_missing_target_rejected() {
+        let mut temp_file = NamedTempFile::with_suffix(".tar").unwrap();
+        let mut builder = tar::Builder::new(Vec::new());
+
+        let mut header = tar::Header::new_gnu();
+        header.set_path("link").unwrap();
+        header.set_size(0);
+        header.set_entry_type(tar::EntryType::Symlink);
+        // Deliberately no `set_link_name()` call: the raw linkname field
+        // stays all-zero, so `entry.link_name()` returns `None` rather than
+        // `Some(empty)`.
+        header.set_cksum();
+        builder.append(&header, &[][..]).unwrap();
+
+        let data = builder.into_inner().unwrap();
+        temp_file.write_all(&data).unwrap();
+        temp_file.flush().unwrap();
+
+        let config = SecurityConfig::default();
+        let result = list_archive(temp_file.path(), &config);
+        match result {
+            Err(ArchiveError::InvalidArchive(msg)) => {
+                assert_eq!(msg, "symlink missing target");
+            }
+            other => panic!("expected InvalidArchive for missing symlink target, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_list_tar_hardlink_missing_target_rejected() {
+        let mut temp_file = NamedTempFile::with_suffix(".tar").unwrap();
+        let mut builder = tar::Builder::new(Vec::new());
+
+        let mut header = tar::Header::new_gnu();
+        header.set_path("link").unwrap();
+        header.set_size(0);
+        header.set_entry_type(tar::EntryType::Link);
+        header.set_cksum();
+        builder.append(&header, &[][..]).unwrap();
+
+        let data = builder.into_inner().unwrap();
+        temp_file.write_all(&data).unwrap();
+        temp_file.flush().unwrap();
+
+        let config = SecurityConfig::default();
+        let result = list_archive(temp_file.path(), &config);
+        match result {
+            Err(ArchiveError::InvalidArchive(msg)) => {
+                assert_eq!(msg, "hardlink missing target");
+            }
+            other => panic!("expected InvalidArchive for missing hardlink target, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_list_tar_relaxed_preflight_allows_nul_byte_path() {
+        let mut temp_file = NamedTempFile::with_suffix(".tar").unwrap();
+        temp_file
+            .write_all(&tar_with_pax_nul_path(b"foo\0bar.txt", b"hello"))
+            .unwrap();
+        temp_file.flush().unwrap();
+
+        let config = SecurityConfig::default().with_relaxed_for_verify_preflight();
+        let manifest = list_archive(temp_file.path(), &config)
+            .expect("relaxed_for_verify_preflight must let a NUL-byte entry path through");
+
+        assert_eq!(manifest.total_entries, 1);
+        assert!(
+            has_null_bytes(&manifest.entries[0].path),
+            "the raw NUL-byte path must reach the manifest unmodified"
+        );
+    }
+
+    #[test]
+    fn test_list_tar_relaxed_preflight_allows_missing_link_target() {
+        let mut temp_file = NamedTempFile::with_suffix(".tar").unwrap();
+        let mut builder = tar::Builder::new(Vec::new());
+
+        let mut header = tar::Header::new_gnu();
+        header.set_path("link").unwrap();
+        header.set_size(0);
+        header.set_entry_type(tar::EntryType::Symlink);
+        header.set_cksum();
+        builder.append(&header, &[][..]).unwrap();
+
+        let data = builder.into_inner().unwrap();
+        temp_file.write_all(&data).unwrap();
+        temp_file.flush().unwrap();
+
+        let config = SecurityConfig::default().with_relaxed_for_verify_preflight();
+        let manifest = list_archive(temp_file.path(), &config)
+            .expect("relaxed_for_verify_preflight must let a missing symlink target through");
+
+        assert_eq!(manifest.total_entries, 1);
+        assert_eq!(manifest.entries[0].symlink_target, None);
+    }
+
+    #[test]
+    fn test_list_tar_relaxed_preflight_allows_nul_byte_link_target() {
+        let mut temp_file = NamedTempFile::with_suffix(".tar").unwrap();
+        temp_file
+            .write_all(&tar_with_pax_linkpath(b"foo\0bar", b'2'))
+            .unwrap();
+        temp_file.flush().unwrap();
+
+        let config = SecurityConfig::default().with_relaxed_for_verify_preflight();
+        let manifest = list_archive(temp_file.path(), &config)
+            .expect("relaxed_for_verify_preflight must let a NUL-byte symlink target through");
+
+        assert_eq!(manifest.total_entries, 1);
+        assert!(
+            manifest.entries[0]
+                .symlink_target
+                .as_ref()
+                .is_some_and(|t| has_null_bytes(t)),
+            "the raw NUL-byte target must reach the manifest unmodified"
+        );
+    }
+
+    #[test]
+    fn test_list_zip_relaxed_preflight_allows_nul_byte_path() {
+        let zip_bytes = create_raw_zip_entry("foo\0bar.txt", b"");
+        let mut temp_file = NamedTempFile::with_suffix(".zip").unwrap();
+        temp_file.write_all(&zip_bytes).unwrap();
+        temp_file.flush().unwrap();
+
+        let config = SecurityConfig::default()
+            .with_allow_absolute_paths(true)
+            .with_relaxed_for_verify_preflight();
+        let manifest = list_archive(temp_file.path(), &config)
+            .expect("relaxed_for_verify_preflight must let a NUL-byte ZIP entry path through");
+
+        assert_eq!(manifest.total_entries, 1);
+        assert!(
+            has_null_bytes(&manifest.entries[0].path),
+            "the raw NUL-byte path must reach the manifest unmodified"
         );
     }
 

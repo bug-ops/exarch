@@ -120,15 +120,24 @@ pub fn verify_archive<P: AsRef<Path>>(
 }
 
 /// Returns a config variant for the pre-flight listing step that feeds
-/// `verify_manifest`, with `max_file_size` relaxed to unlimited.
+/// `verify_manifest`, with `max_file_size` relaxed to unlimited and the
+/// list-level NUL-byte/link-target checks relaxed to defer to
+/// `verify_entry`'s own equivalent checks.
 ///
-/// `verify` is a read-only, report-based operation: an oversized entry is
-/// meant to surface as a `VerificationIssue` from `verify_entry` (which
-/// re-checks the real `config` against every manifest entry), not abort the
-/// listing step before any report exists. `max_file_count` and
-/// `max_total_size` are left untouched, matching prior behavior.
+/// `verify` is a read-only, report-based operation: an oversized entry,
+/// a NUL byte in an entry path, or an empty/NUL/missing symlink or hardlink
+/// target are all meant to surface as a `VerificationIssue` from
+/// `verify_entry` (which re-checks the real `config` against every manifest
+/// entry via `validate_path`/`validate_symlink`), not abort the listing step
+/// before any report exists. `max_file_count` and `max_total_size` are left
+/// untouched, matching prior behavior. See
+/// `SecurityConfig::relaxed_for_verify_preflight`'s field doc for exactly
+/// which `list_archive` checks this skips.
 pub(crate) fn listing_config_for_verify(config: &SecurityConfig) -> SecurityConfig {
-    config.clone().with_max_file_size(u64::MAX)
+    config
+        .clone()
+        .with_max_file_size(u64::MAX)
+        .with_relaxed_for_verify_preflight()
 }
 
 fn verify_entry(
@@ -305,6 +314,7 @@ fn determine_security_status(issues: &[VerificationIssue]) -> CheckStatus {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::test_utils::tar_with_pax_nul_path;
     use std::assert_matches;
     use std::io::Write;
     use std::path::PathBuf;
@@ -487,7 +497,7 @@ mod tests {
     }
 
     #[test]
-    fn test_listing_config_for_verify_relaxes_only_max_file_size() {
+    fn test_listing_config_for_verify_relaxes_max_file_size_and_preflight_checks() {
         let config = SecurityConfig {
             max_file_size: 1000,
             max_total_size: 2000,
@@ -499,6 +509,102 @@ mod tests {
         assert_eq!(listing_config.max_file_size, u64::MAX);
         assert_eq!(listing_config.max_total_size, config.max_total_size);
         assert_eq!(listing_config.max_file_count, config.max_file_count);
+        assert!(
+            listing_config.relaxed_for_verify_preflight,
+            "verify's pre-flight listing pass must set relaxed_for_verify_preflight so \
+             NUL-byte paths and empty/NUL/missing link targets defer to verify_entry's own \
+             graceful checks instead of aborting list_archive"
+        );
+    }
+
+    // Regression test for #430 follow-up (round 3): a NUL-byte entry path
+    // must surface as a graceful VerificationIssue, not abort verify_archive
+    // with a hard `Err`, matching verify's behavior before the list-level
+    // NUL-byte check (this PR) existed. An earlier version of this test
+    // pinned the opposite (hard-error) behavior, which a code-review pass
+    // identified as a real regression: verify_entry's own validate_path
+    // call (line ~156) already had a working graceful NUL-byte check via
+    // SafePath::validate, and the list-level check was aborting before that
+    // mechanism ever ran. `listing_config_for_verify` now also relaxes the
+    // list-level NUL-byte check (see
+    // `SecurityConfig::relaxed_for_verify_preflight`), restoring the original
+    // graceful-report behavior — this test was rewritten (not just renamed) to
+    // assert that restored behavior instead of the hard-error behavior it
+    // previously pinned.
+    #[test]
+    fn test_verify_archive_nul_byte_path_reports_issue_not_error() {
+        let mut temp_file = NamedTempFile::with_suffix(".tar").unwrap();
+        temp_file
+            .write_all(&tar_with_pax_nul_path(b"foo\0bar.txt", b"hello"))
+            .unwrap();
+        temp_file.flush().unwrap();
+
+        let config = SecurityConfig::default();
+        let report = verify_archive(temp_file.path(), &config)
+            .expect("verify_archive must report a NUL-byte entry path, not error out");
+
+        assert_eq!(
+            report.status,
+            VerificationStatus::Fail,
+            "NUL-byte entry path must fail verification via a report, not a hard error"
+        );
+        assert_eq!(report.suspicious_entries, 1);
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|i| i.message.contains("null bytes")),
+            "expected an issue mentioning null bytes, got: {:?}",
+            report.issues
+        );
+    }
+
+    // Regression test for #430 follow-up (round 3, item 2): a hardlink entry
+    // with no link target at all must still surface as a graceful
+    // VerificationIssue from verify_archive, not the InvalidArchive hard
+    // error that bare `list_archive` now raises (see
+    // `test_list_tar_hardlink_missing_target_rejected` in
+    // `inspection::list::tests`). `relaxed_for_verify_preflight` lets the
+    // missing target through the pre-flight listing pass as `None`;
+    // `verify_entry` then treats it as an empty target via
+    // `unwrap_or_default()`, which `validate_path` rejects with its own
+    // pre-existing "empty path not allowed" check.
+    #[test]
+    fn test_verify_archive_hardlink_missing_target_reports_issue_not_error() {
+        let mut temp_file = NamedTempFile::with_suffix(".tar").unwrap();
+        let mut builder = tar::Builder::new(Vec::new());
+
+        let mut header = tar::Header::new_gnu();
+        header.set_path("link").unwrap();
+        header.set_size(0);
+        header.set_entry_type(tar::EntryType::Link);
+        header.set_cksum();
+        builder.append(&header, &[][..]).unwrap();
+
+        let archive_data = builder.into_inner().unwrap();
+        temp_file.write_all(&archive_data).unwrap();
+        temp_file.flush().unwrap();
+
+        let config = SecurityConfig::default();
+        let report = verify_archive(temp_file.path(), &config)
+            .expect("verify_archive must report a missing hardlink target, not error out");
+
+        assert_eq!(
+            report.status,
+            VerificationStatus::Fail,
+            "missing hardlink target must fail verification via a report, not a hard error"
+        );
+        assert_eq!(report.suspicious_entries, 1);
+        assert!(
+            report.issues.iter().any(|i| {
+                i.category == IssueCategory::HardlinkEscape
+                    && i.context
+                        .as_deref()
+                        .is_some_and(|c| c.contains("empty path not allowed"))
+            }),
+            "expected a HardlinkEscape issue citing the empty target, got: {:?}",
+            report.issues
+        );
     }
 
     // Note: Full CVE regression tests for path traversal require real malicious

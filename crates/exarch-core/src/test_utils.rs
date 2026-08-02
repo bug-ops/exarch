@@ -365,6 +365,93 @@ impl Default for ZipTestBuilder {
     }
 }
 
+/// Builds a 512-byte raw ustar TAR header block, bypassing `tar::Header`'s
+/// safety checks (`set_path`/`set_link_name` reject NUL bytes and other
+/// adversarial values) so fixtures for security regression tests can be
+/// constructed byte-for-byte.
+fn raw_tar_header(name: &[u8], size: usize, typeflag: u8) -> [u8; 512] {
+    let mut h = [0u8; 512];
+    let name_len = name.len().min(100);
+    h[..name_len].copy_from_slice(&name[..name_len]);
+    h[100..108].copy_from_slice(b"0000644\0");
+    h[108..116].copy_from_slice(b"0000000\0");
+    h[116..124].copy_from_slice(b"0000000\0");
+    h[124..136].copy_from_slice(format!("{size:011o}\0").as_bytes());
+    h[136..148].copy_from_slice(b"00000000000\0");
+    h[156] = typeflag;
+    h[257..263].copy_from_slice(b"ustar\0");
+    h[263..265].copy_from_slice(b"00");
+    h[148..156].copy_from_slice(b"        ");
+    let checksum: u32 = h.iter().map(|&b| u32::from(b)).sum();
+    h[148..156].copy_from_slice(format!("{checksum:06o}\0 ").as_bytes());
+    h
+}
+
+/// Pads `data` to a 512-byte TAR block boundary and appends it to `out`.
+fn pad_tar_block(out: &mut Vec<u8>, data: &[u8]) {
+    out.extend_from_slice(data);
+    let rem = data.len() % 512;
+    if rem != 0 {
+        out.extend(std::iter::repeat_n(0u8, 512 - rem));
+    }
+}
+
+/// Builds a raw ustar-format TAR archive with a PAX extended header record
+/// (`{pax_key}={pax_value}`) followed by one entry of type `typeflag` named
+/// `entry_name` with body `data`.
+///
+/// Writes headers directly rather than through `tar::Header`'s safe setters,
+/// so adversarial PAX overrides — e.g. an embedded NUL byte or an empty
+/// value in a `path`/`linkpath` record — can be constructed for security
+/// regression tests.
+#[must_use]
+pub fn tar_with_pax_record(
+    pax_key: &str,
+    pax_value: &[u8],
+    entry_name: &[u8],
+    typeflag: u8,
+    data: &[u8],
+) -> Vec<u8> {
+    // Self-referential PAX record length: "<len> <key>=<value>\n".
+    let base = pax_key.len() + pax_value.len() + 3;
+    let mut len = base + 1;
+    loop {
+        let candidate = len.to_string().len() + base;
+        if candidate == len {
+            break;
+        }
+        len = candidate;
+    }
+    let mut record = format!("{len} {pax_key}=").into_bytes();
+    record.extend_from_slice(pax_value);
+    record.push(b'\n');
+
+    let mut tar = Vec::new();
+    tar.extend_from_slice(&raw_tar_header(b"PaxHeaders/entry", record.len(), b'x'));
+    pad_tar_block(&mut tar, &record);
+    tar.extend_from_slice(&raw_tar_header(entry_name, data.len(), typeflag));
+    pad_tar_block(&mut tar, data);
+    tar.extend(std::iter::repeat_n(0u8, 1024));
+    tar
+}
+
+/// Builds a raw ustar-format TAR archive with a PAX `path` record embedding
+/// `pax_path` (which may contain a NUL byte) as the effective path of a
+/// regular-file entry with body `data`.
+#[must_use]
+pub fn tar_with_pax_nul_path(pax_path: &[u8], data: &[u8]) -> Vec<u8> {
+    tar_with_pax_record("path", pax_path, b"ustar_name.txt", b'0', data)
+}
+
+/// Builds a raw ustar-format TAR archive with a PAX `linkpath` record
+/// embedding `pax_linkpath` (which may be empty or contain a NUL byte) as
+/// the effective link target of a symlink/hardlink entry. `typeflag` is
+/// `b'2'` for a symlink entry, `b'1'` for a hardlink entry.
+#[must_use]
+pub fn tar_with_pax_linkpath(pax_linkpath: &[u8], typeflag: u8) -> Vec<u8> {
+    tar_with_pax_record("linkpath", pax_linkpath, b"link_entry", typeflag, b"")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

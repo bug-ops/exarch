@@ -34,6 +34,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **`list` accepted NUL bytes, empty targets, and missing targets that `extract`/`verify` already
+  rejected (#430)**: `list_tar_entries` and `list_zip_reader` validated entry paths for path
+  traversal but not embedded NUL bytes, unlike `SafePath::validate` (used by `extract`). For TAR,
+  this meant `exarch list`/`list_archive` silently returned a NUL-containing path as an ordinary
+  entry instead of rejecting the archive. ZIP was affected differently: the `zip` crate's own
+  `enclosed_name()` already rejects a NUL-containing name under the default configuration, so that
+  case was already rejected pre-fix — just via the wrong mechanism (`PathTraversal`, from
+  `enclosed_name()` returning `None`, rather than a NUL-specific error). Only ZIP's
+  `allow_absolute_paths` fallback path — which reads the raw entry name directly, bypassing
+  `enclosed_name()` — was genuinely silent pre-fix, the same way TAR was unconditionally. The same
+  asymmetry existed for symlink/hardlink targets
+  relative to the checks `extract` gained in #424: an empty or NUL-containing target, or (TAR
+  only) a symlink/hardlink entry with no target at all (`link_name()` returns `None` — no ustar
+  linkname field and no PAX `linkpath` override), was silently accepted by `list`. `list_tar_entries`
+  and `list_zip_reader` now reject a NUL byte in the entry path (checked before path-traversal, in
+  both formats, for consistent ordering), and a new `validate_link_target` helper (mirroring
+  `SafeSymlink::validate`/`HardlinkTracker::validate_hardlink`'s wording, though it only checks
+  emptiness and NUL bytes — it does not give `list` full parity with `extract`'s target validation)
+  rejects an empty or NUL-containing `symlink_target`/`hardlink_target`; `list_tar_entries`
+  separately rejects a `None` link target with the same `InvalidArchive` message `extract` uses
+  (`"symlink missing target"` / `"hardlink missing target"`). 7z listing was not changed:
+  `sevenz_rust2::Archive::read` decodes each entry name as UTF-16 and stops at the first zero code
+  unit while parsing the header, so an embedded NUL cannot reach `list_sevenz_archive` in the first
+  place.
+  **`verify_archive`'s report-based behavior is preserved**: `verify_archive` lists the archive as
+  a pre-flight step before building its report, and `verify_entry` already had its own working
+  graceful handling for all of the above (a NUL-byte entry path via `validate_path`, and an empty/
+  NUL/missing link target via `validate_symlink`/`validate_path`, added in #424) — surfacing each as
+  a `VerificationIssue` rather than aborting. An earlier round of this fix let the new list-level
+  checks abort that pre-flight step before `verify_entry` ever ran, silently turning those graceful
+  reports into hard `Err` results (and, for the Python/Node bindings, a report object into a raised
+  exception) — caught and reverted before merging. `listing_config_for_verify` now also relaxes the
+  list-level NUL-byte/empty/missing-target checks (`SecurityConfig::relaxed_for_verify_preflight`,
+  a crate-internal config flag, not part of the public builder API) for `verify_archive`'s pre-flight
+  listing call specifically, so `verify` continues to report rather than abort. Bare `exarch list`/
+  `list_archive` is unaffected by this flag and still hard-aborts on all of the above — that hard
+  behavior is the actual #430 fix.
 - **TAR metadata-entry decompression bomb (#414)**: GNU long-name (`L`), GNU long-link (`K`),
   and PAX extended header (`x`/`g`) records are buffered fully into memory by the `tar` crate's
   internals before any entry reaches `exarch-core`'s validator or quota tracker, so a crafted

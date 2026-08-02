@@ -47,6 +47,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the writer/encoder is fully flushed and finished, for ZIP and all TAR variants (including plain
   `.tar`). `compression_ratio()` and `compression_percentage()` now reflect real compression
   results. The now-unused `crate::io::CountingWriter` (crate-internal only) was removed.
+- **`list_archive()` re-implemented quota checks instead of reusing `QuotaTracker` (#396)**:
+  the three per-format listing functions in `exarch-core`'s `inspection::list` module each
+  duplicated total-size and file-count quota logic inline, independently of the `QuotaTracker`
+  used by extraction. This duplicate implementation was weaker than the original: it never
+  checked `max_file_size` per entry, and computed the running total-size check with unchecked
+  `+` instead of `checked_add`, so a crafted archive with entry sizes near `u64::MAX` could wrap
+  `total_size` in a release build and silently bypass `max_total_size` during listing. All three
+  listing functions (TAR, ZIP, 7z) now route every entry through the same `QuotaTracker` used by
+  extraction, closing both gaps. This does not make listing and extraction fully equivalent:
+  extraction's `QuotaTracker` only records `EntryType::File`, while listing records every entry
+  type (directories, symlinks, hardlinks too) — a pre-existing, unrelated divergence.
+
+  **BREAKING CHANGE:** `list_archive()` and `verify_archive()` — and by extension the `list`/
+  `verify` CLI subcommands and the `exarch-python`/`exarch-node` bindings — now reject any single
+  entry larger than `max_file_size` (default 50 MB) during listing; previously only file count
+  and total size were enforced there. `list`/`verify` gain a new `--max-file-size` CLI flag
+  (mirroring `extract`/`create`) to raise this limit; there was previously no way to configure it
+  for these two commands. `verify_archive()`'s internal pre-flight listing pass keeps
+  `max_file_size` unlimited so an oversized entry still surfaces as a `VerificationIssue`
+  (`Fail` status with an itemized report) via the existing per-entry check in `verify_entry`,
+  rather than aborting before any report exists — `verify`'s "report, don't hard-fail" contract
+  is preserved.
+
+### Changed
+
+- **Deduplicated `PartialExtraction` error-wrapping logic across format handlers (#394)**: the
+  "wrap the error in `ArchiveError::PartialExtraction` if the report recorded any processed
+  items, otherwise return it as-is" pattern was copy-pasted five times across `tar.rs`, `zip.rs`,
+  and `sevenz.rs`. Consolidated into `ArchiveError::partial_or()`; behavior-equivalent at all
+  current call sites (each site returns the error immediately afterwards, so evaluating
+  `std::mem::take(report)` unconditionally rather than only inside the `total_items() > 0` branch
+  is unobservable).
 
 ## [0.5.2] - 2026-07-27
 

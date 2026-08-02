@@ -521,7 +521,7 @@ fn creator_for_format(
 /// Returns error if:
 /// - Archive file cannot be opened
 /// - Archive format is unsupported or corrupted
-/// - Quota limits exceeded (file count, total size)
+/// - Quota limits exceeded (file count, total size, single file size)
 ///
 /// # Examples
 ///

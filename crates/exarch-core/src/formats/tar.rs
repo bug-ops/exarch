@@ -390,14 +390,7 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
         for entry_result in entries {
             let entry = entry_result.map_err(|e| {
                 let raw = ArchiveError::InvalidArchive(format!("failed to read entry: {e}"));
-                if ctx.report.total_items() > 0 {
-                    ArchiveError::PartialExtraction {
-                        source: Box::new(raw),
-                        report: std::mem::take(ctx.report),
-                    }
-                } else {
-                    raw
-                }
+                ArchiveError::partial_or(std::mem::take(ctx.report), raw)
             })?;
 
             // TAR is streaming: total entry count is not known upfront, so pass 0.
@@ -420,14 +413,7 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
                 }
                 Err(e) => {
                     ctx.progress.on_entry_complete(&entry_path);
-                    return Err(if ctx.report.total_items() > 0 {
-                        ArchiveError::PartialExtraction {
-                            source: Box::new(e),
-                            report: std::mem::take(ctx.report),
-                        }
-                    } else {
-                        e
-                    });
+                    return Err(ArchiveError::partial_or(std::mem::take(ctx.report), e));
                 }
             }
         }
@@ -435,14 +421,7 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
         // Two-pass extraction: create hardlinks after all target files exist
         for hardlink_info in &hardlinks {
             if let Err(e) = Self::create_hardlink(hardlink_info, &mut ctx) {
-                return Err(if ctx.report.total_items() > 0 {
-                    ArchiveError::PartialExtraction {
-                        source: Box::new(e),
-                        report: std::mem::take(ctx.report),
-                    }
-                } else {
-                    e
-                });
+                return Err(ArchiveError::partial_or(std::mem::take(ctx.report), e));
             }
         }
 
@@ -485,7 +464,9 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
     }
 
     fn verify(&mut self, config: &SecurityConfig) -> Result<crate::inspection::VerificationReport> {
-        let manifest = self.list(config)?;
+        let manifest = self.list(&crate::inspection::verify::listing_config_for_verify(
+            config,
+        ))?;
         crate::inspection::verify::verify_manifest(&manifest, config)
     }
 

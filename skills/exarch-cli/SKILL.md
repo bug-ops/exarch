@@ -154,7 +154,12 @@ exarch list archive.zip -l -H --json
 | `-H, --human-readable` | off | Human-readable sizes in text mode (ignored in `--json` mode, which always emits raw byte counts). |
 | `--max-files` | 10000 | Hard limit on entries scanned; listing fails with `QuotaExceeded` past this count, it does not truncate. |
 | `--max-total-size` | 500 MB | Hard limit on cumulative listed size; listing fails with `QuotaExceeded` past this size. Raise it explicitly for larger archives. |
+| `--max-file-size` | 50 MB | Hard limit on any single entry's size; listing fails with `QuotaExceeded` (`FileSize`) past this size. Raise it explicitly for archives with large individual files. |
 | `--allow-solid-archives` | off | Allow listing solid 7z archives (higher memory use). |
+
+Verified live: a 51 MB tar entry fails `exarch list` with
+`"quota exceeded: single file size (53477376 > 52428800)"` at the 50 MB default, and succeeds
+once `--max-file-size 100M` is passed.
 
 ### `verify <ARCHIVE>`
 
@@ -167,11 +172,21 @@ exarch verify archive.tar.gz --check-integrity --check-security --json
 | `--check-integrity` | off | Validate checksums/structure. |
 | `--check-security` | off | Run the security validation pipeline (path traversal, symlink/hardlink, permissions) without extracting. |
 | `--strict` | off | Treat any warning-level finding as an error and exit with status `2` instead of `0`. |
-| `--max-files` / `--max-total-size` / `--allow-solid-archives` | same as `list` (10000 / 500 MB / off) | Same hard-limit semantics as `list` — verification fails with `QuotaExceeded` past these caps, it does not skip entries. |
+| `--max-files` / `--max-total-size` / `--max-file-size` / `--allow-solid-archives` | same as `list` (10000 / 500 MB / 50 MB / off) | Same hard-limit semantics as `list` for file count and total size — verification fails with `QuotaExceeded` past those two caps, it does not skip entries. |
 
 Run `verify` before `extract` on any archive from an untrusted source to inspect issues without
 writing anything to disk. Archives over 500 MB need `--max-total-size` raised explicitly or
 `verify` will fail with `QuotaExceeded` before it can report anything else.
+
+`--max-file-size` is the one exception to "fails with `QuotaExceeded`": an entry over this cap
+does **not** abort `verify` early. `verify`'s internal pre-flight listing pass always allows
+entries of any size through, then re-checks the real `--max-file-size` per entry and records a
+violation as a `HIGH`-severity `QuotaExceeded` issue, same as any other security finding —
+`data.status` becomes `"FAIL"` with the issue itemized, `status` (the envelope) stays
+`"success"`, same as the `verify` "one exception" rule described under `--json` output envelope
+below. Verified live: a 51 MB tar entry against the 50 MB default produces `data.status: "FAIL"`
+with one `HIGH` `"Quota Exceeded"` issue and exit code `1`; the same command with
+`--max-file-size 100M` produces `data.status: "PASS"` and exit code `0`.
 
 When the archive has `status: "FAIL"`, `verify --json` prints exactly one top-level JSON
 document to stdout — a `status: "success"` envelope carrying the full report (`data.status:
@@ -232,9 +247,17 @@ For `verify`, branch on `data.status` (or the process exit code), not on top-lev
 For `extract`, when some files were already written before a mid-archive failure, `error` carries
 a structured `error.partial_report` object (`files_extracted`, `directories_created`,
 `symlinks_created`, `bytes_written`). Verified live against a two-entry archive where the first
-entry extracts and the second exceeds `--max-file-size`. The same progress counts also appear as
-free text inside `error.message` (prefixed `"WARNING: Extraction was stopped. ..."`) — prefer the
-structured `error.partial_report` field over parsing that text.
+entry extracts and the second is a symlink rejected by the (default-off) `--allow-symlinks`
+check. The same progress counts also appear as free text inside `error.message` (prefixed
+`"WARNING: Extraction was stopped. ..."`) — prefer the structured `error.partial_report` field
+over parsing that text.
+
+Note: `extract` always lists the archive first (`list_archive()`, sharing `--max-file-count`,
+`--max-total-size`, and `--max-file-size` with the extraction config) to detect output
+conflicts and size the progress bar. Quota violations (file count, total size, per-file size)
+are therefore caught during this pre-flight pass and reported as a plain error with **no**
+`partial_report`, since extraction never starts. Only checks that require the real destination
+directory — symlink/hardlink escape — can still produce a mid-archive partial extraction.
 
 ### Verified examples
 
@@ -267,16 +290,17 @@ Error (`extract`, path traversal):
 }
 ```
 
-Error (`extract`, mid-archive quota failure with partial progress — note the structured
-`error.partial_report` field):
+Error (`extract`, mid-archive security failure with partial progress — note the structured
+`error.partial_report` field; the archive's first entry extracts, then a symlink entry is
+rejected because `--allow-symlinks` was not passed):
 
 ```json
 {
   "operation": "extract",
   "status": "error",
   "error": {
-    "kind": "QuotaExceeded",
-    "message": "WARNING: Extraction was stopped. 1 items (1 files, 0 directories, 0 symlinks) were written to disk before the error.\nHINT: Inspect or remove the output directory before re-running.: quota exceeded: single file size (2000000 > 1000000)",
+    "kind": "SecurityViolation",
+    "message": "WARNING: Extraction was stopped. 1 items (1 files, 0 directories, 0 symlinks) were written to disk before the error.\nHINT: Inspect or remove the output directory before re-running.: operation denied by security policy: symlinks not allowed",
     "partial_report": {
       "files_extracted": 1,
       "directories_created": 0,

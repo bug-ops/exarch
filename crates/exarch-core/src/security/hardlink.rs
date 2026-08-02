@@ -81,7 +81,8 @@ impl HardlinkTracker {
     ///
     /// Returns an error if:
     /// - Hardlinks are not allowed in configuration
-    /// - Target is an absolute path
+    /// - Target is empty or contains NUL bytes
+    /// - Target is an absolute path (including Windows drive/UNC prefixes)
     /// - Target would escape the destination directory
     ///
     /// # Examples
@@ -119,6 +120,25 @@ impl HardlinkTracker {
         if !config.allowed.hardlinks {
             return Err(ArchiveError::SecurityViolation {
                 reason: "hardlinks not allowed".into(),
+            });
+        }
+
+        // Reject empty targets: they do not point anywhere.
+        if target.as_os_str().is_empty() {
+            return Err(ArchiveError::SecurityViolation {
+                reason: "hardlink target is empty".into(),
+            });
+        }
+
+        // Reject null bytes in the target before any error message can be
+        // built from it. Without this check, a NUL byte either falls
+        // through to the OS as a raw `io::Error`, or gets embedded verbatim
+        // into a formatted `InvalidArchive` message further downstream (e.g.
+        // "hardlink target does not exist: {target}"). The message here
+        // intentionally omits the raw target bytes.
+        if crate::types::safe_path::has_null_bytes(target) {
+            return Err(ArchiveError::SecurityViolation {
+                reason: "hardlink target contains null bytes".into(),
             });
         }
 

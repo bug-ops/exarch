@@ -60,15 +60,24 @@ impl SafeSymlink {
     /// # Validation Steps
     ///
     /// 1. Verify symlinks are allowed in the security configuration
-    /// 2. Validate target is relative (reject absolute symlinks)
-    /// 3. Resolve target against the link's parent directory
-    /// 4. Verify resolved target stays within destination directory
+    /// 2. Reject an empty target (points nowhere) or a target containing NUL
+    ///    bytes
+    /// 3. Validate target is relative (reject absolute symlinks)
+    /// 4. Check target components against banned components and
+    ///    `max_path_depth`
+    /// 5. Verify the link's parent directory chain contains no symlinks (TOCTOU
+    ///    protection)
+    /// 6. Resolve target against the link's parent directory, following any
+    ///    on-disk symlinks encountered
+    /// 7. Verify resolved target stays within destination directory
     ///
     /// # Errors
     ///
     /// Returns an error if:
     /// - Symlinks are not allowed by configuration
+    /// - Target is empty or contains NUL bytes
     /// - Target is an absolute path
+    /// - Target contains a banned path component or exceeds `max_path_depth`
     /// - Resolved target escapes the destination directory
     ///
     /// # Examples
@@ -102,6 +111,26 @@ impl SafeSymlink {
         if !config.allowed.symlinks {
             return Err(ArchiveError::SecurityViolation {
                 reason: "symlinks not allowed".into(),
+            });
+        }
+
+        // 1.5. Reject empty targets: an empty target does not point anywhere
+        // (some platforms would silently create a dangling symlink); reject
+        // it explicitly rather than letting it through.
+        if target.as_os_str().is_empty() {
+            return Err(ArchiveError::SecurityViolation {
+                reason: "symlink target is empty".into(),
+            });
+        }
+
+        // 1.6. Reject null bytes in the target, matching the same check
+        // already applied to the link path. Without this, a NUL byte falls
+        // through to the OS and surfaces as a raw `io::Error` instead of a
+        // structured `SecurityViolation`. The message intentionally omits
+        // the raw target bytes so a NUL byte is never embedded in it.
+        if super::safe_path::has_null_bytes(target) {
+            return Err(ArchiveError::SecurityViolation {
+                reason: "symlink target contains null bytes".into(),
             });
         }
 
@@ -587,8 +616,33 @@ mod tests {
         let target = PathBuf::from("");
 
         let result = SafeSymlink::validate(&link, &target, &dest, &config);
-        // Empty target should resolve to link's parent directory
-        assert!(result.is_ok(), "empty target should be allowed");
+        assert_matches!(
+            result,
+            Err(ArchiveError::SecurityViolation { .. }),
+            "empty symlink target should be rejected, not silently accepted"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_safe_symlink_target_with_null_byte() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let (_temp, dest) = create_test_dest();
+        let config = create_config_with_symlinks();
+
+        let link = SafePath::validate(&PathBuf::from("link"), &dest, &config)
+            .expect("link path should be valid");
+
+        let target = PathBuf::from(OsStr::from_bytes(b"benign\0target"));
+
+        let result = SafeSymlink::validate(&link, &target, &dest, &config);
+        assert_matches!(
+            result,
+            Err(ArchiveError::SecurityViolation { .. }),
+            "symlink target containing a null byte should be rejected"
+        );
     }
 
     #[test]

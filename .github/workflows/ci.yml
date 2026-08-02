@@ -56,9 +56,13 @@ jobs:
             python:
               - 'crates/exarch-python/**'
               - 'crates/exarch-core/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
             node:
               - 'crates/exarch-node/**'
               - 'crates/exarch-core/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
             ci:
               - '.github/workflows/**'
               - '.github/labeler.yml'
@@ -259,7 +263,10 @@ jobs:
       - name: Build Python bindings
         run: |
           cd crates/exarch-python
-          maturin build --release
+          # panic-injection exposes a deliberate-panic test hook used by the
+          # #395 regression test (test_panic_safety.py); never enabled for
+          # published wheels (see release.yml).
+          maturin build --release --features panic-injection,abi3
 
       - name: Install Python bindings
         run: uv pip install --system target/wheels/*.whl

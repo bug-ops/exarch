@@ -63,6 +63,27 @@ use report::ExtractionReport;
 use report::VerificationReport;
 use utils::validate_path;
 
+// The `catch_unwind` guards throughout this module only convert Rust panics
+// into a catchable `Error` when the crate is built with `panic = "unwind"`;
+// under `panic = "abort"` they are dead code and the whole Node.js process
+// aborts on any panic. Fail the build loudly instead of silently
+// reintroducing that vulnerability (see issue #395).
+const _: () = assert!(
+    cfg!(panic = "unwind"),
+    "exarch-node must be built with panic=unwind so catch_unwind can convert Rust panics into catchable JS errors; see issue #395"
+);
+
+/// Runs `f`, converting a Rust panic into a catchable napi `Error` instead of
+/// letting it unwind across the FFI boundary (see issue #395).
+///
+/// `context` is interpolated into the error message as "Internal panic
+/// during {context}".
+fn catch_panic_as_js_err<T>(context: &str, f: impl FnOnce() -> Result<T>) -> Result<T> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
+        .map_err(|_| Error::from_reason(format!("Internal panic during {context}")))
+        .flatten()
+}
+
 /// Extract an archive to the specified directory (async).
 ///
 /// This function provides secure archive extraction with configurable
@@ -625,7 +646,7 @@ pub async fn extract_archive_with_progress(
         options.map(|o| o.as_core().clone()).unwrap_or_default();
 
     let report = tokio::task::spawn_blocking(move || {
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        catch_panic_as_js_err("archive extraction with progress", || {
             run_extract_with_optional_progress(
                 &archive_path,
                 &output_dir,
@@ -634,9 +655,7 @@ pub async fn extract_archive_with_progress(
                 progress,
             )
             .map_err(convert_error)
-        }))
-        .map_err(|_| Error::from_reason("Internal panic during archive extraction with progress"))
-        .flatten()
+        })
     })
     .await
     .map_err(|e| Error::from_reason(format!("task join error: {e}")))
@@ -1174,6 +1193,24 @@ mod tests {
         assert!(
             result.unwrap_err().to_string().contains("maximum length"),
             "error message should mention length limit"
+        );
+    }
+
+    /// Regression test for #395: a panic inside the code guarded by
+    /// `catch_panic_as_js_err` (the exact helper
+    /// `extract_archive_with_progress` calls in production) must be
+    /// converted into a catchable `Error`, not left to unwind/abort.
+    #[test]
+    fn catch_panic_as_js_err_converts_panic_to_catchable_error() {
+        let result: Result<()> = catch_panic_as_js_err("test operation", || {
+            panic!("synthetic panic for #395 regression test")
+        });
+
+        let err = result.expect_err("panic must be converted into a catchable Error, not abort");
+        assert!(
+            err.to_string()
+                .contains("Internal panic during test operation"),
+            "unexpected error message: {err}"
         );
     }
 }

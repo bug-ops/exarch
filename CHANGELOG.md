@@ -16,6 +16,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   transitive `lzma-rust2` bump from 0.16.5 to 0.18.0 (required by sevenz-rust2's own `^0.18`
   dependency), which rearchitects the LZMA2/XZ decoders into a sans-I/O design — no known
   advisories against either version; audited with no regressions found.
+- **Release profile aborted on panic, silently disabling FFI panic guards (#395)**: the
+  workspace `[profile.release]` set `panic = "abort"`, which made every `catch_unwind` guard in
+  `exarch-python` and `exarch-node` dead code in published wheels and npm packages — a Rust
+  panic inside `extract_archive`/`create_archive`/etc. aborted the whole Python or Node.js
+  process instead of surfacing as a catchable exception/error. Removed `panic = "abort"` from
+  `Cargo.toml` so release builds unwind (this also lets `exarch-cli`'s `Drop` impls run cleanup
+  on panic). Added a compile-time `const _: () = assert!(cfg!(panic = "unwind"), ...)` guard near
+  the top of both binding crates' `lib.rs` so any future reintroduction (workspace profile,
+  `.cargo/config.toml`, or `RUSTFLAGS`) fails the build instead of silently reintroducing the
+  vulnerability. Also closed a related gap in `exarch-python`: the progress-callback branches of
+  `create_archive_with_progress` and `extract_archive_with_progress` had no `catch_unwind` at
+  all (only the no-callback branch was guarded) — both branches are now wrapped, mirroring
+  `exarch-node`'s existing helper shape. Added runtime regression coverage of the
+  `catch_unwind` -> exception/error conversion itself: `exarch-node` gained a Rust-level test
+  that calls the real `catch_panic_as_js_err` production helper with a panicking closure and
+  asserts a catchable `Error` comes back; `exarch-python` gained an end-to-end pytest
+  (`test_panic_safety.py`) that triggers a real panic through the compiled extension module via
+  a `panic-injection`-feature-gated test hook and asserts a catchable `RuntimeError` is raised
+  instead of the process aborting (the feature is only enabled by CI's `test-python` job, never
+  in published wheels).
 
 ### Added
 

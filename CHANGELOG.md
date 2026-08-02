@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **TAR creation silently dropped empty directories (#400)**: `create_tar_internal_with_progress`
+  in `crates/exarch-core/src/creation/tar.rs` only incremented a counter for `EntryType::Directory`
+  entries without ever writing a directory header to the TAR stream. All four TAR variants
+  (`.tar.gz`, `.tar.bz2`, `.tar.xz`, `.tar.zst`) plus plain `.tar` now write an explicit directory
+  entry for every directory in the source tree (including empty and nested-empty directories),
+  matching the ZIP handler's existing behavior. As part of this fix, `directories_added` in
+  `CreationReport` now excludes the archive root itself (consistent with ZIP), so it may report
+  one fewer directory than before for the same source tree.
+- **`bytes_compressed` in `CreationReport` was inaccurate for every creation format (#402)**: ZIP
+  never assigned `bytes_compressed` (always `0`, causing `compression_percentage()` to always
+  report the "perfect compression" `100.0` fallback). TAR measured the pre-compression TAR
+  stream size (headers + padding, before the gzip/bzip2/xz/zstd encoder), not the actual
+  compressed bytes on disk. Both are now measured from the real on-disk archive file size after
+  the writer/encoder is fully flushed and finished, for ZIP and all TAR variants (including plain
+  `.tar`). `compression_ratio()` and `compression_percentage()` now reflect real compression
+  results. The now-unused `crate::io::CountingWriter` (crate-internal only) was removed.
+
 ## [0.5.2] - 2026-07-27
 
 ### Added

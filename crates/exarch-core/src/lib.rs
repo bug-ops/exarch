@@ -29,7 +29,6 @@ pub mod creation;
 pub mod error;
 pub mod formats;
 pub mod inspection;
-pub(crate) mod io;
 pub mod report;
 pub mod security;
 pub(crate) mod test_utils;

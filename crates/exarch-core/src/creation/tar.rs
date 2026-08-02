@@ -15,7 +15,6 @@ use crate::creation::progress::ProgressTracker;
 use crate::creation::report::CreationReport;
 use crate::creation::walker::EntryType;
 use crate::creation::walker::collect_entries;
-use crate::io::CountingWriter;
 use std::fs::File;
 use std::io::Write;
 use std::path::Path;
@@ -102,7 +101,9 @@ pub fn create_tar_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
     progress: &mut dyn ProgressCallback,
 ) -> Result<CreationReport> {
     let file = File::create(output.as_ref())?;
-    let (report, _) = create_tar_internal_with_progress(file, sources, config, progress)?;
+    let (mut report, file) = create_tar_internal_with_progress(file, sources, config, progress)?;
+    drop(file);
+    report.bytes_compressed = std::fs::metadata(output.as_ref())?.len();
     Ok(report)
 }
 
@@ -125,7 +126,10 @@ pub fn create_tar_gz_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
     let file = File::create(output.as_ref())?;
     let level = compression_level_to_flate2(config.compression_level);
     let encoder = flate2::write::GzEncoder::new(file, level);
-    let (report, _) = create_tar_internal_with_progress(encoder, sources, config, progress)?;
+    let (mut report, encoder) =
+        create_tar_internal_with_progress(encoder, sources, config, progress)?;
+    encoder.finish()?;
+    report.bytes_compressed = std::fs::metadata(output.as_ref())?.len();
     Ok(report)
 }
 
@@ -148,7 +152,10 @@ pub fn create_tar_bz2_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
     let file = File::create(output.as_ref())?;
     let level = compression_level_to_bzip2(config.compression_level);
     let encoder = bzip2::write::BzEncoder::new(file, level);
-    let (report, _) = create_tar_internal_with_progress(encoder, sources, config, progress)?;
+    let (mut report, encoder) =
+        create_tar_internal_with_progress(encoder, sources, config, progress)?;
+    encoder.finish()?;
+    report.bytes_compressed = std::fs::metadata(output.as_ref())?.len();
     Ok(report)
 }
 
@@ -171,7 +178,10 @@ pub fn create_tar_xz_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
     let file = File::create(output.as_ref())?;
     let level = compression_level_to_xz(config.compression_level);
     let encoder = xz2::write::XzEncoder::new(file, level);
-    let (report, _) = create_tar_internal_with_progress(encoder, sources, config, progress)?;
+    let (mut report, encoder) =
+        create_tar_internal_with_progress(encoder, sources, config, progress)?;
+    encoder.finish()?;
+    report.bytes_compressed = std::fs::metadata(output.as_ref())?.len();
     Ok(report)
 }
 
@@ -196,9 +206,11 @@ pub fn create_tar_zst_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
     let mut encoder = zstd::Encoder::new(file, level)?;
     encoder.include_checksum(true)?;
 
-    let (report, encoder) = create_tar_internal_with_progress(encoder, sources, config, progress)?;
+    let (mut report, encoder) =
+        create_tar_internal_with_progress(encoder, sources, config, progress)?;
     encoder.finish()?;
 
+    report.bytes_compressed = std::fs::metadata(output.as_ref())?.len();
     Ok(report)
 }
 
@@ -212,8 +224,7 @@ fn create_tar_internal_with_progress<W: Write, P: AsRef<Path>>(
     config: &CreationConfig,
     progress: &mut dyn ProgressCallback,
 ) -> Result<(CreationReport, W)> {
-    let counting_writer = CountingWriter::new(writer);
-    let mut builder = Builder::new(counting_writer);
+    let mut builder = Builder::new(writer);
     let mut report = CreationReport::default();
     let start = std::time::Instant::now();
 
@@ -239,7 +250,13 @@ fn create_tar_internal_with_progress<W: Write, P: AsRef<Path>>(
             }
             EntryType::Directory => {
                 tracker.on_entry_start(&entry.archive_path);
-                report.directories_added += 1;
+                add_directory_to_tar(
+                    &mut builder,
+                    &entry.path,
+                    &entry.archive_path,
+                    config,
+                    &mut report,
+                )?;
                 tracker.on_entry_complete(&entry.archive_path);
             }
             EntryType::Symlink { target } => {
@@ -264,15 +281,57 @@ fn create_tar_internal_with_progress<W: Write, P: AsRef<Path>>(
     // Finish writing TAR
     builder.finish()?;
 
-    let mut counting_writer = builder.into_inner()?;
-    counting_writer.flush()?;
+    let mut writer = builder.into_inner()?;
+    writer.flush()?;
 
-    report.bytes_compressed = counting_writer.total_bytes();
     report.duration = start.elapsed();
 
     tracker.on_complete();
 
-    Ok((report, counting_writer.into_inner()))
+    Ok((report, writer))
+}
+
+/// Adds a directory entry to the TAR archive.
+///
+/// Skips the archive root (empty relative `archive_path`), mirroring the ZIP
+/// handler's root-skip behavior, since the root itself is not a meaningful
+/// entry in the archive.
+fn add_directory_to_tar<W: Write>(
+    builder: &mut Builder<W>,
+    dir_path: &Path,
+    archive_path: &Path,
+    config: &CreationConfig,
+    report: &mut CreationReport,
+) -> Result<()> {
+    if archive_path.as_os_str().is_empty() {
+        return Ok(());
+    }
+
+    let mut header = Header::new_gnu();
+    header.set_entry_type(tar::EntryType::Directory);
+    header.set_size(0);
+
+    if config.preserve_permissions {
+        let metadata = std::fs::metadata(dir_path)?;
+        set_permissions(&mut header, &metadata);
+    } else {
+        // Deterministic, traversable default (mirrors tar-rs's
+        // `HeaderMode::Deterministic` and the `zip` crate's directory
+        // default) rather than the all-zero mode `Header::new_gnu()`
+        // otherwise leaves behind, which produces directories the owner
+        // cannot even traverse without a manual `chmod -R`.
+        header.set_mode(0o755);
+        header.set_uid(0);
+        header.set_gid(0);
+        header.set_mtime(0);
+    }
+
+    header.set_cksum();
+    builder.append_data(&mut header, archive_path, std::io::empty())?;
+
+    report.directories_added += 1;
+
+    Ok(())
 }
 
 /// Adds a single file to the TAR archive with progress reporting.
@@ -521,7 +580,9 @@ mod tests {
         let report = create_archive(&output, &[source_dir.path()], &config).unwrap();
 
         assert_eq!(report.files_added, 3);
-        assert_eq!(report.directories_added, 2);
+        // Only "subdir" is counted; the archive root itself is skipped
+        // (matches ZIP's root-skip behavior, see #400).
+        assert_eq!(report.directories_added, 1);
         assert!(output.exists());
     }
 
@@ -661,6 +722,47 @@ mod tests {
         let extracted = extract_dir.path().join("test.txt");
         let perms = fs::metadata(&extracted).unwrap().permissions();
         assert_eq!(perms.mode() & 0o777, 0o755);
+    }
+
+    /// Regression test for impl-critic finding S1: with
+    /// `preserve_permissions: false`, TAR directory entries used to inherit
+    /// `Header::new_gnu()`'s zero-filled mode, producing directories mode
+    /// `0o000` that the owner could not even traverse after extraction.
+    #[test]
+    #[cfg(unix)]
+    fn test_create_tar_directory_mode_without_preserve_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new().unwrap();
+        let output = temp.path().join("output.tar");
+
+        let source_dir = TempDir::new().unwrap();
+        let subdir = source_dir.path().join("subdir");
+        fs::create_dir(&subdir).unwrap();
+        // Give the source directory a mode that must NOT leak through, to
+        // prove the archive uses the deterministic default rather than the
+        // real (unpreserved) source mode.
+        fs::set_permissions(&subdir, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let config = CreationConfig::default()
+            .with_exclude_patterns(vec![])
+            .with_preserve_permissions(false)
+            .with_format(Some(ArchiveType::Tar));
+
+        let report = create_archive(&output, &[source_dir.path()], &config).unwrap();
+        assert_eq!(report.directories_added, 1);
+
+        let extract_dir = TempDir::new().unwrap();
+        let security_config = SecurityConfig::default();
+        extract_archive(&output, extract_dir.path(), &security_config).unwrap();
+
+        let extracted = extract_dir.path().join("subdir");
+        let mode = fs::metadata(&extracted).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o755,
+            "directory entries without preserve_permissions must use a traversable \
+             deterministic default, not mode 0"
+        );
     }
 
     #[test]

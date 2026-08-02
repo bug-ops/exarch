@@ -141,7 +141,14 @@ jobs:
       - name: Check documentation
         env:
           RUSTDOCFLAGS: "-D warnings"
-        run: cargo doc --no-deps --all-features --workspace
+        run: |
+          cargo doc --no-deps --all-features --workspace 2>&1 | tee /tmp/cargo-doc.log
+          # cargo emits target output-path collisions as a warning, not a rustdoc lint, so
+          # RUSTDOCFLAGS="-D warnings" above cannot catch it (see #429) — assert it separately.
+          if grep -q "output filename collision" /tmp/cargo-doc.log; then
+            echo "::error::cargo doc reported an output filename collision (see #429)"
+            exit 1
+          fi
 
   # Security audit
   security:

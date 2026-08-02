@@ -11,7 +11,10 @@ homepage.workspace = true
 publish = false
 
 [lib]
-name = "exarch"
+# Deliberately not "exarch": that collides with exarch-cli's `[[bin]]` name at the
+# `cargo doc` output-path level (#429). The Python-facing module name stays "exarch"
+# via `[tool.maturin] module-name` in pyproject.toml, decoupled from this Cargo name.
+name = "exarch_pylib"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]

@@ -124,6 +124,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Stale generated `exarch-node/index.d.ts` (#404)**: the napi-rs generated type declarations
   still listed only 2 of the 7 default `banned_path_components` entries in the `SecurityConfig`
   doc comment table, out of sync with the Rust source. Regenerated via `napi build`.
+- **`test-python` CI job uploaded duplicate coverage to Codecov 5x per run**: the job's
+  `python-version` matrix (3.10-3.14) ran `pytest --cov` and uploaded to Codecov under the same
+  `exarch-python` flag on every leg, even though all 5 legs exercise the same Rust-backed
+  bindings and test suite. Coverage generation and the Codecov upload now run only on the 3.12
+  leg; the other 4 legs still run the full test suite without coverage instrumentation. Also
+  fixed `.github/codecov.yml`'s `after_n_builds` (was `1`, which raced the real 6-upload count
+  per run and could post PR comments before all uploads landed; now `2`, matching the `coverage`
+  and `test-python` jobs' single upload each), and added the missing `flags: exarch-core,
+  exarch-cli` to the `coverage` job's upload — those two flags were declared with their own
+  thresholds in `codecov.yml` but never received any tagged data.
 
 ### Changed
 

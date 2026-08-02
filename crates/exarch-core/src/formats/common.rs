@@ -9,6 +9,7 @@
 //! - [`extract_file_generic`]: Generic file extraction with buffered I/O
 //! - [`create_directory`]: Directory creation (idempotent)
 //! - [`create_symlink`]: Symbolic link creation (Unix only)
+//! - [`check_extension_allowed`]: Extension allowlist filtering
 
 use rustc_hash::FxHashSet;
 use std::fs::File;
@@ -23,6 +24,7 @@ use crate::ArchiveError;
 use crate::ExtractionReport;
 use crate::ProgressCallback;
 use crate::Result;
+use crate::SecurityConfig;
 use crate::copy::CopyBuffer;
 use crate::copy::copy_with_buffer;
 use crate::error::QuotaResource;
@@ -321,6 +323,46 @@ pub fn normalize_entry_name(name: &str) -> String {
     } else {
         name.to_owned()
     }
+}
+
+/// Returns `true` if `path`'s extension passes `config`'s allowlist.
+///
+/// If the extension is not allowed, records the skip in `report`
+/// (increments `files_skipped`, pushes the standard warning) and returns
+/// `false`. Shared by the TAR, ZIP, and 7z extractors, which all reject
+/// entries with disallowed extensions before further validation.
+///
+/// This is the single source of truth for the extension-allowlist skip
+/// check: do not re-inline this pattern at a new call site (this helper
+/// exists because the pattern already drifted once for the FFI boundary
+/// path check in #406 — see #413).
+///
+/// # Examples
+///
+/// ```ignore
+/// # use exarch_core::formats::common::check_extension_allowed;
+/// if !check_extension_allowed(&path, config, report) {
+///     return Ok(None);
+/// }
+/// ```
+#[must_use]
+#[inline]
+pub fn check_extension_allowed(
+    path: &Path,
+    config: &SecurityConfig,
+    report: &mut ExtractionReport,
+) -> bool {
+    let ext = path.extension().and_then(|e| e.to_str());
+    if config.is_path_extension_allowed(ext) {
+        return true;
+    }
+
+    report.files_skipped += 1;
+    report.warnings.push(format!(
+        "skipped entry with disallowed extension: {}",
+        path.display()
+    ));
+    false
 }
 
 /// Creates a file with permissions enforced after creation to bypass umask.
@@ -1161,5 +1203,40 @@ mod tests {
         assert_eq!(report.symlinks_created, 2);
         assert_eq!(report.files_skipped, 0);
         assert!(temp.path().join("link.txt").exists());
+    }
+
+    /// Pins the exact warning message text produced by
+    /// `check_extension_allowed`, so any future edit that changes the
+    /// wording (or re-inlines this pattern with different wording at a call
+    /// site) is caught immediately rather than drifting unnoticed, as
+    /// happened in #413.
+    #[test]
+    fn test_check_extension_allowed_warning_message_text() {
+        let config = SecurityConfig::default().with_allowed_extensions(vec!["txt".to_string()]);
+        let mut report = ExtractionReport::default();
+        let path = PathBuf::from("skip.exe");
+
+        let allowed = check_extension_allowed(&path, &config, &mut report);
+
+        assert!(!allowed, "disallowed extension must be rejected");
+        assert_eq!(report.files_skipped, 1);
+        assert_eq!(
+            report.warnings,
+            vec!["skipped entry with disallowed extension: skip.exe".to_string()]
+        );
+    }
+
+    /// Verifies the happy path leaves `report` untouched.
+    #[test]
+    fn test_check_extension_allowed_allowed_extension() {
+        let config = SecurityConfig::default().with_allowed_extensions(vec!["txt".to_string()]);
+        let mut report = ExtractionReport::default();
+        let path = PathBuf::from("keep.txt");
+
+        let allowed = check_extension_allowed(&path, &config, &mut report);
+
+        assert!(allowed, "allowed extension must pass");
+        assert_eq!(report.files_skipped, 0);
+        assert!(report.warnings.is_empty());
     }
 }

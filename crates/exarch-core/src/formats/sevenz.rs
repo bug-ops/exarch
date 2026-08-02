@@ -313,16 +313,10 @@ impl<R: Read + Seek> SevenZArchive<R> {
 
         // Extension filter runs before validate_entry to avoid quota
         // double-counting for skipped files.
-        if matches!(entry_type, EntryType::File) {
-            let ext = entry_path.extension().and_then(|e| e.to_str());
-            if !config.is_path_extension_allowed(ext) {
-                report.files_skipped += 1;
-                report.warnings.push(format!(
-                    "skipped entry with disallowed extension: {}",
-                    entry_path.display()
-                ));
-                return Ok(0);
-            }
+        if matches!(entry_type, EntryType::File)
+            && !common::check_extension_allowed(entry_path, config, report)
+        {
+            return Ok(0);
         }
 
         // Re-validate (defense in depth)

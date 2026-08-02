@@ -115,8 +115,20 @@ pub fn verify_archive<P: AsRef<Path>>(
     config: &SecurityConfig,
 ) -> Result<VerificationReport> {
     config.validate()?;
-    let manifest = list_archive(archive_path, config)?;
+    let manifest = list_archive(archive_path, &listing_config_for_verify(config))?;
     verify_manifest(&manifest, config)
+}
+
+/// Returns a config variant for the pre-flight listing step that feeds
+/// `verify_manifest`, with `max_file_size` relaxed to unlimited.
+///
+/// `verify` is a read-only, report-based operation: an oversized entry is
+/// meant to surface as a `VerificationIssue` from `verify_entry` (which
+/// re-checks the real `config` against every manifest entry), not abort the
+/// listing step before any report exists. `max_file_count` and
+/// `max_total_size` are left untouched, matching prior behavior.
+pub(crate) fn listing_config_for_verify(config: &SecurityConfig) -> SecurityConfig {
+    config.clone().with_max_file_size(u64::MAX)
 }
 
 fn verify_entry(
@@ -424,6 +436,68 @@ mod tests {
             report.issues.is_empty(),
             "Safe archive should have no issues"
         );
+    }
+
+    // Regression test: verify_archive() must report an oversized entry as a
+    // graceful VerificationIssue (Fail status with an itemized report), not
+    // abort with a bare error during its internal pre-flight list_archive()
+    // call. Before listing_config_for_verify() existed, list_archive()
+    // enforcing max_file_size (#396) made this scenario an Err with no
+    // report, bypassing verify_entry's existing FileSize handling.
+    #[test]
+    fn test_verify_archive_oversized_entry_reports_issue_not_error() {
+        let mut temp_file = NamedTempFile::with_suffix(".tar").unwrap();
+        let mut builder = tar::Builder::new(Vec::new());
+
+        let data = vec![0u8; 1000];
+        let mut header = tar::Header::new_gnu();
+        header.set_path("big.bin").unwrap();
+        header.set_size(data.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder.append(&header, &data[..]).unwrap();
+
+        let archive_data = builder.into_inner().unwrap();
+        temp_file.write_all(&archive_data).unwrap();
+        temp_file.flush().unwrap();
+
+        let config = SecurityConfig {
+            max_file_size: 500,
+            ..Default::default()
+        };
+        let report = verify_archive(temp_file.path(), &config)
+            .expect("verify_archive must report oversized entries, not error out");
+
+        assert_eq!(
+            report.status,
+            VerificationStatus::Fail,
+            "oversized entry must fail verification via a report, not a hard error"
+        );
+        assert_eq!(report.suspicious_entries, 1);
+        assert!(
+            report.issues.iter().any(|i| {
+                i.severity == IssueSeverity::High
+                    && i.category == IssueCategory::QuotaExceeded
+                    && i.message.contains("single file size")
+            }),
+            "expected a High-severity QuotaExceeded FileSize issue, got: {:?}",
+            report.issues
+        );
+    }
+
+    #[test]
+    fn test_listing_config_for_verify_relaxes_only_max_file_size() {
+        let config = SecurityConfig {
+            max_file_size: 1000,
+            max_total_size: 2000,
+            max_file_count: 3,
+            ..Default::default()
+        };
+        let listing_config = listing_config_for_verify(&config);
+
+        assert_eq!(listing_config.max_file_size, u64::MAX);
+        assert_eq!(listing_config.max_total_size, config.max_total_size);
+        assert_eq!(listing_config.max_file_count, config.max_file_count);
     }
 
     // Note: Full CVE regression tests for path traversal require real malicious

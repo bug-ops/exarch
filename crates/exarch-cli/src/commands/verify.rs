@@ -13,6 +13,7 @@ pub fn execute(args: &VerifyArgs, formatter: &dyn OutputFormatter) -> Result<()>
     let config = SecurityConfig::default()
         .with_max_file_count(args.max_files)
         .with_max_total_size(args.max_total_size.unwrap_or(500 * 1024 * 1024))
+        .with_max_file_size(args.max_file_size.unwrap_or(50 * 1024 * 1024))
         .with_allow_solid_archives(args.allow_solid_archives);
 
     let report = verify_archive(&args.archive, &config)?;

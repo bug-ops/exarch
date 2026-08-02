@@ -199,6 +199,10 @@ pub struct ListArgs {
     #[arg(long, value_parser = parse_byte_size)]
     pub max_total_size: Option<u64>,
 
+    /// Maximum size of any single entry in bytes (supports K, M, G, T suffixes)
+    #[arg(long, value_parser = parse_byte_size)]
+    pub max_file_size: Option<u64>,
+
     /// Allow solid 7z archives (higher memory usage during listing)
     #[arg(long)]
     pub allow_solid_archives: bool,
@@ -225,6 +229,10 @@ pub struct VerifyArgs {
     /// Maximum total size of entries in bytes (supports K, M, G, T suffixes)
     #[arg(long, value_parser = parse_byte_size)]
     pub max_total_size: Option<u64>,
+
+    /// Maximum size of any single entry in bytes (supports K, M, G, T suffixes)
+    #[arg(long, value_parser = parse_byte_size)]
+    pub max_file_size: Option<u64>,
 
     /// Allow solid 7z archives (higher memory usage during verification)
     #[arg(long)]
@@ -431,6 +439,24 @@ mod tests {
             panic!("expected verify command");
         };
         assert_eq!(args.max_total_size, Some(500 * 1024 * 1024));
+    }
+
+    #[test]
+    fn test_list_args_max_file_size_override() {
+        let cli = Cli::parse_from(["exarch", "list", "--max-file-size", "100M", "archive.zip"]);
+        let Commands::List(args) = cli.command else {
+            panic!("expected list command");
+        };
+        assert_eq!(args.max_file_size, Some(100 * 1024 * 1024));
+    }
+
+    #[test]
+    fn test_verify_args_max_file_size_override() {
+        let cli = Cli::parse_from(["exarch", "verify", "--max-file-size", "100M", "archive.zip"]);
+        let Commands::Verify(args) = cli.command else {
+            panic!("expected verify command");
+        };
+        assert_eq!(args.max_file_size, Some(100 * 1024 * 1024));
     }
 
     #[test]

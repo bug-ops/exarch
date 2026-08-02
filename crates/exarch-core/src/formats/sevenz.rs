@@ -490,14 +490,7 @@ impl<R: Read + Seek> SevenZArchive<R> {
             Ok(()) => return Ok(accumulated),
             Err(e) => ArchiveError::from(e),
         };
-        if accumulated.total_items() > 0 {
-            Err(ArchiveError::PartialExtraction {
-                source: Box::new(e),
-                report: accumulated,
-            })
-        } else {
-            Err(e)
-        }
+        Err(ArchiveError::partial_or(accumulated, e))
     }
 }
 
@@ -619,7 +612,9 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
 
     fn verify(&mut self, config: &SecurityConfig) -> Result<crate::inspection::VerificationReport> {
         config.validate()?;
-        let manifest = self.list(config)?;
+        let manifest = self.list(&crate::inspection::verify::listing_config_for_verify(
+            config,
+        ))?;
         crate::inspection::verify::verify_manifest(&manifest, config)
     }
 

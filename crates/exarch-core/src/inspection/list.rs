@@ -14,6 +14,7 @@ use flate2::read::GzDecoder;
 use crate::ArchiveError;
 use crate::Result;
 use crate::SecurityConfig;
+#[cfg(test)]
 use crate::error::QuotaResource;
 use crate::formats::common::normalize_entry_name;
 use crate::formats::detect::ArchiveType;
@@ -23,6 +24,7 @@ use crate::formats::zip::zip_mode_is_symlink;
 use crate::inspection::manifest::ArchiveEntry;
 use crate::inspection::manifest::ArchiveManifest;
 use crate::inspection::manifest::ManifestEntryType;
+use crate::security::quota::QuotaTracker;
 
 /// Lists archive contents without extracting.
 ///
@@ -39,7 +41,7 @@ use crate::inspection::manifest::ManifestEntryType;
 /// Returns error if:
 /// - Archive file cannot be opened
 /// - Archive format is unsupported or corrupted
-/// - Quota limits exceeded (file count, total size)
+/// - Quota limits exceeded (file count, total size, single file size)
 ///
 /// # Examples
 ///
@@ -148,6 +150,7 @@ fn list_tar_entries<R: std::io::Read>(
     config: &SecurityConfig,
 ) -> Result<ArchiveManifest> {
     let mut manifest = ArchiveManifest::new(format);
+    let mut quota = QuotaTracker::new();
 
     let entries = archive
         .entries()
@@ -162,15 +165,15 @@ fn list_tar_entries<R: std::io::Read>(
             continue;
         }
 
-        // Check file count quota
-        if manifest.total_entries >= config.max_file_count {
-            return Err(ArchiveError::QuotaExceeded {
-                resource: QuotaResource::FileCount {
-                    current: manifest.total_entries + 1,
-                    max: config.max_file_count,
-                },
-            });
-        }
+        let size = entry.size();
+
+        // Route through the same QuotaTracker used by extraction: per-file
+        // size, file count, and total size (with checked arithmetic) are all
+        // enforced here using the same logic. Note this doesn't make listing
+        // and extraction fully equivalent — extraction's QuotaTracker only
+        // records EntryType::File, while listing records every entry type
+        // (directories, symlinks, hardlinks too), a pre-existing divergence.
+        quota.record_file(size, config)?;
 
         let path = entry
             .path()
@@ -182,7 +185,6 @@ fn list_tar_entries<R: std::io::Read>(
         }
 
         let entry_type = convert_tar_entry_type(&entry)?;
-        let size = entry.size();
         let mode = entry.header().mode().ok();
         let modified =
             entry.header().mtime().ok().and_then(|t| {
@@ -215,16 +217,6 @@ fn list_tar_entries<R: std::io::Read>(
             symlink_target,
             hardlink_target,
         };
-
-        // Check total size quota
-        if manifest.total_size + archive_entry.size > config.max_total_size {
-            return Err(ArchiveError::QuotaExceeded {
-                resource: QuotaResource::TotalSize {
-                    current: manifest.total_size + archive_entry.size,
-                    max: config.max_total_size,
-                },
-            });
-        }
 
         manifest.add_entry(archive_entry);
     }
@@ -264,17 +256,9 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
     config: &SecurityConfig,
 ) -> Result<ArchiveManifest> {
     let mut manifest = ArchiveManifest::new(ArchiveType::Zip);
+    let mut quota = QuotaTracker::new();
 
     for i in 0..archive.len() {
-        if manifest.total_entries >= config.max_file_count {
-            return Err(ArchiveError::QuotaExceeded {
-                resource: QuotaResource::FileCount {
-                    current: manifest.total_entries + 1,
-                    max: config.max_file_count,
-                },
-            });
-        }
-
         let entry = archive.by_index(i).map_err(|e| {
             if e.to_string().contains("Password required to decrypt file") {
                 return ArchiveError::SecurityViolation {
@@ -289,6 +273,14 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
                 reason: "archive is password-protected".into(),
             });
         }
+
+        // Route through the same QuotaTracker used by extraction: per-file
+        // size, file count, and total size (with checked arithmetic) are all
+        // enforced here using the same logic. Note this doesn't make listing
+        // and extraction fully equivalent — extraction's QuotaTracker only
+        // records EntryType::File, while listing records every entry type
+        // (directories, symlinks, hardlinks too), a pre-existing divergence.
+        quota.record_file(entry.size(), config)?;
 
         let raw_name = entry
             .name()
@@ -353,15 +345,6 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
             symlink_target,
             hardlink_target: None,
         };
-
-        if manifest.total_size + archive_entry.size > config.max_total_size {
-            return Err(ArchiveError::QuotaExceeded {
-                resource: QuotaResource::TotalSize {
-                    current: manifest.total_size + archive_entry.size,
-                    max: config.max_total_size,
-                },
-            });
-        }
 
         manifest.add_entry(archive_entry);
     }
@@ -438,20 +421,20 @@ fn list_sevenz_archive(
     config: &SecurityConfig,
 ) -> Result<ArchiveManifest> {
     let mut manifest = ArchiveManifest::new(ArchiveType::SevenZ);
+    let mut quota = QuotaTracker::new();
 
     for entry in &archive.files {
         if entry.is_anti_item {
             continue;
         }
 
-        if manifest.total_entries >= config.max_file_count {
-            return Err(ArchiveError::QuotaExceeded {
-                resource: QuotaResource::FileCount {
-                    current: manifest.total_entries + 1,
-                    max: config.max_file_count,
-                },
-            });
-        }
+        // Route through the same QuotaTracker used by extraction: per-file
+        // size, file count, and total size (with checked arithmetic) are all
+        // enforced here using the same logic. Note this doesn't make listing
+        // and extraction fully equivalent — extraction's QuotaTracker only
+        // records EntryType::File, while listing records every entry type
+        // (directories, symlinks, hardlinks too), a pre-existing divergence.
+        quota.record_file(entry.size, config)?;
 
         let path = PathBuf::from(normalize_entry_name(&entry.name));
 
@@ -483,15 +466,6 @@ fn list_sevenz_archive(
             symlink_target: None,
             hardlink_target: None,
         };
-
-        if manifest.total_size + archive_entry.size > config.max_total_size {
-            return Err(ArchiveError::QuotaExceeded {
-                resource: QuotaResource::TotalSize {
-                    current: manifest.total_size + archive_entry.size,
-                    max: config.max_total_size,
-                },
-            });
-        }
 
         manifest.add_entry(archive_entry);
     }
@@ -2002,6 +1976,209 @@ mod tests {
         assert!(
             matches!(result, Err(ArchiveError::PathTraversal { .. })),
             "traversal inside absolute path must still be rejected, got: {result:?}"
+        );
+    }
+
+    // --- Regression tests for #396: list_archive() must route through
+    // QuotaTracker instead of reimplementing quota checks ---
+
+    #[test]
+    fn test_list_tar_quota_exceeded_file_size() {
+        // Previously list_tar_entries never checked max_file_size per entry —
+        // only max_file_count/max_total_size. A single oversized entry must now
+        // be rejected even when total size and file count are within limits.
+        let mut temp_file = NamedTempFile::with_suffix(".tar").unwrap();
+        let mut builder = tar::Builder::new(Vec::new());
+
+        let data = vec![0u8; 1000];
+        let mut header = tar::Header::new_gnu();
+        header.set_path("big.bin").unwrap();
+        header.set_size(data.len() as u64);
+        header.set_cksum();
+        builder.append(&header, &data[..]).unwrap();
+
+        let archive_data = builder.into_inner().unwrap();
+        temp_file.write_all(&archive_data).unwrap();
+        temp_file.flush().unwrap();
+
+        let config = SecurityConfig {
+            max_file_size: 500,
+            ..Default::default()
+        };
+        let result = list_archive(temp_file.path(), &config);
+        assert!(
+            matches!(
+                result,
+                Err(ArchiveError::QuotaExceeded {
+                    resource: QuotaResource::FileSize {
+                        size: 1000,
+                        max: 500
+                    }
+                })
+            ),
+            "expected FileSize quota error, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_list_zip_quota_exceeded_file_size() {
+        let temp_file = NamedTempFile::with_suffix(".zip").unwrap();
+        let file = std::fs::File::create(temp_file.path()).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        zip.start_file("big.bin", options).unwrap();
+        zip.write_all(&vec![0u8; 1000]).unwrap();
+        zip.finish().unwrap();
+
+        let config = SecurityConfig {
+            max_file_size: 500,
+            ..Default::default()
+        };
+        let result = list_archive(temp_file.path(), &config);
+        assert!(
+            matches!(
+                result,
+                Err(ArchiveError::QuotaExceeded {
+                    resource: QuotaResource::FileSize {
+                        size: 1000,
+                        max: 500
+                    }
+                })
+            ),
+            "expected FileSize quota error, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_list_sevenz_quota_exceeded_file_size() {
+        let data = vec![0u8; 1000];
+        let archive_bytes = make_sevenz_archive(&[("big.bin", &data)]);
+        let mut temp_file = NamedTempFile::with_suffix(".7z").unwrap();
+        temp_file.write_all(&archive_bytes).unwrap();
+        temp_file.flush().unwrap();
+
+        let config = SecurityConfig {
+            max_file_size: 500,
+            ..Default::default()
+        };
+        let result = list_archive(temp_file.path(), &config);
+        assert!(
+            matches!(
+                result,
+                Err(ArchiveError::QuotaExceeded {
+                    resource: QuotaResource::FileSize {
+                        size: 1000,
+                        max: 500
+                    }
+                })
+            ),
+            "expected FileSize quota error, got: {result:?}"
+        );
+    }
+
+    /// Builds a raw ZIP archive whose central directory declares entry sizes
+    /// via the ZIP64 extended-information extra field (id `0x0001`),
+    /// independent of the actual (empty) local file data. This lets tests
+    /// exercise declared sizes that would be implausible to back with real
+    /// bytes (e.g. near `u64::MAX`), which is exactly what `QuotaTracker`'s
+    /// checked arithmetic must guard against.
+    #[allow(clippy::cast_possible_truncation)]
+    fn zip_with_zip64_declared_sizes(entries: &[(&str, u64)]) -> Vec<u8> {
+        let mut buf: Vec<u8> = Vec::new();
+        let mut central_entries: Vec<Vec<u8>> = Vec::new();
+
+        for (name, declared_size) in entries {
+            let name_bytes = name.as_bytes();
+            let name_len = name_bytes.len() as u16;
+            let local_offset = buf.len() as u32;
+
+            // Local file header: empty stored entry, real size 0.
+            buf.extend_from_slice(b"PK\x03\x04");
+            buf.extend_from_slice(&20u16.to_le_bytes()); // version needed
+            buf.extend_from_slice(&0u16.to_le_bytes()); // flags
+            buf.extend_from_slice(&0u16.to_le_bytes()); // compression: stored
+            buf.extend_from_slice(&0u16.to_le_bytes()); // mod time
+            buf.extend_from_slice(&0u16.to_le_bytes()); // mod date
+            buf.extend_from_slice(&0u32.to_le_bytes()); // crc32
+            buf.extend_from_slice(&0u32.to_le_bytes()); // compressed size
+            buf.extend_from_slice(&0u32.to_le_bytes()); // uncompressed size
+            buf.extend_from_slice(&name_len.to_le_bytes());
+            buf.extend_from_slice(&0u16.to_le_bytes()); // extra field length
+            buf.extend_from_slice(name_bytes);
+
+            // Central directory entry: sizes forced to the ZIP64 sentinel with
+            // the real (lying) sizes carried in a ZIP64 extra field.
+            let mut central: Vec<u8> = Vec::new();
+            central.extend_from_slice(b"PK\x01\x02");
+            central.extend_from_slice(&0x032du16.to_le_bytes()); // version made by: Unix, 4.5
+            central.extend_from_slice(&45u16.to_le_bytes()); // version needed: 4.5 (ZIP64)
+            central.extend_from_slice(&0u16.to_le_bytes()); // flags
+            central.extend_from_slice(&0u16.to_le_bytes()); // compression
+            central.extend_from_slice(&0u16.to_le_bytes()); // mod time
+            central.extend_from_slice(&0u16.to_le_bytes()); // mod date
+            central.extend_from_slice(&0u32.to_le_bytes()); // crc32
+            central.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes()); // compressed size sentinel
+            central.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes()); // uncompressed size sentinel
+            central.extend_from_slice(&name_len.to_le_bytes());
+            central.extend_from_slice(&20u16.to_le_bytes()); // extra field length (4 hdr + 16 data)
+            central.extend_from_slice(&0u16.to_le_bytes()); // comment length
+            central.extend_from_slice(&0u16.to_le_bytes()); // disk number start
+            central.extend_from_slice(&0u16.to_le_bytes()); // internal attributes
+            central.extend_from_slice(&0u32.to_le_bytes()); // external attributes
+            central.extend_from_slice(&local_offset.to_le_bytes());
+            central.extend_from_slice(name_bytes);
+            central.extend_from_slice(&1u16.to_le_bytes()); // ZIP64 extra field id
+            central.extend_from_slice(&16u16.to_le_bytes()); // ZIP64 extra field data size
+            central.extend_from_slice(&declared_size.to_le_bytes()); // uncompressed size
+            central.extend_from_slice(&declared_size.to_le_bytes()); // compressed size
+
+            central_entries.push(central);
+        }
+
+        let central_offset = buf.len() as u32;
+        for central in &central_entries {
+            buf.extend_from_slice(central);
+        }
+        let central_size = (buf.len() as u32) - central_offset;
+
+        buf.extend_from_slice(b"PK\x05\x06");
+        buf.extend_from_slice(&0u16.to_le_bytes()); // disk number
+        buf.extend_from_slice(&0u16.to_le_bytes()); // disk with central dir
+        buf.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+        buf.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+        buf.extend_from_slice(&central_size.to_le_bytes());
+        buf.extend_from_slice(&central_offset.to_le_bytes());
+        buf.extend_from_slice(&0u16.to_le_bytes()); // comment length
+        buf
+    }
+
+    #[test]
+    fn test_list_zip_total_size_overflow_rejected_not_wrapped() {
+        // Two entries whose declared sizes sum past u64::MAX. With unchecked
+        // addition (the pre-fix behaviour) `total_size` would silently wrap
+        // and bypass max_total_size entirely. QuotaTracker's checked_add must
+        // reject this with IntegerOverflow instead.
+        use std::io::Cursor;
+
+        let zip_bytes = zip_with_zip64_declared_sizes(&[("a.bin", u64::MAX - 100), ("b.bin", 200)]);
+        let mut archive = zip::ZipArchive::new(Cursor::new(zip_bytes)).unwrap();
+
+        let config = SecurityConfig {
+            max_file_size: u64::MAX,
+            max_file_count: usize::MAX,
+            max_total_size: u64::MAX,
+            ..Default::default()
+        };
+        let result = list_zip_reader(&mut archive, &config);
+        assert!(
+            matches!(
+                result,
+                Err(ArchiveError::QuotaExceeded {
+                    resource: QuotaResource::IntegerOverflow
+                })
+            ),
+            "expected IntegerOverflow quota error instead of a silently wrapped total, got: {result:?}"
         );
     }
 }

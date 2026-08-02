@@ -297,6 +297,25 @@ impl ArchiveError {
             _ => None,
         }
     }
+
+    /// Wraps `err` in [`Self::PartialExtraction`] if `report` recorded any
+    /// processed items, otherwise returns `err` unchanged.
+    ///
+    /// Format handlers call this at every point where extraction can fail
+    /// mid-archive, so callers can distinguish "nothing was written" from
+    /// "extraction stopped partway through" without each handler
+    /// reimplementing the same check.
+    #[must_use]
+    pub(crate) fn partial_or(report: crate::ExtractionReport, err: Self) -> Self {
+        if report.total_items() > 0 {
+            Self::PartialExtraction {
+                source: Box::new(err),
+                report,
+            }
+        } else {
+            err
+        }
+    }
 }
 
 #[cfg(test)]
@@ -672,6 +691,35 @@ mod tests {
             report: ExtractionReport::new(),
         };
         assert!(err.is_recoverable());
+    }
+
+    #[test]
+    fn test_partial_or_wraps_when_report_has_items() {
+        use crate::ExtractionReport;
+
+        let mut report = ExtractionReport::new();
+        report.files_extracted = 1;
+        let err = ArchiveError::InvalidArchive("bad entry".into());
+
+        let result = ArchiveError::partial_or(report, err);
+        assert!(
+            matches!(result, ArchiveError::PartialExtraction { .. }),
+            "expected PartialExtraction when report has processed items, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_partial_or_passes_through_when_report_empty() {
+        use crate::ExtractionReport;
+
+        let report = ExtractionReport::new();
+        let err = ArchiveError::InvalidArchive("bad entry".into());
+
+        let result = ArchiveError::partial_or(report, err);
+        assert!(
+            matches!(result, ArchiveError::InvalidArchive(_)),
+            "expected the original error unwrapped when report is empty, got: {result:?}"
+        );
     }
 
     #[test]

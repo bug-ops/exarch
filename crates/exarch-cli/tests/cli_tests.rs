@@ -1039,6 +1039,98 @@ fn test_list_archive_json_output() {
     assert!(json["data"]["total_entries"].is_number());
 }
 
+/// Builds a tar.gz archive at `path` containing one file of `size` bytes.
+fn create_sized_tar_gz(path: &std::path::Path, size: usize) {
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
+
+    let file = std::fs::File::create(path).expect("create archive");
+    let gz = GzEncoder::new(file, Compression::default());
+    let mut builder = tar::Builder::new(gz);
+    let data = vec![0u8; size];
+    let mut header = tar::Header::new_gnu();
+    header.set_size(data.len() as u64);
+    header.set_mode(0o644);
+    header.set_path("big.bin").expect("set path");
+    header.set_cksum();
+    builder
+        .append_data(&mut header, "big.bin", &data[..])
+        .expect("append entry");
+    let gz = builder.into_inner().expect("get gz encoder");
+    gz.finish().expect("finish gzip stream");
+}
+
+/// Regression test: `list` must respect a caller-supplied `--max-file-size`,
+/// not just the compiled-in 50MB default — previously `list`/`verify` had no
+/// flag to raise or lower this cap, unlike `extract`/`create`.
+#[test]
+fn test_list_max_file_size_flag_enforced_and_configurable() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive_path = temp.path().join("oversized.tar.gz");
+    create_sized_tar_gz(&archive_path, 1000);
+
+    // Below the entry's size: list must reject with QuotaExceeded.
+    let output = exarch_cmd()
+        .arg("list")
+        .arg("--json")
+        .arg("--max-file-size")
+        .arg("500")
+        .arg(&archive_path)
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).expect("invalid JSON output");
+    assert_eq!(json["status"], "error");
+    assert_eq!(json["error"]["kind"], "QuotaExceeded");
+
+    // Above the entry's size: list must succeed.
+    exarch_cmd()
+        .arg("list")
+        .arg("--max-file-size")
+        .arg("2000")
+        .arg(&archive_path)
+        .assert()
+        .success();
+}
+
+/// Regression test: an oversized entry must degrade `verify` to a graceful
+/// Fail-status report (with the violation itemized as an issue), not a bare
+/// error — `verify`'s internal pre-flight listing pass keeps `max_file_size`
+/// unlimited precisely so this stays a report, not a hard failure.
+#[test]
+fn test_verify_oversized_entry_produces_fail_report_not_error() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive_path = temp.path().join("oversized.tar.gz");
+    create_sized_tar_gz(&archive_path, 1000);
+
+    let output = exarch_cmd()
+        .arg("verify")
+        .arg("--json")
+        .arg("--check-security")
+        .arg("--max-file-size")
+        .arg("500")
+        .arg(&archive_path)
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: serde_json::Value = serde_json::from_slice(&output).expect("invalid JSON output");
+    assert_eq!(
+        json["status"], "success",
+        "verify's envelope status must stay success even when data.status is FAIL"
+    );
+    assert_eq!(json["data"]["status"], "FAIL");
+    let issues = json["data"]["issues"].as_array().expect("issues array");
+    assert!(
+        issues.iter().any(|i| i["category"] == "Quota Exceeded"),
+        "expected a QuotaExceeded issue in the report, got: {json}"
+    );
+}
+
 #[test]
 fn test_verify_archive_safe() {
     exarch_cmd()
@@ -1256,6 +1348,13 @@ fn test_verify_fail_human_readable_prints_error() {
 /// Regression test for issue #386: `extract --json` must populate the
 /// structured `error.partial_report` field when extraction is stopped
 /// mid-archive after some entries were already written.
+///
+/// Uses a symlink entry (rejected only during extraction, since
+/// `allow_symlinks` defaults to false) rather than an oversized entry: since
+/// issue #396, `list` enforces `max_file_size` during the CLI's pre-flight
+/// `list_archive()` call (see `extract.rs`'s `list_config`), so an oversized
+/// entry is now rejected before extraction ever starts and would never produce
+/// a partial report.
 #[test]
 fn test_extract_json_partial_report_populated() {
     let temp = TempDir::new().expect("failed to create temp dir");
@@ -1281,20 +1380,14 @@ fn test_extract_json_partial_report_populated() {
                 &b"data"[..],
             )
             .expect("append small entry");
-        let big = vec![0_u8; 2_000_000];
+        let mut link_header = tar::Header::new_gnu();
+        link_header.set_size(0);
+        link_header.set_entry_type(tar::EntryType::Symlink);
+        link_header.set_mode(0o777);
+        link_header.set_cksum();
         builder
-            .append_data(
-                &mut {
-                    let mut h = tar::Header::new_gnu();
-                    h.set_size(big.len() as u64);
-                    h.set_mode(0o644);
-                    h.set_cksum();
-                    h
-                },
-                "big.bin",
-                big.as_slice(),
-            )
-            .expect("append big entry");
+            .append_link(&mut link_header, "link", "target.txt")
+            .expect("append symlink entry");
         let gz = builder.into_inner().expect("get gz encoder");
         gz.finish().expect("finish gzip stream");
     }
@@ -1303,8 +1396,6 @@ fn test_extract_json_partial_report_populated() {
     let output = exarch_cmd()
         .arg("extract")
         .arg("--json")
-        .arg("--max-file-size")
-        .arg("1000000")
         .arg(&archive_path)
         .arg(&output_dir)
         .assert()

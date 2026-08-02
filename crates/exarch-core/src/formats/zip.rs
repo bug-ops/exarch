@@ -481,14 +481,7 @@ impl<R: Read + Seek> ArchiveFormat for ZipArchive<R> {
 
             if let Err(e) = result {
                 drop(guard);
-                return Err(if report.total_items() > 0 {
-                    ArchiveError::PartialExtraction {
-                        source: Box::new(e),
-                        report: std::mem::take(&mut report),
-                    }
-                } else {
-                    e
-                });
+                return Err(ArchiveError::partial_or(std::mem::take(&mut report), e));
             }
             guard.complete();
         }
@@ -505,7 +498,9 @@ impl<R: Read + Seek> ArchiveFormat for ZipArchive<R> {
     }
 
     fn verify(&mut self, config: &SecurityConfig) -> Result<crate::inspection::VerificationReport> {
-        let manifest = self.list(config)?;
+        let manifest = self.list(&crate::inspection::verify::listing_config_for_verify(
+            config,
+        ))?;
         crate::inspection::verify::verify_manifest(&manifest, config)
     }
 

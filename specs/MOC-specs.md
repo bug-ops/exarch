@@ -26,6 +26,7 @@ status: moc
 | 005 | [[005-cli/spec\|CLI]] | tasks | current (v0.5.0) | [[005-cli/tasks\|none open]] |
 | 006 | [[006-python-bindings/spec\|Python Bindings]] | tasks | current (v0.5.1) | [[006-python-bindings/tasks\|none]] |
 | 007 | [[007-node-bindings/spec\|Node.js Bindings]] | tasks | current (v0.5.0) | [[007-node-bindings/tasks\|none]] |
+| 011 | [[011-ffi-panic-boundary-simplification/spec\|FFI Panic Boundary Simplification]] | specify | draft (research, P3) | n/a (specify-only) |
 
 ## Completed Specs
 

@@ -108,6 +108,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or reach an empty value while non-`None`, so the regression tests use a GNU `LongLink` (`K`)
   record's raw payload to smuggle both past the header-field-level shortcuts, exercising the
   same path a real crafted archive would take.
+- **TAR extension-filter skip has no cumulative bound on synthesized drain across many small
+  sparse entries (#422)**: the per-entry synthetic-byte drain cap from #414 bounds the cost of any
+  *single* unread GNU sparse entry, but when `SecurityConfig` has an extension allowlist
+  configured, entries that fail the extension check are skipped before `QuotaTracker` ever runs
+  (intentional, per #421's fix for quota double-counting) — so `max_total_size`/`max_file_count`
+  provided no cumulative bound across many such pre-quota skips (measured: a ~20 MB archive of
+  20,000 small extension-filtered GNU sparse entries took ~1.41 s to extract, versus ~150 ms for
+  the same archive without an extension filter, which hits `QuotaExceeded` immediately). Added a
+  second, cumulative counter to `formats::tar_metadata_limit::TarReadBudget`: every
+  `TarEntryGuard::drop`'s own synthesized-byte count is now summed across the whole archive-open
+  operation, and `BudgetedEntries::next_entry` fails fast with a `SecurityViolation` once the sum
+  exceeds a fixed, non-configurable 1 GiB cap (roughly 128 maximally-saturating entries), rather
+  than continuing to drain further entries. The check lives in `next_entry` itself, so it applies
+  uniformly to `extract_archive`, `list_archive`, and `verify_archive` regardless of
+  extension-filter ordering — including `list_archive`/`verify_archive`, which skip *every* entry
+  unconditionally (they never read entry content at all), not only extension-filtered ones.
+
+  An initial version of this fix used a much tighter 64 MiB cap (8x the per-entry cap). Adversarial
+  review found that gave any legitimate archive of `list`/`verify`/extension-filtered-`extract`
+  sparse entries only 8 entries of headroom before false-positiving with a `SecurityViolation`,
+  since `list`/`verify` drain every entry unconditionally. The cap was raised to 1 GiB: worst-case
+  cost stays a fixed, sub-second amount of wasted `io::sink` throughput regardless of entry count,
+  while legitimate multi-entry sparse archives now have generous (~128-entry) headroom. This widens
+  this module's existing documented residual limitation (a legitimate GNU sparse file with real
+  holes larger than the per-entry cap is indistinguishable from an attack when skipped unread) from
+  a single oversized entry to roughly a hundred such entries in aggregate — still an accepted,
+  documented trade-off (P3), not a new bug.
 - Bumped `sevenz-rust2` from 0.21.3 to 0.21.4, fixing an integer overflow when summing
   attacker-controlled coder stream counts while parsing a 7z block header (upstream #127).
   Malformed archives previously could panic in debug builds and bypassed the stream-count

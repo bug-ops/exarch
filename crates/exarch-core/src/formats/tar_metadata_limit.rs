@@ -79,13 +79,49 @@
 //! holes larger than [`SYNTHETIC_PAD_CAP_BYTES`] (e.g. a multi-gigabyte
 //! sparse disk image, mostly zero-filled) looks identical to an attack from
 //! this module's perspective when such a file is skipped unread — both
-//! produce output with no corresponding read. This affects `list_archive`,
-//! `verify_archive`, and, via those, the `exarch` CLI's `extract` command
-//! too (its `extract` runs a `list_archive` pre-flight ahead of the actual
-//! extraction, the same pre-flight `list`/`verify` use). Only a *direct*
-//! `TarArchive::extract` library call bypassing that pre-flight is
-//! unaffected, since it reads the entry itself and the guard's drain finds
-//! nothing left to do.
+//! produce output with no corresponding read. This affects `list_archive`
+//! and `verify_archive` unconditionally (neither reads entry content at all,
+//! so *every* entry hits this), and affects `extract_archive`/
+//! `TarArchive::extract` whenever any pre-read skip causes the entry not to
+//! be read at all — currently two such paths: a `SecurityConfig` extension
+//! allowlist rejecting the entry (`common::check_extension_allowed`, see the
+//! "Cumulative synthetic-byte budget" section below) and `skip_duplicates`
+//! finding the destination path already exists
+//! (`common::extract_file_generic`, `formats/common.rs`) — both return
+//! before the entry's content is ever read. Only an extract call that
+//! actually reads the entry (no pre-read skip of any kind) is unaffected,
+//! since the guard's drain then finds nothing left to do.
+//! [`CUMULATIVE_SYNTHETIC_CAP_BYTES`] below widens this same limitation
+//! across entries: an archive containing more than roughly a hundred such
+//! large-hole sparse entries, skipped unread by any of the paths above, is
+//! now also rejected, not just a single oversized one.
+//!
+//! # Cumulative synthetic-byte budget (issue #422)
+//!
+//! [`SYNTHETIC_PAD_CAP_BYTES`] bounds the drain cost of any *single* unread
+//! entry, but a caller with an extension allowlist configured
+//! (`common::check_extension_allowed`) skips disallowed entries *before*
+//! `QuotaTracker` ever sees them (intentional — see PR #421, which moved the
+//! check there specifically to stop quota from double-counting files that
+//! end up skipped); `skip_duplicates` skips an already-extracted path after
+//! quota has run but still before the entry is read
+//! (`common::extract_file_generic`); and `list_archive`/`verify_archive`
+//! skip *every* entry unconditionally regardless of any allowlist.
+//! `max_total_size`/`max_file_count` therefore provide no cumulative bound
+//! across many such skips: an archive of many small GNU sparse entries, each
+//! individually capped, could still sum to an arbitrarily large amount of
+//! wasted drain work.
+//!
+//! [`TarReadBudget`] closes this with a second counter — `cumulative_synthetic`
+//! on [`BudgetState`], summed across every [`TarEntryGuard::drop`] for the
+//! lifetime of one `TarReadBudget` (i.e. one archive-open operation) — capped
+//! at [`CUMULATIVE_SYNTHETIC_CAP_BYTES`]. [`BudgetedEntries::next_entry`]
+//! checks it before asking `tar` for the next entry, so a caller that keeps
+//! skipping synthetic-heavy entries fails fast on the next iteration rather
+//! than continuing to drain. Because the check lives in `next_entry` (used by
+//! `extract`, `list`, and — via `list` — `verify` alike), it applies
+//! uniformly regardless of extension-filter ordering — at the cost of the
+//! widened residual limitation described above.
 //!
 //! # Invariant: this module must never peek at archive content
 //!
@@ -124,6 +160,41 @@ use std::sync::atomic::Ordering;
 /// all by 1:1 content.
 const SYNTHETIC_PAD_CAP_BYTES: u64 = 8 * 1024 * 1024;
 
+/// Hard, non-configurable ceiling on the *sum* of every entry's synthesized-
+/// byte drain (see [`SYNTHETIC_PAD_CAP_BYTES`]) across a single archive-open
+/// operation — i.e. the lifetime of one [`TarReadBudget`] handle, shared by
+/// every [`TarEntryGuard`] it produces.
+///
+/// [`SYNTHETIC_PAD_CAP_BYTES`] alone bounds the cost of any one unread entry,
+/// not the *count* of such entries — a caller with an extension allowlist
+/// skips disallowed entries before `QuotaTracker` runs (issue #422), and
+/// `list_archive`/`verify_archive` skip every entry unconditionally (they
+/// never read entry content at all), so nothing else previously capped how
+/// many synthetic-heavy entries an archive could contain.
+///
+/// Calibrated generously, not tightly: every entry that individually
+/// saturates `SYNTHETIC_PAD_CAP_BYTES` — attack or legitimate large-hole
+/// sparse file alike, since this module cannot tell the two apart by design
+/// (see the module's residual-limitation docs) — consumes a full
+/// `SYNTHETIC_PAD_CAP_BYTES` (8 MiB) of this budget. At 1 GiB, that is
+/// roughly 128 such maximally-saturating entries (`1 GiB / 8 MiB`) before
+/// this trips: generous headroom for a real archive holding dozens of large
+/// sparse files, while still bounding the worst case to a fixed, small
+/// amount of wasted `io::sink` throughput — well under a second even at the
+/// cap (see `cumulative_synthetic_budget_trips_on_many_maximally_saturating_entries`
+/// in this module's tests) — no matter how many more entries an attacker
+/// piles on beyond that. The reported attack (a ~20 MB archive of 20,000
+/// small sparse entries, issue #422) took ~1.4 s to fully drain with no
+/// cumulative bound at all; this caps the equivalent cost near what ~128
+/// entries would cost, regardless of how many entries the archive actually
+/// contains. An earlier version of this constant used `8 *
+/// SYNTHETIC_PAD_CAP_BYTES` (64 MiB); adversarial review found that gave
+/// legitimate multi-entry sparse archives only 8 entries of headroom before
+/// false-positiving, while raising the cap all the way to 1 GiB only adds
+/// single-digit milliseconds to the worst case relative to the reported
+/// attack's own baseline.
+const CUMULATIVE_SYNTHETIC_CAP_BYTES: u64 = 1024 * 1024 * 1024;
+
 /// Chunk size for the drain loop in [`TarEntryGuard::drop`]. Not a security
 /// boundary — just an I/O granularity choice, small enough to keep the
 /// worst-case overshoot past [`SYNTHETIC_PAD_CAP_BYTES`] negligible.
@@ -154,6 +225,12 @@ struct BudgetState {
     /// synthesized padding during its drain, regardless of the metered
     /// window's own state at the time.
     total_read: AtomicU64,
+    /// Running sum of every [`TarEntryGuard::drop`]'s own synthesized-byte
+    /// count, across the whole lifetime of this state (i.e. one archive-open
+    /// operation) — never reset. Checked against
+    /// [`CUMULATIVE_SYNTHETIC_CAP_BYTES`] in
+    /// [`BudgetedEntries::next_entry`].
+    cumulative_synthetic: AtomicU64,
 }
 
 /// Cheap, cloneable handle used to arm/disarm the budget around the gap
@@ -184,6 +261,32 @@ impl TarReadBudget {
     fn total_read(&self) -> u64 {
         self.0.total_read.load(Ordering::Relaxed)
     }
+
+    /// Adds `synthetic` to the running cross-entry synthetic-byte sum.
+    /// Called once per [`TarEntryGuard::drop`], with that guard's own final
+    /// `synthetic` count.
+    fn add_cumulative_synthetic(&self, synthetic: u64) {
+        if synthetic > 0 {
+            self.0
+                .cumulative_synthetic
+                .fetch_add(synthetic, Ordering::Relaxed);
+        }
+    }
+
+    /// Returns a [`TarCumulativeSyntheticBudgetExceeded`] I/O error if the
+    /// running cross-entry synthetic-byte sum has exceeded
+    /// [`CUMULATIVE_SYNTHETIC_CAP_BYTES`], else `None`.
+    fn cumulative_synthetic_violation(&self) -> Option<io::Error> {
+        let total = self.0.cumulative_synthetic.load(Ordering::Relaxed);
+        (total > CUMULATIVE_SYNTHETIC_CAP_BYTES).then(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                TarCumulativeSyntheticBudgetExceeded {
+                    limit: CUMULATIVE_SYNTHETIC_CAP_BYTES,
+                },
+            )
+        })
+    }
 }
 
 /// Marker error surfaced when more than the configured limit is read from a
@@ -208,17 +311,49 @@ impl std::fmt::Display for TarReadBudgetExceeded {
 
 impl std::error::Error for TarReadBudgetExceeded {}
 
-/// Recovers a `TarReadBudgetExceeded` violation from an `io::Error` surfaced
-/// by the `tar` crate, converting it into an `ArchiveError::SecurityViolation`.
+/// Marker error surfaced when the cross-entry
+/// [`CUMULATIVE_SYNTHETIC_CAP_BYTES`] budget is exceeded. Recovered via
+/// [`budget_violation`] and converted into
+/// an `ArchiveError::SecurityViolation`, the same as
+/// [`TarReadBudgetExceeded`].
+#[derive(Debug)]
+struct TarCumulativeSyntheticBudgetExceeded {
+    limit: u64,
+}
+
+impl std::fmt::Display for TarCumulativeSyntheticBudgetExceeded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "TAR cumulative synthetic-byte drain budget exceeded: more than {} bytes of \
+             synthesized (unbacked) padding drained from unread entries across this archive",
+            self.limit
+        )
+    }
+}
+
+impl std::error::Error for TarCumulativeSyntheticBudgetExceeded {}
+
+/// Recovers a `TarReadBudgetExceeded` or `TarCumulativeSyntheticBudgetExceeded`
+/// violation from an `io::Error` surfaced by the `tar` crate or by
+/// [`BudgetedEntries::next_entry`], converting it into an
+/// `ArchiveError::SecurityViolation`.
 ///
 /// Returns `None` for any other I/O error, so callers can fall back to their
 /// usual generic error mapping.
 pub fn budget_violation(e: &io::Error) -> Option<crate::ArchiveError> {
     let inner = e.get_ref()?;
-    let exceeded = inner.downcast_ref::<TarReadBudgetExceeded>()?;
-    Some(crate::ArchiveError::SecurityViolation {
-        reason: exceeded.to_string(),
-    })
+    if let Some(exceeded) = inner.downcast_ref::<TarReadBudgetExceeded>() {
+        return Some(crate::ArchiveError::SecurityViolation {
+            reason: exceeded.to_string(),
+        });
+    }
+    if let Some(exceeded) = inner.downcast_ref::<TarCumulativeSyntheticBudgetExceeded>() {
+        return Some(crate::ArchiveError::SecurityViolation {
+            reason: exceeded.to_string(),
+        });
+    }
+    None
 }
 
 /// Read wrapper that meters bytes against a [`TarReadBudget`] while armed and
@@ -295,6 +430,7 @@ pub fn budgeted_reader<R: Read>(inner: R, limit: u64) -> (BudgetedReader<R>, Tar
         consumed: AtomicU64::new(0),
         allowance: AtomicU64::new(limit),
         total_read: AtomicU64::new(0),
+        cumulative_synthetic: AtomicU64::new(0),
     });
     let reader = BudgetedReader {
         inner,
@@ -362,6 +498,7 @@ impl<R: Read> Drop for TarEntryGuard<'_, '_, R> {
         // exceeding the metadata budget, both loud failures, never silent.
         let total_read_at_start = self.budget.total_read();
         let mut output_so_far: u64 = 0;
+        let mut synthetic: u64 = 0;
         let mut buf = [0u8; DRAIN_CHUNK_BYTES];
         loop {
             let n = match self.entry.read(&mut buf) {
@@ -370,11 +507,18 @@ impl<R: Read> Drop for TarEntryGuard<'_, '_, R> {
             };
             output_so_far += n as u64;
             let read_since_start = self.budget.total_read() - total_read_at_start;
-            let synthetic = output_so_far.saturating_sub(read_since_start);
+            synthetic = output_so_far.saturating_sub(read_since_start);
             if synthetic > SYNTHETIC_PAD_CAP_BYTES {
                 break;
             }
         }
+        // Feeds the cross-entry cumulative budget (issue #422): this
+        // entry's own synthesized-byte count, summed with every other
+        // entry's over the lifetime of this `TarReadBudget`, is what
+        // `BudgetedEntries::next_entry` checks before yielding the next
+        // entry — bounding total drain work across many small
+        // synthetic-heavy entries, not just any single one.
+        self.budget.add_cumulative_synthetic(synthetic);
     }
 }
 
@@ -390,11 +534,23 @@ impl<R: Read> Drop for TarEntryGuard<'_, '_, R> {
 pub struct BudgetedEntries<'a, R: Read> {
     entries: tar::Entries<'a, BudgetedReader<R>>,
     budget: TarReadBudget,
+    /// Set once `next_entry` has yielded an `Err`; latches further calls to
+    /// `None` instead of re-yielding (or re-deriving) an error. Without
+    /// this, a hypothetical caller that logs an error from `next_entry` and
+    /// keeps calling it in a loop — rather than propagating with `?` as
+    /// every current call site does — would spin forever once the
+    /// cumulative budget trips, since the violation condition never clears
+    /// itself.
+    poisoned: bool,
 }
 
 impl<'a, R: Read> BudgetedEntries<'a, R> {
     fn new(entries: tar::Entries<'a, BudgetedReader<R>>, budget: TarReadBudget) -> Self {
-        Self { entries, budget }
+        Self {
+            entries,
+            budget,
+            poisoned: false,
+        }
     }
 
     /// Arms the budget, asks `tar` for the next entry, disarms the budget,
@@ -407,14 +563,32 @@ impl<'a, R: Read> BudgetedEntries<'a, R> {
     /// archive consisting of nothing but oversized metadata records would
     /// otherwise buffer unbounded before `tar` gives up with "members found
     /// describing a future member but no future member found".
+    ///
+    /// Before any of that, checks the cross-entry cumulative synthetic-byte
+    /// budget (issue #422): if prior entries' drains have already summed
+    /// past [`CUMULATIVE_SYNTHETIC_CAP_BYTES`], fails immediately rather than
+    /// asking `tar` for (and then draining) yet another entry.
+    ///
+    /// Once this has returned `Some(Err(_))` once, every subsequent call
+    /// returns `None` rather than repeating (or re-deriving) the error.
     pub fn next_entry(&mut self) -> Option<io::Result<TarEntryGuard<'a, '_, R>>> {
+        if self.poisoned {
+            return None;
+        }
+        if let Some(err) = self.budget.cumulative_synthetic_violation() {
+            self.poisoned = true;
+            return Some(Err(err));
+        }
         self.budget.arm();
         let result = self.entries.next();
         self.budget.disarm();
 
         match result {
             None => None,
-            Some(Err(e)) => Some(Err(e)),
+            Some(Err(e)) => {
+                self.poisoned = true;
+                Some(Err(e))
+            }
             Some(Ok(entry)) => Some(Ok(TarEntryGuard {
                 entry,
                 budget: self.budget.clone(),
@@ -691,37 +865,41 @@ mod tests {
         );
     }
 
-    /// Builds a raw one-entry TAR archive with a GNU old-format sparse
-    /// header (typeflag `'S'`) whose `realsize` vastly exceeds its one-block
-    /// physical backing — the same on-disk shape as issue #414's C1 `PoC`,
-    /// used here to unit-test the synthetic-byte cap directly rather than
-    /// relying only on the integration-level regression test.
-    fn gnu_sparse_bomb_tar(realsize: u64) -> Vec<u8> {
-        const HDR_BLOCK: usize = 512;
-        fn octal_field(n: u64, width: usize) -> Option<Vec<u8>> {
-            let digits = format!("{n:o}").into_bytes();
-            if digits.len() > width - 1 {
-                return None;
-            }
-            let mut out = vec![b'0'; width - 1 - digits.len()];
-            out.extend_from_slice(&digits);
-            out.push(0);
-            Some(out)
+    fn octal_field(n: u64, width: usize) -> Option<Vec<u8>> {
+        let digits = format!("{n:o}").into_bytes();
+        if digits.len() > width - 1 {
+            return None;
         }
-        fn base256_field(n: u64, width: usize) -> Vec<u8> {
-            let mut out = vec![0u8; width];
-            let bytes = n.to_be_bytes();
-            out[width - bytes.len()..].copy_from_slice(&bytes);
-            out[0] |= 0x80;
-            out
-        }
-        fn num_field(n: u64, width: usize) -> Vec<u8> {
-            octal_field(n, width).unwrap_or_else(|| base256_field(n, width))
-        }
+        let mut out = vec![b'0'; width - 1 - digits.len()];
+        out.extend_from_slice(&digits);
+        out.push(0);
+        Some(out)
+    }
+    fn base256_field(n: u64, width: usize) -> Vec<u8> {
+        let mut out = vec![0u8; width];
+        let bytes = n.to_be_bytes();
+        out[width - bytes.len()..].copy_from_slice(&bytes);
+        out[0] |= 0x80;
+        out
+    }
+    fn num_field(n: u64, width: usize) -> Vec<u8> {
+        octal_field(n, width).unwrap_or_else(|| base256_field(n, width))
+    }
 
+    const HDR_BLOCK: usize = 512;
+
+    /// Builds a raw GNU old-format sparse header + one-block physical
+    /// backing (typeflag `'S'`) whose `realsize` vastly exceeds that one
+    /// block — the same on-disk shape as issue #414's C1 `PoC` — *without* a
+    /// trailing end-of-archive trailer, so several can be concatenated into
+    /// one multi-entry archive.
+    fn gnu_sparse_bomb_entry(name: &[u8], realsize: u64) -> Vec<u8> {
+        assert!(
+            name.len() <= 100,
+            "test helper: name field is 100 bytes, {name:?} does not fit"
+        );
         let gap = realsize - HDR_BLOCK as u64;
         let mut h = vec![0u8; HDR_BLOCK];
-        let name = b"sparsebomb.bin";
         h[..name.len()].copy_from_slice(name);
         h[100..108].copy_from_slice(&num_field(0o644, 8));
         h[108..116].copy_from_slice(&num_field(0, 8));
@@ -741,6 +919,13 @@ mod tests {
 
         let mut out = h;
         out.extend(std::iter::repeat_n(0u8, HDR_BLOCK)); // one real backing block
+        out
+    }
+
+    /// Builds a raw one-entry TAR archive around a single
+    /// [`gnu_sparse_bomb_entry`], closed with an end-of-archive trailer.
+    fn gnu_sparse_bomb_tar(realsize: u64) -> Vec<u8> {
+        let mut out = gnu_sparse_bomb_entry(b"sparsebomb.bin", realsize);
         out.extend(std::iter::repeat_n(0u8, HDR_BLOCK * 2)); // end-of-archive trailer
         out
     }
@@ -777,6 +962,138 @@ mod tests {
                 <= 512 + 512 + SYNTHETIC_PAD_CAP_BYTES + u64::try_from(DRAIN_CHUNK_BYTES).unwrap(),
             "drop must stop draining almost immediately on synthesized padding, drained {drained} \
              bytes"
+        );
+    }
+
+    /// Drives `entries` to completion or a violation, draining every
+    /// yielded guard exactly like a real skip loop would. Returns the count
+    /// of entries yielded before either running out or hitting an error.
+    fn drain_all_entries<R: Read>(
+        entries: &mut BudgetedEntries<'_, R>,
+    ) -> (usize, Option<io::Error>) {
+        let mut yielded = 0usize;
+        while let Some(result) = entries.next_entry() {
+            match result {
+                Ok(guard) => {
+                    yielded += 1;
+                    drop(guard);
+                }
+                Err(e) => return (yielded, Some(e)),
+            }
+        }
+        (yielded, None)
+    }
+
+    #[test]
+    fn cumulative_synthetic_budget_trips_on_many_maximally_saturating_entries() {
+        // Regression for issue #422: SYNTHETIC_PAD_CAP_BYTES bounds any one
+        // entry's drain, but nothing previously bounded the *count* of such
+        // entries — a caller that keeps skipping synthetic-heavy entries
+        // (e.g. all extension-filtered pre-quota, per PR #421's ordering)
+        // could drain an unbounded total. This is the worst case the
+        // cumulative cap has to bound: every entry individually saturates
+        // SYNTHETIC_PAD_CAP_BYTES, the maximum any single entry can
+        // contribute, so this is also the *fewest* entries that can trip
+        // CUMULATIVE_SYNTHETIC_CAP_BYTES — computed from the real constants
+        // (not a hardcoded entry count) so this stays correct if either cap
+        // is retuned. Also validates the wall-clock claim in
+        // CUMULATIVE_SYNTHETIC_CAP_BYTES's own doc comment: even this worst
+        // case must stay fast, not scale with an attacker's entry count.
+        const WORST_CASE_BOUND: std::time::Duration = std::time::Duration::from_secs(5);
+        let entries_needed = CUMULATIVE_SYNTHETIC_CAP_BYTES / SYNTHETIC_PAD_CAP_BYTES + 1;
+        let entry_count = usize::try_from(entries_needed).unwrap() + 5; // margin past the trip
+
+        let mut data = Vec::new();
+        for i in 0..entry_count {
+            data.extend(gnu_sparse_bomb_entry(
+                format!("spam{i}.bin").as_bytes(),
+                1u64 << 40,
+            ));
+        }
+        data.extend(std::iter::repeat_n(0u8, HDR_BLOCK * 2)); // end-of-archive trailer
+
+        let (reader, budget) = budgeted_reader(Cursor::new(data), 4096);
+        let mut archive = tar::Archive::new(reader);
+        let mut entries = budgeted_tar_entries(&mut archive, budget).unwrap();
+
+        let start = std::time::Instant::now();
+        let (yielded, violation) = drain_all_entries(&mut entries);
+        let elapsed = start.elapsed();
+
+        let err = violation.expect(
+            "the cumulative synthetic budget must trip before every entry is drained, not \
+             silently allow all of them",
+        );
+        assert!(
+            budget_violation(&err).is_some(),
+            "must be recognizable as a budget violation, got: {err:?}"
+        );
+        assert!(
+            yielded < entry_count,
+            "must fail fast well before draining all {entry_count} entries, but yielded \
+             {yielded} of them"
+        );
+        assert!(
+            elapsed < WORST_CASE_BOUND,
+            "the worst case (every entry maximally saturating) took {elapsed:?} to trip, \
+             expected well under {WORST_CASE_BOUND:?}"
+        );
+    }
+
+    #[test]
+    fn cumulative_synthetic_budget_trips_from_many_sub_cap_contributions() {
+        // Regression for critic finding S3: the test above only proves the
+        // budget trips when every entry individually saturates
+        // SYNTHETIC_PAD_CAP_BYTES. The issue's actual reported shape is
+        // different — many small entries, each producing far less
+        // synthesized output than the per-entry cap on its own — and a
+        // buggy accumulation (e.g. one that only counted entries which
+        // individually tripped SYNTHETIC_PAD_CAP_BYTES) would let this
+        // archive drain in full. Each entry here contributes a fixed,
+        // well-under-cap `GAP` to the cumulative sum; only their sum, not
+        // any single one of them, exceeds CUMULATIVE_SYNTHETIC_CAP_BYTES.
+        const GAP: u64 = 4 * 1024 * 1024;
+        const _: () = assert!(
+            GAP < SYNTHETIC_PAD_CAP_BYTES,
+            "test premise: each entry must stay well under the per-entry cap on its own"
+        );
+        let entries_needed = CUMULATIVE_SYNTHETIC_CAP_BYTES / GAP + 1;
+        let entry_count = usize::try_from(entries_needed).unwrap() + 20; // margin past the trip
+
+        let mut data = Vec::new();
+        for i in 0..entry_count {
+            data.extend(gnu_sparse_bomb_entry(
+                format!("small{i}.bin").as_bytes(),
+                HDR_BLOCK as u64 + GAP,
+            ));
+        }
+        data.extend(std::iter::repeat_n(0u8, HDR_BLOCK * 2)); // end-of-archive trailer
+
+        let (reader, budget) = budgeted_reader(Cursor::new(data), 4096);
+        let mut archive = tar::Archive::new(reader);
+        let mut entries = budgeted_tar_entries(&mut archive, budget).unwrap();
+
+        let (yielded, violation) = drain_all_entries(&mut entries);
+
+        let err = violation.expect(
+            "many sub-cap synthetic contributions must still sum past the cumulative budget, \
+             not silently drain in full",
+        );
+        assert!(
+            budget_violation(&err).is_some(),
+            "must be recognizable as a budget violation, got: {err:?}"
+        );
+        assert!(
+            yielded < entry_count,
+            "must fail before draining every one of the {entry_count} sub-cap entries, yielded \
+             {yielded}"
+        );
+        // Proves the accumulation is real (many sub-cap entries actually
+        // summed), not a fluke of some unrelated check firing on entry one.
+        assert!(
+            yielded >= 2,
+            "expected several sub-cap entries to be individually drained before the cumulative \
+             cap trips, only {yielded} were"
         );
     }
 }

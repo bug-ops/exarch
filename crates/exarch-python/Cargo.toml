@@ -21,6 +21,12 @@ pyo3 = { workspace = true, features = ["extension-module"] }
 [features]
 default = []
 abi3 = ["pyo3/abi3-py39"]
+# Exposes `_trigger_panic_for_testing()`, a deliberate-panic hook used by the
+# #395 regression test to verify the catch_unwind -> PyRuntimeError
+# conversion end-to-end through the real Python API. Never enabled for
+# published wheels (see release.yml); only CI's test-python job builds with
+# it (see ci.yml).
+panic-injection = []
 
 [lints]
 workspace = true

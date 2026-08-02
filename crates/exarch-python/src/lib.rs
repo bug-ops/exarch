@@ -22,6 +22,16 @@ use report::PyExtractionReport;
 use report::PyVerificationIssue;
 use report::PyVerificationReport;
 
+// The `catch_unwind` guards throughout this module only convert Rust panics
+// into `PyRuntimeError` when the crate is built with `panic = "unwind"`;
+// under `panic = "abort"` they are dead code and the whole Python process
+// aborts on any panic. Fail the build loudly instead of silently
+// reintroducing that vulnerability (see issue #395).
+const _: () = assert!(
+    cfg!(panic = "unwind"),
+    "exarch-python must be built with panic=unwind so catch_unwind can convert Rust panics into catchable Python exceptions; see issue #395"
+);
+
 /// Extract an archive to the specified directory.
 ///
 /// This function provides secure archive extraction with configurable
@@ -160,6 +170,38 @@ fn path_to_string(py: Python<'_>, path: &Bound<'_, PyAny>) -> PyResult<String> {
     exarch_core::validate_raw_path_str(&path_str).map_err(convert_error)?;
 
     Ok(path_str)
+}
+
+/// Runs `f`, converting a Rust panic into a `PyRuntimeError` instead of
+/// letting it unwind across the FFI boundary (see issue #395).
+///
+/// `context` is interpolated into the error message as "Internal panic
+/// during {context}".
+fn catch_panic_as_py_err<T>(
+    context: &str,
+    f: impl FnOnce() -> exarch_core::Result<T>,
+) -> PyResult<T> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
+        .map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "Internal panic during {context}"
+            ))
+        })?
+        .map_err(convert_error)
+}
+
+/// Deliberately panics inside [`catch_panic_as_py_err`] so the panic ->
+/// `PyRuntimeError` conversion can be verified end-to-end through the real
+/// Python API surface (see issue #395's regression-test requirement).
+///
+/// Only present when the crate is built with the `panic-injection` feature,
+/// which is never enabled for published wheels.
+#[cfg(feature = "panic-injection")]
+#[pyfunction]
+fn _trigger_panic_for_testing() -> PyResult<()> {
+    catch_panic_as_py_err("test operation (panic-injection)", || {
+        panic!("deliberate panic from _trigger_panic_for_testing (issue #395 regression test)")
+    })
 }
 
 /// Create an archive from source files and directories.
@@ -384,43 +426,47 @@ fn create_archive_with_progress(
     let default_config = exarch_core::creation::CreationConfig::default();
     let config_ref = config.map_or(&default_config, |c| c.as_core());
 
-    // Create progress callback adapter
-    if let Some(py_callback) = progress {
-        let mut callback = PyProgressAdapter::new(py_callback);
+    let report = catch_panic_as_py_err("archive creation with progress", || {
+        run_create_with_optional_progress(py, &output_path, &source_paths, config_ref, progress)
+    })?;
 
-        // CRITICAL: Do NOT release GIL when using Python callback!
-        // Python callback requires GIL to call into Python.
-        let report = exarch_core::create_archive_with_progress(
-            &output_path,
-            &source_paths,
-            config_ref,
-            &mut callback,
-        )
-        .map_err(convert_error)?;
+    Ok(PyCreationReport::from(report))
+}
 
-        Ok(PyCreationReport::from(report))
-    } else {
-        // No progress callback - can release GIL
-        let mut noop = exarch_core::NoopProgress;
-        let report = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+/// Runs `create_archive_with_progress` routed to the Python callback when
+/// present, or with the GIL released and a no-op reporter when absent.
+fn run_create_with_optional_progress(
+    py: Python<'_>,
+    output_path: &str,
+    source_paths: &[String],
+    config: &exarch_core::creation::CreationConfig,
+    progress: Option<Py<PyAny>>,
+) -> exarch_core::Result<exarch_core::creation::CreationReport> {
+    progress.map_or_else(
+        || {
+            // No progress callback - can release GIL
+            let mut noop = exarch_core::NoopProgress;
             py.detach(|| {
                 exarch_core::create_archive_with_progress(
-                    &output_path,
-                    &source_paths,
-                    config_ref,
+                    output_path,
+                    source_paths,
+                    config,
                     &mut noop,
                 )
             })
-        }))
-        .map_err(|_| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                "Internal panic during archive creation with progress",
+        },
+        |py_callback| {
+            // CRITICAL: Do NOT release GIL when using Python callback!
+            // Python callback requires GIL to call into Python.
+            let mut callback = PyProgressAdapter::new(py_callback);
+            exarch_core::create_archive_with_progress(
+                output_path,
+                source_paths,
+                config,
+                &mut callback,
             )
-        })?
-        .map_err(convert_error)?;
-
-        Ok(PyCreationReport::from(report))
-    }
+        },
+    )
 }
 
 /// Extract an archive with progress callback.
@@ -494,44 +540,58 @@ fn extract_archive_with_progress(
     let default_options = exarch_core::ExtractionOptions::default();
     let options_ref = options.map_or(&default_options, |o| o.as_core());
 
-    if let Some(py_callback) = progress {
-        let mut callback = PyProgressAdapter::new(py_callback);
-
-        // CRITICAL: Do NOT release GIL when using Python callback!
-        // Python callback requires GIL to call into Python.
-        let report = exarch_core::extract_archive_with_options_and_progress(
+    let report = catch_panic_as_py_err("archive extraction with progress", || {
+        run_extract_with_optional_progress(
+            py,
             &archive_path,
             &output_dir,
             config_ref,
             options_ref,
-            &mut callback,
+            progress,
         )
-        .map_err(convert_error)?;
+    })?;
 
-        Ok(PyExtractionReport::from(report))
-    } else {
-        // No progress callback - can release GIL
-        let mut noop = exarch_core::NoopProgress;
-        let report = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    Ok(PyExtractionReport::from(report))
+}
+
+/// Runs `extract_archive_with_options_and_progress` routed to the Python
+/// callback when present, or with the GIL released and a no-op reporter when
+/// absent.
+fn run_extract_with_optional_progress(
+    py: Python<'_>,
+    archive_path: &str,
+    output_dir: &str,
+    config: &exarch_core::SecurityConfig,
+    options: &exarch_core::ExtractionOptions,
+    progress: Option<Py<PyAny>>,
+) -> exarch_core::Result<exarch_core::ExtractionReport> {
+    progress.map_or_else(
+        || {
+            // No progress callback - can release GIL
+            let mut noop = exarch_core::NoopProgress;
             py.detach(|| {
                 exarch_core::extract_archive_with_options_and_progress(
-                    &archive_path,
-                    &output_dir,
-                    config_ref,
-                    options_ref,
+                    archive_path,
+                    output_dir,
+                    config,
+                    options,
                     &mut noop,
                 )
             })
-        }))
-        .map_err(|_| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                "Internal panic during archive extraction with progress",
+        },
+        |py_callback| {
+            // CRITICAL: Do NOT release GIL when using Python callback!
+            // Python callback requires GIL to call into Python.
+            let mut callback = PyProgressAdapter::new(py_callback);
+            exarch_core::extract_archive_with_options_and_progress(
+                archive_path,
+                output_dir,
+                config,
+                options,
+                &mut callback,
             )
-        })?
-        .map_err(convert_error)?;
-
-        Ok(PyExtractionReport::from(report))
-    }
+        },
+    )
 }
 
 /// Adapter that calls Python callback from Rust.
@@ -595,6 +655,8 @@ fn exarch(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(create_archive_with_progress, m)?)?;
     m.add_function(wrap_pyfunction!(list_archive, m)?)?;
     m.add_function(wrap_pyfunction!(verify_archive, m)?)?;
+    #[cfg(feature = "panic-injection")]
+    m.add_function(wrap_pyfunction!(_trigger_panic_for_testing, m)?)?;
 
     // Configuration classes
     m.add_class::<PySecurityConfig>()?;

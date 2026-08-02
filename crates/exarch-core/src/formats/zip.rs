@@ -376,13 +376,7 @@ impl<R: Read + Seek> ZipArchive<R> {
                 )?;
             }
         } else {
-            let ext = path.extension().and_then(|e| e.to_str());
-            if !ctx.config.is_path_extension_allowed(ext) {
-                ctx.report.files_skipped += 1;
-                ctx.report.warnings.push(format!(
-                    "skipped entry with disallowed extension: {}",
-                    path.display()
-                ));
+            if !common::check_extension_allowed(&path, ctx.config, ctx.report) {
                 return Ok(());
             }
             // File: validate BEFORE writing (security invariant preserved),

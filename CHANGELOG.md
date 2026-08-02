@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Extracted the duplicated extension-allowlist check from `formats/zip.rs`, `formats/tar.rs`,
+  and `formats/sevenz.rs` into a shared, `#[must_use]` `formats::common::check_extension_allowed`
+  helper (#413). Behavior is unchanged; each call site still returns its own type (`Ok(())`,
+  `Ok(None)`, `Ok(0)`) on rejection. Added direct unit tests pinning the exact skip-warning
+  message text so the wording cannot silently drift again.
 - **BREAKING: Bumped MSRV from 1.93.0 to 1.96.0 (#401)**: raises the minimum supported Rust
   version across the workspace. Downstream consumers pinned to an older toolchain must upgrade
   before taking this release. `rust-version` in the root `Cargo.toml`, the `msrv` job in

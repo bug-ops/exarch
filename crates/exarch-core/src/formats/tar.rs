@@ -216,16 +216,10 @@ impl<R: Read> TarArchive<R> {
         let size = TarEntryAdapter::get_uncompressed_size(&entry);
         let mode = entry.header().mode().ok();
 
-        if matches!(entry_type, EntryType::File) {
-            let ext = path.extension().and_then(|e| e.to_str());
-            if !ctx.config.is_path_extension_allowed(ext) {
-                ctx.report.files_skipped += 1;
-                ctx.report.warnings.push(format!(
-                    "skipped entry with disallowed extension: {}",
-                    path.display()
-                ));
-                return Ok(None);
-            }
+        if matches!(entry_type, EntryType::File)
+            && !common::check_extension_allowed(&path, ctx.config, ctx.report)
+        {
+            return Ok(None);
         }
 
         let validated = ctx.validator.validate_entry(

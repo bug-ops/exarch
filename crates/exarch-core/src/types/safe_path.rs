@@ -354,14 +354,14 @@ fn paths_start_with(path: &Path, base: &Path) -> bool {
 
 /// Checks if a path contains null bytes.
 #[cfg(unix)]
-fn has_null_bytes(path: &Path) -> bool {
+pub(crate) fn has_null_bytes(path: &Path) -> bool {
     use std::os::unix::ffi::OsStrExt;
     path.as_os_str().as_bytes().contains(&b'\0')
 }
 
 /// Checks if a path contains null bytes.
 #[cfg(not(unix))]
-fn has_null_bytes(path: &Path) -> bool {
+pub(crate) fn has_null_bytes(path: &Path) -> bool {
     path.to_str().is_none_or(|s| s.contains('\0'))
 }
 

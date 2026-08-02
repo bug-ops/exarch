@@ -95,6 +95,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   non-configurable cap almost immediately regardless of the declared `realsize`. This closes both
   directions of the bug from one mechanism, without ever inspecting a header field to tell the two
   cases apart.
+- **Symlink/hardlink targets were not validated for embedded NUL bytes or emptiness (#415)**:
+  the link path was already checked for NUL bytes and emptiness via `SafePath::validate`, but
+  the target (linkname) was not — a NUL byte in the target fell through to the OS as a raw
+  `io::Error` instead of a structured `SecurityViolation`, an empty target was silently accepted
+  (creating a dangling symlink on platforms that allow it), and a NUL-containing hardlink target
+  could be embedded verbatim into a formatted error message further downstream. `SafeSymlink::validate`
+  and `HardlinkTracker::validate_hardlink` now apply the same NUL-byte and emptiness checks to
+  the target as the link path (`types::safe_path::has_null_bytes` made `pub(crate)` for reuse),
+  without ever embedding the raw target bytes into an error message. A short (<=100 byte)
+  linkname written through the `tar` crate's own header field cannot carry an embedded NUL byte
+  or reach an empty value while non-`None`, so the regression tests use a GNU `LongLink` (`K`)
+  record's raw payload to smuggle both past the header-field-level shortcuts, exercising the
+  same path a real crafted archive would take.
 - Bumped `sevenz-rust2` from 0.21.3 to 0.21.4, fixing an integer overflow when summing
   attacker-controlled coder stream counts while parsing a 7z block header (upstream #127).
   Malformed archives previously could panic in debug builds and bypassed the stream-count

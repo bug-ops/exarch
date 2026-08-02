@@ -69,6 +69,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`Fail` status with an itemized report) via the existing per-entry check in `verify_entry`,
   rather than aborting before any report exists — `verify`'s "report, don't hard-fail" contract
   is preserved.
+- **`SecurityViolation` error text was duplicated for pre-extraction violations (#403)**:
+  `convert_extraction_error` in `exarch-cli` rebuilt the wrapped `ArchiveError`'s own Display
+  text as anyhow context, so the reason (e.g. "banned path component: .git") appeared twice in
+  both `--json` and human text output whenever a violation was caught during listing/
+  pre-validation (banned path components, disallowed symlinks/hardlinks, disallowed solid 7z
+  archives). The reason now appears exactly once, and the CLI's own context adds a hint naming
+  the actual policy flags (`--allow-symlinks`, `--allow-hardlinks`, `--allow-solid-archives`,
+  `--banned-component`) instead of repeating the source error's text.
 
 ### Changed
 

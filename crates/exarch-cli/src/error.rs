@@ -173,9 +173,12 @@ pub fn convert_extraction_error(
         ArchiveError::InvalidCompressionLevel { level } => {
             format!("Invalid compression level {level}: must be between 1 and 9.")
         }
-        ArchiveError::SecurityViolation { reason } => {
-            format!("Operation denied by security policy: {reason}")
-        }
+        ArchiveError::SecurityViolation { .. } => format!(
+            "Security violation while processing '{}'\n\
+             HINT: If this archive is from a trusted source, relax the relevant policy flag \
+             (--allow-symlinks, --allow-hardlinks, --allow-solid-archives, --banned-component).",
+            archive.display(),
+        ),
     };
     anyhow::Error::from(err).context(context)
 }
@@ -364,20 +367,37 @@ mod tests {
     }
 
     #[test]
-    fn test_security_violation_contains_reason() {
+    fn test_security_violation_reason_appears_exactly_once() {
         let err = ArchiveError::SecurityViolation {
             reason: "absolute path detected".to_string(),
         };
         let converted = convert_extraction_error(err, Path::new("archive.tar.gz"), false);
         let msg = format!("{converted:#}");
-        assert!(
-            msg.contains("absolute path detected"),
-            "reason missing: {msg}"
+        assert_eq!(
+            msg.matches("absolute path detected").count(),
+            1,
+            "reason should appear exactly once, got: {msg}"
         );
-        assert!(
-            msg.contains("security policy"),
-            "policy text missing: {msg}"
-        );
+    }
+
+    #[test]
+    fn test_security_violation_hint_names_policy_flags() {
+        // These assertions target text the CLI itself authors (the anyhow
+        // context), not the wrapped `ArchiveError`'s own Display, so the test
+        // fails if the HINT regresses to generic wording again.
+        let err = ArchiveError::SecurityViolation {
+            reason: "banned path component: .git".to_string(),
+        };
+        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"), false);
+        let msg = format!("{converted:#}");
+        for flag in [
+            "--allow-symlinks",
+            "--allow-hardlinks",
+            "--allow-solid-archives",
+            "--banned-component",
+        ] {
+            assert!(msg.contains(flag), "HINT missing flag {flag}: {msg}");
+        }
     }
 
     #[test]

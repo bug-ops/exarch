@@ -128,6 +128,9 @@ use crate::types::EntryType;
 use crate::types::SafePath;
 
 use super::common;
+use super::tar_metadata_limit::budget_violation;
+use super::tar_metadata_limit::budgeted_reader;
+use super::tar_metadata_limit::budgeted_tar_entries;
 use super::traits::ArchiveFormat;
 
 /// TAR archive handler with streaming extraction.
@@ -161,8 +164,12 @@ use super::traits::ArchiveFormat;
 /// # Ok::<(), exarch_core::ArchiveError>(())
 /// ```
 pub struct TarArchive<R: Read> {
-    /// Underlying `tar::Archive` reader; `None` after `list()` consumes it.
-    inner: Option<Archive<R>>,
+    /// Raw underlying reader; `None` after `extract()`/`list()` consumes it.
+    ///
+    /// Wrapped in a metadata-size-limiting reader (using the config supplied
+    /// to `extract()`/`list()`) and only then handed to `tar::Archive`, so the
+    /// cap is applied fresh with whatever `SecurityConfig` each call uses.
+    inner: Option<R>,
 }
 
 impl<R: Read> TarArchive<R> {
@@ -193,17 +200,17 @@ impl<R: Read> TarArchive<R> {
     #[must_use]
     pub fn new(reader: R) -> Self {
         Self {
-            inner: Some(Archive::new(reader)),
+            inner: Some(reader),
         }
     }
 
     /// Processes a single TAR entry.
-    fn process_entry(
-        entry: tar::Entry<'_, R>,
+    fn process_entry<ER: Read>(
+        entry: &mut tar::Entry<'_, ER>,
         ctx: &mut ExtractionContext<'_, '_>,
     ) -> Result<Option<HardlinkInfo>> {
         // Skip TAR metadata entries (PAX headers, GNU long names/links, sparse)
-        if TarEntryAdapter::is_metadata_entry(&entry) {
+        if TarEntryAdapter::is_metadata_entry(entry) {
             return Ok(None);
         }
 
@@ -212,8 +219,8 @@ impl<R: Read> TarArchive<R> {
             .map_err(|e| ArchiveError::InvalidArchive(format!("invalid path: {e}")))?
             .into_owned();
 
-        let entry_type = TarEntryAdapter::to_entry_type(&entry)?;
-        let size = TarEntryAdapter::get_uncompressed_size(&entry);
+        let entry_type = TarEntryAdapter::to_entry_type(entry)?;
+        let size = TarEntryAdapter::get_uncompressed_size(entry);
         let mode = entry.header().mode().ok();
 
         if matches!(entry_type, EntryType::File)
@@ -264,14 +271,14 @@ impl<R: Read> TarArchive<R> {
     }
 
     /// Extracts a regular file to disk.
-    fn extract_file(
-        mut entry: tar::Entry<'_, R>,
+    fn extract_file<ER: Read>(
+        entry: &mut tar::Entry<'_, ER>,
         validated: &ValidatedEntry,
         ctx: &mut ExtractionContext<'_, '_>,
     ) -> Result<()> {
         let size = Some(entry.size());
         common::extract_file_generic(
-            &mut entry,
+            entry,
             validated,
             ctx.dest,
             ctx.report,
@@ -363,11 +370,12 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
 
         let mut current_entry: usize = 0;
 
-        let inner = self.inner.as_mut().ok_or_else(|| {
+        let reader = self.inner.take().ok_or_else(|| {
             ArchiveError::InvalidArchive("archive reader already consumed by list()".into())
         })?;
-        let entries = inner
-            .entries()
+        let (budgeted, budget) = budgeted_reader(reader, config.max_tar_metadata_bytes);
+        let mut inner_archive = Archive::new(budgeted);
+        let mut entries = budgeted_tar_entries(&mut inner_archive, budget)
             .map_err(|e| ArchiveError::InvalidArchive(format!("failed to read entries: {e}")))?;
 
         let mut ctx = ExtractionContext {
@@ -381,14 +389,16 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
             progress,
         };
 
-        for entry_result in entries {
-            let entry = entry_result.map_err(|e| {
-                let raw = ArchiveError::InvalidArchive(format!("failed to read entry: {e}"));
+        while let Some(entry_result) = entries.next_entry() {
+            let mut guard = entry_result.map_err(|e| {
+                let raw = budget_violation(&e).unwrap_or_else(|| {
+                    ArchiveError::InvalidArchive(format!("failed to read entry: {e}"))
+                });
                 ArchiveError::partial_or(std::mem::take(ctx.report), raw)
             })?;
 
             // TAR is streaming: total entry count is not known upfront, so pass 0.
-            let entry_path = entry
+            let entry_path = guard
                 .path()
                 .ok()
                 .map(std::borrow::Cow::into_owned)
@@ -397,7 +407,7 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
             ctx.progress.on_entry_start(&entry_path, 0, current_entry);
 
             // INVARIANT: every branch below must call on_entry_complete exactly once.
-            match Self::process_entry(entry, &mut ctx) {
+            match Self::process_entry(&mut guard, &mut ctx) {
                 Ok(Some(hardlink_info)) => {
                     ctx.progress.on_entry_complete(&entry_path);
                     hardlinks.push(hardlink_info);
@@ -407,6 +417,10 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
                 }
                 Err(e) => {
                     ctx.progress.on_entry_complete(&entry_path);
+                    // Abandoning: no further `next_entry()` calls follow, so
+                    // the guard's usual bounded drain is pointless I/O, not a
+                    // correctness requirement (see `TarEntryGuard::abandon`).
+                    guard.abandon();
                     return Err(ArchiveError::partial_or(std::mem::take(ctx.report), e));
                 }
             }
@@ -449,12 +463,13 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
         use crate::formats::detect::ArchiveType;
         use crate::inspection::list::list_tar_reader;
 
-        // Consume the inner archive — TAR readers are forward-only streams.
+        // Consume the inner reader — TAR readers are forward-only streams.
         // After list() returns, extract() will return an error if called.
-        let inner = self.inner.take().ok_or_else(|| {
+        let reader = self.inner.take().ok_or_else(|| {
             crate::ArchiveError::InvalidArchive("archive reader already consumed by list()".into())
         })?;
-        list_tar_reader(inner.into_inner(), ArchiveType::Tar, config)
+        let (budgeted, budget) = budgeted_reader(reader, config.max_tar_metadata_bytes);
+        list_tar_reader(budgeted, budget, ArchiveType::Tar, config)
     }
 
     fn verify(&mut self, config: &SecurityConfig) -> Result<crate::inspection::VerificationReport> {

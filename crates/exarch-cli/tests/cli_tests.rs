@@ -2228,3 +2228,117 @@ fn test_extract_security_violation_text_reason_appears_once() {
         "reason should appear exactly once, got: {stderr}"
     );
 }
+
+/// Encodes `n` as a classic octal numeric field of `width` bytes (including
+/// the trailing NUL), or `None` if it does not fit in `width - 1` digits.
+fn octal_field(n: u64, width: usize) -> Option<Vec<u8>> {
+    let digits = format!("{n:o}").into_bytes();
+    if digits.len() > width - 1 {
+        return None;
+    }
+    let mut out = vec![b'0'; width - 1 - digits.len()];
+    out.extend_from_slice(&digits);
+    out.push(0);
+    Some(out)
+}
+
+/// Encodes `n` as a GNU base-256 numeric field (big-endian, high bit of the
+/// first byte set) — used for values beyond octal's digit capacity.
+fn base256_field(n: u64, width: usize) -> Vec<u8> {
+    let mut out = vec![0u8; width];
+    let bytes = n.to_be_bytes();
+    out[width - bytes.len()..].copy_from_slice(&bytes);
+    out[0] |= 0x80;
+    out
+}
+
+fn num_field(n: u64, width: usize) -> Vec<u8> {
+    octal_field(n, width).unwrap_or_else(|| base256_field(n, width))
+}
+
+/// Builds a raw GNU old-format sparse header (typeflag `'S'`) with a real
+/// inline `(offset, numbytes)` block and a `realsize` at offset 483.
+fn gnu_sparse_header(
+    name: &[u8],
+    size_field: u64,
+    realsize: u64,
+    offset: u64,
+    numbytes: u64,
+) -> Vec<u8> {
+    const BLOCK: usize = 512;
+    let mut h = vec![0u8; BLOCK];
+    let name_len = name.len().min(100);
+    h[..name_len].copy_from_slice(&name[..name_len]);
+    h[100..108].copy_from_slice(&num_field(0o644, 8));
+    h[108..116].copy_from_slice(&num_field(0, 8));
+    h[116..124].copy_from_slice(&num_field(0, 8));
+    h[124..136].copy_from_slice(&num_field(size_field, 12));
+    h[136..148].copy_from_slice(&num_field(0, 12));
+    h[156] = b'S';
+    h[257..263].copy_from_slice(b"ustar ");
+    h[263..265].copy_from_slice(b" \0");
+    h[386..398].copy_from_slice(&num_field(offset, 12));
+    h[398..410].copy_from_slice(&num_field(numbytes, 12));
+    h[482] = 0;
+    h[483..495].copy_from_slice(&num_field(realsize, 12));
+    h[148..156].copy_from_slice(b"        ");
+    let sum: u32 = h.iter().map(|b| u32::from(*b)).sum();
+    h[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
+    h
+}
+
+/// Builds a raw single-entry TAR with a GNU sparse header shaped so that
+/// `exarch-core`'s bounded drain (`SYNTHETIC_PAD_CAP_BYTES`, currently
+/// 8 MiB) gives up mid-hole, leaving the trailing real data segment
+/// entirely unread — see the matching (and more detailed) construction and
+/// rationale in `exarch-core`'s `tar_metadata_bomb.rs`, in the test named
+/// `known_limitation_legitimate_sparse_hole_above_the_synthetic_cap_is_rejected`.
+fn legitimate_sparse_hole_fixture() -> Vec<u8> {
+    const BLOCK: usize = 512;
+    let gap = 12 * 1024 * 1024u64;
+    let real_trailing = 6 * 1024 * 1024u64;
+    let mut out = gnu_sparse_header(
+        b"legit_sparse.bin",
+        real_trailing,
+        gap + real_trailing,
+        gap,
+        real_trailing,
+    );
+    out.extend(std::iter::repeat_n(
+        b'D',
+        usize::try_from(real_trailing).unwrap(),
+    ));
+    let rem = out.len() % BLOCK;
+    if rem != 0 {
+        out.extend(std::iter::repeat_n(0u8, BLOCK - rem));
+    }
+    out.extend(std::iter::repeat_n(0u8, BLOCK * 2));
+    out
+}
+
+/// Pins the documented residual limitation of the C1/C2/C3 drain-bound fix
+/// (issue #414) specifically at the CLI level: `exarch extract` runs its
+/// own `list_archive` pre-flight (for progress-bar/conflict detection,
+/// `src/commands/extract.rs`) ahead of the actual extraction, so a
+/// legitimate GNU sparse file whose hole exceeds the synthetic-bytes drain
+/// cap is rejected by the CLI even though the underlying library's
+/// `extract_archive`/`TarArchive::extract` calls (which never run that
+/// pre-flight) handle the identical archive cleanly. This is a deliberately
+/// accepted trade-off (P3 follow-up tracked separately), not a bug — this
+/// test exists so the CLI-specific angle of that trade-off cannot silently
+/// change without a test noticing.
+#[test]
+fn test_extract_known_limitation_cli_rejects_legitimate_sparse_hole_above_synthetic_cap() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive_path = temp.path().join("legit_sparse.tar");
+    std::fs::write(&archive_path, legitimate_sparse_hole_fixture()).expect("write sparse fixture");
+    let out_dir = temp.path().join("out");
+
+    exarch_cmd()
+        .arg("extract")
+        .arg(&archive_path)
+        .arg(&out_dir)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("failed to list archive"));
+}

@@ -5,6 +5,7 @@ pub mod compression;
 pub mod detect;
 pub mod sevenz;
 pub mod tar;
+pub(crate) mod tar_metadata_limit;
 pub mod traits;
 pub mod zip;
 

@@ -147,6 +147,29 @@ fn test_7z_encrypted_archive_rejected_at_new() {
     );
 }
 
+/// Regression test for #397 / upstream sevenz-rust2 issue #127: a malformed
+/// block header could overflow while summing attacker-controlled coder
+/// stream counts, panicking in debug builds and bypassing the stream-count
+/// bound in release builds. Fixed upstream in sevenz-rust2 0.21.4 (via
+/// `checked_add`). The fixture is ported verbatim from upstream's own
+/// regression test (`tests/resources/issue_127_coder_stream_overflow.bin`,
+/// `tests/decompression_tests.rs::malformed_coder_stream_counts_are_rejected`,
+/// Apache-2.0, from the sevenz-rust2 0.21.4 source distribution).
+/// `SevenZArchive::new` parses the header eagerly, so the malformed archive
+/// must be rejected gracefully here rather than panicking.
+#[test]
+fn test_7z_malformed_coder_stream_overflow_rejected_gracefully() {
+    let data = load_fixture("malformed-coder-stream-overflow.7z");
+    let cursor = Cursor::new(data);
+
+    let result = SevenZArchive::new(cursor);
+
+    assert!(
+        result.is_err(),
+        "malformed archive with overflowing coder stream count must be rejected, got: {result:?}"
+    );
+}
+
 #[test]
 fn test_7z_quota_file_count() {
     let data = load_fixture("simple.7z"); // 2 files

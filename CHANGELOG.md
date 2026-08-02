@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Bumped `sevenz-rust2` from 0.21.3 to 0.21.4, fixing an integer overflow when summing
+  attacker-controlled coder stream counts while parsing a 7z block header (upstream #127).
+  Malformed archives previously could panic in debug builds and bypassed the stream-count
+  bound in release builds; they are now rejected with an error (#397). This also pulls in a
+  transitive `lzma-rust2` bump from 0.16.5 to 0.18.0 (required by sevenz-rust2's own `^0.18`
+  dependency), which rearchitects the LZMA2/XZ decoders into a sans-I/O design — no known
+  advisories against either version; audited with no regressions found.
+
+### Added
+
+- Regression test coverage for GHSA-qh76-45cr-8xrc / CVE-2026-61725 (7z Zip-Slip via
+  `sevenz_rust2::decompress()`), confirming `SevenZArchive::extract` rejects both
+  relative-traversal and absolute-path 7z entries via `EntryValidator` before any file is
+  written, since exarch-core never calls the vulnerable upstream convenience API. A further
+  test exercises the extraction-time re-validation layer directly, proving it independently
+  rejects traversal as well (#398).
+- Regression test for the #397 coder-stream-count overflow fix (upstream sevenz-rust2 issue
+  #127), using the fixture ported from upstream's own regression test, confirming the
+  malformed archive is now rejected gracefully instead of risking a panic (#397).
+
 ### Fixed
 
 - **TAR creation silently dropped empty directories (#400)**: `create_tar_internal_with_progress`

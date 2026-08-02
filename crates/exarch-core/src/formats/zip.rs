@@ -614,6 +614,7 @@ mod tests {
     use crate::NoopProgress;
     use crate::test_utils::create_raw_zip_entry;
     use crate::test_utils::create_test_zip;
+    use std::assert_matches;
     use std::io::Cursor;
     use std::io::Write;
     use tempfile::TempDir;
@@ -932,10 +933,7 @@ mod tests {
         );
 
         assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            ArchiveError::PathTraversal { .. }
-        ));
+        assert_matches!(result.unwrap_err(), ArchiveError::PathTraversal { .. });
     }
 
     #[test]
@@ -1610,8 +1608,9 @@ mod tests {
                     &mut crate::NoopProgress,
                 )
                 .unwrap_err();
-            assert!(
-                matches!(err, ArchiveError::SecurityViolation { .. }),
+            assert_matches!(
+                err,
+                ArchiveError::SecurityViolation { .. },
                 "expected SecurityViolation for unsupported compression, got: {err:?}"
             );
         }
@@ -1642,8 +1641,10 @@ mod tests {
                     &mut crate::NoopProgress,
                 )
                 .unwrap_err();
-            assert!(
-                matches!(err, ArchiveError::SecurityViolation { ref reason } if reason.contains("symlink target too large")),
+            assert_matches!(
+                err,
+                ArchiveError::SecurityViolation { ref reason }
+                    if reason.contains("symlink target too large"),
                 "expected SecurityViolation(symlink target too large), got: {err:?}"
             );
         }
@@ -1668,8 +1669,9 @@ mod tests {
                     &mut crate::NoopProgress,
                 )
                 .unwrap_err();
-            assert!(
-                matches!(err, ArchiveError::InvalidArchive(ref msg) if msg.contains("UTF-8")),
+            assert_matches!(
+                err,
+                ArchiveError::InvalidArchive(ref msg) if msg.contains("UTF-8"),
                 "expected InvalidArchive(UTF-8), got: {err:?}"
             );
         }
@@ -2149,8 +2151,9 @@ mod tests {
         // crate 8.x actually returns Some("etc/passwd") via enclosed_name(),
         // so we need a name that enclosed_name() will reject: use `/../etc/passwd`.
         let result = call_resolve_entry_path("/../etc/passwd", false);
-        assert!(
-            matches!(result, Err(ArchiveError::PathTraversal { .. })),
+        assert_matches!(
+            result,
+            Err(ArchiveError::PathTraversal { .. }),
             "expected PathTraversal without allow_absolute_paths, got: {result:?}"
         );
     }
@@ -2173,8 +2176,9 @@ mod tests {
             let zip_file = reader.by_index(0).unwrap();
             // with allow_absolute_paths: the `..` component must still be rejected
             let result = ZipArchive::<Cursor<Vec<u8>>>::resolve_entry_path(&zip_file, 0, true);
-            assert!(
-                matches!(result, Err(ArchiveError::PathTraversal { .. })),
+            assert_matches!(
+                result,
+                Err(ArchiveError::PathTraversal { .. }),
                 "traversal after root must be rejected even with allow_absolute_paths"
             );
         }
@@ -2183,8 +2187,9 @@ mod tests {
     #[test]
     fn test_resolve_entry_path_traversal_rejected_without_flag() {
         let result = call_resolve_entry_path("../escape.txt", false);
-        assert!(
-            matches!(result, Err(ArchiveError::PathTraversal { .. })),
+        assert_matches!(
+            result,
+            Err(ArchiveError::PathTraversal { .. }),
             "expected PathTraversal for ../escape.txt, got: {result:?}"
         );
     }

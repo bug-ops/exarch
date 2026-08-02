@@ -562,6 +562,8 @@ fn is_zip_symlink<R: std::io::Read + std::io::Seek>(entry: &zip::read::ZipFile<'
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use std::assert_matches;
+
     use crate::test_utils::create_raw_zip_entry;
     use flate2::write::GzEncoder;
     use std::io::Write;
@@ -1108,8 +1110,9 @@ mod tests {
 
         let config = SecurityConfig::default();
         let result = list_archive(temp_file.path(), &config);
-        assert!(
-            matches!(result, Err(ArchiveError::InvalidArchive(_))),
+        assert_matches!(
+            result,
+            Err(ArchiveError::InvalidArchive(_)),
             "expected InvalidArchive for truncated 7z, got: {result:?}"
         );
     }
@@ -1132,8 +1135,9 @@ mod tests {
 
         let config = SecurityConfig::default();
         let result = list_archive(temp_file.path(), &config);
-        assert!(
-            matches!(result, Err(ArchiveError::InvalidArchive(_))),
+        assert_matches!(
+            result,
+            Err(ArchiveError::InvalidArchive(_)),
             "expected InvalidArchive for char device entry, got: {result:?}"
         );
     }
@@ -1154,13 +1158,11 @@ mod tests {
             ..Default::default()
         };
         let result = list_archive(temp_file.path(), &config);
-        assert!(
-            matches!(
-                result,
-                Err(ArchiveError::QuotaExceeded {
-                    resource: crate::error::QuotaResource::TotalSize { .. }
-                })
-            ),
+        assert_matches!(
+            result,
+            Err(ArchiveError::QuotaExceeded {
+                resource: crate::error::QuotaResource::TotalSize { .. }
+            }),
             "expected TotalSize quota error, got: {result:?}"
         );
     }
@@ -1186,13 +1188,11 @@ mod tests {
             ..Default::default()
         };
         let result = list_archive(temp_file.path(), &config);
-        assert!(
-            matches!(
-                result,
-                Err(ArchiveError::QuotaExceeded {
-                    resource: crate::error::QuotaResource::TotalSize { .. }
-                })
-            ),
+        assert_matches!(
+            result,
+            Err(ArchiveError::QuotaExceeded {
+                resource: crate::error::QuotaResource::TotalSize { .. }
+            }),
             "expected TotalSize quota error, got: {result:?}"
         );
     }
@@ -1212,8 +1212,9 @@ mod tests {
 
         let config = SecurityConfig::default();
         let result = list_archive(temp_file.path(), &config);
-        assert!(
-            matches!(result, Err(ArchiveError::PathTraversal { .. })),
+        assert_matches!(
+            result,
+            Err(ArchiveError::PathTraversal { .. }),
             "expected PathTraversal error, got: {result:?}"
         );
     }
@@ -1228,11 +1229,9 @@ mod tests {
 
         let config = SecurityConfig::default();
         let result = list_archive(temp_file.path(), &config);
-        assert!(
-            matches!(
-                &result,
-                Err(ArchiveError::PathTraversal { path }) if path == &PathBuf::from("../escape.txt")
-            ),
+        assert_matches!(
+            &result,
+            Err(ArchiveError::PathTraversal { path }) if path == &PathBuf::from("../escape.txt"),
             "expected PathTraversal {{ path: ../escape.txt }}, got: {result:?}"
         );
     }
@@ -1247,8 +1246,9 @@ mod tests {
 
         let config = SecurityConfig::default();
         let result = list_archive(temp_file.path(), &config);
-        assert!(
-            matches!(result, Err(ArchiveError::PathTraversal { .. })),
+        assert_matches!(
+            result,
+            Err(ArchiveError::PathTraversal { .. }),
             "expected PathTraversal error for nested ../ in TAR, got: {result:?}"
         );
     }
@@ -1263,8 +1263,9 @@ mod tests {
 
         let config = SecurityConfig::default();
         let result = list_archive(temp_file.path(), &config);
-        assert!(
-            matches!(result, Err(ArchiveError::PathTraversal { .. })),
+        assert_matches!(
+            result,
+            Err(ArchiveError::PathTraversal { .. }),
             "expected PathTraversal error for absolute path in TAR, got: {result:?}"
         );
     }
@@ -1353,8 +1354,9 @@ mod tests {
 
         let config = SecurityConfig::default();
         let result = list_archive(temp_file.path(), &config);
-        assert!(
-            matches!(result, Err(ArchiveError::PathTraversal { .. })),
+        assert_matches!(
+            result,
+            Err(ArchiveError::PathTraversal { .. }),
             "expected PathTraversal error for tar.gz with ../ entry, got: {result:?}"
         );
     }
@@ -1392,8 +1394,9 @@ mod tests {
 
         let config = SecurityConfig::default();
         let result = list_archive(temp_file.path(), &config);
-        assert!(
-            matches!(result, Err(ArchiveError::PathTraversal { .. })),
+        assert_matches!(
+            result,
+            Err(ArchiveError::PathTraversal { .. }),
             "expected PathTraversal error for mixed-entry TAR, got: {result:?}"
         );
     }
@@ -1423,8 +1426,9 @@ mod tests {
 
         let config = SecurityConfig::default();
         let result = list_archive(temp_file.path(), &config);
-        assert!(
-            matches!(result, Err(ArchiveError::SecurityViolation { .. })),
+        assert_matches!(
+            result,
+            Err(ArchiveError::SecurityViolation { .. }),
             "expected SecurityViolation for encrypted ZIP in list, got: {result:?}"
         );
     }
@@ -1621,8 +1625,9 @@ mod tests {
 
         let config = SecurityConfig::default();
         let result = list_archive(temp_file.path(), &config);
-        assert!(
-            matches!(result, Err(ArchiveError::PathTraversal { .. })),
+        assert_matches!(
+            result,
+            Err(ArchiveError::PathTraversal { .. }),
             "expected PathTraversal error for ../ entry, got: {result:?}"
         );
     }
@@ -1641,13 +1646,11 @@ mod tests {
             ..Default::default()
         };
         let result = list_archive(temp_file.path(), &config);
-        assert!(
-            matches!(
-                result,
-                Err(ArchiveError::QuotaExceeded {
-                    resource: crate::error::QuotaResource::FileCount { .. }
-                })
-            ),
+        assert_matches!(
+            result,
+            Err(ArchiveError::QuotaExceeded {
+                resource: crate::error::QuotaResource::FileCount { .. }
+            }),
             "expected FileCount QuotaExceeded, got: {result:?}"
         );
     }
@@ -1666,13 +1669,11 @@ mod tests {
             ..Default::default()
         };
         let result = list_archive(temp_file.path(), &config);
-        assert!(
-            matches!(
-                result,
-                Err(ArchiveError::QuotaExceeded {
-                    resource: crate::error::QuotaResource::TotalSize { .. }
-                })
-            ),
+        assert_matches!(
+            result,
+            Err(ArchiveError::QuotaExceeded {
+                resource: crate::error::QuotaResource::TotalSize { .. }
+            }),
             "expected TotalSize QuotaExceeded, got: {result:?}"
         );
     }
@@ -1738,13 +1739,11 @@ mod tests {
             max_total_size: 100,
             ..Default::default()
         };
-        assert!(
-            matches!(
-                list_archive(temp_file.path(), &small),
-                Err(ArchiveError::QuotaExceeded {
-                    resource: QuotaResource::TotalSize { .. }
-                })
-            ),
+        assert_matches!(
+            list_archive(temp_file.path(), &small),
+            Err(ArchiveError::QuotaExceeded {
+                resource: QuotaResource::TotalSize { .. }
+            }),
             "expected TotalSize quota error with limit=100"
         );
 
@@ -1776,13 +1775,11 @@ mod tests {
             max_total_size: 100,
             ..Default::default()
         };
-        assert!(
-            matches!(
-                list_archive(temp_file.path(), &small),
-                Err(ArchiveError::QuotaExceeded {
-                    resource: QuotaResource::TotalSize { .. }
-                })
-            ),
+        assert_matches!(
+            list_archive(temp_file.path(), &small),
+            Err(ArchiveError::QuotaExceeded {
+                resource: QuotaResource::TotalSize { .. }
+            }),
             "expected TotalSize quota error with limit=100"
         );
 
@@ -1808,13 +1805,11 @@ mod tests {
             max_total_size: 100,
             ..Default::default()
         };
-        assert!(
-            matches!(
-                list_archive(temp_file.path(), &small),
-                Err(ArchiveError::QuotaExceeded {
-                    resource: QuotaResource::TotalSize { .. }
-                })
-            ),
+        assert_matches!(
+            list_archive(temp_file.path(), &small),
+            Err(ArchiveError::QuotaExceeded {
+                resource: QuotaResource::TotalSize { .. }
+            }),
             "expected TotalSize quota error with limit=100"
         );
 
@@ -1882,11 +1877,9 @@ mod tests {
             ..SecurityConfig::default()
         };
         let result = crate::list_archive("any.tar.gz", &config);
-        assert!(
-            matches!(
-                result,
-                Err(crate::ArchiveError::InvalidConfiguration { .. })
-            ),
+        assert_matches!(
+            result,
+            Err(crate::ArchiveError::InvalidConfiguration { .. }),
             "list_archive must return InvalidConfiguration for zero max_file_size"
         );
     }
@@ -1937,8 +1930,9 @@ mod tests {
 
         let config = SecurityConfig::default();
         let result = list_archive(temp_file.path(), &config);
-        assert!(
-            matches!(result, Err(ArchiveError::PathTraversal { .. })),
+        assert_matches!(
+            result,
+            Err(ArchiveError::PathTraversal { .. }),
             "absolute path with traversal must be rejected by default, got: {result:?}"
         );
     }
@@ -1955,8 +1949,9 @@ mod tests {
 
         let config = SecurityConfig::default().with_allow_absolute_paths(true);
         let result = list_archive(temp_file.path(), &config);
-        assert!(
-            matches!(result, Err(ArchiveError::PathTraversal { .. })),
+        assert_matches!(
+            result,
+            Err(ArchiveError::PathTraversal { .. }),
             "traversal inside absolute path must still be rejected even when allowed, got: {result:?}"
         );
     }
@@ -1973,8 +1968,9 @@ mod tests {
 
         let config = SecurityConfig::default().with_allow_absolute_paths(true);
         let result = list_archive(temp_file.path(), &config);
-        assert!(
-            matches!(result, Err(ArchiveError::PathTraversal { .. })),
+        assert_matches!(
+            result,
+            Err(ArchiveError::PathTraversal { .. }),
             "traversal inside absolute path must still be rejected, got: {result:?}"
         );
     }
@@ -2006,16 +2002,14 @@ mod tests {
             ..Default::default()
         };
         let result = list_archive(temp_file.path(), &config);
-        assert!(
-            matches!(
-                result,
-                Err(ArchiveError::QuotaExceeded {
-                    resource: QuotaResource::FileSize {
-                        size: 1000,
-                        max: 500
-                    }
-                })
-            ),
+        assert_matches!(
+            result,
+            Err(ArchiveError::QuotaExceeded {
+                resource: QuotaResource::FileSize {
+                    size: 1000,
+                    max: 500
+                }
+            }),
             "expected FileSize quota error, got: {result:?}"
         );
     }
@@ -2036,16 +2030,14 @@ mod tests {
             ..Default::default()
         };
         let result = list_archive(temp_file.path(), &config);
-        assert!(
-            matches!(
-                result,
-                Err(ArchiveError::QuotaExceeded {
-                    resource: QuotaResource::FileSize {
-                        size: 1000,
-                        max: 500
-                    }
-                })
-            ),
+        assert_matches!(
+            result,
+            Err(ArchiveError::QuotaExceeded {
+                resource: QuotaResource::FileSize {
+                    size: 1000,
+                    max: 500
+                }
+            }),
             "expected FileSize quota error, got: {result:?}"
         );
     }
@@ -2063,16 +2055,14 @@ mod tests {
             ..Default::default()
         };
         let result = list_archive(temp_file.path(), &config);
-        assert!(
-            matches!(
-                result,
-                Err(ArchiveError::QuotaExceeded {
-                    resource: QuotaResource::FileSize {
-                        size: 1000,
-                        max: 500
-                    }
-                })
-            ),
+        assert_matches!(
+            result,
+            Err(ArchiveError::QuotaExceeded {
+                resource: QuotaResource::FileSize {
+                    size: 1000,
+                    max: 500
+                }
+            }),
             "expected FileSize quota error, got: {result:?}"
         );
     }
@@ -2171,13 +2161,11 @@ mod tests {
             ..Default::default()
         };
         let result = list_zip_reader(&mut archive, &config);
-        assert!(
-            matches!(
-                result,
-                Err(ArchiveError::QuotaExceeded {
-                    resource: QuotaResource::IntegerOverflow
-                })
-            ),
+        assert_matches!(
+            result,
+            Err(ArchiveError::QuotaExceeded {
+                resource: QuotaResource::IntegerOverflow
+            }),
             "expected IntegerOverflow quota error instead of a silently wrapped total, got: {result:?}"
         );
     }

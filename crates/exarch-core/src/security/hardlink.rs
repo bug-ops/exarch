@@ -186,6 +186,7 @@ impl HardlinkTracker {
 )]
 mod tests {
     use super::*;
+    use std::assert_matches;
     use tempfile::TempDir;
 
     fn create_test_dest() -> (TempDir, DestDir) {
@@ -245,7 +246,7 @@ mod tests {
         let target = PathBuf::from("/etc/passwd");
 
         let result = tracker.validate_hardlink(&link, &target, &dest, &config);
-        assert!(matches!(result, Err(ArchiveError::HardlinkEscape { .. })));
+        assert_matches!(result, Err(ArchiveError::HardlinkEscape { .. }));
     }
 
     #[test]
@@ -259,7 +260,7 @@ mod tests {
         let target = PathBuf::from("../../etc/passwd");
 
         let result = tracker.validate_hardlink(&link, &target, &dest, &config);
-        assert!(matches!(result, Err(ArchiveError::HardlinkEscape { .. })));
+        assert_matches!(result, Err(ArchiveError::HardlinkEscape { .. }));
     }
 
     #[test]
@@ -403,8 +404,9 @@ mod tests {
         let target = PathBuf::from("a/b/escape/../../etc/passwd");
 
         let result = tracker.validate_hardlink(&link, &target, &dest, &config);
-        assert!(
-            matches!(result, Err(ArchiveError::HardlinkEscape { .. })),
+        assert_matches!(
+            result,
+            Err(ArchiveError::HardlinkEscape { .. }),
             "hardlink through two-hop symlink chain must be rejected"
         );
     }

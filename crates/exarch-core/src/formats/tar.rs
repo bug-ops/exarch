@@ -721,6 +721,7 @@ mod tests {
     use super::*;
     use crate::NoopProgress;
     use crate::test_utils::create_test_tar;
+    use std::assert_matches;
     use std::io::Cursor;
     use std::io::Write;
     use tempfile::TempDir;
@@ -1204,8 +1205,9 @@ mod tests {
             &mut crate::NoopProgress,
         );
 
-        assert!(
-            matches!(result, Err(ArchiveError::SecurityViolation { .. })),
+        assert_matches!(
+            result,
+            Err(ArchiveError::SecurityViolation { .. }),
             "expected SecurityViolation, got: {result:?}"
         );
     }
@@ -1813,7 +1815,7 @@ mod tests {
         // wrapped in PartialExtraction. Unwrap one level to check the source.
         match result {
             Err(ArchiveError::PartialExtraction { source, .. }) => {
-                assert!(matches!(*source, ArchiveError::SymlinkEscape { .. }));
+                assert_matches!(*source, ArchiveError::SymlinkEscape { .. });
             }
             Err(ArchiveError::SymlinkEscape { .. }) => {}
             other => panic!("Expected SymlinkEscape error for symlink escape, got: {other:?}"),
@@ -2256,8 +2258,9 @@ mod tests {
             &mut NoopProgress,
         );
         assert!(result.is_err(), "absolute path must be rejected by default");
-        assert!(
-            matches!(result.unwrap_err(), ArchiveError::PathTraversal { .. }),
+        assert_matches!(
+            result.unwrap_err(),
+            ArchiveError::PathTraversal { .. },
             "expected PathTraversal"
         );
     }

@@ -138,6 +138,7 @@ impl ArchiveBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::assert_matches;
 
     #[test]
     fn test_archive_builder() {
@@ -153,19 +154,19 @@ mod tests {
     fn test_archive_builder_missing_path() {
         let builder = ArchiveBuilder::new().output_dir("/tmp/test");
         let result = builder.extract();
-        assert!(matches!(
+        assert_matches!(
             result,
             Err(crate::ArchiveError::InvalidConfiguration { .. })
-        ));
+        );
     }
 
     #[test]
     fn test_archive_builder_missing_output() {
         let builder = ArchiveBuilder::new().archive("test.tar");
         let result = builder.extract();
-        assert!(matches!(
+        assert_matches!(
             result,
             Err(crate::ArchiveError::InvalidConfiguration { .. })
-        ));
+        );
     }
 }

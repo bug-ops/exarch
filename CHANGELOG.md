@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING: Bumped MSRV from 1.93.0 to 1.96.0 (#401)**: raises the minimum supported Rust
+  version across the workspace. Downstream consumers pinned to an older toolchain must upgrade
+  before taking this release. `rust-version` in the root `Cargo.toml`, the `msrv` job in
+  `.github/workflows/ci.yml`, `clippy.toml`, and all README/CONTRIBUTING/spec references were
+  updated accordingly.
+- Migrated 151 `assert!(matches!(value, Pattern))` test assertions in `exarch-core` to the
+  now-stable `assert_matches!` macro (stabilized in Rust 1.96, imported via
+  `use std::assert_matches;`), which prints the actual value via `Debug` on failure instead of
+  just `"assertion failed: matches!(...)"`. 4 sites in `formats/zip.rs` matching on a
+  non-`Debug` type (`Result<ZipArchive<_>, _>`) were kept as `assert!(matches!(..))` since
+  `assert_matches!` requires the scrutinee to implement `Debug`; 7 sites in
+  `tests/property_tests.rs` were left as `prop_assert!(matches!(..))` since proptest has no
+  `assert_matches!`-equivalent macro.
+- Applied `core::hint::cold_path()` (stabilized in Rust 1.95) to the quota-rejection and
+  integer-overflow branches in `QuotaTracker::record_file`/`record_file_checked`
+  (`crates/exarch-core/src/security/quota.rs`), reinforcing the existing OPT-C003 hot/cold path
+  optimization for the optimizer.
+
 ### Security
 
 - Bumped `sevenz-rust2` from 0.21.3 to 0.21.4, fixing an integer overflow when summing

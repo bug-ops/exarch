@@ -233,6 +233,7 @@ impl DestDir {
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use std::assert_matches;
     use std::fs;
     use tempfile::TempDir;
 
@@ -251,7 +252,7 @@ mod tests {
         let path = PathBuf::from("/nonexistent/directory/that/does/not/exist");
         let result = DestDir::new(path);
         assert!(result.is_err());
-        assert!(matches!(result, Err(ArchiveError::Io(_))));
+        assert_matches!(result, Err(ArchiveError::Io(_)));
     }
 
     #[test]
@@ -262,7 +263,7 @@ mod tests {
 
         let result = DestDir::new(file_path);
         assert!(result.is_err());
-        assert!(matches!(result, Err(ArchiveError::Io(_))));
+        assert_matches!(result, Err(ArchiveError::Io(_)));
     }
 
     #[test]

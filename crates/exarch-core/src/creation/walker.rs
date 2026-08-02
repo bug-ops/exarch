@@ -296,6 +296,7 @@ fn get_file_size(metadata: &Metadata) -> u64 {
 #[allow(clippy::unwrap_used)] // Allow unwrap in tests for brevity
 mod tests {
     use super::*;
+    use std::assert_matches;
     use std::fs;
     use tempfile::TempDir;
 
@@ -418,7 +419,7 @@ mod tests {
 
         assert!(link_entry.is_some());
         if let Some(entry) = link_entry {
-            assert!(matches!(entry.entry_type, EntryType::Symlink { .. }));
+            assert_matches!(entry.entry_type, EntryType::Symlink { .. });
         }
     }
 
@@ -536,7 +537,7 @@ mod tests {
 
         assert_eq!(entry.path, Path::new("/tmp/file.txt"));
         assert_eq!(entry.archive_path, Path::new("file.txt"));
-        assert!(matches!(entry.entry_type, EntryType::File));
+        assert_matches!(entry.entry_type, EntryType::File);
         assert_eq!(entry.size, 1024);
     }
 
@@ -549,7 +550,7 @@ mod tests {
             size: 0,
         };
 
-        assert!(matches!(entry.entry_type, EntryType::Directory));
+        assert_matches!(entry.entry_type, EntryType::Directory);
         assert_eq!(entry.size, 0);
     }
 
@@ -613,10 +614,7 @@ mod tests {
         let result = collect_entries(&sources, &config);
 
         assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            ArchiveError::SourceNotFound { .. }
-        ));
+        assert_matches!(result.unwrap_err(), ArchiveError::SourceNotFound { .. });
     }
 
     #[test]

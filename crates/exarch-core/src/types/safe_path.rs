@@ -374,6 +374,7 @@ fn has_null_bytes(path: &Path) -> bool {
 mod tests {
     use super::*;
     use crate::formats::common::DirCache;
+    use std::assert_matches;
     use tempfile::TempDir;
 
     /// Creates a temporary directory and wraps it in a `DestDir` for testing.
@@ -393,8 +394,9 @@ mod tests {
         let config = SecurityConfig::default();
 
         let result = SafePath::validate(&PathBuf::from(""), &dest, &config);
-        assert!(
-            matches!(result, Err(ArchiveError::SecurityViolation { .. })),
+        assert_matches!(
+            result,
+            Err(ArchiveError::SecurityViolation { .. }),
             "empty path should be explicitly rejected (MED-004)"
         );
     }
@@ -425,8 +427,9 @@ mod tests {
 
         for path in paths {
             let result = SafePath::validate(&path, &dest, &config);
-            assert!(
-                matches!(result, Err(ArchiveError::PathTraversal { .. })),
+            assert_matches!(
+                result,
+                Err(ArchiveError::PathTraversal { .. }),
                 "path should be rejected: {}",
                 path.display()
             );
@@ -441,7 +444,7 @@ mod tests {
 
         let path = PathBuf::from("/etc/passwd");
         let result = SafePath::validate(&path, &dest, &config);
-        assert!(matches!(result, Err(ArchiveError::PathTraversal { .. })));
+        assert_matches!(result, Err(ArchiveError::PathTraversal { .. }));
     }
 
     #[test]
@@ -457,7 +460,7 @@ mod tests {
 
         for path in paths {
             let result = SafePath::validate(&path, &dest, &config);
-            assert!(matches!(result, Err(ArchiveError::PathTraversal { .. })));
+            assert_matches!(result, Err(ArchiveError::PathTraversal { .. }));
         }
     }
 
@@ -486,8 +489,9 @@ mod tests {
         config.allowed.absolute_paths = true;
 
         let result = SafePath::validate(Path::new("/"), &dest, &config);
-        assert!(
-            matches!(result, Err(ArchiveError::PathTraversal { .. })),
+        assert_matches!(
+            result,
+            Err(ArchiveError::PathTraversal { .. }),
             "bare '/' must be rejected as PathTraversal even with allow_absolute_paths"
         );
     }
@@ -501,10 +505,7 @@ mod tests {
         // 4 components - should be rejected
         let path = PathBuf::from("a/b/c/d");
         let result = SafePath::validate(&path, &dest, &config);
-        assert!(matches!(
-            result,
-            Err(ArchiveError::SecurityViolation { .. })
-        ));
+        assert_matches!(result, Err(ArchiveError::SecurityViolation { .. }));
 
         // 3 components - should be allowed
         let path = PathBuf::from("a/b/c");
@@ -525,8 +526,9 @@ mod tests {
 
         for path in paths {
             let result = SafePath::validate(&path, &dest, &config);
-            assert!(
-                matches!(result, Err(ArchiveError::SecurityViolation { .. })),
+            assert_matches!(
+                result,
+                Err(ArchiveError::SecurityViolation { .. }),
                 "path should be rejected: {}",
                 path.display()
             );
@@ -561,10 +563,7 @@ mod tests {
             let path = PathBuf::from(os_str);
 
             let result = SafePath::validate(&path, &dest, &config);
-            assert!(matches!(
-                result,
-                Err(ArchiveError::SecurityViolation { .. })
-            ));
+            assert_matches!(result, Err(ArchiveError::SecurityViolation { .. }));
         }
 
         #[cfg(windows)]
@@ -578,10 +577,7 @@ mod tests {
             let path = PathBuf::from(os_string);
 
             let result = SafePath::validate(&path, &dest, &config);
-            assert!(matches!(
-                result,
-                Err(ArchiveError::SecurityViolation { .. })
-            ));
+            assert_matches!(result, Err(ArchiveError::SecurityViolation { .. }));
         }
     }
 
@@ -658,8 +654,9 @@ mod tests {
         let result = SafePath::validate(&path, &dest, &config);
 
         // Empty paths are now explicitly rejected
-        assert!(
-            matches!(result, Err(ArchiveError::SecurityViolation { .. })),
+        assert_matches!(
+            result,
+            Err(ArchiveError::SecurityViolation { .. }),
             "empty path should be explicitly rejected"
         );
     }
@@ -679,10 +676,7 @@ mod tests {
         // One over limit
         let path = PathBuf::from("a/b/c/d/e/f");
         let result = SafePath::validate(&path, &dest, &config);
-        assert!(matches!(
-            result,
-            Err(ArchiveError::SecurityViolation { .. })
-        ));
+        assert_matches!(result, Err(ArchiveError::SecurityViolation { .. }));
     }
 
     // Single component path test
@@ -751,8 +745,9 @@ mod tests {
         let malicious_path = PathBuf::from("parent_dir/evil.txt");
 
         let result = SafePath::validate(&malicious_path, &dest, &config);
-        assert!(
-            matches!(result, Err(ArchiveError::PathTraversal { .. })),
+        assert_matches!(
+            result,
+            Err(ArchiveError::PathTraversal { .. }),
             "symlink in parent chain should be detected and rejected"
         );
     }
@@ -778,8 +773,9 @@ mod tests {
         let malicious_path = PathBuf::from("legit/escape/passwd");
 
         let result = SafePath::validate(&malicious_path, &dest, &config);
-        assert!(
-            matches!(result, Err(ArchiveError::PathTraversal { .. })),
+        assert_matches!(
+            result,
+            Err(ArchiveError::PathTraversal { .. }),
             "symlink in middle of path should be detected"
         );
     }
@@ -890,8 +886,9 @@ mod tests {
 
         let path = PathBuf::from("evil_dir/payload.txt");
         let result = SafePath::validate_with_context(&path, &dest, &config, &ctx);
-        assert!(
-            matches!(result, Err(ArchiveError::PathTraversal { .. })),
+        assert_matches!(
+            result,
+            Err(ArchiveError::PathTraversal { .. }),
             "symlink attack must be caught even with context: {result:?}"
         );
     }
@@ -923,8 +920,9 @@ mod tests {
         let ctx = ValidationContext::new(false).with_dir_cache(&dir_cache);
         let path = PathBuf::from("subdir/escape/payload.txt");
         let result = SafePath::validate_with_context(&path, &dest, &config, &ctx);
-        assert!(
-            matches!(result, Err(ArchiveError::PathTraversal { .. })),
+        assert_matches!(
+            result,
+            Err(ArchiveError::PathTraversal { .. }),
             "parent canonicalization must catch symlink even in fast path: {result:?}"
         );
 
@@ -933,8 +931,9 @@ mod tests {
         ctx_with_symlink.mark_symlink_seen();
         let result_with_symlink =
             SafePath::validate_with_context(&path, &dest, &config, &ctx_with_symlink);
-        assert!(
-            matches!(result_with_symlink, Err(ArchiveError::PathTraversal { .. })),
+        assert_matches!(
+            result_with_symlink,
+            Err(ArchiveError::PathTraversal { .. }),
             "symlink attack must also be caught with symlink_seen=true: {result_with_symlink:?}"
         );
     }
@@ -1064,8 +1063,9 @@ mod tests {
 
         let evil_path = PathBuf::from("evil/payload.txt");
         let result = SafePath::validate_with_context(&evil_path, &dest, &config, &ctx);
-        assert!(
-            matches!(result, Err(ArchiveError::PathTraversal { .. })),
+        assert_matches!(
+            result,
+            Err(ArchiveError::PathTraversal { .. }),
             "symlink escape must be caught with symlinks_allowed + dir_cache: {result:?}"
         );
     }
@@ -1082,8 +1082,9 @@ mod tests {
         // These should still be caught by component-level checks
         let path = PathBuf::from("../escape.txt");
         let result = SafePath::validate_with_context(&path, &dest, &config, &ctx);
-        assert!(
-            matches!(result, Err(ArchiveError::PathTraversal { .. })),
+        assert_matches!(
+            result,
+            Err(ArchiveError::PathTraversal { .. }),
             "parent traversal must be caught in fast path"
         );
     }
@@ -1170,8 +1171,9 @@ mod tests {
 
         // ".." must still be rejected — it is a traversal attempt, not an archive root
         let result = SafePath::validate(Path::new(".."), &dest, &config);
-        assert!(
-            matches!(result, Err(ArchiveError::PathTraversal { .. })),
+        assert_matches!(
+            result,
+            Err(ArchiveError::PathTraversal { .. }),
             "'..' must be rejected as path traversal"
         );
     }
@@ -1184,8 +1186,9 @@ mod tests {
         let paths = ["./..", "./../../etc", "../foo", "./../etc/passwd"];
         for p in paths {
             let result = SafePath::validate(Path::new(p), &dest, &config);
-            assert!(
-                matches!(result, Err(ArchiveError::PathTraversal { .. })),
+            assert_matches!(
+                result,
+                Err(ArchiveError::PathTraversal { .. }),
                 "path '{p}' must be rejected as path traversal"
             );
         }

@@ -206,6 +206,7 @@ impl CreationConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::assert_matches;
 
     #[test]
     fn test_creation_config_default() {
@@ -275,10 +276,10 @@ mod tests {
         };
         let result = config.validate();
         assert!(result.is_err());
-        assert!(matches!(
+        assert_matches!(
             result.unwrap_err(),
             ArchiveError::InvalidCompressionLevel { level: 0 }
-        ));
+        );
 
         let config = CreationConfig {
             compression_level: Some(10),
@@ -286,22 +287,22 @@ mod tests {
         };
         let result = config.validate();
         assert!(result.is_err());
-        assert!(matches!(
+        assert_matches!(
             result.unwrap_err(),
             ArchiveError::InvalidCompressionLevel { level: 10 }
-        ));
+        );
     }
 
     #[test]
     fn test_creation_config_builder_invalid_compression() {
-        assert!(matches!(
+        assert_matches!(
             CreationConfig::default().with_compression_level(0),
             Err(ArchiveError::InvalidCompressionLevel { level: 0 })
-        ));
-        assert!(matches!(
+        );
+        assert_matches!(
             CreationConfig::default().with_compression_level(10),
             Err(ArchiveError::InvalidCompressionLevel { level: 10 })
-        ));
+        );
     }
 
     #[test]

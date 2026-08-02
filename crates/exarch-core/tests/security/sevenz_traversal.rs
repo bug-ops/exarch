@@ -25,6 +25,7 @@ use exarch_core::formats::SevenZArchive;
 use exarch_core::formats::traits::ArchiveFormat;
 use sevenz_rust2::ArchiveEntry;
 use sevenz_rust2::ArchiveWriter;
+use std::assert_matches;
 use std::io::Cursor;
 use tempfile::TempDir;
 
@@ -60,8 +61,9 @@ fn test_ghsa_qh76_sevenz_relative_traversal_rejected() {
         &mut exarch_core::NoopProgress,
     );
 
-    assert!(
-        matches!(result, Err(ArchiveError::PathTraversal { .. })),
+    assert_matches!(
+        result,
+        Err(ArchiveError::PathTraversal { .. }),
         "relative traversal entry must be rejected with PathTraversal, got: {result:?}"
     );
 
@@ -91,8 +93,9 @@ fn test_ghsa_qh76_sevenz_absolute_path_rejected() {
         &mut exarch_core::NoopProgress,
     );
 
-    assert!(
-        matches!(result, Err(ArchiveError::PathTraversal { .. })),
+    assert_matches!(
+        result,
+        Err(ArchiveError::PathTraversal { .. }),
         "absolute path entry must be rejected with PathTraversal, got: {result:?}"
     );
 

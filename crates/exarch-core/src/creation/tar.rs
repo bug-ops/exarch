@@ -533,6 +533,7 @@ mod tests {
     use crate::api::create_archive;
     use crate::api::extract_archive;
     use crate::formats::detect::ArchiveType;
+    use std::assert_matches;
     use std::fs;
     use tempfile::TempDir;
 
@@ -828,10 +829,7 @@ mod tests {
         let result = create_archive(&output, &[Path::new("/nonexistent/path")], &config);
 
         assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            ArchiveError::SourceNotFound { .. }
-        ));
+        assert_matches!(result.unwrap_err(), ArchiveError::SourceNotFound { .. });
     }
 
     #[test]

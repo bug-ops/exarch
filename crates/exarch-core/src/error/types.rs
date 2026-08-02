@@ -321,6 +321,7 @@ impl ArchiveError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::assert_matches;
 
     #[test]
     fn test_error_display() {
@@ -357,7 +358,7 @@ mod tests {
     fn test_io_error_conversion() {
         let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file not found");
         let err: ArchiveError = io_err.into();
-        assert!(matches!(err, ArchiveError::Io(_)));
+        assert_matches!(err, ArchiveError::Io(_));
     }
 
     #[test]
@@ -702,8 +703,9 @@ mod tests {
         let err = ArchiveError::InvalidArchive("bad entry".into());
 
         let result = ArchiveError::partial_or(report, err);
-        assert!(
-            matches!(result, ArchiveError::PartialExtraction { .. }),
+        assert_matches!(
+            result,
+            ArchiveError::PartialExtraction { .. },
             "expected PartialExtraction when report has processed items, got: {result:?}"
         );
     }
@@ -716,8 +718,9 @@ mod tests {
         let err = ArchiveError::InvalidArchive("bad entry".into());
 
         let result = ArchiveError::partial_or(report, err);
-        assert!(
-            matches!(result, ArchiveError::InvalidArchive(_)),
+        assert_matches!(
+            result,
+            ArchiveError::InvalidArchive(_),
             "expected the original error unwrapped when report is empty, got: {result:?}"
         );
     }

@@ -346,6 +346,7 @@ impl crate::formats::traits::FormatCreator for ZipCreator {
 #[allow(clippy::unwrap_used)] // Allow unwrap in tests for brevity
 mod tests {
     use super::*;
+    use std::assert_matches;
     use std::fs;
     use tempfile::TempDir;
 
@@ -631,10 +632,7 @@ mod tests {
         let result = create_zip(&output, &[Path::new("/nonexistent/path")], &config);
 
         assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            ArchiveError::SourceNotFound { .. }
-        ));
+        assert_matches!(result.unwrap_err(), ArchiveError::SourceNotFound { .. });
     }
 
     #[test]

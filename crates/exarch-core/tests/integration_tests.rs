@@ -19,6 +19,7 @@ use exarch_core::formats::detect::ArchiveType;
 use exarch_core::types::DestDir;
 use exarch_core::types::SafePath;
 use exarch_core::types::SafeSymlink;
+use std::assert_matches;
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
@@ -119,8 +120,9 @@ fn test_path_traversal_blocked() {
 
     for path in paths {
         let result = SafePath::validate(&PathBuf::from(path), &dest, &config);
-        assert!(
-            matches!(result, Err(ArchiveError::PathTraversal { .. })),
+        assert_matches!(
+            result,
+            Err(ArchiveError::PathTraversal { .. }),
             "Path {path} should be rejected"
         );
     }
@@ -136,8 +138,9 @@ fn test_banned_components_blocked() {
 
     for path in paths {
         let result = SafePath::validate(&PathBuf::from(path), &dest, &config);
-        assert!(
-            matches!(result, Err(ArchiveError::SecurityViolation { .. })),
+        assert_matches!(
+            result,
+            Err(ArchiveError::SecurityViolation { .. }),
             "Path {path} should be rejected"
         );
     }
@@ -206,10 +209,7 @@ fn test_depth_limit_enforced() {
     // Path with 6 components should be rejected
     let bad_path = "a/b/c/d/e/f";
     let result = SafePath::validate(&PathBuf::from(bad_path), &dest, &config);
-    assert!(matches!(
-        result,
-        Err(ArchiveError::SecurityViolation { .. })
-    ));
+    assert_matches!(result, Err(ArchiveError::SecurityViolation { .. }));
 }
 
 /// Regression test for #200: `verify_archive` must not share a temp dir across

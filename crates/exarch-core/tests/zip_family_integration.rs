@@ -20,6 +20,7 @@ use exarch_core::formats::detect::ArchiveType;
 use exarch_core::formats::detect::ZIP_FAMILY_ALIASES;
 use exarch_core::list_archive;
 use exarch_core::verify_archive;
+use std::assert_matches;
 use std::path::Path;
 use std::path::PathBuf;
 use tempfile::TempDir;
@@ -313,8 +314,9 @@ fn zip_partial_extraction_stops_on_path_traversal() {
 
     match result {
         Err(ArchiveError::PartialExtraction { source, report }) => {
-            assert!(
-                matches!(*source, ArchiveError::PathTraversal { .. }),
+            assert_matches!(
+                *source,
+                ArchiveError::PathTraversal { .. },
                 "source error must be PathTraversal, got: {source:?}"
             );
             assert!(

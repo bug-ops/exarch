@@ -494,7 +494,7 @@ When adding new formats or changing security defaults:
 | Fluent builder APIs | Compliant | `SecurityConfig`, `CreationConfig`, `ExtractionOptions` all use `with_*` builders |
 | `ProgressCallback::on_complete` not called on failure | Compliant | Verified by regression test (issue #170) |
 | Deny-by-default security policy | Compliant | All `AllowedFeatures` flags false; `allow_solid_archives` false |
-| MSRV 1.93.0 | Compliant | Checked in CI |
+| MSRV 1.96.0 | Compliant | Checked in CI |
 | Conventional Commits | Compliant | Enforced by PR review |
 | `missing_docs` warning | Compliant | All public items documented |
 

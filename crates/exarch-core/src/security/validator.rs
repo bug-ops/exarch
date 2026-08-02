@@ -247,6 +247,7 @@ pub struct ValidationReport {
 )]
 mod tests {
     use super::*;
+    use std::assert_matches;
     use std::path::PathBuf;
     use tempfile::TempDir;
 
@@ -281,7 +282,7 @@ mod tests {
         assert!(result.is_ok());
         let entry = result.unwrap();
         assert_eq!(entry.safe_path.as_path(), Path::new("file.txt"));
-        assert!(matches!(entry.entry_type, ValidatedEntryType::File));
+        assert_matches!(entry.entry_type, ValidatedEntryType::File);
         assert_eq!(entry.mode, Some(0o644));
     }
 
@@ -297,7 +298,7 @@ mod tests {
 
         assert!(result.is_ok());
         let entry = result.unwrap();
-        assert!(matches!(entry.entry_type, ValidatedEntryType::Directory));
+        assert_matches!(entry.entry_type, ValidatedEntryType::Directory);
         assert!(entry.mode.is_none());
     }
 
@@ -479,7 +480,7 @@ mod tests {
 
         assert!(result.is_ok());
         let entry = result.unwrap();
-        assert!(matches!(entry.entry_type, ValidatedEntryType::Symlink(_)));
+        assert_matches!(entry.entry_type, ValidatedEntryType::Symlink(_));
         assert!(validator.symlink_seen);
     }
 
@@ -504,10 +505,7 @@ mod tests {
 
         assert!(result.is_ok());
         let entry = result.unwrap();
-        assert!(matches!(
-            entry.entry_type,
-            ValidatedEntryType::Hardlink { .. }
-        ));
+        assert_matches!(entry.entry_type, ValidatedEntryType::Hardlink { .. });
     }
 
     #[test]
@@ -573,8 +571,9 @@ mod tests {
 
         assert!(result.is_ok(), "empty directory should be valid");
         let entry = result.unwrap();
-        assert!(
-            matches!(entry.entry_type, ValidatedEntryType::Directory),
+        assert_matches!(
+            entry.entry_type,
+            ValidatedEntryType::Directory,
             "should be directory type"
         );
         assert!(entry.mode.is_none(), "directory should not have mode set");

@@ -772,14 +772,11 @@ fn extract_fully_skips_a_legitimate_large_disallowed_extension_entry_and_continu
     // means this entry is skipped without ever being validated — the guard
     // must still fully drain it on skip so the *next* entry's header is
     // found correctly, regardless of size or whether quota validation ran.
-    // 45 MiB is chosen specifically
-    // because it is well above every fixed bound tried and rejected during
-    // this fix's history (4 MiB, 16 MiB, 20 MiB) — C3 found the previous
-    // version of this test (10 MiB) passed only because it stayed under
-    // those since-removed caps, certifying a behavior actually broken above
-    // ~20 MiB — while staying under the default `max_file_size` (50 MB) so
-    // the entry itself passes quota, isolating this test to the drain
-    // mechanism rather than an unrelated quota rejection.
+    // 45 MiB is chosen specifically because it is well above every fixed
+    // bound tried and rejected during this fix's history (4 MiB, 16 MiB,
+    // 20 MiB) — C3 found the previous version of this test (10 MiB) passed
+    // only because it stayed under those since-removed caps, certifying a
+    // behavior actually broken above ~20 MiB.
     let big_size = 45 * 1024 * 1024;
     let data = skip_and_continue_fixture(big_size);
     let temp = TempDir::new().unwrap();

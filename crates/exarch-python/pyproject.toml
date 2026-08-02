@@ -52,6 +52,11 @@ dev = [
 ]
 
 [tool.maturin]
+# Pins the Python-facing module name independently of Cargo's `[lib] name`
+# (which is "exarch_pylib", see crates/exarch-python/Cargo.toml, #429). This
+# drives PyInit_* symbol resolution, the wheel's module directory name, and
+# `exarch.pyi` stub discovery — must match `#[pymodule] fn exarch(...)`.
+module-name = "exarch"
 features = ["pyo3/extension-module", "abi3"]
 
 [tool.pytest.ini_options]

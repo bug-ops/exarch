@@ -311,6 +311,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the same `checked_add(..).ok_or(ArchiveError::QuotaExceeded { resource: QuotaResource::IntegerOverflow })`
   pattern; this is not yet a crate-wide guarantee, since `formats/common.rs` and `formats/sevenz.rs`
   still increment their own `files_extracted` counters with unchecked `+=`.
+- **`cargo doc --workspace` silently overwrote one target's docs (#429)**: `exarch-cli`'s
+  `[[bin]]` target and `exarch-python`'s `[lib]` target both used the crate name `exarch`, so
+  rustdoc wrote both targets' output to the same path and one silently clobbered the other. The
+  build itself still exited 0 — this is a `cargo`-level warning, not a rustdoc lint, so
+  `RUSTDOCFLAGS="-D warnings"` never caught it. Renamed the `exarch-python` Cargo `[lib]` target
+  to `exarch_pylib`; the `exarch-cli` binary name is unchanged since it is the user-facing name
+  installed via `cargo install`. Considered and rejected `doc = false` on `exarch-cli`'s
+  `[[bin]]` as a smaller alternative fix: it would resolve the collision in one line without
+  touching Python packaging, but sacrifices exarch-cli's own rustdoc output, which the rename
+  preserves for both targets. Also added `module-name = "exarch"` under `[tool.maturin]` in
+  `crates/exarch-python/pyproject.toml`, since maturin otherwise derives the expected `PyInit_*`
+  symbol name from the Cargo `[lib]` name and would no longer find the `#[pymodule] fn
+  exarch(...)` entry point, breaking the Python extension import. The CI `Documentation` job
+  (`.github/workflows/ci.yml`) now fails if `cargo doc`'s output contains an "output filename
+  collision" warning, closing the gap that let this regression ship silently in the first place.
 
 ### Changed
 

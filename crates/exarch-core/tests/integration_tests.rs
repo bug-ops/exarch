@@ -322,3 +322,282 @@ roundtrip_test!(roundtrip_tar_bz2, "tar.bz2", ArchiveType::TarBz2);
 roundtrip_test!(roundtrip_tar_xz, "tar.xz", ArchiveType::TarXz);
 roundtrip_test!(roundtrip_tar_zst, "tar.zst", ArchiveType::TarZst);
 roundtrip_test!(roundtrip_zip, "zip", ArchiveType::Zip);
+
+// ============================================================================
+// Empty directory preservation tests (issue #400)
+// ============================================================================
+
+/// Source layout with a top-level empty directory and a nested empty
+/// directory, alongside a regular file so the tree isn't degenerate.
+fn make_empty_dir_source() -> TempDir {
+    let src = TempDir::new().unwrap();
+    fs::write(src.path().join("file.txt"), b"content").unwrap();
+    fs::create_dir(src.path().join("empty1")).unwrap();
+    fs::create_dir_all(src.path().join("empty2/empty3")).unwrap();
+    src
+}
+
+fn assert_empty_dirs_preserved(extract_dir: &TempDir) {
+    for rel in ["empty1", "empty2", "empty2/empty3"] {
+        let path = extract_dir.path().join(rel);
+        assert!(
+            path.is_dir(),
+            "expected directory {rel} to exist after extraction"
+        );
+    }
+    let leaf_entries: Vec<_> = fs::read_dir(extract_dir.path().join("empty2/empty3"))
+        .unwrap()
+        .collect();
+    assert!(
+        leaf_entries.is_empty(),
+        "expected empty2/empty3 to be empty, found {} entries",
+        leaf_entries.len()
+    );
+}
+
+macro_rules! empty_dir_roundtrip_test {
+    ($name:ident, $ext:literal, $format:expr) => {
+        #[test]
+        fn $name() {
+            let src = make_empty_dir_source();
+            let archive_dir = TempDir::new().unwrap();
+            let archive = archive_dir.path().join(concat!("out.", $ext));
+
+            let config = CreationConfig::default()
+                .with_include_hidden(true)
+                .with_format(Some($format));
+            let report = create_archive(&archive, &[src.path()], &config).unwrap();
+            // empty1, empty2, empty2/empty3 = 3 directory entries.
+            assert_eq!(report.directories_added, 3);
+
+            let extract_dir = TempDir::new().unwrap();
+            let extract_report =
+                extract_archive(&archive, extract_dir.path(), &SecurityConfig::default()).unwrap();
+            assert!(extract_report.directories_created >= 3);
+
+            assert_empty_dirs_preserved(&extract_dir);
+        }
+    };
+}
+
+empty_dir_roundtrip_test!(empty_dirs_tar, "tar", ArchiveType::Tar);
+empty_dir_roundtrip_test!(empty_dirs_tar_gz, "tar.gz", ArchiveType::TarGz);
+empty_dir_roundtrip_test!(empty_dirs_tar_bz2, "tar.bz2", ArchiveType::TarBz2);
+empty_dir_roundtrip_test!(empty_dirs_tar_xz, "tar.xz", ArchiveType::TarXz);
+empty_dir_roundtrip_test!(empty_dirs_tar_zst, "tar.zst", ArchiveType::TarZst);
+
+/// Parity check (SC-003): the same source tree with nested empty
+/// directories produces the same directory-entry count for TAR and ZIP.
+#[test]
+fn empty_dirs_parity_between_tar_gz_and_zip() {
+    let src = make_empty_dir_source();
+
+    let archive_dir = TempDir::new().unwrap();
+    let tar_gz = archive_dir.path().join("out.tar.gz");
+    let zip = archive_dir.path().join("out.zip");
+
+    let tar_config = CreationConfig::default()
+        .with_include_hidden(true)
+        .with_format(Some(ArchiveType::TarGz));
+    let zip_config = CreationConfig::default()
+        .with_include_hidden(true)
+        .with_format(Some(ArchiveType::Zip));
+
+    let tar_report = create_archive(&tar_gz, &[src.path()], &tar_config).unwrap();
+    let zip_report = create_archive(&zip, &[src.path()], &zip_config).unwrap();
+
+    assert_eq!(tar_report.directories_added, zip_report.directories_added);
+}
+
+// ============================================================================
+// Compression report accuracy tests (issue #402)
+// ============================================================================
+
+/// Highly compressible fixture so real compression is nontrivial and easy
+/// to distinguish from the previous (broken) always-0/always-100% reports.
+fn make_compressible_source() -> TempDir {
+    let src = TempDir::new().unwrap();
+    fs::write(src.path().join("big.txt"), "a".repeat(200_000)).unwrap();
+    src
+}
+
+macro_rules! bytes_compressed_matches_disk_test {
+    ($name:ident, $ext:literal, $format:expr) => {
+        #[test]
+        fn $name() {
+            let src = make_compressible_source();
+            let archive_dir = TempDir::new().unwrap();
+            let archive = archive_dir.path().join(concat!("out.", $ext));
+
+            let config = CreationConfig::default().with_format(Some($format));
+            let report = create_archive(&archive, &[src.path()], &config).unwrap();
+
+            let on_disk = fs::metadata(&archive).unwrap().len();
+            assert_eq!(
+                report.bytes_compressed, on_disk,
+                "bytes_compressed must equal the actual on-disk archive size"
+            );
+            assert!(report.bytes_compressed > 0);
+            // Real compression on a highly-compressible fixture must beat the
+            // uncompressed size, never hit the old 0/100% fallback.
+            assert!(report.bytes_compressed < report.bytes_written);
+            assert!(report.compression_percentage() < 100.0);
+        }
+    };
+}
+
+bytes_compressed_matches_disk_test!(bytes_compressed_matches_disk_zip, "zip", ArchiveType::Zip);
+bytes_compressed_matches_disk_test!(
+    bytes_compressed_matches_disk_tar_gz,
+    "tar.gz",
+    ArchiveType::TarGz
+);
+bytes_compressed_matches_disk_test!(
+    bytes_compressed_matches_disk_tar_bz2,
+    "tar.bz2",
+    ArchiveType::TarBz2
+);
+bytes_compressed_matches_disk_test!(
+    bytes_compressed_matches_disk_tar_xz,
+    "tar.xz",
+    ArchiveType::TarXz
+);
+bytes_compressed_matches_disk_test!(
+    bytes_compressed_matches_disk_tar_zst,
+    "tar.zst",
+    ArchiveType::TarZst
+);
+
+/// Plain (uncompressed) TAR: `bytes_compressed` still reflects the actual
+/// on-disk TAR stream size (headers + padding), not a reused
+/// `bytes_written` value.
+#[test]
+fn bytes_compressed_matches_disk_plain_tar() {
+    let src = make_compressible_source();
+    let archive_dir = TempDir::new().unwrap();
+    let archive = archive_dir.path().join("out.tar");
+
+    let config = CreationConfig::default().with_format(Some(ArchiveType::Tar));
+    let report = create_archive(&archive, &[src.path()], &config).unwrap();
+
+    let on_disk = fs::metadata(&archive).unwrap().len();
+    assert_eq!(report.bytes_compressed, on_disk);
+    assert!(report.bytes_compressed > 0);
+}
+
+/// `bytes_compressed` must track the real on-disk size at both ends of the
+/// compression-level range, not just the (untested) default level — a
+/// metadata-based measurement should be correct regardless of how much the
+/// encoder actually shrinks the stream.
+#[test]
+fn bytes_compressed_matches_disk_across_compression_levels() {
+    let src = make_compressible_source();
+
+    for level in [1, 9] {
+        let archive_dir = TempDir::new().unwrap();
+        let archive = archive_dir.path().join("out.tar.gz");
+
+        let config = CreationConfig::default()
+            .with_format(Some(ArchiveType::TarGz))
+            .with_compression_level(level)
+            .unwrap();
+        let report = create_archive(&archive, &[src.path()], &config).unwrap();
+
+        let on_disk = fs::metadata(&archive).unwrap().len();
+        assert_eq!(
+            report.bytes_compressed, on_disk,
+            "level {level}: bytes_compressed must equal on-disk size"
+        );
+    }
+}
+
+/// Incompressible (pseudo-random) input: `bytes_compressed` must still
+/// track the real on-disk size, even though compression buys little or
+/// nothing here (guards against a fix that only measures correctly for
+/// highly-compressible fixtures).
+#[test]
+fn bytes_compressed_matches_disk_incompressible_data() {
+    let src = TempDir::new().unwrap();
+    let mut data = vec![0u8; 200_000];
+    let mut state = 0x2545_F491_4F6C_DD1Du64;
+    for byte in &mut data {
+        // xorshift64* — deterministic, no external RNG dependency needed.
+        state ^= state >> 12;
+        state ^= state << 25;
+        state ^= state >> 27;
+        *byte = (state.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 56) as u8;
+    }
+    fs::write(src.path().join("random.bin"), &data).unwrap();
+
+    let archive_dir = TempDir::new().unwrap();
+    let archive = archive_dir.path().join("out.tar.gz");
+
+    let config = CreationConfig::default().with_format(Some(ArchiveType::TarGz));
+    let report = create_archive(&archive, &[src.path()], &config).unwrap();
+
+    let on_disk = fs::metadata(&archive).unwrap().len();
+    assert_eq!(report.bytes_compressed, on_disk);
+}
+
+// ============================================================================
+// Additional edge cases for #400 (directory preservation)
+// ============================================================================
+
+/// A source tree that is *only* empty directories (no files at all) must
+/// still round-trip: `directories_added` counts every directory, and none
+/// are silently dropped for lack of file siblings.
+#[test]
+fn only_empty_directories_no_files_roundtrip() {
+    let src = TempDir::new().unwrap();
+    fs::create_dir_all(src.path().join("a/b/c")).unwrap();
+
+    let archive_dir = TempDir::new().unwrap();
+    let archive = archive_dir.path().join("out.tar.gz");
+
+    let config = CreationConfig::default()
+        .with_include_hidden(true)
+        .with_format(Some(ArchiveType::TarGz));
+    let report = create_archive(&archive, &[src.path()], &config).unwrap();
+
+    // a, a/b, a/b/c = 3 directory entries; zero files.
+    assert_eq!(report.directories_added, 3);
+    assert_eq!(report.files_added, 0);
+
+    let extract_dir = TempDir::new().unwrap();
+    let extract_report =
+        extract_archive(&archive, extract_dir.path(), &SecurityConfig::default()).unwrap();
+    assert!(extract_report.directories_created >= 3);
+
+    for rel in ["a", "a/b", "a/b/c"] {
+        assert!(extract_dir.path().join(rel).is_dir());
+    }
+}
+
+/// Directory names with unicode and spaces must survive TAR creation and
+/// extraction unchanged, exercising the same `add_directory_to_tar` path
+/// as the ASCII-only tests above with non-trivial `archive_path` encoding.
+#[test]
+fn empty_dir_unicode_and_space_names_roundtrip_tar() {
+    let src = TempDir::new().unwrap();
+    fs::create_dir_all(src.path().join("café \u{1F980}/nested dir")).unwrap();
+    fs::write(src.path().join("file.txt"), b"content").unwrap();
+
+    let archive_dir = TempDir::new().unwrap();
+    let archive = archive_dir.path().join("out.tar.gz");
+
+    let config = CreationConfig::default()
+        .with_include_hidden(true)
+        .with_format(Some(ArchiveType::TarGz));
+    let report = create_archive(&archive, &[src.path()], &config).unwrap();
+    assert_eq!(report.directories_added, 2);
+
+    let extract_dir = TempDir::new().unwrap();
+    extract_archive(&archive, extract_dir.path(), &SecurityConfig::default()).unwrap();
+
+    assert!(
+        extract_dir
+            .path()
+            .join("café \u{1F980}/nested dir")
+            .is_dir()
+    );
+}

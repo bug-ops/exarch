@@ -48,7 +48,10 @@ pub fn create_zip<P: AsRef<Path>, Q: AsRef<Path>>(
     config: &CreationConfig,
 ) -> Result<CreationReport> {
     let file = File::create(output.as_ref())?;
-    create_zip_internal(file, sources, config)
+    let (mut report, file) = create_zip_internal(file, sources, config)?;
+    drop(file);
+    report.bytes_compressed = std::fs::metadata(output.as_ref())?.len();
+    Ok(report)
 }
 
 /// Creates a ZIP archive with progress reporting.
@@ -131,16 +134,23 @@ pub fn create_zip_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
     progress: &mut dyn ProgressCallback,
 ) -> Result<CreationReport> {
     let file = File::create(output.as_ref())?;
-    create_zip_internal_with_progress(file, sources, config, progress)
+    let (mut report, file) = create_zip_internal_with_progress(file, sources, config, progress)?;
+    drop(file);
+    report.bytes_compressed = std::fs::metadata(output.as_ref())?.len();
+    Ok(report)
 }
 
 /// Internal function that creates ZIP with any writer and progress reporting.
+///
+/// Returns `(report, writer)` so callers with a file-backed destination can
+/// measure the actual on-disk archive size after the writer is fully
+/// finished and flushed.
 fn create_zip_internal_with_progress<W: Write + Seek, P: AsRef<Path>>(
     writer: W,
     sources: &[P],
     config: &CreationConfig,
     progress: &mut dyn ProgressCallback,
-) -> Result<CreationReport> {
+) -> Result<(CreationReport, W)> {
     let mut zip = ZipWriter::new(writer);
     let mut report = CreationReport::default();
     let start = std::time::Instant::now();
@@ -203,21 +213,22 @@ fn create_zip_internal_with_progress<W: Write + Seek, P: AsRef<Path>>(
     }
 
     // Finish writing ZIP
-    zip.finish()
+    let writer = zip
+        .finish()
         .map_err(|e| std::io::Error::other(format!("failed to finish ZIP archive: {e}")))?;
 
     report.duration = start.elapsed();
 
     tracker.on_complete();
 
-    Ok(report)
+    Ok((report, writer))
 }
 
 fn create_zip_internal<W: Write + Seek, P: AsRef<Path>>(
     writer: W,
     sources: &[P],
     config: &CreationConfig,
-) -> Result<CreationReport> {
+) -> Result<(CreationReport, W)> {
     create_zip_internal_with_progress(writer, sources, config, &mut NoopProgress)
 }
 

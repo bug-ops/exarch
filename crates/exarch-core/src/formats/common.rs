@@ -640,6 +640,7 @@ mod tests {
     use crate::security::validator::ValidatedEntry;
     use crate::security::validator::ValidatedEntryType;
     use crate::types::SafePath;
+    use std::assert_matches;
     use std::io::Cursor;
     use std::path::PathBuf;
     use tempfile::TempDir;
@@ -682,12 +683,12 @@ mod tests {
 
         // Should return QuotaExceeded with IntegerOverflow
         assert!(result.is_err());
-        assert!(matches!(
+        assert_matches!(
             result.unwrap_err(),
             ArchiveError::QuotaExceeded {
                 resource: QuotaResource::IntegerOverflow
             }
-        ));
+        );
     }
 
     /// Test `DirCache` basic functionality

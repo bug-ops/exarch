@@ -43,6 +43,7 @@ pub fn validate_compression_ratio(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::assert_matches;
 
     #[test]
     fn test_validate_compression_ratio_safe() {
@@ -55,7 +56,7 @@ mod tests {
     fn test_validate_compression_ratio_bomb() {
         let config = SecurityConfig::default();
         let result = validate_compression_ratio(1000, 1_000_000, &config);
-        assert!(matches!(result, Err(ArchiveError::ZipBomb { .. })));
+        assert_matches!(result, Err(ArchiveError::ZipBomb { .. }));
     }
 
     #[test]
@@ -64,8 +65,9 @@ mod tests {
 
         // HIGH-001: Zero compressed with non-zero uncompressed is invalid
         let result = validate_compression_ratio(0, 1000, &config);
-        assert!(
-            matches!(result, Err(ArchiveError::InvalidArchive(_))),
+        assert_matches!(
+            result,
+            Err(ArchiveError::InvalidArchive(_)),
             "zero compressed with non-zero uncompressed should be rejected"
         );
     }
@@ -87,8 +89,9 @@ mod tests {
         // HIGH-001: Compressed size zero with uncompressed > 0 is INVALID
         // This prevents zip bomb bypass for stored compression
         let result = validate_compression_ratio(0, 1_000_000, &config);
-        assert!(
-            matches!(result, Err(ArchiveError::InvalidArchive(_))),
+        assert_matches!(
+            result,
+            Err(ArchiveError::InvalidArchive(_)),
             "compressed_size == 0 but uncompressed_size > 0 should be rejected (HIGH-001 fix)"
         );
     }
@@ -100,8 +103,9 @@ mod tests {
         // Very small compressed size (1 byte) with large uncompressed
         // This should trigger zip bomb detection
         let result = validate_compression_ratio(1, 1_000_000, &config);
-        assert!(
-            matches!(result, Err(ArchiveError::ZipBomb { .. })),
+        assert_matches!(
+            result,
+            Err(ArchiveError::ZipBomb { .. }),
             "extremely high compression ratio should be detected as zip bomb"
         );
     }

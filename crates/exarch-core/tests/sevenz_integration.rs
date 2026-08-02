@@ -10,6 +10,7 @@ use exarch_core::formats::SevenZArchive;
 use exarch_core::formats::traits::ArchiveFormat;
 use sevenz_rust2::ArchiveEntry;
 use sevenz_rust2::ArchiveWriter;
+use std::assert_matches;
 use std::io::Cursor;
 use std::path::Path;
 use std::sync::Arc;
@@ -67,7 +68,7 @@ fn test_7z_security_config_integration() {
         &ExtractionOptions::default(),
         &mut exarch_core::NoopProgress,
     );
-    assert!(matches!(result, Err(ArchiveError::QuotaExceeded { .. })));
+    assert_matches!(result, Err(ArchiveError::QuotaExceeded { .. }));
 }
 
 #[test]
@@ -118,10 +119,7 @@ fn test_7z_solid_archive_rejected_at_new() {
     );
 
     assert!(result.is_err());
-    assert!(matches!(
-        result.unwrap_err(),
-        ArchiveError::SecurityViolation { .. }
-    ));
+    assert_matches!(result.unwrap_err(), ArchiveError::SecurityViolation { .. });
 }
 
 #[test]
@@ -132,7 +130,7 @@ fn test_7z_encrypted_archive_rejected_at_new() {
     let result = SevenZArchive::new(cursor);
     assert!(result.is_err());
     let err = result.unwrap_err();
-    assert!(matches!(err, ArchiveError::SecurityViolation { .. }));
+    assert_matches!(err, ArchiveError::SecurityViolation { .. });
 
     // Verify error message is helpful
     let msg = err.to_string();
@@ -185,7 +183,7 @@ fn test_7z_quota_file_count() {
         &ExtractionOptions::default(),
         &mut exarch_core::NoopProgress,
     );
-    assert!(matches!(result, Err(ArchiveError::QuotaExceeded { .. })));
+    assert_matches!(result, Err(ArchiveError::QuotaExceeded { .. }));
 }
 
 #[test]
@@ -203,7 +201,7 @@ fn test_7z_quota_total_size() {
         &ExtractionOptions::default(),
         &mut exarch_core::NoopProgress,
     );
-    assert!(matches!(result, Err(ArchiveError::QuotaExceeded { .. })));
+    assert_matches!(result, Err(ArchiveError::QuotaExceeded { .. }));
 }
 
 // ============================================================================
@@ -257,7 +255,7 @@ fn test_7z_solid_archive_with_file_count_quota() {
         &ExtractionOptions::default(),
         &mut exarch_core::NoopProgress,
     );
-    assert!(matches!(result, Err(ArchiveError::QuotaExceeded { .. })));
+    assert_matches!(result, Err(ArchiveError::QuotaExceeded { .. }));
 }
 
 // ============================================================================
@@ -504,8 +502,9 @@ fn test_7z_partial_extraction_accurate_report() {
         &mut exarch_core::NoopProgress,
     );
 
-    assert!(
-        matches!(result, Err(ArchiveError::QuotaExceeded { .. })),
+    assert_matches!(
+        result,
+        Err(ArchiveError::QuotaExceeded { .. }),
         "pre-validation quota check must return QuotaExceeded directly, got: {result:?}"
     );
     // No files should have been written — the output directory is empty.

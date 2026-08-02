@@ -37,19 +37,19 @@ impl QuotaTracker {
             && config.max_file_count == usize::MAX
             && config.max_total_size == u64::MAX
         {
-            self.files_extracted =
-                self.files_extracted
-                    .checked_add(1)
-                    .ok_or(ArchiveError::QuotaExceeded {
-                        resource: crate::QuotaResource::IntegerOverflow,
-                    })?;
+            self.files_extracted = self.files_extracted.checked_add(1).ok_or_else(|| {
+                core::hint::cold_path();
+                ArchiveError::QuotaExceeded {
+                    resource: crate::QuotaResource::IntegerOverflow,
+                }
+            })?;
 
-            self.bytes_written =
-                self.bytes_written
-                    .checked_add(size)
-                    .ok_or(ArchiveError::QuotaExceeded {
-                        resource: crate::QuotaResource::IntegerOverflow,
-                    })?;
+            self.bytes_written = self.bytes_written.checked_add(size).ok_or_else(|| {
+                core::hint::cold_path();
+                ArchiveError::QuotaExceeded {
+                    resource: crate::QuotaResource::IntegerOverflow,
+                }
+            })?;
 
             return Ok(());
         }
@@ -64,6 +64,7 @@ impl QuotaTracker {
     #[inline(never)]
     fn record_file_checked(&mut self, size: u64, config: &SecurityConfig) -> Result<()> {
         if size > config.max_file_size {
+            core::hint::cold_path();
             return Err(ArchiveError::QuotaExceeded {
                 resource: crate::QuotaResource::FileSize {
                     size,
@@ -72,21 +73,22 @@ impl QuotaTracker {
             });
         }
 
-        self.files_extracted =
-            self.files_extracted
-                .checked_add(1)
-                .ok_or(ArchiveError::QuotaExceeded {
-                    resource: crate::QuotaResource::IntegerOverflow,
-                })?;
+        self.files_extracted = self.files_extracted.checked_add(1).ok_or_else(|| {
+            core::hint::cold_path();
+            ArchiveError::QuotaExceeded {
+                resource: crate::QuotaResource::IntegerOverflow,
+            }
+        })?;
 
-        self.bytes_written =
-            self.bytes_written
-                .checked_add(size)
-                .ok_or(ArchiveError::QuotaExceeded {
-                    resource: crate::QuotaResource::IntegerOverflow,
-                })?;
+        self.bytes_written = self.bytes_written.checked_add(size).ok_or_else(|| {
+            core::hint::cold_path();
+            ArchiveError::QuotaExceeded {
+                resource: crate::QuotaResource::IntegerOverflow,
+            }
+        })?;
 
         if self.files_extracted > config.max_file_count {
+            core::hint::cold_path();
             return Err(ArchiveError::QuotaExceeded {
                 resource: crate::QuotaResource::FileCount {
                     current: self.files_extracted,
@@ -96,6 +98,7 @@ impl QuotaTracker {
         }
 
         if self.bytes_written > config.max_total_size {
+            core::hint::cold_path();
             return Err(ArchiveError::QuotaExceeded {
                 resource: crate::QuotaResource::TotalSize {
                     current: self.bytes_written,
@@ -124,6 +127,7 @@ impl QuotaTracker {
 #[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
+    use std::assert_matches;
 
     #[test]
     fn test_quota_tracker_new() {
@@ -151,7 +155,7 @@ mod tests {
         assert!(tracker.record_file(100, &config).is_ok());
         assert!(tracker.record_file(100, &config).is_ok());
         let result = tracker.record_file(100, &config);
-        assert!(matches!(result, Err(ArchiveError::QuotaExceeded { .. })));
+        assert_matches!(result, Err(ArchiveError::QuotaExceeded { .. }));
     }
 
     #[test]
@@ -162,7 +166,7 @@ mod tests {
 
         assert!(tracker.record_file(600, &config).is_ok());
         let result = tracker.record_file(500, &config);
-        assert!(matches!(result, Err(ArchiveError::QuotaExceeded { .. })));
+        assert_matches!(result, Err(ArchiveError::QuotaExceeded { .. }));
     }
 
     #[test]
@@ -172,7 +176,7 @@ mod tests {
         config.max_file_size = 1000;
 
         let result = tracker.record_file(2000, &config);
-        assert!(matches!(result, Err(ArchiveError::QuotaExceeded { .. })));
+        assert_matches!(result, Err(ArchiveError::QuotaExceeded { .. }));
     }
 
     // H-TEST-4: Quota boundary conditions test
@@ -201,13 +205,11 @@ mod tests {
 
         // One more should fail (exceeds limit)
         let result = tracker.record_file(100, &config);
-        assert!(
-            matches!(
-                result,
-                Err(ArchiveError::QuotaExceeded {
-                    resource: crate::QuotaResource::FileCount { current: 4, max: 3 }
-                })
-            ),
+        assert_matches!(
+            result,
+            Err(ArchiveError::QuotaExceeded {
+                resource: crate::QuotaResource::FileCount { current: 4, max: 3 }
+            }),
             "file 4 should exceed quota"
         );
     }
@@ -229,16 +231,14 @@ mod tests {
 
         // One more byte should fail
         let result = tracker.record_file(1, &config);
-        assert!(
-            matches!(
-                result,
-                Err(ArchiveError::QuotaExceeded {
-                    resource: crate::QuotaResource::TotalSize {
-                        current: 1001,
-                        max: 1000
-                    }
-                })
-            ),
+        assert_matches!(
+            result,
+            Err(ArchiveError::QuotaExceeded {
+                resource: crate::QuotaResource::TotalSize {
+                    current: 1001,
+                    max: 1000
+                }
+            }),
             "exceeding total size should fail"
         );
     }
@@ -259,16 +259,14 @@ mod tests {
 
         // File one byte over should fail
         let result = tracker.record_file(5001, &config);
-        assert!(
-            matches!(
-                result,
-                Err(ArchiveError::QuotaExceeded {
-                    resource: crate::QuotaResource::FileSize {
-                        size: 5001,
-                        max: 5000
-                    }
-                })
-            ),
+        assert_matches!(
+            result,
+            Err(ArchiveError::QuotaExceeded {
+                resource: crate::QuotaResource::FileSize {
+                    size: 5001,
+                    max: 5000
+                }
+            }),
             "file exceeding limit should fail"
         );
     }
@@ -286,7 +284,7 @@ mod tests {
 
         // Second file should fail (max is 1)
         let result = tracker.record_file(100, &config);
-        assert!(matches!(result, Err(ArchiveError::QuotaExceeded { .. })));
+        assert_matches!(result, Err(ArchiveError::QuotaExceeded { .. }));
     }
 
     // OPT-C003: Test fast path for unlimited quotas
@@ -324,13 +322,11 @@ mod tests {
 
         // Adding 200 bytes should trigger overflow detection
         let result = tracker.record_file(200, &config);
-        assert!(
-            matches!(
-                result,
-                Err(ArchiveError::QuotaExceeded {
-                    resource: crate::QuotaResource::IntegerOverflow
-                })
-            ),
+        assert_matches!(
+            result,
+            Err(ArchiveError::QuotaExceeded {
+                resource: crate::QuotaResource::IntegerOverflow
+            }),
             "fast path should still detect overflow"
         );
     }

@@ -637,6 +637,7 @@ fn determine_creation_format(output: &Path, config: &CreationConfig) -> Result<A
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use std::assert_matches;
     use std::path::PathBuf;
 
     #[test]
@@ -756,11 +757,9 @@ mod tests {
             ..CreationConfig::default()
         };
         let result = create_archive(&archive_path, &[] as &[&str], &config);
-        assert!(
-            matches!(
-                result,
-                Err(ArchiveError::InvalidCompressionLevel { level: 15 })
-            ),
+        assert_matches!(
+            result,
+            Err(ArchiveError::InvalidCompressionLevel { level: 15 }),
             "expected InvalidCompressionLevel, got {result:?}",
         );
         // Verify no I/O happened — output file must not exist
@@ -776,8 +775,9 @@ mod tests {
         for ext in ["apk", "whl", "EPUB"] {
             let archive_path = dest.path().join(format!("output.{ext}"));
             let result = create_archive(&archive_path, &[] as &[&str], &CreationConfig::default());
-            assert!(
-                matches!(result, Err(ArchiveError::InvalidArchive(_))),
+            assert_matches!(
+                result,
+                Err(ArchiveError::InvalidArchive(_)),
                 ".{ext} should be rejected, got {result:?}",
             );
         }
@@ -808,10 +808,10 @@ mod tests {
         let result = create_archive(&archive_path, &[] as &[&str], &CreationConfig::default());
 
         assert!(result.is_err());
-        assert!(matches!(
+        assert_matches!(
             result.unwrap_err(),
             ArchiveError::InvalidConfiguration { .. }
-        ));
+        );
     }
 
     #[test]

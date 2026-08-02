@@ -12,6 +12,7 @@ use exarch_core::SecurityConfig;
 use exarch_core::formats::ArchiveFormat;
 use exarch_core::formats::TarArchive;
 use exarch_core::formats::ZipArchive;
+use std::assert_matches;
 use std::io::Cursor;
 use tempfile::TempDir;
 
@@ -158,8 +159,9 @@ fn test_cve_2024_12718_dotslash_prefix_traversal() {
         &mut exarch_core::NoopProgress,
     );
 
-    assert!(
-        matches!(result, Err(ArchiveError::PathTraversal { .. })),
+    assert_matches!(
+        result,
+        Err(ArchiveError::PathTraversal { .. }),
         "dotslash-prefixed traversal must be rejected, got: {result:?}"
     );
 }
@@ -178,8 +180,9 @@ fn test_cve_2024_12718_dotslash_complex_traversal() {
         &mut exarch_core::NoopProgress,
     );
 
-    assert!(
-        matches!(result, Err(ArchiveError::PathTraversal { .. })),
+    assert_matches!(
+        result,
+        Err(ArchiveError::PathTraversal { .. }),
         "complex dotslash traversal must be rejected, got: {result:?}"
     );
 }
@@ -238,11 +241,9 @@ fn test_cve_2024_12905_symlink_outside_dest_rejected_by_default() {
         &mut exarch_core::NoopProgress,
     );
 
-    assert!(
-        matches!(
-            result,
-            Err(ArchiveError::SecurityViolation { .. } | ArchiveError::SymlinkEscape { .. })
-        ),
+    assert_matches!(
+        result,
+        Err(ArchiveError::SecurityViolation { .. } | ArchiveError::SymlinkEscape { .. }),
         "symlink to outside dest must be rejected with default config, got: {result:?}"
     );
 }
@@ -268,8 +269,9 @@ fn test_cve_2024_12905_symlink_outside_dest_rejected_when_allowed() {
         &mut exarch_core::NoopProgress,
     );
 
-    assert!(
-        matches!(result, Err(ArchiveError::SymlinkEscape { .. })),
+    assert_matches!(
+        result,
+        Err(ArchiveError::SymlinkEscape { .. }),
         "symlink to outside destination must be rejected, got: {result:?}"
     );
 }
@@ -294,8 +296,9 @@ fn test_cve_2024_12905_deep_symlink_chain() {
         &mut exarch_core::NoopProgress,
     );
 
-    assert!(
-        matches!(result, Err(ArchiveError::SymlinkEscape { .. })),
+    assert_matches!(
+        result,
+        Err(ArchiveError::SymlinkEscape { .. }),
         "deep symlink chain escape must be rejected, got: {result:?}"
     );
 }
@@ -322,11 +325,9 @@ fn test_cve_2025_48387_hardlink_outside_dest_rejected_by_default() {
         &mut exarch_core::NoopProgress,
     );
 
-    assert!(
-        matches!(
-            result,
-            Err(ArchiveError::SecurityViolation { .. } | ArchiveError::HardlinkEscape { .. })
-        ),
+    assert_matches!(
+        result,
+        Err(ArchiveError::SecurityViolation { .. } | ArchiveError::HardlinkEscape { .. }),
         "hardlink outside dest must be rejected with default config, got: {result:?}"
     );
 }
@@ -351,8 +352,9 @@ fn test_cve_2025_48387_hardlink_outside_dest_rejected_when_allowed() {
         &mut exarch_core::NoopProgress,
     );
 
-    assert!(
-        matches!(result, Err(ArchiveError::HardlinkEscape { .. })),
+    assert_matches!(
+        result,
+        Err(ArchiveError::HardlinkEscape { .. }),
         "hardlink traversal outside dest must be rejected, got: {result:?}"
     );
 }
@@ -376,8 +378,9 @@ fn test_cve_2025_48387_absolute_hardlink_rejected() {
         &mut exarch_core::NoopProgress,
     );
 
-    assert!(
-        matches!(result, Err(ArchiveError::HardlinkEscape { .. })),
+    assert_matches!(
+        result,
+        Err(ArchiveError::HardlinkEscape { .. }),
         "absolute hardlink target must be rejected, got: {result:?}"
     );
 }
@@ -411,13 +414,11 @@ fn test_rustsec_2026_0067_symlink_dir_chmod_default_config() {
         &mut exarch_core::NoopProgress,
     );
 
-    assert!(
-        matches!(
-            result,
-            Err(ArchiveError::SecurityViolation { .. }
-                | ArchiveError::SymlinkEscape { .. }
-                | ArchiveError::PathTraversal { .. })
-        ),
+    assert_matches!(
+        result,
+        Err(ArchiveError::SecurityViolation { .. }
+            | ArchiveError::SymlinkEscape { .. }
+            | ArchiveError::PathTraversal { .. }),
         "symlink+dir chmod attack must be rejected with default config, got: {result:?}"
     );
 
@@ -450,8 +451,9 @@ fn test_rustsec_2026_0067_symlink_dir_chmod_symlinks_allowed() {
         &mut exarch_core::NoopProgress,
     );
 
-    assert!(
-        matches!(result, Err(ArchiveError::SymlinkEscape { .. })),
+    assert_matches!(
+        result,
+        Err(ArchiveError::SymlinkEscape { .. }),
         "symlink escaping root must be rejected even when symlinks are allowed, got: {result:?}"
     );
 
@@ -572,11 +574,9 @@ fn test_cve_2026_24842_deep_nested_hardlink_escape_rejected_by_default() {
         &mut exarch_core::NoopProgress,
     );
 
-    assert!(
-        matches!(
-            result,
-            Err(ArchiveError::SecurityViolation { .. } | ArchiveError::HardlinkEscape { .. })
-        ),
+    assert_matches!(
+        result,
+        Err(ArchiveError::SecurityViolation { .. } | ArchiveError::HardlinkEscape { .. }),
         "deep nested hardlink escape must be rejected with default config, got: {result:?}"
     );
 }
@@ -602,8 +602,9 @@ fn test_cve_2026_24842_deep_nested_hardlink_escape_rejected_when_allowed() {
         &mut exarch_core::NoopProgress,
     );
 
-    assert!(
-        matches!(result, Err(ArchiveError::HardlinkEscape { .. })),
+    assert_matches!(
+        result,
+        Err(ArchiveError::HardlinkEscape { .. }),
         "deep nested hardlink escape must be rejected even with hardlinks allowed, got: {result:?}"
     );
 
@@ -809,8 +810,9 @@ fn test_cve_2025_29787_zip_slip_blocked_with_symlinks_enabled() {
         result.is_err(),
         "extraction must fail: escaping symlink must be rejected"
     );
-    assert!(
-        matches!(result.unwrap_err(), ArchiveError::SymlinkEscape { .. }),
+    assert_matches!(
+        result.unwrap_err(),
+        ArchiveError::SymlinkEscape { .. },
         "expected SymlinkEscape"
     );
 

@@ -246,9 +246,12 @@ proptest! {
             prop_assert_eq!(tracker.bytes_written(), file_size);
         } else {
             prop_assert!(
-                matches!(result, Err(ArchiveError::QuotaExceeded {
-                    resource: QuotaResource::FileSize { .. }
-                })),
+                matches!(
+                    result,
+                    Err(ArchiveError::QuotaExceeded {
+                        resource: QuotaResource::FileSize { .. }
+                    })
+                ),
                 "file exceeding size limit should fail"
             );
             prop_assert_eq!(tracker.bytes_written(), 0, "no bytes should be recorded on failure");

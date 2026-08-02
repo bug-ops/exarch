@@ -26,7 +26,7 @@ status: permanent
 
 ## II. Technology Stack
 
-- Language: Rust, MSRV 1.93.0
+- Language: Rust, MSRV 1.96.0
 - CLI: `clap` 4.x with derive macros
 - Python bindings: `pyo3` 0.29, `maturin`, GIL released during I/O
 - Node.js bindings: `napi-rs` 3.x, async Promises via tokio thread pool

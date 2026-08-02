@@ -305,6 +305,7 @@ fn determine_security_status(issues: &[VerificationIssue]) -> CheckStatus {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use std::assert_matches;
     use std::io::Write;
     use std::path::PathBuf;
     use tempfile::NamedTempFile;
@@ -627,11 +628,9 @@ mod tests {
             ..SecurityConfig::default()
         };
         let result = crate::verify_archive("any.tar.gz", &config);
-        assert!(
-            matches!(
-                result,
-                Err(crate::ArchiveError::InvalidConfiguration { .. })
-            ),
+        assert_matches!(
+            result,
+            Err(crate::ArchiveError::InvalidConfiguration { .. }),
             "verify_archive must return InvalidConfiguration for zero max_path_depth"
         );
     }

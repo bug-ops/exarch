@@ -20,7 +20,7 @@ related:
 
 > [!info] Metadata
 > **Subsystem**: exarch-cli
-> **MSRV**: Rust 1.93.0
+> **MSRV**: Rust 1.96.0
 > **Source**: extracted from [[001-exarch-system/spec]]
 
 ## 1. Overview

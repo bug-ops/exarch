@@ -209,6 +209,7 @@ fn detect_format_from_magic(path: &Path) -> Option<ArchiveType> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use std::assert_matches;
     use std::path::PathBuf;
 
     #[test]
@@ -229,20 +230,20 @@ mod tests {
     #[test]
     fn test_detect_bare_gz_returns_unknown_format() {
         let path = PathBuf::from("archive.gz");
-        assert!(matches!(
+        assert_matches!(
             detect_format(&path),
             Err(ArchiveError::UnknownFormat { .. })
-        ));
+        );
     }
 
     #[test]
     fn test_detect_bare_gz_error_carries_path() {
         let path = PathBuf::from("archive.gz");
         let err = detect_format(&path).unwrap_err();
-        assert!(matches!(
+        assert_matches!(
             err,
             ArchiveError::UnknownFormat { path: ref p } if p == &PathBuf::from("archive.gz")
-        ));
+        );
     }
 
     #[test]
@@ -322,20 +323,20 @@ mod tests {
     #[test]
     fn test_detect_unknown_format() {
         let path = PathBuf::from("archive.rar");
-        assert!(matches!(
+        assert_matches!(
             detect_format(&path),
             Err(ArchiveError::UnknownFormat { .. })
-        ));
+        );
     }
 
     #[test]
     fn test_detect_unknown_format_error_carries_path() {
         let path = PathBuf::from("archive.rar");
         let err = detect_format(&path).unwrap_err();
-        assert!(matches!(
+        assert_matches!(
             err,
             ArchiveError::UnknownFormat { path: ref p } if p == &PathBuf::from("archive.rar")
-        ));
+        );
     }
 
     #[test]
@@ -449,10 +450,10 @@ mod tests {
     #[test]
     fn test_nonexistent_file_without_extension_returns_unknown() {
         let path = PathBuf::from("/nonexistent/path/to/archive");
-        assert!(matches!(
+        assert_matches!(
             detect_format(&path),
             Err(ArchiveError::UnknownFormat { .. })
-        ));
+        );
     }
 
     #[test]

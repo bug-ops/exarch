@@ -297,6 +297,7 @@ pub(crate) fn resolve_through_symlinks(
 #[allow(clippy::expect_used, clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
+    use std::assert_matches;
     use tempfile::TempDir;
 
     /// Creates a temporary directory and wraps it in a `DestDir` for testing.
@@ -344,10 +345,7 @@ mod tests {
         let target = PathBuf::from("target.txt");
 
         let result = SafeSymlink::validate(&link, &target, &dest, &config);
-        assert!(matches!(
-            result,
-            Err(ArchiveError::SecurityViolation { .. })
-        ));
+        assert_matches!(result, Err(ArchiveError::SecurityViolation { .. }));
     }
 
     #[test]
@@ -361,7 +359,7 @@ mod tests {
         let target = PathBuf::from("/etc/passwd");
 
         let result = SafeSymlink::validate(&link, &target, &dest, &config);
-        assert!(matches!(result, Err(ArchiveError::SymlinkEscape { .. })));
+        assert_matches!(result, Err(ArchiveError::SymlinkEscape { .. }));
     }
 
     #[test]
@@ -375,7 +373,7 @@ mod tests {
         let target = PathBuf::from("C:\\Windows\\System32");
 
         let result = SafeSymlink::validate(&link, &target, &dest, &config);
-        assert!(matches!(result, Err(ArchiveError::SymlinkEscape { .. })));
+        assert_matches!(result, Err(ArchiveError::SymlinkEscape { .. }));
     }
 
     #[test]
@@ -390,7 +388,7 @@ mod tests {
         let target = PathBuf::from("../../../../etc/passwd");
 
         let result = SafeSymlink::validate(&link, &target, &dest, &config);
-        assert!(matches!(result, Err(ArchiveError::SymlinkEscape { .. })));
+        assert_matches!(result, Err(ArchiveError::SymlinkEscape { .. }));
     }
 
     #[test]
@@ -536,7 +534,7 @@ mod tests {
         let target = PathBuf::from("../".repeat(50) + "file.txt");
 
         let result = SafeSymlink::validate(&link, &target, &dest, &config);
-        assert!(matches!(result, Err(ArchiveError::SymlinkEscape { .. })));
+        assert_matches!(result, Err(ArchiveError::SymlinkEscape { .. }));
     }
 
     // Test for symlink with banned target component
@@ -552,8 +550,9 @@ mod tests {
         let target = PathBuf::from(".git/config");
 
         let result = SafeSymlink::validate(&link, &target, &dest, &config);
-        assert!(
-            matches!(result, Err(ArchiveError::SecurityViolation { .. })),
+        assert_matches!(
+            result,
+            Err(ArchiveError::SecurityViolation { .. }),
             "symlink to banned component should be rejected"
         );
     }
@@ -674,8 +673,9 @@ mod tests {
         let target = PathBuf::from("c/up/../..");
 
         let result = SafeSymlink::validate(&link, &target, &dest, &config);
-        assert!(
-            matches!(result, Err(ArchiveError::SymlinkEscape { .. })),
+        assert_matches!(
+            result,
+            Err(ArchiveError::SymlinkEscape { .. }),
             "two-hop symlink chain must be rejected"
         );
     }

@@ -780,6 +780,7 @@ impl From<sevenz_rust2::Error> for ArchiveError {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use std::assert_matches;
     use std::io::Cursor;
     use tempfile::TempDir;
 
@@ -821,7 +822,7 @@ mod tests {
         assert!(result.is_err(), "invalid archive should fail to parse");
 
         // Verify the error is InvalidArchive (not security violation)
-        assert!(matches!(result, Err(ArchiveError::InvalidArchive(_))));
+        assert_matches!(result, Err(ArchiveError::InvalidArchive(_)));
     }
 
     /// Test that invalid magic bytes are rejected.
@@ -832,7 +833,7 @@ mod tests {
 
         let result = SevenZArchive::new(cursor);
         assert!(result.is_err());
-        assert!(matches!(result, Err(ArchiveError::InvalidArchive(_))));
+        assert_matches!(result, Err(ArchiveError::InvalidArchive(_)));
     }
 
     #[test]
@@ -910,10 +911,7 @@ mod tests {
         );
 
         assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            ArchiveError::SecurityViolation { .. }
-        ));
+        assert_matches!(result.unwrap_err(), ArchiveError::SecurityViolation { .. });
     }
 
     #[test]
@@ -924,10 +922,7 @@ mod tests {
         // Should fail in new() due to encryption detection
         let result = SevenZArchive::new(cursor);
         assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            ArchiveError::SecurityViolation { .. }
-        ));
+        assert_matches!(result.unwrap_err(), ArchiveError::SecurityViolation { .. });
     }
 
     #[test]
@@ -992,10 +987,7 @@ mod tests {
             &mut crate::NoopProgress,
         );
         assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            ArchiveError::QuotaExceeded { .. }
-        ));
+        assert_matches!(result.unwrap_err(), ArchiveError::QuotaExceeded { .. });
     }
 
     /// Test B-002: Verify quota is not double-counted
@@ -1086,10 +1078,7 @@ mod tests {
             &mut crate::NoopProgress,
         );
         assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            ArchiveError::SecurityViolation { .. }
-        ));
+        assert_matches!(result.unwrap_err(), ArchiveError::SecurityViolation { .. });
     }
 
     /// Test: Solid archive memory limit exceeded
@@ -1113,10 +1102,7 @@ mod tests {
             &mut crate::NoopProgress,
         );
         assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            ArchiveError::QuotaExceeded { .. }
-        ));
+        assert_matches!(result.unwrap_err(), ArchiveError::QuotaExceeded { .. });
     }
 
     /// Test: Non-solid archives work regardless of solid config
@@ -1221,10 +1207,7 @@ mod tests {
             &mut crate::NoopProgress,
         );
         assert!(result.is_err(), "one byte under limit should reject");
-        assert!(matches!(
-            result.unwrap_err(),
-            ArchiveError::QuotaExceeded { .. }
-        ));
+        assert_matches!(result.unwrap_err(), ArchiveError::QuotaExceeded { .. });
     }
 
     /// Test H-2: Verify error message contains helpful info
@@ -1272,8 +1255,9 @@ mod tests {
 
         let result = SevenZEntryAdapter::to_entry_type(&entry);
         assert!(result.is_err(), "should return error for reparse point");
-        assert!(
-            matches!(result.unwrap_err(), ArchiveError::SecurityViolation { .. }),
+        assert_matches!(
+            result.unwrap_err(),
+            ArchiveError::SecurityViolation { .. },
             "should be SecurityViolation error"
         );
     }
@@ -1340,10 +1324,7 @@ mod tests {
         // This catches directory junctions (Windows symlink directories)
         let result = SevenZEntryAdapter::to_entry_type(&entry);
         assert!(result.is_err(), "directory junction should be rejected");
-        assert!(matches!(
-            result.unwrap_err(),
-            ArchiveError::SecurityViolation { .. }
-        ));
+        assert_matches!(result.unwrap_err(), ArchiveError::SecurityViolation { .. });
     }
 
     /// Test: Error message for Windows reparse point
@@ -1530,8 +1511,9 @@ mod tests {
             result.is_err(),
             "backslash-encoded traversal must be rejected, got: {result:?}"
         );
-        assert!(
-            matches!(result.unwrap_err(), ArchiveError::PathTraversal { .. }),
+        assert_matches!(
+            result.unwrap_err(),
+            ArchiveError::PathTraversal { .. },
             "expected PathTraversal error"
         );
     }
@@ -1639,10 +1621,11 @@ mod tests {
             &config,
         );
 
-        assert!(
-            matches!(&result, Err(sevenz_rust2::Error::Other(m)) if m.contains("validation failed")),
-            "callback re-validation must independently reject a traversal entry \
-             via its own validate_entry call, got: {result:?}"
+        assert_matches!(
+            &result,
+            Err(sevenz_rust2::Error::Other(m)) if m.contains("validation failed"),
+            "callback re-validation must independently reject a traversal entry via its own \
+             validate_entry call, got: {result:?}"
         );
     }
 }

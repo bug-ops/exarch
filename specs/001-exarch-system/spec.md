@@ -19,7 +19,7 @@ related:
 
 > [!info] Metadata
 > **Version**: 0.4.1
-> **MSRV**: Rust 1.93.0
+> **MSRV**: Rust 1.96.0
 > **License**: MIT OR Apache-2.0
 > **Crates**: exarch-core, exarch-cli, exarch-python, exarch-node
 
@@ -269,7 +269,7 @@ THEN extraction runs on the libuv thread pool, files are extracted, and an Extra
 | NFR-007 | Reliability | Atomic extraction mode ensures all-or-nothing semantics (no partial output on failure) |
 | NFR-008 | Reliability | Progress `on_complete` not called on failure — callers can rely on this for cleanup signaling |
 | NFR-009 | Safety | `deny(unsafe_code)` workspace-wide; Python binding contains one justified `unsafe impl Send` for `PyProgressAdapter` |
-| NFR-010 | Compatibility | MSRV 1.93.0; no const generics or APIs introduced after 1.93 |
+| NFR-010 | Compatibility | MSRV 1.96.0; no const generics or APIs introduced after 1.96 |
 | NFR-011 | Portability | Path separator handling must be tested on Windows (backslash vs forward slash edge cases in path validation) |
 | NFR-012 | Observability | CLI progress bar uses `indicatif` in human mode; suppressed in `--json` and `--quiet` modes |
 
@@ -337,7 +337,7 @@ THEN extraction runs on the libuv thread pool, files are extracted, and an Extra
 | SC-005 | Test coverage (new code) | All security checks have property-based or integration tests |
 | SC-006 | Doc-test pass rate | 100% — `cargo test --doc --workspace --all-features` must pass |
 | SC-007 | Clippy clean | Zero warnings with `--all-features --all-targets -D warnings` |
-| SC-008 | MSRV compliance | `cargo check -p exarch-core --all-features` passes on Rust 1.93.0 |
+| SC-008 | MSRV compliance | `cargo check -p exarch-core --all-features` passes on Rust 1.96.0 |
 | SC-009 | Atomic extraction correctness | No partial output on extraction failure; temp dir cleaned up |
 
 ## 8. Agent Boundaries

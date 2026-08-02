@@ -279,6 +279,7 @@ impl ArchiveCreator {
 mod tests {
     use super::*;
     use crate::formats::detect::ArchiveType;
+    use std::assert_matches;
     use std::path::PathBuf;
 
     #[test]
@@ -348,10 +349,10 @@ mod tests {
 
         let result = creator.create();
         assert!(result.is_err());
-        assert!(matches!(
+        assert_matches!(
             result.unwrap_err(),
             ArchiveError::InvalidConfiguration { .. }
-        ));
+        );
     }
 
     #[test]
@@ -360,10 +361,10 @@ mod tests {
 
         let result = creator.create();
         assert!(result.is_err());
-        assert!(matches!(
+        assert_matches!(
             result.unwrap_err(),
             ArchiveError::InvalidConfiguration { .. }
-        ));
+        );
     }
 
     #[test]
@@ -380,14 +381,14 @@ mod tests {
 
     #[test]
     fn test_builder_compression_level_invalid() {
-        assert!(matches!(
+        assert_matches!(
             ArchiveCreator::new().compression_level(0),
             Err(ArchiveError::InvalidCompressionLevel { level: 0 })
-        ));
-        assert!(matches!(
+        );
+        assert_matches!(
             ArchiveCreator::new().compression_level(10),
             Err(ArchiveError::InvalidCompressionLevel { level: 10 })
-        ));
+        );
     }
 
     #[test]

@@ -1604,4 +1604,50 @@ mod tests {
             "traversal-after-root must be rejected even with allow_absolute_paths"
         );
     }
+
+    /// Regression test for GHSA-qh76-45cr-8xrc / CVE-2026-61725 (7z Zip-Slip):
+    /// proves the extraction-time re-validation inside `process_entry_inner`
+    /// (the "defense in depth" layer noted at the top of
+    /// `extract_with_callback`, which compensates for deliberately bypassing
+    /// upstream's own Zip-Slip guard) independently rejects a traversal
+    /// entry.
+    ///
+    /// `SevenZArchive::extract` always pre-validates every entry in Step 1
+    /// before this callback ever runs, so a traversal entry reaching
+    /// `extract()` is caught there first (see the `test_7z_*_rejected*`
+    /// tests above). This test calls `process_entry_inner` directly to
+    /// exercise the callback layer in isolation, proving it is not dead
+    /// code should Step 1 ever be bypassed or restructured.
+    #[test]
+    fn test_process_entry_inner_rejects_traversal_independently() {
+        let temp = TempDir::new().unwrap();
+        let dest = DestDir::new_or_create(temp.path().to_path_buf()).unwrap();
+        let config = SecurityConfig::default();
+        let mut validator = EntryValidator::new(&config, &dest);
+        let mut dir_cache = common::DirCache::new();
+        let mut report = ExtractionReport::new();
+
+        let mut entry = sevenz_rust2::ArchiveEntry::new_file("../../evil.txt");
+        entry.has_stream = true;
+        entry.size = 5;
+        let entry_path = std::path::PathBuf::from(common::normalize_entry_name(&entry.name));
+
+        let result = SevenZArchive::<Cursor<Vec<u8>>>::process_entry_inner(
+            &entry,
+            &mut std::io::empty(),
+            &entry_path,
+            &mut validator,
+            &dest,
+            &mut report,
+            &mut dir_cache,
+            false,
+            &config,
+        );
+
+        assert!(
+            matches!(&result, Err(sevenz_rust2::Error::Other(m)) if m.contains("validation failed")),
+            "callback re-validation must independently reject a traversal entry \
+             via its own validate_entry call, got: {result:?}"
+        );
+    }
 }

@@ -165,6 +165,23 @@ pub struct SecurityConfig {
     ///
     /// Default: 4 MiB (4,194,304 bytes)
     pub max_tar_metadata_bytes: u64,
+
+    /// Internal only — not part of the public builder API, and never set by
+    /// `SecurityConfig::default()`/`permissive()` construction paths that
+    /// external callers use.
+    ///
+    /// When `true`, `list_archive`'s entry-path NUL-byte check, symlink/
+    /// hardlink target NUL-byte/emptiness check, and missing-link-target
+    /// check are all skipped, instead of aborting the listing pass. Set only
+    /// by `inspection::verify::listing_config_for_verify` for
+    /// `verify_archive`'s internal pre-flight listing step, so a NUL-byte or
+    /// empty/missing link target reaches `verify_entry`'s own equivalent
+    /// checks (`SafePath::validate`, `SafeSymlink::validate`) and surfaces as
+    /// a graceful `VerificationIssue` in the report, matching `verify`'s
+    /// behavior before these list-level checks existed. Bare `list_archive`
+    /// always leaves this `false`, so `exarch list` still hard-aborts on
+    /// these conditions.
+    pub(crate) relaxed_for_verify_preflight: bool,
 }
 
 impl Default for SecurityConfig {
@@ -206,6 +223,7 @@ impl Default for SecurityConfig {
             allow_solid_archives: false,
             max_solid_block_memory: 512 * 1024 * 1024, // 512 MB
             max_tar_metadata_bytes: 4 * 1024 * 1024,   // 4 MiB
+            relaxed_for_verify_preflight: false,
         }
     }
 }
@@ -581,6 +599,16 @@ impl SecurityConfig {
     #[inline]
     pub fn with_max_tar_metadata_bytes(mut self, size: u64) -> Self {
         self.max_tar_metadata_bytes = size;
+        self
+    }
+
+    /// Marks this config as the internal pre-flight listing pass inside
+    /// `verify_archive`. Not part of the public API — see
+    /// `relaxed_for_verify_preflight`'s field doc for what this relaxes.
+    #[must_use]
+    #[inline]
+    pub(crate) fn with_relaxed_for_verify_preflight(mut self) -> Self {
+        self.relaxed_for_verify_preflight = true;
         self
     }
 

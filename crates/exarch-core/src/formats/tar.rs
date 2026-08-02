@@ -312,7 +312,13 @@ impl<R: Read> TarArchive<R> {
 
         if link_path.exists() {
             if ctx.skip_duplicates {
-                ctx.report.files_skipped += 1;
+                ctx.report.files_skipped =
+                    ctx.report
+                        .files_skipped
+                        .checked_add(1)
+                        .ok_or(ArchiveError::QuotaExceeded {
+                            resource: crate::QuotaResource::IntegerOverflow,
+                        })?;
                 ctx.report.warnings.push(format!(
                     "skipped duplicate hardlink: {}",
                     info.link_path.as_path().display()
@@ -325,12 +331,32 @@ impl<R: Read> TarArchive<R> {
             )));
         }
 
+        // Every hardlink copies the target's real bytes to a new inode, so it
+        // must be charged against the same quota tracker as regular files
+        // (issue #426): otherwise N hardlinks to one small file extract N
+        // full copies with no size or count enforcement. Charged after the
+        // duplicate-skip check above (mirroring `extract_file_generic`) so a
+        // `skip_duplicates=true` archive is not spuriously charged for an
+        // entry that is ultimately never copied.
+        let target_size = std::fs::metadata(&target_path)?.len();
+        ctx.validator.record_hardlink(target_size)?;
+
         // Copy content to a new independent inode. Any subsequent write to
         // `link_path` cannot corrupt `target_path` because they are separate files.
         let bytes_copied = std::fs::copy(&target_path, &link_path)?;
 
-        ctx.report.files_extracted += 1;
-        ctx.report.bytes_written += bytes_copied;
+        ctx.report.files_extracted =
+            ctx.report
+                .files_extracted
+                .checked_add(1)
+                .ok_or(ArchiveError::QuotaExceeded {
+                    resource: crate::QuotaResource::IntegerOverflow,
+                })?;
+        ctx.report.bytes_written = ctx.report.bytes_written.checked_add(bytes_copied).ok_or(
+            ArchiveError::QuotaExceeded {
+                resource: crate::QuotaResource::IntegerOverflow,
+            },
+        )?;
         ctx.progress.on_bytes_written(bytes_copied);
 
         Ok(())

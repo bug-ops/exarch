@@ -212,6 +212,23 @@ impl<'a> EntryValidator<'a> {
         })
     }
 
+    /// Records a hardlink's copied byte count against the shared quota tracker.
+    ///
+    /// Hardlinks are validated for path/target escape during the first pass
+    /// (`validate_entry`), but their size is only known once the target file
+    /// exists on disk, in the second pass. This routes that size through the
+    /// same `QuotaTracker` used for regular files, so `max_file_size`,
+    /// `max_file_count`, and `max_total_size` are enforced uniformly
+    /// regardless of entry type.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArchiveError::QuotaExceeded`] if recording this hardlink
+    /// would exceed `max_file_size`, `max_file_count`, or `max_total_size`.
+    pub(crate) fn record_hardlink(&mut self, size: u64) -> Result<()> {
+        self.quota_tracker.record_file(size, self.config)
+    }
+
     /// Finishes validation and returns a summary report.
     ///
     /// This consumes the validator and returns statistics about the
@@ -721,5 +738,86 @@ mod tests {
             .unwrap();
 
         assert!(validator.symlink_seen);
+    }
+
+    // Issue #426: hardlink quota bypass regression tests.
+
+    #[test]
+    fn test_record_hardlink_exceeding_max_file_size_rejected() {
+        let temp = TempDir::new().unwrap();
+        let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
+        let mut config = SecurityConfig::default();
+        config.max_file_size = 100;
+        let mut validator = EntryValidator::new(&config, &dest);
+
+        // A single hardlink whose on-disk target size alone exceeds
+        // max_file_size must be rejected, exactly like an oversized regular
+        // file would be.
+        let result = validator.record_hardlink(1_000);
+
+        assert_matches!(
+            result,
+            Err(crate::ArchiveError::QuotaExceeded {
+                resource: crate::QuotaResource::FileSize { .. }
+            }),
+            "hardlink exceeding max_file_size must be rejected, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_record_hardlink_shares_quota_tracker_with_files() {
+        let temp = TempDir::new().unwrap();
+        let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
+        let mut config = SecurityConfig::default();
+        config.allowed.hardlinks = true;
+        config.max_total_size = 250;
+        let mut validator = EntryValidator::new(&config, &dest);
+
+        // A regular file consumes part of the shared total-size budget...
+        validator
+            .validate_entry(
+                Path::new("file1.txt"),
+                &EntryType::File,
+                100,
+                None,
+                Some(0o644),
+                None,
+            )
+            .unwrap();
+
+        // ...and a hardlink recorded afterwards must be charged against the
+        // same tracker, not a separate/untracked counter.
+        assert!(validator.record_hardlink(100).is_ok());
+
+        let result = validator.record_hardlink(100);
+        assert_matches!(
+            result,
+            Err(crate::ArchiveError::QuotaExceeded {
+                resource: crate::QuotaResource::TotalSize { .. }
+            }),
+            "hardlink bytes must accumulate on the same tracker as file bytes \
+             (200 already recorded + 100 more exceeds the 250 budget), got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_record_hardlink_exceeding_max_file_count() {
+        let temp = TempDir::new().unwrap();
+        let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
+        let mut config = SecurityConfig::default();
+        config.max_file_count = 2;
+        let mut validator = EntryValidator::new(&config, &dest);
+
+        assert!(validator.record_hardlink(1).is_ok());
+        assert!(validator.record_hardlink(1).is_ok());
+
+        let result = validator.record_hardlink(1);
+        assert_matches!(
+            result,
+            Err(crate::ArchiveError::QuotaExceeded {
+                resource: crate::QuotaResource::FileCount { .. }
+            }),
+            "hardlink count alone exceeding max_file_count must be rejected, got: {result:?}"
+        );
     }
 }

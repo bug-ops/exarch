@@ -229,6 +229,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Regression test for the #397 coder-stream-count overflow fix (upstream sevenz-rust2 issue
   #127), using the fixture ported from upstream's own regression test, confirming the
   malformed archive is now rejected gracefully instead of risking a panic (#397).
+- **TAR hardlink extraction bypassed quota tracking entirely (#426)**: `EntryValidator::validate_entry`
+  only ran `QuotaTracker::record_file` for `EntryType::File`, so hardlink entries (opt-in via
+  `config.allowed.hardlinks`) never counted against `max_file_size`, `max_file_count`, or
+  `max_total_size`, even though `TarArchive::create_hardlink` copies the target's full on-disk
+  bytes via `std::fs::copy` for every hardlink entry. A crafted archive with one file within
+  quota followed by many hardlink entries pointing at it extracted unlimited copies with zero
+  enforcement. `EntryValidator` gained `record_hardlink`, and the TAR second pass now calls it
+  with the target's on-disk size (read via `std::fs::metadata`) before copying, routing hardlink
+  bytes and counts through the same `QuotaTracker` instance used for regular files.
 
 ### Fixed
 
@@ -295,6 +304,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `test-python` jobs' single upload each), and added the missing `flags: exarch-core,
   exarch-cli` to the `coverage` job's upload — those two flags were declared with their own
   thresholds in `codecov.yml` but never received any tagged data.
+- **TAR hardlink byte/count accounting used unchecked `+=` (#427)**: `TarArchive::create_hardlink`
+  incremented `ExtractionReport::files_extracted`/`bytes_written`/`files_skipped` with plain `+=`
+  after copying a hardlink's target bytes, inconsistent with `formats::common::extract_file_generic`'s
+  `checked_add`-guarded `bytes_written` accounting. All three counters in `create_hardlink` now use
+  the same `checked_add(..).ok_or(ArchiveError::QuotaExceeded { resource: QuotaResource::IntegerOverflow })`
+  pattern; this is not yet a crate-wide guarantee, since `formats/common.rs` and `formats/sevenz.rs`
+  still increment their own `files_extracted` counters with unchecked `+=`.
 
 ### Changed
 

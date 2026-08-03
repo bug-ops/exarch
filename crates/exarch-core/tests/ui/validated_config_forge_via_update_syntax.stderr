@@ -1,0 +1,7 @@
+error[E0560]: struct `SecurityConfig<_>` has no field named `max_compression_ratio`
+  --> tests/ui/validated_config_forge_via_update_syntax.rs:13:9
+   |
+13 |         max_compression_ratio: f64::NAN,
+   |         ^^^^^^^^^^^^^^^^^^^^^ `SecurityConfig<_>` does not have this field
+   |
+   = note: all struct fields are already assigned

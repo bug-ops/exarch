@@ -66,9 +66,10 @@
 //! # fn main() -> Result<(), exarch_core::ArchiveError> {
 //! let file = File::open("archive.7z")?;
 //! let mut archive = SevenZArchive::new(file)?;
+//! let config = SecurityConfig::default().validate()?;
 //! let report = archive.extract(
 //!     Path::new("/output"),
-//!     &SecurityConfig::default(),
+//!     &config,
 //!     &ExtractionOptions::default(),
 //!     &mut exarch_core::NoopProgress,
 //! )?;
@@ -111,6 +112,7 @@ use crate::ExtractionReport;
 use crate::ProgressCallback;
 use crate::Result;
 use crate::SecurityConfig;
+use crate::config::Validated;
 use crate::error::QuotaResource;
 use crate::security::EntryValidator;
 use crate::security::validator::ValidatedEntryType;
@@ -190,9 +192,10 @@ struct CachedEntry {
 ///
 /// let file = File::open("archive.7z")?;
 /// let mut archive = SevenZArchive::new(file)?;
+/// let config = SecurityConfig::default().validate()?;
 /// let report = archive.extract(
 ///     Path::new("/output"),
-///     &SecurityConfig::default(),
+///     &config,
 ///     &ExtractionOptions::default(),
 ///     &mut exarch_core::NoopProgress,
 /// )?;
@@ -305,7 +308,7 @@ impl<R: Read + Seek> SevenZArchive<R> {
         report: &mut ExtractionReport,
         dir_cache: &mut common::DirCache,
         skip_duplicates: bool,
-        config: &SecurityConfig,
+        config: &SecurityConfig<Validated>,
     ) -> std::result::Result<u64, sevenz_rust2::Error> {
         let entry_type = SevenZEntryAdapter::to_entry_type(entry).map_err(|e| {
             sevenz_rust2::Error::Other(format!("entry type detection failed: {e}").into())
@@ -325,15 +328,15 @@ impl<R: Read + Seek> SevenZArchive<R> {
             .map_err(|e| sevenz_rust2::Error::Other(format!("validation failed: {e}").into()))?;
 
         // Extract based on type
-        match validated.entry_type {
+        match validated.entry_type() {
             ValidatedEntryType::Directory => {
-                let dest_path = dest.join_path(validated.safe_path.as_path());
+                let dest_path = dest.join_path(validated.safe_path().as_path());
                 dir_cache.ensure_dir(&dest_path)?;
                 report.directories_created += 1;
                 Ok(0)
             }
             ValidatedEntryType::File => {
-                let dest_path = dest.join_path(validated.safe_path.as_path());
+                let dest_path = dest.join_path(validated.safe_path().as_path());
 
                 dir_cache.ensure_parent_dir(&dest_path)?;
 
@@ -342,7 +345,7 @@ impl<R: Read + Seek> SevenZArchive<R> {
                         report.files_skipped += 1;
                         report.warnings.push(format!(
                             "skipped duplicate entry: {}",
-                            validated.safe_path.as_path().display()
+                            validated.safe_path().as_path().display()
                         ));
                         return Ok(0);
                     }
@@ -413,7 +416,7 @@ impl<R: Read + Seek> SevenZArchive<R> {
         skip_duplicates: bool,
         progress: &mut dyn ProgressCallback,
         total: usize,
-        config: &SecurityConfig,
+        config: &SecurityConfig<Validated>,
     ) -> Result<ExtractionReport> {
         struct SzContext<'a> {
             report: ExtractionReport,
@@ -492,7 +495,7 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
     fn extract(
         &mut self,
         output_dir: &Path,
-        config: &SecurityConfig,
+        config: &SecurityConfig<Validated>,
         options: &ExtractionOptions,
         progress: &mut dyn ProgressCallback,
     ) -> Result<ExtractionReport> {
@@ -557,7 +560,7 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
             let validated =
                 prevalidator.validate_entry(&path, &entry_type, entry.size, None, None, None)?;
 
-            match validated.entry_type {
+            match validated.entry_type() {
                 ValidatedEntryType::File | ValidatedEntryType::Directory => {
                     // Will be extracted in Step 3
                 }
@@ -598,14 +601,19 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
         Ok(report)
     }
 
-    fn list(&mut self, config: &SecurityConfig) -> Result<crate::inspection::ArchiveManifest> {
+    fn list(
+        &mut self,
+        config: &SecurityConfig<Validated>,
+    ) -> Result<crate::inspection::ArchiveManifest> {
         use crate::inspection::list::list_sevenz_reader;
         self.source.rewind().map_err(ArchiveError::Io)?;
         list_sevenz_reader(&mut self.source, config)
     }
 
-    fn verify(&mut self, config: &SecurityConfig) -> Result<crate::inspection::VerificationReport> {
-        config.validate()?;
+    fn verify(
+        &mut self,
+        config: &SecurityConfig<Validated>,
+    ) -> Result<crate::inspection::VerificationReport> {
         let manifest = self.list(&crate::inspection::verify::listing_config_for_verify(
             config,
         ))?;
@@ -844,7 +852,7 @@ mod tests {
         let mut archive = SevenZArchive::new(cursor).unwrap();
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         let report = archive
             .extract(
@@ -871,7 +879,7 @@ mod tests {
         let mut archive = SevenZArchive::new(cursor).unwrap();
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         let report = archive
             .extract(
@@ -899,7 +907,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let result = archive.extract(
             temp.path(),
-            &SecurityConfig::default(),
+            &SecurityConfig::default().validate().unwrap(),
             &ExtractionOptions::default(),
             &mut crate::NoopProgress,
         );
@@ -926,7 +934,7 @@ mod tests {
         let mut archive = SevenZArchive::new(cursor).unwrap();
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         let report = archive
             .extract(
@@ -948,7 +956,7 @@ mod tests {
         let mut archive = SevenZArchive::new(file).unwrap();
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         let report = archive
             .extract(
@@ -969,10 +977,11 @@ mod tests {
         let mut archive = SevenZArchive::new(cursor).unwrap();
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig {
-            max_file_size: 1024, // 1 KB limit, fixture has 50 KB file
-            ..SecurityConfig::default()
-        };
+        // 1 KB limit, fixture has 50 KB file
+        let config = SecurityConfig::default()
+            .with_max_file_size(1024)
+            .validate()
+            .unwrap();
 
         let result = archive.extract(
             temp.path(),
@@ -994,10 +1003,11 @@ mod tests {
         let mut archive = SevenZArchive::new(cursor).unwrap();
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig {
-            max_file_count: 3, // Should allow 2 files
-            ..SecurityConfig::default()
-        };
+        // Should allow 2 files
+        let config = SecurityConfig::default()
+            .with_max_file_count(3)
+            .validate()
+            .unwrap();
 
         let result = archive.extract(
             temp.path(),
@@ -1039,11 +1049,11 @@ mod tests {
         let mut archive = SevenZArchive::new(cursor).unwrap();
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig {
-            allow_solid_archives: true,
-            max_solid_block_memory: 100 * 1024 * 1024, // 100 MB
-            ..SecurityConfig::default()
-        };
+        let config = SecurityConfig::default()
+            .with_allow_solid_archives(true)
+            .with_max_solid_block_memory(100 * 1024 * 1024)
+            .validate()
+            .unwrap(); // 100 MB
 
         let result = archive.extract(
             temp.path(),
@@ -1063,7 +1073,7 @@ mod tests {
         let mut archive = SevenZArchive::new(cursor).unwrap();
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         let result = archive.extract(
             temp.path(),
@@ -1083,11 +1093,11 @@ mod tests {
         let mut archive = SevenZArchive::new(cursor).unwrap();
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig {
-            allow_solid_archives: true,
-            max_solid_block_memory: 1, // 1 byte (too small)
-            ..SecurityConfig::default()
-        };
+        let config = SecurityConfig::default()
+            .with_allow_solid_archives(true)
+            .with_max_solid_block_memory(1)
+            .validate()
+            .unwrap(); // 1 byte (too small)
 
         let result = archive.extract(
             temp.path(),
@@ -1107,7 +1117,7 @@ mod tests {
         let mut archive = SevenZArchive::new(cursor).unwrap();
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default(); // allow_solid_archives = false
+        let config = SecurityConfig::default().validate().expect("valid config"); // allow_solid_archives = false
 
         let result = archive.extract(
             temp.path(),
@@ -1153,11 +1163,11 @@ mod tests {
         // Now test with exact limit
         let mut archive = SevenZArchive::new(Cursor::new(data)).unwrap();
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig {
-            allow_solid_archives: true,
-            max_solid_block_memory: total_size, // Exact match
-            ..SecurityConfig::default()
-        };
+        let config = SecurityConfig::default()
+            .with_allow_solid_archives(true)
+            .with_max_solid_block_memory(total_size)
+            .validate()
+            .unwrap(); // Exact match
 
         let result = archive.extract(
             temp.path(),
@@ -1188,11 +1198,11 @@ mod tests {
         // Now test with one byte under
         let mut archive = SevenZArchive::new(Cursor::new(data)).unwrap();
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig {
-            allow_solid_archives: true,
-            max_solid_block_memory: total_size - 1, // One byte under
-            ..SecurityConfig::default()
-        };
+        let config = SecurityConfig::default()
+            .with_allow_solid_archives(true)
+            .with_max_solid_block_memory(total_size - 1)
+            .validate()
+            .unwrap(); // One byte under
 
         let result = archive.extract(
             temp.path(),
@@ -1214,7 +1224,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let result = archive.extract(
             temp.path(),
-            &SecurityConfig::default(),
+            &SecurityConfig::default().validate().unwrap(),
             &ExtractionOptions::default(),
             &mut crate::NoopProgress,
         );
@@ -1350,7 +1360,7 @@ mod tests {
     fn test_list_returns_manifest_with_entries() {
         let data = load_fixture("simple.7z");
         let mut archive = SevenZArchive::new(Cursor::new(data)).unwrap();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         let manifest = archive.list(&config).unwrap();
 
@@ -1364,7 +1374,7 @@ mod tests {
     fn test_verify_clean_sevenz_is_safe() {
         let data = load_fixture("simple.7z");
         let mut archive = SevenZArchive::new(Cursor::new(data)).unwrap();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         let report = archive.verify(&config).unwrap();
 
@@ -1377,7 +1387,10 @@ mod tests {
         let data = load_fixture("mixed-extensions.7z");
         let dest = TempDir::new().unwrap();
 
-        let config = SecurityConfig::default().with_allowed_extensions(vec!["txt".to_string()]);
+        let config = SecurityConfig::default()
+            .with_allowed_extensions(vec!["txt".to_string()])
+            .validate()
+            .unwrap();
 
         let report = SevenZArchive::new(Cursor::new(data))
             .unwrap()
@@ -1416,7 +1429,7 @@ mod tests {
     fn test_empty_allowed_extensions_allows_all() {
         let data = load_fixture("simple.7z");
         let dest = TempDir::new().unwrap();
-        let config = SecurityConfig::default(); // empty = allow all
+        let config = SecurityConfig::default().validate().expect("valid config"); // empty = allow all
 
         let report = SevenZArchive::new(Cursor::new(data))
             .unwrap()
@@ -1437,7 +1450,10 @@ mod tests {
         // no-extension.7z contains document.txt and Makefile (no extension)
         let data = load_fixture("no-extension.7z");
         let dest = TempDir::new().unwrap();
-        let config = SecurityConfig::default().with_allowed_extensions(vec!["txt".to_string()]);
+        let config = SecurityConfig::default()
+            .with_allowed_extensions(vec!["txt".to_string()])
+            .validate()
+            .unwrap();
 
         let report = SevenZArchive::new(Cursor::new(data))
             .unwrap()
@@ -1497,7 +1513,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let result = archive.extract(
             temp.path(),
-            &SecurityConfig::default(),
+            &SecurityConfig::default().validate().unwrap(),
             &ExtractionOptions::default(),
             &mut crate::NoopProgress,
         );
@@ -1518,7 +1534,7 @@ mod tests {
         let mut archive = SevenZArchive::new(Cursor::new(data)).unwrap();
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         let result = archive.extract(
             temp.path(),
@@ -1538,7 +1554,10 @@ mod tests {
         let mut archive = SevenZArchive::new(Cursor::new(data)).unwrap();
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default().with_allow_absolute_paths(true);
+        let config = SecurityConfig::default()
+            .with_allow_absolute_paths(true)
+            .validate()
+            .unwrap();
 
         let report = archive
             .extract(
@@ -1562,7 +1581,10 @@ mod tests {
         let mut archive = SevenZArchive::new(Cursor::new(data)).unwrap();
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default().with_allow_absolute_paths(true);
+        let config = SecurityConfig::default()
+            .with_allow_absolute_paths(true)
+            .validate()
+            .unwrap();
 
         let result = archive.extract(
             temp.path(),
@@ -1593,7 +1615,7 @@ mod tests {
     fn test_process_entry_inner_rejects_traversal_independently() {
         let temp = TempDir::new().unwrap();
         let dest = DestDir::new_or_create(temp.path().to_path_buf()).unwrap();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
         let mut validator = EntryValidator::new(&config, &dest);
         let mut dir_cache = common::DirCache::new();
         let mut report = ExtractionReport::new();

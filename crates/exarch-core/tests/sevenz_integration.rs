@@ -38,7 +38,7 @@ fn test_7z_extraction_via_trait() {
     let report = archive
         .extract(
             temp.path(),
-            &SecurityConfig::default(),
+            &SecurityConfig::default().validate().unwrap(),
             &ExtractionOptions::default(),
             &mut exarch_core::NoopProgress,
         )
@@ -60,7 +60,10 @@ fn test_7z_security_config_integration() {
     let mut archive = SevenZArchive::new(cursor).unwrap();
 
     let temp = TempDir::new().unwrap();
-    let config = SecurityConfig::default().with_max_file_size(1024);
+    let config = SecurityConfig::default()
+        .with_max_file_size(1024)
+        .validate()
+        .unwrap();
 
     let result = archive.extract(
         temp.path(),
@@ -90,7 +93,7 @@ fn test_7z_nested_directories() {
     let report = archive
         .extract(
             temp.path(),
-            &SecurityConfig::default(),
+            &SecurityConfig::default().validate().unwrap(),
             &ExtractionOptions::default(),
             &mut exarch_core::NoopProgress,
         )
@@ -113,7 +116,7 @@ fn test_7z_solid_archive_rejected_at_new() {
     let temp = TempDir::new().unwrap();
     let result = archive.extract(
         temp.path(),
-        &SecurityConfig::default(),
+        &SecurityConfig::default().validate().unwrap(),
         &ExtractionOptions::default(),
         &mut exarch_core::NoopProgress,
     );
@@ -175,7 +178,10 @@ fn test_7z_quota_file_count() {
     let mut archive = SevenZArchive::new(cursor).unwrap();
 
     let temp = TempDir::new().unwrap();
-    let config = SecurityConfig::default().with_max_file_count(1);
+    let config = SecurityConfig::default()
+        .with_max_file_count(1)
+        .validate()
+        .unwrap();
 
     let result = archive.extract(
         temp.path(),
@@ -193,7 +199,10 @@ fn test_7z_quota_total_size() {
     let mut archive = SevenZArchive::new(cursor).unwrap();
 
     let temp = TempDir::new().unwrap();
-    let config = SecurityConfig::default().with_max_total_size(10);
+    let config = SecurityConfig::default()
+        .with_max_total_size(10)
+        .validate()
+        .unwrap();
 
     let result = archive.extract(
         temp.path(),
@@ -218,7 +227,9 @@ fn test_7z_solid_archive_extraction_success() {
     let temp = TempDir::new().unwrap();
     let config = SecurityConfig::default()
         .with_allow_solid_archives(true)
-        .with_max_solid_block_memory(100 * 1024 * 1024);
+        .with_max_solid_block_memory(100 * 1024 * 1024)
+        .validate()
+        .unwrap();
 
     let report = archive
         .extract(
@@ -247,7 +258,9 @@ fn test_7z_solid_archive_with_file_count_quota() {
     let config = SecurityConfig::default()
         .with_allow_solid_archives(true)
         .with_max_solid_block_memory(100 * 1024 * 1024)
-        .with_max_file_count(1);
+        .with_max_file_count(1)
+        .validate()
+        .unwrap();
 
     let result = archive.extract(
         temp.path(),
@@ -271,7 +284,7 @@ fn test_7z_unix_symlink_extracted_as_file() {
     let mut archive = SevenZArchive::new(cursor).unwrap();
 
     let temp = TempDir::new().unwrap();
-    let config = SecurityConfig::default();
+    let config = SecurityConfig::default().validate().unwrap();
 
     // Current behavior: succeeds, extracts symlink as file
     let result = archive.extract(
@@ -321,7 +334,7 @@ fn test_7z_hardlink_extracted_as_duplicate_files() {
     let mut archive = SevenZArchive::new(cursor).unwrap();
 
     let temp = TempDir::new().unwrap();
-    let config = SecurityConfig::default();
+    let config = SecurityConfig::default().validate().unwrap();
 
     let result = archive.extract(
         temp.path(),
@@ -420,7 +433,7 @@ fn test_7z_progress_interleaves_per_entry() {
     archive
         .extract(
             temp.path(),
-            &SecurityConfig::default(),
+            &SecurityConfig::default().validate().unwrap(),
             &ExtractionOptions::default(),
             &mut progress,
         )
@@ -461,7 +474,7 @@ fn test_7z_bytes_written_accumulates_correctly() {
     let report = archive
         .extract(
             temp.path(),
-            &SecurityConfig::default(),
+            &SecurityConfig::default().validate().unwrap(),
             &ExtractionOptions::default(),
             &mut exarch_core::NoopProgress,
         )
@@ -494,7 +507,10 @@ fn test_7z_partial_extraction_accurate_report() {
     let mut archive = SevenZArchive::new(cursor).unwrap();
     let out_temp = TempDir::new().unwrap();
 
-    let config = SecurityConfig::default().with_max_total_size(20);
+    let config = SecurityConfig::default()
+        .with_max_total_size(20)
+        .validate()
+        .unwrap();
     let result = archive.extract(
         out_temp.path(),
         &config,
@@ -547,7 +563,7 @@ fn test_7z_force_overwrite_duplicate_entry() {
     let report = archive
         .extract(
             out_temp.path(),
-            &SecurityConfig::default(),
+            &SecurityConfig::default().validate().unwrap(),
             &options,
             &mut exarch_core::NoopProgress,
         )
@@ -591,7 +607,7 @@ fn test_7z_no_partial_extraction_when_zero_items() {
 
     let result = archive.extract(
         out_temp.path(),
-        &SecurityConfig::default(),
+        &SecurityConfig::default().validate().unwrap(),
         &ExtractionOptions::default(),
         &mut exarch_core::NoopProgress,
     );

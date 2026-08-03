@@ -32,7 +32,7 @@ use tempfile::TempDir;
 fn test_full_safe_path_workflow() {
     let temp = TempDir::new().unwrap();
     let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
-    let config = SecurityConfig::default();
+    let config = SecurityConfig::default().validate().unwrap();
 
     // Create actual file
     let file_path = temp.path().join("test_file.txt");
@@ -49,7 +49,7 @@ fn test_full_safe_path_workflow() {
 fn test_dest_dir_join_safe_path() {
     let temp = TempDir::new().unwrap();
     let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
-    let config = SecurityConfig::default();
+    let config = SecurityConfig::default().validate().unwrap();
 
     let safe = SafePath::validate(&PathBuf::from("foo/bar.txt"), &dest, &config).unwrap();
     let joined = dest.join(&safe);
@@ -62,7 +62,7 @@ fn test_dest_dir_join_safe_path() {
 fn test_nested_directory_creation() {
     let temp = TempDir::new().unwrap();
     let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
-    let config = SecurityConfig::default();
+    let config = SecurityConfig::default().validate().unwrap();
 
     // Validate nested path
     let safe = SafePath::validate(&PathBuf::from("a/b/c/d/file.txt"), &dest, &config).unwrap();
@@ -84,6 +84,7 @@ fn test_symlink_workflow() {
     let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
     let mut config = SecurityConfig::default();
     config.allowed.symlinks = true;
+    let config = config.validate().unwrap();
 
     // Create target file
     let target_path = temp.path().join("target.txt");
@@ -110,7 +111,7 @@ fn test_symlink_workflow() {
 fn test_path_traversal_blocked() {
     let temp = TempDir::new().unwrap();
     let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
-    let config = SecurityConfig::default();
+    let config = SecurityConfig::default().validate().unwrap();
 
     let paths = vec![
         "../etc/passwd",
@@ -132,7 +133,7 @@ fn test_path_traversal_blocked() {
 fn test_banned_components_blocked() {
     let temp = TempDir::new().unwrap();
     let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
-    let config = SecurityConfig::default();
+    let config = SecurityConfig::default().validate().unwrap();
 
     let paths = vec![".git/config", "user/.ssh/id_rsa", "home/.gnupg/key"];
 
@@ -150,7 +151,7 @@ fn test_banned_components_blocked() {
 fn test_multiple_files_same_directory() {
     let temp = TempDir::new().unwrap();
     let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
-    let config = SecurityConfig::default();
+    let config = SecurityConfig::default().validate().unwrap();
 
     // Create directory
     let dir_path = temp.path().join("subdir");
@@ -176,6 +177,7 @@ fn test_relative_symlink_resolution() {
     let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
     let mut config = SecurityConfig::default();
     config.allowed.symlinks = true;
+    let config = config.validate().unwrap();
 
     // Create directory structure: a/b/target.txt and a/link.txt -> b/target.txt
     let a_dir = temp.path().join("a");
@@ -200,6 +202,7 @@ fn test_depth_limit_enforced() {
     let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
     let mut config = SecurityConfig::default();
     config.max_path_depth = 5;
+    let config = config.validate().unwrap();
 
     // Path with 5 components should be allowed
     let ok_path = "a/b/c/d/e";

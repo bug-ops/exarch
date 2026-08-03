@@ -62,7 +62,7 @@ fn create_tar_in_memory(file_count: usize, file_size: usize) -> Vec<u8> {
 
 fn profile_zip_extraction(file_count: usize, file_size: usize) {
     let zip_data = create_zip_in_memory(file_count, file_size);
-    let config = SecurityConfig::default();
+    let config = SecurityConfig::default().validate().unwrap();
     let temp = tempfile::tempdir().unwrap();
 
     let _profiler = dhat::Profiler::new_heap();
@@ -81,7 +81,7 @@ fn profile_zip_extraction(file_count: usize, file_size: usize) {
 
 fn profile_tar_extraction(file_count: usize, file_size: usize) {
     let tar_data = create_tar_in_memory(file_count, file_size);
-    let config = SecurityConfig::default();
+    let config = SecurityConfig::default().validate().unwrap();
     let temp = tempfile::tempdir().unwrap();
 
     let _profiler = dhat::Profiler::new_heap();

@@ -58,7 +58,10 @@ fn extract_with_symlinks_allowed(
 ) -> exarch_core::Result<exarch_core::ExtractionReport> {
     let temp = TempDir::new().unwrap();
     let mut archive = TarArchive::new(Cursor::new(tar_data));
-    let config = SecurityConfig::default().with_allow_symlinks(true);
+    let config = SecurityConfig::default()
+        .with_allow_symlinks(true)
+        .validate()
+        .unwrap();
     archive.extract(
         temp.path(),
         &config,
@@ -72,7 +75,10 @@ fn extract_with_hardlinks_allowed(
 ) -> exarch_core::Result<exarch_core::ExtractionReport> {
     let temp = TempDir::new().unwrap();
     let mut archive = TarArchive::new(Cursor::new(tar_data));
-    let config = SecurityConfig::default().with_allow_hardlinks(true);
+    let config = SecurityConfig::default()
+        .with_allow_hardlinks(true)
+        .validate()
+        .unwrap();
     archive.extract(
         temp.path(),
         &config,

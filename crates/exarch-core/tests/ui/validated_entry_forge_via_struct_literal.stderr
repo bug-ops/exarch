@@ -1,0 +1,11 @@
+error[E0451]: fields `safe_path`, `entry_type` and `mode` of struct `ValidatedEntry` are private
+  --> tests/ui/validated_entry_forge_via_struct_literal.rs:13:9
+   |
+12 |     let _entry = ValidatedEntry {
+   |                  -------------- in this type
+13 |         safe_path: todo!(),
+   |         ^^^^^^^^^ private field
+14 |         entry_type: ValidatedEntryType::File,
+   |         ^^^^^^^^^^ private field
+15 |         mode: None,
+   |         ^^^^ private field

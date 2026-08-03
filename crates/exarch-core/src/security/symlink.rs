@@ -4,6 +4,7 @@ use std::path::Path;
 
 use crate::Result;
 use crate::SecurityConfig;
+use crate::config::Validated;
 use crate::types::DestDir;
 use crate::types::SafePath;
 use crate::types::SafeSymlink;
@@ -54,7 +55,7 @@ pub fn validate_symlink(
     link_path: &SafePath,
     target: &Path,
     dest: &DestDir,
-    config: &SecurityConfig,
+    config: &SecurityConfig<Validated>,
 ) -> Result<SafeSymlink> {
     SafeSymlink::validate(link_path, target, dest, config)
 }
@@ -81,6 +82,7 @@ mod tests {
         let (_temp, dest) = create_test_dest();
         let mut config = SecurityConfig::default();
         config.allowed.symlinks = true;
+        let config = config.validate().expect("valid config");
 
         let link = SafePath::validate(&PathBuf::from("link"), &dest, &config).unwrap();
         let target = PathBuf::from("target.txt");
@@ -90,7 +92,7 @@ mod tests {
     #[test]
     fn test_validate_symlink_disabled() {
         let (_temp, dest) = create_test_dest();
-        let config = SecurityConfig::default(); // symlinks disabled by default
+        let config = SecurityConfig::default().validate().expect("valid config"); // symlinks disabled by default
 
         let link = SafePath::validate(&PathBuf::from("link"), &dest, &config).unwrap();
         let target = PathBuf::from("target.txt");
@@ -102,6 +104,7 @@ mod tests {
         let (_temp, dest) = create_test_dest();
         let mut config = SecurityConfig::default();
         config.allowed.symlinks = true;
+        let config = config.validate().expect("valid config");
 
         let link = SafePath::validate(&PathBuf::from("link"), &dest, &config).unwrap();
         let target = PathBuf::from("../../etc/passwd");
@@ -113,6 +116,7 @@ mod tests {
         let (_temp, dest) = create_test_dest();
         let mut config = SecurityConfig::default();
         config.allowed.symlinks = true;
+        let config = config.validate().expect("valid config");
 
         let link = SafePath::validate(&PathBuf::from("foo/link"), &dest, &config).unwrap();
         let target = PathBuf::from("../bar/target.txt");

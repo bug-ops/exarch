@@ -111,7 +111,9 @@ fn test_hardlink_bomb_exceeds_total_size() {
         .with_allow_hardlinks(true)
         .with_max_file_size(target_size as u64 + 1)
         .with_max_total_size(20_000) // room for target + 3 links, not 4
-        .with_max_file_count(1_000);
+        .with_max_file_count(1_000)
+        .validate()
+        .unwrap();
 
     let mut archive = TarArchive::new(Cursor::new(tar_data));
     let result = archive.extract(
@@ -160,7 +162,9 @@ fn test_hardlink_bomb_exceeds_file_count() {
         .with_allow_hardlinks(true)
         .with_max_file_size(1_000_000)
         .with_max_total_size(1_000_000)
-        .with_max_file_count(3); // target.txt + 2 hardlinks allowed, 3rd rejected
+        .with_max_file_count(3)
+        .validate()
+        .unwrap(); // target.txt + 2 hardlinks allowed, 3rd rejected
 
     let mut archive = TarArchive::new(Cursor::new(tar_data));
     let result = archive.extract(
@@ -204,7 +208,10 @@ fn test_legitimate_hardlinks_within_quota_succeed() {
         .build();
 
     let temp = TempDir::new().unwrap();
-    let config = SecurityConfig::default().with_allow_hardlinks(true);
+    let config = SecurityConfig::default()
+        .with_allow_hardlinks(true)
+        .validate()
+        .unwrap();
 
     let mut archive = TarArchive::new(Cursor::new(tar_data));
     let result = archive.extract(

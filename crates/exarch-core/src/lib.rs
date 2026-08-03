@@ -47,6 +47,8 @@ pub use archive::Archive;
 pub use archive::ArchiveBuilder;
 pub use config::ExtractionOptions;
 pub use config::SecurityConfig;
+pub use config::Unvalidated;
+pub use config::Validated;
 pub use error::ArchiveError;
 pub use error::FfiErrorMessage;
 pub use error::QuotaResource;

@@ -3,6 +3,7 @@
 use crate::ArchiveError;
 use crate::Result;
 use crate::SecurityConfig;
+use crate::config::Validated;
 
 /// Validates compression ratio to detect potential zip bombs.
 ///
@@ -12,7 +13,7 @@ use crate::SecurityConfig;
 pub fn validate_compression_ratio(
     compressed_size: u64,
     uncompressed_size: u64,
-    config: &SecurityConfig,
+    config: &SecurityConfig<Validated>,
 ) -> Result<()> {
     // HIGH-001: Fix bypass for stored compression with compressed_size == 0
     // Reject invalid entries where compressed_size is 0 but uncompressed_size > 0
@@ -41,27 +42,28 @@ pub fn validate_compression_ratio(
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
     use std::assert_matches;
 
     #[test]
     fn test_validate_compression_ratio_safe() {
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
         let result = validate_compression_ratio(1000, 10_000, &config);
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_validate_compression_ratio_bomb() {
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
         let result = validate_compression_ratio(1000, 1_000_000, &config);
         assert_matches!(result, Err(ArchiveError::ZipBomb { .. }));
     }
 
     #[test]
     fn test_validate_compression_ratio_zero_compressed() {
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         // HIGH-001: Zero compressed with non-zero uncompressed is invalid
         let result = validate_compression_ratio(0, 1000, &config);
@@ -75,7 +77,7 @@ mod tests {
     // H-TEST-3: Division by zero edge cases test
     #[test]
     fn test_compressed_size_zero_with_uncompressed_zero() {
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         // Both zero - should be OK (empty file)
         let result = validate_compression_ratio(0, 0, &config);
@@ -84,7 +86,7 @@ mod tests {
 
     #[test]
     fn test_compressed_size_zero_with_large_uncompressed() {
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         // HIGH-001: Compressed size zero with uncompressed > 0 is INVALID
         // This prevents zip bomb bypass for stored compression
@@ -98,7 +100,7 @@ mod tests {
 
     #[test]
     fn test_very_small_compressed_large_uncompressed() {
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         // Very small compressed size (1 byte) with large uncompressed
         // This should trigger zip bomb detection
@@ -112,7 +114,7 @@ mod tests {
 
     #[test]
     fn test_equal_sizes() {
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         // No compression (ratio = 1.0)
         let result = validate_compression_ratio(1000, 1000, &config);
@@ -121,7 +123,7 @@ mod tests {
 
     #[test]
     fn test_negative_compression() {
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         // Compressed larger than uncompressed (poor compression)
         let result = validate_compression_ratio(2000, 1000, &config);

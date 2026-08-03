@@ -5,6 +5,7 @@ use std::path::Path;
 use crate::ArchiveError;
 use crate::Result;
 use crate::SecurityConfig;
+use crate::config::Validated;
 use crate::inspection::list::list_archive;
 use crate::inspection::manifest::ArchiveEntry;
 use crate::inspection::manifest::ArchiveManifest;
@@ -30,7 +31,7 @@ use crate::types::EntryType;
 /// produced by `ArchiveFormat::list()`.
 pub(crate) fn verify_manifest(
     manifest: &ArchiveManifest,
-    config: &SecurityConfig,
+    config: &SecurityConfig<Validated>,
 ) -> Result<VerificationReport> {
     let mut issues = Vec::new();
     let mut suspicious_entries = 0;
@@ -114,9 +115,9 @@ pub fn verify_archive<P: AsRef<Path>>(
     archive_path: P,
     config: &SecurityConfig,
 ) -> Result<VerificationReport> {
-    config.validate()?;
+    let validated_config = config.clone().validate()?;
     let manifest = list_archive(archive_path, &listing_config_for_verify(config))?;
-    verify_manifest(&manifest, config)
+    verify_manifest(&manifest, &validated_config)
 }
 
 /// Returns a config variant for the pre-flight listing step that feeds
@@ -133,16 +134,24 @@ pub fn verify_archive<P: AsRef<Path>>(
 /// untouched, matching prior behavior. See
 /// `SecurityConfig::relaxed_for_verify_preflight`'s field doc for exactly
 /// which `list_archive` checks this skips.
-pub(crate) fn listing_config_for_verify(config: &SecurityConfig) -> SecurityConfig {
-    config
-        .clone()
-        .with_max_file_size(u64::MAX)
-        .with_relaxed_for_verify_preflight()
+///
+/// Generic over the validation typestate so it serves both callers: the
+/// top-level [`verify_archive`] (still `Unvalidated`, feeds into
+/// [`list_archive`] which validates internally) and the
+/// [`ArchiveFormat`](crate::formats::traits::ArchiveFormat) trait's `verify()`
+/// implementations (already `Validated`, feeds into `list()` which requires
+/// it). Delegates to `SecurityConfig::as_relaxed_for_verify_preflight`, whose
+/// docs justify why re-deriving a `Validated` result without calling
+/// `validate()` again is sound.
+pub(crate) fn listing_config_for_verify<State>(
+    config: &SecurityConfig<State>,
+) -> SecurityConfig<State> {
+    config.as_relaxed_for_verify_preflight()
 }
 
 fn verify_entry(
     entry: &ArchiveEntry,
-    config: &SecurityConfig,
+    config: &SecurityConfig<Validated>,
     dest: &DestDir,
     quota_tracker: &mut QuotaTracker,
 ) -> Vec<VerificationIssue> {
@@ -215,7 +224,7 @@ fn verify_entry(
     issues
 }
 
-fn check_permissions(path: &Path, mode: u32, config: &SecurityConfig) -> Result<()> {
+fn check_permissions(path: &Path, mode: u32, config: &SecurityConfig<Validated>) -> Result<()> {
     let sanitized = sanitize_permissions(mode, config);
     if sanitized == mode {
         Ok(())
@@ -472,10 +481,7 @@ mod tests {
         temp_file.write_all(&archive_data).unwrap();
         temp_file.flush().unwrap();
 
-        let config = SecurityConfig {
-            max_file_size: 500,
-            ..Default::default()
-        };
+        let config = SecurityConfig::default().with_max_file_size(500);
         let report = verify_archive(temp_file.path(), &config)
             .expect("verify_archive must report oversized entries, not error out");
 
@@ -498,12 +504,10 @@ mod tests {
 
     #[test]
     fn test_listing_config_for_verify_relaxes_max_file_size_and_preflight_checks() {
-        let config = SecurityConfig {
-            max_file_size: 1000,
-            max_total_size: 2000,
-            max_file_count: 3,
-            ..Default::default()
-        };
+        let config = SecurityConfig::default()
+            .with_max_file_size(1000)
+            .with_max_total_size(2000)
+            .with_max_file_count(3);
         let listing_config = listing_config_for_verify(&config);
 
         assert_eq!(listing_config.max_file_size, u64::MAX);
@@ -729,10 +733,7 @@ mod tests {
 
     #[test]
     fn verify_archive_rejects_invalid_security_config() {
-        let config = SecurityConfig {
-            max_path_depth: 0,
-            ..SecurityConfig::default()
-        };
+        let config = SecurityConfig::default().with_max_path_depth(0);
         let result = crate::verify_archive("any.tar.gz", &config);
         assert_matches!(
             result,

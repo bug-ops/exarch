@@ -71,9 +71,10 @@
 //!
 //! let file = File::open("archive.tar")?;
 //! let mut archive = TarArchive::new(file);
+//! let config = SecurityConfig::default().validate()?;
 //! let report = archive.extract(
 //!     Path::new("/output"),
-//!     &SecurityConfig::default(),
+//!     &config,
 //!     &ExtractionOptions::default(),
 //!     &mut exarch_core::NoopProgress,
 //! )?;
@@ -95,9 +96,10 @@
 //! let file = File::open("archive.tar.gz")?;
 //! let decoder = GzDecoder::new(file);
 //! let mut archive = TarArchive::new(decoder);
+//! let config = SecurityConfig::default().validate()?;
 //! let report = archive.extract(
 //!     Path::new("/output"),
-//!     &SecurityConfig::default(),
+//!     &config,
 //!     &ExtractionOptions::default(),
 //!     &mut exarch_core::NoopProgress,
 //! )?;
@@ -119,6 +121,7 @@ use crate::ExtractionReport;
 use crate::ProgressCallback;
 use crate::Result;
 use crate::SecurityConfig;
+use crate::config::Validated;
 use crate::copy::CopyBuffer;
 use crate::security::validator::EntryValidator;
 use crate::security::validator::ValidatedEntry;
@@ -154,7 +157,7 @@ use super::traits::ArchiveFormat;
 ///
 /// let file = File::open("archive.tar")?;
 /// let mut archive = TarArchive::new(file);
-/// let config = SecurityConfig::default();
+/// let config = SecurityConfig::default().validate()?;
 /// let report = archive.extract(
 ///     Path::new("/output"),
 ///     &config,
@@ -238,7 +241,7 @@ impl<R: Read> TarArchive<R> {
             Some(ctx.dir_cache),
         )?;
 
-        match validated.entry_type {
+        match validated.entry_type() {
             ValidatedEntryType::File => {
                 Self::extract_file(entry, &validated, ctx)?;
                 Ok(None)
@@ -251,7 +254,7 @@ impl<R: Read> TarArchive<R> {
 
             ValidatedEntryType::Symlink(safe_symlink) => {
                 common::create_symlink(
-                    &safe_symlink,
+                    safe_symlink,
                     ctx.dest,
                     ctx.report,
                     ctx.dir_cache,
@@ -263,8 +266,8 @@ impl<R: Read> TarArchive<R> {
             ValidatedEntryType::Hardlink { target } => {
                 // Two-pass: defer hardlink creation until target files exist
                 Ok(Some(HardlinkInfo {
-                    link_path: validated.safe_path,
-                    target_path: target,
+                    link_path: validated.safe_path().clone(),
+                    target_path: target.clone(),
                 }))
             }
         }
@@ -375,7 +378,7 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
     fn extract(
         &mut self,
         output_dir: &Path,
-        config: &SecurityConfig,
+        config: &SecurityConfig<Validated>,
         options: &ExtractionOptions,
         progress: &mut dyn ProgressCallback,
     ) -> Result<ExtractionReport> {
@@ -485,7 +488,10 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
     /// let mut archive2 = TarArchive::open(&path)?;
     /// let report = archive2.extract(&dest, &config, &options, &mut NoopProgress)?;
     /// ```
-    fn list(&mut self, config: &SecurityConfig) -> Result<crate::inspection::ArchiveManifest> {
+    fn list(
+        &mut self,
+        config: &SecurityConfig<Validated>,
+    ) -> Result<crate::inspection::ArchiveManifest> {
         use crate::formats::detect::ArchiveType;
         use crate::inspection::list::list_tar_reader;
 
@@ -498,7 +504,10 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
         list_tar_reader(budgeted, budget, ArchiveType::Tar, config)
     }
 
-    fn verify(&mut self, config: &SecurityConfig) -> Result<crate::inspection::VerificationReport> {
+    fn verify(
+        &mut self,
+        config: &SecurityConfig<Validated>,
+    ) -> Result<crate::inspection::VerificationReport> {
         let manifest = self.list(&crate::inspection::verify::listing_config_for_verify(
             config,
         ))?;
@@ -517,7 +526,7 @@ struct ExtractionContext<'a, 'v> {
     copy_buffer: &'a mut CopyBuffer,
     dir_cache: &'a mut common::DirCache,
     skip_duplicates: bool,
-    config: &'v SecurityConfig,
+    config: &'v SecurityConfig<Validated>,
     progress: &'a mut dyn ProgressCallback,
 }
 
@@ -623,7 +632,7 @@ impl TarEntryAdapter {
 /// use std::path::Path;
 ///
 /// let mut archive = open_tar_gz("archive.tar.gz")?;
-/// let config = SecurityConfig::default();
+/// let config = SecurityConfig::default().validate()?;
 /// let report = archive.extract(
 ///     Path::new("/output"),
 ///     &config,
@@ -659,7 +668,7 @@ pub fn open_tar_gz<P: AsRef<Path>>(
 /// use std::path::Path;
 ///
 /// let mut archive = open_tar_bz2("archive.tar.bz2")?;
-/// let config = SecurityConfig::default();
+/// let config = SecurityConfig::default().validate()?;
 /// let report = archive.extract(
 ///     Path::new("/output"),
 ///     &config,
@@ -695,7 +704,7 @@ pub fn open_tar_bz2<P: AsRef<Path>>(
 /// use std::path::Path;
 ///
 /// let mut archive = open_tar_xz("archive.tar.xz")?;
-/// let config = SecurityConfig::default();
+/// let config = SecurityConfig::default().validate()?;
 /// let report = archive.extract(
 ///     Path::new("/output"),
 ///     &config,
@@ -732,7 +741,7 @@ pub fn open_tar_xz<P: AsRef<Path>>(
 /// use std::path::Path;
 ///
 /// let mut archive = open_tar_zst("archive.tar.zst")?;
-/// let config = SecurityConfig::default();
+/// let config = SecurityConfig::default().validate()?;
 /// let report = archive.extract(
 ///     Path::new("/output"),
 ///     &config,
@@ -774,7 +783,7 @@ mod tests {
         let mut archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         let report = archive
             .extract(
@@ -826,7 +835,7 @@ mod tests {
         let mut archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         let report = archive
             .extract(
@@ -873,6 +882,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let mut config = SecurityConfig::default();
         config.allowed.symlinks = true;
+        let config = config.validate().expect("valid config");
 
         let report = archive
             .extract(
@@ -919,6 +929,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let mut config = SecurityConfig::default();
         config.allowed.hardlinks = true;
+        let config = config.validate().expect("valid config");
 
         let report = archive
             .extract(
@@ -940,10 +951,10 @@ mod tests {
         let mut archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig {
-            max_file_size: 100,
-            ..Default::default()
-        };
+        let config = SecurityConfig::default()
+            .with_max_file_size(100)
+            .validate()
+            .unwrap();
 
         let result = archive.extract(
             temp.path(),
@@ -970,7 +981,7 @@ mod tests {
         let mut archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         let result = archive.extract(
             temp.path(),
@@ -997,7 +1008,7 @@ mod tests {
         let mut archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         let result = archive.extract(
             temp.path(),
@@ -1024,7 +1035,7 @@ mod tests {
         let mut archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         let result = archive.extract(
             temp.path(),
@@ -1072,7 +1083,7 @@ mod tests {
         let mut archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         let report = archive
             .extract(
@@ -1114,7 +1125,7 @@ mod tests {
         let mut archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         let report = archive
             .extract(
@@ -1156,7 +1167,7 @@ mod tests {
         let mut archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         let report = archive
             .extract(
@@ -1193,7 +1204,7 @@ mod tests {
         let mut archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         // Either succeeds (extracted as regular file) or fails with
         // InvalidArchive due to missing GNU sparse extension headers.
@@ -1231,7 +1242,7 @@ mod tests {
         let mut archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         let result = archive.extract(
             temp.path(),
@@ -1264,7 +1275,7 @@ mod tests {
         let mut archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         let report = archive
             .extract(
@@ -1297,7 +1308,7 @@ mod tests {
         let mut archive = TarArchive::new(decoder);
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         let report = archive
             .extract(
@@ -1330,7 +1341,7 @@ mod tests {
         let mut archive = TarArchive::new(decoder);
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         let report = archive
             .extract(
@@ -1362,7 +1373,7 @@ mod tests {
         let mut archive = TarArchive::new(decoder);
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         let report = archive
             .extract(
@@ -1390,7 +1401,7 @@ mod tests {
         let mut archive = TarArchive::new(decoder);
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         let report = archive
             .extract(
@@ -1411,7 +1422,7 @@ mod tests {
         let mut archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         let report = archive
             .extract(
@@ -1432,7 +1443,7 @@ mod tests {
         let mut archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         let report = archive
             .extract(
@@ -1463,7 +1474,7 @@ mod tests {
         let mut archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         let report = archive
             .extract(
@@ -1490,10 +1501,10 @@ mod tests {
         let mut archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig {
-            max_file_count: 2,
-            ..Default::default()
-        };
+        let config = SecurityConfig::default()
+            .with_max_file_count(2)
+            .validate()
+            .unwrap();
 
         let result = archive.extract(
             temp.path(),
@@ -1514,10 +1525,10 @@ mod tests {
         let mut archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig {
-            max_total_size: 1000,
-            ..Default::default()
-        };
+        let config = SecurityConfig::default()
+            .with_max_total_size(1000)
+            .validate()
+            .unwrap();
 
         let result = archive.extract(
             temp.path(),
@@ -1547,7 +1558,7 @@ mod tests {
         let mut archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         let report = archive
             .extract(
@@ -1583,7 +1594,7 @@ mod tests {
         let mut archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         let report = archive
             .extract(
@@ -1608,7 +1619,7 @@ mod tests {
         let mut archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         let report = archive
             .extract(
@@ -1638,7 +1649,7 @@ mod tests {
         let mut archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         let report = archive
             .extract(
@@ -1672,7 +1683,7 @@ mod tests {
         let mut archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default(); // symlinks disabled by default
+        let config = SecurityConfig::default().validate().expect("valid config"); // symlinks disabled by default
 
         let result = archive.extract(
             temp.path(),
@@ -1702,7 +1713,7 @@ mod tests {
         let mut archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default(); // hardlinks disabled by default
+        let config = SecurityConfig::default().validate().expect("valid config"); // hardlinks disabled by default
 
         let result = archive.extract(
             temp.path(),
@@ -1720,7 +1731,7 @@ mod tests {
         let mut archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         let report = archive
             .extract(
@@ -1754,7 +1765,7 @@ mod tests {
         let mut archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         let result = archive.extract(
             temp.path(),
@@ -1790,7 +1801,7 @@ mod tests {
         let mut archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         let result = archive.extract(
             temp.path(),
@@ -1837,6 +1848,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let mut config = SecurityConfig::default();
         config.allowed.symlinks = true;
+        let config = config.validate().expect("valid config");
 
         let result = archive.extract(
             temp.path(),
@@ -1878,6 +1890,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let mut config = SecurityConfig::default();
         config.allowed.hardlinks = true;
+        let config = config.validate().expect("valid config");
 
         let result = archive.extract(
             temp.path(),
@@ -1930,6 +1943,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let mut config = SecurityConfig::default();
         config.allowed.hardlinks = true;
+        let config = config.validate().expect("valid config");
 
         let report = archive
             .extract(
@@ -1982,6 +1996,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let mut config = SecurityConfig::default();
         config.allowed.hardlinks = true;
+        let config = config.validate().expect("valid config");
 
         let report = archive
             .extract(
@@ -2063,10 +2078,10 @@ mod tests {
 
         let mut archive = TarArchive::new(Cursor::new(tar_data));
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig {
-            max_file_size: 1024 * 1024,
-            ..Default::default()
-        };
+        let config = SecurityConfig::default()
+            .with_max_file_size(1024 * 1024)
+            .validate()
+            .unwrap();
 
         let result = archive.extract(
             temp.path(),
@@ -2091,10 +2106,10 @@ mod tests {
 
         let mut archive = TarArchive::new(Cursor::new(tar_data));
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig {
-            max_total_size: 500 * 1024,
-            ..Default::default()
-        };
+        let config = SecurityConfig::default()
+            .with_max_total_size(500 * 1024)
+            .validate()
+            .unwrap();
 
         let result = archive.extract(
             temp.path(),
@@ -2143,6 +2158,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let mut config = SecurityConfig::default();
         config.allowed.hardlinks = true;
+        let config = config.validate().expect("valid config");
 
         let report = archive
             .extract(
@@ -2185,7 +2201,7 @@ mod tests {
         let mut archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
         let options = ExtractionOptions::default(); // skip_duplicates = true
 
         let report = archive
@@ -2209,7 +2225,7 @@ mod tests {
         let mut archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
         let options = ExtractionOptions {
             atomic: false,
             skip_duplicates: false,
@@ -2232,7 +2248,7 @@ mod tests {
     fn test_list_returns_manifest_with_entries() {
         let tar_data = create_test_tar(vec![("a.txt", b"hello"), ("b.txt", b"world")]);
         let mut archive = TarArchive::new(Cursor::new(tar_data));
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         let manifest = archive.list(&config).unwrap();
 
@@ -2244,7 +2260,7 @@ mod tests {
     fn test_list_empty_archive_returns_empty_manifest() {
         let tar_data = create_test_tar(vec![]);
         let mut archive = TarArchive::new(Cursor::new(tar_data));
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         let manifest = archive.list(&config).unwrap();
 
@@ -2256,7 +2272,7 @@ mod tests {
     fn test_verify_clean_archive_is_safe() {
         let tar_data = create_test_tar(vec![("safe.txt", b"data")]);
         let mut archive = TarArchive::new(Cursor::new(tar_data));
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         let report = archive.verify(&config).unwrap();
 
@@ -2284,7 +2300,7 @@ mod tests {
         let mut archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         let result = archive.extract(
             temp.path(),
@@ -2306,7 +2322,10 @@ mod tests {
         let mut archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default().with_allow_absolute_paths(true);
+        let config = SecurityConfig::default()
+            .with_allow_absolute_paths(true)
+            .validate()
+            .unwrap();
 
         let report = archive
             .extract(
@@ -2332,7 +2351,10 @@ mod tests {
         let mut archive = TarArchive::new(Cursor::new(tar_data));
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default().with_allow_absolute_paths(true);
+        let config = SecurityConfig::default()
+            .with_allow_absolute_paths(true)
+            .validate()
+            .unwrap();
 
         let result = archive.extract(
             temp.path(),
@@ -2350,7 +2372,10 @@ mod tests {
     fn test_allowed_extensions_filters_out_disallowed() {
         let tar_data = create_test_tar(vec![("keep.txt", b"keep"), ("skip.exe", b"skip")]);
         let dest = tempfile::tempdir().unwrap();
-        let config = SecurityConfig::default().with_allowed_extensions(vec!["txt".to_string()]);
+        let config = SecurityConfig::default()
+            .with_allowed_extensions(vec!["txt".to_string()])
+            .validate()
+            .unwrap();
 
         let report = TarArchive::new(Cursor::new(tar_data))
             .extract(
@@ -2372,7 +2397,7 @@ mod tests {
     fn test_empty_allowed_extensions_allows_all() {
         let tar_data = create_test_tar(vec![("a.txt", b"a"), ("b.exe", b"b")]);
         let dest = tempfile::tempdir().unwrap();
-        let config = SecurityConfig::default(); // empty = allow all
+        let config = SecurityConfig::default().validate().expect("valid config"); // empty = allow all
 
         let report = TarArchive::new(Cursor::new(tar_data))
             .extract(
@@ -2392,7 +2417,10 @@ mod tests {
         // A file without any extension must be blocked when an allowlist is set.
         let tar_data = create_test_tar(vec![("Makefile", b"all:"), ("keep.txt", b"ok")]);
         let dest = tempfile::tempdir().unwrap();
-        let config = SecurityConfig::default().with_allowed_extensions(vec!["txt".to_string()]);
+        let config = SecurityConfig::default()
+            .with_allowed_extensions(vec!["txt".to_string()])
+            .validate()
+            .unwrap();
 
         let report = TarArchive::new(Cursor::new(tar_data))
             .extract(

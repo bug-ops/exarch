@@ -47,6 +47,7 @@ tempfile = "3.27"
 thiserror = "2.0"
 time = "0.3"
 tokio = "1.52"
+trybuild = "1.0"
 walkdir = "2.5"
 xz2 = { version = "0.1", features = ["static"] }
 zip = { version = "9.0.0-pre2", default-features = false }

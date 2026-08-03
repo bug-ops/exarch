@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING: `SecurityConfig` is now a two-state typestate over `Unvalidated`/`Validated`
+  (#433, #434, #435)**: `SecurityConfig<State = Unvalidated>` carries a phantom marker; the
+  fluent `with_*` builder methods remain available only on `SecurityConfig<Unvalidated>`, and
+  `SecurityConfig::validate()` now consumes `self` and returns
+  `Result<SecurityConfig<Validated>>` instead of `Result<()>`. The `ArchiveFormat` trait
+  (`extract`, `list`, `verify`) and every function downstream of validation in `exarch-core`
+  (`EntryValidator`, `SafePath::validate`, `SafeSymlink::validate`, `QuotaTracker::record_file`,
+  `validate_symlink`, `validate_compression_ratio`, `HardlinkTracker::validate_hardlink`,
+  `sanitize_permissions`, and the per-format `list`/`extract` helpers) now require
+  `&SecurityConfig<Validated>`, so a config that skipped or failed validation can no longer
+  reach extraction, listing, or verification — enforced by the compiler instead of by
+  convention. Fields are sealed behind a private inner struct, reachable read-only via `Deref`
+  for both typestates but mutable (`DerefMut`) only for `SecurityConfig<Unvalidated>`, so a
+  `SecurityConfig<Validated>` cannot be mutated back into an invalid state after the fact while
+  `cfg.max_file_size`-style field access keeps working unchanged for every existing caller. The
+  top-level `extract_archive*`, `list_archive`, `verify_archive`, and `create_archive*`
+  functions are unaffected: they still accept `&SecurityConfig` (defaulting to `Unvalidated`)
+  and validate internally. `SecurityConfig::default()` continues to infer `Unvalidated` with no
+  turbofish required. `Validated` and `Unvalidated` are re-exported from the crate root.
+  `exarch-cli`, `exarch-python`, and `exarch-node` need no changes: they only ever hold
+  `SecurityConfig<Unvalidated>` and pass it to the top-level API. `ValidatedEntry`
+  (`security::validator`) becomes sealed: its fields are private, its constructor is
+  `pub(crate)`, and `safe_path()`/`entry_type()`/`mode()` accessors replace direct field access,
+  so it is assemblable only from inside this crate, and in practice only via
+  `EntryValidator::validate_entry()`. `ValidatedEntryType` is now `#[non_exhaustive]`; its
+  `Symlink`/`Hardlink` variants wrap the already-sealed `SafeSymlink`/`SafePath`, so their
+  payloads cannot be forged even from within the crate. No validation logic changed — this is
+  purely a compile-time hardening of the existing
+  runtime checks.
 - Extracted the duplicated extension-allowlist check from `formats/zip.rs`, `formats/tar.rs`,
   and `formats/sevenz.rs` into a shared, `#[must_use]` `formats::common::check_extension_allowed`
   helper (#413). Behavior is unchanged; each call site still returns its own type (`Ok(())`,

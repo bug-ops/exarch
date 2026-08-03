@@ -123,8 +123,8 @@ use crate::Result;
 use crate::SecurityConfig;
 use crate::config::Validated;
 use crate::copy::CopyBuffer;
+use crate::security::quota::QuotaPermit;
 use crate::security::validator::EntryValidator;
-use crate::security::validator::ValidatedEntry;
 use crate::security::validator::ValidatedEntryType;
 use crate::types::DestDir;
 use crate::types::EntryType;
@@ -241,20 +241,24 @@ impl<R: Read> TarArchive<R> {
             Some(ctx.dir_cache),
         )?;
 
-        match validated.entry_type() {
-            ValidatedEntryType::File(_) => {
-                Self::extract_file(entry, &validated, ctx)?;
+        // `into_parts()` consumes `validated` so the File arm can move its
+        // QuotaPermit by value into extract_file (mirrors 7z's
+        // process_entry_inner, issue #445), rather than only observing it
+        // through entry_type()'s shared reference.
+        match validated.into_parts() {
+            (safe_path, ValidatedEntryType::File(permit), mode) => {
+                Self::extract_file(entry, &safe_path, mode, permit, ctx)?;
                 Ok(None)
             }
 
-            ValidatedEntryType::Directory => {
-                common::create_directory(&validated, ctx.dest, ctx.report, ctx.dir_cache)?;
+            (safe_path, ValidatedEntryType::Directory, _) => {
+                common::create_directory(&safe_path, ctx.dest, ctx.report, ctx.dir_cache)?;
                 Ok(None)
             }
 
-            ValidatedEntryType::Symlink(safe_symlink) => {
+            (_, ValidatedEntryType::Symlink(safe_symlink), _) => {
                 common::create_symlink(
-                    safe_symlink,
+                    &safe_symlink,
                     ctx.dest,
                     ctx.report,
                     ctx.dir_cache,
@@ -263,11 +267,11 @@ impl<R: Read> TarArchive<R> {
                 Ok(None)
             }
 
-            ValidatedEntryType::Hardlink { target } => {
+            (safe_path, ValidatedEntryType::Hardlink { target }, _) => {
                 // Two-pass: defer hardlink creation until target files exist
                 Ok(Some(HardlinkInfo {
-                    link_path: validated.safe_path().clone(),
-                    target_path: target.clone(),
+                    link_path: safe_path,
+                    target_path: target,
                 }))
             }
         }
@@ -276,13 +280,17 @@ impl<R: Read> TarArchive<R> {
     /// Extracts a regular file to disk.
     fn extract_file<ER: Read>(
         entry: &mut tar::Entry<'_, ER>,
-        validated: &ValidatedEntry,
+        safe_path: &SafePath,
+        mode: Option<u32>,
+        permit: QuotaPermit,
         ctx: &mut ExtractionContext<'_, '_>,
     ) -> Result<()> {
         let size = Some(entry.size());
-        common::extract_file_generic(
+        common::extract_file_with_permit(
             entry,
-            validated,
+            safe_path,
+            mode,
+            permit,
             ctx.dest,
             ctx.report,
             size,

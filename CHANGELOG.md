@@ -194,6 +194,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ladder, so `extract`/`list --long --human-readable` output for archives or entries at or above 1
   TB now shows `"... TB"` instead of a misleadingly large GB number (e.g. `u64::MAX` bytes now
   renders `"16777216.0 TB"`, not `"17179869184.0 GB"`).
+- **TAR/ZIP file writes only observed their `QuotaPermit` by shared reference instead of
+  consuming it (#445)**: unlike 7z's `write_file_with_permit` (#440), `formats::common`'s shared
+  `extract_file_generic` runtime-guarded `ValidatedEntryType::File(_)` against `&ValidatedEntry`
+  and never took ownership of the permit. Renamed it to `extract_file_with_permit`, taking
+  `safe_path: &SafePath`, `mode: Option<u32>`, and `permit: QuotaPermit` by value instead of
+  `&ValidatedEntry`; `formats::common::create_directory` narrows to `&SafePath` for the same
+  reason (its body only ever read `validated.safe_path()`). TAR's extraction dispatch now matches
+  exhaustively on `ValidatedEntry::into_parts()`, so only the `File` arm can even bind a
+  `QuotaPermit` — a compiler-enforced impossibility, not a runtime check. ZIP's dispatch also
+  calls `into_parts()` and moves the permit by value, but retains a runtime
+  `let ValidatedEntryType::File(permit) = entry_type else { return Err(..) }` fail-closed guard,
+  since ZIP's file/directory/symlink branches aren't a single exhaustive match; this relies on
+  `EntryValidator::validate_entry(&EntryType::File, ..)` always producing
+  `ValidatedEntryType::File`, an invariant covered by the existing `test_validate_file_entry`. No
+  quota arithmetic or validation behavior changed for either format.
+
 - **7z file writes discarded their `QuotaPermit` instead of consuming it (#440)**: unlike TAR/ZIP,
   7z's `ValidatedEntryType::File(_)` write arm matched the permit and dropped it via `_`, so the
   capability-token guarantee introduced in #436 covered TAR and ZIP but not 7z. Added
@@ -204,7 +220,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   compile without a genuine permit obtained from `EntryValidator::validate_entry`. No quota
   arithmetic or validation behavior changed.
 
+### Performance
+
+- **Extracting archives with many small files regressed ~15.8% after #436/#437/#439 (#446,
+  partial recovery)**: `formats::common::extract_file_with_permit`'s duplicate-detection now
+  folds the existence check into the file-creation `open()` call (see the `O_EXCL`/`O_NOFOLLOW`
+  entry under Security below) instead of a separate `output_path.exists()` stat followed by a
+  truncating create — one fewer syscall per extracted file. This is primarily the security fix
+  described below; the syscall reduction is a side-benefit, not the reason it was made. Also added
+  `#[inline]` to `EntryValidator::validate_entry`/`check_ratio` and `SecurityConfig`'s
+  `Deref::deref`, on the hot per-entry validation path. Re-verified via a controlled same-session
+  A/B (`criterion --save-baseline`): `many_small_files/10000` improved -8.3% to -8.9%
+  (p <= 0.01, reproduced twice); `/100` and `/1000` showed no significant change. This is a
+  **partial**, not full, recovery of the confirmed +15.8% regression — the regression's root cause
+  was not otherwise identified, and full parity against the original CI baseline still needs
+  confirmation on CI hardware rather than local benchmarks (which showed >20% same-commit swings
+  during this investigation).
+
 ### Security
+
+- **Dangling symlink at the extraction destination bypassed the duplicate-check and allowed
+  writing outside the destination root (#459, pre-existing, TAR and ZIP)**: the duplicate-existence
+  check used `Path::exists()`, which follows symlinks and returns `false` for a dangling one. A
+  symlink already present at the destination path — planted by something other than the archive
+  being extracted, since `SafeSymlink::validate` already prevents an in-archive symlink entry from
+  escaping `dest` — was therefore treated as "no duplicate," and a plain `File::create` followed
+  the link, writing the entry's content outside the extraction root. Fixed by opening the
+  destination file with `O_EXCL` (via `OpenOptions::create_new`, already required for the
+  `skip_duplicates=true` duplicate-detection path) and, on Unix, unconditionally with `O_NOFOLLOW`
+  (`OpenOptionsExt::custom_flags`): both reject an existing symlink, dangling or not, instead of
+  following it, closing the escape on both `skip_duplicates` values (the `skip_duplicates=false`
+  overwrite path previously had no protection at all). Added regression tests planting a dangling
+  symlink at the destination path before extraction for both `skip_duplicates` settings.
+  Precondition is an attacker-writable destination directory, not a malicious archive alone.
 
 - **`list` accepted NUL bytes, empty targets, and missing targets that `extract`/`verify` already
   rejected (#430)**: `list_tar_entries` and `list_zip_reader` validated entry paths for path

@@ -572,7 +572,7 @@ impl<R: Read + Seek> SevenZArchive<R> {
 
                 if existing.is_some() && skip_duplicates {
                     report.files_skipped += 1;
-                    *duplicate_skips += 1;
+                    *duplicate_skips = duplicate_skips.saturating_add(1);
                     return Ok(0);
                 }
 
@@ -2258,6 +2258,57 @@ mod tests {
             Err(sevenz_rust2::Error::Other(m)) if m.contains("validation failed"),
             "callback re-validation must independently reject a traversal entry via its own \
              validate_entry call, got: {result:?}"
+        );
+    }
+
+    /// Regression test for #502: `duplicate_skips` must saturate instead of
+    /// wrapping (or panicking, in debug builds) once it reaches `u64::MAX`,
+    /// mirroring the near-boundary pattern used by
+    /// `common.rs`'s `test_extract_file_with_permit_integer_overflow_check`
+    /// for `bytes_written`.
+    #[test]
+    fn test_process_entry_inner_duplicate_skips_saturates_at_max() {
+        let temp = TempDir::new().unwrap();
+        let dest = DestDir::new_or_create(temp.path().to_path_buf()).unwrap();
+        std::fs::write(temp.path().join("existing.txt"), b"already here").unwrap();
+
+        let config = SecurityConfig::default().validate().expect("valid config");
+        let mut validator = EntryValidator::new(&config, &dest);
+        let mut dir_cache = common::DirCache::new();
+        let mut report = ExtractionReport::new();
+        let mut duplicate_skips = u64::MAX;
+        let mut disallowed_extension_skips = 0u64;
+        let mut pending_io_error = None;
+
+        let mut entry = sevenz_rust2::ArchiveEntry::new_file("existing.txt");
+        entry.has_stream = true;
+        entry.size = 5;
+        let entry_path = std::path::PathBuf::from(common::normalize_entry_name(&entry.name));
+
+        let result = SevenZArchive::<Cursor<Vec<u8>>>::process_entry_inner(
+            &entry,
+            &mut std::io::empty(),
+            &entry_path,
+            &mut validator,
+            &dest,
+            &mut report,
+            &mut dir_cache,
+            true, // skip_duplicates
+            &config,
+            &mut duplicate_skips,
+            &mut disallowed_extension_skips,
+            &mut pending_io_error,
+        );
+
+        assert_matches!(
+            result,
+            Ok(0),
+            "duplicate skip must not error, got: {result:?}"
+        );
+        assert_eq!(
+            duplicate_skips,
+            u64::MAX,
+            "duplicate_skips must saturate at u64::MAX instead of wrapping or panicking"
         );
     }
 

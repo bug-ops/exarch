@@ -176,6 +176,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`exarch-python`: a raising progress callback was silently swallowed during extraction/creation
+  (#489)**: `PyProgressAdapter::on_entry_start` discarded both the return value and any Python
+  exception from `self.callback.call1(...)` via `let _ = ...`, so a callback raising to signal an
+  abort (an anomaly check, a quota/policy decision, a cancellation request) had no effect —
+  extraction or creation ran to completion as if nothing happened. The exception is now captured
+  instead of discarded; consistent with `exarch-node`'s `NodeProgressAdapter` (#465/#485), the
+  underlying `ProgressCallback` contract has no cancellation signal, so the operation still runs to
+  completion (further callback dispatches are skipped once an exception is captured), and the
+  result is merged once it returns: if the operation otherwise succeeded, the callback's exception
+  now propagates to the caller, carrying `files_extracted`/`files_added` and `bytes_written`
+  attributes describing what was written, plus a `progress_callback_error = True` marker
+  attribute — needed because those two counter attribute names are the same ones a genuine
+  partial extraction/creation failure carries (see `extract_archive`'s existing
+  `hasattr(e, "files_extracted")` idiom), so the marker is what tells the two apart; if the
+  operation also failed, the core error stays primary (a raising callback can never mask a
+  security error) with the callback's exception chained onto it via `__cause__`.
 - **`exarch-core`: 7z `skip_duplicates = false` deleted a pre-existing destination directory tree
   instead of failing like TAR/ZIP's `EISDIR` (#483)**: when a 7z file entry's destination path was
   occupied by a pre-existing directory, extraction called `remove_dir_all` on it and wrote a fresh

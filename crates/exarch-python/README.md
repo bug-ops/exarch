@@ -177,6 +177,8 @@ result = exarch.extract_archive_with_progress(
 )
 ```
 
+**If `progress` raises:** extraction is not aborted early — the progress-callback contract has no cancellation signal, so extraction always runs to completion first, and `progress` is not called again for the remaining entries once it has raised. If extraction otherwise succeeded, `progress`'s own exception propagates unchanged, with `files_extracted`/`bytes_written` attributes describing what was written and a `progress_callback_error = True` marker attribute (check this marker before treating the presence of `files_extracted` as a partial-extraction signal, since a genuine partial-extraction failure carries the same two attribute names). If extraction also failed, the extraction error takes priority — a raising `progress` can never mask a security error such as `SymlinkEscapeError` — and `progress`'s exception is attached as `__cause__` instead of being dropped. `create_archive_with_progress` behaves the same way, using `files_added` in place of `files_extracted`.
+
 ### `SecurityConfig`
 
 Builder-style security configuration.

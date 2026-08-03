@@ -209,6 +209,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`exarch-core`: a symlink passed directly as a top-level `create` source was silently
+  dereferenced into its target's file content instead of being archived as a link (#510)**:
+  `creation::walker::collect_entries`'s single-file branch (taken when a source argument is not a
+  directory) used `std::fs::metadata` (stat, follows symlinks) to classify the source and check its
+  existence, so a symlink argument was misclassified as `EntryType::File` and a dangling symlink
+  (target missing) failed existence checks with `SourceNotFound`, even though the identical
+  directory-walk path already used lstat semantics and archived symlinks under a directory
+  correctly. Both checks now use `std::fs::symlink_metadata` (lstat), so a symlink source
+  classifies as `EntryType::Symlink` and a dangling symlink is no longer rejected as missing.
+  Because the fix makes ZIP's `EntryType::Symlink` arm reachable for the first time (previously
+  dead code — `walkdir` always dereferences directory-walk roots), `create_zip_internal_with_progress`
+  also gained the `follow_symlinks` handling ZIP creation was missing: with `--follow-symlinks` it
+  now embeds the target file's content, matching TAR's existing behavior, instead of silently
+  producing an empty archive with `files_added: 0` and no warning.
+
+  This is a behavior change for `exarch-core`, `exarch create <archive> <symlink>`, and the
+  Python/Node.js bindings that call it: `exarch create a.tar link.txt` now stores a real symlink
+  entry rather than the target's dereferenced content, so extracting that archive requires
+  `--allow-symlinks` (deny-by-default) where it previously round-tripped without it.
 - **`exarch-core`: hardened ZIP's `by_index()`/`name()` error paths inside `extract()`'s entry loop
   to route through the same warning aggregation and `ArchiveError::partial_or` wrapping as other
   failures in the loop**: `formats/zip.rs`'s extraction loop opened each entry via

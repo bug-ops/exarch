@@ -206,7 +206,18 @@ fn create_zip_internal_with_progress<W: Write + Seek, P: AsRef<Path>>(
             }
             EntryType::Symlink { .. } => {
                 tracker.on_entry_start(&entry.archive_path);
-                if !config.follow_symlinks {
+                if config.follow_symlinks {
+                    add_file_to_zip_with_progress_and_buffer(
+                        &mut zip,
+                        &entry.path,
+                        &entry.archive_path,
+                        config,
+                        &mut report,
+                        &options,
+                        tracker.callback(),
+                        &mut buffer,
+                    )?;
+                } else {
                     report.files_skipped += 1;
                     report.add_warning(format!("Skipped symlink: {}", entry.path.display()));
                 }
@@ -751,6 +762,42 @@ mod tests {
 
         let warning = &report.warnings[0];
         assert!(warning.contains("Skipped symlink"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_create_zip_follow_symlinks_embeds_target_content() {
+        let temp = TempDir::new().unwrap();
+        let output = temp.path().join("output.zip");
+
+        let source_dir = TempDir::new().unwrap();
+        fs::write(source_dir.path().join("target.txt"), "content").unwrap();
+        std::os::unix::fs::symlink(
+            source_dir.path().join("target.txt"),
+            source_dir.path().join("link.txt"),
+        )
+        .unwrap();
+
+        let config = CreationConfig::default()
+            .with_exclude_patterns(vec![])
+            .with_include_hidden(true)
+            .with_follow_symlinks(true)
+            .validate()
+            .unwrap();
+
+        let report = create_zip(&output, &[source_dir.path()], &config).unwrap();
+
+        // Both target.txt and the followed link.txt must be written as regular entries.
+        assert_eq!(report.files_added, 2);
+        assert_eq!(report.files_skipped, 0);
+        assert!(!report.has_warnings());
+
+        let file = File::open(&output).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let mut entry = archive.by_name("link.txt").unwrap();
+        let mut contents = String::new();
+        entry.read_to_string(&mut contents).unwrap();
+        assert_eq!(contents, "content");
     }
 
     #[test]

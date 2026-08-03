@@ -137,6 +137,11 @@ exarch create out.tar.gz src/ --json
 | `--max-file-size <BYTES>` | none | Skip source files larger than this (`K`/`M`/`G`/`T` suffixes). |
 | `--preserve-permissions[=true\|false]` | `true` | Preserve platform permission bits. Pass `--preserve-permissions=false` for a portable, permission-agnostic archive. |
 
+> [!NOTE]
+> ZIP has no symlink entry type. With `--follow-symlinks` off (default), a symlink passed
+> directly as a source is skipped (warning + `files_skipped`), not archived. TAR always stores
+> it as a real symlink entry regardless of the flag.
+
 `exarch` refuses to *create* 7z archives (7z is extract-only) and refuses to create archives
 under ZIP-family extensions that carry extra format semantics: `.jar`, `.war`, `.ear`, `.nar`,
 `.nbm`, `.apk`, `.aab`, `.ipa`, `.appx`, `.msix`, `.whl`, `.vsix`, `.xpi`, `.epub` — use plain

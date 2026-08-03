@@ -227,11 +227,15 @@ pub fn collect_entries<P: AsRef<Path>, State>(
     for source in sources {
         let path = source.as_ref();
 
-        if !path.exists() {
+        // `symlink_metadata` (lstat) is required here instead of `exists`/`metadata`
+        // (stat) so that a dangling symlink (target missing) is still treated as a
+        // present source; it is later classified as EntryType::Symlink below. The
+        // result is reused in the single-file branch to avoid a second lstat.
+        let Ok(metadata) = path.symlink_metadata() else {
             return Err(ArchiveError::SourceNotFound {
                 path: path.to_path_buf(),
             });
-        }
+        };
 
         if path.is_dir() {
             let walker = FilteredWalker::new(path, config);
@@ -239,8 +243,10 @@ pub fn collect_entries<P: AsRef<Path>, State>(
                 entries.push(entry?);
             }
         } else {
-            // For single files, we need to create a FilteredEntry manually
-            let metadata = std::fs::metadata(path)?;
+            // For single files, we need to create a FilteredEntry manually.
+            // `symlink_metadata` (lstat) is required here instead of `metadata` (stat)
+            // so that a symlink passed directly as a top-level source is classified as
+            // EntryType::Symlink rather than silently dereferenced into its target.
             let size = if metadata.is_file() {
                 metadata.len()
             } else {
@@ -710,6 +716,65 @@ mod tests {
                 .to_str()
                 .unwrap()
                 .contains("test.txt")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_collect_entries_single_file_symlink_not_dereferenced() {
+        let temp = TempDir::new().unwrap();
+        let target_path = temp.path().join("target.txt");
+        let link_path = temp.path().join("evil_link");
+        fs::write(&target_path, "content").unwrap();
+        std::os::unix::fs::symlink(&target_path, &link_path).unwrap();
+
+        let config = CreationConfig::default();
+        let sources = [&link_path];
+
+        let entries = collect_entries(&sources, &config).unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].entry_type,
+            EntryType::Symlink {
+                target: target_path,
+            }
+        );
+        assert!(
+            entries[0]
+                .archive_path
+                .to_str()
+                .unwrap()
+                .contains("evil_link")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_collect_entries_dangling_symlink_source_not_rejected() {
+        let temp = TempDir::new().unwrap();
+        let missing_target = temp.path().join("nowhere.txt");
+        let link_path = temp.path().join("dangling_link");
+        std::os::unix::fs::symlink(&missing_target, &link_path).unwrap();
+
+        let config = CreationConfig::default();
+        let sources = [&link_path];
+
+        let entries = collect_entries(&sources, &config).unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].entry_type,
+            EntryType::Symlink {
+                target: missing_target,
+            }
+        );
+        assert!(
+            entries[0]
+                .archive_path
+                .to_str()
+                .unwrap()
+                .contains("dangling_link")
         );
     }
 

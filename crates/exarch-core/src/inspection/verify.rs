@@ -43,11 +43,21 @@ pub(crate) fn verify_manifest(
 
     for entry in &manifest.entries {
         let entry_issues = verify_entry(entry, config, &temp_dest, &mut quota_tracker);
-        if !entry_issues.is_empty() {
-            suspicious_entries += 1;
-            issues.extend(entry_issues);
-        }
         let heuristic_issues = check_heuristics(entry);
+
+        // Info/Low heuristics (e.g. suspicious extension) never flip `status`
+        // away from `Pass`, so they historically weren't counted as
+        // "suspicious". A Medium+ heuristic does flip `status`, so it must
+        // count too, or the report becomes self-contradictory (Warning with
+        // zero suspicious entries).
+        let has_medium_plus_heuristic = heuristic_issues
+            .iter()
+            .any(|i| i.severity >= IssueSeverity::Medium);
+        if !entry_issues.is_empty() || has_medium_plus_heuristic {
+            suspicious_entries += 1;
+        }
+
+        issues.extend(entry_issues);
         issues.extend(heuristic_issues);
     }
 
@@ -264,6 +274,27 @@ fn check_heuristics(entry: &ArchiveEntry) -> Vec<VerificationIssue> {
         });
     }
 
+    // Non-UTF8 name detection: TAR entry names are stored byte-exact, so a
+    // name that isn't valid UTF-8 is a portability risk — it extracts fine
+    // on filesystems that accept arbitrary byte-string names (e.g. Linux
+    // ext4/xfs/btrfs) but can fail on ones that require valid UTF-8 (e.g.
+    // APFS, NTFS). This check is host-agnostic by design: `verify` is also
+    // used to vet archives before shipping them to a different host, so the
+    // warning must not depend on which filesystem happens to be running it.
+    if entry.path.to_str().is_none() {
+        issues.push(VerificationIssue {
+            severity: IssueSeverity::Medium,
+            category: IssueCategory::SuspiciousPath,
+            entry_path: Some(entry.path.clone()),
+            message: format!(
+                "Entry name is not valid UTF-8; extraction may fail on filesystems that require \
+                 UTF-8 names (e.g. APFS, NTFS): {}",
+                entry.path.display()
+            ),
+            context: None,
+        });
+    }
+
     issues
 }
 
@@ -425,6 +456,52 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn test_check_heuristics_non_utf8_name() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let entry = crate::inspection::manifest::ArchiveEntry {
+            path: PathBuf::from(OsStr::from_bytes(b"weird-\xFF\xFE-name.txt")),
+            entry_type: ManifestEntryType::File,
+            size: 100,
+            compressed_size: None,
+            mode: Some(0o644),
+            modified: None,
+            symlink_target: None,
+            hardlink_target: None,
+        };
+
+        let issues = check_heuristics(&entry);
+        assert!(!issues.is_empty());
+        assert!(issues.iter().any(|i| {
+            i.category == IssueCategory::SuspiciousPath && i.severity == IssueSeverity::Medium
+        }));
+    }
+
+    // False-positive guard for #528: a plain, valid-UTF8, non-suspicious
+    // entry name must not trigger the new non-UTF8-name heuristic.
+    #[test]
+    fn test_check_heuristics_valid_utf8_name_no_warning() {
+        let entry = crate::inspection::manifest::ArchiveEntry {
+            path: PathBuf::from("safe/file.txt"),
+            entry_type: ManifestEntryType::File,
+            size: 100,
+            compressed_size: None,
+            mode: Some(0o644),
+            modified: None,
+            symlink_target: None,
+            hardlink_target: None,
+        };
+
+        let issues = check_heuristics(&entry);
+        assert!(
+            issues.is_empty(),
+            "valid UTF-8 name must not trigger any heuristic issue, got: {issues:?}"
+        );
+    }
+
     #[test]
     fn test_verify_archive_safe() {
         let mut temp_file = NamedTempFile::with_suffix(".tar").unwrap();
@@ -559,6 +636,51 @@ mod tests {
                 .iter()
                 .any(|i| i.message.contains("null bytes")),
             "expected an issue mentioning null bytes, got: {:?}",
+            report.issues
+        );
+    }
+
+    // Regression test for #528: a TAR entry name that is not valid UTF-8 is
+    // stored byte-exact in the manifest and may fail to extract on this
+    // filesystem, but previously nothing in the verification pipeline
+    // checked for it, so `verify` reported `Pass` for an archive that
+    // `extract` would later fail on.
+    //
+    // Unix-only: the `tar` crate's `bytes2path` requires valid UTF-8 on
+    // non-Unix targets (see `tar::header::bytes2path`), so on Windows
+    // `entry.path()` itself errors out during listing and `verify_archive`
+    // returns `Err` before ever reaching `check_heuristics` — a different,
+    // pre-existing cross-platform divergence outside this fix's scope.
+    #[cfg(unix)]
+    #[test]
+    fn test_verify_archive_non_utf8_name_reports_warning_not_pass() {
+        use crate::test_utils::tar_with_nonutf8_name;
+
+        let mut temp_file = NamedTempFile::with_suffix(".tar").unwrap();
+        temp_file
+            .write_all(&tar_with_nonutf8_name(b"weird-\xFF\xFE-name.txt", b"hello"))
+            .unwrap();
+        temp_file.flush().unwrap();
+
+        let config = SecurityConfig::default();
+        let report = verify_archive(temp_file.path(), &config)
+            .expect("verify_archive must report a non-UTF8 entry name, not error out");
+
+        assert_eq!(
+            report.status,
+            VerificationStatus::Warning,
+            "non-UTF8 entry name must surface as a Warning, not silently Pass"
+        );
+        assert_eq!(
+            report.suspicious_entries, 1,
+            "a Medium+ heuristic issue must be reflected in suspicious_entries, \
+             or the report is self-contradictory (Warning with 0 suspicious entries)"
+        );
+        assert!(
+            report.issues.iter().any(|i| {
+                i.category == IssueCategory::SuspiciousPath && i.message.contains("not valid UTF-8")
+            }),
+            "expected a SuspiciousPath issue mentioning UTF-8, got: {:?}",
             report.issues
         );
     }
@@ -728,6 +850,11 @@ mod tests {
                 .iter()
                 .any(|i| i.category == IssueCategory::SuspiciousPath),
             "Should have SuspiciousPath issue for .sh extension"
+        );
+        assert_eq!(
+            report.suspicious_entries, 0,
+            "Info/Low-severity heuristic issues (executable, suspicious extension) must not \
+             count toward suspicious_entries — only Medium+ issues do"
         );
     }
 

@@ -452,6 +452,21 @@ pub fn tar_with_pax_linkpath(pax_linkpath: &[u8], typeflag: u8) -> Vec<u8> {
     tar_with_pax_record("linkpath", pax_linkpath, b"link_entry", typeflag, b"")
 }
 
+/// Builds a raw ustar-format TAR archive with a single regular-file entry
+/// whose `name` field is `name_bytes`, which may not be valid UTF-8.
+///
+/// Writes the header directly rather than through `tar::Header::set_path`
+/// (which requires a `Path`), so arbitrary non-UTF8 byte sequences can be
+/// used as the entry name for extractability regression tests.
+#[must_use]
+pub fn tar_with_nonutf8_name(name_bytes: &[u8], data: &[u8]) -> Vec<u8> {
+    let mut tar = Vec::new();
+    tar.extend_from_slice(&raw_tar_header(name_bytes, data.len(), b'0'));
+    pad_tar_block(&mut tar, data);
+    tar.extend(std::iter::repeat_n(0u8, 1024));
+    tar
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

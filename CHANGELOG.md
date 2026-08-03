@@ -251,6 +251,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`exarch-core`: `verify`/`list` reported `PASS` for a TAR archive containing a non-UTF8 entry
+  name that may fail to extract on filesystems requiring UTF-8 names (#528)**: TAR entry names are
+  stored byte-exact (no lossy conversion) in `ArchiveEntry.path`, but
+  `inspection::verify::check_heuristics` never checked whether that path was valid UTF-8, so
+  `verify_manifest` collected no issue for such an entry and `determine_status` returned `Pass`
+  even though extraction could fail depending on the destination filesystem (e.g. APFS, NTFS —
+  Linux ext4/xfs/btrfs accept arbitrary byte-string names and are unaffected). `check_heuristics`
+  now pushes a `Medium`-severity `SuspiciousPath` issue — worded as a portability risk, not a
+  claim about the host running `verify`, since an archive is often vetted on one machine before
+  being shipped to another — for any entry whose path is not valid UTF-8, flipping the overall
+  `status` to `Warning` and `suspicious_entries` accordingly. `security_status` is unaffected, since
+  `SuspiciousPath` was already excluded from `determine_security_status`'s category filter (this is
+  not a security issue, only a portability one).
+- **`exarch-cli`: the `ArchiveError::Io` context duplicated the wrapped I/O error's own message,
+  printing both the "I/O error" phrase and the OS error text twice (#528)**: `error.rs`'s
+  `convert_extraction_error` built the `Io` arm's context by re-interpolating the inner `io::Error`'s
+  Display text (`"I/O error while processing '{path}': {io_err}"`), but `ArchiveError::Io` itself
+  already displays as `"I/O error: {io_err}"`, and anyhow's `{:#}` rendering appends that source after
+  the context — doubling both the phrase and the OS error text in `--json` and human-text output
+  alike. Same duplication class as #403's `SecurityViolation` fix, different arm. The context no
+  longer re-embeds the inner error's text.
 - **`exarch-cli`: `extract --atomic --force` deleted a pre-existing destination directory before
   extraction was known to succeed, defeating the point of `--atomic` (#519)**: `commands/extract.rs`
   pre-removed `output_dir` with `remove_dir_all` so the subsequent rename in `exarch-core`'s

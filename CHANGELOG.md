@@ -239,6 +239,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   include `files_skipped` and `warnings` (the human path only when non-empty, mirroring the
   existing success-path convention), without changing the existing "WARNING: Extraction was
   stopped..." / "HINT: ..." wording.
+- **`exarch-core`: 7z's `duplicate_skips` counter used a plain `+= 1` instead of `saturating_add`,
+  the only non-saturating skip counter in the codebase (#502)**: every other skip-counter increment
+  — `disallowed_extension_skips` (`common.rs:452`), TAR/ZIP's shared `duplicate_skips`
+  (`common.rs:704`), and TAR's `hardlink_duplicate_skips` (`tar.rs:397`) — already used
+  `saturating_add` to avoid wrapping after `u64::MAX` skips; 7z's own counter
+  (`formats/sevenz.rs:575`) was the one site still using bare `+= 1`. Switched to
+  `duplicate_skips.saturating_add(1)`, matching the existing idiom exactly.
 - **`exarch-core`: TAR, ZIP, and 7z pushed one unbounded, path-bearing warning `String` per entry
   rejected by the extension allowlist (#495)**: `common::check_extension_allowed` (shared by all
   three format handlers) pushed a `"skipped entry with disallowed extension: {path}"` warning

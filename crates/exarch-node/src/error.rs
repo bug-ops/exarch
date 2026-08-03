@@ -17,10 +17,26 @@ fn sanitize_path_for_error(path: &Path) -> String {
 
 #[cfg(not(debug_assertions))]
 fn sanitize_path_for_error(path: &Path) -> String {
-    path.file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("<unknown>")
-        .to_string()
+    path.file_name().map_or_else(
+        || "<unknown>".to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    )
+}
+
+/// Sanitizes I/O error messages for error reporting.
+///
+/// In debug builds, returns the full `Display` output (which may embed a
+/// host path, e.g. from `DestDir`'s validation messages). In release builds,
+/// returns only the [`std::io::ErrorKind`] description, since the free-form
+/// message text has no structured path field to redact.
+#[cfg(debug_assertions)]
+fn sanitize_io_error_for_error(e: &std::io::Error) -> String {
+    e.to_string()
+}
+
+#[cfg(not(debug_assertions))]
+fn sanitize_io_error_for_error(e: &std::io::Error) -> String {
+    e.kind().to_string()
 }
 
 /// Converts Rust extraction errors to JavaScript exceptions.
@@ -130,7 +146,7 @@ pub fn convert_error(err: CoreError) -> Error {
             Error::new(Status::GenericFailure, msg)
         }
         CoreError::Io(e) => {
-            let e_str = e.to_string();
+            let e_str = sanitize_io_error_for_error(&e);
             let mut msg = String::with_capacity(10 + e_str.len());
             msg.push_str("IO_ERROR: ");
             msg.push_str(&e_str);
@@ -202,7 +218,10 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    /// Asserts the full attacker-supplied path is present, which only holds
+    /// under `debug_assertions` (see `sanitize_path_for_error`).
     #[test]
+    #[cfg(debug_assertions)]
     fn test_path_traversal_conversion() {
         let err = CoreError::PathTraversal {
             path: PathBuf::from("../etc/passwd"),
@@ -214,7 +233,10 @@ mod tests {
         assert!(err_str.contains("../etc/passwd"));
     }
 
+    /// Asserts the full path is present, which only holds under
+    /// `debug_assertions` (see `sanitize_path_for_error`).
     #[test]
+    #[cfg(debug_assertions)]
     fn test_symlink_escape_conversion() {
         let err = CoreError::SymlinkEscape {
             path: PathBuf::from("/etc/passwd"),
@@ -226,7 +248,10 @@ mod tests {
         assert!(err_str.contains("/etc/passwd"));
     }
 
+    /// Asserts the full path is present, which only holds under
+    /// `debug_assertions` (see `sanitize_path_for_error`).
     #[test]
+    #[cfg(debug_assertions)]
     fn test_hardlink_escape_conversion() {
         let err = CoreError::HardlinkEscape {
             path: PathBuf::from("/etc/shadow"),
@@ -352,7 +377,10 @@ mod tests {
         assert!(err_str.contains("corrupted header"));
     }
 
+    /// Asserts the original custom message is present, which only holds
+    /// under `debug_assertions` (see `sanitize_io_error_for_error`).
     #[test]
+    #[cfg(debug_assertions)]
     fn test_io_error_conversion() {
         let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file not found");
         let err = CoreError::Io(io_err);
@@ -360,6 +388,40 @@ mod tests {
         let err_str = napi_err.to_string();
         assert!(err_str.contains("IO_ERROR"));
         assert!(err_str.contains("file not found"));
+    }
+
+    /// Regression test for #453 follow-up: in release builds,
+    /// `sanitize_path_for_error` must strip the path down to the filename,
+    /// not leak the full host path.
+    #[test]
+    #[cfg(not(debug_assertions))]
+    fn test_sanitize_path_for_error_strips_directory_in_release() {
+        let path = PathBuf::from("/srv/secret/app/x.txt");
+        assert_eq!(sanitize_path_for_error(&path), "x.txt");
+    }
+
+    /// Regression test for #453 follow-up: `CoreError::Io` carries free-form
+    /// messages (e.g. from `DestDir`'s validation) that can embed a host
+    /// path. In release builds the message must be reduced to the
+    /// `ErrorKind` description so no such path can leak through it.
+    #[test]
+    #[cfg(not(debug_assertions))]
+    fn test_io_error_conversion_redacts_message_in_release() {
+        let io_err = std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "directory is not writable: /srv/secret/app/private-output",
+        );
+        let err = CoreError::Io(io_err);
+        let napi_err = convert_error(err);
+        let err_str = napi_err.to_string();
+        assert!(
+            !err_str.contains("/srv/secret/app"),
+            "Expected host path to be redacted, got: {err_str}"
+        );
+        assert!(
+            err_str.contains("permission denied"),
+            "Expected ErrorKind description in error message, got: {err_str}"
+        );
     }
 
     /// Regression test for #251 + #210: `convert_error` must preserve the

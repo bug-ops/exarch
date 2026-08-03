@@ -7,6 +7,41 @@ use pyo3::exceptions::PyException;
 use pyo3::exceptions::PyIOError;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use std::path::Path;
+
+/// Sanitizes path information for error messages.
+///
+/// In debug builds, returns the full path for detailed diagnostics.
+/// In release builds, returns only the filename to avoid leaking internal
+/// directory structures to potential attackers.
+#[cfg(debug_assertions)]
+fn sanitize_path_for_error(path: &Path) -> String {
+    path.display().to_string()
+}
+
+#[cfg(not(debug_assertions))]
+fn sanitize_path_for_error(path: &Path) -> String {
+    path.file_name().map_or_else(
+        || "<unknown>".to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    )
+}
+
+/// Sanitizes I/O error messages for error reporting.
+///
+/// In debug builds, returns the full `Display` output (which may embed a
+/// host path, e.g. from `DestDir`'s validation messages). In release builds,
+/// returns only the [`std::io::ErrorKind`] description, since the free-form
+/// message text has no structured path field to redact.
+#[cfg(debug_assertions)]
+fn sanitize_io_error_for_error(e: &std::io::Error) -> String {
+    e.to_string()
+}
+
+#[cfg(not(debug_assertions))]
+fn sanitize_io_error_for_error(e: &std::io::Error) -> String {
+    e.kind().to_string()
+}
 
 // Base exception for all extraction errors
 create_exception!(exarch, ArchiveError, PyException);
@@ -36,16 +71,21 @@ create_exception!(exarch, InvalidArchiveError, ArchiveError);
 pub fn convert_error(err: CoreError) -> PyErr {
     match err {
         CoreError::PathTraversal { path } => {
-            PathTraversalError::new_err(format!("path traversal detected: {}", path.display()))
+            let path_str = sanitize_path_for_error(&path);
+            PathTraversalError::new_err(format!("path traversal detected: {path_str}"))
         }
-        CoreError::SymlinkEscape { path } => SymlinkEscapeError::new_err(format!(
-            "symlink target outside extraction directory: {}",
-            path.display()
-        )),
-        CoreError::HardlinkEscape { path } => HardlinkEscapeError::new_err(format!(
-            "hardlink target outside extraction directory: {}",
-            path.display()
-        )),
+        CoreError::SymlinkEscape { path } => {
+            let path_str = sanitize_path_for_error(&path);
+            SymlinkEscapeError::new_err(format!(
+                "symlink target outside extraction directory: {path_str}"
+            ))
+        }
+        CoreError::HardlinkEscape { path } => {
+            let path_str = sanitize_path_for_error(&path);
+            HardlinkEscapeError::new_err(format!(
+                "hardlink target outside extraction directory: {path_str}"
+            ))
+        }
         CoreError::ZipBomb {
             compressed,
             uncompressed,
@@ -53,11 +93,12 @@ pub fn convert_error(err: CoreError) -> PyErr {
         } => ZipBombError::new_err(format!(
             "potential zip bomb: compressed={compressed} bytes, uncompressed={uncompressed} bytes (ratio: {ratio:.2})"
         )),
-        CoreError::InvalidPermissions { path, mode } => InvalidPermissionsError::new_err(format!(
-            "invalid permissions for {}: {:#o}",
-            path.display(),
-            mode
-        )),
+        CoreError::InvalidPermissions { path, mode } => {
+            let path_str = sanitize_path_for_error(&path);
+            InvalidPermissionsError::new_err(format!(
+                "invalid permissions for {path_str}: {mode:#o}"
+            ))
+        }
         CoreError::QuotaExceeded { resource } => {
             let msg = match resource {
                 CoreQuotaResource::FileCount { current, max } => {
@@ -81,23 +122,29 @@ pub fn convert_error(err: CoreError) -> PyErr {
         CoreError::InvalidArchive(msg) => {
             InvalidArchiveError::new_err(format!("invalid archive: {msg}"))
         }
-        CoreError::Io(e) => PyErr::from(e),
+        CoreError::Io(e) => {
+            let msg = sanitize_io_error_for_error(&e);
+            PyErr::from(std::io::Error::new(e.kind(), msg))
+        }
         CoreError::SourceNotFound { path } => {
-            PyIOError::new_err(format!("source path not found: {}", path.display()))
+            let path_str = sanitize_path_for_error(&path);
+            PyIOError::new_err(format!("source path not found: {path_str}"))
         }
         CoreError::SourceNotAccessible { path } => {
-            PyIOError::new_err(format!("source path is not accessible: {}", path.display()))
+            let path_str = sanitize_path_for_error(&path);
+            PyIOError::new_err(format!("source path is not accessible: {path_str}"))
         }
         CoreError::OutputExists { path } => {
-            PyIOError::new_err(format!("output file already exists: {}", path.display()))
+            let path_str = sanitize_path_for_error(&path);
+            PyIOError::new_err(format!("output file already exists: {path_str}"))
         }
         CoreError::InvalidCompressionLevel { level } => {
             PyValueError::new_err(format!("invalid compression level {level}, must be 1-9"))
         }
-        CoreError::UnknownFormat { path } => UnknownFormatError::new_err(format!(
-            "cannot determine archive format from: {}",
-            path.display()
-        )),
+        CoreError::UnknownFormat { path } => {
+            let path_str = sanitize_path_for_error(&path);
+            UnknownFormatError::new_err(format!("cannot determine archive format from: {path_str}"))
+        }
         CoreError::InvalidConfiguration { reason } => {
             PyValueError::new_err(format!("invalid configuration: {reason}"))
         }
@@ -171,7 +218,10 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    /// Asserts the full attacker-supplied path is present, which only holds
+    /// under `debug_assertions` (see `sanitize_path_for_error`).
     #[test]
+    #[cfg(debug_assertions)]
     fn test_path_traversal_conversion() {
         let err = CoreError::PathTraversal {
             path: PathBuf::from("../etc/passwd"),
@@ -190,7 +240,10 @@ mod tests {
         );
     }
 
+    /// Asserts the full path is present, which only holds under
+    /// `debug_assertions` (see `sanitize_path_for_error`).
     #[test]
+    #[cfg(debug_assertions)]
     fn test_symlink_escape_conversion() {
         let err = CoreError::SymlinkEscape {
             path: PathBuf::from("/etc/passwd"),
@@ -209,7 +262,10 @@ mod tests {
         );
     }
 
+    /// Asserts the full path is present, which only holds under
+    /// `debug_assertions` (see `sanitize_path_for_error`).
     #[test]
+    #[cfg(debug_assertions)]
     fn test_hardlink_escape_conversion() {
         let err = CoreError::HardlinkEscape {
             path: PathBuf::from("/etc/shadow"),
@@ -428,7 +484,10 @@ mod tests {
         );
     }
 
+    /// Asserts the original custom message is present, which only holds
+    /// under `debug_assertions` (see `sanitize_io_error_for_error`).
     #[test]
+    #[cfg(debug_assertions)]
     fn test_io_error_conversion() {
         let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file not found");
         let err = CoreError::Io(io_err);
@@ -437,6 +496,61 @@ mod tests {
         assert!(
             err_str.contains("file not found"),
             "Expected 'file not found' in error message, got: {}",
+            err_str
+        );
+    }
+
+    /// Regression test for #453 follow-up: in release builds,
+    /// `sanitize_path_for_error` must strip the path down to the filename,
+    /// not leak the full host path.
+    #[test]
+    #[cfg(not(debug_assertions))]
+    fn test_sanitize_path_for_error_strips_directory_in_release() {
+        let path = PathBuf::from("/srv/secret/app/x.txt");
+        assert_eq!(sanitize_path_for_error(&path), "x.txt");
+    }
+
+    /// Regression test for #453 follow-up: `CoreError::Io` carries free-form
+    /// messages (e.g. from `DestDir`'s validation) that can embed a host
+    /// path. In release builds the message must be reduced to the
+    /// `ErrorKind` description so no such path can leak through it.
+    #[test]
+    #[cfg(not(debug_assertions))]
+    fn test_io_error_conversion_redacts_message_in_release() {
+        let io_err = std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "directory is not writable: /srv/secret/app/private-output",
+        );
+        let err = CoreError::Io(io_err);
+        let py_err = convert_error(err);
+        let err_str = py_err.to_string();
+        assert!(
+            !err_str.contains("/srv/secret/app"),
+            "Expected host path to be redacted, got: {}",
+            err_str
+        );
+        assert!(
+            err_str.contains("permission denied"),
+            "Expected ErrorKind description in error message, got: {}",
+            err_str
+        );
+    }
+
+    #[test]
+    fn test_source_not_found_conversion() {
+        let err = CoreError::SourceNotFound {
+            path: PathBuf::from("missing_source.tar.gz"),
+        };
+        let py_err = convert_error(err);
+        let err_str = py_err.to_string();
+        assert!(
+            err_str.contains("source path not found"),
+            "Expected 'source path not found' in error message, got: {}",
+            err_str
+        );
+        assert!(
+            err_str.contains("missing_source.tar.gz"),
+            "Expected filename in error message, got: {}",
             err_str
         );
     }

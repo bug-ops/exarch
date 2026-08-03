@@ -126,7 +126,7 @@ fn extract_archive(
     // NOTE: TOCTOU race condition - archive contents can change between check and
     // extraction. This is an accepted limitation when releasing the GIL for
     // performance.
-    let report = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let report = catch_panic_as_py_err("extraction", || {
         py.detach(|| {
             exarch_core::extract_archive_with_options(
                 &archive_path,
@@ -135,11 +135,7 @@ fn extract_archive(
                 options_ref,
             )
         })
-    }))
-    .map_err(|_| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Internal panic during extraction")
-    })?
-    .map_err(convert_error)?;
+    })?;
 
     Ok(PyExtractionReport::from(report))
 }
@@ -256,13 +252,9 @@ fn create_archive(
     let default_config = exarch_core::creation::CreationConfig::default();
     let config_ref = config.map_or(&default_config, |c| c.as_core());
 
-    let report = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let report = catch_panic_as_py_err("archive creation", || {
         py.detach(|| exarch_core::create_archive(&output_path, &source_paths, config_ref))
-    }))
-    .map_err(|_| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Internal panic during archive creation")
-    })?
-    .map_err(convert_error)?;
+    })?;
 
     Ok(PyCreationReport::from(report))
 }
@@ -305,13 +297,9 @@ fn list_archive(
     let default_config = exarch_core::SecurityConfig::default();
     let config_ref = config.map_or(&default_config, |c| c.as_core());
 
-    let manifest = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let manifest = catch_panic_as_py_err("archive listing", || {
         py.detach(|| exarch_core::list_archive(&archive_path, config_ref))
-    }))
-    .map_err(|_| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Internal panic during archive listing")
-    })?
-    .map_err(convert_error)?;
+    })?;
 
     Ok(PyArchiveManifest::from(manifest))
 }
@@ -357,15 +345,9 @@ fn verify_archive(
     let default_config = exarch_core::SecurityConfig::default();
     let config_ref = config.map_or(&default_config, |c| c.as_core());
 
-    let report = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let report = catch_panic_as_py_err("archive verification", || {
         py.detach(|| exarch_core::verify_archive(&archive_path, config_ref))
-    }))
-    .map_err(|_| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-            "Internal panic during archive verification",
-        )
-    })?
-    .map_err(convert_error)?;
+    })?;
 
     Ok(PyVerificationReport::from(report))
 }

@@ -51,6 +51,7 @@ pub use config::Unvalidated;
 pub use config::Validated;
 pub use error::ArchiveError;
 pub use error::FfiErrorMessage;
+pub use error::IoContext;
 pub use error::QuotaResource;
 pub use error::Result;
 /// Formats an archive-relative, attacker-authored path for an FFI error

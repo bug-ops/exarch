@@ -4,6 +4,7 @@
 //! compression levels and security options.
 
 use crate::ArchiveError;
+use crate::IoContext;
 use crate::NoopProgress;
 use crate::ProgressCallback;
 use crate::Result;
@@ -194,7 +195,10 @@ fn create_zip_internal_with_progress<W: Write + Seek, P: AsRef<Path>>(
                 if !entry.archive_path.as_os_str().is_empty() {
                     let dir_path = format!("{}/", normalize_zip_path(&entry.archive_path)?);
                     zip.add_directory(&dir_path, options).map_err(|e| {
-                        std::io::Error::other(format!("failed to add directory: {e}"))
+                        std::io::Error::other(IoContext::new(
+                            "failed to add directory to zip archive",
+                            e.to_string(),
+                        ))
                     })?;
                     report.directories_added += 1;
                 }
@@ -212,9 +216,12 @@ fn create_zip_internal_with_progress<W: Write + Seek, P: AsRef<Path>>(
     }
 
     // Finish writing ZIP
-    let writer = zip
-        .finish()
-        .map_err(|e| std::io::Error::other(format!("failed to finish ZIP archive: {e}")))?;
+    let writer = zip.finish().map_err(|e| {
+        std::io::Error::other(IoContext::new(
+            "failed to finish zip archive",
+            e.to_string(),
+        ))
+    })?;
 
     report.duration = start.elapsed();
 
@@ -278,8 +285,12 @@ fn add_file_to_zip_with_progress_and_buffer<W: Write + Seek>(
 
     let archive_name = normalize_zip_path(archive_path)?;
 
-    zip.start_file(&archive_name, file_options)
-        .map_err(|e| std::io::Error::other(format!("failed to start file in ZIP: {e}")))?;
+    zip.start_file(&archive_name, file_options).map_err(|e| {
+        std::io::Error::other(IoContext::new(
+            "failed to start file in zip archive",
+            e.to_string(),
+        ))
+    })?;
 
     // Copy file contents with progress tracking and reusable buffer
     let mut bytes_written = 0u64;
@@ -306,9 +317,9 @@ fn add_file_to_zip_with_progress_and_buffer<W: Write + Seek>(
 fn normalize_zip_path(path: &Path) -> Result<String> {
     // Convert to string
     let path_str = path.to_str().ok_or_else(|| {
-        ArchiveError::Io(std::io::Error::other(format!(
-            "path is not valid UTF-8: {}",
-            path.display()
+        ArchiveError::Io(std::io::Error::other(IoContext::new(
+            "archive path is not valid UTF-8",
+            path.display().to_string(),
         )))
     })?;
 

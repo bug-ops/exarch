@@ -461,6 +461,34 @@ export declare function createArchiveSync(outputPath: string, sources: Array<str
  * Returns error if path validation fails, archive creation fails, or I/O
  * errors occur. See `createArchive` for the full list of error codes.
  *
+ * If `progress` throws, the returned promise rejects instead of crashing the
+ * process (see issue #465). Creation has already run to completion (or
+ * failure) by the time the rejection is observed — a throwing callback cannot
+ * abort creation early, since the progress callback contract has no
+ * cancellation signal. The rejection therefore reports both signals:
+ *
+ * - Creation succeeded: the message is prefixed with `PROGRESS_CALLBACK_ERROR`
+ *   and carries `filesAdded=N, bytesWritten=M`, so the caller can still see
+ *   that an archive was written and needs cleaning up.
+ * - Creation also failed: the core error stays primary and keeps its
+ *   error-code prefix, with a fixed ` | progressCallbackError: see cause`
+ *   marker appended. A throwing callback can never mask a core error.
+ *
+ * In both cases the original JS exception is available as the `cause`
+ * property of the rejection value. The throw's own text and stack are never
+ * copied into the message — read `cause` for the callback's error detail
+ * rather than parsing it out of `message`.
+ *
+ * ## Known limitation: primitive throws still crash the process
+ *
+ * Identical to `extractArchiveWithProgress`: the catchable-rejection behavior
+ * holds only for non-primitive throws. `throw 'oops'` from the callback still
+ * aborts the host process uncatchably with `Call JavaScript callback failed in
+ * threadsafe function`, and the promise never settles. Both functions dispatch
+ * through the same `call_async_catch` path, so they share the upstream
+ * napi-rs 3.12.0 defect described there. Always throw an `Error` instance.
+ * Tracked in <https://github.com/bug-ops/exarch/issues/473>.
+ *
  * # Examples
  *
  * ```javascript
@@ -495,6 +523,24 @@ export declare function createArchiveWithProgress(outputPath: string, sources: A
  * here. Use `createArchiveWithProgress` instead if you need progress updates
  * while creation is still running.
  *
+ * ## A throwing `progress` surfaces as an `uncaughtException`
+ *
+ * Because every call is delivered after this function has already returned,
+ * there is no return value left to carry a callback throw: this function has
+ * resolved with its `CreationReport` by then. A throw therefore propagates the
+ * way any throw from a deferred callback does — as a process-level
+ * `uncaughtException` on the turn that delivered the call, observable via
+ * `process.on('uncaughtException', ...)`. It is never merged into a
+ * `PROGRESS_CALLBACK_ERROR` result the way `createArchiveWithProgress` merges
+ * it, and it cannot be caught by wrapping this call in `try`/`catch`.
+ *
+ * The primitive-throw crash documented on `createArchiveWithProgress` does
+ * **not** apply here: that defect lives in the await-the-result dispatch path,
+ * which this function cannot use (awaiting a call that only the blocked event
+ * loop can deliver would deadlock). Queued calls take the plain dispatch path
+ * instead, where a thrown primitive reaches `uncaughtException` intact just
+ * like a thrown `Error`.
+ *
  * # Arguments
  *
  * * `output_path` - Path to output archive file
@@ -502,7 +548,8 @@ export declare function createArchiveWithProgress(outputPath: string, sources: A
  * * `config` - Optional `CreationConfig` (uses defaults if omitted)
  * * `progress` - Optional progress callback `(err: Error | null, arg: [path:
  *   string, total: number, current: number, bytesWritten: number]) => void`.
- *   See the section above: calls arrive only after this function returns.
+ *   See the sections above: calls arrive only after this function returns, and
+ *   a throw becomes an `uncaughtException` rather than an error from here.
  *
  * # Returns
  *
@@ -695,6 +742,45 @@ export declare function extractArchiveSync(archivePath: string, outputDir: strin
  * Returns error for security violations or I/O errors. Error messages are
  * prefixed with error codes for discrimination in JavaScript. See
  * `extractArchive` for the full list of error codes.
+ *
+ * If `progress` throws, the returned promise rejects instead of crashing the
+ * process (see issue #465). Extraction has already run to completion (or
+ * failure) by the time the rejection is observed — a throwing callback cannot
+ * abort the extraction early, since the progress callback contract has no
+ * cancellation signal. The rejection therefore reports both signals:
+ *
+ * - Extraction succeeded: the message is prefixed with
+ *   `PROGRESS_CALLBACK_ERROR` and carries `filesExtracted=N, bytesWritten=M`,
+ *   so the caller can still see what was written to disk.
+ * - Extraction also failed: the core error stays primary and keeps its
+ *   error-code prefix, with a fixed ` | progressCallbackError: see cause`
+ *   marker appended. A throwing callback can never mask a security error such
+ *   as `SYMLINK_ESCAPE`.
+ *
+ * In both cases the original JS exception is available as the `cause`
+ * property of the rejection value. The throw's own text and stack are never
+ * copied into the message — read `cause` for the callback's error detail
+ * rather than parsing it out of `message`.
+ *
+ * ## Known limitation: primitive throws still crash the process
+ *
+ * The catchable-rejection behavior above only holds when the callback throws a
+ * non-primitive value (`Error` and subclasses, plain objects, arrays, `null`,
+ * `undefined`, `Symbol`). Throwing a bare string, number, or boolean —
+ * `throw 'oops'` — still aborts the host process uncatchably with
+ * `Call JavaScript callback failed in threadsafe function`, and the promise
+ * never settles.
+ *
+ * This is an upstream defect in napi-rs 3.12.0: the dispatcher behind
+ * `call_async_catch` overwrites its own status with the result of
+ * `napi_create_reference()`, which reports `napi_invalid_arg` for a primitive
+ * exception value, and that status is then escalated to a fatal exception even
+ * though the error was already delivered to the channel. It cannot be worked
+ * around from this crate.
+ *
+ * Always throw an `Error` instance (or any non-primitive) from a progress
+ * callback to get the documented rejection behavior. Tracked upstream in
+ * <https://github.com/bug-ops/exarch/issues/473>.
  *
  * # Examples
  *

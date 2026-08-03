@@ -134,6 +134,13 @@ impl<O: Write, E: Write> OutputFormatter for HumanFormatter<O, E> {
             format_args!("  Total size: {}", humanize_bytes(report.bytes_written)),
         );
 
+        if report.files_skipped > 0 {
+            emit_line(
+                &mut self.out,
+                format_args!("  Files skipped: {}", report.files_skipped),
+            );
+        }
+
         if self.verbose {
             emit_line(
                 &mut self.out,
@@ -143,6 +150,21 @@ impl<O: Write, E: Write> OutputFormatter for HumanFormatter<O, E> {
                 &mut self.out,
                 format_args!("  Duration: {:?}", report.duration),
             );
+        }
+
+        if report.has_warnings() {
+            emit_blank(&mut self.out);
+            if self.use_colors {
+                emit_line(
+                    &mut self.out,
+                    format_args!("{}", style("Warnings:").yellow().bold()),
+                );
+            } else {
+                emit_line(&mut self.out, format_args!("Warnings:"));
+            }
+            for warning in &report.warnings {
+                emit_line(&mut self.out, format_args!("  - {warning}"));
+            }
         }
 
         Ok(())
@@ -519,6 +541,31 @@ mod tests {
         assert!(text.contains("Directories: 1"));
         assert!(text.contains("Total size: 2.0 KB"));
         assert!(!text.contains("Symlinks:"));
+    }
+
+    #[test]
+    fn format_extraction_result_with_warnings_and_files_skipped() {
+        let mut f = formatter(false, false, false);
+        let mut report = sample_extraction_report();
+        report.files_skipped = 2;
+        report
+            .warnings
+            .push("skipped 2 entries with disallowed extensions".to_string());
+        f.format_extraction_result(&report).unwrap();
+        let text = out_text(&f);
+        assert!(text.contains("Files skipped: 2"));
+        assert!(text.contains("Warnings:"));
+        assert!(text.contains("skipped 2 entries with disallowed extensions"));
+    }
+
+    #[test]
+    fn format_extraction_result_no_warnings_section_when_empty() {
+        let mut f = formatter(false, false, false);
+        f.format_extraction_result(&sample_extraction_report())
+            .unwrap();
+        let text = out_text(&f);
+        assert!(!text.contains("Warnings:"));
+        assert!(!text.contains("Files skipped:"));
     }
 
     #[test]

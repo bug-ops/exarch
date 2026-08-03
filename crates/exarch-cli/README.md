@@ -276,8 +276,24 @@ Extraction complete
     "files_extracted": 1523,
     "directories_created": 87,
     "symlinks_created": 0,
-    "bytes_written": 44396032
+    "bytes_written": 44396032,
+    "files_skipped": 0,
+    "duration_ms": 842,
+    "warnings": []
   }
+}
+```
+
+`files_skipped` and `warnings` are populated whenever entries are skipped without failing the
+extraction — e.g. `--allowed-extensions` rejecting entries by extension, or pre-existing
+duplicate destination files skipped by default (unless `--force` is passed):
+
+```json
+{
+  "files_skipped": 2,
+  "warnings": [
+    "skipped 2 entries with disallowed extensions"
+  ]
 }
 ```
 

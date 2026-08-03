@@ -237,7 +237,18 @@ pub fn collect_entries<P: AsRef<Path>, State>(
             });
         };
 
-        if path.is_dir() {
+        // `metadata.is_dir()` (from the lstat above) is required here instead of
+        // `path.is_dir()` (stat, follows symlinks), so that a symlink pointing at a
+        // directory is not routed into `FilteredWalker`/`WalkDir` by default —
+        // `WalkDir` always dereferences its root regardless of `follow_links(false)`
+        // and would produce an empty relative path for the root entry. Such a symlink
+        // is instead classified as `EntryType::Symlink` in the branch below,
+        // consistent with the symlink-to-file case. When `follow_symlinks` is
+        // explicitly enabled, though, the symlink must still be walked as a directory
+        // (via `path.is_dir()`, stat) to preserve the pre-existing dereferencing
+        // behavior for that config — otherwise the single-entry branch would try to
+        // open the symlink as a regular file and fail with an I/O error.
+        if metadata.is_dir() || (config.follow_symlinks && path.is_dir()) {
             let walker = FilteredWalker::new(path, config);
             for entry in walker.walk() {
                 entries.push(entry?);
@@ -247,6 +258,8 @@ pub fn collect_entries<P: AsRef<Path>, State>(
             // `symlink_metadata` (lstat) is required here instead of `metadata` (stat)
             // so that a symlink passed directly as a top-level source is classified as
             // EntryType::Symlink rather than silently dereferenced into its target.
+            // `metadata.is_dir()` can no longer be true here (that case is routed to
+            // the walk branch above), so only `File` and `Symlink` remain.
             let size = if metadata.is_file() {
                 metadata.len()
             } else {
@@ -256,8 +269,6 @@ pub fn collect_entries<P: AsRef<Path>, State>(
             let entry_type = if metadata.is_symlink() {
                 let target = std::fs::read_link(path)?;
                 EntryType::Symlink { target }
-            } else if metadata.is_dir() {
-                EntryType::Directory
             } else {
                 EntryType::File
             };
@@ -775,6 +786,35 @@ mod tests {
                 .to_str()
                 .unwrap()
                 .contains("dangling_link")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_collect_entries_dir_symlink_source_classified_as_symlink() {
+        let temp = TempDir::new().unwrap();
+        let target_dir = temp.path().join("target_dir");
+        let link_path = temp.path().join("dirlink");
+        fs::create_dir(&target_dir).unwrap();
+        fs::write(target_dir.join("inner.txt"), "content").unwrap();
+        std::os::unix::fs::symlink(&target_dir, &link_path).unwrap();
+
+        let config = CreationConfig::default();
+        let sources = [&link_path];
+
+        let entries = collect_entries(&sources, &config).unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].entry_type,
+            EntryType::Symlink { target: target_dir }
+        );
+        assert!(
+            entries[0]
+                .archive_path
+                .to_str()
+                .unwrap()
+                .contains("dirlink")
         );
     }
 

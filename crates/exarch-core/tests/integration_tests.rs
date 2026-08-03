@@ -604,3 +604,93 @@ fn empty_dir_unicode_and_space_names_roundtrip_tar() {
             .is_dir()
     );
 }
+
+// ============================================================================
+// #512: top-level directory-symlink creation source
+// ============================================================================
+
+/// With `follow_symlinks` disabled (default), a top-level source that is a
+/// symlink to a directory must archive as a single `EntryType::Symlink`
+/// entry rather than crashing (the original #512 crash) or being walked.
+#[cfg(unix)]
+#[test]
+fn dir_symlink_source_without_follow_symlinks_archives_as_symlink_tar() {
+    let src = TempDir::new().unwrap();
+    let target_dir = src.path().join("target_dir");
+    let link_path = src.path().join("dirlink");
+    fs::create_dir(&target_dir).unwrap();
+    fs::write(target_dir.join("inner.txt"), "content").unwrap();
+    std::os::unix::fs::symlink(&target_dir, &link_path).unwrap();
+
+    let archive_dir = TempDir::new().unwrap();
+    let archive = archive_dir.path().join("out.tar.gz");
+
+    let config = CreationConfig::default().with_format(Some(ArchiveType::TarGz));
+    let report = create_archive(&archive, &[&link_path], &config).unwrap();
+
+    assert_eq!(report.files_added, 0);
+    assert_eq!(report.directories_added, 0);
+}
+
+/// With `follow_symlinks` enabled, a top-level directory-symlink source must
+/// still be dereferenced and its tree walked (pre-#512 behavior), not
+/// misclassified as a single symlink entry (which would make TAR try to
+/// `File::open` a directory and fail with an I/O error).
+#[cfg(unix)]
+#[test]
+fn dir_symlink_source_with_follow_symlinks_walks_tree_tar() {
+    let src = TempDir::new().unwrap();
+    let target_dir = src.path().join("target_dir");
+    let link_path = src.path().join("dirlink");
+    fs::create_dir(&target_dir).unwrap();
+    fs::write(target_dir.join("inner.txt"), "content").unwrap();
+    std::os::unix::fs::symlink(&target_dir, &link_path).unwrap();
+
+    let archive_dir = TempDir::new().unwrap();
+    let archive = archive_dir.path().join("out.tar.gz");
+
+    let config = CreationConfig::default()
+        .with_format(Some(ArchiveType::TarGz))
+        .with_follow_symlinks(true);
+    let report = create_archive(&archive, &[&link_path], &config).unwrap();
+
+    assert_eq!(report.files_added, 1);
+
+    let extract_dir = TempDir::new().unwrap();
+    extract_archive(&archive, extract_dir.path(), &SecurityConfig::default()).unwrap();
+    assert_eq!(
+        fs::read_to_string(extract_dir.path().join("inner.txt")).unwrap(),
+        "content"
+    );
+}
+
+/// Same `follow_symlinks` regression as above, but for ZIP: creation must
+/// succeed and produce the dereferenced file, not error out trying to open
+/// the directory-symlink path as a regular file.
+#[cfg(unix)]
+#[test]
+fn dir_symlink_source_with_follow_symlinks_walks_tree_zip() {
+    let src = TempDir::new().unwrap();
+    let target_dir = src.path().join("target_dir");
+    let link_path = src.path().join("dirlink");
+    fs::create_dir(&target_dir).unwrap();
+    fs::write(target_dir.join("inner.txt"), "content").unwrap();
+    std::os::unix::fs::symlink(&target_dir, &link_path).unwrap();
+
+    let archive_dir = TempDir::new().unwrap();
+    let archive = archive_dir.path().join("out.zip");
+
+    let config = CreationConfig::default()
+        .with_format(Some(ArchiveType::Zip))
+        .with_follow_symlinks(true);
+    let report = create_archive(&archive, &[&link_path], &config).unwrap();
+
+    assert_eq!(report.files_added, 1);
+
+    let extract_dir = TempDir::new().unwrap();
+    extract_archive(&archive, extract_dir.path(), &SecurityConfig::default()).unwrap();
+    assert_eq!(
+        fs::read_to_string(extract_dir.path().join("inner.txt")).unwrap(),
+        "content"
+    );
+}

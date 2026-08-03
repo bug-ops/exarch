@@ -209,6 +209,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`exarch-core`: a symlink pointing at a directory, passed directly as a top-level `create`
+  source, crashed with an internal path-normalization error instead of being archived as a link
+  (#512)**: `creation::walker::collect_entries` classified the directory-walk vs. single-entry
+  branch using `path.is_dir()` (stat, follows symlinks), so a symlink-to-directory source was
+  routed into `FilteredWalker`/`WalkDir` instead of `EntryType::Symlink`. `WalkDir` always
+  dereferences its root regardless of `follow_links(false)`, so walking through the symlink root
+  produced an empty relative path for the root entry, later failing with `paths in archives must
+  have at least one component when setting path for ""`. The branch selector now reuses the
+  `symlink_metadata` (lstat) already fetched for existence checking and tests `metadata.is_dir()`
+  instead, so a symlink-to-directory source classifies as `EntryType::Symlink` by default —
+  consistent with how #510 fixed the analogous symlink-to-file case — without dereferencing the
+  source at all. When `follow_symlinks` is explicitly enabled, the branch selector additionally
+  checks `path.is_dir()` (stat) so the symlink is still walked as a directory, preserving the
+  pre-existing dereferencing behavior for that config instead of regressing it into an I/O error
+  (TAR) or an empty archive (ZIP). Under the default (non-follow) policy, TAR archives the
+  directory symlink as a link entry; ZIP has no on-disk representation for symlinks and continues
+  to skip it with a `Skipped symlink` warning, per the ZIP policy already established in #510 — for
+  a directory symlink this means the entire target tree is omitted from the ZIP archive (exit code
+  0, `files_skipped: 1`), so callers who need the tree's contents in a ZIP must pass
+  `--follow-symlinks`.
 - **`exarch-core`: a symlink passed directly as a top-level `create` source was silently
   dereferenced into its target's file content instead of being archived as a link (#510)**:
   `creation::walker::collect_entries`'s single-file branch (taken when a source argument is not a

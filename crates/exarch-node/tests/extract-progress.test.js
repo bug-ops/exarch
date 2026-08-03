@@ -9,11 +9,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const { spawnSync } = require('node:child_process');
-const {
-  extractArchiveWithProgress,
-  createArchiveSync,
-  SecurityConfig,
-} = require('../index.js');
+const { extractArchiveWithProgress, createArchiveSync, SecurityConfig } = require('../index.js');
 
 function createTempDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'exarch-progress-test-'));
@@ -55,7 +51,7 @@ describe('extractArchiveWithProgress', () => {
       null,
       (err, arg) => {
         calls.push([err, arg]);
-      },
+      }
     );
 
     assert.strictEqual(report.filesExtracted, 2);
@@ -83,7 +79,7 @@ describe('extractArchiveWithProgress', () => {
       (err) => {
         assert.strictEqual(err.cause.message, 'boom from progress callback');
         return true;
-      },
+      }
     );
   });
 
@@ -99,7 +95,7 @@ describe('extractArchiveWithProgress', () => {
       (err) => {
         assert.ok(
           err.message.startsWith('PROGRESS_CALLBACK_ERROR:'),
-          `expected PROGRESS_CALLBACK_ERROR prefix, got: ${err.message}`,
+          `expected PROGRESS_CALLBACK_ERROR prefix, got: ${err.message}`
         );
         assert.match(err.message, /filesExtracted=2/);
         assert.match(err.message, /bytesWritten=\d+/);
@@ -108,7 +104,7 @@ describe('extractArchiveWithProgress', () => {
         assert.ok(!err.message.includes('boom from progress callback'));
         assert.strictEqual(err.cause.message, 'boom from progress callback');
         return true;
-      },
+      }
     );
     assert.ok(fs.existsSync(path.join(outputDir, 'hello.txt')));
   });
@@ -128,14 +124,14 @@ describe('extractArchiveWithProgress', () => {
       (err) => {
         assert.ok(
           err.message.startsWith('QUOTA_EXCEEDED:'),
-          `core error code must stay primary, got: ${err.message}`,
+          `core error code must stay primary, got: ${err.message}`
         );
         assert.match(err.message, /file count/);
         assert.ok(err.message.endsWith(' | progressCallbackError: see cause'));
         assert.ok(!err.message.includes('boom from progress callback'));
         assert.strictEqual(err.cause.message, 'boom from progress callback');
         return true;
-      },
+      }
     );
   });
 
@@ -164,15 +160,15 @@ describe('extractArchiveWithProgress', () => {
     assert.strictEqual(
       result.status,
       0,
-      `expected clean exit, got status=${result.status}, stderr=${result.stderr}`,
+      `expected clean exit, got status=${result.status}, stderr=${result.stderr}`
     );
     assert.ok(
       result.stdout.includes('REJECTED:boom from progress callback'),
-      `expected rejection to be observed, got stdout=${result.stdout}`,
+      `expected rejection to be observed, got stdout=${result.stdout}`
     );
     assert.ok(
       !result.stderr.includes('Uncaught'),
-      `expected no uncaught exception, got stderr=${result.stderr}`,
+      `expected no uncaught exception, got stderr=${result.stderr}`
     );
   });
 
@@ -217,7 +213,7 @@ describe('extractArchiveWithProgress', () => {
       0,
       'primitive throws are expected to still crash the process; if this now ' +
         'exits cleanly, the upstream napi-rs bug is fixed — update this test ' +
-        'and the extractArchiveWithProgress docs',
+        'and the extractArchiveWithProgress docs'
     );
     assert.match(result.stderr, /Call JavaScript callback failed/);
     // The promise never settles, so neither handler runs.

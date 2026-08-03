@@ -13,7 +13,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const { spawnSync } = require('node:child_process');
-const { createArchiveWithProgress, createArchiveWithProgressSync } = require('../index.js');
+const { createArchiveWithProgress } = require('../index.js');
 
 const INDEX_JS = JSON.stringify(path.join(__dirname, '..', 'index.js'));
 
@@ -57,7 +57,7 @@ describe('createArchiveWithProgress', () => {
       (err) => {
         assert.strictEqual(err.cause.message, 'boom from progress callback');
         return true;
-      },
+      }
     );
   });
 
@@ -73,7 +73,7 @@ describe('createArchiveWithProgress', () => {
       (err) => {
         assert.ok(
           err.message.startsWith('PROGRESS_CALLBACK_ERROR:'),
-          `expected PROGRESS_CALLBACK_ERROR prefix, got: ${err.message}`,
+          `expected PROGRESS_CALLBACK_ERROR prefix, got: ${err.message}`
         );
         assert.match(err.message, /filesAdded=2/);
         assert.match(err.message, /bytesWritten=\d+/);
@@ -82,7 +82,7 @@ describe('createArchiveWithProgress', () => {
         assert.ok(!err.message.includes('boom from progress callback'));
         assert.strictEqual(err.cause.message, 'boom from progress callback');
         return true;
-      },
+      }
     );
     // The archive really was written, which is why the report must survive.
     assert.ok(fs.existsSync(outputPath));
@@ -90,34 +90,32 @@ describe('createArchiveWithProgress', () => {
 
   // A throwing progress callback must not mask a core error: callers grep the
   // error-code prefix, so the core error stays primary.
-  it(
-    'surfaces the core error when the callback also throws',
-    { skip: canDenyReads ? false : 'requires chmod-enforced read denial' },
-    async () => {
-      // hello.txt is added first and fires the callback (which throws), then
-      // the unreadable file fails the creation itself.
-      const unreadable = path.join(sourceDir, 'zz-unreadable.txt');
-      fs.writeFileSync(unreadable, 'secret');
-      fs.chmodSync(unreadable, 0o000);
+  it('surfaces the core error when the callback also throws', {
+    skip: canDenyReads ? false : 'requires chmod-enforced read denial',
+  }, async () => {
+    // hello.txt is added first and fires the callback (which throws), then
+    // the unreadable file fails the creation itself.
+    const unreadable = path.join(sourceDir, 'zz-unreadable.txt');
+    fs.writeFileSync(unreadable, 'secret');
+    fs.chmodSync(unreadable, 0o000);
 
-      await assert.rejects(
-        () =>
-          createArchiveWithProgress(outputPath, [sourceDir], null, () => {
-            throw new Error('boom from progress callback');
-          }),
-        (err) => {
-          assert.ok(
-            err.message.startsWith('IO_ERROR:'),
-            `core error code must stay primary, got: ${err.message}`,
-          );
-          assert.ok(err.message.endsWith(' | progressCallbackError: see cause'));
-          assert.ok(!err.message.includes('boom from progress callback'));
-          assert.strictEqual(err.cause.message, 'boom from progress callback');
-          return true;
-        },
-      );
-    },
-  );
+    await assert.rejects(
+      () =>
+        createArchiveWithProgress(outputPath, [sourceDir], null, () => {
+          throw new Error('boom from progress callback');
+        }),
+      (err) => {
+        assert.ok(
+          err.message.startsWith('IO_ERROR:'),
+          `core error code must stay primary, got: ${err.message}`
+        );
+        assert.ok(err.message.endsWith(' | progressCallbackError: see cause'));
+        assert.ok(!err.message.includes('boom from progress callback'));
+        assert.strictEqual(err.cause.message, 'boom from progress callback');
+        return true;
+      }
+    );
+  });
 
   // Run in a child process so a crash (uncaughtException, non-zero exit) can
   // be distinguished from a clean rejection without taking down this test run.
@@ -140,15 +138,15 @@ describe('createArchiveWithProgress', () => {
     assert.strictEqual(
       result.status,
       0,
-      `expected clean exit, got status=${result.status}, stderr=${result.stderr}`,
+      `expected clean exit, got status=${result.status}, stderr=${result.stderr}`
     );
     assert.ok(
       result.stdout.includes('REJECTED:boom from progress callback'),
-      `expected rejection to be observed, got stdout=${result.stdout}`,
+      `expected rejection to be observed, got stdout=${result.stdout}`
     );
     assert.ok(
       !result.stderr.includes('Uncaught'),
-      `expected no uncaught exception, got stderr=${result.stderr}`,
+      `expected no uncaught exception, got stderr=${result.stderr}`
     );
   });
 
@@ -183,7 +181,7 @@ describe('createArchiveWithProgress', () => {
       0,
       'primitive throws are expected to still crash the process; if this now ' +
         'exits cleanly, the upstream napi-rs bug is fixed — update this test ' +
-        'and the createArchiveWithProgress docs',
+        'and the createArchiveWithProgress docs'
     );
     assert.match(result.stderr, /Call JavaScript callback failed/);
     // The promise never settles, so neither handler runs.
@@ -234,19 +232,19 @@ describe('createArchiveWithProgressSync', () => {
     const result = spawnSync(
       process.execPath,
       ['-e', syncThrowScript("new Error('boom from progress callback')")],
-      { encoding: 'utf8' },
+      { encoding: 'utf8' }
     );
 
     assert.strictEqual(
       result.status,
       0,
-      `expected clean exit, got status=${result.status}, stderr=${result.stderr}`,
+      `expected clean exit, got status=${result.status}, stderr=${result.stderr}`
     );
     // The report is returned normally: the callback had not run yet.
     assert.match(result.stdout, /RETURNED:1/);
     assert.ok(
       result.stdout.includes('UNCAUGHT:boom from progress callback'),
-      `expected the throw to surface as uncaughtException, got stdout=${result.stdout}`,
+      `expected the throw to surface as uncaughtException, got stdout=${result.stdout}`
     );
   });
 
@@ -262,16 +260,16 @@ describe('createArchiveWithProgressSync', () => {
     assert.strictEqual(
       result.status,
       0,
-      `expected clean exit, got status=${result.status}, stderr=${result.stderr}`,
+      `expected clean exit, got status=${result.status}, stderr=${result.stderr}`
     );
     assert.match(result.stdout, /RETURNED:1/);
     assert.ok(
       result.stdout.includes('UNCAUGHT:oops'),
-      `expected the primitive throw to surface as uncaughtException, got stdout=${result.stdout}`,
+      `expected the primitive throw to surface as uncaughtException, got stdout=${result.stdout}`
     );
     assert.ok(
       !result.stderr.includes('Call JavaScript callback failed'),
-      `sync dispatch must not hit the call_async_catch primitive bug, got stderr=${result.stderr}`,
+      `sync dispatch must not hit the call_async_catch primitive bug, got stderr=${result.stderr}`
     );
   });
 });

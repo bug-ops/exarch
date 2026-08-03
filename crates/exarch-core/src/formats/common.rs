@@ -370,10 +370,14 @@ pub fn check_extension_allowed(
 /// Creates a file with permissions enforced after creation to bypass umask.
 ///
 /// On Unix platforms, this function uses `OpenOptions::mode()` to hint the
-/// desired mode during `open()`, then calls `set_permissions()` to enforce
-/// the exact sanitized mode. The second call is required because
-/// `OpenOptions::mode()` is subject to the process umask and the resulting
-/// permissions may be narrower than requested.
+/// desired mode during `open()`, then calls `File::set_permissions()` on the
+/// already-open file descriptor (`fchmod`) to enforce the exact sanitized
+/// mode. The second call is required because `OpenOptions::mode()` is
+/// subject to the process umask and the resulting permissions may be
+/// narrower than requested. Operating on the open descriptor rather than
+/// `std::fs::set_permissions(path, ..)` avoids re-resolving `path` from the
+/// filesystem root a second time, which would otherwise reopen a TOCTOU
+/// window between file creation and permission enforcement (issue #460).
 ///
 /// On non-Unix platforms, permissions are not supported and mode is ignored.
 ///
@@ -398,11 +402,11 @@ pub fn check_extension_allowed(
 ///
 /// # Performance
 ///
-/// - Unix: 2 syscalls (open with mode hint + `set_permissions` to bypass umask)
-/// - Non-Unix: 1 syscall (create)
-///
-/// For archives with 1000 files, this reduces 2000 syscalls to 1000 syscalls
-/// (50% reduction in permission-related syscalls).
+/// - Unix, `mode.is_some()`: 2 syscalls (`open` with mode hint + `fchmod` to
+///   bypass umask)
+/// - Unix, `mode.is_none()`: 1 syscall (`open`, no permission enforcement to
+///   perform)
+/// - Non-Unix: 1 syscall (`open`)
 ///
 /// # Security - Mode Sanitization Requirement
 ///
@@ -464,9 +468,13 @@ fn create_file_with_mode(
 
     // OpenOptions::mode() is subject to the process umask, which may reduce
     // the requested permissions. Call set_permissions() explicitly to enforce
-    // the exact sanitized mode, bypassing umask.
+    // the exact sanitized mode, bypassing umask. Applied to the already-open
+    // file descriptor (fchmod) rather than std::fs::set_permissions(path, ..),
+    // which would re-resolve path from the filesystem root and reopen a
+    // TOCTOU window between this open() and the permission change (issue
+    // #460).
     if let Some(m) = mode {
-        std::fs::set_permissions(path, Permissions::from_mode(m))?;
+        file.set_permissions(Permissions::from_mode(m))?;
     }
 
     Ok(file)
@@ -511,14 +519,18 @@ fn create_file_with_mode(
 /// This function consolidates file extraction logic to ensure consistent:
 /// - Directory creation with caching
 /// - Buffered I/O (64KB buffer)
-/// - Permission preservation (Unix only, set atomically during file creation)
+/// - Exclusive file creation with permission enforcement (Unix only)
 /// - Quota tracking with overflow protection
 ///
 /// # Permission Enforcement
 ///
-/// On Unix, file permissions are enforced via `set_permissions()` after
-/// creation to bypass the process umask. This ensures the exact sanitized
-/// mode from `SecurityConfig` is applied, regardless of the caller's umask.
+/// On Unix, file permissions are enforced via `File::set_permissions()` on
+/// the already-open file descriptor (`fchmod`), not a path-based
+/// `std::fs::set_permissions()` call, to bypass the process umask without
+/// reopening a TOCTOU window between file creation and permission
+/// enforcement (issue #460). This ensures the exact sanitized mode from
+/// `SecurityConfig` is applied, regardless of the caller's umask. See
+/// [`create_file_with_mode`] for the full contract.
 ///
 /// # Correctness
 ///

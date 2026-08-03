@@ -93,6 +93,7 @@
 use std::io::ErrorKind;
 use std::io::Read;
 use std::io::Seek;
+use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::id;
@@ -188,6 +189,13 @@ pub struct SevenZArchive<R: Read + Seek> {
     source: R,
     entries: Vec<CachedEntry>,
     is_solid: bool,
+    /// Header already parsed by [`Self::new`], retained so
+    /// `extract_with_callback` can hand it to
+    /// `ArchiveReader::from_archive` instead of re-parsing the archive from
+    /// scratch (issue #492). Cloned, not moved, at extraction time so that a
+    /// second `extract()` call on the same instance still has a real parsed
+    /// archive to work with instead of silently extracting nothing.
+    archive: Archive,
 }
 
 impl<R: Read + Seek> SevenZArchive<R> {
@@ -238,6 +246,7 @@ impl<R: Read + Seek> SevenZArchive<R> {
                         source,
                         entries: vec![],
                         is_solid: false,
+                        archive: Archive::default(),
                     });
                 }
                 return Err(ArchiveError::InvalidArchive(format!(
@@ -268,12 +277,67 @@ impl<R: Read + Seek> SevenZArchive<R> {
             source,
             entries,
             is_solid,
+            archive,
         })
     }
 }
 
+/// Writes `reader`'s bytes directly to `dest_path` (no temp file, no
+/// rename), consuming the [`QuotaPermit`] that authorized the write.
+///
+/// Used for the common case where nothing currently occupies `dest_path`
+/// (issue #492): opens `dest_path` itself via `common::create_file_with_mode`
+/// with `create_new = true`, giving the same `O_EXCL`+`O_NOFOLLOW` (Unix)
+/// guarantee against a symlink race as [`write_file_with_permit`]'s temp file
+/// and as TAR/ZIP's [`common::extract_file_with_permit`] — just without the
+/// two extra syscalls (open+rename of a temp file) that only matter when
+/// something needs to be atomically replaced. Callers must have already
+/// confirmed `dest_path` has no pre-existing occupant (see
+/// [`lstat_dest`]); when it does, use [`write_file_with_permit`] instead so a
+/// decode failure mid-stream cannot leave a truncated file where the
+/// original stood.
+///
+/// Taking `permit` by value mirrors the guarantee
+/// [`common::copy_file_content_with_permit`] gives TAR's hardlink path, and
+/// the guarantee [`common::extract_file_with_permit`] gives TAR/ZIP's
+/// normal-file path (issue #445): `QuotaPermit` is neither `Clone` nor
+/// `Copy`, so a caller cannot retain it to authorize a second write, and this
+/// function cannot be called at all without moving a genuine permit out of
+/// the validated entry.
+///
+/// # Errors
+///
+/// Returns an error if file creation, the copy, or the underlying I/O fails.
+fn write_file_direct(
+    reader: &mut dyn Read,
+    dest_path: &Path,
+    _permit: QuotaPermit,
+) -> std::result::Result<u64, sevenz_rust2::Error> {
+    let file = common::create_file_with_mode(dest_path, None, true)?;
+    // A decode failure partway through the copy would otherwise leave a
+    // truncated file at dest_path (issue #492 adversarial review, finding
+    // M1): since this branch only runs when nothing occupied dest_path
+    // beforehand, it is always safe to remove whatever we just started
+    // writing there. Mirrors write_file_with_permit_using's TempFileGuard
+    // use, just applied directly to dest_path instead of a temp path.
+    let guard = common::TempFileGuard::new(dest_path.to_path_buf());
+    // 64KiB write buffering to cut per-file syscall count (finding M2),
+    // matching TAR/ZIP's common::extract_file_with_permit.
+    let mut writer = std::io::BufWriter::with_capacity(64 * 1024, file);
+    let bytes_written = std::io::copy(reader, &mut writer)?;
+    writer.flush()?;
+    guard.persist();
+    Ok(bytes_written)
+}
+
 /// Writes `reader`'s bytes to `dest_path` via an atomic temp-file-then-rename,
 /// consuming the [`QuotaPermit`] that authorized the write.
+///
+/// Used only when `dest_path` has a pre-existing occupant being overwritten
+/// (issue #492): atomicity matters here because a decode failure mid-stream
+/// must not leave a truncated file where the original stood. When
+/// `dest_path` is known to have no pre-existing occupant, [`write_file_direct`]
+/// skips the temp file and rename entirely.
 ///
 /// Taking `permit` by value mirrors the guarantee
 /// [`common::copy_file_content_with_permit`] gives TAR's hardlink path, and
@@ -367,7 +431,15 @@ fn write_file_with_permit_using(
     })?;
 
     let temp_guard = common::TempFileGuard::new(temp_path.clone());
-    let bytes_written = std::io::copy(reader, &mut temp_file)?;
+    // 64KiB write buffering to cut per-file syscall count (issue #492
+    // adversarial review, finding M2), matching TAR/ZIP's
+    // common::extract_file_with_permit.
+    let bytes_written = {
+        let mut writer = std::io::BufWriter::with_capacity(64 * 1024, &mut temp_file);
+        let bytes_written = std::io::copy(reader, &mut writer)?;
+        writer.flush()?;
+        bytes_written
+    };
     std::fs::rename(&temp_path, dest_path)?;
     temp_guard.persist();
 
@@ -387,13 +459,19 @@ fn write_file_with_permit_using(
 /// # TOCTOU
 ///
 /// This check is advisory, not atomic: nothing prevents the filesystem state
-/// at `dest_path` from changing between this lstat and the later
-/// `remove_file`/`remove_dir_all`/`rename`. That window is benign here —
-/// unlike TAR/ZIP's `O_NOFOLLOW` open (a single atomic syscall), 7z's
-/// temp+rename write never opens `dest_path` itself, and `rename(2)`
-/// replaces whatever occupies the destination without following a symlink
-/// planted there in the interim, so a race cannot redirect the write through
-/// a symlink target.
+/// at `dest_path` from changing between this lstat and the later write. That
+/// window is benign on both of 7z's write paths (issue #492), for different
+/// reasons:
+///
+/// - When nothing occupied `dest_path` ([`write_file_direct`]): the fast path
+///   opens `dest_path` itself via `common::create_file_with_mode` with
+///   `create_new = true`, the same `O_EXCL`+`O_NOFOLLOW` (Unix) guarantee
+///   TAR/ZIP's `O_NOFOLLOW` open gives — anything planted in the race window
+///   makes that open fail with `AlreadyExists` instead of being followed.
+/// - When something did occupy `dest_path` ([`write_file_with_permit`]): this
+///   branch never opens `dest_path` itself, and `rename(2)` replaces whatever
+///   occupies the destination without following a symlink planted there in the
+///   interim, so a race cannot redirect the write through a symlink target.
 fn lstat_dest(dest_path: &Path) -> std::io::Result<Option<std::fs::Metadata>> {
     match std::fs::symlink_metadata(dest_path) {
         Ok(meta) => Ok(Some(meta)),
@@ -457,6 +535,19 @@ impl<R: Read + Seek> SevenZArchive<R> {
         // entries is reserved separately below, after the duplicate-skip
         // check, so a skipped entry never consumes quota it will not use
         // (issue #478). See `EntryValidator::validate_entry_path`.
+        //
+        // SECURITY: Deliberately passes `None`, not `Some(dir_cache)`, unlike
+        // TAR (issue #492 adversarial review, finding C1). `DirCache` caches
+        // any path `create_dir_all` reports as already-a-directory, without
+        // checking whether that path is a real directory or a symlink to
+        // one. If something outside archive control (e.g. a misbehaving
+        // `ProgressCallback`) swaps a previously-created directory for a
+        // symlink between entries, trusting `dir_cache` here would skip the
+        // parent-canonicalize check that catches the swap, turning a
+        // hard-erroring symlink escape into a silent, unbounded one across
+        // every subsequent entry under that path. Passing `None` forces
+        // `SafePath::validate_with_context` to canonicalize the parent every
+        // time, so the swap is always caught.
         let safe_path = validator
             .validate_entry_path(entry_path, None)
             .map_err(|e| sevenz_rust2::Error::Other(format!("validation failed: {e}").into()))?;
@@ -534,7 +625,13 @@ impl<R: Read + Seek> SevenZArchive<R> {
                     sevenz_rust2::Error::Other(format!("validation failed: {e}").into())
                 })?;
 
-                if existing.is_some() {
+                // Fast path (issue #492): when nothing occupies dest_path,
+                // write directly to it (open+write, no temp file, no
+                // rename) — mirrors TAR/ZIP's common::extract_file_with_permit.
+                // The overwrite branch keeps temp+rename so a decode failure
+                // mid-stream cannot leave a truncated file where the
+                // original stood.
+                let bytes_written = if existing.is_some() {
                     // 7z uses temp+rename (unlike TAR/ZIP which truncate
                     // in-place via File::create). Remove the existing
                     // regular file/symlink first so `rename` can succeed.
@@ -543,9 +640,10 @@ impl<R: Read + Seek> SevenZArchive<R> {
                     // symlink) can reach here: directories and Unix symlinks
                     // were already rejected above.
                     std::fs::remove_file(&dest_path)?;
-                }
-
-                let bytes_written = write_file_with_permit(reader, &dest_path, permit)?;
+                    write_file_with_permit(reader, &dest_path, permit)?
+                } else {
+                    write_file_direct(reader, &dest_path, permit)?
+                };
                 report.bytes_written = report
                     .bytes_written
                     .checked_add(bytes_written)
@@ -574,12 +672,16 @@ impl<R: Read + Seek> SevenZArchive<R> {
     ///
     /// - Re-validates paths in callback (defense in depth)
     /// - Enforces quotas during extraction
-    /// - Uses atomic writes (temp + rename)
+    /// - Writes directly (`O_EXCL`+`O_NOFOLLOW`) when nothing occupies the
+    ///   destination, and via atomic temp+rename when overwriting a
+    ///   pre-existing file — see [`write_file_direct`] and
+    ///   [`write_file_with_permit`] (issue #492)
     /// - Creates directories only after validation
     /// - Uses directory cache to reduce mkdir syscalls
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     fn extract_with_callback(
         source: &mut R,
+        archive: Archive,
         dest: &DestDir,
         validator: &mut EntryValidator,
         dir_cache: &mut common::DirCache,
@@ -666,8 +768,9 @@ impl<R: Read + Seek> SevenZArchive<R> {
             }
         };
 
-        let mut archive_reader =
-            ArchiveReader::new(source, Password::empty()).map_err(ArchiveError::from)?;
+        // Reuses the Archive header already parsed in `new()` instead of
+        // re-parsing it from scratch (issue #492).
+        let mut archive_reader = ArchiveReader::from_archive(archive, source, Password::empty());
         let result = archive_reader.for_each_entries(&mut extract_fn);
         let mut accumulated = ctx.report;
         if ctx.duplicate_skips > 0 {
@@ -806,15 +909,22 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
             return Ok(ExtractionReport::new());
         }
 
-        // Step 3: Extract with FRESH validator to avoid quota double-counting
-        // Note: sevenz-rust2 still parses archive internally, but we avoid
-        // double parsing in our validation logic
+        // Step 3: Extract with FRESH validator to avoid quota double-counting.
+        // The archive header itself was already parsed once in `new()`;
+        // cloning it here (rather than `mem::take`, issue #492 adversarial
+        // review finding C2) lets extract_with_callback reuse it via
+        // ArchiveReader::from_archive instead of re-parsing, while leaving
+        // `self.archive` intact so a second `extract()` call on the same
+        // instance still has real entry metadata to read, instead of
+        // silently extracting zero files against `Archive::default()`.
         let mut validator = EntryValidator::new(config, &dest);
         let mut dir_cache = common::DirCache::new();
         let total = self.entries.len();
+        let archive = self.archive.clone();
 
         let report = Self::extract_with_callback(
             &mut self.source,
+            archive,
             &dest,
             &mut validator,
             &mut dir_cache,
@@ -2241,6 +2351,116 @@ mod tests {
             report.warnings[0].contains(&ENTRY_COUNT.to_string()),
             "aggregated warning must report the correct skipped count, got: {}",
             report.warnings[0]
+        );
+    }
+
+    /// Regression test for issue #492 adversarial review, finding C1:
+    /// `process_entry_inner` must re-validate every entry's path without
+    /// trusting `dir_cache`'s record of directories it has already created.
+    /// If something outside the archive's own entries — e.g. a misbehaving
+    /// `ProgressCallback` — replaces a previously-created directory with a
+    /// symlink between two entries that share it as a parent, the trust
+    /// shortcut would let the second entry's write follow that symlink
+    /// outside the destination root, silently and repeatedly, instead of
+    /// failing loudly the way an untrusted (always-canonicalize) validation
+    /// does. Simulates exactly that swap and asserts extraction aborts
+    /// instead of writing through the symlink.
+    #[test]
+    #[cfg(unix)]
+    fn test_dir_swapped_for_symlink_between_entries_is_rejected() {
+        struct DirSwapper {
+            dest_root: std::path::PathBuf,
+            outside_root: std::path::PathBuf,
+        }
+
+        impl crate::ProgressCallback for DirSwapper {
+            fn on_entry_start(&mut self, _path: &std::path::Path, _total: usize, _current: usize) {}
+
+            fn on_bytes_written(&mut self, _bytes: u64) {}
+
+            fn on_entry_complete(&mut self, path: &std::path::Path) {
+                if path == std::path::Path::new("a/file1.txt") {
+                    let a = self.dest_root.join("a");
+                    std::fs::remove_dir_all(&a).unwrap();
+                    std::os::unix::fs::symlink(&self.outside_root, &a).unwrap();
+                }
+            }
+
+            fn on_complete(&mut self) {}
+        }
+
+        let data = make_sevenz_archive(&[("a/file1.txt", b"one"), ("a/file2.txt", b"two")]);
+        let mut archive = SevenZArchive::new(Cursor::new(data)).unwrap();
+
+        let dest = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+
+        let mut swapper = DirSwapper {
+            dest_root: dest.path().to_path_buf(),
+            outside_root: outside.path().to_path_buf(),
+        };
+
+        let config = SecurityConfig::default().validate().expect("valid config");
+        let result = archive.extract(
+            dest.path(),
+            &config,
+            &ExtractionOptions::default(),
+            &mut swapper,
+        );
+
+        assert!(
+            result.is_err(),
+            "extraction must fail once a parent directory is swapped for a symlink \
+             mid-extraction, not silently continue writing through it"
+        );
+        assert!(
+            !outside.path().join("file2.txt").exists(),
+            "file2.txt must not be written through the swapped symlink outside the \
+             destination root"
+        );
+    }
+
+    /// Regression test for issue #492 adversarial review, finding C2:
+    /// `extract()` must remain safely callable more than once on the same
+    /// `SevenZArchive` instance. `mem::take`-ing the cached `Archive` on the
+    /// first call left `self.archive` as `Archive::default()` afterward, so
+    /// a second `extract()` would silently report zero files extracted
+    /// against an archive with no entries, instead of extracting the same
+    /// real contents again.
+    #[test]
+    fn test_extract_can_be_called_twice_on_same_instance() {
+        let data = make_sevenz_archive(&[("file.txt", b"payload")]);
+        let mut archive = SevenZArchive::new(Cursor::new(data)).unwrap();
+        let config = SecurityConfig::default().validate().expect("valid config");
+
+        let first_dest = TempDir::new().unwrap();
+        let first_report = archive
+            .extract(
+                first_dest.path(),
+                &config,
+                &ExtractionOptions::default(),
+                &mut crate::NoopProgress,
+            )
+            .unwrap();
+        assert_eq!(first_report.files_extracted, 1);
+
+        let second_dest = TempDir::new().unwrap();
+        let second_report = archive
+            .extract(
+                second_dest.path(),
+                &config,
+                &ExtractionOptions::default(),
+                &mut crate::NoopProgress,
+            )
+            .unwrap();
+        assert_eq!(
+            second_report.files_extracted, 1,
+            "second extract() call on the same instance must extract the real archive \
+             contents, not silently return zero files"
+        );
+        assert_eq!(
+            std::fs::read(second_dest.path().join("file.txt")).unwrap(),
+            b"payload"
         );
     }
 }

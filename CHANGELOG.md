@@ -56,6 +56,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`formats::sevenz::extract_archive` now builds its duplicate-skip warning via the shared
+  `common::push_duplicate_skip_warning` helper (#499)**, matching the TAR and ZIP handlers instead
+  of re-implementing the singular/plural aggregation inline. No behavior or message change.
 - **BREAKING: `ArchiveError::to_ffi_message` no longer takes a `sanitize_paths: bool` parameter
   (#463)**: the parameter's runtime toggle no longer maps onto anything real once the redaction
   policy became profile-gated (`cfg(debug_assertions)`) rather than caller-selected — see the

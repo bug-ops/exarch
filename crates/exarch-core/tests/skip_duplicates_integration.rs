@@ -145,7 +145,6 @@ fn make_sevenz_with_duplicate(path: &str, first: &[u8], second: &[u8]) -> NamedT
 }
 
 /// Build a 7z archive in memory containing a single file entry.
-#[cfg(unix)]
 fn make_sevenz_single(path: &str, content: &[u8]) -> NamedTempFile {
     let mut f = NamedTempFile::with_suffix(".7z").unwrap();
     {

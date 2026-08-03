@@ -42,7 +42,7 @@ export declare class CreationConfig {
    *
    * Default: true.
    */
-  setPreservePermissions(preserve?: boolean | undefined | null): this
+  setPreservePermissions(preserve: boolean): this
   /**
    * Sets whether to follow symlinks when adding files.
    *
@@ -51,13 +51,13 @@ export declare class CreationConfig {
    * Security note: Following symlinks may include unintended files
    * from outside the source directory.
    */
-  setFollowSymlinks(follow?: boolean | undefined | null): this
+  setFollowSymlinks(follow: boolean): this
   /**
    * Sets whether to include hidden files (files starting with '.').
    *
    * Default: false.
    */
-  setIncludeHidden(include?: boolean | undefined | null): this
+  setIncludeHidden(include: boolean): this
   /**
    * Sets maximum size for a single file in bytes.
    *
@@ -122,7 +122,7 @@ export declare class ExtractionOptions {
    * When `true` (default), duplicate entries produce a warning in the
    * report. When `false`, a duplicate entry causes an error.
    */
-  withSkipDuplicates(skip?: boolean | undefined | null): this
+  withSkipDuplicates(skip: boolean): this
   /**
    * Sets whether extraction uses a temporary directory for atomic commits.
    *
@@ -136,7 +136,7 @@ export declare class ExtractionOptions {
    * output-already-exists error. Non-atomic mode extracts into an
    * existing directory without error.
    */
-  withAtomic(atomic?: boolean | undefined | null): this
+  withAtomic(atomic: boolean): this
   /** Finalizes the configuration (for API consistency). */
   build(): this
   /** Whether duplicate entries are skipped silently. */
@@ -212,13 +212,13 @@ export declare class SecurityConfig {
   /** Sets the maximum path depth. */
   setMaxPathDepth(depth: number): this
   /** Allows or denies symlinks. */
-  setAllowSymlinks(allow?: boolean | undefined | null): this
+  setAllowSymlinks(allow: boolean): this
   /** Allows or denies hardlinks. */
-  setAllowHardlinks(allow?: boolean | undefined | null): this
+  setAllowHardlinks(allow: boolean): this
   /** Allows or denies absolute paths. */
-  setAllowAbsolutePaths(allow?: boolean | undefined | null): this
+  setAllowAbsolutePaths(allow: boolean): this
   /** Allows or denies world-writable files. */
-  setAllowWorldWritable(allow?: boolean | undefined | null): this
+  setAllowWorldWritable(allow: boolean): this
   /**
    * Allows or denies solid 7z archives.
    *
@@ -226,7 +226,7 @@ export declare class SecurityConfig {
    * entry, which may allow a crafted archive to consume excessive
    * memory. Disabled by default.
    */
-  setAllowSolidArchives(allow?: boolean | undefined | null): this
+  setAllowSolidArchives(allow: boolean): this
   /**
    * Sets the maximum memory that may be used to decompress a solid 7z block.
    *
@@ -240,7 +240,7 @@ export declare class SecurityConfig {
    */
   setMaxSolidBlockMemory(size: number): this
   /** Sets whether to preserve permissions from archive. */
-  setPreservePermissions(preserve?: boolean | undefined | null): this
+  setPreservePermissions(preserve: boolean): this
   /**
    * Adds an allowed file extension.
    *

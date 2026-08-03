@@ -16,6 +16,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING: `exarch-node` boolean setters now take a mandatory `boolean` instead of an
+  optional one (#442)**: `SecurityConfig.setAllowSymlinks`, `setAllowHardlinks`,
+  `setAllowAbsolutePaths`, `setAllowWorldWritable`, `setAllowSolidArchives`,
+  `setPreservePermissions`; `CreationConfig.setPreservePermissions`, `setFollowSymlinks`,
+  `setIncludeHidden`; and `ExtractionOptions.withSkipDuplicates`, `withAtomic` no longer accept
+  `Option<bool>` resolved via `.unwrap_or(true)`. Previously, calling one of these setters with
+  zero arguments silently flipped the flag to the permissive `true` state instead of erroring,
+  violating this project's secure-by-default posture. Callers must now pass an explicit
+  `boolean`; omitting the argument is a compile-time TypeScript error and a runtime napi error
+  from plain JavaScript. Explicit `undefined` or `null` are rejected the same way, which also
+  catches the more realistic failure pattern of forwarding an optional property (e.g.
+  `cfg.setAllowSymlinks(userOpts.allowSymlinks)`) that was never actually set.
 - **BREAKING: `ValidatedEntryType::File` now carries a `QuotaPermit` capability token (#436)**:
   `QuotaTracker::record_file` is renamed to `reserve` and returns `Result<QuotaPermit>` instead
   of `Result<()>`; `EntryValidator::record_hardlink` is renamed to `reserve_hardlink` for the

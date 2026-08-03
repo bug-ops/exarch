@@ -48,11 +48,17 @@ describe('ExtractionOptions', () => {
       assert.strictEqual(opts.skipDuplicates, true);
     });
 
-    it('should default to true when called with no argument', () => {
+    it('should throw when called with no argument, undefined, or null', () => {
       const opts = new ExtractionOptions();
       opts.withSkipDuplicates(false);
-      opts.withSkipDuplicates();
-      assert.strictEqual(opts.skipDuplicates, true);
+      assert.throws(() => opts.withSkipDuplicates());
+      assert.throws(() => opts.withSkipDuplicates(undefined));
+      assert.throws(() => opts.withSkipDuplicates(null));
+      assert.strictEqual(
+        opts.skipDuplicates,
+        false,
+        'a rejected call must not silently flip the flag'
+      );
     });
   });
 
@@ -74,6 +80,23 @@ describe('ExtractionOptions', () => {
       const opts = new ExtractionOptions();
       opts.withAtomic(true);
       assert.strictEqual(opts.atomic, true);
+    });
+
+    it('should set atomic back to false via withAtomic', () => {
+      const opts = new ExtractionOptions();
+      opts.withAtomic(true);
+      opts.withAtomic(false);
+      assert.strictEqual(opts.atomic, false);
+    });
+
+    it('should throw when withAtomic is called with no argument, undefined, or null', () => {
+      const opts = new ExtractionOptions();
+      opts.withAtomic(true);
+
+      assert.throws(() => opts.withAtomic());
+      assert.throws(() => opts.withAtomic(undefined));
+      assert.throws(() => opts.withAtomic(null));
+      assert.strictEqual(opts.atomic, true, 'a rejected call must not silently flip the flag');
     });
   });
 

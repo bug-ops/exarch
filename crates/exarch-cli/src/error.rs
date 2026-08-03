@@ -173,13 +173,7 @@ pub fn convert_extraction_error(
              HINT: Use --allow-hardlinks to extract hardlinks (only if trusted source).",
             archive.display(),
         ),
-        ArchiveError::Io(io_err) => {
-            format!(
-                "I/O error while processing '{}': {}",
-                archive.display(),
-                io_err
-            )
-        }
+        ArchiveError::Io(_) => format!("Failed to process '{}'", archive.display()),
         ArchiveError::UnknownFormat { path } => format!(
             "Cannot determine archive format: {}\n\
              HINT: Supported formats: tar, tar.gz, tar.bz2, tar.xz, tar.zstd, zip",
@@ -360,6 +354,30 @@ mod tests {
         let converted = convert_extraction_error(err, Path::new("archive.tar.gz"), false);
         let msg = format!("{converted:?}");
         assert!(msg.contains("I/O error"));
+    }
+
+    // Regression test for issue #528: the `Io` arm's context must not
+    // re-embed the wrapped `io::Error`'s own Display text, since anyhow's
+    // `{:#}` rendering already appends the source error after the context.
+    #[test]
+    fn test_io_error_no_duplication() {
+        let io_err = io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Illegal byte sequence (os error 92)",
+        );
+        let err = ArchiveError::Io(io_err);
+        let converted = convert_extraction_error(err, Path::new("nonutf8.tar"), false);
+        let msg = format!("{converted:#}");
+        assert_eq!(
+            msg.matches("Illegal byte sequence (os error 92)").count(),
+            1,
+            "OS error text should appear exactly once, got: {msg}"
+        );
+        assert_eq!(
+            msg.matches("I/O error").count(),
+            1,
+            "\"I/O error\" phrase should appear exactly once, got: {msg}"
+        );
     }
 
     // Regression tests for issue #204: PartialExtraction wrapping HardlinkEscape /

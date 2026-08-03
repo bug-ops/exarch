@@ -176,6 +176,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`exarch-core`: 7z `skip_duplicates` check missed a dangling symlink at the destination path
+  (#468)**: `dest_path.exists()` follows symlinks and returns `false` for a dangling symlink, so a
+  pre-existing dangling symlink occupying an entry's destination silently passed the duplicate
+  check instead of being detected. With `skip_duplicates = true` the entry is now correctly skipped
+  rather than silently replacing the symlink; with `skip_duplicates = false`, this check's own
+  destination is still replaced via `rename` rather than followed, so this specific check is not a
+  symlink-escape vector (unlike TAR/ZIP, which hard-fail via `O_NOFOLLOW` here — that cross-format
+  divergence is tracked separately in #477). This is unrelated to the temp-file creation step
+  earlier in the same write path, which is a separate, open symlink-escape vector tracked as #471.
+  Replaced the check with `dest_path.symlink_metadata().is_ok()`, matching the same simplification
+  applied to `formats::common::create_symlink`'s equivalent duplicate check.
 - **`sanitize_path_for_error`/`sanitize_io_error_for_error` duplicated verbatim across bindings
   (plus a third, unused copy in `exarch-core` itself), and over-redacted attacker-authored paths
   (#463, #462)**: the profile-gated redaction helpers added by #453 were byte-identical,

@@ -729,7 +729,7 @@ pub fn create_symlink(
         // Create parent directories using cache
         dir_cache.ensure_parent_dir(&link_path)?;
 
-        if link_path.exists() || link_path.symlink_metadata().is_ok() {
+        if link_path.symlink_metadata().is_ok() {
             if skip_duplicates {
                 report.files_skipped += 1;
                 report.warnings.push(format!(

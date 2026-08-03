@@ -34,6 +34,109 @@ fn run_extraction(
     )
 }
 
+/// Extracts into a fresh temp directory next to `output_dir`, then swaps it
+/// into place over the pre-existing `output_dir`.
+///
+/// Used only for `--atomic --force` when `output_dir` already exists. Core's
+/// own atomic path (`ExtractionOptions::atomic`) never replaces an existing
+/// directory, so this performs the replacement itself, strictly after
+/// extraction has already succeeded: the original destination is moved aside
+/// to a backup path, the extracted content is moved into place, and only
+/// then is the backup removed. If moving the extracted content into place
+/// fails, the backup is moved back so the original destination is restored.
+fn run_atomic_force_extraction(
+    archive: &Path,
+    output_dir: &Path,
+    config: &SecurityConfig,
+    options: &ExtractionOptions,
+    progress: &mut dyn ProgressCallback,
+    allow_symlinks: bool,
+) -> Result<ExtractionReport> {
+    let canonical_output = output_dir
+        .canonicalize()
+        .with_context(|| format!("failed to resolve destination: {}", output_dir.display()))?;
+    let parent = canonical_output
+        .parent()
+        .with_context(|| format!("destination has no parent: {}", output_dir.display()))?;
+
+    let temp_dir = tempfile::tempdir_in(parent)
+        .with_context(|| format!("failed to create temp directory in {}", parent.display()))?;
+
+    let report = run_extraction(
+        archive,
+        temp_dir.path(),
+        config,
+        options,
+        progress,
+        allow_symlinks,
+    )?;
+
+    // Extraction succeeded. Reserve a unique, currently-vacant sibling path
+    // for the backup: renaming onto an existing path (even an empty
+    // directory) is unsupported on Windows, so the reserved path must be
+    // freed before use.
+    let backup_dir = tempfile::tempdir_in(parent)
+        .with_context(|| format!("failed to reserve backup path in {}", parent.display()))?;
+    let backup_path = backup_dir.keep();
+    std::fs::remove_dir(&backup_path)
+        .with_context(|| format!("failed to free backup path: {}", backup_path.display()))?;
+
+    std::fs::rename(&canonical_output, &backup_path).with_context(|| {
+        format!(
+            "failed to move existing destination {} aside before replacing it",
+            canonical_output.display()
+        )
+    })?;
+
+    let temp_path = temp_dir.keep();
+    if let Err(e) = std::fs::rename(&temp_path, &canonical_output) {
+        // Restore the original destination; the new extraction is discarded.
+        // The restore's own outcome must be checked, not assumed: claiming
+        // "restored" when the rename-back itself failed would tell the user
+        // their data is safe while it actually sits at an unprinted temp path.
+        let restore_result = std::fs::rename(&backup_path, &canonical_output);
+        let _ = std::fs::remove_dir_all(&temp_path);
+        return Err(e).with_context(|| match restore_result {
+            Ok(()) => format!(
+                "failed to move extracted content into {}; original destination restored",
+                canonical_output.display()
+            ),
+            Err(restore_err) => format!(
+                "failed to move extracted content into {}; the original destination could NOT \
+                 be restored ({restore_err}) — its original contents are preserved at {} and \
+                 must be recovered manually",
+                canonical_output.display(),
+                backup_path.display()
+            ),
+        });
+    }
+
+    let _ = std::fs::remove_dir_all(&backup_path);
+
+    Ok(report)
+}
+
+/// Determines whether `--atomic --force` must replace a pre-existing
+/// `output_dir` via [`run_atomic_force_extraction`].
+///
+/// Gated on `is_dir()`, not `exists()`: a pre-existing non-directory
+/// destination (a regular file, a symlink to one, etc.) must never be
+/// silently replaced by the swap — that would reproduce the exact data-loss
+/// class #519 was filed for, just on a different destination type. Returns
+/// an error instead of proceeding when that happens.
+fn resolve_atomic_force_replace(args: &ExtractArgs, output_dir: &Path) -> Result<bool> {
+    if !(args.atomic && args.force && output_dir.exists()) {
+        return Ok(false);
+    }
+    if !output_dir.is_dir() {
+        anyhow::bail!(
+            "cannot use --atomic --force: destination {} already exists and is not a directory",
+            output_dir.display()
+        );
+    }
+    Ok(true)
+}
+
 /// Expands a list of extension tokens that may contain comma-separated values
 /// into individual lowercase extension strings without leading dots.
 fn parse_extensions(raw: &[String]) -> Vec<String> {
@@ -185,18 +288,17 @@ pub fn execute(
             .count()
     };
 
-    let options = ExtractionOptions::default()
-        .with_atomic(args.atomic)
-        .with_skip_duplicates(!args.force);
+    // --atomic + --force over a pre-existing destination needs a swap that
+    // core's `extract_atomic` doesn't perform itself (it refuses to replace
+    // an existing directory, by design, so a pre-existing destination is
+    // never touched if extraction fails). The CLI performs that swap only
+    // after extraction has already fully succeeded; see
+    // `run_atomic_force_extraction`.
+    let atomic_force_replace = resolve_atomic_force_replace(args, &output_dir)?;
 
-    // When --atomic + --force: remove existing destination after successful
-    // extraction (handled inside extract_atomic via rename semantics) but we
-    // must pre-remove if it exists so rename can succeed (on most platforms
-    // rename over an existing non-empty dir fails).
-    if args.atomic && args.force && output_dir.exists() {
-        std::fs::remove_dir_all(&output_dir)
-            .with_context(|| format!("failed to remove existing dir: {}", output_dir.display()))?;
-    }
+    let options = ExtractionOptions::default()
+        .with_atomic(args.atomic && !atomic_force_replace)
+        .with_skip_duplicates(!args.force);
 
     let mut progress: Box<dyn ProgressCallback> = if verbose {
         Box::new(VerboseProgress::new())
@@ -206,14 +308,25 @@ pub fn execute(
         Box::new(NoopProgress)
     };
 
-    let report = run_extraction(
-        &args.archive,
-        &output_dir,
-        &config,
-        &options,
-        progress.as_mut(),
-        args.allow_symlinks,
-    )?;
+    let report = if atomic_force_replace {
+        run_atomic_force_extraction(
+            &args.archive,
+            &output_dir,
+            &config,
+            &options,
+            progress.as_mut(),
+            args.allow_symlinks,
+        )?
+    } else {
+        run_extraction(
+            &args.archive,
+            &output_dir,
+            &config,
+            &options,
+            progress.as_mut(),
+            args.allow_symlinks,
+        )?
+    };
 
     formatter.format_extraction_result(&report)?;
 

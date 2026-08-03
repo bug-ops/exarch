@@ -24,13 +24,13 @@ exarch-core.workspace = true
 indicatif = { workspace = true, features = ["improved_unicode"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+tempfile.workspace = true
 
 [dev-dependencies]
 assert_cmd.workspace = true
 flate2.workspace = true
 predicates.workspace = true
 tar.workspace = true
-tempfile.workspace = true
 
 [lints]
 workspace = true

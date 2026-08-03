@@ -2532,3 +2532,276 @@ fn test_extract_known_limitation_cli_rejects_legitimate_sparse_hole_above_synthe
         .failure()
         .stderr(predicate::str::contains("failed to list archive"));
 }
+
+// ============================================================================
+// --atomic --force destination safety (#519)
+// ============================================================================
+
+/// Regression test for #519: `--atomic --force` extracting a valid archive
+/// over a pre-existing non-empty destination must fully replace it.
+#[test]
+fn test_extract_atomic_force_success_replaces_destination() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let dest = temp.path().join("dest");
+    std::fs::create_dir_all(&dest).expect("create pre-existing destination");
+    std::fs::write(dest.join("old.txt"), b"OLD CONTENT").expect("seed pre-existing file");
+
+    exarch_cmd()
+        .arg("extract")
+        .arg("--atomic")
+        .arg("--force")
+        .arg(fixture_path("sample.tar.gz"))
+        .arg(&dest)
+        .assert()
+        .success();
+
+    assert!(
+        dest.join("sample.txt").exists(),
+        "destination must contain the newly extracted archive content"
+    );
+    assert!(
+        !dest.join("old.txt").exists(),
+        "pre-existing destination content must be fully replaced on success"
+    );
+}
+
+/// Regression test for #519: `--atomic --force` used to unconditionally
+/// `remove_dir_all` the destination before extraction even started, so a
+/// mid-extraction failure permanently destroyed pre-existing content. The fix
+/// extracts into a temp directory and only swaps it into place after
+/// extraction fully succeeds, so a failed extraction must leave the
+/// pre-existing destination completely untouched — same files, same
+/// content, no partial archive content leaked in, and no leftover
+/// swap/backup directories next to it.
+#[test]
+fn test_extract_atomic_force_failure_leaves_destination_untouched() {
+    // The archive lives in a separate temp dir from `dest`'s parent, so the
+    // sibling-directory check below only ever sees directories the CLI itself
+    // created (or failed to clean up), not this test's own fixture file.
+    let archive_temp = TempDir::new().expect("failed to create archive temp dir");
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let dest = temp.path().join("dest");
+    std::fs::create_dir_all(&dest).expect("create pre-existing destination");
+    std::fs::write(dest.join("old.txt"), b"OLD CONTENT").expect("seed pre-existing file");
+
+    // Symlinks are rejected during extraction (not during the CLI's list
+    // pre-flight) since --allow-symlinks defaults to false, so this archive
+    // passes listing and fails partway through the actual extraction copy —
+    // exactly the failure shape #519 needs to exercise.
+    let archive_path = archive_temp.path().join("symlink_escape.tar.gz");
+    create_symlink_escape_tar_gz(&archive_path);
+
+    exarch_cmd()
+        .arg("extract")
+        .arg("--atomic")
+        .arg("--force")
+        .arg(&archive_path)
+        .arg(&dest)
+        .assert()
+        .failure();
+
+    let contents = std::fs::read(dest.join("old.txt")).expect("pre-existing file must survive");
+    assert_eq!(
+        contents, b"OLD CONTENT",
+        "pre-existing destination content must be byte-for-byte unchanged after a failed extraction"
+    );
+    assert!(
+        !dest.join("evil_link").exists(),
+        "no content from the failed extraction attempt must leak into the destination"
+    );
+
+    let siblings: Vec<_> = std::fs::read_dir(temp.path())
+        .expect("read temp dir")
+        .map(|e| e.expect("dir entry").file_name())
+        .collect();
+    assert_eq!(
+        siblings,
+        vec![std::ffi::OsString::from("dest")],
+        "no leftover temp/backup swap directories must remain next to the destination: {siblings:?}"
+    );
+}
+
+// ============================================================================
+// SecurityViolation HINT text specificity (#520)
+// ============================================================================
+
+/// CRC32 (IEEE 802.3 polynomial) for raw ZIP construction.
+fn crc32_ieee(data: &[u8]) -> u32 {
+    let mut crc: u32 = 0xFFFF_FFFF;
+    for &byte in data {
+        crc ^= u32::from(byte);
+        for _ in 0..8 {
+            if crc & 1 != 0 {
+                crc = (crc >> 1) ^ 0xEDB8_8320;
+            } else {
+                crc >>= 1;
+            }
+        }
+    }
+    !crc
+}
+
+/// Raw-DEFLATEs `data` (RFC 1951, no zlib/gzip wrapper), the format ZIP's
+/// compression method 8 requires.
+fn raw_deflate(data: &[u8]) -> Vec<u8> {
+    use flate2::Compression;
+    use flate2::write::DeflateEncoder;
+    use std::io::Write;
+
+    let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(data).expect("deflate payload");
+    encoder.finish().expect("finish deflate stream")
+}
+
+/// Builds a single-entry, spec-valid DEFLATE ZIP archive whose local file
+/// header and central directory both declare `declared_uncompressed_size`
+/// for `entry_name`, regardless of what `real_payload` actually decompresses
+/// to. Mirrors the GHSA-5j8q-wxg5-hj4r advisory `PoC` shape (see
+/// `exarch-core/tests/security/zip_ghsa_5j8q.rs`): a forged small
+/// `uncompressed_size` alongside a real, much larger compressed stream.
+#[allow(clippy::cast_possible_truncation)]
+fn build_forged_size_zip(
+    entry_name: &str,
+    real_payload: &[u8],
+    declared_uncompressed_size: u32,
+) -> Vec<u8> {
+    let compressed = raw_deflate(real_payload);
+    let crc = crc32_ieee(real_payload);
+    let name_bytes = entry_name.as_bytes();
+    let name_len = name_bytes.len() as u16;
+    let compressed_len = compressed.len() as u32;
+
+    let mut buf: Vec<u8> = Vec::new();
+    let local_offset = 0u32;
+
+    buf.extend_from_slice(b"PK\x03\x04");
+    buf.extend_from_slice(&20u16.to_le_bytes());
+    buf.extend_from_slice(&0u16.to_le_bytes());
+    buf.extend_from_slice(&8u16.to_le_bytes());
+    buf.extend_from_slice(&0u16.to_le_bytes());
+    buf.extend_from_slice(&0u16.to_le_bytes());
+    buf.extend_from_slice(&crc.to_le_bytes());
+    buf.extend_from_slice(&compressed_len.to_le_bytes());
+    buf.extend_from_slice(&declared_uncompressed_size.to_le_bytes()); // FORGED
+    buf.extend_from_slice(&name_len.to_le_bytes());
+    buf.extend_from_slice(&0u16.to_le_bytes());
+    buf.extend_from_slice(name_bytes);
+    buf.extend_from_slice(&compressed);
+
+    let central_dir_offset = buf.len() as u32;
+
+    buf.extend_from_slice(b"PK\x01\x02");
+    buf.extend_from_slice(&0x031eu16.to_le_bytes());
+    buf.extend_from_slice(&20u16.to_le_bytes());
+    buf.extend_from_slice(&0u16.to_le_bytes());
+    buf.extend_from_slice(&8u16.to_le_bytes());
+    buf.extend_from_slice(&0u16.to_le_bytes());
+    buf.extend_from_slice(&0u16.to_le_bytes());
+    buf.extend_from_slice(&crc.to_le_bytes());
+    buf.extend_from_slice(&compressed_len.to_le_bytes());
+    buf.extend_from_slice(&declared_uncompressed_size.to_le_bytes()); // FORGED
+    buf.extend_from_slice(&name_len.to_le_bytes());
+    buf.extend_from_slice(&0u16.to_le_bytes());
+    buf.extend_from_slice(&0u16.to_le_bytes());
+    buf.extend_from_slice(&0u16.to_le_bytes());
+    buf.extend_from_slice(&0u16.to_le_bytes());
+    buf.extend_from_slice(&(0o100_644u32 << 16).to_le_bytes());
+    buf.extend_from_slice(&local_offset.to_le_bytes());
+    buf.extend_from_slice(name_bytes);
+
+    let central_dir_size = (buf.len() as u32) - central_dir_offset;
+
+    buf.extend_from_slice(b"PK\x05\x06");
+    buf.extend_from_slice(&0u16.to_le_bytes());
+    buf.extend_from_slice(&0u16.to_le_bytes());
+    buf.extend_from_slice(&1u16.to_le_bytes());
+    buf.extend_from_slice(&1u16.to_le_bytes());
+    buf.extend_from_slice(&central_dir_size.to_le_bytes());
+    buf.extend_from_slice(&central_dir_offset.to_le_bytes());
+    buf.extend_from_slice(&0u16.to_le_bytes());
+
+    buf
+}
+
+/// Regression test for #520: the GHSA-5j8q-wxg5-hj4r forged-size
+/// `SecurityViolation` cannot be worked around with any policy flag, so its
+/// HINT must not suggest `--allow-symlinks`, `--allow-hardlinks`,
+/// `--allow-solid-archives`, or `--banned-component` the way the generic
+/// `SecurityViolation` HINT does.
+#[test]
+fn test_extract_forged_size_hint_omits_policy_flags() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive_path = temp.path().join("bomb.zip");
+    // Highly compressible so the real DEFLATE stream is tiny while still
+    // decompressing to several megabytes, well past the declared 50 bytes.
+    let real_payload = vec![0x41u8; 4 * 1024 * 1024];
+    std::fs::write(
+        &archive_path,
+        build_forged_size_zip("bomb.txt", &real_payload, 50),
+    )
+    .expect("write forged-size zip fixture");
+    let out_dir = temp.path().join("out");
+
+    let output = exarch_cmd()
+        .arg("extract")
+        .arg(&archive_path)
+        .arg(&out_dir)
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+
+    let stderr = std::str::from_utf8(&output).expect("stderr is not valid UTF-8");
+    assert!(
+        stderr.contains("cannot be relaxed via any policy flag"),
+        "expected the size-mismatch-specific HINT, got: {stderr}"
+    );
+    for flag in [
+        "--allow-symlinks",
+        "--allow-hardlinks",
+        "--allow-solid-archives",
+        "--banned-component",
+    ] {
+        assert!(
+            !stderr.contains(flag),
+            "forged-size HINT must not mention {flag} (it cannot fix a size mismatch), got: {stderr}"
+        );
+    }
+}
+
+/// Companion to [`test_extract_forged_size_hint_omits_policy_flags`]: a
+/// genuine banned-path-component `SecurityViolation` (unrelated to
+/// GHSA-5j8q-wxg5-hj4r) must still get the original generic HINT naming all
+/// four policy flags, proving #520's new guarded match arm did not swallow
+/// the pre-existing categories.
+#[test]
+fn test_extract_banned_component_hint_still_names_policy_flags() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive_path = temp.path().join("banned.tar.gz");
+    create_tar_gz_with_component(&archive_path, ".customdir");
+    let out_dir = temp.path().join("out");
+    std::fs::create_dir_all(&out_dir).expect("create out dir");
+
+    let output = exarch_cmd()
+        .arg("extract")
+        .arg(&archive_path)
+        .arg(&out_dir)
+        .arg("--banned-component")
+        .arg(".customdir")
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+
+    let stderr = std::str::from_utf8(&output).expect("stderr is not valid UTF-8");
+    for flag in [
+        "--allow-symlinks",
+        "--allow-hardlinks",
+        "--allow-solid-archives",
+        "--banned-component",
+    ] {
+        assert!(stderr.contains(flag), "HINT missing flag {flag}: {stderr}");
+    }
+}

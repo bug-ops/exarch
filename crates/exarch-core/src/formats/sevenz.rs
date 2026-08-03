@@ -438,6 +438,8 @@ impl<R: Read + Seek> SevenZArchive<R> {
         dir_cache: &mut common::DirCache,
         skip_duplicates: bool,
         config: &SecurityConfig<Validated>,
+        duplicate_skips: &mut u64,
+        pending_io_error: &mut Option<std::io::Error>,
     ) -> std::result::Result<u64, sevenz_rust2::Error> {
         let entry_type = SevenZEntryAdapter::to_entry_type(entry).map_err(|e| {
             sevenz_rust2::Error::Other(format!("entry type detection failed: {e}").into())
@@ -473,10 +475,7 @@ impl<R: Read + Seek> SevenZArchive<R> {
 
                 if existing.is_some() && skip_duplicates {
                     report.files_skipped += 1;
-                    report.warnings.push(format!(
-                        "skipped duplicate entry: {}",
-                        safe_path.as_path().display()
-                    ));
+                    *duplicate_skips += 1;
                     return Ok(0);
                 }
 
@@ -492,6 +491,41 @@ impl<R: Read + Seek> SevenZArchive<R> {
                     return Err(symlink_at_dest_error().into());
                 }
 
+                // `lstat_dest` uses `symlink_metadata` (lstat), so `is_dir()`
+                // here is true only for a real pre-existing directory, never
+                // a symlink pointing at one: on Unix any symlink is already
+                // rejected above, and on non-Unix a symlink-to-directory is
+                // not itself a directory by lstat semantics, so it falls
+                // through to the regular-file removal path below (issue
+                // #483 counterexample: a symlink-to-directory must not be
+                // treated as a directory itself).
+                if let Some(meta) = &existing
+                    && meta.is_dir()
+                {
+                    // Match TAR/ZIP's EISDIR failure (create_file_with_mode
+                    // opening a directory for write) instead of recursively
+                    // deleting the pre-existing directory tree (issue #483).
+                    //
+                    // Stashed as a raw `io::Error` and returned out-of-band
+                    // via `pending_io_error` instead of `.into()`-converting
+                    // to `sevenz_rust2::Error` here: that round-trip goes
+                    // through `From<sevenz_rust2::Error> for ArchiveError`,
+                    // which stringifies the error and re-derives its
+                    // classification from substring matches (password/
+                    // encrypt/i/o/read/write) on the resulting text,
+                    // collapsing `ErrorKind::IsADirectory` to `Other` and
+                    // risking misclassification as `SecurityViolation` if
+                    // the message text happened to contain a matched
+                    // substring (issue #483 S1). No message text is
+                    // constructed here for the same reason: nothing about
+                    // this error should ever again be at the mercy of that
+                    // heuristic.
+                    *pending_io_error = Some(std::io::Error::from(ErrorKind::IsADirectory));
+                    return Err(sevenz_rust2::Error::Other(
+                        "destination path is a pre-existing directory".into(),
+                    ));
+                }
+
                 // Reserve quota BEFORE mutating the filesystem: deciding
                 // (quota check) must precede acting (removing the existing
                 // path), so a QuotaExceeded error never first destroys a
@@ -500,16 +534,15 @@ impl<R: Read + Seek> SevenZArchive<R> {
                     sevenz_rust2::Error::Other(format!("validation failed: {e}").into())
                 })?;
 
-                if let Some(meta) = existing {
+                if existing.is_some() {
                     // 7z uses temp+rename (unlike TAR/ZIP which truncate
-                    // in-place via File::create). Remove the existing path
-                    // first so `rename` can succeed. Deferred until after
-                    // the quota reservation above succeeds.
-                    if meta.is_dir() {
-                        std::fs::remove_dir_all(&dest_path)?;
-                    } else {
-                        std::fs::remove_file(&dest_path)?;
-                    }
+                    // in-place via File::create). Remove the existing
+                    // regular file/symlink first so `rename` can succeed.
+                    // Deferred until after the quota reservation above
+                    // succeeds. Only a regular file (or, on non-Unix, a
+                    // symlink) can reach here: directories and Unix symlinks
+                    // were already rejected above.
+                    std::fs::remove_file(&dest_path)?;
                 }
 
                 let bytes_written = write_file_with_permit(reader, &dest_path, permit)?;
@@ -560,6 +593,20 @@ impl<R: Read + Seek> SevenZArchive<R> {
             dir_cache: &'a mut common::DirCache,
             progress: &'a mut dyn ProgressCallback,
             current_idx: usize,
+            /// Count of entries skipped because they duplicate a pre-existing
+            /// destination path (issue #484). Tracked separately from
+            /// `report.warnings` so a single aggregated warning can be emitted
+            /// after extraction instead of one `String` per skipped entry,
+            /// keeping `report.warnings`'s growth independent of how many
+            /// duplicate entries an archive contains.
+            duplicate_skips: u64,
+            /// Set when `process_entry_inner` needs its caller to construct
+            /// `ArchiveError::Io` directly from a raw `io::Error`, bypassing
+            /// the lossy `sevenz_rust2::Error` -> `ArchiveError` conversion
+            /// (issue #483 S1) that stringifies errors and would otherwise
+            /// collapse a specific `ErrorKind` to `Other` and re-classify by
+            /// substring match on the resulting text.
+            pending_io_error: Option<std::io::Error>,
         }
 
         let mut ctx = SzContext {
@@ -567,6 +614,8 @@ impl<R: Read + Seek> SevenZArchive<R> {
             dir_cache,
             progress,
             current_idx: 0,
+            duplicate_skips: 0,
+            pending_io_error: None,
         };
 
         // Extraction callback - called for each entry.
@@ -596,6 +645,8 @@ impl<R: Read + Seek> SevenZArchive<R> {
                 ctx.dir_cache,
                 skip_duplicates,
                 config,
+                &mut ctx.duplicate_skips,
+                &mut ctx.pending_io_error,
             );
 
             // INVARIANT: every branch below must call on_entry_complete exactly once.
@@ -618,11 +669,29 @@ impl<R: Read + Seek> SevenZArchive<R> {
         let mut archive_reader =
             ArchiveReader::new(source, Password::empty()).map_err(ArchiveError::from)?;
         let result = archive_reader.for_each_entries(&mut extract_fn);
-        let accumulated = ctx.report;
+        let mut accumulated = ctx.report;
+        if ctx.duplicate_skips > 0 {
+            let noun = if ctx.duplicate_skips == 1 {
+                "entry"
+            } else {
+                "entries"
+            };
+            accumulated.warnings.push(format!(
+                "skipped {} {noun} as pre-existing duplicates",
+                ctx.duplicate_skips
+            ));
+        }
 
         let e = match result {
             Ok(()) => return Ok(accumulated),
-            Err(e) => ArchiveError::from(e),
+            // A stashed `pending_io_error` takes priority: it means
+            // `process_entry_inner` already resolved the precise error and
+            // the `sevenz_rust2::Error` in `e` is just a same-iteration abort
+            // signal, not the real failure (issue #483 S1).
+            Err(e) => ctx
+                .pending_io_error
+                .take()
+                .map_or_else(|| ArchiveError::from(e), ArchiveError::Io),
         };
         Err(ArchiveError::partial_or(accumulated, e))
     }
@@ -1929,6 +1998,8 @@ mod tests {
         let mut validator = EntryValidator::new(&config, &dest);
         let mut dir_cache = common::DirCache::new();
         let mut report = ExtractionReport::new();
+        let mut duplicate_skips = 0u64;
+        let mut pending_io_error = None;
 
         let mut entry = sevenz_rust2::ArchiveEntry::new_file("../../evil.txt");
         entry.has_stream = true;
@@ -1945,6 +2016,8 @@ mod tests {
             &mut dir_cache,
             false,
             &config,
+            &mut duplicate_skips,
+            &mut pending_io_error,
         );
 
         assert_matches!(
@@ -2032,6 +2105,142 @@ mod tests {
         assert!(
             metadata.file_type().is_symlink(),
             "dangling symlink must survive untouched, not be replaced by extracted content"
+        );
+    }
+
+    /// Regression test for issue #483: extracting a file entry onto a
+    /// pre-existing *directory* at the destination path must fail instead of
+    /// recursively deleting the directory tree via `remove_dir_all`.
+    ///
+    /// Asserts the error's `io::ErrorKind` specifically (not just
+    /// `is_err()`): the S1 bug this guards against had extraction still
+    /// return `Err`, but with the precise `IsADirectory` kind lost to the
+    /// lossy `From<sevenz_rust2::Error> for ArchiveError` string-heuristic
+    /// converter (and, for some path names, misclassified as
+    /// `SecurityViolation`), so a bare `is_err()` check would not have
+    /// caught it.
+    #[test]
+    fn test_overwrite_directory_returns_error_without_deleting_it() {
+        let data = make_sevenz_archive(&[("target", b"payload")]);
+        let mut archive = SevenZArchive::new(Cursor::new(data)).unwrap();
+
+        let temp = TempDir::new().unwrap();
+        let dir_path = temp.path().join("target");
+        std::fs::create_dir(&dir_path).unwrap();
+        let inner_file = dir_path.join("keep-me.txt");
+        std::fs::write(&inner_file, b"do not delete").unwrap();
+
+        let config = SecurityConfig::default().validate().expect("valid config");
+        let options = ExtractionOptions {
+            skip_duplicates: false,
+            ..ExtractionOptions::default()
+        };
+
+        let result = archive.extract(temp.path(), &config, &options, &mut crate::NoopProgress);
+
+        let err =
+            result.expect_err("extracting a file entry onto a pre-existing directory must fail");
+        assert_matches!(
+            &err,
+            ArchiveError::Io(io_err) if io_err.kind() == std::io::ErrorKind::IsADirectory,
+            "must fail with ErrorKind::IsADirectory specifically, not a generic or \
+             misclassified error, got: {err:?}"
+        );
+        assert!(
+            dir_path.is_dir(),
+            "pre-existing directory must survive the failed extraction, not be deleted"
+        );
+        assert_eq!(
+            std::fs::read(&inner_file).unwrap(),
+            b"do not delete",
+            "directory contents must be untouched by the failed extraction"
+        );
+    }
+
+    /// Regression test for issue #483 finding S2: a symlink whose target is
+    /// itself a directory must not be misidentified as a real directory and
+    /// take the `ErrorKind::IsADirectory` branch. It is still rejected — as
+    /// of #486/#477, every pre-existing symlink at the destination fails
+    /// with `ELOOP` on Unix rather than being replaced — but the failure
+    /// must come from the symlink check, not the directory check, and the
+    /// symlink's target directory itself must survive untouched either way.
+    #[test]
+    #[cfg(unix)]
+    fn test_symlink_to_directory_rejected_via_symlink_check_not_directory_check() {
+        let data = make_sevenz_archive(&[("target", b"payload")]);
+        let mut archive = SevenZArchive::new(Cursor::new(data)).unwrap();
+
+        let temp = TempDir::new().unwrap();
+        let real_dir = temp.path().join("real-dir");
+        std::fs::create_dir(&real_dir).unwrap();
+        let link_path = temp.path().join("target");
+        std::os::unix::fs::symlink(&real_dir, &link_path).unwrap();
+
+        let config = SecurityConfig::default().validate().expect("valid config");
+        let options = ExtractionOptions {
+            skip_duplicates: false,
+            ..ExtractionOptions::default()
+        };
+
+        let result = archive.extract(temp.path(), &config, &options, &mut crate::NoopProgress);
+
+        assert!(
+            result.is_err(),
+            "a pre-existing symlink at the destination must be rejected, even when its \
+             target is a directory: {result:?}"
+        );
+        let metadata = std::fs::symlink_metadata(&link_path).unwrap();
+        assert!(
+            metadata.file_type().is_symlink(),
+            "the symlink itself must survive untouched, not be replaced"
+        );
+        assert!(
+            real_dir.is_dir(),
+            "the symlink's target directory itself must be untouched"
+        );
+    }
+
+    /// Regression test for issue #484: extracting an archive with many
+    /// pre-existing duplicate entries must push exactly one aggregated
+    /// warning onto `report.warnings`, not one `String` per skipped entry.
+    #[test]
+    fn test_skip_duplicates_aggregates_single_warning() {
+        const ENTRY_COUNT: usize = 30;
+        let names: Vec<String> = (0..ENTRY_COUNT).map(|i| format!("dup-{i}.txt")).collect();
+        let entries: Vec<(&str, &[u8])> = names
+            .iter()
+            .map(|n| (n.as_str(), b"payload".as_slice()))
+            .collect();
+        let data = make_sevenz_archive(&entries);
+        let mut archive = SevenZArchive::new(Cursor::new(data)).unwrap();
+
+        let temp = TempDir::new().unwrap();
+        for name in &names {
+            std::fs::write(temp.path().join(name), b"already here").unwrap();
+        }
+
+        let config = SecurityConfig::default().validate().expect("valid config");
+        let report = archive
+            .extract(
+                temp.path(),
+                &config,
+                &ExtractionOptions::default(), // skip_duplicates = true
+                &mut crate::NoopProgress,
+            )
+            .unwrap();
+
+        assert_eq!(report.files_skipped, ENTRY_COUNT);
+        assert_eq!(report.files_extracted, 0);
+        assert_eq!(
+            report.warnings.len(),
+            1,
+            "duplicate skips must be aggregated into a single warning, got: {:?}",
+            report.warnings
+        );
+        assert!(
+            report.warnings[0].contains(&ENTRY_COUNT.to_string()),
+            "aggregated warning must report the correct skipped count, got: {}",
+            report.warnings[0]
         );
     }
 }

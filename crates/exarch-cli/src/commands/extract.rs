@@ -2,6 +2,7 @@
 
 use crate::cli::ExtractArgs;
 use crate::commands::apply_size_limits;
+use crate::commands::atomic_swap::PinnedDir;
 use crate::error::add_archive_context;
 use crate::output::OutputFormatter;
 use crate::progress::CliProgress;
@@ -17,6 +18,7 @@ use exarch_core::SecurityConfig;
 use exarch_core::extract_archive_with_options_and_progress;
 use exarch_core::list_archive;
 use std::env;
+use std::ffi::OsStr;
 use std::path::Path;
 
 fn run_extraction(
@@ -44,6 +46,17 @@ fn run_extraction(
 /// to a backup path, the extracted content is moved into place, and only
 /// then is the backup removed. If moving the extracted content into place
 /// fails, the backup is moved back so the original destination is restored.
+///
+/// On Unix, `parent` is pinned by an open file descriptor ([`PinnedDir`])
+/// and every rename/remove below is resolved relative to that descriptor
+/// rather than by path, closing the TOCTOU window where an *intermediate*
+/// path component is replaced with a symlink mid-swap (issue #526). A
+/// dev/ino identity recheck immediately before the destructive swap
+/// (see [`verify_destination_unchanged`]) additionally narrows — it does
+/// not close — the remaining window around the *final* component itself:
+/// the fd-pin cannot cover a change to the entry it was opened for, and the
+/// recheck is itself a check-then-use relative to the rename that follows
+/// it, just one shrunk from extraction-duration to two syscalls wide.
 fn run_atomic_force_extraction(
     archive: &Path,
     output_dir: &Path,
@@ -58,9 +71,34 @@ fn run_atomic_force_extraction(
     let parent = canonical_output
         .parent()
         .with_context(|| format!("destination has no parent: {}", output_dir.display()))?;
+    let dest_name = canonical_output
+        .file_name()
+        .with_context(|| format!("destination has no file name: {}", output_dir.display()))?;
 
+    let pin = PinnedDir::open(parent)
+        .with_context(|| format!("failed to pin destination parent: {}", parent.display()))?;
+    let dest_id = pin.entry_identity(dest_name).with_context(|| {
+        format!(
+            "failed to inspect destination: {}",
+            canonical_output.display()
+        )
+    })?;
+
+    // Path-based: `tempfile` has no fd-relative constructor. If `parent`
+    // were redirected between the pin above and here, every fd-relative
+    // call below fails closed with `ENOENT` before anything destructive
+    // happens, so this does not reopen the window `PinnedDir` closes.
     let temp_dir = tempfile::tempdir_in(parent)
         .with_context(|| format!("failed to create temp directory in {}", parent.display()))?;
+    // Derived now, before any destructive operation below, so that a
+    // (practically unreachable, `tempfile` always yields a named path)
+    // `file_name()` failure can never surface *after* the destination has
+    // already been moved aside with no way to name the replacement.
+    let temp_name = temp_dir
+        .path()
+        .file_name()
+        .map(OsStr::to_os_string)
+        .with_context(|| format!("temp path has no file name: {}", temp_dir.path().display()))?;
 
     let report = run_extraction(
         archive,
@@ -75,13 +113,20 @@ fn run_atomic_force_extraction(
     // for the backup: renaming onto an existing path (even an empty
     // directory) is unsupported on Windows, so the reserved path must be
     // freed before use.
+    //
+    // Path-based for the same reason as the temp dir above.
     let backup_dir = tempfile::tempdir_in(parent)
         .with_context(|| format!("failed to reserve backup path in {}", parent.display()))?;
     let backup_path = backup_dir.keep();
-    std::fs::remove_dir(&backup_path)
+    let backup_name = backup_path
+        .file_name()
+        .with_context(|| format!("backup path has no file name: {}", backup_path.display()))?;
+    pin.remove_dir(backup_name)
         .with_context(|| format!("failed to free backup path: {}", backup_path.display()))?;
 
-    std::fs::rename(&canonical_output, &backup_path).with_context(|| {
+    verify_destination_unchanged(&pin, dest_name, dest_id, &canonical_output)?;
+
+    pin.rename(dest_name, backup_name).with_context(|| {
         format!(
             "failed to move existing destination {} aside before replacing it",
             canonical_output.display()
@@ -89,12 +134,17 @@ fn run_atomic_force_extraction(
     })?;
 
     let temp_path = temp_dir.keep();
-    if let Err(e) = std::fs::rename(&temp_path, &canonical_output) {
+    if let Err(e) = pin.rename(&temp_name, dest_name) {
         // Restore the original destination; the new extraction is discarded.
         // The restore's own outcome must be checked, not assumed: claiming
         // "restored" when the rename-back itself failed would tell the user
         // their data is safe while it actually sits at an unprinted temp path.
-        let restore_result = std::fs::rename(&backup_path, &canonical_output);
+        let restore_result = pin.rename(backup_name, dest_name);
+        // Path-based, but safe: std's Unix `remove_dir_all` has been
+        // `O_NOFOLLOW`-rooted and fd-recursive since the CVE-2022-21658
+        // hardening, so it cannot be tricked into descending a planted
+        // symlink; a redirected `parent` at worst removes an
+        // attacker-planted directory at the redirected location.
         let _ = std::fs::remove_dir_all(&temp_path);
         return Err(e).with_context(|| match restore_result {
             Ok(()) => format!(
@@ -111,9 +161,37 @@ fn run_atomic_force_extraction(
         });
     }
 
+    // Path-based, same CVE-2022-21658 rationale as above.
     let _ = std::fs::remove_dir_all(&backup_path);
 
     Ok(report)
+}
+
+/// Aborts with a distinct, actionable error if `pin`'s entry `name` no
+/// longer identifies `expected`.
+///
+/// Called by [`run_atomic_force_extraction`] immediately before the
+/// destructive first swap rename. `display` is used only to build the error
+/// message (it is expected to be the same path `name` was resolved from).
+fn verify_destination_unchanged(
+    pin: &PinnedDir,
+    name: &OsStr,
+    expected: (u64, u64),
+    display: &Path,
+) -> Result<()> {
+    let current = pin.entry_identity(name).with_context(|| {
+        format!(
+            "failed to inspect destination before swap: {}",
+            display.display()
+        )
+    })?;
+    if current != expected {
+        anyhow::bail!(
+            "destination changed on disk during extraction; refusing to swap: {}",
+            display.display()
+        );
+    }
+    Ok(())
 }
 
 /// Determines whether `--atomic --force` must replace a pre-existing
@@ -336,6 +414,43 @@ pub fn execute(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression test for critic finding S2: the identity-mismatch abort
+    /// branch in [`run_atomic_force_extraction`] previously had zero test
+    /// coverage — only the OS-level property it relies on
+    /// (`PinnedDir::entry_identity` differing for different inodes) was
+    /// tested, not this code's use of it. Exercises both outcomes of
+    /// [`verify_destination_unchanged`] directly: unchanged passes, and a
+    /// destination swapped for a freshly created replacement with the same
+    /// name is rejected with the distinct "refusing to swap" message.
+    #[test]
+    #[cfg(unix)]
+    #[allow(clippy::unwrap_used, clippy::expect_used)]
+    fn verify_destination_unchanged_detects_a_swapped_destination() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let parent = root.path().join("parent");
+        std::fs::create_dir(&parent).expect("create parent");
+        let dest = parent.join("dest");
+        std::fs::create_dir(&dest).expect("create dest");
+
+        let pin = PinnedDir::open(&parent).expect("pin parent");
+        let dest_name = OsStr::new("dest");
+        let expected = pin.entry_identity(dest_name).expect("snapshot identity");
+
+        verify_destination_unchanged(&pin, dest_name, expected, &dest)
+            .expect("unchanged destination must pass verification");
+
+        std::fs::rename(&dest, parent.join("dest.old")).expect("move dest aside");
+        std::fs::create_dir(&dest).expect("create replacement dest");
+
+        let err = verify_destination_unchanged(&pin, dest_name, expected, &dest)
+            .expect_err("swapped destination must be rejected");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("destination changed on disk during extraction; refusing to swap"),
+            "error must carry the distinct refusing-to-swap message, got: {msg}"
+        );
+    }
 
     #[test]
     fn parse_extensions_comma_split() {

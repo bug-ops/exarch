@@ -553,6 +553,7 @@ dependencies = [
  "flate2",
  "indicatif",
  "predicates",
+ "rustix",
  "serde",
  "serde_json",
  "tar",

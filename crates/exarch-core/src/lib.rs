@@ -78,9 +78,16 @@ pub use inspection::VerificationStatus;
 /// Summary statistics produced by the validation pipeline; see
 /// [`security::ValidationReport`].
 pub use security::ValidationReport;
+/// Maximum length, in bytes, of a single `SecurityConfig` entry — an
+/// allowed extension or a banned path component. Shared by `exarch-python`
+/// and `exarch-node`.
+pub use security::boundary::MAX_CONFIG_ENTRY_LENGTH;
 /// Maximum length, in bytes, of a raw path string accepted at the FFI
 /// boundary. Shared by `exarch-python` and `exarch-node`.
 pub use security::boundary::MAX_PATH_LENGTH;
+/// Validates a single caller-supplied `SecurityConfig` entry string.
+/// Shared by `exarch-python` and `exarch-node`.
+pub use security::boundary::validate_config_entry;
 /// Validates a raw, caller-supplied path string before it enters the
 /// archive pipeline. Shared by `exarch-python` and `exarch-node`.
 pub use security::boundary::validate_raw_path_str;

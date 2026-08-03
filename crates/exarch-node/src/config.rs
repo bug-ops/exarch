@@ -1,15 +1,12 @@
 //! Node.js bindings for `SecurityConfig` and `ExtractionOptions`.
 
 use exarch_core::SecurityConfig as CoreConfig;
+use exarch_core::validate_config_entry;
 use napi::bindgen_prelude::Error;
 use napi::bindgen_prelude::Result;
 use napi_derive::napi;
 
-/// Maximum length for file extension strings (e.g., ".tar.gz")
-const MAX_EXTENSION_LENGTH: usize = 255;
-
-/// Maximum length for path component strings
-const MAX_COMPONENT_LENGTH: usize = 255;
+use crate::error::convert_error;
 
 /// Security configuration for archive extraction.
 ///
@@ -205,20 +202,11 @@ impl SecurityConfig {
     ///
     /// # Errors
     ///
-    /// Returns error if extension exceeds maximum length or contains null
-    /// bytes.
+    /// Returns error if the extension is empty, exceeds maximum length, or
+    /// contains null bytes.
     #[napi]
     pub fn add_allowed_extension(&mut self, ext: String) -> Result<&Self> {
-        if ext.contains('\0') {
-            return Err(Error::from_reason(
-                "extension contains null bytes - potential security issue",
-            ));
-        }
-        if ext.len() > MAX_EXTENSION_LENGTH {
-            return Err(Error::from_reason(format!(
-                "extension exceeds maximum length of {MAX_EXTENSION_LENGTH} characters"
-            )));
-        }
+        validate_config_entry(&ext, "extension").map_err(convert_error)?;
         self.inner.allowed_extensions.push(ext);
         Ok(self)
     }
@@ -227,20 +215,11 @@ impl SecurityConfig {
     ///
     /// # Errors
     ///
-    /// Returns error if component exceeds maximum length or contains null
-    /// bytes.
+    /// Returns error if the component is empty, exceeds maximum length, or
+    /// contains null bytes.
     #[napi]
     pub fn add_banned_component(&mut self, component: String) -> Result<&Self> {
-        if component.contains('\0') {
-            return Err(Error::from_reason(
-                "component contains null bytes - potential security issue",
-            ));
-        }
-        if component.len() > MAX_COMPONENT_LENGTH {
-            return Err(Error::from_reason(format!(
-                "component exceeds maximum length of {MAX_COMPONENT_LENGTH} characters"
-            )));
-        }
+        validate_config_entry(&component, "banned path component").map_err(convert_error)?;
         self.inner.banned_path_components.push(component);
         Ok(self)
     }
@@ -687,6 +666,8 @@ impl ExtractionOptions {
     clippy::uninlined_format_args
 )]
 mod tests {
+    use exarch_core::MAX_CONFIG_ENTRY_LENGTH;
+
     use super::*;
 
     #[test]
@@ -783,8 +764,15 @@ mod tests {
     #[test]
     fn test_add_allowed_extension_rejects_too_long() {
         let mut config = SecurityConfig::new();
-        let long_ext = "x".repeat(MAX_EXTENSION_LENGTH + 1);
+        let long_ext = "x".repeat(MAX_CONFIG_ENTRY_LENGTH + 1);
         let result = config.add_allowed_extension(long_ext);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_add_allowed_extension_rejects_empty() {
+        let mut config = SecurityConfig::new();
+        let result = config.add_allowed_extension(String::new());
         assert!(result.is_err());
     }
 
@@ -810,8 +798,15 @@ mod tests {
     #[test]
     fn test_add_banned_component_rejects_too_long() {
         let mut config = SecurityConfig::new();
-        let long_component = "x".repeat(MAX_COMPONENT_LENGTH + 1);
+        let long_component = "x".repeat(MAX_CONFIG_ENTRY_LENGTH + 1);
         let result = config.add_banned_component(long_component);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_add_banned_component_rejects_empty() {
+        let mut config = SecurityConfig::new();
+        let result = config.add_banned_component(String::new());
         assert!(result.is_err());
     }
 

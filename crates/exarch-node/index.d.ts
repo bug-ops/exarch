@@ -246,8 +246,8 @@ export declare class SecurityConfig {
    *
    * # Errors
    *
-   * Returns error if extension exceeds maximum length or contains null
-   * bytes.
+   * Returns error if the extension is empty, exceeds maximum length, or
+   * contains null bytes.
    */
   addAllowedExtension(ext: string): this
   /**
@@ -255,8 +255,8 @@ export declare class SecurityConfig {
    *
    * # Errors
    *
-   * Returns error if component exceeds maximum length or contains null
-   * bytes.
+   * Returns error if the component is empty, exceeds maximum length, or
+   * contains null bytes.
    */
   addBannedComponent(component: string): this
   /**

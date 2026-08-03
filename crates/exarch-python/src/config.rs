@@ -4,14 +4,11 @@
 use exarch_core::ExtractionOptions as CoreExtractionOptions;
 use exarch_core::SecurityConfig as CoreSecurityConfig;
 use exarch_core::creation::CreationConfig as CoreCreationConfig;
+use exarch_core::validate_config_entry;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-/// Maximum length for file extension strings (e.g., ".tar.gz")
-const MAX_EXTENSION_LENGTH: usize = 255;
-
-/// Maximum length for path component strings
-const MAX_COMPONENT_LENGTH: usize = 255;
+use crate::error::convert_error;
 
 /// Security configuration for archive extraction.
 ///
@@ -200,22 +197,13 @@ impl PySecurityConfig {
     ///
     /// # Errors
     ///
-    /// Returns `ValueError` if extension exceeds maximum length or contains
-    /// null bytes.
+    /// Returns `ValueError` if the extension is empty, exceeds maximum
+    /// length, or contains null bytes.
     fn add_allowed_extension(
         mut slf: PyRefMut<'_, Self>,
         ext: String,
     ) -> PyResult<PyRefMut<'_, Self>> {
-        if ext.contains('\0') {
-            return Err(PyValueError::new_err(
-                "extension contains null bytes - potential security issue",
-            ));
-        }
-        if ext.len() > MAX_EXTENSION_LENGTH {
-            return Err(PyValueError::new_err(format!(
-                "extension exceeds maximum length of {MAX_EXTENSION_LENGTH} characters"
-            )));
-        }
+        validate_config_entry(&ext, "extension").map_err(convert_error)?;
         slf.inner.allowed_extensions.push(ext);
         Ok(slf)
     }
@@ -224,22 +212,13 @@ impl PySecurityConfig {
     ///
     /// # Errors
     ///
-    /// Returns `ValueError` if component exceeds maximum length or contains
-    /// null bytes.
+    /// Returns `ValueError` if the component is empty, exceeds maximum
+    /// length, or contains null bytes.
     fn add_banned_component(
         mut slf: PyRefMut<'_, Self>,
         component: String,
     ) -> PyResult<PyRefMut<'_, Self>> {
-        if component.contains('\0') {
-            return Err(PyValueError::new_err(
-                "component contains null bytes - potential security issue",
-            ));
-        }
-        if component.len() > MAX_COMPONENT_LENGTH {
-            return Err(PyValueError::new_err(format!(
-                "component exceeds maximum length of {MAX_COMPONENT_LENGTH} characters"
-            )));
-        }
+        validate_config_entry(&component, "banned path component").map_err(convert_error)?;
         slf.inner.banned_path_components.push(component);
         Ok(slf)
     }
@@ -767,6 +746,8 @@ impl PyExtractionOptions {
     clippy::float_cmp
 )]
 mod tests {
+    use exarch_core::MAX_CONFIG_ENTRY_LENGTH;
+
     use super::*;
 
     #[test]
@@ -1043,12 +1024,25 @@ mod tests {
             let py_config = Py::new(py, config).expect("Failed to create Py object");
             let obj = py_config.bind(py);
 
-            let long_ext = "x".repeat(MAX_EXTENSION_LENGTH + 1);
+            let long_ext = "x".repeat(MAX_CONFIG_ENTRY_LENGTH + 1);
             let result = obj.call_method1("add_allowed_extension", (long_ext,));
             assert!(
                 result.is_err(),
                 "Should reject extension exceeding max length"
             );
+        });
+    }
+
+    #[test]
+    fn test_add_allowed_extension_rejects_empty() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let config = PySecurityConfig::new();
+            let py_config = Py::new(py, config).expect("Failed to create Py object");
+            let obj = py_config.bind(py);
+
+            let result = obj.call_method1("add_allowed_extension", ("",));
+            assert!(result.is_err(), "Should reject empty extension");
         });
     }
 
@@ -1092,12 +1086,25 @@ mod tests {
             let py_config = Py::new(py, config).expect("Failed to create Py object");
             let obj = py_config.bind(py);
 
-            let long_component = "x".repeat(MAX_COMPONENT_LENGTH + 1);
+            let long_component = "x".repeat(MAX_CONFIG_ENTRY_LENGTH + 1);
             let result = obj.call_method1("add_banned_component", (long_component,));
             assert!(
                 result.is_err(),
                 "Should reject component exceeding max length"
             );
+        });
+    }
+
+    #[test]
+    fn test_add_banned_component_rejects_empty() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let config = PySecurityConfig::new();
+            let py_config = Py::new(py, config).expect("Failed to create Py object");
+            let obj = py_config.bind(py);
+
+            let result = obj.call_method1("add_banned_component", ("",));
+            assert!(result.is_err(), "Should reject empty component");
         });
     }
 

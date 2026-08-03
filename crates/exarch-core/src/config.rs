@@ -377,6 +377,9 @@ impl SecurityConfig<Unvalidated> {
     /// - `max_file_count` is zero
     /// - `max_solid_block_memory` is zero
     /// - `max_tar_metadata_bytes` is zero
+    /// - any entry in `allowed_extensions` or `banned_path_components` is
+    ///   empty, contains a null byte, or exceeds
+    ///   [`crate::MAX_CONFIG_ENTRY_LENGTH`] bytes
     ///
     /// # Examples
     ///
@@ -424,6 +427,12 @@ impl SecurityConfig<Unvalidated> {
             return Err(crate::ArchiveError::InvalidConfiguration {
                 reason: "max_tar_metadata_bytes must not be zero".into(),
             });
+        }
+        for extension in &self.fields.allowed_extensions {
+            crate::security::boundary::validate_config_entry(extension, "allowed extension")?;
+        }
+        for component in &self.fields.banned_path_components {
+            crate::security::boundary::validate_config_entry(component, "banned path component")?;
         }
         Ok(SecurityConfig {
             fields: self.fields,
@@ -1168,6 +1177,45 @@ mod tests {
     fn test_validate_rejects_zero_max_tar_metadata_bytes() {
         let mut cfg = SecurityConfig::default();
         cfg.max_tar_metadata_bytes = 0;
+        assert!(cfg.validate().is_err());
+    }
+
+    // Regression tests for #449: SecurityConfig::validate() must reject
+    // malformed allowed_extensions/banned_path_components entries.
+
+    #[test]
+    fn test_validate_permissive_is_ok() {
+        assert!(SecurityConfig::permissive().validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_accepts_empty_allowed_extensions_vec() {
+        let cfg = SecurityConfig::default().with_allowed_extensions(Vec::new());
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_rejects_empty_allowed_extension_entry() {
+        let cfg = SecurityConfig::default().with_allowed_extensions(vec![String::new()]);
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_empty_banned_path_component_entry() {
+        let cfg = SecurityConfig::default().with_banned_path_components(vec![String::new()]);
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_null_byte_in_allowed_extension() {
+        let cfg = SecurityConfig::default().with_allowed_extensions(vec!["bad\0ext".to_string()]);
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_overlong_banned_path_component() {
+        let long_component = "x".repeat(256);
+        let cfg = SecurityConfig::default().with_banned_path_components(vec![long_component]);
         assert!(cfg.validate().is_err());
     }
 

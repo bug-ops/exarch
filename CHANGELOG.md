@@ -209,6 +209,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`exarch-core`: hardened ZIP's `by_index()`/`name()` error paths inside `extract()`'s entry loop
+  to route through the same warning aggregation and `ArchiveError::partial_or` wrapping as other
+  failures in the loop**: `formats/zip.rs`'s extraction loop opened each entry via
+  `self.inner.by_index(i)?` and read its name via `zip_file.name()?`, both using a bare `?` that
+  returned the raw error immediately, bypassing the duplicate/disallowed-extension warning
+  aggregation and `ArchiveError::partial_or` wrapping used for `process_entry` failures a few lines
+  below. In practice this path is not reachable through the public API today: `ZipArchive::new()`
+  already scans every entry via `by_index()` during its password-protection check, so any entry
+  that would fail `by_index()`/`name()` is caught at open time, before `extract()`'s loop ever
+  runs — the gap would only matter if the underlying reader's data changed between that scan and
+  extraction, or in a future refactor that removes or narrows the open-time scan. Both failure
+  sites now aggregate the same warnings and route through `ArchiveError::partial_or` before
+  returning, via a shared `push_duplicate_skip_warnings` helper (mirroring TAR's existing helper of
+  the same name), giving ZIP the same structural handling as TAR and 7z as defense-in-depth, not as
+  a fix for a demonstrated user-facing bug.
+- **`exarch-core`: a mid-archive extraction failure where every entry processed beforehand was
+  skipped (not written) discarded the entire partial report, including its warnings (#505)**:
+  `ArchiveError::partial_or` only wrapped a failure into `PartialExtraction { report, .. }` when
+  `report.total_items()` (`files_extracted + directories_created + symlinks_created`) was nonzero.
+  An archive whose only processed entries before the failure were rejected — e.g. by
+  `--allowed-extensions` or as pre-existing duplicates — left `total_items()` at `0`, so
+  `partial_or` returned the original error unwrapped, silently dropping `report.warnings` and
+  `report.files_skipped` even though both were populated. `partial_or` now also treats a report as
+  worth surfacing when `files_skipped > 0` or `warnings` is non-empty, without changing
+  `total_items()` itself (it remains "items written to disk", matching its existing Python binding
+  semantics and tests).
 - **`exarch-cli`: `extract`'s human and `--json` output never surfaced `ExtractionReport.warnings`
   or `files_skipped` (#498)**: both fields are populated correctly by `exarch-core` and already
   exposed by the Python and Node.js bindings, but `format_extraction_result` in `output/human.rs`

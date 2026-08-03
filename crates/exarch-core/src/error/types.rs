@@ -299,15 +299,20 @@ impl ArchiveError {
     }
 
     /// Wraps `err` in [`Self::PartialExtraction`] if `report` recorded any
-    /// processed items, otherwise returns `err` unchanged.
+    /// processed items, skipped files, or warnings, otherwise returns `err`
+    /// unchanged.
     ///
     /// Format handlers call this at every point where extraction can fail
     /// mid-archive, so callers can distinguish "nothing was written" from
     /// "extraction stopped partway through" without each handler
-    /// reimplementing the same check.
+    /// reimplementing the same check. A report is considered worth surfacing
+    /// even when [`ExtractionReport::total_items`] is zero, since an archive
+    /// where every entry before the failure was rejected (e.g. by an
+    /// extension allowlist) still accumulates `files_skipped` and
+    /// `warnings` that the caller should see.
     #[must_use]
     pub(crate) fn partial_or(report: crate::ExtractionReport, err: Self) -> Self {
-        if report.total_items() > 0 {
+        if report.total_items() > 0 || report.files_skipped > 0 || report.has_warnings() {
             Self::PartialExtraction {
                 source: Box::new(err),
                 report,
@@ -722,6 +727,40 @@ mod tests {
             result,
             ArchiveError::InvalidArchive(_),
             "expected the original error unwrapped when report is empty, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_partial_or_wraps_when_report_has_only_files_skipped() {
+        use crate::ExtractionReport;
+
+        let mut report = ExtractionReport::new();
+        report.files_skipped = 2;
+        let err = ArchiveError::InvalidArchive("bad entry".into());
+
+        let result = ArchiveError::partial_or(report, err);
+        assert_matches!(
+            result,
+            ArchiveError::PartialExtraction { .. },
+            "expected PartialExtraction when report has files_skipped > 0 but zero total_items \
+             and no warnings, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_partial_or_wraps_when_report_has_only_warnings() {
+        use crate::ExtractionReport;
+
+        let mut report = ExtractionReport::new();
+        report.add_warning("skipped disallowed extension".into());
+        let err = ArchiveError::InvalidArchive("bad entry".into());
+
+        let result = ArchiveError::partial_or(report, err);
+        assert_matches!(
+            result,
+            ArchiveError::PartialExtraction { .. },
+            "expected PartialExtraction when report has a warning but zero total_items and zero \
+             files_skipped, got: {result:?}"
         );
     }
 

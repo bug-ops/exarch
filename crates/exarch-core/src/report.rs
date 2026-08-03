@@ -42,7 +42,15 @@ impl ExtractionReport {
         self.warnings.push(message);
     }
 
-    /// Returns total number of items processed.
+    /// Returns the total number of items actually written to disk
+    /// (`files_extracted + directories_created + symlinks_created`).
+    ///
+    /// This deliberately excludes [`files_skipped`](Self::files_skipped): a
+    /// report can carry meaningful progress — skipped entries, warnings —
+    /// while this is `0`. Callers deciding whether a report is worth
+    /// surfacing (e.g. `ArchiveError::partial_or`) must check
+    /// `files_skipped`/[`has_warnings`](Self::has_warnings) too, not rely on
+    /// this alone.
     #[must_use]
     pub fn total_items(&self) -> usize {
         self.files_extracted + self.directories_created + self.symlinks_created

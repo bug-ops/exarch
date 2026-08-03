@@ -2,6 +2,7 @@
 
 mod cve_regression;
 mod hardlink_quota_bypass;
+mod partial_report_skip_and_fail;
 mod sevenz_traversal;
 mod symlink_target_validation;
 mod tar_budget_parity;

@@ -901,9 +901,12 @@ fn list_and_verify_accept_a_single_legitimate_entry_at_every_size_that_broke_c2(
 // crate-internal `BudgetedEntries` iterator directly; the tests below
 // exercise the same shapes through the public API these internals actually
 // serve, so wall-clock is the only externally observable "failed fast"
-// signal available here (the extension-filter skip path never populates a
-// `PartialExtraction` report to count against, since only `files_skipped`,
-// not `total_items()`, would be nonzero).
+// signal available here. (Since #505, a skip-only report — nonzero
+// `files_skipped` but zero `total_items()` — does populate `PartialExtraction`
+// on a later failure, but `assert_is_budget_violation` below deliberately
+// keys off `is_security_violation()`/`context()`, which delegate through
+// `PartialExtraction` either way, so it is agnostic to whether that wrapping
+// occurred.)
 
 /// Builds a multi-entry TAR of `n` GNU sparse entries, each named
 /// `spam{i}.bin`, each declaring a hole (`gap`) beyond its one physical

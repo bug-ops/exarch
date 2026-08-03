@@ -228,6 +228,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   at most 10 of them and collapsing the remainder into a single `... and N more` summary line —
   sorting first keeps "first 10 shown" a deterministic, reproducible subset rather than whatever
   order the archive manifest happened to yield.
+- **`exarch-cli`: `files_skipped`/`warnings` were dropped from the error-path JSON and human
+  output on a mid-archive extraction failure (#503)**: when extraction stopped partway through
+  (e.g. a symlink escape after some entries already extracted), the partial `ExtractionReport`
+  carried `files_skipped` and `warnings`, but neither `format_error`'s `JsonPartialReport`
+  (`output/json.rs`, `output/formatter.rs`) nor `PartialExtractionContext`'s `Display` impl
+  (`error.rs`, used for human-readable output) surfaced them — only `files_extracted`,
+  `directories_created`, `symlinks_created`, and `bytes_written` were reported, silently hiding
+  any disallowed-extension or duplicate skips that happened before the failure. Both paths now
+  include `files_skipped` and `warnings` (the human path only when non-empty, mirroring the
+  existing success-path convention), without changing the existing "WARNING: Extraction was
+  stopped..." / "HINT: ..." wording.
 - **`exarch-core`: TAR, ZIP, and 7z pushed one unbounded, path-bearing warning `String` per entry
   rejected by the extension allowlist (#495)**: `common::check_extension_allowed` (shared by all
   three format handlers) pushed a `"skipped entry with disallowed extension: {path}"` warning

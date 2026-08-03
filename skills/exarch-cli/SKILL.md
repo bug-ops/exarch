@@ -246,11 +246,13 @@ For `verify`, branch on `data.status` (or the process exit code), not on top-lev
 
 For `extract`, when some files were already written before a mid-archive failure, `error` carries
 a structured `error.partial_report` object (`files_extracted`, `directories_created`,
-`symlinks_created`, `bytes_written`). Verified live against a two-entry archive where the first
-entry extracts and the second is a symlink rejected by the (default-off) `--allow-symlinks`
-check. The same progress counts also appear as free text inside `error.message` (prefixed
-`"WARNING: Extraction was stopped. ..."`) — prefer the structured `error.partial_report` field
-over parsing that text.
+`symlinks_created`, `bytes_written`, `files_skipped`, `warnings`). Verified live against a
+three-entry archive where the first entry extracts, the second is skipped for a disallowed
+extension (via `--allowed-extensions`), and the third is a symlink rejected by the (default-off)
+`--allow-symlinks` check. The same progress counts, skip count, and warnings also appear as free
+text inside `error.message` (prefixed `"WARNING: Extraction was stopped. ..."`, with optional
+`"Files skipped: N"` / `"Warnings:"` lines when non-empty) — prefer the structured
+`error.partial_report` field over parsing that text.
 
 Note: `extract` always lists the archive first (`list_archive()`, sharing `--max-file-count`,
 `--max-total-size`, and `--max-file-size` with the extraction config) to detect output
@@ -316,7 +318,8 @@ Error (`extract`, path traversal):
 ```
 
 Error (`extract`, mid-archive security failure with partial progress — note the structured
-`error.partial_report` field; the archive's first entry extracts, then a symlink entry is
+`error.partial_report` field, including `files_skipped`/`warnings`; the archive's first entry
+extracts, its second entry is skipped for a disallowed extension, then a symlink entry is
 rejected because `--allow-symlinks` was not passed):
 
 ```json
@@ -325,12 +328,16 @@ rejected because `--allow-symlinks` was not passed):
   "status": "error",
   "error": {
     "kind": "SecurityViolation",
-    "message": "WARNING: Extraction was stopped. 1 items (1 files, 0 directories, 0 symlinks) were written to disk before the error.\nHINT: Inspect or remove the output directory before re-running.: operation denied by security policy: symlinks not allowed",
+    "message": "WARNING: Extraction was stopped. 1 items (1 files, 0 directories, 0 symlinks) were written to disk before the error.\nFiles skipped: 1\nWarnings:\n  - skipped 1 entry with disallowed extension\nHINT: Inspect or remove the output directory before re-running.: operation denied by security policy: symlinks not allowed",
     "partial_report": {
       "files_extracted": 1,
       "directories_created": 0,
       "symlinks_created": 0,
-      "bytes_written": 4
+      "bytes_written": 5,
+      "files_skipped": 1,
+      "warnings": [
+        "skipped 1 entry with disallowed extension"
+      ]
     }
   }
 }

@@ -80,6 +80,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`crates/exarch-core/src/security/quota.rs`), reinforcing the existing OPT-C003 hot/cold path
   optimization for the optimizer.
 
+### Fixed
+
+- **7z file writes discarded their `QuotaPermit` instead of consuming it (#440)**: unlike TAR/ZIP,
+  7z's `ValidatedEntryType::File(_)` write arm matched the permit and dropped it via `_`, so the
+  capability-token guarantee introduced in #436 covered TAR and ZIP but not 7z. Added
+  `ValidatedEntry::into_parts()` (a consuming accessor, since `QuotaPermit` is neither `Clone` nor
+  `Copy` and `entry_type()` only lends a shared reference) and a new `write_file_with_permit`
+  helper in `formats/sevenz.rs` that takes `QuotaPermit` by value, mirroring
+  `formats::common::copy_file_with_permit`. 7z's atomic temp-file-then-rename write now cannot
+  compile without a genuine permit obtained from `EntryValidator::validate_entry`. No quota
+  arithmetic or validation behavior changed.
+
 ### Security
 
 - **`list` accepted NUL bytes, empty targets, and missing targets that `extract`/`verify` already

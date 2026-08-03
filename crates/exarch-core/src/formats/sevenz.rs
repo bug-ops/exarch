@@ -115,6 +115,7 @@ use crate::SecurityConfig;
 use crate::config::Validated;
 use crate::error::QuotaResource;
 use crate::security::EntryValidator;
+use crate::security::quota::QuotaPermit;
 use crate::security::validator::ValidatedEntryType;
 use crate::types::DestDir;
 use crate::types::EntryType;
@@ -291,6 +292,47 @@ impl<R: Read + Seek> SevenZArchive<R> {
     }
 }
 
+/// Writes `reader`'s bytes to `dest_path` via an atomic temp-file-then-rename,
+/// consuming the [`QuotaPermit`] that authorized the write.
+///
+/// Taking `permit` by value mirrors the guarantee
+/// [`common::copy_file_with_permit`] gives TAR's hardlink path: `QuotaPermit`
+/// is neither `Clone` nor `Copy`, so a caller cannot retain it to authorize a
+/// second write, and this function cannot be called at all without moving a
+/// genuine permit out of the validated entry. This is stronger than
+/// `common::extract_file_generic` (TAR/ZIP's normal-file path), which only
+/// pattern-matches `ValidatedEntryType::File(_)` against a shared reference
+/// at runtime and never takes ownership of the permit — that helper is not
+/// brought to this same compile-time guarantee by this change (tracked
+/// separately: <https://github.com/bug-ops/exarch/issues/445>).
+///
+/// # Errors
+///
+/// Returns an error if temp file creation, the copy, or the rename fails.
+fn write_file_with_permit(
+    reader: &mut dyn Read,
+    dest_path: &Path,
+    _permit: QuotaPermit,
+) -> std::result::Result<u64, sevenz_rust2::Error> {
+    let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let pid = id();
+    let original_name = dest_path
+        .file_name()
+        .map_or_else(|| "file".to_string(), |n| n.to_string_lossy().to_string());
+    let temp_name = format!(".{original_name}.exarch-tmp-{pid}-{counter}");
+    let temp_path = dest_path.with_file_name(&temp_name);
+
+    let temp_guard = TempFileGuard::new(temp_path.clone());
+    let bytes_written = {
+        let mut temp_file = std::fs::File::create(&temp_path)?;
+        std::io::copy(reader, &mut temp_file)?
+    };
+    std::fs::rename(&temp_path, dest_path)?;
+    temp_guard.persist();
+
+    Ok(bytes_written)
+}
+
 impl<R: Read + Seek> SevenZArchive<R> {
     /// Processes a single 7z entry: validates, extracts file or creates
     /// directory.
@@ -327,23 +369,25 @@ impl<R: Read + Seek> SevenZArchive<R> {
             .validate_entry(entry_path, &entry_type, entry.size, None, None, None)
             .map_err(|e| sevenz_rust2::Error::Other(format!("validation failed: {e}").into()))?;
 
-        // Extract based on type
-        match validated.entry_type() {
+        // Extract based on type. `into_parts()` consumes `validated` so the
+        // File arm can move its QuotaPermit by value into
+        // write_file_with_permit, rather than only observing it through
+        // entry_type()'s shared reference.
+        //
+        // `_mode` is discarded: sevenz-rust2 never exposes Unix mode, so this
+        // module has no set_permissions/sanitize_permissions call today. If
+        // that limitation is ever lifted, wire `_mode` into the write path
+        // instead of continuing to drop it here.
+        let (safe_path, entry_type, _mode) = validated.into_parts();
+        let dest_path = dest.join_path(safe_path.as_path());
+
+        match entry_type {
             ValidatedEntryType::Directory => {
-                let dest_path = dest.join_path(validated.safe_path().as_path());
                 dir_cache.ensure_dir(&dest_path)?;
                 report.directories_created += 1;
                 Ok(0)
             }
-            // TODO(critic): 7z write is guarded only by this match arm; no
-            // QuotaPermit is consumed here (unlike TAR/ZIP's runtime guard in
-            // extract_file_generic and the hardlink path's by-value permit).
-            // A future refactor that lifts the temp+rename block below out of
-            // this arm would silently drop the guarantee. Extracting it into
-            // a helper taking `&QuotaPermit` would bring 7z to parity.
-            ValidatedEntryType::File(_) => {
-                let dest_path = dest.join_path(validated.safe_path().as_path());
-
+            ValidatedEntryType::File(permit) => {
                 dir_cache.ensure_parent_dir(&dest_path)?;
 
                 if dest_path.exists() {
@@ -351,7 +395,7 @@ impl<R: Read + Seek> SevenZArchive<R> {
                         report.files_skipped += 1;
                         report.warnings.push(format!(
                             "skipped duplicate entry: {}",
-                            validated.safe_path().as_path().display()
+                            safe_path.as_path().display()
                         ));
                         return Ok(0);
                     }
@@ -365,27 +409,11 @@ impl<R: Read + Seek> SevenZArchive<R> {
                     }
                 }
 
-                // Atomic write (temp + rename) with unique temp file name
-                let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-                let pid = id();
-                let original_name = dest_path
-                    .file_name()
-                    .map_or_else(|| "file".to_string(), |n| n.to_string_lossy().to_string());
-                let temp_name = format!(".{original_name}.exarch-tmp-{pid}-{counter}");
-                let temp_path = dest_path.with_file_name(&temp_name);
-
-                let temp_guard = TempFileGuard::new(temp_path.clone());
-                let bytes_written = {
-                    let mut temp_file = std::fs::File::create(&temp_path)?;
-                    let n = std::io::copy(reader, &mut temp_file)?;
-                    report.bytes_written =
-                        report.bytes_written.checked_add(n).ok_or_else(|| {
-                            sevenz_rust2::Error::Other("bytes_written overflow".into())
-                        })?;
-                    n
-                };
-                std::fs::rename(&temp_path, &dest_path)?;
-                temp_guard.persist();
+                let bytes_written = write_file_with_permit(reader, &dest_path, permit)?;
+                report.bytes_written = report
+                    .bytes_written
+                    .checked_add(bytes_written)
+                    .ok_or_else(|| sevenz_rust2::Error::Other("bytes_written overflow".into()))?;
 
                 report.files_extracted += 1;
                 Ok(bytes_written)

@@ -612,7 +612,11 @@ def extract_archive(
         When extraction fails after some files have already been written to disk,
         the specific exception (e.g. ``SymlinkEscapeError``) is raised with
         ``files_extracted`` and ``bytes_written`` attributes attached. Detect a
-        partial extraction via ``hasattr(e, "files_extracted")``.
+        partial extraction via ``hasattr(e, "files_extracted")`` — but see
+        ``extract_archive_with_progress`` below: a raising ``progress`` callback
+        over an otherwise-successful extraction attaches the same two attribute
+        names, distinguished by a ``progress_callback_error`` marker attribute
+        this function's own exceptions never carry.
     """
     ...
 
@@ -667,6 +671,23 @@ def extract_archive_with_progress(
         the specific exception (e.g. ``SymlinkEscapeError``) is raised with
         ``files_extracted`` and ``bytes_written`` attributes attached.
 
+        If ``progress`` itself raises, extraction is **not** aborted early — the
+        underlying progress-callback contract has no cancellation signal, so
+        extraction always runs to completion first, and ``progress`` is not
+        called again for the remaining entries once it has raised:
+
+        - If extraction otherwise succeeds, ``progress``'s own exception is what
+          propagates (unchanged — the same type, message, and traceback), with
+          ``files_extracted`` and ``bytes_written`` attributes attached
+          describing what was written, plus a ``progress_callback_error = True``
+          marker attribute. Check ``progress_callback_error`` before treating the
+          presence of ``files_extracted`` as a partial-extraction signal — see
+          the note on ``extract_archive`` above.
+        - If extraction also fails, the extraction error takes priority (a
+          raising ``progress`` can never mask a security error such as
+          ``SymlinkEscapeError``) and ``progress``'s exception is attached as
+          ``__cause__`` rather than being dropped.
+
     Example:
         >>> def progress(path: str, total: int, current: int, bytes: int):
         ...     print(f"{current}/{total}: {path} ({bytes} bytes)")
@@ -719,6 +740,22 @@ def create_archive_with_progress(
         ValueError: Invalid arguments
         IOError: I/O operation failed
         UnsupportedFormatError: Archive format not supported
+
+    Note:
+        If ``progress`` itself raises, creation is **not** aborted early — the
+        underlying progress-callback contract has no cancellation signal, so
+        creation always runs to completion first, and ``progress`` is not
+        called again for the remaining entries once it has raised:
+
+        - If creation otherwise succeeds, ``progress``'s own exception is what
+          propagates (unchanged — the same type, message, and traceback), with
+          ``files_added`` and ``bytes_written`` attributes attached describing
+          what was written, plus a ``progress_callback_error = True`` marker
+          attribute.
+        - If creation also fails, the creation error takes priority (a raising
+          ``progress`` can never mask a security error such as
+          ``SymlinkEscapeError``) and ``progress``'s exception is attached as
+          ``__cause__`` rather than being dropped.
 
     Example:
         >>> def progress(path: str, total: int, current: int, bytes: int):

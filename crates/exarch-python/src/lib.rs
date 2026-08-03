@@ -186,6 +186,21 @@ fn catch_panic_as_py_err<T>(
         .map_err(convert_error)
 }
 
+/// Catches a panic inside `f` and converts it into `PyRuntimeError`, without
+/// any further error mapping.
+///
+/// Unlike [`catch_panic_as_py_err`], `f` already returns a fully-formed
+/// `PyResult`. Used by the `*_with_progress` entry points, where a raising
+/// progress callback produces a `PyErr` directly — one that [`convert_error`]
+/// (which only maps `exarch_core::ArchiveError`) cannot express.
+fn catch_panic_as_py_result<T>(context: &str, f: impl FnOnce() -> PyResult<T>) -> PyResult<T> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).map_err(|_| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+            "Internal panic during {context}"
+        ))
+    })?
+}
+
 /// Deliberately panics inside [`catch_panic_as_py_err`] so the panic ->
 /// `PyRuntimeError` conversion can be verified end-to-end through the real
 /// Python API surface (see issue #395's regression-test requirement).
@@ -374,6 +389,31 @@ fn verify_archive(
 /// * `ValueError` - Invalid arguments
 /// * `IOError` - I/O operation failed
 /// * `UnsupportedFormatError` - Archive format not supported
+/// * Whatever `progress` itself raises - see the note below
+///
+/// # A raising `progress` propagates instead of being swallowed
+///
+/// Creation has already run to completion (or failure) by the time the
+/// exception is observed: the underlying `ProgressCallback` contract has no
+/// cancellation signal, so a raising `progress` cannot abort creation early
+/// (the same constraint documented on the Node binding's
+/// `createArchiveWithProgress`, see issues #465/#485/#489). Once `progress`
+/// raises, it is no longer called for the remaining entries.
+///
+/// - If creation otherwise succeeds, the callback's exception is what
+///   propagates. `files_added` and `bytes_written` attributes describing what
+///   was written are attached on a best-effort basis (`setattr` can fail, e.g.
+///   for an exception class using `__slots__`), together with a
+///   `progress_callback_error = True` marker attribute — check it before
+///   assuming the mere presence of `files_added` means creation failed partway
+///   through, matching the equivalent `extract_archive_with_progress` guidance
+///   (`exarch_core` has no partial-creation error variant today, but the marker
+///   keeps this call site consistent with the extraction side and correct if
+///   that changes).
+/// - If creation also fails, the core error takes priority (a raising callback
+///   can never mask a security error such as `SymlinkEscapeError`) and the
+///   callback's exception is chained onto it via `__cause__`. This error does
+///   not carry the `progress_callback_error` marker.
 ///
 /// # Examples
 ///
@@ -408,7 +448,7 @@ fn create_archive_with_progress(
     let default_config = exarch_core::creation::CreationConfig::default();
     let config_ref = config.map_or(&default_config, |c| c.as_core());
 
-    let report = catch_panic_as_py_err("archive creation with progress", || {
+    let report = catch_panic_as_py_result("archive creation with progress", || {
         run_create_with_optional_progress(py, &output_path, &source_paths, config_ref, progress)
     })?;
 
@@ -423,7 +463,7 @@ fn run_create_with_optional_progress(
     source_paths: &[String],
     config: &exarch_core::creation::CreationConfig,
     progress: Option<Py<PyAny>>,
-) -> exarch_core::Result<exarch_core::creation::CreationReport> {
+) -> PyResult<exarch_core::creation::CreationReport> {
     progress.map_or_else(
         || {
             // No progress callback - can release GIL
@@ -436,19 +476,68 @@ fn run_create_with_optional_progress(
                     &mut noop,
                 )
             })
+            .map_err(convert_error)
         },
         |py_callback| {
             // CRITICAL: Do NOT release GIL when using Python callback!
             // Python callback requires GIL to call into Python.
             let mut callback = PyProgressAdapter::new(py_callback);
-            exarch_core::create_archive_with_progress(
+            let result = exarch_core::create_archive_with_progress(
                 output_path,
                 source_paths,
                 config,
                 &mut callback,
-            )
+            );
+            merge_progress_result(py, result, callback.into_callback_error(), |exc, report| {
+                let _ = exc.setattr("files_added", report.files_added);
+                let _ = exc.setattr("bytes_written", report.bytes_written);
+            })
         },
     )
+}
+
+/// Merges a creation/extraction result with an exception captured from a
+/// raising progress callback, mirroring the Node binding's
+/// `ProgressCallbackError` semantics (see issues #465/#485): a core failure
+/// always stays primary — the callback exception is chained onto it as
+/// `__cause__` rather than masking it — while a callback exception over an
+/// otherwise successful operation is raised directly.
+///
+/// `attach_report_attrs` attaches counters describing what was written
+/// (`files_extracted`/`files_added` and `bytes_written`) onto the callback
+/// exception in the success case; the attribute names differ between
+/// extraction and creation, so the caller supplies them. In addition, a
+/// `progress_callback_error = True` attribute is always attached alongside
+/// them: without it, these counters are indistinguishable from the same two
+/// attribute names [`convert_error`] attaches to a genuine
+/// `PartialExtraction` (a core failure partway through), which would make a
+/// caller following that documented `hasattr(e, "files_extracted")` idiom
+/// misclassify a fully successful operation as a partial one (see #489
+/// review). Attribute attachment is best-effort (`setattr` can fail, e.g. on
+/// an exception class using `__slots__`); a failure here does not affect
+/// which exception is raised.
+fn merge_progress_result<T>(
+    py: Python<'_>,
+    result: exarch_core::Result<T>,
+    callback_error: Option<PyErr>,
+    attach_report_attrs: impl FnOnce(&Bound<'_, PyAny>, &T),
+) -> PyResult<T> {
+    match (result, callback_error) {
+        (Ok(report), None) => Ok(report),
+        (Ok(report), Some(err)) => {
+            let exc_value = err.value(py);
+            attach_report_attrs(exc_value, &report);
+            let _ = exc_value.setattr("progress_callback_error", true);
+            Err(err)
+        }
+        (Err(core_err), callback_err) => {
+            let converted = convert_error(core_err);
+            if let Some(cb_err) = callback_err {
+                converted.set_cause(py, Some(cb_err));
+            }
+            Err(converted)
+        }
+    }
 }
 
 /// Extract an archive with progress callback.
@@ -481,6 +570,7 @@ fn run_create_with_optional_progress(
 /// * `UnsupportedFormatError` - Archive format not supported
 /// * `InvalidArchiveError` - Archive is corrupted
 /// * `IOError` - I/O operation failed
+/// * Whatever `progress` itself raises - see the note below
 ///
 /// # Security Considerations
 ///
@@ -490,6 +580,30 @@ fn run_create_with_optional_progress(
 /// that the callback can safely call into Python. Without a callback the GIL
 /// is released for performance, but the TOCTOU caveat from `extract_archive`
 /// still applies.
+///
+/// ## A raising `progress` propagates instead of being swallowed
+///
+/// Extraction has already run to completion (or failure) by the time the
+/// exception is observed: the underlying `ProgressCallback` contract has no
+/// cancellation signal, so a raising `progress` cannot abort extraction early
+/// (the same constraint documented on the Node binding's
+/// `extractArchiveWithProgress`, see issues #465/#485/#489). Once `progress`
+/// raises, it is no longer called for the remaining entries.
+///
+/// - If extraction otherwise succeeds, the callback's exception is what
+///   propagates. `files_extracted` and `bytes_written` attributes describing
+///   what was written are attached on a best-effort basis (`setattr` can fail,
+///   e.g. for an exception class using `__slots__`), together with a
+///   `progress_callback_error = True` marker attribute. The marker exists
+///   because `files_extracted`/`bytes_written` are the *same* attribute names a
+///   genuine partial extraction carries (see `extract_archive`'s own
+///   partial-extraction note) — check `progress_callback_error` first to tell
+///   the two apart, rather than assuming their mere presence means extraction
+///   failed partway through.
+/// - If extraction also fails, the core error takes priority (a raising
+///   callback can never mask a security error such as `SymlinkEscapeError`) and
+///   the callback's exception is chained onto it via `__cause__`. This error
+///   does not carry the `progress_callback_error` marker.
 ///
 /// # Examples
 ///
@@ -522,7 +636,7 @@ fn extract_archive_with_progress(
     let default_options = exarch_core::ExtractionOptions::default();
     let options_ref = options.map_or(&default_options, |o| o.as_core());
 
-    let report = catch_panic_as_py_err("archive extraction with progress", || {
+    let report = catch_panic_as_py_result("archive extraction with progress", || {
         run_extract_with_optional_progress(
             py,
             &archive_path,
@@ -546,7 +660,7 @@ fn run_extract_with_optional_progress(
     config: &exarch_core::SecurityConfig,
     options: &exarch_core::ExtractionOptions,
     progress: Option<Py<PyAny>>,
-) -> exarch_core::Result<exarch_core::ExtractionReport> {
+) -> PyResult<exarch_core::ExtractionReport> {
     progress.map_or_else(
         || {
             // No progress callback - can release GIL
@@ -560,18 +674,23 @@ fn run_extract_with_optional_progress(
                     &mut noop,
                 )
             })
+            .map_err(convert_error)
         },
         |py_callback| {
             // CRITICAL: Do NOT release GIL when using Python callback!
             // Python callback requires GIL to call into Python.
             let mut callback = PyProgressAdapter::new(py_callback);
-            exarch_core::extract_archive_with_options_and_progress(
+            let result = exarch_core::extract_archive_with_options_and_progress(
                 archive_path,
                 output_dir,
                 config,
                 options,
                 &mut callback,
-            )
+            );
+            merge_progress_result(py, result, callback.into_callback_error(), |exc, report| {
+                let _ = exc.setattr("files_extracted", report.files_extracted);
+                let _ = exc.setattr("bytes_written", report.bytes_written);
+            })
         },
     )
 }
@@ -582,9 +701,21 @@ fn run_extract_with_optional_progress(
 /// bytes_written: int)` where `bytes_written` is the number of bytes written
 /// **for the current entry so far** (starts at 0 when the entry begins, grows
 /// as chunks are flushed to disk).
+///
+/// If the callback raises, the exception is captured into `callback_error`
+/// instead of being discarded (see issue #489). The
+/// [`exarch_core::ProgressCallback`] contract has no cancellation signal —
+/// the same constraint the Node binding documents for `NodeProgressAdapter`
+/// (issues #465/#485) — so extraction/creation keeps running to completion;
+/// once a raise has been captured, further dispatches are skipped, since
+/// there is no value in repeatedly invoking a callback already known to be
+/// broken. The caller retrieves the captured exception via
+/// [`into_callback_error`](Self::into_callback_error) once the core
+/// operation returns, and raises it to the Python caller.
 struct PyProgressAdapter {
     callback: Py<PyAny>,
     current_entry_bytes: u64,
+    callback_error: Option<PyErr>,
 }
 
 impl PyProgressAdapter {
@@ -592,18 +723,31 @@ impl PyProgressAdapter {
         Self {
             callback,
             current_entry_bytes: 0,
+            callback_error: None,
         }
+    }
+
+    /// Consumes the adapter, returning the exception captured from a raising
+    /// Python progress callback, if one occurred.
+    fn into_callback_error(self) -> Option<PyErr> {
+        self.callback_error
     }
 }
 
 impl exarch_core::ProgressCallback for PyProgressAdapter {
     fn on_entry_start(&mut self, path: &std::path::Path, total: usize, current: usize) {
+        if self.callback_error.is_some() {
+            return;
+        }
         self.current_entry_bytes = 0;
         Python::attach(|py| {
             let path_str = path.to_string_lossy().into_owned();
-            let _ = self
+            if let Err(err) = self
                 .callback
-                .call1(py, (path_str, total, current, self.current_entry_bytes));
+                .call1(py, (path_str, total, current, self.current_entry_bytes))
+            {
+                self.callback_error = Some(err);
+            }
         });
     }
 
@@ -805,6 +949,259 @@ mod tests {
                 result.err()
             );
             assert_eq!(result.unwrap().len(), MAX_PATH_LENGTH);
+        });
+    }
+
+    /// Regression test for #489: a raising progress callback must stop being
+    /// invoked for subsequent entries once its exception has been captured,
+    /// mirroring `NodeProgressAdapter`'s equivalent behavior.
+    #[test]
+    fn test_progress_adapter_skips_dispatch_after_first_error() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let raiser = py
+                .eval(
+                    c"lambda *a: (_ for _ in ()).throw(RuntimeError('boom'))",
+                    None,
+                    None,
+                )
+                .expect("failed to build raising callback");
+            let mut adapter = PyProgressAdapter::new(raiser.into());
+
+            exarch_core::ProgressCallback::on_entry_start(
+                &mut adapter,
+                std::path::Path::new("first.txt"),
+                2,
+                1,
+            );
+            assert!(
+                adapter.callback_error.is_some(),
+                "first raise must be captured"
+            );
+
+            // A second dispatch after capture must be a no-op: if it weren't
+            // skipped, invoking the same raising callback again is harmless
+            // here, but a real callback might be expensive or bring
+            // side-effects the contract requires not to repeat.
+            exarch_core::ProgressCallback::on_entry_start(
+                &mut adapter,
+                std::path::Path::new("second.txt"),
+                2,
+                2,
+            );
+
+            let err = adapter
+                .into_callback_error()
+                .expect("captured exception must survive into_callback_error");
+            assert!(
+                err.is_instance_of::<pyo3::exceptions::PyRuntimeError>(py),
+                "expected RuntimeError, got: {err}"
+            );
+        });
+    }
+
+    /// Attaches `exarch_core::ExtractionReport` counters onto a callback
+    /// exception, matching the closure passed to `merge_progress_result` at
+    /// the real `extract_archive_with_progress` call site.
+    fn attach_extraction_attrs(exc: &Bound<'_, PyAny>, report: &exarch_core::ExtractionReport) {
+        let _ = exc.setattr("files_extracted", report.files_extracted);
+        let _ = exc.setattr("bytes_written", report.bytes_written);
+    }
+
+    /// Attaches `exarch_core::creation::CreationReport` counters onto a
+    /// callback exception, matching the closure passed to
+    /// `merge_progress_result` at the real `create_archive_with_progress`
+    /// call site.
+    fn attach_creation_attrs(
+        exc: &Bound<'_, PyAny>,
+        report: &exarch_core::creation::CreationReport,
+    ) {
+        let _ = exc.setattr("files_added", report.files_added);
+        let _ = exc.setattr("bytes_written", report.bytes_written);
+    }
+
+    /// Regression test for #489: when the core operation succeeds but the
+    /// progress callback raised, the callback's exception must propagate
+    /// (not be swallowed), carrying the report's counters as attributes plus
+    /// the `progress_callback_error` marker (see #489 review S1) that
+    /// distinguishes this case from a genuine `PartialExtraction`, which
+    /// attaches the same `files_extracted`/`bytes_written` attribute names.
+    #[test]
+    fn test_merge_extraction_progress_result_callback_error_over_success() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let report = exarch_core::ExtractionReport {
+                files_extracted: 3,
+                bytes_written: 42,
+                ..exarch_core::ExtractionReport::default()
+            };
+            let cb_err = PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("callback boom");
+
+            let result =
+                merge_progress_result(py, Ok(report), Some(cb_err), attach_extraction_attrs);
+
+            let err = result.expect_err("callback exception must propagate");
+            assert!(err.is_instance_of::<pyo3::exceptions::PyRuntimeError>(py));
+            let exc_value = err.value(py);
+            let files: usize = exc_value
+                .getattr("files_extracted")
+                .expect("files_extracted missing")
+                .extract()
+                .expect("files_extracted not usize");
+            let bytes: u64 = exc_value
+                .getattr("bytes_written")
+                .expect("bytes_written missing")
+                .extract()
+                .expect("bytes_written not u64");
+            let marker: bool = exc_value
+                .getattr("progress_callback_error")
+                .expect("progress_callback_error missing")
+                .extract()
+                .expect("progress_callback_error not bool");
+            assert_eq!(files, 3);
+            assert_eq!(bytes, 42);
+            assert!(marker, "progress_callback_error must be True");
+        });
+    }
+
+    /// Regression test for #489: a core failure (e.g. a security violation)
+    /// must stay the primary, specifically-typed exception even when the
+    /// progress callback also raised — the callback exception is chained
+    /// onto it via `__cause__` instead of masking it, and the success-path
+    /// `progress_callback_error` marker must not be attached to it (a
+    /// genuine `PartialExtraction` is distinguished from a callback-raise
+    /// precisely by the marker's absence).
+    #[test]
+    fn test_merge_extraction_progress_result_core_error_takes_priority() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let core_err = exarch_core::ArchiveError::SymlinkEscape {
+                path: std::path::PathBuf::from("/etc/passwd"),
+            };
+            let cb_err = PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("callback boom");
+
+            let result =
+                merge_progress_result(py, Err(core_err), Some(cb_err), attach_extraction_attrs);
+
+            let err = result.expect_err("core error must propagate");
+            assert!(
+                err.is_instance_of::<error::SymlinkEscapeError>(py),
+                "expected SymlinkEscapeError, got: {err}"
+            );
+            let cause = err.cause(py).expect("callback exception must be chained");
+            assert!(cause.is_instance_of::<pyo3::exceptions::PyRuntimeError>(py));
+            assert!(
+                !err.value(py)
+                    .hasattr("progress_callback_error")
+                    .unwrap_or(false),
+                "core error must not carry the callback-over-success marker"
+            );
+        });
+    }
+
+    /// Regression test for #489: with no callback exception, a successful
+    /// extraction result passes through unchanged.
+    #[test]
+    fn test_merge_extraction_progress_result_success_passthrough() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let report = exarch_core::ExtractionReport {
+                files_extracted: 1,
+                ..exarch_core::ExtractionReport::default()
+            };
+            let result = merge_progress_result(py, Ok(report), None, attach_extraction_attrs);
+            assert_eq!(
+                result
+                    .expect("no callback error, no core error")
+                    .files_extracted,
+                1
+            );
+        });
+    }
+
+    /// Regression test for #489 (testing agent gap S3): the creation-side
+    /// counterpart of
+    /// `test_merge_extraction_progress_result_callback_error_over_success`.
+    /// `merge_progress_result` is shared between extraction and creation, but
+    /// the `files_added` attribute name is creation-specific and had zero
+    /// coverage before this test.
+    #[test]
+    fn test_merge_creation_progress_result_callback_error_over_success() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let report = exarch_core::creation::CreationReport {
+                files_added: 2,
+                bytes_written: 17,
+                ..exarch_core::creation::CreationReport::default()
+            };
+            let cb_err = PyErr::new::<pyo3::exceptions::PyValueError, _>("callback boom");
+
+            let result = merge_progress_result(py, Ok(report), Some(cb_err), attach_creation_attrs);
+
+            let err = result.expect_err("callback exception must propagate");
+            assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+            let exc_value = err.value(py);
+            let files: usize = exc_value
+                .getattr("files_added")
+                .expect("files_added missing")
+                .extract()
+                .expect("files_added not usize");
+            let bytes: u64 = exc_value
+                .getattr("bytes_written")
+                .expect("bytes_written missing")
+                .extract()
+                .expect("bytes_written not u64");
+            let marker: bool = exc_value
+                .getattr("progress_callback_error")
+                .expect("progress_callback_error missing")
+                .extract()
+                .expect("progress_callback_error not bool");
+            assert_eq!(files, 2);
+            assert_eq!(bytes, 17);
+            assert!(marker, "progress_callback_error must be True");
+        });
+    }
+
+    /// Regression test for #489 (testing agent gap S3): the creation-side
+    /// counterpart of
+    /// `test_merge_extraction_progress_result_core_error_takes_priority`.
+    #[test]
+    fn test_merge_creation_progress_result_core_error_takes_priority() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let core_err = exarch_core::ArchiveError::SourceNotFound {
+                path: std::path::PathBuf::from("missing.txt"),
+            };
+            let cb_err = PyErr::new::<pyo3::exceptions::PyValueError, _>("callback boom");
+
+            let result =
+                merge_progress_result(py, Err(core_err), Some(cb_err), attach_creation_attrs);
+
+            let err = result.expect_err("core error must propagate");
+            assert!(err.is_instance_of::<pyo3::exceptions::PyIOError>(py));
+            let cause = err.cause(py).expect("callback exception must be chained");
+            assert!(cause.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+        });
+    }
+
+    /// Regression test for #489 (testing agent gap S3): the creation-side
+    /// counterpart of
+    /// `test_merge_extraction_progress_result_success_passthrough`.
+    #[test]
+    fn test_merge_creation_progress_result_success_passthrough() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let report = exarch_core::creation::CreationReport {
+                files_added: 1,
+                ..exarch_core::creation::CreationReport::default()
+            };
+            let result = merge_progress_result(py, Ok(report), None, attach_creation_attrs);
+            assert_eq!(
+                result
+                    .expect("no callback error, no core error")
+                    .files_added,
+                1
+            );
         });
     }
 }

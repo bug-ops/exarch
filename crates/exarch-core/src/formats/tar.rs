@@ -389,11 +389,7 @@ impl<R: Read> TarArchive<R> {
             Ok(file) => file,
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 if ctx.skip_duplicates {
-                    ctx.report.files_skipped = ctx.report.files_skipped.checked_add(1).ok_or(
-                        ArchiveError::QuotaExceeded {
-                            resource: crate::QuotaResource::IntegerOverflow,
-                        },
-                    )?;
+                    common::checked_increment_files_skipped(ctx.report)?;
                     *ctx.hardlink_duplicate_skips = ctx.hardlink_duplicate_skips.saturating_add(1);
                     return Ok(());
                 }

@@ -5,6 +5,7 @@
 //! limits.
 
 use crate::ArchiveError;
+use crate::IoContext;
 use crate::Result;
 use crate::creation::config::CreationConfig;
 use crate::creation::filters;
@@ -99,9 +100,9 @@ impl<'a, State> FilteredWalker<'a, State> {
                 }
                 Err(e) => {
                     // Convert walkdir error to ArchiveError
-                    Some(Err(ArchiveError::Io(std::io::Error::other(format!(
-                        "walkdir error: {e}"
-                    )))))
+                    Some(Err(ArchiveError::Io(std::io::Error::other(
+                        IoContext::new("directory walk failed", e.to_string()),
+                    ))))
                 }
             }
         })
@@ -114,18 +115,18 @@ impl<'a, State> FilteredWalker<'a, State> {
     fn build_filtered_entry(&self, entry: &walkdir::DirEntry) -> Result<Option<FilteredEntry>> {
         let path = entry.path().to_path_buf();
         let metadata = entry.metadata().map_err(|e| {
-            ArchiveError::Io(std::io::Error::other(format!(
-                "cannot read metadata for {}: {e}",
-                path.display()
+            ArchiveError::Io(std::io::Error::other(IoContext::new(
+                "failed to read entry metadata",
+                format!("{}: {e}", path.display()),
             )))
         })?;
 
         // Determine entry type
         let entry_type = if metadata.is_symlink() {
             let target = std::fs::read_link(&path).map_err(|e| {
-                ArchiveError::Io(std::io::Error::other(format!(
-                    "cannot read symlink target for {}: {e}",
-                    path.display()
+                ArchiveError::Io(std::io::Error::other(IoContext::new(
+                    "failed to read symlink target",
+                    format!("{}: {e}", path.display()),
                 )))
             })?;
             EntryType::Symlink { target }
@@ -260,9 +261,9 @@ pub fn collect_entries<P: AsRef<Path>, State>(
             } else {
                 path.file_name()
                     .ok_or_else(|| {
-                        ArchiveError::Io(std::io::Error::other(format!(
-                            "cannot determine filename for {}",
-                            path.display()
+                        ArchiveError::Io(std::io::Error::other(IoContext::new(
+                            "cannot determine filename for source path",
+                            path.display().to_string(),
                         )))
                     })?
                     .into()

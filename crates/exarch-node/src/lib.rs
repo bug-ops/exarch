@@ -45,7 +45,6 @@
 
 use napi::bindgen_prelude::*;
 use napi::threadsafe_function::ThreadsafeFunction;
-use napi::threadsafe_function::ThreadsafeFunctionCallMode;
 use napi_derive::napi;
 
 mod config;
@@ -775,6 +774,44 @@ pub fn verify_archive_sync(
 /// prefixed with error codes for discrimination in JavaScript. See
 /// `extractArchive` for the full list of error codes.
 ///
+/// If `progress` throws, the returned promise rejects instead of crashing the
+/// process (see issue #465). Extraction has already run to completion (or
+/// failure) by the time the rejection is observed — a throwing callback cannot
+/// abort the extraction early, since the progress callback contract has no
+/// cancellation signal. The rejection therefore reports both signals:
+///
+/// - Extraction succeeded: the message is prefixed with
+///   `PROGRESS_CALLBACK_ERROR` and carries `filesExtracted=N, bytesWritten=M`,
+///   so the caller can still see what was written to disk.
+/// - Extraction also failed: the core error stays primary and keeps its
+///   error-code prefix, with a fixed ` | progressCallbackError: see cause`
+///   marker appended. A throwing callback can never mask a security error such
+///   as `SYMLINK_ESCAPE`.
+///
+/// In both cases the original JS exception is available as the `cause`
+/// property of the rejection value. The throw's own text and stack are never
+/// copied into the message — read `cause` for the callback's error detail
+/// rather than parsing it out of `message`.
+///
+/// ## Known limitation: primitive throws still crash the process
+///
+/// The catchable-rejection behavior above only holds when the callback throws a
+/// non-primitive value (`Error` and subclasses, plain objects, arrays, `null`,
+/// `undefined`, `Symbol`). Throwing a bare string, number, or boolean —
+/// `throw 'oops'` — still aborts the host process uncatchably with
+/// `Call JavaScript callback failed in threadsafe function`, and the promise
+/// never settles.
+///
+/// This is an upstream defect in napi-rs 3.12.0: the dispatcher behind
+/// `call_async_catch` overwrites its own status with the result of
+/// `napi_create_reference()`, which reports `napi_invalid_arg` for a primitive
+/// exception value, and that status is then escalated to a fatal exception even
+/// though the error was already delivered to the channel. It cannot be worked
+/// around from this crate.
+///
+/// Always throw an `Error` instance (or any non-primitive) from a progress
+/// callback to get the documented rejection behavior.
+///
 /// # Examples
 ///
 /// ```javascript
@@ -815,7 +852,7 @@ pub async fn extract_archive_with_progress(
                 &options_owned,
                 progress,
             )
-            .map_err(convert_error)
+            .map_err(|err| Error::from(*err))
         })
     })
     .await
@@ -825,15 +862,93 @@ pub async fn extract_archive_with_progress(
     Ok(ExtractionReport::from(report))
 }
 
+/// Error from running an extraction with a JS progress callback: either the
+/// core extraction operation failed, or the JS callback itself threw.
+enum ProgressCallbackError {
+    /// The core extraction failed. `callback` carries a JS progress callback
+    /// throw observed during the same run, if any.
+    Core {
+        source: exarch_core::ArchiveError,
+        callback: Option<Error>,
+    },
+    /// The JS progress callback threw while the extraction itself succeeded;
+    /// carries the already-converted napi error captured by
+    /// [`NodeProgressAdapter`] (see issue #465) plus the report describing
+    /// what was written to disk.
+    Callback {
+        source: Error,
+        report: exarch_core::ExtractionReport,
+    },
+}
+
+/// Projects a [`ProgressCallbackError`] onto the single napi error the promise
+/// rejects with, without discarding either signal:
+///
+/// - A core failure stays primary and keeps its error-code prefix
+///   (`SYMLINK_ESCAPE`, `QUOTA_EXCEEDED`, …) at the start of the message, so a
+///   throwing callback cannot mask a security violation from callers that match
+///   on that prefix. A concurrent callback throw is flagged by a fixed marker
+///   in the message and attached as `cause`.
+/// - A callback throw over a successful extraction is prefixed with
+///   `PROGRESS_CALLBACK_ERROR` and carries the report fields, so callers can
+///   still tell what was written to disk before deciding how to clean up.
+///
+/// In both cases the original JS exception is preserved as the `cause`
+/// property of the rejection, retaining its class and stack. Its text is never
+/// stringified into the message: the stack embeds an absolute host path (which
+/// #453 redacts everywhere else in release builds), and the throw content is
+/// attacker-influenced whenever the callback echoes archive entry data, which
+/// would let it spoof the machine-readable fields.
+impl From<ProgressCallbackError> for Error {
+    fn from(err: ProgressCallbackError) -> Self {
+        use std::fmt::Write;
+        match err {
+            ProgressCallbackError::Core { source, callback } => {
+                let mut converted = convert_error(source);
+                if let Some(cb) = callback {
+                    // Fixed marker only: the throw's own text carries a host
+                    // path in its stack and is attacker-influenced when the
+                    // callback echoes archive entry data, so it must not reach
+                    // the parseable message. `cause` carries it losslessly.
+                    converted
+                        .reason
+                        .push_str(" | progressCallbackError: see cause");
+                    converted.set_cause(cb);
+                }
+                converted
+            }
+            ProgressCallbackError::Callback { source, report } => {
+                let mut reason = String::with_capacity(128);
+                reason.push_str(
+                    "PROGRESS_CALLBACK_ERROR: progress callback threw after successful extraction",
+                );
+                // Writing to a String never fails
+                let _ = write!(
+                    &mut reason,
+                    " | filesExtracted={}, bytesWritten={}",
+                    report.files_extracted, report.bytes_written
+                );
+                let mut converted = Self::new(Status::GenericFailure, reason);
+                converted.set_cause(source);
+                converted
+            }
+        }
+    }
+}
+
 /// Runs `extract_archive_with_options_and_progress` routing to the JS callback
 /// when present or to [`exarch_core::NoopProgress`] when absent.
+///
+/// A core extraction failure and a JS callback throw can occur in the same
+/// run; both are carried out of here so neither is silently dropped (see the
+/// `From<ProgressCallbackError>` impl for how they merge into one rejection).
 fn run_extract_with_optional_progress(
     archive_path: &str,
     output_dir: &str,
     config: &exarch_core::SecurityConfig,
     options: &exarch_core::ExtractionOptions,
     progress: Option<ThreadsafeFunction<(String, i64, i64, i64)>>,
-) -> exarch_core::Result<exarch_core::ExtractionReport> {
+) -> std::result::Result<exarch_core::ExtractionReport, Box<ProgressCallbackError>> {
     progress.map_or_else(
         || {
             let mut noop = exarch_core::NoopProgress;
@@ -844,16 +959,31 @@ fn run_extract_with_optional_progress(
                 options,
                 &mut noop,
             )
+            .map_err(|source| {
+                Box::new(ProgressCallbackError::Core {
+                    source,
+                    callback: None,
+                })
+            })
         },
         |tsfn| {
             let mut callback = NodeProgressAdapter::new(tsfn);
-            exarch_core::extract_archive_with_options_and_progress(
+            let result = exarch_core::extract_archive_with_options_and_progress(
                 archive_path,
                 output_dir,
                 config,
                 options,
                 &mut callback,
-            )
+            );
+            match (result, callback.into_callback_error()) {
+                (Ok(report), None) => Ok(report),
+                (Ok(report), Some(source)) => {
+                    Err(Box::new(ProgressCallbackError::Callback { source, report }))
+                }
+                (Err(source), callback) => {
+                    Err(Box::new(ProgressCallbackError::Core { source, callback }))
+                }
+            }
         },
     )
 }
@@ -866,10 +996,19 @@ fn run_extract_with_optional_progress(
 /// `current_entry_bytes` to `0` immediately before doing so. `on_bytes_written`
 /// does accumulate per-chunk writes (during creation; extraction also emits
 /// these events for some formats), but never triggers a dispatch of its own.
+///
+/// If the JavaScript callback throws, the exception is captured into
+/// `callback_error` instead of being routed through `napi_fatal_exception`
+/// (which would otherwise crash the host process uncatchably, see issue
+/// #465). Once a throw has been captured, further dispatches are skipped:
+/// the [`exarch_core::ProgressCallback`] contract has no cancellation signal,
+/// so extraction/creation keeps running, but there is no value in repeatedly
+/// invoking a callback already known to be broken.
 struct NodeProgressAdapter {
     tsfn: ThreadsafeFunction<(String, i64, i64, i64)>,
     current_entry_bytes: i64,
     total: usize,
+    callback_error: Option<Error>,
 }
 
 impl NodeProgressAdapter {
@@ -878,21 +1017,37 @@ impl NodeProgressAdapter {
             tsfn,
             current_entry_bytes: 0,
             total: 0,
+            callback_error: None,
         }
+    }
+
+    /// Consumes the adapter, returning the error captured from a throwing JS
+    /// progress callback, if one occurred.
+    fn into_callback_error(self) -> Option<Error> {
+        self.callback_error
     }
 }
 
 impl exarch_core::ProgressCallback for NodeProgressAdapter {
     fn on_entry_start(&mut self, path: &std::path::Path, total: usize, current: usize) {
+        if self.callback_error.is_some() {
+            return;
+        }
         self.current_entry_bytes = 0;
         self.total = total;
         let path_str = path.to_string_lossy().into_owned();
         let total_i64 = i64::try_from(total).unwrap_or(i64::MAX);
         let current_i64 = i64::try_from(current).unwrap_or(i64::MAX);
-        self.tsfn.call(
-            Ok((path_str, total_i64, current_i64, self.current_entry_bytes)),
-            ThreadsafeFunctionCallMode::NonBlocking,
-        );
+        let value = Ok((path_str, total_i64, current_i64, self.current_entry_bytes));
+        // `call_async_catch` clears and captures a JS throw into `Err` rather
+        // than routing it through `napi_fatal_exception`. `block_on` is sound
+        // here because `on_entry_start` runs only on a `spawn_blocking`
+        // worker thread, never inside an async task-polling context.
+        if let Err(err) =
+            tokio::runtime::Handle::current().block_on(self.tsfn.call_async_catch(value))
+        {
+            self.callback_error = Some(err);
+        }
     }
 
     fn on_bytes_written(&mut self, bytes: u64) {

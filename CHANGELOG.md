@@ -205,6 +205,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   messages for `PathTraversal`, `SymlinkEscape`, `HardlinkEscape`, and `InvalidPermissions` now
   include the full archive entry path where they
   previously showed only the filename.
+
+- **`io::Error::other(...)` call sites collapsed to the uninformative "other error" message in
+  release builds after #453's redaction fix (#464)**: `#453` reduced `CoreError::Io` messages to
+  their `std::io::ErrorKind` description in release builds to close a host-path leak, which is
+  sound for OS-originated `ErrorKind`s but degraded every `ErrorKind::Other` call site (built via
+  `std::io::Error::other(...)` in `creation::walker`, `creation::zip`, and the I/O-class branch of
+  `formats::sevenz`'s error mapping) to the fixed string "other error", losing all diagnostic
+  value. Added `exarch_core::IoContext`, which pairs a static, non-path-bearing summary (e.g.
+  "failed to read entry metadata") with the dynamic detail (which may embed a host path) at each
+  of those call sites. `exarch-core`'s shared `sanitize_io_error_for_error` (see the `#463`/`#462`
+  entry above, which hoisted it out of both bindings into `error::redaction`) now recognizes
+  `IoContext` via `io::Error::get_ref` downcasting and surfaces its static `context` in release
+  builds instead of the generic `ErrorKind` description, while debug builds continue to show the
+  full detail. Because both bindings call that one shared function, they pick this up without
+  binding-local logic. No host path can leak through `context`, since it is always a `&'static
+  str` fixed at the call site. The redaction itself is unit-tested in `error::redaction`, and the
+  release-mode behaviour is asserted end-to-end against the compiled bindings by `exarch-python`'s
+  `tests/test_error_redaction.py` and `exarch-node`'s `tests/error-redaction.test.js`, which
+  trigger a real walkdir failure through `create_archive` and check that the `IoContext` summary
+  survives while the host path and raw OS detail do not.
+
+- **`exarch-node`: a throwing progress callback crashed the process uncatchably (#465)**:
+  `extractArchiveWithProgress`'s `NodeProgressAdapter` dispatched the JS progress callback via
+  `ThreadsafeFunction::call` in fire-and-forget `NonBlocking` mode, which routes a JS throw
+  through `napi_fatal_exception` — terminating the process with an uncatchable
+  `uncaughtException`, even when the call site was wrapped in `try`/`catch`. The adapter now
+  awaits `ThreadsafeFunction::call_async_catch` (via `Handle::block_on`, since the dispatch runs
+  on a `spawn_blocking` worker thread) and captures a JS throw into the adapter instead; the
+  captured error now rejects the returned promise rather than crashing the host process.
+  Because extraction cannot be aborted from a progress callback (the `ProgressCallback` contract
+  has no cancellation signal), a callback throw and a core extraction failure can both occur in
+  the same run — neither is discarded. When extraction also failed, the core error stays primary
+  and keeps its error-code prefix (`SYMLINK_ESCAPE`, `QUOTA_EXCEEDED`, …) at the start of the
+  message with a fixed ` | progressCallbackError: see cause` marker appended, so a throwing
+  callback cannot mask a security violation from callers matching on that prefix. When extraction
+  succeeded, the rejection is prefixed `PROGRESS_CALLBACK_ERROR` and carries
+  `filesExtracted=N, bytesWritten=M`, so callers can still tell what was written to disk. In both
+  cases the original JS exception is preserved as the rejection's `cause` property, retaining its
+  class and stack; its text and stack are never copied into the message, since the stack embeds an
+  absolute host path (which #453 redacts everywhere else in release builds) and the throw content
+  is attacker-influenced whenever the callback echoes archive entry data — read `cause` for the
+  callback's detail rather than parsing it out of `message`.
+  Known limitation, now documented on `extractArchiveWithProgress` and pinned by a child-process
+  test: this only covers non-primitive throws. Throwing a bare string, number, or boolean
+  (`throw 'oops'`) still crashes the process and leaves the promise unsettled, due to an upstream
+  napi-rs 3.12.0 defect where `call_async_catch`'s dispatcher escalates the `napi_invalid_arg`
+  from `napi_create_reference()` on a primitive exception value into a fatal exception. Throw an
+  `Error` instance (or any non-primitive) from a progress callback to get the documented
+  rejection behavior.
+
 - **`exarch-python` error messages leaked full absolute paths in release builds, and both
   bindings leaked host paths embedded in `CoreError::Io` messages (#453)**:
   `crates/exarch-python/src/error.rs` called `path.display()` directly and unconditionally for

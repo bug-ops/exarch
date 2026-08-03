@@ -390,9 +390,7 @@ mod tests {
             CoreError::SymlinkEscape {
                 path: nested.clone(),
             },
-            CoreError::HardlinkEscape {
-                path: nested.clone(),
-            },
+            CoreError::HardlinkEscape { path: nested },
         ];
         for err in variants {
             let err_str = convert_error(err).to_string();

@@ -696,6 +696,44 @@ export declare function extractArchiveSync(archivePath: string, outputDir: strin
  * prefixed with error codes for discrimination in JavaScript. See
  * `extractArchive` for the full list of error codes.
  *
+ * If `progress` throws, the returned promise rejects instead of crashing the
+ * process (see issue #465). Extraction has already run to completion (or
+ * failure) by the time the rejection is observed — a throwing callback cannot
+ * abort the extraction early, since the progress callback contract has no
+ * cancellation signal. The rejection therefore reports both signals:
+ *
+ * - Extraction succeeded: the message is prefixed with
+ *   `PROGRESS_CALLBACK_ERROR` and carries `filesExtracted=N, bytesWritten=M`,
+ *   so the caller can still see what was written to disk.
+ * - Extraction also failed: the core error stays primary and keeps its
+ *   error-code prefix, with a fixed ` | progressCallbackError: see cause`
+ *   marker appended. A throwing callback can never mask a security error such
+ *   as `SYMLINK_ESCAPE`.
+ *
+ * In both cases the original JS exception is available as the `cause`
+ * property of the rejection value. The throw's own text and stack are never
+ * copied into the message — read `cause` for the callback's error detail
+ * rather than parsing it out of `message`.
+ *
+ * ## Known limitation: primitive throws still crash the process
+ *
+ * The catchable-rejection behavior above only holds when the callback throws a
+ * non-primitive value (`Error` and subclasses, plain objects, arrays, `null`,
+ * `undefined`, `Symbol`). Throwing a bare string, number, or boolean —
+ * `throw 'oops'` — still aborts the host process uncatchably with
+ * `Call JavaScript callback failed in threadsafe function`, and the promise
+ * never settles.
+ *
+ * This is an upstream defect in napi-rs 3.12.0: the dispatcher behind
+ * `call_async_catch` overwrites its own status with the result of
+ * `napi_create_reference()`, which reports `napi_invalid_arg` for a primitive
+ * exception value, and that status is then escalated to a fatal exception even
+ * though the error was already delivered to the channel. It cannot be worked
+ * around from this crate.
+ *
+ * Always throw an `Error` instance (or any non-primitive) from a progress
+ * callback to get the documented rejection behavior.
+ *
  * # Examples
  *
  * ```javascript

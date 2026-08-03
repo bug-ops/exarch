@@ -109,6 +109,7 @@ static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 use crate::ArchiveError;
 use crate::ExtractionOptions;
 use crate::ExtractionReport;
+use crate::IoContext;
 use crate::ProgressCallback;
 use crate::Result;
 use crate::SecurityConfig;
@@ -801,7 +802,10 @@ impl From<sevenz_rust2::Error> for ArchiveError {
 
         // Check for I/O errors
         if err_lower.contains("i/o") || err_lower.contains("read") || err_lower.contains("write") {
-            return Self::Io(std::io::Error::other(err_str));
+            return Self::Io(std::io::Error::other(IoContext::new(
+                "7z I/O error",
+                err_str,
+            )));
         }
 
         // Default: InvalidArchive
@@ -1384,6 +1388,38 @@ mod tests {
                 );
             }
             other => panic!("expected SecurityViolation, got {other:?}"),
+        }
+    }
+
+    /// Regression test for #464: the I/O-class branch of the sevenz-rust2
+    /// error mapping must wrap its detail in `IoContext` so bindings can
+    /// surface an actionable reason in release builds instead of the
+    /// generic `ErrorKind::Other` message "other error".
+    #[test]
+    fn test_sevenz_io_error_maps_to_io_context() {
+        let inner = std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "unexpected EOF while reading entry data",
+        );
+        let sevenz_err = sevenz_rust2::Error::Io(inner, "test.7z".into());
+
+        let archive_err: ArchiveError = sevenz_err.into();
+
+        match archive_err {
+            ArchiveError::Io(io_err) => {
+                assert_eq!(io_err.kind(), std::io::ErrorKind::Other);
+                let ctx = io_err
+                    .get_ref()
+                    .and_then(|inner| inner.downcast_ref::<IoContext>())
+                    .expect("expected IoContext to be attached to the io::Error");
+                assert_eq!(ctx.context, "7z I/O error");
+                assert!(
+                    ctx.detail.contains("unexpected EOF"),
+                    "detail should retain the original sevenz-rust2 message, got: {}",
+                    ctx.detail
+                );
+            }
+            other => panic!("expected ArchiveError::Io, got {other:?}"),
         }
     }
 

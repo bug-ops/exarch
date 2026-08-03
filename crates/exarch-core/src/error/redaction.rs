@@ -14,8 +14,8 @@
 //! This module owns the two redaction algorithms — [`sanitize_path_for_error`]
 //! for genuinely host-derived paths and [`format_entry_path_for_error`] for
 //! archive-relative, attacker-authored paths — plus
-//! [`sanitize_io_error_for_error`] for I/O error messages (see #463). Both
-//! bindings call these algorithms directly, per variant, in their own
+//! [`sanitize_io_error_for_error`] for I/O error messages (see #463, #464).
+//! Both bindings call these algorithms directly, per variant, in their own
 //! `convert_error`; [`ArchiveError::to_ffi_message`] uses them via
 //! [`ArchiveError::redacted_path`]. The mapping from variant to algorithm is
 //! therefore still applied independently in three places — here (via
@@ -123,6 +123,14 @@ pub fn format_entry_path_for_error(path: &Path) -> String {
 /// builds, returns only the [`std::io::ErrorKind`] description, since the
 /// free-form message text has no structured path field to redact.
 ///
+/// Exception: errors carrying an [`IoContext`](super::IoContext) — used at
+/// [`std::io::Error::other`] call sites whose [`std::io::ErrorKind::Other`]
+/// description would otherwise redact to the uninformative "other error"
+/// (see #464) — surface [`IoContext::context`](super::IoContext::context) in
+/// release builds instead. That is safe because `context` is always a
+/// `&'static str` fixed at the call site, never built from path or archive
+/// entry data.
+///
 /// # Examples
 ///
 /// ```
@@ -145,6 +153,14 @@ pub fn sanitize_io_error_for_error(e: &std::io::Error) -> String {
 /// builds, returns only the [`std::io::ErrorKind`] description, since the
 /// free-form message text has no structured path field to redact.
 ///
+/// Exception: errors carrying an [`IoContext`](super::IoContext) — used at
+/// [`std::io::Error::other`] call sites whose [`std::io::ErrorKind::Other`]
+/// description would otherwise redact to the uninformative "other error"
+/// (see #464) — surface [`IoContext::context`](super::IoContext::context) in
+/// release builds instead. That is safe because `context` is always a
+/// `&'static str` fixed at the call site, never built from path or archive
+/// entry data.
+///
 /// # Examples
 ///
 /// ```
@@ -157,7 +173,9 @@ pub fn sanitize_io_error_for_error(e: &std::io::Error) -> String {
 #[cfg(not(debug_assertions))]
 #[must_use]
 pub fn sanitize_io_error_for_error(e: &std::io::Error) -> String {
-    e.kind().to_string()
+    e.get_ref()
+        .and_then(|inner| inner.downcast_ref::<super::IoContext>())
+        .map_or_else(|| e.kind().to_string(), |ctx| ctx.context.to_string())
 }
 
 impl ArchiveError {
@@ -275,6 +293,33 @@ mod tests {
         let msg = sanitize_io_error_for_error(&err);
         assert!(!msg.contains("/srv/secret/app"));
         assert!(msg.contains("permission denied"));
+    }
+
+    /// Regression test for #464: `ErrorKind::Other` would otherwise redact to
+    /// the uninformative "other error", so an `IoContext` payload surfaces its
+    /// static `context` instead — without leaking the dynamic detail.
+    #[test]
+    #[cfg(not(debug_assertions))]
+    fn test_sanitize_io_error_for_error_surfaces_io_context_in_release() {
+        let err = std::io::Error::other(crate::IoContext::new(
+            "failed to read entry metadata",
+            "/srv/secret/app/x.txt: permission denied",
+        ));
+        let msg = sanitize_io_error_for_error(&err);
+        assert_eq!(msg, "failed to read entry metadata");
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    fn test_sanitize_io_error_for_error_keeps_io_context_detail_in_debug() {
+        let err = std::io::Error::other(crate::IoContext::new(
+            "failed to read entry metadata",
+            "/srv/secret/app/x.txt: permission denied",
+        ));
+        assert_eq!(
+            sanitize_io_error_for_error(&err),
+            "failed to read entry metadata: /srv/secret/app/x.txt: permission denied"
+        );
     }
 
     /// Regression test for #462: every `ArchiveError` variant carrying an

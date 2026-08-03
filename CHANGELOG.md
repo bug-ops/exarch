@@ -362,6 +362,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **A pre-planted symlink at a predictable/checked destination path bypassed a `Path::exists()`-style
+  duplicate check, and the subsequent non-exclusive write followed it outside the extraction root
+  (#471, #467)**: two more instances of the vulnerability class fixed for TAR/ZIP's normal-file
+  write path in #459 below, found in the two write paths that fix did not cover. In 7z's
+  `write_file_with_permit` (`formats/sevenz.rs`), the temp-file-then-rename write path derived its
+  temp file name from the process PID and a per-process monotonic counter — predictable — and opened
+  it with a plain `File::create`, which follows an existing symlink (dangling or not) instead of
+  refusing it; fixed by opening with `OpenOptions::create_new`, retrying with a fresh counter value
+  on `AlreadyExists` up to `MAX_TEMP_FILE_CREATE_ATTEMPTS` (8) times. In TAR's `create_hardlink`
+  (`formats/tar.rs`), `Path::exists()` returns `false` for a dangling symlink at the hardlink's
+  destination, so a pre-planted one bypassed the duplicate-detection check entirely, and the
+  subsequent `std::fs::copy` followed it; fixed by opening the destination with
+  `OpenOptions::create_new` first — folding the duplicate check into the `open()` call itself — then
+  copying the hardlink target's content into the already-open handle via a new
+  `common::copy_file_content_with_permit`, which replaces the now-removed path-based
+  `common::copy_file_with_permit`. Both fixes share a new `common::TempFileGuard` RAII cleanup type
+  (hoisted out of `formats/sevenz.rs`, previously private to that module) so a fallible step between
+  file creation and the operation's success point does not leave a partial artifact behind on the
+  error path. Both preconditions require an attacker-writable destination directory, not a malicious
+  archive alone. `create_hardlink`'s *read* side had a narrower version of the same class: hardlink
+  targets are validated for containment in a first pass (`HardlinkTracker::validate_hardlink`,
+  resolving on-disk symlinks as of that point in time) but the two-pass design defers actually
+  reading the target to a later, second pass with nothing re-validating it in between — a plain
+  path-based `File::open`/`std::fs::metadata` in that second pass would silently follow whatever
+  ended up at the target path by then, which an attacker with write access to the destination could
+  swap out after the first pass validated it (TOCTOU, not an unconditional read: a symlink present
+  *before* the first pass runs is already rejected there, per #116). The same path-based `stat`
+  also left quota sizing vulnerable to the same swap, independent of the read TOCTOU (bypassing
+  #426's per-hardlink accounting). Both are closed by a new `common::open_no_follow`, which opens
+  the target exactly once with `O_NOFOLLOW` (Unix), so any symlink present by the second pass
+  fails the open instead of being followed; `copy_file_content_with_permit` now takes that
+  already-open handle instead of a path, and the quota reservation is sized from the same handle's
+  `fstat` rather than a separate `stat` call. A symlink at the target is not automatically treated
+  as an attack, since it is a legitimate archive shape for a hardlink's target to be a symlink
+  created earlier in the same extraction (already first-pass-validated): on `open_no_follow`
+  returning `ELOOP`, `create_hardlink` re-runs the first pass's own `resolve_through_symlinks`
+  containment check against the current on-disk state and, if it still resolves inside the
+  destination, opens the resolved path instead of failing outright.
 - **Dangling symlink at the extraction destination bypassed the duplicate-check and allowed
   writing outside the destination root (#459, pre-existing, TAR and ZIP)**: the duplicate-existence
   check used `Path::exists()`, which follows symlinks and returns `false` for a dangling one. A

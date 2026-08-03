@@ -9,6 +9,11 @@
 //! - [`extract_file_with_permit`]: Generic file extraction with buffered I/O
 //! - [`create_directory`]: Directory creation (idempotent)
 //! - [`create_symlink`]: Symbolic link creation (Unix only)
+//! - [`open_no_follow`]: Read-only open that refuses to follow a symlink
+//! - [`is_filesystem_loop_error`]: Detects the `ELOOP` error `open_no_follow`
+//!   produces
+//! - [`copy_file_content_with_permit`]: Hardlink content copy between
+//!   already-open source/destination handles
 //! - [`check_extension_allowed`]: Extension allowlist filtering
 
 use rustc_hash::FxHashSet;
@@ -437,7 +442,7 @@ pub fn check_extension_allowed(
 /// component is a symlink on any branch.
 #[inline]
 #[cfg(unix)]
-fn create_file_with_mode(
+pub fn create_file_with_mode(
     path: &Path,
     mode: Option<u32>,
     create_new: bool,
@@ -499,7 +504,7 @@ fn create_file_with_mode(
 /// exists.
 #[inline]
 #[cfg(not(unix))]
-fn create_file_with_mode(
+pub fn create_file_with_mode(
     path: &Path,
     _mode: Option<u32>,
     create_new: bool,
@@ -757,18 +762,150 @@ pub fn create_symlink(
     }
 }
 
-/// Copies a hardlink target's bytes to a new inode, consuming the
-/// [`QuotaPermit`] that authorized the copy.
+/// Opens `path` for reading, refusing to follow a symlink at its final path
+/// component.
+///
+/// # Security - Hardlink-Target TOCTOU Rejection (issue #467)
+///
+/// A hardlink's target is validated for containment in an earlier pass
+/// (`HardlinkTracker::validate_hardlink`, resolving on-disk symlinks as of
+/// that point in time) but nothing re-validates it by the time a later pass
+/// actually reads it — a plain `File::open` at that point would silently
+/// follow whatever is at the target path *then*, which given an
+/// attacker-writable destination directory may no longer be what the
+/// earlier pass validated. On Unix, this is closed with `O_NOFOLLOW`: the
+/// open fails instead of following a symlink planted or swapped in at the
+/// target path since. Callers should reserve quota and copy from the
+/// returned handle rather than re-opening `path`, to avoid a TOCTOU window
+/// between a path-based size check and a separate path-based read. A symlink
+/// at `path` is not automatically an attack, though — see
+/// [`resolve_through_symlinks`](crate::types::safe_symlink::resolve_through_symlinks)
+/// for the re-validation callers should perform on `ErrorKind::FilesystemLoop`
+/// before treating it as one.
+///
+/// This mitigation is Unix-only: non-Unix platforms have no `O_NOFOLLOW`
+/// equivalent wired up here, so the TOCTOU window this closes on Unix
+/// remains open on those platforms.
+///
+/// # Errors
+///
+/// Returns an I/O error if `path` does not exist, is a symlink (Unix only,
+/// via `ELOOP`), or otherwise cannot be opened for reading.
+pub fn open_no_follow(path: &Path) -> std::io::Result<File> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.read(true);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(libc::O_NOFOLLOW);
+    }
+
+    opts.open(path)
+}
+
+/// Returns `true` if `error` is the "too many levels of symbolic links"
+/// error (`ELOOP` on Unix) that [`open_no_follow`] produces when its final
+/// path component is a symlink.
+///
+/// `std::io::ErrorKind::FilesystemLoop` exists for exactly this case but is
+/// not yet stable (`io_error_more`, rust-lang/rust#86442 as of this crate's
+/// MSRV), so this compares the raw OS error code directly on Unix. Always
+/// `false` on non-Unix, since [`open_no_follow`] has no `O_NOFOLLOW`
+/// equivalent there and cannot produce this specific error.
+#[must_use]
+pub fn is_filesystem_loop_error(error: &std::io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        error.raw_os_error() == Some(libc::ELOOP)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = error;
+        false
+    }
+}
+
+/// Copies a hardlink target's bytes from an already-open source handle into
+/// an already-open destination handle, consuming the [`QuotaPermit`] that
+/// authorized the copy.
 ///
 /// Taking `permit` by value ensures a reservation can be spent at most once:
 /// `QuotaPermit` is neither `Clone` nor `Copy`, so the caller cannot retain
 /// it to pass to a second copy.
 ///
+/// # Security - Symlink Rejection and Quota TOCTOU (issue #467)
+///
+/// Unlike `std::fs::copy(from, to)`, both `from` and `to` are already-open
+/// [`File`] handles rather than paths. Callers obtain `to` via
+/// `OpenOptions::create_new` (refusing to create through a pre-existing
+/// destination path, symlink or not) and `from` via [`open_no_follow`]
+/// (refusing to follow a symlink at the source path), and reserve quota from
+/// `from`'s already-open `fstat`, not a separate path-based `stat`. Passing
+/// paths instead would both re-expose the symlink-follow read this function
+/// exists to prevent, and reopen a TOCTOU window where the reserved size and
+/// the actually-copied bytes come from two different filesystem objects.
+///
+/// On Unix, `from`'s permission bits are copied to `to` afterward, matching
+/// `std::fs::copy`'s behavior. `from`'s permissions were already sanitized
+/// when the target file was extracted as a regular file (setuid/setgid
+/// stripped), so re-applying them to the brand-new `to` here does not
+/// reintroduce anything unsanitized.
+///
 /// # Errors
 ///
-/// Returns an I/O error if the copy fails.
-pub fn copy_file_with_permit(from: &Path, to: &Path, _permit: QuotaPermit) -> std::io::Result<u64> {
-    std::fs::copy(from, to)
+/// Returns an I/O error if the copy or (on Unix) applying permissions fails.
+pub fn copy_file_content_with_permit(
+    mut from: File,
+    mut to: File,
+    _permit: QuotaPermit,
+) -> std::io::Result<u64> {
+    let bytes_copied = std::io::copy(&mut from, &mut to)?;
+
+    #[cfg(unix)]
+    {
+        let permissions = from.metadata()?.permissions();
+        to.set_permissions(permissions)?;
+    }
+
+    Ok(bytes_copied)
+}
+
+/// RAII guard that removes a file at `path` when dropped, unless [`persist`]
+/// was called first.
+///
+/// Shared between TAR's hardlink-content copy and 7z's temp-file-then-rename
+/// write path so a fallible step between file creation and the operation's
+/// success point (quota reservation, the copy itself) does not leave a
+/// partial artifact behind on the error path.
+///
+/// [`persist`]: TempFileGuard::persist
+pub struct TempFileGuard {
+    path: PathBuf,
+    should_cleanup: bool,
+}
+
+impl TempFileGuard {
+    /// Creates a new guard that will remove `path` on drop.
+    pub fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            should_cleanup: true,
+        }
+    }
+
+    /// Marks the file as successfully processed, preventing cleanup on drop.
+    pub fn persist(mut self) {
+        self.should_cleanup = false;
+    }
+}
+
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        if self.should_cleanup {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
 }
 
 #[cfg(test)]

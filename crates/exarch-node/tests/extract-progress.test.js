@@ -191,7 +191,8 @@ describe('extractArchiveWithProgress', () => {
   // This test pins the CURRENT behavior. A napi-rs upgrade that fixes the bug
   // will make it fail — that is the intended signal: flip the assertions to
   // match the clean-rejection case above and drop the caveat from the
-  // `extractArchiveWithProgress` docs.
+  // `extractArchiveWithProgress` docs. Tracked in
+  // https://github.com/bug-ops/exarch/issues/473.
   it('KNOWN LIMITATION: crashes the host process when the callback throws a primitive (child process)', () => {
     const script = `
       const exarch = require(${JSON.stringify(path.join(__dirname, '..', 'index.js'))});

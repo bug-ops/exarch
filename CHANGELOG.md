@@ -253,7 +253,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   napi-rs 3.12.0 defect where `call_async_catch`'s dispatcher escalates the `napi_invalid_arg`
   from `napi_create_reference()` on a primitive exception value into a fatal exception. Throw an
   `Error` instance (or any non-primitive) from a progress callback to get the documented
-  rejection behavior.
+  rejection behavior. Tracked upstream in #473.
 
 - **`exarch-python` error messages leaked full absolute paths in release builds, and both
   bindings leaked host paths embedded in `CoreError::Io` messages (#453)**:

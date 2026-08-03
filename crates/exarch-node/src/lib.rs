@@ -810,7 +810,8 @@ pub fn verify_archive_sync(
 /// around from this crate.
 ///
 /// Always throw an `Error` instance (or any non-primitive) from a progress
-/// callback to get the documented rejection behavior.
+/// callback to get the documented rejection behavior. Tracked upstream in
+/// <https://github.com/bug-ops/exarch/issues/473>.
 ///
 /// # Examples
 ///

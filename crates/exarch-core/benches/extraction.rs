@@ -33,6 +33,8 @@ use exarch_core::formats::traits::ArchiveFormat;
 use std::io::Cursor;
 use std::io::Write;
 use std::path::PathBuf;
+use std::time::Duration;
+use std::time::Instant;
 use tempfile::TempDir;
 use zip::write::SimpleFileOptions;
 use zip::write::ZipWriter;
@@ -237,18 +239,27 @@ fn benchmark_many_small_files(c: &mut Criterion) {
             BenchmarkId::from_parameter(file_count),
             &zip_data,
             |b, data| {
-                b.iter(|| {
-                    let temp = TempDir::new().unwrap();
-                    let cursor = Cursor::new(data.clone());
-                    let mut archive = ZipArchive::new(cursor).unwrap();
-                    archive
-                        .extract(
-                            temp.path(),
-                            &SecurityConfig::default().validate().unwrap(),
-                            &ExtractionOptions::default(),
-                            &mut exarch_core::NoopProgress,
-                        )
-                        .unwrap();
+                b.iter_custom(|iters| {
+                    let mut total = Duration::ZERO;
+                    for _ in 0..iters {
+                        let temp = TempDir::new().unwrap();
+
+                        let start = Instant::now();
+                        let cursor = Cursor::new(data.clone());
+                        let mut archive = ZipArchive::new(cursor).unwrap();
+                        archive
+                            .extract(
+                                temp.path(),
+                                &SecurityConfig::default().validate().unwrap(),
+                                &ExtractionOptions::default(),
+                                &mut exarch_core::NoopProgress,
+                            )
+                            .unwrap();
+                        total += start.elapsed();
+
+                        drop(temp);
+                    }
+                    total
                 });
             },
         );
@@ -490,18 +501,27 @@ fn benchmark_file_count_scaling(c: &mut Criterion) {
         group.throughput(Throughput::Elements(count_u64));
         group.bench_with_input(BenchmarkId::new("files", count), &zip_data, |b, data| {
             let config = SecurityConfig::default().validate().unwrap();
-            b.iter(|| {
-                let temp = TempDir::new().unwrap();
-                let cursor = Cursor::new(data.clone());
-                let mut archive = ZipArchive::new(cursor).unwrap();
-                archive
-                    .extract(
-                        temp.path(),
-                        &config,
-                        &ExtractionOptions::default(),
-                        &mut exarch_core::NoopProgress,
-                    )
-                    .unwrap();
+            b.iter_custom(|iters| {
+                let mut total = Duration::ZERO;
+                for _ in 0..iters {
+                    let temp = TempDir::new().unwrap();
+
+                    let start = Instant::now();
+                    let cursor = Cursor::new(data.clone());
+                    let mut archive = ZipArchive::new(cursor).unwrap();
+                    archive
+                        .extract(
+                            temp.path(),
+                            &config,
+                            &ExtractionOptions::default(),
+                            &mut exarch_core::NoopProgress,
+                        )
+                        .unwrap();
+                    total += start.elapsed();
+
+                    drop(temp);
+                }
+                total
             });
         });
     }

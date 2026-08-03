@@ -83,8 +83,8 @@ impl ValidatedEntry {
     /// — `QuotaPermit` is neither `Clone` nor `Copy` by design, so ownership
     /// can only be obtained by consuming the `ValidatedEntry` that holds it.
     /// Write paths that need to thread the permit by value into a helper
-    /// (mirroring `formats::common::copy_file_with_permit`'s guarantee) call
-    /// this instead of `entry_type()`.
+    /// (mirroring `formats::common::copy_file_content_with_permit`'s guarantee)
+    /// call this instead of `entry_type()`.
     #[inline]
     #[must_use]
     pub(crate) fn into_parts(self) -> (SafePath, ValidatedEntryType, Option<u32>) {

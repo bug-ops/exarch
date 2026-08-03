@@ -129,6 +129,7 @@ use crate::security::validator::ValidatedEntryType;
 use crate::types::DestDir;
 use crate::types::EntryType;
 use crate::types::SafePath;
+use crate::types::safe_symlink::resolve_through_symlinks;
 
 use super::common;
 use super::tar_metadata_limit::budget_violation;
@@ -303,10 +304,66 @@ impl<R: Read> TarArchive<R> {
 
     /// Creates a hardlink in the second pass by copying content.
     ///
-    /// Uses `fs::copy` instead of `fs::hard_link` to avoid shared-inode
+    /// Uses a content copy instead of `fs::hard_link` to avoid shared-inode
     /// corruption: a real OS hardlink would allow a subsequent write to
     /// `link_path` to silently overwrite `target_path` (GHSA-2367-c296-3mp2
     /// variant, issue #130).
+    ///
+    /// # Security - Symlink-at-Destination Rejection (issue #467)
+    ///
+    /// `Path::exists()` returns `false` for a dangling symlink, so a
+    /// pre-planted symlink at `link_path` used to bypass the old
+    /// existence-based duplicate check, and the subsequent `fs::copy`
+    /// followed it, writing archive content outside the extraction root.
+    /// The destination is now opened via `common::create_file_with_mode`
+    /// (mode `None`, since permissions are copied from the target's bytes
+    /// afterward, not set at creation) with `create_new = true`, which
+    /// atomically fails with `ErrorKind::AlreadyExists` for any pre-existing
+    /// path at `link_path` — symlink (dangling or not), regular file, or
+    /// directory — folding the duplicate check into the `open()` call
+    /// itself instead of a separate, bypassable `exists()` probe. This
+    /// reuses the same `O_EXCL`+`O_NOFOLLOW` (Unix) discipline as the
+    /// normal-file write path (issue #459) for consistency, though
+    /// `create_new`'s `O_EXCL` alone already refuses any pre-existing path.
+    ///
+    /// # Security - Target Read TOCTOU and Quota TOCTOU (issue #467)
+    ///
+    /// Hardlinks are validated in two passes: `EntryValidator::validate_entry`
+    /// (via `HardlinkTracker::validate_hardlink`) resolves `target` through
+    /// any on-disk symlinks and checks containment in pass one, but this
+    /// function — pass two — runs later, after every entry in the archive has
+    /// been validated and every non-hardlink entry extracted. Nothing
+    /// re-validates `target_path` in between. A plain path-based `File::open`
+    /// (or `std::fs::metadata`, as this function used to do to size the quota
+    /// reservation) would silently follow whatever is at `target_path` by the
+    /// time pass two runs — which, given an attacker-writable destination
+    /// directory, may not be what pass one validated at all (the target
+    /// swapped for a symlink escaping `dest` in between the two passes).
+    /// Separately, sizing the quota reservation from a path-based `stat` and
+    /// then copying from a *different*, separately-opened handle left its own
+    /// TOCTOU window: swapping `target_path` between the two operations could
+    /// charge the quota for N bytes while actually copying an unbounded
+    /// amount.
+    ///
+    /// Both are narrowed the same way: [`common::open_no_follow`] opens
+    /// `target_path` once, refusing to follow a symlink (Unix, via
+    /// `O_NOFOLLOW`) rather than a separate `stat`-then-`open`; the quota
+    /// reservation is sized from that same open handle's `fstat`, and the
+    /// copy reads from that same handle — never re-touching the path
+    /// afterward. A symlink at `target_path` is not automatically rejected,
+    /// though: it is a legitimate, common archive shape for a hardlink's
+    /// target to itself be a symlink created earlier in the *same*
+    /// extraction (already pass-one-validated). On `ErrorKind::FilesystemLoop`
+    /// from `open_no_follow`, [`resolve_through_symlinks`] re-runs the exact
+    /// containment check pass one already trusts, against the *current*
+    /// on-disk state; if it still resolves inside `dest`, the resolved
+    /// (symlink-free, since `canonicalize` dereferences fully) path is opened
+    /// instead. This narrows the TOCTOU window from "the entire gap between
+    /// pass one and pass two" down to "between this re-check and the open" —
+    /// consistent with the check-then-act discipline the rest of the pipeline
+    /// already accepts elsewhere (e.g. `DirCache`'s documented TOCTOU). If the
+    /// re-resolution instead lands outside `dest`, that is a genuine escape
+    /// attempt and is reported as such, not as a raw OS errno.
     fn create_hardlink(info: &HardlinkInfo, ctx: &mut ExtractionContext<'_, '_>) -> Result<()> {
         let link_path = ctx.dest.join(&info.link_path);
         let target_path = ctx.dest.join(&info.target_path);
@@ -321,41 +378,73 @@ impl<R: Read> TarArchive<R> {
         // Create parent directories using cache
         ctx.dir_cache.ensure_parent_dir(&link_path)?;
 
-        if link_path.exists() {
-            if ctx.skip_duplicates {
-                ctx.report.files_skipped =
-                    ctx.report
-                        .files_skipped
-                        .checked_add(1)
-                        .ok_or(ArchiveError::QuotaExceeded {
+        let link_file = match common::create_file_with_mode(&link_path, None, true) {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                if ctx.skip_duplicates {
+                    ctx.report.files_skipped = ctx.report.files_skipped.checked_add(1).ok_or(
+                        ArchiveError::QuotaExceeded {
                             resource: crate::QuotaResource::IntegerOverflow,
-                        })?;
-                ctx.report.warnings.push(format!(
-                    "skipped duplicate hardlink: {}",
+                        },
+                    )?;
+                    ctx.report.warnings.push(format!(
+                        "skipped duplicate hardlink: {}",
+                        info.link_path.as_path().display()
+                    ));
+                    return Ok(());
+                }
+                return Err(ArchiveError::InvalidArchive(format!(
+                    "duplicate entry: {}",
                     info.link_path.as_path().display()
-                ));
-                return Ok(());
+                )));
             }
-            return Err(ArchiveError::InvalidArchive(format!(
-                "duplicate entry: {}",
-                info.link_path.as_path().display()
-            )));
-        }
+            Err(e) => return Err(ArchiveError::Io(e)),
+        };
+        let cleanup_guard = common::TempFileGuard::new(link_path);
+
+        // Opened once, refusing to follow a symlink at `target_path`; the
+        // quota reservation below and the copy further down both operate on
+        // this same handle instead of re-touching the path (issue #467).
+        let target_file = match common::open_no_follow(&target_path) {
+            Ok(file) => file,
+            Err(e) if common::is_filesystem_loop_error(&e) => {
+                // `target_path`'s final component is a symlink. Re-run pass
+                // one's own containment check against the current on-disk
+                // state; a symlink created by an earlier entry in this same
+                // extraction resolves safely inside `dest` and is opened at
+                // its resolved (symlink-free) location, while a genuine
+                // escape attempt is rejected as HardlinkEscape rather than
+                // surfacing as a raw ELOOP.
+                let resolved = resolve_through_symlinks(
+                    ctx.dest.as_path(),
+                    info.target_path.as_path(),
+                    ctx.dest.as_path(),
+                    info.link_path.as_path(),
+                )
+                .map_err(|_| ArchiveError::HardlinkEscape {
+                    path: info.link_path.as_path().to_path_buf(),
+                })?;
+                common::open_no_follow(&resolved)?
+            }
+            Err(e) => return Err(ArchiveError::Io(e)),
+        };
 
         // Every hardlink copies the target's real bytes to a new inode, so it
         // must be charged against the same quota tracker as regular files
         // (issue #426): otherwise N hardlinks to one small file extract N
         // full copies with no size or count enforcement. Reserved after the
-        // duplicate-skip check above (mirroring `extract_file_generic`) so a
+        // duplicate-check above (mirroring `extract_file_generic`) so a
         // `skip_duplicates=true` archive is not spuriously charged for an
         // entry that is ultimately never copied. The permit is consumed by
         // value below, so this reservation cannot be spent twice.
-        let target_size = std::fs::metadata(&target_path)?.len();
+        let target_size = target_file.metadata()?.len();
         let permit = ctx.validator.reserve_hardlink(target_size)?;
 
-        // Copy content to a new independent inode. Any subsequent write to
-        // `link_path` cannot corrupt `target_path` because they are separate files.
-        let bytes_copied = common::copy_file_with_permit(&target_path, &link_path, permit)?;
+        // Copy content between the two handles opened above. Any subsequent
+        // write to `link_path` cannot corrupt `target_path` because they are
+        // separate files.
+        let bytes_copied = common::copy_file_content_with_permit(target_file, link_file, permit)?;
+        cleanup_guard.persist();
 
         ctx.report.files_extracted =
             ctx.report
@@ -777,6 +866,7 @@ mod tests {
     use std::assert_matches;
     use std::io::Cursor;
     use std::io::Write;
+    use std::path::PathBuf;
     use tempfile::TempDir;
 
     #[test]
@@ -1915,6 +2005,314 @@ mod tests {
             }
             _ => panic!("Expected InvalidArchive error for missing hardlink target"),
         }
+    }
+
+    /// Builds a TAR with a regular file entry (`target.txt`) followed by a
+    /// hardlink entry (`hardlink.txt`) pointing at it.
+    #[cfg(unix)]
+    fn create_hardlink_tar(target_content: &[u8]) -> Vec<u8> {
+        let mut builder = tar::Builder::new(Vec::new());
+
+        let mut file_header = tar::Header::new_gnu();
+        file_header.set_entry_type(tar::EntryType::Regular);
+        file_header.set_size(target_content.len() as u64);
+        file_header.set_mode(0o644);
+        file_header.set_cksum();
+        builder
+            .append_data(&mut file_header, "target.txt", target_content)
+            .unwrap();
+
+        let mut link_header = tar::Header::new_gnu();
+        link_header.set_entry_type(tar::EntryType::Link);
+        link_header.set_link_name("target.txt").unwrap();
+        link_header.set_size(0);
+        link_header.set_cksum();
+        builder
+            .append_data(&mut link_header, "hardlink.txt", &[] as &[u8])
+            .unwrap();
+
+        builder.into_inner().unwrap()
+    }
+
+    /// Regression test for issue #467: a dangling symlink pre-planted at the
+    /// hardlink's destination path used to bypass the old `Path::exists()`
+    /// duplicate check (which returns `false` for a dangling symlink) and a
+    /// subsequent `fs::copy` followed it, writing archive content outside
+    /// the extraction root. With `skip_duplicates=true` (the default), the
+    /// pre-existing path at `hardlink.txt` must now be treated as a
+    /// duplicate and skipped instead of being written through.
+    #[test]
+    #[cfg(unix)]
+    fn test_hardlink_dangling_symlink_at_destination_skipped() {
+        let temp = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let victim_path = outside.path().join("victim.txt");
+
+        // Pre-plant a dangling symlink at the hardlink's destination path,
+        // pointing outside the extraction root at a file that does not exist.
+        let link_dest = temp.path().join("hardlink.txt");
+        std::os::unix::fs::symlink(&victim_path, &link_dest).unwrap();
+        assert!(!victim_path.exists());
+
+        let tar_data = create_hardlink_tar(b"pwned!");
+        let mut archive = TarArchive::new(Cursor::new(tar_data));
+
+        let mut config = SecurityConfig::default();
+        config.allowed.hardlinks = true;
+        let config = config.validate().expect("valid config");
+
+        let report = archive
+            .extract(
+                temp.path(),
+                &config,
+                &ExtractionOptions::default(), // skip_duplicates = true
+                &mut crate::NoopProgress,
+            )
+            .expect("extraction should succeed by skipping the duplicate");
+
+        assert_eq!(report.files_skipped, 1);
+        assert!(
+            !victim_path.exists(),
+            "hardlink write followed the pre-planted symlink outside the extraction root"
+        );
+
+        // The pre-planted symlink itself must be left untouched, not followed
+        // or replaced.
+        let link_metadata = std::fs::symlink_metadata(&link_dest).unwrap();
+        assert!(link_metadata.file_type().is_symlink());
+    }
+
+    /// Companion to [`test_hardlink_dangling_symlink_at_destination_skipped`]
+    /// with `skip_duplicates=false`: the pre-planted symlink must still be
+    /// rejected as a duplicate-entry error rather than followed.
+    #[test]
+    #[cfg(unix)]
+    fn test_hardlink_dangling_symlink_at_destination_errors_when_skip_disabled() {
+        let temp = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let victim_path = outside.path().join("victim.txt");
+
+        let link_dest = temp.path().join("hardlink.txt");
+        std::os::unix::fs::symlink(&victim_path, &link_dest).unwrap();
+
+        let tar_data = create_hardlink_tar(b"pwned!");
+        let mut archive = TarArchive::new(Cursor::new(tar_data));
+
+        let mut config = SecurityConfig::default();
+        config.allowed.hardlinks = true;
+        let config = config.validate().expect("valid config");
+        let options = ExtractionOptions {
+            atomic: false,
+            skip_duplicates: false,
+        };
+
+        let result = archive.extract(temp.path(), &config, &options, &mut crate::NoopProgress);
+
+        assert!(!victim_path.exists());
+        // The regular `target.txt` entry extracts successfully before the
+        // hardlink entry fails, so the error arrives wrapped in
+        // PartialExtraction; unwrap one level to check the source.
+        match result {
+            Err(ArchiveError::PartialExtraction { source, .. }) => match *source {
+                ArchiveError::InvalidArchive(msg) => assert!(msg.contains("duplicate entry")),
+                other => panic!("Expected InvalidArchive duplicate-entry error, got: {other:?}"),
+            },
+            Err(ArchiveError::InvalidArchive(msg)) => {
+                assert!(msg.contains("duplicate entry"));
+            }
+            other => panic!("Expected InvalidArchive duplicate-entry error, got: {other:?}"),
+        }
+
+        let link_metadata = std::fs::symlink_metadata(&link_dest).unwrap();
+        assert!(link_metadata.file_type().is_symlink());
+    }
+
+    /// Regression test for issue #467's pass-1-to-pass-2 TOCTOU: a hardlink
+    /// target that is safe when `EntryValidator::validate_entry`
+    /// (`HardlinkTracker::validate_hardlink`) runs in pass one, but gets
+    /// swapped for a symlink escaping `dest` before `create_hardlink` (pass
+    /// two) actually reads it, must not have its escape-target content
+    /// copied into the destination.
+    ///
+    /// Calls `create_hardlink` directly with a hand-built `HardlinkInfo`
+    /// instead of going through `TarArchive::extract`, since the two passes
+    /// run back-to-back within a single `extract()` call with no way for a
+    /// test to inject a filesystem change in between. This is deliberate: a
+    /// plain pre-planted symlink present *before* pass one runs is already
+    /// rejected by pass one's own `resolve_through_symlinks` check
+    /// (`HardlinkTracker::validate_hardlink`, issue #116) and never reaches
+    /// `create_hardlink` at all — asserting against that scenario would
+    /// pass identically on the pre-#467-fix code and prove nothing about
+    /// this change. Simulating the race directly is the only way to
+    /// exercise `open_no_follow`'s `ErrorKind::FilesystemLoop` retry path
+    /// and its `resolve_through_symlinks` re-validation.
+    #[test]
+    #[cfg(unix)]
+    fn test_hardlink_target_swapped_for_escaping_symlink_between_passes() {
+        let temp = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let sentinel_path = outside.path().join("sentinel.txt");
+        std::fs::write(&sentinel_path, b"top secret").unwrap();
+
+        let dest = DestDir::new_or_create(temp.path().to_path_buf()).unwrap();
+        let mut config = SecurityConfig::default();
+        config.allowed.hardlinks = true;
+        let config = config.validate().expect("valid config");
+
+        // Simulates: pass one validated "target.txt" as a safe relative
+        // target (it did not exist yet, or was something innocuous) and
+        // recorded this `HardlinkInfo` for pass two. Between the two passes,
+        // an attacker with write access to `dest` swaps in a symlink
+        // escaping the destination — exactly the window pass one's
+        // point-in-time check cannot see across.
+        let info = HardlinkInfo {
+            link_path: SafePath::new_unchecked(PathBuf::from("loot.txt")),
+            target_path: SafePath::new_unchecked(PathBuf::from("target.txt")),
+        };
+        std::os::unix::fs::symlink(&sentinel_path, dest.as_path().join("target.txt")).unwrap();
+
+        let mut validator = EntryValidator::new(&config, &dest);
+        let mut report = ExtractionReport::new();
+        let mut copy_buffer = CopyBuffer::new();
+        let mut dir_cache = common::DirCache::new();
+        let mut progress = crate::NoopProgress;
+        let mut ctx = ExtractionContext {
+            validator: &mut validator,
+            dest: &dest,
+            report: &mut report,
+            copy_buffer: &mut copy_buffer,
+            dir_cache: &mut dir_cache,
+            skip_duplicates: true,
+            config: &config,
+            progress: &mut progress,
+        };
+
+        let result = TarArchive::<Cursor<Vec<u8>>>::create_hardlink(&info, &mut ctx);
+
+        assert_matches!(
+            result,
+            Err(ArchiveError::HardlinkEscape { .. }),
+            "expected the pass-1-to-pass-2 target swap to be rejected as a hardlink escape, got: {result:?}"
+        );
+        assert!(
+            !temp.path().join("loot.txt").exists(),
+            "sentinel content must not have been copied into the destination, and TempFileGuard \
+             must have removed the exclusively-opened link file on this error path"
+        );
+    }
+
+    /// Regression test for issue #467's `TempFileGuard` cleanup path: when
+    /// the quota reservation fails *after* the hardlink's exclusive-open
+    /// destination file was already created, no stray zero-byte file must
+    /// be left behind at `link_path`.
+    #[test]
+    #[cfg(unix)]
+    fn test_hardlink_quota_failure_leaves_no_stray_link_file() {
+        let temp = TempDir::new().unwrap();
+
+        let tar_data = create_hardlink_tar(&[b'A'; 100]);
+        let mut archive = TarArchive::new(Cursor::new(tar_data));
+
+        let mut config = SecurityConfig::default();
+        config.allowed.hardlinks = true;
+        // Enough room for target.txt (100 bytes) but not for the hardlink's
+        // own independent 100-byte copy on top of it.
+        config.max_total_size = 150;
+        let config = config.validate().expect("valid config");
+
+        let result = archive.extract(
+            temp.path(),
+            &config,
+            &ExtractionOptions::default(),
+            &mut crate::NoopProgress,
+        );
+
+        assert!(result.is_err(), "expected quota exceeded, got: {result:?}");
+        assert!(
+            temp.path().join("target.txt").exists(),
+            "target.txt should have been extracted before the hardlink's quota failure"
+        );
+        assert!(
+            !temp.path().join("hardlink.txt").exists(),
+            "TempFileGuard must remove the empty hardlink destination file left by the failed \
+             quota reservation"
+        );
+    }
+
+    /// Regression test for issue #467's
+    /// `open_no_follow`/`ErrorKind::FilesystemLoop` re-resolution path: a
+    /// hardlink whose target is itself a symlink pointing *inside* `dest`
+    /// (a legitimate, common archive shape — two links sharing an inode,
+    /// where the second is stored as a `Symlink` entry rather than a second
+    /// `Link` entry) must still extract correctly, not hard-fail with a raw
+    /// `ELOOP`.
+    ///
+    /// Archive order matters here: `real.txt` (regular) then `loot.txt`
+    /// (hardlink -> `target.txt`) then `target.txt` (symlink -> `real.txt`)
+    /// means `target.txt` does not exist on disk yet when `loot.txt`'s
+    /// hardlink entry is validated in pass one, so pass one cannot resolve
+    /// the symlink itself — deferring to pass two's `create_hardlink`, which
+    /// by then finds `target.txt` on disk as the symlink created earlier in
+    /// the same pass-one loop. This is the exact ordering the regression was
+    /// reproduced with.
+    #[test]
+    #[cfg(unix)]
+    fn test_hardlink_target_is_legitimate_symlink_created_earlier_in_extraction() {
+        let temp = TempDir::new().unwrap();
+
+        let mut builder = tar::Builder::new(Vec::new());
+
+        let mut file_header = tar::Header::new_gnu();
+        file_header.set_entry_type(tar::EntryType::Regular);
+        file_header.set_size(5);
+        file_header.set_mode(0o644);
+        file_header.set_cksum();
+        builder
+            .append_data(&mut file_header, "real.txt", b"hello" as &[u8])
+            .unwrap();
+
+        let mut link_header = tar::Header::new_gnu();
+        link_header.set_entry_type(tar::EntryType::Link);
+        link_header.set_link_name("target.txt").unwrap();
+        link_header.set_size(0);
+        link_header.set_cksum();
+        builder
+            .append_data(&mut link_header, "loot.txt", &[] as &[u8])
+            .unwrap();
+
+        let mut symlink_header = tar::Header::new_gnu();
+        symlink_header.set_entry_type(tar::EntryType::Symlink);
+        symlink_header.set_link_name("real.txt").unwrap();
+        symlink_header.set_size(0);
+        symlink_header.set_cksum();
+        builder
+            .append_data(&mut symlink_header, "target.txt", &[] as &[u8])
+            .unwrap();
+
+        let tar_data = builder.into_inner().unwrap();
+        let mut archive = TarArchive::new(Cursor::new(tar_data));
+
+        let mut config = SecurityConfig::default();
+        config.allowed.hardlinks = true;
+        config.allowed.symlinks = true;
+        let config = config.validate().expect("valid config");
+
+        let report = archive
+            .extract(
+                temp.path(),
+                &config,
+                &ExtractionOptions::default(),
+                &mut crate::NoopProgress,
+            )
+            .expect("legitimate hardlink-to-in-dest-symlink shape must extract successfully");
+
+        assert_eq!(report.files_extracted, 2, "real.txt and loot.txt");
+        assert_eq!(report.symlinks_created, 1, "target.txt");
+        assert_eq!(
+            std::fs::read(temp.path().join("loot.txt")).unwrap(),
+            b"hello",
+            "loot.txt must contain real.txt's content, resolved through target.txt's symlink"
+        );
     }
 
     // OPT-H001: Test SmallVec stack allocation for hardlinks

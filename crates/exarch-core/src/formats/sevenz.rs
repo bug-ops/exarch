@@ -106,6 +106,16 @@ use sevenz_rust2::Password;
 // Atomic counter for generating unique temporary file names
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// Maximum number of attempts to create a uniquely-named temp file before
+/// giving up.
+///
+/// Bounds retry cost if an attacker has pre-planted symlinks at several
+/// predicted `.{name}.exarch-tmp-{pid}-{counter}` paths (issue #471); a
+/// genuine collision from concurrent extraction into the same directory
+/// resolves on the first or second attempt since `TEMP_COUNTER` is
+/// monotonically increasing per process.
+const MAX_TEMP_FILE_CREATE_ATTEMPTS: u32 = 8;
+
 use crate::ArchiveError;
 use crate::ExtractionOptions;
 use crate::ExtractionReport;
@@ -123,36 +133,6 @@ use crate::types::EntryType;
 
 use super::common;
 use super::traits::ArchiveFormat;
-
-/// RAII guard for temporary files.
-/// Ensures temp files are cleaned up on error.
-struct TempFileGuard {
-    path: PathBuf,
-    should_cleanup: bool,
-}
-
-impl TempFileGuard {
-    fn new(path: PathBuf) -> Self {
-        Self {
-            path,
-            should_cleanup: true,
-        }
-    }
-
-    /// Mark the temp file as successfully processed.
-    /// Prevents cleanup on drop.
-    fn persist(mut self) {
-        self.should_cleanup = false;
-    }
-}
-
-impl Drop for TempFileGuard {
-    fn drop(&mut self) {
-        if self.should_cleanup {
-            let _ = std::fs::remove_file(&self.path);
-        }
-    }
-}
 
 /// Cached entry metadata from initial archive read.
 /// Avoids re-parsing archive during extraction.
@@ -297,34 +277,98 @@ impl<R: Read + Seek> SevenZArchive<R> {
 /// consuming the [`QuotaPermit`] that authorized the write.
 ///
 /// Taking `permit` by value mirrors the guarantee
-/// [`common::copy_file_with_permit`] gives TAR's hardlink path, and the
-/// guarantee [`common::extract_file_with_permit`] gives TAR/ZIP's normal-file
-/// path (issue #445): `QuotaPermit` is neither `Clone` nor `Copy`, so a
-/// caller cannot retain it to authorize a second write, and this function
-/// cannot be called at all without moving a genuine permit out of the
-/// validated entry.
+/// [`common::copy_file_content_with_permit`] gives TAR's hardlink path, and
+/// the guarantee [`common::extract_file_with_permit`] gives TAR/ZIP's
+/// normal-file path (issue #445): `QuotaPermit` is neither `Clone` nor
+/// `Copy`, so a caller cannot retain it to authorize a second write, and this
+/// function cannot be called at all without moving a genuine permit out of
+/// the validated entry.
+///
+/// # Security - Symlink-at-Destination Rejection (issue #471)
+///
+/// The temp file name is predictable from the process PID and a per-process
+/// monotonic counter, so a pre-planted symlink (dangling or not) at a
+/// predicted temp path used to be silently followed by `File::create`,
+/// writing archive content outside the extraction root. The temp file is
+/// now opened via `common::create_file_with_mode` (mode `None`, since 7z
+/// never exposes a Unix mode to sanitize) with `create_new = true`, reusing
+/// the same `O_EXCL`+`O_NOFOLLOW` (Unix) discipline as the normal-file write
+/// path (issue #459) for consistency, though `create_new`'s `O_EXCL` alone
+/// already refuses any pre-existing path instead of following it. On
+/// collision (`ErrorKind::AlreadyExists`), a fresh counter value is drawn
+/// and creation is retried up to [`MAX_TEMP_FILE_CREATE_ATTEMPTS`] times.
 ///
 /// # Errors
 ///
-/// Returns an error if temp file creation, the copy, or the rename fails.
+/// Returns an error if a unique temp file cannot be created within
+/// [`MAX_TEMP_FILE_CREATE_ATTEMPTS`] attempts, or if the copy or rename
+/// fails.
 fn write_file_with_permit(
     reader: &mut dyn Read,
     dest_path: &Path,
-    _permit: QuotaPermit,
+    permit: QuotaPermit,
 ) -> std::result::Result<u64, sevenz_rust2::Error> {
-    let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
     let pid = id();
     let original_name = dest_path
         .file_name()
         .map_or_else(|| "file".to_string(), |n| n.to_string_lossy().to_string());
-    let temp_name = format!(".{original_name}.exarch-tmp-{pid}-{counter}");
-    let temp_path = dest_path.with_file_name(&temp_name);
 
-    let temp_guard = TempFileGuard::new(temp_path.clone());
-    let bytes_written = {
-        let mut temp_file = std::fs::File::create(&temp_path)?;
-        std::io::copy(reader, &mut temp_file)?
-    };
+    write_file_with_permit_using(reader, dest_path, permit, || {
+        let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let temp_name = format!(".{original_name}.exarch-tmp-{pid}-{counter}");
+        dest_path.with_file_name(&temp_name)
+    })
+}
+
+/// Implementation behind [`write_file_with_permit`], parameterized over the
+/// candidate temp-path generator.
+///
+/// Tests inject a private, non-shared generator here instead of calling
+/// [`write_file_with_permit`] directly, so that predicting which paths a
+/// test run will attempt never depends on the process-global
+/// [`TEMP_COUNTER`] — a global shared with every other test in the same
+/// binary that also happens to write a 7z file, and therefore not something
+/// a single test can safely predict under `cargo test`'s default
+/// multi-threaded execution (only nextest's one-test-per-process model would
+/// make that safe).
+///
+/// # Errors
+///
+/// Returns an error if a unique temp file cannot be created within
+/// [`MAX_TEMP_FILE_CREATE_ATTEMPTS`] attempts, or if the copy or rename
+/// fails.
+fn write_file_with_permit_using(
+    reader: &mut dyn Read,
+    dest_path: &Path,
+    _permit: QuotaPermit,
+    mut next_candidate_path: impl FnMut() -> PathBuf,
+) -> std::result::Result<u64, sevenz_rust2::Error> {
+    let mut created: Option<(PathBuf, std::fs::File)> = None;
+    for _ in 0..MAX_TEMP_FILE_CREATE_ATTEMPTS {
+        let candidate_path = next_candidate_path();
+
+        match common::create_file_with_mode(&candidate_path, None, true) {
+            Ok(file) => {
+                created = Some((candidate_path, file));
+                break;
+            }
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+
+    let (temp_path, mut temp_file) = created.ok_or_else(|| {
+        std::io::Error::new(
+            ErrorKind::AlreadyExists,
+            format!(
+                "failed to create a unique temp file for {} after {MAX_TEMP_FILE_CREATE_ATTEMPTS} attempts",
+                dest_path.display()
+            ),
+        )
+    })?;
+
+    let temp_guard = common::TempFileGuard::new(temp_path.clone());
+    let bytes_written = std::io::copy(reader, &mut temp_file)?;
     std::fs::rename(&temp_path, dest_path)?;
     temp_guard.persist();
 
@@ -878,6 +922,123 @@ mod tests {
         let data = load_fixture("simple.7z");
         assert!(!data.is_empty());
         assert_eq!(&data[0..6], &SEVENZ_MAGIC);
+    }
+
+    /// Reserves a throwaway [`QuotaPermit`] for use in tests that call
+    /// `write_file_with_permit` directly, bypassing the normal validation
+    /// pipeline that would otherwise produce one.
+    fn test_permit() -> QuotaPermit {
+        let config = SecurityConfig::default().validate().expect("valid config");
+        crate::security::quota::QuotaTracker::new()
+            .reserve(0, &config)
+            .expect("reservation should succeed")
+    }
+
+    /// Regression test for issue #471: `write_file_with_permit`'s temp file
+    /// name is predictable from the process PID and a per-process monotonic
+    /// counter (`.{name}.exarch-tmp-{pid}-{counter}`). A dangling symlink
+    /// pre-planted at one of the next few predicted counter values used to
+    /// be silently followed by a non-exclusive `File::create`, writing
+    /// archive content through it and outside the extraction root. The fix
+    /// retries with a fresh counter value on `AlreadyExists` instead of
+    /// falling through to a non-exclusive open.
+    ///
+    /// Exercises [`write_file_with_permit_using`] directly with a private,
+    /// test-local candidate generator instead of calling
+    /// [`write_file_with_permit`] (which draws from the process-global
+    /// [`TEMP_COUNTER`]): predicting exactly which paths a call will attempt
+    /// is only safe if nothing else in the process can advance that counter
+    /// concurrently, which does not hold under `cargo test`'s default
+    /// multi-threaded execution (sibling tests write 7z files too). A
+    /// private generator has no shared state to race on, so this test is
+    /// deterministic under both `cargo test` and nextest (see #471 review).
+    #[test]
+    #[cfg(unix)]
+    fn test_write_file_with_permit_skips_planted_symlinks() {
+        let temp = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let dest_path = temp.path().join("real-output.txt");
+
+        // Plant dangling symlinks at every candidate path the generator
+        // below will produce, except the last available attempt, so the fix
+        // must retry past all of them.
+        let mut victims = Vec::new();
+        for offset in 0..(MAX_TEMP_FILE_CREATE_ATTEMPTS - 1) {
+            let planted_path = temp.path().join(format!(".candidate-{offset}.tmp"));
+            let victim_path = outside.path().join(format!("victim-{offset}.txt"));
+            std::os::unix::fs::symlink(&victim_path, &planted_path).unwrap();
+            victims.push((planted_path, victim_path));
+        }
+
+        let mut next_candidate = 0u32;
+        let temp_dir_path = temp.path().to_path_buf();
+        let mut reader = Cursor::new(b"legit content".to_vec());
+        let bytes_written =
+            write_file_with_permit_using(&mut reader, &dest_path, test_permit(), || {
+                let path = temp_dir_path.join(format!(".candidate-{next_candidate}.tmp"));
+                next_candidate += 1;
+                path
+            })
+            .expect("should retry past every planted symlink and succeed");
+
+        assert_eq!(bytes_written, 13);
+        assert_eq!(std::fs::read(&dest_path).unwrap(), b"legit content");
+        // The generator must have been driven past every planted symlink to
+        // reach a free candidate — otherwise this test would pass vacuously
+        // without ever exercising the retry-on-AlreadyExists path.
+        assert_eq!(next_candidate, MAX_TEMP_FILE_CREATE_ATTEMPTS);
+
+        for (planted_path, victim_path) in &victims {
+            assert!(
+                !victim_path.exists(),
+                "write followed a planted symlink outside the extraction root"
+            );
+            let metadata = std::fs::symlink_metadata(planted_path).unwrap();
+            assert!(
+                metadata.file_type().is_symlink(),
+                "planted symlink should be left untouched, not consumed or replaced"
+            );
+        }
+    }
+
+    /// Companion to [`test_write_file_with_permit_skips_planted_symlinks`]:
+    /// when every attempt's candidate path is blocked by a planted symlink,
+    /// `write_file_with_permit_using` must give up with an error instead of
+    /// looping forever or falling back to a non-exclusive open. Uses the
+    /// same private-generator approach for the same determinism reason.
+    #[test]
+    #[cfg(unix)]
+    fn test_write_file_with_permit_gives_up_after_max_attempts() {
+        let temp = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let dest_path = temp.path().join("real-output.txt");
+
+        let mut victims = Vec::new();
+        for offset in 0..MAX_TEMP_FILE_CREATE_ATTEMPTS {
+            let planted_path = temp.path().join(format!(".candidate-{offset}.tmp"));
+            let victim_path = outside.path().join(format!("victim-{offset}.txt"));
+            std::os::unix::fs::symlink(&victim_path, &planted_path).unwrap();
+            victims.push(victim_path);
+        }
+
+        let mut next_candidate = 0u32;
+        let temp_dir_path = temp.path().to_path_buf();
+        let mut reader = Cursor::new(b"legit content".to_vec());
+        let result = write_file_with_permit_using(&mut reader, &dest_path, test_permit(), || {
+            let path = temp_dir_path.join(format!(".candidate-{next_candidate}.tmp"));
+            next_candidate += 1;
+            path
+        });
+
+        assert!(
+            result.is_err(),
+            "expected exhaustion error, got: {result:?}"
+        );
+        assert_eq!(next_candidate, MAX_TEMP_FILE_CREATE_ATTEMPTS);
+        assert!(!dest_path.exists());
+        for victim_path in &victims {
+            assert!(!victim_path.exists());
+        }
     }
 
     #[test]

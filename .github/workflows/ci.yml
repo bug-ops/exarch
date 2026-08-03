@@ -355,6 +355,31 @@ jobs:
           cd crates/exarch-node
           npm test
 
+  # Quick compile-only check for criterion benchmarks (does not run them)
+  bench-build:
+    name: Bench Build Check
+    needs: [changes, format]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: |
+      needs.changes.outputs.rust == 'true' ||
+      github.ref == 'refs/heads/main' ||
+      github.ref == 'refs/heads/develop'
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "bench-build"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build benchmarks (compile only, does not run them)
+        run: cargo build --workspace --benches --all-features --exclude exarch-python --exclude exarch-node
+
   # MSRV check (exarch-core only)
   msrv:
     name: MSRV Check (exarch-core)
@@ -434,7 +459,7 @@ jobs:
   # All checks passed
   ci-success:
     name: CI Success
-    needs: [format, clippy, documentation, security, test, test-python, test-node, msrv]
+    needs: [format, clippy, documentation, security, test, test-python, test-node, msrv, bench-build]
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -450,6 +475,7 @@ jobs:
             "${{ needs.test-python.result }}"
             "${{ needs.test-node.result }}"
             "${{ needs.msrv.result }}"
+            "${{ needs.bench-build.result }}"
           )
 
           for result in "${REQUIRED_JOBS[@]}"; do

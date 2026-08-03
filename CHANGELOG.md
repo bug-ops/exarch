@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- CI: add `bench-build` job to `.github/workflows/ci.yml` that compiles the
+  `exarch-core` criterion benchmarks (`--all-features`, covering the
+  `testing`-gated `validation` bench) without running them, catching
+  benchmark compilation breakage in a fast parallel job.
+
 ### Changed
 
 - **BREAKING: `SecurityConfig` is now a two-state typestate over `Unvalidated`/`Validated`

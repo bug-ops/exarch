@@ -212,6 +212,38 @@ jobs:
       - name: Run doctests
         run: cargo test --doc --workspace --all-features --exclude exarch-python --exclude exarch-node
 
+  # Release-profile tests for exarch-core: exercises cfg(not(debug_assertions))
+  # tests (e.g. release-only redaction/security assertions) that the debug-mode
+  # `test` job above never runs (see #476).
+  test-release:
+    name: Test (release profile)
+    needs: [changes, format]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    if: |
+      needs.changes.outputs.rust == 'true' ||
+      github.ref == 'refs/heads/main' ||
+      github.ref == 'refs/heads/develop'
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "test-release"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Install nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      - name: Run release-profile tests (exarch-core)
+        run: cargo nextest run -p exarch-core --release --all-features --no-fail-fast
+
   # Test Python bindings with coverage
   test-python:
     name: Test Python ${{ matrix.python-version }}
@@ -259,6 +291,9 @@ jobs:
         run: |
           cd crates/exarch-python
           uv pip install --system maturin "ruff==0.16.0" mypy pytest pytest-cov
+
+      - name: Run Rust unit tests (exarch-python)
+        run: cargo test -p exarch-python --lib --no-default-features
 
       - name: Format check with ruff
         run: |
@@ -345,6 +380,9 @@ jobs:
         run: |
           cd crates/exarch-node
           npm install
+
+      - name: Run Rust unit tests (exarch-node)
+        run: cargo test -p exarch-node --lib
 
       - name: Format check with Biome
         run: |
@@ -470,7 +508,7 @@ jobs:
   # All checks passed
   ci-success:
     name: CI Success
-    needs: [format, clippy, documentation, security, test, test-python, test-node, msrv, bench-build]
+    needs: [format, clippy, documentation, security, test, test-release, test-python, test-node, msrv, bench-build]
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -483,6 +521,7 @@ jobs:
             "${{ needs.documentation.result }}"
             "${{ needs.security.result }}"
             "${{ needs.test.result }}"
+            "${{ needs.test-release.result }}"
             "${{ needs.test-python.result }}"
             "${{ needs.test-node.result }}"
             "${{ needs.msrv.result }}"

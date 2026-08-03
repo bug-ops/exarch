@@ -898,8 +898,9 @@ mod tests {
 
         assert_eq!(
             py_issue.severity(),
-            "Critical",
-            "severity should be Critical"
+            "CRITICAL",
+            "severity() forwards IssueSeverity's Display impl, which renders upper-case \
+             (matches exarch-cli and exarch-node's own convention)"
         );
         assert_eq!(
             py_issue.message(),
@@ -913,8 +914,9 @@ mod tests {
         );
         assert_eq!(
             py_issue.category(),
-            "PathTraversal",
-            "category should be PathTraversal"
+            "Path Traversal",
+            "category() forwards IssueCategory's Display impl (matches exarch-cli's JSON output \
+             and exarch-node's own convention)"
         );
         assert!(py_issue.context().is_some(), "context should be Some");
     }

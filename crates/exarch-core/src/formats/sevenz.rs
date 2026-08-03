@@ -2158,14 +2158,15 @@ mod tests {
     }
 
     /// Regression test for issue #483 finding S2: a symlink whose target is
-    /// itself a directory must be treated like any other pre-existing
-    /// file/symlink at the destination path (replaced, per #477's
-    /// established symlink-replacement behavior) and not misidentified as a
-    /// real directory that triggers the new `ErrorKind::IsADirectory`
-    /// rejection.
+    /// itself a directory must not be misidentified as a real directory and
+    /// take the `ErrorKind::IsADirectory` branch. It is still rejected — as
+    /// of #486/#477, every pre-existing symlink at the destination fails
+    /// with `ELOOP` on Unix rather than being replaced — but the failure
+    /// must come from the symlink check, not the directory check, and the
+    /// symlink's target directory itself must survive untouched either way.
     #[test]
     #[cfg(unix)]
-    fn test_symlink_to_directory_is_replaced_not_rejected() {
+    fn test_symlink_to_directory_rejected_via_symlink_check_not_directory_check() {
         let data = make_sevenz_archive(&[("target", b"payload")]);
         let mut archive = SevenZArchive::new(Cursor::new(data)).unwrap();
 
@@ -2181,18 +2182,18 @@ mod tests {
             ..ExtractionOptions::default()
         };
 
-        let report = archive
-            .extract(temp.path(), &config, &options, &mut crate::NoopProgress)
-            .expect("symlink-to-directory must be replaced, not rejected with EISDIR");
+        let result = archive.extract(temp.path(), &config, &options, &mut crate::NoopProgress);
 
-        assert_eq!(report.files_extracted, 1);
-        assert_eq!(report.files_skipped, 0);
+        assert!(
+            result.is_err(),
+            "a pre-existing symlink at the destination must be rejected, even when its \
+             target is a directory: {result:?}"
+        );
         let metadata = std::fs::symlink_metadata(&link_path).unwrap();
         assert!(
-            !metadata.file_type().is_symlink(),
-            "symlink-to-directory must be replaced by the extracted file"
+            metadata.file_type().is_symlink(),
+            "the symlink itself must survive untouched, not be replaced"
         );
-        assert_eq!(std::fs::read(&link_path).unwrap(), b"payload");
         assert!(
             real_dir.is_dir(),
             "the symlink's target directory itself must be untouched"

@@ -185,9 +185,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   out-of-band around the lossy `sevenz_rust2::Error` string-based conversion, which would otherwise
   collapse the kind to `Other` and risk misclassifying certain destination paths as encryption
   errors). A pre-existing *symlink* at the destination — including one pointing at a directory — is
-  unaffected and continues to be replaced via `remove_file`, consistent with #477's established
-  symlink-replacement behavior. **Behavior change**: callers relying on 7z silently overwriting a
-  pre-existing destination directory must now handle an extraction failure for that entry instead.
+  handled separately by #477/#478's `ELOOP` rejection (see `### Security` below) and never reaches
+  this check. **Behavior change**: callers relying on 7z silently overwriting a pre-existing
+  destination directory must now handle an extraction failure for that entry instead.
 - **`exarch-core`: 7z `skip_duplicates = true` pushed one unbounded warning `String` per
   pre-existing-duplicate entry (#484)**: `report.warnings` grew by one entry per skipped duplicate,
   proportional to archive size with no cap. Replaced with a single aggregated warning

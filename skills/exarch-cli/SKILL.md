@@ -138,9 +138,11 @@ exarch create out.tar.gz src/ --json
 | `--preserve-permissions[=true\|false]` | `true` | Preserve platform permission bits. Pass `--preserve-permissions=false` for a portable, permission-agnostic archive. |
 
 > [!NOTE]
-> ZIP has no symlink entry type. With `--follow-symlinks` off (default), a symlink passed
-> directly as a source is skipped (warning + `files_skipped`), not archived. TAR always stores
-> it as a real symlink entry regardless of the flag.
+> With `--follow-symlinks` off (default), a symlink passed directly as a source (file or
+> directory) is archived as a link in TAR; ZIP has no symlink entry type, so it is skipped
+> instead (warning + `files_skipped`). With `--follow-symlinks` on, both TAR and ZIP dereference
+> the symlink and store the target's content — for a directory symlink, this means walking and
+> archiving the entire target tree.
 
 `exarch` refuses to *create* 7z archives (7z is extract-only) and refuses to create archives
 under ZIP-family extensions that carry extra format semantics: `.jar`, `.war`, `.ear`, `.nar`,

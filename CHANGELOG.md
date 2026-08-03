@@ -176,6 +176,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`exarch-core`: 7z `skip_duplicates = false` deleted a pre-existing destination directory tree
+  instead of failing like TAR/ZIP's `EISDIR` (#483)**: when a 7z file entry's destination path was
+  occupied by a pre-existing directory, extraction called `remove_dir_all` on it and wrote a fresh
+  file in its place, recursively discarding the entire tree. TAR/ZIP instead fail with `EISDIR` via
+  `create_file_with_mode` and leave the directory untouched. 7z now fails the same way instead of
+  deleting anything, propagating `ArchiveError::Io` with `ErrorKind::IsADirectory` preserved (routed
+  out-of-band around the lossy `sevenz_rust2::Error` string-based conversion, which would otherwise
+  collapse the kind to `Other` and risk misclassifying certain destination paths as encryption
+  errors). A pre-existing *symlink* at the destination — including one pointing at a directory — is
+  unaffected and continues to be replaced via `remove_file`, consistent with #477's established
+  symlink-replacement behavior. **Behavior change**: callers relying on 7z silently overwriting a
+  pre-existing destination directory must now handle an extraction failure for that entry instead.
+- **`exarch-core`: 7z `skip_duplicates = true` pushed one unbounded warning `String` per
+  pre-existing-duplicate entry (#484)**: `report.warnings` grew by one entry per skipped duplicate,
+  proportional to archive size with no cap. Replaced with a single aggregated warning
+  (`"skipped N entries as pre-existing duplicates"`) emitted once extraction completes, if any
+  entries were skipped this way. `report.files_skipped`'s count is unaffected. TAR/ZIP's equivalent
+  per-entry duplicate-skip warning is unchanged.
 - **`exarch-core`: 7z `skip_duplicates` check missed a dangling symlink at the destination path
   (#468)**: `dest_path.exists()` follows symlinks and returns `false` for a dangling symlink, so a
   pre-existing dangling symlink occupying an entry's destination silently passed the duplicate

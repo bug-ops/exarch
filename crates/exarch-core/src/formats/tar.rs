@@ -866,6 +866,7 @@ mod tests {
     use std::assert_matches;
     use std::io::Cursor;
     use std::io::Write;
+    #[cfg(unix)]
     use std::path::PathBuf;
     use tempfile::TempDir;
 

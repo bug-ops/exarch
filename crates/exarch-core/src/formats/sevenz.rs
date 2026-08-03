@@ -927,6 +927,7 @@ mod tests {
     /// Reserves a throwaway [`QuotaPermit`] for use in tests that call
     /// `write_file_with_permit` directly, bypassing the normal validation
     /// pipeline that would otherwise produce one.
+    #[cfg(unix)]
     fn test_permit() -> QuotaPermit {
         let config = SecurityConfig::default().validate().expect("valid config");
         crate::security::quota::QuotaTracker::new()

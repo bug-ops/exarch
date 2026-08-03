@@ -686,6 +686,123 @@ fn benchmark_permission_optimization(_c: &mut Criterion) {
     // No-op on non-Unix platforms
 }
 
+/// Compares `exarch-core`'s 7z extraction against the upstream
+/// `sevenz_rust2::decompress_file` reference implementation on the same
+/// fixtures (uses fixtures from benches/fixtures/). Gives a repo-native,
+/// reproducible baseline for the write-path optimization in issue #492
+/// instead of relying on ad hoc timing.
+fn benchmark_sevenz_vs_reference(c: &mut Criterion) {
+    let mut group = c.benchmark_group("sevenz_vs_reference");
+    // generate_fixtures.sh's `7z a` defaults to solid compression.
+    let config = benchmark_config()
+        .with_allow_solid_archives(true)
+        .with_max_solid_block_memory(256 * 1024 * 1024);
+
+    for fixture_name in ["small_files.7z", "medium_files.7z"] {
+        let Some(fixture) = get_fixture(fixture_name) else {
+            eprintln!(
+                "Skipping sevenz_vs_reference/{fixture_name}: fixture not found. Run generate_fixtures.sh"
+            );
+            continue;
+        };
+
+        let size = get_fixture_size(fixture_name);
+        if size > 0 {
+            group.throughput(Throughput::Bytes(size));
+        }
+
+        group.bench_with_input(
+            BenchmarkId::new("exarch", fixture_name),
+            &fixture,
+            |b, path| {
+                b.iter(|| {
+                    let temp = TempDir::new().unwrap();
+                    exarch_core::extract_archive(path, temp.path(), &config).unwrap();
+                });
+            },
+        );
+
+        group.bench_with_input(
+            BenchmarkId::new("sevenz_rust2", fixture_name),
+            &fixture,
+            |b, path| {
+                b.iter(|| {
+                    let temp = TempDir::new().unwrap();
+                    sevenz_rust2::decompress_file(path, temp.path()).unwrap();
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+/// Exercises 7z's overwrite/temp-file-then-rename write path, which
+/// `benchmark_sevenz_vs_reference` never reaches since every extraction
+/// there targets a fresh, empty directory (issue #492 adversarial review,
+/// finding M3). Each iteration pre-populates the destination with a prior
+/// extraction so every entry hits the `existing.is_some()` branch.
+fn benchmark_sevenz_overwrite(c: &mut Criterion) {
+    let mut group = c.benchmark_group("sevenz_overwrite");
+    let config = benchmark_config()
+        .with_allow_solid_archives(true)
+        .with_max_solid_block_memory(256 * 1024 * 1024)
+        .validate()
+        .unwrap();
+    let overwrite_options = ExtractionOptions::default().with_skip_duplicates(false);
+
+    for fixture_name in ["small_files.7z", "medium_files.7z"] {
+        let Some(fixture) = get_fixture(fixture_name) else {
+            eprintln!(
+                "Skipping sevenz_overwrite/{fixture_name}: fixture not found. Run generate_fixtures.sh"
+            );
+            continue;
+        };
+        let data = std::fs::read(&fixture).unwrap();
+
+        let size = get_fixture_size(fixture_name);
+        if size > 0 {
+            group.throughput(Throughput::Bytes(size));
+        }
+
+        group.bench_with_input(
+            BenchmarkId::new("exarch_overwrite", fixture_name),
+            &data,
+            |b, data| {
+                b.iter_batched(
+                    || {
+                        let temp = TempDir::new().unwrap();
+                        let mut archive = SevenZArchive::new(Cursor::new(data.clone())).unwrap();
+                        archive
+                            .extract(
+                                temp.path(),
+                                &config,
+                                &ExtractionOptions::default(),
+                                &mut exarch_core::NoopProgress,
+                            )
+                            .unwrap();
+                        (temp, data.clone())
+                    },
+                    |(temp, data)| {
+                        let mut archive = SevenZArchive::new(Cursor::new(data)).unwrap();
+                        archive
+                            .extract(
+                                temp.path(),
+                                &config,
+                                &overwrite_options,
+                                &mut exarch_core::NoopProgress,
+                            )
+                            .unwrap();
+                    },
+                    criterion::BatchSize::LargeInput,
+                );
+            },
+        );
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     benchmark_security_config,
@@ -696,6 +813,8 @@ criterion_group!(
     benchmark_sevenz_simple,
     benchmark_sevenz_nested_dirs,
     benchmark_sevenz_large_file,
+    benchmark_sevenz_vs_reference,
+    benchmark_sevenz_overwrite,
     benchmark_file_count_scaling,
     benchmark_depth_scaling,
     benchmark_file_extraction,

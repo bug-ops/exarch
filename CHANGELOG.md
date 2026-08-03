@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Performance
+
+- **7z extraction was 35-101% slower than `sevenz_rust2::decompress_file` on the same archive,
+  scaling with file count (#492)**: `formats::sevenz::write_file_with_permit_using` always wrote
+  through a temp-file-then-`rename` even when nothing occupied the destination path, costing two
+  extra syscalls (`open`+`rename`) per extracted file — profiling attributed 45-54% of extraction
+  CPU time to this path. `process_entry_inner` now writes directly to `dest_path` via
+  `common::create_file_with_mode` (same `O_EXCL`+`O_NOFOLLOW` guarantee, mirroring TAR/ZIP's
+  `common::extract_file_with_permit`) when no pre-existing file is found there, and keeps the
+  atomic temp+rename path only for the overwrite case where a decode failure mid-stream must not
+  leave a truncated file behind; both write paths now also buffer output through a 64KiB
+  `BufWriter`, matching TAR/ZIP's `common::extract_file_with_permit`, and the direct-write path
+  removes whatever it started writing if the copy fails partway, so a decode failure never leaves
+  a truncated file at the final destination either. `SevenZArchive` also now retains its
+  already-parsed `sevenz_rust2::Archive` from `new()` and clones it into `ArchiveReader::from_archive`
+  at extraction time instead of re-parsing the archive header a second time (the clone, not a move,
+  keeps a second `extract()` call on the same instance working correctly). Re-measured via a new
+  `sevenz_vs_reference` criterion bench group (`crates/exarch-core/benches/extraction.rs`,
+  `medium_files.7z`/`small_files.7z`): the gap against `sevenz_rust2::decompress_file` closed from
+  35%/101% slower to within noise of parity (and `medium_files.7z` now edges ahead). A companion
+  `sevenz_overwrite` bench group exercises the temp+rename path specifically.
+
+  An earlier version of this fix also threaded `Some(dir_cache)` into both
+  `EntryValidator::validate_entry_path` call sites in `sevenz.rs` (matching TAR) to enable the
+  trusted-parent canonicalize-skip. Adversarial review found this let `DirCache` trust a directory
+  that something outside the archive's own entries — e.g. a misbehaving `ProgressCallback` —
+  swapped for a symlink between two entries sharing that parent, turning a hard-erroring symlink
+  escape into a silent, unbounded one; both call sites were reverted to `None` before merge, so
+  this specific optimization is not part of this change.
+
 ### Added
 
 - CI: add `bench-build` job to `.github/workflows/ci.yml` that compiles the

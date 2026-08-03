@@ -517,6 +517,7 @@ impl<R: Read + Seek> SevenZArchive<R> {
         skip_duplicates: bool,
         config: &SecurityConfig<Validated>,
         duplicate_skips: &mut u64,
+        disallowed_extension_skips: &mut u64,
         pending_io_error: &mut Option<std::io::Error>,
     ) -> std::result::Result<u64, sevenz_rust2::Error> {
         let entry_type = SevenZEntryAdapter::to_entry_type(entry).map_err(|e| {
@@ -526,7 +527,12 @@ impl<R: Read + Seek> SevenZArchive<R> {
         // Extension filter runs before path validation to avoid quota
         // double-counting for skipped files.
         if matches!(entry_type, EntryType::File)
-            && !common::check_extension_allowed(entry_path, config, report)
+            && !common::check_extension_allowed(
+                entry_path,
+                config,
+                report,
+                disallowed_extension_skips,
+            )
         {
             return Ok(0);
         }
@@ -702,6 +708,11 @@ impl<R: Read + Seek> SevenZArchive<R> {
             /// keeping `report.warnings`'s growth independent of how many
             /// duplicate entries an archive contains.
             duplicate_skips: u64,
+            /// Count of file entries skipped by
+            /// `common::check_extension_allowed` because their
+            /// extension is not in the allowlist. Aggregated the
+            /// same way as `duplicate_skips` (issue #495).
+            disallowed_extension_skips: u64,
             /// Set when `process_entry_inner` needs its caller to construct
             /// `ArchiveError::Io` directly from a raw `io::Error`, bypassing
             /// the lossy `sevenz_rust2::Error` -> `ArchiveError` conversion
@@ -717,6 +728,7 @@ impl<R: Read + Seek> SevenZArchive<R> {
             progress,
             current_idx: 0,
             duplicate_skips: 0,
+            disallowed_extension_skips: 0,
             pending_io_error: None,
         };
 
@@ -748,6 +760,7 @@ impl<R: Read + Seek> SevenZArchive<R> {
                 skip_duplicates,
                 config,
                 &mut ctx.duplicate_skips,
+                &mut ctx.disallowed_extension_skips,
                 &mut ctx.pending_io_error,
             );
 
@@ -784,6 +797,7 @@ impl<R: Read + Seek> SevenZArchive<R> {
                 ctx.duplicate_skips
             ));
         }
+        common::push_disallowed_extension_warning(&mut accumulated, ctx.disallowed_extension_skips);
 
         let e = match result {
             Ok(()) => return Ok(accumulated),
@@ -1911,7 +1925,119 @@ mod tests {
                 .exists(),
             ".txt files must be extracted"
         );
-        assert!(report.warnings.iter().any(|w| w.contains("program.exe")));
+        assert_eq!(
+            report.warnings,
+            vec!["skipped 1 entry with disallowed extension".to_string()],
+            "the disallowed-extension skip must be aggregated into a single warning \
+             instead of a per-entry, path-bearing one (issue #495)"
+        );
+    }
+
+    /// Reproduces the actual #495 bug scenario end-to-end: many entries
+    /// rejected by the extension allowlist must aggregate into a single
+    /// warning instead of growing `report.warnings` proportional to archive
+    /// size (mirrors `test_skip_duplicates_aggregates_single_warning`, #490).
+    #[test]
+    fn test_disallowed_extension_aggregates_single_warning() {
+        const ENTRY_COUNT: usize = 30;
+        let names: Vec<String> = (0..ENTRY_COUNT).map(|i| format!("skip-{i}.exe")).collect();
+        let entries: Vec<(&str, &[u8])> = names
+            .iter()
+            .map(|n| (n.as_str(), b"payload".as_slice()))
+            .collect();
+        let data = make_sevenz_archive(&entries);
+        let dest = TempDir::new().unwrap();
+        let config = SecurityConfig::default()
+            .with_allowed_extensions(vec!["txt".to_string()])
+            .validate()
+            .expect("valid config");
+
+        let report = SevenZArchive::new(Cursor::new(data))
+            .unwrap()
+            .extract(
+                dest.path(),
+                &config,
+                &ExtractionOptions::default(),
+                &mut crate::NoopProgress,
+            )
+            .unwrap();
+
+        assert_eq!(report.files_skipped, ENTRY_COUNT);
+        assert_eq!(report.files_extracted, 0);
+        assert_eq!(
+            report.warnings,
+            vec![format!(
+                "skipped {ENTRY_COUNT} entries with disallowed extensions"
+            )],
+            "disallowed-extension skips must be aggregated into a single warning, got: {:?}",
+            report.warnings
+        );
+    }
+
+    /// Verifies duplicate-skip and disallowed-extension-skip counters
+    /// aggregate independently in the same extraction: an archive mixing
+    /// both skip reasons must produce exactly two warnings, one per reason,
+    /// each with the correct count (issue #495).
+    #[test]
+    fn test_duplicate_and_disallowed_extension_skips_aggregate_independently() {
+        const DUPLICATE_COUNT: usize = 5;
+        const DISALLOWED_COUNT: usize = 7;
+
+        let mut names: Vec<String> = (0..DUPLICATE_COUNT)
+            .map(|i| format!("dup-{i}.txt"))
+            .collect();
+        names.extend((0..DISALLOWED_COUNT).map(|i| format!("skip-{i}.exe")));
+        let entries: Vec<(&str, &[u8])> = names
+            .iter()
+            .map(|n| (n.as_str(), b"payload".as_slice()))
+            .collect();
+        let data = make_sevenz_archive(&entries);
+
+        let temp = TempDir::new().unwrap();
+        for name in names.iter().take(DUPLICATE_COUNT) {
+            std::fs::write(temp.path().join(name), b"already here").unwrap();
+        }
+
+        let config = SecurityConfig::default()
+            .with_allowed_extensions(vec!["txt".to_string()])
+            .validate()
+            .expect("valid config");
+
+        let report = SevenZArchive::new(Cursor::new(data))
+            .unwrap()
+            .extract(
+                temp.path(),
+                &config,
+                &ExtractionOptions::default(), // skip_duplicates = true
+                &mut crate::NoopProgress,
+            )
+            .unwrap();
+
+        assert_eq!(report.files_skipped, DUPLICATE_COUNT + DISALLOWED_COUNT);
+        assert_eq!(report.files_extracted, 0);
+        assert_eq!(
+            report.warnings.len(),
+            2,
+            "each skip reason must aggregate into its own single warning, got: {:?}",
+            report.warnings
+        );
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w.contains(&DUPLICATE_COUNT.to_string()) && w.contains("duplicate")),
+            "expected a duplicate-skip warning reporting {DUPLICATE_COUNT}, got: {:?}",
+            report.warnings
+        );
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w.contains(&DISALLOWED_COUNT.to_string())
+                    && w.contains("disallowed extension")),
+            "expected a disallowed-extension warning reporting {DISALLOWED_COUNT}, got: {:?}",
+            report.warnings
+        );
     }
 
     #[test]
@@ -2109,6 +2235,7 @@ mod tests {
         let mut dir_cache = common::DirCache::new();
         let mut report = ExtractionReport::new();
         let mut duplicate_skips = 0u64;
+        let mut disallowed_extension_skips = 0u64;
         let mut pending_io_error = None;
 
         let mut entry = sevenz_rust2::ArchiveEntry::new_file("../../evil.txt");
@@ -2127,6 +2254,7 @@ mod tests {
             false,
             &config,
             &mut duplicate_skips,
+            &mut disallowed_extension_skips,
             &mut pending_io_error,
         );
 

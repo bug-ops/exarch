@@ -362,6 +362,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **`exarch-core`: 7z's `skip_duplicates = false` path silently replaced a pre-existing symlink at
+  the destination instead of rejecting it, and quota was reserved before the duplicate-skip
+  decision (#477, #478)**: the #468 fix below (`skip_duplicates.symlink_metadata()`) closed the
+  duplicate-*detection* gap for `skip_duplicates = true`, but as that entry's own text noted,
+  `skip_duplicates = false` was left unresolved and tracked separately here. `process_entry_inner`
+  now `lstat`s the destination via a shared `lstat_dest` helper before doing anything else with it:
+  with `skip_duplicates = false`, a symlink there (dangling or live) now fails with the same `ELOOP`
+  I/O error TAR/ZIP's `O_NOFOLLOW` open produces, instead of `write_file_with_permit`'s
+  temp-file-then-`rename` silently unlinking and replacing it — `rename(2)` itself never followed
+  the symlink even pre-fix, so this was a silent-replacement bug, not a symlink-escape (content
+  never wrote through the link to its target). A regular file or directory at the destination is
+  still overwritten as before; only a symlink is now rejected. Separately, quota (`reserve_file`,
+  a new `EntryValidator` method mirroring the existing `reserve_hardlink`) is now reserved *after*
+  this check and after the duplicate-skip decision, not before: previously every entry's quota was
+  reserved unconditionally via `validate_entry` before the destination was even inspected, so an
+  entry skipped as a duplicate permanently consumed its file-count/byte-size allotment (`QuotaPermit`
+  has no `Drop` impl to release it). Both fixes apply identically to `SevenZArchive::extract`'s Step
+  1 pre-validation pass, which previously used neither check, so a symlink-at-destination or a
+  since-skipped duplicate could pass pre-validation and only fail (or over-consume quota) partway
+  through the later extraction pass. New `EntryValidator::validate_entry_path` splits path
+  validation out of `validate_entry` so callers needing the destination path before deciding on
+  quota (7z's duplicate check, mirroring `reserve_hardlink`'s existing decoupling for hardlinks) no
+  longer have to reserve quota just to get it.
 - **A pre-planted symlink at a predictable/checked destination path bypassed a `Path::exists()`-style
   duplicate check, and the subsequent non-exclusive write followed it outside the extraction root
   (#471, #467)**: two more instances of the vulnerability class fixed for TAR/ZIP's normal-file

@@ -11,10 +11,18 @@ use crate::config::Validated;
 /// [`QuotaTracker`].
 ///
 /// This is a capability token, not a data type: it carries no payload and
-/// exists only so that [`ValidatedEntryType::File`] cannot be constructed
-/// without a tracker having actually authorized the charge. Its only
-/// producer is [`QuotaTracker::reserve`] — the private field means no other
-/// code, in or out of this crate, can assemble one directly.
+/// exists only so that code holding one can prove a tracker actually
+/// authorized the charge. Its only producer is [`QuotaTracker::reserve`] —
+/// the private field means no other code, in or out of this crate, can
+/// assemble one directly. `EntryValidator` exposes three ways to obtain one,
+/// all funneling through that same `reserve` call:
+/// [`EntryValidator::validate_entry`] embeds it in
+/// [`ValidatedEntryType::File`] for the common case where path validation and
+/// quota reservation happen together; its crate-private `reserve_hardlink`
+/// and `reserve_file` methods return it standalone for callers that must
+/// decouple the two — hardlinks (target size only known in a second pass)
+/// and 7z's duplicate-skip check (quota must not be reserved for an entry
+/// that turns out to be a skipped duplicate), respectively.
 ///
 /// Deliberately not `Clone`/`Copy`/`Default`: a permit represents a single
 /// reservation and must not be duplicated or spent more than once. Zero-sized
@@ -22,11 +30,12 @@ use crate::config::Validated;
 /// `Result<()>`.
 ///
 /// [`ValidatedEntryType::File`]: crate::security::validator::ValidatedEntryType::File
+/// [`EntryValidator::validate_entry`]: crate::security::validator::EntryValidator::validate_entry
 ///
 /// # Examples
 ///
-/// A `QuotaPermit` is never constructed directly — it arrives already
-/// embedded in a validated file entry:
+/// The common case: a `QuotaPermit` arrives already embedded in a validated
+/// file entry, via [`EntryValidator::validate_entry`]:
 ///
 /// ```no_run
 /// use exarch_core::SecurityConfig;

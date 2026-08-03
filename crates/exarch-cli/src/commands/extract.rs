@@ -1,6 +1,7 @@
 //! Extract command implementation.
 
 use crate::cli::ExtractArgs;
+use crate::commands::apply_size_limits;
 use crate::error::add_archive_context;
 use crate::output::OutputFormatter;
 use crate::progress::CliProgress;
@@ -58,7 +59,7 @@ fn filter_banned_components(raw: &[String]) -> Vec<String> {
 
 pub fn execute(
     args: &ExtractArgs,
-    formatter: &dyn OutputFormatter,
+    formatter: &mut dyn OutputFormatter,
     verbose: bool,
     quiet: bool,
 ) -> Result<()> {
@@ -69,19 +70,20 @@ pub fn execute(
 
     let allowed_extensions = parse_extensions(&args.allowed_extensions);
 
-    let config = SecurityConfig::default()
-        .with_max_file_count(args.max_files)
-        .with_max_total_size(args.max_total_size.unwrap_or(500 * 1024 * 1024))
-        .with_max_file_size(args.max_file_size.unwrap_or(50 * 1024 * 1024))
-        .with_max_compression_ratio(f64::from(args.max_compression_ratio))
-        .with_max_path_depth(args.max_path_depth)
-        .with_allow_symlinks(args.allow_symlinks)
-        .with_allow_hardlinks(args.allow_hardlinks)
-        .with_allow_absolute_paths(args.allow_absolute_paths)
-        .with_allow_world_writable(args.allow_world_writable)
-        .with_preserve_permissions(args.preserve_permissions)
-        .with_allow_solid_archives(args.allow_solid_archives)
-        .with_allowed_extensions(allowed_extensions);
+    let config = apply_size_limits(
+        SecurityConfig::default().with_max_file_count(args.max_files),
+        args.max_total_size,
+        args.max_file_size,
+    )
+    .with_max_compression_ratio(f64::from(args.max_compression_ratio))
+    .with_max_path_depth(args.max_path_depth)
+    .with_allow_symlinks(args.allow_symlinks)
+    .with_allow_hardlinks(args.allow_hardlinks)
+    .with_allow_absolute_paths(args.allow_absolute_paths)
+    .with_allow_world_writable(args.allow_world_writable)
+    .with_preserve_permissions(args.preserve_permissions)
+    .with_allow_solid_archives(args.allow_solid_archives)
+    .with_allowed_extensions(allowed_extensions);
 
     let config = if args.banned_components.is_empty() {
         config

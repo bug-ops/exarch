@@ -11,22 +11,27 @@ use std::path::Path;
 /// Common output formatter trait
 pub trait OutputFormatter {
     /// Format extraction result
-    fn format_extraction_result(&self, report: &ExtractionReport) -> Result<()>;
+    fn format_extraction_result(&mut self, report: &ExtractionReport) -> Result<()>;
 
     /// Format archive creation result
-    fn format_creation_result(&self, output_path: &Path, report: &CreationReport) -> Result<()>;
+    fn format_creation_result(&mut self, output_path: &Path, report: &CreationReport)
+    -> Result<()>;
 
     /// Format archive manifest (short format - paths only)
-    fn format_manifest_short(&self, manifest: &ArchiveManifest) -> Result<()>;
+    fn format_manifest_short(&mut self, manifest: &ArchiveManifest) -> Result<()>;
 
     /// Format archive manifest (long format - detailed)
-    fn format_manifest_long(&self, manifest: &ArchiveManifest, human_readable: bool) -> Result<()>;
+    fn format_manifest_long(
+        &mut self,
+        manifest: &ArchiveManifest,
+        human_readable: bool,
+    ) -> Result<()>;
 
     /// Format verification report
-    fn format_verification_report(&self, report: &VerificationReport) -> Result<()>;
+    fn format_verification_report(&mut self, report: &VerificationReport) -> Result<()>;
 
     /// Format error message for the given operation
-    fn format_error(&self, operation: &str, error: &anyhow::Error);
+    fn format_error(&mut self, operation: &str, error: &anyhow::Error);
 }
 
 /// Generic JSON output structure

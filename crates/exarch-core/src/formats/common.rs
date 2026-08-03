@@ -334,6 +334,45 @@ pub fn normalize_entry_name(name: &str) -> String {
     }
 }
 
+/// Appends a single aggregated warning for `count` skipped duplicate
+/// entries, choosing `noun_singular`/`noun_plural` based on `count`.
+///
+/// Shared by the TAR and ZIP extractors so a single warning is pushed once
+/// extraction completes instead of one warning per skipped duplicate,
+/// mirroring 7z's `duplicate_skips` accumulator
+/// (`SevenZArchive::extract_with_callback`, issues #484/#487/#490). A no-op
+/// when `count` is zero.
+///
+/// # Examples
+///
+/// ```ignore
+/// # use exarch_core::formats::common::push_duplicate_skip_warning;
+/// # use exarch_core::ExtractionReport;
+/// let mut report = ExtractionReport::new();
+/// push_duplicate_skip_warning(&mut report, 3, "entry", "entries");
+/// assert_eq!(
+///     report.warnings,
+///     vec!["skipped 3 entries as pre-existing duplicates".to_string()]
+/// );
+/// ```
+pub fn push_duplicate_skip_warning(
+    report: &mut ExtractionReport,
+    count: u64,
+    noun_singular: &str,
+    noun_plural: &str,
+) {
+    if count > 0 {
+        let noun = if count == 1 {
+            noun_singular
+        } else {
+            noun_plural
+        };
+        report
+            .warnings
+            .push(format!("skipped {count} {noun} as pre-existing duplicates"));
+    }
+}
+
 /// Returns `true` if `path`'s extension passes `config`'s allowlist.
 ///
 /// If the extension is not allowed, records the skip in `report`
@@ -567,6 +606,10 @@ pub fn create_file_with_mode(
 /// * `expected_size` - Expected file size (if known) for quota pre-check
 /// * `copy_buffer` - Reusable buffer for I/O operations
 /// * `dir_cache` - Directory cache to reduce redundant mkdir syscalls
+/// * `duplicate_skips` - Counter incremented (not pushed as a warning string)
+///   when a duplicate entry is skipped; the caller aggregates it into a single
+///   warning after extraction completes, mirroring 7z's `duplicate_skips`
+///   accumulator (issue #490)
 ///
 /// # Errors
 ///
@@ -588,6 +631,7 @@ pub fn extract_file_with_permit<R: Read>(
     copy_buffer: &mut CopyBuffer,
     dir_cache: &mut DirCache,
     skip_duplicates: bool,
+    duplicate_skips: &mut u64,
     progress: &mut dyn ProgressCallback,
 ) -> Result<()> {
     let output_path = dest.join(safe_path);
@@ -617,10 +661,7 @@ pub fn extract_file_with_permit<R: Read>(
         Ok(file) => file,
         Err(e) if skip_duplicates && e.kind() == std::io::ErrorKind::AlreadyExists => {
             report.files_skipped += 1;
-            report.warnings.push(format!(
-                "skipped duplicate entry: {}",
-                safe_path.as_path().display()
-            ));
+            *duplicate_skips = duplicate_skips.saturating_add(1);
             return Ok(());
         }
         Err(e) => return Err(e.into()),
@@ -710,6 +751,10 @@ pub fn create_directory(
 /// * `dest` - Destination directory
 /// * `report` - Extraction statistics (updated)
 /// * `dir_cache` - Directory cache to reduce redundant mkdir syscalls
+/// * `duplicate_skips` - Counter incremented (not pushed as a warning string)
+///   when a duplicate symlink is skipped; the caller aggregates it into a
+///   single warning after extraction completes, mirroring 7z's
+///   `duplicate_skips` accumulator (issue #490)
 ///
 /// # Errors
 ///
@@ -725,6 +770,7 @@ pub fn create_symlink(
     report: &mut ExtractionReport,
     dir_cache: &mut DirCache,
     skip_duplicates: bool,
+    duplicate_skips: &mut u64,
 ) -> Result<()> {
     #[cfg(unix)]
     {
@@ -739,10 +785,7 @@ pub fn create_symlink(
         if link_path.symlink_metadata().is_ok() {
             if skip_duplicates {
                 report.files_skipped += 1;
-                report.warnings.push(format!(
-                    "skipped duplicate symlink: {}",
-                    safe_symlink.link_path().display()
-                ));
+                *duplicate_skips = duplicate_skips.saturating_add(1);
                 return Ok(());
             }
             std::fs::remove_file(&link_path)?;
@@ -959,6 +1002,7 @@ mod tests {
             &mut copy_buffer,
             &mut dir_cache,
             true,
+            &mut 0u64,
             &mut NoopProgress,
         );
 
@@ -1356,6 +1400,7 @@ mod tests {
             &mut copy_buffer,
             &mut dir_cache,
             true,
+            &mut 0u64,
             &mut NoopProgress,
         )
         .expect("extraction should succeed");
@@ -1439,13 +1484,27 @@ mod tests {
         let mut dir_cache = DirCache::new();
 
         // First creation
-        create_symlink(&safe_symlink, &dest, &mut report, &mut dir_cache, false)
-            .expect("first create_symlink should succeed");
+        create_symlink(
+            &safe_symlink,
+            &dest,
+            &mut report,
+            &mut dir_cache,
+            false,
+            &mut 0u64,
+        )
+        .expect("first create_symlink should succeed");
         assert_eq!(report.symlinks_created, 1);
 
         // Second creation with skip_duplicates=false must overwrite without error
-        create_symlink(&safe_symlink, &dest, &mut report, &mut dir_cache, false)
-            .expect("second create_symlink should overwrite");
+        create_symlink(
+            &safe_symlink,
+            &dest,
+            &mut report,
+            &mut dir_cache,
+            false,
+            &mut 0u64,
+        )
+        .expect("second create_symlink should overwrite");
         assert_eq!(report.symlinks_created, 2);
         assert_eq!(report.files_skipped, 0);
         assert!(temp.path().join("link.txt").exists());

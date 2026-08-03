@@ -82,14 +82,13 @@ fn tar_skip_duplicates_true_keeps_first_entry() {
         report.files_skipped, 1,
         "second entry must be counted as skipped"
     );
+    // TAR aggregates all pre-existing-duplicate skips into a single warning
+    // without per-path text, to keep `report.warnings` bounded regardless of
+    // how many entries are skipped (see #490, mirroring 7z's #484).
     assert_eq!(
-        report.warnings.len(),
-        1,
-        "exactly one duplicate warning expected"
-    );
-    assert!(
-        report.warnings[0].contains("file.txt"),
-        "warning must identify the duplicate path"
+        report.warnings,
+        vec!["skipped 1 entry as pre-existing duplicates".to_string()],
+        "TAR now emits one aggregated duplicate-skip warning, not a per-path one"
     );
 
     let content = std::fs::read(dest.path().join("file.txt")).unwrap();
@@ -199,10 +198,10 @@ fn sevenz_skip_duplicates_true_keeps_first_entry() {
         report.files_skipped, 1,
         "second entry must be counted as skipped"
     );
-    // Unlike TAR/ZIP (which push one warning per skipped path, asserted above),
     // 7z aggregates all pre-existing-duplicate skips into a single warning
     // without per-path text, to keep `report.warnings` bounded regardless of
-    // how many entries are skipped (see #484).
+    // how many entries are skipped (see #484; TAR/ZIP do the same as of #490,
+    // asserted above).
     assert_eq!(
         report.warnings,
         vec!["skipped 1 entry as pre-existing duplicates".to_string()],

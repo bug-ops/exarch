@@ -43,6 +43,19 @@ fn parse_extensions(raw: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// Drops empty entries from raw `--banned-component` values.
+///
+/// `SecurityConfig::validate()` rejects empty entries, but an empty value is
+/// the documented idiom for disabling the default ban list (see the
+/// `--banned-component` clap help), so it must never reach `validate()`.
+/// The caller keeps checking `args.banned_components.is_empty()` on the raw,
+/// unfiltered values to decide whether to override the default ban list at
+/// all; this only strips empties out of the values passed once that
+/// decision is made.
+fn filter_banned_components(raw: &[String]) -> Vec<String> {
+    raw.iter().filter(|c| !c.is_empty()).cloned().collect()
+}
+
 pub fn execute(
     args: &ExtractArgs,
     formatter: &dyn OutputFormatter,
@@ -73,7 +86,7 @@ pub fn execute(
     let config = if args.banned_components.is_empty() {
         config
     } else {
-        config.with_banned_path_components(args.banned_components.clone())
+        config.with_banned_path_components(filter_banned_components(&args.banned_components))
     };
 
     // list_config shares quota and path-filtering params with config but uses
@@ -214,5 +227,17 @@ mod tests {
     fn parse_extensions_mixed_repeatable_and_comma() {
         let raw = vec!["zip,tar".to_string(), ".GZ".to_string()];
         assert_eq!(parse_extensions(&raw), vec!["zip", "tar", "gz"]);
+    }
+
+    #[test]
+    fn filter_banned_components_drops_empty_entries() {
+        let raw = vec![String::new()];
+        assert_eq!(filter_banned_components(&raw), Vec::<String>::new());
+    }
+
+    #[test]
+    fn filter_banned_components_keeps_non_empty_entries() {
+        let raw = vec![".git".to_string(), String::new(), ".ssh".to_string()];
+        assert_eq!(filter_banned_components(&raw), vec![".git", ".ssh"]);
     }
 }

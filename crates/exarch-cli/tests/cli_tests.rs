@@ -2229,6 +2229,34 @@ fn test_extract_security_violation_text_reason_appears_once() {
     );
 }
 
+/// Regression test for issue #449: `--banned-component ""` is a documented
+/// idiom (see clap help on `ExtractArgs::banned_components`) for disabling
+/// the default ban list entirely. `SecurityConfig::validate()` now rejects
+/// empty entries, so the CLI must filter them out before building the
+/// config rather than passing the raw, unfiltered flag values through.
+#[test]
+fn test_extract_banned_component_empty_string_disables_default_ban_list() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive_path = temp.path().join("git.tar.gz");
+    create_tar_gz_with_component(&archive_path, ".git");
+    let out_dir = temp.path().join("out");
+    std::fs::create_dir_all(&out_dir).expect("create out dir");
+
+    exarch_cmd()
+        .arg("extract")
+        .arg(&archive_path)
+        .arg(&out_dir)
+        .arg("--banned-component")
+        .arg("")
+        .assert()
+        .success();
+
+    assert!(
+        out_dir.join(".git").join("file.txt").exists(),
+        "empty --banned-component should disable the default ban list, allowing .git/ through"
+    );
+}
+
 /// Encodes `n` as a classic octal numeric field of `width` bytes (including
 /// the trailing NUL), or `None` if it does not fit in `width - 1` digits.
 fn octal_field(n: u64, width: usize) -> Option<Vec<u8>> {

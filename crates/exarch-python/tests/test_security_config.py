@@ -143,3 +143,26 @@ class TestSecurityConfig:
         # Should reject overly long strings
         with pytest.raises(ValueError, match="maximum length"):
             config.add_allowed_extension("x" * 300)
+
+        # Should reject empty strings
+        with pytest.raises(ValueError, match="empty"):
+            config.add_allowed_extension("")
+
+    def test_banned_component_validation(self):
+        """Test banned path component string validation."""
+        config = SecurityConfig()
+
+        # Should accept valid component
+        config.add_banned_component("node_modules")
+
+        # Should reject null bytes
+        with pytest.raises(ValueError, match="null bytes"):
+            config.add_banned_component("bad\x00component")
+
+        # Should reject overly long strings
+        with pytest.raises(ValueError, match="maximum length"):
+            config.add_banned_component("x" * 300)
+
+        # Should reject empty strings
+        with pytest.raises(ValueError, match="empty"):
+            config.add_banned_component("")

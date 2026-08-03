@@ -16,6 +16,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING: `SecurityConfig::validate()` now rejects malformed `allowed_extensions`/
+  `banned_path_components` entries (#449)**: a new `validate_config_entry` helper in
+  `exarch-core::security::boundary` (re-exported as `exarch_core::validate_config_entry`,
+  alongside `MAX_CONFIG_ENTRY_LENGTH`) is called per-entry from `SecurityConfig::validate()`,
+  which now returns `ArchiveError::InvalidConfiguration` for any entry that is empty, contains a
+  null byte, or exceeds 255 bytes — configs that previously passed `validate()` with such entries
+  now fail. `exarch-python`'s `add_allowed_extension`/`add_banned_component` and
+  `exarch-node`'s `addAllowedExtension`/`addBannedComponent` now delegate to the same helper
+  instead of duplicating the length/null-byte checks, so both bindings additionally reject empty
+  entries eagerly (previously accepted) and report length in bytes rather than the previously
+  inaccurate "characters" wording for multi-byte input. `exarch-node`'s error messages for these
+  two setters now carry the crate-wide `INVALID_CONFIGURATION: invalid configuration: ` prefix
+  (previously a bare reason string), matching every other error path in the binding.
 - **BREAKING: `exarch-node` boolean setters now take a mandatory `boolean` instead of an
   optional one (#442)**: `SecurityConfig.setAllowSymlinks`, `setAllowHardlinks`,
   `setAllowAbsolutePaths`, `setAllowWorldWritable`, `setAllowSolidArchives`,

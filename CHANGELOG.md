@@ -28,6 +28,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from plain JavaScript. Explicit `undefined` or `null` are rejected the same way, which also
   catches the more realistic failure pattern of forwarding an optional property (e.g.
   `cfg.setAllowSymlinks(userOpts.allowSymlinks)`) that was never actually set.
+- **BREAKING: `CreationConfig` is now a two-state typestate over `Unvalidated`/`Validated` (#443)**:
+  mirrors the `SecurityConfig` typestate from #433-#435. `CreationConfig<State = Unvalidated>`
+  carries a phantom marker (reusing the existing `Unvalidated`/`Validated` markers from
+  `crate::config`, not a new pair); the fluent `with_*` builders remain available only on
+  `CreationConfig<Unvalidated>`, and `CreationConfig::validate()` now consumes `self` and returns
+  `Result<CreationConfig<Validated>>` instead of `Result<()>`. The low-level
+  `creation::tar::*`/`creation::zip::*` functions and `FormatCreator::create` now require
+  `&CreationConfig<Validated>`, so a forged or unvalidated `compression_level` can no longer reach
+  `flate2`/`xz2`, closing a panic-based DoS: a hand-built `CreationConfig` with
+  `compression_level: Some(200)` previously bypassed the `InvalidCompressionLevel` contract
+  enforced only at the two high-level entry points and triggered an `assert!`/`unwrap()` panic
+  inside `flate2`'s `zlib-rs` backend and `xz2` respectively, instead of returning an error.
+  Fields are sealed behind a private inner `CreationConfigFields` struct
+  (`#[non_exhaustive]`), reachable read-only via `Deref` for both typestates but mutable
+  (`DerefMut`) only for `CreationConfig<Unvalidated>`. `creation::filters::should_skip` and
+  `creation::filters::compute_archive_path` also gained a `State` type parameter, so any external
+  caller invoking them with an explicit turbofish must update it. The top-level `create_archive*` functions
+  and `ArchiveCreator::create` are unaffected: they still accept `&CreationConfig`/`CreationConfig`
+  (defaulting to `Unvalidated`) and validate internally. `exarch-cli`, `exarch-python`, and
+  `exarch-node` need only the CLI's `create` command updated (it built a `CreationConfig` via
+  struct-literal syntax); both bindings mutate through `DerefMut` on `Unvalidated` and continue to
+  compile unchanged.
 - **BREAKING: `ValidatedEntryType::File` now carries a `QuotaPermit` capability token (#436)**:
   `QuotaTracker::record_file` is renamed to `reserve` and returns `Result<QuotaPermit>` instead
   of `Result<()>`; `EntryValidator::record_hardlink` is renamed to `reserve_hardlink` for the

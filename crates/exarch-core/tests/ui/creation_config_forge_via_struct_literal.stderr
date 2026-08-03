@@ -1,0 +1,7 @@
+error[E0560]: struct `CreationConfig<_>` has no field named `compression_level`
+  --> tests/ui/creation_config_forge_via_struct_literal.rs:14:9
+   |
+14 |         compression_level: Some(200),
+   |         ^^^^^^^^^^^^^^^^^ `CreationConfig<_>` does not have this field
+   |
+   = note: all struct fields are already assigned

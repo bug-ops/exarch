@@ -37,7 +37,7 @@ pub fn compression_level_to_flate2(level: Option<u8>) -> flate2::Compression {
         None | Some(6) => flate2::Compression::default(),
         Some(1..=3) => flate2::Compression::fast(),
         Some(7..=9) => flate2::Compression::best(),
-        Some(n) => flate2::Compression::new(u32::from(n)),
+        Some(n) => flate2::Compression::new(u32::from(n.min(9))),
     }
 }
 
@@ -75,7 +75,7 @@ pub fn compression_level_to_bzip2(level: Option<u8>) -> bzip2::Compression {
 /// # Mapping
 ///
 /// - `None` or `Some(6)`: Level 6 (default)
-/// - Other values: Literal level (0-9 range supported by xz)
+/// - Other values: Literal level (clamped to valid range 0-9)
 ///
 /// # Examples
 ///
@@ -90,7 +90,7 @@ pub fn compression_level_to_bzip2(level: Option<u8>) -> bzip2::Compression {
 pub fn compression_level_to_xz(level: Option<u8>) -> u32 {
     match level {
         None | Some(6) => 6,
-        Some(n) => u32::from(n),
+        Some(n) => u32::from(n.min(9)),
     }
 }
 
@@ -184,6 +184,15 @@ mod tests {
         assert_eq!(level, flate2::Compression::new(5));
     }
 
+    /// Regression test for #443: defense-in-depth clamping so this
+    /// primitive cannot panic even if called directly with an unvalidated
+    /// value, independent of the `CreationConfig` typestate guarantee.
+    #[test]
+    fn test_compression_level_to_flate2_out_of_range_does_not_panic() {
+        let level = compression_level_to_flate2(Some(200));
+        assert_eq!(level, flate2::Compression::new(9));
+    }
+
     #[test]
     fn test_compression_level_to_bzip2() {
         // Default
@@ -209,6 +218,14 @@ mod tests {
         assert_eq!(compression_level_to_xz(Some(6)), 6);
         assert_eq!(compression_level_to_xz(Some(1)), 1);
         assert_eq!(compression_level_to_xz(Some(9)), 9);
+    }
+
+    /// Regression test for #443: defense-in-depth clamping so this
+    /// primitive cannot panic even if called directly with an unvalidated
+    /// value, independent of the `CreationConfig` typestate guarantee.
+    #[test]
+    fn test_compression_level_to_xz_out_of_range_does_not_panic() {
+        assert_eq!(compression_level_to_xz(Some(200)), 9);
     }
 
     #[test]

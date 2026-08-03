@@ -77,6 +77,7 @@ pub trait ArchiveFormat {
 /// ```
 /// use exarch_core::ProgressCallback;
 /// use exarch_core::Result;
+/// use exarch_core::config::Validated;
 /// use exarch_core::creation::CreationConfig;
 /// use exarch_core::creation::CreationReport;
 /// use exarch_core::formats::traits::FormatCreator;
@@ -89,7 +90,7 @@ pub trait ArchiveFormat {
 ///         &self,
 ///         _output: &Path,
 ///         _sources: &[&Path],
-///         _config: &CreationConfig,
+///         _config: &CreationConfig<Validated>,
 ///         _progress: &mut dyn ProgressCallback,
 ///     ) -> Result<CreationReport> {
 ///         Ok(CreationReport::default())
@@ -104,14 +105,14 @@ pub trait ArchiveFormat {
 ///     creator: &dyn FormatCreator,
 ///     output: &Path,
 ///     sources: &[&Path],
-///     config: &CreationConfig,
+///     config: &CreationConfig<Validated>,
 ///     progress: &mut dyn ProgressCallback,
 /// ) -> Result<CreationReport> {
 ///     creator.create(output, sources, config, progress)
 /// }
 ///
 /// let creator = NoopCreator;
-/// let config = CreationConfig::default();
+/// let config = CreationConfig::default().validate().unwrap();
 /// let mut noop = exarch_core::NoopProgress;
 /// create_via_trait(&creator, Path::new("out.tar.gz"), &[], &config, &mut noop).unwrap();
 /// ```
@@ -126,7 +127,7 @@ pub trait FormatCreator {
         &self,
         output: &Path,
         sources: &[&Path],
-        config: &CreationConfig,
+        config: &CreationConfig<Validated>,
         progress: &mut dyn ProgressCallback,
     ) -> Result<CreationReport>;
 

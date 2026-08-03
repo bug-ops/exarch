@@ -26,15 +26,17 @@ pub fn execute(args: &CreateArgs, formatter: &dyn OutputFormatter, quiet: bool) 
     }
 
     // Build config
-    let mut config = CreationConfig {
-        follow_symlinks: args.follow_symlinks,
-        include_hidden: args.include_hidden,
-        compression_level: args.compression_level,
-        strip_prefix: args.strip_prefix.clone(),
-        max_file_size: args.max_file_size,
-        preserve_permissions: args.preserve_permissions,
-        ..Default::default()
-    };
+    let mut config = CreationConfig::default()
+        .with_follow_symlinks(args.follow_symlinks)
+        .with_include_hidden(args.include_hidden)
+        .with_strip_prefix(args.strip_prefix.clone())
+        .with_max_file_size(args.max_file_size)
+        .with_preserve_permissions(args.preserve_permissions);
+    if let Some(level) = args.compression_level {
+        config = config
+            .with_compression_level(level)
+            .with_context(|| format!("invalid compression level: {level}"))?;
+    }
 
     // Add user exclude patterns to defaults
     config.exclude_patterns.extend(args.exclude.iter().cloned());

@@ -251,6 +251,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`exarch-cli`: `extract --atomic --force` deleted a pre-existing destination directory before
+  extraction was known to succeed, defeating the point of `--atomic` (#519)**: `commands/extract.rs`
+  pre-removed `output_dir` with `remove_dir_all` so the subsequent rename in `exarch-core`'s
+  `extract_atomic` (which refuses to replace an existing directory by design) would succeed — but
+  the removal ran before extraction was attempted, so a failed extraction (security violation,
+  malformed archive, disk full, etc.) left the original destination permanently gone with no
+  recovery, worse than plain `--force`. The CLI no longer pre-deletes; for this specific combination
+  it now extracts into a temp directory beside the destination (non-atomic), and only after
+  extraction fully succeeds does it perform its own swap: the existing destination is renamed aside
+  to a backup path, the extracted content is renamed into place, and only then is the backup
+  removed. If the final rename into place fails, the backup is renamed back and the CLI reports
+  clearly whether that restore succeeded — including the backup path if it didn't, so the original
+  content can still be recovered manually. A pre-existing destination that exists but is not a
+  directory (e.g. a regular file) is now rejected with an explicit error instead of being silently
+  replaced. Any other `--atomic`/`--force` combination is unaffected.
+- **`exarch-cli`: the `SecurityViolation` HINT suggested policy flags (`--allow-symlinks`,
+  `--allow-hardlinks`, `--allow-solid-archives`, `--banned-component`) even for violations none of
+  those flags control — most notably the GHSA-5j8q-wxg5-hj4r declared/decompressed size mismatch,
+  but also roughly ten other reasons such as password-protected archives, unsupported compression
+  methods, or invalid entry paths (#520)**: `error.rs`'s `convert_extraction_error` attached the
+  same generic HINT to every `SecurityViolation` regardless of `reason` (a free-form `String`, not
+  a structured enum). It now checks `reason` against the known prefixes exarch-core uses for the
+  four categories the flags actually relax and only shows the flag-specific HINT for those; every
+  other `SecurityViolation` gets a HINT stating that it cannot be relaxed via any policy flag.
 - **`exarch-core`: `files_skipped` was incremented via a plain `+= 1` in six sites across
   extraction and creation, inconsistent with the `checked_add`-based hardening already applied to
   TAR's own `files_skipped` counter (#515)**: `formats/common.rs`'s `check_extension_allowed`,

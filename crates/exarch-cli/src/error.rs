@@ -84,6 +84,38 @@ impl fmt::Display for PartialExtractionContext {
 
 impl std::error::Error for PartialExtractionContext {}
 
+/// Fixed literal prefixes `exarch-core` builds `SecurityViolation.reason`
+/// strings from for the four categories the CLI's policy flags
+/// (`--allow-symlinks`, `--allow-hardlinks`, `--allow-solid-archives`,
+/// `--banned-component`) actually relax. Verified against the exact
+/// construction call sites: `types/safe_symlink.rs`, `security/hardlink.rs`,
+/// `formats/sevenz.rs`, and `types/safe_path.rs` / `types/safe_symlink.rs`
+/// (banned components can appear either in the entry path itself or in a
+/// symlink's target, hence two prefixes for that one category).
+const RELAXABLE_VIOLATION_PREFIXES: &[&str] = &[
+    "symlinks not allowed",
+    "hardlinks not allowed",
+    "solid 7z archives are not allowed",
+    "banned path component:",
+    "symlink target contains banned component:",
+];
+
+/// Returns `true` if `reason` names a `SecurityViolation` category one of the
+/// CLI's policy flags can actually relax.
+///
+/// Matches with `starts_with`, anchored at the very beginning of `reason`:
+/// each prefix above is the fixed literal text `exarch-core` writes before
+/// any attacker-controlled data (an entry path, a component name, etc.), so
+/// a forged archive cannot spoof this classification by choosing path
+/// components that happen to contain one of these prefixes elsewhere in the
+/// string — only a `reason` that genuinely originates from one of these
+/// call sites starts with it.
+fn is_relaxable_by_policy_flag(reason: &str) -> bool {
+    RELAXABLE_VIOLATION_PREFIXES
+        .iter()
+        .any(|prefix| reason.starts_with(prefix))
+}
+
 /// Converts `ArchiveError` to user-friendly anyhow error with context.
 ///
 /// The original `ArchiveError` is preserved as the error source so that
@@ -185,12 +217,32 @@ pub fn convert_extraction_error(
         ArchiveError::InvalidCompressionLevel { level } => {
             format!("Invalid compression level {level}: must be between 1 and 9.")
         }
-        ArchiveError::SecurityViolation { .. } => format!(
-            "Security violation while processing '{}'\n\
-             HINT: If this archive is from a trusted source, relax the relevant policy flag \
-             (--allow-symlinks, --allow-hardlinks, --allow-solid-archives, --banned-component).",
-            archive.display(),
-        ),
+        // `SecurityViolation.reason` is a free-form String with no structured
+        // variant to distinguish its cause, and the CLI's four policy flags
+        // only relax a handful of them (symlinks, hardlinks, solid archives,
+        // banned components) — roughly a dozen others (GHSA-5j8q-wxg5-hj4r's
+        // declared/decompressed size mismatch, encrypted/password-protected
+        // entries, unsupported compression methods, oversized symlink
+        // targets, disallowed TAR entry types, null bytes or empty/oversized
+        // paths, etc.) cannot be relaxed by any flag at all. Rather than
+        // special-casing the one known mismatch, classify by the fixed
+        // literal prefix each relaxable category's reason is built from (see
+        // `is_relaxable_by_policy_flag`) and give every non-matching reason a
+        // HINT that does not point at a flag that cannot fix it.
+        ArchiveError::SecurityViolation { reason } => {
+            let hint = if is_relaxable_by_policy_flag(reason) {
+                "If this archive is from a trusted source, relax the relevant policy flag \
+                 (--allow-symlinks, --allow-hardlinks, --allow-solid-archives, \
+                 --banned-component)."
+            } else {
+                "This archive was rejected by a security check that cannot be relaxed via any \
+                 policy flag."
+            };
+            format!(
+                "Security violation while processing '{}'\nHINT: {hint}",
+                archive.display(),
+            )
+        }
     };
     anyhow::Error::from(err).context(context)
 }
@@ -390,6 +442,35 @@ mod tests {
             1,
             "reason should appear exactly once, got: {msg}"
         );
+    }
+
+    // Regression test for issue #520: the GHSA-5j8q-wxg5-hj4r forged-size
+    // SecurityViolation must get its own accurate HINT, not the generic
+    // policy-flag one, since none of those flags can fix a size mismatch.
+
+    #[test]
+    fn test_security_violation_forged_size_hint_omits_policy_flags() {
+        let err = ArchiveError::SecurityViolation {
+            reason: "decompressed size exceeded the declared uncompressed size of 50 bytes"
+                .to_string(),
+        };
+        let converted = convert_extraction_error(err, Path::new("archive.zip"), false);
+        let msg = format!("{converted:#}");
+        assert!(
+            msg.contains("cannot be relaxed via any policy flag"),
+            "expected the size-mismatch-specific HINT, got: {msg}"
+        );
+        for flag in [
+            "--allow-symlinks",
+            "--allow-hardlinks",
+            "--allow-solid-archives",
+            "--banned-component",
+        ] {
+            assert!(
+                !msg.contains(flag),
+                "forged-size HINT must not mention {flag}, got: {msg}"
+            );
+        }
     }
 
     #[test]

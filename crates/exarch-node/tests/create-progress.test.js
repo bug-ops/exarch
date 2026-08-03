@@ -212,10 +212,7 @@ describe('createArchiveWithProgress', () => {
           `expected PROGRESS_CALLBACK_ERROR prefix, got: ${err.message}`
         );
         assert.match(err.message, /filesAdded=2/);
-        assert.strictEqual(
-          err.cause.message,
-          'progress callback threw a non-object value: oops'
-        );
+        assert.strictEqual(err.cause.message, 'progress callback threw a non-object value: oops');
         assert.strictEqual(err.cause.cause, 'oops');
         return true;
       }

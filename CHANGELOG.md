@@ -26,6 +26,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING: `ArchiveError::to_ffi_message` no longer takes a `sanitize_paths: bool` parameter
+  (#463)**: the parameter's runtime toggle no longer maps onto anything real once the redaction
+  policy became profile-gated (`cfg(debug_assertions)`) rather than caller-selected — see the
+  `#463`/`#462` entry under `### Fixed` for why the policy changed. `to_ffi_message()` now takes
+  no arguments and always applies the shared policy from the new `error::redaction` module via
+  `ArchiveError::redacted_path()`. The method had zero callers anywhere in the workspace, so this
+  has no runtime effect on `exarch-python`/`exarch-node`, but any direct Rust API consumer calling
+  `to_ffi_message(sanitize_paths)` must drop the argument.
 - **BREAKING: `SecurityConfig::validate()` now rejects malformed `allowed_extensions`/
   `banned_path_components` entries (#449)**: a new `validate_config_entry` helper in
   `exarch-core::security::boundary` (re-exported as `exarch_core::validate_config_entry`,
@@ -168,6 +176,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`sanitize_path_for_error`/`sanitize_io_error_for_error` duplicated verbatim across bindings
+  (plus a third, unused copy in `exarch-core` itself), and over-redacted attacker-authored paths
+  (#463, #462)**: the profile-gated redaction helpers added by #453 were byte-identical,
+  independently-maintained copies in `crates/exarch-python/src/error.rs` and
+  `crates/exarch-node/src/error.rs`, with no shared source or cross-binding test; a third,
+  never-called copy of the same policy also lived in `ArchiveError::to_ffi_message` and carried
+  the same bugs. Hoisted the two binding-local helpers into a new `exarch-core` module,
+  `error::redaction` (re-exported as `exarch_core::sanitize_path_for_error`,
+  `exarch_core::format_entry_path_for_error`, and `exarch_core::sanitize_io_error_for_error`) —
+  both bindings' `convert_error` bind the path per match arm and call the correct algorithm
+  directly (preserving the compiler's exhaustiveness guarantee that a new `ArchiveError` variant
+  forces every call site to handle it explicitly), and `ArchiveError::to_ffi_message` (previously
+  the buggy third copy, see `### Changed` for its resulting signature break) calls the same two
+  algorithms via a new `ArchiveError::redacted_path()` helper. Only the two redaction algorithms
+  are single-sourced this way — the variant-to-algorithm mapping itself is still applied
+  independently in three places (`redacted_path()`, and each binding's `convert_error`), guarded
+  by tests in each. While hoisting, fixed over-redaction: `PathTraversal`, `SymlinkEscape`, and
+  `HardlinkEscape` carry an archive-relative path the attacker authored inside the archive entry,
+  not a host filesystem path (see `exarch-core/src/types/safe_path.rs` and `safe_symlink.rs`), so
+  redacting them to filename-only in release builds hid nothing from the attacker while destroying
+  the defender's ability to identify the offending entry in redacted logs. These three variants —
+  and `InvalidPermissions`, which carries the same kind of archive-relative entry path (see
+  `inspection::verify`) — now keep the full path in both debug and release builds.
+  `SourceNotFound`, `SourceNotAccessible`, `OutputExists`, `UnknownFormat`, and `Io` are unaffected
+  and remain redacted to filename-only (or `ErrorKind` description, for `Io`) in release builds,
+  since those genuinely carry host-derived paths. **Behavior change**: release-build error
+  messages for `PathTraversal`, `SymlinkEscape`, `HardlinkEscape`, and `InvalidPermissions` now
+  include the full archive entry path where they
+  previously showed only the filename.
 - **`exarch-python` error messages leaked full absolute paths in release builds, and both
   bindings leaked host paths embedded in `CoreError::Io` messages (#453)**:
   `crates/exarch-python/src/error.rs` called `path.display()` directly and unconditionally for

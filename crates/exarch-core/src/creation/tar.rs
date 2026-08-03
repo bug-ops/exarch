@@ -393,7 +393,7 @@ fn add_symlink_to_tar<W: Write>(
     report: &mut CreationReport,
 ) -> Result<()> {
     // On non-Unix platforms, skip symlinks
-    report.files_skipped += 1;
+    report.files_skipped = report.files_skipped.saturating_add(1);
     report.add_warning("Symlinks not supported on this platform");
     Ok(())
 }

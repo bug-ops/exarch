@@ -209,6 +209,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`exarch-core`: `files_skipped` was incremented via a plain `+= 1` in six sites across
+  extraction and creation, inconsistent with the `checked_add`-based hardening already applied to
+  TAR's own `files_skipped` counter (#515)**: `formats/common.rs`'s `check_extension_allowed`,
+  `extract_file_with_permit`, and `create_symlink`, `formats/sevenz.rs`'s `process_entry_inner`,
+  and `creation/zip.rs` and `creation/tar.rs`'s skip sites all used bare `+= 1`, while
+  `formats/tar.rs:392` already used `checked_add(1).ok_or(ArchiveError::QuotaExceeded { resource:
+  IntegerOverflow })?` after #506's `duplicate_skips` hardening. The two `Result`-returning
+  extraction sites in `common.rs` and the one in `sevenz.rs` now match that same `checked_add` +
+  fail-closed pattern; `check_extension_allowed` (a `bool`-returning function that cannot propagate
+  `?`) and the `creation/`-side sites now use `saturating_add`, matching every sibling counter in
+  those same functions (`disallowed_extension_skips`, and `CreationReport`'s `files_added`/
+  `directories_added`/`symlinks_added`, none of which have a checked variant). Added a regression
+  test proving the `checked_add` extraction path fails closed with `QuotaExceeded { resource:
+  IntegerOverflow }` at `usize::MAX` instead of silently wrapping.
 - **`exarch-core`: a symlink pointing at a directory, passed directly as a top-level `create`
   source, crashed with an internal path-normalization error instead of being archived as a link
   (#512)**: `creation::walker::collect_entries` classified the directory-walk vs. single-entry

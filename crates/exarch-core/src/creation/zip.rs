@@ -218,7 +218,7 @@ fn create_zip_internal_with_progress<W: Write + Seek, P: AsRef<Path>>(
                         &mut buffer,
                     )?;
                 } else {
-                    report.files_skipped += 1;
+                    report.files_skipped = report.files_skipped.saturating_add(1);
                     report.add_warning(format!("Skipped symlink: {}", entry.path.display()));
                 }
                 tracker.on_entry_complete(&entry.archive_path);
@@ -270,7 +270,7 @@ fn add_file_to_zip_with_progress_and_buffer<W: Write + Seek>(
     if let Some(max_size) = config.max_file_size
         && size > max_size
     {
-        report.files_skipped += 1;
+        report.files_skipped = report.files_skipped.saturating_add(1);
         report.add_warning(format!(
             "Skipped file (too large): {} ({} bytes)",
             file_path.display(),

@@ -571,7 +571,10 @@ impl<R: Read + Seek> SevenZArchive<R> {
                 let existing = lstat_dest(&dest_path)?;
 
                 if existing.is_some() && skip_duplicates {
-                    report.files_skipped += 1;
+                    report.files_skipped =
+                        report.files_skipped.checked_add(1).ok_or_else(|| {
+                            sevenz_rust2::Error::Other("files_skipped overflow".into())
+                        })?;
                     *duplicate_skips = duplicate_skips.saturating_add(1);
                     return Ok(0);
                 }

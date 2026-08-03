@@ -81,7 +81,7 @@ fn benchmark_tar_with_noop_progress(c: &mut Criterion) {
     let source = TempDir::new().unwrap();
     create_test_directory(&source, 100, 1024); // 100 files, 1 KB each
 
-    let config = CreationConfig::default();
+    let config = CreationConfig::default().validate().unwrap();
 
     c.bench_function("tar_creation_noop_progress", |b| {
         b.iter(|| {
@@ -100,7 +100,7 @@ fn benchmark_tar_with_counting_progress(c: &mut Criterion) {
     let source = TempDir::new().unwrap();
     create_test_directory(&source, 100, 1024); // 100 files, 1 KB each
 
-    let config = CreationConfig::default();
+    let config = CreationConfig::default().validate().unwrap();
 
     c.bench_function("tar_creation_counting_progress", |b| {
         b.iter(|| {
@@ -137,7 +137,7 @@ fn benchmark_zip_with_noop_progress(c: &mut Criterion) {
     let source = TempDir::new().unwrap();
     create_test_directory(&source, 100, 1024); // 100 files, 1 KB each
 
-    let config = CreationConfig::default();
+    let config = CreationConfig::default().validate().unwrap();
 
     c.bench_function("zip_creation_noop_progress", |b| {
         b.iter(|| {
@@ -156,7 +156,7 @@ fn benchmark_zip_with_counting_progress(c: &mut Criterion) {
     let source = TempDir::new().unwrap();
     create_test_directory(&source, 100, 1024); // 100 files, 1 KB each
 
-    let config = CreationConfig::default();
+    let config = CreationConfig::default().validate().unwrap();
 
     c.bench_function("zip_creation_counting_progress", |b| {
         b.iter(|| {

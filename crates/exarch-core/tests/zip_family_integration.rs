@@ -182,10 +182,8 @@ fn explicit_format_override_allows_zip_family_creation() {
     let dest = TempDir::new().unwrap();
     let src = dest.path().join("source.txt");
     std::fs::write(&src, b"hello").unwrap();
-    let config = CreationConfig {
-        format: Some(ArchiveType::Zip),
-        ..CreationConfig::default()
-    };
+    let mut config = CreationConfig::default();
+    config.format = Some(ArchiveType::Zip);
     let output = dest.path().join("out.apk");
     create_archive(&output, &[&src], &config)
         .expect("explicit ArchiveType::Zip should bypass the guard");

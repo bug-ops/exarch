@@ -267,9 +267,7 @@ impl ArchiveCreator {
             });
         }
 
-        // Validate configuration
-        self.config.validate()?;
-
+        // Configuration is validated inside `create_archive`.
         crate::api::create_archive(&output_path, &self.sources, &self.config)
     }
 }

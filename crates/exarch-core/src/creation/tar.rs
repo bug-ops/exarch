@@ -5,6 +5,7 @@
 
 use crate::ProgressCallback;
 use crate::Result;
+use crate::config::Validated;
 use crate::creation::compression::compression_level_to_bzip2;
 use crate::creation::compression::compression_level_to_flate2;
 use crate::creation::compression::compression_level_to_xz;
@@ -76,7 +77,7 @@ use tar::Header;
 ///     }
 /// }
 ///
-/// let config = CreationConfig::default();
+/// let config = CreationConfig::default().validate()?;
 /// let mut progress = SimpleProgress;
 /// let report = create_tar_with_progress(
 ///     Path::new("output.tar"),
@@ -97,7 +98,7 @@ use tar::Header;
 pub fn create_tar_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
     output: P,
     sources: &[Q],
-    config: &CreationConfig,
+    config: &CreationConfig<Validated>,
     progress: &mut dyn ProgressCallback,
 ) -> Result<CreationReport> {
     let file = File::create(output.as_ref())?;
@@ -120,7 +121,7 @@ pub fn create_tar_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
 pub fn create_tar_gz_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
     output: P,
     sources: &[Q],
-    config: &CreationConfig,
+    config: &CreationConfig<Validated>,
     progress: &mut dyn ProgressCallback,
 ) -> Result<CreationReport> {
     let file = File::create(output.as_ref())?;
@@ -146,7 +147,7 @@ pub fn create_tar_gz_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
 pub fn create_tar_bz2_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
     output: P,
     sources: &[Q],
-    config: &CreationConfig,
+    config: &CreationConfig<Validated>,
     progress: &mut dyn ProgressCallback,
 ) -> Result<CreationReport> {
     let file = File::create(output.as_ref())?;
@@ -172,7 +173,7 @@ pub fn create_tar_bz2_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
 pub fn create_tar_xz_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
     output: P,
     sources: &[Q],
-    config: &CreationConfig,
+    config: &CreationConfig<Validated>,
     progress: &mut dyn ProgressCallback,
 ) -> Result<CreationReport> {
     let file = File::create(output.as_ref())?;
@@ -198,7 +199,7 @@ pub fn create_tar_xz_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
 pub fn create_tar_zst_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
     output: P,
     sources: &[Q],
-    config: &CreationConfig,
+    config: &CreationConfig<Validated>,
     progress: &mut dyn ProgressCallback,
 ) -> Result<CreationReport> {
     let file = File::create(output.as_ref())?;
@@ -221,7 +222,7 @@ pub fn create_tar_zst_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
 fn create_tar_internal_with_progress<W: Write, P: AsRef<Path>>(
     writer: W,
     sources: &[P],
-    config: &CreationConfig,
+    config: &CreationConfig<Validated>,
     progress: &mut dyn ProgressCallback,
 ) -> Result<(CreationReport, W)> {
     let mut builder = Builder::new(writer);
@@ -300,7 +301,7 @@ fn add_directory_to_tar<W: Write>(
     builder: &mut Builder<W>,
     dir_path: &Path,
     archive_path: &Path,
-    config: &CreationConfig,
+    config: &CreationConfig<Validated>,
     report: &mut CreationReport,
 ) -> Result<()> {
     if archive_path.as_os_str().is_empty() {
@@ -339,7 +340,7 @@ fn add_file_to_tar_with_progress_impl<W: Write>(
     builder: &mut Builder<W>,
     file_path: &Path,
     archive_path: &Path,
-    config: &CreationConfig,
+    config: &CreationConfig<Validated>,
     report: &mut CreationReport,
     progress: &mut dyn ProgressCallback,
 ) -> Result<()> {
@@ -449,7 +450,7 @@ impl crate::formats::traits::FormatCreator for TarCreator {
         &self,
         output: &Path,
         sources: &[&Path],
-        config: &CreationConfig,
+        config: &CreationConfig<Validated>,
         progress: &mut dyn ProgressCallback,
     ) -> crate::Result<crate::creation::CreationReport> {
         create_tar_with_progress(output, sources, config, progress)
@@ -465,7 +466,7 @@ impl crate::formats::traits::FormatCreator for TarGzCreator {
         &self,
         output: &Path,
         sources: &[&Path],
-        config: &CreationConfig,
+        config: &CreationConfig<Validated>,
         progress: &mut dyn ProgressCallback,
     ) -> crate::Result<crate::creation::CreationReport> {
         create_tar_gz_with_progress(output, sources, config, progress)
@@ -481,7 +482,7 @@ impl crate::formats::traits::FormatCreator for TarBz2Creator {
         &self,
         output: &Path,
         sources: &[&Path],
-        config: &CreationConfig,
+        config: &CreationConfig<Validated>,
         progress: &mut dyn ProgressCallback,
     ) -> crate::Result<crate::creation::CreationReport> {
         create_tar_bz2_with_progress(output, sources, config, progress)
@@ -497,7 +498,7 @@ impl crate::formats::traits::FormatCreator for TarXzCreator {
         &self,
         output: &Path,
         sources: &[&Path],
-        config: &CreationConfig,
+        config: &CreationConfig<Validated>,
         progress: &mut dyn ProgressCallback,
     ) -> crate::Result<crate::creation::CreationReport> {
         create_tar_xz_with_progress(output, sources, config, progress)
@@ -513,7 +514,7 @@ impl crate::formats::traits::FormatCreator for TarZstCreator {
         &self,
         output: &Path,
         sources: &[&Path],
-        config: &CreationConfig,
+        config: &CreationConfig<Validated>,
         progress: &mut dyn ProgressCallback,
     ) -> crate::Result<crate::creation::CreationReport> {
         create_tar_zst_with_progress(output, sources, config, progress)
@@ -674,6 +675,13 @@ mod tests {
         assert_eq!(&data[0..4], &[0x28, 0xB5, 0x2F, 0xFD]); // zstd magic bytes
     }
 
+    /// Regression test for #443: sweeps every tar compression backend
+    /// (flate2, bzip2, xz2, zstd) across the full 1-9 level range through
+    /// the validated `create_archive` path. This is the test that would
+    /// have caught the flate2 1.1.9 backend swap that panicked on
+    /// out-of-range levels — a level-1-and-9-only sweep on tar.gz alone
+    /// does not exercise `xz2::Stream::new_easy_encoder`, one of the two
+    /// confirmed panic sites, at any level but the default.
     #[test]
     fn test_create_tar_compression_levels() {
         let temp = TempDir::new().unwrap();
@@ -681,17 +689,24 @@ mod tests {
         let source_dir = TempDir::new().unwrap();
         fs::write(source_dir.path().join("test.txt"), "a".repeat(10000)).unwrap();
 
-        for level in [1, 6, 9] {
-            let output = temp.path().join(format!("output_{level}.tar.gz"));
-            let config = CreationConfig::default()
-                .with_exclude_patterns(vec![])
-                .with_compression_level(level)
-                .unwrap()
-                .with_format(Some(ArchiveType::TarGz));
+        for format in [
+            ArchiveType::TarGz,
+            ArchiveType::TarBz2,
+            ArchiveType::TarXz,
+            ArchiveType::TarZst,
+        ] {
+            for level in 1..=9 {
+                let output = temp.path().join(format!("output_{format:?}_{level}.tar"));
+                let config = CreationConfig::default()
+                    .with_exclude_patterns(vec![])
+                    .with_compression_level(level)
+                    .unwrap()
+                    .with_format(Some(format));
 
-            let report = create_archive(&output, &[source_dir.path()], &config).unwrap();
-            assert_eq!(report.files_added, 1);
-            assert!(output.exists());
+                let report = create_archive(&output, &[source_dir.path()], &config).unwrap();
+                assert_eq!(report.files_added, 1, "{format:?} level {level}");
+                assert!(output.exists(), "{format:?} level {level}");
+            }
         }
     }
 
@@ -909,7 +924,9 @@ mod tests {
 
         let config = CreationConfig::default()
             .with_exclude_patterns(vec![])
-            .with_format(Some(ArchiveType::TarZst));
+            .with_format(Some(ArchiveType::TarZst))
+            .validate()
+            .unwrap();
 
         // Allow enough bytes for the zstd header but fail mid-stream so that
         // encoder.finish() must flush remaining data and hits the limit.
@@ -976,7 +993,9 @@ mod tests {
 
         let config = CreationConfig::default()
             .with_exclude_patterns(vec![])
-            .with_include_hidden(true);
+            .with_include_hidden(true)
+            .validate()
+            .unwrap();
 
         let mut progress = TestProgress::default();
 
@@ -1040,7 +1059,10 @@ mod tests {
         let source_dir = TempDir::new().unwrap();
         fs::write(source_dir.path().join("test.txt"), "zstd progress finish").unwrap();
 
-        let config = CreationConfig::default().with_exclude_patterns(vec![]);
+        let config = CreationConfig::default()
+            .with_exclude_patterns(vec![])
+            .validate()
+            .unwrap();
         let mut noop = crate::NoopProgress;
         let report =
             create_tar_zst_with_progress(&output, &[source_dir.path()], &config, &mut noop)

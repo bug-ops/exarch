@@ -38,12 +38,12 @@ use walkdir::WalkDir;
 ///     println!("Would add: {}", entry.archive_path.display());
 /// }
 /// ```
-pub struct FilteredWalker<'a> {
+pub struct FilteredWalker<'a, State> {
     root: &'a Path,
-    config: &'a CreationConfig,
+    config: &'a CreationConfig<State>,
 }
 
-impl<'a> FilteredWalker<'a> {
+impl<'a, State> FilteredWalker<'a, State> {
     /// Creates a new filtered walker for the given root directory.
     ///
     /// # Examples
@@ -57,7 +57,7 @@ impl<'a> FilteredWalker<'a> {
     /// let walker = FilteredWalker::new(Path::new("."), &config);
     /// ```
     #[must_use]
-    pub fn new(root: &'a Path, config: &'a CreationConfig) -> Self {
+    pub fn new(root: &'a Path, config: &'a CreationConfig<State>) -> Self {
         Self { root, config }
     }
 
@@ -217,9 +217,9 @@ pub enum EntryType {
 /// - Source path does not exist
 /// - Directory traversal fails
 /// - File metadata cannot be read
-pub fn collect_entries<P: AsRef<Path>>(
+pub fn collect_entries<P: AsRef<Path>, State>(
     sources: &[P],
-    config: &CreationConfig,
+    config: &CreationConfig<State>,
 ) -> Result<Vec<FilteredEntry>> {
     let mut entries = Vec::new();
 

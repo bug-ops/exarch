@@ -260,20 +260,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   redacts everywhere else in release builds) and the throw content is attacker-influenced whenever
   the callback echoes archive entry data — read `cause` for the callback's detail rather than
   parsing it out of `message`.
-  Known limitation, now documented on both `*WithProgress` functions and pinned by child-process
-  tests: this only covers non-primitive throws. Throwing a bare string, number, or boolean
-  (`throw 'oops'`) still crashes the process and leaves the promise unsettled, due to an upstream
-  napi-rs 3.12.0 defect where `call_async_catch`'s dispatcher escalates the `napi_invalid_arg`
-  from `napi_create_reference()` on a primitive exception value into a fatal exception. Throw an
-  `Error` instance (or any non-primitive) from a progress callback to get the documented
-  rejection behavior. Tracked upstream in #473.
+  At the time this landed, throwing a bare primitive (string, number, boolean) from the callback
+  was a known, documented limitation that still crashed the process on both `*WithProgress`
+  functions; see the following entry for the fix.
   `createArchiveWithProgressSync` cannot use the awaiting dispatch at all: it runs on the JS
   thread, so no tokio runtime is entered (`Handle::current()` panicked) and awaiting a call that
   only the blocked event loop can deliver would deadlock. It now dispatches unawaited and is
   documented accordingly — every call arrives after the function has already returned its
   `CreationReport`, so a throw cannot be merged into the result and instead surfaces as an
   ordinary `uncaughtException`, observable via `process.on('uncaughtException', …)`. Because that
-  path never enters `call_async_catch`, the primitive-throw crash above does not apply to it.
+  path never enters `call_async_catch`, the primitive-throw crash above never applied to it —
+  string, number, and boolean throws already reached `uncaughtException` intact, exactly like an
+  `Error` throw, so it needed no fix and is unaffected by the following entry.
+
+- **`exarch-node`: throwing a bare primitive from a progress callback still crashed the process
+  (#473, follow-up to #465)**: #465's fix above only covered `Error`/object throws on
+  `extractArchiveWithProgress` and `createArchiveWithProgress` — a callback throwing `'oops'`,
+  `42`, or `true` still crashed the process uncatchably, because the `napi_invalid_arg` status
+  that `call_async_catch`'s dispatcher gets back from `napi_create_reference()` on a primitive
+  exception value is escalated to `napi_fatal_exception` regardless of the exception having
+  already been delivered correctly to the Rust side — an upstream napi-rs 3.12.0 defect that
+  cannot be fixed from this crate. Both functions now wrap the user-supplied `progress` callback
+  in a small JavaScript shim (built via `Env::run_script`, applied inside a shared
+  `ProgressCallback::from_napi_value` impl before the `ThreadsafeFunction` is constructed) that
+  catches any synchronous throw and, unless the thrown value is already an object or function
+  `napi_create_reference()` can reference, re-throws a new `Error` carrying the original value as
+  `cause` — so napi-rs's dispatcher never observes a primitive crossing the callback boundary in
+  the first place. A non-function `progress` argument is now also rejected immediately via a
+  `ValueType` check, instead of running the whole operation to completion first. Does not cover an
+  `async` progress callback whose returned `Promise` rejects with a primitive — a `try`/`catch`
+  only observes synchronous throws — nor `createArchiveWithProgressSync`, which was never affected
+  by this class of bug (see the preceding entry).
 
 - **`exarch-python` error messages leaked full absolute paths in release builds, and both
   bindings leaked host paths embedded in `CoreError::Io` messages (#453)**:

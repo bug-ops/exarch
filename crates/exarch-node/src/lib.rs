@@ -374,6 +374,111 @@ pub fn create_archive_sync(
     Ok(CreationReport::from(report))
 }
 
+/// JavaScript source for a factory that wraps a progress callback so any
+/// primitive value it throws is normalized to a proper `Error` before
+/// napi-rs's threadsafe function dispatcher ever observes it (see issue
+/// #473).
+///
+/// `napi_create_reference()` cannot create a weak reference to a thrown
+/// primitive (string/number/boolean/`undefined`/`BigInt`/`null`); napi-rs
+/// 3.12.0's `call_async_catch` dispatcher (`threadsafe_function.rs`) still
+/// escalates that failure to `napi_fatal_exception`, crashing the host
+/// process, even though the error was already delivered correctly to the
+/// Rust side. Catching the throw in real JavaScript, ahead of that
+/// dispatcher, sidesteps the defect entirely: napi-rs never sees a primitive
+/// cross the callback boundary.
+///
+/// The guard only rewraps values `napi_create_reference()` actually can't
+/// reference — any object or function (plain objects, custom `Error`
+/// subclasses, cross-realm `Error`s, arrays) passes through unchanged, so the
+/// original thrown value stays directly under the rejection's `cause` rather
+/// than being demoted to `cause.cause`.
+///
+/// A thrown `Symbol` is stringified before being attached as `cause`, rather
+/// than attached as-is like every other primitive: napi-rs's own
+/// `extract_error_cause` (used when the *rejection* value's `.cause` is later
+/// read back out) coerces `.cause` to a string via `napi_coerce_to_string`,
+/// which throws `TypeError: Cannot convert a Symbol value to a string` for a
+/// raw `Symbol` — reproducing this fix's own target crash one layer further
+/// in, uncatchably under `--force-node-api-uncaught-exceptions-policy=true`.
+const WRAP_PROGRESS_CALLBACK_JS: &str = r#"(callback) => function progressCallbackWrapper(err, arg) {
+  try {
+    return callback(err, arg);
+  } catch (thrown) {
+    if (thrown !== null && (typeof thrown === "object" || typeof thrown === "function")) {
+      throw thrown;
+    }
+    const wrapped = new Error("progress callback threw a non-object value: " + String(thrown));
+    wrapped.cause = typeof thrown === "symbol" ? String(thrown) : thrown;
+    throw wrapped;
+  }
+}"#;
+
+/// Argument type for a progress callback that wraps the JS value with
+/// `WRAP_PROGRESS_CALLBACK_JS` before building the [`ThreadsafeFunction`].
+///
+/// Shared by `createArchiveWithProgress` and `extractArchiveWithProgress` —
+/// the two entry points that dispatch through `ProgressDispatch::Awaited`
+/// (`call_async_catch`) and therefore share the primitive-throw crash this
+/// type exists to prevent. `createArchiveWithProgressSync` dispatches
+/// through `ProgressDispatch::Deferred` (plain `ThreadsafeFunction::call`)
+/// instead, which never enters the buggy code path in the first place — see
+/// its own doc comment — so it takes a raw `ThreadsafeFunction` unchanged.
+///
+/// The wrapping must happen inside [`FromNapiValue::from_napi_value`] rather
+/// than in the body of an `async fn` like `extract_archive_with_progress`:
+/// `Env` and `Function` wrap raw, thread-affine JS engine pointers and are
+/// not `Send`, so neither can be a parameter of that `async fn` — its future
+/// is later driven by `tokio::task::spawn_blocking`, which requires `Send`.
+/// Argument extraction, by contrast, always runs synchronously on the JS
+/// thread before the future is constructed, which is exactly where
+/// `Env`/`Function` access is valid.
+pub struct ProgressCallback(ThreadsafeFunction<(String, i64, i64, i64)>);
+
+impl TypeName for ProgressCallback {
+    fn type_name() -> &'static str {
+        "Function"
+    }
+
+    fn value_type() -> ValueType {
+        ValueType::Function
+    }
+}
+
+impl ValidateNapiValue for ProgressCallback {}
+
+impl FromNapiValue for ProgressCallback {
+    // SAFETY: `from_napi_value` is unsafe only because the trait contract
+    // requires `env`/`napi_val` to be a valid, currently-active napi
+    // environment and value, which is guaranteed here: napi-rs's generated
+    // argument-extraction code calls this exclusively from inside the JS
+    // callback that receives the corresponding `#[napi]` function's raw
+    // arguments, on the JS thread, before either pointer can be invalidated.
+    #[allow(unsafe_code)]
+    unsafe fn from_napi_value(env: sys::napi_env, napi_val: sys::napi_value) -> Result<Self> {
+        // `Function::from_napi_value` wraps any value with zero type
+        // checking, unlike `ThreadsafeFunction::from_napi_value` (which fails
+        // fast via `napi_create_reference`). Without this check, a
+        // non-function `progress` argument would run the whole operation to
+        // completion and only fail when the shim's `callback(...)` call
+        // throws `TypeError: callback is not a function` — surfaced as a
+        // misleading post-hoc `PROGRESS_CALLBACK_ERROR` instead of an
+        // upfront rejection.
+        assert_type_of!(env, napi_val, ValueType::Function)?;
+        // SAFETY: same guarantee as above — `env`/`napi_val` come from the
+        // trait caller and are valid for the duration of this call.
+        let callback = unsafe { Function::<Unknown, Unknown>::from_napi_value(env, napi_val)? };
+        let factory: Function<'_, Unknown<'_>, Function<'_, Unknown<'_>, Unknown<'_>>> =
+            Env::from_raw(env).run_script(WRAP_PROGRESS_CALLBACK_JS)?;
+        let wrapped = factory.call(callback.to_unknown())?;
+        let tsfn = wrapped
+            .build_threadsafe_function::<(String, i64, i64, i64)>()
+            .callee_handled::<true>()
+            .build_callback(|ctx| Ok(ctx.value))?;
+        Ok(Self(tsfn))
+    }
+}
+
 /// Create an archive from source files and directories with a progress
 /// callback (async).
 ///
@@ -427,15 +532,17 @@ pub fn create_archive_sync(
 /// copied into the message — read `cause` for the callback's error detail
 /// rather than parsing it out of `message`.
 ///
-/// ## Known limitation: primitive throws still crash the process
-///
-/// Identical to `extractArchiveWithProgress`: the catchable-rejection behavior
-/// holds only for non-primitive throws. `throw 'oops'` from the callback still
-/// aborts the host process uncatchably with `Call JavaScript callback failed in
-/// threadsafe function`, and the promise never settles. Both functions dispatch
-/// through the same `call_async_catch` path, so they share the upstream
-/// napi-rs 3.12.0 defect described there. Always throw an `Error` instance.
-/// Tracked in <https://github.com/bug-ops/exarch/issues/473>.
+/// This holds regardless of what the callback *synchronously throws*,
+/// including a bare primitive (`throw 'oops'`, `throw 42`, `throw true`):
+/// `progress` is wrapped in a small JavaScript shim before it is ever handed
+/// to napi-rs's threadsafe function dispatcher (see issue #473; identical
+/// mechanism to `extractArchiveWithProgress`, which shares more detail on
+/// why this is necessary). This does **not** cover an `async` progress
+/// callback whose returned `Promise` rejects with a primitive — a
+/// `try`/`catch` only observes synchronous throws — nor
+/// `createArchiveWithProgressSync`'s deferred dispatch, which never enters
+/// the affected code path to begin with (see its own doc comment). Keep
+/// `progress` synchronous.
 ///
 /// # Examples
 ///
@@ -456,7 +563,10 @@ pub async fn create_archive_with_progress(
     output_path: String,
     sources: Vec<String>,
     config: Option<&CreationConfig>,
-    progress: Option<ThreadsafeFunction<(String, i64, i64, i64)>>,
+    #[napi(
+        ts_arg_type = "(((err: Error | null, arg: [string, number, number, number]) => any)) | undefined | null"
+    )]
+    progress: Option<ProgressCallback>,
 ) -> Result<CreationReport> {
     validate_path(&output_path)?;
     for source in &sources {
@@ -465,6 +575,7 @@ pub async fn create_archive_with_progress(
 
     let config_owned: exarch_core::creation::CreationConfig =
         config.map(|c| c.as_core().clone()).unwrap_or_default();
+    let progress = progress.map(|ProgressCallback(tsfn)| tsfn);
 
     let report = tokio::task::spawn_blocking(move || {
         catch_panic_as_js_err("archive creation with progress", || {
@@ -883,25 +994,30 @@ pub fn verify_archive_sync(
 /// copied into the message — read `cause` for the callback's error detail
 /// rather than parsing it out of `message`.
 ///
-/// ## Known limitation: primitive throws still crash the process
+/// This holds regardless of what the callback *synchronously throws*,
+/// including a bare primitive (`throw 'oops'`, `throw 42`, `throw true`):
+/// `progress` is wrapped in a small JavaScript shim before it is ever handed
+/// to napi-rs's threadsafe function dispatcher (see issue #473). The shim's
+/// `try`/`catch` catches any synchronous throw and, unless the thrown value
+/// is already an object or function `napi_create_reference()` can reference,
+/// re-throws a new `Error` carrying the original value as `cause`. napi-rs
+/// 3.12.0's `call_async_catch` dispatcher crashes the host process
+/// uncatchably when the JS value it observes crossing the callback boundary
+/// is a primitive — `napi_create_reference()` cannot create a weak reference
+/// to one, and the resulting non-ok status is escalated to
+/// `napi_fatal_exception` regardless of the exception having already been
+/// delivered to the channel — so the shim guarantees napi-rs never observes
+/// a primitive throw in the first place, rather than relying on a fix inside
+/// the upstream dispatcher.
 ///
-/// The catchable-rejection behavior above only holds when the callback throws a
-/// non-primitive value (`Error` and subclasses, plain objects, arrays, `null`,
-/// `undefined`, `Symbol`). Throwing a bare string, number, or boolean —
-/// `throw 'oops'` — still aborts the host process uncatchably with
-/// `Call JavaScript callback failed in threadsafe function`, and the promise
-/// never settles.
-///
-/// This is an upstream defect in napi-rs 3.12.0: the dispatcher behind
-/// `call_async_catch` overwrites its own status with the result of
-/// `napi_create_reference()`, which reports `napi_invalid_arg` for a primitive
-/// exception value, and that status is then escalated to a fatal exception even
-/// though the error was already delivered to the channel. It cannot be worked
-/// around from this crate.
-///
-/// Always throw an `Error` instance (or any non-primitive) from a progress
-/// callback to get the documented rejection behavior. Tracked upstream in
-/// <https://github.com/bug-ops/exarch/issues/473>.
+/// This does **not** cover an `async` progress callback whose returned
+/// `Promise` rejects with a primitive: a `try`/`catch` only observes
+/// synchronous throws, so a rejected `Promise` passes through the shim as an
+/// ordinary (fulfilled, from the shim's point of view) return value, napi-rs
+/// never awaits it, and Node terminates the process with
+/// `ERR_UNHANDLED_REJECTION` once the rejection goes unhandled — a
+/// pre-existing gap (present since before #465) that this fix does not
+/// address. Keep `progress` synchronous.
 ///
 /// # Examples
 ///
@@ -924,7 +1040,10 @@ pub async fn extract_archive_with_progress(
     output_dir: String,
     config: Option<&SecurityConfig>,
     options: Option<&ExtractionOptions>,
-    progress: Option<ThreadsafeFunction<(String, i64, i64, i64)>>,
+    #[napi(
+        ts_arg_type = "(((err: Error | null, arg: [string, number, number, number]) => any)) | undefined | null"
+    )]
+    progress: Option<ProgressCallback>,
 ) -> Result<ExtractionReport> {
     validate_path(&archive_path)?;
     validate_path(&output_dir)?;
@@ -933,6 +1052,7 @@ pub async fn extract_archive_with_progress(
         config.map(|c| c.as_core().clone()).unwrap_or_default();
     let options_owned: exarch_core::ExtractionOptions =
         options.map(|o| o.as_core().clone()).unwrap_or_default();
+    let progress = progress.map(|ProgressCallback(tsfn)| tsfn);
 
     let report = tokio::task::spawn_blocking(move || {
         catch_panic_as_js_err("archive extraction with progress", || {

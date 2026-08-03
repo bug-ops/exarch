@@ -172,51 +172,147 @@ describe('extractArchiveWithProgress', () => {
     );
   });
 
-  // KNOWN LIMITATION (not a passing "this works" test): throwing a primitive
-  // (string/number/boolean) from the progress callback still crashes the host
-  // process uncatchably, so #465 is only fixed for non-primitive throws.
+  // Regression test for #473: throwing a bare primitive (string/number/
+  // boolean) from the progress callback must also reject the promise
+  // instead of crashing the process uncatchably. Run in a child process so a
+  // crash (uncaughtException, non-zero exit) can be distinguished from a
+  // clean rejection without taking down this test run.
   //
-  // Upstream bug in napi-rs 3.12.0 (threadsafe_function.rs:864): the dispatcher
-  // in `call_async_catch` overwrites its status with the result of
-  // `napi_create_reference()`, which returns `napi_invalid_arg` for a primitive
-  // exception value (a weak ref to a primitive is not possible). It correctly
-  // falls back to `maybe_ref: None` and still delivers `Err` to the channel,
-  // but the non-ok status then reaches `napi_fatal_exception`. The wasm branch
-  // of the same function already resets `status = napi_ok`.
-  //
-  // This test pins the CURRENT behavior. A napi-rs upgrade that fixes the bug
-  // will make it fail — that is the intended signal: flip the assertions to
-  // match the clean-rejection case above and drop the caveat from the
-  // `extractArchiveWithProgress` docs. Tracked in
-  // https://github.com/bug-ops/exarch/issues/473.
-  it('KNOWN LIMITATION: crashes the host process when the callback throws a primitive (child process)', () => {
-    const script = `
-      const exarch = require(${JSON.stringify(path.join(__dirname, '..', 'index.js'))});
-      exarch.extractArchiveWithProgress(
-        ${JSON.stringify(archivePath)},
-        ${JSON.stringify(outputDir)},
-        null,
-        null,
-        () => { throw 'oops'; },
-      ).then(
-        () => { console.log('UNEXPECTED_RESOLVE'); },
-        () => { console.log('UNEXPECTED_REJECT'); },
+  // Fixed by wrapping the callback in a small JS shim (see
+  // `WRAP_PROGRESS_CALLBACK_JS` in lib.rs) before it is ever handed to
+  // napi-rs's threadsafe function dispatcher: the shim catches any
+  // synchronous throw and, unless the thrown value is already an object or
+  // function, re-throws a new `Error` carrying the original value as
+  // `cause`. This sidesteps a napi-rs 3.12.0 upstream defect where
+  // `call_async_catch` crashes the process when the JS value crossing the
+  // callback boundary is a primitive (`napi_create_reference()` cannot
+  // create a weak reference to one).
+  for (const [label, thrown, thrownRepr] of [
+    ['string', "'oops'", 'oops'],
+    ['number', '42', '42'],
+    ['boolean', 'true', 'true'],
+  ]) {
+    it(`rejects the promise instead of crashing when the callback throws a ${label} (child process)`, () => {
+      const script = `
+        const exarch = require(${JSON.stringify(path.join(__dirname, '..', 'index.js'))});
+        exarch.extractArchiveWithProgress(
+          ${JSON.stringify(archivePath)},
+          ${JSON.stringify(outputDir)},
+          null,
+          null,
+          () => { throw ${thrown}; },
+        ).then(
+          () => { console.log('UNEXPECTED_RESOLVE'); process.exit(2); },
+          (err) => { console.log('REJECTED:' + err.cause.message + ':' + err.cause.cause); },
+        );
+      `;
+
+      const result = spawnSync(process.execPath, ['-e', script], {
+        encoding: 'utf8',
+      });
+
+      assert.strictEqual(
+        result.status,
+        0,
+        `expected clean exit, got status=${result.status}, stderr=${result.stderr}`
       );
-    `;
-
-    const result = spawnSync(process.execPath, ['-e', script], {
-      encoding: 'utf8',
+      assert.ok(
+        result.stdout.includes(
+          `REJECTED:progress callback threw a non-object value: ${thrownRepr}:${thrownRepr}`
+        ),
+        `expected rejection to be observed, got stdout=${result.stdout}`
+      );
+      assert.ok(
+        !result.stderr.includes('Uncaught') &&
+          !result.stderr.includes('Call JavaScript callback failed'),
+        `expected no crash/uncaught exception, got stderr=${result.stderr}`
+      );
     });
+  }
 
-    assert.notStrictEqual(
-      result.status,
-      0,
-      'primitive throws are expected to still crash the process; if this now ' +
-        'exits cleanly, the upstream napi-rs bug is fixed — update this test ' +
-        'and the extractArchiveWithProgress docs'
+  // Regression test for #473, in-process: a callback throwing a primitive no
+  // longer crashes the host, so this can be asserted directly like the
+  // `Error`-throw case above instead of needing a child process.
+  it('preserves the extraction report when the callback throws a primitive', async () => {
+    await assert.rejects(
+      () =>
+        extractArchiveWithProgress(archivePath, outputDir, null, null, () => {
+          throw 'oops';
+        }),
+      (err) => {
+        assert.ok(
+          err.message.startsWith('PROGRESS_CALLBACK_ERROR:'),
+          `expected PROGRESS_CALLBACK_ERROR prefix, got: ${err.message}`
+        );
+        assert.match(err.message, /filesExtracted=2/);
+        assert.strictEqual(
+          err.cause.message,
+          'progress callback threw a non-object value: oops'
+        );
+        assert.strictEqual(err.cause.cause, 'oops');
+        return true;
+      }
     );
-    assert.match(result.stderr, /Call JavaScript callback failed/);
-    // The promise never settles, so neither handler runs.
-    assert.strictEqual(result.stdout.trim(), '');
+    assert.ok(fs.existsSync(path.join(outputDir, 'hello.txt')));
+  });
+
+  // Regression test for the #473 review: a non-function `progress` argument
+  // must fail fast (before touching the archive), not run the whole
+  // extraction and only fail when the shim's `callback(...)` call throws
+  // `TypeError: callback is not a function`. Argument extraction happens
+  // synchronously before the returned promise is even constructed, so the
+  // invalid argument throws synchronously rather than rejecting.
+  it('throws synchronously when progress is not a function, without extracting', () => {
+    assert.throws(
+      () => extractArchiveWithProgress(archivePath, outputDir, null, null, 42),
+      (err) => {
+        assert.match(err.message, /Function/);
+        return true;
+      }
+    );
+    assert.strictEqual(fs.readdirSync(outputDir).length, 0);
+  });
+
+  // Regression test for the #473 review: the shim must only rewrap values
+  // `napi_create_reference()` genuinely cannot reference (primitives). A
+  // plain object throw (or any non-Error object) must stay directly under
+  // `cause`, not get demoted to `cause.cause` behind a synthesized wrapper.
+  it('preserves a plain-object throw directly under cause, not cause.cause', async () => {
+    await assert.rejects(
+      () =>
+        extractArchiveWithProgress(archivePath, outputDir, null, null, () => {
+          throw { code: 'CUSTOM', detail: 'stuff' };
+        }),
+      (err) => {
+        assert.deepStrictEqual(err.cause, { code: 'CUSTOM', detail: 'stuff' });
+        return true;
+      }
+    );
+  });
+
+  // Regression test for the #473 re-critique: a thrown `Symbol` is a
+  // primitive the shim's guard correctly rewraps (`typeof` is `"symbol"`,
+  // not `"object"`/`"function"`), but assigning it to `wrapped.cause` as-is
+  // relocates the crash rather than fixing it — napi-rs's own
+  // `extract_error_cause` later coerces `.cause` to a string via
+  // `napi_coerce_to_string`, which throws for a raw `Symbol` and, under
+  // `--force-node-api-uncaught-exceptions-policy=true`, reproduces the exact
+  // uncatchable crash this fix targets. The shim stringifies a `Symbol`
+  // before attaching it as `cause` to avoid that.
+  it('preserves a thrown Symbol as its string form under cause, without crashing', async () => {
+    await assert.rejects(
+      () =>
+        extractArchiveWithProgress(archivePath, outputDir, null, null, () => {
+          throw Symbol('boom');
+        }),
+      (err) => {
+        assert.strictEqual(
+          err.cause.message,
+          'progress callback threw a non-object value: Symbol(boom)'
+        );
+        assert.strictEqual(err.cause.cause, 'Symbol(boom)');
+        return true;
+      }
+    );
   });
 });

@@ -479,15 +479,17 @@ export declare function createArchiveSync(outputPath: string, sources: Array<str
  * copied into the message — read `cause` for the callback's error detail
  * rather than parsing it out of `message`.
  *
- * ## Known limitation: primitive throws still crash the process
- *
- * Identical to `extractArchiveWithProgress`: the catchable-rejection behavior
- * holds only for non-primitive throws. `throw 'oops'` from the callback still
- * aborts the host process uncatchably with `Call JavaScript callback failed in
- * threadsafe function`, and the promise never settles. Both functions dispatch
- * through the same `call_async_catch` path, so they share the upstream
- * napi-rs 3.12.0 defect described there. Always throw an `Error` instance.
- * Tracked in <https://github.com/bug-ops/exarch/issues/473>.
+ * This holds regardless of what the callback *synchronously throws*,
+ * including a bare primitive (`throw 'oops'`, `throw 42`, `throw true`):
+ * `progress` is wrapped in a small JavaScript shim before it is ever handed
+ * to napi-rs's threadsafe function dispatcher (see issue #473; identical
+ * mechanism to `extractArchiveWithProgress`, which shares more detail on
+ * why this is necessary). This does **not** cover an `async` progress
+ * callback whose returned `Promise` rejects with a primitive — a
+ * `try`/`catch` only observes synchronous throws — nor
+ * `createArchiveWithProgressSync`'s deferred dispatch, which never enters
+ * the affected code path to begin with (see its own doc comment). Keep
+ * `progress` synchronous.
  *
  * # Examples
  *
@@ -762,25 +764,30 @@ export declare function extractArchiveSync(archivePath: string, outputDir: strin
  * copied into the message — read `cause` for the callback's error detail
  * rather than parsing it out of `message`.
  *
- * ## Known limitation: primitive throws still crash the process
+ * This holds regardless of what the callback *synchronously throws*,
+ * including a bare primitive (`throw 'oops'`, `throw 42`, `throw true`):
+ * `progress` is wrapped in a small JavaScript shim before it is ever handed
+ * to napi-rs's threadsafe function dispatcher (see issue #473). The shim's
+ * `try`/`catch` catches any synchronous throw and, unless the thrown value
+ * is already an object or function `napi_create_reference()` can reference,
+ * re-throws a new `Error` carrying the original value as `cause`. napi-rs
+ * 3.12.0's `call_async_catch` dispatcher crashes the host process
+ * uncatchably when the JS value it observes crossing the callback boundary
+ * is a primitive — `napi_create_reference()` cannot create a weak reference
+ * to one, and the resulting non-ok status is escalated to
+ * `napi_fatal_exception` regardless of the exception having already been
+ * delivered to the channel — so the shim guarantees napi-rs never observes
+ * a primitive throw in the first place, rather than relying on a fix inside
+ * the upstream dispatcher.
  *
- * The catchable-rejection behavior above only holds when the callback throws a
- * non-primitive value (`Error` and subclasses, plain objects, arrays, `null`,
- * `undefined`, `Symbol`). Throwing a bare string, number, or boolean —
- * `throw 'oops'` — still aborts the host process uncatchably with
- * `Call JavaScript callback failed in threadsafe function`, and the promise
- * never settles.
- *
- * This is an upstream defect in napi-rs 3.12.0: the dispatcher behind
- * `call_async_catch` overwrites its own status with the result of
- * `napi_create_reference()`, which reports `napi_invalid_arg` for a primitive
- * exception value, and that status is then escalated to a fatal exception even
- * though the error was already delivered to the channel. It cannot be worked
- * around from this crate.
- *
- * Always throw an `Error` instance (or any non-primitive) from a progress
- * callback to get the documented rejection behavior. Tracked upstream in
- * <https://github.com/bug-ops/exarch/issues/473>.
+ * This does **not** cover an `async` progress callback whose returned
+ * `Promise` rejects with a primitive: a `try`/`catch` only observes
+ * synchronous throws, so a rejected `Promise` passes through the shim as an
+ * ordinary (fulfilled, from the shim's point of view) return value, napi-rs
+ * never awaits it, and Node terminates the process with
+ * `ERR_UNHANDLED_REJECTION` once the rejection goes unhandled — a
+ * pre-existing gap (present since before #465) that this fix does not
+ * address. Keep `progress` synchronous.
  *
  * # Examples
  *

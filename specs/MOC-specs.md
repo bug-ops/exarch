@@ -27,6 +27,7 @@ status: moc
 | 006 | [[006-python-bindings/spec\|Python Bindings]] | tasks | current (v0.5.1) | [[006-python-bindings/tasks\|none]] |
 | 007 | [[007-node-bindings/spec\|Node.js Bindings]] | tasks | current (v0.5.0) | [[007-node-bindings/tasks\|none]] |
 | 011 | [[011-ffi-panic-boundary-simplification/spec\|FFI Panic Boundary Simplification]] | specify | draft (research, P3) | n/a (specify-only) |
+| 012 | [[012-windows-reserved-device-names/spec\|Windows Reserved Device Name Validation]] | specify | draft (bug, P2) | [[012-windows-reserved-device-names/tasks\|not started]] |
 
 ## Completed Specs
 

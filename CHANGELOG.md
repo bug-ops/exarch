@@ -92,6 +92,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Duplicate-file, duplicate-symlink, and duplicate-hardlink skip paths now share a
+  `common::checked_increment_files_skipped` helper (#518)** instead of repeating the same
+  checked-add-with-overflow-guard increment inline in `formats::common::extract_file_with_permit`,
+  `formats::common::create_symlink`, and `formats::tar::create_hardlink`. No behavior change; 7z's
+  analogous site is out of scope since it runs inside a `sevenz_rust2::Error`-returning closure and
+  cannot share this helper's signature.
 - **`formats::sevenz::extract_archive` now builds its duplicate-skip warning via the shared
   `common::push_duplicate_skip_warning` helper (#499)**, matching the TAR and ZIP handlers instead
   of re-implementing the singular/plural aggregation inline. No behavior or message change.

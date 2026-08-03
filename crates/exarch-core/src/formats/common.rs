@@ -405,6 +405,44 @@ pub fn push_disallowed_extension_warning(report: &mut ExtractionReport, count: u
     }
 }
 
+/// Increments `report.files_skipped`, failing closed with
+/// `QuotaExceeded { resource: IntegerOverflow }` instead of wrapping if the
+/// counter is already at its maximum.
+///
+/// Shared by the TAR and ZIP extractors' duplicate-file, duplicate-symlink,
+/// and duplicate-hardlink skip paths, which all perform this exact checked
+/// increment before recording the skip in their own per-cause counter (issue
+/// #518). 7z performs the same guard inline in `sevenz.rs` because it must
+/// return a `sevenz_rust2::Error`, not this function's `Result`.
+///
+/// # Errors
+///
+/// Returns [`ArchiveError::QuotaExceeded`] with
+/// [`QuotaResource::IntegerOverflow`] if `report.files_skipped` is already at
+/// its maximum value.
+///
+/// # Examples
+///
+/// ```ignore
+/// # use exarch_core::formats::common::checked_increment_files_skipped;
+/// # use exarch_core::ExtractionReport;
+/// let mut report = ExtractionReport::new();
+/// checked_increment_files_skipped(&mut report)?;
+/// assert_eq!(report.files_skipped, 1);
+/// # Ok::<(), exarch_core::ArchiveError>(())
+/// ```
+#[inline]
+pub fn checked_increment_files_skipped(report: &mut ExtractionReport) -> Result<()> {
+    report.files_skipped =
+        report
+            .files_skipped
+            .checked_add(1)
+            .ok_or(ArchiveError::QuotaExceeded {
+                resource: QuotaResource::IntegerOverflow,
+            })?;
+    Ok(())
+}
+
 /// Returns `true` if `path`'s extension passes `config`'s allowlist.
 ///
 /// If the extension is not allowed, records the skip (increments
@@ -719,13 +757,7 @@ pub fn extract_file_with_permit<R: Read>(
     let output_file = match create_file_with_mode(&output_path, mode, skip_duplicates) {
         Ok(file) => file,
         Err(e) if skip_duplicates && e.kind() == std::io::ErrorKind::AlreadyExists => {
-            report.files_skipped =
-                report
-                    .files_skipped
-                    .checked_add(1)
-                    .ok_or(ArchiveError::QuotaExceeded {
-                        resource: QuotaResource::IntegerOverflow,
-                    })?;
+            checked_increment_files_skipped(report)?;
             *duplicate_skips = duplicate_skips.saturating_add(1);
             return Ok(());
         }
@@ -869,13 +901,7 @@ pub fn create_symlink(
 
         if link_path.symlink_metadata().is_ok() {
             if skip_duplicates {
-                report.files_skipped =
-                    report
-                        .files_skipped
-                        .checked_add(1)
-                        .ok_or(ArchiveError::QuotaExceeded {
-                            resource: QuotaResource::IntegerOverflow,
-                        })?;
+                checked_increment_files_skipped(report)?;
                 *duplicate_skips = duplicate_skips.saturating_add(1);
                 return Ok(());
             }

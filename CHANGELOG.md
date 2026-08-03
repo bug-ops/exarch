@@ -254,6 +254,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   symlink at the destination path before extraction for both `skip_duplicates` settings.
   Precondition is an attacker-writable destination directory, not a malicious archive alone.
 
+- **File permissions were applied via a path-based `set_permissions()` after `open()`, reopening a
+  TOCTOU window (#460)**: the same `formats::common::create_file_with_mode` helper enforced the
+  sanitized (setuid/setgid-stripped) mode with `std::fs::set_permissions(path, ..)`, which
+  re-resolves `path` from the filesystem root rather than operating on the already-open file
+  descriptor, letting a concurrent attacker swap the path for a symlink between `open()` and
+  `set_permissions()`. Switched to `File::set_permissions(&file, ..)`, which applies the mode via
+  `fchmod` on the open descriptor and cannot be redirected by a later filesystem change.
+
 - **`list` accepted NUL bytes, empty targets, and missing targets that `extract`/`verify` already
   rejected (#430)**: `list_tar_entries` and `list_zip_reader` validated entry paths for path
   traversal but not embedded NUL bytes, unlike `SafePath::validate` (used by `extract`). For TAR,

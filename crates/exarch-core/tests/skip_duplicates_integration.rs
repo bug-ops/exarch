@@ -50,6 +50,7 @@ fn write_tar(data: &[u8]) -> NamedTempFile {
 }
 
 /// Build a TAR archive in memory containing a single file entry.
+#[cfg(unix)]
 fn make_tar_single(path: &str, content: &[u8]) -> Vec<u8> {
     let mut builder = tar::Builder::new(Vec::new());
     let mut hdr = tar::Header::new_gnu();

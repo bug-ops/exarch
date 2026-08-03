@@ -91,11 +91,55 @@ describe('SecurityConfig', () => {
       assert.strictEqual(config.allowSymlinks, true);
     });
 
+    it('should set allow symlinks back to false', () => {
+      const config = new SecurityConfig();
+      config.setAllowSymlinks(true);
+      config.setAllowSymlinks(false);
+
+      assert.strictEqual(config.allowSymlinks, false);
+    });
+
+    it('should throw when setAllowSymlinks is called with no argument, undefined, or null', () => {
+      const config = new SecurityConfig();
+      config.setAllowSymlinks(true);
+
+      assert.throws(() => config.setAllowSymlinks());
+      assert.throws(() => config.setAllowSymlinks(undefined));
+      assert.throws(() => config.setAllowSymlinks(null));
+      assert.strictEqual(
+        config.allowSymlinks,
+        true,
+        'a rejected call must not silently flip the flag'
+      );
+    });
+
     it('should set allow hardlinks', () => {
       const config = new SecurityConfig();
       config.setAllowHardlinks(true);
 
       assert.strictEqual(config.allowHardlinks, true);
+    });
+
+    it('should set allow hardlinks back to false', () => {
+      const config = new SecurityConfig();
+      config.setAllowHardlinks(true);
+      config.setAllowHardlinks(false);
+
+      assert.strictEqual(config.allowHardlinks, false);
+    });
+
+    it('should throw when setAllowHardlinks is called with no argument, undefined, or null', () => {
+      const config = new SecurityConfig();
+      config.setAllowHardlinks(true);
+
+      assert.throws(() => config.setAllowHardlinks());
+      assert.throws(() => config.setAllowHardlinks(undefined));
+      assert.throws(() => config.setAllowHardlinks(null));
+      assert.strictEqual(
+        config.allowHardlinks,
+        true,
+        'a rejected call must not silently flip the flag'
+      );
     });
 
     it('should set allow absolute paths', () => {
@@ -105,11 +149,55 @@ describe('SecurityConfig', () => {
       assert.strictEqual(config.allowAbsolutePaths, true);
     });
 
+    it('should set allow absolute paths back to false', () => {
+      const config = new SecurityConfig();
+      config.setAllowAbsolutePaths(true);
+      config.setAllowAbsolutePaths(false);
+
+      assert.strictEqual(config.allowAbsolutePaths, false);
+    });
+
+    it('should throw when setAllowAbsolutePaths is called with no argument, undefined, or null', () => {
+      const config = new SecurityConfig();
+      config.setAllowAbsolutePaths(true);
+
+      assert.throws(() => config.setAllowAbsolutePaths());
+      assert.throws(() => config.setAllowAbsolutePaths(undefined));
+      assert.throws(() => config.setAllowAbsolutePaths(null));
+      assert.strictEqual(
+        config.allowAbsolutePaths,
+        true,
+        'a rejected call must not silently flip the flag'
+      );
+    });
+
     it('should set allow world writable', () => {
       const config = new SecurityConfig();
       config.setAllowWorldWritable(true);
 
       assert.strictEqual(config.allowWorldWritable, true);
+    });
+
+    it('should set allow world writable back to false', () => {
+      const config = new SecurityConfig();
+      config.setAllowWorldWritable(true);
+      config.setAllowWorldWritable(false);
+
+      assert.strictEqual(config.allowWorldWritable, false);
+    });
+
+    it('should throw when setAllowWorldWritable is called with no argument, undefined, or null', () => {
+      const config = new SecurityConfig();
+      config.setAllowWorldWritable(true);
+
+      assert.throws(() => config.setAllowWorldWritable());
+      assert.throws(() => config.setAllowWorldWritable(undefined));
+      assert.throws(() => config.setAllowWorldWritable(null));
+      assert.strictEqual(
+        config.allowWorldWritable,
+        true,
+        'a rejected call must not silently flip the flag'
+      );
     });
 
     it('should default allowSolidArchives to false', () => {
@@ -125,11 +213,55 @@ describe('SecurityConfig', () => {
       assert.strictEqual(config.allowSolidArchives, true);
     });
 
+    it('should set allow solid archives back to false', () => {
+      const config = new SecurityConfig();
+      config.setAllowSolidArchives(true);
+      config.setAllowSolidArchives(false);
+
+      assert.strictEqual(config.allowSolidArchives, false);
+    });
+
+    it('should throw when setAllowSolidArchives is called with no argument, undefined, or null', () => {
+      const config = new SecurityConfig();
+      config.setAllowSolidArchives(true);
+
+      assert.throws(() => config.setAllowSolidArchives());
+      assert.throws(() => config.setAllowSolidArchives(undefined));
+      assert.throws(() => config.setAllowSolidArchives(null));
+      assert.strictEqual(
+        config.allowSolidArchives,
+        true,
+        'a rejected call must not silently flip the flag'
+      );
+    });
+
     it('should set preserve permissions', () => {
       const config = new SecurityConfig();
       config.setPreservePermissions(true);
 
       assert.strictEqual(config.preservePermissions, true);
+    });
+
+    it('should set preserve permissions back to false', () => {
+      const config = new SecurityConfig();
+      config.setPreservePermissions(true);
+      config.setPreservePermissions(false);
+
+      assert.strictEqual(config.preservePermissions, false);
+    });
+
+    it('should throw when setPreservePermissions is called with no argument, undefined, or null', () => {
+      const config = new SecurityConfig();
+      config.setPreservePermissions(true);
+
+      assert.throws(() => config.setPreservePermissions());
+      assert.throws(() => config.setPreservePermissions(undefined));
+      assert.throws(() => config.setPreservePermissions(null));
+      assert.strictEqual(
+        config.preservePermissions,
+        true,
+        'a rejected call must not silently flip the flag'
+      );
     });
   });
 

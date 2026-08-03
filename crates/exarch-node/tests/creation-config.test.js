@@ -40,6 +40,28 @@ describe('CreationConfig', () => {
       assert.strictEqual(config.preservePermissions, false);
     });
 
+    it('should set preserve permissions back to true', () => {
+      const config = new CreationConfig();
+      config.setPreservePermissions(false);
+      config.setPreservePermissions(true);
+
+      assert.strictEqual(config.preservePermissions, true);
+    });
+
+    it('should throw when setPreservePermissions is called with no argument, undefined, or null', () => {
+      const config = new CreationConfig();
+      config.setPreservePermissions(false);
+
+      assert.throws(() => config.setPreservePermissions());
+      assert.throws(() => config.setPreservePermissions(undefined));
+      assert.throws(() => config.setPreservePermissions(null));
+      assert.strictEqual(
+        config.preservePermissions,
+        false,
+        'a rejected call must not silently flip the flag'
+      );
+    });
+
     it('should set follow symlinks', () => {
       const config = new CreationConfig();
       config.setFollowSymlinks(true);
@@ -47,11 +69,55 @@ describe('CreationConfig', () => {
       assert.strictEqual(config.followSymlinks, true);
     });
 
+    it('should set follow symlinks back to false', () => {
+      const config = new CreationConfig();
+      config.setFollowSymlinks(true);
+      config.setFollowSymlinks(false);
+
+      assert.strictEqual(config.followSymlinks, false);
+    });
+
+    it('should throw when setFollowSymlinks is called with no argument, undefined, or null', () => {
+      const config = new CreationConfig();
+      config.setFollowSymlinks(true);
+
+      assert.throws(() => config.setFollowSymlinks());
+      assert.throws(() => config.setFollowSymlinks(undefined));
+      assert.throws(() => config.setFollowSymlinks(null));
+      assert.strictEqual(
+        config.followSymlinks,
+        true,
+        'a rejected call must not silently flip the flag'
+      );
+    });
+
     it('should set include hidden', () => {
       const config = new CreationConfig();
       config.setIncludeHidden(true);
 
       assert.strictEqual(config.includeHidden, true);
+    });
+
+    it('should set include hidden back to false', () => {
+      const config = new CreationConfig();
+      config.setIncludeHidden(true);
+      config.setIncludeHidden(false);
+
+      assert.strictEqual(config.includeHidden, false);
+    });
+
+    it('should throw when setIncludeHidden is called with no argument, undefined, or null', () => {
+      const config = new CreationConfig();
+      config.setIncludeHidden(true);
+
+      assert.throws(() => config.setIncludeHidden());
+      assert.throws(() => config.setIncludeHidden(undefined));
+      assert.throws(() => config.setIncludeHidden(null));
+      assert.strictEqual(
+        config.includeHidden,
+        true,
+        'a rejected call must not silently flip the flag'
+      );
     });
 
     it('should set max file size', () => {

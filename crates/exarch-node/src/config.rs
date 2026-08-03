@@ -134,29 +134,29 @@ impl SecurityConfig {
 
     /// Allows or denies symlinks.
     #[napi(js_name = "setAllowSymlinks")]
-    pub fn set_allow_symlinks(&mut self, allow: Option<bool>) -> &Self {
-        self.inner.allowed.symlinks = allow.unwrap_or(true);
+    pub fn set_allow_symlinks(&mut self, allow: bool) -> &Self {
+        self.inner.allowed.symlinks = allow;
         self
     }
 
     /// Allows or denies hardlinks.
     #[napi(js_name = "setAllowHardlinks")]
-    pub fn set_allow_hardlinks(&mut self, allow: Option<bool>) -> &Self {
-        self.inner.allowed.hardlinks = allow.unwrap_or(true);
+    pub fn set_allow_hardlinks(&mut self, allow: bool) -> &Self {
+        self.inner.allowed.hardlinks = allow;
         self
     }
 
     /// Allows or denies absolute paths.
     #[napi(js_name = "setAllowAbsolutePaths")]
-    pub fn set_allow_absolute_paths(&mut self, allow: Option<bool>) -> &Self {
-        self.inner.allowed.absolute_paths = allow.unwrap_or(true);
+    pub fn set_allow_absolute_paths(&mut self, allow: bool) -> &Self {
+        self.inner.allowed.absolute_paths = allow;
         self
     }
 
     /// Allows or denies world-writable files.
     #[napi(js_name = "setAllowWorldWritable")]
-    pub fn set_allow_world_writable(&mut self, allow: Option<bool>) -> &Self {
-        self.inner.allowed.world_writable = allow.unwrap_or(true);
+    pub fn set_allow_world_writable(&mut self, allow: bool) -> &Self {
+        self.inner.allowed.world_writable = allow;
         self
     }
 
@@ -166,8 +166,8 @@ impl SecurityConfig {
     /// entry, which may allow a crafted archive to consume excessive
     /// memory. Disabled by default.
     #[napi(js_name = "setAllowSolidArchives")]
-    pub fn set_allow_solid_archives(&mut self, allow: Option<bool>) -> &Self {
-        self.inner.allow_solid_archives = allow.unwrap_or(true);
+    pub fn set_allow_solid_archives(&mut self, allow: bool) -> &Self {
+        self.inner.allow_solid_archives = allow;
         self
     }
 
@@ -196,8 +196,8 @@ impl SecurityConfig {
 
     /// Sets whether to preserve permissions from archive.
     #[napi(js_name = "setPreservePermissions")]
-    pub fn set_preserve_permissions(&mut self, preserve: Option<bool>) -> &Self {
-        self.inner.preserve_permissions = preserve.unwrap_or(true);
+    pub fn set_preserve_permissions(&mut self, preserve: bool) -> &Self {
+        self.inner.preserve_permissions = preserve;
         self
     }
 
@@ -471,8 +471,8 @@ impl CreationConfig {
     ///
     /// Default: true.
     #[napi(js_name = "setPreservePermissions")]
-    pub fn set_preserve_permissions(&mut self, preserve: Option<bool>) -> &Self {
-        self.inner.preserve_permissions = preserve.unwrap_or(true);
+    pub fn set_preserve_permissions(&mut self, preserve: bool) -> &Self {
+        self.inner.preserve_permissions = preserve;
         self
     }
 
@@ -483,8 +483,8 @@ impl CreationConfig {
     /// Security note: Following symlinks may include unintended files
     /// from outside the source directory.
     #[napi(js_name = "setFollowSymlinks")]
-    pub fn set_follow_symlinks(&mut self, follow: Option<bool>) -> &Self {
-        self.inner.follow_symlinks = follow.unwrap_or(true);
+    pub fn set_follow_symlinks(&mut self, follow: bool) -> &Self {
+        self.inner.follow_symlinks = follow;
         self
     }
 
@@ -492,8 +492,8 @@ impl CreationConfig {
     ///
     /// Default: false.
     #[napi(js_name = "setIncludeHidden")]
-    pub fn set_include_hidden(&mut self, include: Option<bool>) -> &Self {
-        self.inner.include_hidden = include.unwrap_or(true);
+    pub fn set_include_hidden(&mut self, include: bool) -> &Self {
+        self.inner.include_hidden = include;
         self
     }
 
@@ -627,8 +627,8 @@ impl ExtractionOptions {
     /// When `true` (default), duplicate entries produce a warning in the
     /// report. When `false`, a duplicate entry causes an error.
     #[napi(js_name = "withSkipDuplicates")]
-    pub fn with_skip_duplicates(&mut self, skip: Option<bool>) -> &Self {
-        self.inner.skip_duplicates = skip.unwrap_or(true);
+    pub fn with_skip_duplicates(&mut self, skip: bool) -> &Self {
+        self.inner.skip_duplicates = skip;
         self
     }
 
@@ -644,8 +644,8 @@ impl ExtractionOptions {
     /// output-already-exists error. Non-atomic mode extracts into an
     /// existing directory without error.
     #[napi(js_name = "withAtomic")]
-    pub fn with_atomic(&mut self, atomic: Option<bool>) -> &Self {
-        self.inner.atomic = atomic.unwrap_or(true);
+    pub fn with_atomic(&mut self, atomic: bool) -> &Self {
+        self.inner.atomic = atomic;
         self
     }
 
@@ -922,7 +922,7 @@ mod tests {
         config.set_max_compression_ratio(250.0).unwrap();
         config.set_max_file_count(50_000);
         config.set_max_path_depth(64);
-        config.set_preserve_permissions(Some(true));
+        config.set_preserve_permissions(true);
 
         assert_eq!(
             config.get_max_file_size(),
@@ -964,7 +964,7 @@ mod tests {
         );
 
         let mut config = SecurityConfig::new();
-        config.set_allow_solid_archives(Some(true));
+        config.set_allow_solid_archives(true);
         assert!(
             config.get_allow_solid_archives(),
             "allow_solid_archives getter should reflect setter value"
@@ -1321,9 +1321,9 @@ mod tests {
     fn test_creation_config_builder() {
         let mut config = CreationConfig::new();
         config.set_compression_level(9).unwrap();
-        config.set_preserve_permissions(Some(false));
-        config.set_follow_symlinks(Some(true));
-        config.set_include_hidden(Some(true));
+        config.set_preserve_permissions(false);
+        config.set_follow_symlinks(true);
+        config.set_include_hidden(true);
         config.set_max_file_size(1_000_000).unwrap();
 
         assert_eq!(config.get_compression_level(), Some(9));

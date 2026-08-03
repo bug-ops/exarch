@@ -236,15 +236,7 @@ impl<'a> EntryValidator<'a> {
         mode: Option<u32>,
         dir_cache: Option<&DirCache>,
     ) -> Result<ValidatedEntry> {
-        let mut ctx = ValidationContext::new(self.config.allowed.symlinks);
-        if let Some(cache) = dir_cache {
-            ctx = ctx.with_dir_cache(cache);
-        }
-        if self.symlink_seen {
-            ctx.mark_symlink_seen();
-        }
-
-        let safe_path = SafePath::validate_with_context(path, self.dest, self.config, &ctx)?;
+        let safe_path = self.validate_entry_path(path, dir_cache)?;
 
         let (validated_type, sanitized_mode) = match entry_type {
             EntryType::File => {
@@ -295,6 +287,60 @@ impl<'a> EntryValidator<'a> {
             validated_type,
             sanitized_mode,
         ))
+    }
+
+    /// Validates only the path portion of an entry — traversal, absolute-path,
+    /// depth, and symlink-escape-adjacent checks — without reserving quota or
+    /// applying type-specific validation (symlink/hardlink target checks,
+    /// permission sanitization).
+    ///
+    /// Split out of [`validate_entry`](Self::validate_entry), which calls
+    /// this for its own path-validation step so the two never diverge.
+    /// Callers that must resolve an entry's destination path *before*
+    /// deciding whether to reserve quota — 7z's duplicate-skip check (issue
+    /// #478), which needs the path to check for a pre-existing file at the
+    /// destination — use this together with
+    /// [`reserve_file`](Self::reserve_file) instead of `validate_entry`, so
+    /// a skipped entry never reserves quota it will not use.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArchiveError::PathTraversal`](crate::ArchiveError::PathTraversal)
+    /// or another path-validation error if `path` fails validation.
+    pub(crate) fn validate_entry_path(
+        &self,
+        path: &Path,
+        dir_cache: Option<&DirCache>,
+    ) -> Result<SafePath> {
+        let mut ctx = ValidationContext::new(self.config.allowed.symlinks);
+        if let Some(cache) = dir_cache {
+            ctx = ctx.with_dir_cache(cache);
+        }
+        if self.symlink_seen {
+            ctx.mark_symlink_seen();
+        }
+
+        SafePath::validate_with_context(path, self.dest, self.config, &ctx)
+    }
+
+    /// Reserves quota capacity for a regular file's byte count, independent
+    /// of path validation.
+    ///
+    /// Mirrors [`reserve_hardlink`](Self::reserve_hardlink), which exists for
+    /// the same reason on the hardlink path: reserving quota unconditionally
+    /// inside `validate_entry` and only checking for a duplicate afterward
+    /// would permanently consume the entry's quota allotment on the skip
+    /// path, since [`QuotaPermit`] has no `Drop` impl to release it. Used by
+    /// 7z's extraction callback together with
+    /// [`validate_entry_path`](Self::validate_entry_path) (issue #478).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArchiveError::QuotaExceeded`](crate::ArchiveError::QuotaExceeded)
+    /// if recording `size` bytes would exceed `max_file_size`,
+    /// `max_file_count`, or `max_total_size`.
+    pub(crate) fn reserve_file(&mut self, size: u64) -> Result<QuotaPermit> {
+        self.quota_tracker.reserve(size, self.config)
     }
 
     /// Validates the compression ratio (zip bomb detection) when a

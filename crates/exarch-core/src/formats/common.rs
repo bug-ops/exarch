@@ -7,6 +7,8 @@
 //! # Functions
 //!
 //! - [`extract_file_with_permit`]: Generic file extraction with buffered I/O
+//! - [`create_file_with_mode`]: O_NOFOLLOW/O_EXCL-safe file creation, also used
+//!   by 7z for its temp file (issues #459, #471)
 //! - [`create_directory`]: Directory creation (idempotent)
 //! - [`create_symlink`]: Symbolic link creation (Unix only)
 //! - [`open_no_follow`]: Read-only open that refuses to follow a symlink

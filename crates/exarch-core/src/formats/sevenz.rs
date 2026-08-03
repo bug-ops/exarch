@@ -127,7 +127,6 @@ use crate::config::Validated;
 use crate::error::QuotaResource;
 use crate::security::EntryValidator;
 use crate::security::quota::QuotaPermit;
-use crate::security::validator::ValidatedEntryType;
 use crate::types::DestDir;
 use crate::types::EntryType;
 
@@ -375,6 +374,52 @@ fn write_file_with_permit_using(
     Ok(bytes_written)
 }
 
+/// lstat's `dest_path`, returning `Ok(None)` if nothing occupies it.
+///
+/// Uses `symlink_metadata` rather than `exists()`/`is_dir()`: those follow
+/// symlinks and report a dangling symlink as absent, which would let a
+/// dangling symlink slip past both duplicate detection and the
+/// pre-existing-symlink rejection below (issues #468, #477, #478). Shared by
+/// both `SevenZArchive::extract`'s Step 1 pre-validation loop and
+/// `process_entry_inner`'s Step 3 extraction callback, so the two agree on
+/// what counts as "something already at this path".
+///
+/// # TOCTOU
+///
+/// This check is advisory, not atomic: nothing prevents the filesystem state
+/// at `dest_path` from changing between this lstat and the later
+/// `remove_file`/`remove_dir_all`/`rename`. That window is benign here —
+/// unlike TAR/ZIP's `O_NOFOLLOW` open (a single atomic syscall), 7z's
+/// temp+rename write never opens `dest_path` itself, and `rename(2)`
+/// replaces whatever occupies the destination without following a symlink
+/// planted there in the interim, so a race cannot redirect the write through
+/// a symlink target.
+fn lstat_dest(dest_path: &Path) -> std::io::Result<Option<std::fs::Metadata>> {
+    match std::fs::symlink_metadata(dest_path) {
+        Ok(meta) => Ok(Some(meta)),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// Returns the `ELOOP` I/O error `common::open_no_follow` produces when a
+/// symlink occupies the destination path, so 7z's own checks fail the same
+/// way instead of silently replacing the symlink (issue #477). Converts via
+/// `?`/`.into()` into either `ArchiveError` (Step 1) or `sevenz_rust2::Error`
+/// (Step 3), both of which implement `From<std::io::Error>`.
+///
+/// `#[cfg(unix)]`, not just conditional at runtime: `O_NOFOLLOW` is a
+/// Unix-specific mechanism (see `common::open_no_follow`), and
+/// `common::create_file_with_mode`'s non-Unix branch provides no equivalent
+/// symlink guard for TAR/ZIP either, so non-Unix keeps the pre-existing
+/// remove-then-rename behavior for parity with TAR/ZIP's own platform split.
+/// Both call sites are gated by the same `#[cfg(unix)]`, so this function
+/// does not exist at all — and cannot be reached — on non-Unix targets.
+#[cfg(unix)]
+fn symlink_at_dest_error() -> std::io::Error {
+    std::io::Error::from_raw_os_error(libc::ELOOP)
+}
+
 impl<R: Read + Seek> SevenZArchive<R> {
     /// Processes a single 7z entry: validates, extracts file or creates
     /// directory.
@@ -398,7 +443,7 @@ impl<R: Read + Seek> SevenZArchive<R> {
             sevenz_rust2::Error::Other(format!("entry type detection failed: {e}").into())
         })?;
 
-        // Extension filter runs before validate_entry to avoid quota
+        // Extension filter runs before path validation to avoid quota
         // double-counting for skipped files.
         if matches!(entry_type, EntryType::File)
             && !common::check_extension_allowed(entry_path, config, report)
@@ -406,45 +451,61 @@ impl<R: Read + Seek> SevenZArchive<R> {
             return Ok(0);
         }
 
-        // Re-validate (defense in depth)
-        let validated = validator
-            .validate_entry(entry_path, &entry_type, entry.size, None, None, None)
+        // Re-validate the path only (defense in depth); quota for File
+        // entries is reserved separately below, after the duplicate-skip
+        // check, so a skipped entry never consumes quota it will not use
+        // (issue #478). See `EntryValidator::validate_entry_path`.
+        let safe_path = validator
+            .validate_entry_path(entry_path, None)
             .map_err(|e| sevenz_rust2::Error::Other(format!("validation failed: {e}").into()))?;
-
-        // Extract based on type. `into_parts()` consumes `validated` so the
-        // File arm can move its QuotaPermit by value into
-        // write_file_with_permit, rather than only observing it through
-        // entry_type()'s shared reference.
-        //
-        // `_mode` is discarded: sevenz-rust2 never exposes Unix mode, so this
-        // module has no set_permissions/sanitize_permissions call today. If
-        // that limitation is ever lifted, wire `_mode` into the write path
-        // instead of continuing to drop it here.
-        let (safe_path, entry_type, _mode) = validated.into_parts();
         let dest_path = dest.join_path(safe_path.as_path());
 
         match entry_type {
-            ValidatedEntryType::Directory => {
+            EntryType::Directory => {
                 dir_cache.ensure_dir(&dest_path)?;
                 report.directories_created += 1;
                 Ok(0)
             }
-            ValidatedEntryType::File(permit) => {
+            EntryType::File => {
                 dir_cache.ensure_parent_dir(&dest_path)?;
 
-                if dest_path.symlink_metadata().is_ok() {
-                    if skip_duplicates {
-                        report.files_skipped += 1;
-                        report.warnings.push(format!(
-                            "skipped duplicate entry: {}",
-                            safe_path.as_path().display()
-                        ));
-                        return Ok(0);
-                    }
-                    // 7z uses temp+rename (unlike TAR/ZIP which truncate in-place via
-                    // File::create). Remove the existing path first so `rename`
-                    // can succeed.
-                    if dest_path.is_dir() {
+                let existing = lstat_dest(&dest_path)?;
+
+                if existing.is_some() && skip_duplicates {
+                    report.files_skipped += 1;
+                    report.warnings.push(format!(
+                        "skipped duplicate entry: {}",
+                        safe_path.as_path().display()
+                    ));
+                    return Ok(0);
+                }
+
+                #[cfg(unix)]
+                if let Some(meta) = &existing
+                    && meta.file_type().is_symlink()
+                {
+                    // SECURITY: refuse to silently unlink a pre-existing
+                    // symlink at the destination and replace it — fail
+                    // the same way TAR/ZIP's O_NOFOLLOW open does
+                    // (ELOOP), instead of proceeding to remove_file +
+                    // rename underneath it (issue #477).
+                    return Err(symlink_at_dest_error().into());
+                }
+
+                // Reserve quota BEFORE mutating the filesystem: deciding
+                // (quota check) must precede acting (removing the existing
+                // path), so a QuotaExceeded error never first destroys a
+                // pre-existing destination it could not ultimately replace.
+                let permit = validator.reserve_file(entry.size).map_err(|e| {
+                    sevenz_rust2::Error::Other(format!("validation failed: {e}").into())
+                })?;
+
+                if let Some(meta) = existing {
+                    // 7z uses temp+rename (unlike TAR/ZIP which truncate
+                    // in-place via File::create). Remove the existing path
+                    // first so `rename` can succeed. Deferred until after
+                    // the quota reservation above succeeds.
+                    if meta.is_dir() {
                         std::fs::remove_dir_all(&dest_path)?;
                     } else {
                         std::fs::remove_file(&dest_path)?;
@@ -624,30 +685,50 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
         let mut prevalidator = EntryValidator::new(config, &dest);
         for entry in &self.entries {
             let path = std::path::PathBuf::from(common::normalize_entry_name(&entry.name));
-            let entry_type = if entry.is_directory {
-                EntryType::Directory
-            } else {
-                EntryType::File
-            };
+
+            // Path-only validation here; quota for File entries is reserved
+            // below, after checking whether this entry would be skipped as a
+            // duplicate at the destination, so pre-validation does not
+            // over-count entries Step 3 will actually skip (issue #478).
+            let safe_path = prevalidator.validate_entry_path(&path, None)?;
+
+            if entry.is_directory {
+                continue;
+            }
+
+            let dest_path = dest.join_path(safe_path.as_path());
+            // lstat so a pre-existing symlink at dest_path — including a
+            // dangling one — counts as "already there", matching the
+            // duplicate detection Step 3 performs (issue #468, #477, #478).
+            let existing = lstat_dest(&dest_path)?;
+
+            if existing.is_some() && options.skip_duplicates {
+                // Step 3 will skip this entry; do not reserve its quota.
+                continue;
+            }
+
+            #[cfg(unix)]
+            if let Some(meta) = &existing
+                && meta.file_type().is_symlink()
+            {
+                // Fail here too, not only in Step 3: with
+                // skip_duplicates=false, a symlink at this entry's
+                // destination will be rejected once extraction reaches it,
+                // so failing during pre-validation — before any entry is
+                // written — preserves this loop's "no partial extraction"
+                // guarantee (issue #477).
+                return Err(symlink_at_dest_error().into());
+            }
 
             // KNOWN LIMITATION: compressed_size is None, so compression ratio check is
             // skipped. Defense relies on max_total_size and max_file_size
             // quotas.
-            let validated =
-                prevalidator.validate_entry(&path, &entry_type, entry.size, None, None, None)?;
-
-            match validated.entry_type() {
-                ValidatedEntryType::File(_) | ValidatedEntryType::Directory => {
-                    // Will be extracted in Step 3
-                }
-                _ => {
-                    // KNOWN LIMITATION: sevenz-rust2 doesn't expose symlink/hardlink detection.
-                    // If entry type detection improves, this will catch them.
-                    return Err(ArchiveError::SecurityViolation {
-                        reason: "symlinks/hardlinks not yet supported for 7z".into(),
-                    });
-                }
-            }
+            //
+            // The permit itself is discarded: this loop only needs
+            // `reserve_file`'s Err on a would-be quota violation, since
+            // `prevalidator` is thrown away once Step 1 finishes (Step 3
+            // uses a fresh validator, see below).
+            let _permit = prevalidator.reserve_file(entry.size)?;
         }
 
         // Empty archives: skip extraction entirely — decompress_with_extract_fn
@@ -1916,21 +1997,18 @@ mod tests {
         );
     }
 
-    /// Characterization test, not a regression test for #468: this
-    /// `skip_duplicates = false` path passes identically on the pre-fix
-    /// code too, since `dest_path.exists()` is `false` for a dangling
-    /// symlink either way — the `if` block (and its `is_dir()`/
-    /// `remove_file` duplicate-removal logic) is never entered pre-fix.
-    /// The write still succeeds pre-fix because `write_file_with_permit`'s
-    /// temp-file + `rename` replaces whatever sits at `dest_path`, symlink
-    /// or not, without following it. It documents that this behavior is
-    /// unaffected by the #468 fix — 7z silently replaces a pre-existing
-    /// symlink here, unlike TAR/ZIP which hard-fail via `O_NOFOLLOW`/
-    /// `ELOOP` in `create_file_with_mode`. That cross-format divergence is
-    /// tracked separately in #477.
+    /// Regression test for #477: before this fix, `skip_duplicates = false`
+    /// against a dangling symlink at the destination silently replaced it —
+    /// `write_file_with_permit`'s temp-file + `rename` replaces whatever
+    /// sits at `dest_path`, symlink or not, without following it, and
+    /// nothing upstream of that rename rejected a symlink destination the
+    /// way TAR/ZIP's `O_NOFOLLOW`/`ELOOP` in `create_file_with_mode` does.
+    /// `process_entry_inner` now checks `lstat_dest` before reserving quota
+    /// or removing anything, and fails with the same `ELOOP` I/O error
+    /// TAR/ZIP produce instead of silently replacing the symlink.
     #[test]
     #[cfg(unix)]
-    fn test_duplicate_replaces_dangling_symlink_when_not_skipping() {
+    fn test_duplicate_rejects_dangling_symlink_when_not_skipping() {
         let data = make_sevenz_archive(&[("target.txt", b"payload")]);
         let mut archive = SevenZArchive::new(Cursor::new(data)).unwrap();
 
@@ -1943,17 +2021,17 @@ mod tests {
             skip_duplicates: false,
             ..ExtractionOptions::default()
         };
-        let report = archive
-            .extract(temp.path(), &config, &options, &mut crate::NoopProgress)
-            .unwrap();
+        let result = archive.extract(temp.path(), &config, &options, &mut crate::NoopProgress);
 
-        assert_eq!(report.files_extracted, 1);
-        assert_eq!(report.files_skipped, 0);
+        assert!(
+            result.is_err(),
+            "a pre-existing symlink at the destination must be rejected, not silently \
+             replaced: {result:?}"
+        );
         let metadata = std::fs::symlink_metadata(&link_path).unwrap();
         assert!(
-            !metadata.file_type().is_symlink(),
-            "dangling symlink must be replaced by the extracted file"
+            metadata.file_type().is_symlink(),
+            "dangling symlink must survive untouched, not be replaced by extracted content"
         );
-        assert_eq!(std::fs::read(&link_path).unwrap(), b"payload");
     }
 }

@@ -1980,6 +1980,168 @@ fn test_extract_with_force_overwrites_conflicts() {
         .stdout(predicate::str::contains("Extraction complete"));
 }
 
+/// Regression test for #500: the pre-flight destination-conflict error must
+/// cap the number of individually listed paths rather than dumping one line
+/// per conflicting file.
+#[test]
+fn test_extract_without_force_caps_conflict_list_for_many_files() {
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
+
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive_path = temp.path().join("many_files.tar.gz");
+
+    let file = std::fs::File::create(&archive_path).expect("create archive");
+    let gz = GzEncoder::new(file, Compression::default());
+    let mut builder = tar::Builder::new(gz);
+
+    for i in 0..15 {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(4);
+        header.set_mode(0o644);
+        header
+            .set_path(format!("f{i}.txt"))
+            .expect("set entry path");
+        header.set_cksum();
+        builder
+            .append_data(&mut header, format!("f{i}.txt"), &b"data"[..])
+            .expect("append file entry");
+    }
+    builder
+        .into_inner()
+        .expect("finish tar")
+        .finish()
+        .expect("finish gzip");
+
+    let output_dir = temp.path().join("out");
+
+    // First extraction populates the output directory.
+    exarch_cmd()
+        .arg("extract")
+        .arg(&archive_path)
+        .arg(&output_dir)
+        .assert()
+        .success();
+
+    // Second extraction without --force must fail with a capped conflict list.
+    exarch_cmd()
+        .arg("extract")
+        .arg(&archive_path)
+        .arg(&output_dir)
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("15 destination files already exist")
+                .and(predicate::str::contains("first 10 shown"))
+                .and(predicate::str::contains("... and 5 more")),
+        );
+}
+
+/// Builds a tar.gz with `allowed` files matching `.txt` and `rejected` files
+/// matching `.exe`, so `--allowed-extensions txt` skips exactly `rejected`
+/// entries.
+fn make_mixed_extension_archive(path: &std::path::Path, allowed: usize, rejected: usize) {
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
+
+    let file = std::fs::File::create(path).expect("create archive");
+    let gz = GzEncoder::new(file, Compression::default());
+    let mut builder = tar::Builder::new(gz);
+
+    for i in 0..allowed {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(4);
+        header.set_mode(0o644);
+        header
+            .set_path(format!("keep{i}.txt"))
+            .expect("set entry path");
+        header.set_cksum();
+        builder
+            .append_data(&mut header, format!("keep{i}.txt"), &b"data"[..])
+            .expect("append file entry");
+    }
+    for i in 0..rejected {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(4);
+        header.set_mode(0o644);
+        header
+            .set_path(format!("drop{i}.exe"))
+            .expect("set entry path");
+        header.set_cksum();
+        builder
+            .append_data(&mut header, format!("drop{i}.exe"), &b"data"[..])
+            .expect("append file entry");
+    }
+    builder
+        .into_inner()
+        .expect("finish tar")
+        .finish()
+        .expect("finish gzip");
+}
+
+/// Regression test for #498: entries skipped by `--allowed-extensions` (a
+/// real core→CLI round trip, not a synthetic report fed directly to the
+/// formatter) must be surfaced in human-readable stdout as `Files skipped:`
+/// plus a `Warnings:` section.
+#[test]
+fn test_extract_reports_files_skipped_and_warnings_for_disallowed_extensions() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive_path = temp.path().join("mixed.tar.gz");
+    make_mixed_extension_archive(&archive_path, 3, 2);
+
+    let output_dir = temp.path().join("out");
+
+    exarch_cmd()
+        .arg("extract")
+        .arg("--allowed-extensions")
+        .arg("txt")
+        .arg(&archive_path)
+        .arg(&output_dir)
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("Files skipped: 2")
+                .and(predicate::str::contains("Warnings:"))
+                .and(predicate::str::contains(
+                    "skipped 2 entries with disallowed extensions",
+                )),
+        );
+}
+
+/// Regression test for #498: same scenario as
+/// `test_extract_reports_files_skipped_and_warnings_for_disallowed_extensions`
+/// but for `--json`, verifying the `files_skipped`/`warnings` fields the
+/// Python and Node.js bindings already exposed are now present in the CLI's
+/// JSON payload too.
+#[test]
+fn test_extract_json_reports_files_skipped_and_warnings_for_disallowed_extensions() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive_path = temp.path().join("mixed.tar.gz");
+    make_mixed_extension_archive(&archive_path, 3, 2);
+
+    let output_dir = temp.path().join("out");
+
+    let output = exarch_cmd()
+        .arg("extract")
+        .arg("--allowed-extensions")
+        .arg("txt")
+        .arg("--json")
+        .arg(&archive_path)
+        .arg(&output_dir)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: serde_json::Value = serde_json::from_slice(&output).expect("valid JSON output");
+    assert_eq!(json["data"]["files_skipped"], 2);
+    assert_eq!(
+        json["data"]["warnings"][0],
+        "skipped 2 entries with disallowed extensions"
+    );
+}
+
 // ============================================================================
 // symlink_target in JSON list output (#346)
 // ============================================================================

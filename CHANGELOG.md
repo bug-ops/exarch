@@ -209,6 +209,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`exarch-cli`: `extract`'s human and `--json` output never surfaced `ExtractionReport.warnings`
+  or `files_skipped` (#498)**: both fields are populated correctly by `exarch-core` and already
+  exposed by the Python and Node.js bindings, but `format_extraction_result` in `output/human.rs`
+  and `output/json.rs` only read `files_extracted`/`directories_created`/`symlinks_created`/
+  `bytes_written`/`duration`, silently dropping any warnings (e.g. capped disallowed-extension or
+  duplicate-skip summaries from #495/#497) and the skipped-file count. `format_extraction_result`
+  now prints a `Files skipped:` line and a `Warnings:` section (mirroring `create`'s existing
+  formatter), and the JSON `ExtractionOutput` struct gained `files_skipped`/`warnings` fields
+  (mirroring `CreationOutput`).
+- **`exarch-cli`: `extract`'s pre-flight destination-conflict error listed every conflicting path
+  with no cap (#500)**: the pre-flight check in `commands/extract.rs` (run before core extraction,
+  when `--force`/`--atomic` are absent) built an `anyhow::bail!` message listing one line per
+  pre-existing destination file: with `max_file_count` defaulting to 10000, extracting an archive
+  with many same-named entries over a populated destination could dump up to 10000 lines to
+  stderr — the same unbounded-output class already fixed for `exarch-core`'s warning aggregation
+  in #484/#490/#495/#497. `conflict_error_message` now sorts the conflicting paths before listing
+  at most 10 of them and collapsing the remainder into a single `... and N more` summary line —
+  sorting first keeps "first 10 shown" a deterministic, reproducible subset rather than whatever
+  order the archive manifest happened to yield.
 - **`exarch-core`: TAR, ZIP, and 7z pushed one unbounded, path-bearing warning `String` per entry
   rejected by the extension allowlist (#495)**: `common::check_extension_allowed` (shared by all
   three format handlers) pushed a `"skipped entry with disallowed extension: {path}"` warning

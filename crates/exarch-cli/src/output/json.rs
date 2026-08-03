@@ -82,7 +82,9 @@ impl<W: Write> OutputFormatter for JsonFormatter<W> {
             directories_created: usize,
             symlinks_created: usize,
             bytes_written: u64,
+            files_skipped: usize,
             duration_ms: u128,
+            warnings: Vec<String>,
         }
 
         let data = ExtractionOutput {
@@ -90,7 +92,9 @@ impl<W: Write> OutputFormatter for JsonFormatter<W> {
             directories_created: report.directories_created,
             symlinks_created: report.symlinks_created,
             bytes_written: report.bytes_written,
+            files_skipped: report.files_skipped,
             duration_ms: report.duration.as_millis(),
+            warnings: report.warnings.clone(),
         };
 
         let output = JsonOutput::success("extract", data);
@@ -522,6 +526,27 @@ mod tests {
         assert_eq!(v["status"], "success");
         assert_eq!(v["data"]["files_extracted"], 3);
         assert_eq!(v["data"]["bytes_written"], 2048);
+    }
+
+    #[test]
+    fn format_extraction_result_includes_warnings_and_files_skipped() {
+        let mut f = JsonFormatter::with_writer(Vec::new());
+        let report = ExtractionReport {
+            files_extracted: 3,
+            directories_created: 1,
+            symlinks_created: 0,
+            bytes_written: 2048,
+            files_skipped: 2,
+            duration: std::time::Duration::from_secs(1),
+            warnings: vec!["skipped 2 entries with disallowed extensions".to_string()],
+        };
+        f.format_extraction_result(&report).unwrap();
+        let v = parsed(&f);
+        assert_eq!(v["data"]["files_skipped"], 2);
+        assert_eq!(
+            v["data"]["warnings"][0],
+            "skipped 2 entries with disallowed extensions"
+        );
     }
 
     #[test]

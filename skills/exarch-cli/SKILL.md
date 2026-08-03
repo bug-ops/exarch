@@ -272,7 +272,32 @@ Success (`extract`):
     "directories_created": 0,
     "symlinks_created": 0,
     "bytes_written": 6,
-    "duration_ms": 0
+    "files_skipped": 0,
+    "duration_ms": 0,
+    "warnings": []
+  }
+}
+```
+
+`files_skipped` and `warnings` are populated whenever entries are skipped without failing the
+extraction — e.g. `--allowed-extensions` rejecting entries by extension, or duplicate destination
+files skipped under `--skip-duplicates` semantics (the default when `--force` is absent).
+Verified live with a mixed-extension archive extracted via `--allowed-extensions txt`:
+
+```json
+{
+  "operation": "extract",
+  "status": "success",
+  "data": {
+    "files_extracted": 3,
+    "directories_created": 1,
+    "symlinks_created": 0,
+    "bytes_written": 18,
+    "files_skipped": 2,
+    "duration_ms": 0,
+    "warnings": [
+      "skipped 2 entries with disallowed extensions"
+    ]
   }
 }
 ```

@@ -44,6 +44,45 @@ fn parse_extensions(raw: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// Maximum number of conflicting destination paths listed individually in
+/// the pre-flight conflict error before the remainder is collapsed into a
+/// single "... and N more" summary line.
+const MAX_LISTED_CONFLICTS: usize = 10;
+
+/// Builds the pre-flight destination-conflict error message for `conflicts`.
+///
+/// Caps the number of individually listed paths at [`MAX_LISTED_CONFLICTS`]
+/// so an archive with many same-named pre-existing files (up to
+/// `max_file_count`, 10000 by default) cannot flood stderr with one line per
+/// conflict. `conflicts` is sorted before truncation so "first N shown" is a
+/// deterministic, reproducible subset rather than whatever order the archive
+/// manifest happened to yield.
+fn conflict_error_message(conflicts: &[std::path::PathBuf]) -> String {
+    let count = conflicts.len();
+    let noun = if count == 1 { "file" } else { "files" };
+    let verb = if count == 1 { "exists" } else { "exist" };
+
+    let mut sorted: Vec<&std::path::PathBuf> = conflicts.iter().collect();
+    sorted.sort();
+
+    let list = sorted
+        .into_iter()
+        .take(MAX_LISTED_CONFLICTS)
+        .map(|p| format!("  {}", p.display()))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let remaining = count.saturating_sub(MAX_LISTED_CONFLICTS);
+    if remaining == 0 {
+        format!("{count} destination {noun} already {verb} (use --force to overwrite):\n{list}")
+    } else {
+        format!(
+            "{count} destination {noun} already {verb} (use --force to overwrite); \
+             first {MAX_LISTED_CONFLICTS} shown:\n{list}\n  ... and {remaining} more"
+        )
+    }
+}
+
 /// Drops empty entries from raw `--banned-component` values.
 ///
 /// `SecurityConfig::validate()` rejects empty entries, but an empty value is
@@ -128,12 +167,7 @@ pub fn execute(
             .collect();
 
         if !conflicts.is_empty() {
-            let list = conflicts
-                .iter()
-                .map(|p| format!("  {}", p.display()))
-                .collect::<Vec<_>>()
-                .join("\n");
-            anyhow::bail!("destination files already exist (use --force to overwrite):\n{list}");
+            anyhow::bail!(conflict_error_message(&conflicts));
         }
     }
 
@@ -241,5 +275,95 @@ mod tests {
     fn filter_banned_components_keeps_non_empty_entries() {
         let raw = vec![".git".to_string(), String::new(), ".ssh".to_string()];
         assert_eq!(filter_banned_components(&raw), vec![".git", ".ssh"]);
+    }
+
+    #[test]
+    fn conflict_error_message_singular() {
+        let conflicts = vec![std::path::PathBuf::from("a.txt")];
+        let msg = conflict_error_message(&conflicts);
+        assert!(msg.starts_with("1 destination file already exists"));
+        assert!(msg.contains("a.txt"));
+        assert!(!msg.contains("more"));
+    }
+
+    #[test]
+    fn conflict_error_message_under_cap_lists_all_without_truncation_note() {
+        let conflicts: Vec<_> = (0..5)
+            .map(|i| std::path::PathBuf::from(format!("f{i}.txt")))
+            .collect();
+        let msg = conflict_error_message(&conflicts);
+        assert!(msg.starts_with("5 destination files already exist"));
+        for i in 0..5 {
+            assert!(msg.contains(&format!("f{i}.txt")));
+        }
+        assert!(!msg.contains("more"));
+        assert!(!msg.contains("first"));
+    }
+
+    #[test]
+    fn conflict_error_message_at_cap_lists_all_without_truncation_note() {
+        let conflicts: Vec<_> = (0..MAX_LISTED_CONFLICTS)
+            .map(|i| std::path::PathBuf::from(format!("f{i}.txt")))
+            .collect();
+        let msg = conflict_error_message(&conflicts);
+        assert!(msg.starts_with("10 destination files already exist"));
+        for i in 0..MAX_LISTED_CONFLICTS {
+            assert!(msg.contains(&format!("f{i}.txt")));
+        }
+        assert!(!msg.contains("more"));
+        assert!(!msg.contains("first"));
+    }
+
+    #[test]
+    fn conflict_error_message_over_cap_truncates_and_summarizes() {
+        // Zero-padded so lexicographic (PathBuf::Ord) sort matches numeric
+        // order, and reverse-inserted to prove the shown subset is the
+        // sorted-first-10, not an insertion-order-first-10.
+        let conflicts: Vec<_> = (0..25)
+            .rev()
+            .map(|i| std::path::PathBuf::from(format!("f{i:02}.txt")))
+            .collect();
+        let msg = conflict_error_message(&conflicts);
+        assert!(msg.starts_with("25 destination files already exist"));
+        assert!(msg.contains("first 10 shown"));
+        for i in 0..10 {
+            assert!(msg.contains(&format!("f{i:02}.txt")));
+        }
+        for i in 10..25 {
+            assert!(!msg.contains(&format!("f{i:02}.txt")));
+        }
+        assert!(msg.contains("... and 15 more"));
+    }
+
+    #[test]
+    fn conflict_error_message_lists_shown_entries_in_sorted_order() {
+        let conflicts: Vec<_> = ["c.txt", "a.txt", "b.txt"]
+            .iter()
+            .map(std::path::PathBuf::from)
+            .collect();
+        let msg = conflict_error_message(&conflicts);
+        let find = |needle: &str| {
+            msg.find(needle)
+                .unwrap_or_else(|| panic!("{needle} missing from: {msg}"))
+        };
+        assert!(
+            find("a.txt") < find("b.txt") && find("b.txt") < find("c.txt"),
+            "shown paths must be listed in sorted order regardless of input order: {msg}"
+        );
+    }
+
+    #[test]
+    fn conflict_error_message_is_deterministic_across_input_permutations() {
+        let ascending: Vec<_> = (0..15)
+            .map(|i| std::path::PathBuf::from(format!("f{i:02}.txt")))
+            .collect();
+        let mut reversed = ascending.clone();
+        reversed.reverse();
+
+        assert_eq!(
+            conflict_error_message(&ascending),
+            conflict_error_message(&reversed),
+            "the message must not depend on the order conflicts were discovered in"
+        );
     }
 }

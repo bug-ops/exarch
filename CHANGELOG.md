@@ -227,33 +227,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   survives while the host path and raw OS detail do not.
 
 - **`exarch-node`: a throwing progress callback crashed the process uncatchably (#465)**:
-  `extractArchiveWithProgress`'s `NodeProgressAdapter` dispatched the JS progress callback via
-  `ThreadsafeFunction::call` in fire-and-forget `NonBlocking` mode, which routes a JS throw
-  through `napi_fatal_exception` — terminating the process with an uncatchable
-  `uncaughtException`, even when the call site was wrapped in `try`/`catch`. The adapter now
-  awaits `ThreadsafeFunction::call_async_catch` (via `Handle::block_on`, since the dispatch runs
-  on a `spawn_blocking` worker thread) and captures a JS throw into the adapter instead; the
-  captured error now rejects the returned promise rather than crashing the host process.
-  Because extraction cannot be aborted from a progress callback (the `ProgressCallback` contract
-  has no cancellation signal), a callback throw and a core extraction failure can both occur in
-  the same run — neither is discarded. When extraction also failed, the core error stays primary
-  and keeps its error-code prefix (`SYMLINK_ESCAPE`, `QUOTA_EXCEEDED`, …) at the start of the
-  message with a fixed ` | progressCallbackError: see cause` marker appended, so a throwing
-  callback cannot mask a security violation from callers matching on that prefix. When extraction
-  succeeded, the rejection is prefixed `PROGRESS_CALLBACK_ERROR` and carries
-  `filesExtracted=N, bytesWritten=M`, so callers can still tell what was written to disk. In both
-  cases the original JS exception is preserved as the rejection's `cause` property, retaining its
-  class and stack; its text and stack are never copied into the message, since the stack embeds an
-  absolute host path (which #453 redacts everywhere else in release builds) and the throw content
-  is attacker-influenced whenever the callback echoes archive entry data — read `cause` for the
-  callback's detail rather than parsing it out of `message`.
-  Known limitation, now documented on `extractArchiveWithProgress` and pinned by a child-process
-  test: this only covers non-primitive throws. Throwing a bare string, number, or boolean
+  `NodeProgressAdapter` dispatched the JS progress callback via `ThreadsafeFunction::call` in
+  fire-and-forget `NonBlocking` mode, which routes a JS throw through `napi_fatal_exception` —
+  terminating the process with an uncatchable `uncaughtException`, even when the call site was
+  wrapped in `try`/`catch`. The adapter now awaits `ThreadsafeFunction::call_async_catch` (via
+  `Handle::block_on`, since the dispatch runs on a `spawn_blocking` worker thread) and captures a
+  JS throw into the adapter instead; the captured error now rejects the returned promise rather
+  than crashing the host process. This covers both `extractArchiveWithProgress` and — since the
+  create-side progress API landed in #469 — `createArchiveWithProgress`, which share the adapter.
+  Because the operation cannot be aborted from a progress callback (the `ProgressCallback`
+  contract has no cancellation signal), a callback throw and a core failure can both occur in
+  the same run — neither is discarded. When the core operation also failed, its error stays
+  primary and keeps its error-code prefix (`SYMLINK_ESCAPE`, `QUOTA_EXCEEDED`, `IO_ERROR`, …) at
+  the start of the message with a fixed ` | progressCallbackError: see cause` marker appended, so
+  a throwing callback cannot mask a security violation from callers matching on that prefix. When
+  the operation succeeded, the rejection is prefixed `PROGRESS_CALLBACK_ERROR` and carries
+  `filesExtracted=N, bytesWritten=M` (extraction) or `filesAdded=N, bytesWritten=M` (creation), so
+  callers can still tell what was written to disk. In both cases the original JS exception is
+  preserved as the rejection's `cause` property, retaining its class and stack; its text and stack
+  are never copied into the message, since the stack embeds an absolute host path (which #453
+  redacts everywhere else in release builds) and the throw content is attacker-influenced whenever
+  the callback echoes archive entry data — read `cause` for the callback's detail rather than
+  parsing it out of `message`.
+  Known limitation, now documented on both `*WithProgress` functions and pinned by child-process
+  tests: this only covers non-primitive throws. Throwing a bare string, number, or boolean
   (`throw 'oops'`) still crashes the process and leaves the promise unsettled, due to an upstream
   napi-rs 3.12.0 defect where `call_async_catch`'s dispatcher escalates the `napi_invalid_arg`
   from `napi_create_reference()` on a primitive exception value into a fatal exception. Throw an
   `Error` instance (or any non-primitive) from a progress callback to get the documented
   rejection behavior. Tracked upstream in #473.
+  `createArchiveWithProgressSync` cannot use the awaiting dispatch at all: it runs on the JS
+  thread, so no tokio runtime is entered (`Handle::current()` panicked) and awaiting a call that
+  only the blocked event loop can deliver would deadlock. It now dispatches unawaited and is
+  documented accordingly — every call arrives after the function has already returned its
+  `CreationReport`, so a throw cannot be merged into the result and instead surfaces as an
+  ordinary `uncaughtException`, observable via `process.on('uncaughtException', …)`. Because that
+  path never enters `call_async_catch`, the primitive-throw crash above does not apply to it.
 
 - **`exarch-python` error messages leaked full absolute paths in release builds, and both
   bindings leaked host paths embedded in `CoreError::Io` messages (#453)**:

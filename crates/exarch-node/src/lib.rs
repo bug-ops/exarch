@@ -45,6 +45,7 @@
 
 use napi::bindgen_prelude::*;
 use napi::threadsafe_function::ThreadsafeFunction;
+use napi::threadsafe_function::ThreadsafeFunctionCallMode;
 use napi_derive::napi;
 
 mod config;
@@ -408,6 +409,34 @@ pub fn create_archive_sync(
 /// Returns error if path validation fails, archive creation fails, or I/O
 /// errors occur. See `createArchive` for the full list of error codes.
 ///
+/// If `progress` throws, the returned promise rejects instead of crashing the
+/// process (see issue #465). Creation has already run to completion (or
+/// failure) by the time the rejection is observed — a throwing callback cannot
+/// abort creation early, since the progress callback contract has no
+/// cancellation signal. The rejection therefore reports both signals:
+///
+/// - Creation succeeded: the message is prefixed with `PROGRESS_CALLBACK_ERROR`
+///   and carries `filesAdded=N, bytesWritten=M`, so the caller can still see
+///   that an archive was written and needs cleaning up.
+/// - Creation also failed: the core error stays primary and keeps its
+///   error-code prefix, with a fixed ` | progressCallbackError: see cause`
+///   marker appended. A throwing callback can never mask a core error.
+///
+/// In both cases the original JS exception is available as the `cause`
+/// property of the rejection value. The throw's own text and stack are never
+/// copied into the message — read `cause` for the callback's error detail
+/// rather than parsing it out of `message`.
+///
+/// ## Known limitation: primitive throws still crash the process
+///
+/// Identical to `extractArchiveWithProgress`: the catchable-rejection behavior
+/// holds only for non-primitive throws. `throw 'oops'` from the callback still
+/// aborts the host process uncatchably with `Call JavaScript callback failed in
+/// threadsafe function`, and the promise never settles. Both functions dispatch
+/// through the same `call_async_catch` path, so they share the upstream
+/// napi-rs 3.12.0 defect described there. Always throw an `Error` instance.
+/// Tracked in <https://github.com/bug-ops/exarch/issues/473>.
+///
 /// # Examples
 ///
 /// ```javascript
@@ -440,8 +469,14 @@ pub async fn create_archive_with_progress(
     let report = tokio::task::spawn_blocking(move || {
         catch_panic_as_js_err("archive creation with progress", || {
             let sources_refs: Vec<&str> = sources.iter().map(String::as_str).collect();
-            run_create_with_optional_progress(&output_path, &sources_refs, &config_owned, progress)
-                .map_err(convert_error)
+            run_create_with_optional_progress(
+                &output_path,
+                &sources_refs,
+                &config_owned,
+                progress,
+                ProgressDispatch::Awaited,
+            )
+            .map_err(|err| Error::from(*err))
         })
     })
     .await
@@ -468,6 +503,24 @@ pub async fn create_archive_with_progress(
 /// here. Use `createArchiveWithProgress` instead if you need progress updates
 /// while creation is still running.
 ///
+/// ## A throwing `progress` surfaces as an `uncaughtException`
+///
+/// Because every call is delivered after this function has already returned,
+/// there is no return value left to carry a callback throw: this function has
+/// resolved with its `CreationReport` by then. A throw therefore propagates the
+/// way any throw from a deferred callback does — as a process-level
+/// `uncaughtException` on the turn that delivered the call, observable via
+/// `process.on('uncaughtException', ...)`. It is never merged into a
+/// `PROGRESS_CALLBACK_ERROR` result the way `createArchiveWithProgress` merges
+/// it, and it cannot be caught by wrapping this call in `try`/`catch`.
+///
+/// The primitive-throw crash documented on `createArchiveWithProgress` does
+/// **not** apply here: that defect lives in the await-the-result dispatch path,
+/// which this function cannot use (awaiting a call that only the blocked event
+/// loop can deliver would deadlock). Queued calls take the plain dispatch path
+/// instead, where a thrown primitive reaches `uncaughtException` intact just
+/// like a thrown `Error`.
+///
 /// # Arguments
 ///
 /// * `output_path` - Path to output archive file
@@ -475,7 +528,8 @@ pub async fn create_archive_with_progress(
 /// * `config` - Optional `CreationConfig` (uses defaults if omitted)
 /// * `progress` - Optional progress callback `(err: Error | null, arg: [path:
 ///   string, total: number, current: number, bytesWritten: number]) => void`.
-///   See the section above: calls arrive only after this function returns.
+///   See the sections above: calls arrive only after this function returns, and
+///   a throw becomes an `uncaughtException` rather than an error from here.
 ///
 /// # Returns
 ///
@@ -519,8 +573,14 @@ pub fn create_archive_with_progress_sync(
     let sources_refs: Vec<&str> = sources.iter().map(String::as_str).collect();
 
     let report = catch_panic_as_js_err("archive creation with progress", || {
-        run_create_with_optional_progress(&output_path, &sources_refs, config_ref, progress)
-            .map_err(convert_error)
+        run_create_with_optional_progress(
+            &output_path,
+            &sources_refs,
+            config_ref,
+            progress,
+            ProgressDispatch::Deferred,
+        )
+        .map_err(|err| Error::from(*err))
     })?;
 
     Ok(CreationReport::from(report))
@@ -528,20 +588,50 @@ pub fn create_archive_with_progress_sync(
 
 /// Runs `create_archive_with_progress` routing to the JS callback when
 /// present or to [`exarch_core::NoopProgress`] when absent.
+///
+/// A core creation failure and a JS callback throw can occur in the same run;
+/// both are carried out of here so neither is silently dropped, mirroring
+/// [`run_extract_with_optional_progress`]. Under
+/// [`ProgressDispatch::Deferred`] no throw is ever observable here — the
+/// callback runs only after the caller has returned.
 fn run_create_with_optional_progress(
     output_path: &str,
     sources: &[&str],
     config: &exarch_core::creation::CreationConfig,
     progress: Option<ThreadsafeFunction<(String, i64, i64, i64)>>,
-) -> exarch_core::Result<exarch_core::creation::CreationReport> {
+    dispatch: ProgressDispatch,
+) -> std::result::Result<exarch_core::creation::CreationReport, Box<ProgressCallbackError>> {
     progress.map_or_else(
         || {
             let mut noop = exarch_core::NoopProgress;
             exarch_core::create_archive_with_progress(output_path, sources, config, &mut noop)
+                .map_err(|source| {
+                    Box::new(ProgressCallbackError::Core {
+                        source,
+                        callback: None,
+                    })
+                })
         },
         |tsfn| {
-            let mut callback = NodeProgressAdapter::new(tsfn);
-            exarch_core::create_archive_with_progress(output_path, sources, config, &mut callback)
+            let mut callback = NodeProgressAdapter::new(tsfn, dispatch);
+            let result = exarch_core::create_archive_with_progress(
+                output_path,
+                sources,
+                config,
+                &mut callback,
+            );
+            match (result, callback.into_callback_error()) {
+                (Ok(report), None) => Ok(report),
+                (Ok(report), Some(source)) => {
+                    Err(Box::new(ProgressCallbackError::CreationCallback {
+                        source,
+                        report,
+                    }))
+                }
+                (Err(source), callback) => {
+                    Err(Box::new(ProgressCallbackError::Core { source, callback }))
+                }
+            }
         },
     )
 }
@@ -863,10 +953,10 @@ pub async fn extract_archive_with_progress(
     Ok(ExtractionReport::from(report))
 }
 
-/// Error from running an extraction with a JS progress callback: either the
-/// core extraction operation failed, or the JS callback itself threw.
+/// Error from running an extraction or a creation with a JS progress callback:
+/// either the core operation failed, or the JS callback itself threw.
 enum ProgressCallbackError {
-    /// The core extraction failed. `callback` carries a JS progress callback
+    /// The core operation failed. `callback` carries a JS progress callback
     /// throw observed during the same run, if any.
     Core {
         source: exarch_core::ArchiveError,
@@ -876,9 +966,16 @@ enum ProgressCallbackError {
     /// carries the already-converted napi error captured by
     /// [`NodeProgressAdapter`] (see issue #465) plus the report describing
     /// what was written to disk.
-    Callback {
+    ExtractionCallback {
         source: Error,
         report: exarch_core::ExtractionReport,
+    },
+    /// The JS progress callback threw while the creation itself succeeded;
+    /// the creation counterpart of [`Self::ExtractionCallback`], carrying the
+    /// report describing the archive that was written.
+    CreationCallback {
+        source: Error,
+        report: exarch_core::creation::CreationReport,
     },
 }
 
@@ -890,7 +987,7 @@ enum ProgressCallbackError {
 ///   throwing callback cannot mask a security violation from callers that match
 ///   on that prefix. A concurrent callback throw is flagged by a fixed marker
 ///   in the message and attached as `cause`.
-/// - A callback throw over a successful extraction is prefixed with
+/// - A callback throw over a successful extraction or creation is prefixed with
 ///   `PROGRESS_CALLBACK_ERROR` and carries the report fields, so callers can
 ///   still tell what was written to disk before deciding how to clean up.
 ///
@@ -902,7 +999,6 @@ enum ProgressCallbackError {
 /// would let it spoof the machine-readable fields.
 impl From<ProgressCallbackError> for Error {
     fn from(err: ProgressCallbackError) -> Self {
-        use std::fmt::Write;
         match err {
             ProgressCallbackError::Core { source, callback } => {
                 let mut converted = convert_error(source);
@@ -918,23 +1014,52 @@ impl From<ProgressCallbackError> for Error {
                 }
                 converted
             }
-            ProgressCallbackError::Callback { source, report } => {
-                let mut reason = String::with_capacity(128);
-                reason.push_str(
-                    "PROGRESS_CALLBACK_ERROR: progress callback threw after successful extraction",
-                );
-                // Writing to a String never fails
-                let _ = write!(
-                    &mut reason,
-                    " | filesExtracted={}, bytesWritten={}",
-                    report.files_extracted, report.bytes_written
-                );
-                let mut converted = Self::new(Status::GenericFailure, reason);
-                converted.set_cause(source);
-                converted
+            ProgressCallbackError::ExtractionCallback { source, report } => {
+                callback_throw_over_success(
+                    "extraction",
+                    format_args!(
+                        "filesExtracted={}, bytesWritten={}",
+                        report.files_extracted, report.bytes_written
+                    ),
+                    source,
+                )
+            }
+            ProgressCallbackError::CreationCallback { source, report } => {
+                callback_throw_over_success(
+                    "creation",
+                    format_args!(
+                        "filesAdded={}, bytesWritten={}",
+                        report.files_added, report.bytes_written
+                    ),
+                    source,
+                )
             }
         }
     }
+}
+
+/// Builds the rejection for a progress callback that threw over an otherwise
+/// successful operation: a fixed `PROGRESS_CALLBACK_ERROR` prefix, the report
+/// fields describing what was written, and the JS throw attached as `cause`.
+///
+/// `fields` must be built solely from report counters — the throw's own text
+/// and stack never enter the message (see the [`From`] impl above).
+fn callback_throw_over_success(
+    operation: &str,
+    fields: std::fmt::Arguments<'_>,
+    source: Error,
+) -> Error {
+    use std::fmt::Write;
+
+    let mut reason = String::with_capacity(128);
+    // Writing to a String never fails
+    let _ = write!(
+        &mut reason,
+        "PROGRESS_CALLBACK_ERROR: progress callback threw after successful {operation} | {fields}"
+    );
+    let mut converted = Error::new(Status::GenericFailure, reason);
+    converted.set_cause(source);
+    converted
 }
 
 /// Runs `extract_archive_with_options_and_progress` routing to the JS callback
@@ -968,7 +1093,7 @@ fn run_extract_with_optional_progress(
             })
         },
         |tsfn| {
-            let mut callback = NodeProgressAdapter::new(tsfn);
+            let mut callback = NodeProgressAdapter::new(tsfn, ProgressDispatch::Awaited);
             let result = exarch_core::extract_archive_with_options_and_progress(
                 archive_path,
                 output_dir,
@@ -979,7 +1104,10 @@ fn run_extract_with_optional_progress(
             match (result, callback.into_callback_error()) {
                 (Ok(report), None) => Ok(report),
                 (Ok(report), Some(source)) => {
-                    Err(Box::new(ProgressCallbackError::Callback { source, report }))
+                    Err(Box::new(ProgressCallbackError::ExtractionCallback {
+                        source,
+                        report,
+                    }))
                 }
                 (Err(source), callback) => {
                     Err(Box::new(ProgressCallbackError::Core { source, callback }))
@@ -1007,15 +1135,32 @@ fn run_extract_with_optional_progress(
 /// invoking a callback already known to be broken.
 struct NodeProgressAdapter {
     tsfn: ThreadsafeFunction<(String, i64, i64, i64)>,
+    dispatch: ProgressDispatch,
     current_entry_bytes: i64,
     total: usize,
     callback_error: Option<Error>,
 }
 
+/// How a progress dispatch reaches the JavaScript thread, which decides whether
+/// a callback throw can be reported through the operation's own result.
+#[derive(Clone, Copy)]
+enum ProgressDispatch {
+    /// The operation runs on a worker thread while the JavaScript event loop
+    /// keeps turning, so each dispatch can be awaited and a throw captured into
+    /// `callback_error` before the operation returns.
+    Awaited,
+    /// The operation runs on the JavaScript thread itself (a `*Sync` entry
+    /// point), so the event loop cannot turn until it returns and awaiting a
+    /// dispatch would deadlock. Calls are queued and delivered afterwards,
+    /// which also means a throw cannot be routed back into the return value.
+    Deferred,
+}
+
 impl NodeProgressAdapter {
-    fn new(tsfn: ThreadsafeFunction<(String, i64, i64, i64)>) -> Self {
+    fn new(tsfn: ThreadsafeFunction<(String, i64, i64, i64)>, dispatch: ProgressDispatch) -> Self {
         Self {
             tsfn,
+            dispatch,
             current_entry_bytes: 0,
             total: 0,
             callback_error: None,
@@ -1040,14 +1185,26 @@ impl exarch_core::ProgressCallback for NodeProgressAdapter {
         let total_i64 = i64::try_from(total).unwrap_or(i64::MAX);
         let current_i64 = i64::try_from(current).unwrap_or(i64::MAX);
         let value = Ok((path_str, total_i64, current_i64, self.current_entry_bytes));
-        // `call_async_catch` clears and captures a JS throw into `Err` rather
-        // than routing it through `napi_fatal_exception`. `block_on` is sound
-        // here because `on_entry_start` runs only on a `spawn_blocking`
-        // worker thread, never inside an async task-polling context.
-        if let Err(err) =
-            tokio::runtime::Handle::current().block_on(self.tsfn.call_async_catch(value))
-        {
-            self.callback_error = Some(err);
+        match self.dispatch {
+            // `call_async_catch` clears and captures a JS throw into `Err`
+            // rather than routing it through `napi_fatal_exception`. `block_on`
+            // is sound here because an `Awaited` adapter runs only on a
+            // `spawn_blocking` worker thread, never inside an async
+            // task-polling context and never on the JS thread.
+            ProgressDispatch::Awaited => {
+                if let Err(err) =
+                    tokio::runtime::Handle::current().block_on(self.tsfn.call_async_catch(value))
+                {
+                    self.callback_error = Some(err);
+                }
+            }
+            // No runtime is entered on the JS thread and the event loop is
+            // blocked, so the dispatch is queued unawaited. A throw surfaces as
+            // an ordinary Node.js `uncaughtException` on the delivering turn.
+            ProgressDispatch::Deferred => {
+                self.tsfn
+                    .call(value, ThreadsafeFunctionCallMode::NonBlocking);
+            }
         }
     }
 

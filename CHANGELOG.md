@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **ZIP extraction trusted the archive-declared uncompressed size for zip-bomb ratio detection and
+  quota reservation, but never verified it against what decompression actually produced
+  (GHSA-5j8q-wxg5-hj4r)**: `formats/zip.rs`'s `ZipEntryAdapter::get_sizes` reads `uncompressed_size`
+  straight from the entry's local/central-directory header — attacker-controlled bytes — and that
+  same declared value fed both `security::zipbomb::validate_compression_ratio` and
+  `QuotaTracker::reserve` before a single byte was decompressed. The actual copy
+  (`copy::copy_with_buffer`, invoked from `formats::common::extract_file_with_permit`) then read from
+  the real DEFLATE-decompressing stream in a loop with no ceiling tied to the declared/reserved size,
+  so a ZIP entry declaring a small `uncompressed_size` alongside a real DEFLATE stream that inflated
+  to a much larger payload extracted successfully, writing far more than the configured
+  `max_file_size` to disk with no warning. `copy_with_buffer` now takes the declared size as an
+  `expected_size` parameter and enforces it as a hard streaming ceiling — checked after every
+  buffered read, not only at the end — aborting with `ArchiveError::SecurityViolation` the instant
+  actual bytes exceed it, and rejecting a short stream (fewer bytes than declared) the same way once
+  EOF is reached; a legitimate encoder never lies about this, so the post-copy check is exact-match,
+  not a tolerance. (`SecurityViolation` rather than `QuotaExceeded`, deliberately: `expected_size` here
+  is the archive's own possibly-forged size, not `config.max_file_size`, so a quota-shaped error would
+  carry the CLI's "raise --max-file-size" hint — wrong advice for a metadata mismatch.)
+  `extract_file_with_permit` (shared by TAR and ZIP) wraps the write in a `TempFileGuard` so an aborted
+  copy removes the file it created instead of leaving a partial one on disk; when overwriting a
+  pre-existing destination (`--force`, `skip_duplicates = false`) the guard is not armed, since that
+  path already truncates the destination in place before any size check runs and deleting the
+  now-truncated file on abort would only destroy more of what was there, not less.
+
+  7z's two write paths (`write_file_direct`, `write_file_with_permit`) previously bypassed
+  `copy_with_buffer` entirely via `std::io::copy`; both now route through it with `entry.size` as the
+  declared size. TAR (via the `tar` crate's `Entry` reader) and 7z (via `sevenz-rust2`'s bounded
+  reader) already cap how many bytes a single entry's reader yields to its own declared size upstream,
+  so for those two formats the new ceiling is defense-in-depth against a future upstream regression
+  rather than closing a live vulnerability the way it does for ZIP — only the short-stream/mismatch
+  direction of the new check is reachable through them today. Applying it uniformly still closes the
+  structural gap (no format-specific patch needed if that upstream guarantee ever changes) and keeps
+  all three formats' extraction paths consistent.
+
 ### Performance
 
 - **7z extraction was 35-101% slower than `sevenz_rust2::decompress_file` on the same archive,

@@ -607,6 +607,21 @@ pub fn create_file_with_mode(
 /// - Buffered I/O (64KB buffer)
 /// - Exclusive file creation with permission enforcement (Unix only)
 /// - Quota tracking with overflow protection
+/// - A hard streaming ceiling on `expected_size`, so a forged declared size
+///   cannot decouple what was quota-checked from what is actually written
+///
+/// # Security - Streaming Size Enforcement (GHSA-5j8q-wxg5-hj4r)
+///
+/// `expected_size` is the same declared size the caller already used for
+/// compression-ratio and quota validation — metadata read from the archive,
+/// not measured from real bytes. This function does not merely trust it a
+/// second time: it is threaded into [`copy_with_buffer`] as a hard ceiling
+/// enforced on every buffered read, so a forged small `expected_size` cannot
+/// let the real decompressed stream grow unbounded, and a short stream (less
+/// than declared) is rejected once it reaches EOF. On either violation, the
+/// partially-written file is removed via [`TempFileGuard`] before the error
+/// propagates — a rejected entry never leaves oversized or truncated content
+/// on disk.
 ///
 /// # Permission Enforcement
 ///
@@ -643,7 +658,9 @@ pub fn create_file_with_mode(
 ///   quota tracker; consumed by value and otherwise unused
 /// * `dest` - Destination directory
 /// * `report` - Extraction statistics (updated)
-/// * `expected_size` - Expected file size (if known) for quota pre-check
+/// * `expected_size` - Declared uncompressed size (if known); used for the
+///   quota pre-check and, per the security note above, enforced as a hard
+///   streaming ceiling and exact post-copy match
 /// * `copy_buffer` - Reusable buffer for I/O operations
 /// * `dir_cache` - Directory cache to reduce redundant mkdir syscalls
 /// * `duplicate_skips` - Counter incremented (not pushed as a warning string)
@@ -658,6 +675,8 @@ pub fn create_file_with_mode(
 /// - Quota would be exceeded (checked before write)
 /// - File creation fails
 /// - I/O error during copy
+/// - `expected_size` is `Some` and the actual decompressed byte count exceeds
+///   or falls short of it (forged size metadata)
 #[allow(clippy::too_many_arguments)]
 #[inline]
 pub fn extract_file_with_permit<R: Read>(
@@ -713,9 +732,29 @@ pub fn extract_file_with_permit<R: Read>(
         Err(e) => return Err(e.into()),
     };
 
+    // SECURITY: guards against leaving a partial file on disk when
+    // copy_with_buffer aborts mid-stream because expected_size was forged
+    // (GHSA-5j8q-wxg5-hj4r) — the `?` below returns before `persist()` runs,
+    // so the guard's Drop removes whatever was written so far.
+    //
+    // Only armed when `skip_duplicates` is true: that is exactly the branch
+    // where `create_file_with_mode` used `create_new(true)` above, so
+    // `output_path` is guaranteed to have held nothing before this call and
+    // deleting it on abort loses nothing. When `skip_duplicates` is false
+    // (`--force`/overwrite), `create_file_with_mode` already truncated a
+    // possibly pre-existing file in place before any of this ran — deleting
+    // that truncated stub on abort would be new behavior this security fix
+    // has no reason to introduce (unlike 7z's temp+rename, TAR/ZIP's
+    // in-place overwrite was never atomic; restoring the original on failure
+    // would need that same restructuring, tracked separately, not folded
+    // into this patch).
+    let guard = skip_duplicates.then(|| TempFileGuard::new(output_path));
     let mut buffered_writer = BufWriter::with_capacity(64 * 1024, output_file);
-    let bytes_written = copy_with_buffer(reader, &mut buffered_writer, copy_buffer)?;
+    let bytes_written = copy_with_buffer(reader, &mut buffered_writer, copy_buffer, expected_size)?;
     buffered_writer.flush()?;
+    if let Some(guard) = guard {
+        guard.persist();
+    }
 
     if bytes_written > 0 {
         progress.on_bytes_written(bytes_written);
@@ -1128,6 +1167,156 @@ mod tests {
             ArchiveError::QuotaExceeded {
                 resource: QuotaResource::IntegerOverflow
             }
+        );
+    }
+
+    /// Regression test for GHSA-5j8q-wxg5-hj4r: a reader that produces far
+    /// more bytes than the entry's declared `expected_size` (the
+    /// proof-of-concept shape — a ZIP local/central-directory header lying
+    /// about `uncompressed_size`) must abort extraction with a security
+    /// error and must not leave an oversized (or any) file behind on disk.
+    #[test]
+    fn test_extract_file_with_permit_forged_size_aborts_and_cleans_up() {
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
+        let mut report = ExtractionReport::default();
+        let mut copy_buffer = CopyBuffer::new();
+        let mut dir_cache = DirCache::new();
+
+        let config = SecurityConfig::default().validate().expect("valid config");
+        // Declares 50 bytes, mirroring the PoC's forged uncompressed_size.
+        let permit = QuotaTracker::new()
+            .reserve(50, &config)
+            .expect("reservation should succeed");
+        let safe_path = SafePath::validate(&PathBuf::from("bomb.txt"), &dest, &config)
+            .expect("path should be valid");
+
+        // The "decompressed" stream actually produces far more than declared.
+        let real_data = vec![0x41u8; 200 * 1024];
+        let mut reader = Cursor::new(&real_data);
+
+        let result = extract_file_with_permit(
+            &mut reader,
+            &safe_path,
+            Some(0o644),
+            permit,
+            &dest,
+            &mut report,
+            Some(50),
+            &mut copy_buffer,
+            &mut dir_cache,
+            true,
+            &mut 0u64,
+            &mut NoopProgress,
+        );
+
+        assert_matches!(
+            result,
+            Err(ArchiveError::SecurityViolation { .. }),
+            "streaming past the declared size must abort with a security error, got: {result:?}"
+        );
+        assert!(
+            !temp.path().join("bomb.txt").exists(),
+            "aborted extraction must not leave a partial or oversized file on disk"
+        );
+    }
+
+    /// A stream that ends short of its declared `expected_size` is rejected
+    /// too, and the partial file it produced is removed rather than left
+    /// truncated on disk.
+    #[test]
+    fn test_extract_file_with_permit_undersized_stream_cleans_up() {
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
+        let mut report = ExtractionReport::default();
+        let mut copy_buffer = CopyBuffer::new();
+        let mut dir_cache = DirCache::new();
+
+        let config = SecurityConfig::default().validate().expect("valid config");
+        let permit = QuotaTracker::new()
+            .reserve(1000, &config)
+            .expect("reservation should succeed");
+        let safe_path = SafePath::validate(&PathBuf::from("short.txt"), &dest, &config)
+            .expect("path should be valid");
+
+        let mut reader = Cursor::new(b"too short");
+
+        let result = extract_file_with_permit(
+            &mut reader,
+            &safe_path,
+            Some(0o644),
+            permit,
+            &dest,
+            &mut report,
+            Some(1000),
+            &mut copy_buffer,
+            &mut dir_cache,
+            true,
+            &mut 0u64,
+            &mut NoopProgress,
+        );
+
+        assert_matches!(
+            result,
+            Err(ArchiveError::SecurityViolation { .. }),
+            "actual size short of declared size must be rejected, got: {result:?}"
+        );
+        assert!(
+            !temp.path().join("short.txt").exists(),
+            "rejected entry must not leave a truncated file on disk"
+        );
+    }
+
+    /// Security-review follow-up for GHSA-5j8q-wxg5-hj4r: with
+    /// `skip_duplicates = false` (`--force`), a pre-existing destination
+    /// file must not be *deleted* by an aborted forged-size entry. The
+    /// `TempFileGuard` added for the streaming ceiling is only armed when
+    /// this call created the file itself (`skip_duplicates = true`,
+    /// `create_new`); the overwrite branch already truncated the
+    /// pre-existing file in place before any size check ran (pre-existing,
+    /// non-atomic behavior this security fix does not change), so on abort
+    /// the truncated file is left as-is rather than additionally deleted.
+    #[test]
+    fn test_extract_file_with_permit_force_overwrite_forged_size_does_not_delete_destination() {
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
+        let mut report = ExtractionReport::default();
+        let mut copy_buffer = CopyBuffer::new();
+        let mut dir_cache = DirCache::new();
+
+        // Pre-existing destination file, as if from a prior extraction.
+        std::fs::write(temp.path().join("target.txt"), b"pre-existing content")
+            .expect("failed to seed file");
+
+        let config = SecurityConfig::default().validate().expect("valid config");
+        let permit = QuotaTracker::new()
+            .reserve(50, &config)
+            .expect("reservation should succeed");
+        let safe_path = SafePath::validate(&PathBuf::from("target.txt"), &dest, &config)
+            .expect("path should be valid");
+
+        let real_data = vec![0x41u8; 200 * 1024];
+        let mut reader = Cursor::new(&real_data);
+
+        let result = extract_file_with_permit(
+            &mut reader,
+            &safe_path,
+            Some(0o644),
+            permit,
+            &dest,
+            &mut report,
+            Some(50),
+            &mut copy_buffer,
+            &mut dir_cache,
+            false, // skip_duplicates = false: --force overwrite
+            &mut 0u64,
+            &mut NoopProgress,
+        );
+
+        assert_matches!(result, Err(ArchiveError::SecurityViolation { .. }));
+        assert!(
+            temp.path().join("target.txt").exists(),
+            "aborted --force overwrite must not delete the destination path entirely"
         );
     }
 

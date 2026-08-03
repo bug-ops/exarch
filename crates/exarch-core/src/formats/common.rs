@@ -29,7 +29,9 @@ use crate::config::Validated;
 use crate::copy::CopyBuffer;
 use crate::copy::copy_with_buffer;
 use crate::error::QuotaResource;
+use crate::security::quota::QuotaPermit;
 use crate::security::validator::ValidatedEntry;
+use crate::security::validator::ValidatedEntryType;
 use crate::types::DestDir;
 use crate::types::SafeSymlink;
 
@@ -469,8 +471,11 @@ fn create_file_with_mode(path: &Path, _mode: Option<u32>) -> std::io::Result<Fil
 ///
 /// # Correctness
 ///
-/// Quota is checked BEFORE writing to prevent partial files on overflow.
-/// This fixes the inconsistency where TAR was checking AFTER write.
+/// The quota charge for this entry already happened during
+/// `EntryValidator::validate_entry`, proven by the [`QuotaPermit`] held in
+/// `validated`'s `ValidatedEntryType::File`; this function only rejects
+/// non-`File` entries and guards `report.bytes_written` against overflow
+/// before writing.
 ///
 /// # Type Parameters
 ///
@@ -508,6 +513,12 @@ pub fn extract_file_generic<R: Read>(
 ) -> Result<()> {
     let output_path = dest.join(validated.safe_path());
 
+    let ValidatedEntryType::File(_) = validated.entry_type() else {
+        return Err(ArchiveError::SecurityViolation {
+            reason: "extract_file_generic called with a non-File validated entry".into(),
+        });
+    };
+
     // Create parent directories if needed using cache
     dir_cache.ensure_parent_dir(&output_path)?;
 
@@ -520,7 +531,10 @@ pub fn extract_file_generic<R: Read>(
         return Ok(());
     }
 
-    // CRITICAL: Check quota BEFORE writing (prevents partial files on overflow)
+    // The size was already reserved against QuotaTracker during
+    // validate_entry (proven by the QuotaPermit held in `validated`'s
+    // ValidatedEntryType::File); this only guards report.bytes_written,
+    // a different quantity, against overflow before writing.
     if let Some(size) = expected_size {
         report
             .bytes_written
@@ -671,6 +685,20 @@ pub fn create_symlink(
     }
 }
 
+/// Copies a hardlink target's bytes to a new inode, consuming the
+/// [`QuotaPermit`] that authorized the copy.
+///
+/// Taking `permit` by value ensures a reservation can be spent at most once:
+/// `QuotaPermit` is neither `Clone` nor `Copy`, so the caller cannot retain
+/// it to pass to a second copy.
+///
+/// # Errors
+///
+/// Returns an I/O error if the copy fails.
+pub fn copy_file_with_permit(from: &Path, to: &Path, _permit: QuotaPermit) -> std::io::Result<u64> {
+    std::fs::copy(from, to)
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
@@ -680,6 +708,7 @@ mod tests {
     use crate::NoopProgress;
     use crate::SecurityConfig;
     use crate::copy::CopyBuffer;
+    use crate::security::quota::QuotaTracker;
     use crate::security::validator::ValidatedEntry;
     use crate::security::validator::ValidatedEntryType;
     use crate::types::SafePath;
@@ -703,10 +732,13 @@ mod tests {
         let expected_size = Some(200u64); // This would overflow when added
 
         let config = SecurityConfig::default().validate().expect("valid config");
+        let permit = QuotaTracker::new()
+            .reserve(0, &config)
+            .expect("reservation should succeed");
         let validated = ValidatedEntry::new(
             SafePath::validate(&PathBuf::from("test.txt"), &dest, &config)
                 .expect("path should be valid"),
-            ValidatedEntryType::File,
+            ValidatedEntryType::File(permit),
             Some(0o644),
         );
 
@@ -731,6 +763,46 @@ mod tests {
             ArchiveError::QuotaExceeded {
                 resource: QuotaResource::IntegerOverflow
             }
+        );
+    }
+
+    /// A `Directory`-typed validated entry must be rejected by
+    /// `extract_file_generic` before any filesystem side effect, proving the
+    /// non-`File` guard is live and not just structurally implied.
+    #[test]
+    fn test_extract_file_generic_rejects_non_file_entry() {
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
+        let mut report = ExtractionReport::default();
+        let mut copy_buffer = CopyBuffer::new();
+        let mut dir_cache = DirCache::new();
+
+        let config = SecurityConfig::default().validate().expect("valid config");
+        let validated = ValidatedEntry::new(
+            SafePath::validate(&PathBuf::from("dir_entry"), &dest, &config)
+                .expect("path should be valid"),
+            ValidatedEntryType::Directory,
+            None,
+        );
+
+        let mut reader = Cursor::new(b"");
+
+        let result = extract_file_generic(
+            &mut reader,
+            &validated,
+            &dest,
+            &mut report,
+            None,
+            &mut copy_buffer,
+            &mut dir_cache,
+            true,
+            &mut NoopProgress,
+        );
+
+        assert_matches!(result, Err(ArchiveError::SecurityViolation { .. }));
+        assert!(
+            !temp.path().join("dir_entry").exists(),
+            "non-File entry must not touch the filesystem"
         );
     }
 
@@ -1089,10 +1161,13 @@ mod tests {
 
         // Mode 0o777 in archive, sanitized to 0o775 (world-writable stripped)
         let sanitized_mode = 0o775u32;
+        let permit = QuotaTracker::new()
+            .reserve(0, &config)
+            .expect("reservation should succeed");
         let validated = ValidatedEntry::new(
             SafePath::validate(&PathBuf::from("perm_test.txt"), &dest, &config)
                 .expect("path should be valid"),
-            ValidatedEntryType::File,
+            ValidatedEntryType::File(permit),
             Some(sanitized_mode),
         );
 

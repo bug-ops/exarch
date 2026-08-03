@@ -198,7 +198,7 @@ fn list_tar_entries<R: std::io::Read>(
         // explicit `entry.abandon()`; harmless — the guard's bounded drain
         // on drop is pointless I/O in that case, not a correctness
         // requirement (see `TarEntryGuard::abandon`).
-        quota.record_file(size, config)?;
+        let _permit = quota.reserve(size, config)?;
 
         let path = entry
             .path()
@@ -336,7 +336,7 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
         // and extraction fully equivalent — extraction's QuotaTracker only
         // records EntryType::File, while listing records every entry type
         // (directories, symlinks, hardlinks too), a pre-existing divergence.
-        quota.record_file(entry.size(), config)?;
+        let _permit = quota.reserve(entry.size(), config)?;
 
         let raw_name = entry
             .name()
@@ -512,7 +512,7 @@ fn list_sevenz_archive(
         // and extraction fully equivalent — extraction's QuotaTracker only
         // records EntryType::File, while listing records every entry type
         // (directories, symlinks, hardlinks too), a pre-existing divergence.
-        quota.record_file(entry.size, config)?;
+        let _permit = quota.reserve(entry.size, config)?;
 
         let path = PathBuf::from(normalize_entry_name(&entry.name));
 

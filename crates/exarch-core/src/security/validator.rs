@@ -12,6 +12,7 @@ use crate::formats::common::DirCache;
 use crate::security::context::ValidationContext;
 use crate::security::hardlink::HardlinkTracker;
 use crate::security::permissions::sanitize_permissions;
+use crate::security::quota::QuotaPermit;
 use crate::security::quota::QuotaTracker;
 use crate::security::symlink::validate_symlink;
 use crate::security::zipbomb::validate_compression_ratio;
@@ -78,17 +79,24 @@ impl ValidatedEntry {
 
 /// Validated entry type variants.
 ///
-/// This enum alone does not carry the sealing guarantee — `File` and
-/// `Directory` are plain markers with no data, so they are directly
-/// constructible from any module (in or out of this crate) that can name the
-/// type. The guarantee instead comes from [`ValidatedEntry`]: its
-/// constructor is `pub(crate)`, so nothing outside this crate can assemble a
-/// `ValidatedEntry` at all, regardless of how its `ValidatedEntryType` field
-/// was produced. Within that guarantee, the `Symlink` and `Hardlink`
-/// variants add a second layer for their own payloads: they wrap
-/// [`SafeSymlink`] and [`SafePath`], which are independently sealed and can
-/// only be produced by their own validation routines, so even crate-internal
-/// code cannot forge a "validated" symlink/hardlink target.
+/// This enum alone does not carry the sealing guarantee — the external seal
+/// comes from [`ValidatedEntry`]: its constructor is `pub(crate)`, so
+/// nothing outside this crate can assemble a `ValidatedEntry` at all,
+/// regardless of how its `ValidatedEntryType` field was produced. Within
+/// that guarantee, several variants add a second, crate-internal layer for
+/// their own payloads:
+///
+/// - The `Symlink` and `Hardlink` variants wrap [`SafeSymlink`] and
+///   [`SafePath`], which are independently sealed and can only be produced by
+///   their own validation routines, so even crate-internal code cannot forge a
+///   "validated" symlink/hardlink target.
+/// - The `File` variant wraps [`QuotaPermit`], whose only producer is
+///   [`QuotaTracker::reserve`]: a `File` variant cannot be built without a
+///   quota reservation having actually succeeded. This is crate-internal
+///   discipline, not an external-construction barrier — enum variant fields are
+///   as visible as the enum itself, so `ValidatedEntryType::File(todo!())`
+///   compiles from outside this crate too; it just can never *run*, since
+///   nothing outside this crate can produce a genuine `QuotaPermit`.
 ///
 /// `#[non_exhaustive]` so a future variant is not a breaking change for
 /// downstream matches — [`ValidatedEntry::entry_type`] is the only way
@@ -97,8 +105,9 @@ impl ValidatedEntry {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum ValidatedEntryType {
-    /// Regular file
-    File,
+    /// Regular file, carrying proof that its size was reserved against a
+    /// [`QuotaTracker`] before this entry was validated.
+    File(QuotaPermit),
 
     /// Directory
     Directory,
@@ -185,7 +194,8 @@ impl<'a> EntryValidator<'a> {
     ///
     /// This method orchestrates all security validations:
     /// 1. Path validation (traversal, depth, banned components)
-    /// 2. Quota checking (file size, count, total size)
+    /// 2. Quota checking (file size, count, total size) — `EntryType::File`
+    ///    only
     /// 3. Compression ratio validation (zip bomb detection)
     /// 4. Type-specific validation (symlink, hardlink, permissions)
     ///
@@ -220,30 +230,29 @@ impl<'a> EntryValidator<'a> {
 
         let safe_path = SafePath::validate_with_context(path, self.dest, self.config, &ctx)?;
 
-        if matches!(entry_type, EntryType::File) {
-            self.quota_tracker
-                .record_file(uncompressed_size, self.config)?;
-        }
-
-        if let Some(compressed) = compressed_size {
-            validate_compression_ratio(compressed, uncompressed_size, self.config)?;
-        }
-
         let (validated_type, sanitized_mode) = match entry_type {
             EntryType::File => {
+                let permit = self.quota_tracker.reserve(uncompressed_size, self.config)?;
+                self.check_ratio(compressed_size, uncompressed_size)?;
                 let sanitized = mode.map(|m| sanitize_permissions(m, self.config));
-                (ValidatedEntryType::File, sanitized)
+                (ValidatedEntryType::File(permit), sanitized)
             }
 
-            EntryType::Directory => (ValidatedEntryType::Directory, None),
+            EntryType::Directory => {
+                self.check_ratio(compressed_size, uncompressed_size)?;
+                (ValidatedEntryType::Directory, None)
+            }
 
             EntryType::Symlink { target } => {
+                self.check_ratio(compressed_size, uncompressed_size)?;
                 let safe_symlink = validate_symlink(&safe_path, target, self.dest, self.config)?;
                 self.symlink_seen = true;
                 (ValidatedEntryType::Symlink(safe_symlink), None)
             }
 
             EntryType::Hardlink { target } => {
+                self.check_ratio(compressed_size, uncompressed_size)?;
+
                 // Hardlink tracker validates: absolute paths, traversal, normalization, escapes
                 self.hardlink_tracker.validate_hardlink(
                     &safe_path,
@@ -272,7 +281,28 @@ impl<'a> EntryValidator<'a> {
         ))
     }
 
-    /// Records a hardlink's copied byte count against the shared quota tracker.
+    /// Validates the compression ratio (zip bomb detection) when a
+    /// compressed size is known.
+    ///
+    /// Extracted so [`validate_entry`](Self::validate_entry) can call it at
+    /// the exact ordering position each entry type requires relative to its
+    /// other checks, without duplicating the `if let Some(compressed) = ...`
+    /// pattern at every call site.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArchiveError::ZipBomb`] if the compression ratio exceeds the
+    /// configured limit.
+    fn check_ratio(&self, compressed_size: Option<u64>, uncompressed_size: u64) -> Result<()> {
+        if let Some(compressed) = compressed_size {
+            validate_compression_ratio(compressed, uncompressed_size, self.config)?;
+        }
+        Ok(())
+    }
+
+    /// Reserves quota capacity for a hardlink's copied byte count against the
+    /// shared quota tracker, returning a capability token that proves the
+    /// reservation succeeded.
     ///
     /// Hardlinks are validated for path/target escape during the first pass
     /// (`validate_entry`), but their size is only known once the target file
@@ -285,8 +315,8 @@ impl<'a> EntryValidator<'a> {
     ///
     /// Returns [`ArchiveError::QuotaExceeded`] if recording this hardlink
     /// would exceed `max_file_size`, `max_file_count`, or `max_total_size`.
-    pub(crate) fn record_hardlink(&mut self, size: u64) -> Result<()> {
-        self.quota_tracker.record_file(size, self.config)
+    pub(crate) fn reserve_hardlink(&mut self, size: u64) -> Result<QuotaPermit> {
+        self.quota_tracker.reserve(size, self.config)
     }
 
     /// Finishes validation and returns a summary report.
@@ -359,7 +389,7 @@ mod tests {
         assert!(result.is_ok());
         let entry = result.unwrap();
         assert_eq!(entry.safe_path.as_path(), Path::new("file.txt"));
-        assert_matches!(entry.entry_type, ValidatedEntryType::File);
+        assert_matches!(entry.entry_type, ValidatedEntryType::File(_));
         assert_eq!(entry.mode, Some(0o644));
     }
 
@@ -809,7 +839,7 @@ mod tests {
     // Issue #426: hardlink quota bypass regression tests.
 
     #[test]
-    fn test_record_hardlink_exceeding_max_file_size_rejected() {
+    fn test_reserve_hardlink_exceeding_max_file_size_rejected() {
         let temp = TempDir::new().unwrap();
         let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
         let mut config = SecurityConfig::default();
@@ -820,7 +850,7 @@ mod tests {
         // A single hardlink whose on-disk target size alone exceeds
         // max_file_size must be rejected, exactly like an oversized regular
         // file would be.
-        let result = validator.record_hardlink(1_000);
+        let result = validator.reserve_hardlink(1_000);
 
         assert_matches!(
             result,
@@ -832,7 +862,7 @@ mod tests {
     }
 
     #[test]
-    fn test_record_hardlink_shares_quota_tracker_with_files() {
+    fn test_reserve_hardlink_shares_quota_tracker_with_files() {
         let temp = TempDir::new().unwrap();
         let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
         let mut config = SecurityConfig::default();
@@ -855,9 +885,9 @@ mod tests {
 
         // ...and a hardlink recorded afterwards must be charged against the
         // same tracker, not a separate/untracked counter.
-        assert!(validator.record_hardlink(100).is_ok());
+        assert!(validator.reserve_hardlink(100).is_ok());
 
-        let result = validator.record_hardlink(100);
+        let result = validator.reserve_hardlink(100);
         assert_matches!(
             result,
             Err(crate::ArchiveError::QuotaExceeded {
@@ -869,7 +899,7 @@ mod tests {
     }
 
     #[test]
-    fn test_record_hardlink_exceeding_max_file_count() {
+    fn test_reserve_hardlink_exceeding_max_file_count() {
         let temp = TempDir::new().unwrap();
         let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
         let mut config = SecurityConfig::default();
@@ -877,10 +907,10 @@ mod tests {
         let config = config.validate().expect("valid config");
         let mut validator = EntryValidator::new(&config, &dest);
 
-        assert!(validator.record_hardlink(1).is_ok());
-        assert!(validator.record_hardlink(1).is_ok());
+        assert!(validator.reserve_hardlink(1).is_ok());
+        assert!(validator.reserve_hardlink(1).is_ok());
 
-        let result = validator.record_hardlink(1);
+        let result = validator.reserve_hardlink(1);
         assert_matches!(
             result,
             Err(crate::ArchiveError::QuotaExceeded {

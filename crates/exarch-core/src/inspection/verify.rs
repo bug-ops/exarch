@@ -176,8 +176,8 @@ fn verify_entry(
         issues.push(VerificationIssue::from_error(e, Some(entry.path.clone())));
     }
 
-    // Quota validation using record_file (combines all checks)
-    if let Err(e) = quota_tracker.record_file(entry.size, config) {
+    // Quota validation using reserve (combines all checks)
+    if let Err(e) = quota_tracker.reserve(entry.size, config) {
         issues.push(VerificationIssue::from_error(&e, Some(entry.path.clone())));
     }
 

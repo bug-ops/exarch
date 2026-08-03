@@ -242,7 +242,7 @@ impl<R: Read> TarArchive<R> {
         )?;
 
         match validated.entry_type() {
-            ValidatedEntryType::File => {
+            ValidatedEntryType::File(_) => {
                 Self::extract_file(entry, &validated, ctx)?;
                 Ok(None)
             }
@@ -337,16 +337,17 @@ impl<R: Read> TarArchive<R> {
         // Every hardlink copies the target's real bytes to a new inode, so it
         // must be charged against the same quota tracker as regular files
         // (issue #426): otherwise N hardlinks to one small file extract N
-        // full copies with no size or count enforcement. Charged after the
+        // full copies with no size or count enforcement. Reserved after the
         // duplicate-skip check above (mirroring `extract_file_generic`) so a
         // `skip_duplicates=true` archive is not spuriously charged for an
-        // entry that is ultimately never copied.
+        // entry that is ultimately never copied. The permit is consumed by
+        // value below, so this reservation cannot be spent twice.
         let target_size = std::fs::metadata(&target_path)?.len();
-        ctx.validator.record_hardlink(target_size)?;
+        let permit = ctx.validator.reserve_hardlink(target_size)?;
 
         // Copy content to a new independent inode. Any subsequent write to
         // `link_path` cannot corrupt `target_path` because they are separate files.
-        let bytes_copied = std::fs::copy(&target_path, &link_path)?;
+        let bytes_copied = common::copy_file_with_permit(&target_path, &link_path, permit)?;
 
         ctx.report.files_extracted =
             ctx.report

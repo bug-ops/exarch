@@ -171,6 +171,20 @@ struct ZipExtractionContext<'a> {
     progress: &'a mut dyn ProgressCallback,
 }
 
+/// Appends aggregated duplicate-skip and disallowed-extension warnings to
+/// `report`, mirroring TAR's `push_duplicate_skip_warnings` (issues #490,
+/// #495). Called on every extraction exit path — including entry-open/name
+/// failures that occur before a [`ZipExtractionContext`] exists — so no
+/// early return can drop accumulated skip counts from the report.
+fn push_duplicate_skip_warnings(
+    report: &mut ExtractionReport,
+    duplicate_skips: u64,
+    disallowed_extension_skips: u64,
+) {
+    common::push_duplicate_skip_warning(report, duplicate_skips, "entry", "entries");
+    common::push_disallowed_extension_warning(report, disallowed_extension_skips);
+}
+
 /// ZIP archive handler with random-access extraction.
 ///
 /// Supports:
@@ -496,22 +510,37 @@ impl<R: Read + Seek> ArchiveFormat for ZipArchive<R> {
         let entry_count = self.inner.len();
 
         for i in 0..entry_count {
-            let zip_file = self.inner.by_index(i).map_err(|e| {
-                if e.to_string().contains("Password required to decrypt file") {
-                    return ArchiveError::SecurityViolation {
-                        reason: "archive is password-protected.\n  Password-protected ZIP archives are not supported. Decrypt the archive externally and try again.".into(),
+            let zip_file = match self.inner.by_index(i) {
+                Ok(f) => f,
+                Err(e) => {
+                    let err = if e.to_string().contains("Password required to decrypt file") {
+                        ArchiveError::SecurityViolation {
+                            reason: "archive is password-protected.\n  Password-protected ZIP archives are not supported. Decrypt the archive externally and try again.".into(),
+                        }
+                    } else {
+                        ArchiveError::InvalidArchive(format!("failed to open zip entry {i}: {e}"))
                     };
+                    push_duplicate_skip_warnings(
+                        &mut report,
+                        duplicate_skips,
+                        disallowed_extension_skips,
+                    );
+                    return Err(ArchiveError::partial_or(std::mem::take(&mut report), err));
                 }
-                ArchiveError::InvalidArchive(format!("failed to open zip entry {i}: {e}"))
-            })?;
-            let entry_path = PathBuf::from(
-                zip_file
-                    .name()
-                    .map_err(|e| {
-                        ArchiveError::InvalidArchive(format!("invalid entry name at {i}: {e}"))
-                    })?
-                    .as_ref(),
-            );
+            };
+            let entry_path = match zip_file.name() {
+                Ok(name) => PathBuf::from(name.as_ref()),
+                Err(e) => {
+                    let err =
+                        ArchiveError::InvalidArchive(format!("invalid entry name at {i}: {e}"));
+                    push_duplicate_skip_warnings(
+                        &mut report,
+                        duplicate_skips,
+                        disallowed_extension_skips,
+                    );
+                    return Err(ArchiveError::partial_or(std::mem::take(&mut report), err));
+                }
+            };
             progress.on_entry_start(&entry_path, entry_count, i.saturating_add(1));
             let mut guard = EntryCompleteGuard::new(progress, &entry_path);
 
@@ -531,20 +560,17 @@ impl<R: Read + Seek> ArchiveFormat for ZipArchive<R> {
 
             if let Err(e) = result {
                 drop(guard);
-                common::push_duplicate_skip_warning(
+                push_duplicate_skip_warnings(
                     &mut report,
                     duplicate_skips,
-                    "entry",
-                    "entries",
+                    disallowed_extension_skips,
                 );
-                common::push_disallowed_extension_warning(&mut report, disallowed_extension_skips);
                 return Err(ArchiveError::partial_or(std::mem::take(&mut report), e));
             }
             guard.complete();
         }
 
-        common::push_duplicate_skip_warning(&mut report, duplicate_skips, "entry", "entries");
-        common::push_disallowed_extension_warning(&mut report, disallowed_extension_skips);
+        push_duplicate_skip_warnings(&mut report, duplicate_skips, disallowed_extension_skips);
         progress.on_complete();
         report.duration = start.elapsed();
 
@@ -2236,6 +2262,76 @@ mod tests {
             "expected a disallowed-extension warning reporting {DISALLOWED_COUNT}, got: {:?}",
             report.warnings
         );
+    }
+
+    /// Regression for critic finding S1 (found during #505 review):
+    /// `by_index()` failing partway through the loop previously returned its
+    /// error via a bare `?`, bypassing the duplicate/disallowed-extension
+    /// warning aggregation and `ArchiveError::partial_or` wrapping used for
+    /// `process_entry` failures — silently discarding any skips/warnings
+    /// accumulated from earlier entries. `ZipArchive::new()`'s own
+    /// encryption pre-scan already calls `by_index()` on every entry, so a
+    /// corrupted local header would normally be caught there rather than in
+    /// `extract()`; this test bypasses that pre-scan by constructing
+    /// `ZipArchive` directly from an already-parsed `zip::ZipArchive`, to
+    /// exercise `extract()`'s own `by_index()` failure path in isolation.
+    #[test]
+    fn test_by_index_failure_preserves_prior_skip_warnings() {
+        use crate::NoopProgress;
+
+        let mut zip_data = create_test_zip(vec![("bad.exe", b"x"), ("good.txt", b"hello world")]);
+
+        // Corrupt the second entry's local file header signature so
+        // `by_index(1)` fails in `extract()` while the central directory
+        // (read by `zip::ZipArchive::new()`) remains intact.
+        let sig = b"PK\x03\x04";
+        let first = zip_data
+            .windows(4)
+            .position(|w| w == sig)
+            .expect("first local header signature");
+        let second = zip_data[first + 4..]
+            .windows(4)
+            .position(|w| w == sig)
+            .map(|p| p + first + 4)
+            .expect("second local header signature");
+        zip_data[second..second + 4].copy_from_slice(b"XXXX");
+
+        // Bypass `ZipArchive::new()`'s encryption pre-scan (which itself
+        // calls `by_index()` on every entry and would surface the
+        // corruption before `extract()` is ever reached) by constructing
+        // the wrapper directly around an already-open reader.
+        let inner = ZipReader::new(Cursor::new(zip_data)).expect("valid central directory");
+        let mut archive = ZipArchive { inner };
+
+        let config = SecurityConfig::default()
+            .with_allowed_extensions(vec!["txt".to_string()])
+            .validate()
+            .expect("valid config");
+        let temp = TempDir::new().unwrap();
+
+        let err = archive
+            .extract(
+                temp.path(),
+                &config,
+                &ExtractionOptions::default(),
+                &mut NoopProgress,
+            )
+            .unwrap_err();
+
+        match err {
+            ArchiveError::PartialExtraction { report, .. } => {
+                assert_eq!(
+                    report.files_skipped, 1,
+                    "the disallowed-extension skip of bad.exe before the by_index failure \
+                     must be preserved, got report: {report:?}"
+                );
+                assert!(
+                    report.has_warnings(),
+                    "the disallowed-extension warning must be preserved, got report: {report:?}"
+                );
+            }
+            other => panic!("expected PartialExtraction preserving the prior skip, got: {other:?}"),
+        }
     }
 
     #[test]

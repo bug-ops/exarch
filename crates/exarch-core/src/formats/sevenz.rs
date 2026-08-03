@@ -335,7 +335,13 @@ impl<R: Read + Seek> SevenZArchive<R> {
                 report.directories_created += 1;
                 Ok(0)
             }
-            ValidatedEntryType::File => {
+            // TODO(critic): 7z write is guarded only by this match arm; no
+            // QuotaPermit is consumed here (unlike TAR/ZIP's runtime guard in
+            // extract_file_generic and the hardlink path's by-value permit).
+            // A future refactor that lifts the temp+rename block below out of
+            // this arm would silently drop the guarantee. Extracting it into
+            // a helper taking `&QuotaPermit` would bring 7z to parity.
+            ValidatedEntryType::File(_) => {
                 let dest_path = dest.join_path(validated.safe_path().as_path());
 
                 dir_cache.ensure_parent_dir(&dest_path)?;
@@ -561,7 +567,7 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
                 prevalidator.validate_entry(&path, &entry_type, entry.size, None, None, None)?;
 
             match validated.entry_type() {
-                ValidatedEntryType::File | ValidatedEntryType::Directory => {
+                ValidatedEntryType::File(_) | ValidatedEntryType::Directory => {
                     // Will be extracted in Step 3
                 }
                 _ => {

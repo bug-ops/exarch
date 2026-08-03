@@ -16,6 +16,12 @@ pub use validator::ValidatedEntry;
 pub use validator::ValidatedEntryType;
 pub use validator::ValidationReport;
 
+// QuotaPermit rides inside the unconditionally-public
+// ValidatedEntryType::File, so it must be exported ungated: a
+// `#[cfg(feature = "testing")]` re-export (as `QuotaTracker` gets below)
+// would be a private-type-in-public-interface compile error.
+pub use quota::QuotaPermit;
+
 // Security primitives exposed under the `testing` feature for external
 // benchmarks and integration tests that cannot access pub(crate) items.
 #[cfg(feature = "testing")]

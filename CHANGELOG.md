@@ -16,6 +16,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING: `ValidatedEntryType::File` now carries a `QuotaPermit` capability token (#436)**:
+  `QuotaTracker::record_file` is renamed to `reserve` and returns `Result<QuotaPermit>` instead
+  of `Result<()>`; `EntryValidator::record_hardlink` is renamed to `reserve_hardlink` for the
+  same reason. `QuotaPermit` is a zero-sized, non-`Clone`/non-`Copy` token whose only producer
+  is `QuotaTracker::reserve`, and constructing `ValidatedEntryType::File` now requires one, so a
+  `File`-typed validated entry with no quota charge is unrepresentable. `extract_file_generic`
+  (shared by TAR and ZIP) additionally rejects any non-`File` entry before touching the
+  filesystem, and TAR's hardlink-copy path now consumes its permit by value via a new
+  `copy_file_with_permit` helper, so a single reservation cannot be spent twice. This closes the
+  same class of gap as #428 (an unguarded quota-charge path) at the type level instead of by
+  convention; behavior is unchanged for every caller that already went through
+  `EntryValidator::validate_entry`.
 - **BREAKING: `SecurityConfig` is now a two-state typestate over `Unvalidated`/`Validated`
   (#433, #434, #435)**: `SecurityConfig<State = Unvalidated>` carries a phantom marker; the
   fluent `with_*` builder methods remain available only on `SecurityConfig<Unvalidated>`, and

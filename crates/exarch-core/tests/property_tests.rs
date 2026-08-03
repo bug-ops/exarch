@@ -140,11 +140,11 @@ proptest! {
             if let Some(new_total) = expected_total.checked_add(size) {
                 expected_total = new_total;
                 expected_count += 1;
-                let result = tracker.record_file(size, &config);
+                let result = tracker.reserve(size, &config);
                 prop_assert!(result.is_ok(), "recording file should succeed when no overflow");
             } else {
                 // Overflow expected - tracker should detect it
-                let result = tracker.record_file(size, &config);
+                let result = tracker.reserve(size, &config);
                 prop_assert!(result.is_err(), "tracker should detect overflow");
                 break;
             }
@@ -169,7 +169,7 @@ proptest! {
 
         let mut success_count = 0;
         for _ in 0..num_files {
-            let result = tracker.record_file(100, &config);
+            let result = tracker.reserve(100, &config);
             if result.is_ok() {
                 success_count += 1;
             } else {
@@ -184,7 +184,7 @@ proptest! {
         );
 
         if num_files > max_files {
-            let result = tracker.record_file(100, &config);
+            let result = tracker.reserve(100, &config);
             prop_assert!(
                 matches!(result, Err(ArchiveError::QuotaExceeded { .. })),
                 "exceeding file count should fail"
@@ -210,7 +210,7 @@ proptest! {
         let config = config.validate().unwrap();
 
         for size in file_sizes {
-            let result = tracker.record_file(size, &config);
+            let result = tracker.reserve(size, &config);
 
             // Key security property: if quota would be exceeded, operation must fail
             if result.is_err() {
@@ -243,7 +243,7 @@ proptest! {
         config.max_file_count = usize::MAX;
         let config = config.validate().unwrap();
 
-        let result = tracker.record_file(file_size, &config);
+        let result = tracker.reserve(file_size, &config);
 
         if file_size <= max_file_size {
             prop_assert!(result.is_ok(), "file within size limit should succeed");
@@ -285,7 +285,7 @@ proptest! {
         }
 
         for size in file_sizes {
-            let result = tracker.record_file(size, &config);
+            let result = tracker.reserve(size, &config);
             if tracker.bytes_written().checked_add(size).is_some() {
                 prop_assert!(result.is_ok() || result.is_err(), "either succeeds or detects overflow");
             }

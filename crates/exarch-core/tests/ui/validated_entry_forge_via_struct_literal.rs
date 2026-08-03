@@ -5,13 +5,12 @@
 //! `EntryValidator::validate_entry`.
 
 use exarch_core::security::ValidatedEntry;
-use exarch_core::security::ValidatedEntryType;
 
 #[allow(unreachable_code)]
 fn main() {
     let _entry = ValidatedEntry {
         safe_path: todo!(),
-        entry_type: ValidatedEntryType::File,
+        entry_type: todo!(),
         mode: None,
     };
 }

@@ -1,9 +1,65 @@
 //! Extraction quota tracking and validation.
 
+use std::marker::PhantomData;
+
 use crate::ArchiveError;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::config::Validated;
+
+/// Proof that a file's size was successfully reserved against a
+/// [`QuotaTracker`].
+///
+/// This is a capability token, not a data type: it carries no payload and
+/// exists only so that [`ValidatedEntryType::File`] cannot be constructed
+/// without a tracker having actually authorized the charge. Its only
+/// producer is [`QuotaTracker::reserve`] — the private field means no other
+/// code, in or out of this crate, can assemble one directly.
+///
+/// Deliberately not `Clone`/`Copy`/`Default`: a permit represents a single
+/// reservation and must not be duplicated or spent more than once. Zero-sized
+/// (`PhantomData`-based), so wrapping it in `Result` costs nothing over
+/// `Result<()>`.
+///
+/// [`ValidatedEntryType::File`]: crate::security::validator::ValidatedEntryType::File
+///
+/// # Examples
+///
+/// A `QuotaPermit` is never constructed directly — it arrives already
+/// embedded in a validated file entry:
+///
+/// ```no_run
+/// use exarch_core::SecurityConfig;
+/// use exarch_core::security::EntryValidator;
+/// use exarch_core::security::ValidatedEntryType;
+/// use exarch_core::types::DestDir;
+/// use exarch_core::types::EntryType;
+/// use std::path::Path;
+/// use std::path::PathBuf;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let dest = DestDir::new(PathBuf::from("/tmp"))?;
+/// let config = SecurityConfig::default().validate()?;
+/// let mut validator = EntryValidator::new(&config, &dest);
+///
+/// let entry = validator.validate_entry(
+///     Path::new("file.txt"),
+///     &EntryType::File,
+///     1024, // uncompressed size
+///     None, // compressed size
+///     None, // mode
+///     None, // dir_cache
+/// )?;
+///
+/// if let ValidatedEntryType::File(permit) = entry.entry_type() {
+///     println!("{permit:?}");
+/// }
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Debug)]
+#[must_use]
+pub struct QuotaPermit(PhantomData<()>);
 
 /// Tracks resource usage during extraction.
 #[derive(Debug, Default)]
@@ -19,7 +75,8 @@ impl QuotaTracker {
         Self::default()
     }
 
-    /// Records a file extraction.
+    /// Reserves quota capacity for a file extraction, returning a capability
+    /// token that proves the reservation succeeded.
     ///
     /// # Errors
     ///
@@ -31,7 +88,11 @@ impl QuotaTracker {
     /// When all quotas are set to maximum values (unlimited), the function
     /// skips quota checks and only tracks counters with overflow detection.
     #[inline]
-    pub fn record_file(&mut self, size: u64, config: &SecurityConfig<Validated>) -> Result<()> {
+    pub fn reserve(
+        &mut self,
+        size: u64,
+        config: &SecurityConfig<Validated>,
+    ) -> Result<QuotaPermit> {
         // OPT-C003: Fast path when all quotas unlimited - skip checks, only detect
         // overflow
         if config.max_file_size == u64::MAX
@@ -52,10 +113,11 @@ impl QuotaTracker {
                 }
             })?;
 
-            return Ok(());
+            return Ok(QuotaPermit(PhantomData));
         }
 
-        self.record_file_checked(size, config)
+        self.record_file_checked(size, config)?;
+        Ok(QuotaPermit(PhantomData))
     }
 
     /// Internal implementation with full quota validation.
@@ -138,11 +200,11 @@ mod tests {
     }
 
     #[test]
-    fn test_quota_tracker_record_file() {
+    fn test_quota_tracker_reserve() {
         let mut tracker = QuotaTracker::new();
         let config = SecurityConfig::default().validate().expect("valid config");
 
-        assert!(tracker.record_file(1000, &config).is_ok());
+        assert!(tracker.reserve(1000, &config).is_ok());
         assert_eq!(tracker.files_extracted(), 1);
         assert_eq!(tracker.bytes_written(), 1000);
     }
@@ -154,9 +216,9 @@ mod tests {
         config.max_file_count = 2;
         let config = config.validate().expect("valid config");
 
-        assert!(tracker.record_file(100, &config).is_ok());
-        assert!(tracker.record_file(100, &config).is_ok());
-        let result = tracker.record_file(100, &config);
+        assert!(tracker.reserve(100, &config).is_ok());
+        assert!(tracker.reserve(100, &config).is_ok());
+        let result = tracker.reserve(100, &config);
         assert_matches!(result, Err(ArchiveError::QuotaExceeded { .. }));
     }
 
@@ -167,8 +229,8 @@ mod tests {
         config.max_total_size = 1000;
         let config = config.validate().expect("valid config");
 
-        assert!(tracker.record_file(600, &config).is_ok());
-        let result = tracker.record_file(500, &config);
+        assert!(tracker.reserve(600, &config).is_ok());
+        let result = tracker.reserve(500, &config);
         assert_matches!(result, Err(ArchiveError::QuotaExceeded { .. }));
     }
 
@@ -179,7 +241,7 @@ mod tests {
         config.max_file_size = 1000;
         let config = config.validate().expect("valid config");
 
-        let result = tracker.record_file(2000, &config);
+        let result = tracker.reserve(2000, &config);
         assert_matches!(result, Err(ArchiveError::QuotaExceeded { .. }));
     }
 
@@ -195,21 +257,21 @@ mod tests {
 
         // Exactly at file count limit should succeed
         assert!(
-            tracker.record_file(100, &config).is_ok(),
+            tracker.reserve(100, &config).is_ok(),
             "file 1 should succeed"
         );
         assert!(
-            tracker.record_file(100, &config).is_ok(),
+            tracker.reserve(100, &config).is_ok(),
             "file 2 should succeed"
         );
         assert!(
-            tracker.record_file(100, &config).is_ok(),
+            tracker.reserve(100, &config).is_ok(),
             "file 3 should succeed"
         );
         assert_eq!(tracker.files_extracted(), 3, "should have 3 files");
 
         // One more should fail (exceeds limit)
-        let result = tracker.record_file(100, &config);
+        let result = tracker.reserve(100, &config);
         assert_matches!(
             result,
             Err(ArchiveError::QuotaExceeded {
@@ -229,14 +291,14 @@ mod tests {
         let config = config.validate().expect("valid config");
 
         // Add files up to exactly the limit
-        assert!(tracker.record_file(600, &config).is_ok());
+        assert!(tracker.reserve(600, &config).is_ok());
         assert_eq!(tracker.bytes_written(), 600);
 
-        assert!(tracker.record_file(400, &config).is_ok());
+        assert!(tracker.reserve(400, &config).is_ok());
         assert_eq!(tracker.bytes_written(), 1000, "should be exactly at limit");
 
         // One more byte should fail
-        let result = tracker.record_file(1, &config);
+        let result = tracker.reserve(1, &config);
         assert_matches!(
             result,
             Err(ArchiveError::QuotaExceeded {
@@ -260,12 +322,12 @@ mod tests {
 
         // File exactly at limit should succeed
         assert!(
-            tracker.record_file(5000, &config).is_ok(),
+            tracker.reserve(5000, &config).is_ok(),
             "file exactly at limit should succeed"
         );
 
         // File one byte over should fail
-        let result = tracker.record_file(5001, &config);
+        let result = tracker.reserve(5001, &config);
         assert_matches!(
             result,
             Err(ArchiveError::QuotaExceeded {
@@ -288,10 +350,10 @@ mod tests {
         let config = config.validate().expect("valid config");
 
         // First file should succeed
-        assert!(tracker.record_file(100, &config).is_ok());
+        assert!(tracker.reserve(100, &config).is_ok());
 
         // Second file should fail (max is 1)
-        let result = tracker.record_file(100, &config);
+        let result = tracker.reserve(100, &config);
         assert_matches!(result, Err(ArchiveError::QuotaExceeded { .. }));
     }
 
@@ -308,7 +370,7 @@ mod tests {
 
         for i in 1..=1000 {
             assert!(
-                tracker.record_file(1000, &config).is_ok(),
+                tracker.reserve(1000, &config).is_ok(),
                 "file {i} should succeed with unlimited quotas"
             );
         }
@@ -331,7 +393,7 @@ mod tests {
         tracker.bytes_written = u64::MAX - 100;
 
         // Adding 200 bytes should trigger overflow detection
-        let result = tracker.record_file(200, &config);
+        let result = tracker.reserve(200, &config);
         assert_matches!(
             result,
             Err(ArchiveError::QuotaExceeded {

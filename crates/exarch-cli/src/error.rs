@@ -132,12 +132,29 @@ pub fn convert_extraction_error(
     // Handle PartialExtraction before the borrow below.
     //
     // `PartialExtraction` is `#[error("{source}")]` with `#[source]`, so
-    // placing it in an anyhow chain causes the inner error text to appear
-    // twice in `{:#}` output.  Instead, we extract the inner error and wrap
-    // it with `PartialExtractionContext`, which carries the partial report
-    // without duplicating the inner Display text.
+    // placing it in an anyhow chain directly would cause the inner error text
+    // to appear twice in `{:#}` output. Recursing gives the inner `source`
+    // its own fully-formed, category-specific context (HINT included) first;
+    // `PartialExtractionContext` is then layered on top as an additional
+    // context frame, which — unlike `PartialExtraction` itself — never
+    // re-displays the inner error text.
+    //
+    // This keeps issue #204's "inner error text appears exactly once in
+    // `{:#}`" guarantee intact for the variants whose CLI-authored `context`
+    // string below does not itself re-embed the inner error's data —
+    // `PathTraversal`, `SymlinkEscape`, `HardlinkEscape`, `SecurityViolation`,
+    // `ZipBomb`, `QuotaExceeded` (the ones the regression tests below cover).
+    // `InvalidArchive` builds its `context` string by interpolating the
+    // inner data directly (`{reason}`), so its inner text was already
+    // printed twice by this same recursion path on the *non-partial* path
+    // before this change; wrapping it in `PartialExtraction` now reaches
+    // that pre-existing duplication too, rather than introducing a new one
+    // — partial and non-partial output are consistent with each other, not
+    // newly broken. (`Io`'s context no longer re-embeds the inner error's
+    // text either, since #528 — it is not an exception to the guarantee.)
     if let ArchiveError::PartialExtraction { source, report } = err {
-        return anyhow::Error::from(*source).context(PartialExtractionContext { report });
+        return convert_extraction_error(*source, archive, allow_symlinks)
+            .context(PartialExtractionContext { report });
     }
 
     let context = match &err {
@@ -571,6 +588,48 @@ mod tests {
         assert!(msg.contains("Files skipped: 2"), "got: {msg}");
         assert!(msg.contains("Warnings:"), "got: {msg}");
         assert!(msg.contains("skipped a broken symlink"), "got: {msg}");
+    }
+
+    // Regression test for issue #527: PartialExtraction must not discard the
+    // category-specific HINT the wrapped source would otherwise get.
+
+    #[test]
+    fn test_partial_security_violation_keeps_hint_and_partial_progress_wording() {
+        use exarch_core::ExtractionReport;
+        use std::time::Duration;
+
+        let inner = ArchiveError::SecurityViolation {
+            reason: "symlinks not allowed by security policy".to_string(),
+        };
+        let report = ExtractionReport {
+            files_extracted: 3,
+            directories_created: 1,
+            symlinks_created: 0,
+            bytes_written: 42,
+            duration: Duration::from_millis(0),
+            files_skipped: 0,
+            warnings: vec![],
+        };
+        let err = ArchiveError::PartialExtraction {
+            source: Box::new(inner),
+            report,
+        };
+        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"), false);
+        let msg = format!("{converted:#}");
+        assert!(
+            msg.contains("were written to disk before the error"),
+            "partial-progress wording missing: {msg}"
+        );
+        assert!(
+            msg.contains("--allow-symlinks"),
+            "category-specific HINT missing: {msg}"
+        );
+        assert_eq!(
+            msg.matches("symlinks not allowed by security policy")
+                .count(),
+            1,
+            "inner error reason should appear exactly once, got: {msg}"
+        );
     }
 
     #[test]

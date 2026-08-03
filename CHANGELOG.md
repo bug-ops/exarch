@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **`extract --atomic --force` resolved the destination-swap rename/remove sequence by path on every
+  call, leaving a TOCTOU window where replacing an intermediate path component with a symlink
+  mid-extraction could redirect the swap outside the intended destination (#526)**:
+  `run_atomic_force_extraction` (`crates/exarch-cli/src/commands/extract.rs`) now pins the
+  destination's parent directory with an open file descriptor (`commands::atomic_swap::PinnedDir`,
+  Unix only) once, and performs every subsequent rename/remove `*at`-relative to that descriptor
+  instead of re-walking the path, closing the window for any *intermediate* path component. A
+  `dev`/`ino` identity recheck immediately before the destructive swap narrows — it does not close —
+  the much smaller remaining window around the *final* component itself changing between the initial
+  snapshot and the swap; a mismatch aborts the swap with a distinct error instead of proceeding.
+  Non-Unix targets keep the previous path-based behavior (documented residual, not a regression:
+  symlink creation is a privileged operation on Windows). Adds `rustix` (already present transitively
+  via `tempfile`/`xattr`) as a direct, Unix-only dependency of `exarch-cli`.
+
+  **Behavior change on Unix**: `--atomic --force` now requires read permission on the destination's
+  parent directory (needed to obtain a real directory file descriptor; there is no portable Unix
+  equivalent of Linux's permission-free `O_PATH` for this). It does **not** require read permission
+  on the destination directory itself — the identity recheck uses `statat`, which needs only search
+  permission on the already-open parent.
+
+- **`PartialExtraction`-wrapped errors lost their category-specific HINT text (#527)**:
+  `convert_extraction_error` (`crates/exarch-cli/src/error.rs`) special-cased
+  `ArchiveError::PartialExtraction` with an early return that discarded the per-variant `match` below
+  it entirely, replacing every category-specific HINT (e.g. `--allow-symlinks`, or the "cannot be
+  relaxed via any policy flag" wording for forged-size violations) with `PartialExtractionContext`'s
+  generic one. It now recurses into `convert_extraction_error` for the wrapped source first, then
+  layers `PartialExtractionContext` on top as additional context — preserving both the HINT and (for
+  the variants whose CLI-authored context does not itself re-embed the inner error's data) the #204
+  guarantee that the inner error text appears exactly once in `{:#}` output.
+
 - **ZIP extraction trusted the archive-declared uncompressed size for zip-bomb ratio detection and
   quota reservation, but never verified it against what decompression actually produced
   (GHSA-5j8q-wxg5-hj4r)**: `formats/zip.rs`'s `ZipEntryAdapter::get_sizes` reads `uncompressed_size`

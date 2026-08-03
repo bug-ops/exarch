@@ -2621,6 +2621,103 @@ fn test_extract_atomic_force_failure_leaves_destination_untouched() {
     );
 }
 
+/// Regression test for #525: `--atomic --force` onto a destination that
+/// exists as a regular file (not a directory) must be rejected rather than
+/// silently replaced, and the file must be left byte-for-byte unchanged.
+#[test]
+fn test_extract_atomic_force_rejects_non_directory_destination() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let dest = temp.path().join("dest");
+    std::fs::write(&dest, b"OLD FILE CONTENT").expect("seed pre-existing file destination");
+
+    exarch_cmd()
+        .arg("extract")
+        .arg("--atomic")
+        .arg("--force")
+        .arg(fixture_path("sample.tar.gz"))
+        .arg(&dest)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "cannot use --atomic --force: destination",
+        ))
+        .stderr(predicate::str::contains(
+            "already exists and is not a directory",
+        ));
+
+    let contents = std::fs::read(&dest).expect("destination file must survive");
+    assert_eq!(
+        contents, b"OLD FILE CONTENT",
+        "destination file must be byte-for-byte unchanged when rejected"
+    );
+}
+
+/// Regression test for #525/#526: when `output_dir` is a symlink to a
+/// directory, `--atomic --force` must replace the *target* directory's
+/// contents while leaving the symlink itself intact and still pointing at
+/// the same target path. This is also the proof that the #526 fd-pinned
+/// swap (which resolves `parent`/`dest_name` from `canonicalize()`'s fully
+/// resolved output) does not regress this final-component-is-a-symlink
+/// behavior: `renameat` on the pinned parent acts on the same real
+/// directory a path-based `rename` would.
+#[test]
+#[cfg(unix)]
+fn test_extract_atomic_force_symlink_destination_preserves_symlink() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let real_dest = temp.path().join("real_dest");
+    std::fs::create_dir_all(&real_dest).expect("create real destination directory");
+    std::fs::write(real_dest.join("old.txt"), b"OLD CONTENT").expect("seed pre-existing file");
+
+    let symlink_dest = temp.path().join("dest_link");
+    std::os::unix::fs::symlink(&real_dest, &symlink_dest).expect("create symlink to destination");
+
+    exarch_cmd()
+        .arg("extract")
+        .arg("--atomic")
+        .arg("--force")
+        .arg(fixture_path("sample.tar.gz"))
+        .arg(&symlink_dest)
+        .assert()
+        .success();
+
+    assert!(
+        symlink_dest
+            .symlink_metadata()
+            .expect("read symlink metadata")
+            .file_type()
+            .is_symlink(),
+        "the destination symlink itself must survive the swap"
+    );
+    assert_eq!(
+        std::fs::read_link(&symlink_dest).expect("read symlink target"),
+        real_dest,
+        "the symlink must still point at the same target path"
+    );
+    assert!(
+        real_dest.join("sample.txt").exists(),
+        "the symlink's target directory must contain the newly extracted content"
+    );
+    assert!(
+        !real_dest.join("old.txt").exists(),
+        "the symlink's target directory's pre-existing content must be fully replaced"
+    );
+
+    let siblings: Vec<_> = std::fs::read_dir(temp.path())
+        .expect("read temp dir")
+        .map(|e| e.expect("dir entry").file_name())
+        .collect();
+    let mut siblings_sorted = siblings.clone();
+    siblings_sorted.sort();
+    assert_eq!(
+        siblings_sorted,
+        vec![
+            std::ffi::OsString::from("dest_link"),
+            std::ffi::OsString::from("real_dest"),
+        ],
+        "no leftover temp/backup swap directories must remain next to the destination: {siblings:?}"
+    );
+}
+
 // ============================================================================
 // SecurityViolation HINT text specificity (#520)
 // ============================================================================

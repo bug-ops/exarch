@@ -218,10 +218,18 @@ jobs:
     needs: [changes, format]
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # always() + explicit needs.format.result check is required here: a job
+    # with `needs: [format]` is skipped by GitHub Actions whenever `format`
+    # itself is skipped (e.g. on a Python-only PR, where rust == 'false'),
+    # regardless of what this job's own `if` says, unless always() overrides
+    # that default gating.
     if: |
-      needs.changes.outputs.python == 'true' ||
+      always() &&
+      needs.changes.result == 'success' &&
+      (needs.format.result == 'success' || needs.format.result == 'skipped') &&
+      (needs.changes.outputs.python == 'true' ||
       github.ref == 'refs/heads/main' ||
-      github.ref == 'refs/heads/develop'
+      github.ref == 'refs/heads/develop')
     strategy:
       fail-fast: false
       matrix:
@@ -310,9 +318,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     if: |
-      needs.changes.outputs.node == 'true' ||
+      always() &&
+      needs.changes.result == 'success' &&
+      (needs.format.result == 'success' || needs.format.result == 'skipped') &&
+      (needs.changes.outputs.node == 'true' ||
       github.ref == 'refs/heads/main' ||
-      github.ref == 'refs/heads/develop'
+      github.ref == 'refs/heads/develop')
     steps:
       - uses: actions/checkout@v7
 

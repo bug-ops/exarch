@@ -34,14 +34,15 @@ pytest -v tests/
 
 ## Test Status
 
-Currently, all tests are skipped with `pytest.skip()` because they require:
-
-1. The compiled Python extension module (`maturin develop`)
-2. Test fixture archives in `tests/fixtures/`
+Tests use `pytest.importorskip("exarch")` at module level, so they are skipped
+only when the compiled extension module isn't built yet (`maturin develop`)
+and run for real otherwise. Fixture archives are generated on the fly by
+fixtures in `conftest.py` (e.g. `sample_tar_gz`); malicious CVE-regression
+fixtures live in `tests/fixtures/` and are generated via
+`tests/fixtures/generate_fixtures.py`.
 
 ## TODO
 
-- [ ] Add test fixture archives (test.tar.gz, malicious.zip, etc.)
 - [ ] Integrate with CI pipeline
 - [ ] Add more comprehensive test cases
 - [ ] Add property-based tests with Hypothesis

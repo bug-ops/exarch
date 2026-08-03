@@ -388,7 +388,7 @@ impl<R: Read + Seek> SevenZArchive<R> {
             ValidatedEntryType::File(permit) => {
                 dir_cache.ensure_parent_dir(&dest_path)?;
 
-                if dest_path.exists() {
+                if dest_path.symlink_metadata().is_ok() {
                     if skip_duplicates {
                         report.files_skipped += 1;
                         report.warnings.push(format!(
@@ -1710,5 +1710,88 @@ mod tests {
             "callback re-validation must independently reject a traversal entry via its own \
              validate_entry call, got: {result:?}"
         );
+    }
+
+    /// Issue #468: `Path::exists()` follows symlinks and returns `false` for
+    /// a dangling symlink, so the old `dest_path.exists()` check silently
+    /// missed a pre-existing dangling symlink occupying the entry's
+    /// destination path. With `skip_duplicates` true, the entry must be
+    /// detected as a duplicate and skipped, leaving the dangling symlink in
+    /// place instead of being silently replaced.
+    #[test]
+    #[cfg(unix)]
+    fn test_skip_duplicates_detects_dangling_symlink_at_destination() {
+        let data = make_sevenz_archive(&[("target.txt", b"payload")]);
+        let mut archive = SevenZArchive::new(Cursor::new(data)).unwrap();
+
+        let temp = TempDir::new().unwrap();
+        let link_path = temp.path().join("target.txt");
+        std::os::unix::fs::symlink(temp.path().join("does-not-exist"), &link_path).unwrap();
+        assert!(
+            !link_path.exists(),
+            "sanity check: dangling symlink must be invisible to exists()"
+        );
+
+        let config = SecurityConfig::default().validate().expect("valid config");
+        let report = archive
+            .extract(
+                temp.path(),
+                &config,
+                &ExtractionOptions::default(), // skip_duplicates = true
+                &mut crate::NoopProgress,
+            )
+            .unwrap();
+
+        assert_eq!(
+            report.files_skipped, 1,
+            "entry must be skipped as a duplicate of the dangling symlink"
+        );
+        assert_eq!(report.files_extracted, 0);
+        let metadata = std::fs::symlink_metadata(&link_path).unwrap();
+        assert!(
+            metadata.file_type().is_symlink(),
+            "dangling symlink must survive untouched, not be replaced by extracted content"
+        );
+    }
+
+    /// Characterization test, not a regression test for #468: this
+    /// `skip_duplicates = false` path passes identically on the pre-fix
+    /// code too, since `dest_path.exists()` is `false` for a dangling
+    /// symlink either way — the `if` block (and its `is_dir()`/
+    /// `remove_file` duplicate-removal logic) is never entered pre-fix.
+    /// The write still succeeds pre-fix because `write_file_with_permit`'s
+    /// temp-file + `rename` replaces whatever sits at `dest_path`, symlink
+    /// or not, without following it. It documents that this behavior is
+    /// unaffected by the #468 fix — 7z silently replaces a pre-existing
+    /// symlink here, unlike TAR/ZIP which hard-fail via `O_NOFOLLOW`/
+    /// `ELOOP` in `create_file_with_mode`. That cross-format divergence is
+    /// tracked separately in #477.
+    #[test]
+    #[cfg(unix)]
+    fn test_duplicate_replaces_dangling_symlink_when_not_skipping() {
+        let data = make_sevenz_archive(&[("target.txt", b"payload")]);
+        let mut archive = SevenZArchive::new(Cursor::new(data)).unwrap();
+
+        let temp = TempDir::new().unwrap();
+        let link_path = temp.path().join("target.txt");
+        std::os::unix::fs::symlink(temp.path().join("does-not-exist"), &link_path).unwrap();
+
+        let config = SecurityConfig::default().validate().expect("valid config");
+        let options = ExtractionOptions {
+            skip_duplicates: false,
+            ..ExtractionOptions::default()
+        };
+        let report = archive
+            .extract(temp.path(), &config, &options, &mut crate::NoopProgress)
+            .unwrap();
+
+        assert_eq!(report.files_extracted, 1);
+        assert_eq!(report.files_skipped, 0);
+        let metadata = std::fs::symlink_metadata(&link_path).unwrap();
+        assert!(
+            !metadata.file_type().is_symlink(),
+            "dangling symlink must be replaced by the extracted file"
+        );
+        assert_eq!(std::fs::read(&link_path).unwrap(), b"payload");
     }
 }

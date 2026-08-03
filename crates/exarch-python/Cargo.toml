@@ -19,10 +19,17 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 exarch-core.workspace = true
-pyo3 = { workspace = true, features = ["extension-module"] }
+pyo3.workspace = true
 
 [features]
-default = []
+# Enabled by default so plain `cargo build`/`maturin develop` behave as
+# before. Disable it (`--no-default-features`) to run `cargo test --lib`:
+# extension-module tells pyo3 to expect the host process (the Python
+# interpreter) to provide libpython symbols at dlopen time, which a
+# standalone test binary cannot satisfy — see PyO3's user guide section on
+# testing extension modules.
+default = ["extension-module"]
+extension-module = ["pyo3/extension-module"]
 abi3 = ["pyo3/abi3-py39"]
 # Exposes `_trigger_panic_for_testing()`, a deliberate-panic hook used by the
 # #395 regression test to verify the catch_unwind -> PyRuntimeError

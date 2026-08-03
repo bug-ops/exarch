@@ -29,6 +29,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   inaccurate "characters" wording for multi-byte input. `exarch-node`'s error messages for these
   two setters now carry the crate-wide `INVALID_CONFIGURATION: invalid configuration: ` prefix
   (previously a bare reason string), matching every other error path in the binding.
+- **`exarch-cli` output formatters now write through an injectable writer (#452)**:
+  `OutputFormatter`'s six trait methods take `&mut self` instead of `&self`.
+  `HumanFormatter<O: Write = Term, E: Write = Term>` writes non-error output to `O` and errors to
+  `E` (`HumanFormatter::new` keeps the stdout/stderr default; `HumanFormatter::with_writers` injects
+  custom writers and an explicit `use_colors` flag for deterministic tests). `JsonFormatter<W: Write
+  = Stdout>` gained the same shape (`JsonFormatter::stdout()` replaces the old unit-struct
+  constructor; `JsonFormatter::with_writer` injects a custom writer). `create_formatter`'s signature
+  is unchanged. This unlocks unit tests that capture formatter output into an in-memory buffer
+  instead of requiring a subprocess. `HumanFormatter` renders each line into a `String` first and
+  issues a single `write_all` per line (`output::human::emit_line`/`emit_blank`) rather than calling
+  `writeln!` directly on the writer, which would otherwise turn one multi-argument format line into
+  several separate small writes against `console::Term` (no internal buffering) — output throughput
+  on large manifests is unchanged from the pre-refactor `Term::write_line` behavior.
+- **CLI size-limit defaults are no longer re-literalized across commands (#450)**: added
+  `commands::apply_size_limits(config, max_total, max_file)` in `crates/exarch-cli/src/commands/mod.rs`,
+  applying `--max-total-size`/`--max-file-size` overrides only when provided and otherwise leaving
+  `SecurityConfig::default()`'s own limits in place. `extract`, `list`, and `verify` now route
+  through this helper instead of each hardcoding `.unwrap_or(500 * 1024 * 1024)` /
+  `.unwrap_or(50 * 1024 * 1024)`. No behavior change.
 - **BREAKING: `exarch-node` boolean setters now take a mandatory `boolean` instead of an
   optional one (#442)**: `SecurityConfig.setAllowSymlinks`, `setAllowHardlinks`,
   `setAllowAbsolutePaths`, `setAllowWorldWritable`, `setAllowSolidArchives`,
@@ -157,7 +176,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   description in release builds, closing the same leak class at the one variant that had been
   missed. Neither `exarch-python` nor `exarch-node` now leaks internal directory structure in
   release-build error messages.
-
+- **`exarch-cli` human-readable sizes >= 1 TB rendered as an inflated GB figure instead of TB
+  (#451)**: `HumanFormatter::format_size` (`crates/exarch-cli/src/output/human.rs`) and
+  `progress::humanize_bytes` (`crates/exarch-cli/src/progress.rs`) were two independent
+  byte-humanization implementations; only the `progress` copy had a TB tier. Consolidated both into
+  a single `output::humanize_bytes` (`crates/exarch-cli/src/output/mod.rs`) with the TB-inclusive
+  ladder, so `extract`/`list --long --human-readable` output for archives or entries at or above 1
+  TB now shows `"... TB"` instead of a misleadingly large GB number (e.g. `u64::MAX` bytes now
+  renders `"16777216.0 TB"`, not `"17179869184.0 GB"`).
 - **7z file writes discarded their `QuotaPermit` instead of consuming it (#440)**: unlike TAR/ZIP,
   7z's `ValidatedEntryType::File(_)` write arm matched the permit and dropped it via `_`, so the
   capability-token guarantee introduced in #436 covered TAR and ZIP but not 7z. Added

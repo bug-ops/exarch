@@ -11,6 +11,7 @@ use exarch_core::CreationReport;
 use exarch_core::ExtractionReport;
 use exarch_core::VerificationReport;
 use serde::Serialize;
+use std::io::Stdout;
 use std::io::Write;
 use std::io::{self};
 use std::path::Path;
@@ -37,18 +38,44 @@ fn extraction_error_kind(err: &ArchiveError) -> String {
     .to_string()
 }
 
-pub struct JsonFormatter;
+/// JSON formatter writing envelopes to `W`. Defaults to process stdout;
+/// tests can inject an in-memory writer via [`JsonFormatter::with_writer`]
+/// to capture output.
+pub struct JsonFormatter<W: Write = Stdout> {
+    out: W,
+}
 
-impl JsonFormatter {
-    fn output<T: Serialize>(value: &T) -> Result<()> {
+impl JsonFormatter<Stdout> {
+    /// Creates a formatter writing to the process stdout.
+    #[must_use]
+    pub fn stdout() -> Self {
+        Self { out: io::stdout() }
+    }
+}
+
+impl<W: Write> JsonFormatter<W> {
+    /// Creates a formatter writing to the given writer.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn with_writer(out: W) -> Self {
+        Self { out }
+    }
+
+    /// Returns a reference to the underlying writer.
+    #[must_use]
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn writer(&self) -> &W {
+        &self.out
+    }
+
+    fn output<T: Serialize>(&mut self, value: &T) -> Result<()> {
         let json = serde_json::to_string_pretty(value)?;
-        writeln!(io::stdout(), "{json}")?;
+        writeln!(self.out, "{json}")?;
         Ok(())
     }
 }
 
-impl OutputFormatter for JsonFormatter {
-    fn format_extraction_result(&self, report: &ExtractionReport) -> Result<()> {
+impl<W: Write> OutputFormatter for JsonFormatter<W> {
+    fn format_extraction_result(&mut self, report: &ExtractionReport) -> Result<()> {
         #[derive(Serialize)]
         struct ExtractionOutput {
             files_extracted: usize,
@@ -67,10 +94,14 @@ impl OutputFormatter for JsonFormatter {
         };
 
         let output = JsonOutput::success("extract", data);
-        Self::output(&output)
+        self.output(&output)
     }
 
-    fn format_creation_result(&self, output_path: &Path, report: &CreationReport) -> Result<()> {
+    fn format_creation_result(
+        &mut self,
+        output_path: &Path,
+        report: &CreationReport,
+    ) -> Result<()> {
         #[derive(Serialize)]
         struct CreationOutput {
             output_path: String,
@@ -101,10 +132,10 @@ impl OutputFormatter for JsonFormatter {
         };
 
         let output = JsonOutput::success("create", data);
-        Self::output(&output)
+        self.output(&output)
     }
 
-    fn format_error(&self, operation: &str, error: &anyhow::Error) {
+    fn format_error(&mut self, operation: &str, error: &anyhow::Error) {
         let extraction_err = error.chain().find_map(|e| e.downcast_ref::<ArchiveError>());
 
         let kind = extraction_err.map_or_else(|| "Error".to_string(), extraction_error_kind);
@@ -131,10 +162,10 @@ impl OutputFormatter for JsonFormatter {
         } else {
             JsonOutput::<()>::error(operation, kind, message)
         };
-        let _ = Self::output(&output);
+        let _ = self.output(&output);
     }
 
-    fn format_manifest_short(&self, manifest: &ArchiveManifest) -> Result<()> {
+    fn format_manifest_short(&mut self, manifest: &ArchiveManifest) -> Result<()> {
         #[derive(Serialize)]
         struct ManifestEntry {
             path: String,
@@ -162,11 +193,11 @@ impl OutputFormatter for JsonFormatter {
         };
 
         let output = JsonOutput::success("list", data);
-        Self::output(&output)
+        self.output(&output)
     }
 
     fn format_manifest_long(
-        &self,
+        &mut self,
         manifest: &ArchiveManifest,
         _human_readable: bool,
     ) -> Result<()> {
@@ -222,10 +253,10 @@ impl OutputFormatter for JsonFormatter {
         };
 
         let output = JsonOutput::success("list", data);
-        Self::output(&output)
+        self.output(&output)
     }
 
-    fn format_verification_report(&self, report: &VerificationReport) -> Result<()> {
+    fn format_verification_report(&mut self, report: &VerificationReport) -> Result<()> {
         #[derive(Serialize)]
         struct VerificationIssue {
             severity: String,
@@ -271,7 +302,7 @@ impl OutputFormatter for JsonFormatter {
         };
 
         let output = JsonOutput::success("verify", data);
-        Self::output(&output)
+        self.output(&output)
     }
 }
 
@@ -468,5 +499,129 @@ mod tests {
             display_occurrences <= 1,
             "JSON message duplicates ArchiveError display text ({display_occurrences} occurrences): {message}"
         );
+    }
+
+    fn parsed(formatter: &JsonFormatter<Vec<u8>>) -> serde_json::Value {
+        serde_json::from_slice(formatter.writer()).unwrap()
+    }
+
+    #[test]
+    fn format_extraction_result_writes_success_envelope() {
+        let mut f = JsonFormatter::with_writer(Vec::new());
+        let report = ExtractionReport {
+            files_extracted: 3,
+            directories_created: 1,
+            symlinks_created: 0,
+            bytes_written: 2048,
+            duration: std::time::Duration::from_secs(1),
+            ..Default::default()
+        };
+        f.format_extraction_result(&report).unwrap();
+        let v = parsed(&f);
+        assert_eq!(v["operation"], "extract");
+        assert_eq!(v["status"], "success");
+        assert_eq!(v["data"]["files_extracted"], 3);
+        assert_eq!(v["data"]["bytes_written"], 2048);
+    }
+
+    #[test]
+    fn format_creation_result_writes_success_envelope() {
+        let mut f = JsonFormatter::with_writer(Vec::new());
+        let report = CreationReport {
+            files_added: 2,
+            directories_added: 1,
+            symlinks_added: 0,
+            bytes_written: 1024,
+            bytes_compressed: 0,
+            duration: std::time::Duration::from_secs(1),
+            ..Default::default()
+        };
+        f.format_creation_result(Path::new("out.tar.gz"), &report)
+            .unwrap();
+        let v = parsed(&f);
+        assert_eq!(v["operation"], "create");
+        assert_eq!(v["status"], "success");
+        assert_eq!(v["data"]["output_path"], "out.tar.gz");
+        assert_eq!(v["data"]["files_added"], 2);
+    }
+
+    #[test]
+    fn format_error_writes_error_envelope() {
+        let mut f = JsonFormatter::with_writer(Vec::new());
+        let err = anyhow::anyhow!(ArchiveError::ZipBomb {
+            compressed: 1000,
+            uncompressed: 1_000_000,
+            ratio: 1000.0,
+        });
+        f.format_error("extract", &err);
+        let v = parsed(&f);
+        assert_eq!(v["operation"], "extract");
+        assert_eq!(v["status"], "error");
+        assert_eq!(v["error"]["kind"], "ZipBomb");
+    }
+
+    fn sample_manifest() -> ArchiveManifest {
+        use exarch_core::ArchiveEntry;
+        use exarch_core::ManifestEntryType;
+        use exarch_core::formats::detect::ArchiveType;
+
+        ArchiveManifest {
+            format: ArchiveType::TarGz,
+            total_entries: 1,
+            total_size: 1024,
+            entries: vec![ArchiveEntry {
+                path: PathBuf::from("file.txt"),
+                entry_type: ManifestEntryType::File,
+                size: 1024,
+                compressed_size: None,
+                mode: Some(0o644),
+                modified: None,
+                symlink_target: None,
+                hardlink_target: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn format_manifest_short_writes_paths_only() {
+        let mut f = JsonFormatter::with_writer(Vec::new());
+        f.format_manifest_short(&sample_manifest()).unwrap();
+        let v = parsed(&f);
+        assert_eq!(v["operation"], "list");
+        assert_eq!(v["data"]["entries"][0]["path"], "file.txt");
+        assert!(v["data"]["entries"][0].get("size").is_none());
+    }
+
+    #[test]
+    fn format_manifest_long_writes_full_detail() {
+        let mut f = JsonFormatter::with_writer(Vec::new());
+        f.format_manifest_long(&sample_manifest(), true).unwrap();
+        let v = parsed(&f);
+        assert_eq!(v["data"]["entries"][0]["size"], 1024);
+        assert_eq!(v["data"]["entries"][0]["entry_type"], "File");
+        assert_eq!(v["data"]["total_size"], 1024);
+    }
+
+    #[test]
+    fn format_verification_report_writes_full_report() {
+        use exarch_core::CheckStatus;
+        use exarch_core::VerificationStatus;
+        use exarch_core::formats::detect::ArchiveType;
+
+        let mut f = JsonFormatter::with_writer(Vec::new());
+        let report = VerificationReport {
+            status: VerificationStatus::Pass,
+            integrity_status: CheckStatus::Pass,
+            security_status: CheckStatus::Pass,
+            total_entries: 5,
+            suspicious_entries: 0,
+            total_size: 4096,
+            format: ArchiveType::TarGz,
+            issues: vec![],
+        };
+        f.format_verification_report(&report).unwrap();
+        let v = parsed(&f);
+        assert_eq!(v["operation"], "verify");
+        assert_eq!(v["data"]["total_entries"], 5);
     }
 }

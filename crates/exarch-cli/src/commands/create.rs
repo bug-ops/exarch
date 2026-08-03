@@ -9,7 +9,7 @@ use exarch_core::CreationConfig;
 use exarch_core::NoopProgress;
 use exarch_core::create_archive_with_progress;
 
-pub fn execute(args: &CreateArgs, formatter: &dyn OutputFormatter, quiet: bool) -> Result<()> {
+pub fn execute(args: &CreateArgs, formatter: &mut dyn OutputFormatter, quiet: bool) -> Result<()> {
     // Check if output exists
     if args.output.exists() && !args.force {
         anyhow::bail!(
@@ -90,30 +90,30 @@ mod tests {
     }
 
     impl OutputFormatter for SpyFormatter {
-        fn format_extraction_result(&self, _: &ExtractionReport) -> Result<()> {
+        fn format_extraction_result(&mut self, _: &ExtractionReport) -> Result<()> {
             Ok(())
         }
 
-        fn format_creation_result(&self, _: &Path, _: &CreationReport) -> Result<()> {
+        fn format_creation_result(&mut self, _: &Path, _: &CreationReport) -> Result<()> {
             if !self.quiet {
                 self.called.set(true);
             }
             Ok(())
         }
 
-        fn format_manifest_short(&self, _: &ArchiveManifest) -> Result<()> {
+        fn format_manifest_short(&mut self, _: &ArchiveManifest) -> Result<()> {
             Ok(())
         }
 
-        fn format_manifest_long(&self, _: &ArchiveManifest, _: bool) -> Result<()> {
+        fn format_manifest_long(&mut self, _: &ArchiveManifest, _: bool) -> Result<()> {
             Ok(())
         }
 
-        fn format_verification_report(&self, _: &VerificationReport) -> Result<()> {
+        fn format_verification_report(&mut self, _: &VerificationReport) -> Result<()> {
             Ok(())
         }
 
-        fn format_error(&self, _: &str, _: &anyhow::Error) {}
+        fn format_error(&mut self, _: &str, _: &anyhow::Error) {}
     }
 
     /// `JsonFormatter` always calls `format_creation_result` regardless of
@@ -135,28 +135,28 @@ mod tests {
     }
 
     impl OutputFormatter for AlwaysCallSpyFormatter {
-        fn format_extraction_result(&self, _: &ExtractionReport) -> Result<()> {
+        fn format_extraction_result(&mut self, _: &ExtractionReport) -> Result<()> {
             Ok(())
         }
 
-        fn format_creation_result(&self, _: &Path, _: &CreationReport) -> Result<()> {
+        fn format_creation_result(&mut self, _: &Path, _: &CreationReport) -> Result<()> {
             self.called.set(true);
             Ok(())
         }
 
-        fn format_manifest_short(&self, _: &ArchiveManifest) -> Result<()> {
+        fn format_manifest_short(&mut self, _: &ArchiveManifest) -> Result<()> {
             Ok(())
         }
 
-        fn format_manifest_long(&self, _: &ArchiveManifest, _: bool) -> Result<()> {
+        fn format_manifest_long(&mut self, _: &ArchiveManifest, _: bool) -> Result<()> {
             Ok(())
         }
 
-        fn format_verification_report(&self, _: &VerificationReport) -> Result<()> {
+        fn format_verification_report(&mut self, _: &VerificationReport) -> Result<()> {
             Ok(())
         }
 
-        fn format_error(&self, _: &str, _: &anyhow::Error) {}
+        fn format_error(&mut self, _: &str, _: &anyhow::Error) {}
     }
 
     fn make_args(output: PathBuf, source: PathBuf) -> CreateArgs {
@@ -184,9 +184,9 @@ mod tests {
         let out = tmp.path().join("out.tar.gz");
 
         let args = make_args(out, src);
-        let formatter = AlwaysCallSpyFormatter::new();
+        let mut formatter = AlwaysCallSpyFormatter::new();
 
-        execute(&args, &formatter, true).unwrap();
+        execute(&args, &mut formatter, true).unwrap();
 
         assert!(
             formatter.was_called(),
@@ -202,9 +202,9 @@ mod tests {
         let out = tmp.path().join("out.tar.gz");
 
         let args = make_args(out, src);
-        let formatter = AlwaysCallSpyFormatter::new();
+        let mut formatter = AlwaysCallSpyFormatter::new();
 
-        execute(&args, &formatter, false).unwrap();
+        execute(&args, &mut formatter, false).unwrap();
 
         assert!(formatter.was_called());
     }
@@ -219,9 +219,9 @@ mod tests {
         let out = tmp.path().join("out.tar.gz");
 
         let args = make_args(out, src);
-        let formatter = SpyFormatter::new(true);
+        let mut formatter = SpyFormatter::new(true);
 
-        execute(&args, &formatter, true).unwrap();
+        execute(&args, &mut formatter, true).unwrap();
 
         assert!(
             !formatter.was_called(),

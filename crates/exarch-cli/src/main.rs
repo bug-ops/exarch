@@ -13,7 +13,7 @@ use error::VerificationFailed;
 use output::OutputFormatter;
 use std::process;
 
-fn run(cli: &cli::Cli, formatter: &dyn OutputFormatter) -> (anyhow::Result<()>, &'static str) {
+fn run(cli: &cli::Cli, formatter: &mut dyn OutputFormatter) -> (anyhow::Result<()>, &'static str) {
     match &cli.command {
         cli::Commands::Extract(args) => (
             commands::extract::execute(args, formatter, cli.verbose, cli.quiet),
@@ -34,9 +34,9 @@ fn run(cli: &cli::Cli, formatter: &dyn OutputFormatter) -> (anyhow::Result<()>, 
 
 fn main() {
     let cli = cli::Cli::parse();
-    let formatter = output::create_formatter(cli.json, cli.verbose, cli.quiet);
+    let mut formatter = output::create_formatter(cli.json, cli.verbose, cli.quiet);
 
-    let (result, operation) = run(&cli, &*formatter);
+    let (result, operation) = run(&cli, formatter.as_mut());
     if let Err(err) = result {
         if err.is::<StrictWarning>() {
             process::exit(2);

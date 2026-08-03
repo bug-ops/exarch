@@ -53,6 +53,8 @@ pub struct JsonPartialReport {
     pub directories_created: usize,
     pub symlinks_created: usize,
     pub bytes_written: u64,
+    pub files_skipped: usize,
+    pub warnings: Vec<String>,
 }
 
 /// Structured error object in JSON output

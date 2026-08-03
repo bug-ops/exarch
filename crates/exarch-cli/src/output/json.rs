@@ -159,6 +159,8 @@ impl<W: Write> OutputFormatter for JsonFormatter<W> {
                     directories_created: ctx.report.directories_created,
                     symlinks_created: ctx.report.symlinks_created,
                     bytes_written: ctx.report.bytes_written,
+                    files_skipped: ctx.report.files_skipped,
+                    warnings: ctx.report.warnings.clone(),
                 });
 
         let output = if let Some(pr) = partial_report {
@@ -583,6 +585,38 @@ mod tests {
         assert_eq!(v["operation"], "extract");
         assert_eq!(v["status"], "error");
         assert_eq!(v["error"]["kind"], "ZipBomb");
+    }
+
+    #[test]
+    fn format_error_writes_partial_report_with_skipped_and_warnings() {
+        use crate::error::convert_extraction_error;
+        use exarch_core::ExtractionReport;
+
+        let mut f = JsonFormatter::with_writer(Vec::new());
+        let inner = ArchiveError::HardlinkEscape {
+            path: PathBuf::from("escaped"),
+        };
+        let report = ExtractionReport {
+            files_extracted: 2,
+            directories_created: 1,
+            symlinks_created: 0,
+            bytes_written: 512,
+            duration: std::time::Duration::from_millis(0),
+            files_skipped: 3,
+            warnings: vec!["skipped disallowed extension".to_string()],
+        };
+        let err = ArchiveError::PartialExtraction {
+            source: Box::new(inner),
+            report,
+        };
+        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"), false);
+        f.format_error("extract", &converted);
+        let v = parsed(&f);
+        assert_eq!(v["error"]["partial_report"]["files_skipped"], 3);
+        assert_eq!(
+            v["error"]["partial_report"]["warnings"][0],
+            "skipped disallowed extension"
+        );
     }
 
     fn sample_manifest() -> ArchiveManifest {

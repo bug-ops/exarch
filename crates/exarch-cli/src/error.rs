@@ -63,9 +63,21 @@ impl fmt::Display for PartialExtractionContext {
         write!(
             f,
             "WARNING: Extraction was stopped. {items} items ({} files, {} directories, {} symlinks) \
-             were written to disk before the error.\n\
-             HINT: Inspect or remove the output directory before re-running.",
+             were written to disk before the error.",
             r.files_extracted, r.directories_created, r.symlinks_created,
+        )?;
+        if r.files_skipped > 0 {
+            write!(f, "\nFiles skipped: {}", r.files_skipped)?;
+        }
+        if !r.warnings.is_empty() {
+            write!(f, "\nWarnings:")?;
+            for warning in &r.warnings {
+                write!(f, "\n  - {warning}")?;
+            }
+        }
+        write!(
+            f,
+            "\nHINT: Inspect or remove the output directory before re-running."
         )
     }
 }
@@ -428,5 +440,64 @@ mod tests {
             occurrences, 1,
             "inner error path should appear exactly once, got: {msg}"
         );
+    }
+
+    // Regression tests for issue #503: files_skipped/warnings must be shown in
+    // the partial-extraction Display output when present, and hidden when
+    // both are empty/zero (mirrors the #498-fix "shown when present" pattern).
+
+    #[test]
+    fn test_partial_display_shows_files_skipped_and_warnings_when_present() {
+        use exarch_core::ExtractionReport;
+        use std::time::Duration;
+
+        let inner = ArchiveError::HardlinkEscape {
+            path: PathBuf::from("hardlink_escape_path"),
+        };
+        let report = ExtractionReport {
+            files_extracted: 1,
+            directories_created: 0,
+            symlinks_created: 0,
+            bytes_written: 0,
+            duration: Duration::from_millis(0),
+            files_skipped: 2,
+            warnings: vec!["skipped a broken symlink".to_string()],
+        };
+        let err = ArchiveError::PartialExtraction {
+            source: Box::new(inner),
+            report,
+        };
+        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"), false);
+        let msg = format!("{converted:#}");
+        assert!(msg.contains("Files skipped: 2"), "got: {msg}");
+        assert!(msg.contains("Warnings:"), "got: {msg}");
+        assert!(msg.contains("skipped a broken symlink"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_partial_display_hides_files_skipped_and_warnings_when_empty() {
+        use exarch_core::ExtractionReport;
+        use std::time::Duration;
+
+        let inner = ArchiveError::HardlinkEscape {
+            path: PathBuf::from("hardlink_escape_path"),
+        };
+        let report = ExtractionReport {
+            files_extracted: 1,
+            directories_created: 0,
+            symlinks_created: 0,
+            bytes_written: 0,
+            duration: Duration::from_millis(0),
+            files_skipped: 0,
+            warnings: vec![],
+        };
+        let err = ArchiveError::PartialExtraction {
+            source: Box::new(inner),
+            report,
+        };
+        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"), false);
+        let msg = format!("{converted:#}");
+        assert!(!msg.contains("Files skipped"), "got: {msg}");
+        assert!(!msg.contains("Warnings:"), "got: {msg}");
     }
 }

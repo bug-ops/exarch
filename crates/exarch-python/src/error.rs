@@ -119,7 +119,8 @@ pub fn convert_error(err: CoreError) -> PyErr {
         CoreError::PartialExtraction { source, report } => {
             // Recover the specific exception type (SymlinkEscapeError, HardlinkEscapeError,
             // etc.) so callers can catch the precise error. The partial-extraction report
-            // attributes from #210 are attached to that concrete exception instead.
+            // attributes from #210, plus files_skipped/warnings from #508, are attached to
+            // that concrete exception instead.
             let source_err = convert_error(*source);
             Python::attach(|py| {
                 let exc_value = source_err.value(py);
@@ -127,6 +128,8 @@ pub fn convert_error(err: CoreError) -> PyErr {
                 // the workspace forbids unwrap/expect outside tests.
                 let _ = exc_value.setattr("files_extracted", report.files_extracted);
                 let _ = exc_value.setattr("bytes_written", report.bytes_written);
+                let _ = exc_value.setattr("files_skipped", report.files_skipped);
+                let _ = exc_value.setattr("warnings", report.warnings);
                 source_err
             })
         }
@@ -664,6 +667,56 @@ mod tests {
                 .expect("bytes_written not u64");
             assert_eq!(files, 3);
             assert_eq!(bytes, 1024);
+        });
+    }
+
+    /// Regression test for #508: `convert_error` must also attach
+    /// `files_skipped` and `warnings` from the partial-extraction report,
+    /// alongside the pre-existing `files_extracted`/`bytes_written`. Uses a
+    /// skip-only report (`files_extracted: 0, bytes_written: 0`) matching
+    /// #505's original trigger — a failure that skipped entries without
+    /// extracting anything — and a realistic aggregated warning string (see
+    /// `formats::common`'s `"skipped N entries with disallowed extensions"`
+    /// convention) rather than an invented one, so the test documents why
+    /// the fix exists, not just that the fields are forwarded.
+    #[test]
+    fn test_partial_extraction_includes_files_skipped_and_warnings() {
+        use exarch_core::ExtractionReport;
+        use exarch_core::QuotaResource;
+
+        let report = ExtractionReport {
+            files_extracted: 0,
+            bytes_written: 0,
+            files_skipped: 2,
+            warnings: vec!["skipped 2 entries with disallowed extensions".to_string()],
+            ..ExtractionReport::default()
+        };
+        let source = CoreError::QuotaExceeded {
+            resource: QuotaResource::FileCount { current: 4, max: 3 },
+        };
+        let err = CoreError::PartialExtraction {
+            source: Box::new(source),
+            report,
+        };
+
+        let py_err = convert_error(err);
+        Python::attach(|py| {
+            let exc_value = py_err.value(py);
+            let files_skipped: usize = exc_value
+                .getattr("files_skipped")
+                .expect("files_skipped missing")
+                .extract()
+                .expect("files_skipped not usize");
+            let warnings: Vec<String> = exc_value
+                .getattr("warnings")
+                .expect("warnings missing")
+                .extract()
+                .expect("warnings not list[str]");
+            assert_eq!(files_skipped, 2);
+            assert_eq!(
+                warnings,
+                vec!["skipped 2 entries with disallowed extensions"]
+            );
         });
     }
 

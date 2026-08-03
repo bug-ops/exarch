@@ -165,15 +165,15 @@ pub fn convert_error(err: CoreError) -> Error {
         CoreError::PartialExtraction { source, report } => {
             // Preserve the specific error code (SYMLINK_ESCAPE, QUOTA_EXCEEDED, etc.) from
             // the inner source so JavaScript callers can distinguish the error type. The
-            // partial-extraction report fields from #210 are appended for caller
-            // inspection.
+            // partial-extraction report fields from #210, plus filesSkipped/warnings from
+            // #508, are appended for caller inspection.
             let inner = convert_error(*source);
-            let mut msg = String::with_capacity(inner.reason.len() + 64);
+            let mut msg = String::with_capacity(inner.reason.len() + 96);
             msg.push_str(&inner.reason);
             let _ = write!(
                 &mut msg,
-                " | filesExtracted={}, bytesWritten={}",
-                report.files_extracted, report.bytes_written
+                " | filesExtracted={}, bytesWritten={}, filesSkipped={}, warnings={:?}",
+                report.files_extracted, report.bytes_written, report.files_skipped, report.warnings
             );
             Error::new(Status::GenericFailure, msg)
         }
@@ -462,6 +462,50 @@ mod tests {
         assert!(
             msg.contains("bytesWritten=1024"),
             "message must contain bytesWritten=1024, got: {msg}"
+        );
+    }
+
+    /// Regression test for #508: `convert_error` must also append
+    /// `filesSkipped` and `warnings` from the partial-extraction report,
+    /// alongside the pre-existing `filesExtracted`/`bytesWritten`. Uses a
+    /// skip-only report (`files_extracted: 0, bytes_written: 0`) matching
+    /// #505's original trigger — a failure that skipped entries without
+    /// extracting anything — and a realistic aggregated warning string
+    /// (see `formats::common`'s `"skipped N entries with disallowed
+    /// extensions"` convention) rather than an invented one, so the test
+    /// documents why the fix exists, not just that the fields are forwarded.
+    #[test]
+    fn test_partial_extraction_includes_files_skipped_and_warnings() {
+        use exarch_core::ExtractionReport;
+        use exarch_core::QuotaResource;
+
+        let report = ExtractionReport {
+            files_extracted: 0,
+            bytes_written: 0,
+            files_skipped: 2,
+            warnings: vec!["skipped 2 entries with disallowed extensions".to_string()],
+            ..ExtractionReport::default()
+        };
+        let source = CoreError::QuotaExceeded {
+            resource: QuotaResource::FileCount { current: 4, max: 3 },
+        };
+        let err = CoreError::PartialExtraction {
+            source: Box::new(source),
+            report,
+        };
+
+        let napi_err = convert_error(err);
+        let msg = &napi_err.reason;
+        assert!(
+            msg.contains("filesSkipped=2"),
+            "message must contain filesSkipped=2, got: {msg}"
+        );
+        // Only asserts a substring of the warning text, not the full
+        // Rust-`Debug`-formatted array, to avoid pinning the exact
+        // `{:?}` rendering as a change-detector (see #508 review M4).
+        assert!(
+            msg.contains("skipped 2 entries with disallowed extensions"),
+            "message must contain the warning text, got: {msg}"
         );
     }
 

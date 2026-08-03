@@ -611,12 +611,14 @@ def extract_archive(
     Note:
         When extraction fails after some files have already been written to disk,
         the specific exception (e.g. ``SymlinkEscapeError``) is raised with
-        ``files_extracted`` and ``bytes_written`` attributes attached. Detect a
-        partial extraction via ``hasattr(e, "files_extracted")`` — but see
+        ``files_extracted``, ``bytes_written``, ``files_skipped``, and
+        ``warnings`` attributes attached. Detect a partial extraction via
+        ``hasattr(e, "files_extracted")`` — but see
         ``extract_archive_with_progress`` below: a raising ``progress`` callback
-        over an otherwise-successful extraction attaches the same two attribute
-        names, distinguished by a ``progress_callback_error`` marker attribute
-        this function's own exceptions never carry.
+        over an otherwise-successful extraction attaches ``files_extracted`` and
+        ``bytes_written`` (not ``files_skipped``/``warnings``), distinguished by
+        a ``progress_callback_error`` marker attribute this function's own
+        exceptions never carry.
     """
     ...
 
@@ -669,7 +671,8 @@ def extract_archive_with_progress(
 
         When extraction fails after some files have already been written to disk,
         the specific exception (e.g. ``SymlinkEscapeError``) is raised with
-        ``files_extracted`` and ``bytes_written`` attributes attached.
+        ``files_extracted``, ``bytes_written``, ``files_skipped``, and
+        ``warnings`` attributes attached.
 
         If ``progress`` itself raises, extraction is **not** aborted early — the
         underlying progress-callback contract has no cancellation signal, so
@@ -821,10 +824,14 @@ class PathTraversalError(ArchiveError):
     Attributes:
         files_extracted: Number of files successfully extracted before the error.
         bytes_written: Total bytes written to disk before the error.
+        files_skipped: Number of entries skipped due to security checks before the error.
+        warnings: Warning messages generated before the error.
     """
 
     files_extracted: int
     bytes_written: int
+    files_skipped: int
+    warnings: list[str]
 
 class SymlinkEscapeError(ArchiveError):
     """
@@ -836,10 +843,14 @@ class SymlinkEscapeError(ArchiveError):
     Attributes:
         files_extracted: Number of files successfully extracted before the error.
         bytes_written: Total bytes written to disk before the error.
+        files_skipped: Number of entries skipped due to security checks before the error.
+        warnings: Warning messages generated before the error.
     """
 
     files_extracted: int
     bytes_written: int
+    files_skipped: int
+    warnings: list[str]
 
 class HardlinkEscapeError(ArchiveError):
     """
@@ -851,10 +862,14 @@ class HardlinkEscapeError(ArchiveError):
     Attributes:
         files_extracted: Number of files successfully extracted before the error.
         bytes_written: Total bytes written to disk before the error.
+        files_skipped: Number of entries skipped due to security checks before the error.
+        warnings: Warning messages generated before the error.
     """
 
     files_extracted: int
     bytes_written: int
+    files_skipped: int
+    warnings: list[str]
 
 class ZipBombError(ArchiveError):
     """
@@ -866,10 +881,14 @@ class ZipBombError(ArchiveError):
     Attributes:
         files_extracted: Number of files successfully extracted before the error.
         bytes_written: Total bytes written to disk before the error.
+        files_skipped: Number of entries skipped due to security checks before the error.
+        warnings: Warning messages generated before the error.
     """
 
     files_extracted: int
     bytes_written: int
+    files_skipped: int
+    warnings: list[str]
 
 class InvalidPermissionsError(ArchiveError):
     """
@@ -881,10 +900,14 @@ class InvalidPermissionsError(ArchiveError):
     Attributes:
         files_extracted: Number of files successfully extracted before the error.
         bytes_written: Total bytes written to disk before the error.
+        files_skipped: Number of entries skipped due to security checks before the error.
+        warnings: Warning messages generated before the error.
     """
 
     files_extracted: int
     bytes_written: int
+    files_skipped: int
+    warnings: list[str]
 
 class QuotaExceededError(ArchiveError):
     """
@@ -896,10 +919,14 @@ class QuotaExceededError(ArchiveError):
     Attributes:
         files_extracted: Number of files successfully extracted before the error.
         bytes_written: Total bytes written to disk before the error.
+        files_skipped: Number of entries skipped due to security checks before the error.
+        warnings: Warning messages generated before the error.
     """
 
     files_extracted: int
     bytes_written: int
+    files_skipped: int
+    warnings: list[str]
 
 class SecurityViolationError(ArchiveError):
     """
@@ -911,10 +938,14 @@ class SecurityViolationError(ArchiveError):
     Attributes:
         files_extracted: Number of files successfully extracted before the error.
         bytes_written: Total bytes written to disk before the error.
+        files_skipped: Number of entries skipped due to security checks before the error.
+        warnings: Warning messages generated before the error.
     """
 
     files_extracted: int
     bytes_written: int
+    files_skipped: int
+    warnings: list[str]
 
 class UnsupportedFormatError(ArchiveError):
     """Archive format not supported."""

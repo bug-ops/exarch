@@ -272,6 +272,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `saturating_add` to avoid wrapping after `u64::MAX` skips; 7z's own counter
   (`formats/sevenz.rs:575`) was the one site still using bare `+= 1`. Switched to
   `duplicate_skips.saturating_add(1)`, matching the existing idiom exactly.
+- **`exarch-python` and `exarch-node`: a `PartialExtraction` error dropped `files_skipped` and
+  `warnings` when converted to the language-level exception/error (#508)**: both bindings'
+  `convert_error` (`crates/exarch-python/src/error.rs`, `crates/exarch-node/src/error.rs`) only
+  forwarded `files_extracted`/`bytes_written` from the `ExtractionReport` attached to
+  `CoreError::PartialExtraction`, even though `exarch-core` has populated `files_skipped`/
+  `warnings` on that report since #505 — the CLI got the fix in #503, but the bindings were
+  never updated. Python's `convert_error` now also attaches `files_skipped` (`int`) and `warnings`
+  (`list[str]`) to the raised exception; Node's now also appends `filesSkipped=N` and a
+  Rust-`Debug`-formatted `warnings=[...]` fragment to the thrown error's message, following the
+  same `key=value` convention as the existing `filesExtracted`/`bytesWritten` suffix. The
+  `warnings=[...]` fragment on the Node side is for human/log inspection only — it is not
+  guaranteed valid JSON and must not be `JSON.parse`d.
 - **`exarch-core`: TAR, ZIP, and 7z pushed one unbounded, path-bearing warning `String` per entry
   rejected by the extension allowlist (#495)**: `common::check_extension_allowed` (shared by all
   three format handlers) pushed a `"skipped entry with disallowed extension: {path}"` warning

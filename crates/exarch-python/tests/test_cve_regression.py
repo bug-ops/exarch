@@ -265,6 +265,93 @@ def test_partial_extraction_preserves_hardlink_escape_type(temp_dir):
     assert err.files_extracted >= 1
 
 
+def test_partial_extraction_carries_files_skipped_and_warnings(temp_dir):
+    """
+    End-to-end regression test for #508.
+
+    `convert_error`'s `PartialExtraction` arm must forward `files_skipped`
+    and `warnings` from the core `ExtractionReport`, not just
+    `files_extracted`/`bytes_written` (the #210 capability). This exercises
+    the real extraction path (not just `convert_error` directly, unlike the
+    Rust-level unit tests) with an archive that both skips an
+    extension-disallowed entry (non-fatal, extraction continues) and then
+    trips a real failure (a file-count quota), so the resulting
+    `PartialExtraction` report has a non-zero skip count and a real
+    aggregated warning alongside the fatal error.
+    """
+    import tarfile
+
+    archive = temp_dir / "partial_skip_and_warn.tar.gz"
+    blocked = tarfile.TarInfo("dist/blocked.exe")
+    blocked.type = tarfile.REGTYPE
+    first = tarfile.TarInfo("dist/first.txt")
+    first.type = tarfile.REGTYPE
+    second = tarfile.TarInfo("dist/second.txt")
+    second.type = tarfile.REGTYPE
+    _make_tar_gz(
+        archive,
+        [(blocked, b"MZ"), (first, b"ok"), (second, b"also ok")],
+    )
+
+    output_dir = temp_dir / "out"
+    output_dir.mkdir()
+    # `add_allowed_extension` matches against `Path::extension()`, which never
+    # includes the leading dot — pass "txt", not ".txt".
+    config = exarch.SecurityConfig().add_allowed_extension("txt").with_max_file_count(1)
+
+    with pytest.raises(exarch.QuotaExceededError) as exc_info:
+        exarch.extract_archive(archive, output_dir, config)
+
+    err = exc_info.value
+    assert err.files_extracted >= 1
+    assert err.files_skipped > 0
+    assert err.warnings
+    assert any("disallowed extension" in w for w in err.warnings)
+
+
+def test_partial_extraction_skip_only_carries_files_skipped_and_warnings(temp_dir):
+    """
+    End-to-end regression test for #508 (true skip-only scenario, now
+    reachable via #509's `ArchiveError::partial_or` fix).
+
+    The scenario above (test_partial_extraction_carries_files_skipped_and_warnings)
+    always had at least one file extracted before the fatal error, so it was
+    already reachable as `PartialExtraction` even under the old, pre-#509
+    `partial_or` (which only wrapped when something had actually been
+    written). #508's repro steps describe the case where *nothing* was
+    extracted before the failure — a skip-only report where
+    `files_extracted`/`bytes_written` alone "carry zero actionable
+    information" and `files_skipped`/`warnings` are the only signal. This
+    builds an archive with an extension-disallowed entry (non-fatal skip)
+    immediately followed by a symlink escape (fatal, and the very first
+    entry that would have written anything), so the resulting
+    `PartialExtraction` report has zero extracted files/bytes.
+    """
+    import tarfile
+
+    archive = temp_dir / "partial_skip_only.tar.gz"
+    blocked = tarfile.TarInfo("dist/blocked.exe")
+    blocked.type = tarfile.REGTYPE
+    link = tarfile.TarInfo("dist/evil_link")
+    link.type = tarfile.SYMTYPE
+    link.linkname = "../../outside.txt"
+    _make_tar_gz(archive, [(blocked, b"MZ"), (link, None)])
+
+    output_dir = temp_dir / "out"
+    output_dir.mkdir()
+    config = exarch.SecurityConfig().add_allowed_extension("txt").with_allow_symlinks(True)
+
+    with pytest.raises(exarch.SymlinkEscapeError) as exc_info:
+        exarch.extract_archive(archive, output_dir, config)
+
+    err = exc_info.value
+    assert err.files_extracted == 0
+    assert err.bytes_written == 0
+    assert err.files_skipped > 0
+    assert err.warnings
+    assert any("disallowed extension" in w for w in err.warnings)
+
+
 def test_progress_bytes_written_not_stale(temp_dir):
     """
     Regression test for #285.

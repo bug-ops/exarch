@@ -206,6 +206,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`exarch-core`: TAR, ZIP, and 7z pushed one unbounded, path-bearing warning `String` per entry
+  rejected by the extension allowlist (#495)**: `common::check_extension_allowed` (shared by all
+  three format handlers) pushed a `"skipped entry with disallowed extension: {path}"` warning
+  directly into `report.warnings` for every rejected entry, growing the report proportional to
+  archive size with no cap — the same class of issue already fixed for pre-existing-duplicate skips
+  in #484/#490. The function now increments a `disallowed_extension_skips` counter instead; each
+  format's `extract()` aggregates it into at most one `"skipped N entries with disallowed
+  extensions"` warning once extraction completes. `report.files_skipped`'s count is unaffected.
 - **`exarch-python`: a raising progress callback was silently swallowed during extraction/creation
   (#489)**: `PyProgressAdapter::on_entry_start` discarded both the return value and any Python
   exception from `self.callback.call1(...)` via `let _ = ...`, so a callback raising to signal an

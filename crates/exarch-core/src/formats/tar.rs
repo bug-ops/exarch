@@ -228,7 +228,12 @@ impl<R: Read> TarArchive<R> {
         let mode = entry.header().mode().ok();
 
         if matches!(entry_type, EntryType::File)
-            && !common::check_extension_allowed(&path, ctx.config, ctx.report)
+            && !common::check_extension_allowed(
+                &path,
+                ctx.config,
+                ctx.report,
+                ctx.disallowed_extension_skips,
+            )
         {
             return Ok(None);
         }
@@ -505,6 +510,9 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
         // rather than `common::extract_file_with_permit`/`create_symlink`.
         let mut duplicate_skips: u64 = 0;
         let mut hardlink_duplicate_skips: u64 = 0;
+        // Same aggregation, for entries rejected by the extension allowlist
+        // (issue #495).
+        let mut disallowed_extension_skips: u64 = 0;
 
         let reader = self.inner.take().ok_or_else(|| {
             ArchiveError::InvalidArchive("archive reader already consumed by list()".into())
@@ -523,6 +531,7 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
             skip_duplicates,
             duplicate_skips: &mut duplicate_skips,
             hardlink_duplicate_skips: &mut hardlink_duplicate_skips,
+            disallowed_extension_skips: &mut disallowed_extension_skips,
             config,
             progress,
         };
@@ -536,6 +545,7 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
                     ctx.report,
                     *ctx.duplicate_skips,
                     *ctx.hardlink_duplicate_skips,
+                    *ctx.disallowed_extension_skips,
                 );
                 ArchiveError::partial_or(std::mem::take(ctx.report), raw)
             })?;
@@ -568,6 +578,7 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
                         ctx.report,
                         *ctx.duplicate_skips,
                         *ctx.hardlink_duplicate_skips,
+                        *ctx.disallowed_extension_skips,
                     );
                     return Err(ArchiveError::partial_or(std::mem::take(ctx.report), e));
                 }
@@ -581,6 +592,7 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
                     ctx.report,
                     *ctx.duplicate_skips,
                     *ctx.hardlink_duplicate_skips,
+                    *ctx.disallowed_extension_skips,
                 );
                 return Err(ArchiveError::partial_or(std::mem::take(ctx.report), e));
             }
@@ -590,6 +602,7 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
             ctx.report,
             *ctx.duplicate_skips,
             *ctx.hardlink_duplicate_skips,
+            *ctx.disallowed_extension_skips,
         );
         ctx.progress.on_complete();
         report.duration = start.elapsed();
@@ -666,21 +679,28 @@ struct ExtractionContext<'a, 'v> {
     /// `duplicate_skips` because hardlinks are TAR-specific (ZIP has no
     /// hardlink entry type) and are not routed through `common.rs`.
     hardlink_duplicate_skips: &'a mut u64,
+    /// Count of file entries skipped by `common::check_extension_allowed`
+    /// because their extension is not in the allowlist. Aggregated into a
+    /// single warning by [`push_duplicate_skip_warnings`] instead of one
+    /// warning per entry (issue #495).
+    disallowed_extension_skips: &'a mut u64,
     config: &'v SecurityConfig<Validated>,
     progress: &'a mut dyn ProgressCallback,
 }
 
-/// Appends aggregated duplicate-skip warnings to `report`, one entry per
-/// non-zero counter, mirroring 7z's single end-of-extraction warning
-/// (`SevenZArchive::extract_with_callback`) instead of one warning per
-/// skipped entry (issue #490).
+/// Appends aggregated duplicate-skip and disallowed-extension warnings to
+/// `report`, one entry per non-zero counter, mirroring 7z's single
+/// end-of-extraction warning (`SevenZArchive::extract_with_callback`)
+/// instead of one warning per skipped entry (issues #490, #495).
 fn push_duplicate_skip_warnings(
     report: &mut ExtractionReport,
     duplicate_skips: u64,
     hardlink_duplicate_skips: u64,
+    disallowed_extension_skips: u64,
 ) {
     common::push_duplicate_skip_warning(report, duplicate_skips, "entry", "entries");
     common::push_duplicate_skip_warning(report, hardlink_duplicate_skips, "hardlink", "hardlinks");
+    common::push_disallowed_extension_warning(report, disallowed_extension_skips);
 }
 
 #[allow(dead_code)] // Fields used only on Unix
@@ -2234,6 +2254,7 @@ mod tests {
         let mut progress = crate::NoopProgress;
         let mut duplicate_skips = 0u64;
         let mut hardlink_duplicate_skips = 0u64;
+        let mut disallowed_extension_skips = 0u64;
         let mut ctx = ExtractionContext {
             validator: &mut validator,
             dest: &dest,
@@ -2243,6 +2264,7 @@ mod tests {
             skip_duplicates: true,
             duplicate_skips: &mut duplicate_skips,
             hardlink_duplicate_skips: &mut hardlink_duplicate_skips,
+            disallowed_extension_skips: &mut disallowed_extension_skips,
             config: &config,
             progress: &mut progress,
         };
@@ -2970,7 +2992,117 @@ mod tests {
         assert_eq!(report.files_skipped, 1);
         assert!(dest.path().join("keep.txt").exists());
         assert!(!dest.path().join("skip.exe").exists());
-        assert!(report.warnings.iter().any(|w| w.contains("skip.exe")));
+        assert_eq!(
+            report.warnings,
+            vec!["skipped 1 entry with disallowed extension".to_string()],
+            "the disallowed-extension skip must be aggregated into a single warning \
+             instead of a per-entry, path-bearing one (issue #495)"
+        );
+    }
+
+    /// Reproduces the actual #495 bug scenario end-to-end: many entries
+    /// rejected by the extension allowlist must aggregate into a single
+    /// warning instead of growing `report.warnings` proportional to archive
+    /// size (mirrors `test_skip_duplicates_aggregates_single_warning`, #490).
+    #[test]
+    fn test_disallowed_extension_aggregates_single_warning() {
+        const ENTRY_COUNT: usize = 30;
+        let names: Vec<String> = (0..ENTRY_COUNT).map(|i| format!("skip-{i}.exe")).collect();
+        let entries: Vec<(&str, &[u8])> = names
+            .iter()
+            .map(|n| (n.as_str(), b"payload".as_slice()))
+            .collect();
+        let tar_data = create_test_tar(entries);
+        let dest = tempfile::tempdir().unwrap();
+        let config = SecurityConfig::default()
+            .with_allowed_extensions(vec!["txt".to_string()])
+            .validate()
+            .expect("valid config");
+
+        let report = TarArchive::new(Cursor::new(tar_data))
+            .extract(
+                dest.path(),
+                &config,
+                &ExtractionOptions::default(),
+                &mut NoopProgress,
+            )
+            .unwrap();
+
+        assert_eq!(report.files_skipped, ENTRY_COUNT);
+        assert_eq!(report.files_extracted, 0);
+        assert_eq!(
+            report.warnings,
+            vec![format!(
+                "skipped {ENTRY_COUNT} entries with disallowed extensions"
+            )],
+            "disallowed-extension skips must be aggregated into a single warning, got: {:?}",
+            report.warnings
+        );
+    }
+
+    /// Verifies duplicate-skip and disallowed-extension-skip counters
+    /// aggregate independently in the same extraction: an archive mixing
+    /// both skip reasons must produce exactly two warnings, one per reason,
+    /// each with the correct count (issue #495).
+    #[test]
+    fn test_duplicate_and_disallowed_extension_skips_aggregate_independently() {
+        const DUPLICATE_COUNT: usize = 5;
+        const DISALLOWED_COUNT: usize = 7;
+
+        let mut names: Vec<String> = (0..DUPLICATE_COUNT)
+            .map(|i| format!("dup-{i}.txt"))
+            .collect();
+        names.extend((0..DISALLOWED_COUNT).map(|i| format!("skip-{i}.exe")));
+        let entries: Vec<(&str, &[u8])> = names
+            .iter()
+            .map(|n| (n.as_str(), b"payload".as_slice()))
+            .collect();
+        let tar_data = create_test_tar(entries);
+
+        let temp = TempDir::new().unwrap();
+        for name in names.iter().take(DUPLICATE_COUNT) {
+            std::fs::write(temp.path().join(name), b"already here").unwrap();
+        }
+
+        let config = SecurityConfig::default()
+            .with_allowed_extensions(vec!["txt".to_string()])
+            .validate()
+            .expect("valid config");
+
+        let report = TarArchive::new(Cursor::new(tar_data))
+            .extract(
+                temp.path(),
+                &config,
+                &ExtractionOptions::default(), // skip_duplicates = true
+                &mut NoopProgress,
+            )
+            .unwrap();
+
+        assert_eq!(report.files_skipped, DUPLICATE_COUNT + DISALLOWED_COUNT);
+        assert_eq!(report.files_extracted, 0);
+        assert_eq!(
+            report.warnings.len(),
+            2,
+            "each skip reason must aggregate into its own single warning, got: {:?}",
+            report.warnings
+        );
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w.contains(&DUPLICATE_COUNT.to_string()) && w.contains("duplicate")),
+            "expected a duplicate-skip warning reporting {DUPLICATE_COUNT}, got: {:?}",
+            report.warnings
+        );
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w.contains(&DISALLOWED_COUNT.to_string())
+                    && w.contains("disallowed extension")),
+            "expected a disallowed-extension warning reporting {DISALLOWED_COUNT}, got: {:?}",
+            report.warnings
+        );
     }
 
     #[test]

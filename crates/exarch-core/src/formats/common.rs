@@ -17,6 +17,8 @@
 //! - [`copy_file_content_with_permit`]: Hardlink content copy between
 //!   already-open source/destination handles
 //! - [`check_extension_allowed`]: Extension allowlist filtering
+//! - [`push_disallowed_extension_warning`]: Aggregated disallowed-extension
+//!   skip warning
 
 use rustc_hash::FxHashSet;
 use std::fs::File;
@@ -373,10 +375,42 @@ pub fn push_duplicate_skip_warning(
     }
 }
 
+/// Appends a single aggregated warning for `count` entries skipped due to a
+/// disallowed extension.
+///
+/// Mirrors [`push_duplicate_skip_warning`]'s aggregation pattern so
+/// `report.warnings` grows once per extraction instead of once per rejected
+/// entry (issue #495). A no-op when `count` is zero.
+///
+/// # Examples
+///
+/// ```ignore
+/// # use exarch_core::formats::common::push_disallowed_extension_warning;
+/// # use exarch_core::ExtractionReport;
+/// let mut report = ExtractionReport::new();
+/// push_disallowed_extension_warning(&mut report, 3);
+/// assert_eq!(
+///     report.warnings,
+///     vec!["skipped 3 entries with disallowed extensions".to_string()]
+/// );
+/// ```
+pub fn push_disallowed_extension_warning(report: &mut ExtractionReport, count: u64) {
+    if count > 0 {
+        let (noun, ext_noun) = if count == 1 {
+            ("entry", "extension")
+        } else {
+            ("entries", "extensions")
+        };
+        report
+            .warnings
+            .push(format!("skipped {count} {noun} with disallowed {ext_noun}"));
+    }
+}
+
 /// Returns `true` if `path`'s extension passes `config`'s allowlist.
 ///
-/// If the extension is not allowed, records the skip in `report`
-/// (increments `files_skipped`, pushes the standard warning) and returns
+/// If the extension is not allowed, records the skip (increments
+/// `report.files_skipped` and `disallowed_extension_skips`) and returns
 /// `false`. Shared by the TAR, ZIP, and 7z extractors, which all reject
 /// entries with disallowed extensions before further validation.
 ///
@@ -385,11 +419,21 @@ pub fn push_duplicate_skip_warning(
 /// exists because the pattern already drifted once for the FFI boundary
 /// path check in #406 — see #413).
 ///
+/// # Aggregated Warning (issue #495)
+///
+/// `path` is deliberately not recorded anywhere: earlier versions pushed one
+/// path-bearing warning string per rejected entry, which grew
+/// `report.warnings` without bound for archives with many disallowed
+/// entries. The caller instead increments `disallowed_extension_skips` and
+/// aggregates it into a single [`push_disallowed_extension_warning`] once
+/// extraction completes, mirroring the `duplicate_skips` pattern used by
+/// [`push_duplicate_skip_warning`].
+///
 /// # Examples
 ///
 /// ```ignore
 /// # use exarch_core::formats::common::check_extension_allowed;
-/// if !check_extension_allowed(&path, config, report) {
+/// if !check_extension_allowed(&path, config, report, &mut disallowed_extension_skips) {
 ///     return Ok(None);
 /// }
 /// ```
@@ -399,6 +443,7 @@ pub fn check_extension_allowed(
     path: &Path,
     config: &SecurityConfig<Validated>,
     report: &mut ExtractionReport,
+    disallowed_extension_skips: &mut u64,
 ) -> bool {
     let ext = path.extension().and_then(|e| e.to_str());
     if config.is_path_extension_allowed(ext) {
@@ -406,10 +451,7 @@ pub fn check_extension_allowed(
     }
 
     report.files_skipped += 1;
-    report.warnings.push(format!(
-        "skipped entry with disallowed extension: {}",
-        path.display()
-    ));
+    *disallowed_extension_skips = disallowed_extension_skips.saturating_add(1);
     false
 }
 
@@ -1510,31 +1552,30 @@ mod tests {
         assert!(temp.path().join("link.txt").exists());
     }
 
-    /// Pins the exact warning message text produced by
-    /// `check_extension_allowed`, so any future edit that changes the
-    /// wording (or re-inlines this pattern with different wording at a call
-    /// site) is caught immediately rather than drifting unnoticed, as
-    /// happened in #413.
+    /// Pins the aggregation behavior of `check_extension_allowed`: a rejected
+    /// entry increments `disallowed_extension_skips` instead of pushing a
+    /// per-entry warning, so `report.warnings`'s growth stays independent of
+    /// how many disallowed entries an archive contains (issue #495).
     #[test]
-    fn test_check_extension_allowed_warning_message_text() {
+    fn test_check_extension_allowed_increments_counter_not_warnings() {
         let config = SecurityConfig::default()
             .with_allowed_extensions(vec!["txt".to_string()])
             .validate()
             .expect("valid config");
         let mut report = ExtractionReport::default();
         let path = PathBuf::from("skip.exe");
+        let mut disallowed_extension_skips = 0u64;
 
-        let allowed = check_extension_allowed(&path, &config, &mut report);
+        let allowed =
+            check_extension_allowed(&path, &config, &mut report, &mut disallowed_extension_skips);
 
         assert!(!allowed, "disallowed extension must be rejected");
         assert_eq!(report.files_skipped, 1);
-        assert_eq!(
-            report.warnings,
-            vec!["skipped entry with disallowed extension: skip.exe".to_string()]
-        );
+        assert_eq!(disallowed_extension_skips, 1);
+        assert!(report.warnings.is_empty());
     }
 
-    /// Verifies the happy path leaves `report` untouched.
+    /// Verifies the happy path leaves `report` and the counter untouched.
     #[test]
     fn test_check_extension_allowed_allowed_extension() {
         let config = SecurityConfig::default()
@@ -1543,11 +1584,37 @@ mod tests {
             .expect("valid config");
         let mut report = ExtractionReport::default();
         let path = PathBuf::from("keep.txt");
+        let mut disallowed_extension_skips = 0u64;
 
-        let allowed = check_extension_allowed(&path, &config, &mut report);
+        let allowed =
+            check_extension_allowed(&path, &config, &mut report, &mut disallowed_extension_skips);
 
         assert!(allowed, "allowed extension must pass");
         assert_eq!(report.files_skipped, 0);
+        assert_eq!(disallowed_extension_skips, 0);
         assert!(report.warnings.is_empty());
+    }
+
+    /// Pins the exact aggregated warning message text produced by
+    /// `push_disallowed_extension_warning` for both singular and plural
+    /// counts, and confirms it is a no-op for a zero count.
+    #[test]
+    fn test_push_disallowed_extension_warning_text() {
+        let mut report = ExtractionReport::default();
+        push_disallowed_extension_warning(&mut report, 0);
+        assert!(report.warnings.is_empty(), "zero count must be a no-op");
+
+        push_disallowed_extension_warning(&mut report, 1);
+        assert_eq!(
+            report.warnings,
+            vec!["skipped 1 entry with disallowed extension".to_string()]
+        );
+
+        report.warnings.clear();
+        push_disallowed_extension_warning(&mut report, 3);
+        assert_eq!(
+            report.warnings,
+            vec!["skipped 3 entries with disallowed extensions".to_string()]
+        );
     }
 }

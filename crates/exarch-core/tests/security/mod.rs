@@ -8,3 +8,4 @@ mod symlink_target_validation;
 mod tar_budget_parity;
 mod tar_ghsa_2026;
 mod tar_metadata_bomb;
+mod zip_ghsa_5j8q;

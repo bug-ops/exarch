@@ -125,6 +125,8 @@ use crate::ProgressCallback;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::config::Validated;
+use crate::copy::CopyBuffer;
+use crate::copy::copy_with_buffer;
 use crate::error::QuotaResource;
 use crate::security::EntryValidator;
 use crate::security::quota::QuotaPermit;
@@ -305,14 +307,27 @@ impl<R: Read + Seek> SevenZArchive<R> {
 /// function cannot be called at all without moving a genuine permit out of
 /// the validated entry.
 ///
+/// # Security - Streaming Size Enforcement (GHSA-5j8q-wxg5-hj4r)
+///
+/// `expected_size` is `entry.size` — the declared uncompressed size read
+/// from 7z's own (attacker-controlled) archive metadata, the same value
+/// already used to authorize `permit`. The copy goes through
+/// [`copy_with_buffer`], which enforces it as a hard streaming ceiling and
+/// an exact post-copy match rather than trusting it a second time, closing
+/// the same gap TAR/ZIP close via [`common::extract_file_with_permit`].
+///
 /// # Errors
 ///
-/// Returns an error if file creation, the copy, or the underlying I/O fails.
+/// Returns an error if file creation, the copy, or the underlying I/O fails,
+/// or if the actual decompressed byte count exceeds or falls short of
+/// `expected_size`.
 fn write_file_direct(
     reader: &mut dyn Read,
     dest_path: &Path,
+    expected_size: u64,
+    copy_buffer: &mut CopyBuffer,
     _permit: QuotaPermit,
-) -> std::result::Result<u64, sevenz_rust2::Error> {
+) -> Result<u64> {
     let file = common::create_file_with_mode(dest_path, None, true)?;
     // A decode failure partway through the copy would otherwise leave a
     // truncated file at dest_path (issue #492 adversarial review, finding
@@ -320,11 +335,17 @@ fn write_file_direct(
     // beforehand, it is always safe to remove whatever we just started
     // writing there. Mirrors write_file_with_permit_using's TempFileGuard
     // use, just applied directly to dest_path instead of a temp path.
+    //
+    // Declared before `writer` takes ownership of `file` below: Rust drops
+    // locals in reverse declaration order, so on an error unwind `writer`
+    // (and the `file` it owns) drops — and closes the fd — before `guard`
+    // attempts to remove the path. Reversing this order would let the guard
+    // try to unlink a still-open file, a silent no-op on Windows.
     let guard = common::TempFileGuard::new(dest_path.to_path_buf());
     // 64KiB write buffering to cut per-file syscall count (finding M2),
     // matching TAR/ZIP's common::extract_file_with_permit.
     let mut writer = std::io::BufWriter::with_capacity(64 * 1024, file);
-    let bytes_written = std::io::copy(reader, &mut writer)?;
+    let bytes_written = copy_with_buffer(reader, &mut writer, copy_buffer, Some(expected_size))?;
     writer.flush()?;
     guard.persist();
     Ok(bytes_written)
@@ -361,26 +382,42 @@ fn write_file_direct(
 /// collision (`ErrorKind::AlreadyExists`), a fresh counter value is drawn
 /// and creation is retried up to [`MAX_TEMP_FILE_CREATE_ATTEMPTS`] times.
 ///
+/// # Security - Streaming Size Enforcement (GHSA-5j8q-wxg5-hj4r)
+///
+/// Same enforcement as [`write_file_direct`]: the copy runs through
+/// [`copy_with_buffer`] with `expected_size` (`entry.size`) as a hard
+/// streaming ceiling and exact post-copy match, not trusted metadata.
+///
 /// # Errors
 ///
 /// Returns an error if a unique temp file cannot be created within
-/// [`MAX_TEMP_FILE_CREATE_ATTEMPTS`] attempts, or if the copy or rename
-/// fails.
+/// [`MAX_TEMP_FILE_CREATE_ATTEMPTS`] attempts, if the copy or rename fails,
+/// or if the actual decompressed byte count exceeds or falls short of
+/// `expected_size`.
 fn write_file_with_permit(
     reader: &mut dyn Read,
     dest_path: &Path,
+    expected_size: u64,
+    copy_buffer: &mut CopyBuffer,
     permit: QuotaPermit,
-) -> std::result::Result<u64, sevenz_rust2::Error> {
+) -> Result<u64> {
     let pid = id();
     let original_name = dest_path
         .file_name()
         .map_or_else(|| "file".to_string(), |n| n.to_string_lossy().to_string());
 
-    write_file_with_permit_using(reader, dest_path, permit, || {
-        let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let temp_name = format!(".{original_name}.exarch-tmp-{pid}-{counter}");
-        dest_path.with_file_name(&temp_name)
-    })
+    write_file_with_permit_using(
+        reader,
+        dest_path,
+        expected_size,
+        copy_buffer,
+        permit,
+        || {
+            let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let temp_name = format!(".{original_name}.exarch-tmp-{pid}-{counter}");
+            dest_path.with_file_name(&temp_name)
+        },
+    )
 }
 
 /// Implementation behind [`write_file_with_permit`], parameterized over the
@@ -395,17 +432,26 @@ fn write_file_with_permit(
 /// multi-threaded execution (only nextest's one-test-per-process model would
 /// make that safe).
 ///
+/// # Security - Streaming Size Enforcement (GHSA-5j8q-wxg5-hj4r)
+///
+/// Same enforcement as [`write_file_direct`]: the copy runs through
+/// [`copy_with_buffer`] with `expected_size` as a hard streaming ceiling and
+/// exact post-copy match, not trusted metadata.
+///
 /// # Errors
 ///
 /// Returns an error if a unique temp file cannot be created within
-/// [`MAX_TEMP_FILE_CREATE_ATTEMPTS`] attempts, or if the copy or rename
-/// fails.
+/// [`MAX_TEMP_FILE_CREATE_ATTEMPTS`] attempts, if the copy or rename fails,
+/// or if the actual decompressed byte count exceeds or falls short of
+/// `expected_size`.
 fn write_file_with_permit_using(
     reader: &mut dyn Read,
     dest_path: &Path,
+    expected_size: u64,
+    copy_buffer: &mut CopyBuffer,
     _permit: QuotaPermit,
     mut next_candidate_path: impl FnMut() -> PathBuf,
-) -> std::result::Result<u64, sevenz_rust2::Error> {
+) -> Result<u64> {
     let mut created: Option<(PathBuf, std::fs::File)> = None;
     for _ in 0..MAX_TEMP_FILE_CREATE_ATTEMPTS {
         let candidate_path = next_candidate_path();
@@ -420,7 +466,7 @@ fn write_file_with_permit_using(
         }
     }
 
-    let (temp_path, mut temp_file) = created.ok_or_else(|| {
+    let (temp_path, temp_file) = created.ok_or_else(|| {
         std::io::Error::new(
             ErrorKind::AlreadyExists,
             format!(
@@ -430,16 +476,23 @@ fn write_file_with_permit_using(
         )
     })?;
 
+    // Declared before `writer` takes ownership of `temp_file` below, for the
+    // same reason as write_file_direct's `guard`: reverse-declaration-order
+    // drop means `writer` (owning `temp_file`) closes the fd before
+    // `temp_guard` attempts to remove `temp_path` on an error unwind,
+    // instead of racing a still-open handle (a silent no-op on Windows).
+    // `temp_file` is moved into `writer` rather than merely borrowed so
+    // there is no separate `temp_file` binding left to outlive `writer`.
     let temp_guard = common::TempFileGuard::new(temp_path.clone());
     // 64KiB write buffering to cut per-file syscall count (issue #492
     // adversarial review, finding M2), matching TAR/ZIP's
     // common::extract_file_with_permit.
-    let bytes_written = {
-        let mut writer = std::io::BufWriter::with_capacity(64 * 1024, &mut temp_file);
-        let bytes_written = std::io::copy(reader, &mut writer)?;
-        writer.flush()?;
-        bytes_written
-    };
+    let mut writer = std::io::BufWriter::with_capacity(64 * 1024, temp_file);
+    let bytes_written = copy_with_buffer(reader, &mut writer, copy_buffer, Some(expected_size))?;
+    writer.flush()?;
+    // Explicit close before rename: renaming a still-open file is fine on
+    // Unix but the handle should not outlive its purpose regardless.
+    drop(writer);
     std::fs::rename(&temp_path, dest_path)?;
     temp_guard.persist();
 
@@ -518,7 +571,8 @@ impl<R: Read + Seek> SevenZArchive<R> {
         config: &SecurityConfig<Validated>,
         duplicate_skips: &mut u64,
         disallowed_extension_skips: &mut u64,
-        pending_io_error: &mut Option<std::io::Error>,
+        pending_error: &mut Option<ArchiveError>,
+        copy_buffer: &mut CopyBuffer,
     ) -> std::result::Result<u64, sevenz_rust2::Error> {
         let entry_type = SevenZEntryAdapter::to_entry_type(entry).map_err(|e| {
             sevenz_rust2::Error::Other(format!("entry type detection failed: {e}").into())
@@ -606,8 +660,8 @@ impl<R: Read + Seek> SevenZArchive<R> {
                     // opening a directory for write) instead of recursively
                     // deleting the pre-existing directory tree (issue #483).
                     //
-                    // Stashed as a raw `io::Error` and returned out-of-band
-                    // via `pending_io_error` instead of `.into()`-converting
+                    // Stashed as a raw ArchiveError and returned out-of-band
+                    // via `pending_error` instead of `.into()`-converting
                     // to `sevenz_rust2::Error` here: that round-trip goes
                     // through `From<sevenz_rust2::Error> for ArchiveError`,
                     // which stringifies the error and re-derives its
@@ -620,7 +674,9 @@ impl<R: Read + Seek> SevenZArchive<R> {
                     // constructed here for the same reason: nothing about
                     // this error should ever again be at the mercy of that
                     // heuristic.
-                    *pending_io_error = Some(std::io::Error::from(ErrorKind::IsADirectory));
+                    *pending_error = Some(ArchiveError::Io(std::io::Error::from(
+                        ErrorKind::IsADirectory,
+                    )));
                     return Err(sevenz_rust2::Error::Other(
                         "destination path is a pre-existing directory".into(),
                     ));
@@ -640,6 +696,15 @@ impl<R: Read + Seek> SevenZArchive<R> {
                 // The overwrite branch keeps temp+rename so a decode failure
                 // mid-stream cannot leave a truncated file where the
                 // original stood.
+                //
+                // Both branches enforce entry.size as a hard streaming
+                // ceiling and exact post-copy match (GHSA-5j8q-wxg5-hj4r, see
+                // write_file_direct/write_file_with_permit); a violation
+                // there returns Err(ArchiveError) which does not implement
+                // Into<sevenz_rust2::Error>, so it is stashed out-of-band via
+                // `pending_error` (same reasoning as the IsADirectory case
+                // above) rather than round-tripped through the lossy string
+                // conversion.
                 let bytes_written = if existing.is_some() {
                     // 7z uses temp+rename (unlike TAR/ZIP which truncate
                     // in-place via File::create). Remove the existing
@@ -649,10 +714,14 @@ impl<R: Read + Seek> SevenZArchive<R> {
                     // symlink) can reach here: directories and Unix symlinks
                     // were already rejected above.
                     std::fs::remove_file(&dest_path)?;
-                    write_file_with_permit(reader, &dest_path, permit)?
+                    write_file_with_permit(reader, &dest_path, entry.size, copy_buffer, permit)
                 } else {
-                    write_file_direct(reader, &dest_path, permit)?
-                };
+                    write_file_direct(reader, &dest_path, entry.size, copy_buffer, permit)
+                }
+                .map_err(|e| {
+                    *pending_error = Some(e);
+                    sevenz_rust2::Error::Other("extraction aborted by security policy".into())
+                })?;
                 report.bytes_written = report
                     .bytes_written
                     .checked_add(bytes_written)
@@ -716,13 +785,25 @@ impl<R: Read + Seek> SevenZArchive<R> {
             /// extension is not in the allowlist. Aggregated the
             /// same way as `duplicate_skips` (issue #495).
             disallowed_extension_skips: u64,
-            /// Set when `process_entry_inner` needs its caller to construct
-            /// `ArchiveError::Io` directly from a raw `io::Error`, bypassing
-            /// the lossy `sevenz_rust2::Error` -> `ArchiveError` conversion
-            /// (issue #483 S1) that stringifies errors and would otherwise
-            /// collapse a specific `ErrorKind` to `Other` and re-classify by
-            /// substring match on the resulting text.
-            pending_io_error: Option<std::io::Error>,
+            /// Set when `process_entry_inner` needs its caller to propagate a
+            /// precise `ArchiveError` directly, bypassing the lossy
+            /// `sevenz_rust2::Error` -> `ArchiveError` conversion (issue
+            /// #483 S1) that stringifies errors and would otherwise collapse
+            /// a specific `ErrorKind` to `Other` and re-classify by
+            /// substring match on the resulting text. Used for the
+            /// `IsADirectory` case and for `write_file_direct`/
+            /// `write_file_with_permit`'s streaming-size violations
+            /// (GHSA-5j8q-wxg5-hj4r), neither of which has a meaningful
+            /// `sevenz_rust2::Error` representation to round-trip through.
+            pending_error: Option<ArchiveError>,
+            /// Single reusable copy buffer for the whole extraction, mirroring
+            /// TAR/ZIP's per-archive `CopyBuffer` (`tar.rs`, `zip.rs`).
+            /// Previously `write_file_direct`/`write_file_with_permit_using`
+            /// each allocated a fresh 64KiB `CopyBuffer` per file entry — the
+            /// same per-file cost #492 removed from 7z's write path — so this
+            /// hoists it here instead of threading a freshly-allocated one
+            /// through `process_entry_inner` on every call.
+            copy_buffer: CopyBuffer,
         }
 
         let mut ctx = SzContext {
@@ -732,7 +813,8 @@ impl<R: Read + Seek> SevenZArchive<R> {
             current_idx: 0,
             duplicate_skips: 0,
             disallowed_extension_skips: 0,
-            pending_io_error: None,
+            pending_error: None,
+            copy_buffer: CopyBuffer::new(),
         };
 
         // Extraction callback - called for each entry.
@@ -764,7 +846,8 @@ impl<R: Read + Seek> SevenZArchive<R> {
                 config,
                 &mut ctx.duplicate_skips,
                 &mut ctx.disallowed_extension_skips,
-                &mut ctx.pending_io_error,
+                &mut ctx.pending_error,
+                &mut ctx.copy_buffer,
             );
 
             // INVARIANT: every branch below must call on_entry_complete exactly once.
@@ -798,15 +881,25 @@ impl<R: Read + Seek> SevenZArchive<R> {
         common::push_disallowed_extension_warning(&mut accumulated, ctx.disallowed_extension_skips);
 
         let e = match result {
-            Ok(()) => return Ok(accumulated),
-            // A stashed `pending_io_error` takes priority: it means
+            Ok(()) => {
+                // `pending_error` is only ever set immediately before
+                // `process_entry_inner` returns an `Err` for the same entry
+                // (issue #483 S1 pattern); if the overall callback loop
+                // succeeded, nothing should have stashed a pending error.
+                debug_assert!(
+                    ctx.pending_error.is_none(),
+                    "pending_error must be unset when for_each_entries reports success"
+                );
+                return Ok(accumulated);
+            }
+            // A stashed `pending_error` takes priority: it means
             // `process_entry_inner` already resolved the precise error and
             // the `sevenz_rust2::Error` in `e` is just a same-iteration abort
             // signal, not the real failure (issue #483 S1).
             Err(e) => ctx
-                .pending_io_error
+                .pending_error
                 .take()
-                .map_or_else(|| ArchiveError::from(e), ArchiveError::Io),
+                .unwrap_or_else(|| ArchiveError::from(e)),
         };
         Err(ArchiveError::partial_or(accumulated, e))
     }
@@ -1246,13 +1339,20 @@ mod tests {
         let mut next_candidate = 0u32;
         let temp_dir_path = temp.path().to_path_buf();
         let mut reader = Cursor::new(b"legit content".to_vec());
-        let bytes_written =
-            write_file_with_permit_using(&mut reader, &dest_path, test_permit(), || {
+        let mut copy_buffer = CopyBuffer::new();
+        let bytes_written = write_file_with_permit_using(
+            &mut reader,
+            &dest_path,
+            13,
+            &mut copy_buffer,
+            test_permit(),
+            || {
                 let path = temp_dir_path.join(format!(".candidate-{next_candidate}.tmp"));
                 next_candidate += 1;
                 path
-            })
-            .expect("should retry past every planted symlink and succeed");
+            },
+        )
+        .expect("should retry past every planted symlink and succeed");
 
         assert_eq!(bytes_written, 13);
         assert_eq!(std::fs::read(&dest_path).unwrap(), b"legit content");
@@ -1297,11 +1397,19 @@ mod tests {
         let mut next_candidate = 0u32;
         let temp_dir_path = temp.path().to_path_buf();
         let mut reader = Cursor::new(b"legit content".to_vec());
-        let result = write_file_with_permit_using(&mut reader, &dest_path, test_permit(), || {
-            let path = temp_dir_path.join(format!(".candidate-{next_candidate}.tmp"));
-            next_candidate += 1;
-            path
-        });
+        let mut copy_buffer = CopyBuffer::new();
+        let result = write_file_with_permit_using(
+            &mut reader,
+            &dest_path,
+            13,
+            &mut copy_buffer,
+            test_permit(),
+            || {
+                let path = temp_dir_path.join(format!(".candidate-{next_candidate}.tmp"));
+                next_candidate += 1;
+                path
+            },
+        );
 
         assert!(
             result.is_err(),
@@ -1312,6 +1420,84 @@ mod tests {
         for victim_path in &victims {
             assert!(!victim_path.exists());
         }
+    }
+
+    /// Regression test for GHSA-5j8q-wxg5-hj4r on 7z's fast write path
+    /// (`write_file_direct`, used when nothing occupies the destination): a
+    /// reader producing far more bytes than `expected_size` (standing in for
+    /// a forged `entry.size` from 7z's own archive metadata) must abort with
+    /// an error and must not leave an oversized file on disk.
+    #[test]
+    #[cfg(unix)]
+    fn test_write_file_direct_forged_size_aborts_and_cleans_up() {
+        let temp = TempDir::new().unwrap();
+        let dest_path = temp.path().join("bomb.bin");
+
+        let real_data = vec![0x41u8; 200 * 1024];
+        let mut reader = Cursor::new(&real_data);
+        let mut copy_buffer = CopyBuffer::new();
+
+        let result =
+            write_file_direct(&mut reader, &dest_path, 50, &mut copy_buffer, test_permit());
+
+        assert!(
+            result.is_err(),
+            "streaming past expected_size must abort, got: {result:?}"
+        );
+        match result {
+            Err(ArchiveError::SecurityViolation { reason }) => {
+                assert!(
+                    reason.contains("50 bytes"),
+                    "error must name the declared ceiling (50), got: {reason:?}"
+                );
+            }
+            other => {
+                panic!("expected SecurityViolation naming the 50-byte ceiling, got: {other:?}")
+            }
+        }
+        assert!(
+            !dest_path.exists(),
+            "aborted write_file_direct must not leave a file on disk"
+        );
+    }
+
+    /// Same as [`test_write_file_direct_forged_size_aborts_and_cleans_up`]
+    /// but for the overwrite path (`write_file_with_permit`, temp-file +
+    /// rename): the forged-size abort must clean up the temp file and must
+    /// never reach `rename`, so the pre-existing destination is untouched.
+    #[test]
+    #[cfg(unix)]
+    fn test_write_file_with_permit_forged_size_aborts_and_leaves_original_untouched() {
+        let temp = TempDir::new().unwrap();
+        let dest_path = temp.path().join("existing.bin");
+        std::fs::write(&dest_path, b"original content").unwrap();
+
+        let real_data = vec![0x41u8; 200 * 1024];
+        let mut reader = Cursor::new(&real_data);
+        let mut copy_buffer = CopyBuffer::new();
+
+        let result =
+            write_file_with_permit(&mut reader, &dest_path, 50, &mut copy_buffer, test_permit());
+
+        assert!(
+            result.is_err(),
+            "streaming past expected_size must abort, got: {result:?}"
+        );
+        assert_eq!(
+            std::fs::read(&dest_path).unwrap(),
+            b"original content",
+            "aborted overwrite must leave the pre-existing destination untouched"
+        );
+        // No stray temp file (`.existing.bin.exarch-tmp-*`) left behind.
+        let leftovers: Vec<_> = std::fs::read_dir(temp.path())
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .filter(|e| e.file_name() != dest_path.file_name().unwrap())
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "aborted write must not leave a temp file behind, found: {leftovers:?}"
+        );
     }
 
     #[test]
@@ -2234,7 +2420,8 @@ mod tests {
         let mut report = ExtractionReport::new();
         let mut duplicate_skips = 0u64;
         let mut disallowed_extension_skips = 0u64;
-        let mut pending_io_error = None;
+        let mut pending_error = None;
+        let mut copy_buffer = CopyBuffer::new();
 
         let mut entry = sevenz_rust2::ArchiveEntry::new_file("../../evil.txt");
         entry.has_stream = true;
@@ -2253,7 +2440,8 @@ mod tests {
             &config,
             &mut duplicate_skips,
             &mut disallowed_extension_skips,
-            &mut pending_io_error,
+            &mut pending_error,
+            &mut copy_buffer,
         );
 
         assert_matches!(
@@ -2281,7 +2469,8 @@ mod tests {
         let mut report = ExtractionReport::new();
         let mut duplicate_skips = u64::MAX;
         let mut disallowed_extension_skips = 0u64;
-        let mut pending_io_error = None;
+        let mut pending_error = None;
+        let mut copy_buffer = CopyBuffer::new();
 
         let mut entry = sevenz_rust2::ArchiveEntry::new_file("existing.txt");
         entry.has_stream = true;
@@ -2300,7 +2489,8 @@ mod tests {
             &config,
             &mut duplicate_skips,
             &mut disallowed_extension_skips,
-            &mut pending_io_error,
+            &mut pending_error,
+            &mut copy_buffer,
         );
 
         assert_matches!(

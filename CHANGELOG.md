@@ -192,6 +192,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `hasattr(e, "files_extracted")` idiom), so the marker is what tells the two apart; if the
   operation also failed, the core error stays primary (a raising callback can never mask a
   security error) with the callback's exception chained onto it via `__cause__`.
+- **`exarch-core`: `SafeSymlink::validate` did not explicitly reject Windows drive/UNC prefix or
+  root-relative components in a symlink target, relying only on `is_absolute()` (#491)**: a
+  drive-relative target like `C:foo` (no backslash after the colon, `Prefix` without `RootDir`) and
+  a root-relative target like `\evil` (`RootDir` without `Prefix`) are both not `is_absolute()` per
+  Rust's definition, which requires both components together, yet each still resolves relative to
+  the current directory/drive — a GHSA-9ppj-qmqm-q256-class bypass. `SafeHardlink::validate`
+  (`security/hardlink.rs`, tag `H-SEC-2`) and `SafePath::validate` already carry this explicit
+  `Component::Prefix(_) | Component::RootDir` rejection; `SafeSymlink::validate` only carried it as
+  an unstated side effect of `PathBuf::push`'s Windows prefix-without-root replacement behavior in
+  `resolve_through_symlinks`. Added the same explicit guard so the rejection is deliberate rather
+  than incidental.
+- **`exarch-core`: TAR and ZIP `skip_duplicates = true` pushed one unbounded warning `String` per
+  pre-existing-duplicate entry, symlink, or (TAR-only) hardlink (#490)**: `report.warnings` grew by
+  one entry per skipped duplicate, proportional to archive size with no cap — the same class of
+  issue already fixed for 7z in #484/#487. `common::extract_file_with_permit` and
+  `common::create_symlink` (shared by both formats) and TAR's own inline hardlink duplicate-skip
+  path in `create_hardlink` now accumulate counters instead, and each format's `extract()` pushes at
+  most two aggregated warnings once extraction completes (one for file/symlink duplicates, plus one
+  for hardlink duplicates on TAR, since ZIP has no hardlink entry type). `report.files_skipped`'s
+  count is unaffected.
 - **`exarch-core`: 7z `skip_duplicates = false` deleted a pre-existing destination directory tree
   instead of failing like TAR/ZIP's `EISDIR` (#483)**: when a 7z file entry's destination path was
   occupied by a pre-existing directory, extraction called `remove_dir_all` on it and wrote a fresh
@@ -209,7 +229,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   proportional to archive size with no cap. Replaced with a single aggregated warning
   (`"skipped N entries as pre-existing duplicates"`) emitted once extraction completes, if any
   entries were skipped this way. `report.files_skipped`'s count is unaffected. TAR/ZIP's equivalent
-  per-entry duplicate-skip warning is unchanged.
+  per-entry duplicate-skip warning was fixed the same way in #490.
 - **`exarch-core`: 7z `skip_duplicates` check missed a dangling symlink at the destination path
   (#468)**: `dest_path.exists()` follows symlinks and returns `false` for a dangling symlink, so a
   pre-existing dangling symlink occupying an entry's destination silently passed the duplicate

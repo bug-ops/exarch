@@ -157,6 +157,12 @@ struct ZipExtractionContext<'a> {
     copy_buffer: &'a mut CopyBuffer,
     dir_cache: &'a mut common::DirCache,
     skip_duplicates: bool,
+    /// Count of file/symlink entries skipped as pre-existing duplicates,
+    /// threaded through `common::extract_file_with_permit` and
+    /// `common::create_symlink`. Aggregated into a single warning after
+    /// extraction completes instead of one warning per entry, mirroring
+    /// 7z's `duplicate_skips` accumulator (issue #490).
+    duplicate_skips: &'a mut u64,
     progress: &'a mut dyn ProgressCallback,
 }
 
@@ -378,6 +384,7 @@ impl<R: Read + Seek> ZipArchive<R> {
                     ctx.report,
                     ctx.dir_cache,
                     ctx.skip_duplicates,
+                    ctx.duplicate_skips,
                 )?;
             }
         } else {
@@ -438,6 +445,7 @@ impl<R: Read + Seek> ZipArchive<R> {
             ctx.copy_buffer,
             ctx.dir_cache,
             ctx.skip_duplicates,
+            ctx.duplicate_skips,
             ctx.progress,
         )
     }
@@ -465,6 +473,11 @@ impl<R: Read + Seek> ArchiveFormat for ZipArchive<R> {
         let mut copy_buffer = CopyBuffer::new();
 
         let mut dir_cache = common::DirCache::new();
+
+        // Aggregated into a single warning after extraction instead of one
+        // per skipped entry, mirroring 7z's `duplicate_skips` accumulator
+        // (issue #490).
+        let mut duplicate_skips: u64 = 0;
 
         let entry_count = self.inner.len();
 
@@ -495,6 +508,7 @@ impl<R: Read + Seek> ArchiveFormat for ZipArchive<R> {
                 copy_buffer: &mut copy_buffer,
                 dir_cache: &mut dir_cache,
                 skip_duplicates,
+                duplicate_skips: &mut duplicate_skips,
                 progress: guard.progress_mut(),
             };
 
@@ -502,11 +516,18 @@ impl<R: Read + Seek> ArchiveFormat for ZipArchive<R> {
 
             if let Err(e) = result {
                 drop(guard);
+                common::push_duplicate_skip_warning(
+                    &mut report,
+                    duplicate_skips,
+                    "entry",
+                    "entries",
+                );
                 return Err(ArchiveError::partial_or(std::mem::take(&mut report), e));
             }
             guard.complete();
         }
 
+        common::push_duplicate_skip_warning(&mut report, duplicate_skips, "entry", "entries");
         progress.on_complete();
         report.duration = start.elapsed();
 
@@ -1900,6 +1921,53 @@ mod tests {
         // ZIP extractor still succeeds without panicking on such archives.
         assert_eq!(report.files_extracted, 1);
         assert!(temp.path().join("legit.txt").exists());
+    }
+
+    /// Regression test for issue #490: extracting an archive whose entries
+    /// collide with many pre-existing files on disk must push exactly one
+    /// aggregated warning onto `report.warnings`, not one `String` per
+    /// skipped entry (mirrors 7z's
+    /// `test_skip_duplicates_aggregates_single_warning`, #484).
+    #[test]
+    fn test_skip_duplicates_aggregates_single_warning() {
+        const ENTRY_COUNT: usize = 30;
+        let names: Vec<String> = (0..ENTRY_COUNT).map(|i| format!("dup-{i}.txt")).collect();
+        let entries: Vec<(&str, &[u8])> = names
+            .iter()
+            .map(|n| (n.as_str(), b"payload".as_slice()))
+            .collect();
+        let zip_data = create_test_zip(entries);
+        let cursor = Cursor::new(zip_data);
+        let mut archive = ZipArchive::new(cursor).unwrap();
+
+        let temp = TempDir::new().unwrap();
+        for name in &names {
+            std::fs::write(temp.path().join(name), b"already here").unwrap();
+        }
+
+        let config = SecurityConfig::default().validate().expect("valid config");
+        let report = archive
+            .extract(
+                temp.path(),
+                &config,
+                &ExtractionOptions::default(), // skip_duplicates = true
+                &mut crate::NoopProgress,
+            )
+            .unwrap();
+
+        assert_eq!(report.files_skipped, ENTRY_COUNT);
+        assert_eq!(report.files_extracted, 0);
+        assert_eq!(
+            report.warnings.len(),
+            1,
+            "duplicate skips must be aggregated into a single warning, got: {:?}",
+            report.warnings
+        );
+        assert!(
+            report.warnings[0].contains(&ENTRY_COUNT.to_string()),
+            "aggregated warning must report the correct skipped count, got: {}",
+            report.warnings[0]
+        );
     }
 
     #[test]

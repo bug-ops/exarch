@@ -264,6 +264,7 @@ impl<R: Read> TarArchive<R> {
                     ctx.report,
                     ctx.dir_cache,
                     ctx.skip_duplicates,
+                    ctx.duplicate_skips,
                 )?;
                 Ok(None)
             }
@@ -298,6 +299,7 @@ impl<R: Read> TarArchive<R> {
             ctx.copy_buffer,
             ctx.dir_cache,
             ctx.skip_duplicates,
+            ctx.duplicate_skips,
             ctx.progress,
         )
     }
@@ -387,10 +389,7 @@ impl<R: Read> TarArchive<R> {
                             resource: crate::QuotaResource::IntegerOverflow,
                         },
                     )?;
-                    ctx.report.warnings.push(format!(
-                        "skipped duplicate hardlink: {}",
-                        info.link_path.as_path().display()
-                    ));
+                    *ctx.hardlink_duplicate_skips = ctx.hardlink_duplicate_skips.saturating_add(1);
                     return Ok(());
                 }
                 return Err(ArchiveError::InvalidArchive(format!(
@@ -497,6 +496,16 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
 
         let mut current_entry: usize = 0;
 
+        // Aggregated once, at every exit point, into a single warning per
+        // counter instead of one warning per skipped entry — keeps
+        // `report.warnings`'s growth independent of how many duplicate
+        // entries an archive contains (issue #490). Hardlinks are counted
+        // separately since they are format-specific to TAR (ZIP has no
+        // hardlink entry type) and go through `create_hardlink` directly
+        // rather than `common::extract_file_with_permit`/`create_symlink`.
+        let mut duplicate_skips: u64 = 0;
+        let mut hardlink_duplicate_skips: u64 = 0;
+
         let reader = self.inner.take().ok_or_else(|| {
             ArchiveError::InvalidArchive("archive reader already consumed by list()".into())
         })?;
@@ -512,6 +521,8 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
             copy_buffer: &mut copy_buffer,
             dir_cache: &mut dir_cache,
             skip_duplicates,
+            duplicate_skips: &mut duplicate_skips,
+            hardlink_duplicate_skips: &mut hardlink_duplicate_skips,
             config,
             progress,
         };
@@ -521,6 +532,11 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
                 let raw = budget_violation(&e).unwrap_or_else(|| {
                     ArchiveError::InvalidArchive(format!("failed to read entry: {e}"))
                 });
+                push_duplicate_skip_warnings(
+                    ctx.report,
+                    *ctx.duplicate_skips,
+                    *ctx.hardlink_duplicate_skips,
+                );
                 ArchiveError::partial_or(std::mem::take(ctx.report), raw)
             })?;
 
@@ -548,6 +564,11 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
                     // the guard's usual bounded drain is pointless I/O, not a
                     // correctness requirement (see `TarEntryGuard::abandon`).
                     guard.abandon();
+                    push_duplicate_skip_warnings(
+                        ctx.report,
+                        *ctx.duplicate_skips,
+                        *ctx.hardlink_duplicate_skips,
+                    );
                     return Err(ArchiveError::partial_or(std::mem::take(ctx.report), e));
                 }
             }
@@ -556,10 +577,20 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
         // Two-pass extraction: create hardlinks after all target files exist
         for hardlink_info in &hardlinks {
             if let Err(e) = Self::create_hardlink(hardlink_info, &mut ctx) {
+                push_duplicate_skip_warnings(
+                    ctx.report,
+                    *ctx.duplicate_skips,
+                    *ctx.hardlink_duplicate_skips,
+                );
                 return Err(ArchiveError::partial_or(std::mem::take(ctx.report), e));
             }
         }
 
+        push_duplicate_skip_warnings(
+            ctx.report,
+            *ctx.duplicate_skips,
+            *ctx.hardlink_duplicate_skips,
+        );
         ctx.progress.on_complete();
         report.duration = start.elapsed();
 
@@ -624,8 +655,32 @@ struct ExtractionContext<'a, 'v> {
     copy_buffer: &'a mut CopyBuffer,
     dir_cache: &'a mut common::DirCache,
     skip_duplicates: bool,
+    /// Count of file/symlink entries skipped as pre-existing duplicates,
+    /// threaded through `common::extract_file_with_permit` and
+    /// `common::create_symlink`. Aggregated into a single warning by
+    /// [`push_duplicate_skip_warnings`] instead of one warning per entry
+    /// (issue #490).
+    duplicate_skips: &'a mut u64,
+    /// Count of hardlinks skipped as pre-existing duplicates in
+    /// [`TarArchive::create_hardlink`]. Tracked separately from
+    /// `duplicate_skips` because hardlinks are TAR-specific (ZIP has no
+    /// hardlink entry type) and are not routed through `common.rs`.
+    hardlink_duplicate_skips: &'a mut u64,
     config: &'v SecurityConfig<Validated>,
     progress: &'a mut dyn ProgressCallback,
+}
+
+/// Appends aggregated duplicate-skip warnings to `report`, one entry per
+/// non-zero counter, mirroring 7z's single end-of-extraction warning
+/// (`SevenZArchive::extract_with_callback`) instead of one warning per
+/// skipped entry (issue #490).
+fn push_duplicate_skip_warnings(
+    report: &mut ExtractionReport,
+    duplicate_skips: u64,
+    hardlink_duplicate_skips: u64,
+) {
+    common::push_duplicate_skip_warning(report, duplicate_skips, "entry", "entries");
+    common::push_duplicate_skip_warning(report, hardlink_duplicate_skips, "hardlink", "hardlinks");
 }
 
 #[allow(dead_code)] // Fields used only on Unix
@@ -2177,6 +2232,8 @@ mod tests {
         let mut copy_buffer = CopyBuffer::new();
         let mut dir_cache = common::DirCache::new();
         let mut progress = crate::NoopProgress;
+        let mut duplicate_skips = 0u64;
+        let mut hardlink_duplicate_skips = 0u64;
         let mut ctx = ExtractionContext {
             validator: &mut validator,
             dest: &dest,
@@ -2184,6 +2241,8 @@ mod tests {
             copy_buffer: &mut copy_buffer,
             dir_cache: &mut dir_cache,
             skip_duplicates: true,
+            duplicate_skips: &mut duplicate_skips,
+            hardlink_duplicate_skips: &mut hardlink_duplicate_skips,
             config: &config,
             progress: &mut progress,
         };
@@ -2620,7 +2679,7 @@ mod tests {
         assert_eq!(report.files_extracted, 1);
         assert_eq!(report.files_skipped, 1);
         assert_eq!(report.warnings.len(), 1);
-        assert!(report.warnings[0].contains("legit.txt"));
+        assert!(report.warnings[0].contains("pre-existing duplicates"));
 
         // File content is from the first entry
         let content = std::fs::read(temp.path().join("legit.txt")).unwrap();
@@ -2650,6 +2709,119 @@ mod tests {
         // File content is from the second (overwriting) entry
         let content = std::fs::read(temp.path().join("legit.txt")).unwrap();
         assert_eq!(content, b"second");
+    }
+
+    /// Regression test for issue #490: extracting an archive with many
+    /// pre-existing duplicate entries must push exactly one aggregated
+    /// warning onto `report.warnings`, not one `String` per skipped entry
+    /// (mirrors 7z's `test_skip_duplicates_aggregates_single_warning`, #484).
+    #[test]
+    fn test_skip_duplicates_aggregates_single_warning() {
+        const ENTRY_COUNT: usize = 30;
+        let names: Vec<String> = (0..ENTRY_COUNT).map(|i| format!("dup-{i}.txt")).collect();
+        let entries: Vec<(&str, &[u8])> = names
+            .iter()
+            .map(|n| (n.as_str(), b"payload".as_slice()))
+            .collect();
+        let tar_data = create_test_tar(entries);
+        let mut archive = TarArchive::new(Cursor::new(tar_data));
+
+        let temp = TempDir::new().unwrap();
+        for name in &names {
+            std::fs::write(temp.path().join(name), b"already here").unwrap();
+        }
+
+        let config = SecurityConfig::default().validate().expect("valid config");
+        let report = archive
+            .extract(
+                temp.path(),
+                &config,
+                &ExtractionOptions::default(), // skip_duplicates = true
+                &mut crate::NoopProgress,
+            )
+            .unwrap();
+
+        assert_eq!(report.files_skipped, ENTRY_COUNT);
+        assert_eq!(report.files_extracted, 0);
+        assert_eq!(
+            report.warnings.len(),
+            1,
+            "duplicate skips must be aggregated into a single warning, got: {:?}",
+            report.warnings
+        );
+        assert!(
+            report.warnings[0].contains(&ENTRY_COUNT.to_string()),
+            "aggregated warning must report the correct skipped count, got: {}",
+            report.warnings[0]
+        );
+    }
+
+    /// Companion to [`test_skip_duplicates_aggregates_single_warning`]: TAR's
+    /// hardlink duplicate-skip path (`create_hardlink`) is not routed
+    /// through `common.rs`, so it needs its own counter and must be verified
+    /// to aggregate separately (issue #490).
+    #[test]
+    #[cfg(unix)]
+    fn test_skip_duplicate_hardlinks_aggregates_single_warning() {
+        const LINK_COUNT: usize = 10;
+
+        let mut builder = tar::Builder::new(Vec::new());
+
+        let mut header = tar::Header::new_gnu();
+        header.set_size(5);
+        header.set_mode(0o644);
+        header.set_entry_type(tar::EntryType::Regular);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, "target.txt", &b"data\n"[..])
+            .unwrap();
+
+        for i in 0..LINK_COUNT {
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Link);
+            header.set_link_name("target.txt").unwrap();
+            header.set_size(0);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, format!("link{i}.txt"), &[] as &[u8])
+                .unwrap();
+        }
+
+        let tar_data = builder.into_inner().unwrap();
+        let mut archive = TarArchive::new(Cursor::new(tar_data));
+
+        let temp = TempDir::new().unwrap();
+        for i in 0..LINK_COUNT {
+            std::fs::write(temp.path().join(format!("link{i}.txt")), b"already here").unwrap();
+        }
+
+        let mut config = SecurityConfig::default();
+        config.allowed.hardlinks = true;
+        let config = config.validate().expect("valid config");
+
+        let report = archive
+            .extract(
+                temp.path(),
+                &config,
+                &ExtractionOptions::default(), // skip_duplicates = true
+                &mut crate::NoopProgress,
+            )
+            .unwrap();
+
+        assert_eq!(report.files_skipped, LINK_COUNT);
+        assert_eq!(report.files_extracted, 1, "only target.txt is extracted");
+        assert_eq!(
+            report.warnings.len(),
+            1,
+            "hardlink duplicate skips must be aggregated into a single warning, got: {:?}",
+            report.warnings
+        );
+        assert!(
+            report.warnings[0].contains(&LINK_COUNT.to_string())
+                && report.warnings[0].contains("hardlink"),
+            "aggregated warning must report the correct skipped hardlink count, got: {}",
+            report.warnings[0]
+        );
     }
 
     #[test]

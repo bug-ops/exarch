@@ -64,7 +64,9 @@ impl SafeSymlink {
     /// 1. Verify symlinks are allowed in the security configuration
     /// 2. Reject an empty target (points nowhere) or a target containing NUL
     ///    bytes
-    /// 3. Validate target is relative (reject absolute symlinks)
+    /// 3. Reject a target containing a `Prefix` or `RootDir` component (e.g.
+    ///    Windows `C:\` or `C:foo` drive-relative paths), then validate the
+    ///    target is relative (reject absolute symlinks)
     /// 4. Check target components against banned components and
     ///    `max_path_depth`
     /// 5. Verify the link's parent directory chain contains no symlinks (TOCTOU
@@ -78,7 +80,8 @@ impl SafeSymlink {
     /// Returns an error if:
     /// - Symlinks are not allowed by configuration
     /// - Target is empty or contains NUL bytes
-    /// - Target is an absolute path
+    /// - Target is an absolute path, or contains a Windows drive/UNC prefix
+    ///   component
     /// - Target contains a banned path component or exceeds `max_path_depth`
     /// - Resolved target escapes the destination directory
     ///
@@ -137,7 +140,28 @@ impl SafeSymlink {
             });
         }
 
-        // 2. Validate target is relative
+        // H-SEC-2: Reject Windows-specific absolute path components in the
+        // target before relying on `is_absolute()` below. On Windows, a
+        // drive-relative path like `C:foo` (no backslash after the colon) is
+        // not `is_absolute()` per Rust's definition (requires both a prefix
+        // AND a root), yet still resolves relative to the current directory
+        // on that drive — letting a malicious archive escape via a
+        // drive-relative symlink target. Mirrors the identical guard in
+        // `HardlinkTracker::validate_hardlink` (`security/hardlink.rs`) and
+        // `SafePath::validate` (issue #491, GHSA-9ppj-qmqm-q256 class).
+        for component in target.components() {
+            if matches!(
+                component,
+                std::path::Component::Prefix(_) | std::path::Component::RootDir
+            ) {
+                return Err(ArchiveError::SymlinkEscape {
+                    path: link.as_path().to_path_buf(),
+                });
+            }
+        }
+
+        // 2. Validate target is relative (redundant with the check above on
+        // Windows, but keeps this check for other absolute-path shapes).
         if target.is_absolute() {
             return Err(ArchiveError::SymlinkEscape {
                 path: link.as_path().to_path_buf(),
@@ -407,6 +431,140 @@ mod tests {
 
         let result = SafeSymlink::validate(&link, &target, &dest, &config);
         assert_matches!(result, Err(ArchiveError::SymlinkEscape { .. }));
+    }
+
+    /// Behavior test for issue #491 (GHSA-9ppj-qmqm-q256 class): a Windows
+    /// drive-relative target like `C:foo` (no backslash after the colon) is
+    /// NOT `is_absolute()` per Rust's definition, which requires both a
+    /// `Prefix` AND a `RootDir` component, yet still resolves relative to
+    /// the current directory on that drive.
+    ///
+    /// This test alone does NOT prove the new `Component::Prefix` guard is
+    /// what rejects it: pre-fix, `C:foo` was already rejected with the same
+    /// `SymlinkEscape` variant via `resolve_through_symlinks`'s `_ =>
+    /// current.push(component)` fallback arm, since Windows `PathBuf::push`
+    /// with a prefix-but-no-root component replaces `current` entirely
+    /// (`current` becomes `"C:"`), which then fails
+    /// `current.starts_with(dest)`. See
+    /// `test_safe_symlink_reject_drive_relative_target_with_banned_component_windows`
+    /// below for the discriminating regression test. `Component::Prefix` can
+    /// only be produced by the path parser on Windows, so this test is
+    /// `cfg(windows)`-gated (mirrors
+    /// `inspection::list::test_contains_traversal_prefix_gated_by_flag`).
+    #[test]
+    #[cfg(windows)]
+    fn test_safe_symlink_reject_drive_relative_target_windows_behavior() {
+        let (_temp, dest) = create_test_dest();
+        let config = create_config_with_symlinks();
+
+        let link = SafePath::validate(&PathBuf::from("link"), &dest, &config)
+            .expect("link path should be valid");
+        let target = PathBuf::from("C:foo");
+        assert!(
+            !target.is_absolute(),
+            "C:foo must not be is_absolute() per Rust's definition — this is the exact gap #491 closes"
+        );
+        assert!(
+            target
+                .components()
+                .any(|c| matches!(c, std::path::Component::Prefix(_))),
+            "C:foo must parse to a Prefix component on Windows"
+        );
+
+        let result = SafeSymlink::validate(&link, &target, &dest, &config);
+        assert_matches!(
+            result,
+            Err(ArchiveError::SymlinkEscape { .. }),
+            "drive-relative symlink target must be rejected, got: {result:?}"
+        );
+    }
+
+    /// Discriminating regression test for issue #491: unlike the plain
+    /// `C:foo` behavior test above, this target is chosen so pre-fix and
+    /// post-fix code paths disagree on the *error variant* returned, proving
+    /// the new `Component::Prefix` guard — not
+    /// `resolve_through_symlinks`'s unrelated fallback rejection — is what
+    /// fires.
+    ///
+    /// `C:.git\evil` is drive-relative (`Prefix` component, no `RootDir`,
+    /// same as `C:foo`) but its second component, `.git`, is also a default
+    /// `banned_path_components` entry (`SecurityConfig::default()`,
+    /// `config.rs:218`). Pre-fix, the old code's `Component::Normal`-only
+    /// scan (step 2.5) would reach `.git` first — since the pre-fix code had
+    /// no `Prefix` guard ahead of it — and reject with
+    /// `SecurityViolation("banned component")`, never reaching
+    /// `resolve_through_symlinks` at all. Post-fix, the new guard runs
+    /// first and rejects with `SymlinkEscape` before the banned-component
+    /// scan is ever reached. Reverting the new guard flips this test's
+    /// expected variant from `SymlinkEscape` to `SecurityViolation`, so it
+    /// fails closed if the guard regresses.
+    #[test]
+    #[cfg(windows)]
+    fn test_safe_symlink_reject_drive_relative_target_with_banned_component_windows() {
+        let (_temp, dest) = create_test_dest();
+        let config = create_config_with_symlinks();
+
+        let link = SafePath::validate(&PathBuf::from("link"), &dest, &config)
+            .expect("link path should be valid");
+        let target = PathBuf::from(r"C:.git\evil");
+        assert!(
+            !target.is_absolute(),
+            "C:.git\\evil must not be is_absolute() — drive-relative, no RootDir"
+        );
+
+        let result = SafeSymlink::validate(&link, &target, &dest, &config);
+        assert_matches!(
+            result,
+            Err(ArchiveError::SymlinkEscape { .. }),
+            "drive-relative target with a banned second component must be rejected by the new \
+             Prefix guard (SymlinkEscape), not fall through to the banned-component scan \
+             (SecurityViolation) — got: {result:?}"
+        );
+    }
+
+    /// Companion to the drive-relative regression test above, for the other
+    /// half of the `Component::Prefix(_) | Component::RootDir` guard: a
+    /// Windows root-relative target (`RootDir` with no `Prefix`, e.g.
+    /// `\evil`) resolves relative to the current drive and is also NOT
+    /// `is_absolute()` per Rust's definition (which requires both a prefix
+    /// AND a root). This is a second, previously-untested gap the #491 fix
+    /// closes, not just the drive-relative one.
+    ///
+    /// Uses the same banned-component discriminator as the drive-relative
+    /// case above: pre-fix, `.git` is reached by the old Normal-only scan
+    /// and rejected as `SecurityViolation`; post-fix, the new `RootDir` arm
+    /// fires first and rejects as `SymlinkEscape`.
+    #[test]
+    #[cfg(windows)]
+    fn test_safe_symlink_reject_root_relative_target_with_banned_component_windows() {
+        let (_temp, dest) = create_test_dest();
+        let config = create_config_with_symlinks();
+
+        let link = SafePath::validate(&PathBuf::from("link"), &dest, &config)
+            .expect("link path should be valid");
+        let target = PathBuf::from(r"\.git\evil");
+        assert!(
+            !target.is_absolute(),
+            r"\.git\evil must not be is_absolute() — RootDir without a Prefix"
+        );
+        assert!(
+            target
+                .components()
+                .any(|c| matches!(c, std::path::Component::RootDir))
+                && !target
+                    .components()
+                    .any(|c| matches!(c, std::path::Component::Prefix(_))),
+            r"\.git\evil must parse to RootDir without Prefix on Windows"
+        );
+
+        let result = SafeSymlink::validate(&link, &target, &dest, &config);
+        assert_matches!(
+            result,
+            Err(ArchiveError::SymlinkEscape { .. }),
+            "root-relative target with a banned second component must be rejected by the new \
+             RootDir guard (SymlinkEscape), not fall through to the banned-component scan \
+             (SecurityViolation) — got: {result:?}"
+        );
     }
 
     #[test]

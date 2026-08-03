@@ -161,9 +161,15 @@ interface ExtractionReport {
 }
 ```
 
-### `extractArchiveWithProgress(archivePath, outputDir, config?, progress?)`
+### `extractArchiveWithProgress(archivePath, outputDir, config?, options?, progress?)`
 
-Async extraction with an optional progress callback.
+Async extraction with an optional progress callback, invoked once per entry.
+
+`progress` uses napi's standard threadsafe-function calling convention:
+`(err, arg)`, where `err` is always `null` and `arg` is the `[path, total,
+current, bytesWritten]` tuple — **not** four separate arguments.
+`bytesWritten` is always `0`: the callback only fires from the entry-start
+event, before any bytes for that entry have been counted.
 
 ```typescript
 import { extractArchiveWithProgress } from 'exarch-rs';
@@ -172,8 +178,9 @@ const result = await extractArchiveWithProgress(
   'archive.tar.gz',
   '/output/path',
   undefined,  // SecurityConfig or undefined
-  (path, total, current, bytesWritten) => {
-    console.log(`[${current}/${total}] ${path} (${bytesWritten} bytes)`);
+  undefined,  // ExtractionOptions or undefined
+  (err, [path, total, current, bytesWritten]) => {
+    console.log(`[${current}/${total}] ${path}`);
   }
 );
 ```
@@ -185,9 +192,80 @@ const result = await extractArchiveWithProgress(
 | `archivePath` | `string` | Path to the archive file |
 | `outputDir` | `string` | Directory where files will be extracted |
 | `config` | `SecurityConfig \| undefined` | Optional security configuration |
-| `progress` | `(path: string, total: bigint, current: bigint, bytesWritten: bigint) => void \| undefined` | Optional progress callback |
+| `options` | `ExtractionOptions \| undefined` | Optional extraction options |
+| `progress` | `(err: Error \| null, arg: [path: string, total: number, current: number, bytesWritten: number]) => void \| undefined` | Optional progress callback |
 
 **Returns:** `Promise<ExtractionReport>`
+
+### `createArchiveWithProgress(outputPath, sources, config?, progress?)`
+
+Async archive creation with an optional progress callback, invoked once per entry.
+
+`progress` uses the same `(err, arg)` calling convention as
+`extractArchiveWithProgress` above — `arg` is `[path, total, current,
+bytesWritten]`, and `bytesWritten` is always `0` for the same reason.
+
+```typescript
+import { createArchiveWithProgress } from 'exarch-rs';
+
+const result = await createArchiveWithProgress(
+  'backup.tar.gz',
+  ['src/', 'package.json'],
+  undefined,  // CreationConfig or undefined
+  (err, [path, total, current, bytesWritten]) => {
+    console.log(`[${current}/${total}] ${path}`);
+  }
+);
+```
+
+**Parameters:**
+
+| Name | Type | Description |
+|------|------|-------------|
+| `outputPath` | `string` | Path to the output archive file |
+| `sources` | `string[]` | Source files/directories to include |
+| `config` | `CreationConfig \| undefined` | Optional creation configuration |
+| `progress` | `(err: Error \| null, arg: [path: string, total: number, current: number, bytesWritten: number]) => void \| undefined` | Optional progress callback |
+
+**Returns:** `Promise<CreationReport>`
+
+### `createArchiveWithProgressSync(outputPath, sources, config?, progress?)`
+
+Synchronous version. Blocks the event loop until creation completes.
+
+**`progress` does not report live during this call.** It is dispatched
+through the same threadsafe-function mechanism as the async variant, which
+only ever delivers calls on a turn of the Node.js event loop. Because this
+function blocks that same event loop until it returns, every queued call is
+delivered only *after* `createArchiveWithProgressSync` has already
+returned — none of them fire while creation is running. Use
+`createArchiveWithProgress` instead if you need live progress updates.
+
+```typescript
+import { createArchiveWithProgressSync } from 'exarch-rs';
+
+const result = createArchiveWithProgressSync(
+  'backup.tar.gz',
+  ['src/', 'package.json'],
+  undefined,  // CreationConfig or undefined
+  (err, [path, total, current, bytesWritten]) => {
+    // Fires only after createArchiveWithProgressSync has already returned.
+    console.log(`[${current}/${total}] ${path}`);
+  }
+);
+console.log(`Created archive with ${result.filesAdded} files`);
+```
+
+**Parameters:**
+
+| Name | Type | Description |
+|------|------|-------------|
+| `outputPath` | `string` | Path to the output archive file |
+| `sources` | `string[]` | Source files/directories to include |
+| `config` | `CreationConfig \| undefined` | Optional creation configuration |
+| `progress` | `(err: Error \| null, arg: [path: string, total: number, current: number, bytesWritten: number]) => void \| undefined` | Optional progress callback. See the note above: calls arrive only after this function returns. |
+
+**Returns:** `CreationReport`
 
 ### `SecurityConfig`
 

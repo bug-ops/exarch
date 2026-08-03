@@ -426,6 +426,111 @@ export declare function createArchive(outputPath: string, sources: Array<string>
 export declare function createArchiveSync(outputPath: string, sources: Array<string>, config?: CreationConfig | undefined | null): CreationReport
 
 /**
+ * Create an archive from source files and directories with a progress
+ * callback (async).
+ *
+ * The `progress` callback is called once per entry, receiving `(err,
+ * [path, total, current, bytesWritten])` (napi's standard threadsafe
+ * function calling convention: `err` is always `null`, the entry data
+ * arrives as a single array argument) where:
+ * - `path` — entry path being added to the archive
+ * - `total` — total number of entries as `number`
+ * - `current` — 1-based index of the current entry as `number`
+ * - `bytesWritten` — always `0`. The callback only fires from the entry-start
+ *   event, which resets the running per-entry byte counter immediately before
+ *   dispatching; the separate byte-accumulation event never triggers a
+ *   dispatch of its own, so no call ever observes a nonzero value.
+ *
+ * Creation runs on the tokio blocking thread pool. The progress callback is
+ * dispatched back to the JavaScript thread via a threadsafe function.
+ *
+ * # Arguments
+ *
+ * * `output_path` - Path to output archive file
+ * * `sources` - Array of source files/directories to include
+ * * `config` - Optional `CreationConfig` (uses defaults if omitted)
+ * * `progress` - Optional progress callback `(err: Error | null, arg: [path:
+ *   string, total: number, current: number, bytesWritten: number]) => void`
+ *
+ * # Returns
+ *
+ * Promise resolving to `CreationReport` with creation statistics
+ *
+ * # Errors
+ *
+ * Returns error if path validation fails, archive creation fails, or I/O
+ * errors occur. See `createArchive` for the full list of error codes.
+ *
+ * # Examples
+ *
+ * ```javascript
+ * const report = await createArchiveWithProgress(
+ *   'output.tar.gz',
+ *   ['source_dir/'],
+ *   null,
+ *   (err, [path, total, current, bytesWritten]) => {
+ *     console.log(`${current}/${total}: ${path}`);
+ *   },
+ * );
+ * console.log(`Created archive with ${report.filesAdded} files`);
+ * ```
+ */
+export declare function createArchiveWithProgress(outputPath: string, sources: Array<string>, config?: CreationConfig | undefined | null, progress?: (((err: Error | null, arg: [string, number, number, number]) => any)) | undefined | null): Promise<CreationReport>
+
+/**
+ * Create an archive from source files and directories with a progress
+ * callback (sync).
+ *
+ * Synchronous version of `createArchiveWithProgress`. Blocks the event loop
+ * until creation completes. Prefer the async version for most use cases.
+ *
+ * # `progress` does not report live during this call
+ *
+ * `progress` is dispatched through the same threadsafe-function mechanism as
+ * the async variant, which only ever delivers calls on a turn of the Node.js
+ * event loop. Because this function blocks that same event loop until it
+ * returns, **every queued call is delivered only after
+ * `createArchiveWithProgressSync` has already returned** — none of them fire
+ * during the call, so `progress` cannot be used to report *live* progress
+ * here. Use `createArchiveWithProgress` instead if you need progress updates
+ * while creation is still running.
+ *
+ * # Arguments
+ *
+ * * `output_path` - Path to output archive file
+ * * `sources` - Array of source files/directories to include
+ * * `config` - Optional `CreationConfig` (uses defaults if omitted)
+ * * `progress` - Optional progress callback `(err: Error | null, arg: [path:
+ *   string, total: number, current: number, bytesWritten: number]) => void`.
+ *   See the section above: calls arrive only after this function returns.
+ *
+ * # Returns
+ *
+ * `CreationReport` with creation statistics
+ *
+ * # Errors
+ *
+ * Returns error if path validation fails, archive creation fails, or I/O
+ * errors occur. See `createArchive` for the full list of error codes.
+ *
+ * # Examples
+ *
+ * ```javascript
+ * const report = createArchiveWithProgressSync(
+ *   'output.tar.gz',
+ *   ['source_dir/'],
+ *   null,
+ *   (err, [path, total, current, bytesWritten]) => {
+ *     // Fires only after createArchiveWithProgressSync has already returned.
+ *     console.log(`${current}/${total}: ${path}`);
+ *   },
+ * );
+ * console.log(`Created archive with ${report.filesAdded} files`);
+ * ```
+ */
+export declare function createArchiveWithProgressSync(outputPath: string, sources: Array<string>, config?: CreationConfig | undefined | null, progress?: (((err: Error | null, arg: [string, number, number, number]) => any)) | undefined | null): CreationReport
+
+/**
  * Report of an archive creation operation.
  *
  * Contains statistics and metadata about the creation process.
@@ -556,15 +661,18 @@ export declare function extractArchiveSync(archivePath: string, outputDir: strin
  * Extract an archive to the specified directory with a progress callback
  * (async).
  *
- * The `progress` callback is called once per entry with
- * `(path, total, current, bytesWritten)` where:
+ * The `progress` callback is called once per entry, receiving `(err,
+ * [path, total, current, bytesWritten])` (napi's standard threadsafe
+ * function calling convention: `err` is always `null`, the entry data
+ * arrives as a single array argument) where:
  * - `path` — entry path inside the archive
  * - `total` — total number of entries as `number` (0 for TAR-family formats
  *   because the entry count is unknown until the stream is fully read)
  * - `current` — 1-based index of the current entry as `number`
- * - `bytesWritten` — cumulative bytes written to disk so far as `number`
- *   (always 0 during extraction because the core library does not emit
- *   byte-level progress events for extraction; only entry-level events fire)
+ * - `bytesWritten` — always `0`. The callback only fires from the entry-start
+ *   event, which resets the running per-entry byte counter immediately before
+ *   dispatching; the separate byte-accumulation event never triggers a
+ *   dispatch of its own, so no call ever observes a nonzero value.
  *
  * Extraction runs on the tokio blocking thread pool. The progress callback is
  * dispatched back to the JavaScript thread via a threadsafe function.
@@ -575,8 +683,8 @@ export declare function extractArchiveSync(archivePath: string, outputDir: strin
  * * `output_dir` - Directory where files will be extracted
  * * `config` - Optional `SecurityConfig` (uses secure defaults if omitted)
  * * `options` - Optional `ExtractionOptions` (uses defaults if omitted)
- * * `progress` - Optional progress callback `(path: string, total: number,
- *   current: number, bytesWritten: number) => void`
+ * * `progress` - Optional progress callback `(err: Error | null, arg: [path:
+ *   string, total: number, current: number, bytesWritten: number]) => void`
  *
  * # Returns
  *
@@ -596,7 +704,7 @@ export declare function extractArchiveSync(archivePath: string, outputDir: strin
  *   '/tmp/output',
  *   null,
  *   null,
- *   (path, total, current, bytesWritten) => {
+ *   (err, [path, total, current, bytesWritten]) => {
  *     console.log(`${current}/${total}: ${path}`);
  *   },
  * );

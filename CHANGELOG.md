@@ -13,6 +13,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `exarch-core` criterion benchmarks (`--all-features`, covering the
   `testing`-gated `validation` bench) without running them, catching
   benchmark compilation breakage in a fast parallel job.
+- `exarch-node`: add `createArchiveWithProgress` and
+  `createArchiveWithProgressSync`, mirroring the existing
+  `extractArchiveWithProgress` async/sync pattern and `exarch-python`'s
+  `create_archive_with_progress`. Both reuse `exarch_core::create_archive_with_progress`
+  and the existing `NodeProgressAdapter` threadsafe-function bridge — no new
+  core security logic (#455).
+- `exarch-node`: add JS integration tests for `extractArchiveWithProgress`,
+  `createArchiveWithProgress`, and `createArchiveWithProgressSync` covering
+  the per-entry callback shape and the `progress=null`/omitted paths, closing
+  a coverage gap where these APIs had no test exercising them (#456).
 
 ### Changed
 

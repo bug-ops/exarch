@@ -374,6 +374,179 @@ pub fn create_archive_sync(
     Ok(CreationReport::from(report))
 }
 
+/// Create an archive from source files and directories with a progress
+/// callback (async).
+///
+/// The `progress` callback is called once per entry, receiving `(err,
+/// [path, total, current, bytesWritten])` (napi's standard threadsafe
+/// function calling convention: `err` is always `null`, the entry data
+/// arrives as a single array argument) where:
+/// - `path` — entry path being added to the archive
+/// - `total` — total number of entries as `number`
+/// - `current` — 1-based index of the current entry as `number`
+/// - `bytesWritten` — always `0`. The callback only fires from the entry-start
+///   event, which resets the running per-entry byte counter immediately before
+///   dispatching; the separate byte-accumulation event never triggers a
+///   dispatch of its own, so no call ever observes a nonzero value.
+///
+/// Creation runs on the tokio blocking thread pool. The progress callback is
+/// dispatched back to the JavaScript thread via a threadsafe function.
+///
+/// # Arguments
+///
+/// * `output_path` - Path to output archive file
+/// * `sources` - Array of source files/directories to include
+/// * `config` - Optional `CreationConfig` (uses defaults if omitted)
+/// * `progress` - Optional progress callback `(err: Error | null, arg: [path:
+///   string, total: number, current: number, bytesWritten: number]) => void`
+///
+/// # Returns
+///
+/// Promise resolving to `CreationReport` with creation statistics
+///
+/// # Errors
+///
+/// Returns error if path validation fails, archive creation fails, or I/O
+/// errors occur. See `createArchive` for the full list of error codes.
+///
+/// # Examples
+///
+/// ```javascript
+/// const report = await createArchiveWithProgress(
+///   'output.tar.gz',
+///   ['source_dir/'],
+///   null,
+///   (err, [path, total, current, bytesWritten]) => {
+///     console.log(`${current}/${total}: ${path}`);
+///   },
+/// );
+/// console.log(`Created archive with ${report.filesAdded} files`);
+/// ```
+#[napi]
+#[allow(clippy::needless_pass_by_value, clippy::trailing_empty_array)]
+pub async fn create_archive_with_progress(
+    output_path: String,
+    sources: Vec<String>,
+    config: Option<&CreationConfig>,
+    progress: Option<ThreadsafeFunction<(String, i64, i64, i64)>>,
+) -> Result<CreationReport> {
+    validate_path(&output_path)?;
+    for source in &sources {
+        validate_path(source)?;
+    }
+
+    let config_owned: exarch_core::creation::CreationConfig =
+        config.map(|c| c.as_core().clone()).unwrap_or_default();
+
+    let report = tokio::task::spawn_blocking(move || {
+        catch_panic_as_js_err("archive creation with progress", || {
+            let sources_refs: Vec<&str> = sources.iter().map(String::as_str).collect();
+            run_create_with_optional_progress(&output_path, &sources_refs, &config_owned, progress)
+                .map_err(convert_error)
+        })
+    })
+    .await
+    .map_err(|e| Error::from_reason(format!("task join error: {e}")))
+    .flatten()?;
+
+    Ok(CreationReport::from(report))
+}
+
+/// Create an archive from source files and directories with a progress
+/// callback (sync).
+///
+/// Synchronous version of `createArchiveWithProgress`. Blocks the event loop
+/// until creation completes. Prefer the async version for most use cases.
+///
+/// # `progress` does not report live during this call
+///
+/// `progress` is dispatched through the same threadsafe-function mechanism as
+/// the async variant, which only ever delivers calls on a turn of the Node.js
+/// event loop. Because this function blocks that same event loop until it
+/// returns, **every queued call is delivered only after
+/// `createArchiveWithProgressSync` has already returned** — none of them fire
+/// during the call, so `progress` cannot be used to report *live* progress
+/// here. Use `createArchiveWithProgress` instead if you need progress updates
+/// while creation is still running.
+///
+/// # Arguments
+///
+/// * `output_path` - Path to output archive file
+/// * `sources` - Array of source files/directories to include
+/// * `config` - Optional `CreationConfig` (uses defaults if omitted)
+/// * `progress` - Optional progress callback `(err: Error | null, arg: [path:
+///   string, total: number, current: number, bytesWritten: number]) => void`.
+///   See the section above: calls arrive only after this function returns.
+///
+/// # Returns
+///
+/// `CreationReport` with creation statistics
+///
+/// # Errors
+///
+/// Returns error if path validation fails, archive creation fails, or I/O
+/// errors occur. See `createArchive` for the full list of error codes.
+///
+/// # Examples
+///
+/// ```javascript
+/// const report = createArchiveWithProgressSync(
+///   'output.tar.gz',
+///   ['source_dir/'],
+///   null,
+///   (err, [path, total, current, bytesWritten]) => {
+///     // Fires only after createArchiveWithProgressSync has already returned.
+///     console.log(`${current}/${total}: ${path}`);
+///   },
+/// );
+/// console.log(`Created archive with ${report.filesAdded} files`);
+/// ```
+#[napi]
+#[allow(clippy::needless_pass_by_value)]
+pub fn create_archive_with_progress_sync(
+    output_path: String,
+    sources: Vec<String>,
+    config: Option<&CreationConfig>,
+    progress: Option<ThreadsafeFunction<(String, i64, i64, i64)>>,
+) -> Result<CreationReport> {
+    validate_path(&output_path)?;
+    for source in &sources {
+        validate_path(source)?;
+    }
+
+    let default_config = exarch_core::creation::CreationConfig::default();
+    let config_ref = config.map_or(&default_config, |c| c.as_core());
+
+    let sources_refs: Vec<&str> = sources.iter().map(String::as_str).collect();
+
+    let report = catch_panic_as_js_err("archive creation with progress", || {
+        run_create_with_optional_progress(&output_path, &sources_refs, config_ref, progress)
+            .map_err(convert_error)
+    })?;
+
+    Ok(CreationReport::from(report))
+}
+
+/// Runs `create_archive_with_progress` routing to the JS callback when
+/// present or to [`exarch_core::NoopProgress`] when absent.
+fn run_create_with_optional_progress(
+    output_path: &str,
+    sources: &[&str],
+    config: &exarch_core::creation::CreationConfig,
+    progress: Option<ThreadsafeFunction<(String, i64, i64, i64)>>,
+) -> exarch_core::Result<exarch_core::creation::CreationReport> {
+    progress.map_or_else(
+        || {
+            let mut noop = exarch_core::NoopProgress;
+            exarch_core::create_archive_with_progress(output_path, sources, config, &mut noop)
+        },
+        |tsfn| {
+            let mut callback = NodeProgressAdapter::new(tsfn);
+            exarch_core::create_archive_with_progress(output_path, sources, config, &mut callback)
+        },
+    )
+}
+
 /// List archive contents without extracting (async).
 ///
 /// # Arguments
@@ -567,15 +740,18 @@ pub fn verify_archive_sync(
 /// Extract an archive to the specified directory with a progress callback
 /// (async).
 ///
-/// The `progress` callback is called once per entry with
-/// `(path, total, current, bytesWritten)` where:
+/// The `progress` callback is called once per entry, receiving `(err,
+/// [path, total, current, bytesWritten])` (napi's standard threadsafe
+/// function calling convention: `err` is always `null`, the entry data
+/// arrives as a single array argument) where:
 /// - `path` — entry path inside the archive
 /// - `total` — total number of entries as `number` (0 for TAR-family formats
 ///   because the entry count is unknown until the stream is fully read)
 /// - `current` — 1-based index of the current entry as `number`
-/// - `bytesWritten` — cumulative bytes written to disk so far as `number`
-///   (always 0 during extraction because the core library does not emit
-///   byte-level progress events for extraction; only entry-level events fire)
+/// - `bytesWritten` — always `0`. The callback only fires from the entry-start
+///   event, which resets the running per-entry byte counter immediately before
+///   dispatching; the separate byte-accumulation event never triggers a
+///   dispatch of its own, so no call ever observes a nonzero value.
 ///
 /// Extraction runs on the tokio blocking thread pool. The progress callback is
 /// dispatched back to the JavaScript thread via a threadsafe function.
@@ -586,8 +762,8 @@ pub fn verify_archive_sync(
 /// * `output_dir` - Directory where files will be extracted
 /// * `config` - Optional `SecurityConfig` (uses secure defaults if omitted)
 /// * `options` - Optional `ExtractionOptions` (uses defaults if omitted)
-/// * `progress` - Optional progress callback `(path: string, total: number,
-///   current: number, bytesWritten: number) => void`
+/// * `progress` - Optional progress callback `(err: Error | null, arg: [path:
+///   string, total: number, current: number, bytesWritten: number]) => void`
 ///
 /// # Returns
 ///
@@ -607,7 +783,7 @@ pub fn verify_archive_sync(
 ///   '/tmp/output',
 ///   null,
 ///   null,
-///   (path, total, current, bytesWritten) => {
+///   (err, [path, total, current, bytesWritten]) => {
 ///     console.log(`${current}/${total}: ${path}`);
 ///   },
 /// );
@@ -684,11 +860,12 @@ fn run_extract_with_optional_progress(
 
 /// Adapter that calls a JavaScript progress callback from a Rust worker thread.
 ///
-/// The JavaScript callback receives `(path: string, total: number, current:
-/// number, bytesWritten: number)` where `bytesWritten` is the number of bytes
-/// written **for the current entry so far** (starts at 0 when the entry begins,
-/// grows as chunks are flushed to disk; always 0 during extraction because the
-/// core library does not emit byte-level progress events for extraction).
+/// Shared by extraction and creation. The JavaScript callback receives `(err:
+/// Error | null, [path, total, current, bytesWritten])`. `bytesWritten` is
+/// always `0`: only `on_entry_start` dispatches a call, and it resets
+/// `current_entry_bytes` to `0` immediately before doing so. `on_bytes_written`
+/// does accumulate per-chunk writes (during creation; extraction also emits
+/// these events for some formats), but never triggers a dispatch of its own.
 struct NodeProgressAdapter {
     tsfn: ThreadsafeFunction<(String, i64, i64, i64)>,
     current_entry_bytes: i64,

@@ -448,7 +448,7 @@ pub fn check_extension_allowed(
         return true;
     }
 
-    report.files_skipped += 1;
+    report.files_skipped = report.files_skipped.saturating_add(1);
     *disallowed_extension_skips = disallowed_extension_skips.saturating_add(1);
     false
 }
@@ -700,7 +700,13 @@ pub fn extract_file_with_permit<R: Read>(
     let output_file = match create_file_with_mode(&output_path, mode, skip_duplicates) {
         Ok(file) => file,
         Err(e) if skip_duplicates && e.kind() == std::io::ErrorKind::AlreadyExists => {
-            report.files_skipped += 1;
+            report.files_skipped =
+                report
+                    .files_skipped
+                    .checked_add(1)
+                    .ok_or(ArchiveError::QuotaExceeded {
+                        resource: QuotaResource::IntegerOverflow,
+                    })?;
             *duplicate_skips = duplicate_skips.saturating_add(1);
             return Ok(());
         }
@@ -824,7 +830,13 @@ pub fn create_symlink(
 
         if link_path.symlink_metadata().is_ok() {
             if skip_duplicates {
-                report.files_skipped += 1;
+                report.files_skipped =
+                    report
+                        .files_skipped
+                        .checked_add(1)
+                        .ok_or(ArchiveError::QuotaExceeded {
+                            resource: QuotaResource::IntegerOverflow,
+                        })?;
                 *duplicate_skips = duplicate_skips.saturating_add(1);
                 return Ok(());
             }
@@ -1060,6 +1072,62 @@ mod tests {
         assert!(
             !temp.path().join("test.txt").exists(),
             "overflow-rejected entry must not touch the filesystem"
+        );
+    }
+
+    /// Regression test for #515: `files_skipped` must fail closed with
+    /// `QuotaExceeded { resource: IntegerOverflow }` instead of wrapping (or
+    /// panicking, in debug builds) once it reaches `usize::MAX`, mirroring
+    /// `test_extract_file_with_permit_integer_overflow_check` for
+    /// `bytes_written`.
+    #[test]
+    fn test_extract_file_with_permit_files_skipped_overflow_check() {
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
+        let mut report = ExtractionReport::default();
+        let mut copy_buffer = CopyBuffer::new();
+        let mut dir_cache = DirCache::new();
+        let mut duplicate_skips = 0u64;
+
+        // Set files_skipped to usize::MAX so the duplicate-skip path's
+        // increment would overflow.
+        report.files_skipped = usize::MAX;
+
+        let config = SecurityConfig::default().validate().expect("valid config");
+        let permit = QuotaTracker::new()
+            .reserve(0, &config)
+            .expect("reservation should succeed");
+        let safe_path = SafePath::validate(&PathBuf::from("test.txt"), &dest, &config)
+            .expect("path should be valid");
+
+        // Pre-create the destination file so create_file_with_mode's
+        // create_new(true) hits AlreadyExists, taking the duplicate-skip
+        // branch that increments files_skipped.
+        std::fs::write(temp.path().join("test.txt"), b"existing").expect("failed to seed file");
+
+        let mut reader = Cursor::new(b"test data");
+
+        let result = extract_file_with_permit(
+            &mut reader,
+            &safe_path,
+            Some(0o644),
+            permit,
+            &dest,
+            &mut report,
+            None,
+            &mut copy_buffer,
+            &mut dir_cache,
+            true,
+            &mut duplicate_skips,
+            &mut NoopProgress,
+        );
+
+        assert!(result.is_err());
+        assert_matches!(
+            result.unwrap_err(),
+            ArchiveError::QuotaExceeded {
+                resource: QuotaResource::IntegerOverflow
+            }
         );
     }
 

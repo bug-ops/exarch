@@ -87,7 +87,7 @@
 //! allowlist rejecting the entry (`common::check_extension_allowed`, see the
 //! "Cumulative synthetic-byte budget" section below) and `skip_duplicates`
 //! finding the destination path already exists
-//! (`common::extract_file_generic`, `formats/common.rs`) — both return
+//! (`common::extract_file_with_permit`, `formats/common.rs`) — both return
 //! before the entry's content is ever read. Only an extract call that
 //! actually reads the entry (no pre-read skip of any kind) is unaffected,
 //! since the guard's drain then finds nothing left to do.
@@ -105,7 +105,7 @@
 //! check there specifically to stop quota from double-counting files that
 //! end up skipped); `skip_duplicates` skips an already-extracted path after
 //! quota has run but still before the entry is read
-//! (`common::extract_file_generic`); and `list_archive`/`verify_archive`
+//! (`common::extract_file_with_permit`); and `list_archive`/`verify_archive`
 //! skip *every* entry unconditionally regardless of any allowlist.
 //! `max_total_size`/`max_file_count` therefore provide no cumulative bound
 //! across many such skips: an archive of many small GNU sparse entries, each

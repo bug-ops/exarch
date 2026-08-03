@@ -296,15 +296,12 @@ impl<R: Read + Seek> SevenZArchive<R> {
 /// consuming the [`QuotaPermit`] that authorized the write.
 ///
 /// Taking `permit` by value mirrors the guarantee
-/// [`common::copy_file_with_permit`] gives TAR's hardlink path: `QuotaPermit`
-/// is neither `Clone` nor `Copy`, so a caller cannot retain it to authorize a
-/// second write, and this function cannot be called at all without moving a
-/// genuine permit out of the validated entry. This is stronger than
-/// `common::extract_file_generic` (TAR/ZIP's normal-file path), which only
-/// pattern-matches `ValidatedEntryType::File(_)` against a shared reference
-/// at runtime and never takes ownership of the permit — that helper is not
-/// brought to this same compile-time guarantee by this change (tracked
-/// separately: <https://github.com/bug-ops/exarch/issues/445>).
+/// [`common::copy_file_with_permit`] gives TAR's hardlink path, and the
+/// guarantee [`common::extract_file_with_permit`] gives TAR/ZIP's normal-file
+/// path (issue #445): `QuotaPermit` is neither `Clone` nor `Copy`, so a
+/// caller cannot retain it to authorize a second write, and this function
+/// cannot be called at all without moving a genuine permit out of the
+/// validated entry.
 ///
 /// # Errors
 ///

@@ -135,9 +135,11 @@ use crate::SecurityConfig;
 use crate::config::Validated;
 use crate::copy::CopyBuffer;
 use crate::security::EntryValidator;
+use crate::security::quota::QuotaPermit;
 use crate::security::validator::ValidatedEntryType;
 use crate::types::DestDir;
 use crate::types::EntryType;
+use crate::types::SafePath;
 
 use super::common;
 use super::common::EntryCompleteGuard;
@@ -356,7 +358,7 @@ impl<R: Read + Seek> ZipArchive<R> {
                 mode,
                 Some(ctx.dir_cache),
             )?;
-            common::create_directory(&validated, ctx.dest, ctx.report, ctx.dir_cache)?;
+            common::create_directory(validated.safe_path(), ctx.dest, ctx.report, ctx.dir_cache)?;
         } else if ZipEntryAdapter::is_symlink_from_mode(mode) {
             let target = ZipEntryAdapter::read_symlink_target(&mut zip_file)?;
             drop(zip_file);
@@ -392,7 +394,25 @@ impl<R: Read + Seek> ZipArchive<R> {
                 mode,
                 Some(ctx.dir_cache),
             )?;
-            Self::extract_file(&mut zip_file, &validated, uncompressed_size, ctx)?;
+            // into_parts() moves the QuotaPermit out by value into
+            // extract_file (mirrors 7z's process_entry_inner, issue #445),
+            // rather than only observing it through entry_type()'s shared
+            // reference. validate_entry(&EntryType::File, ..) always yields
+            // ValidatedEntryType::File, never another variant.
+            let (safe_path, entry_type, sanitized_mode) = validated.into_parts();
+            let ValidatedEntryType::File(permit) = entry_type else {
+                return Err(ArchiveError::SecurityViolation {
+                    reason: "validate_entry(EntryType::File) returned a non-File variant".into(),
+                });
+            };
+            Self::extract_file(
+                &mut zip_file,
+                &safe_path,
+                sanitized_mode,
+                permit,
+                uncompressed_size,
+                ctx,
+            )?;
         }
 
         Ok(())
@@ -401,13 +421,17 @@ impl<R: Read + Seek> ZipArchive<R> {
     /// Extracts a regular file to disk.
     fn extract_file(
         zip_file: &mut zip::read::ZipFile<'_, R>,
-        validated: &crate::security::validator::ValidatedEntry,
+        safe_path: &SafePath,
+        mode: Option<u32>,
+        permit: QuotaPermit,
         file_size: u64,
         ctx: &mut ZipExtractionContext<'_>,
     ) -> Result<()> {
-        common::extract_file_generic(
+        common::extract_file_with_permit(
             zip_file,
-            validated,
+            safe_path,
+            mode,
+            permit,
             ctx.dest,
             ctx.report,
             Some(file_size),

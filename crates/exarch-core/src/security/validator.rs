@@ -226,6 +226,7 @@ impl<'a> EntryValidator<'a> {
     /// - `ArchiveError::SymlinkEscape` - Symlink target escapes
     /// - `ArchiveError::HardlinkEscape` - Hardlink target escapes
     /// - `ArchiveError::InvalidPermissions` - Dangerous permissions
+    #[inline]
     pub fn validate_entry(
         &mut self,
         path: &Path,
@@ -308,6 +309,7 @@ impl<'a> EntryValidator<'a> {
     ///
     /// Returns [`ArchiveError::ZipBomb`] if the compression ratio exceeds the
     /// configured limit.
+    #[inline]
     fn check_ratio(&self, compressed_size: Option<u64>, uncompressed_size: u64) -> Result<()> {
         if let Some(compressed) = compressed_size {
             validate_compression_ratio(compressed, uncompressed_size, self.config)?;

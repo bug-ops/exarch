@@ -6,7 +6,7 @@
 //!
 //! # Functions
 //!
-//! - [`extract_file_generic`]: Generic file extraction with buffered I/O
+//! - [`extract_file_with_permit`]: Generic file extraction with buffered I/O
 //! - [`create_directory`]: Directory creation (idempotent)
 //! - [`create_symlink`]: Symbolic link creation (Unix only)
 //! - [`check_extension_allowed`]: Extension allowlist filtering
@@ -30,9 +30,8 @@ use crate::copy::CopyBuffer;
 use crate::copy::copy_with_buffer;
 use crate::error::QuotaResource;
 use crate::security::quota::QuotaPermit;
-use crate::security::validator::ValidatedEntry;
-use crate::security::validator::ValidatedEntryType;
 use crate::types::DestDir;
+use crate::types::SafePath;
 use crate::types::SafeSymlink;
 
 /// RAII guard that calls `on_entry_complete` when dropped.
@@ -378,6 +377,25 @@ pub fn check_extension_allowed(
 ///
 /// On non-Unix platforms, permissions are not supported and mode is ignored.
 ///
+/// When `create_new` is `true`, the file is opened with `O_EXCL` semantics
+/// (`OpenOptions::create_new`): the call atomically fails with
+/// `ErrorKind::AlreadyExists` if `path` already exists, instead of truncating
+/// it. This folds the caller's duplicate-detection into the `open()` syscall
+/// itself rather than requiring a separate `exists()` stat beforehand.
+///
+/// # Security - Symlink-at-Destination Rejection (issue #459)
+///
+/// On Unix, every open passes `O_NOFOLLOW`: if `path`'s final component is a
+/// symlink (dangling or not — planted by something other than this
+/// extraction, since `SafeSymlink::validate` already prevents an in-archive
+/// symlink entry from escaping `dest`), the call fails with `ELOOP` instead
+/// of following the link. Without this, `path.exists()` (used by the old,
+/// now-removed pre-check) returns `false` for a dangling symlink, and a plain
+/// `File::create` follows it, writing archive content outside the
+/// extraction root. `create_new`'s `O_EXCL` already rejects any existing
+/// path including symlinks, so `O_NOFOLLOW` is redundant there; it is the
+/// only guard on the `create`+`truncate` (`create_new = false`) branch.
+///
 /// # Performance
 ///
 /// - Unix: 2 syscalls (open with mode hint + `set_permissions` to bypass umask)
@@ -404,20 +422,38 @@ pub fn check_extension_allowed(
 ///
 /// * `path` - Path where file should be created
 /// * `mode` - Optional Unix file mode (must be pre-sanitized by caller)
+/// * `create_new` - If `true`, fail with `AlreadyExists` instead of truncating
+///   an existing file at `path`
 ///
 /// # Errors
 ///
-/// Returns an I/O error if file creation fails.
+/// Returns an I/O error if file creation fails, including
+/// `ErrorKind::AlreadyExists` when `create_new` is `true` and `path` already
+/// exists, or `ELOOP` (via `custom_flags(O_NOFOLLOW)`) when `path`'s final
+/// component is a symlink on any branch.
 #[inline]
 #[cfg(unix)]
-fn create_file_with_mode(path: &Path, mode: Option<u32>) -> std::io::Result<File> {
+fn create_file_with_mode(
+    path: &Path,
+    mode: Option<u32>,
+    create_new: bool,
+) -> std::io::Result<File> {
     use std::fs::OpenOptions;
     use std::fs::Permissions;
     use std::os::unix::fs::OpenOptionsExt;
     use std::os::unix::fs::PermissionsExt;
 
     let mut opts = OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
+    opts.write(true);
+    // O_NOFOLLOW rejects a symlink at `path` on every branch (issue #459);
+    // `create_new`'s O_EXCL already implies this, but the create+truncate
+    // branch below has no other protection against a planted symlink.
+    opts.custom_flags(libc::O_NOFOLLOW);
+    if create_new {
+        opts.create_new(true);
+    } else {
+        opts.create(true).truncate(true);
+    }
 
     if let Some(m) = mode {
         // Apply sanitized mode during open (already stripped setuid/setgid)
@@ -445,14 +481,29 @@ fn create_file_with_mode(path: &Path, mode: Option<u32>) -> std::io::Result<File
 ///
 /// * `path` - Path where file should be created
 /// * `_mode` - Ignored on non-Unix platforms
+/// * `create_new` - If `true`, fail with `AlreadyExists` instead of truncating
+///   an existing file at `path`
 ///
 /// # Errors
 ///
-/// Returns an I/O error if file creation fails.
+/// Returns an I/O error if file creation fails, including
+/// `ErrorKind::AlreadyExists` when `create_new` is `true` and `path` already
+/// exists.
 #[inline]
 #[cfg(not(unix))]
-fn create_file_with_mode(path: &Path, _mode: Option<u32>) -> std::io::Result<File> {
-    File::create(path)
+fn create_file_with_mode(
+    path: &Path,
+    _mode: Option<u32>,
+    create_new: bool,
+) -> std::io::Result<File> {
+    if create_new {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+    } else {
+        File::create(path)
+    }
 }
 
 /// Generic file extraction implementation used by all format adapters.
@@ -472,10 +523,14 @@ fn create_file_with_mode(path: &Path, _mode: Option<u32>) -> std::io::Result<Fil
 /// # Correctness
 ///
 /// The quota charge for this entry already happened during
-/// `EntryValidator::validate_entry`, proven by the [`QuotaPermit`] held in
-/// `validated`'s `ValidatedEntryType::File`; this function only rejects
-/// non-`File` entries and guards `report.bytes_written` against overflow
-/// before writing.
+/// `EntryValidator::validate_entry`, proven by the [`QuotaPermit`] passed in
+/// by value: a `QuotaPermit` is neither `Clone` nor `Copy`, so this function
+/// cannot be called at all without the caller having moved a genuine permit
+/// out of a `ValidatedEntryType::File` via [`ValidatedEntry::into_parts`]
+/// (mirrors 7z's `write_file_with_permit`, issue #445). This guards
+/// `report.bytes_written` against overflow before writing.
+///
+/// [`ValidatedEntry::into_parts`]: crate::security::validator::ValidatedEntry::into_parts
 ///
 /// # Type Parameters
 ///
@@ -484,7 +539,10 @@ fn create_file_with_mode(path: &Path, _mode: Option<u32>) -> std::io::Result<Fil
 /// # Arguments
 ///
 /// * `reader` - Source data stream
-/// * `validated` - Validated entry metadata (path, mode, etc.)
+/// * `safe_path` - Validated destination-relative path
+/// * `mode` - Sanitized Unix file mode, if any
+/// * `_permit` - Proof that this file's size was already reserved against the
+///   quota tracker; consumed by value and otherwise unused
 /// * `dest` - Destination directory
 /// * `report` - Extraction statistics (updated)
 /// * `expected_size` - Expected file size (if known) for quota pre-check
@@ -500,9 +558,11 @@ fn create_file_with_mode(path: &Path, _mode: Option<u32>) -> std::io::Result<Fil
 /// - I/O error during copy
 #[allow(clippy::too_many_arguments)]
 #[inline]
-pub fn extract_file_generic<R: Read>(
+pub fn extract_file_with_permit<R: Read>(
     reader: &mut R,
-    validated: &ValidatedEntry,
+    safe_path: &SafePath,
+    mode: Option<u32>,
+    _permit: QuotaPermit,
     dest: &DestDir,
     report: &mut ExtractionReport,
     expected_size: Option<u64>,
@@ -511,30 +571,16 @@ pub fn extract_file_generic<R: Read>(
     skip_duplicates: bool,
     progress: &mut dyn ProgressCallback,
 ) -> Result<()> {
-    let output_path = dest.join(validated.safe_path());
-
-    let ValidatedEntryType::File(_) = validated.entry_type() else {
-        return Err(ArchiveError::SecurityViolation {
-            reason: "extract_file_generic called with a non-File validated entry".into(),
-        });
-    };
+    let output_path = dest.join(safe_path);
 
     // Create parent directories if needed using cache
     dir_cache.ensure_parent_dir(&output_path)?;
 
-    if output_path.exists() && skip_duplicates {
-        report.files_skipped += 1;
-        report.warnings.push(format!(
-            "skipped duplicate entry: {}",
-            validated.safe_path().as_path().display()
-        ));
-        return Ok(());
-    }
-
     // The size was already reserved against QuotaTracker during
-    // validate_entry (proven by the QuotaPermit held in `validated`'s
-    // ValidatedEntryType::File); this only guards report.bytes_written,
-    // a different quantity, against overflow before writing.
+    // validate_entry (proven by the QuotaPermit consumed above); this only
+    // guards report.bytes_written, a different quantity, against overflow.
+    // Checked before any filesystem mutation so a rejected entry never
+    // leaves a zero-byte file on disk (restores the pre-#446 ordering).
     if let Some(size) = expected_size {
         report
             .bytes_written
@@ -544,9 +590,23 @@ pub fn extract_file_generic<R: Read>(
             })?;
     }
 
-    // Create file and enforce exact sanitized permissions (Unix only).
-    // set_permissions() is called inside create_file_with_mode to bypass umask.
-    let output_file = create_file_with_mode(&output_path, validated.mode())?;
+    // Folds the duplicate-existence check into the open() syscall itself
+    // (create_new(true) atomically fails with AlreadyExists) instead of a
+    // separate exists() stat followed by a truncating create — one syscall
+    // per extracted file instead of two.
+    let output_file = match create_file_with_mode(&output_path, mode, skip_duplicates) {
+        Ok(file) => file,
+        Err(e) if skip_duplicates && e.kind() == std::io::ErrorKind::AlreadyExists => {
+            report.files_skipped += 1;
+            report.warnings.push(format!(
+                "skipped duplicate entry: {}",
+                safe_path.as_path().display()
+            ));
+            return Ok(());
+        }
+        Err(e) => return Err(e.into()),
+    };
+
     let mut buffered_writer = BufWriter::with_capacity(64 * 1024, output_file);
     let bytes_written = copy_with_buffer(reader, &mut buffered_writer, copy_buffer)?;
     buffered_writer.flush()?;
@@ -584,7 +644,7 @@ pub fn extract_file_generic<R: Read>(
 ///
 /// # Arguments
 ///
-/// * `validated` - Validated entry metadata
+/// * `safe_path` - Validated destination-relative path of the directory
 /// * `dest` - Destination directory
 /// * `report` - Extraction statistics (updated)
 /// * `dir_cache` - Directory cache to reduce redundant mkdir syscalls
@@ -593,12 +653,12 @@ pub fn extract_file_generic<R: Read>(
 ///
 /// Returns an error if directory creation fails due to I/O errors.
 pub fn create_directory(
-    validated: &ValidatedEntry,
+    safe_path: &SafePath,
     dest: &DestDir,
     report: &mut ExtractionReport,
     dir_cache: &mut DirCache,
 ) -> Result<()> {
-    let dir_path = dest.join(validated.safe_path());
+    let dir_path = dest.join(safe_path);
 
     // Use cache to avoid redundant mkdir syscalls
     dir_cache.ensure_dir(&dir_path)?;
@@ -709,16 +769,13 @@ mod tests {
     use crate::SecurityConfig;
     use crate::copy::CopyBuffer;
     use crate::security::quota::QuotaTracker;
-    use crate::security::validator::ValidatedEntry;
-    use crate::security::validator::ValidatedEntryType;
-    use crate::types::SafePath;
     use std::assert_matches;
     use std::io::Cursor;
     use std::path::PathBuf;
     use tempfile::TempDir;
 
     #[test]
-    fn test_extract_file_generic_integer_overflow_check() {
+    fn test_extract_file_with_permit_integer_overflow_check() {
         let temp = TempDir::new().expect("failed to create temp dir");
         let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
         let mut report = ExtractionReport::default();
@@ -735,18 +792,16 @@ mod tests {
         let permit = QuotaTracker::new()
             .reserve(0, &config)
             .expect("reservation should succeed");
-        let validated = ValidatedEntry::new(
-            SafePath::validate(&PathBuf::from("test.txt"), &dest, &config)
-                .expect("path should be valid"),
-            ValidatedEntryType::File(permit),
-            Some(0o644),
-        );
+        let safe_path = SafePath::validate(&PathBuf::from("test.txt"), &dest, &config)
+            .expect("path should be valid");
 
         let mut reader = Cursor::new(b"test data");
 
-        let result = extract_file_generic(
+        let result = extract_file_with_permit(
             &mut reader,
-            &validated,
+            &safe_path,
+            Some(0o644),
+            permit,
             &dest,
             &mut report,
             expected_size,
@@ -764,45 +819,12 @@ mod tests {
                 resource: QuotaResource::IntegerOverflow
             }
         );
-    }
-
-    /// A `Directory`-typed validated entry must be rejected by
-    /// `extract_file_generic` before any filesystem side effect, proving the
-    /// non-`File` guard is live and not just structurally implied.
-    #[test]
-    fn test_extract_file_generic_rejects_non_file_entry() {
-        let temp = TempDir::new().expect("failed to create temp dir");
-        let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
-        let mut report = ExtractionReport::default();
-        let mut copy_buffer = CopyBuffer::new();
-        let mut dir_cache = DirCache::new();
-
-        let config = SecurityConfig::default().validate().expect("valid config");
-        let validated = ValidatedEntry::new(
-            SafePath::validate(&PathBuf::from("dir_entry"), &dest, &config)
-                .expect("path should be valid"),
-            ValidatedEntryType::Directory,
-            None,
-        );
-
-        let mut reader = Cursor::new(b"");
-
-        let result = extract_file_generic(
-            &mut reader,
-            &validated,
-            &dest,
-            &mut report,
-            None,
-            &mut copy_buffer,
-            &mut dir_cache,
-            true,
-            &mut NoopProgress,
-        );
-
-        assert_matches!(result, Err(ArchiveError::SecurityViolation { .. }));
+        // The overflow check now runs before the file is created (issue
+        // #446 review): a rejected entry must not leave a zero-byte file on
+        // disk.
         assert!(
-            !temp.path().join("dir_entry").exists(),
-            "non-File entry must not touch the filesystem"
+            !temp.path().join("test.txt").exists(),
+            "overflow-rejected entry must not touch the filesystem"
         );
     }
 
@@ -1017,7 +1039,8 @@ mod tests {
         let file_path = temp.path().join("test_0o644.txt");
 
         // Create file with mode 0o644
-        let file = create_file_with_mode(&file_path, Some(0o644)).expect("should create file");
+        let file =
+            create_file_with_mode(&file_path, Some(0o644), false).expect("should create file");
         drop(file);
 
         // Verify file exists
@@ -1045,7 +1068,8 @@ mod tests {
         let file_path = temp.path().join("test_0o755.txt");
 
         // Create file with mode 0o755
-        let file = create_file_with_mode(&file_path, Some(0o755)).expect("should create file");
+        let file =
+            create_file_with_mode(&file_path, Some(0o755), false).expect("should create file");
         drop(file);
 
         // Verify file exists
@@ -1073,7 +1097,8 @@ mod tests {
         let file_path = temp.path().join("test_0o600.txt");
 
         // Create file with mode 0o600
-        let file = create_file_with_mode(&file_path, Some(0o600)).expect("should create file");
+        let file =
+            create_file_with_mode(&file_path, Some(0o600), false).expect("should create file");
         drop(file);
 
         // Verify file exists
@@ -1099,7 +1124,7 @@ mod tests {
         let file_path = temp.path().join("test_none.txt");
 
         // Create file with mode=None (should use system defaults)
-        let file = create_file_with_mode(&file_path, None).expect("should create file");
+        let file = create_file_with_mode(&file_path, None, false).expect("should create file");
         drop(file);
 
         // Verify file exists
@@ -1121,7 +1146,7 @@ mod tests {
         let file_path = temp.path().join("test_none_unix.txt");
 
         // Create file with mode=None
-        let file = create_file_with_mode(&file_path, None).expect("should create file");
+        let file = create_file_with_mode(&file_path, None, false).expect("should create file");
         drop(file);
 
         // Verify file exists
@@ -1164,18 +1189,16 @@ mod tests {
         let permit = QuotaTracker::new()
             .reserve(0, &config)
             .expect("reservation should succeed");
-        let validated = ValidatedEntry::new(
-            SafePath::validate(&PathBuf::from("perm_test.txt"), &dest, &config)
-                .expect("path should be valid"),
-            ValidatedEntryType::File(permit),
-            Some(sanitized_mode),
-        );
+        let safe_path = SafePath::validate(&PathBuf::from("perm_test.txt"), &dest, &config)
+            .expect("path should be valid");
 
         let mut reader = Cursor::new(b"content");
 
-        extract_file_generic(
+        extract_file_with_permit(
             &mut reader,
-            &validated,
+            &safe_path,
+            Some(sanitized_mode),
+            permit,
             &dest,
             &mut report,
             None,
@@ -1221,7 +1244,7 @@ mod tests {
         // process-global but safe to mutate here. Restored unconditionally.
         let previous_umask = unsafe { libc::umask(0o077) };
 
-        let result = create_file_with_mode(&file_path, Some(0o755));
+        let result = create_file_with_mode(&file_path, Some(0o755), false);
 
         // Restore previous umask unconditionally before any assert.
         unsafe { libc::umask(previous_umask) };

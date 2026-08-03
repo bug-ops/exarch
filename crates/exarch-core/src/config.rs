@@ -290,6 +290,7 @@ pub struct SecurityConfig<State = Unvalidated> {
 impl<State> Deref for SecurityConfig<State> {
     type Target = SecurityConfigFields;
 
+    #[inline]
     fn deref(&self) -> &SecurityConfigFields {
         &self.fields
     }

@@ -339,11 +339,9 @@ pub fn normalize_entry_name(name: &str) -> String {
 /// Appends a single aggregated warning for `count` skipped duplicate
 /// entries, choosing `noun_singular`/`noun_plural` based on `count`.
 ///
-/// Shared by the TAR and ZIP extractors so a single warning is pushed once
-/// extraction completes instead of one warning per skipped duplicate,
-/// mirroring 7z's `duplicate_skips` accumulator
-/// (`SevenZArchive::extract_with_callback`, issues #484/#487/#490). A no-op
-/// when `count` is zero.
+/// Shared by the TAR, ZIP, and 7z extractors (#499) so a single warning is
+/// pushed once extraction completes instead of one warning per skipped
+/// duplicate. A no-op when `count` is zero.
 ///
 /// # Examples
 ///
@@ -1615,6 +1613,29 @@ mod tests {
         assert_eq!(
             report.warnings,
             vec!["skipped 3 entries with disallowed extensions".to_string()]
+        );
+    }
+
+    /// Pins the exact aggregated warning message text produced by
+    /// `push_duplicate_skip_warning` for both singular and plural counts,
+    /// and confirms it is a no-op for a zero count.
+    #[test]
+    fn test_push_duplicate_skip_warning_text() {
+        let mut report = ExtractionReport::default();
+        push_duplicate_skip_warning(&mut report, 0, "entry", "entries");
+        assert!(report.warnings.is_empty(), "zero count must be a no-op");
+
+        push_duplicate_skip_warning(&mut report, 1, "entry", "entries");
+        assert_eq!(
+            report.warnings,
+            vec!["skipped 1 entry as pre-existing duplicates".to_string()]
+        );
+
+        report.warnings.clear();
+        push_duplicate_skip_warning(&mut report, 3, "entry", "entries");
+        assert_eq!(
+            report.warnings,
+            vec!["skipped 3 entries as pre-existing duplicates".to_string()]
         );
     }
 }

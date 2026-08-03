@@ -786,17 +786,12 @@ impl<R: Read + Seek> SevenZArchive<R> {
         let mut archive_reader = ArchiveReader::from_archive(archive, source, Password::empty());
         let result = archive_reader.for_each_entries(&mut extract_fn);
         let mut accumulated = ctx.report;
-        if ctx.duplicate_skips > 0 {
-            let noun = if ctx.duplicate_skips == 1 {
-                "entry"
-            } else {
-                "entries"
-            };
-            accumulated.warnings.push(format!(
-                "skipped {} {noun} as pre-existing duplicates",
-                ctx.duplicate_skips
-            ));
-        }
+        common::push_duplicate_skip_warning(
+            &mut accumulated,
+            ctx.duplicate_skips,
+            "entry",
+            "entries",
+        );
         common::push_disallowed_extension_warning(&mut accumulated, ctx.disallowed_extension_skips);
 
         let e = match result {

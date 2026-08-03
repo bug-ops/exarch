@@ -126,8 +126,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   integer-overflow branches in `QuotaTracker::record_file`/`record_file_checked`
   (`crates/exarch-core/src/security/quota.rs`), reinforcing the existing OPT-C003 hot/cold path
   optimization for the optimizer.
+- Internal: `exarch-python`'s `extract_archive`, `create_archive`, `list_archive`, and
+  `verify_archive`, and `exarch-node`'s async/sync `extract_archive(_sync)`,
+  `create_archive(_sync)`, `list_archive(_sync)`, and `verify_archive(_sync)` now route through
+  the existing `catch_panic_as_py_err`/`catch_panic_as_js_err` panic-catch helpers (#395) instead
+  of each reimplementing the identical `catch_unwind(...).map_err(...)` sequence inline (#454).
+  Pure deduplication — no change to panic-catching semantics or error messages.
+- **User-visible**: in release builds of `exarch-python` and `exarch-node`, an I/O error
+  (`CoreError::Io`) raised by either binding now reports only the `std::io::ErrorKind`
+  description (e.g. "permission denied") instead of the full underlying `io::Error` message text;
+  the full message is still shown in debug builds. See the `#453` entry below for why.
 
 ### Fixed
+
+- **`exarch-python` error messages leaked full absolute paths in release builds, and both
+  bindings leaked host paths embedded in `CoreError::Io` messages (#453)**:
+  `crates/exarch-python/src/error.rs` called `path.display()` directly and unconditionally for
+  every path-carrying `ArchiveError` variant (`PathTraversal`, `SymlinkEscape`, `HardlinkEscape`,
+  `InvalidPermissions`, `SourceNotFound`, `SourceNotAccessible`, `OutputExists`,
+  `UnknownFormat`), unlike `exarch-node`'s equivalent module which already redacted paths to just
+  the filename in release builds. Added a profile-gated `sanitize_path_for_error` helper matching
+  `exarch-node`'s behavior (full path under `debug_assertions`, filename only otherwise) and
+  routed every path-carrying variant through it. Separately, `CoreError::Io` was found to bypass
+  redaction in **both** bindings: `exarch-core`'s `DestDir` validation (e.g. "directory is not
+  writable: `{canonical_path}`") embeds a fully-canonicalized host path directly in the `io::Error`
+  message text, reachable from every extraction call via `DestDir::new_or_create`, and neither
+  binding's `Io` arm redacted it. Since the message is free-form text with no structured path
+  field, added a `sanitize_io_error_for_error` helper to both bindings that keeps the full
+  `Display` output under `debug_assertions` but reduces it to just the `std::io::ErrorKind`
+  description in release builds, closing the same leak class at the one variant that had been
+  missed. Neither `exarch-python` nor `exarch-node` now leaks internal directory structure in
+  release-build error messages.
 
 - **7z file writes discarded their `QuotaPermit` instead of consuming it (#440)**: unlike TAR/ZIP,
   7z's `ValidatedEntryType::File(_)` write arm matched the permit and dropped it via `_`, so the

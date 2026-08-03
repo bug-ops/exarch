@@ -181,7 +181,7 @@ pub async fn extract_archive(
     // For maximum security with untrusted archives, use extractArchiveSync()
     // or ensure exclusive file access (e.g., flock) during extraction.
     let report = tokio::task::spawn_blocking(move || {
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        catch_panic_as_js_err("archive extraction", || {
             exarch_core::extract_archive_with_options(
                 &archive_path,
                 &output_dir,
@@ -189,9 +189,7 @@ pub async fn extract_archive(
                 &options_owned,
             )
             .map_err(convert_error)
-        }))
-        .map_err(|_| Error::from_reason("Internal panic during archive extraction"))
-        .flatten()
+        })
     })
     .await
     .map_err(|e| Error::from_reason(format!("task join error: {e}")))
@@ -254,16 +252,15 @@ pub fn extract_archive_sync(
 
     // Run extraction synchronously with panic safety
     // CRITICAL: Never panic across FFI boundary
-    let report = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let report = catch_panic_as_js_err("archive extraction", || {
         exarch_core::extract_archive_with_options(
             &archive_path,
             &output_dir,
             config_ref,
             options_ref,
         )
-    }))
-    .map_err(|_| Error::from_reason("Internal panic during archive extraction"))?
-    .map_err(convert_error)?;
+        .map_err(convert_error)
+    })?;
 
     Ok(ExtractionReport::from(report))
 }
@@ -313,13 +310,11 @@ pub async fn create_archive(
         config.map(|c| c.as_core().clone()).unwrap_or_default();
 
     let report = tokio::task::spawn_blocking(move || {
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        catch_panic_as_js_err("archive creation", || {
             let sources_refs: Vec<&str> = sources.iter().map(String::as_str).collect();
             exarch_core::create_archive(&output_path, &sources_refs, &config_owned)
                 .map_err(convert_error)
-        }))
-        .map_err(|_| Error::from_reason("Internal panic during archive creation"))
-        .flatten()
+        })
     })
     .await
     .map_err(|e| Error::from_reason(format!("task join error: {e}")))
@@ -372,11 +367,9 @@ pub fn create_archive_sync(
 
     let sources_refs: Vec<&str> = sources.iter().map(String::as_str).collect();
 
-    let report = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        exarch_core::create_archive(&output_path, &sources_refs, config_ref)
-    }))
-    .map_err(|_| Error::from_reason("Internal panic during archive creation"))?
-    .map_err(convert_error)?;
+    let report = catch_panic_as_js_err("archive creation", || {
+        exarch_core::create_archive(&output_path, &sources_refs, config_ref).map_err(convert_error)
+    })?;
 
     Ok(CreationReport::from(report))
 }
@@ -418,11 +411,9 @@ pub async fn list_archive(
         config.map(|c| c.as_core().clone()).unwrap_or_default();
 
     let manifest = tokio::task::spawn_blocking(move || {
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        catch_panic_as_js_err("archive listing", || {
             exarch_core::list_archive(&archive_path, &config_owned).map_err(convert_error)
-        }))
-        .map_err(|_| Error::from_reason("Internal panic during archive listing"))
-        .flatten()
+        })
     })
     .await
     .map_err(|e| Error::from_reason(format!("task join error: {e}")))
@@ -469,11 +460,9 @@ pub fn list_archive_sync(
     let default_config = exarch_core::SecurityConfig::default();
     let config_ref = config.map_or(&default_config, |c| c.as_core());
 
-    let manifest = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        exarch_core::list_archive(&archive_path, config_ref)
-    }))
-    .map_err(|_| Error::from_reason("Internal panic during archive listing"))?
-    .map_err(convert_error)?;
+    let manifest = catch_panic_as_js_err("archive listing", || {
+        exarch_core::list_archive(&archive_path, config_ref).map_err(convert_error)
+    })?;
 
     Ok(ArchiveManifest::from(manifest))
 }
@@ -519,11 +508,9 @@ pub async fn verify_archive(
         config.map(|c| c.as_core().clone()).unwrap_or_default();
 
     let report = tokio::task::spawn_blocking(move || {
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        catch_panic_as_js_err("archive verification", || {
             exarch_core::verify_archive(&archive_path, &config_owned).map_err(convert_error)
-        }))
-        .map_err(|_| Error::from_reason("Internal panic during archive verification"))
-        .flatten()
+        })
     })
     .await
     .map_err(|e| Error::from_reason(format!("task join error: {e}")))
@@ -570,11 +557,9 @@ pub fn verify_archive_sync(
     let default_config = exarch_core::SecurityConfig::default();
     let config_ref = config.map_or(&default_config, |c| c.as_core());
 
-    let report = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        exarch_core::verify_archive(&archive_path, config_ref)
-    }))
-    .map_err(|_| Error::from_reason("Internal panic during archive verification"))?
-    .map_err(convert_error)?;
+    let report = catch_panic_as_js_err("archive verification", || {
+        exarch_core::verify_archive(&archive_path, config_ref).map_err(convert_error)
+    })?;
 
     Ok(VerificationReport::from(report))
 }

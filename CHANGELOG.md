@@ -274,6 +274,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   confirmation on CI hardware rather than local benchmarks (which showed >20% same-commit swings
   during this investigation).
 
+- **`many_small_files`/`file_count_scaling` benchmarks were timing `TempDir` cleanup as part of
+  extraction cost (#446)**: `benchmark_many_small_files` and `benchmark_file_count_scaling` in
+  `crates/exarch-core/benches/extraction.rs` timed `TempDir::drop()` (recursive deletion of every
+  extracted file) inside criterion's `b.iter()`, alongside the `ZipArchive::extract()` call being
+  measured — `sample` profiling attributed ~87% of the `many_small_files/10000` wall time to this
+  cleanup, not to extraction. Switched both benchmarks to `b.iter_custom`, excluding only
+  `TempDir::new()`/`drop()` from the timed window. dhat heap-allocation profiling showed
+  byte-identical allocations across the regression window, and re-measurement on the corrected
+  harness shows no residual regression vs. the ci-076 baseline: the originally reported +15.8% was
+  inflated by this harness bug on top of the real regression already addressed above by #470's
+  syscall reduction. This dev machine's benchmark noise floor (40-80% run-to-run variance under
+  shared load, observed during this investigation) still exceeds the project's 10% regression
+  threshold, and no CI workflow currently runs `cargo bench` (`bench-build` only compiles
+  benchmarks) — the "confirmation on CI hardware" noted above is not currently achievable and
+  should be read as aspirational pending a dedicated benchmark-running job, not a completed step.
+
 ### Security
 
 - **Dangling symlink at the extraction destination bypassed the duplicate-check and allowed

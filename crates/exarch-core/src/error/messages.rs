@@ -3,8 +3,7 @@
 //! Provides consistent error messages across Python and Node.js bindings
 //! while allowing platform-specific customization.
 
-use std::path::Path;
-
+use super::redaction::sanitize_io_error_for_error;
 use super::types::ArchiveError;
 
 /// Error message for FFI consumption.
@@ -26,11 +25,11 @@ pub struct FfiErrorMessage {
 impl ArchiveError {
     /// Formats error for FFI consumption.
     ///
-    /// # Arguments
-    ///
-    /// * `sanitize_paths` - If true, only show filename (not full path) for
-    ///   security. Should be `false` in development, `true` in production
-    ///   Node.js builds.
+    /// Path and I/O-error text is redacted per the shared policy in
+    /// [`super::redaction`] — see [`Self::redacted_path`] and
+    /// [`sanitize_io_error_for_error`] — so this always applies the same
+    /// policy `exarch-python` and `exarch-node` apply directly; there is no
+    /// separate `sanitize_paths` toggle to keep in sync with theirs.
     ///
     /// # Examples
     ///
@@ -39,41 +38,36 @@ impl ArchiveError {
     /// use std::path::PathBuf;
     ///
     /// let error = ArchiveError::PathTraversal {
-    ///     path: PathBuf::from("/etc/passwd"),
+    ///     path: PathBuf::from("../../etc/passwd"),
     /// };
     ///
-    /// let msg = error.to_ffi_message(true);
+    /// let msg = error.to_ffi_message();
     /// assert_eq!(msg.code, "PATH_TRAVERSAL");
-    /// assert!(msg.description.contains("passwd")); // Only filename shown
+    /// // Archive-relative, attacker-authored path: never redacted (#462).
+    /// assert!(msg.description.contains("../../etc/passwd"));
     /// ```
     #[must_use]
     #[allow(clippy::too_many_lines)]
-    pub fn to_ffi_message(&self, sanitize_paths: bool) -> FfiErrorMessage {
+    pub fn to_ffi_message(&self) -> FfiErrorMessage {
+        let path = self
+            .redacted_path()
+            .unwrap_or_else(|| "<unknown>".to_string());
         match self {
-            Self::PathTraversal { path } => FfiErrorMessage {
+            Self::PathTraversal { .. } => FfiErrorMessage {
                 code: "PATH_TRAVERSAL",
-                description: format!(
-                    "path traversal detected: {}",
-                    format_path(path, sanitize_paths)
-                ),
+                description: format!("path traversal detected: {path}"),
                 context: None,
             },
 
-            Self::SymlinkEscape { path } => FfiErrorMessage {
+            Self::SymlinkEscape { .. } => FfiErrorMessage {
                 code: "SYMLINK_ESCAPE",
-                description: format!(
-                    "symlink target outside extraction directory: {}",
-                    format_path(path, sanitize_paths)
-                ),
+                description: format!("symlink target outside extraction directory: {path}"),
                 context: None,
             },
 
-            Self::HardlinkEscape { path } => FfiErrorMessage {
+            Self::HardlinkEscape { .. } => FfiErrorMessage {
                 code: "HARDLINK_ESCAPE",
-                description: format!(
-                    "hardlink target outside extraction directory: {}",
-                    format_path(path, sanitize_paths)
-                ),
+                description: format!("hardlink target outside extraction directory: {path}"),
                 context: None,
             },
 
@@ -109,43 +103,31 @@ impl ArchiveError {
 
             Self::Io(io_err) => FfiErrorMessage {
                 code: "IO_ERROR",
-                description: io_err.to_string(),
+                description: sanitize_io_error_for_error(io_err),
                 context: Some(io_err.kind().to_string()),
             },
 
-            Self::InvalidPermissions { path, mode } => FfiErrorMessage {
+            Self::InvalidPermissions { mode, .. } => FfiErrorMessage {
                 code: "INVALID_PERMISSIONS",
-                description: format!(
-                    "invalid permissions for {}: {mode:#o}",
-                    format_path(path, sanitize_paths)
-                ),
+                description: format!("invalid permissions for {path}: {mode:#o}"),
                 context: None,
             },
 
-            Self::SourceNotFound { path } => FfiErrorMessage {
+            Self::SourceNotFound { .. } => FfiErrorMessage {
                 code: "SOURCE_NOT_FOUND",
-                description: format!(
-                    "source path not found: {}",
-                    format_path(path, sanitize_paths)
-                ),
+                description: format!("source path not found: {path}"),
                 context: None,
             },
 
-            Self::SourceNotAccessible { path } => FfiErrorMessage {
+            Self::SourceNotAccessible { .. } => FfiErrorMessage {
                 code: "SOURCE_NOT_ACCESSIBLE",
-                description: format!(
-                    "source path is not accessible: {}",
-                    format_path(path, sanitize_paths)
-                ),
+                description: format!("source path is not accessible: {path}"),
                 context: None,
             },
 
-            Self::OutputExists { path } => FfiErrorMessage {
+            Self::OutputExists { .. } => FfiErrorMessage {
                 code: "OUTPUT_EXISTS",
-                description: format!(
-                    "output file already exists: {}",
-                    format_path(path, sanitize_paths)
-                ),
+                description: format!("output file already exists: {path}"),
                 context: None,
             },
 
@@ -155,12 +137,9 @@ impl ArchiveError {
                 context: None,
             },
 
-            Self::UnknownFormat { path } => FfiErrorMessage {
+            Self::UnknownFormat { .. } => FfiErrorMessage {
                 code: "UNKNOWN_FORMAT",
-                description: format!(
-                    "cannot determine archive format from: {}",
-                    format_path(path, sanitize_paths)
-                ),
+                description: format!("cannot determine archive format from: {path}"),
                 context: None,
             },
 
@@ -170,7 +149,7 @@ impl ArchiveError {
                 context: None,
             },
 
-            Self::PartialExtraction { source, .. } => source.to_ffi_message(sanitize_paths),
+            Self::PartialExtraction { source, .. } => source.to_ffi_message(),
         }
     }
 
@@ -200,40 +179,49 @@ impl ArchiveError {
     }
 }
 
-/// Formats a path for error messages.
-///
-/// If `sanitize` is true, only returns the filename (for production).
-/// If `sanitize` is false, returns the full path (for development).
-fn format_path(path: &Path, sanitize: bool) -> String {
-    if sanitize {
-        path.file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("<unknown>")
-            .to_string()
-    } else {
-        path.display().to_string()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    /// Regression test for #462: `PathTraversal` carries an
+    /// archive-relative, attacker-authored path and must never be redacted,
+    /// unlike a genuinely host-derived path variant (see the test below).
     #[test]
-    fn test_path_sanitization() {
+    fn test_attacker_path_never_redacted() {
         let error = ArchiveError::PathTraversal {
-            path: PathBuf::from("/etc/passwd"),
+            path: PathBuf::from("../../etc/passwd"),
         };
+        let msg = error.to_ffi_message();
+        assert!(msg.description.contains("../../etc/passwd"));
+    }
 
-        // Development: full path
-        let msg = error.to_ffi_message(false);
-        assert!(msg.description.contains("/etc/passwd"));
+    /// Regression test for #453: `SourceNotFound` carries a host filesystem
+    /// path; in release builds it must be redacted to filename-only. This
+    /// only exercises the release-build branch — the debug-build behavior
+    /// is covered directly in `super::redaction`.
+    #[test]
+    #[cfg(not(debug_assertions))]
+    fn test_host_path_redacted_in_release() {
+        let error = ArchiveError::SourceNotFound {
+            path: PathBuf::from("/srv/secret/app/x.txt"),
+        };
+        let msg = error.to_ffi_message();
+        assert!(msg.description.contains("x.txt"));
+        assert!(!msg.description.contains("/srv/secret"));
+    }
 
-        // Production: filename only
-        let msg = error.to_ffi_message(true);
-        assert!(msg.description.contains("passwd"));
-        assert!(!msg.description.contains("/etc/"));
+    /// Regression test for #453: `Io` messages must not leak a host path
+    /// embedded in the free-form message text in release builds.
+    #[test]
+    #[cfg(not(debug_assertions))]
+    fn test_io_error_redacted_in_release() {
+        let error = ArchiveError::Io(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "directory is not writable: /srv/secret/app/private-output",
+        ));
+        let msg = error.to_ffi_message();
+        assert!(!msg.description.contains("/srv/secret"));
     }
 
     #[test]
@@ -263,7 +251,7 @@ mod tests {
 
         for (error, expected_code) in test_cases {
             assert_eq!(error.error_code(), expected_code);
-            assert_eq!(error.to_ffi_message(false).code, expected_code);
+            assert_eq!(error.to_ffi_message().code, expected_code);
         }
     }
 
@@ -323,7 +311,7 @@ mod tests {
             let code = error.error_code();
             assert!(!code.is_empty(), "Error code should not be empty");
 
-            let msg = error.to_ffi_message(false);
+            let msg = error.to_ffi_message();
             assert_eq!(msg.code, code);
             assert!(!msg.description.is_empty());
         }

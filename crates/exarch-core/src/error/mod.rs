@@ -1,6 +1,7 @@
 //! Error types for archive operations.
 
 pub mod messages;
+pub mod redaction;
 pub mod types;
 
 pub use messages::FfiErrorMessage;

@@ -2,46 +2,14 @@
 
 use exarch_core::ArchiveError as CoreError;
 use exarch_core::QuotaResource as CoreQuotaResource;
+use exarch_core::format_entry_path_for_error;
+use exarch_core::sanitize_io_error_for_error;
+use exarch_core::sanitize_path_for_error;
 use pyo3::create_exception;
 use pyo3::exceptions::PyException;
 use pyo3::exceptions::PyIOError;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use std::path::Path;
-
-/// Sanitizes path information for error messages.
-///
-/// In debug builds, returns the full path for detailed diagnostics.
-/// In release builds, returns only the filename to avoid leaking internal
-/// directory structures to potential attackers.
-#[cfg(debug_assertions)]
-fn sanitize_path_for_error(path: &Path) -> String {
-    path.display().to_string()
-}
-
-#[cfg(not(debug_assertions))]
-fn sanitize_path_for_error(path: &Path) -> String {
-    path.file_name().map_or_else(
-        || "<unknown>".to_string(),
-        |n| n.to_string_lossy().into_owned(),
-    )
-}
-
-/// Sanitizes I/O error messages for error reporting.
-///
-/// In debug builds, returns the full `Display` output (which may embed a
-/// host path, e.g. from `DestDir`'s validation messages). In release builds,
-/// returns only the [`std::io::ErrorKind`] description, since the free-form
-/// message text has no structured path field to redact.
-#[cfg(debug_assertions)]
-fn sanitize_io_error_for_error(e: &std::io::Error) -> String {
-    e.to_string()
-}
-
-#[cfg(not(debug_assertions))]
-fn sanitize_io_error_for_error(e: &std::io::Error) -> String {
-    e.kind().to_string()
-}
 
 // Base exception for all extraction errors
 create_exception!(exarch, ArchiveError, PyException);
@@ -71,17 +39,17 @@ create_exception!(exarch, InvalidArchiveError, ArchiveError);
 pub fn convert_error(err: CoreError) -> PyErr {
     match err {
         CoreError::PathTraversal { path } => {
-            let path_str = sanitize_path_for_error(&path);
+            let path_str = format_entry_path_for_error(&path);
             PathTraversalError::new_err(format!("path traversal detected: {path_str}"))
         }
         CoreError::SymlinkEscape { path } => {
-            let path_str = sanitize_path_for_error(&path);
+            let path_str = format_entry_path_for_error(&path);
             SymlinkEscapeError::new_err(format!(
                 "symlink target outside extraction directory: {path_str}"
             ))
         }
         CoreError::HardlinkEscape { path } => {
-            let path_str = sanitize_path_for_error(&path);
+            let path_str = format_entry_path_for_error(&path);
             HardlinkEscapeError::new_err(format!(
                 "hardlink target outside extraction directory: {path_str}"
             ))
@@ -94,7 +62,7 @@ pub fn convert_error(err: CoreError) -> PyErr {
             "potential zip bomb: compressed={compressed} bytes, uncompressed={uncompressed} bytes (ratio: {ratio:.2})"
         )),
         CoreError::InvalidPermissions { path, mode } => {
-            let path_str = sanitize_path_for_error(&path);
+            let path_str = format_entry_path_for_error(&path);
             InvalidPermissionsError::new_err(format!(
                 "invalid permissions for {path_str}: {mode:#o}"
             ))
@@ -218,10 +186,10 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    /// Asserts the full attacker-supplied path is present, which only holds
-    /// under `debug_assertions` (see `sanitize_path_for_error`).
+    /// Asserts the full attacker-supplied path is present in both debug and
+    /// release builds — `PathTraversal` carries an archive-relative,
+    /// attacker-authored path and is never redacted (see #462).
     #[test]
-    #[cfg(debug_assertions)]
     fn test_path_traversal_conversion() {
         let err = CoreError::PathTraversal {
             path: PathBuf::from("../etc/passwd"),
@@ -240,10 +208,10 @@ mod tests {
         );
     }
 
-    /// Asserts the full path is present, which only holds under
-    /// `debug_assertions` (see `sanitize_path_for_error`).
+    /// Asserts the full path is present in both debug and release builds —
+    /// `SymlinkEscape` carries an archive-relative, attacker-authored path
+    /// and is never redacted (see #462).
     #[test]
-    #[cfg(debug_assertions)]
     fn test_symlink_escape_conversion() {
         let err = CoreError::SymlinkEscape {
             path: PathBuf::from("/etc/passwd"),
@@ -262,10 +230,10 @@ mod tests {
         );
     }
 
-    /// Asserts the full path is present, which only holds under
-    /// `debug_assertions` (see `sanitize_path_for_error`).
+    /// Asserts the full path is present in both debug and release builds —
+    /// `HardlinkEscape` carries an archive-relative, attacker-authored path
+    /// and is never redacted (see #462).
     #[test]
-    #[cfg(debug_assertions)]
     fn test_hardlink_escape_conversion() {
         let err = CoreError::HardlinkEscape {
             path: PathBuf::from("/etc/shadow"),
@@ -500,14 +468,58 @@ mod tests {
         );
     }
 
-    /// Regression test for #453 follow-up: in release builds,
-    /// `sanitize_path_for_error` must strip the path down to the filename,
-    /// not leak the full host path.
+    /// Regression test for #453 follow-up: in release builds, a
+    /// host-derived path variant must be reduced to the filename, not leak
+    /// the full host path. The redaction primitives themselves are tested
+    /// directly in `exarch_core::error::redaction`; this exercises the
+    /// binding's end-to-end `convert_error` path.
     #[test]
     #[cfg(not(debug_assertions))]
-    fn test_sanitize_path_for_error_strips_directory_in_release() {
-        let path = PathBuf::from("/srv/secret/app/x.txt");
-        assert_eq!(sanitize_path_for_error(&path), "x.txt");
+    fn test_source_not_found_strips_directory_in_release() {
+        let err = CoreError::SourceNotFound {
+            path: PathBuf::from("/srv/secret/app/x.txt"),
+        };
+        let py_err = convert_error(err);
+        let err_str = py_err.to_string();
+        assert!(
+            err_str.contains("x.txt"),
+            "Expected filename in error message, got: {}",
+            err_str
+        );
+        assert!(
+            !err_str.contains("/srv/secret"),
+            "Expected host directory to be redacted, got: {}",
+            err_str
+        );
+    }
+
+    /// Regression test for #462: `PathTraversal`, `SymlinkEscape`, and
+    /// `HardlinkEscape` carry archive-relative, attacker-authored paths and
+    /// must keep the full path even in release builds, unlike genuinely
+    /// host-derived path variants (see the test above).
+    #[test]
+    #[cfg(not(debug_assertions))]
+    fn test_attacker_path_variants_not_redacted_in_release() {
+        let nested = PathBuf::from("nested/dir/../../etc/passwd");
+        let variants = [
+            CoreError::PathTraversal {
+                path: nested.clone(),
+            },
+            CoreError::SymlinkEscape {
+                path: nested.clone(),
+            },
+            CoreError::HardlinkEscape {
+                path: nested.clone(),
+            },
+        ];
+        for err in variants {
+            let err_str = convert_error(err).to_string();
+            assert!(
+                err_str.contains("nested/dir/../../etc/passwd"),
+                "Expected full archive-relative path to survive redaction, got: {}",
+                err_str
+            );
+        }
     }
 
     /// Regression test for #453 follow-up: `CoreError::Io` carries free-form
@@ -750,5 +762,42 @@ mod tests {
 
         let py_err = convert_error(err);
         assert_partial_extraction_report::<SecurityViolationError>(&py_err, 2, 512);
+    }
+
+    /// Regression test for #463: `convert_error` binds `path` per match arm
+    /// and calls the redaction algorithm directly (S2 fix) rather than
+    /// going through `ArchiveError::redacted_path()`, so nothing at compile
+    /// time keeps the two mappings in sync. Cross-checks every path-carrying
+    /// variant's `convert_error` output against `redacted_path()` so the two
+    /// independently-maintained mappings (this file's and core's) cannot
+    /// silently drift apart.
+    #[test]
+    fn test_convert_error_paths_agree_with_redacted_path_dispatcher() {
+        let path = PathBuf::from("some/example/path.txt");
+        let variants: Vec<CoreError> = vec![
+            CoreError::PathTraversal { path: path.clone() },
+            CoreError::SymlinkEscape { path: path.clone() },
+            CoreError::HardlinkEscape { path: path.clone() },
+            CoreError::InvalidPermissions {
+                path: path.clone(),
+                mode: 0o644,
+            },
+            CoreError::SourceNotFound { path: path.clone() },
+            CoreError::SourceNotAccessible { path: path.clone() },
+            CoreError::OutputExists { path: path.clone() },
+            CoreError::UnknownFormat { path },
+        ];
+
+        for err in variants {
+            let expected = err
+                .redacted_path()
+                .expect("variant is known to carry a path");
+            let err_str = convert_error(err).to_string();
+            assert!(
+                err_str.contains(&expected),
+                "convert_error output does not agree with ArchiveError::redacted_path(): \
+                 expected {expected:?} in {err_str:?}"
+            );
+        }
     }
 }

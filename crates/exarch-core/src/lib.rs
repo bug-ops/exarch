@@ -53,6 +53,15 @@ pub use error::ArchiveError;
 pub use error::FfiErrorMessage;
 pub use error::QuotaResource;
 pub use error::Result;
+/// Formats an archive-relative, attacker-authored path for an FFI error
+/// message without redaction. Shared by `exarch-python` and `exarch-node`.
+pub use error::redaction::format_entry_path_for_error;
+/// Sanitizes a `std::io::Error` message for an FFI error message. Shared by
+/// `exarch-python` and `exarch-node`.
+pub use error::redaction::sanitize_io_error_for_error;
+/// Redacts a host-derived filesystem path for an FFI error message in
+/// release builds. Shared by `exarch-python` and `exarch-node`.
+pub use error::redaction::sanitize_path_for_error;
 pub use report::ExtractionReport;
 pub use report::NoopProgress;
 pub use report::ProgressCallback;

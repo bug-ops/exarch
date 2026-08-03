@@ -14,6 +14,7 @@ use flate2::read::GzDecoder;
 use crate::ArchiveError;
 use crate::Result;
 use crate::SecurityConfig;
+use crate::config::Validated;
 #[cfg(test)]
 use crate::error::QuotaResource;
 use crate::formats::common::normalize_entry_name;
@@ -69,7 +70,8 @@ pub fn list_archive<P: AsRef<Path>>(
     archive_path: P,
     config: &SecurityConfig,
 ) -> Result<ArchiveManifest> {
-    config.validate()?;
+    let config = config.clone().validate()?;
+    let config = &config;
     let archive_path = archive_path.as_ref();
     let format = detect_format(archive_path)?;
 
@@ -87,7 +89,7 @@ pub fn list_archive<P: AsRef<Path>>(
 fn list_tar(
     archive_path: &Path,
     format: ArchiveType,
-    config: &SecurityConfig,
+    config: &SecurityConfig<Validated>,
 ) -> Result<ArchiveManifest> {
     let file = File::open(archive_path)?;
     let reader = BufReader::new(file);
@@ -99,7 +101,7 @@ fn list_tar(
 fn list_tar_gz(
     archive_path: &Path,
     format: ArchiveType,
-    config: &SecurityConfig,
+    config: &SecurityConfig<Validated>,
 ) -> Result<ArchiveManifest> {
     let file = File::open(archive_path)?;
     let reader = BufReader::new(file);
@@ -112,7 +114,7 @@ fn list_tar_gz(
 fn list_tar_bz2(
     archive_path: &Path,
     format: ArchiveType,
-    config: &SecurityConfig,
+    config: &SecurityConfig<Validated>,
 ) -> Result<ArchiveManifest> {
     use bzip2::read::BzDecoder;
 
@@ -127,7 +129,7 @@ fn list_tar_bz2(
 fn list_tar_xz(
     archive_path: &Path,
     format: ArchiveType,
-    config: &SecurityConfig,
+    config: &SecurityConfig<Validated>,
 ) -> Result<ArchiveManifest> {
     use xz2::read::XzDecoder;
 
@@ -142,7 +144,7 @@ fn list_tar_xz(
 fn list_tar_zst(
     archive_path: &Path,
     format: ArchiveType,
-    config: &SecurityConfig,
+    config: &SecurityConfig<Validated>,
 ) -> Result<ArchiveManifest> {
     use zstd::stream::read::Decoder as ZstdDecoder;
 
@@ -163,7 +165,7 @@ fn list_tar_entries<R: std::io::Read>(
     mut archive: tar::Archive<crate::formats::tar_metadata_limit::BudgetedReader<R>>,
     budget: TarReadBudget,
     format: ArchiveType,
-    config: &SecurityConfig,
+    config: &SecurityConfig<Validated>,
 ) -> Result<ArchiveManifest> {
     let mut manifest = ArchiveManifest::new(format);
     let mut quota = QuotaTracker::new();
@@ -278,7 +280,7 @@ fn list_tar_entries<R: std::io::Read>(
 fn list_zip(
     archive_path: &Path,
     _format: ArchiveType,
-    config: &SecurityConfig,
+    config: &SecurityConfig<Validated>,
 ) -> Result<ArchiveManifest> {
     let file = File::open(archive_path)?;
     let mut archive = zip::ZipArchive::new(file)
@@ -296,7 +298,7 @@ pub(crate) fn list_tar_reader<R: Read>(
     reader: crate::formats::tar_metadata_limit::BudgetedReader<R>,
     budget: TarReadBudget,
     format: ArchiveType,
-    config: &SecurityConfig,
+    config: &SecurityConfig<Validated>,
 ) -> Result<ArchiveManifest> {
     let archive = tar::Archive::new(reader);
     list_tar_entries(archive, budget, format, config)
@@ -307,7 +309,7 @@ pub(crate) fn list_tar_reader<R: Read>(
 /// Used by `ArchiveFormat::list()` to avoid re-opening the archive.
 pub(crate) fn list_zip_reader<R: Read + Seek>(
     archive: &mut zip::ZipArchive<R>,
-    config: &SecurityConfig,
+    config: &SecurityConfig<Validated>,
 ) -> Result<ArchiveManifest> {
     let mut manifest = ArchiveManifest::new(ArchiveType::Zip);
     let mut quota = QuotaTracker::new();
@@ -426,7 +428,7 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
 /// must be positioned at the beginning of the 7z stream.
 pub(crate) fn list_sevenz_reader<R: Read + Seek>(
     mut source: R,
-    config: &SecurityConfig,
+    config: &SecurityConfig<Validated>,
 ) -> Result<ArchiveManifest> {
     use sevenz_rust2::Archive;
     use sevenz_rust2::Password;
@@ -494,7 +496,7 @@ fn is_empty_sevenz_archive_reader<R: Read + Seek>(
 /// that truncation behavior.
 fn list_sevenz_archive(
     archive: &sevenz_rust2::Archive,
-    config: &SecurityConfig,
+    config: &SecurityConfig<Validated>,
 ) -> Result<ArchiveManifest> {
     let mut manifest = ArchiveManifest::new(ArchiveType::SevenZ);
     let mut quota = QuotaTracker::new();
@@ -552,7 +554,7 @@ fn list_sevenz_archive(
 fn list_sevenz(
     archive_path: &Path,
     _format: ArchiveType,
-    config: &SecurityConfig,
+    config: &SecurityConfig<Validated>,
 ) -> Result<ArchiveManifest> {
     let mut file = File::open(archive_path)?;
     list_sevenz_reader(&mut file, config)
@@ -589,7 +591,11 @@ fn sevenz_manifest_entry_type(entry: &sevenz_rust2::ArchiveEntry) -> ManifestEnt
 /// field's doc), so `verify_archive`'s pre-flight listing pass can defer to
 /// `verify_entry`'s own equivalent checks and report a graceful
 /// `VerificationIssue` instead of aborting.
-fn validate_link_target(target: &Path, kind: &str, config: &SecurityConfig) -> Result<()> {
+fn validate_link_target(
+    target: &Path,
+    kind: &str,
+    config: &SecurityConfig<Validated>,
+) -> Result<()> {
     if config.relaxed_for_verify_preflight {
         return Ok(());
     }
@@ -612,7 +618,7 @@ fn validate_link_target(target: &Path, kind: &str, config: &SecurityConfig) -> R
 /// `ParentDir` (`..`) is always rejected. `RootDir` and `Prefix` (Windows drive
 /// paths such as `C:\`) are rejected only when `config.allowed.absolute_paths`
 /// is false, matching the behaviour of `SafePath::validate`.
-fn contains_traversal(path: &Path, config: &SecurityConfig) -> bool {
+fn contains_traversal(path: &Path, config: &SecurityConfig<Validated>) -> bool {
     use std::path::Component;
     path.components().any(|c| match c {
         Component::ParentDir => true,
@@ -931,7 +937,7 @@ mod tests {
 
         let zip_bytes = create_zip_with_symlink("link", "target.txt");
         let mut archive = zip::ZipArchive::new(Cursor::new(zip_bytes)).unwrap();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
         let manifest = list_zip_reader(&mut archive, &config).unwrap();
 
         assert_eq!(manifest.total_entries, 1);
@@ -999,10 +1005,7 @@ mod tests {
         temp_file.flush().unwrap();
 
         // Set quota to 1 file
-        let config = SecurityConfig {
-            max_file_count: 1,
-            ..Default::default()
-        };
+        let config = SecurityConfig::default().with_max_file_count(1);
 
         let result = list_archive(temp_file.path(), &config);
         match result {
@@ -1027,10 +1030,7 @@ mod tests {
         zip.start_file("b.txt", options).unwrap();
         zip.finish().unwrap();
 
-        let config = SecurityConfig {
-            max_file_count: 1,
-            ..Default::default()
-        };
+        let config = SecurityConfig::default().with_max_file_count(1);
 
         let result = list_archive(temp_file.path(), &config);
         match result {
@@ -1266,10 +1266,7 @@ mod tests {
         zip.write_all(&vec![0u8; 600]).unwrap();
         zip.finish().unwrap();
 
-        let config = SecurityConfig {
-            max_total_size: 100,
-            ..Default::default()
-        };
+        let config = SecurityConfig::default().with_max_total_size(100);
         let result = list_archive(temp_file.path(), &config);
         assert_matches!(
             result,
@@ -1296,10 +1293,7 @@ mod tests {
         temp_file.write_all(&archive_data).unwrap();
         temp_file.flush().unwrap();
 
-        let config = SecurityConfig {
-            max_total_size: 100,
-            ..Default::default()
-        };
+        let config = SecurityConfig::default().with_max_total_size(100);
         let result = list_archive(temp_file.path(), &config);
         assert_matches!(
             result,
@@ -1434,13 +1428,16 @@ mod tests {
         // verified by the match arm `Component::Prefix(_) | Component::RootDir`.
         let absolute = PathBuf::from("/absolute/path.txt");
 
-        let config_deny = SecurityConfig::default(); // absolute_paths = false
+        let config_deny = SecurityConfig::default().validate().expect("valid config"); // absolute_paths = false
         assert!(
             contains_traversal(&absolute, &config_deny),
             "absolute path must be rejected when allow_absolute_paths=false"
         );
 
-        let config_allow = SecurityConfig::default().with_allow_absolute_paths(true);
+        let config_allow = SecurityConfig::default()
+            .with_allow_absolute_paths(true)
+            .validate()
+            .expect("valid config");
         assert!(
             !contains_traversal(&absolute, &config_allow),
             "absolute path must be accepted when allow_absolute_paths=true"
@@ -1754,10 +1751,7 @@ mod tests {
         temp_file.write_all(&archive_bytes).unwrap();
         temp_file.flush().unwrap();
 
-        let config = SecurityConfig {
-            max_file_count: 2,
-            ..Default::default()
-        };
+        let config = SecurityConfig::default().with_max_file_count(2);
         let result = list_archive(temp_file.path(), &config);
         assert_matches!(
             result,
@@ -1777,10 +1771,7 @@ mod tests {
         temp_file.write_all(&archive_bytes).unwrap();
         temp_file.flush().unwrap();
 
-        let config = SecurityConfig {
-            max_total_size: 50,
-            ..Default::default()
-        };
+        let config = SecurityConfig::default().with_max_total_size(50);
         let result = list_archive(temp_file.path(), &config);
         assert_matches!(
             result,
@@ -1848,10 +1839,7 @@ mod tests {
         temp_file.flush().unwrap();
 
         // Small limit — must reject.
-        let small = SecurityConfig {
-            max_total_size: 100,
-            ..Default::default()
-        };
+        let small = SecurityConfig::default().with_max_total_size(100);
         assert_matches!(
             list_archive(temp_file.path(), &small),
             Err(ArchiveError::QuotaExceeded {
@@ -1861,10 +1849,7 @@ mod tests {
         );
 
         // Large limit (simulates --max-total-size 1G) — must succeed.
-        let large = SecurityConfig {
-            max_total_size: 1024 * 1024 * 1024,
-            ..Default::default()
-        };
+        let large = SecurityConfig::default().with_max_total_size(1024 * 1024 * 1024);
         assert!(
             list_archive(temp_file.path(), &large).is_ok(),
             "list_archive must succeed when caller supplies a large max_total_size (regression #166)"
@@ -1884,10 +1869,7 @@ mod tests {
             zip.finish().unwrap();
         }
 
-        let small = SecurityConfig {
-            max_total_size: 100,
-            ..Default::default()
-        };
+        let small = SecurityConfig::default().with_max_total_size(100);
         assert_matches!(
             list_archive(temp_file.path(), &small),
             Err(ArchiveError::QuotaExceeded {
@@ -1896,10 +1878,7 @@ mod tests {
             "expected TotalSize quota error with limit=100"
         );
 
-        let large = SecurityConfig {
-            max_total_size: 1024 * 1024 * 1024,
-            ..Default::default()
-        };
+        let large = SecurityConfig::default().with_max_total_size(1024 * 1024 * 1024);
         assert!(
             list_archive(temp_file.path(), &large).is_ok(),
             "list_archive must succeed when caller supplies a large max_total_size (regression #166)"
@@ -1914,10 +1893,7 @@ mod tests {
         temp_file.write_all(&archive_bytes).unwrap();
         temp_file.flush().unwrap();
 
-        let small = SecurityConfig {
-            max_total_size: 100,
-            ..Default::default()
-        };
+        let small = SecurityConfig::default().with_max_total_size(100);
         assert_matches!(
             list_archive(temp_file.path(), &small),
             Err(ArchiveError::QuotaExceeded {
@@ -1926,10 +1902,7 @@ mod tests {
             "expected TotalSize quota error with limit=100"
         );
 
-        let large = SecurityConfig {
-            max_total_size: 1024 * 1024 * 1024,
-            ..Default::default()
-        };
+        let large = SecurityConfig::default().with_max_total_size(1024 * 1024 * 1024);
         assert!(
             list_archive(temp_file.path(), &large).is_ok(),
             "list_archive must succeed when caller supplies a large max_total_size (regression #166)"
@@ -1963,10 +1936,7 @@ mod tests {
         use crate::inspection::report::IssueSeverity;
 
         let path = std::path::Path::new("../../tests/fixtures/solid.7z");
-        let config = SecurityConfig {
-            allow_solid_archives: true,
-            ..SecurityConfig::default()
-        };
+        let config = SecurityConfig::default().with_allow_solid_archives(true);
         let report = crate::verify_archive(path, &config).unwrap();
         assert_ne!(
             report.status,
@@ -1985,10 +1955,7 @@ mod tests {
 
     #[test]
     fn list_archive_rejects_invalid_security_config() {
-        let config = SecurityConfig {
-            max_file_size: 0,
-            ..SecurityConfig::default()
-        };
+        let config = SecurityConfig::default().with_max_file_size(0);
         let result = crate::list_archive("any.tar.gz", &config);
         assert_matches!(
             result,
@@ -2240,7 +2207,7 @@ mod tests {
 
         let zip_bytes = create_zip_with_symlink("link", "foo\0bar");
         let mut archive = zip::ZipArchive::new(Cursor::new(zip_bytes)).unwrap();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
         let result = list_zip_reader(&mut archive, &config);
         match result {
             Err(ArchiveError::SecurityViolation { reason }) => {
@@ -2260,7 +2227,7 @@ mod tests {
 
         let zip_bytes = create_zip_with_symlink("link", "");
         let mut archive = zip::ZipArchive::new(Cursor::new(zip_bytes)).unwrap();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
         let result = list_zip_reader(&mut archive, &config);
         match result {
             Err(ArchiveError::SecurityViolation { reason }) => {
@@ -2443,10 +2410,7 @@ mod tests {
         temp_file.write_all(&archive_data).unwrap();
         temp_file.flush().unwrap();
 
-        let config = SecurityConfig {
-            max_file_size: 500,
-            ..Default::default()
-        };
+        let config = SecurityConfig::default().with_max_file_size(500);
         let result = list_archive(temp_file.path(), &config);
         assert_matches!(
             result,
@@ -2471,10 +2435,7 @@ mod tests {
         zip.write_all(&vec![0u8; 1000]).unwrap();
         zip.finish().unwrap();
 
-        let config = SecurityConfig {
-            max_file_size: 500,
-            ..Default::default()
-        };
+        let config = SecurityConfig::default().with_max_file_size(500);
         let result = list_archive(temp_file.path(), &config);
         assert_matches!(
             result,
@@ -2496,10 +2457,7 @@ mod tests {
         temp_file.write_all(&archive_bytes).unwrap();
         temp_file.flush().unwrap();
 
-        let config = SecurityConfig {
-            max_file_size: 500,
-            ..Default::default()
-        };
+        let config = SecurityConfig::default().with_max_file_size(500);
         let result = list_archive(temp_file.path(), &config);
         assert_matches!(
             result,
@@ -2600,12 +2558,12 @@ mod tests {
         let zip_bytes = zip_with_zip64_declared_sizes(&[("a.bin", u64::MAX - 100), ("b.bin", 200)]);
         let mut archive = zip::ZipArchive::new(Cursor::new(zip_bytes)).unwrap();
 
-        let config = SecurityConfig {
-            max_file_size: u64::MAX,
-            max_file_count: usize::MAX,
-            max_total_size: u64::MAX,
-            ..Default::default()
-        };
+        let config = SecurityConfig::default()
+            .with_max_file_size(u64::MAX)
+            .with_max_file_count(usize::MAX)
+            .with_max_total_size(u64::MAX)
+            .validate()
+            .expect("valid config");
         let result = list_zip_reader(&mut archive, &config);
         assert_matches!(
             result,

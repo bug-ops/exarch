@@ -3,6 +3,7 @@
 use crate::ArchiveError;
 use crate::Result;
 use crate::SecurityConfig;
+use crate::config::Validated;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -37,6 +38,7 @@ use super::SafePath;
 /// let dest = DestDir::new(PathBuf::from("/tmp"))?;
 /// let mut config = SecurityConfig::default();
 /// config.allowed.symlinks = true;
+/// let config = config.validate()?;
 ///
 /// let link = SafePath::validate(&PathBuf::from("mylink"), &dest, &config)?;
 /// let target = PathBuf::from("../target.txt");
@@ -93,6 +95,7 @@ impl SafeSymlink {
     /// let dest = DestDir::new(PathBuf::from("/tmp"))?;
     /// let mut config = SecurityConfig::default();
     /// config.allowed.symlinks = true;
+    /// let config = config.validate()?;
     ///
     /// let link = SafePath::validate(&PathBuf::from("dir/link"), &dest, &config)?;
     /// let target = PathBuf::from("../file.txt");
@@ -105,7 +108,7 @@ impl SafeSymlink {
         link: &SafePath,
         target: &Path,
         dest: &DestDir,
-        config: &SecurityConfig,
+        config: &SecurityConfig<Validated>,
     ) -> Result<Self> {
         // 1. Verify symlinks are allowed
         if !config.allowed.symlinks {
@@ -340,10 +343,10 @@ mod tests {
     }
 
     /// Creates a `SecurityConfig` with symlinks enabled for testing.
-    fn create_config_with_symlinks() -> SecurityConfig {
+    fn create_config_with_symlinks() -> SecurityConfig<Validated> {
         let mut config = SecurityConfig::default();
         config.allowed.symlinks = true;
-        config
+        config.validate().expect("valid config")
     }
 
     #[test]
@@ -368,6 +371,7 @@ mod tests {
         let (_temp, dest) = create_test_dest();
         let mut config = SecurityConfig::default();
         config.allowed.symlinks = false;
+        let config = config.validate().expect("valid config");
 
         let link = SafePath::validate(&PathBuf::from("link"), &dest, &config)
             .expect("link path should be valid");

@@ -1,5 +1,38 @@
 //! Security configuration for archive extraction.
 
+use std::marker::PhantomData;
+use std::ops::Deref;
+use std::ops::DerefMut;
+
+/// Marker type for a [`SecurityConfig`] whose invariants have not yet been
+/// checked.
+///
+/// This is the default type parameter for [`SecurityConfig`]. The fluent
+/// `with_*` builder methods and [`SecurityConfig::validate`] are only
+/// available in this state.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Unvalidated;
+
+/// Marker type for a [`SecurityConfig`] whose invariants have been checked.
+///
+/// Reachable only through [`SecurityConfig::validate`]. Every entry point
+/// that performs security-sensitive work — the
+/// [`ArchiveFormat`](crate::formats::traits::ArchiveFormat) trait and
+/// everything it calls — requires a `SecurityConfig<Validated>`, so an
+/// unvalidated configuration (e.g. one with `max_file_size == 0`) can never
+/// reach extraction, listing, or verification. The compiler enforces this;
+/// it is not a convention callers must remember to follow.
+///
+/// Once validated, a config's fields can still be *read* (via [`Deref`]) but
+/// no longer *written*: [`DerefMut`] is implemented only for
+/// `SecurityConfig<Unvalidated>`, so `cfg.max_compression_ratio = f64::NAN`
+/// on a `SecurityConfig<Validated>` is a compile error, not a runtime
+/// invariant violation. This is what makes the typestate airtight — without
+/// it, a caller could validate a config and then mutate it back into an
+/// invalid state before passing it to `ArchiveFormat::extract`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Validated;
+
 /// Feature flags controlling what archive features are allowed during
 /// extraction.
 ///
@@ -22,35 +55,22 @@ pub struct AllowedFeatures {
     pub world_writable: bool,
 }
 
-/// Security configuration with default-deny settings.
+/// The field data of a [`SecurityConfig`], reachable via [`Deref`]/[`DerefMut`]
+/// regardless of (or gated by) validation state.
 ///
-/// This configuration controls various security checks performed during
-/// archive extraction to prevent common vulnerabilities.
-///
-/// # Performance Note
-///
-/// This struct contains heap-allocated collections (`Vec<String>`). For
-/// performance, pass by reference (`&SecurityConfig`) rather than cloning. If
-/// shared ownership is needed across threads, consider wrapping in
-/// `Arc<SecurityConfig>`.
-///
-/// # Examples
-///
-/// ```
-/// use exarch_core::SecurityConfig;
-///
-/// // Use secure defaults
-/// let config = SecurityConfig::default();
-///
-/// // Customize via fluent builder
-/// let custom = SecurityConfig::default()
-///     .with_max_file_size(100 * 1024 * 1024)
-///     .with_max_total_size(1024 * 1024 * 1024)
-///     .with_allow_symlinks(true);
-/// ```
+/// This type is not itself part of the sealing boundary — it is a plain data
+/// bag with `pub` fields, and nothing stops external code from naming it or
+/// cloning one out of a `&SecurityConfig`. The boundary is
+/// [`SecurityConfig`]'s own private `fields` member: there is no public API
+/// that takes a bare `SecurityConfigFields` and wraps it back into a
+/// `SecurityConfig<Validated>`, so an externally-forged or externally-mutated
+/// `SecurityConfigFields` value can never be smuggled into a `Validated`
+/// config. It exists purely so [`SecurityConfig`] can implement `Deref`/
+/// `DerefMut` and keep `cfg.max_file_size`-style field access working for
+/// every existing caller instead of forcing a getter-method migration.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
-pub struct SecurityConfig {
+pub struct SecurityConfigFields {
     /// Maximum size for a single file in bytes.
     pub max_file_size: u64,
 
@@ -184,23 +204,7 @@ pub struct SecurityConfig {
     pub(crate) relaxed_for_verify_preflight: bool,
 }
 
-impl Default for SecurityConfig {
-    /// Creates a `SecurityConfig` with secure default settings.
-    ///
-    /// Default values:
-    /// - `max_file_size`: 50 MB
-    /// - `max_total_size`: 500 MB
-    /// - `max_compression_ratio`: 100.0
-    /// - `max_file_count`: 10,000
-    /// - `max_path_depth`: 32
-    /// - `allowed`: All features disabled (deny-by-default)
-    /// - `preserve_permissions`: false
-    /// - `allowed_extensions`: empty (allow all)
-    /// - `banned_path_components`: `[".git", ".ssh", ".gnupg", ".aws", ".kube",
-    ///   ".docker", ".env"]`
-    /// - `allow_solid_archives`: false (solid archives rejected)
-    /// - `max_solid_block_memory`: 512 MB
-    /// - `max_tar_metadata_bytes`: 4 MiB
+impl Default for SecurityConfigFields {
     fn default() -> Self {
         Self {
             max_file_size: 50 * 1024 * 1024,   // 50 MB
@@ -228,7 +232,104 @@ impl Default for SecurityConfig {
     }
 }
 
-impl SecurityConfig {
+/// Security configuration with default-deny settings.
+///
+/// This configuration controls various security checks performed during
+/// archive extraction to prevent common vulnerabilities.
+///
+/// # Performance Note
+///
+/// This struct contains heap-allocated collections (`Vec<String>`). For
+/// performance, pass by reference (`&SecurityConfig`) rather than cloning. If
+/// shared ownership is needed across threads, consider wrapping in
+/// `Arc<SecurityConfig>`.
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::SecurityConfig;
+///
+/// // Use secure defaults
+/// let config = SecurityConfig::default();
+///
+/// // Customize via fluent builder
+/// let custom = SecurityConfig::default()
+///     .with_max_file_size(100 * 1024 * 1024)
+///     .with_max_total_size(1024 * 1024 * 1024)
+///     .with_allow_symlinks(true);
+/// ```
+///
+/// # Typestate
+///
+/// `SecurityConfig` carries a phantom `State` type parameter — [`Unvalidated`]
+/// (the default) or [`Validated`] — that tracks whether
+/// [`validate`](SecurityConfig::validate) has been called. Builder methods
+/// are only available in the `Unvalidated` state; security-sensitive APIs
+/// (the [`ArchiveFormat`](crate::formats::traits::ArchiveFormat) trait and
+/// everything downstream of it) require `SecurityConfig<Validated>`. This
+/// makes skipping validation a compile error instead of a runtime gap.
+///
+/// # Sealing
+///
+/// Fields are private and reachable only through
+/// <code>[Deref]<Target = [SecurityConfigFields]></code>, so
+/// `cfg.max_file_size` continues to work as plain field access for both states.
+/// [`DerefMut`] is implemented only for
+/// `SecurityConfig<Unvalidated>`, so a `SecurityConfig<Validated>`'s fields
+/// cannot be reassigned after the fact — the only way to produce one is
+/// [`validate`](SecurityConfig::validate) itself, and it stays that way for
+/// its entire lifetime.
+#[derive(Debug, Clone)]
+pub struct SecurityConfig<State = Unvalidated> {
+    fields: SecurityConfigFields,
+
+    /// Typestate marker — see the "Typestate" section on the type-level docs.
+    _marker: PhantomData<State>,
+}
+
+impl<State> Deref for SecurityConfig<State> {
+    type Target = SecurityConfigFields;
+
+    fn deref(&self) -> &SecurityConfigFields {
+        &self.fields
+    }
+}
+
+/// Only `Unvalidated` configs are mutable — see the "Sealing" section on
+/// [`SecurityConfig`]'s type-level docs for why this is the crux of the
+/// typestate guarantee.
+impl DerefMut for SecurityConfig<Unvalidated> {
+    fn deref_mut(&mut self) -> &mut SecurityConfigFields {
+        &mut self.fields
+    }
+}
+
+impl Default for SecurityConfig<Unvalidated> {
+    /// Creates a `SecurityConfig` with secure default settings.
+    ///
+    /// Default values:
+    /// - `max_file_size`: 50 MB
+    /// - `max_total_size`: 500 MB
+    /// - `max_compression_ratio`: 100.0
+    /// - `max_file_count`: 10,000
+    /// - `max_path_depth`: 32
+    /// - `allowed`: All features disabled (deny-by-default)
+    /// - `preserve_permissions`: false
+    /// - `allowed_extensions`: empty (allow all)
+    /// - `banned_path_components`: `[".git", ".ssh", ".gnupg", ".aws", ".kube",
+    ///   ".docker", ".env"]`
+    /// - `allow_solid_archives`: false (solid archives rejected)
+    /// - `max_solid_block_memory`: 512 MB
+    /// - `max_tar_metadata_bytes`: 4 MiB
+    fn default() -> Self {
+        Self {
+            fields: SecurityConfigFields::default(),
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl SecurityConfig<Unvalidated> {
     /// Creates a permissive configuration for trusted archives.
     ///
     /// This configuration allows symlinks, hardlinks, absolute paths, and
@@ -236,26 +337,35 @@ impl SecurityConfig {
     #[must_use]
     pub fn permissive() -> Self {
         Self {
-            allowed: AllowedFeatures {
-                symlinks: true,
-                hardlinks: true,
-                absolute_paths: true,
-                world_writable: true,
+            fields: SecurityConfigFields {
+                allowed: AllowedFeatures {
+                    symlinks: true,
+                    hardlinks: true,
+                    absolute_paths: true,
+                    world_writable: true,
+                },
+                preserve_permissions: true,
+                max_compression_ratio: 1000.0,
+                banned_path_components: Vec::new(),
+                allow_solid_archives: true,
+                max_solid_block_memory: 1024 * 1024 * 1024, // 1 GB for permissive
+                max_tar_metadata_bytes: 16 * 1024 * 1024,   // 16 MiB for permissive
+                ..SecurityConfigFields::default()
             },
-            preserve_permissions: true,
-            max_compression_ratio: 1000.0,
-            banned_path_components: Vec::new(),
-            allow_solid_archives: true,
-            max_solid_block_memory: 1024 * 1024 * 1024, // 1 GB for permissive
-            max_tar_metadata_bytes: 16 * 1024 * 1024,   // 16 MiB for permissive
-            ..Default::default()
+            _marker: PhantomData,
         }
     }
 
-    /// Validates that the configuration values are logically consistent.
+    /// Validates that the configuration values are logically consistent,
+    /// transitioning to the [`Validated`] typestate on success.
     ///
     /// Returns an error if any field has a value that would make security
-    /// enforcement impossible (zero limits or non-positive ratio).
+    /// enforcement impossible (zero limits or non-positive ratio). Consumes
+    /// `self`: the only way to obtain a `SecurityConfig<Validated>`, which is
+    /// what every security-sensitive API in this crate requires. Once
+    /// returned, the `Validated` config's fields can no longer be reassigned
+    /// (see the "Sealing" section on the type-level docs), so this check can
+    /// never be silently invalidated afterward.
     ///
     /// # Errors
     ///
@@ -266,6 +376,7 @@ impl SecurityConfig {
     /// - `max_path_depth` is zero
     /// - `max_file_count` is zero
     /// - `max_solid_block_memory` is zero
+    /// - `max_tar_metadata_bytes` is zero
     ///
     /// # Examples
     ///
@@ -278,7 +389,7 @@ impl SecurityConfig {
     /// let bad = SecurityConfig::default().with_max_file_size(0);
     /// assert!(bad.validate().is_err());
     /// ```
-    pub fn validate(&self) -> crate::Result<()> {
+    pub fn validate(self) -> crate::Result<SecurityConfig<Validated>> {
         if !self.max_compression_ratio.is_finite() || self.max_compression_ratio <= 0.0 {
             return Err(crate::ArchiveError::InvalidConfiguration {
                 reason: "max_compression_ratio must be positive".into(),
@@ -314,7 +425,10 @@ impl SecurityConfig {
                 reason: "max_tar_metadata_bytes must not be zero".into(),
             });
         }
-        Ok(())
+        Ok(SecurityConfig {
+            fields: self.fields,
+            _marker: PhantomData,
+        })
     }
 
     /// Sets the maximum size for a single extracted file in bytes.
@@ -330,7 +444,7 @@ impl SecurityConfig {
     #[must_use]
     #[inline]
     pub fn with_max_file_size(mut self, size: u64) -> Self {
-        self.max_file_size = size;
+        self.fields.max_file_size = size;
         self
     }
 
@@ -347,7 +461,7 @@ impl SecurityConfig {
     #[must_use]
     #[inline]
     pub fn with_max_total_size(mut self, size: u64) -> Self {
-        self.max_total_size = size;
+        self.fields.max_total_size = size;
         self
     }
 
@@ -364,7 +478,7 @@ impl SecurityConfig {
     #[must_use]
     #[inline]
     pub fn with_max_compression_ratio(mut self, ratio: f64) -> Self {
-        self.max_compression_ratio = ratio;
+        self.fields.max_compression_ratio = ratio;
         self
     }
 
@@ -381,7 +495,7 @@ impl SecurityConfig {
     #[must_use]
     #[inline]
     pub fn with_max_file_count(mut self, count: usize) -> Self {
-        self.max_file_count = count;
+        self.fields.max_file_count = count;
         self
     }
 
@@ -398,7 +512,7 @@ impl SecurityConfig {
     #[must_use]
     #[inline]
     pub fn with_max_path_depth(mut self, depth: usize) -> Self {
-        self.max_path_depth = depth;
+        self.fields.max_path_depth = depth;
         self
     }
 
@@ -417,7 +531,7 @@ impl SecurityConfig {
     #[must_use]
     #[inline]
     pub fn with_allowed(mut self, allowed: AllowedFeatures) -> Self {
-        self.allowed = allowed;
+        self.fields.allowed = allowed;
         self
     }
 
@@ -434,7 +548,7 @@ impl SecurityConfig {
     #[must_use]
     #[inline]
     pub fn with_allow_symlinks(mut self, allow: bool) -> Self {
-        self.allowed.symlinks = allow;
+        self.fields.allowed.symlinks = allow;
         self
     }
 
@@ -451,7 +565,7 @@ impl SecurityConfig {
     #[must_use]
     #[inline]
     pub fn with_allow_hardlinks(mut self, allow: bool) -> Self {
-        self.allowed.hardlinks = allow;
+        self.fields.allowed.hardlinks = allow;
         self
     }
 
@@ -468,7 +582,7 @@ impl SecurityConfig {
     #[must_use]
     #[inline]
     pub fn with_allow_absolute_paths(mut self, allow: bool) -> Self {
-        self.allowed.absolute_paths = allow;
+        self.fields.allowed.absolute_paths = allow;
         self
     }
 
@@ -485,7 +599,7 @@ impl SecurityConfig {
     #[must_use]
     #[inline]
     pub fn with_allow_world_writable(mut self, allow: bool) -> Self {
-        self.allowed.world_writable = allow;
+        self.fields.allowed.world_writable = allow;
         self
     }
 
@@ -502,7 +616,7 @@ impl SecurityConfig {
     #[must_use]
     #[inline]
     pub fn with_preserve_permissions(mut self, preserve: bool) -> Self {
-        self.preserve_permissions = preserve;
+        self.fields.preserve_permissions = preserve;
         self
     }
 
@@ -523,7 +637,7 @@ impl SecurityConfig {
     #[must_use]
     #[inline]
     pub fn with_allowed_extensions(mut self, extensions: Vec<String>) -> Self {
-        self.allowed_extensions = extensions;
+        self.fields.allowed_extensions = extensions;
         self
     }
 
@@ -541,7 +655,7 @@ impl SecurityConfig {
     #[must_use]
     #[inline]
     pub fn with_banned_path_components(mut self, components: Vec<String>) -> Self {
-        self.banned_path_components = components;
+        self.fields.banned_path_components = components;
         self
     }
 
@@ -558,7 +672,7 @@ impl SecurityConfig {
     #[must_use]
     #[inline]
     pub fn with_allow_solid_archives(mut self, allow: bool) -> Self {
-        self.allow_solid_archives = allow;
+        self.fields.allow_solid_archives = allow;
         self
     }
 
@@ -579,7 +693,7 @@ impl SecurityConfig {
     #[must_use]
     #[inline]
     pub fn with_max_solid_block_memory(mut self, size: u64) -> Self {
-        self.max_solid_block_memory = size;
+        self.fields.max_solid_block_memory = size;
         self
     }
 
@@ -598,20 +712,30 @@ impl SecurityConfig {
     #[must_use]
     #[inline]
     pub fn with_max_tar_metadata_bytes(mut self, size: u64) -> Self {
-        self.max_tar_metadata_bytes = size;
+        self.fields.max_tar_metadata_bytes = size;
         self
     }
 
     /// Marks this config as the internal pre-flight listing pass inside
     /// `verify_archive`. Not part of the public API — see
     /// `relaxed_for_verify_preflight`'s field doc for what this relaxes.
+    ///
+    /// Production code builds this state via
+    /// `SecurityConfig::as_relaxed_for_verify_preflight` instead (it must
+    /// work on both typestates); this builder-style variant exists only so
+    /// `Unvalidated`-only test call sites don't need direct field writes.
+    #[cfg(test)]
     #[must_use]
     #[inline]
     pub(crate) fn with_relaxed_for_verify_preflight(mut self) -> Self {
-        self.relaxed_for_verify_preflight = true;
+        self.fields.relaxed_for_verify_preflight = true;
         self
     }
+}
 
+/// Read-only queries and crate-internal helpers available regardless of
+/// validation state.
+impl<State> SecurityConfig<State> {
     /// Validates whether a path component is allowed.
     ///
     /// Comparison is case-insensitive to prevent bypass on case-insensitive
@@ -666,6 +790,29 @@ impl SecurityConfig {
             return true;
         }
         extension.is_some_and(|ext| self.is_extension_allowed(ext))
+    }
+
+    /// Returns a clone with `max_file_size` relaxed to unlimited and
+    /// `relaxed_for_verify_preflight` set, preserving `State`.
+    ///
+    /// Crate-internal escape hatch backing
+    /// `inspection::verify::listing_config_for_verify`. Sound for both
+    /// typestates: it only ever *relaxes* two fields whose overridden values
+    /// (`u64::MAX`, `true`) can never fail
+    /// [`validate`](SecurityConfig::validate)'s checks, so a `Validated`
+    /// input yields a still-genuinely-valid `Validated` output without
+    /// re-running `validate()`. This must not be generalized into an
+    /// arbitrary-field mutator — that would reopen the exact hole
+    /// `DerefMut`'s state-gating exists to close.
+    #[must_use]
+    pub(crate) fn as_relaxed_for_verify_preflight(&self) -> Self {
+        let mut fields = self.fields.clone();
+        fields.max_file_size = u64::MAX;
+        fields.relaxed_for_verify_preflight = true;
+        Self {
+            fields,
+            _marker: PhantomData,
+        }
     }
 }
 
@@ -743,7 +890,11 @@ impl ExtractionOptions {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::field_reassign_with_default)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
 mod tests {
     use super::*;
 
@@ -952,91 +1103,86 @@ mod tests {
 
     #[test]
     fn test_validate_rejects_negative_compression_ratio() {
-        let cfg = SecurityConfig {
-            max_compression_ratio: -1.0,
-            ..SecurityConfig::default()
-        };
+        let mut cfg = SecurityConfig::default();
+        cfg.max_compression_ratio = -1.0;
         assert!(cfg.validate().is_err());
     }
 
     #[test]
     fn test_validate_rejects_zero_compression_ratio() {
-        let cfg = SecurityConfig {
-            max_compression_ratio: 0.0,
-            ..SecurityConfig::default()
-        };
+        let mut cfg = SecurityConfig::default();
+        cfg.max_compression_ratio = 0.0;
         assert!(cfg.validate().is_err());
     }
 
     #[test]
     fn test_validate_rejects_zero_max_file_size() {
-        let cfg = SecurityConfig {
-            max_file_size: 0,
-            ..SecurityConfig::default()
-        };
+        let mut cfg = SecurityConfig::default();
+        cfg.max_file_size = 0;
         assert!(cfg.validate().is_err());
     }
 
     #[test]
     fn test_validate_rejects_zero_max_total_size() {
-        let cfg = SecurityConfig {
-            max_total_size: 0,
-            ..SecurityConfig::default()
-        };
+        let mut cfg = SecurityConfig::default();
+        cfg.max_total_size = 0;
         assert!(cfg.validate().is_err());
     }
 
     #[test]
     fn test_validate_rejects_zero_max_path_depth() {
-        let cfg = SecurityConfig {
-            max_path_depth: 0,
-            ..SecurityConfig::default()
-        };
+        let mut cfg = SecurityConfig::default();
+        cfg.max_path_depth = 0;
         assert!(cfg.validate().is_err());
     }
 
     #[test]
     fn test_validate_rejects_nan_compression_ratio() {
-        let cfg = SecurityConfig {
-            max_compression_ratio: f64::NAN,
-            ..SecurityConfig::default()
-        };
+        let mut cfg = SecurityConfig::default();
+        cfg.max_compression_ratio = f64::NAN;
         assert!(cfg.validate().is_err());
     }
 
     #[test]
     fn test_validate_rejects_infinite_compression_ratio() {
-        let cfg = SecurityConfig {
-            max_compression_ratio: f64::INFINITY,
-            ..SecurityConfig::default()
-        };
+        let mut cfg = SecurityConfig::default();
+        cfg.max_compression_ratio = f64::INFINITY;
         assert!(cfg.validate().is_err());
     }
 
     #[test]
     fn test_validate_rejects_zero_max_file_count() {
-        let cfg = SecurityConfig {
-            max_file_count: 0,
-            ..SecurityConfig::default()
-        };
+        let mut cfg = SecurityConfig::default();
+        cfg.max_file_count = 0;
         assert!(cfg.validate().is_err());
     }
 
     #[test]
     fn test_validate_rejects_zero_max_solid_block_memory() {
-        let cfg = SecurityConfig {
-            max_solid_block_memory: 0,
-            ..SecurityConfig::default()
-        };
+        let mut cfg = SecurityConfig::default();
+        cfg.max_solid_block_memory = 0;
         assert!(cfg.validate().is_err());
     }
 
     #[test]
     fn test_validate_rejects_zero_max_tar_metadata_bytes() {
-        let cfg = SecurityConfig {
-            max_tar_metadata_bytes: 0,
-            ..SecurityConfig::default()
-        };
+        let mut cfg = SecurityConfig::default();
+        cfg.max_tar_metadata_bytes = 0;
         assert!(cfg.validate().is_err());
+    }
+
+    // Regression test for the C1 finding on #433/#434/#435: a
+    // `SecurityConfig<Validated>` must not be mutable. `DerefMut` is only
+    // implemented for `SecurityConfig<Unvalidated>`, so this is enforced at
+    // compile time — see `tests/ui/validated_config_field_mutation.rs` for
+    // the corresponding compile-fail fixture. This test only pins the
+    // read-side behavior: fields remain readable after validation.
+    #[test]
+    fn test_validated_config_fields_remain_readable() {
+        let validated = SecurityConfig::default()
+            .with_max_file_size(123)
+            .validate()
+            .expect("valid config");
+        assert_eq!(validated.max_file_size, 123);
     }
 }

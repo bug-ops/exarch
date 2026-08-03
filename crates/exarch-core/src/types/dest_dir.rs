@@ -182,7 +182,7 @@ impl DestDir {
     ///
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let dest = DestDir::new(PathBuf::from("/tmp"))?;
-    /// let config = SecurityConfig::default();
+    /// let config = SecurityConfig::default().validate()?;
     /// let safe = SafePath::validate(&PathBuf::from("foo/bar.txt"), &dest, &config)?;
     ///
     /// let final_path = dest.join(&safe);

@@ -4,6 +4,7 @@ use std::path::Path;
 
 use crate::Result;
 use crate::SecurityConfig;
+use crate::config::Validated;
 use crate::types::DestDir;
 use crate::types::SafePath;
 
@@ -41,7 +42,7 @@ use crate::types::SafePath;
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let dest = DestDir::new(PathBuf::from("/tmp"))?;
-/// let config = SecurityConfig::default();
+/// let config = SecurityConfig::default().validate()?;
 ///
 /// // Valid path
 /// let path = Path::new("foo/bar.txt");
@@ -53,7 +54,11 @@ use crate::types::SafePath;
 /// # Ok(())
 /// # }
 /// ```
-pub fn validate_path(path: &Path, dest: &DestDir, config: &SecurityConfig) -> Result<SafePath> {
+pub fn validate_path(
+    path: &Path,
+    dest: &DestDir,
+    config: &SecurityConfig<Validated>,
+) -> Result<SafePath> {
     SafePath::validate(path, dest, config)
 }
 
@@ -73,7 +78,7 @@ mod tests {
     #[test]
     fn test_validate_path_valid() {
         let (_temp, dest) = create_test_dest();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
         let path = PathBuf::from("foo/bar.txt");
         assert!(validate_path(&path, &dest, &config).is_ok());
     }
@@ -81,7 +86,7 @@ mod tests {
     #[test]
     fn test_validate_path_traversal() {
         let (_temp, dest) = create_test_dest();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
         let path = PathBuf::from("../etc/passwd");
         assert!(validate_path(&path, &dest, &config).is_err());
     }
@@ -89,7 +94,7 @@ mod tests {
     #[test]
     fn test_validate_path_absolute() {
         let (_temp, dest) = create_test_dest();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
         let path = PathBuf::from("/etc/passwd");
         assert!(validate_path(&path, &dest, &config).is_err());
     }
@@ -97,7 +102,7 @@ mod tests {
     #[test]
     fn test_validate_path_nested() {
         let (_temp, dest) = create_test_dest();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
         let path = PathBuf::from("foo/bar/baz/file.txt");
         assert!(validate_path(&path, &dest, &config).is_ok());
     }
@@ -105,7 +110,7 @@ mod tests {
     #[test]
     fn test_validate_path_current_dir() {
         let (_temp, dest) = create_test_dest();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
         let path = PathBuf::from("./foo/bar.txt");
         let result = validate_path(&path, &dest, &config);
         assert!(result.is_ok());

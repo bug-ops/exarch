@@ -3,6 +3,7 @@
 use crate::ArchiveError;
 use crate::Result;
 use crate::SecurityConfig;
+use crate::config::Validated;
 
 /// Tracks resource usage during extraction.
 #[derive(Debug, Default)]
@@ -30,7 +31,7 @@ impl QuotaTracker {
     /// When all quotas are set to maximum values (unlimited), the function
     /// skips quota checks and only tracks counters with overflow detection.
     #[inline]
-    pub fn record_file(&mut self, size: u64, config: &SecurityConfig) -> Result<()> {
+    pub fn record_file(&mut self, size: u64, config: &SecurityConfig<Validated>) -> Result<()> {
         // OPT-C003: Fast path when all quotas unlimited - skip checks, only detect
         // overflow
         if config.max_file_size == u64::MAX
@@ -62,7 +63,7 @@ impl QuotaTracker {
     /// This is the slow path called when quotas are actually enforced.
     /// Separated from the fast path to keep the hot path small and inlinable.
     #[inline(never)]
-    fn record_file_checked(&mut self, size: u64, config: &SecurityConfig) -> Result<()> {
+    fn record_file_checked(&mut self, size: u64, config: &SecurityConfig<Validated>) -> Result<()> {
         if size > config.max_file_size {
             core::hint::cold_path();
             return Err(ArchiveError::QuotaExceeded {
@@ -124,7 +125,7 @@ impl QuotaTracker {
 }
 
 #[cfg(test)]
-#[allow(clippy::field_reassign_with_default)]
+#[allow(clippy::field_reassign_with_default, clippy::expect_used)]
 mod tests {
     use super::*;
     use std::assert_matches;
@@ -139,7 +140,7 @@ mod tests {
     #[test]
     fn test_quota_tracker_record_file() {
         let mut tracker = QuotaTracker::new();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         assert!(tracker.record_file(1000, &config).is_ok());
         assert_eq!(tracker.files_extracted(), 1);
@@ -151,6 +152,7 @@ mod tests {
         let mut tracker = QuotaTracker::new();
         let mut config = SecurityConfig::default();
         config.max_file_count = 2;
+        let config = config.validate().expect("valid config");
 
         assert!(tracker.record_file(100, &config).is_ok());
         assert!(tracker.record_file(100, &config).is_ok());
@@ -163,6 +165,7 @@ mod tests {
         let mut tracker = QuotaTracker::new();
         let mut config = SecurityConfig::default();
         config.max_total_size = 1000;
+        let config = config.validate().expect("valid config");
 
         assert!(tracker.record_file(600, &config).is_ok());
         let result = tracker.record_file(500, &config);
@@ -174,6 +177,7 @@ mod tests {
         let mut tracker = QuotaTracker::new();
         let mut config = SecurityConfig::default();
         config.max_file_size = 1000;
+        let config = config.validate().expect("valid config");
 
         let result = tracker.record_file(2000, &config);
         assert_matches!(result, Err(ArchiveError::QuotaExceeded { .. }));
@@ -187,6 +191,7 @@ mod tests {
         config.max_file_count = 3;
         config.max_total_size = u64::MAX;
         config.max_file_size = u64::MAX;
+        let config = config.validate().expect("valid config");
 
         // Exactly at file count limit should succeed
         assert!(
@@ -221,6 +226,7 @@ mod tests {
         config.max_file_count = 100;
         config.max_total_size = 1000;
         config.max_file_size = u64::MAX;
+        let config = config.validate().expect("valid config");
 
         // Add files up to exactly the limit
         assert!(tracker.record_file(600, &config).is_ok());
@@ -250,6 +256,7 @@ mod tests {
         config.max_file_count = 100;
         config.max_total_size = u64::MAX;
         config.max_file_size = 5000;
+        let config = config.validate().expect("valid config");
 
         // File exactly at limit should succeed
         assert!(
@@ -278,6 +285,7 @@ mod tests {
         config.max_file_count = 1;
         config.max_total_size = u64::MAX;
         config.max_file_size = u64::MAX;
+        let config = config.validate().expect("valid config");
 
         // First file should succeed
         assert!(tracker.record_file(100, &config).is_ok());
@@ -296,6 +304,7 @@ mod tests {
         config.max_file_size = u64::MAX;
         config.max_file_count = usize::MAX;
         config.max_total_size = u64::MAX;
+        let config = config.validate().expect("valid config");
 
         for i in 1..=1000 {
             assert!(
@@ -316,6 +325,7 @@ mod tests {
         config.max_file_size = u64::MAX;
         config.max_file_count = usize::MAX;
         config.max_total_size = u64::MAX;
+        let config = config.validate().expect("valid config");
 
         // Manually set bytes_written to near overflow
         tracker.bytes_written = u64::MAX - 100;

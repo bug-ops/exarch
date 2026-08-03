@@ -3,6 +3,7 @@
 use crate::ArchiveError;
 use crate::Result;
 use crate::SecurityConfig;
+use crate::config::Validated;
 use crate::security::context::ValidationContext;
 use std::borrow::Cow;
 use std::path::Component;
@@ -38,7 +39,7 @@ use super::DestDir;
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let dest = DestDir::new(PathBuf::from("/tmp"))?;
-/// let config = SecurityConfig::default();
+/// let config = SecurityConfig::default().validate()?;
 ///
 /// // Valid path
 /// let safe = SafePath::validate(&PathBuf::from("foo/bar.txt"), &dest, &config)?;
@@ -111,14 +112,18 @@ impl SafePath {
     ///
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let dest = DestDir::new(PathBuf::from("/tmp"))?;
-    /// let config = SecurityConfig::default();
+    /// let config = SecurityConfig::default().validate()?;
     ///
     /// let safe = SafePath::validate(&PathBuf::from("valid/path.txt"), &dest, &config)?;
     /// # Ok(())
     /// # }
     /// ```
     #[allow(clippy::too_many_lines)]
-    pub fn validate(path: &Path, dest: &DestDir, config: &SecurityConfig) -> Result<Self> {
+    pub fn validate(
+        path: &Path,
+        dest: &DestDir,
+        config: &SecurityConfig<Validated>,
+    ) -> Result<Self> {
         let ctx = ValidationContext::new(config.allowed.symlinks);
         Self::validate_with_context(path, dest, config, &ctx)
     }
@@ -137,7 +142,7 @@ impl SafePath {
     pub(crate) fn validate_with_context(
         path: &Path,
         dest: &DestDir,
-        config: &SecurityConfig,
+        config: &SecurityConfig<Validated>,
         ctx: &ValidationContext,
     ) -> Result<Self> {
         // Reject empty paths explicitly
@@ -391,7 +396,7 @@ mod tests {
     #[test]
     fn test_empty_path() {
         let (_temp, dest) = create_test_dest();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         let result = SafePath::validate(&PathBuf::from(""), &dest, &config);
         assert_matches!(
@@ -404,7 +409,7 @@ mod tests {
     #[test]
     fn test_safe_path_valid_relative() {
         let (_temp, dest) = create_test_dest();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         let path = PathBuf::from("foo/bar/baz.txt");
         let result = SafePath::validate(&path, &dest, &config);
@@ -417,7 +422,7 @@ mod tests {
     #[test]
     fn test_safe_path_reject_parent_traversal() {
         let (_temp, dest) = create_test_dest();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         let paths = vec![
             PathBuf::from("../etc/passwd"),
@@ -440,7 +445,7 @@ mod tests {
     #[cfg(unix)]
     fn test_safe_path_reject_absolute_unix() {
         let (_temp, dest) = create_test_dest();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         let path = PathBuf::from("/etc/passwd");
         let result = SafePath::validate(&path, &dest, &config);
@@ -451,7 +456,7 @@ mod tests {
     #[cfg(windows)]
     fn test_safe_path_reject_absolute_windows() {
         let (_temp, dest) = create_test_dest();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         let paths = vec![
             PathBuf::from("C:\\Windows\\System32"),
@@ -469,6 +474,7 @@ mod tests {
         let (_temp, dest) = create_test_dest();
         let mut config = SecurityConfig::default();
         config.allowed.absolute_paths = true;
+        let config = config.validate().expect("valid config");
 
         // Verify that an external absolute path is stripped to a relative path
         // so dest.join() resolves inside dest, not at the original absolute location.
@@ -487,6 +493,7 @@ mod tests {
         let (_temp, dest) = create_test_dest();
         let mut config = SecurityConfig::default();
         config.allowed.absolute_paths = true;
+        let config = config.validate().expect("valid config");
 
         let result = SafePath::validate(Path::new("/"), &dest, &config);
         assert_matches!(
@@ -501,6 +508,7 @@ mod tests {
         let (_temp, dest) = create_test_dest();
         let mut config = SecurityConfig::default();
         config.max_path_depth = 3;
+        let config = config.validate().expect("valid config");
 
         // 4 components - should be rejected
         let path = PathBuf::from("a/b/c/d");
@@ -516,7 +524,7 @@ mod tests {
     #[test]
     fn test_safe_path_reject_banned_components() {
         let (_temp, dest) = create_test_dest();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         let paths = vec![
             PathBuf::from("project/.git/config"),
@@ -538,7 +546,7 @@ mod tests {
     #[test]
     fn test_safe_path_normalize_dot_components() {
         let (_temp, dest) = create_test_dest();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         let path = PathBuf::from("foo/./bar/./baz.txt");
         let result = SafePath::validate(&path, &dest, &config);
@@ -551,7 +559,7 @@ mod tests {
     #[test]
     fn test_safe_path_null_bytes() {
         let (_temp, dest) = create_test_dest();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         #[cfg(unix)]
         {
@@ -601,7 +609,7 @@ mod tests {
     #[test]
     fn test_normalize_path() {
         let (_temp, dest) = create_test_dest();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         // Normalization now happens in single-pass validation
         // Path with . components should be normalized
@@ -622,7 +630,7 @@ mod tests {
     #[test]
     fn test_safe_path_equality() {
         let (_temp, dest) = create_test_dest();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         let safe1 = SafePath::validate(&PathBuf::from("foo/bar.txt"), &dest, &config)
             .expect("should be valid");
@@ -635,7 +643,7 @@ mod tests {
     #[test]
     fn test_safe_path_clone() {
         let (_temp, dest) = create_test_dest();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         let safe = SafePath::validate(&PathBuf::from("foo/bar.txt"), &dest, &config)
             .expect("should be valid");
@@ -648,7 +656,7 @@ mod tests {
     #[test]
     fn test_safe_path_empty() {
         let (_temp, dest) = create_test_dest();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         let path = PathBuf::from("");
         let result = SafePath::validate(&path, &dest, &config);
@@ -667,6 +675,7 @@ mod tests {
         let (_temp, dest) = create_test_dest();
         let mut config = SecurityConfig::default();
         config.max_path_depth = 5;
+        let config = config.validate().expect("valid config");
 
         // Exactly at limit
         let path = PathBuf::from("a/b/c/d/e");
@@ -684,7 +693,7 @@ mod tests {
     #[allow(clippy::unwrap_used)]
     fn test_safe_path_single_component() {
         let (_temp, dest) = create_test_dest();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         let path = PathBuf::from("file.txt");
         let result = SafePath::validate(&path, &dest, &config);
@@ -698,7 +707,7 @@ mod tests {
     #[test]
     fn test_safe_path_unicode() {
         let (_temp, dest) = create_test_dest();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         // Emoji in path
         let path = PathBuf::from("folder/\u{1f4c1}test.txt");
@@ -716,7 +725,7 @@ mod tests {
     #[cfg(windows)]
     fn test_safe_path_windows_reserved_names() {
         let (_temp, dest) = create_test_dest();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         let reserved = vec!["CON", "PRN", "AUX", "NUL", "COM1", "LPT1"];
 
@@ -735,7 +744,7 @@ mod tests {
 
         let temp = TempDir::new().expect("failed to create temp dir");
         let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         // Create: dest/parent_dir -> /tmp (symlink to outside)
         let parent_symlink = temp.path().join("parent_dir");
@@ -759,7 +768,7 @@ mod tests {
 
         let temp = TempDir::new().expect("failed to create temp dir");
         let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         // Create legitimate directory
         let legit_dir = temp.path().join("legit");
@@ -785,7 +794,7 @@ mod tests {
     fn test_legitimate_file_in_real_directory() {
         let temp = TempDir::new().expect("failed to create temp dir");
         let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         // Create real directory (not symlink)
         let real_dir = temp.path().join("real_dir");
@@ -804,7 +813,7 @@ mod tests {
     fn test_validate_with_context_trusted_parent_skips_canonicalize() {
         let temp = TempDir::new().expect("failed to create temp dir");
         let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         // Create a real directory and register it in DirCache
         let sub_dir = dest.as_path().join("trusted_dir");
@@ -823,7 +832,7 @@ mod tests {
     fn test_validate_with_context_untrusted_parent_still_validates() {
         let temp = TempDir::new().expect("failed to create temp dir");
         let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         let dir_cache = DirCache::new(); // empty cache
         let ctx = ValidationContext::new(false).with_dir_cache(&dir_cache);
@@ -841,7 +850,7 @@ mod tests {
     #[test]
     fn test_validate_with_context_symlink_free_fast_path() {
         let (_temp, dest) = create_test_dest();
-        let config = SecurityConfig::default(); // symlinks = false
+        let config = SecurityConfig::default().validate().expect("valid config"); // symlinks = false
 
         // No dir_cache, no symlinks -> fast path (no canonicalize)
         let ctx = ValidationContext::new(false);
@@ -853,7 +862,7 @@ mod tests {
     #[test]
     fn test_validate_with_context_symlink_seen_disables_fast_path() {
         let (_temp, dest) = create_test_dest();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         let mut ctx = ValidationContext::new(false);
         ctx.mark_symlink_seen();
@@ -873,7 +882,7 @@ mod tests {
 
         let temp = TempDir::new().expect("failed to create temp dir");
         let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         // Create a symlink pointing outside dest
         let malicious_link = temp.path().join("evil_dir");
@@ -902,7 +911,7 @@ mod tests {
 
         let temp = TempDir::new().expect("failed to create temp dir");
         let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         // Create a real subdirectory and register in DirCache
         let sub_dir = dest.as_path().join("subdir");
@@ -945,7 +954,7 @@ mod tests {
 
         let temp = TempDir::new().expect("failed to create temp dir");
         let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         // Create subdir and register in DirCache
         let sub_dir = dest.as_path().join("trusted");
@@ -976,7 +985,7 @@ mod tests {
     fn test_validate_backward_compat_same_result() {
         let temp = TempDir::new().expect("failed to create temp dir");
         let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         let test_paths = vec![
             PathBuf::from("file.txt"),
@@ -1011,7 +1020,7 @@ mod tests {
     fn test_validate_backward_compat_error_paths() {
         let temp = TempDir::new().expect("failed to create temp dir");
         let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         let error_paths = vec![
             PathBuf::from("../escape"),
@@ -1039,7 +1048,7 @@ mod tests {
 
         let temp = TempDir::new().expect("failed to create temp dir");
         let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         // Create dir and register in cache
         let sub = dest.as_path().join("safe_dir");
@@ -1074,7 +1083,7 @@ mod tests {
     #[cfg(unix)]
     fn test_symlink_free_fast_path_still_rejects_traversal() {
         let (_temp, dest) = create_test_dest();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         // Symlink-free fast path (no symlinks allowed, none seen)
         let ctx = ValidationContext::new(false);
@@ -1093,7 +1102,7 @@ mod tests {
     fn test_validate_with_context_dir_cache_created_vs_preexisting() {
         let temp = TempDir::new().expect("failed to create temp dir");
         let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         // Create directory manually (pre-existing, NOT in DirCache)
         let preexisting = dest.as_path().join("preexisting");
@@ -1123,7 +1132,7 @@ mod tests {
     #[test]
     fn test_validate_with_context_no_parent() {
         let (_temp, dest) = create_test_dest();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         // Single-component path has dest itself as parent
         let cache = DirCache::new();
@@ -1139,7 +1148,7 @@ mod tests {
     #[test]
     fn test_archive_root_dot_is_accepted() {
         let (_temp, dest) = create_test_dest();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         // "." is the archive root directory — produced by `tar -C /dir .`
         let result = SafePath::validate(Path::new("."), &dest, &config);
@@ -1153,7 +1162,7 @@ mod tests {
     #[test]
     fn test_archive_root_dot_slash_is_accepted() {
         let (_temp, dest) = create_test_dest();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         // "./" is an alternate form of the archive root directory entry
         let result = SafePath::validate(Path::new("./"), &dest, &config);
@@ -1167,7 +1176,7 @@ mod tests {
     #[test]
     fn test_archive_root_dot_dot_still_rejected() {
         let (_temp, dest) = create_test_dest();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         // ".." must still be rejected — it is a traversal attempt, not an archive root
         let result = SafePath::validate(Path::new(".."), &dest, &config);
@@ -1181,7 +1190,7 @@ mod tests {
     #[test]
     fn test_archive_root_dot_dot_slash_still_rejected() {
         let (_temp, dest) = create_test_dest();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         let paths = ["./..", "./../../etc", "../foo", "./../etc/passwd"];
         for p in paths {

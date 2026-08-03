@@ -224,6 +224,18 @@ FormatCreator:
   format_name() -> &'static str
 ```
 
+> [!note] Unreleased: `ArchiveFormat` requires `SecurityConfig<Validated>` (#433, #434, #435)
+> `SecurityConfig` is now a two-state typestate over `Unvalidated`/`Validated` markers
+> (`SecurityConfig<State = Unvalidated>`). `ArchiveFormat::extract`, `list`, and `verify`
+> now take `config: &SecurityConfig<Validated>` instead of `config: &SecurityConfig` — a
+> breaking change for anyone implementing `ArchiveFormat` outside the crate or calling
+> `TarArchive`/`ZipArchive`/`SevenZArchive` methods directly. The top-level
+> `extract_archive*`, `list_archive`, `verify_archive`, and `create_archive*` functions are
+> unaffected: they still accept a plain `&SecurityConfig` (defaulting to `Unvalidated`) and
+> call `validate()` internally before dispatching to `ArchiveFormat`. No validation logic
+> changed — this is purely a compile-time hardening of the existing "call `validate()` before
+> use" convention.
+
 > [!note] zip dependency
 > Upgraded from 8.6.0 to 9.0.0-pre2 in v0.4.0. `ZipFile::name()` now returns
 > `Result<Cow<str>, ZipError>` instead of `&str`; all call sites propagate the

@@ -71,6 +71,13 @@ fn benchmark_config() -> SecurityConfig {
         .with_max_path_depth(100)
 }
 
+/// Validated variant of [`benchmark_config`] for direct
+/// `ArchiveFormat::extract` trait calls, which require
+/// `SecurityConfig<Validated>`.
+fn benchmark_config_validated() -> SecurityConfig<exarch_core::Validated> {
+    benchmark_config().validate().unwrap()
+}
+
 /// Returns fixture path if it exists, otherwise None.
 fn get_fixture(name: &str) -> Option<PathBuf> {
     let path = fixtures_dir().join(name);
@@ -237,7 +244,7 @@ fn benchmark_many_small_files(c: &mut Criterion) {
                     archive
                         .extract(
                             temp.path(),
-                            &SecurityConfig::default(),
+                            &SecurityConfig::default().validate().unwrap(),
                             &ExtractionOptions::default(),
                             &mut exarch_core::NoopProgress,
                         )
@@ -270,7 +277,9 @@ fn benchmark_large_files(c: &mut Criterion) {
                     // Use config with increased limits for benchmarks
                     let config = SecurityConfig::default()
                         .with_max_file_size(200 * 1024 * 1024)
-                        .with_max_total_size(500 * 1024 * 1024);
+                        .with_max_total_size(500 * 1024 * 1024)
+                        .validate()
+                        .unwrap();
 
                     archive
                         .extract(
@@ -303,7 +312,7 @@ fn benchmark_nested_directories(c: &mut Criterion) {
                 archive
                     .extract(
                         temp.path(),
-                        &SecurityConfig::default(),
+                        &SecurityConfig::default().validate().unwrap(),
                         &ExtractionOptions::default(),
                         &mut exarch_core::NoopProgress,
                     )
@@ -317,7 +326,7 @@ fn benchmark_nested_directories(c: &mut Criterion) {
 
 fn benchmark_compression_methods(c: &mut Criterion) {
     let mut group = c.benchmark_group("compression_methods");
-    let config = benchmark_config();
+    let config = benchmark_config_validated();
 
     let size_bytes = 10 * 1024 * 1024; // 10 MB
     group.throughput(Throughput::Bytes(size_bytes as u64));
@@ -394,7 +403,7 @@ fn benchmark_sevenz_simple(c: &mut Criterion) {
             archive
                 .extract(
                     temp.path(),
-                    &SecurityConfig::default(),
+                    &SecurityConfig::default().validate().unwrap(),
                     &ExtractionOptions::default(),
                     &mut exarch_core::NoopProgress,
                 )
@@ -419,7 +428,7 @@ fn benchmark_sevenz_nested_dirs(c: &mut Criterion) {
             archive
                 .extract(
                     temp.path(),
-                    &SecurityConfig::default(),
+                    &SecurityConfig::default().validate().unwrap(),
                     &ExtractionOptions::default(),
                     &mut exarch_core::NoopProgress,
                 )
@@ -445,7 +454,7 @@ fn benchmark_sevenz_large_file(c: &mut Criterion) {
             archive
                 .extract(
                     temp.path(),
-                    &SecurityConfig::default(),
+                    &SecurityConfig::default().validate().unwrap(),
                     &ExtractionOptions::default(),
                     &mut exarch_core::NoopProgress,
                 )
@@ -480,7 +489,7 @@ fn benchmark_file_count_scaling(c: &mut Criterion) {
         let count_u64 = count as u64;
         group.throughput(Throughput::Elements(count_u64));
         group.bench_with_input(BenchmarkId::new("files", count), &zip_data, |b, data| {
-            let config = SecurityConfig::default();
+            let config = SecurityConfig::default().validate().unwrap();
             b.iter(|| {
                 let temp = TempDir::new().unwrap();
                 let cursor = Cursor::new(data.clone());
@@ -503,7 +512,7 @@ fn benchmark_file_count_scaling(c: &mut Criterion) {
 /// Directory depth scaling benchmark.
 fn benchmark_depth_scaling(c: &mut Criterion) {
     let mut group = c.benchmark_group("depth_scaling");
-    let config = benchmark_config();
+    let config = benchmark_config_validated();
 
     for depth in [5, 10, 20, 50] {
         let zip_data = {

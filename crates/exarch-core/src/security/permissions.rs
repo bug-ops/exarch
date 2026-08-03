@@ -1,6 +1,7 @@
 //! File permission validation and sanitization.
 
 use crate::SecurityConfig;
+use crate::config::Validated;
 
 /// Sanitizes file permissions by stripping dangerous bits.
 ///
@@ -40,7 +41,7 @@ use crate::SecurityConfig;
 /// assert_eq!(sanitized, 0o775);
 /// ```
 #[must_use]
-pub fn sanitize_permissions(mode: u32, config: &SecurityConfig) -> u32 {
+pub fn sanitize_permissions(mode: u32, config: &SecurityConfig<Validated>) -> u32 {
     let mut sanitized = mode;
 
     // Strip setuid bit (04000)
@@ -58,72 +59,73 @@ pub fn sanitize_permissions(mode: u32, config: &SecurityConfig) -> u32 {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
 
     #[test]
     fn test_sanitize_permissions_normal() {
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
         assert_eq!(sanitize_permissions(0o644, &config), 0o644);
     }
 
     #[test]
     fn test_sanitize_permissions_executable() {
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
         assert_eq!(sanitize_permissions(0o755, &config), 0o755);
     }
 
     #[test]
     fn test_sanitize_permissions_strip_setuid() {
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
         assert_eq!(sanitize_permissions(0o4755, &config), 0o755);
     }
 
     #[test]
     fn test_sanitize_permissions_strip_setgid() {
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
         assert_eq!(sanitize_permissions(0o2755, &config), 0o755);
     }
 
     #[test]
     fn test_sanitize_permissions_strip_both() {
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
         assert_eq!(sanitize_permissions(0o6755, &config), 0o755);
     }
 
     #[test]
     fn test_sanitize_permissions_strip_world_writable() {
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
         assert_eq!(sanitize_permissions(0o777, &config), 0o775);
     }
 
     #[test]
     fn test_sanitize_permissions_world_readable_ok() {
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
         assert_eq!(sanitize_permissions(0o644, &config), 0o644);
     }
 
     #[test]
     fn test_sanitize_permissions_owner_writable_ok() {
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
         assert_eq!(sanitize_permissions(0o600, &config), 0o600);
     }
 
     #[test]
     fn test_sanitize_permissions_group_writable_ok() {
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
         assert_eq!(sanitize_permissions(0o664, &config), 0o664);
     }
 
     #[test]
     fn test_sanitize_permissions_edge_case_zero() {
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
         assert_eq!(sanitize_permissions(0o000, &config), 0o000);
     }
 
     #[test]
     fn test_sticky_bit_preservation() {
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
         let sanitized = sanitize_permissions(0o1755, &config);
         assert_eq!(sanitized & 0o1000, 0o1000, "sticky bit should be preserved");
         assert_eq!(sanitized, 0o1755, "full mode should be preserved");
@@ -131,7 +133,7 @@ mod tests {
 
     #[test]
     fn test_sticky_bit_with_setuid_stripped() {
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
         let sanitized = sanitize_permissions(0o7755, &config);
         assert_eq!(sanitized & 0o1000, 0o1000, "sticky bit should remain");
         assert_eq!(sanitized & 0o4000, 0, "setuid should be stripped");
@@ -144,6 +146,7 @@ mod tests {
     fn test_world_writable_allowed_with_config() {
         let mut config = SecurityConfig::default();
         config.allowed.world_writable = true;
+        let config = config.validate().expect("valid config");
         let sanitized = sanitize_permissions(0o777, &config);
         assert_eq!(
             sanitized & 0o002,
@@ -157,7 +160,7 @@ mod tests {
 
     #[test]
     fn test_world_writable_stripped_by_default() {
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
         assert_eq!(
             sanitize_permissions(0o777, &config),
             0o775,
@@ -167,7 +170,7 @@ mod tests {
 
     #[test]
     fn test_world_writable_bit_only_stripped() {
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
         // 0o666 = rw-rw-rw-, only other-write (0o002) should be stripped -> 0o664
         assert_eq!(
             sanitize_permissions(0o666, &config),

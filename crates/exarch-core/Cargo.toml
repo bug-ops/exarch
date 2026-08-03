@@ -33,6 +33,7 @@ libc.workspace = true
 criterion.workspace = true
 dhat.workspace = true
 proptest.workspace = true
+trybuild.workspace = true
 
 [features]
 # Exposes security primitives as `pub` for external benchmarks and integration

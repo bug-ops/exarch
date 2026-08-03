@@ -25,6 +25,7 @@ use crate::ExtractionReport;
 use crate::ProgressCallback;
 use crate::Result;
 use crate::SecurityConfig;
+use crate::config::Validated;
 use crate::copy::CopyBuffer;
 use crate::copy::copy_with_buffer;
 use crate::error::QuotaResource;
@@ -349,7 +350,7 @@ pub fn normalize_entry_name(name: &str) -> String {
 #[inline]
 pub fn check_extension_allowed(
     path: &Path,
-    config: &SecurityConfig,
+    config: &SecurityConfig<Validated>,
     report: &mut ExtractionReport,
 ) -> bool {
     let ext = path.extension().and_then(|e| e.to_str());
@@ -505,7 +506,7 @@ pub fn extract_file_generic<R: Read>(
     skip_duplicates: bool,
     progress: &mut dyn ProgressCallback,
 ) -> Result<()> {
-    let output_path = dest.join(&validated.safe_path);
+    let output_path = dest.join(validated.safe_path());
 
     // Create parent directories if needed using cache
     dir_cache.ensure_parent_dir(&output_path)?;
@@ -514,7 +515,7 @@ pub fn extract_file_generic<R: Read>(
         report.files_skipped += 1;
         report.warnings.push(format!(
             "skipped duplicate entry: {}",
-            validated.safe_path.as_path().display()
+            validated.safe_path().as_path().display()
         ));
         return Ok(());
     }
@@ -531,7 +532,7 @@ pub fn extract_file_generic<R: Read>(
 
     // Create file and enforce exact sanitized permissions (Unix only).
     // set_permissions() is called inside create_file_with_mode to bypass umask.
-    let output_file = create_file_with_mode(&output_path, validated.mode)?;
+    let output_file = create_file_with_mode(&output_path, validated.mode())?;
     let mut buffered_writer = BufWriter::with_capacity(64 * 1024, output_file);
     let bytes_written = copy_with_buffer(reader, &mut buffered_writer, copy_buffer)?;
     buffered_writer.flush()?;
@@ -583,7 +584,7 @@ pub fn create_directory(
     report: &mut ExtractionReport,
     dir_cache: &mut DirCache,
 ) -> Result<()> {
-    let dir_path = dest.join(&validated.safe_path);
+    let dir_path = dest.join(validated.safe_path());
 
     // Use cache to avoid redundant mkdir syscalls
     dir_cache.ensure_dir(&dir_path)?;
@@ -701,13 +702,13 @@ mod tests {
         // Try to extract a file with size that would overflow
         let expected_size = Some(200u64); // This would overflow when added
 
-        let config = SecurityConfig::default();
-        let validated = ValidatedEntry {
-            safe_path: SafePath::validate(&PathBuf::from("test.txt"), &dest, &config)
+        let config = SecurityConfig::default().validate().expect("valid config");
+        let validated = ValidatedEntry::new(
+            SafePath::validate(&PathBuf::from("test.txt"), &dest, &config)
                 .expect("path should be valid"),
-            mode: Some(0o644),
-            entry_type: ValidatedEntryType::File,
-        };
+            ValidatedEntryType::File,
+            Some(0o644),
+        );
 
         let mut reader = Cursor::new(b"test data");
 
@@ -1084,16 +1085,16 @@ mod tests {
         let mut copy_buffer = CopyBuffer::new();
         let mut dir_cache = DirCache::new();
 
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().expect("valid config");
 
         // Mode 0o777 in archive, sanitized to 0o775 (world-writable stripped)
         let sanitized_mode = 0o775u32;
-        let validated = ValidatedEntry {
-            safe_path: SafePath::validate(&PathBuf::from("perm_test.txt"), &dest, &config)
+        let validated = ValidatedEntry::new(
+            SafePath::validate(&PathBuf::from("perm_test.txt"), &dest, &config)
                 .expect("path should be valid"),
-            mode: Some(sanitized_mode),
-            entry_type: ValidatedEntryType::File,
-        };
+            ValidatedEntryType::File,
+            Some(sanitized_mode),
+        );
 
         let mut reader = Cursor::new(b"content");
 
@@ -1166,18 +1167,14 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn test_duplicate_symlink_overwrites_when_skip_disabled() {
-        use crate::config::AllowedFeatures;
         use crate::types::SafeSymlink;
 
         let temp = TempDir::new().expect("failed to create temp dir");
         let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
-        let config = SecurityConfig {
-            allowed: AllowedFeatures {
-                symlinks: true,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
+        let config = SecurityConfig::default()
+            .with_allow_symlinks(true)
+            .validate()
+            .expect("valid config");
 
         // Create the target file so the symlink has somewhere to point
         std::fs::write(temp.path().join("target.txt"), b"data").expect("write target");
@@ -1212,7 +1209,10 @@ mod tests {
     /// happened in #413.
     #[test]
     fn test_check_extension_allowed_warning_message_text() {
-        let config = SecurityConfig::default().with_allowed_extensions(vec!["txt".to_string()]);
+        let config = SecurityConfig::default()
+            .with_allowed_extensions(vec!["txt".to_string()])
+            .validate()
+            .expect("valid config");
         let mut report = ExtractionReport::default();
         let path = PathBuf::from("skip.exe");
 
@@ -1229,7 +1229,10 @@ mod tests {
     /// Verifies the happy path leaves `report` untouched.
     #[test]
     fn test_check_extension_allowed_allowed_extension() {
-        let config = SecurityConfig::default().with_allowed_extensions(vec!["txt".to_string()]);
+        let config = SecurityConfig::default()
+            .with_allowed_extensions(vec!["txt".to_string()])
+            .validate()
+            .expect("valid config");
         let mut report = ExtractionReport::default();
         let path = PathBuf::from("keep.txt");
 

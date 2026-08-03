@@ -9,6 +9,7 @@ use crate::ProgressCallback;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::config::ExtractionOptions;
+use crate::config::Validated;
 use crate::creation::CreationConfig;
 use crate::creation::CreationReport;
 use crate::formats::detect::ArchiveType;
@@ -112,7 +113,8 @@ fn extract_impl<P: AsRef<Path>, Q: AsRef<Path>>(
     options: &ExtractionOptions,
     progress: &mut dyn ProgressCallback,
 ) -> Result<ExtractionReport> {
-    config.validate()?;
+    let config = config.clone().validate()?;
+    let config = &config;
 
     let archive_path = archive_path.as_ref();
     let output_dir = output_dir.as_ref();
@@ -328,7 +330,7 @@ fn extract_atomic<P: AsRef<Path>, Q: AsRef<Path>>(
 fn extract_tar_with_decoder<R, F>(
     archive_path: &Path,
     output_dir: &Path,
-    config: &SecurityConfig,
+    config: &SecurityConfig<Validated>,
     options: &ExtractionOptions,
     progress: &mut dyn ProgressCallback,
     make_decoder: F,
@@ -350,7 +352,7 @@ where
 fn extract_zip(
     archive_path: &Path,
     output_dir: &Path,
-    config: &SecurityConfig,
+    config: &SecurityConfig<Validated>,
     options: &ExtractionOptions,
     progress: &mut dyn ProgressCallback,
 ) -> Result<ExtractionReport> {
@@ -366,7 +368,7 @@ fn extract_zip(
 fn extract_7z(
     archive_path: &Path,
     output_dir: &Path,
-    config: &SecurityConfig,
+    config: &SecurityConfig<Validated>,
     options: &ExtractionOptions,
     progress: &mut dyn ProgressCallback,
 ) -> Result<ExtractionReport> {
@@ -1327,6 +1329,7 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         let mut config = SecurityConfig::default();
         config.allowed.hardlinks = true;
+        let config = config.validate().unwrap();
 
         let mut archive = TarArchive::new(Cursor::new(tar_data));
         let mut progress = ByteTracker { total: 0 };
@@ -1390,7 +1393,7 @@ mod tests {
         };
         let result = archive.extract(
             temp.path(),
-            &SecurityConfig::default(),
+            &SecurityConfig::default().validate().unwrap(),
             &ExtractionOptions::default(),
             &mut progress,
         );
@@ -1444,7 +1447,7 @@ mod tests {
         };
         let result = archive.extract(
             temp.path(),
-            &SecurityConfig::default(),
+            &SecurityConfig::default().validate().unwrap(),
             &ExtractionOptions::default(),
             &mut progress,
         );

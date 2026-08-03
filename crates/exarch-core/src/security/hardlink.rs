@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use crate::ArchiveError;
 use crate::Result;
 use crate::SecurityConfig;
+use crate::config::Validated;
 use crate::types::DestDir;
 use crate::types::SafePath;
 use crate::types::safe_symlink::resolve_through_symlinks;
@@ -114,7 +115,7 @@ impl HardlinkTracker {
         link_path: &SafePath,
         target: &Path,
         dest: &DestDir,
-        config: &SecurityConfig,
+        config: &SecurityConfig<Validated>,
     ) -> Result<()> {
         // Check if hardlinks are allowed
         if !config.allowed.hardlinks {
@@ -226,6 +227,7 @@ mod tests {
         let (_temp, dest) = create_test_dest();
         let mut config = SecurityConfig::default();
         config.allowed.hardlinks = true;
+        let config = config.validate().expect("valid config");
 
         let mut tracker = HardlinkTracker::new();
         let link = SafePath::validate(&PathBuf::from("link"), &dest, &config).unwrap();
@@ -242,7 +244,7 @@ mod tests {
     #[test]
     fn test_validate_hardlink_disabled() {
         let (_temp, dest) = create_test_dest();
-        let config = SecurityConfig::default(); // hardlinks disabled by default
+        let config = SecurityConfig::default().validate().expect("valid config"); // hardlinks disabled by default
 
         let mut tracker = HardlinkTracker::new();
         let link = SafePath::validate(&PathBuf::from("link"), &dest, &config).unwrap();
@@ -260,6 +262,7 @@ mod tests {
         let (_temp, dest) = create_test_dest();
         let mut config = SecurityConfig::default();
         config.allowed.hardlinks = true;
+        let config = config.validate().expect("valid config");
 
         let mut tracker = HardlinkTracker::new();
         let link = SafePath::validate(&PathBuf::from("link"), &dest, &config).unwrap();
@@ -274,6 +277,7 @@ mod tests {
         let (_temp, dest) = create_test_dest();
         let mut config = SecurityConfig::default();
         config.allowed.hardlinks = true;
+        let config = config.validate().expect("valid config");
 
         let mut tracker = HardlinkTracker::new();
         let link = SafePath::validate(&PathBuf::from("link"), &dest, &config).unwrap();
@@ -288,6 +292,7 @@ mod tests {
         let (_temp, dest) = create_test_dest();
         let mut config = SecurityConfig::default();
         config.allowed.hardlinks = true;
+        let config = config.validate().expect("valid config");
 
         let mut tracker = HardlinkTracker::new();
 
@@ -309,6 +314,7 @@ mod tests {
         let (_temp, dest) = create_test_dest();
         let mut config = SecurityConfig::default();
         config.allowed.hardlinks = true;
+        let config = config.validate().expect("valid config");
 
         let mut tracker = HardlinkTracker::new();
         let link = SafePath::validate(&PathBuf::from("link"), &dest, &config).unwrap();
@@ -327,6 +333,7 @@ mod tests {
         let (_temp, dest) = create_test_dest();
         let mut config = SecurityConfig::default();
         config.allowed.hardlinks = true;
+        let config = config.validate().expect("valid config");
 
         let mut tracker = HardlinkTracker::new();
         let link = SafePath::validate(&PathBuf::from("foo/link"), &dest, &config).unwrap();
@@ -343,6 +350,7 @@ mod tests {
         let (_temp, dest) = create_test_dest();
         let mut config = SecurityConfig::default();
         config.allowed.hardlinks = true;
+        let config = config.validate().expect("valid config");
 
         let mut tracker = HardlinkTracker::new();
         let target = PathBuf::from("target.txt");
@@ -372,6 +380,7 @@ mod tests {
         let (_temp, dest) = create_test_dest();
         let mut config = SecurityConfig::default();
         config.allowed.hardlinks = true;
+        let config = config.validate().expect("valid config");
 
         let mut tracker = HardlinkTracker::new();
 
@@ -407,6 +416,7 @@ mod tests {
         let (temp, dest) = create_test_dest();
         let mut config = SecurityConfig::default();
         config.allowed.hardlinks = true;
+        let config = config.validate().expect("valid config");
 
         // Simulate on-disk state after extracting the two symlink entries.
         let a = temp.path().join("a");

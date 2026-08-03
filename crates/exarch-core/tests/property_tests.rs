@@ -36,7 +36,7 @@ proptest! {
         suffix in "([a-z]+/?){0,5}"
     ) {
         let (_temp, dest) = create_test_dest();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().unwrap();
         // Ensure there's a proper path separator before ..
         let path_str = if prefix.is_empty() {
             format!("../{suffix}")
@@ -54,7 +54,7 @@ proptest! {
         components in prop::collection::vec("[a-zA-Z0-9_-]{1,20}", 1..5)
     ) {
         let (_temp, dest) = create_test_dest();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().unwrap();
         let path = PathBuf::from(components.join("/"));
         let result = SafePath::validate(&path, &dest, &config);
         prop_assert!(result.is_ok(), "valid path should be accepted");
@@ -66,7 +66,7 @@ proptest! {
         depth in 33usize..100
     ) {
         let (_temp, dest) = create_test_dest();
-        let config = SecurityConfig::default(); // max_path_depth = 32
+        let config = SecurityConfig::default().validate().unwrap(); // max_path_depth = 32
         let components: Vec<String> = (0..depth).map(|i| format!("d{i}")).collect();
         let path = PathBuf::from(components.join("/"));
         let result = SafePath::validate(&path, &dest, &config);
@@ -81,6 +81,7 @@ proptest! {
         let (_temp, dest) = create_test_dest();
         let mut config = SecurityConfig::default();
         config.allowed.symlinks = true;
+        let config = config.validate().unwrap();
 
         let link = SafePath::validate(&PathBuf::from("a/b/link"), &dest, &config)
             .expect("link path should be valid");
@@ -102,7 +103,7 @@ proptest! {
         ])
     ) {
         let (_temp, dest) = create_test_dest();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().unwrap();
         let path = PathBuf::from(format!("dir/{case_variant}/file"));
         let result = SafePath::validate(&path, &dest, &config);
         prop_assert!(result.is_err(), "banned component should be rejected");
@@ -114,7 +115,7 @@ proptest! {
         depth in 1usize..32
     ) {
         let (_temp, dest) = create_test_dest();
-        let config = SecurityConfig::default(); // max_path_depth = 32
+        let config = SecurityConfig::default().validate().unwrap(); // max_path_depth = 32
         let components: Vec<String> = (0..depth).map(|i| format!("d{i}")).collect();
         let path = PathBuf::from(components.join("/"));
         let result = SafePath::validate(&path, &dest, &config);
@@ -131,7 +132,7 @@ proptest! {
         file_sizes in prop::collection::vec(0u64..1_000_000, 1..100)
     ) {
         let mut tracker = QuotaTracker::new();
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().unwrap();
         let mut expected_total: u64 = 0;
         let mut expected_count = 0;
 
@@ -164,6 +165,7 @@ proptest! {
         config.max_file_count = max_files;
         config.max_total_size = u64::MAX;
         config.max_file_size = u64::MAX;
+        let config = config.validate().unwrap();
 
         let mut success_count = 0;
         for _ in 0..num_files {
@@ -205,6 +207,7 @@ proptest! {
         config.max_total_size = max_size;
         config.max_file_count = usize::MAX;
         config.max_file_size = u64::MAX;
+        let config = config.validate().unwrap();
 
         for size in file_sizes {
             let result = tracker.record_file(size, &config);
@@ -238,6 +241,7 @@ proptest! {
         config.max_file_size = max_file_size;
         config.max_total_size = u64::MAX;
         config.max_file_count = usize::MAX;
+        let config = config.validate().unwrap();
 
         let result = tracker.record_file(file_size, &config);
 
@@ -268,6 +272,7 @@ proptest! {
         config.max_file_size = u64::MAX;
         config.max_file_count = usize::MAX;
         config.max_total_size = u64::MAX;
+        let config = config.validate().unwrap();
 
         let mut expected_total = 0u64;
         for size in &file_sizes {
@@ -302,7 +307,7 @@ proptest! {
     ) {
         use exarch_core::security::validate_compression_ratio;
 
-        let config = SecurityConfig::default(); // max_compression_ratio = 1000.0
+        let config = SecurityConfig::default().validate().unwrap(); // max_compression_ratio = 1000.0
         #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
         let uncompressed = (compressed as f64 * ratio) as u64;
 
@@ -322,7 +327,7 @@ proptest! {
     ) {
         use exarch_core::security::validate_compression_ratio;
 
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().unwrap();
         let result = validate_compression_ratio(0, uncompressed, &config);
 
         prop_assert!(
@@ -336,7 +341,7 @@ proptest! {
     fn prop_compression_both_zero(_dummy in 0..100) {
         use exarch_core::security::validate_compression_ratio;
 
-        let config = SecurityConfig::default();
+        let config = SecurityConfig::default().validate().unwrap();
         let result = validate_compression_ratio(0, 0, &config);
 
         prop_assert!(result.is_ok(), "empty file (0/0) should be valid");
@@ -350,7 +355,7 @@ proptest! {
     ) {
         use exarch_core::security::validate_compression_ratio;
 
-        let config = SecurityConfig::default(); // max = 1000.0
+        let config = SecurityConfig::default().validate().unwrap(); // max = 1000.0
         let uncompressed = compressed.saturating_mul(multiplier);
 
         let result = validate_compression_ratio(compressed, uncompressed, &config);
@@ -373,6 +378,7 @@ proptest! {
         let (_temp, dest) = create_test_dest();
         let mut config = SecurityConfig::default();
         config.allowed.hardlinks = true;
+        let config = config.validate().unwrap();
 
         let mut tracker = HardlinkTracker::new();
         let link = SafePath::validate(&PathBuf::from("link"), &dest, &config)
@@ -392,6 +398,7 @@ proptest! {
         let (_temp, dest) = create_test_dest();
         let mut config = SecurityConfig::default();
         config.allowed.hardlinks = true;
+        let config = config.validate().unwrap();
 
         let mut tracker = HardlinkTracker::new();
         let link = SafePath::validate(&PathBuf::from("link"), &dest, &config)
@@ -414,6 +421,7 @@ proptest! {
         let (_temp, dest) = create_test_dest();
         let mut config = SecurityConfig::default();
         config.allowed.hardlinks = true;
+        let config = config.validate().unwrap();
 
         let mut tracker = HardlinkTracker::new();
         let target = PathBuf::from("shared_target.txt");
@@ -437,6 +445,7 @@ proptest! {
         let (_temp, dest) = create_test_dest();
         let mut config = SecurityConfig::default();
         config.allowed.hardlinks = true;
+        let config = config.validate().unwrap();
 
         let mut tracker = HardlinkTracker::new();
 
@@ -464,6 +473,7 @@ proptest! {
         let (_temp, dest) = create_test_dest();
         let mut config = SecurityConfig::default();
         config.allowed.symlinks = true;
+        let config = config.validate().unwrap();
 
         let link = SafePath::validate(&PathBuf::from("link"), &dest, &config)
             .expect("link path should be valid");
@@ -483,6 +493,7 @@ proptest! {
         let (_temp, dest) = create_test_dest();
         let mut config = SecurityConfig::default();
         config.allowed.symlinks = true;
+        let config = config.validate().unwrap();
 
         let link_path = if link_depth == 0 {
             PathBuf::from("link")
@@ -511,7 +522,7 @@ proptest! {
         target in "[a-z/]{1,30}"
     ) {
         let (_temp, dest) = create_test_dest();
-        let config = SecurityConfig::default(); // symlinks disabled
+        let config = SecurityConfig::default().validate().unwrap(); // symlinks disabled
 
         let link = SafePath::validate(&PathBuf::from("link"), &dest, &config)
             .expect("link path should be valid");

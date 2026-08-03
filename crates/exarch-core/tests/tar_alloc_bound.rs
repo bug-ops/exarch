@@ -176,7 +176,10 @@ fn measure_extract_peak_bytes(bytes: &[u8], budget: u64) -> usize {
     let profiler = dhat::Profiler::builder().testing().build();
     {
         let temp = tempfile::tempdir().unwrap();
-        let config = SecurityConfig::default().with_max_tar_metadata_bytes(budget);
+        let config = SecurityConfig::default()
+            .with_max_tar_metadata_bytes(budget)
+            .validate()
+            .unwrap();
         let mut archive = TarArchive::new(Cursor::new(bytes));
         // Outcome (Ok or Err) is irrelevant here — only peak memory matters.
         let _ = archive.extract(

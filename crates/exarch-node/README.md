@@ -32,7 +32,7 @@ bun add exarch-rs
 
 ## Requirements
 
-- Node.js >= 18
+- Node.js >= 20
 
 ## Quick Start
 
@@ -294,6 +294,7 @@ The library provides built-in protection against:
 | Symlink attacks | Prevents symlinks escaping extraction directory |
 | Hardlink attacks | Validates hardlink targets |
 | Zip bombs | Detects high compression ratios |
+| TAR metadata bombs | Bounds GNU long-name/long-link and PAX header record reads |
 | Permission sanitization | Strips setuid/setgid bits |
 | Size limits | Enforces file and total size limits |
 

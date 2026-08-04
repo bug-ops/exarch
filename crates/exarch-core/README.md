@@ -14,7 +14,7 @@ This crate is part of the [exarch](https://github.com/bug-ops/exarch) workspace.
 
 ```toml
 [dependencies]
-exarch-core = "0.5"
+exarch-core = "0.6"
 ```
 
 > [!IMPORTANT]
@@ -52,7 +52,7 @@ let config = SecurityConfig::default()
     .with_allowed_extensions(vec![".tar".into(), ".gz".into()]); // optional allowlist
 ```
 
-Available builders on `SecurityConfig`: `with_max_file_size`, `with_max_total_size`, `with_max_compression_ratio`, `with_max_file_count`, `with_max_path_depth`, `with_allowed`, `with_allow_symlinks`, `with_allow_hardlinks`, `with_allow_absolute_paths`, `with_allow_world_writable`, `with_preserve_permissions`, `with_allowed_extensions`, `with_banned_path_components`, `with_allow_solid_archives`, `with_max_solid_block_memory`. On `ExtractionOptions`: `with_atomic`, `with_skip_duplicates`.
+Available builders on `SecurityConfig`: `with_max_file_size`, `with_max_total_size`, `with_max_compression_ratio`, `with_max_file_count`, `with_max_path_depth`, `with_allowed`, `with_allow_symlinks`, `with_allow_hardlinks`, `with_allow_absolute_paths`, `with_allow_world_writable`, `with_preserve_permissions`, `with_allowed_extensions`, `with_banned_path_components`, `with_allow_solid_archives`, `with_max_solid_block_memory`, `with_max_tar_metadata_bytes`. On `ExtractionOptions`: `with_atomic`, `with_skip_duplicates`.
 
 ### Builder Pattern
 
@@ -75,6 +75,7 @@ exarch-core provides defense-in-depth protection against common archive vulnerab
 | Symlink attacks | Prevents symlinks escaping extraction directory | Blocked |
 | Hardlink attacks | Validates hardlink targets within extraction directory | Blocked |
 | Zip bombs | Detects high compression ratios | Enabled (100x limit) |
+| TAR metadata bombs | Bounds GNU long-name/long-link and PAX header record reads | Enabled (4 MiB, 16 MiB for `permissive()`) |
 | Permission sanitization | Strips setuid/setgid bits | Enabled |
 | Size limits | Configurable file and total size limits | 50 MB / 10 GB |
 

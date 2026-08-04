@@ -9,7 +9,7 @@ tags:
   - ffi
   - rust
 created: 2026-05-20
-updated: 2026-07-09
+updated: 2026-08-04
 status: draft
 related:
   - "[[constitution]]"
@@ -73,14 +73,22 @@ SO THAT I receive a clear Python exception for obvious mistakes
 ```
 GIVEN a path containing null bytes
 WHEN any exarch function is called with that path
-THEN ValueError is raised immediately without calling into Rust core
+THEN SecurityViolationError is raised immediately without calling into Rust core
 ```
 
 ```
 GIVEN a path exceeding 4096 bytes
 WHEN any exarch function is called with that path
-THEN ValueError is raised immediately
+THEN SecurityViolationError is raised immediately
 ```
+
+> [!note] Unreleased (v0.6.0): boundary validation hoisted to `exarch-core`, exception type changed (#406)
+> Both bindings previously hand-rolled null-byte/length checks independently (and had drifted:
+> a full-scan fold vs. a short-circuiting check, inconsistent order). Both now call
+> `exarch_core::validate_raw_path_str()` (checks length before scanning for a null byte, O(1)
+> before the O(n) scan) and route its `ArchiveError::SecurityViolation` through the existing
+> `convert_error()` used for every other rejection. **Breaking change**: Python now raises
+> `SecurityViolationError` for null-byte/path-length rejections, not a bare `ValueError`.
 
 ### US-003: GIL Release During I/O
 
@@ -133,13 +141,16 @@ THEN extraction respects those settings
 |----|------------|----------|
 | FR-070 | THE SYSTEM SHALL expose Python functions: `extract_archive`, `extract_archive_with_progress`, `create_archive`, `create_archive_with_progress`, `list_archive`, `verify_archive` | must |
 | FR-071 | ALL Python functions SHALL accept `str` or `pathlib.Path` for path arguments | must |
-| FR-072 | WHEN paths contain null bytes or exceed 4096 bytes, THE SYSTEM SHALL raise `ValueError` at the Python boundary before calling into Rust | must |
+| FR-072 | WHEN paths contain null bytes or exceed 4096 bytes, THE SYSTEM SHALL raise `SecurityViolationError` (via the shared `exarch_core::validate_raw_path_str()` and the existing `convert_error()` path) at the Python boundary before calling into Rust (v0.6.0, #406 — previously a bare `ValueError`) | must |
 | FR-073 | WHEN no Python progress callback is provided, THE SYSTEM SHALL release the GIL during extraction/creation | must |
 | FR-074 | WHEN a Python progress callback is provided, THE SYSTEM SHALL NOT release the GIL (callback requires GIL to invoke Python) | must |
 | FR-075 | Rust `ArchiveError` variants SHALL map to specific Python exception types; `SourceNotFound`/`OutputExists` → `PyIOError`; `InvalidCompressionLevel`/`InvalidConfiguration` → `PyValueError`; `PartialExtraction` → the specific inner exception type (e.g. `SymlinkEscapeError`, `QuotaExceededError`) with `files_extracted` and `bytes_written` attributes attached to that exception | must |
 | FR-076 | ALL Python exception types SHALL be subclasses of `ExarchError(Exception)` | must |
 | FR-077 | `PySecurityConfig` and `PyCreationConfig` SHALL expose the same fluent builder API as the Rust counterparts | must |
 | FR-078 | `PyExtractionReport`, `PyCreationReport`, `PyArchiveManifest`, and `PyVerificationReport` SHALL expose all fields as Python attributes | must |
+| FR-079 | WHEN `CoreError::PartialExtraction` is converted to a Python exception, THE SYSTEM SHALL attach `files_skipped: int` and `warnings: list[str]` (in addition to the existing `files_extracted`/`bytes_written`) — `exarch-core` has populated these on the report since v0.6.0 #505, and this binding was the one call site not yet forwarding them (v0.6.0, #508) | must |
+| FR-080 | WHEN a Python progress callback raises during extraction or creation, THE SYSTEM SHALL capture the exception (not discard it) and, if the underlying operation otherwise succeeds, re-raise it to the caller carrying `files_extracted`/`files_added`, `bytes_written`, and a `progress_callback_error = True` marker attribute; if the operation also fails, the core error stays primary with the callback's exception chained via `__cause__` (v0.6.0, #489 — previously silently swallowed via `let _ = ...`) | must |
+| FR-081 | ALL path-carrying `ArchiveError` variants SHALL be redacted for release-build Python exception messages via the shared `exarch_core::error::redaction` module, not a Python-crate-local copy; `PathTraversal`/`SymlinkEscape`/`HardlinkEscape`/`InvalidPermissions` (archive-relative, attacker-authored paths) SHALL keep the full path in both debug and release builds, while `SourceNotFound`/`SourceNotAccessible`/`OutputExists`/`UnknownFormat`/`Io` (host-derived paths) SHALL redact to filename-only (or `ErrorKind` description for `Io`) in release builds (v0.6.0, #453, #462, #463) | must |
 
 ## 4. Non-Functional Requirements
 
@@ -248,14 +259,14 @@ class ExtractionOptions:
 | Scenario | Expected Behavior |
 |----------|-------------------|
 | Path is `None` | `TypeError` raised by PyO3 before boundary check |
-| Path contains null byte | `ValueError` at Python boundary |
-| Path exceeds 4096 bytes | `ValueError` at Python boundary |
+| Path contains null byte | `SecurityViolationError` at Python boundary (v0.6.0, #406 — was `ValueError`) |
+| Path exceeds 4096 bytes | `SecurityViolationError` at Python boundary (v0.6.0, #406 — was `ValueError`) |
 | Path is `pathlib.Path` | Converted to `str` via `.as_os_str()` before Rust call |
-| Rust returns `ArchiveError::PathTraversal` | `PathTraversalError` raised in Python |
-| Rust returns `ArchiveError::SourceNotFound` or `OutputExists` | `PyIOError` raised (not `InvalidArchiveError`) |
+| Rust returns `ArchiveError::PathTraversal` | `PathTraversalError` raised in Python; full archive-relative path retained even in release builds (v0.6.0, #462) |
+| Rust returns `ArchiveError::SourceNotFound` or `OutputExists` | `PyIOError` raised (not `InvalidArchiveError`); host path redacted to filename-only in release builds |
 | Rust returns `ArchiveError::InvalidCompressionLevel` or `InvalidConfiguration` | `PyValueError` raised (not `InvalidArchiveError`) |
-| Rust returns `ArchiveError::PartialExtraction` | The specific inner exception (e.g. `SymlinkEscapeError`) is raised; `files_extracted` and `bytes_written` attributes are attached; detect partiality via `hasattr(e, "files_extracted")` |
-| Progress callback raises Python exception | Exception propagates through `PyProgressAdapter`; extraction aborted |
+| Rust returns `ArchiveError::PartialExtraction` | The specific inner exception (e.g. `SymlinkEscapeError`) is raised; `files_extracted`, `bytes_written`, `files_skipped`, and `warnings` attributes are attached (v0.6.0, #508); detect partiality via `hasattr(e, "files_extracted")` |
+| Progress callback raises Python exception | Captured, not discarded (v0.6.0, #489); extraction/creation still runs to completion (no cancellation signal), then the exception propagates on success with `progress_callback_error = True`, or chains onto the core error via `__cause__` on failure |
 | GIL state with progress callback | GIL held throughout; no concurrent Python threads during extraction |
 
 ## 7. Success Criteria

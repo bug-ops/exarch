@@ -8,7 +8,7 @@ tags:
   - archive
   - rust
 created: 2026-05-20
-updated: 2026-07-09
+updated: 2026-08-04
 status: draft
 related:
   - "[[constitution]]"
@@ -16,6 +16,9 @@ related:
   - "[[001-security-pipeline/spec]]"
   - "[[003-config-api/spec]]"
   - "[[004-progress-tracking/spec]]"
+  - "[[008-tar-empty-directory-preservation/spec]]"
+  - "[[009-accurate-compression-reporting/spec]]"
+  - "[[013-quota-permit-capability-token/spec]]"
 ---
 
 # Feature: Format Handlers
@@ -166,6 +169,13 @@ THEN magic bytes take precedence over the extension
 | FR-029 | WHEN listing or verifying an archive, THE SYSTEM SHALL NOT write any files to disk | must |
 | FR-030 | WHEN `allowed_extensions` in `SecurityConfig` is non-empty, ALL three format handlers (TAR, ZIP, 7z) SHALL skip entries whose extension is not in the allowlist and record them in `ExtractionReport::files_skipped` | must |
 | FR-031 | `ArchiveFormat::extract` SHALL accept and invoke a `ProgressCallback` for every entry; ZIP-family alias creation without an explicit `CreationConfig::format` override SHALL be rejected with `ArchiveError::InvalidArchive` naming the alias | must |
+| FR-032 | WHEN creating an archive, THE SYSTEM SHALL write an explicit directory entry (TAR: `append_dir`; ZIP: `add_directory`) for every directory in the source tree, including empty and nested-empty directories, for all TAR variants and ZIP alike; `CreationReport::directories_added` SHALL exclude the archive root itself (implemented v0.6.0, #400 — see [[008-tar-empty-directory-preservation/spec]]) | must |
+| FR-033 | WHEN archive creation completes, THE SYSTEM SHALL set `CreationReport::bytes_compressed` to the actual on-disk size of the created archive file, measured after the writer/encoder is fully flushed and finished, for ZIP and every TAR variant (implemented v0.6.0, #402 — see [[009-accurate-compression-reporting/spec]]) | must |
+| FR-034 | WHEN a symlink (to a file or to a directory) is passed directly as a top-level `create` source, THE SYSTEM SHALL classify it via `lstat`/`symlink_metadata` (not `stat`/`metadata`) and archive it as `EntryType::Symlink`, not dereference it into file content; a dangling symlink source SHALL NOT be rejected as missing | must |
+| FR-035 | WHEN `CreationConfig::follow_symlinks` is enabled, THE SYSTEM SHALL dereference a symlink source (file or directory) for both TAR and ZIP creation, embedding the target's real content instead of a link entry | must |
+| FR-036 | WHEN a TAR hardlink entry is extracted, THE SYSTEM SHALL charge its target's on-disk size against `QuotaTracker` via `EntryValidator::reserve_hardlink` before copying, so hardlink extraction cannot bypass `max_file_size`/`max_file_count`/`max_total_size` (fixed v0.6.0, #426) | must |
+| FR-037 | WHEN listing an archive (`list_archive`), THE SYSTEM SHALL route every entry through the same `QuotaTracker` used by extraction rather than a separate, weaker inline implementation; a single entry larger than `max_file_size` SHALL be rejected during listing (fixed v0.6.0, #396 — breaking change: `list`/`verify` previously enforced only file count and total size) | must |
+| FR-038 | WHEN 7z extraction writes a file and no pre-existing file occupies the destination, THE SYSTEM SHALL write directly to the destination path (same `O_EXCL`+`O_NOFOLLOW` guarantee as TAR/ZIP) instead of always staging through a temp-file-then-rename, retaining the temp+rename path only for the overwrite case (perf fix v0.6.0, #492: closed a 35–101% throughput gap vs. `sevenz_rust2::decompress_file`) | must |
 
 ## 4. Non-Functional Requirements
 
@@ -236,6 +246,40 @@ FormatCreator:
 > changed — this is purely a compile-time hardening of the existing "call `validate()` before
 > use" convention.
 
+> [!note] Unreleased: `ValidatedEntryType::File` carries a `QuotaPermit` (#436, #439, #440, #447)
+> Every format's file-write path (`formats::common::extract_file_with_permit` for TAR/ZIP,
+> `formats::sevenz::write_file_with_permit` for 7z) now takes the `QuotaPermit` capability token
+> by value instead of matching-and-dropping it (`_`). TAR's dispatch matches exhaustively on
+> `ValidatedEntry::into_parts()`, so only the `File` arm can bind a permit — a compiler-enforced
+> impossibility for any other arm to accidentally reach a write with no quota charge. ZIP retains
+> a runtime fail-closed guard since its dispatch is not a single exhaustive match. See
+> [[013-quota-permit-capability-token/spec]] for the full pattern.
+
+> [!note] Unreleased: 7z extraction performance parity with `sevenz_rust2::decompress_file` (#492)
+> `formats::sevenz::write_file_with_permit_using` previously always staged through a temp file
+> and `rename`, even when nothing occupied the destination — costing two extra syscalls per
+> extracted file and attributing 45-54% of extraction CPU time to this path in profiling.
+> `process_entry_inner` now writes directly to `dest_path` via `common::create_file_with_mode`
+> when no pre-existing file is found there, keeping the atomic temp+rename path only for the
+> overwrite case (so a decode failure mid-stream never leaves a truncated file at the final
+> destination). `SevenZArchive` also retains its already-parsed `sevenz_rust2::Archive` from
+> `new()` instead of re-parsing the header a second time at extraction. Re-measured via a new
+> `sevenz_vs_reference` criterion bench group: the gap closed from 35%/101% slower to within
+> noise of parity.
+
+> [!note] Unreleased: symlink sources archived as links, not dereferenced (#510, #512)
+> A symlink (to a file or a directory) passed directly as a top-level `create` source was
+> previously classified via `stat`/`metadata` (follows symlinks), silently dereferencing it into
+> the target's content and rejecting a dangling symlink as `SourceNotFound`. `creation::walker::collect_entries`
+> now uses `lstat`/`symlink_metadata` for this classification, so a symlink source archives as
+> `EntryType::Symlink` by default (TAR: link entry; ZIP: skipped with a `Skipped symlink`
+> warning, since ZIP has no on-disk symlink representation) and a dangling symlink is no longer
+> rejected. **Breaking behavior change**: `exarch create a.tar link.txt` now stores a real
+> symlink entry rather than the target's dereferenced content — extracting that archive now
+> requires `--allow-symlinks` (deny-by-default) where it previously round-tripped without it.
+> `CreationConfig::follow_symlinks` dereferences as before when explicitly enabled, and ZIP
+> creation gained the `follow_symlinks` handling it was previously missing entirely.
+
 > [!note] zip dependency
 > Upgraded from 8.6.0 to 9.0.0-pre2 in v0.4.0. `ZipFile::name()` now returns
 > `Result<Cow<str>, ZipError>` instead of `&str`; all call sites propagate the
@@ -290,6 +334,11 @@ FormatCreator:
 | Compression ratio unavailable per-entry (TAR streams) | Zip bomb check skipped for that entry; total quota still enforced |
 | 7z entry with absolute path and `allowed.absolute_paths = true` | Written inside `output_dir` with the leading `/` stripped, same as TAR/ZIP (fixed in v0.5.1, #375; previously silently skipped) |
 | 7z entry name containing `\` (e.g. `..\..\x`) | Normalized to `/` via `normalize_entry_name` before validation; rejected with `ArchiveError::PathTraversal` (fixed in v0.5.1, #376; previously bypassed traversal detection on Unix) |
+| TAR-family `create` with empty directories in the source tree | Explicit directory entry written for each (including nested-empty); preserved on round-trip (fixed v0.6.0, #400 — was previously silently dropped for TAR only, ZIP was already correct) |
+| `bytes_compressed` in `CreationReport` for ZIP/TAR creation | Reflects the real on-disk archive size, measured after the writer/encoder finishes (fixed v0.6.0, #402 — was previously always `0` for ZIP and the pre-compression TAR stream size for TAR) |
+| Symlink (file or directory) passed as a top-level `create` source | Archived as `EntryType::Symlink` (TAR) or skipped with a warning (ZIP), not dereferenced; dangling symlink sources are no longer rejected as missing (fixed v0.6.0, #510, #512) |
+| TAR hardlink entry during extraction | Charged against `QuotaTracker` via the target's on-disk size before copying (fixed v0.6.0, #426 — previously bypassed quota entirely) |
+| `list_archive` on an entry larger than `max_file_size` | Rejected during listing, same as extraction (fixed v0.6.0, #396 — breaking change; `verify_archive`'s internal pre-flight listing keeps `max_file_size` unlimited so an oversized entry surfaces as a `VerificationIssue` instead of aborting before any report exists) |
 
 ## 7. Success Criteria
 
@@ -333,4 +382,7 @@ FormatCreator:
 - [[001-security-pipeline/spec]] — `EntryValidator` that format handlers must use
 - [[003-config-api/spec]] — `SecurityConfig`, `CreationConfig`, `ExtractionOptions`
 - [[004-progress-tracking/spec]] — `ProgressCallback` passed to `extract` and `create`
+- [[008-tar-empty-directory-preservation/spec]] — TAR directory-entry fix in detail (implemented)
+- [[009-accurate-compression-reporting/spec]] — `bytes_compressed` accuracy fix in detail (implemented)
+- [[013-quota-permit-capability-token/spec]] — `QuotaPermit` pattern consumed by every format's file-write path
 - [[001-exarch-system/spec]] — original monolithic spec (archived)

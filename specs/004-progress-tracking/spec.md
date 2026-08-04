@@ -8,12 +8,15 @@ tags:
   - progress
   - rust
 created: 2026-05-20
+updated: 2026-08-04
 status: draft
 related:
   - "[[constitution]]"
   - "[[MOC-specs]]"
   - "[[002-format-handlers/spec]]"
   - "[[005-cli/spec]]"
+  - "[[006-python-bindings/spec]]"
+  - "[[007-node-bindings/spec]]"
 ---
 
 # Feature: Progress Tracking
@@ -167,6 +170,9 @@ ProgressCallback: Send
 | Archive with unknown total entry count | `total` argument to `on_entry_start` is 0 |
 | Progress callback panics | Panic propagates as normal Rust panic; not caught by exarch |
 | Creation progress for large directories | `on_entry_start` called for each file; total is file count from walk |
+| Python progress callback raises an exception (v0.6.0, #489) | Captured, not silently swallowed (previously discarded via `let _ = ...`); the `ProgressCallback` contract has no cancellation signal, so the operation still runs to completion, and if it otherwise succeeded the callback's exception now propagates to the caller carrying `files_extracted`/`files_added`, `bytes_written`, and a `progress_callback_error = True` marker attribute — see [[006-python-bindings/spec]] |
+| Node.js progress callback throws an `Error`/object (v0.6.0, #465) | Captured via `call_async_catch` instead of routing through `napi_fatal_exception` (which previously crashed the process uncatchably even inside `try`/`catch`); rejects the returned Promise instead — see [[007-node-bindings/spec]] |
+| Node.js progress callback throws a bare primitive (string/number/boolean) (v0.6.0, #473) | Also captured, not just `Error`/object throws — closed a separate napi-rs `napi_create_reference()` escalation gap via a JS shim wrapping the callback; does not cover `createArchiveWithProgressSync`, which dispatches unawaited and was never affected by this class of bug |
 
 ## 7. Success Criteria
 
@@ -175,6 +181,7 @@ ProgressCallback: Send
 | SC-001 | `on_complete` not called on failure | Regression test (issue #170, fixed in v0.4.0) |
 | SC-002 | Progress overhead vs no-progress | < 5% throughput penalty (measured in bench) |
 | SC-003 | All format handlers (TAR, ZIP, 7z) call progress callbacks per-entry | Fixed in v0.4.0 (#170, #191) |
+| SC-004 | Node.js creation progress parity with extraction | `createArchiveWithProgress`/`createArchiveWithProgressSync` added (v0.6.0, #455), reusing `exarch_core::create_archive_with_progress` and the existing `NodeProgressAdapter`; JS integration tests cover the per-entry callback shape and `progress=null`/omitted paths (#456) |
 
 ## 8. Agent Boundaries
 
@@ -204,5 +211,6 @@ ProgressCallback: Send
 - [[MOC-specs]] — all specifications
 - [[002-format-handlers/spec]] — format handlers that call progress callbacks
 - [[005-cli/spec]] — indicatif-based `ProgressCallback` implementation
-- [[006-python-bindings/spec]] — `PyProgressAdapter` and GIL interaction
+- [[006-python-bindings/spec]] — `PyProgressAdapter` and GIL interaction; callback exception propagation
+- [[007-node-bindings/spec]] — `NodeProgressAdapter`, `createArchiveWithProgress`/`Sync`, primitive-throw hardening
 - [[001-exarch-system/spec]] — original monolithic spec (archived)

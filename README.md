@@ -32,7 +32,7 @@ Memory-safe archive extraction and creation library with Python and Node.js bind
 
 ```toml
 [dependencies]
-exarch-core = "0.5"
+exarch-core = "0.6"
 ```
 
 > [!IMPORTANT]
@@ -54,7 +54,7 @@ npm install exarch-rs
 ```
 
 > [!NOTE]
-> Requires Node.js 18 or later.
+> Requires Node.js 20 or later.
 
 ## Quick Start
 
@@ -89,7 +89,7 @@ print(f"Extracted {result.files_extracted} files")
 #### Node.js
 
 ```javascript
-const { extractArchive } = require('exarch');
+const { extractArchive } = require('exarch-rs');
 
 // Async (recommended)
 const result = await extractArchive('archive.tar.gz', '/output/path');
@@ -126,7 +126,7 @@ print(f"Created archive with {result.files_added} files")
 #### Node.js
 
 ```javascript
-const { createArchive } = require('exarch');
+const { createArchive } = require('exarch-rs');
 
 // Async (recommended)
 const result = await createArchive('output.tar.gz', ['src/', 'package.json']);
@@ -143,6 +143,7 @@ exarch provides defense-in-depth protection against common archive vulnerabiliti
 | Symlink attacks | Prevents symlinks escaping extraction directory | Blocked |
 | Hardlink attacks | Validates hardlink targets within extraction directory | Blocked |
 | Zip bombs | Detects high compression ratios | Enabled (100x limit) |
+| TAR metadata bombs | Bounds GNU long-name/long-link and PAX header record reads | Enabled (4 MiB, 16 MiB for `permissive()`) |
 | Permission sanitization | Strips setuid/setgid bits | Enabled |
 | Size limits | Configurable file and total size limits | 50 MB / 10 GB |
 
@@ -235,7 +236,7 @@ exarch uses optimized I/O with directory caching and atomic permission setting t
 
 - Rust 1.96.0 or later (Edition 2024)
 - Python 3.10+ (for Python bindings)
-- Node.js 18+ (for Node.js bindings)
+- Node.js 20+ (for Node.js bindings)
 
 ### Build
 

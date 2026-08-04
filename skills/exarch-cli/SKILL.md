@@ -5,7 +5,7 @@ license: MIT OR Apache-2.0
 compatibility: Requires the `exarch` binary (cargo install exarch-cli, or build from this workspace with cargo build -p exarch-cli). MSRV 1.96.0 if building from source.
 metadata:
   author: bug-ops
-  version: "0.5.2"
+  version: "0.6.0"
 ---
 
 # exarch CLI

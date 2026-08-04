@@ -9,7 +9,8 @@ tags:
   - rust
   - bug
 created: 2026-08-02
-status: draft
+updated: 2026-08-04
+status: implemented
 related:
   - "[[constitution]]"
   - "[[MOC-specs]]"
@@ -18,6 +19,14 @@ related:
 ---
 
 # Feature: Accurate Compression Reporting in CreationReport
+
+> [!success] Implemented (#402, v0.6.0 unreleased)
+> `bytes_compressed` is now measured from the real on-disk archive file size,
+> queried after the writer/encoder is fully flushed and finished, for ZIP and
+> all TAR variants (including plain `.tar`) — resolving FR-005 in favor of the
+> filesystem-metadata approach over instrumenting the writer chain. The
+> now-unused `crate::io::CountingWriter` was removed entirely (it is no longer
+> part of the codebase, not merely repositioned).
 
 > [!info] Metadata
 > **Subsystem**: exarch-core / creation

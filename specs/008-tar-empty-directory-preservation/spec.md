@@ -9,7 +9,8 @@ tags:
   - rust
   - bug
 created: 2026-08-02
-status: draft
+updated: 2026-08-04
+status: implemented
 related:
   - "[[constitution]]"
   - "[[MOC-specs]]"
@@ -17,6 +18,14 @@ related:
 ---
 
 # Feature: TAR Empty Directory Preservation
+
+> [!success] Implemented (#400, v0.6.0 unreleased)
+> `create_tar_internal_with_progress` now writes an explicit directory entry for
+> every directory in the source tree (including empty and nested-empty
+> directories) for all four TAR variants plus plain `.tar`, mirroring the ZIP
+> handler exactly as this spec proposed. `CreationReport::directories_added` now
+> excludes the archive root itself (consistent with ZIP), matching FR-003. See
+> [[002-format-handlers/spec]] for the current data-model description.
 
 > [!info] Metadata
 > **Subsystem**: exarch-core / creation

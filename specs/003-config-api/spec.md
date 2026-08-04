@@ -8,12 +8,14 @@ tags:
   - config
   - rust
 created: 2026-05-20
+updated: 2026-08-04
 status: draft
 related:
   - "[[constitution]]"
   - "[[MOC-specs]]"
   - "[[001-security-pipeline/spec]]"
   - "[[002-format-handlers/spec]]"
+  - "[[014-config-typestate-validation/spec]]"
 ---
 
 # Feature: Configuration API
@@ -86,6 +88,39 @@ WHEN validate() is called
 THEN it returns ArchiveError::InvalidConfiguration before extraction begins
 ```
 
+```
+GIVEN SecurityConfig::default().with_allowed_extensions(vec!["\0evil"])
+WHEN validate() is called
+THEN it returns ArchiveError::InvalidConfiguration (entry contains a null byte)
+```
+
+> [!note] Unreleased (v0.6.0): entry-level validation for allowlist/banlist fields (#449)
+> A new `validate_config_entry` helper (`exarch-core::security::boundary`, re-exported as
+> `exarch_core::validate_config_entry` alongside `MAX_CONFIG_ENTRY_LENGTH`) is called per-entry
+> from `SecurityConfig::validate()` for both `allowed_extensions` and `banned_path_components`.
+> An entry that is empty, contains a null byte, or exceeds 255 bytes now fails validation —
+> configs that previously passed with such entries now return `InvalidConfiguration`. Python's
+> `add_allowed_extension`/`add_banned_component` and Node's `addAllowedExtension`/
+> `addBannedComponent` delegate to the same helper, so both bindings additionally reject empty
+> entries eagerly (previously accepted) and report length in bytes.
+
+### US-006: Compile-Time Validation Enforcement
+
+AS A library maintainer
+I WANT the type system to make it impossible to reach extraction/listing/verification
+with an unvalidated or invalid `SecurityConfig`
+SO THAT a caller cannot accidentally (or via a future refactor) bypass `validate()`
+
+**Acceptance criteria:**
+```
+GIVEN a hand-built SecurityConfig<Unvalidated>
+WHEN it is passed directly to ArchiveFormat::extract/list/verify (not the top-level
+     extract_archive/list_archive/verify_archive functions)
+THEN the code does not compile — those methods require &SecurityConfig<Validated>
+```
+
+See [[014-config-typestate-validation/spec]] for the full typestate design.
+
 ### US-004: Archive Creation Configuration
 
 AS A developer building a packaging tool
@@ -130,6 +165,10 @@ THEN no files are present in the output directory; the temp dir is cleaned up
 | FR-037 | All three config types SHALL implement `Default` with documented defaults | must |
 | FR-038 | `AllowedFeatures` SHALL be a separate struct with boolean flags: `symlinks`, `hardlinks`, `absolute_paths`, `world_writable`; all default to false | must |
 | FR-039 | `CreationConfig::validate()` SHALL be called inside `create_archive_with_progress` before any I/O; invalid configurations SHALL be rejected early | must |
+| FR-040 | `SecurityConfig` and `CreationConfig` SHALL be two-state typestates over `Unvalidated`/`Validated` phantom markers; fluent `with_*` builders SHALL exist only on `T<Unvalidated>`; `validate()` SHALL consume `self` and return `Result<T<Validated>>` instead of `Result<()>` (v0.6.0, see [[014-config-typestate-validation/spec]]) | must |
+| FR-041 | `SecurityConfig::validate()` SHALL reject any `allowed_extensions` or `banned_path_components` entry that is empty, contains a null byte, or exceeds 255 bytes, via the shared `validate_config_entry` helper | must |
+| FR-042 | `T<Validated>` SHALL be reachable read-only via `Deref` for both typestates, but mutable (`DerefMut`) only for `T<Unvalidated>`, so a validated config cannot be mutated back into an unvalidated-equivalent state after the fact | must |
+| FR-043 | Top-level `extract_archive*`, `list_archive`, `verify_archive`, and `create_archive*` functions SHALL continue to accept a plain `&SecurityConfig`/`CreationConfig` (defaulting to `Unvalidated`) and validate internally, so bindings and CLI callers require no changes | must |
 
 ## 4. Non-Functional Requirements
 
@@ -144,10 +183,11 @@ THEN no files are present in the output directory; the temp dir is cleaned up
 
 | Entity | Description | Key Attributes |
 |--------|-------------|----------------|
-| `SecurityConfig` | Security policy for extraction and inspection operations | `max_file_size`, `max_total_size`, `max_compression_ratio`, `max_file_count`, `max_path_depth`, `allowed: AllowedFeatures`, `banned_path_components`, `allowed_extensions`, `allow_solid_archives`, `max_solid_block_memory` |
+| `SecurityConfig<State = Unvalidated>` | Security policy for extraction and inspection operations; typestate over `Unvalidated`/`Validated` since v0.6.0 | `max_file_size`, `max_total_size`, `max_compression_ratio`, `max_file_count`, `max_path_depth`, `allowed: AllowedFeatures`, `banned_path_components`, `allowed_extensions`, `allow_solid_archives`, `max_solid_block_memory`, `max_tar_metadata_bytes`; fields sealed behind a private `SecurityConfigFields` struct, reachable via `Deref`/`DerefMut` |
 | `AllowedFeatures` | Feature flags for deny-by-default policy | `symlinks: bool`, `hardlinks: bool`, `absolute_paths: bool`, `world_writable: bool` |
-| `CreationConfig` | Configuration for archive creation | `follow_symlinks`, `include_hidden`, `max_file_size`, `exclude_patterns`, `strip_prefix`, `compression_level` (1–9), `preserve_permissions`, `format: Option<ArchiveType>` |
+| `CreationConfig<State = Unvalidated>` | Configuration for archive creation; typestate over `Unvalidated`/`Validated` since v0.6.0 (mirrors `SecurityConfig`) | `follow_symlinks`, `include_hidden`, `max_file_size`, `exclude_patterns`, `strip_prefix`, `compression_level` (1–9), `preserve_permissions`, `format: Option<ArchiveType>`; fields sealed behind `CreationConfigFields` (`#[non_exhaustive]`) |
 | `ExtractionOptions` | Operational options for extraction (non-security) | `atomic: bool`, `skip_duplicates: bool` |
+| `Unvalidated` / `Validated` | Zero-sized phantom marker types re-exported at crate root | Encode config validation state at compile time; used as the default and post-`validate()` type parameter of `SecurityConfig`/`CreationConfig` respectively |
 
 ### SecurityConfig Defaults
 
@@ -174,7 +214,9 @@ THEN no files are present in the output directory; the temp dir is cleaned up
 |----------|-------------------|
 | `SecurityConfig` with zero `max_file_size`, `max_total_size`, `max_path_depth`, `max_file_count`, or `max_solid_block_memory` | `validate()` returns `InvalidConfiguration` |
 | `SecurityConfig` with `max_compression_ratio` of 0.0, negative, or NaN | `validate()` returns `InvalidConfiguration` |
+| `SecurityConfig` with an empty, null-byte-containing, or >255-byte `allowed_extensions`/`banned_path_components` entry | `validate()` returns `InvalidConfiguration` (v0.6.0, #449) |
 | `compression_level` outside 1–9 (0 or > 9) | `ArchiveCreator::compression_level` (and `CreationConfig::with_compression_level`) returns `Err(ArchiveError::InvalidCompressionLevel)`; callers must handle with `?` or explicit match |
+| A hand-built `CreationConfig` with `compression_level: Some(200)` reaches `flate2`/`xz2` directly (bypassing the high-level `with_compression_level` contract) | No longer possible: `creation::tar::*`/`creation::zip::*` and `FormatCreator::create` require `&CreationConfig<Validated>`, so an invalid compression level cannot compile its way past validation (v0.6.0, #443 — previously an `assert!`/`unwrap()` panic inside the compression backend, a panic-based DoS) |
 | `atomic = true` and output on a different filesystem than temp dir | `fs::rename` may fail; caller receives `ArchiveError::Io` |
 | `skip_duplicates = false` and duplicate entry | `ArchiveError::InvalidArchive` (duplicate entry) |
 | Atomic extraction fails mid-archive | Temp dir deleted; `ArchiveError` returned; no files in output dir |
@@ -220,4 +262,5 @@ THEN no files are present in the output directory; the temp dir is cleaned up
 - [[MOC-specs]] — all specifications
 - [[001-security-pipeline/spec]] — consumes `SecurityConfig` and `AllowedFeatures`
 - [[002-format-handlers/spec]] — consumes `CreationConfig` and `ExtractionOptions`
+- [[014-config-typestate-validation/spec]] — `Unvalidated`/`Validated` typestate design in detail
 - [[001-exarch-system/spec]] — original monolithic spec (archived)

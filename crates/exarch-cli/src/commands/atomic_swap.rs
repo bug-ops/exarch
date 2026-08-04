@@ -11,11 +11,27 @@
 //! `parent` once and performing every subsequent operation `*at`-relative
 //! to that file descriptor: once opened, the descriptor identifies an
 //! inode, not a path, so no later rename of an intermediate component can
-//! retarget it.
+//! retarget it. [`PinnedDir::entry_status`]'s [`DestEntryKind`]
+//! classification closes the complementary *final*-component vector
+//! (GHSA-x8wr-7ww2-c94x) on every platform: the destination entry itself
+//! being a symlink or junction is rejected rather than followed.
 
 use std::ffi::OsStr;
 use std::io;
 use std::path::Path;
+
+/// Classification of a directory entry inspected by
+/// [`PinnedDir::entry_status`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DestEntryKind {
+    /// The entry is a directory — the only kind `--atomic --force` may swap.
+    Directory,
+    /// The entry is a symlink (or, on Windows, a junction or other reparse
+    /// point) — always rejected, regardless of what it points at.
+    Symlink,
+    /// Neither a directory nor a symlink (a regular file, FIFO, etc.).
+    Other,
+}
 
 /// A directory pinned by an open file descriptor.
 ///
@@ -47,14 +63,20 @@ impl PinnedDir {
             rustix::fs::OFlags::RDONLY
                 | rustix::fs::OFlags::DIRECTORY
                 | rustix::fs::OFlags::CLOEXEC
-                | rustix::fs::OFlags::NOFOLLOW,
+                | rustix::fs::OFlags::NOFOLLOW
+                // `O_DIRECTORY` alone rejects a non-directory, but on some
+                // platforms a FIFO planted at `parent` can still stall the
+                // open itself waiting for a writer before that rejection is
+                // reached; `NONBLOCK` makes the open fail immediately
+                // instead of hanging the process.
+                | rustix::fs::OFlags::NONBLOCK,
             rustix::fs::Mode::empty(),
         )?;
         Ok(Self(std::fs::File::from(fd)))
     }
 
-    /// Returns the `(dev, ino)` identity of the directory entry `name`
-    /// inside the pinned directory.
+    /// Classifies the directory entry `name` inside the pinned directory and
+    /// returns its `(dev, ino)` identity, in the same syscall.
     ///
     /// Uses `statat` rather than `openat` + `fstat` deliberately: `statat`
     /// only needs search permission on the pinned directory (already
@@ -62,11 +84,11 @@ impl PinnedDir {
     /// would additionally require read permission on the destination entry
     /// — a requirement the previous path-based flow never had. `NOFOLLOW`
     /// makes this fail closed if `name` has become a symlink since it was
-    /// last checked, rather than silently resolving through it; the explicit
-    /// `FileType` check right after does the same for `name` having become
-    /// any *other* non-directory (regular file, FIFO, etc.), restoring the
-    /// guarantee the old `openat(O_DIRECTORY)` implementation gave for free
-    /// — `statat` alone happily returns an identity for any entry type.
+    /// last checked, rather than silently resolving through it: unlike the
+    /// identity-only check this replaces, a symlink is reported as
+    /// [`DestEntryKind::Symlink`] rather than an error — the kind is
+    /// returned, never used here to decide anything, so callers decide what
+    /// to do with it.
     // `st_dev`/`st_ino` are platform-native integer types: `i32`/`u64` on
     // macOS, `u64`/`u64` on 64-bit glibc Linux. `try_from` is therefore a
     // genuine conversion on macOS's `st_dev` but a same-type no-op for
@@ -80,16 +102,18 @@ impl PinnedDir {
     // unrepresentable values compare equal to each other, silently
     // defeating the identity check this feeds.
     #[allow(clippy::useless_conversion)]
-    pub(super) fn entry_identity(&self, name: &OsStr) -> io::Result<(u64, u64)> {
+    pub(super) fn entry_status(&self, name: &OsStr) -> io::Result<(DestEntryKind, (u64, u64))> {
         let stat = rustix::fs::statat(&self.0, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)?;
-        if rustix::fs::FileType::from_raw_mode(stat.st_mode) != rustix::fs::FileType::Directory {
-            return Err(rustix::io::Errno::NOTDIR.into());
-        }
+        let kind = match rustix::fs::FileType::from_raw_mode(stat.st_mode) {
+            rustix::fs::FileType::Directory => DestEntryKind::Directory,
+            rustix::fs::FileType::Symlink => DestEntryKind::Symlink,
+            _ => DestEntryKind::Other,
+        };
         let dev =
             u64::try_from(stat.st_dev).map_err(|_| io::Error::other("unrepresentable st_dev"))?;
         let ino =
             u64::try_from(stat.st_ino).map_err(|_| io::Error::other("unrepresentable st_ino"))?;
-        Ok((dev, ino))
+        Ok((kind, (dev, ino)))
     }
 
     /// Renames `from` to `to`, both resolved relative to the pinned
@@ -109,12 +133,13 @@ impl PinnedDir {
 
 /// Non-Unix fallback: plain path-based operations.
 ///
-/// This does not close the TOCTOU window issue #526 addresses — it is a
-/// documented residual, not a claimed guarantee. Symlink creation is a
-/// privileged operation on Windows (unlike Unix), which substantially
-/// narrows who can plant the redirect in the first place; fully closing the
-/// window there would need a distinct, Windows-specific mechanism and is
-/// out of scope for this fix.
+/// This does not close the TOCTOU window issue #526 addresses on an
+/// *intermediate* path component — it is a documented residual, not a
+/// claimed guarantee; fully closing it there would need a distinct,
+/// Windows-specific fd-pinning mechanism and is out of scope for this fix.
+/// The *final* component — the destination itself being a symlink or
+/// junction — is closed on this platform too, by
+/// [`entry_status`](PinnedDir::entry_status)'s reparse-point check below.
 #[cfg(not(unix))]
 pub(super) struct PinnedDir {
     parent: std::path::PathBuf,
@@ -132,14 +157,28 @@ impl PinnedDir {
         })
     }
 
-    /// Always reports a matching identity: verifying without re-walking
-    /// the path is exactly the capability this platform lacks, so the
-    /// check is a no-op here rather than a false guarantee.
+    /// Classifies the directory entry `name` and reports its identity.
+    ///
+    /// Identity is always `(0, 0)`: verifying without re-walking the path is
+    /// exactly the capability this platform lacks, so the check is a no-op
+    /// here rather than a false guarantee. The *kind* classification is
+    /// real, though — [`is_reparse_point`] checks
+    /// `FILE_ATTRIBUTE_REPARSE_POINT` tag-agnostically on Windows, so
+    /// junctions and any other reparse point are reported as
+    /// [`DestEntryKind::Symlink`], not just true symlinks.
     // `&self` is part of the shared signature with the Unix impl, which
     // does need it; this stub simply doesn't.
     #[allow(clippy::unused_self)]
-    pub(super) fn entry_identity(&self, _name: &OsStr) -> io::Result<(u64, u64)> {
-        Ok((0, 0))
+    pub(super) fn entry_status(&self, name: &OsStr) -> io::Result<(DestEntryKind, (u64, u64))> {
+        let metadata = std::fs::symlink_metadata(self.parent.join(name))?;
+        let kind = if is_reparse_point(&metadata) {
+            DestEntryKind::Symlink
+        } else if metadata.is_dir() {
+            DestEntryKind::Directory
+        } else {
+            DestEntryKind::Other
+        };
+        Ok((kind, (0, 0)))
     }
 
     pub(super) fn rename(&self, from: &OsStr, to: &OsStr) -> io::Result<()> {
@@ -151,9 +190,31 @@ impl PinnedDir {
     }
 }
 
+/// Reports whether `metadata` carries `FILE_ATTRIBUTE_REPARSE_POINT`.
+///
+/// Deliberately tag-agnostic: it does not distinguish a true symlink from a
+/// junction or any other reparse tag, so it covers junctions — the
+/// practical Windows redirect primitive, which (unlike a true symlink)
+/// needs no elevation to create — without depending on which specific tag
+/// an attacker used.
+#[cfg(windows)]
+fn is_reparse_point(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt as _;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+/// Non-Windows, non-Unix fallback: this platform has no reparse-point
+/// concept, so a true symlink is the only redirect primitive to check for.
+#[cfg(all(not(unix), not(windows)))]
+fn is_reparse_point(metadata: &std::fs::Metadata) -> bool {
+    metadata.file_type().is_symlink()
+}
+
 #[cfg(all(test, unix))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    use super::DestEntryKind;
     use super::PinnedDir;
     use std::ffi::OsStr;
     use std::os::unix::fs::PermissionsExt;
@@ -190,7 +251,7 @@ mod tests {
     }
 
     #[test]
-    fn entry_identity_mismatch_is_detectable_after_destination_is_swapped() {
+    fn entry_status_identity_mismatch_is_detectable_after_destination_is_swapped() {
         let root = tempfile::tempdir().expect("tempdir");
         let parent = root.path().join("parent");
         std::fs::create_dir(&parent).expect("create parent");
@@ -199,66 +260,117 @@ mod tests {
 
         let pin = PinnedDir::open(&parent).expect("pin parent");
         let name = OsStr::new("dest");
-        let snapshot = pin.entry_identity(name).expect("snapshot identity");
+        let (kind, snapshot) = pin.entry_status(name).expect("snapshot identity");
+        assert_eq!(kind, DestEntryKind::Directory);
 
         let moved_aside = parent.join("dest.old");
         std::fs::rename(&dest, &moved_aside).expect("move dest aside");
         std::fs::create_dir(&dest).expect("create replacement dest");
 
-        let recheck = pin.entry_identity(name).expect("recheck identity");
+        let (kind, recheck) = pin.entry_status(name).expect("recheck identity");
+        assert_eq!(kind, DestEntryKind::Directory);
         assert_ne!(
             snapshot, recheck,
             "identity must change when the destination entry is swapped for a new one"
         );
     }
 
-    /// Regression test for the R1 finding: `statat` alone happily returns an
-    /// identity for any entry type, so `entry_identity` must reject a
-    /// non-directory entry explicitly rather than silently treating it like
-    /// a directory — restoring the guarantee the old `openat(O_DIRECTORY)`
-    /// implementation gave for free.
+    /// Unit-level pin (v3 spec) that `entry_status` classifies a symlink
+    /// entry as `DestEntryKind::Symlink`, distinct from `Directory` for a
+    /// real directory entry — the classification `resolve_atomic_force_replace`
+    /// relies on to reject a symlinked destination.
     #[test]
-    fn entry_identity_rejects_non_directory_entry() {
+    fn entry_status_returns_symlink_kind_for_a_planted_symlink() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let parent = root.path().join("parent");
+        std::fs::create_dir(&parent).expect("create parent");
+        let real_dir = root.path().join("real_dir");
+        std::fs::create_dir(&real_dir).expect("create real_dir");
+        let link = parent.join("link");
+        symlink(&real_dir, &link).expect("plant symlink");
+
+        let pin = PinnedDir::open(&parent).expect("pin parent");
+        let (kind, _) = pin
+            .entry_status(OsStr::new("link"))
+            .expect("a symlink entry must be classified, not rejected as an error");
+        assert_eq!(
+            kind,
+            DestEntryKind::Symlink,
+            "expected a symlink to be classified as Symlink"
+        );
+    }
+
+    /// Unit-level pin (v3 spec) that a missing entry fails with `NotFound`,
+    /// distinguishable from the `Symlink`/`Other` success-path values above
+    /// — callers must be able to tell "nothing here yet" from "something
+    /// here that must be rejected" without inspecting the error message.
+    #[test]
+    fn entry_status_on_missing_entry_is_not_found() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let parent = root.path().join("parent");
+        std::fs::create_dir(&parent).expect("create parent");
+
+        let pin = PinnedDir::open(&parent).expect("pin parent");
+        let err = pin
+            .entry_status(OsStr::new("does_not_exist"))
+            .expect_err("a missing entry must be an error, not a classified value");
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::NotFound,
+            "expected a not-found failure specifically, got: {err}"
+        );
+    }
+
+    /// Regression test for the R1 finding, reshaped for `entry_status`
+    /// (E4): `statat` alone happily returns an identity for any entry type,
+    /// so a non-directory entry must be classified as
+    /// `DestEntryKind::Other` on the success path rather than silently
+    /// treated like a directory — restoring the guarantee the old
+    /// `openat(O_DIRECTORY)` implementation gave for free. Unlike the
+    /// superseded `entry_identity`, this is no longer an error: `Other` is
+    /// a value the caller inspects and rejects itself.
+    #[test]
+    fn entry_status_returns_other_kind_for_non_directory_entry() {
         let root = tempfile::tempdir().expect("tempdir");
         let parent = root.path().join("parent");
         std::fs::create_dir(&parent).expect("create parent");
         std::fs::write(parent.join("not_a_dir"), b"x").expect("create regular file");
 
         let pin = PinnedDir::open(&parent).expect("pin parent");
-        let err = pin
-            .entry_identity(OsStr::new("not_a_dir"))
-            .expect_err("a regular file must be rejected, not silently identified");
+        let (kind, _) = pin
+            .entry_status(OsStr::new("not_a_dir"))
+            .expect("a regular file must be classified, not rejected as an error");
         assert_eq!(
-            err.kind(),
-            std::io::ErrorKind::NotADirectory,
-            "expected a not-a-directory failure specifically, got: {err}"
+            kind,
+            DestEntryKind::Other,
+            "expected a regular file to be classified as Other"
         );
     }
 
-    /// Regression test for the S1 finding: `entry_identity` must not require
+    /// Regression test for the S1 finding: `entry_status` must not require
     /// read permission on the destination entry itself — only search
     /// permission on the pinned parent, which `PinnedDir::open` already
     /// established. Before switching from `openat`+`fstat` to `statat`,
     /// this failed with `EACCES` on a destination with no read bit set.
     #[test]
-    fn entry_identity_does_not_require_read_permission_on_the_entry() {
+    fn entry_status_does_not_require_read_permission_on_the_entry() {
         let root = tempfile::tempdir().expect("tempdir");
         let parent = root.path().join("parent");
         std::fs::create_dir(&parent).expect("create parent");
         let dest = parent.join("dest");
         std::fs::create_dir(&dest).expect("create dest");
-        // Write+execute only, no read bit: `entry_identity` must still work.
+        // Write+execute only, no read bit: `entry_status` must still work.
         std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o311))
             .expect("restrict dest permissions");
 
         let pin = PinnedDir::open(&parent).expect("pin parent");
-        let result = pin.entry_identity(OsStr::new("dest"));
+        let result = pin.entry_status(OsStr::new("dest"));
 
         // Restore permissions before any panic-driven cleanup runs.
         std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))
             .expect("restore dest permissions");
 
-        result.expect("entry_identity must succeed without read permission on the entry");
+        result.expect("entry_status must succeed without read permission on the entry");
     }
 
     /// Pins the accepted residual noted in [`PinnedDir::open`]'s doc

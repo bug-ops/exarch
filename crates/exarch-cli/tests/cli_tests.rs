@@ -2652,17 +2652,20 @@ fn test_extract_atomic_force_rejects_non_directory_destination() {
     );
 }
 
-/// Regression test for #525/#526: when `output_dir` is a symlink to a
-/// directory, `--atomic --force` must replace the *target* directory's
-/// contents while leaving the symlink itself intact and still pointing at
-/// the same target path. This is also the proof that the #526 fd-pinned
-/// swap (which resolves `parent`/`dest_name` from `canonicalize()`'s fully
-/// resolved output) does not regress this final-component-is-a-symlink
-/// behavior: `renameat` on the pinned parent acts on the same real
-/// directory a path-based `rename` would.
+/// Regression test for GHSA-x8wr-7ww2-c94x: when `output_dir` is a symlink,
+/// `--atomic --force` must reject it outright rather than following it — the
+/// destination's own name is now taken lexically and never canonicalized,
+/// so a symlink at the destination itself is classified via
+/// `statat(SYMLINK_NOFOLLOW)` and refused instead of being silently
+/// resolved to whatever it points at. This inverts and replaces
+/// `test_extract_atomic_force_symlink_destination_preserves_symlink`, which
+/// pinned the now-removed behavior (#525/#526): following a symlinked
+/// destination let an attacker who controls the destination's containing
+/// directory redirect — and, via the swap's `remove_dir_all`, destructively
+/// replace — any directory writable by the invoking user.
 #[test]
 #[cfg(unix)]
-fn test_extract_atomic_force_symlink_destination_preserves_symlink() {
+fn test_extract_atomic_force_rejects_symlink_destination() {
     let temp = TempDir::new().expect("failed to create temp dir");
     let real_dest = temp.path().join("real_dest");
     std::fs::create_dir_all(&real_dest).expect("create real destination directory");
@@ -2678,7 +2681,8 @@ fn test_extract_atomic_force_symlink_destination_preserves_symlink() {
         .arg(fixture_path("sample.tar.gz"))
         .arg(&symlink_dest)
         .assert()
-        .success();
+        .failure()
+        .stderr(predicate::str::contains("is a symlink"));
 
     assert!(
         symlink_dest
@@ -2686,20 +2690,16 @@ fn test_extract_atomic_force_symlink_destination_preserves_symlink() {
             .expect("read symlink metadata")
             .file_type()
             .is_symlink(),
-        "the destination symlink itself must survive the swap"
+        "the destination symlink itself must be left untouched"
     );
     assert_eq!(
-        std::fs::read_link(&symlink_dest).expect("read symlink target"),
-        real_dest,
-        "the symlink must still point at the same target path"
+        std::fs::read(real_dest.join("old.txt")).expect("pre-existing file must survive"),
+        b"OLD CONTENT",
+        "the symlink's target directory's pre-existing content must be unchanged when rejected"
     );
     assert!(
-        real_dest.join("sample.txt").exists(),
-        "the symlink's target directory must contain the newly extracted content"
-    );
-    assert!(
-        !real_dest.join("old.txt").exists(),
-        "the symlink's target directory's pre-existing content must be fully replaced"
+        !real_dest.join("sample.txt").exists(),
+        "no content from the rejected extraction attempt must leak into the target directory"
     );
 
     let siblings: Vec<_> = std::fs::read_dir(temp.path())
@@ -2716,6 +2716,509 @@ fn test_extract_atomic_force_symlink_destination_preserves_symlink() {
         ],
         "no leftover temp/backup swap directories must remain next to the destination: {siblings:?}"
     );
+}
+
+/// Regression test (v4 D2): a trailing slash on a symlinked destination
+/// must not defeat the rejection above. `SYMLINK_NOFOLLOW` alone is *not*
+/// sufficient here — a trailing slash makes `statat`/`open` follow the
+/// symlink regardless of the no-follow flag (verified: `"link/"` resolves
+/// to the target's inode, `"link"` does not) — so this test is the one
+/// guard against a future regression back toward deriving `dest_name` from
+/// a raw path fragment instead of `Path::file_name()`, which strips the
+/// trailing separator before the name ever reaches `statat`. This vector
+/// was never reachable against the shipped fd-pinning design (#531); it
+/// guards a design invariant, not a live defect in `main`.
+#[test]
+#[cfg(unix)]
+fn test_extract_atomic_force_rejects_symlink_destination_with_trailing_slash() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let real_dest = temp.path().join("real_dest");
+    std::fs::create_dir_all(&real_dest).expect("create real destination directory");
+    std::fs::write(real_dest.join("old.txt"), b"OLD CONTENT").expect("seed pre-existing file");
+
+    let symlink_dest = temp.path().join("dest_link");
+    std::os::unix::fs::symlink(&real_dest, &symlink_dest).expect("create symlink to destination");
+    let mut symlink_dest_with_slash = symlink_dest.into_os_string();
+    symlink_dest_with_slash.push("/");
+
+    exarch_cmd()
+        .arg("extract")
+        .arg("--atomic")
+        .arg("--force")
+        .arg(fixture_path("sample.tar.gz"))
+        .arg(&symlink_dest_with_slash)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("is a symlink"));
+
+    assert_eq!(
+        std::fs::read(real_dest.join("old.txt")).expect("pre-existing file must survive"),
+        b"OLD CONTENT",
+        "the symlink's target directory's pre-existing content must be unchanged when rejected"
+    );
+}
+
+/// Regression test (S5(i)): a destination that does not yet exist, whose
+/// parent does, must take the `Ok(None)` path and fall through to core's
+/// own atomic extraction rather than being rejected. Zero coverage before
+/// this fix and the highest silent-regression risk in this change, since
+/// nothing here previously exercised `entry_status`'s `NotFound` mapping.
+#[test]
+fn test_extract_atomic_force_fresh_destination_succeeds() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let dest = temp.path().join("dest");
+
+    exarch_cmd()
+        .arg("extract")
+        .arg("--atomic")
+        .arg("--force")
+        .arg(fixture_path("sample.tar.gz"))
+        .arg(&dest)
+        .assert()
+        .success();
+
+    assert!(
+        dest.join("sample.txt").exists(),
+        "a fresh destination must be created and populated"
+    );
+}
+
+/// Regression test (S5(ii)): a *dangling* symlink at the destination (its
+/// target does not exist) must still be rejected as a symlink, not treated
+/// as `NotFound`/`Ok(None)`. `statat(SYMLINK_NOFOLLOW)` reports the
+/// symlink's own kind regardless of whether its target resolves, so this
+/// pins that `entry_status` is checked on the link itself, never on
+/// whatever (if anything) it points to.
+#[test]
+#[cfg(unix)]
+fn test_extract_atomic_force_rejects_dangling_symlink_destination() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let dangling_target = temp.path().join("does_not_exist");
+    let symlink_dest = temp.path().join("dest_link");
+    std::os::unix::fs::symlink(&dangling_target, &symlink_dest)
+        .expect("create dangling symlink destination");
+
+    exarch_cmd()
+        .arg("extract")
+        .arg("--atomic")
+        .arg("--force")
+        .arg(fixture_path("sample.tar.gz"))
+        .arg(&symlink_dest)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("is a symlink"));
+
+    assert!(
+        symlink_dest
+            .symlink_metadata()
+            .expect("read symlink metadata")
+            .file_type()
+            .is_symlink(),
+        "the dangling destination symlink itself must be left untouched"
+    );
+}
+
+/// Regression test (S5(iii)-a): a bare relative destination (no directory
+/// prefix) exercises `output_dir.parent() == Some("")`, which
+/// `resolve_atomic_force_replace` must normalize to `"."` rather than
+/// passing the empty path to `canonicalize()`.
+#[test]
+#[cfg(unix)]
+fn test_extract_atomic_force_relative_bare_destination_succeeds() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let dest = temp.path().join("dest");
+    std::fs::create_dir_all(&dest).expect("create pre-existing destination");
+    std::fs::write(dest.join("old.txt"), b"OLD CONTENT").expect("seed pre-existing file");
+
+    exarch_cmd()
+        .current_dir(temp.path())
+        .arg("extract")
+        .arg("--atomic")
+        .arg("--force")
+        .arg(fixture_path("sample.tar.gz"))
+        .arg("dest")
+        .assert()
+        .success();
+
+    assert!(
+        dest.join("sample.txt").exists(),
+        "destination must contain the newly extracted archive content"
+    );
+    assert!(
+        !dest.join("old.txt").exists(),
+        "pre-existing destination content must be fully replaced on success"
+    );
+}
+
+/// Regression test (S5(iii)-b): a trailing slash on an ordinary (non-symlink)
+/// destination must resolve identically to the same path without one —
+/// `Path::file_name()` strips the trailing separator on the direct branch
+/// too, not only in the `canonicalize()` fallback. Distinct from
+/// `test_extract_atomic_force_rejects_symlink_destination_with_trailing_slash`,
+/// which pins the rejection case; this pins the success case.
+#[test]
+#[cfg(unix)]
+fn test_extract_atomic_force_trailing_slash_destination_succeeds() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let dest = temp.path().join("dest");
+    std::fs::create_dir_all(&dest).expect("create pre-existing destination");
+    std::fs::write(dest.join("old.txt"), b"OLD CONTENT").expect("seed pre-existing file");
+
+    let mut dest_with_slash = dest.clone().into_os_string();
+    dest_with_slash.push("/");
+
+    exarch_cmd()
+        .arg("extract")
+        .arg("--atomic")
+        .arg("--force")
+        .arg(fixture_path("sample.tar.gz"))
+        .arg(&dest_with_slash)
+        .assert()
+        .success();
+
+    assert!(
+        dest.join("sample.txt").exists(),
+        "destination must contain the newly extracted archive content"
+    );
+    assert!(
+        !dest.join("old.txt").exists(),
+        "pre-existing destination content must be fully replaced on success"
+    );
+}
+
+/// Regression test (N1): a destination of `.` must still work — before this
+/// fix, `output_dir.file_name()` is `None` for `.`, so this fell through to
+/// a hard-fail on `canonicalize()`/`file_name()` chaining. Now `.` and
+/// paths ending in it are resolved via the `canonicalize()` fallback, whose
+/// resulting name is already slash- and dot-free.
+#[test]
+#[cfg(unix)]
+fn test_extract_atomic_force_dot_destination_succeeds() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let dest = temp.path().join("dest");
+    std::fs::create_dir_all(&dest).expect("create pre-existing destination");
+    std::fs::write(dest.join("old.txt"), b"OLD CONTENT").expect("seed pre-existing file");
+
+    exarch_cmd()
+        .current_dir(&dest)
+        .arg("extract")
+        .arg("--atomic")
+        .arg("--force")
+        .arg(fixture_path("sample.tar.gz"))
+        .arg(".")
+        .assert()
+        .success();
+
+    assert!(
+        dest.join("sample.txt").exists(),
+        "destination must contain the newly extracted archive content"
+    );
+    assert!(
+        !dest.join("old.txt").exists(),
+        "pre-existing destination content must be fully replaced on success"
+    );
+}
+
+/// Sibling of the `.` case above: a trailing-slash-terminated `./` must
+/// resolve identically (`Path::file_name()` is `None` for both).
+#[test]
+#[cfg(unix)]
+fn test_extract_atomic_force_dot_slash_destination_succeeds() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let dest = temp.path().join("dest");
+    std::fs::create_dir_all(&dest).expect("create pre-existing destination");
+    std::fs::write(dest.join("old.txt"), b"OLD CONTENT").expect("seed pre-existing file");
+
+    exarch_cmd()
+        .current_dir(&dest)
+        .arg("extract")
+        .arg("--atomic")
+        .arg("--force")
+        .arg(fixture_path("sample.tar.gz"))
+        .arg("./")
+        .assert()
+        .success();
+
+    assert!(
+        dest.join("sample.txt").exists(),
+        "destination must contain the newly extracted archive content"
+    );
+    assert!(
+        !dest.join("old.txt").exists(),
+        "pre-existing destination content must be fully replaced on success"
+    );
+}
+
+/// Sibling of the `.` case above using `..`: resolved via the same
+/// `canonicalize()` fallback (`Path::file_name()` is also `None` for `..`).
+#[test]
+#[cfg(unix)]
+fn test_extract_atomic_force_dotdot_destination_succeeds() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let dest = temp.path().join("dest");
+    let cwd = dest.join("subdir");
+    std::fs::create_dir_all(&cwd).expect("create pre-existing destination and cwd subdir");
+    std::fs::write(dest.join("old.txt"), b"OLD CONTENT").expect("seed pre-existing file");
+
+    exarch_cmd()
+        .current_dir(&cwd)
+        .arg("extract")
+        .arg("--atomic")
+        .arg("--force")
+        .arg(fixture_path("sample.tar.gz"))
+        .arg("..")
+        .assert()
+        .success();
+
+    assert!(
+        dest.join("sample.txt").exists(),
+        "destination must contain the newly extracted archive content"
+    );
+    assert!(
+        !dest.join("old.txt").exists(),
+        "pre-existing destination content must be fully replaced on success"
+    );
+}
+
+/// Regression test (N2): a destination whose parent doesn't exist yet
+/// either (a fresh, multi-level-nested path) must still succeed — before
+/// this fix, `canonicalize()` on a not-yet-existing nested parent returned
+/// `NotFound`, hard-failing instead of falling through to core's own atomic
+/// extraction, which creates the necessary directories itself.
+#[test]
+fn test_extract_atomic_force_nested_fresh_destination_succeeds() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let dest = temp.path().join("new").join("deep").join("dir");
+
+    exarch_cmd()
+        .arg("extract")
+        .arg("--atomic")
+        .arg("--force")
+        .arg(fixture_path("sample.tar.gz"))
+        .arg(&dest)
+        .assert()
+        .success();
+
+    assert!(
+        dest.join("sample.txt").exists(),
+        "a fresh, multi-level-nested destination must be created and populated"
+    );
+}
+
+/// A symlinked *intermediate* path component must remain fully supported —
+/// only the destination's own final component is rejected when it is a
+/// symlink. `resolve_atomic_force_replace` canonicalizes the destination's
+/// parent (resolving any symlinked prefix) but takes the destination's own
+/// name lexically, so `link_mid/dest` still finds and replaces the real
+/// `real_mid/dest` directory.
+#[test]
+#[cfg(unix)]
+fn test_extract_atomic_force_symlinked_intermediate_component_still_succeeds() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let real_mid = temp.path().join("real_mid");
+    std::fs::create_dir_all(&real_mid).expect("create real intermediate directory");
+    let dest = real_mid.join("dest");
+    std::fs::create_dir_all(&dest).expect("create pre-existing destination");
+    std::fs::write(dest.join("old.txt"), b"OLD CONTENT").expect("seed pre-existing file");
+
+    let link_mid = temp.path().join("link_mid");
+    std::os::unix::fs::symlink(&real_mid, &link_mid).expect("symlink intermediate component");
+
+    exarch_cmd()
+        .arg("extract")
+        .arg("--atomic")
+        .arg("--force")
+        .arg(fixture_path("sample.tar.gz"))
+        .arg(link_mid.join("dest"))
+        .assert()
+        .success();
+
+    assert!(
+        dest.join("sample.txt").exists(),
+        "destination reached through a symlinked intermediate component must be populated"
+    );
+    assert!(
+        !dest.join("old.txt").exists(),
+        "pre-existing destination content must be fully replaced on success"
+    );
+    assert_eq!(
+        std::fs::read_link(&link_mid).expect("read symlink target"),
+        real_mid,
+        "the intermediate symlink itself must be untouched by the swap"
+    );
+}
+
+/// A destination that is the filesystem root has no parent to pin — this
+/// must still be rejected, unchanged from before this fix (today's
+/// `canonical_output.parent()` is already `None` there). Safe to exercise
+/// against the real `/`: `resolve_atomic_force_replace` bails at the
+/// parent-less check before any filesystem write is attempted.
+#[test]
+#[cfg(unix)]
+fn test_extract_atomic_force_rejects_filesystem_root_destination() {
+    exarch_cmd()
+        .arg("extract")
+        .arg("--atomic")
+        .arg("--force")
+        .arg(fixture_path("sample.tar.gz"))
+        .arg("/")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("destination has no parent"));
+}
+
+/// Regression pin for the G1 finding: dropping the `exists()` gate means
+/// `resolve_atomic_force_replace` now pins the destination's parent for
+/// *every* `--atomic --force` invocation, not only when something already
+/// exists there to replace. A `0311` (write+execute, no read) parent used
+/// to work for a fresh destination (`mkdir`/`realpath` succeed without read);
+/// it must now fail, since obtaining a real directory file descriptor
+/// requires read permission on the parent (see `PinnedDir::open`'s doc
+/// comment and `parent_without_read_permission_is_rejected` in
+/// `atomic_swap.rs`, which pins the same residual for a pre-existing
+/// destination).
+#[test]
+#[cfg(unix)]
+fn test_extract_atomic_force_requires_parent_read_permission_even_for_fresh_destination() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let parent = temp.path().join("parent");
+    std::fs::create_dir(&parent).expect("create parent");
+    std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o311))
+        .expect("restrict parent permissions");
+    let dest = parent.join("dest");
+
+    let assert = exarch_cmd()
+        .arg("extract")
+        .arg("--atomic")
+        .arg("--force")
+        .arg(fixture_path("sample.tar.gz"))
+        .arg(&dest)
+        .assert();
+
+    std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755))
+        .expect("restore parent permissions so tempdir cleanup can proceed");
+
+    if assert.get_output().status.success() {
+        eprintln!(
+            "skipping: extraction into a read-restricted parent unexpectedly succeeded \
+             (running as root?)"
+        );
+        return;
+    }
+    assert
+        .failure()
+        .stderr(predicate::str::contains("failed to pin destination parent"));
+}
+
+/// Windows-only regression test (v3/v4): a junction at the destination must
+/// be rejected the same way a Unix symlink is. `entry_status` classifies
+/// `FILE_ATTRIBUTE_REPARSE_POINT` tag-agnostically as
+/// `DestEntryKind::Symlink`, so this covers junctions — the practical
+/// Windows redirect primitive, which (unlike a true symlink) needs no
+/// elevation to create — without depending on which specific reparse tag an
+/// attacker used. `mklink /J` requires no elevation either, so this fixture
+/// does not need an elevated CI runner.
+#[test]
+#[cfg(windows)]
+fn test_extract_atomic_force_rejects_junction_destination() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let real_dest = temp.path().join("real_dest");
+    std::fs::create_dir_all(&real_dest).expect("create real destination directory");
+    std::fs::write(real_dest.join("old.txt"), b"OLD CONTENT").expect("seed pre-existing file");
+
+    let junction_dest = temp.path().join("dest_junction");
+    let status = std::process::Command::new("cmd")
+        .arg("/C")
+        .arg("mklink")
+        .arg("/J")
+        .arg(&junction_dest)
+        .arg(&real_dest)
+        .status()
+        .expect("run mklink");
+    assert!(
+        status.success(),
+        "mklink /J must succeed to create the junction fixture"
+    );
+
+    exarch_cmd()
+        .arg("extract")
+        .arg("--atomic")
+        .arg("--force")
+        .arg(fixture_path("sample.tar.gz"))
+        .arg(&junction_dest)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("is a symlink"));
+
+    assert_eq!(
+        std::fs::read(real_dest.join("old.txt")).expect("pre-existing file must survive"),
+        b"OLD CONTENT",
+        "the junction's target directory's pre-existing content must be unchanged when rejected"
+    );
+}
+
+/// Regression test reproducing the original GHSA-x8wr-7ww2-c94x `PoC`: tightly
+/// toggles the destination between a real directory and a symlink to
+/// `attacker_dir` while `--atomic --force` runs, many times, and asserts
+/// the invariant the fix establishes rather than a probability — every
+/// trial is either a clean failure or a success with `attacker_dir`
+/// completely untouched. Success with archive content landing under
+/// `attacker_dir` (the original vulnerability) must never be observed.
+#[test]
+#[cfg(unix)]
+fn test_extract_atomic_force_survives_destination_symlink_race() {
+    const TRIALS: usize = 30;
+
+    for trial in 0..TRIALS {
+        let temp = TempDir::new().expect("failed to create temp dir");
+
+        let attacker_dir = temp.path().join("attacker_dir");
+        std::fs::create_dir_all(&attacker_dir).expect("create attacker dir");
+        std::fs::write(attacker_dir.join("canary.txt"), b"CANARY").expect("seed canary");
+
+        let dest = temp.path().join("dest");
+        std::fs::create_dir_all(&dest).expect("create initial dest");
+
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let toggler_stop = std::sync::Arc::clone(&stop);
+        let toggler_dest = dest.clone();
+        let toggler_attacker = attacker_dir.clone();
+        let toggler = std::thread::spawn(move || {
+            while !toggler_stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let _ = std::fs::remove_dir(&toggler_dest);
+                let _ = std::os::unix::fs::symlink(&toggler_attacker, &toggler_dest);
+                let _ = std::fs::remove_file(&toggler_dest);
+                let _ = std::fs::create_dir(&toggler_dest);
+            }
+        });
+
+        let output = exarch_cmd()
+            .arg("extract")
+            .arg("--atomic")
+            .arg("--force")
+            .arg(fixture_path("sample.tar.gz"))
+            .arg(&dest)
+            .output()
+            .expect("run exarch");
+
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        toggler.join().expect("toggler thread must not panic");
+
+        let canary = std::fs::read(attacker_dir.join("canary.txt"))
+            .expect("attacker_dir's own canary must always survive");
+        assert_eq!(
+            canary, b"CANARY",
+            "trial {trial}: attacker_dir must never be modified by the swap"
+        );
+        assert!(
+            !attacker_dir.join("sample.txt").exists(),
+            "trial {trial}: archive content must never land under attacker_dir — this is the \
+             exact vulnerability the fix closes (extraction success = {})",
+            output.status.success()
+        );
+    }
 }
 
 // ============================================================================

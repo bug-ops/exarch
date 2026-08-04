@@ -24,10 +24,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   via `tempfile`/`xattr`) as a direct, Unix-only dependency of `exarch-cli`.
 
   **Behavior change on Unix**: `--atomic --force` now requires read permission on the destination's
-  parent directory (needed to obtain a real directory file descriptor; there is no portable Unix
-  equivalent of Linux's permission-free `O_PATH` for this). It does **not** require read permission
-  on the destination directory itself — the identity recheck uses `statat`, which needs only search
-  permission on the already-open parent.
+  parent directory for every invocation, including when the destination does not yet exist (needed to
+  obtain a real directory file descriptor; there is no portable Unix equivalent of Linux's
+  permission-free `O_PATH` for this). It does **not** require read permission on the destination
+  directory itself — the identity recheck uses `statat`, which needs only search permission on the
+  already-open parent.
+
+- **`extract --atomic --force` followed a destination that was itself a symlink (GHSA-x8wr-7ww2-c94x)**:
+  the destination was resolved by path — `exists()`, `is_dir()`, then `canonicalize()` — and the swap's
+  parent and entry name were both derived from the *canonicalized* result, so a symlink at the
+  destination silently retargeted the swap at the directory it pointed to. Because the swap ends in
+  `remove_dir_all` on the displaced backup, this destroyed the redirected directory's original
+  contents: attacker-directed destructive replacement of any directory writable by the invoking user,
+  requiring only write access to the destination's containing directory and no race to win. The
+  destination's parent is now canonicalized and pinned by a file descriptor, while the destination's
+  own name is taken lexically and never canonicalized; its type is checked with `statat(SYMLINK_NOFOLLOW)`,
+  so every check and every rename names the same entry inside the same pinned parent.
+
+  **Breaking change**: `--atomic --force` onto a destination that is itself a symlink (or, on Windows,
+  a junction or other reparse point) is now rejected on all platforms — pass the resolved target path
+  instead (`--atomic --force "$(readlink -f /path/to/link)"`). Symlinked *intermediate* path components
+  remain supported, and a destination that is a symlink to a regular file now reports the symlink error
+  rather than #525's "not a directory". **Scope**: only `--atomic --force` performs this swap and only
+  it applies this restriction; plain `extract`, `--atomic` without `--force`, and the Rust/Python/Node
+  APIs still resolve a symlinked destination root through `DestDir` (see #533).
 
 - **`PartialExtraction`-wrapped errors lost their category-specific HINT text (#527)**:
   `convert_extraction_error` (`crates/exarch-cli/src/error.rs`) special-cased

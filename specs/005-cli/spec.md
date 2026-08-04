@@ -8,12 +8,14 @@ tags:
   - cli
   - rust
 created: 2026-05-20
+updated: 2026-08-04
 status: draft
 related:
   - "[[constitution]]"
   - "[[MOC-specs]]"
   - "[[003-config-api/spec]]"
   - "[[004-progress-tracking/spec]]"
+  - "[[015-atomic-force-destination-swap-hardening/spec]]"
 ---
 
 # Feature: CLI
@@ -153,6 +155,17 @@ THEN stdout contains valid JSON with all report fields; stderr contains no progr
 | FR-073 | WHEN `--json` is used, the JSON `message` field for `PartialExtraction`, `PathTraversal`, `SymlinkEscape`, `HardlinkEscape`, `QuotaExceeded`, and `ZipBomb` errors SHALL NOT repeat inner error text that already appears in the structured fields | must |
 | FR-074 | `verify` SHALL support `--strict` flag: when set, a `VerificationReport` with `Warning` status causes the process to exit with code 2 instead of 0; without the flag, exit 0 on warnings is unchanged | must |
 | FR-075 | WHEN `list -l` or `list --json -l` is run and an entry is a symlink or hardlink, THE CLI SHALL include the target path in the output; text format: `l755  0  link.txt -> target.txt`; JSON format: `symlink_target` and `hardlink_target` fields populated | must |
+| FR-076 | `OutputFormatter`'s trait methods SHALL take `&mut self` and write through an injectable `Write` destination (`HumanFormatter<O: Write = Term, E: Write = Term>`, `JsonFormatter<W: Write = Stdout>`) rather than writing directly to a hardcoded `Term`/`Stdout`, so formatter output can be captured in unit tests without a subprocess (v0.6.0, #452) | must |
+| FR-077 | `extract`'s human and `--json` output SHALL surface `ExtractionReport.warnings` and `files_skipped` on both the success path and the error path (`PartialExtraction`), not silently drop them (v0.6.0, #498, #503) | must |
+| FR-078 | WHEN the `SecurityViolation` HINT is shown, THE CLI SHALL only suggest a policy flag (`--allow-symlinks`, `--allow-hardlinks`, `--allow-solid-archives`, `--banned-component`) for violation reasons those flags actually relax; every other `SecurityViolation` (e.g. the GHSA-5j8q-wxg5-hj4r size-mismatch case, password-protected archives, unsupported compression) SHALL get a HINT stating it cannot be relaxed via any policy flag (v0.6.0, #520) | must |
+| FR-079 | WHEN a `PartialExtraction`-wrapped error is rendered, THE CLI SHALL preserve the wrapped error's category-specific HINT text (e.g. `--allow-symlinks`, or the "cannot be relaxed" wording) rather than replacing it with `PartialExtractionContext`'s generic HINT (v0.6.0, #527) | must |
+| FR-080 | `extract`'s pre-flight destination-conflict error SHALL sort and cap the listed conflicting paths at 10, collapsing the remainder into a single `... and N more` summary line, instead of listing every conflict unbounded (v0.6.0, #500) | must |
+| FR-081 | Human-readable byte sizes >= 1 TB SHALL render with a `TB` suffix, not an inflated `GB` figure; `HumanFormatter::format_size` and `progress::humanize_bytes` SHALL share one implementation (`output::humanize_bytes`) with a TB-inclusive ladder (v0.6.0, #451) | must |
+| FR-082 | `extract`, `list`, and `verify` SHALL apply `--max-total-size`/`--max-file-size` overrides only when provided, otherwise leaving `SecurityConfig::default()`'s own limits in place, via a single shared `commands::apply_size_limits` helper instead of each command re-literalizing the defaults (v0.6.0, #450) | must |
+| FR-083 | WHEN `extract --atomic --force` is used and the destination already exists as a directory, THE CLI SHALL extract into a temp directory beside the destination first and only swap it into place — renaming the existing destination aside to a backup path, renaming the extracted content into place, then removing the backup — after extraction fully succeeds; a failed final rename SHALL restore the backup and report its path if that restore itself fails. A pre-existing destination that is not a directory SHALL be rejected explicitly, not silently replaced (v0.6.0, #519) | must |
+| FR-084 | `extract --atomic --force` SHALL reject a destination that is itself a symlink (or, on Windows, a junction/reparse point) on all platforms, and SHALL perform every rename/remove in its destination swap `*at`-relative to a file descriptor pinned on the destination's parent directory (Unix only), never by re-resolving a logical path mid-extraction. This is scoped to `--atomic --force` only — see [[015-atomic-force-destination-swap-hardening/spec]] for the full GHSA-x8wr-7ww2-c94x fix | must |
+| FR-085 | WHEN `extract --atomic --force`'s best-effort cleanup on failure cannot locate its temp/backup directory at the expected logical path (e.g. because an intermediate path component was redirected mid-extraction), THE CLI SHALL disclose the directory's actual current path (resolved via an open file descriptor, not the possibly-stale logical path) in its error output rather than leaving surviving content undisclosed (v0.6.0, #530) | should |
+| FR-086 | `verify`/`list` SHALL flag a TAR entry whose path is not valid UTF-8 as a `Medium`-severity `SuspiciousPath` `VerificationIssue` (portability risk, not a security issue — `security_status` is unaffected), flipping `status` to `Warning` instead of reporting `Pass` for an entry that may fail to extract on filesystems requiring UTF-8 names (v0.6.0, #528) | should |
 
 ## 4. Non-Functional Requirements
 
@@ -174,7 +187,10 @@ THEN stdout contains valid JSON with all report fields; stderr contains no progr
 | `CreateArgs` | Arguments for `create` subcommand | `output`, `sources`, creation options, `--max-file-size`, `--preserve-permissions` |
 | `ListArgs` | Arguments for `list` subcommand | `archive`, display options |
 | `VerifyArgs` | Arguments for `verify` subcommand | `archive`, inspection options |
-| `OutputFormatter` | Trait for human vs JSON output | Methods: `print_extraction_report`, `print_creation_report`, `print_manifest`, `print_verification_report` |
+| `OutputFormatter` | Trait for human vs JSON output; methods take `&mut self` since v0.6.0 (#452) | Methods: `format_extraction_result`, `format_creation_result`, `format_manifest_short`, `format_manifest_long`, `format_verification_report` |
+| `HumanFormatter<O: Write = Term, E: Write = Term>` | Human-readable formatter; writes non-error output to `O`, errors to `E` (v0.6.0) | `HumanFormatter::new()` (stdout/stderr default), `HumanFormatter::with_writers()` (injects custom writers + `use_colors` for deterministic tests) |
+| `JsonFormatter<W: Write = Stdout>` | JSON formatter (v0.6.0) | `JsonFormatter::stdout()` (replaces the old unit-struct constructor), `JsonFormatter::with_writer()` |
+| `PinnedDir` (`commands::atomic_swap`) | Unix-only file-descriptor handle on the destination's parent directory, used by `--atomic --force` to perform `*at`-relative renames (v0.6.0, #526) | See [[015-atomic-force-destination-swap-hardening/spec]] |
 
 ### CLI Command Syntax
 
@@ -217,6 +233,15 @@ exarch completion <SHELL>    # bash | zsh | fish | powershell | elvish  (output 
 | SIZE suffix parsing (e.g. `--max-total-size 500M`) | K=1024, M=1024², G=1024³, T=1024⁴ |
 | `completion` for unsupported shell | Error; exit code non-zero |
 | `verify` on archive with issues | Issues printed; exit code non-zero when status is Fail |
+| `extract --atomic --force` onto a destination that is itself a symlink | Rejected on all platforms (GHSA-x8wr-7ww2-c94x, v0.6.0) — pass the resolved target path instead |
+| `extract --atomic --force` where an intermediate destination path component is replaced with a symlink mid-extraction | Swap is confined to the pinned parent fd; a `dev`/`ino` identity mismatch immediately before the destructive swap aborts it with a distinct error (v0.6.0, #526) |
+| `extract --atomic --force` fails after a mid-extraction redirect leaves a temp/backup directory behind at an unexpected path | Error output discloses the directory's actual current path, resolved via an open fd (v0.6.0, #530); in the ordinary non-redirected case, cleanup succeeds and nothing is disclosed or left behind |
+| `extract --atomic --force` on Unix without read permission on the destination's parent directory | Fails — obtaining the pinned parent fd requires read permission on the parent (not the destination itself), even when the destination does not yet exist (v0.6.0, #531, behavior change) |
+| `SecurityViolation` for a reason no policy flag controls (e.g. GHSA-5j8q-wxg5-hj4r size mismatch, password-protected archive) | HINT states it cannot be relaxed via any policy flag, instead of suggesting an irrelevant flag (v0.6.0, #520) |
+| `PartialExtraction`-wrapped error | Category-specific HINT from the wrapped error is preserved, not replaced by the generic partial-extraction HINT (v0.6.0, #527) |
+| `extract` pre-flight destination conflict with many pre-existing files | At most 10 conflicting paths listed (sorted), remainder collapsed into `... and N more` (v0.6.0, #500) |
+| Human-readable size >= 1 TB (e.g. `u64::MAX` bytes) | Renders as `"...  TB"`, not an inflated GB figure (v0.6.0, #451) |
+| `verify`/`list` on a TAR archive with a non-UTF8 entry name | `status: Warning` with a `Medium`-severity `SuspiciousPath` issue, not `Pass` (v0.6.0, #528/#529) — portability risk only, `security_status` unaffected |
 
 ## 7. Success Criteria
 
@@ -256,4 +281,5 @@ exarch completion <SHELL>    # bash | zsh | fish | powershell | elvish  (output 
 - [[MOC-specs]] — all specifications
 - [[003-config-api/spec]] — config types translated from CLI flags
 - [[004-progress-tracking/spec]] — indicatif-based `ProgressCallback` used by CLI
+- [[015-atomic-force-destination-swap-hardening/spec]] — `--atomic --force` symlink/TOCTOU hardening in detail
 - [[001-exarch-system/spec]] — original monolithic spec (archived)

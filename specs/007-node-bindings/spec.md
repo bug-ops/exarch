@@ -9,6 +9,7 @@ tags:
   - ffi
   - rust
 created: 2026-05-20
+updated: 2026-08-04
 status: draft
 related:
   - "[[constitution]]"
@@ -125,7 +126,7 @@ THEN extraction respects those settings
 
 | ID | Requirement | Priority |
 |----|------------|----------|
-| FR-080 | THE SYSTEM SHALL expose async Node.js functions returning Promises: `extractArchive`, `extractArchiveWithProgress`, `createArchive`, `listArchive`, `verifyArchive` | must |
+| FR-080 | THE SYSTEM SHALL expose async Node.js functions returning Promises: `extractArchive`, `extractArchiveWithProgress`, `createArchive`, `createArchiveWithProgress`, `createArchiveWithProgressSync`, `listArchive`, `verifyArchive` (`createArchiveWithProgress`/`Sync` added v0.6.0, #455, mirroring the existing `extractArchiveWithProgress` async/sync pattern via the shared `NodeProgressAdapter`) | must |
 | FR-081 | ALL async operations SHALL run on the libuv thread pool, not the main event loop thread | must |
 | FR-082 | WHEN paths contain null bytes or exceed 4096 bytes, THE SYSTEM SHALL throw a synchronous JavaScript Error before spawning a thread | must |
 | FR-083 | Rust `ArchiveError` variants SHALL map to named JavaScript Error types; when `PartialExtraction` wraps an inner error, the error message SHALL begin with the specific inner error code (e.g. `SYMLINK_ESCAPE`, `QUOTA_EXCEEDED`) and SHALL append `filesExtracted` and `bytesWritten` fields for caller inspection | must |
@@ -136,6 +137,10 @@ THEN extraction respects those settings
 | FR-090 | `extractArchiveWithProgress(archivePath, outputDir, config?, progress?)` SHALL accept an optional `ThreadsafeFunction` callback with signature `(path: string, total: number, current: number, bytesWritten: number) => void`; numeric callback arguments are `number` (not `bigint`) | must |
 | FR-086 | napi-rs SHALL generate TypeScript `.d.ts` files for all exported functions and classes | must |
 | FR-087 | ALL path arguments SHALL accept `string` type in JavaScript | must |
+| FR-091 | `SecurityConfig.setAllowSymlinks`/`setAllowHardlinks`/`setAllowAbsolutePaths`/`setAllowWorldWritable`/`setAllowSolidArchives`/`setPreservePermissions`, `CreationConfig.setPreservePermissions`/`setFollowSymlinks`/`setIncludeHidden`, and `ExtractionOptions.withSkipDuplicates`/`withAtomic` SHALL take a mandatory `boolean` argument, not `Option<bool>` resolved via `.unwrap_or(true)`; omitting the argument, or passing explicit `undefined`/`null`, SHALL be a compile-time TypeScript error / runtime napi error rather than silently flipping the flag to the permissive `true` state (v0.6.0, #442, BREAKING) | must |
+| FR-092 | WHEN a `PartialExtraction` error is converted to a JS error, THE SYSTEM SHALL append `filesSkipped=N` and a `warnings=[...]` fragment (Rust-`Debug`-formatted, not guaranteed valid JSON) to the message, in addition to the existing `filesExtracted`/`bytesWritten` (v0.6.0, #508) | must |
+| FR-093 | WHEN a progress callback throws (an `Error`/object, or a bare primitive) during `extractArchiveWithProgress` or `createArchiveWithProgress`, THE SYSTEM SHALL capture it (via `call_async_catch` plus a JS shim that pre-empts napi-rs's primitive-throw escalation) and reject the returned Promise instead of crashing the process with `napi_fatal_exception`; `createArchiveWithProgressSync` cannot use the awaiting dispatch (would deadlock the blocked event loop) and remains a documented, unaffected exception — a throw there surfaces as an ordinary `uncaughtException` (v0.6.0, #465, #473) | must |
+| FR-094 | ALL path-carrying `ArchiveError` variants SHALL be redacted for release-build error messages via the shared `exarch_core::error::redaction` module, matching the Python binding's policy (archive-relative paths never redacted; host-derived paths redacted to filename-only or `ErrorKind` description) (v0.6.0, #453, #463) | must |
 
 ## 4. Non-Functional Requirements
 
@@ -232,6 +237,24 @@ class ExtractionOptions {
 > not `bigint`. `index.d.ts` is committed to the repository so TypeScript consumers have correct
 > types without building from source.
 
+> [!note] Unreleased (v0.6.0): boolean setters now require an explicit argument (#442, BREAKING)
+> `SecurityConfig.setAllowSymlinks`/`setAllowHardlinks`/`setAllowAbsolutePaths`/
+> `setAllowWorldWritable`/`setAllowSolidArchives`/`setPreservePermissions`,
+> `CreationConfig.setPreservePermissions`/`setFollowSymlinks`/`setIncludeHidden`, and
+> `ExtractionOptions.withSkipDuplicates`/`withAtomic` no longer accept `Option<bool>` resolved via
+> `.unwrap_or(true)`. Previously, calling one of these setters with zero arguments silently
+> flipped the flag to the permissive `true` state instead of erroring — violating this project's
+> secure-by-default posture. Callers must now pass an explicit `boolean`; omitting it is a
+> compile-time TypeScript error and a runtime napi error from plain JavaScript, which also catches
+> the more realistic failure of forwarding an optional property that was never actually set (e.g.
+> `cfg.setAllowSymlinks(userOpts.allowSymlinks)` where `userOpts.allowSymlinks` is `undefined`).
+
+> [!note] Unreleased (v0.6.0): `createArchiveWithProgress`/`createArchiveWithProgressSync` (#455, #456)
+> Mirror the existing `extractArchiveWithProgress` async/sync pattern, reusing
+> `exarch_core::create_archive_with_progress` and the existing `NodeProgressAdapter`
+> threadsafe-function bridge — no new core security logic. JS integration tests cover the
+> per-entry callback shape and the `progress=null`/omitted paths.
+
 ### JavaScript Error Mapping
 
 | Rust `ArchiveError` variant | JavaScript Error name |
@@ -245,7 +268,7 @@ class ExtractionOptions {
 | `InvalidConfiguration` | `InvalidConfigurationError` |
 | `InvalidArchive` | `InvalidArchiveError` |
 | `Io` | `IoError` |
-| `PartialExtraction` | The specific inner error code (e.g. `SYMLINK_ESCAPE: ...`) is preserved; `filesExtracted` and `bytesWritten` are appended to the message |
+| `PartialExtraction` | The specific inner error code (e.g. `SYMLINK_ESCAPE: ...`) is preserved; `filesExtracted`, `bytesWritten`, `filesSkipped`, and a `warnings=[...]` fragment are appended to the message (v0.6.0, #508 added `filesSkipped`/`warnings`) |
 
 > [!note] PartialExtraction fix in v0.4.0 and v0.4.1 (#210, #251)
 > In v0.4.0 the error message for `PartialExtraction` was extended to include
@@ -265,9 +288,12 @@ class ExtractionOptions {
 | Path contains null byte | Synchronous `Error` thrown before Promise creation |
 | Path exceeds 4096 bytes | Synchronous `Error` thrown before Promise creation |
 | Rust returns `ArchiveError::PathTraversal` | Promise rejects with `PathTraversalError` |
-| Rust returns `ArchiveError::PartialExtraction` | Promise rejects with the specific inner error code as prefix (e.g. `SYMLINK_ESCAPE: ...`); message appends `filesExtracted` and `bytesWritten` |
+| Rust returns `ArchiveError::PartialExtraction` | Promise rejects with the specific inner error code as prefix (e.g. `SYMLINK_ESCAPE: ...`); message appends `filesExtracted`, `bytesWritten`, `filesSkipped`, and `warnings=[...]` (v0.6.0, #508) |
 | Thread pool exhausted | Promise eventually resolves when thread becomes available; no timeout |
 | `sources` array is empty for `createArchive` | [NEEDS CLARIFICATION: reject immediately or produce empty archive?] |
+| Boolean setter (e.g. `setAllowSymlinks`) called with no argument, or explicit `undefined`/`null` | Runtime napi error / compile-time TypeScript error, not a silent `true` default (v0.6.0, #442, BREAKING) |
+| Progress callback throws an `Error`, object, or bare primitive during `extractArchiveWithProgress`/`createArchiveWithProgress` | Captured; rejects the returned Promise instead of crashing the process (v0.6.0, #465, #473) |
+| Progress callback throws during `createArchiveWithProgressSync` | Surfaces as an ordinary `uncaughtException` after the function has already returned its `CreationReport` — cannot be merged into the result (documented limitation, unaffected by #465/#473 since it never enters the awaiting dispatch path) |
 
 ## 7. Success Criteria
 
@@ -314,5 +340,5 @@ class ExtractionOptions {
 - [[MOC-specs]] — all specifications
 - [[001-security-pipeline/spec]] — security pipeline invoked by Node.js bindings
 - [[003-config-api/spec]] — `SecurityConfig` and `CreationConfig` types
-- [[004-progress-tracking/spec]] — `ProgressCallback` and `NodeProgressAdapter` (progress callbacks supported via `ThreadsafeFunction` since v0.4.1)
+- [[004-progress-tracking/spec]] — `ProgressCallback` and `NodeProgressAdapter` (progress callbacks supported via `ThreadsafeFunction` since v0.4.1; creation-side progress and callback-throw hardening since v0.6.0)
 - [[001-exarch-system/spec]] — original monolithic spec (archived)

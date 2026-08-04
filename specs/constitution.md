@@ -5,7 +5,7 @@ tags:
   - sdd
   - constitution
 created: 2026-05-20
-updated: 2026-07-09
+updated: 2026-08-04
 status: permanent
 ---
 
@@ -23,6 +23,9 @@ status: permanent
 - Archive entries pass through a typed validation pipeline (`SafePath` → `ValidatedEntry`) before any I/O
 - Format abstraction: every archive format must implement `ArchiveFormat` (extract / list / verify) and optionally `FormatCreator`
 - Configuration is immutable after construction; `SecurityConfig` and `CreationConfig` use fluent builder APIs
+- `SecurityConfig` and `CreationConfig` are two-state typestates over `Unvalidated`/`Validated` phantom markers (v0.6.0, #433–#437, #443): fluent `with_*` builders exist only on the `Unvalidated` state; `validate()` consumes `self` and returns `Result<T<Validated>>`. `ArchiveFormat::extract/list/verify` and every downstream security function require `&SecurityConfig<Validated>`, so a config that skipped validation cannot compile its way into extraction. Top-level `extract_archive*`/`list_archive`/`verify_archive`/`create_archive*` still accept a plain `&SecurityConfig`/`CreationConfig` (defaulting to `Unvalidated`) and validate internally — bindings and CLI need no changes
+- Quota charges are proven at compile time, not by convention (v0.6.0, #436, #439, #440, #447): `QuotaTracker::reserve` (renamed from `record_file`) and `EntryValidator::reserve_hardlink` (renamed from `record_hardlink`) are the only producers of `QuotaPermit`, a non-`Clone`/non-`Copy` zero-sized capability token. `ValidatedEntryType::File` embeds one, so a validated file entry with no quota charge is unrepresentable; every format's file-write path consumes it by value, making a double-spend a compile error
+- `exarch-cli`'s `OutputFormatter` trait methods take `&mut self` and write through an injectable `Write` destination (`HumanFormatter<O, E>`, `JsonFormatter<W>`) rather than writing directly to `Term`/`Stdout` (v0.6.0, #452) — this exists to unlock unit tests that capture formatter output into an in-memory buffer instead of requiring a subprocess; `create_formatter`'s signature is unchanged
 
 ## II. Technology Stack
 
@@ -60,9 +63,15 @@ status: permanent
 - `ValidationReport` is re-exported at crate root as `exarch_core::ValidationReport` (v0.4.1)
 - The error type covering all archive operations is `ArchiveError` (renamed from `ExtractionError` in v0.4.1); all public API surfaces use this name
 - Security primitives (`validate_path`, `validate_symlink`, `sanitize_permissions`, `validate_compression_ratio`, `QuotaTracker`, `HardlinkTracker`) are `pub(crate)` and not part of the public API; external tests must use `--features testing`
+- `ValidatedEntry` (`security::validator`) is sealed: fields are private, the constructor is `pub(crate)`, and `safe_path()`/`entry_type()`/`mode()`/`into_parts()` accessors replace direct field access — assemblable only from inside `exarch-core`, in practice only via `EntryValidator::validate_entry()`. `ValidatedEntryType` is `#[non_exhaustive]` (v0.6.0, #433–#436)
 - Absolute-path stripping for entries with `allow_absolute_paths` enabled is performed centrally in `SafePath::validate_with_context`, not in per-format handlers (v0.5.0)
 - Format handlers MUST NOT drive an upstream extraction API that performs its own path-safety checks ahead of `EntryValidator` — this silently disables the deny-by-default policy for that format. The 7z handler was found doing exactly this after a `sevenz-rust2` 0.21.1 dependency bump and was fixed by switching to an API with no built-in check (v0.5.1, #374, #375)
 - Archive entry names MUST be normalized (`\` → `/`) via `formats::common::normalize_entry_name` before being passed to `SafePath::validate`, wherever the underlying format may embed Windows-style separators (currently: 7z). `SafePath::validate` documents this as a caller contract — it does not normalize internally (v0.5.1, #365, #376)
+- Destination files MUST be opened with `O_EXCL`/`O_NOFOLLOW` (Unix) rather than checked via `Path::exists()` before writing — `exists()` follows symlinks and returns `false` for a dangling one, letting a pre-planted symlink at the destination bypass duplicate detection and redirect the write outside the extraction root. This precondition (attacker-writable destination directory) and fix pattern applies uniformly across TAR/ZIP's shared write path, 7z's temp-file-then-rename path, and TAR's hardlink copy path (v0.6.0, #459, #471, #467)
+- A copy loop MUST enforce the archive-declared size as a hard streaming ceiling — checked after every buffered read, not only at EOF — rather than trusting it only for pre-write quota/ratio checks; this closed GHSA-5j8q-wxg5-hj4r, a ZIP entry that declared a small `uncompressed_size` while its real DEFLATE stream inflated far larger (v0.6.0, #517, `formats::copy::copy_with_buffer`)
+- File permissions MUST be applied via `File::set_permissions`/`fchmod` on an already-open descriptor, never via a path-based `set_permissions()` call after `open()` — the latter re-resolves the path and reopens a TOCTOU symlink-swap window (v0.6.0, #472)
+- Path redaction for error messages is single-sourced in `exarch-core::error::redaction` (`sanitize_path_for_error`, `format_entry_path_for_error`, `sanitize_io_error_for_error`), not duplicated per binding. `PathTraversal`, `SymlinkEscape`, `HardlinkEscape`, and `InvalidPermissions` carry an archive-relative path the attacker already controls and are NEVER redacted (full path in both debug and release builds); `SourceNotFound`, `SourceNotAccessible`, `OutputExists`, `UnknownFormat`, and `Io` carry host-derived paths and ARE redacted to filename-only (or `ErrorKind` description, for `Io`) in release builds (v0.6.0, #453, #462, #463, #464)
+- `exarch-cli extract --atomic --force` performs its destination swap `*at`-relative to a file descriptor pinned on the destination's parent directory (`commands::atomic_swap::PinnedDir`, Unix only), never by re-resolving a logical path — closing a TOCTOU window where an intermediate path component replaced with a symlink mid-extraction could redirect the swap. A destination that is itself a symlink is rejected outright (GHSA-x8wr-7ww2-c94x, v0.6.0, #526, #531). This restriction is scoped to `--atomic --force` only: plain `extract`, `--atomic` without `--force`, and the Rust/Python/Node APIs continue to resolve a symlinked destination *root* via `DestDir::new`/`new_or_create` and `canonicalize()`, matching `tar -C`/`unzip -d` (confirmed by audit, v0.6.0, #533) — only intermediate *path components* being symlinks is a rejected case, not the root itself
 
 ## VI. Performance
 

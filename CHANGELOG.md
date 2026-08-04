@@ -320,6 +320,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`exarch-cli`: `extract --atomic --force` did not disclose the location of a temp/backup
+  directory left behind by a parent-directory redirect mid-extraction (#530)**:
+  `run_atomic_force_extraction` creates its temp and backup directories with path-based calls
+  (`tempfile::tempdir_in`), and its best-effort cleanup on failure (`std::fs::remove_dir_all`) is
+  also path-based — if an intermediate component of the destination's parent is replaced with a
+  symlink while extraction is in progress, that cleanup call can silently target a decoy at the
+  redirected location instead of the real directory, leaving genuine content behind with no
+  indication of where. Every failure site in `run_atomic_force_extraction` now captures each
+  directory's `(dev, ino)` identity via `PinnedDir::entry_status` (fd-relative to the already-pinned
+  parent, so unaffected by the redirect) right after creating it, and after the best-effort cleanup
+  attempt, re-checks that identity: if the directory still exists and matches, its *current* path is
+  resolved fresh from a freshly opened fd on the entry itself (`PinnedDir::open_entry` +
+  `commands::atomic_swap::current_path`, using `/proc/self/fd` on Linux and `F_GETPATH` via
+  `rustix::fs::getpath` on macOS) and disclosed in the error message — critical, since the *logical*
+  path built from the (possibly still-redirected) parent does not necessarily lead there anymore,
+  confirmed by live-reproducing a persisting mid-extraction redirect and checking that the disclosed
+  path resolves to the real, surviving content rather than the decoy. If no fd-to-path facility is
+  available (any Unix other than Linux/macOS), falls back to naming the `(dev, ino)` identity with a
+  `find -inum` pointer instead of a path — Unix only, since `entry_status` always reports the
+  identity `(0, 0)` on other platforms, which would make that pointer meaningless there. Capturing the
+  backup directory's own identity (used only so a later failure to remove it can be disclosed) is
+  itself best-effort: by the time it runs, the destination has already been renamed into the backup's
+  place, so a failure there must not abort an otherwise-successful swap over and above what actually
+  failed — it degrades to skipping that one disclosure opportunity instead. In the ordinary
+  (non-redirected) case, cleanup succeeds and
+  the identity recheck correctly finds nothing, so no directory is disclosed and none is left behind
+  — this is deliberate: an earlier version of this fix instead persisted the temp directory
+  unconditionally, which left one behind on *every* failed `--atomic --force`, not just the redirect
+  race; the identity-recheck approach avoids that regression entirely. Non-Unix targets fall back to
+  naming the (possibly stale) logical path unconditionally when content survives, since
+  `PinnedDir::entry_status` cannot distinguish "our" directory from a replacement there (documented
+  residual, same as #526). This does not, and cannot, discover content written directly to a
+  redirect-created decoy directory if the redirect is reverted before this check runs — `exarch-core`'s
+  own per-entry extraction writes are path-based and out of scope for this fix to make fd-relative;
+  that narrower case remains a genuine, undisclosed orphan. Not a security escape (the fd-pinned swap
+  logic from #526/GHSA-x8wr-7ww2-c94x still confines renames/removes correctly) and not new data
+  loss, only a disclosure gap in the error/warning text.
 - **`exarch-core`: `verify`/`list` reported `PASS` for a TAR archive containing a non-UTF8 entry
   name that may fail to extract on filesystems requiring UTF-8 names (#528)**: TAR entry names are
   stored byte-exact (no lossy conversion) in `ArchiveEntry.path`, but

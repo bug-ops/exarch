@@ -27,7 +27,7 @@ serde_json.workspace = true
 tempfile.workspace = true
 
 [target.'cfg(unix)'.dependencies]
-rustix = { workspace = true, features = ["fs"] }
+rustix = { workspace = true, features = ["fs", "alloc"] }
 
 [dev-dependencies]
 assert_cmd.workspace = true

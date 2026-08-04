@@ -95,7 +95,7 @@ Key flags (all optional):
 | Flag | Default | Purpose |
 |---|---|---|
 | `--force` | off | Overwrite existing files at the destination. |
-| `--atomic` | off | Extract to a temp dir, rename into place on success, clean up on failure. With `--force`, the pre-existing destination is removed only after successful extraction (right before rename), minimizing the window with no valid data. With `--force`, a destination that is itself a symlink is now rejected — pass the resolved target path instead. |
+| `--atomic` | off | Extract to a temp dir, rename into place on success, clean up on failure. With `--force`, the pre-existing destination is removed only after successful extraction (right before rename), minimizing the window with no valid data. With `--force`, a destination that is itself a symlink is now rejected — pass the resolved target path instead. Without `--force`, a symlinked destination isn't rejected as such, but the final rename onto it fails (`ENOTDIR` on Unix, `OutputExists` on Windows), since `rename` doesn't follow a symlink at the target — pass the resolved target path here too. Plain (non-atomic) `extract` is unaffected: it resolves a symlinked destination via `canonicalize()` and writes through it, matching `tar -C`/`unzip -d` (see #533). |
 | `--preserve-permissions` | off | Preserve file permissions from the archive (setuid/setgid are still stripped regardless). |
 | `--max-files` | 10000 | Max number of entries to extract. |
 | `--max-total-size` | 500 MB | Max cumulative extracted size. Accepts `K`/`M`/`G`/`T` suffixes, e.g. `2G`. |

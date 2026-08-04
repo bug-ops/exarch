@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Reviewed and confirmed the symlinked-destination-root policy outside `--atomic --force` (#533)**:
+  following GHSA-x8wr-7ww2-c94x's fix restricting `--atomic --force` (below), we audited whether the
+  same rejection should extend elsewhere. It does not: `DestDir::new`/`new_or_create` — used by plain
+  `extract` and by the Rust/Python/Node APIs — continue to accept a symlinked destination root and
+  resolve it via `canonicalize()`, matching `tar -C`/`unzip -d`, with containment unaffected since
+  every extracted path is still validated against the canonical root. (`--atomic` without `--force`
+  also reaches `DestDir` unchanged, but a symlinked destination there still fails end-to-end with an
+  I/O error at the later rename step — a pre-existing, separate limitation, not a rejection this
+  change introduces or a case this policy needed to cover.) Documentation and test change only; no
+  runtime behavior changes.
+
 - **`extract --atomic --force` resolved the destination-swap rename/remove sequence by path on every
   call, leaving a TOCTOU window where replacing an intermediate path component with a symlink
   mid-extraction could redirect the swap outside the intended destination (#526)**:

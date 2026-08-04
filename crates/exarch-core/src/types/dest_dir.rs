@@ -47,6 +47,30 @@ impl DestDir {
     ///
     /// # Security Considerations
     ///
+    /// **Symlinked destination roots are accepted by design.** If `path`
+    /// itself is a symlink (or contains one), it is resolved via
+    /// [`canonicalize`](Path::canonicalize) and extraction proceeds against
+    /// the resolved directory — matching the behavior of `tar -C` and
+    /// `unzip -d`. This is not a gap: the guarantee `DestDir` provides is
+    /// that every extracted path is validated against the *canonical* root,
+    /// not that the resolved directory is lexically identical to what the
+    /// caller passed in. Containment holds either way, because validation
+    /// runs against the canonical path.
+    ///
+    /// Callers that perform destructive operations on the destination entry
+    /// itself — renaming it aside, `remove_dir_all`-ing it, or otherwise
+    /// replacing it — need a stricter guarantee than `DestDir` provides, or
+    /// can provide, since its whole purpose is to resolve into the target
+    /// the symlink points at. Do not substitute an ad hoc `symlink_metadata`
+    /// check on the final component; see `exarch-cli`'s
+    /// `resolve_atomic_force_replace`
+    /// (`crates/exarch-cli/src/commands/extract.rs`) for the reference
+    /// implementation, which closes GHSA-x8wr-7ww2-c94x for `--atomic
+    /// --force` extraction by pinning the destination's parent with an open
+    /// file descriptor, classifying the final component relative to that
+    /// descriptor, and re-verifying its identity immediately before the
+    /// destructive swap.
+    ///
     /// **TOCTOU Warning**: This function has a time-of-check-time-of-use
     /// (TOCTOU) race condition between the `exists()`, `is_dir()`, and
     /// `canonicalize()` calls. An attacker with filesystem access could
@@ -140,6 +164,12 @@ impl DestDir {
     /// does not exist.
     ///
     /// Equivalent to `mkdir -p` followed by [`DestDir::new`].
+    ///
+    /// If `path` is an existing symlink to a directory, `create_dir_all`
+    /// follows it and this function resolves to the symlink's target — the
+    /// same accept-and-resolve policy documented on [`DestDir::new`]. This
+    /// function does not tighten that policy; see [`DestDir::new`]'s
+    /// `# Security Considerations` for what destructive callers need instead.
     ///
     /// # Errors
     ///
@@ -325,6 +355,11 @@ mod tests {
         assert_eq!(dest, cloned);
     }
 
+    /// Pins the deliberate policy decision for issue #533: a symlinked
+    /// destination root is accepted and resolved, not rejected. This is
+    /// intentional behavior, not an oversight — see the `# Security
+    /// Considerations` section on [`DestDir::new`] before "fixing" this
+    /// into a rejection.
     #[test]
     fn test_dest_dir_with_symlink() {
         let temp = TempDir::new().expect("failed to create temp dir");
@@ -350,6 +385,59 @@ mod tests {
                 "should resolve symlink to real path"
             );
         }
+    }
+
+    /// Demonstrates that accepting a symlinked destination root does not
+    /// weaken containment: `SafePath::validate` resolves paths against the
+    /// canonical root either way (see #533).
+    ///
+    /// Both cases exercise the parent-canonicalization check at
+    /// `SafePath::validate` (`safe_path.rs:257-263`), which is what the
+    /// containment claim actually rests on — a lexical `../`-style path is
+    /// rejected earlier, on the literal `Component::ParentDir` check, before
+    /// `dest` is ever read, so it would pass identically for a plain or a
+    /// symlinked root and would not catch a regression in the
+    /// symlinked-root handling.
+    #[test]
+    #[cfg(unix)]
+    fn test_dest_dir_symlink_root_preserves_containment() {
+        use crate::SecurityConfig;
+        use crate::types::SafePath;
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let real_dir = temp.path().join("real");
+        fs::create_dir(&real_dir).expect("failed to create real dir");
+        fs::create_dir(real_dir.join("sub")).expect("failed to create sub dir");
+
+        let outside_dir = temp.path().join("outside");
+        fs::create_dir(&outside_dir).expect("failed to create outside dir");
+        symlink(&outside_dir, real_dir.join("out")).expect("failed to create nested symlink");
+
+        let link_path = temp.path().join("link");
+        symlink(&real_dir, &link_path).expect("failed to create symlink");
+
+        let dest = DestDir::new(link_path).expect("should create from symlink");
+        let config = SecurityConfig::default().validate().expect("valid config");
+
+        // Positive case: a legitimate path under the symlinked root resolves
+        // successfully. With a non-canonical dest, the parent-canonicalize
+        // check would resolve to `<tmp>/real/sub`, fail to start with
+        // `<tmp>/link`, and spuriously reject this.
+        let ok_result = SafePath::validate(&PathBuf::from("sub/file.txt"), &dest, &config);
+        assert!(
+            ok_result.is_ok(),
+            "legitimate path under symlinked root must validate: {ok_result:?}"
+        );
+
+        // Negative case: a non-lexical escape via a nested symlink pointing
+        // outside the (canonical) destination is still rejected.
+        let escape_result = SafePath::validate(&PathBuf::from("out/loot.txt"), &dest, &config);
+        assert_matches!(
+            escape_result,
+            Err(ArchiveError::PathTraversal { .. }),
+            "non-lexical escape via nested symlink must still be rejected: {escape_result:?}"
+        );
     }
 
     #[test]
@@ -400,6 +488,31 @@ mod tests {
         let dest =
             DestDir::new_or_create(temp.path().to_path_buf()).expect("should work on existing dir");
         assert!(dest.as_path().is_absolute());
+    }
+
+    /// `new_or_create` on an existing symlink-to-directory must resolve to
+    /// the symlink's target, not error — `create_dir_all` follows an
+    /// existing symlink-to-dir, so this inherits the same accept-and-resolve
+    /// policy as [`DestDir::new`] (#533).
+    #[test]
+    #[cfg(unix)]
+    fn test_dest_dir_new_or_create_existing_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let real_dir = temp.path().join("real");
+        fs::create_dir(&real_dir).expect("failed to create real dir");
+
+        let link_path = temp.path().join("link");
+        symlink(&real_dir, &link_path).expect("failed to create symlink");
+
+        let dest = DestDir::new_or_create(&link_path)
+            .expect("should resolve existing symlink-to-dir, not error");
+        assert_eq!(
+            dest.as_path(),
+            real_dir.canonicalize().unwrap(),
+            "should resolve symlink to its target"
+        );
     }
 
     #[test]

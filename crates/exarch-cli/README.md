@@ -127,6 +127,10 @@ exarch extract --max-files 50000 --max-total-size 50G large-archive.tar.gz
 
 # Allow symlinks for trusted archives
 exarch extract --allow-symlinks trusted-source.tar
+
+# Atomically replace an existing directory: old content is only removed
+# after the new content has been fully extracted and swapped into place
+exarch extract --atomic --force archive.tar.gz /var/www/current
 ```
 
 ### Security Options
@@ -143,11 +147,17 @@ exarch extract --allow-symlinks trusted-source.tar
 | `--allow-absolute-paths` | false | Allow entries with absolute paths (stripped to relative on extraction) |
 | `--allow-symlinks` | false | Allow symlinks (within extraction directory) |
 | `--allow-hardlinks` | false | Allow hardlinks (within extraction directory) |
+| `--allow-solid-archives` | false | Allow solid 7z archives (multiple files compressed as one block) |
+| `--allow-world-writable` | false | Allow world-writable files in extracted archives |
 | `--preserve-permissions` | false | Preserve file permissions from archive |
 | `--force` | false | Overwrite existing files |
+| `--atomic` | false | Extract atomically: write to a temp directory and rename into place on success, cleaning up on failure. Combined with `--force`, the existing destination is renamed aside first, the new content renamed into its place second, and only once that swap succeeds is the old destination removed — a failure at any point leaves either the old or the new content in place under the destination name. |
 
 > [!CAUTION]
 > Only use `--allow-symlinks` and `--allow-hardlinks` with archives from trusted sources. These options can be exploited by malicious archives.
+
+> [!IMPORTANT]
+> `--atomic --force` rejects a destination that is itself a symlink (or, on Windows, a junction/reparse point) — pass the resolved target path instead. On Unix it also requires read permission on the destination's parent directory (used to pin it by file descriptor for the swap); the destination itself does not need to be readable.
 
 ## Create Command
 

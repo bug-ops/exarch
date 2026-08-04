@@ -89,7 +89,7 @@ print(f"Extracted {result.files_extracted} files")
 #### Node.js
 
 ```javascript
-const { extractArchive } = require('exarch');
+const { extractArchive } = require('exarch-rs');
 
 // Async (recommended)
 const result = await extractArchive('archive.tar.gz', '/output/path');
@@ -126,7 +126,7 @@ print(f"Created archive with {result.files_added} files")
 #### Node.js
 
 ```javascript
-const { createArchive } = require('exarch');
+const { createArchive } = require('exarch-rs');
 
 // Async (recommended)
 const result = await createArchive('output.tar.gz', ['src/', 'package.json']);
@@ -143,6 +143,7 @@ exarch provides defense-in-depth protection against common archive vulnerabiliti
 | Symlink attacks | Prevents symlinks escaping extraction directory | Blocked |
 | Hardlink attacks | Validates hardlink targets within extraction directory | Blocked |
 | Zip bombs | Detects high compression ratios | Enabled (100x limit) |
+| TAR metadata bombs | Bounds GNU long-name/long-link and PAX header record reads | Enabled (4 MiB, 16 MiB for `permissive()`) |
 | Permission sanitization | Strips setuid/setgid bits | Enabled |
 | Size limits | Configurable file and total size limits | 50 MB / 10 GB |
 

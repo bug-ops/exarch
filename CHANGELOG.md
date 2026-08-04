@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-08-04
+
 ### Security
 
 - **Reviewed and confirmed the symlinked-destination-root policy outside `--atomic --force` (#533)**:
@@ -104,6 +106,256 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   structural gap (no format-specific patch needed if that upstream guarantee ever changes) and keeps
   all three formats' extraction paths consistent.
 
+- **`exarch-core`: 7z's `skip_duplicates = false` path silently replaced a pre-existing symlink at
+  the destination instead of rejecting it, and quota was reserved before the duplicate-skip
+  decision (#477, #478)**: the #468 fix below (`skip_duplicates.symlink_metadata()`) closed the
+  duplicate-*detection* gap for `skip_duplicates = true`, but as that entry's own text noted,
+  `skip_duplicates = false` was left unresolved and tracked separately here. `process_entry_inner`
+  now `lstat`s the destination via a shared `lstat_dest` helper before doing anything else with it:
+  with `skip_duplicates = false`, a symlink there (dangling or live) now fails with the same `ELOOP`
+  I/O error TAR/ZIP's `O_NOFOLLOW` open produces, instead of `write_file_with_permit`'s
+  temp-file-then-`rename` silently unlinking and replacing it — `rename(2)` itself never followed
+  the symlink even pre-fix, so this was a silent-replacement bug, not a symlink-escape (content
+  never wrote through the link to its target). A regular file or directory at the destination is
+  still overwritten as before; only a symlink is now rejected. Separately, quota (`reserve_file`,
+  a new `EntryValidator` method mirroring the existing `reserve_hardlink`) is now reserved *after*
+  this check and after the duplicate-skip decision, not before: previously every entry's quota was
+  reserved unconditionally via `validate_entry` before the destination was even inspected, so an
+  entry skipped as a duplicate permanently consumed its file-count/byte-size allotment (`QuotaPermit`
+  has no `Drop` impl to release it). Both fixes apply identically to `SevenZArchive::extract`'s Step
+  1 pre-validation pass, which previously used neither check, so a symlink-at-destination or a
+  since-skipped duplicate could pass pre-validation and only fail (or over-consume quota) partway
+  through the later extraction pass. New `EntryValidator::validate_entry_path` splits path
+  validation out of `validate_entry` so callers needing the destination path before deciding on
+  quota (7z's duplicate check, mirroring `reserve_hardlink`'s existing decoupling for hardlinks) no
+  longer have to reserve quota just to get it.
+- **A pre-planted symlink at a predictable/checked destination path bypassed a `Path::exists()`-style
+  duplicate check, and the subsequent non-exclusive write followed it outside the extraction root
+  (#471, #467)**: two more instances of the vulnerability class fixed for TAR/ZIP's normal-file
+  write path in #459 below, found in the two write paths that fix did not cover. In 7z's
+  `write_file_with_permit` (`formats/sevenz.rs`), the temp-file-then-rename write path derived its
+  temp file name from the process PID and a per-process monotonic counter — predictable — and opened
+  it with a plain `File::create`, which follows an existing symlink (dangling or not) instead of
+  refusing it; fixed by opening with `OpenOptions::create_new`, retrying with a fresh counter value
+  on `AlreadyExists` up to `MAX_TEMP_FILE_CREATE_ATTEMPTS` (8) times. In TAR's `create_hardlink`
+  (`formats/tar.rs`), `Path::exists()` returns `false` for a dangling symlink at the hardlink's
+  destination, so a pre-planted one bypassed the duplicate-detection check entirely, and the
+  subsequent `std::fs::copy` followed it; fixed by opening the destination with
+  `OpenOptions::create_new` first — folding the duplicate check into the `open()` call itself — then
+  copying the hardlink target's content into the already-open handle via a new
+  `common::copy_file_content_with_permit`, which replaces the now-removed path-based
+  `common::copy_file_with_permit`. Both fixes share a new `common::TempFileGuard` RAII cleanup type
+  (hoisted out of `formats/sevenz.rs`, previously private to that module) so a fallible step between
+  file creation and the operation's success point does not leave a partial artifact behind on the
+  error path. Both preconditions require an attacker-writable destination directory, not a malicious
+  archive alone. `create_hardlink`'s *read* side had a narrower version of the same class: hardlink
+  targets are validated for containment in a first pass (`HardlinkTracker::validate_hardlink`,
+  resolving on-disk symlinks as of that point in time) but the two-pass design defers actually
+  reading the target to a later, second pass with nothing re-validating it in between — a plain
+  path-based `File::open`/`std::fs::metadata` in that second pass would silently follow whatever
+  ended up at the target path by then, which an attacker with write access to the destination could
+  swap out after the first pass validated it (TOCTOU, not an unconditional read: a symlink present
+  *before* the first pass runs is already rejected there, per #116). The same path-based `stat`
+  also left quota sizing vulnerable to the same swap, independent of the read TOCTOU (bypassing
+  #426's per-hardlink accounting). Both are closed by a new `common::open_no_follow`, which opens
+  the target exactly once with `O_NOFOLLOW` (Unix), so any symlink present by the second pass
+  fails the open instead of being followed; `copy_file_content_with_permit` now takes that
+  already-open handle instead of a path, and the quota reservation is sized from the same handle's
+  `fstat` rather than a separate `stat` call. A symlink at the target is not automatically treated
+  as an attack, since it is a legitimate archive shape for a hardlink's target to be a symlink
+  created earlier in the same extraction (already first-pass-validated): on `open_no_follow`
+  returning `ELOOP`, `create_hardlink` re-runs the first pass's own `resolve_through_symlinks`
+  containment check against the current on-disk state and, if it still resolves inside the
+  destination, opens the resolved path instead of failing outright.
+- **Dangling symlink at the extraction destination bypassed the duplicate-check and allowed
+  writing outside the destination root (#459, pre-existing, TAR and ZIP)**: the duplicate-existence
+  check used `Path::exists()`, which follows symlinks and returns `false` for a dangling one. A
+  symlink already present at the destination path — planted by something other than the archive
+  being extracted, since `SafeSymlink::validate` already prevents an in-archive symlink entry from
+  escaping `dest` — was therefore treated as "no duplicate," and a plain `File::create` followed
+  the link, writing the entry's content outside the extraction root. Fixed by opening the
+  destination file with `O_EXCL` (via `OpenOptions::create_new`, already required for the
+  `skip_duplicates=true` duplicate-detection path) and, on Unix, unconditionally with `O_NOFOLLOW`
+  (`OpenOptionsExt::custom_flags`): both reject an existing symlink, dangling or not, instead of
+  following it, closing the escape on both `skip_duplicates` values (the `skip_duplicates=false`
+  overwrite path previously had no protection at all). Added regression tests planting a dangling
+  symlink at the destination path before extraction for both `skip_duplicates` settings.
+  Precondition is an attacker-writable destination directory, not a malicious archive alone.
+
+- **File permissions were applied via a path-based `set_permissions()` after `open()`, reopening a
+  TOCTOU window (#460)**: the same `formats::common::create_file_with_mode` helper enforced the
+  sanitized (setuid/setgid-stripped) mode with `std::fs::set_permissions(path, ..)`, which
+  re-resolves `path` from the filesystem root rather than operating on the already-open file
+  descriptor, letting a concurrent attacker swap the path for a symlink between `open()` and
+  `set_permissions()`. Switched to `File::set_permissions(&file, ..)`, which applies the mode via
+  `fchmod` on the open descriptor and cannot be redirected by a later filesystem change.
+
+- **`list` accepted NUL bytes, empty targets, and missing targets that `extract`/`verify` already
+  rejected (#430)**: `list_tar_entries` and `list_zip_reader` validated entry paths for path
+  traversal but not embedded NUL bytes, unlike `SafePath::validate` (used by `extract`). For TAR,
+  this meant `exarch list`/`list_archive` silently returned a NUL-containing path as an ordinary
+  entry instead of rejecting the archive. ZIP was affected differently: the `zip` crate's own
+  `enclosed_name()` already rejects a NUL-containing name under the default configuration, so that
+  case was already rejected pre-fix — just via the wrong mechanism (`PathTraversal`, from
+  `enclosed_name()` returning `None`, rather than a NUL-specific error). Only ZIP's
+  `allow_absolute_paths` fallback path — which reads the raw entry name directly, bypassing
+  `enclosed_name()` — was genuinely silent pre-fix, the same way TAR was unconditionally. The same
+  asymmetry existed for symlink/hardlink targets
+  relative to the checks `extract` gained in #424: an empty or NUL-containing target, or (TAR
+  only) a symlink/hardlink entry with no target at all (`link_name()` returns `None` — no ustar
+  linkname field and no PAX `linkpath` override), was silently accepted by `list`. `list_tar_entries`
+  and `list_zip_reader` now reject a NUL byte in the entry path (checked before path-traversal, in
+  both formats, for consistent ordering), and a new `validate_link_target` helper (mirroring
+  `SafeSymlink::validate`/`HardlinkTracker::validate_hardlink`'s wording, though it only checks
+  emptiness and NUL bytes — it does not give `list` full parity with `extract`'s target validation)
+  rejects an empty or NUL-containing `symlink_target`/`hardlink_target`; `list_tar_entries`
+  separately rejects a `None` link target with the same `InvalidArchive` message `extract` uses
+  (`"symlink missing target"` / `"hardlink missing target"`). 7z listing was not changed:
+  `sevenz_rust2::Archive::read` decodes each entry name as UTF-16 and stops at the first zero code
+  unit while parsing the header, so an embedded NUL cannot reach `list_sevenz_archive` in the first
+  place.
+  **`verify_archive`'s report-based behavior is preserved**: `verify_archive` lists the archive as
+  a pre-flight step before building its report, and `verify_entry` already had its own working
+  graceful handling for all of the above (a NUL-byte entry path via `validate_path`, and an empty/
+  NUL/missing link target via `validate_symlink`/`validate_path`, added in #424) — surfacing each as
+  a `VerificationIssue` rather than aborting. An earlier round of this fix let the new list-level
+  checks abort that pre-flight step before `verify_entry` ever ran, silently turning those graceful
+  reports into hard `Err` results (and, for the Python/Node bindings, a report object into a raised
+  exception) — caught and reverted before merging. `listing_config_for_verify` now also relaxes the
+  list-level NUL-byte/empty/missing-target checks (`SecurityConfig::relaxed_for_verify_preflight`,
+  a crate-internal config flag, not part of the public builder API) for `verify_archive`'s pre-flight
+  listing call specifically, so `verify` continues to report rather than abort. Bare `exarch list`/
+  `list_archive` is unaffected by this flag and still hard-aborts on all of the above — that hard
+  behavior is the actual #430 fix.
+- **TAR metadata-entry decompression bomb (#414)**: GNU long-name (`L`), GNU long-link (`K`),
+  and PAX extended header (`x`/`g`) records are buffered fully into memory by the `tar` crate's
+  internals before any entry reaches `exarch-core`'s validator or quota tracker, so a crafted
+  record declaring a multi-gigabyte length backed by a tiny compressed stream caused unbounded
+  allocation with no quota enforcement (measured: a 765 KB `.tar.gz` reached 4.95 GB peak RSS on
+  `extract`, 3.29 GB on `verify`, 2.49 GB on `list`). Added `SecurityConfig::max_tar_metadata_bytes`
+  (default 4 MiB, 16 MiB for `SecurityConfig::permissive()`) enforced by a new
+  `formats::tar_metadata_limit` read-budget mechanism: a reader wrapper meters bytes the `tar`
+  crate reads while searching for the next entry (headers, long-name/long-link/PAX records, GNU
+  sparse extension blocks) and errors once the budget is exceeded, before any oversized
+  allocation completes. Applied uniformly to `extract_archive`, `list_archive`, and
+  `verify_archive` (including `TarArchive`'s `ArchiveFormat` trait methods), since all three
+  previously opened `tar::Archive` independently.
+
+  An initial version of this fix re-parsed TAR headers in a shadow parser to reject an oversized
+  *declared* size before the `tar` crate could buffer it. Three rounds of adversarial review each
+  found a fresh case where that shadow parser's belief about entry framing diverged from the
+  `tar` crate's own (an untracked PAX `size=` override hiding a bomb behind a mis-framed decoy
+  entry; the same bypass again when the overriding PAX header had invalid magic, since `tar` only
+  honors an override when the header is `is_recognized_header`; and again via a PAX global header
+  draining `tar`'s override state without draining the shadow parser's mirrored state) — three
+  independent divergences in three rounds, each closed individually but never provably
+  exhaustive. The mechanism actually shipped replaces the shadow parser entirely: it never parses
+  a header, typeflag, magic byte, or PAX record, so there is exactly one parser (the `tar`
+  crate's own) and nothing left to diverge from it. Every yielded entry is fully drained (bounded,
+  not run to true EOF — an unbounded drain would let a crafted GNU sparse entry's synthesized
+  zero-padding become a separate unbounded CPU sink) before the budget re-arms for the next gap,
+  so the budget never depends on any declared size, override, or magic validity.
+
+  A follow-up review found that the drained-on-drop bound above was itself sourced from the
+  caller's `max_file_size` quota — a value `inspection::verify::listing_config_for_verify` (the
+  `verify_archive` pre-listing pass) legitimately relaxes to `u64::MAX` so metadata-only listing
+  does not false-reject large files. A GNU old-format sparse entry (`typeflag 'S'`) can declare a
+  `realsize` field up to `u64::MAX` (via GNU base-256 encoding) while backed by a single physical
+  block, so the relaxed quota silently defeated the drain bound on `verify` specifically,
+  reintroducing an unbounded, memory-invisible (drained to `io::sink`, so no corresponding heap
+  growth) CPU-exhaustion hang scaling linearly with the attacker-chosen `realsize` (measured: a
+  113-byte `.tar.gz` drove `verify` to 3.98 s at a 400 GiB `realsize`, with throughput implying a
+  `u64::MAX` value would hang for years).
+
+  Two successive fixes that instead sourced the drain bound from a fixed value (first
+  `max_tar_metadata_bytes`, 4 MiB, on the shared `list`/`verify` path; then, after that turned out
+  to false-reject any archive with a single entry over ~8 MiB, an "absolute cap" of 16 MiB applied
+  everywhere) were each found to reopen the same class of bug in the opposite direction: `list`,
+  `verify`, and even `extract` (via the CLI's `list_archive` pre-flight) rejected perfectly
+  ordinary archives — a ~765 KB legitimate file was rejected with a `SecurityViolation` — because
+  `list`/`verify` never read entry content at all, so the drain is the *only* thing consuming a
+  legitimate entry's real bytes to reach the next header, and any *fixed* cap on total drained
+  output eventually clips some legitimate entry's real content, however generous the cap.
+
+  The mechanism that actually shipped bounds the drain by **synthesized** bytes instead of total
+  output: `formats::tar_metadata_limit::BudgetedReader` now tracks a monotonic count of bytes
+  actually read from the underlying reader, and `TarEntryGuard::drop` drains in a loop comparing
+  bytes output so far against bytes actually read during the same drain. A legitimate entry's
+  drain consumes real bytes 1:1 with what it outputs, so this "synthetic" gap stays at (or within
+  a read-chunk's rounding of) zero regardless of entry size, and the entry always drains to
+  completion; GNU sparse zero-padding is the opposite — `tar` yields it from `io::repeat(0)` with
+  no corresponding read — so the gap grows every iteration and trips a small, fixed,
+  non-configurable cap almost immediately regardless of the declared `realsize`. This closes both
+  directions of the bug from one mechanism, without ever inspecting a header field to tell the two
+  cases apart.
+- **Symlink/hardlink targets were not validated for embedded NUL bytes or emptiness (#415)**:
+  the link path was already checked for NUL bytes and emptiness via `SafePath::validate`, but
+  the target (linkname) was not — a NUL byte in the target fell through to the OS as a raw
+  `io::Error` instead of a structured `SecurityViolation`, an empty target was silently accepted
+  (creating a dangling symlink on platforms that allow it), and a NUL-containing hardlink target
+  could be embedded verbatim into a formatted error message further downstream. `SafeSymlink::validate`
+  and `HardlinkTracker::validate_hardlink` now apply the same NUL-byte and emptiness checks to
+  the target as the link path (`types::safe_path::has_null_bytes` made `pub(crate)` for reuse),
+  without ever embedding the raw target bytes into an error message. A short (<=100 byte)
+  linkname written through the `tar` crate's own header field cannot carry an embedded NUL byte
+  or reach an empty value while non-`None`, so the regression tests use a GNU `LongLink` (`K`)
+  record's raw payload to smuggle both past the header-field-level shortcuts, exercising the
+  same path a real crafted archive would take.
+- **TAR extension-filter skip has no cumulative bound on synthesized drain across many small
+  sparse entries (#422)**: the per-entry synthetic-byte drain cap from #414 bounds the cost of any
+  *single* unread GNU sparse entry, but when `SecurityConfig` has an extension allowlist
+  configured, entries that fail the extension check are skipped before `QuotaTracker` ever runs
+  (intentional, per #421's fix for quota double-counting) — so `max_total_size`/`max_file_count`
+  provided no cumulative bound across many such pre-quota skips (measured: a ~20 MB archive of
+  20,000 small extension-filtered GNU sparse entries took ~1.41 s to extract, versus ~150 ms for
+  the same archive without an extension filter, which hits `QuotaExceeded` immediately). Added a
+  second, cumulative counter to `formats::tar_metadata_limit::TarReadBudget`: every
+  `TarEntryGuard::drop`'s own synthesized-byte count is now summed across the whole archive-open
+  operation, and `BudgetedEntries::next_entry` fails fast with a `SecurityViolation` once the sum
+  exceeds a fixed, non-configurable 1 GiB cap (roughly 128 maximally-saturating entries), rather
+  than continuing to drain further entries. The check lives in `next_entry` itself, so it applies
+  uniformly to `extract_archive`, `list_archive`, and `verify_archive` regardless of
+  extension-filter ordering — including `list_archive`/`verify_archive`, which skip *every* entry
+  unconditionally (they never read entry content at all), not only extension-filtered ones.
+
+  An initial version of this fix used a much tighter 64 MiB cap (8x the per-entry cap). Adversarial
+  review found that gave any legitimate archive of `list`/`verify`/extension-filtered-`extract`
+  sparse entries only 8 entries of headroom before false-positiving with a `SecurityViolation`,
+  since `list`/`verify` drain every entry unconditionally. The cap was raised to 1 GiB: worst-case
+  cost stays a fixed, sub-second amount of wasted `io::sink` throughput regardless of entry count,
+  while legitimate multi-entry sparse archives now have generous (~128-entry) headroom. This widens
+  this module's existing documented residual limitation (a legitimate GNU sparse file with real
+  holes larger than the per-entry cap is indistinguishable from an attack when skipped unread) from
+  a single oversized entry to roughly a hundred such entries in aggregate — still an accepted,
+  documented trade-off (P3), not a new bug.
+- Bumped `sevenz-rust2` from 0.21.3 to 0.21.4, fixing an integer overflow when summing
+  attacker-controlled coder stream counts while parsing a 7z block header (upstream #127).
+  Malformed archives previously could panic in debug builds and bypassed the stream-count
+  bound in release builds; they are now rejected with an error (#397). This also pulls in a
+  transitive `lzma-rust2` bump from 0.16.5 to 0.18.0 (required by sevenz-rust2's own `^0.18`
+  dependency), which rearchitects the LZMA2/XZ decoders into a sans-I/O design — no known
+  advisories against either version; audited with no regressions found.
+- **Release profile aborted on panic, silently disabling FFI panic guards (#395)**: the
+  workspace `[profile.release]` set `panic = "abort"`, which made every `catch_unwind` guard in
+  `exarch-python` and `exarch-node` dead code in published wheels and npm packages — a Rust
+  panic inside `extract_archive`/`create_archive`/etc. aborted the whole Python or Node.js
+  process instead of surfacing as a catchable exception/error. Removed `panic = "abort"` from
+  `Cargo.toml` so release builds unwind (this also lets `exarch-cli`'s `Drop` impls run cleanup
+  on panic). Added a compile-time `const _: () = assert!(cfg!(panic = "unwind"), ...)` guard near
+  the top of both binding crates' `lib.rs` so any future reintroduction (workspace profile,
+  `.cargo/config.toml`, or `RUSTFLAGS`) fails the build instead of silently reintroducing the
+  vulnerability. Also closed a related gap in `exarch-python`: the progress-callback branches of
+  `create_archive_with_progress` and `extract_archive_with_progress` had no `catch_unwind` at
+  all (only the no-callback branch was guarded) — both branches are now wrapped, mirroring
+  `exarch-node`'s existing helper shape. Added runtime regression coverage of the
+  `catch_unwind` -> exception/error conversion itself: `exarch-node` gained a Rust-level test
+  that calls the real `catch_panic_as_js_err` production helper with a panicking closure and
+  asserts a catchable `Error` comes back; `exarch-python` gained an end-to-end pytest
+  (`test_panic_safety.py`) that triggers a real panic through the compiled extension module via
+  a `panic-injection`-feature-gated test hook and asserts a catchable `RuntimeError` is raised
+  instead of the process aborting (the feature is only enabled by CI's `test-python` job, never
+  in published wheels).
+
 ### Performance
 
 - **7z extraction was 35-101% slower than `sevenz_rust2::decompress_file` on the same archive,
@@ -134,6 +386,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   escape into a silent, unbounded one; both call sites were reverted to `None` before merge, so
   this specific optimization is not part of this change.
 
+- **Extracting archives with many small files regressed ~15.8% after #436/#437/#439 (#446,
+  partial recovery)**: `formats::common::extract_file_with_permit`'s duplicate-detection now
+  folds the existence check into the file-creation `open()` call (see the `O_EXCL`/`O_NOFOLLOW`
+  entry under Security below) instead of a separate `output_path.exists()` stat followed by a
+  truncating create — one fewer syscall per extracted file. This is primarily the security fix
+  described below; the syscall reduction is a side-benefit, not the reason it was made. Also added
+  `#[inline]` to `EntryValidator::validate_entry`/`check_ratio` and `SecurityConfig`'s
+  `Deref::deref`, on the hot per-entry validation path. Re-verified via a controlled same-session
+  A/B (`criterion --save-baseline`): `many_small_files/10000` improved -8.3% to -8.9%
+  (p <= 0.01, reproduced twice); `/100` and `/1000` showed no significant change. This is a
+  **partial**, not full, recovery of the confirmed +15.8% regression — the regression's root cause
+  was not otherwise identified, and full parity against the original CI baseline still needs
+  confirmation on CI hardware rather than local benchmarks (which showed >20% same-commit swings
+  during this investigation).
+
+- **`many_small_files`/`file_count_scaling` benchmarks were timing `TempDir` cleanup as part of
+  extraction cost (#446)**: `benchmark_many_small_files` and `benchmark_file_count_scaling` in
+  `crates/exarch-core/benches/extraction.rs` timed `TempDir::drop()` (recursive deletion of every
+  extracted file) inside criterion's `b.iter()`, alongside the `ZipArchive::extract()` call being
+  measured — `sample` profiling attributed ~87% of the `many_small_files/10000` wall time to this
+  cleanup, not to extraction. Switched both benchmarks to `b.iter_custom`, excluding only
+  `TempDir::new()`/`drop()` from the timed window. dhat heap-allocation profiling showed
+  byte-identical allocations across the regression window, and re-measurement on the corrected
+  harness shows no residual regression vs. the ci-076 baseline: the originally reported +15.8% was
+  inflated by this harness bug on top of the real regression already addressed above by #470's
+  syscall reduction. This dev machine's benchmark noise floor (40-80% run-to-run variance under
+  shared load, observed during this investigation) still exceeds the project's 10% regression
+  threshold, and no CI workflow currently runs `cargo bench` (`bench-build` only compiles
+  benchmarks) — the "confirmation on CI hardware" noted above is not currently achievable and
+  should be read as aspirational pending a dedicated benchmark-running job, not a completed step.
+
 ### Added
 
 - CI: add `bench-build` job to `.github/workflows/ci.yml` that compiles the
@@ -150,6 +433,80 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `createArchiveWithProgress`, and `createArchiveWithProgressSync` covering
   the per-entry callback shape and the `progress=null`/omitted paths, closing
   a coverage gap where these APIs had no test exercising them (#456).
+
+- Regression test coverage mapping node-tar GHSA vulnerability classes onto the TAR extraction
+  pipeline (#399): GHSA-vmf3 (PAX/GNU long-name/long-link record smuggling and stream
+  re-framing), GHSA-gvwx / GHSA-w8wr (NUL byte and malformed-field handling in PAX and GNU
+  long-name records), and GHSA-23hp (declared-vs-actual entry size mismatches). All 13 cases
+  currently pass — protection is inherited from the `tar` crate dependency, so these lock in
+  that behavior against a future dependency bump.
+- Regression test coverage for the `max_tar_metadata_bytes` read-budget mechanism (#414):
+  `tests/security/tar_metadata_bomb.rs` covers `extract`/`list`/`verify`/`extract_archive`
+  against oversized `L`/`K`/`x` records, a false-positive check for legitimate long paths, and
+  the three historical shadow-parser bypass shapes (untracked PAX `size=` override,
+  invalid-magic variant, and PAX-global-header state drain) reconstructed to confirm the budget
+  mechanism rejects all three regardless — none of those shapes are individually meaningful to
+  it any more, since it does not parse headers at all. `tests/tar_alloc_bound.rs` (its own
+  top-level test binary, since `dhat`'s counting allocator is process-wide) measures actual peak
+  heap usage — not just the returned error — across the historical shapes and ~100
+  proptest-generated adversarial archives (random typeflags, magic validity, and declared sizes
+  up to 4 GiB), asserting it stays orders of magnitude below the historical multi-GB measurements
+  regardless of what the archive contains.
+  `tests/security/tar_budget_parity.rs` guards against the mechanism's one real assumption (that
+  `tar`'s iterator reads less than the budget between yields once every entry is drained) with a
+  proptest comparing budgeted extraction output against a plain, unwrapped `tar::Archive` read
+  for well-formed archives with long paths and many files, so a future `tar` crate bump that
+  invalidates the assumption fails loudly here rather than silently rejecting legitimate archives
+  in production.
+- Regression test coverage for the synthesized-bytes drain bound above (#414): direct unit tests
+  in `formats::tar_metadata_limit` confirm a legitimate entry (comfortably larger than the
+  synthetic-bytes cap) drains to true completion, and that a real GNU old-format sparse header
+  with an extreme `realsize` still stops draining within a small, bounded number of real bytes
+  read. `tests/security/tar_metadata_bomb.rs` reconstructs the same sparse-header shape and
+  asserts `verify_archive`, `list_archive`, and `extract_archive` all reject it within a bounded
+  wall-clock time regardless of the claimed size, not just bounded heap usage. A companion test
+  reproduces the exact false-positive size table found during this fix's own review (legitimate
+  archives with a single 3/6/9/12/30/45 MiB entry) against `list_archive`, `verify_archive`, and
+  `extract_archive`, and a further test confirms `extract` still fully skips a legitimately large
+  (45 MiB) disallowed-extension entry and continues extracting the rest, checked through both
+  `TarArchive::extract` directly and the public `extract_archive` API. `tests/tar_alloc_bound.rs`
+  was extended to measure `list_archive` and `verify_archive` in addition to `extract`, and its
+  random-archive generator now emits real GNU sparse header fields for typeflag `'S'` steps
+  instead of an empty (and therefore non-sparse-triggering) header, so the fuzz corpus actually
+  exercises the zero-padding code path this mechanism bounds.
+
+  A known, accepted residual limitation of the synthesized-bytes design: a *legitimate* GNU
+  sparse file with a real hole larger than the synthetic-bytes cap is indistinguishable, by pure
+  byte accounting, from the attack shape when skipped unread on `list_archive`/`verify_archive` —
+  both produce output with no corresponding read. This affects those two functions directly and,
+  transitively, the `exarch` CLI's `extract` command (which runs its own `list_archive`
+  pre-flight for progress-bar/conflict detection ahead of the actual extraction); it does *not*
+  affect the `extract_archive`/`TarArchive::extract` library functions, which read the entry
+  themselves and never reach the guard's drain unread. Accepted as a documented trade-off (P3
+  follow-up filed separately) rather than fixed here, since it requires a real hole combined with
+  several MiB of real data to reproduce and this PR has already been through four rounds of
+  adversarial review. Pinned by a dedicated regression test in each of `tests/security/tar_metadata_bomb.rs`
+  (`list_archive`/`verify_archive`/library `extract`) and `exarch-cli/tests/cli_tests.rs` (the CLI
+  command specifically), so a future change to the cap cannot silently move this threshold
+  without a test noticing.
+- Regression test coverage for GHSA-qh76-45cr-8xrc / CVE-2026-61725 (7z Zip-Slip via
+  `sevenz_rust2::decompress()`), confirming `SevenZArchive::extract` rejects both
+  relative-traversal and absolute-path 7z entries via `EntryValidator` before any file is
+  written, since exarch-core never calls the vulnerable upstream convenience API. A further
+  test exercises the extraction-time re-validation layer directly, proving it independently
+  rejects traversal as well (#398).
+- Regression test for the #397 coder-stream-count overflow fix (upstream sevenz-rust2 issue
+  #127), using the fixture ported from upstream's own regression test, confirming the
+  malformed archive is now rejected gracefully instead of risking a panic (#397).
+- **TAR hardlink extraction bypassed quota tracking entirely (#426)**: `EntryValidator::validate_entry`
+  only ran `QuotaTracker::record_file` for `EntryType::File`, so hardlink entries (opt-in via
+  `config.allowed.hardlinks`) never counted against `max_file_size`, `max_file_count`, or
+  `max_total_size`, even though `TarArchive::create_hardlink` copies the target's full on-disk
+  bytes via `std::fs::copy` for every hardlink entry. A crafted archive with one file within
+  quota followed by many hardlink entries pointing at it extracted unlimited copies with zero
+  enforcement. `EntryValidator` gained `record_hardlink`, and the TAR second pass now calls it
+  with the target's on-disk size (read via `std::fs::metadata`) before copying, routing hardlink
+  bytes and counts through the same `QuotaTracker` instance used for regular files.
 
 ### Changed
 
@@ -317,6 +674,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`CoreError::Io`) raised by either binding now reports only the `std::io::ErrorKind`
   description (e.g. "permission denied") instead of the full underlying `io::Error` message text;
   the full message is still shown in debug builds. See the `#453` entry below for why.
+
+- **Deduplicated `PartialExtraction` error-wrapping logic across format handlers (#394)**: the
+  "wrap the error in `ArchiveError::PartialExtraction` if the report recorded any processed
+  items, otherwise return it as-is" pattern was copy-pasted five times across `tar.rs`, `zip.rs`,
+  and `sevenz.rs`. Consolidated into `ArchiveError::partial_or()`; behavior-equivalent at all
+  current call sites (each site returns the error immediately afterwards, so evaluating
+  `std::mem::take(report)` unconditionally rather than only inside the `total_items() > 0` branch
+  is unobservable).
+- **Deduplicated FFI boundary path validation between `exarch-python` and `exarch-node` (#406)**:
+  both bindings independently rejected null bytes and paths over 4096 bytes for raw path strings
+  supplied by callers, and the two implementations had drifted (a full-scan fold vs. a
+  short-circuiting `contains` for the null-byte check, and no consistent check order). Both now
+  call the new `exarch_core::validate_raw_path_str()`, which owns `MAX_PATH_LENGTH`, checks length
+  before scanning for a null byte (rejecting oversized input in O(1) before the O(n) scan runs),
+  and returns `ArchiveError::SecurityViolation`. Each binding routes that error through its
+  existing `convert_error()` — the same converter used for every other security rejection — instead
+  of hand-rolling a bespoke exception. This changes the concrete exception raised for null-byte and
+  path-length rejections: Python now raises `SecurityViolationError` (previously a bare
+  `ValueError`) and Node.js error messages now carry the `SECURITY_VIOLATION:` code prefix
+  (previously unprefixed). Both were already documented as possible outcomes of these checks;
+  acceptable pre-1.0 per the project's no-backward-compatibility policy.
+- **`exarch-node`'s declared minimum Node.js version no longer matched what CI actually tests**:
+  `package.json`'s `engines.node` field said `>= 18`, but `ci.yml`'s `test-node` job only ever
+  runs against Node 20 and neither a version matrix nor an `.nvmrc` covers 18/19. Raised
+  `engines.node` to `>= 20` to match, and updated the corresponding requirement notes in
+  `README.md` and `crates/exarch-node/README.md`.
 
 ### Fixed
 
@@ -760,369 +1143,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   compile without a genuine permit obtained from `EntryValidator::validate_entry`. No quota
   arithmetic or validation behavior changed.
 
-### Performance
-
-- **Extracting archives with many small files regressed ~15.8% after #436/#437/#439 (#446,
-  partial recovery)**: `formats::common::extract_file_with_permit`'s duplicate-detection now
-  folds the existence check into the file-creation `open()` call (see the `O_EXCL`/`O_NOFOLLOW`
-  entry under Security below) instead of a separate `output_path.exists()` stat followed by a
-  truncating create — one fewer syscall per extracted file. This is primarily the security fix
-  described below; the syscall reduction is a side-benefit, not the reason it was made. Also added
-  `#[inline]` to `EntryValidator::validate_entry`/`check_ratio` and `SecurityConfig`'s
-  `Deref::deref`, on the hot per-entry validation path. Re-verified via a controlled same-session
-  A/B (`criterion --save-baseline`): `many_small_files/10000` improved -8.3% to -8.9%
-  (p <= 0.01, reproduced twice); `/100` and `/1000` showed no significant change. This is a
-  **partial**, not full, recovery of the confirmed +15.8% regression — the regression's root cause
-  was not otherwise identified, and full parity against the original CI baseline still needs
-  confirmation on CI hardware rather than local benchmarks (which showed >20% same-commit swings
-  during this investigation).
-
-- **`many_small_files`/`file_count_scaling` benchmarks were timing `TempDir` cleanup as part of
-  extraction cost (#446)**: `benchmark_many_small_files` and `benchmark_file_count_scaling` in
-  `crates/exarch-core/benches/extraction.rs` timed `TempDir::drop()` (recursive deletion of every
-  extracted file) inside criterion's `b.iter()`, alongside the `ZipArchive::extract()` call being
-  measured — `sample` profiling attributed ~87% of the `many_small_files/10000` wall time to this
-  cleanup, not to extraction. Switched both benchmarks to `b.iter_custom`, excluding only
-  `TempDir::new()`/`drop()` from the timed window. dhat heap-allocation profiling showed
-  byte-identical allocations across the regression window, and re-measurement on the corrected
-  harness shows no residual regression vs. the ci-076 baseline: the originally reported +15.8% was
-  inflated by this harness bug on top of the real regression already addressed above by #470's
-  syscall reduction. This dev machine's benchmark noise floor (40-80% run-to-run variance under
-  shared load, observed during this investigation) still exceeds the project's 10% regression
-  threshold, and no CI workflow currently runs `cargo bench` (`bench-build` only compiles
-  benchmarks) — the "confirmation on CI hardware" noted above is not currently achievable and
-  should be read as aspirational pending a dedicated benchmark-running job, not a completed step.
-
-### Security
-
-- **`exarch-core`: 7z's `skip_duplicates = false` path silently replaced a pre-existing symlink at
-  the destination instead of rejecting it, and quota was reserved before the duplicate-skip
-  decision (#477, #478)**: the #468 fix below (`skip_duplicates.symlink_metadata()`) closed the
-  duplicate-*detection* gap for `skip_duplicates = true`, but as that entry's own text noted,
-  `skip_duplicates = false` was left unresolved and tracked separately here. `process_entry_inner`
-  now `lstat`s the destination via a shared `lstat_dest` helper before doing anything else with it:
-  with `skip_duplicates = false`, a symlink there (dangling or live) now fails with the same `ELOOP`
-  I/O error TAR/ZIP's `O_NOFOLLOW` open produces, instead of `write_file_with_permit`'s
-  temp-file-then-`rename` silently unlinking and replacing it — `rename(2)` itself never followed
-  the symlink even pre-fix, so this was a silent-replacement bug, not a symlink-escape (content
-  never wrote through the link to its target). A regular file or directory at the destination is
-  still overwritten as before; only a symlink is now rejected. Separately, quota (`reserve_file`,
-  a new `EntryValidator` method mirroring the existing `reserve_hardlink`) is now reserved *after*
-  this check and after the duplicate-skip decision, not before: previously every entry's quota was
-  reserved unconditionally via `validate_entry` before the destination was even inspected, so an
-  entry skipped as a duplicate permanently consumed its file-count/byte-size allotment (`QuotaPermit`
-  has no `Drop` impl to release it). Both fixes apply identically to `SevenZArchive::extract`'s Step
-  1 pre-validation pass, which previously used neither check, so a symlink-at-destination or a
-  since-skipped duplicate could pass pre-validation and only fail (or over-consume quota) partway
-  through the later extraction pass. New `EntryValidator::validate_entry_path` splits path
-  validation out of `validate_entry` so callers needing the destination path before deciding on
-  quota (7z's duplicate check, mirroring `reserve_hardlink`'s existing decoupling for hardlinks) no
-  longer have to reserve quota just to get it.
-- **A pre-planted symlink at a predictable/checked destination path bypassed a `Path::exists()`-style
-  duplicate check, and the subsequent non-exclusive write followed it outside the extraction root
-  (#471, #467)**: two more instances of the vulnerability class fixed for TAR/ZIP's normal-file
-  write path in #459 below, found in the two write paths that fix did not cover. In 7z's
-  `write_file_with_permit` (`formats/sevenz.rs`), the temp-file-then-rename write path derived its
-  temp file name from the process PID and a per-process monotonic counter — predictable — and opened
-  it with a plain `File::create`, which follows an existing symlink (dangling or not) instead of
-  refusing it; fixed by opening with `OpenOptions::create_new`, retrying with a fresh counter value
-  on `AlreadyExists` up to `MAX_TEMP_FILE_CREATE_ATTEMPTS` (8) times. In TAR's `create_hardlink`
-  (`formats/tar.rs`), `Path::exists()` returns `false` for a dangling symlink at the hardlink's
-  destination, so a pre-planted one bypassed the duplicate-detection check entirely, and the
-  subsequent `std::fs::copy` followed it; fixed by opening the destination with
-  `OpenOptions::create_new` first — folding the duplicate check into the `open()` call itself — then
-  copying the hardlink target's content into the already-open handle via a new
-  `common::copy_file_content_with_permit`, which replaces the now-removed path-based
-  `common::copy_file_with_permit`. Both fixes share a new `common::TempFileGuard` RAII cleanup type
-  (hoisted out of `formats/sevenz.rs`, previously private to that module) so a fallible step between
-  file creation and the operation's success point does not leave a partial artifact behind on the
-  error path. Both preconditions require an attacker-writable destination directory, not a malicious
-  archive alone. `create_hardlink`'s *read* side had a narrower version of the same class: hardlink
-  targets are validated for containment in a first pass (`HardlinkTracker::validate_hardlink`,
-  resolving on-disk symlinks as of that point in time) but the two-pass design defers actually
-  reading the target to a later, second pass with nothing re-validating it in between — a plain
-  path-based `File::open`/`std::fs::metadata` in that second pass would silently follow whatever
-  ended up at the target path by then, which an attacker with write access to the destination could
-  swap out after the first pass validated it (TOCTOU, not an unconditional read: a symlink present
-  *before* the first pass runs is already rejected there, per #116). The same path-based `stat`
-  also left quota sizing vulnerable to the same swap, independent of the read TOCTOU (bypassing
-  #426's per-hardlink accounting). Both are closed by a new `common::open_no_follow`, which opens
-  the target exactly once with `O_NOFOLLOW` (Unix), so any symlink present by the second pass
-  fails the open instead of being followed; `copy_file_content_with_permit` now takes that
-  already-open handle instead of a path, and the quota reservation is sized from the same handle's
-  `fstat` rather than a separate `stat` call. A symlink at the target is not automatically treated
-  as an attack, since it is a legitimate archive shape for a hardlink's target to be a symlink
-  created earlier in the same extraction (already first-pass-validated): on `open_no_follow`
-  returning `ELOOP`, `create_hardlink` re-runs the first pass's own `resolve_through_symlinks`
-  containment check against the current on-disk state and, if it still resolves inside the
-  destination, opens the resolved path instead of failing outright.
-- **Dangling symlink at the extraction destination bypassed the duplicate-check and allowed
-  writing outside the destination root (#459, pre-existing, TAR and ZIP)**: the duplicate-existence
-  check used `Path::exists()`, which follows symlinks and returns `false` for a dangling one. A
-  symlink already present at the destination path — planted by something other than the archive
-  being extracted, since `SafeSymlink::validate` already prevents an in-archive symlink entry from
-  escaping `dest` — was therefore treated as "no duplicate," and a plain `File::create` followed
-  the link, writing the entry's content outside the extraction root. Fixed by opening the
-  destination file with `O_EXCL` (via `OpenOptions::create_new`, already required for the
-  `skip_duplicates=true` duplicate-detection path) and, on Unix, unconditionally with `O_NOFOLLOW`
-  (`OpenOptionsExt::custom_flags`): both reject an existing symlink, dangling or not, instead of
-  following it, closing the escape on both `skip_duplicates` values (the `skip_duplicates=false`
-  overwrite path previously had no protection at all). Added regression tests planting a dangling
-  symlink at the destination path before extraction for both `skip_duplicates` settings.
-  Precondition is an attacker-writable destination directory, not a malicious archive alone.
-
-- **File permissions were applied via a path-based `set_permissions()` after `open()`, reopening a
-  TOCTOU window (#460)**: the same `formats::common::create_file_with_mode` helper enforced the
-  sanitized (setuid/setgid-stripped) mode with `std::fs::set_permissions(path, ..)`, which
-  re-resolves `path` from the filesystem root rather than operating on the already-open file
-  descriptor, letting a concurrent attacker swap the path for a symlink between `open()` and
-  `set_permissions()`. Switched to `File::set_permissions(&file, ..)`, which applies the mode via
-  `fchmod` on the open descriptor and cannot be redirected by a later filesystem change.
-
-- **`list` accepted NUL bytes, empty targets, and missing targets that `extract`/`verify` already
-  rejected (#430)**: `list_tar_entries` and `list_zip_reader` validated entry paths for path
-  traversal but not embedded NUL bytes, unlike `SafePath::validate` (used by `extract`). For TAR,
-  this meant `exarch list`/`list_archive` silently returned a NUL-containing path as an ordinary
-  entry instead of rejecting the archive. ZIP was affected differently: the `zip` crate's own
-  `enclosed_name()` already rejects a NUL-containing name under the default configuration, so that
-  case was already rejected pre-fix — just via the wrong mechanism (`PathTraversal`, from
-  `enclosed_name()` returning `None`, rather than a NUL-specific error). Only ZIP's
-  `allow_absolute_paths` fallback path — which reads the raw entry name directly, bypassing
-  `enclosed_name()` — was genuinely silent pre-fix, the same way TAR was unconditionally. The same
-  asymmetry existed for symlink/hardlink targets
-  relative to the checks `extract` gained in #424: an empty or NUL-containing target, or (TAR
-  only) a symlink/hardlink entry with no target at all (`link_name()` returns `None` — no ustar
-  linkname field and no PAX `linkpath` override), was silently accepted by `list`. `list_tar_entries`
-  and `list_zip_reader` now reject a NUL byte in the entry path (checked before path-traversal, in
-  both formats, for consistent ordering), and a new `validate_link_target` helper (mirroring
-  `SafeSymlink::validate`/`HardlinkTracker::validate_hardlink`'s wording, though it only checks
-  emptiness and NUL bytes — it does not give `list` full parity with `extract`'s target validation)
-  rejects an empty or NUL-containing `symlink_target`/`hardlink_target`; `list_tar_entries`
-  separately rejects a `None` link target with the same `InvalidArchive` message `extract` uses
-  (`"symlink missing target"` / `"hardlink missing target"`). 7z listing was not changed:
-  `sevenz_rust2::Archive::read` decodes each entry name as UTF-16 and stops at the first zero code
-  unit while parsing the header, so an embedded NUL cannot reach `list_sevenz_archive` in the first
-  place.
-  **`verify_archive`'s report-based behavior is preserved**: `verify_archive` lists the archive as
-  a pre-flight step before building its report, and `verify_entry` already had its own working
-  graceful handling for all of the above (a NUL-byte entry path via `validate_path`, and an empty/
-  NUL/missing link target via `validate_symlink`/`validate_path`, added in #424) — surfacing each as
-  a `VerificationIssue` rather than aborting. An earlier round of this fix let the new list-level
-  checks abort that pre-flight step before `verify_entry` ever ran, silently turning those graceful
-  reports into hard `Err` results (and, for the Python/Node bindings, a report object into a raised
-  exception) — caught and reverted before merging. `listing_config_for_verify` now also relaxes the
-  list-level NUL-byte/empty/missing-target checks (`SecurityConfig::relaxed_for_verify_preflight`,
-  a crate-internal config flag, not part of the public builder API) for `verify_archive`'s pre-flight
-  listing call specifically, so `verify` continues to report rather than abort. Bare `exarch list`/
-  `list_archive` is unaffected by this flag and still hard-aborts on all of the above — that hard
-  behavior is the actual #430 fix.
-- **TAR metadata-entry decompression bomb (#414)**: GNU long-name (`L`), GNU long-link (`K`),
-  and PAX extended header (`x`/`g`) records are buffered fully into memory by the `tar` crate's
-  internals before any entry reaches `exarch-core`'s validator or quota tracker, so a crafted
-  record declaring a multi-gigabyte length backed by a tiny compressed stream caused unbounded
-  allocation with no quota enforcement (measured: a 765 KB `.tar.gz` reached 4.95 GB peak RSS on
-  `extract`, 3.29 GB on `verify`, 2.49 GB on `list`). Added `SecurityConfig::max_tar_metadata_bytes`
-  (default 4 MiB, 16 MiB for `SecurityConfig::permissive()`) enforced by a new
-  `formats::tar_metadata_limit` read-budget mechanism: a reader wrapper meters bytes the `tar`
-  crate reads while searching for the next entry (headers, long-name/long-link/PAX records, GNU
-  sparse extension blocks) and errors once the budget is exceeded, before any oversized
-  allocation completes. Applied uniformly to `extract_archive`, `list_archive`, and
-  `verify_archive` (including `TarArchive`'s `ArchiveFormat` trait methods), since all three
-  previously opened `tar::Archive` independently.
-
-  An initial version of this fix re-parsed TAR headers in a shadow parser to reject an oversized
-  *declared* size before the `tar` crate could buffer it. Three rounds of adversarial review each
-  found a fresh case where that shadow parser's belief about entry framing diverged from the
-  `tar` crate's own (an untracked PAX `size=` override hiding a bomb behind a mis-framed decoy
-  entry; the same bypass again when the overriding PAX header had invalid magic, since `tar` only
-  honors an override when the header is `is_recognized_header`; and again via a PAX global header
-  draining `tar`'s override state without draining the shadow parser's mirrored state) — three
-  independent divergences in three rounds, each closed individually but never provably
-  exhaustive. The mechanism actually shipped replaces the shadow parser entirely: it never parses
-  a header, typeflag, magic byte, or PAX record, so there is exactly one parser (the `tar`
-  crate's own) and nothing left to diverge from it. Every yielded entry is fully drained (bounded,
-  not run to true EOF — an unbounded drain would let a crafted GNU sparse entry's synthesized
-  zero-padding become a separate unbounded CPU sink) before the budget re-arms for the next gap,
-  so the budget never depends on any declared size, override, or magic validity.
-
-  A follow-up review found that the drained-on-drop bound above was itself sourced from the
-  caller's `max_file_size` quota — a value `inspection::verify::listing_config_for_verify` (the
-  `verify_archive` pre-listing pass) legitimately relaxes to `u64::MAX` so metadata-only listing
-  does not false-reject large files. A GNU old-format sparse entry (`typeflag 'S'`) can declare a
-  `realsize` field up to `u64::MAX` (via GNU base-256 encoding) while backed by a single physical
-  block, so the relaxed quota silently defeated the drain bound on `verify` specifically,
-  reintroducing an unbounded, memory-invisible (drained to `io::sink`, so no corresponding heap
-  growth) CPU-exhaustion hang scaling linearly with the attacker-chosen `realsize` (measured: a
-  113-byte `.tar.gz` drove `verify` to 3.98 s at a 400 GiB `realsize`, with throughput implying a
-  `u64::MAX` value would hang for years).
-
-  Two successive fixes that instead sourced the drain bound from a fixed value (first
-  `max_tar_metadata_bytes`, 4 MiB, on the shared `list`/`verify` path; then, after that turned out
-  to false-reject any archive with a single entry over ~8 MiB, an "absolute cap" of 16 MiB applied
-  everywhere) were each found to reopen the same class of bug in the opposite direction: `list`,
-  `verify`, and even `extract` (via the CLI's `list_archive` pre-flight) rejected perfectly
-  ordinary archives — a ~765 KB legitimate file was rejected with a `SecurityViolation` — because
-  `list`/`verify` never read entry content at all, so the drain is the *only* thing consuming a
-  legitimate entry's real bytes to reach the next header, and any *fixed* cap on total drained
-  output eventually clips some legitimate entry's real content, however generous the cap.
-
-  The mechanism that actually shipped bounds the drain by **synthesized** bytes instead of total
-  output: `formats::tar_metadata_limit::BudgetedReader` now tracks a monotonic count of bytes
-  actually read from the underlying reader, and `TarEntryGuard::drop` drains in a loop comparing
-  bytes output so far against bytes actually read during the same drain. A legitimate entry's
-  drain consumes real bytes 1:1 with what it outputs, so this "synthetic" gap stays at (or within
-  a read-chunk's rounding of) zero regardless of entry size, and the entry always drains to
-  completion; GNU sparse zero-padding is the opposite — `tar` yields it from `io::repeat(0)` with
-  no corresponding read — so the gap grows every iteration and trips a small, fixed,
-  non-configurable cap almost immediately regardless of the declared `realsize`. This closes both
-  directions of the bug from one mechanism, without ever inspecting a header field to tell the two
-  cases apart.
-- **Symlink/hardlink targets were not validated for embedded NUL bytes or emptiness (#415)**:
-  the link path was already checked for NUL bytes and emptiness via `SafePath::validate`, but
-  the target (linkname) was not — a NUL byte in the target fell through to the OS as a raw
-  `io::Error` instead of a structured `SecurityViolation`, an empty target was silently accepted
-  (creating a dangling symlink on platforms that allow it), and a NUL-containing hardlink target
-  could be embedded verbatim into a formatted error message further downstream. `SafeSymlink::validate`
-  and `HardlinkTracker::validate_hardlink` now apply the same NUL-byte and emptiness checks to
-  the target as the link path (`types::safe_path::has_null_bytes` made `pub(crate)` for reuse),
-  without ever embedding the raw target bytes into an error message. A short (<=100 byte)
-  linkname written through the `tar` crate's own header field cannot carry an embedded NUL byte
-  or reach an empty value while non-`None`, so the regression tests use a GNU `LongLink` (`K`)
-  record's raw payload to smuggle both past the header-field-level shortcuts, exercising the
-  same path a real crafted archive would take.
-- **TAR extension-filter skip has no cumulative bound on synthesized drain across many small
-  sparse entries (#422)**: the per-entry synthetic-byte drain cap from #414 bounds the cost of any
-  *single* unread GNU sparse entry, but when `SecurityConfig` has an extension allowlist
-  configured, entries that fail the extension check are skipped before `QuotaTracker` ever runs
-  (intentional, per #421's fix for quota double-counting) — so `max_total_size`/`max_file_count`
-  provided no cumulative bound across many such pre-quota skips (measured: a ~20 MB archive of
-  20,000 small extension-filtered GNU sparse entries took ~1.41 s to extract, versus ~150 ms for
-  the same archive without an extension filter, which hits `QuotaExceeded` immediately). Added a
-  second, cumulative counter to `formats::tar_metadata_limit::TarReadBudget`: every
-  `TarEntryGuard::drop`'s own synthesized-byte count is now summed across the whole archive-open
-  operation, and `BudgetedEntries::next_entry` fails fast with a `SecurityViolation` once the sum
-  exceeds a fixed, non-configurable 1 GiB cap (roughly 128 maximally-saturating entries), rather
-  than continuing to drain further entries. The check lives in `next_entry` itself, so it applies
-  uniformly to `extract_archive`, `list_archive`, and `verify_archive` regardless of
-  extension-filter ordering — including `list_archive`/`verify_archive`, which skip *every* entry
-  unconditionally (they never read entry content at all), not only extension-filtered ones.
-
-  An initial version of this fix used a much tighter 64 MiB cap (8x the per-entry cap). Adversarial
-  review found that gave any legitimate archive of `list`/`verify`/extension-filtered-`extract`
-  sparse entries only 8 entries of headroom before false-positiving with a `SecurityViolation`,
-  since `list`/`verify` drain every entry unconditionally. The cap was raised to 1 GiB: worst-case
-  cost stays a fixed, sub-second amount of wasted `io::sink` throughput regardless of entry count,
-  while legitimate multi-entry sparse archives now have generous (~128-entry) headroom. This widens
-  this module's existing documented residual limitation (a legitimate GNU sparse file with real
-  holes larger than the per-entry cap is indistinguishable from an attack when skipped unread) from
-  a single oversized entry to roughly a hundred such entries in aggregate — still an accepted,
-  documented trade-off (P3), not a new bug.
-- Bumped `sevenz-rust2` from 0.21.3 to 0.21.4, fixing an integer overflow when summing
-  attacker-controlled coder stream counts while parsing a 7z block header (upstream #127).
-  Malformed archives previously could panic in debug builds and bypassed the stream-count
-  bound in release builds; they are now rejected with an error (#397). This also pulls in a
-  transitive `lzma-rust2` bump from 0.16.5 to 0.18.0 (required by sevenz-rust2's own `^0.18`
-  dependency), which rearchitects the LZMA2/XZ decoders into a sans-I/O design — no known
-  advisories against either version; audited with no regressions found.
-- **Release profile aborted on panic, silently disabling FFI panic guards (#395)**: the
-  workspace `[profile.release]` set `panic = "abort"`, which made every `catch_unwind` guard in
-  `exarch-python` and `exarch-node` dead code in published wheels and npm packages — a Rust
-  panic inside `extract_archive`/`create_archive`/etc. aborted the whole Python or Node.js
-  process instead of surfacing as a catchable exception/error. Removed `panic = "abort"` from
-  `Cargo.toml` so release builds unwind (this also lets `exarch-cli`'s `Drop` impls run cleanup
-  on panic). Added a compile-time `const _: () = assert!(cfg!(panic = "unwind"), ...)` guard near
-  the top of both binding crates' `lib.rs` so any future reintroduction (workspace profile,
-  `.cargo/config.toml`, or `RUSTFLAGS`) fails the build instead of silently reintroducing the
-  vulnerability. Also closed a related gap in `exarch-python`: the progress-callback branches of
-  `create_archive_with_progress` and `extract_archive_with_progress` had no `catch_unwind` at
-  all (only the no-callback branch was guarded) — both branches are now wrapped, mirroring
-  `exarch-node`'s existing helper shape. Added runtime regression coverage of the
-  `catch_unwind` -> exception/error conversion itself: `exarch-node` gained a Rust-level test
-  that calls the real `catch_panic_as_js_err` production helper with a panicking closure and
-  asserts a catchable `Error` comes back; `exarch-python` gained an end-to-end pytest
-  (`test_panic_safety.py`) that triggers a real panic through the compiled extension module via
-  a `panic-injection`-feature-gated test hook and asserts a catchable `RuntimeError` is raised
-  instead of the process aborting (the feature is only enabled by CI's `test-python` job, never
-  in published wheels).
-
-### Added
-
-- Regression test coverage mapping node-tar GHSA vulnerability classes onto the TAR extraction
-  pipeline (#399): GHSA-vmf3 (PAX/GNU long-name/long-link record smuggling and stream
-  re-framing), GHSA-gvwx / GHSA-w8wr (NUL byte and malformed-field handling in PAX and GNU
-  long-name records), and GHSA-23hp (declared-vs-actual entry size mismatches). All 13 cases
-  currently pass — protection is inherited from the `tar` crate dependency, so these lock in
-  that behavior against a future dependency bump.
-- Regression test coverage for the `max_tar_metadata_bytes` read-budget mechanism (#414):
-  `tests/security/tar_metadata_bomb.rs` covers `extract`/`list`/`verify`/`extract_archive`
-  against oversized `L`/`K`/`x` records, a false-positive check for legitimate long paths, and
-  the three historical shadow-parser bypass shapes (untracked PAX `size=` override,
-  invalid-magic variant, and PAX-global-header state drain) reconstructed to confirm the budget
-  mechanism rejects all three regardless — none of those shapes are individually meaningful to
-  it any more, since it does not parse headers at all. `tests/tar_alloc_bound.rs` (its own
-  top-level test binary, since `dhat`'s counting allocator is process-wide) measures actual peak
-  heap usage — not just the returned error — across the historical shapes and ~100
-  proptest-generated adversarial archives (random typeflags, magic validity, and declared sizes
-  up to 4 GiB), asserting it stays orders of magnitude below the historical multi-GB measurements
-  regardless of what the archive contains.
-  `tests/security/tar_budget_parity.rs` guards against the mechanism's one real assumption (that
-  `tar`'s iterator reads less than the budget between yields once every entry is drained) with a
-  proptest comparing budgeted extraction output against a plain, unwrapped `tar::Archive` read
-  for well-formed archives with long paths and many files, so a future `tar` crate bump that
-  invalidates the assumption fails loudly here rather than silently rejecting legitimate archives
-  in production.
-- Regression test coverage for the synthesized-bytes drain bound above (#414): direct unit tests
-  in `formats::tar_metadata_limit` confirm a legitimate entry (comfortably larger than the
-  synthetic-bytes cap) drains to true completion, and that a real GNU old-format sparse header
-  with an extreme `realsize` still stops draining within a small, bounded number of real bytes
-  read. `tests/security/tar_metadata_bomb.rs` reconstructs the same sparse-header shape and
-  asserts `verify_archive`, `list_archive`, and `extract_archive` all reject it within a bounded
-  wall-clock time regardless of the claimed size, not just bounded heap usage. A companion test
-  reproduces the exact false-positive size table found during this fix's own review (legitimate
-  archives with a single 3/6/9/12/30/45 MiB entry) against `list_archive`, `verify_archive`, and
-  `extract_archive`, and a further test confirms `extract` still fully skips a legitimately large
-  (45 MiB) disallowed-extension entry and continues extracting the rest, checked through both
-  `TarArchive::extract` directly and the public `extract_archive` API. `tests/tar_alloc_bound.rs`
-  was extended to measure `list_archive` and `verify_archive` in addition to `extract`, and its
-  random-archive generator now emits real GNU sparse header fields for typeflag `'S'` steps
-  instead of an empty (and therefore non-sparse-triggering) header, so the fuzz corpus actually
-  exercises the zero-padding code path this mechanism bounds.
-
-  A known, accepted residual limitation of the synthesized-bytes design: a *legitimate* GNU
-  sparse file with a real hole larger than the synthetic-bytes cap is indistinguishable, by pure
-  byte accounting, from the attack shape when skipped unread on `list_archive`/`verify_archive` —
-  both produce output with no corresponding read. This affects those two functions directly and,
-  transitively, the `exarch` CLI's `extract` command (which runs its own `list_archive`
-  pre-flight for progress-bar/conflict detection ahead of the actual extraction); it does *not*
-  affect the `extract_archive`/`TarArchive::extract` library functions, which read the entry
-  themselves and never reach the guard's drain unread. Accepted as a documented trade-off (P3
-  follow-up filed separately) rather than fixed here, since it requires a real hole combined with
-  several MiB of real data to reproduce and this PR has already been through four rounds of
-  adversarial review. Pinned by a dedicated regression test in each of `tests/security/tar_metadata_bomb.rs`
-  (`list_archive`/`verify_archive`/library `extract`) and `exarch-cli/tests/cli_tests.rs` (the CLI
-  command specifically), so a future change to the cap cannot silently move this threshold
-  without a test noticing.
-- Regression test coverage for GHSA-qh76-45cr-8xrc / CVE-2026-61725 (7z Zip-Slip via
-  `sevenz_rust2::decompress()`), confirming `SevenZArchive::extract` rejects both
-  relative-traversal and absolute-path 7z entries via `EntryValidator` before any file is
-  written, since exarch-core never calls the vulnerable upstream convenience API. A further
-  test exercises the extraction-time re-validation layer directly, proving it independently
-  rejects traversal as well (#398).
-- Regression test for the #397 coder-stream-count overflow fix (upstream sevenz-rust2 issue
-  #127), using the fixture ported from upstream's own regression test, confirming the
-  malformed archive is now rejected gracefully instead of risking a panic (#397).
-- **TAR hardlink extraction bypassed quota tracking entirely (#426)**: `EntryValidator::validate_entry`
-  only ran `QuotaTracker::record_file` for `EntryType::File`, so hardlink entries (opt-in via
-  `config.allowed.hardlinks`) never counted against `max_file_size`, `max_file_count`, or
-  `max_total_size`, even though `TarArchive::create_hardlink` copies the target's full on-disk
-  bytes via `std::fs::copy` for every hardlink entry. A crafted archive with one file within
-  quota followed by many hardlink entries pointing at it extracted unlimited copies with zero
-  enforcement. `EntryValidator` gained `record_hardlink`, and the TAR second pass now calls it
-  with the target's on-disk size (read via `std::fs::metadata`) before copying, routing hardlink
-  bytes and counts through the same `QuotaTracker` instance used for regular files.
-
-### Fixed
-
 - **TAR creation silently dropped empty directories (#400)**: `create_tar_internal_with_progress`
   in `crates/exarch-core/src/creation/tar.rs` only incremented a counter for `EntryType::Directory`
   entries without ever writing a directory header to the TAR stream. All four TAR variants
@@ -1208,29 +1228,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exarch(...)` entry point, breaking the Python extension import. The CI `Documentation` job
   (`.github/workflows/ci.yml`) now fails if `cargo doc`'s output contains an "output filename
   collision" warning, closing the gap that let this regression ship silently in the first place.
-
-### Changed
-
-- **Deduplicated `PartialExtraction` error-wrapping logic across format handlers (#394)**: the
-  "wrap the error in `ArchiveError::PartialExtraction` if the report recorded any processed
-  items, otherwise return it as-is" pattern was copy-pasted five times across `tar.rs`, `zip.rs`,
-  and `sevenz.rs`. Consolidated into `ArchiveError::partial_or()`; behavior-equivalent at all
-  current call sites (each site returns the error immediately afterwards, so evaluating
-  `std::mem::take(report)` unconditionally rather than only inside the `total_items() > 0` branch
-  is unobservable).
-- **Deduplicated FFI boundary path validation between `exarch-python` and `exarch-node` (#406)**:
-  both bindings independently rejected null bytes and paths over 4096 bytes for raw path strings
-  supplied by callers, and the two implementations had drifted (a full-scan fold vs. a
-  short-circuiting `contains` for the null-byte check, and no consistent check order). Both now
-  call the new `exarch_core::validate_raw_path_str()`, which owns `MAX_PATH_LENGTH`, checks length
-  before scanning for a null byte (rejecting oversized input in O(1) before the O(n) scan runs),
-  and returns `ArchiveError::SecurityViolation`. Each binding routes that error through its
-  existing `convert_error()` — the same converter used for every other security rejection — instead
-  of hand-rolling a bespoke exception. This changes the concrete exception raised for null-byte and
-  path-length rejections: Python now raises `SecurityViolationError` (previously a bare
-  `ValueError`) and Node.js error messages now carry the `SECURITY_VIOLATION:` code prefix
-  (previously unprefixed). Both were already documented as possible outcomes of these checks;
-  acceptable pre-1.0 per the project's no-backward-compatibility policy.
 
 ## [0.5.2] - 2026-07-27
 
@@ -2015,7 +2012,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 64KB reusable copy buffers
 - LRU cache for symlink target resolution
 
-[Unreleased]: https://github.com/bug-ops/exarch/compare/v0.5.2...HEAD
+[Unreleased]: https://github.com/bug-ops/exarch/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/bug-ops/exarch/compare/v0.5.2...v0.6.0
 [0.5.2]: https://github.com/bug-ops/exarch/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/bug-ops/exarch/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/bug-ops/exarch/compare/v0.4.1...v0.5.0

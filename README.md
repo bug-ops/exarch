@@ -32,7 +32,7 @@ Memory-safe archive extraction and creation library with Python and Node.js bind
 
 ```toml
 [dependencies]
-exarch-core = "0.5"
+exarch-core = "0.6"
 ```
 
 > [!IMPORTANT]
@@ -54,7 +54,7 @@ npm install exarch-rs
 ```
 
 > [!NOTE]
-> Requires Node.js 18 or later.
+> Requires Node.js 20 or later.
 
 ## Quick Start
 
@@ -235,7 +235,7 @@ exarch uses optimized I/O with directory caching and atomic permission setting t
 
 - Rust 1.96.0 or later (Edition 2024)
 - Python 3.10+ (for Python bindings)
-- Node.js 18+ (for Node.js bindings)
+- Node.js 20+ (for Node.js bindings)
 
 ### Build
 

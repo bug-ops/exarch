@@ -37,7 +37,7 @@ status: permanent
 
 - All features must have passing tests before merge
 - Python and Node.js crates are excluded from `cargo nextest` — tested separately via `pytest` / `npm test`
-- Doc-tests must pass: `cargo test --doc --workspace --all-features`
+- Doc-tests must pass: `cargo test --doc --workspace --all-features --exclude exarch-python --exclude exarch-node`
 - Every new `pub` item requires a `///` doc comment; non-trivial APIs require `# Examples` with runnable doc-tests
 - Security-critical paths (path traversal, symlink/hardlink validation, zip bomb detection, permission sanitization) require live integration tests before any PR touching them
 
@@ -81,6 +81,6 @@ status: permanent
 
 - Branch naming: `feat/{issue}-{slug}`, `fix/{issue}-{slug}`, `hotfix/{issue}-{slug}`
 - Commit messages: Conventional Commits 1.0.0
-- Pre-merge checks (must match CI): `cargo +nightly fmt --check`, `cargo clippy --all-targets --all-features --workspace -- -D warnings`, `cargo nextest run --workspace --all-features --exclude exarch-python --exclude exarch-node`, `cargo test --doc --workspace --all-features`
+- Pre-merge checks (must match CI): `cargo +nightly fmt --check`, `cargo clippy --all-targets --all-features --workspace -- -D warnings`, `cargo nextest run --workspace --all-features --exclude exarch-python --exclude exarch-node`, `cargo test --doc --workspace --all-features --exclude exarch-python --exclude exarch-node`
 - Docs must build cleanly: `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features --workspace`
 - Every phase-end PR: update `CHANGELOG.md` under `[Unreleased]`

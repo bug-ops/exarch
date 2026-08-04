@@ -153,6 +153,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`exarch-cli`: `extract --help`'s `--atomic` text described a stale swap ordering and omitted
+  the Unix permission requirement `--force` now has (#532)**: the `atomic` field's doc comment in
+  `cli.rs` said the existing destination is "removed after successful extraction (just before
+  rename), not before" — a description that predates the #519 fix and no longer matches
+  `run_atomic_force_extraction`'s actual swap ordering (old destination renamed aside first, new
+  content renamed into place second, old destination removed only once that swap succeeds). It also
+  never mentioned #531's Unix-only change requiring read permission on the destination's parent
+  directory. The doc comment now describes both accurately. No behavior change, `--help` text only.
 - **Duplicate-file, duplicate-symlink, and duplicate-hardlink skip paths now share a
   `common::checked_increment_files_skipped` helper (#518)** instead of repeating the same
   checked-add-with-overflow-guard increment inline in `formats::common::extract_file_with_permit`,

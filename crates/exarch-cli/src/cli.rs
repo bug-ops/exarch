@@ -114,10 +114,15 @@ pub struct ExtractArgs {
     pub force: bool,
 
     /// Extract atomically: use a temp dir, rename on success, clean up on
-    /// failure. When combined with --force, the existing destination is
-    /// removed after successful extraction (just before rename), not
-    /// before, to minimize the window where neither old nor new data
-    /// exists.
+    /// failure. When combined with --force to replace an existing
+    /// destination, the existing destination is renamed aside first, the
+    /// new content is renamed into its place second, and only once that
+    /// swap has succeeded is the old destination removed - never before, so
+    /// a failure at any point still leaves either the old or the new
+    /// content in place under the destination name. On Unix, --force also
+    /// requires read permission on the destination's parent directory (used
+    /// to pin it by file descriptor for the swap); the destination itself
+    /// does not need to be readable.
     #[arg(long)]
     pub atomic: bool,
 

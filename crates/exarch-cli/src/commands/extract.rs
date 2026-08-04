@@ -2,6 +2,7 @@
 
 use crate::cli::ExtractArgs;
 use crate::commands::apply_size_limits;
+use crate::commands::atomic_swap;
 use crate::commands::atomic_swap::DestEntryKind;
 use crate::commands::atomic_swap::PinnedDir;
 use crate::error::add_archive_context;
@@ -119,76 +120,387 @@ fn run_atomic_force_extraction(
         .file_name()
         .map(OsStr::to_os_string)
         .with_context(|| format!("temp path has no file name: {}", temp_dir.path().display()))?;
+    // Captured fd-relative through `pin` rather than by re-resolving a path:
+    // a `canonicalize`-based check here would be a no-op for the same
+    // structural reason it was pre-#535 (`parent_display` is already fully
+    // resolved), so it could never detect the parent redirect issue #530 is
+    // about. This identity is what every disclosure check below confirms
+    // against — "is *our* directory still present under `temp_name`", not
+    // just "is something present under that name".
+    let (_, temp_id) = pin.entry_status(&temp_name).with_context(|| {
+        format!(
+            "failed to inspect newly created temp directory: {}",
+            parent_display.join(&temp_name).display()
+        )
+    })?;
 
-    let report = run_extraction(
+    let mut report = run_extraction(
         archive,
         temp_dir.path(),
         config,
         options,
         progress,
         allow_symlinks,
+    )
+    .with_context(|| {
+        disclose_if_orphaned(
+            &pin,
+            &temp_name,
+            temp_id,
+            &parent_display,
+            "extraction interrupted",
+        )
+    })?;
+
+    // Extraction succeeded.
+    let (backup_path, backup_name, backup_id) = move_destination_to_backup(
+        &pin,
+        &parent_display,
+        &dest_name,
+        dest_id,
+        &dest_display,
+        &temp_name,
+        temp_id,
     )?;
 
-    // Extraction succeeded. Reserve a unique, currently-vacant sibling path
-    // for the backup: renaming onto an existing path (even an empty
-    // directory) is unsupported on Windows, so the reserved path must be
-    // freed before use.
-    //
-    // Path-based for the same reason as the temp dir above.
-    let backup_dir = tempfile::tempdir_in(&parent_display).with_context(|| {
-        format!(
-            "failed to reserve backup path in {}",
-            parent_display.display()
-        )
-    })?;
-    let backup_path = backup_dir.keep();
-    let backup_name = backup_path
-        .file_name()
-        .with_context(|| format!("backup path has no file name: {}", backup_path.display()))?;
-    pin.remove_dir(backup_name)
-        .with_context(|| format!("failed to free backup path: {}", backup_path.display()))?;
-
-    verify_destination_unchanged(&pin, &dest_name, dest_id, &dest_display)?;
-
-    pin.rename(&dest_name, backup_name).with_context(|| {
-        format!(
-            "failed to move existing destination {} aside before replacing it",
-            dest_display.display()
-        )
-    })?;
-
-    let temp_path = temp_dir.keep();
     if let Err(e) = pin.rename(&temp_name, &dest_name) {
         // Restore the original destination; the new extraction is discarded.
         // The restore's own outcome must be checked, not assumed: claiming
         // "restored" when the rename-back itself failed would tell the user
         // their data is safe while it actually sits at an unprinted temp path.
-        let restore_result = pin.rename(backup_name, &dest_name);
-        // Path-based, but safe: std's Unix `remove_dir_all` has been
-        // `O_NOFOLLOW`-rooted and fd-recursive since the CVE-2022-21658
-        // hardening, so it cannot be tricked into descending a planted
-        // symlink; a redirected `parent` at worst removes an
-        // attacker-planted directory at the redirected location.
-        let _ = std::fs::remove_dir_all(&temp_path);
-        return Err(e).with_context(|| match restore_result {
-            Ok(()) => format!(
-                "failed to move extracted content into {}; original destination restored",
-                dest_display.display()
-            ),
-            Err(restore_err) => format!(
-                "failed to move extracted content into {}; the original destination could NOT \
-                 be restored ({restore_err}) — its original contents are preserved at {} and \
-                 must be recovered manually",
-                dest_display.display(),
-                backup_path.display()
-            ),
+        let restore_result = pin.rename(&backup_name, &dest_name);
+        return Err(e).with_context(|| {
+            describe_final_swap_failure(
+                &pin,
+                &temp_name,
+                temp_id,
+                &parent_display,
+                &dest_display,
+                &backup_path,
+                restore_result,
+            )
         });
     }
 
-    // Path-based, same CVE-2022-21658 rationale as above.
-    let _ = std::fs::remove_dir_all(&backup_path);
+    cleanup_backup_or_warn(&mut report, &pin, &backup_name, backup_id, &backup_path);
 
     Ok(report)
+}
+
+/// Reserves a unique, currently-vacant sibling path in `parent_display` to
+/// hold the pre-existing destination, then renames it there — returning the
+/// backup's resolved path, entry name, and `(dev, ino)` identity once the
+/// original destination is confirmed safely at that name.
+///
+/// Renaming onto an existing path (even an empty directory) is unsupported
+/// on Windows, so the reserved path is freed (removed) again immediately
+/// after creation, before the destination is renamed onto it. Every error
+/// here also runs [`disclose_if_orphaned`] on the temp directory identified
+/// by `temp_name`/`temp_id`, since the extraction that landed there has
+/// already succeeded by the time this is called.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn move_destination_to_backup(
+    pin: &PinnedDir,
+    parent_display: &Path,
+    dest_name: &OsStr,
+    dest_id: (u64, u64),
+    dest_display: &Path,
+    temp_name: &OsStr,
+    temp_id: (u64, u64),
+) -> Result<(PathBuf, OsString, Option<(u64, u64)>)> {
+    let backup_dir = tempfile::tempdir_in(parent_display).with_context(|| {
+        disclose_if_orphaned(
+            pin,
+            temp_name,
+            temp_id,
+            parent_display,
+            &format!(
+                "failed to reserve backup path in {}",
+                parent_display.display()
+            ),
+        )
+    })?;
+    let backup_path = backup_dir.keep();
+    let backup_name = backup_path
+        .file_name()
+        .with_context(|| {
+            disclose_if_orphaned(
+                pin,
+                temp_name,
+                temp_id,
+                parent_display,
+                &format!("backup path has no file name: {}", backup_path.display()),
+            )
+        })?
+        .to_os_string();
+    pin.remove_dir(&backup_name).with_context(|| {
+        disclose_if_orphaned(
+            pin,
+            temp_name,
+            temp_id,
+            parent_display,
+            &format!("failed to free backup path: {}", backup_path.display()),
+        )
+    })?;
+
+    verify_destination_unchanged(pin, dest_name, dest_id, dest_display).with_context(|| {
+        disclose_if_orphaned(
+            pin,
+            temp_name,
+            temp_id,
+            parent_display,
+            "extraction already completed; destination changed underneath it",
+        )
+    })?;
+
+    pin.rename(dest_name, &backup_name).with_context(|| {
+        disclose_if_orphaned(
+            pin,
+            temp_name,
+            temp_id,
+            parent_display,
+            &format!(
+                "failed to move existing destination {} aside before replacing it",
+                dest_display.display()
+            ),
+        )
+    })?;
+    // Captured now, right after the destination genuinely landed at
+    // `backup_name` (before this rename it was `backup_dir`'s empty
+    // placeholder, whose identity is irrelevant): the same fd-relative
+    // pattern as `temp_id`, used by the caller so a failure to remove this
+    // backup after a successful swap can be disclosed instead of silently
+    // discarded (M2 from the prior review round).
+    //
+    // Best-effort, not `?`: by this point the destination has already been
+    // renamed to `backup_name` — inside the destructive window, past the
+    // point of an easy return. A failure to *inspect* the backup (`statat`
+    // failing on an entry `renameat` just created — exactly this issue's
+    // adversarial threat model) must never abort an otherwise-successful
+    // swap over and above what actually failed; it would propagate with
+    // neither a restore attempt nor a `disclose_if_orphaned` call, leaving
+    // the destination displaced under a `.tmpXXXX` name (S1, review of #530
+    // round 4). `cleanup_backup_or_warn` simply skips its warning if this
+    // identity was never captured, the same "don't claim without
+    // confirmation" principle `survival_clause`'s mismatch arm already
+    // applies.
+    let backup_id = pin.entry_status(&backup_name).ok().map(|(_, id)| id);
+
+    Ok((backup_path, backup_name, backup_id))
+}
+
+/// Best-effort removes `backup_path` after a successful swap; if that fails
+/// and the entry at `backup_name` still identifies as `backup_id` (i.e. the
+/// removal genuinely didn't reach it, not just raced with something else
+/// occupying the name), records a warning on `report` instead of silently
+/// discarding the failure — the same disclosure principle as
+/// [`disclose_if_orphaned`], applied to the backup instead of the temp
+/// directory (M2 from the prior review round). Path-based, but safe for the
+/// same CVE-2022-21658 (`O_NOFOLLOW`-rooted, fd-recursive `remove_dir_all`)
+/// reason as every other best-effort removal in this module.
+///
+/// `backup_id` is `None` when [`move_destination_to_backup`] could not
+/// capture the backup's identity (its own best-effort inspection, per S1 of
+/// the #530 round 4 review) — in that case there is nothing to confirm the
+/// removal missed against, so this silently declines to warn rather than
+/// claiming a match it cannot verify, same as [`survival_clause`]'s
+/// mismatch arm.
+fn cleanup_backup_or_warn(
+    report: &mut ExtractionReport,
+    pin: &PinnedDir,
+    backup_name: &OsStr,
+    backup_id: Option<(u64, u64)>,
+    backup_path: &Path,
+) {
+    let Err(cleanup_err) = std::fs::remove_dir_all(backup_path) else {
+        return;
+    };
+    let Some(backup_id) = backup_id else {
+        return;
+    };
+    if pin
+        .entry_status(backup_name)
+        .is_ok_and(|(_, id)| id == backup_id)
+    {
+        report.warnings.push(format!(
+            "failed to remove backup of the original destination at {} ({cleanup_err}); it must \
+             be cleaned up manually",
+            backup_path.display()
+        ));
+    }
+}
+
+/// Returns a disclosure clause naming where surviving content can be found,
+/// or `None` if nothing under `name` still identifies as `expected_id` (i.e.
+/// it was genuinely removed, or something unrelated now occupies the name).
+///
+/// When content survives, the disclosed path is resolved fresh from an
+/// fd opened on the surviving entry itself ([`PinnedDir::open_entry`] +
+/// [`atomic_swap::current_path`]), not by joining `name` onto
+/// `parent_display`: `entry_status` confirming survival only proves the
+/// content still exists *somewhere* linked from the pinned parent — it does
+/// not prove `parent_display` (a plain, possibly stale display string) still
+/// resolves there. Live-verified (issue #530 round 3): a redirect that
+/// stays in place through this check makes `parent_display.join(name)`
+/// resolve into the *decoy*, not the real content, even though the identity
+/// check correctly confirms the real content survives. Falls back to the
+/// logical path, with a caveat, only if fd-to-path resolution is
+/// unavailable (non-Linux, non-macOS) or itself fails.
+fn survival_clause(
+    pin: &PinnedDir,
+    name: &OsStr,
+    expected_id: (u64, u64),
+    parent_display: &Path,
+) -> Option<String> {
+    match pin.entry_status(name) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Ok((_, id)) if id == expected_id => {
+            let real_path = pin
+                .open_entry(name)
+                .ok()
+                .and_then(|fd| atomic_swap::current_path(&fd));
+            Some(real_path.map_or_else(
+                || unresolved_survival_message(expected_id, parent_display, name),
+                |path| {
+                    format!(
+                        "partial content survived cleanup and remains at {}",
+                        path.display()
+                    )
+                },
+            ))
+        }
+        // Something else now occupies the name (a decoy left by a redirect,
+        // or an unrelated benign reuse) — it is not ours to claim, so no
+        // disclosure is made for it either.
+        Ok(_) => None,
+        Err(e) => Some(format!(
+            "whether partial content survived cleanup could not be determined ({e})"
+        )),
+    }
+}
+
+/// Builds the disclosure message for confirmed-surviving content whose
+/// current path could not be resolved — `PinnedDir::open_entry` or
+/// [`atomic_swap::current_path`] failed or (on platforms other than Linux
+/// and macOS) isn't implemented. Deliberately does not say *why*: a genuine
+/// runtime failure (`/proc` unmounted, `getpath` erroring) is not a
+/// "platform limitation", so this only states the fact that resolution
+/// failed, not a claimed cause (S2, review of #530 round 4).
+///
+/// On Unix, `expected_id`'s `(dev, ino)` is a real identity and gives an
+/// operator a `find`-based fallback. On non-Unix, [`PinnedDir::entry_status`]
+/// always reports `(0, 0)` (documented on its non-Unix impl) — printing that
+/// would be meaningless noise, and there is no portable `find`-by-inode
+/// equivalent to suggest either, so the non-Unix message stays plain rather
+/// than inventing Unix-flavored advice for a platform that has neither.
+#[cfg(unix)]
+fn unresolved_survival_message(
+    expected_id: (u64, u64),
+    parent_display: &Path,
+    name: &OsStr,
+) -> String {
+    let (dev, ino) = expected_id;
+    format!(
+        "partial content survived cleanup (device {dev}, inode {ino}); its current path could \
+         not be resolved — {} may no longer lead there if the containing directory has itself \
+         been redirected, in which case locate it via `find <volume-root> -xdev -inum {ino}`",
+        parent_display.join(name).display()
+    )
+}
+
+/// Non-Unix counterpart of [`unresolved_survival_message`]: see its doc
+/// comment for why `expected_id` is not printed here.
+#[cfg(not(unix))]
+fn unresolved_survival_message(
+    _expected_id: (u64, u64),
+    parent_display: &Path,
+    name: &OsStr,
+) -> String {
+    format!(
+        "partial content survived cleanup at an unresolvable path; {} may no longer lead there \
+         if the containing directory has itself been redirected",
+        parent_display.join(name).display()
+    )
+}
+
+/// Best-effort removes the directory `name` (resolved by joining
+/// `parent_display`, the same *logical* path every other path-based
+/// operation in [`run_atomic_force_extraction`] uses), then appends
+/// [`survival_clause`]'s disclosure to `base_message` if it is still
+/// present under `name` afterward, identified by `expected_id` — the
+/// `(dev, ino)` pair `pin.entry_status` reported when this directory was
+/// created (fd-relative, so unaffected by a later redirect).
+///
+/// In the ordinary case this removal succeeds: `parent_display` was never
+/// redirected, so it names the same directory `expected_id` identifies,
+/// removing it leaves nothing under `name`, and no clause is appended —
+/// matching pre-#530 behavior of silent, automatic cleanup on an ordinary
+/// failure (unconditional disclosure was tried and reverted: it leaves a
+/// partial-extraction directory behind on every failure, not just the race
+/// this issue is about). In the #530 race, `parent_display` was redirected
+/// mid-extraction: this removal, still path-based, can target a decoy at
+/// the redirected location instead of the real directory — but the
+/// `pin.entry_status` check afterward is fd-relative to the *pinned*
+/// parent, immune to that same redirect, so it still correctly reports the
+/// real directory's survival.
+///
+/// This detects and discloses survival of *this specific, identity-checked
+/// directory* — it cannot discover content written to a *different*,
+/// redirect-created decoy directory if the redirect happens mid-extraction
+/// and is reverted before this check runs: `exarch-core`'s own per-entry
+/// writes during extraction are path-based and re-resolve on every entry,
+/// which is out of scope for this fix to make fd-relative (see the original
+/// issue). That narrower case remains a genuine, undisclosed orphan — the
+/// same class of accepted residual this module already documents elsewhere
+/// (e.g. [`verify_destination_unchanged`]'s doc comment, and the non-Unix
+/// `entry_status`'s always-`(0, 0)` identity, which cannot distinguish this
+/// function's "matching" and "mismatched" cases at all).
+fn disclose_if_orphaned(
+    pin: &PinnedDir,
+    name: &OsStr,
+    expected_id: (u64, u64),
+    parent_display: &Path,
+    base_message: &str,
+) -> String {
+    let _ = std::fs::remove_dir_all(parent_display.join(name));
+    survival_clause(pin, name, expected_id, parent_display).map_or_else(
+        || base_message.to_string(),
+        |clause| format!("{base_message}; {clause}"),
+    )
+}
+
+/// Builds the context message for the final swap-rename failure branch of
+/// [`run_atomic_force_extraction`].
+///
+/// Reports, in order: whether the original destination could be restored
+/// from `backup_path`, and (via [`disclose_if_orphaned`]) whether the
+/// discarded extracted content identified by `temp_id` is still present
+/// under `temp_name` — disclosed rather than assumed cleaned up, since a
+/// failed or misdirected removal leaves that content as exactly the kind of
+/// orphan issue #530 was filed for.
+fn describe_final_swap_failure(
+    pin: &PinnedDir,
+    temp_name: &OsStr,
+    temp_id: (u64, u64),
+    parent_display: &Path,
+    dest_display: &Path,
+    backup_path: &Path,
+    restore_result: io::Result<()>,
+) -> String {
+    let restored = match restore_result {
+        Ok(()) => format!(
+            "failed to move extracted content into {}; original destination restored",
+            dest_display.display()
+        ),
+        Err(restore_err) => format!(
+            "failed to move extracted content into {}; the original destination could NOT be \
+             restored ({restore_err}) — its original contents are preserved at {} and must be \
+             recovered manually",
+            dest_display.display(),
+            backup_path.display()
+        ),
+    };
+    disclose_if_orphaned(pin, temp_name, temp_id, parent_display, &restored)
 }
 
 /// Aborts with a distinct, actionable error if `pin`'s entry `name` no
@@ -561,6 +873,8 @@ pub fn execute(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     /// Regression test for critic finding S2: the identity-mismatch abort
     /// branch in [`run_atomic_force_extraction`] previously had zero test
@@ -631,6 +945,214 @@ mod tests {
         assert!(
             msg.contains("destination changed on disk during extraction; refusing to swap"),
             "error must carry the distinct refusing-to-swap message, got: {msg}"
+        );
+    }
+
+    /// Regression test for issue #530: the ordinary case, where cleanup
+    /// genuinely succeeds, must disclose nothing — asserted directly against
+    /// [`disclose_if_orphaned`] rather than a live redirect race, which
+    /// [`survival_clause`]'s `Ok((_, id)) if id == expected_id` branch makes
+    /// unnecessary for deterministic coverage of this behavior.
+    #[test]
+    #[cfg(unix)]
+    #[allow(clippy::unwrap_used, clippy::expect_used)]
+    fn disclose_if_orphaned_ordinary_cleanup_discloses_nothing() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let parent = root.path().join("parent");
+        std::fs::create_dir(&parent).expect("create parent");
+        let name = OsStr::new("temp_dir");
+        std::fs::create_dir(parent.join(name)).expect("create temp dir");
+
+        let pin = PinnedDir::open(&parent).expect("pin parent");
+        let (_, id) = pin.entry_status(name).expect("snapshot identity");
+
+        let msg = disclose_if_orphaned(&pin, name, id, &parent, "extraction interrupted");
+
+        assert_eq!(
+            msg, "extraction interrupted",
+            "successful cleanup must not disclose a path: {msg}"
+        );
+        assert!(
+            !parent.join(name).exists(),
+            "the directory must actually be gone, not just unclaimed"
+        );
+    }
+
+    /// Regression test for issue #530: content that survives the best-effort
+    /// cleanup attempt (here, forced by making the directory's own
+    /// permissions block removing its content — analogous in effect, though
+    /// not in cause, to a `remove_dir_all` that missed the real directory
+    /// under a parent redirect) must be disclosed, and the disclosed path
+    /// must genuinely still contain the surviving content.
+    #[test]
+    #[cfg(unix)]
+    #[allow(clippy::unwrap_used, clippy::expect_used)]
+    fn disclose_if_orphaned_discloses_surviving_content_with_matching_identity() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let parent = root.path().join("parent");
+        std::fs::create_dir(&parent).expect("create parent");
+        let name = OsStr::new("temp_dir");
+        let target = parent.join(name);
+        std::fs::create_dir(&target).expect("create temp dir");
+        std::fs::write(target.join("payload.txt"), b"partial content").expect("write payload");
+        // Entry removal needs write permission on the *containing* directory,
+        // not the entry itself — this blocks `remove_dir_all` from removing
+        // `payload.txt`, which leaves `target` itself non-empty and thus
+        // un-`rmdir`-able too.
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o555))
+            .expect("restrict temp dir permissions");
+
+        let pin = PinnedDir::open(&parent).expect("pin parent");
+        let (_, id) = pin.entry_status(name).expect("snapshot identity");
+
+        let msg = disclose_if_orphaned(&pin, name, id, &parent, "extraction interrupted");
+
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755))
+            .expect("restore temp dir permissions");
+
+        if !target.join("payload.txt").exists() {
+            // DAC permission checks don't apply to root, so the restriction
+            // above did nothing and cleanup genuinely succeeded — same
+            // root-skip reasoning as `parent_without_read_permission_is_rejected`
+            // in `atomic_swap.rs`.
+            eprintln!(
+                "skipping: permission-restricted removal unexpectedly succeeded (running as \
+                 root?)"
+            );
+            return;
+        }
+
+        assert!(
+            msg.contains("partial content survived cleanup and remains at"),
+            "surviving content must be disclosed: {msg}"
+        );
+        assert!(
+            msg.contains(&target.display().to_string()),
+            "disclosed message must name the surviving path: {msg}"
+        );
+    }
+
+    /// Regression test for issue #530: an entry that now occupies `name` but
+    /// is *not* the directory `disclose_if_orphaned` was checking on (a
+    /// decoy left by a redirect, or an unrelated benign reuse of the name)
+    /// must never be claimed as surviving orphaned content — that would
+    /// misdirect an operator at data this code has no actual claim over.
+    #[test]
+    #[cfg(unix)]
+    #[allow(clippy::unwrap_used, clippy::expect_used)]
+    fn disclose_if_orphaned_does_not_disclose_on_identity_mismatch() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let parent = root.path().join("parent");
+        std::fs::create_dir(&parent).expect("create parent");
+        let name = OsStr::new("temp_dir");
+        let target = parent.join(name);
+        std::fs::create_dir(&target).expect("create original temp dir");
+
+        let pin = PinnedDir::open(&parent).expect("pin parent");
+        let (_, original_id) = pin.entry_status(name).expect("snapshot original identity");
+
+        // Replace the original with a different directory under the same
+        // name — created under a *different* name first, while the
+        // original (at `name`) is still alive, then `rename()`d over it.
+        // This guarantees the allocator hands out a genuinely distinct
+        // inode, not just "whatever's currently free": a delete-then-recreate
+        // sequence would instead depend on the filesystem not reusing the
+        // just-freed inode number, which APFS happens not to do but ext4
+        // readily does — flipping this test to a false identity match on
+        // Linux CI (reviewer finding, #530). `rename()` onto an existing,
+        // empty directory atomically replaces the dentry, so the surviving
+        // inode under `name` is deterministically the replacement's on every
+        // platform. Protected from `disclose_if_orphaned`'s own cleanup
+        // attempt the same way the previous test protects its target, so the
+        // mismatch is actually observed rather than removed before the check
+        // runs.
+        let replacement = parent.join("replacement_dir");
+        std::fs::create_dir(&replacement)
+            .expect("create replacement temp dir under a different name");
+        std::fs::write(replacement.join("decoy.txt"), b"not ours").expect("write decoy content");
+        std::fs::rename(&replacement, &target).expect("rename replacement over the original name");
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o555))
+            .expect("restrict replacement dir permissions");
+
+        let msg = disclose_if_orphaned(&pin, name, original_id, &parent, "extraction interrupted");
+
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755))
+            .expect("restore replacement dir permissions");
+
+        if !target.join("decoy.txt").exists() {
+            eprintln!(
+                "skipping: permission-restricted removal unexpectedly succeeded (running as \
+                 root?)"
+            );
+            return;
+        }
+
+        assert_eq!(
+            msg, "extraction interrupted",
+            "content under a mismatched identity must not be claimed as our own orphaned data: \
+             {msg}"
+        );
+    }
+
+    /// Regression test for issue #530, round 3: statically simulates the
+    /// exact parent-redirect scenario the developer live-verified with a
+    /// real, timing-sensitive race (see the round-3 developer handoff) —
+    /// deterministically, since the redirect only needs to happen *between*
+    /// identity capture and disclosure, not concurrently with anything.
+    /// Proves `disclose_if_orphaned` discloses the survivor's real, current
+    /// location — resolved via [`survival_clause`]'s `open_entry` +
+    /// [`atomic_swap::current_path`] — rather than the decoy sitting at the
+    /// redirected logical path, or nothing at all. This is the specific gap
+    /// the existing
+    /// `disclose_if_orphaned_discloses_surviving_content_with_matching_identity`
+    /// test cannot catch: without a redirect, the logical path and the real
+    /// path are identical, so that test would pass even if disclosure fell
+    /// back to the (wrong, in a real redirect) logical path.
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[allow(clippy::unwrap_used, clippy::expect_used)]
+    fn disclose_if_orphaned_discloses_real_path_through_a_redirected_parent() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let real_parent = root.path().join("real_parent");
+        std::fs::create_dir(&real_parent).expect("create real parent");
+        let name = OsStr::new("temp_dir");
+        let target = real_parent.join(name);
+        std::fs::create_dir(&target).expect("create temp dir");
+        std::fs::write(target.join("payload.txt"), b"partial content").expect("write payload");
+
+        let pin = PinnedDir::open(&real_parent).expect("pin real parent");
+        let (_, id) = pin.entry_status(name).expect("snapshot identity");
+
+        // Redirect `real_parent`'s logical path: move the real directory
+        // aside and put a symlink to an empty decoy in its place. `pin`,
+        // already opened before this, keeps identifying the real, now-moved
+        // directory by fd; `real_parent` (passed below as `parent_display`)
+        // no longer resolves there by path.
+        let decoy = root.path().join("decoy");
+        std::fs::create_dir(&decoy).expect("create decoy");
+        let moved_real_parent = root.path().join("real_parent_moved");
+        std::fs::rename(&real_parent, &moved_real_parent).expect("move real parent aside");
+        std::os::unix::fs::symlink(&decoy, &real_parent).expect("plant symlink at old path");
+
+        let msg = disclose_if_orphaned(&pin, name, id, &real_parent, "extraction interrupted");
+
+        let real_content = moved_real_parent.join(name);
+        assert!(
+            msg.contains("partial content survived cleanup and remains at"),
+            "content must be disclosed as surviving: {msg}"
+        );
+        assert!(
+            msg.contains(&real_content.display().to_string()),
+            "disclosed path must be the real, moved location, not the decoy or the stale \
+             logical path: {msg}"
+        );
+        assert!(
+            !msg.contains(&decoy.display().to_string()),
+            "disclosed path must never point into the decoy: {msg}"
+        );
+        assert!(
+            real_content.join("payload.txt").exists(),
+            "the disclosed real directory must genuinely still contain the surviving content"
         );
     }
 

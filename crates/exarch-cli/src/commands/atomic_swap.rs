@@ -129,6 +129,63 @@ impl PinnedDir {
         rustix::fs::unlinkat(&self.0, name, rustix::fs::AtFlags::REMOVEDIR)?;
         Ok(())
     }
+
+    /// Opens the directory entry `name`, resolved relative to the pinned
+    /// directory, and returns an owned handle to it.
+    ///
+    /// Used by callers that need [`current_path`] on the specific entry
+    /// `name` identifies — resolving *its* current location in the
+    /// filesystem namespace, not `parent`'s — rather than anything this type
+    /// exposes about `name` itself. `NOFOLLOW` matches every other lookup in
+    /// this type: a symlink at `name` is rejected, not followed.
+    pub(super) fn open_entry(&self, name: &OsStr) -> io::Result<std::fs::File> {
+        let fd = rustix::fs::openat(
+            &self.0,
+            name,
+            rustix::fs::OFlags::RDONLY
+                | rustix::fs::OFlags::DIRECTORY
+                | rustix::fs::OFlags::CLOEXEC
+                | rustix::fs::OFlags::NOFOLLOW,
+            rustix::fs::Mode::empty(),
+        )?;
+        Ok(std::fs::File::from(fd))
+    }
+}
+
+/// Best-effort: `fd`'s current path in the filesystem namespace, resolved
+/// directly from the descriptor rather than any stored string — so it
+/// reflects wherever the entry actually is *now*, unaffected by a redirect
+/// of any ancestor path component since `fd` was opened. Used to disclose an
+/// accurate, walkable location for content [`PinnedDir::entry_status`] has
+/// already confirmed survives (issue #530): that confirmation alone doesn't
+/// guarantee the *logical* path built from `parent`'s (possibly still
+/// redirected) display path actually leads there — this does.
+///
+/// Returns `None` if this platform has no fd-to-path facility implemented
+/// here (anything other than Linux or macOS); callers must have a fallback,
+/// such as naming the logical path with a caveat, for that case.
+#[cfg(target_os = "linux")]
+pub(super) fn current_path(fd: &std::fs::File) -> Option<std::path::PathBuf> {
+    use std::os::fd::AsRawFd;
+    std::fs::read_link(format!("/proc/self/fd/{}", fd.as_raw_fd())).ok()
+}
+
+/// macOS implementation of [`current_path`] via `fcntl(fd, F_GETPATH)`, the
+/// platform's direct fd-to-path facility (Linux's `/proc/self/fd` has no
+/// macOS equivalent).
+#[cfg(target_os = "macos")]
+pub(super) fn current_path(fd: &std::fs::File) -> Option<std::path::PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    rustix::fs::getpath(fd)
+        .ok()
+        .map(|c_path| std::path::PathBuf::from(std::ffi::OsStr::from_bytes(c_path.as_bytes())))
+}
+
+/// Fallback for Unix targets with no fd-to-path facility implemented here:
+/// no accurate current path is available.
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+pub(super) fn current_path(_fd: &std::fs::File) -> Option<std::path::PathBuf> {
+    None
 }
 
 /// Non-Unix fallback: plain path-based operations.
@@ -188,6 +245,27 @@ impl PinnedDir {
     pub(super) fn remove_dir(&self, name: &OsStr) -> io::Result<()> {
         std::fs::remove_dir(self.parent.join(name))
     }
+
+    /// Opens the directory entry `name`, resolved by joining `self.parent`.
+    ///
+    /// Path-based, same residual as every other operation on this platform's
+    /// `PinnedDir`. Kept for signature parity with the Unix impl so callers
+    /// never need to branch on platform; its result feeds into
+    /// [`current_path`], which always returns `None` on this platform
+    /// regardless of whether this call succeeds.
+    pub(super) fn open_entry(&self, name: &OsStr) -> io::Result<std::fs::File> {
+        std::fs::File::open(self.parent.join(name))
+    }
+}
+
+/// Non-Unix fallback for [`current_path`]: no fd-to-path facility is
+/// implemented here, so this always returns `None` — the same "documented
+/// residual, not a false guarantee" pattern as [`PinnedDir`]'s non-Unix
+/// `entry_status` always reporting `(0, 0)`. Callers fall back to naming the
+/// logical path instead.
+#[cfg(not(unix))]
+pub(super) fn current_path(_fd: &std::fs::File) -> Option<std::path::PathBuf> {
+    None
 }
 
 /// Reports whether `metadata` carries `FILE_ATTRIBUTE_REPARSE_POINT`.
@@ -216,6 +294,7 @@ fn is_reparse_point(metadata: &std::fs::Metadata) -> bool {
 mod tests {
     use super::DestEntryKind;
     use super::PinnedDir;
+    use super::current_path;
     use std::ffi::OsStr;
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::fs::symlink;
@@ -412,5 +491,90 @@ mod tests {
                 "expected a permission-denied failure specifically, got: {err}"
             ),
         }
+    }
+
+    /// Regression test for issue #530, round 3: `current_path` must resolve
+    /// an entry's *current* location from its own fd, not the path used to
+    /// open it. Proven directly here — no timing race needed, since the
+    /// redirect only has to happen *between* `open_entry` and `current_path`,
+    /// not concurrently with either — by the same
+    /// move-aside-and-symlink-over technique
+    /// `rename_follows_the_pinned_inode_not_a_planted_symlink` uses for
+    /// `rename`. This is the property `survival_clause` (in `extract.rs`)
+    /// depends on to disclose the real surviving location instead of a
+    /// decoy or nothing.
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn current_path_resolves_through_a_redirected_parent() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let real_parent = root.path().join("real_parent");
+        std::fs::create_dir(&real_parent).expect("create real_parent");
+        std::fs::create_dir(real_parent.join("entry")).expect("create entry");
+
+        let pin = PinnedDir::open(&real_parent).expect("pin real_parent");
+        let fd = pin
+            .open_entry(OsStr::new("entry"))
+            .expect("open entry via pinned fd");
+
+        // Redirect the path `real_parent` used to name: move the real
+        // directory aside and put a symlink to a decoy in its place.
+        let decoy = root.path().join("decoy");
+        std::fs::create_dir(&decoy).expect("create decoy");
+        let moved_real_parent = root.path().join("real_parent_moved");
+        std::fs::rename(&real_parent, &moved_real_parent).expect("move real parent aside");
+        symlink(&decoy, &real_parent).expect("plant symlink at the old path");
+
+        let resolved = current_path(&fd).expect("current_path must resolve on this platform");
+
+        // `current_path` resolves through every symlink in the filesystem
+        // (e.g. macOS's `/tmp` -> `/private/tmp`), so the expected side must
+        // be canonicalized the same way before comparing — the property
+        // under test is "reflects the real, moved location", not "matches
+        // the exact string `root.path()` happened to be built from".
+        let expected = moved_real_parent
+            .join("entry")
+            .canonicalize()
+            .expect("canonicalize expected path");
+        assert_eq!(
+            resolved, expected,
+            "current_path must reflect the entry's real, moved location, not the stale logical \
+             path or the decoy"
+        );
+    }
+
+    /// `open_entry` must fail closed (`NOFOLLOW`) rather than follow a
+    /// symlink planted at `name`, the same rejection `entry_status` already
+    /// applies to its own lookup. An fd opened by following a symlink here
+    /// would make `current_path` resolve to wherever the symlink's target
+    /// currently is, not the entry `disclose_if_orphaned` is actually
+    /// tracking.
+    #[test]
+    fn open_entry_rejects_a_planted_symlink() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let parent = root.path().join("parent");
+        std::fs::create_dir(&parent).expect("create parent");
+        let real_dir = root.path().join("real_dir");
+        std::fs::create_dir(&real_dir).expect("create real_dir");
+        let link = parent.join("link");
+        symlink(&real_dir, &link).expect("plant symlink");
+
+        let pin = PinnedDir::open(&parent).expect("pin parent");
+        let err = pin
+            .open_entry(OsStr::new("link"))
+            .expect_err("a symlink entry must be rejected, not followed");
+        // The specific errno is platform-dependent: combined with
+        // `O_DIRECTORY`, Linux's `open(2)` still reports `ELOOP` for a
+        // `NOFOLLOW`'d symlink, while macOS/BSD report `ENOTDIR` instead
+        // (`io::ErrorKind::FilesystemLoop` itself is also still unstable —
+        // `io_error_more`, rust-lang/rust#86442 — hence comparing the raw
+        // errno rather than the `ErrorKind`). Either is acceptable here: what
+        // matters is that the open fails closed rather than following the
+        // symlink into a real, followable directory fd.
+        let raw = err.raw_os_error();
+        assert!(
+            raw == Some(rustix::io::Errno::LOOP.raw_os_error())
+                || raw == Some(rustix::io::Errno::NOTDIR.raw_os_error()),
+            "expected NOFOLLOW to reject the symlink with ELOOP or ENOTDIR, got: {err}"
+        );
     }
 }

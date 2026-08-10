@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Case-insensitive containment check accepted a sibling of the destination root sharing a name prefix on macOS/Windows (GHSA-wcmx-7f9h-5mv5)**:
+  `paths_start_with` (`crates/exarch-core/src/types/safe_path.rs`), used by `SafePath`'s macOS/Windows
+  containment check, compared paths as raw lowercased strings, so `/tmp/destevil` was wrongly treated as
+  contained within `/tmp/dest` (`"...destevil".starts_with("...dest")` is true with no component
+  boundary). The check now compares `Path::components()` pairwise, case-folding each segment, matching
+  the already-correct non-macOS Unix behavior except case-insensitively.
+
 ### Changed
 
 - **`exarch-cli`'s `--atomic --force` swap path now bundles the pinned temp directory's

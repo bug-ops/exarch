@@ -134,6 +134,13 @@ fn run_atomic_force_extraction(
         )
     })?;
 
+    let temp_ref = TempOrphanRef {
+        pin: &pin,
+        name: &temp_name,
+        id: temp_id,
+        parent_display: &parent_display,
+    };
+
     let mut report = run_extraction(
         archive,
         temp_dir.path(),
@@ -142,26 +149,11 @@ fn run_atomic_force_extraction(
         progress,
         allow_symlinks,
     )
-    .with_context(|| {
-        disclose_if_orphaned(
-            &pin,
-            &temp_name,
-            temp_id,
-            &parent_display,
-            "extraction interrupted",
-        )
-    })?;
+    .with_context(|| temp_ref.disclose("extraction interrupted"))?;
 
     // Extraction succeeded.
-    let (backup_path, backup_name, backup_id) = move_destination_to_backup(
-        &pin,
-        &parent_display,
-        &dest_name,
-        dest_id,
-        &dest_display,
-        &temp_name,
-        temp_id,
-    )?;
+    let (backup_path, backup_name, backup_id) =
+        move_destination_to_backup(&temp_ref, &dest_name, dest_id, &dest_display)?;
 
     if let Err(e) = pin.rename(&temp_name, &dest_name) {
         // Restore the original destination; the new extraction is discarded.
@@ -170,15 +162,7 @@ fn run_atomic_force_extraction(
         // their data is safe while it actually sits at an unprinted temp path.
         let restore_result = pin.rename(&backup_name, &dest_name);
         return Err(e).with_context(|| {
-            describe_final_swap_failure(
-                &pin,
-                &temp_name,
-                temp_id,
-                &parent_display,
-                &dest_display,
-                &backup_path,
-                restore_result,
-            )
+            describe_final_swap_failure(&temp_ref, &dest_display, &backup_path, restore_result)
         });
     }
 
@@ -187,83 +171,56 @@ fn run_atomic_force_extraction(
     Ok(report)
 }
 
-/// Reserves a unique, currently-vacant sibling path in `parent_display` to
-/// hold the pre-existing destination, then renames it there — returning the
-/// backup's resolved path, entry name, and `(dev, ino)` identity once the
+/// Reserves a unique, currently-vacant sibling path in `temp.parent_display`
+/// to hold the pre-existing destination, then renames it there — returning
+/// the backup's resolved path, entry name, and `(dev, ino)` identity once the
 /// original destination is confirmed safely at that name.
 ///
 /// Renaming onto an existing path (even an empty directory) is unsupported
 /// on Windows, so the reserved path is freed (removed) again immediately
 /// after creation, before the destination is renamed onto it. Every error
 /// here also runs [`disclose_if_orphaned`] on the temp directory identified
-/// by `temp_name`/`temp_id`, since the extraction that landed there has
-/// already succeeded by the time this is called.
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+/// by `temp`, since the extraction that landed there has already succeeded
+/// by the time this is called.
+#[allow(clippy::type_complexity)]
 fn move_destination_to_backup(
-    pin: &PinnedDir,
-    parent_display: &Path,
+    temp: &TempOrphanRef<'_>,
     dest_name: &OsStr,
     dest_id: (u64, u64),
     dest_display: &Path,
-    temp_name: &OsStr,
-    temp_id: (u64, u64),
 ) -> Result<(PathBuf, OsString, Option<(u64, u64)>)> {
-    let backup_dir = tempfile::tempdir_in(parent_display).with_context(|| {
-        disclose_if_orphaned(
-            pin,
-            temp_name,
-            temp_id,
-            parent_display,
-            &format!(
-                "failed to reserve backup path in {}",
-                parent_display.display()
-            ),
-        )
+    let backup_dir = tempfile::tempdir_in(temp.parent_display).with_context(|| {
+        temp.disclose(&format!(
+            "failed to reserve backup path in {}",
+            temp.parent_display.display()
+        ))
     })?;
     let backup_path = backup_dir.keep();
     let backup_name = backup_path
         .file_name()
         .with_context(|| {
-            disclose_if_orphaned(
-                pin,
-                temp_name,
-                temp_id,
-                parent_display,
-                &format!("backup path has no file name: {}", backup_path.display()),
-            )
+            temp.disclose(&format!(
+                "backup path has no file name: {}",
+                backup_path.display()
+            ))
         })?
         .to_os_string();
-    pin.remove_dir(&backup_name).with_context(|| {
-        disclose_if_orphaned(
-            pin,
-            temp_name,
-            temp_id,
-            parent_display,
-            &format!("failed to free backup path: {}", backup_path.display()),
-        )
+    temp.pin.remove_dir(&backup_name).with_context(|| {
+        temp.disclose(&format!(
+            "failed to free backup path: {}",
+            backup_path.display()
+        ))
     })?;
 
-    verify_destination_unchanged(pin, dest_name, dest_id, dest_display).with_context(|| {
-        disclose_if_orphaned(
-            pin,
-            temp_name,
-            temp_id,
-            parent_display,
-            "extraction already completed; destination changed underneath it",
-        )
-    })?;
+    verify_destination_unchanged(temp.pin, dest_name, dest_id, dest_display).with_context(
+        || temp.disclose("extraction already completed; destination changed underneath it"),
+    )?;
 
-    pin.rename(dest_name, &backup_name).with_context(|| {
-        disclose_if_orphaned(
-            pin,
-            temp_name,
-            temp_id,
-            parent_display,
-            &format!(
-                "failed to move existing destination {} aside before replacing it",
-                dest_display.display()
-            ),
-        )
+    temp.pin.rename(dest_name, &backup_name).with_context(|| {
+        temp.disclose(&format!(
+            "failed to move existing destination {} aside before replacing it",
+            dest_display.display()
+        ))
     })?;
     // Captured now, right after the destination genuinely landed at
     // `backup_name` (before this rename it was `backup_dir`'s empty
@@ -284,7 +241,7 @@ fn move_destination_to_backup(
     // identity was never captured, the same "don't claim without
     // confirmation" principle `survival_clause`'s mismatch arm already
     // applies.
-    let backup_id = pin.entry_status(&backup_name).ok().map(|(_, id)| id);
+    let backup_id = temp.pin.entry_status(&backup_name).ok().map(|(_, id)| id);
 
     Ok((backup_path, backup_name, backup_id))
 }
@@ -469,20 +426,43 @@ fn disclose_if_orphaned(
     )
 }
 
+/// The temp directory's `pin`/`name`/`id`/`parent_display` identifiers,
+/// bundled once so [`run_atomic_force_extraction`] and the functions it
+/// calls can thread them to every [`disclose_if_orphaned`] call site without
+/// repeating the same four parameters at each one. Performs no cleanup
+/// itself — it only carries the identity `disclose` checks a cleanup
+/// against.
+struct TempOrphanRef<'a> {
+    pin: &'a PinnedDir,
+    name: &'a OsStr,
+    id: (u64, u64),
+    parent_display: &'a Path,
+}
+
+impl TempOrphanRef<'_> {
+    /// Forwards to [`disclose_if_orphaned`] with this reference's identity.
+    fn disclose(&self, base_message: &str) -> String {
+        disclose_if_orphaned(
+            self.pin,
+            self.name,
+            self.id,
+            self.parent_display,
+            base_message,
+        )
+    }
+}
+
 /// Builds the context message for the final swap-rename failure branch of
 /// [`run_atomic_force_extraction`].
 ///
 /// Reports, in order: whether the original destination could be restored
 /// from `backup_path`, and (via [`disclose_if_orphaned`]) whether the
-/// discarded extracted content identified by `temp_id` is still present
-/// under `temp_name` — disclosed rather than assumed cleaned up, since a
+/// discarded extracted content identified by `temp`'s id is still present
+/// under `temp`'s name — disclosed rather than assumed cleaned up, since a
 /// failed or misdirected removal leaves that content as exactly the kind of
 /// orphan issue #530 was filed for.
 fn describe_final_swap_failure(
-    pin: &PinnedDir,
-    temp_name: &OsStr,
-    temp_id: (u64, u64),
-    parent_display: &Path,
+    temp: &TempOrphanRef<'_>,
     dest_display: &Path,
     backup_path: &Path,
     restore_result: io::Result<()>,
@@ -500,7 +480,7 @@ fn describe_final_swap_failure(
             backup_path.display()
         ),
     };
-    disclose_if_orphaned(pin, temp_name, temp_id, parent_display, &restored)
+    temp.disclose(&restored)
 }
 
 /// Aborts with a distinct, actionable error if `pin`'s entry `name` no

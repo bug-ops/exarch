@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`exarch-cli`'s `--atomic --force` swap path now bundles the pinned temp directory's
+  `pin`/`name`/`id`/`parent_display` identifiers into a `TempOrphanRef` struct (#538)** instead of
+  threading the same four parameters through `move_destination_to_backup` (7 params, down to 4) and
+  `describe_final_swap_failure` (7 params, down to 4) to reach each of the six
+  `disclose_if_orphaned` call sites individually. No behavior change.
+
 ## [0.6.0] - 2026-08-04
 
 ### Security

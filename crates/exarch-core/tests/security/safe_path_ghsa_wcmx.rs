@@ -9,7 +9,11 @@
 //! the containment check runs against an actually canonicalized path — the
 //! same code path a crafted archive entry resolving through a symlinked
 //! directory would take — rather than a synthetic `Path` value.
-
+//!
+//! Unix-only: the attack requires a real on-disk symlink, and the whole
+//! file (not just the test function) must be gated so its imports don't
+//! become unused-import errors under `-D warnings` on non-Unix targets.
+#![cfg(unix)]
 #![allow(clippy::unwrap_used)]
 
 use exarch_core::ArchiveError;
@@ -21,7 +25,6 @@ use std::path::PathBuf;
 use tempfile::TempDir;
 
 #[test]
-#[cfg(unix)]
 fn ghsa_wcmx_sibling_reached_via_symlink_is_rejected() {
     use std::os::unix::fs::symlink;
 

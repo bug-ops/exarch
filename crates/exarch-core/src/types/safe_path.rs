@@ -343,12 +343,25 @@ impl SafePath {
 ///
 /// On case-insensitive filesystems (macOS, Windows), attackers can bypass
 /// path validation using different case (e.g., `../../USERS/victim/.ssh/`).
+///
+/// Compares `path` and `base` component-by-component rather than as raw
+/// strings, so a shared name prefix without a component boundary (e.g. base
+/// `/tmp/dest` against sibling `/tmp/destevil`) is correctly rejected. See
+/// GHSA-wcmx-7f9h-5mv5.
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 fn paths_start_with(path: &Path, base: &Path) -> bool {
-    // Convert both paths to lowercase strings for comparison
-    let path_str = path.to_string_lossy().to_lowercase();
-    let base_str = base.to_string_lossy().to_lowercase();
-    path_str.starts_with(&base_str)
+    let mut path_components = path.components();
+    for base_component in base.components() {
+        let Some(path_component) = path_components.next() else {
+            return false;
+        };
+        let path_str = path_component.as_os_str().to_string_lossy().to_lowercase();
+        let base_str = base_component.as_os_str().to_string_lossy().to_lowercase();
+        if path_str != base_str {
+            return false;
+        }
+    }
+    true
 }
 
 /// Case-sensitive path prefix check for Unix (not macOS).
@@ -1201,5 +1214,59 @@ mod tests {
                 "path '{p}' must be rejected as path traversal"
             );
         }
+    }
+
+    // --- Tests for GHSA-wcmx-7f9h-5mv5 (case-insensitive prefix bypass) ---
+
+    #[test]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    fn test_paths_start_with_rejects_sibling_sharing_name_prefix_ghsa_wcmx() {
+        // GHSA-wcmx-7f9h-5mv5: the previous implementation compared paths as
+        // raw strings, so `/tmp/destevil`.starts_with(`/tmp/dest`) was true
+        // even though `destevil` is a sibling directory, not a subdirectory
+        // of `dest`.
+        let base = Path::new("/tmp/dest");
+        let sibling = Path::new("/tmp/destevil");
+        assert!(
+            !paths_start_with(sibling, base),
+            "sibling directory sharing a name prefix must not be treated as contained"
+        );
+    }
+
+    #[test]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    fn test_paths_start_with_accepts_genuine_subdirectory() {
+        let base = Path::new("/tmp/dest");
+        let child = Path::new("/tmp/dest/sub");
+        assert!(
+            paths_start_with(child, base),
+            "genuine subdirectory must still be accepted as contained"
+        );
+    }
+
+    #[test]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    fn test_paths_start_with_is_case_insensitive() {
+        let base = Path::new("/tmp/dest");
+        let child = Path::new("/tmp/Dest/sub");
+        assert!(
+            paths_start_with(child, base),
+            "differing-case containment must still be accepted on case-insensitive filesystems"
+        );
+    }
+
+    #[test]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    fn test_paths_start_with_rejects_when_base_has_more_components_than_path() {
+        // Regression for a `break`-instead-of-`return false` mutant: when
+        // `base` has more components than `path`, the `path` component
+        // iterator is exhausted mid-loop and the function must reject
+        // immediately, not fall through the loop to the trailing `true`.
+        let base = Path::new("/tmp/dest/sub/extra");
+        let shorter = Path::new("/tmp/dest/sub");
+        assert!(
+            !paths_start_with(shorter, base),
+            "a path shorter than base must never be treated as containing base"
+        );
     }
 }

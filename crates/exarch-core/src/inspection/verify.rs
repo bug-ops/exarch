@@ -236,7 +236,7 @@ fn verify_entry(
 
 fn check_permissions(path: &Path, mode: u32, config: &SecurityConfig<Validated>) -> Result<()> {
     let sanitized = sanitize_permissions(mode, config);
-    if sanitized == mode {
+    if sanitized.as_u32() == mode {
         Ok(())
     } else {
         Err(ArchiveError::InvalidPermissions {

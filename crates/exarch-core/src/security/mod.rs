@@ -22,6 +22,11 @@ pub use validator::ValidationReport;
 // would be a private-type-in-public-interface compile error.
 pub use quota::QuotaPermit;
 
+// SanitizedMode rides inside the unconditionally-public
+// ValidatedEntry::mode(), so — like QuotaPermit above — it must be exported
+// ungated rather than gated behind `testing`.
+pub use permissions::SanitizedMode;
+
 // Security primitives exposed under the `testing` feature for external
 // benchmarks and integration tests that cannot access pub(crate) items.
 #[cfg(feature = "testing")]

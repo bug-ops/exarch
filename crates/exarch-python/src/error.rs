@@ -81,6 +81,10 @@ pub fn convert_error(err: CoreError) -> PyErr {
                 CoreQuotaResource::IntegerOverflow => {
                     "quota exceeded: integer overflow in quota tracking".to_string()
                 }
+                // Forward-compat: a variant added to QuotaResource after this
+                // match was written. #[non_exhaustive] requires this arm to
+                // compile against a newer exarch-core.
+                _ => "quota exceeded".to_string(),
             };
             QuotaExceededError::new_err(msg)
         }
@@ -133,6 +137,10 @@ pub fn convert_error(err: CoreError) -> PyErr {
                 source_err
             })
         }
+        // Forward-compat: a variant added to ArchiveError after this match was
+        // written. #[non_exhaustive] requires this arm to compile against a
+        // newer exarch-core.
+        _ => ArchiveError::new_err("unrecognized archive error"),
     }
 }
 

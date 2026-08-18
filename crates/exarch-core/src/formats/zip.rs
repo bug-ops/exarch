@@ -135,6 +135,7 @@ use crate::SecurityConfig;
 use crate::config::Validated;
 use crate::copy::CopyBuffer;
 use crate::security::EntryValidator;
+use crate::security::permissions::SanitizedMode;
 use crate::security::quota::QuotaPermit;
 use crate::security::validator::ValidatedEntryType;
 use crate::types::DestDir;
@@ -453,7 +454,7 @@ impl<R: Read + Seek> ZipArchive<R> {
     fn extract_file(
         zip_file: &mut zip::read::ZipFile<'_, R>,
         safe_path: &SafePath,
-        mode: Option<u32>,
+        mode: Option<SanitizedMode>,
         permit: QuotaPermit,
         file_size: u64,
         ctx: &mut ZipExtractionContext<'_>,

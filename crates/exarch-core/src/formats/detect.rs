@@ -51,7 +51,11 @@ pub(crate) fn is_zip_family_alias(ext: &str) -> bool {
 }
 
 /// Supported archive formats.
+///
+/// `#[non_exhaustive]` so support for a new archive format is not a
+/// breaking change for downstream matches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ArchiveType {
     /// Tar archive (uncompressed).
     Tar,

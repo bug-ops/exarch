@@ -36,7 +36,11 @@
 /// let best_codec = CompressionCodec::Xz; // Best compression ratio
 /// let modern_codec = CompressionCodec::Zstd; // Modern balanced approach
 /// ```
+///
+/// `#[non_exhaustive]` so support for a new compression codec is not a
+/// breaking change for downstream matches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum CompressionCodec {
     /// Gzip compression (deflate algorithm).
     ///

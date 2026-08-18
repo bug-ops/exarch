@@ -24,6 +24,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `describe_final_swap_failure` (7 params, down to 4) to reach each of the six
   `disclose_if_orphaned` call sites individually. No behavior change.
 
+- **Bumped `sevenz-rust2` from 0.21.4 to 0.21.5, pulling in a transitive `lzma-rust2` bump from
+  0.18.0 to 0.19.0 (#548)**: `sevenz-rust2` 0.21.5 batches AES-CBC block decryption, a 7z-extraction
+  performance improvement on AES-encrypted archives — currently unreachable in `exarch-core`, since
+  every call site uses `Password::empty()` and encrypted 7z archives are rejected before decryption
+  is attempted, so this is a forward-looking perf improvement rather than an observable behavior
+  change. The transitive `lzma-rust2` bump picks up the out-of-bounds LZ encoder fix that actually
+  landed in 0.18.1 (upstream #107, an encoder-only panic on single-stream encodes above roughly
+  2 GiB); 0.19.0 itself minor-bumped separately to add sans-I/O LZMA1/LZIP decoders (upstream #109).
+  `lzma-rust2`'s encoder surface is unreachable in `exarch-core` today, since 7z archive creation is
+  unsupported, so the encoder fix is defense-in-depth for a currently-dormant code path. Only
+  `Cargo.lock` changes; `sevenz-rust2 = "0.21.4"` in `Cargo.toml` is left as-is since the caret
+  requirement already admits 0.21.5.
+
 ## [0.6.0] - 2026-08-04
 
 ### Security

@@ -7,6 +7,7 @@ use crate::commands::atomic_swap::DestEntryKind;
 use crate::commands::atomic_swap::PinnedDir;
 use crate::error::add_archive_context;
 use crate::output::OutputFormatter;
+use crate::output::Verbosity;
 use crate::progress::CliProgress;
 use crate::progress::VerboseProgress;
 use anyhow::Context;
@@ -719,8 +720,7 @@ fn filter_banned_components(raw: &[String]) -> Vec<String> {
 pub fn execute(
     args: &ExtractArgs,
     formatter: &mut dyn OutputFormatter,
-    verbose: bool,
-    quiet: bool,
+    verbosity: Verbosity,
 ) -> Result<()> {
     let output_dir = match &args.output_dir {
         Some(dir) => dir.clone(),
@@ -817,12 +817,12 @@ pub fn execute(
         .with_atomic(args.atomic && atomic_force_target.is_none())
         .with_skip_duplicates(!args.force);
 
-    let mut progress: Box<dyn ProgressCallback> = if verbose {
-        Box::new(VerboseProgress::new())
-    } else if !quiet && CliProgress::should_show() {
-        Box::new(CliProgress::new(entry_count, "Extracting"))
-    } else {
-        Box::new(NoopProgress)
+    let mut progress: Box<dyn ProgressCallback> = match verbosity {
+        Verbosity::Verbose => Box::new(VerboseProgress::new()),
+        Verbosity::Normal if CliProgress::should_show() => {
+            Box::new(CliProgress::new(entry_count, "Extracting"))
+        }
+        Verbosity::Quiet | Verbosity::Normal => Box::new(NoopProgress),
     };
 
     let report = if let Some(target) = atomic_force_target {

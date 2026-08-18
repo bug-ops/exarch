@@ -1,5 +1,6 @@
 //! Human-readable output formatter with colors and styling.
 
+use super::Verbosity;
 use super::formatter::OutputFormatter;
 use super::humanize_bytes;
 use anyhow::Result;
@@ -17,8 +18,7 @@ use std::path::Path;
 /// to `E`. Defaults to the process stdout/stderr terminals; tests can inject
 /// in-memory writers via [`HumanFormatter::with_writers`] to capture output.
 pub struct HumanFormatter<O: Write = Term, E: Write = Term> {
-    verbose: bool,
-    quiet: bool,
+    verbosity: Verbosity,
     use_colors: bool,
     out: O,
     err: E,
@@ -27,10 +27,9 @@ pub struct HumanFormatter<O: Write = Term, E: Write = Term> {
 impl HumanFormatter<Term, Term> {
     /// Creates a formatter writing to the process stdout/stderr terminals,
     /// with colors auto-detected from the environment.
-    pub fn new(verbose: bool, quiet: bool) -> Self {
+    pub fn new(verbosity: Verbosity) -> Self {
         Self {
-            verbose,
-            quiet,
+            verbosity,
             use_colors: console::colors_enabled(),
             out: Term::stdout(),
             err: Term::stderr(),
@@ -43,10 +42,9 @@ impl<O: Write, E: Write> HumanFormatter<O, E> {
     /// set explicitly rather than auto-detected — lets tests assert on
     /// deterministic output regardless of TTY state.
     #[cfg_attr(not(test), allow(dead_code))]
-    pub fn with_writers(out: O, err: E, verbose: bool, quiet: bool, use_colors: bool) -> Self {
+    pub fn with_writers(out: O, err: E, verbosity: Verbosity, use_colors: bool) -> Self {
         Self {
-            verbose,
-            quiet,
+            verbosity,
             use_colors,
             out,
             err,
@@ -108,7 +106,7 @@ fn emit_blank<W: Write>(writer: &mut W) {
 
 impl<O: Write, E: Write> OutputFormatter for HumanFormatter<O, E> {
     fn format_extraction_result(&mut self, report: &ExtractionReport) -> Result<()> {
-        if self.quiet {
+        if self.verbosity == Verbosity::Quiet {
             return Ok(());
         }
 
@@ -141,7 +139,7 @@ impl<O: Write, E: Write> OutputFormatter for HumanFormatter<O, E> {
             );
         }
 
-        if self.verbose {
+        if self.verbosity == Verbosity::Verbose {
             emit_line(
                 &mut self.out,
                 format_args!("  Symlinks: {}", report.symlinks_created),
@@ -175,7 +173,7 @@ impl<O: Write, E: Write> OutputFormatter for HumanFormatter<O, E> {
         output_path: &Path,
         report: &CreationReport,
     ) -> Result<()> {
-        if self.quiet {
+        if self.verbosity == Verbosity::Quiet {
             return Ok(());
         }
 
@@ -273,7 +271,7 @@ impl<O: Write, E: Write> OutputFormatter for HumanFormatter<O, E> {
     }
 
     fn format_manifest_short(&mut self, manifest: &ArchiveManifest) -> Result<()> {
-        if self.quiet {
+        if self.verbosity == Verbosity::Quiet {
             return Ok(());
         }
 
@@ -289,7 +287,7 @@ impl<O: Write, E: Write> OutputFormatter for HumanFormatter<O, E> {
         manifest: &ArchiveManifest,
         human_readable: bool,
     ) -> Result<()> {
-        if self.quiet {
+        if self.verbosity == Verbosity::Quiet {
             return Ok(());
         }
 
@@ -356,7 +354,7 @@ impl<O: Write, E: Write> OutputFormatter for HumanFormatter<O, E> {
     }
 
     fn format_verification_report(&mut self, report: &VerificationReport) -> Result<()> {
-        if self.quiet {
+        if self.verbosity == Verbosity::Quiet {
             return Ok(());
         }
 
@@ -443,8 +441,8 @@ impl<O: Write, E: Write> OutputFormatter for HumanFormatter<O, E> {
 mod tests {
     use super::*;
 
-    fn formatter(verbose: bool, quiet: bool, use_colors: bool) -> HumanFormatter<Vec<u8>, Vec<u8>> {
-        HumanFormatter::with_writers(Vec::new(), Vec::new(), verbose, quiet, use_colors)
+    fn formatter(verbosity: Verbosity, use_colors: bool) -> HumanFormatter<Vec<u8>, Vec<u8>> {
+        HumanFormatter::with_writers(Vec::new(), Vec::new(), verbosity, use_colors)
     }
 
     fn out_text(f: &HumanFormatter<Vec<u8>, Vec<u8>>) -> String {
@@ -528,7 +526,7 @@ mod tests {
 
     #[test]
     fn format_extraction_result_no_colors() {
-        let mut f = formatter(false, false, false);
+        let mut f = formatter(Verbosity::Normal, false);
         f.format_extraction_result(&sample_extraction_report())
             .unwrap();
         let text = out_text(&f);
@@ -545,7 +543,7 @@ mod tests {
 
     #[test]
     fn format_extraction_result_with_warnings_and_files_skipped() {
-        let mut f = formatter(false, false, false);
+        let mut f = formatter(Verbosity::Normal, false);
         let mut report = sample_extraction_report();
         report.files_skipped = 2;
         report
@@ -560,7 +558,7 @@ mod tests {
 
     #[test]
     fn format_extraction_result_no_warnings_section_when_empty() {
-        let mut f = formatter(false, false, false);
+        let mut f = formatter(Verbosity::Normal, false);
         f.format_extraction_result(&sample_extraction_report())
             .unwrap();
         let text = out_text(&f);
@@ -570,7 +568,7 @@ mod tests {
 
     #[test]
     fn format_extraction_result_verbose() {
-        let mut f = formatter(true, false, false);
+        let mut f = formatter(Verbosity::Verbose, false);
         f.format_extraction_result(&sample_extraction_report())
             .unwrap();
         let text = out_text(&f);
@@ -580,7 +578,7 @@ mod tests {
 
     #[test]
     fn format_extraction_result_quiet_suppresses_output() {
-        let mut f = formatter(false, true, false);
+        let mut f = formatter(Verbosity::Quiet, false);
         f.format_extraction_result(&sample_extraction_report())
             .unwrap();
         assert!(out_text(&f).is_empty());
@@ -588,7 +586,7 @@ mod tests {
 
     #[test]
     fn format_extraction_result_with_colors() {
-        let mut f = formatter(false, false, true);
+        let mut f = formatter(Verbosity::Normal, true);
         f.format_extraction_result(&sample_extraction_report())
             .unwrap();
         // A reset escape sits between the styled "✓" and the following
@@ -605,7 +603,7 @@ mod tests {
 
     #[test]
     fn format_creation_result_no_colors() {
-        let mut f = formatter(false, false, false);
+        let mut f = formatter(Verbosity::Normal, false);
         let path = Path::new("out.tar.gz");
         f.format_creation_result(path, &sample_creation_report())
             .unwrap();
@@ -618,7 +616,7 @@ mod tests {
 
     #[test]
     fn format_creation_result_with_compression_and_warnings() {
-        let mut f = formatter(false, false, false);
+        let mut f = formatter(Verbosity::Normal, false);
         let mut report = sample_creation_report();
         report.bytes_compressed = 512;
         report.files_skipped = 1;
@@ -635,7 +633,7 @@ mod tests {
 
     #[test]
     fn format_creation_result_quiet_suppresses_output() {
-        let mut f = formatter(false, true, false);
+        let mut f = formatter(Verbosity::Quiet, false);
         f.format_creation_result(Path::new("out.tar.gz"), &sample_creation_report())
             .unwrap();
         assert!(out_text(&f).is_empty());
@@ -643,7 +641,7 @@ mod tests {
 
     #[test]
     fn format_error_writes_to_stderr_not_stdout() {
-        let mut f = formatter(false, false, false);
+        let mut f = formatter(Verbosity::Normal, false);
         let err = anyhow::anyhow!(exarch_core::ArchiveError::ZipBomb {
             compressed: 1000,
             uncompressed: 1_000_000,
@@ -669,7 +667,7 @@ mod tests {
         let previous = console::colors_enabled();
         console::set_colors_enabled(true);
 
-        let mut f = formatter(false, false, true);
+        let mut f = formatter(Verbosity::Normal, true);
         let err = anyhow::anyhow!("boom");
         f.format_error("extract", &err);
 
@@ -685,7 +683,7 @@ mod tests {
 
     #[test]
     fn format_error_ignores_quiet() {
-        let mut f = formatter(false, true, false);
+        let mut f = formatter(Verbosity::Quiet, false);
         let err = anyhow::anyhow!("boom");
         f.format_error("extract", &err);
         assert!(err_text(&f).contains("boom"));
@@ -727,7 +725,7 @@ mod tests {
 
     #[test]
     fn format_manifest_short_lists_paths_only() {
-        let mut f = formatter(false, false, false);
+        let mut f = formatter(Verbosity::Normal, false);
         f.format_manifest_short(&sample_manifest()).unwrap();
         let text = out_text(&f);
         assert!(text.contains("file.txt"));
@@ -737,14 +735,14 @@ mod tests {
 
     #[test]
     fn format_manifest_short_quiet_suppresses_output() {
-        let mut f = formatter(false, true, false);
+        let mut f = formatter(Verbosity::Quiet, false);
         f.format_manifest_short(&sample_manifest()).unwrap();
         assert!(out_text(&f).is_empty());
     }
 
     #[test]
     fn format_manifest_long_human_readable_size() {
-        let mut f = formatter(false, false, false);
+        let mut f = formatter(Verbosity::Normal, false);
         f.format_manifest_long(&sample_manifest(), true).unwrap();
         let text = out_text(&f);
         assert!(text.contains("1.0 KB"));
@@ -754,7 +752,7 @@ mod tests {
 
     #[test]
     fn format_manifest_long_raw_size() {
-        let mut f = formatter(false, false, false);
+        let mut f = formatter(Verbosity::Normal, false);
         f.format_manifest_long(&sample_manifest(), false).unwrap();
         let text = out_text(&f);
         assert!(text.contains("1024"));
@@ -763,7 +761,7 @@ mod tests {
 
     #[test]
     fn format_manifest_long_shows_symlink_target() {
-        let mut f = formatter(false, false, false);
+        let mut f = formatter(Verbosity::Normal, false);
         f.format_manifest_long(&sample_manifest(), true).unwrap();
         let text = out_text(&f);
         assert!(text.contains("link.txt -> file.txt"));
@@ -791,7 +789,7 @@ mod tests {
             }],
         };
 
-        let mut f = formatter(false, false, false);
+        let mut f = formatter(Verbosity::Normal, false);
         f.format_manifest_long(&manifest, true).unwrap();
         let text = out_text(&f);
         assert!(text.contains("hard.txt -> original.txt"));
@@ -799,7 +797,7 @@ mod tests {
 
     #[test]
     fn format_manifest_long_quiet_suppresses_output() {
-        let mut f = formatter(false, true, false);
+        let mut f = formatter(Verbosity::Quiet, false);
         f.format_manifest_long(&sample_manifest(), true).unwrap();
         assert!(out_text(&f).is_empty());
     }
@@ -822,7 +820,7 @@ mod tests {
 
     #[test]
     fn format_verification_report_pass_no_colors() {
-        let mut f = formatter(false, false, false);
+        let mut f = formatter(Verbosity::Normal, false);
         f.format_verification_report(&sample_verification_report(
             exarch_core::VerificationStatus::Pass,
         ))
@@ -838,7 +836,7 @@ mod tests {
 
     #[test]
     fn format_verification_report_with_colors() {
-        let mut f = formatter(false, false, true);
+        let mut f = formatter(Verbosity::Normal, true);
         f.format_verification_report(&sample_verification_report(
             exarch_core::VerificationStatus::Pass,
         ))
@@ -855,7 +853,7 @@ mod tests {
 
     #[test]
     fn format_verification_report_quiet_suppresses_output() {
-        let mut f = formatter(false, true, false);
+        let mut f = formatter(Verbosity::Quiet, false);
         f.format_verification_report(&sample_verification_report(
             exarch_core::VerificationStatus::Pass,
         ))

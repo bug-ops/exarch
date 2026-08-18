@@ -11,16 +11,21 @@ use clap::Parser;
 use error::StrictWarning;
 use error::VerificationFailed;
 use output::OutputFormatter;
+use output::Verbosity;
 use std::process;
 
-fn run(cli: &cli::Cli, formatter: &mut dyn OutputFormatter) -> (anyhow::Result<()>, &'static str) {
+fn run(
+    cli: &cli::Cli,
+    verbosity: Verbosity,
+    formatter: &mut dyn OutputFormatter,
+) -> (anyhow::Result<()>, &'static str) {
     match &cli.command {
         cli::Commands::Extract(args) => (
-            commands::extract::execute(args, formatter, cli.verbose, cli.quiet),
+            commands::extract::execute(args, formatter, verbosity),
             "extract",
         ),
         cli::Commands::Create(args) => (
-            commands::create::execute(args, formatter, cli.quiet),
+            commands::create::execute(args, formatter, verbosity),
             "create",
         ),
         cli::Commands::List(args) => (commands::list::execute(args, formatter), "list"),
@@ -34,9 +39,10 @@ fn run(cli: &cli::Cli, formatter: &mut dyn OutputFormatter) -> (anyhow::Result<(
 
 fn main() {
     let cli = cli::Cli::parse();
-    let mut formatter = output::create_formatter(cli.json, cli.verbose, cli.quiet);
+    let verbosity = Verbosity::from(&cli);
+    let mut formatter = output::create_formatter(cli.json, verbosity);
 
-    let (result, operation) = run(&cli, formatter.as_mut());
+    let (result, operation) = run(&cli, verbosity, formatter.as_mut());
     if let Err(err) = result {
         if err.is::<StrictWarning>() {
             process::exit(2);

@@ -18,6 +18,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`exarch-cli`'s output-formatter and progress-selection code took separate `verbose: bool, quiet: bool`
+  parameters, allowing the nonsensical `verbose: true, quiet: true` state and, in `extract`, resolving it
+  inconsistently between the formatter (quiet-wins) and the progress reporter (verbose-wins) (#550)**:
+  `output::create_formatter`, `HumanFormatter::new`, `HumanFormatter::with_writers`,
+  `commands::extract::execute`, and `commands::create::execute` now take a single `output::Verbosity`
+  (`Quiet` | `Normal` | `Verbose`) instead, resolved once via `impl From<&cli::Cli> for Verbosity` in
+  `main.rs` and threaded through every call site. `--verbose`/`--quiet` remain independent `clap` flags
+  with `conflicts_with` on `--quiet`; that check only rejects the pair when both land in the same
+  `ArgMatches` level (e.g. `exarch list --verbose --quiet`), so a split-level combination such as
+  `exarch --verbose extract archive.tar.gz out --quiet` still parses with both `true` —
+  `Verbosity::from_flags` resolves that case deterministically to `Quiet`, the same tie-break the
+  formatter already used.
+
+  **Behavior change**: `extract`'s progress reporter previously selected `VerboseProgress` whenever
+  `--verbose` was passed, even together with `--quiet` (verbose-wins), while the formatter suppressed the
+  summary (quiet-wins) — so `--verbose extract ... --quiet` printed per-entry progress lines but no
+  summary. Both now consistently resolve to `Quiet` (no progress output, no summary) through the same
+  `Verbosity` value.
+
 - **`exarch-cli`'s `--atomic --force` swap path now bundles the pinned temp directory's
   `pin`/`name`/`id`/`parent_display` identifiers into a `TempOrphanRef` struct (#538)** instead of
   threading the same four parameters through `move_destination_to_backup` (7 params, down to 4) and

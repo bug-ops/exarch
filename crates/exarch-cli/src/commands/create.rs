@@ -2,6 +2,7 @@
 
 use crate::cli::CreateArgs;
 use crate::output::OutputFormatter;
+use crate::output::Verbosity;
 use crate::progress::CliProgress;
 use anyhow::Context;
 use anyhow::Result;
@@ -9,7 +10,11 @@ use exarch_core::CreationConfig;
 use exarch_core::NoopProgress;
 use exarch_core::create_archive_with_progress;
 
-pub fn execute(args: &CreateArgs, formatter: &mut dyn OutputFormatter, quiet: bool) -> Result<()> {
+pub fn execute(
+    args: &CreateArgs,
+    formatter: &mut dyn OutputFormatter,
+    verbosity: Verbosity,
+) -> Result<()> {
     // Check if output exists
     if args.output.exists() && !args.force {
         anyhow::bail!(
@@ -42,7 +47,7 @@ pub fn execute(args: &CreateArgs, formatter: &mut dyn OutputFormatter, quiet: bo
     config.exclude_patterns.extend(args.exclude.iter().cloned());
 
     // Create archive with progress if TTY is detected
-    let report = if !quiet && CliProgress::should_show() {
+    let report = if verbosity != Verbosity::Quiet && CliProgress::should_show() {
         let mut progress = CliProgress::new(100, "Creating");
         create_archive_with_progress(&args.output, &args.sources, &config, &mut progress)
             .with_context(|| format!("Failed to create archive: {}", args.output.display()))?
@@ -186,7 +191,7 @@ mod tests {
         let args = make_args(out, src);
         let mut formatter = AlwaysCallSpyFormatter::new();
 
-        execute(&args, &mut formatter, true).unwrap();
+        execute(&args, &mut formatter, Verbosity::Quiet).unwrap();
 
         assert!(
             formatter.was_called(),
@@ -204,7 +209,7 @@ mod tests {
         let args = make_args(out, src);
         let mut formatter = AlwaysCallSpyFormatter::new();
 
-        execute(&args, &mut formatter, false).unwrap();
+        execute(&args, &mut formatter, Verbosity::Normal).unwrap();
 
         assert!(formatter.was_called());
     }
@@ -221,7 +226,7 @@ mod tests {
         let args = make_args(out, src);
         let mut formatter = SpyFormatter::new(true);
 
-        execute(&args, &mut formatter, true).unwrap();
+        execute(&args, &mut formatter, Verbosity::Quiet).unwrap();
 
         assert!(
             !formatter.was_called(),

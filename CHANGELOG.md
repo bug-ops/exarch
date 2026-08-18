@@ -42,6 +42,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   threading the same four parameters through `move_destination_to_backup` (7 params, down to 4) and
   `describe_final_swap_failure` (7 params, down to 4) to reach each of the six
   `disclose_if_orphaned` call sites individually. No behavior change.
+- **Sanitized file permission modes are now a distinct type, `SanitizedMode` (#549)**:
+  `security::sanitize_permissions` returns `SanitizedMode` instead of a plain `u32`, and
+  `ValidatedEntry::mode()`, `EntryValidator::validate_entry()`'s sanitized output, and
+  `formats::common::create_file_with_mode`/`extract_file_with_permit` now take `Option<SanitizedMode>`
+  instead of `Option<u32>`. `SanitizedMode` can only be constructed by `sanitize_permissions`, so an
+  unsanitized mode read from an archive header can no longer reach permission-setting code by mistake —
+  the invariant is enforced at compile time instead of only in a doc comment. Call `.as_u32()` to
+  recover the raw mode.
+- **Six public enums expected to grow variants before v1.0.0 are now `#[non_exhaustive]` (#551)**:
+  `ArchiveError`, `QuotaResource`, `formats::detect::ArchiveType`, `formats::compression::CompressionCodec`,
+  `inspection::report::IssueCategory`, and `types::entry_type::EntryType`. (`creation::walker::EntryType`
+  is `pub(crate)`-only and not part of this change — the attribute would have no effect on a type that is
+  never nameable outside this crate.) Downstream crates matching on the six public enums exhaustively now
+  need a wildcard arm; `exarch-cli`, `exarch-python`, and `exarch-node` have been updated accordingly.
 
 - **Bumped `sevenz-rust2` from 0.21.4 to 0.21.5, pulling in a transitive `lzma-rust2` bump from
   0.18.0 to 0.19.0 (#548)**: `sevenz-rust2` 0.21.5 batches AES-CBC block decryption, a 7z-extraction

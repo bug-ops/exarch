@@ -98,6 +98,10 @@ pub fn convert_error(err: CoreError) -> Error {
                         "QUOTA_EXCEEDED: quota exceeded: integer overflow in quota tracking",
                     );
                 }
+                // Forward-compat: a variant added to QuotaResource after this
+                // match was written. #[non_exhaustive] requires this arm to
+                // compile against a newer exarch-core.
+                _ => msg.push_str("QUOTA_EXCEEDED: quota exceeded"),
             }
             Error::new(Status::GenericFailure, msg)
         }
@@ -177,6 +181,13 @@ pub fn convert_error(err: CoreError) -> Error {
             );
             Error::new(Status::GenericFailure, msg)
         }
+        // Forward-compat: a variant added to ArchiveError after this match was
+        // written. #[non_exhaustive] requires this arm to compile against a
+        // newer exarch-core.
+        _ => Error::new(
+            Status::GenericFailure,
+            "UNKNOWN: unrecognized archive error",
+        ),
     }
 }
 

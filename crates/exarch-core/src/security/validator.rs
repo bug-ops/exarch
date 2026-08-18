@@ -11,6 +11,7 @@ use crate::config::Validated;
 use crate::formats::common::DirCache;
 use crate::security::context::ValidationContext;
 use crate::security::hardlink::HardlinkTracker;
+use crate::security::permissions::SanitizedMode;
 use crate::security::permissions::sanitize_permissions;
 use crate::security::quota::QuotaPermit;
 use crate::security::quota::QuotaTracker;
@@ -34,7 +35,7 @@ use crate::types::SafeSymlink;
 pub struct ValidatedEntry {
     safe_path: SafePath,
     entry_type: ValidatedEntryType,
-    mode: Option<u32>,
+    mode: Option<SanitizedMode>,
 }
 
 impl ValidatedEntry {
@@ -46,7 +47,7 @@ impl ValidatedEntry {
     pub(crate) fn new(
         safe_path: SafePath,
         entry_type: ValidatedEntryType,
-        mode: Option<u32>,
+        mode: Option<SanitizedMode>,
     ) -> Self {
         Self {
             safe_path,
@@ -72,7 +73,7 @@ impl ValidatedEntry {
     /// Returns the sanitized file permissions, if applicable.
     #[inline]
     #[must_use]
-    pub fn mode(&self) -> Option<u32> {
+    pub fn mode(&self) -> Option<SanitizedMode> {
         self.mode
     }
 
@@ -87,7 +88,7 @@ impl ValidatedEntry {
     /// call this instead of `entry_type()`.
     #[inline]
     #[must_use]
-    pub(crate) fn into_parts(self) -> (SafePath, ValidatedEntryType, Option<u32>) {
+    pub(crate) fn into_parts(self) -> (SafePath, ValidatedEntryType, Option<SanitizedMode>) {
         (self.safe_path, self.entry_type, self.mode)
     }
 }
@@ -453,7 +454,7 @@ mod tests {
         let entry = result.unwrap();
         assert_eq!(entry.safe_path.as_path(), Path::new("file.txt"));
         assert_matches!(entry.entry_type, ValidatedEntryType::File(_));
-        assert_eq!(entry.mode, Some(0o644));
+        assert_eq!(entry.mode.map(SanitizedMode::as_u32), Some(0o644));
     }
 
     #[test]
@@ -628,7 +629,7 @@ mod tests {
 
         assert!(result.is_ok());
         let entry = result.unwrap();
-        assert_eq!(entry.mode, Some(0o755)); // setuid stripped
+        assert_eq!(entry.mode.map(SanitizedMode::as_u32), Some(0o755)); // setuid stripped
     }
 
     #[test]

@@ -292,7 +292,11 @@ impl std::fmt::Display for IssueSeverity {
 }
 
 /// Issue categories (maps to security checks).
+///
+/// `#[non_exhaustive]` so a future security check is not a breaking change
+/// for downstream matches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum IssueCategory {
     /// Path traversal attack
     PathTraversal,

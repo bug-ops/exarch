@@ -38,6 +38,7 @@ use crate::config::Validated;
 use crate::copy::CopyBuffer;
 use crate::copy::copy_with_buffer;
 use crate::error::QuotaResource;
+use crate::security::permissions::SanitizedMode;
 use crate::security::quota::QuotaPermit;
 use crate::types::DestDir;
 use crate::types::SafePath;
@@ -542,14 +543,16 @@ pub fn check_extension_allowed(
 /// - Strip sticky bit (0o1000) if required by security policy
 /// - Ensure world-writable permissions are only set if allowed
 ///
-/// Mode sanitization MUST be performed by the caller (typically in the
-/// validation layer via `SecurityConfig::sanitize_mode()`). This function
-/// does NOT perform any sanitization and will apply the mode value directly.
+/// The [`SanitizedMode`] parameter type enforces mode sanitization at
+/// compile time: only
+/// [`sanitize_permissions`](crate::security::sanitize_permissions)
+/// can construct one, so a raw, unsanitized mode read from an archive header
+/// cannot reach this function by mistake.
 ///
 /// # Arguments
 ///
 /// * `path` - Path where file should be created
-/// * `mode` - Optional Unix file mode (must be pre-sanitized by caller)
+/// * `mode` - Optional pre-sanitized Unix file mode
 /// * `create_new` - If `true`, fail with `AlreadyExists` instead of truncating
 ///   an existing file at `path`
 ///
@@ -563,7 +566,7 @@ pub fn check_extension_allowed(
 #[cfg(unix)]
 pub fn create_file_with_mode(
     path: &Path,
-    mode: Option<u32>,
+    mode: Option<SanitizedMode>,
     create_new: bool,
 ) -> std::io::Result<File> {
     use std::fs::OpenOptions;
@@ -585,7 +588,7 @@ pub fn create_file_with_mode(
 
     if let Some(m) = mode {
         // Apply sanitized mode during open (already stripped setuid/setgid)
-        opts.mode(m);
+        opts.mode(m.as_u32());
     }
 
     let file = opts.open(path)?;
@@ -598,7 +601,7 @@ pub fn create_file_with_mode(
     // TOCTOU window between this open() and the permission change (issue
     // #460).
     if let Some(m) = mode {
-        file.set_permissions(Permissions::from_mode(m))?;
+        file.set_permissions(Permissions::from_mode(m.as_u32()))?;
     }
 
     Ok(file)
@@ -625,7 +628,7 @@ pub fn create_file_with_mode(
 #[cfg(not(unix))]
 pub fn create_file_with_mode(
     path: &Path,
-    _mode: Option<u32>,
+    _mode: Option<SanitizedMode>,
     create_new: bool,
 ) -> std::io::Result<File> {
     if create_new {
@@ -720,7 +723,7 @@ pub fn create_file_with_mode(
 pub fn extract_file_with_permit<R: Read>(
     reader: &mut R,
     safe_path: &SafePath,
-    mode: Option<u32>,
+    mode: Option<SanitizedMode>,
     _permit: QuotaPermit,
     dest: &DestDir,
     report: &mut ExtractionReport,
@@ -1079,11 +1082,21 @@ mod tests {
     use crate::NoopProgress;
     use crate::SecurityConfig;
     use crate::copy::CopyBuffer;
+    use crate::security::permissions::sanitize_permissions;
     use crate::security::quota::QuotaTracker;
     use std::assert_matches;
     use std::io::Cursor;
     use std::path::PathBuf;
     use tempfile::TempDir;
+
+    /// Builds a [`SanitizedMode`] for tests that don't otherwise need a
+    /// `SecurityConfig` in scope. None of the modes used across these tests
+    /// carry setuid/setgid/world-writable bits, so sanitizing with the
+    /// default config never changes the value.
+    fn sanitized(mode: u32) -> SanitizedMode {
+        let config = SecurityConfig::default().validate().expect("valid config");
+        sanitize_permissions(mode, &config)
+    }
 
     #[test]
     fn test_extract_file_with_permit_integer_overflow_check() {
@@ -1111,7 +1124,7 @@ mod tests {
         let result = extract_file_with_permit(
             &mut reader,
             &safe_path,
-            Some(0o644),
+            Some(sanitized(0o644)),
             permit,
             &dest,
             &mut report,
@@ -1175,7 +1188,7 @@ mod tests {
         let result = extract_file_with_permit(
             &mut reader,
             &safe_path,
-            Some(0o644),
+            Some(sanitized(0o644)),
             permit,
             &dest,
             &mut report,
@@ -1224,7 +1237,7 @@ mod tests {
         let result = extract_file_with_permit(
             &mut reader,
             &safe_path,
-            Some(0o644),
+            Some(sanitized(0o644)),
             permit,
             &dest,
             &mut report,
@@ -1270,7 +1283,7 @@ mod tests {
         let result = extract_file_with_permit(
             &mut reader,
             &safe_path,
-            Some(0o644),
+            Some(sanitized(0o644)),
             permit,
             &dest,
             &mut report,
@@ -1327,7 +1340,7 @@ mod tests {
         let result = extract_file_with_permit(
             &mut reader,
             &safe_path,
-            Some(0o644),
+            Some(sanitized(0o644)),
             permit,
             &dest,
             &mut report,
@@ -1557,8 +1570,8 @@ mod tests {
         let file_path = temp.path().join("test_0o644.txt");
 
         // Create file with mode 0o644
-        let file =
-            create_file_with_mode(&file_path, Some(0o644), false).expect("should create file");
+        let file = create_file_with_mode(&file_path, Some(sanitized(0o644)), false)
+            .expect("should create file");
         drop(file);
 
         // Verify file exists
@@ -1586,8 +1599,8 @@ mod tests {
         let file_path = temp.path().join("test_0o755.txt");
 
         // Create file with mode 0o755
-        let file =
-            create_file_with_mode(&file_path, Some(0o755), false).expect("should create file");
+        let file = create_file_with_mode(&file_path, Some(sanitized(0o755)), false)
+            .expect("should create file");
         drop(file);
 
         // Verify file exists
@@ -1615,8 +1628,8 @@ mod tests {
         let file_path = temp.path().join("test_0o600.txt");
 
         // Create file with mode 0o600
-        let file =
-            create_file_with_mode(&file_path, Some(0o600), false).expect("should create file");
+        let file = create_file_with_mode(&file_path, Some(sanitized(0o600)), false)
+            .expect("should create file");
         drop(file);
 
         // Verify file exists
@@ -1703,7 +1716,7 @@ mod tests {
         let config = SecurityConfig::default().validate().expect("valid config");
 
         // Mode 0o777 in archive, sanitized to 0o775 (world-writable stripped)
-        let sanitized_mode = 0o775u32;
+        let sanitized_mode = sanitize_permissions(0o777, &config);
         let permit = QuotaTracker::new()
             .reserve(0, &config)
             .expect("reservation should succeed");
@@ -1763,7 +1776,7 @@ mod tests {
         // process-global but safe to mutate here. Restored unconditionally.
         let previous_umask = unsafe { libc::umask(0o077) };
 
-        let result = create_file_with_mode(&file_path, Some(0o755), false);
+        let result = create_file_with_mode(&file_path, Some(sanitized(0o755)), false);
 
         // Restore previous umask unconditionally before any assert.
         unsafe { libc::umask(previous_umask) };

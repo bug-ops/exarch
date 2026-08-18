@@ -7,7 +7,11 @@ use thiserror::Error;
 pub type Result<T> = std::result::Result<T, ArchiveError>;
 
 /// Represents a specific quota resource that was exceeded.
+///
+/// `#[non_exhaustive]` so a future quota dimension is not a breaking change
+/// for downstream matches.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum QuotaResource {
     /// File count quota exceeded.
     FileCount {
@@ -55,7 +59,11 @@ impl std::fmt::Display for QuotaResource {
 
 /// Errors that can occur during archive operations (extraction, creation,
 /// listing, verification).
+///
+/// `#[non_exhaustive]` so a future error variant is not a breaking change
+/// for downstream matches.
 #[derive(Error, Debug)]
+#[non_exhaustive]
 pub enum ArchiveError {
     /// I/O operation failed.
     #[error("I/O error: {0}")]

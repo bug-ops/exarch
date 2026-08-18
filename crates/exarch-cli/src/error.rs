@@ -254,6 +254,10 @@ pub fn convert_extraction_error(
                 archive.display(),
             )
         }
+        // Forward-compat: a variant added to ArchiveError after this match was
+        // written. #[non_exhaustive] requires this arm to compile against a
+        // newer exarch-core; there is no more specific context to add.
+        _ => format!("Error while processing '{}'", archive.display()),
     };
     anyhow::Error::from(err).context(context)
 }

@@ -20,7 +20,11 @@ use std::path::PathBuf;
 ///     target: PathBuf::from("../target"),
 /// };
 /// ```
+///
+/// `#[non_exhaustive]` so a future archive entry kind is not a breaking
+/// change for downstream matches.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum EntryType {
     /// Regular file entry.
     File,

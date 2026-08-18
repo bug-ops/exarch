@@ -123,6 +123,7 @@ use crate::Result;
 use crate::SecurityConfig;
 use crate::config::Validated;
 use crate::copy::CopyBuffer;
+use crate::security::permissions::SanitizedMode;
 use crate::security::quota::QuotaPermit;
 use crate::security::validator::EntryValidator;
 use crate::security::validator::ValidatedEntryType;
@@ -288,7 +289,7 @@ impl<R: Read> TarArchive<R> {
     fn extract_file<ER: Read>(
         entry: &mut tar::Entry<'_, ER>,
         safe_path: &SafePath,
-        mode: Option<u32>,
+        mode: Option<SanitizedMode>,
         permit: QuotaPermit,
         ctx: &mut ExtractionContext<'_, '_>,
     ) -> Result<()> {

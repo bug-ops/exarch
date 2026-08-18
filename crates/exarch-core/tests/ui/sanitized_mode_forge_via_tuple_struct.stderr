@@ -1,0 +1,11 @@
+error[E0423]: cannot initialize a tuple struct which contains private fields
+  --> tests/ui/sanitized_mode_forge_via_tuple_struct.rs:10:17
+   |
+10 |     let _mode = SanitizedMode(todo!());
+   |                 ^^^^^^^^^^^^^
+   |
+note: constructor is not visible here due to private fields
+  --> src/security/permissions.rs
+   |
+   | pub struct SanitizedMode(u32);
+   |                          ^^^ private field

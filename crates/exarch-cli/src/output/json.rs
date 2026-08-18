@@ -34,6 +34,11 @@ fn extraction_error_kind(err: &ArchiveError) -> String {
         ArchiveError::UnknownFormat { .. } => "UnknownFormat",
         ArchiveError::InvalidConfiguration { .. } => "InvalidConfiguration",
         ArchiveError::PartialExtraction { source, .. } => return extraction_error_kind(source),
+        // Forward-compat: a variant added to ArchiveError after this match was
+        // written. #[non_exhaustive] requires this arm to compile against a
+        // newer exarch-core. "Error" matches the generic fallback documented
+        // for kinds that don't map to a known archive validation failure.
+        _ => "Error",
     }
     .to_string()
 }

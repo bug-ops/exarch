@@ -8,7 +8,7 @@ tags:
   - cli
   - rust
 created: 2026-05-20
-updated: 2026-08-04
+updated: 2026-09-02
 status: draft
 related:
   - "[[constitution]]"
@@ -166,6 +166,7 @@ THEN stdout contains valid JSON with all report fields; stderr contains no progr
 | FR-084 | `extract --atomic --force` SHALL reject a destination that is itself a symlink (or, on Windows, a junction/reparse point) on all platforms, and SHALL perform every rename/remove in its destination swap `*at`-relative to a file descriptor pinned on the destination's parent directory (Unix only), never by re-resolving a logical path mid-extraction. This is scoped to `--atomic --force` only — see [[015-atomic-force-destination-swap-hardening/spec]] for the full GHSA-x8wr-7ww2-c94x fix | must |
 | FR-085 | WHEN `extract --atomic --force`'s best-effort cleanup on failure cannot locate its temp/backup directory at the expected logical path (e.g. because an intermediate path component was redirected mid-extraction), THE CLI SHALL disclose the directory's actual current path (resolved via an open file descriptor, not the possibly-stale logical path) in its error output rather than leaving surviving content undisclosed (v0.6.0, #530) | should |
 | FR-086 | `verify`/`list` SHALL flag a TAR entry whose path is not valid UTF-8 as a `Medium`-severity `SuspiciousPath` `VerificationIssue` (portability risk, not a security issue — `security_status` is unaffected), flipping `status` to `Warning` instead of reporting `Pass` for an entry that may fail to extract on filesystems requiring UTF-8 names (v0.6.0, #528) | should |
+| FR-087 | `--verbose` and `--quiet` SHALL be resolved once into a single `output::Verbosity` (`Quiet` \| `Normal` \| `Verbose`) via `impl From<&cli::Cli> for Verbosity`, and threaded through `output::create_formatter`, `HumanFormatter::new`/`with_writers`, `commands::extract::execute`, and `commands::create::execute`, rather than each site independently interpreting the two raw booleans; `Verbosity::from_flags` SHALL resolve `verbose: true, quiet: true` to `Quiet` in every case, including when the two flags are parsed at different `clap` `ArgMatches` levels (e.g. a global `--verbose` combined with a subcommand-level `--quiet`), which `clap`'s `conflicts_with` on `--quiet` does not reject (unreleased, post-v0.6.0, #550, behavior change — see Edge Cases) | must |
 
 ## 4. Non-Functional Requirements
 
@@ -191,6 +192,7 @@ THEN stdout contains valid JSON with all report fields; stderr contains no progr
 | `HumanFormatter<O: Write = Term, E: Write = Term>` | Human-readable formatter; writes non-error output to `O`, errors to `E` (v0.6.0) | `HumanFormatter::new()` (stdout/stderr default), `HumanFormatter::with_writers()` (injects custom writers + `use_colors` for deterministic tests) |
 | `JsonFormatter<W: Write = Stdout>` | JSON formatter (v0.6.0) | `JsonFormatter::stdout()` (replaces the old unit-struct constructor), `JsonFormatter::with_writer()` |
 | `PinnedDir` (`commands::atomic_swap`) | Unix-only file-descriptor handle on the destination's parent directory, used by `--atomic --force` to perform `*at`-relative renames (v0.6.0, #526) | See [[015-atomic-force-destination-swap-hardening/spec]] |
+| `Verbosity` (`output`) | Enum replacing independent `verbose: bool, quiet: bool` parameters across formatter/progress construction (unreleased, post-v0.6.0, #550) | `Quiet` \| `Normal` \| `Verbose`; `from_flags(verbose, quiet)` resolves `quiet` as the deterministic tie-break when both are `true`; `impl From<&cli::Cli> for Verbosity` is the single resolution point |
 
 ### CLI Command Syntax
 
@@ -242,6 +244,7 @@ exarch completion <SHELL>    # bash | zsh | fish | powershell | elvish  (output 
 | `extract` pre-flight destination conflict with many pre-existing files | At most 10 conflicting paths listed (sorted), remainder collapsed into `... and N more` (v0.6.0, #500) |
 | Human-readable size >= 1 TB (e.g. `u64::MAX` bytes) | Renders as `"...  TB"`, not an inflated GB figure (v0.6.0, #451) |
 | `verify`/`list` on a TAR archive with a non-UTF8 entry name | `status: Warning` with a `Medium`-severity `SuspiciousPath` issue, not `Pass` (v0.6.0, #528/#529) — portability risk only, `security_status` unaffected |
+| `exarch --verbose extract archive.tar.gz out --quiet` (global `--verbose`, subcommand-level `--quiet`) | Resolves deterministically to `Quiet` (no progress output, no summary) via `Verbosity::from_flags` (unreleased, post-v0.6.0, #550, behavior change) — previously the progress reporter selected verbose output (verbose-wins) while the formatter suppressed the summary (quiet-wins), an inconsistency `clap`'s `conflicts_with` did not catch since the two flags parsed at different `ArgMatches` levels |
 
 ## 7. Success Criteria
 

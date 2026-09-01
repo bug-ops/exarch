@@ -3,7 +3,7 @@
 [![Crates.io](https://img.shields.io/crates/v/exarch-core)](https://crates.io/crates/exarch-core)
 [![docs.rs](https://img.shields.io/docsrs/exarch-core)](https://docs.rs/exarch-core)
 [![CI](https://img.shields.io/github/actions/workflow/status/bug-ops/exarch/ci.yml?branch=main)](https://github.com/bug-ops/exarch/actions)
-[![MSRV](https://img.shields.io/badge/MSRV-1.96.0-blue)](https://github.com/bug-ops/exarch)
+[![MSRV](https://img.shields.io/badge/MSRV-1.98.0-blue)](https://github.com/bug-ops/exarch)
 [![License](https://img.shields.io/crates/l/exarch-core)](../../LICENSE-MIT)
 
 Memory-safe archive extraction and creation library with security validation.
@@ -18,7 +18,7 @@ exarch-core = "0.6"
 ```
 
 > [!IMPORTANT]
-> Requires Rust 1.96.0 or later (Edition 2024).
+> Requires Rust 1.98.0 or later (Edition 2024).
 
 ## Usage
 
@@ -205,7 +205,7 @@ Optimized for throughput with:
 ## MSRV Policy
 
 > [!NOTE]
-> Minimum Supported Rust Version: **1.96.0**. MSRV increases are minor version bumps.
+> Minimum Supported Rust Version: **1.98.0**. MSRV increases are minor version bumps.
 
 ## License
 

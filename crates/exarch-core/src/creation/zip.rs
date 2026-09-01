@@ -194,7 +194,7 @@ fn create_zip_internal_with_progress<W: Write + Seek, P: AsRef<Path>>(
                 tracker.on_entry_start(&entry.archive_path);
                 // Skip root directory entry (empty path becomes "/" which is
                 // invalid)
-                if !entry.archive_path.as_os_str().is_empty() {
+                if !entry.archive_path.is_empty() {
                     let dir_path = format!("{}/", normalize_zip_path(&entry.archive_path)?);
                     zip.add_directory(&dir_path, options).map_err(|e| {
                         std::io::Error::other(IoContext::new(

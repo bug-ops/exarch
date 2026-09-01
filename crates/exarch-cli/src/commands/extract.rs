@@ -553,7 +553,7 @@ fn resolve_atomic_force_replace(
             // always `Some`, possibly empty (`Path::new("dest").parent()`
             // is `Some("")`).
             let parent = match output_dir.parent() {
-                Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+                Some(p) if !p.is_empty() => p.to_path_buf(),
                 _ => PathBuf::from("."),
             };
             (parent, name.to_os_string())

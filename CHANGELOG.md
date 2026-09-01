@@ -18,6 +18,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING: Bumped MSRV from 1.96.0 to 1.98.0 (#558)**: raises the minimum supported Rust
+  version across the workspace. Downstream consumers pinned to an older toolchain must upgrade
+  before taking this release. `rust-version` in the root `Cargo.toml`, the MSRV job in
+  `.github/workflows/ci.yml`, `clippy.toml`, and all README/CONTRIBUTING/spec references were
+  updated accordingly. Also replaced all `path.as_os_str().is_empty()` call sites with the
+  newly-stabilized `Path::is_empty()`.
+
 - **`exarch-cli`'s output-formatter and progress-selection code took separate `verbose: bool, quiet: bool`
   parameters, allowing the nonsensical `verbose: true, quiet: true` state and, in `extract`, resolving it
   inconsistently between the formatter (quiet-wins) and the progress reporter (verbose-wins) (#550)**:
@@ -42,6 +49,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   threading the same four parameters through `move_destination_to_backup` (7 params, down to 4) and
   `describe_final_swap_failure` (7 params, down to 4) to reach each of the six
   `disclose_if_orphaned` call sites individually. No behavior change.
+
 - **Sanitized file permission modes are now a distinct type, `SanitizedMode` (#549)**:
   `security::sanitize_permissions` returns `SanitizedMode` instead of a plain `u32`, and
   `ValidatedEntry::mode()`, `EntryValidator::validate_entry()`'s sanitized output, and

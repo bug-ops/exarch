@@ -123,7 +123,7 @@ impl SafeSymlink {
         // 1.5. Reject empty targets: an empty target does not point anywhere
         // (some platforms would silently create a dangling symlink); reject
         // it explicitly rather than letting it through.
-        if target.as_os_str().is_empty() {
+        if target.is_empty() {
             return Err(ArchiveError::SecurityViolation {
                 reason: "symlink target is empty".into(),
             });

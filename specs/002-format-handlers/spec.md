@@ -25,7 +25,7 @@ related:
 
 > [!info] Metadata
 > **Subsystem**: exarch-core / formats
-> **MSRV**: Rust 1.96.0
+> **MSRV**: Rust 1.98.0
 > **zip dependency**: 9.0.0-pre2
 > **Source**: extracted from [[001-exarch-system/spec]]
 

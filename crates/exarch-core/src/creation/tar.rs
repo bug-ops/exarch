@@ -304,7 +304,7 @@ fn add_directory_to_tar<W: Write>(
     config: &CreationConfig<Validated>,
     report: &mut CreationReport,
 ) -> Result<()> {
-    if archive_path.as_os_str().is_empty() {
+    if archive_path.is_empty() {
         return Ok(());
     }
 

@@ -125,7 +125,7 @@ impl HardlinkTracker {
         }
 
         // Reject empty targets: they do not point anywhere.
-        if target.as_os_str().is_empty() {
+        if target.is_empty() {
             return Err(ArchiveError::SecurityViolation {
                 reason: "hardlink target is empty".into(),
             });

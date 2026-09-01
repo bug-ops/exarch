@@ -735,9 +735,9 @@ mod tests {
 
     // Note: Full CVE regression tests for path traversal require real malicious
     // archives that cannot be created using the tar crate (it validates paths).
-    // Those tests should be added in tests/cve/ directory with pre-built malicious
-    // fixtures. This test verifies the workflow works with archives that tar
-    // crate accepts.
+    // Those tests should be added in tests/cve/ directory with pre-built
+    // malicious fixtures. This test verifies the workflow works with
+    // archives that tar crate accepts.
 
     #[test]
     fn test_verify_archive_symlink_escape() {
@@ -757,7 +757,8 @@ mod tests {
         temp_file.write_all(&archive_data).unwrap();
         temp_file.flush().unwrap();
 
-        // Default config blocks ALL symlinks, so check that the issue is detected
+        // Default config blocks ALL symlinks, so check that the issue is
+        // detected
         let config = SecurityConfig::default();
         let report = verify_archive(temp_file.path(), &config).unwrap();
 
@@ -770,8 +771,8 @@ mod tests {
         assert_eq!(report.suspicious_entries, 1);
         assert!(!report.issues.is_empty(), "Should detect symlink");
 
-        // Symlink is blocked by default config (SecurityViolation -> SuspiciousPath
-        // category)
+        // Symlink is blocked by default config (SecurityViolation ->
+        // SuspiciousPath category)
         let has_symlink_issue = report.issues.iter().any(|i| {
             matches!(i.category, IssueCategory::SuspiciousPath) && i.message.contains("symlink")
         });

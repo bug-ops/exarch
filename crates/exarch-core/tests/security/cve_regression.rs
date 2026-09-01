@@ -481,11 +481,11 @@ fn test_rustsec_2026_0067_symlink_dir_chmod_symlinks_allowed() {
 
 #[test]
 fn test_ghsa_2367_hardlink_does_not_corrupt_target() {
-    // Archive: legit.txt → hardlink link_to_legit→legit.txt → plain link_to_legit
-    // ATTACK. Two-pass: first pass extracts legit.txt and plain link_to_legit;
-    // second pass calls fs::copy for the hardlink (which overwrites
-    // link_to_legit with a copy of legit.txt). legit.txt must always contain
-    // "legit\n".
+    // Archive: legit.txt → hardlink link_to_legit→legit.txt → plain
+    // link_to_legit ATTACK. Two-pass: first pass extracts legit.txt and
+    // plain link_to_legit; second pass calls fs::copy for the hardlink
+    // (which overwrites link_to_legit with a copy of legit.txt). legit.txt
+    // must always contain "legit\n".
     let tar_data = TarTestBuilder::new()
         .add_file("legit.txt", b"legit\n")
         .add_hardlink("link_to_legit", "legit.txt")
@@ -498,8 +498,8 @@ fn test_ghsa_2367_hardlink_does_not_corrupt_target() {
     let config = config.validate().unwrap();
 
     let mut archive = TarArchive::new(Cursor::new(tar_data));
-    // Extraction may succeed or fail depending on platform duplicate-file handling,
-    // but legit.txt must never be corrupted.
+    // Extraction may succeed or fail depending on platform duplicate-file
+    // handling, but legit.txt must never be corrupted.
     let _ = archive.extract(
         temp.path(),
         &config,
@@ -699,8 +699,8 @@ struct RawZipEntry<'a> {
 /// raw byte assembly.
 fn build_raw_zip(entries: &[RawZipEntry<'_>]) -> Vec<u8> {
     let mut buf: Vec<u8> = Vec::new();
-    // Collect (local_offset, name_len, external_attributes, crc, content_len) per
-    // entry.
+    // Collect (local_offset, name_len, external_attributes, crc, content_len)
+    // per entry.
     let mut meta: Vec<(u32, u16, u32, u32, u32)> = Vec::new();
 
     for entry in entries {

@@ -227,26 +227,29 @@ pub fn collect_entries<P: AsRef<Path>, State>(
     for source in sources {
         let path = source.as_ref();
 
-        // `symlink_metadata` (lstat) is required here instead of `exists`/`metadata`
-        // (stat) so that a dangling symlink (target missing) is still treated as a
-        // present source; it is later classified as EntryType::Symlink below. The
-        // result is reused in the single-file branch to avoid a second lstat.
+        // `symlink_metadata` (lstat) is required here instead of
+        // `exists`/`metadata` (stat) so that a dangling symlink (target
+        // missing) is still treated as a present source; it is later
+        // classified as EntryType::Symlink below. The result is reused
+        // in the single-file branch to avoid a second lstat.
         let Ok(metadata) = path.symlink_metadata() else {
             return Err(ArchiveError::SourceNotFound {
                 path: path.to_path_buf(),
             });
         };
 
-        // `metadata.is_dir()` (from the lstat above) is required here instead of
-        // `path.is_dir()` (stat, follows symlinks), so that a symlink pointing at a
-        // directory is not routed into `FilteredWalker`/`WalkDir` by default —
-        // `WalkDir` always dereferences its root regardless of `follow_links(false)`
-        // and would produce an empty relative path for the root entry. Such a symlink
-        // is instead classified as `EntryType::Symlink` in the branch below,
-        // consistent with the symlink-to-file case. When `follow_symlinks` is
-        // explicitly enabled, though, the symlink must still be walked as a directory
-        // (via `path.is_dir()`, stat) to preserve the pre-existing dereferencing
-        // behavior for that config — otherwise the single-entry branch would try to
+        // `metadata.is_dir()` (from the lstat above) is required here instead
+        // of `path.is_dir()` (stat, follows symlinks), so that a
+        // symlink pointing at a directory is not routed into
+        // `FilteredWalker`/`WalkDir` by default — `WalkDir` always
+        // dereferences its root regardless of `follow_links(false)` and
+        // would produce an empty relative path for the root entry. Such a
+        // symlink is instead classified as `EntryType::Symlink` in the
+        // branch below, consistent with the symlink-to-file case. When
+        // `follow_symlinks` is explicitly enabled, though, the symlink
+        // must still be walked as a directory (via `path.is_dir()`,
+        // stat) to preserve the pre-existing dereferencing behavior for
+        // that config — otherwise the single-entry branch would try to
         // open the symlink as a regular file and fail with an I/O error.
         if metadata.is_dir() || (config.follow_symlinks && path.is_dir()) {
             let walker = FilteredWalker::new(path, config);
@@ -255,11 +258,13 @@ pub fn collect_entries<P: AsRef<Path>, State>(
             }
         } else {
             // For single files, we need to create a FilteredEntry manually.
-            // `symlink_metadata` (lstat) is required here instead of `metadata` (stat)
-            // so that a symlink passed directly as a top-level source is classified as
-            // EntryType::Symlink rather than silently dereferenced into its target.
-            // `metadata.is_dir()` can no longer be true here (that case is routed to
-            // the walk branch above), so only `File` and `Symlink` remain.
+            // `symlink_metadata` (lstat) is required here instead of `metadata`
+            // (stat) so that a symlink passed directly as a
+            // top-level source is classified as EntryType::Symlink
+            // rather than silently dereferenced into its target.
+            // `metadata.is_dir()` can no longer be true here (that case is
+            // routed to the walk branch above), so only `File` and
+            // `Symlink` remain.
             let size = if metadata.is_file() {
                 metadata.len()
             } else {
@@ -336,7 +341,8 @@ mod tests {
         let walker = FilteredWalker::new(root, &config);
         let entries: Vec<_> = walker.walk().collect::<Result<Vec<_>>>().unwrap();
 
-        // Should find exactly: root dir, file1, file2, subdir, file3 = 5 entries
+        // Should find exactly: root dir, file1, file2, subdir, file3 = 5
+        // entries
         assert_eq!(entries.len(), 5, "expected exactly 5 entries");
 
         let paths: Vec<_> = entries
@@ -657,8 +663,8 @@ mod tests {
 
         let entries = collect_entries(&sources, &config).unwrap();
 
-        // Should have: single_file.txt (1) + dir1 entries (2 files + 1 dir = 3) + dir2
-        // entries (1 file + 1 dir = 2) = 6 total
+        // Should have: single_file.txt (1) + dir1 entries (2 files + 1 dir = 3)
+        // + dir2 entries (1 file + 1 dir = 2) = 6 total
         assert!(
             entries.len() >= 5,
             "Expected at least 5 entries (files and dirs), got {}",
@@ -699,8 +705,8 @@ mod tests {
 
         let entries = collect_entries(&sources, &config).unwrap();
 
-        // Should have: 50 files in root + 1 subdir + 1 root dir + 30 files in subdir =
-        // 82
+        // Should have: 50 files in root + 1 subdir + 1 root dir + 30 files in
+        // subdir = 82
         assert!(
             entries.len() >= 80,
             "Expected at least 80 entries, got {}",

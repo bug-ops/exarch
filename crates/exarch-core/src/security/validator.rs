@@ -262,7 +262,8 @@ impl<'a> EntryValidator<'a> {
             EntryType::Hardlink { target } => {
                 self.check_ratio(compressed_size, uncompressed_size)?;
 
-                // Hardlink tracker validates: absolute paths, traversal, normalization, escapes
+                // Hardlink tracker validates: absolute paths, traversal,
+                // normalization, escapes
                 self.hardlink_tracker.validate_hardlink(
                     &safe_path,
                     target,
@@ -270,8 +271,8 @@ impl<'a> EntryValidator<'a> {
                     self.config,
                 )?;
 
-                // SAFETY: validate_hardlink verified target is relative, normalized, within
-                // dest
+                // SAFETY: validate_hardlink verified target is relative,
+                // normalized, within dest
                 let target_safe = SafePath::new_unchecked(target.clone());
 
                 (
@@ -798,8 +799,8 @@ mod tests {
             config.max_file_size,
             SecurityConfig::default().max_file_size
         );
-        // Note: dest.as_path() may be canonicalized on macOS (/var vs /private/var)
-        // Just verify dest is still accessible
+        // Note: dest.as_path() may be canonicalized on macOS (/var vs
+        // /private/var) Just verify dest is still accessible
         let _ = dest.as_path();
 
         // Validator can still be used

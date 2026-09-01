@@ -930,8 +930,8 @@ mod tests {
         let parent = tempfile::TempDir::new().unwrap();
         let output_dir = parent.path().join("extracted");
         std::fs::create_dir_all(&output_dir).unwrap();
-        // Create a file in output_dir so it's non-empty (rename over non-empty dir
-        // fails on most OSes)
+        // Create a file in output_dir so it's non-empty (rename over non-empty
+        // dir fails on most OSes)
         std::fs::write(output_dir.join("existing.txt"), b"old content").unwrap();
 
         let archive_dir = tempfile::TempDir::new().unwrap();
@@ -951,7 +951,8 @@ mod tests {
             &options,
         );
 
-        // Should fail with OutputExists or Io (platform dependent rename semantics)
+        // Should fail with OutputExists or Io (platform dependent rename
+        // semantics)
         assert!(result.is_err());
         // Output dir must still have old content (not corrupted)
         assert!(output_dir.join("existing.txt").exists());
@@ -1349,7 +1350,8 @@ mod tests {
             )
             .unwrap();
 
-        // The hardlink copies the file content — bytes should be reported twice.
+        // The hardlink copies the file content — bytes should be reported
+        // twice.
         let expected = (content.len() as u64) * 2;
         assert_eq!(
             progress.total, expected,

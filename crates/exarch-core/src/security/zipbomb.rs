@@ -16,7 +16,8 @@ pub fn validate_compression_ratio(
     config: &SecurityConfig<Validated>,
 ) -> Result<()> {
     // HIGH-001: Fix bypass for stored compression with compressed_size == 0
-    // Reject invalid entries where compressed_size is 0 but uncompressed_size > 0
+    // Reject invalid entries where compressed_size is 0 but uncompressed_size >
+    // 0
     if compressed_size == 0 {
         if uncompressed_size > 0 {
             return Err(ArchiveError::InvalidArchive(

@@ -401,8 +401,9 @@ mod tests {
         );
     }
 
-    // Regression tests for issue #204: PartialExtraction wrapping HardlinkEscape /
-    // SymlinkEscape must not repeat the inner error text more than once.
+    // Regression tests for issue #204: PartialExtraction wrapping
+    // HardlinkEscape / SymlinkEscape must not repeat the inner error text
+    // more than once.
 
     #[test]
     fn test_partial_hardlink_escape_inner_text_appears_once() {
@@ -434,8 +435,8 @@ mod tests {
         );
     }
 
-    // Regression tests for issue #295: four explicit arms must produce actionable
-    // messages.
+    // Regression tests for issue #295: four explicit arms must produce
+    // actionable messages.
 
     #[test]
     fn test_output_exists_contains_path_and_hint() {

@@ -462,7 +462,8 @@ mod tests {
 
     #[test]
     fn test_nonexistent_file_with_known_extension_uses_extension() {
-        // For a nonexistent file the magic-read silently fails, so extension wins.
+        // For a nonexistent file the magic-read silently fails, so extension
+        // wins.
         let path = PathBuf::from("/nonexistent/archive.zip");
         assert_eq!(detect_format(&path).unwrap(), ArchiveType::Zip);
     }
@@ -482,14 +483,16 @@ mod tests {
         assert_eq!(detect_format(&path).unwrap(), ArchiveType::Zip);
     }
 
-    // S3: USTAR detection must work even when the file is exactly 262 bytes with
-    // no extra padding — exercises the read loop for a file that is exactly at
-    // the boundary and has no trailing zero padding beyond offset 262.
+    // S3: USTAR detection must work even when the file is exactly 262 bytes
+    // with no extra padding — exercises the read loop for a file that is
+    // exactly at the boundary and has no trailing zero padding beyond
+    // offset 262.
     #[test]
     fn test_magic_tar_ustar_exact_boundary_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("minimal.tar");
-        // Write exactly 262 bytes: zeros everywhere except "ustar" at offset 257.
+        // Write exactly 262 bytes: zeros everywhere except "ustar" at offset
+        // 257.
         let mut data = vec![0u8; MAGIC_READ_LEN];
         data[257..262].copy_from_slice(b"ustar");
         std::fs::write(&path, &data).unwrap();
@@ -498,8 +501,9 @@ mod tests {
     }
 
     // S3: a file shorter than 262 bytes but with USTAR at offset 257 must still
-    // be detected (file is 262 bytes minimum by construction, but 263 bytes with
-    // one extra zero also works; test a file that is exactly the USTAR minimum).
+    // be detected (file is 262 bytes minimum by construction, but 263 bytes
+    // with one extra zero also works; test a file that is exactly the USTAR
+    // minimum).
     #[test]
     fn test_magic_tar_ustar_minimal_263_byte_file() {
         let dir = tempfile::tempdir().unwrap();

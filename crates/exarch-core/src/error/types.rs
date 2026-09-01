@@ -538,9 +538,10 @@ mod tests {
     }
 
     // Regression test for #177: ArchiveError::Io must not expose the inner
-    // std::io::Error as an error source. The manual From impl intentionally omits
-    // #[source] so callers building error chains (anyhow, thiserror) do not append
-    // the OS message a second time after ArchiveError::Io's own Display.
+    // std::io::Error as an error source. The manual From impl intentionally
+    // omits #[source] so callers building error chains (anyhow, thiserror)
+    // do not append the OS message a second time after ArchiveError::Io's
+    // own Display.
     #[test]
     fn test_io_error_no_source_chain() {
         use std::error::Error;

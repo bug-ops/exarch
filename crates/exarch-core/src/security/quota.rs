@@ -102,8 +102,8 @@ impl QuotaTracker {
         size: u64,
         config: &SecurityConfig<Validated>,
     ) -> Result<QuotaPermit> {
-        // OPT-C003: Fast path when all quotas unlimited - skip checks, only detect
-        // overflow
+        // OPT-C003: Fast path when all quotas unlimited - skip checks, only
+        // detect overflow
         if config.max_file_size == u64::MAX
             && config.max_file_count == usize::MAX
             && config.max_total_size == u64::MAX

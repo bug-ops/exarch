@@ -158,8 +158,9 @@ fn create_zip_internal_with_progress<W: Write + Seek, P: AsRef<Path>>(
     let start = std::time::Instant::now();
 
     // Configure ZIP file options with compression level. `compression_level`
-    // is guaranteed to be `None` or `Some(1..=9)` by `CreationConfig::validate`,
-    // so `Stored` (level 0) is unreachable through the public API.
+    // is guaranteed to be `None` or `Some(1..=9)` by
+    // `CreationConfig::validate`, so `Stored` (level 0) is unreachable
+    // through the public API.
     let level = config.compression_level.unwrap_or(6);
     let options = SimpleFileOptions::default()
         .compression_method(CompressionMethod::Deflated)
@@ -191,7 +192,8 @@ fn create_zip_internal_with_progress<W: Write + Seek, P: AsRef<Path>>(
             }
             EntryType::Directory => {
                 tracker.on_entry_start(&entry.archive_path);
-                // Skip root directory entry (empty path becomes "/" which is invalid)
+                // Skip root directory entry (empty path becomes "/" which is
+                // invalid)
                 if !entry.archive_path.as_os_str().is_empty() {
                     let dir_path = format!("{}/", normalize_zip_path(&entry.archive_path)?);
                     zip.add_directory(&dir_path, options).map_err(|e| {
@@ -415,8 +417,8 @@ mod tests {
 
         // Should have exactly 3 files: file1.txt, file2.txt, subdir/file3.txt
         assert_eq!(report.files_added, 3);
-        // Should have exactly 1 directory: subdir (root is omitted — empty archive path
-        // is invalid in ZIP)
+        // Should have exactly 1 directory: subdir (root is omitted — empty
+        // archive path is invalid in ZIP)
         assert_eq!(report.directories_added, 1);
         assert!(output.exists());
     }
@@ -787,7 +789,8 @@ mod tests {
 
         let report = create_zip(&output, &[source_dir.path()], &config).unwrap();
 
-        // Both target.txt and the followed link.txt must be written as regular entries.
+        // Both target.txt and the followed link.txt must be written as regular
+        // entries.
         assert_eq!(report.files_added, 2);
         assert_eq!(report.files_skipped, 0);
         assert!(!report.has_warnings());

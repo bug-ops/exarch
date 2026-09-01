@@ -1442,7 +1442,8 @@ mod tests {
             .ensure_parent_dir(&file_path)
             .expect("should handle single component");
 
-        // Parent is temp.path(), which was not in cache, so it gets created/cached
+        // Parent is temp.path(), which was not in cache, so it gets
+        // created/cached
         assert!(created, "parent directory gets cached on first call");
 
         // Second call should use cache
@@ -1831,7 +1832,8 @@ mod tests {
         .expect("first create_symlink should succeed");
         assert_eq!(report.symlinks_created, 1);
 
-        // Second creation with skip_duplicates=false must overwrite without error
+        // Second creation with skip_duplicates=false must overwrite without
+        // error
         create_symlink(
             &safe_symlink,
             &dest,

@@ -993,7 +993,8 @@ mod tests {
         if !target.join("payload.txt").exists() {
             // DAC permission checks don't apply to root, so the restriction
             // above did nothing and cleanup genuinely succeeded — same
-            // root-skip reasoning as `parent_without_read_permission_is_rejected`
+            // root-skip reasoning as
+            // `parent_without_read_permission_is_rejected`
             // in `atomic_swap.rs`.
             eprintln!(
                 "skipping: permission-restricted removal unexpectedly succeeded (running as \

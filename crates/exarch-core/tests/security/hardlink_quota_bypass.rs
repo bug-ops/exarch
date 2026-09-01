@@ -133,7 +133,8 @@ fn test_hardlink_bomb_exceeds_total_size() {
         "expected TotalSize quota error, got: {quota_err:?}"
     );
 
-    // Must have stopped well short of all 20 hardlinks (target + at most 3 links).
+    // Must have stopped well short of all 20 hardlinks (target + at most 3
+    // links).
     assert!(
         files_extracted <= 4,
         "extraction must stop at the quota boundary, not write all hardlinks; wrote {files_extracted}"

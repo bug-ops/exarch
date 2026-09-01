@@ -960,7 +960,8 @@ mod tests {
     fn test_config_default_security_flags() {
         let config = SecurityConfig::default();
 
-        // All security-sensitive flags should be false by default (deny-by-default)
+        // All security-sensitive flags should be false by default
+        // (deny-by-default)
         assert!(
             !config.allowed.symlinks,
             "symlinks should be denied by default"

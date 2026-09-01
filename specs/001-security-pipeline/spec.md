@@ -8,7 +8,7 @@ tags:
   - security
   - rust
 created: 2026-05-20
-updated: 2026-08-04
+updated: 2026-09-02
 status: draft
 related:
   - "[[constitution]]"
@@ -17,6 +17,7 @@ related:
   - "[[003-config-api/spec]]"
   - "[[013-quota-permit-capability-token/spec]]"
   - "[[014-config-typestate-validation/spec]]"
+  - "[[016-sanitized-mode-and-non-exhaustive-enums/spec]]"
 ---
 
 # Feature: Security Pipeline
@@ -157,13 +158,14 @@ THEN the written file has those bits cleared; ValidatedEntry.mode reflects the s
 | FR-016 | WHEN opening a destination path for a file, symlink-target read, or 7z temp-file write, THE SYSTEM SHALL use `O_EXCL`/`O_NOFOLLOW` (Unix) or an equivalent atomic create-exclusive open rather than a prior `Path::exists()` check, since `exists()` follows symlinks and reports `false` for a dangling one — letting a pre-planted symlink at the destination bypass duplicate detection and redirect the write outside the extraction root | must |
 | FR-017 | WHEN a file entry is validated, THE SYSTEM SHALL produce a `QuotaPermit` capability token from `QuotaTracker::reserve` that the eventual write path must consume by value, so a validated `File` entry with no quota charge is unrepresentable and a reservation cannot be spent twice (see [[013-quota-permit-capability-token/spec]]) | must |
 | FR-018 | WHEN `SecurityConfig`/`CreationConfig` builder methods are used, THE SYSTEM SHALL make them available only on the `Unvalidated` typestate, and `validate()` SHALL consume `self` and return `Result<T<Validated>>`; every downstream security function SHALL require `&SecurityConfig<Validated>` (see [[014-config-typestate-validation/spec]]) | must |
+| FR-019 | WHEN comparing a validated entry's canonicalized parent path against the destination root on macOS/Windows, THE SYSTEM SHALL compare `Path::components()` pairwise (case-folding each segment) rather than the raw lowercased path strings, so a sibling directory sharing the destination root's name as a string prefix (e.g. `/tmp/destevil` vs. `/tmp/dest`) is not treated as contained within it, closing GHSA-wcmx-7f9h-5mv5 | must |
 
 ## 4. Non-Functional Requirements
 
 | ID | Category | Requirement |
 |----|----------|-------------|
 | NFR-001 | Security | All security checks run before any bytes are written to disk for each entry |
-| NFR-002 | Security | Path component matching is case-insensitive to prevent bypass on case-insensitive filesystems |
+| NFR-002 | Security | Path component matching is case-insensitive and component-wise (not a raw string-prefix comparison) to prevent bypass on case-insensitive filesystems (GHSA-wcmx-7f9h-5mv5) |
 | NFR-003 | Security | Default limits: 50 MB per file, 500 MB total, 100× compression ratio, 10,000 files, depth 32 |
 | NFR-004 | Security | Default banned components: `.git`, `.ssh`, `.gnupg`, `.aws`, `.kube`, `.docker`, `.env` |
 | NFR-005 | Safety | `deny(unsafe_code)` workspace-wide — no exceptions in this module |
@@ -267,6 +269,26 @@ THEN the written file has those bits cleared; ValidatedEntry.mode reflects the s
 > legitimate entry's real content — see `formats::tar_metadata_limit::BudgetedReader` for the
 > synthetic-vs-real byte accounting that makes this direction-independent.
 
+> [!note] (unreleased, post-v0.6.0): sibling-directory containment bypass closed on macOS/Windows (GHSA-wcmx-7f9h-5mv5, #543)
+> `paths_start_with` — used by `SafePath`'s macOS/Windows containment check — compared `path`/`base`
+> as raw lowercased strings, so `/tmp/destevil` was wrongly treated as contained within `/tmp/dest`
+> (`"...destevil".starts_with("...dest")` is true, since there is no component boundary between
+> `dest` and `evil`). The non-macOS Unix arm was unaffected — it already used `Path::starts_with`,
+> which is component-aware. Fixed by comparing `Path::components()` pairwise, case-folding each
+> segment, matching the same semantics as the Unix arm. Covered by unit tests (sibling rejection,
+> genuine-subdirectory acceptance, case-insensitivity, base-longer-than-path short-circuit) plus an
+> end-to-end regression test driving the attack through a real on-disk symlink.
+
+> [!note] (unreleased, post-v0.6.0): `SanitizedMode` newtype and `#[non_exhaustive]` enum hardening (#554)
+> `sanitize_permissions` now returns `SanitizedMode` (`security::SanitizedMode`) instead of a plain
+> `u32`; `ValidatedEntry::mode()`, `EntryValidator::validate_entry()`'s sanitized output, and
+> `formats::common::create_file_with_mode`/`extract_file_with_permit` take `Option<SanitizedMode>`
+> instead of `Option<u32>`, so an unsanitized mode read from an archive header can no longer reach
+> permission-setting code by mistake — the invariant is enforced at compile time, matching the
+> `SafePath`/`QuotaPermit` sealed-type pattern. Full detail, including the six enums newly marked
+> `#[non_exhaustive]` (`ArchiveError`, `QuotaResource`, and others outside this pipeline), is tracked
+> in [[016-sanitized-mode-and-non-exhaustive-enums/spec]].
+
 ## 6. Edge Cases and Error Handling
 
 | Scenario | Expected Behavior |
@@ -285,6 +307,7 @@ THEN the written file has those bits cleared; ValidatedEntry.mode reflects the s
 | Symlink pointing outside `output_dir` | `ArchiveError::SymlinkEscape` |
 | Symlink or hardlink target is empty or contains a null byte | `ArchiveError::SecurityViolation` (raw target bytes never embedded in the error message) |
 | Dangling symlink pre-planted at an entry's destination path | Rejected via `O_EXCL`/`O_NOFOLLOW` open, not silently followed; requires an attacker-writable destination directory |
+| On macOS/Windows, a validated entry's canonicalized path resolves (e.g. via a symlink) into a sibling directory sharing the destination root's name as a string prefix (e.g. `/tmp/destevil` vs. `/tmp/dest`) | Rejected — `paths_start_with` compares `Path::components()` pairwise, not raw lowercased strings (GHSA-wcmx-7f9h-5mv5, unreleased) |
 | Hardlink with `allowed.hardlinks = false` | Entry skipped |
 | Hardlink to a path not previously seen | `ArchiveError::HardlinkEscape` |
 | setuid/setgid bits on Unix | Stripped silently via `fchmod` on the open descriptor; `ValidatedEntry.mode()` reflects sanitized value |
@@ -348,4 +371,7 @@ THEN the written file has those bits cleared; ValidatedEntry.mode reflects the s
 - [[013-quota-permit-capability-token/spec]] — `QuotaPermit` capability-token pattern in detail
 - [[014-config-typestate-validation/spec]] — `SecurityConfig`/`CreationConfig` `Unvalidated`/`Validated` typestate in detail
 - [[015-atomic-force-destination-swap-hardening/spec]] — CLI-side `--atomic --force` symlink/TOCTOU hardening (GHSA-x8wr-7ww2-c94x)
+- [[016-sanitized-mode-and-non-exhaustive-enums/spec]] — `SanitizedMode` capability-token newtype and `#[non_exhaustive]` enum hardening
 - [[001-exarch-system/spec]] — original monolithic spec (archived)
+- `crates/exarch-core/src/types/safe_path.rs` — `paths_start_with`
+- Advisory GHSA-wcmx-7f9h-5mv5 — the macOS/Windows sibling-directory containment bypass fixed here

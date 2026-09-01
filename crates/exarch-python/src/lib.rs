@@ -123,9 +123,9 @@ fn extract_archive(
     let options_ref = options.map_or(&default_options, |o| o.as_core());
 
     // Release GIL during I/O-heavy extraction
-    // NOTE: TOCTOU race condition - archive contents can change between check and
-    // extraction. This is an accepted limitation when releasing the GIL for
-    // performance.
+    // NOTE: TOCTOU race condition - archive contents can change between check
+    // and extraction. This is an accepted limitation when releasing the GIL
+    // for performance.
     let report = catch_panic_as_py_err("extraction", || {
         py.detach(|| {
             exarch_core::extract_archive_with_options(

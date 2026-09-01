@@ -940,7 +940,8 @@ mod tests {
             create_tar_internal_with_progress(encoder, &[source_dir.path()], &config, &mut noop);
 
         // Either the internal write or encoder.finish() must surface an error.
-        // We call finish() only if internal succeeded, mirroring the real code path.
+        // We call finish() only if internal succeeded, mirroring the real code
+        // path.
         let is_err = match result {
             Err(_) => true,
             Ok((_, enc)) => enc.finish().is_err(),

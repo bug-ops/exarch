@@ -224,7 +224,8 @@ mod tests {
     #[test]
     fn test_world_writable_bit_only_stripped() {
         let config = SecurityConfig::default().validate().expect("valid config");
-        // 0o666 = rw-rw-rw-, only other-write (0o002) should be stripped -> 0o664
+        // 0o666 = rw-rw-rw-, only other-write (0o002) should be stripped ->
+        // 0o664
         assert_eq!(
             sanitize_permissions(0o666, &config).as_u32(),
             0o664,

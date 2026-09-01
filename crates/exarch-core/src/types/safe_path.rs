@@ -212,12 +212,14 @@ impl SafePath {
                             path: path.to_path_buf(),
                         });
                     }
-                    // Strip root/prefix so final_path stays relative; dest.join()
-                    // would otherwise discard dest entirely for absolute paths.
+                    // Strip root/prefix so final_path stays relative;
+                    // dest.join() would otherwise discard
+                    // dest entirely for absolute paths.
                     // This is the canonical stripping point — format handlers
                     // (tar, sevenz) pass raw entry names straight through.
                     // ZIP is the exception: zip::ZipFile::enclosed_name() may
-                    // return None for rooted names, handled in resolve_entry_path.
+                    // return None for rooted names, handled in
+                    // resolve_entry_path.
                     needs_normalization = true;
                 }
             }
@@ -490,7 +492,8 @@ mod tests {
         let config = config.validate().expect("valid config");
 
         // Verify that an external absolute path is stripped to a relative path
-        // so dest.join() resolves inside dest, not at the original absolute location.
+        // so dest.join() resolves inside dest, not at the original absolute
+        // location.
         let result = SafePath::validate(Path::new("/some/external/path"), &dest, &config);
         assert!(
             result.is_ok(),
@@ -1191,7 +1194,8 @@ mod tests {
         let (_temp, dest) = create_test_dest();
         let config = SecurityConfig::default().validate().expect("valid config");
 
-        // ".." must still be rejected — it is a traversal attempt, not an archive root
+        // ".." must still be rejected — it is a traversal attempt, not an
+        // archive root
         let result = SafePath::validate(Path::new(".."), &dest, &config);
         assert_matches!(
             result,

@@ -214,8 +214,8 @@ mod tests {
         assert!(formatter.was_called());
     }
 
-    // Human formatter with quiet=true must suppress output — SpyFormatter mirrors
-    // HumanFormatter behavior.
+    // Human formatter with quiet=true must suppress output — SpyFormatter
+    // mirrors HumanFormatter behavior.
     #[test]
     fn human_formatter_suppresses_when_quiet() {
         let tmp = tempfile::tempdir().unwrap();

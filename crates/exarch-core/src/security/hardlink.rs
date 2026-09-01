@@ -145,9 +145,9 @@ impl HardlinkTracker {
 
         use std::path::Component;
 
-        // H-SEC-2: Reject Windows-specific absolute path components in target (before
-        // resolution) This prevents bypasses on Windows like C:\ or
-        // \\server\share
+        // H-SEC-2: Reject Windows-specific absolute path components in target
+        // (before resolution) This prevents bypasses on Windows like
+        // C:\ or \\server\share
         for component in target.components() {
             if matches!(component, Component::Prefix(_) | Component::RootDir) {
                 return Err(ArchiveError::HardlinkEscape {
@@ -156,7 +156,8 @@ impl HardlinkTracker {
             }
         }
 
-        // Also reject absolute targets (redundant with above, but keeps existing check)
+        // Also reject absolute targets (redundant with above, but keeps
+        // existing check)
         if target.is_absolute() {
             return Err(ArchiveError::HardlinkEscape {
                 path: link_path.as_path().to_path_buf(),
@@ -168,8 +169,9 @@ impl HardlinkTracker {
         //
         // String-based normalization is insufficient: if a previously extracted
         // symlink lies on the target path, a hardlink target can escape the
-        // extraction root via on-disk resolution even though string normalization
-        // would pass (two-hop chain bypass, GHSA-83g3-92jg-28cx variant — #116).
+        // extraction root via on-disk resolution even though string
+        // normalization would pass (two-hop chain bypass,
+        // GHSA-83g3-92jg-28cx variant — #116).
         let resolved =
             resolve_through_symlinks(dest.as_path(), target, dest.as_path(), link_path.as_path())
                 .map_err(|_| ArchiveError::HardlinkEscape {
@@ -367,7 +369,8 @@ mod tests {
             );
         }
 
-        // All three links point to the same target, so only 1 unique target tracked
+        // All three links point to the same target, so only 1 unique target
+        // tracked
         assert_eq!(
             tracker.count(),
             1,

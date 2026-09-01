@@ -29,7 +29,8 @@ impl From<CoreReport> for ExtractionReport {
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     fn from(report: CoreReport) -> Self {
         // Use saturating conversions to prevent silent wraparound on overflow
-        // This ensures audit trails remain accurate even for very large extractions
+        // This ensures audit trails remain accurate even for very large
+        // extractions
         Self {
             files_extracted: report.files_extracted.min(u32::MAX as usize) as u32,
             directories_created: report.directories_created.min(u32::MAX as usize) as u32,

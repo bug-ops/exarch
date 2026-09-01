@@ -567,8 +567,9 @@ fn sevenz_manifest_entry_type(entry: &sevenz_rust2::ArchiveEntry) -> ManifestEnt
     if entry.is_directory {
         return ManifestEntryType::Directory;
     }
-    // Detect Windows reparse points (symlinks) via FILE_ATTRIBUTE_REPARSE_POINT.
-    // Unix symlinks cannot be detected with this API; they are reported as files.
+    // Detect Windows reparse points (symlinks) via
+    // FILE_ATTRIBUTE_REPARSE_POINT. Unix symlinks cannot be detected with
+    // this API; they are reported as files.
     if entry.has_windows_attributes
         && (entry.windows_attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0
     {
@@ -721,7 +722,8 @@ mod tests {
         // Typeflag: '0' (regular file)
         block[156] = b'0';
 
-        // Checksum: sum of all bytes in the header (checksum field treated as spaces).
+        // Checksum: sum of all bytes in the header (checksum field treated as
+        // spaces).
         block[148..156].copy_from_slice(b"        ");
         let checksum: u32 = block.iter().map(|&b| u32::from(b)).sum();
         let checksum_str = format!("{checksum:06o}\0 ");
@@ -1046,8 +1048,9 @@ mod tests {
 
     #[test]
     fn test_zip_mode_strips_s_ifreg_bits() {
-        // Archives from Unix tools store the full stat(2) mode in external_attributes.
-        // 0o100644 = S_IFREG (0o100000) | 0o644. After listing, only 0o644 must remain.
+        // Archives from Unix tools store the full stat(2) mode in
+        // external_attributes. 0o100644 = S_IFREG (0o100000) | 0o644.
+        // After listing, only 0o644 must remain.
         let zip_bytes = zip_with_raw_unix_mode("file.txt", 0o100_644);
         let mut temp_file = NamedTempFile::with_suffix(".zip").unwrap();
         temp_file.write_all(&zip_bytes).unwrap();
@@ -1062,7 +1065,8 @@ mod tests {
 
     #[test]
     fn test_zip_mode_strips_s_ifdir_bits() {
-        // 0o040755 = S_IFDIR (0o040000) | 0o755. After listing, only 0o755 must remain.
+        // 0o040755 = S_IFDIR (0o040000) | 0o755. After listing, only 0o755 must
+        // remain.
         let zip_bytes = zip_with_raw_unix_mode("mydir/", 0o040_755);
         let mut temp_file = NamedTempFile::with_suffix(".zip").unwrap();
         temp_file.write_all(&zip_bytes).unwrap();
@@ -1077,7 +1081,8 @@ mod tests {
 
     #[test]
     fn test_zip_mode_permission_bits_unchanged() {
-        // When no file-type bits are present, permission bits must be preserved as-is.
+        // When no file-type bits are present, permission bits must be preserved
+        // as-is.
         let zip_bytes = zip_with_raw_unix_mode("file.txt", 0o644);
         let mut temp_file = NamedTempFile::with_suffix(".zip").unwrap();
         temp_file.write_all(&zip_bytes).unwrap();
@@ -1216,7 +1221,8 @@ mod tests {
 
     #[test]
     fn test_list_sevenz_corrupt() {
-        // A truncated 7z header (valid magic, invalid body) must return InvalidArchive.
+        // A truncated 7z header (valid magic, invalid body) must return
+        // InvalidArchive.
         let mut temp_file = NamedTempFile::with_suffix(".7z").unwrap();
         temp_file.write_all(b"7z\xbc\xaf\x27\x1c\x00\x04").unwrap();
         temp_file.flush().unwrap();
@@ -1306,8 +1312,9 @@ mod tests {
 
     #[test]
     fn test_list_zip_path_traversal() {
-        // ZIP with ../etc/passwd entry — enclosed_name() returns None for traversal
-        // paths, triggering PathTraversal error in list_zip (lines 268-270).
+        // ZIP with ../etc/passwd entry — enclosed_name() returns None for
+        // traversal paths, triggering PathTraversal error in list_zip
+        // (lines 268-270).
         let temp_file = NamedTempFile::with_suffix(".zip").unwrap();
         let file = std::fs::File::create(temp_file.path()).unwrap();
         let mut zip = zip::ZipWriter::new(file);
@@ -1379,8 +1386,8 @@ mod tests {
 
     #[test]
     fn test_list_tar_absolute_path_allowed_when_flag_set() {
-        // Regression for #318: allow_absolute_paths must also take effect during
-        // the listing phase, not only during extraction.
+        // Regression for #318: allow_absolute_paths must also take effect
+        // during the listing phase, not only during extraction.
         let mut temp_file = NamedTempFile::with_suffix(".tar").unwrap();
         temp_file
             .write_all(&tar_with_raw_path("/etc/passwd"))
@@ -1399,7 +1406,8 @@ mod tests {
 
     #[test]
     fn test_list_sevenz_absolute_path_allowed_when_flag_set() {
-        // Regression for #318: allow_absolute_paths must propagate to 7z listing.
+        // Regression for #318: allow_absolute_paths must propagate to 7z
+        // listing.
         let archive_bytes = make_sevenz_archive(&[("/absolute/path.txt", b"data")]);
         let mut temp_file = NamedTempFile::with_suffix(".7z").unwrap();
         temp_file.write_all(&archive_bytes).unwrap();
@@ -1421,11 +1429,12 @@ mod tests {
     #[test]
     fn test_contains_traversal_prefix_gated_by_flag() {
         // A path whose string representation starts with a Windows-style drive
-        // prefix. On Windows this produces Component::Prefix; on Unix the entire
-        // string is treated as a relative path component (no Prefix produced), so
-        // this test exercises the flag-gating logic via the RootDir path instead.
-        // The critical invariant — Prefix and RootDir share the same gate — is
-        // verified by the match arm `Component::Prefix(_) | Component::RootDir`.
+        // prefix. On Windows this produces Component::Prefix; on Unix the
+        // entire string is treated as a relative path component (no
+        // Prefix produced), so this test exercises the flag-gating
+        // logic via the RootDir path instead. The critical invariant —
+        // Prefix and RootDir share the same gate — is verified by the
+        // match arm `Component::Prefix(_) | Component::RootDir`.
         let absolute = PathBuf::from("/absolute/path.txt");
 
         let config_deny = SecurityConfig::default().validate().expect("valid config"); // absolute_paths = false
@@ -1473,9 +1482,10 @@ mod tests {
 
     #[test]
     fn test_list_tar_path_traversal_mixed_entries_fail_fast() {
-        // A safe entry followed by a traversal entry — verifies fail-fast behavior:
-        // error must be returned immediately on the traversal entry, not after
-        // accumulating the safe entry into a partial manifest.
+        // A safe entry followed by a traversal entry — verifies fail-fast
+        // behavior: error must be returned immediately on the traversal
+        // entry, not after accumulating the safe entry into a partial
+        // manifest.
         let mut temp_file = NamedTempFile::with_suffix(".tar").unwrap();
         let mut builder = tar::Builder::new(Vec::new());
 
@@ -1487,15 +1497,17 @@ mod tests {
         builder.append(&header, &safe_data[..]).unwrap();
         let safe_tar = builder.into_inner().unwrap();
 
-        // safe_tar ends with the two zero-block end-of-archive marker. Strip it and
-        // append the raw traversal entry + end-of-archive to create a two-entry
-        // archive. The tar crate always writes exactly two 512-byte zero blocks
-        // (1024 bytes total) as the end-of-archive marker per POSIX ustar §3.4.
-        // Verified with tar 0.4.x; a future major version bump should re-check this.
+        // safe_tar ends with the two zero-block end-of-archive marker. Strip it
+        // and append the raw traversal entry + end-of-archive to create
+        // a two-entry archive. The tar crate always writes exactly two
+        // 512-byte zero blocks (1024 bytes total) as the end-of-archive
+        // marker per POSIX ustar §3.4. Verified with tar 0.4.x; a
+        // future major version bump should re-check this.
         let eof_marker_len = 1024;
         let tar_body = &safe_tar[..safe_tar.len() - eof_marker_len];
         let traversal_entry = tar_with_raw_path("../escape.txt");
-        // tar_with_raw_path includes end-of-archive, so use it as-is after the body.
+        // tar_with_raw_path includes end-of-archive, so use it as-is after the
+        // body.
         let mut combined = tar_body.to_vec();
         combined.extend_from_slice(&traversal_entry);
 
@@ -1513,10 +1525,10 @@ mod tests {
 
     #[test]
     fn test_list_zip_by_index_encrypted_error_path() {
-        // Cover the encrypted entry check at list.rs line 260 (entry.encrypted() ==
-        // true). ZipCrypto entries succeed at by_index() time but are flagged
-        // as encrypted by the entry metadata, triggering
-        // SecurityViolation::EncryptedArchive.
+        // Cover the encrypted entry check at list.rs line 260
+        // (entry.encrypted() == true). ZipCrypto entries succeed at
+        // by_index() time but are flagged as encrypted by the entry
+        // metadata, triggering SecurityViolation::EncryptedArchive.
         use std::io::Write;
         use zip::ZipWriter;
         use zip::unstable::write::FileOptionsExt;
@@ -1545,7 +1557,8 @@ mod tests {
 
     #[test]
     fn test_tar_and_zip_mode_consistent() {
-        // TAR and ZIP must both store only permission bits in ArchiveEntry.mode.
+        // TAR and ZIP must both store only permission bits in
+        // ArchiveEntry.mode.
         let tar_file = NamedTempFile::with_suffix(".tar").unwrap();
         {
             let mut builder = tar::Builder::new(std::fs::File::create(tar_file.path()).unwrap());
@@ -1629,7 +1642,8 @@ mod tests {
 
     #[test]
     fn test_list_sevenz_solid() {
-        // Solid archives are safe to list (no decompression needed for metadata).
+        // Solid archives are safe to list (no decompression needed for
+        // metadata).
         let path = std::path::Path::new("../../tests/fixtures/solid.7z");
         let config = SecurityConfig::default();
         let manifest = list_archive(path, &config).unwrap();
@@ -1803,9 +1817,9 @@ mod tests {
 
     #[test]
     fn test_list_sevenz_solid_compressed_size() {
-        // Entries in solid archives should not have compressed_size=Some(0) with
-        // size>0. That combination would trigger a false positive in zip bomb
-        // detection.
+        // Entries in solid archives should not have compressed_size=Some(0)
+        // with size>0. That combination would trigger a false positive
+        // in zip bomb detection.
         let path = std::path::Path::new("../../tests/fixtures/solid.7z");
         let config = SecurityConfig::default();
         let manifest = list_archive(path, &config).unwrap();
@@ -1920,7 +1934,8 @@ mod tests {
             manifest.total_entries > 0,
             "symlink-unix.7z should have entries"
         );
-        // All entries should be File or Directory — no Symlink (API limitation).
+        // All entries should be File or Directory — no Symlink (API
+        // limitation).
         for entry in &manifest.entries {
             assert_ne!(
                 entry.entry_type,
@@ -1966,14 +1981,16 @@ mod tests {
 
     // --- Regression tests for #325: allow_absolute_paths for ZIP listing ---
 
-    // The zip 8.x crate's `enclosed_name()` already strips a single leading `/`,
-    // so `/etc/passwd` becomes `Some("etc/passwd")` — the path is safe without
-    // needing our fallback. The fallback activates only when `enclosed_name()`
-    // returns `None`, which happens for traversal patterns like `/../etc/passwd`.
+    // The zip 8.x crate's `enclosed_name()` already strips a single leading
+    // `/`, so `/etc/passwd` becomes `Some("etc/passwd")` — the path is safe
+    // without needing our fallback. The fallback activates only when
+    // `enclosed_name()` returns `None`, which happens for traversal
+    // patterns like `/../etc/passwd`.
     #[test]
     fn test_list_zip_absolute_path_stripped_by_zip_crate() {
-        // /etc/passwd: enclosed_name() returns Some("etc/passwd") — accepted even
-        // without allow_absolute_paths because the zip crate already strips `/`.
+        // /etc/passwd: enclosed_name() returns Some("etc/passwd") — accepted
+        // even without allow_absolute_paths because the zip crate
+        // already strips `/`.
         let zip_bytes = create_raw_zip_entry("/etc/passwd", b"");
         let mut temp_file = NamedTempFile::with_suffix(".zip").unwrap();
         temp_file.write_all(&zip_bytes).unwrap();
@@ -2038,9 +2055,10 @@ mod tests {
 
     #[test]
     fn test_list_zip_absolute_path_with_traversal_still_rejected() {
-        // /foo/../../../etc/passwd: enclosed_name() returns None (would go above
-        // root). Our fallback strips `/` to get `foo/../../../etc/passwd`, then
-        // contains_traversal() rejects the remaining `..` components.
+        // /foo/../../../etc/passwd: enclosed_name() returns None (would go
+        // above root). Our fallback strips `/` to get
+        // `foo/../../../etc/passwd`, then contains_traversal() rejects
+        // the remaining `..` components.
         let zip_bytes = create_raw_zip_entry("/foo/../../../etc/passwd", b"");
         let mut temp_file = NamedTempFile::with_suffix(".zip").unwrap();
         temp_file.write_all(&zip_bytes).unwrap();

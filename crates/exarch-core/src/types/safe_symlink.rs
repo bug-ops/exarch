@@ -192,9 +192,11 @@ impl SafeSymlink {
             });
         }
 
-        // 3. Verify parent directory chain doesn't contain symlinks (TOCTOU protection)
-        // This prevents race conditions where an attacker replaces a parent directory
-        // with a symlink between validation and extraction time.
+        // 3. Verify parent directory chain doesn't contain symlinks (TOCTOU
+        //    protection)
+        // This prevents race conditions where an attacker replaces a parent
+        // directory with a symlink between validation and extraction
+        // time.
         verify_parent_not_symlink(link.as_path(), dest)?;
 
         // 4. Resolve target against link's parent directory, following any
@@ -305,9 +307,10 @@ pub(crate) fn resolve_through_symlinks(
     for component in target.components() {
         match component {
             std::path::Component::ParentDir => {
-                // If the current accumulated path is an on-disk symlink, resolve
-                // it before applying `..` so the pop operates on the real
-                // filesystem topology rather than the string representation.
+                // If the current accumulated path is an on-disk symlink,
+                // resolve it before applying `..` so the pop
+                // operates on the real filesystem topology
+                // rather than the string representation.
                 if std::fs::symlink_metadata(&current).is_ok_and(|m| m.file_type().is_symlink()) {
                     current = std::fs::canonicalize(&current).map_err(|_| {
                         ArchiveError::SymlinkEscape {
@@ -689,7 +692,8 @@ mod tests {
             .expect("link path should be valid");
         let target = PathBuf::from("a"); // Points into circular chain
 
-        // This should complete (not hang) and may succeed since we don't follow chains
+        // This should complete (not hang) and may succeed since we don't follow
+        // chains
         let _result = SafeSymlink::validate(&link, &target, &dest, &config);
     }
 

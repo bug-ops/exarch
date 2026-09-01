@@ -167,9 +167,10 @@ pub fn convert_error(err: CoreError) -> Error {
             Error::new(Status::GenericFailure, msg)
         }
         CoreError::PartialExtraction { source, report } => {
-            // Preserve the specific error code (SYMLINK_ESCAPE, QUOTA_EXCEEDED, etc.) from
-            // the inner source so JavaScript callers can distinguish the error type. The
-            // partial-extraction report fields from #210, plus filesSkipped/warnings from
+            // Preserve the specific error code (SYMLINK_ESCAPE, QUOTA_EXCEEDED,
+            // etc.) from the inner source so JavaScript callers can
+            // distinguish the error type. The partial-extraction
+            // report fields from #210, plus filesSkipped/warnings from
             // #508, are appended for caller inspection.
             let inner = convert_error(*source);
             let mut msg = String::with_capacity(inner.reason.len() + 96);
@@ -460,8 +461,8 @@ mod tests {
 
         let napi_err = convert_error(err);
         let msg = &napi_err.reason;
-        // Must carry the specific error code, not the generic PARTIAL_EXTRACTION
-        // prefix.
+        // Must carry the specific error code, not the generic
+        // PARTIAL_EXTRACTION prefix.
         assert!(
             msg.starts_with("QUOTA_EXCEEDED"),
             "message must start with QUOTA_EXCEEDED, got: {msg}"

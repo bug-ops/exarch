@@ -260,7 +260,8 @@ impl<R: Read + Seek> ZipArchive<R> {
             ArchiveError::InvalidArchive(format!("failed to open ZIP archive: {e}"))
         })?;
 
-        // Detect password protection early (CRIT-003: robust check with entry limit)
+        // Detect password protection early (CRIT-003: robust check with entry
+        // limit)
         if Self::is_password_protected(&mut inner)? {
             return Err(ArchiveError::SecurityViolation {
                 reason: "password-protected ZIP archives are not supported".into(),
@@ -319,8 +320,9 @@ impl<R: Read + Seek> ZipArchive<R> {
                     });
                 }
                 let p = PathBuf::from(stripped);
-                // SafePath::validate will enforce the remaining security checks;
-                // we only need to pre-reject clear traversal here.
+                // SafePath::validate will enforce the remaining security
+                // checks; we only need to pre-reject clear
+                // traversal here.
                 if p.components()
                     .any(|c| matches!(c, std::path::Component::ParentDir))
                 {
@@ -494,7 +496,8 @@ impl<R: Read + Seek> ArchiveFormat for ZipArchive<R> {
 
         let mut report = ExtractionReport::new();
 
-        // OPT-C002: Single copy buffer per archive instead of per-file allocation
+        // OPT-C002: Single copy buffer per archive instead of per-file
+        // allocation
         let mut copy_buffer = CopyBuffer::new();
 
         let mut dir_cache = common::DirCache::new();
@@ -628,8 +631,9 @@ impl ZipEntryAdapter {
             });
         }
 
-        // SAFETY: size has already been validated to be <= MAX_SYMLINK_TARGET_SIZE
-        // (4096) which is well within usize range on all platforms
+        // SAFETY: size has already been validated to be <=
+        // MAX_SYMLINK_TARGET_SIZE (4096) which is well within usize
+        // range on all platforms
         #[allow(clippy::cast_possible_truncation)]
         let mut target_bytes = Vec::with_capacity(size as usize);
         zip_file
@@ -1689,8 +1693,9 @@ mod tests {
     #[test]
     fn test_unsupported_compression_method_rejected() {
         // Build a ZIP with compression method=99 (unknown/unsupported)
-        // The zip crate parses entries with unknown methods but fails on decompression.
-        // Our code checks the compression method in process_entry before decompressing.
+        // The zip crate parses entries with unknown methods but fails on
+        // decompression. Our code checks the compression method in
+        // process_entry before decompressing.
         let zip_bytes = raw_zip_with_custom_entry("file.txt", b"", 99, 0, 0o100_644);
         let cursor = Cursor::new(zip_bytes);
         let result = ZipArchive::new(cursor);
@@ -1717,10 +1722,10 @@ mod tests {
 
     #[test]
     fn test_symlink_target_too_large() {
-        // Build a raw ZIP entry with symlink mode (0o120777) and >4096 bytes content.
-        // The size field in the local header is what our code reads via
-        // zip_file.size(). We need actual content bytes so the zip crate
-        // reports the correct uncompressed size.
+        // Build a raw ZIP entry with symlink mode (0o120777) and >4096 bytes
+        // content. The size field in the local header is what our code
+        // reads via zip_file.size(). We need actual content bytes so
+        // the zip crate reports the correct uncompressed size.
         let target = vec![b'a'; 4097];
         let zip_bytes = raw_zip_with_custom_entry("link", &target, 0, 0, 0o120_777);
         let cursor = Cursor::new(zip_bytes);
@@ -2058,7 +2063,8 @@ mod tests {
             .unwrap();
 
         // 7 entries: indices 0..6. Encrypted entry is at index 3 (interior).
-        // Verifies that the full scan catches all positions, not just boundaries.
+        // Verifies that the full scan catches all positions, not just
+        // boundaries.
         for i in 0..7u8 {
             if i == 3 {
                 writer
@@ -2387,9 +2393,10 @@ mod tests {
 
     #[test]
     fn test_extract_zip_traversal_after_root_rejected_by_default() {
-        // `/../etc/passwd` has a traversal component after root; enclosed_name()
-        // returns None for this pattern. Without allow_absolute_paths the entry
-        // must be rejected as PathTraversal.
+        // `/../etc/passwd` has a traversal component after root;
+        // enclosed_name() returns None for this pattern. Without
+        // allow_absolute_paths the entry must be rejected as
+        // PathTraversal.
         let zip_data = create_raw_zip_entry("/../etc/passwd", b"secret");
         let cursor = Cursor::new(zip_data);
         let mut archive = ZipArchive::new(cursor).unwrap();
@@ -2491,7 +2498,8 @@ mod tests {
         // enclosed_name() returns None for names that start with `/` and
         // contain traversal components.  For a plain `/etc/passwd` the zip
         // crate 8.x actually returns Some("etc/passwd") via enclosed_name(),
-        // so we need a name that enclosed_name() will reject: use `/../etc/passwd`.
+        // so we need a name that enclosed_name() will reject: use
+        // `/../etc/passwd`.
         let result = call_resolve_entry_path("/../etc/passwd", false);
         assert_matches!(
             result,
@@ -2510,13 +2518,15 @@ mod tests {
         // get PathTraversal. Instead, synthesize a raw ZIP where
         // enclosed_name() returns None for a pure `/abs` path by crafting the
         // bytes manually, bypassing zip crate's writer normalization.
-        // The simplest approach: use the existing raw_zip_with_custom_entry helper.
+        // The simplest approach: use the existing raw_zip_with_custom_entry
+        // helper.
         let zip_bytes = raw_zip_with_custom_entry("/../etc/shadow", b"", 0, 0, 0o100_644);
         let cursor = Cursor::new(zip_bytes);
         let result = zip::ZipArchive::new(cursor);
         if let Ok(mut reader) = result {
             let zip_file = reader.by_index(0).unwrap();
-            // with allow_absolute_paths: the `..` component must still be rejected
+            // with allow_absolute_paths: the `..` component must still be
+            // rejected
             let result = ZipArchive::<Cursor<Vec<u8>>>::resolve_entry_path(&zip_file, 0, true);
             assert_matches!(
                 result,

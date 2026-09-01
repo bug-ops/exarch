@@ -264,7 +264,8 @@ mod tests {
 
     #[test]
     fn test_validate_config_entry_rejects_multibyte_over_length() {
-        // "日" is 3 bytes in UTF-8; 100 repeats is 300 bytes but only 100 chars.
+        // "日" is 3 bytes in UTF-8; 100 repeats is 300 bytes but only 100
+        // chars.
         let multibyte_entry = "日".repeat(100);
         assert!(multibyte_entry.chars().count() < MAX_CONFIG_ENTRY_LENGTH);
         let err =

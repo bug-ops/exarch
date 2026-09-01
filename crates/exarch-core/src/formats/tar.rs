@@ -547,7 +547,8 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
                 ArchiveError::partial_or(std::mem::take(ctx.report), raw)
             })?;
 
-            // TAR is streaming: total entry count is not known upfront, so pass 0.
+            // TAR is streaming: total entry count is not known upfront, so pass
+            // 0.
             let entry_path = guard
                 .path()
                 .ok()
@@ -556,7 +557,8 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
             current_entry = current_entry.saturating_add(1);
             ctx.progress.on_entry_start(&entry_path, 0, current_entry);
 
-            // INVARIANT: every branch below must call on_entry_complete exactly once.
+            // INVARIANT: every branch below must call on_entry_complete exactly
+            // once.
             match Self::process_entry(&mut guard, &mut ctx) {
                 Ok(Some(hardlink_info)) => {
                     ctx.progress.on_entry_complete(&entry_path);
@@ -2502,12 +2504,13 @@ mod tests {
 
     // Builds a raw TAR archive with a PAX extended header that advertises
     // `pax_size` for the file, while the ustar header carries size=0.
-    // This is exactly the structure that exploits the PAX quota bypass (issue #82).
+    // This is exactly the structure that exploits the PAX quota bypass (issue
+    // #82).
     fn create_tar_with_pax_size_override(filename: &str, pax_size: u64, data: &[u8]) -> Vec<u8> {
         let mut out = Vec::new();
 
-        // PAX key-value: "<len> size=<N>\n" where len equals the total record byte
-        // count.
+        // PAX key-value: "<len> size=<N>\n" where len equals the total record
+        // byte count.
         let kv_suffix = format!(" size={pax_size}\n");
         let mut total = 1 + kv_suffix.len(); // start with 1 digit
         loop {
@@ -2556,8 +2559,9 @@ mod tests {
 
     #[test]
     fn test_pax_size_override_bypasses_max_file_size_quota() {
-        // Regression for issue #82: PAX size must be used for quota, not ustar size.
-        // File has PAX size=2MB but ustar size=0; limit is 1MB — must be rejected.
+        // Regression for issue #82: PAX size must be used for quota, not ustar
+        // size. File has PAX size=2MB but ustar size=0; limit is 1MB —
+        // must be rejected.
         const PAX_SIZE: u64 = 2 * 1024 * 1024;
         let data = vec![0u8; usize::try_from(PAX_SIZE).unwrap()];
         let tar_data = create_tar_with_pax_size_override("big.bin", PAX_SIZE, &data);
@@ -2584,8 +2588,8 @@ mod tests {
     #[test]
     fn test_pax_size_override_bypasses_max_total_size_quota() {
         // Regression for issue #82: PAX size must be used for total-size quota.
-        // File has PAX size=600KB but ustar size=0; total limit is 500KB — must be
-        // rejected.
+        // File has PAX size=600KB but ustar size=0; total limit is 500KB — must
+        // be rejected.
         const PAX_SIZE: u64 = 600 * 1024;
         let data = vec![0u8; usize::try_from(PAX_SIZE).unwrap()];
         let tar_data = create_tar_with_pax_size_override("big.bin", PAX_SIZE, &data);
@@ -3123,7 +3127,8 @@ mod tests {
 
     #[test]
     fn test_extension_less_files_blocked_when_allowlist_nonempty() {
-        // A file without any extension must be blocked when an allowlist is set.
+        // A file without any extension must be blocked when an allowlist is
+        // set.
         let tar_data = create_test_tar(vec![("Makefile", b"all:"), ("keep.txt", b"ok")]);
         let dest = tempfile::tempdir().unwrap();
         let config = SecurityConfig::default()

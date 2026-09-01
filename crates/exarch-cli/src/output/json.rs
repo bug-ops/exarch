@@ -427,8 +427,8 @@ mod tests {
 
     #[test]
     fn test_format_error_downcasts_extraction_error() {
-        // Verify that format_error correctly resolves the kind from an anyhow chain
-        // containing an ArchiveError.
+        // Verify that format_error correctly resolves the kind from an anyhow
+        // chain containing an ArchiveError.
         let extraction_err = ArchiveError::ZipBomb {
             compressed: 100,
             uncompressed: 100_000,
@@ -447,8 +447,8 @@ mod tests {
 
     #[test]
     fn test_format_error_unknown_error_uses_generic_kind() {
-        // A plain anyhow error with no ArchiveError in chain should use "Error" as
-        // kind
+        // A plain anyhow error with no ArchiveError in chain should use "Error"
+        // as kind
         let anyhow_err = anyhow::anyhow!("something went wrong");
 
         let kind = anyhow_err
@@ -459,8 +459,8 @@ mod tests {
         assert_eq!(kind, "Error");
     }
 
-    // Regression tests for issue #192: JSON error message must not duplicate text
-    // that ArchiveError::Display already emits.
+    // Regression tests for issue #192: JSON error message must not duplicate
+    // text that ArchiveError::Display already emits.
 
     #[test]
     fn test_json_message_quota_exceeded_no_duplication() {

@@ -121,15 +121,17 @@ pub fn convert_error(err: CoreError) -> PyErr {
             PyValueError::new_err(format!("invalid configuration: {reason}"))
         }
         CoreError::PartialExtraction { source, report } => {
-            // Recover the specific exception type (SymlinkEscapeError, HardlinkEscapeError,
-            // etc.) so callers can catch the precise error. The partial-extraction report
-            // attributes from #210, plus files_skipped/warnings from #508, are attached to
-            // that concrete exception instead.
+            // Recover the specific exception type (SymlinkEscapeError,
+            // HardlinkEscapeError, etc.) so callers can catch the
+            // precise error. The partial-extraction report
+            // attributes from #210, plus files_skipped/warnings from #508, are
+            // attached to that concrete exception instead.
             let source_err = convert_error(*source);
             Python::attach(|py| {
                 let exc_value = source_err.value(py);
-                // setattr failures are silenced to preserve the `PyErr → PyErr` signature;
-                // the workspace forbids unwrap/expect outside tests.
+                // setattr failures are silenced to preserve the `PyErr → PyErr`
+                // signature; the workspace forbids
+                // unwrap/expect outside tests.
                 let _ = exc_value.setattr("files_extracted", report.files_extracted);
                 let _ = exc_value.setattr("bytes_written", report.bytes_written);
                 let _ = exc_value.setattr("files_skipped", report.files_skipped);

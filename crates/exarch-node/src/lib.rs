@@ -1421,7 +1421,8 @@ mod tests {
         let result = extract_archive("".to_string(), "".to_string(), None, None).await;
 
         // If it fails, ensure it's not a boundary path validation error
-        // (empty paths pass boundary validation; core handles semantic validation)
+        // (empty paths pass boundary validation; core handles semantic
+        // validation)
         if let Err(e) = result {
             let err_msg = e.to_string();
             assert!(
@@ -1493,8 +1494,8 @@ mod tests {
     #[test]
     fn test_extract_archive_sync_accepts_valid_paths() {
         // Test that valid paths pass boundary validation
-        // The actual extraction may succeed (empty archive) or fail (file not found)
-        // but should NOT fail due to path validation
+        // The actual extraction may succeed (empty archive) or fail (file not
+        // found) but should NOT fail due to path validation
         let result = extract_archive_sync(
             "/tmp/valid_test_path.tar".to_string(),
             "/tmp/valid_output_path".to_string(),

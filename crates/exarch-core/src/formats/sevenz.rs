@@ -240,8 +240,9 @@ impl<R: Read + Seek> SevenZArchive<R> {
                                  Decrypt the archive externally and try again.".into(),
                     });
                 }
-                // Handle valid empty 7z archives: sevenz-rust2 fails with UnexpectedEof on
-                // 32-byte archives that contain no files. Check for a valid 7z signature
+                // Handle valid empty 7z archives: sevenz-rust2 fails with
+                // UnexpectedEof on 32-byte archives that
+                // contain no files. Check for a valid 7z signature
                 // and small file size before treating as an empty archive.
                 if is_empty_sevenz_archive(&e, &mut source) {
                     return Ok(Self {
@@ -850,8 +851,9 @@ impl<R: Read + Seek> SevenZArchive<R> {
                 &mut ctx.copy_buffer,
             );
 
-            // INVARIANT: every branch below must call on_entry_complete exactly once.
-            // Fire on_bytes_written before on_entry_complete on success.
+            // INVARIANT: every branch below must call on_entry_complete exactly
+            // once. Fire on_bytes_written before on_entry_complete
+            // on success.
             match result {
                 Ok(bytes_written) => {
                     if bytes_written > 0 {
@@ -950,15 +952,17 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
         let dest = DestDir::new_or_create(output_dir.to_path_buf())?;
 
         // Pre-validate all paths BEFORE extraction using cached metadata
-        // SECURITY NOTE: Pre-validation prevents partial extraction on malicious
-        // archives
+        // SECURITY NOTE: Pre-validation prevents partial extraction on
+        // malicious archives
         //
-        // PERFORMANCE: Uses cached metadata from new() to avoid re-parsing archive
+        // PERFORMANCE: Uses cached metadata from new() to avoid re-parsing
+        // archive
         //
         // API LIMITATIONS (sevenz-rust2 0.20):
-        // - compressed_size: Not exposed per-entry, so zip bomb detection relies on
-        //   quotas only
-        // - symlink detection: Not exposed, non-directory entries treated as files
+        // - compressed_size: Not exposed per-entry, so zip bomb detection
+        //   relies on quotas only
+        // - symlink detection: Not exposed, non-directory entries treated as
+        //   files
         let mut prevalidator = EntryValidator::new(config, &dest);
         for entry in &self.entries {
             let path = std::path::PathBuf::from(common::normalize_entry_name(&entry.name));
@@ -997,9 +1001,9 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
                 return Err(symlink_at_dest_error().into());
             }
 
-            // KNOWN LIMITATION: compressed_size is None, so compression ratio check is
-            // skipped. Defense relies on max_total_size and max_file_size
-            // quotas.
+            // KNOWN LIMITATION: compressed_size is None, so compression ratio
+            // check is skipped. Defense relies on max_total_size
+            // and max_file_size quotas.
             //
             // The permit itself is discarded: this loop only needs
             // `reserve_file`'s Err on a would-be quota violation, since
@@ -1123,7 +1127,8 @@ impl SevenZEntryAdapter {
     /// (symlinks on Windows).
     fn to_entry_type(entry: &sevenz_rust2::ArchiveEntry) -> Result<EntryType> {
         // SECURITY: Check Windows attributes for reparse points FIRST
-        // This applies to BOTH files AND directories (e.g., directory junctions)
+        // This applies to BOTH files AND directories (e.g., directory
+        // junctions)
         if Self::is_windows_reparse_point(entry) {
             return Err(ArchiveError::SecurityViolation {
                 reason: format!(
@@ -1140,8 +1145,8 @@ impl SevenZEntryAdapter {
         }
 
         // Default: regular file
-        // KNOWN LIMITATION: Unix symlinks cannot be detected and will be extracted as
-        // files
+        // KNOWN LIMITATION: Unix symlinks cannot be detected and will be
+        // extracted as files
         Ok(EntryType::File)
     }
 
@@ -1682,8 +1687,8 @@ mod tests {
     /// archives with path traversal attempts.
     #[test]
     fn test_path_traversal_integration() {
-        // Test that our validator integration works by creating a simple archive
-        // and verifying the validator is properly called
+        // Test that our validator integration works by creating a simple
+        // archive and verifying the validator is properly called
         let data = load_fixture("simple.7z");
         let cursor = Cursor::new(data);
         let archive = SevenZArchive::new(cursor);

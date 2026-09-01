@@ -481,7 +481,8 @@ fn test_7z_bytes_written_accumulates_correctly() {
         .unwrap();
 
     // The fixture contains 2 files totalling 25 bytes (verified via `7z l`).
-    // The exact value matters: checked_add accumulates per-file sizes correctly.
+    // The exact value matters: checked_add accumulates per-file sizes
+    // correctly.
     assert_eq!(
         report.bytes_written, 25,
         "bytes_written must equal the total bytes extracted, got {}",

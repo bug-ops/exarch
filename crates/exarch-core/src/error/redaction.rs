@@ -124,7 +124,7 @@ pub fn format_entry_path_for_error(path: &Path) -> String {
 /// free-form message text has no structured path field to redact.
 ///
 /// Exception: errors carrying an [`IoContext`](super::IoContext) — used at
-/// [`std::io::Error::other`] call sites whose [`std::io::ErrorKind::Other`]
+/// `std::io::Error::other` call sites whose [`std::io::ErrorKind::Other`]
 /// description would otherwise redact to the uninformative "other error"
 /// (see #464) — surface [`IoContext::context`](super::IoContext::context) in
 /// release builds instead. That is safe because `context` is always a
@@ -154,7 +154,7 @@ pub fn sanitize_io_error_for_error(e: &std::io::Error) -> String {
 /// free-form message text has no structured path field to redact.
 ///
 /// Exception: errors carrying an [`IoContext`](super::IoContext) — used at
-/// [`std::io::Error::other`] call sites whose [`std::io::ErrorKind::Other`]
+/// `std::io::Error::other` call sites whose [`std::io::ErrorKind::Other`]
 /// description would otherwise redact to the uninformative "other error"
 /// (see #464) — surface [`IoContext::context`](super::IoContext::context) in
 /// release builds instead. That is safe because `context` is always a

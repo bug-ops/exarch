@@ -176,6 +176,7 @@ let config = SecurityConfig::default()
 
 > [!IMPORTANT]
 > `SecurityConfig`, `AllowedFeatures`, and `ExtractionOptions` are `#[non_exhaustive]` since v0.4.0. Use `Default::default()` plus the fluent `with_*` builder methods instead of struct literal syntax.
+> Since v0.6.1, `ArchiveError`, `QuotaResource`, `ArchiveType`, `CompressionCodec`, `IssueCategory`, and `EntryType` are `#[non_exhaustive]` too — an exhaustive `match` on any of them needs a wildcard `_` arm.
 
 ## Supported Formats
 

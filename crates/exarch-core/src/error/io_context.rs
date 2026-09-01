@@ -4,7 +4,7 @@ use std::error::Error as StdError;
 use std::fmt;
 
 /// Pairs a static, non-path-bearing summary with the dynamic detail of an
-/// I/O failure constructed via [`std::io::Error::other`].
+/// I/O failure constructed via `std::io::Error::other`.
 ///
 /// FFI bindings redact `ArchiveError::Io` messages down to their
 /// [`std::io::ErrorKind`] description in release builds, since free-form

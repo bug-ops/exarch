@@ -40,6 +40,7 @@ fn main() -> Result<(), exarch_core::ArchiveError> {
 
 > [!IMPORTANT]
 > Since v0.4.0, `SecurityConfig`, `AllowedFeatures`, and `ExtractionOptions` are `#[non_exhaustive]`. Use `Default::default()` plus the fluent `with_*` builder methods instead of struct literal syntax.
+> Since v0.6.1, `ArchiveError`, `QuotaResource`, `ArchiveType`, `CompressionCodec`, `IssueCategory`, and `EntryType` are `#[non_exhaustive]` too — an exhaustive `match` on any of them (including the `Error Handling` example below) needs a wildcard `_` arm.
 
 ```rust
 use exarch_core::SecurityConfig;

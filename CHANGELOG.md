@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-09-02
+
 ### Security
 
 - **Case-insensitive containment check accepted a sibling of the destination root sharing a name prefix on macOS/Windows (GHSA-wcmx-7f9h-5mv5)**:
@@ -77,6 +79,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unsupported, so the encoder fix is defense-in-depth for a currently-dormant code path. Only
   `Cargo.lock` changes; `sevenz-rust2 = "0.21.4"` in `Cargo.toml` is left as-is since the caret
   requirement already admits 0.21.5.
+
+- **Bumped `sevenz-rust2` from 0.21.5 to 0.22.2 (#561)**: no RUSTSEC advisory or CVE prompted this
+  bump; `cargo audit`/`cargo deny check` report no regression. `Cargo.toml`'s pinned requirement
+  was updated to `"0.22.2"` alongside `Cargo.lock`.
 
 ## [0.6.0] - 2026-08-04
 
@@ -1393,6 +1399,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   precedence. Archive creation is unaffected — `determine_creation_format` uses
   extension-only detection so stale on-disk bytes cannot override the caller's
   intent (#353).
+- `extract` command now exposes three previously hidden `SecurityConfig` fields as CLI flags:
+  `--max-path-depth <N>` (default 32), `--banned-component <COMPONENT>` (repeatable; replaces
+  the default ban list when provided), and `--allow-absolute-paths` (flag). Operators can now
+  tune path depth and component ban lists without recompiling (#303).
+- `create` CLI subcommand: `--max-file-size <BYTES>` flag (supports K/M/G/T suffixes) skips
+  source files larger than the given threshold during archive creation (#306).
+- `create` CLI subcommand: `--preserve-permissions` flag (default: true) controls whether
+  Unix file permissions are stored in the archive; pass `--preserve-permissions=false` to
+  create a portable archive without platform-specific permission bits (#306).
+- Python and Node.js bindings now expose `ExtractionOptions` with `skip_duplicates`. Python:
+  `ExtractionOptions` class with `with_skip_duplicates(skip=True)` builder. Node.js:
+  `ExtractionOptions` class with `withSkipDuplicates(skip?)` builder. Both `extract_archive`
+  and `extract_archive_with_progress` accept an optional `options` parameter (#313).
+- Python and Node.js bindings expose `ExtractionOptions.atomic`. Python: `with_atomic(bool)`
+  builder and `atomic` getter/setter. Node.js: `withAtomic(bool?)` builder and `atomic` getter.
+  Atomic mode extracts to a staging directory first, then renames it to the destination — the
+  output directory must not pre-exist (#322).
 
 ### Changed
 
@@ -1439,53 +1462,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   corruption to go undetected (#335).
 - CLI roundtrip tests (`test_roundtrip_tar_gz_single_file`, `test_roundtrip_zip_directory`)
   now assert extracted file contents match the original source bytes (#335).
-
-### Breaking Changes
-
-- **Python `SecurityConfig` builder methods** `allow_symlinks`, `allow_hardlinks`,
-  `allow_absolute_paths`, `allow_world_writable`, and `allow_solid_archives` have been renamed
-  to `with_allow_symlinks`, `with_allow_hardlinks`, `with_allow_absolute_paths`,
-  `with_allow_world_writable`, and `with_allow_solid_archives` to match the `with_` prefix
-  convention used by all other builder methods in the class. Update call sites by prepending
-  `with_` to each method name (#354).
-
-- **`ArchiveCreator::compression_level`** now returns `Result<Self, ArchiveError>` instead of
-  `Self`. Call sites must propagate the error with `?` or handle it explicitly; passing an
-  out-of-range level (0 or >9) now returns `ArchiveError::InvalidCompressionLevel` instead of
-  silently clamping or panicking (#308).
-
-### Added
-
-- `extract` command now exposes three previously hidden `SecurityConfig` fields as CLI flags:
-  `--max-path-depth <N>` (default 32), `--banned-component <COMPONENT>` (repeatable; replaces
-  the default ban list when provided), and `--allow-absolute-paths` (flag). Operators can now
-  tune path depth and component ban lists without recompiling (#303).
-- `create` CLI subcommand: `--max-file-size <BYTES>` flag (supports K/M/G/T suffixes) skips
-  source files larger than the given threshold during archive creation (#306).
-- `create` CLI subcommand: `--preserve-permissions` flag (default: true) controls whether
-  Unix file permissions are stored in the archive; pass `--preserve-permissions=false` to
-  create a portable archive without platform-specific permission bits (#306).
-- Python and Node.js bindings now expose `ExtractionOptions` with `skip_duplicates`. Python:
-  `ExtractionOptions` class with `with_skip_duplicates(skip=True)` builder. Node.js:
-  `ExtractionOptions` class with `withSkipDuplicates(skip?)` builder. Both `extract_archive`
-  and `extract_archive_with_progress` accept an optional `options` parameter (#313).
-- Python and Node.js bindings expose `ExtractionOptions.atomic`. Python: `with_atomic(bool)`
-  builder and `atomic` getter/setter. Node.js: `withAtomic(bool?)` builder and `atomic` getter.
-  Atomic mode extracts to a staging directory first, then renames it to the destination — the
-  output directory must not pre-exist (#322).
-
-### Tests
-
-- Python and Node.js bindings: added round-trip tests for `ExtractionOptions.atomic`
-  and `skip_duplicates` — each field is covered by a default-value test and a
-  setter/getter round-trip test. Added `# Examples` doc section to the Python
-  `with_atomic` method (#332).
-- Added integration tests for `ExtractionOptions::skip_duplicates`: covers `skip_duplicates=true` (first entry kept, duplicate skipped with warning) and `skip_duplicates=false` (second entry overwrites first) for TAR archives. Documents that the `zip` crate 8.x deduplicates entries at parse time, making the flag a no-op for ZIP (#302).
-- Added 7z integration tests for `skip_duplicates`: `skip_duplicates=true` keeps the first
-  entry and records a warning; `skip_duplicates=false` overwrites with the last entry (#314).
-
-### Fixed
-
 - Python: `exarch.pyi` `SecurityConfig` and `CreationConfig` builder methods
   (`max_file_size`, `max_total_size`, `max_compression_ratio`, `max_file_count`,
   `max_path_depth`, `max_solid_block_memory`, `preserve_permissions`,
@@ -1531,6 +1507,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ArchiveManifest` entries were set to the entry's own path instead of reading the actual
   target from the entry data (where the ZIP spec stores it). The symlink detection mask in the
   listing path has also been corrected to use `S_IFMT & S_IFLNK`, matching the extraction path (#336).
+
+### Breaking Changes
+
+- **Python `SecurityConfig` builder methods** `allow_symlinks`, `allow_hardlinks`,
+  `allow_absolute_paths`, `allow_world_writable`, and `allow_solid_archives` have been renamed
+  to `with_allow_symlinks`, `with_allow_hardlinks`, `with_allow_absolute_paths`,
+  `with_allow_world_writable`, and `with_allow_solid_archives` to match the `with_` prefix
+  convention used by all other builder methods in the class. Update call sites by prepending
+  `with_` to each method name (#354).
+
+- **`ArchiveCreator::compression_level`** now returns `Result<Self, ArchiveError>` instead of
+  `Self`. Call sites must propagate the error with `?` or handle it explicitly; passing an
+  out-of-range level (0 or >9) now returns `ArchiveError::InvalidCompressionLevel` instead of
+  silently clamping or panicking (#308).
+
+### Tests
+
+- Python and Node.js bindings: added round-trip tests for `ExtractionOptions.atomic`
+  and `skip_duplicates` — each field is covered by a default-value test and a
+  setter/getter round-trip test. Added `# Examples` doc section to the Python
+  `with_atomic` method (#332).
+- Added integration tests for `ExtractionOptions::skip_duplicates`: covers `skip_duplicates=true` (first entry kept, duplicate skipped with warning) and `skip_duplicates=false` (second entry overwrites first) for TAR archives. Documents that the `zip` crate 8.x deduplicates entries at parse time, making the flag a no-op for ZIP (#302).
+- Added 7z integration tests for `skip_duplicates`: `skip_duplicates=true` keeps the first
+  entry and records a warning; `skip_duplicates=false` overwrites with the last entry (#314).
 
 ## [0.4.1] - 2026-06-05
 
@@ -2083,7 +2083,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 64KB reusable copy buffers
 - LRU cache for symlink target resolution
 
-[Unreleased]: https://github.com/bug-ops/exarch/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/bug-ops/exarch/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/bug-ops/exarch/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/bug-ops/exarch/compare/v0.5.2...v0.6.0
 [0.5.2]: https://github.com/bug-ops/exarch/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/bug-ops/exarch/compare/v0.5.0...v0.5.1

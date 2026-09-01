@@ -23,7 +23,7 @@ related:
 
 > [!info] Metadata
 > **Subsystem**: exarch-node
-> **MSRV**: Rust 1.96.0
+> **MSRV**: Rust 1.98.0
 > **Build**: napi-rs 3.x + tokio runtime
 > **Source**: extracted from [[001-exarch-system/spec]]
 

@@ -23,7 +23,7 @@ related:
 
 > [!info] Metadata
 > **Subsystem**: exarch-python
-> **MSRV**: Rust 1.96.0
+> **MSRV**: Rust 1.98.0
 > **Build**: maturin + pyo3 0.29
 > **Source**: extracted from [[001-exarch-system/spec]]
 

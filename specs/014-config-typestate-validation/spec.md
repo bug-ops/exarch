@@ -22,7 +22,7 @@ related:
 
 > [!info] Metadata
 > **Subsystem**: exarch-core / config, creation
-> **MSRV**: Rust 1.96.0
+> **MSRV**: Rust 1.98.0
 > **Origin**: #433, #434, #435 (`SecurityConfig`), #443 (`CreationConfig`) — v0.6.0, unreleased
 > **Status**: implemented — this spec documents shipped behavior, extracted from
 > [[003-config-api/spec]] because it introduces a reusable pattern (typestate-enforced

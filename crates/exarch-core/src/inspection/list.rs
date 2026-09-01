@@ -600,7 +600,7 @@ fn validate_link_target(
     if config.relaxed_for_verify_preflight {
         return Ok(());
     }
-    if target.as_os_str().is_empty() {
+    if target.is_empty() {
         return Err(ArchiveError::SecurityViolation {
             reason: format!("{kind} target is empty"),
         });
@@ -1595,10 +1595,7 @@ mod tests {
         let manifest = list_archive(path, &config).unwrap();
         assert!(manifest.total_entries > 0, "simple.7z should have entries");
         for entry in &manifest.entries {
-            assert!(
-                !entry.path.as_os_str().is_empty(),
-                "entry path should not be empty"
-            );
+            assert!(!entry.path.is_empty(), "entry path should not be empty");
         }
     }
 

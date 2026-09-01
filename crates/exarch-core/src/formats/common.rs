@@ -200,10 +200,10 @@ impl DirCache {
     /// `ensure_parent_dir` and `ensure_dir`.
     fn cache_ancestors(&mut self, path: &Path) {
         let mut current = path;
-        while !current.as_os_str().is_empty() {
+        while !current.is_empty() {
             self.created.insert(current.to_path_buf());
             match current.parent() {
-                Some(p) if !p.as_os_str().is_empty() => current = p,
+                Some(p) if !p.is_empty() => current = p,
                 _ => break,
             }
         }
@@ -248,7 +248,7 @@ impl DirCache {
     #[inline]
     pub fn ensure_parent_dir(&mut self, file_path: &Path) -> std::io::Result<bool> {
         if let Some(parent) = file_path.parent() {
-            if parent.as_os_str().is_empty() {
+            if parent.is_empty() {
                 return Ok(false);
             }
             if !self.created.contains(parent) {
@@ -291,7 +291,7 @@ impl DirCache {
     /// ```
     #[inline]
     pub fn ensure_dir(&mut self, dir_path: &Path) -> std::io::Result<bool> {
-        if dir_path.as_os_str().is_empty() {
+        if dir_path.is_empty() {
             return Ok(false);
         }
         if !self.created.contains(dir_path) {

@@ -22,7 +22,7 @@ related:
 
 > [!info] Metadata
 > **Subsystem**: exarch-core / security (`security::quota`, `security::validator`)
-> **MSRV**: Rust 1.96.0
+> **MSRV**: Rust 1.98.0
 > **Origin**: #436, #439, #440, #447 (v0.6.0, unreleased)
 > **Status**: implemented — this spec documents shipped behavior, extracted from
 > [[001-security-pipeline/spec]] and [[002-format-handlers/spec]] because it introduces

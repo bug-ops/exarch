@@ -146,7 +146,7 @@ impl SafePath {
         ctx: &ValidationContext,
     ) -> Result<Self> {
         // Reject empty paths explicitly
-        if path.as_os_str().is_empty() {
+        if path.is_empty() {
             return Err(ArchiveError::SecurityViolation {
                 reason: "empty path not allowed".into(),
             });
@@ -227,7 +227,7 @@ impl SafePath {
 
         // Bare absolute paths like `/` or `C:\` produce an empty normalized
         // path after stripping the root/prefix component. Reject them.
-        if needs_normalization && normalized.as_os_str().is_empty() && depth == 0 {
+        if needs_normalization && normalized.is_empty() && depth == 0 {
             return Err(ArchiveError::PathTraversal {
                 path: path.to_path_buf(),
             });

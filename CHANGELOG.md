@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Bumped transitive `js-yaml` (via `@napi-rs/cli`) in `exarch-node`'s dev toolchain from 4.3.1 to
+  5.4.2, fixing a CPU-exhaustion DoS in YAML merge-key handling (GHSA-2883-xcg3-v3hh) (#571).
+
 ## [0.6.1] - 2026-09-02
 
 ### Security

@@ -11,6 +11,7 @@ version = 2
 allow = [
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
+    "BSD-3-Clause",  # zstd/zstd-safe/zstd-sys switched from MIT starting at zstd 0.14.0
     "bzip2-1.0.6",
     "CC0-1.0",       # Public domain dedication (ppmd-rust via sevenz-rust2)
     "ISC",

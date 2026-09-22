@@ -1,0 +1,9 @@
+homepage: "https://github.com/bug-ops/exarch"
+language: rust
+primary_contact: k05h31@gmail.com
+main_repo: "https://github.com/bug-ops/exarch"
+file_github_issue: false
+sanitizers:
+  - address
+fuzzing_engines:
+  - libfuzzer

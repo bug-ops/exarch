@@ -34,6 +34,15 @@ bun add exarch-rs
 
 - Node.js >= 20
 
+### Runtime support
+
+Node.js is the fully supported runtime, exercised by the complete test
+matrix. Bun and Deno are smoke-tested in CI (basic create/list/verify/extract
+plus the progress callback and a security-violation error path) but are not
+part of the full Node.js test matrix. The smoke test does not exercise a
+Rust panic crossing the addon boundary, so `catch_unwind` behavior under
+Bun/Deno is unverified.
+
 ## Quick Start
 
 ### Extraction

@@ -404,6 +404,65 @@ jobs:
           cd crates/exarch-node
           npm test
 
+  # Smoke-test the napi addon under Bun and Deno (issue #567). Not part of
+  # the full Node.js test matrix -- Node.js remains the only fully supported
+  # runtime. Non-blocking failures are limited to the progress-callback
+  # sub-test inside the script itself; everything else here is a hard failure.
+  test-node-runtimes:
+    name: Test Node.js Bindings (Bun/Deno smoke test)
+    needs: [changes, format]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: |
+      always() &&
+      needs.changes.result == 'success' &&
+      (needs.format.result == 'success' || needs.format.result == 'skipped') &&
+      (needs.changes.outputs.node == 'true' ||
+      github.ref == 'refs/heads/main' ||
+      github.ref == 'refs/heads/develop')
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "node"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: |
+          cd crates/exarch-node
+          npm install
+
+      - name: Build Node.js bindings
+        run: |
+          cd crates/exarch-node
+          npm run build
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Set up Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Smoke test under Bun
+        run: bun run crates/exarch-node/scripts/smoke-test.mjs
+
+      - name: Smoke test under Deno
+        run: deno run --allow-read --allow-write --allow-env --allow-ffi crates/exarch-node/scripts/smoke-test.mjs
+
   # Quick compile-only check for criterion benchmarks (does not run them)
   bench-build:
     name: Bench Build Check
@@ -508,7 +567,7 @@ jobs:
   # All checks passed
   ci-success:
     name: CI Success
-    needs: [format, clippy, documentation, security, test, test-release, test-python, test-node, msrv, bench-build]
+    needs: [format, clippy, documentation, security, test, test-release, test-python, test-node, test-node-runtimes, msrv, bench-build]
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -524,6 +583,7 @@ jobs:
             "${{ needs.test-release.result }}"
             "${{ needs.test-python.result }}"
             "${{ needs.test-node.result }}"
+            "${{ needs.test-node-runtimes.result }}"
             "${{ needs.msrv.result }}"
             "${{ needs.bench-build.result }}"
           )

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### CI
+
+- Smoke-test the `exarch-rs` napi addon under Bun and Deno (Linux, create/list/verify/extract plus a security-violation path).
+
 ### Security
 
 - Bumped transitive `js-yaml` (via `@napi-rs/cli`) in `exarch-node`'s dev toolchain from 4.3.1 to

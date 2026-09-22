@@ -120,6 +120,11 @@ would otherwise fail the build for no security reason.
    `.claude/rules/commits-and-issues.md` — file a private security advisory
    first.
 
-## Deferred
+## OSS-Fuzz
 
-TODO: OSS-Fuzz integration (tracked in #<follow-up>).
+`fuzz/oss-fuzz/` holds the submission scaffolding for upstream
+[OSS-Fuzz](https://google.github.io/oss-fuzz/getting-started/new-project-guide/rust-lang/)
+integration: `project.yaml`, `Dockerfile`, and `build.sh`, building all five
+targets in `fuzz/fuzz_targets/` via `cargo fuzz build`. This is scaffolding
+only — actual onboarding requires a PR to `google/oss-fuzz` reviewed and
+merged by Google, which is external to this repository and not done here.

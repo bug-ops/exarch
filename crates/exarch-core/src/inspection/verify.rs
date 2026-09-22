@@ -735,8 +735,8 @@ mod tests {
 
     // Note: Full CVE regression tests for path traversal require real malicious
     // archives that cannot be created using the tar crate (it validates paths).
-    // Those tests should be added in tests/cve/ directory with pre-built
-    // malicious fixtures. This test verifies the workflow works with
+    // Those tests should be added in crates/exarch-core/tests/security/ with
+    // pre-built malicious fixtures. This test verifies the workflow works with
     // archives that tar crate accepts.
 
     #[test]

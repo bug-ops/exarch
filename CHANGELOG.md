@@ -22,13 +22,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `securityStatus`: "OK"/"FAILED"/"WARNING"/"SKIPPED"; `severity`: "CRITICAL"/"HIGH"/"MEDIUM"/
   "LOW"/"INFO"; `category`: space-separated title case, e.g. "Path Traversal") instead of the
   stale title-case wording (#583).
-- Wired the orphaned root-level `tests/cve/` and `tests/security/` suites into a real cargo target: superseded duplicates were removed, and distinct `EntryValidator` coverage (path traversal, symlink/hardlink escape, zip-bomb ratio detection) was ported into `crates/exarch-core/tests/security/`, fixing tests that previously compiled in no cargo target (#587).
+- Wired the orphaned root-level `tests/cve/` and `tests/security/` suites into a real cargo target: superseded duplicates were removed, and distinct `EntryValidator` coverage (path traversal, symlink/hardlink escape, zip-bomb ratio detection) was ported into `crates/exarch-core/tests/security/`, fixing tests that previously compiled in no cargo target (#590).
 
 ### CI
 
 - Added a `cargo-fuzz` harness covering `tar`, `zip`, `sevenz`, `safe_path`, and `extract_archive`, gated into `ci-success` via a mandatory compile check plus a weekly scheduled fuzz run (#585).
 - Pinned every GitHub Actions reference in `ci.yml` to a commit SHA instead of a mutable tag (#585).
-- Added `fuzz/oss-fuzz/` submission scaffolding (`project.yaml`, `Dockerfile`, `build.sh`) for upstream OSS-Fuzz integration; actual onboarding still requires an external PR to `google/oss-fuzz` (#588).
+- Added `fuzz/oss-fuzz/` submission scaffolding (`project.yaml`, `Dockerfile`, `build.sh`) for upstream OSS-Fuzz integration; actual onboarding still requires an external PR to `google/oss-fuzz` (#590).
 - Smoke-test the `exarch-rs` napi addon under Bun and Deno (Linux, create/list/verify/extract plus a security-violation path) (#579).
 - `deny.toml` now enforces the `multiple-versions` ban instead of only warning, with scoped exceptions for the known `zstd`/`zstd-safe` and `syn` duplicates (#581).
 

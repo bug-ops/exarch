@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Bumped `napi`/`napi-build`/`napi-derive`, `sevenz-rust2`, and `smallvec` to their latest compatible releases; refreshed `deny.toml`'s `zstd-safe`/`syn` duplicate-version exceptions to match the resulting transitive bumps.
+- Bumped `napi`/`napi-build`/`napi-derive`, `sevenz-rust2`, and `smallvec` to their latest compatible releases; refreshed `deny.toml`'s `zstd-safe`/`syn` duplicate-version exceptions to match the resulting transitive bumps (#584).
 
 ### Fixed
 

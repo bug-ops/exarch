@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Renamed `exarch-node`'s deprecated `napi.name`/`napi.triples` package.json fields to
+  `napi.binaryName`/`napi.targets` per `@napi-rs/cli` 3.10.x, eliminating build-time
+  deprecation warnings, and added the missing `aarch64-unknown-linux-gnu` target so the
+  declared list matches what CI actually builds (#583).
+- Corrected `VerificationReport`/`VerificationIssue` doc comment prose in `exarch-node` to
+  match the actual runtime strings (`status`: "PASS"/"FAIL"/"WARNING"; `integrityStatus`/
+  `securityStatus`: "OK"/"FAILED"/"WARNING"/"SKIPPED"; `severity`: "CRITICAL"/"HIGH"/"MEDIUM"/
+  "LOW"/"INFO"; `category`: space-separated title case, e.g. "Path Traversal") instead of the
+  stale title-case wording (#583).
+
 ### CI
 
 - Smoke-test the `exarch-rs` napi addon under Bun and Deno (Linux, create/list/verify/extract plus a security-violation path) (#579).

@@ -30,10 +30,14 @@
     "url": "https://github.com/bug-ops/exarch/issues"
   },
   "napi": {
-    "name": "exarch-rs",
-    "triples": {
-      "defaults": true
-    }
+    "binaryName": "exarch-rs",
+    "targets": [
+      "x86_64-apple-darwin",
+      "aarch64-apple-darwin",
+      "x86_64-pc-windows-msvc",
+      "x86_64-unknown-linux-gnu",
+      "aarch64-unknown-linux-gnu"
+    ]
   },
   "scripts": {
     "build": "napi build --platform --release",

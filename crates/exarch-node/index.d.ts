@@ -906,9 +906,9 @@ export declare function listArchiveSync(archivePath: string, config?: SecurityCo
 
 /** Single verification issue. */
 export interface VerificationIssue {
-  /** Issue severity level ("Critical", "High", "Medium", "Low", "Info"). */
+  /** Issue severity level ("CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"). */
   severity: string
-  /** Issue category (`PathTraversal`, `SymlinkEscape`, etc.). */
+  /** Issue category, e.g. "Path Traversal", "Symlink Escape", "Zip Bomb". */
   category: string
   /** Entry path that triggered issue (if applicable). */
   entryPath?: string
@@ -925,11 +925,11 @@ export interface VerificationIssue {
  * performed without extracting files to disk.
  */
 export interface VerificationReport {
-  /** Overall verification status ("Pass", "Fail", "Warning"). */
+  /** Overall verification status ("PASS", "FAIL", "WARNING"). */
   status: string
-  /** Integrity check result ("Pass", "Fail", "Warning", "Skipped"). */
+  /** Integrity check result ("OK", "FAILED", "WARNING", "SKIPPED"). */
   integrityStatus: string
-  /** Security check result ("Pass", "Fail", "Warning", "Skipped"). */
+  /** Security check result ("OK", "FAILED", "WARNING", "SKIPPED"). */
   securityStatus: string
   /** List of all issues found (sorted by severity). */
   issues: Array<VerificationIssue>

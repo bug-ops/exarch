@@ -25,7 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### CI
 
-- Added a `cargo-fuzz` harness covering `tar`, `zip`, `sevenz`, `safe_path`, and `extract_archive`, gated into `ci-success` via a mandatory compile check plus a weekly scheduled fuzz run.
+- Added a `cargo-fuzz` harness covering `tar`, `zip`, `sevenz`, `safe_path`, and `extract_archive`, gated into `ci-success` via a mandatory compile check plus a weekly scheduled fuzz run (#585).
+- Pinned every GitHub Actions reference in `ci.yml` to a commit SHA instead of a mutable tag (#585).
 - Smoke-test the `exarch-rs` napi addon under Bun and Deno (Linux, create/list/verify/extract plus a security-violation path) (#579).
 - `deny.toml` now enforces the `multiple-versions` ban instead of only warning, with scoped exceptions for the known `zstd`/`zstd-safe` and `syn` duplicates (#581).
 

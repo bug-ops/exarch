@@ -1,19 +1,31 @@
-//! Symlink escape attack integration tests.
+//! `EntryValidator` symlink escape regression tests.
+//!
+//! Exercises `EntryValidator::validate_entry` directly against symlink
+//! entries: absolute/parent-traversal escapes, the disabled-by-default
+//! rejection path, and safe same-directory/relative links.
 
+#![allow(clippy::unwrap_used)]
+
+use exarch_core::ArchiveError;
+use exarch_core::SecurityConfig;
 use exarch_core::security::EntryValidator;
-use exarch_core::types::{DestDir, EntryType};
-use exarch_core::{ArchiveError, SecurityConfig};
-use std::path::{Path, PathBuf};
+use exarch_core::types::DestDir;
+use exarch_core::types::EntryType;
+use std::assert_matches;
+use std::path::Path;
+use std::path::PathBuf;
 use tempfile::TempDir;
 
 #[test]
 fn test_symlink_absolute_target() {
     let temp = TempDir::new().unwrap();
     let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
-    let mut config = SecurityConfig::default();
-    config.allow_symlinks = true;
+    let config = SecurityConfig::default()
+        .with_allow_symlinks(true)
+        .validate()
+        .unwrap();
 
-    let mut validator = EntryValidator::new(config, dest);
+    let mut validator = EntryValidator::new(&config, &dest);
 
     let result = validator.validate_entry(
         Path::new("malicious_link"),
@@ -23,22 +35,22 @@ fn test_symlink_absolute_target() {
         0,
         None,
         None,
+        None,
     );
 
-    assert!(matches!(
-        result,
-        Err(ArchiveError::SymlinkEscape { .. })
-    ));
+    assert_matches!(result, Err(ArchiveError::SymlinkEscape { .. }));
 }
 
 #[test]
 fn test_symlink_parent_traversal() {
     let temp = TempDir::new().unwrap();
     let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
-    let mut config = SecurityConfig::default();
-    config.allow_symlinks = true;
+    let config = SecurityConfig::default()
+        .with_allow_symlinks(true)
+        .validate()
+        .unwrap();
 
-    let mut validator = EntryValidator::new(config, dest);
+    let mut validator = EntryValidator::new(&config, &dest);
 
     let result = validator.validate_entry(
         Path::new("safe/link"),
@@ -48,21 +60,19 @@ fn test_symlink_parent_traversal() {
         0,
         None,
         None,
+        None,
     );
 
-    assert!(matches!(
-        result,
-        Err(ArchiveError::SymlinkEscape { .. })
-    ));
+    assert_matches!(result, Err(ArchiveError::SymlinkEscape { .. }));
 }
 
 #[test]
 fn test_symlink_disabled_by_default() {
     let temp = TempDir::new().unwrap();
     let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
-    let config = SecurityConfig::default();
+    let config = SecurityConfig::default().validate().unwrap();
 
-    let mut validator = EntryValidator::new(config, dest);
+    let mut validator = EntryValidator::new(&config, &dest);
 
     let result = validator.validate_entry(
         Path::new("link"),
@@ -72,22 +82,22 @@ fn test_symlink_disabled_by_default() {
         0,
         None,
         None,
+        None,
     );
 
-    assert!(matches!(
-        result,
-        Err(ArchiveError::SecurityViolation { .. })
-    ));
+    assert_matches!(result, Err(ArchiveError::SecurityViolation { .. }));
 }
 
 #[test]
 fn test_symlink_relative_safe() {
     let temp = TempDir::new().unwrap();
     let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
-    let mut config = SecurityConfig::default();
-    config.allow_symlinks = true;
+    let config = SecurityConfig::default()
+        .with_allow_symlinks(true)
+        .validate()
+        .unwrap();
 
-    let mut validator = EntryValidator::new(config, dest);
+    let mut validator = EntryValidator::new(&config, &dest);
 
     let result = validator.validate_entry(
         Path::new("foo/link"),
@@ -95,6 +105,7 @@ fn test_symlink_relative_safe() {
             target: PathBuf::from("../bar/target.txt"),
         },
         0,
+        None,
         None,
         None,
     );
@@ -106,10 +117,12 @@ fn test_symlink_relative_safe() {
 fn test_symlink_same_directory() {
     let temp = TempDir::new().unwrap();
     let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
-    let mut config = SecurityConfig::default();
-    config.allow_symlinks = true;
+    let config = SecurityConfig::default()
+        .with_allow_symlinks(true)
+        .validate()
+        .unwrap();
 
-    let mut validator = EntryValidator::new(config, dest);
+    let mut validator = EntryValidator::new(&config, &dest);
 
     let result = validator.validate_entry(
         Path::new("link"),
@@ -117,6 +130,7 @@ fn test_symlink_same_directory() {
             target: PathBuf::from("target.txt"),
         },
         0,
+        None,
         None,
         None,
     );
@@ -128,12 +142,14 @@ fn test_symlink_same_directory() {
 fn test_symlink_chain_escape() {
     let temp = TempDir::new().unwrap();
     let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
-    let mut config = SecurityConfig::default();
-    config.allow_symlinks = true;
+    let config = SecurityConfig::default()
+        .with_allow_symlinks(true)
+        .validate()
+        .unwrap();
 
-    let mut validator = EntryValidator::new(config, dest);
+    let mut validator = EntryValidator::new(&config, &dest);
 
-    // Try to escape via multiple parent traversals
+    // Try to escape via multiple parent traversals.
     let result = validator.validate_entry(
         Path::new("a/b/c/link"),
         &EntryType::Symlink {
@@ -142,10 +158,8 @@ fn test_symlink_chain_escape() {
         0,
         None,
         None,
+        None,
     );
 
-    assert!(matches!(
-        result,
-        Err(ArchiveError::SymlinkEscape { .. })
-    ));
+    assert_matches!(result, Err(ArchiveError::SymlinkEscape { .. }));
 }

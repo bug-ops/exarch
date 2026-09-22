@@ -147,7 +147,8 @@ cargo llvm-cov nextest --all-features --workspace --html
 
 ### CVE Regression Tests
 
-When fixing security issues, add a regression test in `tests/cve/`:
+When fixing security issues, add a regression test in
+`crates/exarch-core/tests/security/`:
 
 ```rust
 #[test]

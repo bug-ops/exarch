@@ -1,19 +1,32 @@
-//! Hardlink attack integration tests.
+//! `EntryValidator` hardlink attack regression tests.
+//!
+//! Exercises `EntryValidator::validate_entry` directly against hardlink
+//! entries: absolute/parent-traversal escapes, the disabled-by-default
+//! rejection path, safe same-directory/relative links, and multi-entry
+//! tracking via `ValidationReport::hardlinks_tracked`.
 
+#![allow(clippy::unwrap_used)]
+
+use exarch_core::ArchiveError;
+use exarch_core::SecurityConfig;
 use exarch_core::security::EntryValidator;
-use exarch_core::types::{DestDir, EntryType};
-use exarch_core::{ArchiveError, SecurityConfig};
-use std::path::{Path, PathBuf};
+use exarch_core::types::DestDir;
+use exarch_core::types::EntryType;
+use std::assert_matches;
+use std::path::Path;
+use std::path::PathBuf;
 use tempfile::TempDir;
 
 #[test]
 fn test_hardlink_absolute_target() {
     let temp = TempDir::new().unwrap();
     let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
-    let mut config = SecurityConfig::default();
-    config.allow_hardlinks = true;
+    let config = SecurityConfig::default()
+        .with_allow_hardlinks(true)
+        .validate()
+        .unwrap();
 
-    let mut validator = EntryValidator::new(config, dest);
+    let mut validator = EntryValidator::new(&config, &dest);
 
     let result = validator.validate_entry(
         Path::new("malicious_hardlink"),
@@ -23,22 +36,22 @@ fn test_hardlink_absolute_target() {
         0,
         None,
         None,
+        None,
     );
 
-    assert!(matches!(
-        result,
-        Err(ArchiveError::HardlinkEscape { .. })
-    ));
+    assert_matches!(result, Err(ArchiveError::HardlinkEscape { .. }));
 }
 
 #[test]
 fn test_hardlink_parent_traversal() {
     let temp = TempDir::new().unwrap();
     let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
-    let mut config = SecurityConfig::default();
-    config.allow_hardlinks = true;
+    let config = SecurityConfig::default()
+        .with_allow_hardlinks(true)
+        .validate()
+        .unwrap();
 
-    let mut validator = EntryValidator::new(config, dest);
+    let mut validator = EntryValidator::new(&config, &dest);
 
     let result = validator.validate_entry(
         Path::new("link"),
@@ -48,21 +61,19 @@ fn test_hardlink_parent_traversal() {
         0,
         None,
         None,
+        None,
     );
 
-    assert!(matches!(
-        result,
-        Err(ArchiveError::HardlinkEscape { .. })
-    ));
+    assert_matches!(result, Err(ArchiveError::HardlinkEscape { .. }));
 }
 
 #[test]
 fn test_hardlink_disabled_by_default() {
     let temp = TempDir::new().unwrap();
     let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
-    let config = SecurityConfig::default();
+    let config = SecurityConfig::default().validate().unwrap();
 
-    let mut validator = EntryValidator::new(config, dest);
+    let mut validator = EntryValidator::new(&config, &dest);
 
     let result = validator.validate_entry(
         Path::new("link"),
@@ -72,22 +83,22 @@ fn test_hardlink_disabled_by_default() {
         0,
         None,
         None,
+        None,
     );
 
-    assert!(matches!(
-        result,
-        Err(ArchiveError::SecurityViolation { .. })
-    ));
+    assert_matches!(result, Err(ArchiveError::SecurityViolation { .. }));
 }
 
 #[test]
 fn test_hardlink_relative_safe() {
     let temp = TempDir::new().unwrap();
     let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
-    let mut config = SecurityConfig::default();
-    config.allow_hardlinks = true;
+    let config = SecurityConfig::default()
+        .with_allow_hardlinks(true)
+        .validate()
+        .unwrap();
 
-    let mut validator = EntryValidator::new(config, dest);
+    let mut validator = EntryValidator::new(&config, &dest);
 
     let result = validator.validate_entry(
         Path::new("foo/link"),
@@ -95,6 +106,7 @@ fn test_hardlink_relative_safe() {
             target: PathBuf::from("foo/target.txt"),
         },
         0,
+        None,
         None,
         None,
     );
@@ -106,10 +118,12 @@ fn test_hardlink_relative_safe() {
 fn test_hardlink_same_directory() {
     let temp = TempDir::new().unwrap();
     let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
-    let mut config = SecurityConfig::default();
-    config.allow_hardlinks = true;
+    let config = SecurityConfig::default()
+        .with_allow_hardlinks(true)
+        .validate()
+        .unwrap();
 
-    let mut validator = EntryValidator::new(config, dest);
+    let mut validator = EntryValidator::new(&config, &dest);
 
     let result = validator.validate_entry(
         Path::new("link"),
@@ -117,6 +131,7 @@ fn test_hardlink_same_directory() {
             target: PathBuf::from("target.txt"),
         },
         0,
+        None,
         None,
         None,
     );
@@ -128,10 +143,12 @@ fn test_hardlink_same_directory() {
 fn test_multiple_hardlinks_tracked() {
     let temp = TempDir::new().unwrap();
     let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
-    let mut config = SecurityConfig::default();
-    config.allow_hardlinks = true;
+    let config = SecurityConfig::default()
+        .with_allow_hardlinks(true)
+        .validate()
+        .unwrap();
 
-    let mut validator = EntryValidator::new(config, dest);
+    let mut validator = EntryValidator::new(&config, &dest);
 
     validator
         .validate_entry(
@@ -140,6 +157,7 @@ fn test_multiple_hardlinks_tracked() {
                 target: PathBuf::from("target1.txt"),
             },
             0,
+            None,
             None,
             None,
         )
@@ -154,6 +172,7 @@ fn test_multiple_hardlinks_tracked() {
             0,
             None,
             None,
+            None,
         )
         .unwrap();
 
@@ -165,12 +184,14 @@ fn test_multiple_hardlinks_tracked() {
 fn test_hardlink_chain_escape() {
     let temp = TempDir::new().unwrap();
     let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
-    let mut config = SecurityConfig::default();
-    config.allow_hardlinks = true;
+    let config = SecurityConfig::default()
+        .with_allow_hardlinks(true)
+        .validate()
+        .unwrap();
 
-    let mut validator = EntryValidator::new(config, dest);
+    let mut validator = EntryValidator::new(&config, &dest);
 
-    // Try to escape via multiple parent traversals
+    // Try to escape via multiple parent traversals.
     let result = validator.validate_entry(
         Path::new("a/b/c/link"),
         &EntryType::Hardlink {
@@ -179,10 +200,8 @@ fn test_hardlink_chain_escape() {
         0,
         None,
         None,
+        None,
     );
 
-    assert!(matches!(
-        result,
-        Err(ArchiveError::HardlinkEscape { .. })
-    ));
+    assert_matches!(result, Err(ArchiveError::HardlinkEscape { .. }));
 }

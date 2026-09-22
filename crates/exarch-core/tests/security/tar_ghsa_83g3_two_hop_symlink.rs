@@ -7,21 +7,30 @@
 //! traversal outside the root.
 //!
 //! Attack chain:
-//!   Entry 1: dir   a/b/c/
-//!   Entry 2: link  a/b/c/up  ->  ../..        (resolves to a/ — written to disk)
-//!   Entry 3: link  a/b/escape -> c/up/../..   (string: a/b/ — PASS; disk: escapes dest)
-//!   Entry 4: hard  exfil -> a/b/escape/../../etc/passwd
 //!
-//! The fix resolves each target component through the real filesystem, calling
-//! `fs::canonicalize` whenever an on-disk symlink is encountered, so the escape
-//! is detected at the containment check.
+//! - Entry 1: dir `a/b/c/`
+//! - Entry 2: link `a/b/c/up` -> `../..` (resolves to `a/` — written to disk)
+//! - Entry 3: link `a/b/escape` -> `c/up/../..` (string: `a/b/` — PASS; disk:
+//!   escapes dest)
+//! - Entry 4: hard `exfil` -> `a/b/escape/../../etc/passwd`
 //!
-//! Requires: `--allow-symlinks` AND `--allow-hardlinks` (both non-default).
+//! This is the only end-to-end (`TarArchive::extract`) coverage of the
+//! two-hop chain:
+//! `src/types/safe_symlink.rs::test_safe_symlink_two_hop_chain_rejected`
+//! and `src/security/hardlink.rs::test_hardlink_two_hop_chain_rejected` call
+//! `SafeSymlink::validate`/hardlink validation directly against a
+//! hand-constructed on-disk symlink, which does not exercise
+//! `validate_entry_path`'s canonicalize-skipping optimizations
+//! (`mark_symlink_seen`, `with_dir_cache`) the way a real archive extraction
+//! does.
 
 use exarch_core::ArchiveError;
+use exarch_core::ExtractionOptions;
+use exarch_core::NoopProgress;
 use exarch_core::SecurityConfig;
+use exarch_core::formats::ArchiveFormat;
 use exarch_core::formats::TarArchive;
-use exarch_core::formats::traits::ArchiveFormat;
+use std::assert_matches;
 use std::io::Cursor;
 use tempfile::TempDir;
 
@@ -50,8 +59,12 @@ fn build_two_hop_chain_tar() -> Vec<u8> {
         .expect("append first hop symlink");
 
     // Entry 3: symlink a/b/escape -> c/up/../..
-    // String normalization: dest/a/b/c/up/../.. → dest/a/b (within dest — PASS without fix)
-    // On disk: c/up resolves to ../../.. from dest/a/b = outside dest
+    //
+    // String normalization: dest/a/b/c/up/../.. -> dest/a/b (within dest --
+    // PASS without fix).
+    //
+    // On disk: c/up resolves to ../../.. from dest/a/b, which is outside
+    // dest.
     let mut header = tar::Header::new_gnu();
     header.set_entry_type(tar::EntryType::Symlink);
     header.set_size(0);
@@ -80,29 +93,40 @@ fn build_two_hop_chain_tar() -> Vec<u8> {
 #[cfg(unix)]
 fn two_hop_symlink_chain_is_rejected() {
     let dest = TempDir::new().expect("temp dir");
-    let mut config = SecurityConfig::default();
-    config.allowed.symlinks = true;
-    config.allowed.hardlinks = true;
+    let config = SecurityConfig::default()
+        .with_allow_symlinks(true)
+        .with_allow_hardlinks(true)
+        .validate()
+        .expect("valid config");
 
     let data = build_two_hop_chain_tar();
     let cursor = Cursor::new(data);
     let mut archive = TarArchive::new(cursor);
 
-    let result = archive.extract(dest.path(), &config);
+    let result = archive.extract(
+        dest.path(),
+        &config,
+        &ExtractionOptions::default(),
+        &mut NoopProgress,
+    );
 
-    // Extraction must fail — the escape symlink or hardlink must be rejected.
+    // Extraction must fail -- the escape symlink or hardlink must be rejected.
     assert!(
         result.is_err(),
         "two-hop symlink chain must be rejected, but extraction succeeded"
     );
 
-    // The error must be a symlink or hardlink escape, not an unrelated I/O error.
+    // Extraction failures surface as `PartialExtraction { source, report }`,
+    // wrapping the triggering error. The source must be a symlink or
+    // hardlink escape, not an unrelated I/O error.
     let err = result.unwrap_err();
-    assert!(
-        matches!(
-            err,
-            ArchiveError::SymlinkEscape { .. } | ArchiveError::HardlinkEscape { .. }
-        ),
+    let source = match &err {
+        ArchiveError::PartialExtraction { source, .. } => source.as_ref(),
+        other => other,
+    };
+    assert_matches!(
+        source,
+        ArchiveError::SymlinkEscape { .. } | ArchiveError::HardlinkEscape { .. },
         "expected SymlinkEscape or HardlinkEscape, got: {err:?}"
     );
 
@@ -114,16 +138,21 @@ fn two_hop_symlink_chain_is_rejected() {
 }
 
 /// With symlinks disabled (default), the archive is rejected at the first
-/// symlink entry — the two-hop chain is never attempted.
+/// symlink entry -- the two-hop chain is never attempted.
 #[test]
 fn two_hop_chain_rejected_when_symlinks_disabled() {
     let dest = TempDir::new().expect("temp dir");
-    let config = SecurityConfig::default(); // symlinks = false
+    let config = SecurityConfig::default().validate().expect("valid config"); // symlinks = false
 
     let data = build_two_hop_chain_tar();
     let cursor = Cursor::new(data);
     let mut archive = TarArchive::new(cursor);
 
-    let result = archive.extract(dest.path(), &config);
+    let result = archive.extract(
+        dest.path(),
+        &config,
+        &ExtractionOptions::default(),
+        &mut NoopProgress,
+    );
     assert!(result.is_err(), "should be rejected with symlinks disabled");
 }

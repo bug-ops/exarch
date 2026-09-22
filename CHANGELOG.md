@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `securityStatus`: "OK"/"FAILED"/"WARNING"/"SKIPPED"; `severity`: "CRITICAL"/"HIGH"/"MEDIUM"/
   "LOW"/"INFO"; `category`: space-separated title case, e.g. "Path Traversal") instead of the
   stale title-case wording (#583).
+- Wired the orphaned root-level `tests/cve/` and `tests/security/` suites into a real cargo target: superseded duplicates were removed, and distinct `EntryValidator` coverage (path traversal, symlink/hardlink escape, zip-bomb ratio detection) was ported into `crates/exarch-core/tests/security/`, fixing tests that previously compiled in no cargo target (#587).
 
 ### CI
 

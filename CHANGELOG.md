@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### CI
 
 - Smoke-test the `exarch-rs` napi addon under Bun and Deno (Linux, create/list/verify/extract plus a security-violation path) (#579).
+- `deny.toml` now enforces the `multiple-versions` ban instead of only warning, with scoped exceptions for the known `zstd`/`zstd-safe` and `syn` duplicates (#581).
 
 ### Security
 

@@ -172,11 +172,11 @@ impl From<exarch_core::inspection::ArchiveEntry> for ArchiveEntry {
 #[napi(object)]
 #[derive(Debug, Clone)]
 pub struct VerificationReport {
-    /// Overall verification status ("Pass", "Fail", "Warning").
+    /// Overall verification status ("PASS", "FAIL", "WARNING").
     pub status: String,
-    /// Integrity check result ("Pass", "Fail", "Warning", "Skipped").
+    /// Integrity check result ("OK", "FAILED", "WARNING", "SKIPPED").
     pub integrity_status: String,
-    /// Security check result ("Pass", "Fail", "Warning", "Skipped").
+    /// Security check result ("OK", "FAILED", "WARNING", "SKIPPED").
     pub security_status: String,
     /// List of all issues found (sorted by severity).
     pub issues: Vec<VerificationIssue>,
@@ -214,9 +214,9 @@ impl From<exarch_core::inspection::VerificationReport> for VerificationReport {
 #[napi(object)]
 #[derive(Debug, Clone)]
 pub struct VerificationIssue {
-    /// Issue severity level ("Critical", "High", "Medium", "Low", "Info").
+    /// Issue severity level ("CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO").
     pub severity: String,
-    /// Issue category (`PathTraversal`, `SymlinkEscape`, etc.).
+    /// Issue category, e.g. "Path Traversal", "Symlink Escape", "Zip Bomb".
     pub category: String,
     /// Entry path that triggered issue (if applicable).
     pub entry_path: Option<String>,

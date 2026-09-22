@@ -24,15 +24,19 @@
 //! (`mark_symlink_seen`, `with_dir_cache`) the way a real archive extraction
 //! does.
 
-use exarch_core::ArchiveError;
 use exarch_core::ExtractionOptions;
 use exarch_core::NoopProgress;
 use exarch_core::SecurityConfig;
 use exarch_core::formats::ArchiveFormat;
 use exarch_core::formats::TarArchive;
-use std::assert_matches;
 use std::io::Cursor;
 use tempfile::TempDir;
+
+// Only used by `two_hop_symlink_chain_is_rejected`, which is `#[cfg(unix)]`.
+#[cfg(unix)]
+use exarch_core::ArchiveError;
+#[cfg(unix)]
+use std::assert_matches;
 
 /// Build the two-hop symlink escape TAR in memory.
 fn build_two_hop_chain_tar() -> Vec<u8> {

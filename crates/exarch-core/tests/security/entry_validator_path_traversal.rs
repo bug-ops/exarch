@@ -74,31 +74,31 @@ fn test_absolute_path_attack() {
     }
 }
 
+// Null-byte injection via `OsStr` construction is a Unix-only attack shape;
+// on Windows, `OsString` is WTF-8 and doesn't admit an embedded NUL the same
+// way.
 #[test]
+#[cfg(unix)]
 fn test_null_byte_injection() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::PathBuf;
+
     let temp = TempDir::new().unwrap();
     let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
     let config = SecurityConfig::default().validate().unwrap();
     let mut validator = EntryValidator::new(&config, &dest);
 
-    #[cfg(unix)]
-    {
-        use std::ffi::OsStr;
-        use std::os::unix::ffi::OsStrExt;
-        use std::path::PathBuf;
+    let bytes = b"file\0.txt";
+    let os_str = OsStr::from_bytes(bytes);
+    let path = PathBuf::from(os_str);
 
-        let bytes = b"file\0.txt";
-        let os_str = OsStr::from_bytes(bytes);
-        let path = PathBuf::from(os_str);
+    let result = validator.validate_entry(&path, &EntryType::File, 1024, None, Some(0o644), None);
 
-        let result =
-            validator.validate_entry(&path, &EntryType::File, 1024, None, Some(0o644), None);
-
-        assert!(matches!(
-            result,
-            Err(ArchiveError::SecurityViolation { .. })
-        ));
-    }
+    assert!(matches!(
+        result,
+        Err(ArchiveError::SecurityViolation { .. })
+    ));
 }
 
 #[test]

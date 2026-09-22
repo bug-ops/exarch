@@ -27,11 +27,32 @@ expression = "MIT AND ISC AND OpenSSL"
 license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
 
 [bans]
-multiple-versions = "warn"
+multiple-versions = "deny"
 wildcards = "allow"
 highlight = "all"
 workspace-default-features = "allow"
 external-default-features = "allow"
+
+# zip v9.0.0-pre3 transitively pins the old zstd/zstd-safe line instead of the
+# 0.14.0 direct dependency; intentional exception pending zip's upgrade (#578).
+[[bans.skip]]
+name = "zstd"
+version = "=0.13.3"
+
+[[bans.skip]]
+name = "zstd-safe"
+version = "=7.2.4"
+
+# Pre-existing proc-macro ecosystem split, out of scope for #578: napi-derive/pyo3-macros/
+# zerocopy-derive pull syn 2.x while clap_derive/futures-macro/serde_derive/thiserror-impl/
+# tokio-macros have moved to syn 3.x. A follow-up consolidation issue will be filed separately.
+[[bans.skip]]
+name = "syn"
+version = "=2.0.119"
+
+[[bans.skip]]
+name = "syn"
+version = "=3.0.4"
 
 [sources]
 unknown-registry = "deny"

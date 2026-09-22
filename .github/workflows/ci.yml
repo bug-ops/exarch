@@ -40,9 +40,9 @@ jobs:
       ci: ${{ steps.filter.outputs.ci }}
       docs: ${{ steps.filter.outputs.docs }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: dorny/paths-filter@v4
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4
         id: filter
         with:
           filters: |
@@ -81,7 +81,7 @@ jobs:
       github.ref == 'refs/heads/main' ||
       github.ref == 'refs/heads/develop'
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install nightly Rust
         uses: dtolnay/rust-toolchain@nightly
@@ -90,6 +90,9 @@ jobs:
 
       - name: Check formatting
         run: cargo +nightly fmt --all -- --check
+
+      - name: Check formatting (fuzz crate)
+        run: cargo +nightly fmt --manifest-path fuzz/Cargo.toml -- --check
 
   clippy:
     name: Clippy
@@ -101,7 +104,7 @@ jobs:
       github.ref == 'refs/heads/main' ||
       github.ref == 'refs/heads/develop'
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -109,7 +112,7 @@ jobs:
           components: clippy
 
       - name: Cache Cargo dependencies
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: "clippy"
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -127,13 +130,13 @@ jobs:
       github.ref == 'refs/heads/main' ||
       github.ref == 'refs/heads/develop'
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache Cargo dependencies
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: "doc"
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -162,14 +165,96 @@ jobs:
       github.ref == 'refs/heads/develop' ||
       github.event_name == 'schedule'
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Run cargo-deny
-        uses: EmbarkStudios/cargo-deny-action@v2
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
         with:
           log-level: warn
           command: check
           arguments: --all-features
+
+      # fuzz/ is outside the root workspace, so the check above cannot see its
+      # dep tree (libfuzzer-sys, arbitrary, cc). Advisories only -- NCSA stays
+      # off deny.toml's allow-list for anything shipped. Scheduled-only:
+      # .github/dependabot.yml only covers directory "/", so fuzz/Cargo.lock
+      # has no automated update path and this step must not red every PR.
+      - name: Run cargo-deny (fuzz crate advisories)
+        if: github.event_name == 'schedule'
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
+        with:
+          log-level: warn
+          manifest-path: fuzz/Cargo.toml
+          command: check
+          command-arguments: advisories
+
+  # Scheduled fuzzing. Narrow but real: 5 targets x 300s weekly on a corpus
+  # that persists via actions/cache, layered on top of the existing
+  # regression-test harness -- not a replacement for it. Deliberately not in
+  # ci-success: non-blocking by design, only fuzz-build above gates PRs.
+  fuzz:
+    name: Fuzz (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: changes
+    if: github.event_name == 'schedule'
+    env:
+      RUSTFLAGS: ""
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [safe_path, tar, zip, sevenz, extract_archive]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: dtolnay/rust-toolchain@nightly
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: "fuzz-${{ matrix.target }}"
+          workspaces: "fuzz"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - uses: taiki-e/install-action@dfae9bf3d6f6c6f20ef4ebb3486c01a51341ff12 # v2.87.18
+        with:
+          tool: cargo-fuzz
+
+      # actions/cache has post-if: "success()", so a plain cache@v4 step would
+      # discard the corpus on exactly the run where libFuzzer finds a crash
+      # (nonzero exit). Restore/save split with `if: always()` on save fixes
+      # that; same key + restore-keys keeps the rolling window.
+      - name: Restore fuzz corpus
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: fuzz-corpus-${{ matrix.target }}-
+
+      - name: Seed corpus
+        run: ./fuzz/seed-corpus.sh
+
+      - name: Fuzz ${{ matrix.target }}
+        run: |
+          cargo +nightly fuzz run ${{ matrix.target }} \
+            fuzz/corpus/${{ matrix.target }} fuzz/seeds/${{ matrix.target }} \
+            -- -max_total_time=300 -timeout=25 -rss_limit_mb=2048 \
+            -print_final_stats=1
+
+      - name: Save fuzz corpus
+        if: always()
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}/
+          if-no-files-found: ignore
+          retention-days: 30
 
   # Cross-platform tests with matrix
   test:
@@ -187,19 +272,19 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache Cargo dependencies
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: "test-${{ matrix.os }}"
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install nextest
-        uses: taiki-e/install-action@v2.87.15
+        uses: taiki-e/install-action@dfae9bf3d6f6c6f20ef4ebb3486c01a51341ff12 # v2.87.18
         with:
           tool: nextest
 
@@ -225,19 +310,19 @@ jobs:
       github.ref == 'refs/heads/main' ||
       github.ref == 'refs/heads/develop'
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache Cargo dependencies
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: "test-release"
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install nextest
-        uses: taiki-e/install-action@v2.87.15
+        uses: taiki-e/install-action@dfae9bf3d6f6c6f20ef4ebb3486c01a51341ff12 # v2.87.18
         with:
           tool: nextest
 
@@ -268,24 +353,24 @@ jobs:
         python-version: ['3.10', '3.11', '3.12', '3.13', '3.14']
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache Cargo dependencies
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: "python"
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: ${{ matrix.python-version }}
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v7
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
 
       - name: Install dependencies
         run: |
@@ -339,7 +424,7 @@ jobs:
 
       - name: Upload Python coverage to Codecov
         if: matrix.python-version == '3.12'
-        uses: codecov/codecov-action@v7
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: crates/exarch-python/coverage.xml
@@ -360,19 +445,19 @@ jobs:
       github.ref == 'refs/heads/main' ||
       github.ref == 'refs/heads/develop')
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache Cargo dependencies
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: "node"
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Set up Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: '20'
 
@@ -421,19 +506,19 @@ jobs:
       github.ref == 'refs/heads/main' ||
       github.ref == 'refs/heads/develop')
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache Cargo dependencies
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: "node"
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Set up Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: '20'
 
@@ -448,7 +533,7 @@ jobs:
           npm run build
 
       - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: latest
 
@@ -474,19 +559,50 @@ jobs:
       github.ref == 'refs/heads/main' ||
       github.ref == 'refs/heads/develop'
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache Cargo dependencies
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: "bench-build"
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build benchmarks (compile only, does not run them)
         run: cargo build --workspace --benches --all-features --exclude exarch-python --exclude exarch-node
+
+  # Mandatory per-PR compile gate for fuzz/. Without this a core API change
+  # could break every fuzz target for up to a week before the scheduled `fuzz`
+  # job below (which nobody watches) surfaces it.
+  fuzz-build:
+    name: Fuzz Build Check
+    needs: [changes, format]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: |
+      needs.changes.outputs.rust == 'true' ||
+      github.ref == 'refs/heads/main' ||
+      github.ref == 'refs/heads/develop'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: dtolnay/rust-toolchain@nightly
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: "fuzz-build"
+          workspaces: "fuzz"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Syntax-check seed-corpus.sh
+        run: bash -n fuzz/seed-corpus.sh
+
+      - name: Check fuzz targets compile
+        env:
+          RUSTFLAGS: ""
+        run: cargo +nightly check --manifest-path fuzz/Cargo.toml --all-targets
 
   # MSRV check (exarch-core only)
   msrv:
@@ -499,7 +615,7 @@ jobs:
       github.ref == 'refs/heads/main' ||
       github.ref == 'refs/heads/develop'
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install Rust 1.98.0
         uses: dtolnay/rust-toolchain@master
@@ -507,7 +623,7 @@ jobs:
           toolchain: "1.98.0"
 
       - name: Cache Cargo dependencies
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: "msrv"
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -528,24 +644,24 @@ jobs:
       github.ref == 'refs/heads/main' ||
       github.ref == 'refs/heads/develop'
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache Cargo dependencies
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: "coverage"
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@v2.87.15
+        uses: taiki-e/install-action@dfae9bf3d6f6c6f20ef4ebb3486c01a51341ff12 # v2.87.18
         with:
           tool: cargo-llvm-cov
 
       - name: Install nextest
-        uses: taiki-e/install-action@v2.87.15
+        uses: taiki-e/install-action@dfae9bf3d6f6c6f20ef4ebb3486c01a51341ff12 # v2.87.18
         with:
           tool: nextest
 
@@ -556,7 +672,7 @@ jobs:
             --lcov --output-path lcov.info nextest
 
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v7
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: lcov.info
@@ -567,7 +683,7 @@ jobs:
   # All checks passed
   ci-success:
     name: CI Success
-    needs: [format, clippy, documentation, security, test, test-release, test-python, test-node, test-node-runtimes, msrv, bench-build]
+    needs: [format, clippy, documentation, security, test, test-release, test-python, test-node, test-node-runtimes, msrv, bench-build, fuzz-build]
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -586,6 +702,7 @@ jobs:
             "${{ needs.test-node-runtimes.result }}"
             "${{ needs.msrv.result }}"
             "${{ needs.bench-build.result }}"
+            "${{ needs.fuzz-build.result }}"
           )
 
           for result in "${REQUIRED_JOBS[@]}"; do

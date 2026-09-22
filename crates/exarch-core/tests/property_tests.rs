@@ -14,6 +14,9 @@ use std::path::PathBuf;
 use exarch_core::ArchiveError;
 use exarch_core::QuotaResource;
 use exarch_core::SecurityConfig;
+use exarch_core::formats::detect::ArchiveType;
+use exarch_core::formats::detect::ZIP_FAMILY_ALIASES;
+use exarch_core::formats::detect::detect_format;
 use exarch_core::security::HardlinkTracker;
 use exarch_core::security::QuotaTracker;
 use exarch_core::types::DestDir;
@@ -21,6 +24,88 @@ use exarch_core::types::SafePath;
 use exarch_core::types::SafeSymlink;
 use proptest::prelude::*;
 use tempfile::TempDir;
+
+/// Extensions `detect_format`'s extension phase maps 1:1 to a single
+/// format, paired with the `ArchiveType` each maps to. Mirrors
+/// `detect_format_from_extension` (`pub(crate)`, not reachable from this
+/// integration test) so the property test below can construct
+/// known-extension cases without duplicating the match logic under test.
+/// The ZIP-family aliases (`.jar`, `.whl`, ...) are intentionally not
+/// hardcoded here -- see `known_extensions` below, which appends the `pub`
+/// `ZIP_FAMILY_ALIASES` instead, the same constant `detect.rs` itself
+/// iterates to avoid drift.
+const KNOWN_EXTENSIONS: &[(&str, ArchiveType)] = &[
+    ("tar", ArchiveType::Tar),
+    ("tgz", ArchiveType::TarGz),
+    ("bz2", ArchiveType::TarBz2),
+    ("tbz", ArchiveType::TarBz2),
+    ("tbz2", ArchiveType::TarBz2),
+    ("xz", ArchiveType::TarXz),
+    ("txz", ArchiveType::TarXz),
+    ("zst", ArchiveType::TarZst),
+    ("tzst", ArchiveType::TarZst),
+    ("zip", ArchiveType::Zip),
+    ("7z", ArchiveType::SevenZ),
+];
+
+/// `KNOWN_EXTENSIONS` plus every ZIP-family alias (all mapping to
+/// `ArchiveType::Zip`), for the property test to sample from.
+fn known_extensions() -> Vec<(&'static str, ArchiveType)> {
+    KNOWN_EXTENSIONS
+        .iter()
+        .copied()
+        .chain(
+            ZIP_FAMILY_ALIASES
+                .iter()
+                .map(|&ext| (ext, ArchiveType::Zip)),
+        )
+        .collect()
+}
+
+/// Magic-byte signatures from `detect.rs`'s private `MAGIC_SIGNATURES` table,
+/// duplicated here for the same reason as `KNOWN_EXTENSIONS` above: the
+/// constant itself is not `pub`. All 9 entries are mirrored, including
+/// ZIP's two alternate openers (EOCD, split-archive marker) alongside its
+/// local-file-header signature -- all three map to `ArchiveType::Zip`.
+const MAGIC_CASES: &[(usize, &[u8], ArchiveType)] = &[
+    (0, b"\x1f\x8b", ArchiveType::TarGz),
+    (0, b"\x28\xb5\x2f\xfd", ArchiveType::TarZst),
+    (0, b"\x42\x5a\x68", ArchiveType::TarBz2),
+    (0, b"\x50\x4b\x03\x04", ArchiveType::Zip),
+    (0, b"\x50\x4b\x05\x06", ArchiveType::Zip),
+    (0, b"\x50\x4b\x07\x08", ArchiveType::Zip),
+    (0, b"\x37\x7a\xbc\xaf\x27\x1c", ArchiveType::SevenZ),
+    (0, b"\xfd\x37\x7a\x58\x5a\x00", ArchiveType::TarXz),
+    (257, b"ustar", ArchiveType::Tar),
+];
+
+/// Number of bytes `detect_format`'s magic phase reads
+/// (`detect::MAGIC_READ_LEN`, private) -- long enough to hold the offset-257
+/// USTAR signature.
+const MAGIC_READ_LEN: usize = 262;
+
+/// The `.gz`-stem branch (`archive.tar.gz` -> `TarGz`, but bare `archive.gz`
+/// is rejected) is a composite two-suffix extension the proptests below
+/// cannot reach: their extension generator always produces a single
+/// `archive.<ext>` suffix. Covered here instead by two literal cases.
+#[test]
+fn detect_format_gz_stem_branch() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+
+    let tar_gz = temp.path().join("archive.tar.gz");
+    std::fs::write(&tar_gz, []).expect("failed to write fixture");
+    assert_eq!(
+        detect_format(&tar_gz).expect("archive.tar.gz must be detected"),
+        ArchiveType::TarGz
+    );
+
+    let bare_gz = temp.path().join("archive.gz");
+    std::fs::write(&bare_gz, []).expect("failed to write fixture");
+    assert!(
+        detect_format(&bare_gz).is_err(),
+        "bare .gz without a .tar stem must not be recognized by extension"
+    );
+}
 
 fn create_test_dest() -> (TempDir, DestDir) {
     let temp = TempDir::new().expect("failed to create temp dir");
@@ -534,5 +619,49 @@ proptest! {
             matches!(result, Err(ArchiveError::SecurityViolation { .. })),
             "symlinks should be rejected when disabled"
         );
+    }
+
+    // ========================================================================
+    // FORMAT DETECTION PROPERTY TESTS
+    // ========================================================================
+
+    /// `detect_format` must never panic on any (extension, leading-bytes)
+    /// combination -- the fuzz suite deliberately does not include a
+    /// `detect` target (see fuzz/README.md); this proptest is that target's
+    /// replacement and runs on every PR (given `--all-features`) instead of
+    /// weekly.
+    #[test]
+    fn prop_detect_format_no_panic(
+        ext in "[a-zA-Z0-9]{0,8}",
+        prefix in prop::collection::vec(any::<u8>(), 0..300),
+    ) {
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let path = temp.path().join(format!("archive.{ext}"));
+        std::fs::write(&path, &prefix).expect("failed to write fixture");
+
+        let _ = detect_format(&path);
+    }
+
+    /// When the extension names one known format and the file's leading
+    /// bytes carry a *different* known format's magic signature, the
+    /// magic-byte result must win (see `detect_format`'s doc comment).
+    #[test]
+    fn prop_detect_format_magic_wins_over_extension(
+        ext_case in prop::sample::select(known_extensions()),
+        magic_case in prop::sample::select(MAGIC_CASES.to_vec()),
+    ) {
+        let (ext, ext_type) = ext_case;
+        let (offset, sig, magic_type) = magic_case;
+        prop_assume!(ext_type != magic_type);
+
+        let mut content = vec![0u8; MAGIC_READ_LEN];
+        content[offset..offset + sig.len()].copy_from_slice(sig);
+
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let path = temp.path().join(format!("archive.{ext}"));
+        std::fs::write(&path, &content).expect("failed to write fixture");
+
+        let detected = detect_format(&path).expect("known magic bytes must detect");
+        prop_assert_eq!(detected, magic_type);
     }
 }

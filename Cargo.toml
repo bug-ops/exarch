@@ -6,6 +6,10 @@ members = [
     "crates/exarch-node",
     "crates/exarch-cli",
 ]
+# fuzz/ is nightly-only (libfuzzer-sys) and vendors NCSA-licensed LLVM
+# libFuzzer sources not in deny.toml's shipped-code allow-list; it keeps its
+# own workspace and Cargo.lock. See fuzz/README.md.
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.6.1"

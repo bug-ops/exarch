@@ -41,7 +41,7 @@ version = "=0.13.3"
 
 [[bans.skip]]
 name = "zstd-safe"
-version = "=7.2.4"
+version = "=7.3.0"
 
 # Pre-existing proc-macro ecosystem split, out of scope for #578: napi-derive/pyo3-macros/
 # zerocopy-derive pull syn 2.x while clap_derive/futures-macro/serde_derive/thiserror-impl/
@@ -52,7 +52,7 @@ version = "=2.0.119"
 
 [[bans.skip]]
 name = "syn"
-version = "=3.0.4"
+version = "=3.0.6"
 
 [sources]
 unknown-registry = "deny"

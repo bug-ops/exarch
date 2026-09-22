@@ -1,0 +1,55 @@
+[package]
+name = "exarch-fuzz"
+version = "0.0.0"
+publish = false
+# Not a stylistic mismatch with the root workspace's edition 2024: this is
+# cargo-fuzz's own template default.
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+tempfile = "3"
+exarch-core = { path = "../crates/exarch-core" }
+
+[workspace]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "tar"
+path = "fuzz_targets/tar.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "zip"
+path = "fuzz_targets/zip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sevenz"
+path = "fuzz_targets/sevenz.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "safe_path"
+path = "fuzz_targets/safe_path.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "extract_archive"
+path = "fuzz_targets/extract_archive.rs"
+test = false
+doc = false
+bench = false

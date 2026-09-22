@@ -23,6 +23,31 @@ updates:
           - "minor"
           - "patch"
 
+  # fuzz/ has its own Cargo.lock (excluded from the root workspace) and no
+  # automated update path without this: fuzz-build is mandatory in
+  # ci-success, so a libfuzzer-sys/cc nightly break would otherwise red
+  # every PR in the repo with nothing to fix it.
+  - package-ecosystem: "cargo"
+    directory: "/fuzz"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "rust"
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+    groups:
+      minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
   # GitHub Actions
   - package-ecosystem: "github-actions"
     directory: "/"

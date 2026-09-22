@@ -500,4 +500,95 @@ mod tests {
             .build();
         assert!(!zip_data.is_empty());
     }
+
+    /// Dumps the adversarial archives built by this module's generators into
+    /// `fuzz/seeds/<target>/` so `fuzz/seed-corpus.sh` can assemble them into
+    /// the fuzz corpus. `test_utils` is `pub(crate)`, so this is the only
+    /// place that can reach these generators without widening crate
+    /// visibility for a dev-only need. Not run by default; invoked via
+    /// `cargo test -p exarch-core --lib -- --ignored dump_fuzz_seeds`.
+    #[test]
+    #[ignore = "generates fuzz/seeds/ on demand; not part of the default test run"]
+    fn dump_fuzz_seeds() {
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .unwrap();
+        let seeds = repo_root.join("fuzz/seeds");
+
+        let write_seed = |target: &str, name: &str, data: &[u8]| {
+            let dir = seeds.join(target);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join(name), data).unwrap();
+        };
+
+        write_seed(
+            "tar",
+            "basic.bin",
+            &create_test_tar(vec![("file.txt", b"hello world")]),
+        );
+        write_seed(
+            "tar",
+            "builder.bin",
+            &TarTestBuilder::new()
+                .add_file("file.txt", b"content")
+                .add_directory("dir/")
+                .build(),
+        );
+        write_seed(
+            "tar",
+            "pax-record.bin",
+            &tar_with_pax_record(
+                "path",
+                b"pax/override/path.txt",
+                b"ustar_name.txt",
+                b'0',
+                b"data",
+            ),
+        );
+        write_seed(
+            "tar",
+            "pax-nul-path.bin",
+            &tar_with_pax_nul_path(b"path/with\0nul", b"data"),
+        );
+        write_seed(
+            "tar",
+            "pax-linkpath-symlink.bin",
+            &tar_with_pax_linkpath(b"../../etc/passwd", b'2'),
+        );
+        write_seed(
+            "tar",
+            "pax-linkpath-hardlink.bin",
+            &tar_with_pax_linkpath(b"../../etc/passwd", b'1'),
+        );
+        write_seed(
+            "tar",
+            "nonutf8-name.bin",
+            &tar_with_nonutf8_name(&[0xff, 0xfe, b'/', b'x'], b"data"),
+        );
+
+        write_seed(
+            "zip",
+            "basic.bin",
+            &create_test_zip(vec![("file.txt", b"hello world")]),
+        );
+        write_seed(
+            "zip",
+            "builder.bin",
+            &ZipTestBuilder::new()
+                .add_file("file.txt", b"content")
+                .add_directory("dir/")
+                .build(),
+        );
+        write_seed(
+            "zip",
+            "raw-traversal.bin",
+            &create_raw_zip_entry("../../etc/passwd", b"data"),
+        );
+        write_seed(
+            "zip",
+            "symlink-escape.bin",
+            &create_zip_with_symlink("link", "../../etc/passwd"),
+        );
+    }
 }

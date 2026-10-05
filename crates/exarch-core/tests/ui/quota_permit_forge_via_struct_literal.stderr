@@ -4,6 +4,7 @@ error[E0423]: cannot initialize a tuple struct which contains private fields
 10 |     let _permit = QuotaPermit(todo!());
    |                   ^^^^^^^^^^^
    |
+   = note: a struct named `QuotaPermit` exists in another namespace
 note: constructor is not visible here due to private fields
   --> src/security/quota.rs
    |

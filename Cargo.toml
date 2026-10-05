@@ -64,6 +64,7 @@ pedantic = { level = "warn", priority = -1 }
 nursery = { level = "warn", priority = -1 }
 expect_used = "warn"
 unwrap_used = "warn"
+assert_is_empty = "allow"
 cast_precision_loss = "allow"
 missing_const_for_fn = "allow"
 no_effect_underscore_binding = "allow"

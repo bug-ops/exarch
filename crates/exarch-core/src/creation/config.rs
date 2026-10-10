@@ -52,6 +52,8 @@ pub struct CreationConfigFields {
     /// Prefix to strip from entry paths in the archive.
     ///
     /// If set, this prefix will be removed from all entry paths.
+    /// If the prefix does not match an entry's path, that entry is stored unstripped.
+    ///
     /// Useful for creating archives without deep directory nesting.
     ///
     /// Default: `None`.

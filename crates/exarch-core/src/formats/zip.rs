@@ -146,6 +146,10 @@ use super::common;
 use super::common::EntryCompleteGuard;
 use super::traits::ArchiveFormat;
 
+/// Message of the `io::Error` the `zip` crate (>= 9.0.1) raises when an entry
+/// decompresses past its declared size.
+const ZIP_DECLARED_SIZE_EXCEEDED: &str = "File is larger than its declared uncompressed size";
+
 /// Shared context passed to every ZIP entry extraction call.
 ///
 /// Groups the parameters that are constant across all entries in a single
@@ -475,6 +479,27 @@ impl<R: Read + Seek> ZipArchive<R> {
             ctx.duplicate_skips,
             ctx.progress,
         )
+        .map_err(|e| Self::classify_declared_size_overrun(e, file_size))
+    }
+
+    /// Re-types the `zip` crate's own declared-size ceiling as a security
+    /// violation, matching what `copy_with_buffer` reports for the same
+    /// forgery.
+    fn classify_declared_size_overrun(err: ArchiveError, declared: u64) -> ArchiveError {
+        match err {
+            ArchiveError::Io(ref io)
+                if io.kind() == std::io::ErrorKind::InvalidData
+                    && io.to_string() == ZIP_DECLARED_SIZE_EXCEEDED =>
+            {
+                ArchiveError::SecurityViolation {
+                    reason: format!(
+                        "decompressed size exceeded the declared uncompressed size of \
+                         {declared} bytes"
+                    ),
+                }
+            }
+            other => other,
+        }
     }
 }
 

@@ -185,7 +185,7 @@ jobs:
         run: maturin build --release ${{ matrix.platform.maturin-args }} --strip --out wheels -i python3.10
 
       - name: Upload wheels
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: wheels-${{ matrix.platform.name }}
           path: crates/exarch-python/wheels/*.whl
@@ -286,7 +286,7 @@ jobs:
           (Get-FileHash "$Name.zip" -Algorithm SHA256).Hash.ToLower() + "  $Name.zip" | Out-File -Encoding ascii "$Name.zip.sha256"
 
       - name: Upload CLI archive
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: cli-${{ matrix.platform.name }}
           path: |
@@ -399,7 +399,7 @@ jobs:
         run: pnpm run build --target ${{ matrix.platform.target }}
 
       - name: Upload bindings
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: bindings-${{ matrix.platform.name }}
           path: |

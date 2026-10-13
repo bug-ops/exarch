@@ -310,7 +310,7 @@ jobs:
       id-token: write  # Required for trusted publishing
     steps:
       - name: Download all wheels
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           path: dist
           pattern: wheels-*
@@ -436,7 +436,7 @@ jobs:
           version: 10
 
       - name: Download all bindings
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           path: bindings
           pattern: bindings-*
@@ -474,20 +474,20 @@ jobs:
           fetch-depth: 0
 
       - name: Download Python wheels
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           path: release-artifacts/python
           pattern: wheels-*
           merge-multiple: true
 
       - name: Download Node.js bindings
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           path: release-artifacts/node
           pattern: bindings-*
 
       - name: Download CLI binaries
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           path: release-artifacts/cli
           pattern: cli-*

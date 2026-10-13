@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Scheduled fuzz job now passes `--target x86_64-unknown-linux-gnu`; the prebuilt musl `cargo-fuzz` defaulted to musl, which ASAN cannot build for.
 - Renamed `exarch-node`'s deprecated `napi.name`/`napi.triples` package.json fields to
   `napi.binaryName`/`napi.targets` per `@napi-rs/cli` 3.10.x, eliminating build-time
   deprecation warnings, and added the missing `aarch64-unknown-linux-gnu` target so the

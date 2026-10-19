@@ -84,8 +84,8 @@ closed_enum! {
 ///
 /// **Phase 1 — extension:** maps the file extension to an [`ArchiveType`] using
 /// the same rules as before. `.gz` is only accepted when the stem ends with
-/// `.tar` (e.g. `archive.tar.gz`); a bare `archive.gz` is not a recognised
-/// extension.
+/// `.tar`, compared case-insensitively (e.g. `archive.tar.gz`,
+/// `ARCHIVE.TAR.GZ`); a bare `archive.gz` is not a recognised extension.
 ///
 /// **Phase 2 — magic bytes:** when extension detection fails (unrecognised or
 /// missing extension), the function reads up to the first 262 bytes of the file
@@ -154,7 +154,10 @@ pub(crate) fn detect_format_from_extension(path: &Path) -> Result<ArchiveType> {
         "tgz" => Ok(ArchiveType::TarGz),
         "gz" => {
             if let Some(stem) = path.file_stem()
-                && stem.to_string_lossy().ends_with(".tar")
+                && stem
+                    .as_encoded_bytes()
+                    .last_chunk::<4>()
+                    .is_some_and(|tail| tail.eq_ignore_ascii_case(b".tar"))
             {
                 Ok(ArchiveType::TarGz)
             } else {
@@ -244,6 +247,25 @@ mod tests {
 
         let path2 = PathBuf::from("archive.tgz");
         assert_eq!(detect_format(&path2).unwrap(), ArchiveType::TarGz);
+    }
+
+    #[test]
+    fn test_detect_tar_gz_stem_is_case_insensitive() {
+        for name in ["a.TAR.gz", "a.Tar.GZ", "A.TAR.GZ"] {
+            assert_eq!(
+                detect_format(&PathBuf::from(name)).unwrap(),
+                ArchiveType::TarGz,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_detect_bare_dot_tar_gz_still_matches() {
+        assert_eq!(
+            detect_format_from_extension(Path::new(".tar.gz")).unwrap(),
+            ArchiveType::TarGz
+        );
     }
 
     #[test]

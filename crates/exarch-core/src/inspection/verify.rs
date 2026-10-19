@@ -265,11 +265,14 @@ fn check_heuristics(entry: &ArchiveEntry) -> Vec<VerificationIssue> {
     issues
 }
 
+const SUSPICIOUS_EXTENSIONS: [&str; 5] = ["exe", "dll", "sh", "bat", "cmd"];
+
 fn is_suspicious_extension(path: &Path) -> bool {
-    matches!(
-        path.extension().and_then(|s| s.to_str()),
-        Some("exe" | "dll" | "sh" | "bat" | "cmd")
-    )
+    path.extension().is_some_and(|ext| {
+        SUSPICIOUS_EXTENSIONS
+            .iter()
+            .any(|s| ext.eq_ignore_ascii_case(s))
+    })
 }
 
 #[cfg(test)]
@@ -289,6 +292,9 @@ mod tests {
         assert!(is_suspicious_extension(Path::new("file.dll")));
         assert!(is_suspicious_extension(Path::new("file.sh")));
         assert!(is_suspicious_extension(Path::new("file.bat")));
+        assert!(is_suspicious_extension(Path::new("FILE.EXE")));
+        assert!(is_suspicious_extension(Path::new("run.Bat")));
+        assert!(is_suspicious_extension(Path::new("x.CMD")));
         assert!(!is_suspicious_extension(Path::new("file.txt")));
         assert!(!is_suspicious_extension(Path::new("file.rs")));
     }

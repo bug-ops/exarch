@@ -5,6 +5,7 @@ use std::path::Path;
 
 use crate::ArchiveError;
 use crate::Result;
+use crate::closed_enum::closed_enum;
 
 /// Number of bytes to read for magic-byte detection.
 ///
@@ -50,27 +51,29 @@ pub(crate) fn is_zip_family_alias(ext: &str) -> bool {
     ZIP_FAMILY_ALIASES.contains(&lower.as_str())
 }
 
-/// Supported archive formats.
-///
-/// `#[non_exhaustive]` so support for a new archive format is not a
-/// breaking change for downstream matches.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum ArchiveType {
-    /// Tar archive (uncompressed).
-    Tar,
-    /// Gzip-compressed tar archive.
-    TarGz,
-    /// Bzip2-compressed tar archive.
-    TarBz2,
-    /// XZ-compressed tar archive.
-    TarXz,
-    /// Zstd-compressed tar archive.
-    TarZst,
-    /// ZIP archive.
-    Zip,
-    /// 7z archive.
-    SevenZ,
+closed_enum! {
+    /// Supported archive formats.
+    ///
+    /// `#[non_exhaustive]` so support for a new archive format is not a
+    /// breaking change for downstream matches.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[non_exhaustive]
+    pub enum ArchiveType {
+        /// Tar archive (uncompressed).
+        Tar => "Tar",
+        /// Gzip-compressed tar archive.
+        TarGz => "TarGz",
+        /// Bzip2-compressed tar archive.
+        TarBz2 => "TarBz2",
+        /// XZ-compressed tar archive.
+        TarXz => "TarXz",
+        /// Zstd-compressed tar archive.
+        TarZst => "TarZst",
+        /// ZIP archive.
+        Zip => "Zip",
+        /// 7z archive.
+        SevenZ => "SevenZ",
+    }
 }
 
 /// Detects the archive type from a file path using two-phase detection.
@@ -215,6 +218,18 @@ mod tests {
     use super::*;
     use std::assert_matches;
     use std::path::PathBuf;
+
+    #[test]
+    fn test_archive_type_as_str_matches_display_and_is_unique() {
+        let names: Vec<&str> = ArchiveType::ALL.iter().map(|t| t.as_str()).collect();
+        assert_eq!(
+            names,
+            ["Tar", "TarGz", "TarBz2", "TarXz", "TarZst", "Zip", "SevenZ"]
+        );
+        for t in ArchiveType::ALL {
+            assert_eq!(t.to_string(), t.as_str());
+        }
+    }
 
     #[test]
     fn test_detect_tar() {

@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 
+use crate::closed_enum::closed_enum;
 use crate::error::ArchiveError;
 use crate::formats::detect::ArchiveType;
 
@@ -85,53 +86,36 @@ impl VerificationReport {
     }
 }
 
-/// Overall verification status.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VerificationStatus {
-    /// All checks passed
-    Pass,
+closed_enum! {
+    /// Overall verification status.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum VerificationStatus {
+        /// All checks passed
+        Pass => "PASS",
 
-    /// One or more checks failed
-    Fail,
+        /// One or more checks failed
+        Fail => "FAIL",
 
-    /// Checks completed with warnings
-    Warning,
-}
-
-impl std::fmt::Display for VerificationStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Pass => write!(f, "PASS"),
-            Self::Fail => write!(f, "FAIL"),
-            Self::Warning => write!(f, "WARNING"),
-        }
+        /// Checks completed with warnings
+        Warning => "WARNING",
     }
 }
 
-/// Status of a specific check category.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CheckStatus {
-    /// Check passed
-    Pass,
+closed_enum! {
+    /// Status of a specific check category.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum CheckStatus {
+        /// Check passed
+        Pass => "OK",
 
-    /// Check failed
-    Fail,
+        /// Check failed
+        Fail => "FAILED",
 
-    /// Check completed with warnings
-    Warning,
+        /// Check completed with warnings
+        Warning => "WARNING",
 
-    /// Check was skipped
-    Skipped,
-}
-
-impl std::fmt::Display for CheckStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Pass => write!(f, "OK"),
-            Self::Fail => write!(f, "FAILED"),
-            Self::Warning => write!(f, "WARNING"),
-            Self::Skipped => write!(f, "SKIPPED"),
-        }
+        /// Check was skipped
+        Skipped => "SKIPPED",
     }
 }
 
@@ -260,85 +244,61 @@ impl VerificationIssue {
     }
 }
 
-/// Issue severity levels (ordered from least to most severe for Ord).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum IssueSeverity {
-    /// Informational
-    Info,
+closed_enum! {
+    /// Issue severity levels (ordered from least to most severe for Ord).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    pub enum IssueSeverity {
+        /// Informational
+        Info => "INFO",
 
-    /// Policy violation
-    Low,
+        /// Policy violation
+        Low => "LOW",
 
-    /// Security concern
-    Medium,
+        /// Security concern
+        Medium => "MEDIUM",
 
-    /// Exploitable security issue
-    High,
+        /// Exploitable security issue
+        High => "HIGH",
 
-    /// CVE-level vulnerability
-    Critical,
-}
-
-impl std::fmt::Display for IssueSeverity {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Critical => write!(f, "CRITICAL"),
-            Self::High => write!(f, "HIGH"),
-            Self::Medium => write!(f, "MEDIUM"),
-            Self::Low => write!(f, "LOW"),
-            Self::Info => write!(f, "INFO"),
-        }
+        /// CVE-level vulnerability
+        Critical => "CRITICAL",
     }
 }
 
-/// Issue categories (maps to security checks).
-///
-/// `#[non_exhaustive]` so a future security check is not a breaking change
-/// for downstream matches.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum IssueCategory {
-    /// Path traversal attack
-    PathTraversal,
+closed_enum! {
+    /// Issue categories (maps to security checks).
+    ///
+    /// `#[non_exhaustive]` so a future security check is not a breaking change
+    /// for downstream matches.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[non_exhaustive]
+    pub enum IssueCategory {
+        /// Path traversal attack
+        PathTraversal => "Path Traversal",
 
-    /// Symlink escape attack
-    SymlinkEscape,
+        /// Symlink escape attack
+        SymlinkEscape => "Symlink Escape",
 
-    /// Hardlink escape attack
-    HardlinkEscape,
+        /// Hardlink escape attack
+        HardlinkEscape => "Hardlink Escape",
 
-    /// Zip bomb (excessive compression)
-    ZipBomb,
+        /// Zip bomb (excessive compression)
+        ZipBomb => "Zip Bomb",
 
-    /// Invalid or unsafe permissions
-    InvalidPermissions,
+        /// Invalid or unsafe permissions
+        InvalidPermissions => "Invalid Permissions",
 
-    /// Quota exceeded (file count or size)
-    QuotaExceeded,
+        /// Quota exceeded (file count or size)
+        QuotaExceeded => "Quota Exceeded",
 
-    /// Invalid or corrupted archive
-    InvalidArchive,
+        /// Invalid or corrupted archive
+        InvalidArchive => "Invalid Archive",
 
-    /// Suspicious path or filename
-    SuspiciousPath,
+        /// Suspicious path or filename
+        SuspiciousPath => "Suspicious Path",
 
-    /// Executable file detected
-    ExecutableFile,
-}
-
-impl std::fmt::Display for IssueCategory {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::PathTraversal => write!(f, "Path Traversal"),
-            Self::SymlinkEscape => write!(f, "Symlink Escape"),
-            Self::HardlinkEscape => write!(f, "Hardlink Escape"),
-            Self::ZipBomb => write!(f, "Zip Bomb"),
-            Self::InvalidPermissions => write!(f, "Invalid Permissions"),
-            Self::QuotaExceeded => write!(f, "Quota Exceeded"),
-            Self::InvalidArchive => write!(f, "Invalid Archive"),
-            Self::SuspiciousPath => write!(f, "Suspicious Path"),
-            Self::ExecutableFile => write!(f, "Executable File"),
-        }
+        /// Executable file detected
+        ExecutableFile => "Executable File",
     }
 }
 
@@ -346,6 +306,40 @@ impl std::fmt::Display for IssueCategory {
 mod tests {
     use super::*;
     use std::io;
+
+    #[test]
+    fn test_enum_as_str_spellings_and_display() {
+        let spell = |all: &[&str], want: &[&str]| assert_eq!(all, want);
+        spell(
+            &VerificationStatus::ALL
+                .iter()
+                .map(|v| v.as_str())
+                .collect::<Vec<_>>(),
+            &["PASS", "FAIL", "WARNING"],
+        );
+        spell(
+            &CheckStatus::ALL
+                .iter()
+                .map(|v| v.as_str())
+                .collect::<Vec<_>>(),
+            &["OK", "FAILED", "WARNING", "SKIPPED"],
+        );
+        spell(
+            &IssueSeverity::ALL
+                .iter()
+                .map(|v| v.as_str())
+                .collect::<Vec<_>>(),
+            &["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"],
+        );
+        assert_eq!(IssueCategory::ALL.len(), 9);
+        assert_eq!(IssueCategory::PathTraversal.as_str(), "Path Traversal");
+        assert_eq!(IssueCategory::ZipBomb.to_string(), "Zip Bomb");
+    }
+
+    #[test]
+    fn test_severity_all_is_ascending() {
+        assert!(IssueSeverity::ALL.is_sorted());
+    }
 
     #[test]
     fn test_verification_status_display() {

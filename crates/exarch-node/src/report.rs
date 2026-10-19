@@ -111,7 +111,7 @@ impl From<exarch_core::inspection::ArchiveManifest> for ArchiveManifest {
                 .collect(),
             total_entries: manifest.total_entries.min(u32::MAX as usize) as u32,
             total_size: manifest.total_size.min(i64::MAX as u64) as i64,
-            format: format!("{:?}", manifest.format),
+            format: manifest.format.as_str().to_string(),
         }
     }
 }
@@ -205,7 +205,7 @@ impl From<exarch_core::inspection::VerificationReport> for VerificationReport {
             total_entries: report.total_entries.min(u32::MAX as usize) as u32,
             suspicious_entries: report.suspicious_entries.min(u32::MAX as usize) as u32,
             total_size: report.total_size.min(i64::MAX as u64) as i64,
-            format: format!("{:?}", report.format),
+            format: report.format.as_str().to_string(),
         }
     }
 }

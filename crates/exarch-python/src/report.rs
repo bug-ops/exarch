@@ -345,12 +345,12 @@ impl PyArchiveManifest {
 
     #[getter]
     fn format(&self) -> String {
-        format!("{:?}", self.inner.format)
+        self.inner.format.as_str().to_string()
     }
 
     fn __str__(&self) -> String {
         format!(
-            "ArchiveManifest(entries={}, total_size={} bytes, format={:?})",
+            "ArchiveManifest(entries={}, total_size={} bytes, format={})",
             self.inner.total_entries, self.inner.total_size, self.inner.format
         )
     }

@@ -184,7 +184,7 @@ impl<W: Write> OutputFormatter for JsonFormatter<W> {
 
         #[derive(Serialize)]
         struct ManifestOutput {
-            format: String,
+            format: &'static str,
             total_entries: usize,
             entries: Vec<ManifestEntry>,
         }
@@ -198,7 +198,7 @@ impl<W: Write> OutputFormatter for JsonFormatter<W> {
             .collect();
 
         let data = ManifestOutput {
-            format: format!("{:?}", manifest.format),
+            format: manifest.format.as_str(),
             total_entries: manifest.total_entries,
             entries,
         };
@@ -231,7 +231,7 @@ impl<W: Write> OutputFormatter for JsonFormatter<W> {
 
         #[derive(Serialize)]
         struct ManifestOutput {
-            format: String,
+            format: &'static str,
             total_entries: usize,
             total_size: u64,
             entries: Vec<ManifestEntry>,
@@ -257,7 +257,7 @@ impl<W: Write> OutputFormatter for JsonFormatter<W> {
             .collect();
 
         let data = ManifestOutput {
-            format: format!("{:?}", manifest.format),
+            format: manifest.format.as_str(),
             total_entries: manifest.total_entries,
             total_size: manifest.total_size,
             entries,
@@ -285,7 +285,7 @@ impl<W: Write> OutputFormatter for JsonFormatter<W> {
             total_entries: usize,
             suspicious_entries: usize,
             total_size: u64,
-            format: String,
+            format: &'static str,
             issues: Vec<VerificationIssue>,
         }
 
@@ -308,7 +308,7 @@ impl<W: Write> OutputFormatter for JsonFormatter<W> {
             total_entries: report.total_entries,
             suspicious_entries: report.suspicious_entries,
             total_size: report.total_size,
-            format: format!("{:?}", report.format),
+            format: report.format.as_str(),
             issues,
         };
 

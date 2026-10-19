@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 use std::time::SystemTime;
 
+use crate::closed_enum::closed_enum;
 use crate::formats::detect::ArchiveType;
 
 /// Complete manifest of archive contents.
@@ -102,33 +103,24 @@ impl ArchiveEntry {
     }
 }
 
-/// Entry type in manifest (does NOT require validation).
-///
-/// Unlike `EntryType`, this enum is used for read-only listing
-/// and does not enforce security constraints.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ManifestEntryType {
-    /// Regular file
-    File,
+closed_enum! {
+    /// Entry type in manifest (does NOT require validation).
+    ///
+    /// Unlike `EntryType`, this enum is used for read-only listing
+    /// and does not enforce security constraints.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum ManifestEntryType {
+        /// Regular file
+        File => "File",
 
-    /// Directory
-    Directory,
+        /// Directory
+        Directory => "Directory",
 
-    /// Symbolic link
-    Symlink,
+        /// Symbolic link
+        Symlink => "Symlink",
 
-    /// Hard link
-    Hardlink,
-}
-
-impl std::fmt::Display for ManifestEntryType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::File => write!(f, "File"),
-            Self::Directory => write!(f, "Directory"),
-            Self::Symlink => write!(f, "Symlink"),
-            Self::Hardlink => write!(f, "Hardlink"),
-        }
+        /// Hard link
+        Hardlink => "Hardlink",
     }
 }
 

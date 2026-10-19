@@ -23,6 +23,7 @@
 
 pub mod api;
 pub mod archive;
+pub(crate) mod closed_enum;
 pub mod config;
 pub(crate) mod copy;
 pub mod creation;

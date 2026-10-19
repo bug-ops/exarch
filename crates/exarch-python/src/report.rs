@@ -245,7 +245,7 @@ impl PyArchiveEntry {
 
     #[getter]
     fn entry_type(&self) -> String {
-        self.inner.entry_type.to_string()
+        self.inner.entry_type.as_str().to_owned()
     }
 
     #[getter]
@@ -345,7 +345,7 @@ impl PyArchiveManifest {
 
     #[getter]
     fn format(&self) -> String {
-        self.inner.format().as_str().to_string()
+        self.inner.format().as_str().to_owned()
     }
 
     fn __str__(&self) -> String {
@@ -385,7 +385,7 @@ pub struct PyVerificationIssue {
 impl PyVerificationIssue {
     #[getter]
     fn severity(&self) -> String {
-        self.inner.severity.to_string()
+        self.inner.severity.as_str().to_owned()
     }
 
     #[getter]
@@ -403,7 +403,7 @@ impl PyVerificationIssue {
 
     #[getter]
     fn category(&self) -> String {
-        self.inner.category.to_string()
+        self.inner.category.as_str().to_owned()
     }
 
     #[getter]
@@ -444,7 +444,7 @@ pub struct PyVerificationReport {
 impl PyVerificationReport {
     #[getter]
     fn status(&self) -> String {
-        self.inner.status().to_string()
+        self.inner.status().as_str().to_owned()
     }
 
     #[getter]
@@ -469,12 +469,12 @@ impl PyVerificationReport {
 
     #[getter]
     fn integrity_status(&self) -> String {
-        self.inner.integrity_status().to_string()
+        self.inner.integrity_status().as_str().to_owned()
     }
 
     #[getter]
     fn security_status(&self) -> String {
-        self.inner.security_status().to_string()
+        self.inner.security_status().as_str().to_owned()
     }
 
     fn is_safe(&self) -> bool {
@@ -876,6 +876,44 @@ mod tests {
              and exarch-node's own convention)"
         );
         assert!(py_issue.context().is_some(), "context should be Some");
+    }
+
+    fn literal_line<T: Copy>(alias: &str, all: &[T], as_str: fn(T) -> &'static str) -> String {
+        let values: Vec<String> = all.iter().map(|v| format!("\"{}\"", as_str(*v))).collect();
+        format!("{alias} = Literal[{}]", values.join(", "))
+    }
+
+    #[test]
+    fn test_pyi_literal_aliases_match_core_enums() {
+        use exarch_core::formats::detect::ArchiveType;
+        use exarch_core::inspection::CheckStatus;
+        use exarch_core::inspection::IssueCategory;
+        use exarch_core::inspection::IssueSeverity;
+        use exarch_core::inspection::VerificationStatus;
+
+        let pyi = include_str!("../exarch.pyi");
+        let expected = [
+            literal_line("_ArchiveType", ArchiveType::ALL, ArchiveType::as_str),
+            literal_line(
+                "_ManifestEntryType",
+                ManifestEntryType::ALL,
+                ManifestEntryType::as_str,
+            ),
+            literal_line(
+                "_VerificationStatus",
+                VerificationStatus::ALL,
+                VerificationStatus::as_str,
+            ),
+            literal_line("_CheckStatus", CheckStatus::ALL, CheckStatus::as_str),
+            literal_line("_IssueSeverity", IssueSeverity::ALL, IssueSeverity::as_str),
+            literal_line("_IssueCategory", IssueCategory::ALL, IssueCategory::as_str),
+        ];
+        for line in expected {
+            assert!(
+                pyi.lines().any(|l| l == line),
+                "exarch.pyi is out of sync with exarch-core, expected line:\n{line}"
+            );
+        }
     }
 
     // NOTE: VerificationReport tests removed as they depend on types that may

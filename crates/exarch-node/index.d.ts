@@ -338,8 +338,8 @@ export declare class SecurityConfig {
 export interface ArchiveEntry {
   /** Entry path (relative, as stored in archive). */
   path: string
-  /** Entry type ("File", "Directory", "Symlink", "Hardlink"). */
-  entryType: string
+  /** Entry type. */
+  entryType: ManifestEntryType
   /** Uncompressed size in bytes (0 for directories). */
   size: number
   /** Compressed size in bytes (if available, ZIP only). */
@@ -367,9 +367,15 @@ export interface ArchiveManifest {
   totalEntries: number
   /** Total uncompressed size in bytes. */
   totalSize: number
-  /** Archive format (e.g., `TarGz`, `Zip`). */
-  format: string
+  /** Archive format. */
+  format: ArchiveType
 }
+
+/** Archive format. */
+export type ArchiveType = 'Tar' | 'TarGz' | 'TarBz2' | 'TarXz' | 'TarZst' | 'Zip' | 'SevenZ'
+
+/** Status of a single check category. */
+export type CheckStatus = 'OK' | 'FAILED' | 'WARNING' | 'SKIPPED'
 
 /**
  * Create an archive from source files and directories (async).
@@ -845,6 +851,12 @@ export interface ExtractionReport {
   warnings: Array<string>
 }
 
+/** Issue category. */
+export type IssueCategory = 'Path Traversal' | 'Symlink Escape' | 'Hardlink Escape' | 'Zip Bomb' | 'Invalid Permissions' | 'Quota Exceeded' | 'Invalid Archive' | 'Suspicious Path' | 'Executable File'
+
+/** Issue severity. */
+export type IssueSeverity = 'INFO' | 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL'
+
 /**
  * List archive contents without extracting (async).
  *
@@ -904,12 +916,15 @@ export declare function listArchive(archivePath: string, config?: SecurityConfig
  */
 export declare function listArchiveSync(archivePath: string, config?: SecurityConfig | undefined | null): ArchiveManifest
 
+/** Manifest entry type. */
+export type ManifestEntryType = 'File' | 'Directory' | 'Symlink' | 'Hardlink'
+
 /** Single verification issue. */
 export interface VerificationIssue {
-  /** Issue severity level ("CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"). */
-  severity: string
-  /** Issue category, e.g. "Path Traversal", "Symlink Escape", "Zip Bomb". */
-  category: string
+  /** Issue severity level. */
+  severity: IssueSeverity
+  /** Issue category. */
+  category: IssueCategory
   /** Entry path that triggered issue (if applicable). */
   entryPath?: string
   /** Human-readable description. */
@@ -925,12 +940,12 @@ export interface VerificationIssue {
  * performed without extracting files to disk.
  */
 export interface VerificationReport {
-  /** Overall verification status ("PASS", "FAIL", "WARNING"). */
-  status: string
-  /** Integrity check result ("OK", "FAILED", "WARNING", "SKIPPED"). */
-  integrityStatus: string
-  /** Security check result ("OK", "FAILED", "WARNING", "SKIPPED"). */
-  securityStatus: string
+  /** Overall verification status. */
+  status: VerificationStatus
+  /** Integrity check result. */
+  integrityStatus: CheckStatus
+  /** Security check result. */
+  securityStatus: CheckStatus
   /** List of all issues found (sorted by severity). */
   issues: Array<VerificationIssue>
   /** Total entries scanned. */
@@ -939,12 +954,15 @@ export interface VerificationReport {
   suspiciousEntries: number
   /** Total uncompressed size. */
   totalSize: number
-  /** Archive format (e.g., `TarGz`, `Zip`). */
-  format: string
+  /** Archive format. */
+  format: ArchiveType
 }
 
+/** Overall verification status. */
+export type VerificationStatus = 'PASS' | 'FAIL' | 'WARNING'
+
 /**
- * Verify archive integrity and security (async).
+ * Verify archive security (async).
  *
  * # Arguments
  *
@@ -976,7 +994,7 @@ export interface VerificationReport {
 export declare function verifyArchive(archivePath: string, config?: SecurityConfig | undefined | null): Promise<VerificationReport>
 
 /**
- * Verify archive integrity and security (sync).
+ * Verify archive security (sync).
  *
  * Synchronous version of `verifyArchive`. Blocks the event loop until
  * verification completes. Prefer the async version for most use cases.

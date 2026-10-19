@@ -170,3 +170,60 @@ describe('verifyArchiveSync', () => {
     assert.ok(report.totalEntries >= 1);
   });
 });
+
+function tarWithEntry(name, content) {
+  const header = Buffer.alloc(512);
+  header.write(name, 0, 'utf8');
+  header.write('0000755\0', 100);
+  header.write('0000000\0', 108);
+  header.write('0000000\0', 116);
+  header.write(`${content.length.toString(8).padStart(11, '0')}\0`, 124);
+  header.write('00000000000\0', 136);
+  header.write('        ', 148);
+  header.write('0', 156);
+  header.write('ustar\0', 257);
+  header.write('00', 263);
+  const checksum = header.reduce((sum, byte) => sum + byte, 0);
+  header.write(`${checksum.toString(8).padStart(6, '0')}\0 `, 148);
+  const body = Buffer.alloc(Math.ceil(content.length / 512) * 512);
+  Buffer.from(content).copy(body);
+  return Buffer.concat([header, body, Buffer.alloc(1024)]);
+}
+
+describe('typed report enums wire values', () => {
+  let tempDir;
+
+  beforeEach(() => {
+    tempDir = createTempDir();
+  });
+
+  afterEach(() => {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it('reports a clean archive with exact enum spellings', () => {
+    const archivePath = path.join(tempDir, 'test.tar.gz');
+    createValidArchive(archivePath, tempDir);
+
+    const manifest = listArchiveSync(archivePath);
+    assert.strictEqual(manifest.format, 'TarGz');
+    assert.ok(manifest.entries.some((e) => e.entryType === 'File'));
+
+    const report = verifyArchiveSync(archivePath);
+    assert.strictEqual(report.status, 'PASS');
+    assert.strictEqual(report.integrityStatus, 'SKIPPED');
+    assert.strictEqual(report.securityStatus, 'OK');
+    assert.strictEqual(report.format, 'TarGz');
+  });
+
+  it('reports severity and category with exact spellings', () => {
+    const archivePath = path.join(tempDir, 'evil.tar');
+    fs.writeFileSync(archivePath, tarWithEntry('tool.bin', 'x'));
+
+    const report = verifyArchiveSync(archivePath);
+    assert.strictEqual(report.format, 'Tar');
+    const issue = report.issues.find((i) => i.category === 'Executable File');
+    assert.ok(issue, JSON.stringify(report.issues));
+    assert.strictEqual(issue.severity, 'LOW');
+  });
+});

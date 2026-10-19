@@ -798,7 +798,7 @@ pub async fn list_archive(
     .map_err(|e| Error::from_reason(format!("task join error: {e}")))
     .flatten()?;
 
-    Ok(ArchiveManifest::from(manifest))
+    ArchiveManifest::try_from(manifest)
 }
 
 /// List archive contents without extracting (sync).
@@ -843,7 +843,7 @@ pub fn list_archive_sync(
         exarch_core::list_archive(&archive_path, config_ref).map_err(convert_error)
     })?;
 
-    Ok(ArchiveManifest::from(manifest))
+    ArchiveManifest::try_from(manifest)
 }
 
 /// Verify archive security (async).
@@ -894,7 +894,7 @@ pub async fn verify_archive(
     .map_err(|e| Error::from_reason(format!("task join error: {e}")))
     .flatten()?;
 
-    Ok(VerificationReport::from(report))
+    VerificationReport::try_from(report)
 }
 
 /// Verify archive security (sync).
@@ -939,7 +939,7 @@ pub fn verify_archive_sync(
         exarch_core::verify_archive(&archive_path, config_ref).map_err(convert_error)
     })?;
 
-    Ok(VerificationReport::from(report))
+    VerificationReport::try_from(report)
 }
 
 /// Extract an archive to the specified directory with a progress callback

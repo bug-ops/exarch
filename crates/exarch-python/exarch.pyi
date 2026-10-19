@@ -8,8 +8,17 @@ and other common vulnerabilities.
 
 from collections.abc import Callable
 from pathlib import Path
+from typing import Literal
 
 __version__: str
+
+# Stub-only aliases: the native module does not export them at runtime.
+_ArchiveType = Literal["Tar", "TarGz", "TarBz2", "TarXz", "TarZst", "Zip", "SevenZ"]
+_ManifestEntryType = Literal["File", "Directory", "Symlink", "Hardlink"]
+_VerificationStatus = Literal["PASS", "FAIL", "WARNING"]
+_CheckStatus = Literal["OK", "FAILED", "WARNING", "SKIPPED"]
+_IssueSeverity = Literal["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
+_IssueCategory = Literal["Path Traversal", "Symlink Escape", "Hardlink Escape", "Zip Bomb", "Invalid Permissions", "Quota Exceeded", "Invalid Archive", "Suspicious Path", "Executable File"]
 
 class SecurityConfig:
     """
@@ -430,8 +439,8 @@ class ArchiveEntry:
         ...
 
     @property
-    def entry_type(self) -> str:
-        """Entry type (File, Directory, Symlink, Hardlink)."""
+    def entry_type(self) -> _ManifestEntryType:
+        """Entry type."""
         ...
 
     @property
@@ -492,7 +501,7 @@ class ArchiveManifest:
         ...
 
     @property
-    def format(self) -> str:
+    def format(self) -> _ArchiveType:
         """Archive format."""
         ...
 
@@ -500,7 +509,7 @@ class VerificationIssue:
     """Verification issue."""
 
     @property
-    def severity(self) -> str:
+    def severity(self) -> _IssueSeverity:
         """Issue severity level."""
         ...
 
@@ -515,7 +524,7 @@ class VerificationIssue:
         ...
 
     @property
-    def category(self) -> str:
+    def category(self) -> _IssueCategory:
         """Issue category."""
         ...
 
@@ -534,7 +543,7 @@ class VerificationReport:
     """
 
     @property
-    def status(self) -> str:
+    def status(self) -> _VerificationStatus:
         """Overall verification status."""
         ...
 
@@ -554,12 +563,12 @@ class VerificationReport:
         ...
 
     @property
-    def integrity_status(self) -> str:
+    def integrity_status(self) -> _CheckStatus:
         """Always "SKIPPED": payload integrity is not verified."""
         ...
 
     @property
-    def security_status(self) -> str:
+    def security_status(self) -> _CheckStatus:
         """Security check result."""
         ...
 

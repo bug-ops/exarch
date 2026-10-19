@@ -1,6 +1,14 @@
 //! Node.js bindings for `ExtractionReport`.
 
 use exarch_core::ExtractionReport as CoreReport;
+use exarch_core::formats::detect::ArchiveType as CoreArchiveType;
+use exarch_core::inspection::CheckStatus as CoreCheckStatus;
+use exarch_core::inspection::IssueCategory as CoreIssueCategory;
+use exarch_core::inspection::IssueSeverity as CoreIssueSeverity;
+use exarch_core::inspection::ManifestEntryType as CoreManifestEntryType;
+use exarch_core::inspection::VerificationStatus as CoreVerificationStatus;
+use napi::Error;
+use napi::Result;
 use napi_derive::napi;
 
 fn saturating_u32(n: usize) -> u32 {
@@ -9,6 +17,230 @@ fn saturating_u32(n: usize) -> u32 {
 
 fn saturating_i64(n: u64) -> i64 {
     i64::try_from(n).unwrap_or(i64::MAX)
+}
+
+fn unknown_variant(what: &str, wire: &str) -> Error {
+    Error::from_reason(format!(
+        "exarch-node is older than exarch-core: unknown {what} '{wire}'"
+    ))
+}
+
+/// Archive format.
+// Values must equal `exarch_core::ArchiveType::as_str`.
+#[napi(string_enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArchiveType {
+    /// Uncompressed TAR.
+    #[napi(value = "Tar")]
+    Tar,
+    /// Gzip-compressed TAR.
+    #[napi(value = "TarGz")]
+    TarGz,
+    /// Bzip2-compressed TAR.
+    #[napi(value = "TarBz2")]
+    TarBz2,
+    /// XZ-compressed TAR.
+    #[napi(value = "TarXz")]
+    TarXz,
+    /// Zstd-compressed TAR.
+    #[napi(value = "TarZst")]
+    TarZst,
+    /// ZIP.
+    #[napi(value = "Zip")]
+    Zip,
+    /// 7z.
+    #[napi(value = "SevenZ")]
+    SevenZ,
+}
+
+impl TryFrom<CoreArchiveType> for ArchiveType {
+    type Error = Error;
+
+    fn try_from(value: CoreArchiveType) -> Result<Self> {
+        Ok(match value {
+            CoreArchiveType::Tar => Self::Tar,
+            CoreArchiveType::TarGz => Self::TarGz,
+            CoreArchiveType::TarBz2 => Self::TarBz2,
+            CoreArchiveType::TarXz => Self::TarXz,
+            CoreArchiveType::TarZst => Self::TarZst,
+            CoreArchiveType::Zip => Self::Zip,
+            CoreArchiveType::SevenZ => Self::SevenZ,
+            other => return Err(unknown_variant("archive type", other.as_str())),
+        })
+    }
+}
+
+/// Manifest entry type.
+// Values must equal `exarch_core::inspection::ManifestEntryType::as_str`.
+#[napi(string_enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManifestEntryType {
+    /// Regular file.
+    #[napi(value = "File")]
+    File,
+    /// Directory.
+    #[napi(value = "Directory")]
+    Directory,
+    /// Symbolic link.
+    #[napi(value = "Symlink")]
+    Symlink,
+    /// Hard link.
+    #[napi(value = "Hardlink")]
+    Hardlink,
+}
+
+impl From<CoreManifestEntryType> for ManifestEntryType {
+    fn from(value: CoreManifestEntryType) -> Self {
+        match value {
+            CoreManifestEntryType::File => Self::File,
+            CoreManifestEntryType::Directory => Self::Directory,
+            CoreManifestEntryType::Symlink => Self::Symlink,
+            CoreManifestEntryType::Hardlink => Self::Hardlink,
+        }
+    }
+}
+
+/// Overall verification status.
+// Values must equal `exarch_core::inspection::VerificationStatus::as_str`.
+#[napi(string_enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerificationStatus {
+    /// All checks passed.
+    #[napi(value = "PASS")]
+    Pass,
+    /// One or more checks failed.
+    #[napi(value = "FAIL")]
+    Fail,
+    /// Checks completed with warnings.
+    #[napi(value = "WARNING")]
+    Warning,
+}
+
+impl From<CoreVerificationStatus> for VerificationStatus {
+    fn from(value: CoreVerificationStatus) -> Self {
+        match value {
+            CoreVerificationStatus::Pass => Self::Pass,
+            CoreVerificationStatus::Fail => Self::Fail,
+            CoreVerificationStatus::Warning => Self::Warning,
+        }
+    }
+}
+
+/// Status of a single check category.
+// Values must equal `exarch_core::inspection::CheckStatus::as_str`.
+#[napi(string_enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckStatus {
+    /// Check passed.
+    #[napi(value = "OK")]
+    Pass,
+    /// Check failed.
+    #[napi(value = "FAILED")]
+    Fail,
+    /// Check completed with warnings.
+    #[napi(value = "WARNING")]
+    Warning,
+    /// Check was not performed.
+    #[napi(value = "SKIPPED")]
+    Skipped,
+}
+
+impl From<CoreCheckStatus> for CheckStatus {
+    fn from(value: CoreCheckStatus) -> Self {
+        match value {
+            CoreCheckStatus::Pass => Self::Pass,
+            CoreCheckStatus::Fail => Self::Fail,
+            CoreCheckStatus::Warning => Self::Warning,
+            CoreCheckStatus::Skipped => Self::Skipped,
+        }
+    }
+}
+
+/// Issue severity.
+// Values must equal `exarch_core::inspection::IssueSeverity::as_str`.
+#[napi(string_enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IssueSeverity {
+    /// Informational.
+    #[napi(value = "INFO")]
+    Info,
+    /// Policy violation.
+    #[napi(value = "LOW")]
+    Low,
+    /// Security concern.
+    #[napi(value = "MEDIUM")]
+    Medium,
+    /// Exploitable security issue.
+    #[napi(value = "HIGH")]
+    High,
+    /// CVE-level vulnerability.
+    #[napi(value = "CRITICAL")]
+    Critical,
+}
+
+impl From<CoreIssueSeverity> for IssueSeverity {
+    fn from(value: CoreIssueSeverity) -> Self {
+        match value {
+            CoreIssueSeverity::Info => Self::Info,
+            CoreIssueSeverity::Low => Self::Low,
+            CoreIssueSeverity::Medium => Self::Medium,
+            CoreIssueSeverity::High => Self::High,
+            CoreIssueSeverity::Critical => Self::Critical,
+        }
+    }
+}
+
+/// Issue category.
+// Values must equal `exarch_core::inspection::IssueCategory::as_str`.
+#[napi(string_enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IssueCategory {
+    /// Path traversal attack.
+    #[napi(value = "Path Traversal")]
+    PathTraversal,
+    /// Symlink escape attack.
+    #[napi(value = "Symlink Escape")]
+    SymlinkEscape,
+    /// Hardlink escape attack.
+    #[napi(value = "Hardlink Escape")]
+    HardlinkEscape,
+    /// Zip bomb (excessive compression).
+    #[napi(value = "Zip Bomb")]
+    ZipBomb,
+    /// Invalid or unsafe permissions.
+    #[napi(value = "Invalid Permissions")]
+    InvalidPermissions,
+    /// Quota exceeded (file count or size).
+    #[napi(value = "Quota Exceeded")]
+    QuotaExceeded,
+    /// Invalid or corrupted archive.
+    #[napi(value = "Invalid Archive")]
+    InvalidArchive,
+    /// Suspicious path or filename.
+    #[napi(value = "Suspicious Path")]
+    SuspiciousPath,
+    /// Executable file detected.
+    #[napi(value = "Executable File")]
+    ExecutableFile,
+}
+
+impl TryFrom<CoreIssueCategory> for IssueCategory {
+    type Error = Error;
+
+    fn try_from(value: CoreIssueCategory) -> Result<Self> {
+        Ok(match value {
+            CoreIssueCategory::PathTraversal => Self::PathTraversal,
+            CoreIssueCategory::SymlinkEscape => Self::SymlinkEscape,
+            CoreIssueCategory::HardlinkEscape => Self::HardlinkEscape,
+            CoreIssueCategory::ZipBomb => Self::ZipBomb,
+            CoreIssueCategory::InvalidPermissions => Self::InvalidPermissions,
+            CoreIssueCategory::QuotaExceeded => Self::QuotaExceeded,
+            CoreIssueCategory::InvalidArchive => Self::InvalidArchive,
+            CoreIssueCategory::SuspiciousPath => Self::SuspiciousPath,
+            CoreIssueCategory::ExecutableFile => Self::ExecutableFile,
+            other => return Err(unknown_variant("issue category", other.as_str())),
+        })
+    }
 }
 
 /// Report of an archive extraction operation.
@@ -104,17 +336,18 @@ pub struct ArchiveManifest {
     pub total_entries: u32,
     /// Total uncompressed size in bytes.
     pub total_size: i64,
-    /// Archive format (e.g., `TarGz`, `Zip`).
-    pub format: String,
+    /// Archive format.
+    pub format: ArchiveType,
 }
 
-impl From<exarch_core::inspection::ArchiveManifest> for ArchiveManifest {
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    fn from(manifest: exarch_core::inspection::ArchiveManifest) -> Self {
+impl TryFrom<exarch_core::inspection::ArchiveManifest> for ArchiveManifest {
+    type Error = Error;
+
+    fn try_from(manifest: exarch_core::inspection::ArchiveManifest) -> Result<Self> {
         let total_entries = saturating_u32(manifest.total_entries());
         let total_size = saturating_i64(manifest.total_size());
-        let format = manifest.format().as_str().to_string();
-        Self {
+        let format = ArchiveType::try_from(manifest.format())?;
+        Ok(Self {
             entries: manifest
                 .into_entries()
                 .into_iter()
@@ -123,7 +356,7 @@ impl From<exarch_core::inspection::ArchiveManifest> for ArchiveManifest {
             total_entries,
             total_size,
             format,
-        }
+        })
     }
 }
 
@@ -136,8 +369,8 @@ impl From<exarch_core::inspection::ArchiveManifest> for ArchiveManifest {
 pub struct ArchiveEntry {
     /// Entry path (relative, as stored in archive).
     pub path: String,
-    /// Entry type ("File", "Directory", "Symlink", "Hardlink").
-    pub entry_type: String,
+    /// Entry type.
+    pub entry_type: ManifestEntryType,
     /// Uncompressed size in bytes (0 for directories).
     pub size: i64,
     /// Compressed size in bytes (if available, ZIP only).
@@ -157,7 +390,7 @@ impl From<exarch_core::inspection::ArchiveEntry> for ArchiveEntry {
     fn from(entry: exarch_core::inspection::ArchiveEntry) -> Self {
         Self {
             path: entry.path.to_string_lossy().into_owned(),
-            entry_type: entry.entry_type.to_string(),
+            entry_type: entry.entry_type.into(),
             size: saturating_i64(entry.size),
             compressed_size: entry.compressed_size.map(saturating_i64),
             mode: entry.mode,
@@ -183,12 +416,12 @@ impl From<exarch_core::inspection::ArchiveEntry> for ArchiveEntry {
 #[napi(object)]
 #[derive(Debug, Clone)]
 pub struct VerificationReport {
-    /// Overall verification status ("PASS", "FAIL", "WARNING").
-    pub status: String,
-    /// Integrity check result ("OK", "FAILED", "WARNING", "SKIPPED").
-    pub integrity_status: String,
-    /// Security check result ("OK", "FAILED", "WARNING", "SKIPPED").
-    pub security_status: String,
+    /// Overall verification status.
+    pub status: VerificationStatus,
+    /// Integrity check result.
+    pub integrity_status: CheckStatus,
+    /// Security check result.
+    pub security_status: CheckStatus,
     /// List of all issues found (sorted by severity).
     pub issues: Vec<VerificationIssue>,
     /// Total entries scanned.
@@ -197,34 +430,35 @@ pub struct VerificationReport {
     pub suspicious_entries: u32,
     /// Total uncompressed size.
     pub total_size: i64,
-    /// Archive format (e.g., `TarGz`, `Zip`).
-    pub format: String,
+    /// Archive format.
+    pub format: ArchiveType,
 }
 
-impl From<exarch_core::inspection::VerificationReport> for VerificationReport {
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    fn from(report: exarch_core::inspection::VerificationReport) -> Self {
-        let status = report.status().to_string();
-        let integrity_status = report.integrity_status().to_string();
-        let security_status = report.security_status().to_string();
+impl TryFrom<exarch_core::inspection::VerificationReport> for VerificationReport {
+    type Error = Error;
+
+    fn try_from(report: exarch_core::inspection::VerificationReport) -> Result<Self> {
+        let status = report.status().into();
+        let integrity_status = report.integrity_status().into();
+        let security_status = report.security_status().into();
         let total_entries = saturating_u32(report.total_entries());
         let suspicious_entries = saturating_u32(report.suspicious_entries());
         let total_size = saturating_i64(report.total_size());
-        let format = report.format().as_str().to_string();
-        Self {
+        let format = ArchiveType::try_from(report.format())?;
+        Ok(Self {
             status,
             integrity_status,
             security_status,
             issues: report
                 .into_issues()
                 .into_iter()
-                .map(VerificationIssue::from)
-                .collect(),
+                .map(VerificationIssue::try_from)
+                .collect::<Result<_>>()?,
             total_entries,
             suspicious_entries,
             total_size,
             format,
-        }
+        })
     }
 }
 
@@ -232,10 +466,10 @@ impl From<exarch_core::inspection::VerificationReport> for VerificationReport {
 #[napi(object)]
 #[derive(Debug, Clone)]
 pub struct VerificationIssue {
-    /// Issue severity level ("CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO").
-    pub severity: String,
-    /// Issue category, e.g. "Path Traversal", "Symlink Escape", "Zip Bomb".
-    pub category: String,
+    /// Issue severity level.
+    pub severity: IssueSeverity,
+    /// Issue category.
+    pub category: IssueCategory,
     /// Entry path that triggered issue (if applicable).
     pub entry_path: Option<String>,
     /// Human-readable description.
@@ -244,15 +478,17 @@ pub struct VerificationIssue {
     pub context: Option<String>,
 }
 
-impl From<exarch_core::inspection::VerificationIssue> for VerificationIssue {
-    fn from(issue: exarch_core::inspection::VerificationIssue) -> Self {
-        Self {
-            severity: issue.severity.to_string(),
-            category: issue.category.to_string(),
+impl TryFrom<exarch_core::inspection::VerificationIssue> for VerificationIssue {
+    type Error = Error;
+
+    fn try_from(issue: exarch_core::inspection::VerificationIssue) -> Result<Self> {
+        Ok(Self {
+            severity: issue.severity.into(),
+            category: issue.category.try_into()?,
             entry_path: issue.entry_path.map(|p| p.to_string_lossy().into_owned()),
             message: issue.message,
             context: issue.context,
-        }
+        })
     }
 }
 
@@ -440,7 +676,7 @@ mod tests {
         let entry = ArchiveEntry::from(core_entry);
 
         assert_eq!(entry.path, "test/file.txt");
-        assert_eq!(entry.entry_type, "File");
+        assert_eq!(entry.entry_type, ManifestEntryType::File);
         assert_eq!(entry.size, 1024);
         assert_eq!(entry.compressed_size, Some(512));
         assert_eq!(entry.mode, Some(0o644));
@@ -452,28 +688,26 @@ mod tests {
     // ArchiveManifest tests
     #[test]
     fn test_archive_manifest_conversion() {
-        use exarch_core::formats::detect::ArchiveType;
-
-        let mut core_manifest = exarch_core::inspection::ArchiveManifest::new(ArchiveType::TarGz);
+        let mut core_manifest =
+            exarch_core::inspection::ArchiveManifest::new(CoreArchiveType::TarGz);
         for i in 0..10 {
             core_manifest
                 .add_entry(sized_entry(&format!("f{i}"), 500))
                 .unwrap();
         }
 
-        let manifest = ArchiveManifest::from(core_manifest);
+        let manifest = ArchiveManifest::try_from(core_manifest).unwrap();
 
         assert_eq!(manifest.total_entries, 10);
         assert_eq!(manifest.total_size, 5000);
-        assert!(manifest.format.contains("TarGz"));
+        assert_eq!(manifest.format, ArchiveType::TarGz);
     }
 
     // VerificationReport tests
     #[test]
     fn test_verification_report_conversion() {
-        use exarch_core::formats::detect::ArchiveType;
-
-        let mut core_manifest = exarch_core::inspection::ArchiveManifest::new(ArchiveType::TarGz);
+        let mut core_manifest =
+            exarch_core::inspection::ArchiveManifest::new(CoreArchiveType::TarGz);
         for i in 0..10 {
             core_manifest
                 .add_entry(sized_entry(&format!("f{i}"), 500))
@@ -484,11 +718,11 @@ mod tests {
                 Vec::new()
             });
 
-        let report = VerificationReport::from(core_report);
+        let report = VerificationReport::try_from(core_report).unwrap();
 
-        assert_eq!(report.status, "PASS");
-        assert_eq!(report.integrity_status, "SKIPPED");
-        assert_eq!(report.security_status, "OK");
+        assert_eq!(report.status, VerificationStatus::Pass);
+        assert_eq!(report.integrity_status, CheckStatus::Skipped);
+        assert_eq!(report.security_status, CheckStatus::Pass);
         assert_eq!(report.total_entries, 10);
         assert_eq!(report.suspicious_entries, 0);
         assert_eq!(report.total_size, 5000);
@@ -497,22 +731,20 @@ mod tests {
     // VerificationIssue tests
     #[test]
     fn test_verification_issue_conversion() {
-        use exarch_core::inspection::IssueCategory;
-        use exarch_core::inspection::IssueSeverity;
         use std::path::PathBuf;
 
         let mut core_issue = exarch_core::inspection::VerificationIssue::new(
-            IssueSeverity::Critical,
-            IssueCategory::PathTraversal,
+            CoreIssueSeverity::Critical,
+            CoreIssueCategory::PathTraversal,
             "Path traversal detected".to_string(),
         );
         core_issue.entry_path = Some(PathBuf::from("../etc/passwd"));
         core_issue.context = Some("Attempt to escape directory".to_string());
 
-        let issue = VerificationIssue::from(core_issue);
+        let issue = VerificationIssue::try_from(core_issue).unwrap();
 
-        assert_eq!(issue.severity, "CRITICAL");
-        assert_eq!(issue.category, "Path Traversal");
+        assert_eq!(issue.severity, IssueSeverity::Critical);
+        assert_eq!(issue.category, IssueCategory::PathTraversal);
         assert_eq!(issue.entry_path, Some("../etc/passwd".to_string()));
         assert_eq!(issue.message, "Path traversal detected");
         assert_eq!(
@@ -624,14 +856,13 @@ mod tests {
 
     #[test]
     fn test_archive_manifest_saturates_total_size_at_i64_max() {
-        use exarch_core::formats::detect::ArchiveType;
-
-        let mut core_manifest = exarch_core::inspection::ArchiveManifest::new(ArchiveType::TarGz);
+        let mut core_manifest =
+            exarch_core::inspection::ArchiveManifest::new(CoreArchiveType::TarGz);
         core_manifest
             .add_entry(sized_entry("big", u64::MAX))
             .unwrap();
 
-        let manifest = ArchiveManifest::from(core_manifest);
+        let manifest = ArchiveManifest::try_from(core_manifest).unwrap();
 
         assert_eq!(
             manifest.total_size,
@@ -660,6 +891,61 @@ mod tests {
             entry.compressed_size,
             Some(i64::MAX),
             "compressed_size should saturate to i64::MAX"
+        );
+    }
+
+    fn assert_all_distinct<T: PartialEq + std::fmt::Debug>(values: &[T]) {
+        for (i, a) in values.iter().enumerate() {
+            assert!(
+                values[i + 1..].iter().all(|b| a != b),
+                "{a:?} is mapped from more than one core variant"
+            );
+        }
+    }
+
+    #[test]
+    fn test_archive_type_try_from_covers_every_core_variant() {
+        let mapped: Vec<_> = CoreArchiveType::ALL
+            .iter()
+            .map(|v| ArchiveType::try_from(*v).unwrap())
+            .collect();
+        assert_all_distinct(&mapped);
+    }
+
+    #[test]
+    fn test_issue_category_try_from_covers_every_core_variant() {
+        let mapped: Vec<_> = CoreIssueCategory::ALL
+            .iter()
+            .map(|v| IssueCategory::try_from(*v).unwrap())
+            .collect();
+        assert_all_distinct(&mapped);
+    }
+
+    #[test]
+    fn test_exhaustive_enum_from_is_injective() {
+        assert_all_distinct(
+            &CoreVerificationStatus::ALL
+                .iter()
+                .map(|v| VerificationStatus::from(*v))
+                .collect::<Vec<_>>(),
+        );
+        assert_all_distinct(
+            &CoreCheckStatus::ALL
+                .iter()
+                .map(|v| CheckStatus::from(*v))
+                .collect::<Vec<_>>(),
+        );
+        assert_all_distinct(
+            &CoreIssueSeverity::ALL
+                .iter()
+                .map(|v| IssueSeverity::from(*v))
+                .collect::<Vec<_>>(),
+        );
+        assert_all_distinct(
+            &CoreManifestEntryType::ALL
+                .iter()
+                .map(|v| ManifestEntryType::from(*v))
+                .collect::<Vec<_>>(),
         );
     }
 }

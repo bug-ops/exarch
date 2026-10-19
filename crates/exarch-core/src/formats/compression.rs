@@ -11,6 +11,11 @@
 //! - **Xz** (.tar.xz, .txz): Best compression ratio, slowest
 //! - **Zstd** (.tar.zst, .tzst): Modern codec with good speed/ratio balance
 
+use std::io::BufRead;
+use std::io::Read;
+
+use crate::Result;
+
 /// Compression codec for archive files.
 ///
 /// Represents the compression algorithm used for compressed archives.
@@ -90,6 +95,28 @@ impl CompressionCodec {
         }
     }
 
+    /// Wraps `input` in this codec's decoder.
+    ///
+    /// This is the only codec-to-decoder mapping used for reading TAR
+    /// streams. The `bufread` decoders take the caller's buffer as-is, so
+    /// the caller decides the buffering once instead of each decoder adding
+    /// its own.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error if the decoder cannot be initialised.
+    pub(crate) fn decoder<'r, R>(self, input: R) -> Result<Box<dyn Read + Send + 'r>>
+    where
+        R: BufRead + Send + 'r,
+    {
+        Ok(match self {
+            Self::Gzip => Box::new(flate2::bufread::GzDecoder::new(input)),
+            Self::Bzip2 => Box::new(bzip2::bufread::BzDecoder::new(input)),
+            Self::Xz => Box::new(xz2::bufread::XzDecoder::new(input)),
+            Self::Zstd => Box::new(zstd::Decoder::with_buffer(input)?),
+        })
+    }
+
     /// Returns a human-readable name for this codec.
     ///
     /// # Examples
@@ -112,6 +139,7 @@ impl CompressionCodec {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -129,6 +157,80 @@ mod tests {
         assert_eq!(CompressionCodec::Bzip2.name(), "bzip2");
         assert_eq!(CompressionCodec::Xz.name(), "xz");
         assert_eq!(CompressionCodec::Zstd.name(), "zstd");
+    }
+
+    fn encode(codec: CompressionCodec, data: &[u8]) -> Vec<u8> {
+        use std::io::Write;
+
+        match codec {
+            CompressionCodec::Gzip => {
+                let mut enc =
+                    flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+                enc.write_all(data).unwrap();
+                enc.finish().unwrap()
+            }
+            CompressionCodec::Bzip2 => {
+                let mut enc = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::fast());
+                enc.write_all(data).unwrap();
+                enc.finish().unwrap()
+            }
+            CompressionCodec::Xz => {
+                let mut enc = xz2::write::XzEncoder::new(Vec::new(), 1);
+                enc.write_all(data).unwrap();
+                enc.finish().unwrap()
+            }
+            CompressionCodec::Zstd => zstd::encode_all(data, 1).unwrap(),
+        }
+    }
+
+    const ALL_CODECS: [CompressionCodec; 4] = [
+        CompressionCodec::Gzip,
+        CompressionCodec::Bzip2,
+        CompressionCodec::Xz,
+        CompressionCodec::Zstd,
+    ];
+
+    #[test]
+    fn test_decoder_round_trips_every_codec() {
+        let data = b"hello decoder ".repeat(1000);
+        for codec in ALL_CODECS {
+            let mut out = Vec::new();
+            codec
+                .decoder(std::io::Cursor::new(encode(codec, &data)))
+                .unwrap()
+                .read_to_end(&mut out)
+                .unwrap();
+            assert_eq!(out, data, "{}", codec.name());
+        }
+    }
+
+    #[test]
+    fn test_decoder_ignores_bytes_after_a_single_stream() {
+        let data = b"payload".repeat(100);
+        for codec in [CompressionCodec::Gzip, CompressionCodec::Bzip2] {
+            let mut encoded = encode(codec, &data);
+            encoded.extend_from_slice(b"TRAILING-BYTES");
+            let mut out = Vec::new();
+            codec
+                .decoder(std::io::Cursor::new(encoded))
+                .unwrap()
+                .read_to_end(&mut out)
+                .unwrap();
+            assert_eq!(out, data, "{}", codec.name());
+        }
+    }
+
+    #[test]
+    fn test_decoder_reads_concatenated_zstd_frames() {
+        let mut encoded = encode(CompressionCodec::Zstd, b"first-");
+        encoded.extend_from_slice(&encode(CompressionCodec::Zstd, b"second"));
+        let mut out = Vec::new();
+        CompressionCodec::Zstd
+            .decoder(std::io::Cursor::new(encoded))
+            .unwrap()
+            .read_to_end(&mut out)
+            .unwrap();
+        assert_eq!(out, b"first-second");
     }
 
     #[test]

@@ -133,6 +133,7 @@ use crate::types::SafePath;
 use crate::types::safe_symlink::resolve_through_symlinks;
 
 use super::common;
+use super::compression::CompressionCodec;
 use super::tar_metadata_limit::budget_violation;
 use super::tar_metadata_limit::budgeted_reader;
 use super::tar_metadata_limit::budgeted_tar_entries;
@@ -786,6 +787,28 @@ impl TarEntryAdapter {
     }
 }
 
+/// Opens `path` as a TAR byte stream, decoding it with `codec` when one is
+/// given.
+///
+/// This is the single place that decides how a TAR file is buffered, so
+/// extraction, listing and the public `open_tar_*` functions share one read
+/// path: file, one [`BufReader`], then at most one decoder.
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be opened or the decoder cannot be
+/// initialised.
+pub(crate) fn open_tar_stream(
+    path: &Path,
+    codec: Option<CompressionCodec>,
+) -> Result<Box<dyn Read + Send>> {
+    let reader = BufReader::new(File::open(path)?);
+    match codec {
+        Some(codec) => codec.decoder(reader),
+        None => Ok(Box::new(reader)),
+    }
+}
+
 /// Opens a gzip-compressed TAR archive (.tar.gz).
 ///
 /// The file is wrapped in `BufReader` for optimal performance.
@@ -813,13 +836,8 @@ impl TarEntryAdapter {
 /// )?;
 /// # Ok::<(), exarch_core::ArchiveError>(())
 /// ```
-pub fn open_tar_gz<P: AsRef<Path>>(
-    path: P,
-) -> Result<TarArchive<flate2::read::GzDecoder<BufReader<File>>>> {
-    let file = File::open(path)?;
-    let buffered = BufReader::new(file);
-    let decoder = flate2::read::GzDecoder::new(buffered);
-    Ok(TarArchive::new(decoder))
+pub fn open_tar_gz<P: AsRef<Path>>(path: P) -> Result<TarArchive<Box<dyn Read + Send>>> {
+    open_tar_stream(path.as_ref(), Some(CompressionCodec::Gzip)).map(TarArchive::new)
 }
 
 /// Opens a bzip2-compressed TAR archive (.tar.bz2).
@@ -849,13 +867,8 @@ pub fn open_tar_gz<P: AsRef<Path>>(
 /// )?;
 /// # Ok::<(), exarch_core::ArchiveError>(())
 /// ```
-pub fn open_tar_bz2<P: AsRef<Path>>(
-    path: P,
-) -> Result<TarArchive<bzip2::read::BzDecoder<BufReader<File>>>> {
-    let file = File::open(path)?;
-    let buffered = BufReader::new(file);
-    let decoder = bzip2::read::BzDecoder::new(buffered);
-    Ok(TarArchive::new(decoder))
+pub fn open_tar_bz2<P: AsRef<Path>>(path: P) -> Result<TarArchive<Box<dyn Read + Send>>> {
+    open_tar_stream(path.as_ref(), Some(CompressionCodec::Bzip2)).map(TarArchive::new)
 }
 
 /// Opens an xz-compressed TAR archive (.tar.xz).
@@ -885,13 +898,8 @@ pub fn open_tar_bz2<P: AsRef<Path>>(
 /// )?;
 /// # Ok::<(), exarch_core::ArchiveError>(())
 /// ```
-pub fn open_tar_xz<P: AsRef<Path>>(
-    path: P,
-) -> Result<TarArchive<xz2::read::XzDecoder<BufReader<File>>>> {
-    let file = File::open(path)?;
-    let buffered = BufReader::new(file);
-    let decoder = xz2::read::XzDecoder::new(buffered);
-    Ok(TarArchive::new(decoder))
+pub fn open_tar_xz<P: AsRef<Path>>(path: P) -> Result<TarArchive<Box<dyn Read + Send>>> {
+    open_tar_stream(path.as_ref(), Some(CompressionCodec::Xz)).map(TarArchive::new)
 }
 
 /// Opens a zstd-compressed TAR archive (.tar.zst).
@@ -922,13 +930,8 @@ pub fn open_tar_xz<P: AsRef<Path>>(
 /// )?;
 /// # Ok::<(), exarch_core::ArchiveError>(())
 /// ```
-pub fn open_tar_zst<P: AsRef<Path>>(
-    path: P,
-) -> Result<TarArchive<zstd::Decoder<'static, BufReader<File>>>> {
-    let file = File::open(path)?;
-    let buffered = BufReader::new(file);
-    let decoder = zstd::Decoder::with_buffer(buffered)?;
-    Ok(TarArchive::new(decoder))
+pub fn open_tar_zst<P: AsRef<Path>>(path: P) -> Result<TarArchive<Box<dyn Read + Send>>> {
+    open_tar_stream(path.as_ref(), Some(CompressionCodec::Zstd)).map(TarArchive::new)
 }
 
 #[cfg(test)]

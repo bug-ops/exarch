@@ -6,6 +6,7 @@ use std::path::Path;
 use crate::ArchiveError;
 use crate::Result;
 use crate::closed_enum::closed_enum;
+use crate::formats::compression::CompressionCodec;
 
 /// Number of bytes to read for magic-byte detection.
 ///
@@ -73,6 +74,30 @@ closed_enum! {
         Zip => "Zip",
         /// 7z archive.
         SevenZ => "SevenZ",
+    }
+}
+
+/// How an [`ArchiveType`] is read: a TAR stream with an optional codec, or a
+/// container format with its own handler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FormatFamily {
+    Tar(Option<CompressionCodec>),
+    Zip,
+    SevenZ,
+}
+
+impl ArchiveType {
+    /// Groups this type by the reader that handles it.
+    pub(crate) const fn family(self) -> FormatFamily {
+        match self {
+            Self::Tar => FormatFamily::Tar(None),
+            Self::TarGz => FormatFamily::Tar(Some(CompressionCodec::Gzip)),
+            Self::TarBz2 => FormatFamily::Tar(Some(CompressionCodec::Bzip2)),
+            Self::TarXz => FormatFamily::Tar(Some(CompressionCodec::Xz)),
+            Self::TarZst => FormatFamily::Tar(Some(CompressionCodec::Zstd)),
+            Self::Zip => FormatFamily::Zip,
+            Self::SevenZ => FormatFamily::SevenZ,
+        }
     }
 }
 
@@ -232,6 +257,29 @@ mod tests {
         for t in ArchiveType::ALL {
             assert_eq!(t.to_string(), t.as_str());
         }
+    }
+
+    #[test]
+    fn test_family_maps_tar_codecs() {
+        assert_eq!(ArchiveType::Tar.family(), FormatFamily::Tar(None));
+        assert_eq!(
+            ArchiveType::TarGz.family(),
+            FormatFamily::Tar(Some(CompressionCodec::Gzip))
+        );
+        assert_eq!(
+            ArchiveType::TarBz2.family(),
+            FormatFamily::Tar(Some(CompressionCodec::Bzip2))
+        );
+        assert_eq!(
+            ArchiveType::TarXz.family(),
+            FormatFamily::Tar(Some(CompressionCodec::Xz))
+        );
+        assert_eq!(
+            ArchiveType::TarZst.family(),
+            FormatFamily::Tar(Some(CompressionCodec::Zstd))
+        );
+        assert_eq!(ArchiveType::Zip.family(), FormatFamily::Zip);
+        assert_eq!(ArchiveType::SevenZ.family(), FormatFamily::SevenZ);
     }
 
     #[test]

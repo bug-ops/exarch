@@ -1,7 +1,6 @@
 //! Archive listing implementation.
 
 use std::fs::File;
-use std::io::BufReader;
 use std::io::ErrorKind;
 use std::io::Read;
 use std::io::Seek;
@@ -10,8 +9,6 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::time::SystemTime;
 
-use flate2::read::GzDecoder;
-
 use crate::ArchiveError;
 use crate::Result;
 use crate::SecurityConfig;
@@ -19,9 +16,12 @@ use crate::config::Validated;
 #[cfg(test)]
 use crate::error::QuotaResource;
 use crate::formats::common::normalize_entry_name;
+use crate::formats::compression::CompressionCodec;
 use crate::formats::detect::ArchiveType;
+use crate::formats::detect::FormatFamily;
 use crate::formats::detect::detect_format;
 use crate::formats::sevenz::sevenz_compressed_sizes;
+use crate::formats::tar::open_tar_stream;
 use crate::formats::tar_metadata_limit::TarReadBudget;
 use crate::formats::tar_metadata_limit::budget_violation;
 use crate::formats::tar_metadata_limit::budgeted_reader;
@@ -78,83 +78,21 @@ pub fn list_archive<P: AsRef<Path>>(
     let archive_path = archive_path.as_ref();
     let format = detect_format(archive_path)?;
 
-    match format {
-        ArchiveType::Tar => list_tar(archive_path, format, config),
-        ArchiveType::TarGz => list_tar_gz(archive_path, format, config),
-        ArchiveType::TarBz2 => list_tar_bz2(archive_path, format, config),
-        ArchiveType::TarXz => list_tar_xz(archive_path, format, config),
-        ArchiveType::TarZst => list_tar_zst(archive_path, format, config),
-        ArchiveType::Zip => list_zip(archive_path, format, config),
-        ArchiveType::SevenZ => list_sevenz(archive_path, format, config),
+    match format.family() {
+        FormatFamily::Tar(codec) => list_tar(archive_path, codec, format, config),
+        FormatFamily::Zip => list_zip(archive_path, format, config),
+        FormatFamily::SevenZ => list_sevenz(archive_path, format, config),
     }
 }
 
 fn list_tar(
     archive_path: &Path,
+    codec: Option<CompressionCodec>,
     format: ArchiveType,
     config: &SecurityConfig<Validated>,
 ) -> Result<ArchiveManifest> {
-    let file = File::open(archive_path)?;
-    let reader = BufReader::new(file);
-    let (budgeted, budget) = budgeted_reader(reader, config.max_tar_metadata_bytes);
-    let archive = tar::Archive::new(budgeted);
-    list_tar_entries(archive, budget, format, config)
-}
-
-fn list_tar_gz(
-    archive_path: &Path,
-    format: ArchiveType,
-    config: &SecurityConfig<Validated>,
-) -> Result<ArchiveManifest> {
-    let file = File::open(archive_path)?;
-    let reader = BufReader::new(file);
-    let decoder = GzDecoder::new(reader);
-    let (budgeted, budget) = budgeted_reader(decoder, config.max_tar_metadata_bytes);
-    let archive = tar::Archive::new(budgeted);
-    list_tar_entries(archive, budget, format, config)
-}
-
-fn list_tar_bz2(
-    archive_path: &Path,
-    format: ArchiveType,
-    config: &SecurityConfig<Validated>,
-) -> Result<ArchiveManifest> {
-    use bzip2::read::BzDecoder;
-
-    let file = File::open(archive_path)?;
-    let reader = BufReader::new(file);
-    let decoder = BzDecoder::new(reader);
-    let (budgeted, budget) = budgeted_reader(decoder, config.max_tar_metadata_bytes);
-    let archive = tar::Archive::new(budgeted);
-    list_tar_entries(archive, budget, format, config)
-}
-
-fn list_tar_xz(
-    archive_path: &Path,
-    format: ArchiveType,
-    config: &SecurityConfig<Validated>,
-) -> Result<ArchiveManifest> {
-    use xz2::read::XzDecoder;
-
-    let file = File::open(archive_path)?;
-    let reader = BufReader::new(file);
-    let decoder = XzDecoder::new(reader);
-    let (budgeted, budget) = budgeted_reader(decoder, config.max_tar_metadata_bytes);
-    let archive = tar::Archive::new(budgeted);
-    list_tar_entries(archive, budget, format, config)
-}
-
-fn list_tar_zst(
-    archive_path: &Path,
-    format: ArchiveType,
-    config: &SecurityConfig<Validated>,
-) -> Result<ArchiveManifest> {
-    use zstd::stream::read::Decoder as ZstdDecoder;
-
-    let file = File::open(archive_path)?;
-    let reader = BufReader::new(file);
-    let decoder = ZstdDecoder::new(reader)?;
-    let (budgeted, budget) = budgeted_reader(decoder, config.max_tar_metadata_bytes);
+    let stream = open_tar_stream(archive_path, codec)?;
+    let (budgeted, budget) = budgeted_reader(stream, config.max_tar_metadata_bytes);
     let archive = tar::Archive::new(budgeted);
     list_tar_entries(archive, budget, format, config)
 }

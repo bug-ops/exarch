@@ -12,7 +12,9 @@ use crate::config::ExtractionOptions;
 use crate::config::Validated;
 use crate::creation::CreationConfig;
 use crate::creation::CreationReport;
+use crate::formats::compression::CompressionCodec;
 use crate::formats::detect::ArchiveType;
+use crate::formats::detect::FormatFamily;
 use crate::formats::detect::detect_format;
 use crate::formats::detect::detect_format_from_extension;
 use crate::formats::detect::is_zip_family_alias;
@@ -123,32 +125,12 @@ fn extract_impl<P: AsRef<Path>, Q: AsRef<Path>>(
     let format = detect_format(archive_path)?;
 
     // Dispatch to format-specific extraction
-    match format {
-        ArchiveType::Tar => {
-            extract_tar_with_decoder(archive_path, output_dir, config, options, progress, Ok)
+    match format.family() {
+        FormatFamily::Tar(codec) => {
+            extract_tar(archive_path, output_dir, config, options, progress, codec)
         }
-        ArchiveType::TarGz => {
-            extract_tar_with_decoder(archive_path, output_dir, config, options, progress, |r| {
-                Ok(flate2::read::GzDecoder::new(r))
-            })
-        }
-        ArchiveType::TarBz2 => {
-            extract_tar_with_decoder(archive_path, output_dir, config, options, progress, |r| {
-                Ok(bzip2::read::BzDecoder::new(r))
-            })
-        }
-        ArchiveType::TarXz => {
-            extract_tar_with_decoder(archive_path, output_dir, config, options, progress, |r| {
-                Ok(xz2::read::XzDecoder::new(r))
-            })
-        }
-        ArchiveType::TarZst => {
-            extract_tar_with_decoder(archive_path, output_dir, config, options, progress, |r| {
-                Ok(zstd::stream::read::Decoder::new(r)?)
-            })
-        }
-        ArchiveType::Zip => extract_zip(archive_path, output_dir, config, options, progress),
-        ArchiveType::SevenZ => extract_7z(archive_path, output_dir, config, options, progress),
+        FormatFamily::Zip => extract_zip(archive_path, output_dir, config, options, progress),
+        FormatFamily::SevenZ => extract_7z(archive_path, output_dir, config, options, progress),
     }
 }
 
@@ -320,32 +302,22 @@ fn extract_atomic<P: AsRef<Path>, Q: AsRef<Path>>(
     }
 }
 
-/// Opens `archive_path`, wraps it in a `BufReader`, passes it to
-/// `make_decoder`, and extracts the resulting TAR stream.
-///
-/// `make_decoder` builds a decoder (e.g. `GzDecoder`, `XzDecoder`) from the
-/// buffered file reader. For uncompressed TAR pass `Ok` as the identity
-/// closure. The closure may be fallible (e.g. zstd requires a constructor call
-/// that can fail with an I/O error).
-fn extract_tar_with_decoder<R, F>(
+/// Opens `archive_path` as a TAR stream (decoded with `codec` when present)
+/// and extracts it.
+fn extract_tar(
     archive_path: &Path,
     output_dir: &Path,
     config: &SecurityConfig<Validated>,
     options: &ExtractionOptions,
     progress: &mut dyn ProgressCallback,
-    make_decoder: F,
-) -> Result<ExtractionReport>
-where
-    R: std::io::Read,
-    F: FnOnce(std::io::BufReader<std::fs::File>) -> Result<R>,
-{
+    codec: Option<CompressionCodec>,
+) -> Result<ExtractionReport> {
     use crate::formats::TarArchive;
+    use crate::formats::tar::open_tar_stream;
     use crate::formats::traits::ArchiveFormat;
 
-    let file = std::fs::File::open(archive_path)?;
-    let reader = std::io::BufReader::new(file);
-    let decoder = make_decoder(reader)?;
-    let mut archive = TarArchive::new(decoder);
+    let stream = open_tar_stream(archive_path, codec)?;
+    let mut archive = TarArchive::new(stream);
     archive.extract(output_dir, config, options, progress)
 }
 

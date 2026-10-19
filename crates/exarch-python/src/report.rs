@@ -22,7 +22,7 @@ use pyo3::prelude::*;
 /// * `duration_ms` - Extraction duration in milliseconds
 /// * `files_skipped` - Number of files skipped due to security checks
 /// * `warnings` - List of warning messages
-#[pyclass(name = "ExtractionReport", skip_from_py_object)]
+#[pyclass(name = "ExtractionReport")]
 #[derive(Clone)]
 pub struct PyExtractionReport {
     inner: CoreExtractionReport,
@@ -135,7 +135,7 @@ impl From<CoreExtractionReport> for PyExtractionReport {
 /// * `duration_ms` - Creation duration in milliseconds
 /// * `files_skipped` - Number of files skipped
 /// * `warnings` - List of warning messages
-#[pyclass(name = "CreationReport", skip_from_py_object)]
+#[pyclass(name = "CreationReport")]
 #[derive(Clone)]
 pub struct PyCreationReport {
     inner: CoreCreationReport,
@@ -225,7 +225,7 @@ impl From<CoreCreationReport> for PyCreationReport {
 }
 
 /// Single entry in archive manifest.
-#[pyclass(name = "ArchiveEntry", skip_from_py_object)]
+#[pyclass(name = "ArchiveEntry")]
 #[derive(Clone)]
 pub struct PyArchiveEntry {
     inner: ArchiveEntry,
@@ -315,7 +315,7 @@ impl From<ArchiveEntry> for PyArchiveEntry {
 /// * `total_entries` - Total number of entries
 /// * `total_size` - Total uncompressed size
 /// * `entries` - List of archive entries
-#[pyclass(name = "ArchiveManifest", skip_from_py_object)]
+#[pyclass(name = "ArchiveManifest")]
 #[derive(Clone)]
 pub struct PyArchiveManifest {
     inner: ArchiveManifest,
@@ -373,7 +373,7 @@ impl From<ArchiveManifest> for PyArchiveManifest {
 /// * `severity` - Issue severity level
 /// * `message` - Human-readable description
 /// * `path` - Entry path that triggered issue (if applicable)
-#[pyclass(name = "VerificationIssue", skip_from_py_object)]
+#[pyclass(name = "VerificationIssue")]
 #[derive(Clone)]
 pub struct PyVerificationIssue {
     inner: VerificationIssue,
@@ -432,7 +432,7 @@ impl From<VerificationIssue> for PyVerificationIssue {
 /// * `issues` - List of issues found
 /// * `total_entries` - Total entries scanned
 /// * `total_size` - Total uncompressed size
-#[pyclass(name = "VerificationReport", skip_from_py_object)]
+#[pyclass(name = "VerificationReport")]
 #[derive(Clone)]
 pub struct PyVerificationReport {
     inner: VerificationReport,

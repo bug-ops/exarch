@@ -42,7 +42,7 @@ use crate::error::convert_error;
 /// # Use permissive configuration for trusted archives
 /// config = SecurityConfig.permissive()
 /// ```
-#[pyclass(name = "SecurityConfig", skip_from_py_object)]
+#[pyclass(name = "SecurityConfig")]
 #[derive(Clone)]
 pub struct PySecurityConfig {
     inner: CoreSecurityConfig,
@@ -441,7 +441,7 @@ impl PySecurityConfig {
 ///     .with_compression_level(9)
 ///     .with_follow_symlinks(True))
 /// ```
-#[pyclass(name = "CreationConfig", skip_from_py_object)]
+#[pyclass(name = "CreationConfig")]
 #[derive(Clone)]
 pub struct PyCreationConfig {
     inner: CoreCreationConfig,
@@ -638,7 +638,7 @@ impl PyCreationConfig {
 /// # Enable atomic extraction
 /// opts = ExtractionOptions().with_atomic(True)
 /// ```
-#[pyclass(name = "ExtractionOptions", skip_from_py_object)]
+#[pyclass(name = "ExtractionOptions")]
 #[derive(Clone)]
 pub struct PyExtractionOptions {
     inner: CoreExtractionOptions,

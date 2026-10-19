@@ -215,7 +215,7 @@ impl<W: Write> OutputFormatter for JsonFormatter<W> {
         #[derive(Serialize)]
         struct ManifestEntry {
             path: String,
-            entry_type: String,
+            entry_type: &'static str,
             size: u64,
             #[serde(skip_serializing_if = "Option::is_none")]
             compressed_size: Option<u64>,
@@ -242,7 +242,7 @@ impl<W: Write> OutputFormatter for JsonFormatter<W> {
             .iter()
             .map(|e| ManifestEntry {
                 path: e.path.display().to_string(),
-                entry_type: format!("{}", e.entry_type),
+                entry_type: e.entry_type.as_str(),
                 size: e.size,
                 compressed_size: e.compressed_size,
                 mode: e.mode,
@@ -270,8 +270,8 @@ impl<W: Write> OutputFormatter for JsonFormatter<W> {
     fn format_verification_report(&mut self, report: &VerificationReport) -> Result<()> {
         #[derive(Serialize)]
         struct VerificationIssue {
-            severity: String,
-            category: String,
+            severity: &'static str,
+            category: &'static str,
             entry_path: Option<String>,
             message: String,
             context: Option<String>,
@@ -279,9 +279,9 @@ impl<W: Write> OutputFormatter for JsonFormatter<W> {
 
         #[derive(Serialize)]
         struct VerificationOutput {
-            status: String,
-            integrity_status: String,
-            security_status: String,
+            status: &'static str,
+            integrity_status: &'static str,
+            security_status: &'static str,
             total_entries: usize,
             suspicious_entries: usize,
             total_size: u64,
@@ -293,8 +293,8 @@ impl<W: Write> OutputFormatter for JsonFormatter<W> {
             .issues()
             .iter()
             .map(|i| VerificationIssue {
-                severity: format!("{}", i.severity),
-                category: format!("{}", i.category),
+                severity: i.severity.as_str(),
+                category: i.category.as_str(),
                 entry_path: i.entry_path.as_ref().map(|p| p.display().to_string()),
                 message: i.message.clone(),
                 context: i.context.clone(),
@@ -302,9 +302,9 @@ impl<W: Write> OutputFormatter for JsonFormatter<W> {
             .collect();
 
         let data = VerificationOutput {
-            status: format!("{}", report.status()),
-            integrity_status: format!("{}", report.integrity_status()),
-            security_status: format!("{}", report.security_status()),
+            status: report.status().as_str(),
+            integrity_status: report.integrity_status().as_str(),
+            security_status: report.security_status().as_str(),
             total_entries: report.total_entries(),
             suspicious_entries: report.suspicious_entries(),
             total_size: report.total_size(),

@@ -741,3 +741,41 @@ fn sevenz_extract_enforces_compression_ratio() {
     let report = exarch_core::verify_archive(&path, &SecurityConfig::default()).unwrap();
     assert_eq!(report.status(), exarch_core::VerificationStatus::Fail);
 }
+
+#[test]
+fn sevenz_solid_archive_is_not_flagged_by_ratio_check() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("solid.7z");
+    std::fs::write(&path, load_fixture("solid.7z")).unwrap();
+
+    let report = exarch_core::verify_archive(&path, &SecurityConfig::default()).unwrap();
+    assert!(
+        report
+            .issues()
+            .iter()
+            .all(|i| i.category != exarch_core::IssueCategory::ZipBomb),
+        "unexpected ratio issue: {:?}",
+        report.issues()
+    );
+}
+
+#[test]
+fn sevenz_ratio_check_runs_before_duplicate_skip() {
+    let data = build_plain_sevenz("a.txt", &[0u8; 100], 1_000_000, 100);
+    let mut archive = SevenZArchive::new(Cursor::new(data)).unwrap();
+    let out = TempDir::new().unwrap();
+    std::fs::write(out.path().join("a.txt"), b"existing").unwrap();
+
+    let result = archive.extract(
+        out.path(),
+        &SecurityConfig::default().validate().unwrap(),
+        &ExtractionOptions::default().with_skip_duplicates(true),
+        &mut exarch_core::NoopProgress,
+    );
+
+    assert_matches!(result, Err(ArchiveError::ZipBomb { .. }));
+    assert_eq!(
+        std::fs::read(out.path().join("a.txt")).unwrap(),
+        b"existing"
+    );
+}

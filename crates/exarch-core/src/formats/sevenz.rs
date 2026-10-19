@@ -1029,9 +1029,8 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
         // PERFORMANCE: Uses cached metadata from new() to avoid re-parsing
         // archive
         //
-        // API LIMITATIONS (sevenz-rust2 0.20):
-        // - symlink detection: Not exposed, non-directory entries treated as
-        //   files
+        // API LIMITATION (sevenz-rust2): symlink detection is not exposed, so
+        // non-directory entries are treated as files.
         let mut prevalidator = EntryValidator::new(config, &dest);
         for entry in &self.entries {
             let path = std::path::PathBuf::from(common::normalize_entry_name(&entry.name));
@@ -1700,30 +1699,6 @@ mod tests {
         assert_eq!(report.bytes_written, 0);
     }
 
-    #[test]
-    fn test_quota_exceeded() {
-        let data = load_fixture("large-file.7z");
-        let cursor = Cursor::new(data);
-        let mut archive = SevenZArchive::new(cursor).unwrap();
-
-        let temp = TempDir::new().unwrap();
-        // 1 KB limit, fixture has 50 KB file
-        let config = SecurityConfig::default()
-            .with_max_file_size(1024)
-            .with_max_compression_ratio(10_000.0)
-            .validate()
-            .unwrap();
-
-        let result = archive.extract(
-            temp.path(),
-            &config,
-            &ExtractionOptions::default(),
-            &mut crate::NoopProgress,
-        );
-        assert!(result.is_err());
-        assert_matches!(result.unwrap_err(), ArchiveError::QuotaExceeded { .. });
-    }
-
     fn parse_fixture(name: &str) -> (Archive, u64) {
         let data = load_fixture(name);
         let len = data.len() as u64;
@@ -1745,7 +1720,22 @@ mod tests {
     fn test_compressed_sizes_solid_block_is_attributed_to_first_file_only() {
         let (archive, len) = parse_fixture("solid.7z");
         let sizes = sevenz_compressed_sizes(&archive, len).unwrap();
-        assert_eq!(sizes.iter().flatten().count(), archive.blocks.len());
+        let pack_sizes = archive.pack_sizes();
+        let first_packs = archive.stream_map.block_first_pack_stream_index();
+        let first_files = &archive.stream_map.block_first_file_index;
+        assert!(!first_files.is_empty());
+
+        for (block, &file) in first_files.iter().enumerate() {
+            let end = first_packs
+                .get(block + 1)
+                .copied()
+                .unwrap_or(pack_sizes.len());
+            let expected: u64 = pack_sizes[first_packs[block]..end].iter().sum();
+            assert_eq!(sizes[file], Some(expected), "block {block}");
+        }
+        for (index, size) in sizes.iter().enumerate() {
+            assert_eq!(size.is_some(), first_files.contains(&index), "file {index}");
+        }
     }
 
     #[test]

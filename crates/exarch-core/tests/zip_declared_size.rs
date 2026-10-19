@@ -135,3 +135,47 @@ fn zip_well_formed_archive_lists_and_verifies() {
     assert_eq!(list_archive(&path, &config).unwrap().total_entries(), 2);
     assert!(verify_archive(&path, &config).unwrap().is_safe());
 }
+
+/// Appends a second central-directory record (under another name) that
+/// refers to the same local header.
+fn with_repeated_central_record(data: &[u8]) -> Vec<u8> {
+    const EOCD: &[u8] = b"PK\x05\x06";
+    let eocd_at = data.windows(4).rposition(|w| w == EOCD).unwrap();
+    let dir_start =
+        u32::from_le_bytes(data[eocd_at + 16..eocd_at + 20].try_into().unwrap()) as usize;
+    let record = &data[dir_start..eocd_at];
+
+    let mut second = record.to_vec();
+    let name_at = second.windows(5).position(|w| w == b"a.txt").unwrap();
+    second[name_at] = b'b';
+
+    let mut out = data[..eocd_at].to_vec();
+    out.extend_from_slice(&second);
+    let mut eocd = data[eocd_at..].to_vec();
+    eocd[8..10].copy_from_slice(&2u16.to_le_bytes());
+    eocd[10..12].copy_from_slice(&2u16.to_le_bytes());
+    let dir_size = u32::try_from(record.len() * 2).unwrap();
+    eocd[12..16].copy_from_slice(&dir_size.to_le_bytes());
+    out.extend_from_slice(&eocd);
+    out
+}
+
+#[test]
+fn zip_rejects_repeated_central_records_for_one_local_header() {
+    let data = with_repeated_central_record(&stored_zip(&[("a.txt", &[9u8; 64])]));
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("a.zip");
+    std::fs::write(&path, &data).unwrap();
+    let config = SecurityConfig::default();
+
+    assert_matches!(
+        list_archive(&path, &config),
+        Err(ArchiveError::InvalidArchive(_))
+    );
+    assert_matches!(
+        verify_archive(&path, &config),
+        Err(ArchiveError::InvalidArchive(_))
+    );
+    let out = TempDir::new().unwrap();
+    assert!(extract_archive(&path, out.path(), &config).is_err());
+}

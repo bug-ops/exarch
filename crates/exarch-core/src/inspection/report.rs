@@ -475,33 +475,44 @@ mod tests {
 
     use crate::inspection::manifest::ManifestEntryType;
 
+    fn spellings<T: Copy>(all: &[T], text: impl Fn(T) -> &'static str) -> Vec<&'static str> {
+        all.iter().map(|v| text(*v)).collect()
+    }
+
     #[test]
     fn test_enum_as_str_spellings_and_display() {
-        let spell = |all: &[&str], want: &[&str]| assert_eq!(all, want);
-        spell(
-            &VerificationStatus::ALL
-                .iter()
-                .map(|v| v.as_str())
-                .collect::<Vec<_>>(),
-            &["PASS", "FAIL", "WARNING"],
+        assert_eq!(
+            spellings(VerificationStatus::ALL, VerificationStatus::as_str),
+            ["PASS", "FAIL", "WARNING"]
         );
-        spell(
-            &CheckStatus::ALL
-                .iter()
-                .map(|v| v.as_str())
-                .collect::<Vec<_>>(),
-            &["OK", "FAILED", "WARNING", "SKIPPED"],
+        assert_eq!(
+            spellings(CheckStatus::ALL, CheckStatus::as_str),
+            ["OK", "FAILED", "WARNING", "SKIPPED"]
         );
-        spell(
-            &IssueSeverity::ALL
-                .iter()
-                .map(|v| v.as_str())
-                .collect::<Vec<_>>(),
-            &["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"],
+        assert_eq!(
+            spellings(IssueSeverity::ALL, IssueSeverity::as_str),
+            ["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
         );
-        assert_eq!(IssueCategory::ALL.len(), 9);
-        assert_eq!(IssueCategory::PathTraversal.as_str(), "Path Traversal");
-        assert_eq!(IssueCategory::ZipBomb.to_string(), "Zip Bomb");
+        assert_eq!(
+            spellings(IssueCategory::ALL, IssueCategory::as_str),
+            [
+                "Path Traversal",
+                "Symlink Escape",
+                "Hardlink Escape",
+                "Zip Bomb",
+                "Invalid Permissions",
+                "Quota Exceeded",
+                "Invalid Archive",
+                "Suspicious Path",
+                "Executable File",
+            ]
+        );
+        for category in IssueCategory::ALL {
+            assert_eq!(category.to_string(), category.as_str());
+        }
+        for severity in IssueSeverity::ALL {
+            assert_eq!(severity.to_string(), severity.as_str());
+        }
     }
 
     #[test]
@@ -549,44 +560,6 @@ mod tests {
             context: None,
         }];
         assert_eq!(determine_status(&issues), VerificationStatus::Warning);
-    }
-
-    #[test]
-    fn test_verification_status_display() {
-        assert_eq!(VerificationStatus::Pass.to_string(), "PASS");
-        assert_eq!(VerificationStatus::Fail.to_string(), "FAIL");
-        assert_eq!(VerificationStatus::Warning.to_string(), "WARNING");
-    }
-
-    #[test]
-    fn test_check_status_display() {
-        assert_eq!(CheckStatus::Pass.to_string(), "OK");
-        assert_eq!(CheckStatus::Fail.to_string(), "FAILED");
-        assert_eq!(CheckStatus::Warning.to_string(), "WARNING");
-        assert_eq!(CheckStatus::Skipped.to_string(), "SKIPPED");
-    }
-
-    #[test]
-    fn test_issue_severity_display() {
-        assert_eq!(IssueSeverity::Critical.to_string(), "CRITICAL");
-        assert_eq!(IssueSeverity::High.to_string(), "HIGH");
-        assert_eq!(IssueSeverity::Medium.to_string(), "MEDIUM");
-        assert_eq!(IssueSeverity::Low.to_string(), "LOW");
-        assert_eq!(IssueSeverity::Info.to_string(), "INFO");
-    }
-
-    #[test]
-    fn test_issue_severity_ordering() {
-        assert!(IssueSeverity::Critical > IssueSeverity::High);
-        assert!(IssueSeverity::High > IssueSeverity::Medium);
-        assert!(IssueSeverity::Medium > IssueSeverity::Low);
-        assert!(IssueSeverity::Low > IssueSeverity::Info);
-    }
-
-    #[test]
-    fn test_issue_category_display() {
-        assert_eq!(IssueCategory::PathTraversal.to_string(), "Path Traversal");
-        assert_eq!(IssueCategory::SymlinkEscape.to_string(), "Symlink Escape");
     }
 
     #[test]

@@ -11,19 +11,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Bumped `zip` to 9.0.1 and refreshed the lockfile; zip's own declared-size overrun error is now reported as a security violation (#608).
 - Bumped `napi`/`napi-build`/`napi-derive`, `sevenz-rust2`, and `smallvec` to their latest compatible releases; refreshed `deny.toml`'s `zstd-safe`/`syn` duplicate-version exceptions to match the resulting transitive bumps (#584).
-- **BREAKING:** `ArchiveManifest` and `VerificationReport` expose accessors instead of public fields, `ArchiveManifest::add_entry` returns `Result`, and `ArchiveEntry`/`VerificationIssue` are `#[non_exhaustive]` with `new()`; report status is derived from the issue list (#PR).
-- **BREAKING:** `exarch verify` no longer accepts `--check-integrity`/`--check-security`, and `integrity_status` is `SKIPPED` instead of `OK` in the CLI, Python and Node reports until a real check lands (#PR).
-- **BREAKING:** `open_tar_gz`/`open_tar_bz2`/`open_tar_xz`/`open_tar_zst` return `TarArchive<Box<dyn Read + Send>>`; extract, list and open share one TAR decoder constructor (#PR).
-- **BREAKING:** Node report enum fields are typed string unions in `index.d.ts` (build uses `--no-const-enum`), and Python report getters are annotated with `Literal` (#PR).
-- `ArchiveType` implements `Display`, and report enums share one table for `ALL` and `as_str` instead of `Debug` formatting in the CLI, Node and Python (#PR).
-- `verify` and `list` return an `InvalidArchive` error for ZIP and 7z archives whose declared compressed sizes exceed the archive length (#PR).
-- Removed the stale `zstd`, `zstd-safe` and `syn` multiple-versions exceptions from `deny.toml`; the remaining `syn` 2 copy comes only from the `criterion` dev-dependency chain (#PR).
+- **BREAKING:** `ArchiveManifest` and `VerificationReport` expose accessors instead of public fields, `ArchiveManifest::add_entry` returns `Result`, and `ArchiveEntry`/`VerificationIssue` are `#[non_exhaustive]` with `new()`; report status is derived from the issue list (#624).
+- **BREAKING:** `exarch verify` no longer accepts `--check-integrity`/`--check-security`, and `integrity_status` is `SKIPPED` instead of `OK` in the CLI, Python and Node reports until a real check lands (#624).
+- **BREAKING:** `open_tar_gz`/`open_tar_bz2`/`open_tar_xz`/`open_tar_zst` return `TarArchive<Box<dyn Read + Send>>`; extract, list and open share one TAR decoder constructor (#624).
+- **BREAKING:** Node report enum fields are typed string unions in `index.d.ts` (build uses `--no-const-enum`), and Python report getters are annotated with `Literal` (#624).
+- `ArchiveType` implements `Display`, and report enums share one table for `ALL` and `as_str` instead of `Debug` formatting in the CLI, Node and Python (#624).
+- `verify` and `list` return an `InvalidArchive` error for ZIP and 7z archives whose declared compressed sizes exceed the archive length (#624).
+- Removed the stale `zstd`, `zstd-safe` and `syn` multiple-versions exceptions from `deny.toml`; the remaining `syn` 2 copy comes only from the `criterion` dev-dependency chain (#624).
 
 ### Fixed
 
-- 7z `extract` now enforces `max_compression_ratio` like `verify` and `list` do for non-solid archives (#PR).
-- ZIP `extract`, `list` and `verify` validate declared compressed sizes against the archive length (#PR).
-- `.TAR.GZ` stems are detected case-insensitively, and `verify`'s suspicious-extension check ignores case (#PR).
+- 7z `extract` now enforces `max_compression_ratio` like `verify` and `list` do for non-solid archives (#624).
+- ZIP `extract`, `list` and `verify` validate declared compressed sizes against the archive length (#624).
+- `.TAR.GZ` stems are detected case-insensitively, and `verify`'s suspicious-extension check ignores case (#624).
 - Scheduled fuzz job now passes `--target x86_64-unknown-linux-gnu`; the prebuilt musl `cargo-fuzz` defaulted to musl, which ASAN cannot build for (#616).
 - Renamed `exarch-node`'s deprecated `napi.name`/`napi.triples` package.json fields to
   `napi.binaryName`/`napi.targets` per `@napi-rs/cli` 3.10.x, eliminating build-time
@@ -43,7 +43,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added `fuzz/oss-fuzz/` submission scaffolding (`project.yaml`, `Dockerfile`, `build.sh`) for upstream OSS-Fuzz integration; actual onboarding still requires an external PR to `google/oss-fuzz` (#590).
 - Smoke-test the `exarch-rs` napi addon under Bun and Deno (Linux, create/list/verify/extract plus a security-violation path) (#579).
 - `deny.toml` now enforces the `multiple-versions` ban instead of only warning, with scoped exceptions for the known `zstd`/`zstd-safe` and `syn` duplicates (#581).
-- Pinned the remaining `release.yml` and `ci.yml` action references to commit SHAs and added a `pin-check` job that fails on any unpinned `uses:` (#PR).
+- Pinned the remaining `release.yml` and `ci.yml` action references to commit SHAs and added a `pin-check` job that fails on any unpinned `uses:` (#624).
 
 ### Security
 

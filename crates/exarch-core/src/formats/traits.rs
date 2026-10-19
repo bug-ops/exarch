@@ -193,8 +193,8 @@ mod tests {
         let mut format = TestFormat;
         let config = SecurityConfig::default().validate().unwrap();
         let manifest = format.list(&config).unwrap();
-        assert_eq!(manifest.total_entries, 0);
-        assert_eq!(manifest.total_size, 0);
+        assert_eq!(manifest.total_entries(), 0);
+        assert_eq!(manifest.total_size(), 0);
     }
 
     #[test]
@@ -203,7 +203,7 @@ mod tests {
         let mut format = TestFormat;
         let config = SecurityConfig::default().validate().unwrap();
         let report = format.verify(&config).unwrap();
-        assert_eq!(report.total_entries, 0);
+        assert_eq!(report.total_entries(), 0);
         assert!(report.is_safe());
     }
 
@@ -213,7 +213,7 @@ mod tests {
         let mut format: Box<dyn ArchiveFormat> = Box::new(TestFormat);
         let config = SecurityConfig::default().validate().unwrap();
         let manifest = format.list(&config).unwrap();
-        assert_eq!(manifest.total_entries, 0);
+        assert_eq!(manifest.total_entries(), 0);
     }
 
     #[test]

@@ -2855,8 +2855,8 @@ mod tests {
 
         let manifest = archive.list(&config).unwrap();
 
-        assert_eq!(manifest.total_entries, 2);
-        assert_eq!(manifest.total_size, 10);
+        assert_eq!(manifest.total_entries(), 2);
+        assert_eq!(manifest.total_size(), 10);
     }
 
     #[test]
@@ -2867,8 +2867,8 @@ mod tests {
 
         let manifest = archive.list(&config).unwrap();
 
-        assert_eq!(manifest.total_entries, 0);
-        assert_eq!(manifest.total_size, 0);
+        assert_eq!(manifest.total_entries(), 0);
+        assert_eq!(manifest.total_size(), 0);
     }
 
     #[test]
@@ -2880,7 +2880,7 @@ mod tests {
         let report = archive.verify(&config).unwrap();
 
         assert!(report.is_safe());
-        assert_eq!(report.total_entries, 1);
+        assert_eq!(report.total_entries(), 1);
     }
 
     fn create_tar_with_absolute_path(path_bytes: &[u8], content: &[u8]) -> Vec<u8> {

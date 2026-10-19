@@ -59,8 +59,8 @@ use crate::types::safe_path::has_null_bytes;
 /// let config = SecurityConfig::default();
 /// let manifest = list_archive("archive.tar.gz", &config)?;
 ///
-/// println!("Archive contains {} files", manifest.total_entries);
-/// for entry in manifest.entries {
+/// println!("Archive contains {} files", manifest.total_entries());
+/// for entry in manifest.entries() {
 ///     println!("{}: {} bytes", entry.path.display(), entry.size);
 /// }
 /// # Ok(())
@@ -271,7 +271,7 @@ fn list_tar_entries<R: std::io::Read>(
             hardlink_target,
         };
 
-        manifest.add_entry(archive_entry);
+        manifest.add_entry(archive_entry)?;
     }
 
     Ok(manifest)
@@ -416,7 +416,7 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
             hardlink_target: None,
         };
 
-        manifest.add_entry(archive_entry);
+        manifest.add_entry(archive_entry)?;
     }
 
     Ok(manifest)
@@ -545,7 +545,7 @@ fn list_sevenz_archive(
             hardlink_target: None,
         };
 
-        manifest.add_entry(archive_entry);
+        manifest.add_entry(archive_entry)?;
     }
 
     Ok(manifest)
@@ -814,10 +814,10 @@ mod tests {
         let config = SecurityConfig::default();
         let manifest = list_archive(temp_file.path(), &config).unwrap();
 
-        assert_eq!(manifest.total_entries, 0);
-        assert_eq!(manifest.total_size, 0);
-        assert_eq!(manifest.entries.len(), 0);
-        assert_eq!(manifest.format, ArchiveType::Tar);
+        assert_eq!(manifest.total_entries(), 0);
+        assert_eq!(manifest.total_size(), 0);
+        assert_eq!(manifest.entries().len(), 0);
+        assert_eq!(manifest.format(), ArchiveType::Tar);
     }
 
     #[test]
@@ -843,10 +843,10 @@ mod tests {
         let config = SecurityConfig::default();
         let manifest = list_archive(temp_file.path(), &config).unwrap();
 
-        assert_eq!(manifest.total_entries, 1);
-        assert_eq!(manifest.format, ArchiveType::TarGz);
-        assert_eq!(manifest.entries[0].path, PathBuf::from("file.txt"));
-        assert_eq!(manifest.entries[0].entry_type, ManifestEntryType::File);
+        assert_eq!(manifest.total_entries(), 1);
+        assert_eq!(manifest.format(), ArchiveType::TarGz);
+        assert_eq!(manifest.entries()[0].path, PathBuf::from("file.txt"));
+        assert_eq!(manifest.entries()[0].entry_type, ManifestEntryType::File);
     }
 
     #[test]
@@ -864,10 +864,10 @@ mod tests {
         let config = SecurityConfig::default();
         let manifest = list_archive(temp_file.path(), &config).unwrap();
 
-        assert_eq!(manifest.total_entries, 1);
-        assert_eq!(manifest.format, ArchiveType::Zip);
-        assert_eq!(manifest.entries[0].path, PathBuf::from("test.txt"));
-        assert_eq!(manifest.entries[0].entry_type, ManifestEntryType::File);
+        assert_eq!(manifest.total_entries(), 1);
+        assert_eq!(manifest.format(), ArchiveType::Zip);
+        assert_eq!(manifest.entries()[0].path, PathBuf::from("test.txt"));
+        assert_eq!(manifest.entries()[0].entry_type, ManifestEntryType::File);
     }
 
     #[test]
@@ -896,11 +896,11 @@ mod tests {
         let config = SecurityConfig::default();
         let manifest = list_archive(temp_file.path(), &config).unwrap();
 
-        assert_eq!(manifest.total_entries, 2);
-        assert_eq!(manifest.total_size, 16);
-        assert_eq!(manifest.entries.len(), 2);
-        assert_eq!(manifest.entries[0].path, PathBuf::from("dir/file1.txt"));
-        assert_eq!(manifest.entries[1].path, PathBuf::from("dir/file2.txt"));
+        assert_eq!(manifest.total_entries(), 2);
+        assert_eq!(manifest.total_size(), 16);
+        assert_eq!(manifest.entries().len(), 2);
+        assert_eq!(manifest.entries()[0].path, PathBuf::from("dir/file1.txt"));
+        assert_eq!(manifest.entries()[1].path, PathBuf::from("dir/file2.txt"));
     }
 
     #[test]
@@ -923,10 +923,10 @@ mod tests {
         let config = SecurityConfig::default();
         let manifest = list_archive(temp_file.path(), &config).unwrap();
 
-        assert_eq!(manifest.total_entries, 1);
-        assert_eq!(manifest.entries[0].entry_type, ManifestEntryType::Symlink);
+        assert_eq!(manifest.total_entries(), 1);
+        assert_eq!(manifest.entries()[0].entry_type, ManifestEntryType::Symlink);
         assert_eq!(
-            manifest.entries[0].symlink_target,
+            manifest.entries()[0].symlink_target,
             Some(PathBuf::from("target.txt"))
         );
     }
@@ -942,15 +942,16 @@ mod tests {
         let config = SecurityConfig::default().validate().expect("valid config");
         let manifest = list_zip_reader(&mut archive, &config).unwrap();
 
-        assert_eq!(manifest.total_entries, 1);
-        assert_eq!(manifest.entries[0].entry_type, ManifestEntryType::Symlink);
+        assert_eq!(manifest.total_entries(), 1);
+        assert_eq!(manifest.entries()[0].entry_type, ManifestEntryType::Symlink);
         assert_eq!(
-            manifest.entries[0].symlink_target,
+            manifest.entries()[0].symlink_target,
             Some(PathBuf::from("target.txt")),
             "symlink_target must be the actual link target, not the entry path"
         );
         assert_eq!(
-            manifest.entries[0].hardlink_target, None,
+            manifest.entries()[0].hardlink_target,
+            None,
             "ZIP has no hardlink concept — hardlink_target must always be None"
         );
     }
@@ -975,10 +976,13 @@ mod tests {
         let config = SecurityConfig::default();
         let manifest = list_archive(temp_file.path(), &config).unwrap();
 
-        assert_eq!(manifest.total_entries, 1);
-        assert_eq!(manifest.entries[0].entry_type, ManifestEntryType::Hardlink);
+        assert_eq!(manifest.total_entries(), 1);
         assert_eq!(
-            manifest.entries[0].hardlink_target,
+            manifest.entries()[0].entry_type,
+            ManifestEntryType::Hardlink
+        );
+        assert_eq!(
+            manifest.entries()[0].hardlink_target,
             Some(PathBuf::from("original.txt"))
         );
     }
@@ -1059,8 +1063,8 @@ mod tests {
         let config = SecurityConfig::default();
         let manifest = list_archive(temp_file.path(), &config).unwrap();
 
-        assert_eq!(manifest.total_entries, 1);
-        assert_eq!(manifest.entries[0].mode, Some(0o644));
+        assert_eq!(manifest.total_entries(), 1);
+        assert_eq!(manifest.entries()[0].mode, Some(0o644));
     }
 
     #[test]
@@ -1075,8 +1079,8 @@ mod tests {
         let config = SecurityConfig::default();
         let manifest = list_archive(temp_file.path(), &config).unwrap();
 
-        assert_eq!(manifest.total_entries, 1);
-        assert_eq!(manifest.entries[0].mode, Some(0o755));
+        assert_eq!(manifest.total_entries(), 1);
+        assert_eq!(manifest.entries()[0].mode, Some(0o755));
     }
 
     #[test]
@@ -1091,8 +1095,8 @@ mod tests {
         let config = SecurityConfig::default();
         let manifest = list_archive(temp_file.path(), &config).unwrap();
 
-        assert_eq!(manifest.total_entries, 1);
-        assert_eq!(manifest.entries[0].mode, Some(0o644));
+        assert_eq!(manifest.total_entries(), 1);
+        assert_eq!(manifest.entries()[0].mode, Some(0o644));
     }
 
     #[test]
@@ -1154,9 +1158,9 @@ mod tests {
         let config = SecurityConfig::default();
         let manifest = list_archive(temp_file.path(), &config).unwrap();
 
-        assert_eq!(manifest.total_entries, 1);
-        assert_eq!(manifest.format, ArchiveType::TarBz2);
-        assert_eq!(manifest.entries[0].path, PathBuf::from("file.txt"));
+        assert_eq!(manifest.total_entries(), 1);
+        assert_eq!(manifest.format(), ArchiveType::TarBz2);
+        assert_eq!(manifest.entries()[0].path, PathBuf::from("file.txt"));
     }
 
     #[test]
@@ -1185,8 +1189,8 @@ mod tests {
         let config = SecurityConfig::default();
         let manifest = list_archive(temp_file.path(), &config).unwrap();
 
-        assert_eq!(manifest.total_entries, 1);
-        assert_eq!(manifest.format, ArchiveType::TarXz);
+        assert_eq!(manifest.total_entries(), 1);
+        assert_eq!(manifest.format(), ArchiveType::TarXz);
     }
 
     #[test]
@@ -1215,8 +1219,8 @@ mod tests {
         let config = SecurityConfig::default();
         let manifest = list_archive(temp_file.path(), &config).unwrap();
 
-        assert_eq!(manifest.total_entries, 1);
-        assert_eq!(manifest.format, ArchiveType::TarZst);
+        assert_eq!(manifest.total_entries(), 1);
+        assert_eq!(manifest.format(), ArchiveType::TarZst);
     }
 
     #[test]
@@ -1401,7 +1405,7 @@ mod tests {
             "list_archive must accept absolute paths when allow_absolute_paths=true, got: {result:?}"
         );
         let manifest = result.unwrap();
-        assert_eq!(manifest.total_entries, 1);
+        assert_eq!(manifest.total_entries(), 1);
     }
 
     #[test]
@@ -1584,8 +1588,11 @@ mod tests {
         let tar_manifest = list_archive(tar_file.path(), &config).unwrap();
         let zip_manifest = list_archive(zip_file.path(), &config).unwrap();
 
-        assert_eq!(tar_manifest.entries[0].mode, zip_manifest.entries[0].mode);
-        assert_eq!(tar_manifest.entries[0].mode, Some(0o644));
+        assert_eq!(
+            tar_manifest.entries()[0].mode,
+            zip_manifest.entries()[0].mode
+        );
+        assert_eq!(tar_manifest.entries()[0].mode, Some(0o644));
     }
 
     #[test]
@@ -1593,8 +1600,11 @@ mod tests {
         let path = std::path::Path::new("../../tests/fixtures/simple.7z");
         let config = SecurityConfig::default();
         let manifest = list_archive(path, &config).unwrap();
-        assert!(manifest.total_entries > 0, "simple.7z should have entries");
-        for entry in &manifest.entries {
+        assert!(
+            manifest.total_entries() > 0,
+            "simple.7z should have entries"
+        );
+        for entry in manifest.entries() {
             assert!(!entry.path.is_empty(), "entry path should not be empty");
         }
     }
@@ -1604,9 +1614,14 @@ mod tests {
         let path = std::path::Path::new("../../tests/fixtures/empty.7z");
         let config = SecurityConfig::default();
         let manifest = list_archive(path, &config).unwrap();
-        assert_eq!(manifest.total_entries, 0, "empty.7z should have no entries");
         assert_eq!(
-            manifest.total_size, 0,
+            manifest.total_entries(),
+            0,
+            "empty.7z should have no entries"
+        );
+        assert_eq!(
+            manifest.total_size(),
+            0,
             "empty.7z should have zero total size"
         );
     }
@@ -1616,9 +1631,9 @@ mod tests {
         let path = std::path::Path::new("../../tests/fixtures/nested-dirs.7z");
         let config = SecurityConfig::default();
         let manifest = list_archive(path, &config).unwrap();
-        assert!(manifest.total_entries > 0);
+        assert!(manifest.total_entries() > 0);
         let has_dir = manifest
-            .entries
+            .entries()
             .iter()
             .any(|e| e.entry_type == ManifestEntryType::Directory);
         assert!(has_dir, "nested-dirs.7z should contain directory entries");
@@ -1644,7 +1659,7 @@ mod tests {
         let path = std::path::Path::new("../../tests/fixtures/solid.7z");
         let config = SecurityConfig::default();
         let manifest = list_archive(path, &config).unwrap();
-        assert!(manifest.total_entries > 0, "solid.7z should have entries");
+        assert!(manifest.total_entries() > 0, "solid.7z should have entries");
     }
 
     #[test]
@@ -1653,7 +1668,7 @@ mod tests {
         let config = SecurityConfig::default();
         let report = crate::verify_archive(path, &config).unwrap();
         assert_ne!(
-            report.status,
+            report.status(),
             crate::inspection::report::VerificationStatus::Fail,
             "simple.7z should not fail verification"
         );
@@ -1665,7 +1680,7 @@ mod tests {
         let config = SecurityConfig::default();
         let manifest = list_archive(path, &config).unwrap();
         assert_eq!(
-            manifest.format,
+            manifest.format(),
             crate::formats::detect::ArchiveType::SevenZ,
             "manifest format should be SevenZ"
         );
@@ -1800,10 +1815,10 @@ mod tests {
         let config = SecurityConfig::default();
         let manifest = list_archive(path, &config).unwrap();
         assert!(
-            manifest.total_entries > 0,
+            manifest.total_entries() > 0,
             "hardlink.7z should have entries"
         );
-        for entry in &manifest.entries {
+        for entry in manifest.entries() {
             assert_ne!(
                 entry.entry_type,
                 ManifestEntryType::Hardlink,
@@ -1820,7 +1835,7 @@ mod tests {
         let path = std::path::Path::new("../../tests/fixtures/solid.7z");
         let config = SecurityConfig::default();
         let manifest = list_archive(path, &config).unwrap();
-        for entry in &manifest.entries {
+        for entry in manifest.entries() {
             if entry.size > 0 {
                 assert_ne!(
                     entry.compressed_size,
@@ -1928,12 +1943,12 @@ mod tests {
         let config = SecurityConfig::default();
         let manifest = list_archive(path, &config).unwrap();
         assert!(
-            manifest.total_entries > 0,
+            manifest.total_entries() > 0,
             "symlink-unix.7z should have entries"
         );
         // All entries should be File or Directory — no Symlink (API
         // limitation).
-        for entry in &manifest.entries {
+        for entry in manifest.entries() {
             assert_ne!(
                 entry.entry_type,
                 ManifestEntryType::Symlink,
@@ -1951,11 +1966,11 @@ mod tests {
         let config = SecurityConfig::default().with_allow_solid_archives(true);
         let report = crate::verify_archive(path, &config).unwrap();
         assert_ne!(
-            report.status,
+            report.status(),
             crate::inspection::report::VerificationStatus::Fail,
             "solid.7z should not fail verification when solid archives are allowed"
         );
-        let has_false_positive = report.issues.iter().any(|issue| {
+        let has_false_positive = report.issues().iter().any(|issue| {
             issue.severity == IssueSeverity::High
                 && issue.message.to_lowercase().contains("compressed_size")
         });
@@ -1995,8 +2010,8 @@ mod tests {
 
         let config = SecurityConfig::default();
         let manifest = list_archive(temp_file.path(), &config).unwrap();
-        assert_eq!(manifest.total_entries, 1);
-        assert_eq!(manifest.entries[0].path, PathBuf::from("etc/passwd"));
+        assert_eq!(manifest.total_entries(), 1);
+        assert_eq!(manifest.entries()[0].path, PathBuf::from("etc/passwd"));
     }
 
     #[test]
@@ -2008,8 +2023,8 @@ mod tests {
 
         let config = SecurityConfig::default().with_allow_absolute_paths(true);
         let manifest = list_archive(temp_file.path(), &config).unwrap();
-        assert_eq!(manifest.total_entries, 1);
-        assert_eq!(manifest.entries[0].path, PathBuf::from("etc/passwd"));
+        assert_eq!(manifest.total_entries(), 1);
+        assert_eq!(manifest.entries()[0].path, PathBuf::from("etc/passwd"));
     }
 
     #[test]
@@ -2330,9 +2345,9 @@ mod tests {
         let manifest = list_archive(temp_file.path(), &config)
             .expect("relaxed_for_verify_preflight must let a NUL-byte entry path through");
 
-        assert_eq!(manifest.total_entries, 1);
+        assert_eq!(manifest.total_entries(), 1);
         assert!(
-            has_null_bytes(&manifest.entries[0].path),
+            has_null_bytes(&manifest.entries()[0].path),
             "the raw NUL-byte path must reach the manifest unmodified"
         );
     }
@@ -2357,8 +2372,8 @@ mod tests {
         let manifest = list_archive(temp_file.path(), &config)
             .expect("relaxed_for_verify_preflight must let a missing symlink target through");
 
-        assert_eq!(manifest.total_entries, 1);
-        assert_eq!(manifest.entries[0].symlink_target, None);
+        assert_eq!(manifest.total_entries(), 1);
+        assert_eq!(manifest.entries()[0].symlink_target, None);
     }
 
     #[test]
@@ -2373,9 +2388,9 @@ mod tests {
         let manifest = list_archive(temp_file.path(), &config)
             .expect("relaxed_for_verify_preflight must let a NUL-byte symlink target through");
 
-        assert_eq!(manifest.total_entries, 1);
+        assert_eq!(manifest.total_entries(), 1);
         assert!(
-            manifest.entries[0]
+            manifest.entries()[0]
                 .symlink_target
                 .as_ref()
                 .is_some_and(|t| has_null_bytes(t)),
@@ -2396,9 +2411,9 @@ mod tests {
         let manifest = list_archive(temp_file.path(), &config)
             .expect("relaxed_for_verify_preflight must let a NUL-byte ZIP entry path through");
 
-        assert_eq!(manifest.total_entries, 1);
+        assert_eq!(manifest.total_entries(), 1);
         assert!(
-            has_null_bytes(&manifest.entries[0].path),
+            has_null_bytes(&manifest.entries()[0].path),
             "the raw NUL-byte path must reach the manifest unmodified"
         );
     }

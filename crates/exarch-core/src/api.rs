@@ -536,8 +536,8 @@ fn creator_for_format(
 /// let config = SecurityConfig::default();
 /// let manifest = list_archive("archive.tar.gz", &config)?;
 ///
-/// println!("Archive contains {} files", manifest.total_entries);
-/// for entry in manifest.entries {
+/// println!("Archive contains {} files", manifest.total_entries());
+/// for entry in manifest.entries() {
 ///     println!("{}: {} bytes", entry.path.display(), entry.size);
 /// }
 /// # Ok(())
@@ -568,7 +568,7 @@ pub fn list_archive<P: AsRef<Path>>(
 /// - Archive file cannot be opened
 /// - Archive is severely corrupted (cannot read structure)
 ///
-/// Security violations are reported in `VerificationReport.issues`,
+/// Security violations are reported in `VerificationReport::issues`,
 /// not as errors.
 ///
 /// # Examples
@@ -582,11 +582,11 @@ pub fn list_archive<P: AsRef<Path>>(
 /// let config = SecurityConfig::default();
 /// let report = verify_archive("archive.tar.gz", &config)?;
 ///
-/// if report.status == VerificationStatus::Pass {
+/// if report.status() == VerificationStatus::Pass {
 ///     println!("Archive is safe to extract");
 /// } else {
 ///     eprintln!("Security issues found:");
-///     for issue in report.issues {
+///     for issue in report.issues() {
 ///         eprintln!("  [{}] {}", issue.severity, issue.message);
 ///     }
 /// }

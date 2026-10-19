@@ -3,6 +3,14 @@
 use exarch_core::ExtractionReport as CoreReport;
 use napi_derive::napi;
 
+fn saturating_u32(n: usize) -> u32 {
+    u32::try_from(n).unwrap_or(u32::MAX)
+}
+
+fn saturating_i64(n: u64) -> i64 {
+    i64::try_from(n).unwrap_or(i64::MAX)
+}
+
 /// Report of an archive extraction operation.
 ///
 /// Contains statistics and metadata about the extraction process.
@@ -32,12 +40,12 @@ impl From<CoreReport> for ExtractionReport {
         // This ensures audit trails remain accurate even for very large
         // extractions
         Self {
-            files_extracted: report.files_extracted.min(u32::MAX as usize) as u32,
-            directories_created: report.directories_created.min(u32::MAX as usize) as u32,
-            symlinks_created: report.symlinks_created.min(u32::MAX as usize) as u32,
-            bytes_written: report.bytes_written.min(i64::MAX as u64) as i64,
+            files_extracted: saturating_u32(report.files_extracted),
+            directories_created: saturating_u32(report.directories_created),
+            symlinks_created: saturating_u32(report.symlinks_created),
+            bytes_written: saturating_i64(report.bytes_written),
             duration_ms: report.duration.as_millis().min(i64::MAX as u128) as i64,
-            files_skipped: report.files_skipped.min(u32::MAX as usize) as u32,
+            files_skipped: saturating_u32(report.files_skipped),
             warnings: report.warnings,
         }
     }
@@ -71,13 +79,13 @@ impl From<exarch_core::creation::CreationReport> for CreationReport {
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     fn from(report: exarch_core::creation::CreationReport) -> Self {
         Self {
-            files_added: report.files_added.min(u32::MAX as usize) as u32,
-            directories_added: report.directories_added.min(u32::MAX as usize) as u32,
-            symlinks_added: report.symlinks_added.min(u32::MAX as usize) as u32,
-            bytes_written: report.bytes_written.min(i64::MAX as u64) as i64,
-            bytes_compressed: report.bytes_compressed.min(i64::MAX as u64) as i64,
+            files_added: saturating_u32(report.files_added),
+            directories_added: saturating_u32(report.directories_added),
+            symlinks_added: saturating_u32(report.symlinks_added),
+            bytes_written: saturating_i64(report.bytes_written),
+            bytes_compressed: saturating_i64(report.bytes_compressed),
             duration_ms: report.duration.as_millis().min(i64::MAX as u128) as i64,
-            files_skipped: report.files_skipped.min(u32::MAX as usize) as u32,
+            files_skipped: saturating_u32(report.files_skipped),
             warnings: report.warnings,
         }
     }
@@ -103,15 +111,18 @@ pub struct ArchiveManifest {
 impl From<exarch_core::inspection::ArchiveManifest> for ArchiveManifest {
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     fn from(manifest: exarch_core::inspection::ArchiveManifest) -> Self {
+        let total_entries = saturating_u32(manifest.total_entries());
+        let total_size = saturating_i64(manifest.total_size());
+        let format = manifest.format().as_str().to_string();
         Self {
             entries: manifest
-                .entries
+                .into_entries()
                 .into_iter()
                 .map(ArchiveEntry::from)
                 .collect(),
-            total_entries: manifest.total_entries.min(u32::MAX as usize) as u32,
-            total_size: manifest.total_size.min(i64::MAX as u64) as i64,
-            format: manifest.format.as_str().to_string(),
+            total_entries,
+            total_size,
+            format,
         }
     }
 }
@@ -147,8 +158,8 @@ impl From<exarch_core::inspection::ArchiveEntry> for ArchiveEntry {
         Self {
             path: entry.path.to_string_lossy().into_owned(),
             entry_type: entry.entry_type.to_string(),
-            size: entry.size.min(i64::MAX as u64) as i64,
-            compressed_size: entry.compressed_size.map(|s| s.min(i64::MAX as u64) as i64),
+            size: saturating_i64(entry.size),
+            compressed_size: entry.compressed_size.map(saturating_i64),
             mode: entry.mode,
             modified: entry.modified.and_then(|t| {
                 t.duration_since(std::time::UNIX_EPOCH)
@@ -193,19 +204,26 @@ pub struct VerificationReport {
 impl From<exarch_core::inspection::VerificationReport> for VerificationReport {
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     fn from(report: exarch_core::inspection::VerificationReport) -> Self {
+        let status = report.status().to_string();
+        let integrity_status = report.integrity_status().to_string();
+        let security_status = report.security_status().to_string();
+        let total_entries = saturating_u32(report.total_entries());
+        let suspicious_entries = saturating_u32(report.suspicious_entries());
+        let total_size = saturating_i64(report.total_size());
+        let format = report.format().as_str().to_string();
         Self {
-            status: report.status.to_string(),
-            integrity_status: report.integrity_status.to_string(),
-            security_status: report.security_status.to_string(),
+            status,
+            integrity_status,
+            security_status,
             issues: report
-                .issues
+                .into_issues()
                 .into_iter()
                 .map(VerificationIssue::from)
                 .collect(),
-            total_entries: report.total_entries.min(u32::MAX as usize) as u32,
-            suspicious_entries: report.suspicious_entries.min(u32::MAX as usize) as u32,
-            total_size: report.total_size.min(i64::MAX as u64) as i64,
-            format: report.format.as_str().to_string(),
+            total_entries,
+            suspicious_entries,
+            total_size,
+            format,
         }
     }
 }
@@ -396,22 +414,28 @@ mod tests {
         assert_eq!(report.warnings[0], "Test warning");
     }
 
+    fn sized_entry(name: &str, size: u64) -> exarch_core::inspection::ArchiveEntry {
+        exarch_core::inspection::ArchiveEntry::new(
+            std::path::PathBuf::from(name),
+            exarch_core::inspection::ManifestEntryType::File,
+            size,
+        )
+    }
+
     // ArchiveEntry tests
     #[test]
     fn test_archive_entry_conversion() {
         use std::path::PathBuf;
         use std::time::UNIX_EPOCH;
 
-        let core_entry = exarch_core::inspection::ArchiveEntry {
-            path: PathBuf::from("test/file.txt"),
-            entry_type: exarch_core::inspection::ManifestEntryType::File,
-            size: 1024,
-            compressed_size: Some(512),
-            mode: Some(0o644),
-            modified: Some(UNIX_EPOCH + std::time::Duration::from_secs(1000)),
-            symlink_target: None,
-            hardlink_target: None,
-        };
+        let mut core_entry = exarch_core::inspection::ArchiveEntry::new(
+            PathBuf::from("test/file.txt"),
+            exarch_core::inspection::ManifestEntryType::File,
+            1024,
+        );
+        core_entry.compressed_size = Some(512);
+        core_entry.mode = Some(0o644);
+        core_entry.modified = Some(UNIX_EPOCH + std::time::Duration::from_secs(1000));
 
         let entry = ArchiveEntry::from(core_entry);
 
@@ -431,8 +455,11 @@ mod tests {
         use exarch_core::formats::detect::ArchiveType;
 
         let mut core_manifest = exarch_core::inspection::ArchiveManifest::new(ArchiveType::TarGz);
-        core_manifest.total_entries = 10;
-        core_manifest.total_size = 5000;
+        for i in 0..10 {
+            core_manifest
+                .add_entry(sized_entry(&format!("f{i}"), 500))
+                .unwrap();
+        }
 
         let manifest = ArchiveManifest::from(core_manifest);
 
@@ -445,19 +472,17 @@ mod tests {
     #[test]
     fn test_verification_report_conversion() {
         use exarch_core::formats::detect::ArchiveType;
-        use exarch_core::inspection::CheckStatus;
-        use exarch_core::inspection::VerificationStatus;
 
-        let core_report = exarch_core::inspection::VerificationReport {
-            status: VerificationStatus::Pass,
-            integrity_status: CheckStatus::Pass,
-            security_status: CheckStatus::Pass,
-            issues: vec![],
-            total_entries: 10,
-            suspicious_entries: 0,
-            total_size: 5000,
-            format: ArchiveType::TarGz,
-        };
+        let mut core_manifest = exarch_core::inspection::ArchiveManifest::new(ArchiveType::TarGz);
+        for i in 0..10 {
+            core_manifest
+                .add_entry(sized_entry(&format!("f{i}"), 500))
+                .unwrap();
+        }
+        let core_report =
+            exarch_core::inspection::VerificationReport::from_entry_issues(&core_manifest, |_| {
+                Vec::new()
+            });
 
         let report = VerificationReport::from(core_report);
 
@@ -476,13 +501,13 @@ mod tests {
         use exarch_core::inspection::IssueSeverity;
         use std::path::PathBuf;
 
-        let core_issue = exarch_core::inspection::VerificationIssue {
-            severity: IssueSeverity::Critical,
-            category: IssueCategory::PathTraversal,
-            entry_path: Some(PathBuf::from("../etc/passwd")),
-            message: "Path traversal detected".to_string(),
-            context: Some("Attempt to escape directory".to_string()),
-        };
+        let mut core_issue = exarch_core::inspection::VerificationIssue::new(
+            IssueSeverity::Critical,
+            IssueCategory::PathTraversal,
+            "Path traversal detected".to_string(),
+        );
+        core_issue.entry_path = Some(PathBuf::from("../etc/passwd"));
+        core_issue.context = Some("Attempt to escape directory".to_string());
 
         let issue = VerificationIssue::from(core_issue);
 
@@ -586,19 +611,15 @@ mod tests {
     }
 
     #[test]
-    fn test_archive_manifest_saturates_total_entries_at_u32_max() {
-        use exarch_core::formats::detect::ArchiveType;
+    fn test_saturating_u32_clamps_at_u32_max() {
+        assert_eq!(saturating_u32(7), 7);
+        assert_eq!(saturating_u32((u32::MAX as usize) + 1000), u32::MAX);
+    }
 
-        let mut core_manifest = exarch_core::inspection::ArchiveManifest::new(ArchiveType::TarGz);
-        core_manifest.total_entries = (u32::MAX as usize) + 1000;
-
-        let manifest = ArchiveManifest::from(core_manifest);
-
-        assert_eq!(
-            manifest.total_entries,
-            u32::MAX,
-            "total_entries should saturate to u32::MAX"
-        );
+    #[test]
+    fn test_saturating_i64_clamps_at_i64_max() {
+        assert_eq!(saturating_i64(7), 7);
+        assert_eq!(saturating_i64(u64::MAX), i64::MAX);
     }
 
     #[test]
@@ -606,7 +627,9 @@ mod tests {
         use exarch_core::formats::detect::ArchiveType;
 
         let mut core_manifest = exarch_core::inspection::ArchiveManifest::new(ArchiveType::TarGz);
-        core_manifest.total_size = u64::MAX;
+        core_manifest
+            .add_entry(sized_entry("big", u64::MAX))
+            .unwrap();
 
         let manifest = ArchiveManifest::from(core_manifest);
 
@@ -619,18 +642,7 @@ mod tests {
 
     #[test]
     fn test_archive_entry_saturates_size_at_i64_max() {
-        use std::path::PathBuf;
-
-        let core_entry = exarch_core::inspection::ArchiveEntry {
-            path: PathBuf::from("test.txt"),
-            entry_type: exarch_core::inspection::ManifestEntryType::File,
-            size: u64::MAX,
-            compressed_size: None,
-            mode: None,
-            modified: None,
-            symlink_target: None,
-            hardlink_target: None,
-        };
+        let core_entry = sized_entry("test.txt", u64::MAX);
 
         let entry = ArchiveEntry::from(core_entry);
 
@@ -639,18 +651,8 @@ mod tests {
 
     #[test]
     fn test_archive_entry_saturates_compressed_size_at_i64_max() {
-        use std::path::PathBuf;
-
-        let core_entry = exarch_core::inspection::ArchiveEntry {
-            path: PathBuf::from("test.txt"),
-            entry_type: exarch_core::inspection::ManifestEntryType::File,
-            size: 1024,
-            compressed_size: Some(u64::MAX),
-            mode: None,
-            modified: None,
-            symlink_target: None,
-            hardlink_target: None,
-        };
+        let mut core_entry = sized_entry("test.txt", 1024);
+        core_entry.compressed_size = Some(u64::MAX);
 
         let entry = ArchiveEntry::from(core_entry);
 
@@ -658,58 +660,6 @@ mod tests {
             entry.compressed_size,
             Some(i64::MAX),
             "compressed_size should saturate to i64::MAX"
-        );
-    }
-
-    #[test]
-    fn test_verification_report_saturates_total_entries_at_u32_max() {
-        use exarch_core::formats::detect::ArchiveType;
-        use exarch_core::inspection::CheckStatus;
-        use exarch_core::inspection::VerificationStatus;
-
-        let core_report = exarch_core::inspection::VerificationReport {
-            status: VerificationStatus::Pass,
-            integrity_status: CheckStatus::Pass,
-            security_status: CheckStatus::Pass,
-            issues: vec![],
-            total_entries: (u32::MAX as usize) + 1000,
-            suspicious_entries: 0,
-            total_size: 5000,
-            format: ArchiveType::TarGz,
-        };
-
-        let report = VerificationReport::from(core_report);
-
-        assert_eq!(
-            report.total_entries,
-            u32::MAX,
-            "total_entries should saturate to u32::MAX"
-        );
-    }
-
-    #[test]
-    fn test_verification_report_saturates_suspicious_entries_at_u32_max() {
-        use exarch_core::formats::detect::ArchiveType;
-        use exarch_core::inspection::CheckStatus;
-        use exarch_core::inspection::VerificationStatus;
-
-        let core_report = exarch_core::inspection::VerificationReport {
-            status: VerificationStatus::Fail,
-            integrity_status: CheckStatus::Pass,
-            security_status: CheckStatus::Fail,
-            issues: vec![],
-            total_entries: 100,
-            suspicious_entries: (u32::MAX as usize) + 1000,
-            total_size: 5000,
-            format: ArchiveType::TarGz,
-        };
-
-        let report = VerificationReport::from(core_report);
-
-        assert_eq!(
-            report.suspicious_entries,
-            u32::MAX,
-            "suspicious_entries should saturate to u32::MAX"
         );
     }
 }

@@ -15,7 +15,7 @@
 //!
 //! // List archive contents
 //! let manifest = list_archive("archive.tar.gz", &config)?;
-//! println!("Archive contains {} files", manifest.total_entries);
+//! println!("Archive contains {} files", manifest.total_entries());
 //!
 //! // Verify archive security
 //! let report = verify_archive("archive.tar.gz", &config)?;

@@ -22,7 +22,7 @@ pub fn execute(args: &VerifyArgs, formatter: &mut dyn OutputFormatter) -> Result
 
     formatter.format_verification_report(&report)?;
 
-    match report.status {
+    match report.status() {
         VerificationStatus::Pass => Ok(()),
         VerificationStatus::Warning => {
             if args.strict {

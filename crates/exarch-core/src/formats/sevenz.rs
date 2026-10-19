@@ -2057,7 +2057,7 @@ mod tests {
         let manifest = archive.list(&config).unwrap();
 
         assert!(
-            manifest.total_entries > 0,
+            manifest.total_entries() > 0,
             "simple.7z must have at least one entry"
         );
     }

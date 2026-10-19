@@ -118,7 +118,7 @@ fn list_works_for_every_fixture() {
         let manifest = list_archive(fixture(name), &config)
             .unwrap_or_else(|e| panic!("listing {name}: {e:?}"));
         assert!(
-            !manifest.entries.is_empty(),
+            !manifest.entries().is_empty(),
             "{name} should have entries in its manifest",
         );
     }

@@ -563,7 +563,7 @@ class VerificationReport:
         ...
 
     def is_safe(self) -> bool:
-        """Returns true if the archive is safe (no critical or high severity issues)."""
+        """Returns true if the archive is safe (no Medium-or-higher severity issues)."""
         ...
 
     def has_critical_issues(self) -> bool:

@@ -275,7 +275,7 @@ impl<O: Write, E: Write> OutputFormatter for HumanFormatter<O, E> {
             return Ok(());
         }
 
-        for entry in &manifest.entries {
+        for entry in manifest.entries() {
             emit_line(&mut self.out, format_args!("{}", entry.path.display()));
         }
 
@@ -291,7 +291,7 @@ impl<O: Write, E: Write> OutputFormatter for HumanFormatter<O, E> {
             return Ok(());
         }
 
-        for entry in &manifest.entries {
+        for entry in manifest.entries() {
             let size_str = if human_readable {
                 humanize_bytes(entry.size)
             } else {
@@ -345,8 +345,8 @@ impl<O: Write, E: Write> OutputFormatter for HumanFormatter<O, E> {
             &mut self.out,
             format_args!(
                 "Total: {} files, {}",
-                Self::format_number(manifest.total_entries),
-                humanize_bytes(manifest.total_size)
+                Self::format_number(manifest.total_entries()),
+                humanize_bytes(manifest.total_size())
             ),
         );
 
@@ -360,7 +360,7 @@ impl<O: Write, E: Write> OutputFormatter for HumanFormatter<O, E> {
 
         // Header
         if self.use_colors {
-            let status_str = match report.status {
+            let status_str = match report.status() {
                 exarch_core::VerificationStatus::Pass => style("PASSED").green().bold(),
                 exarch_core::VerificationStatus::Warning => style("WARNING").yellow().bold(),
                 exarch_core::VerificationStatus::Fail => style("FAILED").red().bold(),
@@ -372,40 +372,40 @@ impl<O: Write, E: Write> OutputFormatter for HumanFormatter<O, E> {
         } else {
             emit_line(
                 &mut self.out,
-                format_args!("Archive verification: {}", report.status),
+                format_args!("Archive verification: {}", report.status()),
             );
         }
 
         // Summary
         emit_line(
             &mut self.out,
-            format_args!("  Integrity: {}", report.integrity_status),
+            format_args!("  Integrity: {}", report.integrity_status()),
         );
         emit_line(
             &mut self.out,
-            format_args!("  Security: {}", report.security_status),
+            format_args!("  Security: {}", report.security_status()),
         );
         emit_line(
             &mut self.out,
             format_args!(
                 "  Total entries: {}",
-                Self::format_number(report.total_entries)
+                Self::format_number(report.total_entries())
             ),
         );
 
-        if report.suspicious_entries > 0 {
+        if report.suspicious_entries() > 0 {
             emit_line(
                 &mut self.out,
-                format_args!("  Suspicious entries: {}", report.suspicious_entries),
+                format_args!("  Suspicious entries: {}", report.suspicious_entries()),
             );
         }
 
         // Issues
-        if !report.issues.is_empty() {
+        if !report.issues().is_empty() {
             emit_blank(&mut self.out);
             emit_line(&mut self.out, format_args!("Issues:"));
 
-            for issue in &report.issues {
+            for issue in report.issues() {
                 let severity_str = if self.use_colors {
                     match issue.severity {
                         IssueSeverity::Critical => style("CRITICAL").red().bold().to_string(),
@@ -694,33 +694,24 @@ mod tests {
         use exarch_core::ManifestEntryType;
         use exarch_core::formats::detect::ArchiveType;
 
-        ArchiveManifest {
-            format: ArchiveType::TarGz,
-            total_entries: 2,
-            total_size: 1536,
-            entries: vec![
-                ArchiveEntry {
-                    path: std::path::PathBuf::from("file.txt"),
-                    entry_type: ManifestEntryType::File,
-                    size: 1024,
-                    compressed_size: None,
-                    mode: Some(0o644),
-                    modified: None,
-                    symlink_target: None,
-                    hardlink_target: None,
-                },
-                ArchiveEntry {
-                    path: std::path::PathBuf::from("link.txt"),
-                    entry_type: ManifestEntryType::Symlink,
-                    size: 512,
-                    compressed_size: None,
-                    mode: Some(0o777),
-                    modified: None,
-                    symlink_target: Some(std::path::PathBuf::from("file.txt")),
-                    hardlink_target: None,
-                },
-            ],
-        }
+        let mut file = ArchiveEntry::new(
+            std::path::PathBuf::from("file.txt"),
+            ManifestEntryType::File,
+            1024,
+        );
+        file.mode = Some(0o644);
+        let mut link = ArchiveEntry::new(
+            std::path::PathBuf::from("link.txt"),
+            ManifestEntryType::Symlink,
+            512,
+        );
+        link.mode = Some(0o777);
+        link.symlink_target = Some(std::path::PathBuf::from("file.txt"));
+
+        let mut manifest = ArchiveManifest::new(ArchiveType::TarGz);
+        manifest.add_entry(file).unwrap();
+        manifest.add_entry(link).unwrap();
+        manifest
     }
 
     #[test]
@@ -773,21 +764,15 @@ mod tests {
         use exarch_core::ManifestEntryType;
         use exarch_core::formats::detect::ArchiveType;
 
-        let manifest = ArchiveManifest {
-            format: ArchiveType::TarGz,
-            total_entries: 1,
-            total_size: 256,
-            entries: vec![ArchiveEntry {
-                path: std::path::PathBuf::from("hard.txt"),
-                entry_type: ManifestEntryType::Hardlink,
-                size: 256,
-                compressed_size: None,
-                mode: Some(0o644),
-                modified: None,
-                symlink_target: None,
-                hardlink_target: Some(std::path::PathBuf::from("original.txt")),
-            }],
-        };
+        let mut hard = ArchiveEntry::new(
+            std::path::PathBuf::from("hard.txt"),
+            ManifestEntryType::Hardlink,
+            256,
+        );
+        hard.mode = Some(0o644);
+        hard.hardlink_target = Some(std::path::PathBuf::from("original.txt"));
+        let mut manifest = ArchiveManifest::new(ArchiveType::TarGz);
+        manifest.add_entry(hard).unwrap();
 
         let mut f = formatter(Verbosity::Normal, false);
         f.format_manifest_long(&manifest, true).unwrap();
@@ -802,29 +787,25 @@ mod tests {
         assert!(out_text(&f).is_empty());
     }
 
-    fn sample_verification_report(status: exarch_core::VerificationStatus) -> VerificationReport {
-        use exarch_core::CheckStatus;
+    fn sample_verification_report() -> VerificationReport {
+        use exarch_core::ArchiveEntry;
+        use exarch_core::ManifestEntryType;
         use exarch_core::formats::detect::ArchiveType;
 
-        VerificationReport {
-            status,
-            integrity_status: CheckStatus::Pass,
-            security_status: CheckStatus::Pass,
-            total_entries: 5,
-            suspicious_entries: 0,
-            total_size: 4096,
-            format: ArchiveType::TarGz,
-            issues: vec![],
+        let mut manifest = ArchiveManifest::new(ArchiveType::TarGz);
+        for i in 0..5 {
+            let path = std::path::PathBuf::from(format!("f{i}.txt"));
+            let entry = ArchiveEntry::new(path, ManifestEntryType::File, 0);
+            manifest.add_entry(entry).unwrap();
         }
+        VerificationReport::from_entry_issues(&manifest, |_| Vec::new())
     }
 
     #[test]
     fn format_verification_report_pass_no_colors() {
         let mut f = formatter(Verbosity::Normal, false);
-        f.format_verification_report(&sample_verification_report(
-            exarch_core::VerificationStatus::Pass,
-        ))
-        .unwrap();
+        f.format_verification_report(&sample_verification_report())
+            .unwrap();
         let text = out_text(&f);
         assert!(text.contains("Archive verification: PASS\n"));
         assert!(
@@ -837,10 +818,8 @@ mod tests {
     #[test]
     fn format_verification_report_with_colors() {
         let mut f = formatter(Verbosity::Normal, true);
-        f.format_verification_report(&sample_verification_report(
-            exarch_core::VerificationStatus::Pass,
-        ))
-        .unwrap();
+        f.format_verification_report(&sample_verification_report())
+            .unwrap();
         // See the comment in `format_extraction_result_with_colors`: the
         // leading fg/attr escapes sit directly before "PASSED", so strip
         // ANSI codes before asserting adjacency.
@@ -854,10 +833,8 @@ mod tests {
     #[test]
     fn format_verification_report_quiet_suppresses_output() {
         let mut f = formatter(Verbosity::Quiet, false);
-        f.format_verification_report(&sample_verification_report(
-            exarch_core::VerificationStatus::Pass,
-        ))
-        .unwrap();
+        f.format_verification_report(&sample_verification_report())
+            .unwrap();
         assert!(out_text(&f).is_empty());
     }
 }

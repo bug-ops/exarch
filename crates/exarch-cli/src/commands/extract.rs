@@ -772,7 +772,7 @@ pub fn execute(
 
     if !args.force && !args.atomic {
         let conflicts: Vec<_> = manifest
-            .entries
+            .entries()
             .iter()
             .filter(|e| e.entry_type == ManifestEntryType::File)
             .map(|e| {
@@ -792,10 +792,10 @@ pub fn execute(
     }
 
     let entry_count = if config.allowed_extensions.is_empty() {
-        manifest.entries.len()
+        manifest.entries().len()
     } else {
         manifest
-            .entries
+            .entries()
             .iter()
             .filter(|e| e.entry_type == ManifestEntryType::File)
             .filter(|e| {

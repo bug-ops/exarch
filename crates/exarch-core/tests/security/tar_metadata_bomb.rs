@@ -862,16 +862,16 @@ fn list_and_verify_accept_a_single_legitimate_entry_at_every_size_that_broke_c2(
         let manifest = exarch_core::list_archive(&path, &config).unwrap_or_else(|e| {
             panic!("list_archive rejected a legitimate {size_mib} MiB entry: {e}")
         });
-        assert_eq!(manifest.total_entries, 1);
+        assert_eq!(manifest.total_entries(), 1);
 
         let report = exarch_core::verify_archive(&path, &config).unwrap_or_else(|e| {
             panic!("verify_archive rejected a legitimate {size_mib} MiB entry: {e}")
         });
         assert_eq!(
-            report.status,
+            report.status(),
             exarch_core::VerificationStatus::Pass,
             "verify_archive reported issues for a legitimate {size_mib} MiB entry: {:?}",
-            report.issues
+            report.issues()
         );
 
         let out = temp.path().join("out");
@@ -1062,11 +1062,11 @@ fn list_and_verify_accept_many_sparse_entries_comfortably_under_the_cumulative_c
 
     let manifest = exarch_core::list_archive(&path, &config)
         .expect("an archive comfortably under the cumulative synthetic cap must list cleanly");
-    assert_eq!(manifest.total_entries, ENTRY_COUNT);
+    assert_eq!(manifest.total_entries(), ENTRY_COUNT);
 
     let report = exarch_core::verify_archive(&path, &config)
         .expect("an archive comfortably under the cumulative synthetic cap must verify cleanly");
-    assert_eq!(report.status, exarch_core::VerificationStatus::Pass);
+    assert_eq!(report.status(), exarch_core::VerificationStatus::Pass);
 }
 
 #[test]

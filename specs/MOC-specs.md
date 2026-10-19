@@ -6,7 +6,7 @@ tags:
   - moc
   - sdd
 created: 2026-05-20
-updated: 2026-09-02
+updated: 2026-10-19
 status: moc
 ---
 
@@ -33,6 +33,7 @@ status: moc
 | 014 | [[014-config-typestate-validation/spec\|Config Typestate Validation]] | tasks | current (v0.6.0, unreleased) | [[014-config-typestate-validation/tasks\|none open]] |
 | 015 | [[015-atomic-force-destination-swap-hardening/spec\|Atomic-Force Destination Swap Hardening]] | tasks | current (v0.6.0, unreleased) | [[015-atomic-force-destination-swap-hardening/tasks\|none open]] |
 | 016 | [[016-sanitized-mode-and-non-exhaustive-enums/spec\|SanitizedMode Newtype and Non-Exhaustive Enum Hardening]] | specify | implemented (post-v0.6.0, unreleased, #554) | n/a (specify-only, retrospective) |
+| 017 | [[017-zip-header-consistency/spec\|ZIP Header Consistency Validation]] | specify | draft (enhancement, P2, #637) | n/a (specify-only) |
 
 ## Completed Specs
 

@@ -250,6 +250,8 @@ Every subcommand's `--json` output uses the same envelope:
 archive still yields a `status: "success"` envelope (the verification *ran* successfully — it just
 found the archive unsafe), with the outcome in `data.status` (`"PASS"` / `"WARNING"` / `"FAIL"`).
 For `verify`, branch on `data.status` (or the process exit code), not on top-level `status`.
+An archive whose declared compressed sizes exceed the archive length is not reported as an issue:
+`verify` fails with an `InvalidArchive` error (`status: "error"`, no `data`, exit `1`).
 
 For `extract`, when some files were already written before a mid-archive failure, `error` carries
 a structured `error.partial_report` object (`files_extracted`, `directories_created`,

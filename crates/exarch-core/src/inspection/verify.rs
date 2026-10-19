@@ -62,6 +62,7 @@ pub(crate) fn verify_manifest(
 /// Returns error if:
 /// - Archive file cannot be opened
 /// - Archive is severely corrupted (cannot read structure)
+/// - Declared compressed sizes exceed the archive length
 ///
 /// Security violations are reported in `VerificationReport::issues`, not as
 /// errors.

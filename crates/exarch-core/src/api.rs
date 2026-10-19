@@ -497,6 +497,7 @@ fn creator_for_format(
 /// - Archive file cannot be opened
 /// - Archive format is unsupported or corrupted
 /// - Quota limits exceeded (file count, total size, single file size)
+/// - Declared compressed sizes exceed the archive length
 ///
 /// # Examples
 ///
@@ -541,6 +542,7 @@ pub fn list_archive<P: AsRef<Path>>(
 /// Returns error if:
 /// - Archive file cannot be opened
 /// - Archive is severely corrupted (cannot read structure)
+/// - Declared compressed sizes exceed the archive length
 ///
 /// Security violations are reported in `VerificationReport::issues`,
 /// not as errors.

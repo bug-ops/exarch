@@ -42,13 +42,13 @@ pub fn validate_compression_ratio(
     Ok(())
 }
 
-/// Cumulative bound on the compressed sizes an archive declares in its
-/// metadata.
+/// Bounds the sum of declared compressed sizes by the archive's data region.
 ///
-/// Per-entry ratio checks trust declared compressed sizes; charging every
-/// declared size against the bytes the archive really occupies caps the total
-/// output at `max_compression_ratio` times the real archive size, and rejects
-/// entries that claim overlapping or non-existent data.
+/// Each entry's declared compressed size is charged against the budget, so
+/// the sizes of all entries together never exceed the space the archive can
+/// actually hold. Entries that declare more data than remains are rejected,
+/// which keeps per-entry compression-ratio checks anchored to real archive
+/// bytes.
 #[derive(Debug)]
 pub struct DeclaredCompressedBudget {
     remaining: u64,

@@ -172,10 +172,9 @@ pub async fn extract_archive(
     validate_path(&output_dir)?;
 
     // Get owned config/options - clone only when Some, use default otherwise
-    let config_owned: exarch_core::SecurityConfig =
-        config.map(|c| c.as_core().clone()).unwrap_or_default();
+    let config_owned: exarch_core::SecurityConfig = config.map_or_default(|c| c.as_core().clone());
     let options_owned: exarch_core::ExtractionOptions =
-        options.map(|o| o.as_core().clone()).unwrap_or_default();
+        options.map_or_default(|o| o.as_core().clone());
 
     // Run extraction on tokio thread pool
     //
@@ -315,7 +314,7 @@ pub async fn create_archive(
 
     // Get owned config - clone only when config is Some, use default otherwise
     let config_owned: exarch_core::creation::CreationConfig =
-        config.map(|c| c.as_core().clone()).unwrap_or_default();
+        config.map_or_default(|c| c.as_core().clone());
 
     let report = tokio::task::spawn_blocking(move || {
         catch_panic_as_js_err("archive creation", || {
@@ -582,7 +581,7 @@ pub async fn create_archive_with_progress(
     }
 
     let config_owned: exarch_core::creation::CreationConfig =
-        config.map(|c| c.as_core().clone()).unwrap_or_default();
+        config.map_or_default(|c| c.as_core().clone());
     let progress = progress.map(|ProgressCallback(tsfn)| tsfn);
 
     let report = tokio::task::spawn_blocking(move || {
@@ -788,8 +787,7 @@ pub async fn list_archive(
     validate_path(&archive_path)?;
 
     // Get owned config - clone only when config is Some, use default otherwise
-    let config_owned: exarch_core::SecurityConfig =
-        config.map(|c| c.as_core().clone()).unwrap_or_default();
+    let config_owned: exarch_core::SecurityConfig = config.map_or_default(|c| c.as_core().clone());
 
     let manifest = tokio::task::spawn_blocking(move || {
         catch_panic_as_js_err("archive listing", || {
@@ -885,8 +883,7 @@ pub async fn verify_archive(
     validate_path(&archive_path)?;
 
     // Get owned config - clone only when config is Some, use default otherwise
-    let config_owned: exarch_core::SecurityConfig =
-        config.map(|c| c.as_core().clone()).unwrap_or_default();
+    let config_owned: exarch_core::SecurityConfig = config.map_or_default(|c| c.as_core().clone());
 
     let report = tokio::task::spawn_blocking(move || {
         catch_panic_as_js_err("archive verification", || {
@@ -1056,10 +1053,9 @@ pub async fn extract_archive_with_progress(
     validate_path(&archive_path)?;
     validate_path(&output_dir)?;
 
-    let config_owned: exarch_core::SecurityConfig =
-        config.map(|c| c.as_core().clone()).unwrap_or_default();
+    let config_owned: exarch_core::SecurityConfig = config.map_or_default(|c| c.as_core().clone());
     let options_owned: exarch_core::ExtractionOptions =
-        options.map(|o| o.as_core().clone()).unwrap_or_default();
+        options.map_or_default(|o| o.as_core().clone());
     let progress = progress.map(|ProgressCallback(tsfn)| tsfn);
 
     let report = tokio::task::spawn_blocking(move || {

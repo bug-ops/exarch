@@ -358,7 +358,11 @@ impl<'a> EntryValidator<'a> {
     /// Returns [`ArchiveError::ZipBomb`] if the compression ratio exceeds the
     /// configured limit.
     #[inline]
-    fn check_ratio(&self, compressed_size: Option<u64>, uncompressed_size: u64) -> Result<()> {
+    pub(crate) fn check_ratio(
+        &self,
+        compressed_size: Option<u64>,
+        uncompressed_size: u64,
+    ) -> Result<()> {
         if let Some(compressed) = compressed_size {
             validate_compression_ratio(compressed, uncompressed_size, self.config)?;
         }

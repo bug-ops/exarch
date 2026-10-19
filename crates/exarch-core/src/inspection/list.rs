@@ -5,6 +5,7 @@ use std::io::BufReader;
 use std::io::ErrorKind;
 use std::io::Read;
 use std::io::Seek;
+use std::io::SeekFrom;
 use std::path::Path;
 use std::path::PathBuf;
 use std::time::SystemTime;
@@ -20,6 +21,7 @@ use crate::error::QuotaResource;
 use crate::formats::common::normalize_entry_name;
 use crate::formats::detect::ArchiveType;
 use crate::formats::detect::detect_format;
+use crate::formats::sevenz::sevenz_compressed_sizes;
 use crate::formats::tar_metadata_limit::TarReadBudget;
 use crate::formats::tar_metadata_limit::budget_violation;
 use crate::formats::tar_metadata_limit::budgeted_reader;
@@ -454,7 +456,8 @@ pub(crate) fn list_sevenz_reader<R: Read + Seek>(
         }
     };
 
-    list_sevenz_archive(&archive, config)
+    let source_len = source.seek(SeekFrom::End(0))?;
+    list_sevenz_archive(&archive, source_len, config)
 }
 
 /// Checks whether a sevenz-rust2 parse failure is due to a valid empty 7z
@@ -496,12 +499,14 @@ fn is_empty_sevenz_archive_reader<R: Read + Seek>(
 /// that truncation behavior.
 fn list_sevenz_archive(
     archive: &sevenz_rust2::Archive,
+    source_len: u64,
     config: &SecurityConfig<Validated>,
 ) -> Result<ArchiveManifest> {
     let mut manifest = ArchiveManifest::new(ArchiveType::SevenZ);
     let mut quota = QuotaTracker::new();
+    let compressed_sizes = sevenz_compressed_sizes(archive, source_len)?;
 
-    for entry in &archive.files {
+    for (entry, compressed_size) in archive.files.iter().zip(compressed_sizes) {
         if entry.is_anti_item {
             continue;
         }
@@ -522,14 +527,6 @@ fn list_sevenz_archive(
 
         let entry_type = sevenz_manifest_entry_type(entry);
         let size = entry.size;
-        let compressed_size = if archive.is_solid {
-            entry
-                .has_stream
-                .then_some(entry.compressed_size)
-                .filter(|&cs| cs > 0)
-        } else {
-            entry.has_stream.then_some(entry.compressed_size)
-        };
         let modified = entry
             .has_last_modified_date
             .then(|| SystemTime::from(entry.last_modified_date));

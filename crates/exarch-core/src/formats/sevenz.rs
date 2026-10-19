@@ -93,6 +93,7 @@
 use std::io::ErrorKind;
 use std::io::Read;
 use std::io::Seek;
+use std::io::SeekFrom;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
@@ -130,6 +131,7 @@ use crate::copy::copy_with_buffer;
 use crate::error::QuotaResource;
 use crate::security::EntryValidator;
 use crate::security::quota::QuotaPermit;
+use crate::security::zipbomb::DeclaredCompressedBudget;
 use crate::types::DestDir;
 use crate::types::EntryType;
 
@@ -143,6 +145,71 @@ struct CachedEntry {
     name: String,
     size: u64,
     is_directory: bool,
+    /// Validated compressed size; see [`sevenz_compressed_sizes`].
+    compressed_size: Option<u64>,
+}
+
+/// Size of the fixed 7z signature header that precedes the packed streams.
+const SIGNATURE_HEADER_SIZE: u64 = 32;
+
+/// Derives a per-file compressed size for ratio checks, after validating the
+/// declared pack stream sizes against the archive length.
+///
+/// The returned vector is 1:1 with `archive.files`. A file that starts a
+/// block gets the checked sum of that block's pack streams; other files of a
+/// solid block, and files without data, get `None`, so for solid archives the
+/// ratio is at most the true ratio of the block. `source_len` must be the
+/// length of the same source the archive is decoded from.
+///
+/// # Errors
+///
+/// Returns [`ArchiveError::InvalidArchive`] when the declared pack sizes
+/// exceed the space the archive can hold, or any size sum overflows.
+pub(crate) fn sevenz_compressed_sizes(
+    archive: &Archive,
+    source_len: u64,
+) -> Result<Vec<Option<u64>>> {
+    let data_region = source_len
+        .checked_sub(SIGNATURE_HEADER_SIZE)
+        .and_then(|len| len.checked_sub(archive.pack_pos()))
+        .ok_or_else(|| {
+            ArchiveError::InvalidArchive("declared compressed size exceeds archive length".into())
+        })?;
+    let mut budget = DeclaredCompressedBudget::new(data_region);
+    for &pack_size in archive.pack_sizes() {
+        budget.charge(pack_size)?;
+    }
+
+    let pack_sizes = archive.pack_sizes();
+    let first_pack = archive.stream_map.block_first_pack_stream_index();
+    let block_compressed = |block: usize| -> Result<u64> {
+        let start = first_pack[block];
+        let end = first_pack
+            .get(block + 1)
+            .copied()
+            .unwrap_or(pack_sizes.len());
+        pack_sizes[start..end]
+            .iter()
+            .try_fold(0u64, |acc, &size| acc.checked_add(size))
+            .ok_or_else(|| ArchiveError::InvalidArchive("7z pack sizes overflow".into()))
+    };
+
+    archive
+        .files
+        .iter()
+        .enumerate()
+        .map(|(index, file)| {
+            let Some(block) = archive.stream_map.file_block_index[index] else {
+                return Ok(None);
+            };
+            let starts_block = archive.stream_map.block_first_file_index[block] == index;
+            if file.has_stream && starts_block {
+                block_compressed(block).map(Some)
+            } else {
+                Ok(None)
+            }
+        })
+        .collect()
 }
 
 /// 7z archive handler with security validation.
@@ -263,13 +330,17 @@ impl<R: Read + Seek> SevenZArchive<R> {
         let is_solid = archive.is_solid;
 
         // Step 3: Cache entry metadata to avoid re-parsing during extraction
+        let source_len = source.seek(SeekFrom::End(0)).map_err(ArchiveError::Io)?;
+        let compressed_sizes = sevenz_compressed_sizes(&archive, source_len)?;
         let entries: Vec<CachedEntry> = archive
             .files
             .iter()
-            .map(|e| CachedEntry {
+            .zip(compressed_sizes)
+            .map(|(e, compressed_size)| CachedEntry {
                 name: e.name.clone(),
                 size: e.size,
                 is_directory: e.is_directory(),
+                compressed_size,
             })
             .collect();
 
@@ -959,8 +1030,6 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
         // archive
         //
         // API LIMITATIONS (sevenz-rust2 0.20):
-        // - compressed_size: Not exposed per-entry, so zip bomb detection
-        //   relies on quotas only
         // - symlink detection: Not exposed, non-directory entries treated as
         //   files
         let mut prevalidator = EntryValidator::new(config, &dest);
@@ -976,6 +1045,11 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
             if entry.is_directory {
                 continue;
             }
+
+            // The ratio is a property of the archive, not of the destination,
+            // so it is checked before the duplicate-skip below, matching what
+            // `verify` reports.
+            prevalidator.check_ratio(entry.compressed_size, entry.size)?;
 
             let dest_path = dest.join_path(safe_path.as_path());
             // lstat so a pre-existing symlink at dest_path — including a
@@ -1001,10 +1075,6 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
                 return Err(symlink_at_dest_error().into());
             }
 
-            // KNOWN LIMITATION: compressed_size is None, so compression ratio
-            // check is skipped. Defense relies on max_total_size
-            // and max_file_size quotas.
-            //
             // The permit itself is discarded: this loop only needs
             // `reserve_file`'s Err on a would-be quota violation, since
             // `prevalidator` is thrown away once Step 1 finishes (Step 3
@@ -1640,6 +1710,7 @@ mod tests {
         // 1 KB limit, fixture has 50 KB file
         let config = SecurityConfig::default()
             .with_max_file_size(1024)
+            .with_max_compression_ratio(10_000.0)
             .validate()
             .unwrap();
 
@@ -1651,6 +1722,42 @@ mod tests {
         );
         assert!(result.is_err());
         assert_matches!(result.unwrap_err(), ArchiveError::QuotaExceeded { .. });
+    }
+
+    fn parse_fixture(name: &str) -> (Archive, u64) {
+        let data = load_fixture(name);
+        let len = data.len() as u64;
+        let archive = Archive::read(&mut Cursor::new(data), &Password::empty()).unwrap();
+        (archive, len)
+    }
+
+    #[test]
+    fn test_compressed_sizes_non_solid_covers_every_stream_file() {
+        let (archive, len) = parse_fixture("simple.7z");
+        let sizes = sevenz_compressed_sizes(&archive, len).unwrap();
+        assert_eq!(sizes.len(), archive.files.len());
+        for (file, size) in archive.files.iter().zip(&sizes) {
+            assert_eq!(file.has_stream, size.is_some(), "{}", file.name);
+        }
+    }
+
+    #[test]
+    fn test_compressed_sizes_solid_block_is_attributed_to_first_file_only() {
+        let (archive, len) = parse_fixture("solid.7z");
+        let sizes = sevenz_compressed_sizes(&archive, len).unwrap();
+        assert_eq!(sizes.iter().flatten().count(), archive.blocks.len());
+    }
+
+    #[test]
+    fn test_compressed_sizes_reject_source_shorter_than_declared_streams() {
+        let (archive, len) = parse_fixture("simple.7z");
+        let declared: u64 = archive.pack_sizes().iter().sum();
+        let too_short = SIGNATURE_HEADER_SIZE + archive.pack_pos() + declared - 1;
+        assert!(too_short < len);
+        assert_matches!(
+            sevenz_compressed_sizes(&archive, too_short),
+            Err(ArchiveError::InvalidArchive(_))
+        );
     }
 
     /// Test B-002: Verify quota is not double-counted

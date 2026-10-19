@@ -62,6 +62,7 @@ fn test_7z_security_config_integration() {
     let temp = TempDir::new().unwrap();
     let config = SecurityConfig::default()
         .with_max_file_size(1024)
+        .with_max_compression_ratio(10_000.0)
         .validate()
         .unwrap();
 
@@ -618,4 +619,125 @@ fn test_7z_no_partial_extraction_when_zero_items() {
         !matches!(result, Err(ArchiveError::PartialExtraction { .. })),
         "must NOT be PartialExtraction when zero items were written; got: {result:?}"
     );
+}
+
+fn crc32(data: &[u8]) -> u32 {
+    let mut crc = u32::MAX;
+    for &byte in data {
+        crc ^= u32::from(byte);
+        for _ in 0..8 {
+            crc = if crc & 1 == 1 {
+                (crc >> 1) ^ 0xEDB8_8320
+            } else {
+                crc >> 1
+            };
+        }
+    }
+    !crc
+}
+
+fn push_number(out: &mut Vec<u8>, value: u64) {
+    out.push(0xFF);
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+/// Builds a minimal one-file 7z with an unencoded header and a Copy coder.
+/// `content` is stored as the packed stream; `unpack_size` and
+/// `declared_pack_size` are written to the header as given.
+fn build_plain_sevenz(
+    name: &str,
+    content: &[u8],
+    unpack_size: u64,
+    declared_pack_size: u64,
+) -> Vec<u8> {
+    let mut header = vec![0x01, 0x04];
+    header.extend_from_slice(&[0x06, 0x00, 0x01, 0x09]);
+    push_number(&mut header, declared_pack_size);
+    header.push(0x00);
+    header.extend_from_slice(&[0x07, 0x0B, 0x01, 0x00, 0x01, 0x01, 0x00, 0x0C]);
+    push_number(&mut header, unpack_size);
+    header.extend_from_slice(&[0x00, 0x08, 0x00, 0x00]);
+
+    let mut names: Vec<u8> = vec![0x00];
+    for unit in name.encode_utf16().chain(std::iter::once(0)) {
+        names.extend_from_slice(&unit.to_le_bytes());
+    }
+    header.extend_from_slice(&[0x05, 0x01, 0x11]);
+    push_number(&mut header, names.len() as u64);
+    header.extend_from_slice(&names);
+    header.extend_from_slice(&[0x00, 0x00]);
+
+    let mut start = Vec::new();
+    start.extend_from_slice(&(content.len() as u64).to_le_bytes());
+    start.extend_from_slice(&(header.len() as u64).to_le_bytes());
+    start.extend_from_slice(&crc32(&header).to_le_bytes());
+
+    let mut out = vec![b'7', b'z', 0xBC, 0xAF, 0x27, 0x1C, 0x00, 0x04];
+    out.extend_from_slice(&crc32(&start).to_le_bytes());
+    out.extend_from_slice(&start);
+    out.extend_from_slice(content);
+    out.extend_from_slice(&header);
+    out
+}
+
+#[test]
+fn sevenz_plain_builder_round_trips_well_formed_archive() {
+    let data = build_plain_sevenz("a.txt", b"hello", 5, 5);
+    let mut archive = SevenZArchive::new(Cursor::new(data)).unwrap();
+    let out = TempDir::new().unwrap();
+    archive
+        .extract(
+            out.path(),
+            &SecurityConfig::default().validate().unwrap(),
+            &ExtractionOptions::default(),
+            &mut exarch_core::NoopProgress,
+        )
+        .unwrap();
+    assert_eq!(std::fs::read(out.path().join("a.txt")).unwrap(), b"hello");
+}
+
+#[test]
+fn sevenz_rejects_pack_sizes_beyond_archive_length() {
+    let data = build_plain_sevenz("a.txt", b"hello", 5, 1_000_000);
+
+    assert_matches!(
+        SevenZArchive::new(Cursor::new(data.clone())),
+        Err(ArchiveError::InvalidArchive(_))
+    );
+
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("a.7z");
+    std::fs::write(&path, &data).unwrap();
+    let config = SecurityConfig::default();
+    assert_matches!(
+        exarch_core::list_archive(&path, &config),
+        Err(ArchiveError::InvalidArchive(_))
+    );
+    assert_matches!(
+        exarch_core::verify_archive(&path, &config),
+        Err(ArchiveError::InvalidArchive(_))
+    );
+}
+
+#[test]
+fn sevenz_extract_enforces_compression_ratio() {
+    let data = build_plain_sevenz("a.txt", &[0u8; 100], 1_000_000, 100);
+    let mut archive = SevenZArchive::new(Cursor::new(data.clone())).unwrap();
+    let out = TempDir::new().unwrap();
+
+    let result = archive.extract(
+        out.path(),
+        &SecurityConfig::default().validate().unwrap(),
+        &ExtractionOptions::default(),
+        &mut exarch_core::NoopProgress,
+    );
+
+    assert_matches!(result, Err(ArchiveError::ZipBomb { .. }));
+    assert_eq!(std::fs::read_dir(out.path()).unwrap().count(), 0);
+
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("a.7z");
+    std::fs::write(&path, &data).unwrap();
+    let report = exarch_core::verify_archive(&path, &SecurityConfig::default()).unwrap();
+    assert_eq!(report.status(), exarch_core::VerificationStatus::Fail);
 }

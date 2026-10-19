@@ -13,6 +13,7 @@ use exarch_core::SecurityConfig;
 use exarch_core::security::EntryValidator;
 use exarch_core::types::DestDir;
 use exarch_core::types::EntryType;
+use std::assert_matches;
 use std::path::Path;
 use tempfile::TempDir;
 
@@ -40,12 +41,12 @@ fn test_42_zip_bomb_rejected_by_default_file_size_quota() {
         None,
     );
 
-    assert!(matches!(
+    assert_matches!(
         result,
         Err(ArchiveError::QuotaExceeded {
             resource: QuotaResource::FileSize { .. }
         })
-    ));
+    );
 }
 
 #[test]
@@ -73,7 +74,7 @@ fn test_42_zip_bomb_simulation() {
         None,
     );
 
-    assert!(matches!(result, Err(ArchiveError::ZipBomb { .. })));
+    assert_matches!(result, Err(ArchiveError::ZipBomb { .. }));
 }
 
 #[test]
@@ -94,7 +95,7 @@ fn test_high_compression_ratio_individual() {
         None,
     );
 
-    assert!(matches!(result, Err(ArchiveError::ZipBomb { .. })));
+    assert_matches!(result, Err(ArchiveError::ZipBomb { .. }));
 }
 
 #[test]
@@ -160,7 +161,7 @@ fn test_just_over_compression_ratio() {
         None,
     );
 
-    assert!(matches!(result, Err(ArchiveError::ZipBomb { .. })));
+    assert_matches!(result, Err(ArchiveError::ZipBomb { .. }));
 }
 
 #[test]
@@ -184,7 +185,7 @@ fn test_zero_compressed_nonzero_uncompressed_rejected() {
         None,
     );
 
-    assert!(matches!(result, Err(ArchiveError::InvalidArchive(_))));
+    assert_matches!(result, Err(ArchiveError::InvalidArchive(_)));
 }
 
 #[test]

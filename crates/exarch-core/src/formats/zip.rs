@@ -1846,8 +1846,9 @@ mod tests {
         let zip_data = create_large_archive_with_encrypted_entry(0);
         let cursor = Cursor::new(zip_data);
         let result = ZipArchive::new(cursor);
-        assert!(
-            matches!(result, Err(ArchiveError::SecurityViolation { .. })),
+        assert_matches!(
+            result.err(),
+            Some(ArchiveError::SecurityViolation { .. }),
             "expected SecurityViolation for encrypted entry in first batch"
         );
     }
@@ -1858,8 +1859,9 @@ mod tests {
         let zip_data = create_large_archive_with_encrypted_entry(200);
         let cursor = Cursor::new(zip_data);
         let result = ZipArchive::new(cursor);
-        assert!(
-            matches!(result, Err(ArchiveError::SecurityViolation { .. })),
+        assert_matches!(
+            result.err(),
+            Some(ArchiveError::SecurityViolation { .. }),
             "expected SecurityViolation for encrypted entry in middle batch"
         );
     }
@@ -1870,8 +1872,9 @@ mod tests {
         let zip_data = create_large_archive_with_encrypted_entry(399);
         let cursor = Cursor::new(zip_data);
         let result = ZipArchive::new(cursor);
-        assert!(
-            matches!(result, Err(ArchiveError::SecurityViolation { .. })),
+        assert_matches!(
+            result.err(),
+            Some(ArchiveError::SecurityViolation { .. }),
             "expected SecurityViolation for encrypted entry in last batch"
         );
     }
@@ -1903,8 +1906,9 @@ mod tests {
         let zip_data = create_large_archive_with_encrypted_entry(125);
         let cursor = Cursor::new(zip_data);
         let result = ZipArchive::new(cursor);
-        assert!(
-            matches!(result, Err(ArchiveError::SecurityViolation { .. })),
+        assert_matches!(
+            result.err(),
+            Some(ArchiveError::SecurityViolation { .. }),
             "full scan must detect encrypted entry at index 125"
         );
     }

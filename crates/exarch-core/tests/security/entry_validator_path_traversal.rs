@@ -12,6 +12,7 @@ use exarch_core::SecurityConfig;
 use exarch_core::security::EntryValidator;
 use exarch_core::types::DestDir;
 use exarch_core::types::EntryType;
+use std::assert_matches;
 use std::path::Path;
 use tempfile::TempDir;
 
@@ -40,8 +41,9 @@ fn test_cve_2025_4517_python_tarfile_traversal() {
             None,
         );
 
-        assert!(
-            matches!(result, Err(ArchiveError::PathTraversal { .. })),
+        assert_matches!(
+            result,
+            Err(ArchiveError::PathTraversal { .. }),
             "Path should be rejected: {path}"
         );
     }
@@ -95,10 +97,7 @@ fn test_null_byte_injection() {
 
     let result = validator.validate_entry(&path, &EntryType::File, 1024, None, Some(0o644), None);
 
-    assert!(matches!(
-        result,
-        Err(ArchiveError::SecurityViolation { .. })
-    ));
+    assert_matches!(result, Err(ArchiveError::SecurityViolation { .. }));
 }
 
 #[test]

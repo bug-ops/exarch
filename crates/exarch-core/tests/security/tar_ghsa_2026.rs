@@ -21,6 +21,7 @@ use exarch_core::NoopProgress;
 use exarch_core::SecurityConfig;
 use exarch_core::formats::ArchiveFormat;
 use exarch_core::formats::TarArchive;
+use std::assert_matches;
 use std::io::Cursor;
 use tempfile::TempDir;
 
@@ -195,8 +196,9 @@ fn ghsa_vmf3_gnu_longname_traversal_pax_path_benign_rejected() {
     eof(&mut t);
 
     let (result, _temp) = extract(&t);
-    assert!(
-        matches!(result, Err(ArchiveError::PathTraversal { .. })),
+    assert_matches!(
+        result,
+        Err(ArchiveError::PathTraversal { .. }),
         "GNU longname traversal must be rejected, got: {result:?}"
     );
 }
@@ -213,8 +215,9 @@ fn ghsa_vmf3_pax_path_traversal_alone_rejected() {
     eof(&mut t);
 
     let (result, _temp) = extract(&t);
-    assert!(
-        matches!(result, Err(ArchiveError::PathTraversal { .. })),
+    assert_matches!(
+        result,
+        Err(ArchiveError::PathTraversal { .. }),
         "PAX-only path traversal must be rejected, got: {result:?}"
     );
 }
@@ -293,8 +296,9 @@ fn ghsa_gvwx_nul_byte_in_pax_path_rejected_without_panic() {
 
     let result = std::panic::catch_unwind(|| extract(&t).0);
     let result = result.expect("must not panic on NUL byte in PAX path");
-    assert!(
-        matches!(result, Err(ArchiveError::SecurityViolation { .. })),
+    assert_matches!(
+        result,
+        Err(ArchiveError::SecurityViolation { .. }),
         "NUL byte in PAX path must be a SecurityViolation, got: {result:?}"
     );
     if let Err(ArchiveError::SecurityViolation { reason }) = result {
@@ -315,8 +319,9 @@ fn ghsa_gvwx_nul_byte_in_gnu_longname_rejected_without_panic() {
 
     let result = std::panic::catch_unwind(|| extract(&t).0);
     let result = result.expect("must not panic on NUL byte in GNU longname");
-    assert!(
-        matches!(result, Err(ArchiveError::SecurityViolation { .. })),
+    assert_matches!(
+        result,
+        Err(ArchiveError::SecurityViolation { .. }),
         "NUL byte in GNU longname must be a SecurityViolation, got: {result:?}"
     );
     if let Err(ArchiveError::SecurityViolation { reason }) = result {

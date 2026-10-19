@@ -188,6 +188,7 @@ pub fn copy_with_buffer<R: Read + ?Sized, W: Write + ?Sized>(
 mod tests {
     use super::*;
     use proptest::prelude::*;
+    use std::assert_matches;
     use std::io::Cursor;
 
     #[test]
@@ -460,10 +461,7 @@ mod tests {
             result.is_err(),
             "actual size short of declared size must be rejected, got: {result:?}"
         );
-        assert!(matches!(
-            result,
-            Err(ArchiveError::SecurityViolation { .. })
-        ));
+        assert_matches!(result, Err(ArchiveError::SecurityViolation { .. }));
     }
 
     /// A stream matching its declared size exactly must succeed, exercising

@@ -18,7 +18,7 @@ _ManifestEntryType = Literal["File", "Directory", "Symlink", "Hardlink"]
 _VerificationStatus = Literal["PASS", "FAIL", "WARNING"]
 _CheckStatus = Literal["OK", "FAILED", "WARNING", "SKIPPED"]
 _IssueSeverity = Literal["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
-_IssueCategory = Literal["Path Traversal", "Symlink Escape", "Hardlink Escape", "Zip Bomb", "Invalid Permissions", "Quota Exceeded", "Invalid Archive", "Suspicious Path", "Executable File"]
+_IssueCategory = Literal["Path Traversal", "Symlink Escape", "Hardlink Escape", "Zip Bomb", "Invalid Permissions", "Quota Exceeded", "Invalid Archive", "Suspicious Path", "Executable File"]  # noqa: E501  # fmt: skip
 
 class SecurityConfig:
     """

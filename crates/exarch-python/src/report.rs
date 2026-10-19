@@ -910,7 +910,8 @@ mod tests {
         ];
         for line in expected {
             assert!(
-                pyi.lines().any(|l| l == line),
+                pyi.lines()
+                    .any(|l| l.split("  # ").next() == Some(line.as_str())),
                 "exarch.pyi is out of sync with exarch-core, expected line:\n{line}"
             );
         }

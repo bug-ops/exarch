@@ -22,7 +22,7 @@
 //!
 //! # Symlink and Hardlink Limitations
 //!
-//! Due to sevenz-rust2 0.20 API limitations, symlink and hardlink detection
+//! Due to sevenz-rust2 0.24 API limitations, symlink and hardlink detection
 //! is incomplete:
 //!
 //! - **Windows symlinks**: Detected via `FILE_ATTRIBUTE_REPARSE_POINT` and
@@ -997,8 +997,7 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
 
             // SECURITY: Heuristic pre-check validates total uncompressed size
             // Uses checked_add to detect overflow (defense in depth)
-            // Reason: sevenz-rust2 0.20 doesn't expose solid block boundaries
-            // This is conservative: assumes worst case of single solid block
+            // Conservative: sums all entries as if they formed one solid block
             let total_uncompressed: u64 = self
                 .entries
                 .iter()
@@ -1141,7 +1140,7 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
 
 /// Adapter to convert sevenz-rust2 entry types to our `EntryType` enum.
 ///
-/// # Known Limitations (sevenz-rust2 0.20)
+/// # Known Limitations (sevenz-rust2 0.24)
 ///
 /// - **Symlinks (Unix)**: Not reliably detectable. The 7z format supports Unix
 ///   symlinks, but sevenz-rust2 does not expose entry type information.

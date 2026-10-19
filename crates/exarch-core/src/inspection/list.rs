@@ -32,6 +32,7 @@ use crate::inspection::manifest::ArchiveEntry;
 use crate::inspection::manifest::ArchiveManifest;
 use crate::inspection::manifest::ManifestEntryType;
 use crate::security::quota::QuotaTracker;
+use crate::security::zipbomb::DeclaredCompressedBudget;
 use crate::types::safe_path::has_null_bytes;
 
 /// Lists archive contents without extracting.
@@ -315,6 +316,7 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
 ) -> Result<ArchiveManifest> {
     let mut manifest = ArchiveManifest::new(ArchiveType::Zip);
     let mut quota = QuotaTracker::new();
+    let mut compressed_budget = DeclaredCompressedBudget::new(archive.central_directory_start());
 
     for i in 0..archive.len() {
         let entry = archive.by_index(i).map_err(|e| {
@@ -331,6 +333,8 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
                 reason: "archive is password-protected".into(),
             });
         }
+
+        compressed_budget.charge(entry.compressed_size())?;
 
         // Route through the same QuotaTracker used by extraction: per-file
         // size, file count, and total size (with checked arithmetic) are all
@@ -2552,7 +2556,7 @@ mod tests {
             central.extend_from_slice(&1u16.to_le_bytes()); // ZIP64 extra field id
             central.extend_from_slice(&16u16.to_le_bytes()); // ZIP64 extra field data size
             central.extend_from_slice(&declared_size.to_le_bytes()); // uncompressed size
-            central.extend_from_slice(&declared_size.to_le_bytes()); // compressed size
+            central.extend_from_slice(&0u64.to_le_bytes()); // compressed size
 
             central_entries.push(central);
         }

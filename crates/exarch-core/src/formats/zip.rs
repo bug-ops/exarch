@@ -138,6 +138,7 @@ use crate::security::EntryValidator;
 use crate::security::permissions::SanitizedMode;
 use crate::security::quota::QuotaPermit;
 use crate::security::validator::ValidatedEntryType;
+use crate::security::zipbomb::DeclaredCompressedBudget;
 use crate::types::DestDir;
 use crate::types::EntryType;
 use crate::types::SafePath;
@@ -161,6 +162,7 @@ struct ZipExtractionContext<'a> {
     report: &'a mut ExtractionReport,
     copy_buffer: &'a mut CopyBuffer,
     dir_cache: &'a mut common::DirCache,
+    compressed_budget: &'a mut DeclaredCompressedBudget,
     skip_duplicates: bool,
     /// Count of file/symlink entries skipped as pre-existing duplicates,
     /// threaded through `common::extract_file_with_permit` and
@@ -368,6 +370,7 @@ impl<R: Read + Seek> ZipArchive<R> {
         let path = Self::resolve_entry_path(&zip_file, index, ctx.config.allowed.absolute_paths)?;
 
         let (uncompressed_size, compressed_size) = ZipEntryAdapter::get_sizes(&zip_file);
+        ctx.compressed_budget.charge(compressed_size)?;
         let mode = zip_file.unix_mode();
 
         let compression = ZipEntryAdapter::get_compression_method(&zip_file);
@@ -527,6 +530,9 @@ impl<R: Read + Seek> ArchiveFormat for ZipArchive<R> {
 
         let mut dir_cache = common::DirCache::new();
 
+        let mut compressed_budget =
+            DeclaredCompressedBudget::new(self.inner.central_directory_start());
+
         // Aggregated into a single warning after extraction instead of one
         // per skipped entry, mirroring 7z's `duplicate_skips` accumulator
         // (issue #490).
@@ -579,6 +585,7 @@ impl<R: Read + Seek> ArchiveFormat for ZipArchive<R> {
                 report: &mut report,
                 copy_buffer: &mut copy_buffer,
                 dir_cache: &mut dir_cache,
+                compressed_budget: &mut compressed_budget,
                 skip_duplicates,
                 duplicate_skips: &mut duplicate_skips,
                 disallowed_extension_skips: &mut disallowed_extension_skips,

@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **BREAKING:** `ArchiveManifest` and `VerificationReport` expose accessors instead of public fields, `ArchiveManifest::add_entry` returns `Result`, and `ArchiveEntry`/`VerificationIssue` are `#[non_exhaustive]` with `new()`; report status is derived from the issue list (#PR).
 - **BREAKING:** `exarch verify` no longer accepts `--check-integrity`/`--check-security`, and `integrity_status` is `SKIPPED` instead of `OK` in the CLI, Python and Node reports until a real check lands (#PR).
 - **BREAKING:** `open_tar_gz`/`open_tar_bz2`/`open_tar_xz`/`open_tar_zst` return `TarArchive<Box<dyn Read + Send>>`; extract, list and open share one TAR decoder constructor (#PR).
-- **BREAKING:** Node report fields (format, entry type, status, integrity/security status, severity, category) are string-union types in `index.d.ts`, and the Node build passes `--no-const-enum`; Python getters are annotated with `Literal` in `exarch.pyi` (#PR).
+- **BREAKING:** Node report enum fields are typed string unions in `index.d.ts` (build uses `--no-const-enum`), and Python report getters are annotated with `Literal` (#PR).
 - `ArchiveType` implements `Display`, and report enums share one table for `ALL` and `as_str` instead of `Debug` formatting in the CLI, Node and Python (#PR).
 - `verify` and `list` return an `InvalidArchive` error for ZIP and 7z archives whose declared compressed sizes exceed the archive length (#PR).
 - Removed the stale `zstd`, `zstd-safe` and `syn` multiple-versions exceptions from `deny.toml`; the remaining `syn` 2 copy comes only from the `criterion` dev-dependency chain (#PR).

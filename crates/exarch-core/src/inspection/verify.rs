@@ -43,12 +43,14 @@ pub(crate) fn verify_manifest(
     }))
 }
 
-/// Verifies archive integrity and security without extracting.
+/// Verifies archive security without extracting.
 ///
-/// Performs comprehensive validation:
-/// - Integrity checks (structure, checksums)
+/// Performs metadata-only validation:
 /// - Security checks (path traversal, zip bombs, CVEs)
 /// - Policy checks (file types, permissions)
+///
+/// Payload integrity (checksums, decode-to-end) is not verified: the report's
+/// `integrity_status` is [`CheckStatus::Skipped`](crate::CheckStatus::Skipped).
 ///
 /// # Arguments
 ///

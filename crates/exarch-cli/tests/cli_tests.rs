@@ -1108,7 +1108,6 @@ fn test_verify_oversized_entry_produces_fail_report_not_error() {
     let output = exarch_cmd()
         .arg("verify")
         .arg("--json")
-        .arg("--check-security")
         .arg("--max-file-size")
         .arg("500")
         .arg(&archive_path)
@@ -1264,8 +1263,31 @@ fn test_verify_archive_json_output() {
     assert!(json["data"]["status"].is_string());
     assert!(json["data"]["total_entries"].is_number());
     assert!(json["data"]["issues"].is_array());
-    assert!(json["data"]["integrity_status"].is_string());
+    assert_eq!(json["data"]["integrity_status"], "SKIPPED");
     assert!(json["data"]["security_status"].is_string());
+}
+
+#[test]
+fn test_verify_reports_integrity_skipped_in_text_mode() {
+    exarch_cmd()
+        .arg("verify")
+        .arg(fixture_path("sample.tar.gz"))
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Integrity: SKIPPED"));
+}
+
+#[test]
+fn test_verify_rejects_removed_check_flags() {
+    for flag in ["--check-integrity", "--check-security"] {
+        exarch_cmd()
+            .arg("verify")
+            .arg(flag)
+            .arg(fixture_path("sample.tar.gz"))
+            .assert()
+            .code(2)
+            .stderr(predicates::str::contains("unexpected argument"));
+    }
 }
 
 /// Builds a tar.gz archive at `path` containing one symlink entry pointing

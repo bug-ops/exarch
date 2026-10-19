@@ -171,15 +171,15 @@ once `--max-file-size 100M` is passed.
 ### `verify <ARCHIVE>`
 
 ```bash
-exarch verify archive.tar.gz --check-integrity --check-security --json
+exarch verify archive.tar.gz --json
 ```
 
 | Flag | Default | Purpose |
 |---|---|---|
-| `--check-integrity` | off | Validate checksums/structure. |
-| `--check-security` | off | Run the security validation pipeline (path traversal, symlink/hardlink, permissions) without extracting. |
 | `--strict` | off | Treat any warning-level finding as an error and exit with status `2` instead of `0`. |
 | `--max-files` / `--max-total-size` / `--max-file-size` / `--allow-solid-archives` | same as `list` (10000 / 500 MB / 50 MB / off) | Same hard-limit semantics as `list` for file count and total size — verification fails with `QuotaExceeded` past those two caps, it does not skip entries. |
+
+`verify` always runs the full security validation pipeline (path traversal, symlink/hardlink, permissions) without extracting; there are no flags to enable it. It does not validate payload checksums: `integrity_status` is always `SKIPPED` (`Integrity: SKIPPED` in text mode), so a passing `verify` says nothing about data corruption.
 
 Run `verify` before `extract` on any archive from an untrusted source to inspect issues without
 writing anything to disk. Archives over 500 MB need `--max-total-size` raised explicitly or
@@ -217,7 +217,7 @@ extraction fails with `SymlinkEscape`, `HardlinkEscape`, `PathTraversal`, `ZipBo
 `InvalidPermissions`, or `SecurityViolation`, that is the validator correctly rejecting
 something dangerous — **do not add the matching `--allow-*` flag just to make the command
 succeed.** Only add it when the archive's origin and contents are already known to be trusted,
-and prefer re-running just `verify --check-security` first to see the full list of findings
+and prefer re-running just `verify` first to see the full list of findings
 before deciding. `--force` (extract/create) and `--atomic` (extract) are safe to use more
 liberally since they affect overwrite behavior, not path/link/permission validation.
 

@@ -154,7 +154,7 @@ let report = ArchiveCreator::new()
 | [`extract_archive`](https://docs.rs/exarch-core/latest/exarch_core/fn.extract_archive.html) | High-level extraction function |
 | [`create_archive`](https://docs.rs/exarch-core/latest/exarch_core/fn.create_archive.html) | High-level archive creation function |
 | [`list_archive`](https://docs.rs/exarch-core/latest/exarch_core/fn.list_archive.html) | List archive contents |
-| [`verify_archive`](https://docs.rs/exarch-core/latest/exarch_core/fn.verify_archive.html) | Verify archive integrity and security |
+| [`verify_archive`](https://docs.rs/exarch-core/latest/exarch_core/fn.verify_archive.html) | Verify archive security without extracting |
 | [`Archive`](https://docs.rs/exarch-core/latest/exarch_core/struct.Archive.html) | Archive handle for extraction |
 | [`ArchiveBuilder`](https://docs.rs/exarch-core/latest/exarch_core/struct.ArchiveBuilder.html) | Builder for configuring extraction |
 | [`ArchiveCreator`](https://docs.rs/exarch-core/latest/exarch_core/struct.ArchiveCreator.html) | Builder for configuring archive creation |

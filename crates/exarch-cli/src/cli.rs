@@ -34,7 +34,7 @@ pub enum Commands {
     Create(CreateArgs),
     /// List archive contents without extraction
     List(ListArgs),
-    /// Verify archive integrity
+    /// Verify archive security without extracting
     Verify(VerifyArgs),
     /// Generate shell completions
     Completion(CompletionArgs),
@@ -218,14 +218,6 @@ pub struct VerifyArgs {
     /// Path to the archive file
     #[arg(value_name = "ARCHIVE")]
     pub archive: PathBuf,
-
-    /// Check archive integrity (checksums, structure)
-    #[arg(long)]
-    pub check_integrity: bool,
-
-    /// Run security validation
-    #[arg(long)]
-    pub check_security: bool,
 
     /// Maximum number of entries to verify
     #[arg(long, default_value = "10000")]

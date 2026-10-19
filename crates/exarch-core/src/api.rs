@@ -550,12 +550,14 @@ pub fn list_archive<P: AsRef<Path>>(
     crate::inspection::list_archive(archive_path, config)
 }
 
-/// Verifies archive integrity and security without extracting.
+/// Verifies archive security without extracting.
 ///
-/// Performs comprehensive validation:
-/// - Integrity checks (structure, checksums)
+/// Performs metadata-only validation:
 /// - Security checks (path traversal, zip bombs, CVEs)
 /// - Policy checks (file types, permissions)
+///
+/// Payload integrity (checksums, decode-to-end) is not verified: the report's
+/// `integrity_status` is [`CheckStatus::Skipped`](crate::CheckStatus::Skipped).
 ///
 /// # Arguments
 ///

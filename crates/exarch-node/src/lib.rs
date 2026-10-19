@@ -848,7 +848,7 @@ pub fn list_archive_sync(
     Ok(ArchiveManifest::from(manifest))
 }
 
-/// Verify archive integrity and security (async).
+/// Verify archive security (async).
 ///
 /// # Arguments
 ///
@@ -900,7 +900,7 @@ pub async fn verify_archive(
     Ok(VerificationReport::from(report))
 }
 
-/// Verify archive integrity and security (sync).
+/// Verify archive security (sync).
 ///
 /// Synchronous version of `verifyArchive`. Blocks the event loop until
 /// verification completes. Prefer the async version for most use cases.

@@ -487,7 +487,7 @@ mod tests {
         let report = VerificationReport::from(core_report);
 
         assert_eq!(report.status, "PASS");
-        assert_eq!(report.integrity_status, "OK");
+        assert_eq!(report.integrity_status, "SKIPPED");
         assert_eq!(report.security_status, "OK");
         assert_eq!(report.total_entries, 10);
         assert_eq!(report.suspicious_entries, 0);

@@ -319,7 +319,7 @@ fn list_archive(
     Ok(PyArchiveManifest::from(manifest))
 }
 
-/// Verify archive integrity and security.
+/// Verify archive security.
 ///
 /// # Arguments
 ///

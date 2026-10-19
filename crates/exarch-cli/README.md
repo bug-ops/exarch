@@ -88,7 +88,7 @@ exarch [OPTIONS] <COMMAND>
 | `extract` | Extract archive contents |
 | `create` | Create a new archive |
 | `list` | List archive contents |
-| `verify` | Verify archive integrity |
+| `verify` | Verify archive security without extracting |
 | `completion` | Generate shell completion script (bash, zsh, fish, powershell, elvish) |
 
 ### Global Options
@@ -212,7 +212,7 @@ exarch create -f backup.tar.gz ./src
 
 ## Verify Command
 
-Check archive integrity and security before extraction:
+Check archive security before extraction (payload checksums are not verified; `Integrity` is reported as `SKIPPED`):
 
 ```bash
 exarch verify [OPTIONS] <ARCHIVE>
@@ -221,7 +221,7 @@ exarch verify [OPTIONS] <ARCHIVE>
 ### Examples
 
 ```bash
-# Verify integrity and report any security warnings
+# Report any security warnings
 exarch verify archive.tar.gz
 
 # Treat warnings as errors (exit 2 on warnings, exit 1 on failure)

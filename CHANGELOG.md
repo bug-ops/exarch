@@ -9,13 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Minor cleanups: `map_or_default` and `bool::ok_or_else` sites, dead `_format` parameters, a duplicated declared-size message, and unconditional clippy `#[allow]` converted to `#[expect]` (#641).
-- **BREAKING:** `ArchiveEntry` holds one `kind: ManifestEntryKind` instead of `entry_type`, `symlink_target` and `hardlink_target`, and `verify` reports a link entry without a target as a security-policy issue (#636).
-- **BREAKING:** `ArchiveEntry.compressed_size` is replaced by `compression: EntryCompression` with a `compressed_size()` method, and `compression_ratio()` is `None` for 7z solid-block entries (#626).
-- **BREAKING:** `open_tar_xz` takes a `SecurityConfig`; tar.xz decoder memory is bounded by the new `max_decoder_memory` (default 256 MiB) and reported as `QuotaResource::DecoderMemory` (#629).
-- **BREAKING:** TAR creation uses one `create_tar_with_progress(output, codec, ...)`; the per-codec `create_tar_*_with_progress` functions and the unused `creation::CompressionLevel` are removed (#635).
-- CI fails when the generated Node.js `index.d.ts` is out of date, and `@napi-rs/cli` is pinned (#638).
-- Raised the `zip` dependency floor to 9.0.5 to exclude versions with unpatched read-path vulnerabilities (#640).
+- Minor cleanups: `map_or_default` and `bool::ok_or_else` sites, dead `_format` parameters, a duplicated declared-size message, and unconditional clippy `#[allow]` converted to `#[expect]` (#652).
+- **BREAKING:** `ArchiveEntry` holds one `kind: ManifestEntryKind` instead of `entry_type`, `symlink_target` and `hardlink_target`, and `verify` reports a link entry without a target as a security-policy issue (#652).
+- **BREAKING:** `ArchiveEntry.compressed_size` is replaced by `compression: EntryCompression` with a `compressed_size()` method, and `compression_ratio()` is `None` for 7z solid-block entries (#652).
+- **BREAKING:** `open_tar_xz` takes a `SecurityConfig`; tar.xz decoder memory is bounded by the new `max_decoder_memory` (default 256 MiB) and reported as `QuotaResource::DecoderMemory` (#652).
+- **BREAKING:** TAR creation uses one `create_tar_with_progress(output, codec, ...)`; the per-codec `create_tar_*_with_progress` functions and the unused `creation::CompressionLevel` are removed (#652).
+- CI fails when the generated Node.js `index.d.ts` is out of date, and `@napi-rs/cli` is pinned (#652).
+- Raised the `zip` dependency floor to 9.0.5 to exclude versions with unpatched read-path vulnerabilities (#652).
 - Bumped `zip` to 9.0.1 and refreshed the lockfile; zip's own declared-size overrun error is now reported as a security violation (#608).
 - Bumped `napi`/`napi-build`/`napi-derive`, `sevenz-rust2`, and `smallvec` to their latest compatible releases; refreshed `deny.toml`'s `zstd-safe`/`syn` duplicate-version exceptions to match the resulting transitive bumps (#584).
 - **BREAKING:** `ArchiveManifest` and `VerificationReport` expose accessors instead of public fields, `ArchiveManifest::add_entry` returns `Result`, and `ArchiveEntry`/`VerificationIssue` are `#[non_exhaustive]` with `new()`; report status is derived from the issue list (#624).
@@ -28,15 +28,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- 7z solid blocks are checked as a whole against the new `max_solid_compression_ratio` (default 1000x, Rust API only) instead of comparing only the first file (#626).
-- ZIP library extraction rejects oversized declared compressed sizes when the archive is opened, before any entry is written (#625).
-- ZIP `extract`, `list` and `verify` reject absolute and `..` entry names by default like TAR, treat NUL bytes as a security violation, and `--allow-absolute-paths` now takes effect for ZIP (#631).
-- ZIP and 7z error classification uses typed upstream variants instead of message substrings, and 7z I/O errors keep their original kind (#634).
-- `exarch create` TAR headers store permission bits only, so `list --long` mode matches ZIP and system tar (#632).
-- `verify` reports security violations under the new `IssueCategory::SecurityPolicy` and fails `security_status` for them; it now also validates hardlinks through `HardlinkTracker`, so `exarch verify` exits 1 on any TAR containing a hardlink under the default policy (#630).
-- Extraction benchmark no longer panics on the 7z large-file fixture, and bz2/xz/zst extraction benchmarks were added (#633, #641).
-- 7z extraction of solid blocks drains a skipped entry's data so it no longer corrupts the next entry (#628).
-- Windows reserved device names and `:` in path components are rejected on Windows, with a Rust-only opt-out `AllowedFeatures::windows_reserved_names` and a new public `is_windows_reserved_component` (#642).
+- 7z solid blocks are checked as a whole against the new `max_solid_compression_ratio` (default 1000x, Rust API only) instead of comparing only the first file (#652).
+- ZIP library extraction rejects oversized declared compressed sizes when the archive is opened, before any entry is written (#652).
+- ZIP `extract`, `list` and `verify` reject absolute and `..` entry names by default like TAR, treat NUL bytes as a security violation, and `--allow-absolute-paths` now takes effect for ZIP (#652).
+- ZIP and 7z error classification uses typed upstream variants instead of message substrings, and 7z I/O errors keep their original kind (#652).
+- `exarch create` TAR headers store permission bits only, so `list --long` mode matches ZIP and system tar (#652).
+- `verify` reports security violations under the new `IssueCategory::SecurityPolicy` and fails `security_status` for them; it now also validates hardlinks through `HardlinkTracker`, so `exarch verify` exits 1 on any TAR containing a hardlink under the default policy (#652).
+- Extraction benchmark no longer panics on the 7z large-file fixture, and bz2/xz/zst extraction benchmarks were added (#652).
+- 7z extraction of solid blocks drains a skipped entry's data so it no longer corrupts the next entry (#652).
+- Windows reserved device names and `:` in path components are rejected on Windows, with a Rust-only opt-out `AllowedFeatures::windows_reserved_names` and a new public `is_windows_reserved_component` (#652).
 - 7z `extract` now enforces `max_compression_ratio` like `verify` and `list` do for non-solid archives (#624).
 - ZIP `extract`, `list` and `verify` validate declared compressed sizes against the archive length (#624).
 - `.TAR.GZ` stems are detected case-insensitively, and `verify`'s suspicious-extension check ignores case (#624).

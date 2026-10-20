@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- 7z extraction of solid blocks drains a skipped entry's data so it no longer corrupts the next entry (#628).
 - Windows reserved device names and `:` in path components are rejected on Windows, with a Rust-only opt-out `AllowedFeatures::windows_reserved_names` (#642).
 - 7z `extract` now enforces `max_compression_ratio` like `verify` and `list` do for non-solid archives (#624).
 - ZIP `extract`, `list` and `verify` validate declared compressed sizes against the archive length (#624).

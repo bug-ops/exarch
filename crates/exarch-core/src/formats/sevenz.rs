@@ -90,6 +90,7 @@
 //! // ... extract with config
 //! ```
 
+use std::io;
 use std::io::ErrorKind;
 use std::io::Read;
 use std::io::Seek;
@@ -897,6 +898,7 @@ impl<R: Read + Seek> SevenZArchive<R> {
         // EntryValidator is the authoritative guard for all path security
         // (traversal, absolute paths, symlinks); the upstream check is
         // redundant and breaks allow_absolute_paths support.
+        let is_solid = archive.is_solid;
         let mut extract_fn = |entry: &sevenz_rust2::ArchiveEntry,
                               reader: &mut dyn Read|
          -> std::result::Result<bool, sevenz_rust2::Error> {
@@ -921,6 +923,17 @@ impl<R: Read + Seek> SevenZArchive<R> {
                 &mut ctx.pending_error,
                 &mut ctx.copy_buffer,
             );
+
+            // Entries of a solid block share one decoder stream: bytes a
+            // skipped entry left unread would be served to the next entry.
+            let result = if is_solid {
+                result.and_then(|written| {
+                    io::copy(&mut (&mut *reader).take(entry.size), &mut io::sink())?;
+                    Ok(written)
+                })
+            } else {
+                result
+            };
 
             // INVARIANT: every branch below must call on_entry_complete exactly
             // once. Fire on_bytes_written before on_entry_complete
@@ -2397,6 +2410,97 @@ mod tests {
                 .unwrap();
         }
         writer.finish().unwrap().into_inner()
+    }
+
+    /// Builds a 7z archive with all `entries` packed into one solid block.
+    fn make_solid_sevenz_archive(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        use sevenz_rust2::ArchiveEntry;
+        use sevenz_rust2::ArchiveWriter;
+        use sevenz_rust2::EncoderConfiguration;
+        use sevenz_rust2::EncoderMethod;
+        use sevenz_rust2::SourceReader;
+
+        let mut writer = ArchiveWriter::new(Cursor::new(Vec::new())).unwrap();
+        writer.set_content_methods(vec![EncoderConfiguration::new(EncoderMethod::COPY)]);
+        let archive_entries = entries
+            .iter()
+            .map(|(name, data)| {
+                let mut entry = ArchiveEntry::new_file(name);
+                entry.has_stream = true;
+                entry.size = data.len() as u64;
+                entry
+            })
+            .collect();
+        let readers = entries
+            .iter()
+            .map(|(_, data)| SourceReader::from(Cursor::new(*data)))
+            .collect();
+        writer
+            .push_archive_entries(archive_entries, readers)
+            .unwrap();
+        writer.finish().unwrap().into_inner()
+    }
+
+    fn solid_config(allowed_extensions: Vec<String>) -> SecurityConfig<Validated> {
+        SecurityConfig::default()
+            .with_allow_solid_archives(true)
+            .with_max_solid_block_memory(100 * 1024 * 1024)
+            .with_allowed_extensions(allowed_extensions)
+            .validate()
+            .unwrap()
+    }
+
+    /// Issue #628: a disallowed entry in a solid block must not leave its
+    /// bytes in the shared stream for the next entry to read.
+    #[test]
+    fn test_solid_block_disallowed_entry_does_not_shift_next_entry() {
+        let skipped = vec![b'A'; 5000];
+        let kept = vec![b'B'; 5000];
+        let data = make_solid_sevenz_archive(&[("a.bin", &skipped), ("b.txt", &kept)]);
+        let dest = TempDir::new().unwrap();
+
+        let report = SevenZArchive::new(Cursor::new(data))
+            .unwrap()
+            .extract(
+                dest.path(),
+                &solid_config(vec!["txt".to_string()]),
+                &ExtractionOptions::default(),
+                &mut crate::NoopProgress,
+            )
+            .unwrap();
+
+        assert_eq!(report.files_extracted, 1);
+        assert_eq!(report.files_skipped, 1);
+        assert!(!dest.path().join("a.bin").exists());
+        assert_eq!(std::fs::read(dest.path().join("b.txt")).unwrap(), kept);
+    }
+
+    /// Issue #628: same as above for the `skip_duplicates` skip path.
+    #[test]
+    fn test_solid_block_duplicate_entry_does_not_shift_next_entry() {
+        let skipped = vec![b'A'; 5000];
+        let kept = vec![b'B'; 5000];
+        let data = make_solid_sevenz_archive(&[("a.txt", &skipped), ("b.txt", &kept)]);
+        let dest = TempDir::new().unwrap();
+        std::fs::write(dest.path().join("a.txt"), b"already here").unwrap();
+
+        let report = SevenZArchive::new(Cursor::new(data))
+            .unwrap()
+            .extract(
+                dest.path(),
+                &solid_config(Vec::new()),
+                &ExtractionOptions::default(),
+                &mut crate::NoopProgress,
+            )
+            .unwrap();
+
+        assert_eq!(report.files_extracted, 1);
+        assert_eq!(report.files_skipped, 1);
+        assert_eq!(
+            std::fs::read(dest.path().join("a.txt")).unwrap(),
+            b"already here"
+        );
+        assert_eq!(std::fs::read(dest.path().join("b.txt")).unwrap(), kept);
     }
 
     /// Test #376: entry names with embedded `\` must be treated as path

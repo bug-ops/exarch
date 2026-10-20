@@ -1921,17 +1921,24 @@ mod tests {
         zip.finish().unwrap().into_inner()
     }
 
+    const LOCAL_HEADER_SIGNATURE: [u8; 4] = *b"PK\x03\x04";
+    const CENTRAL_HEADER_SIGNATURE: [u8; 4] = *b"PK\x01\x02";
+
+    /// Offset of the second header starting with `signature`.
+    fn second_header_offset(data: &[u8], signature: [u8; 4]) -> usize {
+        data.windows(4)
+            .enumerate()
+            .filter(|(_, w)| **w == signature)
+            .nth(1)
+            .map(|(i, _)| i)
+            .expect("second header present")
+    }
+
     /// Sets the declared compressed size of the second local and central
     /// header to `size`.
     fn forge_second_entry_compressed_size(data: &mut [u8], size: u32) {
-        for (signature, offset) in [(b"PK\x03\x04", 18), (b"PK\x01\x02", 20)] {
-            let at = data
-                .windows(4)
-                .enumerate()
-                .filter(|(_, w)| *w == signature)
-                .nth(1)
-                .map(|(i, _)| i)
-                .expect("second header present");
+        for (signature, offset) in [(LOCAL_HEADER_SIGNATURE, 18), (CENTRAL_HEADER_SIGNATURE, 20)] {
+            let at = second_header_offset(data, signature);
             data[at + offset..at + offset + 4].copy_from_slice(&size.to_le_bytes());
         }
     }
@@ -1967,13 +1974,7 @@ mod tests {
     #[test]
     fn test_corrupt_local_header_fails_before_any_write() {
         let mut data = create_test_zip(vec![("a.txt", &[1u8; 64]), ("b.txt", &[2u8; 64])]);
-        let at = data
-            .windows(4)
-            .enumerate()
-            .filter(|(_, w)| *w == b"PK\x03\x04")
-            .nth(1)
-            .map(|(i, _)| i)
-            .expect("second local header present");
+        let at = second_header_offset(&data, LOCAL_HEADER_SIGNATURE);
         data[at..at + 4].fill(0);
 
         let dir = TempDir::new().unwrap();

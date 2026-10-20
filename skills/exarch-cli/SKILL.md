@@ -389,8 +389,12 @@ across versions.
 Default `SecurityConfig` limits: 50 MB per file, 500 MB total extracted size, 100x max
 compression ratio, 10,000 max files, 32 max path depth. All symlinks, hardlinks, absolute
 paths, and world-writable files are rejected unless explicitly allowed. This holds for ZIP too: an
-absolute entry name (leading `/`, `\` or drive letter) or any `..` component in the raw name is
-`PathTraversal` by default, and a NUL byte in an entry name is `SecurityViolation`. On Windows only, entries
+absolute entry name or any `..` component in the raw name is
+`PathTraversal` by default. A name is absolute on every platform when it starts with `/` or `\`
+(UNC included), or with a drive letter followed by a separator or nothing (`C:\x`, `C:/x`, `C:`);
+a drive glued to a name (`C:name`) is absolute only on Windows, and on Unix `a:notes.txt` is kept
+as is. An empty entry name is `InvalidArchive`, and a NUL byte in an entry name is
+`SecurityViolation`. On Windows only, entries
 whose path has a reserved device-name component (`CON`, `NUL`, `COM1`, ... ASCII
 case-insensitive, with or without an extension, e.g. `NUL.tar.gz`) or a component containing
 `:` (NTFS alternate data streams) are rejected with `SecurityViolation`; there is no CLI flag to

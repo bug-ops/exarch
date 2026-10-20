@@ -48,8 +48,9 @@ pub const ZIP_FAMILY_ALIASES: &[&str] = &[
 /// separately when they need to distinguish "bare ZIP" from "ZIP under
 /// another name".
 pub(crate) fn is_zip_family_alias(ext: &str) -> bool {
-    let lower = ext.to_ascii_lowercase();
-    ZIP_FAMILY_ALIASES.contains(&lower.as_str())
+    ZIP_FAMILY_ALIASES
+        .iter()
+        .any(|alias| ext.eq_ignore_ascii_case(alias))
 }
 
 closed_enum! {

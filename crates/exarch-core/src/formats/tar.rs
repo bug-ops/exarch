@@ -553,8 +553,7 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
             let entry_path = guard
                 .path()
                 .ok()
-                .map(std::borrow::Cow::into_owned)
-                .unwrap_or_default();
+                .map_or_default(std::borrow::Cow::into_owned);
             current_entry = current_entry.saturating_add(1);
             ctx.progress.on_entry_start(&entry_path, 0, current_entry);
 

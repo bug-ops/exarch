@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ArchiveError::ZipInconsistency` and five new `IssueCategory` variants for ZIP structure findings and name collisions. (#671)
 - `LinkTarget` for manifest link targets. (#671)
 - `exarch verify --allow-symlinks` and `--allow-hardlinks`, sharing one link-policy argument group with `extract` (#653).
+- `VerificationReport::integrity_gaps()` with typed per-reason counts and unverified entry paths, and `data.integrity_gaps` in CLI JSON, Python and Node (#672).
+- ZIP structure checks scan the prefix before the archive start and report a skipped end-of-central-directory record (`IgnoredEndRecord`); `verify --check-integrity` reports a header hidden in a data-descriptor entry tail (#672).
+- ZIP structure corpus covers Java and Windows producers, generated in CI (#672).
 
 ### Changed
 
@@ -27,6 +30,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **BREAKING:** `verify` folds names and limits symlink hops per host and reports colliding names as `NameCollision`. (#671)
 - `security_status` ignores the harmless merge of two empty directories. (#671)
 - ZIP `list` and `verify` do more work per entry for the structure checks. (#671)
+- **BREAKING:** `LinkTarget::classify` takes a new `LinkKind`, and link target limits follow the host, with symlink targets checked by path length only (#672).
+- **BREAKING:** `HiddenLocalHeader` carries a `region: HiddenRegion`, `Unverified` is renamed `UnverifiedReason`, and `IntegrityOutcome` and `IntegrityScope::Requested` carry `IntegrityGaps` (#672).
+- **BREAKING:** `list` rejects entry paths over the host limits, and `verify` reports each as a High issue (`OversizedEntry`) without retaining the path (#672).
+- **BREAKING:** TAR readers decode every gzip member, bzip2 stream and xz stream, accept only zero padding as a tail, and reject empty input (#672).
+- **BREAKING:** CLI `verify` of a solid 7z archive without `--allow-solid-archives` exits 1, was 0 with INCOMPLETE (#672).
+- 7z `extract` decodes on one thread: peak memory drops 96-98% and time rises 77-120% on multi-threaded LZMA2 archives (#672).
+- ZIP `list` and `verify` are 2-3x faster than at #671 through a windowed header reader (#672).
 - **BREAKING:** ZIP entries with a compression method other than Stored, Deflate, Bzip2 or Zstd are rejected at open by `extract`, `list` and `verify` through one shared admission check (#653).
 - **BREAKING:** 7z directories with the Windows reparse-point attribute are listed as symlinks and fail `verify`, matching `extract` (#653).
 - **BREAKING:** `ArchiveError::ZipBomb` wraps `ZipBombDetails` (sizes, `ZipBombScope::{Entry, SolidBlock}`, derived `CompressionRatio`), so solid-block rejections are no longer reported as per-file ratios (#653).
@@ -53,6 +63,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- 7z `extract` admits each block's decoder memory against `max_decoder_memory`, closing unbounded multi-threaded LZMA2 buffering (#672).
+- 7z `extract` refuses a block with a stream-less entry between its files instead of silently omitting a file (#672).
+- `verify` reports what 7z `extract` refuses: solid policy, decoder memory, unknown coder, encrypted content and interleaved blocks (#672).
+- A ZIP open no longer loses an I/O error raised by the trailing directory probe (#672).
 - `verify` reports a symlink entry placed over an earlier file entry instead of passing archives that `extract` can reject (#656).
 - 7z solid blocks are checked as a whole against the new `max_solid_compression_ratio` (default 1000x, Rust API only) instead of comparing only the first file (#652).
 - ZIP library extraction rejects oversized declared compressed sizes when the archive is opened, before any entry is written (#652).

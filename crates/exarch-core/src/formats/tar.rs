@@ -227,7 +227,7 @@ impl<R: Read> TarArchive<R> {
 
         let entry_type = TarEntryAdapter::to_entry_type(entry)?;
         let size = TarEntryAdapter::get_uncompressed_size(entry);
-        let mode = entry.header().mode().ok();
+        let mode = tar_permission_bits(entry.header());
 
         if matches!(entry_type, EntryType::File)
             && !common::check_extension_allowed(
@@ -787,6 +787,13 @@ impl TarEntryAdapter {
     }
 }
 
+/// Returns the permission bits (`0o7777`) of a TAR header's mode, dropping any
+/// file-type bits older writers stored there, so `list` and `extract` agree
+/// with ZIP and system `tar`.
+pub(crate) fn tar_permission_bits(header: &tar::Header) -> Option<u32> {
+    header.mode().ok().map(|mode| mode & 0o7777)
+}
+
 /// Opens `path` as a TAR byte stream, decoding it with `codec` when one is
 /// given.
 ///
@@ -962,6 +969,15 @@ mod tests {
     #[cfg(unix)]
     use std::path::PathBuf;
     use tempfile::TempDir;
+
+    #[test]
+    fn test_tar_permission_bits_strips_file_type_bits() {
+        let mut header = tar::Header::new_gnu();
+        for (raw, expected) in [(0o100_644, 0o644), (0o040_755, 0o755), (0o104_755, 0o4755)] {
+            header.set_mode(raw);
+            assert_eq!(tar_permission_bits(&header), Some(expected));
+        }
+    }
 
     #[test]
     fn test_tar_archive_new() {

@@ -307,8 +307,7 @@ fn add_symlink_to_tar<W: Write>(
 #[cfg(unix)]
 fn set_permissions(header: &mut Header, metadata: &std::fs::Metadata) {
     use std::os::unix::fs::MetadataExt;
-    let mode = metadata.mode();
-    header.set_mode(mode);
+    header.set_mode(metadata.mode() & 0o7777);
     header.set_uid(u64::from(metadata.uid()));
     header.set_gid(u64::from(metadata.gid()));
     // mtime can be negative for dates before epoch, clamp to 0
@@ -609,6 +608,41 @@ mod tests {
             mode, 0o755,
             "directory entries without preserve_permissions must use a traversable \
              deterministic default, not mode 0"
+        );
+    }
+
+    /// Regression test for #632: headers carry permission bits only, so
+    /// `list` agrees with ZIP and system `tar`.
+    #[test]
+    #[cfg(unix)]
+    fn test_create_tar_header_mode_has_no_file_type_bits() {
+        let temp = TempDir::new().unwrap();
+        let output = temp.path().join("output.tar");
+        let source_dir = TempDir::new().unwrap();
+        fs::write(source_dir.path().join("a.txt"), "hello").unwrap();
+        fs::create_dir(source_dir.path().join("sub")).unwrap();
+
+        let config = CreationConfig::default()
+            .with_exclude_patterns(vec![])
+            .with_preserve_permissions(true)
+            .with_format(Some(ArchiveType::Tar));
+        create_archive(&output, &[source_dir.path()], &config).unwrap();
+
+        let mut archive = tar::Archive::new(fs::File::open(&output).unwrap());
+        let modes: Vec<u32> = archive
+            .entries()
+            .unwrap()
+            .map(|e| e.unwrap().header().mode().unwrap())
+            .collect();
+        assert!(!modes.is_empty());
+        assert!(modes.iter().all(|m| m & !0o7777 == 0), "{modes:?}");
+
+        let manifest = crate::list_archive(&output, &SecurityConfig::default()).unwrap();
+        assert!(
+            manifest
+                .entries()
+                .iter()
+                .all(|e| e.mode.is_none_or(|m| m & !0o7777 == 0))
         );
     }
 

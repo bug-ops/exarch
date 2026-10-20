@@ -157,7 +157,7 @@ fn list_tar_entries<R: std::io::Read>(
         }
 
         let entry_type = convert_tar_entry_type(&entry)?;
-        let mode = entry.header().mode().ok();
+        let mode = crate::formats::tar::tar_permission_bits(entry.header());
         let modified =
             entry.header().mtime().ok().and_then(|t| {
                 SystemTime::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(t))

@@ -781,7 +781,7 @@ mod tests {
         let entry = ArchiveEntry::new(
             PathBuf::from("link"),
             ManifestEntryKind::Symlink {
-                target: Some(PathBuf::from("target/file.txt")),
+                target: exarch_core::LinkTarget::Recorded(PathBuf::from("target/file.txt")),
             },
             0,
         );
@@ -804,7 +804,7 @@ mod tests {
         let entry = ArchiveEntry::new(
             PathBuf::from("hardlink"),
             ManifestEntryKind::Hardlink {
-                target: Some(PathBuf::from("original/file.txt")),
+                target: exarch_core::LinkTarget::Recorded(PathBuf::from("original/file.txt")),
             },
             0,
         );

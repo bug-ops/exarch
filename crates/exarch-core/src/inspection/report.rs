@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use crate::closed_enum::closed_enum;
 use crate::error::ArchiveError;
+use crate::error::ZipInconsistency;
 use crate::formats::detect::ArchiveType;
 use crate::inspection::manifest::ArchiveEntry;
 use crate::inspection::manifest::ArchiveManifest;
@@ -85,27 +86,69 @@ impl VerificationReport {
         F: FnMut(&ArchiveEntry) -> Vec<VerificationIssue>,
     {
         let lists = manifest.entries().iter().map(issues_for).collect();
-        Self::from_entry_issue_lists(manifest, lists, Vec::new(), IntegrityScope::NotRequested)
+        Self::from_entry_issue_lists(
+            manifest,
+            lists,
+            Vec::new(),
+            &ArchiveStructure::of_manifest(manifest),
+            IntegrityScope::NotRequested,
+        )
     }
 
-    /// Builds a report from one precomputed issue list per manifest entry plus
-    /// issues that belong to the archive as a whole.
+    /// Builds a report from one precomputed issue list per manifest entry,
+    /// issues that belong to the archive as a whole, and the structure of the
+    /// archive the manifest came from.
     ///
-    /// Archive-level issues count toward the statuses but not toward
-    /// `suspicious_entries`.
+    /// `lists` holds one list per manifest entry, optionally followed by
+    /// lists of archive-level issues. A structural finding bound to an entry
+    /// joins that entry's list, so an entry with several issues still counts
+    /// once; any other finding is an archive-level list. Only entries count
+    /// as suspicious, so `suspicious_entries()` never exceeds the manifest,
+    /// while archive-level issues still decide `status()`.
     pub(crate) fn from_entry_issue_lists(
         manifest: &ArchiveManifest,
-        lists: Vec<Vec<VerificationIssue>>,
+        mut lists: Vec<Vec<VerificationIssue>>,
         archive_issues: Vec<VerificationIssue>,
+        structure: &ArchiveStructure<'_>,
         integrity: IntegrityScope,
     ) -> Self {
+        for finding in structure.findings {
+            let bound_entry = match finding {
+                ZipInconsistency::HeaderMismatch { entry, .. } => Some(entry.get()),
+                _ => None,
+            };
+            let mut issue = VerificationIssue::from_error(
+                &ArchiveError::ZipInconsistency(finding.clone()),
+                None,
+            );
+            match bound_entry.and_then(|index| manifest.entries().get(index).map(|e| (index, e))) {
+                Some((index, entry)) => {
+                    issue.entry_path = Some(entry.path.clone());
+                    lists[index].push(issue);
+                }
+                None => lists.push(vec![issue]),
+            }
+        }
+
+        if structure.omitted > 0 {
+            lists.push(vec![VerificationIssue::new(
+                IssueSeverity::Info,
+                IssueCategory::InvalidArchive,
+                format!(
+                    "{} further ZIP structure findings are not listed",
+                    structure.omitted
+                ),
+            )]);
+        }
+
         let mut issues = archive_issues;
         let mut suspicious_entries = 0;
 
-        for entry_issues in lists {
-            if entry_issues
-                .iter()
-                .any(|i| i.severity >= IssueSeverity::Medium)
+        for (index, entry_issues) in lists.into_iter().enumerate() {
+            if index < manifest.total_entries()
+                && entry_issues
+                    .iter()
+                    .any(|i| i.severity >= IssueSeverity::Medium)
             {
                 suspicious_entries += 1;
             }
@@ -117,7 +160,7 @@ impl VerificationReport {
         Self {
             issues,
             integrity,
-            total_entries: manifest.total_entries(),
+            total_entries: structure.total_entries,
             suspicious_entries,
             total_size: manifest.total_size(),
             format: manifest.format(),
@@ -131,7 +174,8 @@ impl VerificationReport {
     }
 
     /// Returns the security check result, derived from security-category
-    /// issues.
+    /// issues. A [`IssueCategory::NameCollision`] of Low severity (two
+    /// directories without contents merging) is reported but not counted.
     #[must_use]
     pub fn security_status(&self) -> CheckStatus {
         determine_security_status(&self.issues)
@@ -170,7 +214,10 @@ impl VerificationReport {
         self.total_entries
     }
 
-    /// Returns the number of entries with a Medium-or-higher issue.
+    /// Returns the number of entries with a Medium-or-higher issue. Issues
+    /// that belong to the archive as a whole (a hidden ZIP header, a repeated
+    /// name) are not entries and are not counted here, but they fail
+    /// [`status`](Self::status).
     #[must_use]
     pub const fn suspicious_entries(&self) -> usize {
         self.suspicious_entries
@@ -210,6 +257,35 @@ impl VerificationReport {
             .iter()
             .filter(|i| i.severity == severity)
             .collect()
+    }
+}
+
+/// What an archive's format reports about its own structure, beyond the
+/// manifest of the entries it lists.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ArchiveStructure<'a> {
+    total_entries: usize,
+    findings: &'a [ZipInconsistency],
+    omitted: usize,
+}
+
+impl<'a> ArchiveStructure<'a> {
+    /// A structure with `total_entries` records and the findings to report.
+    pub(crate) const fn new(
+        total_entries: usize,
+        findings: &'a [ZipInconsistency],
+        omitted: usize,
+    ) -> Self {
+        Self {
+            total_entries,
+            findings,
+            omitted,
+        }
+    }
+
+    /// The structure of a format whose manifest is its whole content.
+    pub(crate) fn of_manifest(manifest: &ArchiveManifest) -> Self {
+        Self::new(manifest.total_entries(), &[], 0)
     }
 }
 
@@ -253,7 +329,7 @@ pub(crate) enum IntegrityScope {
 fn determine_security_status(issues: &[VerificationIssue]) -> CheckStatus {
     let mut security_issues = issues
         .iter()
-        .filter(|i| i.category.is_security())
+        .filter(|i| i.category.is_security() && !i.is_harmless_collision())
         .peekable();
 
     if security_issues.peek().is_none() {
@@ -352,6 +428,12 @@ pub struct VerificationIssue {
 }
 
 impl VerificationIssue {
+    /// The one Low-severity security finding: two directories that merge
+    /// without either holding an entry, which changes nothing on disk.
+    fn is_harmless_collision(&self) -> bool {
+        self.category == IssueCategory::NameCollision && self.severity == IssueSeverity::Low
+    }
+
     /// Creates an issue with no entry path or context attached.
     #[must_use]
     pub const fn new(severity: IssueSeverity, category: IssueCategory, message: String) -> Self {
@@ -387,6 +469,11 @@ impl VerificationIssue {
                 IssueSeverity::Critical,
                 IssueCategory::ZipBomb,
                 format!("Potential zip bomb: {details}"),
+            ),
+            ArchiveError::ZipInconsistency(finding) => (
+                IssueSeverity::High,
+                IssueCategory::from_zip_inconsistency(finding),
+                error.to_string(),
             ),
             ArchiveError::QuotaExceeded { resource } => (
                 IssueSeverity::High,
@@ -527,10 +614,36 @@ closed_enum! {
 
         /// Integrity check could not cover part of the payload
         IntegrityIncomplete => "Integrity Incomplete",
+
+        /// ZIP local header disagrees with its central directory record
+        HeaderMismatch => "Header Mismatch",
+
+        /// ZIP central directory repeats an entry name
+        DuplicateEntry => "Duplicate Entry",
+
+        /// ZIP entry data ranges intersect
+        OverlappingEntries => "Overlapping Entries",
+
+        /// ZIP entry that the central directory does not account for
+        HiddenEntry => "Hidden Entry",
+
+        /// Two entry names the host filesystem treats as one
+        NameCollision => "Name Collision",
     }
 }
 
 impl IssueCategory {
+    /// Category under which a ZIP structure finding is reported.
+    pub(crate) const fn from_zip_inconsistency(finding: &ZipInconsistency) -> Self {
+        match finding {
+            ZipInconsistency::HeaderMismatch { .. } => Self::HeaderMismatch,
+            ZipInconsistency::DuplicateName { .. } => Self::DuplicateEntry,
+            ZipInconsistency::OverlappingEntries => Self::OverlappingEntries,
+            ZipInconsistency::HiddenLocalHeader { .. }
+            | ZipInconsistency::UncountedCentralRecords { .. } => Self::HiddenEntry,
+        }
+    }
+
     /// Whether issues of this category come from a security check, and so
     /// count towards [`VerificationReport::security_status`].
     ///
@@ -544,7 +657,12 @@ impl IssueCategory {
             | Self::ZipBomb
             | Self::InvalidPermissions
             | Self::QuotaExceeded
-            | Self::SecurityPolicy => true,
+            | Self::SecurityPolicy
+            | Self::HeaderMismatch
+            | Self::DuplicateEntry
+            | Self::OverlappingEntries
+            | Self::HiddenEntry
+            | Self::NameCollision => true,
             Self::InvalidArchive
             | Self::SuspiciousPath
             | Self::ExecutableFile
@@ -597,6 +715,11 @@ mod tests {
                 "Executable File",
                 "Corrupt Data",
                 "Integrity Incomplete",
+                "Header Mismatch",
+                "Duplicate Entry",
+                "Overlapping Entries",
+                "Hidden Entry",
+                "Name Collision",
             ]
         );
         assert_eq!(
@@ -609,6 +732,85 @@ mod tests {
         for severity in IssueSeverity::ALL {
             assert_eq!(severity.to_string(), severity.as_str());
         }
+    }
+
+    #[test]
+    fn test_zip_inconsistency_maps_to_security_issue_categories() {
+        use crate::CentralRecordOrdinal;
+        use crate::ZipEntryIndex;
+        use crate::ZipHeaderField;
+
+        let cases = [
+            (
+                ZipInconsistency::HeaderMismatch {
+                    entry: ZipEntryIndex::new(0),
+                    field: ZipHeaderField::FileName,
+                    name: "a".to_string(),
+                },
+                IssueCategory::HeaderMismatch,
+            ),
+            (
+                ZipInconsistency::DuplicateName {
+                    record: CentralRecordOrdinal::new(1),
+                    name: "a".to_string(),
+                },
+                IssueCategory::DuplicateEntry,
+            ),
+            (
+                ZipInconsistency::OverlappingEntries,
+                IssueCategory::OverlappingEntries,
+            ),
+            (
+                ZipInconsistency::HiddenLocalHeader { offset: 9 },
+                IssueCategory::HiddenEntry,
+            ),
+            (
+                ZipInconsistency::UncountedCentralRecords {
+                    counted: 1,
+                    found: 2,
+                },
+                IssueCategory::HiddenEntry,
+            ),
+        ];
+        for (finding, category) in cases {
+            let issue =
+                VerificationIssue::from_error(&ArchiveError::ZipInconsistency(finding), None);
+            assert_eq!(issue.category, category);
+            assert_eq!(issue.severity, IssueSeverity::High);
+            assert!(issue.category.is_security());
+        }
+    }
+
+    #[test]
+    fn test_low_severity_issue_of_another_security_category_still_counts() {
+        let low = VerificationIssue::new(
+            IssueSeverity::Low,
+            IssueCategory::SecurityPolicy,
+            "policy".to_string(),
+        );
+        assert_eq!(determine_security_status(&[low]), CheckStatus::Warning);
+    }
+
+    #[test]
+    fn test_low_severity_security_issue_does_not_taint_security_status() {
+        let low = VerificationIssue::new(
+            IssueSeverity::Low,
+            IssueCategory::NameCollision,
+            "directories merge".to_string(),
+        );
+        assert_eq!(
+            determine_security_status(std::slice::from_ref(&low)),
+            CheckStatus::Pass
+        );
+        let medium = VerificationIssue::new(
+            IssueSeverity::Medium,
+            IssueCategory::NameCollision,
+            "files collide".to_string(),
+        );
+        assert_eq!(
+            determine_security_status(&[low, medium]),
+            CheckStatus::Warning
+        );
     }
 
     #[test]
@@ -861,7 +1063,13 @@ mod tests {
         let mut manifest = ArchiveManifest::new(ArchiveType::TarGz);
         let entry = ArchiveEntry::new(PathBuf::from("a"), ManifestEntryKind::File, 1024);
         manifest.add_entry(entry).unwrap();
-        VerificationReport::from_entry_issue_lists(&manifest, vec![Vec::new()], issues, scope)
+        VerificationReport::from_entry_issue_lists(
+            &manifest,
+            vec![Vec::new()],
+            issues,
+            &ArchiveStructure::of_manifest(&manifest),
+            scope,
+        )
     }
 
     #[test]

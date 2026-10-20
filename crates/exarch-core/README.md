@@ -53,7 +53,7 @@ let config = SecurityConfig::default()
     .with_allowed_extensions(vec![".tar".into(), ".gz".into()]); // optional allowlist
 ```
 
-Available builders on `SecurityConfig`: `with_max_file_size`, `with_max_total_size`, `with_max_compression_ratio`, `with_max_file_count`, `with_max_path_depth`, `with_allowed`, `with_allow_symlinks`, `with_allow_hardlinks`, `with_allow_absolute_paths`, `with_allow_world_writable`, `with_preserve_permissions`, `with_allowed_extensions`, `with_banned_path_components`, `with_allow_solid_archives`, `with_max_solid_block_memory`, `with_max_tar_metadata_bytes`, `with_max_decoder_memory`, `with_max_solid_compression_ratio`, `with_allow_windows_reserved_names`. On `ExtractionOptions`: `with_atomic`, `with_skip_duplicates`.
+Available builders on `SecurityConfig`: `with_max_file_size`, `with_max_total_size`, `with_max_compression_ratio`, `with_max_file_count`, `with_max_path_depth`, `with_allowed`, `with_allow_symlinks`, `with_allow_hardlinks`, `with_allow_absolute_paths`, `with_allow_world_writable`, `with_preserve_permissions`, `with_allowed_extensions`, `with_banned_path_components`, `with_allow_solid_archives`, `with_max_solid_block_memory`, `with_max_tar_metadata_bytes`, `with_max_decoder_memory`, `with_max_solid_compression_ratio`, `with_allow_windows_reserved_names`, `with_zip_consistency`. On `ExtractionOptions`: `with_atomic`, `with_skip_duplicates`.
 
 ### Builder Pattern
 

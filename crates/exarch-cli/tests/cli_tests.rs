@@ -3832,3 +3832,142 @@ fn test_verify_check_integrity_json_reports_ok_and_incomplete() {
         assert_eq!(json["data"]["integrity_status"], expected);
     }
 }
+// ============================================================================
+// ZIP structure policy (--zip-consistency)
+// ============================================================================
+
+/// Creates a ZIP whose local header names the entry `tample.txt` while the
+/// central directory names it `sample.txt`.
+fn create_cloaked_zip(dir: &std::path::Path) -> PathBuf {
+    let archive = dir.join("cloaked.zip");
+    exarch_cmd()
+        .arg("create")
+        .arg(&archive)
+        .arg(fixture_path("sample.txt"))
+        .assert()
+        .success();
+
+    let mut bytes = std::fs::read(&archive).expect("read zip");
+    let local_name = bytes
+        .windows(10)
+        .position(|w| w == b"sample.txt")
+        .expect("local header name");
+    bytes[local_name] = b't';
+    std::fs::write(&archive, bytes).expect("write zip");
+    archive
+}
+
+#[test]
+fn test_zip_consistency_flag_is_listed_in_help() {
+    for command in ["extract", "list", "verify"] {
+        exarch_cmd()
+            .arg(command)
+            .arg("--help")
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("--zip-consistency"));
+    }
+}
+
+#[test]
+fn test_zip_consistency_rejects_unknown_value() {
+    exarch_cmd()
+        .args(["list", "--zip-consistency", "off", "x.zip"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("possible values: enforce, ignore"));
+}
+
+#[test]
+fn test_extract_rejects_cloaked_zip_by_default() {
+    let temp = TempDir::new().expect("temp dir");
+    let archive = create_cloaked_zip(temp.path());
+    let out = temp.path().join("out");
+
+    exarch_cmd()
+        .arg("extract")
+        .arg(&archive)
+        .arg(&out)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--zip-consistency ignore"));
+
+    assert!(!out.exists(), "nothing may be written before the rejection");
+}
+
+#[test]
+fn test_extract_json_error_kind_for_cloaked_zip() {
+    let temp = TempDir::new().expect("temp dir");
+    let archive = create_cloaked_zip(temp.path());
+
+    let output = exarch_cmd()
+        .arg("extract")
+        .arg("--json")
+        .arg(&archive)
+        .arg(temp.path().join("out"))
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: serde_json::Value = serde_json::from_slice(&output).expect("invalid JSON output");
+    assert_eq!(json["error"]["kind"], "ZipInconsistency");
+}
+
+#[test]
+fn test_extract_cloaked_zip_with_ignore_policy() {
+    let temp = TempDir::new().expect("temp dir");
+    let archive = create_cloaked_zip(temp.path());
+    let out = temp.path().join("out");
+
+    exarch_cmd()
+        .args(["extract", "--zip-consistency", "ignore"])
+        .arg(&archive)
+        .arg(&out)
+        .assert()
+        .success();
+
+    assert!(out.join("sample.txt").exists());
+}
+
+#[test]
+fn test_list_cloaked_zip_follows_the_policy() {
+    let temp = TempDir::new().expect("temp dir");
+    let archive = create_cloaked_zip(temp.path());
+
+    exarch_cmd().arg("list").arg(&archive).assert().failure();
+    exarch_cmd()
+        .args(["list", "--zip-consistency", "ignore"])
+        .arg(&archive)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("sample.txt"));
+}
+
+#[test]
+fn test_verify_cloaked_zip_reports_a_header_mismatch() {
+    let temp = TempDir::new().expect("temp dir");
+    let archive = create_cloaked_zip(temp.path());
+
+    let output = exarch_cmd()
+        .args(["verify", "--json"])
+        .arg(&archive)
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).expect("invalid JSON output");
+    let issues = json["data"]["issues"].as_array().expect("issues array");
+    assert!(
+        issues.iter().any(|i| i["category"] == "Header Mismatch"),
+        "{issues:?}"
+    );
+
+    exarch_cmd()
+        .args(["verify", "--zip-consistency", "ignore"])
+        .arg(&archive)
+        .assert()
+        .success();
+}

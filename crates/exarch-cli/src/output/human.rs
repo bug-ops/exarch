@@ -696,7 +696,7 @@ mod tests {
         let mut link = ArchiveEntry::new(
             std::path::PathBuf::from("link.txt"),
             ManifestEntryKind::Symlink {
-                target: Some(std::path::PathBuf::from("file.txt")),
+                target: exarch_core::LinkTarget::Recorded(std::path::PathBuf::from("file.txt")),
             },
             512,
         );
@@ -761,7 +761,7 @@ mod tests {
         let mut hard = ArchiveEntry::new(
             std::path::PathBuf::from("hard.txt"),
             ManifestEntryKind::Hardlink {
-                target: Some(std::path::PathBuf::from("original.txt")),
+                target: exarch_core::LinkTarget::Recorded(std::path::PathBuf::from("original.txt")),
             },
             256,
         );

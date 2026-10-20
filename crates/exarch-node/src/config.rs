@@ -2,12 +2,53 @@
 //! `VerificationOptions`.
 
 use exarch_core::SecurityConfig as CoreConfig;
+use exarch_core::ZipConsistencyPolicy as CorePolicy;
 use exarch_core::validate_config_entry;
 use napi::bindgen_prelude::Error;
 use napi::bindgen_prelude::Result;
 use napi_derive::napi;
 
 use crate::error::convert_error;
+use crate::report::unknown_variant;
+
+/// How ZIP archives with ambiguous structure are handled.
+///
+/// `enforce` (the default, also for `SecurityConfig.permissive()`) rejects
+/// archives whose local and central headers disagree, that repeat a name,
+/// overlap entries or hide records. `ignore` keeps the central directory
+/// interpretation without structural findings.
+// Values must equal `exarch_core::ZipConsistencyPolicy::as_str`.
+#[napi(string_enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ZipConsistencyPolicy {
+    /// Reject or report structurally ambiguous ZIP archives.
+    #[napi(value = "enforce")]
+    Enforce,
+    /// Use the central directory interpretation without structural findings.
+    #[napi(value = "ignore")]
+    Ignore,
+}
+
+impl From<ZipConsistencyPolicy> for CorePolicy {
+    fn from(policy: ZipConsistencyPolicy) -> Self {
+        match policy {
+            ZipConsistencyPolicy::Enforce => Self::Enforce,
+            ZipConsistencyPolicy::Ignore => Self::Ignore,
+        }
+    }
+}
+
+impl TryFrom<CorePolicy> for ZipConsistencyPolicy {
+    type Error = Error;
+
+    fn try_from(policy: CorePolicy) -> Result<Self> {
+        match policy {
+            CorePolicy::Enforce => Ok(Self::Enforce),
+            CorePolicy::Ignore => Ok(Self::Ignore),
+            other => Err(unknown_variant("ZIP consistency policy", other.as_str())),
+        }
+    }
+}
 
 /// Security configuration for archive extraction.
 ///
@@ -178,6 +219,13 @@ impl SecurityConfig {
         self
     }
 
+    /// Sets how ZIP archives with ambiguous structure are handled.
+    #[napi(js_name = "setZipConsistency")]
+    pub fn set_zip_consistency(&mut self, policy: ZipConsistencyPolicy) -> &Self {
+        self.inner.zip_consistency = policy.into();
+        self
+    }
+
     /// Sets the maximum memory that may be used to decompress a solid 7z block.
     ///
     /// Solid archives decompress entire blocks into memory before individual
@@ -332,6 +380,17 @@ impl SecurityConfig {
     #[napi(getter)]
     pub fn get_allow_solid_archives(&self) -> bool {
         self.inner.allow_solid_archives
+    }
+
+    /// How ZIP archives with ambiguous structure are handled.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if this binding is older than `exarch-core` and does not
+    /// know the policy.
+    #[napi(getter)]
+    pub fn get_zip_consistency(&self) -> Result<ZipConsistencyPolicy> {
+        self.inner.zip_consistency.try_into()
     }
 
     /// Maximum memory in bytes for decompressing a solid 7z block.
@@ -1472,5 +1531,46 @@ mod tests {
         let config = CreationConfig::new();
         let core = config.as_core();
         assert_eq!(core.compression_level, Some(6));
+    }
+
+    #[test]
+    fn test_zip_consistency_defaults_to_enforce_and_round_trips() {
+        let mut config = SecurityConfig::new();
+        assert_eq!(
+            config.get_zip_consistency().unwrap(),
+            ZipConsistencyPolicy::Enforce
+        );
+        assert_eq!(
+            SecurityConfig::permissive().get_zip_consistency().unwrap(),
+            ZipConsistencyPolicy::Enforce
+        );
+
+        config.set_zip_consistency(ZipConsistencyPolicy::Ignore);
+        assert_eq!(
+            config.get_zip_consistency().unwrap(),
+            ZipConsistencyPolicy::Ignore
+        );
+    }
+
+    #[test]
+    fn test_zip_consistency_policy_covers_every_core_variant() {
+        for core in CorePolicy::ALL {
+            let policy = ZipConsistencyPolicy::try_from(*core).unwrap();
+            assert_eq!(CorePolicy::from(policy), *core);
+        }
+    }
+
+    #[test]
+    fn test_index_d_ts_policy_union_matches_core() {
+        let values: Vec<_> = CorePolicy::ALL
+            .iter()
+            .map(|p| format!("'{}'", p.as_str()))
+            .collect();
+        let expected = format!("export type ZipConsistencyPolicy = {}", values.join(" | "));
+        let dts = include_str!("../index.d.ts");
+        assert!(
+            dts.lines().any(|l| l == expected),
+            "index.d.ts out of sync with exarch-core, expected line:\n{expected}"
+        );
     }
 }

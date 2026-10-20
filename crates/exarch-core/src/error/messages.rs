@@ -80,6 +80,12 @@ impl ArchiveError {
                 )),
             },
 
+            Self::ZipInconsistency(_) => FfiErrorMessage {
+                code: "ZIP_INCONSISTENCY",
+                description: self.to_string(),
+                context: None,
+            },
+
             Self::QuotaExceeded { resource } => FfiErrorMessage {
                 code: "QUOTA_EXCEEDED",
                 description: resource.to_string(),
@@ -160,6 +166,7 @@ impl ArchiveError {
             Self::SymlinkEscape { .. } => "SYMLINK_ESCAPE",
             Self::HardlinkEscape { .. } => "HARDLINK_ESCAPE",
             Self::ZipBomb(_) => "ZIP_BOMB",
+            Self::ZipInconsistency(_) => "ZIP_INCONSISTENCY",
             Self::QuotaExceeded { .. } => "QUOTA_EXCEEDED",
             Self::SecurityViolation { .. } => "SECURITY_VIOLATION",
             Self::InvalidArchive(_) => "INVALID_ARCHIVE",

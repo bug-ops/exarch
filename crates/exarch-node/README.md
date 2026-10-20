@@ -308,10 +308,11 @@ const config = new SecurityConfig()
   .maxCompressionRatio(n)                    // Max compression ratio (zip bomb detection)
   .allowedExtensions([".txt", ".md"])        // Restrict to a set of extensions
   .bannedPathComponents(["__MACOSX"])        // Skip these path components
-  .setAllowSolidArchives(true);              // Allow solid 7z archives (default: false)
+  .setAllowSolidArchives(true)               // Allow solid 7z archives (default: false)
+  .setZipConsistency('ignore');              // ZIP structure policy: 'enforce' (default) or 'ignore'
 ```
 
-**Getters:** `allowSymlinks`, `allowHardlinks`, `allowAbsolutePaths`, `allowWorldWritable`, `allowSolidArchives` — each returns the corresponding boolean policy value.
+**Getters:** `allowSymlinks`, `allowHardlinks`, `allowAbsolutePaths`, `allowWorldWritable`, `allowSolidArchives` — each returns the corresponding boolean policy value. `zipConsistency` returns `'enforce'` or `'ignore'`.
 
 ## Security Features
 

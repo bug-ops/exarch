@@ -22,6 +22,9 @@ create_exception!(exarch, ZipBombError, ArchiveError);
 create_exception!(exarch, InvalidPermissionsError, ArchiveError);
 create_exception!(exarch, QuotaExceededError, ArchiveError);
 create_exception!(exarch, SecurityViolationError, ArchiveError);
+// Subclass of SecurityViolationError: raised when a ZIP archive's structure is
+// read differently by different tools. Callers catching the parent still work.
+create_exception!(exarch, ZipInconsistencyError, SecurityViolationError);
 create_exception!(exarch, UnsupportedFormatError, ArchiveError);
 // Subclass of UnsupportedFormatError: raised when the format cannot be
 // identified at all (as opposed to being known but unsupported). Callers
@@ -55,6 +58,9 @@ pub fn convert_error(err: CoreError) -> PyErr {
             ))
         }
         zip_bomb @ CoreError::ZipBomb(_) => ZipBombError::new_err(zip_bomb.to_string()),
+        finding @ CoreError::ZipInconsistency(_) => {
+            ZipInconsistencyError::new_err(finding.to_string())
+        }
         CoreError::InvalidPermissions { path, mode } => {
             let path_str = format_entry_path_for_error(&path);
             InvalidPermissionsError::new_err(format!(
@@ -172,6 +178,10 @@ pub fn register_exceptions(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.py().get_type::<SecurityViolationError>(),
     )?;
     m.add(
+        "ZipInconsistencyError",
+        m.py().get_type::<ZipInconsistencyError>(),
+    )?;
+    m.add(
         "UnsupportedFormatError",
         m.py().get_type::<UnsupportedFormatError>(),
     )?;
@@ -280,6 +290,16 @@ mod tests {
             err_str.contains("1000"),
             "Expected compression ratio in error message, got: {}",
             err_str
+        );
+    }
+
+    #[test]
+    fn test_zip_inconsistency_conversion() {
+        let err = CoreError::ZipInconsistency(exarch_core::ZipInconsistency::OverlappingEntries);
+        let py_err = convert_error(err);
+        assert!(
+            py_err.to_string().contains("overlap"),
+            "Expected the finding in the error message, got: {py_err}"
         );
     }
 
@@ -625,6 +645,10 @@ mod tests {
             assert!(
                 module.getattr("SecurityViolationError").is_ok(),
                 "SecurityViolationError not registered"
+            );
+            assert!(
+                module.getattr("ZipInconsistencyError").is_ok(),
+                "ZipInconsistencyError not registered"
             );
             assert!(
                 module.getattr("UnsupportedFormatError").is_ok(),

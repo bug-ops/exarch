@@ -5,6 +5,7 @@ use clap::Subcommand;
 use clap_complete::Shell;
 use exarch_core::DecompressionBudget;
 use exarch_core::SecurityConfig;
+use exarch_core::ZipConsistencyPolicy;
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -71,6 +72,43 @@ impl LinkPolicyArgs {
     }
 }
 
+/// How ZIP archives whose structure different readers interpret differently
+/// are handled.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ZipConsistencyArg {
+    /// Reject (extract, list) or report (verify) such archives
+    Enforce,
+    /// Use the central directory interpretation without structural findings
+    Ignore,
+}
+
+impl From<ZipConsistencyArg> for ZipConsistencyPolicy {
+    fn from(arg: ZipConsistencyArg) -> Self {
+        match arg {
+            ZipConsistencyArg::Enforce => Self::Enforce,
+            ZipConsistencyArg::Ignore => Self::Ignore,
+        }
+    }
+}
+
+/// ZIP structure policy flag shared by `extract`, `list` and `verify`, so all
+/// three accept and reject the same archives.
+#[derive(clap::Args, Clone, Copy)]
+pub struct ZipPolicyArgs {
+    /// How to treat ZIP archives whose local and central headers disagree,
+    /// that repeat a name, overlap entries or hide records. Relax only for
+    /// archives from a producer known to write benign differences.
+    #[arg(long, value_enum, default_value_t = ZipConsistencyArg::Enforce)]
+    pub zip_consistency: ZipConsistencyArg,
+}
+
+impl ZipPolicyArgs {
+    /// Applies the ZIP structure policy to `config`.
+    pub fn apply(self, config: SecurityConfig) -> SecurityConfig {
+        config.with_zip_consistency(self.zip_consistency.into())
+    }
+}
+
 #[derive(clap::Args)]
 pub struct ExtractArgs {
     /// Path to the archive file
@@ -99,6 +137,9 @@ pub struct ExtractArgs {
 
     #[command(flatten)]
     pub links: LinkPolicyArgs,
+
+    #[command(flatten)]
+    pub zip: ZipPolicyArgs,
 
     /// Maximum path depth allowed (default: 32, minimum: 1)
     #[arg(long, default_value = "32")]
@@ -230,6 +271,9 @@ pub struct ListArgs {
     /// Allow solid 7z archives (higher memory usage during listing)
     #[arg(long)]
     pub allow_solid_archives: bool,
+
+    #[command(flatten)]
+    pub zip: ZipPolicyArgs,
 }
 
 #[derive(clap::Args)]
@@ -252,6 +296,9 @@ pub struct VerifyArgs {
 
     #[command(flatten)]
     pub links: LinkPolicyArgs,
+
+    #[command(flatten)]
+    pub zip: ZipPolicyArgs,
 
     /// Allow solid 7z archives (higher memory usage during verification)
     #[arg(long)]

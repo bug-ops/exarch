@@ -17,6 +17,7 @@ use napi::bindgen_prelude::*;
 /// - `SYMLINK_ESCAPE`: Symlink points outside extraction directory
 /// - `HARDLINK_ESCAPE`: Hardlink target outside extraction directory
 /// - `ZIP_BOMB`: Potential zip bomb detected
+/// - `ZIP_INCONSISTENCY`: ZIP structure is read differently by different tools
 /// - `INVALID_PERMISSIONS`: File permissions are invalid or unsafe
 /// - `QUOTA_EXCEEDED`: Resource quota exceeded
 /// - `SECURITY_VIOLATION`: Security policy violation
@@ -54,6 +55,10 @@ pub fn convert_error(err: CoreError) -> Error {
         zip_bomb @ CoreError::ZipBomb(_) => {
             Error::new(Status::GenericFailure, format!("ZIP_BOMB: {zip_bomb}"))
         }
+        finding @ CoreError::ZipInconsistency(_) => Error::new(
+            Status::GenericFailure,
+            format!("ZIP_INCONSISTENCY: {finding}"),
+        ),
         CoreError::InvalidPermissions { path, mode } => {
             let path_str = format_entry_path_for_error(&path);
             let mut msg = String::with_capacity(60 + path_str.len());

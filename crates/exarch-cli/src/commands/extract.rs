@@ -6,12 +6,14 @@ use crate::commands::atomic_swap;
 use crate::commands::atomic_swap::DestEntryKind;
 use crate::commands::atomic_swap::PinnedDir;
 use crate::error::add_archive_context;
+use crate::error::convert_extraction_error;
 use crate::output::OutputFormatter;
 use crate::output::Verbosity;
 use crate::progress::CliProgress;
 use crate::progress::VerboseProgress;
 use anyhow::Context;
 use anyhow::Result;
+use exarch_core::ArchiveError;
 use exarch_core::ExtractionOptions;
 use exarch_core::ExtractionReport;
 use exarch_core::ManifestEntryKind;
@@ -717,6 +719,15 @@ fn filter_banned_components(raw: &[String]) -> Vec<String> {
     raw.iter().filter(|c| !c.is_empty()).cloned().collect()
 }
 
+/// Wraps a pre-flight listing failure. A ZIP structure rejection keeps its
+/// own message and hint, since that is the error the user has to act on.
+fn list_error(err: ArchiveError, archive: &Path) -> anyhow::Error {
+    if matches!(err, ArchiveError::ZipInconsistency(_)) {
+        return convert_extraction_error(err, archive, false);
+    }
+    anyhow::Error::from(err).context(format!("failed to list archive: {}", archive.display()))
+}
+
 pub fn execute(
     args: &ExtractArgs,
     formatter: &mut dyn OutputFormatter,
@@ -730,12 +741,12 @@ pub fn execute(
     let allowed_extensions = parse_extensions(&args.allowed_extensions);
 
     let config = args
-        .links
-        .apply(apply_size_limits(
+        .zip
+        .apply(args.links.apply(apply_size_limits(
             SecurityConfig::default().with_max_file_count(args.max_files),
             args.max_total_size,
             args.max_file_size,
-        ))
+        )))
         .with_max_compression_ratio(f64::from(args.max_compression_ratio))
         .with_max_path_depth(args.max_path_depth)
         .with_allow_absolute_paths(args.allow_absolute_paths)
@@ -761,14 +772,15 @@ pub fn execute(
         .with_max_file_size(config.max_file_size)
         .with_max_compression_ratio(config.max_compression_ratio)
         .with_allow_solid_archives(config.allow_solid_archives)
+        .with_zip_consistency(config.zip_consistency)
         .with_allow_absolute_paths(config.allowed.absolute_paths)
         .with_max_path_depth(config.max_path_depth)
         .with_banned_path_components(config.banned_path_components.clone());
 
     // Always list the archive: needed for conflict detection and for obtaining
     // the real entry count that drives the progress bar.
-    let manifest = list_archive(&args.archive, &list_config)
-        .with_context(|| format!("failed to list archive: {}", args.archive.display()))?;
+    let manifest =
+        list_archive(&args.archive, &list_config).map_err(|e| list_error(e, &args.archive))?;
 
     if !args.force && !args.atomic {
         let conflicts: Vec<_> = manifest

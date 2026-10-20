@@ -19,7 +19,8 @@ _VerificationStatus = Literal["PASS", "FAIL", "WARNING"]
 _CheckStatus = Literal["OK", "FAILED", "WARNING", "SKIPPED"]
 _IntegrityStatus = Literal["OK", "FAILED", "INCOMPLETE", "SKIPPED"]
 _IssueSeverity = Literal["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
-_IssueCategory = Literal["Path Traversal", "Symlink Escape", "Hardlink Escape", "Zip Bomb", "Invalid Permissions", "Quota Exceeded", "Security Policy", "Invalid Archive", "Suspicious Path", "Executable File", "Corrupt Data", "Integrity Incomplete"]  # noqa: E501  # fmt: skip
+_IssueCategory = Literal["Path Traversal", "Symlink Escape", "Hardlink Escape", "Zip Bomb", "Invalid Permissions", "Quota Exceeded", "Security Policy", "Invalid Archive", "Suspicious Path", "Executable File", "Corrupt Data", "Integrity Incomplete", "Header Mismatch", "Duplicate Entry", "Overlapping Entries", "Hidden Entry", "Name Collision"]  # noqa: E501  # fmt: skip
+_ZipConsistency = Literal["enforce", "ignore"]
 
 class SecurityConfig:
     """
@@ -89,6 +90,17 @@ class SecurityConfig:
 
     def with_allow_solid_archives(self, allow: bool = True) -> SecurityConfig:
         """Allows or denies solid 7z archives."""
+        ...
+
+    def with_zip_consistency(self, policy: _ZipConsistency) -> SecurityConfig:
+        """
+        Sets how ZIP archives with ambiguous structure are handled.
+
+        ``"enforce"`` (the default, also for ``permissive()``) rejects archives whose
+        local and central headers disagree, that repeat a name, overlap entries or hide
+        records. ``"ignore"`` keeps the central directory interpretation without
+        structural findings. Raises ``ValueError`` for any other string.
+        """
         ...
 
     def with_max_solid_block_memory(self, size: int) -> SecurityConfig:
@@ -195,6 +207,14 @@ class SecurityConfig:
     def allow_world_writable(self) -> bool:
         """Whether world-writable files are allowed (default: False)."""
         ...
+
+    @property
+    def zip_consistency(self) -> _ZipConsistency:
+        """How ZIP archives with ambiguous structure are handled (default: ``"enforce"``)."""
+        ...
+
+    @zip_consistency.setter
+    def zip_consistency(self, value: _ZipConsistency) -> None: ...
 
     @property
     def allow_solid_archives(self) -> bool:
@@ -1008,6 +1028,26 @@ class QuotaExceededError(ArchiveError):
 
     When raised during ``extract_archive``, the following attributes are
     available if some files were already written before the error occurred:
+
+    Attributes:
+        files_extracted: Number of files successfully extracted before the error.
+        bytes_written: Total bytes written to disk before the error.
+        files_skipped: Number of entries skipped due to security checks before the error.
+        warnings: Warning messages generated before the error.
+    """
+
+    files_extracted: int
+    bytes_written: int
+    files_skipped: int
+    warnings: list[str]
+
+class ZipInconsistencyError(SecurityViolationError):
+    """
+    A ZIP archive's structure is read differently by different tools.
+
+    Raised under the ``"enforce"`` ZIP consistency policy when local and central headers
+    disagree, a name repeats, entries overlap, or the central directory or local headers
+    hide records. Catching ``SecurityViolationError`` also catches it.
 
     Attributes:
         files_extracted: Number of files successfully extracted before the error.

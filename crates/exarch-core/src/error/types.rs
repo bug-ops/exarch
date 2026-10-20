@@ -3,6 +3,8 @@
 use std::path::PathBuf;
 use thiserror::Error;
 
+use super::zip_inconsistency::ZipInconsistency;
+
 /// Result type alias using [`ArchiveError`].
 pub type Result<T> = std::result::Result<T, ArchiveError>;
 
@@ -250,6 +252,10 @@ pub enum ArchiveError {
     #[error("potential zip bomb: {0}")]
     ZipBomb(ZipBombDetails),
 
+    /// A ZIP archive is structurally ambiguous between readers.
+    #[error("ZIP structure inconsistency: {0}")]
+    ZipInconsistency(ZipInconsistency),
+
     /// File permissions are invalid or unsafe.
     #[error("invalid permissions for {path}: {mode:#o}")]
     InvalidPermissions {
@@ -340,6 +346,7 @@ impl ArchiveError {
     /// - Symlink escapes
     /// - Hardlink escapes
     /// - Zip bombs
+    /// - ZIP structure inconsistencies
     /// - Invalid permissions
     /// - Quota exceeded
     /// - General security policy violations
@@ -368,6 +375,7 @@ impl ArchiveError {
                     | Self::SymlinkEscape { .. }
                     | Self::HardlinkEscape { .. }
                     | Self::ZipBomb(_)
+                    | Self::ZipInconsistency(_)
                     | Self::InvalidPermissions { .. }
                     | Self::QuotaExceeded { .. }
                     | Self::SecurityViolation { .. }

@@ -15,6 +15,7 @@ use crate::SecurityConfig;
 use crate::config::Validated;
 #[cfg(test)]
 use crate::error::QuotaResource;
+use crate::formats::ZipArchive;
 use crate::formats::common::encrypted_archive_error;
 use crate::formats::common::normalize_entry_name;
 use crate::formats::compression::CompressionCodec;
@@ -31,7 +32,6 @@ use crate::formats::tar_metadata_limit::TarReadBudget;
 use crate::formats::tar_metadata_limit::budget_violation;
 use crate::formats::tar_metadata_limit::budgeted_reader;
 use crate::formats::tar_metadata_limit::budgeted_tar_entries;
-use crate::formats::zip::admit_zip_entry;
 use crate::formats::zip::is_password_required;
 use crate::formats::zip::read_zip_symlink_target;
 use crate::formats::zip::read_zip_symlink_target_checked;
@@ -46,10 +46,11 @@ use crate::inspection::integrity::TarTrailer;
 use crate::inspection::manifest::ArchiveEntry;
 use crate::inspection::manifest::ArchiveManifest;
 use crate::inspection::manifest::EntryCompression;
+use crate::inspection::manifest::LinkTarget;
 use crate::inspection::manifest::ManifestEntryKind;
 use crate::inspection::manifest::ManifestEntryType;
+use crate::security::fs_view::MAX_PATH_BYTES;
 use crate::security::quota::QuotaTracker;
-use crate::security::zipbomb::DeclaredCompressedBudget;
 use crate::types::safe_path::has_null_bytes;
 
 /// Lists archive contents without extracting.
@@ -68,6 +69,9 @@ use crate::types::safe_path::has_null_bytes;
 /// - Archive file cannot be opened
 /// - Archive format is unsupported or corrupted
 /// - Quota limits exceeded (file count, total size, single file size)
+/// - A ZIP archive's structure is read differently by different tools
+///   ([`ArchiveError::ZipInconsistency`], unless `zip_consistency` is `Ignore`)
+/// - A link target exceeds the host's name limits
 ///
 /// # Examples
 ///
@@ -101,8 +105,16 @@ pub(crate) fn list_validated(
     config: &SecurityConfig<Validated>,
     policy: &mut ContentPolicy<'_, '_>,
 ) -> Result<ArchiveManifest> {
-    let format = detect_format(archive_path)?;
+    list_detected(archive_path, detect_format(archive_path)?, config, policy)
+}
 
+/// Lists an archive whose format is already known.
+pub(crate) fn list_detected(
+    archive_path: &Path,
+    format: ArchiveType,
+    config: &SecurityConfig<Validated>,
+    policy: &mut ContentPolicy<'_, '_>,
+) -> Result<ArchiveManifest> {
     match format.family() {
         FormatFamily::Tar(codec) => list_tar(archive_path, codec, format, config, policy),
         FormatFamily::Zip => list_zip(archive_path, config, policy),
@@ -205,8 +217,8 @@ fn list_tar_entries<R: std::io::Read>(
                 let is_symlink = entry.header().entry_type() == tar::EntryType::Symlink;
                 let kind = if is_symlink { "symlink" } else { "hardlink" };
 
-                match &target {
-                    Some(t) => validate_link_target(t, kind, config)?,
+                match target {
+                    Some(t) => classify_link_target(t, kind, config)?,
                     // `link_name()` returns `None` when neither the ustar
                     // linkname field nor a PAX `linkpath` override is
                     // present — a structurally different case from an
@@ -221,12 +233,10 @@ fn list_tar_entries<R: std::io::Read>(
                             "{kind} missing target"
                         )));
                     }
-                    None => {}
+                    None => LinkTarget::Missing,
                 }
-
-                target
             }
-            _ => None,
+            _ => LinkTarget::Missing,
         };
 
         let archive_entry = ArchiveEntry {
@@ -291,9 +301,7 @@ fn list_zip(
     policy: &mut ContentPolicy<'_, '_>,
 ) -> Result<ArchiveManifest> {
     let file = File::open(archive_path)?;
-    let mut archive = zip::ZipArchive::new(file)
-        .map_err(|e| ArchiveError::InvalidArchive(format!("failed to open ZIP archive: {e}")))?;
-    list_zip_reader(&mut archive, config, policy)
+    ZipArchive::new(file)?.list_with(config, policy)
 }
 
 /// Lists entries from an already budget-wrapped TAR reader.
@@ -316,15 +324,18 @@ pub(crate) fn list_tar_reader<R: Read>(
 
 /// Lists entries from an already-opened ZIP archive.
 ///
-/// Used by `ArchiveFormat::list()` to avoid re-opening the archive.
+/// Used by `ArchiveFormat::list()` and `verify()`. Taking the crate's own
+/// handler rather than the raw reader proves that opening already ran the
+/// admission checks (encryption, method, declared sizes) and the structural
+/// census, so listing does not repeat them.
 pub(crate) fn list_zip_reader<R: Read + Seek>(
-    archive: &mut zip::ZipArchive<R>,
+    archive: &mut ZipArchive<R>,
     config: &SecurityConfig<Validated>,
     policy: &mut ContentPolicy<'_, '_>,
 ) -> Result<ArchiveManifest> {
     let mut manifest = ArchiveManifest::new(ArchiveType::Zip);
     let mut quota = QuotaTracker::new();
-    let mut compressed_budget = DeclaredCompressedBudget::new(archive.central_directory_start());
+    let archive = archive.reader_mut();
 
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i).map_err(|e| {
@@ -333,8 +344,6 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
             }
             ArchiveError::InvalidArchive(format!("failed to read ZIP entry: {e}"))
         })?;
-
-        admit_zip_entry(&entry, &mut compressed_budget)?;
 
         // Route through the same QuotaTracker used by extraction: per-file
         // size, file count, and total size (with checked arithmetic) are all
@@ -385,16 +394,22 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
             let mut sym_entry = archive.by_index(i).map_err(|e| {
                 ArchiveError::InvalidArchive(format!("failed to re-read ZIP entry {i}: {e}"))
             })?;
-            let target = match tracked.as_mut() {
-                Some((pass, slot)) => {
-                    read_zip_symlink_target_checked(&mut sym_entry, pass, *slot, &path)?
+            let declared = sym_entry.size();
+            if config.relaxed_for_verify_preflight && declared > MAX_PATH_BYTES as u64 {
+                LinkTarget::Oversized {
+                    bytes: usize::try_from(declared).unwrap_or(usize::MAX),
                 }
-                None => read_zip_symlink_target(&mut sym_entry)?,
-            };
-            validate_link_target(&target, "symlink", config)?;
-            Some(target)
+            } else {
+                let target = match tracked.as_mut() {
+                    Some((pass, slot)) => {
+                        read_zip_symlink_target_checked(&mut sym_entry, pass, *slot, &path)?
+                    }
+                    None => read_zip_symlink_target(&mut sym_entry)?,
+                };
+                classify_link_target(target, "symlink", config)?
+            }
         } else {
-            None
+            LinkTarget::Missing
         };
 
         let archive_entry = ArchiveEntry {
@@ -532,7 +547,7 @@ fn list_sevenz_archive(
 
         let archive_entry = ArchiveEntry {
             path,
-            kind: manifest_entry_kind(entry_type, None),
+            kind: manifest_entry_kind(entry_type, LinkTarget::Missing),
             size,
             compression,
             mode: None,
@@ -554,10 +569,7 @@ fn list_sevenz(
     list_sevenz_reader(&mut file, config, policy)
 }
 
-fn manifest_entry_kind(
-    entry_type: ManifestEntryType,
-    target: Option<PathBuf>,
-) -> ManifestEntryKind {
+fn manifest_entry_kind(entry_type: ManifestEntryType, target: LinkTarget) -> ManifestEntryKind {
     match entry_type {
         ManifestEntryType::File => ManifestEntryKind::File,
         ManifestEntryType::Directory => ManifestEntryKind::Directory,
@@ -612,6 +624,25 @@ fn validate_link_target(
         });
     }
     Ok(())
+}
+
+/// Validates a link target found during listing and classifies it once.
+///
+/// A target beyond the host's name limits is never retained: bare listing
+/// rejects it, and the verify pre-flight keeps only its length so the report
+/// can flag it without the manifest growing with the target.
+fn classify_link_target(
+    target: PathBuf,
+    kind: &str,
+    config: &SecurityConfig<Validated>,
+) -> Result<LinkTarget> {
+    validate_link_target(&target, kind, config)?;
+    match LinkTarget::classify(target) {
+        LinkTarget::Oversized { bytes } if !config.relaxed_for_verify_preflight => Err(
+            ArchiveError::InvalidArchive(format!("{kind} target too long: {bytes} bytes")),
+        ),
+        classified => Ok(classified),
+    }
 }
 
 /// Returns `true` if the path contains traversal attempts.
@@ -947,7 +978,7 @@ mod tests {
         use std::io::Cursor;
 
         let zip_bytes = create_zip_with_symlink("link", "target.txt");
-        let mut archive = zip::ZipArchive::new(Cursor::new(zip_bytes)).unwrap();
+        let mut archive = ZipArchive::new(Cursor::new(zip_bytes)).unwrap();
         let config = SecurityConfig::default().validate().expect("valid config");
         let manifest = list_zip_reader(
             &mut archive,
@@ -2250,7 +2281,7 @@ mod tests {
         use std::io::Cursor;
 
         let zip_bytes = create_zip_with_symlink("link", "foo\0bar");
-        let mut archive = zip::ZipArchive::new(Cursor::new(zip_bytes)).unwrap();
+        let mut archive = ZipArchive::new(Cursor::new(zip_bytes)).unwrap();
         let config = SecurityConfig::default().validate().expect("valid config");
         let result = list_zip_reader(
             &mut archive,
@@ -2274,7 +2305,7 @@ mod tests {
         use std::io::Cursor;
 
         let zip_bytes = create_zip_with_symlink("link", "");
-        let mut archive = zip::ZipArchive::new(Cursor::new(zip_bytes)).unwrap();
+        let mut archive = ZipArchive::new(Cursor::new(zip_bytes)).unwrap();
         let config = SecurityConfig::default().validate().expect("valid config");
         let result = list_zip_reader(
             &mut archive,
@@ -2608,7 +2639,7 @@ mod tests {
         use std::io::Cursor;
 
         let zip_bytes = zip_with_zip64_declared_sizes(&[("a.bin", u64::MAX - 100), ("b.bin", 200)]);
-        let mut archive = zip::ZipArchive::new(Cursor::new(zip_bytes)).unwrap();
+        let mut archive = ZipArchive::new(Cursor::new(zip_bytes)).unwrap();
 
         let config = SecurityConfig::default()
             .with_max_file_size(u64::MAX)
@@ -2627,6 +2658,105 @@ mod tests {
                 resource: QuotaResource::IntegerOverflow
             }),
             "expected IntegerOverflow quota error instead of a silently wrapped total, got: {result:?}"
+        );
+    }
+
+    fn oversized_hardlink_tar(count: usize) -> Vec<u8> {
+        let one = tar_with_pax_linkpath(&vec![b'a'; 100_000], b'1');
+        let entry = &one[..one.len() - 1024];
+        let mut tar = entry.repeat(count);
+        tar.extend(std::iter::repeat_n(0u8, 1024));
+        tar
+    }
+
+    #[test]
+    fn test_list_tar_oversized_link_target_rejected() {
+        let mut temp_file = NamedTempFile::with_suffix(".tar").unwrap();
+        temp_file.write_all(&oversized_hardlink_tar(1)).unwrap();
+        temp_file.flush().unwrap();
+
+        let result = list_archive(temp_file.path(), &SecurityConfig::default());
+        assert_matches!(
+            result,
+            Err(ArchiveError::InvalidArchive(msg)) if msg == "hardlink target too long: 100000 bytes"
+        );
+    }
+
+    #[test]
+    fn test_list_tar_preflight_keeps_only_the_length_of_oversized_targets() {
+        let mut temp_file = NamedTempFile::with_suffix(".tar").unwrap();
+        temp_file.write_all(&oversized_hardlink_tar(3)).unwrap();
+        temp_file.flush().unwrap();
+
+        let config = SecurityConfig::default().with_relaxed_for_verify_preflight();
+        let manifest = list_archive(temp_file.path(), &config).unwrap();
+
+        assert_eq!(manifest.total_entries(), 3);
+        for entry in manifest.entries() {
+            assert_matches!(
+                &entry.kind,
+                ManifestEntryKind::Hardlink {
+                    target: LinkTarget::Oversized { bytes: 100_000 }
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn test_list_zip_oversized_symlink_target() {
+        use crate::test_utils::create_zip_with_symlink;
+        use std::io::Cursor;
+
+        let zip_bytes = create_zip_with_symlink("link", &"a".repeat(5000));
+
+        let mut archive = ZipArchive::new(Cursor::new(zip_bytes.clone())).unwrap();
+        let strict = SecurityConfig::default().validate().unwrap();
+        assert_matches!(
+            list_zip_reader(&mut archive, &strict, &mut ContentPolicy::Skip),
+            Err(ArchiveError::SecurityViolation { .. })
+        );
+
+        let mut archive = ZipArchive::new(Cursor::new(zip_bytes)).unwrap();
+        let relaxed = SecurityConfig::default()
+            .with_relaxed_for_verify_preflight()
+            .validate()
+            .unwrap();
+        let manifest = list_zip_reader(&mut archive, &relaxed, &mut ContentPolicy::Skip).unwrap();
+        assert_matches!(
+            &manifest.entries()[0].kind,
+            ManifestEntryKind::Symlink {
+                target: LinkTarget::Oversized { bytes: 5000 }
+            }
+        );
+    }
+
+    #[test]
+    fn test_list_zip_symlink_with_a_huge_declared_target_is_never_read() {
+        use crate::raw_zip::RawEntry;
+        use crate::raw_zip::RawZip;
+        use crate::raw_zip::deflate_zeros;
+        use std::io::Cursor;
+
+        const DECLARED: u64 = 64 * 1024 * 1024;
+        let mut link = RawEntry::stored("link", b"");
+        link.data = deflate_zeros(DECLARED);
+        link.method = 8;
+        link.size = DECLARED;
+        link.external_attributes = 0o120_777 << 16;
+        let bytes = RawZip::new(vec![link]).build().bytes;
+
+        let mut archive = ZipArchive::new(Cursor::new(bytes)).unwrap();
+        let relaxed = SecurityConfig::default()
+            .with_max_file_size(u64::MAX)
+            .with_relaxed_for_verify_preflight()
+            .validate()
+            .unwrap();
+        let manifest = list_zip_reader(&mut archive, &relaxed, &mut ContentPolicy::Skip).unwrap();
+        assert_matches!(
+            &manifest.entries()[0].kind,
+            ManifestEntryKind::Symlink {
+                target: LinkTarget::Oversized { bytes }
+            } if *bytes == usize::try_from(DECLARED).unwrap()
         );
     }
 }

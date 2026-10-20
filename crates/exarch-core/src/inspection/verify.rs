@@ -8,23 +8,32 @@ use crate::Result;
 use crate::SecurityConfig;
 use crate::VerificationOptions;
 use crate::config::Validated;
+use crate::formats::ZipArchive;
+use crate::formats::detect::FormatFamily;
+use crate::formats::detect::detect_format;
+use crate::formats::traits::ArchiveFormat;
 use crate::inspection::integrity::ContentPolicy;
 use crate::inspection::integrity::IntegrityOutcome;
 use crate::inspection::integrity::IntegrityPass;
-use crate::inspection::list::list_validated;
+use crate::inspection::list::list_detected;
 use crate::inspection::manifest::ArchiveEntry;
 use crate::inspection::manifest::ArchiveManifest;
+use crate::inspection::manifest::LinkTarget;
 use crate::inspection::manifest::ManifestEntryKind;
 use crate::inspection::manifest::ManifestEntryType;
+use crate::inspection::report::ArchiveStructure;
 use crate::inspection::report::IntegrityScope;
 use crate::inspection::report::IssueCategory;
 use crate::inspection::report::IssueSeverity;
 use crate::inspection::report::VerificationIssue;
 use crate::inspection::report::VerificationReport;
+use crate::security::fs_view::CollisionKind;
 use crate::security::fs_view::FsView;
+use crate::security::fs_view::NameCollision;
 use crate::security::fs_view::Node;
 use crate::security::fs_view::VirtualTree;
 use crate::security::fs_view::check_name_lengths;
+use crate::security::fs_view::name_too_long;
 use crate::security::hardlink::HardlinkTracker;
 use crate::security::hardlink::hardlink_target_missing;
 use crate::security::permissions::sanitize_permissions;
@@ -49,10 +58,38 @@ pub(crate) fn verify_manifest(
     config: &SecurityConfig<Validated>,
     integrity: Option<IntegrityOutcome>,
 ) -> Result<VerificationReport> {
+    verify_manifest_with_structure(
+        manifest,
+        config,
+        &ArchiveStructure::of_manifest(manifest),
+        integrity,
+    )
+}
+
+/// Like [`verify_manifest`], for a format that also reports structural
+/// findings and a record count of its own.
+pub(crate) fn verify_manifest_with_structure(
+    manifest: &ArchiveManifest,
+    config: &SecurityConfig<Validated>,
+    structure: &ArchiveStructure<'_>,
+    integrity: Option<IntegrityOutcome>,
+) -> Result<VerificationReport> {
+    verify_with_tree(manifest, config, structure, integrity, VirtualTree::new)
+}
+
+/// Verifies against a tree built by `make_tree`, which lets tests choose how
+/// names are folded instead of taking the host's rule.
+fn verify_with_tree(
+    manifest: &ArchiveManifest,
+    config: &SecurityConfig<Validated>,
+    structure: &ArchiveStructure<'_>,
+    integrity: Option<IntegrityOutcome>,
+    make_tree: impl FnOnce(&Path) -> VirtualTree,
+) -> Result<VerificationReport> {
     let temp_dir = tempfile::TempDir::new()?;
     let temp_dest = DestDir::new(temp_dir.path())?;
 
-    let mut tree = VirtualTree::new(temp_dest.as_path());
+    let mut tree = make_tree(temp_dest.as_path());
     let mut quota_tracker = QuotaTracker::new();
     let mut hardlink_tracker = HardlinkTracker::new();
 
@@ -79,9 +116,10 @@ pub(crate) fn verify_manifest(
     // refuses a solid 7z that verify passes.
     for index in deferred {
         let entry = &manifest.entries()[index];
-        if let Err(e) =
-            verify_deferred_hardlink(entry, config, &temp_dest, &mut tree, &mut hardlink_tracker)
-        {
+        let materialized =
+            verify_deferred_hardlink(entry, config, &temp_dest, &mut tree, &mut hardlink_tracker);
+        lists[index].extend(collision_issues(&mut tree));
+        if let Err(e) = materialized {
             lists[index].push(VerificationIssue::from_error(&e, Some(entry.path.clone())));
         }
     }
@@ -97,19 +135,60 @@ pub(crate) fn verify_manifest(
         None => (Vec::new(), IntegrityScope::NotRequested),
     };
 
+    lists.extend(
+        tree.take_empty_merges()
+            .into_iter()
+            .map(|collision| vec![collision_issue(collision)]),
+    );
+
     Ok(VerificationReport::from_entry_issue_lists(
         manifest,
         lists,
         archive_issues,
+        structure,
         scope,
     ))
 }
 
-/// Runs `list` under the policy `options` asks for and verifies the manifest.
+/// A manifest listed for verification, with the integrity pass outcome when
+/// one was requested.
+pub(crate) struct ListedForVerify {
+    pub(crate) manifest: ArchiveManifest,
+    pub(crate) integrity: Option<IntegrityOutcome>,
+}
+
+/// Runs `list` under the policy `options` asks for, on the relaxed pre-flight
+/// config.
 ///
-/// `list` receives the relaxed pre-flight config and the content policy; it is
-/// the only format-specific part of verification, so `verify_archive` and
-/// every `ArchiveFormat::verify` share the rest.
+/// `list` is the only format-specific part of verification, so
+/// `verify_archive` and every `ArchiveFormat::verify` share the rest.
+pub(crate) fn list_for_verify<F>(
+    config: &SecurityConfig<Validated>,
+    options: VerificationOptions,
+    list: F,
+) -> Result<ListedForVerify>
+where
+    F: FnOnce(&SecurityConfig<Validated>, &mut ContentPolicy<'_, '_>) -> Result<ArchiveManifest>,
+{
+    let listing_config = listing_config_for_verify(config);
+    match options.integrity {
+        IntegrityCheck::Skip => Ok(ListedForVerify {
+            manifest: list(&listing_config, &mut ContentPolicy::Skip)?,
+            integrity: None,
+        }),
+        IntegrityCheck::DecodeToEof(budget) => {
+            let mut pass = IntegrityPass::new(config, budget);
+            let manifest = list(&listing_config, &mut ContentPolicy::Decode(&mut pass))?;
+            Ok(ListedForVerify {
+                manifest,
+                integrity: Some(pass.finish()),
+            })
+        }
+    }
+}
+
+/// Lists with `list` and verifies the manifest, for formats whose manifest is
+/// their whole content.
 pub(crate) fn verify_with<F>(
     config: &SecurityConfig<Validated>,
     options: VerificationOptions,
@@ -118,18 +197,8 @@ pub(crate) fn verify_with<F>(
 where
     F: FnOnce(&SecurityConfig<Validated>, &mut ContentPolicy<'_, '_>) -> Result<ArchiveManifest>,
 {
-    let listing_config = listing_config_for_verify(config);
-    match options.integrity {
-        IntegrityCheck::Skip => {
-            let manifest = list(&listing_config, &mut ContentPolicy::Skip)?;
-            verify_manifest(&manifest, config, None)
-        }
-        IntegrityCheck::DecodeToEof(budget) => {
-            let mut pass = IntegrityPass::new(config, budget);
-            let manifest = list(&listing_config, &mut ContentPolicy::Decode(&mut pass))?;
-            verify_manifest(&manifest, config, Some(pass.finish()))
-        }
-    }
+    let listed = list_for_verify(config, options, list)?;
+    verify_manifest(&listed.manifest, config, listed.integrity)
 }
 
 /// Verifies archive security without extracting.
@@ -154,6 +223,8 @@ where
 /// - Archive file cannot be opened
 /// - Archive is severely corrupted (cannot read structure)
 /// - Declared compressed sizes exceed the archive length
+/// - A ZIP central directory holds more records than `max_file_count`, counting
+///   records the `zip` crate collapses or the end record does not count
 /// - An entry name is a path traversal (`..` component, or an absolute path
 ///   unless `allowed.absolute_paths` is set): the listing step rejects it with
 ///   [`ArchiveError::PathTraversal`] before a report exists
@@ -161,19 +232,31 @@ where
 /// Other security violations are reported in `VerificationReport::issues`
 /// instead: disallowed links, link targets that escape the destination,
 /// hardlinks whose target never appears, quota and compression-ratio
-/// violations, NUL bytes, banned components and unsafe permissions.
+/// violations, NUL bytes, banned components, unsafe permissions and, for ZIP
+/// under `zip_consistency = Enforce`, headers that disagree with the central
+/// directory, duplicate names, overlapping entries and hidden records or
+/// headers. The report's total is the ZIP's raw central directory count.
 ///
 /// # Limitations
 ///
 /// Verification models only the archive's own entries; it cannot account for
 /// files, directories or links already present in the extraction destination,
 /// so a PASS does not guarantee that extraction into a non-empty destination
-/// succeeds. Symlink chains are cut off after 40 hops, which may differ from
-/// the host's own limit. On macOS and Windows hosts entry names are matched
-/// after lowercasing only: names the host filesystem treats as equal under
-/// Unicode normalisation (NFC/NFD) or special case folding (final sigma) are
-/// not modelled. Windows component checks (reserved names, `:`, trailing dot
-/// or space) run only on Windows hosts.
+/// succeeds. Symlink chains are cut off after a per-OS number of hops that
+/// matches `std::fs::canonicalize` on macOS (33), glibc (40) and musl (39)
+/// hosts; Windows (63) is unverified and other Unix hosts assume 32, where a
+/// low guess can only give a false FAIL.
+///
+/// On macOS entry names are compared after NFD and a per-character case fold,
+/// on Windows after the same fold without normalisation, and elsewhere
+/// exactly. Two names that differ exactly but compare equal under that fold
+/// are reported as a [`IssueCategory::NameCollision`] (High when the kinds
+/// differ or a symlink is involved, Medium for two files or for directories
+/// that hold entries, Low for two directories that hold none), so a merge is
+/// never silent. The fold approximates the host
+/// table, so a pair it merges that the host keeps apart is reported too.
+/// Windows component checks (reserved names, `:`, trailing dot or space) run
+/// only on Windows hosts.
 ///
 /// Verification models extraction that skips an existing entry. With
 /// overwrite semantics extraction keeps the last entry at a path, which
@@ -276,8 +359,13 @@ pub fn verify_archive_with_options<P: AsRef<Path>>(
 ) -> Result<VerificationReport> {
     let validated_config = config.clone().validate()?;
     let archive_path = archive_path.as_ref();
+    let format = detect_format(archive_path)?;
+    if format.family() == FormatFamily::Zip {
+        let file = std::fs::File::open(archive_path)?;
+        return ZipArchive::new(file)?.verify(&validated_config, options);
+    }
     verify_with(&validated_config, *options, |listing_config, policy| {
-        list_validated(archive_path, listing_config, policy)
+        list_detected(archive_path, format, listing_config, policy)
     })
 }
 
@@ -349,22 +437,16 @@ fn verify_entry(
     if let Ok(ref safe_path) = path_result {
         let link_result = match &entry.kind {
             ManifestEntryKind::Symlink { target } => Some(
-                target
-                    .as_deref()
-                    .ok_or_else(|| missing_link_target(ManifestEntryType::Symlink))
-                    .and_then(|t| {
-                        check_target_lengths(t)?;
-                        SafeSymlink::validate_in(safe_path, t, dest, config, tree).map(drop)
-                    }),
+                usable_link_target(target, ManifestEntryType::Symlink).and_then(|t| {
+                    check_target_lengths(t)?;
+                    SafeSymlink::validate_in(safe_path, t, dest, config, tree).map(drop)
+                }),
             ),
             ManifestEntryKind::Hardlink { target } => Some(
-                target
-                    .as_deref()
-                    .ok_or_else(|| missing_link_target(ManifestEntryType::Hardlink))
-                    .and_then(|t| {
-                        check_target_lengths(t)?;
-                        hardlink_tracker.validate_hardlink_in(safe_path, t, dest, config, tree)
-                    }),
+                usable_link_target(target, ManifestEntryType::Hardlink).and_then(|t| {
+                    check_target_lengths(t)?;
+                    hardlink_tracker.validate_hardlink_in(safe_path, t, dest, config, tree)
+                }),
             ),
             ManifestEntryKind::File | ManifestEntryKind::Directory => None,
         };
@@ -376,7 +458,9 @@ fn verify_entry(
                 hardlink_pending = true;
             }
             _ => {
-                if let Err(e) = record_entry(tree, safe_path.as_path(), &entry.kind) {
+                let recorded = record_entry(tree, safe_path.as_path(), &entry.kind);
+                issues.extend(collision_issues(tree));
+                if let Err(e) = recorded {
                     issues.push(VerificationIssue::from_error(
                         &ArchiveError::Io(e),
                         Some(entry.path.clone()),
@@ -403,6 +487,54 @@ fn check_target_lengths(target: &Path) -> Result<()> {
     check_name_lengths(target).map_err(ArchiveError::Io)
 }
 
+/// Returns the target to validate, or the error a missing or oversized
+/// target is reported as.
+fn usable_link_target(target: &LinkTarget, kind: ManifestEntryType) -> Result<&Path> {
+    match target {
+        LinkTarget::Recorded(path) => Ok(path),
+        LinkTarget::Missing => Err(missing_link_target(kind)),
+        LinkTarget::Oversized { .. } => Err(ArchiveError::Io(name_too_long())),
+    }
+}
+
+/// Drains the name collisions the tree recorded since the last call into
+/// report issues, so none is lost whichever insert produced it.
+fn collision_issues(tree: &mut VirtualTree) -> Vec<VerificationIssue> {
+    tree.take_collisions()
+        .into_iter()
+        .map(collision_issue)
+        .collect()
+}
+
+/// Spells a path with combining marks and control characters escaped, so two
+/// canonically equivalent names do not read as the same text.
+fn escaped(path: &Path) -> String {
+    path.to_string_lossy()
+        .chars()
+        .flat_map(char::escape_debug)
+        .collect()
+}
+
+fn collision_issue(collision: NameCollision) -> VerificationIssue {
+    let severity = match collision.kind {
+        CollisionKind::Directories => IssueSeverity::Low,
+        CollisionKind::DirectoriesWithContents | CollisionKind::Files => IssueSeverity::Medium,
+        CollisionKind::Mixed => IssueSeverity::High,
+    };
+    VerificationIssue {
+        severity,
+        category: IssueCategory::NameCollision,
+        message: format!(
+            "Names \"{}\" and \"{}\" are the same name on case-insensitive or normalizing \
+             filesystems",
+            escaped(&collision.existing),
+            escaped(&collision.incoming)
+        ),
+        entry_path: Some(collision.incoming),
+        context: None,
+    }
+}
+
 /// Records a successfully validated non-hardlink entry in the tree.
 fn record_entry(
     tree: &mut VirtualTree,
@@ -412,8 +544,10 @@ fn record_entry(
     let node = match kind {
         ManifestEntryKind::File => Node::File,
         ManifestEntryKind::Directory => Node::Dir,
-        ManifestEntryKind::Symlink { target: Some(t) } => Node::Symlink(t.clone()),
-        ManifestEntryKind::Symlink { target: None } | ManifestEntryKind::Hardlink { .. } => {
+        ManifestEntryKind::Symlink {
+            target: LinkTarget::Recorded(t),
+        } => Node::Symlink(t.clone()),
+        ManifestEntryKind::Symlink { .. } | ManifestEntryKind::Hardlink { .. } => {
             return Ok(());
         }
     };
@@ -430,7 +564,7 @@ fn verify_deferred_hardlink(
     hardlink_tracker: &mut HardlinkTracker,
 ) -> Result<()> {
     let ManifestEntryKind::Hardlink {
-        target: Some(target),
+        target: LinkTarget::Recorded(target),
     } = &entry.kind
     else {
         return Ok(());
@@ -559,13 +693,13 @@ mod tests {
 
     fn symlink_to(target: &str) -> ManifestEntryKind {
         ManifestEntryKind::Symlink {
-            target: Some(PathBuf::from(target)),
+            target: LinkTarget::Recorded(PathBuf::from(target)),
         }
     }
 
     fn hardlink_to(target: &str) -> ManifestEntryKind {
         ManifestEntryKind::Hardlink {
-            target: Some(PathBuf::from(target)),
+            target: LinkTarget::Recorded(PathBuf::from(target)),
         }
     }
 
@@ -584,6 +718,162 @@ mod tests {
             .filter(|i| i.category == IssueCategory::InvalidArchive)
             .count();
         assert_eq!(too_long, 2, "{:?}", report.issues());
+    }
+
+    #[test]
+    fn oversized_link_targets_from_the_preflight_are_reported() {
+        let manifest = manifest_of(vec![
+            (
+                "s",
+                ManifestEntryKind::Symlink {
+                    target: LinkTarget::Oversized { bytes: 100_000 },
+                },
+            ),
+            (
+                "h",
+                ManifestEntryKind::Hardlink {
+                    target: LinkTarget::Oversized { bytes: 100_000 },
+                },
+            ),
+        ]);
+        let report = verify_manifest(&manifest, &link_config(), None).unwrap();
+        let too_long = report
+            .issues()
+            .iter()
+            .filter(|i| i.category == IssueCategory::InvalidArchive)
+            .count();
+        assert_eq!(too_long, 2, "{:?}", report.issues());
+        assert_eq!(report.status(), VerificationStatus::Fail);
+    }
+
+    #[test]
+    fn collision_severity_follows_the_kinds_involved() {
+        let collision = |kind| NameCollision {
+            existing: PathBuf::from("a"),
+            incoming: PathBuf::from("A"),
+            kind,
+        };
+        let severity = |kind| collision_issue(collision(kind)).severity;
+        assert_eq!(severity(CollisionKind::Directories), IssueSeverity::Low);
+        assert_eq!(
+            severity(CollisionKind::DirectoriesWithContents),
+            IssueSeverity::Medium
+        );
+        assert_eq!(severity(CollisionKind::Files), IssueSeverity::Medium);
+        assert_eq!(severity(CollisionKind::Mixed), IssueSeverity::High);
+    }
+
+    fn ascii_upper(name: &std::ffi::OsStr) -> std::borrow::Cow<'_, std::ffi::OsStr> {
+        std::borrow::Cow::Owned(name.to_string_lossy().to_ascii_uppercase().into())
+    }
+
+    /// Verifies as a host that compares names case-insensitively would.
+    fn verify_folding(entries: Vec<(&str, ManifestEntryKind)>) -> VerificationReport {
+        let manifest = manifest_of(entries);
+        verify_with_tree(
+            &manifest,
+            &link_config(),
+            &ArchiveStructure::of_manifest(&manifest),
+            None,
+            |root| VirtualTree::with_fold(root, ascii_upper),
+        )
+        .unwrap()
+    }
+
+    fn collisions(report: &VerificationReport) -> Vec<IssueSeverity> {
+        report
+            .issues()
+            .iter()
+            .filter(|i| i.category == IssueCategory::NameCollision)
+            .map(|i| i.severity)
+            .collect()
+    }
+
+    #[test]
+    fn hardlink_over_differently_spelled_file_is_not_a_pass() {
+        let report = verify_folding(vec![
+            ("a.txt", ManifestEntryKind::File),
+            ("A.txt", hardlink_to("a.txt")),
+        ]);
+        assert_ne!(report.status(), VerificationStatus::Pass);
+        assert_eq!(collisions(&report), [IssueSeverity::Medium]);
+    }
+
+    #[test]
+    fn symlink_over_differently_spelled_file_is_reported_as_mixed() {
+        let report = verify_folding(vec![("a", ManifestEntryKind::File), ("A", symlink_to("x"))]);
+        assert!(collisions(&report).contains(&IssueSeverity::High));
+        assert_eq!(report.status(), VerificationStatus::Fail);
+    }
+
+    #[test]
+    fn differently_spelled_files_and_directories_with_contents_are_reported() {
+        let report = verify_folding(vec![
+            ("Images/x", ManifestEntryKind::File),
+            ("images/y", ManifestEntryKind::File),
+            ("f", ManifestEntryKind::File),
+            ("F", ManifestEntryKind::File),
+        ]);
+        assert_eq!(
+            collisions(&report),
+            [IssueSeverity::Medium, IssueSeverity::Medium]
+        );
+        assert_eq!(report.status(), VerificationStatus::Warning);
+    }
+
+    #[test]
+    fn merged_directories_with_colliding_children_are_never_a_pass() {
+        let entries: Vec<_> = (0..50)
+            .flat_map(|i| {
+                [
+                    (format!("a/f{i}"), ManifestEntryKind::File),
+                    (format!("A/f{i}"), ManifestEntryKind::File),
+                ]
+            })
+            .collect();
+        let manifest = manifest_of(
+            entries
+                .iter()
+                .map(|(p, k)| (p.as_str(), k.clone()))
+                .collect(),
+        );
+        let report = verify_with_tree(
+            &manifest,
+            &link_config(),
+            &ArchiveStructure::of_manifest(&manifest),
+            None,
+            |root| VirtualTree::with_fold(root, ascii_upper),
+        )
+        .unwrap();
+        assert_eq!(report.status(), VerificationStatus::Warning);
+        assert_eq!(report.security_status(), crate::CheckStatus::Warning);
+        assert_eq!(
+            collisions(&report),
+            [IssueSeverity::Medium],
+            "reported once"
+        );
+    }
+
+    #[test]
+    fn merged_empty_directories_are_low_and_keep_security_ok() {
+        let report = verify_folding(vec![
+            ("Dir", ManifestEntryKind::Directory),
+            ("dir", ManifestEntryKind::Directory),
+        ]);
+        assert_eq!(collisions(&report), [IssueSeverity::Low]);
+        assert_eq!(report.status(), VerificationStatus::Pass);
+        assert_eq!(report.security_status(), crate::CheckStatus::Pass);
+    }
+
+    #[test]
+    fn empty_directory_merge_is_upgraded_when_an_entry_lands_in_it() {
+        let report = verify_folding(vec![
+            ("Dir", ManifestEntryKind::Directory),
+            ("dir", ManifestEntryKind::Directory),
+            ("Dir/f", ManifestEntryKind::File),
+        ]);
+        assert_eq!(collisions(&report), [IssueSeverity::Medium]);
+        assert_eq!(report.status(), VerificationStatus::Warning);
     }
 
     #[test]
@@ -1196,6 +1486,77 @@ mod tests {
             0,
             "Info/Low-severity heuristic issues (executable, suspicious extension) must not \
              count toward suspicious_entries — only Medium+ issues do"
+        );
+    }
+
+    fn cloaked_zip_file() -> NamedTempFile {
+        use crate::raw_zip::RawEntry;
+        use crate::raw_zip::RawZip;
+
+        let bytes = RawZip::new(vec![
+            RawEntry::stored("cron_worker.sh", b"payload").with_central_name("doc_report.pdf"),
+        ])
+        .build()
+        .bytes;
+        let mut file = NamedTempFile::with_suffix(".zip").unwrap();
+        file.write_all(&bytes).unwrap();
+        file.flush().unwrap();
+        file
+    }
+
+    #[test]
+    fn verify_archive_fails_a_cloaked_zip_under_the_default_policy() {
+        let file = cloaked_zip_file();
+        let report = verify_archive(file.path(), &SecurityConfig::default()).unwrap();
+        assert_eq!(report.status(), VerificationStatus::Fail);
+        assert_eq!(report.security_status(), crate::CheckStatus::Fail);
+        assert!(
+            report
+                .issues()
+                .iter()
+                .any(|i| i.category == IssueCategory::HeaderMismatch)
+        );
+        assert_eq!(report.total_entries(), 1);
+    }
+
+    #[test]
+    fn verify_archive_passes_a_cloaked_zip_when_ignored() {
+        use crate::ZipConsistencyPolicy;
+
+        let file = cloaked_zip_file();
+        let config = SecurityConfig::default().with_zip_consistency(ZipConsistencyPolicy::Ignore);
+        let report = verify_archive(file.path(), &config).unwrap();
+        assert_eq!(report.status(), VerificationStatus::Pass);
+    }
+
+    #[test]
+    fn permissive_config_enforces_zip_consistency_too() {
+        let file = cloaked_zip_file();
+        let report = verify_archive(file.path(), &SecurityConfig::permissive()).unwrap();
+        assert_eq!(report.status(), VerificationStatus::Fail);
+    }
+
+    #[test]
+    fn verify_archive_reports_an_oversized_zip_symlink_target() {
+        use crate::test_utils::create_zip_with_symlink;
+
+        let bytes = create_zip_with_symlink("link", &"a".repeat(5000));
+        let mut file = NamedTempFile::with_suffix(".zip").unwrap();
+        file.write_all(&bytes).unwrap();
+        file.flush().unwrap();
+
+        let config = SecurityConfig::default().with_allow_symlinks(true);
+        let report = verify_archive(file.path(), &config)
+            .expect("an oversized target is a report issue, not an error");
+        assert_eq!(report.status(), VerificationStatus::Fail);
+        assert!(
+            report
+                .issues()
+                .iter()
+                .any(|i| i.category == IssueCategory::InvalidArchive
+                    && i.message.contains("file name too long")),
+            "{:?}",
+            report.issues()
         );
     }
 

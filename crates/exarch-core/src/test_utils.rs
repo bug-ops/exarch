@@ -470,6 +470,8 @@ pub fn tar_with_nonutf8_name(name_bytes: &[u8], data: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::raw_zip::RawEntry;
+    use crate::raw_zip::RawZip;
 
     #[test]
     fn test_create_test_tar() {
@@ -499,6 +501,44 @@ mod tests {
             .add_directory("dir/")
             .build();
         assert!(!zip_data.is_empty());
+    }
+
+    /// ZIP archives whose structure different readers interpret differently.
+    fn structural_zip_seeds() -> Vec<(&'static str, RawZip)> {
+        let hidden = RawZip::new(vec![RawEntry::stored("evil.sh", b"echo pwned\n")]).build();
+        let gap = hidden.bytes[..hidden.directory_start].to_vec();
+
+        let mut hidden_local = RawZip::new(vec![RawEntry::stored("benign.txt", b"hello")]);
+        hidden_local.before_directory.clone_from(&gap);
+        let mut uncounted = RawZip::new(vec![
+            RawEntry::stored("benign.txt", b"hello"),
+            RawEntry::stored("hidden.sh", b"echo pwned\n"),
+        ]);
+        uncounted.end_count = Some(1);
+        let mut descriptor_gap = RawZip::new(vec![
+            RawEntry::stored("a.txt", b"hello").with_descriptor(true, true),
+        ]);
+        descriptor_gap.before_directory = gap;
+
+        vec![
+            (
+                "header-name-mismatch.bin",
+                RawZip::new(vec![
+                    RawEntry::stored("cron_worker.sh", b"payload")
+                        .with_central_name("doc_report.pdf"),
+                ]),
+            ),
+            (
+                "duplicate-names.bin",
+                RawZip::new(vec![
+                    RawEntry::stored("a.txt", b"first"),
+                    RawEntry::stored("a.txt", b"EVIL"),
+                ]),
+            ),
+            ("hidden-local-header.bin", hidden_local),
+            ("uncounted-central-record.bin", uncounted),
+            ("descriptor-gap.bin", descriptor_gap),
+        ]
     }
 
     /// Dumps the adversarial archives built by this module's generators into
@@ -590,5 +630,9 @@ mod tests {
             "symlink-escape.bin",
             &create_zip_with_symlink("link", "../../etc/passwd"),
         );
+
+        for (name, zip) in structural_zip_seeds() {
+            write_seed("zip", name, &zip.build().bytes);
+        }
     }
 }

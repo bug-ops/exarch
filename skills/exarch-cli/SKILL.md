@@ -108,6 +108,7 @@ Key flags (all optional):
 | `--allow-absolute-paths` | off | Allow archive entries with absolute paths. For ZIP the leading root or drive prefix is stripped, so the entry lands under the destination (`/tmp/x` extracts to `<dest>/tmp/x`). |
 | `--allow-world-writable` | off | Allow files with world-writable (mode `0o002`) permission bits. |
 | `--allow-solid-archives` | off | Allow solid 7z archives (see Security model below). |
+| `--zip-consistency <enforce\|ignore>` | enforce | ZIP only. `enforce` rejects an archive whose structure different ZIP readers interpret differently (see "ZIP structure" under `verify`); `ignore` keeps the central-directory interpretation and raises no structural finding. Relax it only for archives from a producer you trust. |
 | `--banned-component <COMPONENT>` | see below | Block entries whose path contains this component. **Replaces** the default list — see warning below. Repeatable. |
 
 > [!WARNING]
@@ -163,6 +164,7 @@ exarch list archive.zip -l -H --json
 | `--max-total-size` | 500 MB | Hard limit on cumulative listed size; listing fails with `QuotaExceeded` past this size. Raise it explicitly for larger archives. |
 | `--max-file-size` | 50 MB | Hard limit on any single entry's size; listing fails with `QuotaExceeded` (`FileSize`) past this size. Raise it explicitly for archives with large individual files. |
 | `--allow-solid-archives` | off | Allow listing solid 7z archives (higher memory use). |
+| `--zip-consistency <enforce\|ignore>` | enforce | Same as `extract`: under `enforce` a ZIP with ambiguous structure fails with `ZipInconsistency` instead of being listed. |
 
 Verified live: a 51 MB tar entry fails `exarch list` with
 `"quota exceeded: single file size (53477376 > 52428800)"` at the 50 MB default, and succeeds
@@ -179,7 +181,8 @@ exarch verify archive.tar.gz --json
 | `--strict` | off | Treat any warning-level finding as an error and exit with status `2` instead of `0`. |
 | `--check-integrity` | off | Decode the payload to the decoder's EOF so checksums and codec framing are verified. See "Payload integrity" below. |
 | `--decompression-budget <SIZE>` | 500M | Extra bytes `--check-integrity` may decode beyond what listing already decodes (`K`/`M`/`G`/`T` suffixes). Requires `--check-integrity`; `0` is rejected. Fixed default: it does not follow `--max-total-size`, so raise both for archives over 500 MB. |
-| `--allow-symlinks` / `--allow-hardlinks` | off | Same flags and semantics as `extract`: links that resolve within the extraction directory are accepted, escaping links still fail. `verify` accepts only these two policy flags (plus `--max-files`, `--max-total-size`, `--max-file-size`, `--allow-solid-archives`, `--check-integrity`, `--decompression-budget` and `--strict`); it has no `--max-compression-ratio`, `--max-path-depth`, `--banned-component`, `--allow-absolute-paths` or `--allow-world-writable`, so pass the link flags you intend to extract with, and expect extraction-only options to be evaluated by `extract` alone. |
+| `--allow-symlinks` / `--allow-hardlinks` | off | Same flags and semantics as `extract`: links that resolve within the extraction directory are accepted, escaping links still fail. `verify` accepts only these two policy flags (plus `--zip-consistency`, `--max-files`, `--max-total-size`, `--max-file-size`, `--allow-solid-archives`, `--check-integrity`, `--decompression-budget` and `--strict`); it has no `--max-compression-ratio`, `--max-path-depth`, `--banned-component`, `--allow-absolute-paths` or `--allow-world-writable`, so pass the link flags you intend to extract with, and expect extraction-only options to be evaluated by `extract` alone. |
+| `--zip-consistency <enforce\|ignore>` | enforce | ZIP only. Under `enforce`, structural findings are reported as issues (see "ZIP structure" below); under `ignore` none are raised. |
 | `--max-files` / `--max-total-size` / `--max-file-size` / `--allow-solid-archives` | same as `list` (10000 / 500 MB / 50 MB / off) | Same hard-limit semantics as `list` for file count and total size — verification fails with `QuotaExceeded` past those two caps, it does not skip entries. |
 
 `verify` always runs the full security validation pipeline (path traversal, symlink/hardlink, permissions) without extracting. By default it does not validate payload checksums: `integrity_status` is `SKIPPED` (`Integrity: SKIPPED` in text mode), so a passing `verify` says nothing about data corruption. Pass `--check-integrity` for that.
@@ -233,10 +236,12 @@ still exits `1` for a FAIL status.
 `data.issues[].category` is one of `"Path Traversal"`, `"Symlink Escape"`, `"Hardlink Escape"`,
 `"Zip Bomb"`, `"Invalid Permissions"`, `"Quota Exceeded"`, `"Security Policy"`,
 `"Invalid Archive"`, `"Suspicious Path"`, `"Executable File"`, `"Corrupt Data"`,
-`"Integrity Incomplete"`. The last two come only from `--check-integrity` and are not security
-findings, but `--check-integrity` can also add security-category issues (`"Security Policy"` for a
-forged ZIP declared size, `"Quota Exceeded"` for 7z decoder memory or `max_solid_block_memory`), so
-`Security:` can be `FAILED` with the flag on an archive that is `OK` without it. `"Security Policy"` covers entries
+`"Integrity Incomplete"`, `"Header Mismatch"`, `"Duplicate Entry"`, `"Overlapping Entries"`,
+`"Hidden Entry"`, `"Name Collision"`. `"Corrupt Data"` and `"Integrity Incomplete"` come only from
+`--check-integrity` and are not security findings, but `--check-integrity` can also add
+security-category issues (`"Security Policy"` for a forged ZIP declared size, `"Quota Exceeded"` for 7z
+decoder memory or `max_solid_block_memory`), so `Security:` can be `FAILED` with the flag on an archive
+that is `OK` without it. `"Security Policy"` covers entries
 rejected by the configured policy rather than by an attack check: a symlink or hardlink under the
 default config (`Security violation: symlinks not allowed` / `hardlinks not allowed`), NUL bytes,
 banned components. These are security findings: `security_status` is `FAILED` (`Security:
@@ -252,12 +257,46 @@ exit `1`; `--allow-symlinks` alone leaves only the hardlink finding; both flags 
 **Limitations.**
 
 - `verify` models only the archive's own entries. It cannot see files, directories or links already present in the extraction destination, so a `PASS` does not guarantee that extraction into a non-empty destination succeeds.
-- Symlink chains are resolved with a hop limit in `verify`'s model while the host applies its own limit on extraction; the two differ, so a `PASS` does not guarantee that a deep chain extracts (on macOS, extraction can fail on long chains that `verify` accepts).
+- Symlink chains are resolved with a per-OS hop limit in `verify`'s model: macOS 33, Linux glibc 40, Linux musl 39, Windows 63 (not verified on a Windows host), other Unix 32. The first three match `std::fs::canonicalize`, which `extract` uses; a different filesystem or kernel configuration can still disagree, so a `PASS` does not guarantee that a deep chain extracts. Verified live on macOS: chains of up to 34 links pass `verify` and `extract`, a 35-link chain fails both.
 - A hardlink whose target does not exist in the archive fails with `Invalid archive: hardlink target does not exist: <target>`, matching `extract`.
 - `verify` reports as `HIGH` issues (exit `1`) the entry shapes the host rejects: an entry beneath a regular file (`I/O error: not a directory`), a directory over an existing file (`I/O error: entity already exists`), a parent chain that loops or leaves the destination, a hardlink whose target is a directory (`hardlink target is a directory: <target>`), and an entry, symlink target or hardlink target with a name component over 255 bytes or a path over 4096 bytes (`I/O error: file name too long`).
 - `verify` has no overwrite option and models first-entry-wins extraction. Without `--force`, `extract` skips a later entry at an already-written path (verified live: entries `f`=`one` then `f`=`two` leave `one`, with a `skipped 1 entry as pre-existing duplicates` warning); with `--force` a later entry overwrites it (the same archive leaves `two`). `verify` cannot model the `--force` outcome and reports an issue where a symlink entry follows an earlier file entry at the same path, even though plain `extract` skips that symlink.
-- Names that the host treats as equal under Unicode normalisation (for example NFC versus NFD) or special case folding are not modelled on case-insensitive hosts.
+- On macOS names are compared after NFD and a per-character case fold, on Windows after the same fold without normalisation, elsewhere exactly. Two entries whose names differ but compare equal under that fold are reported as a `"Name Collision"` issue, never merged silently: `HIGH` when their kinds differ or a symlink is involved (a hardlink over a file counts as a file), `MEDIUM` for two files or for two directories that hold entries (`status` `WARNING`, `Security: WARNING`), `LOW` for two directories that hold no entries (listed, but `status` stays `PASS` and `Security: OK`). A spelling is reported once, however many entries use it. Verified live on macOS: `café.txt` in NFC and NFD spellings, `straße.txt` and `straẞe.txt`, `a.txt` and `A.txt`, and `Dir/a.txt` with `dir/b.txt` give `MEDIUM`; the empty directory entries `Dir/` and `dir/` give `LOW`. The fold approximates the host's table, so a pair it merges that the host keeps apart is reported too.
 - Windows component checks (reserved device names, alternate data streams, trailing dot or space) run only when `verify` itself runs on a Windows host, so results are not host-independent.
+
+**ZIP structure.** A ZIP stores each entry's metadata twice, in a local header and in the central
+directory; random-access readers follow the directory and streaming readers follow the local
+headers, so an archive whose copies differ shows different content to different tools. Under the
+default `--zip-consistency enforce`, `extract` and `list` fail with `ZipInconsistency` (exit `1`,
+nothing written, `error.kind` `ZipInconsistency`) and `verify` reports each finding as a `HIGH`
+issue when the archive:
+
+- has a local header that disagrees with its central directory record on the file name, a Unicode Path extra field, compression method, encryption flag, data-descriptor flag, modification time, CRC-32 or sizes (`"Header Mismatch"`; a local header that cannot be parsed at all is reported the same way);
+- repeats an entry name (`"Duplicate Entry"`; the `zip` crate keeps only the last record, `verify` still counts every record in `total_entries`);
+- has entries whose data ranges overlap (`"Overlapping Entries"`);
+- holds central directory records beyond the count in its end record, or a local header that no central directory record maps (`"Hidden Entry"`): before the archive (offset 0), between entries, behind padding, or just before the directory. A streaming reader extracts such an entry and a random-access reader never lists it.
+
+`total_entries` of a ZIP report is the raw central directory count. A raw count over `--max-files` is
+a `QuotaExceeded` error (`quota exceeded: file count (20000 > 10000)`, exit `1`) from `extract`,
+`list` and `verify` under both policies, even when most records share one name. Verified live
+with crafted archives built with Python: a two-record directory whose end record counts one
+(`Total entries: 2`, two `"Hidden Entry"` issues), a local header inserted before the directory
+(`"Hidden Entry"`), two entries named `a.txt` (`"Duplicate Entry"`, `Total entries: 2`) and an
+archive with 20000 records named `a.txt`; each passes with `--zip-consistency ignore` (except the
+last, which stays a `QuotaExceeded` error), where `extract` writes what it always did. Archives from
+Info-ZIP, `ditto`, 7-Zip, `bsdtar`, Go and Python's `zipfile`, including streamed archives
+with data descriptors, produce no findings; archives from Java's `jar` and from Windows producers
+(Explorer, WinRAR, .NET) were not tested. Not covered: a descriptor, local header and data hidden
+inside the declared range of a data-descriptor entry (streaming readers end such an entry at the
+end of its compressed stream, `zip` at the declared size; verified live that `bsdtar` extracts it
+while `exarch` passes), central directory records before the directory start, the bytes between
+offset 0 and the start of the archive (only offset 0 is checked, since self-extracting stubs embed
+the signature), and an earlier end-of-central-directory candidate that the `zip` crate falls back
+to. Pre-ZIP64 archives
+with more than 65535 entries (a wrapped end-record count) and archives with orphaned local headers
+left by in-place updaters are rejected under `enforce`; so are ZIP64 directory entries written by the
+Rust `zip` crate, whose local sizes its own check rejects (use `--zip-consistency ignore`). With
+duplicate names, local headers are not compared with the central directory.
 
 `verify`, `list` and `extract` reject a ZIP entry whose compression method is not Stored, Deflate,
 Bzip2 or Zstd (including `deflate64`) with `operation denied by security policy: unsupported
@@ -277,9 +316,10 @@ Valid `<SHELL>` values (case-sensitive, exact set): `bash`, `elvish`, `fish`, `p
 ## Do not reach for `--allow-*` reflexively
 
 `--allow-symlinks`, `--allow-hardlinks`, `--allow-absolute-paths`, `--allow-world-writable`,
-`--allow-solid-archives`, and `--force` all weaken a default-deny security check. When an
+`--allow-solid-archives`, `--zip-consistency ignore`, and `--force` all weaken a default-deny
+security check. When an
 extraction fails with `SymlinkEscape`, `HardlinkEscape`, `PathTraversal`, `ZipBomb`,
-`InvalidPermissions`, or `SecurityViolation`, that is the validator correctly rejecting
+`InvalidPermissions`, `ZipInconsistency`, or `SecurityViolation`, that is the validator correctly rejecting
 something dangerous — **do not add the matching `--allow-*` flag just to make the command
 succeed.** Only add it when the archive's origin and contents are already known to be trusted,
 and prefer re-running just `verify` first to see the full list of findings
@@ -420,7 +460,7 @@ rejected because `--allow-symlinks` was not passed):
 ### `error.kind` enum
 
 `IoError`, `InvalidArchive`, `PathTraversal`, `SymlinkEscape`, `HardlinkEscape`, `ZipBomb`,
-`InvalidPermissions`, `QuotaExceeded`, `SecurityViolation`, `SourceNotFound`,
+`ZipInconsistency`, `InvalidPermissions`, `QuotaExceeded`, `SecurityViolation`, `SourceNotFound`,
 `SourceNotAccessible`, `OutputExists`, `InvalidCompressionLevel`, `UnknownFormat`,
 `InvalidConfiguration`, or the generic `Error` fallback for failures that don't originate from
 the archive validation pipeline (e.g. unexpected I/O outside archive handling). Branch on this

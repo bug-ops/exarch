@@ -27,6 +27,7 @@ use criterion::criterion_main;
 use criterion::measurement::WallTime;
 use exarch_core::ExtractionOptions;
 use exarch_core::SecurityConfig;
+use exarch_core::VerificationOptions;
 use exarch_core::formats::SevenZArchive;
 use exarch_core::formats::ZipArchive;
 use exarch_core::formats::traits::ArchiveFormat;
@@ -264,6 +265,51 @@ fn benchmark_many_small_files(c: &mut Criterion) {
             },
         );
     }
+
+    group.finish();
+}
+
+/// Cost of opening, listing and verifying a 10,000-entry ZIP (SC-008).
+///
+/// `baseline_plain_scan` is the work opening did before the structural census:
+/// one `zip` open plus a metadata-only read of every entry.
+fn benchmark_zip_inspection(c: &mut Criterion) {
+    const ENTRIES: usize = 10_000;
+    let mut group = c.benchmark_group("zip_inspection");
+    let data = create_many_small_files_zip(ENTRIES);
+    let config = SecurityConfig::default()
+        .with_max_file_count(ENTRIES * 2)
+        .validate()
+        .unwrap();
+    group.throughput(Throughput::Elements(ENTRIES as u64));
+
+    group.bench_function("baseline_plain_scan", |b| {
+        b.iter(|| {
+            let mut archive = zip::ZipArchive::new(Cursor::new(&data[..])).unwrap();
+            for index in 0..archive.len() {
+                archive.by_index(index).unwrap();
+            }
+        });
+    });
+    group.bench_function("open", |b| {
+        b.iter(|| ZipArchive::new(Cursor::new(&data[..])).unwrap());
+    });
+    group.bench_function("open_and_list", |b| {
+        b.iter(|| {
+            ZipArchive::new(Cursor::new(&data[..]))
+                .unwrap()
+                .list(&config)
+                .unwrap()
+        });
+    });
+    group.bench_function("open_and_verify", |b| {
+        b.iter(|| {
+            ZipArchive::new(Cursor::new(&data[..]))
+                .unwrap()
+                .verify(&config, &VerificationOptions::default())
+                .unwrap()
+        });
+    });
 
     group.finish();
 }
@@ -811,6 +857,7 @@ criterion_group!(
     benches,
     benchmark_security_config,
     benchmark_many_small_files,
+    benchmark_zip_inspection,
     benchmark_large_files,
     benchmark_nested_directories,
     benchmark_compression_methods,

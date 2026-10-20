@@ -24,6 +24,7 @@ fn extraction_error_kind(err: &ArchiveError) -> String {
         ArchiveError::SymlinkEscape { .. } => "SymlinkEscape",
         ArchiveError::HardlinkEscape { .. } => "HardlinkEscape",
         ArchiveError::ZipBomb(_) => "ZipBomb",
+        ArchiveError::ZipInconsistency(_) => "ZipInconsistency",
         ArchiveError::InvalidPermissions { .. } => "InvalidPermissions",
         ArchiveError::QuotaExceeded { .. } => "QuotaExceeded",
         ArchiveError::SecurityViolation { .. } => "SecurityViolation",

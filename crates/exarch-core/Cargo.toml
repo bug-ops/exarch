@@ -29,6 +29,9 @@ zstd.workspace = true
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
 
+[target.'cfg(target_os = "macos")'.dependencies]
+unicode-normalization.workspace = true
+
 [dev-dependencies]
 criterion.workspace = true
 dhat.workspace = true

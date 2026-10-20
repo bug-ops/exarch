@@ -8,12 +8,14 @@ use exarch_core::SecurityConfig;
 use exarch_core::list_archive;
 
 pub fn execute(args: &ListArgs, formatter: &mut dyn OutputFormatter) -> Result<()> {
-    let config = apply_size_limits(
-        SecurityConfig::default().with_max_file_count(args.max_files),
-        args.max_total_size,
-        args.max_file_size,
-    )
-    .with_allow_solid_archives(args.allow_solid_archives);
+    let config = args
+        .zip
+        .apply(apply_size_limits(
+            SecurityConfig::default().with_max_file_count(args.max_files),
+            args.max_total_size,
+            args.max_file_size,
+        ))
+        .with_allow_solid_archives(args.allow_solid_archives);
 
     // List archive
     let manifest = list_archive(&args.archive, &config)?;

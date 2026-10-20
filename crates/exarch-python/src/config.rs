@@ -6,6 +6,7 @@ use exarch_core::ExtractionOptions as CoreExtractionOptions;
 use exarch_core::IntegrityCheck;
 use exarch_core::SecurityConfig as CoreSecurityConfig;
 use exarch_core::VerificationOptions as CoreVerificationOptions;
+use exarch_core::ZipConsistencyPolicy;
 use exarch_core::creation::CreationConfig as CoreCreationConfig;
 use exarch_core::validate_config_entry;
 use pyo3::exceptions::PyValueError;
@@ -164,6 +165,24 @@ impl PySecurityConfig {
     fn with_allow_solid_archives(mut slf: PyRefMut<'_, Self>, allow: bool) -> PyRefMut<'_, Self> {
         slf.inner.allow_solid_archives = allow;
         slf
+    }
+
+    /// Sets how ZIP archives with ambiguous structure are handled.
+    ///
+    /// `"enforce"` (the default, also for `permissive()`) rejects archives
+    /// whose local and central headers disagree, that repeat a name, overlap
+    /// entries or hide records. `"ignore"` keeps the central directory
+    /// interpretation without structural findings.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ValueError` for any other string.
+    fn with_zip_consistency<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        policy: &str,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        slf.inner.zip_consistency = parse_zip_consistency(policy)?;
+        Ok(slf)
     }
 
     /// Sets the maximum memory budget in bytes for decompressing a solid 7z
@@ -347,6 +366,19 @@ impl PySecurityConfig {
         self.inner.allow_solid_archives
     }
 
+    /// Returns how ZIP archives with ambiguous structure are handled
+    /// (`"enforce"` or `"ignore"`).
+    #[getter]
+    fn get_zip_consistency(&self) -> &'static str {
+        self.inner.zip_consistency.as_str()
+    }
+
+    #[setter]
+    fn set_zip_consistency(&mut self, value: &str) -> PyResult<()> {
+        self.inner.zip_consistency = parse_zip_consistency(value)?;
+        Ok(())
+    }
+
     #[getter]
     fn get_max_solid_block_memory(&self) -> u64 {
         self.inner.max_solid_block_memory
@@ -411,6 +443,24 @@ impl PySecurityConfig {
             self.inner.max_path_depth
         )
     }
+}
+
+/// Parses the string form shared with `ZipConsistencyPolicy::as_str`.
+fn parse_zip_consistency(value: &str) -> PyResult<ZipConsistencyPolicy> {
+    ZipConsistencyPolicy::ALL
+        .iter()
+        .copied()
+        .find(|policy| policy.as_str() == value)
+        .ok_or_else(|| {
+            let allowed: Vec<_> = ZipConsistencyPolicy::ALL
+                .iter()
+                .map(|policy| policy.as_str())
+                .collect();
+            PyValueError::new_err(format!(
+                "zip_consistency must be one of {}, got {value:?}",
+                allowed.join(", ")
+            ))
+        })
 }
 
 impl PySecurityConfig {

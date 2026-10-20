@@ -27,6 +27,7 @@ use exarch_core::SecurityConfig;
 use exarch_core::Unvalidated;
 use exarch_core::Validated;
 use exarch_core::VerificationOptions;
+use exarch_core::ZipConsistencyPolicy;
 
 fn base_config() -> SecurityConfig<Unvalidated> {
     SecurityConfig::default()
@@ -47,6 +48,19 @@ pub fn validated() -> &'static SecurityConfig<Validated> {
     static CONFIG: OnceLock<SecurityConfig<Validated>> = OnceLock::new();
     CONFIG.get_or_init(|| {
         base_config()
+            .validate()
+            .expect("fuzz harness SecurityConfig must be internally consistent")
+    })
+}
+
+/// Like [`validated`], but with the ZIP structure policy relaxed so the
+/// archives `Enforce` rejects early still reach listing and verification.
+#[allow(dead_code)]
+pub fn validated_ignoring_zip_structure() -> &'static SecurityConfig<Validated> {
+    static CONFIG: OnceLock<SecurityConfig<Validated>> = OnceLock::new();
+    CONFIG.get_or_init(|| {
+        base_config()
+            .with_zip_consistency(ZipConsistencyPolicy::Ignore)
             .validate()
             .expect("fuzz harness SecurityConfig must be internally consistent")
     })

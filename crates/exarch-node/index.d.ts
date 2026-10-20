@@ -239,6 +239,8 @@ export declare class SecurityConfig {
    * memory. Disabled by default.
    */
   setAllowSolidArchives(allow: boolean): this
+  /** Sets how ZIP archives with ambiguous structure are handled. */
+  setZipConsistency(policy: ZipConsistencyPolicy): this
   /**
    * Sets the maximum memory that may be used to decompress a solid 7z block.
    *
@@ -304,6 +306,15 @@ export declare class SecurityConfig {
   get allowWorldWritable(): boolean
   /** Whether solid 7z archives are allowed. */
   get allowSolidArchives(): boolean
+  /**
+   * How ZIP archives with ambiguous structure are handled.
+   *
+   * # Errors
+   *
+   * Returns error if this binding is older than `exarch-core` and does not
+   * know the policy.
+   */
+  get zipConsistency(): ZipConsistencyPolicy
   /** Maximum memory in bytes for decompressing a solid 7z block. */
   get maxSolidBlockMemory(): number
   /**
@@ -704,6 +715,7 @@ export interface CreationReport {
  * - `SYMLINK_ESCAPE`: Symlink points outside extraction directory
  * - `HARDLINK_ESCAPE`: Hardlink target outside extraction directory
  * - `ZIP_BOMB`: Potential zip bomb detected
+ * - `ZIP_INCONSISTENCY`: ZIP structure is read differently by different tools
  * - `INVALID_PERMISSIONS`: File permissions are invalid or unsafe
  * - `QUOTA_EXCEEDED`: Resource quota exceeded
  * - `SECURITY_VIOLATION`: Security policy violation
@@ -898,7 +910,7 @@ export interface ExtractionReport {
 export type IntegrityStatus = 'OK' | 'FAILED' | 'INCOMPLETE' | 'SKIPPED'
 
 /** Issue category. */
-export type IssueCategory = 'Path Traversal' | 'Symlink Escape' | 'Hardlink Escape' | 'Zip Bomb' | 'Invalid Permissions' | 'Quota Exceeded' | 'Security Policy' | 'Invalid Archive' | 'Suspicious Path' | 'Executable File' | 'Corrupt Data' | 'Integrity Incomplete'
+export type IssueCategory = 'Path Traversal' | 'Symlink Escape' | 'Hardlink Escape' | 'Zip Bomb' | 'Invalid Permissions' | 'Quota Exceeded' | 'Security Policy' | 'Invalid Archive' | 'Suspicious Path' | 'Executable File' | 'Corrupt Data' | 'Integrity Incomplete' | 'Header Mismatch' | 'Duplicate Entry' | 'Overlapping Entries' | 'Hidden Entry' | 'Name Collision'
 
 /** Issue severity. */
 export type IssueSeverity = 'INFO' | 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL'
@@ -1075,3 +1087,13 @@ export declare function verifyArchive(archivePath: string, config?: SecurityConf
  * ```
  */
 export declare function verifyArchiveSync(archivePath: string, config?: SecurityConfig | undefined | null, options?: VerificationOptions | undefined | null): VerificationReport
+
+/**
+ * How ZIP archives with ambiguous structure are handled.
+ *
+ * `enforce` (the default, also for `SecurityConfig.permissive()`) rejects
+ * archives whose local and central headers disagree, that repeat a name,
+ * overlap entries or hide records. `ignore` keeps the central directory
+ * interpretation without structural findings.
+ */
+export type ZipConsistencyPolicy = 'enforce' | 'ignore'

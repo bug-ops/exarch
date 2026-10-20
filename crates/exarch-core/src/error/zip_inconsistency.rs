@@ -1,0 +1,251 @@
+//! Typed findings for ZIP archives whose structure is read differently by
+//! different ZIP readers.
+
+use crate::closed_enum::closed_enum;
+
+macro_rules! index_newtype {
+    ($(#[$meta:meta])* $name:ident) => {
+        $(#[$meta])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        pub struct $name(usize);
+
+        impl $name {
+            /// Wraps a raw index.
+            #[must_use]
+            pub const fn new(index: usize) -> Self {
+                Self(index)
+            }
+
+            /// Returns the raw index.
+            #[must_use]
+            pub const fn get(self) -> usize {
+                self.0
+            }
+        }
+
+        impl ::std::fmt::Display for $name {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                ::std::fmt::Display::fmt(&self.0, f)
+            }
+        }
+    };
+}
+
+index_newtype! {
+    /// Index of an entry in the `zip` crate's entry map, which equals its
+    /// position in the manifest listing.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::ZipEntryIndex;
+    ///
+    /// assert_eq!(ZipEntryIndex::new(3).get(), 3);
+    /// ```
+    ZipEntryIndex
+}
+
+index_newtype! {
+    /// Position of a record in the raw central directory, counting records
+    /// that the `zip` crate collapsed because they share a name.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::CentralRecordOrdinal;
+    ///
+    /// assert_eq!(CentralRecordOrdinal::new(1).to_string(), "1");
+    /// ```
+    CentralRecordOrdinal
+}
+
+closed_enum! {
+    /// Header field in which a ZIP local header disagrees with its central
+    /// directory record.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::ZipHeaderField;
+    ///
+    /// assert_eq!(ZipHeaderField::FileName.to_string(), "file name");
+    /// ```
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[non_exhaustive]
+    pub enum ZipHeaderField {
+        /// File name
+        FileName => "file name",
+
+        /// Unicode Path extra field
+        UnicodePath => "unicode path",
+
+        /// Compression method
+        CompressionMethod => "compression method",
+
+        /// Encryption flag
+        EncryptionFlag => "encryption flag",
+
+        /// Data descriptor flag
+        DataDescriptorFlag => "data descriptor flag",
+
+        /// Modification time
+        ModifiedTime => "modification time",
+
+        /// CRC-32
+        Crc32 => "crc32",
+
+        /// Compressed size
+        CompressedSize => "compressed size",
+
+        /// Uncompressed size
+        UncompressedSize => "uncompressed size",
+
+        /// The `zip` crate reported a field this version does not know
+        Unrecognized => "unrecognized field",
+
+        /// The local header could not be parsed, so it could not be compared
+        Unparseable => "unparseable local header",
+    }
+}
+
+/// A structural finding that makes a ZIP archive ambiguous between readers.
+///
+/// Names are the raw central directory bytes decoded lossily; the `zip`
+/// crate's own key can differ after Unicode Path substitution.
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::CentralRecordOrdinal;
+/// use exarch_core::ZipInconsistency;
+///
+/// let finding = ZipInconsistency::DuplicateName {
+///     record: CentralRecordOrdinal::new(1),
+///     name: "a.txt".to_string(),
+/// };
+/// assert_eq!(
+///     finding.to_string(),
+///     "duplicate entry name \"a.txt\" (record 1)"
+/// );
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ZipInconsistency {
+    /// A local header disagrees with its central directory record.
+    HeaderMismatch {
+        /// Entry in the crate's entry map.
+        entry: ZipEntryIndex,
+        /// Field that differs.
+        field: ZipHeaderField,
+        /// Central directory name of the entry.
+        name: String,
+    },
+
+    /// Two or more central directory records share a name.
+    DuplicateName {
+        /// Position in the raw central directory of a record that the `zip`
+        /// crate collapsed into a later record with the same name.
+        record: CentralRecordOrdinal,
+        /// Shared name.
+        name: String,
+    },
+
+    /// Entry data ranges intersect.
+    OverlappingEntries,
+
+    /// A local header exists that no central directory record maps.
+    HiddenLocalHeader {
+        /// Absolute offset of the unmapped header.
+        offset: u64,
+    },
+
+    /// The central directory holds more records than its end record counts.
+    UncountedCentralRecords {
+        /// Count claimed by the end of central directory record.
+        counted: usize,
+        /// Records actually present.
+        found: usize,
+    },
+}
+
+impl std::fmt::Display for ZipInconsistency {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::HeaderMismatch { entry, field, name } => match field {
+                ZipHeaderField::Unparseable => write!(
+                    f,
+                    "local header of entry {entry} ({name:?}) cannot be parsed, so it cannot be \
+                     compared with the central directory"
+                ),
+                ZipHeaderField::Unrecognized => write!(
+                    f,
+                    "local header of entry {entry} ({name:?}) fails the header consistency check \
+                     in a way this version does not recognize"
+                ),
+                _ => write!(
+                    f,
+                    "local header disagrees with central directory on {field} for entry {entry} \
+                     ({name:?})"
+                ),
+            },
+            Self::DuplicateName { record, name } => {
+                write!(f, "duplicate entry name {name:?} (record {record})")
+            }
+            Self::OverlappingEntries => f.write_str("entry data ranges overlap"),
+            Self::HiddenLocalHeader { offset } => {
+                write!(
+                    f,
+                    "local header at offset {offset} is not in the central directory"
+                )
+            }
+            Self::UncountedCentralRecords { counted, found } => write!(
+                f,
+                "central directory holds {found} records but the end record counts {counted}"
+            ),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mismatch(field: ZipHeaderField) -> String {
+        ZipInconsistency::HeaderMismatch {
+            entry: ZipEntryIndex::new(2),
+            field,
+            name: "a.txt".into(),
+        }
+        .to_string()
+    }
+
+    #[test]
+    fn mismatch_message_names_the_field() {
+        assert_eq!(
+            mismatch(ZipHeaderField::Crc32),
+            "local header disagrees with central directory on crc32 for entry 2 (\"a.txt\")"
+        );
+    }
+
+    #[test]
+    fn unparseable_and_unrecognized_get_their_own_wording() {
+        assert!(mismatch(ZipHeaderField::Unparseable).contains("cannot be parsed"));
+        assert!(mismatch(ZipHeaderField::Unrecognized).contains("does not recognize"));
+    }
+
+    #[test]
+    fn findings_render_their_positions() {
+        assert_eq!(
+            ZipInconsistency::HiddenLocalHeader { offset: 45 }.to_string(),
+            "local header at offset 45 is not in the central directory"
+        );
+        assert_eq!(
+            ZipInconsistency::UncountedCentralRecords {
+                counted: 1,
+                found: 2
+            }
+            .to_string(),
+            "central directory holds 2 records but the end record counts 1"
+        );
+    }
+}

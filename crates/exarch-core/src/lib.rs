@@ -30,6 +30,8 @@ pub mod creation;
 pub mod error;
 pub mod formats;
 pub mod inspection;
+#[cfg(test)]
+pub(crate) mod raw_zip;
 pub mod report;
 pub mod security;
 pub(crate) mod test_utils;
@@ -54,7 +56,9 @@ pub use config::SecurityConfig;
 pub use config::Unvalidated;
 pub use config::Validated;
 pub use config::VerificationOptions;
+pub use config::ZipConsistencyPolicy;
 pub use error::ArchiveError;
+pub use error::CentralRecordOrdinal;
 pub use error::CompressionRatio;
 pub use error::FfiErrorMessage;
 pub use error::IoContext;
@@ -62,6 +66,9 @@ pub use error::QuotaResource;
 pub use error::Result;
 pub use error::ZipBombDetails;
 pub use error::ZipBombScope;
+pub use error::ZipEntryIndex;
+pub use error::ZipHeaderField;
+pub use error::ZipInconsistency;
 /// Formats an archive-relative, attacker-authored path for an FFI error
 /// message without redaction. Shared by `exarch-python` and `exarch-node`.
 pub use error::redaction::format_entry_path_for_error;
@@ -89,6 +96,7 @@ pub use inspection::EntryCompression;
 pub use inspection::IntegrityStatus;
 pub use inspection::IssueCategory;
 pub use inspection::IssueSeverity;
+pub use inspection::LinkTarget;
 pub use inspection::ManifestEntryKind;
 pub use inspection::ManifestEntryType;
 pub use inspection::SolidBlock;

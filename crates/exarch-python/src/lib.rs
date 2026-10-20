@@ -61,6 +61,8 @@ const _: () = assert!(
 /// * `InvalidPermissionsError` - File permissions are invalid or unsafe
 /// * `QuotaExceededError` - Resource quota exceeded
 /// * `SecurityViolationError` - Security policy violation
+/// * `ZipInconsistencyError` - ZIP structure is read differently by different
+///   tools (subclass of `SecurityViolationError`)
 /// * `UnsupportedFormatError` - Archive format not supported
 /// * `InvalidArchiveError` - Archive is corrupted
 /// * `IOError` - I/O operation failed

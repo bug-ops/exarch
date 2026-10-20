@@ -14,12 +14,12 @@ use exarch_core::verify_archive_with_options;
 
 pub fn execute(args: &VerifyArgs, formatter: &mut dyn OutputFormatter) -> Result<()> {
     let config = args
-        .links
-        .apply(apply_size_limits(
+        .zip
+        .apply(args.links.apply(apply_size_limits(
             SecurityConfig::default().with_max_file_count(args.max_files),
             args.max_total_size,
             args.max_file_size,
-        ))
+        )))
         .with_allow_solid_archives(args.allow_solid_archives);
 
     let options = if args.check_integrity {

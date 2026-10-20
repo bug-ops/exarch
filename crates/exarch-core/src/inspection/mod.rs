@@ -36,6 +36,7 @@ pub use list::list_archive;
 pub use manifest::ArchiveEntry;
 pub use manifest::ArchiveManifest;
 pub use manifest::EntryCompression;
+pub use manifest::LinkTarget;
 pub use manifest::ManifestEntryKind;
 pub use manifest::ManifestEntryType;
 pub use manifest::SolidBlock;

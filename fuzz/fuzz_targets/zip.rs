@@ -10,12 +10,15 @@ use libfuzzer_sys::fuzz_target;
 mod common;
 
 fuzz_target!(|data: &[u8]| {
-    let config = common::validated();
-
-    if let Ok(mut archive) = ZipArchive::new(Cursor::new(data)) {
-        let _ = archive.list(config);
-    }
-    if let Ok(mut archive) = ZipArchive::new(Cursor::new(data)) {
-        let _ = archive.verify(config, &common::verification_options());
+    for config in [
+        common::validated(),
+        common::validated_ignoring_zip_structure(),
+    ] {
+        if let Ok(mut archive) = ZipArchive::new(Cursor::new(data)) {
+            let _ = archive.list(config);
+        }
+        if let Ok(mut archive) = ZipArchive::new(Cursor::new(data)) {
+            let _ = archive.verify(config, &common::verification_options());
+        }
     }
 });

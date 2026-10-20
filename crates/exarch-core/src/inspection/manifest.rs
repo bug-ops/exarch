@@ -8,6 +8,7 @@ use crate::ArchiveError;
 use crate::Result;
 use crate::closed_enum::closed_enum;
 use crate::formats::detect::ArchiveType;
+use crate::security::fs_view::check_name_lengths;
 
 /// Complete manifest of archive contents.
 ///
@@ -259,11 +260,75 @@ impl EntryCompression {
     }
 }
 
+/// Link target of a manifest entry, as far as the listing could keep it.
+///
+/// An over-long target is not retained: only its byte length is kept, so an
+/// archive of many links with huge targets cannot inflate the manifest.
+///
+/// # Examples
+///
+/// ```
+/// use std::path::Path;
+///
+/// use exarch_core::LinkTarget;
+///
+/// assert_eq!(
+///     LinkTarget::Recorded("a.txt".into()).path(),
+///     Some(Path::new("a.txt"))
+/// );
+/// assert_eq!(LinkTarget::Oversized { bytes: 9000 }.path(), None);
+/// assert_eq!(
+///     LinkTarget::classify("x".repeat(5000).into()),
+///     LinkTarget::Oversized { bytes: 5000 }
+/// );
+/// assert_eq!(LinkTarget::Missing.path(), None);
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum LinkTarget {
+    /// Target as stored in the archive, within the host's name limits
+    Recorded(PathBuf),
+
+    /// The archive stores no target
+    Missing,
+
+    /// The target exceeds the host's name limits; only its length is kept
+    Oversized {
+        /// Length of the stored target in bytes
+        bytes: usize,
+    },
+}
+
+impl LinkTarget {
+    /// Keeps `path` when it fits the host's name limits, otherwise drops it
+    /// and keeps only its length.
+    #[must_use]
+    pub fn classify(path: PathBuf) -> Self {
+        if check_name_lengths(&path).is_ok() {
+            Self::Recorded(path)
+        } else {
+            Self::Oversized {
+                bytes: path.as_os_str().len(),
+            }
+        }
+    }
+
+    /// Returns the recorded target, or `None` when it is missing or oversized.
+    #[must_use]
+    pub fn path(&self) -> Option<&Path> {
+        match self {
+            Self::Recorded(path) => Some(path),
+            Self::Missing | Self::Oversized { .. } => None,
+        }
+    }
+}
+
 /// Kind of a manifest entry; link kinds carry their target.
 ///
 /// The target lives in the variant, so a regular file cannot carry one. It is
-/// `None` only for entries produced by the relaxed listing that
-/// [`verify_archive`](crate::verify_archive) uses, where a missing target must
+/// [`LinkTarget::Missing`] or [`LinkTarget::Oversized`] only for entries
+/// produced by the relaxed listing that
+/// [`verify_archive`](crate::verify_archive) uses, where such a target must
 /// become a report issue instead of a listing error.
 ///
 /// # Examples
@@ -271,11 +336,12 @@ impl EntryCompression {
 /// ```
 /// use std::path::Path;
 ///
+/// use exarch_core::LinkTarget;
 /// use exarch_core::ManifestEntryKind;
 /// use exarch_core::ManifestEntryType;
 ///
 /// let kind = ManifestEntryKind::Symlink {
-///     target: Some("a.txt".into()),
+///     target: LinkTarget::Recorded("a.txt".into()),
 /// };
 /// assert_eq!(kind.entry_type(), ManifestEntryType::Symlink);
 /// assert_eq!(kind.link_target(), Some(Path::new("a.txt")));
@@ -293,13 +359,13 @@ pub enum ManifestEntryKind {
     /// Symbolic link
     Symlink {
         /// Link target as stored in the archive
-        target: Option<PathBuf>,
+        target: LinkTarget,
     },
 
     /// Hard link
     Hardlink {
         /// Link target as stored in the archive
-        target: Option<PathBuf>,
+        target: LinkTarget,
     },
 }
 
@@ -319,7 +385,7 @@ impl ManifestEntryKind {
     #[must_use]
     pub fn symlink_target(&self) -> Option<&Path> {
         match self {
-            Self::Symlink { target } => target.as_deref(),
+            Self::Symlink { target } => target.path(),
             Self::File | Self::Directory | Self::Hardlink { .. } => None,
         }
     }
@@ -328,7 +394,7 @@ impl ManifestEntryKind {
     #[must_use]
     pub fn hardlink_target(&self) -> Option<&Path> {
         match self {
-            Self::Hardlink { target } => target.as_deref(),
+            Self::Hardlink { target } => target.path(),
             Self::File | Self::Directory | Self::Symlink { .. } => None,
         }
     }

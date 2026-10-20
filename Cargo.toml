@@ -53,6 +53,7 @@ thiserror = "2.0"
 time = "0.3"
 tokio = "1.53"
 trybuild = "1.0"
+unicode-normalization = "0.1.26"
 walkdir = "2.5"
 xz2 = { version = "0.1", features = ["static"] }
 zip = { version = "9.0.5", default-features = false }

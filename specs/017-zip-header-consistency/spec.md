@@ -10,7 +10,7 @@ tags:
   - rust
   - typestate
 created: 2026-10-19
-status: draft
+status: implemented
 related:
   - "[[constitution]]"
   - "[[MOC-specs]]"
@@ -31,7 +31,7 @@ related:
 > **MSRV**: Rust 1.98.0
 > **Origin**: #637 (new issue)
 > **Type / priority**: enhancement (hardening), P2
-> **Status**: draft — specify phase only; no plan or tasks yet
+> **Status**: implemented with #637, #654 and #655 (see section 11 for decisions, deviations and residuals)
 > **Baseline**: reproduced on commit cf4cfea with default configuration and `zip` 9.0.5 (locked)
 
 ## 1. Overview
@@ -89,7 +89,7 @@ THEN it returns a typed header-inconsistency error identifying the mismatch kind
 
 AS A security engineer using `exarch verify` as an admission gate
 I WANT `verify` to flag header inconsistencies, duplicate names and overlapping entries, and to report the true entry count
-SO THAT a PASS means the archive is interpreted the same way by every ZIP reader
+SO THAT a PASS means the archive has none of the structural ambiguities listed in section 11, with the residuals named there excepted
 
 **Acceptance criteria:**
 ```
@@ -137,12 +137,12 @@ THEN behavior matches today's (central-directory interpretation) with no new rej
 | FR-004 | WHEN the Enforce policy rejects an archive in `extract_archive` or `list_archive` THE SYSTEM SHALL return a typed `ArchiveError` variant carrying a typed mismatch-kind enum and the offending entry index and central-directory name, and SHALL NOT write any file to the destination | must |
 | FR-005 | WHEN `verify_archive` runs on an inconsistent ZIP THE SYSTEM SHALL record each finding as an `inspection::report::IssueCategory` variant (new variant(s) for header inconsistency, duplicate entry, overlapping entries) in `VerificationReport.issues` rather than propagating an error, per the constitution's verify-reporting rule | must |
 | FR-006 | WHEN `verify_archive` runs on a ZIP THE SYSTEM SHALL report the true number of entries in the central directory, including entries sharing a name, regardless of the configured policy | must |
-| FR-007 | WHEN `list_archive` runs on a ZIP containing duplicate names under the Ignore policy THE SYSTEM SHALL list every entry rather than collapsing duplicates `[NEEDS CLARIFICATION: confirm in the plan phase whether the current under-count originates in the zip crate's name index or in exarch's own listing/dedup logic, and what the Ignore-policy extraction semantics for duplicates should be]` | should |
+| FR-007 | WHEN `list_archive` runs on a ZIP containing duplicate names under the Ignore policy THE SYSTEM SHALL list every entry rather than collapsing duplicates. **Resolved:** the under-count originates in the `zip` crate's name index, which keeps one slot per name (first record's position, last record's data) and drops the other records, so they cannot be listed. Ignore lists the crate's view and keeps "last entry wins" extraction; `verify` still reports the raw record count and, under Enforce, a duplicate-entry finding | should |
 | FR-008 | THE SYSTEM SHALL expose the policy as a two-state enum (working name `HeaderConsistencyPolicy { Enforce, Ignore }`, final naming in plan) stored on `SecurityConfig`, settable through a fluent `with_*` builder on the `Unvalidated` state only, immutable once `Validated`, consistent with [[014-config-typestate-validation/spec]] | must |
 | FR-009 | THE SYSTEM SHALL NOT represent the policy as a `bool`, string, or untyped map at any layer (core, CLI, Python, Node) | must |
 | FR-010 | THE SYSTEM SHALL expose the policy through `exarch-cli` (typed `clap` value enum), `exarch-python` and `exarch-node` with identical semantics; the bindings SHALL only map the type and convert the error/issue variants, with all checking logic remaining in `exarch-core` | must |
 | FR-011 | WHEN a new error or issue variant is added THE SYSTEM SHALL keep `ArchiveError` and `IssueCategory` `#[non_exhaustive]` and update the wildcard-arm conversions in CLI, Python and Node so an unmapped variant has a generic fallback (per [[016-sanitized-mode-and-non-exhaustive-enums/spec]]) | must |
-| FR-012 | WHEN the central directory entry count exceeds `max_file_count` THE SYSTEM SHALL reject the archive before running the per-entry header comparison, so the consistency check cannot be used for resource exhaustion | must |
+| FR-012 | WHEN the central directory entry count exceeds `max_file_count` THE SYSTEM SHALL reject the archive before running the per-entry header comparison, so the consistency check cannot be used for resource exhaustion. **Deviation:** the comparison runs while the archive is opened, before any config is known (the open already read one local header per entry without a count bound, so the comparison adds a constant factor and no new vector). The raw record count is checked against `max_file_count` at the start of every operation, whatever the policy, and no operation does further work past it | must |
 | FR-013 | THE SYSTEM SHALL document the policy, its default, and the false-positive trade-off in the public API docs of the new enum and builder method, and in the `exarch-cli` skill under `skills/` | must |
 | FR-014 | THE SYSTEM SHOULD keep the check on the shared ZIP open path so `extract`, `list` and `verify` cannot diverge (single enforcement point, DRY) | should |
 
@@ -158,7 +158,7 @@ THEN behavior matches today's (central-directory interpretation) with no new rej
 | NFR-006 | API stability | The new config field, enum, error variant(s) and issue category variant(s) are public API changes; document in `CHANGELOG.md` under `[Unreleased]` (pre-1.0.0, no deprecation window); if the default is Enforce this is also a behavior change for existing callers and must be called out as such |
 | NFR-007 | Compatibility | A compatibility corpus of legitimate ZIPs produced by common tools must pass under the default policy (see section 7, SC-004) |
 | NFR-008 | Documentation | Every new `pub` item has a `///` doc comment with runnable `# Examples` for non-trivial APIs; docs build with `RUSTDOCFLAGS="-D warnings"` |
-| NFR-009 | Dependencies | No new dependency; the work uses the already-locked `zip` 9.0.5 API. The constitution's Technology Stack line still lists `zip` 9.0.0-pre2 and should be refreshed when this lands |
+| NFR-009 | Dependencies | No new dependency for the structural checks; the work uses the already-locked `zip` 9.0.5 API. The constitution's Technology Stack line still lists `zip` 9.0.0-pre2 and should be refreshed when this lands. The same change adds `unicode-normalization` as a macOS-only dependency for the name folding of #654 |
 
 ## 5. Data Model
 
@@ -225,7 +225,7 @@ THEN behavior matches today's (central-directory interpretation) with no new rej
 ## 9. Open Questions
 
 > [!question] Default policy
-> [NEEDS CLARIFICATION: should the default be strict (Enforce) or opt-in (Ignore)?]
+> **Resolved: Enforce by default, including `SecurityConfig::permissive()`.** The compatibility corpus (SC-004) showed no false positives from the producers that could be tested (Info-ZIP, ditto, 7-Zip, bsdtar, Go, Python, the `zip` crate); Java and Windows producers were not available. Original question: should the default be strict (Enforce) or opt-in (Ignore)?
 >
 > **Recommendation: Enforce by default, with a documented typed opt-out (Ignore).**
 >
@@ -237,16 +237,16 @@ THEN behavior matches today's (central-directory interpretation) with no new rej
 > Justification: the checks that matter for cloaking (name, UnicodePath, compression method, encryption flag, duplicates, overlap) have essentially no legitimate reason to differ, so the false-positive risk concentrates in the modification-time and data-descriptor comparisons. The recommendation is Enforce by default, gated on the compatibility corpus (SC-004). If the corpus shows legitimate producers failing only on mtime or data-descriptor fields, the fallback is to keep Enforce as the default and treat those specific mismatch kinds as non-fatal for the default path (an explicit, documented relaxation, listed under Ask First), not to flip the default to Ignore.
 
 > [!question] Per-check granularity
-> [NEEDS CLARIFICATION: can the `zip` 9.0.5 API distinguish which check failed (needed for the typed `HeaderInconsistencyKind` and for relaxing mtime only), or does it return a single opaque error? If opaque, decide between a coarser kind enum and a small exarch-side comparison. Resolve in the plan phase before committing to the variant list in section 5.]
+> **Resolved:** the crate reports one opaque `InvalidArchive` error per failed check; exarch classifies it by the fixed message prefix into `ZipHeaderField`, and a message it does not recognise becomes `Unrecognized` (rejection never depends on the classification). One test per field pins the locked crate's wording. Original question: can the `zip` 9.0.5 API distinguish which check failed (needed for the typed `HeaderInconsistencyKind` and for relaxing mtime only), or does it return a single opaque error? If opaque, decide between a coarser kind enum and a small exarch-side comparison. Resolve in the plan phase before committing to the variant list in section 5.]
 
 > [!question] Validation strategy and cost
-> [NEEDS CLARIFICATION: whole-archive `validate_header_consistency()` at open versus per-entry `enforce_header_consistency` while iterating. Extraction already reads each LFH to locate entry data, so per-entry enforcement adds mostly comparison cost; `list` and `verify` do not touch LFHs today, so they gain roughly one seek and a small read per entry (about 10,000 extra seeks for a 10,000-entry archive, which may be noticeable on network or cold storage). Decide in the plan phase using the benchmark numbers from SC-007 and SC-008, and whether `list` should validate at all or only report from the central directory plus a cheaper structural check.]
+> **Resolved:** per-entry enforcement while the archive is opened, so `extract`, `list` and `verify` share one pass (FR-014); costs are recorded in `.local/testing/benchmarks.md`. Original question: whole-archive `validate_header_consistency()` at open versus per-entry `enforce_header_consistency` while iterating. Extraction already reads each LFH to locate entry data, so per-entry enforcement adds mostly comparison cost; `list` and `verify` do not touch LFHs today, so they gain roughly one seek and a small read per entry (about 10,000 extra seeks for a 10,000-entry archive, which may be noticeable on network or cold storage). Decide in the plan phase using the benchmark numbers from SC-007 and SC-008, and whether `list` should validate at all or only report from the central directory plus a cheaper structural check.]
 
 > [!question] Duplicate semantics under Ignore
-> [NEEDS CLARIFICATION: see FR-007. Establish where the 1-entry undercount originates, and decide whether Ignore keeps "last entry wins" extraction or listing shows all entries while extraction behavior is unchanged.]
+> **Resolved:** see FR-007. Original question: see FR-007. Establish where the 1-entry undercount originates, and decide whether Ignore keeps "last entry wins" extraction or listing shows all entries while extraction behavior is unchanged.]
 
 > [!question] Exact policy and enum naming
-> [NEEDS CLARIFICATION: final names for the policy enum, the `SecurityConfig` builder method, the CLI flag and the Python/Node surface; align with the naming conventions already used for typed enums in the bindings.]
+> **Resolved:** `ZipConsistencyPolicy { Enforce, Ignore }`, `SecurityConfig::with_zip_consistency`, CLI `--zip-consistency <enforce|ignore>`, Python `with_zip_consistency("enforce" | "ignore")`, Node `setZipConsistency`, error `ArchiveError::ZipInconsistency(ZipInconsistency)`. Original question: final names for the policy enum, the `SecurityConfig` builder method, the CLI flag and the Python/Node surface; align with the naming conventions already used for typed enums in the bindings.]
 
 ## 10. See Also
 
@@ -262,3 +262,15 @@ THEN behavior matches today's (central-directory interpretation) with no new rej
 - zip2 advisory GHSA-m665-v7pm-7grj ("Zip Cloaking", published 2026-10-17; fixed by opt-in header-consistency validation in `zip` 9.0.5)
 - CPython `Lib/zipfile/__init__.py`: `_RealGetContents` and `ZipFile.open` (central/local file-name mismatch check raising `BadZipFile`)
 - CWE-436: Interpretation Conflict
+
+## 11. Implementation Notes
+
+- **Census.** Opening runs the crate's header check on every entry, walks the raw central directory from its start (duplicate records, records beyond the end record's count), looks for local headers in the gaps around entry data and re-parses the archive, which must describe the same directory. Any disagreement fails closed as `InvalidArchive`.
+- **Findings.** `ZipInconsistency::{HeaderMismatch, DuplicateName, OverlappingEntries, HiddenLocalHeader, UncountedCentralRecords}`; verify categories `Header Mismatch`, `Duplicate Entry`, `Overlapping Entries`, `Hidden Entry`. Findings are kept up to a limit per kind (24 header mismatches, 16 duplicate names, 16 hidden headers, one overlap, one uncounted-records finding: 58 in all); the rest are counted and reported as a note, and the search for hidden headers stops at the first one past its limit.
+- **Policy.** `Enforce` rejects in `extract` and `list` and reports in `verify`; `Ignore` raises no structural finding. An entry whose local header cannot be parsed fails closed under `Enforce` (`ZipHeaderField::Unparseable`); under `Ignore` it is still admitted through the normal size and method checks.
+- **Entry count.** `verify` reports the raw central directory count. A raw count over `max_file_count` is a `QuotaExceeded` error from `extract`, `list` and `verify`, whatever the policy.
+- **Behaviour changes.** Pre-ZIP64 archives with more than 65535 entries (wrapped end-record count) and archives with orphaned local headers left by in-place updaters are rejected under `Enforce`. With duplicate names the local headers are not compared with the central directory.
+- **Hidden headers.** The bytes before the first entry, between entries and before the directory are searched for local header signatures (a plausible header needs a name and must fit before the directory), so a header behind padding is found; offset 0 is checked even when a stub precedes the archive. Contiguous archives cost no read. With duplicate names the gaps are not searched.
+- **Residuals, not covered:** (D4) a descriptor, local header and data hidden inside the declared compressed range of a data-descriptor entry, which streaming readers such as `bsdtar` extract and `zip` ignores (closing it needs the end of the compressed stream, i.e. decoding); central directory records located before the directory start; the stub bytes before the archive other than offset 0; and an earlier end-of-central-directory candidate that the `zip` crate falls back to when the last one fails to parse. The `zip` crate writer's own ZIP64 directory entries are rejected by the crate's header check. Only archives from Info-ZIP, `ditto`, 7-Zip, `bsdtar`, Go and Python were tested for false positives; Java and Windows producers were not.
+- **Single parse.** The archive is parsed once through a shared reader handle, so admission and every later operation use the same directory.
+- **#654 / #655.** Names fold through NFD plus a per-character case fold on macOS and the case fold alone on Windows; names that differ exactly but fold equal are a `Name Collision` issue. The symlink hop limit is a per-OS constant checked against `canonicalize`. Link targets over the host's name limits are kept as their length only (`LinkTarget::Oversized`), rejected by `list` and reported by `verify`.

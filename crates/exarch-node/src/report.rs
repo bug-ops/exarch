@@ -20,7 +20,7 @@ fn saturating_i64(n: u64) -> i64 {
     i64::try_from(n).unwrap_or(i64::MAX)
 }
 
-fn unknown_variant(what: &str, wire: &str) -> Error {
+pub fn unknown_variant(what: &str, wire: &str) -> Error {
     Error::from_reason(format!(
         "exarch-node is older than exarch-core: unknown {what} '{wire}'"
     ))
@@ -265,6 +265,21 @@ pub enum IssueCategory {
     /// The integrity check could not cover part of the payload.
     #[napi(value = "Integrity Incomplete")]
     IntegrityIncomplete,
+    /// ZIP local header disagrees with its central directory record.
+    #[napi(value = "Header Mismatch")]
+    HeaderMismatch,
+    /// ZIP central directory repeats an entry name.
+    #[napi(value = "Duplicate Entry")]
+    DuplicateEntry,
+    /// ZIP entry data ranges intersect.
+    #[napi(value = "Overlapping Entries")]
+    OverlappingEntries,
+    /// ZIP entry that the central directory does not account for.
+    #[napi(value = "Hidden Entry")]
+    HiddenEntry,
+    /// Two entry names the host filesystem treats as one.
+    #[napi(value = "Name Collision")]
+    NameCollision,
 }
 
 impl TryFrom<CoreIssueCategory> for IssueCategory {
@@ -284,6 +299,11 @@ impl TryFrom<CoreIssueCategory> for IssueCategory {
             CoreIssueCategory::ExecutableFile => Self::ExecutableFile,
             CoreIssueCategory::CorruptData => Self::CorruptData,
             CoreIssueCategory::IntegrityIncomplete => Self::IntegrityIncomplete,
+            CoreIssueCategory::HeaderMismatch => Self::HeaderMismatch,
+            CoreIssueCategory::DuplicateEntry => Self::DuplicateEntry,
+            CoreIssueCategory::OverlappingEntries => Self::OverlappingEntries,
+            CoreIssueCategory::HiddenEntry => Self::HiddenEntry,
+            CoreIssueCategory::NameCollision => Self::NameCollision,
             other => return Err(unknown_variant("issue category", other.as_str())),
         })
     }

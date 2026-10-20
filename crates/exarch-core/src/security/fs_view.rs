@@ -12,11 +12,16 @@
 //! a non-empty destination succeeds. Further differences from the host
 //! filesystem:
 //!
-//! - symlink chains are cut off after [`MAX_SYMLINK_HOPS`] hops, which may
-//!   differ from the host's own limit;
-//! - on macOS and Windows hosts names are matched after lowercasing only; names
-//!   the host filesystem treats as equal under Unicode normalisation (NFC/NFD)
-//!   or special case folding (final sigma) are not modelled;
+//! - symlink chains are cut off after [`MAX_SYMLINK_HOPS`] hops, a per-OS
+//!   constant that matches `std::fs::canonicalize` on the supported hosts
+//!   (macOS 33, glibc 40, musl 39, Windows 63 unverified, other Unix 32); a
+//!   different filesystem or kernel configuration can still disagree;
+//! - on macOS names are compared after NFD and a per-character
+//!   upper/lower/upper case fold, on Windows after the same fold without
+//!   normalisation, and elsewhere exactly. The fold is an approximation of the
+//!   host's table: two names it merges but the host keeps apart (for example
+//!   `i` and dotless `ı`) are reported as a name collision, never silently
+//!   merged;
 //! - only extraction that skips an existing entry is modelled; with overwrite
 //!   semantics extraction keeps the last entry at a path, which cannot be
 //!   modelled here;
@@ -35,13 +40,39 @@ use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
 
-/// Maximum number of symlinks followed while resolving a single path.
+/// Maximum number of symlinks followed while resolving a single path, as the
+/// host's `realpath` allows it.
+#[cfg(target_os = "macos")]
+pub const MAX_SYMLINK_HOPS: usize = 33;
+
+/// Maximum number of symlinks followed while resolving a single path, as the
+/// host's `realpath` allows it.
+#[cfg(all(target_os = "linux", target_env = "musl"))]
+pub const MAX_SYMLINK_HOPS: usize = 39;
+
+/// Maximum number of symlinks followed while resolving a single path, as the
+/// host's `realpath` allows it.
+#[cfg(all(target_os = "linux", not(target_env = "musl")))]
 pub const MAX_SYMLINK_HOPS: usize = 40;
+
+/// Maximum number of symlinks followed while resolving a single path, as the
+/// host's `realpath` allows it.
+#[cfg(target_os = "windows")]
+pub const MAX_SYMLINK_HOPS: usize = 63;
+
+/// Maximum number of symlinks followed while resolving a single path. A low
+/// guess can only turn a PASS into a false FAIL.
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+pub const MAX_SYMLINK_HOPS: usize = 32;
 
 /// Longest single path component the host accepts (`NAME_MAX`).
 pub const MAX_COMPONENT_BYTES: usize = 255;
 
 /// Longest relative path the host accepts (`PATH_MAX`).
+///
+/// The real limit differs per host, and symlink targets have their own (macOS
+/// 1023, Linux 4095), so a path or target between those values can pass the
+/// model and still fail on extraction.
 pub const MAX_PATH_BYTES: usize = 4096;
 
 /// Rejects entry names the host would refuse with `ENAMETOOLONG`.
@@ -55,12 +86,15 @@ pub fn check_name_lengths(path: &Path) -> io::Result<()> {
             .components()
             .any(|c| c.as_os_str().as_encoded_bytes().len() > MAX_COMPONENT_BYTES);
     if too_long {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidFilename,
-            "file name too long",
-        ));
+        return Err(name_too_long());
     }
     Ok(())
+}
+
+/// The error for a name beyond the host's limits.
+#[must_use]
+pub fn name_too_long() -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidFilename, "file name too long")
 }
 
 /// Filesystem probes needed while validating archive entries.
@@ -103,6 +137,46 @@ impl FsView for HostFs {
     }
 }
 
+/// How two colliding names differ, which sets how serious the collision is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CollisionKind {
+    /// Both are directories and neither holds anything in the archive, so the
+    /// merge changes nothing
+    Directories,
+    /// Both are directories and at least one holds entries, which then land in
+    /// one directory and can overwrite each other
+    DirectoriesWithContents,
+    /// Both are files, so one silently replaces or is skipped for the other
+    Files,
+    /// The kinds differ or a symlink is involved, so later entries can
+    /// resolve differently than the archive intends
+    Mixed,
+}
+
+/// Two entry names that differ exactly but are one name on the host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NameCollision {
+    /// Path of the node that was there first
+    pub existing: PathBuf,
+    /// Path of the entry that hit it
+    pub incoming: PathBuf,
+    /// How the two differ
+    pub kind: CollisionKind,
+}
+
+impl CollisionKind {
+    fn of(existing: &Node, incoming: &Node, existing_has_contents: bool) -> Self {
+        match (existing, incoming) {
+            (Node::Dir, Node::Dir) if existing_has_contents => Self::DirectoriesWithContents,
+            (Node::Dir, Node::Dir) => Self::Directories,
+            (Node::File, Node::File) => Self::Files,
+            _ => Self::Mixed,
+        }
+    }
+}
+
+type FoldFn = for<'a> fn(&'a OsStr) -> Cow<'a, OsStr>;
+
 /// The kind of a node in the in-memory tree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Node {
@@ -117,15 +191,27 @@ pub enum Node {
 #[derive(Debug)]
 struct TreeNode {
     kind: Node,
-    /// Only populated for directories; keyed by the folded component.
+    /// The component exactly as the archive spells it.
+    name: OsString,
+    /// Only populated for directories; every spelling seen so far (the node's
+    /// own and its aliases) mapped to the child, so a repeated spelling is
+    /// found without folding it.
     children: HashMap<OsString, usize>,
+    /// Folded component to child; empty on hosts that compare names exactly.
+    folded: HashMap<OsString, usize>,
+    /// Pairs of spellings of this directory that merged while it was empty: if
+    /// it later gains an entry the merge stops being harmless.
+    empty_merges: Vec<(PathBuf, PathBuf)>,
 }
 
 impl TreeNode {
-    fn new(kind: Node) -> Self {
+    fn new(kind: Node, name: &OsStr) -> Self {
         Self {
             kind,
+            name: name.to_os_string(),
             children: HashMap::new(),
+            folded: HashMap::new(),
+            empty_merges: Vec::new(),
         }
     }
 }
@@ -137,28 +223,53 @@ enum Resolved {
     Outside(PathBuf),
 }
 
+/// A child found by name.
+#[derive(Clone, Copy)]
+struct Found {
+    id: usize,
+    /// Found only through the fold: the archive spells it differently.
+    alias: bool,
+}
+
 /// In-memory model of the destination directory built from archive entries.
 ///
 /// Stored as a per-directory component trie, so a lookup or insert costs
-/// O(bytes of the path) regardless of how many entries share a prefix.
-#[derive(Debug)]
+/// O(bytes of the path) regardless of how many entries share a prefix. A name
+/// is folded only the first time it is seen; repeats, such as the parents of
+/// every entry in a directory, hit the exact-spelling map.
 pub struct VirtualTree {
     root: PathBuf,
     nodes: Vec<TreeNode>,
+    fold: FoldFn,
+    collisions: Vec<NameCollision>,
+    /// Directories holding at least one empty merge.
+    empty_merge_nodes: Vec<usize>,
 }
 
 impl VirtualTree {
     /// Creates an empty tree rooted at `root` (the canonical destination).
     pub fn new(root: &Path) -> Self {
+        Self::with_fold(root, fold)
+    }
+
+    pub(crate) fn with_fold(root: &Path, fold: FoldFn) -> Self {
         Self {
             root: root.to_path_buf(),
-            nodes: vec![TreeNode::new(Node::Dir)],
+            nodes: vec![TreeNode::new(Node::Dir, OsStr::new(""))],
+            fold,
+            collisions: Vec::new(),
+            empty_merge_nodes: Vec::new(),
         }
     }
 
     /// Records `node` at `rel` (relative to the root), creating missing
     /// parents as directories and following in-root symlinked parents the way
     /// `create_dir_all` does.
+    ///
+    /// Names that differ exactly but fold to one key are one name on the host.
+    /// Each such pair is recorded once as a [`NameCollision`] (see
+    /// [`take_collisions`](Self::take_collisions)) and then handled like an
+    /// exact repeat, so a merge is never silent.
     ///
     /// The first node at a path wins, matching extraction that skips an
     /// existing entry. A symlink over a file is ambiguous (extraction skips
@@ -176,13 +287,13 @@ impl VirtualTree {
             return Ok(());
         };
         let parent = self.ensure_dir(rel.parent().unwrap_or_else(|| Path::new("")))?;
-        let key = fold(name);
-        let existing = self.child(parent, name);
-        match (existing, node) {
+        let existing = self.lookup(parent, name);
+        if let Some(found) = existing {
+            self.settle_alias(parent, found, name, &node, rel, false);
+        }
+        match (existing.map(|f| f.id), node) {
             (None, node) => {
-                let id = self.nodes.len();
-                self.nodes.push(TreeNode::new(node));
-                self.node_mut(parent).children.insert(key.into_owned(), id);
+                self.add_child(parent, name, node);
                 Ok(())
             }
             (Some(id), Node::Dir) => match self.node(id).kind {
@@ -215,6 +326,68 @@ impl VirtualTree {
         )
     }
 
+    /// Drains the name collisions recorded by inserts since the last call.
+    ///
+    /// Merges of directories that hold nothing are not included: they are
+    /// harmless unless an entry lands in the directory later, so they wait for
+    /// [`take_empty_merges`](Self::take_empty_merges).
+    pub(crate) fn take_collisions(&mut self) -> Vec<NameCollision> {
+        std::mem::take(&mut self.collisions)
+    }
+
+    /// Drains the merges of directories that are still empty.
+    pub(crate) fn take_empty_merges(&mut self) -> Vec<NameCollision> {
+        let nodes = std::mem::take(&mut self.empty_merge_nodes);
+        nodes
+            .into_iter()
+            .flat_map(|id| std::mem::take(&mut self.node_mut(id).empty_merges))
+            .map(|(existing, incoming)| NameCollision {
+                existing,
+                incoming,
+                kind: CollisionKind::Directories,
+            })
+            .collect()
+    }
+
+    /// Handles a child found by a differently spelled name: remembers the
+    /// spelling, so the pair is reported once, and records the collision.
+    ///
+    /// `incoming_has_contents` is true when the spelling is used as the parent
+    /// of an entry, which makes a directory merge harmful at once; an empty
+    /// merge is flagged so it is upgraded if the directory gains an entry.
+    fn settle_alias(
+        &mut self,
+        parent: usize,
+        found: Found,
+        name: &OsStr,
+        incoming_node: &Node,
+        incoming: &Path,
+        incoming_has_contents: bool,
+    ) {
+        if !found.alias {
+            return;
+        }
+        self.node_mut(parent)
+            .children
+            .insert(name.to_os_string(), found.id);
+        let existing = self.node(found.id);
+        let has_contents = incoming_has_contents || !existing.children.is_empty();
+        let kind = CollisionKind::of(&existing.kind, incoming_node, has_contents);
+        let existing_path = incoming.with_file_name(&existing.name);
+        if kind == CollisionKind::Directories {
+            let node = self.node_mut(found.id);
+            node.empty_merges
+                .push((existing_path, incoming.to_path_buf()));
+            self.empty_merge_nodes.push(found.id);
+            return;
+        }
+        self.collisions.push(NameCollision {
+            existing: existing_path,
+            incoming: incoming.to_path_buf(),
+            kind,
+        });
+    }
+
     fn node(&self, id: usize) -> &TreeNode {
         &self.nodes[id]
     }
@@ -223,11 +396,48 @@ impl VirtualTree {
         &mut self.nodes[id]
     }
 
-    fn child(&self, parent: usize, name: &OsStr) -> Option<usize> {
+    fn lookup(&self, parent: usize, name: &OsStr) -> Option<Found> {
         if name.as_encoded_bytes().len() > MAX_COMPONENT_BYTES {
             return None;
         }
-        self.node(parent).children.get(&*fold(name)).copied()
+        let node = self.node(parent);
+        if let Some(&id) = node.children.get(name) {
+            return Some(Found { id, alias: false });
+        }
+        match (self.fold)(name) {
+            Cow::Borrowed(_) => None,
+            Cow::Owned(key) => node.folded.get(&key).map(|&id| Found { id, alias: true }),
+        }
+    }
+
+    fn child(&self, parent: usize, name: &OsStr) -> Option<usize> {
+        self.lookup(parent, name).map(|found| found.id)
+    }
+
+    /// Adds a node under `parent`.
+    fn add_child(&mut self, parent: usize, name: &OsStr, kind: Node) -> usize {
+        let id = self.nodes.len();
+        self.nodes.push(TreeNode::new(kind, name));
+        let key = match (self.fold)(name) {
+            Cow::Borrowed(_) => None,
+            Cow::Owned(key) => Some(key),
+        };
+        let upgrade = {
+            let parent_node = self.node_mut(parent);
+            parent_node.children.insert(name.to_os_string(), id);
+            if let Some(key) = key {
+                parent_node.folded.insert(key, id);
+            }
+            std::mem::take(&mut parent_node.empty_merges)
+        };
+        for (existing, incoming) in upgrade {
+            self.collisions.push(NameCollision {
+                existing,
+                incoming,
+                kind: CollisionKind::DirectoriesWithContents,
+            });
+        }
+        id
     }
 
     fn ensure_dir(&mut self, rel: &Path) -> io::Result<usize> {
@@ -240,28 +450,24 @@ impl VirtualTree {
                 _ => return Err(io::Error::from(io::ErrorKind::InvalidInput)),
             };
             walked.push(name);
-            current = match self.child(current, name) {
-                None => {
-                    let id = self.nodes.len();
-                    self.nodes.push(TreeNode::new(Node::Dir));
-                    self.node_mut(current)
-                        .children
-                        .insert(fold(name).into_owned(), id);
-                    id
+            current = match self.lookup(current, name) {
+                None => self.add_child(current, name, Node::Dir),
+                Some(found) => {
+                    self.settle_alias(current, found, name, &Node::Dir, &walked, true);
+                    match self.node(found.id).kind {
+                        Node::Dir => found.id,
+                        Node::File => return Err(io::Error::from(io::ErrorKind::NotADirectory)),
+                        Node::Symlink(_) => match self.resolve(&self.root.join(&walked))? {
+                            Resolved::Inside { id, .. } if self.node(id).kind == Node::Dir => id,
+                            Resolved::Inside { .. } => {
+                                return Err(io::Error::from(io::ErrorKind::NotADirectory));
+                            }
+                            Resolved::Outside(_) => {
+                                return Err(io::Error::other("path leaves the extraction root"));
+                            }
+                        },
+                    }
                 }
-                Some(id) => match self.node(id).kind {
-                    Node::Dir => id,
-                    Node::File => return Err(io::Error::from(io::ErrorKind::NotADirectory)),
-                    Node::Symlink(_) => match self.resolve(&self.root.join(&walked))? {
-                        Resolved::Inside { id, .. } if self.node(id).kind == Node::Dir => id,
-                        Resolved::Inside { .. } => {
-                            return Err(io::Error::from(io::ErrorKind::NotADirectory));
-                        }
-                        Resolved::Outside(_) => {
-                            return Err(io::Error::other("path leaves the extraction root"));
-                        }
-                    },
-                },
             };
         }
         Ok(current)
@@ -399,14 +605,50 @@ fn lexical<'a>(components: impl Iterator<Item = Component<'a>>) -> PathBuf {
     out
 }
 
+/// Compares names the way the host does, as far as it can be modelled.
+///
+/// Non-UTF-8 names are folded lossily, which can only merge more names, and a
+/// merge of differently spelled names is always reported.
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 fn fold(name: &OsStr) -> Cow<'_, OsStr> {
-    Cow::Owned(OsString::from(name.to_string_lossy().to_lowercase()))
+    let text = name.to_string_lossy();
+    let folded = if text.is_ascii() {
+        text.to_ascii_uppercase()
+    } else {
+        fold_unicode(&text)
+    };
+    Cow::Owned(OsString::from(folded))
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn fold(name: &OsStr) -> Cow<'_, OsStr> {
     Cow::Borrowed(name)
+}
+
+/// APFS compares canonically decomposed names case-insensitively.
+#[cfg(target_os = "macos")]
+fn fold_unicode(text: &str) -> String {
+    use unicode_normalization::UnicodeNormalization;
+    upper_lower_upper(text.nfd())
+}
+
+/// NTFS compares names case-insensitively without normalisation.
+#[cfg(target_os = "windows")]
+fn fold_unicode(text: &str) -> String {
+    upper_lower_upper(text.chars())
+}
+
+/// Full per-character case folding built from the standard library only.
+///
+/// Upper-casing first merges `ß` with `ẞ`, lower-casing merges the final
+/// sigma and `ϴ` with `θ`, and the last upper-casing makes the key stable.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn upper_lower_upper(chars: impl Iterator<Item = char>) -> String {
+    chars
+        .flat_map(char::to_uppercase)
+        .flat_map(char::to_lowercase)
+        .flat_map(char::to_uppercase)
+        .collect()
 }
 
 #[cfg(test)]
@@ -479,8 +721,308 @@ mod tests {
         for i in 1..=MAX_SYMLINK_HOPS + 1 {
             put(&mut t, &format!("l{i}"), sym(&format!("l{}", i - 1)));
         }
-        assert!(t.canonicalize(Path::new("/dest/l41")).is_err());
-        assert!(t.canonicalize(Path::new("/dest/l40")).is_ok());
+        let over = format!("/dest/l{}", MAX_SYMLINK_HOPS + 1);
+        let at = format!("/dest/l{MAX_SYMLINK_HOPS}");
+        assert!(t.canonicalize(Path::new(&over)).is_err());
+        assert!(t.canonicalize(Path::new(&at)).is_ok());
+    }
+
+    #[cfg(any(unix, windows))]
+    fn make_symlink(target: &str, link: &Path) -> io::Result<()> {
+        #[cfg(unix)]
+        return std::os::unix::fs::symlink(target, link);
+        #[cfg(windows)]
+        return std::os::windows::fs::symlink_dir(target, link);
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn hop_limit_matches_host_canonicalize() {
+        let temp = tempfile::TempDir::new().unwrap();
+        // The temp dir itself may sit behind a symlink (/var on macOS), which
+        // would spend one hop of the chain below.
+        let root = temp.path().canonicalize().unwrap();
+        std::fs::create_dir(root.join("l0")).unwrap();
+
+        let mut resolvable = 0;
+        for i in 1..=MAX_SYMLINK_HOPS + 8 {
+            let linked = make_symlink(&format!("l{}", i - 1), &root.join(format!("l{i}")));
+            assert!(linked.is_ok(), "cannot create symlinks here: {linked:?}");
+            if std::fs::canonicalize(root.join(format!("l{i}"))).is_err() {
+                break;
+            }
+            resolvable = i;
+        }
+        assert_eq!(resolvable, MAX_SYMLINK_HOPS, "host and model limits differ");
+
+        let mut t = tree();
+        put(&mut t, "l0", Node::Dir);
+        for i in 1..=resolvable + 1 {
+            put(&mut t, &format!("l{i}"), sym(&format!("l{}", i - 1)));
+        }
+        assert!(
+            t.canonicalize(Path::new(&format!("/dest/l{resolvable}")))
+                .is_ok()
+        );
+        assert!(
+            t.canonicalize(Path::new(&format!("/dest/l{}", resolvable + 1)))
+                .is_err()
+        );
+    }
+
+    fn ascii_upper(name: &OsStr) -> Cow<'_, OsStr> {
+        Cow::Owned(OsString::from(name.to_string_lossy().to_ascii_uppercase()))
+    }
+
+    fn folding_tree() -> VirtualTree {
+        VirtualTree::with_fold(Path::new("/dest"), ascii_upper)
+    }
+
+    fn collisions_of(t: &mut VirtualTree) -> Vec<(String, String, CollisionKind)> {
+        t.take_collisions()
+            .into_iter()
+            .map(|c| {
+                (
+                    c.existing.display().to_string(),
+                    c.incoming.display().to_string(),
+                    c.kind,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn exact_repeat_is_not_a_collision() {
+        let mut t = folding_tree();
+        put(&mut t, "a/f", Node::File);
+        put(&mut t, "a/f", Node::File);
+        assert!(t.take_collisions().is_empty());
+    }
+
+    #[test]
+    fn differently_spelled_files_collide() {
+        let mut t = folding_tree();
+        put(&mut t, "d/a.txt", Node::File);
+        put(&mut t, "d/A.txt", Node::File);
+        assert_eq!(
+            collisions_of(&mut t),
+            [("d/a.txt".into(), "d/A.txt".into(), CollisionKind::Files)]
+        );
+        assert!(t.take_collisions().is_empty());
+    }
+
+    #[test]
+    fn differently_spelled_parent_directories_collide() {
+        let mut t = folding_tree();
+        put(&mut t, "Images/x", Node::File);
+        put(&mut t, "images/y", Node::File);
+        assert_eq!(
+            collisions_of(&mut t),
+            [(
+                "Images".into(),
+                "images".into(),
+                CollisionKind::DirectoriesWithContents
+            )]
+        );
+    }
+
+    #[test]
+    fn a_spelling_is_reported_once_however_many_entries_use_it() {
+        let mut t = folding_tree();
+        put(&mut t, "Images/a", Node::File);
+        for i in 0..100 {
+            put(&mut t, &format!("images/f{i}"), Node::File);
+        }
+        assert_eq!(collisions_of(&mut t).len(), 1);
+    }
+
+    #[test]
+    fn empty_directories_merge_harmlessly_until_one_gains_an_entry() {
+        let mut t = folding_tree();
+        put(&mut t, "Dir", Node::Dir);
+        put(&mut t, "dir", Node::Dir);
+        assert!(collisions_of(&mut t).is_empty());
+        put(&mut t, "Dir/f", Node::File);
+        put(&mut t, "dir/g", Node::File);
+        assert_eq!(
+            collisions_of(&mut t),
+            [(
+                "Dir".into(),
+                "dir".into(),
+                CollisionKind::DirectoriesWithContents
+            )]
+        );
+    }
+
+    #[test]
+    fn empty_merges_are_reported_once_when_nothing_lands_in_them() {
+        let mut t = folding_tree();
+        put(&mut t, "Dir", Node::Dir);
+        put(&mut t, "dir", Node::Dir);
+        put(&mut t, "other", Node::File);
+        let merges: Vec<_> = t
+            .take_empty_merges()
+            .into_iter()
+            .map(|c| {
+                (
+                    c.existing.display().to_string(),
+                    c.incoming.display().to_string(),
+                    c.kind,
+                )
+            })
+            .collect();
+        assert_eq!(
+            merges,
+            [("Dir".into(), "dir".into(), CollisionKind::Directories)]
+        );
+        assert!(t.take_empty_merges().is_empty());
+    }
+
+    #[test]
+    fn directory_entry_over_a_directory_with_contents_is_not_harmless() {
+        let mut t = folding_tree();
+        put(&mut t, "Dir/f", Node::File);
+        put(&mut t, "dir", Node::Dir);
+        assert_eq!(
+            collisions_of(&mut t),
+            [(
+                "Dir".into(),
+                "dir".into(),
+                CollisionKind::DirectoriesWithContents
+            )]
+        );
+    }
+
+    #[test]
+    fn names_are_folded_once_however_often_they_repeat() {
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::atomic::Ordering;
+
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        fn counting(name: &OsStr) -> Cow<'_, OsStr> {
+            CALLS.fetch_add(1, Ordering::Relaxed);
+            ascii_upper(name)
+        }
+
+        let mut t = VirtualTree::with_fold(Path::new("/dest"), counting);
+        for i in 0..500 {
+            put(&mut t, &format!("a/b/c/d/file{i}"), Node::File);
+        }
+        // Four directories and 500 files, each folded to look up and to store;
+        // a fold per parent per entry would be about 2500 calls.
+        assert!(CALLS.load(Ordering::Relaxed) <= 2 * 504 + 8);
+    }
+
+    #[test]
+    fn collision_across_kinds_or_with_a_symlink_is_mixed() {
+        let mut t = folding_tree();
+        put(&mut t, "a", Node::File);
+        let _ = t.insert(Path::new("A"), Node::Dir);
+        put(&mut t, "link", sym("a"));
+        put(&mut t, "LINK", Node::File);
+        assert_eq!(
+            collisions_of(&mut t),
+            [
+                ("a".into(), "A".into(), CollisionKind::Mixed),
+                ("link".into(), "LINK".into(), CollisionKind::Mixed)
+            ]
+        );
+    }
+
+    #[test]
+    fn collision_is_recorded_when_insert_fails() {
+        let mut t = folding_tree();
+        put(&mut t, "y", Node::File);
+        let err = t.insert(Path::new("Y"), sym(".")).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            collisions_of(&mut t),
+            [("y".into(), "Y".into(), CollisionKind::Mixed)]
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    mod macos {
+        use super::super::fold;
+        use super::*;
+
+        fn key(s: &str) -> OsString {
+            fold(OsStr::new(s)).into_owned()
+        }
+
+        #[test]
+        fn special_case_pairs_fold_equal() {
+            assert_eq!(key("\u{df}"), key("\u{1e9e}"));
+            assert_eq!(key("\u{3b8}"), key("\u{3f4}"));
+            assert_eq!(key("\u{3b8}"), key("\u{3d1}"));
+            assert_eq!(key("\u{3c2}"), key("\u{3a3}"));
+        }
+
+        #[test]
+        fn canonically_equivalent_names_fold_equal() {
+            assert_eq!(key("caf\u{e9}"), key("cafe\u{301}"));
+            assert_eq!(key("\u{ac00}"), key("\u{1100}\u{1161}"));
+        }
+
+        #[test]
+        fn nfc_and_nfd_spellings_collide_in_the_tree() {
+            let mut t = tree();
+            put(&mut t, "caf\u{e9}", Node::File);
+            put(&mut t, "cafe\u{301}", Node::File);
+            assert_eq!(t.take_collisions().len(), 1);
+        }
+
+        #[test]
+        fn fold_never_under_merges_what_apfs_treats_as_equal() {
+            let temp = tempfile::TempDir::new().unwrap();
+            let root = temp.path().canonicalize().unwrap();
+            let mut seen = std::collections::HashSet::new();
+            let mut under = Vec::new();
+            // Blocks with case or normalisation behaviour; the Hangul block is
+            // sampled because it decomposes algorithmically.
+            let candidates = (0x1..=0x3000)
+                .chain((0xAC00..=0xD7A3).step_by(11))
+                .chain(0xF900..=0xFFFF)
+                .chain(0x1_0400..=0x1_044F)
+                .chain(0x1_E900..=0x1_E943);
+            for code in candidates {
+                let Some(c) = char::from_u32(code).filter(|c| !matches!(c, '/' | '.')) else {
+                    continue;
+                };
+                let name = c.to_string();
+                let path = root.join(&name);
+                let host_equal = path.symlink_metadata().is_ok();
+                if !host_equal && std::fs::File::create_new(&path).is_err() {
+                    continue;
+                }
+                let model_seen = !seen.insert(key(&name));
+                if host_equal && !model_seen {
+                    under.push(format!("U+{code:04X}"));
+                }
+            }
+            assert!(under.is_empty(), "under-merged: {under:?}");
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn fold_covers_ntfs_simple_uppercase() {
+        use std::collections::HashMap;
+
+        let mut by_upper: HashMap<char, OsString> = HashMap::new();
+        for code in 0x1..=0x1_FFFFu32 {
+            let Some(c) = char::from_u32(code) else {
+                continue;
+            };
+            let mut upper = c.to_uppercase();
+            let simple = match (upper.next(), upper.next()) {
+                (Some(u), None) => u,
+                _ => c,
+            };
+            let key = fold(OsStr::new(&c.to_string())).into_owned();
+            let expected = by_upper.entry(simple).or_insert_with(|| key.clone());
+            assert_eq!(*expected, key, "U+{code:04X}");
+        }
     }
 
     #[test]

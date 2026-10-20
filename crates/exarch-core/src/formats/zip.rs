@@ -49,6 +49,9 @@
 //!   directory)
 //! - **Permission sanitization** (strips setuid/setgid bits)
 //! - **Encryption rejection** (password-protected archives not supported)
+//! - **Structural consistency** (local headers, duplicate names, overlapping
+//!   entries, records and headers the central directory does not account for;
+//!   see [`ZipConsistencyPolicy`] and `zip_structure`)
 //!
 //! # Entry Type Support
 //!
@@ -133,6 +136,7 @@ use crate::ProgressCallback;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::VerificationOptions;
+use crate::ZipConsistencyPolicy;
 use crate::config::Validated;
 use crate::copy::CopyBuffer;
 
@@ -153,10 +157,13 @@ use crate::types::SafePath;
 use super::common;
 use super::common::EntryCompleteGuard;
 use super::traits::ArchiveFormat;
+use super::zip_structure;
+use super::zip_structure::Shared;
+use super::zip_structure::ZipStructure;
 
 /// Maximum symlink target length read from a ZIP entry: `PATH_MAX`, to prevent
 /// unbounded allocation.
-const MAX_SYMLINK_TARGET_SIZE: u64 = 4096;
+const MAX_SYMLINK_TARGET_SIZE: u64 = crate::security::fs_view::MAX_PATH_BYTES as u64;
 
 /// Message of the `io::Error` the `zip` crate (>= 9.0.1) raises when an entry
 /// decompresses past its declared size.
@@ -359,7 +366,8 @@ fn push_duplicate_skip_warnings(
 /// # Ok::<(), exarch_core::ArchiveError>(())
 /// ```
 pub struct ZipArchive<R: Read + Seek> {
-    inner: ZipReader<R>,
+    inner: ZipReader<Shared<R>>,
+    structure: ZipStructure,
 }
 
 impl<R: Read + Seek> ZipArchive<R> {
@@ -368,11 +376,23 @@ impl<R: Read + Seek> ZipArchive<R> {
     /// The reader must support both `Read` and `Seek` because ZIP archives
     /// have a central directory at the end that must be parsed first.
     ///
+    /// Opening runs the checks that need no configuration: encrypted entries,
+    /// unsupported compression methods and declared compressed sizes that do
+    /// not fit in the archive are rejected, and the archive's structure is
+    /// inspected (local versus central headers, duplicate names, overlapping
+    /// entries, records and local headers the central directory does not
+    /// account for). Structural findings do not fail the constructor; each
+    /// operation applies the
+    /// [`ZipConsistencyPolicy`] of its config. The central directory is
+    /// parsed once and the archive that was admitted is the one every
+    /// operation uses; the structural census adds one sequential pass over
+    /// the raw directory and a second read of each local header.
+    ///
     /// # Errors
     ///
     /// Returns an error if:
     /// - File is not a valid ZIP archive
-    /// - Central directory is corrupted
+    /// - Central directory is corrupted, or changes while it is being read
     /// - Archive is password-protected (rejected for security)
     ///
     /// # Examples
@@ -386,47 +406,64 @@ impl<R: Read + Seek> ZipArchive<R> {
     /// # Ok::<(), exarch_core::ArchiveError>(())
     /// ```
     pub fn new(reader: R) -> Result<Self> {
-        let mut inner = ZipReader::new(reader).map_err(|e| {
-            ArchiveError::InvalidArchive(format!("failed to open ZIP archive: {e}"))
-        })?;
-
-        // Detect password protection early (CRIT-003: robust check with entry
-        // limit)
-        Self::scan_entries(&mut inner)?;
-
-        Ok(Self { inner })
+        let (inner, structure) = zip_structure::open(reader)?;
+        Ok(Self { inner, structure })
     }
 
-    /// Rejects encrypted entries, unsupported compression methods and declared
-    /// compressed sizes that do not fit in the archive, before any caller can
-    /// write a byte (see [`admit_zip_entry`]).
+    /// The underlying reader, for listing.
+    pub(crate) fn reader_mut(&mut self) -> &mut ZipReader<Shared<R>> {
+        &mut self.inner
+    }
+
+    /// What the structural census found when the archive was opened.
+    #[cfg(test)]
+    pub(crate) const fn structure(&self) -> &ZipStructure {
+        &self.structure
+    }
+
+    /// Applies the policy-independent entry count limit, then the structural
+    /// policy, before an operation touches the archive's entries.
     ///
-    /// Opens every entry via metadata-only reads (no decompression), so a
-    /// corrupt local header also fails here. Shared by extraction and listing
-    /// because both go through [`ZipArchive::new`].
-    fn scan_entries(archive: &mut ZipReader<R>) -> Result<()> {
-        let mut budget = DeclaredCompressedBudget::new(archive.central_directory_start());
-        for index in 0..archive.len() {
-            match archive.by_index(index) {
-                Ok(file) => {
-                    admit_zip_entry(&file, &mut budget)?;
-                }
-                Err(e) if is_password_required(&e) => {
-                    return Err(common::encrypted_archive_error());
-                }
-                Err(e) => {
-                    return Err(ArchiveError::InvalidArchive(format!(
-                        "failed to read entry {index}: {e}"
-                    )));
-                }
-            }
+    /// The count is the raw central directory count, so duplicate records and
+    /// records past the end record's count cannot be used to dodge
+    /// `max_file_count`.
+    fn check_count(&self, config: &SecurityConfig<Validated>) -> Result<()> {
+        let found = self.structure.central_entries();
+        if found > config.max_file_count {
+            return Err(ArchiveError::QuotaExceeded {
+                resource: crate::QuotaResource::FileCount {
+                    current: found,
+                    max: config.max_file_count,
+                },
+            });
+        }
+        Ok(())
+    }
+
+    /// Lists the entries under the structural policy, decoding payloads when
+    /// `policy` carries an integrity pass.
+    pub(crate) fn list_with(
+        &mut self,
+        config: &SecurityConfig<Validated>,
+        policy: &mut crate::inspection::integrity::ContentPolicy<'_, '_>,
+    ) -> Result<crate::inspection::ArchiveManifest> {
+        self.check_structure(config)?;
+        crate::inspection::list::list_zip_reader(self, config, policy)
+    }
+
+    fn check_structure(&self, config: &SecurityConfig<Validated>) -> Result<()> {
+        self.check_count(config)?;
+        if config.zip_consistency == ZipConsistencyPolicy::Enforce
+            && let Some(finding) = self.structure.findings().first()
+        {
+            return Err(ArchiveError::ZipInconsistency(finding.clone()));
         }
         Ok(())
     }
 
     /// Resolves the entry path from a ZIP file via [`resolve_zip_entry_path`].
     fn resolve_entry_path(
-        zip_file: &zip::read::ZipFile<'_, R>,
+        zip_file: &zip::read::ZipFile<'_, Shared<R>>,
         index: usize,
         config: &SecurityConfig<Validated>,
     ) -> Result<PathBuf> {
@@ -445,7 +482,7 @@ impl<R: Read + Seek> ZipArchive<R> {
     /// dropped before calling extraction helpers. For files, the zip file
     /// remains alive through validation and is reused for data extraction.
     fn process_entry(
-        mut zip_file: zip::read::ZipFile<'_, R>,
+        mut zip_file: zip::read::ZipFile<'_, Shared<R>>,
         index: usize,
         validator: &mut EntryValidator,
         ctx: &mut ZipExtractionContext<'_>,
@@ -542,7 +579,7 @@ impl<R: Read + Seek> ZipArchive<R> {
 
     /// Extracts a regular file to disk.
     fn extract_file(
-        zip_file: &mut zip::read::ZipFile<'_, R>,
+        zip_file: &mut zip::read::ZipFile<'_, Shared<R>>,
         safe_path: &SafePath,
         mode: Option<SanitizedMode>,
         permit: QuotaPermit,
@@ -593,6 +630,7 @@ impl<R: Read + Seek> ArchiveFormat for ZipArchive<R> {
         let start = Instant::now();
         let skip_duplicates = options.skip_duplicates;
 
+        self.check_structure(config)?;
         let dest = DestDir::new_or_create(output_dir.to_path_buf())?;
 
         // OPT-H004: Pass references to avoid cloning
@@ -688,8 +726,7 @@ impl<R: Read + Seek> ArchiveFormat for ZipArchive<R> {
         config: &SecurityConfig<Validated>,
     ) -> Result<crate::inspection::ArchiveManifest> {
         use crate::inspection::integrity::ContentPolicy;
-        use crate::inspection::list::list_zip_reader;
-        list_zip_reader(&mut self.inner, config, &mut ContentPolicy::Skip)
+        self.list_with(config, &mut ContentPolicy::Skip)
     }
 
     fn verify(
@@ -698,9 +735,22 @@ impl<R: Read + Seek> ArchiveFormat for ZipArchive<R> {
         options: &VerificationOptions,
     ) -> Result<crate::inspection::VerificationReport> {
         use crate::inspection::list::list_zip_reader;
-        crate::inspection::verify::verify_with(config, *options, |listing_config, policy| {
-            list_zip_reader(&mut self.inner, listing_config, policy)
-        })
+        use crate::inspection::report::ArchiveStructure;
+        use crate::inspection::verify::list_for_verify;
+        use crate::inspection::verify::verify_manifest_with_structure;
+
+        self.check_count(config)?;
+        let listed = list_for_verify(config, *options, |listing_config, policy| {
+            list_zip_reader(self, listing_config, policy)
+        })?;
+        let (findings, omitted) = match config.zip_consistency {
+            ZipConsistencyPolicy::Enforce => {
+                (self.structure.findings(), self.structure.omitted_findings())
+            }
+            ZipConsistencyPolicy::Ignore => (&[][..], 0),
+        };
+        let structure = ArchiveStructure::new(self.structure.central_entries(), findings, omitted);
+        verify_manifest_with_structure(&listed.manifest, config, &structure, listed.integrity)
     }
 
     fn format_name(&self) -> &'static str {
@@ -2235,9 +2285,22 @@ mod tests {
         let mut archive = ZipArchive::new(cursor).unwrap();
 
         let temp = TempDir::new().unwrap();
-        let config = SecurityConfig::default().validate().expect("valid config");
+        let enforcing = SecurityConfig::default().validate().expect("valid config");
         let options = ExtractionOptions::default(); // skip_duplicates = true
 
+        let rejected = archive
+            .extract(temp.path(), &enforcing, &options, &mut crate::NoopProgress)
+            .unwrap_err();
+        assert_matches!(
+            rejected,
+            ArchiveError::ZipInconsistency(crate::ZipInconsistency::DuplicateName { .. })
+        );
+        assert!(!temp.path().join("legit.txt").exists());
+
+        let config = SecurityConfig::default()
+            .with_zip_consistency(ZipConsistencyPolicy::Ignore)
+            .validate()
+            .expect("valid config");
         let report = archive
             .extract(temp.path(), &config, &options, &mut crate::NoopProgress)
             .unwrap();
@@ -2587,8 +2650,10 @@ mod tests {
         // calls `by_index()` on every entry and would surface the
         // corruption before `extract()` is ever reached) by constructing
         // the wrapper directly around an already-open reader.
-        let inner = ZipReader::new(Cursor::new(zip_data)).expect("valid central directory");
-        let mut archive = ZipArchive { inner };
+        let inner =
+            ZipReader::new(Shared::new(Cursor::new(zip_data))).expect("valid central directory");
+        let structure = ZipStructure::unchecked(inner.len());
+        let mut archive = ZipArchive { inner, structure };
 
         let config = SecurityConfig::default()
             .with_allowed_extensions(vec!["txt".to_string()])
@@ -2775,7 +2840,7 @@ mod tests {
     ) -> Result<PathBuf> {
         let zip_data = create_raw_zip_entry(entry_name, b"");
         let cursor = Cursor::new(zip_data);
-        let mut reader = zip::ZipArchive::new(cursor).unwrap();
+        let mut reader = zip::ZipArchive::new(Shared::new(cursor)).unwrap();
         let zip_file = reader.by_index(0).unwrap();
         ZipArchive::<Cursor<Vec<u8>>>::resolve_entry_path(&zip_file, 0, config)
     }

@@ -4,6 +4,8 @@ use std::marker::PhantomData;
 use std::ops::Deref;
 use std::ops::DerefMut;
 
+use crate::closed_enum::closed_enum;
+
 /// Marker type for a [`SecurityConfig`] whose invariants have not yet been
 /// checked.
 ///
@@ -61,6 +63,46 @@ pub struct AllowedFeatures {
     /// There is no CLI or binding opt-out, and the permissive preset does not
     /// enable it.
     pub windows_reserved_names: bool,
+}
+
+closed_enum! {
+    /// How ZIP structure that different readers interpret differently is
+    /// handled.
+    ///
+    /// A ZIP archive stores each entry's metadata twice, in a local header and
+    /// in the central directory. Random-access readers follow the central
+    /// directory and streaming readers follow the local headers, so an
+    /// archive whose copies disagree, that hides records, repeats a name or
+    /// overlaps entries is a parser differential ("Zip Cloaking").
+    ///
+    /// `Enforce` (the default, also for [`SecurityConfig::permissive`])
+    /// rejects such archives in `extract` and `list` and reports them in
+    /// `verify`. `Ignore` keeps the central-directory interpretation and
+    /// raises no structural finding; resource limits still apply.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::SecurityConfig;
+    /// use exarch_core::ZipConsistencyPolicy;
+    ///
+    /// assert_eq!(
+    ///     SecurityConfig::default().zip_consistency,
+    ///     ZipConsistencyPolicy::Enforce
+    /// );
+    /// let relaxed = SecurityConfig::default().with_zip_consistency(ZipConsistencyPolicy::Ignore);
+    /// assert_eq!(relaxed.zip_consistency.as_str(), "ignore");
+    /// ```
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    #[non_exhaustive]
+    pub enum ZipConsistencyPolicy {
+        /// Reject or report structurally ambiguous ZIP archives
+        #[default]
+        Enforce => "enforce",
+
+        /// Use the central directory interpretation without structural findings
+        Ignore => "ignore",
+    }
 }
 
 /// The field data of a [`SecurityConfig`], reachable via [`Deref`]/[`DerefMut`]
@@ -216,6 +258,14 @@ pub struct SecurityConfigFields {
     /// Default: 256 MiB (268,435,456 bytes)
     pub max_decoder_memory: u64,
 
+    /// How ZIP archives with ambiguous structure are handled.
+    ///
+    /// Default: [`ZipConsistencyPolicy::Enforce`], including for
+    /// [`SecurityConfig::permissive`]. Pre-ZIP64 archives with more than
+    /// 65535 entries (wrapped end-record count) and archives with orphaned
+    /// local headers left by in-place updaters are rejected under `Enforce`.
+    pub zip_consistency: ZipConsistencyPolicy,
+
     /// Internal only — not part of the public builder API, and never set by
     /// `SecurityConfig::default()`/`permissive()` construction paths that
     /// external callers use.
@@ -259,6 +309,7 @@ impl Default for SecurityConfigFields {
             max_solid_block_memory: 512 * 1024 * 1024, // 512 MB
             max_tar_metadata_bytes: 4 * 1024 * 1024,   // 4 MiB
             max_decoder_memory: 256 * 1024 * 1024,     // 256 MiB
+            zip_consistency: ZipConsistencyPolicy::Enforce,
             relaxed_for_verify_preflight: false,
         }
     }
@@ -356,6 +407,7 @@ impl Default for SecurityConfig<Unvalidated> {
     /// - `max_solid_block_memory`: 512 MB
     /// - `max_tar_metadata_bytes`: 4 MiB
     /// - `max_decoder_memory`: 256 MiB
+    /// - `zip_consistency`: `Enforce`
     fn default() -> Self {
         Self {
             fields: SecurityConfigFields::default(),
@@ -825,6 +877,24 @@ impl SecurityConfig<Unvalidated> {
     #[inline]
     pub fn with_max_decoder_memory(mut self, size: u64) -> Self {
         self.fields.max_decoder_memory = size;
+        self
+    }
+
+    /// Sets how ZIP archives with ambiguous structure are handled.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::SecurityConfig;
+    /// use exarch_core::ZipConsistencyPolicy;
+    ///
+    /// let config = SecurityConfig::default().with_zip_consistency(ZipConsistencyPolicy::Ignore);
+    /// assert_eq!(config.zip_consistency, ZipConsistencyPolicy::Ignore);
+    /// ```
+    #[must_use]
+    #[inline]
+    pub fn with_zip_consistency(mut self, policy: ZipConsistencyPolicy) -> Self {
+        self.fields.zip_consistency = policy;
         self
     }
 

@@ -134,6 +134,22 @@ fn is_relaxable_by_policy_flag(reason: &str) -> bool {
         .any(|prefix| reason.starts_with(prefix))
 }
 
+fn quota_exceeded_context(resource: &exarch_core::QuotaResource, archive: &Path) -> String {
+    if matches!(resource, exarch_core::QuotaResource::DecoderMemory { .. }) {
+        format!(
+            "Decoder memory limit exceeded for '{}'\n\
+             The archive declares a decompression dictionary larger than the allowed limit.",
+            archive.display(),
+        )
+    } else {
+        format!(
+            "Extraction limit exceeded for '{}'\n\
+             HINT: Use --max-files, --max-total-size, or --max-file-size to increase limits.",
+            archive.display(),
+        )
+    }
+}
+
 /// Converts `ArchiveError` to user-friendly anyhow error with context.
 ///
 /// The original `ArchiveError` is preserved as the error source so that
@@ -188,18 +204,13 @@ pub fn convert_extraction_error(
             archive.display(),
             zip_bomb_hint(details),
         ),
-        ArchiveError::QuotaExceeded {
-            resource: exarch_core::QuotaResource::DecoderMemory { .. },
-        } => format!(
-            "Decoder memory limit exceeded for '{}'\n\
-             The archive declares a decompression dictionary larger than the allowed limit.",
+        ArchiveError::ZipInconsistency(_) => format!(
+            "Security violation: ZIP archive '{}' is read differently by different tools\n\
+             HINT: The archive may be crafted to show different content to different extractors. \
+             Use --zip-consistency ignore only for archives from a trusted producer.",
             archive.display(),
         ),
-        ArchiveError::QuotaExceeded { .. } => format!(
-            "Extraction limit exceeded for '{}'\n\
-             HINT: Use --max-files, --max-total-size, or --max-file-size to increase limits.",
-            archive.display(),
-        ),
+        ArchiveError::QuotaExceeded { resource } => quota_exceeded_context(resource, archive),
         ArchiveError::SymlinkEscape { .. } => {
             if allow_symlinks {
                 format!("Symlink escape blocked in '{}'", archive.display())

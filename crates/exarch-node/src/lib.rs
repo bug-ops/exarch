@@ -130,6 +130,7 @@ fn catch_panic_as_js_err<T>(context: &str, f: impl FnOnce() -> Result<T>) -> Res
 /// - `SYMLINK_ESCAPE`: Symlink points outside extraction directory
 /// - `HARDLINK_ESCAPE`: Hardlink target outside extraction directory
 /// - `ZIP_BOMB`: Potential zip bomb detected
+/// - `ZIP_INCONSISTENCY`: ZIP structure is read differently by different tools
 /// - `INVALID_PERMISSIONS`: File permissions are invalid or unsafe
 /// - `QUOTA_EXCEEDED`: Resource quota exceeded
 /// - `SECURITY_VIOLATION`: Security policy violation

@@ -539,9 +539,14 @@ pub fn list_archive<P: AsRef<Path>>(
 /// - Archive file cannot be opened
 /// - Archive is severely corrupted (cannot read structure)
 /// - Declared compressed sizes exceed the archive length
+/// - An entry name is a path traversal (`..` component, or an absolute path
+///   unless `allowed.absolute_paths` is set): the listing step rejects it with
+///   [`ArchiveError::PathTraversal`] before a report exists
 ///
-/// Security violations are reported in `VerificationReport::issues`,
-/// not as errors.
+/// Other security violations are reported in `VerificationReport::issues`
+/// instead: disallowed links, link targets that escape the destination,
+/// quota and compression-ratio violations, NUL bytes, banned components and
+/// unsafe permissions.
 ///
 /// # Examples
 ///

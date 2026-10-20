@@ -295,7 +295,6 @@ impl VerificationIssue {
 
     /// Creates a verification issue from an extraction error.
     #[must_use]
-    #[allow(clippy::too_many_lines)]
     pub fn from_error(error: &ArchiveError, entry_path: Option<PathBuf>) -> Self {
         let (severity, category, message) = match error {
             ArchiveError::PathTraversal { path } => (

@@ -123,7 +123,10 @@ pub fn compression_level_to_xz(level: Option<u8>) -> u32 {
 /// let best_level = compression_level_to_zstd(Some(9));
 /// assert_eq!(best_level, 19);
 /// ```
-#[allow(clippy::match_same_arms)] // Different semantic meanings for each level
+#[expect(
+    clippy::match_same_arms,
+    reason = "arms are kept separate to document each level's meaning"
+)]
 #[must_use]
 pub fn compression_level_to_zstd(level: Option<u8>) -> i32 {
     match level {

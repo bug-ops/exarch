@@ -311,7 +311,10 @@ fn set_permissions(header: &mut Header, metadata: &std::fs::Metadata) {
     header.set_uid(u64::from(metadata.uid()));
     header.set_gid(u64::from(metadata.gid()));
     // mtime can be negative for dates before epoch, clamp to 0
-    #[allow(clippy::cast_sign_loss)] // Intentional: clamped to non-negative
+    #[expect(
+        clippy::cast_sign_loss,
+        reason = "the value is non-negative at this point"
+    )]
     let mtime = metadata.mtime().max(0) as u64;
     header.set_mtime(mtime);
 }

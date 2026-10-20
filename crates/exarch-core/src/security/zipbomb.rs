@@ -82,7 +82,10 @@ fn check_ratio(compressed_size: u64, uncompressed_size: u64, max_ratio: f64) -> 
         return Ok(());
     }
 
-    #[allow(clippy::cast_precision_loss)]
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "the ratio is approximate by design"
+    )]
     let ratio = uncompressed_size as f64 / compressed_size as f64;
 
     if ratio > max_ratio {

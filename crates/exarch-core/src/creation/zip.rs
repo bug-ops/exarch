@@ -253,7 +253,10 @@ fn create_zip_internal<W: Write + Seek, P: AsRef<Path>>(
 
 /// Adds a single file to the ZIP archive with progress reporting and reusable
 /// buffer.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "arguments are threaded through from the caller; a parameter struct adds indirection"
+)]
 fn add_file_to_zip_with_progress_and_buffer<W: Write + Seek>(
     zip: &mut ZipWriter<W>,
     file_path: &Path,

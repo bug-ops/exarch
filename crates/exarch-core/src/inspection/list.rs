@@ -279,7 +279,10 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
         let size = entry.size();
         let compression = EntryCompression::Entry(entry.compressed_size());
         let mode = entry.unix_mode().map(|m| m & 0o7777);
-        #[allow(clippy::cast_sign_loss)]
+        #[expect(
+            clippy::cast_sign_loss,
+            reason = "the value is non-negative at this point"
+        )]
         let modified = entry.last_modified().and_then(|dt| {
             time::PrimitiveDateTime::try_from(dt).ok().and_then(|t| {
                 let timestamp = t.assume_utc().unix_timestamp().max(0) as u64;

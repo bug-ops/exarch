@@ -660,7 +660,10 @@ impl<R: Read + Seek> SevenZArchive<R> {
     /// Returns `(continue, bytes_written)` on success so the caller can
     /// invoke `on_bytes_written` and `on_entry_complete` after this returns,
     /// guaranteeing both callbacks are always paired with `on_entry_start`.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "arguments are threaded through from the caller; a parameter struct adds indirection"
+    )]
     fn process_entry_inner(
         entry: &sevenz_rust2::ArchiveEntry,
         reader: &mut dyn Read,
@@ -858,7 +861,10 @@ impl<R: Read + Seek> SevenZArchive<R> {
     ///   [`write_file_with_permit`] (issue #492)
     /// - Creates directories only after validation
     /// - Uses directory cache to reduce mkdir syscalls
-    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "arguments are threaded through from the caller; a parameter struct adds indirection"
+    )]
     fn extract_with_callback(
         source: &mut R,
         archive: Archive,

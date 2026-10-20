@@ -75,7 +75,10 @@ impl SecurityConfig {
         if size < 0 {
             return Err(Error::from_reason("max file size cannot be negative"));
         }
-        #[allow(clippy::cast_sign_loss)]
+        #[expect(
+            clippy::cast_sign_loss,
+            reason = "the value is non-negative at this point"
+        )]
         {
             self.inner.max_file_size = size as u64;
         }
@@ -92,7 +95,10 @@ impl SecurityConfig {
         if size < 0 {
             return Err(Error::from_reason("max total size cannot be negative"));
         }
-        #[allow(clippy::cast_sign_loss)]
+        #[expect(
+            clippy::cast_sign_loss,
+            reason = "the value is non-negative at this point"
+        )]
         {
             self.inner.max_total_size = size as u64;
         }
@@ -184,7 +190,10 @@ impl SecurityConfig {
                 "max solid block memory must be a positive number",
             ));
         }
-        #[allow(clippy::cast_sign_loss)]
+        #[expect(
+            clippy::cast_sign_loss,
+            reason = "the value is non-negative at this point"
+        )]
         {
             self.inner.max_solid_block_memory = size as u64;
         }
@@ -488,7 +497,10 @@ impl CreationConfig {
         if size < 0 {
             return Err(Error::from_reason("max file size cannot be negative"));
         }
-        #[allow(clippy::cast_sign_loss)]
+        #[expect(
+            clippy::cast_sign_loss,
+            reason = "the value is non-negative at this point"
+        )]
         {
             self.inner.max_file_size = if size == 0 { None } else { Some(size as u64) };
         }

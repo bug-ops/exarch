@@ -37,7 +37,6 @@ const COPY_BUFFER_SIZE: usize = 64 * 1024;
 #[derive(Debug)]
 pub struct CopyBuffer {
     // Stack allocation is intentional for performance (avoids heap overhead)
-    #[allow(clippy::large_stack_arrays)]
     buf: [u8; COPY_BUFFER_SIZE],
 }
 
@@ -47,7 +46,10 @@ impl CopyBuffer {
     /// The buffer is allocated on the stack and zero-initialized.
     #[inline]
     #[must_use]
-    #[allow(clippy::large_stack_arrays)]
+    #[expect(
+        clippy::large_stack_arrays,
+        reason = "the copy buffer is deliberately a fixed-size array"
+    )]
     pub fn new() -> Self {
         Self {
             buf: [0u8; COPY_BUFFER_SIZE],

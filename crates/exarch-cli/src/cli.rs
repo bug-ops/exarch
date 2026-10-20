@@ -241,7 +241,10 @@ pub struct VerifyArgs {
 }
 
 /// Parse byte size with optional suffix (K, M, G, T)
-#[allow(clippy::option_if_let_else)]
+#[expect(
+    clippy::option_if_let_else,
+    reason = "if-let chain reads clearer than map_or_else here"
+)]
 fn parse_byte_size(s: &str) -> Result<u64, String> {
     let s = s.trim();
     if s.is_empty() {

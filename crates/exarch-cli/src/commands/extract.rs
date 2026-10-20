@@ -183,7 +183,7 @@ fn run_atomic_force_extraction(
 /// here also runs [`disclose_if_orphaned`] on the temp directory identified
 /// by `temp`, since the extraction that landed there has already succeeded
 /// by the time this is called.
-#[allow(clippy::type_complexity)]
+#[expect(clippy::type_complexity, reason = "tuple is local to this function")]
 fn move_destination_to_backup(
     temp: &TempOrphanRef<'_>,
     dest_name: &OsStr,

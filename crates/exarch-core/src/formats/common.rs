@@ -729,7 +729,10 @@ pub fn create_file_with_mode(
 /// - I/O error during copy
 /// - `expected_size` is `Some` and the actual decompressed byte count exceeds
 ///   or falls short of it (forged size metadata)
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "arguments are threaded through from the caller; a parameter struct adds indirection"
+)]
 #[inline]
 pub fn extract_file_with_permit<R: Read>(
     reader: &mut R,

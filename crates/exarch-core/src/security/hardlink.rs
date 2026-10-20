@@ -109,7 +109,10 @@ impl HardlinkTracker {
     /// # Ok(())
     /// # }
     /// ```
-    #[allow(clippy::items_after_statements)]
+    #[expect(
+        clippy::items_after_statements,
+        reason = "the import is placed next to its only use"
+    )]
     pub fn validate_hardlink(
         &mut self,
         link_path: &SafePath,

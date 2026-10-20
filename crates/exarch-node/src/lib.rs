@@ -41,7 +41,10 @@
 //! MIT OR Apache-2.0
 
 // Allow trailing_empty_array from napi macro - this is expected behavior
-#![allow(clippy::trailing_empty_array)]
+#![expect(
+    clippy::trailing_empty_array,
+    reason = "emitted by the napi macro expansion"
+)]
 
 use napi::bindgen_prelude::*;
 use napi::threadsafe_function::ThreadsafeFunction;
@@ -461,7 +464,7 @@ impl FromNapiValue for ProgressCallback {
     // argument-extraction code calls this exclusively from inside the JS
     // callback that receives the corresponding `#[napi]` function's raw
     // arguments, on the JS thread, before either pointer can be invalidated.
-    #[allow(unsafe_code)]
+    #[expect(unsafe_code, reason = "napi's FromNapiValue is an unsafe trait method")]
     unsafe fn from_napi_value(env: sys::napi_env, napi_val: sys::napi_value) -> Result<Self> {
         // `Function::from_napi_value` wraps any value with zero type
         // checking, unlike `ThreadsafeFunction::from_napi_value` (which fails

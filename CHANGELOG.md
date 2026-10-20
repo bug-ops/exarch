@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Minor cleanups: `map_or_default` and `bool::ok_or_else` sites, dead `_format` parameters, a duplicated declared-size message, and unconditional clippy `#[allow]` converted to `#[expect]` (#641).
 - **BREAKING:** `ArchiveEntry` holds one `kind: ManifestEntryKind` instead of `entry_type`, `symlink_target` and `hardlink_target`, and `verify` reports a link entry without a target as a security-policy issue (#636).
 - **BREAKING:** `ArchiveEntry.compressed_size` is replaced by `compression: EntryCompression` with a `compressed_size()` method, and `compression_ratio()` is `None` for 7z solid-block entries (#626).
 - **BREAKING:** `open_tar_xz` takes a `SecurityConfig`; tar.xz decoder memory is bounded by the new `max_decoder_memory` (default 256 MiB) and reported as `QuotaResource::DecoderMemory` (#629).

@@ -47,7 +47,6 @@ impl ArchiveError {
     /// assert!(msg.description.contains("../../etc/passwd"));
     /// ```
     #[must_use]
-    #[allow(clippy::too_many_lines)]
     pub fn to_ffi_message(&self) -> FfiErrorMessage {
         let path = self
             .redacted_path()

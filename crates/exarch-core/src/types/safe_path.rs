@@ -120,7 +120,6 @@ impl SafePath {
     /// # Ok(())
     /// # }
     /// ```
-    #[allow(clippy::too_many_lines)]
     pub fn validate(
         path: &Path,
         dest: &DestDir,
@@ -140,7 +139,10 @@ impl SafePath {
     /// All other validation steps (null bytes, absolute paths, parent
     /// traversal, depth, banned components, prefix check) are always
     /// performed regardless of context.
-    #[allow(clippy::too_many_lines)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one cohesive sequence; splitting it would obscure the order of checks"
+    )]
     pub(crate) fn validate_with_context(
         path: &Path,
         dest: &DestDir,

@@ -201,6 +201,16 @@ document to stdout — a `status: "success"` envelope carrying the full report (
 entry: a single valid JSON document, parseable with a plain `json.loads(stdout)`. The process
 still exits `1` for a FAIL status.
 
+`data.issues[].category` is one of `"Path Traversal"`, `"Symlink Escape"`, `"Hardlink Escape"`,
+`"Zip Bomb"`, `"Invalid Permissions"`, `"Quota Exceeded"`, `"Security Policy"`,
+`"Invalid Archive"`, `"Suspicious Path"`, `"Executable File"`. `"Security Policy"` covers entries
+rejected by the configured policy rather than by an attack check: a symlink or hardlink under the
+default config (`Security violation: symlinks not allowed` / `hardlinks not allowed`), NUL bytes,
+banned components. These are security findings: `security_status` is `FAILED` (`Security:
+FAILED` in text mode), not `OK`. Verified live with the debug binary on a TAR containing a
+symlink and on one containing a hardlink: each gives `status: FAIL`, `Security: FAILED`, one
+`HIGH` `"Security Policy"` issue, exit code `1`.
+
 ### `completion <SHELL>`
 
 ```bash
@@ -374,7 +384,12 @@ across versions.
 
 Default `SecurityConfig` limits: 50 MB per file, 500 MB total extracted size, 100x max
 compression ratio, 10,000 max files, 32 max path depth. All symlinks, hardlinks, absolute
-paths, and world-writable files are rejected unless explicitly allowed. setuid/setgid bits are
+paths, and world-writable files are rejected unless explicitly allowed. On Windows only, entries
+whose path has a reserved device-name component (`CON`, `NUL`, `COM1`, ... ASCII
+case-insensitive, with or without an extension, e.g. `NUL.tar.gz`) or a component containing
+`:` (NTFS alternate data streams) are rejected with `SecurityViolation`; there is no CLI flag to
+disable this (the opt-out exists only in the Rust API). On other platforms these names are
+accepted. setuid/setgid bits are
 always stripped on Unix regardless of `--preserve-permissions`. Solid 7z archives (multiple
 files compressed as one block) are rejected by default because extracting even one file
 requires decompressing the whole block into memory — a memory-exhaustion vector; enable

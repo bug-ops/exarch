@@ -1313,6 +1313,48 @@ fn create_symlink_escape_tar_gz(path: &std::path::Path) {
     gz.finish().expect("finish gzip stream");
 }
 
+/// A symlink rejected by the security policy must fail `security_status`, not
+/// just the overall status, and carry the "Security Policy" category.
+#[test]
+fn test_verify_symlink_policy_violation_fails_security_status() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive_path = temp.path().join("symlink_escape.tar.gz");
+    create_symlink_escape_tar_gz(&archive_path);
+
+    let output = exarch_cmd()
+        .arg("verify")
+        .arg("--json")
+        .arg(&archive_path)
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: serde_json::Value = serde_json::from_slice(&output).expect("invalid JSON output");
+    assert_eq!(json["data"]["status"], "FAIL");
+    assert_eq!(json["data"]["security_status"], "FAILED");
+    let issues = json["data"]["issues"].as_array().expect("issues array");
+    assert!(
+        issues.iter().any(|i| i["category"] == "Security Policy"),
+        "expected a Security Policy issue, got: {json}"
+    );
+}
+
+#[test]
+fn test_verify_symlink_policy_violation_human_output_shows_security_failed() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive_path = temp.path().join("symlink_escape.tar.gz");
+    create_symlink_escape_tar_gz(&archive_path);
+
+    exarch_cmd()
+        .arg("verify")
+        .arg(&archive_path)
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("Security: FAILED"));
+}
+
 /// Regression test for issue #387: `verify --json` on a FAIL-status archive
 /// must print exactly one top-level JSON document, and the process must still
 /// exit non-zero.

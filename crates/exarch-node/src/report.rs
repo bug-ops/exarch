@@ -734,6 +734,39 @@ mod tests {
         assert_eq!(report.total_size, 5000);
     }
 
+    #[test]
+    fn test_security_policy_issue_conversion_and_status() {
+        let core_issue = exarch_core::inspection::VerificationIssue::new(
+            CoreIssueSeverity::High,
+            CoreIssueCategory::SecurityPolicy,
+            "Security violation: symlinks not allowed".to_string(),
+        );
+
+        let issue = VerificationIssue::try_from(core_issue).unwrap();
+        assert_eq!(issue.category, IssueCategory::SecurityPolicy);
+
+        let mut manifest = exarch_core::inspection::ArchiveManifest::new(
+            exarch_core::formats::detect::ArchiveType::Tar,
+        );
+        manifest
+            .add_entry(exarch_core::inspection::ArchiveEntry::new(
+                std::path::PathBuf::from("link"),
+                exarch_core::inspection::ManifestEntryKind::File,
+                0,
+            ))
+            .unwrap();
+        let core_report =
+            exarch_core::inspection::VerificationReport::from_entry_issues(&manifest, |_| {
+                vec![exarch_core::inspection::VerificationIssue::new(
+                    CoreIssueSeverity::High,
+                    CoreIssueCategory::SecurityPolicy,
+                    "Security violation: symlinks not allowed".to_string(),
+                )]
+            });
+        let report = VerificationReport::try_from(core_report).unwrap();
+        assert_eq!(report.security_status, CheckStatus::Fail);
+    }
+
     // VerificationIssue tests
     #[test]
     fn test_verification_issue_conversion() {

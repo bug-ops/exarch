@@ -70,9 +70,14 @@ pub(crate) fn verify_manifest(
 /// - Archive file cannot be opened
 /// - Archive is severely corrupted (cannot read structure)
 /// - Declared compressed sizes exceed the archive length
+/// - An entry name is a path traversal (`..` component, or an absolute path
+///   unless `allowed.absolute_paths` is set): the listing step rejects it with
+///   [`ArchiveError::PathTraversal`] before a report exists
 ///
-/// Security violations are reported in `VerificationReport::issues`, not as
-/// errors.
+/// Other security violations are reported in `VerificationReport::issues`
+/// instead: disallowed links, link targets that escape the destination,
+/// quota and compression-ratio violations, NUL bytes, banned components and
+/// unsafe permissions.
 ///
 /// # Examples
 ///
@@ -569,9 +574,7 @@ mod tests {
     // `test_list_tar_hardlink_missing_target_rejected` in
     // `inspection::list::tests`). `relaxed_for_verify_preflight` lets the
     // missing target through the pre-flight listing pass as `None`;
-    // `verify_entry` then treats it as an empty target via
-    // `unwrap_or_default()`, which `validate_path` rejects with its own
-    // pre-existing "empty path not allowed" check.
+    // `verify_entry` reports it as a SecurityPolicy issue.
     #[test]
     fn test_verify_archive_hardlink_missing_target_reports_issue_not_error() {
         let mut temp_file = NamedTempFile::with_suffix(".tar").unwrap();
@@ -607,6 +610,122 @@ mod tests {
             "expected a SecurityPolicy issue citing the missing target, got: {:?}",
             report.issues()
         );
+    }
+
+    fn link_tar(
+        entry_type: tar::EntryType,
+        names_and_targets: &[(&str, Option<&str>)],
+    ) -> NamedTempFile {
+        let mut temp_file = NamedTempFile::with_suffix(".tar").unwrap();
+        let mut builder = tar::Builder::new(Vec::new());
+        for (name, target) in names_and_targets {
+            let mut header = tar::Header::new_gnu();
+            header.set_path(name).unwrap();
+            header.set_size(0);
+            header.set_entry_type(entry_type);
+            if let Some(target) = target {
+                header.set_link_name(target).unwrap();
+            }
+            header.set_cksum();
+            builder.append(&header, &[][..]).unwrap();
+        }
+        temp_file.write_all(&builder.into_inner().unwrap()).unwrap();
+        temp_file.flush().unwrap();
+        temp_file
+    }
+
+    fn hardlink_config(allowed: bool) -> SecurityConfig {
+        let mut config = SecurityConfig::default();
+        config.allowed.hardlinks = allowed;
+        config
+    }
+
+    #[test]
+    fn test_verify_hardlink_rejected_when_not_allowed() {
+        let archive = link_tar(tar::EntryType::Link, &[("link", Some("target.txt"))]);
+        let report = verify_archive(archive.path(), &hardlink_config(false)).unwrap();
+
+        assert_eq!(report.status(), VerificationStatus::Fail);
+        assert_eq!(report.security_status(), crate::CheckStatus::Fail);
+        assert!(report.issues().iter().any(|i| {
+            i.category == IssueCategory::SecurityPolicy
+                && i.message.contains("hardlinks not allowed")
+        }));
+    }
+
+    #[test]
+    fn test_verify_hardlink_inside_dest_passes_when_allowed() {
+        let archive = link_tar(tar::EntryType::Link, &[("link", Some("target.txt"))]);
+        let report = verify_archive(archive.path(), &hardlink_config(true)).unwrap();
+
+        assert!(
+            !report.issues().iter().any(|i| i.category.is_security()),
+            "got: {:?}",
+            report.issues()
+        );
+    }
+
+    #[test]
+    fn test_verify_hardlink_duplicate_target_passes_when_allowed() {
+        let archive = link_tar(
+            tar::EntryType::Link,
+            &[("a", Some("target.txt")), ("b", Some("target.txt"))],
+        );
+        let report = verify_archive(archive.path(), &hardlink_config(true)).unwrap();
+
+        assert!(!report.issues().iter().any(|i| i.category.is_security()));
+    }
+
+    #[test]
+    fn test_verify_hardlink_target_escaping_dest_flagged() {
+        let archive = link_tar(tar::EntryType::Link, &[("link", Some("../outside.txt"))]);
+        let report = verify_archive(archive.path(), &hardlink_config(true)).unwrap();
+
+        assert_eq!(report.status(), VerificationStatus::Fail);
+        assert!(
+            report
+                .issues()
+                .iter()
+                .any(|i| i.category == IssueCategory::HardlinkEscape),
+            "got: {:?}",
+            report.issues()
+        );
+    }
+
+    #[test]
+    fn test_verify_hardlink_absolute_target_flagged() {
+        let archive = link_tar(tar::EntryType::Link, &[("link", Some("/etc/passwd"))]);
+        let report = verify_archive(archive.path(), &hardlink_config(true)).unwrap();
+
+        assert_eq!(report.status(), VerificationStatus::Fail);
+        assert!(
+            report
+                .issues()
+                .iter()
+                .any(|i| i.category == IssueCategory::HardlinkEscape),
+            "got: {:?}",
+            report.issues()
+        );
+    }
+
+    #[test]
+    fn test_verify_symlink_missing_target_reports_policy_issue() {
+        for allowed in [false, true] {
+            let archive = link_tar(tar::EntryType::Symlink, &[("link", None)]);
+            let mut config = SecurityConfig::default();
+            config.allowed.symlinks = allowed;
+            let report = verify_archive(archive.path(), &config).unwrap();
+
+            assert_eq!(report.status(), VerificationStatus::Fail);
+            assert!(
+                report.issues().iter().any(|i| {
+                    i.category == IssueCategory::SecurityPolicy
+                        && i.message.contains("symlink target is missing")
+                }),
+                "allowed={allowed}, got: {:?}",
+                report.issues()
+            );
+        }
     }
 
     // Note: Full CVE regression tests for path traversal require real malicious

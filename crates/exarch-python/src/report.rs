@@ -848,6 +848,23 @@ mod tests {
     }
 
     #[test]
+    fn test_verification_issue_security_policy_category() {
+        use exarch_core::inspection::report::IssueCategory;
+        use exarch_core::inspection::report::IssueSeverity;
+
+        let issue = VerificationIssue::new(
+            IssueSeverity::High,
+            IssueCategory::SecurityPolicy,
+            "Security violation: symlinks not allowed".to_string(),
+        );
+
+        assert_eq!(
+            PyVerificationIssue::from(issue).category(),
+            "Security Policy"
+        );
+    }
+
+    #[test]
     fn test_verification_issue_properties() {
         use exarch_core::inspection::report::IssueCategory;
         use exarch_core::inspection::report::IssueSeverity;

@@ -462,7 +462,12 @@ class ArchiveEntry:
 
     @property
     def compressed_size(self) -> int | None:
-        """Compressed size in bytes (if available). For the first file of a solid 7z block this is the whole block's compressed size; other solid members report None."""
+        """
+        Compressed size in bytes (if available).
+
+        For the first file of a solid 7z block this is the whole block's
+        compressed size; other solid members report None.
+        """
         ...
 
     @property
@@ -481,7 +486,12 @@ class ArchiveEntry:
         ...
 
     def compression_ratio(self) -> float | None:
-        """Returns the compression ratio if the entry owns its compressed data. None for TAR, empty entries and solid 7z members (including the block start, whose ratio is checked per block)."""
+        """
+        Returns the compression ratio if the entry owns its compressed data.
+
+        None for TAR, empty entries and solid 7z members (including the
+        block start, whose ratio is checked per block).
+        """
         ...
 
 class ArchiveManifest:

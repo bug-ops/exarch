@@ -51,18 +51,8 @@ pub fn convert_error(err: CoreError) -> Error {
             msg.push_str(&path_str);
             Error::new(Status::GenericFailure, msg)
         }
-        CoreError::ZipBomb {
-            compressed,
-            uncompressed,
-            ratio,
-        } => {
-            let mut msg = String::with_capacity(150);
-            // Writing to a String never fails
-            let _ = write!(
-                &mut msg,
-                "ZIP_BOMB: potential zip bomb: compressed={compressed} bytes, uncompressed={uncompressed} bytes (ratio: {ratio:.2})"
-            );
-            Error::new(Status::GenericFailure, msg)
+        zip_bomb @ CoreError::ZipBomb(_) => {
+            Error::new(Status::GenericFailure, format!("ZIP_BOMB: {zip_bomb}"))
         }
         CoreError::InvalidPermissions { path, mode } => {
             let path_str = format_entry_path_for_error(&path);
@@ -254,16 +244,27 @@ mod tests {
 
     #[test]
     fn test_zip_bomb_conversion() {
-        let err = CoreError::ZipBomb {
-            compressed: 1000,
-            uncompressed: 1_000_000,
-            ratio: 1000.0,
-        };
+        let err = CoreError::ZipBomb(exarch_core::ZipBombDetails::new(
+            exarch_core::ZipBombScope::Entry,
+            1000,
+            1_000_000,
+        ));
         let napi_err = convert_error(err);
         let err_str = napi_err.to_string();
         assert!(err_str.contains("ZIP_BOMB"));
         assert!(err_str.contains("zip bomb"));
         assert!(err_str.contains("1000"));
+    }
+
+    #[test]
+    fn test_zip_bomb_unbounded_conversion() {
+        let err = CoreError::ZipBomb(exarch_core::ZipBombDetails::new(
+            exarch_core::ZipBombScope::Entry,
+            0,
+            10,
+        ));
+        let msg = convert_error(err).to_string();
+        assert!(msg.contains("ratio: unbounded"), "got: {msg}");
     }
 
     #[test]

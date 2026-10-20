@@ -637,11 +637,9 @@ mod tests {
     #[test]
     fn format_error_writes_to_stderr_not_stdout() {
         let mut f = formatter(Verbosity::Normal, false);
-        let err = anyhow::anyhow!(exarch_core::ArchiveError::ZipBomb {
-            compressed: 1000,
-            uncompressed: 1_000_000,
-            ratio: 1000.0,
-        });
+        let err = anyhow::anyhow!(exarch_core::ArchiveError::ZipBomb(
+            exarch_core::ZipBombDetails::new(exarch_core::ZipBombScope::Entry, 1000, 1_000_000)
+        ));
         f.format_error("extract", &err);
         assert!(out_text(&f).is_empty());
         let text = err_text(&f);

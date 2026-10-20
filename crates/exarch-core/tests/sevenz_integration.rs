@@ -732,7 +732,7 @@ fn sevenz_extract_enforces_compression_ratio() {
         &mut exarch_core::NoopProgress,
     );
 
-    assert_matches!(result, Err(ArchiveError::ZipBomb { .. }));
+    assert_matches!(result, Err(ArchiveError::ZipBomb(_)));
     assert_eq!(std::fs::read_dir(out.path()).unwrap().count(), 0);
 
     let dir = TempDir::new().unwrap();
@@ -773,7 +773,7 @@ fn sevenz_ratio_check_runs_before_duplicate_skip() {
         &mut exarch_core::NoopProgress,
     );
 
-    assert_matches!(result, Err(ArchiveError::ZipBomb { .. }));
+    assert_matches!(result, Err(ArchiveError::ZipBomb(_)));
     assert_eq!(
         std::fs::read(out.path().join("a.txt")).unwrap(),
         b"existing"

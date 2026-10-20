@@ -8,5 +8,8 @@ pub mod types;
 pub use io_context::IoContext;
 pub use messages::FfiErrorMessage;
 pub use types::ArchiveError;
+pub use types::CompressionRatio;
 pub use types::QuotaResource;
 pub use types::Result;
+pub use types::ZipBombDetails;
+pub use types::ZipBombScope;

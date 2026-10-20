@@ -54,13 +54,7 @@ pub fn convert_error(err: CoreError) -> PyErr {
                 "hardlink target outside extraction directory: {path_str}"
             ))
         }
-        CoreError::ZipBomb {
-            compressed,
-            uncompressed,
-            ratio,
-        } => ZipBombError::new_err(format!(
-            "potential zip bomb: compressed={compressed} bytes, uncompressed={uncompressed} bytes (ratio: {ratio:.2})"
-        )),
+        zip_bomb @ CoreError::ZipBomb(_) => ZipBombError::new_err(zip_bomb.to_string()),
         CoreError::InvalidPermissions { path, mode } => {
             let path_str = format_entry_path_for_error(&path);
             InvalidPermissionsError::new_err(format!(
@@ -270,11 +264,11 @@ mod tests {
 
     #[test]
     fn test_zip_bomb_conversion() {
-        let err = CoreError::ZipBomb {
-            compressed: 1000,
-            uncompressed: 1_000_000,
-            ratio: 1000.0,
-        };
+        let err = CoreError::ZipBomb(exarch_core::ZipBombDetails::new(
+            exarch_core::ZipBombScope::Entry,
+            1000,
+            1_000_000,
+        ));
         let py_err = convert_error(err);
         let err_str = py_err.to_string();
         assert!(
@@ -287,6 +281,17 @@ mod tests {
             "Expected compression ratio in error message, got: {}",
             err_str
         );
+    }
+
+    #[test]
+    fn test_zip_bomb_unbounded_conversion() {
+        let err = CoreError::ZipBomb(exarch_core::ZipBombDetails::new(
+            exarch_core::ZipBombScope::Entry,
+            0,
+            10,
+        ));
+        let msg = convert_error(err).to_string();
+        assert!(msg.contains("ratio: unbounded"), "got: {msg}");
     }
 
     #[test]

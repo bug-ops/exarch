@@ -312,16 +312,10 @@ impl VerificationIssue {
                 IssueCategory::HardlinkEscape,
                 format!("Hardlink escape: {}", path.display()),
             ),
-            ArchiveError::ZipBomb {
-                compressed,
-                uncompressed,
-                ratio,
-            } => (
+            ArchiveError::ZipBomb(details) => (
                 IssueSeverity::Critical,
                 IssueCategory::ZipBomb,
-                format!(
-                    "Potential zip bomb: {ratio:.1}x compression ratio (compressed={compressed}, uncompressed={uncompressed})"
-                ),
+                format!("Potential zip bomb: {details}"),
             ),
             ArchiveError::QuotaExceeded { resource } => (
                 IssueSeverity::High,
@@ -483,6 +477,8 @@ impl IssueCategory {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::ZipBombDetails;
+    use crate::ZipBombScope;
     use std::io;
 
     use crate::inspection::manifest::ManifestEntryKind;
@@ -601,11 +597,8 @@ mod tests {
 
     #[test]
     fn test_verification_issue_from_zip_bomb() {
-        let error = ArchiveError::ZipBomb {
-            compressed: 1000,
-            uncompressed: 1_000_000,
-            ratio: 1000.0,
-        };
+        let error =
+            ArchiveError::ZipBomb(ZipBombDetails::new(ZipBombScope::Entry, 1000, 1_000_000));
         let issue = VerificationIssue::from_error(&error, None);
 
         assert_eq!(issue.severity, IssueSeverity::Critical);

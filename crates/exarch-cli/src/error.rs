@@ -5,9 +5,27 @@
 
 use anyhow::Result;
 use exarch_core::ArchiveError;
+use exarch_core::CompressionRatio;
 use exarch_core::ExtractionReport;
+use exarch_core::ZipBombDetails;
+use exarch_core::ZipBombScope;
 use std::fmt;
 use std::path::Path;
+
+fn zip_bomb_hint(details: &ZipBombDetails) -> &'static str {
+    match (details.ratio(), details.scope()) {
+        (CompressionRatio::Unbounded, _) => {
+            "The archive claims data from zero compressed bytes, so its size metadata is \
+             inconsistent and no ratio limit admits it."
+        }
+        (CompressionRatio::Finite(_), ZipBombScope::SolidBlock) => {
+            "Solid 7z blocks use a fixed 1000x limit that the CLI cannot change."
+        }
+        (CompressionRatio::Finite(_), _) => {
+            "--max-compression-ratio allows higher ratios for ZIP and non-solid 7z if legitimate."
+        }
+    }
+}
 
 /// Sentinel error returned by `verify::execute` when `--strict` is active and
 /// the archive has a `Warning`-status verification report. `main` maps this to
@@ -164,11 +182,11 @@ pub fn convert_extraction_error(
              HINT: This archive may be malicious. Do not extract from untrusted sources.",
             archive.display(),
         ),
-        ArchiveError::ZipBomb { .. } => format!(
+        ArchiveError::ZipBomb(details) => format!(
             "Security violation: Archive '{}' appears to be a zip bomb\n\
-             HINT: For ZIP and non-solid 7z, --max-compression-ratio allows higher ratios if \
-             legitimate. Solid 7z blocks use a fixed limit that the CLI cannot change.",
+             HINT: {}",
             archive.display(),
+            zip_bomb_hint(details),
         ),
         ArchiveError::QuotaExceeded {
             resource: exarch_core::QuotaResource::DecoderMemory { .. },
@@ -300,19 +318,32 @@ mod tests {
         assert!(msg.contains("HINT"));
     }
 
+    fn zip_bomb_message(scope: ZipBombScope, compressed: u64, uncompressed: u64) -> String {
+        let err = ArchiveError::ZipBomb(ZipBombDetails::new(scope, compressed, uncompressed));
+        let converted = convert_extraction_error(err, Path::new("bomb.zip"), false);
+        format!("{converted:?}")
+    }
+
     #[test]
     fn test_convert_zip_bomb_error() {
-        let err = ArchiveError::ZipBomb {
-            compressed: 1024,
-            uncompressed: 1024 * 1024 * 150,
-            ratio: 150.0,
-        };
-        let converted = convert_extraction_error(err, Path::new("bomb.zip"), false);
-        let msg = format!("{converted:?}");
+        let msg = zip_bomb_message(ZipBombScope::Entry, 1024, 1024 * 1024 * 150);
         assert!(msg.contains("zip bomb"));
         assert!(msg.contains("bomb.zip"));
         assert!(msg.contains("--max-compression-ratio"));
-        assert!(msg.contains("Solid 7z blocks use a fixed limit"));
+    }
+
+    #[test]
+    fn test_zip_bomb_solid_block_hint() {
+        let msg = zip_bomb_message(ZipBombScope::SolidBlock, 1024, 1024 * 1024 * 150);
+        assert!(msg.contains("fixed 1000x limit"));
+        assert!(!msg.contains("--max-compression-ratio"));
+    }
+
+    #[test]
+    fn test_zip_bomb_unbounded_hint() {
+        let msg = zip_bomb_message(ZipBombScope::Entry, 0, 10);
+        assert!(msg.contains("size metadata is inconsistent"));
+        assert!(!msg.contains("--max-compression-ratio"));
     }
 
     #[test]

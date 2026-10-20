@@ -51,10 +51,13 @@ pub use config::SecurityConfig;
 pub use config::Unvalidated;
 pub use config::Validated;
 pub use error::ArchiveError;
+pub use error::CompressionRatio;
 pub use error::FfiErrorMessage;
 pub use error::IoContext;
 pub use error::QuotaResource;
 pub use error::Result;
+pub use error::ZipBombDetails;
+pub use error::ZipBombScope;
 /// Formats an archive-relative, attacker-authored path for an FFI error
 /// message without redaction. Shared by `exarch-python` and `exarch-node`.
 pub use error::redaction::format_entry_path_for_error;

@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING:** `ArchiveError::ZipBomb` wraps `ZipBombDetails` (sizes, `ZipBombScope::{Entry, SolidBlock}`, derived `CompressionRatio`), so solid-block rejections are no longer reported as per-file ratios (#PR).
+- **BREAKING:** An entry or solid block claiming data from zero compressed bytes is `ZipBomb` with an unbounded ratio instead of `InvalidArchive`, in the core, CLI, Python and Node error mappings (#PR).
 - Minor cleanups: `map_or_default` and `bool::ok_or_else` sites, dead `_format` parameters, a duplicated declared-size message, and unconditional clippy `#[allow]` converted to `#[expect]` (#652).
 - **BREAKING:** `ArchiveEntry` holds one `kind: ManifestEntryKind` instead of `entry_type`, `symlink_target` and `hardlink_target`, and `verify` reports a link entry without a target as a security-policy issue (#652).
 - **BREAKING:** `ArchiveEntry.compressed_size` is replaced by `compression: EntryCompression` with a `compressed_size()` method, and `compression_ratio()` is `None` for 7z solid-block entries (#652).

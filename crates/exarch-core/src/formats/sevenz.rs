@@ -2682,7 +2682,7 @@ mod tests {
 
         let out = dir.path().join("out");
         let result = crate::extract_archive(&path, &out, &config);
-        assert_matches!(result, Err(ArchiveError::ZipBomb { .. }));
+        assert_matches!(result, Err(ArchiveError::ZipBomb(_)));
         assert!(!out.join("copy0").exists(), "nothing may be written");
     }
 

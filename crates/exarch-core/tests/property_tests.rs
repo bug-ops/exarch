@@ -416,7 +416,11 @@ proptest! {
         let result = validate_compression_ratio(0, uncompressed, &config);
 
         prop_assert!(
-            matches!(result, Err(ArchiveError::InvalidArchive(_))),
+            matches!(
+                result,
+                Err(ArchiveError::ZipBomb(details))
+                    if details.ratio() == exarch_core::CompressionRatio::Unbounded
+            ),
             "zero compressed with non-zero uncompressed must be rejected"
         );
     }
@@ -446,7 +450,7 @@ proptest! {
         let result = validate_compression_ratio(compressed, uncompressed, &config);
 
         prop_assert!(
-            matches!(result, Err(ArchiveError::ZipBomb { .. })),
+            matches!(result, Err(ArchiveError::ZipBomb(_))),
             "extreme compression ratio should be detected"
         );
     }

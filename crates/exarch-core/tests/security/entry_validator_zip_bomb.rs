@@ -74,7 +74,7 @@ fn test_42_zip_bomb_simulation() {
         None,
     );
 
-    assert_matches!(result, Err(ArchiveError::ZipBomb { .. }));
+    assert_matches!(result, Err(ArchiveError::ZipBomb(_)));
 }
 
 #[test]
@@ -95,7 +95,7 @@ fn test_high_compression_ratio_individual() {
         None,
     );
 
-    assert_matches!(result, Err(ArchiveError::ZipBomb { .. }));
+    assert_matches!(result, Err(ArchiveError::ZipBomb(_)));
 }
 
 #[test]
@@ -161,7 +161,7 @@ fn test_just_over_compression_ratio() {
         None,
     );
 
-    assert_matches!(result, Err(ArchiveError::ZipBomb { .. }));
+    assert_matches!(result, Err(ArchiveError::ZipBomb(_)));
 }
 
 #[test]
@@ -173,8 +173,8 @@ fn test_zero_compressed_nonzero_uncompressed_rejected() {
     let mut validator = EntryValidator::new(&config, &dest);
 
     // HIGH-001: a stored (compressed_size == 0) entry claiming nonzero
-    // uncompressed content is invalid archive metadata, not a "free" ratio
-    // that divides cleanly to zero — this closes what used to be a
+    // uncompressed content has an unbounded ratio, not a "free" ratio that
+    // divides cleanly to zero — this closes what used to be a
     // zip-bomb-detection bypass via a fabricated zero compressed size.
     let result = validator.validate_entry(
         Path::new("empty.txt"),
@@ -185,7 +185,11 @@ fn test_zero_compressed_nonzero_uncompressed_rejected() {
         None,
     );
 
-    assert_matches!(result, Err(ArchiveError::InvalidArchive(_)));
+    assert_matches!(
+        result,
+        Err(ArchiveError::ZipBomb(details))
+            if details.ratio() == exarch_core::CompressionRatio::Unbounded
+    );
 }
 
 #[test]

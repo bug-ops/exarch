@@ -23,7 +23,7 @@ fn extraction_error_kind(err: &ArchiveError) -> String {
         ArchiveError::PathTraversal { .. } => "PathTraversal",
         ArchiveError::SymlinkEscape { .. } => "SymlinkEscape",
         ArchiveError::HardlinkEscape { .. } => "HardlinkEscape",
-        ArchiveError::ZipBomb { .. } => "ZipBomb",
+        ArchiveError::ZipBomb(_) => "ZipBomb",
         ArchiveError::InvalidPermissions { .. } => "InvalidPermissions",
         ArchiveError::QuotaExceeded { .. } => "QuotaExceeded",
         ArchiveError::SecurityViolation { .. } => "SecurityViolation",
@@ -351,11 +351,11 @@ mod tests {
 
     #[test]
     fn test_extraction_error_kind_zip_bomb() {
-        let err = ArchiveError::ZipBomb {
-            compressed: 1000,
-            uncompressed: 1_000_000,
-            ratio: 1000.0,
-        };
+        let err = exarch_core::ArchiveError::ZipBomb(exarch_core::ZipBombDetails::new(
+            exarch_core::ZipBombScope::Entry,
+            1000,
+            1_000_000,
+        ));
         assert_eq!(error_kind(&err), "ZipBomb");
     }
 
@@ -429,11 +429,11 @@ mod tests {
     fn test_format_error_downcasts_extraction_error() {
         // Verify that format_error correctly resolves the kind from an anyhow
         // chain containing an ArchiveError.
-        let extraction_err = ArchiveError::ZipBomb {
-            compressed: 100,
-            uncompressed: 100_000,
-            ratio: 1000.0,
-        };
+        let extraction_err = exarch_core::ArchiveError::ZipBomb(exarch_core::ZipBombDetails::new(
+            exarch_core::ZipBombScope::Entry,
+            100,
+            100_000,
+        ));
         let anyhow_err = anyhow::Error::new(extraction_err);
 
         // Downcast manually, same logic as format_error uses
@@ -492,14 +492,11 @@ mod tests {
         use crate::error::convert_extraction_error;
         use std::path::Path;
 
-        let compressed = 1_024_u64;
-        let uncompressed = 1_024 * 1_024 * 150_u64;
-        let ratio = 150.0_f64;
-        let err = ArchiveError::ZipBomb {
-            compressed,
-            uncompressed,
-            ratio,
-        };
+        let err = ArchiveError::ZipBomb(exarch_core::ZipBombDetails::new(
+            exarch_core::ZipBombScope::Entry,
+            1_024,
+            1_024 * 1_024 * 150,
+        ));
         // ArchiveError::Display emits the ratio info
         let display_text = err.to_string();
         let anyhow_err = convert_extraction_error(err, Path::new("bomb.zip"), false);
@@ -580,11 +577,9 @@ mod tests {
     #[test]
     fn format_error_writes_error_envelope() {
         let mut f = JsonFormatter::with_writer(Vec::new());
-        let err = anyhow::anyhow!(ArchiveError::ZipBomb {
-            compressed: 1000,
-            uncompressed: 1_000_000,
-            ratio: 1000.0,
-        });
+        let err = anyhow::anyhow!(exarch_core::ArchiveError::ZipBomb(
+            exarch_core::ZipBombDetails::new(exarch_core::ZipBombScope::Entry, 1000, 1_000_000)
+        ));
         f.format_error("extract", &err);
         let v = parsed(&f);
         assert_eq!(v["operation"], "extract");

@@ -70,16 +70,14 @@ impl ArchiveError {
                 context: None,
             },
 
-            Self::ZipBomb {
-                compressed,
-                uncompressed,
-                ratio,
-            } => FfiErrorMessage {
+            Self::ZipBomb(details) => FfiErrorMessage {
                 code: "ZIP_BOMB",
-                description: format!(
-                    "potential zip bomb: compressed={compressed} bytes, uncompressed={uncompressed} bytes (ratio: {ratio:.2})"
-                ),
-                context: Some(format!("compression ratio: {ratio:.2}x")),
+                description: self.to_string(),
+                context: Some(format!(
+                    "{} compression ratio: {}",
+                    details.scope(),
+                    details.ratio()
+                )),
             },
 
             Self::QuotaExceeded { resource } => FfiErrorMessage {
@@ -161,7 +159,7 @@ impl ArchiveError {
             Self::PathTraversal { .. } => "PATH_TRAVERSAL",
             Self::SymlinkEscape { .. } => "SYMLINK_ESCAPE",
             Self::HardlinkEscape { .. } => "HARDLINK_ESCAPE",
-            Self::ZipBomb { .. } => "ZIP_BOMB",
+            Self::ZipBomb(_) => "ZIP_BOMB",
             Self::QuotaExceeded { .. } => "QUOTA_EXCEEDED",
             Self::SecurityViolation { .. } => "SECURITY_VIOLATION",
             Self::InvalidArchive(_) => "INVALID_ARCHIVE",
@@ -180,6 +178,8 @@ impl ArchiveError {
 
 #[cfg(test)]
 mod tests {
+    use super::super::types::ZipBombDetails;
+    use super::super::types::ZipBombScope;
     use super::*;
     use std::path::PathBuf;
 
@@ -239,11 +239,7 @@ mod tests {
                 "SYMLINK_ESCAPE",
             ),
             (
-                ArchiveError::ZipBomb {
-                    compressed: 100,
-                    uncompressed: 10000,
-                    ratio: 100.0,
-                },
+                ArchiveError::ZipBomb(ZipBombDetails::new(ZipBombScope::Entry, 100, 10000)),
                 "ZIP_BOMB",
             ),
         ];
@@ -268,11 +264,7 @@ mod tests {
             ArchiveError::HardlinkEscape {
                 path: PathBuf::from("test"),
             },
-            ArchiveError::ZipBomb {
-                compressed: 100,
-                uncompressed: 10000,
-                ratio: 100.0,
-            },
+            ArchiveError::ZipBomb(ZipBombDetails::new(ZipBombScope::Entry, 100, 10000)),
             ArchiveError::QuotaExceeded {
                 resource: QuotaResource::IntegerOverflow,
             },

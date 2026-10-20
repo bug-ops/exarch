@@ -6,6 +6,150 @@ use thiserror::Error;
 /// Result type alias using [`ArchiveError`].
 pub type Result<T> = std::result::Result<T, ArchiveError>;
 
+/// What a zip bomb size check was measured over.
+///
+/// `#[non_exhaustive]` so a future measurement scope is not a breaking change
+/// for downstream matches.
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::ZipBombScope;
+///
+/// assert_eq!(ZipBombScope::SolidBlock.to_string(), "solid block");
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ZipBombScope {
+    /// One archive entry, checked against `max_compression_ratio`.
+    Entry,
+    /// A whole solid block, checked against `max_solid_compression_ratio`.
+    SolidBlock,
+}
+
+impl std::fmt::Display for ZipBombScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Entry => f.write_str("entry"),
+            Self::SolidBlock => f.write_str("solid block"),
+        }
+    }
+}
+
+/// Compression ratio of a checked size pair.
+///
+/// `Unbounded` replaces a division by zero, so a ratio is never infinite or
+/// `NaN`.
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::CompressionRatio;
+///
+/// assert_eq!(CompressionRatio::Finite(12.5).to_string(), "12.50");
+/// assert_eq!(CompressionRatio::Unbounded.to_string(), "unbounded");
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CompressionRatio {
+    /// Uncompressed size divided by compressed size.
+    Finite(f64),
+    /// Data is claimed from zero compressed bytes.
+    Unbounded,
+}
+
+impl std::fmt::Display for CompressionRatio {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Finite(ratio) => write!(f, "{ratio:.2}"),
+            Self::Unbounded => f.write_str("unbounded"),
+        }
+    }
+}
+
+/// Sizes and scope of a rejected compression ratio.
+///
+/// The ratio is derived from the sizes, so it cannot contradict them.
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::CompressionRatio;
+/// use exarch_core::ZipBombDetails;
+/// use exarch_core::ZipBombScope;
+///
+/// let details = ZipBombDetails::new(ZipBombScope::Entry, 1000, 1_000_000);
+/// assert_eq!(details.scope(), ZipBombScope::Entry);
+/// assert_eq!(details.ratio(), CompressionRatio::Finite(1000.0));
+///
+/// let forged = ZipBombDetails::new(ZipBombScope::Entry, 0, 10);
+/// assert_eq!(forged.ratio(), CompressionRatio::Unbounded);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ZipBombDetails {
+    scope: ZipBombScope,
+    compressed: u64,
+    uncompressed: u64,
+}
+
+impl ZipBombDetails {
+    /// Creates details for a size pair measured over `scope`.
+    #[must_use]
+    pub const fn new(scope: ZipBombScope, compressed: u64, uncompressed: u64) -> Self {
+        Self {
+            scope,
+            compressed,
+            uncompressed,
+        }
+    }
+
+    /// What the sizes were measured over.
+    #[must_use]
+    pub const fn scope(&self) -> ZipBombScope {
+        self.scope
+    }
+
+    /// Compressed size in bytes.
+    #[must_use]
+    pub const fn compressed(&self) -> u64 {
+        self.compressed
+    }
+
+    /// Uncompressed size in bytes.
+    #[must_use]
+    pub const fn uncompressed(&self) -> u64 {
+        self.uncompressed
+    }
+
+    /// Compression ratio of the recorded sizes.
+    #[must_use]
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "the ratio is approximate by design"
+    )]
+    pub fn ratio(&self) -> CompressionRatio {
+        match (self.compressed, self.uncompressed) {
+            (0, 0) => CompressionRatio::Finite(0.0),
+            (0, _) => CompressionRatio::Unbounded,
+            (compressed, uncompressed) => {
+                CompressionRatio::Finite(uncompressed as f64 / compressed as f64)
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for ZipBombDetails {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "compressed={} bytes, uncompressed={} bytes (ratio: {}, scope: {})",
+            self.compressed,
+            self.uncompressed,
+            self.ratio(),
+            self.scope
+        )
+    }
+}
+
 /// Represents a specific quota resource that was exceeded.
 ///
 /// `#[non_exhaustive]` so a future quota dimension is not a breaking change
@@ -103,17 +247,8 @@ pub enum ArchiveError {
     },
 
     /// Potential zip bomb detected.
-    #[error(
-        "potential zip bomb: compressed={compressed} bytes, uncompressed={uncompressed} bytes (ratio: {ratio:.2})"
-    )]
-    ZipBomb {
-        /// Compressed size in bytes.
-        compressed: u64,
-        /// Uncompressed size in bytes.
-        uncompressed: u64,
-        /// Compression ratio.
-        ratio: f64,
-    },
+    #[error("potential zip bomb: {0}")]
+    ZipBomb(ZipBombDetails),
 
     /// File permissions are invalid or unsafe.
     #[error("invalid permissions for {path}: {mode:#o}")]
@@ -232,7 +367,7 @@ impl ArchiveError {
                 Self::PathTraversal { .. }
                     | Self::SymlinkEscape { .. }
                     | Self::HardlinkEscape { .. }
-                    | Self::ZipBomb { .. }
+                    | Self::ZipBomb(_)
                     | Self::InvalidPermissions { .. }
                     | Self::QuotaExceeded { .. }
                     | Self::SecurityViolation { .. }
@@ -366,11 +501,7 @@ mod tests {
 
     #[test]
     fn test_zip_bomb_error() {
-        let err = ArchiveError::ZipBomb {
-            compressed: 1000,
-            uncompressed: 1_000_000,
-            ratio: 1000.0,
-        };
+        let err = ArchiveError::ZipBomb(ZipBombDetails::new(ZipBombScope::Entry, 1000, 1_000_000));
         assert!(err.to_string().contains("zip bomb"));
         assert!(err.to_string().contains("1000"));
     }
@@ -395,11 +526,7 @@ mod tests {
         };
         assert!(err.is_security_violation());
 
-        let err = ArchiveError::ZipBomb {
-            compressed: 1000,
-            uncompressed: 1_000_000,
-            ratio: 1000.0,
-        };
+        let err = ArchiveError::ZipBomb(ZipBombDetails::new(ZipBombScope::Entry, 1000, 1_000_000));
         assert!(err.is_security_violation());
 
         let err = ArchiveError::SecurityViolation {
@@ -439,11 +566,7 @@ mod tests {
         };
         assert!(!err.is_recoverable());
 
-        let err = ArchiveError::ZipBomb {
-            compressed: 1000,
-            uncompressed: 1_000_000,
-            ratio: 1000.0,
-        };
+        let err = ArchiveError::ZipBomb(ZipBombDetails::new(ZipBombScope::Entry, 1000, 1_000_000));
         assert!(!err.is_recoverable());
     }
 
@@ -574,27 +697,41 @@ mod tests {
         );
     }
 
-    // L-11: ZipBomb edge case tests
     #[test]
-    fn test_zip_bomb_edge_cases() {
-        // Zero compressed size (would cause division by zero in ratio calc)
-        let err = ArchiveError::ZipBomb {
-            compressed: 0,
-            uncompressed: 1000,
-            ratio: f64::INFINITY,
-        };
+    fn test_zip_bomb_display_per_scope() {
+        let entry =
+            ArchiveError::ZipBomb(ZipBombDetails::new(ZipBombScope::Entry, 1000, 1_000_000));
+        assert_eq!(
+            entry.to_string(),
+            "potential zip bomb: compressed=1000 bytes, uncompressed=1000000 bytes (ratio: 1000.00, scope: entry)"
+        );
+
+        let solid =
+            ArchiveError::ZipBomb(ZipBombDetails::new(ZipBombScope::SolidBlock, 10, 20_000));
+        assert!(solid.to_string().contains("scope: solid block"));
+    }
+
+    #[test]
+    fn test_zip_bomb_zero_compressed_is_unbounded() {
+        let details = ZipBombDetails::new(ZipBombScope::Entry, 0, 1000);
+        assert_eq!(details.ratio(), CompressionRatio::Unbounded);
+        let err = ArchiveError::ZipBomb(details);
         assert!(err.is_security_violation());
         let display = err.to_string();
-        assert!(display.contains("zip bomb"));
+        assert!(display.contains("ratio: unbounded"));
+        assert!(!display.contains("inf") && !display.contains("NaN"));
+    }
 
-        // Equal sizes (ratio = 1.0)
-        let err = ArchiveError::ZipBomb {
-            compressed: 1000,
-            uncompressed: 1000,
-            ratio: 1.0,
-        };
-        let display = err.to_string();
-        assert!(display.contains("1.00") || display.contains("1.0"));
+    #[test]
+    fn test_zip_bomb_ratio_is_derived_from_sizes() {
+        assert_eq!(
+            ZipBombDetails::new(ZipBombScope::Entry, 1000, 1000).ratio(),
+            CompressionRatio::Finite(1.0)
+        );
+        assert_eq!(
+            ZipBombDetails::new(ZipBombScope::Entry, 0, 0).ratio(),
+            CompressionRatio::Finite(0.0)
+        );
     }
 
     #[test]
@@ -784,11 +921,7 @@ mod tests {
     #[test]
     fn test_partial_extraction_delegates_error_code() {
         use crate::ExtractionReport;
-        let source = ArchiveError::ZipBomb {
-            compressed: 100,
-            uncompressed: 100_000,
-            ratio: 1000.0,
-        };
+        let source = ArchiveError::ZipBomb(ZipBombDetails::new(ZipBombScope::Entry, 100, 100_000));
         let err = ArchiveError::PartialExtraction {
             source: Box::new(source),
             report: ExtractionReport::new(),

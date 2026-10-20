@@ -16,5 +16,5 @@ fuzz_target!(|data: &[u8]| {
     let _ = archive.list(config);
 
     let mut archive = TarArchive::new(Cursor::new(data));
-    let _ = archive.verify(config);
+    let _ = archive.verify(config, &common::verification_options());
 });

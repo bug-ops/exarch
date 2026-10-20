@@ -18,11 +18,15 @@
 //! is what `with_max_solid_block_memory` below is meant to bound; left at
 //! its default `false`, that bound would be dead configuration.
 
+use std::num::NonZeroU64;
 use std::sync::OnceLock;
 
+use exarch_core::DecompressionBudget;
+use exarch_core::IntegrityCheck;
 use exarch_core::SecurityConfig;
 use exarch_core::Unvalidated;
 use exarch_core::Validated;
+use exarch_core::VerificationOptions;
 
 fn base_config() -> SecurityConfig<Unvalidated> {
     SecurityConfig::default()
@@ -54,4 +58,12 @@ pub fn validated() -> &'static SecurityConfig<Validated> {
 pub fn unvalidated() -> &'static SecurityConfig<Unvalidated> {
     static CONFIG: OnceLock<SecurityConfig<Unvalidated>> = OnceLock::new();
     CONFIG.get_or_init(base_config)
+}
+
+/// `verify` options with the integrity pass enabled under a small budget, so
+/// the decode-to-EOF path is fuzzed without risking a libFuzzer timeout.
+#[allow(dead_code)]
+pub fn verification_options() -> VerificationOptions {
+    let budget = DecompressionBudget::new(NonZeroU64::MIN.saturating_add(4 * 1024 * 1024 - 1));
+    VerificationOptions::default().with_integrity(IntegrityCheck::DecodeToEof(budget))
 }

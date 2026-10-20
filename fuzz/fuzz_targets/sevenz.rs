@@ -16,6 +16,6 @@ fuzz_target!(|data: &[u8]| {
         let _ = archive.list(config);
     }
     if let Ok(mut archive) = SevenZArchive::new(Cursor::new(data)) {
-        let _ = archive.verify(config);
+        let _ = archive.verify(config, &common::verification_options());
     }
 });

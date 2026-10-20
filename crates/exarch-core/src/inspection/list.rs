@@ -87,8 +87,8 @@ pub fn list_archive<P: AsRef<Path>>(
 
     match format.family() {
         FormatFamily::Tar(codec) => list_tar(archive_path, codec, format, config),
-        FormatFamily::Zip => list_zip(archive_path, format, config),
-        FormatFamily::SevenZ => list_sevenz(archive_path, format, config),
+        FormatFamily::Zip => list_zip(archive_path, config),
+        FormatFamily::SevenZ => list_sevenz(archive_path, config),
     }
 }
 
@@ -218,11 +218,7 @@ fn list_tar_entries<R: std::io::Read>(
     Ok(manifest)
 }
 
-fn list_zip(
-    archive_path: &Path,
-    _format: ArchiveType,
-    config: &SecurityConfig<Validated>,
-) -> Result<ArchiveManifest> {
+fn list_zip(archive_path: &Path, config: &SecurityConfig<Validated>) -> Result<ArchiveManifest> {
     let file = File::open(archive_path)?;
     ZipArchive::new(file)?.list(config)
 }
@@ -438,11 +434,7 @@ fn list_sevenz_archive(
     Ok(manifest)
 }
 
-fn list_sevenz(
-    archive_path: &Path,
-    _format: ArchiveType,
-    config: &SecurityConfig<Validated>,
-) -> Result<ArchiveManifest> {
+fn list_sevenz(archive_path: &Path, config: &SecurityConfig<Validated>) -> Result<ArchiveManifest> {
     let mut file = File::open(archive_path)?;
     list_sevenz_reader(&mut file, config)
 }
@@ -512,7 +504,6 @@ fn validate_link_target(
     Ok(())
 }
 
-/// Checks whether a sevenz-rust2 parse failure is due to a valid empty 7z
 /// Returns `true` if the path contains traversal attempts.
 ///
 /// `ParentDir` (`..`) is always rejected. `RootDir` and `Prefix` (Windows drive

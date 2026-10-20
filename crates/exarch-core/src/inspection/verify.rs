@@ -203,14 +203,10 @@ fn missing_link_target(kind: &str) -> ArchiveError {
 
 fn check_permissions(path: &Path, mode: u32, config: &SecurityConfig<Validated>) -> Result<()> {
     let sanitized = sanitize_permissions(mode, config);
-    if sanitized.as_u32() == mode {
-        Ok(())
-    } else {
-        Err(ArchiveError::InvalidPermissions {
-            path: path.to_path_buf(),
-            mode,
-        })
-    }
+    (sanitized.as_u32() == mode).ok_or_else(|| ArchiveError::InvalidPermissions {
+        path: path.to_path_buf(),
+        mode,
+    })
 }
 
 fn check_heuristics(entry: &ArchiveEntry) -> Vec<VerificationIssue> {

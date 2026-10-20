@@ -327,7 +327,7 @@ impl VerificationIssue {
             ArchiveError::QuotaExceeded { resource } => (
                 IssueSeverity::High,
                 IssueCategory::QuotaExceeded,
-                format!("{resource}"),
+                resource.to_string(),
             ),
             ArchiveError::InvalidPermissions { path, mode } => (
                 IssueSeverity::Medium,

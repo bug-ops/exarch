@@ -214,7 +214,9 @@ config = config.add_allowed_extension(".txt")  # Extension allowlist
 config = config.add_allowed_extension(".md")
 config = config.add_banned_component("__MACOSX")  # Skip components
 config = config.with_allow_solid_archives(True)  # Allow solid 7z archives
-config = config.with_zip_consistency("ignore")  # ZIP structure policy: "enforce" (default) or "ignore"
+config = config.with_zip_consistency(
+    "ignore"
+)  # ZIP structure policy: "enforce" (default) or "ignore"
 ```
 
 ## Security Features

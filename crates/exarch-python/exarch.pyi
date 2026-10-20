@@ -215,7 +215,6 @@ class SecurityConfig:
 
     @zip_consistency.setter
     def zip_consistency(self, value: _ZipConsistency) -> None: ...
-
     @property
     def allow_solid_archives(self) -> bool:
         """Whether solid 7z archives are allowed (default: False)."""

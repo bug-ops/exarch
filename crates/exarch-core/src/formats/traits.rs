@@ -7,6 +7,7 @@ use crate::ExtractionReport;
 use crate::ProgressCallback;
 use crate::Result;
 use crate::SecurityConfig;
+use crate::VerificationOptions;
 use crate::config::Validated;
 use crate::creation::CreationConfig;
 use crate::creation::CreationReport;
@@ -60,7 +61,13 @@ pub trait ArchiveFormat {
     ///
     /// Returns an error only if the archive cannot be read at all (I/O
     /// failure, encryption). Individual security issues appear in the report.
-    fn verify(&mut self, config: &SecurityConfig<Validated>) -> Result<VerificationReport>;
+    /// With integrity requested in `options`, TAR entry content that fails to
+    /// decode is also an error.
+    fn verify(
+        &mut self,
+        config: &SecurityConfig<Validated>,
+        options: &VerificationOptions,
+    ) -> Result<VerificationReport>;
 
     /// Returns the archive format name.
     fn format_name(&self) -> &'static str;
@@ -157,9 +164,13 @@ mod tests {
             Ok(ArchiveManifest::new(ArchiveType::Tar))
         }
 
-        fn verify(&mut self, config: &SecurityConfig<Validated>) -> Result<VerificationReport> {
+        fn verify(
+            &mut self,
+            config: &SecurityConfig<Validated>,
+            _options: &VerificationOptions,
+        ) -> Result<VerificationReport> {
             let manifest = self.list(config)?;
-            crate::inspection::verify::verify_manifest(&manifest, config)
+            crate::inspection::verify::verify_manifest(&manifest, config, None)
         }
 
         fn format_name(&self) -> &'static str {
@@ -202,7 +213,9 @@ mod tests {
     fn test_trait_verify_returns_clean_report_for_empty_archive() {
         let mut format = TestFormat;
         let config = SecurityConfig::default().validate().unwrap();
-        let report = format.verify(&config).unwrap();
+        let report = format
+            .verify(&config, &crate::VerificationOptions::default())
+            .unwrap();
         assert_eq!(report.total_entries(), 0);
         assert!(report.is_safe());
     }
@@ -221,7 +234,9 @@ mod tests {
     fn test_trait_verify_via_dyn_dispatch() {
         let mut format: Box<dyn ArchiveFormat> = Box::new(TestFormat);
         let config = SecurityConfig::default().validate().unwrap();
-        let report = format.verify(&config).unwrap();
+        let report = format
+            .verify(&config, &crate::VerificationOptions::default())
+            .unwrap();
         assert!(report.is_safe());
     }
 }

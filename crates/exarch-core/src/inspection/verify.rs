@@ -3,14 +3,20 @@
 use std::path::Path;
 
 use crate::ArchiveError;
+use crate::IntegrityCheck;
 use crate::Result;
 use crate::SecurityConfig;
+use crate::VerificationOptions;
 use crate::config::Validated;
-use crate::inspection::list::list_archive;
+use crate::inspection::integrity::ContentPolicy;
+use crate::inspection::integrity::IntegrityOutcome;
+use crate::inspection::integrity::IntegrityPass;
+use crate::inspection::list::list_validated;
 use crate::inspection::manifest::ArchiveEntry;
 use crate::inspection::manifest::ArchiveManifest;
 use crate::inspection::manifest::ManifestEntryKind;
 use crate::inspection::manifest::ManifestEntryType;
+use crate::inspection::report::IntegrityScope;
 use crate::inspection::report::IssueCategory;
 use crate::inspection::report::IssueSeverity;
 use crate::inspection::report::VerificationIssue;
@@ -41,6 +47,7 @@ use crate::types::SafeSymlink;
 pub(crate) fn verify_manifest(
     manifest: &ArchiveManifest,
     config: &SecurityConfig<Validated>,
+    integrity: Option<IntegrityOutcome>,
 ) -> Result<VerificationReport> {
     let temp_dir = tempfile::TempDir::new()?;
     let temp_dest = DestDir::new(temp_dir.path())?;
@@ -68,6 +75,8 @@ pub(crate) fn verify_manifest(
         lists.push(issues);
     }
 
+    // TODO(#658): report `allow_solid_archives` violations here; extract
+    // refuses a solid 7z that verify passes.
     for index in deferred {
         let entry = &manifest.entries()[index];
         if let Err(e) =
@@ -77,7 +86,50 @@ pub(crate) fn verify_manifest(
         }
     }
 
-    Ok(VerificationReport::from_entry_issue_lists(manifest, lists))
+    let (archive_issues, scope) = match integrity {
+        Some(outcome) => {
+            debug_assert_eq!(outcome.entry_issues.len(), lists.len());
+            for (list, extra) in lists.iter_mut().zip(outcome.entry_issues) {
+                list.extend(extra);
+            }
+            (outcome.archive_issues, IntegrityScope::Requested)
+        }
+        None => (Vec::new(), IntegrityScope::NotRequested),
+    };
+
+    Ok(VerificationReport::from_entry_issue_lists(
+        manifest,
+        lists,
+        archive_issues,
+        scope,
+    ))
+}
+
+/// Runs `list` under the policy `options` asks for and verifies the manifest.
+///
+/// `list` receives the relaxed pre-flight config and the content policy; it is
+/// the only format-specific part of verification, so `verify_archive` and
+/// every `ArchiveFormat::verify` share the rest.
+pub(crate) fn verify_with<F>(
+    config: &SecurityConfig<Validated>,
+    options: VerificationOptions,
+    list: F,
+) -> Result<VerificationReport>
+where
+    F: FnOnce(&SecurityConfig<Validated>, &mut ContentPolicy<'_, '_>) -> Result<ArchiveManifest>,
+{
+    let listing_config = listing_config_for_verify(config);
+    match options.integrity {
+        IntegrityCheck::Skip => {
+            let manifest = list(&listing_config, &mut ContentPolicy::Skip)?;
+            verify_manifest(&manifest, config, None)
+        }
+        IntegrityCheck::DecodeToEof(budget) => {
+            let mut pass = IntegrityPass::new(config, budget);
+            let manifest = list(&listing_config, &mut ContentPolicy::Decode(&mut pass))?;
+            verify_manifest(&manifest, config, Some(pass.finish()))
+        }
+    }
 }
 
 /// Verifies archive security without extracting.
@@ -87,7 +139,9 @@ pub(crate) fn verify_manifest(
 /// - Policy checks (file types, permissions)
 ///
 /// Payload integrity (checksums, decode-to-end) is not verified: the report's
-/// `integrity_status` is [`CheckStatus::Skipped`](crate::CheckStatus::Skipped).
+/// `integrity_status` is
+/// [`IntegrityStatus::Skipped`](crate::IntegrityStatus::Skipped).
+/// Use [`verify_archive_with_options`] to request it.
 ///
 /// # Arguments
 ///
@@ -155,9 +209,76 @@ pub fn verify_archive<P: AsRef<Path>>(
     archive_path: P,
     config: &SecurityConfig,
 ) -> Result<VerificationReport> {
+    verify_archive_with_options(archive_path, config, &VerificationOptions::default())
+}
+
+/// Verifies archive security, optionally checking payload integrity.
+///
+/// With [`IntegrityCheck::Skip`] this is [`verify_archive`]. With
+/// [`IntegrityCheck::DecodeToEof`] the payload is decoded to the decoder's EOF
+/// during listing, so codec framing and checksums are verified, and
+/// `integrity_status` becomes `OK`, `FAILED` or `INCOMPLETE`.
+///
+/// # What a status means
+///
+/// | Format | Verified |
+/// |---|---|
+/// | ZIP | per-entry CRC-32 and exact declared size; entries are independent, so a corrupt entry does not stop the scan |
+/// | TAR | header checksums and that every declared data byte is present; no payload checksum |
+/// | tar.gz, tar.bz2, tar.xz, tar.zst | the above plus the codec's own framing and checksums (zstd only if the frame carries one) |
+/// | 7z | per-entry CRC-32 where the archive stores one, else the block CRC |
+///
+/// `OK` means every payload byte was decoded and every checksum the format has
+/// matched. Formats without payload checksums (plain TAR, 7z entries without
+/// CRC, zstd frames without a content checksum) report the weaker guarantee
+/// that the data was complete and decodable. "Decode to EOF" means the
+/// decoder's EOF: bytes after the first gzip member or xz stream are not read.
+///
+/// `INCOMPLETE` means part of the payload was not verified (decompression
+/// budget, a resource limit, a solid 7z archive while `allow_solid_archives`
+/// is off, or a TAR stream without an end-of-archive marker). It comes with a
+/// Medium issue, so the overall status is at least `WARNING`; exit code 0 does
+/// not mean integrity `OK`.
+///
+/// # Errors
+///
+/// As [`verify_archive`]. With integrity requested, a TAR entry whose content
+/// fails to decode, or whose data is cut short, is an
+/// [`ArchiveError::InvalidArchive`]: the
+/// scan cannot continue past it, and a report over the entries read so far
+/// would let security look fine for entries never inspected. Corruption in a
+/// TAR trailer (a gzip CRC, an xz index) is a `FAILED` report instead.
+///
+/// # Examples
+///
+/// ```no_run
+/// use exarch_core::DecompressionBudget;
+/// use exarch_core::IntegrityCheck;
+/// use exarch_core::IntegrityStatus;
+/// use exarch_core::SecurityConfig;
+/// use exarch_core::VerificationOptions;
+/// use exarch_core::verify_archive_with_options;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let options = VerificationOptions::default()
+///     .with_integrity(IntegrityCheck::DecodeToEof(DecompressionBudget::DEFAULT));
+/// let report = verify_archive_with_options("archive.zip", &SecurityConfig::default(), &options)?;
+/// if report.integrity_status() == IntegrityStatus::Fail {
+///     eprintln!("archive is corrupt");
+/// }
+/// # Ok(())
+/// # }
+/// ```
+pub fn verify_archive_with_options<P: AsRef<Path>>(
+    archive_path: P,
+    config: &SecurityConfig,
+    options: &VerificationOptions,
+) -> Result<VerificationReport> {
     let validated_config = config.clone().validate()?;
-    let manifest = list_archive(archive_path, &listing_config_for_verify(config))?;
-    verify_manifest(&manifest, &validated_config)
+    let archive_path = archive_path.as_ref();
+    verify_with(&validated_config, *options, |listing_config, policy| {
+        list_validated(archive_path, listing_config, policy)
+    })
 }
 
 /// Returns a config variant for the pre-flight listing step that feeds
@@ -456,7 +577,7 @@ mod tests {
             ("t", ManifestEntryKind::File),
             ("h", hardlink_to(&long)),
         ]);
-        let report = verify_manifest(&manifest, &link_config()).unwrap();
+        let report = verify_manifest(&manifest, &link_config(), None).unwrap();
         let too_long = report
             .issues()
             .iter()
@@ -474,14 +595,14 @@ mod tests {
             ("alias/h", hardlink_to("real/t")),
             ("again", hardlink_to("real/h")),
         ]);
-        let report = verify_manifest(&manifest, &link_config()).unwrap();
+        let report = verify_manifest(&manifest, &link_config(), None).unwrap();
         assert!(report.issues().is_empty(), "{:?}", report.issues());
     }
 
     #[test]
     fn phase_two_reports_absent_hardlink_target() {
         let manifest = manifest_of(vec![("h", hardlink_to("missing"))]);
-        let report = verify_manifest(&manifest, &link_config()).unwrap();
+        let report = verify_manifest(&manifest, &link_config(), None).unwrap();
         assert_eq!(report.status(), VerificationStatus::Fail);
         assert!(report.issues().iter().any(|i| {
             i.category == IssueCategory::InvalidArchive
@@ -495,7 +616,7 @@ mod tests {
             ("h", hardlink_to("later")),
             ("later", ManifestEntryKind::File),
         ]);
-        let report = verify_manifest(&manifest, &link_config()).unwrap();
+        let report = verify_manifest(&manifest, &link_config(), None).unwrap();
         assert!(report.issues().is_empty(), "{:?}", report.issues());
     }
 
@@ -505,7 +626,7 @@ mod tests {
             ("t", ManifestEntryKind::File),
             ("h", hardlink_to("../outside")),
         ]);
-        let report = verify_manifest(&manifest, &link_config()).unwrap();
+        let report = verify_manifest(&manifest, &link_config(), None).unwrap();
         let escapes = report
             .issues()
             .iter()

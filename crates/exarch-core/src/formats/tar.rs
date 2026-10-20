@@ -121,8 +121,11 @@ use crate::ExtractionReport;
 use crate::ProgressCallback;
 use crate::Result;
 use crate::SecurityConfig;
+use crate::VerificationOptions;
 use crate::config::Validated;
 use crate::copy::CopyBuffer;
+use crate::inspection::integrity::ContentPolicy;
+use crate::inspection::integrity::TarTrailer;
 use crate::security::hardlink::hardlink_target_missing;
 use crate::security::permissions::SanitizedMode;
 use crate::security::quota::QuotaPermit;
@@ -209,6 +212,31 @@ impl<R: Read> TarArchive<R> {
         Self {
             inner: Some(reader),
         }
+    }
+
+    /// Lists the archive under a content policy, consuming the reader.
+    fn list_with_policy(
+        &mut self,
+        config: &SecurityConfig<Validated>,
+        policy: &mut ContentPolicy<'_, '_>,
+    ) -> Result<crate::inspection::ArchiveManifest> {
+        use crate::formats::detect::ArchiveType;
+        use crate::inspection::list::list_tar_reader;
+
+        // Consume the inner reader — TAR readers are forward-only streams.
+        // After list() returns, extract() will return an error if called.
+        let reader = self.inner.take().ok_or_else(|| {
+            crate::ArchiveError::InvalidArchive("archive reader already consumed by list()".into())
+        })?;
+        let (budgeted, budget) = budgeted_reader(reader, config.max_tar_metadata_bytes);
+        list_tar_reader(
+            budgeted,
+            budget,
+            ArchiveType::Tar,
+            config,
+            policy,
+            TarTrailer::DrainToDecoderEof,
+        )
     }
 
     /// Processes a single TAR entry.
@@ -631,26 +659,20 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
         &mut self,
         config: &SecurityConfig<Validated>,
     ) -> Result<crate::inspection::ArchiveManifest> {
-        use crate::formats::detect::ArchiveType;
-        use crate::inspection::list::list_tar_reader;
-
-        // Consume the inner reader — TAR readers are forward-only streams.
-        // After list() returns, extract() will return an error if called.
-        let reader = self.inner.take().ok_or_else(|| {
-            crate::ArchiveError::InvalidArchive("archive reader already consumed by list()".into())
-        })?;
-        let (budgeted, budget) = budgeted_reader(reader, config.max_tar_metadata_bytes);
-        list_tar_reader(budgeted, budget, ArchiveType::Tar, config)
+        self.list_with_policy(config, &mut ContentPolicy::Skip)
     }
 
+    /// Verifies the archive; the TAR stream's codec is unknown here, so with
+    /// integrity requested the stream is read to decoder EOF within the budget
+    /// after the end marker.
     fn verify(
         &mut self,
         config: &SecurityConfig<Validated>,
+        options: &VerificationOptions,
     ) -> Result<crate::inspection::VerificationReport> {
-        let manifest = self.list(&crate::inspection::verify::listing_config_for_verify(
-            config,
-        ))?;
-        crate::inspection::verify::verify_manifest(&manifest, config)
+        crate::inspection::verify::verify_with(config, *options, |listing_config, policy| {
+            self.list_with_policy(listing_config, policy)
+        })
     }
 
     fn format_name(&self) -> &'static str {
@@ -2927,7 +2949,9 @@ mod tests {
         let mut archive = TarArchive::new(Cursor::new(tar_data));
         let config = SecurityConfig::default().validate().expect("valid config");
 
-        let report = archive.verify(&config).unwrap();
+        let report = archive
+            .verify(&config, &crate::VerificationOptions::default())
+            .unwrap();
 
         assert!(report.is_safe());
         assert_eq!(report.total_entries(), 1);

@@ -212,7 +212,7 @@ exarch create -f backup.tar.gz ./src
 
 ## Verify Command
 
-Check archive security before extraction (payload checksums are not verified; `Integrity` is reported as `SKIPPED`):
+Check archive security before extraction. By default payload checksums are not verified and `Integrity` is reported as `SKIPPED`; add `--check-integrity` to decode the payload and verify them:
 
 ```bash
 exarch verify [OPTIONS] <ARCHIVE>
@@ -227,6 +227,12 @@ exarch verify archive.tar.gz
 # Treat warnings as errors (exit 2 on warnings, exit 1 on failure)
 exarch verify --strict archive.tar.gz
 
+# Also decode the payload to verify checksums (Integrity: OK, FAILED or INCOMPLETE)
+exarch verify --check-integrity archive.zip
+
+# Treat an incomplete integrity check as an error (exit 2)
+exarch verify --check-integrity --strict archive.7z
+
 # Verify with JSON output for scripting
 exarch verify --json archive.tar.gz | jq '.data.status'
 ```
@@ -236,6 +242,8 @@ exarch verify --json archive.tar.gz | jq '.data.status'
 | Option | Description |
 |--------|-------------|
 | `--strict` | Exit with code 2 if the report contains warnings (e.g. setuid bits, world-writable files). Without this flag, warnings result in exit 0. |
+| `--check-integrity` | Decode the payload to its end to verify checksums and codec framing. Integrity is `INCOMPLETE` when part of it could not be verified (budget, resource limit, solid 7z without `--allow-solid-archives`, TAR without an end-of-archive marker); exit code 0 does not mean integrity `OK`, use `--strict` to exit 2 |
+| `--decompression-budget` | Extra bytes `--check-integrity` may decode beyond listing (default 500M, independent of `--max-total-size`); requires `--check-integrity` |
 | `--max-files` | Maximum number of entries to scan |
 | `--max-total-size` | Maximum total archive size to scan |
 | `--max-file-size` | Maximum size of any single entry |

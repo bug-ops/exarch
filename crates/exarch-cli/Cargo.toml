@@ -34,6 +34,7 @@ assert_cmd.workspace = true
 flate2.workspace = true
 predicates.workspace = true
 tar.workspace = true
+zip.workspace = true
 
 [lints]
 workspace = true

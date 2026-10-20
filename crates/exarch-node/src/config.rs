@@ -1,4 +1,5 @@
-//! Node.js bindings for `SecurityConfig` and `ExtractionOptions`.
+//! Node.js bindings for `SecurityConfig`, `ExtractionOptions` and
+//! `VerificationOptions`.
 
 use exarch_core::SecurityConfig as CoreConfig;
 use exarch_core::validate_config_entry;
@@ -667,6 +668,87 @@ impl ExtractionOptions {
     ///
     /// Used internally to pass options to the Rust extraction API.
     pub fn as_core(&self) -> &exarch_core::ExtractionOptions {
+        &self.inner
+    }
+}
+
+/// Options controlling verification behavior (non-security).
+///
+/// By default `verifyArchive` checks metadata only and reports
+/// `integrityStatus` as `'SKIPPED'`. `withIntegrityCheck` additionally decodes
+/// the payload so checksums and codec framing are verified.
+///
+/// # Defaults
+///
+/// | Setting | Default Value |
+/// |---------|--------------|
+/// | `integrityCheck` | `false` |
+/// | `decompressionBudget` | none (500 MiB when the check is enabled) |
+#[napi]
+#[derive(Debug, Clone)]
+pub struct VerificationOptions {
+    inner: exarch_core::VerificationOptions,
+}
+
+#[napi]
+impl VerificationOptions {
+    /// Creates a new `VerificationOptions` with defaults (no integrity check).
+    #[napi(constructor)]
+    pub fn new() -> Self {
+        Self {
+            inner: exarch_core::VerificationOptions::default(),
+        }
+    }
+
+    /// Creates a `VerificationOptions` with defaults.
+    ///
+    /// This is equivalent to calling `new VerificationOptions()`.
+    #[napi(factory)]
+    pub fn default() -> Self {
+        Self::new()
+    }
+
+    /// Enables the payload integrity check.
+    ///
+    /// `budget` bounds the extra bytes decoded beyond listing; omit it for the
+    /// default of 500 MiB, which does not follow `maxTotalSize`.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if `budget` is zero or negative.
+    #[napi(js_name = "withIntegrityCheck")]
+    pub fn with_integrity_check(&mut self, budget: Option<i64>) -> Result<&Self> {
+        let budget = match budget {
+            Some(bytes) => exarch_core::DecompressionBudget::try_from_bytes(
+                u64::try_from(bytes).unwrap_or_default(),
+            )
+            .map_err(convert_error)?,
+            None => exarch_core::DecompressionBudget::DEFAULT,
+        };
+        self.inner.integrity = exarch_core::IntegrityCheck::DecodeToEof(budget);
+        Ok(self)
+    }
+
+    /// Whether the payload integrity check is enabled.
+    #[napi(getter)]
+    pub fn get_integrity_check(&self) -> bool {
+        !matches!(self.inner.integrity, exarch_core::IntegrityCheck::Skip)
+    }
+
+    /// Budget in bytes when the integrity check is enabled.
+    #[napi(getter)]
+    #[allow(clippy::cast_possible_wrap)]
+    pub fn get_decompression_budget(&self) -> Option<i64> {
+        match self.inner.integrity {
+            exarch_core::IntegrityCheck::DecodeToEof(budget) => Some(budget.get() as i64),
+            _ => None,
+        }
+    }
+}
+
+impl VerificationOptions {
+    /// Returns a reference to the inner `CoreVerificationOptions`.
+    pub fn as_core(&self) -> &exarch_core::VerificationOptions {
         &self.inner
     }
 }

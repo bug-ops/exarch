@@ -26,6 +26,7 @@
 //! # }
 //! ```
 
+pub(crate) mod integrity;
 pub mod list;
 pub mod manifest;
 pub mod report;
@@ -39,9 +40,11 @@ pub use manifest::ManifestEntryKind;
 pub use manifest::ManifestEntryType;
 pub use manifest::SolidBlock;
 pub use report::CheckStatus;
+pub use report::IntegrityStatus;
 pub use report::IssueCategory;
 pub use report::IssueSeverity;
 pub use report::VerificationIssue;
 pub use report::VerificationReport;
 pub use report::VerificationStatus;
 pub use verify::verify_archive;
+pub use verify::verify_archive_with_options;

@@ -526,7 +526,9 @@ pub fn list_archive<P: AsRef<Path>>(
 /// - Policy checks (file types, permissions)
 ///
 /// Payload integrity (checksums, decode-to-end) is not verified: the report's
-/// `integrity_status` is [`CheckStatus::Skipped`](crate::CheckStatus::Skipped).
+/// `integrity_status` is
+/// [`IntegrityStatus::Skipped`](crate::IntegrityStatus::Skipped);
+/// use [`verify_archive_with_options`] to request it.
 ///
 /// # Arguments
 ///
@@ -575,6 +577,41 @@ pub fn verify_archive<P: AsRef<Path>>(
     config: &SecurityConfig,
 ) -> Result<VerificationReport> {
     crate::inspection::verify_archive(archive_path, config)
+}
+
+/// Verifies archive security, optionally checking payload integrity.
+///
+/// See [`crate::inspection::verify_archive_with_options`] for what each
+/// integrity status means per format.
+///
+/// # Errors
+///
+/// Returns the errors of [`verify_archive`]; with integrity requested, a TAR
+/// entry whose content fails to decode is also an error.
+///
+/// # Examples
+///
+/// ```no_run
+/// use exarch_core::SecurityConfig;
+/// use exarch_core::VerificationOptions;
+/// use exarch_core::verify_archive_with_options;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let report = verify_archive_with_options(
+///     "archive.zip",
+///     &SecurityConfig::default(),
+///     &VerificationOptions::default(),
+/// )?;
+/// println!("{}", report.integrity_status());
+/// # Ok(())
+/// # }
+/// ```
+pub fn verify_archive_with_options<P: AsRef<Path>>(
+    archive_path: P,
+    config: &SecurityConfig,
+    options: &crate::VerificationOptions,
+) -> Result<VerificationReport> {
+    crate::inspection::verify_archive_with_options(archive_path, config, options)
 }
 
 /// Rejects creation for ZIP-family extensions that aren't plain `.zip`.

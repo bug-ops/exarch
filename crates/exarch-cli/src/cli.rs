@@ -3,6 +3,7 @@
 use clap::Parser;
 use clap::Subcommand;
 use clap_complete::Shell;
+use exarch_core::DecompressionBudget;
 use exarch_core::SecurityConfig;
 use std::path::PathBuf;
 
@@ -256,9 +257,33 @@ pub struct VerifyArgs {
     #[arg(long)]
     pub allow_solid_archives: bool,
 
+    /// Decode the payload to its end to verify checksums and codec framing
+    ///
+    /// Integrity is INCOMPLETE when part of the payload could not be verified
+    /// (budget, resource limit, solid 7z without --allow-solid-archives, TAR
+    /// without an end-of-archive marker). Exit code 0 does not mean integrity
+    /// OK: use --strict to exit with status 2 on INCOMPLETE.
+    #[arg(long)]
+    pub check_integrity: bool,
+
+    /// Extra bytes --check-integrity may decode beyond listing (K, M, G, T
+    /// suffixes; default 500M, independent of --max-total-size)
+    #[arg(
+        long,
+        value_name = "SIZE",
+        value_parser = parse_decompression_budget,
+        requires = "check_integrity"
+    )]
+    pub decompression_budget: Option<DecompressionBudget>,
+
     /// Treat warnings as errors and exit with status code 2
     #[arg(long)]
     pub strict: bool,
+}
+
+fn parse_decompression_budget(s: &str) -> Result<DecompressionBudget, String> {
+    DecompressionBudget::try_from_bytes(parse_byte_size(s)?)
+        .map_err(|_| "decompression budget must be greater than zero".to_string())
 }
 
 /// Parse byte size with optional suffix (K, M, G, T)
@@ -460,6 +485,61 @@ mod tests {
             panic!("expected verify command");
         };
         assert_eq!(args.max_total_size, Some(500 * 1024 * 1024));
+    }
+
+    #[test]
+    fn test_verify_integrity_flags_parse() {
+        let cli = Cli::parse_from([
+            "exarch",
+            "verify",
+            "--check-integrity",
+            "--decompression-budget",
+            "2M",
+            "archive.zip",
+        ]);
+        let Commands::Verify(args) = cli.command else {
+            panic!("expected verify command");
+        };
+        assert!(args.check_integrity);
+        assert_eq!(
+            args.decompression_budget.map(DecompressionBudget::get),
+            Some(2 * 1024 * 1024)
+        );
+    }
+
+    #[test]
+    fn test_verify_integrity_is_opt_in() {
+        let cli = Cli::parse_from(["exarch", "verify", "archive.zip"]);
+        let Commands::Verify(args) = cli.command else {
+            panic!("expected verify command");
+        };
+        assert!(!args.check_integrity);
+        assert!(args.decompression_budget.is_none());
+    }
+
+    #[test]
+    fn test_verify_budget_requires_check_integrity() {
+        let result = Cli::try_parse_from([
+            "exarch",
+            "verify",
+            "--decompression-budget",
+            "1M",
+            "archive.zip",
+        ]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_verify_zero_budget_is_rejected() {
+        let result = Cli::try_parse_from([
+            "exarch",
+            "verify",
+            "--check-integrity",
+            "--decompression-budget",
+            "0",
+            "archive.zip",
+        ]);
+        assert!(result.is_err());
     }
 
     #[test]

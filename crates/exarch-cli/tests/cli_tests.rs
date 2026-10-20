@@ -1278,16 +1278,182 @@ fn test_verify_reports_integrity_skipped_in_text_mode() {
 }
 
 #[test]
-fn test_verify_rejects_removed_check_flags() {
-    for flag in ["--check-integrity", "--check-security"] {
-        exarch_cmd()
-            .arg("verify")
-            .arg(flag)
-            .arg(fixture_path("sample.tar.gz"))
-            .assert()
-            .code(2)
-            .stderr(predicates::str::contains("unexpected argument"));
+fn test_verify_rejects_removed_check_security_flag() {
+    exarch_cmd()
+        .arg("verify")
+        .arg("--check-security")
+        .arg(fixture_path("sample.tar.gz"))
+        .assert()
+        .code(2)
+        .stderr(predicates::str::contains("unexpected argument"));
+}
+
+fn workspace_fixture(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures")
+        .join(name)
+}
+
+/// A stored ZIP with one entry whose payload byte is flipped after writing, so
+/// the central directory CRC no longer matches.
+fn create_zip_with_corrupt_crc(path: &std::path::Path) {
+    use std::io::Write;
+    use zip::CompressionMethod;
+    use zip::write::SimpleFileOptions;
+
+    let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+    writer.start_file("data.txt", options).expect("start file");
+    writer.write_all(b"MARKER-PAYLOAD-BYTES").expect("write");
+    let mut bytes = writer.finish().expect("finish").into_inner();
+    let at = bytes
+        .windows(6)
+        .position(|w| w == b"MARKER")
+        .expect("payload present");
+    bytes[at] ^= 0x01;
+    std::fs::write(path, bytes).expect("write archive");
+}
+
+#[test]
+fn test_verify_check_integrity_reports_ok_on_clean_archive() {
+    exarch_cmd()
+        .arg("verify")
+        .arg("--check-integrity")
+        .arg(fixture_path("sample.tar.gz"))
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Integrity: OK"));
+}
+
+#[test]
+fn test_verify_check_integrity_corrupt_zip_fails_with_exit_1_even_under_strict() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("corrupt.zip");
+    create_zip_with_corrupt_crc(&archive);
+
+    exarch_cmd()
+        .arg("verify")
+        .arg(&archive)
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Integrity: SKIPPED"));
+
+    let output = exarch_cmd()
+        .arg("verify")
+        .arg("--json")
+        .arg("--strict")
+        .arg("--check-integrity")
+        .arg(&archive)
+        .assert()
+        .code(1)
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: serde_json::Value = serde_json::from_slice(&output).expect("invalid JSON output");
+    assert_eq!(json["data"]["integrity_status"], "FAILED");
+    assert!(
+        json["data"]["issues"]
+            .as_array()
+            .expect("issues array")
+            .iter()
+            .any(|i| i["category"] == "Corrupt Data" && i["entry_path"] == "data.txt")
+    );
+}
+
+#[test]
+fn test_verify_check_integrity_solid_7z_is_incomplete_and_strict_exits_2() {
+    let archive = workspace_fixture("solid.7z");
+
+    exarch_cmd()
+        .arg("verify")
+        .arg("--check-integrity")
+        .arg(&archive)
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Integrity: INCOMPLETE"));
+
+    exarch_cmd()
+        .arg("verify")
+        .arg("--check-integrity")
+        .arg("--strict")
+        .arg(&archive)
+        .assert()
+        .code(2);
+
+    exarch_cmd()
+        .arg("verify")
+        .arg("--check-integrity")
+        .arg("--allow-solid-archives")
+        .arg(&archive)
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Integrity: OK"));
+}
+
+#[test]
+fn test_verify_check_integrity_truncated_tar_gz_is_an_error() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let bytes = std::fs::read(fixture_path("sample.tar.gz")).expect("read fixture");
+    let archive = temp.path().join("truncated.tar.gz");
+    std::fs::write(&archive, &bytes[..bytes.len() / 2]).expect("write archive");
+
+    exarch_cmd()
+        .arg("verify")
+        .arg("--check-integrity")
+        .arg(&archive)
+        .assert()
+        .code(1);
+}
+
+#[test]
+fn test_verify_decompression_budget_requires_check_integrity() {
+    exarch_cmd()
+        .arg("verify")
+        .arg("--decompression-budget")
+        .arg("1M")
+        .arg(fixture_path("sample.tar.gz"))
+        .assert()
+        .code(2)
+        .stderr(predicates::str::contains("--check-integrity"));
+}
+
+#[test]
+fn test_verify_decompression_budget_zero_is_rejected() {
+    exarch_cmd()
+        .arg("verify")
+        .arg("--check-integrity")
+        .arg("--decompression-budget")
+        .arg("0")
+        .arg(fixture_path("sample.tar.gz"))
+        .assert()
+        .code(2)
+        .stderr(predicates::str::contains("greater than zero"));
+}
+
+#[test]
+fn test_verify_decompression_budget_exhaustion_is_incomplete() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let clean = temp.path().join("clean.zip");
+    {
+        use std::io::Write;
+        let mut writer = zip::ZipWriter::new(std::fs::File::create(&clean).expect("create"));
+        writer
+            .start_file("a.txt", zip::write::SimpleFileOptions::default())
+            .expect("start");
+        writer.write_all(b"0123456789").expect("write");
+        writer.finish().expect("finish");
     }
+
+    exarch_cmd()
+        .arg("verify")
+        .arg("--check-integrity")
+        .arg("--decompression-budget")
+        .arg("1")
+        .arg(&clean)
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Integrity: INCOMPLETE"));
 }
 
 /// Builds a tar.gz archive at `path` containing one symlink entry pointing
@@ -3643,4 +3809,26 @@ fn test_verify_escaping_symlink_fails_even_with_link_flags() {
         .arg(&archive_path)
         .assert()
         .failure();
+}
+
+#[test]
+fn test_verify_check_integrity_json_reports_ok_and_incomplete() {
+    for (args, expected) in [
+        (vec![fixture_path("sample.tar.gz")], "OK"),
+        (vec![workspace_fixture("solid.7z")], "INCOMPLETE"),
+    ] {
+        let output = exarch_cmd()
+            .arg("verify")
+            .arg("--json")
+            .arg("--check-integrity")
+            .args(&args)
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+
+        let json: serde_json::Value = serde_json::from_slice(&output).expect("invalid JSON output");
+        assert_eq!(json["data"]["integrity_status"], expected);
+    }
 }

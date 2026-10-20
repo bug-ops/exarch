@@ -9,10 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `verify --check-integrity` decodes the payload to verify checksums, via `verify_archive_with_options` and a `VerificationOptions` in the core, Python and Node (#TBD).
 - `exarch verify --allow-symlinks` and `--allow-hardlinks`, sharing one link-policy argument group with `extract` (#653).
 
 ### Changed
 
+- **BREAKING:** `integrity_status()` returns the new `IntegrityStatus` with an `INCOMPLETE` value (#TBD).
+- **BREAKING:** `ArchiveFormat::verify` takes `&VerificationOptions`; `IssueCategory` gains two variants (#TBD).
+- **BREAKING:** Reports may carry archive-level issues that do not count as suspicious entries (#TBD).
+- **BREAKING:** With integrity requested, undecodable TAR entry content is an error, not a report (#TBD).
 - **BREAKING:** ZIP entries with a compression method other than Stored, Deflate, Bzip2 or Zstd are rejected at open by `extract`, `list` and `verify` through one shared admission check (#653).
 - **BREAKING:** 7z directories with the Windows reparse-point attribute are listed as symlinks and fail `verify`, matching `extract` (#653).
 - **BREAKING:** `ArchiveError::ZipBomb` wraps `ZipBombDetails` (sizes, `ZipBombScope::{Entry, SolidBlock}`, derived `CompressionRatio`), so solid-block rejections are no longer reported as per-file ratios (#653).
@@ -30,7 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bumped `zip` to 9.0.1 and refreshed the lockfile; zip's own declared-size overrun error is now reported as a security violation (#608).
 - Bumped `napi`/`napi-build`/`napi-derive`, `sevenz-rust2`, and `smallvec` to their latest compatible releases; refreshed `deny.toml`'s `zstd-safe`/`syn` duplicate-version exceptions to match the resulting transitive bumps (#584).
 - **BREAKING:** `ArchiveManifest` and `VerificationReport` expose accessors instead of public fields, `ArchiveManifest::add_entry` returns `Result`, and `ArchiveEntry`/`VerificationIssue` are `#[non_exhaustive]` with `new()`; report status is derived from the issue list (#624).
-- **BREAKING:** `exarch verify` no longer accepts `--check-integrity`/`--check-security`, and `integrity_status` is `SKIPPED` instead of `OK` in the CLI, Python and Node reports until a real check lands (#624).
+- **BREAKING:** `exarch verify` no longer accepts `--check-security`, and `integrity_status` is `SKIPPED` instead of `OK` in the CLI, Python and Node reports unless the integrity check is requested (#624, #623).
 - **BREAKING:** `open_tar_gz`/`open_tar_bz2`/`open_tar_xz`/`open_tar_zst` return `TarArchive<Box<dyn Read + Send>>`; extract, list and open share one TAR decoder constructor (#624).
 - **BREAKING:** Node report enum fields are typed string unions in `index.d.ts` (build uses `--no-const-enum`), and Python report getters are annotated with `Literal` (#624).
 - `ArchiveType` implements `Display`, and report enums share one table for `ALL` and `as_str` instead of `Debug` formatting in the CLI, Node and Python (#624).

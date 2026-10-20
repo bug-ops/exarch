@@ -24,7 +24,9 @@ use crate::formats::detect::detect_format;
 use crate::formats::sevenz::is_password_error;
 use crate::formats::sevenz::is_windows_reparse_point;
 use crate::formats::sevenz::sevenz_entry_compression;
+use crate::formats::sevenz::verify_sevenz_blocks;
 use crate::formats::tar::open_tar_stream;
+use crate::formats::tar_metadata_limit::TarEntryGuard;
 use crate::formats::tar_metadata_limit::TarReadBudget;
 use crate::formats::tar_metadata_limit::budget_violation;
 use crate::formats::tar_metadata_limit::budgeted_reader;
@@ -32,8 +34,15 @@ use crate::formats::tar_metadata_limit::budgeted_tar_entries;
 use crate::formats::zip::admit_zip_entry;
 use crate::formats::zip::is_password_required;
 use crate::formats::zip::read_zip_symlink_target;
+use crate::formats::zip::read_zip_symlink_target_checked;
 use crate::formats::zip::resolve_zip_entry_path;
 use crate::formats::zip::zip_mode_is_symlink;
+use crate::inspection::integrity::Charge;
+use crate::inspection::integrity::ContentPolicy;
+use crate::inspection::integrity::DecodeOutcome;
+use crate::inspection::integrity::IntegrityPass;
+use crate::inspection::integrity::Slot;
+use crate::inspection::integrity::TarTrailer;
 use crate::inspection::manifest::ArchiveEntry;
 use crate::inspection::manifest::ArchiveManifest;
 use crate::inspection::manifest::EntryCompression;
@@ -82,14 +91,22 @@ pub fn list_archive<P: AsRef<Path>>(
     config: &SecurityConfig,
 ) -> Result<ArchiveManifest> {
     let config = config.clone().validate()?;
-    let config = &config;
-    let archive_path = archive_path.as_ref();
+    list_validated(archive_path.as_ref(), &config, &mut ContentPolicy::Skip)
+}
+
+/// Lists an archive with an already validated config, decoding payloads when
+/// `policy` carries an integrity pass.
+pub(crate) fn list_validated(
+    archive_path: &Path,
+    config: &SecurityConfig<Validated>,
+    policy: &mut ContentPolicy<'_, '_>,
+) -> Result<ArchiveManifest> {
     let format = detect_format(archive_path)?;
 
     match format.family() {
-        FormatFamily::Tar(codec) => list_tar(archive_path, codec, format, config),
-        FormatFamily::Zip => list_zip(archive_path, config),
-        FormatFamily::SevenZ => list_sevenz(archive_path, config),
+        FormatFamily::Tar(codec) => list_tar(archive_path, codec, format, config, policy),
+        FormatFamily::Zip => list_zip(archive_path, config, policy),
+        FormatFamily::SevenZ => list_sevenz(archive_path, config, policy),
     }
 }
 
@@ -98,11 +115,17 @@ fn list_tar(
     codec: Option<CompressionCodec>,
     format: ArchiveType,
     config: &SecurityConfig<Validated>,
+    policy: &mut ContentPolicy<'_, '_>,
 ) -> Result<ArchiveManifest> {
     let stream = open_tar_stream(archive_path, codec, config.max_decoder_memory)?;
     let (budgeted, budget) = budgeted_reader(stream, config.max_tar_metadata_bytes);
     let archive = tar::Archive::new(budgeted);
-    list_tar_entries(archive, budget, format, config)
+    let trailer = if codec.is_some() {
+        TarTrailer::DrainToDecoderEof
+    } else {
+        TarTrailer::Probe
+    };
+    list_tar_entries(archive, budget, format, config, policy, trailer)
 }
 
 /// Lists entries from a TAR archive already wrapped in a [`budgeted_reader`].
@@ -115,6 +138,8 @@ fn list_tar_entries<R: std::io::Read>(
     budget: TarReadBudget,
     format: ArchiveType,
     config: &SecurityConfig<Validated>,
+    policy: &mut ContentPolicy<'_, '_>,
+    trailer: TarTrailer,
 ) -> Result<ArchiveManifest> {
     let mut manifest = ArchiveManifest::new(format);
     let mut quota = QuotaTracker::new();
@@ -123,7 +148,7 @@ fn list_tar_entries<R: std::io::Read>(
         .map_err(|e| ArchiveError::InvalidArchive(format!("failed to read TAR entries: {e}")))?;
 
     while let Some(entry_result) = entries.next_entry() {
-        let entry = entry_result.map_err(|e| {
+        let mut entry = entry_result.map_err(|e| {
             budget_violation(&e).unwrap_or_else(|| {
                 ArchiveError::InvalidArchive(format!("failed to read TAR entry: {e}"))
             })
@@ -213,17 +238,62 @@ fn list_tar_entries<R: std::io::Read>(
             modified,
         };
 
+        if let Some(pass) = policy.pass() {
+            let slot = pass.begin_entry(size, &archive_entry.compression);
+            if entry_type == ManifestEntryType::File && size > 0 {
+                verify_tar_payload(pass, slot, &mut entry, &archive_entry.path)?;
+            }
+        }
+
         manifest.add_entry(archive_entry)?;
+    }
+
+    drop(entries);
+    if let Some(pass) = policy.pass() {
+        pass.check_tar_trailer(&mut archive.into_inner(), trailer)?;
     }
 
     Ok(manifest)
 }
 
-fn list_zip(archive_path: &Path, config: &SecurityConfig<Validated>) -> Result<ArchiveManifest> {
+/// Reads one TAR entry's content to its end so the codec and the tar framing
+/// are exercised.
+///
+/// A decode failure inside entry content is a hard error: the scan cannot
+/// continue past it, and a report over the entries read so far would let
+/// security look fine for entries that were never inspected. Listing already
+/// decodes every entry through the guard's drain, so only GNU sparse entries
+/// (whose synthesized zeros the drain caps) are charged to the budget.
+fn verify_tar_payload<R: Read>(
+    pass: &mut IntegrityPass<'_>,
+    slot: Slot,
+    entry: &mut TarEntryGuard<'_, '_, R>,
+    path: &Path,
+) -> Result<()> {
+    let charge = if entry.header().entry_type() == tar::EntryType::GNUSparse {
+        Charge::Declared
+    } else {
+        Charge::Free
+    };
+    let declared = entry.size();
+    match pass.decode(slot, &mut **entry, declared, charge) {
+        DecodeOutcome::Failed(failure) => {
+            entry.abandon();
+            Err(failure.into_tar_error(path))
+        }
+        outcome => pass.record(slot, path, outcome),
+    }
+}
+
+fn list_zip(
+    archive_path: &Path,
+    config: &SecurityConfig<Validated>,
+    policy: &mut ContentPolicy<'_, '_>,
+) -> Result<ArchiveManifest> {
     let file = File::open(archive_path)?;
     let mut archive = zip::ZipArchive::new(file)
         .map_err(|e| ArchiveError::InvalidArchive(format!("failed to open ZIP archive: {e}")))?;
-    list_zip_reader(&mut archive, config)
+    list_zip_reader(&mut archive, config, policy)
 }
 
 /// Lists entries from an already budget-wrapped TAR reader.
@@ -237,9 +307,11 @@ pub(crate) fn list_tar_reader<R: Read>(
     budget: TarReadBudget,
     format: ArchiveType,
     config: &SecurityConfig<Validated>,
+    policy: &mut ContentPolicy<'_, '_>,
+    trailer: TarTrailer,
 ) -> Result<ArchiveManifest> {
     let archive = tar::Archive::new(reader);
-    list_tar_entries(archive, budget, format, config)
+    list_tar_entries(archive, budget, format, config, policy, trailer)
 }
 
 /// Lists entries from an already-opened ZIP archive.
@@ -248,13 +320,14 @@ pub(crate) fn list_tar_reader<R: Read>(
 pub(crate) fn list_zip_reader<R: Read + Seek>(
     archive: &mut zip::ZipArchive<R>,
     config: &SecurityConfig<Validated>,
+    policy: &mut ContentPolicy<'_, '_>,
 ) -> Result<ArchiveManifest> {
     let mut manifest = ArchiveManifest::new(ArchiveType::Zip);
     let mut quota = QuotaTracker::new();
     let mut compressed_budget = DeclaredCompressedBudget::new(archive.central_directory_start());
 
     for i in 0..archive.len() {
-        let entry = archive.by_index(i).map_err(|e| {
+        let mut entry = archive.by_index(i).map_err(|e| {
             if is_password_required(&e) {
                 return encrypted_archive_error();
             }
@@ -292,6 +365,18 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
             })
         });
 
+        let mut tracked = policy.pass().map(|pass| {
+            let slot = pass.begin_entry(size, &compression);
+            (pass, slot)
+        });
+        // Symlink targets are decoded below, through the target read.
+        let has_payload = entry_type != ManifestEntryType::Symlink
+            && (entry_type != ManifestEntryType::Directory || size > 0);
+        if has_payload && let Some((pass, slot)) = tracked.as_mut() {
+            let outcome = pass.decode(*slot, &mut entry, size, Charge::Declared);
+            pass.record(*slot, &path, outcome)?;
+        }
+
         // Drop `entry` before conditionally re-opening the archive for symlink
         // target data: the borrow checker requires the mutable borrow to end.
         drop(entry);
@@ -300,7 +385,12 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
             let mut sym_entry = archive.by_index(i).map_err(|e| {
                 ArchiveError::InvalidArchive(format!("failed to re-read ZIP entry {i}: {e}"))
             })?;
-            let target = read_zip_symlink_target(&mut sym_entry)?;
+            let target = match tracked.as_mut() {
+                Some((pass, slot)) => {
+                    read_zip_symlink_target_checked(&mut sym_entry, pass, *slot, &path)?
+                }
+                None => read_zip_symlink_target(&mut sym_entry)?,
+            };
             validate_link_target(&target, "symlink", config)?;
             Some(target)
         } else {
@@ -329,6 +419,7 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
 pub(crate) fn list_sevenz_reader<R: Read + Seek>(
     mut source: R,
     config: &SecurityConfig<Validated>,
+    policy: &mut ContentPolicy<'_, '_>,
 ) -> Result<ArchiveManifest> {
     use sevenz_rust2::Archive;
     use sevenz_rust2::Password;
@@ -350,7 +441,11 @@ pub(crate) fn list_sevenz_reader<R: Read + Seek>(
     };
 
     let source_len = source.seek(SeekFrom::End(0))?;
-    list_sevenz_archive(&archive, source_len, config)
+    let (manifest, slots) = list_sevenz_archive(&archive, source_len, config, policy)?;
+    if let Some(pass) = policy.pass() {
+        verify_sevenz_blocks(&archive, &mut source, pass, &slots)?;
+    }
+    Ok(manifest)
 }
 
 /// Checks whether a sevenz-rust2 parse failure is due to a valid empty 7z
@@ -394,13 +489,18 @@ fn list_sevenz_archive(
     archive: &sevenz_rust2::Archive,
     source_len: u64,
     config: &SecurityConfig<Validated>,
-) -> Result<ArchiveManifest> {
+    policy: &mut ContentPolicy<'_, '_>,
+) -> Result<(ArchiveManifest, Vec<Option<Slot>>)> {
     let mut manifest = ArchiveManifest::new(ArchiveType::SevenZ);
     let mut quota = QuotaTracker::new();
     let compression = sevenz_entry_compression(archive, source_len)?;
+    // One element per archive file: the integrity slot of the manifest entry it
+    // became, or `None` for an anti item (never listed) or without a pass.
+    let mut slots = Vec::with_capacity(archive.files.len());
 
     for (entry, compression) in archive.files.iter().zip(compression) {
         if entry.is_anti_item {
+            slots.push(None);
             continue;
         }
 
@@ -424,6 +524,12 @@ fn list_sevenz_archive(
             .has_last_modified_date
             .then(|| SystemTime::from(entry.last_modified_date));
 
+        slots.push(
+            policy
+                .pass()
+                .map(|pass| pass.begin_entry(size, &compression)),
+        );
+
         let archive_entry = ArchiveEntry {
             path,
             kind: manifest_entry_kind(entry_type, None),
@@ -436,12 +542,16 @@ fn list_sevenz_archive(
         manifest.add_entry(archive_entry)?;
     }
 
-    Ok(manifest)
+    Ok((manifest, slots))
 }
 
-fn list_sevenz(archive_path: &Path, config: &SecurityConfig<Validated>) -> Result<ArchiveManifest> {
+fn list_sevenz(
+    archive_path: &Path,
+    config: &SecurityConfig<Validated>,
+    policy: &mut ContentPolicy<'_, '_>,
+) -> Result<ArchiveManifest> {
     let mut file = File::open(archive_path)?;
-    list_sevenz_reader(&mut file, config)
+    list_sevenz_reader(&mut file, config, policy)
 }
 
 fn manifest_entry_kind(
@@ -839,7 +949,12 @@ mod tests {
         let zip_bytes = create_zip_with_symlink("link", "target.txt");
         let mut archive = zip::ZipArchive::new(Cursor::new(zip_bytes)).unwrap();
         let config = SecurityConfig::default().validate().expect("valid config");
-        let manifest = list_zip_reader(&mut archive, &config).unwrap();
+        let manifest = list_zip_reader(
+            &mut archive,
+            &config,
+            &mut crate::inspection::integrity::ContentPolicy::Skip,
+        )
+        .unwrap();
 
         assert_eq!(manifest.total_entries(), 1);
         assert_eq!(
@@ -2137,7 +2252,11 @@ mod tests {
         let zip_bytes = create_zip_with_symlink("link", "foo\0bar");
         let mut archive = zip::ZipArchive::new(Cursor::new(zip_bytes)).unwrap();
         let config = SecurityConfig::default().validate().expect("valid config");
-        let result = list_zip_reader(&mut archive, &config);
+        let result = list_zip_reader(
+            &mut archive,
+            &config,
+            &mut crate::inspection::integrity::ContentPolicy::Skip,
+        );
         match result {
             Err(ArchiveError::SecurityViolation { reason }) => {
                 assert_eq!(reason, "symlink target contains null bytes");
@@ -2157,7 +2276,11 @@ mod tests {
         let zip_bytes = create_zip_with_symlink("link", "");
         let mut archive = zip::ZipArchive::new(Cursor::new(zip_bytes)).unwrap();
         let config = SecurityConfig::default().validate().expect("valid config");
-        let result = list_zip_reader(&mut archive, &config);
+        let result = list_zip_reader(
+            &mut archive,
+            &config,
+            &mut crate::inspection::integrity::ContentPolicy::Skip,
+        );
         match result {
             Err(ArchiveError::SecurityViolation { reason }) => {
                 assert_eq!(reason, "symlink target is empty");
@@ -2493,7 +2616,11 @@ mod tests {
             .with_max_total_size(u64::MAX)
             .validate()
             .expect("valid config");
-        let result = list_zip_reader(&mut archive, &config);
+        let result = list_zip_reader(
+            &mut archive,
+            &config,
+            &mut crate::inspection::integrity::ContentPolicy::Skip,
+        );
         assert_matches!(
             result,
             Err(ArchiveError::QuotaExceeded {

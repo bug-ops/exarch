@@ -121,6 +121,9 @@ impl CompressionCodec {
     where
         R: BufRead + Send + 'r,
     {
+        // TODO(#659): single-member GzDecoder/BzDecoder drop entries in later
+        // members (extract exits 0 with missing files); use
+        // MultiGzDecoder/MultiBzDecoder or fail when compressed input remains
         Ok(match self {
             Self::Gzip => Box::new(flate2::bufread::GzDecoder::new(input)),
             Self::Bzip2 => Box::new(bzip2::bufread::BzDecoder::new(input)),

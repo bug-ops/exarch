@@ -177,10 +177,38 @@ exarch verify archive.tar.gz --json
 | Flag | Default | Purpose |
 |---|---|---|
 | `--strict` | off | Treat any warning-level finding as an error and exit with status `2` instead of `0`. |
-| `--allow-symlinks` / `--allow-hardlinks` | off | Same flags and semantics as `extract`: links that resolve within the extraction directory are accepted, escaping links still fail. `verify` accepts only these two policy flags (plus `--max-files`, `--max-total-size`, `--max-file-size`, `--allow-solid-archives` and `--strict`); it has no `--max-compression-ratio`, `--max-path-depth`, `--banned-component`, `--allow-absolute-paths` or `--allow-world-writable`, so pass the link flags you intend to extract with, and expect extraction-only options to be evaluated by `extract` alone. |
+| `--check-integrity` | off | Decode the payload to the decoder's EOF so checksums and codec framing are verified. See "Payload integrity" below. |
+| `--decompression-budget <SIZE>` | 500M | Extra bytes `--check-integrity` may decode beyond what listing already decodes (`K`/`M`/`G`/`T` suffixes). Requires `--check-integrity`; `0` is rejected. Fixed default: it does not follow `--max-total-size`, so raise both for archives over 500 MB. |
+| `--allow-symlinks` / `--allow-hardlinks` | off | Same flags and semantics as `extract`: links that resolve within the extraction directory are accepted, escaping links still fail. `verify` accepts only these two policy flags (plus `--max-files`, `--max-total-size`, `--max-file-size`, `--allow-solid-archives`, `--check-integrity`, `--decompression-budget` and `--strict`); it has no `--max-compression-ratio`, `--max-path-depth`, `--banned-component`, `--allow-absolute-paths` or `--allow-world-writable`, so pass the link flags you intend to extract with, and expect extraction-only options to be evaluated by `extract` alone. |
 | `--max-files` / `--max-total-size` / `--max-file-size` / `--allow-solid-archives` | same as `list` (10000 / 500 MB / 50 MB / off) | Same hard-limit semantics as `list` for file count and total size — verification fails with `QuotaExceeded` past those two caps, it does not skip entries. |
 
-`verify` always runs the full security validation pipeline (path traversal, symlink/hardlink, permissions) without extracting; there are no flags to enable it, only the link policy and limit flags above. It does not validate payload checksums: `integrity_status` is always `SKIPPED` (`Integrity: SKIPPED` in text mode), so a passing `verify` says nothing about data corruption.
+`verify` always runs the full security validation pipeline (path traversal, symlink/hardlink, permissions) without extracting. By default it does not validate payload checksums: `integrity_status` is `SKIPPED` (`Integrity: SKIPPED` in text mode), so a passing `verify` says nothing about data corruption. Pass `--check-integrity` for that.
+
+#### Payload integrity (`--check-integrity`)
+
+`integrity_status` is `OK`, `FAILED`, `INCOMPLETE` or `SKIPPED` (JSON `data.integrity_status`, text `Integrity: ...`):
+
+| Value | Meaning | Exit code |
+|---|---|---|
+| `OK` | Every payload byte was decoded and every checksum the format has matched. | `0` |
+| `FAILED` | A checksum or decoder error proved the payload corrupt: a `HIGH` `"Corrupt Data"` issue, attributed to the entry where one owns it (`entry_path` is `null` for a stream trailer such as a gzip CRC). | `1` |
+| `INCOMPLETE` | Part of the payload was not verified; one `MEDIUM` `"Integrity Incomplete"` issue lists the counts per reason, so `status` is at least `WARNING`. | `0`, or `2` with `--strict` |
+| `SKIPPED` | `--check-integrity` was not passed. | n/a |
+
+**Exit code `0` does not mean integrity `OK`**: `INCOMPLETE` exits `0` unless `--strict` is passed, so use `--strict` (or read `data.integrity_status`) in automation. Reasons an item is unverified: decompression budget exhausted, quota/ratio/decoder-memory limit, a solid 7z archive while `--allow-solid-archives` is off, a 7z block checksum that the entries do not cover, an unsupported 7z coder, and a TAR stream with no end-of-archive marker. Verified live: `tests/fixtures/solid.7z` gives `Integrity: INCOMPLETE` (`solid archive with allow_solid_archives off`) with exit `0`, exit `2` with `--strict`, and `Integrity: OK` with `--allow-solid-archives`.
+
+What `OK` covers per format:
+
+| Format | Checked |
+|---|---|
+| ZIP | Per-entry CRC-32 and the exact declared size. Entries are independent: a corrupt entry is reported and the scan continues. A symlink target is read through the same check. |
+| TAR | Header checksums and that every declared data byte is present. No payload checksum exists, so `OK` means complete and decodable. |
+| tar.gz / tar.bz2 / tar.xz / tar.zst | The above plus the codec's framing and checksums (gzip CRC-32 and size, bzip2 CRC, xz block check, zstd content checksum only if the frame carries one). |
+| 7z | Per-entry CRC-32 where the archive stores one, else the block CRC (which can only fire once the whole block is read and is attributed to the block's last entry). LZMA/LZMA2/PPMd validity. Entries without any CRC get the weaker "decodable" guarantee. |
+
+"Decode to EOF" means the decoder's EOF: bytes after the first gzip member or xz stream are not read, and zstd reads concatenated frames (bounded by the budget). The budget covers only decoding beyond what listing already does: ZIP entries and 7z blocks are charged their declared size before decoding (first-fit, so one large entry does not block later small ones), TAR entries are never charged (listing decodes them anyway), and for compressed TAR it bounds the read from the end marker to decoder EOF. A TAR stream must have at least one byte after the entry list; one that stops at a header boundary is `INCOMPLETE`.
+
+A TAR entry whose content fails to decode (corrupt deflate block, data cut short) is a hard error with exit `1` (`invalid archive: integrity check failed at <path>: ...`), not a report, because the scan cannot continue past it. Corruption that only a trailer check catches (gzip CRC, bzip2 or xz trailer) is a `FAILED` report. Verified live: a `.tar.gz` with a flipped CRC byte gives `Integrity: FAILED` with a `Corrupt Data` issue and exit `1`; a truncated `.tar.gz` fails with `incomplete deflate stream` and exit `1`; a ZIP with a flipped payload byte gives `Integrity: FAILED` naming the entry and exit `1`, while plain `verify` of the same ZIP is `Integrity: SKIPPED` and exits `0`.
 
 Run `verify` before `extract` on any archive from an untrusted source to inspect issues without
 writing anything to disk. Archives over 500 MB need `--max-total-size` raised explicitly or
@@ -204,7 +232,11 @@ still exits `1` for a FAIL status.
 
 `data.issues[].category` is one of `"Path Traversal"`, `"Symlink Escape"`, `"Hardlink Escape"`,
 `"Zip Bomb"`, `"Invalid Permissions"`, `"Quota Exceeded"`, `"Security Policy"`,
-`"Invalid Archive"`, `"Suspicious Path"`, `"Executable File"`. `"Security Policy"` covers entries
+`"Invalid Archive"`, `"Suspicious Path"`, `"Executable File"`, `"Corrupt Data"`,
+`"Integrity Incomplete"`. The last two come only from `--check-integrity` and are not security
+findings, but `--check-integrity` can also add security-category issues (`"Security Policy"` for a
+forged ZIP declared size, `"Quota Exceeded"` for 7z decoder memory or `max_solid_block_memory`), so
+`Security:` can be `FAILED` with the flag on an archive that is `OK` without it. `"Security Policy"` covers entries
 rejected by the configured policy rather than by an attack check: a symlink or hardlink under the
 default config (`Security violation: symlinks not allowed` / `hardlinks not allowed`), NUL bytes,
 banned components. These are security findings: `security_status` is `FAILED` (`Security:

@@ -84,6 +84,44 @@ pub fn declared_size_exceeded(declared: u64) -> ArchiveError {
     }
 }
 
+/// Failure of [`copy_bounded`], kept typed so callers can tell a corrupt
+/// stream from a forged size or a failing sink.
+#[derive(Debug)]
+pub enum CopyError {
+    /// Reading from the source failed.
+    Read(io::Error),
+    /// Writing to the destination failed.
+    Write(io::Error),
+    /// The stream produced more than the declared number of bytes.
+    Overrun { declared: u64 },
+    /// The stream ended before the declared number of bytes.
+    Short { declared: u64, actual: u64 },
+    /// The byte counter overflowed `u64`.
+    Overflow,
+}
+
+impl From<CopyError> for ArchiveError {
+    fn from(err: CopyError) -> Self {
+        match err {
+            CopyError::Read(e) => budget_violation(&e).unwrap_or(Self::Io(e)),
+            CopyError::Write(e) => Self::Io(e),
+            // SecurityViolation, not QuotaExceeded: `declared` is the archive's own
+            // (possibly forged) size, so a "raise --max-file-size" hint would be
+            // wrong advice (GHSA-5j8q-wxg5-hj4r).
+            CopyError::Overrun { declared } => declared_size_exceeded(declared),
+            CopyError::Short { declared, actual } => Self::SecurityViolation {
+                reason: format!(
+                    "decompressed size ({actual} bytes) does not match the declared \
+                     uncompressed size ({declared} bytes)"
+                ),
+            },
+            CopyError::Overflow => Self::QuotaExceeded {
+                resource: crate::QuotaResource::IntegerOverflow,
+            },
+        }
+    }
+}
+
 /// Copies data from reader to writer using the provided reusable buffer.
 ///
 /// This is an optimized version of `std::io::copy` that:
@@ -139,6 +177,17 @@ pub fn copy_with_buffer<R: Read + ?Sized, W: Write + ?Sized>(
     buffer: &mut CopyBuffer,
     expected_size: Option<u64>,
 ) -> Result<u64, ArchiveError> {
+    copy_bounded(reader, writer, buffer, expected_size).map_err(ArchiveError::from)
+}
+
+/// Typed core of [`copy_with_buffer`]; see there for the size-ceiling rules.
+#[inline]
+pub fn copy_bounded<R: Read + ?Sized, W: Write + ?Sized>(
+    reader: &mut R,
+    writer: &mut W,
+    buffer: &mut CopyBuffer,
+    expected_size: Option<u64>,
+) -> Result<u64, CopyError> {
     let mut total: u64 = 0;
 
     loop {
@@ -146,38 +195,27 @@ pub fn copy_with_buffer<R: Read + ?Sized, W: Write + ?Sized>(
             Ok(0) => break,
             Ok(n) => n,
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-            Err(e) => {
-                return Err(budget_violation(&e).unwrap_or(ArchiveError::Io(e)));
-            }
+            Err(e) => return Err(CopyError::Read(e)),
         };
 
         // SECURITY: Detect overflow to prevent quota bypass
         total = total
             .checked_add(bytes_read as u64)
-            .ok_or(ArchiveError::QuotaExceeded {
-                resource: crate::QuotaResource::IntegerOverflow,
-            })?;
+            .ok_or(CopyError::Overflow)?;
 
         // SECURITY: Enforce the declared size as a hard streaming ceiling
         // (GHSA-5j8q-wxg5-hj4r) instead of only checking it once at the end.
         // Checked before the write, so the chunk that would push `total` over
-        // the ceiling is never written at all — not "at most one buffer's
-        // worth of excess on disk", but zero.
-        //
-        // Uses SecurityViolation, not QuotaExceeded: `expected` is the
-        // archive's own declared size, not `config.max_file_size`, so a
-        // QuotaExceeded-shaped error would carry the CLI's "raise
-        // --max-file-size" hint — actively wrong advice for a forged-metadata
-        // mismatch the caller cannot fix by reconfiguring anything.
+        // the ceiling is never written at all.
         if let Some(expected) = expected_size
             && total > expected
         {
-            return Err(declared_size_exceeded(expected));
+            return Err(CopyError::Overrun { declared: expected });
         }
 
         writer
             .write_all(&buffer.buf[..bytes_read])
-            .map_err(ArchiveError::Io)?;
+            .map_err(CopyError::Write)?;
     }
 
     // SECURITY: A short stream (fewer bytes than declared) is just as much a
@@ -186,11 +224,9 @@ pub fn copy_with_buffer<R: Read + ?Sized, W: Write + ?Sized>(
     if let Some(expected) = expected_size
         && total != expected
     {
-        return Err(ArchiveError::SecurityViolation {
-            reason: format!(
-                "decompressed size ({total} bytes) does not match the declared \
-                 uncompressed size ({expected} bytes)"
-            ),
+        return Err(CopyError::Short {
+            declared: expected,
+            actual: total,
         });
     }
 
@@ -563,6 +599,61 @@ mod tests {
             let result2 = copy_with_buffer(&mut input2, &mut output2, &mut buffer, None);
             prop_assert!(result2.is_ok());
             prop_assert_eq!(output2, data2);
+        }
+    }
+
+    /// Pins how `copy_with_buffer` reports each failure, so the typed
+    /// `copy_bounded` refactor cannot change what extraction surfaces.
+    #[test]
+    fn test_copy_with_buffer_error_mapping_is_unchanged() {
+        let mut buffer = CopyBuffer::new();
+
+        let overrun = copy_with_buffer(
+            &mut Cursor::new(vec![0u8; 5]),
+            &mut io::sink(),
+            &mut buffer,
+            Some(3),
+        )
+        .unwrap_err();
+        assert_matches!(
+            overrun,
+            ArchiveError::SecurityViolation { ref reason }
+                if *reason == declared_size_exceeded_reason(3)
+        );
+
+        let short = copy_with_buffer(
+            &mut Cursor::new(vec![0u8; 2]),
+            &mut io::sink(),
+            &mut buffer,
+            Some(3),
+        )
+        .unwrap_err();
+        assert_matches!(
+            short,
+            ArchiveError::SecurityViolation { ref reason }
+                if reason.contains("does not match the declared uncompressed size (3 bytes)")
+        );
+
+        assert_matches!(
+            ArchiveError::from(CopyError::Overflow),
+            ArchiveError::QuotaExceeded {
+                resource: crate::QuotaResource::IntegerOverflow
+            }
+        );
+        assert_matches!(
+            ArchiveError::from(CopyError::Write(io::Error::other("disk full"))),
+            ArchiveError::Io(_)
+        );
+        assert_matches!(
+            ArchiveError::from(CopyError::Read(io::Error::other("read failed"))),
+            ArchiveError::Io(_)
+        );
+    }
+
+    fn declared_size_exceeded_reason(declared: u64) -> String {
+        match declared_size_exceeded(declared) {
+            ArchiveError::SecurityViolation { reason } => reason,
+            other => panic!("unexpected error {other:?}"),
         }
     }
 }

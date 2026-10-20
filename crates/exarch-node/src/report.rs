@@ -3,6 +3,7 @@
 use exarch_core::ExtractionReport as CoreReport;
 use exarch_core::formats::detect::ArchiveType as CoreArchiveType;
 use exarch_core::inspection::CheckStatus as CoreCheckStatus;
+use exarch_core::inspection::IntegrityStatus as CoreIntegrityStatus;
 use exarch_core::inspection::IssueCategory as CoreIssueCategory;
 use exarch_core::inspection::IssueSeverity as CoreIssueSeverity;
 use exarch_core::inspection::ManifestEntryType as CoreManifestEntryType;
@@ -156,6 +157,39 @@ impl From<CoreCheckStatus> for CheckStatus {
     }
 }
 
+/// Result of the payload integrity check.
+// Values must equal `exarch_core::inspection::IntegrityStatus::as_str`.
+#[napi(string_enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntegrityStatus {
+    /// Every payload byte was decoded and every available checksum matched.
+    #[napi(value = "OK")]
+    Pass,
+    /// A checksum or decoder error proved the payload corrupt.
+    #[napi(value = "FAILED")]
+    Fail,
+    /// Part of the payload was not verified.
+    #[napi(value = "INCOMPLETE")]
+    Incomplete,
+    /// The check was not requested.
+    #[napi(value = "SKIPPED")]
+    Skipped,
+}
+
+impl TryFrom<CoreIntegrityStatus> for IntegrityStatus {
+    type Error = Error;
+
+    fn try_from(value: CoreIntegrityStatus) -> Result<Self> {
+        Ok(match value {
+            CoreIntegrityStatus::Pass => Self::Pass,
+            CoreIntegrityStatus::Fail => Self::Fail,
+            CoreIntegrityStatus::Incomplete => Self::Incomplete,
+            CoreIntegrityStatus::Skipped => Self::Skipped,
+            other => return Err(unknown_variant("integrity status", other.as_str())),
+        })
+    }
+}
+
 /// Issue severity.
 // Values must equal `exarch_core::inspection::IssueSeverity::as_str`.
 #[napi(string_enum)]
@@ -225,6 +259,12 @@ pub enum IssueCategory {
     /// Executable file detected.
     #[napi(value = "Executable File")]
     ExecutableFile,
+    /// A checksum or decoder error proved the payload corrupt.
+    #[napi(value = "Corrupt Data")]
+    CorruptData,
+    /// The integrity check could not cover part of the payload.
+    #[napi(value = "Integrity Incomplete")]
+    IntegrityIncomplete,
 }
 
 impl TryFrom<CoreIssueCategory> for IssueCategory {
@@ -242,6 +282,8 @@ impl TryFrom<CoreIssueCategory> for IssueCategory {
             CoreIssueCategory::InvalidArchive => Self::InvalidArchive,
             CoreIssueCategory::SuspiciousPath => Self::SuspiciousPath,
             CoreIssueCategory::ExecutableFile => Self::ExecutableFile,
+            CoreIssueCategory::CorruptData => Self::CorruptData,
+            CoreIssueCategory::IntegrityIncomplete => Self::IntegrityIncomplete,
             other => return Err(unknown_variant("issue category", other.as_str())),
         })
     }
@@ -425,7 +467,7 @@ pub struct VerificationReport {
     /// Overall verification status.
     pub status: VerificationStatus,
     /// Integrity check result.
-    pub integrity_status: CheckStatus,
+    pub integrity_status: IntegrityStatus,
     /// Security check result.
     pub security_status: CheckStatus,
     /// List of all issues found (sorted by severity).
@@ -445,7 +487,7 @@ impl TryFrom<exarch_core::inspection::VerificationReport> for VerificationReport
 
     fn try_from(report: exarch_core::inspection::VerificationReport) -> Result<Self> {
         let status = report.status().into();
-        let integrity_status = report.integrity_status().into();
+        let integrity_status = report.integrity_status().try_into()?;
         let security_status = report.security_status().into();
         let total_entries = saturating_u32(report.total_entries());
         let suspicious_entries = saturating_u32(report.suspicious_entries());
@@ -727,7 +769,7 @@ mod tests {
         let report = VerificationReport::try_from(core_report).unwrap();
 
         assert_eq!(report.status, VerificationStatus::Pass);
-        assert_eq!(report.integrity_status, CheckStatus::Skipped);
+        assert_eq!(report.integrity_status, IntegrityStatus::Skipped);
         assert_eq!(report.security_status, CheckStatus::Pass);
         assert_eq!(report.total_entries, 10);
         assert_eq!(report.suspicious_entries, 0);
@@ -961,6 +1003,15 @@ mod tests {
     }
 
     #[test]
+    fn test_integrity_status_try_from_covers_every_core_variant() {
+        let mapped: Vec<_> = CoreIntegrityStatus::ALL
+            .iter()
+            .map(|v| IntegrityStatus::try_from(*v).unwrap())
+            .collect();
+        assert_all_distinct(&mapped);
+    }
+
+    #[test]
     fn test_exhaustive_enum_from_is_injective() {
         assert_all_distinct(
             &CoreVerificationStatus::ALL
@@ -1009,6 +1060,11 @@ mod tests {
                 CoreIssueSeverity::as_str,
             ),
             union_line("CheckStatus", CoreCheckStatus::ALL, CoreCheckStatus::as_str),
+            union_line(
+                "IntegrityStatus",
+                CoreIntegrityStatus::ALL,
+                CoreIntegrityStatus::as_str,
+            ),
             union_line(
                 "ManifestEntryType",
                 CoreManifestEntryType::ALL,

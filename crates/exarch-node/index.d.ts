@@ -333,6 +333,46 @@ export declare class SecurityConfig {
 }
 
 /**
+ * Options controlling verification behavior (non-security).
+ *
+ * By default `verifyArchive` checks metadata only and reports
+ * `integrityStatus` as `'SKIPPED'`. `withIntegrityCheck` additionally decodes
+ * the payload so checksums and codec framing are verified.
+ *
+ * # Defaults
+ *
+ * | Setting | Default Value |
+ * |---------|--------------|
+ * | `integrityCheck` | `false` |
+ * | `decompressionBudget` | none (500 MiB when the check is enabled) |
+ */
+export declare class VerificationOptions {
+  /** Creates a new `VerificationOptions` with defaults (no integrity check). */
+  constructor()
+  /**
+   * Creates a `VerificationOptions` with defaults.
+   *
+   * This is equivalent to calling `new VerificationOptions()`.
+   */
+  static default(): VerificationOptions
+  /**
+   * Enables the payload integrity check.
+   *
+   * `budget` bounds the extra bytes decoded beyond listing; omit it for the
+   * default of 500 MiB, which does not follow `maxTotalSize`.
+   *
+   * # Errors
+   *
+   * Returns error if `budget` is zero or negative.
+   */
+  withIntegrityCheck(budget?: number | undefined | null): this
+  /** Whether the payload integrity check is enabled. */
+  get integrityCheck(): boolean
+  /** Budget in bytes when the integrity check is enabled. */
+  get decompressionBudget(): number | null
+}
+
+/**
  * Single entry in archive manifest.
  *
  * Contains metadata about a file, directory, symlink, or hardlink
@@ -854,8 +894,11 @@ export interface ExtractionReport {
   warnings: Array<string>
 }
 
+/** Result of the payload integrity check. */
+export type IntegrityStatus = 'OK' | 'FAILED' | 'INCOMPLETE' | 'SKIPPED'
+
 /** Issue category. */
-export type IssueCategory = 'Path Traversal' | 'Symlink Escape' | 'Hardlink Escape' | 'Zip Bomb' | 'Invalid Permissions' | 'Quota Exceeded' | 'Security Policy' | 'Invalid Archive' | 'Suspicious Path' | 'Executable File'
+export type IssueCategory = 'Path Traversal' | 'Symlink Escape' | 'Hardlink Escape' | 'Zip Bomb' | 'Invalid Permissions' | 'Quota Exceeded' | 'Security Policy' | 'Invalid Archive' | 'Suspicious Path' | 'Executable File' | 'Corrupt Data' | 'Integrity Incomplete'
 
 /** Issue severity. */
 export type IssueSeverity = 'INFO' | 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL'
@@ -946,7 +989,7 @@ export interface VerificationReport {
   /** Overall verification status. */
   status: VerificationStatus
   /** Integrity check result. */
-  integrityStatus: CheckStatus
+  integrityStatus: IntegrityStatus
   /** Security check result. */
   securityStatus: CheckStatus
   /** List of all issues found (sorted by severity). */
@@ -971,6 +1014,10 @@ export type VerificationStatus = 'PASS' | 'FAIL' | 'WARNING'
  *
  * * `archive_path` - Path to archive file
  * * `config` - Optional `SecurityConfig` (uses secure defaults if omitted)
+ * * `options` - Optional `VerificationOptions`; use `new
+ *   VerificationOptions().withIntegrityCheck()` to decode the payload and
+ *   verify checksums (default: metadata only, `integrityStatus` is
+ *   `'SKIPPED'`)
  *
  * # Returns
  *
@@ -979,7 +1026,8 @@ export type VerificationStatus = 'PASS' | 'FAIL' | 'WARNING'
  * # Errors
  *
  * Returns error if path validation fails, archive is invalid, or I/O errors
- * occur.
+ * occur. With the integrity check on, a TAR entry whose content fails to
+ * decode is also an error.
  *
  * # Examples
  *
@@ -994,7 +1042,7 @@ export type VerificationStatus = 'PASS' | 'FAIL' | 'WARNING'
  * }
  * ```
  */
-export declare function verifyArchive(archivePath: string, config?: SecurityConfig | undefined | null): Promise<VerificationReport>
+export declare function verifyArchive(archivePath: string, config?: SecurityConfig | undefined | null, options?: VerificationOptions | undefined | null): Promise<VerificationReport>
 
 /**
  * Verify archive security (sync).
@@ -1006,6 +1054,7 @@ export declare function verifyArchive(archivePath: string, config?: SecurityConf
  *
  * * `archive_path` - Path to archive file
  * * `config` - Optional `SecurityConfig` (uses secure defaults if omitted)
+ * * `options` - Optional `VerificationOptions` (see `verifyArchive`)
  *
  * # Returns
  *
@@ -1025,4 +1074,4 @@ export declare function verifyArchive(archivePath: string, config?: SecurityConf
  * }
  * ```
  */
-export declare function verifyArchiveSync(archivePath: string, config?: SecurityConfig | undefined | null): VerificationReport
+export declare function verifyArchiveSync(archivePath: string, config?: SecurityConfig | undefined | null, options?: VerificationOptions | undefined | null): VerificationReport

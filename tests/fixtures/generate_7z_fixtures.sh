@@ -78,6 +78,33 @@ ln hardlink-test/original.txt hardlink-test/link.txt  # Hard link
 7z a -t7z -ms=off "$FIXTURES_DIR/hardlink.7z" hardlink-test/* > /dev/null
 echo "✓ Created hardlink.7z (hardlink)"
 
+# 9. interleaved-empty.7z / interleaved-empty-badcrc.7z - a solid block whose
+# stream-less file sits between its stream files, so sevenz-rust2 never visits
+# the last stream file. The second archive also has a wrong CRC for c.txt.
+mkdir interleave
+for name in d a b c; do
+    head -c 1000 /dev/zero | tr '\0' "$name" > "interleave/$name.txt"
+done
+7z a -t7z -ms=on -mhc=off "$TEMP_DIR/interleave.7z" interleave/d.txt interleave/a.txt interleave/b.txt interleave/c.txt > /dev/null
+python3 - "$TEMP_DIR/interleave.7z" "$FIXTURES_DIR" <<'PY'
+import struct, sys, zlib
+src, out = sys.argv[1], sys.argv[2]
+for name, badcrc in (("interleaved-empty.7z", False), ("interleaved-empty-badcrc.7z", True)):
+    d = bytearray(open(src, "rb").read())
+    off, ln = struct.unpack("<QQ", d[12:28])
+    h = bytearray(d[32 + off : 32 + off + ln])
+    # kEmptyStream bitmap: move the empty file from index 0 to index 1
+    h[h.index(bytes.fromhex("0e0180")) + 2] = 0x40
+    if badcrc:
+        crc_c = struct.pack("<I", zlib.crc32(open("interleave/c.txt", "rb").read()))
+        h[h.index(crc_c)] ^= 1
+    d[32 + off : 32 + off + ln] = h
+    d[28:32] = struct.pack("<I", zlib.crc32(h) & 0xFFFFFFFF)
+    d[8:12] = struct.pack("<I", zlib.crc32(bytes(d[12:32])) & 0xFFFFFFFF)
+    open(f"{out}/{name}", "wb").write(d)
+PY
+echo "✓ Created interleaved-empty.7z and interleaved-empty-badcrc.7z"
+
 echo ""
 echo "All fixtures generated successfully!"
 echo "Note: path-traversal.7z requires manual crafting (see README.md)"

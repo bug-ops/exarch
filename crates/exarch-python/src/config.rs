@@ -1,8 +1,11 @@
-//! Python bindings for `SecurityConfig`, `CreationConfig`, and
-//! `ExtractionOptions`.
+//! Python bindings for `SecurityConfig`, `CreationConfig`,
+//! `ExtractionOptions`, and `VerificationOptions`.
 
+use exarch_core::DecompressionBudget;
 use exarch_core::ExtractionOptions as CoreExtractionOptions;
+use exarch_core::IntegrityCheck;
 use exarch_core::SecurityConfig as CoreSecurityConfig;
+use exarch_core::VerificationOptions as CoreVerificationOptions;
 use exarch_core::creation::CreationConfig as CoreCreationConfig;
 use exarch_core::validate_config_entry;
 use pyo3::exceptions::PyValueError;
@@ -737,6 +740,114 @@ impl PyExtractionOptions {
 impl PyExtractionOptions {
     /// Returns a reference to the inner `CoreExtractionOptions`.
     pub fn as_core(&self) -> &CoreExtractionOptions {
+        &self.inner
+    }
+}
+
+/// Options controlling verification behavior (non-security).
+///
+/// By default `verify_archive` checks metadata only and reports
+/// `integrity_status` as `"SKIPPED"`. `with_integrity_check` additionally
+/// decodes the payload so checksums and codec framing are verified.
+///
+/// # Attributes
+///
+/// * `integrity_check` - Whether payload integrity is checked (default:
+///   `False`)
+/// * `decompression_budget` - Extra bytes the check may decode beyond listing
+///   (500 MiB unless set), or `None` when the check is off
+///
+/// # Examples
+///
+/// ```python
+/// from exarch import VerificationOptions, verify_archive
+///
+/// opts = VerificationOptions().with_integrity_check()
+/// report = verify_archive("archive.zip", options=opts)
+/// print(report.integrity_status)  # "OK", "FAILED" or "INCOMPLETE"
+/// ```
+#[pyclass(name = "VerificationOptions")]
+#[derive(Clone)]
+pub struct PyVerificationOptions {
+    inner: CoreVerificationOptions,
+}
+
+#[pymethods]
+impl PyVerificationOptions {
+    /// Creates a new `VerificationOptions` with defaults (no integrity check).
+    #[new]
+    fn new() -> Self {
+        Self {
+            inner: CoreVerificationOptions::default(),
+        }
+    }
+
+    /// Creates a `VerificationOptions` with defaults.
+    ///
+    /// This is equivalent to calling `VerificationOptions()`.
+    #[staticmethod]
+    fn default() -> Self {
+        Self::new()
+    }
+
+    /// Enables the payload integrity check.
+    ///
+    /// `budget` bounds the extra bytes decoded beyond listing; `None` uses the
+    /// default of 500 MiB, which does not follow `max_total_size`.
+    ///
+    /// # Raises
+    ///
+    /// * `ValueError` - `budget` is zero or negative
+    #[pyo3(signature = (budget=None))]
+    fn with_integrity_check(
+        mut slf: PyRefMut<'_, Self>,
+        budget: Option<i64>,
+    ) -> PyResult<PyRefMut<'_, Self>> {
+        let budget = match budget {
+            Some(bytes) => {
+                let bytes = u64::try_from(bytes).map_err(|_| {
+                    PyValueError::new_err("decompression budget must be greater than zero")
+                })?;
+                DecompressionBudget::try_from_bytes(bytes).map_err(convert_error)?
+            }
+            None => DecompressionBudget::DEFAULT,
+        };
+        slf.inner.integrity = IntegrityCheck::DecodeToEof(budget);
+        Ok(slf)
+    }
+
+    /// Whether the payload integrity check is enabled.
+    #[getter]
+    fn get_integrity_check(&self) -> bool {
+        !matches!(self.inner.integrity, IntegrityCheck::Skip)
+    }
+
+    /// Budget in bytes when the integrity check is enabled, else `None`.
+    #[getter]
+    fn get_decompression_budget(&self) -> Option<u64> {
+        match self.inner.integrity {
+            IntegrityCheck::DecodeToEof(budget) => Some(budget.get()),
+            _ => None,
+        }
+    }
+
+    /// Returns a debug string representation.
+    fn __repr__(&self) -> String {
+        let check = if self.get_integrity_check() {
+            "True"
+        } else {
+            "False"
+        };
+        let budget = self
+            .get_decompression_budget()
+            .map_or_else(|| "None".to_owned(), |bytes| bytes.to_string());
+        format!("VerificationOptions(integrity_check={check}, decompression_budget={budget})")
+    }
+}
+
+impl PyVerificationOptions {
+    /// Returns a reference to the inner `CoreVerificationOptions`.
+    pub fn as_core(&self) -> &CoreVerificationOptions {
         &self.inner
     }
 }

@@ -1001,6 +1001,116 @@ impl ExtractionOptions {
     }
 }
 
+/// Upper bound on the bytes `verify` decodes to check payload integrity.
+///
+/// The budget bounds the work done **beyond what listing already does**: ZIP
+/// entries and 7z blocks are charged their declared uncompressed size before
+/// they are decoded, and for compressed TAR it bounds the read from the end
+/// marker to decoder EOF. TAR entry content is never charged because listing
+/// decodes it anyway. The default is a fixed 500 MiB, equal to the default
+/// `max_total_size`; it does not follow a raised `max_total_size`.
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::DecompressionBudget;
+///
+/// assert!(DecompressionBudget::try_from_bytes(0).is_err());
+/// let budget = DecompressionBudget::try_from_bytes(1024)?;
+/// assert_eq!(budget.get(), 1024);
+/// assert_eq!(DecompressionBudget::default(), DecompressionBudget::DEFAULT);
+/// # Ok::<(), exarch_core::ArchiveError>(())
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DecompressionBudget(std::num::NonZeroU64);
+
+impl DecompressionBudget {
+    /// The default budget: 500 MiB.
+    pub const DEFAULT: Self = match std::num::NonZeroU64::new(500 * 1024 * 1024) {
+        Some(bytes) => Self(bytes),
+        None => unreachable!(),
+    };
+
+    /// Creates a budget from a non-zero byte count.
+    #[must_use]
+    pub const fn new(bytes: std::num::NonZeroU64) -> Self {
+        Self(bytes)
+    }
+
+    /// Creates a budget from a byte count.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArchiveError::InvalidConfiguration`](crate::ArchiveError) when
+    /// `bytes` is zero.
+    pub fn try_from_bytes(bytes: u64) -> crate::Result<Self> {
+        std::num::NonZeroU64::new(bytes).map(Self).ok_or_else(|| {
+            crate::ArchiveError::InvalidConfiguration {
+                reason: "decompression budget must be greater than zero".into(),
+            }
+        })
+    }
+
+    /// Returns the budget in bytes.
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0.get()
+    }
+}
+
+impl Default for DecompressionBudget {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+/// Whether `verify` checks payload integrity.
+///
+/// A budget without the check is unrepresentable: the budget lives inside the
+/// [`DecodeToEof`](Self::DecodeToEof) variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum IntegrityCheck {
+    /// Metadata-only verification (the default).
+    #[default]
+    Skip,
+
+    /// Decode payload to the decoder's EOF so checksums and codec framing are
+    /// verified, spending at most the given budget on extra decoding.
+    DecodeToEof(DecompressionBudget),
+}
+
+/// Options controlling `verify` behavior.
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::DecompressionBudget;
+/// use exarch_core::IntegrityCheck;
+/// use exarch_core::VerificationOptions;
+///
+/// let options = VerificationOptions::default();
+/// assert_eq!(options.integrity, IntegrityCheck::Skip);
+///
+/// let options = options.with_integrity(IntegrityCheck::DecodeToEof(DecompressionBudget::DEFAULT));
+/// assert_ne!(options.integrity, IntegrityCheck::Skip);
+/// ```
+#[derive(Debug, Clone, Copy, Default)]
+#[non_exhaustive]
+pub struct VerificationOptions {
+    /// Payload integrity check mode.
+    pub integrity: IntegrityCheck,
+}
+
+impl VerificationOptions {
+    /// Sets the payload integrity check mode.
+    #[must_use]
+    pub fn with_integrity(mut self, integrity: IntegrityCheck) -> Self {
+        self.integrity = integrity;
+        self
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

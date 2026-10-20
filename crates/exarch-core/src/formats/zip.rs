@@ -132,9 +132,15 @@ use crate::ExtractionReport;
 use crate::ProgressCallback;
 use crate::Result;
 use crate::SecurityConfig;
+use crate::VerificationOptions;
 use crate::config::Validated;
 use crate::copy::CopyBuffer;
+
 use crate::copy::declared_size_exceeded;
+use crate::inspection::integrity::DecodeFailure;
+use crate::inspection::integrity::DecodeOutcome;
+use crate::inspection::integrity::IntegrityPass;
+use crate::inspection::integrity::Slot;
 use crate::security::EntryValidator;
 use crate::security::permissions::SanitizedMode;
 use crate::security::quota::QuotaPermit;
@@ -148,9 +154,18 @@ use super::common;
 use super::common::EntryCompleteGuard;
 use super::traits::ArchiveFormat;
 
+/// Maximum symlink target length read from a ZIP entry: `PATH_MAX`, to prevent
+/// unbounded allocation.
+const MAX_SYMLINK_TARGET_SIZE: u64 = 4096;
+
 /// Message of the `io::Error` the `zip` crate (>= 9.0.1) raises when an entry
 /// decompresses past its declared size.
-const ZIP_DECLARED_SIZE_EXCEEDED: &str = "File is larger than its declared uncompressed size";
+pub(crate) const ZIP_DECLARED_SIZE_EXCEEDED: &str =
+    "File is larger than its declared uncompressed size";
+
+/// Message of the `io::Error` the `zip` crate raises when an entry's CRC-32
+/// does not match, at the read that reaches the entry's EOF.
+pub(crate) const ZIP_INVALID_CHECKSUM: &str = "Invalid checksum";
 
 /// Shared context passed to every ZIP entry extraction call.
 ///
@@ -672,18 +687,20 @@ impl<R: Read + Seek> ArchiveFormat for ZipArchive<R> {
         &mut self,
         config: &SecurityConfig<Validated>,
     ) -> Result<crate::inspection::ArchiveManifest> {
+        use crate::inspection::integrity::ContentPolicy;
         use crate::inspection::list::list_zip_reader;
-        list_zip_reader(&mut self.inner, config)
+        list_zip_reader(&mut self.inner, config, &mut ContentPolicy::Skip)
     }
 
     fn verify(
         &mut self,
         config: &SecurityConfig<Validated>,
+        options: &VerificationOptions,
     ) -> Result<crate::inspection::VerificationReport> {
-        let manifest = self.list(&crate::inspection::verify::listing_config_for_verify(
-            config,
-        ))?;
-        crate::inspection::verify::verify_manifest(&manifest, config)
+        use crate::inspection::list::list_zip_reader;
+        crate::inspection::verify::verify_with(config, *options, |listing_config, policy| {
+            list_zip_reader(&mut self.inner, listing_config, policy)
+        })
     }
 
     fn format_name(&self) -> &'static str {
@@ -704,12 +721,8 @@ impl ZipEntryAdapter {
         })
     }
 
-    /// Reads symlink target from ZIP entry data (stored as file content).
-    fn read_symlink_target<R: Read>(zip_file: &mut zip::read::ZipFile<'_, R>) -> Result<PathBuf> {
-        // SECURITY: Limit to PATH_MAX (4096) to prevent unbounded allocation
-        const MAX_SYMLINK_TARGET_SIZE: u64 = 4096;
-
-        let size = zip_file.size();
+    /// Rejects a declared symlink target size above `PATH_MAX`.
+    fn check_symlink_target_size(size: u64) -> Result<()> {
         if size > MAX_SYMLINK_TARGET_SIZE {
             return Err(ArchiveError::SecurityViolation {
                 reason: format!(
@@ -717,6 +730,21 @@ impl ZipEntryAdapter {
                 ),
             });
         }
+        Ok(())
+    }
+
+    fn symlink_target_from_bytes(target_bytes: &[u8]) -> Result<PathBuf> {
+        let target_str = std::str::from_utf8(target_bytes).map_err(|_| {
+            ArchiveError::InvalidArchive("symlink target is not valid UTF-8".into())
+        })?;
+
+        Ok(PathBuf::from(target_str))
+    }
+
+    /// Reads symlink target from ZIP entry data (stored as file content).
+    fn read_symlink_target<R: Read>(zip_file: &mut zip::read::ZipFile<'_, R>) -> Result<PathBuf> {
+        let size = zip_file.size();
+        Self::check_symlink_target_size(size)?;
 
         // SAFETY: size has already been validated to be <=
         // MAX_SYMLINK_TARGET_SIZE (4096) which is well within usize
@@ -730,11 +758,7 @@ impl ZipEntryAdapter {
                 ArchiveError::InvalidArchive(format!("failed to read symlink target: {e}"))
             })?;
 
-        let target_str = std::str::from_utf8(&target_bytes).map_err(|_| {
-            ArchiveError::InvalidArchive("symlink target is not valid UTF-8".into())
-        })?;
-
-        Ok(PathBuf::from(target_str))
+        Self::symlink_target_from_bytes(&target_bytes)
     }
 
     /// Gets uncompressed and compressed sizes.
@@ -752,6 +776,42 @@ pub(crate) fn read_zip_symlink_target<R: Read>(
     zip_file: &mut zip::read::ZipFile<'_, R>,
 ) -> Result<PathBuf> {
     ZipEntryAdapter::read_symlink_target(zip_file)
+}
+
+/// Reads a ZIP symlink target for an integrity pass.
+///
+/// Unlike [`read_zip_symlink_target`] the entry is read to its EOF through
+/// `copy_bounded`, so the CRC-32 is checked: a checksum failure is recorded
+/// as `CorruptData` for the entry and the bytes read are kept as the target.
+/// Any other read failure is an `InvalidArchive` error, as without a pass.
+///
+/// # Errors
+///
+/// Returns an error when the target is too large, is not UTF-8, cannot be read,
+/// or the disk fails.
+pub(crate) fn read_zip_symlink_target_checked<R: Read>(
+    zip_file: &mut zip::read::ZipFile<'_, R>,
+    pass: &mut IntegrityPass<'_>,
+    slot: Slot,
+    entry_path: &Path,
+) -> Result<PathBuf> {
+    let declared = zip_file.size();
+    ZipEntryAdapter::check_symlink_target_size(declared)?;
+
+    let mut target_bytes = Vec::new();
+    if let Err(failure) = pass.copy_into(zip_file, &mut target_bytes, declared) {
+        match failure {
+            DecodeFailure::Checksum => {
+                pass.record(slot, entry_path, DecodeOutcome::Failed(failure))?;
+            }
+            failure => {
+                return Err(ArchiveError::InvalidArchive(format!(
+                    "failed to read symlink target: {failure}"
+                )));
+            }
+        }
+    }
+    ZipEntryAdapter::symlink_target_from_bytes(&target_bytes)
 }
 
 /// Returns `true` if `mode` has the `S_IFLNK` file-type bits set.
@@ -2342,7 +2402,9 @@ mod tests {
         let mut archive = ZipArchive::new(Cursor::new(zip_data)).unwrap();
         let config = SecurityConfig::default().validate().expect("valid config");
 
-        let report = archive.verify(&config).unwrap();
+        let report = archive
+            .verify(&config, &crate::VerificationOptions::default())
+            .unwrap();
 
         assert!(report.is_safe());
         assert_eq!(report.total_entries(), 1);

@@ -59,6 +59,7 @@ mod utils;
 use config::CreationConfig;
 use config::ExtractionOptions;
 use config::SecurityConfig;
+use config::VerificationOptions;
 use error::convert_error;
 use report::ArchiveManifest;
 use report::CreationReport;
@@ -855,6 +856,10 @@ pub fn list_archive_sync(
 ///
 /// * `archive_path` - Path to archive file
 /// * `config` - Optional `SecurityConfig` (uses secure defaults if omitted)
+/// * `options` - Optional `VerificationOptions`; use `new
+///   VerificationOptions().withIntegrityCheck()` to decode the payload and
+///   verify checksums (default: metadata only, `integrityStatus` is
+///   `'SKIPPED'`)
 ///
 /// # Returns
 ///
@@ -863,7 +868,8 @@ pub fn list_archive_sync(
 /// # Errors
 ///
 /// Returns error if path validation fails, archive is invalid, or I/O errors
-/// occur.
+/// occur. With the integrity check on, a TAR entry whose content fails to
+/// decode is also an error.
 ///
 /// # Examples
 ///
@@ -882,15 +888,18 @@ pub fn list_archive_sync(
 pub async fn verify_archive(
     archive_path: String,
     config: Option<&SecurityConfig>,
+    options: Option<&VerificationOptions>,
 ) -> Result<VerificationReport> {
     validate_path(&archive_path)?;
 
-    // Get owned config - clone only when config is Some, use default otherwise
+    // Get owned config/options - clone only when Some, use default otherwise
     let config_owned: exarch_core::SecurityConfig = config.map_or_default(|c| c.as_core().clone());
+    let options_owned: exarch_core::VerificationOptions = options.map_or_default(|o| *o.as_core());
 
     let report = tokio::task::spawn_blocking(move || {
         catch_panic_as_js_err("archive verification", || {
-            exarch_core::verify_archive(&archive_path, &config_owned).map_err(convert_error)
+            exarch_core::verify_archive_with_options(&archive_path, &config_owned, &options_owned)
+                .map_err(convert_error)
         })
     })
     .await
@@ -909,6 +918,7 @@ pub async fn verify_archive(
 ///
 /// * `archive_path` - Path to archive file
 /// * `config` - Optional `SecurityConfig` (uses secure defaults if omitted)
+/// * `options` - Optional `VerificationOptions` (see `verifyArchive`)
 ///
 /// # Returns
 ///
@@ -932,14 +942,18 @@ pub async fn verify_archive(
 pub fn verify_archive_sync(
     archive_path: String,
     config: Option<&SecurityConfig>,
+    options: Option<&VerificationOptions>,
 ) -> Result<VerificationReport> {
     validate_path(&archive_path)?;
 
     let default_config = exarch_core::SecurityConfig::default();
     let config_ref = config.map_or(&default_config, |c| c.as_core());
+    let default_options = exarch_core::VerificationOptions::default();
+    let options_ref = options.map_or(&default_options, |o| o.as_core());
 
     let report = catch_panic_as_js_err("archive verification", || {
-        exarch_core::verify_archive(&archive_path, config_ref).map_err(convert_error)
+        exarch_core::verify_archive_with_options(&archive_path, config_ref, options_ref)
+            .map_err(convert_error)
     })?;
 
     VerificationReport::try_from(report)
@@ -1755,7 +1769,7 @@ mod tests {
     // CR-004: verify_archive path validation tests
     #[tokio::test]
     async fn test_verify_archive_rejects_null_byte_in_archive_path() {
-        let result = verify_archive("/tmp/test\0malicious.tar".to_string(), None).await;
+        let result = verify_archive("/tmp/test\0malicious.tar".to_string(), None, None).await;
 
         assert!(result.is_err(), "should reject null bytes in archive path");
         assert!(
@@ -1767,7 +1781,7 @@ mod tests {
     #[tokio::test]
     async fn test_verify_archive_rejects_excessively_long_archive_path() {
         let long_path = "x".repeat(5000);
-        let result = verify_archive(long_path, None).await;
+        let result = verify_archive(long_path, None, None).await;
 
         assert!(result.is_err(), "should reject excessively long paths");
         assert!(
@@ -1778,7 +1792,7 @@ mod tests {
 
     #[test]
     fn test_verify_archive_sync_rejects_null_byte_in_archive_path() {
-        let result = verify_archive_sync("/tmp/test\0malicious.tar".to_string(), None);
+        let result = verify_archive_sync("/tmp/test\0malicious.tar".to_string(), None, None);
 
         assert!(result.is_err(), "should reject null bytes in archive path");
         assert!(
@@ -1790,7 +1804,7 @@ mod tests {
     #[test]
     fn test_verify_archive_sync_rejects_excessively_long_archive_path() {
         let long_path = "x".repeat(5000);
-        let result = verify_archive_sync(long_path, None);
+        let result = verify_archive_sync(long_path, None, None);
 
         assert!(result.is_err(), "should reject excessively long paths");
         assert!(

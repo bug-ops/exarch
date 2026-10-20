@@ -120,6 +120,26 @@ const config = new SecurityConfig()
 const result = await extractArchive('archive.tar.gz', '/output', config);
 ```
 
+### Verifying Payload Integrity
+
+`verifyArchive` checks security only by default and reports `integrityStatus`
+as `'SKIPPED'`. Opt in to decode the payload and verify checksums:
+
+```javascript
+const { verifyArchive, VerificationOptions } = require('exarch-rs');
+
+const options = new VerificationOptions().withIntegrityCheck(); // 500 MiB budget
+const report = await verifyArchive('archive.zip', null, options);
+
+console.log(report.integrityStatus); // 'OK', 'FAILED', 'INCOMPLETE' or 'SKIPPED'
+```
+
+**Note:** `'INCOMPLETE'` means part of the payload was not verified (budget,
+resource limit, solid 7z archive while `setAllowSolidArchives` is off, TAR without
+an end-of-archive marker); it comes with a Medium issue, so `status` is at least
+`'WARNING'`. With the check on, a TAR entry whose content fails to decode rejects
+the promise.
+
 ### Error Handling
 
 ```javascript

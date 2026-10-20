@@ -13,6 +13,7 @@ mod report;
 use config::PyCreationConfig;
 use config::PyExtractionOptions;
 use config::PySecurityConfig;
+use config::PyVerificationOptions;
 use error::convert_error;
 use error::register_exceptions;
 use report::PyArchiveEntry;
@@ -325,6 +326,10 @@ fn list_archive(
 ///
 /// * `archive_path` - Path to archive file (str or pathlib.Path)
 /// * `config` - Optional `SecurityConfig` (uses secure defaults if None)
+/// * `options` - Optional `VerificationOptions`; pass
+///   `VerificationOptions().with_integrity_check()` to decode the payload and
+///   verify checksums (default: metadata only, `integrity_status` is
+///   `"SKIPPED"`)
 ///
 /// # Returns
 ///
@@ -335,6 +340,9 @@ fn list_archive(
 /// * `ValueError` - Invalid arguments
 /// * `IOError` - I/O operation failed
 /// * `UnsupportedFormatError` - Archive format not supported
+/// * `InvalidArchiveError` - With the integrity check on, a TAR entry whose
+///   content fails to decode (a resource limit or I/O failure while decoding
+///   raises its own typed error)
 ///
 /// # Examples
 ///
@@ -349,19 +357,24 @@ fn list_archive(
 ///         print(f"[{issue.severity}] {issue.message}")
 /// ```
 #[pyfunction]
-#[pyo3(signature = (archive_path, config=None))]
+#[pyo3(signature = (archive_path, config=None, options=None))]
 fn verify_archive(
     py: Python<'_>,
     archive_path: &Bound<'_, PyAny>,
     config: Option<&PySecurityConfig>,
+    options: Option<&PyVerificationOptions>,
 ) -> PyResult<PyVerificationReport> {
     let archive_path = path_to_string(py, archive_path)?;
 
     let default_config = exarch_core::SecurityConfig::default();
     let config_ref = config.map_or(&default_config, |c| c.as_core());
+    let default_options = exarch_core::VerificationOptions::default();
+    let options_ref = options.map_or(&default_options, |o| o.as_core());
 
     let report = catch_panic_as_py_err("archive verification", || {
-        py.detach(|| exarch_core::verify_archive(&archive_path, config_ref))
+        py.detach(|| {
+            exarch_core::verify_archive_with_options(&archive_path, config_ref, options_ref)
+        })
     })?;
 
     Ok(PyVerificationReport::from(report))
@@ -788,6 +801,7 @@ fn exarch(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySecurityConfig>()?;
     m.add_class::<PyCreationConfig>()?;
     m.add_class::<PyExtractionOptions>()?;
+    m.add_class::<PyVerificationOptions>()?;
 
     // Report classes
     m.add_class::<PyExtractionReport>()?;

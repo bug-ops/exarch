@@ -90,6 +90,27 @@ config = config.with_max_file_size(100 * 1024 * 1024)  # 100 MB
 result = exarch.extract_archive("archive.tar.gz", "/output", config)
 ```
 
+### Verifying Payload Integrity
+
+`verify_archive` checks security only by default and reports
+`integrity_status` as `"SKIPPED"`. Opt in to decode the payload and verify
+checksums:
+
+```python
+import exarch
+
+options = exarch.VerificationOptions().with_integrity_check()  # 500 MiB budget
+report = exarch.verify_archive("archive.zip", options=options)
+
+print(report.integrity_status)  # "OK", "FAILED", "INCOMPLETE" or "SKIPPED"
+```
+
+**Note:** `"INCOMPLETE"` means part of the payload was not verified (budget,
+resource limit, solid 7z archive while `allow_solid_archives` is off, TAR
+without an end-of-archive marker); it comes with a Medium issue, so `status` is
+at least `"WARNING"`. With the check on, a TAR entry whose content fails to
+decode raises `InvalidArchiveError`.
+
 ### Error Handling
 
 ```python

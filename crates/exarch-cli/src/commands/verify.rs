@@ -6,9 +6,11 @@ use crate::error::StrictWarning;
 use crate::error::VerificationFailed;
 use crate::output::OutputFormatter;
 use anyhow::Result;
+use exarch_core::IntegrityCheck;
 use exarch_core::SecurityConfig;
+use exarch_core::VerificationOptions;
 use exarch_core::VerificationStatus;
-use exarch_core::verify_archive;
+use exarch_core::verify_archive_with_options;
 
 pub fn execute(args: &VerifyArgs, formatter: &mut dyn OutputFormatter) -> Result<()> {
     let config = args
@@ -20,7 +22,15 @@ pub fn execute(args: &VerifyArgs, formatter: &mut dyn OutputFormatter) -> Result
         ))
         .with_allow_solid_archives(args.allow_solid_archives);
 
-    let report = verify_archive(&args.archive, &config)?;
+    let options = if args.check_integrity {
+        VerificationOptions::default().with_integrity(IntegrityCheck::DecodeToEof(
+            args.decompression_budget.unwrap_or_default(),
+        ))
+    } else {
+        VerificationOptions::default()
+    };
+
+    let report = verify_archive_with_options(&args.archive, &config, &options)?;
 
     formatter.format_verification_report(&report)?;
 

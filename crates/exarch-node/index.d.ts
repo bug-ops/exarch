@@ -342,7 +342,7 @@ export interface ArchiveEntry {
   entryType: ManifestEntryType
   /** Uncompressed size in bytes (0 for directories). */
   size: number
-  /** Compressed size in bytes (if available, ZIP only). */
+  /** Compressed size in bytes (if the format reports one). */
   compressedSize?: number
   /** File permissions (Unix mode). */
   mode?: number

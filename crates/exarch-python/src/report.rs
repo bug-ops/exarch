@@ -245,17 +245,17 @@ impl PyArchiveEntry {
 
     #[getter]
     fn entry_type(&self) -> String {
-        self.inner.entry_type.as_str().to_owned()
+        self.inner.kind.entry_type().as_str().to_owned()
     }
 
     #[getter]
     fn is_symlink(&self) -> bool {
-        self.inner.entry_type == ManifestEntryType::Symlink
+        self.inner.kind.entry_type() == ManifestEntryType::Symlink
     }
 
     #[getter]
     fn is_hardlink(&self) -> bool {
-        self.inner.entry_type == ManifestEntryType::Hardlink
+        self.inner.kind.entry_type() == ManifestEntryType::Hardlink
     }
 
     #[getter]
@@ -271,16 +271,16 @@ impl PyArchiveEntry {
     #[getter]
     fn symlink_target(&self) -> Option<String> {
         self.inner
-            .symlink_target
-            .as_ref()
+            .kind
+            .symlink_target()
             .map(|p| p.to_string_lossy().into_owned())
     }
 
     #[getter]
     fn hardlink_target(&self) -> Option<String> {
         self.inner
-            .hardlink_target
-            .as_ref()
+            .kind
+            .hardlink_target()
             .map(|p| p.to_string_lossy().into_owned())
     }
 
@@ -292,7 +292,7 @@ impl PyArchiveEntry {
         format!(
             "ArchiveEntry(path='{}', type={}, size={})",
             self.inner.path.display(),
-            self.inner.entry_type,
+            self.inner.kind.entry_type(),
             self.inner.size
         )
     }
@@ -513,6 +513,7 @@ impl From<VerificationReport> for PyVerificationReport {
 )]
 mod tests {
     use super::*;
+    use exarch_core::inspection::manifest::ManifestEntryKind;
     use std::time::Duration;
 
     #[test]
@@ -749,7 +750,7 @@ mod tests {
         use std::path::PathBuf;
 
         let mut entry =
-            ArchiveEntry::new(PathBuf::from("test/file.txt"), ManifestEntryType::File, 512);
+            ArchiveEntry::new(PathBuf::from("test/file.txt"), ManifestEntryKind::File, 512);
         entry.compression = exarch_core::EntryCompression::Entry(256);
         entry.mode = Some(0o644);
 
@@ -777,8 +778,13 @@ mod tests {
     fn test_archive_entry_symlink() {
         use std::path::PathBuf;
 
-        let mut entry = ArchiveEntry::new(PathBuf::from("link"), ManifestEntryType::Symlink, 0);
-        entry.symlink_target = Some(PathBuf::from("target/file.txt"));
+        let entry = ArchiveEntry::new(
+            PathBuf::from("link"),
+            ManifestEntryKind::Symlink {
+                target: Some(PathBuf::from("target/file.txt")),
+            },
+            0,
+        );
 
         let py_entry = PyArchiveEntry::from(entry);
 
@@ -795,9 +801,13 @@ mod tests {
     fn test_archive_entry_hardlink() {
         use std::path::PathBuf;
 
-        let mut entry =
-            ArchiveEntry::new(PathBuf::from("hardlink"), ManifestEntryType::Hardlink, 0);
-        entry.hardlink_target = Some(PathBuf::from("original/file.txt"));
+        let entry = ArchiveEntry::new(
+            PathBuf::from("hardlink"),
+            ManifestEntryKind::Hardlink {
+                target: Some(PathBuf::from("original/file.txt")),
+            },
+            0,
+        );
 
         let py_entry = PyArchiveEntry::from(entry);
 
@@ -817,7 +827,7 @@ mod tests {
 
         let mut manifest = ArchiveManifest::new(ArchiveType::Tar);
         for (name, size) in [("file1.txt", 100), ("file2.txt", 200)] {
-            let entry = ArchiveEntry::new(PathBuf::from(name), ManifestEntryType::File, size);
+            let entry = ArchiveEntry::new(PathBuf::from(name), ManifestEntryKind::File, size);
             manifest.add_entry(entry).unwrap();
         }
 

@@ -1,5 +1,6 @@
 //! Archive manifest types for listing.
 
+use std::path::Path;
 use std::path::PathBuf;
 use std::time::SystemTime;
 
@@ -62,11 +63,11 @@ impl ArchiveManifest {
     ///
     /// use exarch_core::ArchiveEntry;
     /// use exarch_core::ArchiveManifest;
-    /// use exarch_core::ManifestEntryType;
+    /// use exarch_core::ManifestEntryKind;
     /// use exarch_core::formats::detect::ArchiveType;
     ///
     /// let mut manifest = ArchiveManifest::new(ArchiveType::Tar);
-    /// let entry = ArchiveEntry::new(PathBuf::from("a.txt"), ManifestEntryType::File, 10);
+    /// let entry = ArchiveEntry::new(PathBuf::from("a.txt"), ManifestEntryKind::File, 10);
     /// manifest.add_entry(entry)?;
     /// assert_eq!(manifest.total_entries(), 1);
     /// assert_eq!(manifest.total_size(), 10);
@@ -122,8 +123,8 @@ pub struct ArchiveEntry {
     /// Entry path (relative, as stored in archive)
     pub path: PathBuf,
 
-    /// Entry type (File, Directory, Symlink, Hardlink)
-    pub entry_type: ManifestEntryType,
+    /// Entry kind; link kinds carry their target
+    pub kind: ManifestEntryKind,
 
     /// Uncompressed size in bytes (0 for directories)
     pub size: u64,
@@ -136,27 +137,19 @@ pub struct ArchiveEntry {
 
     /// Modification time
     pub modified: Option<SystemTime>,
-
-    /// Symlink target (if `entry_type` is Symlink)
-    pub symlink_target: Option<PathBuf>,
-
-    /// Hardlink target (if `entry_type` is Hardlink)
-    pub hardlink_target: Option<PathBuf>,
 }
 
 impl ArchiveEntry {
     /// Creates an entry with all optional metadata unset.
     #[must_use]
-    pub const fn new(path: PathBuf, entry_type: ManifestEntryType, size: u64) -> Self {
+    pub const fn new(path: PathBuf, kind: ManifestEntryKind, size: u64) -> Self {
         Self {
             path,
-            entry_type,
+            kind,
             size,
             compression: EntryCompression::Unknown,
             mode: None,
             modified: None,
-            symlink_target: None,
-            hardlink_target: None,
         }
     }
 
@@ -266,6 +259,87 @@ impl EntryCompression {
     }
 }
 
+/// Kind of a manifest entry; link kinds carry their target.
+///
+/// The target lives in the variant, so a regular file cannot carry one. It is
+/// `None` only for entries produced by the relaxed listing that
+/// [`verify_archive`](crate::verify_archive) uses, where a missing target must
+/// become a report issue instead of a listing error.
+///
+/// # Examples
+///
+/// ```
+/// use std::path::Path;
+///
+/// use exarch_core::ManifestEntryKind;
+/// use exarch_core::ManifestEntryType;
+///
+/// let kind = ManifestEntryKind::Symlink {
+///     target: Some("a.txt".into()),
+/// };
+/// assert_eq!(kind.entry_type(), ManifestEntryType::Symlink);
+/// assert_eq!(kind.link_target(), Some(Path::new("a.txt")));
+/// assert_eq!(ManifestEntryKind::File.link_target(), None);
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ManifestEntryKind {
+    /// Regular file
+    File,
+
+    /// Directory
+    Directory,
+
+    /// Symbolic link
+    Symlink {
+        /// Link target as stored in the archive
+        target: Option<PathBuf>,
+    },
+
+    /// Hard link
+    Hardlink {
+        /// Link target as stored in the archive
+        target: Option<PathBuf>,
+    },
+}
+
+impl ManifestEntryKind {
+    /// Returns the wire tag of this kind.
+    #[must_use]
+    pub const fn entry_type(&self) -> ManifestEntryType {
+        match self {
+            Self::File => ManifestEntryType::File,
+            Self::Directory => ManifestEntryType::Directory,
+            Self::Symlink { .. } => ManifestEntryType::Symlink,
+            Self::Hardlink { .. } => ManifestEntryType::Hardlink,
+        }
+    }
+
+    /// Returns the target of a symlink, if one was recorded.
+    #[must_use]
+    pub fn symlink_target(&self) -> Option<&Path> {
+        match self {
+            Self::Symlink { target } => target.as_deref(),
+            Self::File | Self::Directory | Self::Hardlink { .. } => None,
+        }
+    }
+
+    /// Returns the target of a hardlink, if one was recorded.
+    #[must_use]
+    pub fn hardlink_target(&self) -> Option<&Path> {
+        match self {
+            Self::Hardlink { target } => target.as_deref(),
+            Self::File | Self::Directory | Self::Symlink { .. } => None,
+        }
+    }
+
+    /// Returns the link target of a symlink or hardlink, if one was recorded.
+    #[must_use]
+    pub fn link_target(&self) -> Option<&Path> {
+        self.symlink_target().or_else(|| self.hardlink_target())
+    }
+}
+
 closed_enum! {
     /// Entry type in manifest (does NOT require validation).
     ///
@@ -309,13 +383,11 @@ mod tests {
 
         let entry = ArchiveEntry {
             path: PathBuf::from("file.txt"),
-            entry_type: ManifestEntryType::File,
+            kind: ManifestEntryKind::File,
             size: 1024,
             compression: EntryCompression::Entry(512),
             mode: Some(0o644),
             modified: None,
-            symlink_target: None,
-            hardlink_target: None,
         };
 
         manifest.add_entry(entry).unwrap();
@@ -328,10 +400,10 @@ mod tests {
     #[test]
     fn test_manifest_add_entry_size_overflow() {
         let mut manifest = ArchiveManifest::new(ArchiveType::Tar);
-        let big = ArchiveEntry::new(PathBuf::from("a"), ManifestEntryType::File, u64::MAX);
+        let big = ArchiveEntry::new(PathBuf::from("a"), ManifestEntryKind::File, u64::MAX);
         manifest.add_entry(big).unwrap();
 
-        let more = ArchiveEntry::new(PathBuf::from("b"), ManifestEntryType::File, 1);
+        let more = ArchiveEntry::new(PathBuf::from("b"), ManifestEntryKind::File, 1);
         assert_matches!(
             manifest.add_entry(more),
             Err(ArchiveError::InvalidArchive(_))
@@ -344,13 +416,11 @@ mod tests {
     fn test_compression_ratio() {
         let entry = ArchiveEntry {
             path: PathBuf::from("file.txt"),
-            entry_type: ManifestEntryType::File,
+            kind: ManifestEntryKind::File,
             size: 1000,
             compression: EntryCompression::Entry(100),
             mode: None,
             modified: None,
-            symlink_target: None,
-            hardlink_target: None,
         };
 
         assert_eq!(entry.compression_ratio(), Some(10.0));
@@ -360,13 +430,11 @@ mod tests {
     fn test_compression_ratio_no_compressed() {
         let entry = ArchiveEntry {
             path: PathBuf::from("file.txt"),
-            entry_type: ManifestEntryType::File,
+            kind: ManifestEntryKind::File,
             size: 1000,
             compression: EntryCompression::Unknown,
             mode: None,
             modified: None,
-            symlink_target: None,
-            hardlink_target: None,
         };
 
         assert_eq!(entry.compression_ratio(), None);
@@ -374,7 +442,7 @@ mod tests {
 
     #[test]
     fn test_solid_entries_have_no_per_file_ratio() {
-        let mut entry = ArchiveEntry::new(PathBuf::from("a"), ManifestEntryType::File, 1000);
+        let mut entry = ArchiveEntry::new(PathBuf::from("a"), ManifestEntryKind::File, 1000);
         entry.compression = EntryCompression::SolidBlockStart(SolidBlock::new(10, 2000));
         assert_eq!(entry.compression_ratio(), None);
         assert_eq!(entry.compressed_size(), Some(10));

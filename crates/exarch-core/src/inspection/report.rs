@@ -64,13 +64,13 @@ impl VerificationReport {
     ///
     /// use exarch_core::ArchiveEntry;
     /// use exarch_core::ArchiveManifest;
-    /// use exarch_core::ManifestEntryType;
+    /// use exarch_core::ManifestEntryKind;
     /// use exarch_core::VerificationReport;
     /// use exarch_core::VerificationStatus;
     /// use exarch_core::formats::detect::ArchiveType;
     ///
     /// let mut manifest = ArchiveManifest::new(ArchiveType::Tar);
-    /// let entry = ArchiveEntry::new(PathBuf::from("a.txt"), ManifestEntryType::File, 1);
+    /// let entry = ArchiveEntry::new(PathBuf::from("a.txt"), ManifestEntryKind::File, 1);
     /// manifest.add_entry(entry)?;
     ///
     /// let report = VerificationReport::from_entry_issues(&manifest, |_| Vec::new());
@@ -486,7 +486,7 @@ mod tests {
     use super::*;
     use std::io;
 
-    use crate::inspection::manifest::ManifestEntryType;
+    use crate::inspection::manifest::ManifestEntryKind;
 
     fn spellings<T: Copy>(all: &[T], text: impl Fn(T) -> &'static str) -> Vec<&'static str> {
         all.iter().map(|v| text(*v)).collect()
@@ -629,7 +629,7 @@ mod tests {
 
     fn report_with(issues: Vec<VerificationIssue>) -> VerificationReport {
         let mut manifest = ArchiveManifest::new(ArchiveType::TarGz);
-        let entry = ArchiveEntry::new(PathBuf::from("a"), ManifestEntryType::File, 1024);
+        let entry = ArchiveEntry::new(PathBuf::from("a"), ManifestEntryKind::File, 1024);
         manifest.add_entry(entry).unwrap();
         let mut issues = Some(issues);
         VerificationReport::from_entry_issues(&manifest, |_| issues.take().unwrap_or_default())

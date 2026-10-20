@@ -242,7 +242,7 @@ impl<W: Write> OutputFormatter for JsonFormatter<W> {
             .iter()
             .map(|e| ManifestEntry {
                 path: e.path.display().to_string(),
-                entry_type: e.entry_type.as_str(),
+                entry_type: e.kind.entry_type().as_str(),
                 size: e.size,
                 compressed_size: e.compressed_size(),
                 mode: e.mode,
@@ -251,8 +251,8 @@ impl<W: Write> OutputFormatter for JsonFormatter<W> {
                         .ok()
                         .map(|d| d.as_secs())
                 }),
-                symlink_target: e.symlink_target.as_ref().map(|p| p.display().to_string()),
-                hardlink_target: e.hardlink_target.as_ref().map(|p| p.display().to_string()),
+                symlink_target: e.kind.symlink_target().map(|p| p.display().to_string()),
+                hardlink_target: e.kind.hardlink_target().map(|p| p.display().to_string()),
             })
             .collect();
 
@@ -626,10 +626,10 @@ mod tests {
 
     fn sample_manifest() -> ArchiveManifest {
         use exarch_core::ArchiveEntry;
-        use exarch_core::ManifestEntryType;
+        use exarch_core::ManifestEntryKind;
         use exarch_core::formats::detect::ArchiveType;
 
-        let mut entry = ArchiveEntry::new(PathBuf::from("file.txt"), ManifestEntryType::File, 1024);
+        let mut entry = ArchiveEntry::new(PathBuf::from("file.txt"), ManifestEntryKind::File, 1024);
         entry.mode = Some(0o644);
         let mut manifest = ArchiveManifest::new(ArchiveType::TarGz);
         manifest.add_entry(entry).unwrap();
@@ -659,7 +659,7 @@ mod tests {
     #[test]
     fn format_verification_report_writes_full_report() {
         use exarch_core::ArchiveEntry;
-        use exarch_core::ManifestEntryType;
+        use exarch_core::ManifestEntryKind;
         use exarch_core::formats::detect::ArchiveType;
 
         let mut f = JsonFormatter::with_writer(Vec::new());
@@ -667,7 +667,7 @@ mod tests {
         for i in 0..5 {
             let path = PathBuf::from(format!("f{i}.txt"));
             manifest
-                .add_entry(ArchiveEntry::new(path, ManifestEntryType::File, 0))
+                .add_entry(ArchiveEntry::new(path, ManifestEntryKind::File, 0))
                 .unwrap();
         }
         let report = VerificationReport::from_entry_issues(&manifest, |_| Vec::new());

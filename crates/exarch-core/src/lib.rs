@@ -81,6 +81,7 @@ pub use inspection::CheckStatus;
 pub use inspection::EntryCompression;
 pub use inspection::IssueCategory;
 pub use inspection::IssueSeverity;
+pub use inspection::ManifestEntryKind;
 pub use inspection::ManifestEntryType;
 pub use inspection::SolidBlock;
 pub use inspection::VerificationIssue;

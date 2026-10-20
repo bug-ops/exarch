@@ -9,7 +9,7 @@ use crate::config::Validated;
 use crate::inspection::list::list_archive;
 use crate::inspection::manifest::ArchiveEntry;
 use crate::inspection::manifest::ArchiveManifest;
-use crate::inspection::manifest::ManifestEntryType;
+use crate::inspection::manifest::ManifestEntryKind;
 use crate::inspection::report::IssueCategory;
 use crate::inspection::report::IssueSeverity;
 use crate::inspection::report::VerificationIssue;
@@ -21,7 +21,6 @@ use crate::security::quota::QuotaTracker;
 use crate::security::symlink::validate_symlink;
 use crate::security::zipbomb::validate_entry_compression;
 use crate::types::DestDir;
-use crate::types::EntryType;
 
 /// Verifies an already-listed manifest against the security config.
 ///
@@ -144,18 +143,6 @@ fn verify_entry(
 ) -> Vec<VerificationIssue> {
     let mut issues = Vec::new();
 
-    // Convert ManifestEntryType to EntryType
-    let entry_type = match entry.entry_type {
-        ManifestEntryType::File => EntryType::File,
-        ManifestEntryType::Directory => EntryType::Directory,
-        ManifestEntryType::Symlink => EntryType::Symlink {
-            target: entry.symlink_target.clone().unwrap_or_default(),
-        },
-        ManifestEntryType::Hardlink => EntryType::Hardlink {
-            target: entry.hardlink_target.clone().unwrap_or_default(),
-        },
-    };
-
     // Path validation — result cached to avoid repeated syscalls for
     // symlink/hardlink checks
     let path_result = validate_path(&entry.path, dest, config);
@@ -173,21 +160,29 @@ fn verify_entry(
         issues.push(VerificationIssue::from_error(&e, Some(entry.path.clone())));
     }
 
-    // Symlink validation
-    if let EntryType::Symlink { ref target } = entry_type
-        && let Ok(ref safe_link_path) = path_result
-        && let Err(e) = validate_symlink(safe_link_path, target, dest, config)
-    {
-        issues.push(VerificationIssue::from_error(&e, Some(entry.path.clone())));
-    }
-
-    // TODO(critic): flag hardlinks whose target never appears earlier in the
-    // manifest (extract fails on them)
-    if let EntryType::Hardlink { ref target } = entry_type
-        && let Ok(ref safe_link_path) = path_result
-        && let Err(e) = hardlink_tracker.validate_hardlink(safe_link_path, target, dest, config)
-    {
-        issues.push(VerificationIssue::from_error(&e, Some(entry.path.clone())));
+    if let Ok(ref safe_link_path) = path_result {
+        let link_result = match &entry.kind {
+            ManifestEntryKind::Symlink { target } => Some(
+                target
+                    .as_deref()
+                    .ok_or_else(|| missing_link_target("symlink"))
+                    .and_then(|t| validate_symlink(safe_link_path, t, dest, config).map(drop)),
+            ),
+            // TODO(critic): flag hardlinks whose target never appears earlier
+            // in the manifest (extract fails on them)
+            ManifestEntryKind::Hardlink { target } => Some(
+                target
+                    .as_deref()
+                    .ok_or_else(|| missing_link_target("hardlink"))
+                    .and_then(|t| {
+                        hardlink_tracker.validate_hardlink(safe_link_path, t, dest, config)
+                    }),
+            ),
+            _ => None,
+        };
+        if let Some(Err(e)) = link_result {
+            issues.push(VerificationIssue::from_error(&e, Some(entry.path.clone())));
+        }
     }
 
     // Permission validation
@@ -198,6 +193,12 @@ fn verify_entry(
     }
 
     issues
+}
+
+fn missing_link_target(kind: &str) -> ArchiveError {
+    ArchiveError::SecurityViolation {
+        reason: format!("{kind} target is missing"),
+    }
 }
 
 fn check_permissions(path: &Path, mode: u32, config: &SecurityConfig<Validated>) -> Result<()> {
@@ -218,7 +219,7 @@ fn check_heuristics(entry: &ArchiveEntry) -> Vec<VerificationIssue> {
     // Executable file detection
     if let Some(mode) = entry.mode
         && mode & 0o111 != 0
-        && entry.entry_type == ManifestEntryType::File
+        && entry.kind == ManifestEntryKind::File
     {
         issues.push(VerificationIssue {
             severity: IssueSeverity::Low,
@@ -303,13 +304,11 @@ mod tests {
     fn test_check_heuristics_executable() {
         let entry = crate::inspection::manifest::ArchiveEntry {
             path: PathBuf::from("test.sh"),
-            entry_type: ManifestEntryType::File,
+            kind: ManifestEntryKind::File,
             size: 100,
             compression: EntryCompression::Unknown,
             mode: Some(0o755),
             modified: None,
-            symlink_target: None,
-            hardlink_target: None,
         };
 
         let issues = check_heuristics(&entry);
@@ -325,13 +324,11 @@ mod tests {
     fn test_check_heuristics_suspicious_extension() {
         let entry = crate::inspection::manifest::ArchiveEntry {
             path: PathBuf::from("malware.exe"),
-            entry_type: ManifestEntryType::File,
+            kind: ManifestEntryKind::File,
             size: 100,
             compression: EntryCompression::Unknown,
             mode: Some(0o644),
             modified: None,
-            symlink_target: None,
-            hardlink_target: None,
         };
 
         let issues = check_heuristics(&entry);
@@ -351,13 +348,11 @@ mod tests {
 
         let entry = crate::inspection::manifest::ArchiveEntry {
             path: PathBuf::from(OsStr::from_bytes(b"weird-\xFF\xFE-name.txt")),
-            entry_type: ManifestEntryType::File,
+            kind: ManifestEntryKind::File,
             size: 100,
             compression: EntryCompression::Unknown,
             mode: Some(0o644),
             modified: None,
-            symlink_target: None,
-            hardlink_target: None,
         };
 
         let issues = check_heuristics(&entry);
@@ -373,13 +368,11 @@ mod tests {
     fn test_check_heuristics_valid_utf8_name_no_warning() {
         let entry = crate::inspection::manifest::ArchiveEntry {
             path: PathBuf::from("safe/file.txt"),
-            entry_type: ManifestEntryType::File,
+            kind: ManifestEntryKind::File,
             size: 100,
             compression: EntryCompression::Unknown,
             mode: Some(0o644),
             modified: None,
-            symlink_target: None,
-            hardlink_target: None,
         };
 
         let issues = check_heuristics(&entry);
@@ -613,9 +606,9 @@ mod tests {
         assert!(
             report.issues().iter().any(|i| {
                 i.category == IssueCategory::SecurityPolicy
-                    && i.message.contains("hardlink target is empty")
+                    && i.message.contains("hardlink target is missing")
             }),
-            "expected a SecurityPolicy issue citing the empty target, got: {:?}",
+            "expected a SecurityPolicy issue citing the missing target, got: {:?}",
             report.issues()
         );
     }

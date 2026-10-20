@@ -37,6 +37,7 @@ use crate::formats::zip::zip_mode_is_symlink;
 use crate::inspection::manifest::ArchiveEntry;
 use crate::inspection::manifest::ArchiveManifest;
 use crate::inspection::manifest::EntryCompression;
+use crate::inspection::manifest::ManifestEntryKind;
 use crate::inspection::manifest::ManifestEntryType;
 use crate::security::quota::QuotaTracker;
 use crate::types::safe_path::has_null_bytes;
@@ -169,7 +170,7 @@ fn list_tar_entries<R: std::io::Read>(
                 SystemTime::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(t))
             });
 
-        let (symlink_target, hardlink_target) = match entry.header().entry_type() {
+        let target = match entry.header().entry_type() {
             tar::EntryType::Symlink | tar::EntryType::Link => {
                 let target = entry
                     .link_name()
@@ -187,9 +188,8 @@ fn list_tar_entries<R: std::io::Read>(
                     // `extract` rejects this via `to_entry_type`
                     // (formats/tar.rs) with the same message; mirrored here
                     // for list/extract parity, still relaxed for verify's
-                    // pre-flight pass since `verify_entry` already turns a
-                    // missing target into an empty one via
-                    // `unwrap_or_default()` and reports it gracefully.
+                    // pre-flight pass since `verify_entry` reports a
+                    // missing target as an issue.
                     None if !config.relaxed_for_verify_preflight => {
                         return Err(ArchiveError::InvalidArchive(format!(
                             "{kind} missing target"
@@ -198,24 +198,18 @@ fn list_tar_entries<R: std::io::Read>(
                     None => {}
                 }
 
-                if is_symlink {
-                    (target.clone(), None)
-                } else {
-                    (None, target.clone())
-                }
+                target
             }
-            _ => (None, None),
+            _ => None,
         };
 
         let archive_entry = ArchiveEntry {
             path,
-            entry_type,
+            kind: manifest_entry_kind(entry_type, target),
             size,
             compression: EntryCompression::Unknown,
             mode,
             modified,
-            symlink_target,
-            hardlink_target,
         };
 
         manifest.add_entry(archive_entry)?;
@@ -301,7 +295,7 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
         // target data: the borrow checker requires the mutable borrow to end.
         drop(entry);
 
-        let symlink_target = if entry_type == ManifestEntryType::Symlink {
+        let target = if entry_type == ManifestEntryType::Symlink {
             let mut sym_entry = archive.by_index(i).map_err(|e| {
                 ArchiveError::InvalidArchive(format!("failed to re-read ZIP entry {i}: {e}"))
             })?;
@@ -314,13 +308,11 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
 
         let archive_entry = ArchiveEntry {
             path,
-            entry_type,
+            kind: manifest_entry_kind(entry_type, target),
             size,
             compression,
             mode,
             modified,
-            symlink_target,
-            hardlink_target: None,
         };
 
         manifest.add_entry(archive_entry)?;
@@ -433,13 +425,11 @@ fn list_sevenz_archive(
 
         let archive_entry = ArchiveEntry {
             path,
-            entry_type,
+            kind: manifest_entry_kind(entry_type, None),
             size,
             compression,
             mode: None,
             modified,
-            symlink_target: None,
-            hardlink_target: None,
         };
 
         manifest.add_entry(archive_entry)?;
@@ -455,6 +445,18 @@ fn list_sevenz(
 ) -> Result<ArchiveManifest> {
     let mut file = File::open(archive_path)?;
     list_sevenz_reader(&mut file, config)
+}
+
+fn manifest_entry_kind(
+    entry_type: ManifestEntryType,
+    target: Option<PathBuf>,
+) -> ManifestEntryKind {
+    match entry_type {
+        ManifestEntryType::File => ManifestEntryKind::File,
+        ManifestEntryType::Directory => ManifestEntryKind::Directory,
+        ManifestEntryType::Symlink => ManifestEntryKind::Symlink { target },
+        ManifestEntryType::Hardlink => ManifestEntryKind::Hardlink { target },
+    }
 }
 
 // Windows FILE_ATTRIBUTE_REPARSE_POINT flag — indicates symlinks and junctions.
@@ -743,7 +745,10 @@ mod tests {
         assert_eq!(manifest.total_entries(), 1);
         assert_eq!(manifest.format(), ArchiveType::TarGz);
         assert_eq!(manifest.entries()[0].path, PathBuf::from("file.txt"));
-        assert_eq!(manifest.entries()[0].entry_type, ManifestEntryType::File);
+        assert_eq!(
+            manifest.entries()[0].kind.entry_type(),
+            ManifestEntryType::File
+        );
     }
 
     #[test]
@@ -764,7 +769,10 @@ mod tests {
         assert_eq!(manifest.total_entries(), 1);
         assert_eq!(manifest.format(), ArchiveType::Zip);
         assert_eq!(manifest.entries()[0].path, PathBuf::from("test.txt"));
-        assert_eq!(manifest.entries()[0].entry_type, ManifestEntryType::File);
+        assert_eq!(
+            manifest.entries()[0].kind.entry_type(),
+            ManifestEntryType::File
+        );
     }
 
     #[test]
@@ -821,10 +829,13 @@ mod tests {
         let manifest = list_archive(temp_file.path(), &config).unwrap();
 
         assert_eq!(manifest.total_entries(), 1);
-        assert_eq!(manifest.entries()[0].entry_type, ManifestEntryType::Symlink);
         assert_eq!(
-            manifest.entries()[0].symlink_target,
-            Some(PathBuf::from("target.txt"))
+            manifest.entries()[0].kind.entry_type(),
+            ManifestEntryType::Symlink
+        );
+        assert_eq!(
+            manifest.entries()[0].kind.symlink_target(),
+            Some(Path::new("target.txt"))
         );
     }
 
@@ -840,14 +851,17 @@ mod tests {
         let manifest = list_zip_reader(&mut archive, &config).unwrap();
 
         assert_eq!(manifest.total_entries(), 1);
-        assert_eq!(manifest.entries()[0].entry_type, ManifestEntryType::Symlink);
         assert_eq!(
-            manifest.entries()[0].symlink_target,
-            Some(PathBuf::from("target.txt")),
+            manifest.entries()[0].kind.entry_type(),
+            ManifestEntryType::Symlink
+        );
+        assert_eq!(
+            manifest.entries()[0].kind.symlink_target(),
+            Some(Path::new("target.txt")),
             "symlink_target must be the actual link target, not the entry path"
         );
         assert_eq!(
-            manifest.entries()[0].hardlink_target,
+            manifest.entries()[0].kind.hardlink_target(),
             None,
             "ZIP has no hardlink concept — hardlink_target must always be None"
         );
@@ -875,12 +889,12 @@ mod tests {
 
         assert_eq!(manifest.total_entries(), 1);
         assert_eq!(
-            manifest.entries()[0].entry_type,
+            manifest.entries()[0].kind.entry_type(),
             ManifestEntryType::Hardlink
         );
         assert_eq!(
-            manifest.entries()[0].hardlink_target,
-            Some(PathBuf::from("original.txt"))
+            manifest.entries()[0].kind.hardlink_target(),
+            Some(Path::new("original.txt"))
         );
     }
 
@@ -1532,7 +1546,7 @@ mod tests {
         let has_dir = manifest
             .entries()
             .iter()
-            .any(|e| e.entry_type == ManifestEntryType::Directory);
+            .any(|e| e.kind.entry_type() == ManifestEntryType::Directory);
         assert!(has_dir, "nested-dirs.7z should contain directory entries");
     }
 
@@ -1717,7 +1731,7 @@ mod tests {
         );
         for entry in manifest.entries() {
             assert_ne!(
-                entry.entry_type,
+                entry.kind.entry_type(),
                 ManifestEntryType::Hardlink,
                 "7z format never produces Hardlink entries (no API support)"
             );
@@ -1847,7 +1861,7 @@ mod tests {
         // limitation).
         for entry in manifest.entries() {
             assert_ne!(
-                entry.entry_type,
+                entry.kind.entry_type(),
                 ManifestEntryType::Symlink,
                 "Unix symlinks in 7z are undetectable and reported as File: {}",
                 entry.path.display()
@@ -2267,7 +2281,7 @@ mod tests {
             .expect("relaxed_for_verify_preflight must let a missing symlink target through");
 
         assert_eq!(manifest.total_entries(), 1);
-        assert_eq!(manifest.entries()[0].symlink_target, None);
+        assert_eq!(manifest.entries()[0].kind.symlink_target(), None);
     }
 
     #[test]
@@ -2285,9 +2299,9 @@ mod tests {
         assert_eq!(manifest.total_entries(), 1);
         assert!(
             manifest.entries()[0]
-                .symlink_target
-                .as_ref()
-                .is_some_and(|t| has_null_bytes(t)),
+                .kind
+                .symlink_target()
+                .is_some_and(has_null_bytes),
             "the raw NUL-byte target must reach the manifest unmodified"
         );
     }

@@ -377,7 +377,7 @@ pub struct ArchiveEntry {
     pub entry_type: ManifestEntryType,
     /// Uncompressed size in bytes (0 for directories).
     pub size: i64,
-    /// Compressed size in bytes (if available, ZIP only).
+    /// Compressed size in bytes (if the format reports one).
     pub compressed_size: Option<i64>,
     /// File permissions (Unix mode).
     pub mode: Option<u32>,
@@ -394,7 +394,7 @@ impl From<exarch_core::inspection::ArchiveEntry> for ArchiveEntry {
     fn from(entry: exarch_core::inspection::ArchiveEntry) -> Self {
         Self {
             path: entry.path.to_string_lossy().into_owned(),
-            entry_type: entry.entry_type.into(),
+            entry_type: entry.kind.entry_type().into(),
             size: saturating_i64(entry.size),
             compressed_size: entry.compressed_size().map(saturating_i64),
             mode: entry.mode,
@@ -404,10 +404,12 @@ impl From<exarch_core::inspection::ArchiveEntry> for ArchiveEntry {
                     .map(|d| d.as_millis().min(i64::MAX as u128) as i64)
             }),
             symlink_target: entry
-                .symlink_target
+                .kind
+                .symlink_target()
                 .map(|p| p.to_string_lossy().into_owned()),
             hardlink_target: entry
-                .hardlink_target
+                .kind
+                .hardlink_target()
                 .map(|p| p.to_string_lossy().into_owned()),
         }
     }
@@ -657,7 +659,7 @@ mod tests {
     fn sized_entry(name: &str, size: u64) -> exarch_core::inspection::ArchiveEntry {
         exarch_core::inspection::ArchiveEntry::new(
             std::path::PathBuf::from(name),
-            exarch_core::inspection::ManifestEntryType::File,
+            exarch_core::inspection::ManifestEntryKind::File,
             size,
         )
     }
@@ -670,7 +672,7 @@ mod tests {
 
         let mut core_entry = exarch_core::inspection::ArchiveEntry::new(
             PathBuf::from("test/file.txt"),
-            exarch_core::inspection::ManifestEntryType::File,
+            exarch_core::inspection::ManifestEntryKind::File,
             1024,
         );
         core_entry.compression = exarch_core::EntryCompression::Entry(512);

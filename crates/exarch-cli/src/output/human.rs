@@ -302,19 +302,14 @@ impl<O: Write, E: Write> OutputFormatter for HumanFormatter<O, E> {
                 .mode
                 .map_or_else(|| "-".to_string(), |m| format!("{m:o}"));
 
-            let type_char = match entry.entry_type {
+            let type_char = match entry.kind.entry_type() {
                 exarch_core::ManifestEntryType::File => "-",
                 exarch_core::ManifestEntryType::Directory => "d",
                 exarch_core::ManifestEntryType::Symlink => "l",
                 exarch_core::ManifestEntryType::Hardlink => "h",
             };
 
-            let link_target = match entry.entry_type {
-                exarch_core::ManifestEntryType::Symlink => entry.symlink_target.as_ref(),
-                exarch_core::ManifestEntryType::Hardlink => entry.hardlink_target.as_ref(),
-                _ => None,
-            };
-            if let Some(target) = link_target {
+            if let Some(target) = entry.kind.link_target() {
                 emit_line(
                     &mut self.out,
                     format_args!(
@@ -691,22 +686,23 @@ mod tests {
 
     fn sample_manifest() -> ArchiveManifest {
         use exarch_core::ArchiveEntry;
-        use exarch_core::ManifestEntryType;
+        use exarch_core::ManifestEntryKind;
         use exarch_core::formats::detect::ArchiveType;
 
         let mut file = ArchiveEntry::new(
             std::path::PathBuf::from("file.txt"),
-            ManifestEntryType::File,
+            ManifestEntryKind::File,
             1024,
         );
         file.mode = Some(0o644);
         let mut link = ArchiveEntry::new(
             std::path::PathBuf::from("link.txt"),
-            ManifestEntryType::Symlink,
+            ManifestEntryKind::Symlink {
+                target: Some(std::path::PathBuf::from("file.txt")),
+            },
             512,
         );
         link.mode = Some(0o777);
-        link.symlink_target = Some(std::path::PathBuf::from("file.txt"));
 
         let mut manifest = ArchiveManifest::new(ArchiveType::TarGz);
         manifest.add_entry(file).unwrap();
@@ -761,16 +757,17 @@ mod tests {
     #[test]
     fn format_manifest_long_shows_hardlink_target() {
         use exarch_core::ArchiveEntry;
-        use exarch_core::ManifestEntryType;
+        use exarch_core::ManifestEntryKind;
         use exarch_core::formats::detect::ArchiveType;
 
         let mut hard = ArchiveEntry::new(
             std::path::PathBuf::from("hard.txt"),
-            ManifestEntryType::Hardlink,
+            ManifestEntryKind::Hardlink {
+                target: Some(std::path::PathBuf::from("original.txt")),
+            },
             256,
         );
         hard.mode = Some(0o644);
-        hard.hardlink_target = Some(std::path::PathBuf::from("original.txt"));
         let mut manifest = ArchiveManifest::new(ArchiveType::TarGz);
         manifest.add_entry(hard).unwrap();
 
@@ -789,13 +786,13 @@ mod tests {
 
     fn sample_verification_report() -> VerificationReport {
         use exarch_core::ArchiveEntry;
-        use exarch_core::ManifestEntryType;
+        use exarch_core::ManifestEntryKind;
         use exarch_core::formats::detect::ArchiveType;
 
         let mut manifest = ArchiveManifest::new(ArchiveType::TarGz);
         for i in 0..5 {
             let path = std::path::PathBuf::from(format!("f{i}.txt"));
-            let entry = ArchiveEntry::new(path, ManifestEntryType::File, 0);
+            let entry = ArchiveEntry::new(path, ManifestEntryKind::File, 0);
             manifest.add_entry(entry).unwrap();
         }
         VerificationReport::from_entry_issues(&manifest, |_| Vec::new())

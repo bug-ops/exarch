@@ -14,7 +14,7 @@ use anyhow::Context;
 use anyhow::Result;
 use exarch_core::ExtractionOptions;
 use exarch_core::ExtractionReport;
-use exarch_core::ManifestEntryType;
+use exarch_core::ManifestEntryKind;
 use exarch_core::NoopProgress;
 use exarch_core::ProgressCallback;
 use exarch_core::SecurityConfig;
@@ -774,7 +774,7 @@ pub fn execute(
         let conflicts: Vec<_> = manifest
             .entries()
             .iter()
-            .filter(|e| e.entry_type == ManifestEntryType::File)
+            .filter(|e| e.kind == ManifestEntryKind::File)
             .map(|e| {
                 let relative = if args.allow_absolute_paths && e.path.is_absolute() {
                     e.path.strip_prefix("/").unwrap_or(&e.path)
@@ -797,7 +797,7 @@ pub fn execute(
         manifest
             .entries()
             .iter()
-            .filter(|e| e.entry_type == ManifestEntryType::File)
+            .filter(|e| e.kind == ManifestEntryKind::File)
             .filter(|e| {
                 let ext = e.path.extension().and_then(|s| s.to_str());
                 config.is_path_extension_allowed(ext)

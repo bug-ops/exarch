@@ -14,4 +14,5 @@ mod tar_budget_parity;
 mod tar_ghsa_2026;
 mod tar_ghsa_83g3_two_hop_symlink;
 mod tar_metadata_bomb;
+mod verify_link_parity;
 mod zip_ghsa_5j8q;

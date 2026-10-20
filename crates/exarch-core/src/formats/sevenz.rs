@@ -1245,7 +1245,7 @@ impl SevenZEntryAdapter {
         // SECURITY: Check Windows attributes for reparse points FIRST
         // This applies to BOTH files AND directories (e.g., directory
         // junctions)
-        if Self::is_windows_reparse_point(entry) {
+        if is_windows_reparse_point(entry) {
             return Err(ArchiveError::SecurityViolation {
                 reason: format!(
                     "symlink detected in 7z archive: {} \
@@ -1265,20 +1265,21 @@ impl SevenZEntryAdapter {
         // extracted as files
         Ok(EntryType::File)
     }
+}
 
-    /// Checks if Windows attributes indicate a reparse point
-    /// (symlink/junction).
-    ///
-    /// **Limitation:** Only detects symlinks created on Windows.
-    /// Unix symlinks in 7z archives may not have Windows attributes.
-    ///
-    /// Reference: <https://learn.microsoft.com/en-us/windows/win32/fileio/file-attribute-constants>
-    fn is_windows_reparse_point(entry: &sevenz_rust2::ArchiveEntry) -> bool {
-        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+/// Checks if Windows attributes indicate a reparse point (symlink/junction).
+///
+/// Shared by extraction and listing so both classify the same entries as
+/// links; checked before the directory flag because junctions are directories.
+///
+/// **Limitation:** Only detects symlinks created on Windows.
+/// Unix symlinks in 7z archives may not have Windows attributes.
+///
+/// Reference: <https://learn.microsoft.com/en-us/windows/win32/fileio/file-attribute-constants>
+pub(crate) fn is_windows_reparse_point(entry: &sevenz_rust2::ArchiveEntry) -> bool {
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
 
-        entry.has_windows_attributes
-            && (entry.windows_attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0
-    }
+    entry.has_windows_attributes && (entry.windows_attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0
 }
 
 /// Checks whether a sevenz-rust2 parse failure is due to a valid empty 7z
@@ -2137,7 +2138,7 @@ mod tests {
         entry.windows_attributes = 0x0400; // FILE_ATTRIBUTE_REPARSE_POINT
 
         assert!(
-            SevenZEntryAdapter::is_windows_reparse_point(&entry),
+            is_windows_reparse_point(&entry),
             "reparse point attribute should be detected"
         );
 
@@ -2159,7 +2160,7 @@ mod tests {
         entry.windows_attributes = 0x0080; // FILE_ATTRIBUTE_NORMAL
 
         assert!(
-            !SevenZEntryAdapter::is_windows_reparse_point(&entry),
+            !is_windows_reparse_point(&entry),
             "normal file should not be detected as reparse point"
         );
 
@@ -2176,7 +2177,7 @@ mod tests {
         entry.windows_attributes = 0; // Should be ignored
 
         assert!(
-            !SevenZEntryAdapter::is_windows_reparse_point(&entry),
+            !is_windows_reparse_point(&entry),
             "entry without Windows attributes should not be detected as reparse point"
         );
 
@@ -2193,7 +2194,7 @@ mod tests {
         entry.windows_attributes = 0x0400 | 0x0020; // REPARSE_POINT | ARCHIVE
 
         assert!(
-            SevenZEntryAdapter::is_windows_reparse_point(&entry),
+            is_windows_reparse_point(&entry),
             "reparse point should be detected even with other attributes"
         );
 

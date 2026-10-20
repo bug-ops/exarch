@@ -167,6 +167,7 @@ THEN stdout contains valid JSON with all report fields; stderr contains no progr
 | FR-085 | WHEN `extract --atomic --force`'s best-effort cleanup on failure cannot locate its temp/backup directory at the expected logical path (e.g. because an intermediate path component was redirected mid-extraction), THE CLI SHALL disclose the directory's actual current path (resolved via an open file descriptor, not the possibly-stale logical path) in its error output rather than leaving surviving content undisclosed (v0.6.0, #530) | should |
 | FR-086 | `verify`/`list` SHALL flag a TAR entry whose path is not valid UTF-8 as a `Medium`-severity `SuspiciousPath` `VerificationIssue` (portability risk, not a security issue — `security_status` is unaffected), flipping `status` to `Warning` instead of reporting `Pass` for an entry that may fail to extract on filesystems requiring UTF-8 names (v0.6.0, #528) | should |
 | FR-087 | `--verbose` and `--quiet` SHALL be resolved once into a single `output::Verbosity` (`Quiet` \| `Normal` \| `Verbose`) via `impl From<&cli::Cli> for Verbosity`, and threaded through `output::create_formatter`, `HumanFormatter::new`/`with_writers`, `commands::extract::execute`, and `commands::create::execute`, rather than each site independently interpreting the two raw booleans; `Verbosity::from_flags` SHALL resolve `verbose: true, quiet: true` to `Quiet` in every case, including when the two flags are parsed at different `clap` `ArgMatches` levels (e.g. a global `--verbose` combined with a subcommand-level `--quiet`), which `clap`'s `conflicts_with` on `--quiet` does not reject (unreleased, post-v0.6.0, #550, behavior change — see Edge Cases) | must |
+| FR-088 | `extract` and `verify` SHALL share one `cli::LinkPolicyArgs` (`--allow-symlinks`, `--allow-hardlinks`), flattened into both argument structs and applied to `SecurityConfig` by `LinkPolicyArgs::apply`, so a link policy that makes `extract` succeed makes `verify` accept the same links; escaping links SHALL still fail under both flags (unreleased, #643) | must |
 
 ## 4. Non-Functional Requirements
 
@@ -187,7 +188,8 @@ THEN stdout contains valid JSON with all report fields; stderr contains no progr
 | `ExtractArgs` | Arguments for `extract` subcommand | `archive`, `output_dir`, security overrides, `--force`, `--atomic`, `--max-path-depth`, `--banned-component`, `--allow-absolute-paths` |
 | `CreateArgs` | Arguments for `create` subcommand | `output`, `sources`, creation options, `--max-file-size`, `--preserve-permissions` |
 | `ListArgs` | Arguments for `list` subcommand | `archive`, display options |
-| `VerifyArgs` | Arguments for `verify` subcommand | `archive`, inspection options |
+| `VerifyArgs` | Arguments for `verify` subcommand | `archive`, inspection options, `links: LinkPolicyArgs` |
+| `LinkPolicyArgs` | Link policy flags shared by `extract` and `verify` (#643) | `allow_symlinks`, `allow_hardlinks`, `apply(SecurityConfig)` |
 | `OutputFormatter` | Trait for human vs JSON output; methods take `&mut self` since v0.6.0 (#452) | Methods: `format_extraction_result`, `format_creation_result`, `format_manifest_short`, `format_manifest_long`, `format_verification_report` |
 | `HumanFormatter<O: Write = Term, E: Write = Term>` | Human-readable formatter; writes non-error output to `O`, errors to `E` (v0.6.0) | `HumanFormatter::new()` (stdout/stderr default), `HumanFormatter::with_writers()` (injects custom writers + `use_colors` for deterministic tests) |
 | `JsonFormatter<W: Write = Stdout>` | JSON formatter (v0.6.0) | `JsonFormatter::stdout()` (replaces the old unit-struct constructor), `JsonFormatter::with_writer()` |
@@ -218,7 +220,7 @@ exarch list <ARCHIVE>
 
 exarch verify <ARCHIVE>
     [--max-files N] [--max-total-size SIZE] [--allow-solid-archives]
-    [--strict]
+    [--allow-symlinks] [--allow-hardlinks] [--strict]
 
 exarch completion <SHELL>    # bash | zsh | fish | powershell | elvish  (output to stdout)
 ```

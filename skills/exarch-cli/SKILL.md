@@ -100,7 +100,7 @@ Key flags (all optional):
 | `--max-files` | 10000 | Max number of entries to extract. |
 | `--max-total-size` | 500 MB | Max cumulative extracted size. Accepts `K`/`M`/`G`/`T` suffixes, e.g. `2G`. |
 | `--max-file-size` | 50 MB | Max size of any single extracted file. Same suffix syntax. |
-| `--max-compression-ratio` | 100 | Max uncompressed/compressed ratio before an entry is treated as a zip bomb. Applies to ZIP and non-solid 7z; it does **not** apply to solid 7z blocks. With `--allow-solid-archives`, each solid block is checked as a whole against a fixed 1000x limit (`max_solid_compression_ratio`, Rust API only, not configurable from the CLI). |
+| `--max-compression-ratio` | 100 | Max uncompressed/compressed ratio before an entry is treated as a zip bomb. Applies to ZIP and non-solid 7z; it does **not** apply to solid 7z blocks. With `--allow-solid-archives`, each solid block is checked as a whole against a fixed 1000x limit (`max_solid_compression_ratio`, Rust API only, not configurable from the CLI). An entry that declares data but zero compressed bytes is always a zip bomb with ratio `unbounded` and no ratio limit admits it; its `HINT` says the size metadata is inconsistent rather than suggesting this flag. |
 | `--max-path-depth` | 32 | Max path component depth allowed per entry. |
 | `--allowed-extensions <EXT>` | all allowed | Restrict extraction to matching extensions. Repeatable or comma-separated (`txt,pdf`); leading dot optional, case-insensitive. |
 | `--allow-symlinks` | off | Allow symlinks that resolve within the extraction directory. |
@@ -177,9 +177,10 @@ exarch verify archive.tar.gz --json
 | Flag | Default | Purpose |
 |---|---|---|
 | `--strict` | off | Treat any warning-level finding as an error and exit with status `2` instead of `0`. |
+| `--allow-symlinks` / `--allow-hardlinks` | off | Same flags and semantics as `extract`: links that resolve within the extraction directory are accepted, escaping links still fail. `verify` accepts only these two policy flags (plus `--max-files`, `--max-total-size`, `--max-file-size`, `--allow-solid-archives` and `--strict`); it has no `--max-compression-ratio`, `--max-path-depth`, `--banned-component`, `--allow-absolute-paths` or `--allow-world-writable`, so pass the link flags you intend to extract with, and expect extraction-only options to be evaluated by `extract` alone. |
 | `--max-files` / `--max-total-size` / `--max-file-size` / `--allow-solid-archives` | same as `list` (10000 / 500 MB / 50 MB / off) | Same hard-limit semantics as `list` for file count and total size — verification fails with `QuotaExceeded` past those two caps, it does not skip entries. |
 
-`verify` always runs the full security validation pipeline (path traversal, symlink/hardlink, permissions) without extracting; there are no flags to enable it. It does not validate payload checksums: `integrity_status` is always `SKIPPED` (`Integrity: SKIPPED` in text mode), so a passing `verify` says nothing about data corruption.
+`verify` always runs the full security validation pipeline (path traversal, symlink/hardlink, permissions) without extracting; there are no flags to enable it, only the link policy and limit flags above. It does not validate payload checksums: `integrity_status` is always `SKIPPED` (`Integrity: SKIPPED` in text mode), so a passing `verify` says nothing about data corruption.
 
 Run `verify` before `extract` on any archive from an untrusted source to inspect issues without
 writing anything to disk. Archives over 500 MB need `--max-total-size` raised explicitly or
@@ -210,10 +211,28 @@ banned components. These are security findings: `security_status` is `FAILED` (`
 FAILED` in text mode), not `OK`. Verified live with the debug binary on a TAR containing a
 symlink and on one containing a hardlink: each gives `status: FAIL`, `Security: FAILED`, one
 `HIGH` `"Security Policy"` issue, exit code `1`.
-Consequently `exarch verify` exits `1` with `Security: FAILED` for **any** TAR containing a hardlink or
-symlink: `verify` always applies the default policy (links not allowed) and has no
-`--allow-hardlinks` / `--allow-symlinks` flags, so such an archive cannot be verified as passing
-even if you intend to extract it with those flags.
+Consequently `exarch verify` exits `1` with `Security: FAILED` for any TAR containing a hardlink or
+symlink unless `--allow-symlinks` / `--allow-hardlinks` is passed, mirroring `extract`. Verified live
+on a TAR with one internal symlink and one internal hardlink: no flags gives two `HIGH` findings and
+exit `1`; `--allow-symlinks` alone leaves only the hardlink finding; both flags give `PASS` and exit
+`0`. A link that escapes the destination still fails with either flag.
+
+**Limitations.**
+
+- `verify` models only the archive's own entries. It cannot see files, directories or links already present in the extraction destination, so a `PASS` does not guarantee that extraction into a non-empty destination succeeds.
+- Symlink chains are resolved with a hop limit in `verify`'s model while the host applies its own limit on extraction; the two differ, so a `PASS` does not guarantee that a deep chain extracts (on macOS, extraction can fail on long chains that `verify` accepts).
+- A hardlink whose target does not exist in the archive fails with `Invalid archive: hardlink target does not exist: <target>`, matching `extract`.
+- `verify` reports as `HIGH` issues (exit `1`) the entry shapes the host rejects: an entry beneath a regular file (`I/O error: not a directory`), a directory over an existing file (`I/O error: entity already exists`), a parent chain that loops or leaves the destination, a hardlink whose target is a directory (`hardlink target is a directory: <target>`), and an entry, symlink target or hardlink target with a name component over 255 bytes or a path over 4096 bytes (`I/O error: file name too long`).
+- `verify` has no overwrite option and models first-entry-wins extraction. Without `--force`, `extract` skips a later entry at an already-written path (verified live: entries `f`=`one` then `f`=`two` leave `one`, with a `skipped 1 entry as pre-existing duplicates` warning); with `--force` a later entry overwrites it (the same archive leaves `two`). `verify` cannot model the `--force` outcome and is conservative where a symlink replaces an earlier file at the same path.
+- Names that the host treats as equal under Unicode normalisation (for example NFC versus NFD) or special case folding are not modelled on case-insensitive hosts.
+- Windows component checks (reserved device names, alternate data streams, trailing dot or space) run only when `verify` itself runs on a Windows host, so results are not host-independent.
+
+`verify`, `list` and `extract` reject a ZIP entry whose compression method is not Stored, Deflate,
+Bzip2 or Zstd (including `deflate64`) with `operation denied by security policy: unsupported
+compression method: <name>` and exit `1`, before anything is written. Verified live with a ZIP
+relabelled as `deflate64`: all three commands exit `1`, and `extract` does not create the output
+directory. A 7z directory carrying the Windows reparse-point attribute is listed as a symlink, fails
+`verify` regardless of `--allow-symlinks`, and is rejected by `extract`.
 
 ### `completion <SHELL>`
 
@@ -397,8 +416,10 @@ as is. An empty entry name is `InvalidArchive`, and a NUL byte in an entry name 
 `SecurityViolation`. On Windows only, entries
 whose path has a reserved device-name component (`CON`, `NUL`, `COM1`, ... ASCII
 case-insensitive, with or without an extension, e.g. `NUL.tar.gz`) or a component containing
-`:` (NTFS alternate data streams) are rejected with `SecurityViolation`; there is no CLI flag to
-disable this (the opt-out exists only in the Rust API). On other platforms these names are
+`:` (NTFS alternate data streams) or ending in a dot or space are rejected with
+`SecurityViolation`; the same component checks apply to symlink and hardlink targets. A trailing
+dot or space and `:` are never allowed; only the reserved-device-name check has an opt-out, and it
+exists only in the Rust API (there is no CLI flag). On other platforms these names are
 accepted. A `.tar.xz` whose LZMA2 dictionary needs more than the decoder-memory limit (default
 256 MiB; `SecurityConfig::max_decoder_memory` in the Rust API, 1 GiB under `permissive()`) is
 rejected by `extract`, `list` and `verify` with `QuotaExceeded` (`quota exceeded: decoder memory

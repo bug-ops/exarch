@@ -8,9 +8,20 @@ use crate::ArchiveError;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::config::Validated;
+use crate::security::fs_view::FsView;
+use crate::security::fs_view::HostFs;
 use crate::types::DestDir;
 use crate::types::SafePath;
-use crate::types::safe_symlink::resolve_through_symlinks;
+use crate::types::safe_path::check_windows_component;
+use crate::types::safe_symlink::resolve_through_symlinks_in;
+
+/// Error for a hardlink whose target is absent when the link is created.
+pub fn hardlink_target_missing(target: &Path) -> ArchiveError {
+    ArchiveError::InvalidArchive(format!(
+        "hardlink target does not exist: {}",
+        target.display()
+    ))
+}
 
 /// Tracks hardlink targets during extraction.
 ///
@@ -109,16 +120,28 @@ impl HardlinkTracker {
     /// # Ok(())
     /// # }
     /// ```
-    #[expect(
-        clippy::items_after_statements,
-        reason = "the import is placed next to its only use"
-    )]
     pub fn validate_hardlink(
         &mut self,
         link_path: &SafePath,
         target: &Path,
         dest: &DestDir,
         config: &SecurityConfig<Validated>,
+    ) -> Result<()> {
+        self.validate_hardlink_in(link_path, target, dest, config, &HostFs)
+    }
+
+    /// Validates against `view` instead of the real filesystem.
+    #[expect(
+        clippy::items_after_statements,
+        reason = "the import is placed next to its only use"
+    )]
+    pub(crate) fn validate_hardlink_in<V: FsView>(
+        &mut self,
+        link_path: &SafePath,
+        target: &Path,
+        dest: &DestDir,
+        config: &SecurityConfig<Validated>,
+        view: &V,
     ) -> Result<()> {
         // Check if hardlinks are allowed
         if !config.allowed.hardlinks {
@@ -159,6 +182,14 @@ impl HardlinkTracker {
             }
         }
 
+        if cfg!(windows) {
+            for component in target.components() {
+                if let Component::Normal(comp) = component {
+                    check_windows_component(comp, config)?;
+                }
+            }
+        }
+
         // Also reject absolute targets (redundant with above, but keeps
         // existing check)
         if target.is_absolute() {
@@ -175,11 +206,16 @@ impl HardlinkTracker {
         // extraction root via on-disk resolution even though string
         // normalization would pass (two-hop chain bypass,
         // GHSA-83g3-92jg-28cx variant — #116).
-        let resolved =
-            resolve_through_symlinks(dest.as_path(), target, dest.as_path(), link_path.as_path())
-                .map_err(|_| ArchiveError::HardlinkEscape {
-                path: link_path.as_path().to_path_buf(),
-            })?;
+        let resolved = resolve_through_symlinks_in(
+            dest.as_path(),
+            target,
+            dest.as_path(),
+            link_path.as_path(),
+            view,
+        )
+        .map_err(|_| ArchiveError::HardlinkEscape {
+            path: link_path.as_path().to_path_buf(),
+        })?;
 
         // Track this hardlink target (H-PERF-6: use entry API)
         self.seen_targets
@@ -445,5 +481,24 @@ mod tests {
             Err(ArchiveError::HardlinkEscape { .. }),
             "hardlink through two-hop symlink chain must be rejected"
         );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_hardlink_rejects_windows_hazards_in_target() {
+        let (_temp, dest) = create_test_dest();
+        let mut config = SecurityConfig::default();
+        config.allowed.hardlinks = true;
+        let config = config.validate().expect("valid config");
+        let link = SafePath::validate(&PathBuf::from("link"), &dest, &config).unwrap();
+
+        for target in ["dir/foo.", "dir/foo ", "dir/a:b", "sub/NUL"] {
+            let mut tracker = HardlinkTracker::new();
+            assert_matches!(
+                tracker.validate_hardlink(&link, &PathBuf::from(target), &dest, &config),
+                Err(ArchiveError::SecurityViolation { .. }),
+                "{target}"
+            );
+        }
     }
 }

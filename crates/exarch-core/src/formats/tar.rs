@@ -123,6 +123,7 @@ use crate::Result;
 use crate::SecurityConfig;
 use crate::config::Validated;
 use crate::copy::CopyBuffer;
+use crate::security::hardlink::hardlink_target_missing;
 use crate::security::permissions::SanitizedMode;
 use crate::security::quota::QuotaPermit;
 use crate::security::validator::EntryValidator;
@@ -378,10 +379,7 @@ impl<R: Read> TarArchive<R> {
         let target_path = ctx.dest.join(&info.target_path);
 
         if !target_path.exists() {
-            return Err(ArchiveError::InvalidArchive(format!(
-                "hardlink target does not exist: {}",
-                info.target_path.as_path().display()
-            )));
+            return Err(hardlink_target_missing(info.target_path.as_path()));
         }
 
         // Create parent directories using cache

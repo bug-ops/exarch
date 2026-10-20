@@ -382,8 +382,9 @@ impl<R: Read + Seek> ZipArchive<R> {
         Ok(Self { inner })
     }
 
-    /// Rejects encrypted entries and declared compressed sizes that do not fit
-    /// in the archive, before any caller can write a byte.
+    /// Rejects encrypted entries, unsupported compression methods and declared
+    /// compressed sizes that do not fit in the archive, before any caller can
+    /// write a byte (see [`admit_zip_entry`]).
     ///
     /// Opens every entry via metadata-only reads (no decompression), so a
     /// corrupt local header also fails here. Shared by extraction and listing
@@ -392,8 +393,9 @@ impl<R: Read + Seek> ZipArchive<R> {
         let mut budget = DeclaredCompressedBudget::new(archive.central_directory_start());
         for index in 0..archive.len() {
             match archive.by_index(index) {
-                Ok(file) if file.encrypted() => return Err(common::encrypted_archive_error()),
-                Ok(file) => budget.charge(file.compressed_size())?,
+                Ok(file) => {
+                    admit_zip_entry(&file, &mut budget)?;
+                }
                 Err(e) if is_password_required(&e) => {
                     return Err(common::encrypted_archive_error());
                 }
@@ -446,16 +448,6 @@ impl<R: Read + Seek> ZipArchive<R> {
 
         let (uncompressed_size, compressed_size) = ZipEntryAdapter::get_sizes(&zip_file);
         let mode = zip_file.unix_mode();
-
-        let compression = ZipEntryAdapter::get_compression_method(&zip_file);
-        if matches!(compression, CompressionMethod::Unsupported) {
-            return Err(ArchiveError::SecurityViolation {
-                reason: format!(
-                    "unsupported compression method: {:?}",
-                    zip_file.compression()
-                ),
-            });
-        }
 
         if zip_file.is_dir() {
             drop(zip_file);
@@ -745,17 +737,6 @@ impl ZipEntryAdapter {
         Ok(PathBuf::from(target_str))
     }
 
-    /// Gets compression method for the entry.
-    fn get_compression_method<R: Read>(zip_file: &zip::read::ZipFile<'_, R>) -> CompressionMethod {
-        match zip_file.compression() {
-            zip::CompressionMethod::Stored => CompressionMethod::Stored,
-            zip::CompressionMethod::Deflated => CompressionMethod::Deflate,
-            zip::CompressionMethod::Bzip2 => CompressionMethod::Bzip2,
-            zip::CompressionMethod::Zstd => CompressionMethod::Zstd,
-            _ => CompressionMethod::Unsupported,
-        }
-    }
-
     /// Gets uncompressed and compressed sizes.
     fn get_sizes<R: Read>(zip_file: &zip::read::ZipFile<'_, R>) -> (u64, u64) {
         (zip_file.size(), zip_file.compressed_size())
@@ -782,14 +763,53 @@ pub(crate) fn zip_mode_is_symlink(mode: Option<u32>) -> bool {
     ZipEntryAdapter::is_symlink_from_mode(mode)
 }
 
-/// Compression methods supported by ZIP.
-#[derive(Debug, Clone, Copy)]
-enum CompressionMethod {
+/// Compression methods the ZIP handlers accept.
+///
+/// Anything else (including `deflate64`, which the `zip` crate can decode but
+/// exarch does not vet) is rejected at open time by [`admit_zip_entry`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ZipMethod {
     Stored,
     Deflate,
     Bzip2,
     Zstd,
-    Unsupported,
+}
+
+impl TryFrom<zip::CompressionMethod> for ZipMethod {
+    type Error = ArchiveError;
+
+    fn try_from(method: zip::CompressionMethod) -> Result<Self> {
+        match method {
+            zip::CompressionMethod::Stored => Ok(Self::Stored),
+            zip::CompressionMethod::Deflated => Ok(Self::Deflate),
+            zip::CompressionMethod::Bzip2 => Ok(Self::Bzip2),
+            zip::CompressionMethod::Zstd => Ok(Self::Zstd),
+            other => Err(ArchiveError::SecurityViolation {
+                reason: format!("unsupported compression method: {other:?}"),
+            }),
+        }
+    }
+}
+
+/// Admission check shared by extraction and listing for every ZIP entry.
+///
+/// Rejects encrypted entries, charges the declared compressed size against
+/// `budget`, and parses the compression method, so `extract`, `list` and
+/// `verify` accept exactly the same set of entries.
+///
+/// # Errors
+///
+/// Returns the encrypted-archive error, `InvalidArchive` when the declared
+/// size exceeds the budget, or `SecurityViolation` for an unsupported method.
+pub(crate) fn admit_zip_entry<R: Read>(
+    entry: &zip::read::ZipFile<'_, R>,
+    budget: &mut DeclaredCompressedBudget,
+) -> Result<()> {
+    if entry.encrypted() {
+        return Err(common::encrypted_archive_error());
+    }
+    budget.charge(entry.compressed_size())?;
+    ZipMethod::try_from(entry.compression()).map(drop)
 }
 
 #[cfg(test)]

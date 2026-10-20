@@ -5,6 +5,8 @@ use crate::Result;
 use crate::SecurityConfig;
 use crate::config::Validated;
 use crate::security::context::ValidationContext;
+use crate::security::fs_view::FsView;
+use crate::security::fs_view::HostFs;
 use std::borrow::Cow;
 use std::ffi::OsStr;
 use std::path::Component;
@@ -125,8 +127,18 @@ impl SafePath {
         dest: &DestDir,
         config: &SecurityConfig<Validated>,
     ) -> Result<Self> {
+        Self::validate_in(path, dest, config, &HostFs)
+    }
+
+    /// Validates `path` against `view` instead of the real filesystem.
+    pub(crate) fn validate_in<V: FsView>(
+        path: &Path,
+        dest: &DestDir,
+        config: &SecurityConfig<Validated>,
+        view: &V,
+    ) -> Result<Self> {
         let ctx = ValidationContext::new(config.allowed.symlinks);
-        Self::validate_with_context(path, dest, config, &ctx)
+        Self::validate_with_context_in(path, dest, config, &ctx, view)
     }
 
     /// Validates with optimization context that can skip `canonicalize()`.
@@ -139,15 +151,25 @@ impl SafePath {
     /// All other validation steps (null bytes, absolute paths, parent
     /// traversal, depth, banned components, prefix check) are always
     /// performed regardless of context.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one cohesive sequence; splitting it would obscure the order of checks"
-    )]
     pub(crate) fn validate_with_context(
         path: &Path,
         dest: &DestDir,
         config: &SecurityConfig<Validated>,
         ctx: &ValidationContext,
+    ) -> Result<Self> {
+        Self::validate_with_context_in(path, dest, config, ctx, &HostFs)
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one cohesive sequence; splitting it would obscure the order of checks"
+    )]
+    pub(crate) fn validate_with_context_in<V: FsView>(
+        path: &Path,
+        dest: &DestDir,
+        config: &SecurityConfig<Validated>,
+        ctx: &ValidationContext,
+        view: &V,
     ) -> Result<Self> {
         // Reject empty paths explicitly
         if path.is_empty() {
@@ -264,7 +286,7 @@ impl SafePath {
         if let Some(parent) = resolved.parent()
             && !ctx.is_trusted_parent(parent)
         {
-            match parent.canonicalize() {
+            match view.canonicalize(parent) {
                 Ok(canonical_parent) => {
                     if !paths_start_with(&canonical_parent, dest.as_path()) {
                         return Err(ArchiveError::PathTraversal {
@@ -284,7 +306,7 @@ impl SafePath {
 
         // Full path canonicalization: skip when symlinks are impossible
         if ctx.needs_full_canonicalize() {
-            match resolved.canonicalize() {
+            match view.canonicalize(&resolved) {
                 Ok(canonical) => {
                     if !paths_start_with(&canonical, dest.as_path()) {
                         return Err(ArchiveError::PathTraversal {
@@ -349,20 +371,56 @@ impl SafePath {
     }
 }
 
-/// Rejects Windows-specific hazardous components (reserved device names and
-/// NTFS alternate-data-stream `:` syntax).
-fn check_windows_component(comp: &OsStr, config: &SecurityConfig<Validated>) -> Result<()> {
-    if comp.to_string_lossy().contains(':') {
-        return Err(ArchiveError::SecurityViolation {
-            reason: format!("path component contains ':': {}", comp.display()),
-        });
+/// Why a path component is hazardous on Windows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WindowsComponentHazard {
+    /// Legacy device name such as `NUL` or `COM1`; may be allowed by config.
+    ReservedDeviceName,
+    /// `:` introduces an NTFS alternate data stream; never allowed.
+    StreamSeparator,
+    /// Windows strips trailing dots and spaces, aliasing another name; never
+    /// allowed.
+    TrailingDotOrSpace,
+}
+
+/// Classifies `comp`, reporting never-allowed hazards before the
+/// configurable reserved-name one. Pure and platform-independent.
+pub(crate) fn windows_component_hazard(comp: &OsStr) -> Option<WindowsComponentHazard> {
+    let lossy = comp.to_string_lossy();
+    if lossy.contains(':') {
+        Some(WindowsComponentHazard::StreamSeparator)
+    } else if lossy.ends_with(['.', ' ']) {
+        Some(WindowsComponentHazard::TrailingDotOrSpace)
+    } else if is_windows_reserved_component(comp) {
+        Some(WindowsComponentHazard::ReservedDeviceName)
+    } else {
+        None
     }
-    if !config.allowed.windows_reserved_names && is_windows_reserved_component(comp) {
-        return Err(ArchiveError::SecurityViolation {
+}
+
+/// Rejects Windows-specific hazardous components (see
+/// [`WindowsComponentHazard`]).
+pub(crate) fn check_windows_component(
+    comp: &OsStr,
+    config: &SecurityConfig<Validated>,
+) -> Result<()> {
+    match windows_component_hazard(comp) {
+        None => Ok(()),
+        Some(WindowsComponentHazard::ReservedDeviceName)
+            if config.allowed.windows_reserved_names =>
+        {
+            Ok(())
+        }
+        Some(WindowsComponentHazard::ReservedDeviceName) => Err(ArchiveError::SecurityViolation {
             reason: format!("Windows reserved device name: {}", comp.display()),
-        });
+        }),
+        Some(WindowsComponentHazard::StreamSeparator) => Err(ArchiveError::SecurityViolation {
+            reason: format!("path component contains ':': {}", comp.display()),
+        }),
+        Some(WindowsComponentHazard::TrailingDotOrSpace) => Err(ArchiveError::SecurityViolation {
+            reason: format!("path component ends with '.' or ' ': {}", comp.display()),
+        }),
     }
-    Ok(())
 }
 
 /// Returns `true` if `comp` names a Windows legacy device.
@@ -858,6 +916,82 @@ mod tests {
             check_windows_component(OsStr::new("CON"), &config),
             Err(ArchiveError::SecurityViolation { .. })
         );
+    }
+
+    #[test]
+    fn windows_hazard_classifier_orders_never_allowed_first() {
+        use WindowsComponentHazard::*;
+        let cases: [(&str, Option<WindowsComponentHazard>); 11] = [
+            ("file.txt", None),
+            ("a:b", Some(StreamSeparator)),
+            ("foo.", Some(TrailingDotOrSpace)),
+            ("foo ", Some(TrailingDotOrSpace)),
+            ("...", Some(TrailingDotOrSpace)),
+            ("NUL", Some(ReservedDeviceName)),
+            ("NUL.tar.gz", Some(ReservedDeviceName)),
+            ("NUL.", Some(TrailingDotOrSpace)),
+            ("NUL :x", Some(StreamSeparator)),
+            (".hidden", None),
+            ("a.b", None),
+        ];
+        for (name, expected) in cases {
+            assert_eq!(
+                windows_component_hazard(OsStr::new(name)),
+                expected,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn check_windows_component_rejects_trailing_dot_even_with_reserved_opt_out() {
+        let config = SecurityConfig::default()
+            .with_allow_windows_reserved_names(true)
+            .validate()
+            .expect("valid config");
+        for name in ["foo.", "foo ", "NUL."] {
+            assert_matches!(
+                check_windows_component(OsStr::new(name), &config),
+                Err(ArchiveError::SecurityViolation { .. }),
+                "{name}"
+            );
+        }
+        assert!(check_windows_component(OsStr::new("NUL"), &config).is_ok());
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_safe_path_trailing_dot_and_space_rejected() {
+        let (_temp, dest) = create_test_dest();
+        let config = SecurityConfig::default().validate().expect("valid config");
+        for name in ["dir/foo.", "dir/foo ", "bar./x"] {
+            assert_matches!(
+                SafePath::validate(Path::new(name), &dest, &config),
+                Err(ArchiveError::SecurityViolation { .. }),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_in_rejects_parent_chain_resolving_outside_tree_root() {
+        use crate::security::fs_view::Node;
+        use crate::security::fs_view::VirtualTree;
+
+        let (_temp, dest) = create_test_dest();
+        let config = SecurityConfig::default()
+            .with_allow_symlinks(true)
+            .validate()
+            .expect("valid config");
+        let mut tree = VirtualTree::new(dest.as_path());
+        tree.insert(Path::new("up"), Node::Symlink(PathBuf::from("..")))
+            .expect("insert");
+
+        assert_matches!(
+            SafePath::validate_in(Path::new("up/f"), &dest, &config, &tree),
+            Err(ArchiveError::PathTraversal { .. })
+        );
+        assert!(SafePath::validate_in(Path::new("ok/f"), &dest, &config, &tree).is_ok());
     }
 
     #[test]

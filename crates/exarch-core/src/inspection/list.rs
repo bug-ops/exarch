@@ -22,12 +22,14 @@ use crate::formats::detect::ArchiveType;
 use crate::formats::detect::FormatFamily;
 use crate::formats::detect::detect_format;
 use crate::formats::sevenz::is_password_error;
+use crate::formats::sevenz::is_windows_reparse_point;
 use crate::formats::sevenz::sevenz_entry_compression;
 use crate::formats::tar::open_tar_stream;
 use crate::formats::tar_metadata_limit::TarReadBudget;
 use crate::formats::tar_metadata_limit::budget_violation;
 use crate::formats::tar_metadata_limit::budgeted_reader;
 use crate::formats::tar_metadata_limit::budgeted_tar_entries;
+use crate::formats::zip::admit_zip_entry;
 use crate::formats::zip::is_password_required;
 use crate::formats::zip::read_zip_symlink_target;
 use crate::formats::zip::resolve_zip_entry_path;
@@ -259,11 +261,7 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
             ArchiveError::InvalidArchive(format!("failed to read ZIP entry: {e}"))
         })?;
 
-        if entry.encrypted() {
-            return Err(encrypted_archive_error());
-        }
-
-        compressed_budget.charge(entry.compressed_size())?;
+        admit_zip_entry(&entry, &mut compressed_budget)?;
 
         // Route through the same QuotaTracker used by extraction: per-file
         // size, file count, and total size (with checked arithmetic) are all
@@ -458,20 +456,15 @@ fn manifest_entry_kind(
     }
 }
 
-// Windows FILE_ATTRIBUTE_REPARSE_POINT flag — indicates symlinks and junctions.
-const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
-
 fn sevenz_manifest_entry_type(entry: &sevenz_rust2::ArchiveEntry) -> ManifestEntryType {
+    // Reparse points are checked before the directory flag so junctions are
+    // classified like extraction does. Unix symlinks cannot be detected with
+    // this API; they are reported as files.
+    if is_windows_reparse_point(entry) {
+        return ManifestEntryType::Symlink;
+    }
     if entry.is_directory {
         return ManifestEntryType::Directory;
-    }
-    // Detect Windows reparse points (symlinks) via
-    // FILE_ATTRIBUTE_REPARSE_POINT. Unix symlinks cannot be detected with
-    // this API; they are reported as files.
-    if entry.has_windows_attributes
-        && (entry.windows_attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0
-    {
-        return ManifestEntryType::Symlink;
     }
     ManifestEntryType::File
 }

@@ -3,6 +3,7 @@
 use clap::Parser;
 use clap::Subcommand;
 use clap_complete::Shell;
+use exarch_core::SecurityConfig;
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -47,6 +48,28 @@ pub struct CompletionArgs {
     pub shell: Shell,
 }
 
+/// Link policy flags shared by `extract` and `verify`, so both commands
+/// accept and reject the same archives.
+#[derive(clap::Args, Clone, Copy)]
+pub struct LinkPolicyArgs {
+    /// Allow symlinks (within extraction directory)
+    #[arg(long)]
+    pub allow_symlinks: bool,
+
+    /// Allow hardlinks (within extraction directory)
+    #[arg(long)]
+    pub allow_hardlinks: bool,
+}
+
+impl LinkPolicyArgs {
+    /// Applies the link policy to `config`.
+    pub fn apply(self, config: SecurityConfig) -> SecurityConfig {
+        config
+            .with_allow_symlinks(self.allow_symlinks)
+            .with_allow_hardlinks(self.allow_hardlinks)
+    }
+}
+
 #[derive(clap::Args)]
 pub struct ExtractArgs {
     /// Path to the archive file
@@ -73,13 +96,8 @@ pub struct ExtractArgs {
     #[arg(long, default_value = "100", value_parser = clap::value_parser!(u32).range(1..))]
     pub max_compression_ratio: u32,
 
-    /// Allow symlinks (within extraction directory)
-    #[arg(long)]
-    pub allow_symlinks: bool,
-
-    /// Allow hardlinks (within extraction directory)
-    #[arg(long)]
-    pub allow_hardlinks: bool,
+    #[command(flatten)]
+    pub links: LinkPolicyArgs,
 
     /// Maximum path depth allowed (default: 32, minimum: 1)
     #[arg(long, default_value = "32")]
@@ -230,6 +248,9 @@ pub struct VerifyArgs {
     /// Maximum size of any single entry in bytes (supports K, M, G, T suffixes)
     #[arg(long, value_parser = parse_byte_size)]
     pub max_file_size: Option<u64>,
+
+    #[command(flatten)]
+    pub links: LinkPolicyArgs,
 
     /// Allow solid 7z archives (higher memory usage during verification)
     #[arg(long)]

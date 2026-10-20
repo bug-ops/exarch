@@ -238,6 +238,9 @@ exarch verify --json archive.tar.gz | jq '.data.status'
 | `--strict` | Exit with code 2 if the report contains warnings (e.g. setuid bits, world-writable files). Without this flag, warnings result in exit 0. |
 | `--max-files` | Maximum number of entries to scan |
 | `--max-total-size` | Maximum total archive size to scan |
+| `--max-file-size` | Maximum size of any single entry |
+| `--allow-symlinks` | Allow symlinks that resolve within the extraction directory (same as `extract`) |
+| `--allow-hardlinks` | Allow hardlinks that resolve within the extraction directory (same as `extract`) |
 | `--allow-solid-archives` | Allow solid 7z archives during verification |
 | `--json` | Output results in JSON format |
 

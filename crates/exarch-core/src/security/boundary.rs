@@ -2,7 +2,7 @@
 //!
 //! Both `exarch-python` and `exarch-node` accept archive/output paths as
 //! plain strings from their host language before any `Path`, `DestDir`, or
-//! `SecurityConfig` exists to run them through [`super::path::validate_path`].
+//! `SecurityConfig` exists to run them through `validate_path`.
 //! They also accept caller-supplied `SecurityConfig` entries — allowed
 //! extensions, banned path components — as plain strings before
 //! [`crate::config::SecurityConfig::validate`] exists to check them. This
@@ -28,7 +28,7 @@ pub const MAX_PATH_LENGTH: usize = 4096;
 /// them. It intentionally does not perform traversal, symlink, or
 /// destination-boundary checks — those require a `Path`, a `DestDir`, and a
 /// `SecurityConfig`, and are handled later by
-/// [`super::path::validate_path`].
+/// `validate_path`.
 ///
 /// # Check order
 ///

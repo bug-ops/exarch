@@ -15,19 +15,29 @@ use crate::inspection::report::IssueCategory;
 use crate::inspection::report::IssueSeverity;
 use crate::inspection::report::VerificationIssue;
 use crate::inspection::report::VerificationReport;
+use crate::security::fs_view::FsView;
+use crate::security::fs_view::Node;
+use crate::security::fs_view::VirtualTree;
+use crate::security::fs_view::check_name_lengths;
 use crate::security::hardlink::HardlinkTracker;
-use crate::security::path::validate_path;
+use crate::security::hardlink::hardlink_target_missing;
 use crate::security::permissions::sanitize_permissions;
 use crate::security::quota::QuotaTracker;
-use crate::security::symlink::validate_symlink;
 use crate::security::zipbomb::validate_entry_compression;
 use crate::types::DestDir;
+use crate::types::SafePath;
+use crate::types::SafeSymlink;
 
 /// Verifies an already-listed manifest against the security config.
 ///
 /// Used by `ArchiveFormat::verify()` to avoid re-opening the archive.
 /// Performs the same checks as `verify_archive` but starts from a manifest
 /// produced by `ArchiveFormat::list()`.
+///
+/// Entries are validated against an in-memory [`VirtualTree`] of what
+/// extraction would create, so nothing is written to disk. Hardlinks are
+/// materialized after every other entry, so their path and target are
+/// validated against the final tree.
 pub(crate) fn verify_manifest(
     manifest: &ArchiveManifest,
     config: &SecurityConfig<Validated>,
@@ -35,20 +45,39 @@ pub(crate) fn verify_manifest(
     let temp_dir = tempfile::TempDir::new()?;
     let temp_dest = DestDir::new(temp_dir.path())?;
 
+    let mut tree = VirtualTree::new(temp_dest.as_path());
     let mut quota_tracker = QuotaTracker::new();
     let mut hardlink_tracker = HardlinkTracker::new();
 
-    Ok(VerificationReport::from_entry_issues(manifest, |entry| {
-        let mut issues = verify_entry(
+    let mut lists = Vec::with_capacity(manifest.entries().len());
+    let mut deferred = Vec::new();
+    for (index, entry) in manifest.entries().iter().enumerate() {
+        let outcome = verify_entry(
             entry,
             config,
             &temp_dest,
+            &mut tree,
             &mut quota_tracker,
             &mut hardlink_tracker,
         );
+        if outcome.hardlink_pending {
+            deferred.push(index);
+        }
+        let mut issues = outcome.issues;
         issues.extend(check_heuristics(entry));
-        issues
-    }))
+        lists.push(issues);
+    }
+
+    for index in deferred {
+        let entry = &manifest.entries()[index];
+        if let Err(e) =
+            verify_deferred_hardlink(entry, config, &temp_dest, &mut tree, &mut hardlink_tracker)
+        {
+            lists[index].push(VerificationIssue::from_error(&e, Some(entry.path.clone())));
+        }
+    }
+
+    Ok(VerificationReport::from_entry_issue_lists(manifest, lists))
 }
 
 /// Verifies archive security without extracting.
@@ -77,8 +106,27 @@ pub(crate) fn verify_manifest(
 ///
 /// Other security violations are reported in `VerificationReport::issues`
 /// instead: disallowed links, link targets that escape the destination,
-/// quota and compression-ratio violations, NUL bytes, banned components and
-/// unsafe permissions.
+/// hardlinks whose target never appears, quota and compression-ratio
+/// violations, NUL bytes, banned components and unsafe permissions.
+///
+/// # Limitations
+///
+/// Verification models only the archive's own entries; it cannot account for
+/// files, directories or links already present in the extraction destination,
+/// so a PASS does not guarantee that extraction into a non-empty destination
+/// succeeds. Symlink chains are cut off after 40 hops, which may differ from
+/// the host's own limit. On macOS and Windows hosts entry names are matched
+/// after lowercasing only: names the host filesystem treats as equal under
+/// Unicode normalisation (NFC/NFD) or special case folding (final sigma) are
+/// not modelled. Windows component checks (reserved names, `:`, trailing dot
+/// or space) run only on Windows hosts.
+///
+/// Verification models extraction that skips an existing entry. With
+/// overwrite semantics extraction keeps the last entry at a path, which
+/// verification cannot model.
+///
+/// Hardlinks are materialized after every other entry, so their path and
+/// target are validated against the final tree.
 ///
 /// # Examples
 ///
@@ -120,7 +168,7 @@ pub fn verify_archive<P: AsRef<Path>>(
 /// a NUL byte in an entry path, or an empty/NUL/missing symlink or hardlink
 /// target are all meant to surface as a `VerificationIssue` from
 /// `verify_entry` (which re-checks the real `config` against every manifest
-/// entry via `validate_path`/`validate_symlink`), not abort the listing step
+/// entry via `SafePath`/`SafeSymlink` validation), not abort the listing step
 /// before any report exists. `max_file_count` and `max_total_size` are left
 /// untouched, matching prior behavior. See
 /// `SecurityConfig::relaxed_for_verify_preflight`'s field doc for exactly
@@ -140,18 +188,28 @@ pub(crate) fn listing_config_for_verify<State>(
     config.as_relaxed_for_verify_preflight()
 }
 
+struct EntryOutcome {
+    issues: Vec<VerificationIssue>,
+    /// A hardlink that passed phase-one validation and awaits phase two.
+    hardlink_pending: bool,
+}
+
 fn verify_entry(
     entry: &ArchiveEntry,
     config: &SecurityConfig<Validated>,
     dest: &DestDir,
+    tree: &mut VirtualTree,
     quota_tracker: &mut QuotaTracker,
     hardlink_tracker: &mut HardlinkTracker,
-) -> Vec<VerificationIssue> {
+) -> EntryOutcome {
     let mut issues = Vec::new();
+    let mut hardlink_pending = false;
 
     // Path validation — result cached to avoid repeated syscalls for
     // symlink/hardlink checks
-    let path_result = validate_path(&entry.path, dest, config);
+    let path_result = check_name_lengths(&entry.path)
+        .map_err(ArchiveError::Io)
+        .and_then(|()| SafePath::validate_in(&entry.path, dest, config, tree));
     if let Err(ref e) = path_result {
         issues.push(VerificationIssue::from_error(e, Some(entry.path.clone())));
     }
@@ -166,28 +224,43 @@ fn verify_entry(
         issues.push(VerificationIssue::from_error(&e, Some(entry.path.clone())));
     }
 
-    if let Ok(ref safe_link_path) = path_result {
+    if let Ok(ref safe_path) = path_result {
         let link_result = match &entry.kind {
             ManifestEntryKind::Symlink { target } => Some(
                 target
                     .as_deref()
                     .ok_or_else(|| missing_link_target(ManifestEntryType::Symlink))
-                    .and_then(|t| validate_symlink(safe_link_path, t, dest, config).map(drop)),
+                    .and_then(|t| {
+                        check_target_lengths(t)?;
+                        SafeSymlink::validate_in(safe_path, t, dest, config, tree).map(drop)
+                    }),
             ),
-            // TODO(#645): flag hardlinks whose target never appears earlier in the
-            // manifest (extract fails on them)
             ManifestEntryKind::Hardlink { target } => Some(
                 target
                     .as_deref()
                     .ok_or_else(|| missing_link_target(ManifestEntryType::Hardlink))
                     .and_then(|t| {
-                        hardlink_tracker.validate_hardlink(safe_link_path, t, dest, config)
+                        check_target_lengths(t)?;
+                        hardlink_tracker.validate_hardlink_in(safe_path, t, dest, config, tree)
                     }),
             ),
             ManifestEntryKind::File | ManifestEntryKind::Directory => None,
         };
-        if let Some(Err(e)) = link_result {
-            issues.push(VerificationIssue::from_error(&e, Some(entry.path.clone())));
+        match link_result {
+            Some(Err(e)) => {
+                issues.push(VerificationIssue::from_error(&e, Some(entry.path.clone())));
+            }
+            Some(Ok(())) if matches!(entry.kind, ManifestEntryKind::Hardlink { .. }) => {
+                hardlink_pending = true;
+            }
+            _ => {
+                if let Err(e) = record_entry(tree, safe_path.as_path(), &entry.kind) {
+                    issues.push(VerificationIssue::from_error(
+                        &ArchiveError::Io(e),
+                        Some(entry.path.clone()),
+                    ));
+                }
+            }
         }
     }
 
@@ -198,7 +271,62 @@ fn verify_entry(
         issues.push(VerificationIssue::from_error(&e, Some(entry.path.clone())));
     }
 
-    issues
+    EntryOutcome {
+        issues,
+        hardlink_pending,
+    }
+}
+
+fn check_target_lengths(target: &Path) -> Result<()> {
+    check_name_lengths(target).map_err(ArchiveError::Io)
+}
+
+/// Records a successfully validated non-hardlink entry in the tree.
+fn record_entry(
+    tree: &mut VirtualTree,
+    path: &Path,
+    kind: &ManifestEntryKind,
+) -> std::io::Result<()> {
+    let node = match kind {
+        ManifestEntryKind::File => Node::File,
+        ManifestEntryKind::Directory => Node::Dir,
+        ManifestEntryKind::Symlink { target: Some(t) } => Node::Symlink(t.clone()),
+        ManifestEntryKind::Symlink { target: None } | ManifestEntryKind::Hardlink { .. } => {
+            return Ok(());
+        }
+    };
+    tree.insert(path, node)
+}
+
+/// Phase two for a hardlink: re-validates its link path and target against the
+/// final tree, requires the target to exist, then materializes the link.
+fn verify_deferred_hardlink(
+    entry: &ArchiveEntry,
+    config: &SecurityConfig<Validated>,
+    dest: &DestDir,
+    tree: &mut VirtualTree,
+    hardlink_tracker: &mut HardlinkTracker,
+) -> Result<()> {
+    let ManifestEntryKind::Hardlink {
+        target: Some(target),
+    } = &entry.kind
+    else {
+        return Ok(());
+    };
+    let link_path = SafePath::validate_in(&entry.path, dest, config, tree)?;
+    hardlink_tracker.validate_hardlink_in(&link_path, target, dest, config, tree)?;
+    let target_full = dest.as_path().join(target);
+    if !tree.exists(&target_full) {
+        return Err(hardlink_target_missing(target));
+    }
+    if tree.resolves_to_dir(&target_full) {
+        return Err(ArchiveError::InvalidArchive(format!(
+            "hardlink target is a directory: {}",
+            target.display()
+        )));
+    }
+    tree.insert(link_path.as_path(), Node::File)?;
+    Ok(())
 }
 
 fn missing_link_target(kind: ManifestEntryType) -> ArchiveError {
@@ -288,6 +416,102 @@ mod tests {
     use std::io::Write;
     use std::path::PathBuf;
     use tempfile::NamedTempFile;
+
+    fn manifest_of(entries: Vec<(&str, ManifestEntryKind)>) -> ArchiveManifest {
+        let mut manifest = ArchiveManifest::new(crate::formats::detect::ArchiveType::Tar);
+        for (path, kind) in entries {
+            manifest
+                .add_entry(ArchiveEntry::new(PathBuf::from(path), kind, 0))
+                .unwrap();
+        }
+        manifest
+    }
+
+    fn link_config() -> SecurityConfig<Validated> {
+        SecurityConfig::default()
+            .with_allow_symlinks(true)
+            .with_allow_hardlinks(true)
+            .validate()
+            .unwrap()
+    }
+
+    fn symlink_to(target: &str) -> ManifestEntryKind {
+        ManifestEntryKind::Symlink {
+            target: Some(PathBuf::from(target)),
+        }
+    }
+
+    fn hardlink_to(target: &str) -> ManifestEntryKind {
+        ManifestEntryKind::Hardlink {
+            target: Some(PathBuf::from(target)),
+        }
+    }
+
+    #[test]
+    fn overlong_link_targets_are_reported_without_resolution() {
+        let long = "a".repeat(1 << 20);
+        let manifest = manifest_of(vec![
+            ("s", symlink_to(&long)),
+            ("t", ManifestEntryKind::File),
+            ("h", hardlink_to(&long)),
+        ]);
+        let report = verify_manifest(&manifest, &link_config()).unwrap();
+        let too_long = report
+            .issues()
+            .iter()
+            .filter(|i| i.category == IssueCategory::InvalidArchive)
+            .count();
+        assert_eq!(too_long, 2, "{:?}", report.issues());
+    }
+
+    #[test]
+    fn phase_two_resolves_link_path_through_tree() {
+        let manifest = manifest_of(vec![
+            ("real", ManifestEntryKind::Directory),
+            ("alias", symlink_to("real")),
+            ("real/t", ManifestEntryKind::File),
+            ("alias/h", hardlink_to("real/t")),
+            ("again", hardlink_to("real/h")),
+        ]);
+        let report = verify_manifest(&manifest, &link_config()).unwrap();
+        assert!(report.issues().is_empty(), "{:?}", report.issues());
+    }
+
+    #[test]
+    fn phase_two_reports_absent_hardlink_target() {
+        let manifest = manifest_of(vec![("h", hardlink_to("missing"))]);
+        let report = verify_manifest(&manifest, &link_config()).unwrap();
+        assert_eq!(report.status(), VerificationStatus::Fail);
+        assert!(report.issues().iter().any(|i| {
+            i.category == IssueCategory::InvalidArchive
+                && i.message.contains("hardlink target does not exist")
+        }));
+    }
+
+    #[test]
+    fn phase_two_accepts_target_declared_later() {
+        let manifest = manifest_of(vec![
+            ("h", hardlink_to("later")),
+            ("later", ManifestEntryKind::File),
+        ]);
+        let report = verify_manifest(&manifest, &link_config()).unwrap();
+        assert!(report.issues().is_empty(), "{:?}", report.issues());
+    }
+
+    #[test]
+    fn phase_one_failure_is_not_reported_again_in_phase_two() {
+        let manifest = manifest_of(vec![
+            ("t", ManifestEntryKind::File),
+            ("h", hardlink_to("../outside")),
+        ]);
+        let report = verify_manifest(&manifest, &link_config()).unwrap();
+        let escapes = report
+            .issues()
+            .iter()
+            .filter(|i| i.category == IssueCategory::HardlinkEscape)
+            .count();
+        assert_eq!(escapes, 1);
+    }
 
     #[test]
     fn test_is_suspicious_extension() {
@@ -485,15 +709,14 @@ mod tests {
     // with a hard `Err`, matching verify's behavior before the list-level
     // NUL-byte check (this PR) existed. An earlier version of this test
     // pinned the opposite (hard-error) behavior, which a code-review pass
-    // identified as a real regression: verify_entry's own validate_path
-    // call (line ~156) already had a working graceful NUL-byte check via
-    // SafePath::validate, and the list-level check was aborting before that
-    // mechanism ever ran. `listing_config_for_verify` now also relaxes the
-    // list-level NUL-byte check (see
-    // `SecurityConfig::relaxed_for_verify_preflight`), restoring the original
-    // graceful-report behavior — this test was rewritten (not just renamed) to
-    // assert that restored behavior instead of the hard-error behavior it
-    // previously pinned.
+    // identified as a real regression: verify_entry's own path validation
+    // already had a working graceful NUL-byte check via SafePath, and the
+    // list-level check was aborting before that mechanism ever ran.
+    // `listing_config_for_verify` now also relaxes the list-level NUL-byte
+    // check (see `SecurityConfig::relaxed_for_verify_preflight`), restoring
+    // the original graceful-report behavior — this test was rewritten (not
+    // just renamed) to assert that restored behavior instead of the
+    // hard-error behavior it previously pinned.
     #[test]
     fn test_verify_archive_nul_byte_path_reports_issue_not_error() {
         let mut temp_file = NamedTempFile::with_suffix(".tar").unwrap();

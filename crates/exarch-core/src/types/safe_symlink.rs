@@ -9,6 +9,9 @@ use std::path::PathBuf;
 
 use super::DestDir;
 use super::SafePath;
+use super::safe_path::check_windows_component;
+use crate::security::fs_view::FsView;
+use crate::security::fs_view::HostFs;
 
 /// A validated symlink that is safe for extraction.
 ///
@@ -113,6 +116,17 @@ impl SafeSymlink {
         dest: &DestDir,
         config: &SecurityConfig<Validated>,
     ) -> Result<Self> {
+        Self::validate_in(link, target, dest, config, &HostFs)
+    }
+
+    /// Validates against `view` instead of the real filesystem.
+    pub(crate) fn validate_in<V: FsView>(
+        link: &SafePath,
+        target: &Path,
+        dest: &DestDir,
+        config: &SecurityConfig<Validated>,
+        view: &V,
+    ) -> Result<Self> {
         // 1. Verify symlinks are allowed
         if !config.allowed.symlinks {
             return Err(ArchiveError::SecurityViolation {
@@ -173,6 +187,9 @@ impl SafeSymlink {
         for component in target.components() {
             if let std::path::Component::Normal(comp) = component {
                 target_depth += 1;
+                if cfg!(windows) {
+                    check_windows_component(comp, config)?;
+                }
                 let comp_str = comp.to_string_lossy();
                 if !config.is_path_component_allowed(&comp_str) {
                     return Err(ArchiveError::SecurityViolation {
@@ -197,7 +214,7 @@ impl SafeSymlink {
         // This prevents race conditions where an attacker replaces a parent
         // directory with a symlink between validation and extraction
         // time.
-        verify_parent_not_symlink(link.as_path(), dest)?;
+        verify_parent_not_symlink(link.as_path(), dest, view)?;
 
         // 4. Resolve target against link's parent directory, following any
         // on-disk symlinks encountered during traversal.
@@ -208,7 +225,13 @@ impl SafeSymlink {
         // GHSA-83g3-92jg-28cx variant — issue #116).
         let link_parent = link.as_path().parent().unwrap_or_else(|| Path::new(""));
         let link_parent_full = dest.as_path().join(link_parent);
-        resolve_through_symlinks(&link_parent_full, target, dest.as_path(), link.as_path())?;
+        resolve_through_symlinks_in(
+            &link_parent_full,
+            target,
+            dest.as_path(),
+            link.as_path(),
+            view,
+        )?;
 
         Ok(Self {
             link_path: link.as_path().to_path_buf(),
@@ -250,7 +273,7 @@ impl SafeSymlink {
 /// # Errors
 ///
 /// Returns `SymlinkEscape` if any parent component is a symlink.
-fn verify_parent_not_symlink(path: &Path, dest: &DestDir) -> Result<()> {
+fn verify_parent_not_symlink<V: FsView>(path: &Path, dest: &DestDir, view: &V) -> Result<()> {
     let mut current = dest.as_path().to_path_buf();
 
     // Walk through each component of the path
@@ -258,13 +281,14 @@ fn verify_parent_not_symlink(path: &Path, dest: &DestDir) -> Result<()> {
         current.push(component);
 
         // Check if current path exists and is a symlink
-        if current.exists() {
-            let metadata =
-                std::fs::symlink_metadata(&current).map_err(|_| ArchiveError::SymlinkEscape {
-                    path: path.to_path_buf(),
-                })?;
+        if view.exists(&current) {
+            let is_symlink =
+                view.is_symlink(&current)
+                    .map_err(|_| ArchiveError::SymlinkEscape {
+                        path: path.to_path_buf(),
+                    })?;
 
-            if metadata.is_symlink() {
+            if is_symlink {
                 return Err(ArchiveError::SymlinkEscape {
                     path: path.to_path_buf(),
                 });
@@ -302,6 +326,17 @@ pub(crate) fn resolve_through_symlinks(
     dest: &Path,
     link_path: &Path,
 ) -> Result<PathBuf> {
+    resolve_through_symlinks_in(start, target, dest, link_path, &HostFs)
+}
+
+/// [`resolve_through_symlinks`] against an arbitrary [`FsView`].
+pub(crate) fn resolve_through_symlinks_in<V: FsView>(
+    start: &Path,
+    target: &Path,
+    dest: &Path,
+    link_path: &Path,
+    view: &V,
+) -> Result<PathBuf> {
     let mut current = start.to_path_buf();
 
     for component in target.components() {
@@ -311,12 +346,12 @@ pub(crate) fn resolve_through_symlinks(
                 // resolve it before applying `..` so the pop
                 // operates on the real filesystem topology
                 // rather than the string representation.
-                if std::fs::symlink_metadata(&current).is_ok_and(|m| m.file_type().is_symlink()) {
-                    current = std::fs::canonicalize(&current).map_err(|_| {
-                        ArchiveError::SymlinkEscape {
-                            path: link_path.to_path_buf(),
-                        }
-                    })?;
+                if view.is_symlink(&current).unwrap_or(false) {
+                    current =
+                        view.canonicalize(&current)
+                            .map_err(|_| ArchiveError::SymlinkEscape {
+                                path: link_path.to_path_buf(),
+                            })?;
                 }
                 if !current.pop() {
                     return Err(ArchiveError::SymlinkEscape {
@@ -329,12 +364,12 @@ pub(crate) fn resolve_through_symlinks(
                 current.push(name);
                 // Resolve the component immediately if it is a symlink so that
                 // any subsequent `..` steps use the real resolved path.
-                if std::fs::symlink_metadata(&current).is_ok_and(|m| m.file_type().is_symlink()) {
-                    current = std::fs::canonicalize(&current).map_err(|_| {
-                        ArchiveError::SymlinkEscape {
-                            path: link_path.to_path_buf(),
-                        }
-                    })?;
+                if view.is_symlink(&current).unwrap_or(false) {
+                    current =
+                        view.canonicalize(&current)
+                            .map_err(|_| ArchiveError::SymlinkEscape {
+                                path: link_path.to_path_buf(),
+                            })?;
                 }
             }
             _ => {
@@ -898,5 +933,21 @@ mod tests {
             Err(ArchiveError::SymlinkEscape { .. }),
             "two-hop symlink chain must be rejected"
         );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_safe_symlink_rejects_windows_hazards_in_target() {
+        let (_temp, dest) = create_test_dest();
+        let config = create_config_with_symlinks();
+        let link = SafePath::validate(&PathBuf::from("link"), &dest, &config).expect("link");
+
+        for target in ["dir/foo.", "dir/foo ", "dir/a:b", "sub/NUL"] {
+            assert_matches!(
+                SafeSymlink::validate(&link, &PathBuf::from(target), &dest, &config),
+                Err(ArchiveError::SecurityViolation { .. }),
+                "{target}"
+            );
+        }
     }
 }

@@ -2,7 +2,9 @@
 
 pub(crate) mod boundary;
 pub(crate) mod context;
+pub(crate) mod fs_view;
 pub(crate) mod hardlink;
+#[cfg(any(test, feature = "testing"))]
 pub(crate) mod path;
 pub(crate) mod permissions;
 pub(crate) mod quota;

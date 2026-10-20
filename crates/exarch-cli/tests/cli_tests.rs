@@ -3469,3 +3469,177 @@ fn test_extract_banned_component_hint_still_names_policy_flags() {
         assert!(stderr.contains(flag), "HINT missing flag {flag}: {stderr}");
     }
 }
+
+fn create_internal_links_tar_gz(path: &std::path::Path) {
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
+
+    let file = std::fs::File::create(path).expect("create archive");
+    let gz = GzEncoder::new(file, Compression::default());
+    let mut builder = tar::Builder::new(gz);
+
+    let mut header = tar::Header::new_gnu();
+    header.set_size(4);
+    header.set_mode(0o644);
+    builder
+        .append_data(&mut header, "target.txt", &b"data"[..])
+        .expect("append file entry");
+
+    for (name, kind) in [
+        ("sym.txt", tar::EntryType::Symlink),
+        ("hard.txt", tar::EntryType::Link),
+    ] {
+        let mut link = tar::Header::new_gnu();
+        link.set_size(0);
+        link.set_mode(0o644);
+        link.set_entry_type(kind);
+        link.set_path(name).expect("set link path");
+        link.set_link_name("target.txt").expect("set link name");
+        link.set_cksum();
+        builder
+            .append(&link, &b""[..] as &[u8])
+            .expect("append link entry");
+    }
+
+    builder
+        .into_inner()
+        .expect("get gz encoder")
+        .finish()
+        .expect("finish gzip");
+}
+
+#[test]
+fn test_verify_internal_links_fail_by_default_and_pass_with_flags() {
+    let temp = TempDir::new().expect("create temp dir");
+    let archive_path = temp.path().join("links.tar.gz");
+    create_internal_links_tar_gz(&archive_path);
+
+    exarch_cmd()
+        .arg("verify")
+        .arg(&archive_path)
+        .assert()
+        .failure();
+
+    exarch_cmd()
+        .arg("verify")
+        .arg("--allow-symlinks")
+        .arg("--allow-hardlinks")
+        .arg(&archive_path)
+        .assert()
+        .success();
+}
+
+#[test]
+fn test_extract_accepts_same_link_flags_as_verify() {
+    let temp = TempDir::new().expect("create temp dir");
+    let archive_path = temp.path().join("links.tar.gz");
+    create_internal_links_tar_gz(&archive_path);
+    let out_dir = temp.path().join("out");
+
+    exarch_cmd()
+        .arg("extract")
+        .arg("--allow-symlinks")
+        .arg("--allow-hardlinks")
+        .arg(&archive_path)
+        .arg(&out_dir)
+        .assert()
+        .success();
+}
+
+#[test]
+fn test_deflate64_zip_is_rejected_by_list_verify_and_extract() {
+    const DEFLATE64: u16 = 9;
+    let name = b"a.txt";
+    let data = b"data";
+    let mut zip = Vec::new();
+    zip.extend_from_slice(b"PK\x03\x04");
+    zip.extend_from_slice(&20u16.to_le_bytes());
+    zip.extend_from_slice(&0u16.to_le_bytes());
+    zip.extend_from_slice(&DEFLATE64.to_le_bytes());
+    zip.extend_from_slice(&[0u8; 4]);
+    zip.extend_from_slice(&0u32.to_le_bytes());
+    zip.extend_from_slice(&4u32.to_le_bytes());
+    zip.extend_from_slice(&4u32.to_le_bytes());
+    zip.extend_from_slice(&5u16.to_le_bytes());
+    zip.extend_from_slice(&0u16.to_le_bytes());
+    zip.extend_from_slice(name);
+    zip.extend_from_slice(data);
+    let central_offset = u32::try_from(zip.len()).expect("fits u32");
+    zip.extend_from_slice(b"PK\x01\x02");
+    zip.extend_from_slice(&20u16.to_le_bytes());
+    zip.extend_from_slice(&20u16.to_le_bytes());
+    zip.extend_from_slice(&0u16.to_le_bytes());
+    zip.extend_from_slice(&DEFLATE64.to_le_bytes());
+    zip.extend_from_slice(&[0u8; 4]);
+    zip.extend_from_slice(&0u32.to_le_bytes());
+    zip.extend_from_slice(&4u32.to_le_bytes());
+    zip.extend_from_slice(&4u32.to_le_bytes());
+    zip.extend_from_slice(&5u16.to_le_bytes());
+    zip.extend_from_slice(&[0u8; 12]);
+    zip.extend_from_slice(&0u32.to_le_bytes());
+    zip.extend_from_slice(name);
+    let central_size = u32::try_from(zip.len()).expect("fits u32") - central_offset;
+    zip.extend_from_slice(b"PK\x05\x06");
+    zip.extend_from_slice(&[0u8; 4]);
+    zip.extend_from_slice(&1u16.to_le_bytes());
+    zip.extend_from_slice(&1u16.to_le_bytes());
+    zip.extend_from_slice(&central_size.to_le_bytes());
+    zip.extend_from_slice(&central_offset.to_le_bytes());
+    zip.extend_from_slice(&0u16.to_le_bytes());
+
+    let temp = TempDir::new().expect("create temp dir");
+    let archive_path = temp.path().join("deflate64.zip");
+    std::fs::write(&archive_path, zip).expect("write archive");
+    let out_dir = temp.path().join("out");
+    std::fs::create_dir(&out_dir).expect("create output dir");
+
+    for command in ["list", "verify"] {
+        let output = exarch_cmd()
+            .arg("--json")
+            .arg(command)
+            .arg(&archive_path)
+            .assert()
+            .code(1)
+            .get_output()
+            .stdout
+            .clone();
+        let json: serde_json::Value = serde_json::from_slice(&output).expect("invalid JSON");
+        assert_eq!(json["error"]["kind"], "SecurityViolation");
+        assert!(
+            json["error"]["message"]
+                .as_str()
+                .expect("message")
+                .contains("unsupported compression method"),
+            "{command}: {json}"
+        );
+    }
+
+    let output = exarch_cmd()
+        .arg("--json")
+        .arg("extract")
+        .arg(&archive_path)
+        .arg(&out_dir)
+        .assert()
+        .code(1)
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).expect("invalid JSON");
+    assert_eq!(json["error"]["kind"], "SecurityViolation");
+    assert_eq!(std::fs::read_dir(&out_dir).expect("read dir").count(), 0);
+}
+
+#[test]
+fn test_verify_escaping_symlink_fails_even_with_link_flags() {
+    let temp = TempDir::new().expect("create temp dir");
+    let archive_path = temp.path().join("symlink_escape.tar.gz");
+    create_symlink_escape_tar_gz(&archive_path);
+
+    exarch_cmd()
+        .arg("verify")
+        .arg("--allow-symlinks")
+        .arg("--allow-hardlinks")
+        .arg(&archive_path)
+        .assert()
+        .failure();
+}

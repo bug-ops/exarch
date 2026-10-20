@@ -7,10 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `exarch verify --allow-symlinks` and `--allow-hardlinks`, sharing one link-policy argument group with `extract` (#PR).
+
 ### Changed
 
+- **BREAKING:** ZIP entries with a compression method other than Stored, Deflate, Bzip2 or Zstd are rejected at open by `extract`, `list` and `verify` through one shared admission check (#PR).
+- **BREAKING:** 7z directories with the Windows reparse-point attribute are listed as symlinks and fail `verify`, matching `extract` (#PR).
 - **BREAKING:** `ArchiveError::ZipBomb` wraps `ZipBombDetails` (sizes, `ZipBombScope::{Entry, SolidBlock}`, derived `CompressionRatio`), so solid-block rejections are no longer reported as per-file ratios (#PR).
 - **BREAKING:** An entry or solid block claiming data from zero compressed bytes is `ZipBomb` with an unbounded ratio instead of `InvalidArchive`, in the core, CLI, Python and Node error mappings (#PR).
+- **BREAKING:** `verify` validates links against an in-memory model of the extracted tree and fails link escapes through earlier symlinks, and hardlinks whose target never appears (#PR).
+- **BREAKING:** `verify` fails entries the host cannot extract: an entry under a file, a directory over a file, a hardlink to a directory, and names, symlink targets or hardlink targets over 255 bytes per component or 4096 bytes per path (#PR).
+- **BREAKING:** On Windows, path components with a trailing dot or space are rejected, and symlink and hardlink targets get the same component checks as entry paths (#PR).
 - Minor cleanups: `map_or_default` and `bool::ok_or_else` sites, dead `_format` parameters, a duplicated declared-size message, and unconditional clippy `#[allow]` converted to `#[expect]` (#652).
 - **BREAKING:** `ArchiveEntry` holds one `kind: ManifestEntryKind` instead of `entry_type`, `symlink_target` and `hardlink_target`, and `verify` reports a link entry without a target as a security-policy issue (#652).
 - **BREAKING:** `ArchiveEntry.compressed_size` is replaced by `compression: EntryCompression` with a `compressed_size()` method, and `compression_ratio()` is `None` for 7z solid-block entries (#652).

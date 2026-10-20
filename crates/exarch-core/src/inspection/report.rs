@@ -79,15 +79,23 @@ impl VerificationReport {
     /// # Ok::<(), exarch_core::ArchiveError>(())
     /// ```
     #[must_use]
-    pub fn from_entry_issues<F>(manifest: &ArchiveManifest, mut issues_for: F) -> Self
+    pub fn from_entry_issues<F>(manifest: &ArchiveManifest, issues_for: F) -> Self
     where
         F: FnMut(&ArchiveEntry) -> Vec<VerificationIssue>,
     {
+        let lists = manifest.entries().iter().map(issues_for).collect();
+        Self::from_entry_issue_lists(manifest, lists)
+    }
+
+    /// Builds a report from one precomputed issue list per manifest entry.
+    pub(crate) fn from_entry_issue_lists(
+        manifest: &ArchiveManifest,
+        lists: Vec<Vec<VerificationIssue>>,
+    ) -> Self {
         let mut issues = Vec::new();
         let mut suspicious_entries = 0;
 
-        for entry in manifest.entries() {
-            let entry_issues = issues_for(entry);
+        for entry_issues in lists {
             if entry_issues
                 .iter()
                 .any(|i| i.severity >= IssueSeverity::Medium)

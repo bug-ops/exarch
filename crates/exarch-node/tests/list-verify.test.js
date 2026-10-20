@@ -171,6 +171,24 @@ describe('verifyArchiveSync', () => {
   });
 });
 
+function tarWithInternalSymlink() {
+  const header = Buffer.alloc(512);
+  header.write('link.txt', 0, 'utf8');
+  header.write('0000755\0', 100);
+  header.write('0000000\0', 108);
+  header.write('0000000\0', 116);
+  header.write('00000000000\0', 124);
+  header.write('00000000000\0', 136);
+  header.write('        ', 148);
+  header.write('2', 156);
+  header.write('target.txt', 157, 'utf8');
+  header.write('ustar\0', 257);
+  header.write('00', 263);
+  const checksum = header.reduce((sum, byte) => sum + byte, 0);
+  header.write(`${checksum.toString(8).padStart(6, '0')}\0 `, 148);
+  return Buffer.concat([tarWithEntry('target.txt', 'x').subarray(0, 1024), header, Buffer.alloc(1024)]);
+}
+
 function tarWithEntry(name, content) {
   const header = Buffer.alloc(512);
   header.write(name, 0, 'utf8');
@@ -225,5 +243,27 @@ describe('typed report enums wire values', () => {
     const issue = report.issues.find((i) => i.category === 'Executable File');
     assert.ok(issue, JSON.stringify(report.issues));
     assert.strictEqual(issue.severity, 'LOW');
+  });
+});
+
+describe('verifyArchiveSync link policy', () => {
+  let tempDir;
+
+  beforeEach(() => {
+    tempDir = createTempDir();
+  });
+
+  afterEach(() => {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it('honours allowSymlinks from SecurityConfig', () => {
+    const archivePath = path.join(tempDir, 'links.tar');
+    fs.writeFileSync(archivePath, tarWithInternalSymlink());
+
+    assert.strictEqual(verifyArchiveSync(archivePath).status, 'FAIL');
+
+    const config = new SecurityConfig().setAllowSymlinks(true);
+    assert.strictEqual(verifyArchiveSync(archivePath, config).status, 'PASS');
   });
 });

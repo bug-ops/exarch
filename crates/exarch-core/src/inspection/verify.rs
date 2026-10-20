@@ -14,6 +14,7 @@ use crate::inspection::report::IssueCategory;
 use crate::inspection::report::IssueSeverity;
 use crate::inspection::report::VerificationIssue;
 use crate::inspection::report::VerificationReport;
+use crate::security::hardlink::HardlinkTracker;
 use crate::security::path::validate_path;
 use crate::security::permissions::sanitize_permissions;
 use crate::security::quota::QuotaTracker;
@@ -35,9 +36,16 @@ pub(crate) fn verify_manifest(
     let temp_dest = DestDir::new(temp_dir.path())?;
 
     let mut quota_tracker = QuotaTracker::new();
+    let mut hardlink_tracker = HardlinkTracker::new();
 
     Ok(VerificationReport::from_entry_issues(manifest, |entry| {
-        let mut issues = verify_entry(entry, config, &temp_dest, &mut quota_tracker);
+        let mut issues = verify_entry(
+            entry,
+            config,
+            &temp_dest,
+            &mut quota_tracker,
+            &mut hardlink_tracker,
+        );
         issues.extend(check_heuristics(entry));
         issues
     }))
@@ -132,6 +140,7 @@ fn verify_entry(
     config: &SecurityConfig<Validated>,
     dest: &DestDir,
     quota_tracker: &mut QuotaTracker,
+    hardlink_tracker: &mut HardlinkTracker,
 ) -> Vec<VerificationIssue> {
     let mut issues = Vec::new();
 
@@ -174,22 +183,13 @@ fn verify_entry(
         issues.push(VerificationIssue::from_error(&e, Some(entry.path.clone())));
     }
 
-    // Hardlink validation (similar to symlink)
+    // TODO(critic): flag hardlinks whose target never appears earlier in the
+    // manifest (extract fails on them)
     if let EntryType::Hardlink { ref target } = entry_type
         && let Ok(ref safe_link_path) = path_result
-        && let Err(e) = validate_path(target, dest, config)
+        && let Err(e) = hardlink_tracker.validate_hardlink(safe_link_path, target, dest, config)
     {
-        issues.push(VerificationIssue {
-            severity: IssueSeverity::Critical,
-            category: IssueCategory::HardlinkEscape,
-            entry_path: Some(entry.path.clone()),
-            message: format!(
-                "Hardlink target escapes destination: {} -> {}",
-                safe_link_path.as_path().display(),
-                target.display()
-            ),
-            context: Some(e.to_string()),
-        });
+        issues.push(VerificationIssue::from_error(&e, Some(entry.path.clone())));
     }
 
     // Permission validation
@@ -600,7 +600,8 @@ mod tests {
         temp_file.write_all(&archive_data).unwrap();
         temp_file.flush().unwrap();
 
-        let config = SecurityConfig::default();
+        let mut config = SecurityConfig::default();
+        config.allowed.hardlinks = true;
         let report = verify_archive(temp_file.path(), &config)
             .expect("verify_archive must report a missing hardlink target, not error out");
 
@@ -612,12 +613,10 @@ mod tests {
         assert_eq!(report.suspicious_entries(), 1);
         assert!(
             report.issues().iter().any(|i| {
-                i.category == IssueCategory::HardlinkEscape
-                    && i.context
-                        .as_deref()
-                        .is_some_and(|c| c.contains("empty path not allowed"))
+                i.category == IssueCategory::SecurityPolicy
+                    && i.message.contains("hardlink target is empty")
             }),
-            "expected a HardlinkEscape issue citing the empty target, got: {:?}",
+            "expected a SecurityPolicy issue citing the empty target, got: {:?}",
             report.issues()
         );
     }
@@ -660,10 +659,8 @@ mod tests {
         assert_eq!(report.suspicious_entries(), 1);
         assert!(!report.issues().is_empty(), "Should detect symlink");
 
-        // Symlink is blocked by default config (SecurityViolation ->
-        // SuspiciousPath category)
         let has_symlink_issue = report.issues().iter().any(|i| {
-            matches!(i.category, IssueCategory::SuspiciousPath) && i.message.contains("symlink")
+            matches!(i.category, IssueCategory::SecurityPolicy) && i.message.contains("symlink")
         });
 
         assert!(

@@ -213,6 +213,9 @@ pub enum IssueCategory {
     /// Quota exceeded (file count or size).
     #[napi(value = "Quota Exceeded")]
     QuotaExceeded,
+    /// Entry rejected by the security policy.
+    #[napi(value = "Security Policy")]
+    SecurityPolicy,
     /// Invalid or corrupted archive.
     #[napi(value = "Invalid Archive")]
     InvalidArchive,
@@ -235,6 +238,7 @@ impl TryFrom<CoreIssueCategory> for IssueCategory {
             CoreIssueCategory::ZipBomb => Self::ZipBomb,
             CoreIssueCategory::InvalidPermissions => Self::InvalidPermissions,
             CoreIssueCategory::QuotaExceeded => Self::QuotaExceeded,
+            CoreIssueCategory::SecurityPolicy => Self::SecurityPolicy,
             CoreIssueCategory::InvalidArchive => Self::InvalidArchive,
             CoreIssueCategory::SuspiciousPath => Self::SuspiciousPath,
             CoreIssueCategory::ExecutableFile => Self::ExecutableFile,
@@ -947,5 +951,45 @@ mod tests {
                 .map(|v| ManifestEntryType::from(*v))
                 .collect::<Vec<_>>(),
         );
+    }
+
+    fn union_line<T: Copy>(name: &str, all: &[T], as_str: fn(T) -> &'static str) -> String {
+        let values: Vec<String> = all.iter().map(|v| format!("'{}'", as_str(*v))).collect();
+        format!("export type {name} = {}", values.join(" | "))
+    }
+
+    #[test]
+    fn test_index_d_ts_unions_match_core_enums() {
+        let dts = include_str!("../index.d.ts");
+        let expected = [
+            union_line("ArchiveType", CoreArchiveType::ALL, CoreArchiveType::as_str),
+            union_line(
+                "IssueCategory",
+                CoreIssueCategory::ALL,
+                CoreIssueCategory::as_str,
+            ),
+            union_line(
+                "IssueSeverity",
+                CoreIssueSeverity::ALL,
+                CoreIssueSeverity::as_str,
+            ),
+            union_line("CheckStatus", CoreCheckStatus::ALL, CoreCheckStatus::as_str),
+            union_line(
+                "ManifestEntryType",
+                CoreManifestEntryType::ALL,
+                CoreManifestEntryType::as_str,
+            ),
+            union_line(
+                "VerificationStatus",
+                CoreVerificationStatus::ALL,
+                CoreVerificationStatus::as_str,
+            ),
+        ];
+        for line in expected {
+            assert!(
+                dts.lines().any(|l| l == line),
+                "index.d.ts out of sync with exarch-core, expected line:\n{line}"
+            );
+        }
     }
 }

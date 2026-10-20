@@ -205,33 +205,22 @@ fn determine_status(issues: &[VerificationIssue]) -> VerificationStatus {
 }
 
 fn determine_security_status(issues: &[VerificationIssue]) -> CheckStatus {
-    let security_issues: Vec<_> = issues
+    let mut security_issues = issues
         .iter()
-        .filter(|i| {
-            matches!(
-                i.category,
-                IssueCategory::PathTraversal
-                    | IssueCategory::SymlinkEscape
-                    | IssueCategory::HardlinkEscape
-                    | IssueCategory::ZipBomb
-                    | IssueCategory::InvalidPermissions
-                    | IssueCategory::QuotaExceeded
-            )
-        })
-        .collect();
+        .filter(|i| i.category.is_security())
+        .peekable();
 
-    if security_issues.is_empty() {
-        CheckStatus::Pass
+    if security_issues.peek().is_none() {
+        return CheckStatus::Pass;
+    }
+
+    let fails = security_issues
+        .any(|i| i.severity == IssueSeverity::Critical || i.severity == IssueSeverity::High);
+
+    if fails {
+        CheckStatus::Fail
     } else {
-        let has_critical = security_issues
-            .iter()
-            .any(|i| i.severity == IssueSeverity::Critical || i.severity == IssueSeverity::High);
-
-        if has_critical {
-            CheckStatus::Fail
-        } else {
-            CheckStatus::Warning
-        }
+        CheckStatus::Warning
     }
 }
 
@@ -361,7 +350,7 @@ impl VerificationIssue {
             ),
             ArchiveError::SecurityViolation { reason } => (
                 IssueSeverity::High,
-                IssueCategory::SuspiciousPath,
+                IssueCategory::SecurityPolicy,
                 format!("Security violation: {reason}"),
             ),
             ArchiveError::SourceNotFound { path } => (
@@ -456,6 +445,10 @@ closed_enum! {
         /// Quota exceeded (file count or size)
         QuotaExceeded => "Quota Exceeded",
 
+        /// Entry rejected by the security policy (links disallowed, NUL bytes,
+        /// banned component, ...)
+        SecurityPolicy => "Security Policy",
+
         /// Invalid or corrupted archive
         InvalidArchive => "Invalid Archive",
 
@@ -464,6 +457,26 @@ closed_enum! {
 
         /// Executable file detected
         ExecutableFile => "Executable File",
+    }
+}
+
+impl IssueCategory {
+    /// Whether issues of this category come from a security check, and so
+    /// count towards [`VerificationReport::security_status`].
+    ///
+    /// The match is exhaustive on purpose: a new category must be classified.
+    #[must_use]
+    pub const fn is_security(self) -> bool {
+        match self {
+            Self::PathTraversal
+            | Self::SymlinkEscape
+            | Self::HardlinkEscape
+            | Self::ZipBomb
+            | Self::InvalidPermissions
+            | Self::QuotaExceeded
+            | Self::SecurityPolicy => true,
+            Self::InvalidArchive | Self::SuspiciousPath | Self::ExecutableFile => false,
+        }
     }
 }
 
@@ -502,6 +515,7 @@ mod tests {
                 "Zip Bomb",
                 "Invalid Permissions",
                 "Quota Exceeded",
+                "Security Policy",
                 "Invalid Archive",
                 "Suspicious Path",
                 "Executable File",
@@ -728,8 +742,35 @@ mod tests {
         };
         let issue = VerificationIssue::from_error(&error, None);
         assert_eq!(issue.severity, IssueSeverity::High);
-        assert_eq!(issue.category, IssueCategory::SuspiciousPath);
+        assert_eq!(issue.category, IssueCategory::SecurityPolicy);
         assert!(issue.message.contains("Security violation"));
+    }
+
+    #[test]
+    fn test_security_violation_fails_security_status() {
+        let error = ArchiveError::SecurityViolation {
+            reason: "symlinks not allowed".into(),
+        };
+        let report = report_with(vec![VerificationIssue::from_error(&error, None)]);
+        assert_eq!(report.status(), VerificationStatus::Fail);
+        assert_eq!(report.security_status(), CheckStatus::Fail);
+    }
+
+    #[test]
+    fn test_is_security_classification() {
+        let non_security: Vec<_> = IssueCategory::ALL
+            .iter()
+            .copied()
+            .filter(|c| !c.is_security())
+            .collect();
+        assert_eq!(
+            non_security,
+            [
+                IssueCategory::InvalidArchive,
+                IssueCategory::SuspiciousPath,
+                IssueCategory::ExecutableFile
+            ]
+        );
     }
 
     #[test]

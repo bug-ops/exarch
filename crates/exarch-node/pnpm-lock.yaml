@@ -12,7 +12,7 @@ importers:
         specifier: ^2.5.11
         version: 2.5.14
       '@napi-rs/cli':
-        specifier: ^3.8.6
+        specifier: 3.10.4
         version: 3.10.4(@emnapi/core@1.11.2)(@emnapi/runtime@1.11.2)
 
 packages:

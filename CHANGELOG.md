@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- CI fails when the generated Node.js `index.d.ts` is out of date, and `@napi-rs/cli` is pinned (#638).
 - Raised the `zip` dependency floor to 9.0.5 to exclude versions with unpatched read-path vulnerabilities (#640).
 - Bumped `zip` to 9.0.1 and refreshed the lockfile; zip's own declared-size overrun error is now reported as a security violation (#608).
 - Bumped `napi`/`napi-build`/`napi-derive`, `sevenz-rust2`, and `smallvec` to their latest compatible releases; refreshed `deny.toml`'s `zstd-safe`/`syn` duplicate-version exceptions to match the resulting transitive bumps (#584).

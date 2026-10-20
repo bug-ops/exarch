@@ -520,6 +520,9 @@ jobs:
           cd crates/exarch-node
           npm run build
 
+      - name: Check index.d.ts is up to date
+        run: git diff --exit-code crates/exarch-node/index.d.ts
+
       - name: Test Node.js bindings
         run: |
           cd crates/exarch-node

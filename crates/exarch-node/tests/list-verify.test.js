@@ -186,7 +186,11 @@ function tarWithInternalSymlink() {
   header.write('00', 263);
   const checksum = header.reduce((sum, byte) => sum + byte, 0);
   header.write(`${checksum.toString(8).padStart(6, '0')}\0 `, 148);
-  return Buffer.concat([tarWithEntry('target.txt', 'x').subarray(0, 1024), header, Buffer.alloc(1024)]);
+  return Buffer.concat([
+    tarWithEntry('target.txt', 'x').subarray(0, 1024),
+    header,
+    Buffer.alloc(1024),
+  ]);
 }
 
 function tarWithEntry(name, content) {

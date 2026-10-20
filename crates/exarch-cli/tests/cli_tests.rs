@@ -3529,6 +3529,7 @@ fn test_verify_internal_links_fail_by_default_and_pass_with_flags() {
         .success();
 }
 
+#[cfg(unix)]
 #[test]
 fn test_extract_accepts_same_link_flags_as_verify() {
     let temp = TempDir::new().expect("create temp dir");

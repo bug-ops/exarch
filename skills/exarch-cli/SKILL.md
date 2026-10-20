@@ -389,7 +389,12 @@ whose path has a reserved device-name component (`CON`, `NUL`, `COM1`, ... ASCII
 case-insensitive, with or without an extension, e.g. `NUL.tar.gz`) or a component containing
 `:` (NTFS alternate data streams) are rejected with `SecurityViolation`; there is no CLI flag to
 disable this (the opt-out exists only in the Rust API). On other platforms these names are
-accepted. setuid/setgid bits are
+accepted. A `.tar.xz` whose LZMA2 dictionary needs more than the decoder-memory limit (default
+256 MiB; `SecurityConfig::max_decoder_memory` in the Rust API, 1 GiB under `permissive()`) is
+rejected by `extract`, `list` and `verify` with `QuotaExceeded` (`quota exceeded: decoder memory
+(> 268435456 bytes)`); there is no CLI flag to raise it. Only xz is bounded this way; zstd keeps
+its fixed decoder window. Verified live: an archive built with `xz --lzma2=dict=300MiB` (needs
+385 MiB) fails `extract` and `list` with exit code `1`, `error.kind: "QuotaExceeded"` in `--json`. setuid/setgid bits are
 always stripped on Unix regardless of `--preserve-permissions`. Solid 7z archives (multiple
 files compressed as one block) are rejected by default because extracting even one file
 requires decompressing the whole block into memory — a memory-exhaustion vector; enable

@@ -9,15 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `verify --check-integrity` decodes the payload to verify checksums, via `verify_archive_with_options` and a `VerificationOptions` in the core, Python and Node (#TBD).
+- `verify --check-integrity` decodes the payload to verify checksums, via `verify_archive_with_options` and a `VerificationOptions` in the core, Python and Node (#670).
 - `exarch verify --allow-symlinks` and `--allow-hardlinks`, sharing one link-policy argument group with `extract` (#653).
 
 ### Changed
 
-- **BREAKING:** `integrity_status()` returns the new `IntegrityStatus` with an `INCOMPLETE` value (#TBD).
-- **BREAKING:** `ArchiveFormat::verify` takes `&VerificationOptions`; `IssueCategory` gains two variants (#TBD).
-- **BREAKING:** Reports may carry archive-level issues that do not count as suspicious entries (#TBD).
-- **BREAKING:** With integrity requested, undecodable TAR entry content is an error, not a report (#TBD).
+- **BREAKING:** `integrity_status()` returns the new `IntegrityStatus` with an `INCOMPLETE` value (#670).
+- **BREAKING:** `ArchiveFormat::verify` takes `&VerificationOptions`; `IssueCategory` gains two variants (#670).
+- **BREAKING:** Reports may carry archive-level issues that do not count as suspicious entries (#670).
+- **BREAKING:** With integrity requested, undecodable TAR entry content is an error, not a report (#670).
 - **BREAKING:** ZIP entries with a compression method other than Stored, Deflate, Bzip2 or Zstd are rejected at open by `extract`, `list` and `verify` through one shared admission check (#653).
 - **BREAKING:** 7z directories with the Windows reparse-point attribute are listed as symlinks and fail `verify`, matching `extract` (#653).
 - **BREAKING:** `ArchiveError::ZipBomb` wraps `ZipBombDetails` (sizes, `ZipBombScope::{Entry, SolidBlock}`, derived `CompressionRatio`), so solid-block rejections are no longer reported as per-file ratios (#653).

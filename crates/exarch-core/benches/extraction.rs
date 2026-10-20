@@ -456,6 +456,7 @@ fn benchmark_sevenz_large_file(c: &mut Criterion) {
     let large_data = load_7z_fixture("large-file.7z");
     let size_bytes: u64 = 50 * 1024; // 50 KB
     group.throughput(Throughput::Bytes(size_bytes));
+    let config = benchmark_config_validated();
 
     group.bench_function("large_file_7z", |b| {
         b.iter(|| {
@@ -465,7 +466,7 @@ fn benchmark_sevenz_large_file(c: &mut Criterion) {
             archive
                 .extract(
                     temp.path(),
-                    &SecurityConfig::default().validate().unwrap(),
+                    &config,
                     &ExtractionOptions::default(),
                     &mut exarch_core::NoopProgress,
                 )
@@ -583,6 +584,9 @@ fn benchmark_file_extraction(c: &mut Criterion) {
     // TAR extraction
     bench_extraction(&mut group, "tar_small", "small_files.tar", &config);
     bench_extraction(&mut group, "tar_gz_small", "small_files.tar.gz", &config);
+    bench_extraction(&mut group, "tar_bz2_small", "small_files.tar.bz2", &config);
+    bench_extraction(&mut group, "tar_xz_small", "small_files.tar.xz", &config);
+    bench_extraction(&mut group, "tar_zst_small", "small_files.tar.zst", &config);
     bench_extraction(&mut group, "tar_medium", "medium_files.tar", &config);
     bench_extraction(&mut group, "tar_gz_medium", "medium_files.tar.gz", &config);
 

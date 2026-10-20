@@ -162,7 +162,6 @@ struct ZipExtractionContext<'a> {
     report: &'a mut ExtractionReport,
     copy_buffer: &'a mut CopyBuffer,
     dir_cache: &'a mut common::DirCache,
-    compressed_budget: &'a mut DeclaredCompressedBudget,
     skip_duplicates: bool,
     /// Count of file/symlink entries skipped as pre-existing duplicates,
     /// threaded through `common::extract_file_with_permit` and
@@ -335,35 +334,34 @@ impl<R: Read + Seek> ZipArchive<R> {
 
         // Detect password protection early (CRIT-003: robust check with entry
         // limit)
-        if Self::is_password_protected(&mut inner)? {
-            return Err(common::encrypted_archive_error());
-        }
+        Self::scan_entries(&mut inner)?;
 
         Ok(Self { inner })
     }
 
-    /// Checks if any entry in the archive is encrypted.
+    /// Rejects encrypted entries and declared compressed sizes that do not fit
+    /// in the archive, before any caller can write a byte.
     ///
-    /// Scans all entries via metadata-only reads (no decompression). Stops
-    /// early on the first encrypted entry found.
-    fn is_password_protected(archive: &mut ZipReader<R>) -> Result<bool> {
-        for i in 0..archive.len() {
-            if Self::check_entry_encrypted(archive, i)? {
-                return Ok(true);
+    /// Opens every entry via metadata-only reads (no decompression), so a
+    /// corrupt local header also fails here. Shared by extraction and listing
+    /// because both go through [`ZipArchive::new`].
+    fn scan_entries(archive: &mut ZipReader<R>) -> Result<()> {
+        let mut budget = DeclaredCompressedBudget::new(archive.central_directory_start());
+        for index in 0..archive.len() {
+            match archive.by_index(index) {
+                Ok(file) if file.encrypted() => return Err(common::encrypted_archive_error()),
+                Ok(file) => budget.charge(file.compressed_size())?,
+                Err(e) if is_password_required(&e) => {
+                    return Err(common::encrypted_archive_error());
+                }
+                Err(e) => {
+                    return Err(ArchiveError::InvalidArchive(format!(
+                        "failed to read entry {index}: {e}"
+                    )));
+                }
             }
         }
-        Ok(false)
-    }
-
-    #[inline]
-    fn check_entry_encrypted(archive: &mut ZipReader<R>, index: usize) -> Result<bool> {
-        match archive.by_index(index) {
-            Ok(file) => Ok(file.encrypted()),
-            Err(e) if is_password_required(&e) => Ok(true),
-            Err(e) => Err(ArchiveError::InvalidArchive(format!(
-                "failed to check entry {index} for encryption: {e}"
-            ))),
-        }
+        Ok(())
     }
 
     /// Resolves the entry path from a ZIP file via [`resolve_zip_entry_path`].
@@ -404,7 +402,6 @@ impl<R: Read + Seek> ZipArchive<R> {
         let path = Self::resolve_entry_path(&zip_file, index, ctx.config)?;
 
         let (uncompressed_size, compressed_size) = ZipEntryAdapter::get_sizes(&zip_file);
-        ctx.compressed_budget.charge(compressed_size)?;
         let mode = zip_file.unix_mode();
 
         let compression = ZipEntryAdapter::get_compression_method(&zip_file);
@@ -564,9 +561,6 @@ impl<R: Read + Seek> ArchiveFormat for ZipArchive<R> {
 
         let mut dir_cache = common::DirCache::new();
 
-        let mut compressed_budget =
-            DeclaredCompressedBudget::new(self.inner.central_directory_start());
-
         // Aggregated into a single warning after extraction instead of one
         // per skipped entry, mirroring 7z's `duplicate_skips` accumulator
         // (issue #490).
@@ -617,7 +611,6 @@ impl<R: Read + Seek> ArchiveFormat for ZipArchive<R> {
                 report: &mut report,
                 copy_buffer: &mut copy_buffer,
                 dir_cache: &mut dir_cache,
-                compressed_budget: &mut compressed_budget,
                 skip_duplicates,
                 duplicate_skips: &mut duplicate_skips,
                 disallowed_extension_skips: &mut disallowed_extension_skips,
@@ -1888,6 +1881,47 @@ mod tests {
         }
 
         zip.finish().unwrap().into_inner()
+    }
+
+    /// Sets the declared compressed size of the second local and central
+    /// header to `size`.
+    fn forge_second_entry_compressed_size(data: &mut [u8], size: u32) {
+        for (signature, offset) in [(b"PK\x03\x04", 18), (b"PK\x01\x02", 20)] {
+            let at = data
+                .windows(4)
+                .enumerate()
+                .filter(|(_, w)| *w == signature)
+                .nth(1)
+                .map(|(i, _)| i)
+                .expect("second header present");
+            data[at + offset..at + offset + 4].copy_from_slice(&size.to_le_bytes());
+        }
+    }
+
+    /// Issue #625: an oversized declared compressed size on a later entry must
+    /// fail when the archive is opened, before the earlier valid entry is
+    /// written.
+    #[test]
+    fn test_declared_compressed_size_violation_fails_before_any_write() {
+        let mut data = create_test_zip(vec![("a.txt", &[1u8; 64]), ("b.txt", &[2u8; 64])]);
+        forge_second_entry_compressed_size(&mut data, 400_000);
+
+        let result = ZipArchive::new(Cursor::new(data.clone()));
+        assert_matches!(result.err(), Some(ArchiveError::InvalidArchive(_)));
+
+        let dir = TempDir::new().unwrap();
+        let archive_path = dir.path().join("forged.zip");
+        std::fs::write(&archive_path, &data).unwrap();
+        let out = dir.path().join("out");
+        std::fs::create_dir(&out).unwrap();
+
+        let result = crate::extract_archive(&archive_path, &out, &SecurityConfig::default());
+        assert_matches!(result, Err(ArchiveError::InvalidArchive(_)));
+        assert_eq!(
+            std::fs::read_dir(&out).unwrap().count(),
+            0,
+            "no entry may be written before the size check fails"
+        );
     }
 
     #[test]

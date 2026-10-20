@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- ZIP library extraction rejects oversized declared compressed sizes when the archive is opened, before any entry is written (#625).
 - ZIP `extract`, `list` and `verify` reject absolute and `..` entry names by default like TAR, treat NUL bytes as a security violation, and `--allow-absolute-paths` now takes effect for ZIP (#631).
 - ZIP and 7z error classification uses typed upstream variants instead of message substrings, and 7z I/O errors keep their original kind (#634).
 - `exarch create` TAR headers store permission bits only, so `list --long` mode matches ZIP and system tar (#632).

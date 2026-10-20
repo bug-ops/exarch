@@ -10,6 +10,7 @@ use crate::inspection::list::list_archive;
 use crate::inspection::manifest::ArchiveEntry;
 use crate::inspection::manifest::ArchiveManifest;
 use crate::inspection::manifest::ManifestEntryKind;
+use crate::inspection::manifest::ManifestEntryType;
 use crate::inspection::report::IssueCategory;
 use crate::inspection::report::IssueSeverity;
 use crate::inspection::report::VerificationIssue;
@@ -170,20 +171,20 @@ fn verify_entry(
             ManifestEntryKind::Symlink { target } => Some(
                 target
                     .as_deref()
-                    .ok_or_else(|| missing_link_target("symlink"))
+                    .ok_or_else(|| missing_link_target(ManifestEntryType::Symlink))
                     .and_then(|t| validate_symlink(safe_link_path, t, dest, config).map(drop)),
             ),
-            // TODO(critic): flag hardlinks whose target never appears earlier
-            // in the manifest (extract fails on them)
+            // TODO(#645): flag hardlinks whose target never appears earlier in the
+            // manifest (extract fails on them)
             ManifestEntryKind::Hardlink { target } => Some(
                 target
                     .as_deref()
-                    .ok_or_else(|| missing_link_target("hardlink"))
+                    .ok_or_else(|| missing_link_target(ManifestEntryType::Hardlink))
                     .and_then(|t| {
                         hardlink_tracker.validate_hardlink(safe_link_path, t, dest, config)
                     }),
             ),
-            _ => None,
+            ManifestEntryKind::File | ManifestEntryKind::Directory => None,
         };
         if let Some(Err(e)) = link_result {
             issues.push(VerificationIssue::from_error(&e, Some(entry.path.clone())));
@@ -200,9 +201,9 @@ fn verify_entry(
     issues
 }
 
-fn missing_link_target(kind: &str) -> ArchiveError {
+fn missing_link_target(kind: ManifestEntryType) -> ArchiveError {
     ArchiveError::SecurityViolation {
-        reason: format!("{kind} target is missing"),
+        reason: format!("{} target is missing", kind.as_str().to_ascii_lowercase()),
     }
 }
 

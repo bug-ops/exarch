@@ -39,7 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- `verify` reports a symlink entry placed over an earlier file entry instead of passing archives that `extract` can reject (#PR).
+- `verify` reports a symlink entry placed over an earlier file entry instead of passing archives that `extract` can reject (#656).
 - 7z solid blocks are checked as a whole against the new `max_solid_compression_ratio` (default 1000x, Rust API only) instead of comparing only the first file (#652).
 - ZIP library extraction rejects oversized declared compressed sizes when the archive is opened, before any entry is written (#652).
 - ZIP `extract`, `list` and `verify` reject absolute and `..` entry names by default like TAR, treat NUL bytes as a security violation, and `--allow-absolute-paths` now takes effect for ZIP (#652).

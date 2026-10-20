@@ -804,6 +804,63 @@ mod tests {
     }
 
     #[test]
+    fn test_check_windows_component_rejects_reserved_and_colon_by_default() {
+        let config = SecurityConfig::default().validate().expect("valid config");
+        for name in [
+            "NUL.tar.gz",
+            "CON ",
+            "con.",
+            "CON",
+            "Aux.txt",
+            "COM\u{b9}",
+            "LPT\u{b3}.log",
+            "CONIN$",
+            "conout$",
+            "a:b",
+            "file.txt:stream",
+        ] {
+            assert_matches!(
+                check_windows_component(OsStr::new(name), &config),
+                Err(ArchiveError::SecurityViolation { .. }),
+                "{name}"
+            );
+        }
+        for name in ["console", "COM10", "file.txt", "xCON", "a.b.c"] {
+            assert!(
+                check_windows_component(OsStr::new(name), &config).is_ok(),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_check_windows_component_opt_out_allows_reserved_but_never_colon() {
+        let config = SecurityConfig::default()
+            .with_allow_windows_reserved_names(true)
+            .validate()
+            .expect("valid config");
+
+        assert!(check_windows_component(OsStr::new("NUL.tar.gz"), &config).is_ok());
+        assert!(check_windows_component(OsStr::new("CONIN$"), &config).is_ok());
+        assert_matches!(
+            check_windows_component(OsStr::new("a:b"), &config),
+            Err(ArchiveError::SecurityViolation { .. })
+        );
+    }
+
+    #[test]
+    fn test_check_windows_component_permissive_preset_still_rejects() {
+        let config = SecurityConfig::permissive()
+            .validate()
+            .expect("valid config");
+
+        assert_matches!(
+            check_windows_component(OsStr::new("CON"), &config),
+            Err(ArchiveError::SecurityViolation { .. })
+        );
+    }
+
+    #[test]
     fn test_is_windows_reserved_component() {
         for name in [
             "CON",

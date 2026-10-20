@@ -125,7 +125,7 @@ impl CompressionCodec {
             Self::Gzip => Box::new(flate2::bufread::GzDecoder::new(input)),
             Self::Bzip2 => Box::new(bzip2::bufread::BzDecoder::new(input)),
             Self::Xz => {
-                let stream = xz2::stream::Stream::new_auto_decoder(max_decoder_memory, 0)
+                let stream = xz2::stream::Stream::new_stream_decoder(max_decoder_memory, 0)
                     .map_err(io::Error::from)?;
                 Box::new(XzLimited {
                     inner: xz2::bufread::XzDecoder::new_stream(input, stream),

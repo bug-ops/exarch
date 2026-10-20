@@ -10,9 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `verify --check-integrity` decodes the payload to verify checksums, via `verify_archive_with_options` and a `VerificationOptions` in the core, Python and Node (#670).
-- `ZipConsistencyPolicy` and `--zip-consistency` (also in Python and Node) to enforce or ignore ZIP structure checks.
-- `ArchiveError::ZipInconsistency` and five new `IssueCategory` variants for ZIP structure findings and name collisions.
-- `LinkTarget` for manifest link targets.
+- `ZipConsistencyPolicy` and `--zip-consistency` (also in Python and Node) to enforce or ignore ZIP structure checks. (#671)
+- `ArchiveError::ZipInconsistency` and five new `IssueCategory` variants for ZIP structure findings and name collisions. (#671)
+- `LinkTarget` for manifest link targets. (#671)
 - `exarch verify --allow-symlinks` and `--allow-hardlinks`, sharing one link-policy argument group with `extract` (#653).
 
 ### Changed
@@ -21,12 +21,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **BREAKING:** `ArchiveFormat::verify` takes `&VerificationOptions`; `IssueCategory` gains two variants (#670).
 - **BREAKING:** Reports may carry archive-level issues that do not count as suspicious entries (#670).
 - **BREAKING:** With integrity requested, undecodable TAR entry content is an error, not a report (#670).
-- **BREAKING:** ZIP `extract` and `list` reject, and `verify` reports, archives that local and central headers describe differently, unless `ignore` is set.
-- **BREAKING:** ZIP `verify` counts raw central directory records, and a count over `max_file_count` is a `QuotaExceeded` error.
-- **BREAKING:** `ManifestEntryKind` link variants carry a `LinkTarget`, and over-long link targets are rejected by `list` and reported by `verify`.
-- **BREAKING:** `verify` folds names and limits symlink hops per host and reports colliding names as `NameCollision`.
-- `security_status` ignores the harmless merge of two empty directories.
-- ZIP `list` and `verify` do more work per entry for the structure checks.
+- **BREAKING:** ZIP `extract` and `list` reject, and `verify` reports, archives that local and central headers describe differently, unless `ignore` is set. (#671)
+- **BREAKING:** ZIP `verify` counts raw central directory records, and a count over `max_file_count` is a `QuotaExceeded` error. (#671)
+- **BREAKING:** `ManifestEntryKind` link variants carry a `LinkTarget`, and over-long link targets are rejected by `list` and reported by `verify`. (#671)
+- **BREAKING:** `verify` folds names and limits symlink hops per host and reports colliding names as `NameCollision`. (#671)
+- `security_status` ignores the harmless merge of two empty directories. (#671)
+- ZIP `list` and `verify` do more work per entry for the structure checks. (#671)
 - **BREAKING:** ZIP entries with a compression method other than Stored, Deflate, Bzip2 or Zstd are rejected at open by `extract`, `list` and `verify` through one shared admission check (#653).
 - **BREAKING:** 7z directories with the Windows reparse-point attribute are listed as symlinks and fail `verify`, matching `extract` (#653).
 - **BREAKING:** `ArchiveError::ZipBomb` wraps `ZipBombDetails` (sizes, `ZipBombScope::{Entry, SolidBlock}`, derived `CompressionRatio`), so solid-block rejections are no longer reported as per-file ratios (#653).

@@ -105,7 +105,7 @@ Key flags (all optional):
 | `--allowed-extensions <EXT>` | all allowed | Restrict extraction to matching extensions. Repeatable or comma-separated (`txt,pdf`); leading dot optional, case-insensitive. |
 | `--allow-symlinks` | off | Allow symlinks that resolve within the extraction directory. |
 | `--allow-hardlinks` | off | Allow hardlinks that resolve within the extraction directory. |
-| `--allow-absolute-paths` | off | Allow archive entries with absolute paths. |
+| `--allow-absolute-paths` | off | Allow archive entries with absolute paths. For ZIP the leading root or drive prefix is stripped, so the entry lands under the destination (`/tmp/x` extracts to `<dest>/tmp/x`). |
 | `--allow-world-writable` | off | Allow files with world-writable (mode `0o002`) permission bits. |
 | `--allow-solid-archives` | off | Allow solid 7z archives (see Security model below). |
 | `--banned-component <COMPONENT>` | see below | Block entries whose path contains this component. **Replaces** the default list — see warning below. Repeatable. |
@@ -384,7 +384,9 @@ across versions.
 
 Default `SecurityConfig` limits: 50 MB per file, 500 MB total extracted size, 100x max
 compression ratio, 10,000 max files, 32 max path depth. All symlinks, hardlinks, absolute
-paths, and world-writable files are rejected unless explicitly allowed. On Windows only, entries
+paths, and world-writable files are rejected unless explicitly allowed. This holds for ZIP too: an
+absolute entry name (leading `/`, `\` or drive letter) or any `..` component in the raw name is
+`PathTraversal` by default, and a NUL byte in an entry name is `SecurityViolation`. On Windows only, entries
 whose path has a reserved device-name component (`CON`, `NUL`, `COM1`, ... ASCII
 case-insensitive, with or without an extension, e.g. `NUL.tar.gz`) or a component containing
 `:` (NTFS alternate data streams) are rejected with `SecurityViolation`; there is no CLI flag to

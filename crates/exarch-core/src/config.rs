@@ -53,6 +53,14 @@ pub struct AllowedFeatures {
     ///
     /// World-writable files pose security risks in multi-user environments.
     pub world_writable: bool,
+
+    /// Allow Windows reserved device names (`CON`, `NUL`, `COM1`, ...) as path
+    /// components.
+    ///
+    /// Only consulted when extracting on Windows; has no effect elsewhere.
+    /// There is no CLI or binding opt-out, and the permissive preset does not
+    /// enable it.
+    pub windows_reserved_names: bool,
 }
 
 /// The field data of a [`SecurityConfig`], reachable via [`Deref`]/[`DerefMut`]
@@ -344,6 +352,7 @@ impl SecurityConfig<Unvalidated> {
                     hardlinks: true,
                     absolute_paths: true,
                     world_writable: true,
+                    windows_reserved_names: false,
                 },
                 preserve_permissions: true,
                 max_compression_ratio: 1000.0,
@@ -610,6 +619,24 @@ impl SecurityConfig<Unvalidated> {
     #[inline]
     pub fn with_allow_world_writable(mut self, allow: bool) -> Self {
         self.fields.allowed.world_writable = allow;
+        self
+    }
+
+    /// Enables or disables Windows reserved device names (`CON`, `NUL`,
+    /// `COM1`, ...) as path components. Only consulted on Windows.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::SecurityConfig;
+    ///
+    /// let config = SecurityConfig::default().with_allow_windows_reserved_names(true);
+    /// assert!(config.allowed.windows_reserved_names);
+    /// ```
+    #[must_use]
+    #[inline]
+    pub fn with_allow_windows_reserved_names(mut self, allow: bool) -> Self {
+        self.fields.allowed.windows_reserved_names = allow;
         self
     }
 

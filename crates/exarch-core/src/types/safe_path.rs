@@ -6,6 +6,7 @@ use crate::SecurityConfig;
 use crate::config::Validated;
 use crate::security::context::ValidationContext;
 use std::borrow::Cow;
+use std::ffi::OsStr;
 use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
@@ -73,7 +74,8 @@ impl SafePath {
     /// 2. Reject absolute paths when `allow_absolute_paths = false`
     /// 3. Check for parent directory traversal (`..`)
     /// 4. Validate path depth does not exceed maximum
-    /// 5. Check for banned path components
+    /// 5. Check for banned path components; on Windows also reject reserved
+    ///    device names (unless `allowed.windows_reserved_names`) and `:`
     /// 6. Normalize path components: strip root/prefix so `dest.join()` stays
     ///    inside `dest`; remove `.` (current-dir) components
     /// 7. Verify resolved path stays within destination directory
@@ -188,6 +190,10 @@ impl SafePath {
                 }
                 Component::Normal(comp) => {
                     depth += 1;
+
+                    if cfg!(windows) {
+                        check_windows_component(comp, config)?;
+                    }
 
                     if has_banned_components {
                         let comp_str = comp
@@ -339,6 +345,65 @@ impl SafePath {
     pub fn into_path_buf(self) -> PathBuf {
         self.0
     }
+}
+
+/// Rejects Windows-specific hazardous components (reserved device names and
+/// NTFS alternate-data-stream `:` syntax).
+fn check_windows_component(comp: &OsStr, config: &SecurityConfig<Validated>) -> Result<()> {
+    if comp.to_string_lossy().contains(':') {
+        return Err(ArchiveError::SecurityViolation {
+            reason: format!("path component contains ':': {}", comp.display()),
+        });
+    }
+    if !config.allowed.windows_reserved_names && is_windows_reserved_component(comp) {
+        return Err(ArchiveError::SecurityViolation {
+            reason: format!("Windows reserved device name: {}", comp.display()),
+        });
+    }
+    Ok(())
+}
+
+/// Returns `true` if `comp` names a Windows legacy device.
+///
+/// The name is the text before the first `.`, with trailing spaces trimmed,
+/// compared ASCII case-insensitively against `CON`, `PRN`, `AUX`, `NUL`,
+/// `COM0`-`COM9`, `LPT0`-`LPT9`, the superscript forms `COM¹²³` / `LPT¹²³`,
+/// `CONIN$` and `CONOUT$`. Pure and platform-independent; callers decide
+/// whether to apply it.
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::types::safe_path::is_windows_reserved_component;
+/// use std::ffi::OsStr;
+///
+/// assert!(is_windows_reserved_component(OsStr::new("NUL.tar.gz")));
+/// assert!(!is_windows_reserved_component(OsStr::new("console.txt")));
+/// ```
+#[must_use]
+pub fn is_windows_reserved_component(comp: &OsStr) -> bool {
+    const PLAIN: [&str; 6] = ["CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"];
+    let lossy = comp.to_string_lossy();
+    let base = lossy
+        .split_once('.')
+        .map_or(&*lossy, |(base, _)| base)
+        .trim_end_matches(' ');
+
+    if PLAIN.iter().any(|n| base.eq_ignore_ascii_case(n)) {
+        return true;
+    }
+
+    let Some(prefix) = base.get(..3) else {
+        return false;
+    };
+    if !(prefix.eq_ignore_ascii_case("COM") || prefix.eq_ignore_ascii_case("LPT")) {
+        return false;
+    }
+    let mut rest = base[3..].chars();
+    matches!(
+        (rest.next(), rest.next()),
+        (Some('0'..='9' | '\u{b9}' | '\u{b2}' | '\u{b3}'), None)
+    )
 }
 
 /// Case-insensitive path prefix check for macOS/Windows.
@@ -736,21 +801,107 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    // Windows reserved names test
+    #[test]
+    fn test_is_windows_reserved_component() {
+        for name in [
+            "CON",
+            "con",
+            "Prn",
+            "AUX",
+            "nul",
+            "COM0",
+            "com1",
+            "COM9",
+            "LPT0",
+            "lpt9",
+            "COM\u{b9}",
+            "COM\u{b2}",
+            "LPT\u{b3}",
+            "CONIN$",
+            "conout$",
+            "CON.txt",
+            "NUL.tar.gz",
+            "aux.",
+            "CON ",
+            "nul .txt",
+        ] {
+            assert!(is_windows_reserved_component(OsStr::new(name)), "{name}");
+        }
+        for name in [
+            "console",
+            "CONS",
+            "COM",
+            "COM10",
+            "COM1x",
+            "LPT",
+            "COMA",
+            "CON1",
+            "xCON",
+            "file.CON",
+            ".CON",
+            "",
+            "\u{e9}\u{e9}",
+            "COM\u{2074}",
+        ] {
+            assert!(!is_windows_reserved_component(OsStr::new(name)), "{name}");
+        }
+    }
+
     #[test]
     #[cfg(windows)]
-    fn test_safe_path_windows_reserved_names() {
+    fn test_safe_path_windows_reserved_names_rejected() {
+        let (_temp, dest) = create_test_dest();
+        let config = SecurityConfig::default().validate().expect("valid config");
+        let permissive = SecurityConfig::permissive()
+            .validate()
+            .expect("valid config");
+
+        for name in ["CON", "PRN", "AUX", "NUL", "COM1", "LPT1"] {
+            let path = PathBuf::from(format!("folder/{name}.txt"));
+            for cfg in [&config, &permissive] {
+                assert!(matches!(
+                    SafePath::validate(&path, &dest, cfg),
+                    Err(ArchiveError::SecurityViolation { .. })
+                ));
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_safe_path_windows_reserved_names_opt_out() {
+        let (_temp, dest) = create_test_dest();
+        let config = SecurityConfig::default()
+            .with_allow_windows_reserved_names(true)
+            .validate()
+            .expect("valid config");
+
+        assert!(SafePath::validate(Path::new("folder/CON.txt"), &dest, &config).is_ok());
+        assert!(matches!(
+            SafePath::validate(Path::new("folder/a:stream"), &dest, &config),
+            Err(ArchiveError::SecurityViolation { .. })
+        ));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_safe_path_windows_colon_rejected() {
         let (_temp, dest) = create_test_dest();
         let config = SecurityConfig::default().validate().expect("valid config");
 
-        let reserved = vec!["CON", "PRN", "AUX", "NUL", "COM1", "LPT1"];
+        assert!(matches!(
+            SafePath::validate(Path::new("file.txt:stream"), &dest, &config),
+            Err(ArchiveError::SecurityViolation { .. })
+        ));
+    }
 
-        for name in reserved {
-            let path = PathBuf::from(format!("folder/{}.txt", name));
-            let _result = SafePath::validate(&path, &dest, &config);
-            // Note: Windows filesystem may reject these, but we don't
-            // explicitly block
-        }
+    #[test]
+    #[cfg(not(windows))]
+    fn test_safe_path_reserved_names_accepted_off_windows() {
+        let (_temp, dest) = create_test_dest();
+        let config = SecurityConfig::default().validate().expect("valid config");
+
+        assert!(SafePath::validate(Path::new("folder/CON.txt"), &dest, &config).is_ok());
     }
 
     #[test]

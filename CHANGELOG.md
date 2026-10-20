@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Windows reserved device names and `:` in path components are rejected on Windows, with a Rust-only opt-out `AllowedFeatures::windows_reserved_names` (#642).
 - 7z `extract` now enforces `max_compression_ratio` like `verify` and `list` do for non-solid archives (#624).
 - ZIP `extract`, `list` and `verify` validate declared compressed sizes against the archive length (#624).
 - `.TAR.GZ` stems are detected case-insensitively, and `verify`'s suspicious-extension check ignores case (#624).

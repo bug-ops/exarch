@@ -16,6 +16,10 @@
 //!   constant that matches `std::fs::canonicalize` on the supported hosts
 //!   (macOS 33, glibc 40, musl 39, Windows 63 unverified, other Unix 32); a
 //!   different filesystem or kernel configuration can still disagree;
+//! - name lengths use per-OS limits ([`MAX_COMPONENT_LEN`], [`MAX_PATH_LEN`]:
+//!   Linux 4095, macOS and other Unix 1023, Windows 32767 UTF-16 units); a
+//!   symlink target is checked against the path limit only. A filesystem with
+//!   tighter limits can still refuse a name the model accepts;
 //! - on macOS names are compared after NFD and a per-character
 //!   upper/lower/upper case fold, on Windows after the same fold without
 //!   normalisation, and elsewhere exactly. The fold is an approximation of the
@@ -65,15 +69,75 @@ pub const MAX_SYMLINK_HOPS: usize = 63;
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 pub const MAX_SYMLINK_HOPS: usize = 32;
 
-/// Longest single path component the host accepts (`NAME_MAX`).
-pub const MAX_COMPONENT_BYTES: usize = 255;
+/// Longest single path component the host accepts (`NAME_MAX`), in bytes, or
+/// in UTF-16 units on Windows.
+pub const MAX_COMPONENT_LEN: usize = 255;
 
-/// Longest relative path the host accepts (`PATH_MAX`).
+/// Longest relative path or symlink target the host accepts (`PATH_MAX` less
+/// the terminator), in bytes.
+#[cfg(target_os = "linux")]
+pub const MAX_PATH_LEN: usize = 4095;
+
+/// Longest relative path or symlink target the host accepts, in UTF-16 units.
 ///
-/// The real limit differs per host, and symlink targets have their own (macOS
-/// 1023, Linux 4095), so a path or target between those values can pass the
-/// model and still fail on extraction.
-pub const MAX_PATH_BYTES: usize = 4096;
+/// 32767 is the documented limit of an extended-length path. A symlink target
+/// is further bounded by the 16 KiB reparse buffer that stores its
+/// substitute and print names, so a symlink target of roughly 8k to 32k units
+/// can pass `verify` and still fail on extraction. This is not verified on a
+/// Windows host and is listed as a verify limitation.
+#[cfg(target_os = "windows")]
+pub const MAX_PATH_LEN: usize = 32767;
+
+/// Longest relative path or symlink target the host accepts (`PATH_MAX` less
+/// the terminator), in bytes. A low guess can only turn a PASS into a false
+/// FAIL.
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+pub const MAX_PATH_LEN: usize = 1023;
+
+/// The kind of link a target belongs to; the host limits them differently.
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::LinkKind;
+///
+/// assert_eq!(LinkKind::Symlink.as_str(), "symlink");
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum LinkKind {
+    /// A symbolic link; `symlink(2)` bounds only the whole target
+    Symlink,
+    /// A hard link; the target is resolved as a path, so components count too
+    Hardlink,
+}
+
+impl LinkKind {
+    /// The lowercase name used in messages.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Symlink => "symlink",
+            Self::Hardlink => "hardlink",
+        }
+    }
+}
+
+impl std::fmt::Display for LinkKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[cfg(windows)]
+fn name_len(name: &OsStr) -> usize {
+    std::os::windows::ffi::OsStrExt::encode_wide(name).count()
+}
+
+#[cfg(not(windows))]
+fn name_len(name: &OsStr) -> usize {
+    name.as_encoded_bytes().len()
+}
 
 /// Rejects entry names the host would refuse with `ENAMETOOLONG`.
 ///
@@ -81,14 +145,30 @@ pub const MAX_PATH_BYTES: usize = 4096;
 ///
 /// Returns an error if the path or any of its components is too long.
 pub fn check_name_lengths(path: &Path) -> io::Result<()> {
-    let too_long = path.as_os_str().as_encoded_bytes().len() > MAX_PATH_BYTES
+    let too_long = name_len(path.as_os_str()) > MAX_PATH_LEN
         || path
             .components()
-            .any(|c| c.as_os_str().as_encoded_bytes().len() > MAX_COMPONENT_BYTES);
+            .any(|c| name_len(c.as_os_str()) > MAX_COMPONENT_LEN);
     if too_long {
         return Err(name_too_long());
     }
     Ok(())
+}
+
+/// Rejects a link target the host would refuse with `ENAMETOOLONG`.
+///
+/// A symlink target is checked against the path limit only, as `symlink(2)`
+/// does; a hardlink target is checked like an entry name.
+///
+/// # Errors
+///
+/// Returns an error if the target is too long for `kind`.
+pub fn check_link_target_length(target: &Path, kind: LinkKind) -> io::Result<()> {
+    match kind {
+        LinkKind::Symlink if name_len(target.as_os_str()) > MAX_PATH_LEN => Err(name_too_long()),
+        LinkKind::Symlink => Ok(()),
+        LinkKind::Hardlink => check_name_lengths(target),
+    }
 }
 
 /// The error for a name beyond the host's limits.
@@ -397,7 +477,7 @@ impl VirtualTree {
     }
 
     fn lookup(&self, parent: usize, name: &OsStr) -> Option<Found> {
-        if name.as_encoded_bytes().len() > MAX_COMPONENT_BYTES {
+        if name_len(name) > MAX_COMPONENT_LEN {
             return None;
         }
         let node = self.node(parent);
@@ -1126,10 +1206,34 @@ mod tests {
     #[test]
     fn name_length_limits() {
         assert!(check_name_lengths(Path::new("a/b")).is_ok());
-        let long_name = "a".repeat(MAX_COMPONENT_BYTES + 1);
+        let long_name = "a".repeat(255 + 1);
         assert!(check_name_lengths(Path::new(&long_name)).is_err());
-        let long_path = vec!["a".repeat(200); 21].join("/");
+        let long_path = path_of_len(HOST_PATH_LIMIT + 1);
         assert!(check_name_lengths(Path::new(&long_path)).is_err());
+        assert!(check_name_lengths(Path::new(&path_of_len(HOST_PATH_LIMIT))).is_ok());
+    }
+
+    use crate::test_utils::HOST_PATH_LIMIT;
+    use crate::test_utils::path_of_len;
+
+    #[test]
+    fn link_target_length_boundaries() {
+        let at_limit = path_of_len(HOST_PATH_LIMIT);
+        assert_eq!(at_limit.len(), HOST_PATH_LIMIT);
+        let over = path_of_len(HOST_PATH_LIMIT + 1);
+        for kind in [LinkKind::Symlink, LinkKind::Hardlink] {
+            assert!(check_link_target_length(Path::new(&at_limit), kind).is_ok());
+            assert!(check_link_target_length(Path::new(&over), kind).is_err());
+        }
+    }
+
+    #[test]
+    fn symlink_target_ignores_component_limit() {
+        let long_component = "a".repeat(255 + 45);
+        let target = Path::new(&long_component);
+        assert!(check_link_target_length(target, LinkKind::Symlink).is_ok());
+        assert!(check_link_target_length(target, LinkKind::Hardlink).is_err());
+        assert!(check_name_lengths(target).is_err());
     }
 
     #[cfg(any(target_os = "macos", target_os = "windows"))]

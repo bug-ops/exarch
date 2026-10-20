@@ -8,7 +8,8 @@ use crate::ArchiveError;
 use crate::Result;
 use crate::closed_enum::closed_enum;
 use crate::formats::detect::ArchiveType;
-use crate::security::fs_view::check_name_lengths;
+use crate::security::fs_view::LinkKind;
+use crate::security::fs_view::check_link_target_length;
 
 /// Complete manifest of archive contents.
 ///
@@ -35,8 +36,42 @@ use crate::security::fs_view::check_name_lengths;
 #[derive(Debug, Clone)]
 pub struct ArchiveManifest {
     entries: Vec<ArchiveEntry>,
+    oversized: Vec<OversizedEntry>,
     total_size: u64,
     format: ArchiveType,
+}
+
+/// An entry whose path exceeds the host's name limits.
+///
+/// Only the position and the path length are kept, so an archive of many
+/// entries with huge names cannot inflate the manifest. The entry is not in
+/// [`ArchiveManifest::entries`].
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::OversizedEntry;
+///
+/// let entry = OversizedEntry::new(3, 70_000);
+/// assert_eq!(entry.index, 3);
+/// assert_eq!(entry.bytes, 70_000);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct OversizedEntry {
+    /// Zero-based position among the listed entries, kept and dropped
+    pub index: usize,
+
+    /// Length of the stored path in bytes
+    pub bytes: usize,
+}
+
+impl OversizedEntry {
+    /// Creates a record of the entry at `index` with a path of `bytes` bytes.
+    #[must_use]
+    pub const fn new(index: usize, bytes: usize) -> Self {
+        Self { index, bytes }
+    }
 }
 
 impl ArchiveManifest {
@@ -45,9 +80,24 @@ impl ArchiveManifest {
     pub fn new(format: ArchiveType) -> Self {
         Self {
             entries: Vec::new(),
+            oversized: Vec::new(),
             total_size: 0,
             format,
         }
+    }
+
+    /// Records an entry dropped for its over-long path; its position counts
+    /// the kept and the dropped entries listed before it.
+    pub(crate) fn add_oversized(&mut self, bytes: usize) {
+        let index = self.entries.len() + self.oversized.len();
+        self.oversized.push(OversizedEntry::new(index, bytes));
+    }
+
+    /// Returns the entries dropped because their path exceeds the host's
+    /// limits; only the verification pre-flight produces any.
+    #[must_use]
+    pub fn oversized_entries(&self) -> &[OversizedEntry] {
+        &self.oversized
     }
 
     /// Adds an entry to the manifest.
@@ -270,6 +320,7 @@ impl EntryCompression {
 /// ```
 /// use std::path::Path;
 ///
+/// use exarch_core::LinkKind;
 /// use exarch_core::LinkTarget;
 ///
 /// assert_eq!(
@@ -277,9 +328,10 @@ impl EntryCompression {
 ///     Some(Path::new("a.txt"))
 /// );
 /// assert_eq!(LinkTarget::Oversized { bytes: 9000 }.path(), None);
+/// // 40000 exceeds the path limit of every supported host
 /// assert_eq!(
-///     LinkTarget::classify("x".repeat(5000).into()),
-///     LinkTarget::Oversized { bytes: 5000 }
+///     LinkTarget::classify("x".repeat(40_000).into(), LinkKind::Symlink),
+///     LinkTarget::Oversized { bytes: 40_000 }
 /// );
 /// assert_eq!(LinkTarget::Missing.path(), None);
 /// ```
@@ -300,11 +352,28 @@ pub enum LinkTarget {
 }
 
 impl LinkTarget {
-    /// Keeps `path` when it fits the host's name limits, otherwise drops it
-    /// and keeps only its length.
+    /// Keeps `path` when it fits the host's limits for `kind`, otherwise
+    /// drops it and keeps only its length.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::LinkKind;
+    /// use exarch_core::LinkTarget;
+    ///
+    /// let long_component: std::path::PathBuf = "x".repeat(300).into();
+    /// assert!(matches!(
+    ///     LinkTarget::classify(long_component.clone(), LinkKind::Symlink),
+    ///     LinkTarget::Recorded(_)
+    /// ));
+    /// assert_eq!(
+    ///     LinkTarget::classify(long_component, LinkKind::Hardlink),
+    ///     LinkTarget::Oversized { bytes: 300 }
+    /// );
+    /// ```
     #[must_use]
-    pub fn classify(path: PathBuf) -> Self {
-        if check_name_lengths(&path).is_ok() {
+    pub fn classify(path: PathBuf, kind: LinkKind) -> Self {
+        if check_link_target_length(&path, kind).is_ok() {
             Self::Recorded(path)
         } else {
             Self::Oversized {

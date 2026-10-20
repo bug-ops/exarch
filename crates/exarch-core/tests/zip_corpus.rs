@@ -7,12 +7,20 @@
 //! test below when
 //! `EXARCH_ZIP_CORPUS_DIR` points at a directory of them; generate one with
 //! `scripts/zip-corpus.sh`.
+//!
+//! Java (`java.util.zip`, `jar`) and Windows (`Compress-Archive`, .NET
+//! `ZipFile`) archives are generated at test time. A missing tool skips its
+//! producers locally; with `EXARCH_REQUIRE_PRODUCERS=1` (set in CI) it fails.
+//! Windows Explorer archives are not covered: they cannot be produced
+//! headless.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::io::Cursor;
 use std::io::Write;
 use std::path::Path;
+use std::process::Command;
+use std::process::Stdio;
 
 use exarch_core::ArchiveError;
 use exarch_core::IssueCategory;
@@ -171,4 +179,129 @@ fn external_corpus_has_no_structural_findings() {
         }
     }
     assert!(checked > 0, "EXARCH_ZIP_CORPUS_DIR holds no archives");
+}
+
+const REQUIRE_PRODUCERS: &str = "EXARCH_REQUIRE_PRODUCERS";
+
+fn tool_works(tool: &str, probe: &[&str]) -> bool {
+    Command::new(tool)
+        .args(probe)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+/// Whether `tool` can run; a missing tool is fatal only when producers are
+/// required.
+fn tool_available(tool: &str, probe: &[&str]) -> bool {
+    if tool_works(tool, probe) {
+        return true;
+    }
+    assert!(
+        std::env::var_os(REQUIRE_PRODUCERS).is_none(),
+        "{REQUIRE_PRODUCERS} is set but `{tool}` is not usable"
+    );
+    eprintln!("skipping {tool} producers: tool not available");
+    false
+}
+
+fn run(command: &mut Command) {
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "{command:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn producer_source_tree(root: &Path) -> std::path::PathBuf {
+    let src = root.join("src");
+    std::fs::create_dir_all(src.join("sub")).unwrap();
+    std::fs::create_dir_all(src.join("emptydir")).unwrap();
+    std::fs::write(src.join("a.txt"), "hello\n").unwrap();
+    std::fs::write(src.join("sub/rep.txt"), "x".repeat(5000)).unwrap();
+    std::fs::write(
+        src.join("sub/rand.bin"),
+        (0..=255u8).cycle().take(200_000).collect::<Vec<_>>(),
+    )
+    .unwrap();
+    std::fs::write(src.join("empty"), "").unwrap();
+    std::fs::write(src.join("sub/caf\u{e9}.txt"), "unicode\n").unwrap();
+    src
+}
+
+fn java_producers(src: &Path, out: &Path) -> usize {
+    let mut made = 0;
+    if tool_available("java", &["--version"]) {
+        let program = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/ZipProducer.java");
+        run(Command::new("java").arg(program).arg(out));
+        made += 2;
+    }
+    if tool_available("jar", &["--version"]) {
+        for (flags, name) in [("cf", "jar.jar"), ("cf0", "jar_store.jar")] {
+            run(Command::new("jar")
+                .arg(flags)
+                .arg(out.join(name))
+                .arg("-C")
+                .arg(src)
+                .arg("."));
+            made += 1;
+        }
+    }
+    made
+}
+
+#[cfg(windows)]
+fn windows_producers(src: &Path, out: &Path) -> usize {
+    let shell = ["pwsh", "powershell"]
+        .into_iter()
+        .find(|t| tool_works(t, &["-NoProfile", "-Command", "exit 0"]));
+    let Some(shell) = shell else {
+        assert!(
+            std::env::var_os(REQUIRE_PRODUCERS).is_none(),
+            "{REQUIRE_PRODUCERS} is set but PowerShell is not usable"
+        );
+        return 0;
+    };
+    let scripts = [
+        format!(
+            "Compress-Archive -Path '{}\\*' -DestinationPath '{}'",
+            src.display(),
+            out.join("compress_archive.zip").display()
+        ),
+        format!(
+            "Add-Type -AssemblyName System.IO.Compression.FileSystem; \
+             [System.IO.Compression.ZipFile]::CreateFromDirectory('{}', '{}')",
+            src.display(),
+            out.join("dotnet.zip").display()
+        ),
+    ];
+    for script in &scripts {
+        run(Command::new(shell).args(["-NoProfile", "-Command", script]));
+    }
+    scripts.len()
+}
+
+#[cfg(not(windows))]
+fn windows_producers(_src: &Path, _out: &Path) -> usize {
+    0
+}
+
+#[test]
+fn java_and_windows_producers_have_no_structural_findings() {
+    let work = TempDir::new().unwrap();
+    let src = producer_source_tree(work.path());
+    let out = work.path().join("out");
+    std::fs::create_dir(&out).unwrap();
+
+    let expected = java_producers(&src, &out) + windows_producers(&src, &out);
+
+    let mut checked = 0;
+    for entry in std::fs::read_dir(&out).unwrap() {
+        let path = entry.unwrap().path();
+        assert_no_structural_finding(&path, &path.display().to_string());
+        checked += 1;
+    }
+    assert_eq!(checked, expected);
 }

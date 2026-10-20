@@ -5,7 +5,8 @@
 #   scripts/zip-corpus.sh /tmp/zip-corpus
 #   EXARCH_ZIP_CORPUS_DIR=/tmp/zip-corpus cargo nextest run -p exarch-core --test zip_corpus --run-ignored only
 #
-# Tools that are not installed are skipped. Every archive must pass the
+# Tools that are not installed are skipped. The in-tree Java and PowerShell
+# producers also run at test time (tests/zip_corpus.rs). Every archive must pass the
 # default ZIP structure policy with no finding.
 set -euo pipefail
 
@@ -14,6 +15,7 @@ work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 mkdir -p "$out" "$work/src/sub" "$work/src/emptydir"
 out="$(cd "$out" && pwd)"
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 printf 'hello\n' >"$work/src/a.txt"
 head -c 200000 /dev/urandom >"$work/src/sub/rand.bin"
@@ -38,6 +40,13 @@ fi
 if have jar && jar --version >/dev/null 2>&1; then
   jar cf "$out/jar.jar" .
   jar cf0 "$out/jar_store.jar" .
+fi
+if have java && java --version >/dev/null 2>&1; then
+  java "$here/../crates/exarch-core/tests/data/ZipProducer.java" "$out"
+fi
+if have pwsh; then
+  pwsh -NoProfile -Command "Compress-Archive -Path '$work/src/*' -DestinationPath '$out/compress_archive.zip'"
+  pwsh -NoProfile -Command "Add-Type -AssemblyName System.IO.Compression.FileSystem; [System.IO.Compression.ZipFile]::CreateFromDirectory('$work/src', '$out/dotnet.zip')"
 fi
 if have 7z; then
   7z a -tzip -bso0 -bsp0 "$out/7z.zip" . >/dev/null

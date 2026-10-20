@@ -8,6 +8,7 @@ use crate::Result;
 use crate::SecurityConfig;
 use crate::VerificationOptions;
 use crate::config::Validated;
+use crate::formats::SevenZArchive;
 use crate::formats::ZipArchive;
 use crate::formats::detect::FormatFamily;
 use crate::formats::detect::detect_format;
@@ -21,6 +22,7 @@ use crate::inspection::manifest::ArchiveManifest;
 use crate::inspection::manifest::LinkTarget;
 use crate::inspection::manifest::ManifestEntryKind;
 use crate::inspection::manifest::ManifestEntryType;
+use crate::inspection::manifest::OversizedEntry;
 use crate::inspection::report::ArchiveStructure;
 use crate::inspection::report::IntegrityScope;
 use crate::inspection::report::IssueCategory;
@@ -29,9 +31,11 @@ use crate::inspection::report::VerificationIssue;
 use crate::inspection::report::VerificationReport;
 use crate::security::fs_view::CollisionKind;
 use crate::security::fs_view::FsView;
+use crate::security::fs_view::LinkKind;
 use crate::security::fs_view::NameCollision;
 use crate::security::fs_view::Node;
 use crate::security::fs_view::VirtualTree;
+use crate::security::fs_view::check_link_target_length;
 use crate::security::fs_view::check_name_lengths;
 use crate::security::fs_view::name_too_long;
 use crate::security::hardlink::HardlinkTracker;
@@ -112,8 +116,6 @@ fn verify_with_tree(
         lists.push(issues);
     }
 
-    // TODO(#658): report `allow_solid_archives` violations here; extract
-    // refuses a solid 7z that verify passes.
     for index in deferred {
         let entry = &manifest.entries()[index];
         let materialized =
@@ -124,15 +126,18 @@ fn verify_with_tree(
         }
     }
 
-    let (archive_issues, scope) = match integrity {
+    let mut archive_issues = structure.refusals().to_vec();
+    archive_issues.extend(oversized_entry_issues(manifest.oversized_entries()));
+    let scope = match integrity {
         Some(outcome) => {
             debug_assert_eq!(outcome.entry_issues.len(), lists.len());
             for (list, extra) in lists.iter_mut().zip(outcome.entry_issues) {
                 list.extend(extra);
             }
-            (outcome.archive_issues, IntegrityScope::Requested)
+            archive_issues.extend(outcome.archive_issues);
+            IntegrityScope::Requested(outcome.gaps)
         }
-        None => (Vec::new(), IntegrityScope::NotRequested),
+        None => IntegrityScope::NotRequested,
     };
 
     lists.extend(
@@ -266,6 +271,12 @@ where
 /// Hardlinks are materialized after every other entry, so their path and
 /// target are validated against the final tree.
 ///
+/// # Limitations
+///
+/// Name lengths are checked on the entry's relative path. Extraction adds the
+/// destination prefix, so a long destination can make extraction fail with
+/// `File name too long` for an entry `verify` accepted.
+///
 /// # Examples
 ///
 /// ```no_run
@@ -315,7 +326,8 @@ pub fn verify_archive<P: AsRef<Path>>(
 /// matched. Formats without payload checksums (plain TAR, 7z entries without
 /// CRC, zstd frames without a content checksum) report the weaker guarantee
 /// that the data was complete and decodable. "Decode to EOF" means the
-/// decoder's EOF: bytes after the first gzip member or xz stream are not read.
+/// decoder's EOF: every gzip member, bzip2 stream and xz stream is decoded, and
+/// a non-zero tail after the last one is an error.
 ///
 /// `INCOMPLETE` means part of the payload was not verified (decompression
 /// budget, a resource limit, a solid 7z archive while `allow_solid_archives`
@@ -360,9 +372,16 @@ pub fn verify_archive_with_options<P: AsRef<Path>>(
     let validated_config = config.clone().validate()?;
     let archive_path = archive_path.as_ref();
     let format = detect_format(archive_path)?;
-    if format.family() == FormatFamily::Zip {
-        let file = std::fs::File::open(archive_path)?;
-        return ZipArchive::new(file)?.verify(&validated_config, options);
+    match format.family() {
+        FormatFamily::Zip => {
+            let file = std::fs::File::open(archive_path)?;
+            return ZipArchive::new(file)?.verify(&validated_config, options);
+        }
+        FormatFamily::SevenZ => {
+            let file = std::fs::File::open(archive_path)?;
+            return SevenZArchive::new(file)?.verify(&validated_config, options);
+        }
+        FormatFamily::Tar(_) => {}
     }
     verify_with(&validated_config, *options, |listing_config, policy| {
         list_detected(archive_path, format, listing_config, policy)
@@ -438,13 +457,13 @@ fn verify_entry(
         let link_result = match &entry.kind {
             ManifestEntryKind::Symlink { target } => Some(
                 usable_link_target(target, ManifestEntryType::Symlink).and_then(|t| {
-                    check_target_lengths(t)?;
+                    check_target_lengths(t, LinkKind::Symlink)?;
                     SafeSymlink::validate_in(safe_path, t, dest, config, tree).map(drop)
                 }),
             ),
             ManifestEntryKind::Hardlink { target } => Some(
                 usable_link_target(target, ManifestEntryType::Hardlink).and_then(|t| {
-                    check_target_lengths(t)?;
+                    check_target_lengths(t, LinkKind::Hardlink)?;
                     hardlink_tracker.validate_hardlink_in(safe_path, t, dest, config, tree)
                 }),
             ),
@@ -483,8 +502,39 @@ fn verify_entry(
     }
 }
 
-fn check_target_lengths(target: &Path) -> Result<()> {
-    check_name_lengths(target).map_err(ArchiveError::Io)
+/// Most over-long entries reported one by one; the rest are counted in a
+/// closing issue so a hostile archive cannot inflate the report.
+const OVERSIZED_ISSUE_CAP: usize = 16;
+
+fn oversized_entry_issues(oversized: &[OversizedEntry]) -> Vec<VerificationIssue> {
+    let name_too_long_issue = |detail: String| {
+        let error = ArchiveError::Io(std::io::Error::new(
+            name_too_long().kind(),
+            format!("{}: {detail}", name_too_long()),
+        ));
+        VerificationIssue::from_error(&error, None)
+    };
+    let mut issues: Vec<_> = oversized
+        .iter()
+        .take(OVERSIZED_ISSUE_CAP)
+        .map(|entry| {
+            name_too_long_issue(format!(
+                "entry {} has a path of {} bytes",
+                entry.index, entry.bytes
+            ))
+        })
+        .collect();
+    let omitted = oversized.len().saturating_sub(OVERSIZED_ISSUE_CAP);
+    if omitted > 0 {
+        issues.push(name_too_long_issue(format!(
+            "{omitted} more entries have over-long paths (first {OVERSIZED_ISSUE_CAP} listed)"
+        )));
+    }
+    issues
+}
+
+fn check_target_lengths(target: &Path, kind: LinkKind) -> Result<()> {
+    check_link_target_length(target, kind).map_err(ArchiveError::Io)
 }
 
 /// Returns the target to validate, or the error a missing or oversized

@@ -6,7 +6,10 @@ use std::io::Cursor;
 use tempfile::TempDir;
 
 use super::*;
+use crate::DecompressionBudget;
 use crate::ExtractionOptions;
+use crate::HiddenRegion;
+use crate::IntegrityCheck;
 use crate::IssueCategory;
 use crate::NoopProgress;
 use crate::QuotaResource;
@@ -192,7 +195,8 @@ fn central_records_past_the_end_count_are_found() {
         archive.structure().findings(),
         [
             ZipInconsistency::HiddenLocalHeader {
-                offset: built.local_offsets[1] as u64
+                offset: built.local_offsets[1] as u64,
+                region: HiddenRegion::Gap,
             },
             ZipInconsistency::UncountedCentralRecords {
                 counted: 1,
@@ -211,7 +215,8 @@ fn local_header_without_a_central_record_is_found() {
     assert_eq!(
         findings_of(&built),
         [ZipInconsistency::HiddenLocalHeader {
-            offset: built.directory_start as u64 - evil.directory_start as u64
+            offset: built.directory_start as u64 - evil.directory_start as u64,
+            region: HiddenRegion::Gap,
         }]
     );
 }
@@ -234,7 +239,8 @@ fn local_header_after_a_descriptor_is_found_at_every_descriptor_width() {
         assert_eq!(
             archive.structure().findings(),
             [ZipInconsistency::HiddenLocalHeader {
-                offset: end + width
+                offset: end + width,
+                region: HiddenRegion::Gap,
             }],
             "{signature} {zip64}"
         );
@@ -313,6 +319,7 @@ fn census_fails_closed_when_it_disagrees_with_the_reader() {
             built.directory_start as u64,
             built.directory_start as u64 + 3,
         ],
+        comment: Vec::new(),
     };
     let result = Census::run(&mut cursor, &map, &Scan::default());
     assert_matches!(result, Err(ArchiveError::InvalidArchive(msg)) if msg.contains("census"));
@@ -321,6 +328,7 @@ fn census_fails_closed_when_it_disagrees_with_the_reader() {
         directory_start: built.directory_start as u64,
         archive_offset: 0,
         central_starts: vec![built.directory_start as u64],
+        comment: Vec::new(),
     };
     let scan = Scan {
         crate_duplicates: true,
@@ -528,8 +536,13 @@ fn evil_local() -> Vec<u8> {
 }
 
 fn hidden_at(offset: usize) -> ZipInconsistency {
+    hidden_in(offset, HiddenRegion::Gap)
+}
+
+fn hidden_in(offset: usize, region: HiddenRegion) -> ZipInconsistency {
     ZipInconsistency::HiddenLocalHeader {
         offset: offset as u64,
+        region,
     }
 }
 
@@ -538,7 +551,10 @@ fn local_header_at_file_start_before_the_archive_is_found() {
     let mut bytes = evil_local();
     bytes.extend(two_files().build().bytes);
     let archive = open_bytes(bytes);
-    assert_eq!(archive.structure().findings(), [hidden_at(0)]);
+    assert_eq!(
+        archive.structure().findings(),
+        [hidden_in(0, HiddenRegion::Prefix)]
+    );
 }
 
 #[test]
@@ -833,7 +849,7 @@ fn the_central_directory_is_parsed_once_and_offsets_stay_cached() {
         seeks.lock().unwrap().iter().filter(|&&s| s == at).count()
     };
 
-    // One parse by the crate plus the census walk; a re-open would add more.
+    // One parse by the crate plus the census walk at most.
     let plain_seeks = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let plain = Probe {
         inner: Cursor::new(built.bytes.clone()),
@@ -846,7 +862,9 @@ fn the_central_directory_is_parsed_once_and_offsets_stay_cached() {
         .iter()
         .filter(|&&s| s == built.directory_start as u64)
         .count();
-    assert_eq!(count_at(built.directory_start), crate_parse + 1);
+    // The window serves repeated reads of the directory without touching the
+    // reader, so it can only seek there less often than an unwindowed parse.
+    assert!(count_at(built.directory_start) <= crate_parse + 1);
 
     let before: Vec<_> = built.local_offsets.iter().map(|&o| count_at(o)).collect();
     archive
@@ -1019,7 +1037,7 @@ struct FailingPastParse {
 
 impl Read for FailingPastParse {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        if self.inner.position() >= self.directory_start {
+        if self.inner.position() + buf.len() as u64 > self.directory_start {
             let seen = self
                 .reads
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1051,12 +1069,586 @@ fn a_reader_failing_in_the_raw_directory_walk_is_an_io_error() {
         allowed,
     };
 
-    zip::ZipArchive::new(reader(usize::MAX)).unwrap();
-    let crate_reads = counter.swap(0, std::sync::atomic::Ordering::Relaxed);
+    ZipArchive::new(reader(usize::MAX)).unwrap();
+    let opening_reads = counter.swap(0, std::sync::atomic::Ordering::Relaxed);
+    assert!(opening_reads > 0);
 
-    let result = ZipArchive::new(reader(crate_reads)).map(drop);
-    assert_matches!(
-        result,
-        Err(ArchiveError::Io(e)) if e.kind() == std::io::ErrorKind::PermissionDenied
+    for allowed in 0..opening_reads {
+        counter.store(0, std::sync::atomic::Ordering::Relaxed);
+        let result = ZipArchive::new(reader(allowed)).map(drop);
+        assert_matches!(
+            result,
+            Err(ArchiveError::Io(e)) if e.kind() == std::io::ErrorKind::PermissionDenied,
+            "allowed {allowed}"
+        );
+    }
+}
+
+fn local_header(version: u16, flags: u16, method: u16, name: &[u8], compressed: u32) -> Vec<u8> {
+    let mut bytes = b"PK\x03\x04".to_vec();
+    bytes.extend_from_slice(&version.to_le_bytes());
+    bytes.extend_from_slice(&flags.to_le_bytes());
+    bytes.extend_from_slice(&method.to_le_bytes());
+    bytes.extend_from_slice(&[0; 8]);
+    bytes.extend_from_slice(&compressed.to_le_bytes());
+    bytes.extend_from_slice(&compressed.to_le_bytes());
+    bytes.extend_from_slice(&u16::try_from(name.len()).unwrap().to_le_bytes());
+    bytes.extend_from_slice(&[0, 0]);
+    bytes.extend_from_slice(name);
+    bytes
+}
+
+fn with_prefix(prefix: Vec<u8>) -> ZipArchive<Cursor<Vec<u8>>> {
+    let mut bytes = prefix;
+    bytes.extend(two_files().build().bytes);
+    open_bytes(bytes)
+}
+
+#[test]
+fn local_header_inside_the_prefix_is_found() {
+    for lead in [1usize, 100, 70_000, 131_000, 131_072 - 10, 300_000] {
+        let mut prefix = vec![b'#'; lead];
+        prefix.extend(evil_local());
+        prefix.extend(vec![b'#'; 50]);
+        let archive = with_prefix(prefix);
+        assert_eq!(
+            archive.structure().findings(),
+            [hidden_in(lead, HiddenRegion::Prefix)],
+            "{lead}"
+        );
+    }
+}
+
+#[test]
+fn prefix_headers_that_do_not_fit_or_look_odd_are_ignored() {
+    let name = b"evil.sh";
+    let cases: [(&str, Vec<u8>); 7] = [
+        ("data past the prefix", local_header(20, 0, 0, name, 1_000)),
+        ("code-like version", local_header(0x2323, 0, 0, name, 0)),
+        ("reserved flag", local_header(20, 0x0100, 0, name, 0)),
+        ("unknown method", local_header(20, 0, 0x7777, name, 0)),
+        ("nul in name", local_header(20, 0, 0, b"a\0b", 0)),
+        ("empty name", local_header(20, 0, 0, b"", 0)),
+        ("name cut by the archive", {
+            let mut cut = local_header(20, 0, 0, name, 0);
+            cut.truncate(cut.len() - 3);
+            cut
+        }),
+    ];
+    for (label, header) in cases {
+        let archive = with_prefix([b"#".to_vec(), header].concat());
+        assert!(archive.structure().findings().is_empty(), "{label}");
+    }
+}
+
+#[test]
+fn header_at_offset_zero_is_judged_like_one_in_a_gap() {
+    let name = b"evil.sh";
+    let cases: [(&str, Vec<u8>); 5] = [
+        ("version 64", local_header(64, 0, 0, name, 0)),
+        ("version 0x0314", local_header(0x0314, 0, 0, name, 0)),
+        ("flag bit 15", local_header(20, 0x8000, 0, name, 0)),
+        ("nul in name", local_header(20, 0, 0, b"a\0b", 0)),
+        (
+            "data past the archive start",
+            local_header(20, 0, 0, name, 1_000),
+        ),
+    ];
+    for (label, header) in cases {
+        let archive = with_prefix(header);
+        assert_eq!(
+            archive.structure().findings(),
+            [hidden_in(0, HiddenRegion::Prefix)],
+            "{label}"
+        );
+    }
+}
+
+/// Shifts every offset of `built` by the stub length, as `zip -A` does.
+fn with_absolute_offsets(stub: &[u8], built: &BuiltZip) -> Vec<u8> {
+    let shift = u32::try_from(stub.len()).unwrap();
+    let mut bytes = built.bytes.clone();
+    let mut at = built.directory_start;
+    let patch = |bytes: &mut Vec<u8>, at: usize| {
+        let old = u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+        bytes[at..at + 4].copy_from_slice(&(old + shift).to_le_bytes());
+    };
+    while bytes[at..at + 4] == *b"PK\x01\x02" {
+        let field = |bytes: &[u8], o: usize| {
+            usize::from(u16::from_le_bytes([bytes[at + o], bytes[at + o + 1]]))
+        };
+        let len = 46 + field(&bytes, 28) + field(&bytes, 30) + field(&bytes, 32);
+        patch(&mut bytes, at + 42);
+        at += len;
+    }
+    patch(&mut bytes, at + 16);
+    [stub.to_vec(), bytes].concat()
+}
+
+fn stub_with_embedded_signatures() -> Vec<u8> {
+    let mut stub = b"MZ\x90\x00".to_vec();
+    for i in 0u8..200 {
+        stub.extend_from_slice(&[0xB8, b'P', b'K', 3, 4, 0x48, 0x89, 0xC3 ^ i, 0x90]);
+    }
+    stub
+}
+
+#[test]
+fn self_extractor_stub_is_not_a_hidden_header() {
+    let stub = stub_with_embedded_signatures();
+    let built = two_files().build();
+
+    let relative = [stub.clone(), built.bytes.clone()].concat();
+    let absolute = with_absolute_offsets(&stub, &built);
+    for (label, bytes) in [("relative", relative), ("absolute", absolute)] {
+        let mut archive = open_bytes(bytes);
+        assert_eq!(archive.reader_mut().len(), 2, "{label}");
+        assert!(archive.structure().findings().is_empty(), "{label}");
+        let report = archive
+            .verify(
+                &config(ZipConsistencyPolicy::Enforce),
+                &VerificationOptions::default(),
+            )
+            .unwrap();
+        assert_eq!(report.status(), VerificationStatus::Pass, "{label}");
+    }
+}
+
+#[test]
+fn header_hidden_in_an_absolute_offset_stub_is_found() {
+    let mut stub = vec![b'#'; 64];
+    stub.extend(evil_local());
+    let absolute = with_absolute_offsets(&stub, &two_files().build());
+    let archive = open_bytes(absolute);
+    assert_eq!(
+        archive.structure().findings(),
+        [hidden_in(64, HiddenRegion::Prefix)]
     );
+}
+
+#[test]
+fn prefix_header_with_a_descriptor_needs_no_data_in_the_prefix() {
+    let archive = with_prefix(local_header(20, 0x0008, 8, b"evil.sh", 5_000));
+    assert_eq!(
+        archive.structure().findings(),
+        [hidden_in(0, HiddenRegion::Prefix)]
+    );
+}
+
+#[test]
+fn prefix_with_many_signature_hits_stays_bounded() {
+    let archive = with_prefix([b"#".to_vec(), b"PK\x03\x04".repeat(100_000)].concat());
+    assert!(archive.structure().findings().is_empty());
+}
+
+fn with_second_end_record(valid_tail: &[u8]) -> Vec<u8> {
+    let mut bytes = two_files().build().bytes;
+    bytes.extend_from_slice(valid_tail);
+    bytes
+}
+
+fn end_record(directory_offset: u32, comment: &[u8]) -> Vec<u8> {
+    let mut record = b"PK\x05\x06".to_vec();
+    record.extend_from_slice(&[0; 8]);
+    record.extend_from_slice(&0u32.to_le_bytes());
+    record.extend_from_slice(&directory_offset.to_le_bytes());
+    record.extend_from_slice(&u16::try_from(comment.len()).unwrap().to_le_bytes());
+    record.extend_from_slice(comment);
+    record
+}
+
+#[test]
+fn end_record_the_crate_skipped_is_found() {
+    let built = two_files().build();
+    let used_end = built.bytes.len();
+    // The last record points past the file, so the crate falls back to the
+    // record before it.
+    let archive = open_bytes(with_second_end_record(&end_record(0x00ff_ffff, b"")));
+    assert_eq!(
+        archive.structure().findings(),
+        [ZipInconsistency::IgnoredEndRecord {
+            offset: used_end as u64
+        }]
+    );
+}
+
+#[test]
+fn end_record_text_inside_a_comment_is_not_a_finding() {
+    let mut zip = two_files();
+    zip.comment = b"see PK\x05\x06 for details".to_vec();
+    let built = zip.build();
+    assert!(findings_of(&built).is_empty());
+}
+
+#[test]
+fn ignored_end_record_is_fatal_under_enforce() {
+    let temp = TempDir::new().unwrap();
+    let dest = temp.path().join("out");
+    let mut archive = open_bytes(with_second_end_record(&end_record(0x00ff_ffff, b"")));
+    let err = archive
+        .extract(
+            &dest,
+            &config(ZipConsistencyPolicy::Enforce),
+            &ExtractionOptions::default(),
+            &mut NoopProgress,
+        )
+        .unwrap_err();
+    assert_matches!(
+        err,
+        ArchiveError::ZipInconsistency(ZipInconsistency::IgnoredEndRecord { .. })
+    );
+    assert!(!dest.exists());
+}
+
+fn compress(method: u16, payload: &[u8]) -> Vec<u8> {
+    match method {
+        8 => {
+            let mut encoder =
+                flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+            std::io::Write::write_all(&mut encoder, payload).unwrap();
+            encoder.finish().unwrap()
+        }
+        12 => {
+            let mut encoder =
+                bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::default());
+            std::io::Write::write_all(&mut encoder, payload).unwrap();
+            encoder.finish().unwrap()
+        }
+        93 => zstd::encode_all(payload, 0).unwrap(),
+        _ => payload.to_vec(),
+    }
+}
+
+fn descriptor(payload: &[u8], compressed: usize) -> Vec<u8> {
+    let mut crc = flate2::Crc::new();
+    crc.update(payload);
+    let mut bytes = b"PK\x07\x08".to_vec();
+    bytes.extend_from_slice(&crc.sum().to_le_bytes());
+    bytes.extend_from_slice(&u32::try_from(compressed).unwrap().to_le_bytes());
+    bytes.extend_from_slice(&u32::try_from(payload.len()).unwrap().to_le_bytes());
+    bytes
+}
+
+/// An entry with a data descriptor whose declared range is `stream + tail`.
+fn descriptor_entry(method: u16, payload: &[u8], tail: &[u8]) -> RawEntry {
+    let mut entry = RawEntry::stored("a.txt", payload).with_descriptor(true, false);
+    entry.method = method;
+    entry.data = [compress(method, payload), tail.to_vec()].concat();
+    entry
+}
+
+fn verify_with_integrity(bytes: Vec<u8>) -> crate::VerificationReport {
+    open_bytes(bytes)
+        .verify(
+            &config(ZipConsistencyPolicy::Enforce),
+            &VerificationOptions::default()
+                .with_integrity(IntegrityCheck::DecodeToEof(DecompressionBudget::DEFAULT)),
+        )
+        .unwrap()
+}
+
+fn hidden_issues(report: &crate::VerificationReport) -> Vec<&crate::VerificationIssue> {
+    report
+        .issues()
+        .iter()
+        .filter(|i| i.category == IssueCategory::HiddenEntry)
+        .collect()
+}
+
+#[test]
+fn header_hidden_behind_a_compressed_stream_is_found_with_integrity() {
+    let payload = b"hello hello hello hello";
+    for method in [8u16, 12, 93] {
+        let stream_len = compress(method, payload).len();
+        let mut tail = [descriptor(payload, 0), evil_local()].concat();
+        if method == 93 {
+            // A bare tail makes the zstd decoder fail; a skippable frame is
+            // decoded around, so only the stream end shows what it hides.
+            let mut frame = 0x184D_2A50u32.to_le_bytes().to_vec();
+            frame.extend_from_slice(&u32::try_from(tail.len()).unwrap().to_le_bytes());
+            tail = [frame, tail].concat();
+        }
+        let built = RawZip::new(vec![descriptor_entry(method, payload, &tail)]).build();
+        let skippable_header = if method == 93 { 8 } else { 0 };
+        let expected = built.local_offsets[0] + 30 + 5 + stream_len + skippable_header + 16;
+        let report = verify_with_integrity(built.bytes.clone());
+        let found = hidden_issues(&report);
+        assert_eq!(found.len(), 1, "method {method}");
+        assert!(
+            found[0].message.contains(&format!("offset {expected} ")),
+            "method {method}: {}",
+            found[0].message
+        );
+        assert_eq!(report.status(), VerificationStatus::Fail);
+
+        let plain = open_bytes(built.bytes)
+            .verify(
+                &config(ZipConsistencyPolicy::Enforce),
+                &VerificationOptions::default(),
+            )
+            .unwrap();
+        assert!(hidden_issues(&plain).is_empty(), "method {method}");
+    }
+}
+
+#[test]
+fn header_hidden_inside_stored_data_is_found_with_integrity() {
+    for filler in [5usize, 200_000] {
+        let content = vec![b'x'; filler];
+        let whole = [content.clone(), descriptor(&content, filler), evil_local()].concat();
+        let built = RawZip::new(vec![descriptor_entry(0, &whole, &[])]).build();
+        let expected = built.local_offsets[0] + 30 + 5 + filler + 16;
+        let report = verify_with_integrity(built.bytes);
+        let found = hidden_issues(&report);
+        assert_eq!(found.len(), 1, "{filler}");
+        assert!(found[0].message.contains(&format!("offset {expected} ")));
+    }
+}
+
+#[test]
+fn ordinary_descriptor_entries_have_no_tail_finding() {
+    let payload = b"hello hello hello hello";
+    for method in [0u16, 8, 12, 93] {
+        for tail in [Vec::new(), descriptor(payload, 0)] {
+            let built = RawZip::new(vec![
+                descriptor_entry(method, payload, &tail),
+                RawEntry::stored("b.txt", b"world").with_descriptor(true, false),
+            ])
+            .build();
+            let report = verify_with_integrity(built.bytes);
+            assert!(hidden_issues(&report).is_empty(), "method {method}");
+        }
+    }
+}
+
+#[test]
+fn window_reads_match_the_underlying_reader() {
+    let data: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
+    let mut windowed = Windowed::new(Cursor::new(data.clone()));
+    let mut plain = Cursor::new(data);
+    let mut state = 0x2545_f491_4f6c_dd1du64;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    for _ in 0..2_000 {
+        let seek = match next() % 4 {
+            0 => SeekFrom::Start(next() % 210_000),
+            1 => SeekFrom::Current((next() % 9_000).cast_signed() - 4_500),
+            2 => SeekFrom::End(-((next() % 200_000).cast_signed())),
+            _ => SeekFrom::Current(0),
+        };
+        let expected = plain.seek(seek).map_err(|e| e.kind());
+        assert_eq!(
+            windowed.seek(seek).map_err(|e| e.kind()),
+            expected,
+            "{seek:?}"
+        );
+        let len = [1usize, 30, 4_095, 4_096, 9_000, 40_000][(next() % 6) as usize];
+        let mut a = vec![0u8; len];
+        let mut b = vec![0u8; len];
+        let got = windowed.read(&mut a).unwrap();
+        let want = plain.read(&mut b).unwrap();
+        // A short read is legal; what was returned must still match.
+        let n = got.min(want);
+        assert_eq!(a[..n], b[..n]);
+        plain
+            .seek(SeekFrom::Start(windowed.stream_position().unwrap()))
+            .unwrap();
+    }
+}
+
+#[test]
+fn opening_many_entries_reads_the_file_in_a_bounded_number_of_requests() {
+    let entries: Vec<_> = (0..2_000)
+        .map(|i| RawEntry::stored(&format!("f{i:04}.txt"), b"x"))
+        .collect();
+    let built = RawZip::new(entries).build();
+    let seeks = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let probe = Probe {
+        inner: Cursor::new(built.bytes),
+        seeks: seeks.clone(),
+    };
+    let mut archive = ZipArchive::new(probe).unwrap();
+    archive
+        .list(&config(ZipConsistencyPolicy::Enforce))
+        .unwrap();
+    assert!(seeks.lock().unwrap().len() < 100);
+}
+
+fn zip64_end_chain(directory_start: usize, directory_len: usize, at: usize) -> Vec<u8> {
+    let mut record = b"PK\x06\x06".to_vec();
+    record.extend_from_slice(&44u64.to_le_bytes());
+    record.extend_from_slice(&[45, 0, 45, 0]);
+    record.extend_from_slice(&[0; 8]);
+    record.extend_from_slice(&5u64.to_le_bytes());
+    record.extend_from_slice(&5u64.to_le_bytes());
+    record.extend_from_slice(&(directory_len as u64).to_le_bytes());
+    record.extend_from_slice(&(directory_start as u64).to_le_bytes());
+    let mut locator = b"PK\x06\x07".to_vec();
+    locator.extend_from_slice(&0u32.to_le_bytes());
+    locator.extend_from_slice(&(at as u64).to_le_bytes());
+    locator.extend_from_slice(&1u32.to_le_bytes());
+    let mut end = b"PK\x05\x06".to_vec();
+    end.extend_from_slice(&[0, 0, 0, 0, 0xff, 0xff, 0xff, 0xff]);
+    end.extend_from_slice(&[0xff; 8]);
+    end.extend_from_slice(&[0, 0]);
+    [record, locator, end].concat()
+}
+
+#[test]
+fn zip64_end_record_the_crate_rejected_is_not_taken_for_the_used_one() {
+    let base = two_files().build().bytes;
+    let evil = RawZip::new(vec![RawEntry::stored("evil.sh", b"echo pwned\n")]).build();
+    let lfh = evil.bytes[..evil.directory_start].to_vec();
+    let mut central = evil.bytes[evil.directory_start..evil.bytes.len() - 22].to_vec();
+    central[42..46].copy_from_slice(&u32::try_from(base.len()).unwrap().to_le_bytes());
+
+    let directory_start = base.len() + lfh.len();
+    let end_at = directory_start + central.len();
+    let bytes = [
+        base,
+        lfh,
+        central.clone(),
+        zip64_end_chain(directory_start, central.len(), end_at),
+    ]
+    .concat();
+    let mut archive = open_bytes(bytes);
+    assert_eq!(archive.reader_mut().len(), 2);
+    assert!(
+        archive
+            .structure()
+            .findings()
+            .iter()
+            .any(|f| matches!(f, ZipInconsistency::IgnoredEndRecord { .. }))
+    );
+}
+
+#[test]
+fn end_record_at_the_far_edge_of_the_search_range_is_still_compared() {
+    // The crate searches 65562 bytes back from the end; the used record sits
+    // 65560 bytes back and a rejected one closes the file.
+    let mut bytes = two_files().build().bytes;
+    let used = bytes.len() - 22;
+    bytes.extend(vec![0u8; 65_538 - 22]);
+    bytes.extend(end_record(0x00ff_ffff, b""));
+    let archive = open_bytes(bytes.clone());
+    assert_eq!(bytes.len() - used, 65_560);
+    assert_eq!(
+        archive.structure().findings(),
+        [ZipInconsistency::IgnoredEndRecord {
+            offset: bytes.len() as u64 - 22
+        }]
+    );
+}
+
+#[test]
+fn unidentified_used_record_is_ambiguous_only_with_several_candidates() {
+    let map = DirectoryMap {
+        directory_start: 999,
+        archive_offset: 0,
+        central_starts: Vec::new(),
+        comment: Vec::new(),
+    };
+    let run = |bytes: Vec<u8>| {
+        let len = bytes.len() as u64;
+        let mut findings = Findings::default();
+        find_ignored_end_records(&mut Cursor::new(bytes), len, &map, &mut findings).unwrap();
+        findings.items
+    };
+    let one = end_record(1, b"");
+    assert!(run(one.clone()).is_empty());
+    assert_eq!(
+        run([one, end_record(2, b"")].concat()),
+        [ZipInconsistency::IgnoredEndRecord { offset: 22 }]
+    );
+}
+
+struct InterruptedOnce {
+    inner: Cursor<Vec<u8>>,
+    reads: usize,
+}
+
+impl Read for InterruptedOnce {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.reads += 1;
+        if self.reads == 2 {
+            return Err(std::io::ErrorKind::Interrupted.into());
+        }
+        self.inner.read(buf)
+    }
+}
+
+impl Seek for InterruptedOnce {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        self.inner.seek(pos)
+    }
+}
+
+#[test]
+fn failed_refill_leaves_no_stale_window() {
+    let data: Vec<u8> = (0..100_000u32).map(|i| (i % 251) as u8).collect();
+    let mut windowed = Windowed::new(InterruptedOnce {
+        inner: Cursor::new(data.clone()),
+        reads: 0,
+    });
+    let mut head = [0u8; 16];
+    windowed.read_exact(&mut head).unwrap();
+    windowed.seek(SeekFrom::Start(50_000)).unwrap();
+    let mut tail = [0u8; 16];
+    windowed.read_exact(&mut tail).unwrap();
+    assert_eq!(tail, data[50_000..50_016]);
+}
+
+#[test]
+fn header_in_a_skippable_frame_between_zstd_frames_is_found() {
+    let (first, second) = (b"hello hello ".as_slice(), b"world world".as_slice());
+    let hidden = [descriptor(first, 0), evil_local()].concat();
+    let mut skippable = 0x184D_2A50u32.to_le_bytes().to_vec();
+    skippable.extend_from_slice(&u32::try_from(hidden.len()).unwrap().to_le_bytes());
+    skippable.extend(hidden);
+
+    let payload = [first, second].concat();
+    let mut entry = RawEntry::stored("a.txt", &payload).with_descriptor(true, false);
+    entry.method = 93;
+    entry.data = [compress(93, first), skippable, compress(93, second)].concat();
+    let report = verify_with_integrity(RawZip::new(vec![entry]).build().bytes);
+    assert_eq!(hidden_issues(&report).len(), 1, "{:?}", report.issues());
+}
+
+#[test]
+fn descriptor_tail_check_is_off_under_the_ignore_policy() {
+    let payload = b"hello hello hello hello";
+    let tail = [descriptor(payload, 0), evil_local()].concat();
+    let built = RawZip::new(vec![descriptor_entry(8, payload, &tail)]).build();
+    let report = open_bytes(built.bytes)
+        .verify(
+            &config(ZipConsistencyPolicy::Ignore),
+            &VerificationOptions::default()
+                .with_integrity(IntegrityCheck::DecodeToEof(DecompressionBudget::DEFAULT)),
+        )
+        .unwrap();
+    assert!(hidden_issues(&report).is_empty());
+}
+
+#[test]
+fn file_starting_with_pk_is_judged_leniently_before_the_first_entry() {
+    let prefix = [b"PK00".to_vec(), local_header(64, 0, 0, b"evil.sh", 0)].concat();
+    let built = two_files().build();
+    let relative = [prefix.clone(), built.bytes.clone()].concat();
+    let absolute = with_absolute_offsets(&prefix, &built);
+    for (label, bytes) in [("relative", relative), ("absolute", absolute)] {
+        let archive = open_bytes(bytes);
+        assert_eq!(
+            archive.structure().findings(),
+            [hidden_in(4, HiddenRegion::Prefix)],
+            "{label}"
+        );
+    }
+
+    let stub = [b"MZ00".to_vec(), local_header(64, 0, 0, b"evil.sh", 0)].concat();
+    let absolute = with_absolute_offsets(&stub, &built);
+    assert!(open_bytes(absolute).structure().findings().is_empty());
 }

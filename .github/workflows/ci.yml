@@ -318,10 +318,18 @@ jobs:
         with:
           tool: nextest
 
+      - name: Install JDK for ZIP producer tests
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: '21'
+
       - name: Build all targets
         run: cargo build --workspace --all-targets --all-features --exclude exarch-python --exclude exarch-node
 
       - name: Run tests
+        env:
+          EXARCH_REQUIRE_PRODUCERS: "1"
         run: cargo nextest run --workspace --all-features --no-fail-fast --exclude exarch-python --exclude exarch-node
 
       - name: Run doctests

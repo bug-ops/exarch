@@ -18,6 +18,7 @@ _ManifestEntryType = Literal["File", "Directory", "Symlink", "Hardlink"]
 _VerificationStatus = Literal["PASS", "FAIL", "WARNING"]
 _CheckStatus = Literal["OK", "FAILED", "WARNING", "SKIPPED"]
 _IntegrityStatus = Literal["OK", "FAILED", "INCOMPLETE", "SKIPPED"]
+_UnverifiedReason = Literal["over_budget", "resource_limit", "solid_policy", "size_ceiling", "uncovered_block_crc", "not_decodable", "no_end_marker"]  # noqa: E501  # fmt: skip
 _IssueSeverity = Literal["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
 _IssueCategory = Literal["Path Traversal", "Symlink Escape", "Hardlink Escape", "Zip Bomb", "Invalid Permissions", "Quota Exceeded", "Security Policy", "Invalid Archive", "Suspicious Path", "Executable File", "Corrupt Data", "Integrity Incomplete", "Header Mismatch", "Duplicate Entry", "Overlapping Entries", "Hidden Entry", "Name Collision"]  # noqa: E501  # fmt: skip
 _ZipConsistency = Literal["enforce", "ignore"]
@@ -613,6 +614,42 @@ class VerificationIssue:
         """Optional context."""
         ...
 
+class UnverifiedEntry:
+    """One entry the integrity check could not verify."""
+
+    @property
+    def path(self) -> str:
+        """Entry path inside the archive."""
+        ...
+
+    @property
+    def reason(self) -> _UnverifiedReason:
+        """Why the entry was not verified."""
+        ...
+
+class IntegrityGaps:
+    """What a requested integrity check left unverified."""
+
+    @property
+    def counts(self) -> dict[_UnverifiedReason, int]:
+        """Unverified items per reason; reasons with no items are absent."""
+        ...
+
+    @property
+    def entries(self) -> list[UnverifiedEntry]:
+        """Unverified entries listed by path, up to a fixed cap (see ``omitted``)."""
+        ...
+
+    @property
+    def omitted(self) -> int:
+        """Unverified entries with a path that did not fit ``entries``."""
+        ...
+
+    @property
+    def total(self) -> int:
+        """Total number of unverified items, including those without a path."""
+        ...
+
 class VerificationReport:
     """
     Verification report.
@@ -658,7 +695,20 @@ class VerificationReport:
         format has matched; plain TAR, 7z entries without CRC and zstd frames
         without a content checksum carry no payload checksum, so ``"OK"`` there
         means complete and decodable. "Decode to EOF" means the decoder's EOF:
-        bytes after the first gzip member or xz stream are not read.
+        every gzip member, bzip2 stream, xz stream and zstd frame is decoded;
+        an all-zero tail is accepted, other trailing bytes are an error.
+        """
+        ...
+
+    @property
+    def integrity_gaps(self) -> IntegrityGaps | None:
+        """
+        What the integrity check left unverified.
+
+        ``None`` unless the check was requested; an empty ``IntegrityGaps``
+        (``total == 0``) when everything was verified. The counts, the listed
+        entries and the ``Integrity Incomplete`` issue message come from the
+        same data.
         """
         ...
 

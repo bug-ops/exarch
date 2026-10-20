@@ -9,6 +9,7 @@ pub(crate) mod tar_metadata_limit;
 pub mod traits;
 pub mod zip;
 pub(crate) mod zip_structure;
+pub(crate) mod zip_tail;
 
 // Re-export main types for convenience
 pub use compression::CompressionCodec;

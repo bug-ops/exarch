@@ -13,6 +13,28 @@
 use std::io::Cursor;
 use std::io::Write;
 
+/// The host's relative path limit, written out per host and independent of the
+/// production constant so a wrong value there is caught.
+#[cfg(target_os = "linux")]
+pub const HOST_PATH_LIMIT: usize = 4095;
+#[cfg(target_os = "windows")]
+pub const HOST_PATH_LIMIT: usize = 32767;
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+pub const HOST_PATH_LIMIT: usize = 1023;
+
+/// A relative path of exactly `len` bytes made of 100-byte components.
+#[must_use]
+pub fn path_of_len(len: usize) -> String {
+    let mut parts = Vec::new();
+    let mut left = len;
+    while left > 0 {
+        let take = left.min(100);
+        parts.push("a".repeat(take));
+        left = left.saturating_sub(take + 1);
+    }
+    parts.join("/")
+}
+
 /// Creates an in-memory TAR archive from a list of `(path, content)` entries.
 ///
 /// All files are created with mode `0o644`.

@@ -11,6 +11,7 @@ use exarch_core::CreationReport;
 use exarch_core::ExtractionReport;
 use exarch_core::VerificationReport;
 use serde::Serialize;
+use std::collections::BTreeMap;
 use std::io::Stdout;
 use std::io::Write;
 use std::io::{self};
@@ -279,9 +280,23 @@ impl<W: Write> OutputFormatter for JsonFormatter<W> {
         }
 
         #[derive(Serialize)]
+        struct UnverifiedEntry {
+            path: String,
+            reason: &'static str,
+        }
+
+        #[derive(Serialize)]
+        struct IntegrityGaps {
+            counts: BTreeMap<&'static str, u64>,
+            entries: Vec<UnverifiedEntry>,
+            omitted: u64,
+        }
+
+        #[derive(Serialize)]
         struct VerificationOutput {
             status: &'static str,
             integrity_status: &'static str,
+            integrity_gaps: Option<IntegrityGaps>,
             security_status: &'static str,
             total_entries: usize,
             suspicious_entries: usize,
@@ -305,6 +320,21 @@ impl<W: Write> OutputFormatter for JsonFormatter<W> {
         let data = VerificationOutput {
             status: report.status().as_str(),
             integrity_status: report.integrity_status().as_str(),
+            integrity_gaps: report.integrity_gaps().map(|gaps| IntegrityGaps {
+                counts: gaps
+                    .counts()
+                    .map(|(reason, count)| (reason.as_str(), count))
+                    .collect(),
+                entries: gaps
+                    .entries()
+                    .iter()
+                    .map(|e| UnverifiedEntry {
+                        path: e.path().display().to_string(),
+                        reason: e.reason().as_str(),
+                    })
+                    .collect(),
+                omitted: gaps.omitted(),
+            }),
             security_status: report.security_status().as_str(),
             total_entries: report.total_entries(),
             suspicious_entries: report.suspicious_entries(),

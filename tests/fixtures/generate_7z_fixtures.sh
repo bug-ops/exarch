@@ -46,6 +46,10 @@ echo "secret content" > encrypted/secret.txt
 7z a -t7z -pPassword123 -mhe=on "$FIXTURES_DIR/encrypted.7z" encrypted/* > /dev/null
 echo "✓ Created encrypted.7z (password: Password123)"
 
+# 4b. encrypted-content-plain-header.7z - encrypted content, readable header
+7z a -t7z -ms=off -pexarch -mhe=off "$FIXTURES_DIR/encrypted-content-plain-header.7z" encrypted/* > /dev/null
+echo "✓ Created encrypted-content-plain-header.7z (password: exarch)"
+
 # 5. empty.7z - No entries
 touch empty-placeholder
 7z a -t7z "$FIXTURES_DIR/empty.7z" empty-placeholder > /dev/null

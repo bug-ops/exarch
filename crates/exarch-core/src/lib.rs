@@ -61,6 +61,7 @@ pub use error::ArchiveError;
 pub use error::CentralRecordOrdinal;
 pub use error::CompressionRatio;
 pub use error::FfiErrorMessage;
+pub use error::HiddenRegion;
 pub use error::IoContext;
 pub use error::QuotaResource;
 pub use error::Result;
@@ -93,16 +94,21 @@ pub use inspection::ArchiveEntry;
 pub use inspection::ArchiveManifest;
 pub use inspection::CheckStatus;
 pub use inspection::EntryCompression;
+pub use inspection::IntegrityGaps;
 pub use inspection::IntegrityStatus;
 pub use inspection::IssueCategory;
 pub use inspection::IssueSeverity;
 pub use inspection::LinkTarget;
 pub use inspection::ManifestEntryKind;
 pub use inspection::ManifestEntryType;
+pub use inspection::OversizedEntry;
 pub use inspection::SolidBlock;
+pub use inspection::UnverifiedEntry;
+pub use inspection::UnverifiedReason;
 pub use inspection::VerificationIssue;
 pub use inspection::VerificationReport;
 pub use inspection::VerificationStatus;
+pub use security::fs_view::LinkKind;
 
 // Re-export security types
 /// Summary statistics produced by the validation pipeline; see

@@ -161,9 +161,9 @@ use super::zip_structure;
 use super::zip_structure::Shared;
 use super::zip_structure::ZipStructure;
 
-/// Maximum symlink target length read from a ZIP entry: `PATH_MAX`, to prevent
-/// unbounded allocation.
-const MAX_SYMLINK_TARGET_SIZE: u64 = crate::security::fs_view::MAX_PATH_BYTES as u64;
+/// Maximum symlink target length read from a ZIP entry: the host's path
+/// limit, to prevent unbounded allocation.
+const MAX_SYMLINK_TARGET_SIZE: u64 = crate::security::fs_view::MAX_PATH_LEN as u64;
 
 /// Message of the `io::Error` the `zip` crate (>= 9.0.1) raises when an entry
 /// decompresses past its declared size.
@@ -797,7 +797,7 @@ impl ZipEntryAdapter {
         Self::check_symlink_target_size(size)?;
 
         // SAFETY: size has already been validated to be <=
-        // MAX_SYMLINK_TARGET_SIZE (4096) which is well within usize
+        // MAX_SYMLINK_TARGET_SIZE which is well within usize
         // range on all platforms
         #[allow(clippy::cast_possible_truncation)]
         let mut target_bytes = Vec::with_capacity(size as usize);

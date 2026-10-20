@@ -3,10 +3,12 @@
 use exarch_core::ExtractionReport as CoreReport;
 use exarch_core::formats::detect::ArchiveType as CoreArchiveType;
 use exarch_core::inspection::CheckStatus as CoreCheckStatus;
+use exarch_core::inspection::IntegrityGaps as CoreIntegrityGaps;
 use exarch_core::inspection::IntegrityStatus as CoreIntegrityStatus;
 use exarch_core::inspection::IssueCategory as CoreIssueCategory;
 use exarch_core::inspection::IssueSeverity as CoreIssueSeverity;
 use exarch_core::inspection::ManifestEntryType as CoreManifestEntryType;
+use exarch_core::inspection::UnverifiedReason as CoreUnverifiedReason;
 use exarch_core::inspection::VerificationStatus as CoreVerificationStatus;
 use napi::Error;
 use napi::Result;
@@ -186,6 +188,112 @@ impl TryFrom<CoreIntegrityStatus> for IntegrityStatus {
             CoreIntegrityStatus::Incomplete => Self::Incomplete,
             CoreIntegrityStatus::Skipped => Self::Skipped,
             other => return Err(unknown_variant("integrity status", other.as_str())),
+        })
+    }
+}
+
+/// Why part of the payload was not verified by the integrity check.
+// Values must equal `exarch_core::inspection::UnverifiedReason::as_str`.
+#[napi(string_enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnverifiedReason {
+    /// The decompression budget could not cover it.
+    #[napi(value = "over_budget")]
+    OverBudget,
+    /// Quota, ratio or decoder-memory admission refused it.
+    #[napi(value = "resource_limit")]
+    ResourceLimit,
+    /// A solid 7z block while solid archives are not allowed.
+    #[napi(value = "solid_policy")]
+    SolidPolicy,
+    /// The stream outgrew its declared size.
+    #[napi(value = "size_ceiling")]
+    SizeCeiling,
+    /// A 7z block checksum that the entries do not cover.
+    #[napi(value = "uncovered_block_crc")]
+    UncoveredBlockCrc,
+    /// An unsupported or unparseable 7z coder.
+    #[napi(value = "not_decodable")]
+    NotDecodable,
+    /// A TAR stream that ends without an end-of-archive marker.
+    #[napi(value = "no_end_marker")]
+    NoEndMarker,
+}
+
+impl TryFrom<CoreUnverifiedReason> for UnverifiedReason {
+    type Error = Error;
+
+    fn try_from(value: CoreUnverifiedReason) -> Result<Self> {
+        Ok(match value {
+            CoreUnverifiedReason::OverBudget => Self::OverBudget,
+            CoreUnverifiedReason::ResourceLimit => Self::ResourceLimit,
+            CoreUnverifiedReason::SolidPolicy => Self::SolidPolicy,
+            CoreUnverifiedReason::SizeCeiling => Self::SizeCeiling,
+            CoreUnverifiedReason::UncoveredBlockCrc => Self::UncoveredBlockCrc,
+            CoreUnverifiedReason::NotDecodable => Self::NotDecodable,
+            CoreUnverifiedReason::NoEndMarker => Self::NoEndMarker,
+            other => return Err(unknown_variant("unverified reason", other.as_str())),
+        })
+    }
+}
+
+/// Number of items left unverified for one reason.
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct UnverifiedCount {
+    /// Why the items were not verified.
+    pub reason: UnverifiedReason,
+    /// Number of items.
+    pub count: i64,
+}
+
+/// One entry the integrity check could not verify.
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct UnverifiedEntry {
+    /// Entry path inside the archive.
+    pub path: String,
+    /// Why the entry was not verified.
+    pub reason: UnverifiedReason,
+}
+
+/// What a requested integrity check left unverified.
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct IntegrityGaps {
+    /// Unverified items per reason; reasons with no items are absent.
+    pub counts: Vec<UnverifiedCount>,
+    /// Unverified entries listed by path, up to a fixed cap (see `omitted`).
+    pub entries: Vec<UnverifiedEntry>,
+    /// Entries with a path that did not fit `entries`.
+    pub omitted: i64,
+}
+
+impl TryFrom<&CoreIntegrityGaps> for IntegrityGaps {
+    type Error = Error;
+
+    fn try_from(gaps: &CoreIntegrityGaps) -> Result<Self> {
+        Ok(Self {
+            counts: gaps
+                .counts()
+                .map(|(reason, count)| {
+                    Ok(UnverifiedCount {
+                        reason: reason.try_into()?,
+                        count: saturating_i64(count),
+                    })
+                })
+                .collect::<Result<_>>()?,
+            entries: gaps
+                .entries()
+                .iter()
+                .map(|e| {
+                    Ok(UnverifiedEntry {
+                        path: e.path().to_string_lossy().into_owned(),
+                        reason: e.reason().try_into()?,
+                    })
+                })
+                .collect::<Result<_>>()?,
+            omitted: saturating_i64(gaps.omitted()),
         })
     }
 }
@@ -488,6 +596,9 @@ pub struct VerificationReport {
     pub status: VerificationStatus,
     /// Integrity check result.
     pub integrity_status: IntegrityStatus,
+    /// What the integrity check left unverified; absent unless the check was
+    /// requested.
+    pub integrity_gaps: Option<IntegrityGaps>,
     /// Security check result.
     pub security_status: CheckStatus,
     /// List of all issues found (sorted by severity).
@@ -508,6 +619,10 @@ impl TryFrom<exarch_core::inspection::VerificationReport> for VerificationReport
     fn try_from(report: exarch_core::inspection::VerificationReport) -> Result<Self> {
         let status = report.status().into();
         let integrity_status = report.integrity_status().try_into()?;
+        let integrity_gaps = report
+            .integrity_gaps()
+            .map(IntegrityGaps::try_from)
+            .transpose()?;
         let security_status = report.security_status().into();
         let total_entries = saturating_u32(report.total_entries());
         let suspicious_entries = saturating_u32(report.suspicious_entries());
@@ -516,6 +631,7 @@ impl TryFrom<exarch_core::inspection::VerificationReport> for VerificationReport
         Ok(Self {
             status,
             integrity_status,
+            integrity_gaps,
             security_status,
             issues: report
                 .into_issues()
@@ -1032,6 +1148,15 @@ mod tests {
     }
 
     #[test]
+    fn test_unverified_reason_try_from_covers_every_core_variant() {
+        let mapped: Vec<_> = CoreUnverifiedReason::ALL
+            .iter()
+            .map(|v| UnverifiedReason::try_from(*v).unwrap())
+            .collect();
+        assert_all_distinct(&mapped);
+    }
+
+    #[test]
     fn test_exhaustive_enum_from_is_injective() {
         assert_all_distinct(
             &CoreVerificationStatus::ALL
@@ -1084,6 +1209,11 @@ mod tests {
                 "IntegrityStatus",
                 CoreIntegrityStatus::ALL,
                 CoreIntegrityStatus::as_str,
+            ),
+            union_line(
+                "UnverifiedReason",
+                CoreUnverifiedReason::ALL,
+                CoreUnverifiedReason::as_str,
             ),
             union_line(
                 "ManifestEntryType",

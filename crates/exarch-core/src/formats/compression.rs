@@ -110,6 +110,11 @@ impl CompressionCodec {
     /// its own. `max_decoder_memory` bounds the xz decoder only; the other
     /// codecs are bounded by their format.
     ///
+    /// Every gzip member, bzip2 stream and xz stream is decoded, and at least
+    /// one is required. After the last one an all-zero tail is accepted (xz:
+    /// a multiple of four bytes, as the format requires); any other trailing
+    /// bytes are an error.
+    ///
     /// # Errors
     ///
     /// Returns an I/O error if the decoder cannot be initialised.
@@ -121,15 +126,15 @@ impl CompressionCodec {
     where
         R: BufRead + Send + 'r,
     {
-        // TODO(#659): single-member GzDecoder/BzDecoder drop entries in later
-        // members (extract exits 0 with missing files); use
-        // MultiGzDecoder/MultiBzDecoder or fail when compressed input remains
         Ok(match self {
-            Self::Gzip => Box::new(flate2::bufread::GzDecoder::new(input)),
-            Self::Bzip2 => Box::new(bzip2::bufread::BzDecoder::new(input)),
+            Self::Gzip => Box::new(MultiMember::<_, flate2::bufread::GzDecoder<R>>::new(input)),
+            Self::Bzip2 => Box::new(MultiMember::<_, bzip2::bufread::BzDecoder<R>>::new(input)),
             Self::Xz => {
-                let stream = xz2::stream::Stream::new_stream_decoder(max_decoder_memory, 0)
-                    .map_err(io::Error::from)?;
+                let stream = xz2::stream::Stream::new_stream_decoder(
+                    max_decoder_memory,
+                    xz2::stream::CONCATENATED,
+                )
+                .map_err(io::Error::from)?;
                 Box::new(XzLimited {
                     inner: xz2::bufread::XzDecoder::new_stream(input, stream),
                     max: max_decoder_memory,
@@ -187,6 +192,158 @@ impl CompressionCodec {
             Self::Bzip2 => "bzip2",
             Self::Xz => "xz",
             Self::Zstd => "zstd",
+        }
+    }
+}
+
+/// A decoder for exactly one member of a concatenated stream.
+trait Member<R>: Read {
+    fn start(input: R) -> Self;
+    fn finish(self) -> R;
+}
+
+impl<R: BufRead> Member<R> for flate2::bufread::GzDecoder<R> {
+    fn start(input: R) -> Self {
+        Self::new(input)
+    }
+
+    fn finish(self) -> R {
+        self.into_inner()
+    }
+}
+
+impl<R: BufRead> Member<R> for bzip2::bufread::BzDecoder<R> {
+    fn start(input: R) -> Self {
+        Self::new(input)
+    }
+
+    fn finish(self) -> R {
+        self.into_inner()
+    }
+}
+
+enum MemberState<R, D> {
+    Between(R),
+    Active(D),
+    Done,
+    /// A non-transient error; replayed on every later read so a retry can
+    /// never look like a clean end of stream.
+    Failed(io::ErrorKind, String),
+}
+
+enum Step {
+    Data(usize),
+    Eof,
+    Continue,
+}
+
+/// Decodes every member of a gzip or bzip2 stream, as `gzip -dc` and
+/// `bzip2 -dc` do, so entries in later members are never silently dropped.
+///
+/// At least one member is required: an empty or all-zero input is not a
+/// compressed stream. After the last member an all-zero tail (tape padding) is
+/// accepted; any other trailing bytes are an error. xz is stricter about the
+/// padding: the format only allows multiples of four zero bytes.
+struct MultiMember<R, D> {
+    state: MemberState<R, D>,
+    seen_member: bool,
+}
+
+impl<R, D> MultiMember<R, D> {
+    const fn new(input: R) -> Self {
+        Self {
+            state: MemberState::Between(input),
+            seen_member: false,
+        }
+    }
+}
+
+fn consume_zero_tail<R: BufRead>(input: &mut R) -> io::Result<()> {
+    loop {
+        let buf = input.fill_buf()?;
+        if buf.is_empty() {
+            return Ok(());
+        }
+        if buf.iter().any(|&b| b != 0) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "trailing data after the last compressed member",
+            ));
+        }
+        let n = buf.len();
+        input.consume(n);
+    }
+}
+
+impl<R: BufRead, D: Member<R>> MultiMember<R, D> {
+    fn step(&mut self, out: &mut [u8]) -> io::Result<Step> {
+        match &mut self.state {
+            MemberState::Done => Ok(Step::Eof),
+            MemberState::Failed(kind, message) => Err(io::Error::new(*kind, message.clone())),
+            MemberState::Between(input) => {
+                let first = input.fill_buf()?.first().copied();
+                match first {
+                    None | Some(0) if !self.seen_member => Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "no compressed member found",
+                    )),
+                    None => {
+                        self.state = MemberState::Done;
+                        Ok(Step::Eof)
+                    }
+                    Some(0) => {
+                        consume_zero_tail(input)?;
+                        self.state = MemberState::Done;
+                        Ok(Step::Eof)
+                    }
+                    Some(_) => {
+                        self.seen_member = true;
+                        if let MemberState::Between(input) =
+                            std::mem::replace(&mut self.state, MemberState::Done)
+                        {
+                            self.state = MemberState::Active(D::start(input));
+                        }
+                        Ok(Step::Continue)
+                    }
+                }
+            }
+            MemberState::Active(decoder) => {
+                let n = decoder.read(out)?;
+                if n > 0 {
+                    return Ok(Step::Data(n));
+                }
+                if let MemberState::Active(decoder) =
+                    std::mem::replace(&mut self.state, MemberState::Done)
+                {
+                    self.state = MemberState::Between(decoder.finish());
+                }
+                Ok(Step::Continue)
+            }
+        }
+    }
+}
+
+impl<R: BufRead, D: Member<R>> Read for MultiMember<R, D> {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        if out.is_empty() {
+            return Ok(0);
+        }
+        loop {
+            match self.step(out) {
+                Ok(Step::Data(n)) => return Ok(n),
+                Ok(Step::Eof) => return Ok(0),
+                Ok(Step::Continue) => {}
+                Err(e) => {
+                    // Interrupted is transient: the state is intact and a retry
+                    // resumes.
+                    if e.kind() != io::ErrorKind::Interrupted
+                        && !matches!(self.state, MemberState::Failed(..))
+                    {
+                        self.state = MemberState::Failed(e.kind(), e.to_string());
+                    }
+                    return Err(e);
+                }
+            }
         }
     }
 }
@@ -344,20 +501,158 @@ mod tests {
         }
     }
 
+    fn decode_all(codec: CompressionCodec, bytes: Vec<u8>, mem: u64) -> io::Result<Vec<u8>> {
+        let mut out = Vec::new();
+        codec
+            .decoder(std::io::Cursor::new(bytes), mem)
+            .unwrap()
+            .read_to_end(&mut out)?;
+        Ok(out)
+    }
+
     #[test]
-    fn test_decoder_ignores_bytes_after_a_single_stream() {
-        let data = b"payload".repeat(100);
-        for codec in [CompressionCodec::Gzip, CompressionCodec::Bzip2] {
-            let mut encoded = encode(codec, &data);
-            encoded.extend_from_slice(b"TRAILING-BYTES");
-            let mut out = Vec::new();
-            codec
-                .decoder(std::io::Cursor::new(encoded), TEST_MEM)
-                .unwrap()
-                .read_to_end(&mut out)
-                .unwrap();
-            assert_eq!(out, data, "{}", codec.name());
+    fn test_decoder_reads_every_concatenated_member() {
+        for codec in ALL_CODECS {
+            let mut encoded = encode(codec, b"first-");
+            encoded.extend_from_slice(&encode(codec, b"second-"));
+            encoded.extend_from_slice(&encode(codec, b"third"));
+            assert_eq!(
+                decode_all(codec, encoded, TEST_MEM).unwrap(),
+                b"first-second-third",
+                "{}",
+                codec.name()
+            );
         }
+    }
+
+    #[test]
+    fn test_decoder_accepts_zero_padding_after_last_member() {
+        for codec in [
+            CompressionCodec::Gzip,
+            CompressionCodec::Bzip2,
+            CompressionCodec::Xz,
+        ] {
+            let mut encoded = encode(codec, b"a");
+            encoded.extend_from_slice(&encode(codec, b"b"));
+            encoded.extend_from_slice(&[0u8; 512]);
+            assert_eq!(
+                decode_all(codec, encoded, TEST_MEM).unwrap(),
+                b"ab",
+                "{}",
+                codec.name()
+            );
+        }
+    }
+
+    struct FailsOnce<R> {
+        inner: R,
+        error: Option<io::ErrorKind>,
+    }
+
+    impl<R: Read> Read for FailsOnce<R> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            match self.error.take() {
+                Some(kind) => Err(io::Error::from(kind)),
+                None => self.inner.read(buf),
+            }
+        }
+    }
+
+    impl<R: BufRead> BufRead for FailsOnce<R> {
+        fn fill_buf(&mut self) -> io::Result<&[u8]> {
+            match self.error.take() {
+                Some(kind) => Err(io::Error::from(kind)),
+                None => self.inner.fill_buf(),
+            }
+        }
+
+        fn consume(&mut self, amt: usize) {
+            self.inner.consume(amt);
+        }
+    }
+
+    #[test]
+    fn test_read_error_never_turns_into_a_clean_eof() {
+        let mut encoded = encode(CompressionCodec::Gzip, b"first-");
+        encoded.extend_from_slice(&encode(CompressionCodec::Gzip, b"second"));
+        for kind in [io::ErrorKind::Interrupted, io::ErrorKind::BrokenPipe] {
+            let input = FailsOnce {
+                inner: std::io::Cursor::new(encoded.clone()),
+                error: Some(kind),
+            };
+            let mut decoder = CompressionCodec::Gzip.decoder(input, TEST_MEM).unwrap();
+            let mut out = Vec::new();
+            let mut buf = [0u8; 64];
+            let mut errors = 0;
+            loop {
+                match decoder.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => out.extend_from_slice(&buf[..n]),
+                    Err(e) => {
+                        assert_eq!(e.kind(), kind);
+                        errors += 1;
+                        if kind != io::ErrorKind::Interrupted {
+                            assert_eq!(decoder.read(&mut buf).unwrap_err().kind(), kind);
+                            return;
+                        }
+                    }
+                }
+            }
+            assert_eq!(errors, 1);
+            assert_eq!(out, b"first-second");
+        }
+    }
+
+    #[test]
+    fn test_decoder_rejects_input_without_a_first_member() {
+        for codec in [
+            CompressionCodec::Gzip,
+            CompressionCodec::Bzip2,
+            CompressionCodec::Xz,
+        ] {
+            for input in [Vec::new(), vec![0u8; 64]] {
+                assert!(
+                    decode_all(codec, input, TEST_MEM).is_err(),
+                    "{}",
+                    codec.name()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_decoder_rejects_trailing_garbage() {
+        for codec in [
+            CompressionCodec::Gzip,
+            CompressionCodec::Bzip2,
+            CompressionCodec::Xz,
+        ] {
+            for tail in [&b"TRAILING-BYTES"[..], &b"\0\0\0\0garbage"[..]] {
+                let mut encoded = encode(codec, b"payload");
+                encoded.extend_from_slice(tail);
+                assert!(
+                    decode_all(codec, encoded, TEST_MEM).is_err(),
+                    "{} {tail:?}",
+                    codec.name()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_xz_memlimit_applies_to_later_stream() {
+        let encode_at = |preset: u32, data: &[u8]| {
+            let mut enc = xz2::write::XzEncoder::new(Vec::new(), preset);
+            enc.write_all(data).unwrap();
+            enc.finish().unwrap()
+        };
+        let mut encoded = encode_at(0, b"first");
+        encoded.extend_from_slice(&encode_at(9, b"second"));
+        let err = decode_all(CompressionCodec::Xz, encoded, 16 * 1024 * 1024).unwrap_err();
+        assert!(
+            err.get_ref()
+                .is_some_and(<dyn std::error::Error + Send + Sync>::is::<DecoderMemoryExceeded>)
+        );
     }
 
     #[test]

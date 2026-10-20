@@ -8,10 +8,9 @@
 //!
 //! Status is derived from the issues the pass produces: a checksum or decoder
 //! failure is a High `CorruptData` issue; anything that could not be verified
-//! is counted per [`Unverified`] reason and reported as one archive-level
+//! is counted per [`UnverifiedReason`] and reported as one archive-level
 //! Medium `IntegrityIncomplete` issue.
 
-use std::collections::BTreeMap;
 use std::fmt;
 use std::io;
 use std::io::Read;
@@ -30,44 +29,13 @@ use crate::formats::tar_metadata_limit::budget_violation;
 use crate::formats::zip::ZIP_DECLARED_SIZE_EXCEEDED;
 use crate::formats::zip::ZIP_INVALID_CHECKSUM;
 use crate::inspection::manifest::EntryCompression;
+use crate::inspection::report::IntegrityGaps;
 use crate::inspection::report::IssueCategory;
 use crate::inspection::report::IssueSeverity;
+use crate::inspection::report::UnverifiedReason;
 use crate::inspection::report::VerificationIssue;
 use crate::security::quota::QuotaTracker;
 use crate::security::zipbomb::validate_entry_compression;
-
-/// Why part of the payload was not verified.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Unverified {
-    /// The decompression budget could not cover it.
-    OverBudget,
-    /// Quota, ratio or decoder-memory admission refused it.
-    ResourceLimit,
-    /// A solid 7z block while `allow_solid_archives` is off.
-    SolidPolicy,
-    /// The stream outgrew its declared size.
-    SizeCeiling,
-    /// A 7z block checksum that the entries do not cover.
-    UncoveredBlockCrc,
-    /// An unsupported or unparseable 7z coder.
-    NotDecodable,
-    /// A TAR stream that ends without an end-of-archive marker.
-    NoEndMarker,
-}
-
-impl fmt::Display for Unverified {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::OverBudget => "over budget",
-            Self::ResourceLimit => "resource limit",
-            Self::SolidPolicy => "solid archive with allow_solid_archives off",
-            Self::SizeCeiling => "declared size exceeded",
-            Self::UncoveredBlockCrc => "block checksum not reachable",
-            Self::NotDecodable => "not decodable",
-            Self::NoEndMarker => "no end-of-archive marker",
-        })
-    }
-}
 
 /// A typed decoding failure; the one table in
 /// [`IntegrityPass::record`] maps it to an issue.
@@ -188,7 +156,7 @@ impl DecodeFailure {
 #[derive(Debug)]
 pub enum DecodeOutcome {
     Verified,
-    Unverified(Unverified),
+    Unverified(UnverifiedReason),
     Failed(DecodeFailure),
 }
 
@@ -227,6 +195,7 @@ struct EntrySlot {
 pub struct IntegrityOutcome {
     pub entry_issues: Vec<Vec<VerificationIssue>>,
     pub archive_issues: Vec<VerificationIssue>,
+    pub gaps: IntegrityGaps,
 }
 
 /// Decodes payloads during listing and collects the integrity issues.
@@ -237,7 +206,7 @@ pub struct IntegrityPass<'c> {
     buffer: Box<CopyBuffer>,
     slots: Vec<EntrySlot>,
     archive_issues: Vec<VerificationIssue>,
-    unverified: BTreeMap<Unverified, u64>,
+    gaps: IntegrityGaps,
 }
 
 impl<'c> IntegrityPass<'c> {
@@ -249,7 +218,7 @@ impl<'c> IntegrityPass<'c> {
             buffer: Box::new(CopyBuffer::new()),
             slots: Vec::new(),
             archive_issues: Vec::new(),
-            unverified: BTreeMap::new(),
+            gaps: IntegrityGaps::default(),
         }
     }
 
@@ -278,14 +247,14 @@ impl<'c> IntegrityPass<'c> {
         self.slots[slot.0].issues.push(issue);
     }
 
-    pub fn push_archive_issue(&mut self, issue: VerificationIssue) {
-        self.archive_issues.push(issue);
+    /// Counts unverified items that belong to no single entry.
+    pub fn count_unverified(&mut self, reason: UnverifiedReason, items: u64) {
+        self.gaps.count_items(reason, items);
     }
 
-    pub fn count_unverified(&mut self, reason: Unverified, items: u64) {
-        if items > 0 {
-            *self.unverified.entry(reason).or_default() += items;
-        }
+    /// Marks the entry at `path` as unverified, listing it in the report.
+    pub fn mark_unverified(&mut self, reason: UnverifiedReason, path: &Path) {
+        self.gaps.mark_entry(reason, path);
     }
 
     /// Reserves `bytes` of the budget; an entry that does not fit leaves the
@@ -309,10 +278,10 @@ impl<'c> IntegrityPass<'c> {
         charge: Charge,
     ) -> DecodeOutcome {
         if !self.is_admitted(slot) {
-            return DecodeOutcome::Unverified(Unverified::ResourceLimit);
+            return DecodeOutcome::Unverified(UnverifiedReason::ResourceLimit);
         }
         if charge == Charge::Declared && !self.try_charge(declared) {
-            return DecodeOutcome::Unverified(Unverified::OverBudget);
+            return DecodeOutcome::Unverified(UnverifiedReason::OverBudget);
         }
         match copy_bounded(reader, &mut io::sink(), &mut self.buffer, Some(declared)) {
             Ok(_) => DecodeOutcome::Verified,
@@ -342,7 +311,7 @@ impl<'c> IntegrityPass<'c> {
     pub fn record(&mut self, slot: Slot, path: &Path, outcome: DecodeOutcome) -> Result<()> {
         match outcome {
             DecodeOutcome::Verified => {}
-            DecodeOutcome::Unverified(reason) => self.count_unverified(reason, 1),
+            DecodeOutcome::Unverified(reason) => self.mark_unverified(reason, path),
             DecodeOutcome::Failed(failure) => self.record_failure(Some((slot, path)), failure)?,
         }
         Ok(())
@@ -363,23 +332,29 @@ impl<'c> IntegrityPass<'c> {
             | DecodeFailure::Truncated { .. } => (corrupt_issue(&failure, entry_path), None),
             DecodeFailure::DeclaredSizeOverrun { declared } => (
                 VerificationIssue::from_error(&declared_size_exceeded(declared), entry_path),
-                Some(Unverified::SizeCeiling),
+                Some(UnverifiedReason::SizeCeiling),
             ),
             DecodeFailure::ResourceLimit(e) => (
                 VerificationIssue::from_error(&e, entry_path),
-                Some(Unverified::ResourceLimit),
+                Some(UnverifiedReason::ResourceLimit),
             ),
             DecodeFailure::NotDecodable(e) => (
                 VerificationIssue::from_error(&e, entry_path),
-                Some(Unverified::NotDecodable),
+                Some(UnverifiedReason::NotDecodable),
             ),
         };
-        match entry {
-            Some((slot, _)) => self.push_issue(slot, issue),
-            None => self.archive_issues.push(issue),
-        }
-        if let Some(reason) = unverified {
-            self.count_unverified(reason, 1);
+        match (entry, unverified) {
+            (Some((slot, path)), Some(reason)) => {
+                self.push_issue(slot, issue);
+                self.mark_unverified(reason, path);
+            }
+            (Some((slot, _)), None) => self.push_issue(slot, issue),
+            (None, reason) => {
+                self.archive_issues.push(issue);
+                if let Some(reason) = reason {
+                    self.count_unverified(reason, 1);
+                }
+            }
         }
         Ok(())
     }
@@ -399,9 +374,9 @@ impl<'c> IntegrityPass<'c> {
             TarTrailer::DrainToDecoderEof => self.drain_to_decoder_eof(reader),
         };
         match outcome {
-            Ok(0) => self.count_unverified(Unverified::NoEndMarker, 1),
+            Ok(0) => self.count_unverified(UnverifiedReason::NoEndMarker, 1),
             Ok(_) => {}
-            Err(TrailerError::OverBudget) => self.count_unverified(Unverified::OverBudget, 1),
+            Err(TrailerError::OverBudget) => self.count_unverified(UnverifiedReason::OverBudget, 1),
             Err(TrailerError::Failed(failure)) => self.record_failure(None, failure)?,
         }
         Ok(())
@@ -429,26 +404,18 @@ impl<'c> IntegrityPass<'c> {
 
     /// Adds the single archive-level `IntegrityIncomplete` issue when anything
     /// was left unverified, and returns the collected issues.
-    // TODO(#660): expose per-reason counts and unverified entry paths as typed
-    // report data instead of only the IntegrityIncomplete message
     pub fn finish(mut self) -> IntegrityOutcome {
-        if !self.unverified.is_empty() {
-            let total: u64 = self.unverified.values().sum();
-            let detail = self
-                .unverified
-                .iter()
-                .map(|(reason, count)| format!("{reason}: {count}"))
-                .collect::<Vec<_>>()
-                .join(", ");
+        if let Some(message) = self.gaps.message() {
             self.archive_issues.push(VerificationIssue::new(
                 IssueSeverity::Medium,
                 IssueCategory::IntegrityIncomplete,
-                format!("Integrity check incomplete: {total} item(s) not verified ({detail})"),
+                message,
             ));
         }
         IntegrityOutcome {
             entry_issues: self.slots.into_iter().map(|s| s.issues).collect(),
             archive_issues: self.archive_issues,
+            gaps: self.gaps,
         }
     }
 }
@@ -504,8 +471,11 @@ impl<'c> ContentPolicy<'_, 'c> {
 mod tests {
     use std::assert_matches;
 
+    use std::path::PathBuf;
+
     use super::*;
     use crate::formats::tar_metadata_limit::DecoderMemoryExceeded;
+    use crate::inspection::report::MAX_LISTED_UNVERIFIED;
 
     fn read_failure(e: io::Error) -> DecodeFailure {
         DecodeFailure::from_copy(CopyError::Read(e), 10)
@@ -658,9 +628,9 @@ mod tests {
     fn test_finish_reports_one_medium_issue_listing_every_reason() {
         let config = SecurityConfig::default().validate().unwrap();
         let mut pass = IntegrityPass::new(&config, DecompressionBudget::DEFAULT);
-        pass.count_unverified(Unverified::OverBudget, 2);
-        pass.count_unverified(Unverified::SolidPolicy, 1);
-        pass.count_unverified(Unverified::NoEndMarker, 0);
+        pass.count_unverified(UnverifiedReason::OverBudget, 2);
+        pass.count_unverified(UnverifiedReason::SolidPolicy, 1);
+        pass.count_unverified(UnverifiedReason::NoEndMarker, 0);
 
         let outcome = pass.finish();
         assert_eq!(outcome.archive_issues.len(), 1);
@@ -670,6 +640,70 @@ mod tests {
         assert!(issue.message.contains("3 item(s)"), "{}", issue.message);
         assert!(issue.message.contains("over budget: 2"));
         assert!(!issue.message.contains("no end-of-archive"));
+    }
+
+    #[test]
+    fn test_gaps_list_marked_entries_and_count_the_rest() {
+        let config = SecurityConfig::default().validate().unwrap();
+        let mut pass = IntegrityPass::new(&config, DecompressionBudget::DEFAULT);
+        pass.mark_unverified(UnverifiedReason::SolidPolicy, Path::new("a"));
+        pass.mark_unverified(UnverifiedReason::OverBudget, Path::new("b"));
+        pass.count_unverified(UnverifiedReason::NoEndMarker, 1);
+
+        let outcome = pass.finish();
+        let gaps = &outcome.gaps;
+        assert_eq!(gaps.total(), 3);
+        assert_eq!(gaps.count(UnverifiedReason::SolidPolicy), 1);
+        assert_eq!(gaps.count(UnverifiedReason::NoEndMarker), 1);
+        let listed: Vec<_> = gaps
+            .entries()
+            .iter()
+            .map(|e| (e.path().to_path_buf(), e.reason()))
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                (PathBuf::from("a"), UnverifiedReason::SolidPolicy),
+                (PathBuf::from("b"), UnverifiedReason::OverBudget),
+            ]
+        );
+        assert_eq!(gaps.omitted(), 0);
+        assert!(outcome.archive_issues[0].message.contains("3 item(s)"));
+    }
+
+    #[test]
+    fn test_gaps_cap_listed_entries_and_count_the_overflow() {
+        let config = SecurityConfig::default().validate().unwrap();
+        let mut pass = IntegrityPass::new(&config, DecompressionBudget::DEFAULT);
+        let over = 5;
+        for i in 0..MAX_LISTED_UNVERIFIED + over {
+            pass.mark_unverified(UnverifiedReason::OverBudget, Path::new(&i.to_string()));
+        }
+
+        let gaps = pass.finish().gaps;
+        assert_eq!(gaps.entries().len(), MAX_LISTED_UNVERIFIED);
+        assert_eq!(gaps.omitted(), over as u64);
+        assert_eq!(
+            gaps.count(UnverifiedReason::OverBudget),
+            (MAX_LISTED_UNVERIFIED + over) as u64
+        );
+    }
+
+    #[test]
+    fn test_recorded_unverified_outcome_lists_the_entry() {
+        let config = SecurityConfig::default().validate().unwrap();
+        let mut pass = IntegrityPass::new(&config, DecompressionBudget::DEFAULT);
+        let slot = pass.begin_entry(1, &EntryCompression::Unknown);
+
+        pass.record(
+            slot,
+            Path::new("x"),
+            DecodeOutcome::Unverified(UnverifiedReason::OverBudget),
+        )
+        .unwrap();
+
+        let gaps = pass.finish().gaps;
+        assert_eq!(gaps.entries()[0].path(), Path::new("x"));
     }
 
     #[test]
@@ -740,7 +774,7 @@ mod tests {
         let outcome = pass.decode(slot, &mut io::Cursor::new(vec![0u8; 8]), 8, Charge::Free);
         assert_matches!(
             outcome,
-            DecodeOutcome::Unverified(Unverified::ResourceLimit)
+            DecodeOutcome::Unverified(UnverifiedReason::ResourceLimit)
         );
     }
 

@@ -108,6 +108,31 @@ closed_enum! {
     }
 }
 
+closed_enum! {
+    /// Part of a ZIP file in which an unmapped local header was found.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::HiddenRegion;
+    ///
+    /// assert_eq!(HiddenRegion::Prefix.to_string(), "before the archive start");
+    /// ```
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[non_exhaustive]
+    pub enum HiddenRegion {
+        /// Bytes before the archive start, such as a self-extractor stub
+        Prefix => "before the archive start",
+
+        /// Bytes between entries or before the central directory
+        Gap => "between entries",
+
+        /// Bytes behind the end of the compressed stream of a data-descriptor
+        /// entry, inside the range its central directory record declares
+        DescriptorTail => "inside the range of a data-descriptor entry",
+    }
+}
+
 /// A structural finding that makes a ZIP archive ambiguous between readers.
 ///
 /// Names are the raw central directory bytes decoded lossily; the `zip`
@@ -157,6 +182,16 @@ pub enum ZipInconsistency {
     HiddenLocalHeader {
         /// Absolute offset of the unmapped header.
         offset: u64,
+        /// Part of the file the header was found in.
+        region: HiddenRegion,
+    },
+
+    /// An end of central directory record other than the one the reader used
+    /// follows it, so a reader that picks another candidate sees another
+    /// directory.
+    IgnoredEndRecord {
+        /// Absolute offset of the ignored record.
+        offset: u64,
     },
 
     /// The central directory holds more records than its end record counts.
@@ -192,12 +227,14 @@ impl std::fmt::Display for ZipInconsistency {
                 write!(f, "duplicate entry name {name:?} (record {record})")
             }
             Self::OverlappingEntries => f.write_str("entry data ranges overlap"),
-            Self::HiddenLocalHeader { offset } => {
-                write!(
-                    f,
-                    "local header at offset {offset} is not in the central directory"
-                )
-            }
+            Self::HiddenLocalHeader { offset, region } => write!(
+                f,
+                "local header at offset {offset} ({region}) is not in the central directory"
+            ),
+            Self::IgnoredEndRecord { offset } => write!(
+                f,
+                "end of central directory record at offset {offset} is ignored by the reader"
+            ),
             Self::UncountedCentralRecords { counted, found } => write!(
                 f,
                 "central directory holds {found} records but the end record counts {counted}"
@@ -236,8 +273,16 @@ mod tests {
     #[test]
     fn findings_render_their_positions() {
         assert_eq!(
-            ZipInconsistency::HiddenLocalHeader { offset: 45 }.to_string(),
-            "local header at offset 45 is not in the central directory"
+            ZipInconsistency::HiddenLocalHeader {
+                offset: 45,
+                region: HiddenRegion::Gap
+            }
+            .to_string(),
+            "local header at offset 45 (between entries) is not in the central directory"
+        );
+        assert_eq!(
+            ZipInconsistency::IgnoredEndRecord { offset: 7 }.to_string(),
+            "end of central directory record at offset 7 is ignored by the reader"
         );
         assert_eq!(
             ZipInconsistency::UncountedCentralRecords {

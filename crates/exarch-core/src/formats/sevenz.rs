@@ -51,6 +51,21 @@
 //! Use `SecurityConfig::allow_solid_archives = true` to enable extraction with
 //! memory limits enforced via `max_solid_block_memory`.
 //!
+//! # Decoder Memory and Block Layout
+//!
+//! `extract` and `verify` share one admission step, `sevenz_refusals`. Before
+//! any byte is decoded, every block's coder memory (LZMA/LZMA2 dictionary,
+//! `PPMd` memory) is checked against `max_decoder_memory`, and blocks with an
+//! unknown coder, AES content encryption, or a stream-less entry between their
+//! stream files are refused. Extraction decodes on one thread because the
+//! multi-threaded LZMA2 decoder buffers whole work units with no output bound.
+//!
+//! **Residual (upstream)**: an encoded (compressed) archive header is decoded
+//! inside `Archive::read` with sevenz-rust2's unlimited memory limit, before
+//! exarch sees any block, so a `PPMd` or LZMA2 header coder can allocate up to
+//! about 4 GiB. `max_decoder_memory` does not cover it until sevenz-rust2
+//! exposes a limit on `Archive::read`.
+//!
 //! # Examples
 //!
 //! Basic extraction:
@@ -138,7 +153,9 @@ use crate::inspection::integrity::DecodeFailure;
 use crate::inspection::integrity::DecodeOutcome;
 use crate::inspection::integrity::IntegrityPass;
 use crate::inspection::integrity::Slot;
-use crate::inspection::integrity::Unverified;
+use crate::inspection::report::IssueCategory;
+use crate::inspection::report::IssueSeverity;
+use crate::inspection::report::UnverifiedReason;
 use crate::inspection::report::VerificationIssue;
 use crate::security::EntryValidator;
 use crate::security::quota::QuotaPermit;
@@ -352,38 +369,72 @@ fn coder_memory(coder: &sevenz_rust2::Coder, unpack_size: u64) -> Option<u64> {
     }
 }
 
-/// Admits a 7z block for decoding and returns the bytes to charge to a
-/// decompression budget.
+/// What the file table says about one block, gathered in a single pass.
+#[derive(Debug, Default, Clone, Copy)]
+struct BlockShape {
+    /// Sum of the declared sizes of the files mapped to the block.
+    declared_size: u64,
+    /// A stream-less file sits between the block's stream files.
+    interleaved_entry: bool,
+}
+
+/// Maps every block to its [`BlockShape`] through
+/// `stream_map.file_block_index`.
 ///
-/// Decoder memory over `max_decoder_memory` is refused before any byte is
-/// decoded. The charge is the largest coder output, so size-preserving filters
-/// (BCJ, Delta) are not counted twice.
+/// sevenz-rust2 hands a block the contiguous span of `num_unpack_sub_streams`
+/// files after its first file, so a stream-less file mapped to a block (the
+/// map leaves leading and trailing ones unmapped) pushes the block's last
+/// stream file out of the span and the decoder skips it.
+fn block_shapes(archive: &Archive) -> Vec<BlockShape> {
+    let mut shapes = vec![BlockShape::default(); archive.blocks.len()];
+    for (index, file) in archive.files.iter().enumerate() {
+        if let Some(block) = archive.stream_map.file_block_index[index] {
+            let shape = &mut shapes[block];
+            shape.declared_size = shape.declared_size.saturating_add(file.size);
+            shape.interleaved_entry |= !file.has_stream;
+        }
+    }
+    shapes
+}
+
+/// Bytes to charge to a decompression budget for decoding `block`.
 ///
-/// # Errors
-///
-/// Returns [`ArchiveError::QuotaExceeded`] when the decoder memory exceeds the
-/// limit and [`ArchiveError::InvalidArchive`] for an unknown method or
-/// unparseable coder properties.
-// TODO(#657): extract has the same exposure; reuse this in `extract` Step 0
-pub(crate) fn admit_sevenz_block(
-    block: &sevenz_rust2::Block,
-    config: &SecurityConfig<Validated>,
-) -> Result<u64> {
-    let charge = block
+/// The charge is the largest coder output, so size-preserving filters (BCJ,
+/// Delta) are not counted twice.
+fn block_charge(block: &sevenz_rust2::Block) -> u64 {
+    block
         .coders
         .iter()
         .map(|coder| block.get_unpack_size_for_coder(coder))
         .max()
-        .unwrap_or_default();
+        .unwrap_or_default()
+}
+
+/// Admits a 7z block for decoding.
+///
+/// Decoder memory over `max_decoder_memory` is refused before any byte is
+/// decoded. LZMA2 is built without an output bound, so its window can grow to
+/// the block's output whatever size its own stream declares; the larger of the
+/// block's unpack size and its files' declared sizes is used.
+///
+/// # Errors
+///
+/// Returns [`ArchiveError::QuotaExceeded`] when the decoder memory exceeds the
+/// limit, [`ArchiveError::SecurityViolation`] for AES content encryption, and
+/// [`ArchiveError::InvalidArchive`] for an unknown method, unparseable coder
+/// properties or a stream-less file inside the block.
+fn admit_sevenz_block(
+    block: &sevenz_rust2::Block,
+    shape: BlockShape,
+    config: &SecurityConfig<Validated>,
+) -> Result<()> {
+    let output = block_charge(block).max(shape.declared_size);
     let mut memory: u64 = 0;
     for coder in &block.coders {
         if coder.encoder_method_id() == sevenz_rust2::EncoderMethod::ID_AES256_SHA256 {
             return Err(common::encrypted_archive_error());
         }
-        // LZMA2 is built without an output bound, so its window can grow to the
-        // block's output whatever size its own stream declares; use the
-        // largest.
-        let needed = coder_memory(coder, charge).ok_or_else(|| {
+        let needed = coder_memory(coder, output).ok_or_else(|| {
             ArchiveError::InvalidArchive(
                 "7z block uses an unsupported coder or malformed coder properties".into(),
             )
@@ -397,7 +448,128 @@ pub(crate) fn admit_sevenz_block(
             },
         });
     }
-    Ok(charge)
+    if shape.interleaved_entry {
+        return Err(ArchiveError::InvalidArchive(
+            "7z block interleaves a stream-less entry, so a file of the block would be skipped"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Part of a 7z archive that a policy refuses to decode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RefusalScope {
+    /// The whole archive.
+    Archive,
+    /// One block, by index.
+    Block(usize),
+}
+
+/// A refusal of extraction, shared by `extract` and `verify`.
+#[derive(Debug)]
+pub(crate) struct SevenZRefusal {
+    scope: RefusalScope,
+    error: ArchiveError,
+}
+
+impl SevenZRefusal {
+    /// Why the payload the refusal covers stays unverified.
+    fn unverified(&self) -> UnverifiedReason {
+        match (&self.error, self.scope) {
+            (ArchiveError::QuotaExceeded { .. }, _) => UnverifiedReason::ResourceLimit,
+            (ArchiveError::SecurityViolation { .. }, RefusalScope::Archive) => {
+                UnverifiedReason::SolidPolicy
+            }
+            _ => UnverifiedReason::NotDecodable,
+        }
+    }
+
+    /// The error `extract` fails with.
+    pub(crate) fn into_error(self) -> ArchiveError {
+        self.error
+    }
+}
+
+/// Everything `extract` refuses in a parsed 7z archive, in the order it checks.
+///
+/// This is the single admission point: `extract` fails on the first refusal
+/// and `verify` reports each, so the two cannot disagree. It covers the solid
+/// policy and, per block, decoder memory, unknown coders, AES content
+/// encryption and stream-less files interleaved in a block.
+///
+/// The iterator is lazy: `extract` takes only the first refusal and stops
+/// checking blocks there.
+pub(crate) fn iter_sevenz_refusals<'a>(
+    archive: &'a Archive,
+    config: &'a SecurityConfig<Validated>,
+) -> impl Iterator<Item = SevenZRefusal> + 'a {
+    let solid = check_solid_policy(
+        archive.is_solid,
+        archive.files.iter().map(|f| f.size),
+        config,
+    )
+    .err()
+    .map(|error| SevenZRefusal {
+        scope: RefusalScope::Archive,
+        error,
+    });
+    let blocks = archive
+        .blocks
+        .iter()
+        .zip(block_shapes(archive))
+        .enumerate()
+        .filter_map(move |(index, (block, shape))| {
+            admit_sevenz_block(block, shape, config)
+                .err()
+                .map(|error| SevenZRefusal {
+                    scope: RefusalScope::Block(index),
+                    error,
+                })
+        });
+    solid.into_iter().chain(blocks)
+}
+
+/// Every refusal of [`iter_sevenz_refusals`], for `verify` to report.
+pub(crate) fn sevenz_refusals(
+    archive: &Archive,
+    config: &SecurityConfig<Validated>,
+) -> Vec<SevenZRefusal> {
+    iter_sevenz_refusals(archive, config).collect()
+}
+
+/// Most refusals `verify` lists; the rest are summarized in one issue.
+const MAX_REFUSAL_ISSUES: usize = 32;
+
+/// Archive-level `verify` issues for the refusals, capped at
+/// [`MAX_REFUSAL_ISSUES`].
+pub(crate) fn refusal_issues(refusals: &[SevenZRefusal]) -> Vec<VerificationIssue> {
+    let mut issues: Vec<_> = refusals
+        .iter()
+        .take(MAX_REFUSAL_ISSUES)
+        .map(|r| VerificationIssue::from_error(&r.error, None))
+        .collect();
+    if let Some(omitted) = refusals.len().checked_sub(MAX_REFUSAL_ISSUES)
+        && omitted > 0
+    {
+        issues.push(VerificationIssue::new(
+            IssueSeverity::Info,
+            IssueCategory::InvalidArchive,
+            format!("{omitted} further 7z refusals are not listed"),
+        ));
+    }
+    issues
+}
+
+/// Builds the reader that decodes blocks for `extract`.
+///
+/// Every `ArchiveReader` goes through here: its default thread count is the
+/// machine's parallelism, which selects the multi-threaded LZMA2 decoder that
+/// buffers whole work units in memory with no output bound.
+fn single_threaded_reader<R: Read + Seek>(archive: Archive, source: R) -> ArchiveReader<R> {
+    let mut reader = ArchiveReader::from_archive(archive, source, Password::empty());
+    reader.set_thread_count(1);
+    reader
 }
 
 /// Per-block state while decoding one 7z block for an integrity pass.
@@ -414,7 +586,7 @@ struct BlockScan<'a, 'c> {
 enum BlockStop {
     /// A decode failure left the rest of the block undecodable; its remaining
     /// payload entries are unverified for this reason.
-    Abandoned(Unverified),
+    Abandoned(UnverifiedReason),
     /// A disk read failed; not a property of the archive.
     Fatal(ArchiveError),
 }
@@ -425,7 +597,7 @@ impl BlockScan<'_, '_> {
         let file_index = self.next_file;
         self.next_file += 1;
         let Some(Some(slot)) = self.slots.get(file_index).copied() else {
-            return true;
+            return !is_sevenz_payload(file) || skip_payload(file, reader);
         };
         if !is_sevenz_payload(file) {
             return true;
@@ -435,12 +607,12 @@ impl BlockScan<'_, '_> {
         let outcome = self.pass.decode(slot, reader, file.size, Charge::Free);
         let abandon = match &outcome {
             DecodeOutcome::Failed(DecodeFailure::ResourceLimit(_)) => {
-                Some(BlockStop::Abandoned(Unverified::ResourceLimit))
+                Some(BlockStop::Abandoned(UnverifiedReason::ResourceLimit))
             }
             DecodeOutcome::Verified
             | DecodeOutcome::Unverified(_)
             | DecodeOutcome::Failed(DecodeFailure::Checksum | DecodeFailure::Io(_)) => None,
-            DecodeOutcome::Failed(_) => Some(BlockStop::Abandoned(Unverified::NotDecodable)),
+            DecodeOutcome::Failed(_) => Some(BlockStop::Abandoned(UnverifiedReason::NotDecodable)),
         };
         if let Err(e) = self.pass.record(slot, &path, outcome) {
             self.stop = Some(BlockStop::Fatal(e));
@@ -450,6 +622,13 @@ impl BlockScan<'_, '_> {
         self.stop = abandon;
         keep_going
     }
+}
+
+/// Reads past a payload file that has no integrity slot (an entry the listing
+/// dropped) so the rest of its solid block stays aligned; returns whether the
+/// scan can continue.
+fn skip_payload(file: &sevenz_rust2::ArchiveEntry, reader: &mut dyn Read) -> bool {
+    std::io::copy(&mut reader.take(file.size), &mut std::io::sink()).is_ok()
 }
 
 fn is_sevenz_payload(file: &sevenz_rust2::ArchiveEntry) -> bool {
@@ -501,51 +680,69 @@ pub(crate) fn verify_sevenz_blocks<R: Read + Seek>(
     pass: &mut IntegrityPass<'_>,
     slots: &[Option<Slot>],
 ) -> Result<()> {
-    if let Err(refusal) = check_solid_policy(
-        archive.is_solid,
-        archive.files.iter().map(|f| f.size),
-        pass.config(),
-    ) {
-        let payload = archive
-            .files
-            .iter()
-            .filter(|f| is_sevenz_payload(f))
-            .count() as u64;
-        if matches!(refusal, ArchiveError::SecurityViolation { .. }) {
-            pass.count_unverified(Unverified::SolidPolicy, payload);
-        } else {
-            pass.push_archive_issue(VerificationIssue::from_error(&refusal, None));
-            pass.count_unverified(Unverified::ResourceLimit, payload);
+    let payload = payload_by_block(archive, slots);
+    let mut refused = vec![None; archive.blocks.len()];
+    for refusal in sevenz_refusals(archive, pass.config()) {
+        match refusal.scope {
+            RefusalScope::Archive => {
+                let indices = payload.iter().flatten().map(|&(index, _)| index);
+                mark_files(pass, archive, refusal.unverified(), indices);
+                return Ok(());
+            }
+            RefusalScope::Block(index) => refused[index] = Some(refusal.unverified()),
         }
-        return Ok(());
     }
 
-    for (block_index, payload) in payload_by_block(archive, slots).iter().enumerate() {
-        if !payload.is_empty() {
-            verify_sevenz_block(archive, source, pass, slots, block_index, payload)?;
+    for (block_index, files) in payload.iter().enumerate() {
+        if files.is_empty() {
+            continue;
+        }
+        match refused[block_index] {
+            Some(reason) => {
+                mark_files(pass, archive, reason, files.iter().map(|&(index, _)| index));
+            }
+            None => verify_sevenz_block(archive, source, pass, slots, block_index, files)?,
         }
     }
     Ok(())
 }
 
-/// Records a block failure against `lead` and counts `others` further entries
-/// under the matching reason.
+/// Path of the archive file at `index`, as listed in the manifest.
+fn file_path(archive: &Archive, index: usize) -> PathBuf {
+    PathBuf::from(common::normalize_entry_name(&archive.files[index].name))
+}
+
+/// Marks the archive files at `indices` as unverified for `reason`.
+fn mark_files(
+    pass: &mut IntegrityPass<'_>,
+    archive: &Archive,
+    reason: UnverifiedReason,
+    indices: impl Iterator<Item = usize>,
+) {
+    for index in indices {
+        pass.mark_unverified(reason, &file_path(archive, index));
+    }
+}
+
+/// Records a block failure against `lead` and marks the `others` further
+/// files unverified under the matching reason.
 fn record_block_failure(
     pass: &mut IntegrityPass<'_>,
+    archive: &Archive,
     lead: (&Path, Slot),
     failure: DecodeFailure,
-    others: u64,
+    others: &[usize],
 ) -> Result<()> {
     let reason = match failure {
-        DecodeFailure::ResourceLimit(_) => Unverified::ResourceLimit,
-        _ => Unverified::NotDecodable,
+        DecodeFailure::ResourceLimit(_) => UnverifiedReason::ResourceLimit,
+        _ => UnverifiedReason::NotDecodable,
     };
     pass.record(lead.1, lead.0, DecodeOutcome::Failed(failure))?;
-    pass.count_unverified(reason, others);
+    mark_files(pass, archive, reason, others.iter().copied());
     Ok(())
 }
 
-/// Counts the entries that only a block CRC could cover but that CRC cannot.
+/// Lists the entries that only a block CRC could cover but that CRC cannot.
 ///
 /// The block CRC fires once the whole block output was read, which never
 /// happens when the entries' sizes do not add up to the block's output. An
@@ -554,12 +751,15 @@ fn entries_uncovered_by_block_crc(
     block_has_crc: bool,
     entry_sizes: u64,
     block_size: u64,
-    entries_with_own_crc: impl Iterator<Item = bool>,
-) -> u64 {
+    entries: impl Iterator<Item = (usize, bool)>,
+) -> Vec<usize> {
     if !block_has_crc || entry_sizes == block_size {
-        return 0;
+        return Vec::new();
     }
-    entries_with_own_crc.filter(|has_crc| !has_crc).count() as u64
+    entries
+        .filter(|&(_, has_crc)| !has_crc)
+        .map(|(index, _)| index)
+        .collect()
 }
 
 fn verify_sevenz_block<R: Read + Seek>(
@@ -571,32 +771,15 @@ fn verify_sevenz_block<R: Read + Seek>(
     payload: &[PayloadFile],
 ) -> Result<()> {
     let block = &archive.blocks[block_index];
-    let count = payload.len() as u64;
-    let (lead_index, lead_slot) = payload[0];
-    let lead_path = PathBuf::from(common::normalize_entry_name(
-        &archive.files[lead_index].name,
-    ));
-    let lead = (lead_path.as_path(), lead_slot);
+    let all = payload.iter().map(|&(index, _)| index);
 
     if payload.iter().any(|&(_, slot)| !pass.is_admitted(slot)) {
-        pass.count_unverified(Unverified::ResourceLimit, count);
+        mark_files(pass, archive, UnverifiedReason::ResourceLimit, all);
         return Ok(());
     }
 
-    let charge = match admit_sevenz_block(block, pass.config()) {
-        Ok(charge) => charge,
-        Err(e) => {
-            let failure = if matches!(e, ArchiveError::QuotaExceeded { .. }) {
-                DecodeFailure::ResourceLimit(e)
-            } else {
-                DecodeFailure::NotDecodable(e)
-            };
-            return record_block_failure(pass, lead, failure, count - 1);
-        }
-    };
-
-    if !pass.try_charge(charge) {
-        pass.count_unverified(Unverified::OverBudget, count);
+    if !pass.try_charge(block_charge(block)) {
+        mark_files(pass, archive, UnverifiedReason::OverBudget, all);
         return Ok(());
     }
 
@@ -613,13 +796,12 @@ fn verify_sevenz_block<R: Read + Seek>(
     let result = decoder.for_each_entries(&mut |file, reader| Ok(scan.visit(file, reader)));
     let (stop, visited) = (scan.stop.take(), scan.visited);
 
-    let unvisited = payload
-        .iter()
-        .filter(|(index, _)| !visited.contains(index))
-        .count() as u64;
+    let unvisited: Vec<usize> = all.filter(|index| !visited.contains(index)).collect();
     match (stop, result) {
         (Some(BlockStop::Fatal(e)), _) => return Err(e),
-        (Some(BlockStop::Abandoned(reason)), _) => pass.count_unverified(reason, unvisited),
+        (Some(BlockStop::Abandoned(reason)), _) => {
+            mark_files(pass, archive, reason, unvisited.into_iter());
+        }
         (None, Err(e)) => {
             // A failure outside the per-entry callbacks belongs to the last
             // entry the decoder reached (where a block CRC would
@@ -629,17 +811,23 @@ fn verify_sevenz_block<R: Read + Seek>(
                 .rev()
                 .find(|(index, _)| visited.contains(index))
                 .unwrap_or(&payload[0]);
-            let path = PathBuf::from(common::normalize_entry_name(&archive.files[index].name));
-            let others = unvisited - u64::from(!visited.contains(&index));
+            let path = file_path(archive, index);
+            let others: Vec<usize> = unvisited.into_iter().filter(|&i| i != index).collect();
             return record_block_failure(
                 pass,
+                archive,
                 (path.as_path(), slot),
                 DecodeFailure::from_sevenz(e),
-                others,
+                &others,
             );
         }
         (None, Ok(_)) => {
-            pass.count_unverified(Unverified::NotDecodable, unvisited);
+            mark_files(
+                pass,
+                archive,
+                UnverifiedReason::NotDecodable,
+                unvisited.into_iter(),
+            );
             let entry_sizes = payload
                 .iter()
                 .map(|&(index, _)| archive.files[index].size)
@@ -647,14 +835,19 @@ fn verify_sevenz_block<R: Read + Seek>(
             let own_crcs = payload
                 .iter()
                 .filter(|(index, _)| visited.contains(index))
-                .map(|&(index, _)| archive.files[index].has_crc);
+                .map(|&(index, _)| (index, archive.files[index].has_crc));
             let uncovered = entries_uncovered_by_block_crc(
                 block.has_crc,
                 entry_sizes,
                 block.get_unpack_size(),
                 own_crcs,
             );
-            pass.count_unverified(Unverified::UncoveredBlockCrc, uncovered);
+            mark_files(
+                pass,
+                archive,
+                UnverifiedReason::UncoveredBlockCrc,
+                uncovered.into_iter(),
+            );
         }
     }
     Ok(())
@@ -705,7 +898,6 @@ fn verify_sevenz_block<R: Read + Seek>(
 pub struct SevenZArchive<R: Read + Seek> {
     source: R,
     entries: Vec<CachedEntry>,
-    is_solid: bool,
     /// Header already parsed by [`Self::new`], retained so
     /// `extract_with_callback` can hand it to
     /// `ArchiveReader::from_archive` instead of re-parsing the archive from
@@ -758,7 +950,6 @@ impl<R: Read + Seek> SevenZArchive<R> {
                     return Ok(Self {
                         source,
                         entries: vec![],
-                        is_solid: false,
                         archive: Archive::default(),
                     });
                 }
@@ -767,10 +958,6 @@ impl<R: Read + Seek> SevenZArchive<R> {
                 )));
             }
         };
-
-        // Step 2: SECURITY - Cache solid flag for later validation
-        // NOTE: Actual enforcement happens in extract() via SecurityConfig
-        let is_solid = archive.is_solid;
 
         // Step 3: Cache entry metadata to avoid re-parsing during extraction
         let source_len = source.seek(SeekFrom::End(0)).map_err(ArchiveError::Io)?;
@@ -793,7 +980,6 @@ impl<R: Read + Seek> SevenZArchive<R> {
         Ok(Self {
             source,
             entries,
-            is_solid,
             archive,
         })
     }
@@ -1403,10 +1589,7 @@ impl<R: Read + Seek> SevenZArchive<R> {
 
         // Reuses the Archive header already parsed in `new()` instead of
         // re-parsing it from scratch (issue #492).
-        let mut archive_reader = ArchiveReader::from_archive(archive, source, Password::empty());
-        // TODO(#661): sevenz-rust2 visits only the contiguous span of a block,
-        // so a stream-less file between a block's stream files silently
-        // drops the last stream file (see `payload_by_block`)
+        let mut archive_reader = single_threaded_reader(archive, source);
         let result = archive_reader.for_each_entries(&mut extract_fn);
         let mut accumulated = ctx.report;
         common::push_duplicate_skip_warning(
@@ -1450,8 +1633,11 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
         options: &ExtractionOptions,
         progress: &mut dyn ProgressCallback,
     ) -> Result<ExtractionReport> {
-        // Step 0: Validate solid archive policy
-        check_solid_policy(self.is_solid, self.entries.iter().map(|e| e.size), config)?;
+        // Step 0: Admit the archive (solid policy, decoder memory, coders,
+        // block layout) before anything is written
+        if let Some(refusal) = iter_sevenz_refusals(&self.archive, config).next() {
+            return Err(refusal.into_error());
+        }
 
         // Step 1: Initialize extraction context
         let dest = DestDir::new_or_create(output_dir.to_path_buf())?;
@@ -1564,11 +1750,17 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
         config: &SecurityConfig<Validated>,
         options: &VerificationOptions,
     ) -> Result<crate::inspection::VerificationReport> {
-        use crate::inspection::list::list_sevenz_reader;
-        self.source.rewind().map_err(ArchiveError::Io)?;
-        crate::inspection::verify::verify_with(config, *options, |listing_config, policy| {
-            list_sevenz_reader(&mut self.source, listing_config, policy)
-        })
+        use crate::inspection::list::list_sevenz_parsed;
+        use crate::inspection::report::ArchiveStructure;
+        use crate::inspection::verify::list_for_verify;
+        use crate::inspection::verify::verify_manifest_with_structure;
+
+        let issues = refusal_issues(&sevenz_refusals(&self.archive, config));
+        let listed = list_for_verify(config, *options, |listing_config, policy| {
+            list_sevenz_parsed(&self.archive, &mut self.source, listing_config, policy)
+        })?;
+        let structure = ArchiveStructure::of_manifest(&listed.manifest).with_refusals(&issues);
+        verify_manifest_with_structure(&listed.manifest, config, &structure, listed.integrity)
     }
 
     fn format_name(&self) -> &'static str {
@@ -2415,14 +2607,17 @@ mod tests {
         let solid_data = load_fixture("solid.7z");
         let solid_cursor = Cursor::new(solid_data);
         let solid_archive = SevenZArchive::new(solid_cursor).unwrap();
-        assert!(solid_archive.is_solid, "solid.7z should have is_solid=true");
+        assert!(
+            solid_archive.archive.is_solid,
+            "solid.7z should have is_solid=true"
+        );
 
         // Non-solid archive should have is_solid = false
         let non_solid_data = load_fixture("simple.7z");
         let non_solid_cursor = Cursor::new(non_solid_data);
         let non_solid_archive = SevenZArchive::new(non_solid_cursor).unwrap();
         assert!(
-            !non_solid_archive.is_solid,
+            !non_solid_archive.archive.is_solid,
             "simple.7z should have is_solid=false"
         );
     }
@@ -2966,7 +3161,7 @@ mod tests {
             .iter()
             .map(|(name, data)| {
                 let mut entry = ArchiveEntry::new_file(name);
-                entry.has_stream = true;
+                entry.has_stream = !data.is_empty();
                 entry.size = data.len() as u64;
                 entry
             })
@@ -3699,18 +3894,98 @@ mod tests {
 
     #[test]
     fn test_uncovered_by_block_crc_counts_entries_without_own_crc() {
-        let crcs = [true, false, false];
+        let crcs = [(4, true), (5, false), (6, false)];
         assert_eq!(
             entries_uncovered_by_block_crc(true, 10, 12, crcs.into_iter()),
-            2
+            [5, 6]
         );
-        assert_eq!(
-            entries_uncovered_by_block_crc(true, 12, 12, crcs.into_iter()),
-            0
+        assert!(entries_uncovered_by_block_crc(true, 12, 12, crcs.into_iter()).is_empty());
+        assert!(entries_uncovered_by_block_crc(false, 10, 12, crcs.into_iter()).is_empty());
+    }
+
+    fn block_refusals(archive: &Archive) -> Vec<SevenZRefusal> {
+        let config = SecurityConfig::default()
+            .with_allow_solid_archives(true)
+            .validate()
+            .unwrap();
+        sevenz_refusals(archive, &config)
+    }
+
+    fn visited_names(archive: Archive, source: Vec<u8>) -> Vec<String> {
+        let mut names = Vec::new();
+        single_threaded_reader(archive, Cursor::new(source))
+            .for_each_entries(|entry, _| {
+                names.push(entry.name.clone());
+                Ok(true)
+            })
+            .unwrap();
+        names
+    }
+
+    #[test]
+    fn test_stream_less_entry_before_a_block_is_admitted() {
+        let bytes = make_sevenz_archive_with_empty_file();
+        let archive = Archive::read(&mut Cursor::new(bytes.clone()), &Password::empty()).unwrap();
+
+        assert!(block_refusals(&archive).is_empty());
+        assert!(visited_names(archive, bytes).contains(&"full.txt".to_string()));
+    }
+
+    /// `interleaved-empty.7z` has a stream-less entry between the stream files
+    /// of one block. Upstream iterates the block as `num_unpack_sub_streams`
+    /// consecutive files, so every stream-less entry inside the block pushes
+    /// the last stream file out of reach (a directory has the same effect
+    /// as an empty file); trailing and leading ones fall outside the span.
+    #[test]
+    fn test_stream_less_entry_inside_a_block_is_refused_and_upstream_drops_a_file() {
+        let bytes = load_fixture("interleaved-empty.7z");
+        let archive = Archive::read(&mut Cursor::new(bytes.clone()), &Password::empty()).unwrap();
+        let stream_files: Vec<_> = archive
+            .files
+            .iter()
+            .filter(|f| f.has_stream && f.size > 0)
+            .map(|f| f.name.clone())
+            .collect();
+
+        let refusals = block_refusals(&archive);
+        assert_eq!(refusals.len(), 1);
+        assert_eq!(refusals[0].scope, RefusalScope::Block(0));
+        assert_matches!(refusals[0].error, ArchiveError::InvalidArchive(_));
+
+        // If sevenz-rust2 starts visiting every stream file, the predicate can
+        // be relaxed.
+        let visited = visited_names(archive, bytes);
+        let dropped = stream_files.iter().filter(|n| !visited.contains(n)).count();
+        assert_eq!(dropped, 1, "{visited:?}");
+    }
+
+    #[test]
+    fn test_decoder_memory_bound_uses_declared_file_sizes_beyond_the_unpack_size() {
+        let data = vec![7u8; 1024];
+        let bytes = build_solid_sevenz_archive(&[("a", &data), ("b", &data)], false);
+        let mut archive = Archive::read(&mut Cursor::new(bytes), &Password::empty()).unwrap();
+        let config = SecurityConfig::default()
+            .with_allow_solid_archives(true)
+            .with_max_decoder_memory(1024 * 1024)
+            .validate()
+            .unwrap();
+
+        assert!(
+            sevenz_refusals(&archive, &config).is_empty(),
+            "a small block is admitted"
         );
-        assert_eq!(
-            entries_uncovered_by_block_crc(false, 10, 12, crcs.into_iter()),
-            0
+
+        archive.files[0].size = 512 * 1024 * 1024;
+        let refusals: Vec<_> = sevenz_refusals(&archive, &config)
+            .into_iter()
+            .filter(|r| r.scope == RefusalScope::Block(0))
+            .collect();
+        assert_eq!(refusals.len(), 1);
+        assert_matches!(
+            refusals[0].error,
+            ArchiveError::QuotaExceeded {
+                resource: QuotaResource::DecoderMemory { .. }
+            }
         );
     }
 
@@ -3793,7 +4068,10 @@ mod tests {
         let (keep_going, stop, issues) = scan_failing_file(error);
 
         assert!(!keep_going);
-        assert_matches!(stop, Some(BlockStop::Abandoned(Unverified::NotDecodable)));
+        assert_matches!(
+            stop,
+            Some(BlockStop::Abandoned(UnverifiedReason::NotDecodable))
+        );
         assert_eq!(issues, [IssueCategory::CorruptData]);
     }
 
@@ -3806,7 +4084,10 @@ mod tests {
         let (keep_going, stop, issues) = scan_failing_file(error);
 
         assert!(!keep_going);
-        assert_matches!(stop, Some(BlockStop::Abandoned(Unverified::ResourceLimit)));
+        assert_matches!(
+            stop,
+            Some(BlockStop::Abandoned(UnverifiedReason::ResourceLimit))
+        );
         assert_eq!(issues, [IssueCategory::QuotaExceeded]);
     }
 

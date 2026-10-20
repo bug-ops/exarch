@@ -20,6 +20,8 @@ use report::PyArchiveEntry;
 use report::PyArchiveManifest;
 use report::PyCreationReport;
 use report::PyExtractionReport;
+use report::PyIntegrityGaps;
+use report::PyUnverifiedEntry;
 use report::PyVerificationIssue;
 use report::PyVerificationReport;
 
@@ -812,6 +814,8 @@ fn exarch(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyArchiveEntry>()?;
     m.add_class::<PyVerificationReport>()?;
     m.add_class::<PyVerificationIssue>()?;
+    m.add_class::<PyIntegrityGaps>()?;
+    m.add_class::<PyUnverifiedEntry>()?;
 
     // Exception types
     register_exceptions(m)?;

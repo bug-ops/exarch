@@ -46,6 +46,35 @@ def test_non_positive_budget_is_rejected(budget):
         exarch.VerificationOptions().with_integrity_check(budget)
 
 
+SOLID_7Z = Path(__file__).resolve().parents[3] / "tests" / "fixtures" / "solid.7z"
+
+
+def test_integrity_gaps_are_none_unless_requested():
+    assert exarch.verify_archive(SOLID_7Z).integrity_gaps is None
+
+
+def test_integrity_gaps_report_counts_and_paths():
+    options = exarch.VerificationOptions().with_integrity_check()
+
+    gaps = exarch.verify_archive(SOLID_7Z, options=options).integrity_gaps
+
+    assert gaps.counts == {"solid_policy": 10}
+    assert gaps.total == 10
+    assert gaps.omitted == 0
+    assert {e.reason for e in gaps.entries} == {"solid_policy"}
+    assert len(gaps.entries) == 10
+
+
+def test_integrity_gaps_are_empty_when_everything_is_verified(temp_dir):
+    archive = _stored_zip(temp_dir / "ok.zip")
+    options = exarch.VerificationOptions().with_integrity_check()
+
+    gaps = exarch.verify_archive(archive, options=options).integrity_gaps
+
+    assert gaps.total == 0
+    assert gaps.counts == {}
+
+
 def test_default_verify_skips_integrity(temp_dir):
     archive = _stored_zip(temp_dir / "bad.zip", corrupt=True)
 
@@ -92,12 +121,11 @@ def test_repr_mentions_state():
 
 
 def test_solid_7z_is_incomplete_until_solid_archives_are_allowed():
-    fixture = Path(__file__).resolve().parents[3] / "tests" / "fixtures" / "solid.7z"
     options = exarch.VerificationOptions().with_integrity_check()
 
-    report = exarch.verify_archive(fixture, options=options)
+    report = exarch.verify_archive(SOLID_7Z, options=options)
     assert report.integrity_status == "INCOMPLETE"
-    assert report.status == "WARNING"
+    assert report.status == "FAIL"
 
     config = exarch.SecurityConfig().with_allow_solid_archives(True)
-    assert exarch.verify_archive(fixture, config, options).integrity_status == "OK"
+    assert exarch.verify_archive(SOLID_7Z, config, options).integrity_status == "OK"

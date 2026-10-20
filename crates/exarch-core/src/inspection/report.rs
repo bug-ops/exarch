@@ -1,5 +1,7 @@
 //! Verification report types for security checks.
 
+use std::collections::BTreeMap;
+use std::path::Path;
 use std::path::PathBuf;
 
 use crate::closed_enum::closed_enum;
@@ -193,7 +195,20 @@ impl VerificationReport {
     /// means the data was decodable and complete, not checksum-verified.
     #[must_use]
     pub fn integrity_status(&self) -> IntegrityStatus {
-        determine_integrity_status(&self.issues, self.integrity)
+        determine_integrity_status(&self.issues, &self.integrity)
+    }
+
+    /// What the requested integrity check left unverified, or `None` when no
+    /// integrity check was requested.
+    ///
+    /// A requested check that verified everything returns an empty
+    /// [`IntegrityGaps`].
+    #[must_use]
+    pub const fn integrity_gaps(&self) -> Option<&IntegrityGaps> {
+        match &self.integrity {
+            IntegrityScope::Requested(gaps) => Some(gaps),
+            IntegrityScope::NotRequested => None,
+        }
     }
 
     /// Returns all issues found, sorted from most to least severe.
@@ -267,6 +282,7 @@ pub(crate) struct ArchiveStructure<'a> {
     total_entries: usize,
     findings: &'a [ZipInconsistency],
     omitted: usize,
+    refusals: &'a [VerificationIssue],
 }
 
 impl<'a> ArchiveStructure<'a> {
@@ -280,7 +296,19 @@ impl<'a> ArchiveStructure<'a> {
             total_entries,
             findings,
             omitted,
+            refusals: &[],
         }
+    }
+
+    /// Adds archive-level issues for what extraction refuses in the archive.
+    pub(crate) const fn with_refusals(mut self, refusals: &'a [VerificationIssue]) -> Self {
+        self.refusals = refusals;
+        self
+    }
+
+    /// Archive-level issues for what extraction refuses in the archive.
+    pub(crate) const fn refusals(&self) -> &'a [VerificationIssue] {
+        self.refusals
     }
 
     /// The structure of a format whose manifest is its whole content.
@@ -305,12 +333,12 @@ fn determine_status(issues: &[VerificationIssue]) -> VerificationStatus {
 
 fn determine_integrity_status(
     issues: &[VerificationIssue],
-    scope: IntegrityScope,
+    scope: &IntegrityScope,
 ) -> IntegrityStatus {
     let has = |category| issues.iter().any(|i| i.category == category);
     if has(IssueCategory::CorruptData) {
         IntegrityStatus::Fail
-    } else if scope == IntegrityScope::NotRequested {
+    } else if matches!(scope, IntegrityScope::NotRequested) {
         IntegrityStatus::Skipped
     } else if has(IssueCategory::IntegrityIncomplete) {
         IntegrityStatus::Incomplete
@@ -319,11 +347,198 @@ fn determine_integrity_status(
     }
 }
 
-/// Whether the caller asked for a payload integrity check.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Whether the caller asked for a payload integrity check, and what the check
+/// left unverified.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum IntegrityScope {
     NotRequested,
-    Requested,
+    Requested(IntegrityGaps),
+}
+
+closed_enum! {
+    /// Why part of the payload was not verified by the integrity check.
+    ///
+    /// `#[non_exhaustive]` so a future reason is not a breaking change for
+    /// downstream matches. The string form is stable and shared by the CLI
+    /// JSON output and the language bindings.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    #[non_exhaustive]
+    pub enum UnverifiedReason {
+        /// The decompression budget could not cover it.
+        OverBudget => "over_budget",
+
+        /// Quota, ratio or decoder-memory admission refused it.
+        ResourceLimit => "resource_limit",
+
+        /// A solid 7z block while `allow_solid_archives` is off.
+        SolidPolicy => "solid_policy",
+
+        /// The stream outgrew its declared size.
+        SizeCeiling => "size_ceiling",
+
+        /// A 7z block checksum that the entries do not cover.
+        UncoveredBlockCrc => "uncovered_block_crc",
+
+        /// An unsupported or unparseable 7z coder.
+        NotDecodable => "not_decodable",
+
+        /// A TAR stream that ends without an end-of-archive marker.
+        NoEndMarker => "no_end_marker",
+    }
+}
+
+impl UnverifiedReason {
+    /// A short human-readable description, used in report messages.
+    #[must_use]
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::OverBudget => "over budget",
+            Self::ResourceLimit => "resource limit",
+            Self::SolidPolicy => "solid archive with allow_solid_archives off",
+            Self::SizeCeiling => "declared size exceeded",
+            Self::UncoveredBlockCrc => "block checksum not reachable",
+            Self::NotDecodable => "not decodable",
+            Self::NoEndMarker => "no end-of-archive marker",
+        }
+    }
+}
+
+/// Most unverified entries an [`IntegrityGaps`] lists by path; the rest are
+/// only counted.
+pub(crate) const MAX_LISTED_UNVERIFIED: usize = 256;
+
+/// One entry the integrity check could not verify, and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnverifiedEntry {
+    path: PathBuf,
+    reason: UnverifiedReason,
+}
+
+impl UnverifiedEntry {
+    /// The entry's path inside the archive.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Why the entry was not verified.
+    #[must_use]
+    pub const fn reason(&self) -> UnverifiedReason {
+        self.reason
+    }
+}
+
+/// What a requested integrity check left unverified.
+///
+/// The counts, the listed entries and the `IntegrityIncomplete` issue message
+/// all come from this one value, so they cannot disagree. Items that belong to
+/// no single entry (a TAR stream without an end marker) are only counted;
+/// entries past a fixed cap (256 today; rely on [`omitted`](Self::omitted), not
+/// the number) are counted in [`omitted`](Self::omitted) instead of listed. The
+/// `counts` shape differs per surface: an iterator in Rust, a map in the CLI
+/// JSON, a dict in Python and an array of `{reason, count}` in Node.
+///
+/// # Examples
+///
+/// ```no_run
+/// use exarch_core::DecompressionBudget;
+/// use exarch_core::IntegrityCheck;
+/// use exarch_core::SecurityConfig;
+/// use exarch_core::VerificationOptions;
+/// use exarch_core::verify_archive_with_options;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let options = VerificationOptions::default()
+///     .with_integrity(IntegrityCheck::DecodeToEof(DecompressionBudget::DEFAULT));
+/// let report = verify_archive_with_options("a.7z", &SecurityConfig::default(), &options)?;
+/// if let Some(gaps) = report.integrity_gaps() {
+///     for (reason, count) in gaps.counts() {
+///         println!("{reason}: {count}");
+///     }
+/// }
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IntegrityGaps {
+    counts: BTreeMap<UnverifiedReason, u64>,
+    entries: Vec<UnverifiedEntry>,
+    omitted: u64,
+}
+
+impl IntegrityGaps {
+    /// Counts of unverified items per reason, in reason order; reasons with no
+    /// items are absent.
+    pub fn counts(&self) -> impl Iterator<Item = (UnverifiedReason, u64)> + '_ {
+        self.counts.iter().map(|(&reason, &count)| (reason, count))
+    }
+
+    /// Number of items left unverified for `reason`.
+    #[must_use]
+    pub fn count(&self, reason: UnverifiedReason) -> u64 {
+        self.counts.get(&reason).copied().unwrap_or_default()
+    }
+
+    /// Total number of unverified items.
+    #[must_use]
+    pub fn total(&self) -> u64 {
+        self.counts.values().sum()
+    }
+
+    /// Returns true when nothing was left unverified.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.counts.is_empty()
+    }
+
+    /// The unverified entries that could be listed by path, up to a fixed cap;
+    /// further ones are counted in [`omitted`](Self::omitted).
+    #[must_use]
+    pub fn entries(&self) -> &[UnverifiedEntry] {
+        &self.entries
+    }
+
+    /// Number of unverified entries that had a path but were not listed
+    /// because the list was full.
+    #[must_use]
+    pub const fn omitted(&self) -> u64 {
+        self.omitted
+    }
+
+    pub(crate) fn count_items(&mut self, reason: UnverifiedReason, items: u64) {
+        if items > 0 {
+            *self.counts.entry(reason).or_default() += items;
+        }
+    }
+
+    pub(crate) fn mark_entry(&mut self, reason: UnverifiedReason, path: &Path) {
+        self.count_items(reason, 1);
+        if self.entries.len() < MAX_LISTED_UNVERIFIED {
+            self.entries.push(UnverifiedEntry {
+                path: path.to_path_buf(),
+                reason,
+            });
+        } else {
+            self.omitted += 1;
+        }
+    }
+
+    /// The `IntegrityIncomplete` issue message; `None` when nothing is
+    /// unverified.
+    pub(crate) fn message(&self) -> Option<String> {
+        if self.is_empty() {
+            return None;
+        }
+        let detail = self
+            .counts()
+            .map(|(reason, count)| format!("{}: {count}", reason.description()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        Some(format!(
+            "Integrity check incomplete: {} item(s) not verified ({detail})",
+            self.total()
+        ))
+    }
 }
 
 fn determine_security_status(issues: &[VerificationIssue]) -> CheckStatus {
@@ -640,7 +855,8 @@ impl IssueCategory {
             ZipInconsistency::DuplicateName { .. } => Self::DuplicateEntry,
             ZipInconsistency::OverlappingEntries => Self::OverlappingEntries,
             ZipInconsistency::HiddenLocalHeader { .. }
-            | ZipInconsistency::UncountedCentralRecords { .. } => Self::HiddenEntry,
+            | ZipInconsistency::UncountedCentralRecords { .. }
+            | ZipInconsistency::IgnoredEndRecord { .. } => Self::HiddenEntry,
         }
     }
 
@@ -761,7 +977,14 @@ mod tests {
                 IssueCategory::OverlappingEntries,
             ),
             (
-                ZipInconsistency::HiddenLocalHeader { offset: 9 },
+                ZipInconsistency::HiddenLocalHeader {
+                    offset: 9,
+                    region: crate::HiddenRegion::Gap,
+                },
+                IssueCategory::HiddenEntry,
+            ),
+            (
+                ZipInconsistency::IgnoredEndRecord { offset: 9 },
                 IssueCategory::HiddenEntry,
             ),
             (
@@ -1080,7 +1303,10 @@ mod tests {
 
     #[test]
     fn test_integrity_requested_without_issues_is_pass() {
-        let report = integrity_report(Vec::new(), IntegrityScope::Requested);
+        let report = integrity_report(
+            Vec::new(),
+            IntegrityScope::Requested(IntegrityGaps::default()),
+        );
         assert_eq!(report.integrity_status(), IntegrityStatus::Pass);
     }
 
@@ -1097,7 +1323,7 @@ mod tests {
             issue(IssueSeverity::Medium, IssueCategory::IntegrityIncomplete),
             issue(IssueSeverity::High, IssueCategory::CorruptData),
         ];
-        let report = integrity_report(issues, IntegrityScope::Requested);
+        let report = integrity_report(issues, IntegrityScope::Requested(IntegrityGaps::default()));
         assert_eq!(report.integrity_status(), IntegrityStatus::Fail);
     }
 
@@ -1107,7 +1333,7 @@ mod tests {
             IssueSeverity::Medium,
             IssueCategory::IntegrityIncomplete,
         )];
-        let report = integrity_report(issues, IntegrityScope::Requested);
+        let report = integrity_report(issues, IntegrityScope::Requested(IntegrityGaps::default()));
         assert_eq!(report.integrity_status(), IntegrityStatus::Incomplete);
         assert_eq!(report.status(), VerificationStatus::Warning);
         assert_eq!(report.security_status(), CheckStatus::Pass);
@@ -1116,7 +1342,7 @@ mod tests {
     #[test]
     fn test_archive_level_issues_do_not_count_as_suspicious_entries() {
         let issues = vec![issue(IssueSeverity::High, IssueCategory::CorruptData)];
-        let report = integrity_report(issues, IntegrityScope::Requested);
+        let report = integrity_report(issues, IntegrityScope::Requested(IntegrityGaps::default()));
         assert_eq!(report.suspicious_entries(), 0);
         assert_eq!(report.status(), VerificationStatus::Fail);
     }
@@ -1222,7 +1448,7 @@ mod tests {
                 })
                 .collect();
             let scope = if requested {
-                IntegrityScope::Requested
+                IntegrityScope::Requested(IntegrityGaps::default())
             } else {
                 IntegrityScope::NotRequested
             };

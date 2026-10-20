@@ -1362,7 +1362,7 @@ fn test_verify_check_integrity_corrupt_zip_fails_with_exit_1_even_under_strict()
 }
 
 #[test]
-fn test_verify_check_integrity_solid_7z_is_incomplete_and_strict_exits_2() {
+fn test_verify_check_integrity_solid_7z_fails_like_extract_and_strict_exits_2_when_incomplete() {
     let archive = workspace_fixture("solid.7z");
 
     exarch_cmd()
@@ -1370,14 +1370,27 @@ fn test_verify_check_integrity_solid_7z_is_incomplete_and_strict_exits_2() {
         .arg("--check-integrity")
         .arg(&archive)
         .assert()
+        .code(1)
+        .stdout(predicates::str::contains("Integrity: INCOMPLETE"));
+
+    let budgeted = workspace_fixture("simple.7z");
+    exarch_cmd()
+        .arg("verify")
+        .arg("--check-integrity")
+        .arg("--decompression-budget")
+        .arg("1")
+        .arg(&budgeted)
+        .assert()
         .success()
         .stdout(predicates::str::contains("Integrity: INCOMPLETE"));
 
     exarch_cmd()
         .arg("verify")
         .arg("--check-integrity")
+        .arg("--decompression-budget")
+        .arg("1")
         .arg("--strict")
-        .arg(&archive)
+        .arg(&budgeted)
         .assert()
         .code(2);
 
@@ -3815,7 +3828,14 @@ fn test_verify_escaping_symlink_fails_even_with_link_flags() {
 fn test_verify_check_integrity_json_reports_ok_and_incomplete() {
     for (args, expected) in [
         (vec![fixture_path("sample.tar.gz")], "OK"),
-        (vec![workspace_fixture("solid.7z")], "INCOMPLETE"),
+        (
+            vec![
+                "--decompression-budget".into(),
+                "1".into(),
+                workspace_fixture("simple.7z"),
+            ],
+            "INCOMPLETE",
+        ),
     ] {
         let output = exarch_cmd()
             .arg("verify")
@@ -3831,6 +3851,31 @@ fn test_verify_check_integrity_json_reports_ok_and_incomplete() {
         let json: serde_json::Value = serde_json::from_slice(&output).expect("invalid JSON output");
         assert_eq!(json["data"]["integrity_status"], expected);
     }
+}
+
+#[test]
+fn test_verify_json_integrity_gaps_are_typed_counts_and_paths() {
+    let run = |extra: &[&str]| -> serde_json::Value {
+        let output = exarch_cmd()
+            .arg("verify")
+            .arg("--json")
+            .args(extra)
+            .arg(workspace_fixture("solid.7z"))
+            .assert()
+            .code(1)
+            .get_output()
+            .stdout
+            .clone();
+        serde_json::from_slice(&output).expect("invalid JSON output")
+    };
+
+    assert!(run(&[])["data"]["integrity_gaps"].is_null());
+
+    let gaps = run(&["--check-integrity"])["data"]["integrity_gaps"].clone();
+    assert_eq!(gaps["counts"]["solid_policy"], 10);
+    assert_eq!(gaps["entries"].as_array().unwrap().len(), 10);
+    assert_eq!(gaps["entries"][0]["reason"], "solid_policy");
+    assert_eq!(gaps["omitted"], 0);
 }
 // ============================================================================
 // ZIP structure policy (--zip-consistency)

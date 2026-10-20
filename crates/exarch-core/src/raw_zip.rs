@@ -98,6 +98,8 @@ pub struct RawZip {
     pub end_count: Option<u16>,
     /// Extra central directory records, appended verbatim after the entries'.
     pub extra_central_records: Vec<(RawEntry, usize)>,
+    /// Archive comment written after the end record.
+    pub comment: Vec<u8>,
 }
 
 /// A built archive and where each local header sits.
@@ -143,7 +145,8 @@ impl RawZip {
         bytes.extend_from_slice(&count.to_le_bytes());
         bytes.extend_from_slice(&(directory_len as u32).to_le_bytes());
         bytes.extend_from_slice(&(directory_start as u32).to_le_bytes());
-        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&(self.comment.len() as u16).to_le_bytes());
+        bytes.extend_from_slice(&self.comment);
         BuiltZip {
             bytes,
             local_offsets,

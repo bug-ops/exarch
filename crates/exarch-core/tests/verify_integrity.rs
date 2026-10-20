@@ -14,6 +14,7 @@ use exarch_core::IntegrityStatus;
 use exarch_core::IssueCategory;
 use exarch_core::QuotaResource;
 use exarch_core::SecurityConfig;
+use exarch_core::UnverifiedReason;
 use exarch_core::VerificationOptions;
 use exarch_core::VerificationReport;
 use exarch_core::VerificationStatus;
@@ -412,7 +413,7 @@ fn tar_gz_invalid_deflate_block_inside_an_entry_is_a_hard_error() {
 }
 
 #[test]
-fn tar_gz_split_into_two_members_at_a_header_boundary_is_incomplete() {
+fn tar_gz_split_into_two_members_at_a_header_boundary_is_fully_verified() {
     let dir = TempDir::new().unwrap();
     let tar = three_entries();
     let boundary = 2 * (512 + 512);
@@ -421,7 +422,7 @@ fn tar_gz_split_into_two_members_at_a_header_boundary_is_incomplete() {
     let path = write(&dir, "a.tar.gz", &gz);
 
     let report = verify(&path, default_integrity());
-    assert_eq!(report.integrity_status(), IntegrityStatus::Incomplete);
+    assert_eq!(report.integrity_status(), IntegrityStatus::Pass);
 }
 
 #[test]
@@ -554,7 +555,8 @@ fn sevenz_solid_fixture_is_incomplete_with_defaults() {
 
     let report = verify(&path, default_integrity());
     assert_eq!(report.integrity_status(), IntegrityStatus::Incomplete);
-    assert_eq!(report.status(), VerificationStatus::Warning);
+    assert_eq!(report.status(), VerificationStatus::Fail);
+    assert_eq!(count(&report, IssueCategory::SecurityPolicy), 1);
 
     let allowed =
         verify_archive_with_options(&path, &solid_config(), &default_integrity()).unwrap();
@@ -653,13 +655,16 @@ fn sevenz_size_preserving_filter_is_not_charged_twice() {
 
 /// sevenz-rust2 decodes a block as the contiguous span of its stream count, so
 /// a stream-less file between the stream files pushes the last one out of the
-/// decoder's reach. It must be reported as unverified, never as `OK`.
+/// decoder's reach. Verify refuses the block like extract does and counts the
+/// payload as unverified, never as `OK`.
 #[test]
 fn sevenz_interleaved_empty_file_cannot_hide_a_payload_file() {
     for name in ["interleaved-empty.7z", "interleaved-empty-badcrc.7z"] {
         let report =
             verify_archive_with_options(fixture(name), &solid_config(), &default_integrity())
                 .unwrap();
+        assert_eq!(report.status(), VerificationStatus::Fail, "{name}");
+        assert_eq!(count(&report, IssueCategory::InvalidArchive), 1, "{name}");
         assert_eq!(
             report.integrity_status(),
             IntegrityStatus::Incomplete,
@@ -674,7 +679,7 @@ fn sevenz_interleaved_empty_file_cannot_hide_a_payload_file() {
             report
                 .issues()
                 .iter()
-                .any(|i| i.message.contains("not decodable: 1")),
+                .any(|i| i.message.contains("not decodable: 3")),
             "{name}"
         );
     }
@@ -868,4 +873,193 @@ fn sevenz_block_crc_mismatch_is_attributed_to_the_last_entry() {
     assert_eq!(report.integrity_status(), IntegrityStatus::Fail);
     assert_eq!(corrupt_paths(&report), ["c"]);
     assert_eq!(count(&report, IssueCategory::IntegrityIncomplete), 0);
+}
+
+fn extract_refusal(path: &Path, config: &SecurityConfig) -> ArchiveError {
+    let dest = TempDir::new().unwrap();
+    let err = exarch_core::extract_archive(path, dest.path(), config).unwrap_err();
+    assert_eq!(std::fs::read_dir(dest.path()).unwrap().count(), 0);
+    err
+}
+
+#[test]
+fn sevenz_extract_refuses_ppmd_over_decoder_memory() {
+    use sevenz_rust2::encoder_options::PpmdOptions;
+
+    let dir = TempDir::new().unwrap();
+    let bytes = sevenz_fixtures::solid(&[("a", GOOD)], vec![PpmdOptions::from_level(4).into()]);
+    let path = write(&dir, "a.7z", &bytes);
+    let config = SecurityConfig::default().with_max_decoder_memory(1024 * 1024);
+
+    assert!(matches!(
+        extract_refusal(&path, &config),
+        ArchiveError::QuotaExceeded {
+            resource: QuotaResource::DecoderMemory { .. }
+        }
+    ));
+}
+
+#[test]
+fn sevenz_extract_refuses_lzma2_over_decoder_memory() {
+    let dir = TempDir::new().unwrap();
+    let data = noisy(1024 * 1024);
+    let lzma2 = EncoderConfiguration::new(EncoderMethod::LZMA2);
+    let path = write(
+        &dir,
+        "a.7z",
+        &sevenz_fixtures::solid(&[("a", data.as_slice())], vec![lzma2]),
+    );
+    let config = SecurityConfig::default().with_max_decoder_memory(256 * 1024);
+
+    assert!(matches!(
+        extract_refusal(&path, &config),
+        ArchiveError::QuotaExceeded {
+            resource: QuotaResource::DecoderMemory { .. }
+        }
+    ));
+}
+
+#[test]
+fn sevenz_verify_and_extract_agree_on_every_refusal() {
+    let refused = [
+        ("solid.7z", SecurityConfig::default()),
+        (
+            "encrypted-content-plain-header.7z",
+            SecurityConfig::default(),
+        ),
+        ("interleaved-empty.7z", solid_config()),
+    ];
+    for (name, config) in refused {
+        let path = fixture(name);
+        extract_refusal(&path, &config);
+        for options in [VerificationOptions::default(), default_integrity()] {
+            let report = verify_archive_with_options(&path, &config, &options).unwrap();
+            assert_eq!(report.status(), VerificationStatus::Fail, "{name}");
+        }
+    }
+}
+
+#[test]
+fn sevenz_plain_verify_fails_a_solid_archive_with_one_policy_issue() {
+    let path = fixture("solid.7z");
+
+    let report = verify_archive_with_options(
+        &path,
+        &SecurityConfig::default(),
+        &VerificationOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(report.status(), VerificationStatus::Fail);
+    assert_eq!(report.issues().len(), 1);
+    assert_eq!(count(&report, IssueCategory::SecurityPolicy), 1);
+
+    let allowed =
+        verify_archive_with_options(&path, &solid_config(), &VerificationOptions::default())
+            .unwrap();
+    assert_eq!(allowed.status(), VerificationStatus::Pass);
+}
+
+#[test]
+fn sevenz_content_encrypted_archive_with_a_plain_header_is_refused() {
+    let path = fixture("encrypted-content-plain-header.7z");
+
+    let report = verify(&path, VerificationOptions::default());
+    assert_eq!(report.status(), VerificationStatus::Fail);
+    // One issue per encrypted block: the fixture holds two non-solid files.
+    assert_eq!(count(&report, IssueCategory::SecurityPolicy), 2);
+    assert!(matches!(
+        extract_refusal(&path, &SecurityConfig::default()),
+        ArchiveError::SecurityViolation { .. }
+    ));
+}
+
+#[test]
+fn integrity_gaps_are_absent_unless_requested_and_empty_when_complete() {
+    let path = fixture("simple.7z");
+
+    assert!(
+        verify(&path, VerificationOptions::default())
+            .integrity_gaps()
+            .is_none()
+    );
+    let report = verify(&path, default_integrity());
+    assert!(report.integrity_gaps().unwrap().is_empty());
+}
+
+#[test]
+fn integrity_gaps_count_and_list_the_unverified_entries_of_a_solid_archive() {
+    let report = verify(&fixture("solid.7z"), default_integrity());
+
+    let gaps = report.integrity_gaps().unwrap();
+    assert_eq!(gaps.count(UnverifiedReason::SolidPolicy), 10);
+    assert_eq!(gaps.total(), 10);
+    assert_eq!(gaps.entries().len(), 10);
+    assert!(
+        gaps.entries()
+            .iter()
+            .all(|e| e.reason() == UnverifiedReason::SolidPolicy)
+    );
+    assert!(
+        report
+            .issues()
+            .iter()
+            .any(|i| i.message.contains("10 item(s)"))
+    );
+}
+
+#[test]
+fn integrity_gaps_of_a_tar_without_end_marker_have_a_count_and_no_path() {
+    let dir = TempDir::new().unwrap();
+    let tar = three_entries();
+    let path = write(&dir, "a.tar", &tar[..tar.len() - 1024]);
+
+    let report = verify(&path, default_integrity());
+
+    let gaps = report.integrity_gaps().unwrap();
+    assert_eq!(gaps.count(UnverifiedReason::NoEndMarker), 1);
+    assert!(gaps.entries().is_empty());
+    assert_eq!(gaps.omitted(), 0);
+}
+
+#[test]
+fn sevenz_list_shows_every_entry_of_an_interleaved_block() {
+    let manifest =
+        exarch_core::list_archive(fixture("interleaved-empty.7z"), &SecurityConfig::default())
+            .unwrap();
+
+    let paths: Vec<_> = manifest
+        .entries()
+        .iter()
+        .map(|e| e.path.display().to_string())
+        .collect();
+    assert_eq!(manifest.total_entries(), 4, "{paths:?}");
+    assert!(paths.iter().any(|p| p == "d.txt"), "{paths:?}");
+}
+
+#[test]
+fn sevenz_extract_fails_closed_on_an_interleaved_stream_less_entry() {
+    let err = extract_refusal(&fixture("interleaved-empty.7z"), &solid_config());
+    assert!(matches!(err, ArchiveError::InvalidArchive(_)), "{err:?}");
+}
+
+#[test]
+fn sevenz_dropped_oversized_entry_does_not_misalign_its_solid_block() {
+    let dir = TempDir::new().unwrap();
+    let long = "a/".repeat(3000);
+    let bytes = sevenz_fixtures::solid(
+        &[(&long, GOOD), ("b", OTHER), ("c", GOOD)],
+        vec![sevenz_fixtures::copy()],
+    );
+    let path = write(&dir, "long.7z", &bytes);
+
+    let report = verify_archive_with_options(&path, &solid_config(), &default_integrity()).unwrap();
+
+    assert!(corrupt_paths(&report).is_empty(), "{:?}", report.issues());
+    assert_eq!(report.status(), VerificationStatus::Fail);
+    assert!(
+        report
+            .issues()
+            .iter()
+            .any(|i| i.message.contains("file name too long"))
+    );
 }

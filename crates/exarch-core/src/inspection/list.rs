@@ -37,6 +37,7 @@ use crate::formats::zip::read_zip_symlink_target;
 use crate::formats::zip::read_zip_symlink_target_checked;
 use crate::formats::zip::resolve_zip_entry_path;
 use crate::formats::zip::zip_mode_is_symlink;
+use crate::formats::zip_tail::DescriptorTail;
 use crate::inspection::integrity::Charge;
 use crate::inspection::integrity::ContentPolicy;
 use crate::inspection::integrity::DecodeOutcome;
@@ -49,7 +50,10 @@ use crate::inspection::manifest::EntryCompression;
 use crate::inspection::manifest::LinkTarget;
 use crate::inspection::manifest::ManifestEntryKind;
 use crate::inspection::manifest::ManifestEntryType;
-use crate::security::fs_view::MAX_PATH_BYTES;
+use crate::security::fs_view::LinkKind;
+use crate::security::fs_view::MAX_PATH_LEN;
+use crate::security::fs_view::check_name_lengths;
+use crate::security::fs_view::name_too_long;
 use crate::security::quota::QuotaTracker;
 use crate::types::safe_path::has_null_bytes;
 
@@ -201,6 +205,10 @@ fn list_tar_entries<R: std::io::Read>(
             return Err(ArchiveError::PathTraversal { path });
         }
 
+        if !admit_path(&path, &mut manifest, config)? {
+            continue;
+        }
+
         let entry_type = convert_tar_entry_type(&entry)?;
         let mode = crate::formats::tar::tar_permission_bits(entry.header());
         let modified =
@@ -215,7 +223,11 @@ fn list_tar_entries<R: std::io::Read>(
                     .map_err(|e| ArchiveError::InvalidArchive(format!("invalid link target: {e}")))?
                     .map(std::borrow::Cow::into_owned);
                 let is_symlink = entry.header().entry_type() == tar::EntryType::Symlink;
-                let kind = if is_symlink { "symlink" } else { "hardlink" };
+                let kind = if is_symlink {
+                    LinkKind::Symlink
+                } else {
+                    LinkKind::Hardlink
+                };
 
                 match target {
                     Some(t) => classify_link_target(t, kind, config)?,
@@ -358,6 +370,9 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
             .map_err(|e| ArchiveError::InvalidArchive(format!("invalid entry name: {e}")))?
             .into_owned();
         let path = resolve_zip_entry_path(&raw_name, entry.enclosed_name(), config)?;
+        if !admit_path(&path, &mut manifest, config)? {
+            continue;
+        }
 
         let entry_type = convert_zip_entry_type(&entry);
         let size = entry.size();
@@ -381,8 +396,12 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
         // Symlink targets are decoded below, through the target read.
         let has_payload = entry_type != ManifestEntryType::Symlink
             && (entry_type != ManifestEntryType::Directory || size > 0);
+        let mut descriptor_tail = None;
         if has_payload && let Some((pass, slot)) = tracked.as_mut() {
             let outcome = pass.decode(*slot, &mut entry, size, Charge::Declared);
+            if matches!(outcome, DecodeOutcome::Verified) {
+                descriptor_tail = DescriptorTail::of(&entry);
+            }
             pass.record(*slot, &path, outcome)?;
         }
 
@@ -390,12 +409,16 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
         // target data: the borrow checker requires the mutable borrow to end.
         drop(entry);
 
+        if let (Some(tail), Some((pass, slot))) = (descriptor_tail, tracked.as_mut()) {
+            tail.check(archive, i, pass, *slot, &path)?;
+        }
+
         let target = if entry_type == ManifestEntryType::Symlink {
             let mut sym_entry = archive.by_index(i).map_err(|e| {
                 ArchiveError::InvalidArchive(format!("failed to re-read ZIP entry {i}: {e}"))
             })?;
             let declared = sym_entry.size();
-            if config.relaxed_for_verify_preflight && declared > MAX_PATH_BYTES as u64 {
+            if config.relaxed_for_verify_preflight && declared > MAX_PATH_LEN as u64 {
                 LinkTarget::Oversized {
                     bytes: usize::try_from(declared).unwrap_or(usize::MAX),
                 }
@@ -406,7 +429,7 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
                     }
                     None => read_zip_symlink_target(&mut sym_entry)?,
                 };
-                classify_link_target(target, "symlink", config)?
+                classify_link_target(target, LinkKind::Symlink, config)?
             }
         } else {
             LinkTarget::Missing
@@ -455,10 +478,21 @@ pub(crate) fn list_sevenz_reader<R: Read + Seek>(
         }
     };
 
+    list_sevenz_parsed(&archive, source, config, policy)
+}
+
+/// Lists an already-parsed 7z archive, decoding its blocks when `policy`
+/// asks for an integrity pass.
+pub(crate) fn list_sevenz_parsed<R: Read + Seek>(
+    archive: &sevenz_rust2::Archive,
+    mut source: R,
+    config: &SecurityConfig<Validated>,
+    policy: &mut ContentPolicy<'_, '_>,
+) -> Result<ArchiveManifest> {
     let source_len = source.seek(SeekFrom::End(0))?;
-    let (manifest, slots) = list_sevenz_archive(&archive, source_len, config, policy)?;
+    let (manifest, slots) = list_sevenz_archive(archive, source_len, config, policy)?;
     if let Some(pass) = policy.pass() {
-        verify_sevenz_blocks(&archive, &mut source, pass, &slots)?;
+        verify_sevenz_blocks(archive, &mut source, pass, &slots)?;
     }
     Ok(manifest)
 }
@@ -533,6 +567,11 @@ fn list_sevenz_archive(
             return Err(ArchiveError::PathTraversal { path });
         }
 
+        if !admit_path(&path, &mut manifest, config)? {
+            slots.push(None);
+            continue;
+        }
+
         let entry_type = sevenz_manifest_entry_type(entry);
         let size = entry.size;
         let modified = entry
@@ -567,6 +606,26 @@ fn list_sevenz(
 ) -> Result<ArchiveManifest> {
     let mut file = File::open(archive_path)?;
     list_sevenz_reader(&mut file, config, policy)
+}
+
+/// Returns whether the entry at `path` is kept.
+///
+/// An entry the host cannot create fails the listing; the verify pre-flight
+/// instead records only its length on `manifest` and drops it, so the report
+/// can flag it without the manifest growing with the path.
+fn admit_path(
+    path: &Path,
+    manifest: &mut ArchiveManifest,
+    config: &SecurityConfig<Validated>,
+) -> Result<bool> {
+    if check_name_lengths(path).is_ok() {
+        return Ok(true);
+    }
+    if !config.relaxed_for_verify_preflight {
+        return Err(ArchiveError::Io(name_too_long()));
+    }
+    manifest.add_oversized(path.as_os_str().len());
+    Ok(false)
 }
 
 fn manifest_entry_kind(entry_type: ManifestEntryType, target: LinkTarget) -> ManifestEntryKind {
@@ -607,7 +666,7 @@ fn sevenz_manifest_entry_type(entry: &sevenz_rust2::ArchiveEntry) -> ManifestEnt
 /// `VerificationIssue` instead of aborting.
 fn validate_link_target(
     target: &Path,
-    kind: &str,
+    kind: LinkKind,
     config: &SecurityConfig<Validated>,
 ) -> Result<()> {
     if config.relaxed_for_verify_preflight {
@@ -633,11 +692,11 @@ fn validate_link_target(
 /// can flag it without the manifest growing with the target.
 fn classify_link_target(
     target: PathBuf,
-    kind: &str,
+    kind: LinkKind,
     config: &SecurityConfig<Validated>,
 ) -> Result<LinkTarget> {
     validate_link_target(&target, kind, config)?;
-    match LinkTarget::classify(target) {
+    match LinkTarget::classify(target, kind) {
         LinkTarget::Oversized { bytes } if !config.relaxed_for_verify_preflight => Err(
             ArchiveError::InvalidArchive(format!("{kind} target too long: {bytes} bytes")),
         ),
@@ -709,7 +768,10 @@ mod tests {
     use super::*;
     use std::assert_matches;
 
+    use crate::OversizedEntry;
+    use crate::test_utils::HOST_PATH_LIMIT;
     use crate::test_utils::create_raw_zip_entry;
+    use crate::test_utils::path_of_len;
     use crate::test_utils::tar_with_pax_linkpath;
     use crate::test_utils::tar_with_pax_nul_path;
     use flate2::write::GzEncoder;
@@ -2384,6 +2446,196 @@ mod tests {
             }
             other => panic!("expected InvalidArchive for missing hardlink target, got: {other:?}"),
         }
+    }
+
+    fn tar_with_paths(paths: &[&str]) -> NamedTempFile {
+        let mut builder = tar::Builder::new(Vec::new());
+        for path in paths {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(1);
+            header.set_cksum();
+            builder.append_data(&mut header, path, &b"x"[..]).unwrap();
+        }
+        let mut file = NamedTempFile::with_suffix(".tar").unwrap();
+        file.write_all(&builder.into_inner().unwrap()).unwrap();
+        file.flush().unwrap();
+        file
+    }
+
+    fn zip_with_names(names: &[&str]) -> NamedTempFile {
+        let file = NamedTempFile::with_suffix(".zip").unwrap();
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(file.path()).unwrap());
+        let options = zip::write::SimpleFileOptions::default();
+        for name in names {
+            zip.start_file(*name, options).unwrap();
+            zip.write_all(b"x").unwrap();
+        }
+        zip.finish().unwrap();
+        file
+    }
+
+    fn assert_name_too_long(result: &Result<ArchiveManifest>) {
+        assert!(
+            matches!(result, Err(ArchiveError::Io(e)) if e.to_string() == "file name too long"),
+            "expected name-too-long error, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_list_tar_entry_path_limit_boundary() {
+        let at_limit = path_of_len(HOST_PATH_LIMIT);
+        let over = path_of_len(HOST_PATH_LIMIT + 1);
+        let config = SecurityConfig::default();
+
+        let ok = tar_with_paths(&[&at_limit]);
+        assert_eq!(list_archive(ok.path(), &config).unwrap().total_entries(), 1);
+
+        let bad = tar_with_paths(&[&over]);
+        assert_name_too_long(&list_archive(bad.path(), &config));
+    }
+
+    #[test]
+    fn test_list_tar_entry_component_limit() {
+        let long_component = "a".repeat(255 + 1);
+        let bad = tar_with_paths(&[&long_component]);
+        assert_name_too_long(&list_archive(bad.path(), &SecurityConfig::default()));
+    }
+
+    #[test]
+    fn test_list_tar_relaxed_preflight_records_oversized_entry() {
+        let over = path_of_len(HOST_PATH_LIMIT + 1);
+        let file = tar_with_paths(&["first.txt", &over, "last.txt"]);
+        let config = SecurityConfig::default().with_relaxed_for_verify_preflight();
+
+        let manifest = list_archive(file.path(), &config).unwrap();
+
+        assert_eq!(manifest.total_entries(), 2);
+        assert_eq!(
+            manifest.oversized_entries(),
+            &[OversizedEntry::new(1, HOST_PATH_LIMIT + 1)]
+        );
+        assert_eq!(manifest.entries()[1].path, PathBuf::from("last.txt"));
+    }
+
+    #[test]
+    fn test_list_zip_entry_path_limit() {
+        let at_limit = path_of_len(HOST_PATH_LIMIT);
+        let over = path_of_len(HOST_PATH_LIMIT + 1);
+        let config = SecurityConfig::default();
+
+        let ok = zip_with_names(&[&at_limit]);
+        assert_eq!(list_archive(ok.path(), &config).unwrap().total_entries(), 1);
+
+        let bad = zip_with_names(&[&over]);
+        assert_name_too_long(&list_archive(bad.path(), &config));
+    }
+
+    #[test]
+    fn test_list_zip_relaxed_preflight_records_oversized_entry() {
+        let over = path_of_len(HOST_PATH_LIMIT + 1);
+        let file = zip_with_names(&[&over, "last.txt"]);
+        let config = SecurityConfig::default().with_relaxed_for_verify_preflight();
+
+        let manifest = list_archive(file.path(), &config).unwrap();
+
+        assert_eq!(manifest.total_entries(), 1);
+        assert_eq!(
+            manifest.oversized_entries(),
+            &[OversizedEntry::new(0, HOST_PATH_LIMIT + 1)]
+        );
+    }
+
+    #[test]
+    fn test_verify_reports_one_high_issue_per_oversized_entry() {
+        let over = path_of_len(HOST_PATH_LIMIT + 1);
+        let way_over = path_of_len(HOST_PATH_LIMIT * 3);
+        let file = tar_with_paths(&["ok.txt", &over, &way_over]);
+
+        let report = crate::verify_archive(file.path(), &SecurityConfig::default()).unwrap();
+
+        assert_eq!(report.status(), crate::VerificationStatus::Fail);
+        let issues: Vec<_> = report
+            .issues()
+            .iter()
+            .filter(|i| i.message.contains("file name too long"))
+            .collect();
+        assert_eq!(issues.len(), 2);
+        assert!(
+            issues
+                .iter()
+                .all(|i| { i.severity == crate::IssueSeverity::High && i.entry_path.is_none() })
+        );
+        assert!(issues[0].message.contains("entry 1"));
+        assert!(
+            issues[1]
+                .message
+                .contains(&format!("{} bytes", HOST_PATH_LIMIT * 3))
+        );
+    }
+
+    #[test]
+    fn test_list_sevenz_entry_path_limit() {
+        let over = path_of_len(HOST_PATH_LIMIT + 1);
+        let data = make_sevenz_archive(&[(&over, b"x"), ("last.txt", b"x")]);
+        let mut file = NamedTempFile::with_suffix(".7z").unwrap();
+        file.write_all(&data).unwrap();
+        file.flush().unwrap();
+
+        assert_name_too_long(&list_archive(file.path(), &SecurityConfig::default()));
+
+        let config = SecurityConfig::default().with_relaxed_for_verify_preflight();
+        let manifest = list_archive(file.path(), &config).unwrap();
+        assert_eq!(manifest.total_entries(), 1);
+        assert_eq!(manifest.oversized_entries().len(), 1);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn test_list_tar_pax_path_of_5000_bytes_errors() {
+        let file = tar_with_paths(&[&path_of_len(5000)]);
+        assert_name_too_long(&list_archive(file.path(), &SecurityConfig::default()));
+
+        let config = SecurityConfig::default().with_relaxed_for_verify_preflight();
+        let manifest = list_archive(file.path(), &config).unwrap();
+        assert_eq!(manifest.total_entries(), 0);
+        assert_eq!(
+            manifest.oversized_entries(),
+            &[OversizedEntry::new(0, 5000)]
+        );
+    }
+
+    #[test]
+    fn test_list_zip_name_of_65535_bytes_errors() {
+        let mut file = NamedTempFile::with_suffix(".zip").unwrap();
+        file.write_all(&create_raw_zip_entry(&path_of_len(65535), b""))
+            .unwrap();
+        file.flush().unwrap();
+        assert_name_too_long(&list_archive(file.path(), &SecurityConfig::default()));
+
+        let config = SecurityConfig::default().with_relaxed_for_verify_preflight();
+        let manifest = list_archive(file.path(), &config).unwrap();
+        assert_eq!(manifest.total_entries(), 0);
+        assert_eq!(
+            manifest.oversized_entries(),
+            &[OversizedEntry::new(0, 65535)]
+        );
+    }
+
+    #[test]
+    fn test_verify_caps_oversized_entry_issues() {
+        let over = path_of_len(HOST_PATH_LIMIT + 1);
+        let paths = vec![over.as_str(); 20];
+        let file = tar_with_paths(&paths);
+
+        let report = crate::verify_archive(file.path(), &SecurityConfig::default()).unwrap();
+
+        let issues: Vec<_> = report
+            .issues()
+            .iter()
+            .filter(|i| i.message.contains("file name too long"))
+            .collect();
+        assert_eq!(issues.len(), 17);
+        assert!(issues[16].message.contains("4 more entries"));
     }
 
     #[test]

@@ -906,6 +906,16 @@ export interface ExtractionReport {
   warnings: Array<string>
 }
 
+/** What a requested integrity check left unverified. */
+export interface IntegrityGaps {
+  /** Unverified items per reason; reasons with no items are absent. */
+  counts: Array<UnverifiedCount>
+  /** Unverified entries listed by path, up to a fixed cap (see `omitted`). */
+  entries: Array<UnverifiedEntry>
+  /** Entries with a path that did not fit `entries`. */
+  omitted: number
+}
+
 /** Result of the payload integrity check. */
 export type IntegrityStatus = 'OK' | 'FAILED' | 'INCOMPLETE' | 'SKIPPED'
 
@@ -977,6 +987,25 @@ export declare function listArchiveSync(archivePath: string, config?: SecurityCo
 /** Manifest entry type. */
 export type ManifestEntryType = 'File' | 'Directory' | 'Symlink' | 'Hardlink'
 
+/** Number of items left unverified for one reason. */
+export interface UnverifiedCount {
+  /** Why the items were not verified. */
+  reason: UnverifiedReason
+  /** Number of items. */
+  count: number
+}
+
+/** One entry the integrity check could not verify. */
+export interface UnverifiedEntry {
+  /** Entry path inside the archive. */
+  path: string
+  /** Why the entry was not verified. */
+  reason: UnverifiedReason
+}
+
+/** Why part of the payload was not verified by the integrity check. */
+export type UnverifiedReason = 'over_budget' | 'resource_limit' | 'solid_policy' | 'size_ceiling' | 'uncovered_block_crc' | 'not_decodable' | 'no_end_marker'
+
 /** Single verification issue. */
 export interface VerificationIssue {
   /** Issue severity level. */
@@ -1002,6 +1031,11 @@ export interface VerificationReport {
   status: VerificationStatus
   /** Integrity check result. */
   integrityStatus: IntegrityStatus
+  /**
+   * What the integrity check left unverified; absent unless the check was
+   * requested.
+   */
+  integrityGaps?: IntegrityGaps
   /** Security check result. */
   securityStatus: CheckStatus
   /** List of all issues found (sorted by severity). */

@@ -2,12 +2,14 @@
 
 use exarch_core::ExtractionReport as CoreExtractionReport;
 use exarch_core::creation::CreationReport as CoreCreationReport;
+use exarch_core::inspection::IntegrityGaps;
 use exarch_core::inspection::manifest::ArchiveEntry;
 use exarch_core::inspection::manifest::ArchiveManifest;
 use exarch_core::inspection::manifest::ManifestEntryType;
 use exarch_core::inspection::report::VerificationIssue;
 use exarch_core::inspection::report::VerificationReport;
 use pyo3::prelude::*;
+use std::collections::BTreeMap;
 
 /// Report of an archive extraction operation.
 ///
@@ -426,6 +428,77 @@ impl From<VerificationIssue> for PyVerificationIssue {
     }
 }
 
+/// One entry the integrity check could not verify.
+///
+/// # Attributes
+///
+/// * `path` - Entry path inside the archive
+/// * `reason` - Stable reason string, e.g. `"solid_policy"`
+#[pyclass(name = "UnverifiedEntry")]
+#[derive(Clone)]
+pub struct PyUnverifiedEntry {
+    #[pyo3(get)]
+    path: String,
+    #[pyo3(get)]
+    reason: String,
+}
+
+/// What a requested integrity check left unverified.
+///
+/// # Attributes
+///
+/// * `counts` - Unverified items per reason
+/// * `entries` - Unverified entries listed by path (capped)
+/// * `omitted` - Entries with a path that did not fit the list
+/// * `total` - Total number of unverified items
+#[pyclass(name = "IntegrityGaps")]
+#[derive(Clone)]
+pub struct PyIntegrityGaps {
+    inner: IntegrityGaps,
+}
+
+#[pymethods]
+impl PyIntegrityGaps {
+    #[getter]
+    fn counts(&self) -> BTreeMap<String, u64> {
+        self.inner
+            .counts()
+            .map(|(reason, count)| (reason.as_str().to_owned(), count))
+            .collect()
+    }
+
+    #[getter]
+    fn entries(&self) -> Vec<PyUnverifiedEntry> {
+        self.inner
+            .entries()
+            .iter()
+            .map(|e| PyUnverifiedEntry {
+                path: e.path().to_string_lossy().into_owned(),
+                reason: e.reason().as_str().to_owned(),
+            })
+            .collect()
+    }
+
+    #[getter]
+    fn omitted(&self) -> u64 {
+        self.inner.omitted()
+    }
+
+    #[getter]
+    fn total(&self) -> u64 {
+        self.inner.total()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "IntegrityGaps(total={}, listed={}, omitted={})",
+            self.inner.total(),
+            self.inner.entries().len(),
+            self.inner.omitted()
+        )
+    }
+}
+
 /// Verification report.
 ///
 /// # Attributes
@@ -470,6 +543,14 @@ impl PyVerificationReport {
     #[getter]
     fn integrity_status(&self) -> String {
         self.inner.integrity_status().as_str().to_owned()
+    }
+
+    #[getter]
+    fn integrity_gaps(&self) -> Option<PyIntegrityGaps> {
+        self.inner
+            .integrity_gaps()
+            .cloned()
+            .map(|inner| PyIntegrityGaps { inner })
     }
 
     #[getter]

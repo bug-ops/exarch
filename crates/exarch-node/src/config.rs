@@ -107,6 +107,9 @@ impl SecurityConfig {
 
     /// Sets the maximum compression ratio.
     ///
+    /// Solid 7z blocks are exempt: each block is checked as a whole against a
+    /// fixed 1000x limit that is configurable only from the Rust API.
+    ///
     /// # Errors
     ///
     /// Returns error if ratio is not a positive finite number.

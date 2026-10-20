@@ -20,7 +20,7 @@ use crate::error::convert_error;
 /// * `max_total_size` - Maximum total size for all files in bytes (default: 500
 ///   MB)
 /// * `max_compression_ratio` - Maximum compression ratio allowed (default:
-///   100.0)
+///   100.0); not applied to solid 7z blocks, which use a fixed 1000x limit
 /// * `max_file_count` - Maximum number of files (default: 10,000)
 /// * `max_path_depth` - Maximum path depth allowed (default: 32)
 /// * `preserve_permissions` - Preserve file permissions from archive (default:
@@ -92,6 +92,9 @@ impl PySecurityConfig {
     }
 
     /// Sets the maximum compression ratio.
+    ///
+    /// Solid 7z blocks are exempt: each block is checked as a whole against a
+    /// fixed 1000x limit that is configurable only from the Rust API.
     ///
     /// # Errors
     ///

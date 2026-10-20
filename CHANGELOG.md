@@ -33,10 +33,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ZIP `extract`, `list` and `verify` reject absolute and `..` entry names by default like TAR, treat NUL bytes as a security violation, and `--allow-absolute-paths` now takes effect for ZIP (#631).
 - ZIP and 7z error classification uses typed upstream variants instead of message substrings, and 7z I/O errors keep their original kind (#634).
 - `exarch create` TAR headers store permission bits only, so `list --long` mode matches ZIP and system tar (#632).
-- `verify` reports security violations under the new `IssueCategory::SecurityPolicy`, fails `security_status` for them, and validates hardlinks through `HardlinkTracker` (#630).
+- `verify` reports security violations under the new `IssueCategory::SecurityPolicy` and fails `security_status` for them; it now also validates hardlinks through `HardlinkTracker`, so `exarch verify` exits 1 on any TAR containing a hardlink under the default policy (#630).
 - Extraction benchmark no longer panics on the 7z large-file fixture, and bz2/xz/zst extraction benchmarks were added (#633, #641).
 - 7z extraction of solid blocks drains a skipped entry's data so it no longer corrupts the next entry (#628).
-- Windows reserved device names and `:` in path components are rejected on Windows, with a Rust-only opt-out `AllowedFeatures::windows_reserved_names` (#642).
+- Windows reserved device names and `:` in path components are rejected on Windows, with a Rust-only opt-out `AllowedFeatures::windows_reserved_names` and a new public `is_windows_reserved_component` (#642).
 - 7z `extract` now enforces `max_compression_ratio` like `verify` and `list` do for non-solid archives (#624).
 - ZIP `extract`, `list` and `verify` validate declared compressed sizes against the archive length (#624).
 - `.TAR.GZ` stems are detected case-insensitively, and `verify`'s suspicious-extension check ignores case (#624).

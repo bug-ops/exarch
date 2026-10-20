@@ -55,7 +55,11 @@ class SecurityConfig:
         ...
 
     def with_max_compression_ratio(self, ratio: float) -> SecurityConfig:
-        """Sets the maximum compression ratio."""
+        """Sets the maximum compression ratio.
+
+        Solid 7z blocks are exempt: each block is checked as a whole against a
+        fixed 1000x limit that is configurable only from the Rust API.
+        """
         ...
 
     def with_max_file_count(self, count: int) -> SecurityConfig:
@@ -135,7 +139,10 @@ class SecurityConfig:
     def max_total_size(self, value: int) -> None: ...
     @property
     def max_compression_ratio(self) -> float:
-        """Maximum compression ratio allowed (default: 100.0)."""
+        """Maximum compression ratio allowed (default: 100.0).
+
+        Not applied to solid 7z blocks, which use a fixed 1000x limit.
+        """
         ...
 
     @max_compression_ratio.setter

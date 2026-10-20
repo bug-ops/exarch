@@ -210,6 +210,10 @@ banned components. These are security findings: `security_status` is `FAILED` (`
 FAILED` in text mode), not `OK`. Verified live with the debug binary on a TAR containing a
 symlink and on one containing a hardlink: each gives `status: FAIL`, `Security: FAILED`, one
 `HIGH` `"Security Policy"` issue, exit code `1`.
+Consequently `exarch verify` exits `1` with `Security: FAILED` for **any** TAR containing a hardlink or
+symlink: `verify` always applies the default policy (links not allowed) and has no
+`--allow-hardlinks` / `--allow-symlinks` flags, so such an archive cannot be verified as passing
+even if you intend to extract it with those flags.
 
 ### `completion <SHELL>`
 

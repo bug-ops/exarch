@@ -166,7 +166,8 @@ pub fn convert_extraction_error(
         ),
         ArchiveError::ZipBomb { .. } => format!(
             "Security violation: Archive '{}' appears to be a zip bomb\n\
-             HINT: Use --max-compression-ratio to allow higher ratios if legitimate.",
+             HINT: For ZIP and non-solid 7z, --max-compression-ratio allows higher ratios if \
+             legitimate. Solid 7z blocks use a fixed limit that the CLI cannot change.",
             archive.display(),
         ),
         ArchiveError::QuotaExceeded {
@@ -310,6 +311,8 @@ mod tests {
         let msg = format!("{converted:?}");
         assert!(msg.contains("zip bomb"));
         assert!(msg.contains("bomb.zip"));
+        assert!(msg.contains("--max-compression-ratio"));
+        assert!(msg.contains("Solid 7z blocks use a fixed limit"));
     }
 
     #[test]

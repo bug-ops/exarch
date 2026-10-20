@@ -122,7 +122,6 @@ const MAX_TEMP_FILE_CREATE_ATTEMPTS: u32 = 8;
 use crate::ArchiveError;
 use crate::ExtractionOptions;
 use crate::ExtractionReport;
-use crate::IoContext;
 use crate::ProgressCallback;
 use crate::Result;
 use crate::SecurityConfig;
@@ -300,13 +299,8 @@ impl<R: Read + Seek> SevenZArchive<R> {
         let archive = match Archive::read(&mut source, &password) {
             Ok(a) => a,
             Err(e) => {
-                // SECURITY: Check if error indicates encryption
-                let err_str = e.to_string().to_lowercase();
-                if err_str.contains("encrypt") || err_str.contains("password") {
-                    return Err(ArchiveError::SecurityViolation {
-                        reason: "encrypted 7z archive detected. Password-protected archives are not supported. \
-                                 Decrypt the archive externally and try again.".into(),
-                    });
+                if is_password_error(&e) {
+                    return Err(common::encrypted_archive_error());
                 }
                 // Handle valid empty 7z archives: sevenz-rust2 fails with
                 // UnexpectedEof on 32-byte archives that
@@ -1282,29 +1276,32 @@ fn is_empty_sevenz_archive<R: Read + Seek>(err: &sevenz_rust2::Error, source: &m
     source.read_exact(&mut magic).is_ok() && magic == SEVENZ_MAGIC
 }
 
+/// Whether a sevenz-rust2 error means the archive needs a password.
+///
+/// Matches the typed upstream variants so an upstream message change cannot
+/// silently reclassify encrypted archives as merely invalid.
+pub(crate) fn is_password_error(error: &sevenz_rust2::Error) -> bool {
+    matches!(
+        error,
+        sevenz_rust2::Error::PasswordRequired | sevenz_rust2::Error::MaybeBadPassword(_)
+    )
+}
+
 /// Converts sevenz-rust2 errors to our `ArchiveError` type.
+///
+/// I/O failures keep their original `io::Error` (kind and source chain).
 impl From<sevenz_rust2::Error> for ArchiveError {
     fn from(err: sevenz_rust2::Error) -> Self {
-        let err_str = err.to_string();
-        let err_lower = err_str.to_lowercase();
-
-        // Check for encryption/password errors
-        if err_lower.contains("password") || err_lower.contains("encrypt") {
-            return Self::SecurityViolation {
-                reason: format!("encrypted archive: {err_str}"),
-            };
+        if is_password_error(&err) {
+            return common::encrypted_archive_error();
         }
 
-        // Check for I/O errors
-        if err_lower.contains("i/o") || err_lower.contains("read") || err_lower.contains("write") {
-            return Self::Io(std::io::Error::other(IoContext::new(
-                "7z I/O error",
-                err_str,
-            )));
+        match err {
+            sevenz_rust2::Error::Io(io_err, _) | sevenz_rust2::Error::FileOpen(io_err, _) => {
+                Self::Io(io_err)
+            }
+            other => Self::InvalidArchive(format!("7z error: {other}")),
         }
-
-        // Default: InvalidArchive
-        Self::InvalidArchive(format!("7z error: {err_str}"))
     }
 }
 
@@ -2125,12 +2122,10 @@ mod tests {
         }
     }
 
-    /// Regression test for #464: the I/O-class branch of the sevenz-rust2
-    /// error mapping must wrap its detail in `IoContext` so bindings can
-    /// surface an actionable reason in release builds instead of the
-    /// generic `ErrorKind::Other` message "other error".
+    /// Issue #634: I/O errors keep their original kind and message instead of
+    /// being rebuilt from the `Display` text as `ErrorKind::Other`.
     #[test]
-    fn test_sevenz_io_error_maps_to_io_context() {
+    fn test_sevenz_io_error_preserves_kind_and_message() {
         let inner = std::io::Error::new(
             std::io::ErrorKind::UnexpectedEof,
             "unexpected EOF while reading entry data",
@@ -2141,20 +2136,33 @@ mod tests {
 
         match archive_err {
             ArchiveError::Io(io_err) => {
-                assert_eq!(io_err.kind(), std::io::ErrorKind::Other);
-                let ctx = io_err
-                    .get_ref()
-                    .and_then(|inner| inner.downcast_ref::<IoContext>())
-                    .expect("expected IoContext to be attached to the io::Error");
-                assert_eq!(ctx.context, "7z I/O error");
-                assert!(
-                    ctx.detail.contains("unexpected EOF"),
-                    "detail should retain the original sevenz-rust2 message, got: {}",
-                    ctx.detail
-                );
+                assert_eq!(io_err.kind(), std::io::ErrorKind::UnexpectedEof);
+                assert!(io_err.to_string().contains("unexpected EOF"));
             }
             other => panic!("expected ArchiveError::Io, got {other:?}"),
         }
+    }
+
+    /// Issue #634: encryption is detected from the typed variants, and
+    /// unrelated messages that merely contain "read" or "password" are not
+    /// reclassified.
+    #[test]
+    fn test_sevenz_error_classification_is_typed() {
+        for err in [
+            sevenz_rust2::Error::PasswordRequired,
+            sevenz_rust2::Error::MaybeBadPassword(std::io::Error::other("bad")),
+        ] {
+            assert_matches!(
+                ArchiveError::from(err),
+                ArchiveError::SecurityViolation { .. }
+            );
+        }
+
+        let lookalike = sevenz_rust2::Error::Other("thread already ready: password".into());
+        assert_matches!(
+            ArchiveError::from(lookalike),
+            ArchiveError::InvalidArchive(_)
+        );
     }
 
     #[test]

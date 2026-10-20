@@ -178,6 +178,19 @@ struct ZipExtractionContext<'a> {
     progress: &'a mut dyn ProgressCallback,
 }
 
+/// Whether opening a ZIP entry failed because it is encrypted.
+///
+/// Matches the typed upstream variants so an upstream message change cannot
+/// silently reclassify encrypted archives as merely invalid.
+pub(crate) fn is_password_required(error: &zip::result::ZipError) -> bool {
+    use zip::result::ZipError;
+
+    matches!(
+        error,
+        ZipError::UnsupportedArchive(ZipError::PASSWORD_REQUIRED) | ZipError::InvalidPassword
+    )
+}
+
 /// Appends aggregated duplicate-skip and disallowed-extension warnings to
 /// `report`, mirroring TAR's `push_duplicate_skip_warnings` (issues #490,
 /// #495). Called on every extraction exit path — including entry-open/name
@@ -269,9 +282,7 @@ impl<R: Read + Seek> ZipArchive<R> {
         // Detect password protection early (CRIT-003: robust check with entry
         // limit)
         if Self::is_password_protected(&mut inner)? {
-            return Err(ArchiveError::SecurityViolation {
-                reason: "password-protected ZIP archives are not supported".into(),
-            });
+            return Err(common::encrypted_archive_error());
         }
 
         Ok(Self { inner })
@@ -294,7 +305,7 @@ impl<R: Read + Seek> ZipArchive<R> {
     fn check_entry_encrypted(archive: &mut ZipReader<R>, index: usize) -> Result<bool> {
         match archive.by_index(index) {
             Ok(file) => Ok(file.encrypted()),
-            Err(e) if e.to_string().contains("Password required to decrypt file") => Ok(true),
+            Err(e) if is_password_required(&e) => Ok(true),
             Err(e) => Err(ArchiveError::InvalidArchive(format!(
                 "failed to check entry {index} for encryption: {e}"
             ))),
@@ -548,10 +559,8 @@ impl<R: Read + Seek> ArchiveFormat for ZipArchive<R> {
             let zip_file = match self.inner.by_index(i) {
                 Ok(f) => f,
                 Err(e) => {
-                    let err = if e.to_string().contains("Password required to decrypt file") {
-                        ArchiveError::SecurityViolation {
-                            reason: "archive is password-protected.\n  Password-protected ZIP archives are not supported. Decrypt the archive externally and try again.".into(),
-                        }
+                    let err = if is_password_required(&e) {
+                        common::encrypted_archive_error()
                     } else {
                         ArchiveError::InvalidArchive(format!("failed to open zip entry {i}: {e}"))
                     };
@@ -1838,6 +1847,20 @@ mod tests {
         }
 
         zip.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn test_is_password_required_matches_typed_variants_only() {
+        use ::zip::result::ZipError;
+
+        assert!(is_password_required(&ZipError::UnsupportedArchive(
+            ZipError::PASSWORD_REQUIRED
+        )));
+        assert!(is_password_required(&ZipError::InvalidPassword));
+        assert!(!is_password_required(&ZipError::FileNotFound));
+        assert!(!is_password_required(&ZipError::UnsupportedArchive(
+            "password mentioned elsewhere"
+        )));
     }
 
     #[test]

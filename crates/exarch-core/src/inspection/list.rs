@@ -15,17 +15,20 @@ use crate::SecurityConfig;
 use crate::config::Validated;
 #[cfg(test)]
 use crate::error::QuotaResource;
+use crate::formats::common::encrypted_archive_error;
 use crate::formats::common::normalize_entry_name;
 use crate::formats::compression::CompressionCodec;
 use crate::formats::detect::ArchiveType;
 use crate::formats::detect::FormatFamily;
 use crate::formats::detect::detect_format;
+use crate::formats::sevenz::is_password_error;
 use crate::formats::sevenz::sevenz_compressed_sizes;
 use crate::formats::tar::open_tar_stream;
 use crate::formats::tar_metadata_limit::TarReadBudget;
 use crate::formats::tar_metadata_limit::budget_violation;
 use crate::formats::tar_metadata_limit::budgeted_reader;
 use crate::formats::tar_metadata_limit::budgeted_tar_entries;
+use crate::formats::zip::is_password_required;
 use crate::formats::zip::read_zip_symlink_target;
 use crate::formats::zip::zip_mode_is_symlink;
 use crate::inspection::manifest::ArchiveEntry;
@@ -258,18 +261,14 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
 
     for i in 0..archive.len() {
         let entry = archive.by_index(i).map_err(|e| {
-            if e.to_string().contains("Password required to decrypt file") {
-                return ArchiveError::SecurityViolation {
-                    reason: "archive is password-protected".into(),
-                };
+            if is_password_required(&e) {
+                return encrypted_archive_error();
             }
             ArchiveError::InvalidArchive(format!("failed to read ZIP entry: {e}"))
         })?;
 
         if entry.encrypted() {
-            return Err(ArchiveError::SecurityViolation {
-                reason: "archive is password-protected".into(),
-            });
+            return Err(encrypted_archive_error());
         }
 
         compressed_budget.charge(entry.compressed_size())?;
@@ -381,13 +380,8 @@ pub(crate) fn list_sevenz_reader<R: Read + Seek>(
     let archive = match Archive::read(&mut source, &password) {
         Ok(a) => a,
         Err(e) => {
-            let err_str = e.to_string().to_lowercase();
-            if err_str.contains("encrypt") || err_str.contains("password") {
-                return Err(ArchiveError::SecurityViolation {
-                    reason: "encrypted 7z archive detected. Password-protected archives are not \
-                             supported. Decrypt the archive externally and try again."
-                        .into(),
-                });
+            if is_password_error(&e) {
+                return Err(encrypted_archive_error());
             }
             if is_empty_sevenz_archive_reader(&e, &mut source) {
                 return Ok(ArchiveManifest::new(ArchiveType::SevenZ));

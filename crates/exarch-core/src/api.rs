@@ -468,14 +468,10 @@ pub fn create_archive_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
 fn creator_for_format(
     format: ArchiveType,
 ) -> Result<Box<dyn crate::formats::traits::FormatCreator>> {
-    match format {
-        ArchiveType::Tar => Ok(Box::new(crate::creation::TarCreator)),
-        ArchiveType::TarGz => Ok(Box::new(crate::creation::TarGzCreator)),
-        ArchiveType::TarBz2 => Ok(Box::new(crate::creation::TarBz2Creator)),
-        ArchiveType::TarXz => Ok(Box::new(crate::creation::TarXzCreator)),
-        ArchiveType::TarZst => Ok(Box::new(crate::creation::TarZstCreator)),
-        ArchiveType::Zip => Ok(Box::new(crate::creation::ZipCreator)),
-        ArchiveType::SevenZ => Err(ArchiveError::InvalidConfiguration {
+    match format.family() {
+        FormatFamily::Tar(codec) => Ok(Box::new(crate::creation::TarCreator(codec))),
+        FormatFamily::Zip => Ok(Box::new(crate::creation::ZipCreator)),
+        FormatFamily::SevenZ => Err(ArchiveError::InvalidConfiguration {
             reason: "7z archive creation is not supported".into(),
         }),
     }

@@ -6,23 +6,23 @@
 use crate::ProgressCallback;
 use crate::Result;
 use crate::config::Validated;
-use crate::creation::compression::compression_level_to_bzip2;
-use crate::creation::compression::compression_level_to_flate2;
-use crate::creation::compression::compression_level_to_xz;
-use crate::creation::compression::compression_level_to_zstd;
 use crate::creation::config::CreationConfig;
 use crate::creation::progress::ProgressReader;
 use crate::creation::progress::ProgressTracker;
 use crate::creation::report::CreationReport;
 use crate::creation::walker::EntryType;
 use crate::creation::walker::collect_entries;
+use crate::formats::compression::CompressionCodec;
 use std::fs::File;
 use std::io::Write;
 use std::path::Path;
 use tar::Builder;
 use tar::Header;
 
-/// Creates an uncompressed TAR archive with progress reporting.
+/// Creates a TAR archive, optionally compressed, with progress reporting.
+///
+/// `codec` selects the compression (`None` writes an uncompressed `.tar`);
+/// the level comes from `config.compression_level`.
 ///
 /// This function provides real-time progress updates during archive creation
 /// through callback functions. Useful for displaying progress bars or logging
@@ -31,6 +31,7 @@ use tar::Header;
 /// # Parameters
 ///
 /// - `output`: Path where the TAR archive will be created
+/// - `codec`: Compression codec, or `None` for an uncompressed TAR
 /// - `sources`: Slice of source paths to include in the archive
 /// - `config`: Configuration controlling filtering, permissions, and archiving
 ///   behavior
@@ -81,6 +82,7 @@ use tar::Header;
 /// let mut progress = SimpleProgress;
 /// let report = create_tar_with_progress(
 ///     Path::new("output.tar"),
+///     None,
 ///     &[Path::new("src")],
 ///     &config,
 ///     &mut progress,
@@ -97,120 +99,23 @@ use tar::Header;
 /// - File metadata cannot be read
 pub fn create_tar_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
     output: P,
+    codec: Option<CompressionCodec>,
     sources: &[Q],
     config: &CreationConfig<Validated>,
     progress: &mut dyn ProgressCallback,
 ) -> Result<CreationReport> {
     let file = File::create(output.as_ref())?;
-    let (mut report, file) = create_tar_internal_with_progress(file, sources, config, progress)?;
-    drop(file);
-    report.bytes_compressed = std::fs::metadata(output.as_ref())?.len();
-    Ok(report)
-}
-
-/// Creates a gzip-compressed TAR archive with progress reporting.
-///
-/// Identical to [`create_tar_with_progress`] but applies gzip compression.
-/// See that function for detailed documentation on progress callbacks and
-/// usage.
-///
-/// # Errors
-///
-/// Returns an error if output file cannot be created, compression fails, or I/O
-/// operations fail.
-pub fn create_tar_gz_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
-    output: P,
-    sources: &[Q],
-    config: &CreationConfig<Validated>,
-    progress: &mut dyn ProgressCallback,
-) -> Result<CreationReport> {
-    let file = File::create(output.as_ref())?;
-    let level = compression_level_to_flate2(config.compression_level);
-    let encoder = flate2::write::GzEncoder::new(file, level);
-    let (mut report, encoder) =
-        create_tar_internal_with_progress(encoder, sources, config, progress)?;
-    encoder.finish()?;
-    report.bytes_compressed = std::fs::metadata(output.as_ref())?.len();
-    Ok(report)
-}
-
-/// Creates a bzip2-compressed TAR archive with progress reporting.
-///
-/// Identical to [`create_tar_with_progress`] but applies bzip2 compression.
-/// See that function for detailed documentation on progress callbacks and
-/// usage.
-///
-/// # Errors
-///
-/// Returns an error if output file cannot be created, compression fails, or I/O
-/// operations fail.
-pub fn create_tar_bz2_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
-    output: P,
-    sources: &[Q],
-    config: &CreationConfig<Validated>,
-    progress: &mut dyn ProgressCallback,
-) -> Result<CreationReport> {
-    let file = File::create(output.as_ref())?;
-    let level = compression_level_to_bzip2(config.compression_level);
-    let encoder = bzip2::write::BzEncoder::new(file, level);
-    let (mut report, encoder) =
-        create_tar_internal_with_progress(encoder, sources, config, progress)?;
-    encoder.finish()?;
-    report.bytes_compressed = std::fs::metadata(output.as_ref())?.len();
-    Ok(report)
-}
-
-/// Creates an xz-compressed TAR archive with progress reporting.
-///
-/// Identical to [`create_tar_with_progress`] but applies xz compression.
-/// See that function for detailed documentation on progress callbacks and
-/// usage.
-///
-/// # Errors
-///
-/// Returns an error if output file cannot be created, compression fails, or I/O
-/// operations fail.
-pub fn create_tar_xz_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
-    output: P,
-    sources: &[Q],
-    config: &CreationConfig<Validated>,
-    progress: &mut dyn ProgressCallback,
-) -> Result<CreationReport> {
-    let file = File::create(output.as_ref())?;
-    let level = compression_level_to_xz(config.compression_level);
-    let encoder = xz2::write::XzEncoder::new(file, level);
-    let (mut report, encoder) =
-        create_tar_internal_with_progress(encoder, sources, config, progress)?;
-    encoder.finish()?;
-    report.bytes_compressed = std::fs::metadata(output.as_ref())?.len();
-    Ok(report)
-}
-
-/// Creates a zstd-compressed TAR archive with progress reporting.
-///
-/// Identical to [`create_tar_with_progress`] but applies zstd compression.
-/// See that function for detailed documentation on progress callbacks and
-/// usage.
-///
-/// # Errors
-///
-/// Returns an error if output file cannot be created, compression fails, or I/O
-/// operations fail.
-pub fn create_tar_zst_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
-    output: P,
-    sources: &[Q],
-    config: &CreationConfig<Validated>,
-    progress: &mut dyn ProgressCallback,
-) -> Result<CreationReport> {
-    let file = File::create(output.as_ref())?;
-    let level = compression_level_to_zstd(config.compression_level);
-    let mut encoder = zstd::Encoder::new(file, level)?;
-    encoder.include_checksum(true)?;
-
-    let (mut report, encoder) =
-        create_tar_internal_with_progress(encoder, sources, config, progress)?;
-    encoder.finish()?;
-
+    let mut report = if let Some(codec) = codec {
+        let encoder = codec.encoder(file, config.compression_level)?;
+        let (report, encoder) =
+            create_tar_internal_with_progress(encoder, sources, config, progress)?;
+        encoder.finish()?;
+        report
+    } else {
+        let (report, file) = create_tar_internal_with_progress(file, sources, config, progress)?;
+        drop(file);
+        report
+    };
     report.bytes_compressed = std::fs::metadata(output.as_ref())?.len();
     Ok(report)
 }
@@ -430,20 +335,8 @@ fn set_permissions(header: &mut Header, metadata: &std::fs::Metadata) {
     }
 }
 
-/// Format creator for uncompressed TAR archives.
-pub struct TarCreator;
-
-/// Format creator for gzip-compressed TAR archives.
-pub struct TarGzCreator;
-
-/// Format creator for bzip2-compressed TAR archives.
-pub struct TarBz2Creator;
-
-/// Format creator for xz-compressed TAR archives.
-pub struct TarXzCreator;
-
-/// Format creator for zstd-compressed TAR archives.
-pub struct TarZstCreator;
+/// Format creator for TAR archives, uncompressed or with one codec.
+pub(crate) struct TarCreator(pub(crate) Option<CompressionCodec>);
 
 impl crate::formats::traits::FormatCreator for TarCreator {
     fn create(
@@ -453,75 +346,11 @@ impl crate::formats::traits::FormatCreator for TarCreator {
         config: &CreationConfig<Validated>,
         progress: &mut dyn ProgressCallback,
     ) -> crate::Result<crate::creation::CreationReport> {
-        create_tar_with_progress(output, sources, config, progress)
+        create_tar_with_progress(output, self.0, sources, config, progress)
     }
 
     fn format_name(&self) -> &'static str {
-        "tar"
-    }
-}
-
-impl crate::formats::traits::FormatCreator for TarGzCreator {
-    fn create(
-        &self,
-        output: &Path,
-        sources: &[&Path],
-        config: &CreationConfig<Validated>,
-        progress: &mut dyn ProgressCallback,
-    ) -> crate::Result<crate::creation::CreationReport> {
-        create_tar_gz_with_progress(output, sources, config, progress)
-    }
-
-    fn format_name(&self) -> &'static str {
-        "tar.gz"
-    }
-}
-
-impl crate::formats::traits::FormatCreator for TarBz2Creator {
-    fn create(
-        &self,
-        output: &Path,
-        sources: &[&Path],
-        config: &CreationConfig<Validated>,
-        progress: &mut dyn ProgressCallback,
-    ) -> crate::Result<crate::creation::CreationReport> {
-        create_tar_bz2_with_progress(output, sources, config, progress)
-    }
-
-    fn format_name(&self) -> &'static str {
-        "tar.bz2"
-    }
-}
-
-impl crate::formats::traits::FormatCreator for TarXzCreator {
-    fn create(
-        &self,
-        output: &Path,
-        sources: &[&Path],
-        config: &CreationConfig<Validated>,
-        progress: &mut dyn ProgressCallback,
-    ) -> crate::Result<crate::creation::CreationReport> {
-        create_tar_xz_with_progress(output, sources, config, progress)
-    }
-
-    fn format_name(&self) -> &'static str {
-        "tar.xz"
-    }
-}
-
-impl crate::formats::traits::FormatCreator for TarZstCreator {
-    fn create(
-        &self,
-        output: &Path,
-        sources: &[&Path],
-        config: &CreationConfig<Validated>,
-        progress: &mut dyn ProgressCallback,
-    ) -> crate::Result<crate::creation::CreationReport> {
-        create_tar_zst_with_progress(output, sources, config, progress)
-    }
-
-    fn format_name(&self) -> &'static str {
-        "tar.zst"
+        self.0.map_or("tar", CompressionCodec::extension)
     }
 }
 
@@ -533,6 +362,8 @@ mod tests {
     use crate::SecurityConfig;
     use crate::api::create_archive;
     use crate::api::extract_archive;
+    use crate::creation::compression::compression_level_to_flate2;
+    use crate::creation::compression::compression_level_to_zstd;
     use crate::formats::detect::ArchiveType;
     use std::assert_matches;
     use std::fs;
@@ -1001,7 +832,7 @@ mod tests {
         let mut progress = TestProgress::default();
 
         let report =
-            create_tar_with_progress(&output, &[source_dir.path()], &config, &mut progress)
+            create_tar_with_progress(&output, None, &[source_dir.path()], &config, &mut progress)
                 .unwrap();
 
         // Verify report
@@ -1045,7 +876,7 @@ mod tests {
         assert!(has_file3, "Expected file3.txt in progress callbacks");
     }
 
-    /// Regression test for #226: `create_tar_zst_with_progress` calls
+    /// Regression test for #226: `create_tar_with_progress` with zstd calls
     /// `encoder.finish()` and returns any I/O error it produces.
     ///
     /// The public function signature takes a `Path`, not a generic writer, so
@@ -1065,9 +896,14 @@ mod tests {
             .validate()
             .unwrap();
         let mut noop = crate::NoopProgress;
-        let report =
-            create_tar_zst_with_progress(&output, &[source_dir.path()], &config, &mut noop)
-                .unwrap();
+        let report = create_tar_with_progress(
+            &output,
+            Some(CompressionCodec::Zstd),
+            &[source_dir.path()],
+            &config,
+            &mut noop,
+        )
+        .unwrap();
 
         assert_eq!(report.files_added, 1);
         assert!(output.exists());

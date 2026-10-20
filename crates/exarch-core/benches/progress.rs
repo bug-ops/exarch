@@ -89,7 +89,7 @@ fn benchmark_tar_with_noop_progress(c: &mut Criterion) {
             let archive = output.path().join("test.tar");
             let mut progress = NoOpProgress;
             black_box(
-                create_tar_with_progress(&archive, &[source.path()], &config, &mut progress)
+                create_tar_with_progress(&archive, None, &[source.path()], &config, &mut progress)
                     .unwrap(),
             );
         });
@@ -111,7 +111,7 @@ fn benchmark_tar_with_counting_progress(c: &mut Criterion) {
                 bytes: 0,
             };
             black_box(
-                create_tar_with_progress(&archive, &[source.path()], &config, &mut progress)
+                create_tar_with_progress(&archive, None, &[source.path()], &config, &mut progress)
                     .unwrap(),
             );
         });

@@ -139,25 +139,6 @@ pub fn compression_level_to_zstd(level: Option<u8>) -> i32 {
     }
 }
 
-/// Unified compression level type.
-///
-/// This enum wraps codec-specific compression level types to provide
-/// a unified interface for compression level conversion.
-#[derive(Debug, Clone, Copy)]
-pub enum CompressionLevel {
-    /// Flate2 (gzip) compression level.
-    Flate2(flate2::Compression),
-
-    /// Bzip2 compression level.
-    Bzip2(bzip2::Compression),
-
-    /// Xz compression level (raw u32).
-    Xz(u32),
-
-    /// Zstd compression level (raw i32).
-    Zstd(i32),
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

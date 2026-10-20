@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING:** TAR creation uses one `create_tar_with_progress(output, codec, ...)`; the per-codec `create_tar_*_with_progress` functions and the unused `creation::CompressionLevel` are removed (#635).
 - CI fails when the generated Node.js `index.d.ts` is out of date, and `@napi-rs/cli` is pinned (#638).
 - Raised the `zip` dependency floor to 9.0.5 to exclude versions with unpatched read-path vulnerabilities (#640).
 - Bumped `zip` to 9.0.1 and refreshed the lockfile; zip's own declared-size overrun error is now reported as a security violation (#608).

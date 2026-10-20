@@ -11,10 +11,16 @@
 //! - **Xz** (.tar.xz, .txz): Best compression ratio, slowest
 //! - **Zstd** (.tar.zst, .tzst): Modern codec with good speed/ratio balance
 
+use std::io;
 use std::io::BufRead;
 use std::io::Read;
+use std::io::Write;
 
 use crate::Result;
+use crate::creation::compression::compression_level_to_bzip2;
+use crate::creation::compression::compression_level_to_flate2;
+use crate::creation::compression::compression_level_to_xz;
+use crate::creation::compression::compression_level_to_zstd;
 
 /// Compression codec for archive files.
 ///
@@ -117,6 +123,37 @@ impl CompressionCodec {
         })
     }
 
+    /// Wraps `out` in this codec's encoder.
+    ///
+    /// Write-side mirror of [`decoder`](Self::decoder) and the only
+    /// codec-to-encoder mapping used for creating TAR streams. `level` is the
+    /// user-facing 1-9 scale (`None` selects the codec default).
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error if the encoder cannot be initialised.
+    pub(crate) fn encoder<W: Write>(self, out: W, level: Option<u8>) -> Result<TarEncoder<W>> {
+        Ok(match self {
+            Self::Gzip => TarEncoder::Gzip(flate2::write::GzEncoder::new(
+                out,
+                compression_level_to_flate2(level),
+            )),
+            Self::Bzip2 => TarEncoder::Bzip2(bzip2::write::BzEncoder::new(
+                out,
+                compression_level_to_bzip2(level),
+            )),
+            Self::Xz => TarEncoder::Xz(xz2::write::XzEncoder::new(
+                out,
+                compression_level_to_xz(level),
+            )),
+            Self::Zstd => {
+                let mut enc = zstd::Encoder::new(out, compression_level_to_zstd(level))?;
+                enc.include_checksum(true)?;
+                TarEncoder::Zstd(enc)
+            }
+        })
+    }
+
     /// Returns a human-readable name for this codec.
     ///
     /// # Examples
@@ -134,6 +171,49 @@ impl CompressionCodec {
             Self::Bzip2 => "bzip2",
             Self::Xz => "xz",
             Self::Zstd => "zstd",
+        }
+    }
+}
+
+/// A compressing writer for one of the [`CompressionCodec`]s.
+///
+/// Must be closed with [`finish`](Self::finish): dropping it can lose the
+/// trailing frame and any flush error.
+pub(crate) enum TarEncoder<W: Write> {
+    Gzip(flate2::write::GzEncoder<W>),
+    Bzip2(bzip2::write::BzEncoder<W>),
+    Xz(xz2::write::XzEncoder<W>),
+    Zstd(zstd::Encoder<'static, W>),
+}
+
+impl<W: Write> TarEncoder<W> {
+    /// Writes the trailer, flushes, and returns the inner writer.
+    pub(crate) fn finish(self) -> io::Result<W> {
+        match self {
+            Self::Gzip(e) => e.finish(),
+            Self::Bzip2(e) => e.finish(),
+            Self::Xz(e) => e.finish(),
+            Self::Zstd(e) => e.finish(),
+        }
+    }
+}
+
+impl<W: Write> Write for TarEncoder<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match self {
+            Self::Gzip(e) => e.write(buf),
+            Self::Bzip2(e) => e.write(buf),
+            Self::Xz(e) => e.write(buf),
+            Self::Zstd(e) => e.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Self::Gzip(e) => e.flush(),
+            Self::Bzip2(e) => e.flush(),
+            Self::Xz(e) => e.flush(),
+            Self::Zstd(e) => e.flush(),
         }
     }
 }
@@ -201,6 +281,25 @@ mod tests {
                 .read_to_end(&mut out)
                 .unwrap();
             assert_eq!(out, data, "{}", codec.name());
+        }
+    }
+
+    #[test]
+    fn test_encoder_round_trips_every_codec_and_level() {
+        let data = b"hello encoder ".repeat(1000);
+        for codec in ALL_CODECS {
+            for level in [None, Some(1), Some(9)] {
+                let mut enc = codec.encoder(Vec::new(), level).unwrap();
+                enc.write_all(&data).unwrap();
+                let encoded = enc.finish().unwrap();
+                let mut out = Vec::new();
+                codec
+                    .decoder(std::io::Cursor::new(encoded))
+                    .unwrap()
+                    .read_to_end(&mut out)
+                    .unwrap();
+                assert_eq!(out, data, "{} {level:?}", codec.name());
+            }
         }
     }
 

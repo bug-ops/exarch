@@ -128,8 +128,8 @@ pub struct ArchiveEntry {
     /// Uncompressed size in bytes (0 for directories)
     pub size: u64,
 
-    /// Compressed size in bytes (if available, ZIP only)
-    pub compressed_size: Option<u64>,
+    /// How this entry's data is compressed, as far as the format exposes it
+    pub compression: EntryCompression,
 
     /// File permissions (Unix mode)
     pub mode: Option<u32>,
@@ -152,7 +152,7 @@ impl ArchiveEntry {
             path,
             entry_type,
             size,
-            compressed_size: None,
+            compression: EntryCompression::Unknown,
             mode: None,
             modified: None,
             symlink_target: None,
@@ -160,12 +160,109 @@ impl ArchiveEntry {
         }
     }
 
-    /// Returns the compression ratio if compressed size is available.
+    /// Returns the compressed size in bytes when the format reports one.
+    ///
+    /// For the first file of a solid block this is the size of the whole
+    /// block; other solid members report `None`.
+    #[must_use]
+    pub const fn compressed_size(&self) -> Option<u64> {
+        self.compression.compressed_size()
+    }
+
+    /// Returns the compression ratio of an entry that owns its compressed
+    /// data, or `None` when none can be attributed to it (TAR, solid members,
+    /// empty entries).
     #[must_use]
     pub fn compression_ratio(&self) -> Option<f64> {
-        self.compressed_size
+        self.compression
+            .entry_compressed_size()
             .filter(|&c| c > 0)
             .map(|c| self.size as f64 / c as f64)
+    }
+}
+
+/// Compressed and uncompressed totals of one solid block.
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::SolidBlock;
+///
+/// let block = SolidBlock::new(100, 13_800);
+/// assert_eq!(block.compressed, 100);
+/// assert_eq!(block.uncompressed, 13_800);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SolidBlock {
+    /// Sum of the block's pack stream sizes in bytes
+    pub compressed: u64,
+
+    /// Sum of the uncompressed sizes of every file in the block
+    pub uncompressed: u64,
+}
+
+impl SolidBlock {
+    /// Creates a block from its compressed and uncompressed totals.
+    #[must_use]
+    pub const fn new(compressed: u64, uncompressed: u64) -> Self {
+        Self {
+            compressed,
+            uncompressed,
+        }
+    }
+}
+
+/// How an archive entry's data is compressed.
+///
+/// Solid 7z members share one compressed stream, so only the block as a whole
+/// has a meaningful ratio; encoding that here keeps a per-file ratio from
+/// being computed for them.
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::EntryCompression;
+///
+/// assert_eq!(EntryCompression::Entry(40).compressed_size(), Some(40));
+/// assert_eq!(EntryCompression::Unknown.compressed_size(), None);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum EntryCompression {
+    /// The format does not expose a compressed size (TAR) or the entry has no
+    /// data stream (empty 7z files)
+    Unknown,
+
+    /// The entry owns this many compressed bytes (ZIP, 7z single-file block)
+    Entry(u64),
+
+    /// First file of a solid block; carries the totals of the whole block
+    SolidBlockStart(SolidBlock),
+
+    /// Later file of a solid block; its data is accounted to the block start
+    SolidBlockMember,
+}
+
+impl EntryCompression {
+    /// Compressed size to report for the entry: the entry's own size, or the
+    /// whole block's size for a solid block start.
+    #[must_use]
+    pub const fn compressed_size(&self) -> Option<u64> {
+        match self {
+            Self::Entry(compressed) => Some(*compressed),
+            Self::SolidBlockStart(block) => Some(block.compressed),
+            Self::Unknown | Self::SolidBlockMember => None,
+        }
+    }
+
+    /// Compressed size owned by the entry alone, for per-file ratio checks.
+    #[must_use]
+    pub const fn entry_compressed_size(&self) -> Option<u64> {
+        match self {
+            Self::Entry(compressed) => Some(*compressed),
+            Self::Unknown | Self::SolidBlockStart(_) | Self::SolidBlockMember => None,
+        }
     }
 }
 
@@ -214,7 +311,7 @@ mod tests {
             path: PathBuf::from("file.txt"),
             entry_type: ManifestEntryType::File,
             size: 1024,
-            compressed_size: Some(512),
+            compression: EntryCompression::Entry(512),
             mode: Some(0o644),
             modified: None,
             symlink_target: None,
@@ -249,7 +346,7 @@ mod tests {
             path: PathBuf::from("file.txt"),
             entry_type: ManifestEntryType::File,
             size: 1000,
-            compressed_size: Some(100),
+            compression: EntryCompression::Entry(100),
             mode: None,
             modified: None,
             symlink_target: None,
@@ -265,7 +362,7 @@ mod tests {
             path: PathBuf::from("file.txt"),
             entry_type: ManifestEntryType::File,
             size: 1000,
-            compressed_size: None,
+            compression: EntryCompression::Unknown,
             mode: None,
             modified: None,
             symlink_target: None,
@@ -273,6 +370,18 @@ mod tests {
         };
 
         assert_eq!(entry.compression_ratio(), None);
+    }
+
+    #[test]
+    fn test_solid_entries_have_no_per_file_ratio() {
+        let mut entry = ArchiveEntry::new(PathBuf::from("a"), ManifestEntryType::File, 1000);
+        entry.compression = EntryCompression::SolidBlockStart(SolidBlock::new(10, 2000));
+        assert_eq!(entry.compression_ratio(), None);
+        assert_eq!(entry.compressed_size(), Some(10));
+
+        entry.compression = EntryCompression::SolidBlockMember;
+        assert_eq!(entry.compression_ratio(), None);
+        assert_eq!(entry.compressed_size(), None);
     }
 
     #[test]

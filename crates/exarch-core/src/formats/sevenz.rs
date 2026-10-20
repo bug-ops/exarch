@@ -120,11 +120,13 @@ static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 const MAX_TEMP_FILE_CREATE_ATTEMPTS: u32 = 8;
 
 use crate::ArchiveError;
+use crate::EntryCompression;
 use crate::ExtractionOptions;
 use crate::ExtractionReport;
 use crate::ProgressCallback;
 use crate::Result;
 use crate::SecurityConfig;
+use crate::SolidBlock;
 use crate::config::Validated;
 use crate::copy::CopyBuffer;
 use crate::copy::copy_with_buffer;
@@ -132,6 +134,7 @@ use crate::error::QuotaResource;
 use crate::security::EntryValidator;
 use crate::security::quota::QuotaPermit;
 use crate::security::zipbomb::DeclaredCompressedBudget;
+use crate::security::zipbomb::validate_entry_compression;
 use crate::types::DestDir;
 use crate::types::EntryType;
 
@@ -145,30 +148,40 @@ struct CachedEntry {
     name: String,
     size: u64,
     is_directory: bool,
-    /// Validated compressed size; see [`sevenz_compressed_sizes`].
-    compressed_size: Option<u64>,
+    /// Validated compression info; see [`sevenz_entry_compression`].
+    compression: EntryCompression,
 }
 
 /// Size of the fixed 7z signature header that precedes the packed streams.
 const SIGNATURE_HEADER_SIZE: u64 = 32;
 
-/// Derives a per-file compressed size for ratio checks, after validating the
-/// declared pack stream sizes against the archive length.
+/// Derives how each file's data is compressed for ratio checks, after
+/// validating the declared pack stream sizes against the archive length.
 ///
-/// The returned vector is 1:1 with `archive.files`. A file that starts a
-/// block gets the checked sum of that block's pack streams; other files of a
-/// solid block, and files without data, get `None`, so for solid archives the
-/// ratio is at most the true ratio of the block. `source_len` must be the
-/// length of the same source the archive is decoded from.
+/// The returned vector is 1:1 with `archive.files`:
+/// - a file alone in its block gets [`EntryCompression::Entry`] with the
+///   checked sum of that block's pack streams;
+/// - the first file of a multi-file (solid) block gets
+///   [`EntryCompression::SolidBlockStart`] with the block's compressed total
+///   and the checked sum of its files' sizes; the other members get
+///   [`EntryCompression::SolidBlockMember`];
+/// - files without a data stream (empty files, directories) get
+///   [`EntryCompression::Unknown`].
+///
+/// The last block's pack total may include pack streams no block references
+/// (the accessor is `pub(crate)` upstream), so its ratio is an upper bound.
+/// `source_len` must be the length of the same source the archive is decoded
+/// from.
 ///
 /// # Errors
 ///
 /// Returns [`ArchiveError::InvalidArchive`] when the declared pack sizes
-/// exceed the space the archive can hold, or any size sum overflows.
-pub(crate) fn sevenz_compressed_sizes(
+/// exceed the space the archive can hold, or a pack size sum overflows, and
+/// [`ArchiveError::QuotaExceeded`] when a block's uncompressed sum overflows.
+pub(crate) fn sevenz_entry_compression(
     archive: &Archive,
     source_len: u64,
-) -> Result<Vec<Option<u64>>> {
+) -> Result<Vec<EntryCompression>> {
     let data_region = source_len
         .checked_sub(SIGNATURE_HEADER_SIZE)
         .and_then(|len| len.checked_sub(archive.pack_pos()))
@@ -194,19 +207,41 @@ pub(crate) fn sevenz_compressed_sizes(
             .ok_or_else(|| ArchiveError::InvalidArchive("7z pack sizes overflow".into()))
     };
 
+    let mut block_uncompressed = vec![0u64; archive.blocks.len()];
+    let mut block_files = vec![0usize; archive.blocks.len()];
+    for (index, file) in archive.files.iter().enumerate() {
+        if let Some(block) = archive.stream_map.file_block_index[index] {
+            block_files[block] += 1;
+            block_uncompressed[block] = block_uncompressed[block].checked_add(file.size).ok_or(
+                ArchiveError::QuotaExceeded {
+                    resource: QuotaResource::IntegerOverflow,
+                },
+            )?;
+        }
+    }
+
     archive
         .files
         .iter()
         .enumerate()
         .map(|(index, file)| {
             let Some(block) = archive.stream_map.file_block_index[index] else {
-                return Ok(None);
+                return Ok(EntryCompression::Unknown);
             };
-            let starts_block = archive.stream_map.block_first_file_index[block] == index;
-            if file.has_stream && starts_block {
-                block_compressed(block).map(Some)
+            if !file.has_stream {
+                return Ok(EntryCompression::Unknown);
+            }
+            let compressed = block_compressed(block)?;
+            if block_files[block] <= 1 {
+                return Ok(EntryCompression::Entry(compressed));
+            }
+            if archive.stream_map.block_first_file_index[block] == index {
+                Ok(EntryCompression::SolidBlockStart(SolidBlock::new(
+                    compressed,
+                    block_uncompressed[block],
+                )))
             } else {
-                Ok(None)
+                Ok(EntryCompression::SolidBlockMember)
             }
         })
         .collect()
@@ -326,16 +361,16 @@ impl<R: Read + Seek> SevenZArchive<R> {
 
         // Step 3: Cache entry metadata to avoid re-parsing during extraction
         let source_len = source.seek(SeekFrom::End(0)).map_err(ArchiveError::Io)?;
-        let compressed_sizes = sevenz_compressed_sizes(&archive, source_len)?;
+        let compression = sevenz_entry_compression(&archive, source_len)?;
         let entries: Vec<CachedEntry> = archive
             .files
             .iter()
-            .zip(compressed_sizes)
-            .map(|(e, compressed_size)| CachedEntry {
+            .zip(compression)
+            .map(|(e, compression)| CachedEntry {
                 name: e.name.clone(),
                 size: e.size,
                 is_directory: e.is_directory(),
-                compressed_size,
+                compression,
             })
             .collect();
 
@@ -1054,7 +1089,7 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
             // The ratio is a property of the archive, not of the destination,
             // so it is checked before the duplicate-skip below, matching what
             // `verify` reports.
-            prevalidator.check_ratio(entry.compressed_size, entry.size)?;
+            validate_entry_compression(&entry.compression, entry.size, config)?;
 
             let dest_path = dest.join_path(safe_path.as_path());
             // lstat so a pre-existing symlink at dest_path — including a
@@ -1716,19 +1751,24 @@ mod tests {
     }
 
     #[test]
-    fn test_compressed_sizes_non_solid_covers_every_stream_file() {
+    fn test_compression_non_solid_covers_every_stream_file() {
         let (archive, len) = parse_fixture("simple.7z");
-        let sizes = sevenz_compressed_sizes(&archive, len).unwrap();
-        assert_eq!(sizes.len(), archive.files.len());
-        for (file, size) in archive.files.iter().zip(&sizes) {
-            assert_eq!(file.has_stream, size.is_some(), "{}", file.name);
+        let compression = sevenz_entry_compression(&archive, len).unwrap();
+        assert_eq!(compression.len(), archive.files.len());
+        for (file, compression) in archive.files.iter().zip(&compression) {
+            assert_eq!(
+                file.has_stream,
+                matches!(compression, EntryCompression::Entry(_)),
+                "{}",
+                file.name
+            );
         }
     }
 
     #[test]
-    fn test_compressed_sizes_solid_block_is_attributed_to_first_file_only() {
+    fn test_compression_solid_block_start_carries_block_totals() {
         let (archive, len) = parse_fixture("solid.7z");
-        let sizes = sevenz_compressed_sizes(&archive, len).unwrap();
+        let compression = sevenz_entry_compression(&archive, len).unwrap();
         let pack_sizes = archive.pack_sizes();
         let first_packs = archive.stream_map.block_first_pack_stream_index();
         let first_files = &archive.stream_map.block_first_file_index;
@@ -1739,22 +1779,74 @@ mod tests {
                 .get(block + 1)
                 .copied()
                 .unwrap_or(pack_sizes.len());
-            let expected: u64 = pack_sizes[first_packs[block]..end].iter().sum();
-            assert_eq!(sizes[file], Some(expected), "block {block}");
+            let expected_compressed: u64 = pack_sizes[first_packs[block]..end].iter().sum();
+            let expected_uncompressed: u64 = archive
+                .files
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| archive.stream_map.file_block_index[*i] == Some(block))
+                .map(|(_, f)| f.size)
+                .sum();
+            assert_eq!(
+                compression[file],
+                EntryCompression::SolidBlockStart(SolidBlock::new(
+                    expected_compressed,
+                    expected_uncompressed
+                )),
+                "block {block}"
+            );
         }
-        for (index, size) in sizes.iter().enumerate() {
-            assert_eq!(size.is_some(), first_files.contains(&index), "file {index}");
+        for (index, compression) in compression.iter().enumerate() {
+            if !first_files.contains(&index) && archive.files[index].has_stream {
+                assert_eq!(
+                    *compression,
+                    EntryCompression::SolidBlockMember,
+                    "file {index}"
+                );
+            }
+        }
+    }
+
+    fn make_sevenz_archive_with_empty_file() -> Vec<u8> {
+        use sevenz_rust2::ArchiveEntry;
+        use sevenz_rust2::ArchiveWriter;
+
+        let mut writer = ArchiveWriter::new(Cursor::new(Vec::new())).unwrap();
+        writer
+            .push_archive_entry(ArchiveEntry::new_file("empty.txt"), None::<Cursor<Vec<u8>>>)
+            .unwrap();
+        let mut full = ArchiveEntry::new_file("full.txt");
+        full.has_stream = true;
+        full.size = 7;
+        writer
+            .push_archive_entry(full, Some(Cursor::new(b"payload".to_vec())))
+            .unwrap();
+        writer.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn test_compression_empty_files_are_unknown() {
+        let data = make_sevenz_archive_with_empty_file();
+        let len = data.len() as u64;
+        let archive = Archive::read(&mut Cursor::new(data), &Password::empty()).unwrap();
+        let compression = sevenz_entry_compression(&archive, len).unwrap();
+        for (file, compression) in archive.files.iter().zip(&compression) {
+            if file.size == 0 {
+                assert_eq!(*compression, EntryCompression::Unknown, "{}", file.name);
+            } else {
+                assert_matches!(compression, EntryCompression::Entry(_));
+            }
         }
     }
 
     #[test]
-    fn test_compressed_sizes_reject_source_shorter_than_declared_streams() {
+    fn test_compression_rejects_source_shorter_than_declared_streams() {
         let (archive, len) = parse_fixture("simple.7z");
         let declared: u64 = archive.pack_sizes().iter().sum();
         let too_short = SIGNATURE_HEADER_SIZE + archive.pack_pos() + declared - 1;
         assert!(too_short < len);
         assert_matches!(
-            sevenz_compressed_sizes(&archive, too_short),
+            sevenz_entry_compression(&archive, too_short),
             Err(ArchiveError::InvalidArchive(_))
         );
     }
@@ -2420,8 +2512,13 @@ mod tests {
         writer.finish().unwrap().into_inner()
     }
 
-    /// Builds a 7z archive with all `entries` packed into one solid block.
+    /// Builds a 7z archive with all `entries` packed into one solid block
+    /// using the COPY method.
     fn make_solid_sevenz_archive(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        build_solid_sevenz_archive(entries, true)
+    }
+
+    fn build_solid_sevenz_archive(entries: &[(&str, &[u8])], copy_method: bool) -> Vec<u8> {
         use sevenz_rust2::ArchiveEntry;
         use sevenz_rust2::ArchiveWriter;
         use sevenz_rust2::EncoderConfiguration;
@@ -2429,7 +2526,9 @@ mod tests {
         use sevenz_rust2::SourceReader;
 
         let mut writer = ArchiveWriter::new(Cursor::new(Vec::new())).unwrap();
-        writer.set_content_methods(vec![EncoderConfiguration::new(EncoderMethod::COPY)]);
+        if copy_method {
+            writer.set_content_methods(vec![EncoderConfiguration::new(EncoderMethod::COPY)]);
+        }
         let archive_entries = entries
             .iter()
             .map(|(name, data)| {
@@ -2456,6 +2555,96 @@ mod tests {
             .with_allowed_extensions(allowed_extensions)
             .validate()
             .unwrap()
+    }
+
+    /// A solid block of `copies` identical source files, LZMA2-compressed.
+    fn compressed_solid_copies(copies: usize) -> Vec<u8> {
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        let source: Vec<u8> = (0..4096)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                b"0123456789abcdef"[(state % 16) as usize]
+            })
+            .collect();
+        let names: Vec<String> = (0..copies).map(|i| format!("copy{i}/main.rs")).collect();
+        let entries: Vec<(&str, &[u8])> = names
+            .iter()
+            .map(|n| (n.as_str(), source.as_slice()))
+            .collect();
+        build_solid_sevenz_archive(&entries, false)
+    }
+
+    fn solid_block_ratio(data: &[u8]) -> f64 {
+        let archive = Archive::read(&mut Cursor::new(data.to_vec()), &Password::empty()).unwrap();
+        let compression = sevenz_entry_compression(&archive, data.len() as u64).unwrap();
+        compression
+            .iter()
+            .find_map(|c| match c {
+                EntryCompression::SolidBlockStart(b) => {
+                    Some(b.uncompressed as f64 / b.compressed as f64)
+                }
+                _ => None,
+            })
+            .expect("a solid block start")
+    }
+
+    /// Issue #626: a legitimate solid block above the per-file ratio limit
+    /// but below the solid limit extracts and verifies cleanly.
+    #[test]
+    fn test_legit_solid_block_above_per_file_ratio_passes_extract_and_verify() {
+        let data = compressed_solid_copies(100);
+        let ratio = solid_block_ratio(&data);
+        assert!(
+            (100.0..1000.0).contains(&ratio),
+            "fixture must sit between the per-file and solid limits, got {ratio}"
+        );
+
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("tree.7z");
+        std::fs::write(&path, &data).unwrap();
+        let config = SecurityConfig::default().with_allow_solid_archives(true);
+
+        let report = crate::verify_archive(&path, &config).unwrap();
+        assert_ne!(
+            report.status(),
+            crate::inspection::report::VerificationStatus::Fail,
+            "issues: {:?}",
+            report.issues()
+        );
+
+        let out = dir.path().join("out");
+        let report = crate::extract_archive(&path, &out, &config).unwrap();
+        assert_eq!(report.files_extracted, 100);
+    }
+
+    /// Issue #626: a block over `max_solid_compression_ratio` is rejected by
+    /// extract before any write and flagged by verify.
+    #[test]
+    fn test_solid_block_over_limit_rejected_by_extract_and_verify() {
+        let data = compressed_solid_copies(100);
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("tree.7z");
+        std::fs::write(&path, &data).unwrap();
+        let config = SecurityConfig::default()
+            .with_allow_solid_archives(true)
+            .with_max_solid_compression_ratio(50.0);
+
+        let report = crate::verify_archive(&path, &config).unwrap();
+        assert!(
+            report
+                .issues()
+                .iter()
+                .any(|i| i.category == crate::inspection::report::IssueCategory::ZipBomb),
+            "issues: {:?}",
+            report.issues()
+        );
+
+        let out = dir.path().join("out");
+        let result = crate::extract_archive(&path, &out, &config);
+        assert_matches!(result, Err(ArchiveError::ZipBomb { .. }));
+        assert!(!out.join("copy0").exists(), "nothing may be written");
     }
 
     /// Issue #628: a disallowed entry in a solid block must not leave its

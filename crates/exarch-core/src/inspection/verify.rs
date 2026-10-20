@@ -19,7 +19,7 @@ use crate::security::path::validate_path;
 use crate::security::permissions::sanitize_permissions;
 use crate::security::quota::QuotaTracker;
 use crate::security::symlink::validate_symlink;
-use crate::security::zipbomb::validate_compression_ratio;
+use crate::security::zipbomb::validate_entry_compression;
 use crate::types::DestDir;
 use crate::types::EntryType;
 
@@ -169,9 +169,7 @@ fn verify_entry(
     }
 
     // Compression ratio validation (zip bomb detection)
-    if let Some(compressed_size) = entry.compressed_size
-        && let Err(e) = validate_compression_ratio(compressed_size, entry.size, config)
-    {
+    if let Err(e) = validate_entry_compression(&entry.compression, entry.size, config) {
         issues.push(VerificationIssue::from_error(&e, Some(entry.path.clone())));
     }
 
@@ -280,6 +278,7 @@ fn is_suspicious_extension(path: &Path) -> bool {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::inspection::manifest::EntryCompression;
     use crate::inspection::report::VerificationStatus;
     use crate::test_utils::tar_with_pax_nul_path;
     use std::assert_matches;
@@ -306,7 +305,7 @@ mod tests {
             path: PathBuf::from("test.sh"),
             entry_type: ManifestEntryType::File,
             size: 100,
-            compressed_size: None,
+            compression: EntryCompression::Unknown,
             mode: Some(0o755),
             modified: None,
             symlink_target: None,
@@ -328,7 +327,7 @@ mod tests {
             path: PathBuf::from("malware.exe"),
             entry_type: ManifestEntryType::File,
             size: 100,
-            compressed_size: None,
+            compression: EntryCompression::Unknown,
             mode: Some(0o644),
             modified: None,
             symlink_target: None,
@@ -354,7 +353,7 @@ mod tests {
             path: PathBuf::from(OsStr::from_bytes(b"weird-\xFF\xFE-name.txt")),
             entry_type: ManifestEntryType::File,
             size: 100,
-            compressed_size: None,
+            compression: EntryCompression::Unknown,
             mode: Some(0o644),
             modified: None,
             symlink_target: None,
@@ -376,7 +375,7 @@ mod tests {
             path: PathBuf::from("safe/file.txt"),
             entry_type: ManifestEntryType::File,
             size: 100,
-            compressed_size: None,
+            compression: EntryCompression::Unknown,
             mode: Some(0o644),
             modified: None,
             symlink_target: None,

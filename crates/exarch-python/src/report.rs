@@ -260,7 +260,7 @@ impl PyArchiveEntry {
 
     #[getter]
     fn compressed_size(&self) -> Option<u64> {
-        self.inner.compressed_size
+        self.inner.compressed_size()
     }
 
     #[getter]
@@ -750,7 +750,7 @@ mod tests {
 
         let mut entry =
             ArchiveEntry::new(PathBuf::from("test/file.txt"), ManifestEntryType::File, 512);
-        entry.compressed_size = Some(256);
+        entry.compression = exarch_core::EntryCompression::Entry(256);
         entry.mode = Some(0o644);
 
         let py_entry = PyArchiveEntry::from(entry);

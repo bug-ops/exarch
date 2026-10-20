@@ -22,7 +22,7 @@ use crate::formats::detect::ArchiveType;
 use crate::formats::detect::FormatFamily;
 use crate::formats::detect::detect_format;
 use crate::formats::sevenz::is_password_error;
-use crate::formats::sevenz::sevenz_compressed_sizes;
+use crate::formats::sevenz::sevenz_entry_compression;
 use crate::formats::tar::open_tar_stream;
 use crate::formats::tar_metadata_limit::TarReadBudget;
 use crate::formats::tar_metadata_limit::budget_violation;
@@ -36,6 +36,7 @@ use crate::formats::zip::resolve_zip_entry_path;
 use crate::formats::zip::zip_mode_is_symlink;
 use crate::inspection::manifest::ArchiveEntry;
 use crate::inspection::manifest::ArchiveManifest;
+use crate::inspection::manifest::EntryCompression;
 use crate::inspection::manifest::ManifestEntryType;
 use crate::security::quota::QuotaTracker;
 use crate::types::safe_path::has_null_bytes;
@@ -210,7 +211,7 @@ fn list_tar_entries<R: std::io::Read>(
             path,
             entry_type,
             size,
-            compressed_size: None,
+            compression: EntryCompression::Unknown,
             mode,
             modified,
             symlink_target,
@@ -286,7 +287,7 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
 
         let entry_type = convert_zip_entry_type(&entry);
         let size = entry.size();
-        let compressed_size = Some(entry.compressed_size());
+        let compression = EntryCompression::Entry(entry.compressed_size());
         let mode = entry.unix_mode().map(|m| m & 0o7777);
         #[allow(clippy::cast_sign_loss)]
         let modified = entry.last_modified().and_then(|dt| {
@@ -315,7 +316,7 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
             path,
             entry_type,
             size,
-            compressed_size,
+            compression,
             mode,
             modified,
             symlink_target,
@@ -403,9 +404,9 @@ fn list_sevenz_archive(
 ) -> Result<ArchiveManifest> {
     let mut manifest = ArchiveManifest::new(ArchiveType::SevenZ);
     let mut quota = QuotaTracker::new();
-    let compressed_sizes = sevenz_compressed_sizes(archive, source_len)?;
+    let compression = sevenz_entry_compression(archive, source_len)?;
 
-    for (entry, compressed_size) in archive.files.iter().zip(compressed_sizes) {
+    for (entry, compression) in archive.files.iter().zip(compression) {
         if entry.is_anti_item {
             continue;
         }
@@ -434,7 +435,7 @@ fn list_sevenz_archive(
             path,
             entry_type,
             size,
-            compressed_size,
+            compression,
             mode: None,
             modified,
             symlink_target: None,
@@ -1734,7 +1735,7 @@ mod tests {
         for entry in manifest.entries() {
             if entry.size > 0 {
                 assert_ne!(
-                    entry.compressed_size,
+                    entry.compressed_size(),
                     Some(0),
                     "entry {:?} has compressed_size=Some(0) with size={}, which is a false positive trigger",
                     entry.path,

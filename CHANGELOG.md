@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING:** `ArchiveEntry.compressed_size` is replaced by `compression: EntryCompression` with a `compressed_size()` method, and `compression_ratio()` is `None` for 7z solid-block entries (#626).
 - **BREAKING:** `open_tar_xz` takes a `SecurityConfig`; tar.xz decoder memory is bounded by the new `max_decoder_memory` (default 256 MiB) and reported as `QuotaResource::DecoderMemory` (#629).
 - **BREAKING:** TAR creation uses one `create_tar_with_progress(output, codec, ...)`; the per-codec `create_tar_*_with_progress` functions and the unused `creation::CompressionLevel` are removed (#635).
 - CI fails when the generated Node.js `index.d.ts` is out of date, and `@napi-rs/cli` is pinned (#638).
@@ -25,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- 7z solid blocks are checked as a whole against the new `max_solid_compression_ratio` (default 1000x, Rust API only) instead of comparing only the first file (#626).
 - ZIP library extraction rejects oversized declared compressed sizes when the archive is opened, before any entry is written (#625).
 - ZIP `extract`, `list` and `verify` reject absolute and `..` entry names by default like TAR, treat NUL bytes as a security violation, and `--allow-absolute-paths` now takes effect for ZIP (#631).
 - ZIP and 7z error classification uses typed upstream variants instead of message substrings, and 7z I/O errors keep their original kind (#634).

@@ -4,6 +4,8 @@ use crate::ArchiveError;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::config::Validated;
+use crate::inspection::EntryCompression;
+use crate::inspection::SolidBlock;
 
 /// Validates compression ratio to detect potential zip bombs.
 ///
@@ -15,6 +17,58 @@ pub fn validate_compression_ratio(
     uncompressed_size: u64,
     config: &SecurityConfig<Validated>,
 ) -> Result<()> {
+    check_ratio(
+        compressed_size,
+        uncompressed_size,
+        config.max_compression_ratio,
+    )
+}
+
+/// Validates the compression ratio of a whole solid block against
+/// `max_solid_compression_ratio`.
+///
+/// A block without data (`uncompressed == 0`) is accepted.
+///
+/// # Errors
+///
+/// Returns [`ArchiveError::InvalidArchive`] when the block claims data but no
+/// compressed bytes, and [`ArchiveError::ZipBomb`] when the ratio exceeds the
+/// configured maximum.
+pub fn validate_solid_block_ratio(
+    block: &SolidBlock,
+    config: &SecurityConfig<Validated>,
+) -> Result<()> {
+    check_ratio(
+        block.compressed,
+        block.uncompressed,
+        config.max_solid_compression_ratio,
+    )
+}
+
+/// Applies the ratio check that fits how `compression` attributes data to an
+/// entry of `uncompressed_size` bytes: per file for
+/// [`EntryCompression::Entry`], per block for a solid block start, none
+/// otherwise.
+///
+/// # Errors
+///
+/// Returns the error of [`validate_compression_ratio`] or
+/// [`validate_solid_block_ratio`].
+pub fn validate_entry_compression(
+    compression: &EntryCompression,
+    uncompressed_size: u64,
+    config: &SecurityConfig<Validated>,
+) -> Result<()> {
+    match compression {
+        EntryCompression::Entry(compressed) => {
+            validate_compression_ratio(*compressed, uncompressed_size, config)
+        }
+        EntryCompression::SolidBlockStart(block) => validate_solid_block_ratio(block, config),
+        EntryCompression::Unknown | EntryCompression::SolidBlockMember => Ok(()),
+    }
+}
+
+fn check_ratio(compressed_size: u64, uncompressed_size: u64, max_ratio: f64) -> Result<()> {
     // HIGH-001: Fix bypass for stored compression with compressed_size == 0
     // Reject invalid entries where compressed_size is 0 but uncompressed_size >
     // 0
@@ -31,7 +85,7 @@ pub fn validate_compression_ratio(
     #[allow(clippy::cast_precision_loss)]
     let ratio = uncompressed_size as f64 / compressed_size as f64;
 
-    if ratio > config.max_compression_ratio {
+    if ratio > max_ratio {
         return Err(ArchiveError::ZipBomb {
             compressed: compressed_size,
             uncompressed: uncompressed_size,
@@ -107,6 +161,44 @@ mod tests {
             result,
             Err(ArchiveError::InvalidArchive(_)),
             "zero compressed with non-zero uncompressed should be rejected"
+        );
+    }
+
+    #[test]
+    fn test_solid_block_ratio_uses_solid_limit() {
+        let config = SecurityConfig::default().validate().expect("valid config");
+        // 138x passes the solid limit (1000) though it exceeds the per-file one
+        // (100).
+        assert!(validate_solid_block_ratio(&SolidBlock::new(1000, 138_000), &config).is_ok());
+        assert_matches!(
+            validate_solid_block_ratio(&SolidBlock::new(1000, 1_500_000), &config),
+            Err(ArchiveError::ZipBomb { .. })
+        );
+    }
+
+    #[test]
+    fn test_solid_block_ratio_empty_and_zero_compressed() {
+        let config = SecurityConfig::default().validate().expect("valid config");
+        assert!(validate_solid_block_ratio(&SolidBlock::new(0, 0), &config).is_ok());
+        assert_matches!(
+            validate_solid_block_ratio(&SolidBlock::new(0, 10), &config),
+            Err(ArchiveError::InvalidArchive(_))
+        );
+    }
+
+    #[test]
+    fn test_entry_compression_dispatch() {
+        let config = SecurityConfig::default().validate().expect("valid config");
+        let block = EntryCompression::SolidBlockStart(SolidBlock::new(1000, 138_000));
+        assert!(validate_entry_compression(&block, 1, &config).is_ok());
+        assert!(
+            validate_entry_compression(&EntryCompression::SolidBlockMember, u64::MAX, &config)
+                .is_ok()
+        );
+        assert!(validate_entry_compression(&EntryCompression::Unknown, u64::MAX, &config).is_ok());
+        assert_matches!(
+            validate_entry_compression(&EntryCompression::Entry(1000), 138_000, &config),
+            Err(ArchiveError::ZipBomb { .. })
         );
     }
 

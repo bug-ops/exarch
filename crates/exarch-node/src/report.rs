@@ -396,7 +396,7 @@ impl From<exarch_core::inspection::ArchiveEntry> for ArchiveEntry {
             path: entry.path.to_string_lossy().into_owned(),
             entry_type: entry.entry_type.into(),
             size: saturating_i64(entry.size),
-            compressed_size: entry.compressed_size.map(saturating_i64),
+            compressed_size: entry.compressed_size().map(saturating_i64),
             mode: entry.mode,
             modified: entry.modified.and_then(|t| {
                 t.duration_since(std::time::UNIX_EPOCH)
@@ -673,7 +673,7 @@ mod tests {
             exarch_core::inspection::ManifestEntryType::File,
             1024,
         );
-        core_entry.compressed_size = Some(512);
+        core_entry.compression = exarch_core::EntryCompression::Entry(512);
         core_entry.mode = Some(0o644);
         core_entry.modified = Some(UNIX_EPOCH + std::time::Duration::from_secs(1000));
 
@@ -887,7 +887,7 @@ mod tests {
     #[test]
     fn test_archive_entry_saturates_compressed_size_at_i64_max() {
         let mut core_entry = sized_entry("test.txt", 1024);
-        core_entry.compressed_size = Some(u64::MAX);
+        core_entry.compression = exarch_core::EntryCompression::Entry(u64::MAX);
 
         let entry = ArchiveEntry::from(core_entry);
 

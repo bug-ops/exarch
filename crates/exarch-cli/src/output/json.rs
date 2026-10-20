@@ -244,7 +244,7 @@ impl<W: Write> OutputFormatter for JsonFormatter<W> {
                 path: e.path.display().to_string(),
                 entry_type: e.entry_type.as_str(),
                 size: e.size,
-                compressed_size: e.compressed_size,
+                compressed_size: e.compressed_size(),
                 mode: e.mode,
                 modified: e.modified.and_then(|t| {
                     t.duration_since(std::time::UNIX_EPOCH)

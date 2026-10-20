@@ -88,6 +88,14 @@ pub struct SecurityConfigFields {
     /// Maximum compression ratio allowed (uncompressed / compressed).
     pub max_compression_ratio: f64,
 
+    /// Maximum compression ratio of a whole solid 7z block (summed
+    /// uncompressed size of its files / compressed size of its pack streams).
+    ///
+    /// Solid members share one compressed stream, so no per-file ratio exists;
+    /// this limit replaces `max_compression_ratio` for them. It is not exposed
+    /// by the CLI or the Python/Node bindings.
+    pub max_solid_compression_ratio: f64,
+
     /// Maximum number of files that can be extracted.
     pub max_file_count: usize,
 
@@ -232,6 +240,7 @@ impl Default for SecurityConfigFields {
             max_file_size: 50 * 1024 * 1024,   // 50 MB
             max_total_size: 500 * 1024 * 1024, // 500 MB
             max_compression_ratio: 100.0,
+            max_solid_compression_ratio: 1000.0,
             max_file_count: 10_000,
             max_path_depth: 32,
             allowed: AllowedFeatures::default(), // All false
@@ -335,6 +344,7 @@ impl Default for SecurityConfig<Unvalidated> {
     /// - `max_file_size`: 50 MB
     /// - `max_total_size`: 500 MB
     /// - `max_compression_ratio`: 100.0
+    /// - `max_solid_compression_ratio`: 1000.0
     /// - `max_file_count`: 10,000
     /// - `max_path_depth`: 32
     /// - `allowed`: All features disabled (deny-by-default)
@@ -372,6 +382,7 @@ impl SecurityConfig<Unvalidated> {
                 },
                 preserve_permissions: true,
                 max_compression_ratio: 1000.0,
+                max_solid_compression_ratio: 10_000.0,
                 banned_path_components: Vec::new(),
                 allow_solid_archives: true,
                 max_solid_block_memory: 1024 * 1024 * 1024, // 1 GB for permissive
@@ -397,7 +408,8 @@ impl SecurityConfig<Unvalidated> {
     /// # Errors
     ///
     /// Returns `ArchiveError::InvalidConfiguration` if:
-    /// - `max_compression_ratio` is not positive
+    /// - `max_compression_ratio` or `max_solid_compression_ratio` is not
+    ///   positive and finite
     /// - `max_file_size` is zero
     /// - `max_total_size` is zero
     /// - `max_path_depth` is zero
@@ -424,6 +436,12 @@ impl SecurityConfig<Unvalidated> {
         if !self.max_compression_ratio.is_finite() || self.max_compression_ratio <= 0.0 {
             return Err(crate::ArchiveError::InvalidConfiguration {
                 reason: "max_compression_ratio must be positive".into(),
+            });
+        }
+        if !self.max_solid_compression_ratio.is_finite() || self.max_solid_compression_ratio <= 0.0
+        {
+            return Err(crate::ArchiveError::InvalidConfiguration {
+                reason: "max_solid_compression_ratio must be positive".into(),
             });
         }
         if self.max_file_size == 0 {
@@ -521,6 +539,23 @@ impl SecurityConfig<Unvalidated> {
     #[inline]
     pub fn with_max_compression_ratio(mut self, ratio: f64) -> Self {
         self.fields.max_compression_ratio = ratio;
+        self
+    }
+
+    /// Sets the maximum compression ratio of a whole solid 7z block.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::SecurityConfig;
+    ///
+    /// let config = SecurityConfig::default().with_max_solid_compression_ratio(5000.0);
+    /// assert_eq!(config.max_solid_compression_ratio, 5000.0);
+    /// ```
+    #[must_use]
+    #[inline]
+    pub fn with_max_solid_compression_ratio(mut self, ratio: f64) -> Self {
+        self.fields.max_solid_compression_ratio = ratio;
         self
     }
 
@@ -1191,6 +1226,27 @@ mod tests {
         let mut cfg = SecurityConfig::default();
         cfg.max_compression_ratio = 0.0;
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_invalid_solid_compression_ratio() {
+        for ratio in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let mut cfg = SecurityConfig::default();
+            cfg.max_solid_compression_ratio = ratio;
+            assert!(cfg.validate().is_err(), "{ratio} must be rejected");
+        }
+    }
+
+    #[test]
+    fn test_solid_compression_ratio_defaults() {
+        assert_eq!(
+            SecurityConfig::default().max_solid_compression_ratio,
+            1000.0
+        );
+        assert_eq!(
+            SecurityConfig::permissive().max_solid_compression_ratio,
+            10_000.0
+        );
     }
 
     #[test]

@@ -178,12 +178,33 @@ struct ZipExtractionContext<'a> {
     progress: &'a mut dyn ProgressCallback,
 }
 
-/// Whether a raw ZIP entry name is absolute under either the Unix (`/x`) or
-/// Windows (`\x`, `C:\x`, `\\server\share`) convention.
-fn is_absolute_zip_name(raw: &str) -> bool {
+/// How a raw ZIP entry name starts, as far as absolute-path policy cares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NamePrefix {
+    /// Starts with `/` or `\` (including UNC `\\server\share`), or a drive
+    /// followed by a separator or nothing (`C:\x`, `C:/x`, `C:`)
+    Rooted,
+    /// A drive letter glued to a name (`C:x`): drive-relative on Windows, an
+    /// ordinary file name elsewhere
+    DriveRelative,
+    /// Anything else
+    Plain,
+}
+
+fn classify_name_prefix(raw: &str) -> NamePrefix {
     let bytes = raw.as_bytes();
-    raw.starts_with(['/', '\\'])
-        || (bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
+    if raw.starts_with(['/', '\\']) {
+        return NamePrefix::Rooted;
+    }
+    match (bytes.first(), bytes.get(1), bytes.get(2)) {
+        (Some(drive), Some(b':'), None | Some(b'/' | b'\\')) if drive.is_ascii_alphabetic() => {
+            NamePrefix::Rooted
+        }
+        (Some(drive), Some(b':'), Some(_)) if drive.is_ascii_alphabetic() => {
+            NamePrefix::DriveRelative
+        }
+        _ => NamePrefix::Plain,
+    }
 }
 
 /// Applies the entry-path policy shared by ZIP extraction and listing.
@@ -196,9 +217,15 @@ fn is_absolute_zip_name(raw: &str) -> bool {
 ///
 /// - `SecurityViolation` for a NUL byte (unless the verify preflight config is
 ///   relaxed, in which case the raw name is returned for verify to report)
+/// - `InvalidArchive` for an empty name
 /// - `PathTraversal` for an absolute name without `allow_absolute_paths`, for
 ///   any `..` component (split on both `/` and `\`), for an absolute name that
 ///   resolves to nothing, and when `enclosed` is `None`
+///
+/// A name is absolute when it starts with `/` or `\`, or with a drive plus a
+/// separator or nothing (`C:\x`, `C:/x`, `C:`), on every platform. A drive
+/// glued to a name (`C:x`) is absolute only on Windows; elsewhere it is an
+/// ordinary file name and is kept as stored.
 pub(crate) fn resolve_zip_entry_path(
     raw: &str,
     enclosed: Option<PathBuf>,
@@ -217,12 +244,27 @@ pub(crate) fn resolve_zip_entry_path(
         });
     }
 
-    let absolute = is_absolute_zip_name(raw);
+    if raw.is_empty() {
+        return Err(ArchiveError::InvalidArchive("empty ZIP entry name".into()));
+    }
+
+    let prefix = classify_name_prefix(raw);
+    let absolute =
+        prefix == NamePrefix::Rooted || (prefix == NamePrefix::DriveRelative && cfg!(windows));
     if absolute && !config.allowed.absolute_paths {
         return Err(traversal());
     }
     if raw.split(['/', '\\']).any(|component| component == "..") {
         return Err(traversal());
+    }
+
+    // `enclosed_name()` parses Windows syntax on every platform and would
+    // strip `a:` from the ordinary Unix file name `a:notes.txt`.
+    if prefix == NamePrefix::DriveRelative && !absolute {
+        return Ok(raw
+            .split(['/', '\\'])
+            .filter(|component| !component.is_empty() && *component != ".")
+            .collect());
     }
 
     match enclosed {
@@ -1920,6 +1962,31 @@ mod tests {
         );
     }
 
+    /// Issue #625: the open-time pass reads every local header, so a corrupt
+    /// header with an intact central directory fails before any write.
+    #[test]
+    fn test_corrupt_local_header_fails_before_any_write() {
+        let mut data = create_test_zip(vec![("a.txt", &[1u8; 64]), ("b.txt", &[2u8; 64])]);
+        let at = data
+            .windows(4)
+            .enumerate()
+            .filter(|(_, w)| *w == b"PK\x03\x04")
+            .nth(1)
+            .map(|(i, _)| i)
+            .expect("second local header present");
+        data[at..at + 4].fill(0);
+
+        let dir = TempDir::new().unwrap();
+        let archive_path = dir.path().join("corrupt.zip");
+        std::fs::write(&archive_path, &data).unwrap();
+        let out = dir.path().join("out");
+        std::fs::create_dir(&out).unwrap();
+
+        let result = crate::extract_archive(&archive_path, &out, &SecurityConfig::default());
+        assert_matches!(result, Err(ArchiveError::InvalidArchive(_)));
+        assert_eq!(std::fs::read_dir(&out).unwrap().count(), 0);
+    }
+
     #[test]
     fn test_is_password_required_matches_typed_variants_only() {
         use ::zip::result::ZipError;
@@ -2676,6 +2743,40 @@ mod tests {
                 Err(ArchiveError::PathTraversal { .. }),
                 "{name:?} resolves to an empty path and must be rejected"
             );
+        }
+    }
+
+    #[test]
+    fn test_resolve_entry_path_drive_glued_to_name_depends_on_platform() {
+        let result = call_resolve_entry_path("a:notes.txt", &strict_config());
+        if cfg!(windows) {
+            assert_matches!(result, Err(ArchiveError::PathTraversal { .. }));
+            let path = call_resolve_entry_path("a:notes.txt", &absolute_config()).unwrap();
+            assert_eq!(path, PathBuf::from("notes.txt"));
+        } else {
+            assert_eq!(result.unwrap(), PathBuf::from("a:notes.txt"));
+            let path = call_resolve_entry_path("a:dir\\notes.txt", &absolute_config()).unwrap();
+            assert_eq!(path, PathBuf::from("a:dir/notes.txt"));
+        }
+    }
+
+    #[test]
+    fn test_resolve_entry_path_drive_with_separator_or_nothing_is_absolute_everywhere() {
+        for name in ["C:", "c:\\x", "Z:/x"] {
+            let result = call_resolve_entry_path(name, &strict_config());
+            assert_matches!(
+                result,
+                Err(ArchiveError::PathTraversal { .. }),
+                "{name:?} must be rejected on every platform"
+            );
+        }
+    }
+
+    #[test]
+    fn test_resolve_zip_entry_path_empty_name_is_invalid() {
+        for config in [strict_config(), absolute_config()] {
+            let result = resolve_zip_entry_path("", Some(PathBuf::new()), &config);
+            assert_matches!(result, Err(ArchiveError::InvalidArchive(_)));
         }
     }
 

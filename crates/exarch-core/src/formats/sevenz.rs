@@ -1338,9 +1338,11 @@ impl From<sevenz_rust2::Error> for ArchiveError {
         }
 
         match err {
-            sevenz_rust2::Error::Io(io_err, _) | sevenz_rust2::Error::FileOpen(io_err, _) => {
-                Self::Io(io_err)
-            }
+            sevenz_rust2::Error::Io(io_err, _) => Self::Io(io_err),
+            sevenz_rust2::Error::FileOpen(io_err, path) => Self::Io(std::io::Error::new(
+                io_err.kind(),
+                format!("{path}: {io_err}"),
+            )),
             other => Self::InvalidArchive(format!("7z error: {other}")),
         }
     }
@@ -1831,6 +1833,24 @@ mod tests {
     }
 
     #[test]
+    fn test_compression_block_uncompressed_overflow_is_rejected() {
+        let (mut archive, len) = parse_fixture("solid.7z");
+        let members: Vec<usize> = (0..archive.files.len())
+            .filter(|&i| archive.stream_map.file_block_index[i] == Some(0))
+            .collect();
+        assert!(members.len() >= 2, "fixture must have a multi-file block");
+        archive.files[members[0]].size = u64::MAX;
+        archive.files[members[1]].size = 1;
+
+        assert_matches!(
+            sevenz_entry_compression(&archive, len),
+            Err(ArchiveError::QuotaExceeded {
+                resource: QuotaResource::IntegerOverflow
+            })
+        );
+    }
+
+    #[test]
     fn test_compression_empty_files_are_unknown() {
         let data = make_sevenz_archive_with_empty_file();
         let len = data.len() as u64;
@@ -2236,6 +2256,19 @@ mod tests {
             ArchiveError::Io(io_err) => {
                 assert_eq!(io_err.kind(), std::io::ErrorKind::UnexpectedEof);
                 assert!(io_err.to_string().contains("unexpected EOF"));
+            }
+            other => panic!("expected ArchiveError::Io, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_sevenz_file_open_error_keeps_path_and_kind() {
+        let inner = std::io::Error::new(std::io::ErrorKind::NotFound, "missing");
+        let err = ArchiveError::from(sevenz_rust2::Error::FileOpen(inner, "a/b.7z".into()));
+        match err {
+            ArchiveError::Io(io_err) => {
+                assert_eq!(io_err.kind(), std::io::ErrorKind::NotFound);
+                assert!(io_err.to_string().contains("a/b.7z"), "{io_err}");
             }
             other => panic!("expected ArchiveError::Io, got {other:?}"),
         }
@@ -2676,6 +2709,37 @@ mod tests {
         assert_eq!(report.files_skipped, 1);
         assert!(!dest.path().join("a.bin").exists());
         assert_eq!(std::fs::read(dest.path().join("b.txt")).unwrap(), kept);
+    }
+
+    /// Issue #628: skipping the last entry of a solid block must leave the
+    /// earlier entries and the extraction result intact.
+    #[test]
+    fn test_solid_block_skipping_last_entry_extracts_earlier_entries() {
+        let first = vec![b'A'; 5000];
+        let second = vec![b'B'; 5000];
+        let skipped = vec![b'C'; 5000];
+        let data = make_solid_sevenz_archive(&[
+            ("a.txt", &first),
+            ("b.txt", &second),
+            ("c.exe", &skipped),
+        ]);
+        let dest = TempDir::new().unwrap();
+
+        let report = SevenZArchive::new(Cursor::new(data))
+            .unwrap()
+            .extract(
+                dest.path(),
+                &solid_config(vec!["txt".to_string()]),
+                &ExtractionOptions::default(),
+                &mut crate::NoopProgress,
+            )
+            .unwrap();
+
+        assert_eq!(report.files_extracted, 2);
+        assert_eq!(report.files_skipped, 1);
+        assert_eq!(std::fs::read(dest.path().join("a.txt")).unwrap(), first);
+        assert_eq!(std::fs::read(dest.path().join("b.txt")).unwrap(), second);
+        assert!(!dest.path().join("c.exe").exists());
     }
 
     /// Issue #628: same as above for the `skip_duplicates` skip path.

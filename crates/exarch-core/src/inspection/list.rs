@@ -28,8 +28,6 @@ use crate::formats::tar_metadata_limit::TarReadBudget;
 use crate::formats::tar_metadata_limit::budget_violation;
 use crate::formats::tar_metadata_limit::budgeted_reader;
 use crate::formats::tar_metadata_limit::budgeted_tar_entries;
-use crate::formats::traits::ArchiveFormat;
-use crate::formats::zip::ZipArchive;
 use crate::formats::zip::is_password_required;
 use crate::formats::zip::read_zip_symlink_target;
 use crate::formats::zip::resolve_zip_entry_path;
@@ -40,6 +38,7 @@ use crate::inspection::manifest::EntryCompression;
 use crate::inspection::manifest::ManifestEntryKind;
 use crate::inspection::manifest::ManifestEntryType;
 use crate::security::quota::QuotaTracker;
+use crate::security::zipbomb::DeclaredCompressedBudget;
 use crate::types::safe_path::has_null_bytes;
 
 /// Lists archive contents without extracting.
@@ -220,7 +219,9 @@ fn list_tar_entries<R: std::io::Read>(
 
 fn list_zip(archive_path: &Path, config: &SecurityConfig<Validated>) -> Result<ArchiveManifest> {
     let file = File::open(archive_path)?;
-    ZipArchive::new(file)?.list(config)
+    let mut archive = zip::ZipArchive::new(file)
+        .map_err(|e| ArchiveError::InvalidArchive(format!("failed to open ZIP archive: {e}")))?;
+    list_zip_reader(&mut archive, config)
 }
 
 /// Lists entries from an already budget-wrapped TAR reader.
@@ -248,6 +249,7 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
 ) -> Result<ArchiveManifest> {
     let mut manifest = ArchiveManifest::new(ArchiveType::Zip);
     let mut quota = QuotaTracker::new();
+    let mut compressed_budget = DeclaredCompressedBudget::new(archive.central_directory_start());
 
     for i in 0..archive.len() {
         let entry = archive.by_index(i).map_err(|e| {
@@ -260,6 +262,8 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
         if entry.encrypted() {
             return Err(encrypted_archive_error());
         }
+
+        compressed_budget.charge(entry.compressed_size())?;
 
         // Route through the same QuotaTracker used by extraction: per-file
         // size, file count, and total size (with checked arithmetic) are all

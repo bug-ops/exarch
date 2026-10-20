@@ -180,6 +180,21 @@ mod tests {
     }
 
     #[test]
+    fn test_ratio_equal_to_limit_is_accepted_and_just_above_is_rejected() {
+        let config = SecurityConfig::default().validate().expect("valid config");
+        assert!(validate_solid_block_ratio(&SolidBlock::new(10, 10_000), &config).is_ok());
+        assert_matches!(
+            validate_solid_block_ratio(&SolidBlock::new(10, 10_001), &config),
+            Err(ArchiveError::ZipBomb { .. })
+        );
+        assert!(validate_compression_ratio(10, 1000, &config).is_ok());
+        assert_matches!(
+            validate_compression_ratio(10, 1001, &config),
+            Err(ArchiveError::ZipBomb { .. })
+        );
+    }
+
+    #[test]
     fn test_solid_block_ratio_empty_and_zero_compressed() {
         let config = SecurityConfig::default().validate().expect("valid config");
         assert!(validate_solid_block_ratio(&SolidBlock::new(0, 0), &config).is_ok());

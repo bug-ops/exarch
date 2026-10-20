@@ -801,10 +801,11 @@ impl TarEntryAdapter {
 pub(crate) fn open_tar_stream(
     path: &Path,
     codec: Option<CompressionCodec>,
+    max_decoder_memory: u64,
 ) -> Result<Box<dyn Read + Send>> {
     let reader = BufReader::new(File::open(path)?);
     match codec {
-        Some(codec) => codec.decoder(reader),
+        Some(codec) => codec.decoder(reader, max_decoder_memory),
         None => Ok(Box::new(reader)),
     }
 }
@@ -837,7 +838,7 @@ pub(crate) fn open_tar_stream(
 /// # Ok::<(), exarch_core::ArchiveError>(())
 /// ```
 pub fn open_tar_gz<P: AsRef<Path>>(path: P) -> Result<TarArchive<Box<dyn Read + Send>>> {
-    open_tar_stream(path.as_ref(), Some(CompressionCodec::Gzip)).map(TarArchive::new)
+    open_tar_stream(path.as_ref(), Some(CompressionCodec::Gzip), u64::MAX).map(TarArchive::new)
 }
 
 /// Opens a bzip2-compressed TAR archive (.tar.bz2).
@@ -868,7 +869,7 @@ pub fn open_tar_gz<P: AsRef<Path>>(path: P) -> Result<TarArchive<Box<dyn Read + 
 /// # Ok::<(), exarch_core::ArchiveError>(())
 /// ```
 pub fn open_tar_bz2<P: AsRef<Path>>(path: P) -> Result<TarArchive<Box<dyn Read + Send>>> {
-    open_tar_stream(path.as_ref(), Some(CompressionCodec::Bzip2)).map(TarArchive::new)
+    open_tar_stream(path.as_ref(), Some(CompressionCodec::Bzip2), u64::MAX).map(TarArchive::new)
 }
 
 /// Opens an xz-compressed TAR archive (.tar.xz).
@@ -879,6 +880,13 @@ pub fn open_tar_bz2<P: AsRef<Path>>(path: P) -> Result<TarArchive<Box<dyn Read +
 ///
 /// Returns an error if the file cannot be opened.
 ///
+/// # Decoder memory
+///
+/// The decoder is bounded by `config.max_decoder_memory`, fixed when the
+/// archive is opened. The config later passed to `extract` is not consulted
+/// for this limit, so the two configs may disagree; use the same config for
+/// both.
+///
 /// # Examples
 ///
 /// ```no_run
@@ -888,8 +896,8 @@ pub fn open_tar_bz2<P: AsRef<Path>>(path: P) -> Result<TarArchive<Box<dyn Read +
 /// use exarch_core::formats::traits::ArchiveFormat;
 /// use std::path::Path;
 ///
-/// let mut archive = open_tar_xz("archive.tar.xz")?;
 /// let config = SecurityConfig::default().validate()?;
+/// let mut archive = open_tar_xz("archive.tar.xz", &config)?;
 /// let report = archive.extract(
 ///     Path::new("/output"),
 ///     &config,
@@ -898,8 +906,16 @@ pub fn open_tar_bz2<P: AsRef<Path>>(path: P) -> Result<TarArchive<Box<dyn Read +
 /// )?;
 /// # Ok::<(), exarch_core::ArchiveError>(())
 /// ```
-pub fn open_tar_xz<P: AsRef<Path>>(path: P) -> Result<TarArchive<Box<dyn Read + Send>>> {
-    open_tar_stream(path.as_ref(), Some(CompressionCodec::Xz)).map(TarArchive::new)
+pub fn open_tar_xz<P: AsRef<Path>>(
+    path: P,
+    config: &SecurityConfig<Validated>,
+) -> Result<TarArchive<Box<dyn Read + Send>>> {
+    open_tar_stream(
+        path.as_ref(),
+        Some(CompressionCodec::Xz),
+        config.max_decoder_memory,
+    )
+    .map(TarArchive::new)
 }
 
 /// Opens a zstd-compressed TAR archive (.tar.zst).
@@ -931,7 +947,7 @@ pub fn open_tar_xz<P: AsRef<Path>>(path: P) -> Result<TarArchive<Box<dyn Read + 
 /// # Ok::<(), exarch_core::ArchiveError>(())
 /// ```
 pub fn open_tar_zst<P: AsRef<Path>>(path: P) -> Result<TarArchive<Box<dyn Read + Send>>> {
-    open_tar_stream(path.as_ref(), Some(CompressionCodec::Zstd)).map(TarArchive::new)
+    open_tar_stream(path.as_ref(), Some(CompressionCodec::Zstd), u64::MAX).map(TarArchive::new)
 }
 
 #[cfg(test)]

@@ -81,6 +81,9 @@ pub fn convert_error(err: CoreError) -> PyErr {
                 CoreQuotaResource::IntegerOverflow => {
                     "quota exceeded: integer overflow in quota tracking".to_string()
                 }
+                CoreQuotaResource::DecoderMemory { max } => {
+                    format!("quota exceeded: decoder memory (> {max} bytes)")
+                }
                 // Forward-compat: a variant added to QuotaResource after this
                 // match was written. #[non_exhaustive] requires this arm to
                 // compile against a newer exarch-core.

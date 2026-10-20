@@ -98,6 +98,12 @@ pub fn convert_error(err: CoreError) -> Error {
                         "QUOTA_EXCEEDED: quota exceeded: integer overflow in quota tracking",
                     );
                 }
+                CoreQuotaResource::DecoderMemory { max } => {
+                    let _ = write!(
+                        &mut msg,
+                        "QUOTA_EXCEEDED: quota exceeded: decoder memory (> {max} bytes)"
+                    );
+                }
                 // Forward-compat: a variant added to QuotaResource after this
                 // match was written. #[non_exhaustive] requires this arm to
                 // compile against a newer exarch-core.

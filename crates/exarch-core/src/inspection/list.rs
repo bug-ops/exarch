@@ -91,7 +91,7 @@ fn list_tar(
     format: ArchiveType,
     config: &SecurityConfig<Validated>,
 ) -> Result<ArchiveManifest> {
-    let stream = open_tar_stream(archive_path, codec)?;
+    let stream = open_tar_stream(archive_path, codec, config.max_decoder_memory)?;
     let (budgeted, budget) = budgeted_reader(stream, config.max_tar_metadata_bytes);
     let archive = tar::Archive::new(budgeted);
     list_tar_entries(archive, budget, format, config)

@@ -23,6 +23,8 @@ use std::io::Read;
 use std::io::Write;
 use std::io::{self};
 
+use crate::formats::tar_metadata_limit::budget_violation;
+
 use crate::ArchiveError;
 
 /// Optimal buffer size for I/O operations (64KB).
@@ -129,7 +131,9 @@ pub fn copy_with_buffer<R: Read + ?Sized, W: Write + ?Sized>(
             Ok(0) => break,
             Ok(n) => n,
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-            Err(e) => return Err(ArchiveError::Io(e)),
+            Err(e) => {
+                return Err(budget_violation(&e).unwrap_or(ArchiveError::Io(e)));
+            }
         };
 
         // SECURITY: Detect overflow to prevent quota bypass

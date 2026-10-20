@@ -169,6 +169,13 @@ pub fn convert_extraction_error(
              HINT: Use --max-compression-ratio to allow higher ratios if legitimate.",
             archive.display(),
         ),
+        ArchiveError::QuotaExceeded {
+            resource: exarch_core::QuotaResource::DecoderMemory { .. },
+        } => format!(
+            "Decoder memory limit exceeded for '{}'\n\
+             The archive declares a decompression dictionary larger than the allowed limit.",
+            archive.display(),
+        ),
         ArchiveError::QuotaExceeded { .. } => format!(
             "Extraction limit exceeded for '{}'\n\
              HINT: Use --max-files, --max-total-size, or --max-file-size to increase limits.",

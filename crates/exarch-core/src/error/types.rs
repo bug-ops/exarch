@@ -36,6 +36,11 @@ pub enum QuotaResource {
     },
     /// Integer overflow detected in quota tracking.
     IntegerOverflow,
+    /// Decompressor memory limit exceeded (xz dictionary and state).
+    DecoderMemory {
+        /// Maximum allowed decoder memory in bytes.
+        max: u64,
+    },
 }
 
 impl std::fmt::Display for QuotaResource {
@@ -52,6 +57,9 @@ impl std::fmt::Display for QuotaResource {
             }
             Self::IntegerOverflow => {
                 write!(f, "quota exceeded: integer overflow in quota tracking")
+            }
+            Self::DecoderMemory { max } => {
+                write!(f, "quota exceeded: decoder memory (> {max} bytes)")
             }
         }
     }
@@ -185,7 +193,7 @@ pub enum ArchiveError {
 
 impl From<std::io::Error> for ArchiveError {
     fn from(e: std::io::Error) -> Self {
-        Self::Io(e)
+        crate::formats::tar_metadata_limit::budget_violation(&e).unwrap_or(Self::Io(e))
     }
 }
 

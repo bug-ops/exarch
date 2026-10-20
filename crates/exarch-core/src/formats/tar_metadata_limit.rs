@@ -334,24 +334,57 @@ impl std::fmt::Display for TarCumulativeSyntheticBudgetExceeded {
 
 impl std::error::Error for TarCumulativeSyntheticBudgetExceeded {}
 
-/// Recovers a `TarReadBudgetExceeded` or `TarCumulativeSyntheticBudgetExceeded`
-/// violation from an `io::Error` surfaced by the `tar` crate or by
-/// [`BudgetedEntries::next_entry`], converting it into an
-/// `ArchiveError::SecurityViolation`.
+/// Marker error raised by the xz decoder wrapper when the stream needs more
+/// memory than `max_decoder_memory` allows. Recovered via [`budget_violation`]
+/// and converted into `QuotaExceeded { DecoderMemory }`.
+#[derive(Debug)]
+pub struct DecoderMemoryExceeded {
+    pub max: u64,
+}
+
+impl std::fmt::Display for DecoderMemoryExceeded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "decoder memory limit of {} bytes exceeded", self.max)
+    }
+}
+
+impl std::error::Error for DecoderMemoryExceeded {}
+
+/// Classifies a stream error raised while decoding or reading an archive.
 ///
-/// Returns `None` for any other I/O error, so callers can fall back to their
+/// Walks the error chain (`get_ref()` through each `io::Error`, `source()`
+/// through everything else, so the `tar` crate's wrapper is transparent) and
+/// recovers a TAR read-budget, cumulative synthetic-byte budget, or decoder
+/// memory violation, converting it into the matching `ArchiveError`.
+///
+/// Returns `None` for any other error, so callers can fall back to their
 /// usual generic error mapping.
 pub fn budget_violation(e: &io::Error) -> Option<crate::ArchiveError> {
-    let inner = e.get_ref()?;
-    if let Some(exceeded) = inner.downcast_ref::<TarReadBudgetExceeded>() {
-        return Some(crate::ArchiveError::SecurityViolation {
-            reason: exceeded.to_string(),
-        });
-    }
-    if let Some(exceeded) = inner.downcast_ref::<TarCumulativeSyntheticBudgetExceeded>() {
-        return Some(crate::ArchiveError::SecurityViolation {
-            reason: exceeded.to_string(),
-        });
+    let mut current: Option<&(dyn std::error::Error + 'static)> = Some(e);
+    while let Some(err) = current {
+        if let Some(exceeded) = err.downcast_ref::<TarReadBudgetExceeded>() {
+            return Some(crate::ArchiveError::SecurityViolation {
+                reason: exceeded.to_string(),
+            });
+        }
+        if let Some(exceeded) = err.downcast_ref::<TarCumulativeSyntheticBudgetExceeded>() {
+            return Some(crate::ArchiveError::SecurityViolation {
+                reason: exceeded.to_string(),
+            });
+        }
+        if let Some(exceeded) = err.downcast_ref::<DecoderMemoryExceeded>() {
+            return Some(crate::ArchiveError::QuotaExceeded {
+                resource: crate::QuotaResource::DecoderMemory { max: exceeded.max },
+            });
+        }
+        current = err.downcast_ref::<io::Error>().map_or_else(
+            || err.source(),
+            |io_err| {
+                io_err
+                    .get_ref()
+                    .map(|inner| inner as &(dyn std::error::Error + 'static))
+            },
+        );
     }
     None
 }

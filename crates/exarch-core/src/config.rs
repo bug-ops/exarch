@@ -194,6 +194,20 @@ pub struct SecurityConfigFields {
     /// Default: 4 MiB (4,194,304 bytes)
     pub max_tar_metadata_bytes: u64,
 
+    /// Maximum memory in bytes an xz decoder may use (dictionary and state).
+    ///
+    /// The xz block header declares the LZMA2 dictionary size (up to 4 GiB),
+    /// so without a limit a tiny archive can drive resident memory far beyond
+    /// what the output quotas allow. Archives that need more fail with
+    /// `QuotaExceeded { DecoderMemory }`. Applies to `extract`, `list` and
+    /// `verify` of `.tar.xz`. Other codecs are bounded by their format
+    /// (bzip2 blocks of at most 900 KB; zstd windows above 128 MiB are
+    /// rejected) and are not governed by this value. Not exposed through the
+    /// CLI or language bindings.
+    ///
+    /// Default: 256 MiB (268,435,456 bytes)
+    pub max_decoder_memory: u64,
+
     /// Internal only — not part of the public builder API, and never set by
     /// `SecurityConfig::default()`/`permissive()` construction paths that
     /// external callers use.
@@ -235,6 +249,7 @@ impl Default for SecurityConfigFields {
             allow_solid_archives: false,
             max_solid_block_memory: 512 * 1024 * 1024, // 512 MB
             max_tar_metadata_bytes: 4 * 1024 * 1024,   // 4 MiB
+            max_decoder_memory: 256 * 1024 * 1024,     // 256 MiB
             relaxed_for_verify_preflight: false,
         }
     }
@@ -330,6 +345,7 @@ impl Default for SecurityConfig<Unvalidated> {
     /// - `allow_solid_archives`: false (solid archives rejected)
     /// - `max_solid_block_memory`: 512 MB
     /// - `max_tar_metadata_bytes`: 4 MiB
+    /// - `max_decoder_memory`: 256 MiB
     fn default() -> Self {
         Self {
             fields: SecurityConfigFields::default(),
@@ -360,6 +376,7 @@ impl SecurityConfig<Unvalidated> {
                 allow_solid_archives: true,
                 max_solid_block_memory: 1024 * 1024 * 1024, // 1 GB for permissive
                 max_tar_metadata_bytes: 16 * 1024 * 1024,   // 16 MiB for permissive
+                max_decoder_memory: 1024 * 1024 * 1024,     // 1 GiB for permissive
                 ..SecurityConfigFields::default()
             },
             _marker: PhantomData,
@@ -387,6 +404,7 @@ impl SecurityConfig<Unvalidated> {
     /// - `max_file_count` is zero
     /// - `max_solid_block_memory` is zero
     /// - `max_tar_metadata_bytes` is zero
+    /// - `max_decoder_memory` is zero
     /// - any entry in `allowed_extensions` or `banned_path_components` is
     ///   empty, contains a null byte, or exceeds
     ///   [`crate::MAX_CONFIG_ENTRY_LENGTH`] bytes
@@ -436,6 +454,11 @@ impl SecurityConfig<Unvalidated> {
         if self.max_tar_metadata_bytes == 0 {
             return Err(crate::ArchiveError::InvalidConfiguration {
                 reason: "max_tar_metadata_bytes must not be zero".into(),
+            });
+        }
+        if self.max_decoder_memory == 0 {
+            return Err(crate::ArchiveError::InvalidConfiguration {
+                reason: "max_decoder_memory must not be zero".into(),
             });
         }
         for extension in &self.fields.allowed_extensions {
@@ -750,6 +773,23 @@ impl SecurityConfig<Unvalidated> {
     #[inline]
     pub fn with_max_tar_metadata_bytes(mut self, size: u64) -> Self {
         self.fields.max_tar_metadata_bytes = size;
+        self
+    }
+
+    /// Sets the maximum memory an xz decoder may use, in bytes.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::SecurityConfig;
+    ///
+    /// let config = SecurityConfig::default().with_max_decoder_memory(64 * 1024 * 1024);
+    /// assert_eq!(config.max_decoder_memory, 64 * 1024 * 1024);
+    /// ```
+    #[must_use]
+    #[inline]
+    pub fn with_max_decoder_memory(mut self, size: u64) -> Self {
+        self.fields.max_decoder_memory = size;
         self
     }
 
@@ -1207,6 +1247,25 @@ mod tests {
         let mut cfg = SecurityConfig::default();
         cfg.max_tar_metadata_bytes = 0;
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_zero_max_decoder_memory() {
+        let mut cfg = SecurityConfig::default();
+        cfg.max_decoder_memory = 0;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_max_decoder_memory_defaults() {
+        assert_eq!(
+            SecurityConfig::default().max_decoder_memory,
+            256 * 1024 * 1024
+        );
+        assert_eq!(
+            SecurityConfig::permissive().max_decoder_memory,
+            1024 * 1024 * 1024
+        );
     }
 
     // Regression tests for #449: SecurityConfig::validate() must reject

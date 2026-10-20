@@ -21,6 +21,7 @@ use crate::creation::compression::compression_level_to_bzip2;
 use crate::creation::compression::compression_level_to_flate2;
 use crate::creation::compression::compression_level_to_xz;
 use crate::creation::compression::compression_level_to_zstd;
+use crate::formats::tar_metadata_limit::DecoderMemoryExceeded;
 
 /// Compression codec for archive files.
 ///
@@ -106,19 +107,31 @@ impl CompressionCodec {
     /// This is the only codec-to-decoder mapping used for reading TAR
     /// streams. The `bufread` decoders take the caller's buffer as-is, so
     /// the caller decides the buffering once instead of each decoder adding
-    /// its own.
+    /// its own. `max_decoder_memory` bounds the xz decoder only; the other
+    /// codecs are bounded by their format.
     ///
     /// # Errors
     ///
     /// Returns an I/O error if the decoder cannot be initialised.
-    pub(crate) fn decoder<'r, R>(self, input: R) -> Result<Box<dyn Read + Send + 'r>>
+    pub(crate) fn decoder<'r, R>(
+        self,
+        input: R,
+        max_decoder_memory: u64,
+    ) -> Result<Box<dyn Read + Send + 'r>>
     where
         R: BufRead + Send + 'r,
     {
         Ok(match self {
             Self::Gzip => Box::new(flate2::bufread::GzDecoder::new(input)),
             Self::Bzip2 => Box::new(bzip2::bufread::BzDecoder::new(input)),
-            Self::Xz => Box::new(xz2::bufread::XzDecoder::new(input)),
+            Self::Xz => {
+                let stream = xz2::stream::Stream::new_auto_decoder(max_decoder_memory, 0)
+                    .map_err(io::Error::from)?;
+                Box::new(XzLimited {
+                    inner: xz2::bufread::XzDecoder::new_stream(input, stream),
+                    max: max_decoder_memory,
+                })
+            }
             Self::Zstd => Box::new(zstd::Decoder::with_buffer(input)?),
         })
     }
@@ -172,6 +185,29 @@ impl CompressionCodec {
             Self::Xz => "xz",
             Self::Zstd => "zstd",
         }
+    }
+}
+
+/// xz decoder that reports liblzma's memory-limit error as a typed
+/// [`DecoderMemoryExceeded`] so `budget_violation` can classify it.
+struct XzLimited<R> {
+    inner: xz2::bufread::XzDecoder<R>,
+    max: u64,
+}
+
+impl<R: BufRead> Read for XzLimited<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.inner.read(buf).map_err(|e| {
+            let mem_limit = e
+                .get_ref()
+                .and_then(|inner| inner.downcast_ref::<xz2::stream::Error>())
+                .is_some_and(|err| matches!(err, xz2::stream::Error::MemLimit));
+            if mem_limit {
+                io::Error::other(DecoderMemoryExceeded { max: self.max })
+            } else {
+                e
+            }
+        })
     }
 }
 
@@ -263,6 +299,8 @@ mod tests {
         }
     }
 
+    const TEST_MEM: u64 = 256 * 1024 * 1024;
+
     const ALL_CODECS: [CompressionCodec; 4] = [
         CompressionCodec::Gzip,
         CompressionCodec::Bzip2,
@@ -276,7 +314,7 @@ mod tests {
         for codec in ALL_CODECS {
             let mut out = Vec::new();
             codec
-                .decoder(std::io::Cursor::new(encode(codec, &data)))
+                .decoder(std::io::Cursor::new(encode(codec, &data)), TEST_MEM)
                 .unwrap()
                 .read_to_end(&mut out)
                 .unwrap();
@@ -294,7 +332,7 @@ mod tests {
                 let encoded = enc.finish().unwrap();
                 let mut out = Vec::new();
                 codec
-                    .decoder(std::io::Cursor::new(encoded))
+                    .decoder(std::io::Cursor::new(encoded), TEST_MEM)
                     .unwrap()
                     .read_to_end(&mut out)
                     .unwrap();
@@ -311,7 +349,7 @@ mod tests {
             encoded.extend_from_slice(b"TRAILING-BYTES");
             let mut out = Vec::new();
             codec
-                .decoder(std::io::Cursor::new(encoded))
+                .decoder(std::io::Cursor::new(encoded), TEST_MEM)
                 .unwrap()
                 .read_to_end(&mut out)
                 .unwrap();
@@ -325,7 +363,7 @@ mod tests {
         encoded.extend_from_slice(&encode(CompressionCodec::Zstd, b"second"));
         let mut out = Vec::new();
         CompressionCodec::Zstd
-            .decoder(std::io::Cursor::new(encoded))
+            .decoder(std::io::Cursor::new(encoded), TEST_MEM)
             .unwrap()
             .read_to_end(&mut out)
             .unwrap();

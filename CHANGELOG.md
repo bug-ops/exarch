@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING:** `open_tar_xz` takes a `SecurityConfig`; tar.xz decoder memory is bounded by the new `max_decoder_memory` (default 256 MiB) and reported as `QuotaResource::DecoderMemory` (#629).
 - **BREAKING:** TAR creation uses one `create_tar_with_progress(output, codec, ...)`; the per-codec `create_tar_*_with_progress` functions and the unused `creation::CompressionLevel` are removed (#635).
 - CI fails when the generated Node.js `index.d.ts` is out of date, and `@napi-rs/cli` is pinned (#638).
 - Raised the `zip` dependency floor to 9.0.5 to exclude versions with unpatched read-path vulnerabilities (#640).

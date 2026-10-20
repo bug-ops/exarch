@@ -316,7 +316,7 @@ fn extract_tar(
     use crate::formats::tar::open_tar_stream;
     use crate::formats::traits::ArchiveFormat;
 
-    let stream = open_tar_stream(archive_path, codec)?;
+    let stream = open_tar_stream(archive_path, codec, config.max_decoder_memory)?;
     let mut archive = TarArchive::new(stream);
     archive.extract(output_dir, config, options, progress)
 }

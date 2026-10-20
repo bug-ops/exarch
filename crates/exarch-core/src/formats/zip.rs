@@ -1963,7 +1963,6 @@ mod tests {
         // the archive never opens, so extraction is blocked either way.
     }
 
-    #[cfg(unix)]
     #[test]
     fn test_symlink_target_too_large() {
         // Build a raw ZIP entry with symlink mode (0o120777) and >4096 bytes
@@ -2000,7 +1999,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn test_symlink_entry_is_refused_on_windows() {
-        let target = vec![b'a'; crate::test_utils::HOST_PATH_LIMIT + 1];
+        let target = vec![b'a'; 16];
         let zip_bytes = raw_zip_with_custom_entry("link", &target, 0, 0, 0o120_777);
         let mut archive = ZipArchive::new(Cursor::new(zip_bytes)).unwrap();
         let temp = TempDir::new().unwrap();

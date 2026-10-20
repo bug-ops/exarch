@@ -141,8 +141,7 @@ fn zip_well_formed_archive_lists_and_verifies() {
 fn with_repeated_central_record(data: &[u8]) -> Vec<u8> {
     const EOCD: &[u8] = b"PK\x05\x06";
     let eocd_at = data.windows(4).rposition(|w| w == EOCD).unwrap();
-    let dir_start =
-        u32::from_le_bytes(data[eocd_at + 16..eocd_at + 20].try_into().unwrap()) as usize;
+    let dir_start = u32::from_le_bytes(*data[eocd_at + 16..].first_chunk::<4>().unwrap()) as usize;
     let record = &data[dir_start..eocd_at];
 
     let mut second = record.to_vec();

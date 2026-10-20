@@ -134,6 +134,7 @@ use crate::Result;
 use crate::SecurityConfig;
 use crate::config::Validated;
 use crate::copy::CopyBuffer;
+use crate::copy::declared_size_exceeded;
 use crate::security::EntryValidator;
 use crate::security::permissions::SanitizedMode;
 use crate::security::quota::QuotaPermit;
@@ -525,12 +526,7 @@ impl<R: Read + Seek> ZipArchive<R> {
                 if io.kind() == std::io::ErrorKind::InvalidData
                     && io.to_string() == ZIP_DECLARED_SIZE_EXCEEDED =>
             {
-                ArchiveError::SecurityViolation {
-                    reason: format!(
-                        "decompressed size exceeded the declared uncompressed size of \
-                         {declared} bytes"
-                    ),
-                }
+                declared_size_exceeded(declared)
             }
             other => other,
         }

@@ -69,6 +69,19 @@ impl Default for CopyBuffer {
     }
 }
 
+/// Error for a stream that decompressed past the archive's own declared size.
+///
+/// Shared by the streaming ceiling in [`copy_with_buffer`] and the ZIP
+/// reader's declared-size classification so the message stays identical.
+#[must_use]
+pub fn declared_size_exceeded(declared: u64) -> ArchiveError {
+    ArchiveError::SecurityViolation {
+        reason: format!(
+            "decompressed size exceeded the declared uncompressed size of {declared} bytes"
+        ),
+    }
+}
+
 /// Copies data from reader to writer using the provided reusable buffer.
 ///
 /// This is an optimized version of `std::io::copy` that:
@@ -157,12 +170,7 @@ pub fn copy_with_buffer<R: Read + ?Sized, W: Write + ?Sized>(
         if let Some(expected) = expected_size
             && total > expected
         {
-            return Err(ArchiveError::SecurityViolation {
-                reason: format!(
-                    "decompressed size exceeded the declared uncompressed size of \
-                     {expected} bytes"
-                ),
-            });
+            return Err(declared_size_exceeded(expected));
         }
 
         writer

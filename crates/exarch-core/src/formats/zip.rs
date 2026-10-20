@@ -1963,13 +1963,14 @@ mod tests {
         // the archive never opens, so extraction is blocked either way.
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_symlink_target_too_large() {
         // Build a raw ZIP entry with symlink mode (0o120777) and >4096 bytes
         // content. The size field in the local header is what our code
         // reads via zip_file.size(). We need actual content bytes so
         // the zip crate reports the correct uncompressed size.
-        let target = vec![b'a'; 4097];
+        let target = vec![b'a'; crate::test_utils::HOST_PATH_LIMIT + 1];
         let zip_bytes = raw_zip_with_custom_entry("link", &target, 0, 0, 0o120_777);
         let cursor = Cursor::new(zip_bytes);
         // The archive itself should open fine.
@@ -1994,6 +1995,32 @@ mod tests {
                 "expected SecurityViolation(symlink target too large), got: {err:?}"
             );
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_symlink_entry_is_refused_on_windows() {
+        let target = vec![b'a'; crate::test_utils::HOST_PATH_LIMIT + 1];
+        let zip_bytes = raw_zip_with_custom_entry("link", &target, 0, 0, 0o120_777);
+        let mut archive = ZipArchive::new(Cursor::new(zip_bytes)).unwrap();
+        let temp = TempDir::new().unwrap();
+        let mut config = SecurityConfig::default();
+        config.allowed.symlinks = true;
+        let config = config.validate().expect("valid config");
+        let err = archive
+            .extract(
+                temp.path(),
+                &config,
+                &ExtractionOptions::default(),
+                &mut crate::NoopProgress,
+            )
+            .unwrap_err();
+        assert_matches!(
+            err,
+            ArchiveError::SecurityViolation { ref reason }
+                if reason.contains("not supported on this platform"),
+            "{err:?}"
+        );
     }
 
     #[test]

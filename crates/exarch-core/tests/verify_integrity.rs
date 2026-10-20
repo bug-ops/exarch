@@ -1045,7 +1045,7 @@ fn sevenz_extract_fails_closed_on_an_interleaved_stream_less_entry() {
 #[test]
 fn sevenz_dropped_oversized_entry_does_not_misalign_its_solid_block() {
     let dir = TempDir::new().unwrap();
-    let long = "a/".repeat(3000);
+    let long = "a/".repeat(20_000);
     let bytes = sevenz_fixtures::solid(
         &[(&long, GOOD), ("b", OTHER), ("c", GOOD)],
         vec![sevenz_fixtures::copy()],

@@ -2956,10 +2956,11 @@ mod tests {
 
     #[test]
     fn test_list_zip_oversized_symlink_target() {
+        use crate::test_utils::HOST_PATH_LIMIT;
         use crate::test_utils::create_zip_with_symlink;
         use std::io::Cursor;
 
-        let zip_bytes = create_zip_with_symlink("link", &"a".repeat(5000));
+        let zip_bytes = create_zip_with_symlink("link", &"a".repeat(HOST_PATH_LIMIT + 1));
 
         let mut archive = ZipArchive::new(Cursor::new(zip_bytes.clone())).unwrap();
         let strict = SecurityConfig::default().validate().unwrap();
@@ -2977,8 +2978,8 @@ mod tests {
         assert_matches!(
             &manifest.entries()[0].kind,
             ManifestEntryKind::Symlink {
-                target: LinkTarget::Oversized { bytes: 5000 }
-            }
+                target: LinkTarget::Oversized { bytes }
+            } if *bytes == HOST_PATH_LIMIT + 1
         );
     }
 

@@ -1588,9 +1588,10 @@ mod tests {
 
     #[test]
     fn verify_archive_reports_an_oversized_zip_symlink_target() {
+        use crate::test_utils::HOST_PATH_LIMIT;
         use crate::test_utils::create_zip_with_symlink;
 
-        let bytes = create_zip_with_symlink("link", &"a".repeat(5000));
+        let bytes = create_zip_with_symlink("link", &"a".repeat(HOST_PATH_LIMIT + 1));
         let mut file = NamedTempFile::with_suffix(".zip").unwrap();
         file.write_all(&bytes).unwrap();
         file.flush().unwrap();

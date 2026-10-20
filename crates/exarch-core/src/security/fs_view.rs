@@ -783,8 +783,8 @@ mod tests {
             .into_iter()
             .map(|c| {
                 (
-                    c.existing.display().to_string(),
-                    c.incoming.display().to_string(),
+                    c.existing.display().to_string().replace('\\', "/"),
+                    c.incoming.display().to_string().replace('\\', "/"),
                     c.kind,
                 )
             })

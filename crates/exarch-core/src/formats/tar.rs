@@ -793,6 +793,9 @@ pub(crate) fn tar_permission_bits(header: &tar::Header) -> Option<u32> {
     header.mode().ok().map(|mode| mode & 0o7777)
 }
 
+/// Decoder memory limit for codecs that ignore it (only xz is bounded).
+const UNBOUNDED_DECODER_MEMORY: u64 = u64::MAX;
+
 /// Opens `path` as a TAR byte stream, decoding it with `codec` when one is
 /// given.
 ///
@@ -844,7 +847,12 @@ pub(crate) fn open_tar_stream(
 /// # Ok::<(), exarch_core::ArchiveError>(())
 /// ```
 pub fn open_tar_gz<P: AsRef<Path>>(path: P) -> Result<TarArchive<Box<dyn Read + Send>>> {
-    open_tar_stream(path.as_ref(), Some(CompressionCodec::Gzip), u64::MAX).map(TarArchive::new)
+    open_tar_stream(
+        path.as_ref(),
+        Some(CompressionCodec::Gzip),
+        UNBOUNDED_DECODER_MEMORY,
+    )
+    .map(TarArchive::new)
 }
 
 /// Opens a bzip2-compressed TAR archive (.tar.bz2).
@@ -875,7 +883,12 @@ pub fn open_tar_gz<P: AsRef<Path>>(path: P) -> Result<TarArchive<Box<dyn Read + 
 /// # Ok::<(), exarch_core::ArchiveError>(())
 /// ```
 pub fn open_tar_bz2<P: AsRef<Path>>(path: P) -> Result<TarArchive<Box<dyn Read + Send>>> {
-    open_tar_stream(path.as_ref(), Some(CompressionCodec::Bzip2), u64::MAX).map(TarArchive::new)
+    open_tar_stream(
+        path.as_ref(),
+        Some(CompressionCodec::Bzip2),
+        UNBOUNDED_DECODER_MEMORY,
+    )
+    .map(TarArchive::new)
 }
 
 /// Opens an xz-compressed TAR archive (.tar.xz).
@@ -953,7 +966,12 @@ pub fn open_tar_xz<P: AsRef<Path>>(
 /// # Ok::<(), exarch_core::ArchiveError>(())
 /// ```
 pub fn open_tar_zst<P: AsRef<Path>>(path: P) -> Result<TarArchive<Box<dyn Read + Send>>> {
-    open_tar_stream(path.as_ref(), Some(CompressionCodec::Zstd), u64::MAX).map(TarArchive::new)
+    open_tar_stream(
+        path.as_ref(),
+        Some(CompressionCodec::Zstd),
+        UNBOUNDED_DECODER_MEMORY,
+    )
+    .map(TarArchive::new)
 }
 
 #[cfg(test)]

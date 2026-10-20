@@ -100,7 +100,7 @@ Key flags (all optional):
 | `--max-files` | 10000 | Max number of entries to extract. |
 | `--max-total-size` | 500 MB | Max cumulative extracted size. Accepts `K`/`M`/`G`/`T` suffixes, e.g. `2G`. |
 | `--max-file-size` | 50 MB | Max size of any single extracted file. Same suffix syntax. |
-| `--max-compression-ratio` | 100 | Max uncompressed/compressed ratio before an entry is treated as a zip bomb. |
+| `--max-compression-ratio` | 100 | Max uncompressed/compressed ratio before an entry is treated as a zip bomb. Applies to ZIP and non-solid 7z; it does **not** apply to solid 7z blocks. With `--allow-solid-archives`, each solid block is checked as a whole against a fixed 1000x limit (`max_solid_compression_ratio`, Rust API only, not configurable from the CLI). |
 | `--max-path-depth` | 32 | Max path component depth allowed per entry. |
 | `--allowed-extensions <EXT>` | all allowed | Restrict extraction to matching extensions. Repeatable or comma-separated (`txt,pdf`); leading dot optional, case-insensitive. |
 | `--allow-symlinks` | off | Allow symlinks that resolve within the extraction directory. |

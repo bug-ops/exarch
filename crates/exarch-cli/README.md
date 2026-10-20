@@ -140,7 +140,7 @@ exarch extract --atomic --force archive.tar.gz /var/www/current
 | `--max-files` | 10000 | Maximum number of files to extract |
 | `--max-total-size` | - | Maximum total extracted size (supports K/M/G/T suffixes) |
 | `--max-file-size` | - | Maximum single file size |
-| `--max-compression-ratio` | 100 | Maximum compression ratio (zip bomb protection) |
+| `--max-compression-ratio` | 100 | Maximum compression ratio (zip bomb protection); does not apply to solid 7z blocks, which use a fixed 1000x limit |
 | `--allowed-extensions` | — | Extract only entries whose extension is in the allowlist (repeatable; comma-separated values accepted; leading dots optional) |
 | `--max-path-depth` | 32 | Maximum path depth for extracted entries |
 | `--banned-component` | — | Banned path component (repeatable; replaces the default ban list when provided) |

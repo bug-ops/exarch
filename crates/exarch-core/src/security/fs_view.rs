@@ -161,14 +161,16 @@ impl VirtualTree {
     /// `create_dir_all` does.
     ///
     /// The first node at a path wins, matching extraction that skips an
-    /// existing entry; a symlink over a file replaces it, the conservative
-    /// choice when extraction overwrites.
+    /// existing entry. A symlink over a file is ambiguous (extraction skips
+    /// it by default but replaces the file when overwriting): the file is
+    /// replaced so later entries are checked against the riskier tree, and an
+    /// error is returned so the archive is never reported as safe.
     ///
     /// # Errors
     ///
     /// Returns an error where extraction would fail: a parent that is a file,
-    /// a parent chain that loops or leaves the root, or a directory entry over
-    /// an existing non-directory.
+    /// a parent chain that loops or leaves the root, a directory entry over
+    /// an existing non-directory, or a symlink over an earlier file.
     pub fn insert(&mut self, rel: &Path, node: Node) -> io::Result<()> {
         let Some(name) = rel.file_name() else {
             return Ok(());
@@ -197,6 +199,7 @@ impl VirtualTree {
             (Some(id), node @ Node::Symlink(_)) => {
                 if self.node(id).kind == Node::File {
                     self.node_mut(id).kind = node;
+                    return Err(io::Error::from(io::ErrorKind::AlreadyExists));
                 }
                 Ok(())
             }
@@ -528,7 +531,8 @@ mod tests {
     fn symlink_replaces_earlier_file() {
         let mut t = tree();
         put(&mut t, "y", Node::File);
-        put(&mut t, "y", sym("."));
+        let err = t.insert(Path::new("y"), sym(".")).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
         assert!(t.is_symlink(Path::new("/dest/y")).unwrap());
     }
 

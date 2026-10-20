@@ -123,7 +123,8 @@ pub(crate) fn verify_manifest(
 ///
 /// Verification models extraction that skips an existing entry. With
 /// overwrite semantics extraction keeps the last entry at a path, which
-/// verification cannot model.
+/// verification cannot model. A symlink entry over a path an earlier entry
+/// created as a file is reported, since the two semantics diverge there.
 ///
 /// Hardlinks are materialized after every other entry, so their path and
 /// target are validated against the final tree.

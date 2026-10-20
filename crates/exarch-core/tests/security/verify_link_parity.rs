@@ -147,6 +147,29 @@ fn symlink_over_earlier_file_is_checked_as_replacement() {
 }
 
 #[test]
+fn symlink_over_file_then_link_through_it_fails() {
+    let cats = assert_verify_agrees_with_extract(&[
+        file("a/x"),
+        sym("c", "a/x"),
+        sym("a/x", "a"),
+        sym("c", "a"),
+    ]);
+    assert!(!cats.is_empty());
+}
+
+#[test]
+fn duplicate_symlink_over_live_symlink_fails() {
+    let cats = assert_verify_agrees_with_extract(&[file("f"), sym("s", "f"), sym("s", "f")]);
+    assert!(cats.contains(&IssueCategory::SymlinkEscape), "{cats:?}");
+}
+
+#[test]
+fn duplicate_symlink_over_dangling_symlink_is_accepted() {
+    let cats = assert_verify_agrees_with_extract(&[sym("s", "missing"), sym("s", "missing")]);
+    assert!(cats.is_empty(), "{cats:?}");
+}
+
+#[test]
 fn entry_under_file_fails() {
     let cats = assert_verify_agrees_with_extract(&[file("x"), file("x/y")]);
     assert!(!cats.is_empty());

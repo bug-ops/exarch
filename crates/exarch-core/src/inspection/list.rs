@@ -30,6 +30,7 @@ use crate::formats::tar_metadata_limit::budgeted_reader;
 use crate::formats::tar_metadata_limit::budgeted_tar_entries;
 use crate::formats::zip::is_password_required;
 use crate::formats::zip::read_zip_symlink_target;
+use crate::formats::zip::resolve_zip_entry_path;
 use crate::formats::zip::zip_mode_is_symlink;
 use crate::inspection::manifest::ArchiveEntry;
 use crate::inspection::manifest::ArchiveManifest;
@@ -285,41 +286,7 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
             .name()
             .map_err(|e| ArchiveError::InvalidArchive(format!("invalid entry name: {e}")))?
             .into_owned();
-        let path = match entry.enclosed_name() {
-            Some(p) => p.clone(),
-            None if config.allowed.absolute_paths => {
-                let stripped = raw_name.trim_start_matches('/');
-                if stripped.is_empty() {
-                    return Err(ArchiveError::PathTraversal {
-                        path: PathBuf::from(&raw_name),
-                    });
-                }
-                let p = PathBuf::from(stripped);
-                // NUL before traversal, matching `list_tar_entries`'s check
-                // order. `enclosed_name()` already rejects NUL bytes
-                // internally and returns `None` for them (caught by the
-                // other two match arms), so this is the only branch where a
-                // NUL byte can reach `p`: it bypasses `enclosed_name()`
-                // entirely by reading `raw_name` straight from the ZIP
-                // central directory.
-                if !config.relaxed_for_verify_preflight && has_null_bytes(&p) {
-                    return Err(ArchiveError::SecurityViolation {
-                        reason: format!("path contains null bytes: {}", p.display()),
-                    });
-                }
-                if contains_traversal(&p, config) {
-                    return Err(ArchiveError::PathTraversal {
-                        path: PathBuf::from(&raw_name),
-                    });
-                }
-                p
-            }
-            None => {
-                return Err(ArchiveError::PathTraversal {
-                    path: PathBuf::from(&raw_name),
-                });
-            }
-        };
+        let path = resolve_zip_entry_path(&raw_name, entry.enclosed_name(), config)?;
 
         let entry_type = convert_zip_entry_type(&entry);
         let size = entry.size();
@@ -1926,25 +1893,22 @@ mod tests {
 
     // --- Regression tests for #325: allow_absolute_paths for ZIP listing ---
 
-    // The zip 8.x crate's `enclosed_name()` already strips a single leading
-    // `/`, so `/etc/passwd` becomes `Some("etc/passwd")` — the path is safe
-    // without needing our fallback. The fallback activates only when
-    // `enclosed_name()` returns `None`, which happens for traversal
-    // patterns like `/../etc/passwd`.
+    // `enclosed_name()` strips a leading `/`, so the absolute-path policy is
+    // enforced on the raw name by `resolve_zip_entry_path` (issue #631).
     #[test]
-    fn test_list_zip_absolute_path_stripped_by_zip_crate() {
-        // /etc/passwd: enclosed_name() returns Some("etc/passwd") — accepted
-        // even without allow_absolute_paths because the zip crate
-        // already strips `/`.
+    fn test_list_zip_absolute_path_rejected_by_default() {
         let zip_bytes = create_raw_zip_entry("/etc/passwd", b"");
         let mut temp_file = NamedTempFile::with_suffix(".zip").unwrap();
         temp_file.write_all(&zip_bytes).unwrap();
         temp_file.flush().unwrap();
 
         let config = SecurityConfig::default();
-        let manifest = list_archive(temp_file.path(), &config).unwrap();
-        assert_eq!(manifest.total_entries(), 1);
-        assert_eq!(manifest.entries()[0].path, PathBuf::from("etc/passwd"));
+        let result = list_archive(temp_file.path(), &config);
+        assert_matches!(
+            result,
+            Err(ArchiveError::PathTraversal { .. }),
+            "absolute ZIP name must be rejected by default like TAR, got: {result:?}"
+        );
     }
 
     #[test]
@@ -2042,10 +2006,7 @@ mod tests {
     }
 
     #[test]
-    fn test_list_zip_nul_byte_rejected_as_path_traversal_by_default() {
-        // Under default config, `enclosed_name()` already rejects NUL bytes
-        // internally, so this hits the pre-existing `None => PathTraversal`
-        // fallback rather than the new NUL-byte check — must not regress.
+    fn test_list_zip_nul_byte_rejected_as_security_violation_by_default() {
         let zip_bytes = create_raw_zip_entry("foo\0bar.txt", b"");
         let mut temp_file = NamedTempFile::with_suffix(".zip").unwrap();
         temp_file.write_all(&zip_bytes).unwrap();
@@ -2053,11 +2014,14 @@ mod tests {
 
         let config = SecurityConfig::default();
         let result = list_archive(temp_file.path(), &config);
-        assert_matches!(
-            result,
-            Err(ArchiveError::PathTraversal { .. }),
-            "NUL byte in ZIP filename must be rejected by default, got: {result:?}"
-        );
+        match result {
+            Err(ArchiveError::SecurityViolation { reason }) => {
+                assert!(reason.contains("null bytes"), "reason: {reason}");
+            }
+            other => {
+                panic!("expected SecurityViolation for NUL byte in ZIP filename, got: {other:?}")
+            }
+        }
     }
 
     #[test]

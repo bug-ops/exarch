@@ -72,7 +72,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **BREAKING:** ZIP structure checks search the descriptor bytes as a gap, and report an empty-name local header that skips data (#688).
 - **BREAKING:** `SecurityConfig` gains `parallel_decode` and `with_parallel_decode`, and the Python and Node `SecurityConfig` classes a matching property (#688).
 - 7z `extract` and `verify --check-integrity` decode LZMA2 runs on worker threads within a memory bound (#688).
-- **BREAKING:** ZIP `extract`, `list` and `verify` reject, under `Enforce`, a hidden local header or stray record signature in the declared range of a stored data-descriptor entry, after its first descriptor signature (#NNN).
+- **BREAKING:** ZIP `extract`, `list` and `verify` reject, under `Enforce`, a hidden local header or stray record signature in the declared range of a stored data-descriptor entry, after its first descriptor signature (#690).
 - **BREAKING:** ZIP `extract`, `list` and `verify` reject, under `Enforce`, an entry whose local or central `xl` extra field gives it another file type than its central attributes (`ZipInconsistency::XlTypeDivergence`) (#689).
 
 ### Fixed

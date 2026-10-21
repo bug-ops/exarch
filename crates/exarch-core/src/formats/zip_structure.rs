@@ -67,6 +67,12 @@
 //! descriptor field that happens to equal a stop signature is reported like
 //! any other signature in a gap, an accepted false positive.
 //!
+//! An `xl` extra field with external attributes, in the local header or the
+//! central record, gives a streaming or seekable reader the entry's file type
+//! (see the `xl_type` module); when that differs from the type the central
+//! attributes give, the entry is reported as a type divergence. Entries
+//! without such a field are not compared.
+//!
 //! A local header with an empty name counts as hidden when its compressed size
 //! is not zero, since a streaming reader skips that many bytes after it.
 //!
@@ -105,6 +111,10 @@ use resume::DescriptorExit;
 use resume::DescriptorWidth;
 use resume::LocalFacts;
 use resume::streaming_resume;
+use xl_type::EntryKind;
+use xl_type::HostSystem;
+use xl_type::XlScan;
+use xl_type::reader_kind;
 
 const CDFH_SIGNATURE: [u8; 4] = *b"PK\x01\x02";
 pub(super) const LFH_SIGNATURE: [u8; 4] = *b"PK\x03\x04";
@@ -167,19 +177,21 @@ enum Slot {
     StrayCentral,
     StrayEnd,
     DescriptorOverrun,
+    XlType,
     Overlap,
     Uncounted,
     IgnoredEnd,
 }
 
 impl Slot {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 10] = [
         Self::Mismatch,
         Self::Duplicate,
         Self::Hidden,
         Self::StrayCentral,
         Self::StrayEnd,
         Self::DescriptorOverrun,
+        Self::XlType,
         Self::Overlap,
         Self::Uncounted,
         Self::IgnoredEnd,
@@ -192,7 +204,8 @@ impl Slot {
             | Self::Hidden
             | Self::StrayCentral
             | Self::StrayEnd
-            | Self::DescriptorOverrun => 16,
+            | Self::DescriptorOverrun
+            | Self::XlType => 16,
             Self::Overlap | Self::Uncounted | Self::IgnoredEnd => 1,
         }
     }
@@ -263,6 +276,7 @@ fn slot_of(finding: &ZipInconsistency) -> Slot {
         ZipInconsistency::StrayCentralRecord { .. } => Slot::StrayCentral,
         ZipInconsistency::StrayEndRecord { .. } => Slot::StrayEnd,
         ZipInconsistency::DescriptorOverrun { .. } => Slot::DescriptorOverrun,
+        ZipInconsistency::XlTypeDivergence { .. } => Slot::XlType,
         ZipInconsistency::OverlappingEntries => Slot::Overlap,
         ZipInconsistency::UncountedCentralRecords { .. } => Slot::Uncounted,
         ZipInconsistency::IgnoredEndRecord { .. } => Slot::IgnoredEnd,
@@ -510,6 +524,8 @@ struct EntryLayout {
     /// Compressed and uncompressed size the central directory declares.
     compressed: u64,
     size: u64,
+    /// Type the central directory gives the entry.
+    kind: EntryKind,
 }
 
 /// The central directory as the `zip` crate maps it.
@@ -690,6 +706,7 @@ fn layout_of<R: Read>(file: &zip::read::ZipFile<'_, R>, index: usize) -> Result<
             .then(|| DescriptorExit::of(file.compression())),
         compressed: file.compressed_size(),
         size: file.size(),
+        kind: EntryKind::of_central(file.is_dir(), file.unix_mode()),
     })
 }
 
@@ -925,8 +942,10 @@ const GAP_OVERLAP: usize = LFH_FIXED_LEN + 3;
 /// they sit between the entries the central directory maps. It also stops
 /// listing at a central directory signature, so one before an entry hides that
 /// entry; the signature alone is the finding, since the reader reads no field
-/// of the record. Archives without gaps cost no read, except that a data
-/// descriptor wider than the shortest one is resolved with up to three reads.
+/// of the record. Archives without gaps cost no gap read, except that a data
+/// descriptor wider than the shortest one is resolved with up to three reads;
+/// the type check reads each entry's local header and central record apart
+/// from that, in directory order.
 ///
 /// The search is bounded whatever the gaps hold: bytes are read in large
 /// chunks and every signature hit is judged from the chunk, state is a single
@@ -984,6 +1003,7 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
     fn run(&mut self, findings: &mut Findings) -> Result<()> {
         let mut order = self.layouts.to_vec();
         order.sort_unstable_by_key(|l| l.header_start);
+        self.check_xl_types(&order, findings)?;
         let prefix_end = if self.map.archive_offset > 0 {
             self.map.archive_offset
         } else {
@@ -1283,30 +1303,221 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
 
     fn read_at(&mut self, position: u64, buf: &mut [u8]) -> Result<()> {
         self.reads += 1;
+        self.read_uncounted(position, buf)
+    }
+
+    fn read_uncounted(&mut self, position: u64, buf: &mut [u8]) -> Result<()> {
         self.reader.seek(SeekFrom::Start(position))?;
         self.reader.read_exact(buf)?;
         Ok(())
     }
 
+    /// Reports every entry whose `xl` extra field, in its local header or its
+    /// central record, gives it a file type that differs from the one the
+    /// central attributes give.
+    ///
+    /// Runs apart from the gap search, so a full retention limit there does
+    /// not hide these findings. The central records are read first and in
+    /// directory order, then the local headers in file order, so that the
+    /// reads stay sequential. The reads are not counted in `reads`, which
+    /// measures the gap search.
+    ///
+    /// Each record costs at most its fixed part, its extra field and, when an
+    /// `xl` field gives a type, its name: about 128 KiB at worst, which is also
+    /// what the `zip` crate's own header check reads per entry. Entries that
+    /// share a local header (overlapping entries) read it, name included, once,
+    /// so the total is bounded by the number of distinct headers and central
+    /// records.
+    fn check_xl_types(&mut self, order: &[EntryLayout], findings: &mut Findings) -> Result<()> {
+        let central = self.central_xl_scans()?;
+        let mut examined: Option<(u64, Option<LocalXl>)> = None;
+        for layout in order {
+            if examined
+                .as_ref()
+                .is_none_or(|(at, _)| *at != layout.header_start)
+            {
+                examined = Some((
+                    layout.header_start,
+                    self.read_local_xl(layout.header_start)?,
+                ));
+            }
+            let Some((_, Some(local))) = &mut examined else {
+                continue;
+            };
+            let central_scan = central.get(layout.entry.get()).copied().flatten();
+            self.check_xl_type(
+                layout,
+                local,
+                central_scan.unwrap_or(XlScan::ABSENT),
+                findings,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Scans the extra block of every central record, by entry index; `None`
+    /// where a reader would reject the record.
+    fn central_xl_scans(&mut self) -> Result<Vec<Option<XlScan>>> {
+        let starts = &self.map.central_starts;
+        let mut order: Vec<usize> = (0..starts.len()).collect();
+        order.sort_unstable_by_key(|&index| starts[index]);
+        let mut scans = vec![None; starts.len()];
+        for index in order {
+            let header =
+                self.read_header::<CDFH_FIXED_LEN>(starts[index], CDFH_LENGTHS, Reads::Uncounted)?;
+            scans[index] = header.and_then(|h| XlScan::parse(h.host(), &h.extra));
+        }
+        Ok(scans)
+    }
+
+    /// Reads the local header at `header_start` for its `xl` fields, or `None`
+    /// when it cannot be read or a reader would reject it.
+    fn read_local_xl(&mut self, header_start: u64) -> Result<Option<LocalXl>> {
+        let header =
+            self.read_header::<LFH_FIXED_LEN>(header_start, LFH_LENGTHS, Reads::Uncounted)?;
+        Ok(header.and_then(|h| {
+            Some(LocalXl {
+                scan: XlScan::parse(h.host(), &h.extra)?,
+                name_start: h.name_start,
+                name_len: h.name_len,
+                name: None,
+                extra: h.extra,
+            })
+        }))
+    }
+
+    /// Compares the type the reader derives from the `xl` fields of one entry
+    /// with the type its central attributes give.
+    ///
+    /// A central scan the reader cannot use counts as having no `xl` field: a
+    /// streaming reader never reads the record.
+    fn check_xl_type(
+        &mut self,
+        layout: &EntryLayout,
+        local: &mut LocalXl,
+        central_scan: XlScan,
+        findings: &mut Findings,
+    ) -> Result<()> {
+        if local.scan.file_type.is_none() && central_scan.file_type.is_none() {
+            return Ok(());
+        }
+        if local.name.is_none() {
+            let mut name = vec![0u8; local.name_len];
+            self.read_uncounted(local.name_start, &mut name)?;
+            local.name = Some(name);
+        }
+        let name = local.name.as_deref().unwrap_or_default();
+        let derived = reader_kind(&local.scan, &central_scan, name, &local.extra);
+        if derived.is_some_and(|kind| kind != layout.kind) {
+            findings.push_with(Slot::XlType, || ZipInconsistency::XlTypeDivergence {
+                entry: layout.entry,
+                offset: layout.header_start,
+            });
+        }
+        Ok(())
+    }
+
+    /// Reads the fixed part and the extra block of the header at `start`, or
+    /// `None` when it does not fit in the file. The extra block is left empty
+    /// when it is too short to hold a field.
+    fn read_header<const FIXED: usize>(
+        &mut self,
+        start: u64,
+        lengths: LengthFields,
+        reads: Reads,
+    ) -> Result<Option<RawHeader<FIXED>>> {
+        if start.saturating_add(FIXED as u64) > self.file_len {
+            return Ok(None);
+        }
+        let mut fixed = [0u8; FIXED];
+        self.read_header_bytes(start, &mut fixed, reads)?;
+        let name_len = usize::from(le_u16(&fixed, lengths.name));
+        let extra_len = usize::from(le_u16(&fixed, lengths.extra));
+        let name_start = start + FIXED as u64;
+        let extra_start = name_start + name_len as u64;
+        if extra_start.saturating_add(extra_len as u64) > self.file_len {
+            return Ok(None);
+        }
+        let mut extra = Vec::new();
+        if extra_len >= 4 {
+            extra.resize(extra_len, 0);
+            self.read_header_bytes(extra_start, &mut extra, reads)?;
+        }
+        Ok(Some(RawHeader {
+            fixed,
+            name_start,
+            name_len,
+            extra,
+        }))
+    }
+
+    fn read_header_bytes(&mut self, position: u64, buf: &mut [u8], reads: Reads) -> Result<()> {
+        match reads {
+            Reads::Counted => self.read_at(position, buf),
+            Reads::Uncounted => self.read_uncounted(position, buf),
+        }
+    }
+
     /// What the local header at `header_start` tells a streaming reader about
     /// the entry's descriptor.
     fn local_facts(&mut self, header_start: u64) -> Result<LocalFacts> {
-        if header_start.saturating_add(LFH_FIXED_LEN as u64) > self.file_len {
-            return Ok(LocalFacts::default());
-        }
-        let mut header = [0u8; LFH_FIXED_LEN];
-        self.read_at(header_start, &mut header)?;
-        let name_len = u64::from(le_u16(&header, 26));
-        let extra_len = usize::from(le_u16(&header, 28));
-        let extra_start = header_start + LFH_FIXED_LEN as u64 + name_len;
-        if extra_start.saturating_add(extra_len as u64) > self.file_len {
-            return Ok(LocalFacts::default());
-        }
-        let mut extra = vec![0u8; extra_len];
-        if extra_len > 0 {
-            self.read_at(extra_start, &mut extra)?;
-        }
-        Ok(LocalFacts::parse(&header, &extra))
+        let header =
+            self.read_header::<LFH_FIXED_LEN>(header_start, LFH_LENGTHS, Reads::Counted)?;
+        Ok(header.map_or_else(LocalFacts::default, |h| {
+            LocalFacts::parse(&h.fixed, &h.extra)
+        }))
+    }
+}
+
+/// Where a header's name and extra field lengths sit in its fixed part.
+#[derive(Debug, Clone, Copy)]
+struct LengthFields {
+    name: usize,
+    extra: usize,
+}
+
+const LFH_LENGTHS: LengthFields = LengthFields {
+    name: 26,
+    extra: 28,
+};
+const CDFH_LENGTHS: LengthFields = LengthFields {
+    name: 28,
+    extra: 30,
+};
+
+/// Both headers carry the host system in the high byte of the version field
+/// that follows the signature.
+const HEADER_HOST_AT: usize = 5;
+
+/// Whether a header read counts towards the gap search's read budget.
+#[derive(Debug, Clone, Copy)]
+enum Reads {
+    Counted,
+    Uncounted,
+}
+
+/// What the `xl` fields of a local header say, with what is needed to decide
+/// the final name. The name is read on first use, so entries that share the
+/// header share the read.
+struct LocalXl {
+    scan: XlScan,
+    extra: Vec<u8>,
+    name_start: u64,
+    name_len: usize,
+    name: Option<Vec<u8>>,
+}
+
+/// A local header or central record as read from the file.
+struct RawHeader<const FIXED: usize> {
+    fixed: [u8; FIXED],
+    name_start: u64,
+    name_len: usize,
+    extra: Vec<u8>,
+}
+
+impl<const FIXED: usize> RawHeader<FIXED> {
+    fn host(&self) -> HostSystem {
+        HostSystem::from_byte(self.fixed[HEADER_HOST_AT])
     }
 }
 
@@ -1512,5 +1723,7 @@ enum Followed {
 }
 
 mod resume;
+mod xl_type;
+
 #[cfg(test)]
 mod tests;

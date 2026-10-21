@@ -28,6 +28,7 @@ use crate::raw_zip::deflate_zeros;
 use crate::test_utils::create_test_zip;
 
 mod streaming;
+mod xl_type;
 
 fn config(policy: ZipConsistencyPolicy) -> SecurityConfig<Validated> {
     SecurityConfig::default()

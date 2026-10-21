@@ -36,6 +36,9 @@ pub struct RawEntry {
     /// Compressed and uncompressed size to write in the local header instead of
     /// the entry's own (or zero when a descriptor follows).
     pub local_sizes: Option<(u32, u32)>,
+    /// "Version needed to extract" written in the local header; its high byte
+    /// names the host system.
+    pub local_version: u16,
 }
 
 impl RawEntry {
@@ -59,6 +62,7 @@ impl RawEntry {
             padding_after: 0,
             declared_compressed: None,
             local_sizes: None,
+            local_version: 20,
         }
     }
 
@@ -104,10 +108,19 @@ impl RawEntry {
 
     /// Appends an extra field with the given id to the local header.
     pub(crate) fn with_local_extra_field(mut self, id: u16, body: &[u8]) -> Self {
-        self.local_extra.extend_from_slice(&id.to_le_bytes());
-        self.local_extra
-            .extend_from_slice(&(body.len() as u16).to_le_bytes());
-        self.local_extra.extend_from_slice(body);
+        self.local_extra.extend(extra_field(id, body));
+        self
+    }
+
+    /// Appends an extra field with the given id to the central record.
+    pub(crate) fn with_central_extra_field(mut self, id: u16, body: &[u8]) -> Self {
+        self.central_extra.extend(extra_field(id, body));
+        self
+    }
+
+    /// Marks the local header as written on a Unix host.
+    pub(crate) const fn with_local_unix_host(mut self) -> Self {
+        self.local_version = 0x031e;
         self
     }
 
@@ -204,7 +217,7 @@ fn write_local(out: &mut Vec<u8>, entry: &RawEntry) {
     };
     let (compressed, size) = entry.local_sizes.unwrap_or((compressed, size));
     out.extend_from_slice(b"PK\x03\x04");
-    out.extend_from_slice(&20u16.to_le_bytes());
+    out.extend_from_slice(&entry.local_version.to_le_bytes());
     out.extend_from_slice(&entry.flags.to_le_bytes());
     out.extend_from_slice(&entry.method.to_le_bytes());
     out.extend_from_slice(&entry.time.to_le_bytes());
@@ -311,4 +324,36 @@ pub fn deflate_zeros(len: u64) -> Vec<u8> {
         bits.out.push(bits.acc as u8);
     }
     bits.out
+}
+
+/// Extra field id of the experimental `xl` field.
+pub const XL_FIELD_ID: u16 = 0x6C78;
+
+/// Unix mode of a symlink with all permissions.
+pub const SYMLINK_MODE: u32 = 0o120_777;
+
+/// An extra field: id, length and `body`.
+pub fn extra_field(id: u16, body: &[u8]) -> Vec<u8> {
+    let mut field = id.to_le_bytes().to_vec();
+    field.extend_from_slice(&(body.len() as u16).to_le_bytes());
+    field.extend_from_slice(body);
+    field
+}
+
+/// Body of an `xl` field that carries only the external attributes of a Unix
+/// entry with the given mode.
+pub fn xl_unix_attributes(mode: u32) -> Vec<u8> {
+    let mut body = vec![4u8];
+    body.extend_from_slice(&(mode << 16).to_le_bytes());
+    body
+}
+
+/// A Unicode Path extra field that replaces `raw` by `replacement`.
+pub fn unicode_path_field(raw: &[u8], replacement: &[u8]) -> Vec<u8> {
+    let mut crc = flate2::Crc::new();
+    crc.update(raw);
+    let mut body = vec![1u8];
+    body.extend_from_slice(&crc.sum().to_le_bytes());
+    body.extend_from_slice(replacement);
+    extra_field(0x7075, &body)
 }

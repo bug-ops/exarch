@@ -247,6 +247,17 @@ pub enum ZipInconsistency {
         offset: u64,
     },
 
+    /// An `xl` extra field, in the local header or the central record, gives
+    /// an entry a file type that differs from the one its central attributes
+    /// give, so a reader that honours the field extracts another kind of entry
+    /// than one that follows the attributes.
+    XlTypeDivergence {
+        /// Entry whose types differ.
+        entry: ZipEntryIndex,
+        /// Absolute offset of the entry's local header.
+        offset: u64,
+    },
+
     /// The central directory holds more records than its end record counts.
     UncountedCentralRecords {
         /// Count claimed by the end of central directory record.
@@ -299,6 +310,11 @@ impl std::fmt::Display for ZipInconsistency {
                 f,
                 "data descriptor of entry {entry} at offset {offset} makes a streaming reader \
                  resume past the next entry"
+            ),
+            Self::XlTypeDivergence { entry, offset } => write!(
+                f,
+                "an xl extra field of entry {entry} (local header at offset {offset}) gives it a \
+                 file type that the central directory attributes do not"
             ),
             Self::UncountedCentralRecords { counted, found } => write!(
                 f,
@@ -369,6 +385,15 @@ mod tests {
             .to_string(),
             "data descriptor of entry 2 at offset 70 makes a streaming reader resume past the \
              next entry"
+        );
+        assert_eq!(
+            ZipInconsistency::XlTypeDivergence {
+                entry: ZipEntryIndex::new(2),
+                offset: 70
+            }
+            .to_string(),
+            "an xl extra field of entry 2 (local header at offset 70) gives it a file type \
+             that the central directory attributes do not"
         );
         assert_eq!(
             ZipInconsistency::UncountedCentralRecords {

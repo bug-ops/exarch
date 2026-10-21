@@ -869,6 +869,7 @@ impl IssueCategory {
             | ZipInconsistency::StrayCentralRecord { .. }
             | ZipInconsistency::StrayEndRecord { .. }
             | ZipInconsistency::DescriptorOverrun { .. }
+            | ZipInconsistency::XlTypeDivergence { .. }
             | ZipInconsistency::UncountedCentralRecords { .. }
             | ZipInconsistency::IgnoredEndRecord { .. } => Self::HiddenEntry,
         }
@@ -1014,6 +1015,13 @@ mod tests {
             ),
             (
                 ZipInconsistency::DescriptorOverrun {
+                    entry: ZipEntryIndex::new(0),
+                    offset: 9,
+                },
+                IssueCategory::HiddenEntry,
+            ),
+            (
+                ZipInconsistency::XlTypeDivergence {
                     entry: ZipEntryIndex::new(0),
                     offset: 9,
                 },

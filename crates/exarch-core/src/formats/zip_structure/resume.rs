@@ -18,7 +18,7 @@
 //!   field.
 //!
 //! The model covers these layouts; other streaming-reader layouts are tracked
-//! in #686 and #687.
+//! in #687.
 //!
 //! Where the two modes disagree the further resume position wins, since either
 //! reader can be the one that skips an entry. The sizes are those of the
@@ -248,6 +248,7 @@ pub(super) fn streaming_resume(
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    use super::super::xl_type::EntryKind;
     use super::*;
     use crate::error::ZipEntryIndex;
 
@@ -265,6 +266,7 @@ mod tests {
             descriptor: Some(exit),
             compressed: COMPRESSED,
             size: SIZE,
+            kind: EntryKind::Regular,
         }
     }
 

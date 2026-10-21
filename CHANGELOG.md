@@ -19,9 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ZIP structure corpus covers Java and Windows producers, generated in CI (#672).
 - `UnverifiedReason::PathTooLong`: `verify` counts entries dropped for an over-long path as unverified (#684).
 - `UnverifiedReason::DescriptorTail`: an undecided or unaffordable descriptor tail check is listed by path under its own reason (#684).
-- ZIP corpus script adds Go, Python unseekable, `bsdtar`, Info-ZIP and `7z` streaming producers (#PR).
-- `ParallelDecode` and `--parallel-decode-memory` bound the memory of parallel 7z LZMA2 decoding (#PR).
-- 7z BCJ2 pack stream bound fixtures and tests (#PR).
+- ZIP corpus script adds Go, Python unseekable, `bsdtar`, Info-ZIP and `7z` streaming producers (#688).
+- `ParallelDecode` and `--parallel-decode-memory` bound the memory of parallel 7z LZMA2 decoding (#688).
+- 7z BCJ2 pack stream bound fixtures and tests (#688).
 
 ### Changed
 
@@ -67,11 +67,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Removed the stale `zstd`, `zstd-safe` and `syn` multiple-versions exceptions from `deny.toml`; the remaining `syn` 2 copy comes only from the `criterion` dev-dependency chain (#624).
 - **BREAKING:** ZIP `extract`, `list` and `verify` reject, under `ZipConsistencyPolicy::Enforce`, a central directory signature in a gap before an entry or in a `PK`-led prefix, where streaming readers stop listing (`ZipInconsistency::StrayCentralRecord`) (#684).
 - `verify` bounds symlink targets on Windows at 4091 UTF-16 units instead of 32767 (#684).
-- **BREAKING:** ZIP `extract`, `list` and `verify` reject, under `Enforce`, an end or ZIP64 end record signature in a gap or `PK`-led prefix (`ZipInconsistency::StrayEndRecord`, `EndRecordKind`) (#PR).
-- **BREAKING:** ZIP `extract`, `list` and `verify` reject, under `Enforce`, a data descriptor after which a streaming reader resumes past the next entry (`ZipInconsistency::DescriptorOverrun`), including stored entries with an unsigned descriptor (#PR).
-- **BREAKING:** ZIP structure checks search the descriptor bytes as a gap, and report an empty-name local header that skips data (#PR).
-- **BREAKING:** `SecurityConfig` gains `parallel_decode` and `with_parallel_decode`, and the Python and Node `SecurityConfig` classes a matching property (#PR).
-- 7z `extract` and `verify --check-integrity` decode LZMA2 runs on worker threads within a memory bound (#PR).
+- **BREAKING:** ZIP `extract`, `list` and `verify` reject, under `Enforce`, an end or ZIP64 end record signature in a gap or `PK`-led prefix (`ZipInconsistency::StrayEndRecord`, `EndRecordKind`) (#688).
+- **BREAKING:** ZIP `extract`, `list` and `verify` reject, under `Enforce`, a data descriptor after which a streaming reader resumes past the next entry (`ZipInconsistency::DescriptorOverrun`), including stored entries with an unsigned descriptor (#688).
+- **BREAKING:** ZIP structure checks search the descriptor bytes as a gap, and report an empty-name local header that skips data (#688).
+- **BREAKING:** `SecurityConfig` gains `parallel_decode` and `with_parallel_decode`, and the Python and Node `SecurityConfig` classes a matching property (#688).
+- 7z `extract` and `verify --check-integrity` decode LZMA2 runs on worker threads within a memory bound (#688).
 
 ### Fixed
 

@@ -227,12 +227,11 @@ class SecurityConfig:
 
     @property
     def parallel_decode_memory(self) -> int | None:
-        """Lookahead memory in bytes for parallel 7z LZMA2 decoding, or ``None`` (default: 128 MiB)."""
+        """Lookahead bytes for parallel 7z LZMA2 decoding, or ``None`` (default: 128 MiB)."""
         ...
 
     @parallel_decode_memory.setter
     def parallel_decode_memory(self, value: int | None) -> None: ...
-
     @property
     def zip_consistency(self) -> _ZipConsistency:
         """How ZIP archives with ambiguous structure are handled (default: ``"enforce"``)."""

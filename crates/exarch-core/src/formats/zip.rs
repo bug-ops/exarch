@@ -161,9 +161,9 @@ use super::zip_structure;
 use super::zip_structure::Shared;
 use super::zip_structure::ZipStructure;
 
-/// Maximum symlink target length read from a ZIP entry: the host's path
-/// limit, to prevent unbounded allocation.
-const MAX_SYMLINK_TARGET_SIZE: u64 = crate::security::fs_view::MAX_PATH_LEN as u64;
+/// Maximum symlink target length read from a ZIP entry: the host's symlink
+/// target limit in bytes, to prevent unbounded allocation.
+const MAX_SYMLINK_TARGET_SIZE: u64 = crate::security::fs_view::MAX_SYMLINK_TARGET_BYTES as u64;
 
 /// Message of the `io::Error` the `zip` crate (>= 9.0.1) raises when an entry
 /// decompresses past its declared size.
@@ -771,7 +771,8 @@ impl ZipEntryAdapter {
         })
     }
 
-    /// Rejects a declared symlink target size above `PATH_MAX`.
+    /// Rejects a declared symlink target size above the host's symlink target
+    /// limit.
     fn check_symlink_target_size(size: u64) -> Result<()> {
         if size > MAX_SYMLINK_TARGET_SIZE {
             return Err(ArchiveError::SecurityViolation {
@@ -1969,7 +1970,7 @@ mod tests {
         // content. The size field in the local header is what our code
         // reads via zip_file.size(). We need actual content bytes so
         // the zip crate reports the correct uncompressed size.
-        let target = vec![b'a'; crate::test_utils::HOST_PATH_LIMIT + 1];
+        let target = vec![b'a'; crate::test_utils::HOST_SYMLINK_TARGET_BYTES + 1];
         let zip_bytes = raw_zip_with_custom_entry("link", &target, 0, 0, 0o120_777);
         let cursor = Cursor::new(zip_bytes);
         // The archive itself should open fine.

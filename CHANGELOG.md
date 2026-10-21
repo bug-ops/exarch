@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `VerificationReport::integrity_gaps()` with typed per-reason counts and unverified entry paths, and `data.integrity_gaps` in CLI JSON, Python and Node (#672).
 - ZIP structure checks scan the prefix before the archive start and report a skipped end-of-central-directory record (`IgnoredEndRecord`); `verify --check-integrity` reports a header hidden in a data-descriptor entry tail (#672).
 - ZIP structure corpus covers Java and Windows producers, generated in CI (#672).
+- `UnverifiedReason::PathTooLong`: `verify` counts entries dropped for an over-long path as unverified (#PR).
+- `UnverifiedReason::DescriptorTail`: an undecided or unaffordable descriptor tail check is listed by path under its own reason (#PR).
 
 ### Changed
 
@@ -60,9 +62,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ArchiveType` implements `Display`, and report enums share one table for `ALL` and `as_str` instead of `Debug` formatting in the CLI, Node and Python (#624).
 - `verify` and `list` return an `InvalidArchive` error for ZIP and 7z archives whose declared compressed sizes exceed the archive length (#624).
 - Removed the stale `zstd`, `zstd-safe` and `syn` multiple-versions exceptions from `deny.toml`; the remaining `syn` 2 copy comes only from the `criterion` dev-dependency chain (#624).
+- **BREAKING:** ZIP `extract`, `list` and `verify` reject, under `ZipConsistencyPolicy::Enforce`, a central directory signature in a gap before an entry or in a `PK`-led prefix, where streaming readers stop listing (`ZipInconsistency::StrayCentralRecord`) (#PR).
+- `verify` bounds symlink targets on Windows at 4091 UTF-16 units instead of 32767 (#PR).
 
 ### Fixed
 
+- 7z last solid block ratio counts only the pack streams its coders consume (#PR).
 - 7z `extract` admits each block's decoder memory against `max_decoder_memory`, closing unbounded multi-threaded LZMA2 buffering (#672).
 - 7z `extract` refuses a block with a stream-less entry between its files instead of silently omitting a file (#672).
 - `verify` reports what 7z `extract` refuses: solid policy, decoder memory, unknown coder, encrypted content and interleaved blocks (#672).

@@ -22,6 +22,13 @@ pub const HOST_PATH_LIMIT: usize = 32767;
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
 pub const HOST_PATH_LIMIT: usize = 1023;
 
+/// The most bytes a symlink target may take on the host, written out per host
+/// like [`HOST_PATH_LIMIT`]: on Windows 4091 UTF-16 units of at most 3 bytes.
+#[cfg(target_os = "windows")]
+pub const HOST_SYMLINK_TARGET_BYTES: usize = 4091 * 3;
+#[cfg(not(target_os = "windows"))]
+pub const HOST_SYMLINK_TARGET_BYTES: usize = HOST_PATH_LIMIT;
+
 /// A relative path of exactly `len` bytes made of 100-byte components.
 #[must_use]
 pub fn path_of_len(len: usize) -> String {

@@ -98,7 +98,13 @@ fn clean_archives_have_no_findings() {
         .build();
         let archive = open_bytes(built.bytes);
         assert!(archive.structure().findings().is_empty());
-        assert_eq!(archive.structure().gap_reads(), 0, "{signature} {zip64}");
+        let reads = archive.structure().gap_reads();
+        let per_entry = match (signature, zip64) {
+            (false, false) => 0,
+            (true, false) => 1,
+            (_, true) => 3,
+        };
+        assert!(reads <= 2 * per_entry, "{signature} {zip64}: {reads}");
     }
 }
 
@@ -257,7 +263,7 @@ fn descriptor_size_equal_to_the_header_magic_is_not_a_hidden_header() {
     let built = RawZip::new(vec![entry]).build();
     let archive = open_bytes(built.bytes);
     assert!(archive.structure().findings().is_empty());
-    assert_eq!(archive.structure().gap_reads(), 0);
+    assert!(archive.structure().gap_reads() <= 1);
 }
 
 #[test]
@@ -722,7 +728,12 @@ fn every_structural_finding_is_ignored_under_the_ignore_policy() {
         .to_le_bytes();
     overlap.bytes[second_record + 42..second_record + 46].copy_from_slice(&first);
 
-    for bytes in [uncounted.build().bytes, hidden.build().bytes, overlap.bytes] {
+    for bytes in [
+        uncounted.build().bytes,
+        hidden.build().bytes,
+        overlap.bytes,
+        stray_before_entry(&stray_central()).bytes,
+    ] {
         assert!(!open_bytes(bytes.clone()).structure().findings().is_empty());
         let mut archive = open_bytes(bytes.clone());
         archive.list(&ignore).unwrap();
@@ -1651,4 +1662,186 @@ fn file_starting_with_pk_is_judged_leniently_before_the_first_entry() {
     let stub = [b"MZ00".to_vec(), local_header(64, 0, 0, b"evil.sh", 0)].concat();
     let absolute = with_absolute_offsets(&stub, &built);
     assert!(open_bytes(absolute).structure().findings().is_empty());
+}
+
+fn stray_central() -> Vec<u8> {
+    let evil = RawZip::new(vec![RawEntry::stored("evil.sh", b"echo pwned\n")]).build();
+    evil.bytes[evil.directory_start..evil.bytes.len() - 22].to_vec()
+}
+
+fn stray(offset: usize) -> ZipInconsistency {
+    ZipInconsistency::StrayCentralRecord {
+        offset: offset as u64,
+    }
+}
+
+/// Two entries with `gap` written into the bytes between them, where a
+/// streaming reader that stops at it never reaches the second entry. Returns
+/// the archive and the offset of the gap.
+fn gap_before_entry(gap: &[u8]) -> (BuiltZip, usize) {
+    gap_with_padding(0, gap)
+}
+
+fn gap_with_padding(padding: usize, gap: &[u8]) -> (BuiltZip, usize) {
+    let mut first = RawEntry::stored("a.txt", b"hello");
+    first.padding_after = padding + gap.len();
+    let mut built = RawZip::new(vec![first, RawEntry::stored("b.txt", b"world")]).build();
+    let at = built.local_offsets[1] - gap.len();
+    built.bytes[at..at + gap.len()].copy_from_slice(gap);
+    (built, at)
+}
+
+fn stray_before_entry(gap: &[u8]) -> BuiltZip {
+    gap_before_entry(gap).0
+}
+
+fn record_with(patch: impl FnOnce(&mut [u8])) -> Vec<u8> {
+    let mut record = stray_central();
+    patch(&mut record);
+    record
+}
+
+#[test]
+fn central_signature_before_an_entry_is_found_whatever_follows_it() {
+    let shapes = [
+        ("full record", stray_central()),
+        ("bare signature", b"PK\x01\x02".to_vec()),
+        ("nameless", record_with(|r| r[28..30].fill(0))),
+        ("version 0xFFFF", record_with(|r| r[6..8].fill(0xFF))),
+        ("zip64 offset", record_with(|r| r[42..46].fill(0xFF))),
+        ("name past the file", record_with(|r| r[28..30].fill(0xFF))),
+    ];
+    for (label, shape) in shapes {
+        let (built, at) = gap_before_entry(&shape);
+        assert_eq!(findings_of(&built), [stray(at)], "{label}");
+    }
+}
+
+#[test]
+fn central_record_in_the_final_gap_hides_nothing_and_is_not_reported() {
+    for shape in [stray_central(), b"PK\x01\x02".to_vec()] {
+        let mut zip = RawZip::new(vec![RawEntry::stored("a.txt", b"hello")]);
+        zip.before_directory = shape;
+        assert!(findings_of(&zip.build()).is_empty());
+    }
+    let mut zip = two_files();
+    zip.before_directory = stray_central();
+    assert!(findings_of(&zip.build()).is_empty());
+}
+
+#[test]
+fn central_signature_split_by_a_read_boundary_is_found() {
+    for padding in [
+        GAP_CHUNK - 5,
+        GAP_CHUNK - 4,
+        GAP_CHUNK - 3,
+        GAP_CHUNK - 2,
+        GAP_CHUNK - 1,
+        GAP_CHUNK,
+    ] {
+        let (built, at) = gap_with_padding(padding, b"PK\x01\x02");
+        assert_eq!(findings_of(&built), [stray(at)], "{padding}");
+    }
+}
+
+#[test]
+fn central_record_in_the_prefix_is_found_only_when_the_file_starts_with_pk() {
+    let built = two_files().build();
+    for (label, record) in [
+        ("bare signature", b"PK\x01\x02".to_vec()),
+        ("nameless", record_with(|r| r[28..30].fill(0))),
+        ("full record", stray_central()),
+    ] {
+        let relative = [record.clone(), built.bytes.clone()].concat();
+        let absolute = with_absolute_offsets(&record, &built);
+        for (kind, bytes) in [("relative", relative), ("absolute", absolute)] {
+            assert_eq!(
+                open_bytes(bytes).structure().findings(),
+                [stray(0)],
+                "{label} {kind}"
+            );
+        }
+
+        let after_pk = [b"PK00".to_vec(), record.clone()].concat();
+        let absolute = with_absolute_offsets(&after_pk, &built);
+        assert_eq!(
+            open_bytes(absolute).structure().findings(),
+            [stray(4)],
+            "{label} behind PK00"
+        );
+
+        let stub = [b"MZ00".to_vec(), record].concat();
+        let absolute = with_absolute_offsets(&stub, &built);
+        assert!(open_bytes(absolute).structure().findings().is_empty());
+    }
+}
+
+#[test]
+fn central_signature_after_a_descriptor_is_found_at_every_descriptor_width() {
+    for (signature, zip64) in [(true, false), (false, false), (true, true), (false, true)] {
+        let mut first = RawEntry::stored("a.txt", b"hello").with_descriptor(signature, zip64);
+        first.padding_after = 4;
+        let mut built = RawZip::new(vec![first, RawEntry::stored("b.txt", b"world")]).build();
+        let at = built.local_offsets[1] - 4;
+        built.bytes[at..at + 4].copy_from_slice(b"PK\x01\x02");
+        assert_eq!(findings_of(&built), [stray(at)], "{signature} {zip64}");
+    }
+}
+
+#[test]
+fn stray_central_records_are_capped() {
+    let (built, _) = gap_before_entry(&b"PK\x01\x02".repeat(40));
+    let found = findings_of(&built);
+    assert_eq!(found.len(), 16);
+    assert!(
+        found
+            .iter()
+            .all(|f| matches!(f, ZipInconsistency::StrayCentralRecord { .. }))
+    );
+}
+
+#[test]
+fn stray_central_record_is_fatal_under_enforce_and_reported_by_verify() {
+    let bytes = stray_before_entry(&stray_central()).bytes;
+
+    assert_matches!(
+        open_bytes(bytes.clone()).list(&config(ZipConsistencyPolicy::Enforce)),
+        Err(ArchiveError::ZipInconsistency(
+            ZipInconsistency::StrayCentralRecord { .. }
+        ))
+    );
+    let report = open_bytes(bytes)
+        .verify(
+            &config(ZipConsistencyPolicy::Enforce),
+            &VerificationOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(report.status(), VerificationStatus::Fail);
+    assert!(report.issues().iter().any(|i| {
+        i.category == IssueCategory::HiddenEntry
+            && i.message
+                .contains("central directory record outside the central directory")
+    }));
+}
+
+#[test]
+fn descriptor_tail_the_budget_cannot_cover_is_listed_with_its_own_reason() {
+    let payload = b"hello hello hello hello";
+    let built = RawZip::new(vec![descriptor_entry(8, payload, &descriptor(payload, 0))]).build();
+    let report = open_bytes(built.bytes)
+        .verify(
+            &config(ZipConsistencyPolicy::Enforce),
+            &VerificationOptions::default().with_integrity(IntegrityCheck::DecodeToEof(
+                DecompressionBudget::try_from_bytes(payload.len() as u64).unwrap(),
+            )),
+        )
+        .unwrap();
+    let gaps = report.integrity_gaps().unwrap();
+    assert_eq!(gaps.total(), 1);
+    assert_eq!(gaps.count(crate::UnverifiedReason::DescriptorTail), 1);
+    assert_eq!(gaps.entries().len(), 1);
+    assert_eq!(
+        gaps.entries()[0].reason(),
+        crate::UnverifiedReason::DescriptorTail
+    );
 }

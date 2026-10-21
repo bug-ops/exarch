@@ -218,6 +218,13 @@ pub enum UnverifiedReason {
     /// A TAR stream that ends without an end-of-archive marker.
     #[napi(value = "no_end_marker")]
     NoEndMarker,
+    /// An entry dropped from the manifest because its path exceeds the host
+    /// limits.
+    #[napi(value = "path_too_long")]
+    PathTooLong,
+    /// The data-descriptor tail of a ZIP entry was not searched.
+    #[napi(value = "descriptor_tail")]
+    DescriptorTail,
 }
 
 impl TryFrom<CoreUnverifiedReason> for UnverifiedReason {
@@ -232,6 +239,8 @@ impl TryFrom<CoreUnverifiedReason> for UnverifiedReason {
             CoreUnverifiedReason::UncoveredBlockCrc => Self::UncoveredBlockCrc,
             CoreUnverifiedReason::NotDecodable => Self::NotDecodable,
             CoreUnverifiedReason::NoEndMarker => Self::NoEndMarker,
+            CoreUnverifiedReason::PathTooLong => Self::PathTooLong,
+            CoreUnverifiedReason::DescriptorTail => Self::DescriptorTail,
             other => return Err(unknown_variant("unverified reason", other.as_str())),
         })
     }

@@ -17,7 +17,8 @@
 //!    handle on the same reader, which exposes duplicate names and records
 //!    beyond the end record's count, and must agree with the crate's map;
 //! 3. the bytes before the archive start, between entries and before the
-//!    directory are searched for local headers no record maps;
+//!    directory are searched for local headers no record maps and for central
+//!    directory signatures before an entry;
 //! 4. the end of the file is searched for end records the crate rejected before
 //!    settling on the one it used.
 //!
@@ -29,7 +30,6 @@
 //! The checks cover what a streaming reader would find outside the entries the
 //! central directory maps. Not covered:
 //!
-//! - central directory records located before the directory start;
 //! - a descriptor, local header and data hidden inside the declared range of a
 //!   data-descriptor entry (streaming readers end such an entry at the end of
 //!   its compressed stream, the central directory at the declared size). Only
@@ -42,7 +42,8 @@
 //! not its offsets were rewritten) are searched with a stricter judge than the
 //! gaps, because stubs embed the signature as code: a hit counts only when the
 //! header looks like a producer wrote it and its whole entry fits inside the
-//! prefix. A stub never starts with a local header, so one at offset 0 is
+//! prefix; central directory signatures are not searched there at all, which is
+//! a residual. A stub never starts with a local header, so one at offset 0 is
 //! judged like a header in a gap. The end of the file is searched back as far
 //! as the `zip` crate looks for end records; if the record the crate used
 //! cannot be identified and others exist, the archive is reported as
@@ -50,9 +51,16 @@
 //!
 //! Pre-ZIP64 archives with more than 65535 entries wrap the end record's count
 //! and are reported as uncounted records, as are orphaned local headers left
-//! behind by in-place updaters. With duplicate names the local headers are not
-//! compared with the central directory and the gaps are not searched. Each kind
-//! of finding keeps a bounded number of entries; the rest are counted.
+//! behind by in-place updaters. A central directory signature before an entry,
+//! in the gaps or in a prefix that starts with `PK`, is reported as a stray
+//! record: a streaming reader that stops listing at the first central record
+//! never sees the entries after it. The signature alone counts, because that
+//! reader reads no field of the record; one behind the last entry hides
+//! nothing and is not reported. An end record signature in a gap stops such a
+//! reader the same way and is not searched, which is a residual (#682). With
+//! duplicate names the local headers are not compared with the central
+//! directory and the gaps are not searched. Each kind of finding keeps a
+//! bounded number of entries; the rest are counted.
 
 use std::collections::HashSet;
 use std::io::BufReader;
@@ -138,16 +146,18 @@ enum Slot {
     Mismatch,
     Duplicate,
     Hidden,
+    StrayCentral,
     Overlap,
     Uncounted,
     IgnoredEnd,
 }
 
 impl Slot {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::Mismatch,
         Self::Duplicate,
         Self::Hidden,
+        Self::StrayCentral,
         Self::Overlap,
         Self::Uncounted,
         Self::IgnoredEnd,
@@ -156,7 +166,7 @@ impl Slot {
     const fn limit(self) -> usize {
         match self {
             Self::Mismatch => 24,
-            Self::Duplicate | Self::Hidden => 16,
+            Self::Duplicate | Self::Hidden | Self::StrayCentral => 16,
             Self::Overlap | Self::Uncounted | Self::IgnoredEnd => 1,
         }
     }
@@ -224,6 +234,7 @@ fn slot_of(finding: &ZipInconsistency) -> Slot {
         ZipInconsistency::HeaderMismatch { .. } => Slot::Mismatch,
         ZipInconsistency::DuplicateName { .. } => Slot::Duplicate,
         ZipInconsistency::HiddenLocalHeader { .. } => Slot::Hidden,
+        ZipInconsistency::StrayCentralRecord { .. } => Slot::StrayCentral,
         ZipInconsistency::OverlappingEntries => Slot::Overlap,
         ZipInconsistency::UncountedCentralRecords { .. } => Slot::Uncounted,
         ZipInconsistency::IgnoredEndRecord { .. } => Slot::IgnoredEnd,
@@ -865,17 +876,21 @@ const KNOWN_METHODS: [u16; 9] = [0, 8, 9, 12, 14, 93, 95, 98, 99];
 /// one chunk is complete in the next.
 const GAP_OVERLAP: usize = LFH_FIXED_LEN + 3;
 
-/// Looks for local headers in the gaps between entries.
+/// Looks for local headers and central directory records in the gaps between
+/// entries.
 ///
 /// A streaming reader walks the file from its start and resynchronises on the
 /// next local header signature it finds, so unmapped headers matter wherever
-/// they sit between the entries the central directory maps. Contiguous
-/// archives have no gap and cost no read at all.
+/// they sit between the entries the central directory maps. It also stops
+/// listing at a central directory signature, so one before an entry hides that
+/// entry; the signature alone is the finding, since the reader reads no field
+/// of the record. Archives without gaps cost no read, except that a data
+/// descriptor wider than the shortest one is resolved with up to three reads.
 ///
 /// The search is bounded whatever the gaps hold: bytes are read in large
 /// chunks and every signature hit is judged from the chunk, state is a single
-/// offset, and the search stops at the first plausible header beyond the
-/// retention limit for hidden headers.
+/// offset, and the search stops at the first hit beyond the retention limit of
+/// either kind of finding, which also ends the search for the other kind.
 struct GapChecker<'a, R> {
     reader: &'a mut R,
     map: &'a DirectoryMap,
@@ -935,7 +950,12 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
                 .first()
                 .map_or(self.map.directory_start, |l| l.header_start)
         };
-        self.scan_prefix(prefix_end, findings)?;
+        let prefix_followed = if order.is_empty() {
+            Followed::ByDirectory
+        } else {
+            Followed::ByEntry
+        };
+        self.scan_prefix(prefix_end, prefix_followed, findings)?;
 
         let mut starts: Vec<u64> = order.iter().map(|l| l.header_start).collect();
         starts.push(self.map.directory_start);
@@ -946,7 +966,7 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
             if self.exhausted {
                 return Ok(());
             }
-            self.gap(cursor, layout.header_start, findings)?;
+            self.gap(cursor, layout.header_start, Followed::ByEntry, findings)?;
             if layout.end > self.map.directory_start {
                 continue;
             }
@@ -961,11 +981,17 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
             };
             cursor = cursor.max(resume);
         }
-        self.gap(cursor, self.map.directory_start, findings)
+        self.gap(
+            cursor,
+            self.map.directory_start,
+            Followed::ByDirectory,
+            findings,
+        )
     }
 
     /// Searches `[0, end)`, the bytes before the first entry, for local
-    /// headers.
+    /// headers, and, when the file starts with `PK`, for central directory
+    /// signatures.
     ///
     /// A stub never starts with a local header or any other `PK` marker (a
     /// streaming reader skips a leading one to the next header), so when the
@@ -976,7 +1002,7 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
     /// whose name is cut off by the end of a chunk are re-read from the
     /// hit, so each judgment sees the full name and every read advances the
     /// scan.
-    fn scan_prefix(&mut self, end: u64, findings: &mut Findings) -> Result<()> {
+    fn scan_prefix(&mut self, end: u64, followed: Followed, findings: &mut Findings) -> Result<()> {
         if end == 0 {
             return Ok(());
         }
@@ -995,9 +1021,15 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
             }
             let mut next = 0;
             let mut resume = None;
-            while let Some(relative) = find_signature(&self.buf[next..want]) {
+            while let Some((relative, kind)) = find_signature(&self.buf[next..want]) {
                 let index = next + relative;
                 next = index + 1;
+                if kind == Signature::CentralRecord {
+                    if lenient {
+                        self.stray_central(position + index as u64, followed, findings);
+                    }
+                    continue;
+                }
                 if lenient || position + index as u64 == 0 {
                     let mut header = [0u8; LFH_FIXED_LEN];
                     if let Some(bytes) = self.buf[..want].get(index..index + LFH_FIXED_LEN) {
@@ -1040,8 +1072,15 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
         Ok(())
     }
 
-    /// Searches `[from, to)` for local headers.
-    fn gap(&mut self, from: u64, to: u64, findings: &mut Findings) -> Result<()> {
+    /// Searches `[from, to)` for local headers and, unless the directory
+    /// follows, central directory signatures.
+    fn gap(
+        &mut self,
+        from: u64,
+        to: u64,
+        followed: Followed,
+        findings: &mut Findings,
+    ) -> Result<()> {
         if self.exhausted || from >= to || self.is_known(from) {
             return Ok(());
         }
@@ -1054,11 +1093,13 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
             let last = position + want as u64 >= to;
             self.fill(position, want)?;
             let mut next = 0;
-            while let Some(relative) = find_signature(&self.buf[next..want]) {
+            while let Some((relative, kind)) = find_signature(&self.buf[next..want]) {
                 let index = next + relative;
                 next = index + 1;
                 let found = position + index as u64;
-                if index + LFH_FIXED_LEN <= want {
+                if kind == Signature::CentralRecord {
+                    self.stray_central(found, followed, findings);
+                } else if index + LFH_FIXED_LEN <= want {
                     let mut header = [0u8; LFH_FIXED_LEN];
                     header.copy_from_slice(&self.buf[index..index + LFH_FIXED_LEN]);
                     self.judge(found, &header, HiddenRegion::Gap, findings);
@@ -1082,28 +1123,38 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
     /// Where the next header can start after a data descriptor.
     ///
     /// The descriptor's length depends on its optional signature and on
-    /// ZIP64, so the next header can sit at four distinct offsets. If one of
-    /// them is a known position the archive is contiguous there and nothing is
-    /// read; only a real gap is resolved by emulating a streaming reader.
+    /// ZIP64, so the next header can sit at four distinct offsets. A known
+    /// position right behind the shortest descriptor leaves nothing to
+    /// search and costs no read. Any other candidate can leave bytes between
+    /// the descriptor a streaming reader consumes and the next header (a stray
+    /// record hides there), so the width is resolved by emulating that reader
+    /// and the search resumes where its descriptor ends.
     fn after_descriptor(&mut self, layout: &EntryLayout, next: u64) -> Result<u64> {
         let candidates = [12u64, 16, 20, 24].map(|width| layout.end.checked_add(width));
-        if let Some(known) = candidates
+        let known = candidates
             .iter()
             .flatten()
             .copied()
             .filter(|&p| p == next || self.is_known(p))
-            .min()
+            .min();
+        if let Some(k) = known
+            && known == candidates[0]
         {
-            return Ok(known);
+            return Ok(k);
         }
         let signed = self.peek(layout.end)? == Some(DATA_DESCRIPTOR_SIGNATURE);
+        let shortest = if signed { 16 } else { 12 };
+        if let Some(k) = known.filter(|&k| Some(k) == layout.end.checked_add(shortest)) {
+            return Ok(k);
+        }
         let sizes = if self.has_zip64_extra(layout.header_start)? {
             20
         } else {
             12
         };
         let width = sizes + if signed { 4 } else { 0 };
-        Ok(layout.end.saturating_add(width))
+        let streaming = layout.end.saturating_add(width);
+        Ok(known.map_or(streaming, |k| k.min(streaming)))
     }
 
     /// Judges the bytes at one position as a possible local header.
@@ -1125,6 +1176,23 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
             self.judge(position, &header, region, findings);
         }
         Ok(())
+    }
+
+    /// Reports a central directory signature that a streaming reader would
+    /// stop at before an entry.
+    ///
+    /// The signature alone is the finding: such a reader reads no field of
+    /// the record, so name, version and offsets are not judged.
+    fn stray_central(&mut self, position: u64, followed: Followed, findings: &mut Findings) {
+        if followed == Followed::ByDirectory || position < self.next_unjudged {
+            return;
+        }
+        self.next_unjudged = position + 1;
+        if !findings.try_push(Slot::StrayCentral, || {
+            ZipInconsistency::StrayCentralRecord { offset: position }
+        }) {
+            self.exhausted = true;
+        }
     }
 
     /// Reports a signature hit as a hidden header when the header it starts
@@ -1339,9 +1407,35 @@ pub(super) fn le_u64(bytes: &[u8], at: usize) -> u64 {
     u64::from_le_bytes(raw)
 }
 
-/// Offset of the first local header signature in `bytes`.
-fn find_signature(bytes: &[u8]) -> Option<usize> {
-    bytes.windows(4).position(|w| w == LFH_SIGNATURE)
+/// A record kind the gap and prefix searches look for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Signature {
+    LocalHeader,
+    CentralRecord,
+}
+
+/// Offset and kind of the first local header or central record signature in
+/// `bytes`.
+fn find_signature(bytes: &[u8]) -> Option<(usize, Signature)> {
+    bytes.windows(4).enumerate().find_map(|(index, w)| {
+        if w == LFH_SIGNATURE {
+            Some((index, Signature::LocalHeader))
+        } else if w == CDFH_SIGNATURE {
+            Some((index, Signature::CentralRecord))
+        } else {
+            None
+        }
+    })
+}
+
+/// What follows a searched region, which decides whether a central record in
+/// it hides anything: a streaming reader stops at the record and so never
+/// reaches an entry behind it, but the directory behind the last entry holds
+/// nothing to hide.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Followed {
+    ByEntry,
+    ByDirectory,
 }
 
 /// Header ids of the well-formed prefix of an extra field block.

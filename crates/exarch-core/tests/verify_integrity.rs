@@ -1062,4 +1062,37 @@ fn sevenz_dropped_oversized_entry_does_not_misalign_its_solid_block() {
             .iter()
             .any(|i| i.message.contains("file name too long"))
     );
+    assert_eq!(
+        report
+            .integrity_gaps()
+            .unwrap()
+            .count(UnverifiedReason::PathTooLong),
+        1
+    );
+}
+
+#[test]
+fn zip_entry_dropped_for_its_path_is_an_integrity_gap() {
+    let dir = TempDir::new().unwrap();
+    let long = "a/".repeat(20_000);
+    let bytes = zip_fixtures::stored(&[(&long, GOOD), ("b", OTHER)]);
+    let path = write(&dir, "long.zip", &bytes);
+
+    let report = verify(&path, default_integrity());
+
+    assert_eq!(report.status(), VerificationStatus::Fail);
+    assert_eq!(report.integrity_status(), IntegrityStatus::Incomplete);
+    let gaps = report.integrity_gaps().unwrap();
+    assert_eq!(gaps.count(UnverifiedReason::PathTooLong), 1);
+    assert_eq!(gaps.total(), 1);
+    assert!(gaps.entries().is_empty());
+    assert!(
+        report
+            .issues()
+            .iter()
+            .any(|i| i.message.contains("path too long for the host"))
+    );
+
+    let plain = verify(&path, VerificationOptions::default());
+    assert!(plain.integrity_gaps().is_none());
 }

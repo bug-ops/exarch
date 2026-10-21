@@ -263,7 +263,8 @@ pub struct SecurityConfigFields {
     /// Default: [`ZipConsistencyPolicy::Enforce`], including for
     /// [`SecurityConfig::permissive`]. Pre-ZIP64 archives with more than
     /// 65535 entries (wrapped end-record count) and archives with orphaned
-    /// local headers left by in-place updaters are rejected under `Enforce`.
+    /// local headers, or with a central directory signature in a gap before an
+    /// entry (left by in-place updaters), are rejected under `Enforce`.
     pub zip_consistency: ZipConsistencyPolicy,
 
     /// Internal only — not part of the public builder API, and never set by

@@ -1004,7 +1004,7 @@ export interface UnverifiedEntry {
 }
 
 /** Why part of the payload was not verified by the integrity check. */
-export type UnverifiedReason = 'over_budget' | 'resource_limit' | 'solid_policy' | 'size_ceiling' | 'uncovered_block_crc' | 'not_decodable' | 'no_end_marker'
+export type UnverifiedReason = 'over_budget' | 'resource_limit' | 'solid_policy' | 'size_ceiling' | 'uncovered_block_crc' | 'not_decodable' | 'no_end_marker' | 'path_too_long' | 'descriptor_tail'
 
 /** Single verification issue. */
 export interface VerificationIssue {

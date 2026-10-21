@@ -194,6 +194,15 @@ pub enum ZipInconsistency {
         offset: u64,
     },
 
+    /// A central directory record sits outside the central directory, in the
+    /// bytes before the first entry or between entries, so a streaming reader
+    /// that stops listing at the first central record never sees the entries
+    /// after it.
+    StrayCentralRecord {
+        /// Absolute offset of the stray record.
+        offset: u64,
+    },
+
     /// The central directory holds more records than its end record counts.
     UncountedCentralRecords {
         /// Count claimed by the end of central directory record.
@@ -234,6 +243,10 @@ impl std::fmt::Display for ZipInconsistency {
             Self::IgnoredEndRecord { offset } => write!(
                 f,
                 "end of central directory record at offset {offset} is ignored by the reader"
+            ),
+            Self::StrayCentralRecord { offset } => write!(
+                f,
+                "central directory record outside the central directory at offset {offset}"
             ),
             Self::UncountedCentralRecords { counted, found } => write!(
                 f,
@@ -283,6 +296,10 @@ mod tests {
         assert_eq!(
             ZipInconsistency::IgnoredEndRecord { offset: 7 }.to_string(),
             "end of central directory record at offset 7 is ignored by the reader"
+        );
+        assert_eq!(
+            ZipInconsistency::StrayCentralRecord { offset: 9 }.to_string(),
+            "central directory record outside the central directory at offset 9"
         );
         assert_eq!(
             ZipInconsistency::UncountedCentralRecords {

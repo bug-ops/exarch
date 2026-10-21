@@ -18,8 +18,9 @@
 //!   different filesystem or kernel configuration can still disagree;
 //! - name lengths use per-OS limits ([`MAX_COMPONENT_LEN`], [`MAX_PATH_LEN`]:
 //!   Linux 4095, macOS and other Unix 1023, Windows 32767 UTF-16 units); a
-//!   symlink target is checked against the path limit only. A filesystem with
-//!   tighter limits can still refuse a name the model accepts;
+//!   symlink target is checked against [`MAX_SYMLINK_TARGET_LEN`] only (Windows
+//!   4091 UTF-16 units). A filesystem with tighter limits can still refuse a
+//!   name the model accepts;
 //! - on macOS names are compared after NFD and a per-character
 //!   upper/lower/upper case fold, on Windows after the same fold without
 //!   normalisation, and elsewhere exactly. The fold is an approximation of the
@@ -73,26 +74,52 @@ pub const MAX_SYMLINK_HOPS: usize = 32;
 /// in UTF-16 units on Windows.
 pub const MAX_COMPONENT_LEN: usize = 255;
 
-/// Longest relative path or symlink target the host accepts (`PATH_MAX` less
-/// the terminator), in bytes.
+/// Longest relative path the host accepts (`PATH_MAX` less the terminator), in
+/// bytes.
 #[cfg(target_os = "linux")]
 pub const MAX_PATH_LEN: usize = 4095;
 
-/// Longest relative path or symlink target the host accepts, in UTF-16 units.
+/// Longest relative path the host accepts, in UTF-16 units.
 ///
 /// 32767 is the documented limit of an extended-length path. A symlink target
-/// is further bounded by the 16 KiB reparse buffer that stores its
-/// substitute and print names, so a symlink target of roughly 8k to 32k units
-/// can pass `verify` and still fail on extraction. This is not verified on a
-/// Windows host and is listed as a verify limitation.
+/// is bounded much lower, see [`MAX_SYMLINK_TARGET_LEN`].
 #[cfg(target_os = "windows")]
 pub const MAX_PATH_LEN: usize = 32767;
 
-/// Longest relative path or symlink target the host accepts (`PATH_MAX` less
-/// the terminator), in bytes. A low guess can only turn a PASS into a false
-/// FAIL.
+/// Longest relative path the host accepts (`PATH_MAX` less the terminator), in
+/// bytes. A low guess can only turn a PASS into a false FAIL.
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
 pub const MAX_PATH_LEN: usize = 1023;
+
+/// Longest symlink target the host accepts, in UTF-16 units.
+///
+/// `CreateSymbolicLinkW` stores the substitute and print names in a 16 KiB
+/// reparse buffer after a 20-byte header. Extraction only creates relative
+/// targets (a `Prefix` or `RootDir` component is rejected), where both names
+/// are equal, so `2 * 2n <= 16384 - 20` gives `n <= 4091`. Absolute targets
+/// (`\??\` prefix) would allow fewer units but are never created.
+#[cfg(target_os = "windows")]
+pub const MAX_SYMLINK_TARGET_LEN: usize = 4091;
+
+/// Longest symlink target the host accepts (`PATH_MAX` less the terminator),
+/// in bytes.
+#[cfg(not(target_os = "windows"))]
+pub const MAX_SYMLINK_TARGET_LEN: usize = MAX_PATH_LEN;
+
+/// Longest symlink target in bytes that can pass the
+/// [`MAX_SYMLINK_TARGET_LEN`] check; the read and allocation cap for targets
+/// stored as bytes.
+///
+/// On Windows a UTF-16 unit takes at most 3 UTF-8 bytes, so a byte cap never
+/// rejects a target the unit check accepts.
+#[cfg(target_os = "windows")]
+pub const MAX_SYMLINK_TARGET_BYTES: usize = MAX_SYMLINK_TARGET_LEN * 3;
+
+/// Longest symlink target in bytes that can pass the
+/// [`MAX_SYMLINK_TARGET_LEN`] check; the read and allocation cap for targets
+/// stored as bytes.
+#[cfg(not(target_os = "windows"))]
+pub const MAX_SYMLINK_TARGET_BYTES: usize = MAX_SYMLINK_TARGET_LEN;
 
 /// The kind of link a target belongs to; the host limits them differently.
 ///
@@ -157,15 +184,17 @@ pub fn check_name_lengths(path: &Path) -> io::Result<()> {
 
 /// Rejects a link target the host would refuse with `ENAMETOOLONG`.
 ///
-/// A symlink target is checked against the path limit only, as `symlink(2)`
-/// does; a hardlink target is checked like an entry name.
+/// A symlink target is checked against [`MAX_SYMLINK_TARGET_LEN`] only, as
+/// `symlink(2)` does; a hardlink target is checked like an entry name.
 ///
 /// # Errors
 ///
 /// Returns an error if the target is too long for `kind`.
 pub fn check_link_target_length(target: &Path, kind: LinkKind) -> io::Result<()> {
     match kind {
-        LinkKind::Symlink if name_len(target.as_os_str()) > MAX_PATH_LEN => Err(name_too_long()),
+        LinkKind::Symlink if name_len(target.as_os_str()) > MAX_SYMLINK_TARGET_LEN => {
+            Err(name_too_long())
+        }
         LinkKind::Symlink => Ok(()),
         LinkKind::Hardlink => check_name_lengths(target),
     }
@@ -1218,13 +1247,78 @@ mod tests {
 
     #[test]
     fn link_target_length_boundaries() {
+        let symlink_limit = path_of_len(MAX_SYMLINK_TARGET_LEN);
+        let symlink_over = path_of_len(MAX_SYMLINK_TARGET_LEN + 1);
+        assert!(check_link_target_length(Path::new(&symlink_limit), LinkKind::Symlink).is_ok());
+        assert!(check_link_target_length(Path::new(&symlink_over), LinkKind::Symlink).is_err());
+
         let at_limit = path_of_len(HOST_PATH_LIMIT);
         assert_eq!(at_limit.len(), HOST_PATH_LIMIT);
         let over = path_of_len(HOST_PATH_LIMIT + 1);
-        for kind in [LinkKind::Symlink, LinkKind::Hardlink] {
-            assert!(check_link_target_length(Path::new(&at_limit), kind).is_ok());
-            assert!(check_link_target_length(Path::new(&over), kind).is_err());
+        assert!(check_link_target_length(Path::new(&at_limit), LinkKind::Hardlink).is_ok());
+        assert!(check_link_target_length(Path::new(&over), LinkKind::Hardlink).is_err());
+    }
+
+    #[test]
+    fn symlink_target_limits_match_the_host() {
+        assert_eq!(
+            MAX_SYMLINK_TARGET_LEN,
+            if cfg!(windows) { 4091 } else { HOST_PATH_LIMIT }
+        );
+        assert_eq!(
+            MAX_SYMLINK_TARGET_BYTES,
+            if cfg!(windows) {
+                4091 * 3
+            } else {
+                HOST_PATH_LIMIT
+            }
+        );
+    }
+
+    /// Finds the longest relative symlink target the host creates and checks
+    /// that [`MAX_SYMLINK_TARGET_LEN`] does not exceed it.
+    #[cfg(windows)]
+    #[test]
+    fn symlink_target_limit_is_accepted_by_the_host() {
+        use std::os::windows::fs::symlink_file;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let mut counter = 0_u32;
+        let mut creates = |len: usize| -> io::Result<bool> {
+            counter += 1;
+            let link = temp.path().join(format!("l{counter}"));
+            let mut target = "abcdefg\\".repeat((len - 1) / 8);
+            target.push_str(&"a".repeat(len - target.len()));
+            match symlink_file(&target, &link) {
+                Ok(()) => Ok(true),
+                Err(e) if e.raw_os_error() == Some(1314) => Err(e),
+                Err(_) => Ok(false),
+            }
+        };
+
+        match creates(1) {
+            Ok(_) => {}
+            Err(e) => {
+                assert!(
+                    std::env::var_os("CI").is_none(),
+                    "symlink creation needs a privilege on CI: {e}"
+                );
+                eprintln!("skipped: symlink creation is not permitted: {e}");
+                return;
+            }
         }
+
+        let (mut ok, mut bad) = (1_usize, 32767_usize);
+        while bad - ok > 1 {
+            let mid = ok + (bad - ok) / 2;
+            if creates(mid).unwrap() {
+                ok = mid;
+            } else {
+                bad = mid;
+            }
+        }
+        eprintln!("largest relative symlink target: {ok} UTF-16 units");
+        assert!(MAX_SYMLINK_TARGET_LEN <= ok, "host limit is {ok}");
     }
 
     #[test]

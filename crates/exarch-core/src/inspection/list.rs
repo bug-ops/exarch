@@ -50,8 +50,9 @@ use crate::inspection::manifest::EntryCompression;
 use crate::inspection::manifest::LinkTarget;
 use crate::inspection::manifest::ManifestEntryKind;
 use crate::inspection::manifest::ManifestEntryType;
+use crate::inspection::report::UnverifiedReason;
 use crate::security::fs_view::LinkKind;
-use crate::security::fs_view::MAX_PATH_LEN;
+use crate::security::fs_view::MAX_SYMLINK_TARGET_BYTES;
 use crate::security::fs_view::check_name_lengths;
 use crate::security::fs_view::name_too_long;
 use crate::security::quota::QuotaTracker;
@@ -205,7 +206,7 @@ fn list_tar_entries<R: std::io::Read>(
             return Err(ArchiveError::PathTraversal { path });
         }
 
-        if !admit_path(&path, &mut manifest, config)? {
+        if !admit_path(&path, &mut manifest, config, policy)? {
             continue;
         }
 
@@ -370,7 +371,7 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
             .map_err(|e| ArchiveError::InvalidArchive(format!("invalid entry name: {e}")))?
             .into_owned();
         let path = resolve_zip_entry_path(&raw_name, entry.enclosed_name(), config)?;
-        if !admit_path(&path, &mut manifest, config)? {
+        if !admit_path(&path, &mut manifest, config, policy)? {
             continue;
         }
 
@@ -418,7 +419,7 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
                 ArchiveError::InvalidArchive(format!("failed to re-read ZIP entry {i}: {e}"))
             })?;
             let declared = sym_entry.size();
-            if config.relaxed_for_verify_preflight && declared > MAX_PATH_LEN as u64 {
+            if config.relaxed_for_verify_preflight && declared > MAX_SYMLINK_TARGET_BYTES as u64 {
                 LinkTarget::Oversized {
                     bytes: usize::try_from(declared).unwrap_or(usize::MAX),
                 }
@@ -544,7 +545,8 @@ fn list_sevenz_archive(
     let mut quota = QuotaTracker::new();
     let compression = sevenz_entry_compression(archive, source_len)?;
     // One element per archive file: the integrity slot of the manifest entry it
-    // became, or `None` for an anti item (never listed) or without a pass.
+    // became, or `None` for an anti item (never listed), an entry dropped for
+    // its path, or without a pass.
     let mut slots = Vec::with_capacity(archive.files.len());
 
     for (entry, compression) in archive.files.iter().zip(compression) {
@@ -567,7 +569,7 @@ fn list_sevenz_archive(
             return Err(ArchiveError::PathTraversal { path });
         }
 
-        if !admit_path(&path, &mut manifest, config)? {
+        if !admit_path(&path, &mut manifest, config, policy)? {
             slots.push(None);
             continue;
         }
@@ -612,11 +614,13 @@ fn list_sevenz(
 ///
 /// An entry the host cannot create fails the listing; the verify pre-flight
 /// instead records only its length on `manifest` and drops it, so the report
-/// can flag it without the manifest growing with the path.
+/// can flag it without the manifest growing with the path. When the verify
+/// pass decodes content, the dropped entry is also counted as unverified.
 fn admit_path(
     path: &Path,
     manifest: &mut ArchiveManifest,
     config: &SecurityConfig<Validated>,
+    policy: &mut ContentPolicy<'_, '_>,
 ) -> Result<bool> {
     if check_name_lengths(path).is_ok() {
         return Ok(true);
@@ -625,6 +629,9 @@ fn admit_path(
         return Err(ArchiveError::Io(name_too_long()));
     }
     manifest.add_oversized(path.as_os_str().len());
+    if let Some(pass) = policy.pass() {
+        pass.count_unverified(UnverifiedReason::PathTooLong, 1);
+    }
     Ok(false)
 }
 
@@ -2956,11 +2963,11 @@ mod tests {
 
     #[test]
     fn test_list_zip_oversized_symlink_target() {
-        use crate::test_utils::HOST_PATH_LIMIT;
+        use crate::test_utils::HOST_SYMLINK_TARGET_BYTES;
         use crate::test_utils::create_zip_with_symlink;
         use std::io::Cursor;
 
-        let zip_bytes = create_zip_with_symlink("link", &"a".repeat(HOST_PATH_LIMIT + 1));
+        let zip_bytes = create_zip_with_symlink("link", &"a".repeat(HOST_SYMLINK_TARGET_BYTES + 1));
 
         let mut archive = ZipArchive::new(Cursor::new(zip_bytes.clone())).unwrap();
         let strict = SecurityConfig::default().validate().unwrap();
@@ -2979,7 +2986,7 @@ mod tests {
             &manifest.entries()[0].kind,
             ManifestEntryKind::Symlink {
                 target: LinkTarget::Oversized { bytes }
-            } if *bytes == HOST_PATH_LIMIT + 1
+            } if *bytes == HOST_SYMLINK_TARGET_BYTES + 1
         );
     }
 

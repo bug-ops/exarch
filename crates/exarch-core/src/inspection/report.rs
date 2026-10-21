@@ -384,6 +384,13 @@ closed_enum! {
 
         /// A TAR stream that ends without an end-of-archive marker.
         NoEndMarker => "no_end_marker",
+
+        /// An entry dropped from the manifest because its path exceeds the
+        /// host limits.
+        PathTooLong => "path_too_long",
+
+        /// The data-descriptor tail of a ZIP entry was not searched.
+        DescriptorTail => "descriptor_tail",
     }
 }
 
@@ -399,6 +406,10 @@ impl UnverifiedReason {
             Self::UncoveredBlockCrc => "block checksum not reachable",
             Self::NotDecodable => "not decodable",
             Self::NoEndMarker => "no end-of-archive marker",
+            Self::PathTooLong => "path too long for the host",
+            Self::DescriptorTail => {
+                "data-descriptor tail not searched (budget, or raw decode disagrees with the zip crate)"
+            }
         }
     }
 }
@@ -855,6 +866,7 @@ impl IssueCategory {
             ZipInconsistency::DuplicateName { .. } => Self::DuplicateEntry,
             ZipInconsistency::OverlappingEntries => Self::OverlappingEntries,
             ZipInconsistency::HiddenLocalHeader { .. }
+            | ZipInconsistency::StrayCentralRecord { .. }
             | ZipInconsistency::UncountedCentralRecords { .. }
             | ZipInconsistency::IgnoredEndRecord { .. } => Self::HiddenEntry,
         }
@@ -985,6 +997,10 @@ mod tests {
             ),
             (
                 ZipInconsistency::IgnoredEndRecord { offset: 9 },
+                IssueCategory::HiddenEntry,
+            ),
+            (
+                ZipInconsistency::StrayCentralRecord { offset: 9 },
                 IssueCategory::HiddenEntry,
             ),
             (

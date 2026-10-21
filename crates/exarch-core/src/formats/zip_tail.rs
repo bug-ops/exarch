@@ -71,7 +71,8 @@ impl DescriptorTail {
     ///
     /// Does nothing under `--zip-consistency ignore`. A tail the budget
     /// cannot cover, or whose raw decode disagrees with the `zip` crate's, is
-    /// counted as unverified instead of being passed over silently.
+    /// listed by path as unverified (`DescriptorTail`) instead of being passed
+    /// over silently.
     ///
     /// # Errors
     ///
@@ -92,7 +93,7 @@ impl DescriptorTail {
             _ => self.size,
         };
         if !pass.try_charge(cost) {
-            pass.count_unverified(UnverifiedReason::OverBudget, 1);
+            pass.mark_unverified(UnverifiedReason::DescriptorTail, path);
             return Ok(());
         }
         let raw = archive.by_index_raw(index).map_err(|e| {
@@ -101,7 +102,7 @@ impl DescriptorTail {
         let found = match self.find_hidden(raw)? {
             Tail::Clean => return Ok(()),
             Tail::Undecided => {
-                pass.count_unverified(UnverifiedReason::NotDecodable, 1);
+                pass.mark_unverified(UnverifiedReason::DescriptorTail, path);
                 return Ok(());
             }
             Tail::Hidden(found) => found,
@@ -351,6 +352,38 @@ mod tests {
         let truncated = &stream[..stream.len() / 2];
         assert!(matches!(drained(Cursor::new(truncated), 10_000), Ok(None)));
         assert!(matches!(drained(Cursor::new(stream), 10_000), Ok(Some(()))));
+    }
+
+    #[test]
+    fn undecided_tail_is_listed_with_its_own_reason() {
+        use crate::DecompressionBudget;
+        use crate::SecurityConfig;
+        use crate::raw_zip::RawEntry;
+        use crate::raw_zip::RawZip;
+
+        let payload = vec![b'x'; 200];
+        let mut entry = RawEntry::stored("a.txt", &payload).with_descriptor(true, false);
+        entry.method = 8;
+        entry.data = deflate(&payload);
+        let compressed = entry.data.len() as u64;
+        let built = RawZip::new(vec![entry]).build();
+        let mut archive = ZipReader::new(Cursor::new(built.bytes)).unwrap();
+
+        let tail = DescriptorTail {
+            method: ZipMethod::Deflate,
+            data_start: 0,
+            compressed,
+            size: payload.len() as u64 - 1,
+        };
+        let config = SecurityConfig::default().validate().unwrap();
+        let mut pass = IntegrityPass::new(&config, DecompressionBudget::DEFAULT);
+        let slot = pass.begin_entry(0, &crate::EntryCompression::Unknown);
+        tail.check(&mut archive, 0, &mut pass, slot, Path::new("a.txt"))
+            .unwrap();
+
+        let gaps = pass.finish().gaps;
+        assert_eq!(gaps.count(UnverifiedReason::DescriptorTail), 1);
+        assert_eq!(gaps.entries()[0].path(), Path::new("a.txt"));
     }
 
     struct Failing;

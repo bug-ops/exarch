@@ -650,9 +650,25 @@ fn build_plain_sevenz(
     unpack_size: u64,
     declared_pack_size: u64,
 ) -> Vec<u8> {
+    build_plain_sevenz_packs(name, content, unpack_size, &[declared_pack_size])
+}
+
+/// Like [`build_plain_sevenz`], but the header declares one pack stream per
+/// entry of `declared_pack_sizes` while the single Copy coder consumes only the
+/// first; `content` holds the bytes of all of them.
+fn build_plain_sevenz_packs(
+    name: &str,
+    content: &[u8],
+    unpack_size: u64,
+    declared_pack_sizes: &[u64],
+) -> Vec<u8> {
     let mut header = vec![0x01, 0x04];
-    header.extend_from_slice(&[0x06, 0x00, 0x01, 0x09]);
-    push_number(&mut header, declared_pack_size);
+    header.extend_from_slice(&[0x06, 0x00]);
+    push_number(&mut header, declared_pack_sizes.len() as u64);
+    header.push(0x09);
+    for &size in declared_pack_sizes {
+        push_number(&mut header, size);
+    }
     header.push(0x00);
     header.extend_from_slice(&[0x07, 0x0B, 0x01, 0x00, 0x01, 0x01, 0x00, 0x0C]);
     push_number(&mut header, unpack_size);
@@ -740,6 +756,27 @@ fn sevenz_extract_enforces_compression_ratio() {
     std::fs::write(&path, &data).unwrap();
     let report = exarch_core::verify_archive(&path, &SecurityConfig::default()).unwrap();
     assert_eq!(report.status(), exarch_core::VerificationStatus::Fail);
+}
+
+#[test]
+fn sevenz_unreferenced_trailing_pack_stream_does_not_dilute_the_ratio() {
+    let mut content = vec![0u8; 100];
+    content.extend(vec![0u8; 1_000_000]);
+    let data = build_plain_sevenz_packs("a.txt", &content, 1_000_000, &[100, 1_000_000]);
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("a.7z");
+    std::fs::write(&path, &data).unwrap();
+
+    let report = exarch_core::verify_archive(&path, &SecurityConfig::default()).unwrap();
+
+    assert!(
+        report
+            .issues()
+            .iter()
+            .any(|i| i.category == exarch_core::IssueCategory::ZipBomb),
+        "unreferenced pack stream hid the ratio: {:?}",
+        report.issues()
+    );
 }
 
 #[test]

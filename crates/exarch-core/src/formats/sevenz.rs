@@ -181,6 +181,26 @@ struct CachedEntry {
 /// Size of the fixed 7z signature header that precedes the packed streams.
 const SIGNATURE_HEADER_SIZE: u64 = 32;
 
+/// Number of packed streams a conforming block consumes: one, plus three more
+/// per BCJ2 coder (four inputs, one output). Every other admitted method has a
+/// single input.
+///
+/// The upstream accessors for the stream arity are `pub(crate)`, so the count
+/// follows from the public method IDs. A crafted header can declare a coder
+/// with the BCJ2 ID that the decode path never reaches; the count then exceeds
+/// the real one by up to three streams per such coder, which is never looser
+/// than counting every pack stream after the block.
+fn packed_stream_count(block: &sevenz_rust2::Block) -> usize {
+    use sevenz_rust2::EncoderMethod;
+
+    let bcj2 = block
+        .coders
+        .iter()
+        .filter(|coder| coder.encoder_method_id() == EncoderMethod::ID_BCJ2)
+        .count();
+    1 + 3 * bcj2
+}
+
 /// Derives how each file's data is compressed for ratio checks, after
 /// validating the declared pack stream sizes against the archive length.
 ///
@@ -194,10 +214,10 @@ const SIGNATURE_HEADER_SIZE: u64 = 32;
 /// - files without a data stream (empty files, directories) get
 ///   [`EntryCompression::Unknown`].
 ///
-/// The last block's pack total may include pack streams no block references
-/// (the accessor is `pub(crate)` upstream), so its ratio is an upper bound.
-/// `source_len` must be the length of the same source the archive is decoded
-/// from.
+/// The last block's pack streams are counted from its coders' method IDs (one,
+/// plus three more per BCJ2 coder) and capped at the declared pack streams, so
+/// pack streams no block references do not inflate its total. `source_len` must
+/// be the length of the same source the archive is decoded from.
 ///
 /// # Errors
 ///
@@ -223,10 +243,11 @@ pub(crate) fn sevenz_entry_compression(
     let first_pack = archive.stream_map.block_first_pack_stream_index();
     let block_compressed = |block: usize| -> Result<u64> {
         let start = first_pack[block];
-        let end = first_pack
-            .get(block + 1)
-            .copied()
-            .unwrap_or(pack_sizes.len());
+        let end = first_pack.get(block + 1).copied().unwrap_or_else(|| {
+            start
+                .saturating_add(packed_stream_count(&archive.blocks[block]))
+                .min(pack_sizes.len())
+        });
         pack_sizes[start..end]
             .iter()
             .try_fold(0u64, |acc, &size| acc.checked_add(size))

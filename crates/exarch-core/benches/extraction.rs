@@ -157,6 +157,21 @@ fn create_many_small_files_zip(file_count: usize) -> Vec<u8> {
     zip.finish().unwrap().into_inner()
 }
 
+/// Creates a ZIP archive of stored entries that each carry a data descriptor,
+/// as a streaming writer produces them.
+fn create_stored_descriptor_zip(file_count: usize, payload_len: usize) -> Vec<u8> {
+    let mut zip = ZipWriter::new_stream(Vec::new());
+    let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    let payload = vec![b'a'; payload_len];
+
+    for i in 0..file_count {
+        zip.start_file(format!("file{i:04}.txt"), options).unwrap();
+        zip.write_all(&payload).unwrap();
+    }
+
+    zip.finish().unwrap().into_inner()
+}
+
 /// Creates a ZIP archive with a single large file.
 fn create_large_file_zip(size_bytes: usize) -> Vec<u8> {
     let buffer = Vec::new();
@@ -305,6 +320,24 @@ fn benchmark_zip_inspection(c: &mut Criterion) {
     group.bench_function("open_and_verify", |b| {
         b.iter(|| {
             ZipArchive::new(Cursor::new(&data[..]))
+                .unwrap()
+                .verify(&config, &VerificationOptions::default())
+                .unwrap()
+        });
+    });
+
+    let described = create_stored_descriptor_zip(ENTRIES, 256);
+    group.bench_function("stored_descriptor_open_and_list", |b| {
+        b.iter(|| {
+            ZipArchive::new(Cursor::new(&described[..]))
+                .unwrap()
+                .list(&config)
+                .unwrap()
+        });
+    });
+    group.bench_function("stored_descriptor_open_and_verify", |b| {
+        b.iter(|| {
+            ZipArchive::new(Cursor::new(&described[..]))
                 .unwrap()
                 .verify(&config, &VerificationOptions::default())
                 .unwrap()

@@ -295,10 +295,15 @@ with data descriptors, produce no findings; archives from Java (`java.util.zip`,
 (`Compress-Archive`, .NET `ZipFile`) are generated and checked at test time in CI; Windows
 Explorer and WinRAR archives are still not covered. A descriptor, local header and data hidden
 inside the declared range of a data-descriptor entry (streaming readers end such an entry at the
-end of its compressed stream, `zip` at the declared size) is detected only with `--check-integrity`,
+end of its data, `zip` at the declared size) is found by plain `verify`, `list` and `extract` for a
+stored entry: the declared range is scanned for a descriptor signature and searched from there like a gap
+(`"Hidden Entry"`, exit `1`, with and without `--check-integrity`). A ZIP-based file (a JAR or an ODF package, for example)
+stored whole in an entry that a streaming writer gave a data descriptor is reported the same way, an accepted
+false positive: pass `--zip-consistency ignore` for archives from a trusted producer.
+For a compressed entry (deflate, bzip2, zstd) it is detected only with `--check-integrity`,
 which decodes the entry to find where its stream ends (`"Hidden Entry"` on that entry, exit `1`; not raised under `--zip-consistency ignore`; a tail that cannot be decided counts as an unverified item with the reason `descriptor_tail`;
 plain `verify` passes it, verified live with a crafted deflate archive). Not covered: central
-directory signatures inside the stub of a file that does not start with `PK`, and other streaming-reader layouts tracked in #686 and #687. A central or end record signature behind the last entry is not reported. Pre-ZIP64 archives
+directory signatures inside the stub of a file that does not start with `PK`, and other streaming-reader layouts tracked in #686. A central or end record signature behind the last entry is not reported. Pre-ZIP64 archives
 with more than 65535 entries (a wrapped end-record count) and archives with orphaned local headers
 or a central directory signature in a gap before an entry, left by in-place updaters, are rejected under `enforce`; so are ZIP64 directory entries written by the
 Rust `zip` crate, whose local sizes its own check rejects (use `--zip-consistency ignore`). With

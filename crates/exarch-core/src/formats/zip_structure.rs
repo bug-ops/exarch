@@ -31,12 +31,15 @@
 //! central directory maps. Not covered:
 //!
 //! - a descriptor, local header and data hidden inside the declared range of a
-//!   data-descriptor entry (streaming readers end such an entry at the end of
-//!   its compressed stream, the central directory at the declared size). Only
-//!   an integrity check finds it, because that takes decoding the entry (see
-//!   `zip_tail`), and only under the enforcing policy; plain `verify`, `list`
-//!   and `extract` do not. A tail that cannot be decided (budget, a raw decode
-//!   that disagrees with the crate's) is counted as unverified.
+//!   compressed data-descriptor entry (streaming readers end such an entry at
+//!   the end of its compressed stream, the central directory at the declared
+//!   size). Only an integrity check finds it, because that takes decoding the
+//!   entry (see `zip_tail`), and only under the enforcing policy; plain
+//!   `verify`, `list` and `extract` do not. A tail that cannot be decided
+//!   (budget, a raw decode that disagrees with the crate's) is counted as
+//!   unverified. A stored entry needs no decoding: its declared range is
+//!   searched from its first descriptor signature on, as a gap, since that is
+//!   where a streaming reader resumes.
 //!
 //! The bytes before the first entry (the stub of a self-extractor, whether or
 //! not its offsets were rewritten) are searched with a stricter judge than the
@@ -90,6 +93,7 @@ use std::sync::Mutex;
 use std::sync::MutexGuard;
 use std::sync::PoisonError;
 
+use zip::CompressionMethod;
 use zip::ZipArchive as ZipReader;
 use zip::ZipReadOptions;
 use zip::result::ZipError;
@@ -97,6 +101,8 @@ use zip::result::ZipError;
 use super::common;
 use super::zip::admit_zip_entry;
 use super::zip::is_password_required;
+use super::zip_tail::judge_first_signature;
+use super::zip_tail::scan;
 use crate::ArchiveError;
 use crate::Result;
 use crate::error::CentralRecordOrdinal;
@@ -521,6 +527,7 @@ struct EntryLayout {
     end: u64,
     /// How a streaming reader ends the entry, when its sizes follow the data.
     descriptor: Option<DescriptorExit>,
+    method: CompressionMethod,
     /// Compressed and uncompressed size the central directory declares.
     compressed: u64,
     size: u64,
@@ -704,6 +711,7 @@ fn layout_of<R: Read>(file: &zip::read::ZipFile<'_, R>, index: usize) -> Result<
             .flags()
             .is_using_data_descriptor()
             .then(|| DescriptorExit::of(file.compression())),
+        method: file.compression(),
         compressed: file.compressed_size(),
         size: file.size(),
         kind: EntryKind::of_central(file.is_dir(), file.unix_mode()),
@@ -1027,7 +1035,13 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
             if self.exhausted {
                 return Ok(());
             }
-            self.gap(cursor, layout.header_start, Followed::ByEntry, findings)?;
+            self.gap(
+                cursor,
+                layout.header_start,
+                Followed::ByEntry,
+                HiddenRegion::Gap,
+                findings,
+            )?;
             if layout.end > self.map.directory_start {
                 continue;
             }
@@ -1037,6 +1051,9 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
                     .get(starts.partition_point(|&s| s <= layout.header_start))
                     .copied()
                     .unwrap_or(self.map.directory_start);
+                if layout.method == CompressionMethod::Stored {
+                    self.check_stored_resume(layout, findings)?;
+                }
                 self.check_descriptor(layout, exit, next, findings)?;
             }
         }
@@ -1044,6 +1061,7 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
             cursor,
             self.map.directory_start,
             Followed::ByDirectory,
+            HiddenRegion::Gap,
             findings,
         )
     }
@@ -1131,20 +1149,22 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
         Ok(())
     }
 
-    /// Searches `[from, to)` for local headers and, unless the directory
-    /// follows, central directory signatures.
+    /// Searches `[from, to)` for local headers, reported as hidden in
+    /// `region`, and, unless the directory follows, central directory
+    /// signatures.
     fn gap(
         &mut self,
         from: u64,
         to: u64,
         followed: Followed,
+        region: HiddenRegion,
         findings: &mut Findings,
     ) -> Result<()> {
         if self.exhausted || from >= to || self.is_known(from) {
             return Ok(());
         }
         if !self.search_gaps {
-            return self.probe(from, HiddenRegion::Gap, findings);
+            return self.probe(from, region, findings);
         }
         let mut position = from;
         while position + 4 <= to && !self.exhausted {
@@ -1161,9 +1181,9 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
                 } else if index + LFH_FIXED_LEN <= want {
                     let mut header = [0u8; LFH_FIXED_LEN];
                     header.copy_from_slice(&self.buf[index..index + LFH_FIXED_LEN]);
-                    self.judge(found, &header, HiddenRegion::Gap, findings);
+                    self.judge(found, &header, region, findings);
                 } else if last {
-                    self.probe(found, HiddenRegion::Gap, findings)?;
+                    self.probe(found, region, findings)?;
                 } else {
                     break;
                 }
@@ -1218,6 +1238,49 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
             });
         }
         Ok(())
+    }
+
+    /// Searches the declared range of a stored descriptor entry from its
+    /// first descriptor signature on, as a gap.
+    ///
+    /// A streaming reader cannot decode stored data, so it ends the entry at
+    /// the first descriptor signature in it, which can lie before the declared
+    /// end the central directory gives, and reads on from there like from any
+    /// gap. The signature scan is bounded by the entry's declared size, which
+    /// the archive-wide budget caps, keeps one chunk in memory and is not
+    /// counted in `reads`; the gap search that follows is.
+    fn check_stored_resume(&mut self, layout: &EntryLayout, findings: &mut Findings) -> Result<()> {
+        if layout.compressed < DATA_DESCRIPTOR_SIGNATURE.len() as u64 {
+            return Ok(());
+        }
+        self.reader.seek(SeekFrom::Start(layout.data_start))?;
+        let mut data = Read::take(&mut *self.reader, layout.compressed);
+        let found = scan(
+            &mut data,
+            layout.compressed,
+            DATA_DESCRIPTOR_SIGNATURE,
+            judge_first_signature,
+        )?;
+        let Some(at) = found else {
+            return Ok(());
+        };
+        let signature = layout.data_start.saturating_add(at);
+        if !self.search_gaps {
+            for width in DescriptorWidth::ALL {
+                self.probe(
+                    signature.saturating_add(width.bytes()),
+                    HiddenRegion::DescriptorTail,
+                    findings,
+                )?;
+            }
+        }
+        self.gap(
+            signature,
+            layout.end,
+            Followed::ByEntry,
+            HiddenRegion::DescriptorTail,
+            findings,
+        )
     }
 
     /// Judges the bytes at one position as a possible local header.

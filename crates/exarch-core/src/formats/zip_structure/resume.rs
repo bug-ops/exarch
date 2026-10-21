@@ -17,8 +17,10 @@
 //!   resumes after 16 bytes, or 24 when the local header carries a ZIP64 extra
 //!   field.
 //!
-//! The model covers these layouts; other streaming-reader layouts are tracked
-//! in #687.
+//! The model resumes from the end of the declared data. A stored entry's
+//! declared range is also searched for an in-data descriptor signature, where
+//! listing resumes earlier (see `GapChecker::check_stored_resume`); the end of
+//! a compressed stream inside the declared range is left to `zip_tail`.
 //!
 //! Where the two modes disagree the further resume position wins, since either
 //! reader can be the one that skips an entry. The sizes are those of the
@@ -264,6 +266,7 @@ mod tests {
             data_start: 93,
             end: END,
             descriptor: Some(exit),
+            method: CompressionMethod::Stored,
             compressed: COMPRESSED,
             size: SIZE,
             kind: EntryKind::Regular,

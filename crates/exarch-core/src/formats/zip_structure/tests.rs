@@ -27,6 +27,7 @@ use crate::raw_zip::RawZip;
 use crate::raw_zip::deflate_zeros;
 use crate::test_utils::create_test_zip;
 
+mod stored_resume;
 mod streaming;
 mod xl_type;
 
@@ -1442,6 +1443,13 @@ fn header_hidden_inside_stored_data_is_found_with_integrity() {
         let whole = [content.clone(), descriptor(&content, filler), evil_local()].concat();
         let built = RawZip::new(vec![descriptor_entry(0, &whole, &[])]).build();
         let expected = built.local_offsets[0] + 30 + 5 + filler + 16;
+        let plain = open_bytes(built.bytes.clone())
+            .verify(
+                &config(ZipConsistencyPolicy::Enforce),
+                &VerificationOptions::default(),
+            )
+            .unwrap();
+        assert_eq!(hidden_issues(&plain).len(), 1, "{filler}");
         let report = verify_with_integrity(built.bytes);
         let found = hidden_issues(&report);
         assert_eq!(found.len(), 1, "{filler}");

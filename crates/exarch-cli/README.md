@@ -149,6 +149,7 @@ exarch extract --atomic --force archive.tar.gz /var/www/current
 | `--allow-hardlinks` | false | Allow hardlinks (within extraction directory) |
 | `--allow-solid-archives` | false | Allow solid 7z archives (multiple files compressed as one block) |
 | `--zip-consistency` | enforce | `enforce` rejects ZIP archives whose local and central headers disagree, that repeat a name, overlap entries or hide records; `ignore` keeps the central directory interpretation (also accepted by `list` and `verify`) |
+| `--parallel-decode-memory` | 128M | Memory for decoding independent LZMA2 runs of a 7z block ahead on worker threads (K/M/G/T suffixes), or `off` to decode on one thread (also accepted by `verify`). A stock 7-Zip archive has 64 MiB runs and needs about 100 MiB per extra concurrent run; archives with small runs need far less |
 | `--allow-world-writable` | false | Allow world-writable files in extracted archives |
 | `--preserve-permissions` | false | Preserve file permissions from archive |
 | `--force` | false | Overwrite existing files |
@@ -252,6 +253,7 @@ exarch verify --json archive.tar.gz | jq '.data.status'
 | `--allow-hardlinks` | Allow hardlinks that resolve within the extraction directory (same as `extract`) |
 | `--allow-solid-archives` | Allow solid 7z archives during verification |
 | `--zip-consistency` | `enforce` (default) reports ZIP structure that different readers interpret differently as issues; `ignore` raises no structural issue |
+| `--parallel-decode-memory` | Memory for decoding 7z LZMA2 runs ahead on worker threads with `--check-integrity` (default 128M, K/M/G/T suffixes), or `off` (same as `extract`) |
 | `--json` | Output results in JSON format |
 
 > [!TIP]

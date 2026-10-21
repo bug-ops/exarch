@@ -4,8 +4,10 @@ use clap::Parser;
 use clap::Subcommand;
 use clap_complete::Shell;
 use exarch_core::DecompressionBudget;
+use exarch_core::ParallelDecode;
 use exarch_core::SecurityConfig;
 use exarch_core::ZipConsistencyPolicy;
+use std::num::NonZeroU64;
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -109,6 +111,27 @@ impl ZipPolicyArgs {
     }
 }
 
+/// Lookahead memory flag shared by the commands that decode 7z payloads.
+#[derive(clap::Args, Clone, Copy)]
+pub struct ParallelDecodeArgs {
+    /// Memory for decoding independent LZMA2 runs of a 7z block ahead on worker
+    /// threads (K, M, G, T suffixes), or `off` to decode on one thread
+    /// (default: 128M). A stock 7-Zip archive has 64 MiB runs, about 100 MiB
+    /// per extra concurrent run; archives with small runs need far less.
+    #[arg(long, value_name = "SIZE|off", value_parser = parse_parallel_decode)]
+    pub parallel_decode_memory: Option<ParallelDecode>,
+}
+
+impl ParallelDecodeArgs {
+    /// Applies the flag to `config`, leaving the default when it is omitted.
+    pub fn apply(self, config: SecurityConfig) -> SecurityConfig {
+        match self.parallel_decode_memory {
+            Some(mode) => config.with_parallel_decode(mode),
+            None => config,
+        }
+    }
+}
+
 #[derive(clap::Args)]
 pub struct ExtractArgs {
     /// Path to the archive file
@@ -140,6 +163,9 @@ pub struct ExtractArgs {
 
     #[command(flatten)]
     pub zip: ZipPolicyArgs,
+
+    #[command(flatten)]
+    pub parallel: ParallelDecodeArgs,
 
     /// Maximum path depth allowed (default: 32, minimum: 1)
     #[arg(long, default_value = "32")]
@@ -300,6 +326,9 @@ pub struct VerifyArgs {
     #[command(flatten)]
     pub zip: ZipPolicyArgs,
 
+    #[command(flatten)]
+    pub parallel: ParallelDecodeArgs,
+
     /// Allow solid 7z archives (higher memory usage during verification)
     #[arg(long)]
     pub allow_solid_archives: bool,
@@ -326,6 +355,15 @@ pub struct VerifyArgs {
     /// Treat warnings as errors and exit with status code 2
     #[arg(long)]
     pub strict: bool,
+}
+
+fn parse_parallel_decode(s: &str) -> Result<ParallelDecode, String> {
+    if s.trim().eq_ignore_ascii_case("off") {
+        return Ok(ParallelDecode::Sequential);
+    }
+    NonZeroU64::new(parse_byte_size(s)?)
+        .map(ParallelDecode::Bounded)
+        .ok_or_else(|| "parallel decode memory must be greater than zero (use off)".to_string())
 }
 
 fn parse_decompression_budget(s: &str) -> Result<DecompressionBudget, String> {
@@ -605,6 +643,59 @@ mod tests {
             panic!("expected verify command");
         };
         assert_eq!(args.max_file_size, Some(100 * 1024 * 1024));
+    }
+
+    #[test]
+    fn test_parallel_decode_memory_parses_sizes_and_off() {
+        assert_eq!(
+            parse_parallel_decode("256M"),
+            Ok(ParallelDecode::Bounded(
+                NonZeroU64::new(256 * 1024 * 1024).unwrap()
+            ))
+        );
+        assert_eq!(parse_parallel_decode("off"), Ok(ParallelDecode::Sequential));
+        assert_eq!(parse_parallel_decode("OFF"), Ok(ParallelDecode::Sequential));
+        assert!(parse_parallel_decode("0").is_err());
+        assert!(parse_parallel_decode("lots").is_err());
+    }
+
+    #[test]
+    fn test_parallel_decode_memory_applies_to_extract_and_verify_only_when_given() {
+        let default = SecurityConfig::default().parallel_decode;
+        let Commands::Extract(args) = Cli::parse_from(["exarch", "extract", "a.7z"]).command else {
+            panic!("expected extract command");
+        };
+        assert_eq!(
+            args.parallel
+                .apply(SecurityConfig::default())
+                .parallel_decode,
+            default
+        );
+
+        let Commands::Extract(args) = Cli::parse_from([
+            "exarch",
+            "extract",
+            "--parallel-decode-memory",
+            "off",
+            "a.7z",
+        ])
+        .command
+        else {
+            panic!("expected extract command");
+        };
+        let config = args.parallel.apply(SecurityConfig::default());
+        assert_eq!(config.parallel_decode, ParallelDecode::Sequential);
+
+        let Commands::Verify(args) =
+            Cli::parse_from(["exarch", "verify", "--parallel-decode-memory", "1G", "a.7z"]).command
+        else {
+            panic!("expected verify command");
+        };
+        let config = args.parallel.apply(SecurityConfig::default());
+        assert_eq!(
+            config.parallel_decode,
+            ParallelDecode::Bounded(NonZeroU64::new(1 << 30).unwrap())
+        );
     }
 
     #[test]

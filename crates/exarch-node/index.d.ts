@@ -242,6 +242,21 @@ export declare class SecurityConfig {
   /** Sets how ZIP archives with ambiguous structure are handled. */
   setZipConsistency(policy: ZipConsistencyPolicy): this
   /**
+   * Sets the memory in bytes for decoding independent LZMA2 runs of a 7z
+   * block ahead on worker threads, or `null` to decode on one thread.
+   *
+   * The default is 128 MiB (1 GiB for `SecurityConfig.permissive()`). A
+   * stock 7-Zip archive has 64 MiB runs and needs about 100 MiB per extra
+   * concurrent run. A valid archive decodes to the same bytes either way and
+   * a corrupt one fails the same file. Each call may start up to 16 worker
+   * threads and hold its own lookahead, so concurrent calls multiply both.
+   *
+   * # Errors
+   *
+   * Returns error if `size` is not a positive whole number of bytes.
+   */
+  setParallelDecodeMemory(size?: number | undefined | null): this
+  /**
    * Sets the maximum memory that may be used to decompress a solid 7z block.
    *
    * Solid archives decompress entire blocks into memory before individual
@@ -315,6 +330,11 @@ export declare class SecurityConfig {
    * know the policy.
    */
   get zipConsistency(): ZipConsistencyPolicy
+  /**
+   * Memory in bytes for decoding 7z LZMA2 runs ahead on worker threads, or
+   * `null` when decoding runs on one thread.
+   */
+  get parallelDecodeMemory(): number | null
   /** Maximum memory in bytes for decompressing a solid 7z block. */
   get maxSolidBlockMemory(): number
   /**

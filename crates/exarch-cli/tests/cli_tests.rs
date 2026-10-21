@@ -1420,6 +1420,44 @@ fn test_verify_check_integrity_truncated_tar_gz_is_an_error() {
 }
 
 #[test]
+fn test_parallel_decode_memory_is_accepted_by_extract_and_verify() {
+    for value in ["off", "64M", "2G"] {
+        let temp = TempDir::new().expect("failed to create temp dir");
+        exarch_cmd()
+            .arg("extract")
+            .arg("--parallel-decode-memory")
+            .arg(value)
+            .arg(workspace_fixture("simple.7z"))
+            .arg(temp.path())
+            .assert()
+            .success();
+        assert!(temp.path().join("simple/file1.txt").exists(), "{value}");
+
+        exarch_cmd()
+            .arg("verify")
+            .arg("--check-integrity")
+            .arg("--parallel-decode-memory")
+            .arg(value)
+            .arg(workspace_fixture("simple.7z"))
+            .assert()
+            .success()
+            .stdout(predicates::str::contains("Integrity: OK"));
+    }
+}
+
+#[test]
+fn test_parallel_decode_memory_zero_is_rejected() {
+    exarch_cmd()
+        .arg("extract")
+        .arg("--parallel-decode-memory")
+        .arg("0")
+        .arg(workspace_fixture("simple.7z"))
+        .assert()
+        .code(2)
+        .stderr(predicates::str::contains("greater than zero"));
+}
+
+#[test]
 fn test_verify_decompression_budget_requires_check_integrity() {
     exarch_cmd()
         .arg("verify")

@@ -1,11 +1,12 @@
-//! 7z extraction decodes on one thread so memory stays bounded (#657).
+//! 7z extraction keeps peak heap bounded whatever the LZMA2 chunk layout
+//! (#657, #673).
 //!
-//! With more than one decoder thread, sevenz-rust2 reads an LZMA2 archive with
-//! a multi-threaded reader whose workers buffer each whole work unit in memory
-//! with no output bound. A multi-chunk LZMA2 archive therefore makes peak heap
-//! grow with the chunk size and thread count, whatever `max_decoder_memory`
-//! says. Peak heap is measured with a counting allocator; the test binary is
-//! its own because `#[global_allocator]` is process-wide.
+//! sevenz-rust2's own multi-threaded LZMA2 reader buffers each whole work unit
+//! with no output bound. exarch decodes sequentially under
+//! `ParallelDecode::Sequential` and, otherwise, decodes runs ahead on worker
+//! threads within the configured lookahead. Peak heap is measured with a
+//! counting allocator; the test binary is its own because `#[global_allocator]`
+//! is process-wide, and one test function owns the profiler.
 
 #![allow(clippy::unwrap_used)]
 
@@ -13,7 +14,10 @@
 static ALLOC: dhat::Alloc = dhat::Alloc;
 
 use std::io::Cursor;
+use std::num::NonZeroU64;
+use std::path::Path;
 
+use exarch_core::ParallelDecode;
 use exarch_core::SecurityConfig;
 use exarch_core::extract_archive;
 use sevenz_rust2::ArchiveEntry;
@@ -47,28 +51,60 @@ fn multi_chunk_lzma2_archive() -> Vec<u8> {
     writer.finish().unwrap().into_inner()
 }
 
-#[test]
-fn extract_does_not_buffer_whole_lzma2_work_units() {
-    let dir = TempDir::new().unwrap();
-    let archive = dir.path().join("big.7z");
-    std::fs::write(&archive, multi_chunk_lzma2_archive()).unwrap();
-    let dest = dir.path().join("out");
+fn bounded(bytes: u64) -> ParallelDecode {
+    ParallelDecode::Bounded(NonZeroU64::new(bytes).unwrap())
+}
+
+/// Peak heap bytes of extracting `archive` under `parallel`.
+fn peak_heap(archive: &Path, parallel: ParallelDecode) -> u64 {
+    let dest = TempDir::new().unwrap();
     let config = SecurityConfig::default()
         .with_max_file_size(1 << 30)
         .with_max_total_size(1 << 30)
-        .with_max_compression_ratio(1_000_000.0);
+        .with_max_compression_ratio(1_000_000.0)
+        .with_parallel_decode(parallel);
 
     let _profiler = dhat::Profiler::builder().testing().build();
-    extract_archive(&archive, &dest, &config).unwrap();
+    extract_archive(archive, dest.path(), &config).unwrap();
     let peak = dhat::HeapStats::get().max_bytes;
 
     assert_eq!(
-        std::fs::metadata(dest.join("big")).unwrap().len(),
+        std::fs::metadata(dest.path().join("big")).unwrap().len(),
         OUTPUT as u64
     );
-    // A multi-threaded decode holds at least one whole 16 MiB work unit.
+    peak as u64
+}
+
+#[test]
+fn extract_peak_heap_follows_the_decode_mode() {
+    let dir = TempDir::new().unwrap();
+    let archive = dir.path().join("big.7z");
+    std::fs::write(&archive, multi_chunk_lzma2_archive()).unwrap();
+
+    let sequential = peak_heap(&archive, ParallelDecode::Sequential);
     assert!(
-        (peak as u64) < CHUNK / 2,
-        "peak heap {peak} bytes shows work units buffered in memory"
+        sequential < CHUNK / 2,
+        "sequential peak heap {sequential} bytes shows work units buffered in memory"
+    );
+
+    // 40 MiB fits two of the 16 MiB runs next to the head's window.
+    let lookahead = 40 * 1024 * 1024;
+    let ahead = peak_heap(&archive, bounded(lookahead));
+    let slack = 8 * 1024 * 1024;
+    assert!(
+        ahead <= lookahead + slack,
+        "peak heap {ahead} bytes exceeds the {lookahead} byte lookahead"
+    );
+    if std::thread::available_parallelism().is_ok_and(|n| n.get() > 1) {
+        assert!(
+            ahead >= CHUNK,
+            "peak heap {ahead} bytes shows no run was decoded ahead"
+        );
+    }
+
+    let tiny = peak_heap(&archive, bounded(1024 * 1024));
+    assert!(
+        tiny < CHUNK / 2,
+        "peak heap {tiny} bytes with a lookahead smaller than a run"
     );
 }

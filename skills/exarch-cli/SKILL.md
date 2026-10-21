@@ -108,6 +108,7 @@ Key flags (all optional):
 | `--allow-absolute-paths` | off | Allow archive entries with absolute paths. For ZIP the leading root or drive prefix is stripped, so the entry lands under the destination (`/tmp/x` extracts to `<dest>/tmp/x`). |
 | `--allow-world-writable` | off | Allow files with world-writable (mode `0o002`) permission bits. |
 | `--allow-solid-archives` | off | Allow solid 7z archives (see Security model below). |
+| `--parallel-decode-memory <SIZE\|off>` | 128M | 7z only. Memory for decoding independent LZMA2 runs ahead on worker threads (K, M, G, T suffixes); `off` decodes on one thread; `0` exits 2 ("greater than zero"). |
 | `--zip-consistency <enforce\|ignore>` | enforce | ZIP only. `enforce` rejects an archive whose structure different ZIP readers interpret differently (see "ZIP structure" under `verify`); `ignore` keeps the central-directory interpretation and raises no structural finding. Relax it only for archives from a producer you trust. |
 | `--banned-component <COMPONENT>` | see below | Block entries whose path contains this component. **Replaces** the default list — see warning below. Repeatable. |
 
@@ -181,8 +182,9 @@ exarch verify archive.tar.gz --json
 | `--strict` | off | Treat any warning-level finding as an error and exit with status `2` instead of `0`. |
 | `--check-integrity` | off | Decode the payload to the decoder's EOF so checksums and codec framing are verified. See "Payload integrity" below. |
 | `--decompression-budget <SIZE>` | 500M | Extra bytes `--check-integrity` may decode beyond what listing already decodes (`K`/`M`/`G`/`T` suffixes). Requires `--check-integrity`; `0` is rejected. Fixed default: it does not follow `--max-total-size`, so raise both for archives over 500 MB. |
-| `--allow-symlinks` / `--allow-hardlinks` | off | Same flags and semantics as `extract`: links that resolve within the extraction directory are accepted, escaping links still fail. `verify` accepts only these two policy flags (plus `--zip-consistency`, `--max-files`, `--max-total-size`, `--max-file-size`, `--allow-solid-archives`, `--check-integrity`, `--decompression-budget` and `--strict`); it has no `--max-compression-ratio`, `--max-path-depth`, `--banned-component`, `--allow-absolute-paths` or `--allow-world-writable`, so pass the link flags you intend to extract with, and expect extraction-only options to be evaluated by `extract` alone. |
+| `--allow-symlinks` / `--allow-hardlinks` | off | Same flags and semantics as `extract`: links that resolve within the extraction directory are accepted, escaping links still fail. `verify` accepts only these two policy flags (plus `--zip-consistency`, `--max-files`, `--max-total-size`, `--max-file-size`, `--allow-solid-archives`, `--check-integrity`, `--decompression-budget`, `--parallel-decode-memory` and `--strict`); it has no `--max-compression-ratio`, `--max-path-depth`, `--banned-component`, `--allow-absolute-paths` or `--allow-world-writable`, so pass the link flags you intend to extract with, and expect extraction-only options to be evaluated by `extract` alone. |
 | `--zip-consistency <enforce\|ignore>` | enforce | ZIP only. Under `enforce`, structural findings are reported as issues (see "ZIP structure" below); under `ignore` none are raised. |
+| `--parallel-decode-memory <SIZE\|off>` | 128M | Same as `extract`; effective with `--check-integrity`. |
 | `--max-files` / `--max-total-size` / `--max-file-size` / `--allow-solid-archives` | same as `list` (10000 / 500 MB / 50 MB / off) | Same hard-limit semantics as `list` for file count and total size — verification fails with `QuotaExceeded` past those two caps, it does not skip entries. |
 
 `verify` always runs the full security validation pipeline (path traversal, symlink/hardlink, permissions) without extracting. By default it does not validate payload checksums: `integrity_status` is `SKIPPED` (`Integrity: SKIPPED` in text mode), so a passing `verify` says nothing about data corruption. Pass `--check-integrity` for that.
@@ -276,7 +278,7 @@ issue when the archive:
 - has a local header that disagrees with its central directory record on the file name, a Unicode Path extra field, compression method, encryption flag, data-descriptor flag, modification time, CRC-32 or sizes (`"Header Mismatch"`; a local header that cannot be parsed at all is reported the same way);
 - repeats an entry name (`"Duplicate Entry"`; the `zip` crate keeps only the last record, `verify` still counts every record in `total_entries`);
 - has entries whose data ranges overlap (`"Overlapping Entries"`);
-- holds central directory records beyond the count in its end record, a central directory signature before an entry (between entries, behind padding or a data descriptor, or in a prefix of a file that starts with `PK`), where a streaming reader stops listing and never reaches the entries behind it, or a local header that no central directory record maps (`"Hidden Entry"`): before the archive (a stub is scanned, but past offset 0 only headers that look written by a ZIP producer and whose entry fits inside the stub count, since self-extractors embed the signature; a file that starts with `PK` is not a stub and is judged like a gap; a stub that embeds a whole ZIP resource is still reported), between entries, behind padding, or just before the directory. A streaming reader extracts such an entry and a random-access reader never lists it;
+- holds central directory records beyond the count in its end record, a central directory (`PK\x01\x02`) or end record (`PK\x05\x06`, ZIP64 `PK\x06\x06`) signature before an entry (between entries, behind padding or a data descriptor, or in a prefix of a file that starts with `PK`), where a streaming reader stops listing and never reaches the entries behind it, a data descriptor after which a streaming reader (modeled on libarchive: it skips the local compressed size when there is one, else ends a deflated entry at its stream or scans for the descriptor signature and takes 16 bytes, or 24 with a ZIP64 extra field, and matches the 12/16/20/24-byte layouts against the entry's sizes) resumes past the next entry header, or a local header that no central directory record maps (`"Hidden Entry"`): before the archive (a stub is scanned, but past offset 0 only headers that look written by a ZIP producer and whose entry fits inside the stub count, since self-extractors embed the signature; a file that starts with `PK` is not a stub and is judged like a gap; a stub that embeds a whole ZIP resource is still reported), between entries, behind padding, or just before the directory. A streaming reader extracts such an entry and a random-access reader never lists it;
 - has an end of central directory record after the one the `zip` crate used, which the crate rejected and another reader may take (`"Hidden Entry"`).
 
 `total_entries` of a ZIP report is the raw central directory count. A raw count over `--max-files` is
@@ -284,7 +286,7 @@ a `QuotaExceeded` error (`quota exceeded: file count (20000 > 10000)`, exit `1`)
 `list` and `verify` under both policies, even when most records share one name. Verified live
 with crafted archives built with Python: a two-record directory whose end record counts one
 (`Total entries: 2`, two `"Hidden Entry"` issues), a local header inserted before the directory
-(`"Hidden Entry"`), a central record or a bare `PK\x01\x02` placed between two entries (`"Hidden Entry"`, rejected by `extract` and `list`; `bsdtar` reading the archive from a pipe lists only the first entry), two entries named `a.txt` (`"Duplicate Entry"`, `Total entries: 2`) and an
+(`"Hidden Entry"`), a central record or a bare `PK\x01\x02` or `PK\x05\x06` placed between two entries (`"Hidden Entry"`, rejected by `extract` and `list`; `bsdtar` reading the archive from a pipe lists only the first entry), a stored entry with a signed 16-byte descriptor and a ZIP64 extra field or with an unsigned descriptor, and a deflated entry whose 12-byte descriptor reads as 20 bytes against the next header (`"Hidden Entry"`; `bsdtar` skips an entry, fails, or extracts a file embedded in the next entry), an empty-name header whose compressed size spans the next entry (`"Hidden Entry"`; `bsdtar` skips that entry), two entries named `a.txt` (`"Duplicate Entry"`, `Total entries: 2`) and an
 archive with 20000 records named `a.txt`; each passes with `--zip-consistency ignore` (except the
 last, which stays a `QuotaExceeded` error), where `extract` writes what it always did. Archives from
 Info-ZIP, `ditto`, 7-Zip, `bsdtar`, Go and Python's `zipfile`, including streamed archives
@@ -295,7 +297,7 @@ inside the declared range of a data-descriptor entry (streaming readers end such
 end of its compressed stream, `zip` at the declared size) is detected only with `--check-integrity`,
 which decodes the entry to find where its stream ends (`"Hidden Entry"` on that entry, exit `1`; not raised under `--zip-consistency ignore`; a tail that cannot be decided counts as an unverified item with the reason `descriptor_tail`;
 plain `verify` passes it, verified live with a crafted deflate archive). Not covered: central
-directory signatures inside the stub of a file that does not start with `PK`, and an end record (`PK\x05\x06`, `PK\x06\x06`) in a gap (#682). A central signature behind the last entry is not reported. Pre-ZIP64 archives
+directory signatures inside the stub of a file that does not start with `PK`, and other streaming-reader layouts tracked in #686 and #687. A central or end record signature behind the last entry is not reported. Pre-ZIP64 archives
 with more than 65535 entries (a wrapped end-record count) and archives with orphaned local headers
 or a central directory signature in a gap before an entry, left by in-place updaters, are rejected under `enforce`; so are ZIP64 directory entries written by the
 Rust `zip` crate, whose local sizes its own check rejects (use `--zip-consistency ignore`). With
@@ -506,9 +508,14 @@ files compressed as one block) are rejected by default because extracting even o
 requires decompressing the whole block into memory — a memory-exhaustion vector; enable
 `--allow-solid-archives` only for trusted archives, and consider it isn't a substitute for
 enough free memory. 7z extraction also admits every block's decoder memory (LZMA/LZMA2
-dictionary, PPMd memory) against `max_decoder_memory` before decoding, and decodes on one
-thread so the multi-threaded LZMA2 decoder cannot buffer unbounded output (stock 7-Zip archives
-decode slower, see the changelog). Known gap: a compressed 7z *header* is decoded by sevenz-rust2
+dictionary, PPMd memory) against `max_decoder_memory` before decoding, and decodes
+independent LZMA2 runs ahead on worker threads within `--parallel-decode-memory` (default 128M; `off`
+decodes on one thread) so the decoder cannot buffer unbounded output; a stock 7-Zip archive has
+64 MiB runs and needs about 100 MiB per extra concurrent run, so >= 512M matches the unbounded
+reader there. A valid archive decodes to the same bytes either way; on a corrupt one the same
+file fails and only that file's leading bytes can differ. Each `extract`/`verify` call may start
+up to 16 worker threads and hold its own lookahead, so run concurrent invocations with
+`--parallel-decode-memory` sized for the number running, or `off`. Known gap: a compressed 7z *header* is decoded by sevenz-rust2
 with no memory limit before any block is checked, so the decoder memory limit (`max_decoder_memory`, Rust API only) does not bound a
 PPMd or LZMA2 header coder (up to about 4 GiB); only trusted archives should be opened where
 that matters. A stream-less entry (a directory or empty file) placed between a solid block's

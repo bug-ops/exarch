@@ -329,4 +329,29 @@ describe('SecurityConfig', () => {
       }, /negative/i);
     });
   });
+
+  describe('parallel decode memory', () => {
+    const MIB = 1024 * 1024;
+
+    it('should default to 128 MiB, 1 GiB when permissive', () => {
+      assert.strictEqual(new SecurityConfig().parallelDecodeMemory, 128 * MIB);
+      assert.strictEqual(SecurityConfig.permissive().parallelDecodeMemory, 1024 * MIB);
+    });
+
+    it('should round-trip a size and null', () => {
+      const config = new SecurityConfig();
+      config.setParallelDecodeMemory(256 * MIB);
+      assert.strictEqual(config.parallelDecodeMemory, 256 * MIB);
+      config.setParallelDecodeMemory(null);
+      assert.strictEqual(config.parallelDecodeMemory, null);
+    });
+
+    for (const bad of [0, -1, 1.5, NaN, Infinity]) {
+      it(`should reject ${bad} and keep the previous value`, () => {
+        const config = new SecurityConfig();
+        assert.throws(() => config.setParallelDecodeMemory(bad), /positive whole number/i);
+        assert.strictEqual(config.parallelDecodeMemory, 128 * MIB);
+      });
+    }
+  });
 });

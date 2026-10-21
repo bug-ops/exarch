@@ -109,6 +109,79 @@ for name, badcrc in (("interleaved-empty.7z", False), ("interleaved-empty-badcrc
 PY
 echo "✓ Created interleaved-empty.7z and interleaved-empty-badcrc.7z"
 
+# 10. bcj2.7z / bcj2-spare-pack.7z / bcj2-simple-coder.7z - the packed stream
+# count of a BCJ2 block. The spare variant declares one extra pack stream no
+# block references; the simple-coder variant declares the BCJ2 method ID on a
+# coder with one input, so fewer pack streams exist than a BCJ2 coder implies.
+python3 - "$TEMP_DIR" <<'PY'
+import random
+random.seed(7)
+with open("bcj2.bin", "wb") as f:
+    f.write(b"".join(b"\xe8" + random.randbytes(4) + b"\x90" * random.randrange(4) for _ in range(2000)))
+with open("bcj2-small.bin", "wb") as f:
+    f.write(b"0123456789abcdef" * 8)
+PY
+7z a -t7z -mf=BCJ2 -ms=off -mhc=off "$FIXTURES_DIR/bcj2.7z" bcj2.bin > /dev/null
+7z a -t7z -m0=Copy -ms=off -mhc=off "$TEMP_DIR/copy.7z" bcj2-small.bin > /dev/null
+python3 - "$FIXTURES_DIR/bcj2.7z" "$TEMP_DIR/copy.7z" "$FIXTURES_DIR" <<'PY'
+import struct, sys, zlib
+
+def read_num(b, i):
+    first, mask, val = b[i], 0x80, 0
+    for n in range(8):
+        if first & mask == 0:
+            return val | ((first & (mask - 1)) << (8 * n)), i + 1 + n
+        val |= b[i + 1 + n] << (8 * n)
+        mask >>= 1
+    return val, i + 9
+
+def patched(src, patch, out):
+    d = bytearray(open(src, "rb").read())
+    off, ln = struct.unpack("<QQ", d[12:28])
+    h = bytearray(d[32 + off : 32 + off + ln])
+    patch(h)
+    d = d[: 32 + off] + h
+    d[12:28] = struct.pack("<QQ", off, len(h))
+    d[28:32] = struct.pack("<I", zlib.crc32(h) & 0xFFFFFFFF)
+    d[8:12] = struct.pack("<I", zlib.crc32(bytes(d[12:32])) & 0xFFFFFFFF)
+    open(out, "wb").write(d)
+
+def add_spare_pack_stream(h):
+    # Header, MainStreamsInfo, PackInfo: pack_pos, count, kSize, sizes, kEnd
+    assert h[:3] == bytes([1, 4, 6])
+    _, i = read_num(h, 3)
+    count, j = read_num(h, i)
+    assert count < 0x80 and h[j] == 9
+    j += 1
+    for _ in range(count):
+        _, j = read_num(h, j)
+    h[j:j] = bytes([7])
+    h[i] = count + 1
+
+def declare_bcj2_on_a_simple_coder(h):
+    # kFolder, 1 folder, not external, 1 coder, simple flags with a 1-byte ID 0
+    # (Copy) becomes a 4-byte ID 03 03 01 1B (BCJ2)
+    k = h.index(bytes([0x0B, 1, 0, 1, 1, 0]))
+    h[k + 4 : k + 6] = bytes([4, 3, 3, 1, 0x1B])
+
+src, copy, out = sys.argv[1:4]
+patched(src, add_spare_pack_stream, f"{out}/bcj2-spare-pack.7z")
+patched(copy, declare_bcj2_on_a_simple_coder, f"{out}/bcj2-simple-coder.7z")
+PY
+echo "✓ Created bcj2.7z, bcj2-spare-pack.7z and bcj2-simple-coder.7z"
+
+# 11. lzma2-mt.7z - LZMA2 written by 4 threads with 64 KiB independent runs,
+# the shape the parallel decoder splits. Seeds the 7z fuzz target too.
+python3 - <<'PY'
+import random
+random.seed(11)
+words = [bytes(random.randrange(97, 123) for _ in range(random.randrange(3, 9))) for _ in range(400)]
+with open("lzma2-mt.bin", "wb") as f:
+    f.write(b" ".join(random.choice(words) for _ in range(30000)))
+PY
+7z a -t7z -ms=off -m0=LZMA2:d=64k:c=64k -mmt=4 "$FIXTURES_DIR/lzma2-mt.7z" lzma2-mt.bin > /dev/null
+echo "✓ Created lzma2-mt.7z (4 independent LZMA2 runs)"
+
 echo ""
 echo "All fixtures generated successfully!"
 echo "Note: path-traversal.7z requires manual crafting (see README.md)"

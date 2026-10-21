@@ -19,6 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ZIP structure corpus covers Java and Windows producers, generated in CI (#672).
 - `UnverifiedReason::PathTooLong`: `verify` counts entries dropped for an over-long path as unverified (#684).
 - `UnverifiedReason::DescriptorTail`: an undecided or unaffordable descriptor tail check is listed by path under its own reason (#684).
+- ZIP corpus script adds Go, Python unseekable, `bsdtar`, Info-ZIP and `7z` streaming producers (#PR).
+- `ParallelDecode` and `--parallel-decode-memory` bound the memory of parallel 7z LZMA2 decoding (#PR).
+- 7z BCJ2 pack stream bound fixtures and tests (#PR).
 
 ### Changed
 
@@ -37,7 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **BREAKING:** `list` rejects entry paths over the host limits, and `verify` reports each as a High issue (`OversizedEntry`) without retaining the path (#672).
 - **BREAKING:** TAR readers decode every gzip member, bzip2 stream and xz stream, accept only zero padding as a tail, and reject empty input (#672).
 - **BREAKING:** CLI `verify` of a solid 7z archive without `--allow-solid-archives` exits 1, was 0 with INCOMPLETE (#672).
-- 7z `extract` decodes on one thread: peak memory drops 96-98% and time rises 77-120% on multi-threaded LZMA2 archives (#672).
+- 7z `extract` bounds multi-threaded LZMA2 decoder buffering, cutting peak memory 96-98% on such archives (#672).
 - ZIP `list` and `verify` are 2-3x faster than at #671 through a windowed header reader (#672).
 - **BREAKING:** ZIP entries with a compression method other than Stored, Deflate, Bzip2 or Zstd are rejected at open by `extract`, `list` and `verify` through one shared admission check (#653).
 - **BREAKING:** 7z directories with the Windows reparse-point attribute are listed as symlinks and fail `verify`, matching `extract` (#653).
@@ -64,6 +67,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Removed the stale `zstd`, `zstd-safe` and `syn` multiple-versions exceptions from `deny.toml`; the remaining `syn` 2 copy comes only from the `criterion` dev-dependency chain (#624).
 - **BREAKING:** ZIP `extract`, `list` and `verify` reject, under `ZipConsistencyPolicy::Enforce`, a central directory signature in a gap before an entry or in a `PK`-led prefix, where streaming readers stop listing (`ZipInconsistency::StrayCentralRecord`) (#684).
 - `verify` bounds symlink targets on Windows at 4091 UTF-16 units instead of 32767 (#684).
+- **BREAKING:** ZIP `extract`, `list` and `verify` reject, under `Enforce`, an end or ZIP64 end record signature in a gap or `PK`-led prefix (`ZipInconsistency::StrayEndRecord`, `EndRecordKind`) (#PR).
+- **BREAKING:** ZIP `extract`, `list` and `verify` reject, under `Enforce`, a data descriptor after which a streaming reader resumes past the next entry (`ZipInconsistency::DescriptorOverrun`), including stored entries with an unsigned descriptor (#PR).
+- **BREAKING:** ZIP structure checks search the descriptor bytes as a gap, and report an empty-name local header that skips data (#PR).
+- **BREAKING:** `SecurityConfig` gains `parallel_decode` and `with_parallel_decode`, and the Python and Node `SecurityConfig` classes a matching property (#PR).
+- 7z `extract` and `verify --check-integrity` decode LZMA2 runs on worker threads within a memory bound (#PR).
 
 ### Fixed
 

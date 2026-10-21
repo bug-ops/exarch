@@ -35,6 +35,7 @@ dhat = "0.3"
 flate2 = "1.1"
 indicatif = "0.18"
 libc = "0.2"
+lzma-rust2 = { version = "0.23", default-features = false, features = ["std"] }
 napi = "3.14"
 napi-build = "2.6"
 napi-derive = "3.6"
@@ -75,6 +76,7 @@ unnecessary_literal_bound = "allow"
 [workspace.lints.rust]
 unsafe_code = "deny"
 missing_docs = "warn"
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
 
 [profile.dev]
 opt-level = 0

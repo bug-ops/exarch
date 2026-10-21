@@ -627,6 +627,7 @@ dependencies = [
  "dhat",
  "flate2",
  "libc",
+ "lzma-rust2",
  "proptest",
  "rustc-hash 2.1.3",
  "sevenz-rust2",

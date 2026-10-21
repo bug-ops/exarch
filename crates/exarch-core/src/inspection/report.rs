@@ -867,6 +867,8 @@ impl IssueCategory {
             ZipInconsistency::OverlappingEntries => Self::OverlappingEntries,
             ZipInconsistency::HiddenLocalHeader { .. }
             | ZipInconsistency::StrayCentralRecord { .. }
+            | ZipInconsistency::StrayEndRecord { .. }
+            | ZipInconsistency::DescriptorOverrun { .. }
             | ZipInconsistency::UncountedCentralRecords { .. }
             | ZipInconsistency::IgnoredEndRecord { .. } => Self::HiddenEntry,
         }
@@ -1001,6 +1003,20 @@ mod tests {
             ),
             (
                 ZipInconsistency::StrayCentralRecord { offset: 9 },
+                IssueCategory::HiddenEntry,
+            ),
+            (
+                ZipInconsistency::StrayEndRecord {
+                    offset: 9,
+                    kind: crate::EndRecordKind::Classic,
+                },
+                IssueCategory::HiddenEntry,
+            ),
+            (
+                ZipInconsistency::DescriptorOverrun {
+                    entry: ZipEntryIndex::new(0),
+                    offset: 9,
+                },
                 IssueCategory::HiddenEntry,
             ),
             (

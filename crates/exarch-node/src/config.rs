@@ -1,6 +1,9 @@
 //! Node.js bindings for `SecurityConfig`, `ExtractionOptions` and
 //! `VerificationOptions`.
 
+use std::num::NonZeroU64;
+
+use exarch_core::ParallelDecode;
 use exarch_core::SecurityConfig as CoreConfig;
 use exarch_core::ZipConsistencyPolicy as CorePolicy;
 use exarch_core::validate_config_entry;
@@ -10,6 +13,24 @@ use napi_derive::napi;
 
 use crate::error::convert_error;
 use crate::report::unknown_variant;
+
+/// Largest integer a JavaScript number holds exactly (2^53 - 1).
+const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+
+/// A positive whole byte count held exactly by `bytes`, or `None`.
+///
+/// napi's integer conversion would truncate `1.5` to `1`; a fraction is a
+/// caller mistake and is refused instead.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "bytes is a whole number in 1..=2^53-1 here"
+)]
+fn exact_positive_bytes(bytes: f64) -> Option<NonZeroU64> {
+    let whole =
+        bytes.is_finite() && bytes.fract() == 0.0 && (1.0..=MAX_SAFE_INTEGER).contains(&bytes);
+    whole.then(|| NonZeroU64::new(bytes as u64)).flatten()
+}
 
 /// How ZIP archives with ambiguous structure are handled.
 ///
@@ -226,6 +247,33 @@ impl SecurityConfig {
         self
     }
 
+    /// Sets the memory in bytes for decoding independent LZMA2 runs of a 7z
+    /// block ahead on worker threads, or `null` to decode on one thread.
+    ///
+    /// The default is 128 MiB (1 GiB for `SecurityConfig.permissive()`). A
+    /// stock 7-Zip archive has 64 MiB runs and needs about 100 MiB per extra
+    /// concurrent run. A valid archive decodes to the same bytes either way and
+    /// a corrupt one fails the same file. Each call may start up to 16 worker
+    /// threads and hold its own lookahead, so concurrent calls multiply both.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if `size` is not a positive whole number of bytes.
+    #[napi(js_name = "setParallelDecodeMemory")]
+    pub fn set_parallel_decode_memory(&mut self, size: Option<f64>) -> Result<&Self> {
+        let lookahead = size
+            .map(|bytes| {
+                exact_positive_bytes(bytes).ok_or_else(|| {
+                    Error::from_reason(
+                        "parallel decode memory must be a positive whole number of bytes (use null to disable)",
+                    )
+                })
+            })
+            .transpose()?;
+        self.inner.parallel_decode = ParallelDecode::from(lookahead);
+        Ok(self)
+    }
+
     /// Sets the maximum memory that may be used to decompress a solid 7z block.
     ///
     /// Solid archives decompress entire blocks into memory before individual
@@ -391,6 +439,16 @@ impl SecurityConfig {
     #[napi(getter)]
     pub fn get_zip_consistency(&self) -> Result<ZipConsistencyPolicy> {
         self.inner.zip_consistency.try_into()
+    }
+
+    /// Memory in bytes for decoding 7z LZMA2 runs ahead on worker threads, or
+    /// `null` when decoding runs on one thread.
+    #[napi(getter)]
+    pub fn get_parallel_decode_memory(&self) -> Option<i64> {
+        self.inner
+            .parallel_decode
+            .lookahead()
+            .map(|bytes| i64::try_from(bytes.get()).unwrap_or(i64::MAX))
     }
 
     /// Maximum memory in bytes for decompressing a solid 7z block.
@@ -1531,6 +1589,40 @@ mod tests {
         let config = CreationConfig::new();
         let core = config.as_core();
         assert_eq!(core.compression_level, Some(6));
+    }
+
+    #[test]
+    fn test_parallel_decode_memory_defaults_and_round_trips() {
+        const MIB: i64 = 1024 * 1024;
+        let mut config = SecurityConfig::new();
+        assert_eq!(config.get_parallel_decode_memory(), Some(128 * MIB));
+        assert_eq!(
+            SecurityConfig::permissive().get_parallel_decode_memory(),
+            Some(1024 * MIB)
+        );
+
+        config
+            .set_parallel_decode_memory(Some(256.0 * 1048576.0))
+            .unwrap();
+        assert_eq!(config.get_parallel_decode_memory(), Some(256 * MIB));
+        config.set_parallel_decode_memory(None).unwrap();
+        assert_eq!(config.get_parallel_decode_memory(), None);
+    }
+
+    #[test]
+    fn test_parallel_decode_memory_rejects_zero_and_negative() {
+        let mut config = SecurityConfig::new();
+        assert!(config.set_parallel_decode_memory(Some(0.0)).is_err());
+        assert!(config.set_parallel_decode_memory(Some(-1.0)).is_err());
+        assert!(config.set_parallel_decode_memory(Some(1.5)).is_err());
+        assert!(config.set_parallel_decode_memory(Some(f64::NAN)).is_err());
+        assert!(
+            config
+                .set_parallel_decode_memory(Some(f64::INFINITY))
+                .is_err()
+        );
+        assert!(config.set_parallel_decode_memory(Some(1.0e300)).is_err());
+        assert_eq!(config.get_parallel_decode_memory(), Some(128 * 1024 * 1024));
     }
 
     #[test]

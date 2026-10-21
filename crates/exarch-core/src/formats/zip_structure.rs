@@ -56,9 +56,21 @@
 //! record: a streaming reader that stops listing at the first central record
 //! never sees the entries after it. The signature alone counts, because that
 //! reader reads no field of the record; one behind the last entry hides
-//! nothing and is not reported. An end record signature in a gap stops such a
-//! reader the same way and is not searched, which is a residual (#682). With
-//! duplicate names the local headers are not compared with the central
+//! nothing and is not reported. An end of central directory or ZIP64 end
+//! record signature stops such a reader the same way and is reported as a
+//! stray end record.
+//!
+//! The bytes of a data descriptor are searched like any other gap, and the
+//! position where a streaming reader resumes after the entry's data is
+//! modelled (see the `resume` module): an entry whose descriptor makes that
+//! reader continue past the next header is reported as a descriptor overrun. A
+//! descriptor field that happens to equal a stop signature is reported like
+//! any other signature in a gap, an accepted false positive.
+//!
+//! A local header with an empty name counts as hidden when its compressed size
+//! is not zero, since a streaming reader skips that many bytes after it.
+//!
+//! With duplicate names the local headers are not compared with the central
 //! directory and the gaps are not searched. Each kind of finding keeps a
 //! bounded number of entries; the rest are counted.
 
@@ -82,11 +94,17 @@ use super::zip::is_password_required;
 use crate::ArchiveError;
 use crate::Result;
 use crate::error::CentralRecordOrdinal;
+use crate::error::EndRecordKind;
 use crate::error::HiddenRegion;
 use crate::error::ZipEntryIndex;
 use crate::error::ZipHeaderField;
 use crate::error::ZipInconsistency;
 use crate::security::zipbomb::DeclaredCompressedBudget;
+use resume::DESCRIPTOR_LOOKAHEAD;
+use resume::DescriptorExit;
+use resume::DescriptorWidth;
+use resume::LocalFacts;
+use resume::streaming_resume;
 
 const CDFH_SIGNATURE: [u8; 4] = *b"PK\x01\x02";
 pub(super) const LFH_SIGNATURE: [u8; 4] = *b"PK\x03\x04";
@@ -147,17 +165,21 @@ enum Slot {
     Duplicate,
     Hidden,
     StrayCentral,
+    StrayEnd,
+    DescriptorOverrun,
     Overlap,
     Uncounted,
     IgnoredEnd,
 }
 
 impl Slot {
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 9] = [
         Self::Mismatch,
         Self::Duplicate,
         Self::Hidden,
         Self::StrayCentral,
+        Self::StrayEnd,
+        Self::DescriptorOverrun,
         Self::Overlap,
         Self::Uncounted,
         Self::IgnoredEnd,
@@ -166,7 +188,11 @@ impl Slot {
     const fn limit(self) -> usize {
         match self {
             Self::Mismatch => 24,
-            Self::Duplicate | Self::Hidden | Self::StrayCentral => 16,
+            Self::Duplicate
+            | Self::Hidden
+            | Self::StrayCentral
+            | Self::StrayEnd
+            | Self::DescriptorOverrun => 16,
             Self::Overlap | Self::Uncounted | Self::IgnoredEnd => 1,
         }
     }
@@ -235,6 +261,8 @@ fn slot_of(finding: &ZipInconsistency) -> Slot {
         ZipInconsistency::DuplicateName { .. } => Slot::Duplicate,
         ZipInconsistency::HiddenLocalHeader { .. } => Slot::Hidden,
         ZipInconsistency::StrayCentralRecord { .. } => Slot::StrayCentral,
+        ZipInconsistency::StrayEndRecord { .. } => Slot::StrayEnd,
+        ZipInconsistency::DescriptorOverrun { .. } => Slot::DescriptorOverrun,
         ZipInconsistency::OverlappingEntries => Slot::Overlap,
         ZipInconsistency::UncountedCentralRecords { .. } => Slot::Uncounted,
         ZipInconsistency::IgnoredEndRecord { .. } => Slot::IgnoredEnd,
@@ -473,9 +501,15 @@ impl ZipStructure {
 /// Byte range of one entry, from its local header to the end of its data.
 #[derive(Debug, Clone, Copy)]
 struct EntryLayout {
+    entry: ZipEntryIndex,
     header_start: u64,
+    data_start: u64,
     end: u64,
-    data_descriptor: bool,
+    /// How a streaming reader ends the entry, when its sizes follow the data.
+    descriptor: Option<DescriptorExit>,
+    /// Compressed and uncompressed size the central directory declares.
+    compressed: u64,
+    size: u64,
 }
 
 /// The central directory as the `zip` crate maps it.
@@ -590,7 +624,7 @@ fn scan_entries<R: Read + Seek>(
                 ArchiveError::InvalidArchive(format!("failed to read entry {index}: {e}"))
             })?;
             admit_zip_entry(&file, &mut budget)?;
-            scan.layouts.push(layout_of(&file)?);
+            scan.layouts.push(layout_of(&file, index)?);
             continue;
         }
 
@@ -600,7 +634,7 @@ fn scan_entries<R: Read + Seek>(
             match archive.by_index_with_options(index, options) {
                 Ok(file) => {
                     admit_zip_entry(&file, &mut budget)?;
-                    scan.layouts.push(layout_of(&file)?);
+                    scan.layouts.push(layout_of(&file, index)?);
                     continue;
                 }
                 Err(e) if index == 0 && is_duplicate_names(&e) => scan.crate_duplicates = true,
@@ -621,7 +655,7 @@ fn scan_entries<R: Read + Seek>(
             }
         })?;
         admit_zip_entry(&file, &mut budget)?;
-        scan.layouts.push(layout_of(&file)?);
+        scan.layouts.push(layout_of(&file, index)?);
         if let Some(error) = mismatch {
             scan.findings
                 .push_with(Slot::Mismatch, || ZipInconsistency::HeaderMismatch {
@@ -639,16 +673,23 @@ fn scan_entries<R: Read + Seek>(
     Ok(scan)
 }
 
-fn layout_of<R: Read>(file: &zip::read::ZipFile<'_, R>) -> Result<EntryLayout> {
+fn layout_of<R: Read>(file: &zip::read::ZipFile<'_, R>, index: usize) -> Result<EntryLayout> {
     let invalid =
         || ArchiveError::InvalidArchive("ZIP entry data range is not representable".into());
     let data_start = file.data_start().ok_or_else(invalid)?;
     Ok(EntryLayout {
+        entry: ZipEntryIndex::new(index),
         header_start: file.header_start(),
+        data_start,
         end: data_start
             .checked_add(file.compressed_size())
             .ok_or_else(invalid)?,
-        data_descriptor: file.flags().is_using_data_descriptor(),
+        descriptor: file
+            .flags()
+            .is_using_data_descriptor()
+            .then(|| DescriptorExit::of(file.compression())),
+        compressed: file.compressed_size(),
+        size: file.size(),
     })
 }
 
@@ -970,16 +1011,14 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
             if layout.end > self.map.directory_start {
                 continue;
             }
-            let next = starts
-                .get(starts.partition_point(|&s| s <= layout.header_start))
-                .copied()
-                .unwrap_or(self.map.directory_start);
-            let resume = if layout.data_descriptor {
-                self.after_descriptor(layout, next)?
-            } else {
-                layout.end
-            };
-            cursor = cursor.max(resume);
+            cursor = cursor.max(layout.end);
+            if let Some(exit) = layout.descriptor {
+                let next = starts
+                    .get(starts.partition_point(|&s| s <= layout.header_start))
+                    .copied()
+                    .unwrap_or(self.map.directory_start);
+                self.check_descriptor(layout, exit, next, findings)?;
+            }
         }
         self.gap(
             cursor,
@@ -1024,9 +1063,9 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
             while let Some((relative, kind)) = find_signature(&self.buf[next..want]) {
                 let index = next + relative;
                 next = index + 1;
-                if kind == Signature::CentralRecord {
+                if let Signature::Stray(stray) = kind {
                     if lenient {
-                        self.stray_central(position + index as u64, followed, findings);
+                        self.stray_record(position + index as u64, followed, stray, findings);
                     }
                     continue;
                 }
@@ -1097,8 +1136,8 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
                 let index = next + relative;
                 next = index + 1;
                 let found = position + index as u64;
-                if kind == Signature::CentralRecord {
-                    self.stray_central(found, followed, findings);
+                if let Signature::Stray(stray) = kind {
+                    self.stray_record(found, followed, stray, findings);
                 } else if index + LFH_FIXED_LEN <= want {
                     let mut header = [0u8; LFH_FIXED_LEN];
                     header.copy_from_slice(&self.buf[index..index + LFH_FIXED_LEN]);
@@ -1120,41 +1159,45 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
         Ok(())
     }
 
-    /// Where the next header can start after a data descriptor.
+    /// Checks where a streaming reader resumes after a descriptor entry and
+    /// reports the entry when that is past the next header.
     ///
-    /// The descriptor's length depends on its optional signature and on
-    /// ZIP64, so the next header can sit at four distinct offsets. A known
-    /// position right behind the shortest descriptor leaves nothing to
-    /// search and costs no read. Any other candidate can leave bytes between
-    /// the descriptor a streaming reader consumes and the next header (a stray
-    /// record hides there), so the width is resolved by emulating that reader
-    /// and the search resumes where its descriptor ends.
-    fn after_descriptor(&mut self, layout: &EntryLayout, next: u64) -> Result<u64> {
-        let candidates = [12u64, 16, 20, 24].map(|width| layout.end.checked_add(width));
-        let known = candidates
-            .iter()
-            .flatten()
-            .copied()
-            .filter(|&p| p == next || self.is_known(p))
-            .min();
-        if let Some(k) = known
-            && known == candidates[0]
-        {
-            return Ok(k);
+    /// The bytes from the end of the data to the next header are searched with
+    /// the other gaps, so a signature inside the descriptor itself is found
+    /// there. With duplicate names the gaps are not searched, so the positions
+    /// where the next header can start behind each descriptor width are probed
+    /// instead.
+    fn check_descriptor(
+        &mut self,
+        layout: &EntryLayout,
+        exit: DescriptorExit,
+        next: u64,
+        findings: &mut Findings,
+    ) -> Result<()> {
+        if !self.search_gaps {
+            for width in DescriptorWidth::ALL {
+                self.probe(
+                    layout.end.saturating_add(width.bytes()),
+                    HiddenRegion::Gap,
+                    findings,
+                )?;
+            }
         }
-        let signed = self.peek(layout.end)? == Some(DATA_DESCRIPTOR_SIGNATURE);
-        let shortest = if signed { 16 } else { 12 };
-        if let Some(k) = known.filter(|&k| Some(k) == layout.end.checked_add(shortest)) {
-            return Ok(k);
+        let local = self.local_facts(layout.header_start)?;
+        let mut at_end = [0u8; DESCRIPTOR_LOOKAHEAD];
+        let available = self.file_len.saturating_sub(layout.end);
+        let len = usize::try_from(available).map_or(at_end.len(), |n| n.min(at_end.len()));
+        self.read_at(layout.end, &mut at_end[..len])?;
+        let resume = streaming_resume(layout, exit, local, &at_end[..len]);
+        if resume.position(layout.end).is_none_or(|p| p > next) {
+            findings.push_with(Slot::DescriptorOverrun, || {
+                ZipInconsistency::DescriptorOverrun {
+                    entry: layout.entry,
+                    offset: layout.end,
+                }
+            });
         }
-        let sizes = if self.has_zip64_extra(layout.header_start)? {
-            20
-        } else {
-            12
-        };
-        let width = sizes + if signed { 4 } else { 0 };
-        let streaming = layout.end.saturating_add(width);
-        Ok(known.map_or(streaming, |k| k.min(streaming)))
+        Ok(())
     }
 
     /// Judges the bytes at one position as a possible local header.
@@ -1178,19 +1221,23 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
         Ok(())
     }
 
-    /// Reports a central directory signature that a streaming reader would
-    /// stop at before an entry.
+    /// Reports a central directory or end record signature that a streaming
+    /// reader would stop at before an entry.
     ///
     /// The signature alone is the finding: such a reader reads no field of
     /// the record, so name, version and offsets are not judged.
-    fn stray_central(&mut self, position: u64, followed: Followed, findings: &mut Findings) {
+    fn stray_record(
+        &mut self,
+        position: u64,
+        followed: Followed,
+        kind: StrayKind,
+        findings: &mut Findings,
+    ) {
         if followed == Followed::ByDirectory || position < self.next_unjudged {
             return;
         }
         self.next_unjudged = position + 1;
-        if !findings.try_push(Slot::StrayCentral, || {
-            ZipInconsistency::StrayCentralRecord { offset: position }
-        }) {
+        if !findings.try_push(kind.slot(), || kind.finding(position)) {
             self.exhausted = true;
         }
     }
@@ -1211,7 +1258,9 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
         let name_len = u64::from(le_u16(header, 26));
         let extra_len = u64::from(le_u16(header, 28));
         let end = position + LFH_FIXED_LEN as u64 + name_len + extra_len;
-        if name_len > 0
+        // A nameless header still makes a streaming reader skip its compressed
+        // size.
+        if (name_len > 0 || le_u32(header, 18) > 0)
             && end <= self.map.directory_start
             && !findings.try_push(Slot::Hidden, || ZipInconsistency::HiddenLocalHeader {
                 offset: position,
@@ -1239,20 +1288,11 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
         Ok(())
     }
 
-    fn peek(&mut self, position: u64) -> Result<Option<[u8; 4]>> {
-        if position.saturating_add(4) > self.file_len {
-            return Ok(None);
-        }
-        let mut bytes = [0u8; 4];
-        self.read_at(position, &mut bytes)?;
-        Ok(Some(bytes))
-    }
-
-    /// Whether the local header at `header_start` carries a ZIP64 extra field,
-    /// which makes its data descriptor use 8-byte sizes.
-    fn has_zip64_extra(&mut self, header_start: u64) -> Result<bool> {
+    /// What the local header at `header_start` tells a streaming reader about
+    /// the entry's descriptor.
+    fn local_facts(&mut self, header_start: u64) -> Result<LocalFacts> {
         if header_start.saturating_add(LFH_FIXED_LEN as u64) > self.file_len {
-            return Ok(false);
+            return Ok(LocalFacts::default());
         }
         let mut header = [0u8; LFH_FIXED_LEN];
         self.read_at(header_start, &mut header)?;
@@ -1260,11 +1300,13 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
         let extra_len = usize::from(le_u16(&header, 28));
         let extra_start = header_start + LFH_FIXED_LEN as u64 + name_len;
         if extra_start.saturating_add(extra_len as u64) > self.file_len {
-            return Ok(false);
+            return Ok(LocalFacts::default());
         }
         let mut extra = vec![0u8; extra_len];
-        self.read_at(extra_start, &mut extra)?;
-        Ok(extra_ids(&extra).any(|id| id == ZIP64_EXTRA_ID))
+        if extra_len > 0 {
+            self.read_at(extra_start, &mut extra)?;
+        }
+        Ok(LocalFacts::parse(&header, &extra))
     }
 }
 
@@ -1407,24 +1449,55 @@ pub(super) fn le_u64(bytes: &[u8], at: usize) -> u64 {
     u64::from_le_bytes(raw)
 }
 
+/// A record that stops a streaming reader when it sits between entries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StrayKind {
+    Central,
+    End(EndRecordKind),
+}
+
+impl StrayKind {
+    const fn slot(self) -> Slot {
+        match self {
+            Self::Central => Slot::StrayCentral,
+            Self::End(_) => Slot::StrayEnd,
+        }
+    }
+
+    const fn finding(self, offset: u64) -> ZipInconsistency {
+        match self {
+            Self::Central => ZipInconsistency::StrayCentralRecord { offset },
+            Self::End(kind) => ZipInconsistency::StrayEndRecord { offset, kind },
+        }
+    }
+}
+
 /// A record kind the gap and prefix searches look for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Signature {
     LocalHeader,
-    CentralRecord,
+    Stray(StrayKind),
 }
 
-/// Offset and kind of the first local header or central record signature in
+/// Offset and kind of the first local header or stopping record signature in
 /// `bytes`.
+///
+/// Of the end-related signatures only the two end records stop a streaming
+/// reader; the ZIP64 locator and the data descriptor signature do not.
 fn find_signature(bytes: &[u8]) -> Option<(usize, Signature)> {
     bytes.windows(4).enumerate().find_map(|(index, w)| {
-        if w == LFH_SIGNATURE {
-            Some((index, Signature::LocalHeader))
+        let kind = if w == LFH_SIGNATURE {
+            Signature::LocalHeader
         } else if w == CDFH_SIGNATURE {
-            Some((index, Signature::CentralRecord))
+            Signature::Stray(StrayKind::Central)
+        } else if w == EOCD_SIGNATURE {
+            Signature::Stray(StrayKind::End(EndRecordKind::Classic))
+        } else if w == ZIP64_END_SIGNATURE {
+            Signature::Stray(StrayKind::End(EndRecordKind::Zip64))
         } else {
-            None
-        }
+            return None;
+        };
+        Some((index, kind))
     })
 }
 
@@ -1438,16 +1511,6 @@ enum Followed {
     ByDirectory,
 }
 
-/// Header ids of the well-formed prefix of an extra field block.
-fn extra_ids(mut extra: &[u8]) -> impl Iterator<Item = u16> + '_ {
-    std::iter::from_fn(move || {
-        let (head, rest) = extra.split_first_chunk::<4>()?;
-        let id = le_u16(head, 0);
-        let len = usize::from(le_u16(head, 2));
-        extra = rest.get(len..)?;
-        Some(id)
-    })
-}
-
+mod resume;
 #[cfg(test)]
 mod tests;

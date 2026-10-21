@@ -93,6 +93,22 @@ class SecurityConfig:
         """Allows or denies solid 7z archives."""
         ...
 
+    def with_parallel_decode_memory(self, size: int | None) -> SecurityConfig:
+        """
+        Sets the memory in bytes for decoding 7z LZMA2 runs ahead on worker threads.
+
+        ``None`` decodes on one thread. The default is 128 MiB (1 GiB for
+        ``permissive()``). A stock 7-Zip archive has 64 MiB runs and needs about
+        100 MiB per extra concurrent run. A valid archive decodes to the same bytes
+        either way and a corrupt one fails the same file. Each call may start up to
+        16 worker threads and hold its own lookahead, so concurrent calls multiply
+        both.
+
+        Raises:
+            ValueError: If ``size`` is zero, negative or above 2**64 - 1.
+        """
+        ...
+
     def with_zip_consistency(self, policy: _ZipConsistency) -> SecurityConfig:
         """
         Sets how ZIP archives with ambiguous structure are handled.
@@ -208,6 +224,14 @@ class SecurityConfig:
     def allow_world_writable(self) -> bool:
         """Whether world-writable files are allowed (default: False)."""
         ...
+
+    @property
+    def parallel_decode_memory(self) -> int | None:
+        """Lookahead memory in bytes for parallel 7z LZMA2 decoding, or ``None`` (default: 128 MiB)."""
+        ...
+
+    @parallel_decode_memory.setter
+    def parallel_decode_memory(self, value: int | None) -> None: ...
 
     @property
     def zip_consistency(self) -> _ZipConsistency:

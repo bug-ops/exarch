@@ -155,7 +155,7 @@ THEN no files are present in the output directory; the temp dir is cleaned up
 
 | ID | Requirement | Priority |
 |----|------------|----------|
-| FR-030 | `SecurityConfig` SHALL expose 15 fluent builder methods: `with_max_file_size`, `with_max_total_size`, `with_max_compression_ratio`, `with_max_file_count`, `with_max_path_depth`, `with_allowed`, `with_allow_symlinks`, `with_allow_hardlinks`, `with_allow_absolute_paths`, `with_allow_world_writable`, `with_preserve_permissions`, `with_allowed_extensions`, `with_banned_path_components`, `with_allow_solid_archives`, `with_max_solid_block_memory`; each returns `Self` | must |
+| FR-030 | `SecurityConfig` SHALL expose 16 fluent builder methods: `with_max_file_size`, `with_max_total_size`, `with_max_compression_ratio`, `with_max_file_count`, `with_max_path_depth`, `with_allowed`, `with_allow_symlinks`, `with_allow_hardlinks`, `with_allow_absolute_paths`, `with_allow_world_writable`, `with_preserve_permissions`, `with_allowed_extensions`, `with_banned_path_components`, `with_allow_solid_archives`, `with_max_solid_block_memory`, `with_parallel_decode`; each returns `Self` | must |
 | FR-031 | `SecurityConfig`, `AllowedFeatures`, and `ExtractionOptions` SHALL be annotated `#[non_exhaustive]`; external crates must use `Default::default()` plus builder methods — struct literal construction is a compile error | must |
 | FR-032 | `SecurityConfig::validate()` SHALL return `InvalidConfiguration` if: any numeric limit is zero (`max_file_size`, `max_total_size`, `max_file_count`, `max_path_depth`, `max_solid_block_memory`), or `max_compression_ratio` is zero, negative, or NaN | must |
 | FR-033 | `CreationConfig` SHALL support: `follow_symlinks`, `include_hidden`, `max_file_size`, `exclude_patterns` (glob), `strip_prefix`, `compression_level` (1–9), `preserve_permissions`, `format` override; `with_compression_level` returns `Result<Self, ArchiveError>` — callers must propagate the error with `?`; passing a level outside 1–9 returns `ArchiveError::InvalidCompressionLevel` instead of panicking | must |
@@ -207,6 +207,7 @@ THEN no files are present in the output directory; the temp dir is cleaned up
 | `banned_path_components` | `.git`, `.ssh`, `.gnupg`, `.aws`, `.kube`, `.docker`, `.env` |
 | `allow_solid_archives` | false |
 | `max_solid_block_memory` | 512 MB |
+| `parallel_decode` | `Bounded` 128 MiB (1 GiB for `permissive()`); `#[non_exhaustive] enum ParallelDecode { Sequential, Bounded(NonZeroU64) }`, no zero sentinel. Applies to one extraction: concurrent calls multiply threads (up to 16) and lookahead memory. A valid archive decodes to the same bytes in both modes; a corrupt one fails the same file, and only the failing file's leading bytes can differ |
 
 ## 6. Edge Cases and Error Handling
 

@@ -7,6 +7,7 @@ use tempfile::TempDir;
 
 use super::*;
 use crate::DecompressionBudget;
+use crate::EndRecordKind;
 use crate::ExtractionOptions;
 use crate::HiddenRegion;
 use crate::IntegrityCheck;
@@ -25,6 +26,8 @@ use crate::raw_zip::RawEntry;
 use crate::raw_zip::RawZip;
 use crate::raw_zip::deflate_zeros;
 use crate::test_utils::create_test_zip;
+
+mod streaming;
 
 fn config(policy: ZipConsistencyPolicy) -> SecurityConfig<Validated> {
     SecurityConfig::default()
@@ -91,21 +94,38 @@ fn clean_archives_have_no_findings() {
     assert!(findings_of(&empty).is_empty());
 
     for (signature, zip64) in [(true, false), (false, false), (true, true), (false, true)] {
-        let built = RawZip::new(vec![
-            RawEntry::stored("a.txt", b"hello").with_descriptor(signature, zip64),
-            RawEntry::stored("b.txt", b"world").with_descriptor(signature, zip64),
-        ])
-        .build();
+        let built = deflated_pair(signature, zip64).build();
         let archive = open_bytes(built.bytes);
         assert!(archive.structure().findings().is_empty());
         let reads = archive.structure().gap_reads();
-        let per_entry = match (signature, zip64) {
-            (false, false) => 0,
-            (true, false) => 1,
-            (_, true) => 3,
-        };
-        assert!(reads <= 2 * per_entry, "{signature} {zip64}: {reads}");
+        assert!(
+            reads <= 2 * MAX_READS_PER_DESCRIPTOR,
+            "{signature} {zip64}: {reads}"
+        );
     }
+    for zip64 in [false, true] {
+        let built = RawZip::new(vec![
+            RawEntry::stored("a.txt", b"hello").with_descriptor(true, zip64),
+            RawEntry::stored("b.txt", b"world").with_descriptor(true, zip64),
+        ])
+        .build();
+        assert!(findings_of(&built).is_empty(), "stored {zip64}");
+    }
+}
+
+/// Local header, lookahead and the descriptor bytes themselves.
+const MAX_READS_PER_DESCRIPTOR: usize = 4;
+
+fn deflated_pair(signature: bool, zip64: bool) -> RawZip {
+    RawZip::new(vec![
+        RawEntry::deflated("a.txt", b"hello hello hello").with_descriptor(signature, zip64),
+        RawEntry::deflated("b.txt", b"world world world").with_descriptor(signature, zip64),
+    ])
+}
+
+/// Offset where the data of `entry`, written at `local_offset`, ends.
+fn data_end(entry: &RawEntry, local_offset: usize) -> usize {
+    local_offset + LFH_FIXED_LEN + entry.name.len() + entry.local_extra.len() + entry.data.len()
 }
 
 #[test]
@@ -236,16 +256,16 @@ fn local_header_after_a_descriptor_is_found_at_every_descriptor_width() {
         (true, true, 24),
         (false, true, 20),
     ] {
-        let entry = RawEntry::stored("a.txt", b"hello").with_descriptor(signature, zip64);
-        let mut zip = RawZip::new(vec![entry]);
+        let entry = RawEntry::deflated("a.txt", b"hello").with_descriptor(signature, zip64);
+        let mut zip = RawZip::new(vec![entry.clone()]);
         zip.before_directory = evil.bytes[..evil.directory_start].to_vec();
         let built = zip.build();
         let archive = open_bytes(built.bytes.clone());
-        let end = built.local_offsets[0] as u64 + 30 + 5 + if zip64 { 20 } else { 0 } + 5;
+        let end = data_end(&entry, built.local_offsets[0]);
         assert_eq!(
             archive.structure().findings(),
             [ZipInconsistency::HiddenLocalHeader {
-                offset: end + width,
+                offset: end as u64 + width,
                 region: HiddenRegion::Gap,
             }],
             "{signature} {zip64}"
@@ -263,7 +283,19 @@ fn descriptor_size_equal_to_the_header_magic_is_not_a_hidden_header() {
     let built = RawZip::new(vec![entry]).build();
     let archive = open_bytes(built.bytes);
     assert!(archive.structure().findings().is_empty());
-    assert!(archive.structure().gap_reads() <= 1);
+    assert!(archive.structure().gap_reads() <= MAX_READS_PER_DESCRIPTOR);
+}
+
+#[test]
+fn descriptor_size_equal_to_the_header_magic_before_another_entry_is_a_hidden_header() {
+    const MAGIC_AS_SIZE: u64 = 0x0403_4b50;
+    let mut first = RawEntry::stored("zeros.bin", b"").with_descriptor(true, false);
+    first.data = deflate_zeros(MAGIC_AS_SIZE);
+    first.method = 8;
+    first.size = MAGIC_AS_SIZE;
+    let end = data_end(&first, 0);
+    let built = RawZip::new(vec![first, RawEntry::stored("b.txt", b"world")]).build();
+    assert_eq!(findings_of(&built), [hidden_at(end + 12)]);
 }
 
 #[test]
@@ -1779,7 +1811,7 @@ fn central_record_in_the_prefix_is_found_only_when_the_file_starts_with_pk() {
 #[test]
 fn central_signature_after_a_descriptor_is_found_at_every_descriptor_width() {
     for (signature, zip64) in [(true, false), (false, false), (true, true), (false, true)] {
-        let mut first = RawEntry::stored("a.txt", b"hello").with_descriptor(signature, zip64);
+        let mut first = RawEntry::deflated("a.txt", b"hello").with_descriptor(signature, zip64);
         first.padding_after = 4;
         let mut built = RawZip::new(vec![first, RawEntry::stored("b.txt", b"world")]).build();
         let at = built.local_offsets[1] - 4;

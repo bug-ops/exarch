@@ -15,6 +15,7 @@ pub use types::Result;
 pub use types::ZipBombDetails;
 pub use types::ZipBombScope;
 pub use zip_inconsistency::CentralRecordOrdinal;
+pub use zip_inconsistency::EndRecordKind;
 pub use zip_inconsistency::HiddenRegion;
 pub use zip_inconsistency::ZipEntryIndex;
 pub use zip_inconsistency::ZipHeaderField;

@@ -133,6 +133,30 @@ closed_enum! {
     }
 }
 
+closed_enum! {
+    /// Kind of end record found before an entry.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::EndRecordKind;
+    ///
+    /// assert_eq!(
+    ///     EndRecordKind::Zip64.to_string(),
+    ///     "ZIP64 end of central directory record"
+    /// );
+    /// ```
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[non_exhaustive]
+    pub enum EndRecordKind {
+        /// End of central directory record
+        Classic => "end of central directory record",
+
+        /// ZIP64 end of central directory record
+        Zip64 => "ZIP64 end of central directory record",
+    }
+}
+
 /// A structural finding that makes a ZIP archive ambiguous between readers.
 ///
 /// Names are the raw central directory bytes decoded lossily; the `zip`
@@ -203,6 +227,26 @@ pub enum ZipInconsistency {
         offset: u64,
     },
 
+    /// An end record signature sits in the bytes before the first entry or
+    /// between entries, so a streaming reader that stops listing at it never
+    /// sees the entries after it.
+    StrayEndRecord {
+        /// Absolute offset of the stray record.
+        offset: u64,
+        /// Kind of end record the signature starts.
+        kind: EndRecordKind,
+    },
+
+    /// A data descriptor makes a streaming reader resume past the next entry
+    /// header, so it skips or misreads that entry.
+    DescriptorOverrun {
+        /// Entry whose descriptor is misread.
+        entry: ZipEntryIndex,
+        /// Absolute offset where the entry's data ends and the descriptor
+        /// starts.
+        offset: u64,
+    },
+
     /// The central directory holds more records than its end record counts.
     UncountedCentralRecords {
         /// Count claimed by the end of central directory record.
@@ -247,6 +291,14 @@ impl std::fmt::Display for ZipInconsistency {
             Self::StrayCentralRecord { offset } => write!(
                 f,
                 "central directory record outside the central directory at offset {offset}"
+            ),
+            Self::StrayEndRecord { offset, kind } => {
+                write!(f, "{kind} before an entry, at offset {offset}")
+            }
+            Self::DescriptorOverrun { entry, offset } => write!(
+                f,
+                "data descriptor of entry {entry} at offset {offset} makes a streaming reader \
+                 resume past the next entry"
             ),
             Self::UncountedCentralRecords { counted, found } => write!(
                 f,
@@ -300,6 +352,23 @@ mod tests {
         assert_eq!(
             ZipInconsistency::StrayCentralRecord { offset: 9 }.to_string(),
             "central directory record outside the central directory at offset 9"
+        );
+        assert_eq!(
+            ZipInconsistency::StrayEndRecord {
+                offset: 11,
+                kind: EndRecordKind::Zip64
+            }
+            .to_string(),
+            "ZIP64 end of central directory record before an entry, at offset 11"
+        );
+        assert_eq!(
+            ZipInconsistency::DescriptorOverrun {
+                entry: ZipEntryIndex::new(2),
+                offset: 70
+            }
+            .to_string(),
+            "data descriptor of entry 2 at offset 70 makes a streaming reader resume past the \
+             next entry"
         );
         assert_eq!(
             ZipInconsistency::UncountedCentralRecords {

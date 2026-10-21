@@ -4,6 +4,7 @@
 use exarch_core::DecompressionBudget;
 use exarch_core::ExtractionOptions as CoreExtractionOptions;
 use exarch_core::IntegrityCheck;
+use exarch_core::ParallelDecode;
 use exarch_core::SecurityConfig as CoreSecurityConfig;
 use exarch_core::VerificationOptions as CoreVerificationOptions;
 use exarch_core::ZipConsistencyPolicy;
@@ -11,6 +12,7 @@ use exarch_core::creation::CreationConfig as CoreCreationConfig;
 use exarch_core::validate_config_entry;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use std::num::NonZeroU64;
 
 use crate::error::convert_error;
 
@@ -182,6 +184,27 @@ impl PySecurityConfig {
         policy: &str,
     ) -> PyResult<PyRefMut<'py, Self>> {
         slf.inner.zip_consistency = parse_zip_consistency(policy)?;
+        Ok(slf)
+    }
+
+    /// Sets the memory in bytes for decoding independent LZMA2 runs of a 7z
+    /// block ahead on worker threads, or `None` to decode on one thread.
+    ///
+    /// The default is 128 MiB (1 GiB for `permissive()`). A stock 7-Zip
+    /// archive has 64 MiB runs and needs about 100 MiB per extra concurrent
+    /// run. A valid archive decodes to the same bytes either way and a corrupt
+    /// one fails the same file. Each call may start up to 16 worker threads and
+    /// hold its own lookahead, so concurrent calls multiply both.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ValueError` if `size` is zero, negative or above 2**64 - 1.
+    #[pyo3(signature = (size))]
+    fn with_parallel_decode_memory(
+        mut slf: PyRefMut<'_, Self>,
+        size: Option<i128>,
+    ) -> PyResult<PyRefMut<'_, Self>> {
+        slf.inner.parallel_decode = parse_parallel_decode_memory(size)?;
         Ok(slf)
     }
 
@@ -379,6 +402,19 @@ impl PySecurityConfig {
         Ok(())
     }
 
+    /// Returns the lookahead memory in bytes for parallel 7z LZMA2 decoding,
+    /// or `None` when decoding runs on one thread.
+    #[getter]
+    fn get_parallel_decode_memory(&self) -> Option<u64> {
+        self.inner.parallel_decode.lookahead().map(NonZeroU64::get)
+    }
+
+    #[setter]
+    fn set_parallel_decode_memory(&mut self, value: Option<i128>) -> PyResult<()> {
+        self.inner.parallel_decode = parse_parallel_decode_memory(value)?;
+        Ok(())
+    }
+
     #[getter]
     fn get_max_solid_block_memory(&self) -> u64 {
         self.inner.max_solid_block_memory
@@ -443,6 +479,27 @@ impl PySecurityConfig {
             self.inner.max_path_depth
         )
     }
+}
+
+/// Maps the Python value of `parallel_decode_memory` (`None` or a positive
+/// byte count) to the core mode.
+///
+/// The count arrives as `i128` so that negative and oversized integers reach
+/// the `ValueError` below instead of pyo3's `OverflowError`.
+fn parse_parallel_decode_memory(value: Option<i128>) -> PyResult<ParallelDecode> {
+    value
+        .map(|bytes| {
+            u64::try_from(bytes)
+                .ok()
+                .and_then(NonZeroU64::new)
+                .ok_or_else(|| {
+                    PyValueError::new_err(
+                        "parallel_decode_memory must be positive (use None to disable)",
+                    )
+                })
+        })
+        .transpose()
+        .map(ParallelDecode::from)
 }
 
 /// Parses the string form shared with `ZipConsistencyPolicy::as_str`.
@@ -1383,5 +1440,27 @@ mod tests {
             config.set_max_solid_block_memory(0).is_err(),
             "Should reject zero"
         );
+    }
+
+    #[test]
+    fn test_parallel_decode_memory_defaults_and_setter() {
+        const MIB: u64 = 1024 * 1024;
+        let mut config = PySecurityConfig::new();
+        assert_eq!(config.get_parallel_decode_memory(), Some(128 * MIB));
+        assert_eq!(
+            PySecurityConfig::permissive().get_parallel_decode_memory(),
+            Some(1024 * MIB)
+        );
+
+        config
+            .set_parallel_decode_memory(Some(i128::from(64 * MIB)))
+            .unwrap();
+        assert_eq!(config.get_parallel_decode_memory(), Some(64 * MIB));
+        config.set_parallel_decode_memory(None).unwrap();
+        assert_eq!(config.get_parallel_decode_memory(), None);
+        assert!(config.set_parallel_decode_memory(Some(0)).is_err());
+        assert!(config.set_parallel_decode_memory(Some(-1)).is_err());
+        assert!(config.set_parallel_decode_memory(Some(1 << 70)).is_err());
+        assert_eq!(config.get_parallel_decode_memory(), None);
     }
 }

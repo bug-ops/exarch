@@ -309,10 +309,11 @@ const config = new SecurityConfig()
   .allowedExtensions([".txt", ".md"])        // Restrict to a set of extensions
   .bannedPathComponents(["__MACOSX"])        // Skip these path components
   .setAllowSolidArchives(true)               // Allow solid 7z archives (default: false)
-  .setZipConsistency('ignore');              // ZIP structure policy: 'enforce' (default) or 'ignore'
+  .setZipConsistency('ignore')               // ZIP structure policy: 'enforce' (default) or 'ignore'
+  .setParallelDecodeMemory(256 * 1024 * 1024); // 7z LZMA2 lookahead memory (default 128 MiB); null decodes on one thread
 ```
 
-**Getters:** `allowSymlinks`, `allowHardlinks`, `allowAbsolutePaths`, `allowWorldWritable`, `allowSolidArchives` — each returns the corresponding boolean policy value. `zipConsistency` returns `'enforce'` or `'ignore'`.
+**Getters:** `allowSymlinks`, `allowHardlinks`, `allowAbsolutePaths`, `allowWorldWritable`, `allowSolidArchives` — each returns the corresponding boolean policy value. `zipConsistency` returns `'enforce'` or `'ignore'`. `parallelDecodeMemory` returns the 7z lookahead memory in bytes, or `null` when decoding runs on one thread. Each extract or verify call may start up to 16 worker threads and hold its own lookahead, so concurrent calls multiply both.
 
 ## Security Features
 

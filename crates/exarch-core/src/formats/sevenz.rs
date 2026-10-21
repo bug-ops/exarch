@@ -57,8 +57,21 @@
 //! any byte is decoded, every block's coder memory (LZMA/LZMA2 dictionary,
 //! `PPMd` memory) is checked against `max_decoder_memory`, and blocks with an
 //! unknown coder, AES content encryption, or a stream-less entry between their
-//! stream files are refused. Extraction decodes on one thread because the
-//! multi-threaded LZMA2 decoder buffers whole work units with no output bound.
+//! stream files are refused.
+//!
+//! # Parallel LZMA2 Decoding
+//!
+//! A block that holds a single LZMA2 stream is split at its dictionary resets
+//! into independent runs (7-Zip writes one per 4x dictionary when it
+//! compresses on several threads). `extract` and `verify` decode those runs
+//! ahead on worker threads, within the lookahead memory [`ParallelDecode`]
+//! allows (128 MiB by default), while the consumer reads them back in order.
+//! A run that does not fit the budget, a stream the planner cannot prove well
+//! formed, and every other block layout decode sequentially, with the same
+//! bytes and error kinds (a corrupt stream fails the same file either way).
+//! The decoder window stays bounded by `max_decoder_memory`; the lookahead adds
+//! at most its configured budget on top. sevenz-rust2's own multi-threaded
+//! reader is not used because it buffers whole runs with no output bound.
 //!
 //! **Residual (upstream)**: an encoded (compressed) archive header is decoded
 //! inside `Archive::read` with sevenz-rust2's unlimited memory limit, before
@@ -119,7 +132,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
 use sevenz_rust2::Archive;
-use sevenz_rust2::ArchiveReader;
+use sevenz_rust2::BlockDecoder;
 use sevenz_rust2::Password;
 
 // Atomic counter for generating unique temporary file names
@@ -139,6 +152,7 @@ use crate::ArchiveError;
 use crate::EntryCompression;
 use crate::ExtractionOptions;
 use crate::ExtractionReport;
+use crate::ParallelDecode;
 use crate::ProgressCallback;
 use crate::Result;
 use crate::SecurityConfig;
@@ -165,6 +179,9 @@ use crate::types::DestDir;
 use crate::types::EntryType;
 
 use super::common;
+use super::sevenz_lzma2::DecodeKnobs;
+use super::sevenz_lzma2::Lzma2Stream;
+use super::sevenz_lzma2::with_parallel_reader;
 use super::traits::ArchiveFormat;
 
 /// Cached entry metadata from initial archive read.
@@ -343,6 +360,17 @@ pub(crate) fn check_solid_policy(
 /// Fixed decoder memory charged for a `BZip2` coder, in bytes.
 const BZIP2_DECODER_MEMORY: u64 = 4 * 1024 * 1024;
 
+/// Dictionary size an LZMA2 coder declares in its one property byte, or `None`
+/// for a byte sevenz-rust2 rejects.
+fn lzma2_dict_size(props: &[u8]) -> Option<u32> {
+    let bits = u32::from(*props.first()?);
+    match bits {
+        0..=39 => Some((2 | (bits & 1)) << (bits / 2 + 11)),
+        40 => Some(u32::MAX),
+        _ => None,
+    }
+}
+
 /// Decoder memory a coder needs, estimated from its properties.
 ///
 /// sevenz-rust2 applies no memory limit of its own, so the limit is enforced
@@ -372,15 +400,7 @@ fn coder_memory(coder: &sevenz_rust2::Coder, unpack_size: u64) -> Option<u64> {
             let dict = props.get(1..5)?;
             Some(window(u64::from(u32::from_le_bytes(dict.try_into().ok()?))))
         }
-        EncoderMethod::ID_LZMA2 => {
-            let bits = u32::from(*props.first()?);
-            let dict = match bits {
-                0..=39 => u64::from(2 | (bits & 1)) << (bits / 2 + 11),
-                40 => u64::from(u32::MAX),
-                _ => return None,
-            };
-            Some(window(dict))
-        }
+        EncoderMethod::ID_LZMA2 => Some(window(u64::from(lzma2_dict_size(props)?))),
         EncoderMethod::ID_PPMD => {
             let mem = props.get(1..5)?;
             Some(u64::from(u32::from_le_bytes(mem.try_into().ok()?)))
@@ -582,15 +602,186 @@ pub(crate) fn refusal_issues(refusals: &[SevenZRefusal]) -> Vec<VerificationIssu
     issues
 }
 
-/// Builds the reader that decodes blocks for `extract`.
+/// Result of an entry callback, as sevenz-rust2 defines it.
+type EntryResult = std::result::Result<bool, sevenz_rust2::Error>;
+
+/// Verifies the CRC32 of the bytes read through it once `remaining` of them
+/// were read, with the error sevenz-rust2 raises for a mismatch.
+struct CrcChecked<R> {
+    inner: R,
+    crc: flate2::Crc,
+    expected: u64,
+    remaining: u64,
+}
+
+impl<R: Read> CrcChecked<R> {
+    fn new(inner: R, remaining: u64, expected: u64) -> Self {
+        Self {
+            inner,
+            crc: flate2::Crc::new(),
+            expected,
+            remaining,
+        }
+    }
+}
+
+impl<R: Read> Read for CrcChecked<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.remaining == 0 {
+            return Ok(0);
+        }
+        let size = self.inner.read(buf)?;
+        self.crc.update(&buf[..size]);
+        self.remaining = self.remaining.saturating_sub(size as u64);
+        if self.remaining == 0 && u64::from(self.crc.sum()) != self.expected {
+            return Err(io::Error::other(
+                sevenz_rust2::Error::ChecksumVerificationFailed,
+            ));
+        }
+        Ok(size)
+    }
+}
+
+/// Decodes the files of one block and hands each to `each`.
 ///
-/// Every `ArchiveReader` goes through here: its default thread count is the
-/// machine's parallelism, which selects the multi-threaded LZMA2 decoder that
-/// buffers whole work units in memory with no output bound.
-fn single_threaded_reader<R: Read + Seek>(archive: Archive, source: R) -> ArchiveReader<R> {
-    let mut reader = ArchiveReader::from_archive(archive, source, Password::empty());
-    reader.set_thread_count(1);
-    reader
+/// Blocks that hold a single LZMA2 stream with enough independent runs are
+/// decoded ahead on worker threads within the `parallel` lookahead budget;
+/// every other block, and every block under `ParallelDecode::Sequential`,
+/// goes through sevenz-rust2's single-threaded `BlockDecoder`. Both paths hand
+/// `each` the same bytes for a valid stream. For a corrupt one both deliver
+/// every byte decoded before the failure, so the same file fails with the same
+/// error kind; only how many leading bytes that file received can differ.
+///
+/// Returns `Ok(false)` when `each` stopped the walk.
+fn decode_block_entries<R: Read + Seek>(
+    source: &mut R,
+    archive: &Archive,
+    block_index: usize,
+    parallel: ParallelDecode,
+    knobs: DecodeKnobs,
+    each: &mut impl FnMut(&sevenz_rust2::ArchiveEntry, &mut dyn Read) -> EntryResult,
+) -> EntryResult {
+    let password = Password::empty();
+    let first = archive.stream_map.block_first_file_index[block_index];
+    let count = BlockDecoder::new(1, block_index, archive, &password, &mut *source).entry_count();
+    let plan = match parallel {
+        ParallelDecode::Bounded(lookahead) if knobs.threads.get() > 1 => {
+            parallel_stream(archive, block_index, first..first + count, knobs.min_unit)
+                .map(|stream| (stream, lookahead))
+        }
+        _ => None,
+    };
+    let Some((stream, lookahead)) = plan else {
+        return BlockDecoder::new(1, block_index, archive, &password, source)
+            .for_each_entries(each);
+    };
+
+    // The dry run fails exactly as the sequential path would on a coder graph
+    // or property it rejects, before any thread starts.
+    BlockDecoder::new(1, block_index, archive, &password, &mut *source)
+        .for_each_entries(&mut |_, _| Ok(false))?;
+    let block = &archive.blocks[block_index];
+
+    with_parallel_reader(&mut *source, stream, knobs, lookahead.get(), |reader| {
+        let mut block_reader: Box<dyn Read + '_> = if block.has_crc {
+            Box::new(CrcChecked::new(reader, block.get_unpack_size(), block.crc))
+        } else {
+            Box::new(reader)
+        };
+        for file in &archive.files[first..first + count] {
+            if is_sevenz_payload(file) {
+                let mut decoder: Box<dyn Read + '_> = Box::new((&mut block_reader).take(file.size));
+                if file.has_crc {
+                    decoder = Box::new(CrcChecked::new(decoder, file.size, file.crc));
+                }
+                if !each(file, &mut decoder)? {
+                    return Ok(false);
+                }
+            } else {
+                let empty: &mut dyn Read = &mut ([0u8; 0].as_slice());
+                if !each(file, empty)? {
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(true)
+    })
+}
+
+/// The LZMA2 stream of a block that can be decoded in parallel, or `None`.
+///
+/// Eligible blocks are one LZMA2 coder over one pack stream whose files (the
+/// `files` span the decoder walks) account for the whole output, with room for
+/// at least two runs of `min_unit`.
+fn parallel_stream(
+    archive: &Archive,
+    block_index: usize,
+    files: std::ops::Range<usize>,
+    min_unit: u64,
+) -> Option<Lzma2Stream> {
+    use sevenz_rust2::EncoderMethod;
+
+    let block = &archive.blocks[block_index];
+    let [coder] = block.coders.as_slice() else {
+        return None;
+    };
+    if coder.encoder_method_id() != EncoderMethod::ID_LZMA2 {
+        return None;
+    }
+    let first_packs = archive.stream_map.block_first_pack_stream_index();
+    let first_pack = *first_packs.get(block_index)?;
+    let end_pack = first_packs
+        .get(block_index + 1)
+        .copied()
+        .unwrap_or_else(|| archive.pack_sizes().len());
+    if end_pack.checked_sub(first_pack) != Some(1) {
+        return None;
+    }
+    let output_len = block.get_unpack_size();
+    if output_len < min_unit.saturating_mul(2) {
+        return None;
+    }
+    let files_len = archive
+        .files
+        .get(files)?
+        .iter()
+        .filter(|file| is_sevenz_payload(file))
+        .try_fold(0u64, |sum, file| sum.checked_add(file.size))?;
+    if files_len != output_len {
+        return None;
+    }
+    let offset = SIGNATURE_HEADER_SIZE
+        .checked_add(archive.pack_pos())?
+        .checked_add(*archive.stream_map.pack_stream_offsets().get(first_pack)?)?;
+    Some(Lzma2Stream {
+        offset,
+        len: *archive.pack_sizes().get(first_pack)?,
+        output_len,
+        dict_size: lzma2_dict_size(coder.properties())?,
+    })
+}
+
+/// Decodes every block and then the files without data, handing each to
+/// `each`, in the order sevenz-rust2's `ArchiveReader::for_each_entries` uses.
+fn decode_archive_entries<R: Read + Seek>(
+    source: &mut R,
+    archive: &Archive,
+    parallel: ParallelDecode,
+    knobs: DecodeKnobs,
+    each: &mut impl FnMut(&sevenz_rust2::ArchiveEntry, &mut dyn Read) -> EntryResult,
+) -> std::result::Result<(), sevenz_rust2::Error> {
+    for block_index in 0..archive.blocks.len() {
+        decode_block_entries(source, archive, block_index, parallel, knobs, each)?;
+    }
+    for (index, file) in archive.files.iter().enumerate() {
+        if archive.stream_map.file_block_index[index].is_none() {
+            let empty: &mut dyn Read = &mut ([0u8; 0].as_slice());
+            if !each(file, empty)? {
+                return Ok(());
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Per-block state while decoding one 7z block for an integrity pass.
@@ -714,6 +905,10 @@ pub(crate) fn verify_sevenz_blocks<R: Read + Seek>(
         }
     }
 
+    let decode = DecodeContext {
+        slots,
+        knobs: DecodeKnobs::production(),
+    };
     for (block_index, files) in payload.iter().enumerate() {
         if files.is_empty() {
             continue;
@@ -722,7 +917,7 @@ pub(crate) fn verify_sevenz_blocks<R: Read + Seek>(
             Some(reason) => {
                 mark_files(pass, archive, reason, files.iter().map(|&(index, _)| index));
             }
-            None => verify_sevenz_block(archive, source, pass, slots, block_index, files)?,
+            None => verify_sevenz_block(archive, source, pass, decode, block_index, files)?,
         }
     }
     Ok(())
@@ -783,14 +978,22 @@ fn entries_uncovered_by_block_crc(
         .collect()
 }
 
+/// What `verify` shares between the blocks of one archive.
+#[derive(Clone, Copy)]
+struct DecodeContext<'a> {
+    slots: &'a [Option<Slot>],
+    knobs: DecodeKnobs,
+}
+
 fn verify_sevenz_block<R: Read + Seek>(
     archive: &Archive,
     source: &mut R,
     pass: &mut IntegrityPass<'_>,
-    slots: &[Option<Slot>],
+    decode: DecodeContext<'_>,
     block_index: usize,
     payload: &[PayloadFile],
 ) -> Result<()> {
+    let DecodeContext { slots, knobs } = decode;
     let block = &archive.blocks[block_index];
     let all = payload.iter().map(|&(index, _)| index);
 
@@ -804,9 +1007,7 @@ fn verify_sevenz_block<R: Read + Seek>(
         return Ok(());
     }
 
-    let password = Password::empty();
     let first = archive.stream_map.block_first_file_index[block_index];
-    let decoder = sevenz_rust2::BlockDecoder::new(1, block_index, archive, &password, source);
     let mut scan = BlockScan {
         pass,
         slots,
@@ -814,7 +1015,15 @@ fn verify_sevenz_block<R: Read + Seek>(
         visited: BTreeSet::new(),
         stop: None,
     };
-    let result = decoder.for_each_entries(&mut |file, reader| Ok(scan.visit(file, reader)));
+    let parallel = scan.pass.config().parallel_decode;
+    let result = decode_block_entries(
+        source,
+        archive,
+        block_index,
+        parallel,
+        knobs,
+        &mut |file, reader| Ok(scan.visit(file, reader)),
+    );
     let (stop, visited) = (scan.stop.take(), scan.visited);
 
     let unvisited: Vec<usize> = all.filter(|index| !visited.contains(index)).collect();
@@ -1487,7 +1696,7 @@ impl<R: Read + Seek> SevenZArchive<R> {
     )]
     fn extract_with_callback(
         source: &mut R,
-        archive: Archive,
+        archive: &Archive,
         dest: &DestDir,
         validator: &mut EntryValidator,
         dir_cache: &mut common::DirCache,
@@ -1610,8 +1819,13 @@ impl<R: Read + Seek> SevenZArchive<R> {
 
         // Reuses the Archive header already parsed in `new()` instead of
         // re-parsing it from scratch (issue #492).
-        let mut archive_reader = single_threaded_reader(archive, source);
-        let result = archive_reader.for_each_entries(&mut extract_fn);
+        let result = decode_archive_entries(
+            source,
+            archive,
+            config.parallel_decode,
+            DecodeKnobs::production(),
+            &mut extract_fn,
+        );
         let mut accumulated = ctx.report;
         common::push_duplicate_skip_warning(
             &mut accumulated,
@@ -1729,21 +1943,16 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
         }
 
         // Step 3: Extract with FRESH validator to avoid quota double-counting.
-        // The archive header itself was already parsed once in `new()`;
-        // cloning it here (rather than `mem::take`, issue #492 adversarial
-        // review finding C2) lets extract_with_callback reuse it via
-        // ArchiveReader::from_archive instead of re-parsing, while leaving
-        // `self.archive` intact so a second `extract()` call on the same
-        // instance still has real entry metadata to read, instead of
-        // silently extracting zero files against `Archive::default()`.
+        // The archive header was already parsed once in `new()` and is only
+        // borrowed here, so a second `extract()` call on the same instance
+        // still has real entry metadata to read.
         let mut validator = EntryValidator::new(config, &dest);
         let mut dir_cache = common::DirCache::new();
         let total = self.entries.len();
-        let archive = self.archive.clone();
 
         let report = Self::extract_with_callback(
             &mut self.source,
-            archive,
+            &self.archive,
             &dest,
             &mut validator,
             &mut dir_cache,
@@ -1965,7 +2174,7 @@ mod tests {
     const SEVENZ_MAGIC: [u8; 6] = [0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C];
 
     /// Load pre-generated fixture from tests/fixtures/
-    fn load_fixture(name: &str) -> Vec<u8> {
+    pub(super) fn load_fixture(name: &str) -> Vec<u8> {
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
         let fixture_path = std::path::PathBuf::from(manifest_dir)
             .parent()
@@ -2468,6 +2677,48 @@ mod tests {
                 assert_matches!(compression, EntryCompression::Entry(_));
             }
         }
+    }
+
+    fn entry_compressed_sizes(name: &str) -> Vec<u64> {
+        let (archive, len) = parse_fixture(name);
+        let compression = sevenz_entry_compression(&archive, len).unwrap();
+        let entries: Vec<u64> = compression
+            .iter()
+            .filter_map(|c| match c {
+                EntryCompression::Entry(size) => Some(*size),
+                _ => None,
+            })
+            .collect();
+        entries
+    }
+
+    #[test]
+    fn test_compression_bcj2_block_counts_its_four_pack_streams() {
+        let (archive, _) = parse_fixture("bcj2.7z");
+        assert_eq!(archive.pack_sizes().len(), 4);
+        let expected: u64 = archive.pack_sizes().iter().sum();
+
+        assert_eq!(entry_compressed_sizes("bcj2.7z"), [expected]);
+    }
+
+    #[test]
+    fn test_compression_bcj2_block_excludes_an_unreferenced_pack_stream() {
+        let (archive, _) = parse_fixture("bcj2-spare-pack.7z");
+        let pack_sizes = archive.pack_sizes();
+        assert_eq!(pack_sizes.len(), 5);
+        assert_eq!(pack_sizes[4], 7);
+        let expected: u64 = pack_sizes[..4].iter().sum();
+
+        assert_eq!(entry_compressed_sizes("bcj2-spare-pack.7z"), [expected]);
+    }
+
+    #[test]
+    fn test_compression_bcj2_id_on_a_one_input_coder_is_capped_at_declared_streams() {
+        let (archive, _) = parse_fixture("bcj2-simple-coder.7z");
+        assert_eq!(archive.pack_sizes().len(), 1);
+        let expected = archive.pack_sizes()[0];
+
+        assert_eq!(entry_compressed_sizes("bcj2-simple-coder.7z"), [expected]);
     }
 
     #[test]
@@ -3167,7 +3418,10 @@ mod tests {
         build_solid_sevenz_archive(entries, true)
     }
 
-    fn build_solid_sevenz_archive(entries: &[(&str, &[u8])], copy_method: bool) -> Vec<u8> {
+    pub(super) fn build_solid_sevenz_archive(
+        entries: &[(&str, &[u8])],
+        copy_method: bool,
+    ) -> Vec<u8> {
         use sevenz_rust2::ArchiveEntry;
         use sevenz_rust2::ArchiveWriter;
         use sevenz_rust2::EncoderConfiguration;
@@ -3932,14 +4186,19 @@ mod tests {
         sevenz_refusals(archive, &config)
     }
 
-    fn visited_names(archive: Archive, source: Vec<u8>) -> Vec<String> {
+    fn visited_names(archive: &Archive, source: Vec<u8>) -> Vec<String> {
         let mut names = Vec::new();
-        single_threaded_reader(archive, Cursor::new(source))
-            .for_each_entries(|entry, _| {
+        decode_archive_entries(
+            &mut Cursor::new(source),
+            archive,
+            ParallelDecode::Sequential,
+            DecodeKnobs::production(),
+            &mut |entry, _| {
                 names.push(entry.name.clone());
                 Ok(true)
-            })
-            .unwrap();
+            },
+        )
+        .unwrap();
         names
     }
 
@@ -3949,7 +4208,7 @@ mod tests {
         let archive = Archive::read(&mut Cursor::new(bytes.clone()), &Password::empty()).unwrap();
 
         assert!(block_refusals(&archive).is_empty());
-        assert!(visited_names(archive, bytes).contains(&"full.txt".to_string()));
+        assert!(visited_names(&archive, bytes).contains(&"full.txt".to_string()));
     }
 
     /// `interleaved-empty.7z` has a stream-less entry between the stream files
@@ -3975,7 +4234,7 @@ mod tests {
 
         // If sevenz-rust2 starts visiting every stream file, the predicate can
         // be relaxed.
-        let visited = visited_names(archive, bytes);
+        let visited = visited_names(&archive, bytes);
         let dropped = stream_files.iter().filter(|n| !visited.contains(n)).count();
         assert_eq!(dropped, 1, "{visited:?}");
     }
@@ -4120,3 +4379,6 @@ mod tests {
         assert_matches!(stop, Some(BlockStop::Fatal(ArchiveError::Io(_))));
     }
 }
+
+#[cfg(test)]
+mod parallel_tests;

@@ -741,12 +741,12 @@ pub fn execute(
     let allowed_extensions = parse_extensions(&args.allowed_extensions);
 
     let config = args
-        .zip
-        .apply(args.links.apply(apply_size_limits(
+        .parallel
+        .apply(args.zip.apply(args.links.apply(apply_size_limits(
             SecurityConfig::default().with_max_file_count(args.max_files),
             args.max_total_size,
             args.max_file_size,
-        )))
+        ))))
         .with_max_compression_ratio(f64::from(args.max_compression_ratio))
         .with_max_path_depth(args.max_path_depth)
         .with_allow_absolute_paths(args.allow_absolute_paths)

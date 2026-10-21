@@ -217,6 +217,11 @@ config = config.with_allow_solid_archives(True)  # Allow solid 7z archives
 config = config.with_zip_consistency(
     "ignore"
 )  # ZIP structure policy: "enforce" (default) or "ignore"
+config = config.with_parallel_decode_memory(
+    256 * 1024 * 1024
+)  # 7z LZMA2 lookahead memory (default 128 MiB); None decodes on one thread
+# Each extract/verify call may start up to 16 worker threads and hold its own
+# lookahead, so concurrent calls multiply both.
 ```
 
 ## Security Features

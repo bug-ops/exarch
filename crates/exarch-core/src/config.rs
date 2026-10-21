@@ -1,6 +1,7 @@
 //! Security configuration for archive extraction.
 
 use std::marker::PhantomData;
+use std::num::NonZeroU64;
 use std::ops::Deref;
 use std::ops::DerefMut;
 
@@ -102,6 +103,108 @@ closed_enum! {
 
         /// Use the central directory interpretation without structural findings
         Ignore => "ignore",
+    }
+}
+
+/// How much extra memory a 7z block may use to decode LZMA2 runs ahead on
+/// worker threads.
+///
+/// An LZMA2 stream written with multiple threads (7-Zip's default for large
+/// inputs) consists of independent runs, so several can be decoded at once.
+/// Decoded runs wait in memory until the consumer reaches them, so the
+/// lookahead is bounded: `Bounded(n)` lets in-flight runs hold at most `n`
+/// bytes on top of the decoder window that
+/// [`max_decoder_memory`](SecurityConfigFields::max_decoder_memory) already
+/// admits. `Sequential` decodes on the calling thread only.
+///
+/// Archives written with runs of a few MiB decode within about 10% of an
+/// unbounded multi-threaded reader at the default; a stock 7-Zip archive has
+/// 64 MiB runs and needs about 100 MiB of lookahead
+/// per extra concurrent run.
+///
+/// A valid archive decodes to the same bytes in either mode, and a corrupt one
+/// fails the same file with the same error kind; only how many leading bytes
+/// that file received can differ.
+///
+/// # Concurrency
+///
+/// The limit applies to one extraction or verification. Each call may start
+/// up to 16 worker threads and hold its own lookahead, so concurrent calls
+/// (for example from several Python threads or Node promises) multiply both
+/// the threads and the memory. Size the setting for the number of calls that
+/// can run at once, or use `Sequential`.
+///
+/// # Examples
+///
+/// ```
+/// use std::num::NonZeroU64;
+///
+/// use exarch_core::ParallelDecode;
+/// use exarch_core::SecurityConfig;
+///
+/// assert_eq!(
+///     SecurityConfig::default().parallel_decode,
+///     ParallelDecode::Bounded(NonZeroU64::new(128 * 1024 * 1024).unwrap())
+/// );
+/// let config = SecurityConfig::default().with_parallel_decode(ParallelDecode::Sequential);
+/// assert_eq!(config.parallel_decode, ParallelDecode::Sequential);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ParallelDecode {
+    /// Decode on the calling thread only
+    Sequential,
+
+    /// Decode runs ahead on worker threads, holding at most this many bytes
+    Bounded(NonZeroU64),
+}
+
+/// Builds a non-zero constant; a zero literal fails compilation.
+const fn non_zero(n: u64) -> NonZeroU64 {
+    match NonZeroU64::new(n) {
+        Some(n) => n,
+        None => panic!("constant must be non-zero"),
+    }
+}
+
+impl ParallelDecode {
+    /// Default lookahead: 128 MiB.
+    pub const DEFAULT_BYTES: NonZeroU64 = non_zero(128 * 1024 * 1024);
+
+    /// The lookahead memory in bytes, or `None` for [`Sequential`].
+    ///
+    /// [`Sequential`]: ParallelDecode::Sequential
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::num::NonZeroU64;
+    ///
+    /// use exarch_core::ParallelDecode;
+    ///
+    /// assert_eq!(ParallelDecode::Sequential.lookahead(), None);
+    /// let bytes = NonZeroU64::new(1 << 20).unwrap();
+    /// assert_eq!(ParallelDecode::Bounded(bytes).lookahead(), Some(bytes));
+    /// ```
+    #[must_use]
+    pub const fn lookahead(self) -> Option<NonZeroU64> {
+        match self {
+            Self::Sequential => None,
+            Self::Bounded(bytes) => Some(bytes),
+        }
+    }
+}
+
+impl From<Option<NonZeroU64>> for ParallelDecode {
+    /// `None` is [`ParallelDecode::Sequential`].
+    fn from(lookahead: Option<NonZeroU64>) -> Self {
+        lookahead.map_or(Self::Sequential, Self::Bounded)
+    }
+}
+
+impl Default for ParallelDecode {
+    fn default() -> Self {
+        Self::Bounded(Self::DEFAULT_BYTES)
     }
 }
 
@@ -253,10 +356,22 @@ pub struct SecurityConfigFields {
     /// `verify` of `.tar.xz`. Other codecs are bounded by their format
     /// (bzip2 blocks of at most 900 KB; zstd windows above 128 MiB are
     /// rejected) and are not governed by this value. Not exposed through the
-    /// CLI or language bindings.
+    /// CLI or language bindings. Also admits the 7z decoder window; the
+    /// lookahead of parallel 7z decoding is budgeted separately by
+    /// [`parallel_decode`](Self::parallel_decode).
     ///
     /// Default: 256 MiB (268,435,456 bytes)
     pub max_decoder_memory: u64,
+
+    /// Lookahead memory for decoding independent LZMA2 runs of a 7z block on
+    /// worker threads.
+    ///
+    /// Applies to `extract` and `verify` with integrity checking of 7z
+    /// archives. It is separate from `max_decoder_memory`, which keeps
+    /// bounding the decoder window. See [`ParallelDecode`].
+    ///
+    /// Default: `Bounded` at 128 MiB (1 GiB for [`SecurityConfig::permissive`])
+    pub parallel_decode: ParallelDecode,
 
     /// How ZIP archives with ambiguous structure are handled.
     ///
@@ -310,6 +425,7 @@ impl Default for SecurityConfigFields {
             max_solid_block_memory: 512 * 1024 * 1024, // 512 MB
             max_tar_metadata_bytes: 4 * 1024 * 1024,   // 4 MiB
             max_decoder_memory: 256 * 1024 * 1024,     // 256 MiB
+            parallel_decode: ParallelDecode::Bounded(ParallelDecode::DEFAULT_BYTES),
             zip_consistency: ZipConsistencyPolicy::Enforce,
             relaxed_for_verify_preflight: false,
         }
@@ -408,6 +524,7 @@ impl Default for SecurityConfig<Unvalidated> {
     /// - `max_solid_block_memory`: 512 MB
     /// - `max_tar_metadata_bytes`: 4 MiB
     /// - `max_decoder_memory`: 256 MiB
+    /// - `parallel_decode`: `Bounded` at 128 MiB
     /// - `zip_consistency`: `Enforce`
     fn default() -> Self {
         Self {
@@ -416,6 +533,9 @@ impl Default for SecurityConfig<Unvalidated> {
         }
     }
 }
+
+/// Lookahead memory of [`SecurityConfig::permissive`]: 1 GiB.
+const PERMISSIVE_PARALLEL_DECODE: NonZeroU64 = non_zero(1024 * 1024 * 1024);
 
 impl SecurityConfig<Unvalidated> {
     /// Creates a permissive configuration for trusted archives.
@@ -441,6 +561,7 @@ impl SecurityConfig<Unvalidated> {
                 max_solid_block_memory: 1024 * 1024 * 1024, // 1 GB for permissive
                 max_tar_metadata_bytes: 16 * 1024 * 1024,   // 16 MiB for permissive
                 max_decoder_memory: 1024 * 1024 * 1024,     // 1 GiB for permissive
+                parallel_decode: ParallelDecode::Bounded(PERMISSIVE_PARALLEL_DECODE),
                 ..SecurityConfigFields::default()
             },
             _marker: PhantomData,
@@ -878,6 +999,24 @@ impl SecurityConfig<Unvalidated> {
     #[inline]
     pub fn with_max_decoder_memory(mut self, size: u64) -> Self {
         self.fields.max_decoder_memory = size;
+        self
+    }
+
+    /// Sets the lookahead memory for parallel 7z LZMA2 decoding.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::ParallelDecode;
+    /// use exarch_core::SecurityConfig;
+    ///
+    /// let config = SecurityConfig::default().with_parallel_decode(ParallelDecode::Sequential);
+    /// assert_eq!(config.parallel_decode, ParallelDecode::Sequential);
+    /// ```
+    #[must_use]
+    #[inline]
+    pub fn with_parallel_decode(mut self, mode: ParallelDecode) -> Self {
+        self.fields.parallel_decode = mode;
         self
     }
 
@@ -1491,6 +1630,16 @@ mod tests {
         let mut cfg = SecurityConfig::default();
         cfg.max_decoder_memory = 0;
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_parallel_decode_defaults() {
+        let bytes = |config: SecurityConfig| match config.parallel_decode {
+            ParallelDecode::Bounded(n) => n.get(),
+            ParallelDecode::Sequential => 0,
+        };
+        assert_eq!(bytes(SecurityConfig::default()), 128 * 1024 * 1024);
+        assert_eq!(bytes(SecurityConfig::permissive()), 1024 * 1024 * 1024);
     }
 
     #[test]

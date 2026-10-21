@@ -7,10 +7,12 @@
 #![allow(clippy::unwrap_used, clippy::cast_possible_truncation)]
 
 /// Data descriptor written after an entry's data.
-#[derive(Debug, Clone, Copy)]
-pub struct Descriptor {
-    pub signature: bool,
-    pub zip64: bool,
+#[derive(Debug, Clone)]
+pub enum Descriptor {
+    /// Written from the entry's CRC and sizes.
+    Standard { signature: bool, zip64: bool },
+    /// Written verbatim.
+    Raw(Vec<u8>),
 }
 
 /// One entry with independent local and central metadata.
@@ -31,6 +33,9 @@ pub struct RawEntry {
     pub padding_after: usize,
     /// Compressed size to declare instead of the length of `data`.
     pub declared_compressed: Option<u64>,
+    /// Compressed and uncompressed size to write in the local header instead of
+    /// the entry's own (or zero when a descriptor follows).
+    pub local_sizes: Option<(u32, u32)>,
 }
 
 impl RawEntry {
@@ -53,6 +58,19 @@ impl RawEntry {
             descriptor: None,
             padding_after: 0,
             declared_compressed: None,
+            local_sizes: None,
+        }
+    }
+
+    /// A deflated entry holding `data`.
+    pub(crate) fn deflated(name: &str, data: &[u8]) -> Self {
+        let mut encoder =
+            flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+        std::io::Write::write_all(&mut encoder, data).unwrap();
+        Self {
+            method: 8,
+            data: encoder.finish().unwrap(),
+            ..Self::stored(name, data)
         }
     }
 
@@ -66,7 +84,30 @@ impl RawEntry {
             extra.extend_from_slice(&[0; 16]);
             self.local_extra.extend(extra);
         }
-        self.descriptor = Some(Descriptor { signature, zip64 });
+        self.descriptor = Some(Descriptor::Standard { signature, zip64 });
+        self
+    }
+
+    /// Like [`Self::with_descriptor`], with the descriptor bytes given
+    /// verbatim.
+    pub(crate) fn with_raw_descriptor(mut self, bytes: &[u8]) -> Self {
+        self.flags |= 0x0008;
+        self.descriptor = Some(Descriptor::Raw(bytes.to_vec()));
+        self
+    }
+
+    /// Writes these sizes in the local header, whatever the entry declares.
+    pub(crate) const fn with_local_sizes(mut self, compressed: u32, size: u32) -> Self {
+        self.local_sizes = Some((compressed, size));
+        self
+    }
+
+    /// Appends an extra field with the given id to the local header.
+    pub(crate) fn with_local_extra_field(mut self, id: u16, body: &[u8]) -> Self {
+        self.local_extra.extend_from_slice(&id.to_le_bytes());
+        self.local_extra
+            .extend_from_slice(&(body.len() as u16).to_le_bytes());
+        self.local_extra.extend_from_slice(body);
         self
     }
 
@@ -159,8 +200,9 @@ fn write_local(out: &mut Vec<u8>, entry: &RawEntry) {
     let (crc, compressed, size) = if entry.descriptor.is_some() {
         (0, 0, 0)
     } else {
-        (entry.crc, entry.compressed_len(), entry.size)
+        (entry.crc, entry.compressed_len() as u32, entry.size as u32)
     };
+    let (compressed, size) = entry.local_sizes.unwrap_or((compressed, size));
     out.extend_from_slice(b"PK\x03\x04");
     out.extend_from_slice(&20u16.to_le_bytes());
     out.extend_from_slice(&entry.flags.to_le_bytes());
@@ -168,26 +210,30 @@ fn write_local(out: &mut Vec<u8>, entry: &RawEntry) {
     out.extend_from_slice(&entry.time.to_le_bytes());
     out.extend_from_slice(&0x21u16.to_le_bytes());
     out.extend_from_slice(&crc.to_le_bytes());
-    out.extend_from_slice(&(compressed as u32).to_le_bytes());
-    out.extend_from_slice(&(size as u32).to_le_bytes());
+    out.extend_from_slice(&compressed.to_le_bytes());
+    out.extend_from_slice(&size.to_le_bytes());
     out.extend_from_slice(&(entry.name.len() as u16).to_le_bytes());
     out.extend_from_slice(&(entry.local_extra.len() as u16).to_le_bytes());
     out.extend_from_slice(&entry.name);
     out.extend_from_slice(&entry.local_extra);
     out.extend_from_slice(&entry.data);
 
-    if let Some(descriptor) = entry.descriptor {
-        if descriptor.signature {
-            out.extend_from_slice(b"PK\x07\x08");
+    match &entry.descriptor {
+        Some(Descriptor::Standard { signature, zip64 }) => {
+            if *signature {
+                out.extend_from_slice(b"PK\x07\x08");
+            }
+            out.extend_from_slice(&entry.crc.to_le_bytes());
+            if *zip64 {
+                out.extend_from_slice(&entry.compressed_len().to_le_bytes());
+                out.extend_from_slice(&entry.size.to_le_bytes());
+            } else {
+                out.extend_from_slice(&(entry.compressed_len() as u32).to_le_bytes());
+                out.extend_from_slice(&(entry.size as u32).to_le_bytes());
+            }
         }
-        out.extend_from_slice(&entry.crc.to_le_bytes());
-        if descriptor.zip64 {
-            out.extend_from_slice(&entry.compressed_len().to_le_bytes());
-            out.extend_from_slice(&entry.size.to_le_bytes());
-        } else {
-            out.extend_from_slice(&(entry.compressed_len() as u32).to_le_bytes());
-            out.extend_from_slice(&(entry.size as u32).to_le_bytes());
-        }
+        Some(Descriptor::Raw(bytes)) => out.extend_from_slice(bytes),
+        None => {}
     }
     out.extend(std::iter::repeat_n(0u8, entry.padding_after));
 }

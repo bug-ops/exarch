@@ -32,6 +32,8 @@ if have zip; then
   zip -qr -0 "$out/infozip_store.zip" .
   zip -qr -fd "$out/infozip_fd.zip" . 2>/dev/null || true
   cat a.txt | zip -q "$out/infozip_stdin.zip" -
+  zip -qr - . | cat >"$out/infozip_stream_deflate.zip"
+  zip -qr -0 - . | cat >"$out/infozip_stream_store.zip"
 fi
 if have ditto; then
   ditto -c -k --sequesterRsrc . "$out/ditto.zip"
@@ -50,10 +52,15 @@ if have pwsh; then
 fi
 if have 7z; then
   7z a -tzip -bso0 -bsp0 "$out/7z.zip" . >/dev/null
+  7z a -tzip -so x.zip . 2>/dev/null | cat >"$out/7z_stream_deflate.zip"
 fi
 if have bsdtar; then
   bsdtar --format zip -cf "$out/bsdtar.zip" .
   bsdtar --format zip -cf - . | cat >"$out/bsdtar_stream.zip"
+  bsdtar --format zip --options zip:compression=store -cf - . | cat >"$out/bsdtar_stream_store.zip"
+fi
+if have go; then
+  go run "$here/../crates/exarch-core/tests/data/ZipProducer.go" "$work/src" "$out"
 fi
 if have python3; then
   python3 -I - "$out" <<'EOF'
@@ -85,6 +92,17 @@ with open(f"{out}/py_unseekable.zip", "wb") as raw:
         z.writestr("a.txt", b"hi" * 1000)
         with z.open("big.bin", "w", force_zip64=True) as w:
             w.write(b"y" * 70000)
+
+for tag, method, zip64 in [
+    ("py_unseekable_store", zipfile.ZIP_STORED, False),
+    ("py_unseekable_store_zip64", zipfile.ZIP_STORED, True),
+    ("py_unseekable_deflate_zip64", zipfile.ZIP_DEFLATED, True),
+]:
+    with open(f"{out}/{tag}.zip", "wb") as raw:
+        with zipfile.ZipFile(Unseekable(raw), "w", method) as z:
+            for name in ["a.txt", "sub/rep.txt", "sub/rand.bin", "empty"]:
+                with z.open(name, "w", force_zip64=zip64) as w:
+                    w.write(open(name, "rb").read())
 EOF
 fi
 

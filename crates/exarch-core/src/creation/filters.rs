@@ -146,9 +146,10 @@ fn pattern_matches(s: &str, pattern: &str) -> bool {
 ///
 /// # Errors
 ///
-/// Returns an error if:
-/// - The source path is not under the root directory
-/// - The `strip_prefix` does not match the computed relative path
+/// Returns an error if the source path is not under the root directory.
+///
+/// A `strip_prefix` that does not match the computed relative path is
+/// ignored; the unstripped relative path is used.
 ///
 /// # Examples
 ///

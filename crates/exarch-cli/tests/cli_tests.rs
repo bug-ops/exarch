@@ -4309,6 +4309,7 @@ fn test_extract_zip_empty_entry_name_json_error_code() {
 // ============================================================================
 
 const SEVENZ_UNIX_EXTENSION: u32 = 0x8000;
+#[cfg(unix)]
 const SEVENZ_S_IFLNK: u32 = 0o12_0000;
 const SEVENZ_S_IFREG: u32 = 0o10_0000;
 const SEVENZ_S_IFIFO: u32 = 0o01_0000;
@@ -4397,6 +4398,7 @@ fn test_sevenz_unix_symlink_needs_allow_symlinks() {
 }
 
 /// A 7z symlink target that leaves the destination is blocked before any write.
+#[cfg(unix)]
 #[test]
 fn test_sevenz_unix_symlink_escape_is_blocked() {
     let temp = TempDir::new().expect("failed to create temp dir");
@@ -4431,6 +4433,7 @@ fn test_sevenz_unix_symlink_escape_is_blocked() {
 
 /// A 7z link whose data fails its checksum fails extraction in the target read,
 /// not in the CLI's listing pass, which leaves 7z targets undecoded.
+#[cfg(unix)]
 #[test]
 fn test_sevenz_corrupt_symlink_target_fails_extract_not_listing() {
     let temp = TempDir::new().expect("failed to create temp dir");
@@ -4489,6 +4492,7 @@ fn test_sevenz_fifo_entry_is_refused_everywhere() {
 
 /// A symlink target whose `..` components cannot be resolved against the
 /// extracted tree is rejected by extract and verify, in either entry order.
+#[cfg(unix)]
 #[test]
 fn test_symlink_target_with_unresolvable_parent_components_is_rejected() {
     for links in [[("a", "d/.."), ("d", ".")], [("d", "."), ("a", "d/..")]] {

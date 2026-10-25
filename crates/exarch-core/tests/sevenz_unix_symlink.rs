@@ -3,6 +3,7 @@
 //! validates it, and `extract` creates the link only under `allow_symlinks`.
 
 #![allow(clippy::unwrap_used)]
+#![cfg_attr(not(unix), allow(dead_code, unused_imports))]
 
 use std::assert_matches;
 use std::io::Cursor;
@@ -206,6 +207,7 @@ fn list_rejects_empty_and_oversized_targets_like_zip() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn list_leaves_a_target_with_a_corrupt_checksum_unread() {
     let dir = TempDir::new().unwrap();
@@ -382,6 +384,7 @@ fn extract_creates_the_link_under_allow_symlinks() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn extract_refuses_an_escaping_target_before_any_write() {
     let cases: [(&str, Vec<Item<'_>>); 5] = [
@@ -490,6 +493,7 @@ fn dangling_link_at_the_link_path_is_skipped_or_replaced_by_policy() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn extract_rejects_an_oversized_non_utf8_or_empty_target() {
     let oversized = vec![b'a'; 70_000];
@@ -510,6 +514,7 @@ fn extract_rejects_an_oversized_non_utf8_or_empty_target() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn solid_block_with_a_link_follows_the_solid_policy() {
     let dir = TempDir::new().unwrap();
@@ -539,6 +544,7 @@ fn solid_block_with_a_link_follows_the_solid_policy() {
     assert_eq!(report.symlinks_created, usize::from(cfg!(unix)));
 }
 
+#[cfg(unix)]
 #[test]
 fn unresolvable_parent_components_are_refused_in_both_orders() {
     let orders: [[Item<'_>; 2]; 2] = [
@@ -559,6 +565,7 @@ fn unresolvable_parent_components_are_refused_in_both_orders() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn a_target_through_a_directory_of_the_same_archive_is_refused_before_any_write() {
     let dir = TempDir::new().unwrap();
@@ -571,6 +578,7 @@ fn a_target_through_a_directory_of_the_same_archive_is_refused_before_any_write(
     assert!(dir_is_empty(&out));
 }
 
+#[cfg(unix)]
 #[test]
 fn a_target_with_two_unresolvable_parent_components_is_refused_before_any_write() {
     let dir = TempDir::new().unwrap();
@@ -659,6 +667,7 @@ fn solid_config() -> SecurityConfig {
         .with_max_solid_block_memory(100 * 1024 * 1024)
 }
 
+#[cfg(unix)]
 #[test]
 fn an_escaping_link_inside_a_solid_block_is_refused_before_any_write() {
     let dir = TempDir::new().unwrap();
@@ -684,6 +693,7 @@ fn an_escaping_link_inside_a_solid_block_is_refused_before_any_write() {
     assert!(dir_is_empty(&out));
 }
 
+#[cfg(unix)]
 #[test]
 fn a_corrupt_link_inside_a_solid_block_fails_extract_before_any_write() {
     let dir = TempDir::new().unwrap();

@@ -36,8 +36,11 @@ use crate::formats::sevenz::is_password_error;
 use crate::formats::sevenz::sevenz_entry_compression;
 use crate::formats::sevenz::verify_sevenz_blocks;
 use crate::formats::sevenz::walk_sevenz_links;
+use crate::formats::tar::TarNode;
 use crate::formats::tar::effective_entry_type;
+use crate::formats::tar::is_metadata_type;
 use crate::formats::tar::open_tar_stream;
+use crate::formats::tar::tar_node;
 use crate::formats::tar_metadata_limit::TarEntryGuard;
 use crate::formats::tar_metadata_limit::TarReadBudget;
 use crate::formats::tar_metadata_limit::budget_violation;
@@ -318,7 +321,7 @@ fn list_tar_entries<R: std::io::Read>(
         })?;
 
         // Skip TAR metadata entries (PAX headers, GNU long names/links)
-        if is_tar_metadata_entry(&entry) {
+        if is_metadata_type(entry.header().entry_type()) {
             continue;
         }
 
@@ -1002,30 +1005,13 @@ fn contains_traversal(path: &Path, config: &SecurityConfig<Validated>) -> bool {
     })
 }
 
-/// Returns `true` for TAR metadata entries that should be skipped.
-fn is_tar_metadata_entry<R: std::io::Read>(entry: &tar::Entry<'_, R>) -> bool {
-    matches!(
-        entry.header().entry_type(),
-        tar::EntryType::XHeader
-            | tar::EntryType::XGlobalHeader
-            | tar::EntryType::GNULongName
-            | tar::EntryType::GNULongLink
-    )
-}
-
 fn convert_tar_entry_type(tar_type: tar::EntryType) -> Result<ManifestEntryType> {
-    match tar_type {
-        tar::EntryType::Directory => Ok(ManifestEntryType::Directory),
-        tar::EntryType::Symlink => Ok(ManifestEntryType::Symlink),
-        tar::EntryType::Link => Ok(ManifestEntryType::Hardlink),
-        tar::EntryType::Char | tar::EntryType::Block | tar::EntryType::Fifo => {
-            Err(ArchiveError::InvalidArchive(
-                "special files (char/block devices, FIFOs) are not supported".to_string(),
-            ))
-        }
-        // Regular, Continuous, GNUSparse treated as files
-        _ => Ok(ManifestEntryType::File),
-    }
+    Ok(match tar_node(tar_type)? {
+        TarNode::File => ManifestEntryType::File,
+        TarNode::Directory => ManifestEntryType::Directory,
+        TarNode::Symlink => ManifestEntryType::Symlink,
+        TarNode::Hardlink => ManifestEntryType::Hardlink,
+    })
 }
 
 fn convert_zip_entry_type<R: std::io::Read + std::io::Seek>(
@@ -1648,8 +1634,8 @@ mod tests {
         let result = list_archive(temp_file.path(), &config);
         assert_matches!(
             result,
-            Err(ArchiveError::InvalidArchive(_)),
-            "expected InvalidArchive for char device entry, got: {result:?}"
+            Err(ArchiveError::SecurityViolation { .. }),
+            "expected SecurityViolation for char device entry, got: {result:?}"
         );
     }
 

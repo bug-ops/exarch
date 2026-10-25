@@ -752,24 +752,15 @@ impl TarEntryAdapter {
     /// they normally never reach our iterator. `XGlobalHeader` does reach
     /// us. All four are checked here as defense-in-depth.
     fn is_metadata_entry<R: Read>(tar_entry: &tar::Entry<'_, R>) -> bool {
-        use tar::EntryType as TarType;
-
-        matches!(
-            tar_entry.header().entry_type(),
-            TarType::XHeader | TarType::XGlobalHeader | TarType::GNULongName | TarType::GNULongLink
-        )
+        is_metadata_type(tar_entry.header().entry_type())
     }
 
     /// Converts `tar::EntryType` to our `EntryType` enum.
     fn to_entry_type<R: Read>(tar_entry: &tar::Entry<'_, R>) -> Result<EntryType> {
-        use tar::EntryType as TarType;
-
-        match effective_entry_type(tar_entry) {
-            TarType::Regular | TarType::Continuous | TarType::GNUSparse => Ok(EntryType::File),
-
-            TarType::Directory => Ok(EntryType::Directory),
-
-            TarType::Symlink => {
+        match tar_node(effective_entry_type(tar_entry))? {
+            TarNode::File => Ok(EntryType::File),
+            TarNode::Directory => Ok(EntryType::Directory),
+            TarNode::Symlink => {
                 let target = tar_entry
                     .link_name()
                     .map_err(|e| {
@@ -779,8 +770,7 @@ impl TarEntryAdapter {
                     .into_owned();
                 Ok(EntryType::Symlink { target })
             }
-
-            TarType::Link => {
+            TarNode::Hardlink => {
                 let target = tar_entry
                     .link_name()
                     .map_err(|e| {
@@ -790,31 +780,68 @@ impl TarEntryAdapter {
                     .into_owned();
                 Ok(EntryType::Hardlink { target })
             }
-
-            TarType::Char => Err(ArchiveError::SecurityViolation {
-                reason: "character device entries not supported".into(),
-            }),
-
-            TarType::Block => Err(ArchiveError::SecurityViolation {
-                reason: "block device entries not supported".into(),
-            }),
-
-            TarType::Fifo => Err(ArchiveError::SecurityViolation {
-                reason: "FIFO entries not supported".into(),
-            }),
-
-            _ => Err(ArchiveError::SecurityViolation {
-                reason: format!(
-                    "unsupported entry type: {:?}",
-                    effective_entry_type(tar_entry)
-                ),
-            }),
         }
     }
 
     /// Gets uncompressed size from TAR entry.
     fn get_uncompressed_size<R: Read>(tar_entry: &tar::Entry<'_, R>) -> u64 {
         tar_entry.size()
+    }
+}
+
+/// What a supported TAR entry type stands for.
+///
+/// The single classification shared by extraction, `list` and `verify`, so a
+/// type refused by one is refused by all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TarNode {
+    File,
+    Directory,
+    Symlink,
+    Hardlink,
+}
+
+/// Returns `true` for TAR metadata records that are skipped, not extracted.
+///
+/// The `tar` crate consumes `XHeader`, `GNULongName` and `GNULongLink`
+/// internally, so normally only `XGlobalHeader` reaches the entry loop; all
+/// four are checked as defense-in-depth.
+pub(crate) const fn is_metadata_type(kind: tar::EntryType) -> bool {
+    matches!(
+        kind,
+        tar::EntryType::XHeader
+            | tar::EntryType::XGlobalHeader
+            | tar::EntryType::GNULongName
+            | tar::EntryType::GNULongLink
+    )
+}
+
+/// Classifies a non-metadata TAR entry type, refusing special files.
+///
+/// # Errors
+///
+/// Returns [`ArchiveError::SecurityViolation`] for device nodes, FIFOs and any
+/// other typeflag that is not a file, directory or link.
+pub(crate) fn tar_node(kind: tar::EntryType) -> Result<TarNode> {
+    use tar::EntryType as TarType;
+
+    match kind {
+        TarType::Regular | TarType::Continuous | TarType::GNUSparse => Ok(TarNode::File),
+        TarType::Directory => Ok(TarNode::Directory),
+        TarType::Symlink => Ok(TarNode::Symlink),
+        TarType::Link => Ok(TarNode::Hardlink),
+        TarType::Char => Err(ArchiveError::SecurityViolation {
+            reason: "character device entries not supported".into(),
+        }),
+        TarType::Block => Err(ArchiveError::SecurityViolation {
+            reason: "block device entries not supported".into(),
+        }),
+        TarType::Fifo => Err(ArchiveError::SecurityViolation {
+            reason: "FIFO entries not supported".into(),
+        }),
+        _ => Err(ArchiveError::SecurityViolation {
+            reason: format!("unsupported entry type: {kind:?}"),
+        }),
     }
 }
 

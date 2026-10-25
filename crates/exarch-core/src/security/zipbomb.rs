@@ -80,7 +80,8 @@ fn check_ratio(
 ) -> Result<()> {
     let details = ZipBombDetails::new(scope, compressed_size, uncompressed_size);
     match details.ratio() {
-        // HIGH-001: data claimed from zero compressed bytes bypasses any finite limit
+        // HIGH-001: data claimed from zero compressed bytes bypasses any finite
+        // limit
         CompressionRatio::Unbounded => Err(ArchiveError::ZipBomb(details)),
         CompressionRatio::Finite(ratio) if ratio > max_ratio => Err(ArchiveError::ZipBomb(details)),
         CompressionRatio::Finite(_) => Ok(()),

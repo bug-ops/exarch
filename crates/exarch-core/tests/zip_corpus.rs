@@ -138,7 +138,8 @@ fn assert_no_structural_finding(path: &Path, label: &str) {
     let config = SecurityConfig::default();
     match list_archive(path, &config) {
         Ok(_) => {}
-        // Not admitted for a reason other than structure: Deflate64 and the like.
+        // Not admitted for a reason other than structure: Deflate64 and the
+        // like.
         Err(ArchiveError::SecurityViolation { reason }) if reason.starts_with("unsupported") => {
             return;
         }

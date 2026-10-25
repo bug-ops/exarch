@@ -105,9 +105,9 @@ impl From<CopyError> for ArchiveError {
         match err {
             CopyError::Read(e) => budget_violation(&e).unwrap_or(Self::Io(e)),
             CopyError::Write(e) => Self::Io(e),
-            // SecurityViolation, not QuotaExceeded: `declared` is the archive's own
-            // (possibly forged) size, so a "raise --max-file-size" hint would be
-            // wrong advice (GHSA-5j8q-wxg5-hj4r).
+            // SecurityViolation, not QuotaExceeded: `declared` is the archive's
+            // own (possibly forged) size, so a "raise --max-file-size" hint
+            // would be wrong advice (GHSA-5j8q-wxg5-hj4r).
             CopyError::Overrun { declared } => declared_size_exceeded(declared),
             CopyError::Short { declared, actual } => Self::SecurityViolation {
                 reason: format!(

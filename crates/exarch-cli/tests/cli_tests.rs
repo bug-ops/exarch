@@ -2489,6 +2489,8 @@ fn test_verify_7z_anti_item_info_passes_strict() {
     let json: serde_json::Value = serde_json::from_slice(&output).expect("valid JSON output");
     assert_eq!(json["data"]["status"], "PASS");
     assert_eq!(json["data"]["issues"][0]["severity"], "INFO");
+    assert_eq!(json["data"]["issues"][0]["category"], "Archive Note");
+    assert_eq!(json["data"]["security_status"], "OK");
 }
 
 // ============================================================================
@@ -4300,4 +4302,225 @@ fn test_extract_zip_empty_entry_name_json_error_code() {
             .contains("empty path not allowed"),
         "{json}"
     );
+}
+
+// ============================================================================
+// 7z Unix symlinks, 7z special files, symlink target resolution
+// ============================================================================
+
+const SEVENZ_UNIX_EXTENSION: u32 = 0x8000;
+const SEVENZ_S_IFLNK: u32 = 0o12_0000;
+const SEVENZ_S_IFREG: u32 = 0o10_0000;
+const SEVENZ_S_IFIFO: u32 = 0o01_0000;
+
+fn write_sevenz(archive: &std::path::Path, entries: &[(&str, &[u8], u32)], stored: bool) {
+    use std::io::Cursor;
+    let mut writer =
+        sevenz_rust2::ArchiveWriter::create(archive).expect("failed to create 7z writer");
+    if stored {
+        writer.set_content_methods(vec![sevenz_rust2::EncoderConfiguration::new(
+            sevenz_rust2::EncoderMethod::COPY,
+        )]);
+    }
+    for (name, data, mode) in entries {
+        let mut entry = sevenz_rust2::ArchiveEntry::new_file(name);
+        entry.has_stream = !data.is_empty();
+        entry.size = data.len() as u64;
+        entry.has_windows_attributes = true;
+        entry.windows_attributes = SEVENZ_UNIX_EXTENSION | (mode << 16);
+        let reader = entry.has_stream.then(|| Cursor::new(data.to_vec()));
+        writer.push_archive_entry(entry, reader).expect("entry");
+    }
+    writer.finish().expect("finish");
+}
+
+/// A 7z Unix symlink is refused without `--allow-symlinks`, with the hint a
+/// policy flag can act on, and is created with it.
+#[cfg(unix)]
+#[test]
+fn test_sevenz_unix_symlink_needs_allow_symlinks() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("link.7z");
+    write_sevenz(
+        &archive,
+        &[
+            ("a.txt", b"hi", SEVENZ_S_IFREG | 0o644),
+            ("link", b"a.txt", SEVENZ_S_IFLNK | 0o777),
+        ],
+        false,
+    );
+    let out = temp.path().join("out");
+
+    exarch_cmd()
+        .arg("extract")
+        .arg(&archive)
+        .arg(&out)
+        .assert()
+        .code(1)
+        .stderr(
+            predicate::str::contains("symlinks not allowed")
+                .and(predicate::str::contains("--allow-symlinks"))
+                .and(predicate::str::contains("cannot be relaxed").not()),
+        );
+    assert!(!out.join("a.txt").exists());
+
+    exarch_cmd()
+        .arg("extract")
+        .arg("--allow-symlinks")
+        .arg(&archive)
+        .arg(&out)
+        .assert()
+        .success();
+    assert_eq!(
+        std::fs::read_link(out.join("link")).expect("link"),
+        std::path::Path::new("a.txt")
+    );
+
+    let output = exarch_cmd()
+        .arg("list")
+        .arg("--json")
+        .arg("-l")
+        .arg(&archive)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).expect("valid JSON output");
+    let link = json["data"]["entries"]
+        .as_array()
+        .expect("entries")
+        .iter()
+        .find(|e| e["entry_type"] == "Symlink")
+        .expect("symlink entry");
+    assert_eq!(link["symlink_target"], "a.txt");
+}
+
+/// A 7z symlink target that leaves the destination is blocked before any write.
+#[test]
+fn test_sevenz_unix_symlink_escape_is_blocked() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("escape.7z");
+    write_sevenz(
+        &archive,
+        &[
+            ("a.txt", b"hi", SEVENZ_S_IFREG | 0o644),
+            ("link", b"../../etc/passwd", SEVENZ_S_IFLNK | 0o777),
+        ],
+        false,
+    );
+    let out = temp.path().join("out");
+
+    exarch_cmd()
+        .arg("extract")
+        .arg("--allow-symlinks")
+        .arg(&archive)
+        .arg(&out)
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("Symlink escape blocked"));
+    assert!(!out.join("a.txt").exists());
+
+    exarch_cmd()
+        .arg("verify")
+        .arg("--allow-symlinks")
+        .arg(&archive)
+        .assert()
+        .code(1);
+}
+
+/// A 7z link whose data fails its checksum fails extraction in the target read,
+/// not in the CLI's listing pass, which leaves 7z targets undecoded.
+#[test]
+fn test_sevenz_corrupt_symlink_target_fails_extract_not_listing() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("corrupt.7z");
+    write_sevenz(
+        &archive,
+        &[("link", b"TARGETTARGET", SEVENZ_S_IFLNK | 0o777)],
+        true,
+    );
+    let mut bytes = std::fs::read(&archive).expect("read");
+    let at = bytes
+        .windows(12)
+        .position(|w| w == b"TARGETTARGET")
+        .expect("marker");
+    bytes[at] ^= 1;
+    std::fs::write(&archive, bytes).expect("write");
+    let out = temp.path().join("out");
+
+    exarch_cmd()
+        .arg("extract")
+        .arg("--allow-symlinks")
+        .arg(&archive)
+        .arg(&out)
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("failed to read 7z symlink target"));
+}
+
+/// A FIFO entry in a 7z archive is refused by list, verify and extract.
+#[test]
+fn test_sevenz_fifo_entry_is_refused_everywhere() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("fifo.7z");
+    write_sevenz(
+        &archive,
+        &[
+            ("a.txt", b"hi", SEVENZ_S_IFREG | 0o644),
+            ("pipe", b"", SEVENZ_S_IFIFO | 0o644),
+        ],
+        false,
+    );
+    let out = temp.path().join("out");
+
+    for command in ["list", "verify", "extract"] {
+        let mut cmd = exarch_cmd();
+        cmd.arg(command).arg(&archive);
+        if command == "extract" {
+            cmd.arg(&out);
+        }
+        cmd.assert()
+            .code(1)
+            .stderr(predicate::str::contains("FIFO entries not supported"));
+    }
+    assert!(!out.join("a.txt").exists());
+}
+
+/// A symlink target whose `..` components cannot be resolved against the
+/// extracted tree is rejected by extract and verify, in either entry order.
+#[test]
+fn test_symlink_target_with_unresolvable_parent_components_is_rejected() {
+    for links in [[("a", "d/.."), ("d", ".")], [("d", "."), ("a", "d/..")]] {
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let archive = temp.path().join("pair.tar");
+        let mut builder = tar::Builder::new(Vec::new());
+        for (name, target) in links {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(0);
+            header.set_mode(0o777);
+            header.set_entry_type(tar::EntryType::Symlink);
+            header.set_cksum();
+            builder
+                .append_link(&mut header, name, target)
+                .expect("link");
+        }
+        std::fs::write(&archive, builder.into_inner().expect("tar")).expect("write");
+        let out = temp.path().join("out");
+
+        exarch_cmd()
+            .arg("extract")
+            .arg("--allow-symlinks")
+            .arg(&archive)
+            .arg(&out)
+            .assert()
+            .code(1)
+            .stderr(predicate::str::contains("Symlink escape blocked"));
+        exarch_cmd()
+            .arg("verify")
+            .arg("--allow-symlinks")
+            .arg(&archive)
+            .assert()
+            .code(1);
+    }
 }

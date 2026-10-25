@@ -519,6 +519,42 @@ pub fn list_archive<P: AsRef<Path>>(
     crate::inspection::list_archive(archive_path, config)
 }
 
+/// Lists archive contents without extracting, with
+/// [`ListOptions`](crate::ListOptions).
+///
+/// [`ListOptions::stored_targets`](crate::ListOptions::stored_targets) set to
+/// [`StoredTargets::Skip`](crate::StoredTargets::Skip) leaves 7z
+/// symlink targets unread, so listing decodes no entry data. This is a Rust API
+/// option only: the Python and Node `list_archive` always read targets.
+///
+/// # Errors
+///
+/// Same as [`list_archive`].
+///
+/// # Examples
+///
+/// ```no_run
+/// use exarch_core::ListOptions;
+/// use exarch_core::SecurityConfig;
+/// use exarch_core::StoredTargets;
+/// use exarch_core::list_archive_with_options;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let config = SecurityConfig::default();
+/// let options = ListOptions::default().with_stored_targets(StoredTargets::Skip);
+/// let manifest = list_archive_with_options("archive.7z", &config, &options)?;
+/// println!("Archive contains {} entries", manifest.total_entries());
+/// # Ok(())
+/// # }
+/// ```
+pub fn list_archive_with_options<P: AsRef<Path>>(
+    archive_path: P,
+    config: &SecurityConfig,
+    options: &crate::ListOptions,
+) -> Result<ArchiveManifest> {
+    crate::inspection::list_archive_with_options(archive_path, config, options)
+}
+
 /// Verifies archive security without extracting.
 ///
 /// Performs metadata-only validation:

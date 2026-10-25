@@ -46,6 +46,7 @@ use crate::security::zipbomb::validate_entry_compression;
 use crate::types::DestDir;
 use crate::types::SafePath;
 use crate::types::SafeSymlink;
+use crate::types::safe_symlink::require_symlinks_allowed;
 
 /// Verifies an already-listed manifest against the security config.
 ///
@@ -426,7 +427,15 @@ fn verify_entry(
     if let Ok(ref safe_path) = path_result {
         let link_result = match &entry.kind {
             ManifestEntryKind::Symlink { target } => Some(
-                usable_link_target(target, ManifestEntryType::Symlink).and_then(|t| {
+                // An unread target is never read when symlinks are disallowed,
+                // so the policy is the reason to report.
+                (if matches!(target, LinkTarget::Unread) {
+                    require_symlinks_allowed(config)
+                } else {
+                    Ok(())
+                })
+                .and_then(|()| usable_link_target(target, ManifestEntryType::Symlink))
+                .and_then(|t| {
                     check_target_lengths(t, LinkKind::Symlink)?;
                     SafeSymlink::validate_in(safe_path, t, dest, config, tree).map(drop)
                 }),
@@ -615,7 +624,7 @@ fn missing_link_target(kind: ManifestEntryType) -> ArchiveError {
 fn unread_link_target(kind: ManifestEntryType) -> ArchiveError {
     ArchiveError::SecurityViolation {
         reason: format!(
-            "{} target is not read from this archive format, so it cannot be validated",
+            "{} target was not read, so it cannot be validated",
             kind.as_str().to_ascii_lowercase()
         ),
     }

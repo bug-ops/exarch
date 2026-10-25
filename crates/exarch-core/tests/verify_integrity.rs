@@ -2,11 +2,14 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+mod common;
+
 use std::io::Cursor;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 
+use common::flip_first;
 use exarch_core::ArchiveError;
 use exarch_core::DecompressionBudget;
 use exarch_core::IntegrityCheck;
@@ -72,14 +75,6 @@ fn corrupt_paths(report: &VerificationReport) -> Vec<String> {
         .collect();
     paths.sort();
     paths
-}
-
-fn flip_first(bytes: &mut [u8], marker: &[u8]) {
-    let at = bytes
-        .windows(marker.len())
-        .position(|w| w == marker)
-        .expect("marker present");
-    bytes[at] ^= 0x01;
 }
 
 mod zip_fixtures {

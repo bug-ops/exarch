@@ -75,7 +75,8 @@ impl SafeSymlink {
     /// 5. Verify the link's parent directory chain contains no symlinks (TOCTOU
     ///    protection)
     /// 6. Resolve target against the link's parent directory, following any
-    ///    on-disk symlinks encountered
+    ///    on-disk symlinks encountered; a target whose `..` components cannot
+    ///    be resolved against the extracted tree is rejected
     /// 7. Verify resolved target stays within destination directory
     ///
     /// # Errors
@@ -127,12 +128,7 @@ impl SafeSymlink {
         config: &SecurityConfig<Validated>,
         view: &V,
     ) -> Result<Self> {
-        // 1. Verify symlinks are allowed
-        if !config.allowed.symlinks {
-            return Err(ArchiveError::SecurityViolation {
-                reason: "symlinks not allowed".into(),
-            });
-        }
+        require_symlinks_allowed(config)?;
 
         // 1.5. Reject empty targets: an empty target does not point anywhere
         // (some platforms would silently create a dangling symlink); reject
@@ -257,6 +253,22 @@ impl SafeSymlink {
     }
 }
 
+/// Fails with the symlink-policy refusal unless `config` allows symlinks.
+///
+/// # Errors
+///
+/// Returns `SecurityViolation` ("symlinks not allowed") when symlinks are
+/// disabled.
+pub(crate) fn require_symlinks_allowed(config: &SecurityConfig<Validated>) -> Result<()> {
+    if config.allowed.symlinks {
+        Ok(())
+    } else {
+        Err(ArchiveError::SecurityViolation {
+            reason: "symlinks not allowed".into(),
+        })
+    }
+}
+
 /// Verifies that no component in the parent directory chain of `path` is a
 /// symlink.
 ///
@@ -309,15 +321,16 @@ fn verify_parent_not_symlink<V: FsView>(path: &Path, dest: &DestDir, view: &V) -
 /// (written by a previous archive entry) is resolved to its real on-disk
 /// location before any subsequent `..` traversal is applied.
 ///
-/// Non-existent path components (targets that have not been extracted yet) are
-/// handled transparently — `symlink_metadata` failure is treated as "not a
-/// symlink", so the function degrades gracefully to string-based normalization
-/// for paths that do not yet exist on disk.
+/// A `..` must leave a directory that exists or one of `start`'s own
+/// components; any other component cannot be resolved against the extracted
+/// tree and is rejected.
 ///
 /// # Errors
 ///
 /// Returns `SymlinkEscape` if:
 /// - The resolved path escapes `dest` at any step.
+/// - A `..` leaves a component that is neither an existing directory nor part
+///   of `start`.
 /// - `fs::canonicalize` fails for a symlink component (e.g., `ELOOP` for
 ///   circular chains).
 pub(crate) fn resolve_through_symlinks(
@@ -353,7 +366,7 @@ pub(crate) fn resolve_through_symlinks_in<V: FsView>(
                                 path: link_path.to_path_buf(),
                             })?;
                 }
-                if !current.pop() {
+                if !(start.starts_with(&current) || view.is_dir(&current)) || !current.pop() {
                     return Err(ArchiveError::SymlinkEscape {
                         path: link_path.to_path_buf(),
                     });
@@ -947,6 +960,118 @@ mod tests {
                 SafeSymlink::validate(&link, &PathBuf::from(target), &dest, &config),
                 Err(ArchiveError::SecurityViolation { .. }),
                 "{target}"
+            );
+        }
+    }
+
+    mod parent_resolution {
+        use super::*;
+        use crate::security::fs_view::Node;
+        use crate::security::fs_view::VirtualTree;
+
+        const LINK: &str = "link";
+
+        fn host_resolve(setup: impl FnOnce(&Path), start: &str, target: &str) -> Result<PathBuf> {
+            let temp = TempDir::new().expect("tempdir");
+            let root = temp.path().canonicalize().expect("canonical root");
+            setup(&root);
+            resolve_through_symlinks_in(
+                &root.join(start),
+                Path::new(target),
+                &root,
+                Path::new(LINK),
+                &HostFs,
+            )
+        }
+
+        fn tree_resolve(
+            setup: impl FnOnce(&mut VirtualTree),
+            start: &str,
+            target: &str,
+        ) -> Result<PathBuf> {
+            let root = Path::new("/dest");
+            let mut tree = VirtualTree::new(root);
+            setup(&mut tree);
+            resolve_through_symlinks_in(
+                &root.join(start),
+                Path::new(target),
+                root,
+                Path::new(LINK),
+                &tree,
+            )
+        }
+
+        fn put(tree: &mut VirtualTree, path: &str, node: Node) {
+            tree.insert(Path::new(path), node).expect("insert");
+        }
+
+        #[test]
+        fn parent_dir_after_missing_component_is_rejected() {
+            assert_matches!(
+                host_resolve(|_| {}, "", "d/.."),
+                Err(ArchiveError::SymlinkEscape { .. })
+            );
+            assert_matches!(
+                tree_resolve(|_| {}, "", "d/.."),
+                Err(ArchiveError::SymlinkEscape { .. })
+            );
+        }
+
+        #[test]
+        fn parent_dir_after_file_component_is_rejected() {
+            assert_matches!(
+                host_resolve(
+                    |root| std::fs::write(root.join("f"), b"x").expect("file"),
+                    "",
+                    "f/.."
+                ),
+                Err(ArchiveError::SymlinkEscape { .. })
+            );
+            assert_matches!(
+                tree_resolve(|t| put(t, "f", Node::File), "", "f/.."),
+                Err(ArchiveError::SymlinkEscape { .. })
+            );
+        }
+
+        #[test]
+        fn parent_dir_after_existing_directory_is_resolved() {
+            assert_matches!(
+                host_resolve(
+                    |root| std::fs::create_dir(root.join("d")).expect("dir"),
+                    "",
+                    "d/../x"
+                ),
+                Ok(_)
+            );
+            assert_matches!(
+                tree_resolve(|t| put(t, "d", Node::Dir), "", "d/../x"),
+                Ok(_)
+            );
+        }
+
+        #[test]
+        fn parent_dir_may_leave_own_missing_parent_directories() {
+            assert_matches!(host_resolve(|_| {}, "sub", "../x"), Ok(_));
+            assert_matches!(host_resolve(|_| {}, "a/b", "../../x"), Ok(_));
+            assert_matches!(tree_resolve(|_| {}, "sub", "../x"), Ok(_));
+            assert_matches!(
+                tree_resolve(|_| {}, "sub", "../../x"),
+                Err(ArchiveError::SymlinkEscape { .. })
+            );
+        }
+
+        #[test]
+        fn parent_dir_after_symlinked_directory_uses_resolved_location() {
+            assert_matches!(
+                tree_resolve(
+                    |t| {
+                        put(t, "p/q", Node::Dir);
+                        put(t, "x", Node::Symlink(PathBuf::from("p/q")));
+                    },
+                    "",
+                    "x/.."
+                ),
+                Ok(_)
             );
         }
     }

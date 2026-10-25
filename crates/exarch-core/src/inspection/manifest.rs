@@ -42,6 +42,11 @@ pub struct ArchiveManifest {
     format: ArchiveType,
 }
 
+/// The position of an entry in an [`ArchiveManifest`], only obtainable from
+/// the manifest that holds it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct EntryPosition(usize);
+
 /// An entry whose path exceeds the host's name limits.
 ///
 /// Only the position and the path length are kept, so an archive of many
@@ -152,6 +157,23 @@ impl ArchiveManifest {
         })?;
         self.entries.push(entry);
         Ok(())
+    }
+
+    /// The position the next added entry takes.
+    pub(crate) fn next_position(&self) -> EntryPosition {
+        EntryPosition(self.entries.len())
+    }
+
+    /// Sets the target of the symlink entry at `position`, which listing reads
+    /// after the entry was added. Any other entry is left alone.
+    pub(crate) fn set_link_target(&mut self, position: EntryPosition, target: LinkTarget) {
+        if let Some(ArchiveEntry {
+            kind: ManifestEntryKind::Symlink { target: slot },
+            ..
+        }) = self.entries.get_mut(position.0)
+        {
+            *slot = target;
+        }
     }
 
     /// Returns all entries in the archive (files, dirs, symlinks, hardlinks).
@@ -367,7 +389,9 @@ pub enum LinkTarget {
     /// The archive stores no target
     Missing,
 
-    /// The archive stores a target that listing does not read
+    /// The archive stores a target that listing did not read: a 7z reparse
+    /// point, a 7z target left unread on request or inside a block that cannot
+    /// be decoded, or one whose data is corrupt
     Unread,
 
     /// The target exceeds the host's name limits; only its length is kept

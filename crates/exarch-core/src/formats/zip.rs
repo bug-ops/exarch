@@ -168,10 +168,6 @@ use super::zip_structure;
 use super::zip_structure::Shared;
 use super::zip_structure::ZipStructure;
 
-/// Maximum symlink target length read from a ZIP entry: the host's symlink
-/// target limit in bytes, to prevent unbounded allocation.
-const MAX_SYMLINK_TARGET_SIZE: u64 = crate::security::fs_view::MAX_SYMLINK_TARGET_BYTES as u64;
-
 /// Message of the `io::Error` the `zip` crate (>= 9.0.1) raises when an entry
 /// decompresses past its declared size.
 pub(crate) const ZIP_DECLARED_SIZE_EXCEEDED: &str =
@@ -843,7 +839,7 @@ impl<R: Read + Seek> ArchiveFormat for ZipArchive<R> {
         config: &SecurityConfig<Validated>,
     ) -> Result<crate::inspection::ArchiveManifest> {
         use crate::inspection::list::ListPass;
-        self.list_with(config, &mut ListPass::Strict)
+        self.list_with(config, &mut ListPass::strict())
     }
 
     fn verify(
@@ -881,52 +877,27 @@ struct ZipEntryAdapter;
 impl ZipEntryAdapter {
     /// Checks if an entry is a symbolic link by examining Unix mode bits.
     fn is_symlink_from_mode(mode: Option<u32>) -> bool {
-        mode.is_some_and(|m| {
-            const S_IFMT: u32 = 0o170_000;
-            const S_IFLNK: u32 = 0o120_000;
-            (m & S_IFMT) == S_IFLNK
-        })
-    }
-
-    /// Rejects a declared symlink target size above the host's symlink target
-    /// limit.
-    fn check_symlink_target_size(size: u64) -> Result<()> {
-        if size > MAX_SYMLINK_TARGET_SIZE {
-            return Err(ArchiveError::SecurityViolation {
-                reason: format!(
-                    "symlink target too large: {size} bytes (max {MAX_SYMLINK_TARGET_SIZE})"
-                ),
-            });
-        }
-        Ok(())
-    }
-
-    fn symlink_target_from_bytes(target_bytes: &[u8]) -> Result<PathBuf> {
-        let target_str = std::str::from_utf8(target_bytes).map_err(|_| {
-            ArchiveError::InvalidArchive("symlink target is not valid UTF-8".into())
-        })?;
-
-        Ok(PathBuf::from(target_str))
+        mode.and_then(common::UnixFileType::from_mode) == Some(common::UnixFileType::Symlink)
     }
 
     /// Reads symlink target from ZIP entry data (stored as file content).
     fn read_symlink_target<R: Read>(zip_file: &mut zip::read::ZipFile<'_, R>) -> Result<PathBuf> {
         let size = zip_file.size();
-        Self::check_symlink_target_size(size)?;
+        common::check_symlink_target_size(size)?;
 
         // SAFETY: size has already been validated to be <=
-        // MAX_SYMLINK_TARGET_SIZE which is well within usize
+        // MAX_STORED_SYMLINK_TARGET which is well within usize
         // range on all platforms
         #[allow(clippy::cast_possible_truncation)]
         let mut target_bytes = Vec::with_capacity(size as usize);
         zip_file
-            .take(MAX_SYMLINK_TARGET_SIZE)
+            .take(common::MAX_STORED_SYMLINK_TARGET)
             .read_to_end(&mut target_bytes)
             .map_err(|e| {
                 ArchiveError::InvalidArchive(format!("failed to read symlink target: {e}"))
             })?;
 
-        Self::symlink_target_from_bytes(&target_bytes)
+        common::symlink_target_from_bytes(&target_bytes)
     }
 
     /// Gets uncompressed and compressed sizes.
@@ -964,7 +935,7 @@ pub(crate) fn read_zip_symlink_target_checked<R: Read>(
     entry_path: &Path,
 ) -> Result<PathBuf> {
     let declared = zip_file.size();
-    ZipEntryAdapter::check_symlink_target_size(declared)?;
+    common::check_symlink_target_size(declared)?;
 
     let mut target_bytes = Vec::new();
     if let Err(failure) = pass.copy_into(zip_file, &mut target_bytes, declared) {
@@ -979,7 +950,7 @@ pub(crate) fn read_zip_symlink_target_checked<R: Read>(
             }
         }
     }
-    ZipEntryAdapter::symlink_target_from_bytes(&target_bytes)
+    common::symlink_target_from_bytes(&target_bytes)
 }
 
 /// Returns `true` if `mode` has the `S_IFLNK` file-type bits set.

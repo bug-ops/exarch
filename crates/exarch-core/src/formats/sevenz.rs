@@ -11,6 +11,7 @@
 //! - Decompression bomb detection
 //! - Memory exhaustion protection for solid blocks
 //! - Windows symlink detection (via reparse point attributes)
+//! - Unix symlink targets validated through the symlink policy
 //!
 //! # Supported Compression Methods
 //!
@@ -20,22 +21,33 @@
 //! - DEFLATE
 //! - Copy (stored)
 //!
-//! # Symlink and Hardlink Limitations
+//! # Symlinks, Hardlinks and Special Entries
 //!
-//! Link detection is incomplete because 7z has no link entry type:
+//! 7z has no link entry type, so links are detected from attributes:
 //!
 //! - **Windows symlinks**: Detected via `FILE_ATTRIBUTE_REPARSE_POINT` and
-//!   rejected
+//!   rejected: their target is not stored in a readable form
 //! - **Unix symlinks**: Detected through the Unix mode p7zip keeps in the high
-//!   16 bits of the attributes (`0x8000` flag plus `S_IFLNK`) and rejected,
-//!   whatever `allow_symlinks` says: the link target is not read, so it cannot
-//!   be validated
+//!   16 bits of the attributes (`0x8000` flag plus `S_IFLNK`). The target is
+//!   the entry's data. It is read and validated through the symlink policy, so
+//!   the link is created only under `allow_symlinks`, and `list` and `verify`
+//!   report the target
+//! - **FIFOs, sockets, device nodes**, an undefined Unix type, or a recorded
+//!   kind (Unix mode or the Windows directory bit) that contradicts the entry's
+//!   own kind are refused by `list`, `verify` and `extract`
 //! - **Hardlinks**: Cannot be detected, extracted as separate files (data
 //!   duplication)
 //!
-//! **Security Impact**: Symlinks are NOT created during extraction, preventing
-//! CVE-2024-12905 class symlink escape attacks. An archive holding a detected
-//! link is refused as a whole before anything is written.
+//! **Cost**: Link targets live in the compressed data, so `list` and `verify`
+//! (with `allow_symlinks`) decode every block that holds a link, and `extract`
+//! decodes such a block twice, once to validate and once to extract. The work
+//! is bounded by the solid policy, the admission checks and
+//! `max_solid_block_memory`; archives without links are unaffected.
+//!
+//! **Security Impact**: A symlink target is checked against the destination
+//! before the first write, and the link is validated again against the disk
+//! when it is created, so a refusal at that point can leave the entries written
+//! before it inside the destination.
 //!
 //! # Solid Archives
 //!
@@ -119,6 +131,7 @@
 //! // ... extract with config
 //! ```
 
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::io;
 use std::io::ErrorKind;
@@ -161,6 +174,7 @@ use crate::SolidBlock;
 use crate::VerificationOptions;
 use crate::config::Validated;
 use crate::copy::CopyBuffer;
+use crate::copy::CopyError;
 use crate::copy::copy_with_buffer;
 use crate::error::QuotaResource;
 use crate::inspection::integrity::Charge;
@@ -168,6 +182,7 @@ use crate::inspection::integrity::DecodeFailure;
 use crate::inspection::integrity::DecodeOutcome;
 use crate::inspection::integrity::IntegrityPass;
 use crate::inspection::integrity::Slot;
+use crate::inspection::manifest::EntryPosition;
 use crate::inspection::manifest::ManifestEntryType;
 use crate::inspection::report::IssueCategory;
 use crate::inspection::report::IssueSeverity;
@@ -177,10 +192,14 @@ use crate::security::EntryValidator;
 use crate::security::quota::QuotaPermit;
 use crate::security::validator::EntryPath;
 use crate::security::validator::NodeKind;
+use crate::security::validator::ValidatedEntryType;
 use crate::security::zipbomb::DeclaredCompressedBudget;
 use crate::security::zipbomb::validate_entry_compression;
 use crate::types::DestDir;
 use crate::types::EntryType;
+use crate::types::SafePath;
+use crate::types::SafeSymlink;
+use crate::types::safe_symlink::require_symlinks_allowed;
 
 use super::common;
 use super::sevenz_lzma2::DecodeKnobs;
@@ -788,10 +807,351 @@ fn decode_archive_entries<R: Read + Seek>(
     Ok(())
 }
 
+/// A symlink target as its 7z entry stores it, consumed as soon as it is read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum StoredLinkTarget {
+    /// The target, within the stored-target size limit.
+    Read(PathBuf),
+    /// The entry holds more bytes than a target may; none were read.
+    Oversized {
+        /// Size of the stored target in bytes.
+        bytes: u64,
+    },
+}
+
+/// Why a stored link target was not read. `list` and `verify` leave such a
+/// target unread; `extract` fails.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LinkReadFailure {
+    /// The block holding the target is refused for decoding.
+    BlockRefused,
+    /// The decoder failed before the target was complete.
+    Decode(String),
+    /// The target's data ended before its declared size.
+    Truncated,
+    /// The target's data failed its checksum.
+    Checksum,
+}
+
+impl LinkReadFailure {
+    /// Classifies a decode failure; a failing disk read is not a property of
+    /// the archive and stays an error.
+    fn from_decode(failure: DecodeFailure) -> Result<Self> {
+        match failure {
+            DecodeFailure::Checksum => Ok(Self::Checksum),
+            DecodeFailure::Truncated { .. } => Ok(Self::Truncated),
+            DecodeFailure::Io(e) => Err(ArchiveError::Io(e)),
+            other => Ok(Self::Decode(other.to_string())),
+        }
+    }
+
+    /// The error `extract` fails with for the link named `name`.
+    pub(crate) fn into_extract_error(self, name: &str) -> ArchiveError {
+        let why = match self {
+            Self::BlockRefused => "its block is not admitted for decoding".to_owned(),
+            Self::Decode(detail) => detail,
+            Self::Truncated => "its data ends early".to_owned(),
+            Self::Checksum => "checksum mismatch".to_owned(),
+        };
+        ArchiveError::InvalidArchive(format!("failed to read 7z symlink target {name}: {why}"))
+    }
+}
+
+/// What reading one link's target yields: the target, or why it stays unread.
+pub(crate) type LinkOutcome = std::result::Result<StoredLinkTarget, LinkReadFailure>;
+
+/// Reads the target of the link whose data `reader` yields, `size` bytes.
+///
+/// A target larger than the stored-target limit is not read. Only a failing
+/// disk read or a target that is not UTF-8 is an error: the former is not a
+/// property of the archive, the latter is refused in every mode as in ZIP.
+fn read_sevenz_link_target(reader: &mut dyn Read, size: u64) -> Result<LinkOutcome> {
+    if size > common::MAX_STORED_SYMLINK_TARGET {
+        return Ok(Ok(StoredLinkTarget::Oversized { bytes: size }));
+    }
+    let mut bytes = Vec::new();
+    match (&mut *reader).take(size).read_to_end(&mut bytes) {
+        Ok(_) if bytes.len() as u64 == size => {}
+        Ok(_) => return Ok(Err(LinkReadFailure::Truncated)),
+        Err(e) => {
+            let failure = DecodeFailure::from_copy(CopyError::Read(e), size);
+            return LinkReadFailure::from_decode(failure).map(Err);
+        }
+    }
+    common::symlink_target_from_bytes(&bytes).map(|target| Ok(StoredLinkTarget::Read(target)))
+}
+
+/// How a link entry's target is stored.
+enum LinkStorage {
+    /// No data: the target is empty.
+    Empty,
+    /// More data than a target may hold.
+    Oversized(u64),
+    /// Within a block, within the limit.
+    Stream,
+}
+
+fn link_storage(file: &sevenz_rust2::ArchiveEntry) -> LinkStorage {
+    if !is_sevenz_payload(file) {
+        LinkStorage::Empty
+    } else if file.size > common::MAX_STORED_SYMLINK_TARGET {
+        LinkStorage::Oversized(file.size)
+    } else {
+        LinkStorage::Stream
+    }
+}
+
+/// The link entries of a 7z archive keyed by archive file index.
+///
+/// Entries can only be added in ascending index order, so lookups can bisect
+/// and every walk visits links in file order.
+#[derive(Debug)]
+pub(crate) struct LinkTable<T> {
+    entries: Vec<(usize, T)>,
+}
+
+impl<T> Default for LinkTable<T> {
+    fn default() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
+}
+
+impl<T> LinkTable<T> {
+    /// Adds the link at `file_index`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidArchive` unless `file_index` is above every index
+    /// already added.
+    pub(crate) fn push(&mut self, file_index: usize, value: T) -> Result<()> {
+        if self
+            .entries
+            .last()
+            .is_some_and(|&(last, _)| last >= file_index)
+        {
+            return Err(ArchiveError::InvalidArchive(
+                "7z link entries are out of order".into(),
+            ));
+        }
+        self.entries.push((file_index, value));
+        Ok(())
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// The value added for `file_index`, if any.
+    pub(crate) fn get(&self, file_index: usize) -> Option<&T> {
+        self.entries
+            .binary_search_by_key(&file_index, |&(index, _)| index)
+            .ok()
+            .map(|at| &self.entries[at].1)
+    }
+
+    /// The archive file indices, ascending.
+    pub(crate) fn indices(&self) -> impl Iterator<Item = usize> + '_ {
+        self.entries.iter().map(|&(index, _)| index)
+    }
+}
+
+/// Hands `each` the targets of the links at `indices` (ascending archive file
+/// indices) that need no decoding, and returns the links that do.
+pub(crate) fn deliver_undecoded_links(
+    archive: &Archive,
+    indices: impl Iterator<Item = usize>,
+    each: &mut impl FnMut(usize, LinkOutcome) -> Result<()>,
+) -> Result<Vec<usize>> {
+    let mut streamed = Vec::new();
+    for index in indices {
+        match link_storage(&archive.files[index]) {
+            LinkStorage::Empty => each(index, Ok(StoredLinkTarget::Read(PathBuf::new())))?,
+            LinkStorage::Oversized(bytes) => {
+                each(index, Ok(StoredLinkTarget::Oversized { bytes }))?;
+            }
+            LinkStorage::Stream => streamed.push(index),
+        }
+    }
+    Ok(streamed)
+}
+
+/// Marks the blocks the walk must not decode: every block under an archive
+/// refusal or its own, and every block holding a file over the ratio limit.
+fn blocks_closed_to_links(
+    archive: &Archive,
+    compression: &[EntryCompression],
+    config: &SecurityConfig<Validated>,
+) -> Vec<bool> {
+    let mut closed = vec![false; archive.blocks.len()];
+    for refusal in sevenz_refusals(archive, config) {
+        match refusal.scope {
+            RefusalScope::Archive => closed.fill(true),
+            RefusalScope::Block(index) => closed[index] = true,
+        }
+    }
+    for (index, file) in archive.files.iter().enumerate() {
+        if let Some(block) = archive.stream_map.file_block_index[index]
+            && validate_entry_compression(&compression[index], file.size, config).is_err()
+        {
+            closed[block] = true;
+        }
+    }
+    closed
+}
+
+/// Whether `error` is the checksum failure sevenz-rust2 raises for an entry
+/// whose data was read to its end, which leaves the block stream aligned.
+fn is_entry_checksum_error(error: &io::Error) -> bool {
+    error
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<sevenz_rust2::Error>())
+        .is_some_and(|inner| matches!(inner, sevenz_rust2::Error::ChecksumVerificationFailed))
+}
+
+/// Reads past a file the walk does not want, ignoring its own checksum failure
+/// so the rest of its block stays aligned.
+fn drain_unwanted(file: &sevenz_rust2::ArchiveEntry, reader: &mut dyn Read) -> EntryResult {
+    if is_sevenz_payload(file) {
+        match io::copy(&mut (&mut *reader).take(file.size), &mut io::sink()) {
+            Ok(_) => {}
+            Err(e) if is_entry_checksum_error(&e) => {}
+            Err(e) => return Err(sevenz_rust2::Error::Io(e, "link walk".into())),
+        }
+    }
+    Ok(true)
+}
+
+/// Hands `each` the target of every link in `links`, one at a time in file
+/// order, reading blocks only after the caller's header checks.
+///
+/// A block is decoded only when admission allows it and none of its files is
+/// over the ratio limit, so decoding stays within what `extract` would admit;
+/// a refused block yields [`LinkReadFailure::BlockRefused`] without any decode.
+/// Files of a block that are not wanted are drained so the stream stays
+/// aligned, and decoding stops after the block's last wanted link. A decoder
+/// error abandons the block: its remaining links get
+/// [`LinkReadFailure::Decode`]. An error returned by `each` ends the walk.
+///
+/// # Errors
+///
+/// Returns the first error of `each`, a non-UTF-8 target, or a failing disk
+/// read.
+pub(crate) fn walk_sevenz_links<R: Read + Seek, T>(
+    archive: &Archive,
+    source: &mut R,
+    compression: &[EntryCompression],
+    config: &SecurityConfig<Validated>,
+    links: &LinkTable<T>,
+    each: &mut impl FnMut(usize, LinkOutcome) -> Result<()>,
+) -> Result<()> {
+    let streamed = deliver_undecoded_links(archive, links.indices(), each)?;
+    if streamed.is_empty() {
+        return Ok(());
+    }
+    let closed = blocks_closed_to_links(archive, compression, config);
+    let mut by_block: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for index in streamed {
+        match archive.stream_map.file_block_index[index] {
+            Some(block) => by_block.entry(block).or_default().push(index),
+            None => each(index, Err(LinkReadFailure::BlockRefused))?,
+        }
+    }
+    for (block, wanted) in by_block {
+        if closed[block] {
+            for index in wanted {
+                each(index, Err(LinkReadFailure::BlockRefused))?;
+            }
+        } else {
+            walk_block_links(archive, source, config, block, &wanted, each)?;
+        }
+    }
+    Ok(())
+}
+
+fn walk_block_links<R: Read + Seek>(
+    archive: &Archive,
+    source: &mut R,
+    config: &SecurityConfig<Validated>,
+    block: usize,
+    wanted: &[usize],
+    each: &mut impl FnMut(usize, LinkOutcome) -> Result<()>,
+) -> Result<()> {
+    let mut next_file = archive.stream_map.block_first_file_index[block];
+    let mut delivered = 0;
+    let mut abort = None;
+    let result = decode_block_entries(
+        source,
+        archive,
+        block,
+        config.parallel_decode,
+        DecodeKnobs::production(),
+        &mut |file, reader| {
+            let index = next_file;
+            next_file += 1;
+            if wanted.get(delivered) != Some(&index) {
+                return drain_unwanted(file, reader);
+            }
+            let outcome = match read_sevenz_link_target(reader, file.size) {
+                Ok(outcome) => outcome,
+                Err(e) => {
+                    abort = Some(e);
+                    return Ok(false);
+                }
+            };
+            delivered += 1;
+            let aligned = !matches!(
+                outcome,
+                Err(LinkReadFailure::Truncated | LinkReadFailure::Decode(_))
+            );
+            if let Err(e) = each(index, outcome) {
+                abort = Some(e);
+                return Ok(false);
+            }
+            Ok(aligned && delivered < wanted.len())
+        },
+    );
+    if let Some(e) = abort {
+        return Err(e);
+    }
+    let failure = match result {
+        Err(e) => LinkReadFailure::Decode(e.to_string()),
+        Ok(_) => LinkReadFailure::Decode("the entry was not decoded".to_owned()),
+    };
+    for &index in &wanted[delivered..] {
+        each(index, Err(failure.clone()))?;
+    }
+    Ok(())
+}
+
+/// Where an integrity pass hands the link targets it reads while decoding.
+pub(crate) struct LinkCapture<'a> {
+    /// The manifest position of every listed link.
+    pub(crate) links: &'a LinkTable<EntryPosition>,
+    /// Receives the manifest position and target of each link read.
+    pub(crate) set: &'a mut dyn FnMut(EntryPosition, PathBuf),
+}
+
+impl LinkCapture<'_> {
+    /// The position of `file` when it is a listed link whose target sits in a
+    /// block and is read here.
+    fn position(
+        &self,
+        file_index: usize,
+        file: &sevenz_rust2::ArchiveEntry,
+    ) -> Option<EntryPosition> {
+        matches!(link_storage(file), LinkStorage::Stream)
+            .then(|| self.links.get(file_index).copied())
+            .flatten()
+    }
+}
+
 /// Per-block state while decoding one 7z block for an integrity pass.
 struct BlockScan<'a, 'c> {
     pass: &'a mut IntegrityPass<'c>,
     slots: &'a [Option<Slot>],
+    links: Option<LinkCapture<'a>>,
     next_file: usize,
     visited: BTreeSet<usize>,
     stop: Option<BlockStop>,
@@ -820,7 +1180,20 @@ impl BlockScan<'_, '_> {
         }
         self.visited.insert(file_index);
         let path = PathBuf::from(common::normalize_entry_name(&file.name));
-        let outcome = self.pass.decode(slot, reader, file.size, Charge::Free);
+        let link_position = self
+            .links
+            .as_ref()
+            .and_then(|c| c.position(file_index, file));
+        let outcome = match link_position {
+            Some(position) => match self.read_link(position, slot, file, reader) {
+                Ok(outcome) => outcome,
+                Err(e) => {
+                    self.stop = Some(BlockStop::Fatal(e));
+                    return false;
+                }
+            },
+            None => self.pass.decode(slot, reader, file.size, Charge::Free),
+        };
         let abandon = match &outcome {
             DecodeOutcome::Failed(DecodeFailure::ResourceLimit(_)) => {
                 Some(BlockStop::Abandoned(UnverifiedReason::ResourceLimit))
@@ -837,6 +1210,31 @@ impl BlockScan<'_, '_> {
         let keep_going = abandon.is_none();
         self.stop = abandon;
         keep_going
+    }
+
+    /// Decodes a link's data into its target, which is handed to the capture
+    /// only when the data verified: a target whose checksum failed stays
+    /// unread, as bytes the decoder withheld would pass for a shorter target.
+    fn read_link(
+        &mut self,
+        position: EntryPosition,
+        slot: Slot,
+        file: &sevenz_rust2::ArchiveEntry,
+        reader: &mut dyn Read,
+    ) -> Result<DecodeOutcome> {
+        if !self.pass.is_admitted(slot) {
+            return Ok(DecodeOutcome::Unverified(UnverifiedReason::ResourceLimit));
+        }
+        let mut bytes = Vec::new();
+        match self.pass.copy_into(reader, &mut bytes, file.size) {
+            Ok(_) => {
+                if let Some(capture) = self.links.as_mut() {
+                    (capture.set)(position, common::symlink_target_from_bytes(&bytes)?);
+                }
+                Ok(DecodeOutcome::Verified)
+            }
+            Err(failure) => Ok(DecodeOutcome::Failed(failure)),
+        }
     }
 }
 
@@ -887,14 +1285,20 @@ fn payload_by_block(archive: &Archive, slots: &[Option<Slot>]) -> Vec<Vec<Payloa
 /// fires only once the whole block has been read, so it is attributed to the
 /// block's last entry.
 ///
+/// When `links` is set, the targets of the listed links inside decoded blocks
+/// are read in the same decode and handed to it; links in blocks the pass does
+/// not decode stay unread.
+///
 /// # Errors
 ///
-/// Returns the I/O error of a failing disk read.
+/// Returns the I/O error of a failing disk read, or an error for a link target
+/// that is not UTF-8.
 pub(crate) fn verify_sevenz_blocks<R: Read + Seek>(
     archive: &Archive,
     source: &mut R,
     pass: &mut IntegrityPass<'_>,
     slots: &[Option<Slot>],
+    mut links: Option<LinkCapture<'_>>,
 ) -> Result<()> {
     let payload = payload_by_block(archive, slots);
     let mut refused = vec![None; archive.blocks.len()];
@@ -917,11 +1321,14 @@ pub(crate) fn verify_sevenz_blocks<R: Read + Seek>(
         if files.is_empty() {
             continue;
         }
-        match refused[block_index] {
-            Some(reason) => {
-                mark_files(pass, archive, reason, files.iter().map(|&(index, _)| index));
-            }
-            None => verify_sevenz_block(archive, source, pass, decode, block_index, files)?,
+        if let Some(reason) = refused[block_index] {
+            mark_files(pass, archive, reason, files.iter().map(|&(index, _)| index));
+        } else {
+            let capture = links.as_mut().map(|capture| LinkCapture {
+                links: capture.links,
+                set: &mut *capture.set,
+            });
+            verify_sevenz_block(archive, source, pass, decode, block_index, files, capture)?;
         }
     }
     Ok(())
@@ -996,6 +1403,7 @@ fn verify_sevenz_block<R: Read + Seek>(
     decode: DecodeContext<'_>,
     block_index: usize,
     payload: &[PayloadFile],
+    links: Option<LinkCapture<'_>>,
 ) -> Result<()> {
     let DecodeContext { slots, knobs } = decode;
     let block = &archive.blocks[block_index];
@@ -1015,6 +1423,10 @@ fn verify_sevenz_block<R: Read + Seek>(
     let mut scan = BlockScan {
         pass,
         slots,
+        links: links.map(|capture| LinkCapture {
+            links: capture.links,
+            set: &mut *capture.set,
+        }),
         next_file: first,
         visited: BTreeSet::new(),
         stop: None,
@@ -1487,6 +1899,52 @@ fn symlink_at_dest_error() -> std::io::Error {
 }
 
 impl<R: Read + Seek> SevenZArchive<R> {
+    /// Reads each link's target and validates it against the destination as it
+    /// is before any write, keeping one target at a time.
+    ///
+    /// `links` holds the archive file index and validated path of every
+    /// symlink entry. Runs only after every header check of
+    /// the extraction, so a decode never precedes a refusal.
+    ///
+    /// # Errors
+    ///
+    /// Returns the policy error of the first target that fails validation, or
+    /// `InvalidArchive` when a target cannot be read.
+    fn validate_link_targets(
+        &mut self,
+        dest: &DestDir,
+        config: &SecurityConfig<Validated>,
+        links: &LinkTable<SafePath>,
+    ) -> Result<()> {
+        if links.is_empty() {
+            return Ok(());
+        }
+        let compression: Vec<EntryCompression> =
+            self.entries.iter().map(|entry| entry.compression).collect();
+        let entries = &self.entries;
+        walk_sevenz_links(
+            &self.archive,
+            &mut self.source,
+            &compression,
+            config,
+            links,
+            &mut |index, outcome| {
+                let name = &entries[index].name;
+                let target = match outcome {
+                    Ok(StoredLinkTarget::Read(target)) => target,
+                    Ok(StoredLinkTarget::Oversized { bytes }) => {
+                        return Err(common::symlink_target_too_large(bytes));
+                    }
+                    Err(failure) => return Err(failure.into_extract_error(name)),
+                };
+                let link = links.get(index).ok_or_else(|| {
+                    ArchiveError::InvalidArchive("7z link index is out of range".into())
+                })?;
+                SafeSymlink::validate(link, &target, dest, config).map(drop)
+            },
+        )
+    }
+
     fn anti_item_count(&self) -> u64 {
         let count = self
             .entries
@@ -1494,6 +1952,33 @@ impl<R: Read + Seek> SevenZArchive<R> {
             .filter(|entry| entry.class == SevenZClass::AntiItem)
             .count();
         u64::try_from(count).unwrap_or(u64::MAX)
+    }
+
+    /// Reads the target of the symlink entry from its own stream and validates
+    /// the entry against the disk as it is now; Step 1 validated it against the
+    /// destination before anything was written.
+    fn validate_stream_symlink(
+        entry: &sevenz_rust2::ArchiveEntry,
+        reader: &mut dyn Read,
+        entry_path: &Path,
+        validator: &mut EntryValidator,
+    ) -> Result<crate::security::validator::ValidatedEntry> {
+        let target = match read_sevenz_link_target(reader, entry.size)? {
+            Ok(StoredLinkTarget::Read(target)) => target,
+            Ok(StoredLinkTarget::Oversized { bytes }) => {
+                return Err(common::symlink_target_too_large(bytes));
+            }
+            Err(failure) => return Err(failure.into_extract_error(&entry.name)),
+        };
+        // SECURITY: `None` dir_cache, like the path validation of files.
+        validator.validate_entry(
+            entry_path,
+            &EntryType::Symlink { target },
+            entry.size,
+            None,
+            None,
+            None,
+        )
     }
 
     /// Processes a single 7z entry: validates, extracts file or creates
@@ -1522,13 +2007,35 @@ impl<R: Read + Seek> SevenZArchive<R> {
         pending_error: &mut Option<ArchiveError>,
         copy_buffer: &mut CopyBuffer,
     ) -> std::result::Result<u64, sevenz_rust2::Error> {
-        let entry_type = kind.extraction_type(&entry.name).map_err(|e| {
-            sevenz_rust2::Error::Other(format!("entry type detection failed: {e}").into())
-        })?;
+        match kind {
+            SevenZKind::ReparsePoint => {
+                return Err(abort_with(
+                    pending_error,
+                    reparse_point_refusal(&entry.name),
+                ));
+            }
+            SevenZKind::UnixSymlink => {
+                let validated = Self::validate_stream_symlink(entry, reader, entry_path, validator)
+                    .map_err(|e| abort_with(pending_error, e))?;
+                if let ValidatedEntryType::Symlink(symlink) = validated.entry_type() {
+                    common::create_symlink(
+                        symlink,
+                        dest,
+                        report,
+                        dir_cache,
+                        skip_duplicates,
+                        duplicate_skips,
+                    )
+                    .map_err(|e| abort_with(pending_error, e))?;
+                }
+                return Ok(0);
+            }
+            SevenZKind::File | SevenZKind::Directory => {}
+        }
 
         // Extension filter runs before path validation to avoid quota
         // double-counting for skipped files.
-        if matches!(entry_type, EntryType::File)
+        if kind == SevenZKind::File
             && !common::check_extension_allowed(
                 entry_path,
                 config,
@@ -1562,13 +2069,13 @@ impl<R: Read + Seek> SevenZArchive<R> {
             .into_inner();
         let dest_path = dest.join_path(safe_path.as_path());
 
-        match entry_type {
-            EntryType::Directory => {
+        match kind {
+            SevenZKind::Directory => {
                 dir_cache.ensure_dir(&dest_path)?;
                 report.directories_created += 1;
                 Ok(0)
             }
-            EntryType::File => {
+            SevenZKind::File => {
                 dir_cache.ensure_parent_dir(&dest_path)?;
 
                 let existing = lstat_dest(&dest_path)?;
@@ -1679,8 +2186,8 @@ impl<R: Read + Seek> SevenZArchive<R> {
                 report.files_extracted += 1;
                 Ok(bytes_written)
             }
-            _ => Err(sevenz_rust2::Error::Other(
-                "symlinks/hardlinks not supported".into(),
+            SevenZKind::ReparsePoint | SevenZKind::UnixSymlink => Err(sevenz_rust2::Error::Other(
+                "link entries are handled before path validation".into(),
             )),
         }
     }
@@ -1782,8 +2289,10 @@ impl<R: Read + Seek> SevenZArchive<R> {
         let mut extract_fn = |entry: &sevenz_rust2::ArchiveEntry,
                               reader: &mut dyn Read|
          -> std::result::Result<bool, sevenz_rust2::Error> {
-            let SevenZClass::Present(kind) = SevenZClass::of(entry) else {
-                return Ok(true);
+            let kind = match SevenZClass::of(entry).present(&entry.name) {
+                Ok(Some(kind)) => kind,
+                Ok(None) => return Ok(true),
+                Err(refusal) => return Err(abort_with(&mut ctx.pending_error, refusal)),
             };
             let entry_path = std::path::PathBuf::from(common::normalize_entry_name(&entry.name));
             ctx.current_idx = ctx.current_idx.saturating_add(1);
@@ -1847,14 +2356,11 @@ impl<R: Read + Seek> SevenZArchive<R> {
             &mut extract_fn,
         );
         let mut accumulated = ctx.report;
-        common::push_duplicate_skip_warning(
+        push_skip_warnings(
             &mut accumulated,
-            ctx.duplicate_skips,
-            "entry",
-            "entries",
+            (ctx.duplicate_skips, ctx.disallowed_extension_skips),
+            anti_items,
         );
-        common::push_disallowed_extension_warning(&mut accumulated, ctx.disallowed_extension_skips);
-        push_anti_item_warning(&mut accumulated, anti_items);
 
         let e = match result {
             Ok(()) => {
@@ -1879,6 +2385,15 @@ impl<R: Read + Seek> SevenZArchive<R> {
         };
         Err(ArchiveError::partial_or(accumulated, e))
     }
+}
+
+/// Appends the aggregated warnings for what `extract` skipped: duplicates and
+/// disallowed extensions as `(duplicates, disallowed)`, and anti-items.
+fn push_skip_warnings(report: &mut ExtractionReport, skips: (u64, u64), anti_items: u64) {
+    let (duplicates, disallowed) = skips;
+    common::push_duplicate_skip_warning(report, duplicates, "entry", "entries");
+    common::push_disallowed_extension_warning(report, disallowed);
+    push_anti_item_warning(report, anti_items);
 }
 
 /// Appends one aggregated warning for the anti-items `extract` skipped.
@@ -1907,7 +2422,7 @@ fn anti_item_issue(count: u64) -> Option<VerificationIssue> {
     (count > 0).then(|| {
         VerificationIssue::new(
             IssueSeverity::Info,
-            IssueCategory::SuspiciousPath,
+            IssueCategory::ArchiveNote,
             format!(
                 "{count} 7z {} skipped (deletion markers are not applied)",
                 anti_item_noun(count)
@@ -1943,8 +2458,9 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
         // API LIMITATION (sevenz-rust2): only Windows reparse points and Unix
         // mode symlinks are detectable as links; hardlinks are not.
         let mut prevalidator = EntryValidator::new(config, &dest);
-        for entry in &self.entries {
-            let SevenZClass::Present(kind) = entry.class else {
+        let mut links = LinkTable::default();
+        for (index, entry) in self.entries.iter().enumerate() {
+            let Some(kind) = entry.class.present(&entry.name)? else {
                 continue;
             };
             let path = std::path::PathBuf::from(common::normalize_entry_name(&entry.name));
@@ -1958,10 +2474,19 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
                 EntryPath::Child(safe_path) => safe_path,
             };
 
-            // Refuses links before anything is written, like `verify`.
-            kind.extraction_type(&entry.name)?;
-            if kind == SevenZKind::Directory {
-                continue;
+            // Refuses reparse points and disallowed links before anything is
+            // written, like `verify`.
+            match kind {
+                SevenZKind::Directory => continue,
+                SevenZKind::ReparsePoint => return Err(reparse_point_refusal(&entry.name)),
+                SevenZKind::UnixSymlink => {
+                    validate_entry_compression(&entry.compression, entry.size, config)?;
+                    require_symlinks_allowed(config)?;
+                    common::require_symlink_creation()?;
+                    links.push(index, safe_path)?;
+                    continue;
+                }
+                SevenZKind::File => {}
             }
 
             // The ratio is a property of the archive, not of the destination,
@@ -1999,6 +2524,8 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
             // uses a fresh validator, see below).
             let _permit = prevalidator.reserve_file(entry.size)?;
         }
+
+        self.validate_link_targets(&dest, config, &links)?;
 
         // Empty archives: skip extraction entirely — decompress_with_extract_fn
         // would fail with UnexpectedEof on valid 32-byte empty 7z archives.
@@ -2044,7 +2571,7 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
         use crate::inspection::list::ListPass;
         use crate::inspection::list::list_sevenz_reader;
         self.source.rewind().map_err(ArchiveError::Io)?;
-        list_sevenz_reader(&mut self.source, config, &mut ListPass::Strict)
+        list_sevenz_reader(&mut self.source, config, &mut ListPass::strict())
     }
 
     fn verify(
@@ -2076,10 +2603,11 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
 ///
 /// # Known Limitations (sevenz-rust2 0.24)
 ///
-/// - **Symlinks (Unix)**: p7zip stores the mode in the high 16 bits of the
-///   attributes (flagged by `0x8000`); an `S_IFLNK` mode is classified as
-///   [`SevenZKind::UnixSymlink`] and refused on extraction. The link target is
-///   not read.
+/// - **Unix mode**: p7zip and libarchive store the mode in the high 16 bits of
+///   the attributes (flagged by `0x8000`). `S_IFLNK` is classified as
+///   [`SevenZKind::UnixSymlink`]; a FIFO, socket, device node, undefined type,
+///   or a type that contradicts the entry's native kind is
+///   [`SevenZClass::Unsupported`].
 /// - **Symlinks (Windows)**: detected through `FILE_ATTRIBUTE_REPARSE_POINT`
 ///   and refused on extraction.
 /// - **Hardlinks**: not detectable; extracted as separate files.
@@ -2092,6 +2620,8 @@ pub(crate) enum SevenZClass {
     AntiItem,
     /// An entry that stands for something on disk.
     Present(SevenZKind),
+    /// An entry exarch refuses in `extract`, `list` and `verify`.
+    Unsupported(UnsupportedEntry),
 }
 
 /// What a present 7z entry stands for.
@@ -2107,20 +2637,144 @@ pub(crate) enum SevenZKind {
     UnixSymlink,
 }
 
+/// What the 7z header itself says an entry is: a directory has no stream and
+/// is not flagged as an empty file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NativeKind {
+    /// Holds data or is an empty file.
+    File,
+    /// Has no stream and is not an empty file.
+    Directory,
+}
+
+impl NativeKind {
+    const fn noun(self) -> &'static str {
+        match self {
+            Self::File => "file",
+            Self::Directory => "directory",
+        }
+    }
+
+    const fn opposite(self) -> &'static str {
+        match self {
+            Self::File => "directory",
+            Self::Directory => "regular file",
+        }
+    }
+}
+
+/// Where a claim about an entry's kind was recorded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KindSource {
+    /// The Unix mode in the high 16 bits of the attributes.
+    UnixMode,
+    /// The Windows `FILE_ATTRIBUTE_DIRECTORY` bit.
+    WindowsAttribute,
+}
+
+impl KindSource {
+    const fn noun(self) -> &'static str {
+        match self {
+            Self::UnixMode => "Unix mode",
+            Self::WindowsAttribute => "Windows attributes",
+        }
+    }
+}
+
+/// Why a 7z entry is refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UnsupportedEntry {
+    /// A FIFO, device node or socket.
+    Special(common::SpecialFile),
+    /// A Unix mode whose type bits name no defined file type.
+    UndefinedType(u8),
+    /// A recorded kind that the entry's native kind contradicts: the claim is
+    /// the opposite of `native`.
+    KindContradiction {
+        /// What the 7z header says.
+        native: NativeKind,
+        /// Where the contradicting claim was recorded.
+        claimed_by: KindSource,
+    },
+}
+
+impl UnsupportedEntry {
+    /// The refusal for the entry named `name`.
+    fn refusal(self, name: &str) -> ArchiveError {
+        let reason = match self {
+            Self::Special(special) => {
+                format!("{} entries not supported: {name}", special.noun())
+            }
+            Self::UndefinedType(bits) => {
+                format!("7z entry has an undefined Unix file type ({bits:#x}): {name}")
+            }
+            Self::KindContradiction { native, claimed_by } => format!(
+                "7z entry is a {} but its {} says {}: {name}",
+                native.noun(),
+                claimed_by.noun(),
+                native.opposite()
+            ),
+        };
+        ArchiveError::SecurityViolation { reason }
+    }
+}
+
 impl SevenZClass {
     /// Classifies an entry. An anti item wins over every other attribute, and
     /// a link wins over the directory flag because junctions are directories.
     pub(crate) fn of(entry: &sevenz_rust2::ArchiveEntry) -> Self {
+        use common::UnixFileType;
+
         if entry.is_anti_item {
-            Self::AntiItem
-        } else if is_windows_reparse_point(entry) {
-            Self::Present(SevenZKind::ReparsePoint)
-        } else if is_unix_symlink(entry) {
-            Self::Present(SevenZKind::UnixSymlink)
-        } else if entry.is_directory() {
-            Self::Present(SevenZKind::Directory)
+            return Self::AntiItem;
+        }
+        if is_windows_reparse_point(entry) {
+            return Self::Present(SevenZKind::ReparsePoint);
+        }
+        let mode_type = unix_file_type(entry);
+        if mode_type == Some(UnixFileType::Symlink) {
+            return Self::Present(SevenZKind::UnixSymlink);
+        }
+        let native = if entry.is_directory() {
+            NativeKind::Directory
         } else {
-            Self::Present(SevenZKind::File)
+            NativeKind::File
+        };
+        let contradiction = |claimed_by| {
+            Self::Unsupported(UnsupportedEntry::KindContradiction { native, claimed_by })
+        };
+        match (mode_type, native) {
+            (Some(UnixFileType::Special(special)), _) => {
+                return Self::Unsupported(UnsupportedEntry::Special(special));
+            }
+            (Some(UnixFileType::Undefined(bits)), _) => {
+                return Self::Unsupported(UnsupportedEntry::UndefinedType(bits));
+            }
+            (Some(UnixFileType::Regular), NativeKind::Directory)
+            | (Some(UnixFileType::Directory), NativeKind::File) => {
+                return contradiction(KindSource::UnixMode);
+            }
+            _ => {}
+        }
+        if native == NativeKind::File && claims_windows_directory(entry) {
+            return contradiction(KindSource::WindowsAttribute);
+        }
+        Self::Present(match native {
+            NativeKind::Directory => SevenZKind::Directory,
+            NativeKind::File => SevenZKind::File,
+        })
+    }
+
+    /// The kind of an entry to extract or list, `None` for an anti item.
+    ///
+    /// # Errors
+    ///
+    /// Returns `SecurityViolation` naming `name` for an unsupported entry.
+    pub(crate) fn present(self, name: &str) -> Result<Option<SevenZKind>> {
+        match self {
+            Self::AntiItem => Ok(None),
+            Self::Present(kind) => Ok(Some(kind)),
+            Self::Unsupported(unsupported) => Err(unsupported.refusal(name)),
         }
     }
 }
@@ -2142,46 +2796,33 @@ impl SevenZKind {
             Self::ReparsePoint | Self::UnixSymlink => ManifestEntryType::Symlink,
         }
     }
+}
 
-    /// The entry type to extract. `name` is the entry's name, for the message.
-    ///
-    /// # Errors
-    ///
-    /// Returns `SecurityViolation` for a link: link extraction is not
-    /// supported.
-    pub(crate) fn extraction_type(self, name: &str) -> Result<EntryType> {
-        match self {
-            Self::File => Ok(EntryType::File),
-            Self::Directory => Ok(EntryType::Directory),
-            Self::ReparsePoint => Err(link_refusal(
-                name,
-                "Windows reparse point attribute set",
-                "due to sevenz-rust2 API limitations",
-            )),
-            Self::UnixSymlink => Err(link_refusal(
-                name,
-                "Unix mode S_IFLNK",
-                "because link targets are not read, so the symlink policy cannot allow them",
-            )),
-        }
+/// The refusal for a Windows reparse point, which has no readable target.
+fn reparse_point_refusal(name: &str) -> ArchiveError {
+    ArchiveError::SecurityViolation {
+        reason: format!(
+            "symlink detected in 7z archive: {name} (Windows reparse point attribute set). \
+             Its target cannot be read due to sevenz-rust2 API limitations."
+        ),
     }
 }
 
-/// The refusal for a 7z link entry; `why` completes "extraction is not
-/// supported".
-fn link_refusal(name: &str, evidence: &str, why: &str) -> ArchiveError {
-    ArchiveError::SecurityViolation {
-        reason: format!(
-            "symlink detected in 7z archive: {name} ({evidence}). \
-             7z symlink extraction is not supported {why}."
-        ),
-    }
+/// Stashes `error` for the caller to return as is and gives the error that ends
+/// the sevenz-rust2 entry loop, which would otherwise reclassify it from its
+/// message text.
+fn abort_with(
+    pending_error: &mut Option<ArchiveError>,
+    error: ArchiveError,
+) -> sevenz_rust2::Error {
+    *pending_error = Some(error);
+    sevenz_rust2::Error::Other("extraction aborted by security policy".into())
 }
 
 /// Checks if Windows attributes indicate a reparse point (symlink/junction).
 ///
 /// Only detects links recorded through the Windows attribute; Unix-mode
-/// symlinks are detected by [`is_unix_symlink`].
+/// symlinks are detected by [`unix_file_type`].
 ///
 /// Reference: <https://learn.microsoft.com/en-us/windows/win32/fileio/file-attribute-constants>
 fn is_windows_reparse_point(entry: &sevenz_rust2::ArchiveEntry) -> bool {
@@ -2190,16 +2831,21 @@ fn is_windows_reparse_point(entry: &sevenz_rust2::ArchiveEntry) -> bool {
     entry.has_windows_attributes && (entry.windows_attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0
 }
 
-/// Checks if the Unix mode p7zip keeps in the high 16 bits of the attributes
-/// is a symlink.
-fn is_unix_symlink(entry: &sevenz_rust2::ArchiveEntry) -> bool {
+/// Reads the file type of the Unix mode p7zip keeps in the high 16 bits of the
+/// attributes, `None` when the entry carries no Unix mode or no type bits.
+fn unix_file_type(entry: &sevenz_rust2::ArchiveEntry) -> Option<common::UnixFileType> {
     const UNIX_EXTENSION: u32 = 0x8000;
-    const S_IFMT: u32 = 0o17_0000;
-    const S_IFLNK: u32 = 0o12_0000;
 
-    entry.has_windows_attributes
-        && entry.windows_attributes & UNIX_EXTENSION != 0
-        && (entry.windows_attributes >> 16) & S_IFMT == S_IFLNK
+    (entry.has_windows_attributes && entry.windows_attributes & UNIX_EXTENSION != 0)
+        .then(|| common::UnixFileType::from_mode(entry.windows_attributes >> 16))
+        .flatten()
+}
+
+/// Checks whether the Windows attributes claim a directory.
+fn claims_windows_directory(entry: &sevenz_rust2::ArchiveEntry) -> bool {
+    const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x0000_0010;
+
+    entry.has_windows_attributes && entry.windows_attributes & FILE_ATTRIBUTE_DIRECTORY != 0
 }
 
 /// Checks whether a sevenz-rust2 parse failure is due to a valid empty 7z
@@ -2279,9 +2925,14 @@ mod tests {
     use tempfile::TempDir;
 
     fn extraction_type_of(entry: &sevenz_rust2::ArchiveEntry) -> Result<EntryType> {
-        match SevenZClass::of(entry) {
-            SevenZClass::Present(kind) => kind.extraction_type(&entry.name),
-            SevenZClass::AntiItem => panic!("anti item has no extraction type"),
+        match SevenZClass::of(entry).present(&entry.name)? {
+            Some(SevenZKind::File) => Ok(EntryType::File),
+            Some(SevenZKind::Directory) => Ok(EntryType::Directory),
+            Some(SevenZKind::ReparsePoint) => Err(reparse_point_refusal(&entry.name)),
+            Some(SevenZKind::UnixSymlink) => Ok(EntryType::Symlink {
+                target: PathBuf::new(),
+            }),
+            None => panic!("anti item has no extraction type"),
         }
     }
 
@@ -2367,22 +3018,194 @@ mod tests {
         assert_eq!(SevenZClass::of(&anti), SevenZClass::AntiItem);
     }
 
-    #[test]
-    fn unix_mode_types_other_than_symlink_are_not_symlinks() {
-        const S_IFSOCK: u32 = 0o14_0000;
-        const S_IFBLK: u32 = 0o06_0000;
-        const S_IFREG: u32 = 0o10_0000;
-        const S_IFCHR: u32 = 0o02_0000;
-        const S_IFIFO: u32 = 0o01_0000;
+    const S_IFSOCK: u32 = 0o14_0000;
+    const S_IFBLK: u32 = 0o06_0000;
+    const S_IFREG: u32 = 0o10_0000;
+    const S_IFDIR: u32 = 0o04_0000;
+    const S_IFCHR: u32 = 0o02_0000;
+    const S_IFIFO: u32 = 0o01_0000;
 
-        for mode in [S_IFSOCK, S_IFBLK, S_IFREG, S_IFCHR, S_IFIFO] {
-            let entry = with_unix_mode(sevenz_rust2::ArchiveEntry::new_file("f"), mode | 0o644);
+    fn file_with_stream(name: &str) -> sevenz_rust2::ArchiveEntry {
+        let mut entry = sevenz_rust2::ArchiveEntry::new_file(name);
+        entry.has_stream = true;
+        entry.size = 5;
+        entry
+    }
+
+    #[test]
+    fn unix_mode_special_files_are_unsupported_whatever_the_native_kind() {
+        use common::SpecialFile::*;
+
+        for (mode, special) in [
+            (S_IFIFO, Fifo),
+            (S_IFCHR, CharDevice),
+            (S_IFBLK, BlockDevice),
+            (S_IFSOCK, Socket),
+        ] {
+            for entry in [
+                sevenz_rust2::ArchiveEntry::new_file("f"),
+                file_with_stream("f"),
+                sevenz_rust2::ArchiveEntry::new_directory("f"),
+            ] {
+                assert_eq!(
+                    SevenZClass::of(&with_unix_mode(entry, mode | 0o644)),
+                    SevenZClass::Unsupported(UnsupportedEntry::Special(special)),
+                    "mode {mode:o}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unix_mode_with_an_undefined_type_is_unsupported() {
+        for (mode, bits) in [(0o03_0000, 3), (0o05_0000, 5), (0o16_0000, 14)] {
             assert_eq!(
-                SevenZClass::of(&entry),
-                SevenZClass::Present(SevenZKind::File),
+                SevenZClass::of(&with_unix_mode(file_with_stream("f"), mode | 0o644)),
+                SevenZClass::Unsupported(UnsupportedEntry::UndefinedType(bits)),
                 "mode {mode:o}"
             );
         }
+    }
+
+    #[test]
+    fn unix_mode_agreeing_with_the_native_kind_is_present() {
+        assert_eq!(
+            SevenZClass::of(&with_unix_mode(file_with_stream("f"), S_IFREG | 0o644)),
+            SevenZClass::Present(SevenZKind::File)
+        );
+        assert_eq!(
+            SevenZClass::of(&with_unix_mode(
+                sevenz_rust2::ArchiveEntry::new_file("f"),
+                S_IFREG | 0o644
+            )),
+            SevenZClass::Present(SevenZKind::File)
+        );
+        assert_eq!(
+            SevenZClass::of(&with_unix_mode(
+                sevenz_rust2::ArchiveEntry::new_directory("d"),
+                S_IFDIR | 0o755
+            )),
+            SevenZClass::Present(SevenZKind::Directory)
+        );
+    }
+
+    #[test]
+    fn unix_mode_contradicting_the_native_kind_is_unsupported() {
+        let directory_claim = SevenZClass::Unsupported(UnsupportedEntry::KindContradiction {
+            native: NativeKind::File,
+            claimed_by: KindSource::UnixMode,
+        });
+        let file_claim = SevenZClass::Unsupported(UnsupportedEntry::KindContradiction {
+            native: NativeKind::Directory,
+            claimed_by: KindSource::UnixMode,
+        });
+
+        assert_eq!(
+            SevenZClass::of(&with_unix_mode(file_with_stream("f"), S_IFDIR | 0o755)),
+            directory_claim
+        );
+        assert_eq!(
+            SevenZClass::of(&with_unix_mode(
+                sevenz_rust2::ArchiveEntry::new_file("f"),
+                S_IFDIR | 0o755
+            )),
+            directory_claim
+        );
+        assert_eq!(
+            SevenZClass::of(&with_unix_mode(
+                sevenz_rust2::ArchiveEntry::new_directory("d"),
+                S_IFREG | 0o644
+            )),
+            file_claim
+        );
+    }
+
+    #[test]
+    fn mode_without_type_bits_leaves_the_native_kind() {
+        assert_eq!(
+            SevenZClass::of(&with_unix_mode(file_with_stream("f"), 0o644)),
+            SevenZClass::Present(SevenZKind::File)
+        );
+        assert_eq!(
+            SevenZClass::of(&with_unix_mode(
+                sevenz_rust2::ArchiveEntry::new_directory("d"),
+                0o755
+            )),
+            SevenZClass::Present(SevenZKind::Directory)
+        );
+    }
+
+    #[test]
+    fn windows_directory_bit_on_a_native_file_is_unsupported() {
+        const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+
+        let mut entry = file_with_stream("f");
+        entry.has_windows_attributes = true;
+        entry.windows_attributes = FILE_ATTRIBUTE_DIRECTORY;
+        assert_eq!(
+            SevenZClass::of(&entry),
+            SevenZClass::Unsupported(UnsupportedEntry::KindContradiction {
+                native: NativeKind::File,
+                claimed_by: KindSource::WindowsAttribute,
+            })
+        );
+
+        let mut dir = sevenz_rust2::ArchiveEntry::new_directory("d");
+        dir.has_windows_attributes = true;
+        dir.windows_attributes = FILE_ATTRIBUTE_DIRECTORY;
+        assert_eq!(
+            SevenZClass::of(&dir),
+            SevenZClass::Present(SevenZKind::Directory)
+        );
+
+        let mut clear = sevenz_rust2::ArchiveEntry::new_directory("d");
+        clear.has_windows_attributes = true;
+        clear.windows_attributes = 0x20;
+        assert_eq!(
+            SevenZClass::of(&clear),
+            SevenZClass::Present(SevenZKind::Directory)
+        );
+    }
+
+    #[test]
+    fn symlink_and_reparse_bit_win_before_kind_checks() {
+        let mut link = with_unix_mode(file_with_stream("l"), 0o120_777);
+        link.windows_attributes |= 0x10;
+        assert_eq!(
+            SevenZClass::of(&link),
+            SevenZClass::Present(SevenZKind::UnixSymlink)
+        );
+
+        let mut reparse_dir_bit = file_with_stream("r");
+        reparse_dir_bit.has_windows_attributes = true;
+        reparse_dir_bit.windows_attributes = 0x410;
+        assert_eq!(
+            SevenZClass::of(&reparse_dir_bit),
+            SevenZClass::Present(SevenZKind::ReparsePoint)
+        );
+    }
+
+    #[test]
+    fn anti_item_wins_over_an_unsupported_mode() {
+        let mut anti = with_unix_mode(file_with_stream("a"), S_IFIFO | 0o644);
+        anti.is_anti_item = true;
+        assert_eq!(SevenZClass::of(&anti), SevenZClass::AntiItem);
+    }
+
+    #[test]
+    fn present_refuses_unsupported_entries_by_name() {
+        let fifo = with_unix_mode(file_with_stream("pipe"), S_IFIFO | 0o644);
+        assert_matches!(
+            SevenZClass::of(&fifo).present("pipe"),
+            Err(ArchiveError::SecurityViolation { reason })
+                if reason.contains("FIFO entries not supported") && reason.contains("pipe")
+        );
+        let anti = SevenZClass::AntiItem;
+        assert_matches!(anti.present("a"), Ok(None));
+        assert_matches!(
+            SevenZClass::Present(SevenZKind::File).present("f"),
+            Ok(Some(SevenZKind::File))
+        );
     }
 
     #[test]
@@ -2402,15 +3225,6 @@ mod tests {
         assert_eq!(
             SevenZClass::of(&entry),
             SevenZClass::Present(SevenZKind::File)
-        );
-    }
-
-    #[test]
-    fn unix_symlink_extraction_is_refused() {
-        let entry = with_unix_mode(sevenz_rust2::ArchiveEntry::new_file("l"), 0o120_777);
-        assert_matches!(
-            extraction_type_of(&entry),
-            Err(ArchiveError::SecurityViolation { reason }) if reason.contains("S_IFLNK")
         );
     }
 
@@ -4561,6 +5375,7 @@ mod tests {
         let mut scan = BlockScan {
             pass: &mut pass,
             slots: &slots,
+            links: None,
             next_file: 0,
             visited: BTreeSet::new(),
             stop: None,
@@ -4626,5 +5441,7 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+mod link_walk_tests;
 #[cfg(test)]
 mod parallel_tests;

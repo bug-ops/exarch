@@ -14,14 +14,17 @@ use crate::progress::VerboseProgress;
 use anyhow::Context;
 use anyhow::Result;
 use exarch_core::ArchiveError;
+use exarch_core::ArchiveManifest;
 use exarch_core::ExtractionOptions;
 use exarch_core::ExtractionReport;
+use exarch_core::ListOptions;
 use exarch_core::ManifestEntryKind;
 use exarch_core::NoopProgress;
 use exarch_core::ProgressCallback;
 use exarch_core::SecurityConfig;
+use exarch_core::StoredTargets;
 use exarch_core::extract_archive_with_options_and_progress;
-use exarch_core::list_archive;
+use exarch_core::list_archive_with_options;
 use std::env;
 use std::ffi::OsStr;
 use std::ffi::OsString;
@@ -719,13 +722,20 @@ fn filter_banned_components(raw: &[String]) -> Vec<String> {
     raw.iter().filter(|c| !c.is_empty()).cloned().collect()
 }
 
-/// Wraps a pre-flight listing failure. A ZIP structure rejection keeps its
-/// own message and hint, since that is the error the user has to act on.
-fn list_error(err: ArchiveError, archive: &Path) -> anyhow::Error {
-    if matches!(err, ArchiveError::ZipInconsistency(_)) {
-        return convert_extraction_error(err, archive, false);
-    }
-    anyhow::Error::from(err).context(format!("failed to list archive: {}", archive.display()))
+/// Lists the archive before extraction: for conflict detection and the entry
+/// count that drives the progress bar. Neither needs link targets, and
+/// extraction reads them itself, so the listing leaves 7z targets undecoded.
+///
+/// A ZIP structure rejection keeps its own message and hint, since that is the
+/// error the user has to act on.
+fn list_for_extract(archive: &Path, config: &SecurityConfig) -> Result<ArchiveManifest> {
+    let options = ListOptions::default().with_stored_targets(StoredTargets::Skip);
+    list_archive_with_options(archive, config, &options).map_err(|err| {
+        if matches!(err, ArchiveError::ZipInconsistency(_)) {
+            return convert_extraction_error(err, archive, false);
+        }
+        anyhow::Error::from(err).context(format!("failed to list archive: {}", archive.display()))
+    })
 }
 
 pub fn execute(
@@ -777,10 +787,7 @@ pub fn execute(
         .with_max_path_depth(config.max_path_depth)
         .with_banned_path_components(config.banned_path_components.clone());
 
-    // Always list the archive: needed for conflict detection and for obtaining
-    // the real entry count that drives the progress bar.
-    let manifest =
-        list_archive(&args.archive, &list_config).map_err(|e| list_error(e, &args.archive))?;
+    let manifest = list_for_extract(&args.archive, &list_config)?;
 
     if !args.force && !args.atomic {
         let conflicts: Vec<_> = manifest

@@ -935,10 +935,122 @@ pub fn create_symlink(
 
     #[cfg(not(unix))]
     {
+        require_symlink_creation()
+    }
+}
+
+/// Fails on a host that cannot create symlinks, so a format can refuse a link
+/// before it writes anything.
+///
+/// # Errors
+///
+/// Returns `SecurityViolation` on a non-Unix host.
+pub fn require_symlink_creation() -> Result<()> {
+    if cfg!(unix) {
+        Ok(())
+    } else {
         Err(ArchiveError::SecurityViolation {
             reason: "symlinks are not supported on this platform".into(),
         })
     }
+}
+
+/// The file-type bits of a Unix mode (`S_IFMT`).
+const S_IFMT: u32 = 0o17_0000;
+
+/// A Unix file type that exarch never creates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpecialFile {
+    /// A named pipe.
+    Fifo,
+    /// A character device node.
+    CharDevice,
+    /// A block device node.
+    BlockDevice,
+    /// A Unix domain socket.
+    Socket,
+}
+
+impl SpecialFile {
+    /// The noun used in refusal messages.
+    pub const fn noun(self) -> &'static str {
+        match self {
+            Self::Fifo => "FIFO",
+            Self::CharDevice => "character device",
+            Self::BlockDevice => "block device",
+            Self::Socket => "socket",
+        }
+    }
+}
+
+/// The file type recorded in the type bits of a Unix mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnixFileType {
+    /// `S_IFREG`.
+    Regular,
+    /// `S_IFDIR`.
+    Directory,
+    /// `S_IFLNK`.
+    Symlink,
+    /// A FIFO, device node or socket.
+    Special(SpecialFile),
+    /// Type bits that name no defined file type; holds the bits shifted down.
+    Undefined(u8),
+}
+
+impl UnixFileType {
+    /// Reads the type bits of `mode`; `None` when they are all zero, which
+    /// records no type.
+    pub fn from_mode(mode: u32) -> Option<Self> {
+        match mode & S_IFMT {
+            0 => None,
+            0o10_0000 => Some(Self::Regular),
+            0o04_0000 => Some(Self::Directory),
+            0o12_0000 => Some(Self::Symlink),
+            0o01_0000 => Some(Self::Special(SpecialFile::Fifo)),
+            0o02_0000 => Some(Self::Special(SpecialFile::CharDevice)),
+            0o06_0000 => Some(Self::Special(SpecialFile::BlockDevice)),
+            0o14_0000 => Some(Self::Special(SpecialFile::Socket)),
+            bits => Some(Self::Undefined(u8::try_from(bits >> 12).unwrap_or(u8::MAX))),
+        }
+    }
+}
+
+/// Longest symlink target stored as entry data that is read at all.
+pub const MAX_STORED_SYMLINK_TARGET: u64 =
+    crate::security::fs_view::MAX_SYMLINK_TARGET_BYTES as u64;
+
+/// The refusal for a symlink target stored as entry data above the host's
+/// symlink target limit.
+///
+/// # Errors
+///
+/// Returns `SecurityViolation` when `size` exceeds
+/// [`MAX_STORED_SYMLINK_TARGET`].
+pub fn check_symlink_target_size(size: u64) -> Result<()> {
+    if size > MAX_STORED_SYMLINK_TARGET {
+        return Err(symlink_target_too_large(size));
+    }
+    Ok(())
+}
+
+/// The refusal for a stored symlink target of `size` bytes above the limit.
+pub fn symlink_target_too_large(size: u64) -> ArchiveError {
+    ArchiveError::SecurityViolation {
+        reason: format!("symlink target too large: {size} bytes (max {MAX_STORED_SYMLINK_TARGET})"),
+    }
+}
+
+/// Decodes the bytes of a stored symlink target.
+///
+/// # Errors
+///
+/// Returns `InvalidArchive` when the bytes are not UTF-8.
+pub fn symlink_target_from_bytes(target_bytes: &[u8]) -> Result<PathBuf> {
+    let target_str = std::str::from_utf8(target_bytes)
+        .map_err(|_| ArchiveError::InvalidArchive("symlink target is not valid UTF-8".into()))?;
+
+    Ok(PathBuf::from(target_str))
 }
 
 /// Opens `path` for reading, refusing to follow a symlink at its final path

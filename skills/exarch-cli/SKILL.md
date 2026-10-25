@@ -103,7 +103,7 @@ Key flags (all optional):
 | `--max-compression-ratio` | 100 | Max uncompressed/compressed ratio before an entry is treated as a zip bomb. Applies to ZIP and non-solid 7z; it does **not** apply to solid 7z blocks. With `--allow-solid-archives`, each solid block is checked as a whole against a fixed 1000x limit (`max_solid_compression_ratio`, Rust API only, not configurable from the CLI). An entry that declares data but zero compressed bytes is always a zip bomb with ratio `unbounded` and no ratio limit admits it; its `HINT` says the size metadata is inconsistent rather than suggesting this flag. The ratio of a 7z block counts only the pack streams its coders consume (derived from the coder method IDs, as the stream counts are not public in `sevenz-rust2`); a crafted header that declares a coder with a BCJ2 ID but never decodes it can still add up to three unreferenced pack streams to the last block's total, so that ratio stays an upper bound for such archives (the padding must be real bytes of the file and the other quotas still apply). |
 | `--max-path-depth` | 32 | Max path component depth allowed per entry. |
 | `--allowed-extensions <EXT>` | all allowed | Restrict extraction to matching extensions. Repeatable or comma-separated (`txt,pdf`); leading dot optional, case-insensitive. |
-| `--allow-symlinks` | off | Allow symlinks that resolve within the extraction directory. |
+| `--allow-symlinks` | off | Allow symlinks that resolve within the extraction directory. `extract` and `verify` reject symlink and hardlink targets whose `..` components cannot be resolved against the extracted tree (TAR, ZIP and 7z). |
 | `--allow-hardlinks` | off | Allow hardlinks that resolve within the extraction directory. |
 | `--allow-absolute-paths` | off | Allow archive entries with absolute paths. For ZIP the leading root and any drive, UNC, verbatim (`\\?\`) or device (`\\.\`) prefix is stripped, so the entry lands under the destination (`/tmp/x` extracts to `<dest>/tmp/x`). |
 | `--allow-world-writable` | off | Allow files with world-writable (mode `0o002`) permission bits. |
@@ -241,7 +241,8 @@ still exits `1` for a FAIL status.
 `"Zip Bomb"`, `"Invalid Permissions"`, `"Quota Exceeded"`, `"Security Policy"`,
 `"Invalid Archive"`, `"Suspicious Path"`, `"Executable File"`, `"Corrupt Data"`,
 `"Integrity Incomplete"`, `"Header Mismatch"`, `"Duplicate Entry"`, `"Overlapping Entries"`,
-`"Hidden Entry"`, `"Name Collision"`. `"Corrupt Data"` and `"Integrity Incomplete"` come only from
+`"Hidden Entry"`, `"Name Collision"`, `"Archive Note"`. `"Archive Note"` is informational and never a
+security finding. `"Corrupt Data"` and `"Integrity Incomplete"` come only from
 `--check-integrity` and are not security findings, but `--check-integrity` can also add
 security-category issues (`"Security Policy"` for a forged ZIP declared size, `"Quota Exceeded"` for 7z
 decoder memory or `max_solid_block_memory`), so `Security:` can be `FAILED` with the flag on an archive
@@ -338,14 +339,37 @@ relabelled as `deflate64`: all three commands exit `1`, and `extract` does not c
 directory. A 7z directory carrying the Windows reparse-point attribute is listed as a symlink, fails
 `verify` regardless of `--allow-symlinks`, and is rejected by `extract` before anything is written.
 A 7z entry carrying a Unix symlink mode (`0x8000` flag plus `S_IFLNK` in the high 16 bits of the
-attributes, as p7zip and `bsdtar --format 7zip` write them) is treated the same way: `verify` fails
-with `symlink target is not read from this archive format, so it cannot be validated`, and
-`extract` exits `1` with `symlink detected in 7z archive: <name> (Unix mode S_IFLNK)` before
-anything is written, even with `--allow-symlinks`, because exarch does not read 7z link targets. A
-7z archive that contains any such link is therefore refused as a whole. `extract` reports skipped 7z
-anti-items as one warning, `skipped N 7z anti-item(s) (deletion markers are not applied)` (in
-`data.warnings` with `--json`), and `verify` adds an `INFO` issue (category `Suspicious Path`) with
-the same count; the INFO does not change the `PASS` status, so `verify --strict` still exits `0`.
+attributes, as p7zip and `bsdtar --format 7zip` write them) is a symlink whose target is the
+entry's data:
+
+- `list` reports the target (`symlink_target` with `--json -l`) whatever the policy.
+- `verify` validates it: without `--allow-symlinks` it fails with `symlinks not allowed`, and with
+  it an absolute or escaping target fails as a symlink escape.
+- `extract` refuses the link with `symlinks not allowed` (exit `1`, hint `--allow-symlinks`)
+  before anything is written, and creates it under `--allow-symlinks`. Targets are checked against
+  the destination before the first write, and the link is validated again against the disk when it
+  is created, so a refusal at that point can leave entries written earlier inside the destination.
+- A link in a solid block needs `--allow-solid-archives`, as any entry of one; without it `list`
+  leaves the target unread.
+- With `--check-integrity` a link is decoded once, together with its block. A block the decoder
+  budget cannot cover leaves the target unread, which `verify` reports as a failure.
+- Reading targets means decoding: `list` and `verify` (with `--allow-symlinks`) decode every block
+  that holds a link, and `extract` decodes such a block twice, once to validate and once to
+  extract. The work is bounded by the solid policy, admission and `max_solid_block_memory`, and
+  archives without links are unaffected.
+- A link whose data is corrupt fails `extract` with `InvalidArchive`; `list` and `verify` leave a
+  corrupt target unread. A target that is not UTF-8 fails `extract`, `list` and, with
+  `--allow-symlinks`, `verify` with `InvalidArchive`, as it does for ZIP.
+- A FIFO, socket or device node, Unix type bits that name no file type, or a recorded kind that
+  contradicts the entry's own (a directory mode on an entry with data or an empty file, a
+  regular-file mode on a directory, the Windows directory bit on a file, empty or not) fails
+  `list`, `verify` and `extract` with `operation denied by security policy` and exit `1`, whatever
+  flags are set. `bsdtar --format 7zip` writes FIFOs as stream-less entries, so an archive made
+  from a tree holding one is refused.
+- `extract` reports skipped 7z anti-items as one warning, `skipped N 7z anti-item(s) (deletion
+  markers are not applied)` (in `data.warnings` with `--json`), and `verify` adds an `INFO` issue
+  (category `Archive Note`) with the same count. The INFO is not a security finding and does not
+  change the `PASS` status or `security_status`, so `verify --strict` still exits `0`.
 
 ### `completion <SHELL>`
 

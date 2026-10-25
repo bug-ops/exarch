@@ -4054,3 +4054,65 @@ fn test_verify_cloaked_zip_reports_a_header_mismatch() {
         .assert()
         .success();
 }
+
+/// A bsdtar-shaped ZIP (root directory entry `./`) verifies, lists and
+/// extracts.
+#[test]
+fn test_zip_root_directory_entry_round_trip() {
+    use std::io::Write;
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("dot.zip");
+    let mut writer = zip::ZipWriter::new(std::fs::File::create(&archive).expect("create"));
+    let options = zip::write::SimpleFileOptions::default();
+    writer.start_file("./", options).expect("root");
+    writer.start_file("./a.txt", options).expect("file");
+    writer.write_all(b"hi").expect("write");
+    writer.finish().expect("finish");
+
+    exarch_cmd()
+        .arg("verify")
+        .arg(&archive)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("PASS"));
+    exarch_cmd()
+        .arg("list")
+        .arg(&archive)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("a.txt"));
+
+    let out = temp.path().join("out");
+    exarch_cmd()
+        .arg("extract")
+        .arg(&archive)
+        .arg(&out)
+        .assert()
+        .success();
+    assert_eq!(std::fs::read(out.join("a.txt")).expect("read"), b"hi");
+}
+
+/// An empty bare `.` entry is the destination itself, so extract needs no
+/// `--force`.
+#[test]
+fn test_zip_empty_dot_file_entry_extracts_without_force() {
+    use std::io::Write;
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("dotfile.zip");
+    let mut writer = zip::ZipWriter::new(std::fs::File::create(&archive).expect("create"));
+    let options = zip::write::SimpleFileOptions::default();
+    writer.start_file(".", options).expect("root");
+    writer.start_file("a.txt", options).expect("file");
+    writer.write_all(b"hi").expect("write");
+    writer.finish().expect("finish");
+
+    let out = temp.path().join("out");
+    std::fs::create_dir(&out).expect("dest");
+    exarch_cmd()
+        .arg("extract")
+        .arg(&archive)
+        .arg(&out)
+        .assert()
+        .success();
+    assert_eq!(std::fs::read(out.join("a.txt")).expect("read"), b"hi");
+}

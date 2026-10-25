@@ -282,6 +282,8 @@ issue when the archive:
 - holds central directory records beyond the count in its end record, a central directory (`PK\x01\x02`) or end record (`PK\x05\x06`, ZIP64 `PK\x06\x06`) signature before an entry (between entries, behind padding or a data descriptor, or in a prefix of a file that starts with `PK`), where a streaming reader stops listing and never reaches the entries behind it, a data descriptor after which a streaming reader (modeled on libarchive: it skips the local compressed size when there is one, else ends a deflated entry at its stream or scans for the descriptor signature and takes 16 bytes, or 24 with a ZIP64 extra field, and matches the 12/16/20/24-byte layouts against the entry's sizes) resumes past the next entry header, or a local header that no central directory record maps (`"Hidden Entry"`): before the archive (a stub is scanned, but past offset 0 only headers that look written by a ZIP producer and whose entry fits inside the stub count, since self-extractors embed the signature; a file that starts with `PK` is not a stub and is judged like a gap; a stub that embeds a whole ZIP resource is still reported), between entries, behind padding, or just before the directory. A streaming reader extracts such an entry and a random-access reader never lists it;
 - has an end of central directory record after the one the `zip` crate used, which the crate rejected and another reader may take (`"Hidden Entry"`).
 
+A header mismatch, an `xl` type divergence and a data descriptor overrun are bound to their entry: the issue's `entry_path` is that entry's path and the entry counts in `suspicious_entries`. Every other ZIP structure finding is archive-level (`entry_path` is `null`).
+
 `total_entries` of a ZIP report is the raw central directory count. A raw count over `--max-files` is
 a `QuotaExceeded` error (`quota exceeded: file count (20000 > 10000)`, exit `1`) from `extract`,
 `list` and `verify` under both policies, even when most records share one name. Verified live
@@ -293,7 +295,11 @@ last, which stays a `QuotaExceeded` error), where `extract` writes what it alway
 Info-ZIP, `ditto`, 7-Zip, `bsdtar`, Go and Python's `zipfile`, including streamed archives
 with data descriptors, produce no findings; archives from Java (`java.util.zip`, `jar`) and Windows
 (`Compress-Archive`, .NET `ZipFile`) are generated and checked at test time in CI; Windows
-Explorer and WinRAR archives are still not covered. A descriptor, local header and data hidden
+Explorer and WinRAR archives are still not covered. The `./` root entry written by
+`bsdtar --format zip -cf out.zip .` is the destination itself: `extract` creates nothing for it
+(it still counts toward `Directories`) and `list` shows it as `.`. A bare `.` entry is accepted
+only as a directory or an empty regular file; a `.` symlink or a `.` with data is rejected by
+`extract`, `list` and `verify`. A descriptor, local header and data hidden
 inside the declared range of a data-descriptor entry (streaming readers end such an entry at the
 end of its data, `zip` at the declared size) is found by plain `verify`, `list` and `extract` for a
 stored entry: the declared range is scanned for a descriptor signature and searched from there like a gap

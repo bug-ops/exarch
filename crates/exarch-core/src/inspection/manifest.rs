@@ -6,6 +6,7 @@ use std::time::SystemTime;
 
 use crate::ArchiveError;
 use crate::Result;
+use crate::ZipEntryIndex;
 use crate::closed_enum::closed_enum;
 use crate::formats::detect::ArchiveType;
 use crate::security::fs_view::LinkKind;
@@ -98,6 +99,27 @@ impl ArchiveManifest {
     #[must_use]
     pub fn oversized_entries(&self) -> &[OversizedEntry] {
         &self.oversized
+    }
+
+    /// Returns the position in [`entries`](Self::entries) of the ZIP entry
+    /// with the given index, or `None` when that entry was dropped for its
+    /// over-long path.
+    ///
+    /// ZIP entries are listed in index order, and the dropped ones record
+    /// their listing position, so the kept entry's position is its index less
+    /// the dropped entries before it.
+    pub(crate) fn position_of_zip_entry(&self, index: ZipEntryIndex) -> Option<usize> {
+        let index = index.get();
+        let dropped_before = self.oversized.partition_point(|o| o.index < index);
+        if self
+            .oversized
+            .get(dropped_before)
+            .is_some_and(|o| o.index == index)
+        {
+            return None;
+        }
+        let position = index - dropped_before;
+        (position < self.entries.len()).then_some(position)
     }
 
     /// Adds an entry to the manifest.
@@ -593,5 +615,23 @@ mod tests {
         assert_eq!(ManifestEntryType::Directory.to_string(), "Directory");
         assert_eq!(ManifestEntryType::Symlink.to_string(), "Symlink");
         assert_eq!(ManifestEntryType::Hardlink.to_string(), "Hardlink");
+    }
+
+    #[test]
+    fn test_position_of_zip_entry_skips_dropped_entries() {
+        let mut manifest = ArchiveManifest::new(ArchiveType::Zip);
+        manifest.add_oversized(300);
+        for name in ["a", "b"] {
+            let entry = ArchiveEntry::new(PathBuf::from(name), ManifestEntryKind::File, 0);
+            manifest.add_entry(entry).unwrap();
+        }
+        manifest.add_oversized(300);
+
+        let position = |index| manifest.position_of_zip_entry(ZipEntryIndex::new(index));
+        assert_eq!(position(0), None);
+        assert_eq!(position(1), Some(0));
+        assert_eq!(position(2), Some(1));
+        assert_eq!(position(3), None);
+        assert_eq!(position(9), None);
     }
 }

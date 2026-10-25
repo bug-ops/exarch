@@ -116,17 +116,27 @@ impl VerificationReport {
     ) -> Self {
         for finding in structure.findings {
             let bound_entry = match finding {
-                ZipInconsistency::HeaderMismatch { entry, .. } => Some(entry.get()),
-                _ => None,
+                ZipInconsistency::HeaderMismatch { entry, .. }
+                | ZipInconsistency::DescriptorOverrun { entry, .. }
+                | ZipInconsistency::XlTypeDivergence { entry, .. } => {
+                    manifest.position_of_zip_entry(*entry)
+                }
+                ZipInconsistency::DuplicateName { .. }
+                | ZipInconsistency::OverlappingEntries
+                | ZipInconsistency::HiddenLocalHeader { .. }
+                | ZipInconsistency::IgnoredEndRecord { .. }
+                | ZipInconsistency::StrayCentralRecord { .. }
+                | ZipInconsistency::StrayEndRecord { .. }
+                | ZipInconsistency::UncountedCentralRecords { .. } => None,
             };
             let mut issue = VerificationIssue::from_error(
                 &ArchiveError::ZipInconsistency(finding.clone()),
                 None,
             );
-            match bound_entry.and_then(|index| manifest.entries().get(index).map(|e| (index, e))) {
-                Some((index, entry)) => {
-                    issue.entry_path = Some(entry.path.clone());
-                    lists[index].push(issue);
+            match bound_entry {
+                Some(position) => {
+                    issue.entry_path = Some(manifest.entries()[position].path.clone());
+                    lists[position].push(issue);
                 }
                 None => lists.push(vec![issue]),
             }
@@ -1385,6 +1395,107 @@ mod tests {
         let report = integrity_report(issues, IntegrityScope::Requested(IntegrityGaps::default()));
         assert_eq!(report.suspicious_entries(), 0);
         assert_eq!(report.status(), VerificationStatus::Fail);
+    }
+
+    fn two_file_manifest() -> ArchiveManifest {
+        let mut manifest = ArchiveManifest::new(ArchiveType::Zip);
+        for name in ["a.txt", "b.txt"] {
+            let entry = ArchiveEntry::new(PathBuf::from(name), ManifestEntryKind::File, 1);
+            manifest.add_entry(entry).unwrap();
+        }
+        manifest
+    }
+
+    fn report_of_findings(findings: &[ZipInconsistency]) -> VerificationReport {
+        let manifest = two_file_manifest();
+        VerificationReport::from_entry_issue_lists(
+            &manifest,
+            vec![Vec::new(), Vec::new()],
+            Vec::new(),
+            &ArchiveStructure::new(2, findings, 0),
+            IntegrityScope::NotRequested,
+        )
+    }
+
+    #[test]
+    fn test_entry_bound_findings_name_their_entry_and_count_it_once() {
+        use crate::ZipEntryIndex;
+
+        let findings = [
+            ZipInconsistency::XlTypeDivergence {
+                entry: ZipEntryIndex::new(1),
+                offset: 40,
+            },
+            ZipInconsistency::DescriptorOverrun {
+                entry: ZipEntryIndex::new(1),
+                offset: 60,
+            },
+        ];
+        let report = report_of_findings(&findings);
+        assert_eq!(report.suspicious_entries(), 1);
+        assert_eq!(report.issues().len(), 2);
+        for issue in report.issues() {
+            assert_eq!(issue.entry_path.as_deref(), Some(Path::new("b.txt")));
+            assert_eq!(issue.category, IssueCategory::HiddenEntry);
+        }
+    }
+
+    fn overrun_of(index: usize) -> [ZipInconsistency; 1] {
+        [ZipInconsistency::DescriptorOverrun {
+            entry: crate::ZipEntryIndex::new(index),
+            offset: 9,
+        }]
+    }
+
+    fn report_after_dropped(
+        dropped_before: usize,
+        findings: &[ZipInconsistency],
+    ) -> VerificationReport {
+        let mut manifest = ArchiveManifest::new(ArchiveType::Zip);
+        for _ in 0..dropped_before {
+            manifest.add_oversized(300);
+        }
+        for name in ["a.txt", "b.txt"] {
+            let entry = ArchiveEntry::new(PathBuf::from(name), ManifestEntryKind::File, 1);
+            manifest.add_entry(entry).unwrap();
+        }
+        VerificationReport::from_entry_issue_lists(
+            &manifest,
+            vec![Vec::new(), Vec::new()],
+            Vec::new(),
+            &ArchiveStructure::new(2 + dropped_before, findings, 0),
+            IntegrityScope::NotRequested,
+        )
+    }
+
+    #[test]
+    fn test_finding_index_skips_entries_dropped_before_it() {
+        let report = report_after_dropped(1, &overrun_of(2));
+        assert_eq!(report.suspicious_entries(), 1);
+        assert_eq!(
+            report.issues()[0].entry_path.as_deref(),
+            Some(Path::new("b.txt"))
+        );
+    }
+
+    #[test]
+    fn test_finding_of_a_dropped_entry_is_archive_level() {
+        let report = report_after_dropped(1, &overrun_of(0));
+        assert_eq!(report.suspicious_entries(), 0);
+        assert_eq!(report.issues().len(), 1);
+        assert!(report.issues()[0].entry_path.is_none());
+    }
+
+    #[test]
+    fn test_archive_level_findings_stay_unbound() {
+        let findings = [
+            ZipInconsistency::OverlappingEntries,
+            ZipInconsistency::StrayCentralRecord { offset: 9 },
+        ];
+        let report = report_of_findings(&findings);
+        assert_eq!(report.suspicious_entries(), 0);
+        assert_eq!(report.issues().len(), 2);
+        assert!(report.issues().iter().all(|i| i.entry_path.is_none()));
     }
 
     #[test]

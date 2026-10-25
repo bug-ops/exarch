@@ -32,6 +32,7 @@ use crate::formats::tar_metadata_limit::TarReadBudget;
 use crate::formats::tar_metadata_limit::budget_violation;
 use crate::formats::tar_metadata_limit::budgeted_reader;
 use crate::formats::tar_metadata_limit::budgeted_tar_entries;
+use crate::formats::zip::admit_root_entry;
 use crate::formats::zip::is_password_required;
 use crate::formats::zip::read_zip_symlink_target;
 use crate::formats::zip::read_zip_symlink_target_checked;
@@ -371,11 +372,12 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
             .map_err(|e| ArchiveError::InvalidArchive(format!("invalid entry name: {e}")))?
             .into_owned();
         let path = resolve_zip_entry_path(&raw_name, config)?;
+        admit_root_entry(&path, &entry)?;
         if !admit_path(&path, &mut manifest, config, policy)? {
             continue;
         }
 
-        let entry_type = convert_zip_entry_type(&entry);
+        let entry_type = convert_zip_entry_type(&entry, &path);
         let size = entry.size();
         let compression = EntryCompression::Entry(entry.compressed_size());
         let mode = entry.unix_mode().map(|m| m & 0o7777);
@@ -755,8 +757,10 @@ fn convert_tar_entry_type<R: std::io::Read>(
 
 fn convert_zip_entry_type<R: std::io::Read + std::io::Seek>(
     entry: &zip::read::ZipFile<'_, R>,
+    path: &Path,
 ) -> ManifestEntryType {
-    if entry.is_dir() {
+    // `admit_root_entry` already let only a directory or an empty file through.
+    if entry.is_dir() || path == Path::new(".") {
         ManifestEntryType::Directory
     } else if is_zip_symlink(entry) {
         ManifestEntryType::Symlink

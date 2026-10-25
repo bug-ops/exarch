@@ -22,9 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ZIP corpus script adds Go, Python unseekable, `bsdtar`, Info-ZIP and `7z` streaming producers (#688).
 - `ParallelDecode` and `--parallel-decode-memory` bound the memory of parallel 7z LZMA2 decoding (#688).
 - 7z BCJ2 pack stream bound fixtures and tests (#688).
-- 7z Unix-mode symlinks are read and validated through the symlink policy: `extract` creates them under `allow_symlinks`, and `list` and `verify` report the target (#714, #PR).
-- `IssueCategory::ArchiveNote` for informational findings that need no action, reported in the core, CLI, Python and Node (#716, #PR).
-- `list_archive_with_options` with `ListOptions` and `StoredTargets` to list without decoding 7z link targets (Rust API) (#714, #PR).
+- 7z Unix-mode symlinks are read and validated through the symlink policy: `extract` creates them under `allow_symlinks`, and `list` and `verify` report the target (#714, #723).
+- `IssueCategory::ArchiveNote` for informational findings that need no action, reported in the core, CLI, Python and Node (#716, #723).
+- `list_archive_with_options` with `ListOptions` and `StoredTargets` to list without decoding 7z link targets (Rust API) (#714, #723).
 
 ### Changed
 
@@ -84,18 +84,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **BREAKING:** ZIP `extract`, `list` and `verify` reject, under `Enforce`, an entry whose local or central `xl` extra field gives it another file type than its central attributes (`ZipInconsistency::XlTypeDivergence`) (#689).
 - The `verify` pre-flight listing mode is a `ListPass` type instead of a `SecurityConfig` flag, so extraction cannot receive relaxed ZIP path or size checks (#705).
 - Internal: path validation and listing take the root-entry decision from one `EntryPath` and `NodeKind` instead of a `bool`; ZIP keeps its own rule that accepts an empty `.` file (#704, #709).
-- **BREAKING:** 7z `extract` of a Unix-mode symlink fails with `symlinks not allowed` unless `allow_symlinks` is set, and creates the link with it (#714, #PR).
-- **BREAKING:** 7z `list` and `verify --allow-symlinks` fail with `InvalidArchive` on a symlink target that is not UTF-8, as ZIP does; the previous release listed it as unread (#714, #PR).
-- **BREAKING:** 7z `list`, `verify` and `extract` fail with `SecurityViolation` on a FIFO, socket or device node (also when stream-less, as `bsdtar` writes them), an undefined Unix type, and a Unix mode or Windows directory bit that contradicts the entry's own kind (#715, #PR).
-- **BREAKING:** The 7z anti-item `verify` finding is reported under the new `IssueCategory::ArchiveNote` instead of `SuspiciousPath`, and `IssueCategory::is_security` is `false` for it (#716, #PR).
-- **BREAKING:** TAR and ZIP `extract` and `verify` refuse a symlink or hardlink target that leaves a directory the archive creates later; the same target is accepted when the directory entry comes first (#PR).
-- 7z symlink targets are checked against the destination before any write, so a target whose `..` leaves a directory from the same archive is refused even when that directory comes first (#714, #PR).
-- `exarch extract` lists 7z archives without decoding link targets (#714, #PR).
-- `verify` reports an unread symlink target as `symlinks not allowed` when symlinks are disallowed (#714, #PR).
+- **BREAKING:** 7z `extract` of a Unix-mode symlink fails with `symlinks not allowed` unless `allow_symlinks` is set, and creates the link with it (#714, #723).
+- **BREAKING:** 7z `list` and `verify --allow-symlinks` fail with `InvalidArchive` on a symlink target that is not UTF-8, as ZIP does; the previous release listed it as unread (#714, #723).
+- **BREAKING:** 7z `list`, `verify` and `extract` fail with `SecurityViolation` on a FIFO, socket or device node (also when stream-less, as `bsdtar` writes them), an undefined Unix type, and a Unix mode or Windows directory bit that contradicts the entry's own kind (#715, #723).
+- **BREAKING:** The 7z anti-item `verify` finding is reported under the new `IssueCategory::ArchiveNote` instead of `SuspiciousPath`, and `IssueCategory::is_security` is `false` for it (#716, #723).
+- **BREAKING:** TAR and ZIP `extract` and `verify` refuse a symlink or hardlink target that leaves a directory the archive creates later; the same target is accepted when the directory entry comes first (#723).
+- 7z symlink targets are checked against the destination before any write, so a target whose `..` leaves a directory from the same archive is refused even when that directory comes first (#714, #723).
+- `exarch extract` lists 7z archives without decoding link targets (#714, #723).
+- `verify` reports an unread symlink target as `symlinks not allowed` when symlinks are disallowed (#714, #723).
 
 ### Fixed
 
-- `extract` and `verify` reject symlink and hardlink targets whose `..` components cannot be resolved against the extracted tree, in TAR, ZIP and 7z (#PR).
+- `extract` and `verify` reject symlink and hardlink targets whose `..` components cannot be resolved against the extracted tree, in TAR, ZIP and 7z (#723).
 - **BREAKING:** 7z `extract` and `verify` refuse an entry whose Unix mode is a symlink (`S_IFLNK`) as `SecurityViolation`, regardless of `allow_symlinks`; follow-up #714 (#711, #717).
 - **BREAKING:** `LinkTarget` gains a `non_exhaustive` `Unread` variant; 7z `list` reports it for link entries whose target is not read (#711, #717).
 - 7z `extract` warns once with the number of skipped anti-items and `verify` reports an informational finding; follow-up #716 (#713, #717).

@@ -124,8 +124,8 @@ use crate::SecurityConfig;
 use crate::VerificationOptions;
 use crate::config::Validated;
 use crate::copy::CopyBuffer;
-use crate::inspection::integrity::ContentPolicy;
 use crate::inspection::integrity::TarTrailer;
+use crate::inspection::list::ListPass;
 use crate::security::hardlink::hardlink_target_missing;
 use crate::security::permissions::SanitizedMode;
 use crate::security::quota::QuotaPermit;
@@ -214,11 +214,11 @@ impl<R: Read> TarArchive<R> {
         }
     }
 
-    /// Lists the archive under a content policy, consuming the reader.
-    fn list_with_policy(
+    /// Lists the archive as `listing` asks, consuming the reader.
+    fn list_with_pass(
         &mut self,
         config: &SecurityConfig<Validated>,
-        policy: &mut ContentPolicy<'_, '_>,
+        listing: &mut ListPass<'_, '_>,
     ) -> Result<crate::inspection::ArchiveManifest> {
         use crate::formats::detect::ArchiveType;
         use crate::inspection::list::list_tar_reader;
@@ -234,7 +234,7 @@ impl<R: Read> TarArchive<R> {
             budget,
             ArchiveType::Tar,
             config,
-            policy,
+            listing,
             TarTrailer::DrainToDecoderEof,
         )
     }
@@ -659,7 +659,7 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
         &mut self,
         config: &SecurityConfig<Validated>,
     ) -> Result<crate::inspection::ArchiveManifest> {
-        self.list_with_policy(config, &mut ContentPolicy::Skip)
+        self.list_with_pass(config, &mut ListPass::Strict)
     }
 
     /// Verifies the archive; the TAR stream's codec is unknown here, so with
@@ -670,8 +670,8 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
         config: &SecurityConfig<Validated>,
         options: &VerificationOptions,
     ) -> Result<crate::inspection::VerificationReport> {
-        crate::inspection::verify::verify_with(config, *options, |listing_config, policy| {
-            self.list_with_policy(listing_config, policy)
+        crate::inspection::verify::verify_with(config, *options, |listing| {
+            self.list_with_pass(config, listing)
         })
     }
 

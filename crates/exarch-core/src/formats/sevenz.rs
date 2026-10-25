@@ -1969,10 +1969,10 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
         &mut self,
         config: &SecurityConfig<Validated>,
     ) -> Result<crate::inspection::ArchiveManifest> {
-        use crate::inspection::integrity::ContentPolicy;
+        use crate::inspection::list::ListPass;
         use crate::inspection::list::list_sevenz_reader;
         self.source.rewind().map_err(ArchiveError::Io)?;
-        list_sevenz_reader(&mut self.source, config, &mut ContentPolicy::Skip)
+        list_sevenz_reader(&mut self.source, config, &mut ListPass::Strict)
     }
 
     fn verify(
@@ -1986,8 +1986,8 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
         use crate::inspection::verify::verify_manifest_with_structure;
 
         let issues = refusal_issues(&sevenz_refusals(&self.archive, config));
-        let listed = list_for_verify(config, *options, |listing_config, policy| {
-            list_sevenz_parsed(&self.archive, &mut self.source, listing_config, policy)
+        let listed = list_for_verify(config, *options, |listing| {
+            list_sevenz_parsed(&self.archive, &mut self.source, config, listing)
         })?;
         let structure = ArchiveStructure::of_manifest(&listed.manifest).with_refusals(&issues);
         verify_manifest_with_structure(&listed.manifest, config, &structure, listed.integrity)

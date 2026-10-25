@@ -322,15 +322,18 @@ else (a regular file, including an empty one named `.`, a symlink or a hardlink)
 (V7, `bsdtar --format v7`) is read as a directory by all three commands, so an empty `./` root is a
 no-op; with a payload it stays a file and is rejected. A 7z entry named `.` follows the same rule:
 a directory is a no-op, a non-directory root entry (empty or not) is rejected by all three
-commands with the same message and exit `1`. A 7z anti-item named `.` is a separate known gap (#707):
-`list` and `verify` skip it while `extract` rejects it.
+commands with the same message and exit `1`. A 7z anti-item (a "delete this path" marker) is skipped
+by `extract`, `list` and `verify` without any path check, whatever its name (`.`, `../evil`, `...`),
+and never touches an existing file; unlike `7z x`, exarch never applies it as a deletion. A 7z entry
+with an empty name is rejected by all three commands with `empty path not allowed` (exit `1`; for
+`verify` a hard error, not a report entry).
 
 `verify`, `list` and `extract` reject a ZIP entry whose compression method is not Stored, Deflate,
 Bzip2 or Zstd (including `deflate64`) with `operation denied by security policy: unsupported
 compression method: <name>` and exit `1`, before anything is written. Verified live with a ZIP
 relabelled as `deflate64`: all three commands exit `1`, and `extract` does not create the output
 directory. A 7z directory carrying the Windows reparse-point attribute is listed as a symlink, fails
-`verify` regardless of `--allow-symlinks`, and is rejected by `extract`.
+`verify` regardless of `--allow-symlinks`, and is rejected by `extract` before anything is written.
 
 ### `completion <SHELL>`
 

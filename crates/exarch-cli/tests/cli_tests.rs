@@ -4172,3 +4172,32 @@ fn test_sevenz_root_directory_entry_round_trip() {
         .success();
     assert_eq!(std::fs::read(out.join("a.txt")).expect("read"), b"hi");
 }
+
+/// A 7z entry with an empty name fails `extract` with the empty-path error,
+/// not a false "destination file already exists" from the CLI's list pre-pass.
+#[test]
+fn test_sevenz_empty_name_entry_is_rejected_without_false_conflict() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("empty-name.7z");
+    sevenz_with_root_entry(&archive, sevenz_rust2::ArchiveEntry::new_file(""));
+    let out = temp.path().join("out");
+
+    for command in ["list", "verify"] {
+        exarch_cmd()
+            .arg(command)
+            .arg(&archive)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("empty path not allowed"));
+    }
+    exarch_cmd()
+        .arg("extract")
+        .arg(&archive)
+        .arg(&out)
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("empty path not allowed")
+                .and(predicate::str::contains("already exist").not()),
+        );
+}

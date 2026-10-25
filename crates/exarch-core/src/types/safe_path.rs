@@ -56,6 +56,9 @@ use super::DestDir;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SafePath(PathBuf);
 
+/// Reason carried by the violation raised for an empty entry name.
+pub(crate) const EMPTY_PATH_REASON: &str = "empty path not allowed";
+
 impl SafePath {
     /// Validates and constructs a `SafePath`.
     ///
@@ -173,7 +176,7 @@ impl SafePath {
         // Reject empty paths explicitly
         if path.is_empty() {
             return Err(ArchiveError::SecurityViolation {
-                reason: "empty path not allowed".into(),
+                reason: EMPTY_PATH_REASON.into(),
             });
         }
 

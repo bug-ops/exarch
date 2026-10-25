@@ -213,7 +213,7 @@ What `OK` covers per format:
 | tar.gz / tar.bz2 / tar.xz / tar.zst | The above plus the codec's framing and checksums (gzip CRC-32 and size, bzip2 CRC, xz block check, zstd content checksum only if the frame carries one). |
 | 7z | Per-entry CRC-32 where the archive stores one, else the block CRC (which can only fire once the whole block is read and is attributed to the block's last entry). LZMA/LZMA2/PPMd validity. Entries without any CRC get the weaker "decodable" guarantee. |
 
-"Decode to EOF" means the decoder's EOF: every gzip member, bzip2 stream, xz stream and zstd frame is decoded (concatenated archives such as `cat a.tar.gz b.tar.gz` and pbzip2 output are read in full, bounded by the budget); an all-zero tail after the last member is accepted and any other trailing bytes are an error. The budget covers only decoding beyond what listing already does: ZIP entries and 7z blocks are charged their declared size before decoding (first-fit, so one large entry does not block later small ones), TAR entries are never charged (listing decodes them anyway), and for compressed TAR it bounds the read from the end marker to decoder EOF. A TAR stream must have at least one byte after the entry list; one that stops at a header boundary is `INCOMPLETE`.
+"Decode to EOF" means the decoder's EOF: every gzip member, bzip2 stream, xz stream and zstd frame is decoded (concatenated archives such as `cat a.tar.gz b.tar.gz` and pbzip2 output are read in full, bounded by the budget); an all-zero tail after the last gzip member, bzip2 stream or xz stream is accepted, while after the last zstd frame it is an error (`Unknown frame descriptor`), and any other trailing bytes are an error for every codec. The budget covers only decoding beyond what listing already does: ZIP entries and 7z blocks are charged their declared size before decoding (first-fit, so one large entry does not block later small ones), TAR entries are never charged (listing decodes them anyway), and for compressed TAR it bounds the read from the end marker to decoder EOF. A TAR stream must have at least one byte after the entry list; one that stops at a header boundary is `INCOMPLETE`.
 
 A TAR entry whose content fails to decode (corrupt deflate block, data cut short) is a hard error with exit `1` (`invalid archive: integrity check failed at <path>: ...`), not a report, because the scan cannot continue past it. Corruption that only a trailer check catches (gzip CRC, bzip2 or xz trailer) is a `FAILED` report. Verified live: a `.tar.gz` with a flipped CRC byte gives `Integrity: FAILED` with a `Corrupt Data` issue and exit `1`; a truncated `.tar.gz` fails with `incomplete deflate stream` and exit `1`; a ZIP with a flipped payload byte gives `Integrity: FAILED` naming the entry and exit `1`, while plain `verify` of the same ZIP is `Integrity: SKIPPED` and exits `0`.
 
@@ -314,6 +314,13 @@ with more than 65535 entries (a wrapped end-record count) and archives with orph
 or a central directory signature in a gap before an entry, left by in-place updaters, are rejected under `enforce`; so are ZIP64 directory entries written by the
 Rust `zip` crate before 9.1.0, whose local sizes its own check rejects (use `--zip-consistency ignore`). With
 duplicate names, local headers are not compared with the central directory.
+
+A TAR entry named `.` or `./` is the destination itself: as a directory it is a no-op. As anything
+else (a regular file, including an empty one named `.`, a symlink or a hardlink) it is rejected with
+`archive root entry '.' must be a directory` by `extract`, `list` and `verify` alike (exit `1`; for
+`verify` a hard error, not a report entry). A zero-size regular-file entry whose name ends in `/`
+(V7, `bsdtar --format v7`) is read as a directory by all three commands, so an empty `./` root is a
+no-op; with a payload it stays a file and is rejected.
 
 `verify`, `list` and `extract` reject a ZIP entry whose compression method is not Stored, Deflate,
 Bzip2 or Zstd (including `deflate64`) with `operation denied by security policy: unsupported

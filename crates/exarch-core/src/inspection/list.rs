@@ -26,6 +26,7 @@ use crate::formats::sevenz::is_password_error;
 use crate::formats::sevenz::is_windows_reparse_point;
 use crate::formats::sevenz::sevenz_entry_compression;
 use crate::formats::sevenz::verify_sevenz_blocks;
+use crate::formats::tar::effective_entry_type;
 use crate::formats::tar::open_tar_stream;
 use crate::formats::tar_metadata_limit::TarEntryGuard;
 use crate::formats::tar_metadata_limit::TarReadBudget;
@@ -58,6 +59,7 @@ use crate::security::fs_view::check_name_lengths;
 use crate::security::fs_view::name_too_long;
 use crate::security::quota::QuotaPermit;
 use crate::security::quota::QuotaTracker;
+use crate::security::validator::check_root_entry_is_directory;
 use crate::types::safe_path::has_null_bytes;
 
 /// Lists archive contents without extracting.
@@ -266,7 +268,9 @@ fn list_tar_entries<R: std::io::Read>(
             continue;
         }
 
-        let entry_type = convert_tar_entry_type(&entry)?;
+        let tar_type = effective_entry_type(&entry);
+        check_root_entry_is_directory(&path, tar_type == tar::EntryType::Directory)?;
+        let entry_type = convert_tar_entry_type(tar_type)?;
         let mode = crate::formats::tar::tar_permission_bits(entry.header());
         let modified =
             entry.header().mtime().ok().and_then(|t| {
@@ -790,10 +794,8 @@ fn is_tar_metadata_entry<R: std::io::Read>(entry: &tar::Entry<'_, R>) -> bool {
     )
 }
 
-fn convert_tar_entry_type<R: std::io::Read>(
-    entry: &tar::Entry<'_, R>,
-) -> Result<ManifestEntryType> {
-    match entry.header().entry_type() {
+fn convert_tar_entry_type(tar_type: tar::EntryType) -> Result<ManifestEntryType> {
+    match tar_type {
         tar::EntryType::Directory => Ok(ManifestEntryType::Directory),
         tar::EntryType::Symlink => Ok(ManifestEntryType::Symlink),
         tar::EntryType::Link => Ok(ManifestEntryType::Hardlink),

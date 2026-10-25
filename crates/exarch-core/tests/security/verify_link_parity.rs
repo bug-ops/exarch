@@ -64,25 +64,52 @@ fn link_config() -> SecurityConfig {
         .with_allow_hardlinks(true)
 }
 
-/// Verifies and extracts the archive; asserts both reach the same verdict and
-/// returns the categories verify reported.
-fn assert_verify_agrees_with_extract(items: &[Item]) -> Vec<IssueCategory> {
-    let tmp = TempDir::new().expect("tempdir");
-    let archive = tmp.path().join("a.tar");
+struct Outcome {
+    categories: Vec<IssueCategory>,
+    status: VerificationStatus,
+    extracted: exarch_core::Result<exarch_core::ExtractionReport>,
+    base: TempDir,
+}
+
+impl Outcome {
+    fn dest(&self) -> std::path::PathBuf {
+        self.base.path().join("x/out")
+    }
+}
+
+/// Verifies and extracts the archive into `<base>/x/out`; `plant` runs first
+/// so callers can place files outside the destination.
+fn run_verify_and_extract(items: &[Item], plant: impl FnOnce(&std::path::Path)) -> Outcome {
+    let base = TempDir::new().expect("tempdir");
+    plant(base.path());
+    let archive = base.path().join("a.tar");
     std::fs::write(&archive, build_tar(items)).expect("write archive");
-    let dest = TempDir::new().expect("dest");
+    let dest = base.path().join("x/out");
+    std::fs::create_dir_all(&dest).expect("dest");
 
     let config = link_config();
     let report = verify_archive(&archive, &config).expect("verify report");
-    let extracted = extract_archive(&archive, dest.path(), &config);
+    let extracted = extract_archive(&archive, &dest, &config);
+    Outcome {
+        categories: report.issues().iter().map(|i| i.category).collect(),
+        status: report.status(),
+        extracted,
+        base,
+    }
+}
 
+/// Verifies and extracts the archive; asserts both reach the same verdict and
+/// returns the categories verify reported.
+fn assert_verify_agrees_with_extract(items: &[Item]) -> Vec<IssueCategory> {
+    let outcome = run_verify_and_extract(items, |_| {});
     assert_eq!(
-        extracted.is_ok(),
-        report.status() == VerificationStatus::Pass,
-        "verdicts differ for {items:?}: extract={extracted:?} verify={:?}",
-        report.issues()
+        outcome.extracted.is_ok(),
+        outcome.status == VerificationStatus::Pass,
+        "verdicts differ for {items:?}: extract={:?} verify={:?}",
+        outcome.extracted,
+        outcome.categories
     );
-    report.issues().iter().map(|i| i.category).collect()
+    outcome.categories
 }
 
 fn dir(p: &str) -> Item {
@@ -218,6 +245,93 @@ fn hardlink_to_symlinked_file_is_accepted() {
         hard("h", "s"),
     ]);
     assert!(cats.is_empty(), "{cats:?}");
+}
+
+// GHSA-9mc4-rqmq-h467 / CVE-2026-11940: a hardlink whose target is a relative
+// symlink stored deeper than the hardlink must resolve that symlink against
+// its own directory, not the hardlink's.
+#[test]
+fn hardlink_to_deeper_symlink_leaving_root_is_rejected_at_the_symlink() {
+    let outcome = run_verify_and_extract(
+        &[
+            dir("d"),
+            dir("d/e"),
+            sym("d/e/s", "../../../SECRET"),
+            hard("h", "d/e/s"),
+        ],
+        |base| {
+            std::fs::create_dir_all(base.join("x")).expect("x");
+            std::fs::write(base.join("x/SECRET"), b"secret").expect("plant");
+        },
+    );
+
+    let error = outcome.extracted.as_ref().expect_err("extract must fail");
+    assert!(error.is_security_violation(), "{error:?}");
+    assert_eq!(outcome.status, VerificationStatus::Fail);
+    assert!(
+        outcome.categories.contains(&IssueCategory::SymlinkEscape),
+        "{:?}",
+        outcome.categories
+    );
+    assert!(!outcome.dest().join("h").exists());
+    let secret = outcome.base.path().join("x/SECRET");
+    assert_eq!(std::fs::read(secret).expect("secret"), b"secret");
+}
+
+// `../../SECRET` stays inside from `d/e` (`<dest>/SECRET`) but leaves the root
+// when resolved from the hardlink's directory, so only a resolver that starts
+// from the symlink's own directory accepts it and links the inside file.
+#[test]
+fn hardlink_to_deeper_symlink_resolves_from_the_symlink_directory() {
+    let outcome = run_verify_and_extract(
+        &[
+            file("SECRET"),
+            dir("d"),
+            dir("d/e"),
+            sym("d/e/s", "../../SECRET"),
+            hard("h", "d/e/s"),
+        ],
+        |base| std::fs::write(base.join("SECRET"), b"outside").expect("plant"),
+    );
+
+    outcome.extracted.as_ref().expect("extract must succeed");
+    assert_eq!(outcome.status, VerificationStatus::Pass);
+    let link = outcome.dest().join("h");
+    assert!(
+        std::fs::symlink_metadata(&link)
+            .expect("h exists")
+            .file_type()
+            .is_file()
+    );
+    assert_eq!(std::fs::read(&link).expect("read h"), b"data");
+    let outside = outcome.base.path().join("SECRET");
+    assert_eq!(std::fs::read(outside).expect("outside"), b"outside");
+}
+
+#[test]
+fn hardlink_to_deeper_symlink_staying_inside_is_an_independent_file() {
+    use std::os::unix::fs::MetadataExt;
+
+    let outcome = run_verify_and_extract(
+        &[
+            dir("d"),
+            dir("d/e"),
+            file("d/real.txt"),
+            sym("d/e/s", "../real.txt"),
+            hard("h", "d/e/s"),
+        ],
+        |_| {},
+    );
+
+    outcome.extracted.as_ref().expect("extract must succeed");
+    assert_eq!(outcome.status, VerificationStatus::Pass);
+    assert!(outcome.categories.is_empty(), "{:?}", outcome.categories);
+    let link = outcome.dest().join("h");
+    let meta = std::fs::symlink_metadata(&link).expect("h exists");
+    assert!(meta.file_type().is_file(), "h must not be a symlink");
+    assert_eq!(std::fs::read(&link).expect("read h"), b"data");
+    let real = std::fs::metadata(outcome.dest().join("d/real.txt")).expect("real");
+    assert_ne!(meta.ino(), real.ino());
 }
 
 #[test]

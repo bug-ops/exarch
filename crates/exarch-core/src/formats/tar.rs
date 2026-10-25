@@ -131,6 +131,7 @@ use crate::security::permissions::SanitizedMode;
 use crate::security::quota::QuotaPermit;
 use crate::security::validator::EntryValidator;
 use crate::security::validator::ValidatedEntryType;
+use crate::security::validator::check_root_entry_is_directory;
 use crate::types::DestDir;
 use crate::types::EntryType;
 use crate::types::SafePath;
@@ -253,6 +254,11 @@ impl<R: Read> TarArchive<R> {
             .path()
             .map_err(|e| ArchiveError::InvalidArchive(format!("invalid path: {e}")))?
             .into_owned();
+
+        check_root_entry_is_directory(
+            &path,
+            effective_entry_type(entry) == tar::EntryType::Directory,
+        )?;
 
         let entry_type = TarEntryAdapter::to_entry_type(entry)?;
         let size = TarEntryAdapter::get_uncompressed_size(entry);
@@ -752,7 +758,7 @@ impl TarEntryAdapter {
     fn to_entry_type<R: Read>(tar_entry: &tar::Entry<'_, R>) -> Result<EntryType> {
         use tar::EntryType as TarType;
 
-        match tar_entry.header().entry_type() {
+        match effective_entry_type(tar_entry) {
             TarType::Regular | TarType::Continuous | TarType::GNUSparse => Ok(EntryType::File),
 
             TarType::Directory => Ok(EntryType::Directory),
@@ -794,7 +800,7 @@ impl TarEntryAdapter {
             _ => Err(ArchiveError::SecurityViolation {
                 reason: format!(
                     "unsupported entry type: {:?}",
-                    tar_entry.header().entry_type()
+                    effective_entry_type(tar_entry)
                 ),
             }),
         }
@@ -803,6 +809,25 @@ impl TarEntryAdapter {
     /// Gets uncompressed size from TAR entry.
     fn get_uncompressed_size<R: Read>(tar_entry: &tar::Entry<'_, R>) -> u64 {
         tar_entry.size()
+    }
+}
+
+/// Returns the type an entry stands for, reading an empty regular-file header
+/// whose name ends in `/` as a directory.
+///
+/// An entry with a payload stays a file: reading it as a directory would drop
+/// its data without a trace.
+///
+/// V7 and other pre-ustar writers (`bsdtar --format v7`) store directories as
+/// regular entries with a trailing slash; GNU tar, libarchive and `tar-rs`'s
+/// own unpacker read them as directories. Shared by extraction and listing so
+/// both classify an entry the same way.
+pub(crate) fn effective_entry_type<R: Read>(entry: &tar::Entry<'_, R>) -> tar::EntryType {
+    let kind = entry.header().entry_type();
+    if kind.is_file() && entry.size() == 0 && entry.path_bytes().ends_with(b"/") {
+        tar::EntryType::Directory
+    } else {
+        kind
     }
 }
 

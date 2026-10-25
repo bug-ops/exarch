@@ -251,10 +251,7 @@ describe('zip empty entry name', () => {
       const outputDir = path.join(tempDir, 'output');
       fs.writeFileSync(archivePath, emptyNameZip());
 
-      await assert.rejects(
-        extractArchive(archivePath, outputDir),
-        /SECURITY_VIOLATION/,
-      );
+      await assert.rejects(extractArchive(archivePath, outputDir), /SECURITY_VIOLATION/);
       assert.deepStrictEqual(fs.readdirSync(outputDir), []);
     } finally {
       fs.rmSync(tempDir, { recursive: true, force: true });

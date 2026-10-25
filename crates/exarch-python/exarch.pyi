@@ -66,7 +66,12 @@ class SecurityConfig:
         ...
 
     def with_max_file_count(self, count: int) -> SecurityConfig:
-        """Sets the maximum file count."""
+        """
+        Sets the maximum file count.
+
+        `extract_archive` counts files, symlinks and hardlinks, not
+        directories; `list_archive` and `verify_archive` count every entry.
+        """
         ...
 
     def with_max_path_depth(self, depth: int) -> SecurityConfig:
@@ -179,7 +184,12 @@ class SecurityConfig:
     def max_compression_ratio(self, value: float) -> None: ...
     @property
     def max_file_count(self) -> int:
-        """Maximum number of files (default: 10,000)."""
+        """
+        Maximum number of entries (default: 10,000).
+
+        `extract_archive` counts files, symlinks and hardlinks, not
+        directories; `list_archive` and `verify_archive` count every entry.
+        """
         ...
 
     @max_file_count.setter
@@ -564,7 +574,11 @@ class ArchiveEntry:
 
     @property
     def symlink_target(self) -> str | None:
-        """Symlink target (if applicable)."""
+        """
+        Symlink target (if applicable).
+
+        None for a 7z symlink: listing does not decode 7z entry data to read it.
+        """
         ...
 
     @property

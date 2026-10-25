@@ -302,6 +302,10 @@ pub enum Node {
     File,
     /// A symlink with its target exactly as stored in the archive.
     Symlink(PathBuf),
+    /// A symlink whose target was not read, so nothing can be resolved through
+    /// it: it exists, but a path that runs through it or lands on it while
+    /// being resolved is an error.
+    OpaqueSymlink,
 }
 
 #[derive(Debug)]
@@ -414,7 +418,9 @@ impl VirtualTree {
             }
             (Some(id), Node::Dir) => match self.node(id).kind {
                 Node::Dir => Ok(()),
-                Node::File => Err(io::Error::from(io::ErrorKind::AlreadyExists)),
+                Node::File | Node::OpaqueSymlink => {
+                    Err(io::Error::from(io::ErrorKind::AlreadyExists))
+                }
                 Node::Symlink(_) => {
                     if self.resolves_to_dir(&self.root.join(rel)) {
                         Ok(())
@@ -423,7 +429,7 @@ impl VirtualTree {
                     }
                 }
             },
-            (Some(id), node @ Node::Symlink(_)) => {
+            (Some(id), node @ (Node::Symlink(_) | Node::OpaqueSymlink)) => {
                 if self.node(id).kind == Node::File {
                     self.node_mut(id).kind = node;
                     return Err(io::Error::from(io::ErrorKind::AlreadyExists));
@@ -573,6 +579,7 @@ impl VirtualTree {
                     match self.node(found.id).kind {
                         Node::Dir => found.id,
                         Node::File => return Err(io::Error::from(io::ErrorKind::NotADirectory)),
+                        Node::OpaqueSymlink => return Err(unread_target_error()),
                         Node::Symlink(_) => match self.resolve(&self.root.join(&walked))? {
                             Resolved::Inside { id, .. } if self.node(id).kind == Node::Dir => id,
                             Resolved::Inside { .. } => {
@@ -621,6 +628,13 @@ impl VirtualTree {
                         Node::File => {
                             if !pending.is_empty() {
                                 return Err(io::Error::from(io::ErrorKind::NotADirectory));
+                            }
+                            stack.push(id);
+                            current.push(name);
+                        }
+                        Node::OpaqueSymlink => {
+                            if !pending.is_empty() {
+                                return Err(unread_target_error());
                             }
                             stack.push(id);
                             current.push(name);
@@ -696,15 +710,25 @@ impl FsView for VirtualTree {
             return Err(not_found());
         };
         let id = self.child(parent, name).ok_or_else(not_found)?;
-        Ok(matches!(self.node(id).kind, Node::Symlink(_)))
+        Ok(matches!(
+            self.node(id).kind,
+            Node::Symlink(_) | Node::OpaqueSymlink
+        ))
     }
 
     fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
         match self.resolve(path)? {
+            Resolved::Inside { id, .. } if self.node(id).kind == Node::OpaqueSymlink => {
+                Err(unread_target_error())
+            }
             Resolved::Inside { rel, .. } => Ok(self.root.join(rel)),
             Resolved::Outside(path) => Ok(path),
         }
     }
+}
+
+fn unread_target_error() -> io::Error {
+    io::Error::other("path runs through a symlink whose target was not read")
 }
 
 fn is_prefix(component: Component<'_>) -> bool {
@@ -1151,6 +1175,59 @@ mod tests {
         put(&mut t, "d", sym("missing"));
         assert!(!t.exists(Path::new("/dest/d")));
         assert!(t.is_symlink(Path::new("/dest/d")).unwrap());
+    }
+
+    #[test]
+    fn opaque_symlink_exists_and_is_a_symlink_but_not_a_directory() {
+        let mut t = tree();
+        put(&mut t, "d", Node::OpaqueSymlink);
+        assert!(t.exists(Path::new("/dest/d")));
+        assert!(t.is_symlink(Path::new("/dest/d")).unwrap());
+        assert!(!t.resolves_to_dir(Path::new("/dest/d")));
+    }
+
+    #[test]
+    fn nothing_resolves_through_an_opaque_symlink() {
+        let mut t = tree();
+        put(&mut t, "d", Node::OpaqueSymlink);
+        assert!(t.canonicalize(Path::new("/dest/d")).is_err());
+        assert!(t.canonicalize(Path::new("/dest/d/x")).is_err());
+        assert!(t.insert(Path::new("d/f"), Node::File).is_err());
+    }
+
+    #[test]
+    fn a_chain_ending_at_an_opaque_symlink_does_not_resolve() {
+        let mut t = tree();
+        put(&mut t, "d", Node::OpaqueSymlink);
+        put(&mut t, "l", sym("d"));
+        assert!(t.canonicalize(Path::new("/dest/l")).is_err());
+    }
+
+    #[test]
+    fn opaque_symlink_keeps_its_place_like_a_symlink() {
+        let mut t = tree();
+        put(&mut t, "d", Node::OpaqueSymlink);
+        assert_eq!(
+            t.insert(Path::new("d"), Node::Dir).unwrap_err().kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        put(&mut t, "d", Node::File);
+        assert!(t.is_symlink(Path::new("/dest/d")).unwrap());
+
+        put(&mut t, "f", Node::File);
+        assert!(t.insert(Path::new("f"), Node::OpaqueSymlink).is_err());
+        assert!(t.is_symlink(Path::new("/dest/f")).unwrap());
+    }
+
+    #[test]
+    fn opaque_symlink_collision_is_mixed() {
+        let mut t = folding_tree();
+        put(&mut t, "link", Node::OpaqueSymlink);
+        put(&mut t, "LINK", Node::File);
+        assert_eq!(
+            collisions_of(&mut t),
+            [("link".into(), "LINK".into(), CollisionKind::Mixed)]
+        );
     }
 
     #[test]

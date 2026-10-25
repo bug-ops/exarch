@@ -29,25 +29,30 @@
 //!   rejected: their target is not stored in a readable form
 //! - **Unix symlinks**: Detected through the Unix mode p7zip keeps in the high
 //!   16 bits of the attributes (`0x8000` flag plus `S_IFLNK`). The target is
-//!   the entry's data. It is read and validated through the symlink policy, so
-//!   the link is created only under `allow_symlinks`, and `list` and `verify`
-//!   report the target
+//!   the entry's data. `extract` reads and validates it through the symlink
+//!   policy, so the link is created only under `allow_symlinks`. `list` leaves
+//!   it unread unless asked (`StoredTargets::Read`), and `verify` reads it only
+//!   under an integrity check
 //! - **FIFOs, sockets, device nodes**, an undefined Unix type, or a recorded
 //!   kind (Unix mode or the Windows directory bit) that contradicts the entry's
 //!   own kind are refused by `list`, `verify` and `extract`
 //! - **Hardlinks**: Cannot be detected, extracted as separate files (data
 //!   duplication)
 //!
-//! **Cost**: Link targets live in the compressed data, so `list` and `verify`
-//! (with `allow_symlinks`) decode every block that holds a link, and `extract`
-//! decodes such a block twice, once to validate and once to extract. The work
-//! is bounded by the solid policy, the admission checks and
-//! `max_solid_block_memory`; archives without links are unaffected.
+//! **Cost**: Link targets live in the compressed data. By default `list`
+//! decodes nothing for them, `verify` decodes them only inside its integrity
+//! pass (no extra decode), and `extract` decodes each block once, reading a
+//! target as it creates the link. Reading targets in `list` decodes the blocks
+//! that hold links, bounded by the solid policy, the admission checks and
+//! `max_solid_block_memory`.
 //!
-//! **Security Impact**: A symlink target is checked against the destination
-//! before the first write, and the link is validated again against the disk
-//! when it is created, so a refusal at that point can leave the entries written
-//! before it inside the destination.
+//! **Security Impact**: `extract` validates a symlink target against the disk
+//! as it creates the link, so a refusal for the target's content (escape,
+//! corrupt data, not UTF-8) is a `PartialExtraction` that leaves the entries
+//! written before it inside the destination; `atomic` makes the extraction
+//! all-or-nothing. A link whose target is empty or too large is refused from
+//! the file table before any write. `verify` without an integrity check cannot
+//! validate targets: it reports one Medium issue counting the unread links.
 //!
 //! # Solid Archives
 //!
@@ -183,12 +188,14 @@ use crate::inspection::integrity::DecodeOutcome;
 use crate::inspection::integrity::IntegrityPass;
 use crate::inspection::integrity::Slot;
 use crate::inspection::manifest::EntryPosition;
+use crate::inspection::manifest::LinkTarget;
 use crate::inspection::manifest::ManifestEntryType;
 use crate::inspection::report::IssueCategory;
 use crate::inspection::report::IssueSeverity;
 use crate::inspection::report::UnverifiedReason;
 use crate::inspection::report::VerificationIssue;
 use crate::security::EntryValidator;
+use crate::security::fs_view::LinkKind;
 use crate::security::quota::QuotaPermit;
 use crate::security::validator::EntryPath;
 use crate::security::validator::NodeKind;
@@ -819,8 +826,8 @@ pub(crate) enum StoredLinkTarget {
     },
 }
 
-/// Why a stored link target was not read. `list` and `verify` leave such a
-/// target unread; `extract` fails.
+/// Why a stored link target was not read. `list` and `verify` report such a
+/// target as unreadable; `extract` fails.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum LinkReadFailure {
     /// The block holding the target is refused for decoding.
@@ -937,10 +944,6 @@ impl<T> LinkTable<T> {
         }
         self.entries.push((file_index, value));
         Ok(())
-    }
-
-    pub(crate) fn is_empty(&self) -> bool {
-        self.entries.is_empty()
     }
 
     /// The value added for `file_index`, if any.
@@ -1129,8 +1132,9 @@ fn walk_block_links<R: Read + Seek>(
 pub(crate) struct LinkCapture<'a> {
     /// The manifest position of every listed link.
     pub(crate) links: &'a LinkTable<EntryPosition>,
-    /// Receives the manifest position and target of each link read.
-    pub(crate) set: &'a mut dyn FnMut(EntryPosition, PathBuf),
+    /// Receives the manifest position and target of each link the pass tried
+    /// to read: the target, or [`LinkTarget::Unreadable`].
+    pub(crate) set: &'a mut dyn FnMut(EntryPosition, LinkTarget),
 }
 
 impl LinkCapture<'_> {
@@ -1144,6 +1148,16 @@ impl LinkCapture<'_> {
         matches!(link_storage(file), LinkStorage::Stream)
             .then(|| self.links.get(file_index).copied())
             .flatten()
+    }
+
+    /// Marks the listed links among the archive files at `indices`, whose
+    /// blocks the pass refuses to decode, as unreadable.
+    fn mark_unreadable(&mut self, archive: &Archive, indices: impl Iterator<Item = usize>) {
+        for index in indices {
+            if let Some(position) = self.position(index, &archive.files[index]) {
+                (self.set)(position, LinkTarget::Unreadable);
+            }
+        }
     }
 }
 
@@ -1213,8 +1227,9 @@ impl BlockScan<'_, '_> {
     }
 
     /// Decodes a link's data into its target, which is handed to the capture
-    /// only when the data verified: a target whose checksum failed stays
-    /// unread, as bytes the decoder withheld would pass for a shorter target.
+    /// only when the data verified: a target whose checksum failed is
+    /// unreadable, as bytes the decoder withheld would pass for a shorter
+    /// target. A link the pass does not admit is never read and stays unread.
     fn read_link(
         &mut self,
         position: EntryPosition,
@@ -1229,11 +1244,17 @@ impl BlockScan<'_, '_> {
         match self.pass.copy_into(reader, &mut bytes, file.size) {
             Ok(_) => {
                 if let Some(capture) = self.links.as_mut() {
-                    (capture.set)(position, common::symlink_target_from_bytes(&bytes)?);
+                    let target = common::symlink_target_from_bytes(&bytes)?;
+                    (capture.set)(position, LinkTarget::classify(target, LinkKind::Symlink));
                 }
                 Ok(DecodeOutcome::Verified)
             }
-            Err(failure) => Ok(DecodeOutcome::Failed(failure)),
+            Err(failure) => {
+                if let Some(capture) = self.links.as_mut() {
+                    (capture.set)(position, LinkTarget::Unreadable);
+                }
+                Ok(DecodeOutcome::Failed(failure))
+            }
         }
     }
 }
@@ -1286,8 +1307,9 @@ fn payload_by_block(archive: &Archive, slots: &[Option<Slot>]) -> Vec<Vec<Payloa
 /// block's last entry.
 ///
 /// When `links` is set, the targets of the listed links inside decoded blocks
-/// are read in the same decode and handed to it; links in blocks the pass does
-/// not decode stay unread.
+/// are read in the same decode and handed to it. The links of a block that
+/// policy refuses to decode are handed over as unreadable; links the pass
+/// leaves undecoded for its quota or budget stay unread.
 ///
 /// # Errors
 ///
@@ -1305,8 +1327,11 @@ pub(crate) fn verify_sevenz_blocks<R: Read + Seek>(
     for refusal in sevenz_refusals(archive, pass.config()) {
         match refusal.scope {
             RefusalScope::Archive => {
-                let indices = payload.iter().flatten().map(|&(index, _)| index);
-                mark_files(pass, archive, refusal.unverified(), indices);
+                let indices = || payload.iter().flatten().map(|&(index, _)| index);
+                if let Some(capture) = links.as_mut() {
+                    capture.mark_unreadable(archive, indices());
+                }
+                mark_files(pass, archive, refusal.unverified(), indices());
                 return Ok(());
             }
             RefusalScope::Block(index) => refused[index] = Some(refusal.unverified()),
@@ -1322,7 +1347,11 @@ pub(crate) fn verify_sevenz_blocks<R: Read + Seek>(
             continue;
         }
         if let Some(reason) = refused[block_index] {
-            mark_files(pass, archive, reason, files.iter().map(|&(index, _)| index));
+            let indices = || files.iter().map(|&(index, _)| index);
+            if let Some(capture) = links.as_mut() {
+                capture.mark_unreadable(archive, indices());
+            }
+            mark_files(pass, archive, reason, indices());
         } else {
             let capture = links.as_mut().map(|capture| LinkCapture {
                 links: capture.links,
@@ -1898,53 +1927,25 @@ fn symlink_at_dest_error() -> std::io::Error {
     std::io::Error::from_raw_os_error(libc::ELOOP)
 }
 
-impl<R: Read + Seek> SevenZArchive<R> {
-    /// Reads each link's target and validates it against the destination as it
-    /// is before any write, keeping one target at a time.
-    ///
-    /// `links` holds the archive file index and validated path of every
-    /// symlink entry. Runs only after every header check of
-    /// the extraction, so a decode never precedes a refusal.
-    ///
-    /// # Errors
-    ///
-    /// Returns the policy error of the first target that fails validation, or
-    /// `InvalidArchive` when a target cannot be read.
-    fn validate_link_targets(
-        &mut self,
-        dest: &DestDir,
-        config: &SecurityConfig<Validated>,
-        links: &LinkTable<SafePath>,
-    ) -> Result<()> {
-        if links.is_empty() {
-            return Ok(());
-        }
-        let compression: Vec<EntryCompression> =
-            self.entries.iter().map(|entry| entry.compression).collect();
-        let entries = &self.entries;
-        walk_sevenz_links(
-            &self.archive,
-            &mut self.source,
-            &compression,
-            config,
-            links,
-            &mut |index, outcome| {
-                let name = &entries[index].name;
-                let target = match outcome {
-                    Ok(StoredLinkTarget::Read(target)) => target,
-                    Ok(StoredLinkTarget::Oversized { bytes }) => {
-                        return Err(common::symlink_target_too_large(bytes));
-                    }
-                    Err(failure) => return Err(failure.into_extract_error(name)),
-                };
-                let link = links.get(index).ok_or_else(|| {
-                    ArchiveError::InvalidArchive("7z link index is out of range".into())
-                })?;
-                SafeSymlink::validate(link, &target, dest, config).map(drop)
-            },
-        )
+/// Refuses, from the file table alone, a link whose target is empty or larger
+/// than a target may be, with the error reading it in Step 3 would give.
+///
+/// Any other target is read and validated once, in Step 3, so extraction
+/// decodes each block a single time.
+fn refuse_undecoded_target(
+    link: &SafePath,
+    file: &sevenz_rust2::ArchiveEntry,
+    dest: &DestDir,
+    config: &SecurityConfig<Validated>,
+) -> Result<()> {
+    match link_storage(file) {
+        LinkStorage::Empty => SafeSymlink::validate(link, Path::new(""), dest, config).map(drop),
+        LinkStorage::Oversized(bytes) => Err(common::symlink_target_too_large(bytes)),
+        LinkStorage::Stream => Ok(()),
     }
+}
 
+impl<R: Read + Seek> SevenZArchive<R> {
     fn anti_item_count(&self) -> u64 {
         let count = self
             .entries
@@ -1955,8 +1956,9 @@ impl<R: Read + Seek> SevenZArchive<R> {
     }
 
     /// Reads the target of the symlink entry from its own stream and validates
-    /// the entry against the disk as it is now; Step 1 validated it against the
-    /// destination before anything was written.
+    /// the entry against the disk as it is now. This is the only place a
+    /// target's content is validated, so a refusal leaves the entries extracted
+    /// before it in place, as in TAR and ZIP.
     fn validate_stream_symlink(
         entry: &sevenz_rust2::ArchiveEntry,
         reader: &mut dyn Read,
@@ -2458,7 +2460,6 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
         // API LIMITATION (sevenz-rust2): only Windows reparse points and Unix
         // mode symlinks are detectable as links; hardlinks are not.
         let mut prevalidator = EntryValidator::new(config, &dest);
-        let mut links = LinkTable::default();
         for (index, entry) in self.entries.iter().enumerate() {
             let Some(kind) = entry.class.present(&entry.name)? else {
                 continue;
@@ -2483,7 +2484,8 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
                     validate_entry_compression(&entry.compression, entry.size, config)?;
                     require_symlinks_allowed(config)?;
                     common::require_symlink_creation()?;
-                    links.push(index, safe_path)?;
+                    refuse_undecoded_target(&safe_path, &self.archive.files[index], &dest, config)?;
+                    prevalidator.reserve_symlink(entry.size)?;
                     continue;
                 }
                 SevenZKind::File => {}
@@ -2524,8 +2526,6 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
             // uses a fresh validator, see below).
             let _permit = prevalidator.reserve_file(entry.size)?;
         }
-
-        self.validate_link_targets(&dest, config, &links)?;
 
         // Empty archives: skip extraction entirely — decompress_with_extract_fn
         // would fail with UnexpectedEof on valid 32-byte empty 7z archives.

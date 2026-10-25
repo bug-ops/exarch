@@ -128,6 +128,7 @@ use crate::inspection::integrity::TarTrailer;
 use crate::inspection::list::ListPass;
 use crate::security::hardlink::hardlink_target_missing;
 use crate::security::permissions::SanitizedMode;
+use crate::security::quota::EntryCount;
 use crate::security::quota::QuotaPermit;
 use crate::security::validator::EntryValidator;
 use crate::security::validator::NodeKind;
@@ -314,11 +315,12 @@ impl<R: Read> TarArchive<R> {
                 Ok(None)
             }
 
-            (safe_path, ValidatedEntryType::Hardlink { target }, _) => {
+            (safe_path, ValidatedEntryType::Hardlink { target, counted }, _) => {
                 // Two-pass: defer hardlink creation until target files exist
                 Ok(Some(HardlinkInfo {
                     link_path: safe_path,
                     target_path: target,
+                    counted,
                 }))
             }
         }
@@ -411,7 +413,7 @@ impl<R: Read> TarArchive<R> {
     /// already accepts elsewhere (e.g. `DirCache`'s documented TOCTOU). If the
     /// re-resolution instead lands outside `dest`, that is a genuine escape
     /// attempt and is reported as such, not as a raw OS errno.
-    fn create_hardlink(info: &HardlinkInfo, ctx: &mut ExtractionContext<'_, '_>) -> Result<()> {
+    fn create_hardlink(info: HardlinkInfo, ctx: &mut ExtractionContext<'_, '_>) -> Result<()> {
         let link_path = ctx.dest.join(&info.link_path);
         let target_path = ctx.dest.join(&info.target_path);
 
@@ -469,13 +471,13 @@ impl<R: Read> TarArchive<R> {
         // Every hardlink copies the target's real bytes to a new inode, so it
         // must be charged against the same quota tracker as regular files
         // (issue #426): otherwise N hardlinks to one small file extract N
-        // full copies with no size or count enforcement. Reserved after the
-        // duplicate-check above (mirroring `extract_file_generic`) so a
-        // `skip_duplicates=true` archive is not spuriously charged for an
-        // entry that is ultimately never copied. The permit is consumed by
-        // value below, so this reservation cannot be spent twice.
+        // full copies with no size enforcement. The entry itself was counted
+        // in pass one (`info.counted`), so a skipped duplicate keeps its count
+        // slot but is charged no bytes, and the pending list is bounded by
+        // `max_file_count` before anything is copied. The permit is consumed
+        // by value below, so this charge cannot be spent twice.
         let target_size = target_file.metadata()?.len();
-        let permit = ctx.validator.reserve_hardlink(target_size)?;
+        let permit = ctx.validator.charge_hardlink(info.counted, target_size)?;
 
         // Copy content between the two handles opened above. Any subsequent
         // write to `link_path` cannot corrupt `target_path` because they are
@@ -620,7 +622,7 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
         }
 
         // Two-pass extraction: create hardlinks after all target files exist
-        for hardlink_info in &hardlinks {
+        for hardlink_info in hardlinks {
             if let Err(e) = Self::create_hardlink(hardlink_info, &mut ctx) {
                 push_duplicate_skip_warnings(
                     ctx.report,
@@ -735,6 +737,7 @@ fn push_duplicate_skip_warnings(
 struct HardlinkInfo {
     link_path: SafePath,
     target_path: SafePath,
+    counted: EntryCount,
 }
 
 /// Adapter to convert `tar::Entry` to our `EntryType`.
@@ -2340,13 +2343,31 @@ mod tests {
         // an attacker with write access to `dest` swaps in a symlink
         // escaping the destination — exactly the window pass one's
         // point-in-time check cannot see across.
+        let mut validator = EntryValidator::new(&config, &dest);
+        let validated = validator
+            .validate_entry(
+                Path::new("loot.txt"),
+                &EntryType::Hardlink {
+                    target: PathBuf::from("target.txt"),
+                },
+                0,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let (link_path, ValidatedEntryType::Hardlink { target, counted }, _) =
+            validated.into_parts()
+        else {
+            panic!("expected a validated hardlink");
+        };
         let info = HardlinkInfo {
-            link_path: SafePath::new_unchecked(PathBuf::from("loot.txt")),
-            target_path: SafePath::new_unchecked(PathBuf::from("target.txt")),
+            link_path,
+            target_path: target,
+            counted,
         };
         std::os::unix::fs::symlink(&sentinel_path, dest.as_path().join("target.txt")).unwrap();
 
-        let mut validator = EntryValidator::new(&config, &dest);
         let mut report = ExtractionReport::new();
         let mut copy_buffer = CopyBuffer::new();
         let mut dir_cache = common::DirCache::new();
@@ -2368,7 +2389,7 @@ mod tests {
             progress: &mut progress,
         };
 
-        let result = TarArchive::<Cursor<Vec<u8>>>::create_hardlink(&info, &mut ctx);
+        let result = TarArchive::<Cursor<Vec<u8>>>::create_hardlink(info, &mut ctx);
 
         assert_matches!(
             result,

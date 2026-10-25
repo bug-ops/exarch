@@ -4,8 +4,10 @@ use crate::cli::ListArgs;
 use crate::commands::apply_size_limits;
 use crate::output::OutputFormatter;
 use anyhow::Result;
+use exarch_core::ListOptions;
 use exarch_core::SecurityConfig;
-use exarch_core::list_archive;
+use exarch_core::StoredTargets;
+use exarch_core::list_archive_with_options;
 
 pub fn execute(args: &ListArgs, formatter: &mut dyn OutputFormatter) -> Result<()> {
     let config = args
@@ -17,8 +19,15 @@ pub fn execute(args: &ListArgs, formatter: &mut dyn OutputFormatter) -> Result<(
         ))
         .with_allow_solid_archives(args.allow_solid_archives);
 
+    let stored_targets = if args.read_link_targets {
+        StoredTargets::Read
+    } else {
+        StoredTargets::Skip
+    };
+    let options = ListOptions::default().with_stored_targets(stored_targets);
+
     // List archive
-    let manifest = list_archive(&args.archive, &config)?;
+    let manifest = list_archive_with_options(&args.archive, &config, &options)?;
 
     // Format output
     if args.long {

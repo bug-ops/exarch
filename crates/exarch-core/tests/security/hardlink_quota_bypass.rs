@@ -8,10 +8,11 @@
 //! `max_file_size`, `max_file_count`, or `max_total_size` enforcement — a
 //! classic hardlink-bomb bypass of the same class as decompression bombs.
 //!
-//! The fix adds `EntryValidator::reserve_hardlink`, which charges each
+//! The fix adds `EntryValidator::charge_hardlink`, which charges each
 //! hardlink's on-disk target size against the *same* `QuotaTracker` instance
 //! used for regular files, called after the parent-dir/duplicate checks and
-//! before `common::copy_file_content_with_permit` runs.
+//! before `common::copy_file_content_with_permit` runs. The hardlink itself is
+//! counted against `max_file_count` in the first pass.
 
 #![allow(clippy::unwrap_used, clippy::cast_possible_truncation)]
 

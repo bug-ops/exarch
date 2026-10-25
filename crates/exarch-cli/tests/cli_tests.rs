@@ -4377,27 +4377,104 @@ fn test_sevenz_unix_symlink_needs_allow_symlinks() {
         std::path::Path::new("a.txt")
     );
 
-    let output = exarch_cmd()
+    let listed_target = |extra: &[&str]| {
+        let output = exarch_cmd()
+            .arg("list")
+            .arg("--json")
+            .arg("-l")
+            .args(extra)
+            .arg(&archive)
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let json: serde_json::Value = serde_json::from_slice(&output).expect("valid JSON output");
+        json["data"]["entries"]
+            .as_array()
+            .expect("entries")
+            .iter()
+            .find(|e| e["entry_type"] == "Symlink")
+            .expect("symlink entry")["symlink_target"]
+            .clone()
+    };
+    assert_eq!(listed_target(&[]), serde_json::Value::Null);
+    assert_eq!(listed_target(&["--read-link-targets"]), "a.txt");
+}
+
+/// `list -l` shows a 7z link target only on request and marks a link whose
+/// target was not read in a form no stored target can imitate.
+#[cfg(unix)]
+#[test]
+fn test_sevenz_list_long_marks_unread_link_targets() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("link.7z");
+    write_sevenz(
+        &archive,
+        &[
+            ("a.txt", b"hi", SEVENZ_S_IFREG | 0o644),
+            ("link", b"a.txt", SEVENZ_S_IFLNK | 0o777),
+            ("spoof", b"<not read>", SEVENZ_S_IFLNK | 0o777),
+        ],
+        false,
+    );
+
+    exarch_cmd()
         .arg("list")
-        .arg("--json")
         .arg("-l")
         .arg(&archive)
         .assert()
         .success()
-        .get_output()
-        .stdout
-        .clone();
-    let json: serde_json::Value = serde_json::from_slice(&output).expect("valid JSON output");
-    let link = json["data"]["entries"]
-        .as_array()
-        .expect("entries")
-        .iter()
-        .find(|e| e["entry_type"] == "Symlink")
-        .expect("symlink entry");
-    assert_eq!(link["symlink_target"], "a.txt");
+        .stdout(
+            predicate::str::contains("link  (target not read)")
+                .and(predicate::str::contains("spoof  (target not read)"))
+                .and(predicate::str::contains("->").not()),
+        );
+
+    exarch_cmd()
+        .arg("list")
+        .arg("-l")
+        .arg("--read-link-targets")
+        .arg(&archive)
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("link -> a.txt")
+                .and(predicate::str::contains("spoof -> <not read>"))
+                .and(predicate::str::contains("(target not read)").not()),
+        );
 }
 
-/// A 7z symlink target that leaves the destination is blocked before any write.
+/// An empty 7z link target is refused by `extract` before the symlink policy
+/// hint, because the CLI's listing pass checks header-known targets whatever
+/// the policy.
+#[test]
+fn test_sevenz_empty_link_target_error_precedes_the_symlink_policy_hint() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("empty.7z");
+    let mut writer = sevenz_rust2::ArchiveWriter::create(&archive).expect("writer");
+    let mut entry = sevenz_rust2::ArchiveEntry::new_directory("link");
+    entry.has_windows_attributes = true;
+    entry.windows_attributes = 0x0010 | SEVENZ_UNIX_EXTENSION | ((0o12_0000 | 0o777) << 16);
+    writer
+        .push_archive_entry::<&[u8]>(entry, None)
+        .expect("entry");
+    writer.finish().expect("finish");
+
+    exarch_cmd()
+        .arg("extract")
+        .arg(&archive)
+        .arg(temp.path().join("out"))
+        .assert()
+        .code(1)
+        .stderr(
+            predicate::str::contains("symlink target is empty")
+                .and(predicate::str::contains("--allow-symlinks").not()),
+        );
+}
+
+/// A 7z symlink target that leaves the destination is blocked and never
+/// created; entries extracted before it stay, as with TAR and ZIP.
 #[cfg(unix)]
 #[test]
 fn test_sevenz_unix_symlink_escape_is_blocked() {
@@ -4421,14 +4498,33 @@ fn test_sevenz_unix_symlink_escape_is_blocked() {
         .assert()
         .code(1)
         .stderr(predicate::str::contains("Symlink escape blocked"));
-    assert!(!out.join("a.txt").exists());
+    assert!(out.join("a.txt").exists());
+    assert!(std::fs::symlink_metadata(out.join("link")).is_err());
 
+    exarch_cmd()
+        .arg("verify")
+        .arg("--allow-symlinks")
+        .arg("--check-integrity")
+        .arg(&archive)
+        .assert()
+        .code(1);
+
+    // Without an integrity check the target stays unread: a warning, not a
+    // pass.
     exarch_cmd()
         .arg("verify")
         .arg("--allow-symlinks")
         .arg(&archive)
         .assert()
-        .code(1);
+        .success()
+        .stdout(predicate::str::contains("symlink target was not read"));
+    exarch_cmd()
+        .arg("verify")
+        .arg("--allow-symlinks")
+        .arg("--strict")
+        .arg(&archive)
+        .assert()
+        .code(2);
 }
 
 /// A 7z link whose data fails its checksum fails extraction in the target read,

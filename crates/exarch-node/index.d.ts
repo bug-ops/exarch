@@ -219,7 +219,12 @@ export declare class SecurityConfig {
    * Returns error if ratio is not a positive finite number.
    */
   setMaxCompressionRatio(ratio: number): this
-  /** Sets the maximum file count. */
+  /**
+   * Sets the maximum file count.
+   *
+   * `extractArchive` counts files, symlinks and hardlinks, not directories;
+   * `listArchive` and `verifyArchive` count every entry.
+   */
   setMaxFileCount(count: number): this
   /** Sets the maximum path depth. */
   setMaxPathDepth(depth: number): this
@@ -422,7 +427,10 @@ export interface ArchiveEntry {
   mode?: number
   /** Modification time (milliseconds since Unix epoch). */
   modified?: number
-  /** Symlink target (if `entry_type` is "Symlink"). */
+  /**
+   * Symlink target (if `entry_type` is "Symlink"). Not set for a 7z
+   * symlink: listing does not decode 7z entry data to read it.
+   */
   symlinkTarget?: string
   /** Hardlink target (if `entry_type` is "Hardlink"). */
   hardlinkTarget?: string

@@ -523,9 +523,10 @@ pub fn list_archive<P: AsRef<Path>>(
 /// [`ListOptions`](crate::ListOptions).
 ///
 /// [`ListOptions::stored_targets`](crate::ListOptions::stored_targets) set to
-/// [`StoredTargets::Skip`](crate::StoredTargets::Skip) leaves 7z
-/// symlink targets unread, so listing decodes no entry data. This is a Rust API
-/// option only: the Python and Node `list_archive` always read targets.
+/// [`StoredTargets::Read`](crate::StoredTargets::Read) reads 7z symlink
+/// targets, which decodes the blocks that hold them; by default they are left
+/// unread, so listing decodes no entry data. This is a Rust API option only:
+/// the Python and Node `list_archive` leave 7z targets unread.
 ///
 /// # Errors
 ///
@@ -541,7 +542,7 @@ pub fn list_archive<P: AsRef<Path>>(
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let config = SecurityConfig::default();
-/// let options = ListOptions::default().with_stored_targets(StoredTargets::Skip);
+/// let options = ListOptions::default().with_stored_targets(StoredTargets::Read);
 /// let manifest = list_archive_with_options("archive.7z", &config, &options)?;
 /// println!("Archive contains {} entries", manifest.total_entries());
 /// # Ok(())

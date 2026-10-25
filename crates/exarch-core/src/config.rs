@@ -241,7 +241,11 @@ pub struct SecurityConfigFields {
     /// by the CLI or the Python/Node bindings.
     pub max_solid_compression_ratio: f64,
 
-    /// Maximum number of files that can be extracted.
+    /// Maximum number of entries that can be extracted.
+    ///
+    /// The extraction API counts files, symlinks and hardlinks, not
+    /// directories. `list` and `verify`, and the CLI's `extract` (which lists
+    /// the archive first), count every entry.
     pub max_file_count: usize,
 
     /// Maximum path depth allowed.
@@ -1268,9 +1272,10 @@ impl VerificationOptions {
 /// entry data.
 ///
 /// 7z keeps link targets in compressed entry data, so reading them decodes
-/// part of the archive. Other formats always report their targets: TAR keeps
-/// them in headers, and ZIP reads them from a small local entry. This is a
-/// Rust API option only; the Python and Node `list_archive` always read
+/// part of the archive, which in a solid block can be most of it. Listing
+/// therefore skips them by default. Other formats always report their targets:
+/// TAR keeps them in headers, and ZIP reads them from a small local entry. This
+/// is a Rust API option only; the Python and Node `list_archive` skip 7z
 /// targets.
 ///
 /// # Examples
@@ -1278,17 +1283,18 @@ impl VerificationOptions {
 /// ```
 /// use exarch_core::StoredTargets;
 ///
-/// assert_eq!(StoredTargets::default(), StoredTargets::Read);
+/// assert_eq!(StoredTargets::default(), StoredTargets::Skip);
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum StoredTargets {
-    /// Read the targets (the default).
+    /// Leave 7z link targets unread, so listing decodes no entry data (the
+    /// default).
     #[default]
-    Read,
-
-    /// Leave 7z link targets unread, so listing decodes no entry data.
     Skip,
+
+    /// Read the targets, decoding the blocks that hold them.
+    Read,
 }
 
 /// Options controlling `list` behavior.
@@ -1300,10 +1306,10 @@ pub enum StoredTargets {
 /// use exarch_core::StoredTargets;
 ///
 /// let options = ListOptions::default();
-/// assert_eq!(options.stored_targets, StoredTargets::Read);
-///
-/// let options = options.with_stored_targets(StoredTargets::Skip);
 /// assert_eq!(options.stored_targets, StoredTargets::Skip);
+///
+/// let options = options.with_stored_targets(StoredTargets::Read);
+/// assert_eq!(options.stored_targets, StoredTargets::Read);
 /// ```
 #[derive(Debug, Clone, Copy, Default)]
 #[non_exhaustive]

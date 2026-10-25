@@ -188,6 +188,9 @@ impl SecurityConfig {
     }
 
     /// Sets the maximum file count.
+    ///
+    /// `extractArchive` counts files, symlinks and hardlinks, not directories;
+    /// `listArchive` and `verifyArchive` count every entry.
     #[napi(js_name = "setMaxFileCount")]
     pub fn set_max_file_count(&mut self, count: u32) -> &Self {
         self.inner.max_file_count = count as usize;

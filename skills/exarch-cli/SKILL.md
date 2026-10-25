@@ -97,7 +97,7 @@ Key flags (all optional):
 | `--force` | off | Overwrite existing files at the destination. |
 | `--atomic` | off | Extract to a temp dir, rename into place on success, clean up on failure. With `--force` and a pre-existing destination, the swap is a backup-then-replace: the existing destination is renamed aside first, the new content is renamed into its place second, and only once that swap succeeds is the old destination removed — never before, so a failure at any point still leaves either the old or the new content in place under the destination name. On Unix, `--force` also requires read permission on the destination's parent directory (used to pin it by file descriptor for the swap); the destination itself does not need to be readable. With `--force`, a destination that is itself a symlink is now rejected — pass the resolved target path instead. Without `--force`, a symlinked destination isn't rejected as such, but the final rename onto it fails (`ENOTDIR` on Unix, `OutputExists` on Windows), since `rename` doesn't follow a symlink at the target — pass the resolved target path here too. Plain (non-atomic) `extract` is unaffected: it resolves a symlinked destination via `canonicalize()` and writes through it, matching `tar -C`/`unzip -d` (see #533). If a failed `--atomic --force` run leaves temp/backup content behind (e.g. an intermediate parent-path component was redirected mid-extraction), the error message discloses that content's actual location — see #530. |
 | `--preserve-permissions` | off | Preserve file permissions from the archive (setuid/setgid are still stripped regardless). |
-| `--max-files` | 10000 | Max number of entries to extract. |
+| `--max-files` | 10000 | Max number of entries (files, symlinks, hardlinks and directories); extraction fails with `QuotaExceeded` past it. |
 | `--max-total-size` | 500 MB | Max cumulative extracted size. Accepts `K`/`M`/`G`/`T` suffixes, e.g. `2G`. |
 | `--max-file-size` | 50 MB | Max size of any single extracted file. Same suffix syntax. |
 | `--max-compression-ratio` | 100 | Max uncompressed/compressed ratio before an entry is treated as a zip bomb. Applies to ZIP and non-solid 7z; it does **not** apply to solid 7z blocks. With `--allow-solid-archives`, each solid block is checked as a whole against a fixed 1000x limit (`max_solid_compression_ratio`, Rust API only, not configurable from the CLI). An entry that declares data but zero compressed bytes is always a zip bomb with ratio `unbounded` and no ratio limit admits it; its `HINT` says the size metadata is inconsistent rather than suggesting this flag. The ratio of a 7z block counts only the pack streams its coders consume (derived from the coder method IDs, as the stream counts are not public in `sevenz-rust2`); a crafted header that declares a coder with a BCJ2 ID but never decodes it can still add up to three unreferenced pack streams to the last block's total, so that ratio stays an upper bound for such archives (the padding must be real bytes of the file and the other quotas still apply). |
@@ -159,12 +159,13 @@ exarch list archive.zip -l -H --json
 
 | Flag | Default | Purpose |
 |---|---|---|
-| `-l, --long` | off | Detailed per-entry info (type, size, mode, timestamps, link targets). |
+| `-l, --long` | off | Detailed per-entry info (type, size, mode, timestamps, link targets). A link whose target was not read shows `(target not read)`, one whose read failed `(target unreadable)`. |
 | `-H, --human-readable` | off | Human-readable sizes in text mode (ignored in `--json` mode, which always emits raw byte counts). |
 | `--max-files` | 10000 | Hard limit on entries scanned; listing fails with `QuotaExceeded` past this count, it does not truncate. |
 | `--max-total-size` | 500 MB | Hard limit on cumulative listed size; listing fails with `QuotaExceeded` past this size. Raise it explicitly for larger archives. |
 | `--max-file-size` | 50 MB | Hard limit on any single entry's size; listing fails with `QuotaExceeded` (`FileSize`) past this size. Raise it explicitly for archives with large individual files. |
 | `--allow-solid-archives` | off | Allow listing solid 7z archives (higher memory use). |
+| `--read-link-targets` | off | Read 7z symlink targets, which decodes the blocks that hold them (in a large solid block, most of the archive). By default `list` decodes nothing for links and `symlink_target` is `null`. TAR and ZIP always show their targets. |
 | `--zip-consistency <enforce\|ignore>` | enforce | Same as `extract`: under `enforce` a ZIP with ambiguous structure fails with `ZipInconsistency` instead of being listed. |
 
 Verified live: a 51 MB tar entry fails `exarch list` with
@@ -185,9 +186,11 @@ exarch verify archive.tar.gz --json
 | `--allow-symlinks` / `--allow-hardlinks` | off | Same flags and semantics as `extract`: links that resolve within the extraction directory are accepted, escaping links still fail. `verify` accepts only these two policy flags (plus `--zip-consistency`, `--max-files`, `--max-total-size`, `--max-file-size`, `--allow-solid-archives`, `--check-integrity`, `--decompression-budget`, `--parallel-decode-memory` and `--strict`); it has no `--max-compression-ratio`, `--max-path-depth`, `--banned-component`, `--allow-absolute-paths` or `--allow-world-writable`, so pass the link flags you intend to extract with, and expect extraction-only options to be evaluated by `extract` alone. |
 | `--zip-consistency <enforce\|ignore>` | enforce | ZIP only. Under `enforce`, structural findings are reported as issues (see "ZIP structure" below); under `ignore` none are raised. |
 | `--parallel-decode-memory <SIZE\|off>` | 128M | Same as `extract`; effective with `--check-integrity`. |
-| `--max-files` / `--max-total-size` / `--max-file-size` / `--allow-solid-archives` | same as `list` (10000 / 500 MB / 50 MB / off) | Same hard-limit semantics as `list` for file count and total size — verification fails with `QuotaExceeded` past those two caps, it does not skip entries. |
+| `--max-files` / `--max-total-size` / `--max-file-size` / `--allow-solid-archives` | same as `list` (10000 / 500 MB / 50 MB / off) | Same hard-limit semantics as `list` for file count (every entry is counted) and total size — verification fails with `QuotaExceeded` past those two caps, it does not skip entries. |
 
 `verify` always runs the full security validation pipeline (path traversal, symlink/hardlink, permissions) without extracting. By default it does not validate payload checksums: `integrity_status` is `SKIPPED` (`Integrity: SKIPPED` in text mode), so a passing `verify` says nothing about data corruption. Pass `--check-integrity` for that.
+
+**7z link targets are validated only with `--check-integrity`.** They live in compressed data, so a plain `verify --allow-symlinks` of a 7z archive with symlinks reports one `MEDIUM` issue (`N symlink target(s) were not read, so ...`) and status `WARNING`: exit `0`, or `2` with `--strict`. This includes an archive whose link escapes the destination, so a `verify && extract` gate no longer stops it; gate with `verify --strict` or `verify --check-integrity` (exit `1` on the escape), and use `extract --atomic` for all-or-nothing extraction. Entries beneath or through an unread link are still reported as failures.
 
 #### Payload integrity (`--check-integrity`)
 
@@ -342,24 +345,29 @@ A 7z entry carrying a Unix symlink mode (`0x8000` flag plus `S_IFLNK` in the hig
 attributes, as p7zip and `bsdtar --format 7zip` write them) is a symlink whose target is the
 entry's data:
 
-- `list` reports the target (`symlink_target` with `--json -l`) whatever the policy.
-- `verify` validates it: without `--allow-symlinks` it fails with `symlinks not allowed`, and with
-  it an absolute or escaping target fails as a symlink escape.
+- `list` leaves the target unread by default (`symlink_target` is `null` with `--json -l`, and
+  `list -l` prints `(target not read)`); `--read-link-targets` reads it whatever the policy.
+- `verify` without `--allow-symlinks` fails with `symlinks not allowed`. With it, the target is
+  validated only under `--check-integrity` (an absolute or escaping target then fails as a symlink
+  escape); otherwise `verify` warns once that the targets were not read (see `verify` above).
 - `extract` refuses the link with `symlinks not allowed` (exit `1`, hint `--allow-symlinks`)
-  before anything is written, and creates it under `--allow-symlinks`. Targets are checked against
-  the destination before the first write, and the link is validated again against the disk when it
-  is created, so a refusal at that point can leave entries written earlier inside the destination.
-- A link in a solid block needs `--allow-solid-archives`, as any entry of one; without it `list`
-  leaves the target unread.
+  before anything is written, and creates it under `--allow-symlinks`. An empty or over-long
+  target is refused from the file table before any write; this check also runs in the CLI's
+  listing pass whatever the policy, so such an archive fails with the target error before the
+  `symlinks not allowed` hint. Any other target is read and validated once, as the link is
+  created, so a target that escapes, is corrupt or is not UTF-8 stops extraction with entries
+  written earlier left in the destination. Use `--atomic` for all-or-nothing extraction.
+- A link in a solid block needs `--allow-solid-archives`, as any entry of one; without it
+  `--read-link-targets` marks the target unreadable.
 - With `--check-integrity` a link is decoded once, together with its block. A block the decoder
-  budget cannot cover leaves the target unread, which `verify` reports as a failure.
-- Reading targets means decoding: `list` and `verify` (with `--allow-symlinks`) decode every block
-  that holds a link, and `extract` decodes such a block twice, once to validate and once to
-  extract. The work is bounded by the solid policy, admission and `max_solid_block_memory`, and
-  archives without links are unaffected.
-- A link whose data is corrupt fails `extract` with `InvalidArchive`; `list` and `verify` leave a
-  corrupt target unread. A target that is not UTF-8 fails `extract`, `list` and, with
-  `--allow-symlinks`, `verify` with `InvalidArchive`, as it does for ZIP.
+  budget cannot cover leaves the target unread, which `verify` reports as the warning above.
+- Cost: `list` decodes nothing for links unless `--read-link-targets` is given, `verify` reads them
+  inside its integrity pass, and `extract` decodes each block once. The work is bounded by the
+  solid policy, admission and `max_solid_block_memory`.
+- A link whose data is corrupt fails `extract` with `InvalidArchive`; `--read-link-targets` and
+  `verify --check-integrity` report a corrupt target as unreadable. A target that is not UTF-8
+  fails `extract`, `list --read-link-targets` and `verify --check-integrity` with
+  `InvalidArchive`, as it does for ZIP.
 - A FIFO, socket or device node, Unix type bits that name no file type, or a recorded kind that
   contradicts the entry's own (a directory mode on an entry with data or an empty file, a
   regular-file mode on a directory, the Windows directory bit on a file, empty or not) fails

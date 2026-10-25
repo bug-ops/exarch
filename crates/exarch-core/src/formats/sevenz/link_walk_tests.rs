@@ -269,3 +269,112 @@ fn a_target_that_is_not_utf8_is_a_hard_error() {
 
     assert_matches!(result, Err(ArchiveError::InvalidArchive(reason)) if reason.contains("UTF-8"));
 }
+
+mod bytes_read {
+    use std::cell::Cell;
+    use std::io::Read;
+    use std::io::Seek;
+    use std::io::SeekFrom;
+    use std::rc::Rc;
+
+    use super::*;
+    use crate::StoredTargets;
+    use crate::inspection::list::ListPass;
+    use crate::inspection::list::list_sevenz_reader;
+
+    const FILLER_LEN: usize = 300_000;
+    const UNIX_SYMLINK_ATTRIBUTES: u32 = 0x8000 | (0o120_777 << 16);
+
+    struct Counting<R> {
+        inner: R,
+        read: Rc<Cell<u64>>,
+    }
+
+    impl<R: Read> Read for Counting<R> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let n = self.inner.read(buf)?;
+            self.read.set(self.read.get() + n as u64);
+            Ok(n)
+        }
+    }
+
+    impl<R: Seek> Seek for Counting<R> {
+        fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+            self.inner.seek(pos)
+        }
+    }
+
+    /// A stored solid block of a large file followed by one symlink.
+    fn solid_block_with_trailing_link() -> Vec<u8> {
+        let filler = vec![b'f'; FILLER_LEN];
+        let mut link = entry("link", b"filler");
+        link.has_windows_attributes = true;
+        link.windows_attributes = UNIX_SYMLINK_ATTRIBUTES;
+        let mut writer = writer(true);
+        writer
+            .push_archive_entries(
+                vec![entry("filler", &filler), link],
+                vec![
+                    SourceReader::from(Cursor::new(filler.clone())),
+                    SourceReader::from(Cursor::new(b"filler".to_vec())),
+                ],
+            )
+            .unwrap();
+        writer.finish().unwrap().into_inner()
+    }
+
+    fn counting(bytes: Vec<u8>) -> (Counting<Cursor<Vec<u8>>>, Rc<Cell<u64>>) {
+        let read = Rc::new(Cell::new(0));
+        let source = Counting {
+            inner: Cursor::new(bytes),
+            read: Rc::clone(&read),
+        };
+        (source, read)
+    }
+
+    #[test]
+    fn listing_decodes_the_link_block_only_when_asked_to_read_targets() {
+        let bytes = solid_block_with_trailing_link();
+        let config = config(true);
+
+        let (source, skipped) = counting(bytes.clone());
+        list_sevenz_reader(source, &config, &mut ListPass::strict()).unwrap();
+        let (source, read) = counting(bytes);
+        list_sevenz_reader(source, &config, &mut ListPass::Strict(StoredTargets::Read)).unwrap();
+
+        assert!(skipped.get() < 1_000, "{} bytes read", skipped.get());
+        assert!(read.get() >= FILLER_LEN as u64, "{} bytes read", read.get());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extraction_reads_each_pack_stream_once() {
+        let bytes = solid_block_with_trailing_link();
+        let archive_len = bytes.len() as u64;
+        let (source, read) = counting(bytes);
+        let config = SecurityConfig::default()
+            .with_allow_symlinks(true)
+            .with_allow_solid_archives(true)
+            .with_max_solid_block_memory(100 * 1024 * 1024)
+            .validate()
+            .unwrap();
+        let out = tempfile::TempDir::new().unwrap();
+
+        let report = SevenZArchive::new(source)
+            .unwrap()
+            .extract(
+                out.path(),
+                &config,
+                &ExtractionOptions::default(),
+                &mut crate::NoopProgress,
+            )
+            .unwrap();
+
+        assert_eq!(report.symlinks_created, 1);
+        assert!(
+            read.get() < archive_len + archive_len / 4,
+            "{} bytes read of {archive_len}",
+            read.get()
+        );
+    }
+}

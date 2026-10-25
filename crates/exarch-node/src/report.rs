@@ -566,7 +566,8 @@ pub struct ArchiveEntry {
     pub mode: Option<u32>,
     /// Modification time (milliseconds since Unix epoch).
     pub modified: Option<i64>,
-    /// Symlink target (if `entry_type` is "Symlink").
+    /// Symlink target (if `entry_type` is "Symlink"). Not set for a 7z
+    /// symlink: listing does not decode 7z entry data to read it.
     pub symlink_target: Option<String>,
     /// Hardlink target (if `entry_type` is "Hardlink").
     pub hardlink_target: Option<String>,

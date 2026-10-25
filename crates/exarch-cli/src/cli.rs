@@ -298,6 +298,10 @@ pub struct ListArgs {
     #[arg(long)]
     pub allow_solid_archives: bool,
 
+    /// Read 7z symlink targets, which decodes the blocks that hold them
+    #[arg(long)]
+    pub read_link_targets: bool,
+
     #[command(flatten)]
     pub zip: ZipPolicyArgs,
 }

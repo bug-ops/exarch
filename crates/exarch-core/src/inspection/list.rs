@@ -122,9 +122,10 @@ pub fn list_archive<P: AsRef<Path>>(
 /// Lists archive contents without extracting, with [`ListOptions`].
 ///
 /// See [`list_archive`] for the manifest and the failures listing reports.
-/// [`ListOptions::stored_targets`] set to [`StoredTargets::Skip`] leaves 7z
-/// symlink targets unread, so listing decodes no entry data; other formats
-/// always report their targets.
+/// [`ListOptions::stored_targets`] set to [`StoredTargets::Read`] reads 7z
+/// symlink targets, which decodes the blocks that hold them; by default they
+/// stay unread, so listing decodes no entry data. Other formats always report
+/// their targets.
 ///
 /// # Errors
 ///
@@ -159,16 +160,16 @@ pub fn list_archive<P: AsRef<Path>>(
 /// assert!(matches!(
 ///     &manifest.entries()[0].kind,
 ///     ManifestEntryKind::Symlink {
-///         target: LinkTarget::Recorded(_)
+///         target: LinkTarget::Unread
 ///     }
 /// ));
 ///
-/// let options = ListOptions::default().with_stored_targets(StoredTargets::Skip);
+/// let options = ListOptions::default().with_stored_targets(StoredTargets::Read);
 /// let manifest = list_archive_with_options(&archive, &config, &options)?;
 /// assert!(matches!(
 ///     &manifest.entries()[0].kind,
 ///     ManifestEntryKind::Symlink {
-///         target: LinkTarget::Unread
+///         target: LinkTarget::Recorded(_)
 ///     }
 /// ));
 /// # Ok(())
@@ -201,9 +202,10 @@ pub(crate) enum ListPass<'a, 'c> {
 }
 
 impl<'c> ListPass<'_, 'c> {
-    /// A bare listing that reads every link target.
+    /// A bare listing with the default [`StoredTargets`], which leaves 7z link
+    /// targets unread.
     pub(crate) const fn strict() -> Self {
-        Self::Strict(StoredTargets::Read)
+        Self::Strict(StoredTargets::Skip)
     }
 
     /// Returns the integrity pass, which only the pre-flight can carry.
@@ -325,9 +327,9 @@ fn list_tar_entries<R: std::io::Read>(
         // Route through the same QuotaTracker used by extraction: per-file
         // size, file count, and total size (with checked arithmetic) are all
         // enforced here using the same logic. Note this doesn't make listing
-        // and extraction fully equivalent — extraction's QuotaTracker only
-        // records EntryType::File, while listing records every entry type
-        // (directories, symlinks, hardlinks too), a pre-existing divergence.
+        // and extraction fully equivalent — extraction's QuotaTracker does not
+        // record directories, while listing records every entry type, a
+        // pre-existing divergence.
         //
         // A quota rejection here (the `?`) aborts the loop without an
         // explicit `entry.abandon()`; harmless — the guard's bounded drain
@@ -508,9 +510,9 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
         // Route through the same QuotaTracker used by extraction: per-file
         // size, file count, and total size (with checked arithmetic) are all
         // enforced here using the same logic. Note this doesn't make listing
-        // and extraction fully equivalent — extraction's QuotaTracker only
-        // records EntryType::File, while listing records every entry type
-        // (directories, symlinks, hardlinks too), a pre-existing divergence.
+        // and extraction fully equivalent — extraction's QuotaTracker does not
+        // record directories, while listing records every entry type, a
+        // pre-existing divergence.
         let _permit = reserve_entry(&mut quota, entry.size(), config, list_mode)?;
 
         let raw_name = entry
@@ -652,45 +654,74 @@ pub(crate) fn list_sevenz_parsed<R: Read + Seek>(
         links,
     } = list_sevenz_archive(archive, source_len, config, listing)?;
     let list_mode = listing.mode();
-    let reads_targets = match listing {
-        ListPass::Strict(stored) => *stored == StoredTargets::Read,
-        ListPass::VerifyPreflight(_) => config.allowed.symlinks,
+    let targets = SevenZTargets::of(listing, config.allowed.symlinks);
+    let settle_header_targets = |manifest: &mut ArchiveManifest| {
+        deliver_undecoded_links(archive, links.indices(), &mut |index, outcome| {
+            record_link_target(manifest, &links, list_mode, index, outcome)
+        })
+        .map(drop)
     };
-    if links.is_empty() || !reads_targets {
-        if let Some(pass) = listing.integrity() {
-            verify_sevenz_blocks(archive, &mut source, pass, &slots, None)?;
-        }
-        return Ok(manifest);
-    }
 
-    match listing.integrity() {
-        None => {
-            walk_sevenz_links(
-                archive,
-                &mut source,
-                &compression,
-                config,
-                &links,
-                &mut |index, outcome| {
-                    record_link_target(&mut manifest, &links, list_mode, index, outcome)
-                },
-            )?;
+    match targets {
+        SevenZTargets::Leave(pass) => {
+            if let Some(pass) = pass {
+                verify_sevenz_blocks(archive, &mut source, pass, &slots, None)?;
+            }
         }
-        Some(pass) => {
-            deliver_undecoded_links(archive, links.indices(), &mut |index, outcome| {
+        SevenZTargets::Free => settle_header_targets(&mut manifest)?,
+        SevenZTargets::Walk => walk_sevenz_links(
+            archive,
+            &mut source,
+            &compression,
+            config,
+            &links,
+            &mut |index, outcome| {
                 record_link_target(&mut manifest, &links, list_mode, index, outcome)
-            })?;
+            },
+        )?,
+        SevenZTargets::Capture(pass) => {
+            settle_header_targets(&mut manifest)?;
             let capture = LinkCapture {
                 links: &links,
-                set: &mut |position, target| {
-                    manifest
-                        .set_link_target(position, LinkTarget::classify(target, LinkKind::Symlink));
-                },
+                set: &mut |position, target| manifest.set_link_target(position, target),
             };
             verify_sevenz_blocks(archive, &mut source, pass, &slots, Some(capture))?;
         }
     }
     Ok(manifest)
+}
+
+/// How a 7z listing settles the targets of its Unix symlinks, which every
+/// entry starts without ([`LinkTarget::Unread`]).
+///
+/// A variant carries the integrity pass exactly when it uses one, so a mode
+/// and a pass that do not go together cannot be built.
+enum SevenZTargets<'p, 'c> {
+    /// Settle none: a verification that disallows symlinks reports the policy
+    /// and never needs a target. Still decodes for integrity when requested.
+    Leave(Option<&'p mut IntegrityPass<'c>>),
+    /// Settle only the targets the file table gives (empty or oversized), with
+    /// no decoding.
+    Free,
+    /// Decode the blocks holding links, stopping after each block's last link.
+    Walk,
+    /// Settle the header targets, then read the others in the integrity pass's
+    /// own decode.
+    Capture(&'p mut IntegrityPass<'c>),
+}
+
+impl<'p, 'c> SevenZTargets<'p, 'c> {
+    fn of(listing: &'p mut ListPass<'_, 'c>, symlinks_allowed: bool) -> Self {
+        match listing {
+            ListPass::Strict(StoredTargets::Read) => Self::Walk,
+            ListPass::Strict(StoredTargets::Skip) => Self::Free,
+            ListPass::VerifyPreflight(pass) => match (pass.as_deref_mut(), symlinks_allowed) {
+                (pass, false) => Self::Leave(pass),
+                (None, true) => Self::Free,
+                (Some(pass), true) => Self::Capture(pass),
+            },
+        }
+    }
 }
 
 /// Sets the manifest target of the listed link at archive file `index` from
@@ -702,33 +733,28 @@ fn record_link_target(
     index: usize,
     outcome: LinkOutcome,
 ) -> Result<()> {
-    if let Some(&position) = links.get(index)
-        && let Some(target) = link_target_of(outcome, mode)?
-    {
-        manifest.set_link_target(position, target);
+    if let Some(&position) = links.get(index) {
+        manifest.set_link_target(position, link_target_of(outcome, mode)?);
     }
     Ok(())
 }
 
-/// What a read link target becomes in the manifest, or `None` when the target
-/// stays unread.
+/// What a link target that was asked for becomes in the manifest.
 ///
 /// A bare listing refuses an oversized target (as ZIP does) and checks the
 /// target; the verify pre-flight records both for `verify_entry` to report. A
-/// target that could not be read stays [`LinkTarget::Unread`] in both: corrupt
-/// or refused data never fails the listing.
-fn link_target_of(outcome: LinkOutcome, mode: ListMode) -> Result<Option<LinkTarget>> {
+/// target that could not be read is [`LinkTarget::Unreadable`] in both:
+/// corrupt or refused data never fails the listing.
+fn link_target_of(outcome: LinkOutcome, mode: ListMode) -> Result<LinkTarget> {
     match outcome {
-        Ok(StoredLinkTarget::Read(target)) => {
-            classify_link_target(target, LinkKind::Symlink, mode).map(Some)
-        }
+        Ok(StoredLinkTarget::Read(target)) => classify_link_target(target, LinkKind::Symlink, mode),
         Ok(StoredLinkTarget::Oversized { bytes }) => match mode {
             ListMode::Strict => Err(symlink_target_too_large(bytes)),
-            ListMode::VerifyPreflight => Ok(Some(LinkTarget::Oversized {
+            ListMode::VerifyPreflight => Ok(LinkTarget::Oversized {
                 bytes: usize::try_from(bytes).unwrap_or(usize::MAX),
-            })),
+            }),
         },
-        Err(_) => Ok(None),
+        Err(_) => Ok(LinkTarget::Unreadable),
     }
 }
 
@@ -799,9 +825,9 @@ fn list_sevenz_archive(
         // Route through the same QuotaTracker used by extraction: per-file
         // size, file count, and total size (with checked arithmetic) are all
         // enforced here using the same logic. Note this doesn't make listing
-        // and extraction fully equivalent — extraction's QuotaTracker only
-        // records EntryType::File, while listing records every entry type
-        // (directories, symlinks, hardlinks too), a pre-existing divergence.
+        // and extraction fully equivalent — extraction's QuotaTracker does not
+        // record directories, while listing records every entry type, a
+        // pre-existing divergence.
         let _permit = reserve_entry(&mut quota, entry.size, config, list_mode)?;
 
         let path = PathBuf::from(normalize_entry_name(&entry.name));
@@ -828,9 +854,14 @@ fn list_sevenz_archive(
                 .map(|pass| pass.begin_entry(size, &compression)),
         );
 
+        let target = if kind == SevenZKind::ReparsePoint {
+            LinkTarget::Unreadable
+        } else {
+            LinkTarget::Unread
+        };
         let archive_entry = ArchiveEntry {
             path,
-            kind: manifest_entry_kind(entry_type, LinkTarget::Unread),
+            kind: manifest_entry_kind(entry_type, target),
             size,
             compression,
             mode: None,

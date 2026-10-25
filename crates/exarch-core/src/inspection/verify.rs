@@ -129,6 +129,7 @@ fn verify_with_tree(
 
     let mut archive_issues = structure.refusals().to_vec();
     archive_issues.extend(oversized_entry_issues(manifest.oversized_entries()));
+    archive_issues.extend(unread_targets_issue(manifest, config));
     let scope = match integrity {
         Some(outcome) => {
             debug_assert_eq!(outcome.entry_issues.len(), lists.len());
@@ -233,6 +234,13 @@ where
 /// - An entry name is a path traversal (`..` component, or an absolute path
 ///   unless `allowed.absolute_paths` is set): the listing step rejects it with
 ///   [`ArchiveError::PathTraversal`] before a report exists
+///
+/// The targets of 7z symlinks are stored in compressed entry data, so they are
+/// validated only when an integrity check decodes the archive. Without one,
+/// each such target stays unread and the report carries a single Medium issue
+/// counting them (status at least `WARNING`); entries that would land beneath
+/// an unread link are still reported. With an integrity check whose budget
+/// cannot cover a link, the target stays unread in the same way.
 ///
 /// Other security violations are reported in `VerificationReport::issues`
 /// instead: disallowed links, link targets that escape the destination,
@@ -427,17 +435,21 @@ fn verify_entry(
     if let Ok(ref safe_path) = path_result {
         let link_result = match &entry.kind {
             ManifestEntryKind::Symlink { target } => Some(
-                // An unread target is never read when symlinks are disallowed,
-                // so the policy is the reason to report.
-                (if matches!(target, LinkTarget::Unread) {
+                // A target that is not read is never read when symlinks are
+                // disallowed, so the policy is the reason to report.
+                (if matches!(target, LinkTarget::Unread | LinkTarget::Unreadable) {
                     require_symlinks_allowed(config)
                 } else {
                     Ok(())
                 })
-                .and_then(|()| usable_link_target(target, ManifestEntryType::Symlink))
-                .and_then(|t| {
-                    check_target_lengths(t, LinkKind::Symlink)?;
-                    SafeSymlink::validate_in(safe_path, t, dest, config, tree).map(drop)
+                .and_then(|()| match target {
+                    // Counted once by `unread_targets_issue`; the tree keeps
+                    // the link opaque.
+                    LinkTarget::Unread => Ok(()),
+                    _ => usable_link_target(target, ManifestEntryType::Symlink).and_then(|t| {
+                        check_target_lengths(t, LinkKind::Symlink)?;
+                        SafeSymlink::validate_in(safe_path, t, dest, config, tree).map(drop)
+                    }),
                 }),
             ),
             ManifestEntryKind::Hardlink { target } => Some(
@@ -523,6 +535,7 @@ fn usable_link_target(target: &LinkTarget, kind: ManifestEntryType) -> Result<&P
         LinkTarget::Recorded(path) => Ok(path),
         LinkTarget::Missing => Err(missing_link_target(kind)),
         LinkTarget::Unread => Err(unread_link_target(kind)),
+        LinkTarget::Unreadable => Err(unreadable_link_target(kind)),
         LinkTarget::Oversized { .. } => Err(ArchiveError::Io(name_too_long())),
     }
 }
@@ -577,6 +590,9 @@ fn record_entry(
         ManifestEntryKind::Symlink {
             target: LinkTarget::Recorded(t),
         } => Node::Symlink(t.clone()),
+        ManifestEntryKind::Symlink {
+            target: LinkTarget::Unread,
+        } => Node::OpaqueSymlink,
         ManifestEntryKind::Symlink { .. } | ManifestEntryKind::Hardlink { .. } => {
             return Ok(());
         }
@@ -628,6 +644,52 @@ fn unread_link_target(kind: ManifestEntryType) -> ArchiveError {
             kind.as_str().to_ascii_lowercase()
         ),
     }
+}
+
+fn unreadable_link_target(kind: ManifestEntryType) -> ArchiveError {
+    ArchiveError::SecurityViolation {
+        reason: format!(
+            "{} target could not be read, so it cannot be validated",
+            kind.as_str().to_ascii_lowercase()
+        ),
+    }
+}
+
+/// The one issue for the symlinks whose targets were not read although
+/// symlinks are allowed, which `verify_entry` could not validate.
+fn unread_targets_issue(
+    manifest: &ArchiveManifest,
+    config: &SecurityConfig<Validated>,
+) -> Option<VerificationIssue> {
+    if !config.allowed.symlinks {
+        return None;
+    }
+    let unread = manifest
+        .entries()
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry.kind,
+                ManifestEntryKind::Symlink {
+                    target: LinkTarget::Unread
+                }
+            )
+        })
+        .count();
+    let (subject, validated) = match unread {
+        0 => return None,
+        1 => ("symlink target was", "it was"),
+        _ => ("symlink targets were", "they were"),
+    };
+    Some(VerificationIssue::new(
+        IssueSeverity::Medium,
+        IssueCategory::SecurityPolicy,
+        format!(
+            "{unread} {subject} not read, so {validated} not validated; entries beneath or \
+             through an unread link are reported as failures (an integrity check with a \
+             decompression budget that covers the link blocks reads the targets)"
+        ),
+    ))
 }
 
 fn check_permissions(path: &Path, mode: u32, config: &SecurityConfig<Validated>) -> Result<()> {
@@ -757,6 +819,53 @@ mod tests {
             .filter(|i| i.category == IssueCategory::InvalidArchive)
             .count();
         assert_eq!(too_long, 2, "{:?}", report.issues());
+    }
+
+    fn unread_symlink() -> ManifestEntryKind {
+        ManifestEntryKind::Symlink {
+            target: LinkTarget::Unread,
+        }
+    }
+
+    #[test]
+    fn unread_symlinks_warn_once_and_report_what_runs_through_them() {
+        let alone = manifest_of(vec![("d", unread_symlink()), ("e", unread_symlink())]);
+        let report = verify_manifest(&alone, &link_config(), None).unwrap();
+        assert_eq!(report.status(), VerificationStatus::Warning);
+        assert_eq!(report.issues().len(), 1, "{:?}", report.issues());
+
+        for entries in [
+            vec![("d", unread_symlink()), ("d/f", ManifestEntryKind::File)],
+            vec![("d", unread_symlink()), ("l", symlink_to("d/x"))],
+            vec![("d", unread_symlink()), ("l", symlink_to("d"))],
+        ] {
+            let manifest = manifest_of(entries);
+            let report = verify_manifest(&manifest, &link_config(), None).unwrap();
+            assert_eq!(report.status(), VerificationStatus::Fail, "{manifest:?}");
+        }
+    }
+
+    #[test]
+    fn unread_symlinks_are_a_policy_failure_when_symlinks_are_disallowed() {
+        let manifest = manifest_of(vec![("d", unread_symlink())]);
+        let config = SecurityConfig::default().validate().unwrap();
+        let report = verify_manifest(&manifest, &config, None).unwrap();
+        assert_eq!(report.status(), VerificationStatus::Fail);
+        assert_eq!(report.issues().len(), 1, "{:?}", report.issues());
+    }
+
+    #[test]
+    fn unreadable_symlinks_fail_without_a_warning_count() {
+        let manifest = manifest_of(vec![(
+            "d",
+            ManifestEntryKind::Symlink {
+                target: LinkTarget::Unreadable,
+            },
+        )]);
+        let report = verify_manifest(&manifest, &link_config(), None).unwrap();
+        assert_eq!(report.status(), VerificationStatus::Fail);
+        assert_eq!(report.issues().len(), 1, "{:?}", report.issues());
+        assert!(report.issues()[0].message.contains("could not be read"));
     }
 
     #[test]

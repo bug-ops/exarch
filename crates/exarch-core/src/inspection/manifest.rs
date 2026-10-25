@@ -379,6 +379,7 @@ impl EntryCompression {
 /// );
 /// assert_eq!(LinkTarget::Missing.path(), None);
 /// assert_eq!(LinkTarget::Unread.path(), None);
+/// assert_eq!(LinkTarget::Unreadable.path(), None);
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -389,10 +390,16 @@ pub enum LinkTarget {
     /// The archive stores no target
     Missing,
 
-    /// The archive stores a target that listing did not read: a 7z reparse
-    /// point, a 7z target left unread on request or inside a block that cannot
-    /// be decoded, or one whose data is corrupt
+    /// The archive stores a target that was not read: a 7z target kept in
+    /// compressed entry data, left alone by a listing that skips stored
+    /// targets (the default), by a verification without an integrity check, or
+    /// by an integrity pass whose budget or admission limits did not reach it
     Unread,
+
+    /// The archive stores a target that could not be read: a 7z reparse point
+    /// (in every listing), or a 7z target whose read was attempted and failed
+    /// because its block is refused for decoding or its data is corrupt
+    Unreadable,
 
     /// The target exceeds the host's name limits; only its length is kept
     Oversized {
@@ -437,18 +444,22 @@ impl LinkTarget {
     pub fn path(&self) -> Option<&Path> {
         match self {
             Self::Recorded(path) => Some(path),
-            Self::Missing | Self::Unread | Self::Oversized { .. } => None,
+            Self::Missing | Self::Unread | Self::Unreadable | Self::Oversized { .. } => None,
         }
     }
 }
 
 /// Kind of a manifest entry; link kinds carry their target.
 ///
-/// The target lives in the variant, so a regular file cannot carry one. It is
-/// [`LinkTarget::Missing`], [`LinkTarget::Unread`] or [`LinkTarget::Oversized`]
-/// only for entries produced by the pre-flight listing that
+/// The target lives in the variant, so a regular file cannot carry one.
+/// [`LinkTarget::Missing`] and [`LinkTarget::Oversized`] occur only in entries
+/// produced by the pre-flight listing that
 /// [`verify_archive`](crate::verify_archive) uses, where such a target must
-/// become a report issue instead of a listing error.
+/// become a report issue instead of a listing error. 7z link targets are
+/// [`LinkTarget::Unread`] by default, in verification without an integrity
+/// check, and for links an integrity pass did not reach (budget or admission
+/// limits). [`LinkTarget::Unreadable`] marks a 7z reparse point in every
+/// listing, and a target whose read was attempted and failed.
 ///
 /// # Examples
 ///

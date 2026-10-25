@@ -10,22 +10,32 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 
 use crate::ArchiveError;
+use crate::ListOptions;
 use crate::Result;
 use crate::SecurityConfig;
+use crate::StoredTargets;
 use crate::config::Validated;
 #[cfg(test)]
 use crate::error::QuotaResource;
 use crate::formats::ZipArchive;
 use crate::formats::common::encrypted_archive_error;
 use crate::formats::common::normalize_entry_name;
+use crate::formats::common::symlink_target_too_large;
 use crate::formats::compression::CompressionCodec;
 use crate::formats::detect::ArchiveType;
 use crate::formats::detect::FormatFamily;
 use crate::formats::detect::detect_format;
+use crate::formats::sevenz::LinkCapture;
+use crate::formats::sevenz::LinkOutcome;
+use crate::formats::sevenz::LinkTable;
 use crate::formats::sevenz::SevenZClass;
+use crate::formats::sevenz::SevenZKind;
+use crate::formats::sevenz::StoredLinkTarget;
+use crate::formats::sevenz::deliver_undecoded_links;
 use crate::formats::sevenz::is_password_error;
 use crate::formats::sevenz::sevenz_entry_compression;
 use crate::formats::sevenz::verify_sevenz_blocks;
+use crate::formats::sevenz::walk_sevenz_links;
 use crate::formats::tar::effective_entry_type;
 use crate::formats::tar::open_tar_stream;
 use crate::formats::tar_metadata_limit::TarEntryGuard;
@@ -49,6 +59,7 @@ use crate::inspection::integrity::TarTrailer;
 use crate::inspection::manifest::ArchiveEntry;
 use crate::inspection::manifest::ArchiveManifest;
 use crate::inspection::manifest::EntryCompression;
+use crate::inspection::manifest::EntryPosition;
 use crate::inspection::manifest::LinkTarget;
 use crate::inspection::manifest::ManifestEntryKind;
 use crate::inspection::manifest::ManifestEntryType;
@@ -105,8 +116,75 @@ pub fn list_archive<P: AsRef<Path>>(
     archive_path: P,
     config: &SecurityConfig,
 ) -> Result<ArchiveManifest> {
+    list_archive_with_options(archive_path, config, &ListOptions::default())
+}
+
+/// Lists archive contents without extracting, with [`ListOptions`].
+///
+/// See [`list_archive`] for the manifest and the failures listing reports.
+/// [`ListOptions::stored_targets`] set to [`StoredTargets::Skip`] leaves 7z
+/// symlink targets unread, so listing decodes no entry data; other formats
+/// always report their targets.
+///
+/// # Errors
+///
+/// Same as [`list_archive`].
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::LinkTarget;
+/// use exarch_core::ListOptions;
+/// use exarch_core::ManifestEntryKind;
+/// use exarch_core::SecurityConfig;
+/// use exarch_core::StoredTargets;
+/// use exarch_core::list_archive_with_options;
+/// use sevenz_rust2::ArchiveEntry;
+/// use sevenz_rust2::ArchiveWriter;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// # let dir = tempfile::tempdir()?;
+/// # let archive = dir.path().join("links.7z");
+/// # let mut writer = ArchiveWriter::new(std::io::Cursor::new(Vec::new()))?;
+/// # let mut link = ArchiveEntry::new_file("link");
+/// # link.has_stream = true;
+/// # link.size = 6;
+/// # link.has_windows_attributes = true;
+/// # link.windows_attributes = 0x8000 | (0o120_777 << 16);
+/// # writer.push_archive_entry(link, Some(std::io::Cursor::new(b"target".to_vec())))?;
+/// # std::fs::write(&archive, writer.finish()?.into_inner())?;
+/// let config = SecurityConfig::default();
+///
+/// let manifest = list_archive_with_options(&archive, &config, &ListOptions::default())?;
+/// assert!(matches!(
+///     &manifest.entries()[0].kind,
+///     ManifestEntryKind::Symlink {
+///         target: LinkTarget::Recorded(_)
+///     }
+/// ));
+///
+/// let options = ListOptions::default().with_stored_targets(StoredTargets::Skip);
+/// let manifest = list_archive_with_options(&archive, &config, &options)?;
+/// assert!(matches!(
+///     &manifest.entries()[0].kind,
+///     ManifestEntryKind::Symlink {
+///         target: LinkTarget::Unread
+///     }
+/// ));
+/// # Ok(())
+/// # }
+/// ```
+pub fn list_archive_with_options<P: AsRef<Path>>(
+    archive_path: P,
+    config: &SecurityConfig,
+    options: &ListOptions,
+) -> Result<ArchiveManifest> {
     let config = config.clone().validate()?;
-    list_validated(archive_path.as_ref(), &config, &mut ListPass::Strict)
+    list_validated(
+        archive_path.as_ref(),
+        &config,
+        &mut ListPass::Strict(options.stored_targets),
+    )
 }
 
 /// Which listing runs: the bare `list_archive`, or `verify`'s pre-flight.
@@ -115,24 +193,30 @@ pub fn list_archive<P: AsRef<Path>>(
 /// may decode payloads through an integrity pass. Only the pre-flight can carry
 /// a pass, so a strict listing that decodes is unrepresentable.
 pub(crate) enum ListPass<'a, 'c> {
-    /// Bare listing: every policy violation fails the listing.
-    Strict,
+    /// Bare listing: every policy violation fails the listing. Carries whether
+    /// link targets kept in entry data are read.
+    Strict(StoredTargets),
     /// `verify`'s pre-flight, optionally decoding payloads through the pass.
     VerifyPreflight(Option<&'a mut IntegrityPass<'c>>),
 }
 
 impl<'c> ListPass<'_, 'c> {
+    /// A bare listing that reads every link target.
+    pub(crate) const fn strict() -> Self {
+        Self::Strict(StoredTargets::Read)
+    }
+
     /// Returns the integrity pass, which only the pre-flight can carry.
     pub(crate) fn integrity(&mut self) -> Option<&mut IntegrityPass<'c>> {
         match self {
-            Self::Strict => None,
+            Self::Strict(_) => None,
             Self::VerifyPreflight(pass) => pass.as_deref_mut(),
         }
     }
 
     const fn mode(&self) -> ListMode {
         match self {
-            Self::Strict => ListMode::Strict,
+            Self::Strict(_) => ListMode::Strict,
             Self::VerifyPreflight(_) => ListMode::VerifyPreflight,
         }
     }
@@ -561,11 +645,91 @@ pub(crate) fn list_sevenz_parsed<R: Read + Seek>(
     listing: &mut ListPass<'_, '_>,
 ) -> Result<ArchiveManifest> {
     let source_len = source.seek(SeekFrom::End(0))?;
-    let (manifest, slots) = list_sevenz_archive(archive, source_len, config, listing)?;
-    if let Some(pass) = listing.integrity() {
-        verify_sevenz_blocks(archive, &mut source, pass, &slots)?;
+    let ListedSevenZ {
+        mut manifest,
+        slots,
+        compression,
+        links,
+    } = list_sevenz_archive(archive, source_len, config, listing)?;
+    let list_mode = listing.mode();
+    let reads_targets = match listing {
+        ListPass::Strict(stored) => *stored == StoredTargets::Read,
+        ListPass::VerifyPreflight(_) => config.allowed.symlinks,
+    };
+    if links.is_empty() || !reads_targets {
+        if let Some(pass) = listing.integrity() {
+            verify_sevenz_blocks(archive, &mut source, pass, &slots, None)?;
+        }
+        return Ok(manifest);
+    }
+
+    match listing.integrity() {
+        None => {
+            walk_sevenz_links(
+                archive,
+                &mut source,
+                &compression,
+                config,
+                &links,
+                &mut |index, outcome| {
+                    record_link_target(&mut manifest, &links, list_mode, index, outcome)
+                },
+            )?;
+        }
+        Some(pass) => {
+            deliver_undecoded_links(archive, links.indices(), &mut |index, outcome| {
+                record_link_target(&mut manifest, &links, list_mode, index, outcome)
+            })?;
+            let capture = LinkCapture {
+                links: &links,
+                set: &mut |position, target| {
+                    manifest
+                        .set_link_target(position, LinkTarget::classify(target, LinkKind::Symlink));
+                },
+            };
+            verify_sevenz_blocks(archive, &mut source, pass, &slots, Some(capture))?;
+        }
     }
     Ok(manifest)
+}
+
+/// Sets the manifest target of the listed link at archive file `index` from
+/// what reading it yielded.
+fn record_link_target(
+    manifest: &mut ArchiveManifest,
+    links: &LinkTable<EntryPosition>,
+    mode: ListMode,
+    index: usize,
+    outcome: LinkOutcome,
+) -> Result<()> {
+    if let Some(&position) = links.get(index)
+        && let Some(target) = link_target_of(outcome, mode)?
+    {
+        manifest.set_link_target(position, target);
+    }
+    Ok(())
+}
+
+/// What a read link target becomes in the manifest, or `None` when the target
+/// stays unread.
+///
+/// A bare listing refuses an oversized target (as ZIP does) and checks the
+/// target; the verify pre-flight records both for `verify_entry` to report. A
+/// target that could not be read stays [`LinkTarget::Unread`] in both: corrupt
+/// or refused data never fails the listing.
+fn link_target_of(outcome: LinkOutcome, mode: ListMode) -> Result<Option<LinkTarget>> {
+    match outcome {
+        Ok(StoredLinkTarget::Read(target)) => {
+            classify_link_target(target, LinkKind::Symlink, mode).map(Some)
+        }
+        Ok(StoredLinkTarget::Oversized { bytes }) => match mode {
+            ListMode::Strict => Err(symlink_target_too_large(bytes)),
+            ListMode::VerifyPreflight => Ok(Some(LinkTarget::Oversized {
+                bytes: usize::try_from(bytes).unwrap_or(usize::MAX),
+            })),
+        },
+        Err(_) => Ok(None),
+    }
 }
 
 /// Checks whether a sevenz-rust2 parse failure is due to a valid empty 7z
@@ -610,7 +774,7 @@ fn list_sevenz_archive(
     source_len: u64,
     config: &SecurityConfig<Validated>,
     listing: &mut ListPass<'_, '_>,
-) -> Result<(ArchiveManifest, Vec<Option<Slot>>)> {
+) -> Result<ListedSevenZ> {
     let list_mode = listing.mode();
     let mut manifest = ArchiveManifest::new(ArchiveType::SevenZ);
     let mut quota = QuotaTracker::new();
@@ -619,9 +783,15 @@ fn list_sevenz_archive(
     // became, or `None` for an anti item (never listed), an entry dropped for
     // its path, or without a pass.
     let mut slots = Vec::with_capacity(archive.files.len());
+    let mut links = LinkTable::default();
 
-    for (entry, compression) in archive.files.iter().zip(compression) {
-        let SevenZClass::Present(kind) = SevenZClass::of(entry) else {
+    for (index, (entry, compression)) in archive
+        .files
+        .iter()
+        .zip(compression.iter().copied())
+        .enumerate()
+    {
+        let Some(kind) = SevenZClass::of(entry).present(&entry.name)? else {
             slots.push(None);
             continue;
         };
@@ -667,10 +837,30 @@ fn list_sevenz_archive(
             modified,
         };
 
+        if kind == SevenZKind::UnixSymlink {
+            links.push(index, manifest.next_position())?;
+        }
         manifest.add_entry(archive_entry)?;
     }
 
-    Ok((manifest, slots))
+    Ok(ListedSevenZ {
+        manifest,
+        slots,
+        compression,
+        links,
+    })
+}
+
+/// A 7z manifest built from the file table, before link targets are read.
+struct ListedSevenZ {
+    manifest: ArchiveManifest,
+    /// One element per archive file; see [`list_sevenz_archive`].
+    slots: Vec<Option<Slot>>,
+    /// How each archive file's data is compressed, 1:1 with the files.
+    compression: Vec<EntryCompression>,
+    /// The manifest position of every listed Unix symlink; their targets are
+    /// still [`LinkTarget::Unread`].
+    links: LinkTable<EntryPosition>,
 }
 
 fn list_sevenz(
@@ -1104,7 +1294,7 @@ mod tests {
         let zip_bytes = create_zip_with_symlink("link", "target.txt");
         let mut archive = ZipArchive::new(Cursor::new(zip_bytes)).unwrap();
         let config = SecurityConfig::default().validate().expect("valid config");
-        let manifest = list_zip_reader(&mut archive, &config, &mut ListPass::Strict).unwrap();
+        let manifest = list_zip_reader(&mut archive, &config, &mut ListPass::strict()).unwrap();
 
         assert_eq!(manifest.total_entries(), 1);
         assert_eq!(
@@ -2372,7 +2562,7 @@ mod tests {
         let zip_bytes = create_zip_with_symlink("link", "foo\0bar");
         let mut archive = ZipArchive::new(Cursor::new(zip_bytes)).unwrap();
         let config = SecurityConfig::default().validate().expect("valid config");
-        let result = list_zip_reader(&mut archive, &config, &mut ListPass::Strict);
+        let result = list_zip_reader(&mut archive, &config, &mut ListPass::strict());
         match result {
             Err(ArchiveError::SecurityViolation { reason }) => {
                 assert_eq!(reason, "symlink target contains null bytes");
@@ -2392,7 +2582,7 @@ mod tests {
         let zip_bytes = create_zip_with_symlink("link", "");
         let mut archive = ZipArchive::new(Cursor::new(zip_bytes)).unwrap();
         let config = SecurityConfig::default().validate().expect("valid config");
-        let result = list_zip_reader(&mut archive, &config, &mut ListPass::Strict);
+        let result = list_zip_reader(&mut archive, &config, &mut ListPass::strict());
         match result {
             Err(ArchiveError::SecurityViolation { reason }) => {
                 assert_eq!(reason, "symlink target is empty");
@@ -2914,7 +3104,7 @@ mod tests {
             .with_max_total_size(u64::MAX)
             .validate()
             .expect("valid config");
-        let result = list_zip_reader(&mut archive, &config, &mut ListPass::Strict);
+        let result = list_zip_reader(&mut archive, &config, &mut ListPass::strict());
         assert_matches!(
             result,
             Err(ArchiveError::QuotaExceeded {
@@ -3058,7 +3248,7 @@ mod tests {
         let mut archive = ZipArchive::new(Cursor::new(zip_bytes.clone())).unwrap();
         let strict = SecurityConfig::default().validate().unwrap();
         assert_matches!(
-            list_zip_reader(&mut archive, &strict, &mut ListPass::Strict),
+            list_zip_reader(&mut archive, &strict, &mut ListPass::strict()),
             Err(ArchiveError::SecurityViolation { .. })
         );
 

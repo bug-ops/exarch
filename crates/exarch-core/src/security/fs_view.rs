@@ -211,6 +211,9 @@ pub trait FsView {
     /// Returns `true` if `path` exists, following symlinks.
     fn exists(&self, path: &Path) -> bool;
 
+    /// Returns `true` if `path` exists and is a directory, following symlinks.
+    fn is_dir(&self, path: &Path) -> bool;
+
     /// Returns whether `path` itself is a symlink, without following it.
     ///
     /// # Errors
@@ -235,6 +238,10 @@ pub struct HostFs;
 impl FsView for HostFs {
     fn exists(&self, path: &Path) -> bool {
         path.exists()
+    }
+
+    fn is_dir(&self, path: &Path) -> bool {
+        path.is_dir()
     }
 
     fn is_symlink(&self, path: &Path) -> io::Result<bool> {
@@ -668,6 +675,10 @@ impl VirtualTree {
 impl FsView for VirtualTree {
     fn exists(&self, path: &Path) -> bool {
         matches!(self.resolve(path), Ok(Resolved::Inside { .. }))
+    }
+
+    fn is_dir(&self, path: &Path) -> bool {
+        self.resolves_to_dir(path)
     }
 
     fn is_symlink(&self, path: &Path) -> io::Result<bool> {

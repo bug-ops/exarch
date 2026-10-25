@@ -29,6 +29,16 @@ pub const HOST_SYMLINK_TARGET_BYTES: usize = 4091 * 3;
 #[cfg(not(target_os = "windows"))]
 pub const HOST_SYMLINK_TARGET_BYTES: usize = HOST_PATH_LIMIT;
 
+/// Flips the low bit of the first byte of `marker` found in `bytes`, so stored
+/// data fails its checksum.
+pub fn flip_first(bytes: &mut [u8], marker: &[u8]) {
+    let at = bytes
+        .windows(marker.len())
+        .position(|w| w == marker)
+        .unwrap();
+    bytes[at] ^= 0x01;
+}
+
 /// A relative path of exactly `len` bytes made of 100-byte components.
 #[must_use]
 pub fn path_of_len(len: usize) -> String {

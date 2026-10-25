@@ -445,3 +445,119 @@ fn anti_item_inside_a_solid_block_fails_closed_before_any_write() {
         assert!(dir_names(&out).is_empty(), "anti item at {anti_at}");
     }
 }
+
+const UNIX_EXTENSION: u32 = 0x8000;
+const S_IFSOCK: u32 = 0o14_0000;
+const S_IFBLK: u32 = 0o06_0000;
+const S_IFREG: u32 = 0o10_0000;
+const S_IFDIR: u32 = 0o04_0000;
+const S_IFCHR: u32 = 0o02_0000;
+const S_IFIFO: u32 = 0o01_0000;
+
+fn with_unix_mode(mut pushed: Pushed, mode: u32) -> Pushed {
+    pushed.0.has_windows_attributes = true;
+    pushed.0.windows_attributes = UNIX_EXTENSION | (mode << 16);
+    pushed
+}
+
+fn directory_with_mode(name: &str, mode: u32) -> Pushed {
+    with_unix_mode((ArchiveEntry::new_directory(name), None), mode)
+}
+
+fn assert_refused_by_list_verify_and_extract(entries: Vec<Pushed>, expect: &str) {
+    let dir = TempDir::new().unwrap();
+    let archive = write_archive(&dir, entries);
+    let config = SecurityConfig::default();
+    let out = TempDir::new().unwrap();
+
+    for err in [
+        list_archive(&archive, &config).unwrap_err(),
+        verify_archive(&archive, &config).unwrap_err(),
+        extract_archive(&archive, out.path(), &config).unwrap_err(),
+    ] {
+        assert!(
+            matches!(&err, ArchiveError::SecurityViolation { reason } if reason.contains(expect)),
+            "{expect}: {err}"
+        );
+    }
+    assert!(
+        dir_names(&out).is_empty(),
+        "{expect}: nothing may be written"
+    );
+}
+
+#[test]
+fn special_files_are_refused_with_or_without_a_stream() {
+    for (mode, noun) in [
+        (S_IFIFO, "FIFO"),
+        (S_IFCHR, "character device"),
+        (S_IFBLK, "block device"),
+        (S_IFSOCK, "socket"),
+    ] {
+        for special in [
+            with_unix_mode(file("special", b""), mode | 0o644),
+            with_unix_mode(file("special", b"payload"), mode | 0o644),
+        ] {
+            assert_refused_by_list_verify_and_extract(
+                vec![file("a.txt", b"hi"), special],
+                &format!("{noun} entries not supported"),
+            );
+        }
+    }
+}
+
+#[test]
+fn undefined_unix_file_type_is_refused() {
+    assert_refused_by_list_verify_and_extract(
+        vec![
+            file("a.txt", b"hi"),
+            with_unix_mode(file("odd", b"payload"), 0o03_0000 | 0o644),
+        ],
+        "undefined Unix file type",
+    );
+}
+
+#[test]
+fn unix_mode_contradicting_the_native_kind_is_refused() {
+    let cases = [
+        with_unix_mode(file("d", b"payload"), S_IFDIR | 0o755),
+        with_unix_mode(file("d", b""), S_IFDIR | 0o755),
+        directory_with_mode("d", S_IFREG | 0o644),
+    ];
+    for contradicting in cases {
+        assert_refused_by_list_verify_and_extract(
+            vec![file("a.txt", b"hi"), contradicting],
+            "Unix mode says",
+        );
+    }
+}
+
+#[test]
+fn windows_directory_bit_on_a_file_with_data_is_refused() {
+    let mut pushed = file("d", b"payload");
+    pushed.0.has_windows_attributes = true;
+    pushed.0.windows_attributes = FILE_ATTRIBUTE_DIRECTORY;
+    assert_refused_by_list_verify_and_extract(
+        vec![file("a.txt", b"hi"), pushed],
+        "Windows attributes says",
+    );
+}
+
+#[test]
+fn agreeing_unix_modes_extract_normally() {
+    let dir = TempDir::new().unwrap();
+    let archive = write_archive(
+        &dir,
+        vec![
+            directory_with_mode("sub", S_IFDIR | 0o755),
+            with_unix_mode(file("sub/f", b"data"), S_IFREG | 0o644),
+            with_unix_mode(file("empty", b""), S_IFREG | 0o644),
+        ],
+    );
+    let out = TempDir::new().unwrap();
+
+    extract_archive(&archive, out.path(), &SecurityConfig::default()).unwrap();
+
+    assert_eq!(std::fs::read(out.path().join("sub/f")).unwrap(), b"data");
+    assert!(out.path().join("empty").is_file());
+}

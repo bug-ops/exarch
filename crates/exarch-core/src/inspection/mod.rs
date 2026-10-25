@@ -33,6 +33,7 @@ pub mod report;
 pub mod verify;
 
 pub use list::list_archive;
+pub use list::list_archive_with_options;
 pub use manifest::ArchiveEntry;
 pub use manifest::ArchiveManifest;
 pub use manifest::EntryCompression;

@@ -940,7 +940,7 @@ export interface IntegrityGaps {
 export type IntegrityStatus = 'OK' | 'FAILED' | 'INCOMPLETE' | 'SKIPPED'
 
 /** Issue category. */
-export type IssueCategory = 'Path Traversal' | 'Symlink Escape' | 'Hardlink Escape' | 'Zip Bomb' | 'Invalid Permissions' | 'Quota Exceeded' | 'Security Policy' | 'Invalid Archive' | 'Suspicious Path' | 'Executable File' | 'Corrupt Data' | 'Integrity Incomplete' | 'Header Mismatch' | 'Duplicate Entry' | 'Overlapping Entries' | 'Hidden Entry' | 'Name Collision'
+export type IssueCategory = 'Path Traversal' | 'Symlink Escape' | 'Hardlink Escape' | 'Zip Bomb' | 'Invalid Permissions' | 'Quota Exceeded' | 'Security Policy' | 'Invalid Archive' | 'Suspicious Path' | 'Executable File' | 'Corrupt Data' | 'Integrity Incomplete' | 'Header Mismatch' | 'Duplicate Entry' | 'Overlapping Entries' | 'Hidden Entry' | 'Name Collision' | 'Archive Note'
 
 /** Issue severity. */
 export type IssueSeverity = 'INFO' | 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL'

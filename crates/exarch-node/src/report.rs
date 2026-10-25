@@ -397,6 +397,9 @@ pub enum IssueCategory {
     /// Two entry names the host filesystem treats as one.
     #[napi(value = "Name Collision")]
     NameCollision,
+    /// Informational note that needs no action, such as skipped 7z anti-items.
+    #[napi(value = "Archive Note")]
+    ArchiveNote,
 }
 
 impl TryFrom<CoreIssueCategory> for IssueCategory {
@@ -421,6 +424,7 @@ impl TryFrom<CoreIssueCategory> for IssueCategory {
             CoreIssueCategory::OverlappingEntries => Self::OverlappingEntries,
             CoreIssueCategory::HiddenEntry => Self::HiddenEntry,
             CoreIssueCategory::NameCollision => Self::NameCollision,
+            CoreIssueCategory::ArchiveNote => Self::ArchiveNote,
             other => return Err(unknown_variant("issue category", other.as_str())),
         })
     }

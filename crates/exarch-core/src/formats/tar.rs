@@ -668,7 +668,7 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
         &mut self,
         config: &SecurityConfig<Validated>,
     ) -> Result<crate::inspection::ArchiveManifest> {
-        self.list_with_pass(config, &mut ListPass::Strict)
+        self.list_with_pass(config, &mut ListPass::strict())
     }
 
     /// Verifies the archive; the TAR stream's codec is unknown here, so with

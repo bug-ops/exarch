@@ -1264,6 +1264,63 @@ impl VerificationOptions {
     }
 }
 
+/// Whether listing reads the symlink targets a format keeps in compressed
+/// entry data.
+///
+/// 7z keeps link targets in compressed entry data, so reading them decodes
+/// part of the archive. Other formats always report their targets: TAR keeps
+/// them in headers, and ZIP reads them from a small local entry. This is a
+/// Rust API option only; the Python and Node `list_archive` always read
+/// targets.
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::StoredTargets;
+///
+/// assert_eq!(StoredTargets::default(), StoredTargets::Read);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum StoredTargets {
+    /// Read the targets (the default).
+    #[default]
+    Read,
+
+    /// Leave 7z link targets unread, so listing decodes no entry data.
+    Skip,
+}
+
+/// Options controlling `list` behavior.
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::ListOptions;
+/// use exarch_core::StoredTargets;
+///
+/// let options = ListOptions::default();
+/// assert_eq!(options.stored_targets, StoredTargets::Read);
+///
+/// let options = options.with_stored_targets(StoredTargets::Skip);
+/// assert_eq!(options.stored_targets, StoredTargets::Skip);
+/// ```
+#[derive(Debug, Clone, Copy, Default)]
+#[non_exhaustive]
+pub struct ListOptions {
+    /// Whether to read the link targets a format keeps in entry data.
+    pub stored_targets: StoredTargets,
+}
+
+impl ListOptions {
+    /// Sets whether link targets kept in entry data are read.
+    #[must_use]
+    pub fn with_stored_targets(mut self, stored_targets: StoredTargets) -> Self {
+        self.stored_targets = stored_targets;
+        self
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

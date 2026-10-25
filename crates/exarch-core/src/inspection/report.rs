@@ -865,6 +865,10 @@ closed_enum! {
 
         /// Two entry names the host filesystem treats as one
         NameCollision => "Name Collision",
+
+        /// Informational note that needs no action, such as 7z anti-items that
+        /// are skipped
+        ArchiveNote => "Archive Note",
     }
 }
 
@@ -908,7 +912,8 @@ impl IssueCategory {
             | Self::SuspiciousPath
             | Self::ExecutableFile
             | Self::CorruptData
-            | Self::IntegrityIncomplete => false,
+            | Self::IntegrityIncomplete
+            | Self::ArchiveNote => false,
         }
     }
 }
@@ -961,6 +966,7 @@ mod tests {
                 "Overlapping Entries",
                 "Hidden Entry",
                 "Name Collision",
+                "Archive Note",
             ]
         );
         assert_eq!(
@@ -1325,6 +1331,7 @@ mod tests {
                 IssueCategory::ExecutableFile,
                 IssueCategory::CorruptData,
                 IssueCategory::IntegrityIncomplete,
+                IssueCategory::ArchiveNote,
             ]
         );
     }

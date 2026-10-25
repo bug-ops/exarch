@@ -181,15 +181,18 @@ fn anti_item_is_skipped_by_list_verify_and_extract() {
 #[test]
 fn anti_item_never_truncates_an_existing_file_even_with_overwrite() {
     let dir = TempDir::new().unwrap();
-    let archive = write_archive(&dir, vec![file("a.txt", b"hi"), anti_item("...")]);
+    let archive = write_archive(&dir, vec![file("a.txt", b"hi"), anti_item("gone.txt")]);
     let out = TempDir::new().unwrap();
-    std::fs::write(out.path().join("..."), b"precious").unwrap();
+    std::fs::write(out.path().join("gone.txt"), b"precious").unwrap();
     let options = ExtractionOptions::default().with_skip_duplicates(false);
 
     extract_archive_with_options(&archive, out.path(), &SecurityConfig::default(), &options)
         .unwrap();
 
-    assert_eq!(std::fs::read(out.path().join("...")).unwrap(), b"precious");
+    assert_eq!(
+        std::fs::read(out.path().join("gone.txt")).unwrap(),
+        b"precious"
+    );
 }
 
 #[test]

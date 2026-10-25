@@ -92,11 +92,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **BREAKING:** TAR and ZIP `extract` and `verify` refuse a symlink or hardlink target that leaves a directory the archive creates later; the same target is accepted when the directory entry comes first (#723).
 - 7z `extract` refuses a symlink target whose `..` leaves a directory the archive creates later, even when that directory comes first (#714, #723).
 - `exarch extract` lists 7z archives without decoding link targets (#714, #723).
-- **BREAKING:** `StoredTargets` defaults to `Skip`, so 7z `list` no longer reads link targets; opt in with `StoredTargets::Read` or `list --read-link-targets` (#718, #PR).
-- **BREAKING:** `verify --allow-symlinks` of a 7z archive warns (exit 0) instead of failing unless `--check-integrity` reads the link targets; gate on `--strict` or `--check-integrity` (#718, #PR).
-- **BREAKING:** 7z `extract` decodes each block once, so a refused link target is a `PartialExtraction` after earlier entries; use `--atomic` for all-or-nothing (#718, #PR).
-- **BREAKING:** `max_file_count` counts symlinks and hardlinks in `extract`, and `ValidatedEntryType::Hardlink` carries a `counted: EntryCount` (#719, #PR).
-- 7z `list -l` shows `(target not read)` or `(target unreadable)` for a link without a target (#718, #PR).
+- **BREAKING:** `StoredTargets` defaults to `Skip`, so 7z `list` no longer reads link targets; opt in with `StoredTargets::Read` or `list --read-link-targets` (#718, #724).
+- **BREAKING:** `verify --allow-symlinks` of a 7z archive warns (exit 0) instead of failing unless `--check-integrity` reads the link targets; gate on `--strict` or `--check-integrity` (#718, #724).
+- **BREAKING:** 7z `extract` decodes each block once, so a refused link target is a `PartialExtraction` after earlier entries; use `--atomic` for all-or-nothing (#718, #724).
+- **BREAKING:** `max_file_count` counts symlinks and hardlinks in `extract`, and `ValidatedEntryType::Hardlink` carries a `counted: EntryCount` (#719, #724).
+- 7z `list -l` shows `(target not read)` or `(target unreadable)` for a link without a target (#718, #724).
 - `verify` reports an unread symlink target as `symlinks not allowed` when symlinks are disallowed (#714, #723).
 
 ### Fixed

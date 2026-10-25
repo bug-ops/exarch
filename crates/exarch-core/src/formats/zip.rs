@@ -151,6 +151,8 @@ use crate::inspection::integrity::Slot;
 use crate::security::EntryValidator;
 use crate::security::permissions::SanitizedMode;
 use crate::security::quota::QuotaPermit;
+use crate::security::validator::EntryPath;
+use crate::security::validator::NodeKind;
 use crate::security::validator::ValidatedEntryType;
 use crate::security::zipbomb::DeclaredCompressedBudget;
 use crate::types::DestDir;
@@ -291,7 +293,7 @@ pub(crate) fn resolve_zip_entry_path(
 ///
 /// A relative name made only of `.` and separators (`./`, `.`) is the archive
 /// root and resolves to `.`, which `SafePath` maps to the destination itself;
-/// [`admit_root_entry`] then checks that the entry may stand for it.
+/// [`zip_node_kind`] then checks that the entry may stand for it.
 ///
 /// A name is absolute when it starts with `/` or `\`, or with a drive plus a
 /// separator or nothing (`C:\x`, `C:/x`, `C:`), on every platform. A drive
@@ -363,25 +365,30 @@ pub(crate) fn parse_zip_entry_name(
     Ok(ZipEntryName::Resolved(components.into_iter().collect()))
 }
 
-/// Rejects an archive-root entry (`.`) that is not a no-op.
+/// Classifies an entry for the root-entry rule.
 ///
 /// The root names the destination itself, so only a directory or an empty
-/// regular file (the `zip` crate reads a bare `.` as a file) may stand for it;
-/// a symlink or an entry with data would be written onto the destination.
-/// Shared by extraction and listing so `verify` and `extract` agree.
-pub(crate) fn admit_root_entry<R: Read>(
+/// regular file (the `zip` crate reads a bare `.` as a file) may stand for it,
+/// and counts as a directory; a symlink or an entry with data would be written
+/// onto the destination. Shared by extraction and listing so `verify` and
+/// `extract` agree.
+pub(crate) fn zip_node_kind<R: Read>(
     path: &Path,
     entry: &zip::read::ZipFile<'_, R>,
-) -> Result<()> {
-    if path != Path::new(".") || entry.is_dir() {
-        return Ok(());
+) -> Result<NodeKind> {
+    if entry.is_dir() {
+        return Ok(NodeKind::Directory);
     }
-    if zip_mode_is_symlink(entry.unix_mode()) || entry.size() > 0 {
-        return Err(ArchiveError::SecurityViolation {
-            reason: "archive root entry '.' must be a directory or an empty regular file".into(),
-        });
+    match EntryPath::of(path) {
+        EntryPath::Child(_) => Ok(NodeKind::NonDirectory),
+        EntryPath::Root(_) if zip_mode_is_symlink(entry.unix_mode()) || entry.size() > 0 => {
+            Err(ArchiveError::SecurityViolation {
+                reason: "archive root entry '.' must be a directory or an empty regular file"
+                    .into(),
+            })
+        }
+        EntryPath::Root(_) => Ok(NodeKind::Directory),
     }
-    Ok(())
 }
 
 fn has_parent_component(name: &str) -> bool {
@@ -575,9 +582,7 @@ impl<R: Read + Seek> ZipArchive<R> {
         let raw_name = zip_file.name().map_err(|e| {
             ArchiveError::InvalidArchive(format!("invalid entry name at {index}: {e}"))
         })?;
-        let path = resolve_zip_entry_path(&raw_name, config)?;
-        admit_root_entry(&path, zip_file)?;
-        Ok(path)
+        resolve_zip_entry_path(&raw_name, config)
     }
 
     /// Processes a single ZIP entry using an already-opened `ZipFile`.
@@ -605,7 +610,9 @@ impl<R: Read + Seek> ZipArchive<R> {
 
         let path = Self::resolve_entry_path(&zip_file, index, ctx.config)?;
 
-        if path == Path::new(".") && !zip_file.is_dir() {
+        // A non-directory entry classed as a directory is the empty root file:
+        // a no-op.
+        if zip_node_kind(&path, &zip_file)? == NodeKind::Directory && !zip_file.is_dir() {
             return Ok(());
         }
 

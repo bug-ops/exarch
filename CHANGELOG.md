@@ -80,9 +80,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **BREAKING:** ZIP `extract`, `list` and `verify` reject, under `Enforce`, a hidden local header or stray record signature in the declared range of a stored data-descriptor entry, after its first descriptor signature (#690).
 - **BREAKING:** ZIP `extract`, `list` and `verify` reject, under `Enforce`, an entry whose local or central `xl` extra field gives it another file type than its central attributes (`ZipInconsistency::XlTypeDivergence`) (#689).
 - The `verify` pre-flight listing mode is a `ListPass` type instead of a `SecurityConfig` flag, so extraction cannot receive relaxed ZIP path or size checks (#705).
+- Internal: path validation and listing take the root-entry decision from one `EntryPath` and `NodeKind` instead of a `bool`; ZIP keeps its own rule that accepts an empty `.` file (#704, #709).
 
 ### Fixed
 
+- 7z `extract`, `list` and `verify` reject a `.` root entry that is not a directory, as TAR does (#703, #709).
 - TAR `extract`, `list` and `verify` reject a `.` or `./` root entry that is not a directory, and read an empty regular entry with a trailing-slash name (V7) as a directory (#701, #706).
 - `exarch-cli` skill states that an all-zero tail after the last zstd frame fails `verify --check-integrity` (#699, #706).
 - ZIP `extract`, `list` and `verify` accept a `./` or `.` root entry as the destination directory, and reject a root entry with a payload or a symlink (#698, #702).

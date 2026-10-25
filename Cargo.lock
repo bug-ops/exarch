@@ -613,6 +613,7 @@ dependencies = [
  "rustix",
  "serde",
  "serde_json",
+ "sevenz-rust2",
  "tar",
  "tempfile",
  "zip",

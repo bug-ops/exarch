@@ -33,6 +33,7 @@ rustix = { workspace = true, features = ["fs", "alloc"] }
 assert_cmd.workspace = true
 flate2.workspace = true
 predicates.workspace = true
+sevenz-rust2.workspace = true
 tar.workspace = true
 zip.workspace = true
 

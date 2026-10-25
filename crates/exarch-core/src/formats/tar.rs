@@ -130,6 +130,7 @@ use crate::security::hardlink::hardlink_target_missing;
 use crate::security::permissions::SanitizedMode;
 use crate::security::quota::QuotaPermit;
 use crate::security::validator::EntryValidator;
+use crate::security::validator::NodeKind;
 use crate::security::validator::ValidatedEntryType;
 use crate::security::validator::check_root_entry_is_directory;
 use crate::types::DestDir;
@@ -257,7 +258,7 @@ impl<R: Read> TarArchive<R> {
 
         check_root_entry_is_directory(
             &path,
-            effective_entry_type(entry) == tar::EntryType::Directory,
+            NodeKind::directory_if(effective_entry_type(entry) == tar::EntryType::Directory),
         )?;
 
         let entry_type = TarEntryAdapter::to_entry_type(entry)?;

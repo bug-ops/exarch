@@ -250,6 +250,10 @@ fn classify_name_prefix(raw: &str) -> NamePrefix {
 ///   any `..` component (in the raw name or left after prefix stripping), and
 ///   for an absolute name that resolves to nothing
 ///
+/// A relative name made only of `.` and separators (`./`, `.`) is the archive
+/// root and resolves to `.`, which `SafePath` maps to the destination itself;
+/// [`admit_root_entry`] then checks that the entry may stand for it.
+///
 /// A name is absolute when it starts with `/` or `\`, or with a drive plus a
 /// separator or nothing (`C:\x`, `C:/x`, `C:`), on every platform. A drive
 /// glued to a name (`C:x`) is absolute only on Windows; elsewhere it is an
@@ -295,8 +299,11 @@ pub(crate) fn resolve_zip_entry_path(
         .split(['/', '\\'])
         .filter(|component| !component.is_empty() && *component != ".")
         .collect();
-    if absolute && components.is_empty() {
-        return Err(traversal());
+    if components.is_empty() {
+        if absolute {
+            return Err(traversal());
+        }
+        return Ok(PathBuf::from("."));
     }
     // On Windows, pushing `c:x` replaces the path built so far; other Windows
     // hazards are left to `SafePath`.
@@ -309,6 +316,27 @@ pub(crate) fn resolve_zip_entry_path(
         return Err(stream_separator_error(component));
     }
     Ok(components.into_iter().collect())
+}
+
+/// Rejects an archive-root entry (`.`) that is not a no-op.
+///
+/// The root names the destination itself, so only a directory or an empty
+/// regular file (the `zip` crate reads a bare `.` as a file) may stand for it;
+/// a symlink or an entry with data would be written onto the destination.
+/// Shared by extraction and listing so `verify` and `extract` agree.
+pub(crate) fn admit_root_entry<R: Read>(
+    path: &Path,
+    entry: &zip::read::ZipFile<'_, R>,
+) -> Result<()> {
+    if path != Path::new(".") || entry.is_dir() {
+        return Ok(());
+    }
+    if zip_mode_is_symlink(entry.unix_mode()) || entry.size() > 0 {
+        return Err(ArchiveError::SecurityViolation {
+            reason: "archive root entry '.' must be a directory or an empty regular file".into(),
+        });
+    }
+    Ok(())
 }
 
 fn has_parent_component(name: &str) -> bool {
@@ -502,7 +530,9 @@ impl<R: Read + Seek> ZipArchive<R> {
         let raw_name = zip_file.name().map_err(|e| {
             ArchiveError::InvalidArchive(format!("invalid entry name at {index}: {e}"))
         })?;
-        resolve_zip_entry_path(&raw_name, config)
+        let path = resolve_zip_entry_path(&raw_name, config)?;
+        admit_root_entry(&path, zip_file)?;
+        Ok(path)
     }
 
     /// Processes a single ZIP entry using an already-opened `ZipFile`.
@@ -529,6 +559,10 @@ impl<R: Read + Seek> ZipArchive<R> {
         }
 
         let path = Self::resolve_entry_path(&zip_file, index, ctx.config)?;
+
+        if path == Path::new(".") && !zip_file.is_dir() {
+            return Ok(());
+        }
 
         let (uncompressed_size, compressed_size) = ZipEntryAdapter::get_sizes(&zip_file);
         let mode = zip_file.unix_mode();
@@ -2963,6 +2997,14 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_entry_path_root_directory_spellings_resolve_to_dot() {
+        for name in [".", "./", ".//", "./.", ".\\"] {
+            let path = call_resolve_entry_path(name, &strict_config()).unwrap();
+            assert_eq!(path, PathBuf::from("."), "{name:?}");
+        }
+    }
+
+    #[test]
     fn test_resolve_entry_path_drive_glued_to_name_depends_on_platform() {
         let result = call_resolve_entry_path("a:notes.txt", &strict_config());
         if cfg!(windows) {
@@ -3063,6 +3105,13 @@ mod tests {
         ) {
             let config = if absolute { absolute_config() } else { strict_config() };
             if let Ok(path) = resolve_zip_entry_path(&name, &config) {
+                if path == Path::new(".") {
+                    proptest::prop_assert!(
+                        name.chars().all(|c| matches!(c, '.' | '/' | '\\')),
+                        "{name:?} resolved to the archive root"
+                    );
+                    return Ok(());
+                }
                 proptest::prop_assert!(
                     path.components()
                         .all(|c| matches!(c, std::path::Component::Normal(_))),

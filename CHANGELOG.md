@@ -82,6 +82,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- ZIP `extract`, `list` and `verify` accept a `./` or `.` root entry as the destination directory, and reject a root entry with a payload or a symlink (#698, #702).
+- `verify` binds ZIP xl type and descriptor overrun findings to their entry, and no longer shifts the binding after an over-long name (#692, #702).
 - 7z last solid block ratio counts only the pack streams its coders consume (#684).
 - 7z `extract` admits each block's decoder memory against `max_decoder_memory`, closing unbounded multi-threaded LZMA2 buffering (#672).
 - 7z `extract` refuses a block with a stream-less entry between its files instead of silently omitting a file (#672).

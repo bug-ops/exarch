@@ -1103,6 +1103,94 @@ mod tests {
         );
     }
 
+    #[test]
+    fn xl_type_divergence_is_bound_to_its_manifest_entry() {
+        use crate::raw_zip::RawEntry;
+        use crate::raw_zip::RawZip;
+        use crate::raw_zip::SYMLINK_MODE;
+        use crate::raw_zip::XL_FIELD_ID;
+        use crate::raw_zip::xl_unix_attributes;
+
+        let built = RawZip::new(vec![
+            RawEntry::stored("a.txt", b"../../../../tmp/pwned")
+                .with_local_unix_host()
+                .with_local_extra_field(XL_FIELD_ID, &xl_unix_attributes(SYMLINK_MODE)),
+            RawEntry::stored("b.txt", b"plain b\n"),
+        ])
+        .build();
+        let mut temp_file = NamedTempFile::with_suffix(".zip").unwrap();
+        temp_file.write_all(&built.bytes).unwrap();
+        temp_file.flush().unwrap();
+
+        let report = verify_archive(temp_file.path(), &SecurityConfig::default()).unwrap();
+
+        assert_eq!(report.suspicious_entries(), 1);
+        let issue = report
+            .issues()
+            .iter()
+            .find(|i| i.message.contains("xl extra field"))
+            .unwrap();
+        assert_eq!(issue.entry_path.as_deref(), Some(Path::new("a.txt")));
+    }
+
+    #[test]
+    fn zip_finding_after_a_dropped_oversized_entry_names_its_own_entry() {
+        use crate::raw_zip::RawEntry;
+        use crate::raw_zip::RawZip;
+        use crate::raw_zip::SYMLINK_MODE;
+        use crate::raw_zip::XL_FIELD_ID;
+        use crate::raw_zip::xl_unix_attributes;
+
+        let long_name = "n".repeat(304);
+        let built = RawZip::new(vec![
+            RawEntry::stored(&long_name, b"long"),
+            RawEntry::stored("a.txt", b"../../../../tmp/pwned")
+                .with_local_unix_host()
+                .with_local_extra_field(XL_FIELD_ID, &xl_unix_attributes(SYMLINK_MODE)),
+            RawEntry::stored("b.txt", b"plain b\n"),
+        ])
+        .build();
+        let mut temp_file = NamedTempFile::with_suffix(".zip").unwrap();
+        temp_file.write_all(&built.bytes).unwrap();
+        temp_file.flush().unwrap();
+
+        let report = verify_archive(temp_file.path(), &SecurityConfig::default()).unwrap();
+
+        let issue = report
+            .issues()
+            .iter()
+            .find(|i| i.message.contains("xl extra field"))
+            .unwrap();
+        assert_eq!(issue.entry_path.as_deref(), Some(Path::new("a.txt")));
+    }
+
+    #[test]
+    fn descriptor_overrun_is_bound_to_its_manifest_entry() {
+        use crate::raw_zip::RawEntry;
+        use crate::raw_zip::RawZip;
+
+        let built = RawZip::new(vec![
+            RawEntry::stored("p.txt", b"plain p\n"),
+            RawEntry::stored("a.txt", b"stored a\n").with_descriptor(false, false),
+            RawEntry::stored("b.txt", b"stored b\n"),
+            RawEntry::stored("c.txt", b"stored c\n"),
+        ])
+        .build();
+        let mut temp_file = NamedTempFile::with_suffix(".zip").unwrap();
+        temp_file.write_all(&built.bytes).unwrap();
+        temp_file.flush().unwrap();
+
+        let report = verify_archive(temp_file.path(), &SecurityConfig::default()).unwrap();
+
+        assert_eq!(report.suspicious_entries(), 1);
+        let issue = report
+            .issues()
+            .iter()
+            .find(|i| i.message.contains("data descriptor of entry 1"))
+            .unwrap();
+        assert_eq!(issue.entry_path.as_deref(), Some(Path::new("a.txt")));
+    }
+
     // Regression test: verify_archive() must report an oversized entry as a
     // graceful VerificationIssue (Fail status with an itemized report), not
     // abort with a bare error during its internal pre-flight list_archive()

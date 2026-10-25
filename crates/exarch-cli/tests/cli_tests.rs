@@ -4404,6 +4404,7 @@ fn test_sevenz_unix_symlink_needs_allow_symlinks() {
 
 /// `list -l` shows a 7z link target only on request and marks a link whose
 /// target was not read in a form no stored target can imitate.
+#[cfg(unix)]
 #[test]
 fn test_sevenz_list_long_marks_unread_link_targets() {
     let temp = TempDir::new().expect("failed to create temp dir");

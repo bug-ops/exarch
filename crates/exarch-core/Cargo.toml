@@ -22,6 +22,7 @@ tar.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 time.workspace = true
+typed-path.workspace = true
 walkdir.workspace = true
 xz2.workspace = true
 zip = { workspace = true, features = ["deflate", "deflate64", "bzip2", "zstd", "time"] }

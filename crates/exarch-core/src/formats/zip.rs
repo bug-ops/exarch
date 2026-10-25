@@ -127,6 +127,9 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::time::Instant;
 
+use typed_path::Utf8Components;
+use typed_path::Utf8WindowsComponent;
+use typed_path::Utf8WindowsPath;
 use zip::ZipArchive as ZipReader;
 
 use crate::ArchiveError;
@@ -153,6 +156,7 @@ use crate::security::zipbomb::DeclaredCompressedBudget;
 use crate::types::DestDir;
 use crate::types::EntryType;
 use crate::types::SafePath;
+use crate::types::safe_path::stream_separator_error;
 
 use super::common;
 use super::common::EntryCompleteGuard;
@@ -231,18 +235,20 @@ fn classify_name_prefix(raw: &str) -> NamePrefix {
 
 /// Applies the entry-path policy shared by ZIP extraction and listing.
 ///
-/// `raw` is the entry name as stored; `enclosed` is `ZipFile::enclosed_name()`,
-/// which silently drops a leading root or drive prefix and so cannot be used
-/// alone to enforce the absolute-path policy.
+/// `raw` is the entry name as stored. The name is split on both `/` and `\`
+/// on every platform; for an absolute name admitted by `allow_absolute_paths`
+/// the Windows prefix (drive, UNC, verbatim or device) and root are stripped
+/// first.
 ///
 /// # Errors
 ///
 /// - `SecurityViolation` for a NUL byte (unless the verify preflight config is
-///   relaxed, in which case the raw name is returned for verify to report)
+///   relaxed, in which case the raw name is returned for verify to report), and
+///   on Windows for a `:` in any component (relaxed: the raw name is returned)
 /// - `InvalidArchive` for an empty name
 /// - `PathTraversal` for an absolute name without `allow_absolute_paths`, for
-///   any `..` component (split on both `/` and `\`), for an absolute name that
-///   resolves to nothing, and when `enclosed` is `None`
+///   any `..` component (in the raw name or left after prefix stripping), and
+///   for an absolute name that resolves to nothing
 ///
 /// A name is absolute when it starts with `/` or `\`, or with a drive plus a
 /// separator or nothing (`C:\x`, `C:/x`, `C:`), on every platform. A drive
@@ -250,7 +256,6 @@ fn classify_name_prefix(raw: &str) -> NamePrefix {
 /// ordinary file name and is kept as stored.
 pub(crate) fn resolve_zip_entry_path(
     raw: &str,
-    enclosed: Option<PathBuf>,
     config: &SecurityConfig<Validated>,
 ) -> Result<PathBuf> {
     let traversal = || ArchiveError::PathTraversal {
@@ -276,24 +281,51 @@ pub(crate) fn resolve_zip_entry_path(
     if absolute && !config.allowed.absolute_paths {
         return Err(traversal());
     }
-    if raw.split(['/', '\\']).any(|component| component == "..") {
+    if has_parent_component(raw) {
         return Err(traversal());
     }
 
-    // `enclosed_name()` parses Windows syntax on every platform and would
-    // strip `a:` from the ordinary Unix file name `a:notes.txt`.
-    if prefix == NamePrefix::DriveRelative && !absolute {
-        return Ok(raw
-            .split(['/', '\\'])
-            .filter(|component| !component.is_empty() && *component != ".")
-            .collect());
+    let rest = if absolute { strip_root(raw) } else { raw };
+    // A drive glued to `..` (`\\?\C:..\x`) is one raw component but parses as
+    // prefix plus `..`, so the check must run again after stripping.
+    if absolute && has_parent_component(rest) {
+        return Err(traversal());
     }
+    let components: Vec<&str> = rest
+        .split(['/', '\\'])
+        .filter(|component| !component.is_empty() && *component != ".")
+        .collect();
+    if absolute && components.is_empty() {
+        return Err(traversal());
+    }
+    // On Windows, pushing `c:x` replaces the path built so far; other Windows
+    // hazards are left to `SafePath`.
+    if cfg!(windows)
+        && let Some(component) = components.iter().find(|c| c.contains(':'))
+    {
+        if config.relaxed_for_verify_preflight {
+            return Ok(PathBuf::from(rest));
+        }
+        return Err(stream_separator_error(component));
+    }
+    Ok(components.into_iter().collect())
+}
 
-    match enclosed {
-        Some(path) if absolute && path.as_os_str().is_empty() => Err(traversal()),
-        Some(path) => Ok(path),
-        None => Err(traversal()),
+fn has_parent_component(name: &str) -> bool {
+    name.split(['/', '\\']).any(|component| component == "..")
+}
+
+/// The part of an absolute name after its Windows prefix (drive, UNC,
+/// verbatim or device) and root.
+fn strip_root(raw: &str) -> &str {
+    let mut components = Utf8WindowsPath::new(raw).components();
+    let mut rest = components.as_str();
+    while let Some(Utf8WindowsComponent::Prefix(_) | Utf8WindowsComponent::RootDir) =
+        components.next()
+    {
+        rest = components.as_str();
     }
+    rest
 }
 
 /// Whether opening a ZIP entry failed because it is encrypted.
@@ -470,7 +502,7 @@ impl<R: Read + Seek> ZipArchive<R> {
         let raw_name = zip_file.name().map_err(|e| {
             ArchiveError::InvalidArchive(format!("invalid entry name at {index}: {e}"))
         })?;
-        resolve_zip_entry_path(&raw_name, zip_file.enclosed_name(), config)
+        resolve_zip_entry_path(&raw_name, config)
     }
 
     /// Processes a single ZIP entry using an already-opened `ZipFile`.
@@ -2766,7 +2798,7 @@ mod tests {
     #[test]
     fn test_extract_zip_traversal_after_root_rejected_by_default() {
         // `/../etc/passwd` has a traversal component after root;
-        // enclosed_name() returns None for this pattern. Without
+        // exarch's raw-name `..` check rejects this pattern. Without
         // allow_absolute_paths the entry must be rejected as
         // PathTraversal.
         let zip_data = create_raw_zip_entry("/../etc/passwd", b"secret");
@@ -2816,7 +2848,7 @@ mod tests {
 
     #[test]
     fn test_extract_zip_absolute_path_with_flag_writes_to_dest() {
-        // `/etc/passwd` raw in ZIP: enclosed_name() returns Some("etc/passwd"),
+        // `/etc/passwd` raw in ZIP: the root is stripped to `etc/passwd`,
         // so extraction must write <dest>/etc/passwd without error.
         // Empty content keeps CRC32 = 0 which matches the raw ZIP header.
         let zip_data = create_raw_zip_entry("/etc/passwd", b"");
@@ -2886,6 +2918,10 @@ mod tests {
             "C:\\x",
             "C:/x",
             "\\\\server\\share\\f",
+            "\\\\?\\C:\\x",
+            "\\\\.\\COM1\\x",
+            "\\\\?\\UNC\\srv\\sh\\f",
+            "//?/C:/x",
         ] {
             let result = call_resolve_entry_path(name, &strict_config());
             assert_matches!(
@@ -2903,6 +2939,11 @@ mod tests {
             ("\\etc\\passwd", "etc/passwd"),
             ("C:\\x", "x"),
             ("C:/dir/x", "dir/x"),
+            ("\\\\server\\share\\f", "f"),
+            ("\\\\?\\C:\\x\\y", "x/y"),
+            ("\\\\.\\COM1\\x", "x"),
+            ("\\\\?\\UNC\\srv\\sh\\f", "f"),
+            ("C:\\NUL.txt", "NUL.txt"),
         ] {
             let path = call_resolve_entry_path(name, &absolute_config()).unwrap();
             assert_eq!(path, PathBuf::from(expected), "{name:?}");
@@ -2948,9 +2989,122 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_entry_path_drive_like_later_component_depends_on_platform() {
+        let cases = [
+            ("dir/a:notes.txt", strict_config(), "dir/a:notes.txt"),
+            ("./a:notes.txt", strict_config(), "a:notes.txt"),
+            (".\\a:notes.txt", strict_config(), "a:notes.txt"),
+            ("/dir/a:notes.txt", absolute_config(), "dir/a:notes.txt"),
+            ("/c:x", absolute_config(), "c:x"),
+        ];
+        for (name, config, unix) in cases {
+            let result = call_resolve_entry_path(name, &config);
+            if cfg!(windows) {
+                assert_matches!(
+                    result,
+                    Err(ArchiveError::SecurityViolation { .. }),
+                    "{name:?}"
+                );
+            } else {
+                assert_eq!(result.unwrap(), PathBuf::from(unix), "{name:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_resolve_entry_path_parent_hidden_behind_prefix_rejected() {
+        let mut names = vec!["\\\\?\\C:..\\x", "/\\?\\C:..", "\\\\?\\C:\\..\\x"];
+        if cfg!(windows) {
+            names.extend(["C:..", "c:../x"]);
+        }
+        for name in names {
+            let result = resolve_zip_entry_path(name, &absolute_config());
+            assert_matches!(result, Err(ArchiveError::PathTraversal { .. }), "{name:?}");
+        }
+    }
+
+    fn name_strategy() -> impl proptest::strategy::Strategy<Value = String> {
+        use proptest::prelude::Just;
+        use proptest::prelude::prop_oneof;
+        use proptest::strategy::Strategy;
+        let prefix = prop_oneof![
+            Just(""),
+            Just("/"),
+            Just("\\"),
+            Just("\\\\?\\"),
+            Just("//?/"),
+            Just("/\\?\\"),
+            Just("\\\\.\\"),
+            Just("\\\\?\\UNC\\"),
+            Just("C:"),
+            Just("C:\\"),
+        ];
+        let part = prop_oneof![
+            3 => Just("C:.."),
+            3 => Just(".."),
+            2 => Just("C:"),
+            2 => Just("."),
+            2 => Just("/"),
+            2 => Just("\\"),
+            2 => Just("?"),
+            2 => Just("UNC"),
+            3 => Just("a"),
+        ];
+        (prefix, proptest::collection::vec(part, 0..6))
+            .prop_map(|(prefix, parts)| format!("{prefix}{}", parts.concat()))
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(4096))]
+        #[test]
+        fn test_resolve_entry_path_ok_paths_have_only_normal_components(
+            name in name_strategy(),
+            absolute in proptest::prelude::any::<bool>(),
+        ) {
+            let config = if absolute { absolute_config() } else { strict_config() };
+            if let Ok(path) = resolve_zip_entry_path(&name, &config) {
+                proptest::prop_assert!(
+                    path.components()
+                        .all(|c| matches!(c, std::path::Component::Normal(_))),
+                    "{name:?} resolved to {path:?}"
+                );
+                // Without a ':' component Windows parses the path as plain
+                // names too, so the invariant also holds on Windows hosts.
+                let joined = path.to_string_lossy().replace('/', "\\");
+                if !joined.contains(':') {
+                    proptest::prop_assert!(
+                        Utf8WindowsPath::new(&joined)
+                            .components()
+                            .all(|c| matches!(c, Utf8WindowsComponent::Normal(_))),
+                        "{name:?} resolved to {path:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_resolve_entry_path_windows_reserved_name_left_to_safe_path() {
+        let path = resolve_zip_entry_path("dir/NUL.txt", &strict_config()).unwrap();
+        assert_eq!(path, PathBuf::from("dir/NUL.txt"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_resolve_entry_path_windows_colon_returned_raw_in_verify_preflight() {
+        let config = SecurityConfig::default()
+            .with_relaxed_for_verify_preflight()
+            .validate()
+            .unwrap();
+        let path = resolve_zip_entry_path("dir\\c:x", &config).unwrap();
+        assert_eq!(path, PathBuf::from("dir\\c:x"));
+    }
+
+    #[test]
     fn test_resolve_zip_entry_path_empty_name_is_invalid() {
         for config in [strict_config(), absolute_config()] {
-            let result = resolve_zip_entry_path("", Some(PathBuf::new()), &config);
+            let result = resolve_zip_entry_path("", &config);
             assert_matches!(result, Err(ArchiveError::InvalidArchive(_)));
         }
     }
@@ -2978,8 +3132,14 @@ mod tests {
     #[test]
     fn test_resolve_zip_entry_path_nul_byte_is_security_violation() {
         for config in [strict_config(), absolute_config()] {
-            for raw in ["a\0b.txt", "/a\0b.txt"] {
-                let result = resolve_zip_entry_path(raw, None, &config);
+            for raw in [
+                "a\0b.txt",
+                "/a\0b.txt",
+                "C:\\a\0b.txt",
+                "\\\\?\\C:\\a\0b.txt",
+                "\\\\server\\share\\a\0b",
+            ] {
+                let result = resolve_zip_entry_path(raw, &config);
                 assert_matches!(
                     result,
                     Err(ArchiveError::SecurityViolation { .. }),
@@ -2995,7 +3155,7 @@ mod tests {
             .with_relaxed_for_verify_preflight()
             .validate()
             .unwrap();
-        let path = resolve_zip_entry_path("a\0b.txt", None, &config).unwrap();
+        let path = resolve_zip_entry_path("a\0b.txt", &config).unwrap();
         assert_eq!(path, PathBuf::from("a\0b.txt"));
     }
 }

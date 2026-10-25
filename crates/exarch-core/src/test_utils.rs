@@ -85,7 +85,7 @@ pub fn create_test_zip(entries: Vec<(&str, &[u8])>) -> Vec<u8> {
 /// verbatim into the local file header and central directory, bypassing any
 /// normalization that the `zip` crate applies via `start_file`. Use this to
 /// craft entries with absolute paths or traversal sequences that
-/// `enclosed_name()` returns `None` for.
+/// the `zip` crate's own writer refuses to produce.
 #[must_use]
 #[allow(clippy::cast_possible_truncation)]
 pub fn create_raw_zip_entry(entry_name: &str, content: &[u8]) -> Vec<u8> {

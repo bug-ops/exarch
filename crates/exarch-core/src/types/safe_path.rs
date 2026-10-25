@@ -85,9 +85,8 @@ impl SafePath {
     /// When `allow_absolute_paths = true` the root component (`/` on Unix,
     /// drive prefix on Windows) is stripped here, making the path relative
     /// before `dest.join()` is applied. This is the centralized stripping
-    /// point for TAR and 7z entries; ZIP entries whose `enclosed_name()`
-    /// returns `None` are pre-handled in `resolve_entry_path` before reaching
-    /// this method.
+    /// point for TAR and 7z entries; ZIP names are pre-resolved by
+    /// `resolve_zip_entry_path` before reaching this method.
     ///
     /// # Caller contract
     ///
@@ -247,9 +246,8 @@ impl SafePath {
                     // dest entirely for absolute paths.
                     // This is the canonical stripping point — format handlers
                     // (tar, sevenz) pass raw entry names straight through.
-                    // ZIP is the exception: zip::ZipFile::enclosed_name() may
-                    // return None for rooted names, handled in
-                    // resolve_entry_path.
+                    // ZIP is the exception: names are pre-resolved in
+                    // resolve_zip_entry_path.
                     needs_normalization = true;
                 }
             }
@@ -414,12 +412,20 @@ pub(crate) fn check_windows_component(
         Some(WindowsComponentHazard::ReservedDeviceName) => Err(ArchiveError::SecurityViolation {
             reason: format!("Windows reserved device name: {}", comp.display()),
         }),
-        Some(WindowsComponentHazard::StreamSeparator) => Err(ArchiveError::SecurityViolation {
-            reason: format!("path component contains ':': {}", comp.display()),
-        }),
+        Some(WindowsComponentHazard::StreamSeparator) => {
+            Err(stream_separator_error(&comp.display().to_string()))
+        }
         Some(WindowsComponentHazard::TrailingDotOrSpace) => Err(ArchiveError::SecurityViolation {
             reason: format!("path component ends with '.' or ' ': {}", comp.display()),
         }),
+    }
+}
+
+/// The error for a path component containing `:`, which Windows treats as a
+/// drive or alternate-data-stream separator.
+pub(crate) fn stream_separator_error(comp: &str) -> ArchiveError {
+    ArchiveError::SecurityViolation {
+        reason: format!("path component contains ':': {comp}"),
     }
 }
 

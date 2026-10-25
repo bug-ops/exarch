@@ -370,7 +370,7 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
             .name()
             .map_err(|e| ArchiveError::InvalidArchive(format!("invalid entry name: {e}")))?
             .into_owned();
-        let path = resolve_zip_entry_path(&raw_name, entry.enclosed_name(), config)?;
+        let path = resolve_zip_entry_path(&raw_name, config)?;
         if !admit_path(&path, &mut manifest, config, policy)? {
             continue;
         }
@@ -1433,9 +1433,8 @@ mod tests {
 
     #[test]
     fn test_list_zip_path_traversal() {
-        // ZIP with ../etc/passwd entry — enclosed_name() returns None for
-        // traversal paths, triggering PathTraversal error in list_zip
-        // (lines 268-270).
+        // ZIP with ../etc/passwd entry — resolve_zip_entry_path rejects the
+        // `..` component with PathTraversal.
         let temp_file = NamedTempFile::with_suffix(".zip").unwrap();
         let file = std::fs::File::create(temp_file.path()).unwrap();
         let mut zip = zip::ZipWriter::new(file);
@@ -2110,8 +2109,8 @@ mod tests {
 
     // --- Regression tests for #325: allow_absolute_paths for ZIP listing ---
 
-    // `enclosed_name()` strips a leading `/`, so the absolute-path policy is
-    // enforced on the raw name by `resolve_zip_entry_path` (issue #631).
+    // The absolute-path policy is enforced on the raw name by
+    // `resolve_zip_entry_path` (issue #631).
     #[test]
     fn test_list_zip_absolute_path_rejected_by_default() {
         let zip_bytes = create_raw_zip_entry("/etc/passwd", b"");
@@ -2143,9 +2142,9 @@ mod tests {
 
     #[test]
     fn test_list_zip_traversal_absolute_path_rejected_by_default() {
-        // /../etc/passwd: enclosed_name() returns None (traversal after root).
-        // Our fallback does NOT apply (allow_absolute_paths is false), so the
-        // entry is rejected with PathTraversal.
+        // /../etc/passwd: traversal after root.
+        // allow_absolute_paths is false, so the entry is rejected with
+        // PathTraversal.
         let zip_bytes = create_raw_zip_entry("/../etc/passwd", b"");
         let mut temp_file = NamedTempFile::with_suffix(".zip").unwrap();
         temp_file.write_all(&zip_bytes).unwrap();
@@ -2181,10 +2180,8 @@ mod tests {
 
     #[test]
     fn test_list_zip_absolute_path_with_traversal_still_rejected() {
-        // /foo/../../../etc/passwd: enclosed_name() returns None (would go
-        // above root). Our fallback strips `/` to get
-        // `foo/../../../etc/passwd`, then contains_traversal() rejects
-        // the remaining `..` components.
+        // /foo/../../../etc/passwd: goes above root. The `..` components are
+        // rejected even though the leading `/` is stripped.
         let zip_bytes = create_raw_zip_entry("/foo/../../../etc/passwd", b"");
         let mut temp_file = NamedTempFile::with_suffix(".zip").unwrap();
         temp_file.write_all(&zip_bytes).unwrap();
@@ -2197,6 +2194,20 @@ mod tests {
             Err(ArchiveError::PathTraversal { .. }),
             "traversal inside absolute path must still be rejected, got: {result:?}"
         );
+    }
+
+    #[test]
+    fn test_list_zip_parent_glued_to_prefix_rejected_with_allow_absolute_paths() {
+        for name in ["\\\\?\\C:..\\x", "/\\?\\C:.."] {
+            let zip_bytes = create_raw_zip_entry(name, b"");
+            let mut temp_file = NamedTempFile::with_suffix(".zip").unwrap();
+            temp_file.write_all(&zip_bytes).unwrap();
+            temp_file.flush().unwrap();
+
+            let config = SecurityConfig::default().with_allow_absolute_paths(true);
+            let result = list_archive(temp_file.path(), &config);
+            assert_matches!(result, Err(ArchiveError::PathTraversal { .. }), "{name:?}");
+        }
     }
 
     // --- Regression tests for #430: list() must reject NUL bytes in entry
@@ -2244,8 +2255,8 @@ mod tests {
     #[test]
     fn test_list_zip_nul_byte_rejected_with_allow_absolute_paths() {
         // The actual bypass closed by #430: allow_absolute_paths routes
-        // through the raw-name fallback, bypassing enclosed_name()'s NUL
-        // check entirely, so only the new has_null_bytes() check catches it.
+        // through the raw name, so only the NUL check in
+        // resolve_zip_entry_path catches it.
         let zip_bytes = create_raw_zip_entry("foo\0bar.txt", b"");
         let mut temp_file = NamedTempFile::with_suffix(".zip").unwrap();
         temp_file.write_all(&zip_bytes).unwrap();

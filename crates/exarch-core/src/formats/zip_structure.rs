@@ -59,9 +59,12 @@
 //! record: a streaming reader that stops listing at the first central record
 //! never sees the entries after it. The signature alone counts, because that
 //! reader reads no field of the record; one behind the last entry hides
-//! nothing and is not reported. An end of central directory or ZIP64 end
-//! record signature stops such a reader the same way and is reported as a
-//! stray end record.
+//! nothing to such a reader and is not reported, unless it lies between the
+//! end record's directory offset and the directory the `zip` crate uses (a
+//! prefixed archive): readers up to `zip` 9.0.5 take the first central record
+//! from that offset, so it can replace the directory. An end of central
+//! directory or ZIP64 end record signature stops such a reader the same way and
+//! is reported as a stray end record.
 //!
 //! The bytes of a data descriptor are searched like any other gap, and the
 //! position where a streaming reader resumes after the entry's data is
@@ -140,7 +143,6 @@ const ZIP64_END_DIRECTORY_AT: usize = 48;
 const ZIP64_EXTRA_ID: u16 = 0x0001;
 
 const HEADER_INCONSISTENCY_PREFIX: &str = "header inconsistency detected: ";
-const DUPLICATE_NAMES: &str = "duplicate file names";
 
 /// Field names the `zip` crate puts after [`HEADER_INCONSISTENCY_PREFIX`].
 ///
@@ -638,7 +640,10 @@ fn scan_entries<R: Read + Seek>(
     shared: &Shared<R>,
 ) -> Result<Scan> {
     let mut budget = DeclaredCompressedBudget::new(archive.central_directory_start());
-    let mut scan = Scan::default();
+    let mut scan = Scan {
+        crate_duplicates: archive.has_duplicate_names(),
+        ..Scan::default()
+    };
     let consistent = archive.validate_header_consistency().is_ok();
 
     for index in 0..archive.len() {
@@ -660,7 +665,6 @@ fn scan_entries<R: Read + Seek>(
                     scan.layouts.push(layout_of(&file, index)?);
                     continue;
                 }
-                Err(e) if index == 0 && is_duplicate_names(&e) => scan.crate_duplicates = true,
                 Err(e) => {
                     if let Some(fault) = shared.take_fault() {
                         return Err(ArchiveError::Io(fault));
@@ -725,15 +729,6 @@ fn overlaps(layouts: &[EntryLayout], directory_start: u64) -> bool {
     ranges.sort_unstable();
     ranges.iter().any(|&(_, end)| end > directory_start)
         || ranges.windows(2).any(|w| w[0].1 > w[1].0)
-}
-
-fn is_duplicate_names(error: &ZipError) -> bool {
-    matches!(
-        error,
-        ZipError::InvalidArchive(msg)
-            if msg.strip_prefix(HEADER_INCONSISTENCY_PREFIX)
-                .is_some_and(|rest| rest.starts_with(DUPLICATE_NAMES))
-    )
 }
 
 /// Names the field behind a failed header-consistency check.
@@ -1057,10 +1052,25 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
                 self.check_descriptor(layout, exit, next, findings)?;
             }
         }
+        // Readers up to `zip` 9.0.5 take the first central record at or after
+        // the end record's directory offset, so one in the bytes from there to
+        // the directory the crate uses can replace it.
+        let decoy_start = cursor.max(
+            self.map
+                .directory_start
+                .saturating_sub(self.map.archive_offset),
+        );
         self.gap(
             cursor,
-            self.map.directory_start,
+            decoy_start,
             Followed::ByDirectory,
+            HiddenRegion::Gap,
+            findings,
+        )?;
+        self.gap(
+            decoy_start,
+            self.map.directory_start,
+            Followed::ByEntry,
             HiddenRegion::Gap,
             findings,
         )

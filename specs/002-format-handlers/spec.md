@@ -315,8 +315,8 @@ FormatCreator:
 > (`inspection/list.rs`) — now call the shared `formats::common::normalize_entry_name`
 > helper to replace `\` with `/` before constructing a `PathBuf`, so extract, list, and
 > verify agree on traversal detection. Such entries are now correctly rejected with
-> `ArchiveError::PathTraversal`. ZIP is unaffected (the `zip` crate resolves Windows-style
-> paths internally via `enclosed_name`); TAR is intentionally left un-normalized because `\`
+> `ArchiveError::PathTraversal`. ZIP is unaffected (exarch's own entry-name splitter resolves
+> Windows-style paths); TAR is intentionally left un-normalized because `\`
 > is a legal Unix filename character in TAR archives.
 
 ## 6. Edge Cases and Error Handling

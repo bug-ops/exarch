@@ -25,6 +25,7 @@ use std::process::Stdio;
 use exarch_core::ArchiveError;
 use exarch_core::IssueCategory;
 use exarch_core::SecurityConfig;
+use exarch_core::extract_archive;
 use exarch_core::list_archive;
 use exarch_core::verify_archive;
 use tempfile::TempDir;
@@ -46,11 +47,7 @@ fn options(method: CompressionMethod) -> SimpleFileOptions {
 fn seekable(method: CompressionMethod, large: bool) -> Vec<u8> {
     let mut zip = ZipWriter::new(Cursor::new(Vec::new()));
     let options = options(method).large_file(large);
-    // The `zip` writer gives ZIP64 directories local sizes that its own
-    // header check rejects, so they stay out of the ZIP64 case.
-    if !large {
-        zip.add_directory("dir/", options).unwrap();
-    }
+    zip.add_directory("dir/", options).unwrap();
     zip.start_file("dir/a.txt", options).unwrap();
     zip.write_all(&b"hello world ".repeat(500)).unwrap();
     zip.start_file("empty", options).unwrap();
@@ -154,6 +151,139 @@ fn assert_no_structural_finding(path: &Path, label: &str) {
         .filter(|i| STRUCTURAL.contains(&i.category))
         .collect();
     assert!(findings.is_empty(), "{label}: {findings:?}");
+}
+
+const HARMLESS: &[u8] = b"harmless\n";
+const HARMLESS_CRC: u32 = 0x3024_c2ee;
+const DATA_LEN: u32 = 9;
+
+fn central_record(name: &[u8], mode: u32, local_offset: u32) -> Vec<u8> {
+    let mut record = Vec::new();
+    record.extend(0x0201_4B50u32.to_le_bytes());
+    record.extend(0x0314u16.to_le_bytes());
+    record.extend(20u16.to_le_bytes());
+    record.extend(0x800u16.to_le_bytes());
+    record.extend([0u8; 4]);
+    record.extend(0x21u16.to_le_bytes());
+    record.extend(HARMLESS_CRC.to_le_bytes());
+    record.extend(DATA_LEN.to_le_bytes());
+    record.extend(DATA_LEN.to_le_bytes());
+    record.extend(u16::try_from(name.len()).unwrap().to_le_bytes());
+    record.extend([0u8; 8]);
+    record.extend((mode << 16).to_le_bytes());
+    record.extend(local_offset.to_le_bytes());
+    record.extend(name);
+    record
+}
+
+/// A prefixed archive whose real directory is preceded by a complete decoy
+/// directory naming the same entry differently. Readers that take the first
+/// central record at or after the end record's offset (`zip` up to 9.0.5)
+/// parse the decoy; the `zip` 9.1.0 locator parses the real one.
+fn decoy_directory_archive(decoy_mode: u32) -> Vec<u8> {
+    const PREFIX: usize = 200;
+    assert_eq!(HARMLESS.len(), DATA_LEN as usize);
+    let mut local = Vec::new();
+    local.extend(0x0403_4B50u32.to_le_bytes());
+    local.extend(20u16.to_le_bytes());
+    local.extend(0x800u16.to_le_bytes());
+    local.extend([0u8; 4]);
+    local.extend(0x21u16.to_le_bytes());
+    local.extend(HARMLESS_CRC.to_le_bytes());
+    local.extend(DATA_LEN.to_le_bytes());
+    local.extend(DATA_LEN.to_le_bytes());
+    local.extend(10u16.to_le_bytes());
+    local.extend(0u16.to_le_bytes());
+    local.extend(b"readme.txt");
+    local.extend(HARMLESS);
+
+    let decoy_len = central_record(b"evil.txt", 0, 0).len();
+    let end_record_offset = u32::try_from(local.len() + decoy_len).unwrap();
+    let archive_offset = PREFIX + local.len() - end_record_offset as usize;
+    let decoy = central_record(
+        b"evil.txt",
+        decoy_mode,
+        u32::try_from(PREFIX - archive_offset).unwrap(),
+    );
+    let real = central_record(b"readme.txt", 0o100_644, 0);
+
+    let mut bytes = vec![b'S'; PREFIX];
+    bytes.extend(local);
+    bytes.extend(decoy);
+    bytes.extend(&real);
+    bytes.extend(0x0605_4B50u32.to_le_bytes());
+    bytes.extend([0u8; 4]);
+    bytes.extend(1u16.to_le_bytes());
+    bytes.extend(1u16.to_le_bytes());
+    bytes.extend(u32::try_from(real.len()).unwrap().to_le_bytes());
+    bytes.extend(end_record_offset.to_le_bytes());
+    bytes.extend(0u16.to_le_bytes());
+    bytes
+}
+
+#[test]
+fn decoy_central_directory_before_a_prefixed_directory_is_reported() {
+    let dir = TempDir::new().unwrap();
+    for (label, mode) in [("file", 0o100_644), ("symlink", 0o120_777)] {
+        let path = dir.path().join(format!("decoy-{label}.zip"));
+        std::fs::write(&path, decoy_directory_archive(mode)).unwrap();
+
+        let report = verify_archive(&path, &SecurityConfig::default()).unwrap();
+        assert!(
+            report
+                .issues()
+                .iter()
+                .any(|i| i.category == IssueCategory::HiddenEntry),
+            "{label}: {:?}",
+            report.issues()
+        );
+
+        let dest = dir.path().join(format!("out-{label}"));
+        std::fs::create_dir(&dest).unwrap();
+        assert!(
+            matches!(
+                extract_archive(&path, &dest, &SecurityConfig::default()),
+                Err(ArchiveError::SecurityViolation { .. } | ArchiveError::ZipInconsistency { .. })
+            ),
+            "{label}"
+        );
+    }
+}
+
+#[test]
+fn zip64_directory_entry_extracts_under_enforce() {
+    let dir = TempDir::new().unwrap();
+    let archive = dir.path().join("zip64.zip");
+    std::fs::write(&archive, seekable(CompressionMethod::Deflated, true)).unwrap();
+    let dest = dir.path().join("out");
+    std::fs::create_dir(&dest).unwrap();
+
+    extract_archive(&archive, &dest, &SecurityConfig::default()).unwrap();
+
+    assert!(dest.join("dir").is_dir());
+    assert_eq!(std::fs::read(dest.join("dir/a.txt")).unwrap().len(), 6000);
+}
+
+#[test]
+fn zip64_directory_with_placeholder_local_sizes_is_reported() {
+    let mut bytes = seekable(CompressionMethod::Deflated, true);
+    // Local header compressed-size field, as zip 9.0.5 wrote it for ZIP64
+    // directories.
+    bytes[18..22].copy_from_slice(&1u32.to_le_bytes());
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("placeholder.zip");
+    std::fs::write(&path, bytes).unwrap();
+
+    let report = verify_archive(&path, &SecurityConfig::default()).unwrap();
+
+    assert!(
+        report
+            .issues()
+            .iter()
+            .any(|i| i.category == IssueCategory::HeaderMismatch),
+        "{:?}",
+        report.issues()
+    );
 }
 
 #[test]

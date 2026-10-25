@@ -25,6 +25,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `zip` 9.1.0: ZIP creation reuses one DEFLATE compressor; 500 x 1 KB files allocate ~1 MB instead of ~207 MB (#50, #PR)
+- The documented ZIP64-directory consistency limitation now applies only to archives written by the `zip` crate before 9.1.0 (#667, #PR)
+- **BREAKING:** On Windows, ZIP `extract` and `list` reject an entry with `:` in a path component (`dir\c:x`) as `SecurityViolation` instead of treating it as a drive prefix. (#PR)
+- ZIP structure checks report a central directory record between a prefixed archive's end-record directory offset and its directory, which `zip` 9.1.0 no longer reads. (#PR)
+- ZIP entry names are split by exarch instead of `enclosed_name`; `exarch-core` now depends on `typed-path` directly. (#PR)
 - **BREAKING:** `integrity_status()` returns the new `IntegrityStatus` with an `INCOMPLETE` value (#670).
 - **BREAKING:** `ArchiveFormat::verify` takes `&VerificationOptions`; `IssueCategory` gains two variants (#670).
 - **BREAKING:** Reports may carry archive-level issues that do not count as suspicious entries (#670).

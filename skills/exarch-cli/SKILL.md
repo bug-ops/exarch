@@ -105,7 +105,7 @@ Key flags (all optional):
 | `--allowed-extensions <EXT>` | all allowed | Restrict extraction to matching extensions. Repeatable or comma-separated (`txt,pdf`); leading dot optional, case-insensitive. |
 | `--allow-symlinks` | off | Allow symlinks that resolve within the extraction directory. |
 | `--allow-hardlinks` | off | Allow hardlinks that resolve within the extraction directory. |
-| `--allow-absolute-paths` | off | Allow archive entries with absolute paths. For ZIP the leading root or drive prefix is stripped, so the entry lands under the destination (`/tmp/x` extracts to `<dest>/tmp/x`). |
+| `--allow-absolute-paths` | off | Allow archive entries with absolute paths. For ZIP the leading root and any drive, UNC, verbatim (`\\?\`) or device (`\\.\`) prefix is stripped, so the entry lands under the destination (`/tmp/x` extracts to `<dest>/tmp/x`). |
 | `--allow-world-writable` | off | Allow files with world-writable (mode `0o002`) permission bits. |
 | `--allow-solid-archives` | off | Allow solid 7z archives (see Security model below). |
 | `--parallel-decode-memory <SIZE\|off>` | 128M | 7z only. Memory for decoding independent LZMA2 runs ahead on worker threads (K, M, G, T suffixes); `off` decodes on one thread; `0` exits 2 ("greater than zero"). |
@@ -303,10 +303,10 @@ false positive: pass `--zip-consistency ignore` for archives from a trusted prod
 For a compressed entry (deflate, bzip2, zstd) it is detected only with `--check-integrity`,
 which decodes the entry to find where its stream ends (`"Hidden Entry"` on that entry, exit `1`; not raised under `--zip-consistency ignore`; a tail that cannot be decided counts as an unverified item with the reason `descriptor_tail`;
 plain `verify` passes it, verified live with a crafted deflate archive). Not covered: central
-directory signatures inside the stub of a file that does not start with `PK`, and other streaming-reader layouts tracked in #686. A central or end record signature behind the last entry is not reported. Pre-ZIP64 archives
+directory signatures inside the stub of a file that does not start with `PK`, and other streaming-reader layouts tracked in #686. A central or end record signature behind the last entry is not reported, except in a prefixed archive, where the stretch from the end record's directory offset to the actual directory is searched (a decoy directory that readers up to `zip` 9.0.5 would take is reported as a stray central or end record); a decoy inside the declared data range of the last entry is not scanned. Pre-ZIP64 archives
 with more than 65535 entries (a wrapped end-record count) and archives with orphaned local headers
 or a central directory signature in a gap before an entry, left by in-place updaters, are rejected under `enforce`; so are ZIP64 directory entries written by the
-Rust `zip` crate, whose local sizes its own check rejects (use `--zip-consistency ignore`). With
+Rust `zip` crate before 9.1.0, whose local sizes its own check rejects (use `--zip-consistency ignore`). With
 duplicate names, local headers are not compared with the central directory.
 
 `verify`, `list` and `extract` reject a ZIP entry whose compression method is not Stored, Deflate,

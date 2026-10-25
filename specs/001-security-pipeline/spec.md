@@ -213,7 +213,7 @@ THEN the written file has those bits cleared; ValidatedEntry.mode reflects the s
 > `formats::common::normalize_entry_name` helper is the single normalization point; it is
 > applied by the 7z handler in the pre-validation loop, the extraction callback, and the
 > list/verify path (see [[002-format-handlers/spec]] for the format-level fix). ZIP is
-> unaffected (the `zip` crate handles Windows-style paths internally via `enclosed_name`);
+> unaffected (exarch's own entry-name splitter handles Windows-style paths);
 > TAR is intentionally left un-normalized because `\` is a legal Unix filename character in
 > TAR archives.
 

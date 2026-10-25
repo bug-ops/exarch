@@ -434,7 +434,10 @@ An archive whose declared compressed sizes exceed the archive length is not repo
 
 For `extract`, when some files were already written before a mid-archive failure, `error` carries
 a structured `error.partial_report` object (`files_extracted`, `directories_created`,
-`symlinks_created`, `bytes_written`, `files_skipped`, `warnings`). Verified live against a
+`symlinks_created`, `bytes_written`, `files_skipped`, `warnings`, `writes`). `writes` is
+`"kept"` when the extracted items remain in the destination and `"rolled_back"` under `--atomic`
+(including `--atomic --force`), where the partial extraction is discarded and the destination is
+left unchanged; the counts then describe what was discarded. Verified live against a
 three-entry archive where the first entry extracts, the second is skipped for a disallowed
 extension (via `--allowed-extensions`), and the third is a symlink rejected by the (default-off)
 `--allow-symlinks` check. The same progress counts, skip count, and warnings also appear as free
@@ -525,7 +528,8 @@ rejected because `--allow-symlinks` was not passed):
       "files_skipped": 1,
       "warnings": [
         "skipped 1 entry with disallowed extension"
-      ]
+      ],
+      "writes": "kept"
     }
   }
 }

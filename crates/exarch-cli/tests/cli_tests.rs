@@ -4527,6 +4527,119 @@ fn test_sevenz_unix_symlink_escape_is_blocked() {
         .code(2);
 }
 
+/// A 7z archive with a file followed by a symlink whose target escapes the
+/// destination, so extraction stops with a partial report after the file.
+#[cfg(unix)]
+fn write_sevenz_file_then_escaping_symlink(archive: &std::path::Path) {
+    write_sevenz(
+        archive,
+        &[
+            ("a.txt", b"hi", SEVENZ_S_IFREG | 0o644),
+            ("link", b"../../etc/passwd", SEVENZ_S_IFLNK | 0o777),
+        ],
+        false,
+    );
+}
+
+/// `--atomic` rolls the destination back, so the failure must not claim items
+/// were written to disk.
+#[cfg(unix)]
+#[test]
+fn test_extract_atomic_partial_failure_reports_destination_unchanged() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("escape.7z");
+    write_sevenz_file_then_escaping_symlink(&archive);
+    let out = temp.path().join("out");
+
+    exarch_cmd()
+        .arg("extract")
+        .arg("--allow-symlinks")
+        .arg("--atomic")
+        .arg(&archive)
+        .arg(&out)
+        .assert()
+        .code(1)
+        .stderr(
+            predicate::str::contains("Symlink escape blocked")
+                .and(predicate::str::contains("destination was left unchanged"))
+                .and(predicate::str::contains("written to disk").not()),
+        );
+    assert!(!out.exists());
+}
+
+/// `--atomic --force` over an existing destination keeps its old content and
+/// makes no "written to disk" claim.
+#[cfg(unix)]
+#[test]
+fn test_extract_atomic_force_partial_failure_keeps_old_destination() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("escape.7z");
+    write_sevenz_file_then_escaping_symlink(&archive);
+    let out = temp.path().join("out");
+    std::fs::create_dir(&out).expect("create dest");
+    std::fs::write(out.join("old.txt"), b"old").expect("write old");
+
+    exarch_cmd()
+        .arg("extract")
+        .arg("--allow-symlinks")
+        .arg("--atomic")
+        .arg("--force")
+        .arg(&archive)
+        .arg(&out)
+        .assert()
+        .code(1)
+        .stderr(
+            predicate::str::contains("destination was left unchanged")
+                .and(predicate::str::contains("written to disk").not()),
+        );
+    assert_eq!(std::fs::read(out.join("old.txt")).expect("old"), b"old");
+    assert!(!out.join("a.txt").exists());
+}
+
+/// `extract --json` marks a partial report `rolled_back` under `--atomic` and
+/// `kept` otherwise.
+#[cfg(unix)]
+#[test]
+fn test_extract_partial_report_writes_field_in_json() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("escape.7z");
+    write_sevenz_file_then_escaping_symlink(&archive);
+
+    let run = |out: &std::path::Path, atomic: bool| -> serde_json::Value {
+        let mut cmd = exarch_cmd();
+        cmd.arg("extract").arg("--json").arg("--allow-symlinks");
+        if atomic {
+            cmd.arg("--atomic");
+        }
+        let output = cmd
+            .arg(&archive)
+            .arg(out)
+            .assert()
+            .code(1)
+            .get_output()
+            .stdout
+            .clone();
+        serde_json::from_slice(&output).expect("valid JSON output")
+    };
+
+    let atomic_out = temp.path().join("atomic");
+    let json = run(&atomic_out, true);
+    assert_eq!(json["error"]["partial_report"]["writes"], "rolled_back");
+    assert!(!atomic_out.exists());
+
+    let kept_out = temp.path().join("kept");
+    let json = run(&kept_out, false);
+    assert_eq!(json["error"]["partial_report"]["writes"], "kept");
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .expect("message")
+            .contains("written to disk"),
+        "{json}"
+    );
+    assert!(kept_out.join("a.txt").exists());
+}
+
 /// A 7z link whose data fails its checksum fails extraction in the target read,
 /// not in the CLI's listing pass, which leaves 7z targets undecoded.
 #[cfg(unix)]

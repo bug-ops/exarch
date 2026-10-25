@@ -1,5 +1,7 @@
 """Integration tests for extract_archive function."""
 
+import zipfile
+
 import pytest
 
 pytest.importorskip("exarch")
@@ -47,3 +49,15 @@ class TestExtractArchive:
 
         report = extract_archive(sample_tar_gz, output, config)
         assert report.files_extracted > 0
+
+
+def test_zip_empty_entry_name_raises_security_violation_error(temp_dir):
+    """An empty ZIP entry name is a security violation, not an invalid archive."""
+    archive = temp_dir / "empty-name.zip"
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_STORED) as zf:
+        zf.writestr(zipfile.ZipInfo(""), b"payload")
+    output = temp_dir / "output"
+
+    with pytest.raises(SecurityViolationError, match="empty path"):
+        extract_archive(str(archive), str(output))
+    assert not any(output.iterdir())

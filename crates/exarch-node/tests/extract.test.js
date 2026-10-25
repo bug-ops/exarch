@@ -224,3 +224,37 @@ describe('extractArchiveSync', () => {
     assert.ok(report.filesExtracted >= 1);
   });
 });
+
+/** A stored ZIP with one empty-named, empty entry. */
+function emptyNameZip() {
+  const local = Buffer.alloc(30);
+  local.writeUInt32LE(0x04034b50, 0);
+  local.writeUInt16LE(20, 4);
+  const central = Buffer.alloc(46);
+  central.writeUInt32LE(0x02014b50, 0);
+  central.writeUInt16LE(20, 4);
+  central.writeUInt16LE(20, 6);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(1, 8);
+  end.writeUInt16LE(1, 10);
+  end.writeUInt32LE(central.length, 12);
+  end.writeUInt32LE(local.length, 16);
+  return Buffer.concat([local, central, end]);
+}
+
+describe('zip empty entry name', () => {
+  it('zip empty entry name rejects with SECURITY_VIOLATION', async () => {
+    const tempDir = createTempDir();
+    try {
+      const archivePath = path.join(tempDir, 'empty-name.zip');
+      const outputDir = path.join(tempDir, 'output');
+      fs.writeFileSync(archivePath, emptyNameZip());
+
+      await assert.rejects(extractArchive(archivePath, outputDir), /SECURITY_VIOLATION/);
+      assert.deepStrictEqual(fs.readdirSync(outputDir), []);
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+});

@@ -84,6 +84,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **BREAKING:** 7z `extract` and `verify` refuse an entry whose Unix mode is a symlink (`S_IFLNK`) as `SecurityViolation`, regardless of `allow_symlinks`; follow-up #714 (#711, #717).
+- **BREAKING:** `LinkTarget` gains a `non_exhaustive` `Unread` variant; 7z `list` reports it for link entries whose target is not read (#711, #717).
+- 7z `extract` warns once with the number of skipped anti-items and `verify` reports an informational finding; follow-up #716 (#713, #717).
+- **BREAKING:** TAR `list` and `verify` fail on an entry with an empty name, as `extract` does (#712, #717).
+- **BREAKING:** ZIP `extract`, `list` and `verify` reject an empty entry name as `SecurityViolation` (`SECURITY_VIOLATION`) instead of `InvalidArchive` (#712, #717).
 - 7z `extract`, `list` and `verify` classify entries with one shared classifier: a reparse-point entry is refused before any write, and 7z anti-items are skipped by all three instead of being created or truncated by `extract` (unlike `7z x`, which deletes them) (#707, #708, #710).
 - **BREAKING:** 7z `extract` of a reparse-point entry fails with `SecurityViolation` instead of `InvalidArchive` (Python `SecurityViolationError` instead of `InvalidArchiveError`) (#708, #710).
 - **BREAKING:** 7z `list` and `verify` fail with `SecurityViolation` on an entry with an empty name, as `extract` already did; `verify` no longer reports it as a FAIL issue (#708, #710).

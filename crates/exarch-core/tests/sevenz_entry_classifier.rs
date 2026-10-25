@@ -10,6 +10,7 @@ use std::path::PathBuf;
 
 use exarch_core::ArchiveError;
 use exarch_core::ExtractionOptions;
+use exarch_core::IssueSeverity;
 use exarch_core::ProgressCallback;
 use exarch_core::SecurityConfig;
 use exarch_core::VerificationStatus;
@@ -205,6 +206,137 @@ fn archive_of_only_anti_items_extracts_nothing() {
 
     assert_eq!(report.files_extracted, 0);
     assert!(dir_names(&out).is_empty());
+}
+
+#[test]
+fn extract_warns_once_with_the_number_of_skipped_anti_items() {
+    let dir = TempDir::new().unwrap();
+    let archive = write_archive(
+        &dir,
+        vec![
+            file("a.txt", b"hi"),
+            anti_item("x"),
+            anti_directory("old/"),
+            anti_item("y"),
+        ],
+    );
+    let out = TempDir::new().unwrap();
+
+    let report = extract_archive(&archive, out.path(), &SecurityConfig::default()).unwrap();
+
+    assert_eq!(
+        report.warnings,
+        ["skipped 3 7z anti-items (deletion markers are not applied)"]
+    );
+}
+
+#[test]
+fn extract_of_only_anti_items_still_warns() {
+    let dir = TempDir::new().unwrap();
+    let archive = write_archive(&dir, vec![anti_item("gone.txt")]);
+    let out = TempDir::new().unwrap();
+
+    let report = extract_archive(&archive, out.path(), &SecurityConfig::default()).unwrap();
+
+    assert_eq!(
+        report.warnings,
+        ["skipped 1 7z anti-item (deletion markers are not applied)"]
+    );
+}
+
+#[test]
+fn archive_without_anti_items_has_no_warning_or_finding() {
+    let dir = TempDir::new().unwrap();
+    let archive = write_archive(&dir, vec![file("a.txt", b"hi")]);
+    let out = TempDir::new().unwrap();
+
+    let extracted = extract_archive(&archive, out.path(), &SecurityConfig::default()).unwrap();
+    let verified = verify_archive(&archive, &SecurityConfig::default()).unwrap();
+
+    assert!(extracted.warnings.is_empty());
+    assert!(verified.issues().is_empty());
+}
+
+#[test]
+fn verify_reports_skipped_anti_items_as_info_and_still_passes() {
+    let dir = TempDir::new().unwrap();
+    let archive = write_archive(
+        &dir,
+        vec![file("a.txt", b"hi"), anti_item("x"), anti_item("y")],
+    );
+
+    let report = verify_archive(&archive, &SecurityConfig::default()).unwrap();
+
+    assert_eq!(report.status(), VerificationStatus::Pass);
+    let [issue] = report.issues() else {
+        panic!("expected one finding, got {:?}", report.issues());
+    };
+    assert_eq!(issue.severity, IssueSeverity::Info);
+    assert_eq!(
+        issue.message,
+        "2 7z anti-items skipped (deletion markers are not applied)"
+    );
+}
+
+#[test]
+fn anti_item_warning_survives_a_failing_extract() {
+    let dir = TempDir::new().unwrap();
+    let archive = write_archive(
+        &dir,
+        vec![
+            file("a.txt", b"hi"),
+            file("b.txt", b"yo"),
+            anti_item("gone"),
+        ],
+    );
+    let out = TempDir::new().unwrap();
+    std::fs::create_dir(out.path().join("b.txt")).unwrap();
+    let options = ExtractionOptions::default().with_skip_duplicates(false);
+
+    let err =
+        extract_archive_with_options(&archive, out.path(), &SecurityConfig::default(), &options)
+            .unwrap_err();
+
+    let ArchiveError::PartialExtraction { report, .. } = err else {
+        panic!("expected a partial extraction, got {err}");
+    };
+    assert_eq!(
+        report.warnings,
+        ["skipped 1 7z anti-item (deletion markers are not applied)"]
+    );
+}
+
+#[test]
+fn list_reports_no_anti_item_and_lists_the_rest() {
+    let dir = TempDir::new().unwrap();
+    let archive = write_archive(&dir, vec![file("a.txt", b"hi"), anti_item("gone")]);
+
+    assert_eq!(listed_paths(&archive), ["a.txt"]);
+}
+
+#[test]
+fn verify_anti_item_info_does_not_mask_a_failing_issue() {
+    let dir = TempDir::new().unwrap();
+    let archive = write_archive(
+        &dir,
+        vec![
+            file("a.txt", b"hi"),
+            anti_item("gone"),
+            reparse_file("link"),
+        ],
+    );
+
+    let report = verify_archive(&archive, &SecurityConfig::default()).unwrap();
+
+    assert_eq!(report.status(), VerificationStatus::Fail);
+    assert!(
+        report
+            .issues()
+            .iter()
+            .any(|i| i.severity == IssueSeverity::Info && i.message.contains("anti-item")),
+        "{:?}",
+        report.issues()
+    );
 }
 
 #[derive(Default)]

@@ -133,6 +133,7 @@ use crate::security::validator::EntryValidator;
 use crate::security::validator::NodeKind;
 use crate::security::validator::ValidatedEntryType;
 use crate::security::validator::check_root_entry_is_directory;
+use crate::security::validator::require_non_empty_name;
 use crate::types::DestDir;
 use crate::types::EntryType;
 use crate::types::SafePath;
@@ -256,6 +257,7 @@ impl<R: Read> TarArchive<R> {
             .map_err(|e| ArchiveError::InvalidArchive(format!("invalid path: {e}")))?
             .into_owned();
 
+        require_non_empty_name(&path)?;
         check_root_entry_is_directory(
             &path,
             NodeKind::directory_if(effective_entry_type(entry) == tar::EntryType::Directory),

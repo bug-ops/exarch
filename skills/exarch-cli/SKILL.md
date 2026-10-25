@@ -326,7 +326,10 @@ commands with the same message and exit `1`. A 7z anti-item (a "delete this path
 by `extract`, `list` and `verify` without any path check, whatever its name (`.`, `../evil`, `...`),
 and never touches an existing file; unlike `7z x`, exarch never applies it as a deletion. A 7z entry
 with an empty name is rejected by all three commands with `empty path not allowed` (exit `1`; for
-`verify` a hard error, not a report entry).
+`verify` a hard error, not a report entry). TAR and ZIP follow the same rule: an entry whose name is
+empty (after any PAX or GNU long-name resolution for TAR) fails `list`, `verify` and `extract` with
+`operation denied by security policy: empty path not allowed` and exit `1`, before anything is
+written.
 
 `verify`, `list` and `extract` reject a ZIP entry whose compression method is not Stored, Deflate,
 Bzip2 or Zstd (including `deflate64`) with `operation denied by security policy: unsupported
@@ -334,6 +337,15 @@ compression method: <name>` and exit `1`, before anything is written. Verified l
 relabelled as `deflate64`: all three commands exit `1`, and `extract` does not create the output
 directory. A 7z directory carrying the Windows reparse-point attribute is listed as a symlink, fails
 `verify` regardless of `--allow-symlinks`, and is rejected by `extract` before anything is written.
+A 7z entry carrying a Unix symlink mode (`0x8000` flag plus `S_IFLNK` in the high 16 bits of the
+attributes, as p7zip and `bsdtar --format 7zip` write them) is treated the same way: `verify` fails
+with `symlink target is not read from this archive format, so it cannot be validated`, and
+`extract` exits `1` with `symlink detected in 7z archive: <name> (Unix mode S_IFLNK)` before
+anything is written, even with `--allow-symlinks`, because exarch does not read 7z link targets. A
+7z archive that contains any such link is therefore refused as a whole. `extract` reports skipped 7z
+anti-items as one warning, `skipped N 7z anti-item(s) (deletion markers are not applied)` (in
+`data.warnings` with `--json`), and `verify` adds an `INFO` issue (category `Suspicious Path`) with
+the same count; the INFO does not change the `PASS` status, so `verify --strict` still exits `0`.
 
 ### `completion <SHELL>`
 
@@ -514,7 +526,7 @@ absolute entry name or any `..` component in the raw name is
 `PathTraversal` by default. A name is absolute on every platform when it starts with `/` or `\`
 (UNC included), or with a drive letter followed by a separator or nothing (`C:\x`, `C:/x`, `C:`);
 a drive glued to a name (`C:name`) is absolute only on Windows, and on Unix `a:notes.txt` is kept
-as is. An empty entry name is `InvalidArchive`, and a NUL byte in an entry name is
+as is. An empty entry name and a NUL byte in an entry name are both
 `SecurityViolation`. On Windows only, entries
 whose path has a reserved device-name component (`CON`, `NUL`, `COM1`, ... ASCII
 case-insensitive, with or without an extension, e.g. `NUL.tar.gz`) or a component containing

@@ -253,7 +253,7 @@ The library provides built-in protection against:
 | ZIP-family | `.jar`, `.war`, `.ear`, `.nar`, `.nbm`, `.apk`, `.aab`, `.ipa`, `.appx`, `.msix`, `.whl`, `.vsix`, `.xpi`, `.epub` | ✅ | — | ✅ | ✅ |
 | 7z | `.7z` | ✅ | — | ✅ | ✅ |
 
-**Note:** ZIP-family formats share the ZIP container but add extra structure (signing, checksum manifests, ordering rules) that exarch doesn't produce, so creation is rejected for those extensions. 7z creation is not yet supported. Solid and encrypted 7z archives are rejected for security reasons. Unix symlinks inside 7z archives are reported as regular files and not refused (known limitation).
+**Note:** ZIP-family formats share the ZIP container but add extra structure (signing, checksum manifests, ordering rules) that exarch doesn't produce, so creation is rejected for those extensions. 7z creation is not yet supported. Solid and encrypted 7z archives are rejected for security reasons. A 7z archive holding a symlink (a Windows reparse point or a Unix `S_IFLNK` mode) is refused as a whole, whatever the symlink policy, because 7z link targets are not read.
 
 ## Comparison with tarfile
 

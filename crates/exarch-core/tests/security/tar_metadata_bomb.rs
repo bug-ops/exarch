@@ -494,8 +494,8 @@ fn legitimate_pax_global_header_does_not_false_positive() {
 // output produced with no corresponding read from the underlying reader is
 // capped regardless of any caller-supplied quota.
 //
-// `verify_archive()`'s pre-listing pass (`listing_config_for_verify`)
-// legitimately relaxes `max_file_size` to `u64::MAX` so a metadata-only
+// `verify_archive()`'s pre-listing pass (`ListPass::VerifyPreflight`)
+// legitimately lifts the per-file size limit so a metadata-only
 // listing does not false-reject large files. An earlier version of this fix
 // threaded that same relaxed quota straight into the drain bound, so a
 // sparse entry with an astronomical `realsize` turned `verify` into an
@@ -1000,15 +1000,15 @@ fn list_and_verify_bound_total_drain_across_many_sparse_entries_even_with_relaxe
     // it early.
     //
     // This config relaxation is deliberately broader than what
-    // `listing_config_for_verify` (inspection/verify.rs) applies on its
-    // own — that helper only relaxes `max_file_size` to `u64::MAX`, not
+    // `ListPass::VerifyPreflight` (inspection/list.rs) applies on its
+    // own — it only lifts the per-file size limit, not
     // `max_total_size`/`max_file_count`, so `verify_archive` under its
     // *default* config would already reject a huge declared `realsize` via
     // ordinary total-size quota before ever reaching the cumulative
     // synthetic path. The manual relaxation below represents a caller who
     // has legitimately raised every quota limit (e.g. to inspect a
     // multi-terabyte archive), which is exactly the case
-    // `listing_config_for_verify` does *not* cover and where this budget is
+    // `ListPass::VerifyPreflight` does *not* cover and where this budget is
     // the only remaining defense.
     let bomb = many_sparse_bombs_tar(200, 1u64 << 40);
     let config = SecurityConfig::default()

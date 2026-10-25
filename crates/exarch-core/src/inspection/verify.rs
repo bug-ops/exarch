@@ -13,9 +13,9 @@ use crate::formats::ZipArchive;
 use crate::formats::detect::FormatFamily;
 use crate::formats::detect::detect_format;
 use crate::formats::traits::ArchiveFormat;
-use crate::inspection::integrity::ContentPolicy;
 use crate::inspection::integrity::IntegrityOutcome;
 use crate::inspection::integrity::IntegrityPass;
+use crate::inspection::list::ListPass;
 use crate::inspection::list::list_detected;
 use crate::inspection::manifest::ArchiveEntry;
 use crate::inspection::manifest::ArchiveManifest;
@@ -162,8 +162,8 @@ pub(crate) struct ListedForVerify {
     pub(crate) integrity: Option<IntegrityOutcome>,
 }
 
-/// Runs `list` under the policy `options` asks for, on the relaxed pre-flight
-/// config.
+/// Runs `list` as the verify pre-flight, decoding payloads when `options`
+/// asks for it.
 ///
 /// `list` is the only format-specific part of verification, so
 /// `verify_archive` and every `ArchiveFormat::verify` share the rest.
@@ -173,17 +173,16 @@ pub(crate) fn list_for_verify<F>(
     list: F,
 ) -> Result<ListedForVerify>
 where
-    F: FnOnce(&SecurityConfig<Validated>, &mut ContentPolicy<'_, '_>) -> Result<ArchiveManifest>,
+    F: FnOnce(&mut ListPass<'_, '_>) -> Result<ArchiveManifest>,
 {
-    let listing_config = listing_config_for_verify(config);
     match options.integrity {
         IntegrityCheck::Skip => Ok(ListedForVerify {
-            manifest: list(&listing_config, &mut ContentPolicy::Skip)?,
+            manifest: list(&mut ListPass::VerifyPreflight(None))?,
             integrity: None,
         }),
         IntegrityCheck::DecodeToEof(budget) => {
             let mut pass = IntegrityPass::new(config, budget);
-            let manifest = list(&listing_config, &mut ContentPolicy::Decode(&mut pass))?;
+            let manifest = list(&mut ListPass::VerifyPreflight(Some(&mut pass)))?;
             Ok(ListedForVerify {
                 manifest,
                 integrity: Some(pass.finish()),
@@ -200,7 +199,7 @@ pub(crate) fn verify_with<F>(
     list: F,
 ) -> Result<VerificationReport>
 where
-    F: FnOnce(&SecurityConfig<Validated>, &mut ContentPolicy<'_, '_>) -> Result<ArchiveManifest>,
+    F: FnOnce(&mut ListPass<'_, '_>) -> Result<ArchiveManifest>,
 {
     let listed = list_for_verify(config, options, list)?;
     verify_manifest(&listed.manifest, config, listed.integrity)
@@ -383,38 +382,9 @@ pub fn verify_archive_with_options<P: AsRef<Path>>(
         }
         FormatFamily::Tar(_) => {}
     }
-    verify_with(&validated_config, *options, |listing_config, policy| {
-        list_detected(archive_path, format, listing_config, policy)
+    verify_with(&validated_config, *options, |listing| {
+        list_detected(archive_path, format, &validated_config, listing)
     })
-}
-
-/// Returns a config variant for the pre-flight listing step that feeds
-/// `verify_manifest`, with `max_file_size` relaxed to unlimited and the
-/// list-level NUL-byte/link-target checks relaxed to defer to
-/// `verify_entry`'s own equivalent checks.
-///
-/// `verify` is a read-only, report-based operation: an oversized entry,
-/// a NUL byte in an entry path, or an empty/NUL/missing symlink or hardlink
-/// target are all meant to surface as a `VerificationIssue` from
-/// `verify_entry` (which re-checks the real `config` against every manifest
-/// entry via `SafePath`/`SafeSymlink` validation), not abort the listing step
-/// before any report exists. `max_file_count` and `max_total_size` are left
-/// untouched, matching prior behavior. See
-/// `SecurityConfig::relaxed_for_verify_preflight`'s field doc for exactly
-/// which `list_archive` checks this skips.
-///
-/// Generic over the validation typestate so it serves both callers: the
-/// top-level [`verify_archive`] (still `Unvalidated`, feeds into
-/// [`list_archive`] which validates internally) and the
-/// [`ArchiveFormat`](crate::formats::traits::ArchiveFormat) trait's `verify()`
-/// implementations (already `Validated`, feeds into `list()` which requires
-/// it). Delegates to `SecurityConfig::as_relaxed_for_verify_preflight`, whose
-/// docs justify why re-deriving a `Validated` result without calling
-/// `validate()` again is sound.
-pub(crate) fn listing_config_for_verify<State>(
-    config: &SecurityConfig<State>,
-) -> SecurityConfig<State> {
-    config.as_relaxed_for_verify_preflight()
 }
 
 struct EntryOutcome {
@@ -1194,7 +1164,7 @@ mod tests {
     // Regression test: verify_archive() must report an oversized entry as a
     // graceful VerificationIssue (Fail status with an itemized report), not
     // abort with a bare error during its internal pre-flight list_archive()
-    // call. Before listing_config_for_verify() existed, list_archive()
+    // call. Before the pre-flight lifted the per-file limit, list_archive()
     // enforcing max_file_size (#396) made this scenario an Err with no
     // report, bypassing verify_entry's existing FileSize handling.
     #[test]
@@ -1235,38 +1205,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_listing_config_for_verify_relaxes_max_file_size_and_preflight_checks() {
-        let config = SecurityConfig::default()
-            .with_max_file_size(1000)
-            .with_max_total_size(2000)
-            .with_max_file_count(3);
-        let listing_config = listing_config_for_verify(&config);
-
-        assert_eq!(listing_config.max_file_size, u64::MAX);
-        assert_eq!(listing_config.max_total_size, config.max_total_size);
-        assert_eq!(listing_config.max_file_count, config.max_file_count);
-        assert!(
-            listing_config.relaxed_for_verify_preflight,
-            "verify's pre-flight listing pass must set relaxed_for_verify_preflight so \
-             NUL-byte paths and empty/NUL/missing link targets defer to verify_entry's own \
-             graceful checks instead of aborting list_archive"
-        );
-    }
-
-    // Regression test for #430 follow-up (round 3): a NUL-byte entry path
-    // must surface as a graceful VerificationIssue, not abort verify_archive
-    // with a hard `Err`, matching verify's behavior before the list-level
-    // NUL-byte check (this PR) existed. An earlier version of this test
-    // pinned the opposite (hard-error) behavior, which a code-review pass
-    // identified as a real regression: verify_entry's own path validation
-    // already had a working graceful NUL-byte check via SafePath, and the
-    // list-level check was aborting before that mechanism ever ran.
-    // `listing_config_for_verify` now also relaxes the list-level NUL-byte
-    // check (see `SecurityConfig::relaxed_for_verify_preflight`), restoring
-    // the original graceful-report behavior — this test was rewritten (not
-    // just renamed) to assert that restored behavior instead of the
-    // hard-error behavior it previously pinned.
+    // #430: a NUL-byte entry path must surface as a VerificationIssue, not a
+    // hard `Err` from the verify pre-flight listing.
     #[test]
     fn test_verify_archive_nul_byte_path_reports_issue_not_error() {
         let mut temp_file = NamedTempFile::with_suffix(".tar").unwrap();
@@ -1346,7 +1286,7 @@ mod tests {
     // VerificationIssue from verify_archive, not the InvalidArchive hard
     // error that bare `list_archive` now raises (see
     // `test_list_tar_hardlink_missing_target_rejected` in
-    // `inspection::list::tests`). `relaxed_for_verify_preflight` lets the
+    // `inspection::list::tests`). `ListPass::VerifyPreflight` lets the
     // missing target through the pre-flight listing pass as `None`;
     // `verify_entry` reports it as a SecurityPolicy issue.
     #[test]

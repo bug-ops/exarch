@@ -233,6 +233,48 @@ fn classify_name_prefix(raw: &str) -> NamePrefix {
     }
 }
 
+/// A parsed ZIP entry name: either a clean path, or a name that extraction
+/// rejects but `verify`'s listing pre-flight keeps so `verify_entry` can
+/// report it.
+pub(crate) enum ZipEntryName {
+    /// The name passed the policy; the path is safe to join onto the
+    /// destination.
+    Resolved(PathBuf),
+    /// The name violates the policy: extraction fails with `error`, while the
+    /// verify pre-flight lists it under `path` so the report can flag it.
+    Deferred { path: PathBuf, error: ArchiveError },
+}
+
+impl ZipEntryName {
+    /// Extraction view: a deferred name is an error.
+    pub(crate) fn into_strict(self) -> Result<PathBuf> {
+        match self {
+            Self::Resolved(path) => Ok(path),
+            Self::Deferred { error, .. } => Err(error),
+        }
+    }
+
+    /// Verify pre-flight view: a deferred name keeps its raw path.
+    pub(crate) fn into_preflight_path(self) -> PathBuf {
+        match self {
+            Self::Resolved(path) | Self::Deferred { path, .. } => path,
+        }
+    }
+}
+
+/// Applies the entry-path policy shared by ZIP extraction and listing,
+/// rejecting every name the policy refuses.
+///
+/// Besides the errors listed on [`parse_zip_entry_name`], returns
+/// `SecurityViolation` for a NUL byte and, on Windows, for a `:` in any
+/// component.
+pub(crate) fn resolve_zip_entry_path(
+    raw: &str,
+    config: &SecurityConfig<Validated>,
+) -> Result<PathBuf> {
+    parse_zip_entry_name(raw, config)?.into_strict()
+}
+
 /// Applies the entry-path policy shared by ZIP extraction and listing.
 ///
 /// `raw` is the entry name as stored. The name is split on both `/` and `\`
@@ -242,9 +284,6 @@ fn classify_name_prefix(raw: &str) -> NamePrefix {
 ///
 /// # Errors
 ///
-/// - `SecurityViolation` for a NUL byte (unless the verify preflight config is
-///   relaxed, in which case the raw name is returned for verify to report), and
-///   on Windows for a `:` in any component (relaxed: the raw name is returned)
 /// - `InvalidArchive` for an empty name
 /// - `PathTraversal` for an absolute name without `allow_absolute_paths`, for
 ///   any `..` component (in the raw name or left after prefix stripping), and
@@ -258,20 +297,26 @@ fn classify_name_prefix(raw: &str) -> NamePrefix {
 /// separator or nothing (`C:\x`, `C:/x`, `C:`), on every platform. A drive
 /// glued to a name (`C:x`) is absolute only on Windows; elsewhere it is an
 /// ordinary file name and is kept as stored.
-pub(crate) fn resolve_zip_entry_path(
+///
+/// Two outcomes are [`ZipEntryName::Deferred`] rather than errors: a NUL byte
+/// (`SecurityViolation`, checked first so it wins over every other check;
+/// the path is the raw name), and on Windows a `:` in any component (stream
+/// separator `SecurityViolation`; the path is the name left after prefix
+/// stripping).
+pub(crate) fn parse_zip_entry_name(
     raw: &str,
     config: &SecurityConfig<Validated>,
-) -> Result<PathBuf> {
+) -> Result<ZipEntryName> {
     let traversal = || ArchiveError::PathTraversal {
         path: PathBuf::from(raw),
     };
 
     if raw.contains('\0') {
-        if config.relaxed_for_verify_preflight {
-            return Ok(PathBuf::from(raw));
-        }
-        return Err(ArchiveError::SecurityViolation {
-            reason: format!("path contains null bytes: {}", raw.escape_debug()),
+        return Ok(ZipEntryName::Deferred {
+            path: PathBuf::from(raw),
+            error: ArchiveError::SecurityViolation {
+                reason: format!("path contains null bytes: {}", raw.escape_debug()),
+            },
         });
     }
 
@@ -303,19 +348,19 @@ pub(crate) fn resolve_zip_entry_path(
         if absolute {
             return Err(traversal());
         }
-        return Ok(PathBuf::from("."));
+        return Ok(ZipEntryName::Resolved(PathBuf::from(".")));
     }
     // On Windows, pushing `c:x` replaces the path built so far; other Windows
     // hazards are left to `SafePath`.
     if cfg!(windows)
         && let Some(component) = components.iter().find(|c| c.contains(':'))
     {
-        if config.relaxed_for_verify_preflight {
-            return Ok(PathBuf::from(rest));
-        }
-        return Err(stream_separator_error(component));
+        return Ok(ZipEntryName::Deferred {
+            path: PathBuf::from(rest),
+            error: stream_separator_error(component),
+        });
     }
-    Ok(components.into_iter().collect())
+    Ok(ZipEntryName::Resolved(components.into_iter().collect()))
 }
 
 /// Rejects an archive-root entry (`.`) that is not a no-op.
@@ -501,14 +546,14 @@ impl<R: Read + Seek> ZipArchive<R> {
     }
 
     /// Lists the entries under the structural policy, decoding payloads when
-    /// `policy` carries an integrity pass.
+    /// `listing` carries an integrity pass.
     pub(crate) fn list_with(
         &mut self,
         config: &SecurityConfig<Validated>,
-        policy: &mut crate::inspection::integrity::ContentPolicy<'_, '_>,
+        listing: &mut crate::inspection::list::ListPass<'_, '_>,
     ) -> Result<crate::inspection::ArchiveManifest> {
         self.check_structure(config)?;
-        crate::inspection::list::list_zip_reader(self, config, policy)
+        crate::inspection::list::list_zip_reader(self, config, listing)
     }
 
     fn check_structure(&self, config: &SecurityConfig<Validated>) -> Result<()> {
@@ -791,8 +836,8 @@ impl<R: Read + Seek> ArchiveFormat for ZipArchive<R> {
         &mut self,
         config: &SecurityConfig<Validated>,
     ) -> Result<crate::inspection::ArchiveManifest> {
-        use crate::inspection::integrity::ContentPolicy;
-        self.list_with(config, &mut ContentPolicy::Skip)
+        use crate::inspection::list::ListPass;
+        self.list_with(config, &mut ListPass::Strict)
     }
 
     fn verify(
@@ -806,8 +851,8 @@ impl<R: Read + Seek> ArchiveFormat for ZipArchive<R> {
         use crate::inspection::verify::verify_manifest_with_structure;
 
         self.check_count(config)?;
-        let listed = list_for_verify(config, *options, |listing_config, policy| {
-            list_zip_reader(self, listing_config, policy)
+        let listed = list_for_verify(config, *options, |listing| {
+            list_zip_reader(self, config, listing)
         })?;
         let (findings, omitted) = match config.zip_consistency {
             ZipConsistencyPolicy::Enforce => {
@@ -3142,12 +3187,20 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn test_resolve_entry_path_windows_colon_returned_raw_in_verify_preflight() {
-        let config = SecurityConfig::default()
-            .with_relaxed_for_verify_preflight()
-            .validate()
-            .unwrap();
-        let path = resolve_zip_entry_path("dir\\c:x", &config).unwrap();
+        let path = parse_zip_entry_name("dir\\c:x", &strict_config())
+            .unwrap()
+            .into_preflight_path();
         assert_eq!(path, PathBuf::from("dir\\c:x"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_resolve_entry_path_windows_colon_rejected_in_strict() {
+        let result = resolve_zip_entry_path("dir\\c:x", &strict_config());
+        assert_matches!(
+            result,
+            Err(ArchiveError::SecurityViolation { reason }) if reason == "path component contains ':': c:x"
+        );
     }
 
     #[test]
@@ -3200,11 +3253,33 @@ mod tests {
 
     #[test]
     fn test_resolve_zip_entry_path_nul_byte_passes_through_in_verify_preflight() {
-        let config = SecurityConfig::default()
-            .with_relaxed_for_verify_preflight()
-            .validate()
-            .unwrap();
-        let path = resolve_zip_entry_path("a\0b.txt", &config).unwrap();
+        let path = parse_zip_entry_name("a\0b.txt", &strict_config())
+            .unwrap()
+            .into_preflight_path();
         assert_eq!(path, PathBuf::from("a\0b.txt"));
+    }
+
+    #[test]
+    fn test_nul_byte_entry_is_reported_by_verify_and_rejected_by_extraction() {
+        let dir = TempDir::new().unwrap();
+        let archive_path = dir.path().join("nul.zip");
+        std::fs::write(&archive_path, create_raw_zip_entry("a\0b.txt", b"x")).unwrap();
+        let out = dir.path().join("out");
+        std::fs::create_dir(&out).unwrap();
+        let config = SecurityConfig::default();
+
+        let report = crate::verify_archive(&archive_path, &config).unwrap();
+        assert_eq!(report.status(), crate::VerificationStatus::Fail);
+        assert!(
+            report
+                .issues()
+                .iter()
+                .any(|i| i.message.contains("null bytes")),
+            "expected a null-byte issue, got: {:?}",
+            report.issues()
+        );
+
+        let result = crate::extract_archive(&archive_path, &out, &config);
+        assert_matches!(result, Err(ArchiveError::SecurityViolation { .. }));
     }
 }

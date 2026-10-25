@@ -221,7 +221,7 @@ fn measure_list_peak_bytes(bytes: &[u8], budget: u64) -> usize {
 
 /// As [`measure_list_peak_bytes`], but through `verify_archive` — the path
 /// C1 actually broke, since its internal pre-listing pass
-/// (`listing_config_for_verify`) relaxes `max_file_size` to `u64::MAX`.
+/// (`ListPass::VerifyPreflight`) lifts the per-file size limit.
 fn measure_verify_peak_bytes(bytes: &[u8], budget: u64) -> usize {
     let profiler = dhat::Profiler::builder().testing().build();
     {
@@ -464,7 +464,7 @@ fn tar_metadata_bomb_allocations_stay_bounded() {
     // C1 regression: a real GNU sparse entry declaring a `realsize` far
     // beyond its one-block physical backing, run through all three entry
     // points. `verify` is the path C1 actually broke (its internal
-    // `listing_config_for_verify` relaxes `max_file_size` to `u64::MAX`,
+    // `ListPass::VerifyPreflight` lifts the per-file size limit,
     // which used to flow straight into the drop-time drain bound) — heap
     // stays flat here regardless since the drain writes to `io::sink`, so
     // this is a complementary check to the wall-clock assertions in

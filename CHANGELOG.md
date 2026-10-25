@@ -79,6 +79,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 7z `extract` and `verify --check-integrity` decode LZMA2 runs on worker threads within a memory bound (#688).
 - **BREAKING:** ZIP `extract`, `list` and `verify` reject, under `Enforce`, a hidden local header or stray record signature in the declared range of a stored data-descriptor entry, after its first descriptor signature (#690).
 - **BREAKING:** ZIP `extract`, `list` and `verify` reject, under `Enforce`, an entry whose local or central `xl` extra field gives it another file type than its central attributes (`ZipInconsistency::XlTypeDivergence`) (#689).
+- The `verify` pre-flight listing mode is a `ListPass` type instead of a `SecurityConfig` flag, so extraction cannot receive relaxed ZIP path or size checks (#705).
 
 ### Fixed
 

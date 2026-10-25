@@ -418,7 +418,7 @@ impl LinkTarget {
 ///
 /// The target lives in the variant, so a regular file cannot carry one. It is
 /// [`LinkTarget::Missing`] or [`LinkTarget::Oversized`] only for entries
-/// produced by the relaxed listing that
+/// produced by the pre-flight listing that
 /// [`verify_archive`](crate::verify_archive) uses, where such a target must
 /// become a report issue instead of a listing error.
 ///

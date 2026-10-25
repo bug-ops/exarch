@@ -381,23 +381,6 @@ pub struct SecurityConfigFields {
     /// local headers, or with a central directory signature in a gap before an
     /// entry (left by in-place updaters), are rejected under `Enforce`.
     pub zip_consistency: ZipConsistencyPolicy,
-
-    /// Internal only — not part of the public builder API, and never set by
-    /// `SecurityConfig::default()`/`permissive()` construction paths that
-    /// external callers use.
-    ///
-    /// When `true`, `list_archive`'s entry-path NUL-byte check, symlink/
-    /// hardlink target NUL-byte/emptiness check, and missing-link-target
-    /// check are all skipped, instead of aborting the listing pass. Set only
-    /// by `inspection::verify::listing_config_for_verify` for
-    /// `verify_archive`'s internal pre-flight listing step, so a NUL-byte or
-    /// empty/missing link target reaches `verify_entry`'s own equivalent
-    /// checks (`SafePath::validate`, `SafeSymlink::validate`) and surfaces as
-    /// a graceful `VerificationIssue` in the report, matching `verify`'s
-    /// behavior before these list-level checks existed. Bare `list_archive`
-    /// always leaves this `false`, so `exarch list` still hard-aborts on
-    /// these conditions.
-    pub(crate) relaxed_for_verify_preflight: bool,
 }
 
 impl Default for SecurityConfigFields {
@@ -427,7 +410,6 @@ impl Default for SecurityConfigFields {
             max_decoder_memory: 256 * 1024 * 1024,     // 256 MiB
             parallel_decode: ParallelDecode::Bounded(ParallelDecode::DEFAULT_BYTES),
             zip_consistency: ZipConsistencyPolicy::Enforce,
-            relaxed_for_verify_preflight: false,
         }
     }
 }
@@ -1037,22 +1019,6 @@ impl SecurityConfig<Unvalidated> {
         self.fields.zip_consistency = policy;
         self
     }
-
-    /// Marks this config as the internal pre-flight listing pass inside
-    /// `verify_archive`. Not part of the public API — see
-    /// `relaxed_for_verify_preflight`'s field doc for what this relaxes.
-    ///
-    /// Production code builds this state via
-    /// `SecurityConfig::as_relaxed_for_verify_preflight` instead (it must
-    /// work on both typestates); this builder-style variant exists only so
-    /// `Unvalidated`-only test call sites don't need direct field writes.
-    #[cfg(test)]
-    #[must_use]
-    #[inline]
-    pub(crate) fn with_relaxed_for_verify_preflight(mut self) -> Self {
-        self.fields.relaxed_for_verify_preflight = true;
-        self
-    }
 }
 
 /// Read-only queries and crate-internal helpers available regardless of
@@ -1112,29 +1078,6 @@ impl<State> SecurityConfig<State> {
             return true;
         }
         extension.is_some_and(|ext| self.is_extension_allowed(ext))
-    }
-
-    /// Returns a clone with `max_file_size` relaxed to unlimited and
-    /// `relaxed_for_verify_preflight` set, preserving `State`.
-    ///
-    /// Crate-internal escape hatch backing
-    /// `inspection::verify::listing_config_for_verify`. Sound for both
-    /// typestates: it only ever *relaxes* two fields whose overridden values
-    /// (`u64::MAX`, `true`) can never fail
-    /// [`validate`](SecurityConfig::validate)'s checks, so a `Validated`
-    /// input yields a still-genuinely-valid `Validated` output without
-    /// re-running `validate()`. This must not be generalized into an
-    /// arbitrary-field mutator — that would reopen the exact hole
-    /// `DerefMut`'s state-gating exists to close.
-    #[must_use]
-    pub(crate) fn as_relaxed_for_verify_preflight(&self) -> Self {
-        let mut fields = self.fields.clone();
-        fields.max_file_size = u64::MAX;
-        fields.relaxed_for_verify_preflight = true;
-        Self {
-            fields,
-            _marker: PhantomData,
-        }
     }
 }
 

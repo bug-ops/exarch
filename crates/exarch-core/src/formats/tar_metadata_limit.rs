@@ -44,7 +44,7 @@
 //! `list`/`verify` never read entry content at all, so the drain is the
 //! *only* thing that consumes a legitimate entry's real bytes to reach the
 //! next header, no matter how large that entry is (`verify` in particular
-//! sets `max_file_size` to `u64::MAX` precisely so a metadata-only listing
+//! lifts the per-file size limit precisely so a metadata-only listing
 //! does not reject large files). A fixed cap on *total drained output* —
 //! however generous — therefore either (a) truncates real bytes of some
 //! legitimate large entry, misaligning the next header read and rejecting an

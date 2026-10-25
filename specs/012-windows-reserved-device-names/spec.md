@@ -161,7 +161,7 @@ Use EARS notation. Prefix with FR-NNN.
 | FR-002 | WHEN the extraction target platform is not Windows THE SYSTEM SHALL NOT apply reserved-device-name validation, since no equivalent reserved names exist on Unix/macOS filesystems and applying the check there would be a pure behavior regression with no security benefit | must |
 | FR-003 | WHEN a `SecurityConfig` is constructed via the builder, callers SHALL be able to explicitly opt out of reserved-device-name rejection (default: enabled/reject), analogous to how `with_banned_path_components` customizes the existing banned-component list | should |
 | FR-004 | WHEN validating a path component against the reserved-name set THE SYSTEM SHALL strip only a single trailing extension (text after the last `.`) before comparison, so that `CON.txt` and `CON` both match but `CONTACT.txt` (a superstring, not an exact reserved base name) does not falsely match | must |
-| FR-005 | WHEN a reserved-name violation occurs during `list_archive` or `verify_archive` preflight in relaxed mode (`relaxed_for_verify_preflight`, config.rs line 204) THE SYSTEM SHALL surface it as a graceful `VerificationIssue`, matching how other list-level security violations already degrade in that mode, rather than hard-aborting | should |
+| FR-005 | WHEN a reserved-name violation occurs during `list_archive` or `verify_archive` preflight in the verify pre-flight (`ListPass::VerifyPreflight`, `inspection/list.rs`) THE SYSTEM SHALL surface it as a graceful `VerificationIssue`, matching how other list-level security violations already degrade in that mode, rather than hard-aborting | should |
 | FR-006 | THE SYSTEM SHALL update `test_safe_path_windows_reserved_names` (`safe_path.rs` lines 723-736) to assert the defined reject/allow outcome for each case (bare name, name with extension, lowercase variant, intermediate path component, opt-out config) instead of only asserting the call does not panic | must |
 
 ## 4. Non-Functional Requirements
@@ -191,7 +191,7 @@ new persisted or transmitted entity is introduced.
 | Reserved name as an intermediate directory component, e.g. `CON/file.txt` | Rejected — validation must check every `Component::Normal`, not only the final one (FR-001) |
 | `SecurityConfig` built with the opt-out flag set (FR-003) | Entry allowed through on reserved-name grounds; all other validation steps (traversal, null bytes, depth, other banned components) still apply unchanged |
 | Same archive extracted on a non-Windows target | No reserved-name rejection occurs (FR-002); behavior is unchanged from today |
-| Reserved-name violation encountered during `list_archive`/`verify_archive` in relaxed preflight mode | Surfaced as a `VerificationIssue` in the report rather than a hard abort (FR-005), matching existing relaxed-mode behavior for other violations |
+| Reserved-name violation encountered during `list_archive`/`verify_archive` in the verify pre-flight (`ListPass::VerifyPreflight`) | Surfaced as a `VerificationIssue` in the report rather than a hard abort (FR-005), matching the pre-flight behavior for other violations |
 | Reserved name combined with a path-traversal or null-byte violation in the same entry | Existing validation order in `validate_with_context` (null bytes → absolute path → per-component loop) already runs earlier checks first; the reserved-name check is folded into the same per-component loop as `banned_path_components` and does not need new ordering rules |
 
 ## 7. Success Criteria

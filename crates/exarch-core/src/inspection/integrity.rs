@@ -449,23 +449,6 @@ fn corrupt_issue(
     issue
 }
 
-/// Where listing decodes payload bytes.
-pub enum ContentPolicy<'a, 'c> {
-    /// Metadata only: the public `list_archive` behavior.
-    Skip,
-    /// Decode payloads through the pass.
-    Decode(&'a mut IntegrityPass<'c>),
-}
-
-impl<'c> ContentPolicy<'_, 'c> {
-    pub fn pass(&mut self) -> Option<&mut IntegrityPass<'c>> {
-        match self {
-            Self::Skip => None,
-            Self::Decode(pass) => Some(pass),
-        }
-    }
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {

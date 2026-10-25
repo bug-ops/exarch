@@ -102,9 +102,37 @@ impl QuotaTracker {
         size: u64,
         config: &SecurityConfig<Validated>,
     ) -> Result<QuotaPermit> {
+        self.reserve_within(size, config.max_file_size, config)
+    }
+
+    /// Reserves quota capacity without enforcing the per-file size limit.
+    ///
+    /// For `verify`'s listing pre-flight only, which must see oversized
+    /// entries so `verify_entry` can report them. The file count and total
+    /// size limits still apply; extraction must use [`reserve`](Self::reserve).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file count or total size quota is exceeded or
+    /// integer overflow is detected.
+    pub(crate) fn reserve_without_file_limit(
+        &mut self,
+        size: u64,
+        config: &SecurityConfig<Validated>,
+    ) -> Result<QuotaPermit> {
+        self.reserve_within(size, u64::MAX, config)
+    }
+
+    #[inline]
+    fn reserve_within(
+        &mut self,
+        size: u64,
+        max_file_size: u64,
+        config: &SecurityConfig<Validated>,
+    ) -> Result<QuotaPermit> {
         // OPT-C003: Fast path when all quotas unlimited - skip checks, only
         // detect overflow
-        if config.max_file_size == u64::MAX
+        if max_file_size == u64::MAX
             && config.max_file_count == usize::MAX
             && config.max_total_size == u64::MAX
         {
@@ -125,7 +153,7 @@ impl QuotaTracker {
             return Ok(QuotaPermit(PhantomData));
         }
 
-        self.record_file_checked(size, config)?;
+        self.record_file_checked(size, max_file_size, config)?;
         Ok(QuotaPermit(PhantomData))
     }
 
@@ -134,13 +162,18 @@ impl QuotaTracker {
     /// This is the slow path called when quotas are actually enforced.
     /// Separated from the fast path to keep the hot path small and inlinable.
     #[inline(never)]
-    fn record_file_checked(&mut self, size: u64, config: &SecurityConfig<Validated>) -> Result<()> {
-        if size > config.max_file_size {
+    fn record_file_checked(
+        &mut self,
+        size: u64,
+        max_file_size: u64,
+        config: &SecurityConfig<Validated>,
+    ) -> Result<()> {
+        if size > max_file_size {
             core::hint::cold_path();
             return Err(ArchiveError::QuotaExceeded {
                 resource: crate::QuotaResource::FileSize {
                     size,
-                    max: config.max_file_size,
+                    max: max_file_size,
                 },
             });
         }
@@ -409,6 +442,83 @@ mod tests {
                 resource: crate::QuotaResource::IntegerOverflow
             }),
             "fast path should still detect overflow"
+        );
+    }
+
+    #[test]
+    fn test_reserve_without_file_limit_skips_only_file_size() {
+        let mut tracker = QuotaTracker::new();
+        let mut config = SecurityConfig::default();
+        config.max_file_size = 10;
+        config.max_file_count = 2;
+        config.max_total_size = 1000;
+        let config = config.validate().expect("valid config");
+
+        assert_matches!(
+            tracker.reserve(500, &config),
+            Err(ArchiveError::QuotaExceeded {
+                resource: crate::QuotaResource::FileSize { size: 500, max: 10 }
+            })
+        );
+        assert!(tracker.reserve_without_file_limit(500, &config).is_ok());
+        assert_matches!(
+            tracker.reserve_without_file_limit(501, &config),
+            Err(ArchiveError::QuotaExceeded {
+                resource: crate::QuotaResource::TotalSize {
+                    current: 1001,
+                    max: 1000
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn test_reserve_without_file_limit_enforces_file_count() {
+        let mut tracker = QuotaTracker::new();
+        let mut config = SecurityConfig::default();
+        config.max_file_size = 10;
+        config.max_file_count = 1;
+        let config = config.validate().expect("valid config");
+
+        assert!(tracker.reserve_without_file_limit(500, &config).is_ok());
+        assert_matches!(
+            tracker.reserve_without_file_limit(500, &config),
+            Err(ArchiveError::QuotaExceeded {
+                resource: crate::QuotaResource::FileCount { current: 2, max: 1 }
+            })
+        );
+    }
+
+    #[test]
+    fn test_reserve_without_file_limit_fast_path_accepts_oversized_file() {
+        let mut tracker = QuotaTracker::new();
+        let mut config = SecurityConfig::default();
+        config.max_file_size = 10;
+        config.max_file_count = usize::MAX;
+        config.max_total_size = u64::MAX;
+        let config = config.validate().expect("valid config");
+
+        assert!(tracker.reserve(500, &config).is_err());
+        assert!(tracker.reserve_without_file_limit(500, &config).is_ok());
+        assert_eq!(tracker.files_extracted(), 1);
+        assert_eq!(tracker.bytes_written(), 500);
+    }
+
+    #[test]
+    fn test_reserve_without_file_limit_fast_path_detects_overflow() {
+        let mut tracker = QuotaTracker::new();
+        let mut config = SecurityConfig::default();
+        config.max_file_size = 10;
+        config.max_file_count = usize::MAX;
+        config.max_total_size = u64::MAX;
+        let config = config.validate().expect("valid config");
+
+        tracker.bytes_written = u64::MAX - 100;
+        assert_matches!(
+            tracker.reserve_without_file_limit(200, &config),
+            Err(ArchiveError::QuotaExceeded {
+                resource: crate::QuotaResource::IntegerOverflow
+            })
         );
     }
 }

@@ -22,20 +22,20 @@
 //!
 //! # Symlink and Hardlink Limitations
 //!
-//! Due to sevenz-rust2 0.24 API limitations, symlink and hardlink detection
-//! is incomplete:
+//! Link detection is incomplete because 7z has no link entry type:
 //!
 //! - **Windows symlinks**: Detected via `FILE_ATTRIBUTE_REPARSE_POINT` and
 //!   rejected
-//! - **Unix symlinks**: Not yet recognized (p7zip keeps `S_IFLNK` in the
-//!   Windows attributes), so they are classified as regular files and are NOT
-//!   refused; the target path becomes file content (known limitation)
+//! - **Unix symlinks**: Detected through the Unix mode p7zip keeps in the high
+//!   16 bits of the attributes (`0x8000` flag plus `S_IFLNK`) and rejected,
+//!   whatever `allow_symlinks` says: the link target is not read, so it cannot
+//!   be validated
 //! - **Hardlinks**: Cannot be detected, extracted as separate files (data
 //!   duplication)
 //!
 //! **Security Impact**: Symlinks are NOT created during extraction, preventing
-//! CVE-2024-12905 class symlink escape attacks. However, users may experience
-//! silent feature loss when extracting archives with Unix symlinks.
+//! CVE-2024-12905 class symlink escape attacks. An archive holding a detected
+//! link is refused as a whole before anything is written.
 //!
 //! # Solid Archives
 //!
@@ -1487,6 +1487,15 @@ fn symlink_at_dest_error() -> std::io::Error {
 }
 
 impl<R: Read + Seek> SevenZArchive<R> {
+    fn anti_item_count(&self) -> u64 {
+        let count = self
+            .entries
+            .iter()
+            .filter(|entry| entry.class == SevenZClass::AntiItem)
+            .count();
+        u64::try_from(count).unwrap_or(u64::MAX)
+    }
+
     /// Processes a single 7z entry: validates, extracts file or creates
     /// directory.
     ///
@@ -1709,6 +1718,7 @@ impl<R: Read + Seek> SevenZArchive<R> {
         skip_duplicates: bool,
         progress: &mut dyn ProgressCallback,
         total: usize,
+        anti_items: u64,
         config: &SecurityConfig<Validated>,
     ) -> Result<ExtractionReport> {
         struct SzContext<'a> {
@@ -1844,6 +1854,7 @@ impl<R: Read + Seek> SevenZArchive<R> {
             "entries",
         );
         common::push_disallowed_extension_warning(&mut accumulated, ctx.disallowed_extension_skips);
+        push_anti_item_warning(&mut accumulated, anti_items);
 
         let e = match result {
             Ok(()) => {
@@ -1870,6 +1881,41 @@ impl<R: Read + Seek> SevenZArchive<R> {
     }
 }
 
+/// Appends one aggregated warning for the anti-items `extract` skipped.
+///
+/// A no-op when `count` is zero.
+fn push_anti_item_warning(report: &mut ExtractionReport, count: u64) {
+    if count > 0 {
+        report.warnings.push(format!(
+            "skipped {count} 7z {} (deletion markers are not applied)",
+            anti_item_noun(count)
+        ));
+    }
+}
+
+const fn anti_item_noun(count: u64) -> &'static str {
+    if count == 1 {
+        "anti-item"
+    } else {
+        "anti-items"
+    }
+}
+
+/// The informational finding `verify` reports for skipped anti-items, or
+/// `None` when the archive has none.
+fn anti_item_issue(count: u64) -> Option<VerificationIssue> {
+    (count > 0).then(|| {
+        VerificationIssue::new(
+            IssueSeverity::Info,
+            IssueCategory::SuspiciousPath,
+            format!(
+                "{count} 7z {} skipped (deletion markers are not applied)",
+                anti_item_noun(count)
+            ),
+        )
+    })
+}
+
 impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
     fn extract(
         &mut self,
@@ -1894,9 +1940,8 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
         // PERFORMANCE: Uses cached metadata from new() to avoid re-parsing
         // archive
         //
-        // API LIMITATION (sevenz-rust2): only Windows reparse points are
-        // detectable as links; other non-directory entries are treated as
-        // files.
+        // API LIMITATION (sevenz-rust2): only Windows reparse points and Unix
+        // mode symlinks are detectable as links; hardlinks are not.
         let mut prevalidator = EntryValidator::new(config, &dest);
         for entry in &self.entries {
             let SevenZClass::Present(kind) = entry.class else {
@@ -1962,8 +2007,11 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
             .iter()
             .filter(|entry| matches!(entry.class, SevenZClass::Present(_)))
             .count();
+        let anti_items = self.anti_item_count();
         if total == 0 {
-            return Ok(ExtractionReport::new());
+            let mut report = ExtractionReport::new();
+            push_anti_item_warning(&mut report, anti_items);
+            return Ok(report);
         }
 
         // Step 3: Extract with FRESH validator to avoid quota double-counting.
@@ -1982,6 +2030,7 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
             options.skip_duplicates,
             progress,
             total,
+            anti_items,
             config,
         )?;
         progress.on_complete();
@@ -2008,7 +2057,8 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
         use crate::inspection::verify::list_for_verify;
         use crate::inspection::verify::verify_manifest_with_structure;
 
-        let issues = refusal_issues(&sevenz_refusals(&self.archive, config));
+        let mut issues = refusal_issues(&sevenz_refusals(&self.archive, config));
+        issues.extend(anti_item_issue(self.anti_item_count()));
         let listed = list_for_verify(config, *options, |listing| {
             list_sevenz_parsed(&self.archive, &mut self.source, config, listing)
         })?;
@@ -2026,9 +2076,10 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
 ///
 /// # Known Limitations (sevenz-rust2 0.24)
 ///
-/// - **Symlinks (Unix)**: p7zip stores the mode (`S_IFLNK`) in the Windows
-///   attributes, which this classifier does not read yet, so such symlinks are
-///   classified as [`SevenZKind::File`] and are NOT refused (known limitation).
+/// - **Symlinks (Unix)**: p7zip stores the mode in the high 16 bits of the
+///   attributes (flagged by `0x8000`); an `S_IFLNK` mode is classified as
+///   [`SevenZKind::UnixSymlink`] and refused on extraction. The link target is
+///   not read.
 /// - **Symlinks (Windows)**: detected through `FILE_ATTRIBUTE_REPARSE_POINT`
 ///   and refused on extraction.
 /// - **Hardlinks**: not detectable; extracted as separate files.
@@ -2052,17 +2103,20 @@ pub(crate) enum SevenZKind {
     Directory,
     /// A Windows reparse point (symlink or junction), file or directory.
     ReparsePoint,
+    /// A symlink recorded through the Unix mode p7zip stores in the attributes.
+    UnixSymlink,
 }
 
 impl SevenZClass {
     /// Classifies an entry. An anti item wins over every other attribute, and
-    /// a reparse point wins over the directory flag because junctions are
-    /// directories.
+    /// a link wins over the directory flag because junctions are directories.
     pub(crate) fn of(entry: &sevenz_rust2::ArchiveEntry) -> Self {
         if entry.is_anti_item {
             Self::AntiItem
         } else if is_windows_reparse_point(entry) {
             Self::Present(SevenZKind::ReparsePoint)
+        } else if is_unix_symlink(entry) {
+            Self::Present(SevenZKind::UnixSymlink)
         } else if entry.is_directory() {
             Self::Present(SevenZKind::Directory)
         } else {
@@ -2076,7 +2130,7 @@ impl SevenZKind {
     pub(crate) const fn node_kind(self) -> NodeKind {
         match self {
             Self::Directory => NodeKind::Directory,
-            Self::File | Self::ReparsePoint => NodeKind::NonDirectory,
+            Self::File | Self::ReparsePoint | Self::UnixSymlink => NodeKind::NonDirectory,
         }
     }
 
@@ -2085,7 +2139,7 @@ impl SevenZKind {
         match self {
             Self::File => ManifestEntryType::File,
             Self::Directory => ManifestEntryType::Directory,
-            Self::ReparsePoint => ManifestEntryType::Symlink,
+            Self::ReparsePoint | Self::UnixSymlink => ManifestEntryType::Symlink,
         }
     }
 
@@ -2093,33 +2147,59 @@ impl SevenZKind {
     ///
     /// # Errors
     ///
-    /// Returns `SecurityViolation` for a reparse point: link extraction is not
+    /// Returns `SecurityViolation` for a link: link extraction is not
     /// supported.
     pub(crate) fn extraction_type(self, name: &str) -> Result<EntryType> {
         match self {
             Self::File => Ok(EntryType::File),
             Self::Directory => Ok(EntryType::Directory),
-            Self::ReparsePoint => Err(ArchiveError::SecurityViolation {
-                reason: format!(
-                    "symlink detected in 7z archive: {name} \
-                     (Windows reparse point attribute set). \
-                     7z symlink extraction is not supported due to sevenz-rust2 API limitations."
-                ),
-            }),
+            Self::ReparsePoint => Err(link_refusal(
+                name,
+                "Windows reparse point attribute set",
+                "due to sevenz-rust2 API limitations",
+            )),
+            Self::UnixSymlink => Err(link_refusal(
+                name,
+                "Unix mode S_IFLNK",
+                "because link targets are not read, so the symlink policy cannot allow them",
+            )),
         }
+    }
+}
+
+/// The refusal for a 7z link entry; `why` completes "extraction is not
+/// supported".
+fn link_refusal(name: &str, evidence: &str, why: &str) -> ArchiveError {
+    ArchiveError::SecurityViolation {
+        reason: format!(
+            "symlink detected in 7z archive: {name} ({evidence}). \
+             7z symlink extraction is not supported {why}."
+        ),
     }
 }
 
 /// Checks if Windows attributes indicate a reparse point (symlink/junction).
 ///
-/// **Limitation:** Only detects symlinks created on Windows.
-/// Unix symlinks in 7z archives may not have Windows attributes.
+/// Only detects links recorded through the Windows attribute; Unix-mode
+/// symlinks are detected by [`is_unix_symlink`].
 ///
 /// Reference: <https://learn.microsoft.com/en-us/windows/win32/fileio/file-attribute-constants>
 fn is_windows_reparse_point(entry: &sevenz_rust2::ArchiveEntry) -> bool {
     const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
 
     entry.has_windows_attributes && (entry.windows_attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0
+}
+
+/// Checks if the Unix mode p7zip keeps in the high 16 bits of the attributes
+/// is a symlink.
+fn is_unix_symlink(entry: &sevenz_rust2::ArchiveEntry) -> bool {
+    const UNIX_EXTENSION: u32 = 0x8000;
+    const S_IFMT: u32 = 0o17_0000;
+    const S_IFLNK: u32 = 0o12_0000;
+
+    entry.has_windows_attributes
+        && entry.windows_attributes & UNIX_EXTENSION != 0
+        && (entry.windows_attributes >> 16) & S_IFMT == S_IFLNK
 }
 
 /// Checks whether a sevenz-rust2 parse failure is due to a valid empty 7z
@@ -2237,6 +2317,101 @@ mod tests {
             SevenZClass::Present(SevenZKind::ReparsePoint)
         );
         assert_eq!(SevenZClass::of(&anti_reparse_dir), SevenZClass::AntiItem);
+    }
+
+    fn with_unix_mode(
+        mut entry: sevenz_rust2::ArchiveEntry,
+        mode: u32,
+    ) -> sevenz_rust2::ArchiveEntry {
+        entry.has_windows_attributes = true;
+        entry.windows_attributes = 0x8000 | (mode << 16);
+        entry
+    }
+
+    #[test]
+    fn unix_mode_symlink_is_classified_as_symlink() {
+        use sevenz_rust2::ArchiveEntry;
+
+        let link = SevenZClass::Present(SevenZKind::UnixSymlink);
+
+        assert_eq!(
+            SevenZClass::of(&with_unix_mode(ArchiveEntry::new_file("l"), 0o120_777)),
+            link
+        );
+        assert_eq!(
+            SevenZClass::of(&with_unix_mode(ArchiveEntry::new_directory("l"), 0o120_777)),
+            link
+        );
+        assert_eq!(
+            SevenZClass::of(&with_unix_mode(ArchiveEntry::new_file("f"), 0o100_644)),
+            SevenZClass::Present(SevenZKind::File)
+        );
+        assert_eq!(
+            SevenZClass::of(&with_unix_mode(ArchiveEntry::new_directory("d"), 0o040_755)),
+            SevenZClass::Present(SevenZKind::Directory)
+        );
+    }
+
+    #[test]
+    fn unix_mode_without_extension_flag_is_not_a_symlink() {
+        let mut entry = sevenz_rust2::ArchiveEntry::new_file("f");
+        entry.has_windows_attributes = true;
+        entry.windows_attributes = 0o120_777 << 16;
+        assert_eq!(
+            SevenZClass::of(&entry),
+            SevenZClass::Present(SevenZKind::File)
+        );
+
+        let mut anti = with_unix_mode(sevenz_rust2::ArchiveEntry::new_file("a"), 0o120_777);
+        anti.is_anti_item = true;
+        assert_eq!(SevenZClass::of(&anti), SevenZClass::AntiItem);
+    }
+
+    #[test]
+    fn unix_mode_types_other_than_symlink_are_not_symlinks() {
+        const S_IFSOCK: u32 = 0o14_0000;
+        const S_IFBLK: u32 = 0o06_0000;
+        const S_IFREG: u32 = 0o10_0000;
+        const S_IFCHR: u32 = 0o02_0000;
+        const S_IFIFO: u32 = 0o01_0000;
+
+        for mode in [S_IFSOCK, S_IFBLK, S_IFREG, S_IFCHR, S_IFIFO] {
+            let entry = with_unix_mode(sevenz_rust2::ArchiveEntry::new_file("f"), mode | 0o644);
+            assert_eq!(
+                SevenZClass::of(&entry),
+                SevenZClass::Present(SevenZKind::File),
+                "mode {mode:o}"
+            );
+        }
+    }
+
+    #[test]
+    fn reparse_point_wins_over_unix_symlink() {
+        let mut entry = with_unix_mode(sevenz_rust2::ArchiveEntry::new_file("l"), 0o120_777);
+        entry.windows_attributes |= 0x0400;
+        assert_eq!(
+            SevenZClass::of(&entry),
+            SevenZClass::Present(SevenZKind::ReparsePoint)
+        );
+    }
+
+    #[test]
+    fn unix_mode_is_ignored_without_windows_attributes() {
+        let mut entry = with_unix_mode(sevenz_rust2::ArchiveEntry::new_file("f"), 0o120_777);
+        entry.has_windows_attributes = false;
+        assert_eq!(
+            SevenZClass::of(&entry),
+            SevenZClass::Present(SevenZKind::File)
+        );
+    }
+
+    #[test]
+    fn unix_symlink_extraction_is_refused() {
+        let entry = with_unix_mode(sevenz_rust2::ArchiveEntry::new_file("l"), 0o120_777);
+        assert_matches!(
+            extraction_type_of(&entry),
+            Err(ArchiveError::SecurityViolation { reason }) if reason.contains("S_IFLNK")
+        );
     }
 
     // 7z format magic bytes for signature validation

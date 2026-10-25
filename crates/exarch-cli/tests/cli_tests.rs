@@ -2423,6 +2423,74 @@ fn test_extract_json_reports_files_skipped_and_warnings_for_disallowed_extension
     );
 }
 
+fn make_sevenz_with_anti_item(archive: &std::path::Path) {
+    use std::io::Cursor;
+    let mut writer =
+        sevenz_rust2::ArchiveWriter::create(archive).expect("failed to create 7z writer");
+    let mut file = sevenz_rust2::ArchiveEntry::new_file("a.txt");
+    file.has_stream = true;
+    file.size = 2;
+    writer
+        .push_archive_entry(file, Some(Cursor::new(b"hi".to_vec())))
+        .expect("file");
+    let mut anti = sevenz_rust2::ArchiveEntry::new_file("gone.txt");
+    anti.is_anti_item = true;
+    writer
+        .push_archive_entry(anti, None::<Cursor<Vec<u8>>>)
+        .expect("anti item");
+    writer.finish().expect("finish");
+}
+
+/// A 7z anti-item is skipped, and `extract --json` reports it as one warning.
+#[test]
+fn test_extract_7z_anti_item_warning_in_json() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("anti.7z");
+    make_sevenz_with_anti_item(&archive);
+    let out = temp.path().join("out");
+
+    let output = exarch_cmd()
+        .arg("extract")
+        .arg("--json")
+        .arg(&archive)
+        .arg(&out)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: serde_json::Value = serde_json::from_slice(&output).expect("valid JSON output");
+    assert_eq!(
+        json["data"]["warnings"][0],
+        "skipped 1 7z anti-item (deletion markers are not applied)"
+    );
+    assert!(!out.join("gone.txt").exists());
+}
+
+/// The anti-item finding is informational: `verify --strict` still exits 0.
+#[test]
+fn test_verify_7z_anti_item_info_passes_strict() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("anti.7z");
+    make_sevenz_with_anti_item(&archive);
+
+    let output = exarch_cmd()
+        .arg("verify")
+        .arg("--strict")
+        .arg("--json")
+        .arg(&archive)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: serde_json::Value = serde_json::from_slice(&output).expect("valid JSON output");
+    assert_eq!(json["data"]["status"], "PASS");
+    assert_eq!(json["data"]["issues"][0]["severity"], "INFO");
+}
+
 // ============================================================================
 // symlink_target in JSON list output (#346)
 // ============================================================================
@@ -4200,4 +4268,36 @@ fn test_sevenz_empty_name_entry_is_rejected_without_false_conflict() {
             predicate::str::contains("empty path not allowed")
                 .and(predicate::str::contains("already exist").not()),
         );
+}
+
+#[test]
+fn test_extract_zip_empty_entry_name_json_error_code() {
+    let temp = TempDir::new().expect("create temp dir");
+    let archive = temp.path().join("empty-name.zip");
+    let mut writer = zip::ZipWriter::new(std::fs::File::create(&archive).expect("create"));
+    writer
+        .start_file("", zip::write::SimpleFileOptions::default())
+        .expect("start file");
+    writer.finish().expect("finish");
+    let out = temp.path().join("out");
+
+    let output = exarch_cmd()
+        .arg("--json")
+        .arg("extract")
+        .arg(&archive)
+        .arg(&out)
+        .assert()
+        .code(1)
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).expect("invalid JSON");
+    assert_eq!(json["error"]["kind"], "SecurityViolation");
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .expect("message")
+            .contains("empty path not allowed"),
+        "{json}"
+    );
 }

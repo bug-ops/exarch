@@ -513,6 +513,7 @@ fn usable_link_target(target: &LinkTarget, kind: ManifestEntryType) -> Result<&P
     match target {
         LinkTarget::Recorded(path) => Ok(path),
         LinkTarget::Missing => Err(missing_link_target(kind)),
+        LinkTarget::Unread => Err(unread_link_target(kind)),
         LinkTarget::Oversized { .. } => Err(ArchiveError::Io(name_too_long())),
     }
 }
@@ -608,6 +609,15 @@ fn verify_deferred_hardlink(
 fn missing_link_target(kind: ManifestEntryType) -> ArchiveError {
     ArchiveError::SecurityViolation {
         reason: format!("{} target is missing", kind.as_str().to_ascii_lowercase()),
+    }
+}
+
+fn unread_link_target(kind: ManifestEntryType) -> ArchiveError {
+    ArchiveError::SecurityViolation {
+        reason: format!(
+            "{} target is not read from this archive format, so it cannot be validated",
+            kind.as_str().to_ascii_lowercase()
+        ),
     }
 }
 

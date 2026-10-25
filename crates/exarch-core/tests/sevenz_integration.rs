@@ -276,10 +276,12 @@ fn test_7z_solid_archive_with_file_count_quota() {
 // Phase 10.5: Symlink/Hardlink Detection Integration Tests
 // ============================================================================
 
-/// Test: Unix symlink extraction (documented limitation - extracted as file)
+/// Test: the fixture's `link.txt` carries a regular-file Unix mode (0o100644)
+/// whose data is a target path, so it extracts as a file. A real `S_IFLNK`
+/// entry is refused (see `sevenz_reparse_point.rs`).
 #[test]
 #[cfg(unix)]
-fn test_7z_unix_symlink_extracted_as_file() {
+fn test_7z_regular_mode_entry_with_target_text_extracts_as_file() {
     let data = load_fixture("symlink-unix.7z");
     let cursor = Cursor::new(data);
     let mut archive = SevenZArchive::new(cursor).unwrap();
@@ -287,7 +289,6 @@ fn test_7z_unix_symlink_extracted_as_file() {
     let temp = TempDir::new().unwrap();
     let config = SecurityConfig::default().validate().unwrap();
 
-    // Current behavior: succeeds, extracts symlink as file
     let result = archive.extract(
         temp.path(),
         &config,

@@ -195,7 +195,7 @@ let config = SecurityConfig::default()
 > ZIP-family formats share the ZIP container but add extra structure - signing (`.apk`/`.aab`/`.ipa`/`.appx`/`.msix`), checksum manifests (`.whl`), ordering rules (`.epub`), or descriptor files (`.war`/`.ear`/`.vsix`/`.nbm`) - which exarch doesn't produce. Creation is rejected to avoid silently emitting a bare ZIP with a misleading extension; callers who want that can set `CreationConfig::format = Some(exarch_core::formats::detect::ArchiveType::Zip)` explicitly.
 
 > [!NOTE]
-> 7z creation is not yet supported. Solid and encrypted 7z archives are rejected for security reasons. Unix symlinks inside 7z archives are reported as regular files and not refused (known limitation).
+> 7z creation is not yet supported. Solid and encrypted 7z archives are rejected for security reasons. A 7z archive holding a symlink (a Windows reparse point or a Unix `S_IFLNK` mode) is refused as a whole, whatever the symlink policy, because 7z link targets are not read.
 
 ## Project Structure
 

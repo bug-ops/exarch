@@ -154,6 +154,7 @@ use crate::security::quota::QuotaPermit;
 use crate::security::validator::EntryPath;
 use crate::security::validator::NodeKind;
 use crate::security::validator::ValidatedEntryType;
+use crate::security::validator::require_non_empty_name;
 use crate::security::zipbomb::DeclaredCompressedBudget;
 use crate::types::DestDir;
 use crate::types::EntryType;
@@ -286,7 +287,7 @@ pub(crate) fn resolve_zip_entry_path(
 ///
 /// # Errors
 ///
-/// - `InvalidArchive` for an empty name
+/// - `SecurityViolation` for an empty name
 /// - `PathTraversal` for an absolute name without `allow_absolute_paths`, for
 ///   any `..` component (in the raw name or left after prefix stripping), and
 ///   for an absolute name that resolves to nothing
@@ -322,9 +323,7 @@ pub(crate) fn parse_zip_entry_name(
         });
     }
 
-    if raw.is_empty() {
-        return Err(ArchiveError::InvalidArchive("empty ZIP entry name".into()));
-    }
+    require_non_empty_name(Path::new(raw))?;
 
     let prefix = classify_name_prefix(raw);
     let absolute =
@@ -3211,10 +3210,10 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_zip_entry_path_empty_name_is_invalid() {
+    fn test_resolve_zip_entry_path_empty_name_is_a_security_violation() {
         for config in [strict_config(), absolute_config()] {
             let result = resolve_zip_entry_path("", &config);
-            assert_matches!(result, Err(ArchiveError::InvalidArchive(_)));
+            assert_matches!(result, Err(ArchiveError::SecurityViolation { .. }));
         }
     }
 

@@ -356,6 +356,7 @@ impl EntryCompression {
 ///     LinkTarget::Oversized { bytes: 40_000 }
 /// );
 /// assert_eq!(LinkTarget::Missing.path(), None);
+/// assert_eq!(LinkTarget::Unread.path(), None);
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -365,6 +366,9 @@ pub enum LinkTarget {
 
     /// The archive stores no target
     Missing,
+
+    /// The archive stores a target that listing does not read
+    Unread,
 
     /// The target exceeds the host's name limits; only its length is kept
     Oversized {
@@ -409,7 +413,7 @@ impl LinkTarget {
     pub fn path(&self) -> Option<&Path> {
         match self {
             Self::Recorded(path) => Some(path),
-            Self::Missing | Self::Oversized { .. } => None,
+            Self::Missing | Self::Unread | Self::Oversized { .. } => None,
         }
     }
 }
@@ -417,8 +421,8 @@ impl LinkTarget {
 /// Kind of a manifest entry; link kinds carry their target.
 ///
 /// The target lives in the variant, so a regular file cannot carry one. It is
-/// [`LinkTarget::Missing`] or [`LinkTarget::Oversized`] only for entries
-/// produced by the pre-flight listing that
+/// [`LinkTarget::Missing`], [`LinkTarget::Unread`] or [`LinkTarget::Oversized`]
+/// only for entries produced by the pre-flight listing that
 /// [`verify_archive`](crate::verify_archive) uses, where such a target must
 /// become a report issue instead of a listing error.
 ///

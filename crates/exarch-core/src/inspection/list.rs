@@ -266,6 +266,7 @@ fn list_tar_entries<R: std::io::Read>(
             return Err(ArchiveError::PathTraversal { path });
         }
 
+        require_non_empty_name(&path)?;
         let tar_type = effective_entry_type(&entry);
         let kind = NodeKind::directory_if(tar_type == tar::EntryType::Directory);
         if !admit_path(&path, kind, &mut manifest, listing)? {
@@ -659,7 +660,7 @@ fn list_sevenz_archive(
 
         let archive_entry = ArchiveEntry {
             path,
-            kind: manifest_entry_kind(entry_type, LinkTarget::Missing),
+            kind: manifest_entry_kind(entry_type, LinkTarget::Unread),
             size,
             compression,
             mode: None,
@@ -2060,10 +2061,9 @@ mod tests {
     }
 
     #[test]
-    fn test_list_sevenz_unix_symlink_reported_as_file() {
-        // Unix symlinks in 7z archives are not recognized yet: they are
-        // reported as ManifestEntryType::File and not refused (known
-        // limitation).
+    fn test_list_sevenz_regular_mode_entry_reported_as_file() {
+        // The fixture's link.txt has a regular-file Unix mode, so it is
+        // reported as ManifestEntryType::File.
         let path = std::path::Path::new("../../tests/fixtures/symlink-unix.7z");
         let config = SecurityConfig::default();
         let manifest = list_archive(path, &config).unwrap();
@@ -2077,7 +2077,7 @@ mod tests {
             assert_ne!(
                 entry.kind.entry_type(),
                 ManifestEntryType::Symlink,
-                "Unix symlinks in 7z are undetectable and reported as File: {}",
+                "regular-mode entries are reported as File: {}",
                 entry.path.display()
             );
         }

@@ -107,8 +107,8 @@ pub(crate) fn check_root_entry_is_directory(path: &Path, kind: NodeKind) -> Resu
     EntryPath::of(path).require_directory_root(kind).map(drop)
 }
 
-/// Rejects an empty entry name, so listing fails on the name extraction and
-/// `verify` refuse, instead of joining it onto the destination directory.
+/// Rejects an empty entry name, so listing fails on the name that extraction
+/// and `verify` refuse, instead of joining it onto the destination directory.
 pub(crate) fn require_non_empty_name(path: &Path) -> Result<()> {
     if path.is_empty() {
         return Err(ArchiveError::SecurityViolation {

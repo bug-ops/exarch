@@ -13,6 +13,7 @@ use common::flip_first;
 use exarch_core::ArchiveError;
 use exarch_core::CheckStatus;
 use exarch_core::DecompressionBudget;
+#[cfg(unix)]
 use exarch_core::ExtractionOptions;
 use exarch_core::IntegrityCheck;
 use exarch_core::IntegrityStatus;
@@ -26,6 +27,7 @@ use exarch_core::VerificationOptions;
 use exarch_core::VerificationReport;
 use exarch_core::VerificationStatus;
 use exarch_core::extract_archive;
+#[cfg(unix)]
 use exarch_core::extract_archive_with_options;
 use exarch_core::list_archive;
 use exarch_core::list_archive_with_options;

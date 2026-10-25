@@ -33,13 +33,13 @@ use crate::formats::tar_metadata_limit::TarReadBudget;
 use crate::formats::tar_metadata_limit::budget_violation;
 use crate::formats::tar_metadata_limit::budgeted_reader;
 use crate::formats::tar_metadata_limit::budgeted_tar_entries;
-use crate::formats::zip::admit_root_entry;
 use crate::formats::zip::is_password_required;
 use crate::formats::zip::parse_zip_entry_name;
 use crate::formats::zip::read_zip_symlink_target;
 use crate::formats::zip::read_zip_symlink_target_checked;
 use crate::formats::zip::resolve_zip_entry_path;
 use crate::formats::zip::zip_mode_is_symlink;
+use crate::formats::zip::zip_node_kind;
 use crate::formats::zip_tail::DescriptorTail;
 use crate::inspection::integrity::Charge;
 use crate::inspection::integrity::DecodeOutcome;
@@ -59,7 +59,8 @@ use crate::security::fs_view::check_name_lengths;
 use crate::security::fs_view::name_too_long;
 use crate::security::quota::QuotaPermit;
 use crate::security::quota::QuotaTracker;
-use crate::security::validator::check_root_entry_is_directory;
+use crate::security::validator::EntryPath;
+use crate::security::validator::NodeKind;
 use crate::types::safe_path::has_null_bytes;
 
 /// Lists archive contents without extracting.
@@ -264,12 +265,12 @@ fn list_tar_entries<R: std::io::Read>(
             return Err(ArchiveError::PathTraversal { path });
         }
 
-        if !admit_path(&path, &mut manifest, listing)? {
+        let tar_type = effective_entry_type(&entry);
+        let kind = NodeKind::directory_if(tar_type == tar::EntryType::Directory);
+        if !admit_path(&path, kind, &mut manifest, listing)? {
             continue;
         }
 
-        let tar_type = effective_entry_type(&entry);
-        check_root_entry_is_directory(&path, tar_type == tar::EntryType::Directory)?;
         let entry_type = convert_tar_entry_type(tar_type)?;
         let mode = crate::formats::tar::tar_permission_bits(entry.header());
         let modified =
@@ -436,12 +437,12 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
                 parse_zip_entry_name(&raw_name, config)?.into_preflight_path()
             }
         };
-        admit_root_entry(&path, &entry)?;
-        if !admit_path(&path, &mut manifest, listing)? {
+        let kind = zip_node_kind(&path, &entry)?;
+        if !admit_path(&path, kind, &mut manifest, listing)? {
             continue;
         }
 
-        let entry_type = convert_zip_entry_type(&entry, &path);
+        let entry_type = convert_zip_entry_type(&entry, kind);
         let size = entry.size();
         let compression = EntryCompression::Entry(entry.compressed_size());
         let mode = entry.unix_mode().map(|m| m & 0o7777);
@@ -637,12 +638,13 @@ fn list_sevenz_archive(
             return Err(ArchiveError::PathTraversal { path });
         }
 
-        if !admit_path(&path, &mut manifest, listing)? {
+        let entry_type = sevenz_manifest_entry_type(entry);
+        let kind = NodeKind::directory_if(entry_type == ManifestEntryType::Directory);
+        if !admit_path(&path, kind, &mut manifest, listing)? {
             slots.push(None);
             continue;
         }
 
-        let entry_type = sevenz_manifest_entry_type(entry);
         let size = entry.size;
         let modified = entry
             .has_last_modified_date
@@ -684,11 +686,18 @@ fn list_sevenz(
 /// instead records only its length on `manifest` and drops it, so the report
 /// can flag it without the manifest growing with the path. When the verify
 /// pass decodes content, the dropped entry is also counted as unverified.
+///
+/// # Errors
+///
+/// A root entry (`.`) whose `kind` is not a directory fails the listing in
+/// either mode, so no list handler can skip the root-entry rule.
 fn admit_path(
     path: &Path,
+    kind: NodeKind,
     manifest: &mut ArchiveManifest,
     listing: &mut ListPass<'_, '_>,
 ) -> Result<bool> {
+    EntryPath::of(path).require_directory_root(kind)?;
     if check_name_lengths(path).is_ok() {
         return Ok(true);
     }
@@ -811,10 +820,9 @@ fn convert_tar_entry_type(tar_type: tar::EntryType) -> Result<ManifestEntryType>
 
 fn convert_zip_entry_type<R: std::io::Read + std::io::Seek>(
     entry: &zip::read::ZipFile<'_, R>,
-    path: &Path,
+    kind: NodeKind,
 ) -> ManifestEntryType {
-    // `admit_root_entry` already let only a directory or an empty file through.
-    if entry.is_dir() || path == Path::new(".") {
+    if kind == NodeKind::Directory {
         ManifestEntryType::Directory
     } else if is_zip_symlink(entry) {
         ManifestEntryType::Symlink

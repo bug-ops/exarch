@@ -173,6 +173,8 @@ use crate::inspection::report::UnverifiedReason;
 use crate::inspection::report::VerificationIssue;
 use crate::security::EntryValidator;
 use crate::security::quota::QuotaPermit;
+use crate::security::validator::EntryPath;
+use crate::security::validator::NodeKind;
 use crate::security::zipbomb::DeclaredCompressedBudget;
 use crate::security::zipbomb::validate_entry_compression;
 use crate::types::DestDir;
@@ -1543,8 +1545,13 @@ impl<R: Read + Seek> SevenZArchive<R> {
         // `SafePath::validate_with_context` to canonicalize the parent every
         // time, so the swap is always caught.
         let safe_path = validator
-            .validate_entry_path(entry_path, None)
-            .map_err(|e| sevenz_rust2::Error::Other(format!("validation failed: {e}").into()))?;
+            .validate_entry_path(
+                entry_path,
+                NodeKind::directory_if(matches!(entry_type, EntryType::Directory)),
+                None,
+            )
+            .map_err(|e| sevenz_rust2::Error::Other(format!("validation failed: {e}").into()))?
+            .into_inner();
         let dest_path = dest.join_path(safe_path.as_path());
 
         match entry_type {
@@ -1894,7 +1901,14 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
             // below, after checking whether this entry would be skipped as a
             // duplicate at the destination, so pre-validation does not
             // over-count entries Step 3 will actually skip (issue #478).
-            let safe_path = prevalidator.validate_entry_path(&path, None)?;
+            let safe_path = match prevalidator.validate_entry_path(
+                &path,
+                NodeKind::directory_if(entry.is_directory),
+                None,
+            )? {
+                EntryPath::Root(_) => continue,
+                EntryPath::Child(safe_path) => safe_path,
+            };
 
             if entry.is_directory {
                 continue;

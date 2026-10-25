@@ -4116,3 +4116,59 @@ fn test_zip_empty_dot_file_entry_extracts_without_force() {
         .success();
     assert_eq!(std::fs::read(out.join("a.txt")).expect("read"), b"hi");
 }
+
+fn sevenz_with_root_entry(archive: &std::path::Path, root: sevenz_rust2::ArchiveEntry) {
+    use std::io::Cursor;
+    let mut writer =
+        sevenz_rust2::ArchiveWriter::create(archive).expect("failed to create 7z writer");
+    writer
+        .push_archive_entry(root, None::<Cursor<Vec<u8>>>)
+        .expect("root");
+    let mut file = sevenz_rust2::ArchiveEntry::new_file("a.txt");
+    file.has_stream = true;
+    file.size = 2;
+    writer
+        .push_archive_entry(file, Some(Cursor::new(b"hi".to_vec())))
+        .expect("file");
+    writer.finish().expect("finish");
+}
+
+/// A 7z file entry named `.` is rejected by verify, list and extract alike.
+#[test]
+fn test_sevenz_root_file_entry_is_rejected_everywhere() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("dotfile.7z");
+    sevenz_with_root_entry(&archive, sevenz_rust2::ArchiveEntry::new_file("."));
+    let out = temp.path().join("out");
+
+    for command in ["verify", "list", "extract"] {
+        let mut cmd = exarch_cmd();
+        cmd.arg(command).arg(&archive);
+        if command == "extract" {
+            cmd.arg(&out);
+        }
+        cmd.assert()
+            .code(1)
+            .stderr(predicate::str::contains("must be a directory"));
+    }
+    assert!(!out.join("a.txt").exists());
+}
+
+/// A 7z directory entry named `.` is the destination itself and a no-op.
+#[test]
+fn test_sevenz_root_directory_entry_round_trip() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("dotdir.7z");
+    sevenz_with_root_entry(&archive, sevenz_rust2::ArchiveEntry::new_directory("."));
+    let out = temp.path().join("out");
+
+    exarch_cmd().arg("verify").arg(&archive).assert().success();
+    exarch_cmd().arg("list").arg(&archive).assert().success();
+    exarch_cmd()
+        .arg("extract")
+        .arg(&archive)
+        .arg(&out)
+        .assert()
+        .success();
+    assert_eq!(std::fs::read(out.join("a.txt")).expect("read"), b"hi");
+}

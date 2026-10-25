@@ -23,19 +23,87 @@ use crate::types::EntryType;
 use crate::types::SafePath;
 use crate::types::SafeSymlink;
 
-/// Rejects an archive-root entry (`.`, `./`) that is not a directory.
-///
-/// The root names the destination itself, so a file, symlink or hardlink
-/// standing for it would be written onto, or remove, the destination.
-/// Shared by [`EntryValidator::validate_entry`] and listing so `extract`,
-/// `list` and `verify` agree.
-pub(crate) fn check_root_entry_is_directory(path: &Path, is_directory: bool) -> Result<()> {
-    if path == Path::new(".") && !is_directory {
-        return Err(ArchiveError::SecurityViolation {
-            reason: "archive root entry '.' must be a directory".into(),
-        });
+/// Whether an archive entry is a directory, as the root-entry rule sees it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NodeKind {
+    /// The entry is a directory (or stands for one, like ZIP's empty root
+    /// file).
+    Directory,
+    /// Any other entry: file, symlink, hardlink.
+    NonDirectory,
+}
+
+impl NodeKind {
+    /// Converts a format's directory flag at the boundary, so the rule itself
+    /// never takes a bare `bool`.
+    pub(crate) const fn directory_if(is_directory: bool) -> Self {
+        if is_directory {
+            Self::Directory
+        } else {
+            Self::NonDirectory
+        }
     }
-    Ok(())
+}
+
+/// An archive entry name, split into the archive root and everything else.
+///
+/// The root (`.`, `./`) names the destination itself, so it must not be taken
+/// for an ordinary path: handlers have to match on the variant. `P` is the
+/// path as carried at that stage (`&Path` for a raw name, `SafePath` once
+/// validated).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EntryPath<P> {
+    /// The destination itself (`.`, `./`).
+    Root(P),
+    /// Any path below the destination.
+    Child(P),
+}
+
+impl<'a> EntryPath<&'a Path> {
+    /// Classifies a raw entry name; the single definition of "root" for names
+    /// not yet validated.
+    pub(crate) fn of(path: &'a Path) -> Self {
+        if path == Path::new(".") {
+            Self::Root(path)
+        } else {
+            Self::Child(path)
+        }
+    }
+}
+
+impl<P> EntryPath<P> {
+    /// Whether this is the root; for tests and callers that only need to know
+    /// that, not to act on the path.
+    pub(crate) const fn is_root(&self) -> bool {
+        matches!(self, Self::Root(_))
+    }
+
+    /// The path, for callers that treat the root like any directory.
+    pub(crate) fn into_inner(self) -> P {
+        match self {
+            Self::Root(path) | Self::Child(path) => path,
+        }
+    }
+
+    /// Rejects a root entry that is not a directory.
+    ///
+    /// A file, symlink or hardlink standing for the root would be written
+    /// onto, or remove, the destination. Shared by entry validation and
+    /// listing so `extract`, `list` and `verify` agree.
+    pub(crate) fn require_directory_root(self, kind: NodeKind) -> Result<Self> {
+        if self.is_root() && kind == NodeKind::NonDirectory {
+            return Err(ArchiveError::SecurityViolation {
+                reason: "archive root entry '.' must be a directory".into(),
+            });
+        }
+        Ok(self)
+    }
+}
+
+/// Rejects a root entry that is not a directory, for the TAR extractor, which
+/// checks the raw name before its extension filter.
+pub(crate) fn check_root_entry_is_directory(path: &Path, kind: NodeKind) -> Result<()> {
+    EntryPath::of(path).require_directory_root(kind).map(drop)
 }
 
 /// Result of entry validation.
@@ -257,8 +325,10 @@ impl<'a> EntryValidator<'a> {
         mode: Option<u32>,
         dir_cache: Option<&DirCache>,
     ) -> Result<ValidatedEntry> {
-        check_root_entry_is_directory(path, matches!(entry_type, EntryType::Directory))?;
-        let safe_path = self.validate_entry_path(path, dir_cache)?;
+        let kind = NodeKind::directory_if(matches!(entry_type, EntryType::Directory));
+        let safe_path = self
+            .validate_entry_path(path, kind, dir_cache)?
+            .into_inner();
 
         let (validated_type, sanitized_mode) = match entry_type {
             EntryType::File => {
@@ -329,12 +399,16 @@ impl<'a> EntryValidator<'a> {
     /// # Errors
     ///
     /// Returns [`ArchiveError::PathTraversal`](crate::ArchiveError::PathTraversal)
-    /// or another path-validation error if `path` fails validation.
+    /// or another path-validation error if `path` fails validation, and
+    /// [`ArchiveError::SecurityViolation`](crate::ArchiveError::SecurityViolation)
+    /// for a root entry (`.`) whose `kind` is not a directory.
     pub(crate) fn validate_entry_path(
         &self,
         path: &Path,
+        kind: NodeKind,
         dir_cache: Option<&DirCache>,
-    ) -> Result<SafePath> {
+    ) -> Result<EntryPath<SafePath>> {
+        let entry_path = EntryPath::of(path).require_directory_root(kind)?;
         let mut ctx = ValidationContext::new(self.config.allowed.symlinks);
         if let Some(cache) = dir_cache {
             ctx = ctx.with_dir_cache(cache);
@@ -343,7 +417,11 @@ impl<'a> EntryValidator<'a> {
             ctx.mark_symlink_seen();
         }
 
-        SafePath::validate_with_context(path, self.dest, self.config, &ctx)
+        let validate = |path| SafePath::validate_with_context(path, self.dest, self.config, &ctx);
+        match entry_path {
+            EntryPath::Root(path) => validate(path).map(EntryPath::Root),
+            EntryPath::Child(path) => validate(path).map(EntryPath::Child),
+        }
     }
 
     /// Reserves quota capacity for a regular file's byte count, independent
@@ -447,6 +525,50 @@ mod tests {
     use std::assert_matches;
     use std::path::PathBuf;
     use tempfile::TempDir;
+
+    #[test]
+    fn test_entry_path_of_splits_root_from_child() {
+        for root in [".", "./", "./."] {
+            assert!(EntryPath::of(Path::new(root)).is_root(), "{root:?}");
+        }
+        assert_eq!(
+            EntryPath::of(Path::new("a/b")),
+            EntryPath::Child(Path::new("a/b"))
+        );
+    }
+
+    #[test]
+    fn test_root_requires_directory() {
+        let root = EntryPath::of(Path::new("."));
+        assert!(root.require_directory_root(NodeKind::Directory).is_ok());
+        assert_matches!(
+            root.require_directory_root(NodeKind::NonDirectory),
+            Err(ArchiveError::SecurityViolation { .. })
+        );
+        let child = EntryPath::of(Path::new("a"));
+        assert!(child.require_directory_root(NodeKind::NonDirectory).is_ok());
+    }
+
+    #[test]
+    fn test_validate_entry_path_returns_root_for_directory_and_rejects_file() {
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
+        let config = SecurityConfig::default().validate().expect("valid config");
+        let validator = EntryValidator::new(&config, &dest);
+
+        let root = validator
+            .validate_entry_path(Path::new("."), NodeKind::Directory, None)
+            .expect("root directory");
+        assert!(root.is_root());
+        assert_matches!(
+            validator.validate_entry_path(Path::new("."), NodeKind::NonDirectory, None),
+            Err(ArchiveError::SecurityViolation { .. })
+        );
+        let child = validator
+            .validate_entry_path(Path::new("a.txt"), NodeKind::NonDirectory, None)
+            .expect("child");
+        assert!(!child.is_root());
+    }
 
     #[test]
     fn test_entry_validator_new() {

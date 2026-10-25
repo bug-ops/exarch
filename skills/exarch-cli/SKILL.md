@@ -320,7 +320,10 @@ else (a regular file, including an empty one named `.`, a symlink or a hardlink)
 `archive root entry '.' must be a directory` by `extract`, `list` and `verify` alike (exit `1`; for
 `verify` a hard error, not a report entry). A zero-size regular-file entry whose name ends in `/`
 (V7, `bsdtar --format v7`) is read as a directory by all three commands, so an empty `./` root is a
-no-op; with a payload it stays a file and is rejected.
+no-op; with a payload it stays a file and is rejected. A 7z entry named `.` follows the same rule:
+a directory is a no-op, a non-directory root entry (empty or not) is rejected by all three
+commands with the same message and exit `1`. A 7z anti-item named `.` is a separate known gap (#707):
+`list` and `verify` skip it while `extract` rejects it.
 
 `verify`, `list` and `extract` reject a ZIP entry whose compression method is not Stored, Deflate,
 Bzip2 or Zstd (including `deflate64`) with `operation denied by security policy: unsupported

@@ -5,8 +5,9 @@ import io
 import tarfile
 from pathlib import Path
 
-import exarch
 import pytest
+
+import exarch
 
 # Written with sevenz-rust2: `a.txt` and a Unix-mode symlink `link` -> `a.txt`.
 SYMLINK_7Z = Path(__file__).resolve().parents[3] / "tests" / "fixtures" / "symlink-mode.7z"

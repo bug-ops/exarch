@@ -83,6 +83,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- TAR `extract`, `list` and `verify` reject a `.` or `./` root entry that is not a directory, and read an empty regular entry with a trailing-slash name (V7) as a directory (#701, #706).
+- `exarch-cli` skill states that an all-zero tail after the last zstd frame fails `verify --check-integrity` (#699, #706).
 - ZIP `extract`, `list` and `verify` accept a `./` or `.` root entry as the destination directory, and reject a root entry with a payload or a symlink (#698, #702).
 - `verify` binds ZIP xl type and descriptor overrun findings to their entry, and no longer shifts the binding after an over-long name (#692, #702).
 - 7z last solid block ratio counts only the pack streams its coders consume (#684).

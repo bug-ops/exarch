@@ -5,6 +5,7 @@
 
 use std::path::Path;
 
+use crate::ArchiveError;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::config::Validated;
@@ -21,6 +22,21 @@ use crate::types::DestDir;
 use crate::types::EntryType;
 use crate::types::SafePath;
 use crate::types::SafeSymlink;
+
+/// Rejects an archive-root entry (`.`, `./`) that is not a directory.
+///
+/// The root names the destination itself, so a file, symlink or hardlink
+/// standing for it would be written onto, or remove, the destination.
+/// Shared by [`EntryValidator::validate_entry`] and listing so `extract`,
+/// `list` and `verify` agree.
+pub(crate) fn check_root_entry_is_directory(path: &Path, is_directory: bool) -> Result<()> {
+    if path == Path::new(".") && !is_directory {
+        return Err(ArchiveError::SecurityViolation {
+            reason: "archive root entry '.' must be a directory".into(),
+        });
+    }
+    Ok(())
+}
 
 /// Result of entry validation.
 ///
@@ -227,6 +243,10 @@ impl<'a> EntryValidator<'a> {
     /// - `ArchiveError::SymlinkEscape` - Symlink target escapes
     /// - `ArchiveError::HardlinkEscape` - Hardlink target escapes
     /// - `ArchiveError::InvalidPermissions` - Dangerous permissions
+    /// - `ArchiveError::SecurityViolation` - Root entry (`.`) that is not a
+    ///   directory. This is a backstop for formats that reach here without an
+    ///   earlier check; TAR checks first, in `process_entry`, so the root is
+    ///   rejected before the extension filter can skip it.
     #[inline]
     pub fn validate_entry(
         &mut self,
@@ -237,6 +257,7 @@ impl<'a> EntryValidator<'a> {
         mode: Option<u32>,
         dir_cache: Option<&DirCache>,
     ) -> Result<ValidatedEntry> {
+        check_root_entry_is_directory(path, matches!(entry_type, EntryType::Directory))?;
         let safe_path = self.validate_entry_path(path, dir_cache)?;
 
         let (validated_type, sanitized_mode) = match entry_type {

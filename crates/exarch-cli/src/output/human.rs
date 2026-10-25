@@ -10,6 +10,8 @@ use exarch_core::ArchiveManifest;
 use exarch_core::CreationReport;
 use exarch_core::ExtractionReport;
 use exarch_core::IssueSeverity;
+use exarch_core::LinkTarget;
+use exarch_core::ManifestEntryKind;
 use exarch_core::VerificationReport;
 use std::io::Write;
 use std::path::Path;
@@ -34,6 +36,26 @@ impl HumanFormatter<Term, Term> {
             out: Term::stdout(),
             err: Term::stderr(),
         }
+    }
+}
+
+/// What follows a link's path in the long listing.
+///
+/// A target that was not read gets a parenthesised note without `->`, a form
+/// no stored target can produce, so it is never mistaken for a recorded one.
+fn link_suffix(kind: &ManifestEntryKind) -> String {
+    if let Some(target) = kind.link_target() {
+        return format!(" -> {}", target.display());
+    }
+    match kind {
+        ManifestEntryKind::Symlink { target } | ManifestEntryKind::Hardlink { target } => {
+            match target {
+                LinkTarget::Unread => "  (target not read)".to_owned(),
+                LinkTarget::Unreadable => "  (target unreadable)".to_owned(),
+                _ => String::new(),
+            }
+        }
+        _ => String::new(),
     }
 }
 
@@ -309,30 +331,17 @@ impl<O: Write, E: Write> OutputFormatter for HumanFormatter<O, E> {
                 exarch_core::ManifestEntryType::Hardlink => "h",
             };
 
-            if let Some(target) = entry.kind.link_target() {
-                emit_line(
-                    &mut self.out,
-                    format_args!(
-                        "{}{:<6} {:>10}  {} -> {}",
-                        type_char,
-                        mode_str,
-                        size_str,
-                        entry.path.display(),
-                        target.display()
-                    ),
-                );
-            } else {
-                emit_line(
-                    &mut self.out,
-                    format_args!(
-                        "{}{:<6} {:>10}  {}",
-                        type_char,
-                        mode_str,
-                        size_str,
-                        entry.path.display()
-                    ),
-                );
-            }
+            emit_line(
+                &mut self.out,
+                format_args!(
+                    "{}{:<6} {:>10}  {}{}",
+                    type_char,
+                    mode_str,
+                    size_str,
+                    entry.path.display(),
+                    link_suffix(&entry.kind)
+                ),
+            );
         }
 
         emit_blank(&mut self.out);
@@ -750,6 +759,38 @@ mod tests {
         f.format_manifest_long(&sample_manifest(), true).unwrap();
         let text = out_text(&f);
         assert!(text.contains("link.txt -> file.txt"));
+    }
+
+    #[test]
+    fn format_manifest_long_marks_links_without_a_target() {
+        use exarch_core::ArchiveEntry;
+        use exarch_core::ManifestEntryKind;
+        use exarch_core::formats::detect::ArchiveType;
+
+        let mut manifest = ArchiveManifest::new(ArchiveType::SevenZ);
+        for (path, target) in [
+            ("unread", exarch_core::LinkTarget::Unread),
+            ("unreadable", exarch_core::LinkTarget::Unreadable),
+            (
+                "spoof",
+                exarch_core::LinkTarget::Recorded(std::path::PathBuf::from("<not read>")),
+            ),
+        ] {
+            manifest
+                .add_entry(ArchiveEntry::new(
+                    std::path::PathBuf::from(path),
+                    ManifestEntryKind::Symlink { target },
+                    0,
+                ))
+                .unwrap();
+        }
+
+        let mut f = formatter(Verbosity::Normal, false);
+        f.format_manifest_long(&manifest, false).unwrap();
+        let text = out_text(&f);
+        assert!(text.contains("unread  (target not read)"), "{text}");
+        assert!(text.contains("unreadable  (target unreadable)"), "{text}");
+        assert!(text.contains("spoof -> <not read>"), "{text}");
     }
 
     #[test]

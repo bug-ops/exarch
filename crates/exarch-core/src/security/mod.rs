@@ -18,10 +18,11 @@ pub use validator::ValidatedEntry;
 pub use validator::ValidatedEntryType;
 pub use validator::ValidationReport;
 
-// QuotaPermit rides inside the unconditionally-public
-// ValidatedEntryType::File, so it must be exported ungated: a
+// QuotaPermit and EntryCount ride inside the unconditionally-public
+// ValidatedEntryType::File and ::Hardlink, so it must be exported ungated: a
 // `#[cfg(feature = "testing")]` re-export (as `QuotaTracker` gets below)
 // would be a private-type-in-public-interface compile error.
+pub use quota::EntryCount;
 pub use quota::QuotaPermit;
 
 // SanitizedMode rides inside the unconditionally-public

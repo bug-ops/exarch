@@ -1,6 +1,11 @@
 //! A 7z entry whose Unix mode (`S_IFLNK`) marks it as a symlink is read and
-//! validated through the symlink policy: `list` reports the target, `verify`
-//! validates it, and `extract` creates the link only under `allow_symlinks`.
+//! validated through the symlink policy: `list` reports the target on request,
+//! `verify` validates it under an integrity check, and `extract` validates it
+//! as it creates the link, only under `allow_symlinks`.
+//!
+//! Stream-less directories are handed to the extractor after every block, so a
+//! directory entry of the archive does not exist yet when a link is validated;
+//! 7z is stricter than TAR there.
 
 #![allow(clippy::unwrap_used)]
 #![cfg_attr(not(unix), allow(dead_code, unused_imports))]
@@ -12,6 +17,7 @@ use std::path::PathBuf;
 
 use common::flip_first;
 use exarch_core::ArchiveError;
+use exarch_core::ArchiveManifest;
 use exarch_core::CheckStatus;
 use exarch_core::DecompressionBudget;
 #[cfg(unix)]
@@ -138,7 +144,15 @@ fn dir_is_empty(dir: &TempDir) -> bool {
 }
 
 fn link_target(path: &Path, config: &SecurityConfig) -> LinkTarget {
-    let manifest = list_archive(path, config).unwrap();
+    let options = ListOptions::default().with_stored_targets(StoredTargets::Read);
+    first_link_target(&list_archive_with_options(path, config, &options).unwrap())
+}
+
+fn default_link_target(path: &Path, config: &SecurityConfig) -> LinkTarget {
+    first_link_target(&list_archive(path, config).unwrap())
+}
+
+fn first_link_target(manifest: &ArchiveManifest) -> LinkTarget {
     manifest
         .entries()
         .iter()
@@ -147,6 +161,31 @@ fn link_target(path: &Path, config: &SecurityConfig) -> LinkTarget {
             _ => None,
         })
         .unwrap()
+}
+
+/// A destination one level below a fresh directory, so a write that escapes
+/// it by one level shows up in the container.
+fn nested_dest() -> (TempDir, PathBuf) {
+    let container = TempDir::new().unwrap();
+    let out = container.path().join("out");
+    std::fs::create_dir(&out).unwrap();
+    (container, out)
+}
+
+fn assert_nothing_outside(container: &TempDir, label: &str) {
+    let mut names: Vec<_> = std::fs::read_dir(container.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["out"], "{label}: nothing may be written outside");
+}
+
+fn partial_source(err: ArchiveError) -> ArchiveError {
+    match err {
+        ArchiveError::PartialExtraction { source, .. } => *source,
+        other => panic!("expected PartialExtraction, got {other:?}"),
+    }
 }
 
 fn issue_categories(report: &VerificationReport) -> Vec<IssueCategory> {
@@ -172,6 +211,7 @@ fn list_reports_the_stored_target_whatever_the_policy() {
             link_target(&path, &config),
             LinkTarget::Recorded(PathBuf::from("a.txt"))
         );
+        assert_eq!(default_link_target(&path, &config), LinkTarget::Unread);
     }
 }
 
@@ -209,7 +249,7 @@ fn list_rejects_empty_and_oversized_targets_like_zip() {
 
 #[cfg(unix)]
 #[test]
-fn list_leaves_a_target_with_a_corrupt_checksum_unread() {
+fn list_marks_a_target_with_a_corrupt_checksum_unreadable() {
     let dir = TempDir::new().unwrap();
     let mut bytes = build(
         &[Item::Link("l", b"TARGETTARGET")],
@@ -222,7 +262,7 @@ fn list_leaves_a_target_with_a_corrupt_checksum_unread() {
 
     assert_eq!(
         link_target(&path, &SecurityConfig::default()),
-        LinkTarget::Unread
+        LinkTarget::Unreadable
     );
     assert_matches!(
         extract_archive(&path, TempDir::new().unwrap().path(), &allow_symlinks()),
@@ -256,7 +296,8 @@ fn verify_validates_the_target_when_symlinks_are_allowed() {
         &dir,
         &[Item::File("a.txt", b"hi"), Item::Link("link", b"a.txt")],
     );
-    let report = verify_archive(&inside, &allow_symlinks()).unwrap();
+    let report =
+        verify_archive_with_options(&inside, &allow_symlinks(), &integrity(1 << 20)).unwrap();
     assert_eq!(
         report.status(),
         VerificationStatus::Pass,
@@ -266,7 +307,8 @@ fn verify_validates_the_target_when_symlinks_are_allowed() {
 
     for target in [&b"/etc/passwd"[..], b"../x", b"a/../../x"] {
         let path = archive_of(&dir, &[Item::Link("link", target)]);
-        let report = verify_archive(&path, &allow_symlinks()).unwrap();
+        let report =
+            verify_archive_with_options(&path, &allow_symlinks(), &integrity(1 << 20)).unwrap();
         assert_eq!(report.status(), VerificationStatus::Fail, "{target:?}");
         assert!(
             issue_categories(&report).contains(&IssueCategory::SymlinkEscape),
@@ -274,6 +316,94 @@ fn verify_validates_the_target_when_symlinks_are_allowed() {
             report.issues()
         );
     }
+}
+
+#[test]
+fn verify_without_integrity_warns_that_targets_were_not_validated() {
+    let dir = TempDir::new().unwrap();
+    for target in [&b"a.txt"[..], b"../../x"] {
+        let path = archive_of(
+            &dir,
+            &[Item::File("a.txt", b"hi"), Item::Link("link", target)],
+        );
+
+        let report = verify_archive(&path, &allow_symlinks()).unwrap();
+
+        assert_eq!(report.status(), VerificationStatus::Warning, "{target:?}");
+        assert_eq!(
+            issue_categories(&report),
+            [IssueCategory::SecurityPolicy],
+            "{:?}",
+            report.issues()
+        );
+        let issue = &report.issues()[0];
+        assert_eq!(issue.entry_path, None);
+        assert!(
+            issue.message.contains("1 symlink target was not read"),
+            "{}",
+            issue.message
+        );
+    }
+}
+
+#[test]
+fn verify_without_integrity_still_fails_entries_beneath_an_unread_link() {
+    let dir = TempDir::new().unwrap();
+    let cases: [(&str, Vec<Item<'_>>); 2] = [
+        (
+            "beneath",
+            vec![Item::Link("d", b"sub"), Item::File("d/f", b"x")],
+        ),
+        (
+            "name fold",
+            vec![Item::File("x", b"x"), Item::Link("X", b"sub")],
+        ),
+    ];
+    for (label, items) in cases {
+        let path = archive_of(&dir, &items);
+
+        let report = verify_archive(&path, &allow_symlinks()).unwrap();
+
+        let fails = report.status() == VerificationStatus::Fail;
+        // `X` collides with `x` only where the host folds case.
+        let expected =
+            label != "name fold" || cfg!(any(target_os = "macos", target_os = "windows"));
+        assert_eq!(fails, expected, "{label}: {:?}", report.issues());
+    }
+}
+
+#[test]
+fn verify_fails_a_target_that_runs_through_a_link_the_budget_left_unread() {
+    let filler = vec![b'f'; 20_000];
+    let mut writer = ArchiveWriter::new(Cursor::new(Vec::new())).unwrap();
+    writer.set_content_methods(vec![EncoderConfiguration::new(EncoderMethod::COPY)]);
+    let (filler_entry, _) = Item::File("filler", &filler).entry();
+    let (d_entry, d_data) = Item::Link("d", b"sub").entry();
+    writer
+        .push_archive_entries(
+            vec![filler_entry, d_entry],
+            vec![
+                SourceReader::from(Cursor::new(filler)),
+                SourceReader::from(Cursor::new(d_data.to_vec())),
+            ],
+        )
+        .unwrap();
+    let (l2_entry, l2_data) = Item::Link("l2", b"d/x").entry();
+    writer
+        .push_archive_entry(l2_entry, Some(Cursor::new(l2_data.to_vec())))
+        .unwrap();
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("two-blocks.7z");
+    std::fs::write(&path, writer.finish().unwrap().into_inner()).unwrap();
+
+    let report = verify_archive_with_options(&path, &solid_config(), &integrity(10_000)).unwrap();
+
+    assert_eq!(report.status(), VerificationStatus::Fail);
+    assert!(
+        issue_categories(&report).contains(&IssueCategory::SymlinkEscape),
+        "{:?}",
+        report.issues()
+    );
 }
 
 #[test]
@@ -314,7 +444,7 @@ fn verify_integrity_checks_the_link_in_the_same_decode() {
         report
             .issues()
             .iter()
-            .any(|i| i.message.contains("was not read")),
+            .any(|i| i.message.contains("could not be read")),
         "{:?}",
         report.issues()
     );
@@ -327,12 +457,49 @@ fn verify_integrity_leaves_a_link_unread_when_the_budget_cannot_decode_it() {
 
     let report = verify_archive_with_options(&path, &allow_symlinks(), &integrity(1)).unwrap();
 
+    assert_eq!(report.status(), VerificationStatus::Warning);
+    assert_eq!(report.integrity_status(), IntegrityStatus::Incomplete);
+    assert!(
+        report
+            .issues()
+            .iter()
+            .any(|i| i.message.contains("1 symlink target was not read")),
+        "{:?}",
+        report.issues()
+    );
+}
+
+#[test]
+fn verify_integrity_marks_the_links_of_a_refused_solid_block_unreadable() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("solid.7z");
+    std::fs::write(
+        &path,
+        build(
+            &[Item::File("a.txt", b"hi"), Item::Link("l", b"a.txt")],
+            Layout::Solid,
+            false,
+        ),
+    )
+    .unwrap();
+
+    let report =
+        verify_archive_with_options(&path, &allow_symlinks(), &integrity(1 << 20)).unwrap();
+
     assert_eq!(report.status(), VerificationStatus::Fail);
     assert!(
         report
             .issues()
             .iter()
-            .any(|i| i.message.contains("was not read")),
+            .any(|i| i.message.contains("could not be read")),
+        "{:?}",
+        report.issues()
+    );
+    assert!(
+        report
+            .issues()
+            .iter()
+            .all(|i| !i.message.contains("symlink target was not read")),
         "{:?}",
         report.issues()
     );
@@ -386,7 +553,7 @@ fn extract_creates_the_link_under_allow_symlinks() {
 
 #[cfg(unix)]
 #[test]
-fn extract_refuses_an_escaping_target_before_any_write() {
+fn extract_refuses_an_escaping_target() {
     let cases: [(&str, Vec<Item<'_>>); 5] = [
         ("absolute", vec![Item::Link("l", b"/etc/passwd")]),
         ("parent", vec![Item::Link("l", b"../../x")]),
@@ -409,12 +576,17 @@ fn extract_refuses_an_escaping_target_before_any_write() {
         let mut all = vec![Item::File("a.txt", b"hi")];
         all.extend(items);
         let path = archive_of(&dir, &all);
-        let out = TempDir::new().unwrap();
+        let (container, out) = nested_dest();
 
-        let err = extract_archive(&path, out.path(), &allow_symlinks()).unwrap_err();
+        let err = extract_archive(&path, &out, &allow_symlinks()).unwrap_err();
 
-        assert_matches!(err, ArchiveError::SymlinkEscape { .. }, "{label}");
-        assert!(dir_is_empty(&out), "{label}: nothing may be written");
+        assert_matches!(
+            partial_source(err),
+            ArchiveError::SymlinkEscape { .. },
+            "{label}"
+        );
+        assert!(out.join("a.txt").exists(), "{label}");
+        assert_nothing_outside(&container, label);
     }
 }
 
@@ -459,15 +631,17 @@ fn existing_destination_symlink_is_not_replaced() {
         let result = extract_archive_with_options(&path, out.path(), &allow_symlinks(), &options);
 
         assert_matches!(
-            result,
-            Err(ArchiveError::SymlinkEscape { .. }),
+            partial_source(result.unwrap_err()),
+            ArchiveError::SymlinkEscape { .. },
             "skip_duplicates={skip_duplicates}"
         );
         assert_eq!(
             std::fs::read_link(out.path().join("x")).unwrap(),
             Path::new("p/q")
         );
-        assert!(std::fs::symlink_metadata(out.path().join("a")).is_err());
+        // `a -> x/..` resolves to `p` and is created before `x` is refused.
+        assert!(std::fs::symlink_metadata(out.path().join("a")).is_ok());
+        std::fs::remove_file(out.path().join("a")).unwrap();
     }
 }
 
@@ -509,8 +683,17 @@ fn extract_rejects_an_oversized_non_utf8_or_empty_target() {
 
         let err = extract_archive(&path, out.path(), &allow_symlinks()).unwrap_err();
 
+        let header_refusal = !matches!(err, ArchiveError::PartialExtraction { .. });
+        let err = if header_refusal {
+            err
+        } else {
+            partial_source(err)
+        };
         assert!(err.to_string().contains(expect), "{expect}: {err}");
-        assert!(dir_is_empty(&out), "{expect}");
+        // Empty and oversized targets are refused from the header before any
+        // write; a target that is not UTF-8 needs a decode.
+        assert_eq!(header_refusal, expect != "not valid UTF-8", "{expect}");
+        assert_eq!(dir_is_empty(&out), header_refusal, "{expect}");
     }
 }
 
@@ -527,7 +710,7 @@ fn solid_block_with_a_link_follows_the_solid_policy() {
     std::fs::write(&path, bytes).unwrap();
 
     let refused = SecurityConfig::default().with_allow_symlinks(true);
-    assert_eq!(link_target(&path, &refused), LinkTarget::Unread);
+    assert_eq!(link_target(&path, &refused), LinkTarget::Unreadable);
     let report = verify_archive(&path, &refused).unwrap();
     assert_eq!(report.status(), VerificationStatus::Fail);
     assert!(extract_archive(&path, TempDir::new().unwrap().path(), &refused).is_err());
@@ -551,16 +734,22 @@ fn unresolvable_parent_components_are_refused_in_both_orders() {
         [Item::Link("a", b"d/.."), Item::Link("d", b".")],
         [Item::Link("d", b"."), Item::Link("a", b"d/..")],
     ];
-    for items in orders {
+    for (order, items) in orders.into_iter().enumerate() {
         let dir = TempDir::new().unwrap();
         let path = archive_of(&dir, &items);
         let out = TempDir::new().unwrap();
 
         let err = extract_archive(&path, out.path(), &allow_symlinks()).unwrap_err();
 
-        assert_matches!(err, ArchiveError::SymlinkEscape { .. });
-        assert!(dir_is_empty(&out));
-        let report = verify_archive(&path, &allow_symlinks()).unwrap();
+        if order == 0 {
+            assert_matches!(err, ArchiveError::SymlinkEscape { .. });
+            assert!(dir_is_empty(&out));
+        } else {
+            assert_matches!(partial_source(err), ArchiveError::SymlinkEscape { .. });
+            assert!(std::fs::symlink_metadata(out.path().join("d")).is_ok());
+        }
+        let report =
+            verify_archive_with_options(&path, &allow_symlinks(), &integrity(1 << 20)).unwrap();
         assert_eq!(report.security_status(), CheckStatus::Fail);
     }
 }
@@ -669,7 +858,7 @@ fn solid_config() -> SecurityConfig {
 
 #[cfg(unix)]
 #[test]
-fn an_escaping_link_inside_a_solid_block_is_refused_before_any_write() {
+fn an_escaping_link_inside_a_solid_block_is_refused() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("solid.7z");
     std::fs::write(
@@ -685,17 +874,20 @@ fn an_escaping_link_inside_a_solid_block_is_refused_before_any_write() {
         ),
     )
     .unwrap();
-    let out = TempDir::new().unwrap();
+    let (container, out) = nested_dest();
 
-    let err = extract_archive(&path, out.path(), &solid_config()).unwrap_err();
+    let err = extract_archive(&path, &out, &solid_config()).unwrap_err();
 
-    assert_matches!(err, ArchiveError::SymlinkEscape { .. });
-    assert!(dir_is_empty(&out));
+    assert_matches!(partial_source(err), ArchiveError::SymlinkEscape { .. });
+    assert!(out.join("a.txt").exists());
+    assert!(std::fs::symlink_metadata(out.join("ok")).is_ok());
+    assert!(std::fs::symlink_metadata(out.join("evil")).is_err());
+    assert_nothing_outside(&container, "solid escape");
 }
 
 #[cfg(unix)]
 #[test]
-fn a_corrupt_link_inside_a_solid_block_fails_extract_before_any_write() {
+fn a_corrupt_link_inside_a_solid_block_fails_extract() {
     let dir = TempDir::new().unwrap();
     let mut bytes = build(
         &[
@@ -709,16 +901,21 @@ fn a_corrupt_link_inside_a_solid_block_fails_extract_before_any_write() {
     flip_first(&mut bytes, b"FIRSTFIRST");
     let path = dir.path().join("solid.7z");
     std::fs::write(&path, bytes).unwrap();
-    let out = TempDir::new().unwrap();
+    let (container, out) = nested_dest();
 
-    let err = extract_archive(&path, out.path(), &solid_config()).unwrap_err();
+    let err = extract_archive(&path, &out, &solid_config()).unwrap_err();
 
-    assert_matches!(err, ArchiveError::InvalidArchive(reason) if reason.contains("failed to read 7z symlink target"));
-    assert!(dir_is_empty(&out));
+    assert_matches!(
+        partial_source(err),
+        ArchiveError::InvalidArchive(reason) if reason.contains("failed to read 7z symlink target")
+    );
+    assert!(out.join("a.txt").exists());
+    assert!(std::fs::symlink_metadata(out.join("l1")).is_err());
+    assert_nothing_outside(&container, "solid corrupt");
     assert_eq!(
         link_target(&path, &solid_config()),
-        LinkTarget::Unread,
-        "the corrupt link stays unread in a listing"
+        LinkTarget::Unreadable,
+        "the corrupt link is unreadable in a listing"
     );
 }
 

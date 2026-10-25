@@ -726,6 +726,10 @@ fn filter_banned_components(raw: &[String]) -> Vec<String> {
 /// count that drives the progress bar. Neither needs link targets, and
 /// extraction reads them itself, so the listing leaves 7z targets undecoded.
 ///
+/// Header-known 7z link targets (empty or oversized) are still checked here,
+/// as `list` does whatever the link policy, so such a target fails with its own
+/// error before extraction can say that symlinks are not allowed.
+///
 /// A ZIP structure rejection keeps its own message and hint, since that is the
 /// error the user has to act on.
 fn list_for_extract(archive: &Path, config: &SecurityConfig) -> Result<ArchiveManifest> {

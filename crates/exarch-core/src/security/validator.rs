@@ -12,8 +12,10 @@ use crate::config::Validated;
 use crate::formats::common::DirCache;
 use crate::security::context::ValidationContext;
 use crate::security::hardlink::HardlinkTracker;
+use crate::security::hardlink::require_hardlinks_allowed;
 use crate::security::permissions::SanitizedMode;
 use crate::security::permissions::sanitize_permissions;
+use crate::security::quota::EntryCount;
 use crate::security::quota::QuotaPermit;
 use crate::security::quota::QuotaTracker;
 use crate::security::symlink::validate_symlink;
@@ -23,6 +25,7 @@ use crate::types::EntryType;
 use crate::types::SafePath;
 use crate::types::SafeSymlink;
 use crate::types::safe_path::EMPTY_PATH_REASON;
+use crate::types::safe_symlink::require_symlinks_allowed;
 
 /// Whether an archive entry is a directory, as the root-entry rule sees it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -228,9 +231,13 @@ pub enum ValidatedEntryType {
     Symlink(SafeSymlink),
 
     /// Hardlink (validated in tracker, target path stored for two-pass)
+    #[non_exhaustive]
     Hardlink {
         /// Target path (already validated)
         target: SafePath,
+        /// Proof the hardlink was counted against `max_file_count` in the
+        /// first pass; the second pass spends it to charge the copied bytes.
+        counted: EntryCount,
     },
 }
 
@@ -306,8 +313,9 @@ impl<'a> EntryValidator<'a> {
     ///
     /// This method orchestrates all security validations:
     /// 1. Path validation (traversal, depth, banned components)
-    /// 2. Quota checking (file size, count, total size) — `EntryType::File`
-    ///    only
+    /// 2. Quota checking (file size, count, total size) — files and symlinks; a
+    ///    hardlink is counted here and charged its bytes in the second pass.
+    ///    Directories are not counted
     /// 3. Compression ratio validation (zip bomb detection)
     /// 4. Type-specific validation (symlink, hardlink, permissions)
     ///
@@ -357,6 +365,8 @@ impl<'a> EntryValidator<'a> {
 
             EntryType::Symlink { target } => {
                 self.check_ratio(compressed_size, uncompressed_size)?;
+                require_symlinks_allowed(self.config)?;
+                self.reserve_symlink(uncompressed_size)?;
                 let safe_symlink = validate_symlink(&safe_path, target, self.dest, self.config)?;
                 self.symlink_seen = true;
                 (ValidatedEntryType::Symlink(safe_symlink), None)
@@ -364,6 +374,8 @@ impl<'a> EntryValidator<'a> {
 
             EntryType::Hardlink { target } => {
                 self.check_ratio(compressed_size, uncompressed_size)?;
+                require_hardlinks_allowed(self.config)?;
+                let counted = self.quota_tracker.reserve_count(self.config)?;
 
                 // Hardlink tracker validates: absolute paths, traversal,
                 // normalization, escapes
@@ -381,6 +393,7 @@ impl<'a> EntryValidator<'a> {
                 (
                     ValidatedEntryType::Hardlink {
                         target: target_safe,
+                        counted,
                     },
                     None,
                 )
@@ -439,7 +452,7 @@ impl<'a> EntryValidator<'a> {
     /// Reserves quota capacity for a regular file's byte count, independent
     /// of path validation.
     ///
-    /// Mirrors [`reserve_hardlink`](Self::reserve_hardlink), which exists for
+    /// Mirrors [`charge_hardlink`](Self::charge_hardlink), which exists for
     /// the same reason on the hardlink path: reserving quota unconditionally
     /// inside `validate_entry` and only checking for a duplicate afterward
     /// would permanently consume the entry's quota allotment on the skip
@@ -480,23 +493,41 @@ impl<'a> EntryValidator<'a> {
         Ok(())
     }
 
-    /// Reserves quota capacity for a hardlink's copied byte count against the
-    /// shared quota tracker, returning a capability token that proves the
-    /// reservation succeeded.
+    /// Reserves quota capacity for a symlink, charging its stored size the way
+    /// `list` and `verify` do.
     ///
-    /// Hardlinks are validated for path/target escape during the first pass
-    /// (`validate_entry`), but their size is only known once the target file
-    /// exists on disk, in the second pass. This routes that size through the
-    /// same `QuotaTracker` used for regular files, so `max_file_size`,
-    /// `max_file_count`, and `max_total_size` are enforced uniformly
-    /// regardless of entry type.
+    /// Counts the symlink against `max_file_count` so a link flood is bounded
+    /// like a file flood. The permit is discarded: no writer consumes one for a
+    /// link.
     ///
     /// # Errors
     ///
-    /// Returns [`ArchiveError::QuotaExceeded`] if recording this hardlink
-    /// would exceed `max_file_size`, `max_file_count`, or `max_total_size`.
-    pub(crate) fn reserve_hardlink(&mut self, size: u64) -> Result<QuotaPermit> {
-        self.quota_tracker.reserve(size, self.config)
+    /// Returns [`ArchiveError::QuotaExceeded`] if recording the link would
+    /// exceed `max_file_size`, `max_file_count`, or `max_total_size`.
+    pub(crate) fn reserve_symlink(&mut self, size: u64) -> Result<()> {
+        self.quota_tracker.reserve(size, self.config).map(drop)
+    }
+
+    /// Charges a hardlink's copied byte count against the shared quota tracker,
+    /// returning a capability token that proves the charge succeeded.
+    ///
+    /// The hardlink was already counted against `max_file_count` in the first
+    /// pass (`validate_entry`), which is what `counted` proves; its size is
+    /// only known once the target file exists on disk, in the second pass. This
+    /// routes that size through the same `QuotaTracker` used for regular files,
+    /// so `max_file_size` and `max_total_size` are enforced uniformly
+    /// regardless of entry type, without counting the entry twice.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArchiveError::QuotaExceeded`] if the copy would exceed
+    /// `max_file_size` or `max_total_size`.
+    pub(crate) fn charge_hardlink(
+        &mut self,
+        counted: EntryCount,
+        size: u64,
+    ) -> Result<QuotaPermit> {
+        self.quota_tracker.charge(counted, size, self.config)
     }
 
     /// Finishes validation and returns a summary report.
@@ -516,7 +547,8 @@ impl<'a> EntryValidator<'a> {
 /// Summary report of validation process.
 #[derive(Debug)]
 pub struct ValidationReport {
-    /// Number of files validated
+    /// Number of entries counted against `max_file_count`: files, symlinks and
+    /// hardlinks (directories are not counted)
     pub files_validated: usize,
 
     /// Total bytes processed
@@ -882,7 +914,7 @@ mod tests {
             .unwrap();
 
         let report = validator.finish();
-        assert_eq!(report.files_validated, 1); // Only files counted
+        assert_eq!(report.files_validated, 2); // File and hardlink; directories are not counted
         assert_eq!(report.total_bytes, 1024);
         assert_eq!(report.hardlinks_tracked, 1);
     }
@@ -1062,19 +1094,54 @@ mod tests {
 
     // Issue #426: hardlink quota bypass regression tests.
 
+    fn validate_hardlink_entry(
+        validator: &mut EntryValidator<'_>,
+        name: &str,
+    ) -> crate::Result<EntryCount> {
+        let entry = validator.validate_entry(
+            Path::new(name),
+            &EntryType::Hardlink {
+                target: PathBuf::from("target.txt"),
+            },
+            0,
+            None,
+            None,
+            None,
+        )?;
+        match entry.into_parts() {
+            (_, ValidatedEntryType::Hardlink { counted, .. }, _) => Ok(counted),
+            other => panic!("expected a hardlink, got {other:?}"),
+        }
+    }
+
+    fn validate_symlink_entry(
+        validator: &mut EntryValidator<'_>,
+        name: &str,
+    ) -> crate::Result<ValidatedEntry> {
+        validator.validate_entry(
+            Path::new(name),
+            &EntryType::Symlink {
+                target: PathBuf::from("target.txt"),
+            },
+            0,
+            None,
+            None,
+            None,
+        )
+    }
+
     #[test]
-    fn test_reserve_hardlink_exceeding_max_file_size_rejected() {
+    fn test_charge_hardlink_exceeding_max_file_size_rejected() {
         let temp = TempDir::new().unwrap();
         let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
         let mut config = SecurityConfig::default();
+        config.allowed.hardlinks = true;
         config.max_file_size = 100;
         let config = config.validate().expect("valid config");
         let mut validator = EntryValidator::new(&config, &dest);
 
-        // A single hardlink whose on-disk target size alone exceeds
-        // max_file_size must be rejected, exactly like an oversized regular
-        // file would be.
-        let result = validator.reserve_hardlink(1_000);
+        let counted = validate_hardlink_entry(&mut validator, "link").unwrap();
+        let result = validator.charge_hardlink(counted, 1_000);
 
         assert_matches!(
             result,
@@ -1086,7 +1153,7 @@ mod tests {
     }
 
     #[test]
-    fn test_reserve_hardlink_shares_quota_tracker_with_files() {
+    fn test_charge_hardlink_shares_quota_tracker_with_files() {
         let temp = TempDir::new().unwrap();
         let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
         let mut config = SecurityConfig::default();
@@ -1095,7 +1162,6 @@ mod tests {
         let config = config.validate().expect("valid config");
         let mut validator = EntryValidator::new(&config, &dest);
 
-        // A regular file consumes part of the shared total-size budget...
         validator
             .validate_entry(
                 Path::new("file1.txt"),
@@ -1107,11 +1173,11 @@ mod tests {
             )
             .unwrap();
 
-        // ...and a hardlink recorded afterwards must be charged against the
-        // same tracker, not a separate/untracked counter.
-        assert!(validator.reserve_hardlink(100).is_ok());
+        let first = validate_hardlink_entry(&mut validator, "link1").unwrap();
+        let second = validate_hardlink_entry(&mut validator, "link2").unwrap();
+        assert!(validator.charge_hardlink(first, 100).is_ok());
 
-        let result = validator.reserve_hardlink(100);
+        let result = validator.charge_hardlink(second, 100);
         assert_matches!(
             result,
             Err(crate::ArchiveError::QuotaExceeded {
@@ -1123,24 +1189,94 @@ mod tests {
     }
 
     #[test]
-    fn test_reserve_hardlink_exceeding_max_file_count() {
+    fn test_hardlink_counted_once_in_pass_one() {
         let temp = TempDir::new().unwrap();
         let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
         let mut config = SecurityConfig::default();
+        config.allowed.hardlinks = true;
         config.max_file_count = 2;
         let config = config.validate().expect("valid config");
         let mut validator = EntryValidator::new(&config, &dest);
 
-        assert!(validator.reserve_hardlink(1).is_ok());
-        assert!(validator.reserve_hardlink(1).is_ok());
+        let first = validate_hardlink_entry(&mut validator, "link1").unwrap();
+        let second = validate_hardlink_entry(&mut validator, "link2").unwrap();
 
-        let result = validator.reserve_hardlink(1);
+        let result = validate_hardlink_entry(&mut validator, "link3");
         assert_matches!(
             result,
             Err(crate::ArchiveError::QuotaExceeded {
                 resource: crate::QuotaResource::FileCount { .. }
             }),
-            "hardlink count alone exceeding max_file_count must be rejected, got: {result:?}"
+            "the third hardlink must exceed max_file_count in pass one, got: {result:?}"
+        );
+
+        assert!(validator.charge_hardlink(first, 1).is_ok());
+        assert!(validator.charge_hardlink(second, 1).is_ok());
+        assert_eq!(validator.finish().files_validated, 3);
+    }
+
+    #[test]
+    fn test_symlink_exceeding_max_file_count_rejected() {
+        let temp = TempDir::new().unwrap();
+        let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
+        let mut config = SecurityConfig::default();
+        config.allowed.symlinks = true;
+        config.max_file_count = 2;
+        let config = config.validate().expect("valid config");
+        let mut validator = EntryValidator::new(&config, &dest);
+
+        assert!(validate_symlink_entry(&mut validator, "l1").is_ok());
+        assert!(validate_symlink_entry(&mut validator, "l2").is_ok());
+
+        let result = validate_symlink_entry(&mut validator, "l3");
+        assert_matches!(
+            result,
+            Err(crate::ArchiveError::QuotaExceeded {
+                resource: crate::QuotaResource::FileCount { .. }
+            }),
+            "symlinks must count against max_file_count, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_symlink_policy_error_wins_over_file_count() {
+        let temp = TempDir::new().unwrap();
+        let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
+        let mut config = SecurityConfig::default();
+        config.max_file_count = 1;
+        let config = config.validate().expect("valid config");
+        let mut validator = EntryValidator::new(&config, &dest);
+        validator
+            .validate_entry(Path::new("f"), &EntryType::File, 1, None, None, None)
+            .unwrap();
+
+        let result = validate_symlink_entry(&mut validator, "l1");
+        assert_matches!(
+            result,
+            Err(crate::ArchiveError::SecurityViolation { ref reason })
+                if reason == "symlinks not allowed",
+            "got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_hardlink_policy_error_wins_over_file_count() {
+        let temp = TempDir::new().unwrap();
+        let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
+        let mut config = SecurityConfig::default();
+        config.max_file_count = 1;
+        let config = config.validate().expect("valid config");
+        let mut validator = EntryValidator::new(&config, &dest);
+        validator
+            .validate_entry(Path::new("f"), &EntryType::File, 1, None, None, None)
+            .unwrap();
+
+        let result = validate_hardlink_entry(&mut validator, "l1");
+        assert_matches!(
+            result,
+            Err(crate::ArchiveError::SecurityViolation { ref reason })
+                if reason == "hardlinks not allowed",
+            "got: {result:?}"
         );
     }
 }

@@ -27,7 +27,9 @@ use crate::error::convert_error;
 ///   MB)
 /// * `max_compression_ratio` - Maximum compression ratio allowed (default:
 ///   100.0); not applied to solid 7z blocks, which use a fixed 1000x limit
-/// * `max_file_count` - Maximum number of files (default: 10,000)
+/// * `max_file_count` - Maximum number of files, symlinks and hardlinks that
+///   `extract_archive` creates, directories not counted; `list_archive` and
+///   `verify_archive` count every entry (default: 10,000)
 /// * `max_path_depth` - Maximum path depth allowed (default: 32)
 /// * `preserve_permissions` - Preserve file permissions from archive (default:
 ///   False)

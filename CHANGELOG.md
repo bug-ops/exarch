@@ -22,9 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ZIP corpus script adds Go, Python unseekable, `bsdtar`, Info-ZIP and `7z` streaming producers (#688).
 - `ParallelDecode` and `--parallel-decode-memory` bound the memory of parallel 7z LZMA2 decoding (#688).
 - 7z BCJ2 pack stream bound fixtures and tests (#688).
-- 7z Unix-mode symlinks are read and validated through the symlink policy: `extract` creates them under `allow_symlinks`, and `list` and `verify` report the target (#714, #723).
+- 7z Unix-mode symlinks are validated through the symlink policy: `extract` creates them under `allow_symlinks`, `list` reads the target on request, and `verify` validates it under `--check-integrity` (#714, #723).
 - `IssueCategory::ArchiveNote` for informational findings that need no action, reported in the core, CLI, Python and Node (#716, #723).
-- `list_archive_with_options` with `ListOptions` and `StoredTargets` to list without decoding 7z link targets (Rust API) (#714, #723).
+- `list_archive_with_options` with `ListOptions` and `StoredTargets` to read 7z link targets on request (Rust API), and `exarch list --read-link-targets` (#714, #718, #723).
+- `LinkTarget::Unreadable` for a 7z link target whose read failed or was refused, apart from `Unread` for a target not read (#718).
 
 ### Changed
 
@@ -85,12 +86,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The `verify` pre-flight listing mode is a `ListPass` type instead of a `SecurityConfig` flag, so extraction cannot receive relaxed ZIP path or size checks (#705).
 - Internal: path validation and listing take the root-entry decision from one `EntryPath` and `NodeKind` instead of a `bool`; ZIP keeps its own rule that accepts an empty `.` file (#704, #709).
 - **BREAKING:** 7z `extract` of a Unix-mode symlink fails with `symlinks not allowed` unless `allow_symlinks` is set, and creates the link with it (#714, #723).
-- **BREAKING:** 7z `list` and `verify --allow-symlinks` fail with `InvalidArchive` on a symlink target that is not UTF-8, as ZIP does; the previous release listed it as unread (#714, #723).
+- **BREAKING:** 7z `list --read-link-targets`, `verify --check-integrity` and `extract` fail with `InvalidArchive` on a symlink target that is not UTF-8, as ZIP does (#714, #723).
 - **BREAKING:** 7z `list`, `verify` and `extract` fail with `SecurityViolation` on a FIFO, socket or device node (also when stream-less, as `bsdtar` writes them), an undefined Unix type, and a Unix mode or Windows directory bit that contradicts the entry's own kind (#715, #723).
 - **BREAKING:** The 7z anti-item `verify` finding is reported under the new `IssueCategory::ArchiveNote` instead of `SuspiciousPath`, and `IssueCategory::is_security` is `false` for it (#716, #723).
 - **BREAKING:** TAR and ZIP `extract` and `verify` refuse a symlink or hardlink target that leaves a directory the archive creates later; the same target is accepted when the directory entry comes first (#723).
-- 7z symlink targets are checked against the destination before any write, so a target whose `..` leaves a directory from the same archive is refused even when that directory comes first (#714, #723).
+- 7z `extract` refuses a symlink target whose `..` leaves a directory the archive creates later, even when that directory comes first (#714, #723).
 - `exarch extract` lists 7z archives without decoding link targets (#714, #723).
+- **BREAKING:** `StoredTargets` defaults to `Skip`, so 7z `list` no longer reads link targets; opt in with `StoredTargets::Read` or `list --read-link-targets` (#718, #PR).
+- **BREAKING:** `verify --allow-symlinks` of a 7z archive warns (exit 0) instead of failing unless `--check-integrity` reads the link targets; gate on `--strict` or `--check-integrity` (#718, #PR).
+- **BREAKING:** 7z `extract` decodes each block once, so a refused link target is a `PartialExtraction` after earlier entries; use `--atomic` for all-or-nothing (#718, #PR).
+- **BREAKING:** `max_file_count` counts symlinks and hardlinks in `extract`, and `ValidatedEntryType::Hardlink` carries a `counted: EntryCount` (#719, #PR).
+- 7z `list -l` shows `(target not read)` or `(target unreadable)` for a link without a target (#718, #PR).
 - `verify` reports an unread symlink target as `symlinks not allowed` when symlinks are disallowed (#714, #723).
 
 ### Fixed

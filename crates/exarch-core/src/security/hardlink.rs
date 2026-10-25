@@ -23,6 +23,22 @@ pub fn hardlink_target_missing(target: &Path) -> ArchiveError {
     ))
 }
 
+/// Fails with the hardlink-policy refusal unless `config` allows hardlinks.
+///
+/// # Errors
+///
+/// Returns `SecurityViolation` ("hardlinks not allowed") when hardlinks are
+/// disabled.
+pub fn require_hardlinks_allowed(config: &SecurityConfig<Validated>) -> Result<()> {
+    if config.allowed.hardlinks {
+        Ok(())
+    } else {
+        Err(ArchiveError::SecurityViolation {
+            reason: "hardlinks not allowed".into(),
+        })
+    }
+}
+
 /// Tracks hardlink targets during extraction.
 ///
 /// Hardlinks in archives can be used for attacks:
@@ -143,12 +159,7 @@ impl HardlinkTracker {
         config: &SecurityConfig<Validated>,
         view: &V,
     ) -> Result<()> {
-        // Check if hardlinks are allowed
-        if !config.allowed.hardlinks {
-            return Err(ArchiveError::SecurityViolation {
-                reason: "hardlinks not allowed".into(),
-            });
-        }
+        require_hardlinks_allowed(config)?;
 
         // Reject empty targets: they do not point anywhere.
         if target.is_empty() {

@@ -84,6 +84,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- 7z `extract`, `list` and `verify` classify entries with one shared classifier: a reparse-point entry is refused before any write, and 7z anti-items are skipped by all three instead of being created or truncated by `extract` (unlike `7z x`, which deletes them) (#707, #708, #710).
+- **BREAKING:** 7z `extract` of a reparse-point entry fails with `SecurityViolation` instead of `InvalidArchive` (Python `SecurityViolationError` instead of `InvalidArchiveError`) (#708, #710).
+- **BREAKING:** 7z `list` and `verify` fail with `SecurityViolation` on an entry with an empty name, as `extract` already did; `verify` no longer reports it as a FAIL issue (#708, #710).
 - 7z `extract`, `list` and `verify` reject a `.` root entry that is not a directory, as TAR does (#703, #709).
 - TAR `extract`, `list` and `verify` reject a `.` or `./` root entry that is not a directory, and read an empty regular entry with a trailing-slash name (V7) as a directory (#701, #706).
 - `exarch-cli` skill states that an all-zero tail after the last zstd frame fails `verify --check-integrity` (#699, #706).

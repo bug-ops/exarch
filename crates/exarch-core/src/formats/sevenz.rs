@@ -27,8 +27,9 @@
 //!
 //! - **Windows symlinks**: Detected via `FILE_ATTRIBUTE_REPARSE_POINT` and
 //!   rejected
-//! - **Unix symlinks**: Cannot be detected, extracted as regular files (target
-//!   path becomes file content)
+//! - **Unix symlinks**: Not yet recognized (p7zip keeps `S_IFLNK` in the
+//!   Windows attributes), so they are classified as regular files and are NOT
+//!   refused; the target path becomes file content (known limitation)
 //! - **Hardlinks**: Cannot be detected, extracted as separate files (data
 //!   duplication)
 //!
@@ -167,6 +168,7 @@ use crate::inspection::integrity::DecodeFailure;
 use crate::inspection::integrity::DecodeOutcome;
 use crate::inspection::integrity::IntegrityPass;
 use crate::inspection::integrity::Slot;
+use crate::inspection::manifest::ManifestEntryType;
 use crate::inspection::report::IssueCategory;
 use crate::inspection::report::IssueSeverity;
 use crate::inspection::report::UnverifiedReason;
@@ -192,7 +194,7 @@ use super::traits::ArchiveFormat;
 struct CachedEntry {
     name: String,
     size: u64,
-    is_directory: bool,
+    class: SevenZClass,
     /// Validated compression info; see [`sevenz_entry_compression`].
     compression: EntryCompression,
 }
@@ -1201,7 +1203,7 @@ impl<R: Read + Seek> SevenZArchive<R> {
             .map(|(e, compression)| CachedEntry {
                 name: e.name.clone(),
                 size: e.size,
-                is_directory: e.is_directory(),
+                class: SevenZClass::of(e),
                 compression,
             })
             .collect();
@@ -1497,6 +1499,7 @@ impl<R: Read + Seek> SevenZArchive<R> {
     )]
     fn process_entry_inner(
         entry: &sevenz_rust2::ArchiveEntry,
+        kind: SevenZKind,
         reader: &mut dyn Read,
         entry_path: &std::path::Path,
         validator: &mut EntryValidator,
@@ -1510,7 +1513,7 @@ impl<R: Read + Seek> SevenZArchive<R> {
         pending_error: &mut Option<ArchiveError>,
         copy_buffer: &mut CopyBuffer,
     ) -> std::result::Result<u64, sevenz_rust2::Error> {
-        let entry_type = SevenZEntryAdapter::to_entry_type(entry).map_err(|e| {
+        let entry_type = kind.extraction_type(&entry.name).map_err(|e| {
             sevenz_rust2::Error::Other(format!("entry type detection failed: {e}").into())
         })?;
 
@@ -1545,11 +1548,7 @@ impl<R: Read + Seek> SevenZArchive<R> {
         // `SafePath::validate_with_context` to canonicalize the parent every
         // time, so the swap is always caught.
         let safe_path = validator
-            .validate_entry_path(
-                entry_path,
-                NodeKind::directory_if(matches!(entry_type, EntryType::Directory)),
-                None,
-            )
+            .validate_entry_path(entry_path, kind.node_kind(), None)
             .map_err(|e| sevenz_rust2::Error::Other(format!("validation failed: {e}").into()))?
             .into_inner();
         let dest_path = dest.join_path(safe_path.as_path());
@@ -1773,6 +1772,9 @@ impl<R: Read + Seek> SevenZArchive<R> {
         let mut extract_fn = |entry: &sevenz_rust2::ArchiveEntry,
                               reader: &mut dyn Read|
          -> std::result::Result<bool, sevenz_rust2::Error> {
+            let SevenZClass::Present(kind) = SevenZClass::of(entry) else {
+                return Ok(true);
+            };
             let entry_path = std::path::PathBuf::from(common::normalize_entry_name(&entry.name));
             ctx.current_idx = ctx.current_idx.saturating_add(1);
             let idx = ctx.current_idx;
@@ -1781,6 +1783,7 @@ impl<R: Read + Seek> SevenZArchive<R> {
 
             let result = Self::process_entry_inner(
                 entry,
+                kind,
                 reader,
                 &entry_path,
                 validator,
@@ -1891,26 +1894,28 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
         // PERFORMANCE: Uses cached metadata from new() to avoid re-parsing
         // archive
         //
-        // API LIMITATION (sevenz-rust2): symlink detection is not exposed, so
-        // non-directory entries are treated as files.
+        // API LIMITATION (sevenz-rust2): only Windows reparse points are
+        // detectable as links; other non-directory entries are treated as
+        // files.
         let mut prevalidator = EntryValidator::new(config, &dest);
         for entry in &self.entries {
+            let SevenZClass::Present(kind) = entry.class else {
+                continue;
+            };
             let path = std::path::PathBuf::from(common::normalize_entry_name(&entry.name));
 
             // Path-only validation here; quota for File entries is reserved
             // below, after checking whether this entry would be skipped as a
             // duplicate at the destination, so pre-validation does not
             // over-count entries Step 3 will actually skip (issue #478).
-            let safe_path = match prevalidator.validate_entry_path(
-                &path,
-                NodeKind::directory_if(entry.is_directory),
-                None,
-            )? {
+            let safe_path = match prevalidator.validate_entry_path(&path, kind.node_kind(), None)? {
                 EntryPath::Root(_) => continue,
                 EntryPath::Child(safe_path) => safe_path,
             };
 
-            if entry.is_directory {
+            // Refuses links before anything is written, like `verify`.
+            kind.extraction_type(&entry.name)?;
+            if kind == SevenZKind::Directory {
                 continue;
             }
 
@@ -1952,7 +1957,12 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
 
         // Empty archives: skip extraction entirely — decompress_with_extract_fn
         // would fail with UnexpectedEof on valid 32-byte empty 7z archives.
-        if self.entries.is_empty() {
+        let total = self
+            .entries
+            .iter()
+            .filter(|entry| matches!(entry.class, SevenZClass::Present(_)))
+            .count();
+        if total == 0 {
             return Ok(ExtractionReport::new());
         }
 
@@ -1962,7 +1972,6 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
         // still has real entry metadata to read.
         let mut validator = EntryValidator::new(config, &dest);
         let mut dir_cache = common::DirCache::new();
-        let total = self.entries.len();
 
         let report = Self::extract_with_callback(
             &mut self.source,
@@ -2012,97 +2021,102 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
     }
 }
 
-/// Adapter to convert sevenz-rust2 entry types to our `EntryType` enum.
+/// How a 7z archive entry is treated, decided once for `extract`, `list` and
+/// `verify` so they cannot disagree.
 ///
 /// # Known Limitations (sevenz-rust2 0.24)
 ///
-/// - **Symlinks (Unix)**: Not reliably detectable. The 7z format supports Unix
-///   symlinks, but sevenz-rust2 does not expose entry type information.
-///   Symlinks may be extracted as regular files containing the target path.
-///
-/// - **Symlinks (Windows)**: Partially detectable via
-///   `FILE_ATTRIBUTE_REPARSE_POINT` in Windows attributes. Archives created on
-///   Windows with symlinks will be rejected with a `SecurityViolation` error.
-///
-/// - **Hardlinks**: Not detectable. Hardlinks will be extracted as separate
-///   files (duplication instead of linking).
-///
-/// - **Unix mode**: Not exposed, so permission sanitization cannot be applied
-///   to 7z archives.
-///
-/// # Security Implications
-///
-/// The lack of symlink detection means:
-/// - **No symlink escapes** (good): Symlinks are not created, so they cannot
-///   escape the extraction directory.
-/// - **Silent feature loss** (bad): Users may expect symlinks to work but they
-///   will be extracted as files.
-/// - **Defense-in-depth gap**: We cannot explicitly validate and reject
-///   archives with symlinks (except Windows reparse points).
-///
-/// # Future Work
-///
-/// When sevenz-rust2 adds symlink detection APIs:
-/// 1. Update `to_entry_type()` to return `EntryType::Symlink { target }`
-/// 2. Integrate with existing `validate_symlink()` validator
-/// 3. Add tests for symlink escapes (similar to TAR/ZIP)
-/// 4. Remove Windows-only detection workaround
-struct SevenZEntryAdapter;
+/// - **Symlinks (Unix)**: p7zip stores the mode (`S_IFLNK`) in the Windows
+///   attributes, which this classifier does not read yet, so such symlinks are
+///   classified as [`SevenZKind::File`] and are NOT refused (known limitation).
+/// - **Symlinks (Windows)**: detected through `FILE_ATTRIBUTE_REPARSE_POINT`
+///   and refused on extraction.
+/// - **Hardlinks**: not detectable; extracted as separate files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SevenZClass {
+    /// A "delete this path" marker of an incremental update. Never extracted,
+    /// validated, counted against quota or listed. Unlike `7z x`, which applies
+    /// it as a deletion, exarch deliberately skips it: it applies no
+    /// deletions, and materializing one would truncate an existing file.
+    AntiItem,
+    /// An entry that stands for something on disk.
+    Present(SevenZKind),
+}
 
-impl SevenZEntryAdapter {
-    /// Converts 7z entry to our `EntryType` enum.
-    ///
-    /// # Security Note
-    ///
-    /// Due to sevenz-rust2 API limitations, this function cannot reliably
-    /// detect symlinks or hardlinks:
-    ///
-    /// - **Windows symlinks**: Detected via `FILE_ATTRIBUTE_REPARSE_POINT` and
-    ///   rejected
-    /// - **Unix symlinks**: Not detectable, extracted as regular files
-    ///   (documented limitation)
-    /// - **Hardlinks**: Not detectable, extracted as separate files
+/// What a present 7z entry stands for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SevenZKind {
+    /// A regular file.
+    File,
+    /// A directory.
+    Directory,
+    /// A Windows reparse point (symlink or junction), file or directory.
+    ReparsePoint,
+}
+
+impl SevenZClass {
+    /// Classifies an entry. An anti item wins over every other attribute, and
+    /// a reparse point wins over the directory flag because junctions are
+    /// directories.
+    pub(crate) fn of(entry: &sevenz_rust2::ArchiveEntry) -> Self {
+        if entry.is_anti_item {
+            Self::AntiItem
+        } else if is_windows_reparse_point(entry) {
+            Self::Present(SevenZKind::ReparsePoint)
+        } else if entry.is_directory() {
+            Self::Present(SevenZKind::Directory)
+        } else {
+            Self::Present(SevenZKind::File)
+        }
+    }
+}
+
+impl SevenZKind {
+    /// How the root-entry rule sees this entry.
+    pub(crate) const fn node_kind(self) -> NodeKind {
+        match self {
+            Self::Directory => NodeKind::Directory,
+            Self::File | Self::ReparsePoint => NodeKind::NonDirectory,
+        }
+    }
+
+    /// The entry type `list` and `verify` report.
+    pub(crate) const fn manifest_type(self) -> ManifestEntryType {
+        match self {
+            Self::File => ManifestEntryType::File,
+            Self::Directory => ManifestEntryType::Directory,
+            Self::ReparsePoint => ManifestEntryType::Symlink,
+        }
+    }
+
+    /// The entry type to extract. `name` is the entry's name, for the message.
     ///
     /// # Errors
     ///
-    /// Returns `SecurityViolation` if Windows reparse point is detected
-    /// (symlinks on Windows).
-    fn to_entry_type(entry: &sevenz_rust2::ArchiveEntry) -> Result<EntryType> {
-        // SECURITY: Check Windows attributes for reparse points FIRST
-        // This applies to BOTH files AND directories (e.g., directory
-        // junctions)
-        if is_windows_reparse_point(entry) {
-            return Err(ArchiveError::SecurityViolation {
+    /// Returns `SecurityViolation` for a reparse point: link extraction is not
+    /// supported.
+    pub(crate) fn extraction_type(self, name: &str) -> Result<EntryType> {
+        match self {
+            Self::File => Ok(EntryType::File),
+            Self::Directory => Ok(EntryType::Directory),
+            Self::ReparsePoint => Err(ArchiveError::SecurityViolation {
                 reason: format!(
-                    "symlink detected in 7z archive: {} \
+                    "symlink detected in 7z archive: {name} \
                      (Windows reparse point attribute set). \
-                     7z symlink extraction is not supported due to sevenz-rust2 API limitations.",
-                    entry.name
+                     7z symlink extraction is not supported due to sevenz-rust2 API limitations."
                 ),
-            });
+            }),
         }
-
-        if entry.is_directory() {
-            return Ok(EntryType::Directory);
-        }
-
-        // Default: regular file
-        // KNOWN LIMITATION: Unix symlinks cannot be detected and will be
-        // extracted as files
-        Ok(EntryType::File)
     }
 }
 
 /// Checks if Windows attributes indicate a reparse point (symlink/junction).
 ///
-/// Shared by extraction and listing so both classify the same entries as
-/// links; checked before the directory flag because junctions are directories.
-///
 /// **Limitation:** Only detects symlinks created on Windows.
 /// Unix symlinks in 7z archives may not have Windows attributes.
 ///
 /// Reference: <https://learn.microsoft.com/en-us/windows/win32/fileio/file-attribute-constants>
-pub(crate) fn is_windows_reparse_point(entry: &sevenz_rust2::ArchiveEntry) -> bool {
+fn is_windows_reparse_point(entry: &sevenz_rust2::ArchiveEntry) -> bool {
     const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
 
     entry.has_windows_attributes && (entry.windows_attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0
@@ -2183,6 +2197,47 @@ mod tests {
     use std::assert_matches;
     use std::io::Cursor;
     use tempfile::TempDir;
+
+    fn extraction_type_of(entry: &sevenz_rust2::ArchiveEntry) -> Result<EntryType> {
+        match SevenZClass::of(entry) {
+            SevenZClass::Present(kind) => kind.extraction_type(&entry.name),
+            SevenZClass::AntiItem => panic!("anti item has no extraction type"),
+        }
+    }
+
+    fn reparse(mut entry: sevenz_rust2::ArchiveEntry) -> sevenz_rust2::ArchiveEntry {
+        entry.has_windows_attributes = true;
+        entry.windows_attributes = 0x0400;
+        entry
+    }
+
+    #[test]
+    fn classifier_table() {
+        use sevenz_rust2::ArchiveEntry;
+
+        let file = ArchiveEntry::new_file("f");
+        let dir = ArchiveEntry::new_directory("d");
+        let mut anti_reparse_dir = reparse(ArchiveEntry::new_directory("x"));
+        anti_reparse_dir.is_anti_item = true;
+
+        assert_eq!(
+            SevenZClass::of(&file),
+            SevenZClass::Present(SevenZKind::File)
+        );
+        assert_eq!(
+            SevenZClass::of(&dir),
+            SevenZClass::Present(SevenZKind::Directory)
+        );
+        assert_eq!(
+            SevenZClass::of(&reparse(ArchiveEntry::new_file("l"))),
+            SevenZClass::Present(SevenZKind::ReparsePoint)
+        );
+        assert_eq!(
+            SevenZClass::of(&reparse(ArchiveEntry::new_directory("j"))),
+            SevenZClass::Present(SevenZKind::ReparsePoint)
+        );
+        assert_eq!(SevenZClass::of(&anti_reparse_dir), SevenZClass::AntiItem);
+    }
 
     // 7z format magic bytes for signature validation
     const SEVENZ_MAGIC: [u8; 6] = [0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C];
@@ -3014,7 +3069,7 @@ mod tests {
             "reparse point attribute should be detected"
         );
 
-        let result = SevenZEntryAdapter::to_entry_type(&entry);
+        let result = extraction_type_of(&entry);
         assert!(result.is_err(), "should return error for reparse point");
         assert_matches!(
             result.unwrap_err(),
@@ -3036,7 +3091,7 @@ mod tests {
             "normal file should not be detected as reparse point"
         );
 
-        let result = SevenZEntryAdapter::to_entry_type(&entry);
+        let result = extraction_type_of(&entry);
         assert!(result.is_ok(), "normal file should succeed");
         assert_eq!(result.unwrap(), EntryType::File);
     }
@@ -3053,7 +3108,7 @@ mod tests {
             "entry without Windows attributes should not be detected as reparse point"
         );
 
-        let result = SevenZEntryAdapter::to_entry_type(&entry);
+        let result = extraction_type_of(&entry);
         assert!(result.is_ok(), "file without attributes should succeed");
         assert_eq!(result.unwrap(), EntryType::File);
     }
@@ -3070,7 +3125,7 @@ mod tests {
             "reparse point should be detected even with other attributes"
         );
 
-        let result = SevenZEntryAdapter::to_entry_type(&entry);
+        let result = extraction_type_of(&entry);
         assert!(result.is_err(), "should return error for reparse point");
     }
 
@@ -3083,7 +3138,7 @@ mod tests {
 
         // SECURITY: Reparse point check happens FIRST, even for directories
         // This catches directory junctions (Windows symlink directories)
-        let result = SevenZEntryAdapter::to_entry_type(&entry);
+        let result = extraction_type_of(&entry);
         assert!(result.is_err(), "directory junction should be rejected");
         assert_matches!(result.unwrap_err(), ArchiveError::SecurityViolation { .. });
     }
@@ -3095,7 +3150,7 @@ mod tests {
         entry.has_windows_attributes = true;
         entry.windows_attributes = 0x0400;
 
-        let result = SevenZEntryAdapter::to_entry_type(&entry);
+        let result = extraction_type_of(&entry);
         assert!(result.is_err());
 
         match result.unwrap_err() {
@@ -3780,6 +3835,7 @@ mod tests {
 
         let result = SevenZArchive::<Cursor<Vec<u8>>>::process_entry_inner(
             &entry,
+            SevenZKind::File,
             &mut std::io::empty(),
             &entry_path,
             &mut validator,
@@ -3829,6 +3885,7 @@ mod tests {
 
         let result = SevenZArchive::<Cursor<Vec<u8>>>::process_entry_inner(
             &entry,
+            SevenZKind::File,
             &mut std::io::empty(),
             &entry_path,
             &mut validator,

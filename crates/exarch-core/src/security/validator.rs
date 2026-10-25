@@ -22,6 +22,7 @@ use crate::types::DestDir;
 use crate::types::EntryType;
 use crate::types::SafePath;
 use crate::types::SafeSymlink;
+use crate::types::safe_path::EMPTY_PATH_REASON;
 
 /// Whether an archive entry is a directory, as the root-entry rule sees it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,6 +105,17 @@ impl<P> EntryPath<P> {
 /// checks the raw name before its extension filter.
 pub(crate) fn check_root_entry_is_directory(path: &Path, kind: NodeKind) -> Result<()> {
     EntryPath::of(path).require_directory_root(kind).map(drop)
+}
+
+/// Rejects an empty entry name, so listing fails on the name extraction and
+/// `verify` refuse, instead of joining it onto the destination directory.
+pub(crate) fn require_non_empty_name(path: &Path) -> Result<()> {
+    if path.is_empty() {
+        return Err(ArchiveError::SecurityViolation {
+            reason: EMPTY_PATH_REASON.into(),
+        });
+    }
+    Ok(())
 }
 
 /// Result of entry validation.

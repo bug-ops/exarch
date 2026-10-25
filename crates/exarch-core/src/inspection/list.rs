@@ -22,8 +22,8 @@ use crate::formats::compression::CompressionCodec;
 use crate::formats::detect::ArchiveType;
 use crate::formats::detect::FormatFamily;
 use crate::formats::detect::detect_format;
+use crate::formats::sevenz::SevenZClass;
 use crate::formats::sevenz::is_password_error;
-use crate::formats::sevenz::is_windows_reparse_point;
 use crate::formats::sevenz::sevenz_entry_compression;
 use crate::formats::sevenz::verify_sevenz_blocks;
 use crate::formats::tar::effective_entry_type;
@@ -61,6 +61,7 @@ use crate::security::quota::QuotaPermit;
 use crate::security::quota::QuotaTracker;
 use crate::security::validator::EntryPath;
 use crate::security::validator::NodeKind;
+use crate::security::validator::require_non_empty_name;
 use crate::types::safe_path::has_null_bytes;
 
 /// Lists archive contents without extracting.
@@ -619,10 +620,10 @@ fn list_sevenz_archive(
     let mut slots = Vec::with_capacity(archive.files.len());
 
     for (entry, compression) in archive.files.iter().zip(compression) {
-        if entry.is_anti_item {
+        let SevenZClass::Present(kind) = SevenZClass::of(entry) else {
             slots.push(None);
             continue;
-        }
+        };
 
         // Route through the same QuotaTracker used by extraction: per-file
         // size, file count, and total size (with checked arithmetic) are all
@@ -638,9 +639,9 @@ fn list_sevenz_archive(
             return Err(ArchiveError::PathTraversal { path });
         }
 
-        let entry_type = sevenz_manifest_entry_type(entry);
-        let kind = NodeKind::directory_if(entry_type == ManifestEntryType::Directory);
-        if !admit_path(&path, kind, &mut manifest, listing)? {
+        require_non_empty_name(&path)?;
+        let entry_type = kind.manifest_type();
+        if !admit_path(&path, kind.node_kind(), &mut manifest, listing)? {
             slots.push(None);
             continue;
         }
@@ -718,19 +719,6 @@ fn manifest_entry_kind(entry_type: ManifestEntryType, target: LinkTarget) -> Man
         ManifestEntryType::Symlink => ManifestEntryKind::Symlink { target },
         ManifestEntryType::Hardlink => ManifestEntryKind::Hardlink { target },
     }
-}
-
-fn sevenz_manifest_entry_type(entry: &sevenz_rust2::ArchiveEntry) -> ManifestEntryType {
-    // Reparse points are checked before the directory flag so junctions are
-    // classified like extraction does. Unix symlinks cannot be detected with
-    // this API; they are reported as files.
-    if is_windows_reparse_point(entry) {
-        return ManifestEntryType::Symlink;
-    }
-    if entry.is_directory {
-        return ManifestEntryType::Directory;
-    }
-    ManifestEntryType::File
 }
 
 /// Checks a symlink/hardlink target parsed during listing for emptiness and
@@ -1863,47 +1851,6 @@ mod tests {
         );
     }
 
-    /// Unit test for `sevenz_manifest_entry_type` — reparse point detection.
-    /// Does not require a fixture; constructs `ArchiveEntry` values directly.
-    #[test]
-    fn test_sevenz_manifest_entry_type_reparse_point() {
-        use sevenz_rust2::ArchiveEntry;
-
-        let mut entry = ArchiveEntry::new_file("link");
-        entry.has_windows_attributes = true;
-        entry.windows_attributes = 0x0000_0400; // FILE_ATTRIBUTE_REPARSE_POINT
-        assert_eq!(
-            sevenz_manifest_entry_type(&entry),
-            ManifestEntryType::Symlink,
-            "reparse point should be detected as Symlink"
-        );
-    }
-
-    #[test]
-    fn test_sevenz_manifest_entry_type_regular_file() {
-        use sevenz_rust2::ArchiveEntry;
-
-        let entry = ArchiveEntry::new_file("file.txt");
-        assert_eq!(
-            sevenz_manifest_entry_type(&entry),
-            ManifestEntryType::File,
-            "regular file should be File"
-        );
-    }
-
-    #[test]
-    fn test_sevenz_manifest_entry_type_directory() {
-        use sevenz_rust2::ArchiveEntry;
-
-        let mut entry = ArchiveEntry::new_file("dir/");
-        entry.is_directory = true;
-        assert_eq!(
-            sevenz_manifest_entry_type(&entry),
-            ManifestEntryType::Directory,
-            "directory entry should be Directory"
-        );
-    }
-
     /// Creates a minimal in-memory 7z archive with a single file entry
     /// and returns the archive bytes. Uses stored (no compression) method
     /// to keep test archives fast.
@@ -2114,8 +2061,9 @@ mod tests {
 
     #[test]
     fn test_list_sevenz_unix_symlink_reported_as_file() {
-        // Unix symlinks in 7z archives cannot be detected by sevenz-rust2 API.
-        // They are reported as ManifestEntryType::File (known limitation).
+        // Unix symlinks in 7z archives are not recognized yet: they are
+        // reported as ManifestEntryType::File and not refused (known
+        // limitation).
         let path = std::path::Path::new("../../tests/fixtures/symlink-unix.7z");
         let config = SecurityConfig::default();
         let manifest = list_archive(path, &config).unwrap();

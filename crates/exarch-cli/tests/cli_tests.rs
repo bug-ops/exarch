@@ -3531,7 +3531,7 @@ fn build_forged_size_zip(
     let entry = RawEntry {
         date: 0,
         size: u64::from(declared_uncompressed_size),
-        ..RawEntry::deflated(entry_name, real_payload)
+        ..RawEntry::deflated(entry_name, real_payload).unwrap()
     };
     RawZip::new(vec![entry]).build().bytes
 }

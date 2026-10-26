@@ -108,27 +108,26 @@ impl fmt::Display for PartialExtractionContext {
                      were written to disk before the error.",
                     r.files_extracted, r.directories_created, r.symlinks_created,
                 )?;
+                if r.files_skipped > 0 {
+                    write!(f, "\nFiles skipped: {}", r.files_skipped)?;
+                }
+                if !r.warnings.is_empty() {
+                    write!(f, "\nWarnings:")?;
+                    for warning in &r.warnings {
+                        write!(f, "\n  - {warning}")?;
+                    }
+                }
+                write!(
+                    f,
+                    "\nHINT: Inspect or remove the output directory before re-running."
+                )
             }
+            // The counts and warnings describe the discarded run, not the
+            // destination.
             PartialWrites::RolledBack => f.write_str(
                 "WARNING: Extraction was stopped. --atomic discarded the partial extraction; the \
                  destination was left unchanged.",
-            )?,
-        }
-        if r.files_skipped > 0 {
-            write!(f, "\nFiles skipped: {}", r.files_skipped)?;
-        }
-        if !r.warnings.is_empty() {
-            write!(f, "\nWarnings:")?;
-            for warning in &r.warnings {
-                write!(f, "\n  - {warning}")?;
-            }
-        }
-        match self.writes {
-            PartialWrites::Kept => write!(
-                f,
-                "\nHINT: Inspect or remove the output directory before re-running."
             ),
-            PartialWrites::RolledBack => Ok(()),
         }
     }
 }
@@ -766,6 +765,39 @@ mod tests {
         assert!(!msg.contains("Inspect or remove"), "got: {msg}");
         assert!(msg.contains("destination was left unchanged"), "got: {msg}");
         assert_eq!(msg.matches("hardlink_escape_path").count(), 1, "got: {msg}");
+    }
+
+    #[test]
+    fn test_partial_rolled_back_display_omits_the_discarded_runs_skips_and_warnings() {
+        use exarch_core::ExtractionReport;
+        use std::time::Duration;
+
+        let report = ExtractionReport {
+            files_extracted: 1,
+            directories_created: 0,
+            symlinks_created: 0,
+            bytes_written: 0,
+            duration: Duration::from_millis(0),
+            files_skipped: 3,
+            warnings: vec!["skipped 3 entries".to_string()],
+        };
+        let err = ArchiveError::PartialExtraction {
+            source: Box::new(ArchiveError::HardlinkEscape {
+                path: PathBuf::from("hardlink_escape_path"),
+            }),
+            report,
+        };
+        let converted = convert_extraction_error_with_writes(
+            err,
+            Path::new("archive.tar.gz"),
+            false,
+            PartialWrites::RolledBack,
+        );
+        let msg = format!("{converted:#}");
+        assert!(!msg.contains("Files skipped"), "got: {msg}");
+        assert!(!msg.contains("Warnings:"), "got: {msg}");
+        assert!(!msg.contains("skipped 3 entries"), "got: {msg}");
+        assert!(msg.contains("destination was left unchanged"), "got: {msg}");
     }
 
     #[test]

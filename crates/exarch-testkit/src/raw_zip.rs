@@ -5,7 +5,6 @@
 //! same metadata disagree, hide records, or leave gaps between entries.
 
 #![allow(
-    clippy::unwrap_used,
     clippy::cast_possible_truncation,
     clippy::must_use_candidate,
     clippy::return_self_not_must_use,
@@ -105,15 +104,20 @@ impl RawEntry {
     }
 
     /// A deflated entry holding `data`.
-    pub fn deflated(name: &str, data: &[u8]) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns the encoder's I/O error; writing to memory does not produce
+    /// one in practice.
+    pub fn deflated(name: &str, data: &[u8]) -> std::io::Result<Self> {
         let mut encoder =
             flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
-        std::io::Write::write_all(&mut encoder, data).unwrap();
-        Self {
+        std::io::Write::write_all(&mut encoder, data)?;
+        Ok(Self {
             method: 8,
-            data: encoder.finish().unwrap(),
+            data: encoder.finish()?,
             ..Self::stored(name, data)
-        }
+        })
     }
 
     /// Writes the sizes and CRC after the data in a descriptor instead of in

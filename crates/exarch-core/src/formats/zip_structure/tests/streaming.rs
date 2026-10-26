@@ -157,7 +157,7 @@ fn u32_fields(values: &[u32]) -> Vec<u8> {
 #[test]
 fn descriptor_crc_that_is_a_central_signature_is_a_stray_record() {
     let payload = b"hello hello hello";
-    let first = RawEntry::deflated("a.txt", payload);
+    let first = RawEntry::deflated("a.txt", payload).unwrap();
     let descriptor = u32_fields(&[
         u32::from_le_bytes(*b"PK\x01\x02"),
         u32::try_from(first.data.len()).unwrap(),
@@ -170,7 +170,7 @@ fn descriptor_crc_that_is_a_central_signature_is_a_stray_record() {
 #[test]
 fn descriptor_compressed_size_that_is_an_end_signature_is_a_stray_end_record() {
     let payload = b"hello hello hello";
-    let first = RawEntry::deflated("a.txt", payload);
+    let first = RawEntry::deflated("a.txt", payload).unwrap();
     let descriptor = u32_fields(&[
         first.crc,
         u32::from_le_bytes(*b"PK\x05\x06"),
@@ -290,6 +290,7 @@ fn symlink_marked_by_a_local_extra_does_not_bound_a_stored_descriptor_entry() {
 #[test]
 fn deflated_entry_with_a_local_compressed_size_past_the_next_header_overruns() {
     let first = RawEntry::deflated("a.txt", b"hello hello hello")
+        .unwrap()
         .with_descriptor(true, false)
         .with_local_sizes(4096, 0);
     let (built, end) = first_then_stored(first);
@@ -342,7 +343,9 @@ fn hidden_header_behind_every_descriptor_width_is_probed_with_duplicate_names() 
         (false, true, 20),
     ] {
         let shadowed = RawEntry::stored("a.txt", b"other");
-        let mut survivor = RawEntry::deflated("a.txt", b"hello").with_descriptor(signature, zip64);
+        let mut survivor = RawEntry::deflated("a.txt", b"hello")
+            .unwrap()
+            .with_descriptor(signature, zip64);
         survivor.padding_after = evil.len();
         let end = data_end(&survivor, data_end(&shadowed, 0));
         let mut built = RawZip::new(vec![shadowed, survivor]).build();

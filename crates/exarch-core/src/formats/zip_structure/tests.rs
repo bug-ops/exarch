@@ -128,8 +128,12 @@ const MAX_READS_PER_DESCRIPTOR: usize = 4;
 
 fn deflated_pair(signature: bool, zip64: bool) -> RawZip {
     RawZip::new(vec![
-        RawEntry::deflated("a.txt", b"hello hello hello").with_descriptor(signature, zip64),
-        RawEntry::deflated("b.txt", b"world world world").with_descriptor(signature, zip64),
+        RawEntry::deflated("a.txt", b"hello hello hello")
+            .unwrap()
+            .with_descriptor(signature, zip64),
+        RawEntry::deflated("b.txt", b"world world world")
+            .unwrap()
+            .with_descriptor(signature, zip64),
     ])
 }
 
@@ -266,7 +270,9 @@ fn local_header_after_a_descriptor_is_found_at_every_descriptor_width() {
         (true, true, 24),
         (false, true, 20),
     ] {
-        let entry = RawEntry::deflated("a.txt", b"hello").with_descriptor(signature, zip64);
+        let entry = RawEntry::deflated("a.txt", b"hello")
+            .unwrap()
+            .with_descriptor(signature, zip64);
         let mut zip = RawZip::new(vec![entry.clone()]);
         zip.before_directory = evil.bytes[..evil.directory_start].to_vec();
         let built = zip.build();
@@ -1828,7 +1834,9 @@ fn central_record_in_the_prefix_is_found_only_when_the_file_starts_with_pk() {
 #[test]
 fn central_signature_after_a_descriptor_is_found_at_every_descriptor_width() {
     for (signature, zip64) in [(true, false), (false, false), (true, true), (false, true)] {
-        let mut first = RawEntry::deflated("a.txt", b"hello").with_descriptor(signature, zip64);
+        let mut first = RawEntry::deflated("a.txt", b"hello")
+            .unwrap()
+            .with_descriptor(signature, zip64);
         first.padding_after = 4;
         let mut built = RawZip::new(vec![first, RawEntry::stored("b.txt", b"world")]).build();
         let at = built.local_offsets[1] - 4;

@@ -206,17 +206,6 @@ pub enum ZipInconsistency {
         name: String,
     },
 
-    /// A local header could not be compared with its central directory
-    /// record, so a disagreement between them cannot be ruled out.
-    HeaderUncomparable {
-        /// Entry in the crate's entry map.
-        entry: ZipEntryIndex,
-        /// Central directory name of the entry.
-        name: String,
-        /// Why the comparison was not possible.
-        reason: ZipUncomparable,
-    },
-
     /// Two or more central directory records share a name.
     DuplicateName {
         /// Position in the raw central directory of a record that the `zip`
@@ -291,6 +280,17 @@ pub enum ZipInconsistency {
         counted: usize,
         /// Records actually present.
         found: usize,
+    },
+
+    /// A local header could not be compared with its central directory
+    /// record, so a disagreement between them cannot be ruled out.
+    HeaderUncomparable {
+        /// Entry in the crate's entry map.
+        entry: ZipEntryIndex,
+        /// Central directory name of the entry.
+        name: String,
+        /// Why the comparison was not possible.
+        reason: ZipUncomparable,
     },
 }
 

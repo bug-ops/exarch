@@ -382,13 +382,15 @@ impl VirtualTree {
     /// existing entry. A symlink over a file is ambiguous (extraction skips
     /// it by default but replaces the file when overwriting): the file is
     /// replaced so later entries are checked against the riskier tree, and an
-    /// error is returned so the archive is never reported as safe.
+    /// error is returned so the archive is never reported as safe. A symlink
+    /// over a directory is refused the same way, but the directory stays.
     ///
     /// # Errors
     ///
-    /// Returns an error where extraction would fail: a parent that is a file,
-    /// a parent chain that loops or leaves the root, a directory entry over
-    /// an existing non-directory, or a symlink over an earlier file.
+    /// Returns an error where extraction can fail: a parent that is a file or
+    /// a dangling symlink, a parent chain that loops or leaves the root, a
+    /// directory entry over an existing non-directory, or a symlink over an
+    /// earlier file or directory.
     pub fn insert(&mut self, rel: &Path, node: Node) -> io::Result<()> {
         let Some(name) = rel.file_name() else {
             return Ok(());
@@ -417,11 +419,14 @@ impl VirtualTree {
                 }
             },
             (Some(id), node @ (Node::Symlink(_) | Node::OpaqueSymlink)) => {
-                if self.node(id).kind == Node::File {
-                    self.node_mut(id).kind = node;
-                    return Err(io::Error::from(io::ErrorKind::AlreadyExists));
+                match self.node(id).kind {
+                    Node::File => {
+                        self.node_mut(id).kind = node;
+                        Err(io::Error::from(io::ErrorKind::AlreadyExists))
+                    }
+                    Node::Dir => Err(io::Error::from(io::ErrorKind::AlreadyExists)),
+                    Node::Symlink(_) | Node::OpaqueSymlink => Ok(()),
                 }
-                Ok(())
             }
             (Some(_), _) => Ok(()),
         }
@@ -1058,6 +1063,17 @@ mod tests {
                 ("link".into(), "LINK".into(), CollisionKind::Mixed)
             ]
         );
+    }
+
+    #[test]
+    fn symlink_over_an_existing_dir_is_refused_and_keeps_the_dir() {
+        let mut t = folding_tree();
+        put(&mut t, "d/f", Node::File);
+        let err = t.insert(Path::new("d"), sym("sub")).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        let err = t.insert(Path::new("d"), Node::OpaqueSymlink).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        assert!(t.resolves_to_dir(&t.root.join("d")));
     }
 
     #[test]

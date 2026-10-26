@@ -105,6 +105,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `verify` reports a dangling link used as a parent, a hardlink under it and a symlink over an existing directory as `SecurityViolation` (security status FAILED) instead of an `InvalidArchive` I/O error, in TAR, ZIP and 7z (#726, #733).
 - `extract` and `verify` reject symlink and hardlink targets whose `..` components cannot be resolved against the extracted tree, in TAR, ZIP and 7z (#723).
 - **BREAKING:** 7z `extract` and `verify` refuse an entry whose Unix mode is a symlink (`S_IFLNK`) as `SecurityViolation`, regardless of `allow_symlinks`; follow-up #714 (#711, #717).
 - **BREAKING:** `LinkTarget` gains a `non_exhaustive` `Unread` variant; 7z `list` reports it for link entries whose target is not read (#711, #717).

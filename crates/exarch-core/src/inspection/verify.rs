@@ -471,8 +471,9 @@ fn verify_entry(
                 let recorded = record_entry(tree, safe_path.as_path(), &entry.kind);
                 issues.extend(collision_issues(tree));
                 if let Err(e) = recorded {
+                    let error = insert_failure(tree, dest, safe_path.as_path(), &entry.kind, e);
                     issues.push(VerificationIssue::from_error(
-                        &ArchiveError::Io(e),
+                        &error,
                         Some(entry.path.clone()),
                     ));
                 }
@@ -627,8 +628,46 @@ fn verify_deferred_hardlink(
             target.display()
         )));
     }
-    tree.insert(link_path.as_path(), Node::File)?;
-    Ok(())
+    tree.insert(link_path.as_path(), Node::File)
+        .map_err(|e| insert_failure(tree, dest, link_path.as_path(), &entry.kind, e))
+}
+
+/// Classifies a failed tree insert. A failure that involves a link (the entry
+/// is one, or the path crosses or lands on one) depends on how extraction
+/// resolves the link, so it is a security finding; any other failure is a
+/// structural problem of the archive.
+fn insert_failure(
+    tree: &VirtualTree,
+    dest: &DestDir,
+    rel: &Path,
+    kind: &ManifestEntryKind,
+    error: std::io::Error,
+) -> ArchiveError {
+    let crosses_link = || {
+        rel.ancestors()
+            .take_while(|p| !p.as_os_str().is_empty())
+            .any(|p| tree.is_symlink(&dest.as_path().join(p)).unwrap_or(false))
+    };
+    if !kind.is_link() && !crosses_link() {
+        return ArchiveError::Io(error);
+    }
+    // A symlink over an existing entry is skipped by default, so only that
+    // case depends on the options; the other shapes fail under every set.
+    let skipped_by_default = matches!(kind, ManifestEntryKind::Symlink { .. })
+        && error.kind() == std::io::ErrorKind::AlreadyExists;
+    let when = if skipped_by_default {
+        "can fail"
+    } else {
+        "fails"
+    };
+    let unless = if skipped_by_default {
+        " unless duplicates are skipped"
+    } else {
+        ""
+    };
+    ArchiveError::SecurityViolation {
+        reason: format!("extraction {when} at {}{unless}: {error}", rel.display()),
+    }
 }
 
 fn missing_link_target(kind: ManifestEntryType) -> ArchiveError {
@@ -767,6 +806,7 @@ fn is_suspicious_extension(path: &Path) -> bool {
 mod tests {
     use super::*;
     use crate::inspection::manifest::EntryCompression;
+    use crate::inspection::report::CheckStatus;
     use crate::inspection::report::VerificationStatus;
     use crate::test_utils::tar_with_pax_nul_path;
     use std::assert_matches;
@@ -802,6 +842,66 @@ mod tests {
         ManifestEntryKind::Hardlink {
             target: LinkTarget::Recorded(PathBuf::from(target)),
         }
+    }
+
+    fn assert_link_placement_finding(entries: Vec<(&str, ManifestEntryKind)>, expected: &str) {
+        let report = verify_manifest(&manifest_of(entries), &link_config(), None).unwrap();
+        assert_ne!(report.security_status(), CheckStatus::Pass);
+        let issue = report
+            .issues()
+            .iter()
+            .find(|i| i.category == IssueCategory::SecurityPolicy)
+            .unwrap_or_else(|| panic!("no SecurityPolicy issue: {:?}", report.issues()));
+        assert_eq!(issue.severity, IssueSeverity::High);
+        assert!(issue.message.contains(expected), "{}", issue.message);
+    }
+
+    #[test]
+    fn dangling_link_used_as_a_parent_fails_the_security_status() {
+        assert_link_placement_finding(
+            vec![("d", symlink_to("sub")), ("d/f", ManifestEntryKind::File)],
+            "extraction fails at d/f:",
+        );
+    }
+
+    #[test]
+    fn symlink_over_an_implicit_dir_fails_the_security_status() {
+        assert_link_placement_finding(
+            vec![
+                ("sub", ManifestEntryKind::Directory),
+                ("d/f", ManifestEntryKind::File),
+                ("d", symlink_to("sub")),
+            ],
+            "extraction can fail at d unless duplicates are skipped:",
+        );
+    }
+
+    #[test]
+    fn hardlink_below_a_dangling_link_fails_the_security_status() {
+        assert_link_placement_finding(
+            vec![
+                ("d", symlink_to("sub")),
+                ("t", ManifestEntryKind::File),
+                ("d/h", hardlink_to("t")),
+            ],
+            "extraction fails at d/h:",
+        );
+    }
+
+    #[test]
+    fn directory_over_a_file_is_not_a_security_finding() {
+        let manifest = manifest_of(vec![
+            ("a", ManifestEntryKind::File),
+            ("a", ManifestEntryKind::Directory),
+        ]);
+        let report = verify_manifest(&manifest, &link_config(), None).unwrap();
+        assert_eq!(report.security_status(), CheckStatus::Pass);
+        assert!(
+            report
+                .issues()
+                .iter()
+                .any(|i| i.category == IssueCategory::InvalidArchive)
+        );
     }
 
     #[test]

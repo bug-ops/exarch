@@ -152,6 +152,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "LOW"/"INFO"; `category`: space-separated title case, e.g. "Path Traversal") instead of the
   stale title-case wording (#583).
 - Wired the orphaned root-level `tests/cve/` and `tests/security/` suites into a real cargo target: superseded duplicates were removed, and distinct `EntryValidator` coverage (path traversal, symlink/hardlink escape, zip-bomb ratio detection) was ported into `crates/exarch-core/tests/security/`, fixing tests that previously compiled in no cargo target (#590).
+- 7z `list`, `verify` and `extract` refuse a header with streams but no files info as `InvalidArchive` instead of panicking (#746, #752).
+- 7z extraction reports a blocked path traversal or quota breach with its typed error instead of `InvalidArchive`; the 7z header is opened once and `list` reuses it (#740, #742, #743, #752).
+- `verify` skips the mode of a symlink entry, no longer reports a false `SymlinkEscape` for a repeated symlink, and models overwrite conflicts; a symlink over a symlink is skipped by `extract` and never re-pointed under `--force` (#748, #735, #736, #752).
+- TAR `list`, `verify` and `extract` refuse a file-typed entry with a directory name and a payload as `InvalidArchive` (#744, #752).
+- CLI escapes control characters in entry paths and link targets in human-readable output (#745, #752).
+- **BREAKING:** `ArchiveError::PartialExtraction` carries `PartialWrites` (`writes`); a symlink over an existing symlink with another target under overwrite fails with `Io` instead of `SymlinkEscape` (CLI JSON `IoError`, Python `OSError`, Node `IO_ERROR`); the Node error message gains `| writes=...`; Python rollback errors have no counters (#747, #735, #752).
 
 ### CI
 

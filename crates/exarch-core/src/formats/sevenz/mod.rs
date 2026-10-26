@@ -144,6 +144,7 @@ use decode::decode_archive_entries;
 use links::read_sevenz_link_target;
 use write::lstat_dest;
 use write::refuse_undecoded_target;
+#[cfg(unix)]
 use write::symlink_at_dest_error;
 use write::write_file_direct;
 use write::write_file_with_permit;

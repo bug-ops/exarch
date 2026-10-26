@@ -74,8 +74,9 @@
 //! `extract` and `verify` share one admission step, `sevenz_refusals`. Before
 //! any byte is decoded, every block's coder memory (LZMA/LZMA2 dictionary,
 //! `PPMd` memory) is checked against `max_decoder_memory`, and blocks with an
-//! unknown coder, AES content encryption, or a stream-less entry between their
-//! stream files are refused.
+//! unknown coder, AES content encryption, a stream-less entry between their
+//! stream files, or a stream count that disagrees with the files mapped to
+//! them (an orphan block) are refused.
 //!
 //! # Parallel LZMA2 Decoding
 //!
@@ -447,6 +448,22 @@ struct BlockShape {
     declared_size: u64,
     /// A stream-less file sits between the block's stream files.
     interleaved_entry: bool,
+    /// The block declares streams, but the files it decodes are not exactly the
+    /// files mapped to it: an orphan block no file maps to, or a stream count
+    /// that disagrees with the mapping.
+    span_mismatch: bool,
+}
+
+/// The files the decoder hands out for `block`: the span of its first file and
+/// its `num_unpack_sub_streams`.
+///
+/// sevenz-rust2 validated that the span lies within `archive.files`.
+fn block_span(archive: &Archive, block: usize) -> std::ops::Range<usize> {
+    let password = Password::empty();
+    let mut no_source = io::Cursor::new(&[][..]);
+    let count = BlockDecoder::new(1, block, archive, &password, &mut no_source).entry_count();
+    let first = archive.stream_map.block_first_file_index[block];
+    first..first.saturating_add(count)
 }
 
 /// Maps every block to its [`BlockShape`] through
@@ -455,15 +472,28 @@ struct BlockShape {
 /// sevenz-rust2 hands a block the contiguous span of `num_unpack_sub_streams`
 /// files after its first file, so a stream-less file mapped to a block (the
 /// map leaves leading and trailing ones unmapped) pushes the block's last
-/// stream file out of the span and the decoder skips it.
+/// stream file out of the span and the decoder skips it. A trailing block that
+/// no file maps to keeps a first-file index of 0, so its span would re-deliver
+/// the first files of the archive with its own data.
 fn block_shapes(archive: &Archive) -> Vec<BlockShape> {
     let mut shapes = vec![BlockShape::default(); archive.blocks.len()];
+    let spans: Vec<_> = (0..archive.blocks.len())
+        .map(|block| block_span(archive, block))
+        .collect();
+    let mut mapped = vec![0usize; archive.blocks.len()];
+    let mut outside_span = vec![false; archive.blocks.len()];
     for (index, file) in archive.files.iter().enumerate() {
         if let Some(block) = archive.stream_map.file_block_index[index] {
             let shape = &mut shapes[block];
             shape.declared_size = shape.declared_size.saturating_add(file.size);
             shape.interleaved_entry |= !file.has_stream;
+            mapped[block] += 1;
+            outside_span[block] |= !spans[block].contains(&index);
         }
+    }
+    for (block, shape) in shapes.iter_mut().enumerate() {
+        shape.span_mismatch = !spans[block].is_empty()
+            && (outside_span[block] || mapped[block] != spans[block].len());
     }
     shapes
 }
@@ -493,7 +523,8 @@ fn block_charge(block: &sevenz_rust2::Block) -> u64 {
 /// Returns [`ArchiveError::QuotaExceeded`] when the decoder memory exceeds the
 /// limit, [`ArchiveError::SecurityViolation`] for AES content encryption, and
 /// [`ArchiveError::InvalidArchive`] for an unknown method, unparseable coder
-/// properties or a stream-less file inside the block.
+/// properties, a stream-less file inside the block, or a block whose decoded
+/// files are not the files mapped to it.
 fn admit_sevenz_block(
     block: &sevenz_rust2::Block,
     shape: BlockShape,
@@ -523,6 +554,11 @@ fn admit_sevenz_block(
         return Err(ArchiveError::InvalidArchive(
             "7z block interleaves a stream-less entry, so a file of the block would be skipped"
                 .into(),
+        ));
+    }
+    if shape.span_mismatch {
+        return Err(ArchiveError::InvalidArchive(
+            "7z block decodes files other than the ones mapped to it".into(),
         ));
     }
     Ok(())
@@ -692,8 +728,8 @@ fn decode_block_entries<R: Read + Seek>(
     each: &mut impl FnMut(&sevenz_rust2::ArchiveEntry, &mut dyn Read) -> EntryResult,
 ) -> EntryResult {
     let password = Password::empty();
-    let first = archive.stream_map.block_first_file_index[block_index];
-    let count = BlockDecoder::new(1, block_index, archive, &password, &mut *source).entry_count();
+    let span = block_span(archive, block_index);
+    let (first, count) = (span.start, span.len());
     let plan = match parallel {
         ParallelDecode::Bounded(lookahead) if knobs.threads.get() > 1 => {
             parallel_stream(archive, block_index, first..first + count, knobs.min_unit)
@@ -791,8 +827,40 @@ fn parallel_stream(
     })
 }
 
-/// Decodes every block and then the files without data, handing each to
-/// `each`, in the order sevenz-rust2's `ArchiveReader::for_each_entries` uses.
+/// The span of `block` once checked against the file-to-block map: every file
+/// the decoder would hand out must be mapped to the block.
+///
+/// Admission refuses a block whose span differs from its mapped files before
+/// anything is decoded; this is the same rule at the point of use.
+fn mapped_block_span(
+    archive: &Archive,
+    block: usize,
+) -> std::result::Result<std::ops::Range<usize>, sevenz_rust2::Error> {
+    let span = block_span(archive, block);
+    let mapped = archive
+        .stream_map
+        .file_block_index
+        .get(span.clone())
+        .is_some_and(|map| map.iter().all(|&to| to == Some(block)));
+    if mapped {
+        Ok(span)
+    } else {
+        Err(sevenz_rust2::Error::Other(
+            "7z block decodes files other than the ones mapped to it".into(),
+        ))
+    }
+}
+
+/// Hands each entry to `each` in archive order.
+///
+/// A file without data is handed over where it stands; the first file of a
+/// block decodes the whole block, which hands over the block's files, so the
+/// archive's own order is what every other operation (`list`, `verify`,
+/// TAR, ZIP) uses. Blocks without files are decoded as they come, to keep
+/// their errors; a block no file maps to is never decoded.
+///
+/// Returns an error when the entries handed over are not exactly the entries
+/// of the archive, once each.
 fn decode_archive_entries<R: Read + Seek>(
     source: &mut R,
     archive: &Archive,
@@ -800,18 +868,43 @@ fn decode_archive_entries<R: Read + Seek>(
     knobs: DecodeKnobs,
     each: &mut impl FnMut(&sevenz_rust2::ArchiveEntry, &mut dyn Read) -> EntryResult,
 ) -> std::result::Result<(), sevenz_rust2::Error> {
-    for block_index in 0..archive.blocks.len() {
-        decode_block_entries(source, archive, block_index, parallel, knobs, each)?;
-    }
+    let mut next_block = 0;
+    let mut handed = 0usize;
     for (index, file) in archive.files.iter().enumerate() {
-        if archive.stream_map.file_block_index[index].is_none() {
-            let empty: &mut dyn Read = &mut ([0u8; 0].as_slice());
-            if !each(file, empty)? {
-                return Ok(());
+        match archive.stream_map.file_block_index[index] {
+            None => {
+                let empty: &mut dyn Read = &mut ([0u8; 0].as_slice());
+                if !each(file, empty)? {
+                    return Ok(());
+                }
+                handed += 1;
             }
+            Some(block) if block >= next_block => {
+                for fileless in next_block..block {
+                    if !block_span(archive, fileless).is_empty() {
+                        return Err(sevenz_rust2::Error::Other(
+                            "7z block with streams is skipped by the file order".into(),
+                        ));
+                    }
+                    decode_block_entries(source, archive, fileless, parallel, knobs, each)?;
+                }
+                let span = mapped_block_span(archive, block)?;
+                if !decode_block_entries(source, archive, block, parallel, knobs, each)? {
+                    return Ok(());
+                }
+                handed += span.len();
+                next_block = block + 1;
+            }
+            Some(_) => {}
         }
     }
-    Ok(())
+    if handed == archive.files.len() {
+        Ok(())
+    } else {
+        Err(sevenz_rust2::Error::Other(
+            "7z entries were not handed over exactly once".into(),
+        ))
+    }
 }
 
 /// A symlink target as its 7z entry stores it, consumed as soon as it is read.
@@ -5246,9 +5339,12 @@ mod tests {
         sevenz_refusals(archive, &config)
     }
 
-    fn visited_names(archive: &Archive, source: Vec<u8>) -> Vec<String> {
+    fn visit(
+        archive: &Archive,
+        source: Vec<u8>,
+    ) -> (Vec<String>, std::result::Result<(), sevenz_rust2::Error>) {
         let mut names = Vec::new();
-        decode_archive_entries(
+        let result = decode_archive_entries(
             &mut Cursor::new(source),
             archive,
             ParallelDecode::Sequential,
@@ -5257,9 +5353,8 @@ mod tests {
                 names.push(entry.name.clone());
                 Ok(true)
             },
-        )
-        .unwrap();
-        names
+        );
+        (names, result)
     }
 
     #[test]
@@ -5268,7 +5363,9 @@ mod tests {
         let archive = Archive::read(&mut Cursor::new(bytes.clone()), &Password::empty()).unwrap();
 
         assert!(block_refusals(&archive).is_empty());
-        assert!(visited_names(&archive, bytes).contains(&"full.txt".to_string()));
+        let (visited, result) = visit(&archive, bytes);
+        result.unwrap();
+        assert!(visited.contains(&"full.txt".to_string()));
     }
 
     /// `interleaved-empty.7z` has a stream-less entry between the stream files
@@ -5293,10 +5390,11 @@ mod tests {
         assert_matches!(refusals[0].error, ArchiveError::InvalidArchive(_));
 
         // If sevenz-rust2 starts visiting every stream file, the predicate can
-        // be relaxed.
-        let visited = visited_names(&archive, bytes);
+        // be relaxed. The walk itself fails closed on the dropped file.
+        let (visited, result) = visit(&archive, bytes);
         let dropped = stream_files.iter().filter(|n| !visited.contains(n)).count();
         assert_eq!(dropped, 1, "{visited:?}");
+        assert_matches!(result, Err(sevenz_rust2::Error::Other(_)));
     }
 
     #[test]

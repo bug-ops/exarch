@@ -3,9 +3,8 @@
 //! `verify` validates it under an integrity check, and `extract` validates it
 //! as it creates the link, only under `allow_symlinks`.
 //!
-//! Stream-less directories are handed to the extractor after every block, so a
-//! directory entry of the archive does not exist yet when a link is validated;
-//! 7z is stricter than TAR there.
+//! Entries are handed to the extractor in archive order, as for TAR, so a
+//! directory entry of the archive exists when a later link is validated.
 
 #![allow(clippy::unwrap_used)]
 #![cfg_attr(not(unix), allow(dead_code, unused_imports))]
@@ -40,10 +39,12 @@ use exarch_core::list_archive;
 use exarch_core::list_archive_with_options;
 use exarch_core::verify_archive;
 use exarch_core::verify_archive_with_options;
+use sevenz_rust2::Archive;
 use sevenz_rust2::ArchiveEntry;
 use sevenz_rust2::ArchiveWriter;
 use sevenz_rust2::EncoderConfiguration;
 use sevenz_rust2::EncoderMethod;
+use sevenz_rust2::Password;
 use sevenz_rust2::SourceReader;
 use tempfile::TempDir;
 
@@ -756,15 +757,19 @@ fn unresolvable_parent_components_are_refused_in_both_orders() {
 
 #[cfg(unix)]
 #[test]
-fn a_target_through_a_directory_of_the_same_archive_is_refused_before_any_write() {
+fn a_target_through_a_directory_of_the_same_archive_resolves_like_tar() {
     let dir = TempDir::new().unwrap();
     let path = archive_of(&dir, &[Item::Dir("t"), Item::Link("t2", b"t/../x")]);
     let out = TempDir::new().unwrap();
 
-    let err = extract_archive(&path, out.path(), &allow_symlinks()).unwrap_err();
+    extract_archive(&path, out.path(), &allow_symlinks()).unwrap();
 
-    assert_matches!(err, ArchiveError::SymlinkEscape { .. });
-    assert!(dir_is_empty(&out));
+    let link = std::fs::read_link(out.path().join("t2")).unwrap();
+    assert_eq!(link, Path::new("t/../x"));
+    assert!(!out.path().join("x").exists());
+    let report =
+        verify_archive_with_options(&path, &allow_symlinks(), &integrity(1 << 20)).unwrap();
+    assert_eq!(report.security_status(), CheckStatus::Pass);
 }
 
 #[cfg(unix)]
@@ -917,6 +922,206 @@ fn a_corrupt_link_inside_a_solid_block_fails_extract() {
         LinkTarget::Unreadable,
         "the corrupt link is unreadable in a listing"
     );
+}
+
+/// Marks file `file` of a two-file archive stored with a plain header as
+/// stream-less (a directory), leaving every block as it was.
+///
+/// The block of the file then keeps its stream count but no file maps to it.
+/// The patch is built here from the header layout: 6 signature bytes, 2
+/// version bytes, the start header CRC, then the next header's offset, size
+/// and CRC.
+fn mark_stream_less(bytes: &[u8], file: usize) -> Vec<u8> {
+    const K_FILES_INFO: u8 = 0x05;
+    const K_EMPTY_STREAM: u8 = 0x0E;
+    let crc = |data: &[u8]| {
+        let mut crc = flate2::Crc::new();
+        crc.update(data);
+        crc.sum().to_le_bytes()
+    };
+    let field = |at: usize| {
+        usize::try_from(u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap())).unwrap()
+    };
+    let start = 32 + field(12);
+    let header = &bytes[start..start + field(20)];
+    assert_eq!(start + header.len(), bytes.len());
+    assert_eq!(header[0], 0x01, "the header must be stored plain");
+
+    for at in (0..header.len() - 1).filter(|&at| header[at..at + 2] == [K_FILES_INFO, 2]) {
+        let mut patched = header[..at + 2].to_vec();
+        patched.extend_from_slice(&[K_EMPTY_STREAM, 1, 0x80 >> file]);
+        patched.extend_from_slice(&header[at + 2..]);
+
+        let mut out = bytes[..start].to_vec();
+        out[20..28].copy_from_slice(&(patched.len() as u64).to_le_bytes());
+        out[28..32].copy_from_slice(&crc(&patched));
+        let start_crc = crc(&out[12..32]);
+        out[8..12].copy_from_slice(&start_crc);
+        out.extend_from_slice(&patched);
+
+        let parsed = Archive::read(&mut Cursor::new(out.clone()), &Password::empty());
+        if parsed.is_ok_and(|a| a.blocks.len() == 2 && !a.files[file].has_stream) {
+            return out;
+        }
+    }
+    panic!("no FilesInfo found to patch");
+}
+
+/// Two one-file blocks, one of whose files is then marked stream-less.
+fn orphan_block_archive(dir: &TempDir, stream_less: usize) -> PathBuf {
+    let mut writer = ArchiveWriter::new(Cursor::new(Vec::new())).unwrap();
+    writer.set_content_methods(vec![EncoderConfiguration::new(EncoderMethod::COPY)]);
+    for (name, data) in [("a", b"AAAA"), ("b", b"BBBB")] {
+        let mut entry = ArchiveEntry::new_file(name);
+        entry.has_stream = true;
+        entry.size = data.len() as u64;
+        writer
+            .push_archive_entry(entry, Some(Cursor::new(data.to_vec())))
+            .unwrap();
+    }
+    let plain = writer.finish().unwrap().into_inner();
+    let bytes = mark_stream_less(&plain, stream_less);
+    let path = dir.path().join("orphan.7z");
+    std::fs::write(&path, bytes).unwrap();
+    path
+}
+
+/// An orphan block keeps its stream count and the first-file index 0, so it
+/// would decode over the first files of the archive with its own data. It is
+/// refused where the archive is admitted, by `extract` before any write and by
+/// `verify`, which never decodes it, and `list` reports only what the header
+/// holds.
+fn assert_orphan_block_refused(path: &Path, mapping: [Option<usize>; 2]) {
+    let archive = Archive::read(
+        &mut Cursor::new(std::fs::read(path).unwrap()),
+        &Password::empty(),
+    )
+    .unwrap();
+    assert_eq!(archive.blocks.len(), 2);
+    assert_eq!(archive.stream_map.file_block_index, mapping);
+
+    let out = TempDir::new().unwrap();
+    std::fs::write(out.path().join("a"), b"sentinel").unwrap();
+    std::fs::write(out.path().join("b"), b"sentinel").unwrap();
+    let err = extract_archive(path, out.path(), &SecurityConfig::default()).unwrap_err();
+    assert_matches!(
+        err,
+        ArchiveError::InvalidArchive(reason) if reason.contains("other than the ones mapped")
+    );
+    for name in ["a", "b"] {
+        assert_eq!(std::fs::read(out.path().join(name)).unwrap(), b"sentinel");
+    }
+    assert_eq!(std::fs::read_dir(out.path()).unwrap().count(), 2);
+
+    let report =
+        verify_archive_with_options(path, &SecurityConfig::default(), &integrity(1 << 20)).unwrap();
+    assert_eq!(report.status(), VerificationStatus::Fail);
+    assert_eq!(
+        issue_categories(&report)
+            .into_iter()
+            .filter(|c| *c == IssueCategory::InvalidArchive)
+            .count(),
+        1,
+        "{:?}",
+        report.issues()
+    );
+
+    let manifest = list_archive(path, &SecurityConfig::default()).unwrap();
+    assert_eq!(manifest.total_entries(), 2);
+}
+
+#[test]
+fn an_orphan_trailing_block_is_refused_before_it_can_redeliver_the_first_file() {
+    let dir = TempDir::new().unwrap();
+    let path = orphan_block_archive(&dir, 1);
+
+    assert_orphan_block_refused(&path, [Some(0), None]);
+}
+
+#[test]
+fn a_block_whose_span_covers_a_stream_less_entry_is_refused() {
+    let dir = TempDir::new().unwrap();
+    let path = orphan_block_archive(&dir, 0);
+
+    assert_orphan_block_refused(&path, [None, Some(0)]);
+}
+
+/// How `extract` ended: the archive was extracted, refused as invalid before
+/// any write, or failed part-way.
+#[cfg(unix)]
+fn extract_class(path: &Path, config: &SecurityConfig) -> &'static str {
+    let out = TempDir::new().unwrap();
+    match extract_archive(path, out.path(), config) {
+        Ok(_) => "extracted",
+        Err(ArchiveError::InvalidArchive(_)) => {
+            assert!(dir_is_empty(&out), "a refusal writes nothing");
+            "refused"
+        }
+        Err(_) => "failed",
+    }
+}
+
+/// How `verify --check-integrity` ended.
+#[cfg(unix)]
+fn verify_class(path: &Path, config: &SecurityConfig) -> &'static str {
+    match verify_archive_with_options(path, config, &integrity(1 << 20)) {
+        Ok(report) if report.security_status() == CheckStatus::Pass => "pass",
+        Ok(_) => "fail",
+        Err(ArchiveError::InvalidArchive(_)) => "refused",
+        Err(other) => panic!("unexpected verify error: {other}"),
+    }
+}
+
+/// Extraction follows the archive's entry order, so `verify` (which simulates
+/// entries in that order) and `extract` agree for every order of a directory
+/// `S`, a link `L` to it and a file `F` below the link. Parity holds under an
+/// integrity check only: a plain `verify` leaves 7z link targets unread.
+///
+/// A solid block that interleaves a stream-less entry is refused at admission
+/// by both. `LFS` in separate blocks is the one known gap: `verify` does not
+/// model the dangling link `d` as a parent that already exists, so it passes
+/// what `extract` stops on with EEXIST.
+#[cfg(unix)]
+#[test]
+fn verify_and_extract_agree_for_every_order_of_a_directory_a_link_and_a_file() {
+    let (s, l, f) = (
+        Item::Dir("sub"),
+        Item::Link("d", b"sub"),
+        Item::File("d/f", b"x"),
+    );
+    // (order, extract, verify) for one block per entry, then for one solid
+    // block.
+    let table = [
+        (
+            "SLF",
+            [s, l, f],
+            ("extracted", "pass"),
+            ("refused", "refused"),
+        ),
+        ("LSF", [l, s, f], ("extracted", "pass"), ("refused", "fail")),
+        (
+            "SFL",
+            [s, f, l],
+            ("extracted", "pass"),
+            ("refused", "refused"),
+        ),
+        ("FSL", [f, s, l], ("extracted", "pass"), ("refused", "fail")),
+        ("LFS", [l, f, s], ("failed", "pass"), ("refused", "fail")),
+        ("FLS", [f, l, s], ("extracted", "pass"), ("refused", "fail")),
+    ];
+    let config = allow_symlinks().with_allow_solid_archives(true);
+    for (order, items, separate, solid) in table {
+        for (layout, (extract, verify)) in
+            [(Layout::OneBlockEach, separate), (Layout::Solid, solid)]
+        {
+            let dir = TempDir::new().unwrap();
+            let path = dir.path().join("m.7z");
+            std::fs::write(&path, build(&items, layout, false)).unwrap();
+
+            assert_eq!(extract_class(&path, &config), extract, "{order} extract");
+            assert_eq!(verify_class(&path, &config), verify, "{order} verify");
+        }
+    }
 }
 
 #[cfg(not(unix))]

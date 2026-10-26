@@ -2,6 +2,9 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use super::decode::decode_archive_entries;
+use super::decode::parallel_stream;
+use crate::ParallelDecode;
 use std::io::Cursor;
 
 use sevenz_rust2::ArchiveEntry;
@@ -12,7 +15,7 @@ use sevenz_rust2::SourceReader;
 use sevenz_rust2::encoder_options::Lzma2Options;
 
 use super::*;
-use crate::formats::sevenz_lzma2::WorkerFault;
+use crate::formats::sevenz::lzma2::WorkerFault;
 
 const CHUNK: u64 = 128 * 1024;
 

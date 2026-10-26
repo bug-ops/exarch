@@ -3,8 +3,15 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use super::admit::sevenz_entry_compression;
+use super::links::LinkOutcome;
+use super::links::LinkReadFailure;
+use super::links::LinkTable;
+use super::links::StoredLinkTarget;
+use super::links::walk_sevenz_links;
 use std::assert_matches;
 use std::io::Cursor;
+use std::path::PathBuf;
 
 use sevenz_rust2::ArchiveEntry;
 use sevenz_rust2::ArchiveWriter;

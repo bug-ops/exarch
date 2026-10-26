@@ -75,7 +75,7 @@ fn local_symlink_type_with_a_data_descriptor_is_found() {
 #[test]
 fn local_symlink_type_of_a_deflated_entry_is_found() {
     let built = three_files(with_xl(
-        RawEntry::deflated("a.txt", b"../../../../tmp/pwned ../../../../tmp/pwned"),
+        RawEntry::deflated("a.txt", b"../../../../tmp/pwned ../../../../tmp/pwned").unwrap(),
         LINK,
     ));
     assert_eq!(findings_of(&built), [divergence(0, 0)]);

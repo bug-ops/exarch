@@ -32,9 +32,10 @@ use super::DATA_DESCRIPTOR_SIGNATURE;
 use super::EntryLayout;
 use super::LFH_FIXED_LEN;
 use super::ZIP64_EXTRA_ID;
-use super::le_u16;
+use super::extra_fields;
 use super::le_u32;
 use super::le_u64;
+use super::le32;
 
 /// Bytes after an entry's data that decide where a streaming reader resumes:
 /// the longest data descriptor.
@@ -111,10 +112,10 @@ impl DescriptorWidth {
             if self.wide() {
                 le_u64(sizes, at)
             } else {
-                u64::from(le_u32(sizes, at))
+                le_u32(sizes, at).map(u64::from)
             }
         };
-        read(0) == compressed && read(field) == size
+        read(0) == Some(compressed) && read(field) == Some(size)
     }
 }
 
@@ -172,19 +173,17 @@ impl LocalFacts {
     /// An extra field the reader rejects makes it fail the header, so it gives
     /// up the entry instead of skipping anything; no facts are taken from it.
     pub(super) fn parse(header: &[u8; LFH_FIXED_LEN], extra: &[u8]) -> Self {
-        let raw_compressed = le_u32(header, 18);
+        let raw_compressed = le32::<18, LFH_FIXED_LEN>(header);
         let mut compressed = u64::from(raw_compressed);
         let mut zip64_extra = false;
-        let mut rest = extra;
-        while let Some((head, tail)) = rest.split_first_chunk::<4>() {
-            let (id, len) = (le_u16(head, 0), usize::from(le_u16(head, 2)));
-            let Some((mut body, after)) = tail.split_at_checked(len) else {
+        for field in extra_fields(extra) {
+            let Ok((id, mut body)) = field else {
                 return Self::default();
             };
             if id == ZIP64_EXTRA_ID {
                 zip64_extra = true;
                 let escapes = [
-                    (le_u32(header, 22) == SIZE_ESCAPE, false),
+                    (le32::<22, LFH_FIXED_LEN>(header) == SIZE_ESCAPE, false),
                     (raw_compressed == SIZE_ESCAPE, true),
                 ];
                 for (escaped, is_compressed) in escapes {
@@ -204,7 +203,6 @@ impl LocalFacts {
                     body = remaining;
                 }
             }
-            rest = after;
         }
         Self {
             zip64_extra,

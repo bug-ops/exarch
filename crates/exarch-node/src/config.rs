@@ -12,6 +12,7 @@ use napi::bindgen_prelude::Result;
 use napi_derive::napi;
 
 use crate::error::convert_error;
+use crate::report::saturating_i64;
 use crate::report::unknown_variant;
 
 /// Largest integer a JavaScript number holds exactly (2^53 - 1).
@@ -365,16 +366,14 @@ impl SecurityConfig {
 
     /// Maximum file size in bytes.
     #[napi(getter)]
-    #[allow(clippy::cast_possible_wrap)]
     pub fn get_max_file_size(&self) -> i64 {
-        self.inner.max_file_size as i64
+        saturating_i64(self.inner.max_file_size)
     }
 
     /// Maximum total size in bytes.
     #[napi(getter)]
-    #[allow(clippy::cast_possible_wrap)]
     pub fn get_max_total_size(&self) -> i64 {
-        self.inner.max_total_size as i64
+        saturating_i64(self.inner.max_total_size)
     }
 
     /// Maximum compression ratio.
@@ -451,14 +450,13 @@ impl SecurityConfig {
         self.inner
             .parallel_decode
             .lookahead()
-            .map(|bytes| i64::try_from(bytes.get()).unwrap_or(i64::MAX))
+            .map(|bytes| saturating_i64(bytes.get()))
     }
 
     /// Maximum memory in bytes for decompressing a solid 7z block.
     #[napi(getter)]
-    #[allow(clippy::cast_possible_wrap)]
     pub fn get_max_solid_block_memory(&self) -> i64 {
-        self.inner.max_solid_block_memory as i64
+        saturating_i64(self.inner.max_solid_block_memory)
     }
 
     /// List of allowed file extensions.
@@ -683,9 +681,8 @@ impl CreationConfig {
 
     /// Maximum file size in bytes.
     #[napi(getter)]
-    #[allow(clippy::cast_possible_wrap)]
     pub fn get_max_file_size(&self) -> Option<i64> {
-        self.inner.max_file_size.map(|s| s as i64)
+        self.inner.max_file_size.map(saturating_i64)
     }
 
     /// List of exclude patterns.
@@ -857,10 +854,9 @@ impl VerificationOptions {
 
     /// Budget in bytes when the integrity check is enabled.
     #[napi(getter)]
-    #[allow(clippy::cast_possible_wrap)]
     pub fn get_decompression_budget(&self) -> Option<i64> {
         match self.inner.integrity {
-            exarch_core::IntegrityCheck::DecodeToEof(budget) => Some(budget.get() as i64),
+            exarch_core::IntegrityCheck::DecodeToEof(budget) => Some(saturating_i64(budget.get())),
             _ => None,
         }
     }
@@ -894,6 +890,21 @@ mod tests {
         assert_eq!(config.get_max_total_size(), 500 * 1024 * 1024);
         assert_eq!(config.get_max_file_count(), 10_000);
         assert!(!config.get_preserve_permissions());
+    }
+
+    #[test]
+    fn test_size_getters_clamp_values_above_i64_max() {
+        let mut config = SecurityConfig::new();
+        config.inner.max_file_size = u64::MAX;
+        config.inner.max_total_size = u64::MAX;
+        config.inner.max_solid_block_memory = u64::MAX;
+        assert_eq!(config.get_max_file_size(), i64::MAX);
+        assert_eq!(config.get_max_total_size(), i64::MAX);
+        assert_eq!(config.get_max_solid_block_memory(), i64::MAX);
+
+        let mut creation = CreationConfig::new();
+        creation.inner.max_file_size = Some(u64::MAX);
+        assert_eq!(creation.get_max_file_size(), Some(i64::MAX));
     }
 
     #[test]

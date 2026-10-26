@@ -31,6 +31,7 @@ rustix = { workspace = true, features = ["fs", "alloc"] }
 
 [dev-dependencies]
 assert_cmd.workspace = true
+exarch-testkit.workspace = true
 flate2.workspace = true
 predicates.workspace = true
 sevenz-rust2.workspace = true

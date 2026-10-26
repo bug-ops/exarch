@@ -5,6 +5,7 @@ use crate::commands::apply_size_limits;
 use crate::commands::atomic_swap;
 use crate::commands::atomic_swap::DestEntryKind;
 use crate::commands::atomic_swap::PinnedDir;
+use crate::error::PartialWrites;
 use crate::error::add_archive_context;
 use crate::error::convert_extraction_error;
 use crate::output::OutputFormatter;
@@ -39,11 +40,13 @@ fn run_extraction(
     options: &ExtractionOptions,
     progress: &mut dyn ProgressCallback,
     allow_symlinks: bool,
+    writes: PartialWrites,
 ) -> Result<ExtractionReport> {
     add_archive_context(
         extract_archive_with_options_and_progress(archive, output_dir, config, options, progress),
         archive,
         allow_symlinks,
+        writes,
     )
 }
 
@@ -154,6 +157,7 @@ fn run_atomic_force_extraction(
         options,
         progress,
         allow_symlinks,
+        PartialWrites::RolledBack,
     )
     .with_context(|| temp_ref.disclose("extraction interrupted"))?;
 
@@ -865,6 +869,7 @@ pub fn execute(
             &options,
             progress.as_mut(),
             args.links.allow_symlinks,
+            PartialWrites::from_atomic(args.atomic),
         )?
     };
 

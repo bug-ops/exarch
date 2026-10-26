@@ -18,7 +18,7 @@ fn saturating_u32(n: usize) -> u32 {
     u32::try_from(n).unwrap_or(u32::MAX)
 }
 
-fn saturating_i64(n: u64) -> i64 {
+pub fn saturating_i64(n: u64) -> i64 {
     i64::try_from(n).unwrap_or(i64::MAX)
 }
 

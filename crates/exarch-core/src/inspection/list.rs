@@ -36,19 +36,23 @@ use crate::formats::sevenz::is_password_error;
 use crate::formats::sevenz::sevenz_entry_compression;
 use crate::formats::sevenz::verify_sevenz_blocks;
 use crate::formats::sevenz::walk_sevenz_links;
+use crate::formats::tar::TarNode;
 use crate::formats::tar::effective_entry_type;
+use crate::formats::tar::is_metadata_type;
 use crate::formats::tar::open_tar_stream;
+use crate::formats::tar::tar_node;
 use crate::formats::tar_metadata_limit::TarEntryGuard;
 use crate::formats::tar_metadata_limit::TarReadBudget;
 use crate::formats::tar_metadata_limit::budget_violation;
 use crate::formats::tar_metadata_limit::budgeted_reader;
 use crate::formats::tar_metadata_limit::budgeted_tar_entries;
+use crate::formats::zip::ZipEntryKind;
 use crate::formats::zip::is_password_required;
 use crate::formats::zip::parse_zip_entry_name;
 use crate::formats::zip::read_zip_symlink_target;
 use crate::formats::zip::read_zip_symlink_target_checked;
 use crate::formats::zip::resolve_zip_entry_path;
-use crate::formats::zip::zip_mode_is_symlink;
+use crate::formats::zip::zip_entry_kind;
 use crate::formats::zip::zip_node_kind;
 use crate::formats::zip_tail::DescriptorTail;
 use crate::inspection::integrity::Charge;
@@ -318,7 +322,7 @@ fn list_tar_entries<R: std::io::Read>(
         })?;
 
         // Skip TAR metadata entries (PAX headers, GNU long names/links)
-        if is_tar_metadata_entry(&entry) {
+        if is_metadata_type(entry.header().entry_type()) {
             continue;
         }
 
@@ -1002,47 +1006,24 @@ fn contains_traversal(path: &Path, config: &SecurityConfig<Validated>) -> bool {
     })
 }
 
-/// Returns `true` for TAR metadata entries that should be skipped.
-fn is_tar_metadata_entry<R: std::io::Read>(entry: &tar::Entry<'_, R>) -> bool {
-    matches!(
-        entry.header().entry_type(),
-        tar::EntryType::XHeader
-            | tar::EntryType::XGlobalHeader
-            | tar::EntryType::GNULongName
-            | tar::EntryType::GNULongLink
-    )
-}
-
 fn convert_tar_entry_type(tar_type: tar::EntryType) -> Result<ManifestEntryType> {
-    match tar_type {
-        tar::EntryType::Directory => Ok(ManifestEntryType::Directory),
-        tar::EntryType::Symlink => Ok(ManifestEntryType::Symlink),
-        tar::EntryType::Link => Ok(ManifestEntryType::Hardlink),
-        tar::EntryType::Char | tar::EntryType::Block | tar::EntryType::Fifo => {
-            Err(ArchiveError::InvalidArchive(
-                "special files (char/block devices, FIFOs) are not supported".to_string(),
-            ))
-        }
-        // Regular, Continuous, GNUSparse treated as files
-        _ => Ok(ManifestEntryType::File),
-    }
+    Ok(match tar_node(tar_type)? {
+        TarNode::File => ManifestEntryType::File,
+        TarNode::Directory => ManifestEntryType::Directory,
+        TarNode::Symlink => ManifestEntryType::Symlink,
+        TarNode::Hardlink => ManifestEntryType::Hardlink,
+    })
 }
 
 fn convert_zip_entry_type<R: std::io::Read + std::io::Seek>(
     entry: &zip::read::ZipFile<'_, R>,
     kind: NodeKind,
 ) -> ManifestEntryType {
-    if kind == NodeKind::Directory {
-        ManifestEntryType::Directory
-    } else if is_zip_symlink(entry) {
-        ManifestEntryType::Symlink
-    } else {
-        ManifestEntryType::File
+    match zip_entry_kind(kind == NodeKind::Directory, entry.unix_mode()) {
+        ZipEntryKind::Directory => ManifestEntryType::Directory,
+        ZipEntryKind::Symlink => ManifestEntryType::Symlink,
+        ZipEntryKind::Regular => ManifestEntryType::File,
     }
-}
-
-fn is_zip_symlink<R: std::io::Read + std::io::Seek>(entry: &zip::read::ZipFile<'_, R>) -> bool {
-    zip_mode_is_symlink(entry.unix_mode())
 }
 
 #[cfg(test)]
@@ -1052,6 +1033,9 @@ mod tests {
     use std::assert_matches;
 
     use crate::OversizedEntry;
+    use crate::raw_zip::RawEntry;
+    use crate::raw_zip::RawZip;
+    use crate::raw_zip::extra_field;
     use crate::test_utils::HOST_PATH_LIMIT;
     use crate::test_utils::create_raw_zip_entry;
     use crate::test_utils::path_of_len;
@@ -1120,63 +1104,14 @@ mod tests {
     /// `external_attributes >> 16`). The zip crate's write API masks
     /// `unix_permissions` to 0o777, so we construct the binary ZIP
     /// structure directly to reproduce archives from external tools.
-    /// Uses empty content (CRC32 = 0) to avoid a CRC32 dependency in tests.
-    #[allow(clippy::cast_possible_truncation)]
+    /// The entry is empty.
     fn zip_with_raw_unix_mode(filename: &str, unix_mode: u32) -> Vec<u8> {
-        let external_attributes = unix_mode << 16;
-        let name_bytes = filename.as_bytes();
-        let name_len = name_bytes.len() as u16;
-
-        let mut buf: Vec<u8> = Vec::new();
-
-        // Local file header (empty stored entry, CRC32 = 0)
-        let local_offset = buf.len() as u32;
-        buf.extend_from_slice(b"PK\x03\x04"); // signature
-        buf.extend_from_slice(&20u16.to_le_bytes()); // version needed
-        buf.extend_from_slice(&0u16.to_le_bytes()); // general purpose flags
-        buf.extend_from_slice(&0u16.to_le_bytes()); // compression method: stored
-        buf.extend_from_slice(&0u16.to_le_bytes()); // last mod time
-        buf.extend_from_slice(&0u16.to_le_bytes()); // last mod date
-        buf.extend_from_slice(&0u32.to_le_bytes()); // CRC32
-        buf.extend_from_slice(&0u32.to_le_bytes()); // compressed size
-        buf.extend_from_slice(&0u32.to_le_bytes()); // uncompressed size
-        buf.extend_from_slice(&name_len.to_le_bytes());
-        buf.extend_from_slice(&0u16.to_le_bytes()); // extra field length
-        buf.extend_from_slice(name_bytes);
-        // no content bytes
-
-        // Central directory entry
-        let central_offset = buf.len() as u32;
-        buf.extend_from_slice(b"PK\x01\x02"); // signature
-        buf.extend_from_slice(&0x031eu16.to_le_bytes()); // version made by: Unix (3) + spec 3.0
-        buf.extend_from_slice(&20u16.to_le_bytes()); // version needed
-        buf.extend_from_slice(&0u16.to_le_bytes()); // flags
-        buf.extend_from_slice(&0u16.to_le_bytes()); // compression
-        buf.extend_from_slice(&0u16.to_le_bytes()); // mod time
-        buf.extend_from_slice(&0u16.to_le_bytes()); // mod date
-        buf.extend_from_slice(&0u32.to_le_bytes()); // CRC32
-        buf.extend_from_slice(&0u32.to_le_bytes()); // compressed size
-        buf.extend_from_slice(&0u32.to_le_bytes()); // uncompressed size
-        buf.extend_from_slice(&name_len.to_le_bytes());
-        buf.extend_from_slice(&0u16.to_le_bytes()); // extra length
-        buf.extend_from_slice(&0u16.to_le_bytes()); // comment length
-        buf.extend_from_slice(&0u16.to_le_bytes()); // disk number start
-        buf.extend_from_slice(&0u16.to_le_bytes()); // internal file attributes
-        buf.extend_from_slice(&external_attributes.to_le_bytes()); // external attributes
-        buf.extend_from_slice(&local_offset.to_le_bytes()); // local header offset
-        buf.extend_from_slice(name_bytes);
-
-        // End of central directory record
-        let central_size = (buf.len() as u32) - central_offset;
-        buf.extend_from_slice(b"PK\x05\x06"); // signature
-        buf.extend_from_slice(&0u16.to_le_bytes()); // disk number
-        buf.extend_from_slice(&0u16.to_le_bytes()); // disk with central dir
-        buf.extend_from_slice(&1u16.to_le_bytes()); // entries on this disk
-        buf.extend_from_slice(&1u16.to_le_bytes()); // total entries
-        buf.extend_from_slice(&central_size.to_le_bytes());
-        buf.extend_from_slice(&central_offset.to_le_bytes());
-        buf.extend_from_slice(&0u16.to_le_bytes()); // comment length
-        buf
+        let entry = RawEntry {
+            date: 0,
+            external_attributes: unix_mode << 16,
+            ..RawEntry::stored(filename, b"")
+        };
+        RawZip::new(vec![entry]).build().bytes
     }
 
     #[test]
@@ -1648,8 +1583,8 @@ mod tests {
         let result = list_archive(temp_file.path(), &config);
         assert_matches!(
             result,
-            Err(ArchiveError::InvalidArchive(_)),
-            "expected InvalidArchive for char device entry, got: {result:?}"
+            Err(ArchiveError::SecurityViolation { .. }),
+            "expected SecurityViolation for char device entry, got: {result:?}"
         );
     }
 
@@ -3048,74 +2983,28 @@ mod tests {
     /// exercise declared sizes that would be implausible to back with real
     /// bytes (e.g. near `u64::MAX`), which is exactly what `QuotaTracker`'s
     /// checked arithmetic must guard against.
-    #[allow(clippy::cast_possible_truncation)]
     fn zip_with_zip64_declared_sizes(entries: &[(&str, u64)]) -> Vec<u8> {
-        let mut buf: Vec<u8> = Vec::new();
-        let mut central_entries: Vec<Vec<u8>> = Vec::new();
-
-        for (name, declared_size) in entries {
-            let name_bytes = name.as_bytes();
-            let name_len = name_bytes.len() as u16;
-            let local_offset = buf.len() as u32;
-
-            // Local file header: empty stored entry, real size 0.
-            buf.extend_from_slice(b"PK\x03\x04");
-            buf.extend_from_slice(&20u16.to_le_bytes()); // version needed
-            buf.extend_from_slice(&0u16.to_le_bytes()); // flags
-            buf.extend_from_slice(&0u16.to_le_bytes()); // compression: stored
-            buf.extend_from_slice(&0u16.to_le_bytes()); // mod time
-            buf.extend_from_slice(&0u16.to_le_bytes()); // mod date
-            buf.extend_from_slice(&0u32.to_le_bytes()); // crc32
-            buf.extend_from_slice(&0u32.to_le_bytes()); // compressed size
-            buf.extend_from_slice(&0u32.to_le_bytes()); // uncompressed size
-            buf.extend_from_slice(&name_len.to_le_bytes());
-            buf.extend_from_slice(&0u16.to_le_bytes()); // extra field length
-            buf.extend_from_slice(name_bytes);
-
-            // Central directory entry: sizes forced to the ZIP64 sentinel with
-            // the real (lying) sizes carried in a ZIP64 extra field.
-            let mut central: Vec<u8> = Vec::new();
-            central.extend_from_slice(b"PK\x01\x02");
-            central.extend_from_slice(&0x032du16.to_le_bytes()); // version made by: Unix, 4.5
-            central.extend_from_slice(&45u16.to_le_bytes()); // version needed: 4.5 (ZIP64)
-            central.extend_from_slice(&0u16.to_le_bytes()); // flags
-            central.extend_from_slice(&0u16.to_le_bytes()); // compression
-            central.extend_from_slice(&0u16.to_le_bytes()); // mod time
-            central.extend_from_slice(&0u16.to_le_bytes()); // mod date
-            central.extend_from_slice(&0u32.to_le_bytes()); // crc32
-            central.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes()); // compressed size sentinel
-            central.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes()); // uncompressed size sentinel
-            central.extend_from_slice(&name_len.to_le_bytes());
-            central.extend_from_slice(&20u16.to_le_bytes()); // extra field length (4 hdr + 16 data)
-            central.extend_from_slice(&0u16.to_le_bytes()); // comment length
-            central.extend_from_slice(&0u16.to_le_bytes()); // disk number start
-            central.extend_from_slice(&0u16.to_le_bytes()); // internal attributes
-            central.extend_from_slice(&0u32.to_le_bytes()); // external attributes
-            central.extend_from_slice(&local_offset.to_le_bytes());
-            central.extend_from_slice(name_bytes);
-            central.extend_from_slice(&1u16.to_le_bytes()); // ZIP64 extra field id
-            central.extend_from_slice(&16u16.to_le_bytes()); // ZIP64 extra field data size
-            central.extend_from_slice(&declared_size.to_le_bytes()); // uncompressed size
-            central.extend_from_slice(&0u64.to_le_bytes()); // compressed size
-
-            central_entries.push(central);
-        }
-
-        let central_offset = buf.len() as u32;
-        for central in &central_entries {
-            buf.extend_from_slice(central);
-        }
-        let central_size = (buf.len() as u32) - central_offset;
-
-        buf.extend_from_slice(b"PK\x05\x06");
-        buf.extend_from_slice(&0u16.to_le_bytes()); // disk number
-        buf.extend_from_slice(&0u16.to_le_bytes()); // disk with central dir
-        buf.extend_from_slice(&(entries.len() as u16).to_le_bytes());
-        buf.extend_from_slice(&(entries.len() as u16).to_le_bytes());
-        buf.extend_from_slice(&central_size.to_le_bytes());
-        buf.extend_from_slice(&central_offset.to_le_bytes());
-        buf.extend_from_slice(&0u16.to_le_bytes()); // comment length
-        buf
+        let raw = entries
+            .iter()
+            .map(|(name, declared)| {
+                let mut zip64 = declared.to_le_bytes().to_vec();
+                zip64.extend_from_slice(&0u64.to_le_bytes());
+                RawEntry {
+                    date: 0,
+                    crc: 0,
+                    size: u64::from(u32::MAX),
+                    declared_compressed: Some(u64::from(u32::MAX)),
+                    local_sizes: Some((0, 0)),
+                    made_by: 0x032d,
+                    central_version: 45,
+                    external_attributes: 0,
+                    central_extra: extra_field(1, &zip64),
+                    data: Vec::new(),
+                    ..RawEntry::stored(name, b"")
+                }
+            })
+            .collect();
+        RawZip::new(raw).build().bytes
     }
 
     #[test]

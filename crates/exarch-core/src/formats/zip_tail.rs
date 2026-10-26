@@ -21,10 +21,14 @@ use std::rc::Rc;
 use zip::ZipArchive as ZipReader;
 use zip::read::ZipFile;
 
+use super::chunk_search::ChunkPlan;
+use super::chunk_search::ChunkSource;
+use super::chunk_search::Flow;
+use super::chunk_search::search_chunks;
 use super::zip::ZipMethod;
 use super::zip_structure::LFH_FIXED_LEN;
 use super::zip_structure::LFH_SIGNATURE;
-use super::zip_structure::le_u16;
+use super::zip_structure::le16;
 use crate::ArchiveError;
 use crate::HiddenRegion;
 use crate::Result;
@@ -241,11 +245,11 @@ pub(super) enum Judgement {
 /// Judges a header signature in the bytes behind a compressed stream: a header
 /// with a name that fits in the rest of the declared range.
 fn judge_header_in_slack(bytes: &[u8], at: u64, total: u64) -> Judgement {
-    let Some(header) = bytes.get(..LFH_FIXED_LEN) else {
+    let Some(header) = bytes.first_chunk::<LFH_FIXED_LEN>() else {
         return Judgement::NeedMore;
     };
-    let name_len = u64::from(le_u16(header, 26));
-    let extra_len = u64::from(le_u16(header, 28));
+    let name_len = u64::from(le16::<26, LFH_FIXED_LEN>(header));
+    let extra_len = u64::from(le16::<28, LFH_FIXED_LEN>(header));
     if name_len > 0 && at + LFH_FIXED_LEN as u64 + name_len + extra_len <= total {
         Judgement::Hit(0)
     } else {
@@ -267,39 +271,58 @@ pub(super) fn scan(
     signature: [u8; 4],
     judge: fn(&[u8], u64, u64) -> Judgement,
 ) -> Result<Option<u64>> {
-    let mut buf = vec![0u8; usize::try_from(total).map_or(SCAN_CHUNK, |t| t.min(SCAN_CHUNK))];
-    let mut held = 0;
-    let mut base = 0u64;
-    loop {
-        let read = data.read(&mut buf[held..]).map_err(ArchiveError::Io)?;
-        let end = held + read;
-        let last = read == 0;
-        let mut keep_from = end.saturating_sub(signature.len() - 1);
-        let mut next = 0;
-        while let Some(relative) = buf[next..end].windows(4).position(|w| w == signature) {
-            let at = next + relative;
-            next = at + 1;
-            match judge(&buf[at..end], base + at as u64, total) {
-                Judgement::Hit(delta) => return Ok(Some(base + at as u64 + delta)),
-                Judgement::NeedMore if !last => {
-                    keep_from = keep_from.min(at);
-                    break;
+    let plan = ChunkPlan {
+        range: 0..total,
+        chunk: SCAN_CHUNK,
+        signature_len: signature.len(),
+        max_lookahead: LFH_FIXED_LEN,
+    };
+    let mut found = None;
+    search_chunks(
+        &mut Sequential(data),
+        &plan,
+        |bytes| {
+            bytes
+                .array_windows::<4>()
+                .position(|w| *w == signature)
+                .map(|at| (at, ()))
+        },
+        |_, hit| {
+            Ok(match judge(hit.bytes, hit.offset, total) {
+                Judgement::Hit(delta) => {
+                    found = Some(hit.offset + delta);
+                    Flow::Stop
                 }
-                Judgement::NeedMore | Judgement::Miss => {}
+                Judgement::NeedMore => Flow::NeedMore,
+                Judgement::Miss => Flow::Next,
+            })
+        },
+    )?;
+    Ok(found)
+}
+
+/// A reader that is read from front to back whatever position is asked for.
+struct Sequential<'a, R>(&'a mut R);
+
+impl<R: Read> ChunkSource for Sequential<'_, R> {
+    fn read_chunk(&mut self, _: u64, buf: &mut [u8]) -> Result<usize> {
+        let mut filled = 0;
+        while filled < buf.len() {
+            match self.0.read(&mut buf[filled..]) {
+                Ok(0) => break,
+                Ok(n) => filled += n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(ArchiveError::Io(e)),
             }
         }
-        if last {
-            return Ok(None);
-        }
-        buf.copy_within(keep_from..end, 0);
-        held = end - keep_from;
-        base += keep_from as u64;
+        Ok(filled)
     }
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    use std::assert_matches;
     use std::io::Cursor;
 
     use super::*;
@@ -325,8 +348,8 @@ mod tests {
     fn truncated_stream_is_undecided_not_an_io_error() {
         let stream = deflate(&vec![b'x'; 10_000]);
         let truncated = &stream[..stream.len() / 2];
-        assert!(matches!(drained(Cursor::new(truncated), 10_000), Ok(None)));
-        assert!(matches!(drained(Cursor::new(stream), 10_000), Ok(Some(()))));
+        assert_matches!(drained(Cursor::new(truncated), 10_000), Ok(None));
+        assert_matches!(drained(Cursor::new(stream), 10_000), Ok(Some(())));
     }
 
     #[test]
@@ -371,9 +394,9 @@ mod tests {
 
     #[test]
     fn error_of_the_reader_is_an_io_error() {
-        assert!(matches!(
+        assert_matches!(
             drained(Failing, 10),
             Err(ArchiveError::Io(e)) if e.kind() == std::io::ErrorKind::PermissionDenied
-        ));
+        );
     }
 }

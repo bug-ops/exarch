@@ -12,6 +12,8 @@ use exarch_core::SecurityConfig;
 use exarch_core::formats::ArchiveFormat;
 use exarch_core::formats::TarArchive;
 use exarch_core::formats::ZipArchive;
+use exarch_testkit::raw_zip::RawEntry;
+use exarch_testkit::raw_zip::RawZip;
 use std::assert_matches;
 use std::io::Cursor;
 use tempfile::TempDir;
@@ -669,22 +671,6 @@ fn test_cve_2026_24842_safe_deep_nested_hardlink_allowed() {
 // Unix symlink file-type constant: S_IFLNK (octal 0120000).
 const S_IFLNK: u32 = 0o120_000;
 
-/// CRC32 (IEEE 802.3 polynomial) for raw ZIP construction.
-fn crc32_ieee(data: &[u8]) -> u32 {
-    let mut crc: u32 = 0xFFFF_FFFF;
-    for &byte in data {
-        crc ^= u32::from(byte);
-        for _ in 0..8 {
-            if crc & 1 != 0 {
-                crc = (crc >> 1) ^ 0xEDB8_8320;
-            } else {
-                crc >>= 1;
-            }
-        }
-    }
-    !crc
-}
-
 struct RawZipEntry<'a> {
     name: &'a str,
     content: &'a [u8],
@@ -698,84 +684,15 @@ struct RawZipEntry<'a> {
 /// file-type nibble, making it impossible to mark entries as symlinks without
 /// raw byte assembly.
 fn build_raw_zip(entries: &[RawZipEntry<'_>]) -> Vec<u8> {
-    let mut buf: Vec<u8> = Vec::new();
-    // Collect (local_offset, name_len, external_attributes, crc, content_len)
-    // per entry.
-    let mut meta: Vec<(u32, u16, u32, u32, u32)> = Vec::new();
-
-    for entry in entries {
-        let crc = crc32_ieee(entry.content);
-        let name_bytes = entry.name.as_bytes();
-        let name_len = name_bytes.len() as u16;
-        let content_len = entry.content.len() as u32;
-        let external_attributes = entry.unix_mode << 16;
-
-        let local_offset = buf.len() as u32;
-        meta.push((
-            local_offset,
-            name_len,
-            external_attributes,
-            crc,
-            content_len,
-        ));
-
-        // Local file header
-        buf.extend_from_slice(b"PK\x03\x04");
-        buf.extend_from_slice(&20u16.to_le_bytes()); // version needed
-        buf.extend_from_slice(&0u16.to_le_bytes()); // flags
-        buf.extend_from_slice(&0u16.to_le_bytes()); // compression: Stored
-        buf.extend_from_slice(&0u16.to_le_bytes()); // mod time
-        buf.extend_from_slice(&0u16.to_le_bytes()); // mod date
-        buf.extend_from_slice(&crc.to_le_bytes());
-        buf.extend_from_slice(&content_len.to_le_bytes()); // compressed size
-        buf.extend_from_slice(&content_len.to_le_bytes()); // uncompressed size
-        buf.extend_from_slice(&name_len.to_le_bytes());
-        buf.extend_from_slice(&0u16.to_le_bytes()); // extra field length
-        buf.extend_from_slice(name_bytes);
-        buf.extend_from_slice(entry.content);
-    }
-
-    let central_dir_offset = buf.len() as u32;
-
-    for (i, entry) in entries.iter().enumerate() {
-        let (local_offset, name_len, external_attributes, crc, content_len) = meta[i];
-        let name_bytes = entry.name.as_bytes();
-
-        // Central directory file header
-        buf.extend_from_slice(b"PK\x01\x02");
-        buf.extend_from_slice(&0x031eu16.to_le_bytes()); // version made by: Unix
-        buf.extend_from_slice(&20u16.to_le_bytes()); // version needed
-        buf.extend_from_slice(&0u16.to_le_bytes()); // flags
-        buf.extend_from_slice(&0u16.to_le_bytes()); // compression: Stored
-        buf.extend_from_slice(&0u16.to_le_bytes()); // mod time
-        buf.extend_from_slice(&0u16.to_le_bytes()); // mod date
-        buf.extend_from_slice(&crc.to_le_bytes());
-        buf.extend_from_slice(&content_len.to_le_bytes()); // compressed size
-        buf.extend_from_slice(&content_len.to_le_bytes()); // uncompressed size
-        buf.extend_from_slice(&name_len.to_le_bytes());
-        buf.extend_from_slice(&0u16.to_le_bytes()); // extra length
-        buf.extend_from_slice(&0u16.to_le_bytes()); // comment length
-        buf.extend_from_slice(&0u16.to_le_bytes()); // disk number start
-        buf.extend_from_slice(&0u16.to_le_bytes()); // internal attributes
-        buf.extend_from_slice(&external_attributes.to_le_bytes());
-        buf.extend_from_slice(&local_offset.to_le_bytes());
-        buf.extend_from_slice(name_bytes);
-    }
-
-    let central_dir_size = (buf.len() as u32) - central_dir_offset;
-    let entry_count = entries.len() as u16;
-
-    // End of central directory record
-    buf.extend_from_slice(b"PK\x05\x06");
-    buf.extend_from_slice(&0u16.to_le_bytes()); // disk number
-    buf.extend_from_slice(&0u16.to_le_bytes()); // disk with central dir
-    buf.extend_from_slice(&entry_count.to_le_bytes());
-    buf.extend_from_slice(&entry_count.to_le_bytes());
-    buf.extend_from_slice(&central_dir_size.to_le_bytes());
-    buf.extend_from_slice(&central_dir_offset.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes()); // comment length
-
-    buf
+    let raw = entries
+        .iter()
+        .map(|entry| RawEntry {
+            date: 0,
+            external_attributes: entry.unix_mode << 16,
+            ..RawEntry::stored(entry.name, entry.content)
+        })
+        .collect();
+    RawZip::new(raw).build().bytes
 }
 
 /// Build the CVE-2025-29787 attack ZIP: symlink `up -> ../..` followed by

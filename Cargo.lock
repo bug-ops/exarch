@@ -607,6 +607,7 @@ dependencies = [
  "clap_complete",
  "console",
  "exarch-core",
+ "exarch-testkit",
  "flate2",
  "indicatif",
  "predicates",
@@ -626,6 +627,7 @@ dependencies = [
  "bzip2",
  "criterion",
  "dhat",
+ "exarch-testkit",
  "flate2",
  "libc",
  "lzma-rust2",
@@ -663,6 +665,13 @@ version = "0.6.1"
 dependencies = [
  "exarch-core",
  "pyo3",
+]
+
+[[package]]
+name = "exarch-testkit"
+version = "0.6.1"
+dependencies = [
+ "flate2",
 ]
 
 [[package]]

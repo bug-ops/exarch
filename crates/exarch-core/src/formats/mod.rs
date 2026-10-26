@@ -1,10 +1,10 @@
 //! Archive format implementations.
 
+pub(crate) mod chunk_search;
 pub(crate) mod common;
 pub mod compression;
 pub mod detect;
 pub mod sevenz;
-pub(crate) mod sevenz_lzma2;
 pub mod tar;
 pub(crate) mod tar_metadata_limit;
 pub mod traits;

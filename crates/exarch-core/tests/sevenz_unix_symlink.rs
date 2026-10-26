@@ -3,9 +3,8 @@
 //! `verify` validates it under an integrity check, and `extract` validates it
 //! as it creates the link, only under `allow_symlinks`.
 //!
-//! Stream-less directories are handed to the extractor after every block, so a
-//! directory entry of the archive does not exist yet when a link is validated;
-//! 7z is stricter than TAR there.
+//! Entries are handed to the extractor in archive order, as for TAR, so a
+//! directory entry of the archive exists when a later link is validated.
 
 #![allow(clippy::unwrap_used)]
 #![cfg_attr(not(unix), allow(dead_code, unused_imports))]
@@ -40,10 +39,12 @@ use exarch_core::list_archive;
 use exarch_core::list_archive_with_options;
 use exarch_core::verify_archive;
 use exarch_core::verify_archive_with_options;
+use sevenz_rust2::Archive;
 use sevenz_rust2::ArchiveEntry;
 use sevenz_rust2::ArchiveWriter;
 use sevenz_rust2::EncoderConfiguration;
 use sevenz_rust2::EncoderMethod;
+use sevenz_rust2::Password;
 use sevenz_rust2::SourceReader;
 use tempfile::TempDir;
 
@@ -97,6 +98,10 @@ impl Item<'_> {
 enum Layout {
     OneBlockEach,
     Solid,
+    /// One solid block of the middle entries; a stream-less entry at either
+    /// end is pushed on its own, so the writer does not count it as a
+    /// sub-stream of the block.
+    SolidAroundDirs,
 }
 
 fn build(items: &[Item<'_>], layout: Layout, stored: bool) -> Vec<u8> {
@@ -118,6 +123,39 @@ fn build(items: &[Item<'_>], layout: Layout, stored: bool) -> Vec<u8> {
                 .map(|(entry, data)| (entry, SourceReader::from(Cursor::new(data))))
                 .unzip();
             writer.push_archive_entries(entries, readers).unwrap();
+        }
+        Layout::SolidAroundDirs => {
+            let mut leading = pairs;
+            let trailing = leading.split_off(
+                leading.len()
+                    - leading
+                        .iter()
+                        .rev()
+                        .take_while(|(entry, _)| !entry.has_stream)
+                        .count(),
+            );
+            let leading_len = leading
+                .iter()
+                .take_while(|(entry, _)| !entry.has_stream)
+                .count();
+            let middle = leading.split_off(leading_len);
+            for (entry, _) in leading {
+                writer
+                    .push_archive_entry(entry, None::<Cursor<Vec<u8>>>)
+                    .unwrap();
+            }
+            let (entries, readers): (Vec<_>, Vec<_>) = middle
+                .into_iter()
+                .map(|(entry, data)| (entry, SourceReader::from(Cursor::new(data))))
+                .unzip();
+            if !entries.is_empty() {
+                writer.push_archive_entries(entries, readers).unwrap();
+            }
+            for (entry, _) in trailing {
+                writer
+                    .push_archive_entry(entry, None::<Cursor<Vec<u8>>>)
+                    .unwrap();
+            }
         }
     }
     writer.finish().unwrap().into_inner()
@@ -756,15 +794,19 @@ fn unresolvable_parent_components_are_refused_in_both_orders() {
 
 #[cfg(unix)]
 #[test]
-fn a_target_through_a_directory_of_the_same_archive_is_refused_before_any_write() {
+fn a_target_through_a_directory_of_the_same_archive_resolves_like_tar() {
     let dir = TempDir::new().unwrap();
     let path = archive_of(&dir, &[Item::Dir("t"), Item::Link("t2", b"t/../x")]);
     let out = TempDir::new().unwrap();
 
-    let err = extract_archive(&path, out.path(), &allow_symlinks()).unwrap_err();
+    extract_archive(&path, out.path(), &allow_symlinks()).unwrap();
 
-    assert_matches!(err, ArchiveError::SymlinkEscape { .. });
-    assert!(dir_is_empty(&out));
+    let link = std::fs::read_link(out.path().join("t2")).unwrap();
+    assert_eq!(link, Path::new("t/../x"));
+    assert!(!out.path().join("x").exists());
+    let report =
+        verify_archive_with_options(&path, &allow_symlinks(), &integrity(1 << 20)).unwrap();
+    assert_eq!(report.security_status(), CheckStatus::Pass);
 }
 
 #[cfg(unix)]
@@ -917,6 +959,328 @@ fn a_corrupt_link_inside_a_solid_block_fails_extract() {
         LinkTarget::Unreadable,
         "the corrupt link is unreadable in a listing"
     );
+}
+
+/// `symlink-snl.7z` was written by 7-Zip 26.05 with `-snl` (see
+/// `tests/fixtures/generate_7z_fixtures.sh`). The link carries `S_IFLNK` in the
+/// Unix extension and no Windows reparse-point bit, so it is a Unix symlink
+/// for exarch and not a refused reparse point. Fixtures from p7zip on Linux and
+/// from 7-Zip for Windows are tracked in #727.
+#[cfg(unix)]
+#[test]
+fn a_link_written_by_7zip_with_snl_is_a_unix_symlink_not_a_reparse_point() {
+    const REPARSE_POINT: u32 = 0x0400;
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/symlink-snl.7z");
+
+    let archive = Archive::read(
+        &mut Cursor::new(std::fs::read(&path).unwrap()),
+        &Password::empty(),
+    )
+    .unwrap();
+    let link = archive.files.iter().find(|f| f.name == "link.txt").unwrap();
+    assert!(link.has_windows_attributes);
+    let attributes = link.windows_attributes;
+    assert_ne!(attributes & UNIX_EXTENSION, 0);
+    assert_eq!((attributes >> 16) & 0o17_0000, S_IFLNK);
+    assert_eq!(attributes & REPARSE_POINT, 0);
+
+    assert_eq!(
+        default_link_target(&path, &allow_symlinks()),
+        LinkTarget::Unread
+    );
+    assert_eq!(
+        link_target(&path, &allow_symlinks()),
+        LinkTarget::Recorded(PathBuf::from("target.txt"))
+    );
+    let report =
+        verify_archive_with_options(&path, &allow_symlinks(), &integrity(1 << 20)).unwrap();
+    assert_eq!(report.security_status(), CheckStatus::Pass);
+
+    let refused = TempDir::new().unwrap();
+    assert_matches!(
+        extract_archive(&path, refused.path(), &SecurityConfig::default()),
+        Err(ArchiveError::SecurityViolation { reason }) if reason.contains("symlinks not allowed")
+    );
+    assert!(dir_is_empty(&refused));
+
+    let out = TempDir::new().unwrap();
+    extract_archive(&path, out.path(), &allow_symlinks()).unwrap();
+    assert_eq!(
+        std::fs::read_link(out.path().join("link.txt")).unwrap(),
+        Path::new("target.txt")
+    );
+    assert_eq!(
+        std::fs::read(out.path().join("target.txt")).unwrap(),
+        b"snl target\n"
+    );
+}
+
+/// Marks file `file` of a two-file archive stored with a plain header as
+/// stream-less (a directory), leaving every block as it was.
+///
+/// The block of the file then keeps its stream count but no file maps to it.
+/// The patch is built here from the header layout: 6 signature bytes, 2
+/// version bytes, the start header CRC, then the next header's offset, size
+/// and CRC.
+fn mark_stream_less(bytes: &[u8], file: usize) -> Vec<u8> {
+    const K_FILES_INFO: u8 = 0x05;
+    const K_EMPTY_STREAM: u8 = 0x0E;
+    let crc = |data: &[u8]| {
+        let mut crc = flate2::Crc::new();
+        crc.update(data);
+        crc.sum().to_le_bytes()
+    };
+    let field = |at: usize| {
+        usize::try_from(u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap())).unwrap()
+    };
+    let start = 32 + field(12);
+    let header = &bytes[start..start + field(20)];
+    assert_eq!(start + header.len(), bytes.len());
+    assert_eq!(header[0], 0x01, "the header must be stored plain");
+
+    for at in (0..header.len() - 1).filter(|&at| header[at..at + 2] == [K_FILES_INFO, 2]) {
+        let mut patched = header[..at + 2].to_vec();
+        patched.extend_from_slice(&[K_EMPTY_STREAM, 1, 0x80 >> file]);
+        patched.extend_from_slice(&header[at + 2..]);
+
+        let mut out = bytes[..start].to_vec();
+        out[20..28].copy_from_slice(&(patched.len() as u64).to_le_bytes());
+        out[28..32].copy_from_slice(&crc(&patched));
+        let start_crc = crc(&out[12..32]);
+        out[8..12].copy_from_slice(&start_crc);
+        out.extend_from_slice(&patched);
+
+        let parsed = Archive::read(&mut Cursor::new(out.clone()), &Password::empty());
+        if parsed.is_ok_and(|a| a.blocks.len() == 2 && !a.files[file].has_stream) {
+            return out;
+        }
+    }
+    panic!("no FilesInfo found to patch");
+}
+
+/// Two one-file blocks, one of whose files is then marked stream-less.
+fn orphan_block_archive(dir: &TempDir, stream_less: usize) -> PathBuf {
+    let mut writer = ArchiveWriter::new(Cursor::new(Vec::new())).unwrap();
+    writer.set_content_methods(vec![EncoderConfiguration::new(EncoderMethod::COPY)]);
+    for (name, data) in [("a", b"AAAA"), ("b", b"BBBB")] {
+        let mut entry = ArchiveEntry::new_file(name);
+        entry.has_stream = true;
+        entry.size = data.len() as u64;
+        writer
+            .push_archive_entry(entry, Some(Cursor::new(data.to_vec())))
+            .unwrap();
+    }
+    let plain = writer.finish().unwrap().into_inner();
+    let bytes = mark_stream_less(&plain, stream_less);
+    let path = dir.path().join("orphan.7z");
+    std::fs::write(&path, bytes).unwrap();
+    path
+}
+
+/// An orphan block keeps its stream count and the first-file index 0, so it
+/// would decode over the first files of the archive with its own data. It is
+/// refused where the archive is admitted, by `extract` before any write and by
+/// `verify`, which never decodes it, and `list` reports only what the header
+/// holds.
+fn assert_orphan_block_refused(path: &Path, mapping: [Option<usize>; 2]) {
+    let archive = Archive::read(
+        &mut Cursor::new(std::fs::read(path).unwrap()),
+        &Password::empty(),
+    )
+    .unwrap();
+    assert_eq!(archive.blocks.len(), 2);
+    assert_eq!(archive.stream_map.file_block_index, mapping);
+
+    let out = TempDir::new().unwrap();
+    std::fs::write(out.path().join("a"), b"sentinel").unwrap();
+    std::fs::write(out.path().join("b"), b"sentinel").unwrap();
+    let err = extract_archive(path, out.path(), &SecurityConfig::default()).unwrap_err();
+    assert_matches!(
+        err,
+        ArchiveError::InvalidArchive(reason) if reason.contains("other than the ones mapped")
+    );
+    for name in ["a", "b"] {
+        assert_eq!(std::fs::read(out.path().join(name)).unwrap(), b"sentinel");
+    }
+    assert_eq!(std::fs::read_dir(out.path()).unwrap().count(), 2);
+
+    let report =
+        verify_archive_with_options(path, &SecurityConfig::default(), &integrity(1 << 20)).unwrap();
+    assert_eq!(report.status(), VerificationStatus::Fail);
+    assert_eq!(
+        issue_categories(&report)
+            .into_iter()
+            .filter(|c| *c == IssueCategory::InvalidArchive)
+            .count(),
+        1,
+        "{:?}",
+        report.issues()
+    );
+
+    let manifest = list_archive(path, &SecurityConfig::default()).unwrap();
+    assert_eq!(manifest.total_entries(), 2);
+}
+
+#[test]
+fn an_orphan_trailing_block_is_refused_before_it_can_redeliver_the_first_file() {
+    let dir = TempDir::new().unwrap();
+    let path = orphan_block_archive(&dir, 1);
+
+    assert_orphan_block_refused(&path, [Some(0), None]);
+}
+
+#[test]
+fn a_block_whose_span_covers_a_stream_less_entry_is_refused() {
+    let dir = TempDir::new().unwrap();
+    let path = orphan_block_archive(&dir, 0);
+
+    assert_orphan_block_refused(&path, [None, Some(0)]);
+}
+
+#[cfg(unix)]
+fn tree_of(root: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            let kind = entry.file_type().unwrap();
+            let rel = path.strip_prefix(root).unwrap().display().to_string();
+            if kind.is_symlink() {
+                out.push(format!(
+                    "{rel}->{}",
+                    std::fs::read_link(&path).unwrap().display()
+                ));
+            } else if kind.is_dir() {
+                out.push(format!("{rel}/"));
+                stack.push(path);
+            } else {
+                out.push(rel);
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// How `extract` ended: extracted, refused as invalid before any write, or
+/// failed part-way.
+#[cfg(unix)]
+fn extract_class(path: &Path, config: &SecurityConfig, skip_duplicates: bool) -> &'static str {
+    let out = TempDir::new().unwrap();
+    let options = ExtractionOptions::default().with_skip_duplicates(skip_duplicates);
+    match extract_archive_with_options(path, out.path(), config, &options) {
+        Ok(_) => "extracted",
+        Err(ArchiveError::InvalidArchive(_)) => {
+            assert!(dir_is_empty(&out), "a refusal writes nothing");
+            "refused"
+        }
+        Err(_) => "failed",
+    }
+}
+
+/// How `verify --check-integrity` ended: `pass`, `fail` (a security finding),
+/// `fail-no-security-finding` (the overall status fails, the security status
+/// passes) or `refused`.
+#[cfg(unix)]
+fn verify_class(path: &Path, config: &SecurityConfig) -> &'static str {
+    match verify_archive_with_options(path, config, &integrity(1 << 20)) {
+        Ok(report) if report.status() == VerificationStatus::Pass => "pass",
+        Ok(report) if report.security_status() == CheckStatus::Pass => "fail-no-security-finding",
+        Ok(_) => "fail",
+        Err(ArchiveError::InvalidArchive(_)) => "refused",
+        Err(other) => panic!("unexpected verify error: {other}"),
+    }
+}
+
+/// Extraction follows the archive's entry order, so `verify` (which simulates
+/// entries in that order) and `extract` agree for every order of a directory
+/// `S`, a link `L` to it and a file `F` below the link, with one block per
+/// entry and with the files in one solid block (`S` at either end of the
+/// block is pushed apart from it, so the writer does not count it as a
+/// sub-stream; `S` in the middle makes the block interleaved and is refused at
+/// admission by both). The stream map of every case is pinned. Parity holds
+/// under an integrity check only: a plain `verify` leaves 7z link targets
+/// unread.
+///
+/// In `SLF` and `LSF` the file `d/f` is written through the archive's own link
+/// `d` into `sub/f`, as TAR does.
+///
+/// Two divergences are known:
+/// - `LFS`: `extract` stops because the link `d` dangles when `d/f` is written
+///   (`File exists`); `verify` fails the overall status with an
+///   `InvalidArchive` issue, but its security status passes (tracked in #726).
+/// - `skip_duplicates = false` (the default skips): in `SFL`, `FSL` and `FLS`
+///   the link `d` meets the directory `d/` that the file `d/f` created, and
+///   extract fails with `Operation not permitted` while `verify` passes. With
+///   the default it only looks like `extracted` because the link is dropped
+///   silently. This predates the archive-order walk.
+#[cfg(unix)]
+#[test]
+fn verify_and_extract_agree_for_every_order_of_a_directory_a_link_and_a_file() {
+    const N: Option<usize> = None;
+    let (s, l, f) = (
+        Item::Dir("sub"),
+        Item::Link("d", b"sub"),
+        Item::File("d/f", b"x"),
+    );
+    // (order, items, layout, stream map, extract with skip_duplicates,
+    // extract without it, verify)
+    #[rustfmt::skip]
+    let table = [
+        ("SLF", [s, l, f], Layout::OneBlockEach, [N, Some(0), Some(1)], "extracted", "extracted", "pass"),
+        ("LSF", [l, s, f], Layout::OneBlockEach, [Some(0), N, Some(1)], "extracted", "extracted", "pass"),
+        ("SFL", [s, f, l], Layout::OneBlockEach, [N, Some(0), Some(1)], "extracted", "failed", "pass"),
+        ("FSL", [f, s, l], Layout::OneBlockEach, [Some(0), N, Some(1)], "extracted", "failed", "pass"),
+        ("LFS", [l, f, s], Layout::OneBlockEach, [Some(0), Some(1), N], "failed", "failed", "fail-no-security-finding"),
+        ("FLS", [f, l, s], Layout::OneBlockEach, [Some(0), Some(1), N], "extracted", "failed", "pass"),
+        ("SLF", [s, l, f], Layout::SolidAroundDirs, [N, Some(0), Some(0)], "extracted", "extracted", "pass"),
+        ("LSF", [l, s, f], Layout::SolidAroundDirs, [Some(0), Some(0), Some(0)], "refused", "refused", "fail"),
+        ("SFL", [s, f, l], Layout::SolidAroundDirs, [N, Some(0), Some(0)], "extracted", "failed", "pass"),
+        ("FSL", [f, s, l], Layout::SolidAroundDirs, [Some(0), Some(0), Some(0)], "refused", "refused", "fail"),
+        ("LFS", [l, f, s], Layout::SolidAroundDirs, [Some(0), Some(0), N], "failed", "failed", "fail-no-security-finding"),
+        ("FLS", [f, l, s], Layout::SolidAroundDirs, [Some(0), Some(0), N], "extracted", "failed", "pass"),
+    ];
+    let config = allow_symlinks().with_allow_solid_archives(true);
+    for (order, items, layout, map, skipping, keeping, verify) in table {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("m.7z");
+        let bytes = build(&items, layout, false);
+        std::fs::write(&path, &bytes).unwrap();
+        let label = format!(
+            "{order} {}",
+            if layout == Layout::OneBlockEach {
+                "each"
+            } else {
+                "solid"
+            }
+        );
+
+        let archive = Archive::read(&mut Cursor::new(bytes), &Password::empty()).unwrap();
+        assert_eq!(archive.stream_map.file_block_index, map, "{label} map");
+        assert_eq!(
+            extract_class(&path, &config, true),
+            skipping,
+            "{label} extract"
+        );
+        assert_eq!(
+            extract_class(&path, &config, false),
+            keeping,
+            "{label} extract without skip_duplicates"
+        );
+        assert_eq!(verify_class(&path, &config), verify, "{label} verify");
+
+        if matches!(order, "SLF" | "LSF") && layout == Layout::OneBlockEach
+            || order == "SLF" && layout == Layout::SolidAroundDirs
+        {
+            let (container, out) = nested_dest();
+            extract_archive(&path, &out, &config).unwrap();
+            assert_eq!(tree_of(&out), ["d->sub", "sub/", "sub/f"], "{label} tree");
+            assert_eq!(std::fs::read(out.join("sub/f")).unwrap(), b"x", "{label}");
+            assert_nothing_outside(&container, &label);
+        }
+    }
 }
 
 #[cfg(not(unix))]

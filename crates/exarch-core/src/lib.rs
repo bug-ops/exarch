@@ -31,9 +31,10 @@ pub mod error;
 pub mod formats;
 pub mod inspection;
 #[cfg(test)]
-pub(crate) mod raw_zip;
+use exarch_testkit::raw_zip;
 pub mod report;
 pub mod security;
+#[cfg(test)]
 pub(crate) mod test_utils;
 pub mod types;
 
@@ -75,6 +76,7 @@ pub use error::ZipBombScope;
 pub use error::ZipEntryIndex;
 pub use error::ZipHeaderField;
 pub use error::ZipInconsistency;
+pub use error::ZipUncomparable;
 /// Formats an archive-relative, attacker-authored path for an FFI error
 /// message without redaction. Shared by `exarch-python` and `exarch-node`.
 pub use error::redaction::format_entry_path_for_error;

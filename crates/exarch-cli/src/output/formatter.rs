@@ -1,5 +1,6 @@
 //! Output formatter trait for CLI results.
 
+use crate::error::PartialWrites;
 use anyhow::Result;
 use exarch_core::ArchiveManifest;
 use exarch_core::CreationReport;
@@ -55,6 +56,7 @@ pub struct JsonPartialReport {
     pub bytes_written: u64,
     pub files_skipped: usize,
     pub warnings: Vec<String>,
+    pub writes: PartialWrites,
 }
 
 /// Structured error object in JSON output

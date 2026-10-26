@@ -168,6 +168,7 @@ impl<W: Write> OutputFormatter for JsonFormatter<W> {
                     bytes_written: ctx.report.bytes_written,
                     files_skipped: ctx.report.files_skipped,
                     warnings: ctx.report.warnings.clone(),
+                    writes: ctx.writes,
                 });
 
         let output = if let Some(pr) = partial_report {
@@ -644,6 +645,7 @@ mod tests {
         f.format_error("extract", &converted);
         let v = parsed(&f);
         assert_eq!(v["error"]["partial_report"]["files_skipped"], 3);
+        assert_eq!(v["error"]["partial_report"]["writes"], "kept");
         assert_eq!(
             v["error"]["partial_report"]["warnings"][0],
             "skipped disallowed extension"

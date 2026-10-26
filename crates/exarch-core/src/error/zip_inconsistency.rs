@@ -99,11 +99,27 @@ closed_enum! {
 
         /// Uncompressed size
         UncompressedSize => "uncompressed size",
+    }
+}
 
-        /// The `zip` crate reported a field this version does not know
+closed_enum! {
+    /// Why a ZIP local header could not be compared with its central
+    /// directory record.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::ZipUncomparable;
+    ///
+    /// assert_eq!(ZipUncomparable::Unparseable.to_string(), "unparseable local header");
+    /// ```
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[non_exhaustive]
+    pub enum ZipUncomparable {
+        /// The `zip` crate reported a failed check this version does not know
         Unrecognized => "unrecognized field",
 
-        /// The local header could not be parsed, so it could not be compared
+        /// The local header could not be parsed
         Unparseable => "unparseable local header",
     }
 }
@@ -265,26 +281,41 @@ pub enum ZipInconsistency {
         /// Records actually present.
         found: usize,
     },
+
+    /// A local header could not be compared with its central directory
+    /// record, so a disagreement between them cannot be ruled out.
+    HeaderUncomparable {
+        /// Entry in the crate's entry map.
+        entry: ZipEntryIndex,
+        /// Central directory name of the entry.
+        name: String,
+        /// Why the comparison was not possible.
+        reason: ZipUncomparable,
+    },
 }
 
 impl std::fmt::Display for ZipInconsistency {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::HeaderMismatch { entry, field, name } => match field {
-                ZipHeaderField::Unparseable => write!(
+            Self::HeaderMismatch { entry, field, name } => write!(
+                f,
+                "local header disagrees with central directory on {field} for entry {entry} \
+                 ({name:?})"
+            ),
+            Self::HeaderUncomparable {
+                entry,
+                name,
+                reason,
+            } => match reason {
+                ZipUncomparable::Unparseable => write!(
                     f,
                     "local header of entry {entry} ({name:?}) cannot be parsed, so it cannot be \
                      compared with the central directory"
                 ),
-                ZipHeaderField::Unrecognized => write!(
+                ZipUncomparable::Unrecognized => write!(
                     f,
                     "local header of entry {entry} ({name:?}) fails the header consistency check \
                      in a way this version does not recognize"
-                ),
-                _ => write!(
-                    f,
-                    "local header disagrees with central directory on {field} for entry {entry} \
-                     ({name:?})"
                 ),
             },
             Self::DuplicateName { record, name } => {
@@ -347,8 +378,24 @@ mod tests {
 
     #[test]
     fn unparseable_and_unrecognized_get_their_own_wording() {
-        assert!(mismatch(ZipHeaderField::Unparseable).contains("cannot be parsed"));
-        assert!(mismatch(ZipHeaderField::Unrecognized).contains("does not recognize"));
+        let uncomparable = |reason| {
+            ZipInconsistency::HeaderUncomparable {
+                entry: ZipEntryIndex::new(2),
+                name: "a.txt".into(),
+                reason,
+            }
+            .to_string()
+        };
+        assert_eq!(
+            uncomparable(ZipUncomparable::Unparseable),
+            "local header of entry 2 (\"a.txt\") cannot be parsed, so it cannot be compared \
+             with the central directory"
+        );
+        assert_eq!(
+            uncomparable(ZipUncomparable::Unrecognized),
+            "local header of entry 2 (\"a.txt\") fails the header consistency check in a way \
+             this version does not recognize"
+        );
     }
 
     #[test]

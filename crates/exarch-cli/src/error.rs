@@ -9,6 +9,7 @@ use exarch_core::CompressionRatio;
 use exarch_core::ExtractionReport;
 use exarch_core::ZipBombDetails;
 use exarch_core::ZipBombScope;
+use serde::Serialize;
 use std::fmt;
 use std::path::Path;
 
@@ -62,6 +63,26 @@ impl fmt::Display for VerificationFailed {
 
 impl std::error::Error for VerificationFailed {}
 
+/// Whether the items of a stopped extraction remain on disk.
+///
+/// `--atomic` extracts into a staging directory and discards it on failure, so
+/// the destination is left as it was before the run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PartialWrites {
+    /// Extracted items stay in the destination.
+    Kept,
+    /// Extracted items were discarded and the destination was left unchanged.
+    RolledBack,
+}
+
+impl PartialWrites {
+    /// Maps the `--atomic` flag to the outcome a stopped extraction has.
+    pub const fn from_atomic(atomic: bool) -> Self {
+        if atomic { Self::RolledBack } else { Self::Kept }
+    }
+}
+
 /// Carrier for partial-extraction progress embedded in the anyhow error chain.
 ///
 /// `ArchiveError::PartialExtraction` uses `#[error("{source}")]` with
@@ -72,31 +93,42 @@ impl std::error::Error for VerificationFailed {}
 #[derive(Debug)]
 pub struct PartialExtractionContext {
     pub(crate) report: ExtractionReport,
+    pub(crate) writes: PartialWrites,
 }
 
 impl fmt::Display for PartialExtractionContext {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let r = &self.report;
-        let items = r.files_extracted + r.directories_created + r.symlinks_created;
-        write!(
-            f,
-            "WARNING: Extraction was stopped. {items} items ({} files, {} directories, {} symlinks) \
-             were written to disk before the error.",
-            r.files_extracted, r.directories_created, r.symlinks_created,
-        )?;
-        if r.files_skipped > 0 {
-            write!(f, "\nFiles skipped: {}", r.files_skipped)?;
-        }
-        if !r.warnings.is_empty() {
-            write!(f, "\nWarnings:")?;
-            for warning in &r.warnings {
-                write!(f, "\n  - {warning}")?;
+        match self.writes {
+            PartialWrites::Kept => {
+                let items = r.files_extracted + r.directories_created + r.symlinks_created;
+                write!(
+                    f,
+                    "WARNING: Extraction was stopped. {items} items ({} files, {} directories, {} symlinks) \
+                     were written to disk before the error.",
+                    r.files_extracted, r.directories_created, r.symlinks_created,
+                )?;
+                if r.files_skipped > 0 {
+                    write!(f, "\nFiles skipped: {}", r.files_skipped)?;
+                }
+                if !r.warnings.is_empty() {
+                    write!(f, "\nWarnings:")?;
+                    for warning in &r.warnings {
+                        write!(f, "\n  - {warning}")?;
+                    }
+                }
+                write!(
+                    f,
+                    "\nHINT: Inspect or remove the output directory before re-running."
+                )
             }
+            // The counts and warnings describe the discarded run, not the
+            // destination.
+            PartialWrites::RolledBack => f.write_str(
+                "WARNING: Extraction was stopped. --atomic discarded the partial extraction; the \
+                 destination was left unchanged.",
+            ),
         }
-        write!(
-            f,
-            "\nHINT: Inspect or remove the output directory before re-running."
-        )
     }
 }
 
@@ -163,6 +195,17 @@ pub fn convert_extraction_error(
     archive: &Path,
     allow_symlinks: bool,
 ) -> anyhow::Error {
+    convert_extraction_error_with_writes(err, archive, allow_symlinks, PartialWrites::Kept)
+}
+
+/// Like [`convert_extraction_error`], recording whether the items of a
+/// `PartialExtraction` were kept or rolled back.
+pub fn convert_extraction_error_with_writes(
+    err: ArchiveError,
+    archive: &Path,
+    allow_symlinks: bool,
+    writes: PartialWrites,
+) -> anyhow::Error {
     // Handle PartialExtraction before the borrow below.
     //
     // `PartialExtraction` is `#[error("{source}")]` with `#[source]`, so
@@ -187,8 +230,8 @@ pub fn convert_extraction_error(
     // newly broken. (`Io`'s context no longer re-embeds the inner error's
     // text either, since #528 — it is not an exception to the guarantee.)
     if let ArchiveError::PartialExtraction { source, report } = err {
-        return convert_extraction_error(*source, archive, allow_symlinks)
-            .context(PartialExtractionContext { report });
+        return convert_extraction_error_with_writes(*source, archive, allow_symlinks, writes)
+            .context(PartialExtractionContext { report, writes });
     }
 
     let context = match &err {
@@ -302,13 +345,15 @@ pub fn convert_extraction_error(
 /// Adds context to a generic error about archive operations.
 ///
 /// `allow_symlinks` is forwarded to [`convert_extraction_error`] to suppress
-/// the `--allow-symlinks` hint when the flag is already active.
+/// the `--allow-symlinks` hint when the flag is already active; `writes` is
+/// forwarded likewise.
 pub fn add_archive_context<T>(
     result: Result<T, ArchiveError>,
     archive: &Path,
     allow_symlinks: bool,
+    writes: PartialWrites,
 ) -> anyhow::Result<T> {
-    result.map_err(|e| convert_extraction_error(e, archive, allow_symlinks))
+    result.map_err(|e| convert_extraction_error_with_writes(e, archive, allow_symlinks, writes))
 }
 
 #[cfg(test)]
@@ -687,6 +732,72 @@ mod tests {
             1,
             "inner error reason should appear exactly once, got: {msg}"
         );
+    }
+
+    #[test]
+    fn test_partial_rolled_back_display_makes_no_written_claim() {
+        use exarch_core::ExtractionReport;
+        use std::time::Duration;
+
+        let report = ExtractionReport {
+            files_extracted: 1,
+            directories_created: 0,
+            symlinks_created: 0,
+            bytes_written: 0,
+            duration: Duration::from_millis(0),
+            files_skipped: 0,
+            warnings: vec![],
+        };
+        let err = ArchiveError::PartialExtraction {
+            source: Box::new(ArchiveError::HardlinkEscape {
+                path: PathBuf::from("hardlink_escape_path"),
+            }),
+            report,
+        };
+        let converted = convert_extraction_error_with_writes(
+            err,
+            Path::new("archive.tar.gz"),
+            false,
+            PartialWrites::RolledBack,
+        );
+        let msg = format!("{converted:#}");
+        assert!(!msg.contains("written to disk"), "got: {msg}");
+        assert!(!msg.contains("Inspect or remove"), "got: {msg}");
+        assert!(msg.contains("destination was left unchanged"), "got: {msg}");
+        assert_eq!(msg.matches("hardlink_escape_path").count(), 1, "got: {msg}");
+    }
+
+    #[test]
+    fn test_partial_rolled_back_display_omits_the_discarded_runs_skips_and_warnings() {
+        use exarch_core::ExtractionReport;
+        use std::time::Duration;
+
+        let report = ExtractionReport {
+            files_extracted: 1,
+            directories_created: 0,
+            symlinks_created: 0,
+            bytes_written: 0,
+            duration: Duration::from_millis(0),
+            files_skipped: 3,
+            warnings: vec!["skipped 3 entries".to_string()],
+        };
+        let err = ArchiveError::PartialExtraction {
+            source: Box::new(ArchiveError::HardlinkEscape {
+                path: PathBuf::from("hardlink_escape_path"),
+            }),
+            report,
+        };
+        let converted = convert_extraction_error_with_writes(
+            err,
+            Path::new("archive.tar.gz"),
+            false,
+            PartialWrites::RolledBack,
+        );
+        let msg = format!("{converted:#}");
+        assert!(!msg.contains("Files skipped"), "got: {msg}");
+        assert!(!msg.contains("Warnings:"), "got: {msg}");
+        assert!(!msg.contains("skipped 3 entries"), "got: {msg}");
+        assert!(msg.contains("destination was left unchanged"), "got: {msg}");
     }
 
     #[test]

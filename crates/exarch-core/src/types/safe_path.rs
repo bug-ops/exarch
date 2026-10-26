@@ -1061,10 +1061,10 @@ mod tests {
         for name in ["CON", "PRN", "AUX", "NUL", "COM1", "LPT1"] {
             let path = PathBuf::from(format!("folder/{name}.txt"));
             for cfg in [&config, &permissive] {
-                assert!(matches!(
+                assert_matches!(
                     SafePath::validate(&path, &dest, cfg),
                     Err(ArchiveError::SecurityViolation { .. })
-                ));
+                );
             }
         }
     }
@@ -1079,10 +1079,10 @@ mod tests {
             .expect("valid config");
 
         assert!(SafePath::validate(Path::new("folder/CON.txt"), &dest, &config).is_ok());
-        assert!(matches!(
+        assert_matches!(
             SafePath::validate(Path::new("folder/a:stream"), &dest, &config),
             Err(ArchiveError::SecurityViolation { .. })
-        ));
+        );
     }
 
     #[test]
@@ -1091,10 +1091,10 @@ mod tests {
         let (_temp, dest) = create_test_dest();
         let config = SecurityConfig::default().validate().expect("valid config");
 
-        assert!(matches!(
+        assert_matches!(
             SafePath::validate(Path::new("file.txt:stream"), &dest, &config),
             Err(ArchiveError::SecurityViolation { .. })
-        ));
+        );
     }
 
     #[test]

@@ -67,6 +67,14 @@ fn mismatch(field: ZipHeaderField) -> ZipInconsistency {
     }
 }
 
+fn unparseable() -> ZipInconsistency {
+    ZipInconsistency::HeaderUncomparable {
+        entry: ZipEntryIndex::new(0),
+        name: "a.txt".into(),
+        reason: ZipUncomparable::Unparseable,
+    }
+}
+
 fn unicode_path_extra(name: &[u8]) -> Vec<u8> {
     let mut crc = flate2::Crc::new();
     crc.update(name);
@@ -120,8 +128,12 @@ const MAX_READS_PER_DESCRIPTOR: usize = 4;
 
 fn deflated_pair(signature: bool, zip64: bool) -> RawZip {
     RawZip::new(vec![
-        RawEntry::deflated("a.txt", b"hello hello hello").with_descriptor(signature, zip64),
-        RawEntry::deflated("b.txt", b"world world world").with_descriptor(signature, zip64),
+        RawEntry::deflated("a.txt", b"hello hello hello")
+            .unwrap()
+            .with_descriptor(signature, zip64),
+        RawEntry::deflated("b.txt", b"world world world")
+            .unwrap()
+            .with_descriptor(signature, zip64),
     ])
 }
 
@@ -172,7 +184,7 @@ fn unparseable_local_extra_field_is_recorded_not_fatal() {
     let mut entry = RawEntry::stored("a.txt", b"hello");
     entry.local_extra = extended_timestamp_with_bad_flags();
     let built = RawZip::new(vec![entry]).build();
-    assert_eq!(findings_of(&built), [mismatch(ZipHeaderField::Unparseable)]);
+    assert_eq!(findings_of(&built), [unparseable()]);
 }
 
 #[test]
@@ -258,7 +270,9 @@ fn local_header_after_a_descriptor_is_found_at_every_descriptor_width() {
         (true, true, 24),
         (false, true, 20),
     ] {
-        let entry = RawEntry::deflated("a.txt", b"hello").with_descriptor(signature, zip64);
+        let entry = RawEntry::deflated("a.txt", b"hello")
+            .unwrap()
+            .with_descriptor(signature, zip64);
         let mut zip = RawZip::new(vec![entry.clone()]);
         zip.before_directory = evil.bytes[..evil.directory_start].to_vec();
         let built = zip.build();
@@ -332,19 +346,19 @@ fn field_classification_ignores_names_embedded_in_messages() {
         classify(&message(
             "header inconsistency detected: encryption flag mismatch for 'CRC32 checksum mismatch'"
         )),
-        ZipHeaderField::EncryptionFlag
+        HeaderFault::Mismatch(ZipHeaderField::EncryptionFlag)
     );
     assert_eq!(
         classify(&message("header inconsistency detected: a new check")),
-        ZipHeaderField::Unrecognized
+        HeaderFault::Uncomparable(ZipUncomparable::Unrecognized)
     );
     assert_eq!(
         classify(&message("something else entirely")),
-        ZipHeaderField::Unparseable
+        HeaderFault::Uncomparable(ZipUncomparable::Unparseable)
     );
     assert_eq!(
         classify(&ZipError::Io(std::io::Error::other("x"))),
-        ZipHeaderField::Unparseable
+        HeaderFault::Uncomparable(ZipUncomparable::Unparseable)
     );
 }
 
@@ -361,7 +375,7 @@ fn census_fails_closed_when_it_disagrees_with_the_reader() {
         ],
         comment: Vec::new(),
     };
-    let result = Census::run(&mut cursor, &map, &Scan::default());
+    let result = Census::run(&mut cursor, &map, &Scan::default(), ChunkSizes::PRODUCTION);
     assert_matches!(result, Err(ArchiveError::InvalidArchive(msg)) if msg.contains("census"));
 
     let map = DirectoryMap {
@@ -375,7 +389,7 @@ fn census_fails_closed_when_it_disagrees_with_the_reader() {
         ..Scan::default()
     };
     assert_matches!(
-        Census::run(&mut cursor, &map, &scan),
+        Census::run(&mut cursor, &map, &scan, ChunkSizes::PRODUCTION),
         Err(ArchiveError::InvalidArchive(_))
     );
 }
@@ -798,8 +812,8 @@ fn unparseable_local_header_is_rejected_by_every_operation_under_enforce() {
         assert_matches!(
             r,
             Err(ArchiveError::ZipInconsistency(
-                ZipInconsistency::HeaderMismatch {
-                    field: ZipHeaderField::Unparseable,
+                ZipInconsistency::HeaderUncomparable {
+                    reason: ZipUncomparable::Unparseable,
                     ..
                 }
             ))
@@ -1064,8 +1078,8 @@ fn a_malformed_extra_field_stays_a_finding_not_an_io_error() {
     let archive = open_bytes(ut_archive());
     assert_matches!(
         archive.structure().findings(),
-        [ZipInconsistency::HeaderMismatch {
-            field: ZipHeaderField::Unparseable,
+        [ZipInconsistency::HeaderUncomparable {
+            reason: ZipUncomparable::Unparseable,
             ..
         }]
     );
@@ -1820,7 +1834,9 @@ fn central_record_in_the_prefix_is_found_only_when_the_file_starts_with_pk() {
 #[test]
 fn central_signature_after_a_descriptor_is_found_at_every_descriptor_width() {
     for (signature, zip64) in [(true, false), (false, false), (true, true), (false, true)] {
-        let mut first = RawEntry::deflated("a.txt", b"hello").with_descriptor(signature, zip64);
+        let mut first = RawEntry::deflated("a.txt", b"hello")
+            .unwrap()
+            .with_descriptor(signature, zip64);
         first.padding_after = 4;
         let mut built = RawZip::new(vec![first, RawEntry::stored("b.txt", b"world")]).build();
         let at = built.local_offsets[1] - 4;
@@ -1885,4 +1901,24 @@ fn descriptor_tail_the_budget_cannot_cover_is_listed_with_its_own_reason() {
         gaps.entries()[0].reason(),
         crate::UnverifiedReason::DescriptorTail
     );
+}
+
+#[test]
+fn extra_fields_walk_in_order_and_report_an_overrun_once() {
+    let field = |id: u16, body: &[u8]| crate::raw_zip::extra_field(id, body);
+    let block = [field(1, b"ab"), field(2, b""), field(3, b"xyz")].concat();
+    let walked: Vec<_> = extra_fields(&block).collect();
+    assert_eq!(
+        walked,
+        [Ok((1, &b"ab"[..])), Ok((2, &b""[..])), Ok((3, &b"xyz"[..]))]
+    );
+
+    // Trailing bytes too short for a field header end the walk silently.
+    let short = [field(1, b"ab"), vec![9, 9, 9]].concat();
+    assert_eq!(extra_fields(&short).count(), 1);
+
+    let mut overrun = field(1, b"ab");
+    overrun.extend_from_slice(&[2, 0, 9, 0, 1, 2]);
+    let walked: Vec<_> = extra_fields(&overrun).collect();
+    assert_eq!(walked, [Ok((1, &b"ab"[..])), Err(Overrun)]);
 }

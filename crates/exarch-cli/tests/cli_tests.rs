@@ -7,6 +7,9 @@
 
 use assert_cmd::Command;
 use assert_cmd::cargo::cargo_bin_cmd;
+use exarch_testkit::raw_zip::RawEntry;
+use exarch_testkit::raw_zip::RawZip;
+use exarch_testkit::raw_zip::SYMLINK_MODE;
 use predicates::prelude::*;
 use std::path::PathBuf;
 use tempfile::TempDir;
@@ -2501,74 +2504,12 @@ fn test_verify_7z_anti_item_info_passes_strict() {
 /// bytes. The symlink target is stored as the file content with `S_IFLNK` mode
 /// bits set in the central-directory `external_attributes` field.
 fn make_zip_with_symlink(link_name: &str, target: &str) -> Vec<u8> {
-    let content = target.as_bytes();
-    let crc = {
-        let mut c: u32 = 0xFFFF_FFFF;
-        for &b in content {
-            c ^= u32::from(b);
-            for _ in 0..8 {
-                if c & 1 != 0 {
-                    c = (c >> 1) ^ 0xEDB8_8320;
-                } else {
-                    c >>= 1;
-                }
-            }
-        }
-        c ^ 0xFFFF_FFFF
+    let entry = RawEntry {
+        date: 0,
+        external_attributes: SYMLINK_MODE << 16,
+        ..RawEntry::stored(link_name, target.as_bytes())
     };
-    let external_attributes: u32 = 0o120_777 << 16;
-    let name_bytes = link_name.as_bytes();
-    let name_len = u16::try_from(name_bytes.len()).unwrap();
-    let content_len = u32::try_from(content.len()).unwrap();
-
-    let mut buf: Vec<u8> = Vec::new();
-
-    let local_offset = u32::try_from(buf.len()).unwrap();
-    buf.extend_from_slice(b"PK\x03\x04");
-    buf.extend_from_slice(&20u16.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&crc.to_le_bytes());
-    buf.extend_from_slice(&content_len.to_le_bytes());
-    buf.extend_from_slice(&content_len.to_le_bytes());
-    buf.extend_from_slice(&name_len.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(name_bytes);
-    buf.extend_from_slice(content);
-
-    let central_offset = u32::try_from(buf.len()).unwrap();
-    buf.extend_from_slice(b"PK\x01\x02");
-    buf.extend_from_slice(&0x031eu16.to_le_bytes());
-    buf.extend_from_slice(&20u16.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&crc.to_le_bytes());
-    buf.extend_from_slice(&content_len.to_le_bytes());
-    buf.extend_from_slice(&content_len.to_le_bytes());
-    buf.extend_from_slice(&name_len.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&external_attributes.to_le_bytes());
-    buf.extend_from_slice(&local_offset.to_le_bytes());
-    buf.extend_from_slice(name_bytes);
-
-    let central_size = u32::try_from(buf.len()).unwrap() - central_offset;
-    buf.extend_from_slice(b"PK\x05\x06");
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&1u16.to_le_bytes());
-    buf.extend_from_slice(&1u16.to_le_bytes());
-    buf.extend_from_slice(&central_size.to_le_bytes());
-    buf.extend_from_slice(&central_offset.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-
-    buf
+    RawZip::new(vec![entry]).build().bytes
 }
 
 /// `exarch list --json -l` must include `symlink_target` for symlink entries
@@ -3576,102 +3517,23 @@ fn test_extract_atomic_force_survives_destination_symlink_race() {
 // SecurityViolation HINT text specificity (#520)
 // ============================================================================
 
-/// CRC32 (IEEE 802.3 polynomial) for raw ZIP construction.
-fn crc32_ieee(data: &[u8]) -> u32 {
-    let mut crc: u32 = 0xFFFF_FFFF;
-    for &byte in data {
-        crc ^= u32::from(byte);
-        for _ in 0..8 {
-            if crc & 1 != 0 {
-                crc = (crc >> 1) ^ 0xEDB8_8320;
-            } else {
-                crc >>= 1;
-            }
-        }
-    }
-    !crc
-}
-
-/// Raw-DEFLATEs `data` (RFC 1951, no zlib/gzip wrapper), the format ZIP's
-/// compression method 8 requires.
-fn raw_deflate(data: &[u8]) -> Vec<u8> {
-    use flate2::Compression;
-    use flate2::write::DeflateEncoder;
-    use std::io::Write;
-
-    let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
-    encoder.write_all(data).expect("deflate payload");
-    encoder.finish().expect("finish deflate stream")
-}
-
 /// Builds a single-entry, spec-valid DEFLATE ZIP archive whose local file
 /// header and central directory both declare `declared_uncompressed_size`
 /// for `entry_name`, regardless of what `real_payload` actually decompresses
 /// to. Mirrors the GHSA-5j8q-wxg5-hj4r advisory `PoC` shape (see
 /// `exarch-core/tests/security/zip_ghsa_5j8q.rs`): a forged small
 /// `uncompressed_size` alongside a real, much larger compressed stream.
-#[allow(clippy::cast_possible_truncation)]
 fn build_forged_size_zip(
     entry_name: &str,
     real_payload: &[u8],
     declared_uncompressed_size: u32,
 ) -> Vec<u8> {
-    let compressed = raw_deflate(real_payload);
-    let crc = crc32_ieee(real_payload);
-    let name_bytes = entry_name.as_bytes();
-    let name_len = name_bytes.len() as u16;
-    let compressed_len = compressed.len() as u32;
-
-    let mut buf: Vec<u8> = Vec::new();
-    let local_offset = 0u32;
-
-    buf.extend_from_slice(b"PK\x03\x04");
-    buf.extend_from_slice(&20u16.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&8u16.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&crc.to_le_bytes());
-    buf.extend_from_slice(&compressed_len.to_le_bytes());
-    buf.extend_from_slice(&declared_uncompressed_size.to_le_bytes()); // FORGED
-    buf.extend_from_slice(&name_len.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(name_bytes);
-    buf.extend_from_slice(&compressed);
-
-    let central_dir_offset = buf.len() as u32;
-
-    buf.extend_from_slice(b"PK\x01\x02");
-    buf.extend_from_slice(&0x031eu16.to_le_bytes());
-    buf.extend_from_slice(&20u16.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&8u16.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&crc.to_le_bytes());
-    buf.extend_from_slice(&compressed_len.to_le_bytes());
-    buf.extend_from_slice(&declared_uncompressed_size.to_le_bytes()); // FORGED
-    buf.extend_from_slice(&name_len.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&(0o100_644u32 << 16).to_le_bytes());
-    buf.extend_from_slice(&local_offset.to_le_bytes());
-    buf.extend_from_slice(name_bytes);
-
-    let central_dir_size = (buf.len() as u32) - central_dir_offset;
-
-    buf.extend_from_slice(b"PK\x05\x06");
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&1u16.to_le_bytes());
-    buf.extend_from_slice(&1u16.to_le_bytes());
-    buf.extend_from_slice(&central_dir_size.to_le_bytes());
-    buf.extend_from_slice(&central_dir_offset.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-
-    buf
+    let entry = RawEntry {
+        date: 0,
+        size: u64::from(declared_uncompressed_size),
+        ..RawEntry::deflated(entry_name, real_payload).unwrap()
+    };
+    RawZip::new(vec![entry]).build().bytes
 }
 
 /// Regression test for #520: the GHSA-5j8q-wxg5-hj4r forged-size
@@ -3834,46 +3696,21 @@ fn test_extract_accepts_same_link_flags_as_verify() {
         .success();
 }
 
+fn deflate64_zip() -> Vec<u8> {
+    let entry = RawEntry {
+        method: 9,
+        crc: 0,
+        date: 0,
+        made_by: 20,
+        external_attributes: 0,
+        ..RawEntry::stored("a.txt", b"data")
+    };
+    RawZip::new(vec![entry]).build().bytes
+}
+
 #[test]
 fn test_deflate64_zip_is_rejected_by_list_verify_and_extract() {
-    const DEFLATE64: u16 = 9;
-    let name = b"a.txt";
-    let data = b"data";
-    let mut zip = Vec::new();
-    zip.extend_from_slice(b"PK\x03\x04");
-    zip.extend_from_slice(&20u16.to_le_bytes());
-    zip.extend_from_slice(&0u16.to_le_bytes());
-    zip.extend_from_slice(&DEFLATE64.to_le_bytes());
-    zip.extend_from_slice(&[0u8; 4]);
-    zip.extend_from_slice(&0u32.to_le_bytes());
-    zip.extend_from_slice(&4u32.to_le_bytes());
-    zip.extend_from_slice(&4u32.to_le_bytes());
-    zip.extend_from_slice(&5u16.to_le_bytes());
-    zip.extend_from_slice(&0u16.to_le_bytes());
-    zip.extend_from_slice(name);
-    zip.extend_from_slice(data);
-    let central_offset = u32::try_from(zip.len()).expect("fits u32");
-    zip.extend_from_slice(b"PK\x01\x02");
-    zip.extend_from_slice(&20u16.to_le_bytes());
-    zip.extend_from_slice(&20u16.to_le_bytes());
-    zip.extend_from_slice(&0u16.to_le_bytes());
-    zip.extend_from_slice(&DEFLATE64.to_le_bytes());
-    zip.extend_from_slice(&[0u8; 4]);
-    zip.extend_from_slice(&0u32.to_le_bytes());
-    zip.extend_from_slice(&4u32.to_le_bytes());
-    zip.extend_from_slice(&4u32.to_le_bytes());
-    zip.extend_from_slice(&5u16.to_le_bytes());
-    zip.extend_from_slice(&[0u8; 12]);
-    zip.extend_from_slice(&0u32.to_le_bytes());
-    zip.extend_from_slice(name);
-    let central_size = u32::try_from(zip.len()).expect("fits u32") - central_offset;
-    zip.extend_from_slice(b"PK\x05\x06");
-    zip.extend_from_slice(&[0u8; 4]);
-    zip.extend_from_slice(&1u16.to_le_bytes());
-    zip.extend_from_slice(&1u16.to_le_bytes());
-    zip.extend_from_slice(&central_size.to_le_bytes());
-    zip.extend_from_slice(&central_offset.to_le_bytes());
-    zip.extend_from_slice(&0u16.to_le_bytes());
+    let zip = deflate64_zip();
 
     let temp = TempDir::new().expect("create temp dir");
     let archive_path = temp.path().join("deflate64.zip");
@@ -4525,6 +4362,119 @@ fn test_sevenz_unix_symlink_escape_is_blocked() {
         .arg(&archive)
         .assert()
         .code(2);
+}
+
+/// A 7z archive with a file followed by a symlink whose target escapes the
+/// destination, so extraction stops with a partial report after the file.
+#[cfg(unix)]
+fn write_sevenz_file_then_escaping_symlink(archive: &std::path::Path) {
+    write_sevenz(
+        archive,
+        &[
+            ("a.txt", b"hi", SEVENZ_S_IFREG | 0o644),
+            ("link", b"../../etc/passwd", SEVENZ_S_IFLNK | 0o777),
+        ],
+        false,
+    );
+}
+
+/// `--atomic` rolls the destination back, so the failure must not claim items
+/// were written to disk.
+#[cfg(unix)]
+#[test]
+fn test_extract_atomic_partial_failure_reports_destination_unchanged() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("escape.7z");
+    write_sevenz_file_then_escaping_symlink(&archive);
+    let out = temp.path().join("out");
+
+    exarch_cmd()
+        .arg("extract")
+        .arg("--allow-symlinks")
+        .arg("--atomic")
+        .arg(&archive)
+        .arg(&out)
+        .assert()
+        .code(1)
+        .stderr(
+            predicate::str::contains("Symlink escape blocked")
+                .and(predicate::str::contains("destination was left unchanged"))
+                .and(predicate::str::contains("written to disk").not()),
+        );
+    assert!(!out.exists());
+}
+
+/// `--atomic --force` over an existing destination keeps its old content and
+/// makes no "written to disk" claim.
+#[cfg(unix)]
+#[test]
+fn test_extract_atomic_force_partial_failure_keeps_old_destination() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("escape.7z");
+    write_sevenz_file_then_escaping_symlink(&archive);
+    let out = temp.path().join("out");
+    std::fs::create_dir(&out).expect("create dest");
+    std::fs::write(out.join("old.txt"), b"old").expect("write old");
+
+    exarch_cmd()
+        .arg("extract")
+        .arg("--allow-symlinks")
+        .arg("--atomic")
+        .arg("--force")
+        .arg(&archive)
+        .arg(&out)
+        .assert()
+        .code(1)
+        .stderr(
+            predicate::str::contains("destination was left unchanged")
+                .and(predicate::str::contains("written to disk").not()),
+        );
+    assert_eq!(std::fs::read(out.join("old.txt")).expect("old"), b"old");
+    assert!(!out.join("a.txt").exists());
+}
+
+/// `extract --json` marks a partial report `rolled_back` under `--atomic` and
+/// `kept` otherwise.
+#[cfg(unix)]
+#[test]
+fn test_extract_partial_report_writes_field_in_json() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("escape.7z");
+    write_sevenz_file_then_escaping_symlink(&archive);
+
+    let run = |out: &std::path::Path, atomic: bool| -> serde_json::Value {
+        let mut cmd = exarch_cmd();
+        cmd.arg("extract").arg("--json").arg("--allow-symlinks");
+        if atomic {
+            cmd.arg("--atomic");
+        }
+        let output = cmd
+            .arg(&archive)
+            .arg(out)
+            .assert()
+            .code(1)
+            .get_output()
+            .stdout
+            .clone();
+        serde_json::from_slice(&output).expect("valid JSON output")
+    };
+
+    let atomic_out = temp.path().join("atomic");
+    let json = run(&atomic_out, true);
+    assert_eq!(json["error"]["partial_report"]["writes"], "rolled_back");
+    assert!(!atomic_out.exists());
+
+    let kept_out = temp.path().join("kept");
+    let json = run(&kept_out, false);
+    assert_eq!(json["error"]["partial_report"]["writes"], "kept");
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .expect("message")
+            .contains("written to disk"),
+        "{json}"
+    );
+    assert!(kept_out.join("a.txt").exists());
 }
 
 /// A 7z link whose data fails its checksum fails extraction in the target read,

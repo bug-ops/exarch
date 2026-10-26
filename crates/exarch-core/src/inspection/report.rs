@@ -117,6 +117,7 @@ impl VerificationReport {
         for finding in structure.findings {
             let bound_entry = match finding {
                 ZipInconsistency::HeaderMismatch { entry, .. }
+                | ZipInconsistency::HeaderUncomparable { entry, .. }
                 | ZipInconsistency::DescriptorOverrun { entry, .. }
                 | ZipInconsistency::XlTypeDivergence { entry, .. } => {
                     manifest.position_of_zip_entry(*entry)
@@ -876,7 +877,8 @@ impl IssueCategory {
     /// Category under which a ZIP structure finding is reported.
     pub(crate) const fn from_zip_inconsistency(finding: &ZipInconsistency) -> Self {
         match finding {
-            ZipInconsistency::HeaderMismatch { .. } => Self::HeaderMismatch,
+            ZipInconsistency::HeaderMismatch { .. }
+            | ZipInconsistency::HeaderUncomparable { .. } => Self::HeaderMismatch,
             ZipInconsistency::DuplicateName { .. } => Self::DuplicateEntry,
             ZipInconsistency::OverlappingEntries => Self::OverlappingEntries,
             ZipInconsistency::HiddenLocalHeader { .. }
@@ -993,6 +995,14 @@ mod tests {
                     entry: ZipEntryIndex::new(0),
                     field: ZipHeaderField::FileName,
                     name: "a".to_string(),
+                },
+                IssueCategory::HeaderMismatch,
+            ),
+            (
+                ZipInconsistency::HeaderUncomparable {
+                    entry: ZipEntryIndex::new(0),
+                    name: "a".to_string(),
+                    reason: crate::ZipUncomparable::Unparseable,
                 },
                 IssueCategory::HeaderMismatch,
             ),

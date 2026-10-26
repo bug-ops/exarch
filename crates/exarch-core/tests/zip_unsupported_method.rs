@@ -4,8 +4,6 @@
 #![allow(clippy::unwrap_used)]
 
 use std::assert_matches;
-use std::io::Cursor;
-use std::io::Write;
 use std::path::PathBuf;
 
 use exarch_core::ArchiveError;
@@ -13,37 +11,21 @@ use exarch_core::SecurityConfig;
 use exarch_core::extract_archive;
 use exarch_core::list_archive;
 use exarch_core::verify_archive;
+use exarch_testkit::raw_zip::RawEntry;
+use exarch_testkit::raw_zip::RawZip;
 use tempfile::TempDir;
-use zip::CompressionMethod;
-use zip::write::SimpleFileOptions;
-use zip::write::ZipWriter;
 
-const LOCAL_SIGNATURE: &[u8] = b"PK\x03\x04";
-const CENTRAL_SIGNATURE: &[u8] = b"PK\x01\x02";
-const LOCAL_METHOD_OFFSET: usize = 8;
-const CENTRAL_METHOD_OFFSET: usize = 10;
 const DEFLATE64_METHOD: u16 = 9;
 
-fn patch_last_method(data: &mut [u8], signature: &[u8], offset: usize) {
-    let last = data
-        .windows(signature.len())
-        .rposition(|w| w == signature)
-        .unwrap();
-    data[last + offset..last + offset + 2].copy_from_slice(&DEFLATE64_METHOD.to_le_bytes());
-}
-
-/// Two stored entries; the second one is relabelled as `deflate64`.
+/// Two stored entries; the second one is labelled `deflate64`.
 fn zip_with_deflate64_entry() -> Vec<u8> {
-    let mut zip = ZipWriter::new(Cursor::new(Vec::new()));
-    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
-    zip.start_file("ok.txt", options).unwrap();
-    zip.write_all(b"fine").unwrap();
-    zip.start_file("odd.bin", options).unwrap();
-    zip.write_all(b"data").unwrap();
-    let mut data = zip.finish().unwrap().into_inner();
-    patch_last_method(&mut data, LOCAL_SIGNATURE, LOCAL_METHOD_OFFSET);
-    patch_last_method(&mut data, CENTRAL_SIGNATURE, CENTRAL_METHOD_OFFSET);
-    data
+    let odd = RawEntry {
+        method: DEFLATE64_METHOD,
+        ..RawEntry::stored("odd.bin", b"data")
+    };
+    RawZip::new(vec![RawEntry::stored("ok.txt", b"fine"), odd])
+        .build()
+        .bytes
 }
 
 fn write_fixture(dir: &TempDir) -> PathBuf {

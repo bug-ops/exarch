@@ -614,7 +614,8 @@ impl<R: Read + Seek> ZipArchive<R> {
         let (uncompressed_size, compressed_size) = ZipEntryAdapter::get_sizes(&zip_file);
         let mode = zip_file.unix_mode();
 
-        if zip_file.is_dir() {
+        let entry_kind = zip_entry_kind(zip_file.is_dir(), mode);
+        if entry_kind == ZipEntryKind::Directory {
             drop(zip_file);
             let validated = validator.validate_entry(
                 &path,
@@ -625,7 +626,7 @@ impl<R: Read + Seek> ZipArchive<R> {
                 Some(ctx.dir_cache),
             )?;
             common::create_directory(validated.safe_path(), ctx.dest, ctx.report, ctx.dir_cache)?;
-        } else if ZipEntryAdapter::is_symlink_from_mode(mode) {
+        } else if entry_kind == ZipEntryKind::Symlink {
             let target = ZipEntryAdapter::read_symlink_target(&mut zip_file)?;
             drop(zip_file);
             let entry_type = EntryType::Symlink { target };
@@ -962,6 +963,29 @@ pub(crate) fn zip_mode_is_symlink(mode: Option<u32>) -> bool {
     ZipEntryAdapter::is_symlink_from_mode(mode)
 }
 
+/// What extraction makes of a ZIP entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ZipEntryKind {
+    Directory,
+    Symlink,
+    Regular,
+}
+
+/// The kind extraction gives an entry: a directory, else a symlink by its Unix
+/// mode, else a regular file.
+///
+/// The single decision shared by extraction, listing and the structure census,
+/// whose `xl` comparison is sound only while all three agree.
+pub(crate) fn zip_entry_kind(is_dir: bool, unix_mode: Option<u32>) -> ZipEntryKind {
+    if is_dir {
+        ZipEntryKind::Directory
+    } else if zip_mode_is_symlink(unix_mode) {
+        ZipEntryKind::Symlink
+    } else {
+        ZipEntryKind::Regular
+    }
+}
+
 /// Compression methods the ZIP handlers accept.
 ///
 /// Anything else (including `deflate64`, which the `zip` crate can decode but
@@ -1022,6 +1046,8 @@ pub(crate) fn admit_zip_entry<R: Read>(
 mod tests {
     use super::*;
     use crate::NoopProgress;
+    use crate::raw_zip::RawEntry;
+    use crate::raw_zip::RawZip;
     use crate::test_utils::create_raw_zip_entry;
     use crate::test_utils::create_test_zip;
     use std::assert_matches;
@@ -1930,6 +1956,20 @@ mod tests {
     }
 
     #[test]
+    fn zip_entry_kind_decides_directory_then_symlink_then_regular() {
+        for mode in [None, Some(0o120_777), Some(0o100_644), Some(0o040_755)] {
+            assert_eq!(zip_entry_kind(true, mode), ZipEntryKind::Directory);
+        }
+        assert_eq!(
+            zip_entry_kind(false, Some(0o120_777)),
+            ZipEntryKind::Symlink
+        );
+        for mode in [None, Some(0o100_644), Some(0o040_755), Some(0o755)] {
+            assert_eq!(zip_entry_kind(false, mode), ZipEntryKind::Regular);
+        }
+    }
+
+    #[test]
     fn test_is_symlink_from_mode() {
         assert!(ZipEntryAdapter::is_symlink_from_mode(Some(0o120_777)));
         assert!(ZipEntryAdapter::is_symlink_from_mode(Some(0o120_755)));
@@ -1940,10 +1980,7 @@ mod tests {
     }
 
     /// Builds a single-entry ZIP in memory with a custom compression method
-    /// field, flags, unix mode, and content. CRC32 must be correct for
-    /// non-empty content when using Stored method (method=0); pass 0 for
-    /// empty content.
-    #[allow(clippy::cast_possible_truncation)]
+    /// field, flags, unix mode, and content (written as is, with its CRC32).
     fn raw_zip_with_custom_entry(
         filename: &str,
         content: &[u8],
@@ -1951,75 +1988,26 @@ mod tests {
         flags: u16,
         unix_mode: u32,
     ) -> Vec<u8> {
-        let crc = crc32_ieee(content);
-        let external_attributes = unix_mode << 16;
-        let name_bytes = filename.as_bytes();
-        let name_len = name_bytes.len() as u16;
-        let content_len = content.len() as u32;
-
-        let mut buf: Vec<u8> = Vec::new();
-
-        let local_offset = buf.len() as u32;
-        buf.extend_from_slice(b"PK\x03\x04");
-        buf.extend_from_slice(&20u16.to_le_bytes()); // version needed
-        buf.extend_from_slice(&flags.to_le_bytes());
-        buf.extend_from_slice(&compression_method.to_le_bytes());
-        buf.extend_from_slice(&0u16.to_le_bytes()); // mod time
-        buf.extend_from_slice(&0u16.to_le_bytes()); // mod date
-        buf.extend_from_slice(&crc.to_le_bytes());
-        buf.extend_from_slice(&content_len.to_le_bytes()); // compressed size
-        buf.extend_from_slice(&content_len.to_le_bytes()); // uncompressed size
-        buf.extend_from_slice(&name_len.to_le_bytes());
-        buf.extend_from_slice(&0u16.to_le_bytes()); // extra field length
-        buf.extend_from_slice(name_bytes);
-        buf.extend_from_slice(content);
-
-        let central_offset = buf.len() as u32;
-        buf.extend_from_slice(b"PK\x01\x02");
-        buf.extend_from_slice(&0x031eu16.to_le_bytes()); // version made by: Unix
-        buf.extend_from_slice(&20u16.to_le_bytes()); // version needed
-        buf.extend_from_slice(&flags.to_le_bytes());
-        buf.extend_from_slice(&compression_method.to_le_bytes());
-        buf.extend_from_slice(&0u16.to_le_bytes()); // mod time
-        buf.extend_from_slice(&0u16.to_le_bytes()); // mod date
-        buf.extend_from_slice(&crc.to_le_bytes());
-        buf.extend_from_slice(&content_len.to_le_bytes()); // compressed size
-        buf.extend_from_slice(&content_len.to_le_bytes()); // uncompressed size
-        buf.extend_from_slice(&name_len.to_le_bytes());
-        buf.extend_from_slice(&0u16.to_le_bytes()); // extra length
-        buf.extend_from_slice(&0u16.to_le_bytes()); // comment length
-        buf.extend_from_slice(&0u16.to_le_bytes()); // disk number start
-        buf.extend_from_slice(&0u16.to_le_bytes()); // internal attributes
-        buf.extend_from_slice(&external_attributes.to_le_bytes());
-        buf.extend_from_slice(&local_offset.to_le_bytes());
-        buf.extend_from_slice(name_bytes);
-
-        let central_size = (buf.len() as u32) - central_offset;
-        buf.extend_from_slice(b"PK\x05\x06");
-        buf.extend_from_slice(&0u16.to_le_bytes()); // disk number
-        buf.extend_from_slice(&0u16.to_le_bytes()); // disk with central dir
-        buf.extend_from_slice(&1u16.to_le_bytes()); // entries on this disk
-        buf.extend_from_slice(&1u16.to_le_bytes()); // total entries
-        buf.extend_from_slice(&central_size.to_le_bytes());
-        buf.extend_from_slice(&central_offset.to_le_bytes());
-        buf.extend_from_slice(&0u16.to_le_bytes()); // comment length
-        buf
+        let entry = RawEntry {
+            method: compression_method,
+            flags,
+            date: 0,
+            external_attributes: unix_mode << 16,
+            ..RawEntry::stored(filename, content)
+        };
+        RawZip::new(vec![entry]).build().bytes
     }
 
-    /// CRC32 (IEEE 802.3 polynomial) implementation for test use.
-    fn crc32_ieee(data: &[u8]) -> u32 {
-        let mut crc: u32 = 0xFFFF_FFFF;
-        for &byte in data {
-            crc ^= u32::from(byte);
-            for _ in 0..8 {
-                if crc & 1 != 0 {
-                    crc = (crc >> 1) ^ 0xEDB8_8320;
-                } else {
-                    crc >>= 1;
-                }
-            }
-        }
-        !crc
+    /// Build a raw ZIP with two local entries sharing the same path.
+    ///
+    /// The `zip` crate's writer rejects duplicate filenames, so the entries are
+    /// written by the raw builder.
+    fn create_raw_duplicate_zip(path: &str, content1: &[u8], content2: &[u8]) -> Vec<u8> {
+        let entries = [content1, content2].map(|content| RawEntry {
+            date: 0,
+            ..RawEntry::stored(path, content)
+        });
+        RawZip::new(entries.to_vec()).build().bytes
     }
 
     #[test]
@@ -2318,79 +2306,6 @@ mod tests {
             Some(ArchiveError::SecurityViolation { .. }),
             "full scan must detect encrypted entry at index 125"
         );
-    }
-
-    /// Build a raw ZIP with two local entries sharing the same path.
-    ///
-    /// The `zip` crate's writer rejects duplicate filenames, so we craft bytes
-    /// manually. Both local file records and both central directory entries are
-    /// included so the archive is spec-valid.
-    #[allow(clippy::cast_possible_truncation)]
-    fn create_raw_duplicate_zip(path: &str, content1: &[u8], content2: &[u8]) -> Vec<u8> {
-        let name_bytes = path.as_bytes();
-        let name_len = name_bytes.len() as u16;
-        let mut buf: Vec<u8> = Vec::new();
-
-        let write_local = |buf: &mut Vec<u8>, content: &[u8]| {
-            let crc = crc32_ieee(content);
-            let size = content.len() as u32;
-            buf.extend_from_slice(b"PK\x03\x04");
-            buf.extend_from_slice(&20u16.to_le_bytes());
-            buf.extend_from_slice(&0u16.to_le_bytes()); // flags
-            buf.extend_from_slice(&0u16.to_le_bytes()); // stored
-            buf.extend_from_slice(&0u16.to_le_bytes()); // mod time
-            buf.extend_from_slice(&0u16.to_le_bytes()); // mod date
-            buf.extend_from_slice(&crc.to_le_bytes());
-            buf.extend_from_slice(&size.to_le_bytes());
-            buf.extend_from_slice(&size.to_le_bytes());
-            buf.extend_from_slice(&name_len.to_le_bytes());
-            buf.extend_from_slice(&0u16.to_le_bytes()); // extra
-            buf.extend_from_slice(name_bytes);
-            buf.extend_from_slice(content);
-        };
-
-        let offset1 = buf.len() as u32;
-        write_local(&mut buf, content1);
-        let offset2 = buf.len() as u32;
-        write_local(&mut buf, content2);
-
-        let write_central = |buf: &mut Vec<u8>, content: &[u8], offset: u32| {
-            let crc = crc32_ieee(content);
-            let size = content.len() as u32;
-            buf.extend_from_slice(b"PK\x01\x02");
-            buf.extend_from_slice(&0x031eu16.to_le_bytes()); // version made: Unix
-            buf.extend_from_slice(&20u16.to_le_bytes());
-            buf.extend_from_slice(&0u16.to_le_bytes()); // flags
-            buf.extend_from_slice(&0u16.to_le_bytes()); // stored
-            buf.extend_from_slice(&0u16.to_le_bytes()); // mod time
-            buf.extend_from_slice(&0u16.to_le_bytes()); // mod date
-            buf.extend_from_slice(&crc.to_le_bytes());
-            buf.extend_from_slice(&size.to_le_bytes());
-            buf.extend_from_slice(&size.to_le_bytes());
-            buf.extend_from_slice(&name_len.to_le_bytes());
-            buf.extend_from_slice(&0u16.to_le_bytes()); // extra
-            buf.extend_from_slice(&0u16.to_le_bytes()); // comment
-            buf.extend_from_slice(&0u16.to_le_bytes()); // disk start
-            buf.extend_from_slice(&0u16.to_le_bytes()); // int attrs
-            buf.extend_from_slice(&(0o100_644u32 << 16).to_le_bytes()); // ext attrs
-            buf.extend_from_slice(&offset.to_le_bytes());
-            buf.extend_from_slice(name_bytes);
-        };
-
-        let central_start = buf.len() as u32;
-        write_central(&mut buf, content1, offset1);
-        write_central(&mut buf, content2, offset2);
-        let central_size = (buf.len() as u32) - central_start;
-
-        buf.extend_from_slice(b"PK\x05\x06");
-        buf.extend_from_slice(&0u16.to_le_bytes()); // disk
-        buf.extend_from_slice(&0u16.to_le_bytes()); // disk w/ cd
-        buf.extend_from_slice(&2u16.to_le_bytes()); // entries on disk
-        buf.extend_from_slice(&2u16.to_le_bytes()); // total entries
-        buf.extend_from_slice(&central_size.to_le_bytes());
-        buf.extend_from_slice(&central_start.to_le_bytes());
-        buf.extend_from_slice(&0u16.to_le_bytes()); // comment len
-        buf
     }
 
     #[test]

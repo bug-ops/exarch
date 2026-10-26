@@ -98,6 +98,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **BREAKING:** `max_file_count` counts symlinks and hardlinks in `extract`, and `ValidatedEntryType::Hardlink` carries a `counted: EntryCount` (#719, #724).
 - 7z `list -l` shows `(target not read)` or `(target unreadable)` for a link without a target (#718, #724).
 - `verify` reports an unread symlink target as `symlinks not allowed` when symlinks are disallowed (#714, #723).
+- **BREAKING:** `ZipHeaderField::Unrecognized` and `Unparseable` move to `ZipInconsistency::HeaderUncomparable { reason: ZipUncomparable }` (#697, #728).
+- **BREAKING:** TAR `list` and `verify` refuse FIFO, device, socket and unknown typeflag entries as `SecurityViolation`, as `extract` does (#721, #728).
+- 7z `extract` follows archive order, so `verify` and `extract` agree on stream-less directories (#720, #728).
+- Internal: the ZIP census shares one extra-field walker, chunked signature search and entry-kind decision; `sevenz.rs` is split into modules; the raw ZIP builder moves to the unpublished `exarch-testkit` crate (#694, #695, #696, #728).
 
 ### Fixed
 
@@ -107,6 +111,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 7z `extract` warns once with the number of skipped anti-items and `verify` reports an informational finding; follow-up #716 (#713, #717).
 - **BREAKING:** TAR `list` and `verify` fail on an entry with an empty name, as `extract` does (#712, #717).
 - **BREAKING:** ZIP `extract`, `list` and `verify` reject an empty entry name as `SecurityViolation` (`SECURITY_VIOLATION`) instead of `InvalidArchive` (#712, #717).
+- 7z `extract`, `verify` and `list --check-integrity` refuse a block whose stream count disagrees with the files mapped to it (#720, #728).
+- `extract --atomic` no longer reports items written to disk after the destination was rolled back; the JSON `partial_report` gains `writes` (`kept` or `rolled_back`) (#725, #728).
+- `exarch-node` size getters clamp values above `i64::MAX` instead of returning a negative number (#697, #728).
 - 7z `extract`, `list` and `verify` classify entries with one shared classifier: a reparse-point entry is refused before any write, and 7z anti-items are skipped by all three instead of being created or truncated by `extract` (unlike `7z x`, which deletes them) (#707, #708, #710).
 - **BREAKING:** 7z `extract` of a reparse-point entry fails with `SecurityViolation` instead of `InvalidArchive` (Python `SecurityViolationError` instead of `InvalidArchiveError`) (#708, #710).
 - **BREAKING:** 7z `list` and `verify` fail with `SecurityViolation` on an entry with an empty name, as `extract` already did; `verify` no longer reports it as a FAIL issue (#708, #710).
@@ -147,6 +154,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### CI
 
+- Added a 7-Zip written symlink fixture and `scripts/sevenz-differential.sh`, which compares exarch, `bsdtar`, `7z` and `7zz` on 7z kind contradictions (#722, #728).
 - Added a `cargo-fuzz` harness covering `tar`, `zip`, `sevenz`, `safe_path`, and `extract_archive`, gated into `ci-success` via a mandatory compile check plus a weekly scheduled fuzz run (#585).
 - Pinned every GitHub Actions reference in `ci.yml` to a commit SHA instead of a mutable tag (#585).
 - Added `fuzz/oss-fuzz/` submission scaffolding (`project.yaml`, `Dockerfile`, `build.sh`) for upstream OSS-Fuzz integration; actual onboarding still requires an external PR to `google/oss-fuzz` (#590).

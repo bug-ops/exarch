@@ -8,18 +8,20 @@ use std::io::Write;
 
 use exarch_core::ArchiveError;
 use exarch_core::SecurityConfig;
+use exarch_core::VerificationStatus;
+use exarch_core::ZipHeaderField;
+use exarch_core::ZipInconsistency;
 use exarch_core::extract_archive;
 use exarch_core::list_archive;
 use exarch_core::verify_archive;
+use exarch_testkit::raw_zip::RawEntry;
+use exarch_testkit::raw_zip::RawZip;
 use tempfile::TempDir;
 use zip::CompressionMethod;
 use zip::write::SimpleFileOptions;
 use zip::write::ZipWriter;
 
-const LOCAL_SIGNATURE: &[u8] = b"PK\x03\x04";
-const CENTRAL_SIGNATURE: &[u8] = b"PK\x01\x02";
-const LOCAL_COMPRESSED_SIZE_OFFSET: usize = 18;
-const CENTRAL_COMPRESSED_SIZE_OFFSET: usize = 20;
+const EXCEEDS_ARCHIVE: &str = "declared compressed size exceeds archive length";
 
 fn stored_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
     let mut zip = ZipWriter::new(Cursor::new(Vec::new()));
@@ -31,84 +33,63 @@ fn stored_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
     zip.finish().unwrap().into_inner()
 }
 
-fn set_declared_compressed_size(data: &mut [u8], signature: &[u8], offset: usize, size: u32) {
-    let at = data
-        .windows(signature.len())
-        .position(|w| w == signature)
-        .expect("header present");
-    data[at + offset..at + offset + 4].copy_from_slice(&size.to_le_bytes());
+/// A stored entry whose local header and central record both declare a
+/// compressed size of `declared` bytes.
+fn forged_entry(name: &str, data: &[u8], declared: u32) -> RawEntry {
+    RawEntry {
+        declared_compressed: Some(u64::from(declared)),
+        local_sizes: Some((declared, u32::try_from(data.len()).unwrap())),
+        ..RawEntry::stored(name, data)
+    }
 }
 
-fn with_declared_compressed_size(mut data: Vec<u8>, size: u32) -> Vec<u8> {
-    set_declared_compressed_size(
-        &mut data,
-        LOCAL_SIGNATURE,
-        LOCAL_COMPRESSED_SIZE_OFFSET,
-        size,
+fn write_archive(dir: &TempDir, bytes: &[u8]) -> std::path::PathBuf {
+    let path = dir.path().join("a.zip");
+    std::fs::write(&path, bytes).unwrap();
+    path
+}
+
+fn assert_exceeds_archive(error: Option<ArchiveError>) {
+    assert_matches!(
+        error,
+        Some(ArchiveError::InvalidArchive(reason)) if reason == EXCEEDS_ARCHIVE
     );
-    set_declared_compressed_size(
-        &mut data,
-        CENTRAL_SIGNATURE,
-        CENTRAL_COMPRESSED_SIZE_OFFSET,
-        size,
-    );
-    data
 }
 
 #[test]
 fn zip_rejects_declared_compressed_size_beyond_archive_length() {
-    let data = with_declared_compressed_size(stored_zip(&[("a.txt", &[7u8; 64])]), 400_000);
+    let built = RawZip::new(vec![forged_entry("a.txt", &[7u8; 64], 400_000)]).build();
     let dir = TempDir::new().unwrap();
-    let path = dir.path().join("a.zip");
-    std::fs::write(&path, &data).unwrap();
+    let path = write_archive(&dir, &built.bytes);
     let config = SecurityConfig::default();
 
     let out = TempDir::new().unwrap();
-    assert_matches!(
-        extract_archive(&path, out.path(), &config),
-        Err(ArchiveError::InvalidArchive(_))
-    );
+    assert_exceeds_archive(extract_archive(&path, out.path(), &config).err());
     assert_eq!(std::fs::read_dir(out.path()).unwrap().count(), 0);
 
-    assert_matches!(
-        list_archive(&path, &config),
-        Err(ArchiveError::InvalidArchive(_))
-    );
-    assert_matches!(
-        verify_archive(&path, &config),
-        Err(ArchiveError::InvalidArchive(_))
-    );
+    assert_exceeds_archive(list_archive(&path, &config).err());
+    assert_exceeds_archive(verify_archive(&path, &config).err());
 }
 
 #[test]
 fn zip_rejects_cumulative_declared_sizes_beyond_archive_length() {
-    let mut data = stored_zip(&[("a.txt", &[1u8; 64]), ("b.txt", &[2u8; 64])]);
-    let archive_len = u32::try_from(data.len()).unwrap();
+    let baseline = RawZip::new(vec![
+        RawEntry::stored("a.txt", &[1u8; 64]),
+        RawEntry::stored("b.txt", &[2u8; 64]),
+    ])
+    .build();
+    let archive_len = u32::try_from(baseline.bytes.len()).unwrap();
     // Each entry alone fits within the archive; together they do not.
     let per_entry = archive_len * 3 / 4;
-    for signature_offset in [
-        (LOCAL_SIGNATURE, LOCAL_COMPRESSED_SIZE_OFFSET),
-        (CENTRAL_SIGNATURE, CENTRAL_COMPRESSED_SIZE_OFFSET),
-    ] {
-        let (signature, offset) = signature_offset;
-        let positions: Vec<usize> = data
-            .windows(signature.len())
-            .enumerate()
-            .filter(|(_, w)| *w == signature)
-            .map(|(i, _)| i)
-            .collect();
-        for at in positions {
-            data[at + offset..at + offset + 4].copy_from_slice(&per_entry.to_le_bytes());
-        }
-    }
+    let built = RawZip::new(vec![
+        forged_entry("a.txt", &[1u8; 64], per_entry),
+        forged_entry("b.txt", &[2u8; 64], per_entry),
+    ])
+    .build();
     let dir = TempDir::new().unwrap();
-    let path = dir.path().join("a.zip");
-    std::fs::write(&path, &data).unwrap();
+    let path = write_archive(&dir, &built.bytes);
 
-    assert_matches!(
-        list_archive(&path, &SecurityConfig::default()),
-        Err(ArchiveError::InvalidArchive(_))
-    );
+    assert_exceeds_archive(list_archive(&path, &SecurityConfig::default()).err());
 }
 
 #[test]
@@ -116,8 +97,7 @@ fn zip_with_prepended_data_within_declared_length_extracts() {
     let mut data = vec![0xAB; 1000];
     data.extend_from_slice(&stored_zip(&[("a.txt", b"hello")]));
     let dir = TempDir::new().unwrap();
-    let path = dir.path().join("a.zip");
-    std::fs::write(&path, &data).unwrap();
+    let path = write_archive(&dir, &data);
 
     let out = TempDir::new().unwrap();
     extract_archive(&path, out.path(), &SecurityConfig::default()).unwrap();
@@ -128,53 +108,66 @@ fn zip_with_prepended_data_within_declared_length_extracts() {
 fn zip_well_formed_archive_lists_and_verifies() {
     let data = stored_zip(&[("a.txt", b"hello"), ("b.txt", b"world")]);
     let dir = TempDir::new().unwrap();
-    let path = dir.path().join("a.zip");
-    std::fs::write(&path, &data).unwrap();
+    let path = write_archive(&dir, &data);
     let config = SecurityConfig::default();
 
     assert_eq!(list_archive(&path, &config).unwrap().total_entries(), 2);
     assert!(verify_archive(&path, &config).unwrap().is_safe());
 }
 
-/// Appends a second central-directory record (under another name) that
-/// refers to the same local header.
-fn with_repeated_central_record(data: &[u8]) -> Vec<u8> {
-    const EOCD: &[u8] = b"PK\x05\x06";
-    let eocd_at = data.windows(4).rposition(|w| w == EOCD).unwrap();
-    let dir_start = u32::from_le_bytes(*data[eocd_at + 16..].first_chunk::<4>().unwrap()) as usize;
-    let record = &data[dir_start..eocd_at];
-
-    let mut second = record.to_vec();
-    let name_at = second.windows(5).position(|w| w == b"a.txt").unwrap();
-    second[name_at] = b'b';
-
-    let mut out = data[..eocd_at].to_vec();
-    out.extend_from_slice(&second);
-    let mut eocd = data[eocd_at..].to_vec();
-    eocd[8..10].copy_from_slice(&2u16.to_le_bytes());
-    eocd[10..12].copy_from_slice(&2u16.to_le_bytes());
-    let dir_size = u32::try_from(record.len() * 2).unwrap();
-    eocd[12..16].copy_from_slice(&dir_size.to_le_bytes());
-    out.extend_from_slice(&eocd);
-    out
+/// A second central record under another name that refers to the same local
+/// header as the entry's own.
+fn with_repeated_central_record(entry: RawEntry) -> RawZip {
+    let repeated = RawEntry {
+        name: b"b.txt".to_vec(),
+        ..entry.clone()
+    };
+    let mut zip = RawZip::new(vec![entry]);
+    zip.extra_central_records = vec![(repeated, 0)];
+    zip
 }
 
 #[test]
 fn zip_rejects_repeated_central_records_for_one_local_header() {
-    let data = with_repeated_central_record(&stored_zip(&[("a.txt", &[9u8; 64])]));
+    // Both records declare 64 compressed bytes for data that exists once, so
+    // the cumulative declared size is what rejects the archive.
+    let zip = with_repeated_central_record(RawEntry::stored("a.txt", &[9u8; 64]));
     let dir = TempDir::new().unwrap();
-    let path = dir.path().join("a.zip");
-    std::fs::write(&path, &data).unwrap();
+    let path = write_archive(&dir, &zip.build().bytes);
     let config = SecurityConfig::default();
 
-    assert_matches!(
-        list_archive(&path, &config),
-        Err(ArchiveError::InvalidArchive(_))
-    );
-    assert_matches!(
-        verify_archive(&path, &config),
-        Err(ArchiveError::InvalidArchive(_))
-    );
+    assert_exceeds_archive(list_archive(&path, &config).err());
+    assert_exceeds_archive(verify_archive(&path, &config).err());
     let out = TempDir::new().unwrap();
-    assert!(extract_archive(&path, out.path(), &config).is_err());
+    assert_exceeds_archive(extract_archive(&path, out.path(), &config).err());
+}
+
+#[test]
+fn zip_repeated_central_record_with_room_for_both_is_a_name_mismatch() {
+    // Padding keeps the cumulative declared size within the archive, so the
+    // repeated record is judged on its own: its name differs from the local
+    // header's.
+    let entry = RawEntry::stored("a.txt", &[9u8; 64]).with_padding_after(300);
+    let zip = with_repeated_central_record(entry);
+    let dir = TempDir::new().unwrap();
+    let path = write_archive(&dir, &zip.build().bytes);
+    let config = SecurityConfig::default();
+
+    let mismatch = |error: Option<ArchiveError>| {
+        assert_matches!(
+            error,
+            Some(ArchiveError::ZipInconsistency(
+                ZipInconsistency::HeaderMismatch {
+                    field: ZipHeaderField::FileName,
+                    ..
+                }
+            ))
+        );
+    };
+    mismatch(list_archive(&path, &config).err());
+    let out = TempDir::new().unwrap();
+    mismatch(extract_archive(&path, out.path(), &config).err());
+    // `verify` reports the finding instead of failing: the report fails.
+    let report = verify_archive(&path, &config).unwrap();
+    assert_eq!(report.status(), VerificationStatus::Fail);
 }

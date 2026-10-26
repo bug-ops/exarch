@@ -149,7 +149,8 @@ exarch/
     │   │   │   ├── mod.rs
     │   │   │   ├── list.rs             # list_archive() per format
     │   │   │   ├── verify.rs           # verify_archive() + verify_manifest()
-    │   │   │   ├── manifest.rs         # ArchiveManifest, ArchiveEntry, ManifestEntryType
+    │   │   │   ├── integrity.rs        # payload integrity pass (decode-to-EOF)
+    │   │   │   ├── manifest.rs         # ArchiveManifest, ArchiveEntry, ManifestEntryKind, LinkTarget
     │   │   │   └── report.rs           # VerificationReport, VerificationIssue, etc.
     │   │   ├── io/
     │   │   │   ├── mod.rs
@@ -213,7 +214,7 @@ pub struct SafeSymlink(PathBuf); // invariant: target resolves within dest
 pub struct ValidatedEntry {
     pub safe_path: SafePath,
     pub entry_type: ValidatedEntryType,
-    pub mode: Option<u32>,          // sanitized (setuid/setgid stripped)
+    pub mode: Option<SanitizedMode>, // sanitized (setuid/setgid stripped)
 }
 
 pub enum ValidatedEntryType {
@@ -290,7 +291,13 @@ pub fn create_archive_with_progress<P, Q>(output: P, sources: &[Q], config: &Cre
 // Inspection
 pub fn list_archive<P>(archive: P, config: &SecurityConfig) -> Result<ArchiveManifest>;
 pub fn verify_archive<P>(archive: P, config: &SecurityConfig) -> Result<VerificationReport>;
+pub fn list_archive_with_options<P>(archive: P, config: &SecurityConfig, options: &ListOptions)
+    -> Result<ArchiveManifest>;
+pub fn verify_archive_with_options<P>(archive: P, config: &SecurityConfig,
+    options: &VerificationOptions) -> Result<VerificationReport>;
 ```
+
+See `specs/019-verify-and-list-model/spec.md` for the inspection reporting model.
 
 ### ProgressCallback Trait
 
@@ -310,8 +317,9 @@ pub trait ArchiveFormat {
     fn extract(&mut self, output_dir: &Path, config: &SecurityConfig,
         options: &ExtractionOptions, progress: &mut dyn ProgressCallback)
         -> Result<ExtractionReport>;
-    fn list(&mut self, config: &SecurityConfig) -> Result<ArchiveManifest>;
-    fn verify(&mut self, config: &SecurityConfig) -> Result<VerificationReport>;
+    fn list(&mut self, config: &SecurityConfig<Validated>) -> Result<ArchiveManifest>;
+    fn verify(&mut self, config: &SecurityConfig<Validated>, options: &VerificationOptions)
+        -> Result<VerificationReport>;
     fn format_name(&self) -> &'static str;
 }
 
@@ -338,11 +346,11 @@ exarch create <OUTPUT> <SOURCE>...
     [-x/--exclude PATTERN]... [--strip-prefix PREFIX] [-f/--force]
 
 exarch list <ARCHIVE>
-    [-l/--long] [-H/--human-readable]
+    [-l/--long] [-H/--human-readable] [--read-link-targets]
     [--max-files N] [--max-total-size SIZE] [--allow-solid-archives]
 
 exarch verify <ARCHIVE>
-    [--check-integrity] [--check-security]
+    [--check-integrity [--decompression-budget SIZE]] [--strict]
     [--max-files N] [--max-total-size SIZE] [--allow-solid-archives]
 
 exarch completion <SHELL>    # bash | zsh | fish | powershell | elvish

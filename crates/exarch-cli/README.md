@@ -212,6 +212,24 @@ exarch create -f backup.tar.gz ./src
 > [!CAUTION]
 > Since v0.4.0, `create` rejects ZIP-family alias extensions (`.apk`, `.jar`, `.whl`, `.epub`, `.war`, `.ear`, `.aab`, `.ipa`, `.appx`, `.msix`, `.vsix`, `.nbm`) when format inference is left to the file extension. These containers require extra structure (signing, manifests, ordering) that exarch doesn't produce.
 
+## List Command
+
+List archive contents without extracting:
+
+```bash
+exarch list [OPTIONS] <ARCHIVE>
+```
+
+| Option | Description |
+|--------|-------------|
+| `--long`, `-l` | Show detailed file information |
+| `--human-readable`, `-H` | Show sizes in human-readable format |
+| `--read-link-targets` | Read 7z symlink targets, which decodes the blocks that hold them; without it a 7z link shows `(target not read)` |
+| `--zip-consistency` | `enforce` (default) rejects ZIP archives whose headers disagree; `ignore` keeps the central directory interpretation |
+| `--max-files`, `--max-total-size`, `--max-file-size` | Limits applied while listing |
+| `--allow-solid-archives` | Allow solid 7z archives (higher memory usage during listing) |
+| `--json`, `-j` | Output results in JSON format |
+
 ## Verify Command
 
 Check archive security before extraction. By default payload checksums are not verified and `Integrity` is reported as `SKIPPED`; add `--check-integrity` to decode the payload and verify them:
@@ -319,6 +337,20 @@ duplicate destination files skipped by default (unless `--force` is passed):
   "warnings": [
     "skipped 2 entries with disallowed extensions"
   ]
+}
+```
+
+A failed operation prints an error envelope. For a `SecurityViolation` that a `SecurityConfig` setting would admit, `error.relaxable_by` names that setting (the field is absent otherwise):
+
+```json
+{
+  "operation": "extract",
+  "status": "error",
+  "error": {
+    "kind": "SecurityViolation",
+    "message": "Security violation while processing 'archive.tar'\nHINT: If this archive is from a trusted source, pass --allow-symlinks.: operation denied by security policy: symlinks not allowed",
+    "relaxable_by": "symlinks"
+  }
 }
 ```
 

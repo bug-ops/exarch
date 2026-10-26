@@ -14,7 +14,7 @@ This crate is part of the [exarch](https://github.com/bug-ops/exarch) workspace.
 
 ```toml
 [dependencies]
-exarch-core = "0.6"
+exarch-core = "0.7"
 ```
 
 > [!IMPORTANT]
@@ -154,7 +154,9 @@ let report = ArchiveCreator::new()
 | [`extract_archive`](https://docs.rs/exarch-core/latest/exarch_core/fn.extract_archive.html) | High-level extraction function |
 | [`create_archive`](https://docs.rs/exarch-core/latest/exarch_core/fn.create_archive.html) | High-level archive creation function |
 | [`list_archive`](https://docs.rs/exarch-core/latest/exarch_core/fn.list_archive.html) | List archive contents |
+| [`list_archive_with_options`](https://docs.rs/exarch-core/latest/exarch_core/fn.list_archive_with_options.html) | List archive contents with `ListOptions`, e.g. reading 7z link targets on request |
 | [`verify_archive`](https://docs.rs/exarch-core/latest/exarch_core/fn.verify_archive.html) | Verify archive security without extracting |
+| [`verify_archive_with_options`](https://docs.rs/exarch-core/latest/exarch_core/fn.verify_archive_with_options.html) | Verify with `VerificationOptions`, e.g. decoding the payload to check integrity |
 | [`Archive`](https://docs.rs/exarch-core/latest/exarch_core/struct.Archive.html) | Archive handle for extraction |
 | [`ArchiveBuilder`](https://docs.rs/exarch-core/latest/exarch_core/struct.ArchiveBuilder.html) | Builder for configuring extraction |
 | [`ArchiveCreator`](https://docs.rs/exarch-core/latest/exarch_core/struct.ArchiveCreator.html) | Builder for configuring archive creation |

@@ -10,7 +10,7 @@ tags:
   - windows
   - rust
 created: 2026-08-03
-status: draft
+status: implemented
 related:
   - "[[constitution]]"
   - "[[MOC-specs]]"
@@ -23,6 +23,7 @@ related:
 > **Type**: bug (path-validation robustness gap, Windows-specific)
 > **Priority**: P2
 > **Subsystem**: exarch-core (`crates/exarch-core/src/types/safe_path.rs`)
+> **Status**: implemented in 0.7.0 (#652): `is_windows_reserved_component` and `check_windows_component` in `safe_path.rs`, opt-out `AllowedFeatures::windows_reserved_names` via `SecurityConfig::with_allow_windows_reserved_names` (see section 9 for the resolved decisions and deviations)
 > **Origin**: CVE/vulnerability-class monitoring cycle against the tracked
 > Reference Project `python/cpython` (tarfile module), per
 > `.claude/rules/continuous-improvement.md`. Commit `8b430d6f` (2026-07-02,
@@ -91,8 +92,8 @@ behavior instead of only "does not panic."
 
 - Other Windows filename quirks not related to reserved device names
   (e.g., trailing dot/space stripping, `NTFS` alternate data stream
-  syntax `file.txt:stream`) — tracked as a separate `[NEEDS
-  CLARIFICATION]` item, not bundled into this fix
+  syntax `file.txt:stream`) — originally not bundled into this fix; both
+  were added to the same Windows component check in 0.7.0 (see section 9)
 - macOS/Unix reserved-name equivalents — none exist; this finding is
   Windows-specific only (see NFR-001)
 - Sanitizing/renaming the entry automatically as an alternative to
@@ -243,23 +244,26 @@ new persisted or transmitted entity is introduced.
 
 ## 9. Open Questions
 
-- [NEEDS CLARIFICATION: Should the default posture be reject-by-default
-  (consistent with the existing non-empty `banned_path_components` list
-  defaults) or allow-by-default with an opt-in reject flag (consistent
-  with most `AllowedFeatures` defaulting to `false`/permissive)? This spec
-  assumes reject-by-default per FR-003's phrasing but this should be
-  confirmed with the maintainer before implementation.]
-- [NEEDS CLARIFICATION: Should the trailing dot/space Windows filename
-  quirk (e.g., `CON.`, `CON ` — also documented in Win32 filename rules)
-  be bundled into this same fix, or filed as a separate, narrower
-  follow-up? It is a related but distinct class of Windows-specific
-  filename semantics from the reserved-device-name mapping.]
-- [NEEDS CLARIFICATION: Should this check also run on non-Windows hosts as
-  a defense-in-depth measure for archives that will later be *moved to* a
-  Windows machine (e.g., extracted on Linux CI, then rsynced to a Windows
-  fileshare)? FR-002 currently scopes this strictly to `cfg(windows)`
-  extraction targets only, matching the project's existing platform-gated
-  pattern for `sanitize_permissions` (Unix-only, no inverse check either).]
+- **Resolved: reject by default.** `AllowedFeatures::windows_reserved_names`
+  defaults to `false`; `SecurityConfig::with_allow_windows_reserved_names(true)`
+  is the Rust-only opt-out (no CLI flag, no Python or Node setter), and the
+  permissive preset does not enable it. The rejection is a
+  `SecurityViolation` whose `relaxable_by` is `PolicySetting::WindowsReservedNames`.
+- **Resolved: bundled for trailing dot or space and `:`.** On Windows,
+  `check_windows_component` also rejects a component with a trailing dot or
+  space and a component containing `:` as `SecurityViolation`, with no
+  opt-out, so the opt-out admits only reserved device names (0.7.0, #652,
+  #653, #700).
+- **Resolved: Windows only.** The check runs under `cfg!(windows)` in
+  `SafePath::validate`; the pure helpers are platform-independent and a Unix
+  test pins that `folder/CON.txt` is accepted off Windows.
+- Deviations from FR-001 and FR-004 as shipped: the compared name is the
+  text before the first `.` with trailing spaces trimmed (so `NUL.tar.gz`,
+  `aux.` and `CON ` match, while `file.CON` and `COM10` do not), and the set
+  is `CON`, `PRN`, `AUX`, `NUL`, `COM0`-`COM9`, `LPT0`-`LPT9`, the superscript
+  forms `COM` and `LPT` followed by `¹`, `²` or `³`, `CONIN$` and `CONOUT$`.
+  Link targets of symlinks and hardlinks get the same component check
+  (`safe_symlink.rs`, `security/hardlink.rs`).
 
 ## 10. See Also
 

@@ -9,6 +9,7 @@ tags:
   - rust
   - typestate
 created: 2026-08-04
+updated: 2026-10-26
 status: implemented
 related:
   - "[[constitution]]"
@@ -23,7 +24,7 @@ related:
 > [!info] Metadata
 > **Subsystem**: exarch-core / config, creation
 > **MSRV**: Rust 1.98.0
-> **Origin**: #433, #434, #435 (`SecurityConfig`), #443 (`CreationConfig`) — v0.6.0, unreleased
+> **Origin**: #433, #434, #435 (`SecurityConfig`), #443 (`CreationConfig`) — v0.6.0
 > **Status**: implemented — this spec documents shipped behavior, extracted from
 > [[003-config-api/spec]] because it introduces a reusable pattern (typestate-enforced
 > validation) worth tracking as its own unit
@@ -153,8 +154,9 @@ THEN the code does not compile — those functions require &CreationConfig<Valid
 | `SecurityConfigFields` | Private struct sealing `SecurityConfig`'s actual fields | Reached via `Deref` (both states) / `DerefMut` (`Unvalidated` only) |
 | `CreationConfig<State = Unvalidated>` | Archive-creation configuration, now generic over validation state (mirrors `SecurityConfig`) | `with_*` builders only on `Unvalidated`; `validate(self) -> Result<CreationConfig<Validated>>` |
 | `CreationConfigFields` | `#[non_exhaustive]` private struct sealing `CreationConfig`'s actual fields | Reached via `Deref` (both states) / `DerefMut` (`Unvalidated` only) |
-| `ValidatedEntry` | Sealed as part of this hardening pass | Private fields, `pub(crate)` constructor, `safe_path()`/`entry_type()`/`mode()`/`into_parts()` accessors |
-| `ValidatedEntryType` | `#[non_exhaustive]` since this hardening; `Symlink`/`Hardlink` variants wrap the already-sealed `SafeSymlink`/`SafePath` | Payloads unforgeable even from inside the crate |
+| `ValidatedEntry` | Sealed as part of this hardening pass | Private fields, `pub(crate)` constructor, `safe_path()`/`entry_type()`/`mode()` public accessors and a crate-private `into_parts()` |
+| `ValidatedEntryType` | `#[non_exhaustive]` since this hardening; `Symlink`/`Hardlink` variants wrap the already-sealed `SafeSymlink`/`SafePath` (`Hardlink` also carries an `EntryCount`, see [[013-quota-permit-capability-token/spec]]) | Payloads unforgeable even from inside the crate |
+| `SecurityConfigFields` fields added in v0.7.0 | `max_solid_compression_ratio`, `max_decoder_memory`, `parallel_decode`, `zip_consistency`; each is validated or typed by `validate()` / its own enum (`ParallelDecode`, `ZipConsistencyPolicy`) | `validate()` rejects zero `max_decoder_memory` and a non-positive or non-finite `max_solid_compression_ratio`; see [[003-config-api/spec]] |
 
 ## 6. Edge Cases and Error Handling
 

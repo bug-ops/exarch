@@ -23,6 +23,10 @@ related:
 > **License**: MIT OR Apache-2.0
 > **Crates**: exarch-core, exarch-cli, exarch-python, exarch-node
 
+> [!note]
+> Archived monolithic spec. The list/verify reporting model (manifest, report, integrity) is specified in
+> [[019-verify-and-list-model/spec]]; later security and API changes live in the numbered specs listed in [[MOC-specs]].
+
 ## 1. Overview
 
 ### Problem Statement
@@ -218,9 +222,9 @@ THEN extraction runs on the libuv thread pool, files are extracted, and an Extra
 
 | ID | Requirement | Priority |
 |----|------------|----------|
-| FR-050 | `list_archive()` SHALL return an `ArchiveManifest` with total entry count, total size, and per-entry metadata (path, size, type, compressed size, modified time, permissions) without writing any files to disk | must |
-| FR-051 | `verify_archive()` SHALL return a `VerificationReport` with `status` (Pass/Fail/Warning), `issues` list (each with severity, category, message), and `total_entries` count | must |
-| FR-052 | `VerificationReport` issues SHALL distinguish severity levels: Critical, High, Medium, Low | must |
+| FR-050 | `list_archive()` SHALL return an `ArchiveManifest` with total entry count, total size, and per-entry metadata (path, kind, size, compression, mode, modified time) without writing any files to disk | must |
+| FR-051 | `verify_archive()` SHALL return a `VerificationReport` with `status()` (Pass/Fail/Warning), `issues()` (each with severity, category, message), and `total_entries()` count; `verify_archive_with_options()` additionally accepts `VerificationOptions` to request a payload integrity check | must |
+| FR-052 | `VerificationReport` issues SHALL distinguish severity levels: Critical, High, Medium, Low, Info | must |
 
 ### 3.6 CLI Interface
 
@@ -231,7 +235,7 @@ THEN extraction runs on the libuv thread pool, files are extracted, and an Extra
 | FR-062 | WHEN `--json` is set, THE CLI SHALL output machine-readable JSON to stdout; human-readable text output SHALL go to stderr | must |
 | FR-063 | `extract` SHALL support: `--max-files`, `--max-total-size` (with K/M/G/T suffixes), `--max-file-size`, `--max-compression-ratio`, `--allow-symlinks`, `--allow-hardlinks`, `--allow-solid-archives`, `--allow-world-writable`, `--preserve-permissions`, `--force`, `--atomic` | must |
 | FR-064 | `create` SHALL support: `--compression-level` (1-9), `--follow-symlinks`, `--include-hidden`, `--exclude` (repeatable glob), `--strip-prefix`, `--force` | must |
-| FR-065 | `list` and `verify` SHALL support: `--long`, `--human-readable`, `--max-files`, `--max-total-size`, `--allow-solid-archives` | must |
+| FR-065 | `list` SHALL support `--long`, `--human-readable`, `--max-files`, `--max-total-size`, `--allow-solid-archives`, `--read-link-targets`; `verify` SHALL support `--max-files`, `--max-total-size`, `--allow-solid-archives`, `--check-integrity`, `--decompression-budget`, `--strict` | must |
 | FR-066 | `completion <SHELL>` SHALL generate shell completion scripts for bash, zsh, fish, powershell, and elvish; output goes to stdout | must |
 | FR-067 | WHEN `--verbose` is set, THE CLI SHALL print one line per extracted entry to stderr including entry type, size, and path; `--quiet` takes precedence over `--verbose` | must |
 | FR-068 | WHEN `--allow-symlinks` is already active and a symlink escape is blocked, THE CLI SHALL NOT emit the `--allow-symlinks` hint (genuine security violation, not a configuration gap) | must |
@@ -287,10 +291,10 @@ THEN extraction runs on the libuv thread pool, files are extracted, and an Extra
 | `EntryValidator` | Stateful validator orchestrating all security checks per entry | Holds `QuotaTracker`, `HardlinkTracker`, `symlink_seen` flag |
 | `ExtractionReport` | Result of an extraction operation | `files_extracted`, `directories_created`, `symlinks_created`, `bytes_written`, `duration`, `files_skipped`, `warnings` |
 | `CreationReport` | Result of an archive creation | `files_added`, `bytes_written`, `duration` |
-| `ArchiveManifest` | Listing of archive contents | `total_entries`, `total_size`, `format`, `entries: Vec<ArchiveEntry>` |
-| `ArchiveEntry` | Metadata for a single archive entry | `path`, `size`, `entry_type`, `compressed_size`, `modified`, `permissions` |
-| `VerificationReport` | Security and integrity check results | `status: VerificationStatus`, `issues: Vec<VerificationIssue>`, `total_entries` |
-| `VerificationIssue` | A single identified security or integrity issue | `severity: IssueSeverity`, `category: IssueCategory`, `message`, `path` |
+| `ArchiveManifest` | Listing of archive contents | `total_entries()`, `total_size()`, `format()`, `entries()` (fields private) |
+| `ArchiveEntry` | Metadata for a single archive entry | `path`, `kind: ManifestEntryKind`, `size`, `compression: EntryCompression`, `mode`, `modified` |
+| `VerificationReport` | Security and integrity check results | `status()`, `security_status()`, `integrity_status()`, `issues()`, `total_entries()` (fields private) |
+| `VerificationIssue` | A single identified security or integrity issue | `severity: IssueSeverity`, `category: IssueCategory`, `message`, `entry_path`, `context` |
 | `ArchiveType` | Enum of supported archive formats | `Tar`, `TarGz`, `TarBz2`, `TarXz`, `TarZst`, `Zip`, `SevenZ` |
 | `ArchiveFormat` | Trait for read-side format dispatch | Methods: `extract`, `list`, `verify`, `format_name` |
 | `FormatCreator` | Trait for write-side format dispatch | Methods: `create`, `format_name`; implemented by `TarCreator`, `TarGzCreator`, `TarBz2Creator`, `TarXzCreator`, `TarZstCreator`, `ZipCreator` via `creator_for_format()` helper |
@@ -366,7 +370,7 @@ THEN extraction runs on the libuv thread pool, files are extracted, and an Extra
 
 ## 9. Open Questions
 
-- [NEEDS CLARIFICATION: Should `verify_archive` attempt checksum validation for ZIP (CRC-32) and 7z formats, or only structural/security checks? Currently structural only.]
+- [RESOLVED: `verify_archive` is structural/security only by default; checksum and decode-to-EOF validation is opt-in via `VerificationOptions` (CLI `--check-integrity`), see [[019-verify-and-list-model/spec]].]
 - [NEEDS CLARIFICATION: Is there a plan to support 7z creation in a future version, or is read-only permanently by design?]
 - [NEEDS CLARIFICATION: Windows path separator handling in path validation — is there a CI job that runs the test suite on Windows?]
 - [NEEDS CLARIFICATION: Should `ProgressCallback` expose a cancellation mechanism (e.g., return bool to abort)?]
@@ -382,3 +386,4 @@ THEN extraction runs on the libuv thread pool, files are extracted, and an Extra
 - [[constitution]] — project principles
 - [[MOC-specs]] — all specifications
 - [[001-exarch-system/plan]] — technical plan
+- [[019-verify-and-list-model/spec]] — list/verify reporting model

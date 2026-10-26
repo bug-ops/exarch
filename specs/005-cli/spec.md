@@ -8,7 +8,7 @@ tags:
   - cli
   - rust
 created: 2026-05-20
-updated: 2026-09-02
+updated: 2026-10-26
 status: draft
 related:
   - "[[constitution]]"
@@ -142,9 +142,9 @@ THEN stdout contains valid JSON with all report fields; stderr contains no progr
 | FR-060 | THE CLI SHALL provide subcommands: `extract`, `create`, `list`, `verify`, `completion` | must |
 | FR-061 | THE CLI SHALL support global flags: `--verbose`, `--quiet`, `--json` | must |
 | FR-062 | WHEN `--json` is set, THE CLI SHALL output machine-readable JSON to stdout; human-readable text and progress output SHALL go to stderr | must |
-| FR-063 | `extract` SHALL support: `--max-files N`, `--max-total-size SIZE` (K/M/G/T suffixes), `--max-file-size SIZE`, `--max-compression-ratio N`, `--allow-symlinks`, `--allow-hardlinks`, `--allow-solid-archives`, `--allow-world-writable`, `--preserve-permissions`, `--force`, `--atomic`, `--max-path-depth N` (default 32), `--banned-component COMPONENT` (repeatable; replaces the default ban list when provided), `--allow-absolute-paths` (flag; also applies to the listing pre-pass), `--parallel-decode-memory SIZE|off` (7z; default 128M) | must |
+| FR-063 | `extract` SHALL support: `--max-files N`, `--max-total-size SIZE` (K/M/G/T suffixes), `--max-file-size SIZE`, `--max-compression-ratio N`, `--allow-symlinks`, `--allow-hardlinks`, `--allow-solid-archives`, `--allow-world-writable`, `--preserve-permissions`, `--force`, `--atomic`, `--max-path-depth N` (default 32), `--banned-component COMPONENT` (repeatable; replaces the default ban list when provided), `--allow-absolute-paths` (flag; also applies to the listing pre-pass), `--parallel-decode-memory SIZE|off` (7z; default 128M), `--zip-consistency enforce|ignore` (default `enforce`) | must |
 | FR-064 | `create` SHALL support: `-l/--compression-level 1-9`, `--follow-symlinks`, `--include-hidden`, `-x/--exclude PATTERN` (repeatable glob), `--strip-prefix PREFIX`, `-f/--force`, `--max-file-size SIZE` (K/M/G/T suffixes; skips source files larger than threshold), `--preserve-permissions BOOL` (default true; pass `--preserve-permissions=false` for portable archive without Unix permission bits) | must |
-| FR-065 | `list` and `verify` SHALL support: `-l/--long`, `-H/--human-readable`, `--max-files N`, `--max-total-size SIZE`, `--allow-solid-archives`, `--allow-absolute-paths`; `verify` also `--parallel-decode-memory SIZE|off` (effective with `--check-integrity`) | must |
+| FR-065 | `list` and `verify` SHALL support: `--max-files N`, `--max-total-size SIZE`, `--max-file-size SIZE`, `--allow-solid-archives`, `--zip-consistency enforce|ignore`; `list` also `-l/--long`, `-H/--human-readable`, `--read-link-targets`; `verify` also `--allow-symlinks`, `--allow-hardlinks`, `--check-integrity`, `--decompression-budget SIZE`, `--strict`, `--parallel-decode-memory SIZE|off` (effective with `--check-integrity`). `verify` has no `--check-security` flag (removed in v0.7.0; security checks always run) | must |
 | FR-066 | `completion <SHELL>` SHALL generate shell completion scripts for bash, zsh, fish, powershell, and elvish; output goes to stdout for piping into the appropriate completions directory | must |
 | FR-067 | WHEN extraction or creation fails, THE CLI SHALL exit with a non-zero exit code and print the error to stderr | must |
 | FR-068 | WHEN `--quiet` is set, THE CLI SHALL suppress progress bars and informational output; only errors go to stderr; `--quiet` SHALL NOT suppress `--json` output — `--json` always emits to stdout regardless of `--quiet` | must |
@@ -157,7 +157,7 @@ THEN stdout contains valid JSON with all report fields; stderr contains no progr
 | FR-075 | WHEN `list -l` or `list --json -l` is run and an entry is a symlink or hardlink, THE CLI SHALL include the target path in the output; text format: `l755  0  link.txt -> target.txt`; JSON format: `symlink_target` and `hardlink_target` fields populated | must |
 | FR-076 | `OutputFormatter`'s trait methods SHALL take `&mut self` and write through an injectable `Write` destination (`HumanFormatter<O: Write = Term, E: Write = Term>`, `JsonFormatter<W: Write = Stdout>`) rather than writing directly to a hardcoded `Term`/`Stdout`, so formatter output can be captured in unit tests without a subprocess (v0.6.0, #452) | must |
 | FR-077 | `extract`'s human and `--json` output SHALL surface `ExtractionReport.warnings` and `files_skipped` on both the success path and the error path (`PartialExtraction`), not silently drop them (v0.6.0, #498, #503) | must |
-| FR-078 | WHEN the `SecurityViolation` HINT is shown, THE CLI SHALL only suggest a policy flag (`--allow-symlinks`, `--allow-hardlinks`, `--allow-solid-archives`, `--banned-component`) for violation reasons those flags actually relax; every other `SecurityViolation` (e.g. the GHSA-5j8q-wxg5-hj4r size-mismatch case, password-protected archives, unsupported compression) SHALL get a HINT stating it cannot be relaxed via any policy flag (v0.6.0, #520) | must |
+| FR-078 | WHEN the `SecurityViolation` HINT is shown, THE CLI SHALL derive it from `ArchiveError::relaxable_by()` (a `PolicySetting`) and name only the flag that admits the entry (`--allow-symlinks`, `--allow-hardlinks`, `--allow-solid-archives`, `--banned-component`, `--max-path-depth`); a setting with no CLI flag (`windows_reserved_names`, `max_tar_metadata_bytes`) SHALL point at the Rust API instead, and every other `SecurityViolation` (e.g. the GHSA-5j8q-wxg5-hj4r size-mismatch case, password-protected archives, unsupported compression) SHALL get a HINT stating it cannot be relaxed via any policy flag (v0.6.0, #520; v0.7.0, #741, #757) | must |
 | FR-079 | WHEN a `PartialExtraction`-wrapped error is rendered, THE CLI SHALL preserve the wrapped error's category-specific HINT text (e.g. `--allow-symlinks`, or the "cannot be relaxed" wording) rather than replacing it with `PartialExtractionContext`'s generic HINT (v0.6.0, #527) | must |
 | FR-080 | `extract`'s pre-flight destination-conflict error SHALL sort and cap the listed conflicting paths at 10, collapsing the remainder into a single `... and N more` summary line, instead of listing every conflict unbounded (v0.6.0, #500) | must |
 | FR-081 | Human-readable byte sizes >= 1 TB SHALL render with a `TB` suffix, not an inflated `GB` figure; `HumanFormatter::format_size` and `progress::humanize_bytes` SHALL share one implementation (`output::humanize_bytes`) with a TB-inclusive ladder (v0.6.0, #451) | must |
@@ -166,10 +166,16 @@ THEN stdout contains valid JSON with all report fields; stderr contains no progr
 | FR-084 | `extract --atomic --force` SHALL reject a destination that is itself a symlink (or, on Windows, a junction/reparse point) on all platforms, and SHALL perform every rename/remove in its destination swap `*at`-relative to a file descriptor pinned on the destination's parent directory (Unix only), never by re-resolving a logical path mid-extraction. This is scoped to `--atomic --force` only — see [[015-atomic-force-destination-swap-hardening/spec]] for the full GHSA-x8wr-7ww2-c94x fix | must |
 | FR-085 | WHEN `extract --atomic --force`'s best-effort cleanup on failure cannot locate its temp/backup directory at the expected logical path (e.g. because an intermediate path component was redirected mid-extraction), THE CLI SHALL disclose the directory's actual current path (resolved via an open file descriptor, not the possibly-stale logical path) in its error output rather than leaving surviving content undisclosed (v0.6.0, #530) | should |
 | FR-086 | `verify`/`list` SHALL flag a TAR entry whose path is not valid UTF-8 as a `Medium`-severity `SuspiciousPath` `VerificationIssue` (portability risk, not a security issue — `security_status` is unaffected), flipping `status` to `Warning` instead of reporting `Pass` for an entry that may fail to extract on filesystems requiring UTF-8 names (v0.6.0, #528) | should |
-| FR-087 | `--verbose` and `--quiet` SHALL be resolved once into a single `output::Verbosity` (`Quiet` \| `Normal` \| `Verbose`) via `impl From<&cli::Cli> for Verbosity`, and threaded through `output::create_formatter`, `HumanFormatter::new`/`with_writers`, `commands::extract::execute`, and `commands::create::execute`, rather than each site independently interpreting the two raw booleans; `Verbosity::from_flags` SHALL resolve `verbose: true, quiet: true` to `Quiet` in every case, including when the two flags are parsed at different `clap` `ArgMatches` levels (e.g. a global `--verbose` combined with a subcommand-level `--quiet`), which `clap`'s `conflicts_with` on `--quiet` does not reject (unreleased, post-v0.6.0, #550, behavior change — see Edge Cases) | must |
-| FR-089 | `verify --check-integrity` SHALL decode the payload to the decoder's EOF (ZIP CRC-32, TAR framing, codec checksums, 7z CRC) and report `integrity_status` as `OK`, `FAILED` or `INCOMPLETE` (`SKIPPED` without the flag). `FAILED` SHALL exit 1 even under `--strict`. `INCOMPLETE` (budget, resource limit, solid 7z without `--allow-solid-archives`, TAR without an end-of-archive marker) comes with a Medium issue, SHALL exit 0, and SHALL exit 2 under `--strict` (unreleased, #623) | must |
-| FR-090 | `--decompression-budget <SIZE>` SHALL require `--check-integrity`, reject `0`, default to a fixed 500 MiB that does not follow `--max-total-size`, and bound only the decoding beyond what listing already does (unreleased, #623) | must |
-| FR-088 | `extract` and `verify` SHALL share one `cli::LinkPolicyArgs` (`--allow-symlinks`, `--allow-hardlinks`), flattened into both argument structs and applied to `SecurityConfig` by `LinkPolicyArgs::apply`, so a link policy that makes `extract` succeed makes `verify` accept the same links; escaping links SHALL still fail under both flags (unreleased, #643) | must |
+| FR-087 | `--verbose` and `--quiet` SHALL be resolved once into a single `output::Verbosity` (`Quiet` \| `Normal` \| `Verbose`) via `impl From<&cli::Cli> for Verbosity`, and threaded through `output::create_formatter`, `HumanFormatter::new`/`with_writers`, `commands::extract::execute`, and `commands::create::execute`, rather than each site independently interpreting the two raw booleans; `Verbosity::from_flags` SHALL resolve `verbose: true, quiet: true` to `Quiet` in every case, including when the two flags are parsed at different `clap` `ArgMatches` levels (e.g. a global `--verbose` combined with a subcommand-level `--quiet`), which `clap`'s `conflicts_with` on `--quiet` does not reject (v0.6.1, #550, behavior change — see Edge Cases) | must |
+| FR-089 | `verify --check-integrity` SHALL decode the payload to the decoder's EOF (ZIP CRC-32, TAR framing, codec checksums, 7z CRC) and report `integrity_status` as `OK`, `FAILED` or `INCOMPLETE`; without the flag it is `SKIPPED` (also in JSON). `FAILED` SHALL exit 1 even under `--strict`. `INCOMPLETE` (budget, resource limit, solid 7z without `--allow-solid-archives`, TAR without an end-of-archive marker) comes with a Medium issue, SHALL exit 0 when the report status is not `Fail`, and SHALL exit 2 under `--strict`. A solid 7z archive without `--allow-solid-archives` is a `Security Policy` failure, so `verify` exits 1 with or without the flag (v0.7.0, #623, #670, #672) | must |
+| FR-090 | `--decompression-budget <SIZE>` SHALL require `--check-integrity`, reject `0`, default to a fixed 500 MiB that does not follow `--max-total-size`, and bound only the decoding beyond what listing already does (v0.7.0, #623) | must |
+| FR-088 | `extract` and `verify` SHALL share one `cli::LinkPolicyArgs` (`--allow-symlinks`, `--allow-hardlinks`), flattened into both argument structs and applied to `SecurityConfig` by `LinkPolicyArgs::apply`, so a link policy that makes `extract` succeed makes `verify` accept the same links; escaping links SHALL still fail under both flags (v0.7.0, #643, #653) | must |
+| FR-091 | `extract`, `list` and `verify` SHALL share one `cli::ZipPolicyArgs` (`--zip-consistency enforce|ignore`, default `enforce`) mapped to `ZipConsistencyPolicy`; `enforce` rejects ZIP archives whose headers disagree or hide data (`extract`, `list`) or reports them (`verify`), `ignore` uses the central directory interpretation (v0.7.0, #671) | must |
+| FR-092 | `extract` and `verify` SHALL share one `cli::ParallelDecodeArgs` (`--parallel-decode-memory SIZE|off`); the flag is applied only when given, otherwise `SecurityConfig::default().parallel_decode` stays; `off` maps to `ParallelDecode::Sequential`, `0` is rejected (v0.7.0, #688) | must |
+| FR-093 | `list --read-link-targets` SHALL read 7z symlink targets (decoding the blocks that hold them); without it 7z link targets are not read (v0.7.0, #714, #718, #723) | must |
+| FR-094 | `verify --json` `data` SHALL carry `integrity_status` (`OK`, `FAILED`, `INCOMPLETE`, `SKIPPED`) and `integrity_gaps` (`null` when none, else `counts` keyed by reason, `entries` of `{path, reason}`, and `omitted`) (v0.7.0, #672, #684) | must |
+| FR-095 | The `--json` error envelope SHALL carry `error.relaxable_by` (the stable `PolicySetting` id, e.g. `symlinks`, `solid_archives`) only for a `SecurityViolation` a `SecurityConfig` setting relaxes, and `error.partial_report.writes` (`kept` or `rolled_back`) for a `PartialExtraction`; after `--atomic` rollback the report describes the discarded run (v0.7.0, #725, #741, #757) | must |
+| FR-096 | Human-readable output SHALL escape control and Unicode format characters (including bidirectional controls) in entry paths, link targets and other archive-derived text (v0.7.0, #741, #745, #749, #752, #757) | must |
 
 ## 4. Non-Functional Requirements
 
@@ -190,13 +196,15 @@ THEN stdout contains valid JSON with all report fields; stderr contains no progr
 | `ExtractArgs` | Arguments for `extract` subcommand | `archive`, `output_dir`, security overrides, `--force`, `--atomic`, `--max-path-depth`, `--banned-component`, `--allow-absolute-paths` |
 | `CreateArgs` | Arguments for `create` subcommand | `output`, `sources`, creation options, `--max-file-size`, `--preserve-permissions` |
 | `ListArgs` | Arguments for `list` subcommand | `archive`, display options |
-| `VerifyArgs` | Arguments for `verify` subcommand | `archive`, inspection options, `links: LinkPolicyArgs` |
+| `VerifyArgs` | Arguments for `verify` subcommand | `archive`, inspection options, `links: LinkPolicyArgs`, `zip: ZipPolicyArgs`, `parallel: ParallelDecodeArgs`, `check_integrity`, `decompression_budget` |
 | `LinkPolicyArgs` | Link policy flags shared by `extract` and `verify` (#643) | `allow_symlinks`, `allow_hardlinks`, `apply(SecurityConfig)` |
+| `ZipPolicyArgs` | ZIP structure policy flag shared by `extract`, `list` and `verify` (#671) | `zip_consistency: ZipConsistencyArg` (`Enforce` \| `Ignore`), `apply(SecurityConfig)` |
+| `ParallelDecodeArgs` | 7z parallel-decode memory flag shared by `extract` and `verify` (#688) | `parallel_decode_memory: Option<ParallelDecode>`, `apply(SecurityConfig)` |
 | `OutputFormatter` | Trait for human vs JSON output; methods take `&mut self` since v0.6.0 (#452) | Methods: `format_extraction_result`, `format_creation_result`, `format_manifest_short`, `format_manifest_long`, `format_verification_report` |
 | `HumanFormatter<O: Write = Term, E: Write = Term>` | Human-readable formatter; writes non-error output to `O`, errors to `E` (v0.6.0) | `HumanFormatter::new()` (stdout/stderr default), `HumanFormatter::with_writers()` (injects custom writers + `use_colors` for deterministic tests) |
 | `JsonFormatter<W: Write = Stdout>` | JSON formatter (v0.6.0) | `JsonFormatter::stdout()` (replaces the old unit-struct constructor), `JsonFormatter::with_writer()` |
 | `PinnedDir` (`commands::atomic_swap`) | Unix-only file-descriptor handle on the destination's parent directory, used by `--atomic --force` to perform `*at`-relative renames (v0.6.0, #526) | See [[015-atomic-force-destination-swap-hardening/spec]] |
-| `Verbosity` (`output`) | Enum replacing independent `verbose: bool, quiet: bool` parameters across formatter/progress construction (unreleased, post-v0.6.0, #550) | `Quiet` \| `Normal` \| `Verbose`; `from_flags(verbose, quiet)` resolves `quiet` as the deterministic tie-break when both are `true`; `impl From<&cli::Cli> for Verbosity` is the single resolution point |
+| `Verbosity` (`output`) | Enum replacing independent `verbose: bool, quiet: bool` parameters across formatter/progress construction (v0.6.1, #550) | `Quiet` \| `Normal` \| `Verbose`; `from_flags(verbose, quiet)` resolves `quiet` as the deterministic tie-break when both are `true`; `impl From<&cli::Cli> for Verbosity` is the single resolution point |
 
 ### CLI Command Syntax
 
@@ -209,6 +217,7 @@ exarch extract <ARCHIVE> [OUTPUT_DIR]
     [--allow-solid-archives] [--allow-world-writable]
     [--preserve-permissions] [--force] [--atomic]
     [--max-path-depth N] [--banned-component COMPONENT]... [--allow-absolute-paths]
+    [--zip-consistency enforce|ignore] [--parallel-decode-memory SIZE|off]
 
 exarch create <OUTPUT> <SOURCE>...
     [-l/--compression-level 1-9] [--follow-symlinks] [--include-hidden]
@@ -217,12 +226,15 @@ exarch create <OUTPUT> <SOURCE>...
 
 exarch list <ARCHIVE>
     [-l/--long] [-H/--human-readable]
-    [--max-files N] [--max-total-size SIZE] [--allow-solid-archives]
-    [--allow-absolute-paths]
+    [--max-files N] [--max-total-size SIZE] [--max-file-size SIZE]
+    [--allow-solid-archives] [--read-link-targets]
+    [--zip-consistency enforce|ignore]
 
 exarch verify <ARCHIVE>
-    [--max-files N] [--max-total-size SIZE] [--allow-solid-archives]
-    [--allow-symlinks] [--allow-hardlinks] [--strict]
+    [--max-files N] [--max-total-size SIZE] [--max-file-size SIZE]
+    [--allow-solid-archives] [--allow-symlinks] [--allow-hardlinks]
+    [--zip-consistency enforce|ignore] [--parallel-decode-memory SIZE|off]
+    [--check-integrity [--decompression-budget SIZE]] [--strict]
 
 exarch completion <SHELL>    # bash | zsh | fish | powershell | elvish  (output to stdout)
 ```
@@ -239,6 +251,11 @@ exarch completion <SHELL>    # bash | zsh | fish | powershell | elvish  (output 
 | SIZE suffix parsing (e.g. `--max-total-size 500M`) | K=1024, M=1024², G=1024³, T=1024⁴ |
 | `completion` for unsupported shell | Error; exit code non-zero |
 | `verify` on archive with issues | Issues printed; exit code non-zero when status is Fail |
+| `verify` on a solid 7z archive without `--allow-solid-archives` | `Security Policy` failure, exit 1; with `--check-integrity` the integrity status is also `INCOMPLETE` (v0.7.0, #672) |
+| `verify` without `--check-integrity` | `integrity_status` is `SKIPPED`; `--check-security` no longer exists (v0.7.0, #624) |
+| `verify --decompression-budget` without `--check-integrity`, or with `0` | Rejected at argument parsing (v0.7.0) |
+| `SecurityViolation` a `SecurityConfig` setting relaxes, `--json` | `error.relaxable_by` names the setting; the field is absent otherwise (v0.7.0, #741, #757) |
+| `extract --atomic` fails and rolls back, `--json` | `error.partial_report.writes` is `rolled_back`; without `--atomic` it is `kept` (v0.7.0, #725) |
 | `extract --atomic --force` onto a destination that is itself a symlink | Rejected on all platforms (GHSA-x8wr-7ww2-c94x, v0.6.0) — pass the resolved target path instead |
 | `extract --atomic --force` where an intermediate destination path component is replaced with a symlink mid-extraction | Swap is confined to the pinned parent fd; a `dev`/`ino` identity mismatch immediately before the destructive swap aborts it with a distinct error (v0.6.0, #526) |
 | `extract --atomic --force` fails after a mid-extraction redirect leaves a temp/backup directory behind at an unexpected path | Error output discloses the directory's actual current path, resolved via an open fd (v0.6.0, #530); in the ordinary non-redirected case, cleanup succeeds and nothing is disclosed or left behind |
@@ -248,7 +265,7 @@ exarch completion <SHELL>    # bash | zsh | fish | powershell | elvish  (output 
 | `extract` pre-flight destination conflict with many pre-existing files | At most 10 conflicting paths listed (sorted), remainder collapsed into `... and N more` (v0.6.0, #500) |
 | Human-readable size >= 1 TB (e.g. `u64::MAX` bytes) | Renders as `"...  TB"`, not an inflated GB figure (v0.6.0, #451) |
 | `verify`/`list` on a TAR archive with a non-UTF8 entry name | `status: Warning` with a `Medium`-severity `SuspiciousPath` issue, not `Pass` (v0.6.0, #528/#529) — portability risk only, `security_status` unaffected |
-| `exarch --verbose extract archive.tar.gz out --quiet` (global `--verbose`, subcommand-level `--quiet`) | Resolves deterministically to `Quiet` (no progress output, no summary) via `Verbosity::from_flags` (unreleased, post-v0.6.0, #550, behavior change) — previously the progress reporter selected verbose output (verbose-wins) while the formatter suppressed the summary (quiet-wins), an inconsistency `clap`'s `conflicts_with` did not catch since the two flags parsed at different `ArgMatches` levels |
+| `exarch --verbose extract archive.tar.gz out --quiet` (global `--verbose`, subcommand-level `--quiet`) | Resolves deterministically to `Quiet` (no progress output, no summary) via `Verbosity::from_flags` (v0.6.1, #550, behavior change) — previously the progress reporter selected verbose output (verbose-wins) while the formatter suppressed the summary (quiet-wins), an inconsistency `clap`'s `conflicts_with` did not catch since the two flags parsed at different `ArgMatches` levels |
 
 ## 7. Success Criteria
 

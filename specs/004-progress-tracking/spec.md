@@ -8,7 +8,7 @@ tags:
   - progress
   - rust
 created: 2026-05-20
-updated: 2026-08-04
+updated: 2026-10-26
 status: draft
 related:
   - "[[constitution]]"
@@ -74,8 +74,8 @@ SO THAT I can update a progress bar in real time
 GIVEN a custom ProgressCallback implementation
 WHEN extract_archive_with_progress() is called
 THEN on_entry_start is called before writing the entry,
-     on_bytes_written is called for each write chunk,
-     on_entry_complete is called after the entry is fully written
+     on_bytes_written is called once per written file with that file's byte count,
+     on_entry_complete is called when the entry is finished, including an entry that failed
 ```
 
 ### US-003: Completion Signal on Success Only
@@ -118,8 +118,8 @@ THEN on_entry_start and on_entry_complete are called for each source file added
 | FR-041 | THE SYSTEM SHALL provide a `NoopProgress` implementation that satisfies `ProgressCallback` with no runtime overhead | must |
 | FR-042 | `on_complete` SHALL NOT be called if extraction fails or is partial | must |
 | FR-043 | `ProgressCallback` SHALL be `Send` so it can be used across thread boundaries (Node.js, Python) | must |
-| FR-044 | Format handlers SHALL accept `&mut dyn ProgressCallback` and call it consistently for each entry; callbacks SHALL fire per-entry interleaved with actual I/O (not batched before or after) | must |
-| FR-045 | `on_bytes_written` SHALL be called with the number of bytes written in the current chunk, not a cumulative total | must |
+| FR-044 | Format handlers SHALL accept `&mut dyn ProgressCallback` and call it consistently for each entry; callbacks SHALL fire per-entry interleaved with actual I/O (not batched before or after), and every `on_entry_start` SHALL be paired with exactly one `on_entry_complete`, also when the entry fails | must |
+| FR-045 | `on_bytes_written` SHALL be called with the number of bytes written for the entry just extracted (once per written file), not a cumulative total | must |
 | FR-046 | `on_entry_start` SHALL receive the total number of entries (if known) and the current entry index | must |
 
 ## 4. Non-Functional Requirements
@@ -138,7 +138,6 @@ THEN on_entry_start and on_entry_complete are called for each source file added
 | `ProgressCallback` | Trait for receiving archive operation progress events | Methods: `on_entry_start`, `on_bytes_written`, `on_entry_complete`, `on_complete` |
 | `NoopProgress` | Zero-overhead implementation of `ProgressCallback` | All methods are no-ops; intended as the default |
 | `ExtractionContext` | Per-extraction state passed through TAR helper functions to reduce arity | Holds references to config, options, output dir, and progress callback |
-| `CountingWriter` | Wraps a `Write` impl and counts bytes written; feeds `on_bytes_written` | `inner: W`, `bytes_written: u64` |
 
 ### Trait Signature
 
@@ -156,16 +155,18 @@ ProgressCallback: Send
 
 > [!note] ExtractionContext
 > `ExtractionContext<'_, '_>` is a private TAR helper struct introduced in v0.4.0
-> that groups `validator`, `dest`, `report`, `copy_buffer`, `dir_cache`, and
-> `skip_duplicates` to reduce helper function arity. It is not part of the public
+> that groups `validator`, `dest`, `report`, `copy_buffer`, `dir_cache`,
+> `skip_duplicates`, the skip counters, `config`, and `progress` to reduce helper
+> function arity. ZIP has an analogous `ZipExtractionContext`. It is not part of the public
 > API but is documented here because `ProgressCallback` is passed through it.
 
 ## 6. Edge Cases and Error Handling
 
 | Scenario | Expected Behavior |
 |----------|-------------------|
-| Extraction fails on first entry | Neither `on_entry_complete` nor `on_complete` called for that entry |
-| Extraction fails after N successful entries | `on_entry_complete` called for the N successful entries; `on_complete` NOT called |
+| Extraction fails on first entry | `on_entry_start` and `on_entry_complete` are called for that entry (they are always paired); `on_complete` is NOT called |
+| Extraction fails after N successful entries | `on_entry_complete` called for the N successful entries and for the failing one; `on_complete` NOT called |
+| 7z anti-item (a deletion marker `extract` skips) | No callbacks fire for it |
 | `on_bytes_written` called with 0 bytes | Allowed; implementations must handle gracefully |
 | Archive with unknown total entry count | `total` argument to `on_entry_start` is 0 |
 | Progress callback panics | Panic propagates as normal Rust panic; not caught by exarch |
@@ -203,7 +204,7 @@ ProgressCallback: Send
 ## 9. Open Questions
 
 - [NEEDS CLARIFICATION: Should `ProgressCallback` expose a cancellation mechanism (e.g., `on_entry_start` returns `bool` where `false` aborts extraction)? This would allow callers to cancel mid-archive without waiting for the operation to finish.]
-- [NEEDS CLARIFICATION: Should `on_bytes_written` receive cumulative bytes or per-chunk bytes? Current spec says per-chunk — verify this matches CLI indicatif integration.]
+- [NEEDS CLARIFICATION: `on_bytes_written` receives the byte count of one finished file, not cumulative bytes and not per-chunk bytes — verify this matches the CLI indicatif integration.]
 
 ## 10. See Also
 

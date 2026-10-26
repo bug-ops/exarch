@@ -10,6 +10,7 @@ tags:
   - cli
   - rust
 created: 2026-08-04
+updated: 2026-10-26
 status: implemented
 related:
   - "[[constitution]]"
@@ -25,7 +26,7 @@ related:
 > **Priority**: P0 (security)
 > **Origin**: GHSA-x8wr-7ww2-c94x (#525/#526), TOCTOU follow-up (#531), orphan-disclosure
 > follow-up (#530), destination-identity pinning (#535), symlink-swap TOCTOU close (#536/#531)
-> — v0.6.0, unreleased
+> — v0.6.0
 > **Status**: implemented — this spec documents shipped behavior for `exarch extract
 > --atomic --force`'s destination-swap hardening, a self-contained security fix large
 > enough (five follow-on PRs) to warrant its own spec rather than a subsection of
@@ -161,6 +162,7 @@ THEN the error output includes the directory's actual current path, resolved via
 | FR-009 | Obtaining the pinned parent file descriptor SHALL require read permission on the destination's parent directory, for every `--atomic --force` invocation, including when the destination does not yet exist — this is a documented behavior change (there is no portable Unix equivalent of Linux's permission-free `O_PATH` for this purpose); it SHALL NOT require read permission on the destination directory itself | must |
 | FR-010 | THE SYSTEM SHALL NOT pre-delete a pre-existing destination directory before extraction is known to succeed; `--atomic --force` SHALL extract into a temp directory first and perform the swap only after extraction fully succeeds, with a failed final rename restoring the backup and reporting its path if that restore itself fails (#519, precursor to the swap-hardening in this spec) | must |
 | FR-011 | A pre-existing destination that exists but is not a directory (e.g. a regular file) SHALL be rejected with an explicit error, not silently replaced | must |
+| FR-012 | WHEN `--atomic --force` extraction fails inside the temp directory, THE SYSTEM SHALL report the failure as `ArchiveError::PartialExtraction` with `writes` set to `PartialWrites::RolledBack` (`err.rolled_back()`), and the `--json` `error.partial_report.writes` SHALL be `rolled_back`, so the counters are not presented as leftovers on disk (v0.7.0, #725, #728) | must |
 
 ## 4. Non-Functional Requirements
 
@@ -192,6 +194,7 @@ THEN the error output includes the directory's actual current path, resolved via
 | The destination entry's identity changes between the initial snapshot and the final destructive swap step (narrow residual window) | Swap aborts with a distinct identity-mismatch error rather than proceeding against a possibly-different entry (NFR-002) |
 | `--atomic --force` invoked without read permission on the destination's parent directory | Fails — obtaining the pinned fd requires read permission, even when the destination does not yet exist (FR-009, behavior change vs. pre-fix) |
 | Best-effort cleanup fails and the temp/backup directory's identity still matches at the pinned parent | Actual current path disclosed via a freshly opened fd (FR-006), not the possibly-stale logical path |
+| `--atomic --force` extraction fails after some entries were written to the temp directory | The temp directory is discarded; the `PartialExtraction` error carries `writes: RolledBack`, so its report counts describe work no longer on disk |
 | Best-effort cleanup succeeds (the ordinary, non-redirected case) | Identity recheck finds nothing; no directory is disclosed and none is left behind — this is deliberate, avoiding an earlier draft's regression of unconditionally persisting the temp directory on every failure |
 | Content written directly into a redirect-created decoy directory, where the redirect reverts before the post-cleanup identity check runs | Not discoverable by this fix — `exarch-core`'s own per-entry extraction writes remain path-based (explicitly out of scope); documented as a genuine, undisclosed orphan, not a security escape |
 | Non-Unix platform (e.g. Windows) | Destination-symlink/junction rejection (FR-001) still applies; the swap itself keeps the previous path-based behavior (documented residual, not a regression) |
@@ -227,8 +230,7 @@ THEN the error output includes the directory's actual current path, resolved via
 
 None — this is a retrospective spec documenting shipped, merged behavior (#519, #524, #526,
 #530, #531, #535, #536, #537). The upstream GitHub Security Advisory for GHSA-x8wr-7ww2-c94x
-remained in draft as of this spec's writing and needs a maintainer to publish/close it
-(tracked outside this spec, per project memory).
+was in draft when this spec was written and has since been closed.
 
 ## 10. See Also
 

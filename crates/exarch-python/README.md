@@ -124,7 +124,8 @@ except exarch.PathTraversalError as e:
 except exarch.ZipBombError as e:
     print(f"Zip bomb detected: {e}")
 except exarch.SecurityViolationError as e:
-    print(f"Security violation: {e}")
+    # e.relaxable_by names the SecurityConfig setting that would admit the entry, or None
+    print(f"Security violation ({e.relaxable_by}): {e}")
 except exarch.ArchiveError as e:
     print(f"Extraction failed: {e}")
 ```

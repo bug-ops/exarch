@@ -9,6 +9,7 @@ tags:
   - rust
   - typestate
 created: 2026-09-02
+updated: 2026-10-26
 status: implemented
 related:
   - "[[constitution]]"
@@ -25,7 +26,7 @@ related:
 > **Subsystem**: exarch-core / security (`security::permissions`), plus six growth-prone public
 > enums across `exarch-core`, `exarch-cli`, `exarch-python`, `exarch-node`
 > **MSRV**: Rust 1.98.0
-> **Origin**: #549, #551 (#554, unreleased, post-v0.6.0)
+> **Origin**: #549, #551 (#554, v0.6.1)
 > **Status**: implemented — this spec documents shipped behavior, extracted as its own unit
 > because it introduces a reusable pattern (sealed-newtype for a sanitized value, plus
 > `#[non_exhaustive]` for forward-compatible enum growth) consistent with
@@ -139,12 +140,17 @@ THEN the downstream crate's build breaks with "non-exhaustive patterns" only if 
 | Entity | Description | Key Attributes |
 |--------|-------------|----------------|
 | `SanitizedMode` | Newtype wrapping a Unix permission mode that has already passed through `sanitize_permissions`; sole producer is `sanitize_permissions` | Single private `u32` field; not constructible via tuple-struct syntax outside `exarch-core` (verified by a `trybuild` UI test); `as_u32(self) -> u32` accessor |
-| `ArchiveError` | Top-level error enum for extraction/creation/listing/verification failures | Now `#[non_exhaustive]` |
-| `QuotaResource` | Enum identifying which quota dimension was exceeded (`FileCount`, `FileSizeBytes`, `TotalSizeBytes`, `IntegerOverflow`) | Now `#[non_exhaustive]` |
+| `ArchiveError` | Top-level error enum for extraction/creation/listing/verification failures | Now `#[non_exhaustive]`; since v0.7.0 its `SecurityViolation` variant is `#[non_exhaustive]` too (build it with `violation`/`relaxable_violation`) |
+| `QuotaResource` | Enum identifying which quota dimension was exceeded (`FileCount`, `TotalSize`, `FileSize`, `IntegerOverflow`, and `DecoderMemory` since v0.7.0) | Now `#[non_exhaustive]` |
 | `formats::detect::ArchiveType` | Enum of supported archive formats | Now `#[non_exhaustive]` |
 | `formats::compression::CompressionCodec` | Enum of supported compression codecs | Now `#[non_exhaustive]` |
 | `inspection::report::IssueCategory` | Enum of verification issue categories | Now `#[non_exhaustive]` |
 | `types::entry_type::EntryType` | Public enum of archive entry kinds (distinct from `pub(crate)` `creation::walker::EntryType`, which is unaffected) | Now `#[non_exhaustive]` |
+
+> [!note] v0.7.0: the pattern extends to new public enums
+> Enums added in v0.7.0 are `#[non_exhaustive]` from the start: `PolicySetting`, `ZipBombScope`,
+> `PartialWrites`, `ZipConsistencyPolicy`, `ParallelDecode`, `StoredTargets` and `IntegrityCheck`;
+> `ValidatedEntryType::Hardlink` and `SecurityViolation` are `#[non_exhaustive]` variants (#652, #671, #688, #757).
 
 ## 6. Edge Cases and Error Handling
 

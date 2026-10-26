@@ -32,7 +32,7 @@ Memory-safe archive extraction and creation library with Python and Node.js bind
 
 ```toml
 [dependencies]
-exarch-core = "0.6"
+exarch-core = "0.7"
 ```
 
 > [!IMPORTANT]

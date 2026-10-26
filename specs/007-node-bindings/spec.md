@@ -9,7 +9,7 @@ tags:
   - ffi
   - rust
 created: 2026-05-20
-updated: 2026-08-04
+updated: 2026-10-26
 status: draft
 related:
   - "[[constitution]]"
@@ -93,7 +93,7 @@ SO THAT I can differentiate errors in a catch block by type name
 ```
 GIVEN an archive with a path traversal entry
 WHEN extractArchive() rejects
-THEN the rejected Error has name === "PathTraversalError"
+THEN the rejected Error message starts with "PATH_TRAVERSAL:"
 ```
 
 ### US-004: TypeScript Definitions
@@ -134,13 +134,18 @@ THEN extraction respects those settings
 | FR-085 | `ExtractionReport`, `CreationReport`, `ArchiveManifest`, and `VerificationReport` SHALL be exposed as JavaScript objects with typed fields | must |
 | FR-088 | `ExtractionOptions` SHALL be exposed as a JavaScript class with builder methods `withAtomic(bool?)` and `withSkipDuplicates(bool?)`; both `extractArchive` and `extractArchiveWithProgress` SHALL accept an optional `options` parameter | must |
 | FR-089 | ALL async operations SHALL wrap the core call with `catch_unwind` inside `spawn_blocking`; panics in `exarch-core` SHALL be converted to JavaScript errors and SHALL NOT abort the Node.js process | must |
-| FR-090 | `extractArchiveWithProgress(archivePath, outputDir, config?, progress?)` SHALL accept an optional `ThreadsafeFunction` callback with signature `(path: string, total: number, current: number, bytesWritten: number) => void`; numeric callback arguments are `number` (not `bigint`) | must |
+| FR-090 | `extractArchiveWithProgress(archivePath, outputDir, config?, options?, progress?)` SHALL accept an optional `ThreadsafeFunction` callback with signature `(path: string, total: number, current: number, bytesWritten: number) => void`; numeric callback arguments are `number` (not `bigint`) | must |
 | FR-086 | napi-rs SHALL generate TypeScript `.d.ts` files for all exported functions and classes | must |
 | FR-087 | ALL path arguments SHALL accept `string` type in JavaScript | must |
 | FR-091 | `SecurityConfig.setAllowSymlinks`/`setAllowHardlinks`/`setAllowAbsolutePaths`/`setAllowWorldWritable`/`setAllowSolidArchives`/`setPreservePermissions`, `CreationConfig.setPreservePermissions`/`setFollowSymlinks`/`setIncludeHidden`, and `ExtractionOptions.withSkipDuplicates`/`withAtomic` SHALL take a mandatory `boolean` argument, not `Option<bool>` resolved via `.unwrap_or(true)`; omitting the argument, or passing explicit `undefined`/`null`, SHALL be a compile-time TypeScript error / runtime napi error rather than silently flipping the flag to the permissive `true` state (v0.6.0, #442, BREAKING) | must |
-| FR-092 | WHEN a `PartialExtraction` error is converted to a JS error, THE SYSTEM SHALL append `filesSkipped=N` and a `warnings=[...]` fragment (Rust-`Debug`-formatted, not guaranteed valid JSON) to the message, in addition to the existing `filesExtracted`/`bytesWritten` (v0.6.0, #508) | must |
+| FR-092 | WHEN a `PartialExtraction` error is converted to a JS error, THE SYSTEM SHALL append `filesSkipped=N` and a `warnings=[...]` fragment (Rust-`Debug`-formatted, not guaranteed valid JSON) to the message, in addition to the existing `filesExtracted`/`bytesWritten`; since v0.7.0 the fragment starts ` | writes=kept`, and an atomic rollback appends only ` | writes=rolled_back` without counters (v0.6.0, #508; v0.7.0, #747) | must |
 | FR-093 | WHEN a progress callback throws (an `Error`/object, or a bare primitive) during `extractArchiveWithProgress` or `createArchiveWithProgress`, THE SYSTEM SHALL capture it (via `call_async_catch` plus a JS shim that pre-empts napi-rs's primitive-throw escalation) and reject the returned Promise instead of crashing the process with `napi_fatal_exception`; `createArchiveWithProgressSync` cannot use the awaiting dispatch (would deadlock the blocked event loop) and remains a documented, unaffected exception — a throw there surfaces as an ordinary `uncaughtException` (v0.6.0, #465, #473) | must |
 | FR-094 | ALL path-carrying `ArchiveError` variants SHALL be redacted for release-build error messages via the shared `exarch_core::error::redaction` module, matching the Python binding's policy (archive-relative paths never redacted; host-derived paths redacted to filename-only or `ErrorKind` description) (v0.6.0, #453, #463) | must |
+| FR-095 | `verifyArchive(archivePath, config?, options?)` (and `verifyArchiveSync`) SHALL accept a `VerificationOptions` class; `withIntegrityCheck(budget?)` decodes the payload to the decoder's EOF (default budget 500 MiB, independent of `maxTotalSize`; error for a zero or negative budget), otherwise `integrityStatus` is `'SKIPPED'` (v0.7.0, #670) | must |
+| FR-096 | `VerificationReport` SHALL expose `status`, `integrityStatus`, `integrityGaps?` (absent unless the check ran: `counts: UnverifiedCount[]`, `entries: UnverifiedEntry[]`, `omitted`), `securityStatus`, `issues`, `totalEntries`, `suspiciousEntries`, `totalSize` and `format`; report enum fields are typed string unions in `index.d.ts` (`VerificationStatus`, `CheckStatus`, `IntegrityStatus`, `IssueSeverity`, `IssueCategory`, `UnverifiedReason`, `ManifestEntryType`, `ArchiveType`, `ZipConsistencyPolicy`) (v0.7.0, #624, #672, #684) | must |
+| FR-097 | `SecurityConfig` SHALL expose `setParallelDecodeMemory(size?)` (`null`/omitted decodes on one thread; default 128 MiB, 1 GiB for `permissive()`; error for a non-positive size) with a `parallelDecodeMemory` getter, and `setZipConsistency('enforce' \| 'ignore')` (default `'enforce'`) with a `zipConsistency` getter (v0.7.0, #671, #688) | must |
+| FR-098 | A `SECURITY_VIOLATION` that a `SecurityConfig` setting relaxes SHALL start its message `SECURITY_VIOLATION: [relaxableBy=<id>] operation denied ...`, with `<id>` one of `symlinks`, `hardlinks`, `solid_archives`, `banned_components`, `max_path_depth`, `windows_reserved_names`, `max_tar_metadata_bytes`; the token is absent when no setting relaxes the refusal and a violation reason cannot forge it (v0.7.0, #741, #757) | must |
+| FR-099 | Report size and duration getters SHALL clamp values above `i64::MAX` to `i64::MAX` instead of wrapping (v0.7.0, #583, #697) | must |
 
 ## 4. Non-Functional Requirements
 
@@ -156,12 +161,13 @@ THEN extraction respects those settings
 
 | Entity | Description | Key Attributes |
 |--------|-------------|----------------|
-| `SecurityConfig` (JS class) | JavaScript class wrapping Rust `SecurityConfig` | Fluent builder: `maxFileSize()`, `maxTotalSize()`, `allowSymlinks()`, etc. |
-| `CreationConfig` (JS class) | JavaScript class wrapping Rust `CreationConfig` | Fluent builder: `compressionLevel()`, `followSymlinks()`, etc. |
+| `SecurityConfig` (JS class) | JavaScript class wrapping Rust `SecurityConfig` | Fluent builder: `setMaxFileSize()`, `setMaxTotalSize()`, `setAllowSymlinks()`, `setZipConsistency()`, `setParallelDecodeMemory()`, etc. |
+| `CreationConfig` (JS class) | JavaScript class wrapping Rust `CreationConfig` | Fluent builder: `setCompressionLevel()`, `setFollowSymlinks()`, etc. |
 | `ExtractionReport` (JS object) | Result of extraction | `filesExtracted`, `directoriesCreated`, `bytesWritten`, `duration`, `warnings` |
 | `CreationReport` (JS object) | Result of creation | `filesAdded`, `bytesWritten`, `duration` |
 | `ArchiveManifest` (JS object) | Archive listing result | `totalEntries`, `totalSize`, `format`, `entries` |
-| `VerificationReport` (JS object) | Verification result | `status`, `issues`, `totalEntries` |
+| `VerificationReport` (JS object) | Verification result | `status`, `integrityStatus`, `integrityGaps`, `securityStatus`, `issues`, `totalEntries`, `suspiciousEntries`, `totalSize`, `format` |
+| `VerificationOptions` (JS class) | Options for `verifyArchive` (v0.7.0, #670) | `withIntegrityCheck(budget?)`, `integrityCheck`, `decompressionBudget` |
 
 ### TypeScript API Surface
 
@@ -178,7 +184,8 @@ function extractArchiveWithProgress(
     archivePath: string,
     outputDir: string,
     config?: SecurityConfig,
-    progress?: (path: string, total: number, current: number, bytesWritten: number) => void
+    options?: ExtractionOptions,
+    progress?: (err: Error | null, arg: [string, number, number, number]) => void
 ): Promise<ExtractionReport>
 
 function createArchive(
@@ -194,39 +201,50 @@ function listArchive(
 
 function verifyArchive(
     archivePath: string,
-    config?: SecurityConfig
+    config?: SecurityConfig,
+    options?: VerificationOptions
 ): Promise<VerificationReport>
 
 class SecurityConfig {
-    maxFileSize(size: number): this
-    maxTotalSize(size: number): this
-    maxCompressionRatio(ratio: number): this
-    maxFileCount(count: number): this
-    maxPathDepth(depth: number): this
-    allowSymlinks(allow: boolean): this
-    allowHardlinks(allow: boolean): this
-    allowSolidArchives(allow: boolean): this
+    setMaxFileSize(size: number): this
+    setMaxTotalSize(size: number): this
+    setMaxCompressionRatio(ratio: number): this
+    setMaxFileCount(count: number): this
+    setMaxPathDepth(depth: number): this
+    setAllowSymlinks(allow: boolean): this
+    setAllowHardlinks(allow: boolean): this
+    setAllowSolidArchives(allow: boolean): this
+    setZipConsistency(policy: ZipConsistencyPolicy): this
+    setParallelDecodeMemory(size?: number | null): this
     setMaxSolidBlockMemory(size: number): this
-    // Getters (boolean)
+    // Getters
     get allowSymlinks(): boolean
     get allowHardlinks(): boolean
     get allowAbsolutePaths(): boolean
     get allowWorldWritable(): boolean
     get allowSolidArchives(): boolean
+    get zipConsistency(): ZipConsistencyPolicy
+    get parallelDecodeMemory(): number | null
     get maxSolidBlockMemory(): number
 }
 
+class VerificationOptions {
+    withIntegrityCheck(budget?: number | null): this
+    get integrityCheck(): boolean
+    get decompressionBudget(): number | null
+}
+
 class CreationConfig {
-    compressionLevel(level: number): this
-    followSymlinks(follow: boolean): this
-    includeHidden(include: boolean): this
-    exclude(pattern: string): this
-    stripPrefix(prefix: string): this
+    setCompressionLevel(level: number): this
+    setFollowSymlinks(follow: boolean): this
+    setIncludeHidden(include: boolean): this
+    addExcludePattern(pattern: string): this
+    setMaxFileSize(size: number): this
 }
 
 class ExtractionOptions {
-    withAtomic(atomic?: boolean): this
-    withSkipDuplicates(skip?: boolean): this
+    withAtomic(atomic: boolean): this
+    withSkipDuplicates(skip: boolean): this
     get atomic(): boolean
 }
 ```
@@ -257,18 +275,23 @@ class ExtractionOptions {
 
 ### JavaScript Error Mapping
 
-| Rust `ArchiveError` variant | JavaScript Error name |
+Errors are rejected `Error` objects whose message starts with an upper-snake error code (`convert_error` in `crates/exarch-node/src/error.rs`).
+
+| Rust `ArchiveError` variant | Message prefix |
 |---|---|
-| `PathTraversal` | `PathTraversalError` |
-| `SymlinkEscape` | `SymlinkEscapeError` |
-| `HardlinkEscape` | `HardlinkEscapeError` |
-| `ZipBomb` | `ZipBombError` |
-| `QuotaExceeded` | `QuotaExceededError` |
-| `UnknownFormat` | `UnknownFormatError` |
-| `InvalidConfiguration` | `InvalidConfigurationError` |
-| `InvalidArchive` | `InvalidArchiveError` |
-| `Io` | `IoError` |
-| `PartialExtraction` | The specific inner error code (e.g. `SYMLINK_ESCAPE: ...`) is preserved; `filesExtracted`, `bytesWritten`, `filesSkipped`, and a `warnings=[...]` fragment are appended to the message (v0.6.0, #508 added `filesSkipped`/`warnings`) |
+| `PathTraversal` | `PATH_TRAVERSAL:` |
+| `SymlinkEscape` | `SYMLINK_ESCAPE:` |
+| `HardlinkEscape` | `HARDLINK_ESCAPE:` |
+| `ZipBomb` | `ZIP_BOMB:` (also an entry claiming data from zero compressed bytes, v0.7.0, #653) |
+| `ZipInconsistency` | `ZIP_INCONSISTENCY:` (v0.7.0, #671) |
+| `InvalidPermissions` | `INVALID_PERMISSIONS:` |
+| `QuotaExceeded` | `QUOTA_EXCEEDED:` |
+| `SecurityViolation` | `SECURITY_VIOLATION: [relaxableBy=<id>] operation denied by security policy: ...`; the token is present only when a setting relaxes the refusal (v0.7.0, #741, #757) |
+| `UnknownFormat` | `UNKNOWN_FORMAT:` |
+| `InvalidConfiguration` | `INVALID_CONFIGURATION:` |
+| `InvalidArchive` | `INVALID_ARCHIVE:` |
+| `Io` | `IO_ERROR:` |
+| `PartialExtraction` | The inner error's message is preserved and ` \| writes=kept, filesExtracted=N, bytesWritten=M, filesSkipped=K, warnings=[...]` is appended; after an atomic rollback only ` \| writes=rolled_back` is appended (v0.6.0, #508; v0.7.0, #735, #747) |
 
 > [!note] PartialExtraction fix in v0.4.0 and v0.4.1 (#210, #251)
 > In v0.4.0 the error message for `PartialExtraction` was extended to include
@@ -288,7 +311,9 @@ class ExtractionOptions {
 | Path contains null byte | Synchronous `Error` thrown before Promise creation |
 | Path exceeds 4096 bytes | Synchronous `Error` thrown before Promise creation |
 | Rust returns `ArchiveError::PathTraversal` | Promise rejects with `PathTraversalError` |
-| Rust returns `ArchiveError::PartialExtraction` | Promise rejects with the specific inner error code as prefix (e.g. `SYMLINK_ESCAPE: ...`); message appends `filesExtracted`, `bytesWritten`, `filesSkipped`, and `warnings=[...]` (v0.6.0, #508) |
+| Rust returns `ArchiveError::PartialExtraction` | Promise rejects with the specific inner error code as prefix (e.g. `SYMLINK_ESCAPE: ...`); message appends `writes=kept` with `filesExtracted`, `bytesWritten`, `filesSkipped`, and `warnings=[...]` (v0.6.0, #508), or just `writes=rolled_back` after an atomic rollback (v0.7.0, #747) |
+| `SecurityViolation` a `SecurityConfig` setting relaxes | Message starts `SECURITY_VIOLATION: [relaxableBy=<id>] ...`; parse with `^SECURITY_VIOLATION: \[relaxableBy=([a-z_]+)\]` (v0.7.0, #741, #757) |
+| `verifyArchive` without `VerificationOptions().withIntegrityCheck()` | `integrityStatus` is `'SKIPPED'` and `integrityGaps` is absent (v0.7.0, #670) |
 | Thread pool exhausted | Promise eventually resolves when thread becomes available; no timeout |
 | `sources` array is empty for `createArchive` | [NEEDS CLARIFICATION: reject immediately or produce empty archive?] |
 | Boolean setter (e.g. `setAllowSymlinks`) called with no argument, or explicit `undefined`/`null` | Runtime napi error / compile-time TypeScript error, not a silent `true` default (v0.6.0, #442, BREAKING) |

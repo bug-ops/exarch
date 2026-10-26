@@ -284,24 +284,6 @@ pub(super) fn lstat_dest(dest_path: &Path) -> std::io::Result<Option<std::fs::Me
     }
 }
 
-/// Returns the `ELOOP` I/O error `common::open_no_follow` produces when a
-/// symlink occupies the destination path, so 7z's own checks fail the same
-/// way instead of silently replacing the symlink (issue #477). Converts via
-/// `?`/`.into()` into either `ArchiveError` (Step 1) or `sevenz_rust2::Error`
-/// (Step 3), both of which implement `From<std::io::Error>`.
-///
-/// `#[cfg(unix)]`, not just conditional at runtime: `O_NOFOLLOW` is a
-/// Unix-specific mechanism (see `common::open_no_follow`), and
-/// `common::create_file_with_mode`'s non-Unix branch provides no equivalent
-/// symlink guard for TAR/ZIP either, so non-Unix keeps the pre-existing
-/// remove-then-rename behavior for parity with TAR/ZIP's own platform split.
-/// Both call sites are gated by the same `#[cfg(unix)]`, so this function
-/// does not exist at all — and cannot be reached — on non-Unix targets.
-#[cfg(unix)]
-pub(super) fn symlink_at_dest_error() -> std::io::Error {
-    std::io::Error::from_raw_os_error(libc::ELOOP)
-}
-
 /// Refuses, from the file table alone, a link whose target is empty or larger
 /// than a target may be, with the error reading it in Step 3 would give.
 ///

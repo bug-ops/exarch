@@ -3,6 +3,7 @@
 These tests verify that exarch correctly blocks known CVE attack vectors.
 """
 
+import io
 from pathlib import Path
 
 import pytest
@@ -400,3 +401,51 @@ def test_progress_bytes_written_not_stale(temp_dir):
         f"large.txt: expected bytes_written=0 at entry start, "
         f"got {entry_start_bytes['large.txt']} (stale value — original #285 bug)"
     )
+
+
+def _write_file_then_symlink_escape_tar(path):
+    import tarfile
+
+    with tarfile.open(path, "w") as tar:
+        data = b"abc"
+        info = tarfile.TarInfo(name="one.txt")
+        info.size = len(data)
+        tar.addfile(info, io.BytesIO(data))
+        link = tarfile.TarInfo(name="ln")
+        link.type = tarfile.SYMTYPE
+        link.linkname = "../../etc"
+        tar.addfile(link)
+
+
+def test_partial_extraction_kept_attaches_counters(temp_dir):
+    """Non-atomic failure leaves files on disk and reports `writes == "kept"`."""
+    archive = temp_dir / "partial.tar"
+    _write_file_then_symlink_escape_tar(archive)
+    output_dir = temp_dir / "output"
+    output_dir.mkdir()
+    config = exarch.SecurityConfig().with_allow_symlinks(True)
+
+    with pytest.raises(exarch.SymlinkEscapeError) as excinfo:
+        exarch.extract_archive(archive, output_dir, config)
+
+    assert excinfo.value.writes == "kept"
+    assert excinfo.value.files_extracted == 1
+    assert (output_dir / "one.txt").exists()
+
+
+def test_partial_extraction_atomic_rollback_omits_counters(temp_dir):
+    """Atomic failure rolls back: `writes == "rolled_back"`, no counters."""
+    archive = temp_dir / "partial.tar"
+    _write_file_then_symlink_escape_tar(archive)
+    output_dir = temp_dir / "output"
+    config = exarch.SecurityConfig().with_allow_symlinks(True)
+    options = exarch.ExtractionOptions().with_atomic(True)
+
+    with pytest.raises(exarch.SymlinkEscapeError) as excinfo:
+        exarch.extract_archive(archive, output_dir, config, options)
+
+    exc = excinfo.value
+    assert exc.writes == "rolled_back"
+    for attr in ("files_extracted", "bytes_written", "files_skipped", "warnings"):
+        assert not hasattr(exc, attr)
+    assert not output_dir.exists()

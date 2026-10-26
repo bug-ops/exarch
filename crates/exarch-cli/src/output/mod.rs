@@ -3,6 +3,7 @@
 mod formatter;
 mod human;
 mod json;
+pub mod terminal;
 
 pub use formatter::OutputFormatter;
 

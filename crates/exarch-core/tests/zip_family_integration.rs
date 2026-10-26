@@ -226,7 +226,7 @@ fn zip_partial_extraction_stops_on_path_traversal() {
     let result = extract_archive(&archive_path, dest.path(), &config);
 
     match result {
-        Err(ArchiveError::PartialExtraction { source, report }) => {
+        Err(ArchiveError::PartialExtraction { source, report, .. }) => {
             assert_matches!(
                 *source,
                 ArchiveError::PathTraversal { .. },

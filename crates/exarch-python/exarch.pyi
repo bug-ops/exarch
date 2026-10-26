@@ -22,6 +22,7 @@ _UnverifiedReason = Literal["over_budget", "resource_limit", "solid_policy", "si
 _IssueSeverity = Literal["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
 _IssueCategory = Literal["Path Traversal", "Symlink Escape", "Hardlink Escape", "Zip Bomb", "Invalid Permissions", "Quota Exceeded", "Security Policy", "Invalid Archive", "Suspicious Path", "Executable File", "Corrupt Data", "Integrity Incomplete", "Header Mismatch", "Duplicate Entry", "Overlapping Entries", "Hidden Entry", "Name Collision", "Archive Note"]  # noqa: E501  # fmt: skip
 _ZipConsistency = Literal["enforce", "ignore"]
+_PartialWrites = Literal["kept", "rolled_back"]
 
 class SecurityConfig:
     """
@@ -804,8 +805,15 @@ def extract_archive(
         When extraction fails after some files have already been written to disk,
         the specific exception (e.g. ``SymlinkEscapeError``) is raised with
         ``files_extracted``, ``bytes_written``, ``files_skipped``, and
-        ``warnings`` attributes attached. Detect a partial extraction via
-        ``hasattr(e, "files_extracted")`` — but see
+        ``warnings`` attributes attached, plus ``writes`` (``"kept"``). With
+        ``atomic=True`` the destination is rolled back instead: the exception
+        then carries ``writes == "rolled_back"`` and none of the counter
+        attributes. Detect files left on disk via
+        ``getattr(e, "writes", None) == "kept"``; ``hasattr(e, "writes")``
+        is also true after a rollback. A symlink entry over an existing symlink
+        with a different target, with overwrite enabled (``skip_duplicates``
+        off), raises the builtin ``OSError`` (``ELOOP``), not
+        ``SymlinkEscapeError``. See
         ``extract_archive_with_progress`` below: a raising ``progress`` callback
         over an otherwise-successful extraction attaches ``files_extracted`` and
         ``bytes_written`` (not ``files_skipped``/``warnings``), distinguished by
@@ -1009,9 +1017,16 @@ def verify_archive(
     ...
 
 class ArchiveError(Exception):
-    """Base exception for all extraction errors."""
+    """
+    Base exception for all extraction errors.
 
-    ...
+    Attributes:
+        writes: Set only when extraction failed after recording progress:
+            ``"kept"`` if the written files remain on disk, ``"rolled_back"``
+            if atomic extraction discarded them.
+    """
+
+    writes: _PartialWrites
 
 class PathTraversalError(ArchiveError):
     """

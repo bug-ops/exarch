@@ -8,8 +8,11 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use exarch_core::ArchiveError;
+use exarch_core::ExtractionOptions;
+use exarch_core::PartialWrites;
 use exarch_core::SecurityConfig;
 use exarch_core::extract_archive;
+use exarch_core::extract_archive_with_options;
 use std::assert_matches;
 use tempfile::TempDir;
 
@@ -55,7 +58,7 @@ fn skip_only_report_still_wraps_as_partial_extraction_on_later_failure() {
     let result = extract_archive(&archive_path, dest.path(), &config);
 
     match result {
-        Err(ArchiveError::PartialExtraction { source, report }) => {
+        Err(ArchiveError::PartialExtraction { source, report, .. }) => {
             assert_matches!(
                 *source,
                 ArchiveError::SymlinkEscape { .. },
@@ -77,4 +80,66 @@ fn skip_only_report_still_wraps_as_partial_extraction_on_later_failure() {
         }
         other => panic!("expected PartialExtraction wrapping the skip-only report, got: {other:?}"),
     }
+}
+
+/// Builds a TAR whose first entry extracts and whose second is an escaping
+/// symlink, so the failure always carries a non-empty report.
+fn write_file_then_escape_tar(dir: &TempDir) -> std::path::PathBuf {
+    let mut builder = tar::Builder::new(Vec::new());
+    let mut h1 = tar::Header::new_gnu();
+    h1.set_size(3);
+    h1.set_mode(0o644);
+    h1.set_cksum();
+    builder
+        .append_data(&mut h1, "one.txt", &b"abc"[..])
+        .unwrap();
+    let mut h2 = tar::Header::new_gnu();
+    h2.set_entry_type(tar::EntryType::Symlink);
+    h2.set_size(0);
+    h2.set_mode(0o644);
+    h2.set_link_name("../../etc").unwrap();
+    h2.set_cksum();
+    builder
+        .append_data(&mut h2, "ln", std::io::empty())
+        .unwrap();
+    let path = dir.path().join("kept_or_rolled_back.tar");
+    std::fs::write(&path, builder.into_inner().unwrap()).unwrap();
+    path
+}
+
+fn partial_writes_of(result: exarch_core::Result<exarch_core::ExtractionReport>) -> PartialWrites {
+    match result {
+        Err(ArchiveError::PartialExtraction { writes, .. }) => writes,
+        other => panic!("expected PartialExtraction, got: {other:?}"),
+    }
+}
+
+#[test]
+fn non_atomic_failure_reports_writes_kept() {
+    let archive_dir = TempDir::new().unwrap();
+    let archive = write_file_then_escape_tar(&archive_dir);
+    let dest = TempDir::new().unwrap();
+    let config = SecurityConfig::default().with_allow_symlinks(true);
+
+    let writes = partial_writes_of(extract_archive(&archive, dest.path(), &config));
+
+    assert_eq!(writes, PartialWrites::Kept);
+    assert!(dest.path().join("one.txt").exists());
+}
+
+#[test]
+fn atomic_failure_reports_writes_rolled_back() {
+    let archive_dir = TempDir::new().unwrap();
+    let archive = write_file_then_escape_tar(&archive_dir);
+    let parent = TempDir::new().unwrap();
+    let dest = parent.path().join("out");
+    let config = SecurityConfig::default().with_allow_symlinks(true);
+    let options = ExtractionOptions::default().with_atomic(true);
+
+    let writes = partial_writes_of(extract_archive_with_options(
+        &archive, &dest, &config, &options,
+    ));
+
+    assert_eq!(writes, PartialWrites::RolledBack);
+    assert!(!dest.exists());
 }

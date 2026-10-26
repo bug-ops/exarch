@@ -205,7 +205,8 @@ impl SafeSymlink {
             });
         }
 
-        // 3. Verify parent directory chain doesn't contain symlinks (TOCTOU
+        // 3. Verify the parent directory chain (not the link itself, which
+        //    extraction skips or replaces) contains no symlinks (TOCTOU
         //    protection)
         // This prevents race conditions where an attacker replaces a parent
         // directory with a symlink between validation and extraction
@@ -270,7 +271,8 @@ pub(crate) fn require_symlinks_allowed(config: &SecurityConfig<Validated>) -> Re
 }
 
 /// Verifies that no component in the parent directory chain of `path` is a
-/// symlink.
+/// symlink. The leaf is not checked: extraction never follows it, it replaces
+/// or skips whatever occupies it.
 ///
 /// This function provides protection against TOCTOU (Time-Of-Check-Time-Of-Use)
 /// race conditions where an attacker could replace a parent directory with a
@@ -288,8 +290,7 @@ pub(crate) fn require_symlinks_allowed(config: &SecurityConfig<Validated>) -> Re
 fn verify_parent_not_symlink<V: FsView>(path: &Path, dest: &DestDir, view: &V) -> Result<()> {
     let mut current = dest.as_path().to_path_buf();
 
-    // Walk through each component of the path
-    for component in path.components() {
+    for component in path.parent().unwrap_or_else(|| Path::new("")).components() {
         current.push(component);
 
         // Check if current path exists and is a symlink

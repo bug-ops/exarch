@@ -138,78 +138,44 @@
 //! // ... extract with config
 //! ```
 
+use super::common;
+use super::traits::ArchiveFormat;
+use crate::ArchiveError;
+use crate::EntryCompression;
+use crate::ExtractionOptions;
+use crate::ExtractionReport;
+use crate::ProgressCallback;
+use crate::Result;
+use crate::SecurityConfig;
+use crate::VerificationOptions;
+use crate::config::Validated;
+use crate::copy::CopyBuffer;
+use crate::error::QuotaResource;
+use crate::inspection::report::IssueCategory;
+use crate::inspection::report::IssueSeverity;
+use crate::inspection::report::VerificationIssue;
+use crate::security::EntryValidator;
+use crate::security::validator::EntryPath;
+use crate::security::validator::ValidatedEntryType;
+use crate::security::zipbomb::validate_entry_compression;
+use crate::types::DestDir;
+use crate::types::EntryType;
+use crate::types::safe_symlink::require_symlinks_allowed;
 use classify::abort_with;
 use classify::reparse_point_refusal;
 use decode::decode_archive_entries;
 use links::read_sevenz_link_target;
+use lzma2::DecodeKnobs;
+use std::io;
+use std::io::ErrorKind;
+use std::io::Read;
+use std::io::Seek;
+use std::io::SeekFrom;
+use std::path::Path;
 use write::lstat_dest;
 use write::refuse_undecoded_target;
-#[cfg(unix)]
-use write::symlink_at_dest_error;
 use write::write_file_direct;
 use write::write_file_with_permit;
-
-use std::io;
-
-use std::io::ErrorKind;
-
-use std::io::Read;
-
-use std::io::Seek;
-
-use std::io::SeekFrom;
-
-use std::path::Path;
-
-use sevenz_rust2::Archive;
-
-use sevenz_rust2::Password;
-
-use crate::ArchiveError;
-
-use crate::EntryCompression;
-
-use crate::ExtractionOptions;
-
-use crate::ExtractionReport;
-
-use crate::ProgressCallback;
-
-use crate::Result;
-
-use crate::SecurityConfig;
-
-use crate::VerificationOptions;
-
-use crate::config::Validated;
-
-use crate::copy::CopyBuffer;
-
-use crate::inspection::report::IssueCategory;
-
-use crate::inspection::report::IssueSeverity;
-
-use crate::inspection::report::VerificationIssue;
-
-use crate::security::EntryValidator;
-
-use crate::security::validator::EntryPath;
-
-use crate::security::validator::ValidatedEntryType;
-
-use crate::security::zipbomb::validate_entry_compression;
-
-use crate::types::DestDir;
-
-use crate::types::EntryType;
-
-use crate::types::safe_symlink::require_symlinks_allowed;
-
-use super::common;
-
-use lzma2::DecodeKnobs;
-
-use super::traits::ArchiveFormat;
 
 /// Cached entry metadata from initial archive read.
 /// Avoids re-parsing archive during extraction.
@@ -270,13 +236,11 @@ const SIGNATURE_HEADER_SIZE: u64 = 32;
 pub struct SevenZArchive<R: Read + Seek> {
     source: R,
     entries: Vec<CachedEntry>,
-    /// Header already parsed by [`Self::new`], retained so
-    /// `extract_with_callback` can hand it to
-    /// `ArchiveReader::from_archive` instead of re-parsing the archive from
-    /// scratch (issue #492). Cloned, not moved, at extraction time so that a
-    /// second `extract()` call on the same instance still has a real parsed
-    /// archive to work with instead of silently extracting nothing.
-    archive: Archive,
+    /// Header already parsed by [`Self::new`], borrowed by extraction, `list`
+    /// and `verify` instead of re-parsing the archive (issues #492, #742), so a
+    /// second call on the same instance still has a real parsed archive to
+    /// work with.
+    header: SevenZHeader,
 }
 
 impl<R: Read + Seek> SevenZArchive<R> {
@@ -306,36 +270,12 @@ impl<R: Read + Seek> SevenZArchive<R> {
     /// # Ok::<(), exarch_core::ArchiveError>(())
     /// ```
     pub fn new(mut source: R) -> Result<Self> {
-        // Step 1: Verify it's a valid 7z archive by reading metadata
-        let password = Password::empty();
-        let archive = match Archive::read(&mut source, &password) {
-            Ok(a) => a,
-            Err(e) => {
-                if is_password_error(&e) {
-                    return Err(common::encrypted_archive_error());
-                }
-                // Handle valid empty 7z archives: sevenz-rust2 fails with
-                // UnexpectedEof on 32-byte archives that
-                // contain no files. Check for a valid 7z signature
-                // and small file size before treating as an empty archive.
-                if is_empty_sevenz_archive(&e, &mut source) {
-                    return Ok(Self {
-                        source,
-                        entries: vec![],
-                        archive: Archive::default(),
-                    });
-                }
-                return Err(ArchiveError::InvalidArchive(format!(
-                    "failed to open 7z archive: {e}"
-                )));
-            }
-        };
+        let header = read_sevenz_header(&mut source)?;
 
-        // Step 3: Cache entry metadata to avoid re-parsing during extraction
         let source_len = source.seek(SeekFrom::End(0)).map_err(ArchiveError::Io)?;
-        let compression = sevenz_entry_compression(&archive, source_len)?;
-        let entries: Vec<CachedEntry> = archive
-            .files
+        let compression = sevenz_entry_compression(&header, source_len)?;
+        let entries: Vec<CachedEntry> = header
+            .files()
             .iter()
             .zip(compression)
             .map(|(e, compression)| CachedEntry {
@@ -346,13 +286,12 @@ impl<R: Read + Seek> SevenZArchive<R> {
             })
             .collect();
 
-        // Step 4: Rewind for actual extraction
         source.rewind().map_err(ArchiveError::Io)?;
 
         Ok(Self {
             source,
             entries,
-            archive,
+            header,
         })
     }
 }
@@ -479,7 +418,7 @@ impl<R: Read + Seek> SevenZArchive<R> {
         // time, so the swap is always caught.
         let safe_path = validator
             .validate_entry_path(entry_path, kind.node_kind(), None)
-            .map_err(|e| sevenz_rust2::Error::Other(format!("validation failed: {e}").into()))?
+            .map_err(|e| abort_with(pending_error, e))?
             .into_inner();
         let dest_path = dest.join_path(safe_path.as_path());
 
@@ -495,10 +434,10 @@ impl<R: Read + Seek> SevenZArchive<R> {
                 let existing = lstat_dest(&dest_path)?;
 
                 if existing.is_some() && skip_duplicates {
-                    report.files_skipped =
-                        report.files_skipped.checked_add(1).ok_or_else(|| {
-                            sevenz_rust2::Error::Other("files_skipped overflow".into())
-                        })?;
+                    report.files_skipped = report
+                        .files_skipped
+                        .checked_add(1)
+                        .ok_or_else(|| abort_with(pending_error, counter_overflow()))?;
                     *duplicate_skips = duplicate_skips.saturating_add(1);
                     return Ok(0);
                 }
@@ -512,7 +451,7 @@ impl<R: Read + Seek> SevenZArchive<R> {
                     // the same way TAR/ZIP's O_NOFOLLOW open does
                     // (ELOOP), instead of proceeding to remove_file +
                     // rename underneath it (issue #477).
-                    return Err(symlink_at_dest_error().into());
+                    return Err(common::symlink_at_dest_error(safe_path.as_path()).into());
                 }
 
                 // `lstat_dest` uses `symlink_metadata` (lstat), so `is_dir()`
@@ -556,9 +495,9 @@ impl<R: Read + Seek> SevenZArchive<R> {
                 // (quota check) must precede acting (removing the existing
                 // path), so a QuotaExceeded error never first destroys a
                 // pre-existing destination it could not ultimately replace.
-                let permit = validator.reserve_file(entry.size).map_err(|e| {
-                    sevenz_rust2::Error::Other(format!("validation failed: {e}").into())
-                })?;
+                let permit = validator
+                    .reserve_file(entry.size)
+                    .map_err(|e| abort_with(pending_error, e))?;
 
                 // Fast path (issue #492): when nothing occupies dest_path,
                 // write directly to it (open+write, no temp file, no
@@ -588,14 +527,11 @@ impl<R: Read + Seek> SevenZArchive<R> {
                 } else {
                     write_file_direct(reader, &dest_path, entry.size, copy_buffer, permit)
                 }
-                .map_err(|e| {
-                    *pending_error = Some(e);
-                    sevenz_rust2::Error::Other("extraction aborted by security policy".into())
-                })?;
+                .map_err(|e| abort_with(pending_error, e))?;
                 report.bytes_written = report
                     .bytes_written
                     .checked_add(bytes_written)
-                    .ok_or_else(|| sevenz_rust2::Error::Other("bytes_written overflow".into()))?;
+                    .ok_or_else(|| abort_with(pending_error, counter_overflow()))?;
 
                 report.files_extracted += 1;
                 Ok(bytes_written)
@@ -632,7 +568,7 @@ impl<R: Read + Seek> SevenZArchive<R> {
     )]
     fn extract_with_callback(
         source: &mut R,
-        archive: &Archive,
+        header: &SevenZHeader,
         dest: &DestDir,
         validator: &mut EntryValidator,
         dir_cache: &mut common::DirCache,
@@ -699,7 +635,7 @@ impl<R: Read + Seek> SevenZArchive<R> {
         // EntryValidator is the authoritative guard for all path security
         // (traversal, absolute paths, symlinks); the upstream check is
         // redundant and breaks allow_absolute_paths support.
-        let is_solid = archive.is_solid;
+        let is_solid = header.is_solid();
         let mut extract_fn = |entry: &sevenz_rust2::ArchiveEntry,
                               reader: &mut dyn Read|
          -> std::result::Result<bool, sevenz_rust2::Error> {
@@ -764,7 +700,7 @@ impl<R: Read + Seek> SevenZArchive<R> {
         // re-parsing it from scratch (issue #492).
         let result = decode_archive_entries(
             source,
-            archive,
+            header,
             config.parallel_decode,
             DecodeKnobs::production(),
             &mut extract_fn,
@@ -798,6 +734,13 @@ impl<R: Read + Seek> SevenZArchive<R> {
                 .unwrap_or_else(|| ArchiveError::from(e)),
         };
         Err(ArchiveError::partial_or(accumulated, e))
+    }
+}
+
+/// The error for a report counter that cannot hold one more.
+const fn counter_overflow() -> ArchiveError {
+    ArchiveError::QuotaExceeded {
+        resource: QuotaResource::IntegerOverflow,
     }
 }
 
@@ -855,7 +798,7 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
     ) -> Result<ExtractionReport> {
         // Step 0: Admit the archive (solid policy, decoder memory, coders,
         // block layout) before anything is written
-        if let Some(refusal) = iter_sevenz_refusals(&self.archive, config).next() {
+        if let Some(refusal) = iter_sevenz_refusals(&self.header, config).next() {
             return Err(refusal.into_error());
         }
 
@@ -896,7 +839,12 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
                     validate_entry_compression(&entry.compression, entry.size, config)?;
                     require_symlinks_allowed(config)?;
                     common::require_symlink_creation()?;
-                    refuse_undecoded_target(&safe_path, &self.archive.files[index], &dest, config)?;
+                    refuse_undecoded_target(
+                        &safe_path,
+                        &self.header.files()[index],
+                        &dest,
+                        config,
+                    )?;
                     prevalidator.reserve_symlink(entry.size)?;
                     continue;
                 }
@@ -929,7 +877,7 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
                 // so failing during pre-validation — before any entry is
                 // written — preserves this loop's "no partial extraction"
                 // guarantee (issue #477).
-                return Err(symlink_at_dest_error().into());
+                return Err(common::symlink_at_dest_error(safe_path.as_path()).into());
             }
 
             // The permit itself is discarded: this loop only needs
@@ -962,7 +910,7 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
 
         let report = Self::extract_with_callback(
             &mut self.source,
-            &self.archive,
+            &self.header,
             &dest,
             &mut validator,
             &mut dir_cache,
@@ -981,9 +929,13 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
         config: &SecurityConfig<Validated>,
     ) -> Result<crate::inspection::ArchiveManifest> {
         use crate::inspection::list::ListPass;
-        use crate::inspection::list::list_sevenz_reader;
-        self.source.rewind().map_err(ArchiveError::Io)?;
-        list_sevenz_reader(&mut self.source, config, &mut ListPass::strict())
+        use crate::inspection::list::list_sevenz_parsed;
+        list_sevenz_parsed(
+            &self.header,
+            &mut self.source,
+            config,
+            &mut ListPass::strict(),
+        )
     }
 
     fn verify(
@@ -996,10 +948,10 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
         use crate::inspection::verify::list_for_verify;
         use crate::inspection::verify::verify_manifest_with_structure;
 
-        let mut issues = refusal_issues(&sevenz_refusals(&self.archive, config));
+        let mut issues = refusal_issues(&sevenz_refusals(&self.header, config));
         issues.extend(anti_item_issue(self.anti_item_count()));
         let listed = list_for_verify(config, *options, |listing| {
-            list_sevenz_parsed(&self.archive, &mut self.source, config, listing)
+            list_sevenz_parsed(&self.header, &mut self.source, config, listing)
         })?;
         let structure = ArchiveStructure::of_manifest(&listed.manifest).with_refusals(&issues);
         verify_manifest_with_structure(&listed.manifest, config, &structure, listed.integrity)
@@ -1008,42 +960,6 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
     fn format_name(&self) -> &'static str {
         "7z"
     }
-}
-
-/// Checks whether a sevenz-rust2 parse failure is due to a valid empty 7z
-/// archive.
-///
-/// sevenz-rust2 fails with `UnexpectedEof` on valid 32-byte empty archives (0
-/// files). We detect this by requiring:
-/// 1. The error is an I/O error with `ErrorKind::UnexpectedEof`
-/// 2. The file starts with the 7z magic signature
-/// 3. The file size is exactly 32 bytes (the only valid empty archive size)
-fn is_empty_sevenz_archive<R: Read + Seek>(err: &sevenz_rust2::Error, source: &mut R) -> bool {
-    const SEVENZ_MAGIC: [u8; 6] = [0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C];
-    // A valid empty 7z archive is exactly 32 bytes:
-    // signature (6) + version (2) + StartHeader CRC (4) + StartHeader (20).
-    // Files shorter than 32 bytes are truncated/corrupt, not empty archives.
-    const EMPTY_ARCHIVE_SIZE: u64 = 32;
-
-    let is_eof = matches!(err, sevenz_rust2::Error::Io(io_err, _) if io_err.kind() == ErrorKind::UnexpectedEof);
-    if !is_eof {
-        return false;
-    }
-
-    // Check file size
-    let Ok(size) = source.seek(std::io::SeekFrom::End(0)) else {
-        return false;
-    };
-    if size != EMPTY_ARCHIVE_SIZE {
-        return false;
-    }
-
-    // Check 7z magic signature
-    let Ok(_) = source.seek(std::io::SeekFrom::Start(0)) else {
-        return false;
-    };
-    let mut magic = [0u8; 6];
-    source.read_exact(&mut magic).is_ok() && magic == SEVENZ_MAGIC
 }
 
 /// Whether a sevenz-rust2 error means the archive needs a password.
@@ -1089,6 +1005,9 @@ pub(crate) use admit::sevenz_entry_compression;
 pub(crate) use admit::sevenz_refusals;
 pub(crate) use classify::SevenZClass;
 pub(crate) use classify::SevenZKind;
+pub(crate) use header::SEVENZ_MAGIC;
+pub(crate) use header::SevenZHeader;
+pub(crate) use header::read_sevenz_header;
 pub(crate) use links::LinkCapture;
 pub(crate) use links::LinkOutcome;
 pub(crate) use links::LinkTable;
@@ -1100,6 +1019,7 @@ pub(crate) use verify::verify_sevenz_blocks;
 mod admit;
 mod classify;
 mod decode;
+mod header;
 mod links;
 mod lzma2;
 mod verify;

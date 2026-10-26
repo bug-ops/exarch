@@ -1,6 +1,7 @@
 //! Python exception types for archive extraction errors.
 
 use exarch_core::ArchiveError as CoreError;
+use exarch_core::PartialWrites;
 use exarch_core::QuotaResource as CoreQuotaResource;
 use exarch_core::format_entry_path_for_error;
 use exarch_core::sanitize_io_error_for_error;
@@ -123,22 +124,30 @@ pub fn convert_error(err: CoreError) -> PyErr {
         CoreError::InvalidConfiguration { reason } => {
             PyValueError::new_err(format!("invalid configuration: {reason}"))
         }
-        CoreError::PartialExtraction { source, report } => {
+        CoreError::PartialExtraction {
+            source,
+            report,
+            writes,
+        } => {
             // Recover the specific exception type (SymlinkEscapeError,
             // HardlinkEscapeError, etc.) so callers can catch the
             // precise error. The partial-extraction report
             // attributes from #210, plus files_skipped/warnings from #508, are
-            // attached to that concrete exception instead.
+            // attached to that concrete exception only while the writes remain
+            // on disk; `writes` is always attached.
             let source_err = convert_error(*source);
             Python::attach(|py| {
                 let exc_value = source_err.value(py);
                 // setattr failures are silenced to preserve the `PyErr → PyErr`
                 // signature; the workspace forbids
                 // unwrap/expect outside tests.
-                let _ = exc_value.setattr("files_extracted", report.files_extracted);
-                let _ = exc_value.setattr("bytes_written", report.bytes_written);
-                let _ = exc_value.setattr("files_skipped", report.files_skipped);
-                let _ = exc_value.setattr("warnings", report.warnings);
+                let _ = exc_value.setattr("writes", writes.as_str());
+                if writes == PartialWrites::Kept {
+                    let _ = exc_value.setattr("files_extracted", report.files_extracted);
+                    let _ = exc_value.setattr("bytes_written", report.bytes_written);
+                    let _ = exc_value.setattr("files_skipped", report.files_skipped);
+                    let _ = exc_value.setattr("warnings", report.warnings);
+                }
                 source_err
             })
         }
@@ -685,6 +694,7 @@ mod tests {
         let err = CoreError::PartialExtraction {
             source: Box::new(source),
             report,
+            writes: PartialWrites::Kept,
         };
 
         let py_err = convert_error(err);
@@ -739,6 +749,7 @@ mod tests {
         let err = CoreError::PartialExtraction {
             source: Box::new(source),
             report,
+            writes: PartialWrites::Kept,
         };
 
         let py_err = convert_error(err);
@@ -759,6 +770,71 @@ mod tests {
                 warnings,
                 vec!["skipped 2 entries with disallowed extensions"]
             );
+        });
+    }
+
+    /// Regression test for #747: a rolled-back atomic run attaches `writes`
+    /// but none of the counters that would read as files left on disk.
+    #[test]
+    fn test_partial_extraction_rolled_back_omits_counters() {
+        use exarch_core::ExtractionReport;
+
+        let report = ExtractionReport {
+            files_extracted: 2,
+            bytes_written: 2,
+            ..ExtractionReport::default()
+        };
+        let err = CoreError::PartialExtraction {
+            source: Box::new(CoreError::SymlinkEscape {
+                path: PathBuf::from("ln"),
+            }),
+            report,
+            writes: PartialWrites::RolledBack,
+        };
+
+        let py_err = convert_error(err);
+        Python::attach(|py| {
+            assert!(py_err.is_instance_of::<SymlinkEscapeError>(py));
+            let exc_value = py_err.value(py);
+            let writes: String = exc_value
+                .getattr("writes")
+                .expect("writes missing")
+                .extract()
+                .expect("writes not str");
+            assert_eq!(writes, "rolled_back");
+            for attr in [
+                "files_extracted",
+                "bytes_written",
+                "files_skipped",
+                "warnings",
+            ] {
+                assert!(
+                    exc_value.getattr(attr).is_err(),
+                    "{attr} must be absent after rollback"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn test_partial_extraction_kept_attaches_writes() {
+        let err = CoreError::PartialExtraction {
+            source: Box::new(CoreError::SymlinkEscape {
+                path: PathBuf::from("ln"),
+            }),
+            report: exarch_core::ExtractionReport::default(),
+            writes: PartialWrites::Kept,
+        };
+
+        let py_err = convert_error(err);
+        Python::attach(|py| {
+            let writes: String = py_err
+                .value(py)
+                .getattr("writes")
+                .expect("writes missing")
+                .extract()
+                .expect("writes not str");
+            assert_eq!(writes, "kept");
         });
     }
 
@@ -809,6 +885,7 @@ mod tests {
         let err = CoreError::PartialExtraction {
             source: Box::new(source),
             report,
+            writes: PartialWrites::Kept,
         };
 
         let py_err = convert_error(err);
@@ -830,6 +907,7 @@ mod tests {
         let err = CoreError::PartialExtraction {
             source: Box::new(source),
             report,
+            writes: PartialWrites::Kept,
         };
 
         let py_err = convert_error(err);
@@ -851,6 +929,7 @@ mod tests {
         let err = CoreError::PartialExtraction {
             source: Box::new(source),
             report,
+            writes: PartialWrites::Kept,
         };
 
         let py_err = convert_error(err);

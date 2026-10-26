@@ -1,10 +1,10 @@
 //! Output formatter trait for CLI results.
 
-use crate::error::PartialWrites;
 use anyhow::Result;
 use exarch_core::ArchiveManifest;
 use exarch_core::CreationReport;
 use exarch_core::ExtractionReport;
+use exarch_core::PartialWrites;
 use exarch_core::VerificationReport;
 use serde::Serialize;
 use std::path::Path;
@@ -46,6 +46,16 @@ pub struct JsonOutput<T> {
     pub error: Option<JsonError>,
 }
 
+/// Serializes a [`PartialWrites`] as its stable identifier.
+#[derive(Debug, Clone, Copy)]
+pub struct JsonWrites(pub PartialWrites);
+
+impl Serialize for JsonWrites {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.0.as_str())
+    }
+}
+
 /// Partial extraction report included in error JSON when extraction was stopped
 /// mid-archive.
 #[derive(Debug, Serialize)]
@@ -56,7 +66,7 @@ pub struct JsonPartialReport {
     pub bytes_written: u64,
     pub files_skipped: usize,
     pub warnings: Vec<String>,
-    pub writes: PartialWrites,
+    pub writes: JsonWrites,
 }
 
 /// Structured error object in JSON output

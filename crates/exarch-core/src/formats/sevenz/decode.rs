@@ -4,11 +4,12 @@
 use super::SIGNATURE_HEADER_SIZE;
 use super::admit::block_span;
 use super::admit::lzma2_dict_size;
+use super::header::BlockIndex;
+use super::header::SevenZHeader;
 use super::lzma2::DecodeKnobs;
 use super::lzma2::Lzma2Stream;
 use super::lzma2::with_parallel_reader;
 use crate::ParallelDecode;
-use sevenz_rust2::Archive;
 use sevenz_rust2::BlockDecoder;
 use sevenz_rust2::Password;
 use std::io;
@@ -68,32 +69,33 @@ impl<R: Read> Read for CrcChecked<R> {
 /// Returns `Ok(false)` when `each` stopped the walk.
 pub(super) fn decode_block_entries<R: Read + Seek>(
     source: &mut R,
-    archive: &Archive,
-    block_index: usize,
+    header: &SevenZHeader,
+    block_index: BlockIndex,
     parallel: ParallelDecode,
     knobs: DecodeKnobs,
     each: &mut impl FnMut(&sevenz_rust2::ArchiveEntry, &mut dyn Read) -> EntryResult,
 ) -> EntryResult {
     let password = Password::empty();
-    let span = block_span(archive, block_index);
+    let archive = header.archive();
+    let span = block_span(header, block_index);
     let (first, count) = (span.start, span.len());
     let plan = match parallel {
         ParallelDecode::Bounded(lookahead) if knobs.threads.get() > 1 => {
-            parallel_stream(archive, block_index, first..first + count, knobs.min_unit)
+            parallel_stream(header, block_index, first..first + count, knobs.min_unit)
                 .map(|stream| (stream, lookahead))
         }
         _ => None,
     };
     let Some((stream, lookahead)) = plan else {
-        return BlockDecoder::new(1, block_index, archive, &password, source)
+        return BlockDecoder::new(1, block_index.get(), archive, &password, source)
             .for_each_entries(each);
     };
 
     // The dry run fails exactly as the sequential path would on a coder graph
     // or property it rejects, before any thread starts.
-    BlockDecoder::new(1, block_index, archive, &password, &mut *source)
+    BlockDecoder::new(1, block_index.get(), archive, &password, &mut *source)
         .for_each_entries(&mut |_, _| Ok(false))?;
-    let block = &archive.blocks[block_index];
+    let block = header.block(block_index);
 
     with_parallel_reader(&mut *source, stream, knobs, lookahead.get(), |reader| {
         let mut block_reader: Box<dyn Read + '_> = if block.has_crc {
@@ -101,7 +103,7 @@ pub(super) fn decode_block_entries<R: Read + Seek>(
         } else {
             Box::new(reader)
         };
-        for file in &archive.files[first..first + count] {
+        for file in &header.files()[first..first + count] {
             if is_sevenz_payload(file) {
                 let mut decoder: Box<dyn Read + '_> = Box::new((&mut block_reader).take(file.size));
                 if file.has_crc {
@@ -111,7 +113,7 @@ pub(super) fn decode_block_entries<R: Read + Seek>(
                     return Ok(false);
                 }
             } else {
-                let empty: &mut dyn Read = &mut ([0u8; 0].as_slice());
+                let empty: &mut dyn Read = &mut io::empty();
                 if !each(file, empty)? {
                     return Ok(false);
                 }
@@ -127,25 +129,24 @@ pub(super) fn decode_block_entries<R: Read + Seek>(
 /// `files` span the decoder walks) account for the whole output, with room for
 /// at least two runs of `min_unit`.
 pub(super) fn parallel_stream(
-    archive: &Archive,
-    block_index: usize,
+    header: &SevenZHeader,
+    block_index: BlockIndex,
     files: std::ops::Range<usize>,
     min_unit: u64,
 ) -> Option<Lzma2Stream> {
     use sevenz_rust2::EncoderMethod;
 
-    let block = &archive.blocks[block_index];
+    let archive = header.archive();
+    let block = header.block(block_index);
     let [coder] = block.coders.as_slice() else {
         return None;
     };
     if coder.encoder_method_id() != EncoderMethod::ID_LZMA2 {
         return None;
     }
-    let first_packs = archive.stream_map.block_first_pack_stream_index();
-    let first_pack = *first_packs.get(block_index)?;
-    let end_pack = first_packs
-        .get(block_index + 1)
-        .copied()
+    let first_pack = header.block_first_pack(block_index);
+    let end_pack = header
+        .next_block_first_pack(block_index)
         .unwrap_or_else(|| archive.pack_sizes().len());
     if end_pack.checked_sub(first_pack) != Some(1) {
         return None;
@@ -154,8 +155,8 @@ pub(super) fn parallel_stream(
     if output_len < min_unit.saturating_mul(2) {
         return None;
     }
-    let files_len = archive
-        .files
+    let files_len = header
+        .files()
         .get(files)?
         .iter()
         .filter(|file| is_sevenz_payload(file))
@@ -165,7 +166,7 @@ pub(super) fn parallel_stream(
     }
     let offset = SIGNATURE_HEADER_SIZE
         .checked_add(archive.pack_pos())?
-        .checked_add(*archive.stream_map.pack_stream_offsets().get(first_pack)?)?;
+        .checked_add(*header.pack_stream_offsets().get(first_pack)?)?;
     Some(Lzma2Stream {
         offset,
         len: *archive.pack_sizes().get(first_pack)?,
@@ -180,15 +181,13 @@ pub(super) fn parallel_stream(
 /// Admission refuses a block whose span differs from its mapped files before
 /// anything is decoded; this is the same rule at the point of use.
 pub(super) fn mapped_block_span(
-    archive: &Archive,
-    block: usize,
+    header: &SevenZHeader,
+    block: BlockIndex,
 ) -> std::result::Result<std::ops::Range<usize>, sevenz_rust2::Error> {
-    let span = block_span(archive, block);
-    let mapped = archive
-        .stream_map
-        .file_block_index
-        .get(span.clone())
-        .is_some_and(|map| map.iter().all(|&to| to == Some(block)));
+    let span = block_span(header, block);
+    let mapped = span
+        .clone()
+        .all(|file| header.file_block(file) == Some(block));
     if mapped {
         Ok(span)
     } else {
@@ -210,42 +209,46 @@ pub(super) fn mapped_block_span(
 /// of the archive, once each.
 pub(super) fn decode_archive_entries<R: Read + Seek>(
     source: &mut R,
-    archive: &Archive,
+    header: &SevenZHeader,
     parallel: ParallelDecode,
     knobs: DecodeKnobs,
     each: &mut impl FnMut(&sevenz_rust2::ArchiveEntry, &mut dyn Read) -> EntryResult,
 ) -> std::result::Result<(), sevenz_rust2::Error> {
     let mut next_block = 0;
     let mut handed = 0usize;
-    for (index, file) in archive.files.iter().enumerate() {
-        match archive.stream_map.file_block_index[index] {
+    for (index, file) in header.files().iter().enumerate() {
+        match header.file_block(index) {
             None => {
-                let empty: &mut dyn Read = &mut ([0u8; 0].as_slice());
+                let empty: &mut dyn Read = &mut io::empty();
                 if !each(file, empty)? {
                     return Ok(());
                 }
                 handed += 1;
             }
-            Some(block) if block >= next_block => {
-                for fileless in next_block..block {
-                    if !block_span(archive, fileless).is_empty() {
+            Some(block) if block.get() >= next_block => {
+                for fileless in header
+                    .block_indices()
+                    .skip(next_block)
+                    .take(block.get() - next_block)
+                {
+                    if !block_span(header, fileless).is_empty() {
                         return Err(sevenz_rust2::Error::Other(
                             "7z block with streams is skipped by the file order".into(),
                         ));
                     }
-                    decode_block_entries(source, archive, fileless, parallel, knobs, each)?;
+                    decode_block_entries(source, header, fileless, parallel, knobs, each)?;
                 }
-                let span = mapped_block_span(archive, block)?;
-                if !decode_block_entries(source, archive, block, parallel, knobs, each)? {
+                let span = mapped_block_span(header, block)?;
+                if !decode_block_entries(source, header, block, parallel, knobs, each)? {
                     return Ok(());
                 }
                 handed += span.len();
-                next_block = block + 1;
+                next_block = block.get() + 1;
             }
             Some(_) => {}
         }
     }
-    if handed == archive.files.len() {
+    if handed == header.files().len() {
         Ok(())
     } else {
         Err(sevenz_rust2::Error::Other(

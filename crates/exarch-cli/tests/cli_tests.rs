@@ -1726,6 +1726,84 @@ fn test_extract_json_partial_report_absent_when_nothing_extracted() {
     );
 }
 
+/// Builds a plain tar at `path` with a regular file named `name` followed by
+/// a symlink that extraction rejects under the default policy.
+fn create_tar_with_file_then_symlink(path: &std::path::Path, name: &str) {
+    let file = std::fs::File::create(path).expect("create archive");
+    let mut builder = tar::Builder::new(file);
+    let mut header = tar::Header::new_gnu();
+    header.set_size(4);
+    header.set_mode(0o644);
+    header.set_cksum();
+    builder
+        .append_data(&mut header, name, &b"data"[..])
+        .expect("append file entry");
+    let mut link_header = tar::Header::new_gnu();
+    link_header.set_size(0);
+    link_header.set_entry_type(tar::EntryType::Symlink);
+    link_header.set_mode(0o777);
+    link_header.set_cksum();
+    builder
+        .append_link(&mut link_header, "link", "target.txt")
+        .expect("append symlink entry");
+    builder.finish().expect("finish tar");
+}
+
+/// Regression test for #745: `extract -v` prints entry names to stderr and
+/// must escape control characters instead of passing them to the terminal.
+#[test]
+fn test_extract_verbose_escapes_control_characters_in_entry_names() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive_path = temp.path().join("ansi.tar");
+    create_tar_with_file_then_symlink(&archive_path, "\x1b]0;PWNED\x07t.txt");
+
+    let output = exarch_cmd()
+        .arg("extract")
+        .arg("-v")
+        .arg(&archive_path)
+        .arg(temp.path().join("out"))
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+
+    let stderr = String::from_utf8(output.stderr).expect("stderr is UTF-8");
+    assert!(
+        stderr.contains("  extract  \\x1b]0;PWNED\\x07t.txt"),
+        "escaped entry name expected, got: {stderr:?}"
+    );
+    assert!(
+        !stderr.contains('\x1b') && !stderr.contains('\x07'),
+        "raw control characters reached stderr: {stderr:?}"
+    );
+}
+
+/// Regression test for #747: a failed `--atomic` extraction discards its
+/// writes, and the JSON error must say so.
+#[test]
+fn test_extract_atomic_json_error_reports_rolled_back_writes() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive_path = temp.path().join("atomic.tar");
+    create_tar_with_file_then_symlink(&archive_path, "small.txt");
+    let output_dir = temp.path().join("out");
+
+    let output = exarch_cmd()
+        .arg("extract")
+        .arg("--json")
+        .arg("--atomic")
+        .arg(&archive_path)
+        .arg(&output_dir)
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: serde_json::Value = serde_json::from_slice(&output).expect("invalid JSON output");
+    assert_eq!(json["error"]["partial_report"]["writes"], "rolled_back");
+    assert!(!output_dir.exists(), "atomic failure must leave no output");
+}
+
 #[test]
 fn test_global_verbose_flag() {
     let temp = TempDir::new().expect("failed to create temp dir");

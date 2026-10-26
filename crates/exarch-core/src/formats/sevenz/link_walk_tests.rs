@@ -62,15 +62,15 @@ fn one_block_each(files: &[(&str, &[u8])]) -> Vec<u8> {
 }
 
 struct Parsed {
-    archive: Archive,
+    header: SevenZHeader,
     compression: Vec<EntryCompression>,
 }
 
 fn parse(bytes: &[u8]) -> Parsed {
-    let archive = Archive::read(&mut Cursor::new(bytes), &Password::empty()).unwrap();
-    let compression = sevenz_entry_compression(&archive, bytes.len() as u64).unwrap();
+    let header = read_sevenz_header(&mut Cursor::new(bytes)).unwrap();
+    let compression = sevenz_entry_compression(&header, bytes.len() as u64).unwrap();
     Parsed {
-        archive,
+        header,
         compression,
     }
 }
@@ -99,7 +99,7 @@ fn walk(
 ) -> Vec<(usize, LinkOutcome)> {
     let mut seen = Vec::new();
     walk_sevenz_links(
-        &parsed.archive,
+        &parsed.header,
         &mut Cursor::new(source),
         &parsed.compression,
         config,
@@ -245,7 +245,7 @@ fn an_error_from_the_receiver_ends_the_walk() {
     let mut calls = 0;
 
     let result = walk_sevenz_links(
-        &parsed.archive,
+        &parsed.header,
         &mut Cursor::new(bytes),
         &parsed.compression,
         &config(false),
@@ -266,7 +266,7 @@ fn a_target_that_is_not_utf8_is_a_hard_error() {
     let parsed = parse(&bytes);
 
     let result = walk_sevenz_links(
-        &parsed.archive,
+        &parsed.header,
         &mut Cursor::new(bytes),
         &parsed.compression,
         &config(false),

@@ -817,3 +817,64 @@ fn sevenz_ratio_check_runs_before_duplicate_skip() {
         b"existing"
     );
 }
+
+/// Swaps an already-created directory for a symlink to `outside` when the
+/// entry named `trigger` starts.
+#[cfg(unix)]
+struct SwapDirForSymlink<'a> {
+    trigger: &'a str,
+    dir: std::path::PathBuf,
+    outside: std::path::PathBuf,
+}
+
+#[cfg(unix)]
+impl ProgressCallback for SwapDirForSymlink<'_> {
+    fn on_entry_start(&mut self, path: &Path, _total: usize, _index: usize) {
+        if path.ends_with(self.trigger) {
+            std::fs::remove_dir_all(&self.dir).unwrap();
+            std::os::unix::fs::symlink(&self.outside, &self.dir).unwrap();
+        }
+    }
+
+    fn on_entry_complete(&mut self, _path: &Path) {}
+
+    fn on_bytes_written(&mut self, _bytes: u64) {}
+
+    fn on_complete(&mut self) {}
+}
+
+/// Regression test for #740: a path check that fails inside the entry callback
+/// reaches the caller as the typed security error, not as
+/// `InvalidArchive("7z error: ...")`.
+#[cfg(unix)]
+#[test]
+fn directory_swapped_for_symlink_mid_extraction_reports_a_typed_security_error() {
+    let bytes = load_fixture("nested-dirs.7z");
+    let dest = TempDir::new().unwrap();
+    let outside = TempDir::new().unwrap();
+    let mut progress = SwapDirForSymlink {
+        trigger: "file.txt",
+        dir: dest.path().join("nested/subdir1/subdir2"),
+        outside: outside.path().to_path_buf(),
+    };
+    let config = SecurityConfig::default().validate().unwrap();
+    let mut archive = SevenZArchive::new(Cursor::new(bytes)).unwrap();
+
+    let err = archive
+        .extract(
+            dest.path(),
+            &config,
+            &ExtractionOptions::default(),
+            &mut progress,
+        )
+        .unwrap_err();
+
+    let ArchiveError::PartialExtraction { source, .. } = err else {
+        panic!("expected PartialExtraction, got {err:?}");
+    };
+    assert_matches!(
+        *source,
+        ArchiveError::PathTraversal { .. } | ArchiveError::SymlinkEscape { .. }
+    );
+    assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);
+}

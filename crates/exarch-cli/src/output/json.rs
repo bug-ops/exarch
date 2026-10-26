@@ -2,6 +2,7 @@
 
 use super::formatter::JsonOutput;
 use super::formatter::JsonPartialReport;
+use super::formatter::JsonWrites;
 use super::formatter::OutputFormatter;
 use crate::error::PartialExtractionContext;
 use anyhow::Result;
@@ -168,7 +169,7 @@ impl<W: Write> OutputFormatter for JsonFormatter<W> {
                     bytes_written: ctx.report.bytes_written,
                     files_skipped: ctx.report.files_skipped,
                     warnings: ctx.report.warnings.clone(),
-                    writes: ctx.writes,
+                    writes: JsonWrites(ctx.writes),
                 });
 
         let output = if let Some(pr) = partial_report {
@@ -640,6 +641,7 @@ mod tests {
         let err = ArchiveError::PartialExtraction {
             source: Box::new(inner),
             report,
+            writes: exarch_core::PartialWrites::Kept,
         };
         let converted = convert_extraction_error(err, Path::new("archive.tar.gz"), false);
         f.format_error("extract", &converted);

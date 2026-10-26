@@ -660,47 +660,75 @@ fn existing_destination_symlink_is_not_replaced() {
 
     let dir = TempDir::new().unwrap();
     let path = archive_of(&dir, &[Item::Link("a", b"x/.."), Item::Link("x", b".")]);
-    let out = TempDir::new().unwrap();
-    std::fs::create_dir_all(out.path().join("p/q")).unwrap();
-    symlink("p/q", out.path().join("x")).unwrap();
 
     for skip_duplicates in [true, false] {
+        let out = TempDir::new().unwrap();
+        std::fs::create_dir_all(out.path().join("p/q")).unwrap();
+        symlink("p/q", out.path().join("x")).unwrap();
         let options = ExtractionOptions::default().with_skip_duplicates(skip_duplicates);
         let result = extract_archive_with_options(&path, out.path(), &allow_symlinks(), &options);
 
-        assert_matches!(
-            partial_source(result.unwrap_err()),
-            ArchiveError::SymlinkEscape { .. },
-            "skip_duplicates={skip_duplicates}"
-        );
+        if skip_duplicates {
+            result.unwrap();
+        } else {
+            assert_symlink_refused(result.unwrap_err());
+        }
         assert_eq!(
             std::fs::read_link(out.path().join("x")).unwrap(),
-            Path::new("p/q")
+            Path::new("p/q"),
+            "skip_duplicates={skip_duplicates}"
         );
-        // `a -> x/..` resolves to `p` and is created before `x` is refused.
-        assert!(std::fs::symlink_metadata(out.path().join("a")).is_ok());
-        std::fs::remove_file(out.path().join("a")).unwrap();
+        // `a -> x/..` resolves to `p` and is created before `x` is reached.
+        assert_eq!(
+            std::fs::canonicalize(out.path().join("a")).unwrap(),
+            std::fs::canonicalize(out.path().join("p")).unwrap()
+        );
     }
 }
 
 #[cfg(unix)]
+fn assert_symlink_refused(error: ArchiveError) {
+    let error = match error {
+        ArchiveError::PartialExtraction { source, .. } => *source,
+        other => other,
+    };
+    let ArchiveError::Io(io) = &error else {
+        panic!("expected Io, got {error:?}");
+    };
+    assert_eq!(
+        io.kind(),
+        std::io::Error::from_raw_os_error(libc::ELOOP).kind()
+    );
+    assert!(
+        io.to_string()
+            .contains("refusing to replace the existing symlink"),
+        "{io}"
+    );
+}
+
+#[cfg(unix)]
 #[test]
-fn dangling_link_at_the_link_path_is_skipped_or_replaced_by_policy() {
+fn dangling_link_at_the_link_path_is_skipped_or_refused_by_policy() {
     use std::os::unix::fs::symlink;
 
     let dir = TempDir::new().unwrap();
     let path = archive_of(&dir, &[Item::Link("l", b"other")]);
 
-    for (skip_duplicates, expected) in [(true, "gone"), (false, "other")] {
+    for skip_duplicates in [true, false] {
         let out = TempDir::new().unwrap();
         symlink("gone", out.path().join("l")).unwrap();
         let options = ExtractionOptions::default().with_skip_duplicates(skip_duplicates);
 
-        extract_archive_with_options(&path, out.path(), &allow_symlinks(), &options).unwrap();
+        let result = extract_archive_with_options(&path, out.path(), &allow_symlinks(), &options);
 
+        if skip_duplicates {
+            result.unwrap();
+        } else {
+            assert_symlink_refused(result.unwrap_err());
+        }
         assert_eq!(
             std::fs::read_link(out.path().join("l")).unwrap(),
-            Path::new(expected)
+            Path::new("gone")
         );
     }
 }
@@ -1229,16 +1257,16 @@ fn verify_and_extract_agree_for_every_order_of_a_directory_a_link_and_a_file() {
     let table = [
         ("SLF", [s, l, f], Layout::OneBlockEach, [N, Some(0), Some(1)], "extracted", "extracted", "pass"),
         ("LSF", [l, s, f], Layout::OneBlockEach, [Some(0), N, Some(1)], "extracted", "extracted", "pass"),
-        ("SFL", [s, f, l], Layout::OneBlockEach, [N, Some(0), Some(1)], "extracted", "failed", "fail"),
-        ("FSL", [f, s, l], Layout::OneBlockEach, [Some(0), N, Some(1)], "extracted", "failed", "fail"),
+        ("SFL", [s, f, l], Layout::OneBlockEach, [N, Some(0), Some(1)], "extracted", "failed", "pass"),
+        ("FSL", [f, s, l], Layout::OneBlockEach, [Some(0), N, Some(1)], "extracted", "failed", "pass"),
         ("LFS", [l, f, s], Layout::OneBlockEach, [Some(0), Some(1), N], "failed", "failed", "fail"),
-        ("FLS", [f, l, s], Layout::OneBlockEach, [Some(0), Some(1), N], "extracted", "failed", "fail"),
+        ("FLS", [f, l, s], Layout::OneBlockEach, [Some(0), Some(1), N], "extracted", "failed", "pass"),
         ("SLF", [s, l, f], Layout::SolidAroundDirs, [N, Some(0), Some(0)], "extracted", "extracted", "pass"),
         ("LSF", [l, s, f], Layout::SolidAroundDirs, [Some(0), Some(0), Some(0)], "refused", "refused", "fail"),
-        ("SFL", [s, f, l], Layout::SolidAroundDirs, [N, Some(0), Some(0)], "extracted", "failed", "fail"),
+        ("SFL", [s, f, l], Layout::SolidAroundDirs, [N, Some(0), Some(0)], "extracted", "failed", "pass"),
         ("FSL", [f, s, l], Layout::SolidAroundDirs, [Some(0), Some(0), Some(0)], "refused", "refused", "fail"),
         ("LFS", [l, f, s], Layout::SolidAroundDirs, [Some(0), Some(0), N], "failed", "failed", "fail"),
-        ("FLS", [f, l, s], Layout::SolidAroundDirs, [Some(0), Some(0), N], "extracted", "failed", "fail"),
+        ("FLS", [f, l, s], Layout::SolidAroundDirs, [Some(0), Some(0), N], "extracted", "failed", "pass"),
     ];
     let config = allow_symlinks().with_allow_solid_archives(true);
     for (order, items, layout, map, skipping, keeping, verify) in table {

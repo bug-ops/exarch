@@ -12,6 +12,7 @@ use super::classify::UnsupportedEntry;
 use super::classify::is_windows_reparse_point;
 use super::classify::reparse_point_refusal;
 use super::decode::decode_archive_entries;
+use super::header::BlockIndex;
 use super::links::BlockScan;
 use super::links::BlockStop;
 use super::verify::entries_uncovered_by_block_crc;
@@ -33,6 +34,8 @@ use crate::UnverifiedReason;
 use crate::inspection::integrity::IntegrityPass;
 #[cfg(unix)]
 use crate::security::QuotaPermit;
+use sevenz_rust2::Archive;
+use sevenz_rust2::Password;
 use std::assert_matches;
 use std::collections::BTreeSet;
 use std::io::Cursor;
@@ -734,19 +737,23 @@ fn test_empty_archive_extract() {
     assert_eq!(report.bytes_written, 0);
 }
 
-fn parse_fixture(name: &str) -> (Archive, u64) {
+fn parse_fixture(name: &str) -> (SevenZHeader, u64) {
     let data = load_fixture(name);
     let len = data.len() as u64;
-    let archive = Archive::read(&mut Cursor::new(data), &Password::empty()).unwrap();
-    (archive, len)
+    let header = read_sevenz_header(&mut Cursor::new(data)).unwrap();
+    (header, len)
+}
+
+fn first_block(header: &SevenZHeader) -> BlockIndex {
+    header.block_indices().next().unwrap()
 }
 
 #[test]
 fn test_compression_non_solid_covers_every_stream_file() {
-    let (archive, len) = parse_fixture("simple.7z");
-    let compression = sevenz_entry_compression(&archive, len).unwrap();
-    assert_eq!(compression.len(), archive.files.len());
-    for (file, compression) in archive.files.iter().zip(&compression) {
+    let (header, len) = parse_fixture("simple.7z");
+    let compression = sevenz_entry_compression(&header, len).unwrap();
+    assert_eq!(compression.len(), header.files().len());
+    for (file, compression) in header.files().iter().zip(&compression) {
         assert_eq!(
             file.has_stream,
             matches!(compression, EntryCompression::Entry(_)),
@@ -758,37 +765,38 @@ fn test_compression_non_solid_covers_every_stream_file() {
 
 #[test]
 fn test_compression_solid_block_start_carries_block_totals() {
-    let (archive, len) = parse_fixture("solid.7z");
-    let compression = sevenz_entry_compression(&archive, len).unwrap();
-    let pack_sizes = archive.pack_sizes();
-    let first_packs = archive.stream_map.block_first_pack_stream_index();
-    let first_files = &archive.stream_map.block_first_file_index;
+    let (header, len) = parse_fixture("solid.7z");
+    let compression = sevenz_entry_compression(&header, len).unwrap();
+    let pack_sizes = header.archive().pack_sizes();
+    let first_files: Vec<usize> = header
+        .block_indices()
+        .map(|block| header.block_first_file(block))
+        .collect();
     assert!(!first_files.is_empty());
 
-    for (block, &file) in first_files.iter().enumerate() {
-        let end = first_packs
-            .get(block + 1)
-            .copied()
+    for block in header.block_indices() {
+        let end = header
+            .next_block_first_pack(block)
             .unwrap_or(pack_sizes.len());
-        let expected_compressed: u64 = pack_sizes[first_packs[block]..end].iter().sum();
-        let expected_uncompressed: u64 = archive
-            .files
+        let expected_compressed: u64 = pack_sizes[header.block_first_pack(block)..end].iter().sum();
+        let expected_uncompressed: u64 = header
+            .files()
             .iter()
             .enumerate()
-            .filter(|(i, _)| archive.stream_map.file_block_index[*i] == Some(block))
+            .filter(|(i, _)| header.file_block(*i) == Some(block))
             .map(|(_, f)| f.size)
             .sum();
         assert_eq!(
-            compression[file],
+            compression[header.block_first_file(block)],
             EntryCompression::SolidBlockStart(SolidBlock::new(
                 expected_compressed,
                 expected_uncompressed
             )),
-            "block {block}"
+            "block {block:?}"
         );
     }
     for (index, compression) in compression.iter().enumerate() {
-        if !first_files.contains(&index) && archive.files[index].has_stream {
+        if !first_files.contains(&index) && header.files()[index].has_stream {
             assert_eq!(
                 *compression,
                 EntryCompression::SolidBlockMember,
@@ -817,7 +825,9 @@ fn make_sevenz_archive_with_empty_file() -> Vec<u8> {
 
 #[test]
 fn test_compression_block_uncompressed_overflow_is_rejected() {
-    let (mut archive, len) = parse_fixture("solid.7z");
+    let data = load_fixture("solid.7z");
+    let len = data.len() as u64;
+    let mut archive = Archive::read(&mut Cursor::new(data), &Password::empty()).unwrap();
     let members: Vec<usize> = (0..archive.files.len())
         .filter(|&i| archive.stream_map.file_block_index[i] == Some(0))
         .collect();
@@ -826,7 +836,7 @@ fn test_compression_block_uncompressed_overflow_is_rejected() {
     archive.files[members[1]].size = 1;
 
     assert_matches!(
-        sevenz_entry_compression(&archive, len),
+        sevenz_entry_compression(&SevenZHeader::assume_checked(archive), len),
         Err(ArchiveError::QuotaExceeded {
             resource: QuotaResource::IntegerOverflow
         })
@@ -837,9 +847,9 @@ fn test_compression_block_uncompressed_overflow_is_rejected() {
 fn test_compression_empty_files_are_unknown() {
     let data = make_sevenz_archive_with_empty_file();
     let len = data.len() as u64;
-    let archive = Archive::read(&mut Cursor::new(data), &Password::empty()).unwrap();
-    let compression = sevenz_entry_compression(&archive, len).unwrap();
-    for (file, compression) in archive.files.iter().zip(&compression) {
+    let header = read_sevenz_header(&mut Cursor::new(data)).unwrap();
+    let compression = sevenz_entry_compression(&header, len).unwrap();
+    for (file, compression) in header.files().iter().zip(&compression) {
         if file.size == 0 {
             assert_eq!(*compression, EntryCompression::Unknown, "{}", file.name);
         } else {
@@ -864,8 +874,8 @@ fn entry_compressed_sizes(name: &str) -> Vec<u64> {
 #[test]
 fn test_compression_bcj2_block_counts_its_four_pack_streams() {
     let (archive, _) = parse_fixture("bcj2.7z");
-    assert_eq!(archive.pack_sizes().len(), 4);
-    let expected: u64 = archive.pack_sizes().iter().sum();
+    assert_eq!(archive.archive().pack_sizes().len(), 4);
+    let expected: u64 = archive.archive().pack_sizes().iter().sum();
 
     assert_eq!(entry_compressed_sizes("bcj2.7z"), [expected]);
 }
@@ -873,7 +883,7 @@ fn test_compression_bcj2_block_counts_its_four_pack_streams() {
 #[test]
 fn test_compression_bcj2_block_excludes_an_unreferenced_pack_stream() {
     let (archive, _) = parse_fixture("bcj2-spare-pack.7z");
-    let pack_sizes = archive.pack_sizes();
+    let pack_sizes = archive.archive().pack_sizes();
     assert_eq!(pack_sizes.len(), 5);
     assert_eq!(pack_sizes[4], 7);
     let expected: u64 = pack_sizes[..4].iter().sum();
@@ -884,8 +894,8 @@ fn test_compression_bcj2_block_excludes_an_unreferenced_pack_stream() {
 #[test]
 fn test_compression_bcj2_id_on_a_one_input_coder_is_capped_at_declared_streams() {
     let (archive, _) = parse_fixture("bcj2-simple-coder.7z");
-    assert_eq!(archive.pack_sizes().len(), 1);
-    let expected = archive.pack_sizes()[0];
+    assert_eq!(archive.archive().pack_sizes().len(), 1);
+    let expected = archive.archive().pack_sizes()[0];
 
     assert_eq!(entry_compressed_sizes("bcj2-simple-coder.7z"), [expected]);
 }
@@ -893,8 +903,8 @@ fn test_compression_bcj2_id_on_a_one_input_coder_is_capped_at_declared_streams()
 #[test]
 fn test_compression_rejects_source_shorter_than_declared_streams() {
     let (archive, len) = parse_fixture("simple.7z");
-    let declared: u64 = archive.pack_sizes().iter().sum();
-    let too_short = SIGNATURE_HEADER_SIZE + archive.pack_pos() + declared - 1;
+    let declared: u64 = archive.archive().pack_sizes().iter().sum();
+    let too_short = SIGNATURE_HEADER_SIZE + archive.archive().pack_pos() + declared - 1;
     assert!(too_short < len);
     assert_matches!(
         sevenz_entry_compression(&archive, too_short),
@@ -1049,7 +1059,7 @@ fn test_is_solid_flag_detected_correctly() {
     let solid_cursor = Cursor::new(solid_data);
     let solid_archive = SevenZArchive::new(solid_cursor).unwrap();
     assert!(
-        solid_archive.archive.is_solid,
+        solid_archive.header.is_solid(),
         "solid.7z should have is_solid=true"
     );
 
@@ -1058,7 +1068,7 @@ fn test_is_solid_flag_detected_correctly() {
     let non_solid_cursor = Cursor::new(non_solid_data);
     let non_solid_archive = SevenZArchive::new(non_solid_cursor).unwrap();
     assert!(
-        !non_solid_archive.archive.is_solid,
+        !non_solid_archive.header.is_solid(),
         "simple.7z should have is_solid=false"
     );
 }
@@ -1644,8 +1654,8 @@ fn compressed_solid_copies(copies: usize) -> Vec<u8> {
 }
 
 fn solid_block_ratio(data: &[u8]) -> f64 {
-    let archive = Archive::read(&mut Cursor::new(data.to_vec()), &Password::empty()).unwrap();
-    let compression = sevenz_entry_compression(&archive, data.len() as u64).unwrap();
+    let header = read_sevenz_header(&mut Cursor::new(data)).unwrap();
+    let compression = sevenz_entry_compression(&header, data.len() as u64).unwrap();
     compression
         .iter()
         .find_map(|c| match c {
@@ -1942,11 +1952,15 @@ fn test_process_entry_inner_rejects_traversal_independently() {
         &mut copy_buffer,
     );
 
-    assert_matches!(
-        &result,
-        Err(sevenz_rust2::Error::Other(m)) if m.contains("validation failed"),
+    assert!(
+        result.is_err(),
         "callback re-validation must independently reject a traversal entry via its own \
          validate_entry call, got: {result:?}"
+    );
+    assert_matches!(
+        pending_error,
+        Some(ArchiveError::PathTraversal { .. }),
+        "the typed error must reach the caller, not a stringified one"
     );
 }
 
@@ -2340,22 +2354,22 @@ fn test_uncovered_by_block_crc_counts_entries_without_own_crc() {
     assert!(entries_uncovered_by_block_crc(false, 10, 12, crcs.into_iter()).is_empty());
 }
 
-fn block_refusals(archive: &Archive) -> Vec<SevenZRefusal> {
+fn block_refusals(header: &SevenZHeader) -> Vec<SevenZRefusal> {
     let config = SecurityConfig::default()
         .with_allow_solid_archives(true)
         .validate()
         .unwrap();
-    sevenz_refusals(archive, &config)
+    sevenz_refusals(header, &config)
 }
 
 fn visit(
-    archive: &Archive,
+    header: &SevenZHeader,
     source: Vec<u8>,
 ) -> (Vec<String>, std::result::Result<(), sevenz_rust2::Error>) {
     let mut names = Vec::new();
     let result = decode_archive_entries(
         &mut Cursor::new(source),
-        archive,
+        header,
         ParallelDecode::Sequential,
         DecodeKnobs::production(),
         &mut |entry, _| {
@@ -2369,10 +2383,10 @@ fn visit(
 #[test]
 fn test_stream_less_entry_before_a_block_is_admitted() {
     let bytes = make_sevenz_archive_with_empty_file();
-    let archive = Archive::read(&mut Cursor::new(bytes.clone()), &Password::empty()).unwrap();
+    let header = read_sevenz_header(&mut Cursor::new(bytes.clone())).unwrap();
 
-    assert!(block_refusals(&archive).is_empty());
-    let (visited, result) = visit(&archive, bytes);
+    assert!(block_refusals(&header).is_empty());
+    let (visited, result) = visit(&header, bytes);
     result.unwrap();
     assert!(visited.contains(&"full.txt".to_string()));
 }
@@ -2385,22 +2399,22 @@ fn test_stream_less_entry_before_a_block_is_admitted() {
 #[test]
 fn test_stream_less_entry_inside_a_block_is_refused_and_upstream_drops_a_file() {
     let bytes = load_fixture("interleaved-empty.7z");
-    let archive = Archive::read(&mut Cursor::new(bytes.clone()), &Password::empty()).unwrap();
-    let stream_files: Vec<_> = archive
-        .files
+    let header = read_sevenz_header(&mut Cursor::new(bytes.clone())).unwrap();
+    let stream_files: Vec<_> = header
+        .files()
         .iter()
         .filter(|f| f.has_stream && f.size > 0)
         .map(|f| f.name.clone())
         .collect();
 
-    let refusals = block_refusals(&archive);
+    let refusals = block_refusals(&header);
     assert_eq!(refusals.len(), 1);
-    assert_eq!(refusals[0].scope, RefusalScope::Block(0));
+    assert_eq!(refusals[0].scope, RefusalScope::Block(first_block(&header)));
     assert_matches!(refusals[0].error, ArchiveError::InvalidArchive(_));
 
     // If sevenz-rust2 starts visiting every stream file, the predicate can
     // be relaxed. The walk itself fails closed on the dropped file.
-    let (visited, result) = visit(&archive, bytes);
+    let (visited, result) = visit(&header, bytes);
     let dropped = stream_files.iter().filter(|n| !visited.contains(n)).count();
     assert_eq!(dropped, 1, "{visited:?}");
     assert_matches!(result, Err(sevenz_rust2::Error::Other(_)));
@@ -2417,15 +2431,17 @@ fn test_decoder_memory_bound_uses_declared_file_sizes_beyond_the_unpack_size() {
         .validate()
         .unwrap();
 
+    let header = SevenZHeader::assume_checked(archive.clone());
     assert!(
-        sevenz_refusals(&archive, &config).is_empty(),
+        sevenz_refusals(&header, &config).is_empty(),
         "a small block is admitted"
     );
 
     archive.files[0].size = 512 * 1024 * 1024;
-    let refusals: Vec<_> = sevenz_refusals(&archive, &config)
+    let header = SevenZHeader::assume_checked(archive);
+    let refusals: Vec<_> = sevenz_refusals(&header, &config)
         .into_iter()
-        .filter(|r| r.scope == RefusalScope::Block(0))
+        .filter(|r| r.scope == RefusalScope::Block(first_block(&header)))
         .collect();
     assert_eq!(refusals.len(), 1);
     assert_matches!(
@@ -2463,7 +2479,10 @@ fn test_payload_by_block_skips_anti_items_and_stream_less_files() {
     archive.stream_map.file_block_index = vec![None, Some(0), Some(0), Some(0)];
     let slots = [None, Some(a), Some(empty), Some(b)];
 
-    assert_eq!(payload_by_block(&archive, &slots), [vec![(1, a), (3, b)]]);
+    assert_eq!(
+        payload_by_block(&SevenZHeader::assume_checked(archive), &slots),
+        [vec![(1, a), (3, b)]]
+    );
 }
 
 struct FailingReader(Option<io::Error>);

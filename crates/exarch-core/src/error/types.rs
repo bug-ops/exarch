@@ -315,7 +315,11 @@ pub enum ArchiveError {
         reason: String,
     },
 
-    /// Extraction stopped mid-archive with partial output on disk.
+    /// Extraction stopped mid-archive after recording progress.
+    ///
+    /// `writes` says whether that output is still on disk
+    /// ([`PartialWrites::Kept`]) or was discarded by atomic rollback
+    /// ([`PartialWrites::RolledBack`]).
     #[error("{source}")]
     PartialExtraction {
         /// The original error that stopped extraction.
@@ -323,7 +327,47 @@ pub enum ArchiveError {
         source: Box<Self>,
         /// Report of what was written before the error.
         report: crate::ExtractionReport,
+        /// Whether the reported writes are still on disk.
+        writes: PartialWrites,
     },
+}
+
+/// Fate of the files recorded in a [`ArchiveError::PartialExtraction`] report.
+///
+/// Atomic extraction discards its temporary directory on failure, so the
+/// report's counters describe work that no longer exists on disk. Front ends
+/// use this state to avoid presenting those counters as leftovers.
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::PartialWrites;
+///
+/// assert_eq!(PartialWrites::Kept.as_str(), "kept");
+/// assert_eq!(PartialWrites::RolledBack.as_str(), "rolled_back");
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PartialWrites {
+    /// The written files remain in the destination.
+    Kept,
+    /// Atomic extraction discarded the written files with its temporary
+    /// directory.
+    ///
+    /// Cleanup is best effort: a failed removal can leave a `.tmp*` sibling
+    /// in the destination's parent directory.
+    RolledBack,
+}
+
+impl PartialWrites {
+    /// Stable identifier used in machine-readable output.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Kept => "kept",
+            Self::RolledBack => "rolled_back",
+        }
+    }
 }
 
 impl From<std::io::Error> for ArchiveError {
@@ -469,9 +513,49 @@ impl ArchiveError {
             Self::PartialExtraction {
                 source: Box::new(err),
                 report,
+                writes: PartialWrites::Kept,
             }
         } else {
             err
+        }
+    }
+
+    /// Marks a [`Self::PartialExtraction`] as discarded by atomic rollback;
+    /// any other error is returned unchanged.
+    ///
+    /// [`extract_archive_with_options`](crate::extract_archive_with_options)
+    /// applies this itself for atomic extraction. Callers that stage and
+    /// discard output on their own can use it to keep the reported
+    /// [`PartialWrites`] truthful.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::ArchiveError;
+    /// use exarch_core::ExtractionReport;
+    /// use exarch_core::PartialWrites;
+    ///
+    /// let err = ArchiveError::PartialExtraction {
+    ///     source: Box::new(ArchiveError::SecurityViolation { reason: "x".into() }),
+    ///     report: ExtractionReport::default(),
+    ///     writes: PartialWrites::Kept,
+    /// };
+    /// match err.rolled_back() {
+    ///     ArchiveError::PartialExtraction { writes, .. } => {
+    ///         assert_eq!(writes, PartialWrites::RolledBack);
+    ///     }
+    ///     other => panic!("unexpected: {other:?}"),
+    /// }
+    /// ```
+    #[must_use]
+    pub fn rolled_back(self) -> Self {
+        match self {
+            Self::PartialExtraction { source, report, .. } => Self::PartialExtraction {
+                source,
+                report,
+                writes: PartialWrites::RolledBack,
+            },
+            other => other,
         }
     }
 }
@@ -817,6 +901,7 @@ mod tests {
         let err = ArchiveError::PartialExtraction {
             source: Box::new(source),
             report: ExtractionReport::new(),
+            writes: PartialWrites::Kept,
         };
         let display = err.to_string();
         assert!(display.contains("quota exceeded"));
@@ -831,6 +916,7 @@ mod tests {
         let err = ArchiveError::PartialExtraction {
             source: Box::new(security_err),
             report: ExtractionReport::new(),
+            writes: PartialWrites::Kept,
         };
         assert!(err.is_security_violation());
 
@@ -838,6 +924,7 @@ mod tests {
         let err2 = ArchiveError::PartialExtraction {
             source: Box::new(non_security_err),
             report: ExtractionReport::new(),
+            writes: PartialWrites::Kept,
         };
         assert!(!err2.is_security_violation());
     }
@@ -851,6 +938,7 @@ mod tests {
         let err = ArchiveError::PartialExtraction {
             source: Box::new(recoverable),
             report: ExtractionReport::new(),
+            writes: PartialWrites::Kept,
         };
         assert!(err.is_recoverable());
     }
@@ -927,6 +1015,7 @@ mod tests {
         let err = ArchiveError::PartialExtraction {
             source: Box::new(source),
             report: ExtractionReport::new(),
+            writes: PartialWrites::Kept,
         };
         assert_eq!(err.error_code(), "ZIP_BOMB");
     }

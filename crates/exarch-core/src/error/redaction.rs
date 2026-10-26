@@ -418,6 +418,7 @@ mod tests {
                 path: PathBuf::from("../../etc/passwd"),
             }),
             report: ExtractionReport::new(),
+            writes: crate::PartialWrites::Kept,
         };
         assert_eq!(err.redacted_path().as_deref(), Some("../../etc/passwd"));
     }

@@ -69,6 +69,7 @@ pub use error::EndRecordKind;
 pub use error::FfiErrorMessage;
 pub use error::HiddenRegion;
 pub use error::IoContext;
+pub use error::PartialWrites;
 pub use error::QuotaResource;
 pub use error::Result;
 pub use error::ZipBombDetails;

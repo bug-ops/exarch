@@ -30,10 +30,12 @@ use crate::inspection::report::IssueSeverity;
 use crate::inspection::report::VerificationIssue;
 use crate::inspection::report::VerificationReport;
 use crate::security::fs_view::CollisionKind;
+use crate::security::fs_view::Conflict;
 use crate::security::fs_view::FsView;
 use crate::security::fs_view::LinkKind;
 use crate::security::fs_view::NameCollision;
 use crate::security::fs_view::Node;
+use crate::security::fs_view::Occupant;
 use crate::security::fs_view::VirtualTree;
 use crate::security::fs_view::check_link_target_length;
 use crate::security::fs_view::check_name_lengths;
@@ -122,8 +124,8 @@ fn verify_with_tree(
         let materialized =
             verify_deferred_hardlink(entry, config, &temp_dest, &mut tree, &mut hardlink_tracker);
         lists[index].extend(collision_issues(&mut tree));
-        if let Err(e) = materialized {
-            lists[index].push(VerificationIssue::from_error(&e, Some(entry.path.clone())));
+        if let Err(issue) = materialized {
+            lists[index].push(issue);
         }
     }
 
@@ -274,7 +276,13 @@ where
 /// Verification models extraction that skips an existing entry. With
 /// overwrite semantics extraction keeps the last entry at a path, which
 /// verification cannot model. A symlink entry over a path an earlier entry
-/// created as a file is reported, since the two semantics diverge there.
+/// created as a file is reported as a security finding, since overwriting
+/// replaces the file and changes what the path resolves to. Where overwriting
+/// fails closed and replaces nothing (a symlink over a symlink or directory,
+/// a file over a directory or symlink, a hardlink over any earlier entry; a
+/// symlink repeating an earlier symlink's target is not noted at all) the
+/// entry is only noted as a Low [`IssueCategory::InvalidArchive`] issue, so the
+/// status stays `PASS`.
 ///
 /// Hardlinks are materialized after every other entry, so their path and
 /// target are validated against the final tree.
@@ -470,19 +478,24 @@ fn verify_entry(
             _ => {
                 let recorded = record_entry(tree, safe_path.as_path(), &entry.kind);
                 issues.extend(collision_issues(tree));
-                if let Err(e) = recorded {
-                    let error = insert_failure(tree, dest, safe_path.as_path(), &entry.kind, e);
-                    issues.push(VerificationIssue::from_error(
-                        &error,
-                        Some(entry.path.clone()),
+                if let Err(conflict) = recorded {
+                    issues.push(placement_issue(
+                        tree,
+                        dest,
+                        entry,
+                        safe_path.as_path(),
+                        conflict,
                     ));
                 }
             }
         }
     }
 
-    // Permission validation
+    // Extraction never applies a symlink's mode, so it cannot be unsafe.
+    // TODO(#750): a hardlink's mode is still checked although extraction never
+    // applies it.
     if let Some(mode) = entry.mode
+        && !matches!(entry.kind, ManifestEntryKind::Symlink { .. })
         && let Err(e) = check_permissions(&entry.path, mode, config)
     {
         issues.push(VerificationIssue::from_error(&e, Some(entry.path.clone())));
@@ -584,7 +597,7 @@ fn record_entry(
     tree: &mut VirtualTree,
     path: &Path,
     kind: &ManifestEntryKind,
-) -> std::io::Result<()> {
+) -> std::result::Result<(), Conflict> {
     let node = match kind {
         ManifestEntryKind::File => Node::File,
         ManifestEntryKind::Directory => Node::Dir,
@@ -598,7 +611,7 @@ fn record_entry(
             return Ok(());
         }
     };
-    tree.insert(path, node)
+    tree.try_insert(path, node)
 }
 
 /// Phase two for a hardlink: re-validates its link path and target against the
@@ -609,65 +622,121 @@ fn verify_deferred_hardlink(
     dest: &DestDir,
     tree: &mut VirtualTree,
     hardlink_tracker: &mut HardlinkTracker,
-) -> Result<()> {
+) -> std::result::Result<(), VerificationIssue> {
     let ManifestEntryKind::Hardlink {
         target: LinkTarget::Recorded(target),
     } = &entry.kind
     else {
         return Ok(());
     };
-    let link_path = SafePath::validate_in(&entry.path, dest, config, tree)?;
-    hardlink_tracker.validate_hardlink_in(&link_path, target, dest, config, tree)?;
+    let issue = |e: ArchiveError| VerificationIssue::from_error(&e, Some(entry.path.clone()));
+    let link_path = SafePath::validate_in(&entry.path, dest, config, tree).map_err(issue)?;
+    hardlink_tracker
+        .validate_hardlink_in(&link_path, target, dest, config, tree)
+        .map_err(issue)?;
     let target_full = dest.as_path().join(target);
     if !tree.exists(&target_full) {
-        return Err(hardlink_target_missing(target));
+        return Err(issue(hardlink_target_missing(target)));
     }
     if tree.resolves_to_dir(&target_full) {
-        return Err(ArchiveError::InvalidArchive(format!(
+        return Err(issue(ArchiveError::InvalidArchive(format!(
             "hardlink target is a directory: {}",
             target.display()
-        )));
+        ))));
     }
-    tree.insert(link_path.as_path(), Node::File)
-        .map_err(|e| insert_failure(tree, dest, link_path.as_path(), &entry.kind, e))
+    // A file over a file is accepted by the tree, but a hardlink cannot
+    // replace one: it is created exclusively.
+    let occupant = tree.occupant(link_path.as_path());
+    let conflict = match (tree.try_insert(link_path.as_path(), Node::File), occupant) {
+        (Err(conflict), _) => conflict,
+        (Ok(()), Some(occupant)) => Conflict::already_exists(occupant),
+        (Ok(()), None) => return Ok(()),
+    };
+    Err(placement_issue(
+        tree,
+        dest,
+        entry,
+        link_path.as_path(),
+        conflict,
+    ))
 }
 
-/// Classifies a failed tree insert. A failure that involves a link (the entry
-/// is one, or the path crosses or lands on one) depends on how extraction
+/// What extraction does at a path an earlier entry already holds.
+enum Placement {
+    /// Fails with every option set, or the failure is in the parent chain.
+    FailsAlways,
+    /// Skipped by default, but overwriting replaces a file with a symlink and
+    /// changes what the path resolves to.
+    ReplacesUnderOverwrite,
+    /// Skipped by default; overwriting fails closed and replaces nothing.
+    RefusedUnderOverwrite(Occupant),
+}
+
+impl Placement {
+    fn of(kind: &ManifestEntryKind, conflict: &Conflict) -> Self {
+        match (kind, conflict.occupant) {
+            (ManifestEntryKind::Directory, _) | (_, None) => Self::FailsAlways,
+            (ManifestEntryKind::Symlink { .. }, Some(Occupant::File)) => {
+                Self::ReplacesUnderOverwrite
+            }
+            (_, Some(occupant)) => Self::RefusedUnderOverwrite(occupant),
+        }
+    }
+}
+
+/// Reports a failed tree insert. A failure that involves a link (the entry is
+/// one, or the path crosses or lands on one) depends on how extraction
 /// resolves the link, so it is a security finding; any other failure is a
-/// structural problem of the archive.
-fn insert_failure(
+/// structural problem of the archive. A failure that only overwriting causes,
+/// and that replaces nothing, is a Low note: default extraction skips the
+/// entry.
+fn placement_issue(
     tree: &VirtualTree,
     dest: &DestDir,
+    entry: &ArchiveEntry,
     rel: &Path,
-    kind: &ManifestEntryKind,
-    error: std::io::Error,
-) -> ArchiveError {
-    let crosses_link = || {
-        rel.ancestors()
-            .take_while(|p| !p.as_os_str().is_empty())
-            .any(|p| tree.is_symlink(&dest.as_path().join(p)).unwrap_or(false))
+    conflict: Conflict,
+) -> VerificationIssue {
+    let kind = &entry.kind;
+    let entry_path = Some(entry.path.clone());
+    let error = match Placement::of(kind, &conflict) {
+        Placement::RefusedUnderOverwrite(occupant) => {
+            let mut issue = VerificationIssue::new(
+                IssueSeverity::Low,
+                IssueCategory::InvalidArchive,
+                format!(
+                    "extraction with overwrite fails at {}: an earlier entry is a {} (default \
+                     extraction skips this entry)",
+                    rel.display(),
+                    occupant.noun()
+                ),
+            );
+            issue.entry_path = entry_path;
+            return issue;
+        }
+        Placement::ReplacesUnderOverwrite => ArchiveError::SecurityViolation {
+            reason: format!(
+                "extraction can fail at {} unless duplicates are skipped: {}",
+                rel.display(),
+                conflict.error
+            ),
+        },
+        Placement::FailsAlways => {
+            let crosses_link = || {
+                rel.ancestors()
+                    .take_while(|p| !p.is_empty())
+                    .any(|p| tree.is_symlink(&dest.as_path().join(p)).unwrap_or(false))
+            };
+            if kind.is_link() || crosses_link() {
+                ArchiveError::SecurityViolation {
+                    reason: format!("extraction fails at {}: {}", rel.display(), conflict.error),
+                }
+            } else {
+                ArchiveError::Io(conflict.error)
+            }
+        }
     };
-    if !kind.is_link() && !crosses_link() {
-        return ArchiveError::Io(error);
-    }
-    // A symlink over an existing entry is skipped by default, so only that
-    // case depends on the options; the other shapes fail under every set.
-    let skipped_by_default = matches!(kind, ManifestEntryKind::Symlink { .. })
-        && error.kind() == std::io::ErrorKind::AlreadyExists;
-    let when = if skipped_by_default {
-        "can fail"
-    } else {
-        "fails"
-    };
-    let unless = if skipped_by_default {
-        " unless duplicates are skipped"
-    } else {
-        ""
-    };
-    ArchiveError::SecurityViolation {
-        reason: format!("extraction {when} at {}{unless}: {error}", rel.display()),
-    }
+    VerificationIssue::from_error(&error, entry_path)
 }
 
 fn missing_link_target(kind: ManifestEntryType) -> ArchiveError {
@@ -864,15 +933,100 @@ mod tests {
         );
     }
 
+    fn assert_overwrite_note(entries: Vec<(&str, ManifestEntryKind)>, expected: &str) {
+        let report = verify_manifest(&manifest_of(entries), &link_config(), None).unwrap();
+        assert_eq!(report.security_status(), CheckStatus::Pass, "{report:?}");
+        let note: Vec<_> = report
+            .issues()
+            .iter()
+            .filter(|i| i.severity == IssueSeverity::Low)
+            .collect();
+        assert_eq!(note.len(), 1, "{:?}", report.issues());
+        assert_eq!(note[0].category, IssueCategory::InvalidArchive);
+        assert!(note[0].message.contains(expected), "{}", note[0].message);
+    }
+
     #[test]
-    fn symlink_over_an_implicit_dir_fails_the_security_status() {
-        assert_link_placement_finding(
+    fn symlink_over_an_implicit_dir_is_an_overwrite_note() {
+        assert_overwrite_note(
             vec![
                 ("sub", ManifestEntryKind::Directory),
                 ("d/f", ManifestEntryKind::File),
                 ("d", symlink_to("sub")),
             ],
+            "extraction with overwrite fails at d: an earlier entry is a directory",
+        );
+    }
+
+    #[test]
+    fn symlink_over_a_symlink_is_an_overwrite_note() {
+        assert_overwrite_note(
+            vec![("d", symlink_to("sub")), ("d", symlink_to("other"))],
+            "fails at d: an earlier entry is a symlink",
+        );
+    }
+
+    #[test]
+    fn symlink_repeating_the_same_target_is_not_noted() {
+        let report = verify_manifest(
+            &manifest_of(vec![("d", symlink_to("sub")), ("d", symlink_to("sub"))]),
+            &link_config(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(report.status(), VerificationStatus::Pass);
+        assert!(report.issues().is_empty(), "{:?}", report.issues());
+    }
+
+    #[test]
+    fn file_over_a_dir_or_symlink_is_an_overwrite_note() {
+        assert_overwrite_note(
+            vec![
+                ("d/f", ManifestEntryKind::File),
+                ("d", ManifestEntryKind::File),
+            ],
+            "fails at d: an earlier entry is a directory",
+        );
+        assert_overwrite_note(
+            vec![("s", symlink_to("t")), ("s", ManifestEntryKind::File)],
+            "fails at s: an earlier entry is a symlink",
+        );
+    }
+
+    #[test]
+    fn hardlink_over_any_earlier_entry_is_an_overwrite_note() {
+        let target = ("t", ManifestEntryKind::File);
+        for (earlier, noun) in [
+            (ManifestEntryKind::File, "file"),
+            (ManifestEntryKind::Directory, "directory"),
+            (symlink_to("t"), "symlink"),
+        ] {
+            assert_overwrite_note(
+                vec![target.clone(), ("h", earlier), ("h", hardlink_to("t"))],
+                &format!("fails at h: an earlier entry is a {noun}"),
+            );
+        }
+    }
+
+    #[test]
+    fn symlink_over_a_file_stays_a_security_finding() {
+        assert_link_placement_finding(
+            vec![("d", ManifestEntryKind::File), ("d", symlink_to("sub"))],
             "extraction can fail at d unless duplicates are skipped:",
+        );
+    }
+
+    #[test]
+    fn repointing_a_link_an_earlier_link_resolved_through_is_an_overwrite_note() {
+        assert_overwrite_note(
+            vec![
+                ("sub", ManifestEntryKind::Directory),
+                ("sub/deep", ManifestEntryKind::Directory),
+                ("d", symlink_to("sub/deep")),
+                ("e", symlink_to("d/../..")),
+                ("d", symlink_to("sub")),
+            ],
+            "fails at d: an earlier entry is a symlink",
         );
     }
 
@@ -901,6 +1055,43 @@ mod tests {
                 .issues()
                 .iter()
                 .any(|i| i.category == IssueCategory::InvalidArchive)
+        );
+    }
+
+    fn manifest_with_mode(path: &str, kind: ManifestEntryKind, mode: u32) -> ArchiveManifest {
+        let mut manifest = ArchiveManifest::new(crate::formats::detect::ArchiveType::Tar);
+        let mut entry = ArchiveEntry::new(PathBuf::from(path), kind, 0);
+        entry.mode = Some(mode);
+        manifest.add_entry(entry).unwrap();
+        manifest
+    }
+
+    #[test]
+    fn symlink_mode_is_not_a_permission_finding() {
+        let manifest = manifest_with_mode("l", symlink_to("t"), 0o777);
+        let report = verify_manifest(&manifest, &link_config(), None).unwrap();
+        assert_eq!(report.status(), VerificationStatus::Pass);
+        assert!(
+            report
+                .issues()
+                .iter()
+                .all(|i| i.category != IssueCategory::InvalidPermissions),
+            "{:?}",
+            report.issues()
+        );
+    }
+
+    #[test]
+    fn world_writable_regular_file_is_still_a_permission_finding() {
+        let manifest = manifest_with_mode("f", ManifestEntryKind::File, 0o666);
+        let report = verify_manifest(&manifest, &link_config(), None).unwrap();
+        assert!(
+            report
+                .issues()
+                .iter()
+                .any(|i| i.category == IssueCategory::InvalidPermissions),
+            "{:?}",
+            report.issues()
         );
     }
 

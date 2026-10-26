@@ -278,6 +278,55 @@ impl CollisionKind {
     }
 }
 
+/// What already occupies a path an insert collided with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Occupant {
+    /// A regular file or materialized hardlink.
+    File,
+    /// A directory.
+    Directory,
+    /// A symlink, readable or opaque.
+    Symlink,
+}
+
+impl Occupant {
+    /// The noun used in reports.
+    pub(crate) const fn noun(self) -> &'static str {
+        match self {
+            Self::File => "file",
+            Self::Directory => "directory",
+            Self::Symlink => "symlink",
+        }
+    }
+}
+
+/// A failed [`VirtualTree::try_insert`].
+#[derive(Debug)]
+pub struct Conflict {
+    /// The error `insert` would report.
+    pub(crate) error: io::Error,
+    /// `None` when the failure is in the parent chain, not at the path itself.
+    pub(crate) occupant: Option<Occupant>,
+}
+
+impl Conflict {
+    pub(crate) fn already_exists(occupant: Occupant) -> Self {
+        Self {
+            error: io::Error::from(io::ErrorKind::AlreadyExists),
+            occupant: Some(occupant),
+        }
+    }
+}
+
+impl From<io::Error> for Conflict {
+    fn from(error: io::Error) -> Self {
+        Self {
+            error,
+            occupant: None,
+        }
+    }
+}
+
 type FoldFn = for<'a> fn(&'a OsStr) -> Cow<'a, OsStr>;
 
 /// The kind of a node in the in-memory tree.
@@ -383,15 +432,21 @@ impl VirtualTree {
     /// it by default but replaces the file when overwriting): the file is
     /// replaced so later entries are checked against the riskier tree, and an
     /// error is returned so the archive is never reported as safe. A symlink
-    /// over a directory is refused the same way, but the directory stays.
+    /// over a directory or a symlink with a different target is refused the
+    /// same way, but the existing node stays; a symlink with the same target is
+    /// an unchanged duplicate.
     ///
     /// # Errors
     ///
-    /// Returns an error where extraction can fail: a parent that is a file or
+    /// Returns a conflict where extraction can fail: a parent that is a file or
     /// a dangling symlink, a parent chain that loops or leaves the root, a
-    /// directory entry over an existing non-directory, or a symlink over an
-    /// earlier file or directory.
-    pub fn insert(&mut self, rel: &Path, node: Node) -> io::Result<()> {
+    /// directory entry over an existing non-directory, a symlink over an
+    /// earlier file, directory or symlink with another target, or a file over
+    /// an earlier directory (`IsADirectory`) or symlink.
+    ///
+    /// A failure also names what already occupies the path, so a caller can
+    /// tell what overwriting would do.
+    pub(crate) fn try_insert(&mut self, rel: &Path, node: Node) -> Result<(), Conflict> {
         let Some(name) = rel.file_name() else {
             return Ok(());
         };
@@ -407,14 +462,13 @@ impl VirtualTree {
             }
             (Some(id), Node::Dir) => match self.node(id).kind {
                 Node::Dir => Ok(()),
-                Node::File | Node::OpaqueSymlink => {
-                    Err(io::Error::from(io::ErrorKind::AlreadyExists))
-                }
+                Node::File => Err(Conflict::already_exists(Occupant::File)),
+                Node::OpaqueSymlink => Err(Conflict::already_exists(Occupant::Symlink)),
                 Node::Symlink(_) => {
                     if self.resolves_to_dir(&self.root.join(rel)) {
                         Ok(())
                     } else {
-                        Err(io::Error::from(io::ErrorKind::AlreadyExists))
+                        Err(Conflict::already_exists(Occupant::Symlink))
                     }
                 }
             },
@@ -422,14 +476,50 @@ impl VirtualTree {
                 match self.node(id).kind {
                     Node::File => {
                         self.node_mut(id).kind = node;
-                        Err(io::Error::from(io::ErrorKind::AlreadyExists))
+                        Err(Conflict::already_exists(Occupant::File))
                     }
-                    Node::Dir => Err(io::Error::from(io::ErrorKind::AlreadyExists)),
-                    Node::Symlink(_) | Node::OpaqueSymlink => Ok(()),
+                    Node::Dir => Err(Conflict::already_exists(Occupant::Directory)),
+                    Node::Symlink(ref kept) if matches!(&node, Node::Symlink(t) if t == kept) => {
+                        Ok(())
+                    }
+                    Node::Symlink(_) | Node::OpaqueSymlink => {
+                        Err(Conflict::already_exists(Occupant::Symlink))
+                    }
                 }
             }
-            (Some(_), _) => Ok(()),
+            (Some(id), Node::File) => match self.node(id).kind {
+                Node::File => Ok(()),
+                Node::Dir => Err(Conflict {
+                    error: io::Error::from(io::ErrorKind::IsADirectory),
+                    occupant: Some(Occupant::Directory),
+                }),
+                Node::Symlink(_) | Node::OpaqueSymlink => {
+                    Err(Conflict::already_exists(Occupant::Symlink))
+                }
+            },
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn insert(&mut self, rel: &Path, node: Node) -> io::Result<()> {
+        self.try_insert(rel, node)
+            .map_err(|conflict| conflict.error)
+    }
+
+    /// What an earlier entry left at `rel`, without following a link at the
+    /// path itself; a parent link is followed as extraction would.
+    pub(crate) fn occupant(&self, rel: &Path) -> Option<Occupant> {
+        let name = rel.file_name()?;
+        let parent = match self.resolve(&self.root.join(rel.parent()?)) {
+            Ok(Resolved::Inside { id, .. }) if self.node(id).kind == Node::Dir => id,
+            _ => return None,
+        };
+        let found = self.lookup(parent, name)?;
+        Some(match self.node(found.id).kind {
+            Node::Dir => Occupant::Directory,
+            Node::File => Occupant::File,
+            Node::Symlink(_) | Node::OpaqueSymlink => Occupant::Symlink,
+        })
     }
 
     /// Returns `true` if `path` resolves, through symlinks, to a directory.
@@ -1055,7 +1145,7 @@ mod tests {
         put(&mut t, "a", Node::File);
         let _ = t.insert(Path::new("A"), Node::Dir);
         put(&mut t, "link", sym("a"));
-        put(&mut t, "LINK", Node::File);
+        let _ = t.insert(Path::new("LINK"), Node::File);
         assert_eq!(
             collisions_of(&mut t),
             [
@@ -1214,7 +1304,10 @@ mod tests {
             t.insert(Path::new("d"), Node::Dir).unwrap_err().kind(),
             io::ErrorKind::AlreadyExists
         );
-        put(&mut t, "d", Node::File);
+        assert_eq!(
+            t.insert(Path::new("d"), Node::File).unwrap_err().kind(),
+            io::ErrorKind::AlreadyExists
+        );
         assert!(t.is_symlink(Path::new("/dest/d")).unwrap());
 
         put(&mut t, "f", Node::File);
@@ -1226,7 +1319,7 @@ mod tests {
     fn opaque_symlink_collision_is_mixed() {
         let mut t = folding_tree();
         put(&mut t, "link", Node::OpaqueSymlink);
-        put(&mut t, "LINK", Node::File);
+        let _ = t.insert(Path::new("LINK"), Node::File);
         assert_eq!(
             collisions_of(&mut t),
             [("link".into(), "LINK".into(), CollisionKind::Mixed)]
@@ -1265,8 +1358,61 @@ mod tests {
     fn file_never_replaces_existing_symlink() {
         let mut t = tree();
         put(&mut t, "y", sym("."));
-        put(&mut t, "y", Node::File);
+        let err = t.insert(Path::new("y"), Node::File).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
         assert!(t.is_symlink(Path::new("/dest/y")).unwrap());
+    }
+
+    #[test]
+    fn symlink_over_symlink_is_refused_and_keeps_the_first() {
+        let mut t = tree();
+        put(&mut t, "real", Node::Dir);
+        put(&mut t, "d", sym("real"));
+        for node in [sym("other"), Node::OpaqueSymlink] {
+            let conflict = t.try_insert(Path::new("d"), node).unwrap_err();
+            assert_eq!(conflict.error.kind(), io::ErrorKind::AlreadyExists);
+            assert_eq!(conflict.occupant, Some(Occupant::Symlink));
+        }
+        assert_eq!(
+            t.canonicalize(Path::new("/dest/d")).unwrap(),
+            PathBuf::from("/dest/real")
+        );
+    }
+
+    #[test]
+    fn symlink_repeating_the_same_target_is_an_unchanged_duplicate() {
+        let mut t = tree();
+        put(&mut t, "d", sym("real"));
+        put(&mut t, "d", sym("real"));
+        assert!(t.try_insert(Path::new("d"), Node::OpaqueSymlink).is_err());
+    }
+
+    #[test]
+    fn file_over_dir_is_refused_with_is_a_directory() {
+        let mut t = tree();
+        put(&mut t, "d/f", Node::File);
+        let conflict = t.try_insert(Path::new("d"), Node::File).unwrap_err();
+        assert_eq!(conflict.error.kind(), io::ErrorKind::IsADirectory);
+        assert_eq!(conflict.occupant, Some(Occupant::Directory));
+    }
+
+    #[test]
+    fn file_over_file_is_kept_silently() {
+        let mut t = tree();
+        put(&mut t, "f", Node::File);
+        put(&mut t, "f", Node::File);
+        assert_eq!(t.occupant(Path::new("f")), Some(Occupant::File));
+    }
+
+    #[test]
+    fn occupant_names_what_sits_at_the_path_itself() {
+        let mut t = tree();
+        put(&mut t, "real/f", Node::File);
+        put(&mut t, "alias", sym("real"));
+        assert_eq!(t.occupant(Path::new("real")), Some(Occupant::Directory));
+        assert_eq!(t.occupant(Path::new("alias")), Some(Occupant::Symlink));
+        assert_eq!(t.occupant(Path::new("alias/f")), Some(Occupant::File));
+        assert_eq!(t.occupant(Path::new("none")), None);
     }
 
     #[test]

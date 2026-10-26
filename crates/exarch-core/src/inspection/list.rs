@@ -1,7 +1,6 @@
 //! Archive listing implementation.
 
 use std::fs::File;
-use std::io::ErrorKind;
 use std::io::Read;
 use std::io::Seek;
 use std::io::SeekFrom;
@@ -29,10 +28,11 @@ use crate::formats::sevenz::LinkCapture;
 use crate::formats::sevenz::LinkOutcome;
 use crate::formats::sevenz::LinkTable;
 use crate::formats::sevenz::SevenZClass;
+use crate::formats::sevenz::SevenZHeader;
 use crate::formats::sevenz::SevenZKind;
 use crate::formats::sevenz::StoredLinkTarget;
 use crate::formats::sevenz::deliver_undecoded_links;
-use crate::formats::sevenz::is_password_error;
+use crate::formats::sevenz::read_sevenz_header;
 use crate::formats::sevenz::sevenz_entry_compression;
 use crate::formats::sevenz::verify_sevenz_blocks;
 use crate::formats::sevenz::walk_sevenz_links;
@@ -357,7 +357,7 @@ fn list_tar_entries<R: std::io::Read>(
         }
 
         require_non_empty_name(&path)?;
-        let tar_type = effective_entry_type(&entry);
+        let tar_type = effective_entry_type(&entry)?;
         let kind = NodeKind::directory_if(tar_type == tar::EntryType::Directory);
         if !admit_path(&path, kind, &mut manifest, listing)? {
             continue;
@@ -620,32 +620,14 @@ pub(crate) fn list_sevenz_reader<R: Read + Seek>(
     config: &SecurityConfig<Validated>,
     listing: &mut ListPass<'_, '_>,
 ) -> Result<ArchiveManifest> {
-    use sevenz_rust2::Archive;
-    use sevenz_rust2::Password;
-
-    let password = Password::empty();
-    let archive = match Archive::read(&mut source, &password) {
-        Ok(a) => a,
-        Err(e) => {
-            if is_password_error(&e) {
-                return Err(encrypted_archive_error());
-            }
-            if is_empty_sevenz_archive_reader(&e, &mut source) {
-                return Ok(ArchiveManifest::new(ArchiveType::SevenZ));
-            }
-            return Err(ArchiveError::InvalidArchive(format!(
-                "failed to open 7z archive: {e}"
-            )));
-        }
-    };
-
-    list_sevenz_parsed(&archive, source, config, listing)
+    let header = read_sevenz_header(&mut source)?;
+    list_sevenz_parsed(&header, source, config, listing)
 }
 
 /// Lists an already-parsed 7z archive, decoding its blocks when `listing`
 /// carries an integrity pass.
 pub(crate) fn list_sevenz_parsed<R: Read + Seek>(
-    archive: &sevenz_rust2::Archive,
+    header: &SevenZHeader,
     mut source: R,
     config: &SecurityConfig<Validated>,
     listing: &mut ListPass<'_, '_>,
@@ -656,11 +638,11 @@ pub(crate) fn list_sevenz_parsed<R: Read + Seek>(
         slots,
         compression,
         links,
-    } = list_sevenz_archive(archive, source_len, config, listing)?;
+    } = list_sevenz_archive(header, source_len, config, listing)?;
     let list_mode = listing.mode();
     let targets = SevenZTargets::of(listing, config.allowed.symlinks);
     let settle_header_targets = |manifest: &mut ArchiveManifest| {
-        deliver_undecoded_links(archive, links.indices(), &mut |index, outcome| {
+        deliver_undecoded_links(header, links.indices(), &mut |index, outcome| {
             record_link_target(manifest, &links, list_mode, index, outcome)
         })
         .map(drop)
@@ -669,12 +651,12 @@ pub(crate) fn list_sevenz_parsed<R: Read + Seek>(
     match targets {
         SevenZTargets::Leave(pass) => {
             if let Some(pass) = pass {
-                verify_sevenz_blocks(archive, &mut source, pass, &slots, None)?;
+                verify_sevenz_blocks(header, &mut source, pass, &slots, None)?;
             }
         }
         SevenZTargets::Free => settle_header_targets(&mut manifest)?,
         SevenZTargets::Walk => walk_sevenz_links(
-            archive,
+            header,
             &mut source,
             &compression,
             config,
@@ -689,7 +671,7 @@ pub(crate) fn list_sevenz_parsed<R: Read + Seek>(
                 links: &links,
                 set: &mut |position, target| manifest.set_link_target(position, target),
             };
-            verify_sevenz_blocks(archive, &mut source, pass, &slots, Some(capture))?;
+            verify_sevenz_blocks(header, &mut source, pass, &slots, Some(capture))?;
         }
     }
     Ok(manifest)
@@ -762,34 +744,6 @@ fn link_target_of(outcome: LinkOutcome, mode: ListMode) -> Result<LinkTarget> {
     }
 }
 
-/// Checks whether a sevenz-rust2 parse failure is due to a valid empty 7z
-/// archive, using a generic seekable reader.
-fn is_empty_sevenz_archive_reader<R: Read + Seek>(
-    err: &sevenz_rust2::Error,
-    source: &mut R,
-) -> bool {
-    const SEVENZ_MAGIC: [u8; 6] = [0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C];
-    const EMPTY_ARCHIVE_SIZE: u64 = 32;
-
-    let is_eof = matches!(err, sevenz_rust2::Error::Io(io_err, _) if io_err.kind() == ErrorKind::UnexpectedEof);
-    if !is_eof {
-        return false;
-    }
-
-    let Ok(size) = source.seek(std::io::SeekFrom::End(0)) else {
-        return false;
-    };
-    if size != EMPTY_ARCHIVE_SIZE {
-        return false;
-    }
-
-    let Ok(_) = source.seek(std::io::SeekFrom::Start(0)) else {
-        return false;
-    };
-    let mut magic = [0u8; 6];
-    source.read_exact(&mut magic).is_ok() && magic == SEVENZ_MAGIC
-}
-
 /// Builds a manifest from a parsed 7z archive structure.
 ///
 /// No NUL-byte check is applied to `entry.name`, unlike `list_tar_entries`
@@ -800,7 +754,7 @@ fn is_empty_sevenz_archive_reader<R: Read + Seek>(
 /// scope decision — it would need re-checking if `sevenz-rust2` ever changes
 /// that truncation behavior.
 fn list_sevenz_archive(
-    archive: &sevenz_rust2::Archive,
+    header: &SevenZHeader,
     source_len: u64,
     config: &SecurityConfig<Validated>,
     listing: &mut ListPass<'_, '_>,
@@ -808,15 +762,15 @@ fn list_sevenz_archive(
     let list_mode = listing.mode();
     let mut manifest = ArchiveManifest::new(ArchiveType::SevenZ);
     let mut quota = QuotaTracker::new();
-    let compression = sevenz_entry_compression(archive, source_len)?;
+    let compression = sevenz_entry_compression(header, source_len)?;
     // One element per archive file: the integrity slot of the manifest entry it
     // became, or `None` for an anti item (never listed), an entry dropped for
     // its path, or without a pass.
-    let mut slots = Vec::with_capacity(archive.files.len());
+    let mut slots = Vec::with_capacity(header.files().len());
     let mut links = LinkTable::default();
 
-    for (index, (entry, compression)) in archive
-        .files
+    for (index, (entry, compression)) in header
+        .files()
         .iter()
         .zip(compression.iter().copied())
         .enumerate()

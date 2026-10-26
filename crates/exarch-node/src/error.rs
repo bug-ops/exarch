@@ -1,6 +1,7 @@
 //! Error conversion for Node.js bindings.
 
 use exarch_core::ArchiveError as CoreError;
+use exarch_core::PartialWrites;
 use exarch_core::QuotaResource as CoreQuotaResource;
 use exarch_core::format_entry_path_for_error;
 use exarch_core::sanitize_io_error_for_error;
@@ -170,20 +171,31 @@ pub fn convert_error(err: CoreError) -> Error {
             msg.push_str(&reason);
             Error::new(Status::GenericFailure, msg)
         }
-        CoreError::PartialExtraction { source, report } => {
+        CoreError::PartialExtraction {
+            source,
+            report,
+            writes,
+        } => {
             // Preserve the specific error code (SYMLINK_ESCAPE, QUOTA_EXCEEDED,
             // etc.) from the inner source so JavaScript callers can
             // distinguish the error type. The partial-extraction
             // report fields from #210, plus filesSkipped/warnings from
-            // #508, are appended for caller inspection.
+            // #508, are appended while the writes remain on disk; a
+            // rolled-back atomic run reports only its state.
             let inner = convert_error(*source);
-            let mut msg = String::with_capacity(inner.reason.len() + 96);
+            let mut msg = String::with_capacity(inner.reason.len() + 112);
             msg.push_str(&inner.reason);
-            let _ = write!(
-                &mut msg,
-                " | filesExtracted={}, bytesWritten={}, filesSkipped={}, warnings={:?}",
-                report.files_extracted, report.bytes_written, report.files_skipped, report.warnings
-            );
+            let _ = write!(&mut msg, " | writes={}", writes.as_str());
+            if writes == PartialWrites::Kept {
+                let _ = write!(
+                    &mut msg,
+                    ", filesExtracted={}, bytesWritten={}, filesSkipped={}, warnings={:?}",
+                    report.files_extracted,
+                    report.bytes_written,
+                    report.files_skipped,
+                    report.warnings
+                );
+            }
             Error::new(Status::GenericFailure, msg)
         }
         // Forward-compat: a variant added to ArchiveError after this match was
@@ -472,6 +484,7 @@ mod tests {
         let err = CoreError::PartialExtraction {
             source: Box::new(source),
             report,
+            writes: PartialWrites::Kept,
         };
 
         let napi_err = convert_error(err);
@@ -519,6 +532,7 @@ mod tests {
         let err = CoreError::PartialExtraction {
             source: Box::new(source),
             report,
+            writes: PartialWrites::Kept,
         };
 
         let napi_err = convert_error(err);
@@ -533,6 +547,42 @@ mod tests {
         assert!(
             msg.contains("skipped 2 entries with disallowed extensions"),
             "message must contain the warning text, got: {msg}"
+        );
+    }
+
+    fn partial_symlink_escape(writes: PartialWrites) -> Error {
+        use exarch_core::ExtractionReport;
+
+        convert_error(CoreError::PartialExtraction {
+            source: Box::new(CoreError::SymlinkEscape {
+                path: PathBuf::from("ln"),
+            }),
+            report: ExtractionReport {
+                files_extracted: 2,
+                bytes_written: 2,
+                ..ExtractionReport::default()
+            },
+            writes,
+        })
+    }
+
+    /// Regression test for #747: a rolled-back atomic run must not present
+    /// its counters as files left on disk.
+    #[test]
+    fn test_partial_extraction_rolled_back_omits_counters() {
+        let msg = partial_symlink_escape(PartialWrites::RolledBack).reason;
+        assert!(msg.starts_with("SYMLINK_ESCAPE"), "got: {msg}");
+        assert!(msg.ends_with(" | writes=rolled_back"), "got: {msg}");
+        assert!(!msg.contains("filesExtracted"), "got: {msg}");
+        assert!(!msg.contains("bytesWritten"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_partial_extraction_kept_reports_writes_and_counters() {
+        let msg = partial_symlink_escape(PartialWrites::Kept).reason;
+        assert!(
+            msg.contains(" | writes=kept, filesExtracted=2, bytesWritten=2"),
+            "got: {msg}"
         );
     }
 
@@ -572,6 +622,7 @@ mod tests {
         let err = CoreError::PartialExtraction {
             source: Box::new(source),
             report,
+            writes: PartialWrites::Kept,
         };
 
         let napi_err = convert_error(err);
@@ -593,6 +644,7 @@ mod tests {
         let err = CoreError::PartialExtraction {
             source: Box::new(source),
             report,
+            writes: PartialWrites::Kept,
         };
 
         let napi_err = convert_error(err);
@@ -614,6 +666,7 @@ mod tests {
         let err = CoreError::PartialExtraction {
             source: Box::new(source),
             report,
+            writes: PartialWrites::Kept,
         };
 
         let napi_err = convert_error(err);

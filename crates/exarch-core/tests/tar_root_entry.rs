@@ -208,7 +208,7 @@ fn root_directory_entry_stays_a_no_op() {
 }
 
 #[test]
-fn trailing_slash_regular_entry_with_payload_is_a_file_not_a_directory() {
+fn trailing_slash_regular_entry_with_payload_is_refused_everywhere() {
     let bytes = tar_of(&[
         entry("sub/", tar::EntryType::Regular, b"12345", None),
         entry("sub/a.txt", tar::EntryType::Regular, b"hi", None),
@@ -218,15 +218,13 @@ fn trailing_slash_regular_entry_with_payload_is_a_file_not_a_directory() {
     let config = SecurityConfig::default();
     let out = TempDir::new().unwrap();
 
-    let extracted = extract_archive(&archive, out.path(), &config);
-    let listed = list_archive(&archive, &config);
-    let verified = verify_archive(&archive, &config);
+    let extracted = extract_archive(&archive, out.path(), &config).unwrap_err();
+    let listed = list_archive(&archive, &config).unwrap_err();
+    let verified = verify_archive(&archive, &config).unwrap_err();
 
-    assert!(extracted.is_err());
-    assert!(!verified.unwrap().is_safe());
-    let manifest = listed.unwrap();
-    assert_eq!(manifest.total_entries(), 2);
-    assert_eq!(manifest.entries()[0].kind, ManifestEntryKind::File);
+    assert_eq!(extracted.error_code(), "INVALID_ARCHIVE", "{extracted}");
+    assert_eq!(listed.error_code(), "INVALID_ARCHIVE", "{listed}");
+    assert_eq!(verified.error_code(), "INVALID_ARCHIVE", "{verified}");
     assert!(!out.path().join("sub/a.txt").exists());
 }
 

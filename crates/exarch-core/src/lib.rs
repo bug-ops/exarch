@@ -31,9 +31,10 @@ pub mod error;
 pub mod formats;
 pub mod inspection;
 #[cfg(test)]
-pub(crate) mod raw_zip;
+use exarch_testkit::raw_zip;
 pub mod report;
 pub mod security;
+#[cfg(test)]
 pub(crate) mod test_utils;
 pub mod types;
 

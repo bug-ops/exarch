@@ -21,6 +21,10 @@ use std::rc::Rc;
 use zip::ZipArchive as ZipReader;
 use zip::read::ZipFile;
 
+use super::chunk_search::ChunkPlan;
+use super::chunk_search::ChunkSource;
+use super::chunk_search::Flow;
+use super::chunk_search::search_chunks;
 use super::zip::ZipMethod;
 use super::zip_structure::LFH_FIXED_LEN;
 use super::zip_structure::LFH_SIGNATURE;
@@ -267,33 +271,51 @@ pub(super) fn scan(
     signature: [u8; 4],
     judge: fn(&[u8], u64, u64) -> Judgement,
 ) -> Result<Option<u64>> {
-    let mut buf = vec![0u8; usize::try_from(total).map_or(SCAN_CHUNK, |t| t.min(SCAN_CHUNK))];
-    let mut held = 0;
-    let mut base = 0u64;
-    loop {
-        let read = data.read(&mut buf[held..]).map_err(ArchiveError::Io)?;
-        let end = held + read;
-        let last = read == 0;
-        let mut keep_from = end.saturating_sub(signature.len() - 1);
-        let mut next = 0;
-        while let Some(relative) = buf[next..end].windows(4).position(|w| w == signature) {
-            let at = next + relative;
-            next = at + 1;
-            match judge(&buf[at..end], base + at as u64, total) {
-                Judgement::Hit(delta) => return Ok(Some(base + at as u64 + delta)),
-                Judgement::NeedMore if !last => {
-                    keep_from = keep_from.min(at);
-                    break;
+    let plan = ChunkPlan {
+        range: 0..total,
+        chunk: SCAN_CHUNK,
+        signature_len: signature.len(),
+        max_lookahead: LFH_FIXED_LEN,
+    };
+    let mut found = None;
+    search_chunks(
+        &mut Sequential(data),
+        &plan,
+        |bytes| {
+            bytes
+                .windows(signature.len())
+                .position(|w| w == signature)
+                .map(|at| (at, ()))
+        },
+        |_, hit| {
+            Ok(match judge(hit.bytes, hit.offset, total) {
+                Judgement::Hit(delta) => {
+                    found = Some(hit.offset + delta);
+                    Flow::Stop
                 }
-                Judgement::NeedMore | Judgement::Miss => {}
+                Judgement::NeedMore => Flow::NeedMore,
+                Judgement::Miss => Flow::Next,
+            })
+        },
+    )?;
+    Ok(found)
+}
+
+/// A reader that is read from front to back whatever position is asked for.
+struct Sequential<'a, R>(&'a mut R);
+
+impl<R: Read> ChunkSource for Sequential<'_, R> {
+    fn read_chunk(&mut self, _: u64, buf: &mut [u8]) -> Result<usize> {
+        let mut filled = 0;
+        while filled < buf.len() {
+            match self.0.read(&mut buf[filled..]) {
+                Ok(0) => break,
+                Ok(n) => filled += n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(ArchiveError::Io(e)),
             }
         }
-        if last {
-            return Ok(None);
-        }
-        buf.copy_within(keep_from..end, 0);
-        held = end - keep_from;
-        base += keep_from as u64;
+        Ok(filled)
     }
 }
 

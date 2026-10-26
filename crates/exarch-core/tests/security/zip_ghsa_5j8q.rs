@@ -18,106 +18,27 @@ use exarch_core::ExtractionOptions;
 use exarch_core::SecurityConfig;
 use exarch_core::formats::ArchiveFormat;
 use exarch_core::formats::ZipArchive;
-use flate2::Compression;
-use flate2::write::DeflateEncoder;
+use exarch_testkit::raw_zip::RawEntry;
+use exarch_testkit::raw_zip::RawZip;
 use std::io::Cursor;
-use std::io::Write;
 use tempfile::TempDir;
-
-/// CRC32 (IEEE 802.3 polynomial) for raw ZIP construction.
-fn crc32_ieee(data: &[u8]) -> u32 {
-    let mut crc: u32 = 0xFFFF_FFFF;
-    for &byte in data {
-        crc ^= u32::from(byte);
-        for _ in 0..8 {
-            if crc & 1 != 0 {
-                crc = (crc >> 1) ^ 0xEDB8_8320;
-            } else {
-                crc >>= 1;
-            }
-        }
-    }
-    !crc
-}
-
-/// Raw-DEFLATEs `data` (RFC 1951, no zlib/gzip wrapper), the format ZIP's
-/// compression method 8 requires.
-fn deflate(data: &[u8]) -> Vec<u8> {
-    let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
-    encoder.write_all(data).unwrap();
-    encoder.finish().unwrap()
-}
 
 /// Builds a single-entry, spec-valid DEFLATE ZIP archive whose local file
 /// header and central directory both declare `declared_uncompressed_size`
 /// for `entry_name`, regardless of what `real_payload` actually decompresses
 /// to. Mirrors the `PoC` shape from the advisory: a forged small
 /// `uncompressed_size` alongside a real, much larger compressed stream.
-#[allow(clippy::cast_possible_truncation)]
 fn build_forged_size_zip(
     entry_name: &str,
     real_payload: &[u8],
     declared_uncompressed_size: u32,
 ) -> Vec<u8> {
-    let compressed = deflate(real_payload);
-    let crc = crc32_ieee(real_payload);
-    let name_bytes = entry_name.as_bytes();
-    let name_len = name_bytes.len() as u16;
-    let compressed_len = compressed.len() as u32;
-
-    let mut buf: Vec<u8> = Vec::new();
-    let local_offset = 0u32;
-
-    // Local file header
-    buf.extend_from_slice(b"PK\x03\x04");
-    buf.extend_from_slice(&20u16.to_le_bytes()); // version needed (DEFLATE)
-    buf.extend_from_slice(&0u16.to_le_bytes()); // flags (no data descriptor)
-    buf.extend_from_slice(&8u16.to_le_bytes()); // compression: DEFLATE
-    buf.extend_from_slice(&0u16.to_le_bytes()); // mod time
-    buf.extend_from_slice(&0u16.to_le_bytes()); // mod date
-    buf.extend_from_slice(&crc.to_le_bytes());
-    buf.extend_from_slice(&compressed_len.to_le_bytes()); // compressed size (accurate)
-    buf.extend_from_slice(&declared_uncompressed_size.to_le_bytes()); // FORGED
-    buf.extend_from_slice(&name_len.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes()); // extra field length
-    buf.extend_from_slice(name_bytes);
-    buf.extend_from_slice(&compressed);
-
-    let central_dir_offset = buf.len() as u32;
-
-    // Central directory file header
-    buf.extend_from_slice(b"PK\x01\x02");
-    buf.extend_from_slice(&0x031eu16.to_le_bytes()); // version made by: Unix
-    buf.extend_from_slice(&20u16.to_le_bytes()); // version needed
-    buf.extend_from_slice(&0u16.to_le_bytes()); // flags
-    buf.extend_from_slice(&8u16.to_le_bytes()); // compression: DEFLATE
-    buf.extend_from_slice(&0u16.to_le_bytes()); // mod time
-    buf.extend_from_slice(&0u16.to_le_bytes()); // mod date
-    buf.extend_from_slice(&crc.to_le_bytes());
-    buf.extend_from_slice(&compressed_len.to_le_bytes()); // compressed size (accurate)
-    buf.extend_from_slice(&declared_uncompressed_size.to_le_bytes()); // FORGED
-    buf.extend_from_slice(&name_len.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes()); // extra length
-    buf.extend_from_slice(&0u16.to_le_bytes()); // comment length
-    buf.extend_from_slice(&0u16.to_le_bytes()); // disk number start
-    buf.extend_from_slice(&0u16.to_le_bytes()); // internal attributes
-    buf.extend_from_slice(&(0o100_644u32 << 16).to_le_bytes()); // external attributes
-    buf.extend_from_slice(&local_offset.to_le_bytes());
-    buf.extend_from_slice(name_bytes);
-
-    let central_dir_size = (buf.len() as u32) - central_dir_offset;
-
-    // End of central directory record
-    buf.extend_from_slice(b"PK\x05\x06");
-    buf.extend_from_slice(&0u16.to_le_bytes()); // disk number
-    buf.extend_from_slice(&0u16.to_le_bytes()); // disk with central dir
-    buf.extend_from_slice(&1u16.to_le_bytes()); // entries on this disk
-    buf.extend_from_slice(&1u16.to_le_bytes()); // total entries
-    buf.extend_from_slice(&central_dir_size.to_le_bytes());
-    buf.extend_from_slice(&central_dir_offset.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes()); // comment length
-
-    buf
+    let entry = RawEntry {
+        date: 0,
+        size: u64::from(declared_uncompressed_size),
+        ..RawEntry::deflated(entry_name, real_payload)
+    };
+    RawZip::new(vec![entry]).build().bytes
 }
 
 /// Reproduces the advisory `PoC`: a ZIP entry declares `uncompressed_size = 50`

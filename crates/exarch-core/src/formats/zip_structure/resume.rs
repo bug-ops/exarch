@@ -32,7 +32,7 @@ use super::DATA_DESCRIPTOR_SIGNATURE;
 use super::EntryLayout;
 use super::LFH_FIXED_LEN;
 use super::ZIP64_EXTRA_ID;
-use super::le_u16;
+use super::extra_fields;
 use super::le_u32;
 use super::le_u64;
 
@@ -175,10 +175,8 @@ impl LocalFacts {
         let raw_compressed = le_u32(header, 18);
         let mut compressed = u64::from(raw_compressed);
         let mut zip64_extra = false;
-        let mut rest = extra;
-        while let Some((head, tail)) = rest.split_first_chunk::<4>() {
-            let (id, len) = (le_u16(head, 0), usize::from(le_u16(head, 2)));
-            let Some((mut body, after)) = tail.split_at_checked(len) else {
+        for field in extra_fields(extra) {
+            let Ok((id, mut body)) = field else {
                 return Self::default();
             };
             if id == ZIP64_EXTRA_ID {
@@ -204,7 +202,6 @@ impl LocalFacts {
                     body = remaining;
                 }
             }
-            rest = after;
         }
         Self {
             zip64_extra,

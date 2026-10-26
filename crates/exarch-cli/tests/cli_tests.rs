@@ -7,6 +7,9 @@
 
 use assert_cmd::Command;
 use assert_cmd::cargo::cargo_bin_cmd;
+use exarch_testkit::raw_zip::RawEntry;
+use exarch_testkit::raw_zip::RawZip;
+use exarch_testkit::raw_zip::SYMLINK_MODE;
 use predicates::prelude::*;
 use std::path::PathBuf;
 use tempfile::TempDir;
@@ -2501,74 +2504,12 @@ fn test_verify_7z_anti_item_info_passes_strict() {
 /// bytes. The symlink target is stored as the file content with `S_IFLNK` mode
 /// bits set in the central-directory `external_attributes` field.
 fn make_zip_with_symlink(link_name: &str, target: &str) -> Vec<u8> {
-    let content = target.as_bytes();
-    let crc = {
-        let mut c: u32 = 0xFFFF_FFFF;
-        for &b in content {
-            c ^= u32::from(b);
-            for _ in 0..8 {
-                if c & 1 != 0 {
-                    c = (c >> 1) ^ 0xEDB8_8320;
-                } else {
-                    c >>= 1;
-                }
-            }
-        }
-        c ^ 0xFFFF_FFFF
+    let entry = RawEntry {
+        date: 0,
+        external_attributes: SYMLINK_MODE << 16,
+        ..RawEntry::stored(link_name, target.as_bytes())
     };
-    let external_attributes: u32 = 0o120_777 << 16;
-    let name_bytes = link_name.as_bytes();
-    let name_len = u16::try_from(name_bytes.len()).unwrap();
-    let content_len = u32::try_from(content.len()).unwrap();
-
-    let mut buf: Vec<u8> = Vec::new();
-
-    let local_offset = u32::try_from(buf.len()).unwrap();
-    buf.extend_from_slice(b"PK\x03\x04");
-    buf.extend_from_slice(&20u16.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&crc.to_le_bytes());
-    buf.extend_from_slice(&content_len.to_le_bytes());
-    buf.extend_from_slice(&content_len.to_le_bytes());
-    buf.extend_from_slice(&name_len.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(name_bytes);
-    buf.extend_from_slice(content);
-
-    let central_offset = u32::try_from(buf.len()).unwrap();
-    buf.extend_from_slice(b"PK\x01\x02");
-    buf.extend_from_slice(&0x031eu16.to_le_bytes());
-    buf.extend_from_slice(&20u16.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&crc.to_le_bytes());
-    buf.extend_from_slice(&content_len.to_le_bytes());
-    buf.extend_from_slice(&content_len.to_le_bytes());
-    buf.extend_from_slice(&name_len.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&external_attributes.to_le_bytes());
-    buf.extend_from_slice(&local_offset.to_le_bytes());
-    buf.extend_from_slice(name_bytes);
-
-    let central_size = u32::try_from(buf.len()).unwrap() - central_offset;
-    buf.extend_from_slice(b"PK\x05\x06");
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&1u16.to_le_bytes());
-    buf.extend_from_slice(&1u16.to_le_bytes());
-    buf.extend_from_slice(&central_size.to_le_bytes());
-    buf.extend_from_slice(&central_offset.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-
-    buf
+    RawZip::new(vec![entry]).build().bytes
 }
 
 /// `exarch list --json -l` must include `symlink_target` for symlink entries
@@ -3576,102 +3517,23 @@ fn test_extract_atomic_force_survives_destination_symlink_race() {
 // SecurityViolation HINT text specificity (#520)
 // ============================================================================
 
-/// CRC32 (IEEE 802.3 polynomial) for raw ZIP construction.
-fn crc32_ieee(data: &[u8]) -> u32 {
-    let mut crc: u32 = 0xFFFF_FFFF;
-    for &byte in data {
-        crc ^= u32::from(byte);
-        for _ in 0..8 {
-            if crc & 1 != 0 {
-                crc = (crc >> 1) ^ 0xEDB8_8320;
-            } else {
-                crc >>= 1;
-            }
-        }
-    }
-    !crc
-}
-
-/// Raw-DEFLATEs `data` (RFC 1951, no zlib/gzip wrapper), the format ZIP's
-/// compression method 8 requires.
-fn raw_deflate(data: &[u8]) -> Vec<u8> {
-    use flate2::Compression;
-    use flate2::write::DeflateEncoder;
-    use std::io::Write;
-
-    let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
-    encoder.write_all(data).expect("deflate payload");
-    encoder.finish().expect("finish deflate stream")
-}
-
 /// Builds a single-entry, spec-valid DEFLATE ZIP archive whose local file
 /// header and central directory both declare `declared_uncompressed_size`
 /// for `entry_name`, regardless of what `real_payload` actually decompresses
 /// to. Mirrors the GHSA-5j8q-wxg5-hj4r advisory `PoC` shape (see
 /// `exarch-core/tests/security/zip_ghsa_5j8q.rs`): a forged small
 /// `uncompressed_size` alongside a real, much larger compressed stream.
-#[allow(clippy::cast_possible_truncation)]
 fn build_forged_size_zip(
     entry_name: &str,
     real_payload: &[u8],
     declared_uncompressed_size: u32,
 ) -> Vec<u8> {
-    let compressed = raw_deflate(real_payload);
-    let crc = crc32_ieee(real_payload);
-    let name_bytes = entry_name.as_bytes();
-    let name_len = name_bytes.len() as u16;
-    let compressed_len = compressed.len() as u32;
-
-    let mut buf: Vec<u8> = Vec::new();
-    let local_offset = 0u32;
-
-    buf.extend_from_slice(b"PK\x03\x04");
-    buf.extend_from_slice(&20u16.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&8u16.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&crc.to_le_bytes());
-    buf.extend_from_slice(&compressed_len.to_le_bytes());
-    buf.extend_from_slice(&declared_uncompressed_size.to_le_bytes()); // FORGED
-    buf.extend_from_slice(&name_len.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(name_bytes);
-    buf.extend_from_slice(&compressed);
-
-    let central_dir_offset = buf.len() as u32;
-
-    buf.extend_from_slice(b"PK\x01\x02");
-    buf.extend_from_slice(&0x031eu16.to_le_bytes());
-    buf.extend_from_slice(&20u16.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&8u16.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&crc.to_le_bytes());
-    buf.extend_from_slice(&compressed_len.to_le_bytes());
-    buf.extend_from_slice(&declared_uncompressed_size.to_le_bytes()); // FORGED
-    buf.extend_from_slice(&name_len.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&(0o100_644u32 << 16).to_le_bytes());
-    buf.extend_from_slice(&local_offset.to_le_bytes());
-    buf.extend_from_slice(name_bytes);
-
-    let central_dir_size = (buf.len() as u32) - central_dir_offset;
-
-    buf.extend_from_slice(b"PK\x05\x06");
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&1u16.to_le_bytes());
-    buf.extend_from_slice(&1u16.to_le_bytes());
-    buf.extend_from_slice(&central_dir_size.to_le_bytes());
-    buf.extend_from_slice(&central_dir_offset.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-
-    buf
+    let entry = RawEntry {
+        date: 0,
+        size: u64::from(declared_uncompressed_size),
+        ..RawEntry::deflated(entry_name, real_payload)
+    };
+    RawZip::new(vec![entry]).build().bytes
 }
 
 /// Regression test for #520: the GHSA-5j8q-wxg5-hj4r forged-size
@@ -3834,46 +3696,21 @@ fn test_extract_accepts_same_link_flags_as_verify() {
         .success();
 }
 
+fn deflate64_zip() -> Vec<u8> {
+    let entry = RawEntry {
+        method: 9,
+        crc: 0,
+        date: 0,
+        made_by: 20,
+        external_attributes: 0,
+        ..RawEntry::stored("a.txt", b"data")
+    };
+    RawZip::new(vec![entry]).build().bytes
+}
+
 #[test]
 fn test_deflate64_zip_is_rejected_by_list_verify_and_extract() {
-    const DEFLATE64: u16 = 9;
-    let name = b"a.txt";
-    let data = b"data";
-    let mut zip = Vec::new();
-    zip.extend_from_slice(b"PK\x03\x04");
-    zip.extend_from_slice(&20u16.to_le_bytes());
-    zip.extend_from_slice(&0u16.to_le_bytes());
-    zip.extend_from_slice(&DEFLATE64.to_le_bytes());
-    zip.extend_from_slice(&[0u8; 4]);
-    zip.extend_from_slice(&0u32.to_le_bytes());
-    zip.extend_from_slice(&4u32.to_le_bytes());
-    zip.extend_from_slice(&4u32.to_le_bytes());
-    zip.extend_from_slice(&5u16.to_le_bytes());
-    zip.extend_from_slice(&0u16.to_le_bytes());
-    zip.extend_from_slice(name);
-    zip.extend_from_slice(data);
-    let central_offset = u32::try_from(zip.len()).expect("fits u32");
-    zip.extend_from_slice(b"PK\x01\x02");
-    zip.extend_from_slice(&20u16.to_le_bytes());
-    zip.extend_from_slice(&20u16.to_le_bytes());
-    zip.extend_from_slice(&0u16.to_le_bytes());
-    zip.extend_from_slice(&DEFLATE64.to_le_bytes());
-    zip.extend_from_slice(&[0u8; 4]);
-    zip.extend_from_slice(&0u32.to_le_bytes());
-    zip.extend_from_slice(&4u32.to_le_bytes());
-    zip.extend_from_slice(&4u32.to_le_bytes());
-    zip.extend_from_slice(&5u16.to_le_bytes());
-    zip.extend_from_slice(&[0u8; 12]);
-    zip.extend_from_slice(&0u32.to_le_bytes());
-    zip.extend_from_slice(name);
-    let central_size = u32::try_from(zip.len()).expect("fits u32") - central_offset;
-    zip.extend_from_slice(b"PK\x05\x06");
-    zip.extend_from_slice(&[0u8; 4]);
-    zip.extend_from_slice(&1u16.to_le_bytes());
-    zip.extend_from_slice(&1u16.to_le_bytes());
-    zip.extend_from_slice(&central_size.to_le_bytes());
-    zip.extend_from_slice(&central_offset.to_le_bytes());
-    zip.extend_from_slice(&0u16.to_le_bytes());
+    let zip = deflate64_zip();
 
     let temp = TempDir::new().expect("create temp dir");
     let archive_path = temp.path().join("deflate64.zip");

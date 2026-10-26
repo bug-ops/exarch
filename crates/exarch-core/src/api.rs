@@ -694,6 +694,8 @@ fn determine_creation_format<State>(
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::raw_zip::RawEntry;
+    use crate::raw_zip::RawZip;
     use std::assert_matches;
     use std::path::PathBuf;
 
@@ -1553,80 +1555,14 @@ mod tests {
         out
     }
 
-    // Builds a single-entry ZIP with a raw traversal path by writing the
-    // local file header and central directory manually.
-    #[allow(clippy::cast_possible_truncation)]
+    // Builds a single-entry ZIP whose name is written verbatim, so a traversal
+    // path survives into the headers.
     fn make_zip_with_traversal(path: &[u8], data: &[u8]) -> Vec<u8> {
-        let mut buf: Vec<u8> = Vec::new();
-
-        let crc = crc32_ieee(data);
-        let name_len = path.len() as u16;
-        let content_len = data.len() as u32;
-
-        let local_offset: u32 = 0;
-
-        // Local file header
-        buf.extend_from_slice(b"PK\x03\x04");
-        buf.extend_from_slice(&20u16.to_le_bytes()); // version needed
-        buf.extend_from_slice(&0u16.to_le_bytes()); // flags
-        buf.extend_from_slice(&0u16.to_le_bytes()); // compression: Stored
-        buf.extend_from_slice(&0u16.to_le_bytes()); // mod time
-        buf.extend_from_slice(&0u16.to_le_bytes()); // mod date
-        buf.extend_from_slice(&crc.to_le_bytes());
-        buf.extend_from_slice(&content_len.to_le_bytes());
-        buf.extend_from_slice(&content_len.to_le_bytes());
-        buf.extend_from_slice(&name_len.to_le_bytes());
-        buf.extend_from_slice(&0u16.to_le_bytes()); // extra field length
-        buf.extend_from_slice(path);
-        buf.extend_from_slice(data);
-
-        let central_dir_offset = buf.len() as u32;
-
-        // Central directory file header
-        buf.extend_from_slice(b"PK\x01\x02");
-        buf.extend_from_slice(&0x031eu16.to_le_bytes()); // version made by: Unix
-        buf.extend_from_slice(&20u16.to_le_bytes()); // version needed
-        buf.extend_from_slice(&0u16.to_le_bytes()); // flags
-        buf.extend_from_slice(&0u16.to_le_bytes()); // compression
-        buf.extend_from_slice(&0u16.to_le_bytes()); // mod time
-        buf.extend_from_slice(&0u16.to_le_bytes()); // mod date
-        buf.extend_from_slice(&crc.to_le_bytes());
-        buf.extend_from_slice(&content_len.to_le_bytes());
-        buf.extend_from_slice(&content_len.to_le_bytes());
-        buf.extend_from_slice(&name_len.to_le_bytes());
-        buf.extend_from_slice(&0u16.to_le_bytes()); // extra field len
-        buf.extend_from_slice(&0u16.to_le_bytes()); // file comment len
-        buf.extend_from_slice(&0u16.to_le_bytes()); // disk number start
-        buf.extend_from_slice(&0u16.to_le_bytes()); // internal attrs
-        buf.extend_from_slice(&(0o100_644u32 << 16).to_le_bytes()); // external attrs
-        buf.extend_from_slice(&local_offset.to_le_bytes());
-        buf.extend_from_slice(path);
-
-        let central_dir_size = (buf.len() as u32) - central_dir_offset;
-
-        // End of central directory
-        buf.extend_from_slice(b"PK\x05\x06");
-        buf.extend_from_slice(&0u16.to_le_bytes()); // disk number
-        buf.extend_from_slice(&0u16.to_le_bytes()); // disk with central dir
-        buf.extend_from_slice(&1u16.to_le_bytes()); // entries on this disk
-        buf.extend_from_slice(&1u16.to_le_bytes()); // total entries
-        buf.extend_from_slice(&central_dir_size.to_le_bytes());
-        buf.extend_from_slice(&central_dir_offset.to_le_bytes());
-        buf.extend_from_slice(&0u16.to_le_bytes()); // comment length
-        buf
-    }
-
-    // CRC-32 (IEEE 802.3) used to produce valid ZIP checksums in helpers above.
-    fn crc32_ieee(data: &[u8]) -> u32 {
-        let mut crc: u32 = 0xFFFF_FFFF;
-        for &byte in data {
-            let mut val = crc ^ u32::from(byte);
-            for _ in 0..8 {
-                let mask = (val & 1).wrapping_neg();
-                val = (val >> 1) ^ (0xEDB8_8320 & mask);
-            }
-            crc = val;
-        }
-        !crc
+        let entry = RawEntry {
+            name: path.to_vec(),
+            date: 0,
+            ..RawEntry::stored("", data)
+        };
+        RawZip::new(vec![entry]).build().bytes
     }
 }

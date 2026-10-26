@@ -17,9 +17,12 @@
 
 use flate2::Crc;
 
-use super::le_u16;
+use super::extra_fields;
 use super::le_u32;
-use crate::formats::zip::zip_mode_is_symlink;
+use crate::formats::common::SpecialFile;
+use crate::formats::common::UnixFileType;
+use crate::formats::zip::ZipEntryKind;
+use crate::formats::zip::zip_entry_kind;
 
 const XL_EXTRA_ID: u16 = 0x6c78;
 const UNICODE_PATH_EXTRA_ID: u16 = 0x7075;
@@ -33,12 +36,6 @@ const HOST_DOS: u8 = 0;
 const HOST_UNIX: u8 = 3;
 const DOS_DIRECTORY: u32 = 0x10;
 const DOS_READ_ONLY: u32 = 0x01;
-
-const S_IFMT: u32 = 0o170_000;
-const S_IFDIR: u32 = 0o040_000;
-const S_IFREG: u32 = 0o100_000;
-const S_IFLNK: u32 = 0o120_000;
-const S_IFIFO: u32 = 0o010_000;
 
 /// Host system a header names, which decides how its attributes are read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,12 +69,10 @@ pub(super) enum EntryKind {
 impl EntryKind {
     /// The type the extraction here gives an entry, from its central record.
     pub(super) fn of_central(is_dir: bool, mode: Option<u32>) -> Self {
-        if is_dir {
-            Self::Directory
-        } else if zip_mode_is_symlink(mode) {
-            Self::Symlink
-        } else {
-            Self::Regular
+        match zip_entry_kind(is_dir, mode) {
+            ZipEntryKind::Directory => Self::Directory,
+            ZipEntryKind::Symlink => Self::Symlink,
+            ZipEntryKind::Regular => Self::Regular,
         }
     }
 }
@@ -112,14 +107,11 @@ impl XlScan {
             host,
             file_type: None,
         };
-        let mut rest = extra;
-        while let Some((head, tail)) = rest.split_first_chunk::<4>() {
-            let (id, len) = (le_u16(head, 0), usize::from(le_u16(head, 2)));
-            let (body, after) = tail.split_at_checked(len)?;
+        for field in extra_fields(extra) {
+            let (id, body) = field.ok()?;
             if id == XL_EXTRA_ID {
                 apply_xl(body, &mut scan.host, &mut scan.file_type);
             }
-            rest = after;
         }
         Some(scan)
     }
@@ -131,8 +123,8 @@ impl XlScan {
 /// `name` and `local_extra` are the local header's; the directory decision
 /// follows the reader's final name (see [`is_directory_name`]).
 pub(super) fn reader_kind(
-    local: &XlScan,
-    central: &XlScan,
+    local: XlScan,
+    central: XlScan,
     name: &[u8],
     local_extra: &[u8],
 ) -> Option<EntryKind> {
@@ -149,13 +141,9 @@ pub(super) fn reader_kind(
 /// of a libarchive that converts names to a locale.
 fn is_directory_name(name: &[u8], extra: &[u8], host: HostSystem) -> bool {
     let mut name = name;
-    let mut rest = extra;
-    while let Some((head, tail)) = rest.split_first_chunk::<4>() {
-        let (id, len) = (le_u16(head, 0), usize::from(le_u16(head, 2)));
-        let Some((body, after)) = tail.split_at_checked(len) else {
-            break;
-        };
-        rest = after;
+    // An overrun is unreachable here: `XlScan::parse` rejects the same bytes
+    // first.
+    for (id, body) in extra_fields(extra).map_while(std::result::Result::ok) {
         if id != UNICODE_PATH_EXTRA_ID || body.len() < UNICODE_PATH_HEAD_LEN {
             continue;
         }
@@ -174,30 +162,33 @@ fn is_directory_name(name: &[u8], extra: &[u8], host: HostSystem) -> bool {
 
 /// File type bits an `xl` extra field gives an entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct XlFileType(u32);
+pub(super) struct XlFileType(Option<UnixFileType>);
 
 impl XlFileType {
     /// The type the reader extracts the entry as; a trailing slash in the name
     /// makes anything but a directory one.
-    pub(super) const fn kind(self, trailing_slash: bool) -> EntryKind {
-        match (self.0 & S_IFMT, trailing_slash) {
-            (S_IFDIR, _) | (_, true) => EntryKind::Directory,
-            (S_IFLNK, false) => EntryKind::Symlink,
-            (0 | S_IFREG | S_IFIFO, false) => EntryKind::Regular,
+    pub(super) fn kind(self, trailing_slash: bool) -> EntryKind {
+        match (self.0, trailing_slash) {
+            (Some(UnixFileType::Directory), _) | (_, true) => EntryKind::Directory,
+            (Some(UnixFileType::Symlink), false) => EntryKind::Symlink,
+            (
+                None | Some(UnixFileType::Regular | UnixFileType::Special(SpecialFile::Fifo)),
+                false,
+            ) => EntryKind::Regular,
             _ => EntryKind::Special,
         }
     }
 
-    const fn of_attributes(host: HostSystem, attributes: u32) -> Self {
+    fn of_attributes(host: HostSystem, attributes: u32) -> Self {
         Self(match host {
-            HostSystem::Unix => (attributes >> 16) & S_IFMT,
+            HostSystem::Unix => UnixFileType::from_mode(attributes >> 16),
             // The reader strips the write bits of a read-only entry with a mask
             // that also clears the type, so such a directory reads as a file.
             HostSystem::Dos if attributes & (DOS_DIRECTORY | DOS_READ_ONLY) == DOS_DIRECTORY => {
-                S_IFDIR
+                Some(UnixFileType::Directory)
             }
-            HostSystem::Dos => S_IFREG,
-            HostSystem::Other => 0,
+            HostSystem::Dos => Some(UnixFileType::Regular),
+            HostSystem::Other => None,
         })
     }
 }
@@ -243,6 +234,10 @@ fn apply_xl(body: &[u8], host: &mut HostSystem, file_type: &mut Option<XlFileTyp
 mod tests {
     use super::*;
     use crate::raw_zip::SYMLINK_MODE as LINK;
+
+    const S_IFDIR: u32 = 0o040_000;
+    const S_IFREG: u32 = 0o100_000;
+    const S_IFIFO: u32 = 0o010_000;
     use crate::raw_zip::extra_field;
     use crate::raw_zip::unicode_path_field;
     use crate::raw_zip::xl_unix_attributes as attributes;
@@ -280,6 +275,25 @@ mod tests {
                 Some(kind),
                 "{mode:o}"
             );
+        }
+    }
+
+    #[test]
+    fn every_type_nibble_maps_to_a_kind() {
+        use EntryKind::Directory;
+        use EntryKind::Regular;
+        use EntryKind::Special;
+        use EntryKind::Symlink;
+        // Index = the four S_IFMT bits; 0 records no type.
+        let plain = [
+            Regular, Regular, Special, Special, Directory, Special, Special, Special, Regular,
+            Special, Symlink, Special, Special, Special, Special, Special,
+        ];
+        for (nibble, expected) in plain.into_iter().enumerate() {
+            let mode = u32::try_from(nibble).unwrap() << 12;
+            let file_type = XlFileType::of_attributes(HostSystem::Unix, mode << 16);
+            assert_eq!(file_type.kind(false), expected, "{mode:o}");
+            assert_eq!(file_type.kind(true), Directory, "{mode:o} with slash");
         }
     }
 
@@ -407,13 +421,10 @@ mod tests {
     fn an_absent_central_scan_does_not_hide_a_local_field() {
         let local = XlScan::parse(HostSystem::Unix, &xl(&attributes(LINK))).unwrap();
         assert_eq!(
-            reader_kind(&local, &XlScan::ABSENT, b"a", &[]),
+            reader_kind(local, XlScan::ABSENT, b"a", &[]),
             Some(EntryKind::Symlink)
         );
-        assert_eq!(
-            reader_kind(&XlScan::ABSENT, &XlScan::ABSENT, b"a", &[]),
-            None
-        );
+        assert_eq!(reader_kind(XlScan::ABSENT, XlScan::ABSENT, b"a", &[]), None);
     }
 
     #[test]
@@ -421,11 +432,11 @@ mod tests {
         let scan = |mode| XlScan::parse(HostSystem::Unix, &xl(&attributes(mode))).unwrap();
         let (link, regular) = (scan(LINK), scan(S_IFREG));
         assert_eq!(
-            reader_kind(&link, &regular, b"a", &[]),
+            reader_kind(link, regular, b"a", &[]),
             Some(EntryKind::Symlink)
         );
         assert_eq!(
-            reader_kind(&XlScan::ABSENT, &link, b"a", &[]),
+            reader_kind(XlScan::ABSENT, link, b"a", &[]),
             Some(EntryKind::Symlink)
         );
     }

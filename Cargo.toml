@@ -5,6 +5,7 @@ members = [
     "crates/exarch-python",
     "crates/exarch-node",
     "crates/exarch-cli",
+    "crates/exarch-testkit",
 ]
 # fuzz/ is nightly-only (libfuzzer-sys) and vendors NCSA-licensed LLVM
 # libFuzzer sources not in deny.toml's shipped-code allow-list; it keeps its
@@ -24,6 +25,7 @@ categories = ["compression", "filesystem"]
 
 [workspace.dependencies]
 exarch-core = { path = "crates/exarch-core", version = "0.6.1" }
+exarch-testkit = { path = "crates/exarch-testkit" }
 anyhow = "1.0"
 assert_cmd = "2.2"
 bzip2 = "0.6"

@@ -158,6 +158,8 @@ const HARMLESS: &[u8] = b"harmless\n";
 const HARMLESS_CRC: u32 = 0x3024_c2ee;
 const DATA_LEN: u32 = 9;
 
+// Hand-written: a lone central record for a decoy directory is outside
+// `RawZip`, which always writes a whole archive.
 fn central_record(name: &[u8], mode: u32, local_offset: u32) -> Vec<u8> {
     let mut record = Vec::new();
     record.extend(0x0201_4B50u32.to_le_bytes());

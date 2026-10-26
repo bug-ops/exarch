@@ -101,6 +101,11 @@ use zip::ZipArchive as ZipReader;
 use zip::ZipReadOptions;
 use zip::result::ZipError;
 
+use super::chunk_search::ChunkEnd;
+use super::chunk_search::ChunkPlan;
+use super::chunk_search::ChunkSource;
+use super::chunk_search::Flow;
+use super::chunk_search::search_chunks;
 use super::common;
 use super::zip::admit_zip_entry;
 use super::zip::is_password_required;
@@ -175,36 +180,48 @@ const FIELD_MESSAGES: [(&str, ZipHeaderField); 9] = [
     ),
 ];
 
-/// Kinds of finding, each with its own retention limit so that one kind cannot
-/// push another out of the report.
-#[derive(Debug, Clone, Copy)]
-enum Slot {
-    Mismatch,
-    Duplicate,
-    Hidden,
-    StrayCentral,
-    StrayEnd,
-    DescriptorOverrun,
-    XlType,
-    Overlap,
-    Uncounted,
-    IgnoredEnd,
+/// Declares an enum together with `ALL`, listing its variants in order, so a
+/// variant cannot be missing from `ALL`.
+macro_rules! enum_with_all {
+    ($(#[$meta:meta])* enum $name:ident { $($variant:ident),+ $(,)? }) => {
+        $(#[$meta])*
+        enum $name {
+            $($variant),+
+        }
+
+        impl $name {
+            const ALL: [Self; [$(Self::$variant),+].len()] = [$(Self::$variant),+];
+        }
+    };
 }
 
-impl Slot {
-    const ALL: [Self; 10] = [
-        Self::Mismatch,
-        Self::Duplicate,
-        Self::Hidden,
-        Self::StrayCentral,
-        Self::StrayEnd,
-        Self::DescriptorOverrun,
-        Self::XlType,
-        Self::Overlap,
-        Self::Uncounted,
-        Self::IgnoredEnd,
-    ];
+enum_with_all! {
+    /// Kinds of finding, each with its own retention limit so that one kind
+    /// cannot push another out of the report.
+    #[derive(Debug, Clone, Copy)]
+    enum Slot {
+        Mismatch,
+        Duplicate,
+        Hidden,
+        StrayCentral,
+        StrayEnd,
+        DescriptorOverrun,
+        XlType,
+        Overlap,
+        Uncounted,
+        IgnoredEnd,
+    }
+}
 
+const _: () = {
+    let mut i = 0;
+    while i < Slot::ALL.len() {
+        assert!(Slot::ALL[i].index() == i);
+        i += 1;
+    }
+};
+
+impl Slot {
     const fn limit(self) -> usize {
         match self {
             Self::Mismatch => 24,
@@ -576,14 +593,21 @@ impl DirectoryMap {
 /// Fails on unparseable, encrypted or unsupported archives, and when the
 /// raw central directory and the `zip` crate's map of it disagree.
 pub fn open<R: Read + Seek>(reader: R) -> Result<(ZipReader<Shared<R>>, ZipStructure)> {
+    open_chunked(reader, ChunkSizes::PRODUCTION)
+}
+
+fn open_chunked<R: Read + Seek>(
+    reader: R,
+    chunks: ChunkSizes,
+) -> Result<(ZipReader<Shared<R>>, ZipStructure)> {
     let shared = Shared::new(reader);
     let mut archive = open_reader(shared.clone()).map_err(|e| reader_fault(&shared, e))?;
     let scan = scan_entries(&mut archive, &shared).map_err(|e| reader_fault(&shared, e))?;
     let map = DirectoryMap::of(&archive).map_err(|e| reader_fault(&shared, e))?;
 
     let mut census_reader = shared.clone();
-    let census =
-        Census::run(&mut census_reader, &map, &scan).map_err(|e| reader_fault(&shared, e))?;
+    let census = Census::run(&mut census_reader, &map, &scan, chunks)
+        .map_err(|e| reader_fault(&shared, e))?;
 
     if let Some(fault) = shared.take_fault() {
         return Err(ArchiveError::Io(fault));
@@ -788,7 +812,12 @@ impl CentralRecord {
 }
 
 impl Census {
-    fn run<R: Read + Seek>(reader: &mut R, map: &DirectoryMap, scan: &Scan) -> Result<Self> {
+    fn run<R: Read + Seek>(
+        reader: &mut R,
+        map: &DirectoryMap,
+        scan: &Scan,
+        chunks: ChunkSizes,
+    ) -> Result<Self> {
         let file_len = reader.seek(SeekFrom::End(0))?;
         let mut findings = Findings::default();
 
@@ -809,7 +838,7 @@ impl Census {
             });
         }
 
-        let mut gaps = GapChecker::new(reader, map, &scan.layouts, &walk, file_len);
+        let mut gaps = GapChecker::new(reader, map, &scan.layouts, &walk, file_len, chunks);
         gaps.run(&mut findings)?;
         #[cfg(test)]
         let reads = gaps.reads;
@@ -919,8 +948,23 @@ const GAP_CHUNK: usize = 64 * 1024;
 /// local header so a hit that starts in the first half is complete.
 const PREFIX_CHUNK: usize = 128 * 1024;
 
-/// Bytes two prefix chunks share, so a signature split by a chunk end is seen.
-const PREFIX_OVERLAP: usize = 3;
+/// Most bytes a prefix judgement reads behind a signature: the fixed header and
+/// the longest name.
+const PREFIX_LOOKAHEAD: usize = LFH_FIXED_LEN + u16::MAX as usize;
+
+/// Chunk sizes of the two searches.
+#[derive(Debug, Clone, Copy)]
+struct ChunkSizes {
+    gap: usize,
+    prefix: usize,
+}
+
+impl ChunkSizes {
+    const PRODUCTION: Self = Self {
+        gap: GAP_CHUNK,
+        prefix: PREFIX_CHUNK,
+    };
+}
 
 /// Highest "version needed to extract" a producer writes today.
 const MAX_VERSION_NEEDED: u16 = 63;
@@ -933,9 +977,12 @@ const DATA_DESCRIPTOR_FLAG: u16 = 0x0008;
 /// Compression methods assigned to a format the ecosystem uses.
 const KNOWN_METHODS: [u16; 9] = [0, 8, 9, 12, 14, 93, 95, 98, 99];
 
-/// Bytes two consecutive chunks share, so a header that starts near the end of
-/// one chunk is complete in the next.
-const GAP_OVERLAP: usize = LFH_FIXED_LEN + 3;
+impl<R: Read + Seek> ChunkSource for GapChecker<'_, R> {
+    fn read_chunk(&mut self, position: u64, buf: &mut [u8]) -> Result<usize> {
+        self.read_at(position, buf)?;
+        Ok(buf.len())
+    }
+}
 
 /// Looks for local headers and central directory records in the gaps between
 /// entries.
@@ -961,7 +1008,7 @@ struct GapChecker<'a, R> {
     known_headers: HashSet<u64>,
     search_gaps: bool,
     file_len: u64,
-    buf: Vec<u8>,
+    chunks: ChunkSizes,
     /// Signature hits below this offset were already judged.
     next_unjudged: u64,
     exhausted: bool,
@@ -978,6 +1025,7 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
         layouts: &'a [EntryLayout],
         walk: &Walk,
         file_len: u64,
+        chunks: ChunkSizes,
     ) -> Self {
         Self {
             reader,
@@ -990,7 +1038,7 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
                 .collect(),
             search_gaps: !walk.crate_duplicates(),
             file_len,
-            buf: Vec::new(),
+            chunks,
             next_unjudged: 0,
             exhausted: false,
             reads: 0,
@@ -1096,67 +1144,72 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
         if end < LFH_FIXED_LEN as u64 {
             self.probe(0, HiddenRegion::Prefix, findings)?;
         }
-        let mut position = 0u64;
-        let mut lenient = false;
-        while position + 4 <= end && !self.exhausted {
-            let want =
-                usize::try_from(end - position).map_or(PREFIX_CHUNK, |n| n.min(PREFIX_CHUNK));
-            let last = position + want as u64 >= end;
-            self.fill(position, want)?;
-            if position == 0 {
-                lenient = self.buf[..want].starts_with(b"PK");
-            }
-            let mut next = 0;
-            let mut resume = None;
-            while let Some((relative, kind)) = find_signature(&self.buf[next..want]) {
-                let index = next + relative;
-                next = index + 1;
-                if let Signature::Stray(stray) = kind {
-                    if lenient {
-                        self.stray_record(position + index as u64, followed, stray, findings);
-                    }
-                    continue;
-                }
-                if lenient || position + index as u64 == 0 {
-                    let mut header = [0u8; LFH_FIXED_LEN];
-                    if let Some(bytes) = self.buf[..want].get(index..index + LFH_FIXED_LEN) {
-                        header.copy_from_slice(bytes);
-                        let found = position + index as u64;
-                        self.judge(found, &header, HiddenRegion::Prefix, findings);
-                    } else if !last {
-                        resume = Some(index);
-                        break;
-                    }
-                    continue;
-                }
-                let name_len = self.buf[..want]
-                    .get(index + 26..index + 28)
-                    .map(|b| usize::from(le_u16(b, 0)));
-                let Some(name_len) = name_len.filter(|n| index + LFH_FIXED_LEN + n <= want) else {
-                    if !last {
-                        resume = Some(index);
-                        break;
-                    }
-                    continue;
-                };
-                let candidate = &self.buf[index..index + LFH_FIXED_LEN + name_len];
-                let found = position + index as u64;
-                if is_plausible_prefix_header(candidate, end - found)
-                    && !findings.try_push(Slot::Hidden, || ZipInconsistency::HiddenLocalHeader {
-                        offset: found,
-                        region: HiddenRegion::Prefix,
-                    })
-                {
-                    self.exhausted = true;
-                    return Ok(());
-                }
-            }
-            if last {
-                break;
-            }
-            position += resume.unwrap_or(want - PREFIX_OVERLAP).max(1) as u64;
+        if self.exhausted {
+            return Ok(());
         }
-        Ok(())
+        let mut start = [0u8; 2];
+        let lenient = end >= 4 && {
+            self.read_uncounted(0, &mut start)?;
+            start == *b"PK"
+        };
+        let plan = ChunkPlan {
+            range: 0..end,
+            chunk: self.chunks.prefix,
+            signature_len: 4,
+            max_lookahead: PREFIX_LOOKAHEAD,
+        };
+        search_chunks(self, &plan, find_signature, |this, hit| {
+            let found = hit.offset;
+            let flow = match hit.kind {
+                Signature::Stray(stray) => {
+                    if lenient {
+                        this.stray_record(found, followed, stray, findings);
+                    }
+                    Flow::Next
+                }
+                Signature::LocalHeader if lenient || found == 0 => {
+                    match hit.bytes.first_chunk::<LFH_FIXED_LEN>() {
+                        Some(header) => {
+                            this.judge(found, header, HiddenRegion::Prefix, findings);
+                            Flow::Next
+                        }
+                        None if hit.end == ChunkEnd::Last => Flow::Next,
+                        None => Flow::NeedMore,
+                    }
+                }
+                Signature::LocalHeader => {
+                    let name_len = hit
+                        .bytes
+                        .get(26..28)
+                        .map(|b| usize::from(le_u16(b, 0)))
+                        .filter(|n| LFH_FIXED_LEN + n <= hit.bytes.len());
+                    let Some(name_len) = name_len else {
+                        return Ok(if hit.end == ChunkEnd::Last {
+                            Flow::Next
+                        } else {
+                            Flow::NeedMore
+                        });
+                    };
+                    let candidate = &hit.bytes[..LFH_FIXED_LEN + name_len];
+                    if is_plausible_prefix_header(candidate, end - found)
+                        && !findings.try_push(Slot::Hidden, || {
+                            ZipInconsistency::HiddenLocalHeader {
+                                offset: found,
+                                region: HiddenRegion::Prefix,
+                            }
+                        })
+                    {
+                        this.exhausted = true;
+                        return Ok(Flow::Stop);
+                    }
+                    Flow::Next
+                }
+            };
+            Ok(match flow {
+                Flow::Next if this.exhausted => Flow::Finish,
+                flow => flow,
+            })
+        })
     }
 
     /// Searches `[from, to)` for local headers, reported as hidden in
@@ -1176,37 +1229,29 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
         if !self.search_gaps {
             return self.probe(from, region, findings);
         }
-        let mut position = from;
-        while position + 4 <= to && !self.exhausted {
-            let want = usize::try_from(to - position).map_or(GAP_CHUNK, |n| n.min(GAP_CHUNK));
-            let last = position + want as u64 >= to;
-            self.fill(position, want)?;
-            let mut next = 0;
-            while let Some((relative, kind)) = find_signature(&self.buf[next..want]) {
-                let index = next + relative;
-                next = index + 1;
-                let found = position + index as u64;
-                if let Signature::Stray(stray) = kind {
-                    self.stray_record(found, followed, stray, findings);
-                } else if index + LFH_FIXED_LEN <= want {
-                    let mut header = [0u8; LFH_FIXED_LEN];
-                    header.copy_from_slice(&self.buf[index..index + LFH_FIXED_LEN]);
-                    self.judge(found, &header, region, findings);
-                } else if last {
-                    self.probe(found, region, findings)?;
-                } else {
-                    break;
-                }
-                if self.exhausted {
-                    return Ok(());
-                }
+        let plan = ChunkPlan {
+            range: from..to,
+            chunk: self.chunks.gap,
+            signature_len: 4,
+            max_lookahead: LFH_FIXED_LEN,
+        };
+        search_chunks(self, &plan, find_signature, |this, hit| {
+            match hit.kind {
+                Signature::Stray(stray) => this.stray_record(hit.offset, followed, stray, findings),
+                Signature::LocalHeader => match hit.bytes.first_chunk::<LFH_FIXED_LEN>() {
+                    Some(header) => this.judge(hit.offset, header, region, findings),
+                    None if hit.end == ChunkEnd::Last => {
+                        this.probe(hit.offset, region, findings)?;
+                    }
+                    None => return Ok(Flow::NeedMore),
+                },
             }
-            if last {
-                break;
-            }
-            position += (want - GAP_OVERLAP) as u64;
-        }
-        Ok(())
+            Ok(if this.exhausted {
+                Flow::Stop
+            } else {
+                Flow::Next
+            })
+        })
     }
 
     /// Checks where a streaming reader resumes after a descriptor entry and
@@ -1364,16 +1409,6 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
         }
     }
 
-    fn fill(&mut self, position: u64, len: usize) -> Result<()> {
-        let mut buf = std::mem::take(&mut self.buf);
-        if buf.len() < len {
-            buf.resize(len, 0);
-        }
-        let read = self.read_at(position, &mut buf[..len]);
-        self.buf = buf;
-        read
-    }
-
     fn read_at(&mut self, position: u64, buf: &mut [u8]) -> Result<()> {
         self.reads += 1;
         self.read_uncounted(position, buf)
@@ -1480,7 +1515,7 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
             local.name = Some(name);
         }
         let name = local.name.as_deref().unwrap_or_default();
-        let derived = reader_kind(&local.scan, &central_scan, name, &local.extra);
+        let derived = reader_kind(local.scan, central_scan, name, &local.extra);
         if derived.is_some_and(|kind| kind != layout.kind) {
             findings.push_with(Slot::XlType, || ZipInconsistency::XlTypeDivergence {
                 entry: layout.entry,
@@ -1733,6 +1768,31 @@ pub(super) fn le_u64(bytes: &[u8], at: usize) -> u64 {
     u64::from_le_bytes(raw)
 }
 
+/// An extra field whose declared length runs past its block, which makes a
+/// reader drop the header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Overrun;
+
+/// The extra fields of a header's extra block, in order, as `(id, body)`.
+///
+/// Fewer than four trailing bytes end the walk silently, as a reader does. A
+/// field whose declared length overruns the block yields [`Overrun`] once and
+/// ends the walk; each caller decides what dropping the header means for it.
+fn extra_fields(block: &[u8]) -> impl Iterator<Item = std::result::Result<(u16, &[u8]), Overrun>> {
+    let mut rest = block;
+    std::iter::from_fn(move || {
+        let (head, tail) = rest.split_first_chunk::<4>()?;
+        let (id, len) = (le_u16(head, 0), usize::from(le_u16(head, 2)));
+        if let Some((body, after)) = tail.split_at_checked(len) {
+            rest = after;
+            Some(Ok((id, body)))
+        } else {
+            rest = &[];
+            Some(Err(Overrun))
+        }
+    })
+}
+
 /// A record that stops a streaming reader when it sits between entries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StrayKind {
@@ -1798,5 +1858,7 @@ enum Followed {
 mod resume;
 mod xl_type;
 
+#[cfg(test)]
+mod chunk_boundaries;
 #[cfg(test)]
 mod tests;

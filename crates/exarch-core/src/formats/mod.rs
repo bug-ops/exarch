@@ -1,5 +1,6 @@
 //! Archive format implementations.
 
+pub(crate) mod chunk_search;
 pub(crate) mod common;
 pub mod compression;
 pub mod detect;

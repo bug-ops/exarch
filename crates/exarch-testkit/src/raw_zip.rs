@@ -4,13 +4,27 @@
 //! under the caller's control, so tests can build archives whose copies of the
 //! same metadata disagree, hide records, or leave gaps between entries.
 
-#![allow(clippy::unwrap_used, clippy::cast_possible_truncation)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::cast_possible_truncation,
+    clippy::must_use_candidate,
+    clippy::return_self_not_must_use,
+    clippy::missing_panics_doc
+)]
+
+/// DOS date of a new entry: 1980-01-01.
+const DEFAULT_DATE: u16 = 0x21;
 
 /// Data descriptor written after an entry's data.
 #[derive(Debug, Clone)]
 pub enum Descriptor {
     /// Written from the entry's CRC and sizes.
-    Standard { signature: bool, zip64: bool },
+    Standard {
+        /// Starts with the `PK\x07\x08` signature.
+        signature: bool,
+        /// Sizes are 8 bytes wide instead of 4.
+        zip64: bool,
+    },
     /// Written verbatim.
     Raw(Vec<u8>),
 }
@@ -18,18 +32,34 @@ pub enum Descriptor {
 /// One entry with independent local and central metadata.
 #[derive(Debug, Clone)]
 pub struct RawEntry {
+    /// Name in the local header (and the central record unless
+    /// `central_name` is set).
     pub name: Vec<u8>,
+    /// Different name for the central record.
     pub central_name: Option<Vec<u8>>,
+    /// Bytes written after the local header, already compressed.
     pub data: Vec<u8>,
+    /// Compression method id.
     pub method: u16,
+    /// CRC-32 of the uncompressed data.
     pub crc: u32,
+    /// Uncompressed size.
     pub size: u64,
+    /// General purpose flag bits, in both headers.
     pub flags: u16,
+    /// DOS modification time.
     pub time: u16,
+    /// DOS modification date.
+    pub date: u16,
+    /// Extra field bytes of the local header.
     pub local_extra: Vec<u8>,
+    /// Extra field bytes of the central record.
     pub central_extra: Vec<u8>,
+    /// External attributes of the central record.
     pub external_attributes: u32,
+    /// Data descriptor written after the data.
     pub descriptor: Option<Descriptor>,
+    /// Zero bytes written after the entry and its descriptor.
     pub padding_after: usize,
     /// Compressed size to declare instead of the length of `data`.
     pub declared_compressed: Option<u64>,
@@ -39,11 +69,16 @@ pub struct RawEntry {
     /// "Version needed to extract" written in the local header; its high byte
     /// names the host system.
     pub local_version: u16,
+    /// "Version made by" of the central record; its high byte names the host
+    /// system.
+    pub made_by: u16,
+    /// "Version needed to extract" of the central record.
+    pub central_version: u16,
 }
 
 impl RawEntry {
     /// A stored entry holding `data`.
-    pub(crate) fn stored(name: &str, data: &[u8]) -> Self {
+    pub fn stored(name: &str, data: &[u8]) -> Self {
         let mut crc = flate2::Crc::new();
         crc.update(data);
         Self {
@@ -55,6 +90,7 @@ impl RawEntry {
             size: data.len() as u64,
             flags: 0,
             time: 0,
+            date: DEFAULT_DATE,
             local_extra: Vec::new(),
             central_extra: Vec::new(),
             external_attributes: 0o100_644 << 16,
@@ -63,11 +99,13 @@ impl RawEntry {
             declared_compressed: None,
             local_sizes: None,
             local_version: 20,
+            made_by: 0x031e,
+            central_version: 20,
         }
     }
 
     /// A deflated entry holding `data`.
-    pub(crate) fn deflated(name: &str, data: &[u8]) -> Self {
+    pub fn deflated(name: &str, data: &[u8]) -> Self {
         let mut encoder =
             flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
         std::io::Write::write_all(&mut encoder, data).unwrap();
@@ -80,7 +118,7 @@ impl RawEntry {
 
     /// Writes the sizes and CRC after the data in a descriptor instead of in
     /// the local header.
-    pub(crate) fn with_descriptor(mut self, signature: bool, zip64: bool) -> Self {
+    pub fn with_descriptor(mut self, signature: bool, zip64: bool) -> Self {
         self.flags |= 0x0008;
         if zip64 {
             let mut extra = 1u16.to_le_bytes().to_vec();
@@ -94,45 +132,45 @@ impl RawEntry {
 
     /// Like [`Self::with_descriptor`], with the descriptor bytes given
     /// verbatim.
-    pub(crate) fn with_raw_descriptor(mut self, bytes: &[u8]) -> Self {
+    pub fn with_raw_descriptor(mut self, bytes: &[u8]) -> Self {
         self.flags |= 0x0008;
         self.descriptor = Some(Descriptor::Raw(bytes.to_vec()));
         self
     }
 
     /// Writes these sizes in the local header, whatever the entry declares.
-    pub(crate) const fn with_local_sizes(mut self, compressed: u32, size: u32) -> Self {
+    pub const fn with_local_sizes(mut self, compressed: u32, size: u32) -> Self {
         self.local_sizes = Some((compressed, size));
         self
     }
 
     /// Appends an extra field with the given id to the local header.
-    pub(crate) fn with_local_extra_field(mut self, id: u16, body: &[u8]) -> Self {
+    pub fn with_local_extra_field(mut self, id: u16, body: &[u8]) -> Self {
         self.local_extra.extend(extra_field(id, body));
         self
     }
 
     /// Appends an extra field with the given id to the central record.
-    pub(crate) fn with_central_extra_field(mut self, id: u16, body: &[u8]) -> Self {
+    pub fn with_central_extra_field(mut self, id: u16, body: &[u8]) -> Self {
         self.central_extra.extend(extra_field(id, body));
         self
     }
 
     /// Marks the local header as written on a Unix host.
-    pub(crate) const fn with_local_unix_host(mut self) -> Self {
+    pub const fn with_local_unix_host(mut self) -> Self {
         self.local_version = 0x031e;
         self
     }
 
     /// Different name in the central directory than in the local header.
-    pub(crate) fn with_central_name(mut self, name: &str) -> Self {
+    pub fn with_central_name(mut self, name: &str) -> Self {
         self.central_name = Some(name.as_bytes().to_vec());
         self
     }
 
     /// Raw bytes that follow this entry (and its descriptor) before the next
     /// local header.
-    pub(crate) const fn with_padding_after(mut self, bytes: usize) -> Self {
+    pub const fn with_padding_after(mut self, bytes: usize) -> Self {
         self.padding_after = bytes;
         self
     }
@@ -145,6 +183,7 @@ impl RawEntry {
 /// A whole archive.
 #[derive(Debug, Clone, Default)]
 pub struct RawZip {
+    /// Entries written in order, each with a central record.
     pub entries: Vec<RawEntry>,
     /// Raw bytes written between the last entry and the central directory.
     pub before_directory: Vec<u8>,
@@ -159,20 +198,27 @@ pub struct RawZip {
 /// A built archive and where each local header sits.
 #[derive(Debug, Clone)]
 pub struct BuiltZip {
+    /// The archive.
     pub bytes: Vec<u8>,
+    /// Offset of each entry's local header, in entry order.
     pub local_offsets: Vec<usize>,
+    /// Offset of the first central record.
     pub directory_start: usize,
 }
 
 impl RawZip {
-    pub(crate) fn new(entries: Vec<RawEntry>) -> Self {
+    /// An archive of `entries` with no gaps, no comment and a matching end
+    /// record.
+    pub fn new(entries: Vec<RawEntry>) -> Self {
         Self {
             entries,
             ..Self::default()
         }
     }
 
-    pub(crate) fn build(&self) -> BuiltZip {
+    /// Serializes the archive: local entries, the bytes before the directory,
+    /// the central records and the end record.
+    pub fn build(&self) -> BuiltZip {
         let mut bytes = Vec::new();
         let mut local_offsets = Vec::new();
         for entry in &self.entries {
@@ -221,7 +267,7 @@ fn write_local(out: &mut Vec<u8>, entry: &RawEntry) {
     out.extend_from_slice(&entry.flags.to_le_bytes());
     out.extend_from_slice(&entry.method.to_le_bytes());
     out.extend_from_slice(&entry.time.to_le_bytes());
-    out.extend_from_slice(&0x21u16.to_le_bytes());
+    out.extend_from_slice(&entry.date.to_le_bytes());
     out.extend_from_slice(&crc.to_le_bytes());
     out.extend_from_slice(&compressed.to_le_bytes());
     out.extend_from_slice(&size.to_le_bytes());
@@ -254,12 +300,12 @@ fn write_local(out: &mut Vec<u8>, entry: &RawEntry) {
 fn write_central(out: &mut Vec<u8>, entry: &RawEntry, local_offset: usize) {
     let name = entry.central_name.as_ref().unwrap_or(&entry.name);
     out.extend_from_slice(b"PK\x01\x02");
-    out.extend_from_slice(&0x031eu16.to_le_bytes());
-    out.extend_from_slice(&20u16.to_le_bytes());
+    out.extend_from_slice(&entry.made_by.to_le_bytes());
+    out.extend_from_slice(&entry.central_version.to_le_bytes());
     out.extend_from_slice(&entry.flags.to_le_bytes());
     out.extend_from_slice(&entry.method.to_le_bytes());
     out.extend_from_slice(&entry.time.to_le_bytes());
-    out.extend_from_slice(&0x21u16.to_le_bytes());
+    out.extend_from_slice(&entry.date.to_le_bytes());
     out.extend_from_slice(&entry.crc.to_le_bytes());
     out.extend_from_slice(&(entry.compressed_len() as u32).to_le_bytes());
     out.extend_from_slice(&(entry.size as u32).to_le_bytes());

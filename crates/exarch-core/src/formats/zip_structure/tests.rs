@@ -67,6 +67,14 @@ fn mismatch(field: ZipHeaderField) -> ZipInconsistency {
     }
 }
 
+fn unparseable() -> ZipInconsistency {
+    ZipInconsistency::HeaderUncomparable {
+        entry: ZipEntryIndex::new(0),
+        name: "a.txt".into(),
+        reason: ZipUncomparable::Unparseable,
+    }
+}
+
 fn unicode_path_extra(name: &[u8]) -> Vec<u8> {
     let mut crc = flate2::Crc::new();
     crc.update(name);
@@ -172,7 +180,7 @@ fn unparseable_local_extra_field_is_recorded_not_fatal() {
     let mut entry = RawEntry::stored("a.txt", b"hello");
     entry.local_extra = extended_timestamp_with_bad_flags();
     let built = RawZip::new(vec![entry]).build();
-    assert_eq!(findings_of(&built), [mismatch(ZipHeaderField::Unparseable)]);
+    assert_eq!(findings_of(&built), [unparseable()]);
 }
 
 #[test]
@@ -332,19 +340,19 @@ fn field_classification_ignores_names_embedded_in_messages() {
         classify(&message(
             "header inconsistency detected: encryption flag mismatch for 'CRC32 checksum mismatch'"
         )),
-        ZipHeaderField::EncryptionFlag
+        HeaderFault::Mismatch(ZipHeaderField::EncryptionFlag)
     );
     assert_eq!(
         classify(&message("header inconsistency detected: a new check")),
-        ZipHeaderField::Unrecognized
+        HeaderFault::Uncomparable(ZipUncomparable::Unrecognized)
     );
     assert_eq!(
         classify(&message("something else entirely")),
-        ZipHeaderField::Unparseable
+        HeaderFault::Uncomparable(ZipUncomparable::Unparseable)
     );
     assert_eq!(
         classify(&ZipError::Io(std::io::Error::other("x"))),
-        ZipHeaderField::Unparseable
+        HeaderFault::Uncomparable(ZipUncomparable::Unparseable)
     );
 }
 
@@ -798,8 +806,8 @@ fn unparseable_local_header_is_rejected_by_every_operation_under_enforce() {
         assert_matches!(
             r,
             Err(ArchiveError::ZipInconsistency(
-                ZipInconsistency::HeaderMismatch {
-                    field: ZipHeaderField::Unparseable,
+                ZipInconsistency::HeaderUncomparable {
+                    reason: ZipUncomparable::Unparseable,
                     ..
                 }
             ))
@@ -1064,8 +1072,8 @@ fn a_malformed_extra_field_stays_a_finding_not_an_io_error() {
     let archive = open_bytes(ut_archive());
     assert_matches!(
         archive.structure().findings(),
-        [ZipInconsistency::HeaderMismatch {
-            field: ZipHeaderField::Unparseable,
+        [ZipInconsistency::HeaderUncomparable {
+            reason: ZipUncomparable::Unparseable,
             ..
         }]
     );

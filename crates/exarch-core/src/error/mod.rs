@@ -20,3 +20,4 @@ pub use zip_inconsistency::HiddenRegion;
 pub use zip_inconsistency::ZipEntryIndex;
 pub use zip_inconsistency::ZipHeaderField;
 pub use zip_inconsistency::ZipInconsistency;
+pub use zip_inconsistency::ZipUncomparable;

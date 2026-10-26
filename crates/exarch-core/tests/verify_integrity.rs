@@ -4,6 +4,7 @@
 
 mod common;
 
+use std::assert_matches;
 use std::io::Cursor;
 use std::io::Write;
 use std::path::Path;
@@ -298,10 +299,10 @@ fn tar_plain_truncated_inside_last_entry_is_an_error_with_and_without_integrity(
 
     let without = verify_archive(&path, &SecurityConfig::default());
     assert!(without.is_err());
-    assert!(matches!(
+    assert_matches!(
         verify_err(&path, default_integrity()),
         ArchiveError::InvalidArchive(_)
-    ));
+    );
 }
 
 #[test]
@@ -477,12 +478,12 @@ fn tar_xz_over_decoder_memory_is_a_quota_error_not_corruption() {
     let config = SecurityConfig::default().with_max_decoder_memory(1024);
 
     let err = verify_archive_with_options(&path, &config, &default_integrity()).unwrap_err();
-    assert!(matches!(
+    assert_matches!(
         err,
         ArchiveError::QuotaExceeded {
             resource: QuotaResource::DecoderMemory { .. }
         }
-    ));
+    );
 }
 
 mod sevenz_fixtures {
@@ -886,12 +887,12 @@ fn sevenz_extract_refuses_ppmd_over_decoder_memory() {
     let path = write(&dir, "a.7z", &bytes);
     let config = SecurityConfig::default().with_max_decoder_memory(1024 * 1024);
 
-    assert!(matches!(
+    assert_matches!(
         extract_refusal(&path, &config),
         ArchiveError::QuotaExceeded {
             resource: QuotaResource::DecoderMemory { .. }
         }
-    ));
+    );
 }
 
 #[test]
@@ -906,12 +907,12 @@ fn sevenz_extract_refuses_lzma2_over_decoder_memory() {
     );
     let config = SecurityConfig::default().with_max_decoder_memory(256 * 1024);
 
-    assert!(matches!(
+    assert_matches!(
         extract_refusal(&path, &config),
         ArchiveError::QuotaExceeded {
             resource: QuotaResource::DecoderMemory { .. }
         }
-    ));
+    );
 }
 
 #[test]
@@ -962,10 +963,10 @@ fn sevenz_content_encrypted_archive_with_a_plain_header_is_refused() {
     assert_eq!(report.status(), VerificationStatus::Fail);
     // One issue per encrypted block: the fixture holds two non-solid files.
     assert_eq!(count(&report, IssueCategory::SecurityPolicy), 2);
-    assert!(matches!(
+    assert_matches!(
         extract_refusal(&path, &SecurityConfig::default()),
         ArchiveError::SecurityViolation { .. }
-    ));
+    );
 }
 
 #[test]
@@ -1034,7 +1035,7 @@ fn sevenz_list_shows_every_entry_of_an_interleaved_block() {
 #[test]
 fn sevenz_extract_fails_closed_on_an_interleaved_stream_less_entry() {
     let err = extract_refusal(&fixture("interleaved-empty.7z"), &solid_config());
-    assert!(matches!(err, ArchiveError::InvalidArchive(_)), "{err:?}");
+    assert_matches!(err, ArchiveError::InvalidArchive(_), "{err:?}");
 }
 
 #[test]

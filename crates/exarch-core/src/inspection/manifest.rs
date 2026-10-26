@@ -415,14 +415,16 @@ impl LinkTarget {
     /// # Examples
     ///
     /// ```
+    /// use std::assert_matches;
+    ///
     /// use exarch_core::LinkKind;
     /// use exarch_core::LinkTarget;
     ///
     /// let long_component: std::path::PathBuf = "x".repeat(300).into();
-    /// assert!(matches!(
+    /// assert_matches!(
     ///     LinkTarget::classify(long_component.clone(), LinkKind::Symlink),
     ///     LinkTarget::Recorded(_)
-    /// ));
+    /// );
     /// assert_eq!(
     ///     LinkTarget::classify(long_component, LinkKind::Hardlink),
     ///     LinkTarget::Oversized { bytes: 300 }

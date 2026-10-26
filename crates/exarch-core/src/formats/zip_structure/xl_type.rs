@@ -18,7 +18,7 @@
 use flate2::Crc;
 
 use super::extra_fields;
-use super::le_u32;
+use super::le32;
 use crate::formats::common::SpecialFile;
 use crate::formats::common::UnixFileType;
 use crate::formats::zip::ZipEntryKind;
@@ -144,13 +144,16 @@ fn is_directory_name(name: &[u8], extra: &[u8], host: HostSystem) -> bool {
     // An overrun is unreachable here: `XlScan::parse` rejects the same bytes
     // first.
     for (id, body) in extra_fields(extra).map_while(std::result::Result::ok) {
-        if id != UNICODE_PATH_EXTRA_ID || body.len() < UNICODE_PATH_HEAD_LEN {
+        let Some((head, replacement)) = body.split_first_chunk::<UNICODE_PATH_HEAD_LEN>() else {
+            continue;
+        };
+        if id != UNICODE_PATH_EXTRA_ID {
             continue;
         }
         let mut crc = Crc::new();
         crc.update(name);
-        if crc.sum() == le_u32(body, 1) {
-            name = &body[UNICODE_PATH_HEAD_LEN..];
+        if crc.sum() == le32::<1, UNICODE_PATH_HEAD_LEN>(head) {
+            name = replacement;
         }
     }
     match name.last() {

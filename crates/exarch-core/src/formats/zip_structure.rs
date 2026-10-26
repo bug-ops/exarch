@@ -119,6 +119,7 @@ use crate::error::HiddenRegion;
 use crate::error::ZipEntryIndex;
 use crate::error::ZipHeaderField;
 use crate::error::ZipInconsistency;
+use crate::error::ZipUncomparable;
 use crate::security::zipbomb::DeclaredCompressedBudget;
 use resume::DESCRIPTOR_LOOKAHEAD;
 use resume::DescriptorExit;
@@ -295,7 +296,9 @@ impl Findings {
 
 fn slot_of(finding: &ZipInconsistency) -> Slot {
     match finding {
-        ZipInconsistency::HeaderMismatch { .. } => Slot::Mismatch,
+        ZipInconsistency::HeaderMismatch { .. } | ZipInconsistency::HeaderUncomparable { .. } => {
+            Slot::Mismatch
+        }
         ZipInconsistency::DuplicateName { .. } => Slot::Duplicate,
         ZipInconsistency::HiddenLocalHeader { .. } => Slot::Hidden,
         ZipInconsistency::StrayCentralRecord { .. } => Slot::StrayCentral,
@@ -708,12 +711,12 @@ fn scan_entries<R: Read + Seek>(
         admit_zip_entry(&file, &mut budget)?;
         scan.layouts.push(layout_of(&file, index)?);
         if let Some(error) = mismatch {
-            scan.findings
-                .push_with(Slot::Mismatch, || ZipInconsistency::HeaderMismatch {
-                    entry: ZipEntryIndex::new(index),
-                    field: classify(&error),
-                    name: String::from_utf8_lossy(file.name_raw()).into_owned(),
-                });
+            scan.findings.push_with(Slot::Mismatch, || {
+                classify(&error).finding(
+                    ZipEntryIndex::new(index),
+                    String::from_utf8_lossy(file.name_raw()).into_owned(),
+                )
+            });
         }
     }
 
@@ -752,7 +755,28 @@ fn overlaps(layouts: &[EntryLayout], directory_start: u64) -> bool {
     let mut ranges: Vec<_> = layouts.iter().map(|l| (l.header_start, l.end)).collect();
     ranges.sort_unstable();
     ranges.iter().any(|&(_, end)| end > directory_start)
-        || ranges.windows(2).any(|w| w[0].1 > w[1].0)
+        || ranges.array_windows().any(|[a, b]| a.1 > b.0)
+}
+
+/// What a failed header-consistency check says about the comparison: the field
+/// that differs, or that the headers could not be compared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeaderFault {
+    Mismatch(ZipHeaderField),
+    Uncomparable(ZipUncomparable),
+}
+
+impl HeaderFault {
+    fn finding(self, entry: ZipEntryIndex, name: String) -> ZipInconsistency {
+        match self {
+            Self::Mismatch(field) => ZipInconsistency::HeaderMismatch { entry, field, name },
+            Self::Uncomparable(reason) => ZipInconsistency::HeaderUncomparable {
+                entry,
+                name,
+                reason,
+            },
+        }
+    }
 }
 
 /// Names the field behind a failed header-consistency check.
@@ -760,17 +784,20 @@ fn overlaps(layouts: &[EntryLayout], directory_start: u64) -> bool {
 /// An error without the crate's prefix (for example an I/O error while
 /// parsing the local header's extra fields) means the header could not be
 /// compared at all.
-pub fn classify(error: &ZipError) -> ZipHeaderField {
+pub fn classify(error: &ZipError) -> HeaderFault {
     let ZipError::InvalidArchive(msg) = error else {
-        return ZipHeaderField::Unparseable;
+        return HeaderFault::Uncomparable(ZipUncomparable::Unparseable);
     };
     let Some(rest) = msg.strip_prefix(HEADER_INCONSISTENCY_PREFIX) else {
-        return ZipHeaderField::Unparseable;
+        return HeaderFault::Uncomparable(ZipUncomparable::Unparseable);
     };
     FIELD_MESSAGES
         .iter()
         .find(|(text, _)| rest.starts_with(text))
-        .map_or(ZipHeaderField::Unrecognized, |&(_, field)| field)
+        .map_or(
+            HeaderFault::Uncomparable(ZipUncomparable::Unrecognized),
+            |&(_, field)| HeaderFault::Mismatch(field),
+        )
 }
 
 /// Raw central directory and gap findings.
@@ -797,12 +824,11 @@ impl CentralRecord {
         if reader.read_exact(&mut header).is_err() || header[..4] != CDFH_SIGNATURE {
             return None;
         }
-        let field = |at: usize| le_u16(&header, at);
         Some(Self {
-            name_len: field(28),
-            extra_len: field(30),
-            comment_len: field(32),
-            local_offset: le_u32(&header, 42),
+            name_len: le16::<28, CDFH_FIXED_LEN>(&header),
+            extra_len: le16::<30, CDFH_FIXED_LEN>(&header),
+            comment_len: le16::<32, CDFH_FIXED_LEN>(&header),
+            local_offset: le32::<42, CDFH_FIXED_LEN>(&header),
         })
     }
 
@@ -1012,6 +1038,8 @@ struct GapChecker<'a, R> {
     /// Signature hits below this offset were already judged.
     next_unjudged: u64,
     exhausted: bool,
+    /// Reads of the gap search, for the tests that bound them.
+    #[cfg(test)]
     reads: usize,
 }
 
@@ -1041,6 +1069,7 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
             chunks,
             next_unjudged: 0,
             exhausted: false,
+            #[cfg(test)]
             reads: 0,
         }
     }
@@ -1178,10 +1207,8 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
                     }
                 }
                 Signature::LocalHeader => {
-                    let name_len = hit
-                        .bytes
-                        .get(26..28)
-                        .map(|b| usize::from(le_u16(b, 0)))
+                    let name_len = le_u16(hit.bytes, 26)
+                        .map(usize::from)
                         .filter(|n| LFH_FIXED_LEN + n <= hit.bytes.len());
                     let Some(name_len) = name_len else {
                         return Ok(if hit.end == ChunkEnd::Last {
@@ -1393,12 +1420,12 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
             return;
         }
         self.next_unjudged = position + 1;
-        let name_len = u64::from(le_u16(header, 26));
-        let extra_len = u64::from(le_u16(header, 28));
+        let name_len = u64::from(le16::<26, LFH_FIXED_LEN>(header));
+        let extra_len = u64::from(le16::<28, LFH_FIXED_LEN>(header));
         let end = position + LFH_FIXED_LEN as u64 + name_len + extra_len;
         // A nameless header still makes a streaming reader skip its compressed
         // size.
-        if (name_len > 0 || le_u32(header, 18) > 0)
+        if (name_len > 0 || le32::<18, LFH_FIXED_LEN>(header) > 0)
             && end <= self.map.directory_start
             && !findings.try_push(Slot::Hidden, || ZipInconsistency::HiddenLocalHeader {
                 offset: position,
@@ -1410,7 +1437,10 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
     }
 
     fn read_at(&mut self, position: u64, buf: &mut [u8]) -> Result<()> {
-        self.reads += 1;
+        #[cfg(test)]
+        {
+            self.reads += 1;
+        }
         self.read_uncounted(position, buf)
     }
 
@@ -1539,8 +1569,12 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
         }
         let mut fixed = [0u8; FIXED];
         self.read_header_bytes(start, &mut fixed, reads)?;
-        let name_len = usize::from(le_u16(&fixed, lengths.name));
-        let extra_len = usize::from(le_u16(&fixed, lengths.extra));
+        let (Some(name_len), Some(extra_len)) = (
+            le_u16(&fixed, lengths.name).map(usize::from),
+            le_u16(&fixed, lengths.extra).map(usize::from),
+        ) else {
+            return Ok(None);
+        };
         let name_start = start + FIXED as u64;
         let extra_start = name_start + name_len as u64;
         if extra_start.saturating_add(extra_len as u64) > self.file_len {
@@ -1636,19 +1670,22 @@ impl<const FIXED: usize> RawHeader<FIXED> {
 /// number of prefix bytes from the hit to the archive start, which the
 /// header, extra field and (without a data descriptor) data must fit in.
 fn is_plausible_prefix_header(candidate: &[u8], room: u64) -> bool {
-    let field = |at: usize| le_u16(candidate, at);
-    let name_len = usize::from(field(26));
-    let flags = field(6);
+    let Some(header) = candidate.first_chunk::<LFH_FIXED_LEN>() else {
+        return false;
+    };
+    let name_len = usize::from(le16::<26, LFH_FIXED_LEN>(header));
+    let flags = le16::<6, LFH_FIXED_LEN>(header);
     if name_len == 0
-        || field(4) > MAX_VERSION_NEEDED
+        || le16::<4, LFH_FIXED_LEN>(header) > MAX_VERSION_NEEDED
         || flags & RESERVED_FLAG_BITS != 0
-        || !KNOWN_METHODS.contains(&field(8))
+        || !KNOWN_METHODS.contains(&le16::<8, LFH_FIXED_LEN>(header))
     {
         return false;
     }
-    let mut needed = (LFH_FIXED_LEN + name_len) as u64 + u64::from(field(28));
+    let mut needed =
+        (LFH_FIXED_LEN + name_len) as u64 + u64::from(le16::<28, LFH_FIXED_LEN>(header));
     if flags & DATA_DESCRIPTOR_FLAG == 0 {
-        let compressed = le_u32(candidate, 18);
+        let compressed = le32::<18, LFH_FIXED_LEN>(header);
         if compressed != u32::MAX {
             needed += u64::from(compressed);
         }
@@ -1689,7 +1726,9 @@ fn find_ignored_end_records<R: Read + Seek>(
         if window[at..at + 4] != EOCD_SIGNATURE {
             continue;
         }
-        let comment_len = usize::from(le_u16(&window, at + 20));
+        let Some(comment_len) = le_u16(&window, at + 20).map(usize::from) else {
+            continue;
+        };
         let Some(comment) = window.get(at + EOCD_FIXED_LEN..at + EOCD_FIXED_LEN + comment_len)
         else {
             continue;
@@ -1721,7 +1760,9 @@ fn is_used_record<R: Read + Seek>(
     file_len: u64,
     map: &DirectoryMap,
 ) -> Result<bool> {
-    let directory = le_u32(window, at + 16);
+    let Some(directory) = le_u32(window, at + 16) else {
+        return Ok(false);
+    };
     if directory != u32::MAX {
         return Ok(u64::from(directory).saturating_add(map.archive_offset) == map.directory_start);
     }
@@ -1734,7 +1775,9 @@ fn is_used_record<R: Read + Seek>(
     if locator[..4] != ZIP64_LOCATOR_SIGNATURE {
         return Ok(false);
     }
-    let end_record = le_u64(locator, 8);
+    let Some(end_record) = le_u64(locator, 8) else {
+        return Ok(false);
+    };
     for position in [end_record.saturating_add(map.archive_offset), end_record] {
         if position.saturating_add(ZIP64_END_FIXED_LEN as u64) > file_len {
             continue;
@@ -1745,27 +1788,67 @@ fn is_used_record<R: Read + Seek>(
         if record[..4] != ZIP64_END_SIGNATURE {
             continue;
         }
-        let directory = le_u64(&record, ZIP64_END_DIRECTORY_AT);
+        let directory = le64::<ZIP64_END_DIRECTORY_AT, ZIP64_END_FIXED_LEN>(&record);
         return Ok(directory.saturating_add(map.archive_offset) == map.directory_start);
     }
     Ok(false)
 }
 
-/// Little-endian `u16` at `at`.
-pub(super) fn le_u16(bytes: &[u8], at: usize) -> u16 {
-    u16::from_le_bytes([bytes[at], bytes[at + 1]])
+/// Little-endian `u16` at `at`, or `None` when `bytes` is too short.
+pub(super) fn le_u16(bytes: &[u8], at: usize) -> Option<u16> {
+    bytes
+        .get(at..)?
+        .first_chunk()
+        .copied()
+        .map(u16::from_le_bytes)
 }
 
-/// Little-endian `u32` at `at`.
-pub(super) fn le_u32(bytes: &[u8], at: usize) -> u32 {
-    u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
+/// Little-endian `u32` at `at`, or `None` when `bytes` is too short.
+pub(super) fn le_u32(bytes: &[u8], at: usize) -> Option<u32> {
+    bytes
+        .get(at..)?
+        .first_chunk()
+        .copied()
+        .map(u32::from_le_bytes)
 }
 
-/// Little-endian `u64` at `at`.
-pub(super) fn le_u64(bytes: &[u8], at: usize) -> u64 {
-    let mut raw = [0u8; 8];
-    raw.copy_from_slice(&bytes[at..at + 8]);
-    u64::from_le_bytes(raw)
+/// Little-endian `u64` at `at`, or `None` when `bytes` is too short.
+pub(super) fn le_u64(bytes: &[u8], at: usize) -> Option<u64> {
+    bytes
+        .get(at..)?
+        .first_chunk()
+        .copied()
+        .map(u64::from_le_bytes)
+}
+
+/// Little-endian `u16` at the constant offset `AT` of a fixed-size header; an
+/// offset past the end does not compile.
+pub(super) const fn le16<const AT: usize, const N: usize>(bytes: &[u8; N]) -> u16 {
+    const { assert!(AT + 2 <= N) };
+    u16::from_le_bytes([bytes[AT], bytes[AT + 1]])
+}
+
+/// Little-endian `u32` at the constant offset `AT` of a fixed-size header; an
+/// offset past the end does not compile.
+pub(super) const fn le32<const AT: usize, const N: usize>(bytes: &[u8; N]) -> u32 {
+    const { assert!(AT + 4 <= N) };
+    u32::from_le_bytes([bytes[AT], bytes[AT + 1], bytes[AT + 2], bytes[AT + 3]])
+}
+
+/// Little-endian `u64` at the constant offset `AT` of a fixed-size header; an
+/// offset past the end does not compile.
+pub(super) const fn le64<const AT: usize, const N: usize>(bytes: &[u8; N]) -> u64 {
+    const { assert!(AT + 8 <= N) };
+    u64::from_le_bytes([
+        bytes[AT],
+        bytes[AT + 1],
+        bytes[AT + 2],
+        bytes[AT + 3],
+        bytes[AT + 4],
+        bytes[AT + 5],
+        bytes[AT + 6],
+        bytes[AT + 7],
+    ])
 }
 
 /// An extra field whose declared length runs past its block, which makes a
@@ -1782,7 +1865,7 @@ fn extra_fields(block: &[u8]) -> impl Iterator<Item = std::result::Result<(u16, 
     let mut rest = block;
     std::iter::from_fn(move || {
         let (head, tail) = rest.split_first_chunk::<4>()?;
-        let (id, len) = (le_u16(head, 0), usize::from(le_u16(head, 2)));
+        let (id, len) = (le16::<0, 4>(head), usize::from(le16::<2, 4>(head)));
         if let Some((body, after)) = tail.split_at_checked(len) {
             rest = after;
             Some(Ok((id, body)))
@@ -1829,20 +1912,23 @@ enum Signature {
 /// Of the end-related signatures only the two end records stop a streaming
 /// reader; the ZIP64 locator and the data descriptor signature do not.
 fn find_signature(bytes: &[u8]) -> Option<(usize, Signature)> {
-    bytes.windows(4).enumerate().find_map(|(index, w)| {
-        let kind = if w == LFH_SIGNATURE {
-            Signature::LocalHeader
-        } else if w == CDFH_SIGNATURE {
-            Signature::Stray(StrayKind::Central)
-        } else if w == EOCD_SIGNATURE {
-            Signature::Stray(StrayKind::End(EndRecordKind::Classic))
-        } else if w == ZIP64_END_SIGNATURE {
-            Signature::Stray(StrayKind::End(EndRecordKind::Zip64))
-        } else {
-            return None;
-        };
-        Some((index, kind))
-    })
+    bytes
+        .array_windows::<4>()
+        .enumerate()
+        .find_map(|(index, w)| {
+            let kind = if *w == LFH_SIGNATURE {
+                Signature::LocalHeader
+            } else if *w == CDFH_SIGNATURE {
+                Signature::Stray(StrayKind::Central)
+            } else if *w == EOCD_SIGNATURE {
+                Signature::Stray(StrayKind::End(EndRecordKind::Classic))
+            } else if *w == ZIP64_END_SIGNATURE {
+                Signature::Stray(StrayKind::End(EndRecordKind::Zip64))
+            } else {
+                return None;
+            };
+            Some((index, kind))
+        })
 }
 
 /// What follows a searched region, which decides whether a central record in

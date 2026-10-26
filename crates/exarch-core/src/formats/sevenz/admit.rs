@@ -219,13 +219,13 @@ pub(super) fn coder_memory(coder: &sevenz_rust2::Coder, unpack_size: u64) -> Opt
         | EncoderMethod::ID_BCJ2
         | EncoderMethod::ID_DEFLATE => Some(0),
         EncoderMethod::ID_LZMA => {
-            let dict = props.get(1..5)?;
-            Some(window(u64::from(u32::from_le_bytes(dict.try_into().ok()?))))
+            let dict = props.get(1..)?.first_chunk::<4>()?;
+            Some(window(u64::from(u32::from_le_bytes(*dict))))
         }
         EncoderMethod::ID_LZMA2 => Some(window(u64::from(lzma2_dict_size(props)?))),
         EncoderMethod::ID_PPMD => {
-            let mem = props.get(1..5)?;
-            Some(u64::from(u32::from_le_bytes(mem.try_into().ok()?)))
+            let mem = props.get(1..)?.first_chunk::<4>()?;
+            Some(u64::from(u32::from_le_bytes(*mem)))
         }
         EncoderMethod::ID_BZIP2 => Some(BZIP2_DECODER_MEMORY),
         _ => None,

@@ -161,12 +161,15 @@ mod tests {
     const SIGNATURES: [[u8; 4]; 2] = [*b"PK\x03\x04", *b"PK\x01\x02"];
 
     fn find(bytes: &[u8]) -> Option<(usize, usize)> {
-        bytes.windows(4).enumerate().find_map(|(index, w)| {
-            SIGNATURES
-                .iter()
-                .position(|s| w == s)
-                .map(|which| (index, which))
-        })
+        bytes
+            .array_windows::<4>()
+            .enumerate()
+            .find_map(|(index, w)| {
+                SIGNATURES
+                    .iter()
+                    .position(|s| w == s)
+                    .map(|which| (index, which))
+            })
     }
 
     /// Every hit and the verdict a lookahead of `need` bytes gives it.

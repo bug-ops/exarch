@@ -4,37 +4,31 @@ use std::path::PathBuf;
 use thiserror::Error;
 
 use super::zip_inconsistency::ZipInconsistency;
+use crate::closed_enum::closed_enum;
 
 /// Result type alias using [`ArchiveError`].
 pub type Result<T> = std::result::Result<T, ArchiveError>;
 
-/// What a zip bomb size check was measured over.
-///
-/// `#[non_exhaustive]` so a future measurement scope is not a breaking change
-/// for downstream matches.
-///
-/// # Examples
-///
-/// ```
-/// use exarch_core::ZipBombScope;
-///
-/// assert_eq!(ZipBombScope::SolidBlock.to_string(), "solid block");
-/// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum ZipBombScope {
-    /// One archive entry, checked against `max_compression_ratio`.
-    Entry,
-    /// A whole solid block, checked against `max_solid_compression_ratio`.
-    SolidBlock,
-}
-
-impl std::fmt::Display for ZipBombScope {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Entry => f.write_str("entry"),
-            Self::SolidBlock => f.write_str("solid block"),
-        }
+closed_enum! {
+    /// What a zip bomb size check was measured over.
+    ///
+    /// `#[non_exhaustive]` so a future measurement scope is not a breaking change
+    /// for downstream matches.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::ZipBombScope;
+    ///
+    /// assert_eq!(ZipBombScope::SolidBlock.to_string(), "solid block");
+    /// ```
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[non_exhaustive]
+    pub enum ZipBombScope {
+        /// One archive entry, checked against `max_compression_ratio`.
+        Entry => "entry",
+        /// A whole solid block, checked against `max_solid_compression_ratio`.
+        SolidBlock => "solid block",
     }
 }
 

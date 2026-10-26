@@ -45,6 +45,8 @@ use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
 
+use crate::closed_enum::closed_enum;
+
 /// Maximum number of symlinks followed while resolving a single path, as the
 /// host's `realpath` allows it.
 #[cfg(target_os = "macos")]
@@ -121,38 +123,23 @@ pub const MAX_SYMLINK_TARGET_BYTES: usize = MAX_SYMLINK_TARGET_LEN * 3;
 #[cfg(not(target_os = "windows"))]
 pub const MAX_SYMLINK_TARGET_BYTES: usize = MAX_SYMLINK_TARGET_LEN;
 
-/// The kind of link a target belongs to; the host limits them differently.
-///
-/// # Examples
-///
-/// ```
-/// use exarch_core::LinkKind;
-///
-/// assert_eq!(LinkKind::Symlink.as_str(), "symlink");
-/// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum LinkKind {
-    /// A symbolic link; `symlink(2)` bounds only the whole target
-    Symlink,
-    /// A hard link; the target is resolved as a path, so components count too
-    Hardlink,
-}
-
-impl LinkKind {
-    /// The lowercase name used in messages.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Symlink => "symlink",
-            Self::Hardlink => "hardlink",
-        }
-    }
-}
-
-impl std::fmt::Display for LinkKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
+closed_enum! {
+    /// The kind of link a target belongs to; the host limits them differently.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::LinkKind;
+    ///
+    /// assert_eq!(LinkKind::Symlink.as_str(), "symlink");
+    /// ```
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[non_exhaustive]
+    pub enum LinkKind {
+        /// A symbolic link; `symlink(2)` bounds only the whole target
+        Symlink => "symlink",
+        /// A hard link; the target is resolved as a path, so components count too
+        Hardlink => "hardlink",
     }
 }
 

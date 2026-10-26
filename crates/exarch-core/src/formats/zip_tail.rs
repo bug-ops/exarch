@@ -28,7 +28,7 @@ use super::chunk_search::search_chunks;
 use super::zip::ZipMethod;
 use super::zip_structure::LFH_FIXED_LEN;
 use super::zip_structure::LFH_SIGNATURE;
-use super::zip_structure::le_u16;
+use super::zip_structure::le16;
 use crate::ArchiveError;
 use crate::HiddenRegion;
 use crate::Result;
@@ -245,11 +245,11 @@ pub(super) enum Judgement {
 /// Judges a header signature in the bytes behind a compressed stream: a header
 /// with a name that fits in the rest of the declared range.
 fn judge_header_in_slack(bytes: &[u8], at: u64, total: u64) -> Judgement {
-    let Some(header) = bytes.get(..LFH_FIXED_LEN) else {
+    let Some(header) = bytes.first_chunk::<LFH_FIXED_LEN>() else {
         return Judgement::NeedMore;
     };
-    let name_len = u64::from(le_u16(header, 26));
-    let extra_len = u64::from(le_u16(header, 28));
+    let name_len = u64::from(le16::<26, LFH_FIXED_LEN>(header));
+    let extra_len = u64::from(le16::<28, LFH_FIXED_LEN>(header));
     if name_len > 0 && at + LFH_FIXED_LEN as u64 + name_len + extra_len <= total {
         Judgement::Hit(0)
     } else {
@@ -283,8 +283,8 @@ pub(super) fn scan(
         &plan,
         |bytes| {
             bytes
-                .windows(signature.len())
-                .position(|w| w == signature)
+                .array_windows::<4>()
+                .position(|w| *w == signature)
                 .map(|at| (at, ()))
         },
         |_, hit| {
@@ -322,6 +322,7 @@ impl<R: Read> ChunkSource for Sequential<'_, R> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    use std::assert_matches;
     use std::io::Cursor;
 
     use super::*;
@@ -347,8 +348,8 @@ mod tests {
     fn truncated_stream_is_undecided_not_an_io_error() {
         let stream = deflate(&vec![b'x'; 10_000]);
         let truncated = &stream[..stream.len() / 2];
-        assert!(matches!(drained(Cursor::new(truncated), 10_000), Ok(None)));
-        assert!(matches!(drained(Cursor::new(stream), 10_000), Ok(Some(()))));
+        assert_matches!(drained(Cursor::new(truncated), 10_000), Ok(None));
+        assert_matches!(drained(Cursor::new(stream), 10_000), Ok(Some(())));
     }
 
     #[test]
@@ -393,9 +394,9 @@ mod tests {
 
     #[test]
     fn error_of_the_reader_is_an_io_error() {
-        assert!(matches!(
+        assert_matches!(
             drained(Failing, 10),
             Err(ArchiveError::Io(e)) if e.kind() == std::io::ErrorKind::PermissionDenied
-        ));
+        );
     }
 }

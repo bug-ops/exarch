@@ -16,9 +16,13 @@ use super::links::BlockScan;
 use super::links::BlockStop;
 use super::verify::entries_uncovered_by_block_crc;
 use super::verify::payload_by_block;
+#[cfg(unix)]
 use super::write::MAX_TEMP_FILE_CREATE_ATTEMPTS;
+#[cfg(unix)]
 use super::write::write_file_direct;
+#[cfg(unix)]
 use super::write::write_file_with_permit;
+#[cfg(unix)]
 use super::write::write_file_with_permit_using;
 use super::*;
 use crate::IssueCategory;
@@ -27,6 +31,7 @@ use crate::QuotaResource;
 use crate::SolidBlock;
 use crate::UnverifiedReason;
 use crate::inspection::integrity::IntegrityPass;
+#[cfg(unix)]
 use crate::security::QuotaPermit;
 use std::assert_matches;
 use std::collections::BTreeSet;

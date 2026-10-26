@@ -7,6 +7,7 @@ use crate::ArchiveError;
 use crate::Result;
 use crate::closed_enum::closed_enum;
 use crate::formats::compression::CompressionCodec;
+use crate::formats::sevenz::SEVENZ_MAGIC;
 
 /// Number of bytes to read for magic-byte detection.
 ///
@@ -27,7 +28,7 @@ const MAGIC_SIGNATURES: &[(usize, &[u8], ArchiveType)] = &[
     (0, b"\x50\x4b\x03\x04", ArchiveType::Zip),
     (0, b"\x50\x4b\x05\x06", ArchiveType::Zip),
     (0, b"\x50\x4b\x07\x08", ArchiveType::Zip),
-    (0, b"\x37\x7a\xbc\xaf\x27\x1c", ArchiveType::SevenZ),
+    (0, &SEVENZ_MAGIC, ArchiveType::SevenZ),
     (0, b"\xfd\x37\x7a\x58\x5a\x00", ArchiveType::TarXz),
     (257, b"ustar", ArchiveType::Tar),
 ];

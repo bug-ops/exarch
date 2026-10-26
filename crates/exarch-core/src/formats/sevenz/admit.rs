@@ -2,6 +2,8 @@
 //! compression ratio each entry gets, decided before any byte is decoded.
 
 use super::SIGNATURE_HEADER_SIZE;
+use super::header::BlockIndex;
+use super::header::SevenZHeader;
 use crate::ArchiveError;
 use crate::EntryCompression;
 use crate::Result;
@@ -15,7 +17,6 @@ use crate::inspection::report::IssueSeverity;
 use crate::inspection::report::UnverifiedReason;
 use crate::inspection::report::VerificationIssue;
 use crate::security::zipbomb::DeclaredCompressedBudget;
-use sevenz_rust2::Archive;
 use sevenz_rust2::BlockDecoder;
 use sevenz_rust2::Password;
 use std::io;
@@ -64,9 +65,10 @@ pub(super) fn packed_stream_count(block: &sevenz_rust2::Block) -> usize {
 /// exceed the space the archive can hold, or a pack size sum overflows, and
 /// [`ArchiveError::QuotaExceeded`] when a block's uncompressed sum overflows.
 pub fn sevenz_entry_compression(
-    archive: &Archive,
+    header: &SevenZHeader,
     source_len: u64,
 ) -> Result<Vec<EntryCompression>> {
+    let archive = header.archive();
     let data_region = source_len
         .checked_sub(SIGNATURE_HEADER_SIZE)
         .and_then(|len| len.checked_sub(archive.pack_pos()))
@@ -79,12 +81,11 @@ pub fn sevenz_entry_compression(
     }
 
     let pack_sizes = archive.pack_sizes();
-    let first_pack = archive.stream_map.block_first_pack_stream_index();
-    let block_compressed = |block: usize| -> Result<u64> {
-        let start = first_pack[block];
-        let end = first_pack.get(block + 1).copied().unwrap_or_else(|| {
+    let block_compressed = |block: BlockIndex| -> Result<u64> {
+        let start = header.block_first_pack(block);
+        let end = header.next_block_first_pack(block).unwrap_or_else(|| {
             start
-                .saturating_add(packed_stream_count(&archive.blocks[block]))
+                .saturating_add(packed_stream_count(header.block(block)))
                 .min(pack_sizes.len())
         });
         pack_sizes[start..end]
@@ -93,44 +94,58 @@ pub fn sevenz_entry_compression(
             .ok_or_else(|| ArchiveError::InvalidArchive("7z pack sizes overflow".into()))
     };
 
-    let mut block_uncompressed = vec![0u64; archive.blocks.len()];
-    let mut block_files = vec![0usize; archive.blocks.len()];
-    for (index, file) in archive.files.iter().enumerate() {
-        if let Some(block) = archive.stream_map.file_block_index[index] {
-            block_files[block] += 1;
-            block_uncompressed[block] = block_uncompressed[block].checked_add(file.size).ok_or(
-                ArchiveError::QuotaExceeded {
+    let mut block_uncompressed = vec![0u64; header.block_count()];
+    let mut block_files = vec![0usize; header.block_count()];
+    for (index, file) in header.files().iter().enumerate() {
+        if let Some(block) = header.file_block(index) {
+            block_files[block.get()] += 1;
+            block_uncompressed[block.get()] = block_uncompressed[block.get()]
+                .checked_add(file.size)
+                .ok_or(ArchiveError::QuotaExceeded {
                     resource: QuotaResource::IntegerOverflow,
-                },
-            )?;
+                })?;
         }
     }
 
-    archive
-        .files
+    header
+        .files()
         .iter()
         .enumerate()
         .map(|(index, file)| {
-            let Some(block) = archive.stream_map.file_block_index[index] else {
+            let Some(block) = header.file_block(index) else {
                 return Ok(EntryCompression::Unknown);
             };
             if !file.has_stream {
                 return Ok(EntryCompression::Unknown);
             }
             let compressed = block_compressed(block)?;
-            if block_files[block] <= 1 {
+            if block_files[block.get()] <= 1 {
                 return Ok(EntryCompression::Entry(compressed));
             }
-            if archive.stream_map.block_first_file_index[block] == index {
+            if header.block_first_file(block) == index {
                 Ok(EntryCompression::SolidBlockStart(SolidBlock::new(
                     compressed,
-                    block_uncompressed[block],
+                    block_uncompressed[block.get()],
                 )))
             } else {
                 Ok(EntryCompression::SolidBlockMember)
             }
         })
         .collect()
+}
+
+/// A refused check: the error `extract` fails with, and why `verify` reports
+/// the payload the refusal covers as unverified.
+#[derive(Debug)]
+pub(super) struct Refused {
+    pub(super) reason: UnverifiedReason,
+    pub(super) error: ArchiveError,
+}
+
+impl Refused {
+    const fn new(reason: UnverifiedReason, error: ArchiveError) -> Self {
+        Self { reason, error }
+    }
 }
 
 /// Enforces the solid-archive policy shared by extraction and verification.
@@ -142,39 +157,49 @@ pub fn sevenz_entry_compression(
 ///
 /// # Errors
 ///
-/// Returns [`ArchiveError::SecurityViolation`] when solid archives are not
-/// allowed and [`ArchiveError::QuotaExceeded`] when the size check fails.
-pub fn check_solid_policy(
+/// Refuses with [`UnverifiedReason::SolidPolicy`] and
+/// [`ArchiveError::SecurityViolation`] when solid archives are not allowed, and
+/// with [`UnverifiedReason::ResourceLimit`] and
+/// [`QuotaResource::IntegerOverflow`] or [`QuotaResource::TotalSize`] when the
+/// size check fails.
+pub(super) fn check_solid_policy(
     is_solid: bool,
     sizes: impl IntoIterator<Item = u64>,
     config: &SecurityConfig<Validated>,
-) -> Result<()> {
+) -> std::result::Result<(), Refused> {
     if !is_solid {
         return Ok(());
     }
     if !config.allow_solid_archives {
-        return Err(ArchiveError::SecurityViolation {
-            reason: "solid 7z archives are not allowed (enable allow_solid_archives)".into(),
-        });
+        return Err(Refused::new(
+            UnverifiedReason::SolidPolicy,
+            ArchiveError::SecurityViolation {
+                reason: "solid 7z archives are not allowed (enable allow_solid_archives)".into(),
+            },
+        ));
     }
 
-    let total_uncompressed =
-        sizes
-            .into_iter()
-            .try_fold(0u64, u64::checked_add)
-            .ok_or(ArchiveError::QuotaExceeded {
+    let total_uncompressed = sizes
+        .into_iter()
+        .try_fold(0u64, u64::checked_add)
+        .ok_or_else(|| {
+            Refused::new(
+                UnverifiedReason::ResourceLimit,
+                ArchiveError::QuotaExceeded {
+                    resource: QuotaResource::IntegerOverflow,
+                },
+            )
+        })?;
+    if total_uncompressed > config.max_solid_block_memory {
+        return Err(Refused::new(
+            UnverifiedReason::ResourceLimit,
+            ArchiveError::QuotaExceeded {
                 resource: QuotaResource::TotalSize {
-                    current: u64::MAX,
+                    current: total_uncompressed,
                     max: config.max_solid_block_memory,
                 },
-            })?;
-    if total_uncompressed > config.max_solid_block_memory {
-        return Err(ArchiveError::QuotaExceeded {
-            resource: QuotaResource::TotalSize {
-                current: total_uncompressed,
-                max: config.max_solid_block_memory,
             },
-        });
+        ));
     }
     Ok(())
 }
@@ -248,12 +273,13 @@ pub(super) struct BlockShape {
 /// The files the decoder hands out for `block`: the span of its first file and
 /// its `num_unpack_sub_streams`.
 ///
-/// sevenz-rust2 validated that the span lies within `archive.files`.
-pub(super) fn block_span(archive: &Archive, block: usize) -> std::ops::Range<usize> {
+/// [`SevenZHeader`] proved that the span lies within the archive's files.
+pub(super) fn block_span(header: &SevenZHeader, block: BlockIndex) -> std::ops::Range<usize> {
     let password = Password::empty();
     let mut no_source = io::Cursor::new(&[][..]);
-    let count = BlockDecoder::new(1, block, archive, &password, &mut no_source).entry_count();
-    let first = archive.stream_map.block_first_file_index[block];
+    let count = BlockDecoder::new(1, block.get(), header.archive(), &password, &mut no_source)
+        .entry_count();
+    let first = header.block_first_file(block);
     first..first.saturating_add(count)
 }
 
@@ -266,15 +292,17 @@ pub(super) fn block_span(archive: &Archive, block: usize) -> std::ops::Range<usi
 /// stream file out of the span and the decoder skips it. A trailing block that
 /// no file maps to keeps a first-file index of 0, so its span would re-deliver
 /// the first files of the archive with its own data.
-pub(super) fn block_shapes(archive: &Archive) -> Vec<BlockShape> {
-    let mut shapes = vec![BlockShape::default(); archive.blocks.len()];
-    let spans: Vec<_> = (0..archive.blocks.len())
-        .map(|block| block_span(archive, block))
+pub(super) fn block_shapes(header: &SevenZHeader) -> Vec<BlockShape> {
+    let mut shapes = vec![BlockShape::default(); header.block_count()];
+    let spans: Vec<_> = header
+        .block_indices()
+        .map(|block| block_span(header, block))
         .collect();
-    let mut mapped = vec![0usize; archive.blocks.len()];
-    let mut outside_span = vec![false; archive.blocks.len()];
-    for (index, file) in archive.files.iter().enumerate() {
-        if let Some(block) = archive.stream_map.file_block_index[index] {
+    let mut mapped = vec![0usize; header.block_count()];
+    let mut outside_span = vec![false; header.block_count()];
+    for (index, file) in header.files().iter().enumerate() {
+        if let Some(block) = header.file_block(index) {
+            let block = block.get();
             let shape = &mut shapes[block];
             shape.declared_size = shape.declared_size.saturating_add(file.size);
             shape.interleaved_entry |= !file.has_stream;
@@ -311,46 +339,52 @@ pub(super) fn block_charge(block: &sevenz_rust2::Block) -> u64 {
 ///
 /// # Errors
 ///
-/// Returns [`ArchiveError::QuotaExceeded`] when the decoder memory exceeds the
-/// limit, [`ArchiveError::SecurityViolation`] for AES content encryption, and
-/// [`ArchiveError::InvalidArchive`] for an unknown method, unparseable coder
-/// properties, a stream-less file inside the block, or a block whose decoded
-/// files are not the files mapped to it.
+/// Refuses with [`UnverifiedReason::ResourceLimit`] and
+/// [`ArchiveError::QuotaExceeded`] when the decoder memory exceeds the limit,
+/// and with [`UnverifiedReason::NotDecodable`] for AES content encryption
+/// ([`ArchiveError::SecurityViolation`]) and for an unknown method,
+/// unparseable coder properties, a stream-less file inside the block, or a
+/// block whose decoded files are not the files mapped to it
+/// ([`ArchiveError::InvalidArchive`]).
 pub(super) fn admit_sevenz_block(
     block: &sevenz_rust2::Block,
     shape: BlockShape,
     config: &SecurityConfig<Validated>,
-) -> Result<()> {
+) -> std::result::Result<(), Refused> {
+    let not_decodable = |error| Refused::new(UnverifiedReason::NotDecodable, error);
     let output = block_charge(block).max(shape.declared_size);
     let mut memory: u64 = 0;
     for coder in &block.coders {
         if coder.encoder_method_id() == sevenz_rust2::EncoderMethod::ID_AES256_SHA256 {
-            return Err(common::encrypted_archive_error());
+            return Err(not_decodable(common::encrypted_archive_error()));
         }
         let needed = coder_memory(coder, output).ok_or_else(|| {
-            ArchiveError::InvalidArchive(
+            not_decodable(ArchiveError::InvalidArchive(
                 "7z block uses an unsupported coder or malformed coder properties".into(),
-            )
+            ))
         })?;
         memory = memory.saturating_add(needed);
     }
     if memory > config.max_decoder_memory {
-        return Err(ArchiveError::QuotaExceeded {
-            resource: QuotaResource::DecoderMemory {
-                max: config.max_decoder_memory,
+        return Err(Refused::new(
+            UnverifiedReason::ResourceLimit,
+            ArchiveError::QuotaExceeded {
+                resource: QuotaResource::DecoderMemory {
+                    max: config.max_decoder_memory,
+                },
             },
-        });
+        ));
     }
     if shape.interleaved_entry {
-        return Err(ArchiveError::InvalidArchive(
+        return Err(not_decodable(ArchiveError::InvalidArchive(
             "7z block interleaves a stream-less entry, so a file of the block would be skipped"
                 .into(),
-        ));
+        )));
     }
     if shape.span_mismatch {
-        return Err(ArchiveError::InvalidArchive(
+        return Err(not_decodable(ArchiveError::InvalidArchive(
             "7z block decodes files other than the ones mapped to it".into(),
-        ));
+        )));
     }
     Ok(())
 }
@@ -360,27 +394,30 @@ pub(super) fn admit_sevenz_block(
 pub enum RefusalScope {
     /// The whole archive.
     Archive,
-    /// One block, by index.
-    Block(usize),
+    /// One block.
+    Block(BlockIndex),
 }
 
 /// A refusal of extraction, shared by `extract` and `verify`.
 #[derive(Debug)]
 pub struct SevenZRefusal {
     pub(super) scope: RefusalScope,
+    unverified: UnverifiedReason,
     pub(super) error: ArchiveError,
 }
 
 impl SevenZRefusal {
-    /// Why the payload the refusal covers stays unverified.
-    pub(super) fn unverified(&self) -> UnverifiedReason {
-        match (&self.error, self.scope) {
-            (ArchiveError::QuotaExceeded { .. }, _) => UnverifiedReason::ResourceLimit,
-            (ArchiveError::SecurityViolation { .. }, RefusalScope::Archive) => {
-                UnverifiedReason::SolidPolicy
-            }
-            _ => UnverifiedReason::NotDecodable,
+    fn new(scope: RefusalScope, refused: Refused) -> Self {
+        Self {
+            scope,
+            unverified: refused.reason,
+            error: refused.error,
         }
+    }
+
+    /// Why the payload the refusal covers stays unverified.
+    pub(super) const fn unverified(&self) -> UnverifiedReason {
+        self.unverified
     }
 
     /// The error `extract` fails with.
@@ -399,41 +436,34 @@ impl SevenZRefusal {
 /// The iterator is lazy: `extract` takes only the first refusal and stops
 /// checking blocks there.
 pub fn iter_sevenz_refusals<'a>(
-    archive: &'a Archive,
+    header: &'a SevenZHeader,
     config: &'a SecurityConfig<Validated>,
 ) -> impl Iterator<Item = SevenZRefusal> + 'a {
     let solid = check_solid_policy(
-        archive.is_solid,
-        archive.files.iter().map(|f| f.size),
+        header.is_solid(),
+        header.files().iter().map(|f| f.size),
         config,
     )
     .err()
-    .map(|error| SevenZRefusal {
-        scope: RefusalScope::Archive,
-        error,
-    });
-    let blocks = archive
-        .blocks
-        .iter()
-        .zip(block_shapes(archive))
-        .enumerate()
-        .filter_map(move |(index, (block, shape))| {
-            admit_sevenz_block(block, shape, config)
-                .err()
-                .map(|error| SevenZRefusal {
-                    scope: RefusalScope::Block(index),
-                    error,
-                })
-        });
+    .map(|refused| SevenZRefusal::new(RefusalScope::Archive, refused));
+    let blocks =
+        header
+            .block_indices()
+            .zip(block_shapes(header))
+            .filter_map(move |(index, shape)| {
+                admit_sevenz_block(header.block(index), shape, config)
+                    .err()
+                    .map(|refused| SevenZRefusal::new(RefusalScope::Block(index), refused))
+            });
     solid.into_iter().chain(blocks)
 }
 
 /// Every refusal of [`iter_sevenz_refusals`], for `verify` to report.
 pub fn sevenz_refusals(
-    archive: &Archive,
+    header: &SevenZHeader,
     config: &SecurityConfig<Validated>,
 ) -> Vec<SevenZRefusal> {
-    iter_sevenz_refusals(archive, config).collect()
+    iter_sevenz_refusals(header, config).collect()
 }
 
 /// Most refusals `verify` lists; the rest are summarized in one issue.
@@ -457,4 +487,58 @@ pub fn refusal_issues(refusals: &[SevenZRefusal]) -> Vec<VerificationIssue> {
         ));
     }
     issues
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use std::assert_matches;
+
+    fn config(allow_solid: bool, max_solid_memory: u64) -> SecurityConfig<Validated> {
+        SecurityConfig::default()
+            .with_allow_solid_archives(allow_solid)
+            .with_max_solid_block_memory(max_solid_memory)
+            .validate()
+            .unwrap()
+    }
+
+    #[test]
+    fn solid_policy_refusal_carries_its_own_reason() {
+        let refused = check_solid_policy(true, [1], &config(false, 100)).unwrap_err();
+        assert_eq!(refused.reason, UnverifiedReason::SolidPolicy);
+        assert_matches!(refused.error, ArchiveError::SecurityViolation { .. });
+    }
+
+    #[test]
+    fn solid_size_overflow_is_an_integer_overflow() {
+        let refused = check_solid_policy(true, [u64::MAX, 1], &config(true, 100)).unwrap_err();
+        assert_eq!(refused.reason, UnverifiedReason::ResourceLimit);
+        assert_matches!(
+            refused.error,
+            ArchiveError::QuotaExceeded {
+                resource: QuotaResource::IntegerOverflow
+            }
+        );
+    }
+
+    #[test]
+    fn solid_size_over_the_limit_is_a_resource_limit() {
+        let refused = check_solid_policy(true, [60, 60], &config(true, 100)).unwrap_err();
+        assert_eq!(refused.reason, UnverifiedReason::ResourceLimit);
+        assert_matches!(
+            refused.error,
+            ArchiveError::QuotaExceeded {
+                resource: QuotaResource::TotalSize {
+                    current: 120,
+                    max: 100
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn non_solid_archive_passes_the_policy() {
+        assert!(check_solid_policy(false, [u64::MAX, 1], &config(false, 100)).is_ok());
+    }
 }

@@ -10,6 +10,7 @@ pub use io_context::IoContext;
 pub use messages::FfiErrorMessage;
 pub use types::ArchiveError;
 pub use types::CompressionRatio;
+pub use types::PartialWrites;
 pub use types::QuotaResource;
 pub use types::Result;
 pub use types::ZipBombDetails;

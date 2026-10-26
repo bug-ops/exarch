@@ -7,10 +7,12 @@ use super::decode::parallel_stream;
 use crate::ParallelDecode;
 use std::io::Cursor;
 
+use sevenz_rust2::Archive;
 use sevenz_rust2::ArchiveEntry;
 use sevenz_rust2::ArchiveWriter;
 use sevenz_rust2::EncoderConfiguration;
 use sevenz_rust2::EncoderMethod;
+use sevenz_rust2::Password;
 use sevenz_rust2::SourceReader;
 use sevenz_rust2::encoder_options::Lzma2Options;
 
@@ -80,12 +82,12 @@ fn run(
     knobs: DecodeKnobs,
     stop_after: usize,
 ) -> (Events, String) {
-    let archive = Archive::read(&mut Cursor::new(bytes.to_vec()), &Password::empty()).unwrap();
-    run_archive(&archive, bytes, parallel, knobs, stop_after)
+    let header = read_sevenz_header(&mut Cursor::new(bytes)).unwrap();
+    run_archive(&header, bytes, parallel, knobs, stop_after)
 }
 
 fn run_archive(
-    archive: &Archive,
+    header: &SevenZHeader,
     bytes: &[u8],
     parallel: ParallelDecode,
     knobs: DecodeKnobs,
@@ -94,7 +96,7 @@ fn run_archive(
     let mut events = Events::new();
     let result = decode_archive_entries(
         &mut Cursor::new(bytes.to_vec()),
-        archive,
+        header,
         parallel,
         knobs,
         &mut |entry, reader| {
@@ -117,8 +119,9 @@ fn forced(threads: usize) -> DecodeKnobs {
 }
 
 fn uses_the_parallel_path(bytes: &[u8], knobs: DecodeKnobs) -> bool {
-    let archive = Archive::read(&mut Cursor::new(bytes.to_vec()), &Password::empty()).unwrap();
-    parallel_stream(&archive, 0, 0..archive.files.len(), knobs.min_unit).is_some()
+    let header = read_sevenz_header(&mut Cursor::new(bytes)).unwrap();
+    let block = header.block_indices().next().unwrap();
+    parallel_stream(&header, block, 0..header.files().len(), knobs.min_unit).is_some()
 }
 
 #[test]
@@ -196,11 +199,11 @@ fn test_parallel_decode_reports_a_corrupt_stream_like_sequential() {
 type FileView = (String, Vec<u8>, bool);
 
 fn run_in_steps(bytes: &[u8], parallel: ParallelDecode, knobs: DecodeKnobs) -> Vec<FileView> {
-    let archive = Archive::read(&mut Cursor::new(bytes.to_vec()), &Password::empty()).unwrap();
+    let header = read_sevenz_header(&mut Cursor::new(bytes)).unwrap();
     let mut views = Vec::new();
     let _ = decode_archive_entries(
         &mut Cursor::new(bytes.to_vec()),
-        &archive,
+        &header,
         parallel,
         knobs,
         &mut |entry, reader| {
@@ -342,31 +345,32 @@ fn test_bounded_with_one_thread_takes_the_sequential_path() {
 /// A stream-less file inside the walked span of an otherwise eligible block,
 /// which a hand-edited file table can produce; its size moves to the last file
 /// so the files still account for the whole output.
-fn archive_with_empty_file_in_the_span(bytes: &[u8]) -> Archive {
+fn archive_with_empty_file_in_the_span(bytes: &[u8]) -> SevenZHeader {
     let mut archive = Archive::read(&mut Cursor::new(bytes.to_vec()), &Password::empty()).unwrap();
     let moved = archive.files[1].size;
     archive.files[1].has_stream = false;
     archive.files[1].size = 0;
     archive.files[2].size += moved;
     archive.files[2].has_crc = false;
-    archive
+    SevenZHeader::assume_checked(archive)
 }
 
 #[test]
 fn test_empty_file_inside_a_block_is_visited_and_can_stop_the_walk() {
     let bytes = lzma2_archive(&files());
-    let archive = archive_with_empty_file_in_the_span(&bytes);
-    assert!(parallel_stream(&archive, 0, 0..3, 1024).is_some());
+    let header = archive_with_empty_file_in_the_span(&bytes);
+    let block = header.block_indices().next().unwrap();
+    assert!(parallel_stream(&header, block, 0..3, 1024).is_some());
 
     for stop_after in [2, usize::MAX] {
         let expected = run_archive(
-            &archive,
+            &header,
             &bytes,
             ParallelDecode::Sequential,
             forced(2),
             stop_after,
         );
-        let actual = run_archive(&archive, &bytes, bounded(1 << 22), forced(3), stop_after);
+        let actual = run_archive(&header, &bytes, bounded(1 << 22), forced(3), stop_after);
         assert_eq!(actual, expected, "stop after {stop_after}");
         assert_eq!(actual.0[1], ("second".to_string(), Ok(Vec::new())));
     }

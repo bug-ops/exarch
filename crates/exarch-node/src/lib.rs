@@ -139,9 +139,11 @@ fn catch_panic_as_js_err<T>(context: &str, f: impl FnOnce() -> Result<T>) -> Res
 /// - `IO_ERROR`: I/O operation failed
 ///
 /// When extraction fails after some files were already written (a partial
-/// extraction), the message additionally carries
-/// `filesExtracted=N, bytesWritten=M, filesSkipped=K, warnings=[...]`
-/// appended after the error-code prefix. The `warnings=[...]` fragment is
+/// extraction), the message ends with ` | writes=kept, filesExtracted=N,
+/// bytesWritten=M, filesSkipped=K, warnings=[...]` appended after the
+/// error-code prefix. With `atomic` the destination is rolled back and the
+/// message ends with ` | writes=rolled_back` and no counters. The
+/// `warnings=[...]` fragment is
 /// Rust's `Debug`-formatted `Vec<String>` rendering — it is for human/log
 /// inspection only, is not guaranteed to be valid JSON, and must not be
 /// `JSON.parse`d.

@@ -5,11 +5,12 @@ use crate::commands::apply_size_limits;
 use crate::commands::atomic_swap;
 use crate::commands::atomic_swap::DestEntryKind;
 use crate::commands::atomic_swap::PinnedDir;
-use crate::error::PartialWrites;
+use crate::error::CliContext;
 use crate::error::add_archive_context;
 use crate::error::convert_extraction_error;
 use crate::output::OutputFormatter;
 use crate::output::Verbosity;
+use crate::output::terminal::TerminalPath;
 use crate::progress::CliProgress;
 use crate::progress::VerboseProgress;
 use anyhow::Context;
@@ -33,6 +34,15 @@ use std::io;
 use std::path::Path;
 use std::path::PathBuf;
 
+/// Where [`run_extraction`] writes, which decides what a stopped run leaves.
+#[derive(Clone, Copy)]
+enum Staging {
+    /// Straight into the destination (or core's own atomic staging).
+    Direct,
+    /// Into a staging directory the CLI discards on failure.
+    Discarded,
+}
+
 fn run_extraction(
     archive: &Path,
     output_dir: &Path,
@@ -40,14 +50,15 @@ fn run_extraction(
     options: &ExtractionOptions,
     progress: &mut dyn ProgressCallback,
     allow_symlinks: bool,
-    writes: PartialWrites,
+    staging: Staging,
 ) -> Result<ExtractionReport> {
-    add_archive_context(
-        extract_archive_with_options_and_progress(archive, output_dir, config, options, progress),
-        archive,
-        allow_symlinks,
-        writes,
-    )
+    let result =
+        extract_archive_with_options_and_progress(archive, output_dir, config, options, progress)
+            .map_err(|err| match staging {
+                Staging::Direct => err,
+                Staging::Discarded => err.rolled_back(),
+            });
+    add_archive_context(result, archive, allow_symlinks)
 }
 
 /// Everything [`run_atomic_force_extraction`] needs, resolved and pinned by
@@ -157,7 +168,7 @@ fn run_atomic_force_extraction(
         options,
         progress,
         allow_symlinks,
-        PartialWrites::RolledBack,
+        Staging::Discarded,
     )
     .with_context(|| temp_ref.disclose("extraction interrupted"))?;
 
@@ -698,7 +709,7 @@ fn conflict_error_message(conflicts: &[std::path::PathBuf]) -> String {
     let list = sorted
         .into_iter()
         .take(MAX_LISTED_CONFLICTS)
-        .map(|p| format!("  {}", p.display()))
+        .map(|p| format!("  {}", TerminalPath::new(p)))
         .collect::<Vec<_>>()
         .join("\n");
 
@@ -711,6 +722,12 @@ fn conflict_error_message(conflicts: &[std::path::PathBuf]) -> String {
              first {MAX_LISTED_CONFLICTS} shown:\n{list}\n  ... and {remaining} more"
         )
     }
+}
+
+/// Wraps [`conflict_error_message`] in a [`CliContext`] so the formatter keeps
+/// its line breaks.
+fn conflict_error(conflicts: &[std::path::PathBuf]) -> anyhow::Error {
+    anyhow::Error::new(CliContext::new(conflict_error_message(conflicts)))
 }
 
 /// Drops empty entries from raw `--banned-component` values.
@@ -814,7 +831,7 @@ pub fn execute(
             .collect();
 
         if !conflicts.is_empty() {
-            anyhow::bail!(conflict_error_message(&conflicts));
+            return Err(conflict_error(&conflicts));
         }
     }
 
@@ -869,7 +886,7 @@ pub fn execute(
             &options,
             progress.as_mut(),
             args.links.allow_symlinks,
-            PartialWrites::from_atomic(args.atomic),
+            Staging::Direct,
         )?
     };
 
@@ -1216,6 +1233,13 @@ mod tests {
     fn filter_banned_components_keeps_non_empty_entries() {
         let raw = vec![".git".to_string(), String::new(), ".ssh".to_string()];
         assert_eq!(filter_banned_components(&raw), vec![".git", ".ssh"]);
+    }
+
+    #[test]
+    fn conflict_error_message_escapes_hostile_paths() {
+        let conflicts = vec![std::path::PathBuf::from("a\x1b[2J\nforged")];
+        let msg = conflict_error_message(&conflicts);
+        assert!(msg.ends_with("  a\\x1b[2J\\x0aforged"), "{msg:?}");
     }
 
     #[test]

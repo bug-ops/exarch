@@ -196,6 +196,17 @@ else
     echo "⚠ Skipping symlink-snl.7z (7zz not installed)"
 fi
 
+# 13. streams-without-files-info.7z - NOT generated: a 66-byte fuzzer vector, a
+# header with main streams info and no FilesInfo, fetched byte for byte from
+# hasenbanck/sevenz-rust2 (tests/resources/streams_without_files_info.bin, git
+# blob e85b229022bc9bd35961c7494242496e591ef877, Apache-2.0, compatible with
+# this project's MIT OR Apache-2.0). Pins #746: sevenz-rust2 0.24.1 parses it
+# with an empty stream map, and every operation must reject it as an invalid
+# archive. The file is committed; this script does not recreate it.
+if [ ! -f "$FIXTURES_DIR/streams-without-files-info.7z" ]; then
+    echo "⚠ streams-without-files-info.7z is missing; restore it from git"
+fi
+
 echo ""
 echo "All fixtures generated successfully!"
 echo "Note: path-traversal.7z requires manual crafting (see README.md)"

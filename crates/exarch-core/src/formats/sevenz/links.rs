@@ -6,6 +6,8 @@ use super::decode::EntryResult;
 use super::decode::decode_block_entries;
 use super::decode::is_sevenz_payload;
 use super::decode::skip_payload;
+use super::header::BlockIndex;
+use super::header::SevenZHeader;
 use super::lzma2::DecodeKnobs;
 use crate::ArchiveError;
 use crate::EntryCompression;
@@ -24,9 +26,9 @@ use crate::inspection::manifest::LinkTarget;
 use crate::inspection::report::UnverifiedReason;
 use crate::security::fs_view::LinkKind;
 use crate::security::zipbomb::validate_entry_compression;
-use sevenz_rust2::Archive;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::fmt;
 use std::io;
 use std::io::Read;
 use std::io::Seek;
@@ -46,16 +48,46 @@ pub enum StoredLinkTarget {
 
 /// Why a stored link target was not read. `list` and `verify` report such a
 /// target as unreadable; `extract` fails.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LinkReadFailure {
     /// The block holding the target is refused for decoding.
     BlockRefused,
     /// The decoder failed before the target was complete.
-    Decode(String),
+    Decode(LinkDecodeFailure),
     /// The target's data ended before its declared size.
     Truncated,
     /// The target's data failed its checksum.
     Checksum,
+}
+
+/// How the decoder failed to deliver a link target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkDecodeFailure {
+    /// The compressed data is malformed.
+    Malformed,
+    /// The data exceeds the size the entry declares.
+    DeclaredSizeOverrun,
+    /// Decoding would exceed a resource limit.
+    ResourceLimit,
+    /// The block's method, encryption or coder setup cannot be decoded.
+    NotDecodable,
+    /// The block's decoder failed before reaching the target.
+    BlockAborted,
+    /// The block's decoder finished without handing the target over.
+    NotReached,
+}
+
+impl fmt::Display for LinkDecodeFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Malformed => "the compressed data is malformed",
+            Self::DeclaredSizeOverrun => "the data exceeds the declared size",
+            Self::ResourceLimit => "decoding exceeds a resource limit",
+            Self::NotDecodable => "the block cannot be decoded",
+            Self::BlockAborted => "the decoder failed before the target",
+            Self::NotReached => "the entry was not decoded",
+        })
+    }
 }
 
 impl LinkReadFailure {
@@ -66,7 +98,12 @@ impl LinkReadFailure {
             DecodeFailure::Checksum => Ok(Self::Checksum),
             DecodeFailure::Truncated { .. } => Ok(Self::Truncated),
             DecodeFailure::Io(e) => Err(ArchiveError::Io(e)),
-            other => Ok(Self::Decode(other.to_string())),
+            DecodeFailure::Malformed(_) => Ok(Self::Decode(LinkDecodeFailure::Malformed)),
+            DecodeFailure::DeclaredSizeOverrun { .. } => {
+                Ok(Self::Decode(LinkDecodeFailure::DeclaredSizeOverrun))
+            }
+            DecodeFailure::ResourceLimit(_) => Ok(Self::Decode(LinkDecodeFailure::ResourceLimit)),
+            DecodeFailure::NotDecodable(_) => Ok(Self::Decode(LinkDecodeFailure::NotDecodable)),
         }
     }
 
@@ -74,7 +111,7 @@ impl LinkReadFailure {
     pub(crate) fn into_extract_error(self, name: &str) -> ArchiveError {
         let why = match self {
             Self::BlockRefused => "its block is not admitted for decoding".to_owned(),
-            Self::Decode(detail) => detail,
+            Self::Decode(failure) => failure.to_string(),
             Self::Truncated => "its data ends early".to_owned(),
             Self::Checksum => "checksum mismatch".to_owned(),
         };
@@ -181,13 +218,13 @@ impl<T> LinkTable<T> {
 /// Hands `each` the targets of the links at `indices` (ascending archive file
 /// indices) that need no decoding, and returns the links that do.
 pub fn deliver_undecoded_links(
-    archive: &Archive,
+    header: &SevenZHeader,
     indices: impl Iterator<Item = usize>,
     each: &mut impl FnMut(usize, LinkOutcome) -> Result<()>,
 ) -> Result<Vec<usize>> {
     let mut streamed = Vec::new();
     for index in indices {
-        match link_storage(&archive.files[index]) {
+        match link_storage(&header.files()[index]) {
             LinkStorage::Empty => each(index, Ok(StoredLinkTarget::Read(PathBuf::new())))?,
             LinkStorage::Oversized(bytes) => {
                 each(index, Ok(StoredLinkTarget::Oversized { bytes }))?;
@@ -201,22 +238,22 @@ pub fn deliver_undecoded_links(
 /// Marks the blocks the walk must not decode: every block under an archive
 /// refusal or its own, and every block holding a file over the ratio limit.
 pub(super) fn blocks_closed_to_links(
-    archive: &Archive,
+    header: &SevenZHeader,
     compression: &[EntryCompression],
     config: &SecurityConfig<Validated>,
 ) -> Vec<bool> {
-    let mut closed = vec![false; archive.blocks.len()];
-    for refusal in sevenz_refusals(archive, config) {
+    let mut closed = vec![false; header.block_count()];
+    for refusal in sevenz_refusals(header, config) {
         match refusal.scope {
             RefusalScope::Archive => closed.fill(true),
-            RefusalScope::Block(index) => closed[index] = true,
+            RefusalScope::Block(index) => closed[index.get()] = true,
         }
     }
-    for (index, file) in archive.files.iter().enumerate() {
-        if let Some(block) = archive.stream_map.file_block_index[index]
+    for (index, file) in header.files().iter().enumerate() {
+        if let Some(block) = header.file_block(index)
             && validate_entry_compression(&compression[index], file.size, config).is_err()
         {
-            closed[block] = true;
+            closed[block.get()] = true;
         }
     }
     closed
@@ -263,51 +300,51 @@ pub(super) fn drain_unwanted(
 /// Returns the first error of `each`, a non-UTF-8 target, or a failing disk
 /// read.
 pub fn walk_sevenz_links<R: Read + Seek, T>(
-    archive: &Archive,
+    header: &SevenZHeader,
     source: &mut R,
     compression: &[EntryCompression],
     config: &SecurityConfig<Validated>,
     links: &LinkTable<T>,
     each: &mut impl FnMut(usize, LinkOutcome) -> Result<()>,
 ) -> Result<()> {
-    let streamed = deliver_undecoded_links(archive, links.indices(), each)?;
+    let streamed = deliver_undecoded_links(header, links.indices(), each)?;
     if streamed.is_empty() {
         return Ok(());
     }
-    let closed = blocks_closed_to_links(archive, compression, config);
-    let mut by_block: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    let closed = blocks_closed_to_links(header, compression, config);
+    let mut by_block: BTreeMap<BlockIndex, Vec<usize>> = BTreeMap::new();
     for index in streamed {
-        match archive.stream_map.file_block_index[index] {
+        match header.file_block(index) {
             Some(block) => by_block.entry(block).or_default().push(index),
             None => each(index, Err(LinkReadFailure::BlockRefused))?,
         }
     }
     for (block, wanted) in by_block {
-        if closed[block] {
+        if closed[block.get()] {
             for index in wanted {
                 each(index, Err(LinkReadFailure::BlockRefused))?;
             }
         } else {
-            walk_block_links(archive, source, config, block, &wanted, each)?;
+            walk_block_links(header, source, config, block, &wanted, each)?;
         }
     }
     Ok(())
 }
 
 pub(super) fn walk_block_links<R: Read + Seek>(
-    archive: &Archive,
+    header: &SevenZHeader,
     source: &mut R,
     config: &SecurityConfig<Validated>,
-    block: usize,
+    block: BlockIndex,
     wanted: &[usize],
     each: &mut impl FnMut(usize, LinkOutcome) -> Result<()>,
 ) -> Result<()> {
-    let mut next_file = archive.stream_map.block_first_file_index[block];
+    let mut next_file = header.block_first_file(block);
     let mut delivered = 0;
     let mut abort = None;
     let result = decode_block_entries(
         source,
-        archive,
+        header,
         block,
         config.parallel_decode,
         DecodeKnobs::production(),
@@ -340,11 +377,11 @@ pub(super) fn walk_block_links<R: Read + Seek>(
         return Err(e);
     }
     let failure = match result {
-        Err(e) => LinkReadFailure::Decode(e.to_string()),
-        Ok(_) => LinkReadFailure::Decode("the entry was not decoded".to_owned()),
+        Err(_) => LinkReadFailure::Decode(LinkDecodeFailure::BlockAborted),
+        Ok(_) => LinkReadFailure::Decode(LinkDecodeFailure::NotReached),
     };
     for &index in &wanted[delivered..] {
-        each(index, Err(failure.clone()))?;
+        each(index, Err(failure))?;
     }
     Ok(())
 }
@@ -375,11 +412,11 @@ impl LinkCapture<'_> {
     /// blocks the pass refuses to decode, as unreadable.
     pub(super) fn mark_unreadable(
         &mut self,
-        archive: &Archive,
+        header: &SevenZHeader,
         indices: impl Iterator<Item = usize>,
     ) {
         for index in indices {
-            if let Some(position) = self.position(index, &archive.files[index]) {
+            if let Some(position) = self.position(index, &header.files()[index]) {
                 (self.set)(position, LinkTarget::Unreadable);
             }
         }

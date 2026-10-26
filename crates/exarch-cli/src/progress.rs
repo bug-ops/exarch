@@ -1,6 +1,7 @@
 //! Progress bar implementation for CLI operations.
 
 use crate::output::humanize_bytes;
+use crate::output::terminal::TerminalPath;
 use console::Term;
 use exarch_core::ProgressCallback;
 use indicatif::ProgressBar;
@@ -112,7 +113,7 @@ impl VerboseProgress {
 
 impl ProgressCallback for VerboseProgress {
     fn on_entry_start(&mut self, path: &Path, _total: usize, _current: usize) {
-        eprintln!("  extract  {}", path.display());
+        eprintln!("  extract  {}", TerminalPath::new(path));
     }
 
     fn on_bytes_written(&mut self, _bytes: u64) {}

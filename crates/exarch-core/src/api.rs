@@ -297,7 +297,7 @@ fn extract_atomic<P: AsRef<Path>, Q: AsRef<Path>>(
         }
         Err(e) => {
             // TempDir Drop runs here: cleans up temp dir automatically.
-            Err(e)
+            Err(e.rolled_back())
         }
     }
 }

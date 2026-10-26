@@ -282,6 +282,43 @@ fn symlink_target_leaving_own_parent_directories_extracts() {
     }
 }
 
+/// Extraction with overwrite stops at a symlink entry whose path holds a
+/// symlink, instead of re-pointing a link an earlier entry already resolved
+/// through.
+fn assert_symlink_refused(result: exarch_core::Result<exarch_core::ExtractionReport>) {
+    let error = result.unwrap_err();
+    let exarch_core::ArchiveError::PartialExtraction { source, .. } = &error else {
+        panic!("expected PartialExtraction, got {error:?}");
+    };
+    let exarch_core::ArchiveError::Io(io) = &**source else {
+        panic!("expected Io, got {source:?}");
+    };
+    assert_eq!(
+        io.kind(),
+        std::io::Error::from_raw_os_error(libc::ELOOP).kind()
+    );
+}
+
+fn assert_issue_note(fixture: &Fixture, needle: &str) {
+    let report = fixture.verify_report().unwrap();
+    assert_eq!(report.security_status(), CheckStatus::Pass, "{report:?}");
+    let note = report
+        .issues()
+        .iter()
+        .find(|i| i.category == exarch_core::IssueCategory::InvalidArchive)
+        .unwrap_or_else(|| panic!("no overwrite note: {:?}", report.issues()));
+    assert_eq!(note.severity, exarch_core::IssueSeverity::Low);
+    assert!(note.message.contains(needle), "{}", note.message);
+}
+
+fn resolves_to(fixture: &Fixture, link: &str, expected: &str) {
+    assert_eq!(
+        std::fs::canonicalize(fixture.out().join(link)).unwrap(),
+        std::fs::canonicalize(fixture.out().join(expected)).unwrap(),
+        "{link}"
+    );
+}
+
 #[test]
 fn existing_symlink_at_link_path_is_not_replaced() {
     for format in TAR_ONLY {
@@ -296,17 +333,16 @@ fn existing_symlink_at_link_path_is_not_replaced() {
                     Link("x", "."),
                 ],
             );
-            assert_eq!(
-                code(fixture.extract(skip_duplicates)),
-                "SYMLINK_ESCAPE",
-                "{format:?} skip_duplicates={skip_duplicates}"
-            );
+            let result = fixture.extract(skip_duplicates);
+            if skip_duplicates {
+                result.unwrap();
+            } else {
+                assert_symlink_refused(result);
+            }
             assert_links_resolve_in_dest(&fixture.out());
-            assert_ne!(
-                fixture.verify_status(),
-                Some(CheckStatus::Pass),
-                "{format:?}"
-            );
+            resolves_to(&fixture, "x", "p/q");
+            resolves_to(&fixture, "a", "p");
+            assert_issue_note(&fixture, "fails at x");
         }
     }
 }
@@ -325,18 +361,111 @@ fn existing_symlink_in_chain_is_not_replaced() {
                     Link("y", "."),
                 ],
             );
-            assert_eq!(
-                code(fixture.extract(skip_duplicates)),
-                "SYMLINK_ESCAPE",
-                "{format:?} skip_duplicates={skip_duplicates}"
-            );
+            let result = fixture.extract(skip_duplicates);
+            if skip_duplicates {
+                result.unwrap();
+            } else {
+                assert_symlink_refused(result);
+            }
             assert_links_resolve_in_dest(&fixture.out());
-            assert_ne!(
-                fixture.verify_status(),
-                Some(CheckStatus::Pass),
-                "{format:?}"
-            );
+            resolves_to(&fixture, "y", "p");
+            assert_issue_note(&fixture, "fails at y");
         }
+    }
+}
+
+/// Re-pointing `d` after `e -> d/../..` was validated would make `e` leave the
+/// destination, so the second `d` is skipped by default and refused when
+/// overwriting, in every spelling.
+#[test]
+fn repointing_a_link_that_an_earlier_link_resolved_through_is_refused() {
+    let archives: [(&str, &[Node]); 4] = [
+        (
+            "plain",
+            &[
+                Dir("sub/"),
+                Dir("sub/deep/"),
+                Link("d", "sub/deep"),
+                Link("e", "d/../.."),
+                Link("d", "sub"),
+            ],
+        ),
+        (
+            "trailing slash",
+            &[
+                Dir("sub/"),
+                Dir("sub/deep/"),
+                Link("d", "sub/deep"),
+                Link("e", "d/../.."),
+                Link("d/", "sub"),
+            ],
+        ),
+        (
+            "through a link",
+            &[
+                Dir("sub/"),
+                Dir("sub/deep/"),
+                Link("d", "sub/deep"),
+                Link("c", "d"),
+                Link("e", "c/../.."),
+                Link("c", "sub"),
+            ],
+        ),
+        (
+            "over a directory",
+            &[
+                Dir("sub/"),
+                Dir("sub/deep/"),
+                Link("d", "sub/deep"),
+                Link("e", "d/../.."),
+                Dir("d/"),
+                Link("d", "sub"),
+            ],
+        ),
+    ];
+    for (name, nodes) in archives {
+        for skip_duplicates in [true, false] {
+            let fixture = Fixture::new(Format::Tar, nodes);
+            let result = fixture.extract(skip_duplicates);
+            let label = format!("{name} skip_duplicates={skip_duplicates}");
+            if skip_duplicates {
+                assert!(result.is_ok(), "{label}: {result:?}");
+            } else {
+                assert!(result.is_err(), "{label}");
+            }
+            assert_links_resolve_in_dest(&fixture.out());
+            resolves_to(&fixture, "d", "sub/deep");
+            assert_eq!(fixture.verify_status(), Some(CheckStatus::Pass), "{label}");
+        }
+    }
+}
+
+/// The `zip` writer refuses two entries with one name, so the duplicate is
+/// made by renaming a same-length name in the written bytes.
+#[test]
+fn zip_repointing_through_an_earlier_link_never_escapes() {
+    let nodes = [
+        Dir("sub/"),
+        Dir("sub/deep/"),
+        Link("dQ", "sub/deep"),
+        Link("e", "dQ/../.."),
+        Link("dR", "sub"),
+    ];
+    for skip_duplicates in [true, false] {
+        let fixture = Fixture::new(Format::Zip, &nodes);
+        let mut bytes = std::fs::read(&fixture.archive).unwrap();
+        let mut renamed = 0;
+        for at in 0..bytes.len() - 1 {
+            if &bytes[at..at + 2] == b"dR" {
+                bytes[at + 1] = b'Q';
+                renamed += 1;
+            }
+        }
+        assert!(renamed >= 2, "local header and central directory");
+        std::fs::write(&fixture.archive, bytes).unwrap();
+
+        let _ = fixture.extract(skip_duplicates);
+        assert_links_resolve_in_dest(&fixture.out());
     }
 }
 
@@ -348,7 +477,7 @@ fn existing_symlink_with_differently_cased_name_is_not_replaced() {
     if !probe.path().join("PROBE").exists() {
         return;
     }
-    for format in FORMATS {
+    for format in TAR_ONLY {
         for skip_duplicates in [true, false] {
             let fixture = Fixture::new(
                 format,
@@ -360,28 +489,80 @@ fn existing_symlink_with_differently_cased_name_is_not_replaced() {
                     Link("X", "."),
                 ],
             );
-            assert_eq!(
-                code(fixture.extract(skip_duplicates)),
-                "SYMLINK_ESCAPE",
-                "{format:?} skip_duplicates={skip_duplicates}"
-            );
+            let _ = fixture.extract(skip_duplicates);
             assert_links_resolve_in_dest(&fixture.out());
-            let report = fixture.verify_report().unwrap();
-            assert_ne!(report.security_status(), CheckStatus::Pass, "{format:?}");
-            assert!(
-                report
-                    .issues()
-                    .iter()
-                    .any(|i| i.category == exarch_core::IssueCategory::SymlinkEscape),
-                "{format:?}: {:?}",
-                report.issues()
+            resolves_to(&fixture, "x", "p/q");
+            assert_ne!(
+                fixture.verify_status(),
+                Some(CheckStatus::Pass),
+                "{format:?}"
             );
         }
     }
 }
 
 #[test]
-fn dangling_symlink_at_link_path_is_skipped_or_replaced_by_policy() {
+fn rerun_with_overwrite_keeps_unchanged_symlinks() {
+    for target in ["missing.so.1", "f"] {
+        let fixture = Fixture::new(Format::Tar, &[File("f"), Link("lib.so", target)]);
+        fixture.extract(false).unwrap();
+        fixture.extract(false).unwrap();
+        assert_eq!(
+            std::fs::read_link(fixture.out().join("lib.so")).unwrap(),
+            Path::new(target)
+        );
+    }
+}
+
+#[test]
+fn hardlink_over_an_earlier_link_is_refused_and_keeps_the_link() {
+    for skip_duplicates in [true, false] {
+        let fixture = Fixture::new(
+            Format::Tar,
+            &[
+                Dir("p/"),
+                Dir("p/q/"),
+                Link("x", "p/q"),
+                Link("a", "x/.."),
+                File("t"),
+                Hardlink("x", "t"),
+            ],
+        );
+        let _ = fixture.extract(skip_duplicates);
+        assert_links_resolve_in_dest(&fixture.out());
+        resolves_to(&fixture, "x", "p/q");
+        resolves_to(&fixture, "a", "p");
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn normalization_variant_of_an_existing_symlink_is_not_replaced() {
+    let probe = TempDir::new().unwrap();
+    std::fs::write(probe.path().join("caf\u{e9}"), b"").unwrap();
+    if !probe.path().join("cafe\u{301}").exists() {
+        return;
+    }
+    for skip_duplicates in [true, false] {
+        let fixture = Fixture::new(
+            Format::Tar,
+            &[
+                Dir("p/"),
+                Dir("p/q/"),
+                Link("caf\u{e9}", "p/q"),
+                Link("a", "caf\u{e9}/.."),
+                Link("cafe\u{301}", "."),
+            ],
+        );
+        let _ = fixture.extract(skip_duplicates);
+        assert_links_resolve_in_dest(&fixture.out());
+        resolves_to(&fixture, "caf\u{e9}", "p/q");
+        assert_ne!(fixture.verify_status(), Some(CheckStatus::Pass));
+    }
+}
+
+#[test]
+fn dangling_symlink_at_link_path_is_skipped_or_refused_by_policy() {
     for format in TAR_ONLY {
         let skipped = Fixture::new(format, &[Link("x", "gone"), Link("x", "other")]);
         let report = skipped.extract(true).unwrap();
@@ -391,11 +572,11 @@ fn dangling_symlink_at_link_path_is_skipped_or_replaced_by_policy() {
             Path::new("gone")
         );
 
-        let replaced = Fixture::new(format, &[Link("x", "gone"), Link("x", "other")]);
-        replaced.extract(false).unwrap();
+        let refused = Fixture::new(format, &[Link("x", "gone"), Link("x", "other")]);
+        assert_symlink_refused(refused.extract(false));
         assert_eq!(
-            std::fs::read_link(replaced.out().join("x")).unwrap(),
-            Path::new("other")
+            std::fs::read_link(refused.out().join("x")).unwrap(),
+            Path::new("gone")
         );
     }
 }

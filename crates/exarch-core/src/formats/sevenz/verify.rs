@@ -5,6 +5,8 @@ use super::admit::block_charge;
 use super::admit::sevenz_refusals;
 use super::decode::decode_block_entries;
 use super::decode::is_sevenz_payload;
+use super::header::BlockIndex;
+use super::header::SevenZHeader;
 use super::links::BlockScan;
 use super::links::BlockStop;
 use super::links::LinkCapture;
@@ -16,7 +18,6 @@ use crate::inspection::integrity::DecodeOutcome;
 use crate::inspection::integrity::IntegrityPass;
 use crate::inspection::integrity::Slot;
 use crate::inspection::report::UnverifiedReason;
-use sevenz_rust2::Archive;
 use std::collections::BTreeSet;
 use std::io::Read;
 use std::io::Seek;
@@ -34,14 +35,17 @@ pub(super) type PayloadFile = (usize, Slot);
 /// stream files pushes the last of them out of the span. Going through the
 /// file-to-block map instead lets the caller see every payload file that
 /// belongs to a block, whether or not the decoder visits it.
-pub(super) fn payload_by_block(archive: &Archive, slots: &[Option<Slot>]) -> Vec<Vec<PayloadFile>> {
-    let mut blocks = vec![Vec::new(); archive.blocks.len()];
-    for (index, file) in archive.files.iter().enumerate() {
-        let block = archive.stream_map.file_block_index[index];
+pub(super) fn payload_by_block(
+    header: &SevenZHeader,
+    slots: &[Option<Slot>],
+) -> Vec<Vec<PayloadFile>> {
+    let mut blocks = vec![Vec::new(); header.block_count()];
+    for (index, file) in header.files().iter().enumerate() {
+        let block = header.file_block(index);
         if let (Some(block), Some(Some(slot)), true) =
             (block, slots.get(index), is_sevenz_payload(file))
         {
-            blocks[block].push((index, *slot));
+            blocks[block.get()].push((index, *slot));
         }
     }
     blocks
@@ -69,25 +73,25 @@ pub(super) fn payload_by_block(archive: &Archive, slots: &[Option<Slot>]) -> Vec
 /// Returns the I/O error of a failing disk read, or an error for a link target
 /// that is not UTF-8.
 pub fn verify_sevenz_blocks<R: Read + Seek>(
-    archive: &Archive,
+    header: &SevenZHeader,
     source: &mut R,
     pass: &mut IntegrityPass<'_>,
     slots: &[Option<Slot>],
     mut links: Option<LinkCapture<'_>>,
 ) -> Result<()> {
-    let payload = payload_by_block(archive, slots);
-    let mut refused = vec![None; archive.blocks.len()];
-    for refusal in sevenz_refusals(archive, pass.config()) {
+    let payload = payload_by_block(header, slots);
+    let mut refused = vec![None; header.block_count()];
+    for refusal in sevenz_refusals(header, pass.config()) {
         match refusal.scope {
             RefusalScope::Archive => {
                 let indices = || payload.iter().flatten().map(|&(index, _)| index);
                 if let Some(capture) = links.as_mut() {
-                    capture.mark_unreadable(archive, indices());
+                    capture.mark_unreadable(header, indices());
                 }
-                mark_files(pass, archive, refusal.unverified(), indices());
+                mark_files(pass, header, refusal.unverified(), indices());
                 return Ok(());
             }
-            RefusalScope::Block(index) => refused[index] = Some(refusal.unverified()),
+            RefusalScope::Block(index) => refused[index.get()] = Some(refusal.unverified()),
         }
     }
 
@@ -95,41 +99,41 @@ pub fn verify_sevenz_blocks<R: Read + Seek>(
         slots,
         knobs: DecodeKnobs::production(),
     };
-    for (block_index, files) in payload.iter().enumerate() {
+    for (block_index, files) in header.block_indices().zip(&payload) {
         if files.is_empty() {
             continue;
         }
-        if let Some(reason) = refused[block_index] {
+        if let Some(reason) = refused[block_index.get()] {
             let indices = || files.iter().map(|&(index, _)| index);
             if let Some(capture) = links.as_mut() {
-                capture.mark_unreadable(archive, indices());
+                capture.mark_unreadable(header, indices());
             }
-            mark_files(pass, archive, reason, indices());
+            mark_files(pass, header, reason, indices());
         } else {
             let capture = links.as_mut().map(|capture| LinkCapture {
                 links: capture.links,
                 set: &mut *capture.set,
             });
-            verify_sevenz_block(archive, source, pass, decode, block_index, files, capture)?;
+            verify_sevenz_block(header, source, pass, decode, block_index, files, capture)?;
         }
     }
     Ok(())
 }
 
 /// Path of the archive file at `index`, as listed in the manifest.
-pub(super) fn file_path(archive: &Archive, index: usize) -> PathBuf {
-    PathBuf::from(common::normalize_entry_name(&archive.files[index].name))
+pub(super) fn file_path(header: &SevenZHeader, index: usize) -> PathBuf {
+    PathBuf::from(common::normalize_entry_name(&header.files()[index].name))
 }
 
 /// Marks the archive files at `indices` as unverified for `reason`.
 pub(super) fn mark_files(
     pass: &mut IntegrityPass<'_>,
-    archive: &Archive,
+    header: &SevenZHeader,
     reason: UnverifiedReason,
     indices: impl Iterator<Item = usize>,
 ) {
     for index in indices {
-        pass.mark_unverified(reason, &file_path(archive, index));
+        pass.mark_unverified(reason, &file_path(header, index));
     }
 }
 
@@ -137,7 +141,7 @@ pub(super) fn mark_files(
 /// files unverified under the matching reason.
 pub(super) fn record_block_failure(
     pass: &mut IntegrityPass<'_>,
-    archive: &Archive,
+    header: &SevenZHeader,
     lead: (&Path, Slot),
     failure: DecodeFailure,
     others: &[usize],
@@ -147,7 +151,7 @@ pub(super) fn record_block_failure(
         _ => UnverifiedReason::NotDecodable,
     };
     pass.record(lead.1, lead.0, DecodeOutcome::Failed(failure))?;
-    mark_files(pass, archive, reason, others.iter().copied());
+    mark_files(pass, header, reason, others.iter().copied());
     Ok(())
 }
 
@@ -179,29 +183,29 @@ pub(super) struct DecodeContext<'a> {
 }
 
 pub(super) fn verify_sevenz_block<R: Read + Seek>(
-    archive: &Archive,
+    header: &SevenZHeader,
     source: &mut R,
     pass: &mut IntegrityPass<'_>,
     decode: DecodeContext<'_>,
-    block_index: usize,
+    block_index: BlockIndex,
     payload: &[PayloadFile],
     links: Option<LinkCapture<'_>>,
 ) -> Result<()> {
     let DecodeContext { slots, knobs } = decode;
-    let block = &archive.blocks[block_index];
+    let block = header.block(block_index);
     let all = payload.iter().map(|&(index, _)| index);
 
     if payload.iter().any(|&(_, slot)| !pass.is_admitted(slot)) {
-        mark_files(pass, archive, UnverifiedReason::ResourceLimit, all);
+        mark_files(pass, header, UnverifiedReason::ResourceLimit, all);
         return Ok(());
     }
 
     if !pass.try_charge(block_charge(block)) {
-        mark_files(pass, archive, UnverifiedReason::OverBudget, all);
+        mark_files(pass, header, UnverifiedReason::OverBudget, all);
         return Ok(());
     }
 
-    let first = archive.stream_map.block_first_file_index[block_index];
+    let first = header.block_first_file(block_index);
     let mut scan = BlockScan {
         pass,
         slots,
@@ -216,7 +220,7 @@ pub(super) fn verify_sevenz_block<R: Read + Seek>(
     let parallel = scan.pass.config().parallel_decode;
     let result = decode_block_entries(
         source,
-        archive,
+        header,
         block_index,
         parallel,
         knobs,
@@ -228,7 +232,7 @@ pub(super) fn verify_sevenz_block<R: Read + Seek>(
     match (stop, result) {
         (Some(BlockStop::Fatal(e)), _) => return Err(e),
         (Some(BlockStop::Abandoned(reason)), _) => {
-            mark_files(pass, archive, reason, unvisited.into_iter());
+            mark_files(pass, header, reason, unvisited.into_iter());
         }
         (None, Err(e)) => {
             // A failure outside the per-entry callbacks belongs to the last
@@ -239,11 +243,11 @@ pub(super) fn verify_sevenz_block<R: Read + Seek>(
                 .rev()
                 .find(|(index, _)| visited.contains(index))
                 .unwrap_or(&payload[0]);
-            let path = file_path(archive, index);
+            let path = file_path(header, index);
             let others: Vec<usize> = unvisited.into_iter().filter(|&i| i != index).collect();
             return record_block_failure(
                 pass,
-                archive,
+                header,
                 (path.as_path(), slot),
                 DecodeFailure::from_sevenz(e),
                 &others,
@@ -252,18 +256,18 @@ pub(super) fn verify_sevenz_block<R: Read + Seek>(
         (None, Ok(_)) => {
             mark_files(
                 pass,
-                archive,
+                header,
                 UnverifiedReason::NotDecodable,
                 unvisited.into_iter(),
             );
             let entry_sizes = payload
                 .iter()
-                .map(|&(index, _)| archive.files[index].size)
+                .map(|&(index, _)| header.files()[index].size)
                 .fold(0, u64::saturating_add);
             let own_crcs = payload
                 .iter()
                 .filter(|(index, _)| visited.contains(index))
-                .map(|&(index, _)| (index, archive.files[index].has_crc));
+                .map(|&(index, _)| (index, header.files()[index].has_crc));
             let uncovered = entries_uncovered_by_block_crc(
                 block.has_crc,
                 entry_sizes,
@@ -272,7 +276,7 @@ pub(super) fn verify_sevenz_block<R: Read + Seek>(
             );
             mark_files(
                 pass,
-                archive,
+                header,
                 UnverifiedReason::UncoveredBlockCrc,
                 uncovered.into_iter(),
             );

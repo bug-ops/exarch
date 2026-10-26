@@ -897,6 +897,8 @@ pub fn create_directory(
 /// - Parent directory creation fails
 /// - Symlink creation fails (including when target path already exists)
 /// - Removing an existing path fails when `skip_duplicates` is false
+/// - A symlink with a different target occupies the path and `skip_duplicates`
+///   is false (one with the same target is skipped as unchanged)
 #[allow(unused_variables)]
 pub fn create_symlink(
     safe_symlink: &SafeSymlink,
@@ -916,11 +918,20 @@ pub fn create_symlink(
         // Create parent directories using cache
         dir_cache.ensure_parent_dir(&link_path)?;
 
-        if link_path.symlink_metadata().is_ok() {
+        if let Ok(existing) = link_path.symlink_metadata() {
             if skip_duplicates {
                 checked_increment_files_skipped(report)?;
                 *duplicate_skips = duplicate_skips.saturating_add(1);
                 return Ok(());
+            }
+            if existing.file_type().is_symlink() {
+                // An unchanged link re-points nothing; a different target could
+                // re-point a path that an earlier link's `..` resolved through.
+                if std::fs::read_link(&link_path)? == target_path {
+                    checked_increment_files_skipped(report)?;
+                    return Ok(());
+                }
+                return Err(symlink_at_dest_error(safe_symlink.link_path()).into());
             }
             std::fs::remove_file(&link_path)?;
         }
@@ -937,6 +948,20 @@ pub fn create_symlink(
     {
         require_symlink_creation()
     }
+}
+
+/// The loop-kind I/O error for a symlink that occupies a path extraction would
+/// overwrite, so the replacement fails closed instead of re-pointing the link
+/// (issues #477, #735).
+#[cfg(unix)]
+pub fn symlink_at_dest_error(rel: &Path) -> std::io::Error {
+    std::io::Error::new(
+        std::io::Error::from_raw_os_error(libc::ELOOP).kind(),
+        format!(
+            "refusing to replace the existing symlink at {}",
+            rel.display()
+        ),
+    )
 }
 
 /// Fails on a host that cannot create symlinks, so a format can refuse a link
@@ -1923,7 +1948,7 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn test_duplicate_symlink_overwrites_when_skip_disabled() {
+    fn test_duplicate_symlink_unchanged_or_refused_when_skip_disabled() {
         use crate::types::SafeSymlink;
 
         let temp = TempDir::new().expect("failed to create temp dir");
@@ -1933,12 +1958,10 @@ mod tests {
             .validate()
             .expect("valid config");
 
-        // Create the target file so the symlink has somewhere to point
         std::fs::write(temp.path().join("target.txt"), b"data").expect("write target");
 
         let link_safe_path =
             SafePath::validate(&PathBuf::from("link.txt"), &dest, &config).expect("safe path");
-        // Validate before the symlink exists on disk
         let safe_symlink =
             SafeSymlink::validate(&link_safe_path, Path::new("target.txt"), &dest, &config)
                 .expect("safe symlink");
@@ -1946,7 +1969,6 @@ mod tests {
         let mut report = ExtractionReport::default();
         let mut dir_cache = DirCache::new();
 
-        // First creation
         create_symlink(
             &safe_symlink,
             &dest,
@@ -1958,8 +1980,7 @@ mod tests {
         .expect("first create_symlink should succeed");
         assert_eq!(report.symlinks_created, 1);
 
-        // Second creation with skip_duplicates=false must overwrite without
-        // error
+        let unchanged = report.symlinks_created;
         create_symlink(
             &safe_symlink,
             &dest,
@@ -1968,10 +1989,68 @@ mod tests {
             false,
             &mut 0u64,
         )
-        .expect("second create_symlink should overwrite");
-        assert_eq!(report.symlinks_created, 2);
-        assert_eq!(report.files_skipped, 0);
-        assert!(temp.path().join("link.txt").exists());
+        .expect("an identical link is an unchanged duplicate");
+        assert_eq!(report.symlinks_created, unchanged);
+        assert_eq!(report.files_skipped, 1);
+
+        std::fs::write(temp.path().join("other.txt"), b"data").expect("write other");
+        let other_safe_symlink =
+            SafeSymlink::validate(&link_safe_path, Path::new("other.txt"), &dest, &config)
+                .expect("safe symlink");
+        let err = create_symlink(
+            &other_safe_symlink,
+            &dest,
+            &mut report,
+            &mut dir_cache,
+            false,
+            &mut 0u64,
+        )
+        .expect_err("a link with another target must not be replaced");
+        assert!(
+            matches!(&err, ArchiveError::Io(e)
+                if e.kind() == symlink_at_dest_error(Path::new("link.txt")).kind()),
+            "{err:?}"
+        );
+        assert_eq!(report.symlinks_created, 1);
+        assert_eq!(
+            std::fs::read_link(temp.path().join("link.txt")).expect("link kept"),
+            Path::new("target.txt")
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_symlink_replaces_existing_file_when_skip_disabled() {
+        use crate::types::SafeSymlink;
+
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
+        let config = SecurityConfig::default()
+            .with_allow_symlinks(true)
+            .validate()
+            .expect("valid config");
+
+        std::fs::write(temp.path().join("target.txt"), b"data").expect("write target");
+        std::fs::write(temp.path().join("link.txt"), b"old").expect("write file");
+
+        let link_safe_path =
+            SafePath::validate(&PathBuf::from("link.txt"), &dest, &config).expect("safe path");
+        let safe_symlink =
+            SafeSymlink::validate(&link_safe_path, Path::new("target.txt"), &dest, &config)
+                .expect("safe symlink");
+
+        let mut report = ExtractionReport::default();
+        create_symlink(
+            &safe_symlink,
+            &dest,
+            &mut report,
+            &mut DirCache::new(),
+            false,
+            &mut 0u64,
+        )
+        .expect("a file is replaced");
+        assert_eq!(report.symlinks_created, 1);
+        assert!(temp.path().join("link.txt").is_symlink());
     }
 
     /// Pins the aggregation behavior of `check_extension_allowed`: a rejected

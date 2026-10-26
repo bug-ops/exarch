@@ -138,14 +138,27 @@ fn assert_link_placement_is_a_security_finding(items: &[Item]) -> Outcome {
     outcome
 }
 
-#[test]
-fn symlink_over_earlier_directory_is_a_security_finding() {
-    assert_link_placement_is_a_security_finding(&[dir("sub"), dir("d"), sym("d", "sub")]);
+/// Overwriting cannot replace a directory with a symlink, so `--force` fails
+/// closed there; default extraction skips the link, so verify only notes it.
+fn assert_overwrite_note(items: &[Item]) {
+    let outcome = run_verify_and_extract(items, |_| {});
+    assert_eq!(outcome.status, VerificationStatus::Pass, "{items:?}");
+    assert!(outcome.extracted.is_ok(), "{items:?}");
+    assert_eq!(
+        outcome.categories,
+        [IssueCategory::InvalidArchive],
+        "{items:?}"
+    );
 }
 
 #[test]
-fn symlink_over_implicit_directory_is_a_security_finding() {
-    assert_link_placement_is_a_security_finding(&[dir("sub"), file("d/f"), sym("d", "sub")]);
+fn symlink_over_earlier_directory_is_an_overwrite_note() {
+    assert_overwrite_note(&[dir("sub"), dir("d"), sym("d", "sub")]);
+}
+
+#[test]
+fn symlink_over_implicit_directory_is_an_overwrite_note() {
+    assert_overwrite_note(&[dir("sub"), file("d/f"), sym("d", "sub")]);
 }
 
 #[test]
@@ -226,25 +239,32 @@ fn symlink_over_earlier_file_is_checked_as_replacement() {
 
 #[test]
 fn symlink_over_file_then_link_through_it_fails() {
-    let cats = assert_verify_agrees_with_extract(&[
-        file("a/x"),
-        sym("c", "a/x"),
-        sym("a/x", "a"),
-        sym("c", "a"),
-    ]);
-    assert!(!cats.is_empty());
+    let outcome = run_verify_and_extract(
+        &[file("a/x"), sym("c", "a/x"), sym("a/x", "a"), sym("c", "a")],
+        |_| {},
+    );
+    // Default extraction skips the replacing links; overwriting would replace
+    // the file, so verify reports it.
+    assert!(outcome.extracted.is_ok());
+    assert_eq!(outcome.status, VerificationStatus::Fail);
+    assert!(outcome.categories.contains(&IssueCategory::SecurityPolicy));
 }
 
 #[test]
-fn duplicate_symlink_over_live_symlink_fails() {
-    let cats = assert_verify_agrees_with_extract(&[file("f"), sym("s", "f"), sym("s", "f")]);
-    assert!(cats.contains(&IssueCategory::SymlinkEscape), "{cats:?}");
+fn duplicate_symlink_with_the_same_target_is_not_noted() {
+    for items in [
+        [file("f"), sym("s", "f"), sym("s", "f")],
+        [file("f"), sym("s", "missing"), sym("s", "missing")],
+    ] {
+        let cats = assert_verify_agrees_with_extract(&items);
+        assert!(cats.is_empty(), "{items:?}: {cats:?}");
+    }
 }
 
 #[test]
-fn duplicate_symlink_over_dangling_symlink_is_accepted() {
-    let cats = assert_verify_agrees_with_extract(&[sym("s", "missing"), sym("s", "missing")]);
-    assert!(cats.is_empty(), "{cats:?}");
+fn duplicate_symlink_with_another_target_is_skipped_and_noted() {
+    let cats = assert_verify_agrees_with_extract(&[file("f"), sym("s", "f"), sym("s", "g")]);
+    assert_eq!(cats, [IssueCategory::InvalidArchive]);
 }
 
 #[test]

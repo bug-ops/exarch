@@ -261,7 +261,7 @@ impl<R: Read> TarArchive<R> {
         require_non_empty_name(&path)?;
         check_root_entry_is_directory(
             &path,
-            NodeKind::directory_if(effective_entry_type(entry) == tar::EntryType::Directory),
+            NodeKind::directory_if(effective_entry_type(entry)? == tar::EntryType::Directory),
         )?;
 
         let entry_type = TarEntryAdapter::to_entry_type(entry)?;
@@ -757,7 +757,7 @@ impl TarEntryAdapter {
 
     /// Converts `tar::EntryType` to our `EntryType` enum.
     fn to_entry_type<R: Read>(tar_entry: &tar::Entry<'_, R>) -> Result<EntryType> {
-        match tar_node(effective_entry_type(tar_entry))? {
+        match tar_node(effective_entry_type(tar_entry)?)? {
             TarNode::File => Ok(EntryType::File),
             TarNode::Directory => Ok(EntryType::Directory),
             TarNode::Symlink => {
@@ -845,22 +845,35 @@ pub(crate) fn tar_node(kind: tar::EntryType) -> Result<TarNode> {
     }
 }
 
-/// Returns the type an entry stands for, reading an empty regular-file header
-/// whose name ends in `/` as a directory.
-///
-/// An entry with a payload stays a file: reading it as a directory would drop
-/// its data without a trace.
+/// Returns the type an entry stands for, reading an empty file-typed header
+/// (regular, contiguous or sparse) whose name ends in `/` as a directory.
 ///
 /// V7 and other pre-ustar writers (`bsdtar --format v7`) store directories as
 /// regular entries with a trailing slash; GNU tar, libarchive and `tar-rs`'s
 /// own unpacker read them as directories. Shared by extraction and listing so
 /// both classify an entry the same way.
-pub(crate) fn effective_entry_type<R: Read>(entry: &tar::Entry<'_, R>) -> tar::EntryType {
+///
+/// # Errors
+///
+/// Returns [`ArchiveError::InvalidArchive`] for a file-typed entry with a
+/// directory name that carries a payload: reading it as a directory would drop
+/// its data without a trace, and reading it as a file would create a name the
+/// archive declares to be a directory.
+pub(crate) fn effective_entry_type<R: Read>(entry: &tar::Entry<'_, R>) -> Result<tar::EntryType> {
     let kind = entry.header().entry_type();
-    if kind.is_file() && entry.size() == 0 && entry.path_bytes().ends_with(b"/") {
-        tar::EntryType::Directory
-    } else {
-        kind
+    let is_file_typed = matches!(
+        kind,
+        tar::EntryType::Regular | tar::EntryType::Continuous | tar::EntryType::GNUSparse
+    );
+    if !is_file_typed || !entry.path_bytes().ends_with(b"/") {
+        return Ok(kind);
+    }
+    match entry.size() {
+        0 => Ok(tar::EntryType::Directory),
+        size => Err(ArchiveError::InvalidArchive(format!(
+            "file entry with a directory name carries {size} bytes: {}",
+            String::from_utf8_lossy(&entry.path_bytes())
+        ))),
     }
 }
 

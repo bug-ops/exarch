@@ -3,13 +3,15 @@
 //! Converts exarch-core's typed errors (thiserror) into user-friendly
 //! contextual errors (anyhow) with actionable guidance.
 
+use crate::output::terminal::TerminalPath;
+use crate::output::terminal::TerminalText;
 use anyhow::Result;
 use exarch_core::ArchiveError;
 use exarch_core::CompressionRatio;
 use exarch_core::ExtractionReport;
+use exarch_core::PartialWrites;
 use exarch_core::ZipBombDetails;
 use exarch_core::ZipBombScope;
-use serde::Serialize;
 use std::fmt;
 use std::path::Path;
 
@@ -63,23 +65,46 @@ impl fmt::Display for VerificationFailed {
 
 impl std::error::Error for VerificationFailed {}
 
-/// Whether the items of a stopped extraction remain on disk.
+/// CLI-authored message layered over an optional [`ArchiveError`].
 ///
-/// `--atomic` extracts into a staging directory and discards it on failure, so
-/// the destination is left as it was before the run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PartialWrites {
-    /// Extracted items stay in the destination.
-    Kept,
-    /// Extracted items were discarded and the destination was left unchanged.
-    RolledBack,
+/// A distinct error type, not an anyhow `.context()` string, so the human
+/// formatter can recognise it in the error chain and keep its line breaks
+/// while escaping everything else. `Display` is the message alone; the wrapped
+/// error is exposed as the `source`, so `{:#}` renders `message: error`.
+#[derive(Debug)]
+pub struct CliContext {
+    text: String,
+    source: Option<ArchiveError>,
 }
 
-impl PartialWrites {
-    /// Maps the `--atomic` flag to the outcome a stopped extraction has.
-    pub const fn from_atomic(atomic: bool) -> Self {
-        if atomic { Self::RolledBack } else { Self::Kept }
+impl CliContext {
+    /// A message that wraps no underlying error.
+    pub fn new(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            source: None,
+        }
+    }
+
+    fn wrapping(text: String, source: ArchiveError) -> Self {
+        Self {
+            text,
+            source: Some(source),
+        }
+    }
+}
+
+impl fmt::Display for CliContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.text)
+    }
+}
+
+impl std::error::Error for CliContext {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.source
+            .as_ref()
+            .map(|e| e as &(dyn std::error::Error + 'static))
     }
 }
 
@@ -89,11 +114,13 @@ impl PartialWrites {
 /// `#[source]`, so placing it directly in an anyhow chain causes the inner
 /// error text to appear twice in `{:#}` output (once via Display, once via the
 /// source chain).  This type carries the report without re-emitting the inner
-/// error text in its own Display, keeping the anyhow chain clean.
+/// error text in its own Display, keeping the anyhow chain clean. The
+/// converted inner error is its `source`.
 #[derive(Debug)]
 pub struct PartialExtractionContext {
     pub(crate) report: ExtractionReport,
     pub(crate) writes: PartialWrites,
+    inner: anyhow::Error,
 }
 
 impl fmt::Display for PartialExtractionContext {
@@ -114,7 +141,7 @@ impl fmt::Display for PartialExtractionContext {
                 if !r.warnings.is_empty() {
                     write!(f, "\nWarnings:")?;
                     for warning in &r.warnings {
-                        write!(f, "\n  - {warning}")?;
+                        write!(f, "\n  - {}", TerminalText::new(warning))?;
                     }
                 }
                 write!(
@@ -128,11 +155,18 @@ impl fmt::Display for PartialExtractionContext {
                 "WARNING: Extraction was stopped. --atomic discarded the partial extraction; the \
                  destination was left unchanged.",
             ),
+            // Forward-compat for a `PartialWrites` state added after this
+            // match.
+            _ => f.write_str("WARNING: Extraction was stopped."),
         }
     }
 }
 
-impl std::error::Error for PartialExtractionContext {}
+impl std::error::Error for PartialExtractionContext {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.inner.as_ref())
+    }
+}
 
 /// Fixed literal prefixes `exarch-core` builds `SecurityViolation.reason`
 /// strings from for the four categories the CLI's policy flags
@@ -166,45 +200,38 @@ fn is_relaxable_by_policy_flag(reason: &str) -> bool {
         .any(|prefix| reason.starts_with(prefix))
 }
 
-fn quota_exceeded_context(resource: &exarch_core::QuotaResource, archive: &Path) -> String {
+fn quota_exceeded_context(
+    resource: &exarch_core::QuotaResource,
+    archive: TerminalPath<'_>,
+) -> String {
     if matches!(resource, exarch_core::QuotaResource::DecoderMemory { .. }) {
         format!(
-            "Decoder memory limit exceeded for '{}'\n\
-             The archive declares a decompression dictionary larger than the allowed limit.",
-            archive.display(),
+            "Decoder memory limit exceeded for '{archive}'\n\
+             The archive declares a decompression dictionary larger than the allowed limit."
         )
     } else {
         format!(
-            "Extraction limit exceeded for '{}'\n\
-             HINT: Use --max-files, --max-total-size, or --max-file-size to increase limits.",
-            archive.display(),
+            "Extraction limit exceeded for '{archive}'\n\
+             HINT: Use --max-files, --max-total-size, or --max-file-size to increase limits."
         )
     }
 }
 
 /// Converts `ArchiveError` to user-friendly anyhow error with context.
 ///
-/// The original `ArchiveError` is preserved as the error source so that
-/// callers can downcast via the anyhow chain (used by JSON error output).
+/// The original `ArchiveError` is preserved as the source of a [`CliContext`]
+/// so that callers can downcast via the anyhow chain (used by JSON error
+/// output).
 ///
 /// `allow_symlinks` suppresses the `--allow-symlinks` hint for `SymlinkEscape`
 /// errors when the flag is already active — in that case the escape is a
 /// genuine security violation, not a configuration issue.
+///
+/// A `PartialExtraction` keeps the `writes` outcome core recorded.
 pub fn convert_extraction_error(
     err: ArchiveError,
     archive: &Path,
     allow_symlinks: bool,
-) -> anyhow::Error {
-    convert_extraction_error_with_writes(err, archive, allow_symlinks, PartialWrites::Kept)
-}
-
-/// Like [`convert_extraction_error`], recording whether the items of a
-/// `PartialExtraction` were kept or rolled back.
-pub fn convert_extraction_error_with_writes(
-    err: ArchiveError,
-    archive: &Path,
-    allow_symlinks: bool,
-    writes: PartialWrites,
 ) -> anyhow::Error {
     // Handle PartialExtraction before the borrow below.
     //
@@ -217,70 +244,63 @@ pub fn convert_extraction_error_with_writes(
     // re-displays the inner error text.
     //
     // This keeps issue #204's "inner error text appears exactly once in
-    // `{:#}`" guarantee intact for the variants whose CLI-authored `context`
-    // string below does not itself re-embed the inner error's data —
-    // `PathTraversal`, `SymlinkEscape`, `HardlinkEscape`, `SecurityViolation`,
-    // `ZipBomb`, `QuotaExceeded` (the ones the regression tests below cover).
-    // `InvalidArchive` builds its `context` string by interpolating the
-    // inner data directly (`{reason}`), so its inner text was already
-    // printed twice by this same recursion path on the *non-partial* path
-    // before this change; wrapping it in `PartialExtraction` now reaches
-    // that pre-existing duplication too, rather than introducing a new one
-    // — partial and non-partial output are consistent with each other, not
-    // newly broken. (`Io`'s context no longer re-embeds the inner error's
-    // text either, since #528 — it is not an exception to the guarantee.)
-    if let ArchiveError::PartialExtraction { source, report } = err {
-        return convert_extraction_error_with_writes(*source, archive, allow_symlinks, writes)
-            .context(PartialExtractionContext { report, writes });
+    // `{:#}`" guarantee: no CLI-authored `context` string below interpolates
+    // data the wrapped error's own Display already carries.
+    if let ArchiveError::PartialExtraction {
+        source,
+        report,
+        writes,
+    } = err
+    {
+        let inner = convert_extraction_error(*source, archive, allow_symlinks);
+        return anyhow::Error::new(PartialExtractionContext {
+            report,
+            writes,
+            inner,
+        });
     }
 
+    let archive = TerminalPath::new(archive);
     let context = match &err {
         ArchiveError::PartialExtraction { .. } => unreachable!(),
         ArchiveError::PathTraversal { .. } => format!(
-            "Security violation: Archive '{}' attempted path traversal\n\
-             HINT: This archive may be malicious. Do not extract from untrusted sources.",
-            archive.display(),
+            "Security violation: Archive '{archive}' attempted path traversal\n\
+             HINT: This archive may be malicious. Do not extract from untrusted sources."
         ),
         ArchiveError::ZipBomb(details) => format!(
-            "Security violation: Archive '{}' appears to be a zip bomb\n\
+            "Security violation: Archive '{archive}' appears to be a zip bomb\n\
              HINT: {}",
-            archive.display(),
             zip_bomb_hint(details),
         ),
         ArchiveError::ZipInconsistency(_) => format!(
-            "Security violation: ZIP archive '{}' is read differently by different tools\n\
+            "Security violation: ZIP archive '{archive}' is read differently by different tools\n\
              HINT: The archive may be crafted to show different content to different extractors. \
-             Use --zip-consistency ignore only for archives from a trusted producer.",
-            archive.display(),
+             Use --zip-consistency ignore only for archives from a trusted producer."
         ),
         ArchiveError::QuotaExceeded { resource } => quota_exceeded_context(resource, archive),
         ArchiveError::SymlinkEscape { .. } => {
             if allow_symlinks {
-                format!("Symlink escape blocked in '{}'", archive.display())
+                format!("Symlink escape blocked in '{archive}'")
             } else {
                 format!(
-                    "Symlink rejected in '{}'\n\
-                     HINT: Use --allow-symlinks to extract symlinks (only if trusted source).",
-                    archive.display(),
+                    "Symlink rejected in '{archive}'\n\
+                     HINT: Use --allow-symlinks to extract symlinks (only if trusted source)."
                 )
             }
         }
         ArchiveError::HardlinkEscape { .. } => format!(
-            "Hardlink rejected in '{}'\n\
-             HINT: Use --allow-hardlinks to extract hardlinks (only if trusted source).",
-            archive.display(),
+            "Hardlink rejected in '{archive}'\n\
+             HINT: Use --allow-hardlinks to extract hardlinks (only if trusted source)."
         ),
-        ArchiveError::Io(_) => format!("Failed to process '{}'", archive.display()),
+        ArchiveError::Io(_) => format!("Failed to process '{archive}'"),
         ArchiveError::UnknownFormat { path } => format!(
             "Cannot determine archive format: {}\n\
              HINT: Supported formats: tar, tar.gz, tar.bz2, tar.xz, tar.zstd, zip",
-            path.display()
+            TerminalPath::new(path)
         ),
-        ArchiveError::InvalidArchive(reason) => format!(
-            "Invalid archive '{}': {}\n\
-             HINT: The archive may be corrupted or malformed.",
-            archive.display(),
-            reason
+        ArchiveError::InvalidArchive(_) => format!(
+            "Invalid archive '{archive}'\n\
+             HINT: The archive may be corrupted or malformed."
         ),
         ArchiveError::InvalidConfiguration { reason } => format!(
             "Invalid configuration: {reason}\n\
@@ -289,22 +309,21 @@ pub fn convert_extraction_error_with_writes(
         ArchiveError::SourceNotFound { path } => format!(
             "Source path not found: {}\n\
              HINT: Verify the archive path exists and is readable.",
-            path.display(),
+            TerminalPath::new(path),
         ),
         ArchiveError::SourceNotAccessible { path } => format!(
             "Source path is not accessible: {}\n\
              HINT: Check file permissions on the archive.",
-            path.display(),
+            TerminalPath::new(path),
         ),
         ArchiveError::OutputExists { path } => format!(
             "Output path already exists: {}\n\
              HINT: Use --force to overwrite.",
-            path.display(),
+            TerminalPath::new(path),
         ),
-        ArchiveError::InvalidPermissions { path, mode } => format!(
-            "Invalid permissions {mode:#o} for {}: blocked by security policy.",
-            path.display(),
-        ),
+        ArchiveError::InvalidPermissions { mode, .. } => {
+            format!("Invalid permissions {mode:#o}: blocked by security policy.")
+        }
         ArchiveError::InvalidCompressionLevel { level } => {
             format!("Invalid compression level {level}: must be between 1 and 9.")
         }
@@ -329,31 +348,26 @@ pub fn convert_extraction_error_with_writes(
                 "This archive was rejected by a security check that cannot be relaxed via any \
                  policy flag."
             };
-            format!(
-                "Security violation while processing '{}'\nHINT: {hint}",
-                archive.display(),
-            )
+            format!("Security violation while processing '{archive}'\nHINT: {hint}")
         }
         // Forward-compat: a variant added to ArchiveError after this match was
         // written. #[non_exhaustive] requires this arm to compile against a
         // newer exarch-core; there is no more specific context to add.
-        _ => format!("Error while processing '{}'", archive.display()),
+        _ => format!("Error while processing '{archive}'"),
     };
-    anyhow::Error::from(err).context(context)
+    anyhow::Error::new(CliContext::wrapping(context, err))
 }
 
 /// Adds context to a generic error about archive operations.
 ///
 /// `allow_symlinks` is forwarded to [`convert_extraction_error`] to suppress
-/// the `--allow-symlinks` hint when the flag is already active; `writes` is
-/// forwarded likewise.
+/// the `--allow-symlinks` hint when the flag is already active.
 pub fn add_archive_context<T>(
     result: Result<T, ArchiveError>,
     archive: &Path,
     allow_symlinks: bool,
-    writes: PartialWrites,
 ) -> anyhow::Result<T> {
-    result.map_err(|e| convert_extraction_error_with_writes(e, archive, allow_symlinks, writes))
+    result.map_err(|e| convert_extraction_error(e, archive, allow_symlinks))
 }
 
 #[cfg(test)]
@@ -522,6 +536,7 @@ mod tests {
         let err = ArchiveError::PartialExtraction {
             source: Box::new(inner),
             report,
+            writes: PartialWrites::Kept,
         };
         let converted = convert_extraction_error(err, Path::new("archive.tar.gz"), false);
         let msg = format!("{converted:#}");
@@ -650,6 +665,7 @@ mod tests {
         let err = ArchiveError::PartialExtraction {
             source: Box::new(inner),
             report,
+            writes: PartialWrites::Kept,
         };
         let converted = convert_extraction_error(err, Path::new("archive.tar.gz"), false);
         let msg = format!("{converted:#}");
@@ -684,6 +700,7 @@ mod tests {
         let err = ArchiveError::PartialExtraction {
             source: Box::new(inner),
             report,
+            writes: PartialWrites::Kept,
         };
         let converted = convert_extraction_error(err, Path::new("archive.tar.gz"), false);
         let msg = format!("{converted:#}");
@@ -715,6 +732,7 @@ mod tests {
         let err = ArchiveError::PartialExtraction {
             source: Box::new(inner),
             report,
+            writes: PartialWrites::Kept,
         };
         let converted = convert_extraction_error(err, Path::new("archive.tar.gz"), false);
         let msg = format!("{converted:#}");
@@ -753,13 +771,9 @@ mod tests {
                 path: PathBuf::from("hardlink_escape_path"),
             }),
             report,
+            writes: PartialWrites::RolledBack,
         };
-        let converted = convert_extraction_error_with_writes(
-            err,
-            Path::new("archive.tar.gz"),
-            false,
-            PartialWrites::RolledBack,
-        );
+        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"), false);
         let msg = format!("{converted:#}");
         assert!(!msg.contains("written to disk"), "got: {msg}");
         assert!(!msg.contains("Inspect or remove"), "got: {msg}");
@@ -786,13 +800,9 @@ mod tests {
                 path: PathBuf::from("hardlink_escape_path"),
             }),
             report,
+            writes: PartialWrites::RolledBack,
         };
-        let converted = convert_extraction_error_with_writes(
-            err,
-            Path::new("archive.tar.gz"),
-            false,
-            PartialWrites::RolledBack,
-        );
+        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"), false);
         let msg = format!("{converted:#}");
         assert!(!msg.contains("Files skipped"), "got: {msg}");
         assert!(!msg.contains("Warnings:"), "got: {msg}");
@@ -820,10 +830,82 @@ mod tests {
         let err = ArchiveError::PartialExtraction {
             source: Box::new(inner),
             report,
+            writes: PartialWrites::Kept,
         };
         let converted = convert_extraction_error(err, Path::new("archive.tar.gz"), false);
         let msg = format!("{converted:#}");
         assert!(!msg.contains("Files skipped"), "got: {msg}");
         assert!(!msg.contains("Warnings:"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_cli_context_keeps_archive_error_as_source() {
+        let err = ArchiveError::PathTraversal {
+            path: PathBuf::from("../x"),
+        };
+        let converted = convert_extraction_error(err, Path::new("a.tar"), false);
+        assert!(converted.downcast_ref::<CliContext>().is_some());
+        assert!(
+            converted
+                .chain()
+                .any(|link| link.downcast_ref::<ArchiveError>().is_some())
+        );
+    }
+
+    #[test]
+    fn test_partial_context_is_chain_root_with_inner_source() {
+        let err = ArchiveError::PartialExtraction {
+            source: Box::new(ArchiveError::PathTraversal {
+                path: PathBuf::from("../x"),
+            }),
+            report: ExtractionReport::default(),
+            writes: PartialWrites::Kept,
+        };
+        let converted = convert_extraction_error(err, Path::new("a.tar"), false);
+        assert!(
+            converted
+                .downcast_ref::<PartialExtractionContext>()
+                .is_some()
+        );
+        let kinds: Vec<_> = converted
+            .chain()
+            .map(|link| {
+                (
+                    link.is::<PartialExtractionContext>(),
+                    link.is::<CliContext>(),
+                )
+            })
+            .collect();
+        assert_eq!(kinds[0], (true, false));
+        assert_eq!(kinds[1], (false, true));
+    }
+
+    #[test]
+    fn test_invalid_archive_reason_appears_once() {
+        let err = ArchiveError::InvalidArchive("distinctive-reason".to_string());
+        let converted = convert_extraction_error(err, Path::new("a.tar"), false);
+        let msg = format!("{converted:#}");
+        assert_eq!(msg.matches("distinctive-reason").count(), 1, "got: {msg}");
+    }
+
+    #[test]
+    fn test_partial_display_escapes_warnings() {
+        let report = ExtractionReport {
+            warnings: vec!["w\x1b[31m\nforged".to_string()],
+            ..ExtractionReport::default()
+        };
+        let err = ArchiveError::PartialExtraction {
+            source: Box::new(ArchiveError::PathTraversal {
+                path: PathBuf::from("../x"),
+            }),
+            report,
+            writes: PartialWrites::Kept,
+        };
+        let msg = format!(
+            "{:#}",
+            convert_extraction_error(err, Path::new("a.tar"), false)
+        );
+        assert!(!msg.contains('\x1b'), "got: {msg:?}");
+        assert!(msg.contains("\\x1b[31m\\x0aforged"), "got: {msg:?}");
     }
 }

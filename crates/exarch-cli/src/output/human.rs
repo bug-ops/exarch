@@ -3,6 +3,11 @@
 use super::Verbosity;
 use super::formatter::OutputFormatter;
 use super::humanize_bytes;
+use super::terminal::TerminalBlock;
+use super::terminal::TerminalPath;
+use super::terminal::TerminalText;
+use crate::error::CliContext;
+use crate::error::PartialExtractionContext;
 use anyhow::Result;
 use console::Term;
 use console::style;
@@ -45,7 +50,7 @@ impl HumanFormatter<Term, Term> {
 /// no stored target can produce, so it is never mistaken for a recorded one.
 fn link_suffix(kind: &ManifestEntryKind) -> String {
     if let Some(target) = kind.link_target() {
-        return format!(" -> {}", target.display());
+        return format!(" -> {}", TerminalPath::new(target));
     }
     match kind {
         ManifestEntryKind::Symlink { target } | ManifestEntryKind::Hardlink { target } => {
@@ -103,6 +108,27 @@ impl<O: Write, E: Write> HumanFormatter<O, E> {
 
         result.chars().rev().collect()
     }
+}
+
+/// Renders `error` and its sources joined by `": "`, the shape of `{:#}`, with
+/// control characters escaped.
+///
+/// Only the CLI's own error objects keep their line breaks; every other link
+/// of the chain, including `ArchiveError` and `io::Error` sources that carry
+/// entry paths, is rendered as a single escaped line.
+fn escaped_chain(error: &anyhow::Error) -> String {
+    error
+        .chain()
+        .map(|link| {
+            let text = link.to_string();
+            if link.is::<CliContext>() || link.is::<PartialExtractionContext>() {
+                TerminalBlock::new(&text).to_string()
+            } else {
+                TerminalText::new(&text).to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(": ")
 }
 
 /// Renders `args` to a line and issues a single [`Write::write_all`] call.
@@ -183,7 +209,10 @@ impl<O: Write, E: Write> OutputFormatter for HumanFormatter<O, E> {
                 emit_line(&mut self.out, format_args!("Warnings:"));
             }
             for warning in &report.warnings {
-                emit_line(&mut self.out, format_args!("  - {warning}"));
+                emit_line(
+                    &mut self.out,
+                    format_args!("  - {}", TerminalText::new(warning)),
+                );
             }
         }
 
@@ -205,13 +234,13 @@ impl<O: Write, E: Write> OutputFormatter for HumanFormatter<O, E> {
                 format_args!(
                     "{} Archive created: {}",
                     style("✓").green().bold(),
-                    output_path.display()
+                    TerminalPath::new(output_path)
                 ),
             );
         } else {
             emit_line(
                 &mut self.out,
-                format_args!("Archive created: {}", output_path.display()),
+                format_args!("Archive created: {}", TerminalPath::new(output_path)),
             );
         }
 
@@ -273,7 +302,10 @@ impl<O: Write, E: Write> OutputFormatter for HumanFormatter<O, E> {
                 emit_line(&mut self.out, format_args!("Warnings:"));
             }
             for warning in &report.warnings {
-                emit_line(&mut self.out, format_args!("  - {warning}"));
+                emit_line(
+                    &mut self.out,
+                    format_args!("  - {}", TerminalText::new(warning)),
+                );
             }
         }
 
@@ -282,13 +314,14 @@ impl<O: Write, E: Write> OutputFormatter for HumanFormatter<O, E> {
 
     fn format_error(&mut self, _operation: &str, error: &anyhow::Error) {
         // Always show errors on stderr, even in quiet mode
+        let message = escaped_chain(error);
         if self.use_colors {
             emit_line(
                 &mut self.err,
-                format_args!("{} {error:#}", style("Error:").red().bold()),
+                format_args!("{} {message}", style("Error:").red().bold()),
             );
         } else {
-            emit_line(&mut self.err, format_args!("Error: {error:#}"));
+            emit_line(&mut self.err, format_args!("Error: {message}"));
         }
     }
 
@@ -298,7 +331,10 @@ impl<O: Write, E: Write> OutputFormatter for HumanFormatter<O, E> {
         }
 
         for entry in manifest.entries() {
-            emit_line(&mut self.out, format_args!("{}", entry.path.display()));
+            emit_line(
+                &mut self.out,
+                format_args!("{}", TerminalPath::new(&entry.path)),
+            );
         }
 
         Ok(())
@@ -338,7 +374,7 @@ impl<O: Write, E: Write> OutputFormatter for HumanFormatter<O, E> {
                     type_char,
                     mode_str,
                     size_str,
-                    entry.path.display(),
+                    TerminalPath::new(&entry.path),
                     link_suffix(&entry.kind)
                 ),
             );
@@ -425,12 +461,17 @@ impl<O: Write, E: Write> OutputFormatter for HumanFormatter<O, E> {
                 if let Some(ref path) = issue.entry_path {
                     emit_line(
                         &mut self.out,
-                        format_args!("  {} {}: {}", severity_str, path.display(), issue.message),
+                        format_args!(
+                            "  {} {}: {}",
+                            severity_str,
+                            TerminalPath::new(path),
+                            TerminalText::new(&issue.message)
+                        ),
                     );
                 } else {
                     emit_line(
                         &mut self.out,
-                        format_args!("  {} {}", severity_str, issue.message),
+                        format_args!("  {} {}", severity_str, TerminalText::new(&issue.message)),
                     );
                 }
             }
@@ -872,5 +913,132 @@ mod tests {
         f.format_verification_report(&sample_verification_report())
             .unwrap();
         assert!(out_text(&f).is_empty());
+    }
+
+    const HOSTILE: &str = "ev\x1b[2Jil\x07\n\u{9b}x";
+    const HOSTILE_ESCAPED: &str = "ev\\x1b[2Jil\\x07\\x0a\\x9bx";
+
+    fn hostile_manifest() -> ArchiveManifest {
+        use exarch_core::ArchiveEntry;
+        use exarch_core::formats::detect::ArchiveType;
+
+        let mut manifest = ArchiveManifest::new(ArchiveType::TarGz);
+        manifest
+            .add_entry(ArchiveEntry::new(
+                std::path::PathBuf::from(HOSTILE),
+                ManifestEntryKind::Symlink {
+                    target: exarch_core::LinkTarget::Recorded(std::path::PathBuf::from(HOSTILE)),
+                },
+                0,
+            ))
+            .unwrap();
+        manifest
+    }
+
+    #[test]
+    fn format_manifest_short_escapes_control_characters() {
+        let mut f = formatter(Verbosity::Normal, false);
+        f.format_manifest_short(&hostile_manifest()).unwrap();
+        assert_eq!(out_text(&f), format!("{HOSTILE_ESCAPED}\n"));
+    }
+
+    #[test]
+    fn format_manifest_long_escapes_path_and_link_target() {
+        let mut f = formatter(Verbosity::Normal, false);
+        f.format_manifest_long(&hostile_manifest(), false).unwrap();
+        let text = out_text(&f);
+        assert!(
+            text.contains(&format!("{HOSTILE_ESCAPED} -> {HOSTILE_ESCAPED}")),
+            "{text:?}"
+        );
+        assert!(!text.contains('\x1b') && !text.contains('\x07') && !text.contains('\u{9b}'));
+        assert_eq!(text.lines().count(), 3, "{text:?}");
+    }
+
+    #[test]
+    fn format_verification_report_escapes_issue_path_and_message() {
+        use exarch_core::IssueCategory;
+        use exarch_core::VerificationIssue;
+
+        let mut f = formatter(Verbosity::Normal, false);
+        let report = VerificationReport::from_entry_issues(&hostile_manifest(), |entry| {
+            let mut issue = VerificationIssue::new(
+                IssueSeverity::Low,
+                IssueCategory::InvalidArchive,
+                HOSTILE.to_string(),
+            );
+            issue.entry_path = Some(entry.path.clone());
+            vec![issue]
+        });
+        f.format_verification_report(&report).unwrap();
+        let text = out_text(&f);
+        assert!(
+            text.contains(&format!("{HOSTILE_ESCAPED}: {HOSTILE_ESCAPED}")),
+            "{text:?}"
+        );
+        assert!(!text.contains('\x1b') && !text.contains('\u{9b}'));
+    }
+
+    #[test]
+    fn format_extraction_and_creation_warnings_escape_control_characters() {
+        let mut f = formatter(Verbosity::Normal, false);
+        let mut report = sample_extraction_report();
+        report.warnings.push(HOSTILE.to_string());
+        f.format_extraction_result(&report).unwrap();
+        let mut creation = sample_creation_report();
+        creation.warnings.push(HOSTILE.to_string());
+        f.format_creation_result(Path::new(HOSTILE), &creation)
+            .unwrap();
+        let text = out_text(&f);
+        assert_eq!(text.matches(HOSTILE_ESCAPED).count(), 3, "{text:?}");
+        assert!(!text.contains('\x1b') && !text.contains('\u{9b}'));
+    }
+
+    #[test]
+    fn format_error_escapes_archive_and_io_sources_but_keeps_cli_block_lines() {
+        use crate::error::convert_extraction_error;
+
+        let mut f = formatter(Verbosity::Normal, false);
+        let io = std::io::Error::other(format!("cannot write {HOSTILE}"));
+        let err = convert_extraction_error(
+            exarch_core::ArchiveError::Io(io),
+            Path::new("a\x1b.tar"),
+            false,
+        );
+        f.format_error("extract", &err);
+        let text = err_text(&f);
+        assert!(text.contains("Failed to process 'a\\x1b.tar'"), "{text:?}");
+        assert!(text.contains(HOSTILE_ESCAPED), "{text:?}");
+        assert!(
+            !text.contains('\x1b') && !text.contains('\u{9b}'),
+            "{text:?}"
+        );
+
+        let err = convert_extraction_error(
+            exarch_core::ArchiveError::PathTraversal {
+                path: std::path::PathBuf::from(HOSTILE),
+            },
+            Path::new("a.tar"),
+            false,
+        );
+        let mut f = formatter(Verbosity::Normal, false);
+        f.format_error("extract", &err);
+        let text = err_text(&f);
+        assert!(
+            text.contains("path traversal\nHINT"),
+            "block newline kept: {text:?}"
+        );
+        assert!(text.contains(HOSTILE_ESCAPED), "{text:?}");
+        assert!(
+            !text.contains('\x1b') && !text.contains('\u{9b}'),
+            "{text:?}"
+        );
+    }
+
+    #[test]
+    fn format_error_plain_message_newline_is_escaped() {
+        let mut f = formatter(Verbosity::Normal, false);
+        f.format_error("extract", &anyhow::anyhow!("a\nb"));
+        assert_eq!(err_text(&f), "Error: a\\x0ab\n");
     }
 }

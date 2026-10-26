@@ -125,6 +125,57 @@ fn hard(p: &str, t: &str) -> Item {
     Item::Hard(p.into(), t.into())
 }
 
+/// Extraction can fail (or skip the link) at a link placed over a directory or
+/// below a dangling link, so `verify` reports it as a security finding.
+fn assert_link_placement_is_a_security_finding(items: &[Item]) -> Outcome {
+    let outcome = run_verify_and_extract(items, |_| {});
+    assert_eq!(outcome.status, VerificationStatus::Fail, "{items:?}");
+    assert!(
+        outcome.categories.contains(&IssueCategory::SecurityPolicy),
+        "{items:?}: {:?}",
+        outcome.categories
+    );
+    outcome
+}
+
+#[test]
+fn symlink_over_earlier_directory_is_a_security_finding() {
+    assert_link_placement_is_a_security_finding(&[dir("sub"), dir("d"), sym("d", "sub")]);
+}
+
+#[test]
+fn symlink_over_implicit_directory_is_a_security_finding() {
+    assert_link_placement_is_a_security_finding(&[dir("sub"), file("d/f"), sym("d", "sub")]);
+}
+
+#[test]
+fn entry_below_dangling_symlink_is_a_security_finding() {
+    let outcome =
+        assert_link_placement_is_a_security_finding(&[sym("d", "sub"), file("d/f"), dir("sub")]);
+    assert!(outcome.extracted.is_err());
+}
+
+#[test]
+fn hardlink_below_dangling_symlink_is_a_security_finding() {
+    let outcome = assert_link_placement_is_a_security_finding(&[
+        sym("d", "sub"),
+        file("t"),
+        hard("d/h", "t"),
+    ]);
+    assert!(outcome.extracted.is_err());
+}
+
+#[test]
+fn directory_over_earlier_file_stays_a_structural_issue() {
+    let outcome = run_verify_and_extract(&[file("a"), dir("a")], |_| {});
+    assert_eq!(outcome.status, VerificationStatus::Fail);
+    assert!(
+        !outcome.categories.contains(&IssueCategory::SecurityPolicy),
+        "{:?}",
+        outcome.categories
+    );
+}
+
 #[test]
 fn hardlink_target_through_symlink_leaving_root_fails() {
     let cats = assert_verify_agrees_with_extract(&[

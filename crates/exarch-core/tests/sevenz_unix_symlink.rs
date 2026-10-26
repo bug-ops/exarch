@@ -1180,15 +1180,16 @@ fn extract_class(path: &Path, config: &SecurityConfig, skip_duplicates: bool) ->
     }
 }
 
-/// How `verify --check-integrity` ended: `pass`, `fail` (a security finding),
-/// `fail-no-security-finding` (the overall status fails, the security status
-/// passes) or `refused`.
+/// How `verify --check-integrity` ended: `pass`, `fail` (a security finding)
+/// or `refused`.
 #[cfg(unix)]
 fn verify_class(path: &Path, config: &SecurityConfig) -> &'static str {
     match verify_archive_with_options(path, config, &integrity(1 << 20)) {
         Ok(report) if report.status() == VerificationStatus::Pass => "pass",
-        Ok(report) if report.security_status() == CheckStatus::Pass => "fail-no-security-finding",
-        Ok(_) => "fail",
+        Ok(report) => {
+            assert_ne!(report.security_status(), CheckStatus::Pass, "{report:?}");
+            "fail"
+        }
         Err(ArchiveError::InvalidArchive(_)) => "refused",
         Err(other) => panic!("unexpected verify error: {other}"),
     }
@@ -1207,15 +1208,12 @@ fn verify_class(path: &Path, config: &SecurityConfig) -> &'static str {
 /// In `SLF` and `LSF` the file `d/f` is written through the archive's own link
 /// `d` into `sub/f`, as TAR does.
 ///
-/// Two divergences are known:
-/// - `LFS`: `extract` stops because the link `d` dangles when `d/f` is written
-///   (`File exists`); `verify` fails the overall status with an
-///   `InvalidArchive` issue, but its security status passes (tracked in #726).
-/// - `skip_duplicates = false` (the default skips): in `SFL`, `FSL` and `FLS`
-///   the link `d` meets the directory `d/` that the file `d/f` created, and
-///   extract fails with `Operation not permitted` while `verify` passes. With
-///   the default it only looks like `extracted` because the link is dropped
-///   silently. This predates the archive-order walk.
+/// `verify` reports a link whose placement can make extraction fail under some
+/// option set: a link that dangles when `d/f` is written (`LFS`, which fails
+/// extract with or without `skip_duplicates`), or that lands on the directory
+/// `d/` created by `d/f` (`SFL`, `FSL`, `FLS`, which fail extract without
+/// `skip_duplicates`). The default extract drops that last link silently and so
+/// only looks like `extracted`; `verify` stays conservative and fails.
 #[cfg(unix)]
 #[test]
 fn verify_and_extract_agree_for_every_order_of_a_directory_a_link_and_a_file() {
@@ -1231,16 +1229,16 @@ fn verify_and_extract_agree_for_every_order_of_a_directory_a_link_and_a_file() {
     let table = [
         ("SLF", [s, l, f], Layout::OneBlockEach, [N, Some(0), Some(1)], "extracted", "extracted", "pass"),
         ("LSF", [l, s, f], Layout::OneBlockEach, [Some(0), N, Some(1)], "extracted", "extracted", "pass"),
-        ("SFL", [s, f, l], Layout::OneBlockEach, [N, Some(0), Some(1)], "extracted", "failed", "pass"),
-        ("FSL", [f, s, l], Layout::OneBlockEach, [Some(0), N, Some(1)], "extracted", "failed", "pass"),
-        ("LFS", [l, f, s], Layout::OneBlockEach, [Some(0), Some(1), N], "failed", "failed", "fail-no-security-finding"),
-        ("FLS", [f, l, s], Layout::OneBlockEach, [Some(0), Some(1), N], "extracted", "failed", "pass"),
+        ("SFL", [s, f, l], Layout::OneBlockEach, [N, Some(0), Some(1)], "extracted", "failed", "fail"),
+        ("FSL", [f, s, l], Layout::OneBlockEach, [Some(0), N, Some(1)], "extracted", "failed", "fail"),
+        ("LFS", [l, f, s], Layout::OneBlockEach, [Some(0), Some(1), N], "failed", "failed", "fail"),
+        ("FLS", [f, l, s], Layout::OneBlockEach, [Some(0), Some(1), N], "extracted", "failed", "fail"),
         ("SLF", [s, l, f], Layout::SolidAroundDirs, [N, Some(0), Some(0)], "extracted", "extracted", "pass"),
         ("LSF", [l, s, f], Layout::SolidAroundDirs, [Some(0), Some(0), Some(0)], "refused", "refused", "fail"),
-        ("SFL", [s, f, l], Layout::SolidAroundDirs, [N, Some(0), Some(0)], "extracted", "failed", "pass"),
+        ("SFL", [s, f, l], Layout::SolidAroundDirs, [N, Some(0), Some(0)], "extracted", "failed", "fail"),
         ("FSL", [f, s, l], Layout::SolidAroundDirs, [Some(0), Some(0), Some(0)], "refused", "refused", "fail"),
-        ("LFS", [l, f, s], Layout::SolidAroundDirs, [Some(0), Some(0), N], "failed", "failed", "fail-no-security-finding"),
-        ("FLS", [f, l, s], Layout::SolidAroundDirs, [Some(0), Some(0), N], "extracted", "failed", "pass"),
+        ("LFS", [l, f, s], Layout::SolidAroundDirs, [Some(0), Some(0), N], "failed", "failed", "fail"),
+        ("FLS", [f, l, s], Layout::SolidAroundDirs, [Some(0), Some(0), N], "extracted", "failed", "fail"),
     ];
     let config = allow_symlinks().with_allow_solid_archives(true);
     for (order, items, layout, map, skipping, keeping, verify) in table {

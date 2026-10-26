@@ -513,6 +513,12 @@ impl ManifestEntryKind {
         }
     }
 
+    /// Returns `true` for a symlink or a hardlink.
+    #[must_use]
+    pub const fn is_link(&self) -> bool {
+        matches!(self, Self::Symlink { .. } | Self::Hardlink { .. })
+    }
+
     /// Returns the target of a symlink, if one was recorded.
     #[must_use]
     pub fn symlink_target(&self) -> Option<&Path> {

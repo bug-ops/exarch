@@ -561,3 +561,70 @@ fn agreeing_unix_modes_extract_normally() {
     assert_eq!(std::fs::read(out.path().join("sub/f")).unwrap(), b"data");
     assert!(out.path().join("empty").is_file());
 }
+
+const S_IFLNK: u32 = 0o12_0000;
+
+fn with_windows_attributes(mut pushed: Pushed, attributes: u32) -> Pushed {
+    pushed.0.has_windows_attributes = true;
+    pushed.0.windows_attributes = attributes;
+    pushed
+}
+
+/// Writes one archive per contradiction of the entry kind to
+/// `EXARCH_7Z_DIFF_DIR`, each holding `ok.txt` and the contradicting entry
+/// `entry`; `scripts/sevenz-differential.sh` extracts them with other tools.
+#[test]
+#[ignore = "needs EXARCH_7Z_DIFF_DIR; run through scripts/sevenz-differential.sh"]
+fn write_kind_contradictions_for_the_differential() {
+    let target = std::env::var_os("EXARCH_7Z_DIFF_DIR").unwrap();
+    let target = PathBuf::from(target);
+    let cases: [(&str, Pushed); 9] = [
+        ("baseline-file", file("entry", b"payload")),
+        (
+            "baseline-unix-symlink",
+            with_unix_mode(file("entry", b"ok.txt"), S_IFLNK | 0o777),
+        ),
+        (
+            "dir-bit-on-file-with-data",
+            with_windows_attributes(file("entry", b"payload"), FILE_ATTRIBUTE_DIRECTORY),
+        ),
+        (
+            "unix-dir-on-file-with-data",
+            with_unix_mode(file("entry", b"payload"), S_IFDIR | 0o755),
+        ),
+        (
+            "unix-dir-on-empty-file",
+            with_unix_mode(file("entry", b""), S_IFDIR | 0o755),
+        ),
+        (
+            "unix-regular-on-directory",
+            directory_with_mode("entry", S_IFREG | 0o644),
+        ),
+        (
+            "undefined-unix-type",
+            with_unix_mode(file("entry", b"payload"), 0o03_0000 | 0o644),
+        ),
+        (
+            "symlink-with-reparse-bit",
+            with_windows_attributes(
+                file("entry", b"ok.txt"),
+                UNIX_EXTENSION | ((S_IFLNK | 0o777) << 16) | FILE_ATTRIBUTE_REPARSE_POINT,
+            ),
+        ),
+        (
+            "fifo-with-data",
+            with_unix_mode(file("entry", b"payload"), S_IFIFO | 0o644),
+        ),
+    ];
+    for (name, contradicting) in cases {
+        let mut writer = ArchiveWriter::new(Cursor::new(Vec::new())).unwrap();
+        for (entry, data) in [file("ok.txt", b"fine"), contradicting] {
+            writer.push_archive_entry(entry, data).unwrap();
+        }
+        std::fs::write(
+            target.join(format!("{name}.7z")),
+            writer.finish().unwrap().into_inner(),
+        )
+        .unwrap();
+    }
+}

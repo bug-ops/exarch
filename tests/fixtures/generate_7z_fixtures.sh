@@ -182,6 +182,19 @@ PY
 7z a -t7z -ms=off -m0=LZMA2:d=64k:c=64k -mmt=4 "$FIXTURES_DIR/lzma2-mt.7z" lzma2-mt.bin > /dev/null
 echo "✓ Created lzma2-mt.7z (4 independent LZMA2 runs)"
 
+# 12. symlink-snl.7z - a Unix symlink written by 7-Zip 26.05 with -snl (7zz from
+# `brew install sevenzip`; p7zip 17.05 stores the link as a regular file).
+# Pins that -snl sets S_IFLNK without the Windows reparse-point bit.
+if command -v 7zz > /dev/null 2>&1; then
+    mkdir snl
+    echo "snl target" > snl/target.txt
+    ln -s target.txt snl/link.txt
+    (cd snl && 7zz a -snl -ms=off -bso0 -bsp0 "$FIXTURES_DIR/symlink-snl.7z" target.txt link.txt)
+    echo "✓ Created symlink-snl.7z (7zz -snl symlink)"
+else
+    echo "⚠ Skipping symlink-snl.7z (7zz not installed)"
+fi
+
 echo ""
 echo "All fixtures generated successfully!"
 echo "Note: path-traversal.7z requires manual crafting (see README.md)"

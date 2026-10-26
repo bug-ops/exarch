@@ -924,6 +924,59 @@ fn a_corrupt_link_inside_a_solid_block_fails_extract() {
     );
 }
 
+/// `symlink-snl.7z` was written by 7-Zip 26.05 with `-snl` (see
+/// `tests/fixtures/generate_7z_fixtures.sh`). The link carries `S_IFLNK` in the
+/// Unix extension and no Windows reparse-point bit, so it is a Unix symlink
+/// for exarch and not a refused reparse point.
+#[cfg(unix)]
+#[test]
+fn a_link_written_by_7zip_with_snl_is_a_unix_symlink_not_a_reparse_point() {
+    const REPARSE_POINT: u32 = 0x0400;
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/symlink-snl.7z");
+
+    let archive = Archive::read(
+        &mut Cursor::new(std::fs::read(&path).unwrap()),
+        &Password::empty(),
+    )
+    .unwrap();
+    let link = archive.files.iter().find(|f| f.name == "link.txt").unwrap();
+    assert!(link.has_windows_attributes);
+    let attributes = link.windows_attributes;
+    assert_ne!(attributes & UNIX_EXTENSION, 0);
+    assert_eq!((attributes >> 16) & 0o17_0000, S_IFLNK);
+    assert_eq!(attributes & REPARSE_POINT, 0);
+
+    assert_eq!(
+        default_link_target(&path, &allow_symlinks()),
+        LinkTarget::Unread
+    );
+    assert_eq!(
+        link_target(&path, &allow_symlinks()),
+        LinkTarget::Recorded(PathBuf::from("target.txt"))
+    );
+    let report =
+        verify_archive_with_options(&path, &allow_symlinks(), &integrity(1 << 20)).unwrap();
+    assert_eq!(report.security_status(), CheckStatus::Pass);
+
+    let refused = TempDir::new().unwrap();
+    assert_matches!(
+        extract_archive(&path, refused.path(), &SecurityConfig::default()),
+        Err(ArchiveError::SecurityViolation { reason }) if reason.contains("symlinks not allowed")
+    );
+    assert!(dir_is_empty(&refused));
+
+    let out = TempDir::new().unwrap();
+    extract_archive(&path, out.path(), &allow_symlinks()).unwrap();
+    assert_eq!(
+        std::fs::read_link(out.path().join("link.txt")).unwrap(),
+        Path::new("target.txt")
+    );
+    assert_eq!(
+        std::fs::read(out.path().join("target.txt")).unwrap(),
+        b"snl target\n"
+    );
+}
+
 /// Marks file `file` of a two-file archive stored with a plain header as
 /// stream-less (a directory), leaving every block as it was.
 ///

@@ -184,7 +184,8 @@ echo "✓ Created lzma2-mt.7z (4 independent LZMA2 runs)"
 
 # 12. symlink-snl.7z - a Unix symlink written by 7-Zip 26.05 with -snl (7zz from
 # `brew install sevenzip`; p7zip 17.05 stores the link as a regular file).
-# Pins that -snl sets S_IFLNK without the Windows reparse-point bit.
+# Pins that -snl sets S_IFLNK without the Windows reparse-point bit. A p7zip
+# (Linux) and a Windows fixture are tracked in #727.
 if command -v 7zz > /dev/null 2>&1; then
     mkdir snl
     echo "snl target" > snl/target.txt

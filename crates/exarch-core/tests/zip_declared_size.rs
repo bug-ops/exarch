@@ -8,6 +8,7 @@ use std::io::Write;
 
 use exarch_core::ArchiveError;
 use exarch_core::SecurityConfig;
+use exarch_core::VerificationStatus;
 use exarch_core::ZipHeaderField;
 use exarch_core::ZipInconsistency;
 use exarch_core::extract_archive;
@@ -166,4 +167,7 @@ fn zip_repeated_central_record_with_room_for_both_is_a_name_mismatch() {
     mismatch(list_archive(&path, &config).err());
     let out = TempDir::new().unwrap();
     mismatch(extract_archive(&path, out.path(), &config).err());
+    // `verify` reports the finding instead of failing: the report fails.
+    let report = verify_archive(&path, &config).unwrap();
+    assert_eq!(report.status(), VerificationStatus::Fail);
 }

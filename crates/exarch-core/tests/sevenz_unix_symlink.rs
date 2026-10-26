@@ -98,6 +98,10 @@ impl Item<'_> {
 enum Layout {
     OneBlockEach,
     Solid,
+    /// One solid block of the middle entries; a stream-less entry at either
+    /// end is pushed on its own, so the writer does not count it as a
+    /// sub-stream of the block.
+    SolidAroundDirs,
 }
 
 fn build(items: &[Item<'_>], layout: Layout, stored: bool) -> Vec<u8> {
@@ -119,6 +123,39 @@ fn build(items: &[Item<'_>], layout: Layout, stored: bool) -> Vec<u8> {
                 .map(|(entry, data)| (entry, SourceReader::from(Cursor::new(data))))
                 .unzip();
             writer.push_archive_entries(entries, readers).unwrap();
+        }
+        Layout::SolidAroundDirs => {
+            let mut leading = pairs;
+            let trailing = leading.split_off(
+                leading.len()
+                    - leading
+                        .iter()
+                        .rev()
+                        .take_while(|(entry, _)| !entry.has_stream)
+                        .count(),
+            );
+            let leading_len = leading
+                .iter()
+                .take_while(|(entry, _)| !entry.has_stream)
+                .count();
+            let middle = leading.split_off(leading_len);
+            for (entry, _) in leading {
+                writer
+                    .push_archive_entry(entry, None::<Cursor<Vec<u8>>>)
+                    .unwrap();
+            }
+            let (entries, readers): (Vec<_>, Vec<_>) = middle
+                .into_iter()
+                .map(|(entry, data)| (entry, SourceReader::from(Cursor::new(data))))
+                .unzip();
+            if !entries.is_empty() {
+                writer.push_archive_entries(entries, readers).unwrap();
+            }
+            for (entry, _) in trailing {
+                writer
+                    .push_archive_entry(entry, None::<Cursor<Vec<u8>>>)
+                    .unwrap();
+            }
         }
     }
     writer.finish().unwrap().into_inner()
@@ -927,7 +964,8 @@ fn a_corrupt_link_inside_a_solid_block_fails_extract() {
 /// `symlink-snl.7z` was written by 7-Zip 26.05 with `-snl` (see
 /// `tests/fixtures/generate_7z_fixtures.sh`). The link carries `S_IFLNK` in the
 /// Unix extension and no Windows reparse-point bit, so it is a Unix symlink
-/// for exarch and not a refused reparse point.
+/// for exarch and not a refused reparse point. Fixtures from p7zip on Linux and
+/// from 7-Zip for Windows are tracked in #727.
 #[cfg(unix)]
 #[test]
 fn a_link_written_by_7zip_with_snl_is_a_unix_symlink_not_a_reparse_point() {
@@ -1099,12 +1137,40 @@ fn a_block_whose_span_covers_a_stream_less_entry_is_refused() {
     assert_orphan_block_refused(&path, [None, Some(0)]);
 }
 
-/// How `extract` ended: the archive was extracted, refused as invalid before
-/// any write, or failed part-way.
 #[cfg(unix)]
-fn extract_class(path: &Path, config: &SecurityConfig) -> &'static str {
+fn tree_of(root: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            let kind = entry.file_type().unwrap();
+            let rel = path.strip_prefix(root).unwrap().display().to_string();
+            if kind.is_symlink() {
+                out.push(format!(
+                    "{rel}->{}",
+                    std::fs::read_link(&path).unwrap().display()
+                ));
+            } else if kind.is_dir() {
+                out.push(format!("{rel}/"));
+                stack.push(path);
+            } else {
+                out.push(rel);
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// How `extract` ended: extracted, refused as invalid before any write, or
+/// failed part-way.
+#[cfg(unix)]
+fn extract_class(path: &Path, config: &SecurityConfig, skip_duplicates: bool) -> &'static str {
     let out = TempDir::new().unwrap();
-    match extract_archive(path, out.path(), config) {
+    let options = ExtractionOptions::default().with_skip_duplicates(skip_duplicates);
+    match extract_archive_with_options(path, out.path(), config, &options) {
         Ok(_) => "extracted",
         Err(ArchiveError::InvalidArchive(_)) => {
             assert!(dir_is_empty(&out), "a refusal writes nothing");
@@ -1114,11 +1180,14 @@ fn extract_class(path: &Path, config: &SecurityConfig) -> &'static str {
     }
 }
 
-/// How `verify --check-integrity` ended.
+/// How `verify --check-integrity` ended: `pass`, `fail` (a security finding),
+/// `fail-no-security-finding` (the overall status fails, the security status
+/// passes) or `refused`.
 #[cfg(unix)]
 fn verify_class(path: &Path, config: &SecurityConfig) -> &'static str {
     match verify_archive_with_options(path, config, &integrity(1 << 20)) {
-        Ok(report) if report.security_status() == CheckStatus::Pass => "pass",
+        Ok(report) if report.status() == VerificationStatus::Pass => "pass",
+        Ok(report) if report.security_status() == CheckStatus::Pass => "fail-no-security-finding",
         Ok(_) => "fail",
         Err(ArchiveError::InvalidArchive(_)) => "refused",
         Err(other) => panic!("unexpected verify error: {other}"),
@@ -1127,52 +1196,89 @@ fn verify_class(path: &Path, config: &SecurityConfig) -> &'static str {
 
 /// Extraction follows the archive's entry order, so `verify` (which simulates
 /// entries in that order) and `extract` agree for every order of a directory
-/// `S`, a link `L` to it and a file `F` below the link. Parity holds under an
-/// integrity check only: a plain `verify` leaves 7z link targets unread.
+/// `S`, a link `L` to it and a file `F` below the link, with one block per
+/// entry and with the files in one solid block (`S` at either end of the
+/// block is pushed apart from it, so the writer does not count it as a
+/// sub-stream; `S` in the middle makes the block interleaved and is refused at
+/// admission by both). The stream map of every case is pinned. Parity holds
+/// under an integrity check only: a plain `verify` leaves 7z link targets
+/// unread.
 ///
-/// A solid block that interleaves a stream-less entry is refused at admission
-/// by both. `LFS` in separate blocks is the one known gap: `verify` does not
-/// model the dangling link `d` as a parent that already exists, so it passes
-/// what `extract` stops on with EEXIST.
+/// In `SLF` and `LSF` the file `d/f` is written through the archive's own link
+/// `d` into `sub/f`, as TAR does.
+///
+/// Two divergences are known:
+/// - `LFS`: `extract` stops because the link `d` dangles when `d/f` is written
+///   (`File exists`); `verify` fails the overall status with an
+///   `InvalidArchive` issue, but its security status passes (tracked in #726).
+/// - `skip_duplicates = false` (the default skips): in `SFL`, `FSL` and `FLS`
+///   the link `d` meets the directory `d/` that the file `d/f` created, and
+///   extract fails with `Operation not permitted` while `verify` passes. With
+///   the default it only looks like `extracted` because the link is dropped
+///   silently. This predates the archive-order walk.
 #[cfg(unix)]
 #[test]
 fn verify_and_extract_agree_for_every_order_of_a_directory_a_link_and_a_file() {
+    const N: Option<usize> = None;
     let (s, l, f) = (
         Item::Dir("sub"),
         Item::Link("d", b"sub"),
         Item::File("d/f", b"x"),
     );
-    // (order, extract, verify) for one block per entry, then for one solid
-    // block.
+    // (order, items, layout, stream map, extract with skip_duplicates,
+    // extract without it, verify)
+    #[rustfmt::skip]
     let table = [
-        (
-            "SLF",
-            [s, l, f],
-            ("extracted", "pass"),
-            ("refused", "refused"),
-        ),
-        ("LSF", [l, s, f], ("extracted", "pass"), ("refused", "fail")),
-        (
-            "SFL",
-            [s, f, l],
-            ("extracted", "pass"),
-            ("refused", "refused"),
-        ),
-        ("FSL", [f, s, l], ("extracted", "pass"), ("refused", "fail")),
-        ("LFS", [l, f, s], ("failed", "pass"), ("refused", "fail")),
-        ("FLS", [f, l, s], ("extracted", "pass"), ("refused", "fail")),
+        ("SLF", [s, l, f], Layout::OneBlockEach, [N, Some(0), Some(1)], "extracted", "extracted", "pass"),
+        ("LSF", [l, s, f], Layout::OneBlockEach, [Some(0), N, Some(1)], "extracted", "extracted", "pass"),
+        ("SFL", [s, f, l], Layout::OneBlockEach, [N, Some(0), Some(1)], "extracted", "failed", "pass"),
+        ("FSL", [f, s, l], Layout::OneBlockEach, [Some(0), N, Some(1)], "extracted", "failed", "pass"),
+        ("LFS", [l, f, s], Layout::OneBlockEach, [Some(0), Some(1), N], "failed", "failed", "fail-no-security-finding"),
+        ("FLS", [f, l, s], Layout::OneBlockEach, [Some(0), Some(1), N], "extracted", "failed", "pass"),
+        ("SLF", [s, l, f], Layout::SolidAroundDirs, [N, Some(0), Some(0)], "extracted", "extracted", "pass"),
+        ("LSF", [l, s, f], Layout::SolidAroundDirs, [Some(0), Some(0), Some(0)], "refused", "refused", "fail"),
+        ("SFL", [s, f, l], Layout::SolidAroundDirs, [N, Some(0), Some(0)], "extracted", "failed", "pass"),
+        ("FSL", [f, s, l], Layout::SolidAroundDirs, [Some(0), Some(0), Some(0)], "refused", "refused", "fail"),
+        ("LFS", [l, f, s], Layout::SolidAroundDirs, [Some(0), Some(0), N], "failed", "failed", "fail-no-security-finding"),
+        ("FLS", [f, l, s], Layout::SolidAroundDirs, [Some(0), Some(0), N], "extracted", "failed", "pass"),
     ];
     let config = allow_symlinks().with_allow_solid_archives(true);
-    for (order, items, separate, solid) in table {
-        for (layout, (extract, verify)) in
-            [(Layout::OneBlockEach, separate), (Layout::Solid, solid)]
-        {
-            let dir = TempDir::new().unwrap();
-            let path = dir.path().join("m.7z");
-            std::fs::write(&path, build(&items, layout, false)).unwrap();
+    for (order, items, layout, map, skipping, keeping, verify) in table {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("m.7z");
+        let bytes = build(&items, layout, false);
+        std::fs::write(&path, &bytes).unwrap();
+        let label = format!(
+            "{order} {}",
+            if layout == Layout::OneBlockEach {
+                "each"
+            } else {
+                "solid"
+            }
+        );
 
-            assert_eq!(extract_class(&path, &config), extract, "{order} extract");
-            assert_eq!(verify_class(&path, &config), verify, "{order} verify");
+        let archive = Archive::read(&mut Cursor::new(bytes), &Password::empty()).unwrap();
+        assert_eq!(archive.stream_map.file_block_index, map, "{label} map");
+        assert_eq!(
+            extract_class(&path, &config, true),
+            skipping,
+            "{label} extract"
+        );
+        assert_eq!(
+            extract_class(&path, &config, false),
+            keeping,
+            "{label} extract without skip_duplicates"
+        );
+        assert_eq!(verify_class(&path, &config), verify, "{label} verify");
+
+        if matches!(order, "SLF" | "LSF") && layout == Layout::OneBlockEach
+            || order == "SLF" && layout == Layout::SolidAroundDirs
+        {
+            let (container, out) = nested_dest();
+            extract_archive(&path, &out, &config).unwrap();
+            assert_eq!(tree_of(&out), ["d->sub", "sub/", "sub/f"], "{label} tree");
+            assert_eq!(std::fs::read(out.join("sub/f")).unwrap(), b"x", "{label}");
+            assert_nothing_outside(&container, &label);
         }
     }
 }

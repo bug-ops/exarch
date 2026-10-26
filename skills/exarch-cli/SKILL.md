@@ -172,6 +172,14 @@ Verified live: a 51 MB tar entry fails `exarch list` with
 `"quota exceeded: single file size (53477376 > 52428800)"` at the 50 MB default, and succeeds
 once `--max-file-size 100M` is passed.
 
+A TAR entry that is not a file, directory or link (FIFO, character or block device, or a typeflag
+the format does not define, such as GNU `V`, `M` or `D`) fails `list`, `verify` and `extract`
+alike with `error.kind` `SecurityViolation` and exit `1`, whatever flags are set (`list` and
+`verify` used to list such an entry as a file, or call a FIFO `InvalidArchive`). Verified with the
+debug binary on a TAR holding `ok.txt` and a FIFO: `list` and `verify` give `operation denied by
+security policy: FIFO entries not supported`; with a `V` entry the message reads `unsupported
+entry type: __Nonexhaustive(86)`, and `extract` prefixes it with `failed to list archive`.
+
 ### `verify <ARCHIVE>`
 
 ```bash

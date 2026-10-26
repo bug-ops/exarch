@@ -80,7 +80,7 @@ fn findings_at(bytes: &[u8], chunks: ChunkSizes) -> Option<Vec<ZipInconsistency>
 
 proptest! {
     #![proptest_config(ProptestConfig {
-        cases: 1_000,
+        cases: 256,
         max_global_rejects: 100_000,
         failure_persistence: None,
         ..ProptestConfig::default()

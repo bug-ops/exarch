@@ -6,7 +6,8 @@
 #
 # The archives come from the ignored test write_kind_contradictions_for_the_differential
 # (crates/exarch-core/tests/sevenz_entry_classifier.rs). Each holds `ok.txt` and
-# the contradicting `entry`. Tools that are not installed are left out of the
+# the contradicting `entry`. Fixtures from p7zip on Linux and 7-Zip for Windows
+# are tracked in #727. Tools that are not installed are left out of the
 # columns. Per tool, a cell is one of:
 #   refused-archive   the tool failed and extracted nothing
 #   refused-entry     the tool failed, but extracted ok.txt

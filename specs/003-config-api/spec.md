@@ -8,7 +8,7 @@ tags:
   - config
   - rust
 created: 2026-05-20
-updated: 2026-08-04
+updated: 2026-10-26
 status: draft
 related:
   - "[[constitution]]"
@@ -16,6 +16,7 @@ related:
   - "[[001-security-pipeline/spec]]"
   - "[[002-format-handlers/spec]]"
   - "[[014-config-typestate-validation/spec]]"
+  - "[[017-zip-header-consistency/spec]]"
 ---
 
 # Feature: Configuration API
@@ -94,7 +95,7 @@ WHEN validate() is called
 THEN it returns ArchiveError::InvalidConfiguration (entry contains a null byte)
 ```
 
-> [!note] Unreleased (v0.6.0): entry-level validation for allowlist/banlist fields (#449)
+> [!note] v0.6.0: entry-level validation for allowlist/banlist fields (#449)
 > A new `validate_config_entry` helper (`exarch-core::security::boundary`, re-exported as
 > `exarch_core::validate_config_entry` alongside `MAX_CONFIG_ENTRY_LENGTH`) is called per-entry
 > from `SecurityConfig::validate()` for both `allowed_extensions` and `banned_path_components`.
@@ -155,20 +156,24 @@ THEN no files are present in the output directory; the temp dir is cleaned up
 
 | ID | Requirement | Priority |
 |----|------------|----------|
-| FR-030 | `SecurityConfig` SHALL expose 16 fluent builder methods: `with_max_file_size`, `with_max_total_size`, `with_max_compression_ratio`, `with_max_file_count`, `with_max_path_depth`, `with_allowed`, `with_allow_symlinks`, `with_allow_hardlinks`, `with_allow_absolute_paths`, `with_allow_world_writable`, `with_preserve_permissions`, `with_allowed_extensions`, `with_banned_path_components`, `with_allow_solid_archives`, `with_max_solid_block_memory`, `with_parallel_decode`; each returns `Self` | must |
+| FR-030 | `SecurityConfig` SHALL expose 21 fluent builder methods: `with_max_file_size`, `with_max_total_size`, `with_max_compression_ratio`, `with_max_solid_compression_ratio`, `with_max_file_count`, `with_max_path_depth`, `with_allowed`, `with_allow_symlinks`, `with_allow_hardlinks`, `with_allow_absolute_paths`, `with_allow_world_writable`, `with_allow_windows_reserved_names`, `with_preserve_permissions`, `with_allowed_extensions`, `with_banned_path_components`, `with_allow_solid_archives`, `with_max_solid_block_memory`, `with_max_tar_metadata_bytes`, `with_max_decoder_memory`, `with_parallel_decode`, `with_zip_consistency`; each returns `Self` | must |
 | FR-031 | `SecurityConfig`, `AllowedFeatures`, and `ExtractionOptions` SHALL be annotated `#[non_exhaustive]`; external crates must use `Default::default()` plus builder methods — struct literal construction is a compile error | must |
-| FR-032 | `SecurityConfig::validate()` SHALL return `InvalidConfiguration` if: any numeric limit is zero (`max_file_size`, `max_total_size`, `max_file_count`, `max_path_depth`, `max_solid_block_memory`), or `max_compression_ratio` is zero, negative, or NaN | must |
+| FR-032 | `SecurityConfig::validate()` SHALL return `InvalidConfiguration` if: any numeric limit is zero (`max_file_size`, `max_total_size`, `max_file_count`, `max_path_depth`, `max_solid_block_memory`, `max_tar_metadata_bytes`, `max_decoder_memory`), or `max_compression_ratio` or `max_solid_compression_ratio` is zero, negative, or non-finite | must |
 | FR-033 | `CreationConfig` SHALL support: `follow_symlinks`, `include_hidden`, `max_file_size`, `exclude_patterns` (glob), `strip_prefix`, `compression_level` (1–9), `preserve_permissions`, `format` override; `with_compression_level` returns `Result<Self, ArchiveError>` — callers must propagate the error with `?`; passing a level outside 1–9 returns `ArchiveError::InvalidCompressionLevel` instead of panicking | must |
 | FR-034 | `ExtractionOptions` SHALL support: `atomic` (temp-dir + rename) via `with_atomic`, `skip_duplicates` (default true) via `with_skip_duplicates` | must |
 | FR-035 | WHEN `ExtractionOptions::atomic` is true, THE SYSTEM SHALL extract to a temp dir in the same parent as the output directory and atomically rename on success | must |
 | FR-036 | WHEN atomic extraction fails, THE SYSTEM SHALL delete the temp dir before returning the error | must |
 | FR-037 | All three config types SHALL implement `Default` with documented defaults | must |
-| FR-038 | `AllowedFeatures` SHALL be a separate struct with boolean flags: `symlinks`, `hardlinks`, `absolute_paths`, `world_writable`; all default to false | must |
+| FR-038 | `AllowedFeatures` SHALL be a separate struct with boolean flags: `symlinks`, `hardlinks`, `absolute_paths`, `world_writable`, `windows_reserved_names`; all default to false (`permissive()` leaves `windows_reserved_names` false). `windows_reserved_names` is consulted only on Windows and has no CLI or binding opt-out | must |
 | FR-039 | `CreationConfig::validate()` SHALL be called inside `create_archive_with_progress` before any I/O; invalid configurations SHALL be rejected early | must |
 | FR-040 | `SecurityConfig` and `CreationConfig` SHALL be two-state typestates over `Unvalidated`/`Validated` phantom markers; fluent `with_*` builders SHALL exist only on `T<Unvalidated>`; `validate()` SHALL consume `self` and return `Result<T<Validated>>` instead of `Result<()>` (v0.6.0, see [[014-config-typestate-validation/spec]]) | must |
 | FR-041 | `SecurityConfig::validate()` SHALL reject any `allowed_extensions` or `banned_path_components` entry that is empty, contains a null byte, or exceeds 255 bytes, via the shared `validate_config_entry` helper | must |
 | FR-042 | `T<Validated>` SHALL be reachable read-only via `Deref` for both typestates, but mutable (`DerefMut`) only for `T<Unvalidated>`, so a validated config cannot be mutated back into an unvalidated-equivalent state after the fact | must |
 | FR-043 | Top-level `extract_archive*`, `list_archive`, `verify_archive`, and `create_archive*` functions SHALL continue to accept a plain `&SecurityConfig`/`CreationConfig` (defaulting to `Unvalidated`) and validate internally, so bindings and CLI callers require no changes | must |
+| FR-044 | `SecurityConfig` SHALL expose `zip_consistency: ZipConsistencyPolicy` (`#[non_exhaustive]`: `Enforce`, the default also for `permissive()`; `Ignore`) deciding whether structurally ambiguous ZIP archives are rejected in `extract`/`list` and reported in `verify` (see [[017-zip-header-consistency/spec]]); the CLI exposes it as `--zip-consistency`, Python and Node as a config option | must |
+| FR-045 | `SecurityConfig` SHALL expose `parallel_decode: ParallelDecode` (`Sequential` or `Bounded(NonZeroU64)`) bounding the lookahead memory of parallel 7z LZMA2 decoding, separately from `max_decoder_memory`; the CLI exposes it as `--parallel-decode-memory` | must |
+| FR-046 | `max_solid_compression_ratio` (7z solid blocks) and `max_decoder_memory` (xz and 7z decoder window; breach is `QuotaExceeded { DecoderMemory }`) SHALL be Rust-API-only settings, not exposed by the CLI or the Python/Node bindings | must |
+| FR-047 | `max_file_count` SHALL bound the files, symlinks and hardlinks that `extract` creates (directories are not counted); `list` and `verify` count every entry | must |
 
 ## 4. Non-Functional Requirements
 
@@ -183,8 +188,12 @@ THEN no files are present in the output directory; the temp dir is cleaned up
 
 | Entity | Description | Key Attributes |
 |--------|-------------|----------------|
-| `SecurityConfig<State = Unvalidated>` | Security policy for extraction and inspection operations; typestate over `Unvalidated`/`Validated` since v0.6.0 | `max_file_size`, `max_total_size`, `max_compression_ratio`, `max_file_count`, `max_path_depth`, `allowed: AllowedFeatures`, `banned_path_components`, `allowed_extensions`, `allow_solid_archives`, `max_solid_block_memory`, `max_tar_metadata_bytes`; fields sealed behind a private `SecurityConfigFields` struct, reachable via `Deref`/`DerefMut` |
-| `AllowedFeatures` | Feature flags for deny-by-default policy | `symlinks: bool`, `hardlinks: bool`, `absolute_paths: bool`, `world_writable: bool` |
+| `SecurityConfig<State = Unvalidated>` | Security policy for extraction and inspection operations; typestate over `Unvalidated`/`Validated` since v0.6.0 | `max_file_size`, `max_total_size`, `max_compression_ratio`, `max_solid_compression_ratio`, `max_file_count`, `max_path_depth`, `allowed: AllowedFeatures`, `banned_path_components`, `allowed_extensions`, `allow_solid_archives`, `max_solid_block_memory`, `max_tar_metadata_bytes`, `max_decoder_memory`, `parallel_decode`, `zip_consistency`; fields sealed behind a private `SecurityConfigFields` struct, reachable via `Deref`/`DerefMut` |
+| `AllowedFeatures` | Feature flags for deny-by-default policy | `symlinks: bool`, `hardlinks: bool`, `absolute_paths: bool`, `world_writable: bool`, `windows_reserved_names: bool` |
+| `ParallelDecode` | `#[non_exhaustive]` enum: how much lookahead memory a 7z block may use to decode LZMA2 runs on worker threads | `Sequential`, `Bounded(NonZeroU64)`; `lookahead()`; `DEFAULT_BYTES` = 128 MiB |
+| `ZipConsistencyPolicy` | `#[non_exhaustive]` enum: handling of ZIP archives that different readers interpret differently | `Enforce` (default), `Ignore`; `as_str()` |
+| `VerificationOptions` / `IntegrityCheck` / `DecompressionBudget` | Options for `verify_archive_with_options`; the budget lives inside `IntegrityCheck::DecodeToEof`, so a budget without the check is unrepresentable | `integrity: IntegrityCheck` (`Skip` default, `DecodeToEof(DecompressionBudget)`); budget default 500 MiB, non-zero |
+| `ListOptions` / `StoredTargets` | Options for `list_archive_with_options`; whether 7z link targets kept in compressed entry data are read | `stored_targets: StoredTargets` (`Skip` default, `Read`) |
 | `CreationConfig<State = Unvalidated>` | Configuration for archive creation; typestate over `Unvalidated`/`Validated` since v0.6.0 (mirrors `SecurityConfig`) | `follow_symlinks`, `include_hidden`, `max_file_size`, `exclude_patterns`, `strip_prefix`, `compression_level` (1–9), `preserve_permissions`, `format: Option<ArchiveType>`; fields sealed behind `CreationConfigFields` (`#[non_exhaustive]`) |
 | `ExtractionOptions` | Operational options for extraction (non-security) | `atomic: bool`, `skip_duplicates: bool` |
 | `Unvalidated` / `Validated` | Zero-sized phantom marker types re-exported at crate root | Encode config validation state at compile time; used as the default and post-`validate()` type parameter of `SecurityConfig`/`CreationConfig` respectively |
@@ -196,25 +205,31 @@ THEN no files are present in the output directory; the temp dir is cleaned up
 | `max_file_size` | 50 MB (52,428,800 bytes) |
 | `max_total_size` | 500 MB (524,288,000 bytes) |
 | `max_compression_ratio` | 100.0 |
+| `max_solid_compression_ratio` | 1000.0 (10,000.0 for `permissive()`) |
 | `max_file_count` | 10,000 |
 | `max_path_depth` | 32 |
 | `allowed.symlinks` | false |
 | `allowed.hardlinks` | false |
 | `allowed.absolute_paths` | false |
 | `allowed.world_writable` | false |
+| `allowed.windows_reserved_names` | false (also for `permissive()`) |
 | `preserve_permissions` | false |
 | `allowed_extensions` | `[]` (all allowed) |
 | `banned_path_components` | `.git`, `.ssh`, `.gnupg`, `.aws`, `.kube`, `.docker`, `.env` |
 | `allow_solid_archives` | false |
 | `max_solid_block_memory` | 512 MB |
+| `max_tar_metadata_bytes` | 4 MiB (16 MiB for `permissive()`) |
+| `max_decoder_memory` | 256 MiB (1 GiB for `permissive()`) |
+| `zip_consistency` | `Enforce` (also for `permissive()`) |
 | `parallel_decode` | `Bounded` 128 MiB (1 GiB for `permissive()`); `#[non_exhaustive] enum ParallelDecode { Sequential, Bounded(NonZeroU64) }`, no zero sentinel. Applies to one extraction: concurrent calls multiply threads (up to 16) and lookahead memory. A valid archive decodes to the same bytes in both modes; a corrupt one fails the same file, and only the failing file's leading bytes can differ |
 
 ## 6. Edge Cases and Error Handling
 
 | Scenario | Expected Behavior |
 |----------|-------------------|
-| `SecurityConfig` with zero `max_file_size`, `max_total_size`, `max_path_depth`, `max_file_count`, or `max_solid_block_memory` | `validate()` returns `InvalidConfiguration` |
-| `SecurityConfig` with `max_compression_ratio` of 0.0, negative, or NaN | `validate()` returns `InvalidConfiguration` |
+| `SecurityConfig` with zero `max_file_size`, `max_total_size`, `max_path_depth`, `max_file_count`, `max_solid_block_memory`, `max_tar_metadata_bytes`, or `max_decoder_memory` | `validate()` returns `InvalidConfiguration` |
+| `SecurityConfig` with `max_compression_ratio` or `max_solid_compression_ratio` of 0.0, negative, or non-finite | `validate()` returns `InvalidConfiguration` |
+| `DecompressionBudget::try_from_bytes(0)` | `InvalidConfiguration`; `ParallelDecode::Bounded` takes a `NonZeroU64`, so a zero lookahead is unrepresentable |
 | `SecurityConfig` with an empty, null-byte-containing, or >255-byte `allowed_extensions`/`banned_path_components` entry | `validate()` returns `InvalidConfiguration` (v0.6.0, #449) |
 | `compression_level` outside 1–9 (0 or > 9) | `ArchiveCreator::compression_level` (and `CreationConfig::with_compression_level`) returns `Err(ArchiveError::InvalidCompressionLevel)`; callers must handle with `?` or explicit match |
 | A hand-built `CreationConfig` with `compression_level: Some(200)` reaches `flate2`/`xz2` directly (bypassing the high-level `with_compression_level` contract) | No longer possible: `creation::tar::*`/`creation::zip::*` and `FormatCreator::create` require `&CreationConfig<Validated>`, so an invalid compression level cannot compile its way past validation (v0.6.0, #443 — previously an `assert!`/`unwrap()` panic inside the compression backend, a panic-based DoS) |

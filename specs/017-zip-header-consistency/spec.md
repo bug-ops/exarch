@@ -31,7 +31,7 @@ related:
 > **MSRV**: Rust 1.98.0
 > **Origin**: #637 (new issue)
 > **Type / priority**: enhancement (hardening), P2
-> **Status**: implemented with #637, #654 and #655 (see section 11 for decisions, deviations and residuals)
+> **Status**: implemented with #637, #654 and #655, and extended through 0.7.0 by #671, #680, #682, #683, #686, #687 and #728 (see section 11 for decisions, deviations and residuals)
 > **Baseline**: reproduced on commit cf4cfea with default configuration and `zip` 9.0.5 (locked)
 
 ## 1. Overview
@@ -158,7 +158,7 @@ THEN behavior matches today's (central-directory interpretation) with no new rej
 | NFR-006 | API stability | The new config field, enum, error variant(s) and issue category variant(s) are public API changes; document in `CHANGELOG.md` under `[Unreleased]` (pre-1.0.0, no deprecation window); if the default is Enforce this is also a behavior change for existing callers and must be called out as such |
 | NFR-007 | Compatibility | A compatibility corpus of legitimate ZIPs produced by common tools must pass under the default policy (see section 7, SC-004) |
 | NFR-008 | Documentation | Every new `pub` item has a `///` doc comment with runnable `# Examples` for non-trivial APIs; docs build with `RUSTDOCFLAGS="-D warnings"` |
-| NFR-009 | Dependencies | No new dependency for the structural checks; the work uses the already-locked `zip` 9.0.5 API. The constitution's Technology Stack line still lists `zip` 9.0.0-pre2 and should be refreshed when this lands. The same change adds `unicode-normalization` as a macOS-only dependency for the name folding of #654 |
+| NFR-009 | Dependencies | No new dependency for the structural checks; the work uses the already-locked `zip` 9.0.5 API (9.1.0 since 0.7.0). The constitution's Technology Stack line still lists `zip` 9.0.0-pre2 and should be refreshed when this lands. The same change adds `unicode-normalization` as a macOS-only dependency for the name folding of #654 |
 
 ## 5. Data Model
 

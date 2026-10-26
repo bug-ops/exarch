@@ -11,7 +11,7 @@ tags:
   - typestate
   - robustness
 created: 2026-10-26
-status: draft
+status: implemented
 related:
   - "[[constitution]]"
   - "[[MOC-specs]]"
@@ -29,9 +29,10 @@ related:
 > [!info] Metadata
 > **Subsystem**: exarch-core / formats (`formats::sevenz`: `admit`, `verify`, `links`, `decode`, `mod`), inspection (`inspection::list`); mapping layers in `exarch-cli`, `exarch-python`, `exarch-node` are unchanged
 > **MSRV**: Rust 1.98.0
-> **Origin**: continuous-improvement finding at HEAD `c95a85b` (issue number: [NEEDS CLARIFICATION: issue not yet filed at the time of writing; add the number when filed])
+> **Origin**: continuous-improvement finding at HEAD `c95a85b` ; issue #746, fixed by #752 (0.7.0)
 > **Type / priority**: bug (panic / denial of service on untrusted input), P1
 > **Dependency**: `sevenz-rust2` 0.24.1 (locked)
+> **Status**: implemented in #752; the wrapper is `SevenZHeader`, obtained only from `read_sevenz_header` (`formats/sevenz/header.rs`); see the resolutions in section 9
 
 ## 1. Overview
 
@@ -171,8 +172,8 @@ THEN every such index goes through the validated wrapper
 | Validated 7z archive (new, name in plan) | Newtype around the parsed archive, constructible only by the single open function; carries the proof that the stream map covers every block | the parsed archive, read-only access |
 | `StreamMap` invariant | Relationship between three lengths and the index ranges they hold | see FR-002, FR-003 |
 
-> [!note] Design is deferred
-> Whether the wrapper hands out checked accessors (`first_file_of(block)`) or a borrowed view is a plan decision. This spec fixes only the invariant, the single construction point and that raw `Archive` no longer reaches the indexing sites.
+> [!note] Design as shipped
+> `SevenZHeader` hands out checked accessors (`block_first_file`, `block_first_pack`, `file_block`, `block`) keyed by a `BlockIndex` that only the header mints. Nothing outside `header.rs` reads the stream map vectors, except test code (`formats/sevenz/tests.rs` mutates them on purpose; the test-only `SevenZHeader::assume_checked` wraps such an archive).
 
 ## 6. Edge Cases and Error Handling
 
@@ -197,7 +198,7 @@ THEN every such index goes through the validated wrapper
 | SC-003 | Open paths that construct a parsed 7z archive without the wrapper | 0 (one function, two callers) |
 | SC-004 | Existing 7z tests and fixtures | unchanged results (`cargo nextest run -p exarch-core`) |
 | SC-005 | `fuzz/seed-corpus.sh` output | contains the vector under `fuzz/seeds/sevenz/`; a short local `cargo +nightly fuzz run sevenz` over that corpus does not crash |
-| SC-006 | Python and Node tests for the vector | the call raises the binding's existing invalid-archive exception type, not a panic-derived one ([NEEDS CLARIFICATION: whether to add a binding-level test or rely on the core test, since bindings only map error variants]) |
+| SC-006 | Python and Node tests for the vector | the call raises the binding's existing invalid-archive exception type, not a panic-derived one (resolved: no binding-level test; `crates/exarch-core/tests/sevenz_stream_map.rs` covers `list`, `verify`, `verify` with integrity and `extract`, and the bindings only map `InvalidArchive`) |
 
 ## 8. Agent Boundaries
 
@@ -225,26 +226,26 @@ THEN every such index goes through the validated wrapper
 > **Resolved: `ArchiveError::InvalidArchive`.** It is the variant `SevenZArchive::new` and `list_sevenz_reader` already return for every header that fails to parse (message prefix `failed to open 7z archive:`), and it is what `sevenz-rust2` master will produce for this header, so the observable behavior does not change when the dependency is fixed. `SecurityViolation` is reserved for policy refusals of a well-formed archive. Tests assert the variant, not the message text.
 
 > [!question] Fixture location and seeding
-> [NEEDS CLARIFICATION: where the vector lives.] Two existing conventions apply:
+> **Resolved: the first location**, `tests/fixtures/streams-without-files-info.7z`, used by `crates/exarch-core/tests/sevenz_stream_map.rs`; `fuzz/seed-corpus.sh` seeds it through its `tests/fixtures/*.7z` copy. Original question: where the vector lives. Two existing conventions apply:
 > - `tests/fixtures/streams-without-files-info.7z`: the `.7z` fixture directory used by `load_fixture`; step (a) of `fuzz/seed-corpus.sh` copies every `tests/fixtures/*.7z` into both the `sevenz` and `extract_archive` seed directories with no script change, so the corpus-seed requirement (FR-010) is met for the `extract` path too.
 > - `crates/exarch-core/tests/fixtures/fuzz/sevenz/streams-without-files-info.bin`: the crash-to-regression location in `fuzz/README.md`; seeds only the `sevenz` target, and the directory does not exist yet.
 >
 > Recommendation: the first, because it reaches `extract_archive` (the target that exercises `extract`) without script changes and keeps one copy of the bytes. The vector is 66 bytes, so the test may instead build it from a hex literal; the README prefers programmatic construction where possible. Decide in the plan.
 
 > [!question] Provenance and license of the vector
-> [NEEDS CLARIFICATION: license of `tests/resources/streams_without_files_info.bin` in `hasenbanck/sevenz-rust2` and whether copying a 66-byte fuzzer output needs attribution.] The published 0.24.1 crate declares `license = "Apache-2.0"`; the upstream repository's test resources were not checked for a separate license or an attribution requirement. Alternative that avoids the question: rebuild the header byte by byte from the 7z format description in the test, with a comment giving the structure (signature header, then `kHeader`, `kMainStreamsInfo`, pack info, unpack info, `kEnd`).
+> **Resolved:** the upstream resource is Apache-2.0, compatible with this project's MIT OR Apache-2.0; the fixture is committed byte for byte and its provenance (upstream path and git blob) is recorded in `tests/fixtures/generate_7z_fixtures.sh`. Original question: license of `tests/resources/streams_without_files_info.bin` in `hasenbanck/sevenz-rust2` and whether copying a 66-byte fuzzer output needs attribution. The published 0.24.1 crate declares `license = "Apache-2.0"`; the upstream repository's test resources were not checked for a separate license or an attribution requirement. Alternative that avoids the question: rebuild the header byte by byte from the 7z format description in the test, with a comment giving the structure (signature header, then `kHeader`, `kMainStreamsInfo`, pack info, unpack info, `kEnd`).
 
 > [!question] Strength of the invariant (FR-003)
-> [NEEDS CLARIFICATION: check only the three lengths (FR-002), or also the index ranges?] Recommendation: also check ranges. The cost is linear in the file count and negligible next to decoding; it makes the wrapper cover the `file_block_index[i] -> blocks[b]` and `block_first_file_index[b] -> files[..]` accesses, which are the other direct-indexing family listed in section 1. With lengths only, those stay protected by a dependency convention.
+> **Resolved: ranges are checked too.** `SevenZHeader::check` also validates the pack stream offsets length, every `file_block_index` entry against the block count, the pack spans (`check_pack_spans`) and each block's file span against the file count. Original question: check only the three lengths (FR-002), or also the index ranges? Recommendation: also check ranges. The cost is linear in the file count and negligible next to decoding; it makes the wrapper cover the `file_block_index[i] -> blocks[b]` and `block_first_file_index[b] -> files[..]` accesses, which are the other direct-indexing family listed in section 1. With lengths only, those stay protected by a dependency convention.
 
 > [!question] `list` when integrity is not requested
 > Plain `list` reaches none of the four indexing sites today, so the panic does not affect it, but it returns an empty, clean-looking manifest for an invalid archive. **Resolved: reject it** (FR-001, FR-005, US-002) for cross-operation parity, in the same spirit as the closed parity issues #707, #720 and #726. This is a behavior change for `list` on this one input.
 
 > [!question] `sevenz` fuzz target and extract
-> The `sevenz` target runs `list` and `verify` only. [NEEDS CLARIFICATION: add `extract` to it?] Recommendation: no; `extract_archive` already runs the full pipeline and receives the seed under the recommended fixture location. Revisit only if the second location is chosen.
+> The `sevenz` target runs `list` and `verify` only. **Resolved: not added.** Original question: add `extract` to it? Recommendation: no; `extract_archive` already runs the full pipeline and receives the seed under the recommended fixture location. Revisit only if the second location is chosen.
 
 > [!question] Upstream release
-> FR-011 is non-blocking. [NEEDS CLARIFICATION: how the project tracks the upstream fix (an issue, a `deny.toml`/dependabot note, or a comment at the check).] Recommendation: a one-line comment at the check naming the upstream commits plus a follow-up issue titled for re-evaluation after the next `sevenz-rust2` release, filed with the implementing PR.
+> FR-011 is non-blocking. **Resolved:** the check carries a comment naming the upstream commits, and `check_pack_spans` names #751 for re-evaluation after the next `sevenz-rust2` release. Original question: how the project tracks the upstream fix (an issue, a `deny.toml`/dependabot note, or a comment at the check). Recommendation: a one-line comment at the check naming the upstream commits plus a follow-up issue titled for re-evaluation after the next `sevenz-rust2` release, filed with the implementing PR.
 
 ## 10. See Also
 

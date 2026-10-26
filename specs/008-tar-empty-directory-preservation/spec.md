@@ -19,13 +19,20 @@ related:
 
 # Feature: TAR Empty Directory Preservation
 
-> [!success] Implemented (#400, v0.6.0 unreleased)
+> [!success] Implemented (#400, v0.6.0)
 > `create_tar_internal_with_progress` now writes an explicit directory entry for
 > every directory in the source tree (including empty and nested-empty
 > directories) for all four TAR variants plus plain `.tar`, mirroring the ZIP
 > handler exactly as this spec proposed. `CreationReport::directories_added` now
 > excludes the archive root itself (consistent with ZIP), matching FR-003. See
 > [[002-format-handlers/spec]] for the current data-model description.
+>
+> Since 0.7.0 (#652) the per-codec functions are replaced by one
+> `create_tar_with_progress(output, codec: Option<CompressionCodec>, ...)`, which
+> calls the shared `create_tar_internal_with_progress`; the directory entry is
+> written by `add_directory_to_tar`. TAR headers store permission bits only
+> (`mode & 0o7777`), and with `preserve_permissions` off a directory gets mode
+> `0o755`.
 
 > [!info] Metadata
 > **Subsystem**: exarch-core / creation
@@ -150,7 +157,7 @@ AND  extracting either archive reproduces the same directory structure
 | FR-003 | WHERE the directory is the archive root (empty relative `archive_path`), THE SYSTEM SHALL skip writing a directory entry for it, consistent with ZIP's existing root-skip behavior (`crates/exarch-core/src/creation/zip.rs` lines 184-185) | must |
 | FR-004 | WHEN a written TAR directory entry is extracted via `extract_archive`, THE SYSTEM SHALL recreate the corresponding directory on disk, including empty and nested-empty directories | must |
 | FR-005 | THE SYSTEM SHALL apply the same fix uniformly to all four TAR variants (plain `.tar`, `.tar.gz`, `.tar.bz2`, `.tar.xz`, `.tar.zst`) by fixing the single shared function `create_tar_internal_with_progress`, without duplicating logic per variant | must |
-| FR-006 | WHEN a TAR directory entry is written, THE SYSTEM SHALL set directory-appropriate header metadata (entry type `Directory`, sanitized permissions per `sanitize_permissions`, and a trailing `/` in the archive path per TAR convention) consistent with how `tar` crate directory entries are conventionally written | should |
+| FR-006 | WHEN a TAR directory entry is written, THE SYSTEM SHALL set directory-appropriate header metadata (entry type `Directory`, permission bits only (`mode & 0o7777`, or `0o755` when `preserve_permissions` is off; extraction sanitizes them), and a trailing `/` in the archive path per TAR convention) consistent with how `tar` crate directory entries are conventionally written | should |
 | FR-007 | THE SYSTEM SHALL preserve the existing per-entry `tracker.on_entry_start` / `on_entry_complete` progress callback ordering for directory entries | must |
 
 ## 4. Non-Functional Requirements

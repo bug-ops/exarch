@@ -7,179 +7,81 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-26
+
 ### Added
 
-- `verify --check-integrity` decodes the payload to verify checksums, via `verify_archive_with_options` and a `VerificationOptions` in the core, Python and Node (#670).
-- `ZipConsistencyPolicy` and `--zip-consistency` (also in Python and Node) to enforce or ignore ZIP structure checks. (#671)
-- `ArchiveError::ZipInconsistency` and five new `IssueCategory` variants for ZIP structure findings and name collisions. (#671)
-- `LinkTarget` for manifest link targets. (#671)
+- `verify --check-integrity` decodes the payload to verify checksums, via `verify_archive_with_options` and `VerificationOptions` in the core, Python and Node (#670).
+- `VerificationReport::integrity_gaps()` with typed per-reason counts and unverified entry paths, and `data.integrity_gaps` in CLI JSON, Python and Node; `UnverifiedReason::PathTooLong` and `DescriptorTail` list entries `verify` could not check (#672, #684).
 - `exarch verify --allow-symlinks` and `--allow-hardlinks`, sharing one link-policy argument group with `extract` (#653).
-- `VerificationReport::integrity_gaps()` with typed per-reason counts and unverified entry paths, and `data.integrity_gaps` in CLI JSON, Python and Node (#672).
-- ZIP structure checks scan the prefix before the archive start and report a skipped end-of-central-directory record (`IgnoredEndRecord`); `verify --check-integrity` reports a header hidden in a data-descriptor entry tail (#672).
-- ZIP structure corpus covers Java and Windows producers, generated in CI (#672).
-- `UnverifiedReason::PathTooLong`: `verify` counts entries dropped for an over-long path as unverified (#684).
-- `UnverifiedReason::DescriptorTail`: an undecided or unaffordable descriptor tail check is listed by path under its own reason (#684).
-- ZIP corpus script adds Go, Python unseekable, `bsdtar`, Info-ZIP and `7z` streaming producers (#688).
-- `ParallelDecode` and `--parallel-decode-memory` bound the memory of parallel 7z LZMA2 decoding (#688).
-- 7z BCJ2 pack stream bound fixtures and tests (#688).
+- `ZipConsistencyPolicy` and `--zip-consistency` (also in Python and Node) enforce or ignore ZIP structure checks; `ArchiveError::ZipInconsistency` and new `IssueCategory` variants report structure findings and name collisions (#671).
+- ZIP structure checks cover a prefix before the archive start, stray central and end records, descriptor overruns, headers hidden in a descriptor entry, and `xl` extra-field type divergence (#672, #684, #688, #689, #690).
+- `LinkTarget` for manifest link targets, with `Unread` and `Unreadable` variants for 7z targets not read or refused (#671, #717, #718).
+- `list_archive_with_options` with `ListOptions` and `StoredTargets`, and `exarch list --read-link-targets`, read 7z link targets on request (#714, #718, #723).
 - 7z Unix-mode symlinks are validated through the symlink policy: `extract` creates them under `allow_symlinks`, `list` reads the target on request, and `verify` validates it under `--check-integrity` (#714, #723).
-- `IssueCategory::ArchiveNote` for informational findings that need no action, reported in the core, CLI, Python and Node (#716, #723).
-- `list_archive_with_options` with `ListOptions` and `StoredTargets` to read 7z link targets on request (Rust API), and `exarch list --read-link-targets` (#714, #718, #723).
-- `LinkTarget::Unreadable` for a 7z link target whose read failed or was refused, apart from `Unread` for a target not read (#718).
+- `IssueCategory::ArchiveNote` for informational findings that need no action, in the core, CLI, Python and Node (#716, #723).
+- `ParallelDecode`, `SecurityConfig::with_parallel_decode` and `--parallel-decode-memory` bound the memory of parallel 7z LZMA2 decoding (#688).
 - `PolicySetting` and `ArchiveError::relaxable_by()` name the `SecurityConfig` setting that refused an entry; the CLI `--json` error envelope carries `error.relaxable_by` and Python's `SecurityViolationError` has a `relaxable_by` attribute (#741, #757).
 
 ### Changed
 
-- `zip` 9.1.0: ZIP creation reuses one DEFLATE compressor; 500 x 1 KB files allocate ~1 MB instead of ~207 MB (#50, #700)
-- The documented ZIP64-directory consistency limitation now applies only to archives written by the `zip` crate before 9.1.0 (#667, #700)
-- **BREAKING:** On Windows, ZIP `extract` and `list` reject an entry with `:` in a path component (`dir\c:x`) as `SecurityViolation` instead of treating it as a drive prefix. (#700)
-- ZIP structure checks report a central directory record between a prefixed archive's end-record directory offset and its directory, which `zip` 9.1.0 no longer reads. (#700)
-- ZIP entry names are split by exarch instead of `enclosed_name`; `exarch-core` now depends on `typed-path` directly. (#700)
-- **BREAKING:** `integrity_status()` returns the new `IntegrityStatus` with an `INCOMPLETE` value (#670).
-- **BREAKING:** `ArchiveFormat::verify` takes `&VerificationOptions`; `IssueCategory` gains two variants (#670).
-- **BREAKING:** Reports may carry archive-level issues that do not count as suspicious entries (#670).
-- **BREAKING:** With integrity requested, undecodable TAR entry content is an error, not a report (#670).
-- **BREAKING:** ZIP `extract` and `list` reject, and `verify` reports, archives that local and central headers describe differently, unless `ignore` is set. (#671)
-- **BREAKING:** ZIP `verify` counts raw central directory records, and a count over `max_file_count` is a `QuotaExceeded` error. (#671)
-- **BREAKING:** `ManifestEntryKind` link variants carry a `LinkTarget`, and over-long link targets are rejected by `list` and reported by `verify`. (#671)
-- **BREAKING:** `verify` folds names and limits symlink hops per host and reports colliding names as `NameCollision`. (#671)
-- `security_status` ignores the harmless merge of two empty directories. (#671)
-- ZIP `list` and `verify` do more work per entry for the structure checks. (#671)
-- **BREAKING:** `LinkTarget::classify` takes a new `LinkKind`, and link target limits follow the host, with symlink targets checked by path length only (#672).
-- **BREAKING:** `HiddenLocalHeader` carries a `region: HiddenRegion`, `Unverified` is renamed `UnverifiedReason`, and `IntegrityOutcome` and `IntegrityScope::Requested` carry `IntegrityGaps` (#672).
-- **BREAKING:** `list` rejects entry paths over the host limits, and `verify` reports each as a High issue (`OversizedEntry`) without retaining the path (#672).
-- **BREAKING:** TAR readers decode every gzip member, bzip2 stream and xz stream, accept only zero padding as a tail, and reject empty input (#672).
-- **BREAKING:** CLI `verify` of a solid 7z archive without `--allow-solid-archives` exits 1, was 0 with INCOMPLETE (#672).
-- 7z `extract` bounds multi-threaded LZMA2 decoder buffering, cutting peak memory 96-98% on such archives (#672).
-- ZIP `list` and `verify` are 2-3x faster than at #671 through a windowed header reader (#672).
-- **BREAKING:** ZIP entries with a compression method other than Stored, Deflate, Bzip2 or Zstd are rejected at open by `extract`, `list` and `verify` through one shared admission check (#653).
-- **BREAKING:** 7z directories with the Windows reparse-point attribute are listed as symlinks and fail `verify`, matching `extract` (#653).
-- **BREAKING:** `ArchiveError::ZipBomb` wraps `ZipBombDetails` (sizes, `ZipBombScope::{Entry, SolidBlock}`, derived `CompressionRatio`), so solid-block rejections are no longer reported as per-file ratios (#653).
-- **BREAKING:** An entry or solid block claiming data from zero compressed bytes is `ZipBomb` with an unbounded ratio instead of `InvalidArchive`, in the core, CLI, Python and Node error mappings (#653).
-- **BREAKING:** `verify` validates links against an in-memory model of the extracted tree and fails link escapes through earlier symlinks, and hardlinks whose target never appears (#653).
-- **BREAKING:** `verify` fails entries the host cannot extract: an entry under a file, a directory over a file, a hardlink to a directory, and names, symlink targets or hardlink targets over 255 bytes per component or 4096 bytes per path (#653).
-- **BREAKING:** On Windows, path components with a trailing dot or space are rejected, and symlink and hardlink targets get the same component checks as entry paths (#653).
-- Minor cleanups: `map_or_default` and `bool::ok_or_else` sites, dead `_format` parameters, a duplicated declared-size message, and unconditional clippy `#[allow]` converted to `#[expect]` (#652).
-- **BREAKING:** `ArchiveEntry` holds one `kind: ManifestEntryKind` instead of `entry_type`, `symlink_target` and `hardlink_target`, and `verify` reports a link entry without a target as a security-policy issue (#652).
-- **BREAKING:** `ArchiveEntry.compressed_size` is replaced by `compression: EntryCompression` with a `compressed_size()` method, and `compression_ratio()` is `None` for 7z solid-block entries (#652).
-- **BREAKING:** `open_tar_xz` takes a `SecurityConfig`; tar.xz decoder memory is bounded by the new `max_decoder_memory` (default 256 MiB) and reported as `QuotaResource::DecoderMemory` (#652).
-- **BREAKING:** TAR creation uses one `create_tar_with_progress(output, codec, ...)`; the per-codec `create_tar_*_with_progress` functions and the unused `creation::CompressionLevel` are removed (#652).
-- CI fails when the generated Node.js `index.d.ts` is out of date, and `@napi-rs/cli` is pinned (#652).
-- Raised the `zip` dependency floor to 9.0.5 to exclude versions with unpatched read-path vulnerabilities (#652).
-- Bumped `zip` to 9.0.1 and refreshed the lockfile; zip's own declared-size overrun error is now reported as a security violation (#608).
-- Bumped `napi`/`napi-build`/`napi-derive`, `sevenz-rust2`, and `smallvec` to their latest compatible releases; refreshed `deny.toml`'s `zstd-safe`/`syn` duplicate-version exceptions to match the resulting transitive bumps (#584).
-- **BREAKING:** `ArchiveManifest` and `VerificationReport` expose accessors instead of public fields, `ArchiveManifest::add_entry` returns `Result`, and `ArchiveEntry`/`VerificationIssue` are `#[non_exhaustive]` with `new()`; report status is derived from the issue list (#624).
-- **BREAKING:** `exarch verify` no longer accepts `--check-security`, and `integrity_status` is `SKIPPED` instead of `OK` in the CLI, Python and Node reports unless the integrity check is requested (#624, #623).
-- **BREAKING:** `open_tar_gz`/`open_tar_bz2`/`open_tar_xz`/`open_tar_zst` return `TarArchive<Box<dyn Read + Send>>`; extract, list and open share one TAR decoder constructor (#624).
-- **BREAKING:** Node report enum fields are typed string unions in `index.d.ts` (build uses `--no-const-enum`), and Python report getters are annotated with `Literal` (#624).
-- `ArchiveType` implements `Display`, and report enums share one table for `ALL` and `as_str` instead of `Debug` formatting in the CLI, Node and Python (#624).
-- `verify` and `list` return an `InvalidArchive` error for ZIP and 7z archives whose declared compressed sizes exceed the archive length (#624).
-- Removed the stale `zstd`, `zstd-safe` and `syn` multiple-versions exceptions from `deny.toml`; the remaining `syn` 2 copy comes only from the `criterion` dev-dependency chain (#624).
-- **BREAKING:** ZIP `extract`, `list` and `verify` reject, under `ZipConsistencyPolicy::Enforce`, a central directory signature in a gap before an entry or in a `PK`-led prefix, where streaming readers stop listing (`ZipInconsistency::StrayCentralRecord`) (#684).
-- `verify` bounds symlink targets on Windows at 4091 UTF-16 units instead of 32767 (#684).
-- **BREAKING:** ZIP `extract`, `list` and `verify` reject, under `Enforce`, an end or ZIP64 end record signature in a gap or `PK`-led prefix (`ZipInconsistency::StrayEndRecord`, `EndRecordKind`) (#688).
-- **BREAKING:** ZIP `extract`, `list` and `verify` reject, under `Enforce`, a data descriptor after which a streaming reader resumes past the next entry (`ZipInconsistency::DescriptorOverrun`), including stored entries with an unsigned descriptor (#688).
-- **BREAKING:** ZIP structure checks search the descriptor bytes as a gap, and report an empty-name local header that skips data (#688).
-- **BREAKING:** `SecurityConfig` gains `parallel_decode` and `with_parallel_decode`, and the Python and Node `SecurityConfig` classes a matching property (#688).
-- 7z `extract` and `verify --check-integrity` decode LZMA2 runs on worker threads within a memory bound (#688).
-- **BREAKING:** ZIP `extract`, `list` and `verify` reject, under `Enforce`, a hidden local header or stray record signature in the declared range of a stored data-descriptor entry, after its first descriptor signature (#690).
-- **BREAKING:** ZIP `extract`, `list` and `verify` reject, under `Enforce`, an entry whose local or central `xl` extra field gives it another file type than its central attributes (`ZipInconsistency::XlTypeDivergence`) (#689).
-- The `verify` pre-flight listing mode is a `ListPass` type instead of a `SecurityConfig` flag, so extraction cannot receive relaxed ZIP path or size checks (#705).
-- Internal: path validation and listing take the root-entry decision from one `EntryPath` and `NodeKind` instead of a `bool`; ZIP keeps its own rule that accepts an empty `.` file (#704, #709).
-- **BREAKING:** 7z `extract` of a Unix-mode symlink fails with `symlinks not allowed` unless `allow_symlinks` is set, and creates the link with it (#714, #723).
-- **BREAKING:** 7z `list --read-link-targets`, `verify --check-integrity` and `extract` fail with `InvalidArchive` on a symlink target that is not UTF-8, as ZIP does (#714, #723).
-- **BREAKING:** 7z `list`, `verify` and `extract` fail with `SecurityViolation` on a FIFO, socket or device node (also when stream-less, as `bsdtar` writes them), an undefined Unix type, and a Unix mode or Windows directory bit that contradicts the entry's own kind (#715, #723).
-- **BREAKING:** The 7z anti-item `verify` finding is reported under the new `IssueCategory::ArchiveNote` instead of `SuspiciousPath`, and `IssueCategory::is_security` is `false` for it (#716, #723).
-- **BREAKING:** TAR and ZIP `extract` and `verify` refuse a symlink or hardlink target that leaves a directory the archive creates later; the same target is accepted when the directory entry comes first (#723).
-- 7z `extract` refuses a symlink target whose `..` leaves a directory the archive creates later, even when that directory comes first (#714, #723).
-- `exarch extract` lists 7z archives without decoding link targets (#714, #723).
-- **BREAKING:** `StoredTargets` defaults to `Skip`, so 7z `list` no longer reads link targets; opt in with `StoredTargets::Read` or `list --read-link-targets` (#718, #724).
-- **BREAKING:** `verify --allow-symlinks` of a 7z archive warns (exit 0) instead of failing unless `--check-integrity` reads the link targets; gate on `--strict` or `--check-integrity` (#718, #724).
-- **BREAKING:** 7z `extract` decodes each block once, so a refused link target is a `PartialExtraction` after earlier entries; use `--atomic` for all-or-nothing (#718, #724).
+- **BREAKING:** `verify` API and reports: `integrity_status()` returns `IntegrityStatus` with `INCOMPLETE`; `ArchiveFormat::verify` takes `&VerificationOptions`; reports may carry archive-level issues that are not suspicious entries; `HiddenLocalHeader` carries a `HiddenRegion`; `Unverified` is renamed `UnverifiedReason` (#670, #672).
+- **BREAKING:** `ArchiveManifest` and `VerificationReport` expose accessors, `ArchiveManifest::add_entry` returns `Result`, `ArchiveEntry` and `VerificationIssue` are `#[non_exhaustive]`, and report status is derived from the issue list (#624).
+- **BREAKING:** `ArchiveEntry` holds one `kind: ManifestEntryKind` whose link variants carry a `LinkTarget`, and `compressed_size` is replaced by `compression: EntryCompression` (#652, #671).
+- **BREAKING:** `exarch verify` drops `--check-security`; `integrity_status` is `SKIPPED` in the CLI, Python and Node unless integrity is requested; `verify` of a solid 7z archive without `--allow-solid-archives` exits 1 (#624, #672).
+- **BREAKING:** `verify` validates links against an in-memory model of the extracted tree, fails entries the host cannot extract (entry under a file, hardlink to a directory, components over 255 bytes, paths over 4096), folds names per host and reports `NameCollision`; over-long paths and link targets are rejected by `list` and reported by `verify` (#653, #671, #672, #684).
+- **BREAKING:** `ArchiveError::ZipBomb` wraps `ZipBombDetails` with `ZipBombScope::{Entry, SolidBlock}` and a derived `CompressionRatio`; an entry claiming data from zero compressed bytes is `ZipBomb` instead of `InvalidArchive` (#653).
+- **BREAKING:** ZIP `extract`, `list` and `verify` reject archives whose headers disagree or hide data, unless `ZipConsistencyPolicy::Ignore` is set: local versus central headers, stray central or end records, descriptor overruns, hidden headers in stored descriptor entries, and `xl` type divergence; `ZipHeaderField::Unrecognized` and `Unparseable` move to `ZipInconsistency::HeaderUncomparable` (#671, #684, #688, #689, #690, #728).
+- **BREAKING:** ZIP rejects entries with a method other than Stored, Deflate, Bzip2 or Zstd at open, rejects absolute and `..` names by default like TAR (`--allow-absolute-paths` now applies), and treats an empty name or NUL byte as `SecurityViolation` (#652, #653, #717).
+- **BREAKING:** ZIP `verify` counts raw central directory records and a count over `max_file_count` is `QuotaExceeded`; entry names are split by exarch with a direct `typed-path` dependency (#671, #700).
+- **BREAKING:** TAR readers decode every gzip member, bzip2 stream and xz stream, accept only a zero tail and reject empty input; with integrity requested, undecodable TAR content is an error; `open_tar_*` return `TarArchive<Box<dyn Read + Send>>` and `open_tar_xz` takes a `SecurityConfig` (#624, #652, #670, #672).
+- **BREAKING:** TAR `list` and `verify` refuse FIFO, device, socket and unknown typeflag entries and entries with an empty name, as `extract` does; a file entry with a directory name and a payload is `InvalidArchive` (#717, #721, #728, #744, #752).
+- **BREAKING:** 7z `list`, `verify` and `extract` fail with `SecurityViolation` on a FIFO, socket, device, undefined Unix type, a mode that contradicts the entry kind, a reparse-point entry, a Unix symlink without `allow_symlinks`, or an empty name; 7z directories with the reparse attribute are listed as symlinks (#653, #708, #710, #715, #717, #723).
+- **BREAKING:** 7z link targets: `StoredTargets` defaults to `Skip`, `verify --allow-symlinks` warns unless `--check-integrity` reads targets, a non-UTF-8 target is `InvalidArchive`, and `extract` decodes each block once so a refused target is a `PartialExtraction` (#714, #718, #723, #724).
+- **BREAKING:** TAR and ZIP `extract` and `verify` refuse a link target that leaves a directory the archive creates later; targets with unresolvable `..` are rejected in all formats; 7z does the same even when the directory comes first (#714, #723).
 - **BREAKING:** `max_file_count` counts symlinks and hardlinks in `extract`, and `ValidatedEntryType::Hardlink` carries a `counted: EntryCount` (#719, #724).
-- 7z `list -l` shows `(target not read)` or `(target unreadable)` for a link without a target (#718, #724).
-- `verify` reports an unread symlink target as `symlinks not allowed` when symlinks are disallowed (#714, #723).
-- **BREAKING:** `ZipHeaderField::Unrecognized` and `Unparseable` move to `ZipInconsistency::HeaderUncomparable { reason: ZipUncomparable }` (#697, #728).
-- **BREAKING:** TAR `list` and `verify` refuse FIFO, device, socket and unknown typeflag entries as `SecurityViolation`, as `extract` does (#721, #728).
-- 7z `extract` follows archive order, so `verify` and `extract` agree on stream-less directories (#720, #728).
-- Internal: the ZIP census shares one extra-field walker, chunked signature search and entry-kind decision; `sevenz.rs` is split into modules; the raw ZIP builder moves to the unpublished `exarch-testkit` crate (#694, #695, #696, #728).
-- **BREAKING:** `ArchiveError::SecurityViolation` gains `relaxable_by` and is `#[non_exhaustive]`; build it with `ArchiveError::violation` or `relaxable_violation` and match it with `..` (#741, #757).
-- **BREAKING:** `FfiErrorMessage` is `#[non_exhaustive]` and gains `relaxable_by` (#741, #757).
-- **BREAKING:** A relaxable Node `SECURITY_VIOLATION` message now starts `SECURITY_VIOLATION: [relaxableBy=<id>] ...` (#741, #757).
-- CLI `SecurityViolation` hints name only the flag that admits the entry (including `--max-path-depth`), say "Rust API only" for settings without a flag, and no longer suggest an empty `--banned-component` list (#741, #757).
-- CLI escapes Unicode format characters, including bidirectional controls, in human-readable output (#749, #757).
+- **BREAKING:** The 7z anti-item finding moves to `IssueCategory::ArchiveNote` and `IssueCategory::is_security` is `false` for it (#716, #723).
+- **BREAKING:** On Windows, path components with a trailing dot or space or a `:` are rejected as `SecurityViolation`, link targets get the same component checks, and `LinkTarget::classify` takes a `LinkKind` with host-specific limits (#653, #672, #700).
+- **BREAKING:** `ArchiveError::SecurityViolation` gains `relaxable_by` and is `#[non_exhaustive]` (build it with `violation` or `relaxable_violation`); `FfiErrorMessage` is `#[non_exhaustive]`; a relaxable Node `SECURITY_VIOLATION` message starts `SECURITY_VIOLATION: [relaxableBy=<id>] ...` (#741, #757).
+- **BREAKING:** `ArchiveError::PartialExtraction` carries `PartialWrites`; a symlink over a symlink with another target under overwrite fails with `Io` instead of `SymlinkEscape`; the Node error message gains `| writes=...` (#735, #747, #752).
+- **BREAKING:** `SecurityConfig` gains `parallel_decode`, `max_decoder_memory` (default 256 MiB, `QuotaResource::DecoderMemory`) and a 7z `max_solid_compression_ratio` (Rust API only); `create_tar_with_progress(output, codec, ...)` replaces the per-codec functions and `creation::CompressionLevel` is removed (#652, #688).
+- **BREAKING:** Node report enum fields are typed string unions in `index.d.ts` and Python report getters are annotated with `Literal` (#624).
+- CLI escapes control and Unicode format characters, including bidirectional controls, in entry paths, link targets and other human-readable output; `SecurityViolation` hints name only the flag that admits the entry (#741, #745, #749, #752, #757).
+- `zip` 9.1.0: ZIP creation reuses one DEFLATE compressor, cutting allocation for 500 x 1 KB files from ~207 MB to ~1 MB; ZIP64-directory consistency limitation now applies only to archives written before 9.1.0 (#50, #667, #700).
+- 7z `extract` bounds multi-threaded LZMA2 decoder memory (96-98% lower peak) and decodes LZMA2 runs on worker threads within that bound; 7z `extract` follows archive order; ZIP `list` and `verify` are 2-3x faster through a windowed header reader (#672, #688, #728).
+- `verify` pre-flight listing is a `ListPass` type instead of a `SecurityConfig` flag, and root-entry decisions come from one `EntryPath` and `NodeKind` (#704, #705, #709).
+- Dependencies: `zip` 9.1.0 (floor 9.0.5 excludes versions with unpatched read-path vulnerabilities), `sevenz-rust2` 0.24, `zstd` 0.14, `pyo3` 0.30, `napi` 3.14, `smallvec` 1.16; `deny.toml` bans duplicate versions with scoped exceptions (#570, #584, #607, #608, #618, #620, #652, #700).
+- Internal: ZIP census shares one extra-field walker and signature search, `sevenz.rs` is split into modules, the raw ZIP builder moves to the unpublished `exarch-testkit` crate, and `.TAR.GZ` stems and suspicious extensions are matched case-insensitively (#624, #694, #695, #696, #728).
 
 ### Fixed
 
-- `verify` no longer reports the recorded mode of a hardlink entry as an `Invalid Permissions` finding (#750, #757).
-- `verify` reports a dangling link used as a parent, a hardlink under it and a symlink over an existing directory as `SecurityViolation` (security status FAILED) instead of an `InvalidArchive` I/O error, in TAR, ZIP and 7z (#726, #733).
-- `extract` and `verify` reject symlink and hardlink targets whose `..` components cannot be resolved against the extracted tree, in TAR, ZIP and 7z (#723).
-- **BREAKING:** 7z `extract` and `verify` refuse an entry whose Unix mode is a symlink (`S_IFLNK`) as `SecurityViolation`, regardless of `allow_symlinks`; follow-up #714 (#711, #717).
-- **BREAKING:** `LinkTarget` gains a `non_exhaustive` `Unread` variant; 7z `list` reports it for link entries whose target is not read (#711, #717).
-- 7z `extract` warns once with the number of skipped anti-items and `verify` reports an informational finding; follow-up #716 (#713, #717).
-- **BREAKING:** TAR `list` and `verify` fail on an entry with an empty name, as `extract` does (#712, #717).
-- **BREAKING:** ZIP `extract`, `list` and `verify` reject an empty entry name as `SecurityViolation` (`SECURITY_VIOLATION`) instead of `InvalidArchive` (#712, #717).
-- 7z `extract`, `verify` and `list --check-integrity` refuse a block whose stream count disagrees with the files mapped to it (#720, #728).
-- `extract --atomic` no longer reports items written to disk after the destination was rolled back; the JSON `partial_report` gains `writes` (`kept` or `rolled_back`) (#725, #728).
-- `exarch-node` size getters clamp values above `i64::MAX` instead of returning a negative number (#697, #728).
-- 7z `extract`, `list` and `verify` classify entries with one shared classifier: a reparse-point entry is refused before any write, and 7z anti-items are skipped by all three instead of being created or truncated by `extract` (unlike `7z x`, which deletes them) (#707, #708, #710).
-- **BREAKING:** 7z `extract` of a reparse-point entry fails with `SecurityViolation` instead of `InvalidArchive` (Python `SecurityViolationError` instead of `InvalidArchiveError`) (#708, #710).
-- **BREAKING:** 7z `list` and `verify` fail with `SecurityViolation` on an entry with an empty name, as `extract` already did; `verify` no longer reports it as a FAIL issue (#708, #710).
-- 7z `extract`, `list` and `verify` reject a `.` root entry that is not a directory, as TAR does (#703, #709).
-- TAR `extract`, `list` and `verify` reject a `.` or `./` root entry that is not a directory, and read an empty regular entry with a trailing-slash name (V7) as a directory (#701, #706).
-- `exarch-cli` skill states that an all-zero tail after the last zstd frame fails `verify --check-integrity` (#699, #706).
-- ZIP `extract`, `list` and `verify` accept a `./` or `.` root entry as the destination directory, and reject a root entry with a payload or a symlink (#698, #702).
-- `verify` binds ZIP xl type and descriptor overrun findings to their entry, and no longer shifts the binding after an over-long name (#692, #702).
-- 7z last solid block ratio counts only the pack streams its coders consume (#684).
-- 7z `extract` admits each block's decoder memory against `max_decoder_memory`, closing unbounded multi-threaded LZMA2 buffering (#672).
-- 7z `extract` refuses a block with a stream-less entry between its files instead of silently omitting a file (#672).
-- `verify` reports what 7z `extract` refuses: solid policy, decoder memory, unknown coder, encrypted content and interleaved blocks (#672).
-- A ZIP open no longer loses an I/O error raised by the trailing directory probe (#672).
-- `verify` reports a symlink entry placed over an earlier file entry instead of passing archives that `extract` can reject (#656).
-- 7z solid blocks are checked as a whole against the new `max_solid_compression_ratio` (default 1000x, Rust API only) instead of comparing only the first file (#652).
-- ZIP library extraction rejects oversized declared compressed sizes when the archive is opened, before any entry is written (#652).
-- ZIP `extract`, `list` and `verify` reject absolute and `..` entry names by default like TAR, treat NUL bytes as a security violation, and `--allow-absolute-paths` now takes effect for ZIP (#652).
-- ZIP and 7z error classification uses typed upstream variants instead of message substrings, and 7z I/O errors keep their original kind (#652).
-- `exarch create` TAR headers store permission bits only, so `list --long` mode matches ZIP and system tar (#652).
-- `verify` reports security violations under the new `IssueCategory::SecurityPolicy` and fails `security_status` for them; it now also validates hardlinks through `HardlinkTracker`, so `exarch verify` exits 1 on any TAR containing a hardlink under the default policy (#652).
-- Extraction benchmark no longer panics on the 7z large-file fixture, and bz2/xz/zst extraction benchmarks were added (#652).
-- 7z extraction of solid blocks drains a skipped entry's data so it no longer corrupts the next entry (#652).
-- Windows reserved device names and `:` in path components are rejected on Windows, with a Rust-only opt-out `AllowedFeatures::windows_reserved_names` and a new public `is_windows_reserved_component` (#652).
-- 7z `extract` now enforces `max_compression_ratio` like `verify` and `list` do for non-solid archives (#624).
-- ZIP `extract`, `list` and `verify` validate declared compressed sizes against the archive length (#624).
-- `.TAR.GZ` stems are detected case-insensitively, and `verify`'s suspicious-extension check ignores case (#624).
-- Scheduled fuzz job now passes `--target x86_64-unknown-linux-gnu`; the prebuilt musl `cargo-fuzz` defaulted to musl, which ASAN cannot build for (#616).
-- Renamed `exarch-node`'s deprecated `napi.name`/`napi.triples` package.json fields to
-  `napi.binaryName`/`napi.targets` per `@napi-rs/cli` 3.10.x, eliminating build-time
-  deprecation warnings, and added the missing `aarch64-unknown-linux-gnu` target so the
-  declared list matches what CI actually builds (#583).
-- Corrected `VerificationReport`/`VerificationIssue` doc comment prose in `exarch-node` to
-  match the actual runtime strings (`status`: "PASS"/"FAIL"/"WARNING"; `integrityStatus`/
-  `securityStatus`: "OK"/"FAILED"/"WARNING"/"SKIPPED"; `severity`: "CRITICAL"/"HIGH"/"MEDIUM"/
-  "LOW"/"INFO"; `category`: space-separated title case, e.g. "Path Traversal") instead of the
-  stale title-case wording (#583).
-- Wired the orphaned root-level `tests/cve/` and `tests/security/` suites into a real cargo target: superseded duplicates were removed, and distinct `EntryValidator` coverage (path traversal, symlink/hardlink escape, zip-bomb ratio detection) was ported into `crates/exarch-core/tests/security/`, fixing tests that previously compiled in no cargo target (#590).
-- 7z `list`, `verify` and `extract` refuse a header with streams but no files info as `InvalidArchive` instead of panicking (#746, #752).
-- 7z extraction reports a blocked path traversal or quota breach with its typed error instead of `InvalidArchive`; the 7z header is opened once and `list` reuses it (#740, #742, #743, #752).
-- `verify` skips the mode of a symlink entry, no longer reports a false `SymlinkEscape` for a repeated symlink, and models overwrite conflicts; a symlink over a symlink is skipped by `extract` and never re-pointed under `--force` (#748, #735, #736, #752).
-- TAR `list`, `verify` and `extract` refuse a file-typed entry with a directory name and a payload as `InvalidArchive` (#744, #752).
-- CLI escapes control characters in entry paths and link targets in human-readable output (#745, #752).
-- **BREAKING:** `ArchiveError::PartialExtraction` carries `PartialWrites` (`writes`); a symlink over an existing symlink with another target under overwrite fails with `Io` instead of `SymlinkEscape` (CLI JSON `IoError`, Python `OSError`, Node `IO_ERROR`); the Node error message gains `| writes=...`; Python rollback errors have no counters (#747, #735, #752).
-
-### CI
-
-- Added a 7-Zip written symlink fixture and `scripts/sevenz-differential.sh`, which compares exarch, `bsdtar`, `7z` and `7zz` on 7z kind contradictions (#722, #728).
-- Added a `cargo-fuzz` harness covering `tar`, `zip`, `sevenz`, `safe_path`, and `extract_archive`, gated into `ci-success` via a mandatory compile check plus a weekly scheduled fuzz run (#585).
-- Pinned every GitHub Actions reference in `ci.yml` to a commit SHA instead of a mutable tag (#585).
-- Added `fuzz/oss-fuzz/` submission scaffolding (`project.yaml`, `Dockerfile`, `build.sh`) for upstream OSS-Fuzz integration; actual onboarding still requires an external PR to `google/oss-fuzz` (#590).
-- Smoke-test the `exarch-rs` napi addon under Bun and Deno (Linux, create/list/verify/extract plus a security-violation path) (#579).
-- `deny.toml` now enforces the `multiple-versions` ban instead of only warning, with scoped exceptions for the known `zstd`/`zstd-safe` and `syn` duplicates (#581).
-- Pinned the remaining `release.yml` and `ci.yml` action references to commit SHAs and added a `pin-check` job that fails on any unpinned `uses:` (#624).
+- `verify` reports what `extract` refuses: a symlink over an earlier file, a dangling link used as a parent, a hardlink under it, solid policy, decoder memory, unknown coder, encrypted content and interleaved 7z blocks, as `SecurityViolation` where applicable (#656, #672, #726, #733).
+- `verify` skips the mode of symlink and hardlink entries, no longer reports a false `SymlinkEscape` for a repeated symlink, binds ZIP findings to the right entry, and models overwrite conflicts; a symlink over a symlink is skipped by `extract` and never re-pointed under `--force` (#692, #702, #735, #736, #748, #750, #752, #757).
+- `verify` validates hardlinks through `HardlinkTracker` and reports policy violations as `IssueCategory::SecurityPolicy`, failing `security_status` (#652).
+- ZIP `extract`, `list` and `verify` accept a `./` or `.` root directory entry; ZIP, TAR and 7z reject a root entry that is not a directory or has a payload (#698, #701, #702, #703, #706, #709).
+- 7z `extract`, `list` and `verify` classify entries with one shared classifier and skip anti-items, with one warning for `extract` and an informational finding for `verify`; a reparse-point entry is refused before any write (#707, #708, #710, #713, #717).
+- 7z `extract`: refuses a header with streams but no files info instead of panicking, a block whose stream count disagrees with its files, and a stream-less entry between a block's files; drains skipped solid entries so the next is not corrupted; reports path traversal and quota breaches with their typed error; opens the header once (#672, #652, #720, #728, #740, #742, #743, #746, #752).
+- 7z solid blocks are checked as a whole against `max_solid_compression_ratio`, the last block counts only the pack streams its coders consume, and `max_compression_ratio` applies to non-solid archives in `extract` (#624, #652, #684).
+- ZIP, 7z declared compressed sizes are validated against the archive length when opened; ZIP I/O errors from the trailing directory probe are no longer lost; error classification uses typed upstream variants and keeps the 7z I/O kind (#624, #652, #672).
+- `extract --atomic` no longer reports items written after rollback; JSON `partial_report` gains `writes` (`kept` or `rolled_back`) (#725, #728).
+- `exarch create` TAR headers store permission bits only, so `list --long` matches ZIP and system tar (#652).
+- Windows reserved device names are rejected, with a Rust-only opt-out `AllowedFeatures::windows_reserved_names` and a public `is_windows_reserved_component` (#652).
+- `exarch-node` size getters clamp values above `i64::MAX`; its `napi` config uses `binaryName` and `targets` with the `aarch64-unknown-linux-gnu` target; `index.d.ts` doc comments match the runtime strings (#583, #697, #728).
+- Documented that a `strip_prefix` mismatch is ignored, not an error, and that an all-zero tail after the last zstd frame fails `verify --check-integrity` (#609, #699, #706).
 
 ### Security
 
-- Bumped transitive `js-yaml` (via `@napi-rs/cli`) in `exarch-node`'s dev toolchain from 4.3.1 to
-  5.4.2, fixing a CPU-exhaustion DoS in YAML merge-key handling (GHSA-2883-xcg3-v3hh) (#571).
+- Bumped transitive `js-yaml` in `exarch-node`'s dev toolchain from 4.3.1 to 5.4.2, fixing a CPU-exhaustion DoS in YAML merge-key handling (GHSA-2883-xcg3-v3hh) (#571).
+
+### CI
+
+- Added a `cargo-fuzz` harness for `tar`, `zip`, `sevenz`, `safe_path` and `extract_archive` (compile check plus weekly run) and `fuzz/oss-fuzz/` scaffolding; the scheduled job targets `x86_64-unknown-linux-gnu` (#585, #590, #616).
+- Pinned every GitHub Actions reference in `ci.yml` and `release.yml` to a commit SHA, with a `pin-check` job that fails on unpinned `uses:` (#585, #624).
+- Smoke-test the `exarch-rs` napi addon under Bun and Deno (#579).
+- CI fails when the generated Node.js `index.d.ts` is out of date, and `@napi-rs/cli` is pinned (#652).
+- Wired the orphaned root-level `tests/cve/` and `tests/security/` suites into `crates/exarch-core/tests/security/` (#590).
+- ZIP structure corpus covers Java, Windows, Go, Python unseekable, `bsdtar`, Info-ZIP and `7z` streaming producers; added 7z BCJ2 bound fixtures and `scripts/sevenz-differential.sh` comparing exarch, `bsdtar`, `7z` and `7zz` (#672, #688, #722, #728).
+- The extraction benchmark no longer panics on the 7z large-file fixture, and bz2, xz and zst benchmarks were added (#652).
 
 ## [0.6.1] - 2026-09-02
 
@@ -2257,7 +2159,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 64KB reusable copy buffers
 - LRU cache for symlink target resolution
 
-[Unreleased]: https://github.com/bug-ops/exarch/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/bug-ops/exarch/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/bug-ops/exarch/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/bug-ops/exarch/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/bug-ops/exarch/compare/v0.5.2...v0.6.0
 [0.5.2]: https://github.com/bug-ops/exarch/compare/v0.5.1...v0.5.2

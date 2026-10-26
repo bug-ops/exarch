@@ -20,13 +20,19 @@ related:
 
 # Feature: Accurate Compression Reporting in CreationReport
 
-> [!success] Implemented (#402, v0.6.0 unreleased)
+> [!success] Implemented (#402, v0.6.0)
 > `bytes_compressed` is now measured from the real on-disk archive file size,
 > queried after the writer/encoder is fully flushed and finished, for ZIP and
 > all TAR variants (including plain `.tar`) — resolving FR-005 in favor of the
 > filesystem-metadata approach over instrumenting the writer chain. The
 > now-unused `crate::io::CountingWriter` was removed entirely (it is no longer
 > part of the codebase, not merely repositioned).
+>
+> Since 0.7.0 (#652) the four per-codec wrappers named in FR-004 are replaced by
+> one `create_tar_with_progress(output, codec: Option<CompressionCodec>, ...)`
+> (`None` is plain `.tar`), which sets `bytes_compressed` from
+> `std::fs::metadata(output)` after the encoder is finished; the ZIP path does
+> the same.
 
 > [!info] Metadata
 > **Subsystem**: exarch-core / creation

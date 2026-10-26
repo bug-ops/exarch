@@ -154,6 +154,8 @@ try {
 }
 ```
 
+A `SECURITY_VIOLATION` that a `SecurityConfig` setting would admit starts its message with `SECURITY_VIOLATION: [relaxableBy=<id>] ...`, where `<id>` names that setting.
+
 ## API
 
 ### `extractArchive(archivePath, outputDir, config?)`

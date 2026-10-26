@@ -67,7 +67,7 @@ fn ghsa_5j8q_forged_small_uncompressed_size_aborts_and_cleans_up() {
     );
 
     match result {
-        Err(ArchiveError::SecurityViolation { reason }) => {
+        Err(ArchiveError::SecurityViolation { reason, .. }) => {
             assert!(
                 reason.contains("50 bytes"),
                 "error must name the declared 50-byte ceiling, got: {reason:?}"
@@ -113,7 +113,7 @@ fn ghsa_5j8q_forged_oversized_declared_size_rejected_after_eof() {
     );
 
     match result {
-        Err(ArchiveError::SecurityViolation { reason }) => {
+        Err(ArchiveError::SecurityViolation { reason, .. }) => {
             assert!(
                 reason.contains(&declared.to_string()),
                 "error must name the declared size ({declared}), got: {reason:?}"

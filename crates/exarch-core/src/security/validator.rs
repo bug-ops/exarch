@@ -96,9 +96,9 @@ impl<P> EntryPath<P> {
     /// listing so `extract`, `list` and `verify` agree.
     pub(crate) fn require_directory_root(self, kind: NodeKind) -> Result<Self> {
         if self.is_root() && kind == NodeKind::NonDirectory {
-            return Err(ArchiveError::SecurityViolation {
-                reason: "archive root entry '.' must be a directory".into(),
-            });
+            return Err(ArchiveError::violation(
+                "archive root entry '.' must be a directory".into(),
+            ));
         }
         Ok(self)
     }
@@ -114,9 +114,7 @@ pub(crate) fn check_root_entry_is_directory(path: &Path, kind: NodeKind) -> Resu
 /// and `verify` refuse, instead of joining it onto the destination directory.
 pub(crate) fn require_non_empty_name(path: &Path) -> Result<()> {
     if path.is_empty() {
-        return Err(ArchiveError::SecurityViolation {
-            reason: EMPTY_PATH_REASON.into(),
-        });
+        return Err(ArchiveError::violation(EMPTY_PATH_REASON.into()));
     }
     Ok(())
 }
@@ -1253,7 +1251,7 @@ mod tests {
         let result = validate_symlink_entry(&mut validator, "l1");
         assert_matches!(
             result,
-            Err(crate::ArchiveError::SecurityViolation { ref reason })
+            Err(crate::ArchiveError::SecurityViolation { ref reason, .. })
                 if reason == "symlinks not allowed",
             "got: {result:?}"
         );
@@ -1274,7 +1272,7 @@ mod tests {
         let result = validate_hardlink_entry(&mut validator, "l1");
         assert_matches!(
             result,
-            Err(crate::ArchiveError::SecurityViolation { ref reason })
+            Err(crate::ArchiveError::SecurityViolation { ref reason, .. })
                 if reason == "hardlinks not allowed",
             "got: {result:?}"
         );

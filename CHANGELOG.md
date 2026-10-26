@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `IssueCategory::ArchiveNote` for informational findings that need no action, reported in the core, CLI, Python and Node (#716, #723).
 - `list_archive_with_options` with `ListOptions` and `StoredTargets` to read 7z link targets on request (Rust API), and `exarch list --read-link-targets` (#714, #718, #723).
 - `LinkTarget::Unreadable` for a 7z link target whose read failed or was refused, apart from `Unread` for a target not read (#718).
+- `PolicySetting` and `ArchiveError::relaxable_by()` name the `SecurityConfig` setting that refused an entry; the CLI `--json` error envelope carries `error.relaxable_by` and Python's `SecurityViolationError` has a `relaxable_by` attribute (#741, #757).
 
 ### Changed
 
@@ -102,9 +103,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **BREAKING:** TAR `list` and `verify` refuse FIFO, device, socket and unknown typeflag entries as `SecurityViolation`, as `extract` does (#721, #728).
 - 7z `extract` follows archive order, so `verify` and `extract` agree on stream-less directories (#720, #728).
 - Internal: the ZIP census shares one extra-field walker, chunked signature search and entry-kind decision; `sevenz.rs` is split into modules; the raw ZIP builder moves to the unpublished `exarch-testkit` crate (#694, #695, #696, #728).
+- **BREAKING:** `ArchiveError::SecurityViolation` gains `relaxable_by` and is `#[non_exhaustive]`; build it with `ArchiveError::violation` or `relaxable_violation` and match it with `..` (#741, #757).
+- **BREAKING:** `FfiErrorMessage` is `#[non_exhaustive]` and gains `relaxable_by` (#741, #757).
+- **BREAKING:** A relaxable Node `SECURITY_VIOLATION` message now starts `SECURITY_VIOLATION: [relaxableBy=<id>] ...` (#741, #757).
+- CLI `SecurityViolation` hints name only the flag that admits the entry (including `--max-path-depth`), say "Rust API only" for settings without a flag, and no longer suggest an empty `--banned-component` list (#741, #757).
+- CLI escapes Unicode format characters, including bidirectional controls, in human-readable output (#749, #757).
 
 ### Fixed
 
+- `verify` no longer reports the recorded mode of a hardlink entry as an `Invalid Permissions` finding (#750, #757).
 - `verify` reports a dangling link used as a parent, a hardlink under it and a symlink over an existing directory as `SecurityViolation` (security status FAILED) instead of an `InvalidArchive` I/O error, in TAR, ZIP and 7z (#726, #733).
 - `extract` and `verify` reject symlink and hardlink targets whose `..` components cannot be resolved against the extracted tree, in TAR, ZIP and 7z (#723).
 - **BREAKING:** 7z `extract` and `verify` refuse an entry whose Unix mode is a symlink (`S_IFLNK`) as `SecurityViolation`, regardless of `allow_symlinks`; follow-up #714 (#711, #717).

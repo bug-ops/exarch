@@ -736,7 +736,7 @@ impl VerificationIssue {
                 IssueCategory::InvalidArchive,
                 format!("Invalid archive: {msg}"),
             ),
-            ArchiveError::SecurityViolation { reason } => (
+            ArchiveError::SecurityViolation { reason, .. } => (
                 IssueSeverity::High,
                 IssueCategory::SecurityPolicy,
                 format!("Security violation: {reason}"),
@@ -1307,9 +1307,7 @@ mod tests {
 
     #[test]
     fn test_verification_issue_from_security_violation() {
-        let error = ArchiveError::SecurityViolation {
-            reason: "encrypted".into(),
-        };
+        let error = ArchiveError::violation("encrypted".into());
         let issue = VerificationIssue::from_error(&error, None);
         assert_eq!(issue.severity, IssueSeverity::High);
         assert_eq!(issue.category, IssueCategory::SecurityPolicy);
@@ -1318,9 +1316,7 @@ mod tests {
 
     #[test]
     fn test_security_violation_fails_security_status() {
-        let error = ArchiveError::SecurityViolation {
-            reason: "symlinks not allowed".into(),
-        };
+        let error = ArchiveError::violation("symlinks not allowed".into());
         let report = report_with(vec![VerificationIssue::from_error(&error, None)]);
         assert_eq!(report.status(), VerificationStatus::Fail);
         assert_eq!(report.security_status(), CheckStatus::Fail);

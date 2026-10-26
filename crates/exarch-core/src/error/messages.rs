@@ -5,12 +5,17 @@
 
 use super::redaction::sanitize_io_error_for_error;
 use super::types::ArchiveError;
+use super::types::PolicySetting;
 
 /// Error message for FFI consumption.
 ///
 /// Contains structured error information that can be converted to
 /// platform-specific error types (Python exceptions, Node.js Error objects).
+///
+/// `#[non_exhaustive]` and output-only: bindings read it, only
+/// [`ArchiveError::to_ffi_message`] builds it.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct FfiErrorMessage {
     /// Error code (e.g., `PATH_TRAVERSAL`, `ZIP_BOMB`)
     pub code: &'static str,
@@ -20,6 +25,22 @@ pub struct FfiErrorMessage {
 
     /// Optional additional context
     pub context: Option<String>,
+
+    /// The `SecurityConfig` setting whose current value refused the entry;
+    /// see [`ArchiveError::relaxable_by`].
+    pub relaxable_by: Option<PolicySetting>,
+}
+
+impl FfiErrorMessage {
+    /// A message with no extra context and no relaxing setting.
+    const fn plain(code: &'static str, description: String) -> Self {
+        Self {
+            code,
+            description,
+            context: None,
+            relaxable_by: None,
+        }
+    }
 }
 
 impl ArchiveError {
@@ -52,23 +73,19 @@ impl ArchiveError {
             .redacted_path()
             .unwrap_or_else(|| "<unknown>".to_string());
         match self {
-            Self::PathTraversal { .. } => FfiErrorMessage {
-                code: "PATH_TRAVERSAL",
-                description: format!("path traversal detected: {path}"),
-                context: None,
-            },
+            Self::PathTraversal { .. } => {
+                FfiErrorMessage::plain("PATH_TRAVERSAL", format!("path traversal detected: {path}"))
+            }
 
-            Self::SymlinkEscape { .. } => FfiErrorMessage {
-                code: "SYMLINK_ESCAPE",
-                description: format!("symlink target outside extraction directory: {path}"),
-                context: None,
-            },
+            Self::SymlinkEscape { .. } => FfiErrorMessage::plain(
+                "SYMLINK_ESCAPE",
+                format!("symlink target outside extraction directory: {path}"),
+            ),
 
-            Self::HardlinkEscape { .. } => FfiErrorMessage {
-                code: "HARDLINK_ESCAPE",
-                description: format!("hardlink target outside extraction directory: {path}"),
-                context: None,
-            },
+            Self::HardlinkEscape { .. } => FfiErrorMessage::plain(
+                "HARDLINK_ESCAPE",
+                format!("hardlink target outside extraction directory: {path}"),
+            ),
 
             Self::ZipBomb(details) => FfiErrorMessage {
                 code: "ZIP_BOMB",
@@ -78,79 +95,72 @@ impl ArchiveError {
                     details.scope(),
                     details.ratio()
                 )),
+                relaxable_by: None,
             },
 
-            Self::ZipInconsistency(_) => FfiErrorMessage {
-                code: "ZIP_INCONSISTENCY",
-                description: self.to_string(),
-                context: None,
-            },
+            Self::ZipInconsistency(_) => {
+                FfiErrorMessage::plain("ZIP_INCONSISTENCY", self.to_string())
+            }
 
-            Self::QuotaExceeded { resource } => FfiErrorMessage {
-                code: "QUOTA_EXCEEDED",
-                description: resource.to_string(),
-                context: None,
-            },
+            Self::QuotaExceeded { resource } => {
+                FfiErrorMessage::plain("QUOTA_EXCEEDED", resource.to_string())
+            }
 
-            Self::SecurityViolation { reason } => FfiErrorMessage {
+            Self::SecurityViolation {
+                reason,
+                relaxable_by,
+                ..
+            } => FfiErrorMessage {
                 code: "SECURITY_VIOLATION",
                 description: format!("operation denied by security policy: {reason}"),
                 context: None,
+                relaxable_by: *relaxable_by,
             },
 
-            Self::InvalidArchive(reason) => FfiErrorMessage {
-                code: "INVALID_ARCHIVE",
-                description: format!("invalid archive: {reason}"),
-                context: None,
-            },
+            Self::InvalidArchive(reason) => {
+                FfiErrorMessage::plain("INVALID_ARCHIVE", format!("invalid archive: {reason}"))
+            }
 
             Self::Io(io_err) => FfiErrorMessage {
                 code: "IO_ERROR",
                 description: sanitize_io_error_for_error(io_err),
                 context: Some(io_err.kind().to_string()),
+                relaxable_by: None,
             },
 
-            Self::InvalidPermissions { mode, .. } => FfiErrorMessage {
-                code: "INVALID_PERMISSIONS",
-                description: format!("invalid permissions for {path}: {mode:#o}"),
-                context: None,
-            },
+            Self::InvalidPermissions { mode, .. } => FfiErrorMessage::plain(
+                "INVALID_PERMISSIONS",
+                format!("invalid permissions for {path}: {mode:#o}"),
+            ),
 
-            Self::SourceNotFound { .. } => FfiErrorMessage {
-                code: "SOURCE_NOT_FOUND",
-                description: format!("source path not found: {path}"),
-                context: None,
-            },
+            Self::SourceNotFound { .. } => {
+                FfiErrorMessage::plain("SOURCE_NOT_FOUND", format!("source path not found: {path}"))
+            }
 
-            Self::SourceNotAccessible { .. } => FfiErrorMessage {
-                code: "SOURCE_NOT_ACCESSIBLE",
-                description: format!("source path is not accessible: {path}"),
-                context: None,
-            },
+            Self::SourceNotAccessible { .. } => FfiErrorMessage::plain(
+                "SOURCE_NOT_ACCESSIBLE",
+                format!("source path is not accessible: {path}"),
+            ),
 
-            Self::OutputExists { .. } => FfiErrorMessage {
-                code: "OUTPUT_EXISTS",
-                description: format!("output file already exists: {path}"),
-                context: None,
-            },
+            Self::OutputExists { .. } => FfiErrorMessage::plain(
+                "OUTPUT_EXISTS",
+                format!("output file already exists: {path}"),
+            ),
 
-            Self::InvalidCompressionLevel { level } => FfiErrorMessage {
-                code: "INVALID_COMPRESSION_LEVEL",
-                description: format!("invalid compression level {level}, must be 1-9"),
-                context: None,
-            },
+            Self::InvalidCompressionLevel { level } => FfiErrorMessage::plain(
+                "INVALID_COMPRESSION_LEVEL",
+                format!("invalid compression level {level}, must be 1-9"),
+            ),
 
-            Self::UnknownFormat { .. } => FfiErrorMessage {
-                code: "UNKNOWN_FORMAT",
-                description: format!("cannot determine archive format from: {path}"),
-                context: None,
-            },
+            Self::UnknownFormat { .. } => FfiErrorMessage::plain(
+                "UNKNOWN_FORMAT",
+                format!("cannot determine archive format from: {path}"),
+            ),
 
-            Self::InvalidConfiguration { reason } => FfiErrorMessage {
-                code: "INVALID_CONFIGURATION",
-                description: format!("invalid configuration: {reason}"),
-                context: None,
-            },
+            Self::InvalidConfiguration { reason } => FfiErrorMessage::plain(
+                "INVALID_CONFIGURATION",
+                format!("invalid configuration: {reason}"),
+            ),
 
             Self::PartialExtraction { source, .. } => source.to_ffi_message(),
         }
@@ -275,9 +285,7 @@ mod tests {
             ArchiveError::QuotaExceeded {
                 resource: QuotaResource::IntegerOverflow,
             },
-            ArchiveError::SecurityViolation {
-                reason: "test".into(),
-            },
+            ArchiveError::violation("test".into()),
             ArchiveError::UnknownFormat {
                 path: PathBuf::from("test.rar"),
             },

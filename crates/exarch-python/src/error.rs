@@ -33,6 +33,21 @@ create_exception!(exarch, UnsupportedFormatError, ArchiveError);
 create_exception!(exarch, UnknownFormatError, UnsupportedFormatError);
 create_exception!(exarch, InvalidArchiveError, ArchiveError);
 
+/// Builds a `SecurityViolationError` from a `SecurityViolation`, carrying the
+/// `relaxable_by` attribute when a `SecurityConfig` setting relaxes the
+/// refusal.
+fn security_violation_err(violation: &CoreError) -> PyErr {
+    let err = SecurityViolationError::new_err(violation.to_string());
+    if let Some(setting) = violation.relaxable_by() {
+        Python::attach(|py| {
+            // setattr failures are silenced to preserve the `PyErr` signature;
+            // the class default stays `None`.
+            let _ = err.value(py).setattr("relaxable_by", setting.as_str());
+        });
+    }
+    err
+}
+
 /// Converts Rust extraction errors to Python exceptions.
 ///
 /// This preserves error context and maps each Rust error variant to the
@@ -92,9 +107,7 @@ pub fn convert_error(err: CoreError) -> PyErr {
             };
             QuotaExceededError::new_err(msg)
         }
-        CoreError::SecurityViolation { reason } => SecurityViolationError::new_err(format!(
-            "operation denied by security policy: {reason}"
-        )),
+        violation @ CoreError::SecurityViolation { .. } => security_violation_err(&violation),
         CoreError::InvalidArchive(msg) => {
             InvalidArchiveError::new_err(format!("invalid archive: {msg}"))
         }
@@ -182,10 +195,9 @@ pub fn register_exceptions(m: &Bound<'_, PyModule>) -> PyResult<()> {
         "QuotaExceededError",
         m.py().get_type::<QuotaExceededError>(),
     )?;
-    m.add(
-        "SecurityViolationError",
-        m.py().get_type::<SecurityViolationError>(),
-    )?;
+    let security_violation = m.py().get_type::<SecurityViolationError>();
+    security_violation.setattr("relaxable_by", m.py().None())?;
+    m.add("SecurityViolationError", security_violation)?;
     m.add(
         "ZipInconsistencyError",
         m.py().get_type::<ZipInconsistencyError>(),
@@ -435,9 +447,7 @@ mod tests {
 
     #[test]
     fn test_security_violation_conversion() {
-        let err = CoreError::SecurityViolation {
-            reason: "test violation".to_string(),
-        };
+        let err = CoreError::violation("test violation".to_string());
         let py_err = convert_error(err);
         let err_str = py_err.to_string();
         assert!(
@@ -923,9 +933,7 @@ mod tests {
             bytes_written: 512,
             ..ExtractionReport::default()
         };
-        let source = CoreError::SecurityViolation {
-            reason: "test policy violation".to_string(),
-        };
+        let source = CoreError::violation("test policy violation".to_string());
         let err = CoreError::PartialExtraction {
             source: Box::new(source),
             report,

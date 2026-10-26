@@ -5,6 +5,7 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use crate::ArchiveError;
+use crate::PolicySetting;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::config::Validated;
@@ -33,9 +34,10 @@ pub fn require_hardlinks_allowed(config: &SecurityConfig<Validated>) -> Result<(
     if config.allowed.hardlinks {
         Ok(())
     } else {
-        Err(ArchiveError::SecurityViolation {
-            reason: "hardlinks not allowed".into(),
-        })
+        Err(ArchiveError::relaxable_violation(
+            PolicySetting::Hardlinks,
+            "hardlinks not allowed".into(),
+        ))
     }
 }
 
@@ -163,9 +165,7 @@ impl HardlinkTracker {
 
         // Reject empty targets: they do not point anywhere.
         if target.is_empty() {
-            return Err(ArchiveError::SecurityViolation {
-                reason: "hardlink target is empty".into(),
-            });
+            return Err(ArchiveError::violation("hardlink target is empty".into()));
         }
 
         // Reject null bytes in the target before any error message can be
@@ -175,9 +175,9 @@ impl HardlinkTracker {
         // "hardlink target does not exist: {target}"). The message here
         // intentionally omits the raw target bytes.
         if crate::types::safe_path::has_null_bytes(target) {
-            return Err(ArchiveError::SecurityViolation {
-                reason: "hardlink target contains null bytes".into(),
-            });
+            return Err(ArchiveError::violation(
+                "hardlink target contains null bytes".into(),
+            ));
         }
 
         use std::path::Component;

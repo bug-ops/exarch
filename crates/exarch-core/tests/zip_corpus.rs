@@ -140,7 +140,9 @@ fn assert_no_structural_finding(path: &Path, label: &str) {
         Ok(_) => {}
         // Not admitted for a reason other than structure: Deflate64 and the
         // like.
-        Err(ArchiveError::SecurityViolation { reason }) if reason.starts_with("unsupported") => {
+        Err(ArchiveError::SecurityViolation { reason, .. })
+            if reason.starts_with("unsupported") =>
+        {
             return;
         }
         Err(e) => panic!("{label}: list rejected: {e}"),

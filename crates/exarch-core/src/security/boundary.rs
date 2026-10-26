@@ -61,18 +61,16 @@ pub const MAX_PATH_LENGTH: usize = 4096;
 /// ```
 pub fn validate_raw_path_str(path: &str) -> Result<()> {
     if path.len() > MAX_PATH_LENGTH {
-        return Err(ArchiveError::SecurityViolation {
-            reason: format!(
-                "path exceeds maximum length of {MAX_PATH_LENGTH} bytes (got {} bytes)",
-                path.len()
-            ),
-        });
+        return Err(ArchiveError::violation(format!(
+            "path exceeds maximum length of {MAX_PATH_LENGTH} bytes (got {} bytes)",
+            path.len()
+        )));
     }
 
     if path.contains('\0') {
-        return Err(ArchiveError::SecurityViolation {
-            reason: "path contains null bytes - potential security issue".to_string(),
-        });
+        return Err(ArchiveError::violation(
+            "path contains null bytes - potential security issue".to_string(),
+        ));
     }
 
     Ok(())
@@ -158,7 +156,7 @@ mod tests {
     fn test_validate_raw_path_str_rejects_null_bytes() {
         let err = validate_raw_path_str("/tmp/test\0malicious").expect_err("null byte");
         match err {
-            ArchiveError::SecurityViolation { reason } => {
+            ArchiveError::SecurityViolation { reason, .. } => {
                 assert_eq!(
                     reason,
                     "path contains null bytes - potential security issue"
@@ -173,7 +171,7 @@ mod tests {
         let long_path = "x".repeat(MAX_PATH_LENGTH + 1);
         let err = validate_raw_path_str(&long_path).expect_err("too long");
         match err {
-            ArchiveError::SecurityViolation { reason } => {
+            ArchiveError::SecurityViolation { reason, .. } => {
                 assert_eq!(
                     reason,
                     format!(
@@ -191,7 +189,7 @@ mod tests {
         let long_path_with_null = format!("{}\0", "x".repeat(MAX_PATH_LENGTH));
         let err = validate_raw_path_str(&long_path_with_null).expect_err("too long");
         match err {
-            ArchiveError::SecurityViolation { reason } => {
+            ArchiveError::SecurityViolation { reason, .. } => {
                 assert!(
                     reason.contains("maximum length"),
                     "length check should run first: {reason}"

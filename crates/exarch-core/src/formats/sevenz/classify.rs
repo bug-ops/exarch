@@ -124,7 +124,7 @@ impl UnsupportedEntry {
                 native.opposite()
             ),
         };
-        ArchiveError::SecurityViolation { reason }
+        ArchiveError::violation(reason)
     }
 }
 
@@ -209,12 +209,10 @@ impl SevenZKind {
 
 /// The refusal for a Windows reparse point, which has no readable target.
 pub(super) fn reparse_point_refusal(name: &str) -> ArchiveError {
-    ArchiveError::SecurityViolation {
-        reason: format!(
-            "symlink detected in 7z archive: {name} (Windows reparse point attribute set). \
+    ArchiveError::violation(format!(
+        "symlink detected in 7z archive: {name} (Windows reparse point attribute set). \
              Its target cannot be read due to sevenz-rust2 API limitations."
-        ),
-    }
+    ))
 }
 
 /// Stashes `error` for the caller to return as is and gives the error that ends

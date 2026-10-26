@@ -11,6 +11,7 @@ pub use messages::FfiErrorMessage;
 pub use types::ArchiveError;
 pub use types::CompressionRatio;
 pub use types::PartialWrites;
+pub use types::PolicySetting;
 pub use types::QuotaResource;
 pub use types::Result;
 pub use types::ZipBombDetails;
@@ -22,3 +23,6 @@ pub use zip_inconsistency::ZipEntryIndex;
 pub use zip_inconsistency::ZipHeaderField;
 pub use zip_inconsistency::ZipInconsistency;
 pub use zip_inconsistency::ZipUncomparable;
+
+#[cfg(test)]
+mod policy_setting_tests;

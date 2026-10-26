@@ -77,11 +77,9 @@ impl Default for CopyBuffer {
 /// reader's declared-size classification so the message stays identical.
 #[must_use]
 pub fn declared_size_exceeded(declared: u64) -> ArchiveError {
-    ArchiveError::SecurityViolation {
-        reason: format!(
-            "decompressed size exceeded the declared uncompressed size of {declared} bytes"
-        ),
-    }
+    ArchiveError::violation(format!(
+        "decompressed size exceeded the declared uncompressed size of {declared} bytes"
+    ))
 }
 
 /// Failure of [`copy_bounded`], kept typed so callers can tell a corrupt
@@ -109,12 +107,10 @@ impl From<CopyError> for ArchiveError {
             // own (possibly forged) size, so a "raise --max-file-size" hint
             // would be wrong advice (GHSA-5j8q-wxg5-hj4r).
             CopyError::Overrun { declared } => declared_size_exceeded(declared),
-            CopyError::Short { declared, actual } => Self::SecurityViolation {
-                reason: format!(
-                    "decompressed size ({actual} bytes) does not match the declared \
+            CopyError::Short { declared, actual } => Self::violation(format!(
+                "decompressed size ({actual} bytes) does not match the declared \
                      uncompressed size ({declared} bytes)"
-                ),
-            },
+            )),
             CopyError::Overflow => Self::QuotaExceeded {
                 resource: crate::QuotaResource::IntegerOverflow,
             },
@@ -477,7 +473,7 @@ mod tests {
             "streaming past the declared size must abort, got: {result:?}"
         );
         match result {
-            Err(ArchiveError::SecurityViolation { reason }) => {
+            Err(ArchiveError::SecurityViolation { reason, .. }) => {
                 assert!(
                     reason.contains("50 bytes"),
                     "error must name the declared ceiling (50), got: {reason:?}"
@@ -543,7 +539,7 @@ mod tests {
         let result = copy_with_buffer(&mut input, &mut output, &mut buffer, Some(100));
 
         match result {
-            Err(ArchiveError::SecurityViolation { reason }) => {
+            Err(ArchiveError::SecurityViolation { reason, .. }) => {
                 assert!(
                     reason.contains("100 bytes"),
                     "error must name the declared ceiling (100), got: {reason:?}"
@@ -617,7 +613,7 @@ mod tests {
         .unwrap_err();
         assert_matches!(
             overrun,
-            ArchiveError::SecurityViolation { ref reason }
+            ArchiveError::SecurityViolation { ref reason, .. }
                 if *reason == declared_size_exceeded_reason(3)
         );
 
@@ -630,7 +626,7 @@ mod tests {
         .unwrap_err();
         assert_matches!(
             short,
-            ArchiveError::SecurityViolation { ref reason }
+            ArchiveError::SecurityViolation { ref reason, .. }
                 if reason.contains("does not match the declared uncompressed size (3 bytes)")
         );
 
@@ -652,7 +648,7 @@ mod tests {
 
     fn declared_size_exceeded_reason(declared: u64) -> String {
         match declared_size_exceeded(declared) {
-            ArchiveError::SecurityViolation { reason } => reason,
+            ArchiveError::SecurityViolation { reason, .. } => reason,
             other => panic!("unexpected error {other:?}"),
         }
     }

@@ -110,9 +110,17 @@ pub fn convert_error(err: CoreError) -> Error {
             }
             Error::new(Status::GenericFailure, msg)
         }
-        CoreError::SecurityViolation { reason } => {
-            let mut msg = String::with_capacity(60 + reason.len());
-            msg.push_str("SECURITY_VIOLATION: operation denied by security policy: ");
+        CoreError::SecurityViolation {
+            reason,
+            relaxable_by,
+            ..
+        } => {
+            let mut msg = String::with_capacity(90 + reason.len());
+            msg.push_str("SECURITY_VIOLATION: ");
+            if let Some(setting) = relaxable_by {
+                let _ = write!(&mut msg, "[relaxableBy={}] ", setting.as_str());
+            }
+            msg.push_str("operation denied by security policy: ");
             msg.push_str(&reason);
             Error::new(Status::GenericFailure, msg)
         }
@@ -352,10 +360,34 @@ mod tests {
     }
 
     #[test]
+    fn test_relaxable_violation_carries_anchored_token_after_code() {
+        let err = CoreError::relaxable_violation(
+            exarch_core::PolicySetting::Symlinks,
+            "symlinks not allowed".to_string(),
+        );
+        let msg = convert_error(err).to_string();
+        assert!(
+            msg.contains(
+                "SECURITY_VIOLATION: [relaxableBy=symlinks] operation denied by security policy: \
+                 symlinks not allowed"
+            ),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_reason_cannot_forge_the_relaxable_token() {
+        let err = CoreError::violation("[relaxableBy=symlinks]".to_string());
+        let msg = convert_error(err).to_string();
+        assert!(
+            !msg.contains("SECURITY_VIOLATION: [relaxableBy="),
+            "non-relaxable message must not start with the token: {msg}"
+        );
+    }
+
+    #[test]
     fn test_security_violation_conversion() {
-        let err = CoreError::SecurityViolation {
-            reason: "test violation".to_string(),
-        };
+        let err = CoreError::violation("test violation".to_string());
         let napi_err = convert_error(err);
         let err_str = napi_err.to_string();
         assert!(err_str.contains("SECURITY_VIOLATION"));
@@ -660,9 +692,7 @@ mod tests {
             bytes_written: 512,
             ..ExtractionReport::default()
         };
-        let source = CoreError::SecurityViolation {
-            reason: "test policy violation".to_string(),
-        };
+        let source = CoreError::violation("test policy violation".to_string());
         let err = CoreError::PartialExtraction {
             source: Box::new(source),
             report,

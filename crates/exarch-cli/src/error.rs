@@ -10,6 +10,8 @@ use exarch_core::ArchiveError;
 use exarch_core::CompressionRatio;
 use exarch_core::ExtractionReport;
 use exarch_core::PartialWrites;
+use exarch_core::PolicySetting;
+use exarch_core::SecurityConfig;
 use exarch_core::ZipBombDetails;
 use exarch_core::ZipBombScope;
 use std::fmt;
@@ -168,36 +170,43 @@ impl std::error::Error for PartialExtractionContext {
     }
 }
 
-/// Fixed literal prefixes `exarch-core` builds `SecurityViolation.reason`
-/// strings from for the four categories the CLI's policy flags
-/// (`--allow-symlinks`, `--allow-hardlinks`, `--allow-solid-archives`,
-/// `--banned-component`) actually relax. Verified against the exact
-/// construction call sites: `types/safe_symlink.rs`, `security/hardlink.rs`,
-/// `formats/sevenz.rs`, and `types/safe_path.rs` / `types/safe_symlink.rs`
-/// (banned components can appear either in the entry path itself or in a
-/// symlink's target, hence two prefixes for that one category).
-const RELAXABLE_VIOLATION_PREFIXES: &[&str] = &[
-    "symlinks not allowed",
-    "hardlinks not allowed",
-    "solid 7z archives are not allowed",
-    "banned path component:",
-    "symlink target contains banned component:",
-];
-
-/// Returns `true` if `reason` names a `SecurityViolation` category one of the
-/// CLI's policy flags can actually relax.
+/// The HINT body for a `SecurityViolation` that `relaxable_by` names.
 ///
-/// Matches with `starts_with`, anchored at the very beginning of `reason`:
-/// each prefix above is the fixed literal text `exarch-core` writes before
-/// any attacker-controlled data (an entry path, a component name, etc.), so
-/// a forged archive cannot spoof this classification by choosing path
-/// components that happen to contain one of these prefixes elsewhere in the
-/// string — only a `reason` that genuinely originates from one of these
-/// call sites starts with it.
-fn is_relaxable_by_policy_flag(reason: &str) -> bool {
-    RELAXABLE_VIOLATION_PREFIXES
-        .iter()
-        .any(|prefix| reason.starts_with(prefix))
+/// `None` means no `SecurityConfig` value relaxes the refusal. Settings the CLI
+/// has no flag for point at the Rust API instead of at a flag that does not
+/// exist.
+fn relaxation_hint(relaxable_by: Option<PolicySetting>) -> String {
+    match relaxable_by {
+        None => "This archive was rejected by a security check that cannot be relaxed via any \
+                 policy flag."
+            .to_owned(),
+        Some(PolicySetting::Symlinks) => {
+            "If this archive is from a trusted source, pass --allow-symlinks.".to_owned()
+        }
+        Some(PolicySetting::Hardlinks) => {
+            "If this archive is from a trusted source, pass --allow-hardlinks.".to_owned()
+        }
+        Some(PolicySetting::SolidArchives) => {
+            "If this archive is from a trusted source, pass --allow-solid-archives.".to_owned()
+        }
+        Some(PolicySetting::BannedComponents) => format!(
+            "--banned-component replaces the whole default list. To keep the other bans, re-pass \
+             the entries you still want banned (defaults: {}), leaving out only the component \
+             that refused this entry.",
+            SecurityConfig::default().banned_path_components.join(", ")
+        ),
+        Some(PolicySetting::MaxPathDepth) => {
+            "If this archive is from a trusted source, pass a larger --max-path-depth.".to_owned()
+        }
+        Some(PolicySetting::WindowsReservedNames) => "No CLI flag relaxes this. Rust API only: \
+             SecurityConfig::with_allow_windows_reserved_names."
+            .to_owned(),
+        Some(PolicySetting::MaxTarMetadataBytes) => {
+            "No CLI flag relaxes this. Rust API only: SecurityConfig::with_max_tar_metadata_bytes."
+                .to_owned()
+        }
+        Some(_) => "Relax the SecurityConfig setting that refused this entry.".to_owned(),
+    }
 }
 
 fn quota_exceeded_context(
@@ -327,29 +336,10 @@ pub fn convert_extraction_error(
         ArchiveError::InvalidCompressionLevel { level } => {
             format!("Invalid compression level {level}: must be between 1 and 9.")
         }
-        // `SecurityViolation.reason` is a free-form String with no structured
-        // variant to distinguish its cause, and the CLI's four policy flags
-        // only relax a handful of them (symlinks, hardlinks, solid archives,
-        // banned components) — roughly a dozen others (GHSA-5j8q-wxg5-hj4r's
-        // declared/decompressed size mismatch, encrypted/password-protected
-        // entries, unsupported compression methods, oversized symlink
-        // targets, disallowed TAR entry types, null bytes or empty/oversized
-        // paths, etc.) cannot be relaxed by any flag at all. Rather than
-        // special-casing the one known mismatch, classify by the fixed
-        // literal prefix each relaxable category's reason is built from (see
-        // `is_relaxable_by_policy_flag`) and give every non-matching reason a
-        // HINT that does not point at a flag that cannot fix it.
-        ArchiveError::SecurityViolation { reason } => {
-            let hint = if is_relaxable_by_policy_flag(reason) {
-                "If this archive is from a trusted source, relax the relevant policy flag \
-                 (--allow-symlinks, --allow-hardlinks, --allow-solid-archives, \
-                 --banned-component)."
-            } else {
-                "This archive was rejected by a security check that cannot be relaxed via any \
-                 policy flag."
-            };
-            format!("Security violation while processing '{archive}'\nHINT: {hint}")
-        }
+        ArchiveError::SecurityViolation { relaxable_by, .. } => format!(
+            "Security violation while processing '{archive}'\nHINT: {}",
+            relaxation_hint(*relaxable_by)
+        ),
         // Forward-compat: a variant added to ArchiveError after this match was
         // written. #[non_exhaustive] requires this arm to compile against a
         // newer exarch-core; there is no more specific context to add.
@@ -584,9 +574,7 @@ mod tests {
 
     #[test]
     fn test_security_violation_reason_appears_exactly_once() {
-        let err = ArchiveError::SecurityViolation {
-            reason: "absolute path detected".to_string(),
-        };
+        let err = ArchiveError::violation("absolute path detected".to_string());
         let converted = convert_extraction_error(err, Path::new("archive.tar.gz"), false);
         let msg = format!("{converted:#}");
         assert_eq!(
@@ -602,10 +590,9 @@ mod tests {
 
     #[test]
     fn test_security_violation_forged_size_hint_omits_policy_flags() {
-        let err = ArchiveError::SecurityViolation {
-            reason: "decompressed size exceeded the declared uncompressed size of 50 bytes"
-                .to_string(),
-        };
+        let err = ArchiveError::violation(
+            "decompressed size exceeded the declared uncompressed size of 50 bytes".to_string(),
+        );
         let converted = convert_extraction_error(err, Path::new("archive.zip"), false);
         let msg = format!("{converted:#}");
         assert!(
@@ -625,23 +612,89 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_security_violation_hint_names_policy_flags() {
-        // These assertions target text the CLI itself authors (the anyhow
-        // context), not the wrapped `ArchiveError`'s own Display, so the test
-        // fails if the HINT regresses to generic wording again.
-        let err = ArchiveError::SecurityViolation {
-            reason: "banned path component: .git".to_string(),
-        };
+    fn hint_for(setting: PolicySetting) -> String {
+        let err = ArchiveError::relaxable_violation(setting, "refused".to_string());
         let converted = convert_extraction_error(err, Path::new("archive.tar.gz"), false);
-        let msg = format!("{converted:#}");
+        format!("{converted:#}")
+    }
+
+    #[test]
+    fn test_security_violation_hint_names_exact_flag() {
+        for (setting, flag) in [
+            (PolicySetting::Symlinks, "--allow-symlinks"),
+            (PolicySetting::Hardlinks, "--allow-hardlinks"),
+            (PolicySetting::SolidArchives, "--allow-solid-archives"),
+            (PolicySetting::BannedComponents, "--banned-component"),
+            (PolicySetting::MaxPathDepth, "--max-path-depth"),
+        ] {
+            let msg = hint_for(setting);
+            assert!(msg.contains(flag), "HINT missing {flag}: {msg}");
+            assert!(
+                !msg.contains("cannot be relaxed"),
+                "relaxable HINT must not claim otherwise: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_security_violation_hint_mentions_only_its_own_flag() {
+        let msg = hint_for(PolicySetting::Symlinks);
         for flag in [
-            "--allow-symlinks",
             "--allow-hardlinks",
             "--allow-solid-archives",
             "--banned-component",
         ] {
-            assert!(msg.contains(flag), "HINT missing flag {flag}: {msg}");
+            assert!(!msg.contains(flag), "unexpected {flag}: {msg}");
+        }
+    }
+
+    #[test]
+    fn test_banned_component_hint_renders_defaults_and_never_suggests_empty_list() {
+        let msg = hint_for(PolicySetting::BannedComponents);
+        let config = SecurityConfig::default();
+        for default in &config.banned_path_components {
+            assert!(
+                msg.contains(default.as_str()),
+                "default {default} missing: {msg}"
+            );
+        }
+        assert!(
+            msg.contains("replaces the whole default list"),
+            "got: {msg}"
+        );
+        assert!(
+            !msg.contains("empty"),
+            "must not advertise the empty list: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_api_only_settings_point_at_rust_api() {
+        for (setting, api) in [
+            (
+                PolicySetting::WindowsReservedNames,
+                "with_allow_windows_reserved_names",
+            ),
+            (
+                PolicySetting::MaxTarMetadataBytes,
+                "with_max_tar_metadata_bytes",
+            ),
+        ] {
+            let msg = hint_for(setting);
+            assert!(msg.contains("Rust API only"), "got: {msg}");
+            assert!(msg.contains(api), "got: {msg}");
+            assert!(!msg.contains("--allow"), "no CLI flag exists: {msg}");
+        }
+    }
+
+    #[test]
+    fn test_every_policy_setting_has_a_specific_hint() {
+        for &setting in PolicySetting::ALL {
+            let msg = hint_for(setting);
+            assert!(
+                !msg.contains("Relax the SecurityConfig setting"),
+                "{setting} fell through to the generic hint: {msg}"
+            );
         }
     }
 
@@ -717,9 +770,10 @@ mod tests {
         use exarch_core::ExtractionReport;
         use std::time::Duration;
 
-        let inner = ArchiveError::SecurityViolation {
-            reason: "symlinks not allowed by security policy".to_string(),
-        };
+        let inner = ArchiveError::relaxable_violation(
+            PolicySetting::Symlinks,
+            "symlinks not allowed by security policy".to_string(),
+        );
         let report = ExtractionReport {
             files_extracted: 3,
             directories_created: 1,

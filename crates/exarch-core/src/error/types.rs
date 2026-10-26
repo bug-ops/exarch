@@ -32,6 +32,45 @@ closed_enum! {
     }
 }
 
+closed_enum! {
+    /// The `SecurityConfig` setting whose current value refused an entry.
+    ///
+    /// Changing it removes that refusal only: the entry can still fail a later
+    /// check, for example a symlink that escapes the destination fails with
+    /// [`ArchiveError::SymlinkEscape`] once symlinks are allowed. Refusals that
+    /// no `SecurityConfig` value relaxes carry no `PolicySetting`.
+    ///
+    /// `#[non_exhaustive]` so a future relaxable setting is not a breaking
+    /// change for downstream matches.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::PolicySetting;
+    ///
+    /// assert_eq!(PolicySetting::Symlinks.as_str(), "symlinks");
+    /// assert!(PolicySetting::ALL.contains(&PolicySetting::MaxPathDepth));
+    /// ```
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[non_exhaustive]
+    pub enum PolicySetting {
+        /// `SecurityConfig::with_allow_symlinks`.
+        Symlinks => "symlinks",
+        /// `SecurityConfig::with_allow_hardlinks`.
+        Hardlinks => "hardlinks",
+        /// `SecurityConfig::with_allow_solid_archives`.
+        SolidArchives => "solid_archives",
+        /// `SecurityConfig::with_banned_path_components`.
+        BannedComponents => "banned_components",
+        /// `SecurityConfig::with_max_path_depth`.
+        MaxPathDepth => "max_path_depth",
+        /// `SecurityConfig::with_allow_windows_reserved_names`.
+        WindowsReservedNames => "windows_reserved_names",
+        /// `SecurityConfig::with_max_tar_metadata_bytes`.
+        MaxTarMetadataBytes => "max_tar_metadata_bytes",
+    }
+}
+
 /// Compression ratio of a checked size pair.
 ///
 /// `Unbounded` replaces a division by zero, so a ratio is never infinite or
@@ -267,10 +306,18 @@ pub enum ArchiveError {
     },
 
     /// Operation not permitted by security policy.
+    ///
+    /// Should be built through [`ArchiveError::violation`] and
+    /// [`ArchiveError::relaxable_violation`], so a refusal that a
+    /// `SecurityConfig` value can lift names that value.
     #[error("operation denied by security policy: {reason}")]
+    #[non_exhaustive]
     SecurityViolation {
         /// Reason for the violation.
         reason: String,
+        /// The `SecurityConfig` setting whose current value refused the entry,
+        /// or `None` when no setting relaxes this refusal.
+        relaxable_by: Option<PolicySetting>,
     },
 
     /// Source path not found.
@@ -377,6 +424,65 @@ impl From<std::io::Error> for ArchiveError {
 }
 
 impl ArchiveError {
+    /// Builds a [`Self::SecurityViolation`] that no `SecurityConfig` value
+    /// relaxes.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::ArchiveError;
+    ///
+    /// let err = ArchiveError::violation("encrypted entries are not supported".into());
+    /// assert_eq!(err.context(), Some("encrypted entries are not supported"));
+    /// ```
+    #[must_use]
+    pub const fn violation(reason: String) -> Self {
+        Self::SecurityViolation {
+            reason,
+            relaxable_by: None,
+        }
+    }
+
+    /// Builds a [`Self::SecurityViolation`] that `setting` refused and that
+    /// changing `setting` lifts.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::ArchiveError;
+    /// use exarch_core::PolicySetting;
+    ///
+    /// let err =
+    ///     ArchiveError::relaxable_violation(PolicySetting::Symlinks, "symlinks not allowed".into());
+    /// assert_eq!(err.relaxable_by(), Some(PolicySetting::Symlinks));
+    /// ```
+    #[must_use]
+    pub const fn relaxable_violation(setting: PolicySetting, reason: String) -> Self {
+        Self::SecurityViolation {
+            reason,
+            relaxable_by: Some(setting),
+        }
+    }
+
+    /// Returns the `SecurityConfig` setting whose current value refused the
+    /// entry, if this is a [`Self::SecurityViolation`] that a setting relaxes.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::ArchiveError;
+    ///
+    /// assert_eq!(ArchiveError::violation("x".into()).relaxable_by(), None);
+    /// ```
+    #[must_use]
+    pub fn relaxable_by(&self) -> Option<PolicySetting> {
+        match self {
+            Self::SecurityViolation { relaxable_by, .. } => *relaxable_by,
+            Self::PartialExtraction { source, .. } => source.relaxable_by(),
+            _ => None,
+        }
+    }
+
     /// Returns `true` if this error represents a security violation.
     ///
     /// Security violations include:
@@ -479,7 +585,7 @@ impl ArchiveError {
     pub fn context(&self) -> Option<&str> {
         match self {
             Self::InvalidArchive(msg) => Some(msg),
-            Self::SecurityViolation { reason } => Some(reason),
+            Self::SecurityViolation { reason, .. } => Some(reason),
             Self::PartialExtraction { source, .. } => source.context(),
             _ => None,
         }
@@ -536,7 +642,7 @@ impl ArchiveError {
     /// use exarch_core::PartialWrites;
     ///
     /// let err = ArchiveError::PartialExtraction {
-    ///     source: Box::new(ArchiveError::SecurityViolation { reason: "x".into() }),
+    ///     source: Box::new(ArchiveError::violation("x".into())),
     ///     report: ExtractionReport::default(),
     ///     writes: PartialWrites::Kept,
     /// };
@@ -615,9 +721,7 @@ mod tests {
         let err = ArchiveError::ZipBomb(ZipBombDetails::new(ZipBombScope::Entry, 1000, 1_000_000));
         assert!(err.is_security_violation());
 
-        let err = ArchiveError::SecurityViolation {
-            reason: "test".into(),
-        };
+        let err = ArchiveError::violation("test".into());
         assert!(err.is_security_violation());
 
         // Not security violations
@@ -638,9 +742,7 @@ mod tests {
         };
         assert!(err.is_recoverable());
 
-        let err = ArchiveError::SecurityViolation {
-            reason: "test".into(),
-        };
+        let err = ArchiveError::violation("test".into());
         assert!(err.is_recoverable());
 
         // Non-recoverable errors
@@ -661,9 +763,7 @@ mod tests {
         let err = ArchiveError::InvalidArchive("bad header".into());
         assert_eq!(err.context(), Some("bad header"));
 
-        let err = ArchiveError::SecurityViolation {
-            reason: "not allowed".into(),
-        };
+        let err = ArchiveError::violation("not allowed".into());
         assert_eq!(err.context(), Some("not allowed"));
 
         let err = ArchiveError::UnknownFormat {

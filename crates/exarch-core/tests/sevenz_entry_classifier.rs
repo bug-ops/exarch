@@ -107,7 +107,7 @@ fn reparse_file_and_nested_reparse_entries_are_refused_before_any_write() {
         let err = extract_archive(&archive, out.path(), &SecurityConfig::default()).unwrap_err();
 
         assert!(
-            matches!(&err, ArchiveError::SecurityViolation { reason } if reason.contains("reparse point")),
+            matches!(&err, ArchiveError::SecurityViolation { reason, .. } if reason.contains("reparse point")),
             "{err}"
         );
         assert!(dir_names(&out).is_empty(), "a.txt must not be written");
@@ -476,7 +476,7 @@ fn assert_refused_by_list_verify_and_extract(entries: Vec<Pushed>, expect: &str)
         extract_archive(&archive, out.path(), &config).unwrap_err(),
     ] {
         assert!(
-            matches!(&err, ArchiveError::SecurityViolation { reason } if reason.contains(expect)),
+            matches!(&err, ArchiveError::SecurityViolation { reason, .. } if reason.contains(expect)),
             "{expect}: {err}"
         );
     }

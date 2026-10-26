@@ -1778,6 +1778,171 @@ fn test_extract_verbose_escapes_control_characters_in_entry_names() {
     );
 }
 
+const BIDI_NAME: &str = "evil\u{202e}gpj.exe\u{2066}x";
+const BIDI_NAME_ESCAPED: &str = "evil\\u{202e}gpj.exe\\u{2066}x";
+
+fn assert_no_bidi_controls(text: &str) {
+    assert!(
+        !text.contains('\u{202e}') && !text.contains('\u{2066}'),
+        "raw bidi control reached the terminal: {text:?}"
+    );
+}
+
+/// Regression test for #749: `extract -v` must escape bidi controls.
+#[test]
+fn test_extract_verbose_escapes_bidi_controls_in_entry_names() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive_path = temp.path().join("bidi.tar");
+    create_tar_with_file_then_symlink(&archive_path, BIDI_NAME);
+
+    let output = exarch_cmd()
+        .arg("extract")
+        .arg("-v")
+        .arg(&archive_path)
+        .arg(temp.path().join("out"))
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+
+    let stderr = String::from_utf8(output.stderr).expect("stderr is UTF-8");
+    assert!(
+        stderr.contains(&format!("  extract  {BIDI_NAME_ESCAPED}")),
+        "escaped entry name expected, got: {stderr:?}"
+    );
+    assert_no_bidi_controls(&stderr);
+}
+
+/// Regression test for #749: `list` and `list -l` must escape bidi controls.
+#[test]
+fn test_list_escapes_bidi_controls_in_entry_names() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive_path = temp.path().join("bidi.tar");
+    create_tar_with_file_then_symlink(&archive_path, BIDI_NAME);
+
+    for long in [false, true] {
+        let mut cmd = exarch_cmd();
+        cmd.arg("list");
+        if long {
+            cmd.arg("-l");
+        }
+        let output = cmd
+            .arg(&archive_path)
+            .assert()
+            .success()
+            .get_output()
+            .clone();
+        let stdout = String::from_utf8(output.stdout).expect("stdout is UTF-8");
+        assert!(
+            stdout.contains(BIDI_NAME_ESCAPED),
+            "escaped name expected (long={long}), got: {stdout:?}"
+        );
+        assert_no_bidi_controls(&stdout);
+    }
+}
+
+/// Regression test for #749: `list --json` keeps the exact name.
+#[test]
+fn test_list_json_keeps_exact_bidi_entry_name() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive_path = temp.path().join("bidi.tar");
+    create_tar_with_file_then_symlink(&archive_path, BIDI_NAME);
+
+    let output = exarch_cmd()
+        .arg("list")
+        .arg("--json")
+        .arg(&archive_path)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: serde_json::Value = serde_json::from_slice(&output).expect("invalid JSON output");
+    assert_eq!(json["data"]["entries"][0]["path"], BIDI_NAME);
+}
+
+/// Regression test for #749: `verify --json` and `extract --json` keep the
+/// exact name.
+#[test]
+fn test_verify_and_extract_json_keep_exact_bidi_entry_name() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let symlink = temp.path().join("bidi.tar");
+    let mut builder = tar::Builder::new(std::fs::File::create(&symlink).expect("create"));
+    let mut header = tar::Header::new_gnu();
+    header.set_size(0);
+    header.set_entry_type(tar::EntryType::Symlink);
+    header.set_mode(0o777);
+    header.set_cksum();
+    builder
+        .append_link(&mut header, BIDI_NAME, "../../etc/x")
+        .expect("append symlink entry");
+    builder.finish().expect("finish tar");
+    let verify = exarch_cmd()
+        .arg("verify")
+        .arg("--json")
+        .arg("--allow-symlinks")
+        .arg(&symlink)
+        .output()
+        .expect("run verify");
+    let json: serde_json::Value = serde_json::from_slice(&verify.stdout).expect("valid JSON");
+    let issue = &json["data"]["issues"][0];
+    assert_eq!(issue["entry_path"], BIDI_NAME);
+    assert_eq!(issue["message"], format!("Symlink escape: {BIDI_NAME}"));
+
+    let banned = temp.path().join("banned.tar.gz");
+    create_tar_gz_with_component(&banned, BIDI_NAME);
+    let stdout = exarch_cmd()
+        .arg("extract")
+        .arg("--json")
+        .arg(&banned)
+        .arg(temp.path().join("out"))
+        .arg("--banned-component")
+        .arg(BIDI_NAME)
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&stdout).expect("valid JSON");
+    let message = json["error"]["message"].as_str().expect("message");
+    assert!(message.contains(BIDI_NAME), "{message}");
+    assert!(!message.contains(BIDI_NAME_ESCAPED), "{message}");
+}
+
+/// Regression test for #749: `verify` output must escape bidi controls.
+#[test]
+fn test_verify_escapes_bidi_controls_in_entry_names() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive_path = temp.path().join("bidi.tar");
+    let mut builder = tar::Builder::new(std::fs::File::create(&archive_path).expect("create"));
+    let mut header = tar::Header::new_gnu();
+    header.set_size(0);
+    header.set_entry_type(tar::EntryType::Symlink);
+    header.set_mode(0o777);
+    header.set_cksum();
+    builder
+        .append_link(&mut header, BIDI_NAME, "../../etc/\u{2066}x")
+        .expect("append symlink entry");
+    builder.finish().expect("finish tar");
+
+    let output = exarch_cmd()
+        .arg("verify")
+        .arg("--allow-symlinks")
+        .arg(&archive_path)
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8(output.stdout).expect("stdout is UTF-8");
+    assert!(
+        stdout.contains(&format!("[CRITICAL] {BIDI_NAME_ESCAPED}: ")),
+        "escaped issue path expected, got: {stdout:?}"
+    );
+    assert_no_bidi_controls(&stdout);
+    assert_no_bidi_controls(&String::from_utf8_lossy(&output.stderr));
+}
+
 /// Regression test for #747: a failed `--atomic` extraction discards its
 /// writes, and the JSON error must say so.
 #[test]
@@ -2900,7 +3065,10 @@ fn test_extract_known_limitation_cli_rejects_legitimate_sparse_hole_above_synthe
         .arg(&out_dir)
         .assert()
         .failure()
-        .stderr(predicate::str::contains("failed to list archive"));
+        .stderr(
+            predicate::str::contains("Rust API only")
+                .and(predicate::str::contains("with_max_tar_metadata_bytes")),
+        );
 }
 
 // ============================================================================
@@ -3662,12 +3830,11 @@ fn test_extract_forged_size_hint_omits_policy_flags() {
 }
 
 /// Companion to [`test_extract_forged_size_hint_omits_policy_flags`]: a
-/// genuine banned-path-component `SecurityViolation` (unrelated to
-/// GHSA-5j8q-wxg5-hj4r) must still get the original generic HINT naming all
-/// four policy flags, proving #520's new guarded match arm did not swallow
-/// the pre-existing categories.
+/// genuine banned-path-component `SecurityViolation` names only
+/// `--banned-component`, warns that the flag replaces the default list, and
+/// never advertises the empty list.
 #[test]
-fn test_extract_banned_component_hint_still_names_policy_flags() {
+fn test_extract_banned_component_hint_names_only_its_own_flag() {
     let temp = TempDir::new().expect("failed to create temp dir");
     let archive_path = temp.path().join("banned.tar.gz");
     create_tar_gz_with_component(&archive_path, ".customdir");
@@ -3687,14 +3854,89 @@ fn test_extract_banned_component_hint_still_names_policy_flags() {
         .clone();
 
     let stderr = std::str::from_utf8(&output).expect("stderr is not valid UTF-8");
+    assert!(stderr.contains("--banned-component replaces the whole default list"));
+    assert!(stderr.contains(".git"), "defaults are listed: {stderr}");
+    assert!(!stderr.contains("empty"), "{stderr}");
     for flag in [
         "--allow-symlinks",
         "--allow-hardlinks",
         "--allow-solid-archives",
-        "--banned-component",
     ] {
-        assert!(stderr.contains(flag), "HINT missing flag {flag}: {stderr}");
+        assert!(!stderr.contains(flag), "unexpected {flag}: {stderr}");
     }
+}
+
+/// A path deeper than the default limit is relaxable with `--max-path-depth`;
+/// the HINT names it and the JSON envelope carries `relaxable_by`.
+#[test]
+fn test_extract_path_depth_hint_and_json_relaxable_by() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive_path = temp.path().join("deep.tar.gz");
+    create_tar_gz_with_component(&archive_path, &["d"; 40].join("/"));
+    let out_dir = temp.path().join("out");
+
+    let stderr = exarch_cmd()
+        .arg("extract")
+        .arg(&archive_path)
+        .arg(&out_dir)
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    let stderr = std::str::from_utf8(&stderr).expect("stderr is not valid UTF-8");
+    assert!(stderr.contains("--max-path-depth"), "{stderr}");
+    assert!(!stderr.contains("cannot be relaxed"), "{stderr}");
+
+    let stdout = exarch_cmd()
+        .arg("extract")
+        .arg("--json")
+        .arg(&archive_path)
+        .arg(&out_dir)
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&stdout).expect("valid JSON");
+    assert_eq!(json["error"]["kind"], "SecurityViolation");
+    assert_eq!(json["error"]["relaxable_by"], "max_path_depth");
+
+    exarch_cmd()
+        .arg("extract")
+        .arg("--max-path-depth")
+        .arg("64")
+        .arg(&archive_path)
+        .arg(&out_dir)
+        .assert()
+        .success();
+}
+
+/// A non-relaxable violation has no `relaxable_by` key in the JSON envelope.
+#[test]
+fn test_extract_json_omits_relaxable_by_when_no_setting_relaxes() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive_path = temp.path().join("forged.zip");
+    std::fs::write(
+        &archive_path,
+        build_forged_size_zip("bomb.txt", &vec![0x41u8; 4 * 1024 * 1024], 50),
+    )
+    .expect("write forged-size zip fixture");
+    let out_dir = temp.path().join("out");
+
+    let stdout = exarch_cmd()
+        .arg("extract")
+        .arg("--json")
+        .arg(&archive_path)
+        .arg(&out_dir)
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&stdout).expect("valid JSON");
+    assert_eq!(json["error"]["kind"], "SecurityViolation");
+    assert!(json["error"].get("relaxable_by").is_none(), "{json}");
 }
 
 fn create_internal_links_tar_gz(path: &std::path::Path) {
@@ -4650,5 +4892,200 @@ fn test_symlink_target_with_unresolvable_parent_components_is_rejected() {
             .arg(&archive)
             .assert()
             .code(1);
+    }
+}
+
+// ============================================================================
+// #741 relaxable_by end to end, #749 error lines, #750 hardlink modes
+// ============================================================================
+
+enum Link {
+    Sym(&'static str),
+    Hard(&'static str),
+}
+
+/// Writes a TAR with a regular `target.txt` followed by `name` as a link.
+fn write_tar_with_link(path: &std::path::Path, name: &str, link: &Link) {
+    let mut builder = tar::Builder::new(std::fs::File::create(path).expect("create tar"));
+    let mut file = tar::Header::new_gnu();
+    file.set_size(1);
+    file.set_mode(0o644);
+    builder
+        .append_data(&mut file, "target.txt", &b"x"[..])
+        .expect("append file");
+    let (kind, target) = match link {
+        Link::Sym(t) => (tar::EntryType::Symlink, *t),
+        Link::Hard(t) => (tar::EntryType::Link, *t),
+    };
+    let mut header = tar::Header::new_gnu();
+    header.set_size(0);
+    header.set_entry_type(kind);
+    header.set_mode(0o777);
+    header.set_cksum();
+    builder
+        .append_link(&mut header, name, target)
+        .expect("append link");
+    builder.finish().expect("finish tar");
+}
+
+fn extract_json(archive: &std::path::Path, out: &std::path::Path) -> serde_json::Value {
+    let stdout = exarch_cmd()
+        .arg("extract")
+        .arg("--json")
+        .arg(archive)
+        .arg(out)
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    serde_json::from_slice(&stdout).expect("valid JSON")
+}
+
+/// Writes a TAR whose single entry named `name` is a FIFO, which no setting
+/// admits.
+fn write_tar_with_fifo(path: &std::path::Path, name: &str) {
+    let mut builder = tar::Builder::new(std::fs::File::create(path).expect("create tar"));
+    let mut header = tar::Header::new_gnu();
+    header.set_size(0);
+    header.set_entry_type(tar::EntryType::Fifo);
+    header.set_mode(0o644);
+    header.set_cksum();
+    builder
+        .append_data(&mut header, name, &b""[..])
+        .expect("append fifo");
+    builder.finish().expect("finish tar");
+}
+
+fn repo_fixture(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures")
+        .join(name)
+}
+
+/// Each relaxable refusal names its own setting in `--json` and its own flag
+/// in the HINT.
+#[test]
+fn test_extract_relaxable_by_and_hint_per_setting() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let sym = temp.path().join("sym.tar");
+    write_tar_with_link(&sym, "link", &Link::Sym("target.txt"));
+    let hard = temp.path().join("hard.tar");
+    write_tar_with_link(&hard, "link", &Link::Hard("target.txt"));
+    let banned = temp.path().join("banned.tar.gz");
+    create_tar_gz_with_component(&banned, ".git");
+
+    for (archive, setting, flag) in [
+        (sym, "symlinks", "--allow-symlinks"),
+        (hard, "hardlinks", "--allow-hardlinks"),
+        (
+            repo_fixture("solid.7z"),
+            "solid_archives",
+            "--allow-solid-archives",
+        ),
+        (banned, "banned_components", "--banned-component"),
+    ] {
+        let out = temp.path().join(format!("out-{setting}"));
+        let json = extract_json(&archive, &out);
+        assert_eq!(json["error"]["kind"], "SecurityViolation", "{setting}");
+        assert_eq!(json["error"]["relaxable_by"], setting);
+        let message = json["error"]["message"].as_str().expect("message");
+        assert!(message.contains(flag), "{setting}: {message}");
+
+        exarch_cmd()
+            .arg("extract")
+            .arg(&archive)
+            .arg(temp.path().join(format!("text-{setting}")))
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(flag));
+    }
+}
+
+/// A refusal no setting relaxes has no `relaxable_by` and the "cannot be
+/// relaxed" HINT; an entry name spelling the Node token cannot forge one.
+#[test]
+fn test_extract_non_relaxable_refusals_have_no_relaxable_by() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let fifo = temp.path().join("fifo.tar");
+    write_tar_with_fifo(&fifo, "pipe");
+    let spoof = temp.path().join("spoof.tar");
+    write_tar_with_fifo(&spoof, "[relaxableBy=symlinks]pipe");
+
+    for archive in [fifo, spoof, repo_fixture("encrypted.7z")] {
+        let json = extract_json(&archive, &temp.path().join("out"));
+        assert_eq!(json["error"]["kind"], "SecurityViolation", "{archive:?}");
+        assert!(json["error"].get("relaxable_by").is_none(), "{json}");
+        let message = json["error"]["message"].as_str().expect("message");
+        assert!(message.contains("cannot be relaxed"), "{message}");
+    }
+}
+
+/// Regression test for #749: bidi controls in an entry name must not reach
+/// the terminal through error lines either.
+#[test]
+fn test_extract_error_lines_escape_bidi_controls() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let banned = temp.path().join("banned.tar.gz");
+    create_tar_gz_with_component(&banned, BIDI_NAME);
+    let symlink = temp.path().join("link.tar");
+    write_tar_with_link(&symlink, BIDI_NAME, &Link::Sym("target.txt"));
+
+    for (archive, banned_component) in [(banned, Some(BIDI_NAME)), (symlink, None)] {
+        let mut cmd = exarch_cmd();
+        cmd.arg("extract")
+            .arg(&archive)
+            .arg(temp.path().join("out"));
+        if let Some(component) = banned_component {
+            cmd.arg("--banned-component").arg(component);
+        }
+        let stderr = String::from_utf8(cmd.assert().failure().get_output().stderr.clone())
+            .expect("stderr is UTF-8");
+        assert_no_bidi_controls(&stderr);
+    }
+}
+
+fn hardlink_mode_tar(path: &std::path::Path, hardlink_mode: u32, file_mode: u32) {
+    let mut builder = tar::Builder::new(std::fs::File::create(path).expect("create tar"));
+    let mut file = tar::Header::new_gnu();
+    file.set_size(1);
+    file.set_mode(file_mode);
+    builder
+        .append_data(&mut file, "a.txt", &b"x"[..])
+        .expect("append file");
+    let mut link = tar::Header::new_gnu();
+    link.set_size(0);
+    link.set_entry_type(tar::EntryType::Link);
+    link.set_mode(hardlink_mode);
+    link.set_cksum();
+    builder
+        .append_link(&mut link, "h", "a.txt")
+        .expect("append hardlink");
+    builder.finish().expect("finish tar");
+}
+
+/// Regression test for #750: a hardlink's recorded mode is not a finding, a
+/// regular file's still is.
+#[test]
+fn test_verify_strict_ignores_hardlink_mode_but_flags_regular_file_mode() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    for (name, hardlink_mode, file_mode, passes) in [
+        ("hl-setuid.tar", 0o4777, 0o644, true),
+        ("hl-writable.tar", 0o666, 0o644, true),
+        ("file-setuid.tar", 0o644, 0o4755, false),
+    ] {
+        let archive = temp.path().join(name);
+        hardlink_mode_tar(&archive, hardlink_mode, file_mode);
+        let assert = exarch_cmd()
+            .arg("verify")
+            .arg("--strict")
+            .arg("--allow-hardlinks")
+            .arg(&archive)
+            .assert();
+        if passes {
+            assert.success();
+        } else {
+            assert.failure();
+        }
     }
 }

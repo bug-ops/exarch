@@ -341,11 +341,11 @@ pub fn normalize_entry_name(name: &str) -> String {
 /// 7z (open, list and extract paths) report encryption identically.
 #[must_use]
 pub fn encrypted_archive_error() -> ArchiveError {
-    ArchiveError::SecurityViolation {
-        reason: "archive is encrypted (password-protected). Encrypted archives are not \
+    ArchiveError::violation(
+        "archive is encrypted (password-protected). Encrypted archives are not \
                  supported; decrypt the archive externally and try again."
             .into(),
-    }
+    )
 }
 
 /// Appends a single aggregated warning for `count` skipped duplicate
@@ -974,9 +974,9 @@ pub fn require_symlink_creation() -> Result<()> {
     if cfg!(unix) {
         Ok(())
     } else {
-        Err(ArchiveError::SecurityViolation {
-            reason: "symlinks are not supported on this platform".into(),
-        })
+        Err(ArchiveError::violation(
+            "symlinks are not supported on this platform".into(),
+        ))
     }
 }
 
@@ -1061,9 +1061,9 @@ pub fn check_symlink_target_size(size: u64) -> Result<()> {
 
 /// The refusal for a stored symlink target of `size` bytes above the limit.
 pub fn symlink_target_too_large(size: u64) -> ArchiveError {
-    ArchiveError::SecurityViolation {
-        reason: format!("symlink target too large: {size} bytes (max {MAX_STORED_SYMLINK_TARGET})"),
-    }
+    ArchiveError::violation(format!(
+        "symlink target too large: {size} bytes (max {MAX_STORED_SYMLINK_TARGET})"
+    ))
 }
 
 /// Decodes the bytes of a stored symlink target.

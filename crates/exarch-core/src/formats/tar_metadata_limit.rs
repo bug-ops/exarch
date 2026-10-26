@@ -363,14 +363,13 @@ pub fn budget_violation(e: &io::Error) -> Option<crate::ArchiveError> {
     let mut current: Option<&(dyn std::error::Error + 'static)> = Some(e);
     while let Some(err) = current {
         if let Some(exceeded) = err.downcast_ref::<TarReadBudgetExceeded>() {
-            return Some(crate::ArchiveError::SecurityViolation {
-                reason: exceeded.to_string(),
-            });
+            return Some(crate::ArchiveError::relaxable_violation(
+                crate::PolicySetting::MaxTarMetadataBytes,
+                exceeded.to_string(),
+            ));
         }
         if let Some(exceeded) = err.downcast_ref::<TarCumulativeSyntheticBudgetExceeded>() {
-            return Some(crate::ArchiveError::SecurityViolation {
-                reason: exceeded.to_string(),
-            });
+            return Some(crate::ArchiveError::violation(exceeded.to_string()));
         }
         if let Some(exceeded) = err.downcast_ref::<DecoderMemoryExceeded>() {
             return Some(crate::ArchiveError::QuotaExceeded {

@@ -332,7 +332,7 @@ fn sevenz_policy_and_target_errors_win_over_the_file_count() {
     let disallowed = SecurityConfig::default().with_max_file_count(1);
     assert_matches!(
         extract_archive(&archive, out.path(), &disallowed),
-        Err(ArchiveError::SecurityViolation { reason }) if reason.contains("symlinks not allowed")
+        Err(ArchiveError::SecurityViolation { reason, .. }) if reason.contains("symlinks not allowed")
     );
     assert!(names_in(out.path()).is_empty());
 

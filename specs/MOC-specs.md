@@ -6,7 +6,7 @@ tags:
   - moc
   - sdd
 created: 2026-05-20
-updated: 2026-10-19
+updated: 2026-10-26
 status: moc
 ---
 
@@ -34,6 +34,7 @@ status: moc
 | 015 | [[015-atomic-force-destination-swap-hardening/spec\|Atomic-Force Destination Swap Hardening]] | tasks | current (v0.6.0, unreleased) | [[015-atomic-force-destination-swap-hardening/tasks\|none open]] |
 | 016 | [[016-sanitized-mode-and-non-exhaustive-enums/spec\|SanitizedMode Newtype and Non-Exhaustive Enum Hardening]] | specify | implemented (post-v0.6.0, unreleased, #554) | n/a (specify-only, retrospective) |
 | 017 | [[017-zip-header-consistency/spec\|ZIP Header Consistency Validation]] | specify | draft (enhancement, P2, #637) | n/a (specify-only) |
+| 018 | [[018-7z-stream-map-panic/spec\|7z Stream Map Validation]] | specify | draft (bug, P1) | n/a (specify-only) |
 
 ## Completed Specs
 

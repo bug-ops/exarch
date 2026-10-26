@@ -313,9 +313,10 @@ pub(crate) fn parse_zip_entry_name(
     if raw.contains('\0') {
         return Ok(ZipEntryName::Deferred {
             path: PathBuf::from(raw),
-            error: ArchiveError::SecurityViolation {
-                reason: format!("path contains null bytes: {}", raw.escape_debug()),
-            },
+            error: ArchiveError::violation(format!(
+                "path contains null bytes: {}",
+                raw.escape_debug()
+            )),
         });
     }
 
@@ -377,10 +378,9 @@ pub(crate) fn zip_node_kind<R: Read>(
     match EntryPath::of(path) {
         EntryPath::Child(_) => Ok(NodeKind::NonDirectory),
         EntryPath::Root(_) if zip_mode_is_symlink(entry.unix_mode()) || entry.size() > 0 => {
-            Err(ArchiveError::SecurityViolation {
-                reason: "archive root entry '.' must be a directory or an empty regular file"
-                    .into(),
-            })
+            Err(ArchiveError::violation(
+                "archive root entry '.' must be a directory or an empty regular file".into(),
+            ))
         }
         EntryPath::Root(_) => Ok(NodeKind::Directory),
     }
@@ -598,9 +598,9 @@ impl<R: Read + Seek> ZipArchive<R> {
             let name = zip_file
                 .name()
                 .map_or_else(|_| format!("<entry {index}>"), std::borrow::Cow::into_owned);
-            return Err(ArchiveError::SecurityViolation {
-                reason: format!("encrypted entry detected: {name}"),
-            });
+            return Err(ArchiveError::violation(format!(
+                "encrypted entry detected: {name}"
+            )));
         }
 
         let path = Self::resolve_entry_path(&zip_file, index, ctx.config)?;
@@ -674,9 +674,9 @@ impl<R: Read + Seek> ZipArchive<R> {
             // ValidatedEntryType::File, never another variant.
             let (safe_path, entry_type, sanitized_mode) = validated.into_parts();
             let ValidatedEntryType::File(permit) = entry_type else {
-                return Err(ArchiveError::SecurityViolation {
-                    reason: "validate_entry(EntryType::File) returned a non-File variant".into(),
-                });
+                return Err(ArchiveError::violation(
+                    "validate_entry(EntryType::File) returned a non-File variant".into(),
+                ));
             };
             Self::extract_file(
                 &mut zip_file,
@@ -1007,9 +1007,9 @@ impl TryFrom<zip::CompressionMethod> for ZipMethod {
             zip::CompressionMethod::Deflated => Ok(Self::Deflate),
             zip::CompressionMethod::Bzip2 => Ok(Self::Bzip2),
             zip::CompressionMethod::Zstd => Ok(Self::Zstd),
-            other => Err(ArchiveError::SecurityViolation {
-                reason: format!("unsupported compression method: {other:?}"),
-            }),
+            other => Err(ArchiveError::violation(format!(
+                "unsupported compression method: {other:?}"
+            ))),
         }
     }
 }
@@ -1641,7 +1641,7 @@ mod tests {
         );
 
         match result {
-            Err(ArchiveError::SecurityViolation { reason }) => {
+            Err(ArchiveError::SecurityViolation { reason, .. }) => {
                 assert!(
                     reason.contains("symlinks not allowed") || reason.contains("symlink"),
                     "error should mention symlinks: {reason}"
@@ -2066,7 +2066,7 @@ mod tests {
                 .unwrap_err();
             assert_matches!(
                 err,
-                ArchiveError::SecurityViolation { ref reason }
+                ArchiveError::SecurityViolation { ref reason, .. }
                     if reason.contains("symlink target too large"),
                 "expected SecurityViolation(symlink target too large), got: {err:?}"
             );
@@ -2093,7 +2093,7 @@ mod tests {
             .unwrap_err();
         assert_matches!(
             err,
-            ArchiveError::SecurityViolation { ref reason }
+            ArchiveError::SecurityViolation { ref reason, .. }
                 if reason.contains("not supported on this platform"),
             "{err:?}"
         );
@@ -2409,7 +2409,7 @@ mod tests {
             panic!("expected error for encrypted ZIP, got Ok");
         };
         match err {
-            ArchiveError::SecurityViolation { reason } => {
+            ArchiveError::SecurityViolation { reason, .. } => {
                 assert!(
                     reason.contains("password") || reason.contains("encrypted"),
                     "expected password/encryption mention in reason: {reason}"
@@ -2455,7 +2455,7 @@ mod tests {
             "archive with encrypted entry at index 3 must be rejected"
         );
         match result.err().unwrap() {
-            ArchiveError::SecurityViolation { reason } => {
+            ArchiveError::SecurityViolation { reason, .. } => {
                 assert!(
                     reason.contains("password") || reason.contains("encrypted"),
                     "unexpected reason: {reason}"
@@ -3091,7 +3091,7 @@ mod tests {
         let result = resolve_zip_entry_path("dir\\c:x", &strict_config());
         assert_matches!(
             result,
-            Err(ArchiveError::SecurityViolation { reason }) if reason == "path component contains ':': c:x"
+            Err(ArchiveError::SecurityViolation { reason, .. }) if reason == "path component contains ':': c:x"
         );
     }
 

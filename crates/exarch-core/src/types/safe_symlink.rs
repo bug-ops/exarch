@@ -1,6 +1,7 @@
 //! Validated safe symlink type.
 
 use crate::ArchiveError;
+use crate::PolicySetting;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::config::Validated;
@@ -134,9 +135,7 @@ impl SafeSymlink {
         // (some platforms would silently create a dangling symlink); reject
         // it explicitly rather than letting it through.
         if target.is_empty() {
-            return Err(ArchiveError::SecurityViolation {
-                reason: "symlink target is empty".into(),
-            });
+            return Err(ArchiveError::violation("symlink target is empty".into()));
         }
 
         // 1.6. Reject null bytes in the target, matching the same check
@@ -145,9 +144,9 @@ impl SafeSymlink {
         // structured `SecurityViolation`. The message intentionally omits
         // the raw target bytes so a NUL byte is never embedded in it.
         if super::safe_path::has_null_bytes(target) {
-            return Err(ArchiveError::SecurityViolation {
-                reason: "symlink target contains null bytes".into(),
-            });
+            return Err(ArchiveError::violation(
+                "symlink target contains null bytes".into(),
+            ));
         }
 
         // H-SEC-2: Reject Windows-specific absolute path components in the
@@ -188,21 +187,23 @@ impl SafeSymlink {
                 }
                 let comp_str = comp.to_string_lossy();
                 if !config.is_path_component_allowed(&comp_str) {
-                    return Err(ArchiveError::SecurityViolation {
-                        reason: format!("symlink target contains banned component: {comp_str}"),
-                    });
+                    return Err(ArchiveError::relaxable_violation(
+                        PolicySetting::BannedComponents,
+                        format!("symlink target contains banned component: {comp_str}"),
+                    ));
                 }
             }
         }
 
         // Validate target depth against max_path_depth
         if target_depth > config.max_path_depth {
-            return Err(ArchiveError::SecurityViolation {
-                reason: format!(
+            return Err(ArchiveError::relaxable_violation(
+                PolicySetting::MaxPathDepth,
+                format!(
                     "symlink target depth {target_depth} exceeds maximum {}",
                     config.max_path_depth
                 ),
-            });
+            ));
         }
 
         // 3. Verify the parent directory chain (not the link itself, which
@@ -264,9 +265,10 @@ pub(crate) fn require_symlinks_allowed(config: &SecurityConfig<Validated>) -> Re
     if config.allowed.symlinks {
         Ok(())
     } else {
-        Err(ArchiveError::SecurityViolation {
-            reason: "symlinks not allowed".into(),
-        })
+        Err(ArchiveError::relaxable_violation(
+            PolicySetting::Symlinks,
+            "symlinks not allowed".into(),
+        ))
     }
 }
 

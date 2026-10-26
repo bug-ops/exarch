@@ -491,11 +491,9 @@ fn verify_entry(
         }
     }
 
-    // Extraction never applies a symlink's mode, so it cannot be unsafe.
-    // TODO(#750): a hardlink's mode is still checked although extraction never
-    // applies it.
+    // Extraction never applies a link entry's own recorded mode.
     if let Some(mode) = entry.mode
-        && !matches!(entry.kind, ManifestEntryKind::Symlink { .. })
+        && !entry.kind.is_link()
         && let Err(e) = check_permissions(&entry.path, mode, config)
     {
         issues.push(VerificationIssue::from_error(&e, Some(entry.path.clone())));
@@ -714,13 +712,11 @@ fn placement_issue(
             issue.entry_path = entry_path;
             return issue;
         }
-        Placement::ReplacesUnderOverwrite => ArchiveError::SecurityViolation {
-            reason: format!(
-                "extraction can fail at {} unless duplicates are skipped: {}",
-                rel.display(),
-                conflict.error
-            ),
-        },
+        Placement::ReplacesUnderOverwrite => ArchiveError::violation(format!(
+            "extraction can fail at {} unless duplicates are skipped: {}",
+            rel.display(),
+            conflict.error
+        )),
         Placement::FailsAlways => {
             let crosses_link = || {
                 rel.ancestors()
@@ -728,9 +724,11 @@ fn placement_issue(
                     .any(|p| tree.is_symlink(&dest.as_path().join(p)).unwrap_or(false))
             };
             if kind.is_link() || crosses_link() {
-                ArchiveError::SecurityViolation {
-                    reason: format!("extraction fails at {}: {}", rel.display(), conflict.error),
-                }
+                ArchiveError::violation(format!(
+                    "extraction fails at {}: {}",
+                    rel.display(),
+                    conflict.error
+                ))
             } else {
                 ArchiveError::Io(conflict.error)
             }
@@ -740,27 +738,24 @@ fn placement_issue(
 }
 
 fn missing_link_target(kind: ManifestEntryType) -> ArchiveError {
-    ArchiveError::SecurityViolation {
-        reason: format!("{} target is missing", kind.as_str().to_ascii_lowercase()),
-    }
+    ArchiveError::violation(format!(
+        "{} target is missing",
+        kind.as_str().to_ascii_lowercase()
+    ))
 }
 
 fn unread_link_target(kind: ManifestEntryType) -> ArchiveError {
-    ArchiveError::SecurityViolation {
-        reason: format!(
-            "{} target was not read, so it cannot be validated",
-            kind.as_str().to_ascii_lowercase()
-        ),
-    }
+    ArchiveError::violation(format!(
+        "{} target was not read, so it cannot be validated",
+        kind.as_str().to_ascii_lowercase()
+    ))
 }
 
 fn unreadable_link_target(kind: ManifestEntryType) -> ArchiveError {
-    ArchiveError::SecurityViolation {
-        reason: format!(
-            "{} target could not be read, so it cannot be validated",
-            kind.as_str().to_ascii_lowercase()
-        ),
-    }
+    ArchiveError::violation(format!(
+        "{} target could not be read, so it cannot be validated",
+        kind.as_str().to_ascii_lowercase()
+    ))
 }
 
 /// The one issue for the symlinks whose targets were not read although
@@ -1069,6 +1064,32 @@ mod tests {
     #[test]
     fn symlink_mode_is_not_a_permission_finding() {
         let manifest = manifest_with_mode("l", symlink_to("t"), 0o777);
+        let report = verify_manifest(&manifest, &link_config(), None).unwrap();
+        assert_eq!(report.status(), VerificationStatus::Pass);
+        assert!(
+            report
+                .issues()
+                .iter()
+                .all(|i| i.category != IssueCategory::InvalidPermissions),
+            "{:?}",
+            report.issues()
+        );
+    }
+
+    #[test]
+    fn hardlink_mode_is_not_a_permission_finding() {
+        let mut manifest = ArchiveManifest::new(crate::formats::detect::ArchiveType::Tar);
+        manifest
+            .add_entry(ArchiveEntry::new(
+                PathBuf::from("t"),
+                ManifestEntryKind::File,
+                0,
+            ))
+            .unwrap();
+        let mut link = ArchiveEntry::new(PathBuf::from("h"), hardlink_to("t"), 0);
+        link.mode = Some(0o777);
+        manifest.add_entry(link).unwrap();
+
         let report = verify_manifest(&manifest, &link_config(), None).unwrap();
         assert_eq!(report.status(), VerificationStatus::Pass);
         assert!(

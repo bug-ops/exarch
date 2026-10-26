@@ -5,6 +5,7 @@ use exarch_core::ArchiveManifest;
 use exarch_core::CreationReport;
 use exarch_core::ExtractionReport;
 use exarch_core::PartialWrites;
+use exarch_core::PolicySetting;
 use exarch_core::VerificationReport;
 use serde::Serialize;
 use std::path::Path;
@@ -56,6 +57,16 @@ impl Serialize for JsonWrites {
     }
 }
 
+/// Serializes a [`PolicySetting`] as its stable identifier.
+#[derive(Debug, Clone, Copy)]
+pub struct JsonPolicySetting(pub PolicySetting);
+
+impl Serialize for JsonPolicySetting {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.0.as_str())
+    }
+}
+
 /// Partial extraction report included in error JSON when extraction was stopped
 /// mid-archive.
 #[derive(Debug, Serialize)]
@@ -76,6 +87,10 @@ pub struct JsonError {
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub partial_report: Option<JsonPartialReport>,
+    /// Stable id of the `SecurityConfig` setting whose current value refused
+    /// the entry; present only for a `SecurityViolation` a setting relaxes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relaxable_by: Option<JsonPolicySetting>,
 }
 
 #[derive(Debug, Serialize)]
@@ -109,6 +124,7 @@ impl<T: Serialize> JsonOutput<T> {
                 kind: kind.into(),
                 message: message.into(),
                 partial_report: None,
+                relaxable_by: None,
             }),
         }
     }
@@ -127,7 +143,19 @@ impl<T: Serialize> JsonOutput<T> {
                 kind: kind.into(),
                 message: message.into(),
                 partial_report: Some(partial_report),
+                relaxable_by: None,
             }),
         }
+    }
+}
+
+impl JsonOutput<()> {
+    /// Records the setting that refused the entry on an error envelope.
+    #[must_use]
+    pub fn with_relaxable_by(mut self, setting: Option<PolicySetting>) -> Self {
+        if let Some(error) = self.error.as_mut() {
+            error.relaxable_by = setting.map(JsonPolicySetting);
+        }
+        self
     }
 }

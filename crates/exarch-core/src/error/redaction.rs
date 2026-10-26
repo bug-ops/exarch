@@ -394,9 +394,7 @@ mod tests {
         let no_path = [
             ArchiveError::ZipBomb(ZipBombDetails::new(ZipBombScope::Entry, 100, 100_000)),
             ArchiveError::InvalidArchive("bad header".to_string()),
-            ArchiveError::SecurityViolation {
-                reason: "test".to_string(),
-            },
+            ArchiveError::violation("test".to_string()),
             ArchiveError::InvalidCompressionLevel { level: 0 },
             ArchiveError::InvalidConfiguration {
                 reason: "test".to_string(),

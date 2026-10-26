@@ -82,7 +82,7 @@ fn extract_rejects_reparse_directory() {
 
     assert_matches!(
         extract_archive(&path, out.path(), &SecurityConfig::default()),
-        Err(ArchiveError::SecurityViolation { reason }) if reason.contains("reparse point")
+        Err(ArchiveError::SecurityViolation { reason, .. }) if reason.contains("reparse point")
     );
     assert_eq!(std::fs::read_dir(out.path()).unwrap().count(), 0);
 }

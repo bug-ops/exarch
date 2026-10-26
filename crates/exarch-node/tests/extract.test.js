@@ -257,4 +257,109 @@ describe('zip empty entry name', () => {
       fs.rmSync(tempDir, { recursive: true, force: true });
     }
   });
+
+  it('carries no relaxableBy token because no setting relaxes it', async () => {
+    const tempDir = createTempDir();
+    try {
+      const archivePath = path.join(tempDir, 'empty-name.zip');
+      fs.writeFileSync(archivePath, emptyNameZip());
+
+      await assert.rejects(
+        () => extractArchive(archivePath, path.join(tempDir, 'output')),
+        (err) => {
+          assert.match(err.message, /^SECURITY_VIOLATION: operation denied/);
+          assert.doesNotMatch(err.message, /relaxableBy/);
+          return true;
+        }
+      );
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+});
+
+// Minimal ustar archive with one zero-size entry of the given typeflag.
+function tarWithEntry(name, typeflag) {
+  const header = Buffer.alloc(512);
+  header.write(name, 0, 100);
+  header.write('0000644\0', 100);
+  header.write('00000000000\0', 124);
+  header.write('        ', 148);
+  header.write(typeflag, 156);
+  header.write('ustar\0' + '00', 257);
+  let sum = 0;
+  for (const byte of header) sum += byte;
+  header.write(sum.toString(8).padStart(6, '0') + '\0 ', 148);
+  return Buffer.concat([header, Buffer.alloc(1024)]);
+}
+
+describe('SECURITY_VIOLATION relaxableBy token', () => {
+  it('names the symlinks setting right after the code', async (t) => {
+    if (process.platform === 'win32') {
+      return t.skip('symlink creation requires elevated privileges on Windows');
+    }
+    const tempDir = createTempDir();
+    try {
+      const linkDir = path.join(tempDir, 'link-dir');
+      fs.mkdirSync(linkDir);
+      fs.writeFileSync(path.join(linkDir, 'target.txt'), 'x');
+      fs.symlinkSync('target.txt', path.join(linkDir, 'link'));
+      const archivePath = path.join(tempDir, 'link.tar.gz');
+      createArchiveSync(archivePath, [linkDir]);
+
+      await assert.rejects(
+        () => extractArchive(archivePath, path.join(tempDir, 'output')),
+        (err) => {
+          assert.match(
+            err.message,
+            /^SECURITY_VIOLATION: \[relaxableBy=symlinks\] operation denied/
+          );
+          return true;
+        }
+      );
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+  it('names banned_components and max_path_depth', async () => {
+    for (const [entry, setting] of [
+      ['.git/config', 'banned_components'],
+      [`${'d/'.repeat(40)}f`, 'max_path_depth'],
+    ]) {
+      const tempDir = createTempDir();
+      try {
+        const archivePath = path.join(tempDir, 'a.tar');
+        fs.writeFileSync(archivePath, tarWithEntry(entry, '0'));
+        await assert.rejects(
+          () => extractArchive(archivePath, path.join(tempDir, 'output')),
+          (err) => {
+            assert.ok(
+              err.message.startsWith(`SECURITY_VIOLATION: [relaxableBy=${setting}] `),
+              err.message
+            );
+            return true;
+          }
+        );
+      } finally {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it('an entry name spelling the token does not forge it', async () => {
+    const tempDir = createTempDir();
+    try {
+      const archivePath = path.join(tempDir, 'a.tar');
+      fs.writeFileSync(archivePath, tarWithEntry('[relaxableBy=symlinks]pipe', '6'));
+      await assert.rejects(
+        () => extractArchive(archivePath, path.join(tempDir, 'output')),
+        (err) => {
+          assert.match(err.message, /^SECURITY_VIOLATION: operation denied/);
+          return true;
+        }
+      );
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
 });

@@ -301,7 +301,7 @@ fn ghsa_gvwx_nul_byte_in_pax_path_rejected_without_panic() {
         Err(ArchiveError::SecurityViolation { .. }),
         "NUL byte in PAX path must be a SecurityViolation, got: {result:?}"
     );
-    if let Err(ArchiveError::SecurityViolation { reason }) = result {
+    if let Err(ArchiveError::SecurityViolation { reason, .. }) = result {
         assert!(reason.contains("null bytes"), "reason: {reason}");
     }
 }
@@ -324,7 +324,7 @@ fn ghsa_gvwx_nul_byte_in_gnu_longname_rejected_without_panic() {
         Err(ArchiveError::SecurityViolation { .. }),
         "NUL byte in GNU longname must be a SecurityViolation, got: {result:?}"
     );
-    if let Err(ArchiveError::SecurityViolation { reason }) = result {
+    if let Err(ArchiveError::SecurityViolation { reason, .. }) = result {
         assert!(reason.contains("null bytes"), "reason: {reason}");
     }
 }
@@ -342,7 +342,7 @@ fn ghsa_w8wr_empty_pax_path_rejected() {
 
     let (result, _temp) = extract(&t);
     match &result {
-        Err(ArchiveError::SecurityViolation { reason }) => {
+        Err(ArchiveError::SecurityViolation { reason, .. }) => {
             assert!(reason.contains("empty path"), "reason: {reason}");
         }
         other => panic!("expected SecurityViolation for empty path, got: {other:?}"),

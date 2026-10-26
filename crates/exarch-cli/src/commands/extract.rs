@@ -751,12 +751,15 @@ fn filter_banned_components(raw: &[String]) -> Vec<String> {
 /// as `list` does whatever the link policy, so such a target fails with its own
 /// error before extraction can say that symlinks are not allowed.
 ///
-/// A ZIP structure rejection keeps its own message and hint, since that is the
-/// error the user has to act on.
+/// A ZIP structure rejection or a security violation keeps its own message and
+/// hint, since that is the error the user has to act on.
 fn list_for_extract(archive: &Path, config: &SecurityConfig) -> Result<ArchiveManifest> {
     let options = ListOptions::default().with_stored_targets(StoredTargets::Skip);
     list_archive_with_options(archive, config, &options).map_err(|err| {
-        if matches!(err, ArchiveError::ZipInconsistency(_)) {
+        if matches!(
+            err,
+            ArchiveError::ZipInconsistency(_) | ArchiveError::SecurityViolation { .. }
+        ) {
             return convert_extraction_error(err, archive, false);
         }
         anyhow::Error::from(err).context(format!("failed to list archive: {}", archive.display()))

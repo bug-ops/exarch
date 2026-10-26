@@ -6,6 +6,7 @@ use super::header::BlockIndex;
 use super::header::SevenZHeader;
 use crate::ArchiveError;
 use crate::EntryCompression;
+use crate::PolicySetting;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::SolidBlock;
@@ -173,9 +174,10 @@ pub(super) fn check_solid_policy(
     if !config.allow_solid_archives {
         return Err(Refused::new(
             UnverifiedReason::SolidPolicy,
-            ArchiveError::SecurityViolation {
-                reason: "solid 7z archives are not allowed (enable allow_solid_archives)".into(),
-            },
+            ArchiveError::relaxable_violation(
+                PolicySetting::SolidArchives,
+                "solid 7z archives are not allowed (enable allow_solid_archives)".into(),
+            ),
         ));
     }
 

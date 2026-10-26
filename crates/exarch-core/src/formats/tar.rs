@@ -830,18 +830,16 @@ pub(crate) fn tar_node(kind: tar::EntryType) -> Result<TarNode> {
         TarType::Directory => Ok(TarNode::Directory),
         TarType::Symlink => Ok(TarNode::Symlink),
         TarType::Link => Ok(TarNode::Hardlink),
-        TarType::Char => Err(ArchiveError::SecurityViolation {
-            reason: "character device entries not supported".into(),
-        }),
-        TarType::Block => Err(ArchiveError::SecurityViolation {
-            reason: "block device entries not supported".into(),
-        }),
-        TarType::Fifo => Err(ArchiveError::SecurityViolation {
-            reason: "FIFO entries not supported".into(),
-        }),
-        _ => Err(ArchiveError::SecurityViolation {
-            reason: format!("unsupported entry type: {kind:?}"),
-        }),
+        TarType::Char => Err(ArchiveError::violation(
+            "character device entries not supported".into(),
+        )),
+        TarType::Block => Err(ArchiveError::violation(
+            "block device entries not supported".into(),
+        )),
+        TarType::Fifo => Err(ArchiveError::violation("FIFO entries not supported".into())),
+        _ => Err(ArchiveError::violation(format!(
+            "unsupported entry type: {kind:?}"
+        ))),
     }
 }
 

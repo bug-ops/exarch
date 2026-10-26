@@ -171,15 +171,13 @@ pub fn compute_archive_path<State>(
     config: &CreationConfig<State>,
 ) -> Result<PathBuf> {
     // Compute relative path from root
-    let relative = source_path
-        .strip_prefix(root)
-        .map_err(|_| ArchiveError::SecurityViolation {
-            reason: format!(
-                "path {} is not under root directory: {}",
-                source_path.display(),
-                root.display()
-            ),
-        })?;
+    let relative = source_path.strip_prefix(root).map_err(|_| {
+        ArchiveError::violation(format!(
+            "path {} is not under root directory: {}",
+            source_path.display(),
+            root.display()
+        ))
+    })?;
 
     // Apply strip_prefix if configured
     if let Some(strip) = &config.strip_prefix

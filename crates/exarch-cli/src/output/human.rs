@@ -111,7 +111,7 @@ impl<O: Write, E: Write> HumanFormatter<O, E> {
 }
 
 /// Renders `error` and its sources joined by `": "`, the shape of `{:#}`, with
-/// control characters escaped.
+/// control and invisible format characters escaped.
 ///
 /// Only the CLI's own error objects keep their line breaks; every other link
 /// of the chain, including `ArchiveError` and `io::Error` sources that carry

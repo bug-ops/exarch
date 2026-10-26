@@ -23,6 +23,7 @@ _IssueSeverity = Literal["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
 _IssueCategory = Literal["Path Traversal", "Symlink Escape", "Hardlink Escape", "Zip Bomb", "Invalid Permissions", "Quota Exceeded", "Security Policy", "Invalid Archive", "Suspicious Path", "Executable File", "Corrupt Data", "Integrity Incomplete", "Header Mismatch", "Duplicate Entry", "Overlapping Entries", "Hidden Entry", "Name Collision", "Archive Note"]  # noqa: E501  # fmt: skip
 _ZipConsistency = Literal["enforce", "ignore"]
 _PartialWrites = Literal["kept", "rolled_back"]
+_PolicySetting = Literal["symlinks", "hardlinks", "solid_archives", "banned_components", "max_path_depth", "windows_reserved_names", "max_tar_metadata_bytes"]  # noqa: E501  # fmt: skip
 
 class SecurityConfig:
     """
@@ -1174,12 +1175,19 @@ class SecurityViolationError(ArchiveError):
         bytes_written: Total bytes written to disk before the error.
         files_skipped: Number of entries skipped due to security checks before the error.
         warnings: Warning messages generated before the error.
+        relaxable_by: The ``SecurityConfig`` setting whose current value refused
+            the entry, or ``None`` when no setting relaxes this refusal. Changing
+            that setting removes this refusal only; the entry can still fail a
+            later check. ``"windows_reserved_names"`` and
+            ``"max_tar_metadata_bytes"`` have no setter in this binding (Rust
+            API only).
     """
 
     files_extracted: int
     bytes_written: int
     files_skipped: int
     warnings: list[str]
+    relaxable_by: _PolicySetting | None
 
 class UnsupportedFormatError(ArchiveError):
     """Archive format not supported."""

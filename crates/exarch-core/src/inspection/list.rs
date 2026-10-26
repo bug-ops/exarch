@@ -347,9 +347,10 @@ fn list_tar_entries<R: std::io::Read>(
             .into_owned();
 
         if list_mode == ListMode::Strict && has_null_bytes(&path) {
-            return Err(ArchiveError::SecurityViolation {
-                reason: format!("path contains null bytes: {}", path.display()),
-            });
+            return Err(ArchiveError::violation(format!(
+                "path contains null bytes: {}",
+                path.display()
+            )));
         }
 
         if contains_traversal(&path, config) {
@@ -919,14 +920,12 @@ fn validate_link_target(target: &Path, kind: LinkKind, mode: ListMode) -> Result
         return Ok(());
     }
     if target.is_empty() {
-        return Err(ArchiveError::SecurityViolation {
-            reason: format!("{kind} target is empty"),
-        });
+        return Err(ArchiveError::violation(format!("{kind} target is empty")));
     }
     if has_null_bytes(target) {
-        return Err(ArchiveError::SecurityViolation {
-            reason: format!("{kind} target contains null bytes"),
-        });
+        return Err(ArchiveError::violation(format!(
+            "{kind} target contains null bytes"
+        )));
     }
     Ok(())
 }
@@ -1398,7 +1397,7 @@ mod tests {
         let config = SecurityConfig::default();
         let result = list_archive(temp_file.path(), &config);
         match result {
-            Err(ArchiveError::SecurityViolation { reason }) => {
+            Err(ArchiveError::SecurityViolation { reason, .. }) => {
                 assert!(
                     reason.contains("password-protected"),
                     "expected 'password-protected' in reason: {reason}"
@@ -2343,7 +2342,7 @@ mod tests {
         let config = SecurityConfig::default();
         let result = list_archive(temp_file.path(), &config);
         match result {
-            Err(ArchiveError::SecurityViolation { reason }) => {
+            Err(ArchiveError::SecurityViolation { reason, .. }) => {
                 assert!(reason.contains("null bytes"), "reason: {reason}");
             }
             other => {
@@ -2362,7 +2361,7 @@ mod tests {
         let config = SecurityConfig::default();
         let result = list_archive(temp_file.path(), &config);
         match result {
-            Err(ArchiveError::SecurityViolation { reason }) => {
+            Err(ArchiveError::SecurityViolation { reason, .. }) => {
                 assert!(reason.contains("null bytes"), "reason: {reason}");
             }
             other => {
@@ -2384,7 +2383,7 @@ mod tests {
         let config = SecurityConfig::default().with_allow_absolute_paths(true);
         let result = list_archive(temp_file.path(), &config);
         match result {
-            Err(ArchiveError::SecurityViolation { reason }) => {
+            Err(ArchiveError::SecurityViolation { reason, .. }) => {
                 assert!(reason.contains("null bytes"), "reason: {reason}");
             }
             other => panic!(
@@ -2408,7 +2407,7 @@ mod tests {
         let config = SecurityConfig::default();
         let result = list_archive(temp_file.path(), &config);
         match result {
-            Err(ArchiveError::SecurityViolation { reason }) => {
+            Err(ArchiveError::SecurityViolation { reason, .. }) => {
                 assert_eq!(reason, "symlink target contains null bytes");
             }
             other => {
@@ -2428,7 +2427,7 @@ mod tests {
         let config = SecurityConfig::default();
         let result = list_archive(temp_file.path(), &config);
         match result {
-            Err(ArchiveError::SecurityViolation { reason }) => {
+            Err(ArchiveError::SecurityViolation { reason, .. }) => {
                 assert_eq!(reason, "symlink target is empty");
             }
             other => panic!("expected SecurityViolation for empty symlink target, got: {other:?}"),
@@ -2446,7 +2445,7 @@ mod tests {
         let config = SecurityConfig::default();
         let result = list_archive(temp_file.path(), &config);
         match result {
-            Err(ArchiveError::SecurityViolation { reason }) => {
+            Err(ArchiveError::SecurityViolation { reason, .. }) => {
                 assert_eq!(reason, "hardlink target contains null bytes");
             }
             other => {
@@ -2466,7 +2465,7 @@ mod tests {
         let config = SecurityConfig::default();
         let result = list_archive(temp_file.path(), &config);
         match result {
-            Err(ArchiveError::SecurityViolation { reason }) => {
+            Err(ArchiveError::SecurityViolation { reason, .. }) => {
                 assert_eq!(reason, "hardlink target is empty");
             }
             other => panic!("expected SecurityViolation for empty hardlink target, got: {other:?}"),
@@ -2484,7 +2483,7 @@ mod tests {
         let config = SecurityConfig::default().validate().expect("valid config");
         let result = list_zip_reader(&mut archive, &config, &mut ListPass::strict());
         match result {
-            Err(ArchiveError::SecurityViolation { reason }) => {
+            Err(ArchiveError::SecurityViolation { reason, .. }) => {
                 assert_eq!(reason, "symlink target contains null bytes");
             }
             other => panic!(
@@ -2504,7 +2503,7 @@ mod tests {
         let config = SecurityConfig::default().validate().expect("valid config");
         let result = list_zip_reader(&mut archive, &config, &mut ListPass::strict());
         match result {
-            Err(ArchiveError::SecurityViolation { reason }) => {
+            Err(ArchiveError::SecurityViolation { reason, .. }) => {
                 assert_eq!(reason, "symlink target is empty");
             }
             other => {

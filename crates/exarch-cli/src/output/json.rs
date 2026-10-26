@@ -177,6 +177,7 @@ impl<W: Write> OutputFormatter for JsonFormatter<W> {
         } else {
             JsonOutput::<()>::error(operation, kind, message)
         };
+        let output = output.with_relaxable_by(extraction_err.and_then(ArchiveError::relaxable_by));
         let _ = self.output(&output);
     }
 
@@ -451,10 +452,21 @@ mod tests {
     }
 
     #[test]
+    fn test_error_envelope_reports_relaxable_by_only_when_set() {
+        let relaxable = JsonOutput::<()>::error("extract", "SecurityViolation", "denied")
+            .with_relaxable_by(Some(exarch_core::PolicySetting::Symlinks));
+        let json = serde_json::to_value(&relaxable).unwrap();
+        assert_eq!(json["error"]["relaxable_by"], "symlinks");
+
+        let fixed = JsonOutput::<()>::error("extract", "SecurityViolation", "denied")
+            .with_relaxable_by(None);
+        let json = serde_json::to_value(&fixed).unwrap();
+        assert!(json["error"].get("relaxable_by").is_none());
+    }
+
+    #[test]
     fn test_extraction_error_kind_security_violation() {
-        let err = ArchiveError::SecurityViolation {
-            reason: "denied".to_string(),
-        };
+        let err = ArchiveError::violation("denied".to_string());
         assert_eq!(error_kind(&err), "SecurityViolation");
     }
 

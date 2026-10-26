@@ -312,7 +312,7 @@ fn present_refuses_unsupported_entries_by_name() {
     let fifo = with_unix_mode(file_with_stream("pipe"), S_IFIFO | 0o644);
     assert_matches!(
         SevenZClass::of(&fifo).present("pipe"),
-        Err(ArchiveError::SecurityViolation { reason })
+        Err(ArchiveError::SecurityViolation { reason, .. })
             if reason.contains("FIFO entries not supported") && reason.contains("pipe")
     );
     let anti = SevenZClass::AntiItem;
@@ -557,7 +557,7 @@ fn test_write_file_direct_forged_size_aborts_and_cleans_up() {
         "streaming past expected_size must abort, got: {result:?}"
     );
     match result {
-        Err(ArchiveError::SecurityViolation { reason }) => {
+        Err(ArchiveError::SecurityViolation { reason, .. }) => {
             assert!(
                 reason.contains("50 bytes"),
                 "error must name the declared ceiling (50), got: {reason:?}"
@@ -1153,7 +1153,7 @@ fn test_solid_archive_rejected_error_message() {
 
     assert!(result.is_err());
     match result.unwrap_err() {
-        ArchiveError::SecurityViolation { reason } => {
+        ArchiveError::SecurityViolation { reason, .. } => {
             assert!(
                 reason.contains("solid") && reason.contains("allow_solid_archives"),
                 "error should mention 'solid' and 'allow_solid_archives', got: {reason}"
@@ -1264,7 +1264,7 @@ fn test_windows_reparse_point_error_message() {
     assert!(result.is_err());
 
     match result.unwrap_err() {
-        ArchiveError::SecurityViolation { reason } => {
+        ArchiveError::SecurityViolation { reason, .. } => {
             assert!(
                 reason.contains("symlink") && reason.contains("link.txt"),
                 "error should mention 'symlink' and entry name, got: {reason}"

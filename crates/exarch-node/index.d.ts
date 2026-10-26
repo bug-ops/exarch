@@ -751,6 +751,16 @@ export interface CreationReport {
  * - `INVALID_ARCHIVE`: Archive is corrupted
  * - `IO_ERROR`: I/O operation failed
  *
+ * A `SECURITY_VIOLATION` that a `SecurityConfig` setting relaxes carries an
+ * anchored token right after the code: `SECURITY_VIOLATION: [relaxableBy=<id>]
+ * operation denied ...`, where `<id>` is one of `symlinks`, `hardlinks`,
+ * `solid_archives`, `banned_components`, `max_path_depth`,
+ * `windows_reserved_names` or `max_tar_metadata_bytes`. Parse it with
+ * `^SECURITY_VIOLATION: \[relaxableBy=([a-z_]+)\]`; the token is absent when
+ * no setting relaxes the refusal. Changing the setting removes that refusal
+ * only; the entry can still fail a later check. `windows_reserved_names` and
+ * `max_tar_metadata_bytes` have no setter in this binding (Rust API only).
+ *
  * When extraction fails after some files were already written (a partial
  * extraction), the message ends with ` | writes=kept, filesExtracted=N,
  * bytesWritten=M, filesSkipped=K, warnings=[...]` appended after the

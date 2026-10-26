@@ -1,6 +1,7 @@
 //! Validated safe path type for archive extraction.
 
 use crate::ArchiveError;
+use crate::PolicySetting;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::config::Validated;
@@ -175,9 +176,7 @@ impl SafePath {
     ) -> Result<Self> {
         // Reject empty paths explicitly
         if path.is_empty() {
-            return Err(ArchiveError::SecurityViolation {
-                reason: EMPTY_PATH_REASON.into(),
-            });
+            return Err(ArchiveError::violation(EMPTY_PATH_REASON.into()));
         }
 
         // Archive root entries ("." or "./") represent the extraction directory
@@ -189,9 +188,10 @@ impl SafePath {
 
         // 1. Check for null bytes
         if has_null_bytes(path) {
-            return Err(ArchiveError::SecurityViolation {
-                reason: format!("path contains null bytes: {}", path.display()),
-            });
+            return Err(ArchiveError::violation(format!(
+                "path contains null bytes: {}",
+                path.display()
+            )));
         }
 
         // 2. Check for absolute paths
@@ -227,9 +227,10 @@ impl SafePath {
                             .map_or_else(|| comp.to_string_lossy(), Cow::Borrowed);
 
                         if !config.is_path_component_allowed(&comp_str) {
-                            return Err(ArchiveError::SecurityViolation {
-                                reason: format!("banned path component: {comp_str}"),
-                            });
+                            return Err(ArchiveError::relaxable_violation(
+                                PolicySetting::BannedComponents,
+                                format!("banned path component: {comp_str}"),
+                            ));
                         }
                     }
 
@@ -266,12 +267,13 @@ impl SafePath {
 
         // Check path depth
         if depth > config.max_path_depth {
-            return Err(ArchiveError::SecurityViolation {
-                reason: format!(
+            return Err(ArchiveError::relaxable_violation(
+                PolicySetting::MaxPathDepth,
+                format!(
                     "path depth {} exceeds maximum {}",
                     depth, config.max_path_depth
                 ),
-            });
+            ));
         }
 
         let final_path = if needs_normalization {
@@ -412,24 +414,24 @@ pub(crate) fn check_windows_component(
         {
             Ok(())
         }
-        Some(WindowsComponentHazard::ReservedDeviceName) => Err(ArchiveError::SecurityViolation {
-            reason: format!("Windows reserved device name: {}", comp.display()),
-        }),
+        Some(WindowsComponentHazard::ReservedDeviceName) => Err(ArchiveError::relaxable_violation(
+            PolicySetting::WindowsReservedNames,
+            format!("Windows reserved device name: {}", comp.display()),
+        )),
         Some(WindowsComponentHazard::StreamSeparator) => {
             Err(stream_separator_error(&comp.display().to_string()))
         }
-        Some(WindowsComponentHazard::TrailingDotOrSpace) => Err(ArchiveError::SecurityViolation {
-            reason: format!("path component ends with '.' or ' ': {}", comp.display()),
-        }),
+        Some(WindowsComponentHazard::TrailingDotOrSpace) => Err(ArchiveError::violation(format!(
+            "path component ends with '.' or ' ': {}",
+            comp.display()
+        ))),
     }
 }
 
 /// The error for a path component containing `:`, which Windows treats as a
 /// drive or alternate-data-stream separator.
 pub(crate) fn stream_separator_error(comp: &str) -> ArchiveError {
-    ArchiveError::SecurityViolation {
-        reason: format!("path component contains ':': {comp}"),
-    }
+    ArchiveError::violation(format!("path component contains ':': {comp}"))
 }
 
 /// Returns `true` if `comp` names a Windows legacy device.

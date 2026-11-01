@@ -134,6 +134,14 @@ fn assert_parity(
             );
             false
         }
+        (Err(host_error), Ok(_))
+            if cfg!(windows)
+                && host_error
+                    .to_string()
+                    .contains("symlinks are not supported on this platform") =>
+        {
+            false
+        }
         (host_result, sink_result) => panic!("host: {host_result:?}, sink: {sink_result:?}"),
     }
 }

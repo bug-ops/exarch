@@ -108,7 +108,11 @@ fn portable_refuses_a_hazard_in_a_directory_component() {
 
 #[test]
 fn portable_reports_windows_hazards_with_their_own_reason() {
-    for (name, needle) in [("C:x", "':'"), ("dot.", "ends with"), ("aux", "reserved")] {
+    // A Windows host rejects a drive prefix before the Portable hazard check.
+    for (name, needle) in [("C:x", "':'"), ("dot.", "ends with"), ("aux", "reserved")]
+        .into_iter()
+        .filter(|(name, _)| !(cfg!(windows) && *name == "C:x"))
+    {
         let message = portable(tar_archive(&[tar_file(name, b"x")]))
             .0
             .unwrap_err()

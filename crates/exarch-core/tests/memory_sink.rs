@@ -27,6 +27,7 @@ use exarch_core::SeekableFormat;
 use exarch_core::SinkOptions;
 use exarch_core::extract_bytes_to_memory;
 use exarch_core::extract_to_sink;
+#[cfg(unix)]
 use exarch_core::utf8_entry_path;
 use sink_support::tar_archive;
 use sink_support::tar_dir;

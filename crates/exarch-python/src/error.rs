@@ -1,11 +1,9 @@
 //! Python exception types for archive extraction errors.
 
 use exarch_core::ArchiveError as CoreError;
-use exarch_core::PartialWrites;
-use exarch_core::QuotaResource as CoreQuotaResource;
-use exarch_core::format_entry_path_for_error;
-use exarch_core::sanitize_io_error_for_error;
-use exarch_core::sanitize_path_for_error;
+use exarch_core::FfiErrorMessage;
+use exarch_core::FfiKind;
+use exarch_core::PartialOutcome;
 use pyo3::create_exception;
 use pyo3::exceptions::PyException;
 use pyo3::exceptions::PyIOError;
@@ -33,142 +31,76 @@ create_exception!(exarch, UnsupportedFormatError, ArchiveError);
 create_exception!(exarch, UnknownFormatError, UnsupportedFormatError);
 create_exception!(exarch, InvalidArchiveError, ArchiveError);
 
-/// Builds a `SecurityViolationError` from a `SecurityViolation`, carrying the
-/// `relaxable_by` attribute when a `SecurityConfig` setting relaxes the
-/// refusal.
-fn security_violation_err(violation: &CoreError) -> PyErr {
-    let err = SecurityViolationError::new_err(violation.to_string());
-    if let Some(setting) = violation.relaxable_by() {
-        Python::attach(|py| {
-            // setattr failures are silenced to preserve the `PyErr` signature;
-            // the class default stays `None`.
-            let _ = err.value(py).setattr("relaxable_by", setting.as_str());
-        });
-    }
-    err
-}
-
 /// Converts Rust extraction errors to Python exceptions.
 ///
-/// This preserves error context and maps each Rust error variant to the
-/// appropriate Python exception type.
+/// The exception class, message and attached attributes all come from
+/// [`CoreError::into_ffi_message`], so the mapping is written once in
+/// `exarch-core`; this function only picks the Python class for each
+/// [`FfiKind`].
 ///
 /// This function is a workaround for Rust's orphan rules, which prevent
 /// implementing `From<CoreError> for PyErr` directly.
 pub fn convert_error(err: CoreError) -> PyErr {
-    match err {
-        CoreError::PathTraversal { path } => {
-            let path_str = format_entry_path_for_error(&path);
-            PathTraversalError::new_err(format!("path traversal detected: {path_str}"))
+    let FfiErrorMessage {
+        kind,
+        description,
+        partial,
+        ..
+    } = err.into_ffi_message();
+    let py_err = match kind {
+        FfiKind::PathTraversal => PathTraversalError::new_err(description),
+        FfiKind::SymlinkEscape => SymlinkEscapeError::new_err(description),
+        FfiKind::HardlinkEscape => HardlinkEscapeError::new_err(description),
+        FfiKind::ZipBomb => ZipBombError::new_err(description),
+        FfiKind::ZipInconsistency => ZipInconsistencyError::new_err(description),
+        FfiKind::InvalidPermissions => InvalidPermissionsError::new_err(description),
+        FfiKind::QuotaExceeded => QuotaExceededError::new_err(description),
+        FfiKind::SecurityViolation { relaxable_by } => {
+            let err = SecurityViolationError::new_err(description);
+            if let Some(setting) = relaxable_by {
+                Python::attach(|py| {
+                    // setattr failures are silenced to preserve the `PyErr`
+                    // signature; the class default stays `None`.
+                    let _ = err.value(py).setattr("relaxable_by", setting.as_str());
+                });
+            }
+            err
         }
-        CoreError::SymlinkEscape { path } => {
-            let path_str = format_entry_path_for_error(&path);
-            SymlinkEscapeError::new_err(format!(
-                "symlink target outside extraction directory: {path_str}"
-            ))
+        FfiKind::InvalidArchive => InvalidArchiveError::new_err(description),
+        FfiKind::Io(kind) => PyErr::from(std::io::Error::new(kind, description)),
+        FfiKind::SourceNotFound | FfiKind::SourceNotAccessible | FfiKind::OutputExists => {
+            PyIOError::new_err(description)
         }
-        CoreError::HardlinkEscape { path } => {
-            let path_str = format_entry_path_for_error(&path);
-            HardlinkEscapeError::new_err(format!(
-                "hardlink target outside extraction directory: {path_str}"
-            ))
+        FfiKind::InvalidCompressionLevel | FfiKind::InvalidConfiguration => {
+            PyValueError::new_err(description)
         }
-        zip_bomb @ CoreError::ZipBomb(_) => ZipBombError::new_err(zip_bomb.to_string()),
-        finding @ CoreError::ZipInconsistency(_) => {
-            ZipInconsistencyError::new_err(finding.to_string())
-        }
-        CoreError::InvalidPermissions { path, mode } => {
-            let path_str = format_entry_path_for_error(&path);
-            InvalidPermissionsError::new_err(format!(
-                "invalid permissions for {path_str}: {mode:#o}"
-            ))
-        }
-        CoreError::QuotaExceeded { resource } => {
-            let msg = match resource {
-                CoreQuotaResource::FileCount { current, max } => {
-                    format!("quota exceeded: file count ({current} > {max})")
-                }
-                CoreQuotaResource::TotalSize { current, max } => {
-                    format!("quota exceeded: total size ({current} > {max})")
-                }
-                CoreQuotaResource::FileSize { size, max } => {
-                    format!("quota exceeded: file size ({size} > {max})")
-                }
-                CoreQuotaResource::IntegerOverflow => {
-                    "quota exceeded: integer overflow in quota tracking".to_string()
-                }
-                CoreQuotaResource::DecoderMemory { max } => {
-                    format!("quota exceeded: decoder memory (> {max} bytes)")
-                }
-                // Forward-compat: a variant added to QuotaResource after this
-                // match was written. #[non_exhaustive] requires this arm to
-                // compile against a newer exarch-core.
-                _ => "quota exceeded".to_string(),
-            };
-            QuotaExceededError::new_err(msg)
-        }
-        violation @ CoreError::SecurityViolation { .. } => security_violation_err(&violation),
-        CoreError::InvalidArchive(msg) => {
-            InvalidArchiveError::new_err(format!("invalid archive: {msg}"))
-        }
-        CoreError::Io(e) => {
-            let msg = sanitize_io_error_for_error(&e);
-            PyErr::from(std::io::Error::new(e.kind(), msg))
-        }
-        CoreError::SourceNotFound { path } => {
-            let path_str = sanitize_path_for_error(&path);
-            PyIOError::new_err(format!("source path not found: {path_str}"))
-        }
-        CoreError::SourceNotAccessible { path } => {
-            let path_str = sanitize_path_for_error(&path);
-            PyIOError::new_err(format!("source path is not accessible: {path_str}"))
-        }
-        CoreError::OutputExists { path } => {
-            let path_str = sanitize_path_for_error(&path);
-            PyIOError::new_err(format!("output file already exists: {path_str}"))
-        }
-        CoreError::InvalidCompressionLevel { level } => {
-            PyValueError::new_err(format!("invalid compression level {level}, must be 1-9"))
-        }
-        CoreError::UnknownFormat { path } => {
-            let path_str = sanitize_path_for_error(&path);
-            UnknownFormatError::new_err(format!("cannot determine archive format from: {path_str}"))
-        }
-        CoreError::InvalidConfiguration { reason } => {
-            PyValueError::new_err(format!("invalid configuration: {reason}"))
-        }
-        CoreError::PartialExtraction {
-            source,
-            report,
-            writes,
-        } => {
-            // Recover the specific exception type (SymlinkEscapeError,
-            // HardlinkEscapeError, etc.) so callers can catch the
-            // precise error. The partial-extraction report
-            // attributes from #210, plus files_skipped/warnings from #508, are
-            // attached to that concrete exception only while the writes remain
-            // on disk; `writes` is always attached.
-            let source_err = convert_error(*source);
-            Python::attach(|py| {
-                let exc_value = source_err.value(py);
-                // setattr failures are silenced to preserve the `PyErr → PyErr`
-                // signature; the workspace forbids
-                // unwrap/expect outside tests.
-                let _ = exc_value.setattr("writes", writes.as_str());
-                if writes == PartialWrites::Kept {
-                    let _ = exc_value.setattr("files_extracted", report.files_extracted);
-                    let _ = exc_value.setattr("bytes_written", report.bytes_written);
-                    let _ = exc_value.setattr("files_skipped", report.files_skipped);
-                    let _ = exc_value.setattr("warnings", report.warnings);
-                }
-                source_err
-            })
-        }
-        // Forward-compat: a variant added to ArchiveError after this match was
+        FfiKind::UnknownFormat => UnknownFormatError::new_err(description),
+        // Forward-compat: a class added to FfiKind after this match was
         // written. #[non_exhaustive] requires this arm to compile against a
         // newer exarch-core.
-        _ => ArchiveError::new_err("unrecognized archive error"),
+        _ => ArchiveError::new_err(description),
+    };
+    if let Some(outcome) = partial {
+        attach_partial(&py_err, outcome);
     }
+    py_err
+}
+
+/// Attaches `writes`, and while the writes remain on disk the report counters
+/// (#210, #508), to the concrete exception of a partial extraction.
+fn attach_partial(err: &PyErr, outcome: PartialOutcome) {
+    Python::attach(|py| {
+        let exc_value = err.value(py);
+        // setattr failures are silenced to preserve the `PyErr` signature; the
+        // workspace forbids unwrap/expect outside tests.
+        let _ = exc_value.setattr("writes", outcome.writes().as_str());
+        if let PartialOutcome::Kept(report) = outcome {
+            let _ = exc_value.setattr("files_extracted", report.files_extracted);
+            let _ = exc_value.setattr("bytes_written", report.bytes_written);
+            let _ = exc_value.setattr("files_skipped", report.files_skipped);
+            let _ = exc_value.setattr("warnings", report.warnings);
+        }
+    });
 }
 
 /// Registers all exception types with the Python module.
@@ -225,6 +157,8 @@ pub fn register_exceptions(m: &Bound<'_, PyModule>) -> PyResult<()> {
 )]
 mod tests {
     use super::*;
+    use exarch_core::PartialWrites;
+    use exarch_core::QuotaResource as CoreQuotaResource;
     use std::path::PathBuf;
 
     /// Asserts the full attacker-supplied path is present in both debug and
@@ -420,8 +354,8 @@ mod tests {
             err_str
         );
         assert!(
-            err_str.contains("file size"),
-            "Expected 'file size' in error message, got: {}",
+            err_str.contains("single file size"),
+            "Expected 'single file size' in error message, got: {}",
             err_str
         );
     }
@@ -942,42 +876,5 @@ mod tests {
 
         let py_err = convert_error(err);
         assert_partial_extraction_report::<SecurityViolationError>(&py_err, 2, 512);
-    }
-
-    /// Regression test for #463: `convert_error` binds `path` per match arm
-    /// and calls the redaction algorithm directly (S2 fix) rather than
-    /// going through `ArchiveError::redacted_path()`, so nothing at compile
-    /// time keeps the two mappings in sync. Cross-checks every path-carrying
-    /// variant's `convert_error` output against `redacted_path()` so the two
-    /// independently-maintained mappings (this file's and core's) cannot
-    /// silently drift apart.
-    #[test]
-    fn test_convert_error_paths_agree_with_redacted_path_dispatcher() {
-        let path = PathBuf::from("some/example/path.txt");
-        let variants: Vec<CoreError> = vec![
-            CoreError::PathTraversal { path: path.clone() },
-            CoreError::SymlinkEscape { path: path.clone() },
-            CoreError::HardlinkEscape { path: path.clone() },
-            CoreError::InvalidPermissions {
-                path: path.clone(),
-                mode: 0o644,
-            },
-            CoreError::SourceNotFound { path: path.clone() },
-            CoreError::SourceNotAccessible { path: path.clone() },
-            CoreError::OutputExists { path: path.clone() },
-            CoreError::UnknownFormat { path },
-        ];
-
-        for err in variants {
-            let expected = err
-                .redacted_path()
-                .expect("variant is known to carry a path");
-            let err_str = convert_error(err).to_string();
-            assert!(
-                err_str.contains(&expected),
-                "convert_error output does not agree with ArchiveError::redacted_path(): \
-                 expected {expected:?} in {err_str:?}"
-            );
-        }
     }
 }

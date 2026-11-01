@@ -6,6 +6,7 @@
 use std::io::Cursor;
 use std::path::PathBuf;
 
+use exarch_core::ErrorCode;
 use exarch_core::ManifestEntryKind;
 use exarch_core::SecurityConfig;
 use exarch_core::extract_archive;
@@ -46,7 +47,7 @@ fn write_archive(dir: &TempDir, bytes: &[u8]) -> PathBuf {
 }
 
 fn assert_root_must_be_directory(err: &exarch_core::ArchiveError) {
-    assert_eq!(err.error_code(), "SECURITY_VIOLATION");
+    assert_eq!(err.error_code(), ErrorCode::SecurityViolation);
     assert!(err.to_string().contains("must be a directory"), "{err}");
 }
 

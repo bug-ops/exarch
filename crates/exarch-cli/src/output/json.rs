@@ -1,8 +1,8 @@
 //! JSON output formatter for machine-readable results.
 
+use super::formatter::JsonId;
 use super::formatter::JsonOutput;
 use super::formatter::JsonPartialReport;
-use super::formatter::JsonWrites;
 use super::formatter::OutputFormatter;
 use crate::error::PartialExtractionContext;
 use anyhow::Result;
@@ -169,7 +169,7 @@ impl<W: Write> OutputFormatter for JsonFormatter<W> {
                     bytes_written: ctx.report.bytes_written,
                     files_skipped: ctx.report.files_skipped,
                     warnings: ctx.report.warnings.clone(),
-                    writes: JsonWrites(ctx.writes),
+                    writes: JsonId(ctx.writes),
                 });
 
         let output = if let Some(pr) = partial_report {
@@ -521,7 +521,7 @@ mod tests {
         };
         // ArchiveError::Display emits "quota exceeded: file count (11 > 10)"
         let display_text = err.to_string();
-        let anyhow_err = convert_extraction_error(err, Path::new("archive.tar.gz"), false);
+        let anyhow_err = convert_extraction_error(err, Path::new("archive.tar.gz"));
         let message = format!("{anyhow_err:#}");
 
         // The context must NOT repeat the Display text verbatim
@@ -544,7 +544,7 @@ mod tests {
         ));
         // ArchiveError::Display emits the ratio info
         let display_text = err.to_string();
-        let anyhow_err = convert_extraction_error(err, Path::new("bomb.zip"), false);
+        let anyhow_err = convert_extraction_error(err, Path::new("bomb.zip"));
         let message = format!("{anyhow_err:#}");
 
         let display_occurrences = message.matches(&display_text).count();
@@ -655,7 +655,7 @@ mod tests {
             report,
             writes: exarch_core::PartialWrites::Kept,
         };
-        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"), false);
+        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"));
         f.format_error("extract", &converted);
         let v = parsed(&f);
         assert_eq!(v["error"]["partial_report"]["files_skipped"], 3);

@@ -14,6 +14,7 @@ use crate::security::fs_view::HostFs;
 use crate::types::DestDir;
 use crate::types::SafePath;
 use crate::types::safe_path::check_windows_component;
+use crate::types::safe_symlink::has_root_or_prefix;
 use crate::types::safe_symlink::resolve_through_symlinks_in;
 
 /// Error for a hardlink whose target is absent when the link is created.
@@ -31,14 +32,9 @@ pub fn hardlink_target_missing(target: &Path) -> ArchiveError {
 /// Returns `SecurityViolation` ("hardlinks not allowed") when hardlinks are
 /// disabled.
 pub fn require_hardlinks_allowed(config: &SecurityConfig<Validated>) -> Result<()> {
-    if config.allowed.hardlinks {
-        Ok(())
-    } else {
-        Err(ArchiveError::relaxable_violation(
-            PolicySetting::Hardlinks,
-            "hardlinks not allowed".into(),
-        ))
-    }
+    config.allowed.hardlinks.ok_or_else(|| {
+        ArchiveError::relaxable_violation(PolicySetting::Hardlinks, "hardlinks not allowed".into())
+    })
 }
 
 /// Tracks hardlink targets during extraction.
@@ -185,12 +181,10 @@ impl HardlinkTracker {
         // H-SEC-2: Reject Windows-specific absolute path components in target
         // (before resolution) This prevents bypasses on Windows like
         // C:\ or \\server\share
-        for component in target.components() {
-            if matches!(component, Component::Prefix(_) | Component::RootDir) {
-                return Err(ArchiveError::HardlinkEscape {
-                    path: link_path.as_path().to_path_buf(),
-                });
-            }
+        if has_root_or_prefix(target) {
+            return Err(ArchiveError::HardlinkEscape {
+                path: link_path.as_path().to_path_buf(),
+            });
         }
 
         if cfg!(windows) {
@@ -508,6 +502,57 @@ mod tests {
             assert_matches!(
                 tracker.validate_hardlink(&link, &PathBuf::from(target), &dest, &config),
                 Err(ArchiveError::SecurityViolation { .. }),
+                "{target}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_hardlink_rejects_slash_unc_target() {
+        let (_temp, dest) = create_test_dest();
+        let mut config = SecurityConfig::default();
+        config.allowed.hardlinks = true;
+        let config = config.validate().expect("valid config");
+        let link = SafePath::validate(&PathBuf::from("link"), &dest, &config).unwrap();
+
+        assert_matches!(
+            HardlinkTracker::new().validate_hardlink(
+                &link,
+                Path::new("//host/share/x"),
+                &dest,
+                &config
+            ),
+            Err(ArchiveError::HardlinkEscape { .. })
+        );
+    }
+
+    /// Regression for GHSA-5qh5-c9fp-66jm: UNC and device-namespace targets
+    /// must be rejected as escapes before any filesystem probe. Unverified
+    /// locally; runs only in the Windows CI job.
+    #[test]
+    #[cfg(windows)]
+    fn test_hardlink_rejects_unc_and_device_targets_windows() {
+        let (_temp, dest) = create_test_dest();
+        let mut config = SecurityConfig::default();
+        config.allowed.hardlinks = true;
+        let config = config.validate().expect("valid config");
+        let link = SafePath::validate(&PathBuf::from("link"), &dest, &config).unwrap();
+
+        for target in [
+            r"\\host\share\x",
+            "//host/share/x",
+            r"\\?\UNC\host\share\x",
+            r"\\.\UNC\host\share\x",
+            r"\??\UNC\host\share\x",
+        ] {
+            assert_matches!(
+                HardlinkTracker::new().validate_hardlink(
+                    &link,
+                    &PathBuf::from(target),
+                    &dest,
+                    &config
+                ),
+                Err(ArchiveError::HardlinkEscape { .. }),
                 "{target}"
             );
         }

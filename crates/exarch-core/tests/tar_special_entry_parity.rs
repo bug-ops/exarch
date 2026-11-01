@@ -4,6 +4,7 @@
 
 #![allow(clippy::unwrap_used)]
 
+use exarch_core::ErrorCode;
 use exarch_core::SecurityConfig;
 use exarch_core::extract_archive;
 use exarch_core::list_archive;
@@ -55,15 +56,19 @@ fn special_entries_are_security_violations_everywhere() {
         let extract = extract_archive(&archive, out.path(), &config).unwrap_err();
         assert_eq!(
             extract.error_code(),
-            "SECURITY_VIOLATION",
+            ErrorCode::SecurityViolation,
             "{name}: {extract}"
         );
         let list = list_archive(&archive, &config).unwrap_err();
-        assert_eq!(list.error_code(), "SECURITY_VIOLATION", "{name}: {list}");
+        assert_eq!(
+            list.error_code(),
+            ErrorCode::SecurityViolation,
+            "{name}: {list}"
+        );
         let verify = verify_archive(&archive, &config).unwrap_err();
         assert_eq!(
             verify.error_code(),
-            "SECURITY_VIOLATION",
+            ErrorCode::SecurityViolation,
             "{name}: {verify}"
         );
     }

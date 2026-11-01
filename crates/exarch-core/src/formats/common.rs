@@ -38,6 +38,7 @@ use crate::config::Validated;
 use crate::copy::CopyBuffer;
 use crate::copy::copy_with_buffer;
 use crate::error::QuotaResource;
+use crate::security::fs_view::Occupant;
 use crate::security::permissions::SanitizedMode;
 use crate::security::quota::QuotaPermit;
 use crate::types::DestDir;
@@ -778,7 +779,10 @@ pub fn extract_file_with_permit<R: Read>(
             *duplicate_skips = duplicate_skips.saturating_add(1);
             return Ok(());
         }
-        Err(e) => return Err(e.into()),
+        Err(e) if skip_duplicates => return Err(e.into()),
+        Err(e) => {
+            return Err(name_occupant_on_open_error(&output_path, safe_path.as_path(), e).into());
+        }
     };
 
     // SECURITY: guards against leaving a partial file on disk when
@@ -950,18 +954,70 @@ pub fn create_symlink(
     }
 }
 
-/// The loop-kind I/O error for a symlink that occupies a path extraction would
-/// overwrite, so the replacement fails closed instead of re-pointing the link
-/// (issues #477, #735).
-#[cfg(unix)]
-pub fn symlink_at_dest_error(rel: &Path) -> std::io::Error {
+/// The I/O error for an earlier entry that occupies a path extraction would
+/// overwrite, so the replacement fails closed and names the entry instead of
+/// surfacing a bare errno (issues #477, #735, #765).
+///
+/// A symlink maps to the loop kind on Unix (what `O_NOFOLLOW` reports) and to
+/// `AlreadyExists` elsewhere; the text is identical on every platform.
+pub fn occupant_at_dest_error(rel: &Path, occupant: Occupant) -> std::io::Error {
+    use std::io::ErrorKind;
+
+    #[cfg(unix)]
+    let symlink_kind = std::io::Error::from_raw_os_error(libc::ELOOP).kind();
+    #[cfg(not(unix))]
+    let symlink_kind = ErrorKind::AlreadyExists;
+
+    let kind = match occupant {
+        Occupant::Directory => ErrorKind::IsADirectory,
+        Occupant::Symlink => symlink_kind,
+        Occupant::File => ErrorKind::AlreadyExists,
+    };
     std::io::Error::new(
-        std::io::Error::from_raw_os_error(libc::ELOOP).kind(),
+        kind,
         format!(
-            "refusing to replace the existing symlink at {}",
+            "refusing to replace the existing {} at {}",
+            occupant.noun(),
             rel.display()
         ),
     )
+}
+
+/// The error for a symlink that occupies a path extraction would overwrite.
+#[cfg(unix)]
+pub fn symlink_at_dest_error(rel: &Path) -> std::io::Error {
+    occupant_at_dest_error(rel, Occupant::Symlink)
+}
+
+/// Replaces `err`, the failure of an overwrite-mode open at `path`, with the
+/// entry-naming [`occupant_at_dest_error`] when the failure is the refusal of
+/// the directory or symlink that holds the path; any other failure (including
+/// a different errno on such a path) is returned unchanged.
+///
+/// Runs only on the error path, via `symlink_metadata`, so the success path
+/// costs nothing.
+fn name_occupant_on_open_error(path: &Path, rel: &Path, err: std::io::Error) -> std::io::Error {
+    refused_occupant(path, &err).map_or(err, |occupant| occupant_at_dest_error(rel, occupant))
+}
+
+/// The occupant of `path` whose presence explains `err`, if any.
+///
+/// A symlink is named only on Unix, where its refusal is identified by the
+/// `ELOOP` error.
+fn refused_occupant(path: &Path, err: &std::io::Error) -> Option<Occupant> {
+    use std::io::ErrorKind;
+
+    let file_type = std::fs::symlink_metadata(path).ok()?.file_type();
+    let dir_refusal = err.kind() == ErrorKind::IsADirectory
+        || (cfg!(not(unix)) && err.kind() == ErrorKind::PermissionDenied);
+    if file_type.is_dir() && dir_refusal {
+        return Some(Occupant::Directory);
+    }
+    #[cfg(unix)]
+    if file_type.is_symlink() && err.raw_os_error() == Some(libc::ELOOP) {
+        return Some(Occupant::Symlink);
+    }
+    None
 }
 
 /// Fails on a host that cannot create symlinks, so a format can refuse a link
@@ -971,13 +1027,9 @@ pub fn symlink_at_dest_error(rel: &Path) -> std::io::Error {
 ///
 /// Returns `SecurityViolation` on a non-Unix host.
 pub fn require_symlink_creation() -> Result<()> {
-    if cfg!(unix) {
-        Ok(())
-    } else {
-        Err(ArchiveError::violation(
-            "symlinks are not supported on this platform".into(),
-        ))
-    }
+    cfg!(unix).ok_or_else(|| {
+        ArchiveError::violation("symlinks are not supported on this platform".into())
+    })
 }
 
 /// The file-type bits of a Unix mode (`S_IFMT`).
@@ -1247,6 +1299,56 @@ mod tests {
     fn sanitized(mode: u32) -> SanitizedMode {
         let config = SecurityConfig::default().validate().expect("valid config");
         sanitize_permissions(mode, &config)
+    }
+
+    #[test]
+    fn occupant_error_names_the_entry_and_the_occupant() {
+        use std::io::ErrorKind;
+
+        #[cfg(unix)]
+        let symlink_kind = std::io::Error::from_raw_os_error(libc::ELOOP).kind();
+        #[cfg(not(unix))]
+        let symlink_kind = ErrorKind::AlreadyExists;
+
+        for (occupant, noun, kind) in [
+            (Occupant::Directory, "directory", ErrorKind::IsADirectory),
+            (Occupant::Symlink, "symlink", symlink_kind),
+            (Occupant::File, "file", ErrorKind::AlreadyExists),
+        ] {
+            let err = occupant_at_dest_error(Path::new("a/b"), occupant);
+            assert_eq!(err.kind(), kind, "{occupant:?}");
+            assert_eq!(
+                err.to_string(),
+                format!("refusing to replace the existing {noun} at a/b")
+            );
+        }
+    }
+
+    #[test]
+    fn open_error_is_renamed_only_when_it_matches_the_occupant() {
+        use std::io::Error;
+        use std::io::ErrorKind;
+
+        let temp = TempDir::new().expect("temp dir");
+        let dir = temp.path().join("d");
+        std::fs::create_dir(&dir).expect("mkdir");
+
+        let refused = Error::from(ErrorKind::IsADirectory);
+        assert_matches!(refused_occupant(&dir, &refused), Some(Occupant::Directory));
+        let unrelated = Error::from(ErrorKind::Other);
+        assert_matches!(refused_occupant(&dir, &unrelated), None);
+        assert_matches!(refused_occupant(&temp.path().join("gone"), &refused), None);
+
+        #[cfg(unix)]
+        {
+            let link = temp.path().join("l");
+            std::os::unix::fs::symlink("t", &link).expect("symlink");
+            let loop_err = Error::from_raw_os_error(libc::ELOOP);
+            assert_matches!(refused_occupant(&link, &loop_err), Some(Occupant::Symlink));
+            assert_matches!(refused_occupant(&link, &unrelated), None);
+            let too_many_files = Error::from_raw_os_error(libc::EMFILE);
+            assert_matches!(refused_occupant(&link, &too_many_files), None);
+        }
     }
 
     #[test]

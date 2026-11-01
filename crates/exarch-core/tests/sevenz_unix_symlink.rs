@@ -19,6 +19,7 @@ use exarch_core::ArchiveError;
 use exarch_core::ArchiveManifest;
 use exarch_core::CheckStatus;
 use exarch_core::DecompressionBudget;
+use exarch_core::ErrorCode;
 #[cfg(unix)]
 use exarch_core::ExtractionOptions;
 use exarch_core::IntegrityCheck;
@@ -863,7 +864,7 @@ fn a_link_over_the_ratio_limit_is_a_zip_bomb_before_any_write() {
 
     let err = extract_archive(&path, out.path(), &config).unwrap_err();
 
-    assert_eq!(err.error_code(), "ZIP_BOMB", "{err}");
+    assert_eq!(err.error_code(), ErrorCode::ZipBomb, "{err}");
     assert!(dir_is_empty(&out));
 }
 

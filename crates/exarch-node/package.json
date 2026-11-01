@@ -31,6 +31,7 @@
   },
   "napi": {
     "binaryName": "exarch-rs",
+    "dtsHeaderFile": "dts-header.d.ts",
     "targets": [
       "x86_64-apple-darwin",
       "aarch64-apple-darwin",
@@ -53,7 +54,8 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^2.6.3",
-    "@napi-rs/cli": "3.10.9"
+    "@napi-rs/cli": "3.10.9",
+    "typescript": "5.9.3"
   },
   "engines": {
     "node": ">= 20"

@@ -8,6 +8,7 @@ use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 
+use exarch_core::ErrorCode;
 use exarch_core::SecurityConfig;
 use exarch_core::extract_archive;
 use exarch_core::list_archive;
@@ -76,7 +77,7 @@ fn assert_empty_name_rejected(archive: &Path) {
         extract_archive(archive, out.path(), &config).unwrap_err(),
     ];
     for err in errors {
-        assert_eq!(err.error_code(), "SECURITY_VIOLATION", "{err}");
+        assert_eq!(err.error_code(), ErrorCode::SecurityViolation, "{err}");
         assert!(err.to_string().contains("empty path not allowed"), "{err}");
     }
     assert!(dir_is_empty(out.path()));

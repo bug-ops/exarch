@@ -1,22 +1,20 @@
 //! Utility functions for Node.js bindings.
 
-use napi::bindgen_prelude::*;
-
-use crate::error::convert_error;
+use exarch_core::ArchiveError as CoreError;
 
 /// Validates a path string for security issues.
 ///
 /// Delegates to the shared boundary check in `exarch_core`; see
 /// [`exarch_core::validate_raw_path_str`] for the exact rules (null bytes,
-/// maximum length). Errors are routed through [`convert_error`] so they
-/// carry the same `SECURITY_VIOLATION:` code prefix as every other
+/// maximum length). The core error is returned unconverted so it reaches
+/// JavaScript with the same `SECURITY_VIOLATION` code as every other
 /// security-policy rejection surfaced by this crate.
 ///
 /// # Errors
 ///
 /// Returns error if path contains null bytes or exceeds maximum length.
-pub fn validate_path(path: &str) -> Result<()> {
-    exarch_core::validate_raw_path_str(path).map_err(convert_error)
+pub fn validate_path(path: &str) -> Result<(), CoreError> {
+    exarch_core::validate_raw_path_str(path)
 }
 
 #[cfg(test)]

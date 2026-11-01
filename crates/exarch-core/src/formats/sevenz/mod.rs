@@ -155,6 +155,7 @@ use crate::inspection::report::IssueCategory;
 use crate::inspection::report::IssueSeverity;
 use crate::inspection::report::VerificationIssue;
 use crate::security::EntryValidator;
+use crate::security::fs_view::Occupant;
 use crate::security::validator::EntryPath;
 use crate::security::validator::ValidatedEntryType;
 use crate::security::zipbomb::validate_entry_compression;
@@ -167,7 +168,6 @@ use decode::decode_archive_entries;
 use links::read_sevenz_link_target;
 use lzma2::DecodeKnobs;
 use std::io;
-use std::io::ErrorKind;
 use std::io::Read;
 use std::io::Seek;
 use std::io::SeekFrom;
@@ -465,26 +465,13 @@ impl<R: Read + Seek> SevenZArchive<R> {
                 if let Some(meta) = &existing
                     && meta.is_dir()
                 {
-                    // Match TAR/ZIP's EISDIR failure (create_file_with_mode
-                    // opening a directory for write) instead of recursively
-                    // deleting the pre-existing directory tree (issue #483).
-                    //
-                    // Stashed as a raw ArchiveError and returned out-of-band
-                    // via `pending_error` instead of `.into()`-converting
-                    // to `sevenz_rust2::Error` here: that round-trip goes
-                    // through `From<sevenz_rust2::Error> for ArchiveError`,
-                    // which stringifies the error and re-derives its
-                    // classification from substring matches (password/
-                    // encrypt/i/o/read/write) on the resulting text,
-                    // collapsing `ErrorKind::IsADirectory` to `Other` and
-                    // risking misclassification as `SecurityViolation` if
-                    // the message text happened to contain a matched
-                    // substring (issue #483 S1). No message text is
-                    // constructed here for the same reason: nothing about
-                    // this error should ever again be at the mercy of that
-                    // heuristic.
-                    *pending_error = Some(ArchiveError::Io(std::io::Error::from(
-                        ErrorKind::IsADirectory,
+                    // Refuse to replace a directory instead of deleting the
+                    // tree (issue #483), like TAR/ZIP. The real error travels
+                    // in `pending_error`; the `Other` below only aborts the
+                    // decoder.
+                    *pending_error = Some(ArchiveError::Io(common::occupant_at_dest_error(
+                        safe_path.as_path(),
+                        Occupant::Directory,
                     )));
                     return Err(sevenz_rust2::Error::Other(
                         "destination path is a pre-existing directory".into(),

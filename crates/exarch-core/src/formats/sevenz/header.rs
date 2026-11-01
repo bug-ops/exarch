@@ -354,6 +354,7 @@ fn is_empty_sevenz_archive<R: Read + Seek>(err: &sevenz_rust2::Error, source: &m
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use std::assert_matches;
     use std::io::Cursor;
 
     const NO_FILES_INFO: &[u8] =
@@ -412,23 +413,23 @@ mod tests {
     fn check_rejects_short_first_file_table() {
         let mut archive = parsed(SIMPLE);
         archive.stream_map.block_first_file_index.clear();
-        assert!(matches!(
+        assert_matches!(
             SevenZHeader::check(archive),
             Err(StreamMapDefect::BlockTableLen {
                 table: BlockTable::FirstFile,
                 ..
             })
-        ));
+        );
     }
 
     #[test]
     fn check_rejects_short_file_table() {
         let mut archive = parsed(SIMPLE);
         archive.stream_map.file_block_index.pop();
-        assert!(matches!(
+        assert_matches!(
             SevenZHeader::check(archive),
             Err(StreamMapDefect::FileTableLen { .. })
-        ));
+        );
     }
 
     #[test]
@@ -436,10 +437,10 @@ mod tests {
         let mut archive = parsed(SIMPLE);
         let blocks = archive.blocks.len();
         archive.stream_map.file_block_index[0] = Some(blocks);
-        assert!(matches!(
+        assert_matches!(
             SevenZHeader::check(archive),
             Err(StreamMapDefect::FileBlockOutOfRange { file: 0, .. })
-        ));
+        );
     }
 
     #[test]
@@ -447,10 +448,10 @@ mod tests {
         let mut archive = parsed(SIMPLE);
         let files = archive.files.len();
         archive.stream_map.block_first_file_index[0] = files;
-        assert!(matches!(
+        assert_matches!(
             SevenZHeader::check(archive),
             Err(StreamMapDefect::BlockSpanOutOfRange { block: 0, .. })
-        ));
+        );
     }
 
     #[test]
@@ -465,10 +466,10 @@ mod tests {
                 pack_streams: 3
             })
         );
-        assert!(matches!(
+        assert_matches!(
             check_pack_spans(&[2, 1], 3),
             Err(StreamMapDefect::PackSpanOutOfRange { block: 1, .. })
-        ));
+        );
     }
 
     #[test]

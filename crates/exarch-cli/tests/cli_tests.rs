@@ -4654,7 +4654,9 @@ fn test_sevenz_unix_symlink_escape_is_blocked() {
         .arg(&out)
         .assert()
         .code(1)
-        .stderr(predicate::str::contains("Symlink escape blocked"));
+        .stderr(predicate::str::contains(
+            "has a link that escapes the destination",
+        ));
     assert!(out.join("a.txt").exists());
     assert!(std::fs::symlink_metadata(out.join("link")).is_err());
 
@@ -4717,7 +4719,7 @@ fn test_extract_atomic_partial_failure_reports_destination_unchanged() {
         .assert()
         .code(1)
         .stderr(
-            predicate::str::contains("Symlink escape blocked")
+            predicate::str::contains("has a link that escapes the destination")
                 .and(predicate::str::contains("destination was left unchanged"))
                 .and(predicate::str::contains("written to disk").not()),
         );
@@ -4885,7 +4887,9 @@ fn test_symlink_target_with_unresolvable_parent_components_is_rejected() {
             .arg(&out)
             .assert()
             .code(1)
-            .stderr(predicate::str::contains("Symlink escape blocked"));
+            .stderr(predicate::str::contains(
+                "has a link that escapes the destination",
+            ));
         exarch_cmd()
             .arg("verify")
             .arg("--allow-symlinks")
@@ -5088,4 +5092,115 @@ fn test_verify_strict_ignores_hardlink_mode_but_flags_regular_file_mode() {
             assert.failure();
         }
     }
+}
+
+fn tar_entries_archive(path: &std::path::Path, entries: &[(&str, tar::EntryType, &str)]) {
+    let mut builder = tar::Builder::new(Vec::new());
+    for (name, kind, link) in entries {
+        let mut header = tar::Header::new_gnu();
+        header.set_mode(0o644);
+        header.set_entry_type(*kind);
+        if link.is_empty() {
+            let data: &[u8] = if *kind == tar::EntryType::Regular {
+                b"x"
+            } else {
+                b""
+            };
+            header.set_size(data.len() as u64);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, name, data)
+                .expect("append entry");
+        } else {
+            header.set_size(0);
+            header.set_cksum();
+            builder
+                .append_link(&mut header, name, link)
+                .expect("append link");
+        }
+    }
+    std::fs::write(path, builder.into_inner().expect("tar")).expect("write");
+}
+
+/// Regression test for #759: an escaping hardlink is refused with a hint that
+/// says no flag relaxes it, not one that suggests the flag already passed.
+#[test]
+fn test_extract_hardlink_escape_hint_says_no_flag_relaxes_it() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("hl.tar");
+    tar_entries_archive(
+        &archive,
+        &[("evil", tar::EntryType::Link, "../../etc/hosts")],
+    );
+    let out = temp.path().join("out");
+
+    exarch_cmd()
+        .arg("extract")
+        .arg("--allow-hardlinks")
+        .arg(&archive)
+        .arg(&out)
+        .assert()
+        .code(1)
+        .stderr(
+            predicate::str::contains("no flag relaxes this check")
+                .and(predicate::str::contains("Use --allow-hardlinks").not()),
+        );
+}
+
+/// Regression test for #765: `extract --force` over a directory an earlier
+/// entry created names the entry and the occupant.
+#[test]
+fn test_extract_force_file_over_directory_names_the_entry() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("file_over_dir.tar");
+    tar_entries_archive(
+        &archive,
+        &[
+            ("d/", tar::EntryType::Directory, ""),
+            ("d", tar::EntryType::Regular, ""),
+        ],
+    );
+    let out = temp.path().join("out");
+
+    exarch_cmd()
+        .arg("extract")
+        .arg("--force")
+        .arg(&archive)
+        .arg(&out)
+        .assert()
+        .code(1)
+        .stderr(
+            predicate::str::contains("refusing to replace the existing directory at d")
+                .and(predicate::str::contains("os error").not()),
+        );
+}
+
+/// Regression test for #765: the same over a symlink, which used to report a
+/// bare "too many levels of symbolic links".
+#[cfg(unix)]
+#[test]
+fn test_extract_force_file_over_symlink_names_the_entry() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("file_over_sym.tar");
+    tar_entries_archive(
+        &archive,
+        &[
+            ("l", tar::EntryType::Symlink, "t"),
+            ("l", tar::EntryType::Regular, ""),
+        ],
+    );
+    let out = temp.path().join("out");
+
+    exarch_cmd()
+        .arg("extract")
+        .arg("--allow-symlinks")
+        .arg("--force")
+        .arg(&archive)
+        .arg(&out)
+        .assert()
+        .code(1)
+        .stderr(
+            predicate::str::contains("refusing to replace the existing symlink at l")
+                .and(predicate::str::contains("os error").not()),
+        );
 }

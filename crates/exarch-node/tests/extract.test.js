@@ -71,10 +71,10 @@ describe('extractArchive (async)', () => {
     assert.ok(report.filesExtracted >= 1);
   });
 
-  // End-to-end regression test for #508: convert_error's PartialExtraction
-  // arm must forward filesSkipped/warnings, not just filesExtracted/
+  // End-to-end regression test for #508: a PartialExtraction error
+  // must forward filesSkipped/warnings, not just filesExtracted/
   // bytesWritten. Exercises the real extraction path (not just
-  // convert_error directly, unlike the Rust-level unit tests) with an
+  // the error builder directly, unlike the Rust-level unit tests) with an
   // archive that both skips an extension-disallowed entry (non-fatal,
   // extraction continues) and then trips a real failure (a file-count
   // quota), so the resulting error carries a non-zero skip count and a
@@ -106,9 +106,13 @@ describe('extractArchive (async)', () => {
     await assert.rejects(
       () => extractArchive(archivePath, outputDir, config),
       (err) => {
-        assert.match(err.message, /^QUOTA_EXCEEDED/);
-        assert.match(err.message, /filesSkipped=1/);
-        assert.match(err.message, /disallowed extension/);
+        assert.strictEqual(err.code, 'QUOTA_EXCEEDED');
+        assert.strictEqual(err.writes, 'kept');
+        assert.strictEqual(err.filesSkipped, 1);
+        assert.ok(
+          err.warnings.some((w) => /disallowed extension/.test(w)),
+          String(err.warnings)
+        );
         return true;
       }
     );
@@ -170,11 +174,15 @@ describe('extractArchive (async)', () => {
     await assert.rejects(
       () => extractArchive(archivePath, outputDir, config),
       (err) => {
-        assert.match(err.message, /^SYMLINK_ESCAPE/);
-        assert.match(err.message, /filesExtracted=0/);
-        assert.match(err.message, /bytesWritten=0/);
-        assert.match(err.message, /filesSkipped=1/);
-        assert.match(err.message, /disallowed extension/);
+        assert.strictEqual(err.code, 'SYMLINK_ESCAPE');
+        assert.strictEqual(err.writes, 'kept');
+        assert.strictEqual(err.filesExtracted, 0);
+        assert.strictEqual(err.bytesWritten, 0);
+        assert.strictEqual(err.filesSkipped, 1);
+        assert.ok(
+          err.warnings.some((w) => /disallowed extension/.test(w)),
+          String(err.warnings)
+        );
         return true;
       }
     );
@@ -251,14 +259,14 @@ describe('zip empty entry name', () => {
       const outputDir = path.join(tempDir, 'output');
       fs.writeFileSync(archivePath, emptyNameZip());
 
-      await assert.rejects(extractArchive(archivePath, outputDir), /SECURITY_VIOLATION/);
+      await assert.rejects(extractArchive(archivePath, outputDir), { code: 'SECURITY_VIOLATION' });
       assert.deepStrictEqual(fs.readdirSync(outputDir), []);
     } finally {
       fs.rmSync(tempDir, { recursive: true, force: true });
     }
   });
 
-  it('carries no relaxableBy token because no setting relaxes it', async () => {
+  it('carries no relaxableBy because no setting relaxes it', async () => {
     const tempDir = createTempDir();
     try {
       const archivePath = path.join(tempDir, 'empty-name.zip');
@@ -267,8 +275,8 @@ describe('zip empty entry name', () => {
       await assert.rejects(
         () => extractArchive(archivePath, path.join(tempDir, 'output')),
         (err) => {
-          assert.match(err.message, /^SECURITY_VIOLATION: operation denied/);
-          assert.doesNotMatch(err.message, /relaxableBy/);
+          assert.strictEqual(err.code, 'SECURITY_VIOLATION');
+          assert.strictEqual(err.relaxableBy, undefined);
           return true;
         }
       );
@@ -293,8 +301,8 @@ function tarWithEntry(name, typeflag) {
   return Buffer.concat([header, Buffer.alloc(1024)]);
 }
 
-describe('SECURITY_VIOLATION relaxableBy token', () => {
-  it('names the symlinks setting right after the code', async (t) => {
+describe('SECURITY_VIOLATION relaxableBy property', () => {
+  it('names the symlinks setting', async (t) => {
     if (process.platform === 'win32') {
       return t.skip('symlink creation requires elevated privileges on Windows');
     }
@@ -310,10 +318,9 @@ describe('SECURITY_VIOLATION relaxableBy token', () => {
       await assert.rejects(
         () => extractArchive(archivePath, path.join(tempDir, 'output')),
         (err) => {
-          assert.match(
-            err.message,
-            /^SECURITY_VIOLATION: \[relaxableBy=symlinks\] operation denied/
-          );
+          assert.strictEqual(err.code, 'SECURITY_VIOLATION');
+          assert.strictEqual(err.relaxableBy, 'symlinks');
+          assert.doesNotMatch(err.message, /relaxableBy/);
           return true;
         }
       );
@@ -333,10 +340,8 @@ describe('SECURITY_VIOLATION relaxableBy token', () => {
         await assert.rejects(
           () => extractArchive(archivePath, path.join(tempDir, 'output')),
           (err) => {
-            assert.ok(
-              err.message.startsWith(`SECURITY_VIOLATION: [relaxableBy=${setting}] `),
-              err.message
-            );
+            assert.strictEqual(err.code, 'SECURITY_VIOLATION');
+            assert.strictEqual(err.relaxableBy, setting);
             return true;
           }
         );
@@ -346,7 +351,7 @@ describe('SECURITY_VIOLATION relaxableBy token', () => {
     }
   });
 
-  it('an entry name spelling the token does not forge it', async () => {
+  it('an entry name spelling the token does not set the property', async () => {
     const tempDir = createTempDir();
     try {
       const archivePath = path.join(tempDir, 'a.tar');
@@ -354,7 +359,8 @@ describe('SECURITY_VIOLATION relaxableBy token', () => {
       await assert.rejects(
         () => extractArchive(archivePath, path.join(tempDir, 'output')),
         (err) => {
-          assert.match(err.message, /^SECURITY_VIOLATION: operation denied/);
+          assert.strictEqual(err.code, 'SECURITY_VIOLATION');
+          assert.strictEqual(err.relaxableBy, undefined);
           return true;
         }
       );

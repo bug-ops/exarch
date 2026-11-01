@@ -379,41 +379,33 @@ pub enum ArchiveError {
     },
 }
 
-/// Fate of the files recorded in a [`ArchiveError::PartialExtraction`] report.
-///
-/// Atomic extraction discards its temporary directory on failure, so the
-/// report's counters describe work that no longer exists on disk. Front ends
-/// use this state to avoid presenting those counters as leftovers.
-///
-/// # Examples
-///
-/// ```
-/// use exarch_core::PartialWrites;
-///
-/// assert_eq!(PartialWrites::Kept.as_str(), "kept");
-/// assert_eq!(PartialWrites::RolledBack.as_str(), "rolled_back");
-/// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum PartialWrites {
-    /// The written files remain in the destination.
-    Kept,
-    /// Atomic extraction discarded the written files with its temporary
-    /// directory.
+closed_enum! {
+    /// Fate of the files recorded in a [`ArchiveError::PartialExtraction`] report.
     ///
-    /// Cleanup is best effort: a failed removal can leave a `.tmp*` sibling
-    /// in the destination's parent directory.
-    RolledBack,
-}
-
-impl PartialWrites {
-    /// Stable identifier used in machine-readable output.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Kept => "kept",
-            Self::RolledBack => "rolled_back",
-        }
+    /// Atomic extraction discards its temporary directory on failure, so the
+    /// report's counters describe work that no longer exists on disk. Front ends
+    /// use this state to avoid presenting those counters as leftovers.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::PartialWrites;
+    ///
+    /// assert_eq!(PartialWrites::Kept.as_str(), "kept");
+    /// assert_eq!(PartialWrites::RolledBack.to_string(), "rolled_back");
+    /// assert_eq!(PartialWrites::ALL.len(), 2);
+    /// ```
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[non_exhaustive]
+    pub enum PartialWrites {
+        /// The written files remain in the destination.
+        Kept => "kept",
+        /// Atomic extraction discarded the written files with its temporary
+        /// directory.
+        ///
+        /// Cleanup is best effort: a failed removal can leave a `.tmp*` sibling
+        /// in the destination's parent directory.
+        RolledBack => "rolled_back",
     }
 }
 
@@ -1117,6 +1109,6 @@ mod tests {
             report: ExtractionReport::new(),
             writes: PartialWrites::Kept,
         };
-        assert_eq!(err.error_code(), "ZIP_BOMB");
+        assert_eq!(err.error_code(), crate::ErrorCode::ZipBomb);
     }
 }

@@ -7,7 +7,10 @@ pub mod types;
 pub mod zip_inconsistency;
 
 pub use io_context::IoContext;
+pub use messages::ErrorCode;
 pub use messages::FfiErrorMessage;
+pub use messages::FfiKind;
+pub use messages::PartialOutcome;
 pub use types::ArchiveError;
 pub use types::CompressionRatio;
 pub use types::PartialWrites;

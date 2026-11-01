@@ -149,12 +149,27 @@ try {
   const result = await extractArchive('archive.tar.gz', '/output');
   console.log(`Success: ${result.filesExtracted} files`);
 } catch (error) {
-  // Error codes: PATH_TRAVERSAL, SYMLINK_ESCAPE, ZIP_BOMB, QUOTA_EXCEEDED, etc.
+  // error.code: PATH_TRAVERSAL, SYMLINK_ESCAPE, ZIP_BOMB, QUOTA_EXCEEDED, etc.
+  if (error.code === 'QUOTA_EXCEEDED' && error.writes === 'kept') {
+    console.error(`Partial extraction left ${error.filesExtracted} files on disk`);
+  }
   console.error(`Extraction failed: ${error.message}`);
 }
 ```
 
-A `SECURITY_VIOLATION` that a `SecurityConfig` setting would admit starts its message with `SECURITY_VIOLATION: [relaxableBy=<id>] ...`, where `<id>` names that setting.
+`error.message` is the human-readable description only. Everything machine-readable is a property, typed as `ExarchError` in `index.d.ts`: a union you can narrow on `writes`, whose `code` is an `ErrorCode` for every member except `ExarchNativeError`, so exclude that member before an exhaustive `switch (error.code)`.
+
+| Property | Set when | Value |
+|----------|----------|-------|
+| `code` | always | An `ErrorCode` such as `'PATH_TRAVERSAL'`, `'QUOTA_EXCEEDED'` or `'SECURITY_VIOLATION'`. A path rejected at the boundary (null byte, too long) is `'SECURITY_VIOLATION'` and a rejected setter value is `'INVALID_CONFIGURATION'`. Errors raised by the binding itself (negative sizes, an internal panic, a failed argument conversion) are `ExarchNativeError`: `code` is napi's status string (`'GenericFailure'`, `'InvalidArg'`, ...), not an `ErrorCode`, and no other property is set. |
+| `relaxableBy` | a `SECURITY_VIOLATION` that a `SecurityConfig` setting would admit | The `PolicySetting` id, for example `'symlinks'` |
+| `writes` | an extraction failed after writing files | `'kept'` or `'rolled_back'` (atomic extraction discarded the output) |
+| `filesExtracted`, `bytesWritten`, `filesSkipped`, `warnings` | `writes === 'kept'` | Counters and a `string[]` |
+| `cause` | a progress callback threw | The exception the callback threw |
+
+If a progress callback throws while the operation itself succeeds, the rejection has `code === 'PROGRESS_CALLBACK_ERROR'` and the counters of what was written (`filesExtracted`... for extraction, `filesAdded` and `bytesWritten` for creation).
+
+**Breaking change:** earlier versions put the code, a `[relaxableBy=<id>]` token and a `| writes=...` suffix into `message`. Read the properties instead.
 
 ## API
 

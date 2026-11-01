@@ -1,717 +1,622 @@
 //! Error conversion for Node.js bindings.
+//!
+//! Every failure that reaches JavaScript is built by one env-taking builder,
+//! [`IntoJsError::into_js_error`]. The rejection or exception is a real JS
+//! `Error` whose `message` is the human-readable description only; the
+//! machine-readable data lives in typed properties:
+//!
+//! - `code`: an [`ErrorCode`] string. Core errors keep their core code
+//!   (`SECURITY_VIOLATION` for a rejected boundary path,
+//!   `INVALID_CONFIGURATION` for a rejected setter value);
+//!   `PROGRESS_CALLBACK_ERROR` is Node-only.
+//! - `relaxableBy`: the [`PolicySetting`] that relaxes a refusal, when one
+//!   does.
+//! - `writes`, `filesExtracted`, `bytesWritten`, `filesSkipped`, `warnings`:
+//!   the fate of a partial extraction.
+//! - `cause`: the exception thrown by a JS progress callback.
+//!
+//! Errors raised by the binding itself (negative sizes, a Rust panic, a join
+//! failure) are not core errors and keep their napi `Status` as `code`.
+
+use std::fmt;
+use std::panic::AssertUnwindSafe;
+use std::panic::catch_unwind;
 
 use exarch_core::ArchiveError as CoreError;
-use exarch_core::PartialWrites;
-use exarch_core::QuotaResource as CoreQuotaResource;
-use exarch_core::format_entry_path_for_error;
-use exarch_core::sanitize_io_error_for_error;
-use exarch_core::sanitize_path_for_error;
-use napi::bindgen_prelude::*;
+use exarch_core::ErrorCode as CoreErrorCode;
+use exarch_core::ExtractionReport as CoreExtractionReport;
+use exarch_core::FfiErrorMessage;
+use exarch_core::FfiKind;
+use exarch_core::PartialOutcome;
+use exarch_core::PolicySetting as CorePolicySetting;
+use exarch_core::creation::CreationReport as CoreCreationReport;
+use napi::Env;
+use napi::Error;
+use napi::Status;
+use napi::bindgen_prelude::JsValue;
+use napi::bindgen_prelude::PromiseRaw;
+use napi::bindgen_prelude::ToNapiValue;
+use napi_derive::napi;
 
-/// Converts Rust extraction errors to JavaScript exceptions.
+use crate::report::saturating_i64;
+use crate::report::saturating_u32;
+
+/// `code` of a rejection caused by a throwing JS progress callback over an
+/// otherwise successful operation. Node-only: core has no such error.
+pub const PROGRESS_CALLBACK_ERROR: &str = "PROGRESS_CALLBACK_ERROR";
+
+/// Value of the `code` property on errors surfaced to JavaScript.
 ///
-/// This preserves error context and maps each Rust error variant to a
-/// JavaScript error with a descriptive message prefixed with an error code.
-///
-/// Error codes enable JavaScript callers to distinguish error types:
-/// - `PATH_TRAVERSAL`: Path traversal attempt detected
-/// - `SYMLINK_ESCAPE`: Symlink points outside extraction directory
-/// - `HARDLINK_ESCAPE`: Hardlink target outside extraction directory
-/// - `ZIP_BOMB`: Potential zip bomb detected
-/// - `ZIP_INCONSISTENCY`: ZIP structure is read differently by different tools
-/// - `INVALID_PERMISSIONS`: File permissions are invalid or unsafe
-/// - `QUOTA_EXCEEDED`: Resource quota exceeded
-/// - `SECURITY_VIOLATION`: Security policy violation
-/// - `UNSUPPORTED_FORMAT`: Archive format not supported
-/// - `INVALID_ARCHIVE`: Archive is corrupted
-/// - `IO_ERROR`: I/O operation failed
-#[expect(
-    clippy::too_many_lines,
-    reason = "one cohesive sequence; splitting it would obscure the order of checks"
-)]
-pub fn convert_error(err: CoreError) -> Error {
-    use std::fmt::Write;
-    match err {
-        CoreError::PathTraversal { path } => {
-            let path_str = format_entry_path_for_error(&path);
-            let mut msg = String::with_capacity(50 + path_str.len());
-            msg.push_str("PATH_TRAVERSAL: path traversal detected: ");
-            msg.push_str(&path_str);
-            Error::new(Status::GenericFailure, msg)
+/// Every core error code, plus `PROGRESS_CALLBACK_ERROR` for a progress
+/// callback that threw over a successful operation.
+// Generates the TypeScript union only: runtime values come from core's
+// `as_str`, and a unit test keeps this list equal to core's plus
+// `PROGRESS_CALLBACK_ERROR`.
+#[napi(string_enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorCode {
+    /// Path traversal attempt detected.
+    #[napi(value = "PATH_TRAVERSAL")]
+    PathTraversal,
+    /// Symlink points outside the extraction directory.
+    #[napi(value = "SYMLINK_ESCAPE")]
+    SymlinkEscape,
+    /// Hardlink target outside the extraction directory.
+    #[napi(value = "HARDLINK_ESCAPE")]
+    HardlinkEscape,
+    /// Potential zip bomb detected.
+    #[napi(value = "ZIP_BOMB")]
+    ZipBomb,
+    /// ZIP structure is read differently by different tools.
+    #[napi(value = "ZIP_INCONSISTENCY")]
+    ZipInconsistency,
+    /// Resource quota exceeded.
+    #[napi(value = "QUOTA_EXCEEDED")]
+    QuotaExceeded,
+    /// Security policy violation.
+    #[napi(value = "SECURITY_VIOLATION")]
+    SecurityViolation,
+    /// Archive is corrupted.
+    #[napi(value = "INVALID_ARCHIVE")]
+    InvalidArchive,
+    /// I/O operation failed.
+    #[napi(value = "IO_ERROR")]
+    IoError,
+    /// File permissions are invalid or unsafe.
+    #[napi(value = "INVALID_PERMISSIONS")]
+    InvalidPermissions,
+    /// Source path not found.
+    #[napi(value = "SOURCE_NOT_FOUND")]
+    SourceNotFound,
+    /// Source path is not accessible.
+    #[napi(value = "SOURCE_NOT_ACCESSIBLE")]
+    SourceNotAccessible,
+    /// Output file already exists.
+    #[napi(value = "OUTPUT_EXISTS")]
+    OutputExists,
+    /// Compression level out of range.
+    #[napi(value = "INVALID_COMPRESSION_LEVEL")]
+    InvalidCompressionLevel,
+    /// Archive format cannot be determined.
+    #[napi(value = "UNKNOWN_FORMAT")]
+    UnknownFormat,
+    /// Configuration value rejected.
+    #[napi(value = "INVALID_CONFIGURATION")]
+    InvalidConfiguration,
+    /// A JS progress callback threw while the operation itself succeeded.
+    #[napi(value = "PROGRESS_CALLBACK_ERROR")]
+    ProgressCallbackError,
+}
+
+/// Value of the `relaxableBy` property: the `SecurityConfig` setting whose
+/// current value refused the entry.
+// Generates the TypeScript union only; runtime values come from core's
+// `as_str`, guarded by a unit test.
+#[napi(string_enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolicySetting {
+    /// `SecurityConfig.setAllowSymlinks`.
+    #[napi(value = "symlinks")]
+    Symlinks,
+    /// `SecurityConfig.setAllowHardlinks`.
+    #[napi(value = "hardlinks")]
+    Hardlinks,
+    /// `SecurityConfig.setAllowSolidArchives`.
+    #[napi(value = "solid_archives")]
+    SolidArchives,
+    /// `SecurityConfig.addBannedComponent`.
+    #[napi(value = "banned_components")]
+    BannedComponents,
+    /// `SecurityConfig.setMaxPathDepth`.
+    #[napi(value = "max_path_depth")]
+    MaxPathDepth,
+    /// Rust API only: no setter in this binding.
+    #[napi(value = "windows_reserved_names")]
+    WindowsReservedNames,
+    /// Rust API only: no setter in this binding.
+    #[napi(value = "max_tar_metadata_bytes")]
+    MaxTarMetadataBytes,
+}
+
+/// Value of the `writes` property: whether a failed extraction left files on
+/// disk.
+// Generates the TypeScript union only; runtime values come from core's
+// `as_str`, guarded by a unit test.
+#[napi(string_enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PartialWrites {
+    /// The written files remain in the destination.
+    #[napi(value = "kept")]
+    Kept,
+    /// Atomic extraction discarded the written files.
+    #[napi(value = "rolled_back")]
+    RolledBack,
+}
+
+/// Any failure on its way to becoming a JS `Error`.
+#[derive(Debug)]
+pub enum Failure {
+    /// An `exarch-core` error, including boundary and setter validation.
+    Core(CoreError),
+    /// A core failure or a throwing JS progress callback.
+    Callback(Box<ProgressCallbackError>),
+    /// An error raised by the binding itself; keeps its napi `Status`.
+    Native(Error),
+}
+
+impl From<CoreError> for Failure {
+    fn from(err: CoreError) -> Self {
+        Self::Core(err)
+    }
+}
+
+impl From<ProgressCallbackError> for Failure {
+    fn from(err: ProgressCallbackError) -> Self {
+        Self::Callback(Box::new(err))
+    }
+}
+
+/// Error from running an extraction or a creation with a JS progress callback:
+/// either the core operation failed, or the JS callback itself threw.
+#[derive(Debug)]
+pub enum ProgressCallbackError {
+    /// The core operation failed. `callback` carries a JS progress callback
+    /// throw observed during the same run, if any.
+    Core {
+        /// The core failure; stays primary so a throwing callback can never
+        /// mask a security error.
+        source: CoreError,
+        /// The JS throw, attached as `cause`.
+        callback: Option<Error>,
+    },
+    /// The JS progress callback threw while the extraction itself succeeded
+    /// (see issue #465).
+    ExtractionCallback {
+        /// The JS throw, attached as `cause`.
+        source: Error,
+        /// What was written to disk.
+        report: CoreExtractionReport,
+    },
+    /// The JS progress callback threw while the creation itself succeeded.
+    CreationCallback {
+        /// The JS throw, attached as `cause`.
+        source: Error,
+        /// The archive that was written.
+        report: CoreCreationReport,
+    },
+}
+
+/// Builds the JS `Error` for a failure on the JS thread.
+pub trait IntoJsError {
+    /// Converts `self` into a napi error carrying the typed properties.
+    ///
+    /// If any napi call needed to build the properties fails, falls back to a
+    /// plain `GenericFailure` error with the same message.
+    fn into_js_error(self, env: Env) -> Error;
+}
+
+/// The `code` an error carries: a core code, or the Node-only
+/// `PROGRESS_CALLBACK_ERROR`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JsCode {
+    Core(CoreErrorCode),
+    ProgressCallback,
+}
+
+impl JsCode {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Core(code) => code.as_str(),
+            Self::ProgressCallback => PROGRESS_CALLBACK_ERROR,
         }
-        CoreError::SymlinkEscape { path } => {
-            let path_str = format_entry_path_for_error(&path);
-            let mut msg = String::with_capacity(70 + path_str.len());
-            msg.push_str("SYMLINK_ESCAPE: symlink target outside extraction directory: ");
-            msg.push_str(&path_str);
-            Error::new(Status::GenericFailure, msg)
-        }
-        CoreError::HardlinkEscape { path } => {
-            let path_str = format_entry_path_for_error(&path);
-            let mut msg = String::with_capacity(70 + path_str.len());
-            msg.push_str("HARDLINK_ESCAPE: hardlink target outside extraction directory: ");
-            msg.push_str(&path_str);
-            Error::new(Status::GenericFailure, msg)
-        }
-        zip_bomb @ CoreError::ZipBomb(_) => {
-            Error::new(Status::GenericFailure, format!("ZIP_BOMB: {zip_bomb}"))
-        }
-        finding @ CoreError::ZipInconsistency(_) => Error::new(
-            Status::GenericFailure,
-            format!("ZIP_INCONSISTENCY: {finding}"),
-        ),
-        CoreError::InvalidPermissions { path, mode } => {
-            let path_str = format_entry_path_for_error(&path);
-            let mut msg = String::with_capacity(60 + path_str.len());
-            // Writing to a String never fails
-            let _ = write!(
-                &mut msg,
-                "INVALID_PERMISSIONS: invalid permissions for {path_str}: {mode:#o}"
-            );
-            Error::new(Status::GenericFailure, msg)
-        }
-        CoreError::QuotaExceeded { resource } => {
-            let mut msg = String::with_capacity(100);
-            // Writing to a String never fails
-            match resource {
-                CoreQuotaResource::FileCount { current, max } => {
-                    let _ = write!(
-                        &mut msg,
-                        "QUOTA_EXCEEDED: quota exceeded: file count ({current} > {max})"
-                    );
-                }
-                CoreQuotaResource::TotalSize { current, max } => {
-                    let _ = write!(
-                        &mut msg,
-                        "QUOTA_EXCEEDED: quota exceeded: total size ({current} > {max})"
-                    );
-                }
-                CoreQuotaResource::FileSize { size, max } => {
-                    let _ = write!(
-                        &mut msg,
-                        "QUOTA_EXCEEDED: quota exceeded: file size ({size} > {max})"
-                    );
-                }
-                CoreQuotaResource::IntegerOverflow => {
-                    msg.push_str(
-                        "QUOTA_EXCEEDED: quota exceeded: integer overflow in quota tracking",
-                    );
-                }
-                CoreQuotaResource::DecoderMemory { max } => {
-                    let _ = write!(
-                        &mut msg,
-                        "QUOTA_EXCEEDED: quota exceeded: decoder memory (> {max} bytes)"
-                    );
-                }
-                // Forward-compat: a variant added to QuotaResource after this
-                // match was written. #[non_exhaustive] requires this arm to
-                // compile against a newer exarch-core.
-                _ => msg.push_str("QUOTA_EXCEEDED: quota exceeded"),
-            }
-            Error::new(Status::GenericFailure, msg)
-        }
-        CoreError::SecurityViolation {
-            reason,
+    }
+}
+
+/// Counters of a failed or call-back-interrupted operation.
+#[derive(Debug)]
+enum Details {
+    None,
+    Extraction(PartialOutcome),
+    Creation {
+        files_added: usize,
+        bytes_written: u64,
+    },
+}
+
+/// Everything about an error except its message, ready to be applied to a JS
+/// error object.
+#[derive(Debug)]
+struct ErrorProps {
+    code: JsCode,
+    relaxable_by: Option<CorePolicySetting>,
+    details: Details,
+    cause: Option<Error>,
+}
+
+/// An error message plus the properties to attach to it.
+#[derive(Debug)]
+struct Described {
+    description: String,
+    props: ErrorProps,
+}
+
+fn describe_core(err: CoreError, cause: Option<Error>) -> Described {
+    let FfiErrorMessage {
+        kind,
+        description,
+        partial,
+        ..
+    } = err.into_ffi_message();
+    let relaxable_by = match &kind {
+        FfiKind::SecurityViolation { relaxable_by } => *relaxable_by,
+        _ => None,
+    };
+    Described {
+        description,
+        props: ErrorProps {
+            code: JsCode::Core(kind.code()),
             relaxable_by,
-            ..
-        } => {
-            let mut msg = String::with_capacity(90 + reason.len());
-            msg.push_str("SECURITY_VIOLATION: ");
-            if let Some(setting) = relaxable_by {
-                let _ = write!(&mut msg, "[relaxableBy={}] ", setting.as_str());
+            details: partial.map_or(Details::None, Details::Extraction),
+            cause,
+        },
+    }
+}
+
+fn describe_callback_over_success(operation: &str, details: Details, source: Error) -> Described {
+    Described {
+        description: format!("progress callback threw after successful {operation}"),
+        props: ErrorProps {
+            code: JsCode::ProgressCallback,
+            relaxable_by: None,
+            details,
+            cause: Some(source),
+        },
+    }
+}
+
+fn describe(failure: Failure) -> Result<Described, Error> {
+    match failure {
+        Failure::Core(err) => Ok(describe_core(err, None)),
+        Failure::Callback(err) => Ok(match *err {
+            ProgressCallbackError::Core { source, callback } => describe_core(source, callback),
+            ProgressCallbackError::ExtractionCallback { source, report } => {
+                describe_callback_over_success(
+                    "extraction",
+                    Details::Extraction(PartialOutcome::Kept(report)),
+                    source,
+                )
             }
-            msg.push_str("operation denied by security policy: ");
-            msg.push_str(&reason);
-            Error::new(Status::GenericFailure, msg)
-        }
-        CoreError::InvalidArchive(archive_msg) => {
-            let mut msg = String::with_capacity(30 + archive_msg.len());
-            msg.push_str("INVALID_ARCHIVE: invalid archive: ");
-            msg.push_str(&archive_msg);
-            Error::new(Status::GenericFailure, msg)
-        }
-        CoreError::Io(e) => {
-            let e_str = sanitize_io_error_for_error(&e);
-            let mut msg = String::with_capacity(10 + e_str.len());
-            msg.push_str("IO_ERROR: ");
-            msg.push_str(&e_str);
-            Error::new(Status::GenericFailure, msg)
-        }
-        CoreError::SourceNotFound { path } => {
-            let path_str = sanitize_path_for_error(&path);
-            let mut msg = String::with_capacity(40 + path_str.len());
-            msg.push_str("SOURCE_NOT_FOUND: source path not found: ");
-            msg.push_str(&path_str);
-            Error::new(Status::GenericFailure, msg)
-        }
-        CoreError::SourceNotAccessible { path } => {
-            let path_str = sanitize_path_for_error(&path);
-            let mut msg = String::with_capacity(60 + path_str.len());
-            msg.push_str("SOURCE_NOT_ACCESSIBLE: source path is not accessible: ");
-            msg.push_str(&path_str);
-            Error::new(Status::GenericFailure, msg)
-        }
-        CoreError::OutputExists { path } => {
-            let path_str = sanitize_path_for_error(&path);
-            let mut msg = String::with_capacity(50 + path_str.len());
-            msg.push_str("OUTPUT_EXISTS: output file already exists: ");
-            msg.push_str(&path_str);
-            Error::new(Status::GenericFailure, msg)
-        }
-        CoreError::InvalidCompressionLevel { level } => {
-            let mut msg = String::with_capacity(60);
-            let _ = write!(
-                &mut msg,
-                "INVALID_COMPRESSION_LEVEL: invalid compression level {level}, must be 1-9"
-            );
-            Error::new(Status::GenericFailure, msg)
-        }
-        CoreError::UnknownFormat { path } => {
-            let path_str = sanitize_path_for_error(&path);
-            let mut msg = String::with_capacity(60 + path_str.len());
-            msg.push_str("UNKNOWN_FORMAT: cannot determine archive format from: ");
-            msg.push_str(&path_str);
-            Error::new(Status::GenericFailure, msg)
-        }
-        CoreError::InvalidConfiguration { reason } => {
-            let mut msg = String::with_capacity(40 + reason.len());
-            msg.push_str("INVALID_CONFIGURATION: invalid configuration: ");
-            msg.push_str(&reason);
-            Error::new(Status::GenericFailure, msg)
-        }
-        CoreError::PartialExtraction {
-            source,
-            report,
-            writes,
-        } => {
-            // Preserve the specific error code (SYMLINK_ESCAPE, QUOTA_EXCEEDED,
-            // etc.) from the inner source so JavaScript callers can
-            // distinguish the error type. The partial-extraction
-            // report fields from #210, plus filesSkipped/warnings from
-            // #508, are appended while the writes remain on disk; a
-            // rolled-back atomic run reports only its state.
-            let inner = convert_error(*source);
-            let mut msg = String::with_capacity(inner.reason.len() + 112);
-            msg.push_str(&inner.reason);
-            let _ = write!(&mut msg, " | writes={}", writes.as_str());
-            if writes == PartialWrites::Kept {
-                let _ = write!(
-                    &mut msg,
-                    ", filesExtracted={}, bytesWritten={}, filesSkipped={}, warnings={:?}",
-                    report.files_extracted,
-                    report.bytes_written,
-                    report.files_skipped,
-                    report.warnings
-                );
+            ProgressCallbackError::CreationCallback { source, report } => {
+                describe_callback_over_success(
+                    "creation",
+                    Details::Creation {
+                        files_added: report.files_added,
+                        bytes_written: report.bytes_written,
+                    },
+                    source,
+                )
             }
-            Error::new(Status::GenericFailure, msg)
+        }),
+        Failure::Native(err) => Err(err),
+    }
+}
+
+fn apply(env: Env, described: Described) -> napi::Result<Error> {
+    let Described { description, props } = described;
+    let mut obj = env.create_error(Error::new(Status::GenericFailure, description))?;
+    obj.set("code", props.code.as_str())?;
+    if let Some(setting) = props.relaxable_by {
+        obj.set("relaxableBy", setting.as_str())?;
+    }
+    match props.details {
+        Details::None => {}
+        Details::Extraction(outcome) => {
+            obj.set("writes", outcome.writes().as_str())?;
+            if let PartialOutcome::Kept(report) = outcome {
+                obj.set("filesExtracted", saturating_u32(report.files_extracted))?;
+                obj.set("bytesWritten", saturating_i64(report.bytes_written))?;
+                obj.set("filesSkipped", saturating_u32(report.files_skipped))?;
+                obj.set("warnings", report.warnings)?;
+            }
         }
-        // Forward-compat: a variant added to ArchiveError after this match was
-        // written. #[non_exhaustive] requires this arm to compile against a
-        // newer exarch-core.
-        _ => Error::new(
-            Status::GenericFailure,
-            "UNKNOWN: unrecognized archive error",
-        ),
+        Details::Creation {
+            files_added,
+            bytes_written,
+        } => {
+            obj.set("filesAdded", saturating_u32(files_added))?;
+            obj.set("bytesWritten", saturating_i64(bytes_written))?;
+        }
+    }
+    if let Some(cause) = props.cause {
+        obj.set("cause", cause)?;
+    }
+    Ok(Error::from_unknown_without_coercion(obj.to_unknown()))
+}
+
+impl IntoJsError for Failure {
+    fn into_js_error(self, env: Env) -> Error {
+        match describe(self) {
+            Ok(described) => {
+                let fallback = Error::new(Status::GenericFailure, described.description.clone());
+                apply(env, described).unwrap_or(fallback)
+            }
+            Err(native) => native,
+        }
+    }
+}
+
+impl IntoJsError for CoreError {
+    fn into_js_error(self, env: Env) -> Error {
+        Failure::Core(self).into_js_error(env)
+    }
+}
+
+impl IntoJsError for ProgressCallbackError {
+    fn into_js_error(self, env: Env) -> Error {
+        Failure::from(self).into_js_error(env)
+    }
+}
+
+/// Runs `f`, converting a Rust panic into a [`Failure::Native`] instead of
+/// letting it unwind across the FFI boundary (see issue #395).
+///
+/// `context` is interpolated into the message as "Internal panic during
+/// {context}".
+pub fn catch_panic<T>(context: &str, f: impl FnOnce() -> Result<T, Failure>) -> Result<T, Failure> {
+    catch_unwind(AssertUnwindSafe(f)).unwrap_or_else(|_| {
+        Err(Failure::Native(Error::from_reason(format!(
+            "Internal panic during {context}"
+        ))))
+    })
+}
+
+/// Runs `f` on the JS thread with panic safety and converts a failure into the
+/// napi error JavaScript receives.
+///
+/// # Errors
+///
+/// Returns the converted [`Failure`].
+pub fn run_sync<T>(
+    env: Env,
+    context: &str,
+    f: impl FnOnce() -> Result<T, Failure>,
+) -> napi::Result<T> {
+    catch_panic(context, f).map_err(|failure| failure.into_js_error(env))
+}
+
+/// Runs `work` on the tokio blocking pool and returns a promise that resolves
+/// with `finish(work's value)` or rejects with the failure converted on the JS
+/// thread.
+///
+/// Nothing fallible runs before the spawn: boundary validation belongs inside
+/// `work`, so its errors reject the promise like every other failure.
+///
+/// # Errors
+///
+/// Returns an error only if the promise itself cannot be created.
+pub fn spawn_blocking_promise<'env, T, U>(
+    env: &'env Env,
+    context: &'static str,
+    work: impl FnOnce() -> Result<T, Failure> + Send + 'static,
+    finish: impl FnOnce(T) -> napi::Result<U> + 'static,
+) -> napi::Result<PromiseRaw<'env, U>>
+where
+    T: Send + 'static,
+    U: ToNapiValue,
+{
+    env.spawn_future_with_callback(
+        async move {
+            let outcome = tokio::task::spawn_blocking(move || catch_panic(context, work))
+                .await
+                .unwrap_or_else(|join_err| {
+                    Err(Failure::Native(Error::from_reason(format!(
+                        "task join error: {join_err}"
+                    ))))
+                });
+            Ok::<_, Error>(outcome)
+        },
+        move |env, outcome| match outcome {
+            Ok(value) => finish(value),
+            Err(failure) => Err(failure.into_js_error(*env)),
+        },
+    )
+}
+
+impl fmt::Display for Failure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Core(err) => write!(f, "{err}"),
+            Self::Callback(err) => match err.as_ref() {
+                ProgressCallbackError::Core { source, .. } => write!(f, "{source}"),
+                ProgressCallbackError::ExtractionCallback { .. } => {
+                    f.write_str("progress callback threw after successful extraction")
+                }
+                ProgressCallbackError::CreationCallback { .. } => {
+                    f.write_str("progress callback threw after successful creation")
+                }
+            },
+            Self::Native(err) => write!(f, "{}", err.reason),
+        }
     }
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use super::*;
+    use std::assert_matches;
+    use std::collections::BTreeSet;
     use std::path::PathBuf;
 
-    /// Asserts the full attacker-supplied path is present in both debug and
-    /// release builds — `PathTraversal` carries an archive-relative,
-    /// attacker-authored path and is never redacted (see #462).
+    use exarch_core::PartialWrites as CorePartialWrites;
+    use exarch_core::QuotaResource;
+
+    use super::*;
+
+    const INDEX_DTS: &str = include_str!("../index.d.ts");
+
+    /// Values of the string-literal union declared as `export type {name} =
+    /// ...` in the generated `index.d.ts`.
+    fn dts_union(name: &str) -> BTreeSet<String> {
+        let prefix = format!("export type {name} = ");
+        let line = INDEX_DTS
+            .lines()
+            .find_map(|line| line.strip_prefix(prefix.as_str()))
+            .unwrap_or_else(|| panic!("index.d.ts has no `{prefix}` line; rebuild the bindings"));
+        line.split('|')
+            .map(|literal| literal.trim().trim_matches('\'').to_string())
+            .collect()
+    }
+
     #[test]
-    fn test_path_traversal_conversion() {
-        let err = CoreError::PathTraversal {
+    fn test_error_code_union_matches_core_plus_progress_callback() {
+        let mut expected: BTreeSet<String> = CoreErrorCode::ALL
+            .iter()
+            .map(|code| code.as_str().to_string())
+            .collect();
+        expected.insert(PROGRESS_CALLBACK_ERROR.to_string());
+        assert_eq!(dts_union("ErrorCode"), expected);
+    }
+
+    #[test]
+    fn test_policy_setting_union_matches_core() {
+        let expected: BTreeSet<String> = CorePolicySetting::ALL
+            .iter()
+            .map(|setting| setting.as_str().to_string())
+            .collect();
+        assert_eq!(dts_union("PolicySetting"), expected);
+    }
+
+    #[test]
+    fn test_partial_writes_union_matches_core() {
+        let expected: BTreeSet<String> = CorePartialWrites::ALL
+            .iter()
+            .map(|writes| writes.as_str().to_string())
+            .collect();
+        assert_eq!(dts_union("PartialWrites"), expected);
+    }
+
+    fn described(err: CoreError) -> Described {
+        describe(Failure::Core(err)).expect("core errors are always described")
+    }
+
+    /// `PathTraversal` carries an archive-relative, attacker-authored path and
+    /// is never redacted (see #462).
+    #[test]
+    fn test_path_traversal_keeps_full_path_without_code_prefix() {
+        let d = described(CoreError::PathTraversal {
             path: PathBuf::from("../etc/passwd"),
-        };
-        let napi_err = convert_error(err);
-        let err_str = napi_err.to_string();
-        assert!(err_str.contains("PATH_TRAVERSAL"));
-        assert!(err_str.contains("path traversal"));
-        assert!(err_str.contains("../etc/passwd"));
-    }
-
-    /// Asserts the full path is present in both debug and release builds —
-    /// `SymlinkEscape` carries an archive-relative, attacker-authored path
-    /// and is never redacted (see #462).
-    #[test]
-    fn test_symlink_escape_conversion() {
-        let err = CoreError::SymlinkEscape {
-            path: PathBuf::from("/etc/passwd"),
-        };
-        let napi_err = convert_error(err);
-        let err_str = napi_err.to_string();
-        assert!(err_str.contains("SYMLINK_ESCAPE"));
-        assert!(err_str.contains("symlink target outside"));
-        assert!(err_str.contains("/etc/passwd"));
-    }
-
-    /// Asserts the full path is present in both debug and release builds —
-    /// `HardlinkEscape` carries an archive-relative, attacker-authored path
-    /// and is never redacted (see #462).
-    #[test]
-    fn test_hardlink_escape_conversion() {
-        let err = CoreError::HardlinkEscape {
-            path: PathBuf::from("/etc/shadow"),
-        };
-        let napi_err = convert_error(err);
-        let err_str = napi_err.to_string();
-        assert!(err_str.contains("HARDLINK_ESCAPE"));
-        assert!(err_str.contains("hardlink target outside"));
-        assert!(err_str.contains("/etc/shadow"));
+        });
+        assert_eq!(d.props.code.as_str(), "PATH_TRAVERSAL");
+        assert!(d.description.contains("../etc/passwd"), "{d:?}");
+        assert!(!d.description.contains("PATH_TRAVERSAL"), "{d:?}");
     }
 
     #[test]
-    fn test_zip_bomb_conversion() {
-        let err = CoreError::ZipBomb(exarch_core::ZipBombDetails::new(
+    fn test_zip_bomb_description_has_details() {
+        let d = described(CoreError::ZipBomb(exarch_core::ZipBombDetails::new(
             exarch_core::ZipBombScope::Entry,
             1000,
             1_000_000,
-        ));
-        let napi_err = convert_error(err);
-        let err_str = napi_err.to_string();
-        assert!(err_str.contains("ZIP_BOMB"));
-        assert!(err_str.contains("zip bomb"));
-        assert!(err_str.contains("1000"));
+        )));
+        assert_eq!(d.props.code.as_str(), "ZIP_BOMB");
+        assert!(d.description.contains("1000"), "{d:?}");
     }
 
     #[test]
-    fn test_zip_bomb_unbounded_conversion() {
-        let err = CoreError::ZipBomb(exarch_core::ZipBombDetails::new(
-            exarch_core::ZipBombScope::Entry,
-            0,
-            10,
-        ));
-        let msg = convert_error(err).to_string();
-        assert!(msg.contains("ratio: unbounded"), "got: {msg}");
-    }
-
-    #[test]
-    fn test_invalid_permissions_conversion() {
-        let err = CoreError::InvalidPermissions {
-            path: PathBuf::from("malicious.sh"),
-            mode: 0o777,
-        };
-        let napi_err = convert_error(err);
-        let err_str = napi_err.to_string();
-        assert!(err_str.contains("INVALID_PERMISSIONS"));
-        assert!(err_str.contains("invalid permissions"));
-        assert!(err_str.contains("777"));
-        assert!(err_str.contains("malicious.sh"));
-    }
-
-    #[test]
-    fn test_quota_exceeded_file_count_conversion() {
-        let err = CoreError::QuotaExceeded {
-            resource: CoreQuotaResource::FileCount {
-                current: 11,
-                max: 10,
-            },
-        };
-        let napi_err = convert_error(err);
-        let err_str = napi_err.to_string();
-        assert!(err_str.contains("QUOTA_EXCEEDED"));
-        assert!(err_str.contains("file count"));
-    }
-
-    #[test]
-    fn test_quota_exceeded_total_size_conversion() {
-        let err = CoreError::QuotaExceeded {
-            resource: CoreQuotaResource::TotalSize {
-                current: 1_000_000,
-                max: 500_000,
-            },
-        };
-        let napi_err = convert_error(err);
-        let err_str = napi_err.to_string();
-        assert!(err_str.contains("QUOTA_EXCEEDED"));
-        assert!(err_str.contains("total size"));
-    }
-
-    #[test]
-    fn test_quota_exceeded_file_size_conversion() {
-        let err = CoreError::QuotaExceeded {
-            resource: CoreQuotaResource::FileSize {
+    fn test_quota_exceeded_code_and_wording() {
+        let d = described(CoreError::QuotaExceeded {
+            resource: QuotaResource::FileSize {
                 size: 100_000_000,
                 max: 50_000_000,
             },
-        };
-        let napi_err = convert_error(err);
-        let err_str = napi_err.to_string();
-        assert!(err_str.contains("QUOTA_EXCEEDED"));
-        assert!(err_str.contains("file size"));
+        });
+        assert_eq!(d.props.code.as_str(), "QUOTA_EXCEEDED");
+        assert!(d.description.contains("single file size"), "{d:?}");
     }
 
     #[test]
-    fn test_quota_exceeded_integer_overflow_conversion() {
-        let err = CoreError::QuotaExceeded {
-            resource: CoreQuotaResource::IntegerOverflow,
-        };
-        let napi_err = convert_error(err);
-        let err_str = napi_err.to_string();
-        assert!(err_str.contains("QUOTA_EXCEEDED"));
-        assert!(err_str.contains("integer overflow"));
-    }
-
-    #[test]
-    fn test_relaxable_violation_carries_anchored_token_after_code() {
-        let err = CoreError::relaxable_violation(
-            exarch_core::PolicySetting::Symlinks,
+    fn test_relaxable_violation_sets_property_not_message_token() {
+        let d = described(CoreError::relaxable_violation(
+            CorePolicySetting::Symlinks,
             "symlinks not allowed".to_string(),
-        );
-        let msg = convert_error(err).to_string();
-        assert!(
-            msg.contains(
-                "SECURITY_VIOLATION: [relaxableBy=symlinks] operation denied by security policy: \
-                 symlinks not allowed"
-            ),
-            "got: {msg}"
-        );
+        ));
+        assert_eq!(d.props.code.as_str(), "SECURITY_VIOLATION");
+        assert_eq!(d.props.relaxable_by, Some(CorePolicySetting::Symlinks));
+        assert!(!d.description.contains("relaxableBy"), "{d:?}");
     }
 
     #[test]
-    fn test_reason_cannot_forge_the_relaxable_token() {
-        let err = CoreError::violation("[relaxableBy=symlinks]".to_string());
-        let msg = convert_error(err).to_string();
-        assert!(
-            !msg.contains("SECURITY_VIOLATION: [relaxableBy="),
-            "non-relaxable message must not start with the token: {msg}"
-        );
+    fn test_reason_cannot_forge_relaxable_by() {
+        let d = described(CoreError::violation("[relaxableBy=symlinks]".to_string()));
+        assert_eq!(d.props.relaxable_by, None);
     }
 
     #[test]
-    fn test_security_violation_conversion() {
-        let err = CoreError::violation("test violation".to_string());
-        let napi_err = convert_error(err);
-        let err_str = napi_err.to_string();
-        assert!(err_str.contains("SECURITY_VIOLATION"));
-        assert!(err_str.contains("security policy"));
-        assert!(err_str.contains("test violation"));
+    fn test_invalid_configuration_keeps_core_code() {
+        let d = described(CoreError::InvalidConfiguration {
+            reason: "bad".to_string(),
+        });
+        assert_eq!(d.props.code.as_str(), "INVALID_CONFIGURATION");
     }
 
-    #[test]
-    fn test_unknown_format_conversion() {
-        let err = CoreError::UnknownFormat {
-            path: std::path::PathBuf::from("archive.rar"),
-        };
-        let napi_err = convert_error(err);
-        let err_str = napi_err.to_string();
-        assert!(err_str.contains("UNKNOWN_FORMAT"));
-        assert!(err_str.contains("cannot determine archive format"));
-    }
-
-    #[test]
-    fn test_invalid_archive_conversion() {
-        let err = CoreError::InvalidArchive("corrupted header".to_string());
-        let napi_err = convert_error(err);
-        let err_str = napi_err.to_string();
-        assert!(err_str.contains("INVALID_ARCHIVE"));
-        assert!(err_str.contains("invalid archive"));
-        assert!(err_str.contains("corrupted header"));
-    }
-
-    /// Asserts the original custom message is present, which only holds
-    /// under `debug_assertions` (see `sanitize_io_error_for_error`).
-    #[test]
     #[cfg(debug_assertions)]
-    fn test_io_error_conversion() {
-        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file not found");
-        let err = CoreError::Io(io_err);
-        let napi_err = convert_error(err);
-        let err_str = napi_err.to_string();
-        assert!(err_str.contains("IO_ERROR"));
-        assert!(err_str.contains("file not found"));
+    #[test]
+    fn test_io_error_keeps_message_in_debug() {
+        let d = described(CoreError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "file not found",
+        )));
+        assert_eq!(d.props.code.as_str(), "IO_ERROR");
+        assert!(d.description.contains("file not found"), "{d:?}");
     }
 
-    /// Regression test for #453 follow-up: in release builds, a
-    /// host-derived path variant must be reduced to the filename, not leak
-    /// the full host path. The redaction primitives themselves are tested
-    /// directly in `exarch_core::error::redaction`; this exercises the
-    /// binding's end-to-end `convert_error` path.
-    #[test]
+    /// Regression test for #453 follow-up: in release builds a host-derived
+    /// path variant is reduced to the filename.
     #[cfg(not(debug_assertions))]
+    #[test]
     fn test_source_not_found_strips_directory_in_release() {
-        let err = CoreError::SourceNotFound {
+        let d = described(CoreError::SourceNotFound {
             path: PathBuf::from("/srv/secret/app/x.txt"),
-        };
-        let napi_err = convert_error(err);
-        let err_str = napi_err.to_string();
-        assert!(err_str.contains("x.txt"), "got: {err_str}");
-        assert!(!err_str.contains("/srv/secret"), "got: {err_str}");
+        });
+        assert!(d.description.contains("x.txt"), "{d:?}");
+        assert!(!d.description.contains("/srv/secret"), "{d:?}");
     }
 
-    /// Regression test for #462: `PathTraversal`, `SymlinkEscape`, and
-    /// `HardlinkEscape` carry archive-relative, attacker-authored paths and
-    /// must keep the full path even in release builds, unlike genuinely
-    /// host-derived path variants (see the test above).
-    #[test]
+    /// Regression test for #453 follow-up: `Io` messages can embed a host path
+    /// and are reduced to the `ErrorKind` description in release builds.
     #[cfg(not(debug_assertions))]
-    fn test_attacker_path_variants_not_redacted_in_release() {
-        let nested = PathBuf::from("nested/dir/../../etc/passwd");
-        let variants = [
-            CoreError::PathTraversal {
-                path: nested.clone(),
-            },
-            CoreError::SymlinkEscape {
-                path: nested.clone(),
-            },
-            CoreError::HardlinkEscape { path: nested },
-        ];
-        for err in variants {
-            let err_str = convert_error(err).to_string();
-            assert!(
-                err_str.contains("nested/dir/../../etc/passwd"),
-                "expected full archive-relative path to survive redaction, got: {err_str}"
-            );
-        }
-    }
-
-    /// Regression test for #453 follow-up: `CoreError::Io` carries free-form
-    /// messages (e.g. from `DestDir`'s validation) that can embed a host
-    /// path. In release builds the message must be reduced to the
-    /// `ErrorKind` description so no such path can leak through it.
     #[test]
-    #[cfg(not(debug_assertions))]
-    fn test_io_error_conversion_redacts_message_in_release() {
-        let io_err = std::io::Error::new(
+    fn test_io_error_redacts_message_in_release() {
+        let d = described(CoreError::Io(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
             "directory is not writable: /srv/secret/app/private-output",
-        );
-        let err = CoreError::Io(io_err);
-        let napi_err = convert_error(err);
-        let err_str = napi_err.to_string();
-        assert!(
-            !err_str.contains("/srv/secret/app"),
-            "Expected host path to be redacted, got: {err_str}"
-        );
-        assert!(
-            err_str.contains("permission denied"),
-            "Expected ErrorKind description in error message, got: {err_str}"
-        );
-    }
-
-    /// Regression test for #251 + #210: `convert_error` must preserve the
-    /// specific error code from the inner source (e.g. `QUOTA_EXCEEDED`,
-    /// not `PARTIAL_EXTRACTION`), while still appending `filesExtracted`
-    /// and `bytesWritten` for caller inspection.
-    #[test]
-    fn test_partial_extraction_preserves_specific_code_with_report() {
-        use exarch_core::ExtractionReport;
-        use exarch_core::QuotaResource;
-
-        let report = ExtractionReport {
-            files_extracted: 3,
-            bytes_written: 1024,
-            ..ExtractionReport::default()
-        };
-        let source = CoreError::QuotaExceeded {
-            resource: QuotaResource::FileCount { current: 4, max: 3 },
-        };
-        let err = CoreError::PartialExtraction {
-            source: Box::new(source),
-            report,
-            writes: PartialWrites::Kept,
-        };
-
-        let napi_err = convert_error(err);
-        let msg = &napi_err.reason;
-        // Must carry the specific error code, not the generic
-        // PARTIAL_EXTRACTION prefix.
-        assert!(
-            msg.starts_with("QUOTA_EXCEEDED"),
-            "message must start with QUOTA_EXCEEDED, got: {msg}"
-        );
-        assert!(
-            msg.contains("filesExtracted=3"),
-            "message must contain filesExtracted=3, got: {msg}"
-        );
-        assert!(
-            msg.contains("bytesWritten=1024"),
-            "message must contain bytesWritten=1024, got: {msg}"
-        );
-    }
-
-    /// Regression test for #508: `convert_error` must also append
-    /// `filesSkipped` and `warnings` from the partial-extraction report,
-    /// alongside the pre-existing `filesExtracted`/`bytesWritten`. Uses a
-    /// skip-only report (`files_extracted: 0, bytes_written: 0`) matching
-    /// #505's original trigger — a failure that skipped entries without
-    /// extracting anything — and a realistic aggregated warning string
-    /// (see `formats::common`'s `"skipped N entries with disallowed
-    /// extensions"` convention) rather than an invented one, so the test
-    /// documents why the fix exists, not just that the fields are forwarded.
-    #[test]
-    fn test_partial_extraction_includes_files_skipped_and_warnings() {
-        use exarch_core::ExtractionReport;
-        use exarch_core::QuotaResource;
-
-        let report = ExtractionReport {
-            files_extracted: 0,
-            bytes_written: 0,
-            files_skipped: 2,
-            warnings: vec!["skipped 2 entries with disallowed extensions".to_string()],
-            ..ExtractionReport::default()
-        };
-        let source = CoreError::QuotaExceeded {
-            resource: QuotaResource::FileCount { current: 4, max: 3 },
-        };
-        let err = CoreError::PartialExtraction {
-            source: Box::new(source),
-            report,
-            writes: PartialWrites::Kept,
-        };
-
-        let napi_err = convert_error(err);
-        let msg = &napi_err.reason;
-        assert!(
-            msg.contains("filesSkipped=2"),
-            "message must contain filesSkipped=2, got: {msg}"
-        );
-        // Only asserts a substring of the warning text, not the full
-        // Rust-`Debug`-formatted array, to avoid pinning the exact
-        // `{:?}` rendering as a change-detector (see #508 review M4).
-        assert!(
-            msg.contains("skipped 2 entries with disallowed extensions"),
-            "message must contain the warning text, got: {msg}"
-        );
-    }
-
-    fn partial_symlink_escape(writes: PartialWrites) -> Error {
-        use exarch_core::ExtractionReport;
-
-        convert_error(CoreError::PartialExtraction {
-            source: Box::new(CoreError::SymlinkEscape {
-                path: PathBuf::from("ln"),
-            }),
-            report: ExtractionReport {
-                files_extracted: 2,
-                bytes_written: 2,
-                ..ExtractionReport::default()
-            },
-            writes,
-        })
-    }
-
-    /// Regression test for #747: a rolled-back atomic run must not present
-    /// its counters as files left on disk.
-    #[test]
-    fn test_partial_extraction_rolled_back_omits_counters() {
-        let msg = partial_symlink_escape(PartialWrites::RolledBack).reason;
-        assert!(msg.starts_with("SYMLINK_ESCAPE"), "got: {msg}");
-        assert!(msg.ends_with(" | writes=rolled_back"), "got: {msg}");
-        assert!(!msg.contains("filesExtracted"), "got: {msg}");
-        assert!(!msg.contains("bytesWritten"), "got: {msg}");
+        )));
+        assert!(!d.description.contains("/srv/secret/app"), "{d:?}");
+        assert!(d.description.contains("permission denied"), "{d:?}");
     }
 
     #[test]
-    fn test_partial_extraction_kept_reports_writes_and_counters() {
-        let msg = partial_symlink_escape(PartialWrites::Kept).reason;
-        assert!(
-            msg.contains(" | writes=kept, filesExtracted=2, bytesWritten=2"),
-            "got: {msg}"
-        );
-    }
-
-    // Regression tests for #251: security error variants must also preserve
-    // their specific error code and carry the #210 report fields.
-    //
-    // Helper that asserts the produced error reason starts with the given code
-    // and contains the expected report fields.
-    fn assert_partial_node_report(napi_err: &Error, expected_code: &str, files: usize, bytes: u64) {
-        let msg = &napi_err.reason;
-        assert!(
-            msg.starts_with(expected_code),
-            "message must start with {expected_code}, got: {msg}"
-        );
-        assert!(
-            msg.contains(&format!("filesExtracted={files}")),
-            "message must contain filesExtracted={files}, got: {msg}"
-        );
-        assert!(
-            msg.contains(&format!("bytesWritten={bytes}")),
-            "message must contain bytesWritten={bytes}, got: {msg}"
-        );
-    }
-
-    #[test]
-    fn test_partial_extraction_symlink_escape_preserves_code_and_report() {
-        use exarch_core::ExtractionReport;
-
-        let report = ExtractionReport {
-            files_extracted: 2,
-            bytes_written: 512,
-            ..ExtractionReport::default()
-        };
-        let source = CoreError::SymlinkEscape {
-            path: PathBuf::from("/etc/passwd"),
-        };
-        let err = CoreError::PartialExtraction {
-            source: Box::new(source),
-            report,
-            writes: PartialWrites::Kept,
-        };
-
-        let napi_err = convert_error(err);
-        assert_partial_node_report(&napi_err, "SYMLINK_ESCAPE", 2, 512);
-    }
-
-    #[test]
-    fn test_partial_extraction_hardlink_escape_preserves_code_and_report() {
-        use exarch_core::ExtractionReport;
-
-        let report = ExtractionReport {
-            files_extracted: 2,
-            bytes_written: 512,
-            ..ExtractionReport::default()
-        };
-        let source = CoreError::HardlinkEscape {
-            path: PathBuf::from("/etc/shadow"),
-        };
-        let err = CoreError::PartialExtraction {
-            source: Box::new(source),
-            report,
-            writes: PartialWrites::Kept,
-        };
-
-        let napi_err = convert_error(err);
-        assert_partial_node_report(&napi_err, "HARDLINK_ESCAPE", 2, 512);
-    }
-
-    #[test]
-    fn test_partial_extraction_security_violation_preserves_code_and_report() {
-        use exarch_core::ExtractionReport;
-
-        let report = ExtractionReport {
-            files_extracted: 2,
-            bytes_written: 512,
-            ..ExtractionReport::default()
-        };
-        let source = CoreError::violation("test policy violation".to_string());
-        let err = CoreError::PartialExtraction {
-            source: Box::new(source),
-            report,
-            writes: PartialWrites::Kept,
-        };
-
-        let napi_err = convert_error(err);
-        assert_partial_node_report(&napi_err, "SECURITY_VIOLATION", 2, 512);
-    }
-
-    /// Regression test for #463: `convert_error` binds `path` per match arm
-    /// and calls the redaction algorithm directly (S2 fix) rather than
-    /// going through `ArchiveError::redacted_path()`, so nothing at compile
-    /// time keeps the two mappings in sync. Cross-checks every path-carrying
-    /// variant's `convert_error` output against `redacted_path()` so the two
-    /// independently-maintained mappings (this file's and core's) cannot
-    /// silently drift apart.
-    #[test]
-    fn test_convert_error_paths_agree_with_redacted_path_dispatcher() {
+    fn test_error_paths_agree_with_redacted_path_dispatcher() {
         let path = PathBuf::from("some/example/path.txt");
         let variants: Vec<CoreError> = vec![
             CoreError::PathTraversal { path: path.clone() },
@@ -726,17 +631,108 @@ mod tests {
             CoreError::OutputExists { path: path.clone() },
             CoreError::UnknownFormat { path },
         ];
-
         for err in variants {
-            let expected = err
-                .redacted_path()
-                .expect("variant is known to carry a path");
-            let err_str = convert_error(err).to_string();
+            let expected = err.redacted_path().expect("variant carries a path");
+            let d = described(err);
             assert!(
-                err_str.contains(&expected),
-                "convert_error output does not agree with ArchiveError::redacted_path(): \
-                 expected {expected:?} in {err_str:?}"
+                d.description.contains(&expected),
+                "description {:?} lacks {expected:?}",
+                d.description
             );
         }
+    }
+
+    fn partial(writes: CorePartialWrites) -> CoreError {
+        let source = Box::new(CoreError::SymlinkEscape {
+            path: PathBuf::from("ln"),
+        });
+        let report = CoreExtractionReport {
+            files_extracted: 2,
+            bytes_written: 512,
+            files_skipped: 1,
+            warnings: vec!["skipped 1 entries with disallowed extensions".to_string()],
+            ..CoreExtractionReport::default()
+        };
+        CoreError::PartialExtraction {
+            source,
+            report,
+            writes,
+        }
+    }
+
+    /// Regression test for #251 and #210: a partial extraction keeps the inner
+    /// error's code and carries the counters.
+    #[test]
+    fn test_partial_kept_preserves_code_and_counters() {
+        let d = described(partial(CorePartialWrites::Kept));
+        assert_eq!(d.props.code.as_str(), "SYMLINK_ESCAPE");
+        let Details::Extraction(PartialOutcome::Kept(report)) = d.props.details else {
+            panic!("expected kept outcome");
+        };
+        assert_eq!(report.files_extracted, 2);
+        assert_eq!(report.bytes_written, 512);
+        assert_eq!(report.files_skipped, 1);
+        assert_eq!(report.warnings.len(), 1);
+    }
+
+    /// Regression test for #747: a rolled-back atomic run carries no counters.
+    #[test]
+    fn test_partial_rolled_back_has_no_counters() {
+        let d = described(partial(CorePartialWrites::RolledBack));
+        assert_eq!(d.props.code.as_str(), "SYMLINK_ESCAPE");
+        assert_matches!(
+            d.props.details,
+            Details::Extraction(PartialOutcome::RolledBack)
+        );
+    }
+
+    #[test]
+    fn test_callback_over_extraction_success_describes_counters() {
+        let d = describe(Failure::from(ProgressCallbackError::ExtractionCallback {
+            source: Error::from_reason("boom"),
+            report: CoreExtractionReport {
+                files_extracted: 3,
+                bytes_written: 9,
+                ..CoreExtractionReport::default()
+            },
+        }))
+        .expect("callback errors are described");
+        assert_eq!(d.props.code, JsCode::ProgressCallback);
+        assert!(d.props.cause.is_some());
+        assert!(!d.description.contains("boom"), "{d:?}");
+    }
+
+    #[test]
+    fn test_callback_alongside_core_failure_keeps_core_code_and_cause() {
+        let d = describe(Failure::from(ProgressCallbackError::Core {
+            source: CoreError::SymlinkEscape {
+                path: PathBuf::from("ln"),
+            },
+            callback: Some(Error::from_reason("boom")),
+        }))
+        .expect("callback errors are described");
+        assert_eq!(d.props.code.as_str(), "SYMLINK_ESCAPE");
+        assert!(d.props.cause.is_some());
+    }
+
+    #[test]
+    fn test_native_failure_is_not_described() {
+        let native = describe(Failure::Native(Error::from_reason("negative")))
+            .expect_err("native errors bypass the builder");
+        assert_eq!(native.reason, "negative");
+    }
+
+    /// Regression test for #395: a panic is converted into a catchable error.
+    #[test]
+    fn test_catch_panic_converts_panic_to_native_failure() {
+        let result: Result<(), Failure> = catch_panic("test operation", || {
+            panic!("synthetic panic for #395 regression test")
+        });
+        let err = result.expect_err("panic must be converted, not abort");
+        assert!(
+            err.to_string()
+                .contains("Internal panic during test operation"),
+            "unexpected error message: {err}"
+        );
     }
 }

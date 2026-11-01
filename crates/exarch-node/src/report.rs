@@ -14,7 +14,7 @@ use napi::Error;
 use napi::Result;
 use napi_derive::napi;
 
-fn saturating_u32(n: usize) -> u32 {
+pub fn saturating_u32(n: usize) -> u32 {
     u32::try_from(n).unwrap_or(u32::MAX)
 }
 

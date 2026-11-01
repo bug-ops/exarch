@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING:** `ArchiveError::to_ffi_message` is replaced by the consuming `into_ffi_message`; `FfiErrorMessage` holds a typed `FfiKind` and `PartialOutcome` instead of string `code` and `context`, `error_code()` returns `ErrorCode`, and `PartialWrites` gains `ALL` and `Display`; Python and Node build their errors from it (#758, #PR).
+- **BREAKING:** Node errors carry `err.code` (`ErrorCode`) and typed `relaxableBy`, `writes`, `filesExtracted`, `bytesWritten`, `filesSkipped`, `warnings` properties; `message` no longer has the `CODE: ` prefix, `[relaxableBy=]` token or `| writes=` suffix, and new `ErrorCode`, `PolicySetting`, `PartialWrites` and `ExarchError` types are exported (#760, #PR).
+- Python and Node quota errors use the core wording `single file size`; Node progress-callback failures drop the `| progressCallbackError` marker and expose `cause`, plus `filesAdded` and `bytesWritten` on creation (#758, #760, #PR).
+- CLI: a link escape (symlink or hardlink) no longer hints at `--allow-symlinks` or `--allow-hardlinks`, which never lift it (#759, #PR).
+- `extract --force` over a directory or symlink names the entry, for example `refusing to replace the existing directory at d`, for TAR, ZIP and 7z; the core `Io` error no longer carries `raw_os_error()` in these cases (#765, #PR).
+- CLI: human-readable output escapes all `Default_Ignorable_Code_Point` characters in entry names, keeping variation selectors only after the character they modify (#753, #PR).
+- `exarch-cli` skill: a TAR directory-name payload fails `extract` before anything is written (#766, #PR).
+- `exarch.pyi` drift guard covers all Literal aliases (#761, #PR).
+- Internal cleanups after #752 and #757 (#762, #PR).
+- Windows regression tests for UNC and device-namespace link targets (#764, #PR).
+
 ## [0.7.0] - 2026-10-26
 
 ### Added

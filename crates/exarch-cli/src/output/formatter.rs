@@ -47,23 +47,30 @@ pub struct JsonOutput<T> {
     pub error: Option<JsonError>,
 }
 
-/// Serializes a [`PartialWrites`] as its stable identifier.
-#[derive(Debug, Clone, Copy)]
-pub struct JsonWrites(pub PartialWrites);
+mod sealed {
+    pub trait Sealed {}
 
-impl Serialize for JsonWrites {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(self.0.as_str())
-    }
+    impl Sealed for exarch_core::ErrorCode {}
+    impl Sealed for exarch_core::PartialWrites {}
+    impl Sealed for exarch_core::PolicySetting {}
 }
 
-/// Serializes a [`PolicySetting`] as its stable identifier.
-#[derive(Debug, Clone, Copy)]
-pub struct JsonPolicySetting(pub PolicySetting);
+/// A closed core enum whose `Display` is its stable identifier (`as_str`).
+///
+/// Sealed: only the core enums listed in `sealed` can be serialized as an id.
+pub trait StableId: sealed::Sealed + std::fmt::Display {}
 
-impl Serialize for JsonPolicySetting {
+impl StableId for exarch_core::ErrorCode {}
+impl StableId for exarch_core::PartialWrites {}
+impl StableId for exarch_core::PolicySetting {}
+
+/// Serializes a closed core enum as its stable identifier.
+#[derive(Debug, Clone, Copy)]
+pub struct JsonId<T>(pub T);
+
+impl<T: StableId> Serialize for JsonId<T> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(self.0.as_str())
+        serializer.collect_str(&self.0)
     }
 }
 
@@ -77,7 +84,7 @@ pub struct JsonPartialReport {
     pub bytes_written: u64,
     pub files_skipped: usize,
     pub warnings: Vec<String>,
-    pub writes: JsonWrites,
+    pub writes: JsonId<PartialWrites>,
 }
 
 /// Structured error object in JSON output
@@ -90,7 +97,7 @@ pub struct JsonError {
     /// Stable id of the `SecurityConfig` setting whose current value refused
     /// the entry; present only for a `SecurityViolation` a setting relaxes.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub relaxable_by: Option<JsonPolicySetting>,
+    pub relaxable_by: Option<JsonId<PolicySetting>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -154,7 +161,7 @@ impl JsonOutput<()> {
     #[must_use]
     pub fn with_relaxable_by(mut self, setting: Option<PolicySetting>) -> Self {
         if let Some(error) = self.error.as_mut() {
-            error.relaxable_by = setting.map(JsonPolicySetting);
+            error.relaxable_by = setting.map(JsonId);
         }
         self
     }

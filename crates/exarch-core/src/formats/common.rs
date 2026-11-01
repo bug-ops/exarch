@@ -1381,7 +1381,7 @@ mod tests {
                 err.to_string(),
                 format!(
                     "refusing to replace the existing {noun} at {}",
-                    rel.display()
+                    rel.components().collect::<PathBuf>().display()
                 )
             );
         }

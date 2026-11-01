@@ -267,7 +267,7 @@ mod tar_fixtures {
     }
 
     pub fn xz(tar: &[u8]) -> Vec<u8> {
-        let mut encoder = xz2::write::XzEncoder::new(Vec::new(), 1);
+        let mut encoder = liblzma::write::XzEncoder::new(Vec::new(), 1);
         encoder.write_all(tar).unwrap();
         encoder.finish().unwrap()
     }

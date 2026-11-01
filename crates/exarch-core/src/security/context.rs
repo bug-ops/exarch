@@ -1,6 +1,9 @@
 //! Optimization context for path validation during extraction.
 
 use crate::formats::common::DirCache;
+use crate::security::fs_view::FsView;
+use crate::security::fs_view::HostFs;
+use std::marker::PhantomData;
 use std::path::Path;
 
 /// Carries optimization state that enables skipping expensive `canonicalize()`
@@ -10,28 +13,45 @@ use std::path::Path;
 /// path chains. When we KNOW a directory was created by us (tracked in
 /// `DirCache`), it cannot be a symlink. When the archive contains no symlinks
 /// AND config disallows them, no symlinks can exist in the extraction tree.
-pub struct ValidationContext<'a> {
+///
+/// `V` is the view the context is used against. A `DirCache` describes the
+/// real filesystem, so it can only be attached to a [`HostFs`] context.
+pub struct ValidationContext<'a, V: FsView = HostFs> {
     dir_cache: Option<&'a DirCache>,
     symlink_seen: bool,
     symlinks_allowed: bool,
+    view: PhantomData<fn() -> V>,
 }
 
-impl<'a> ValidationContext<'a> {
+impl<'a> ValidationContext<'a, HostFs> {
+    /// Trusts the directories in `cache`, which this extraction created, so
+    /// their paths are not canonicalized again.
+    ///
+    /// Available on a [`HostFs`] context only: a `DirCache` describes the real
+    /// filesystem, never an in-memory model.
+    #[must_use]
+    pub fn with_dir_cache(mut self, cache: &'a DirCache) -> Self {
+        self.dir_cache = Some(cache);
+        self
+    }
+}
+
+impl<V: FsView> ValidationContext<'_, V> {
+    /// Creates a context with no trusted directories and no symlink seen yet.
+    ///
+    /// `symlinks_allowed` is the config's symlink policy.
     #[must_use]
     pub fn new(symlinks_allowed: bool) -> Self {
         Self {
             dir_cache: None,
             symlink_seen: false,
             symlinks_allowed,
+            view: PhantomData,
         }
     }
 
-    #[must_use]
-    pub fn with_dir_cache(mut self, cache: &'a DirCache) -> Self {
-        self.dir_cache = Some(cache);
-        self
-    }
-
+    /// Records that the archive contains a symlink, which re-enables the full
+    /// `canonicalize()` even when the config disallows symlinks.
     pub fn mark_symlink_seen(&mut self) {
         self.symlink_seen = true;
     }
@@ -62,20 +82,20 @@ mod tests {
 
     #[test]
     fn test_default_context_no_optimizations() {
-        let ctx = ValidationContext::new(false);
+        let ctx = ValidationContext::<HostFs>::new(false);
         assert!(!ctx.is_trusted_parent(Path::new("/some/path")));
         assert!(!ctx.needs_full_canonicalize());
     }
 
     #[test]
     fn test_context_with_symlinks_allowed() {
-        let ctx = ValidationContext::new(true);
+        let ctx = ValidationContext::<HostFs>::new(true);
         assert!(ctx.needs_full_canonicalize());
     }
 
     #[test]
     fn test_context_symlink_seen_enables_canonicalize() {
-        let mut ctx = ValidationContext::new(false);
+        let mut ctx = ValidationContext::<HostFs>::new(false);
         assert!(!ctx.needs_full_canonicalize());
         ctx.mark_symlink_seen();
         assert!(ctx.needs_full_canonicalize());
@@ -89,14 +109,14 @@ mod tests {
         let dir_path = temp.path().join("created_dir");
         dir_cache.ensure_dir(&dir_path).expect("should create dir");
 
-        let ctx = ValidationContext::new(false).with_dir_cache(&dir_cache);
+        let ctx = ValidationContext::<HostFs>::new(false).with_dir_cache(&dir_cache);
         assert!(ctx.is_trusted_parent(&dir_path));
         assert!(!ctx.is_trusted_parent(&temp.path().join("unknown_dir")));
     }
 
     #[test]
     fn test_context_no_dir_cache_never_trusted() {
-        let ctx = ValidationContext::new(false);
+        let ctx = ValidationContext::<HostFs>::new(false);
         assert!(!ctx.is_trusted_parent(Path::new("/any/path")));
     }
 }

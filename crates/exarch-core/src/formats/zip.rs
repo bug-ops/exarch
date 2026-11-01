@@ -141,28 +141,25 @@ use crate::SecurityConfig;
 use crate::VerificationOptions;
 use crate::ZipConsistencyPolicy;
 use crate::config::Validated;
-use crate::copy::CopyBuffer;
 
 use crate::copy::declared_size_exceeded;
 use crate::inspection::integrity::DecodeFailure;
 use crate::inspection::integrity::DecodeOutcome;
 use crate::inspection::integrity::IntegrityPass;
 use crate::inspection::integrity::Slot;
-use crate::security::EntryValidator;
-use crate::security::permissions::SanitizedMode;
-use crate::security::quota::QuotaPermit;
 use crate::security::validator::EntryPath;
 use crate::security::validator::NodeKind;
 use crate::security::validator::ValidatedEntryType;
 use crate::security::validator::require_non_empty_name;
 use crate::security::zipbomb::DeclaredCompressedBudget;
-use crate::types::DestDir;
 use crate::types::EntryType;
-use crate::types::SafePath;
 use crate::types::safe_path::stream_separator_error;
 
 use super::common;
 use super::common::EntryCompleteGuard;
+use super::target::ExtractTarget;
+use super::target::HostTarget;
+use super::target::Tally;
 use super::traits::ArchiveFormat;
 use super::zip_structure;
 use super::zip_structure::Shared;
@@ -183,24 +180,13 @@ pub(crate) const ZIP_INVALID_CHECKSUM: &str = "Invalid checksum";
 /// archive extraction, eliminating the need to thread them through every
 /// function call individually.
 struct ZipExtractionContext<'a> {
-    dest: &'a DestDir,
+    tally: Tally<'a>,
     config: &'a SecurityConfig<Validated>,
-    report: &'a mut ExtractionReport,
-    copy_buffer: &'a mut CopyBuffer,
-    dir_cache: &'a mut common::DirCache,
-    skip_duplicates: bool,
-    /// Count of file/symlink entries skipped as pre-existing duplicates,
-    /// threaded through `common::extract_file_with_permit` and
-    /// `common::create_symlink`. Aggregated into a single warning after
-    /// extraction completes instead of one warning per entry, mirroring
-    /// 7z's `duplicate_skips` accumulator (issue #490).
-    duplicate_skips: &'a mut u64,
     /// Count of file entries skipped by `common::check_extension_allowed`
     /// because their extension is not in the allowlist. Aggregated into a
     /// single warning after extraction completes instead of one warning
     /// per entry (issue #495).
     disallowed_extension_skips: &'a mut u64,
-    progress: &'a mut dyn ProgressCallback,
 }
 
 /// How a raw ZIP entry name starts, as far as absolute-path policy cares.
@@ -430,6 +416,11 @@ fn push_duplicate_skip_warnings(
     common::push_disallowed_extension_warning(report, disallowed_extension_skips);
 }
 
+/// Proof that [`ZipArchive::check_structure`] passed, which every extraction
+/// needs before it creates a destination or hands entries to a sink.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct StructureChecked(());
+
 /// ZIP archive handler with random-access extraction.
 ///
 /// Supports:
@@ -558,14 +549,17 @@ impl<R: Read + Seek> ZipArchive<R> {
         crate::inspection::list::list_zip_reader(self, config, listing)
     }
 
-    fn check_structure(&self, config: &SecurityConfig<Validated>) -> Result<()> {
+    pub(crate) fn check_structure(
+        &self,
+        config: &SecurityConfig<Validated>,
+    ) -> Result<StructureChecked> {
         self.check_count(config)?;
         if config.zip_consistency == ZipConsistencyPolicy::Enforce
             && let Some(finding) = self.structure.findings().first()
         {
             return Err(ArchiveError::ZipInconsistency(finding.clone()));
         }
-        Ok(())
+        Ok(StructureChecked(()))
     }
 
     /// Resolves the entry path from a ZIP file via [`resolve_zip_entry_path`].
@@ -588,10 +582,10 @@ impl<R: Read + Seek> ZipArchive<R> {
     /// borrow scope. For directories and symlinks, the zip file is explicitly
     /// dropped before calling extraction helpers. For files, the zip file
     /// remains alive through validation and is reused for data extraction.
-    fn process_entry(
+    fn process_entry<T: ExtractTarget>(
         mut zip_file: zip::read::ZipFile<'_, Shared<R>>,
         index: usize,
-        validator: &mut EntryValidator,
+        target: &mut T,
         ctx: &mut ZipExtractionContext<'_>,
     ) -> Result<()> {
         if zip_file.encrypted() {
@@ -617,55 +611,47 @@ impl<R: Read + Seek> ZipArchive<R> {
         let entry_kind = zip_entry_kind(zip_file.is_dir(), mode);
         if entry_kind == ZipEntryKind::Directory {
             drop(zip_file);
-            let validated = validator.validate_entry(
+            let validated = target.validate(
                 &path,
                 &EntryType::Directory,
                 uncompressed_size,
                 Some(compressed_size),
                 mode,
-                Some(ctx.dir_cache),
             )?;
-            common::create_directory(validated.safe_path(), ctx.dest, ctx.report, ctx.dir_cache)?;
+            target.directory(validated.safe_path(), &mut ctx.tally)?;
         } else if entry_kind == ZipEntryKind::Symlink {
-            let target = ZipEntryAdapter::read_symlink_target(&mut zip_file)?;
+            let link_target = ZipEntryAdapter::read_symlink_target(&mut zip_file)?;
             drop(zip_file);
-            let entry_type = EntryType::Symlink { target };
-            let validated = validator.validate_entry(
+            let entry_type = EntryType::Symlink {
+                target: link_target,
+            };
+            let validated = target.validate(
                 &path,
                 &entry_type,
                 uncompressed_size,
                 Some(compressed_size),
                 mode,
-                Some(ctx.dir_cache),
             )?;
             if let ValidatedEntryType::Symlink(safe_symlink) = validated.entry_type() {
-                common::create_symlink(
-                    safe_symlink,
-                    ctx.dest,
-                    ctx.report,
-                    ctx.dir_cache,
-                    ctx.skip_duplicates,
-                    ctx.duplicate_skips,
-                )?;
+                target.symlink(safe_symlink, &mut ctx.tally)?;
             }
         } else {
             if !common::check_extension_allowed(
                 &path,
                 ctx.config,
-                ctx.report,
+                ctx.tally.report,
                 ctx.disallowed_extension_skips,
             ) {
                 return Ok(());
             }
             // File: validate BEFORE writing (security invariant preserved),
             // then extract with the same zip_file (stream still at position 0)
-            let validated = validator.validate_entry(
+            let validated = target.validate(
                 &path,
                 &EntryType::File,
                 uncompressed_size,
                 Some(compressed_size),
                 mode,
-                Some(ctx.dir_cache),
             )?;
             // into_parts() moves the QuotaPermit out by value into
             // extract_file (mirrors 7z's process_entry_inner, issue #445),
@@ -678,43 +664,19 @@ impl<R: Read + Seek> ZipArchive<R> {
                     "validate_entry(EntryType::File) returned a non-File variant".into(),
                 ));
             };
-            Self::extract_file(
-                &mut zip_file,
-                &safe_path,
-                sanitized_mode,
-                permit,
-                uncompressed_size,
-                ctx,
-            )?;
+            target
+                .file(
+                    &mut zip_file,
+                    &safe_path,
+                    sanitized_mode,
+                    permit,
+                    uncompressed_size,
+                    &mut ctx.tally,
+                )
+                .map_err(|e| Self::classify_declared_size_overrun(e, uncompressed_size))?;
         }
 
         Ok(())
-    }
-
-    /// Extracts a regular file to disk.
-    fn extract_file(
-        zip_file: &mut zip::read::ZipFile<'_, Shared<R>>,
-        safe_path: &SafePath,
-        mode: Option<SanitizedMode>,
-        permit: QuotaPermit,
-        file_size: u64,
-        ctx: &mut ZipExtractionContext<'_>,
-    ) -> Result<()> {
-        common::extract_file_with_permit(
-            zip_file,
-            safe_path,
-            mode,
-            permit,
-            ctx.dest,
-            ctx.report,
-            Some(file_size),
-            ctx.copy_buffer,
-            ctx.dir_cache,
-            ctx.skip_duplicates,
-            ctx.duplicate_skips,
-            ctx.progress,
-        )
-        .map_err(|e| Self::classify_declared_size_overrun(e, file_size))
     }
 
     /// Re-types the `zip` crate's own declared-size ceiling as a security
@@ -733,10 +695,16 @@ impl<R: Read + Seek> ZipArchive<R> {
     }
 }
 
-impl<R: Read + Seek> ArchiveFormat for ZipArchive<R> {
-    fn extract(
+impl<R: Read + Seek> ZipArchive<R> {
+    /// Runs the extraction loop against `target`: the validation gates are the
+    /// same whether it writes to the filesystem or to an entry sink.
+    ///
+    /// `_checked` proves the structural policy ran before the target, and so
+    /// any destination, existed.
+    pub(crate) fn extract_into<T: ExtractTarget>(
         &mut self,
-        output_dir: &Path,
+        _checked: StructureChecked,
+        target: &mut T,
         config: &SecurityConfig<Validated>,
         options: &ExtractionOptions,
         progress: &mut dyn ProgressCallback,
@@ -744,19 +712,7 @@ impl<R: Read + Seek> ArchiveFormat for ZipArchive<R> {
         let start = Instant::now();
         let skip_duplicates = options.skip_duplicates;
 
-        self.check_structure(config)?;
-        let dest = DestDir::new_or_create(output_dir.to_path_buf())?;
-
-        // OPT-H004: Pass references to avoid cloning
-        let mut validator = EntryValidator::new(config, &dest);
-
         let mut report = ExtractionReport::new();
-
-        // OPT-C002: Single copy buffer per archive instead of per-file
-        // allocation
-        let mut copy_buffer = CopyBuffer::new();
-
-        let mut dir_cache = common::DirCache::new();
 
         // Aggregated into a single warning after extraction instead of one
         // per skipped entry, mirroring 7z's `duplicate_skips` accumulator
@@ -803,18 +759,17 @@ impl<R: Read + Seek> ArchiveFormat for ZipArchive<R> {
             let mut guard = EntryCompleteGuard::new(progress, &entry_path);
 
             let mut ctx = ZipExtractionContext {
-                dest: &dest,
+                tally: Tally {
+                    report: &mut report,
+                    skip_duplicates,
+                    duplicate_skips: &mut duplicate_skips,
+                    progress: guard.progress_mut(),
+                },
                 config,
-                report: &mut report,
-                copy_buffer: &mut copy_buffer,
-                dir_cache: &mut dir_cache,
-                skip_duplicates,
-                duplicate_skips: &mut duplicate_skips,
                 disallowed_extension_skips: &mut disallowed_extension_skips,
-                progress: guard.progress_mut(),
             };
 
-            let result = Self::process_entry(zip_file, i, &mut validator, &mut ctx);
+            let result = Self::process_entry(zip_file, i, target, &mut ctx);
 
             if let Err(e) = result {
                 drop(guard);
@@ -833,6 +788,20 @@ impl<R: Read + Seek> ArchiveFormat for ZipArchive<R> {
         report.duration = start.elapsed();
 
         Ok(report)
+    }
+}
+
+impl<R: Read + Seek> ArchiveFormat for ZipArchive<R> {
+    fn extract(
+        &mut self,
+        output_dir: &Path,
+        config: &SecurityConfig<Validated>,
+        options: &ExtractionOptions,
+        progress: &mut dyn ProgressCallback,
+    ) -> Result<ExtractionReport> {
+        let checked = self.check_structure(config)?;
+        let mut target = HostTarget::create(output_dir, config)?;
+        self.extract_into(checked, &mut target, config, options, progress)
     }
 
     fn list(
@@ -864,7 +833,12 @@ impl<R: Read + Seek> ArchiveFormat for ZipArchive<R> {
             ZipConsistencyPolicy::Ignore => (&[][..], 0),
         };
         let structure = ArchiveStructure::new(self.structure.central_entries(), findings, omitted);
-        verify_manifest_with_structure(&listed.manifest, config, &structure, listed.integrity)
+        Ok(verify_manifest_with_structure(
+            &listed.manifest,
+            config,
+            &structure,
+            listed.integrity,
+        ))
     }
 
     fn format_name(&self) -> &'static str {

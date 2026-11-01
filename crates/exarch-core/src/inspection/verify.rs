@@ -33,9 +33,11 @@ use crate::security::fs_view::CollisionKind;
 use crate::security::fs_view::Conflict;
 use crate::security::fs_view::FsView;
 use crate::security::fs_view::LinkKind;
+use crate::security::fs_view::ModelRoot as _;
 use crate::security::fs_view::NameCollision;
 use crate::security::fs_view::Node;
 use crate::security::fs_view::Occupant;
+use crate::security::fs_view::VirtualRoot;
 use crate::security::fs_view::VirtualTree;
 use crate::security::fs_view::check_link_target_length;
 use crate::security::fs_view::check_name_lengths;
@@ -45,7 +47,6 @@ use crate::security::hardlink::hardlink_target_missing;
 use crate::security::permissions::sanitize_permissions;
 use crate::security::quota::QuotaTracker;
 use crate::security::zipbomb::validate_entry_compression;
-use crate::types::DestDir;
 use crate::types::SafePath;
 use crate::types::SafeSymlink;
 use crate::types::safe_symlink::require_symlinks_allowed;
@@ -64,7 +65,7 @@ pub(crate) fn verify_manifest(
     manifest: &ArchiveManifest,
     config: &SecurityConfig<Validated>,
     integrity: Option<IntegrityOutcome>,
-) -> Result<VerificationReport> {
+) -> VerificationReport {
     verify_manifest_with_structure(
         manifest,
         config,
@@ -80,7 +81,7 @@ pub(crate) fn verify_manifest_with_structure(
     config: &SecurityConfig<Validated>,
     structure: &ArchiveStructure<'_>,
     integrity: Option<IntegrityOutcome>,
-) -> Result<VerificationReport> {
+) -> VerificationReport {
     verify_with_tree(manifest, config, structure, integrity, VirtualTree::new)
 }
 
@@ -91,12 +92,10 @@ fn verify_with_tree(
     config: &SecurityConfig<Validated>,
     structure: &ArchiveStructure<'_>,
     integrity: Option<IntegrityOutcome>,
-    make_tree: impl FnOnce(&Path) -> VirtualTree,
-) -> Result<VerificationReport> {
-    let temp_dir = tempfile::TempDir::new()?;
-    let temp_dest = DestDir::new(temp_dir.path())?;
-
-    let mut tree = make_tree(temp_dest.as_path());
+    make_tree: impl FnOnce(&VirtualRoot) -> VirtualTree,
+) -> VerificationReport {
+    let root = VirtualRoot::new();
+    let mut tree = make_tree(&root);
     let mut quota_tracker = QuotaTracker::new();
     let mut hardlink_tracker = HardlinkTracker::new();
 
@@ -106,7 +105,7 @@ fn verify_with_tree(
         let outcome = verify_entry(
             entry,
             config,
-            &temp_dest,
+            &root,
             &mut tree,
             &mut quota_tracker,
             &mut hardlink_tracker,
@@ -122,7 +121,7 @@ fn verify_with_tree(
     for index in deferred {
         let entry = &manifest.entries()[index];
         let materialized =
-            verify_deferred_hardlink(entry, config, &temp_dest, &mut tree, &mut hardlink_tracker);
+            verify_deferred_hardlink(entry, config, &root, &mut tree, &mut hardlink_tracker);
         lists[index].extend(collision_issues(&mut tree));
         if let Err(issue) = materialized {
             lists[index].push(issue);
@@ -150,13 +149,7 @@ fn verify_with_tree(
             .map(|collision| vec![collision_issue(collision)]),
     );
 
-    Ok(VerificationReport::from_entry_issue_lists(
-        manifest,
-        lists,
-        archive_issues,
-        structure,
-        scope,
-    ))
+    VerificationReport::from_entry_issue_lists(manifest, lists, archive_issues, structure, scope)
 }
 
 /// A manifest listed for verification, with the integrity pass outcome when
@@ -206,7 +199,7 @@ where
     F: FnOnce(&mut ListPass<'_, '_>) -> Result<ArchiveManifest>,
 {
     let listed = list_for_verify(config, options, list)?;
-    verify_manifest(&listed.manifest, config, listed.integrity)
+    Ok(verify_manifest(&listed.manifest, config, listed.integrity))
 }
 
 /// Verifies archive security without extracting.
@@ -413,7 +406,7 @@ struct EntryOutcome {
 fn verify_entry(
     entry: &ArchiveEntry,
     config: &SecurityConfig<Validated>,
-    dest: &DestDir,
+    dest: &VirtualRoot,
     tree: &mut VirtualTree,
     quota_tracker: &mut QuotaTracker,
     hardlink_tracker: &mut HardlinkTracker,
@@ -617,7 +610,7 @@ fn record_entry(
 fn verify_deferred_hardlink(
     entry: &ArchiveEntry,
     config: &SecurityConfig<Validated>,
-    dest: &DestDir,
+    dest: &VirtualRoot,
     tree: &mut VirtualTree,
     hardlink_tracker: &mut HardlinkTracker,
 ) -> std::result::Result<(), VerificationIssue> {
@@ -690,7 +683,7 @@ impl Placement {
 /// entry.
 fn placement_issue(
     tree: &VirtualTree,
-    dest: &DestDir,
+    dest: &VirtualRoot,
     entry: &ArchiveEntry,
     rel: &Path,
     conflict: Conflict,
@@ -909,7 +902,7 @@ mod tests {
     }
 
     fn assert_link_placement_finding(entries: Vec<(&str, ManifestEntryKind)>, expected: &str) {
-        let report = verify_manifest(&manifest_of(entries), &link_config(), None).unwrap();
+        let report = verify_manifest(&manifest_of(entries), &link_config(), None);
         assert_ne!(report.security_status(), CheckStatus::Pass);
         let issue = report
             .issues()
@@ -929,7 +922,7 @@ mod tests {
     }
 
     fn assert_overwrite_note(entries: Vec<(&str, ManifestEntryKind)>, expected: &str) {
-        let report = verify_manifest(&manifest_of(entries), &link_config(), None).unwrap();
+        let report = verify_manifest(&manifest_of(entries), &link_config(), None);
         assert_eq!(report.security_status(), CheckStatus::Pass, "{report:?}");
         let note: Vec<_> = report
             .issues()
@@ -967,8 +960,7 @@ mod tests {
             &manifest_of(vec![("d", symlink_to("sub")), ("d", symlink_to("sub"))]),
             &link_config(),
             None,
-        )
-        .unwrap();
+        );
         assert_eq!(report.status(), VerificationStatus::Pass);
         assert!(report.issues().is_empty(), "{:?}", report.issues());
     }
@@ -1043,7 +1035,7 @@ mod tests {
             ("a", ManifestEntryKind::File),
             ("a", ManifestEntryKind::Directory),
         ]);
-        let report = verify_manifest(&manifest, &link_config(), None).unwrap();
+        let report = verify_manifest(&manifest, &link_config(), None);
         assert_eq!(report.security_status(), CheckStatus::Pass);
         assert!(
             report
@@ -1064,7 +1056,7 @@ mod tests {
     #[test]
     fn symlink_mode_is_not_a_permission_finding() {
         let manifest = manifest_with_mode("l", symlink_to("t"), 0o777);
-        let report = verify_manifest(&manifest, &link_config(), None).unwrap();
+        let report = verify_manifest(&manifest, &link_config(), None);
         assert_eq!(report.status(), VerificationStatus::Pass);
         assert!(
             report
@@ -1090,7 +1082,7 @@ mod tests {
         link.mode = Some(0o777);
         manifest.add_entry(link).unwrap();
 
-        let report = verify_manifest(&manifest, &link_config(), None).unwrap();
+        let report = verify_manifest(&manifest, &link_config(), None);
         assert_eq!(report.status(), VerificationStatus::Pass);
         assert!(
             report
@@ -1105,7 +1097,7 @@ mod tests {
     #[test]
     fn world_writable_regular_file_is_still_a_permission_finding() {
         let manifest = manifest_with_mode("f", ManifestEntryKind::File, 0o666);
-        let report = verify_manifest(&manifest, &link_config(), None).unwrap();
+        let report = verify_manifest(&manifest, &link_config(), None);
         assert!(
             report
                 .issues()
@@ -1124,7 +1116,7 @@ mod tests {
             ("t", ManifestEntryKind::File),
             ("h", hardlink_to(&long)),
         ]);
-        let report = verify_manifest(&manifest, &link_config(), None).unwrap();
+        let report = verify_manifest(&manifest, &link_config(), None);
         let too_long = report
             .issues()
             .iter()
@@ -1142,7 +1134,7 @@ mod tests {
     #[test]
     fn unread_symlinks_warn_once_and_report_what_runs_through_them() {
         let alone = manifest_of(vec![("d", unread_symlink()), ("e", unread_symlink())]);
-        let report = verify_manifest(&alone, &link_config(), None).unwrap();
+        let report = verify_manifest(&alone, &link_config(), None);
         assert_eq!(report.status(), VerificationStatus::Warning);
         assert_eq!(report.issues().len(), 1, "{:?}", report.issues());
 
@@ -1152,7 +1144,7 @@ mod tests {
             vec![("d", unread_symlink()), ("l", symlink_to("d"))],
         ] {
             let manifest = manifest_of(entries);
-            let report = verify_manifest(&manifest, &link_config(), None).unwrap();
+            let report = verify_manifest(&manifest, &link_config(), None);
             assert_eq!(report.status(), VerificationStatus::Fail, "{manifest:?}");
         }
     }
@@ -1161,7 +1153,7 @@ mod tests {
     fn unread_symlinks_are_a_policy_failure_when_symlinks_are_disallowed() {
         let manifest = manifest_of(vec![("d", unread_symlink())]);
         let config = SecurityConfig::default().validate().unwrap();
-        let report = verify_manifest(&manifest, &config, None).unwrap();
+        let report = verify_manifest(&manifest, &config, None);
         assert_eq!(report.status(), VerificationStatus::Fail);
         assert_eq!(report.issues().len(), 1, "{:?}", report.issues());
     }
@@ -1174,7 +1166,7 @@ mod tests {
                 target: LinkTarget::Unreadable,
             },
         )]);
-        let report = verify_manifest(&manifest, &link_config(), None).unwrap();
+        let report = verify_manifest(&manifest, &link_config(), None);
         assert_eq!(report.status(), VerificationStatus::Fail);
         assert_eq!(report.issues().len(), 1, "{:?}", report.issues());
         assert!(report.issues()[0].message.contains("could not be read"));
@@ -1196,7 +1188,7 @@ mod tests {
                 },
             ),
         ]);
-        let report = verify_manifest(&manifest, &link_config(), None).unwrap();
+        let report = verify_manifest(&manifest, &link_config(), None);
         let too_long = report
             .issues()
             .iter()
@@ -1237,7 +1229,6 @@ mod tests {
             None,
             |root| VirtualTree::with_fold(root, ascii_upper),
         )
-        .unwrap()
     }
 
     fn collisions(report: &VerificationReport) -> Vec<IssueSeverity> {
@@ -1303,8 +1294,7 @@ mod tests {
             &ArchiveStructure::of_manifest(&manifest),
             None,
             |root| VirtualTree::with_fold(root, ascii_upper),
-        )
-        .unwrap();
+        );
         assert_eq!(report.status(), VerificationStatus::Warning);
         assert_eq!(report.security_status(), crate::CheckStatus::Warning);
         assert_eq!(
@@ -1345,14 +1335,14 @@ mod tests {
             ("alias/h", hardlink_to("real/t")),
             ("again", hardlink_to("real/h")),
         ]);
-        let report = verify_manifest(&manifest, &link_config(), None).unwrap();
+        let report = verify_manifest(&manifest, &link_config(), None);
         assert!(report.issues().is_empty(), "{:?}", report.issues());
     }
 
     #[test]
     fn phase_two_reports_absent_hardlink_target() {
         let manifest = manifest_of(vec![("h", hardlink_to("missing"))]);
-        let report = verify_manifest(&manifest, &link_config(), None).unwrap();
+        let report = verify_manifest(&manifest, &link_config(), None);
         assert_eq!(report.status(), VerificationStatus::Fail);
         assert!(report.issues().iter().any(|i| {
             i.category == IssueCategory::InvalidArchive
@@ -1366,7 +1356,7 @@ mod tests {
             ("h", hardlink_to("later")),
             ("later", ManifestEntryKind::File),
         ]);
-        let report = verify_manifest(&manifest, &link_config(), None).unwrap();
+        let report = verify_manifest(&manifest, &link_config(), None);
         assert!(report.issues().is_empty(), "{:?}", report.issues());
     }
 
@@ -1376,7 +1366,7 @@ mod tests {
             ("t", ManifestEntryKind::File),
             ("h", hardlink_to("../outside")),
         ]);
-        let report = verify_manifest(&manifest, &link_config(), None).unwrap();
+        let report = verify_manifest(&manifest, &link_config(), None);
         let escapes = report
             .issues()
             .iter()

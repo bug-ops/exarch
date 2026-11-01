@@ -11,6 +11,8 @@ use crate::SecurityConfig;
 use crate::config::Validated;
 use crate::formats::common::DirCache;
 use crate::security::context::ValidationContext;
+use crate::security::fs_view::FsView;
+use crate::security::fs_view::HostFs;
 use crate::security::hardlink::HardlinkTracker;
 use crate::security::hardlink::require_hardlinks_allowed;
 use crate::security::permissions::SanitizedMode;
@@ -18,7 +20,6 @@ use crate::security::permissions::sanitize_permissions;
 use crate::security::quota::EntryCount;
 use crate::security::quota::QuotaPermit;
 use crate::security::quota::QuotaTracker;
-use crate::security::symlink::validate_symlink;
 use crate::security::zipbomb::validate_compression_ratio;
 use crate::types::DestDir;
 use crate::types::EntryType;
@@ -239,6 +240,173 @@ pub enum ValidatedEntryType {
     },
 }
 
+/// The validation state and rules shared by every extraction target: quota,
+/// hardlink and symlink tracking plus the per-entry checks.
+///
+/// It holds neither a root nor a view. Both are passed per call, tied by
+/// [`FsView::Root`], so a target can mutate its view between validations and a
+/// root can never be paired with the wrong view.
+pub(crate) struct ValidatorCore<'a> {
+    config: &'a SecurityConfig<Validated>,
+    quota_tracker: QuotaTracker,
+    hardlink_tracker: HardlinkTracker,
+    symlink_seen: bool,
+}
+
+impl<'a> ValidatorCore<'a> {
+    pub(crate) fn new(config: &'a SecurityConfig<Validated>) -> Self {
+        Self {
+            config,
+            quota_tracker: QuotaTracker::new(),
+            hardlink_tracker: HardlinkTracker::new(),
+            symlink_seen: false,
+        }
+    }
+
+    /// A context reflecting the symlinks seen so far; build a fresh one for
+    /// every entry.
+    pub(crate) fn context<'c, V: FsView>(&self) -> ValidationContext<'c, V> {
+        let mut ctx = ValidationContext::new(self.config.allowed.symlinks);
+        if self.symlink_seen {
+            ctx.mark_symlink_seen();
+        }
+        ctx
+    }
+
+    /// See [`EntryValidator::validate_entry`].
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "mirrors the public validate_entry plus the root, view and context"
+    )]
+    pub(crate) fn validate_entry_in<V: FsView>(
+        &mut self,
+        path: &Path,
+        entry_type: &EntryType,
+        uncompressed_size: u64,
+        compressed_size: Option<u64>,
+        mode: Option<u32>,
+        root: &V::Root,
+        view: &V,
+        ctx: &ValidationContext<'_, V>,
+    ) -> Result<ValidatedEntry> {
+        let kind = NodeKind::directory_if(matches!(entry_type, EntryType::Directory));
+        let safe_path = self
+            .validate_entry_path_in(path, kind, root, view, ctx)?
+            .into_inner();
+
+        let (validated_type, sanitized_mode) = match entry_type {
+            EntryType::File => {
+                let permit = self.quota_tracker.reserve(uncompressed_size, self.config)?;
+                self.check_ratio(compressed_size, uncompressed_size)?;
+                let sanitized = mode.map(|m| sanitize_permissions(m, self.config));
+                (ValidatedEntryType::File(permit), sanitized)
+            }
+
+            EntryType::Directory => {
+                self.check_ratio(compressed_size, uncompressed_size)?;
+                (ValidatedEntryType::Directory, None)
+            }
+
+            EntryType::Symlink { target } => {
+                self.check_ratio(compressed_size, uncompressed_size)?;
+                require_symlinks_allowed(self.config)?;
+                self.reserve_symlink(uncompressed_size)?;
+                let safe_symlink =
+                    SafeSymlink::validate_in(&safe_path, target, root, self.config, view)?;
+                self.symlink_seen = true;
+                (ValidatedEntryType::Symlink(safe_symlink), None)
+            }
+
+            EntryType::Hardlink { target } => {
+                self.check_ratio(compressed_size, uncompressed_size)?;
+                require_hardlinks_allowed(self.config)?;
+                let counted = self.quota_tracker.reserve_count(self.config)?;
+
+                // Hardlink tracker validates: absolute paths, traversal,
+                // normalization, escapes
+                self.hardlink_tracker.validate_hardlink_in(
+                    &safe_path,
+                    target,
+                    root,
+                    self.config,
+                    view,
+                )?;
+
+                // SAFETY: validate_hardlink_in verified target is relative,
+                // normalized, within the root
+                let target_safe = SafePath::new_unchecked(target.clone());
+
+                (
+                    ValidatedEntryType::Hardlink {
+                        target: target_safe,
+                        counted,
+                    },
+                    None,
+                )
+            }
+        };
+
+        Ok(ValidatedEntry::new(
+            safe_path,
+            validated_type,
+            sanitized_mode,
+        ))
+    }
+
+    /// See [`EntryValidator::validate_entry_path`].
+    pub(crate) fn validate_entry_path_in<V: FsView>(
+        &self,
+        path: &Path,
+        kind: NodeKind,
+        root: &V::Root,
+        view: &V,
+        ctx: &ValidationContext<'_, V>,
+    ) -> Result<EntryPath<SafePath>> {
+        let entry_path = EntryPath::of(path).require_directory_root(kind)?;
+        let validate =
+            |path| SafePath::validate_with_context_in(path, root, self.config, ctx, view);
+        match entry_path {
+            EntryPath::Root(path) => validate(path).map(EntryPath::Root),
+            EntryPath::Child(path) => validate(path).map(EntryPath::Child),
+        }
+    }
+
+    pub(crate) fn reserve_file(&mut self, size: u64) -> Result<QuotaPermit> {
+        self.quota_tracker.reserve(size, self.config)
+    }
+
+    pub(crate) fn check_ratio(
+        &self,
+        compressed_size: Option<u64>,
+        uncompressed_size: u64,
+    ) -> Result<()> {
+        if let Some(compressed) = compressed_size {
+            validate_compression_ratio(compressed, uncompressed_size, self.config)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn reserve_symlink(&mut self, size: u64) -> Result<()> {
+        self.quota_tracker.reserve(size, self.config).map(drop)
+    }
+
+    pub(crate) fn charge_hardlink(
+        &mut self,
+        counted: EntryCount,
+        size: u64,
+    ) -> Result<QuotaPermit> {
+        self.quota_tracker.charge(counted, size, self.config)
+    }
+
+    pub(crate) fn finish(self) -> ValidationReport {
+        ValidationReport {
+            files_validated: self.quota_tracker.files_extracted(),
+            total_bytes: self.quota_tracker.bytes_written(),
+            hardlinks_tracked: self.hardlink_tracker.count(),
+        }
+    }
+}
+
 /// Orchestrates security validation for archive entries.
 ///
 /// This type maintains state across entry validations:
@@ -287,11 +455,8 @@ pub enum ValidatedEntryType {
 /// OPT-H004: Validator uses references to avoid cloning config and dest.
 /// This eliminates 1 clone per extraction (`SecurityConfig` + `DestDir`).
 pub struct EntryValidator<'a> {
-    config: &'a SecurityConfig<Validated>,
+    core: ValidatorCore<'a>,
     dest: &'a DestDir,
-    quota_tracker: QuotaTracker,
-    hardlink_tracker: HardlinkTracker,
-    symlink_seen: bool,
 }
 
 impl<'a> EntryValidator<'a> {
@@ -299,11 +464,16 @@ impl<'a> EntryValidator<'a> {
     #[must_use]
     pub fn new(config: &'a SecurityConfig<Validated>, dest: &'a DestDir) -> Self {
         Self {
-            config,
+            core: ValidatorCore::new(config),
             dest,
-            quota_tracker: QuotaTracker::new(),
-            hardlink_tracker: HardlinkTracker::new(),
-            symlink_seen: false,
+        }
+    }
+
+    fn host_context<'c>(&self, dir_cache: Option<&'c DirCache>) -> ValidationContext<'c, HostFs> {
+        let ctx = self.core.context();
+        match dir_cache {
+            Some(cache) => ctx.with_dir_cache(cache),
+            None => ctx,
         }
     }
 
@@ -343,66 +513,17 @@ impl<'a> EntryValidator<'a> {
         mode: Option<u32>,
         dir_cache: Option<&DirCache>,
     ) -> Result<ValidatedEntry> {
-        let kind = NodeKind::directory_if(matches!(entry_type, EntryType::Directory));
-        let safe_path = self
-            .validate_entry_path(path, kind, dir_cache)?
-            .into_inner();
-
-        let (validated_type, sanitized_mode) = match entry_type {
-            EntryType::File => {
-                let permit = self.quota_tracker.reserve(uncompressed_size, self.config)?;
-                self.check_ratio(compressed_size, uncompressed_size)?;
-                let sanitized = mode.map(|m| sanitize_permissions(m, self.config));
-                (ValidatedEntryType::File(permit), sanitized)
-            }
-
-            EntryType::Directory => {
-                self.check_ratio(compressed_size, uncompressed_size)?;
-                (ValidatedEntryType::Directory, None)
-            }
-
-            EntryType::Symlink { target } => {
-                self.check_ratio(compressed_size, uncompressed_size)?;
-                require_symlinks_allowed(self.config)?;
-                self.reserve_symlink(uncompressed_size)?;
-                let safe_symlink = validate_symlink(&safe_path, target, self.dest, self.config)?;
-                self.symlink_seen = true;
-                (ValidatedEntryType::Symlink(safe_symlink), None)
-            }
-
-            EntryType::Hardlink { target } => {
-                self.check_ratio(compressed_size, uncompressed_size)?;
-                require_hardlinks_allowed(self.config)?;
-                let counted = self.quota_tracker.reserve_count(self.config)?;
-
-                // Hardlink tracker validates: absolute paths, traversal,
-                // normalization, escapes
-                self.hardlink_tracker.validate_hardlink(
-                    &safe_path,
-                    target,
-                    self.dest,
-                    self.config,
-                )?;
-
-                // SAFETY: validate_hardlink verified target is relative,
-                // normalized, within dest
-                let target_safe = SafePath::new_unchecked(target.clone());
-
-                (
-                    ValidatedEntryType::Hardlink {
-                        target: target_safe,
-                        counted,
-                    },
-                    None,
-                )
-            }
-        };
-
-        Ok(ValidatedEntry::new(
-            safe_path,
-            validated_type,
-            sanitized_mode,
-        ))
+        let ctx = self.host_context(dir_cache);
+        self.core.validate_entry_in(
+            path,
+            entry_type,
+            uncompressed_size,
+            compressed_size,
+            mode,
+            self.dest,
+            &HostFs,
+            &ctx,
+        )
     }
 
     /// Validates only the path portion of an entry — traversal, absolute-path,
@@ -431,20 +552,9 @@ impl<'a> EntryValidator<'a> {
         kind: NodeKind,
         dir_cache: Option<&DirCache>,
     ) -> Result<EntryPath<SafePath>> {
-        let entry_path = EntryPath::of(path).require_directory_root(kind)?;
-        let mut ctx = ValidationContext::new(self.config.allowed.symlinks);
-        if let Some(cache) = dir_cache {
-            ctx = ctx.with_dir_cache(cache);
-        }
-        if self.symlink_seen {
-            ctx.mark_symlink_seen();
-        }
-
-        let validate = |path| SafePath::validate_with_context(path, self.dest, self.config, &ctx);
-        match entry_path {
-            EntryPath::Root(path) => validate(path).map(EntryPath::Root),
-            EntryPath::Child(path) => validate(path).map(EntryPath::Child),
-        }
+        let ctx = self.host_context(dir_cache);
+        self.core
+            .validate_entry_path_in(path, kind, self.dest, &HostFs, &ctx)
     }
 
     /// Reserves quota capacity for a regular file's byte count, independent
@@ -464,31 +574,7 @@ impl<'a> EntryValidator<'a> {
     /// if recording `size` bytes would exceed `max_file_size`,
     /// `max_file_count`, or `max_total_size`.
     pub(crate) fn reserve_file(&mut self, size: u64) -> Result<QuotaPermit> {
-        self.quota_tracker.reserve(size, self.config)
-    }
-
-    /// Validates the compression ratio (zip bomb detection) when a
-    /// compressed size is known.
-    ///
-    /// Extracted so [`validate_entry`](Self::validate_entry) can call it at
-    /// the exact ordering position each entry type requires relative to its
-    /// other checks, without duplicating the `if let Some(compressed) = ...`
-    /// pattern at every call site.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ArchiveError::ZipBomb`] if the compression ratio exceeds the
-    /// configured limit.
-    #[inline]
-    pub(crate) fn check_ratio(
-        &self,
-        compressed_size: Option<u64>,
-        uncompressed_size: u64,
-    ) -> Result<()> {
-        if let Some(compressed) = compressed_size {
-            validate_compression_ratio(compressed, uncompressed_size, self.config)?;
-        }
-        Ok(())
+        self.core.reserve_file(size)
     }
 
     /// Reserves quota capacity for a symlink, charging its stored size the way
@@ -503,7 +589,7 @@ impl<'a> EntryValidator<'a> {
     /// Returns [`ArchiveError::QuotaExceeded`] if recording the link would
     /// exceed `max_file_size`, `max_file_count`, or `max_total_size`.
     pub(crate) fn reserve_symlink(&mut self, size: u64) -> Result<()> {
-        self.quota_tracker.reserve(size, self.config).map(drop)
+        self.core.reserve_symlink(size)
     }
 
     /// Charges a hardlink's copied byte count against the shared quota tracker,
@@ -520,12 +606,13 @@ impl<'a> EntryValidator<'a> {
     ///
     /// Returns [`ArchiveError::QuotaExceeded`] if the copy would exceed
     /// `max_file_size` or `max_total_size`.
+    #[cfg(test)]
     pub(crate) fn charge_hardlink(
         &mut self,
         counted: EntryCount,
         size: u64,
     ) -> Result<QuotaPermit> {
-        self.quota_tracker.charge(counted, size, self.config)
+        self.core.charge_hardlink(counted, size)
     }
 
     /// Finishes validation and returns a summary report.
@@ -534,11 +621,7 @@ impl<'a> EntryValidator<'a> {
     /// validation process.
     #[must_use]
     pub fn finish(self) -> ValidationReport {
-        ValidationReport {
-            files_validated: self.quota_tracker.files_extracted(),
-            total_bytes: self.quota_tracker.bytes_written(),
-            hardlinks_tracked: self.hardlink_tracker.count(),
-        }
+        self.core.finish()
     }
 }
 
@@ -845,7 +928,7 @@ mod tests {
         assert!(result.is_ok());
         let entry = result.unwrap();
         assert_matches!(entry.entry_type, ValidatedEntryType::Symlink(_));
-        assert!(validator.symlink_seen);
+        assert!(validator.core.symlink_seen);
     }
 
     #[test]
@@ -1071,7 +1154,7 @@ mod tests {
         let config = config.validate().expect("valid config");
         let mut validator = EntryValidator::new(&config, &dest);
 
-        assert!(!validator.symlink_seen);
+        assert!(!validator.core.symlink_seen);
 
         // Validate a symlink entry
         validator
@@ -1087,7 +1170,7 @@ mod tests {
             )
             .unwrap();
 
-        assert!(validator.symlink_seen);
+        assert!(validator.core.symlink_seen);
     }
 
     // Issue #426: hardlink quota bypass regression tests.

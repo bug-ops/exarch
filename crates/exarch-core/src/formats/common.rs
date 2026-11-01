@@ -418,6 +418,30 @@ pub fn push_disallowed_extension_warning(report: &mut ExtractionReport, count: u
     }
 }
 
+/// Adds `n` to a byte counter.
+///
+/// # Errors
+///
+/// Returns `QuotaExceeded` on overflow.
+#[inline]
+pub fn checked_add_bytes(total: u64, n: u64) -> Result<u64> {
+    total.checked_add(n).ok_or(ArchiveError::QuotaExceeded {
+        resource: QuotaResource::IntegerOverflow,
+    })
+}
+
+/// Adds `n` to an entry counter.
+///
+/// # Errors
+///
+/// Returns `QuotaExceeded` on overflow.
+#[inline]
+pub fn checked_add_count(total: usize, n: usize) -> Result<usize> {
+    total.checked_add(n).ok_or(ArchiveError::QuotaExceeded {
+        resource: QuotaResource::IntegerOverflow,
+    })
+}
+
 /// Increments `report.files_skipped`, failing closed with
 /// `QuotaExceeded { resource: IntegerOverflow }` instead of wrapping if the
 /// counter is already at its maximum.
@@ -446,13 +470,7 @@ pub fn push_disallowed_extension_warning(report: &mut ExtractionReport, count: u
 /// ```
 #[inline]
 pub fn checked_increment_files_skipped(report: &mut ExtractionReport) -> Result<()> {
-    report.files_skipped =
-        report
-            .files_skipped
-            .checked_add(1)
-            .ok_or(ArchiveError::QuotaExceeded {
-                resource: QuotaResource::IntegerOverflow,
-            })?;
+    report.files_skipped = checked_add_count(report.files_skipped, 1)?;
     Ok(())
 }
 
@@ -760,12 +778,7 @@ pub fn extract_file_with_permit<R: Read>(
     // Checked before any filesystem mutation so a rejected entry never
     // leaves a zero-byte file on disk (restores the pre-#446 ordering).
     if let Some(size) = expected_size {
-        report
-            .bytes_written
-            .checked_add(size)
-            .ok_or(ArchiveError::QuotaExceeded {
-                resource: QuotaResource::IntegerOverflow,
-            })?;
+        checked_add_bytes(report.bytes_written, size)?;
     }
 
     // Folds the duplicate-existence check into the open() syscall itself
@@ -814,13 +827,7 @@ pub fn extract_file_with_permit<R: Read>(
     }
 
     report.files_extracted += 1;
-    report.bytes_written =
-        report
-            .bytes_written
-            .checked_add(bytes_written)
-            .ok_or(ArchiveError::QuotaExceeded {
-                resource: QuotaResource::IntegerOverflow,
-            })?;
+    report.bytes_written = checked_add_bytes(report.bytes_written, bytes_written)?;
 
     Ok(())
 }
@@ -1159,6 +1166,8 @@ pub fn symlink_target_from_bytes(target_bytes: &[u8]) -> Result<PathBuf> {
 ///
 /// Returns an I/O error if `path` does not exist, is a symlink (Unix only,
 /// via `ELOOP`), or otherwise cannot be opened for reading.
+// TODO(critic): wasm32-wasi gets no O_NOFOLLOW here; use
+// std::os::wasi::fs::OpenOptionsExt lookup flags
 pub fn open_no_follow(path: &Path) -> std::io::Result<File> {
     let mut opts = std::fs::OpenOptions::new();
     opts.read(true);

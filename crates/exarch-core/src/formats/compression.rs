@@ -130,13 +130,13 @@ impl CompressionCodec {
             Self::Gzip => Box::new(MultiMember::<_, flate2::bufread::GzDecoder<R>>::new(input)),
             Self::Bzip2 => Box::new(MultiMember::<_, bzip2::bufread::BzDecoder<R>>::new(input)),
             Self::Xz => {
-                let stream = xz2::stream::Stream::new_stream_decoder(
+                let stream = liblzma::stream::Stream::new_stream_decoder(
                     max_decoder_memory,
-                    xz2::stream::CONCATENATED,
+                    liblzma::stream::CONCATENATED,
                 )
                 .map_err(io::Error::from)?;
                 Box::new(XzLimited {
-                    inner: xz2::bufread::XzDecoder::new_stream(input, stream),
+                    inner: liblzma::bufread::XzDecoder::new_stream(input, stream),
                     max: max_decoder_memory,
                 })
             }
@@ -163,7 +163,7 @@ impl CompressionCodec {
                 out,
                 compression_level_to_bzip2(level),
             )),
-            Self::Xz => TarEncoder::Xz(xz2::write::XzEncoder::new(
+            Self::Xz => TarEncoder::Xz(liblzma::write::XzEncoder::new(
                 out,
                 compression_level_to_xz(level),
             )),
@@ -351,7 +351,7 @@ impl<R: BufRead, D: Member<R>> Read for MultiMember<R, D> {
 /// xz decoder that reports liblzma's memory-limit error as a typed
 /// [`DecoderMemoryExceeded`] so `budget_violation` can classify it.
 struct XzLimited<R> {
-    inner: xz2::bufread::XzDecoder<R>,
+    inner: liblzma::bufread::XzDecoder<R>,
     max: u64,
 }
 
@@ -360,8 +360,8 @@ impl<R: BufRead> Read for XzLimited<R> {
         self.inner.read(buf).map_err(|e| {
             let mem_limit = e
                 .get_ref()
-                .and_then(|inner| inner.downcast_ref::<xz2::stream::Error>())
-                .is_some_and(|err| matches!(err, xz2::stream::Error::MemLimit));
+                .and_then(|inner| inner.downcast_ref::<liblzma::stream::Error>())
+                .is_some_and(|err| matches!(err, liblzma::stream::Error::MemLimit));
             if mem_limit {
                 io::Error::other(DecoderMemoryExceeded { max: self.max })
             } else {
@@ -378,7 +378,7 @@ impl<R: BufRead> Read for XzLimited<R> {
 pub(crate) enum TarEncoder<W: Write> {
     Gzip(flate2::write::GzEncoder<W>),
     Bzip2(bzip2::write::BzEncoder<W>),
-    Xz(xz2::write::XzEncoder<W>),
+    Xz(liblzma::write::XzEncoder<W>),
     Zstd(zstd::Encoder<'static, W>),
 }
 
@@ -451,7 +451,7 @@ mod tests {
                 enc.finish().unwrap()
             }
             CompressionCodec::Xz => {
-                let mut enc = xz2::write::XzEncoder::new(Vec::new(), 1);
+                let mut enc = liblzma::write::XzEncoder::new(Vec::new(), 1);
                 enc.write_all(data).unwrap();
                 enc.finish().unwrap()
             }
@@ -642,7 +642,7 @@ mod tests {
     #[test]
     fn test_xz_memlimit_applies_to_later_stream() {
         let encode_at = |preset: u32, data: &[u8]| {
-            let mut enc = xz2::write::XzEncoder::new(Vec::new(), preset);
+            let mut enc = liblzma::write::XzEncoder::new(Vec::new(), preset);
             enc.write_all(data).unwrap();
             enc.finish().unwrap()
         };

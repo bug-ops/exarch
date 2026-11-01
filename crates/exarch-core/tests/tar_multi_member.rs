@@ -56,7 +56,7 @@ fn bzip2(data: &[u8]) -> Vec<u8> {
 }
 
 fn xz(data: &[u8]) -> Vec<u8> {
-    let mut enc = xz2::write::XzEncoder::new(Vec::new(), 1);
+    let mut enc = liblzma::write::XzEncoder::new(Vec::new(), 1);
     enc.write_all(data).unwrap();
     enc.finish().unwrap()
 }

@@ -170,7 +170,9 @@ mod tests {
             _options: &VerificationOptions,
         ) -> Result<VerificationReport> {
             let manifest = self.list(config)?;
-            crate::inspection::verify::verify_manifest(&manifest, config, None)
+            Ok(crate::inspection::verify::verify_manifest(
+                &manifest, config, None,
+            ))
         }
 
         fn format_name(&self) -> &'static str {

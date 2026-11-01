@@ -46,6 +46,7 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use crate::closed_enum::closed_enum;
+use crate::types::DestDir;
 
 /// Maximum number of symlinks followed while resolving a single path, as the
 /// host's `realpath` allows it.
@@ -193,8 +194,65 @@ pub fn name_too_long() -> io::Error {
     io::Error::new(io::ErrorKind::InvalidFilename, "file name too long")
 }
 
+/// A root directory that a validator resolves entry paths against.
+///
+/// Implemented only by [`DestDir`] (the real destination) and [`VirtualRoot`]
+/// (the in-memory model), and tied to its [`FsView`] through
+/// [`FsView::Root`], so a root can never be paired with the wrong view.
+pub trait ModelRoot {
+    /// The root as a path.
+    fn as_path(&self) -> &Path;
+}
+
+impl ModelRoot for DestDir {
+    fn as_path(&self) -> &Path {
+        Self::as_path(self)
+    }
+}
+
+#[cfg(windows)]
+const VIRTUAL_ROOT: &str = r"C:\exarch-virtual-root";
+#[cfg(not(windows))]
+const VIRTUAL_ROOT: &str = "/exarch-virtual-root";
+
+/// The root of a [`VirtualTree`]: a fixed path that is never touched on disk.
+///
+/// Distinct from [`DestDir`], which promises an existing, canonical, writable
+/// directory, so a virtual root can never reach a helper that writes to the
+/// host filesystem.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VirtualRoot(PathBuf);
+
+impl VirtualRoot {
+    /// Creates the fixed virtual root.
+    #[must_use]
+    pub fn new() -> Self {
+        Self(PathBuf::from(VIRTUAL_ROOT))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn at(path: &str) -> Self {
+        Self(PathBuf::from(path))
+    }
+}
+
+impl Default for VirtualRoot {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ModelRoot for VirtualRoot {
+    fn as_path(&self) -> &Path {
+        &self.0
+    }
+}
+
 /// Filesystem probes needed while validating archive entries.
 pub trait FsView {
+    /// The root type a validator resolves paths against in this view.
+    type Root: ModelRoot;
+
     /// Returns `true` if `path` exists, following symlinks.
     fn exists(&self, path: &Path) -> bool;
 
@@ -223,6 +281,8 @@ pub trait FsView {
 pub struct HostFs;
 
 impl FsView for HostFs {
+    type Root = DestDir;
+
     fn exists(&self, path: &Path) -> bool {
         path.exists()
     }
@@ -349,6 +409,8 @@ struct TreeNode {
     kind: Node,
     /// The component exactly as the archive spells it.
     name: OsString,
+    /// The directory holding this node; the root is its own parent.
+    parent: usize,
     /// Only populated for directories; every spelling seen so far (the node's
     /// own and its aliases) mapped to the child, so a repeated spelling is
     /// found without folding it.
@@ -361,10 +423,11 @@ struct TreeNode {
 }
 
 impl TreeNode {
-    fn new(kind: Node, name: &OsStr) -> Self {
+    fn new(kind: Node, name: &OsStr, parent: usize) -> Self {
         Self {
             kind,
             name: name.to_os_string(),
+            parent,
             children: HashMap::new(),
             folded: HashMap::new(),
             empty_merges: Vec::new(),
@@ -377,6 +440,13 @@ const ROOT: usize = 0;
 enum Resolved {
     Inside { rel: PathBuf, id: usize },
     Outside(PathBuf),
+}
+
+/// Where an insert put its node.
+struct Landed {
+    parent: usize,
+    /// The node that already held the name, if any.
+    existing: Option<usize>,
 }
 
 /// A child found by name.
@@ -393,6 +463,8 @@ struct Found {
 /// O(bytes of the path) regardless of how many entries share a prefix. A name
 /// is folded only the first time it is seen; repeats, such as the parents of
 /// every entry in a directory, hit the exact-spelling map.
+// TODO(critic): directory entries are uncounted; bound tree nodes for
+// long-lived sink extractions
 pub struct VirtualTree {
     root: PathBuf,
     nodes: Vec<TreeNode>,
@@ -403,15 +475,15 @@ pub struct VirtualTree {
 }
 
 impl VirtualTree {
-    /// Creates an empty tree rooted at `root` (the canonical destination).
-    pub fn new(root: &Path) -> Self {
+    /// Creates an empty tree rooted at `root`.
+    pub fn new(root: &VirtualRoot) -> Self {
         Self::with_fold(root, fold)
     }
 
-    pub(crate) fn with_fold(root: &Path, fold: FoldFn) -> Self {
+    pub(crate) fn with_fold(root: &VirtualRoot, fold: FoldFn) -> Self {
         Self {
-            root: root.to_path_buf(),
-            nodes: vec![TreeNode::new(Node::Dir, OsStr::new(""))],
+            root: root.as_path().to_path_buf(),
+            nodes: vec![TreeNode::new(Node::Dir, OsStr::new(""), ROOT)],
             fold,
             collisions: Vec::new(),
             empty_merge_nodes: Vec::new(),
@@ -447,15 +519,49 @@ impl VirtualTree {
     /// A failure also names what already occupies the path, so a caller can
     /// tell what overwriting would do.
     pub(crate) fn try_insert(&mut self, rel: &Path, node: Node) -> Result<(), Conflict> {
+        self.insert_node(rel, node).map(drop)
+    }
+
+    /// [`try_insert`](Self::try_insert) that also returns where the node
+    /// landed: the path relative to the root with every symlinked parent
+    /// resolved and every component spelled as the tree first stored it, so two
+    /// spellings of one name give one path.
+    pub(crate) fn place(&mut self, rel: &Path, node: Node) -> Result<PathBuf, Conflict> {
+        Ok(self
+            .insert_node(rel, node)?
+            .map_or_else(PathBuf::new, |landed| {
+                let leaf = landed.existing.map_or_else(
+                    || rel.file_name(),
+                    |id| Some(self.node(id).name.as_os_str()),
+                );
+                let mut resolved = self.path_of(landed.parent);
+                resolved.extend(leaf);
+                resolved
+            }))
+    }
+
+    /// The path of node `id` relative to the root, spelled by the stored names.
+    fn path_of(&self, mut id: usize) -> PathBuf {
+        let mut names = Vec::new();
+        while id != ROOT {
+            let node = self.node(id);
+            names.push(node.name.as_os_str());
+            id = node.parent;
+        }
+        names.into_iter().rev().collect()
+    }
+
+    fn insert_node(&mut self, rel: &Path, node: Node) -> Result<Option<Landed>, Conflict> {
         let Some(name) = rel.file_name() else {
-            return Ok(());
+            return Ok(None);
         };
         let parent = self.ensure_dir(rel.parent().unwrap_or_else(|| Path::new("")))?;
         let existing = self.lookup(parent, name);
         if let Some(found) = existing {
             self.settle_alias(parent, found, name, &node, rel, false);
         }
-        match (existing.map(|f| f.id), node) {
+        let existing = existing.map(|f| f.id);
+        let outcome = match (existing, node) {
             (None, node) => {
                 self.add_child(parent, name, node);
                 Ok(())
@@ -497,7 +603,8 @@ impl VirtualTree {
                     Err(Conflict::already_exists(Occupant::Symlink))
                 }
             },
-        }
+        };
+        outcome.map(|()| Some(Landed { parent, existing }))
     }
 
     #[cfg(test)]
@@ -621,7 +728,7 @@ impl VirtualTree {
     /// Adds a node under `parent`.
     fn add_child(&mut self, parent: usize, name: &OsStr, kind: Node) -> usize {
         let id = self.nodes.len();
-        self.nodes.push(TreeNode::new(kind, name));
+        self.nodes.push(TreeNode::new(kind, name, parent));
         let key = match (self.fold)(name) {
             Cow::Borrowed(_) => None,
             Cow::Owned(key) => Some(key),
@@ -705,21 +812,21 @@ impl VirtualTree {
                     match &self.node(id).kind {
                         Node::Dir => {
                             stack.push(id);
-                            current.push(name);
+                            current.push(&self.node(id).name);
                         }
                         Node::File => {
                             if !pending.is_empty() {
                                 return Err(io::Error::from(io::ErrorKind::NotADirectory));
                             }
                             stack.push(id);
-                            current.push(name);
+                            current.push(&self.node(id).name);
                         }
                         Node::OpaqueSymlink => {
                             if !pending.is_empty() {
                                 return Err(unread_target_error());
                             }
                             stack.push(id);
-                            current.push(name);
+                            current.push(&self.node(id).name);
                         }
                         Node::Symlink(target) => {
                             hops += 1;
@@ -769,6 +876,8 @@ impl VirtualTree {
 }
 
 impl FsView for VirtualTree {
+    type Root = VirtualRoot;
+
     fn exists(&self, path: &Path) -> bool {
         matches!(self.resolve(path), Ok(Resolved::Inside { .. }))
     }
@@ -883,7 +992,7 @@ mod tests {
     use super::*;
 
     fn tree() -> VirtualTree {
-        VirtualTree::new(Path::new("/dest"))
+        VirtualTree::with_fold(&VirtualRoot::at("/dest"), fold)
     }
 
     fn put(t: &mut VirtualTree, path: &str, node: Node) {
@@ -1001,7 +1110,42 @@ mod tests {
     }
 
     fn folding_tree() -> VirtualTree {
-        VirtualTree::with_fold(Path::new("/dest"), ascii_upper)
+        VirtualTree::with_fold(&VirtualRoot::at("/dest"), ascii_upper)
+    }
+
+    #[test]
+    fn place_resolves_in_root_symlinked_parents() {
+        let mut t = tree();
+        put(&mut t, "real", Node::Dir);
+        put(&mut t, "alias", sym("real"));
+        let placed = t.place(Path::new("alias/f"), Node::File).unwrap();
+        assert_eq!(placed, PathBuf::from("real/f"));
+    }
+
+    #[test]
+    fn place_spells_a_folded_name_as_first_stored() {
+        let mut t = folding_tree();
+        assert_eq!(
+            t.place(Path::new("a/x"), Node::File).unwrap(),
+            PathBuf::from("a/x")
+        );
+        assert_eq!(
+            t.place(Path::new("A/x"), Node::File).unwrap(),
+            PathBuf::from("a/x")
+        );
+        assert_eq!(
+            t.canonicalize(Path::new("/dest/A/X")).unwrap(),
+            PathBuf::from("/dest/a/x")
+        );
+    }
+
+    #[test]
+    fn place_of_the_root_is_empty_and_conflicts_leave_no_path() {
+        let mut t = tree();
+        assert_eq!(t.place(Path::new(""), Node::Dir).unwrap(), PathBuf::new());
+        put(&mut t, "f", Node::File);
+        assert!(t.place(Path::new("f"), Node::Dir).is_err());
+        assert!(t.place(Path::new("f/g"), Node::File).is_err());
     }
 
     fn collisions_of(t: &mut VirtualTree) -> Vec<(String, String, CollisionKind)> {
@@ -1130,7 +1274,7 @@ mod tests {
             ascii_upper(name)
         }
 
-        let mut t = VirtualTree::with_fold(Path::new("/dest"), counting);
+        let mut t = VirtualTree::with_fold(&VirtualRoot::at("/dest"), counting);
         for i in 0..500 {
             put(&mut t, &format!("a/b/c/d/file{i}"), Node::File);
         }

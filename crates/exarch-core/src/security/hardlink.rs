@@ -16,7 +16,7 @@ use crate::security::fs_view::ModelRoot as _;
 #[cfg(any(test, feature = "testing"))]
 use crate::types::DestDir;
 use crate::types::SafePath;
-use crate::types::safe_path::check_windows_component;
+use crate::types::safe_path::check_component_for;
 use crate::types::safe_symlink::has_root_or_prefix;
 use crate::types::safe_symlink::resolve_through_symlinks_in;
 
@@ -192,11 +192,9 @@ impl HardlinkTracker {
             });
         }
 
-        if cfg!(windows) {
-            for component in target.components() {
-                if let Component::Normal(comp) = component {
-                    check_windows_component(comp, config)?;
-                }
+        for component in target.components() {
+            if let Component::Normal(comp) = component {
+                check_component_for(view.path_model(), comp, config)?;
             }
         }
 
@@ -216,7 +214,7 @@ impl HardlinkTracker {
         // extraction root via on-disk resolution even though string
         // normalization would pass (two-hop chain bypass,
         // GHSA-83g3-92jg-28cx variant — #116).
-        let resolved = resolve_through_symlinks_in(dest, target, dest, link_path.as_path(), view)
+        let resolved = resolve_through_symlinks_in(dest, target, root, link_path.as_path(), view)
             .map_err(|_| ArchiveError::HardlinkEscape {
             path: link_path.as_path().to_path_buf(),
         })?;

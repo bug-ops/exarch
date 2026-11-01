@@ -6,9 +6,12 @@ use crate::Result;
 use crate::SecurityConfig;
 use crate::config::Validated;
 use crate::security::context::ValidationContext;
+use crate::security::fs_view::Containment;
 use crate::security::fs_view::FsView;
 use crate::security::fs_view::HostFs;
 use crate::security::fs_view::ModelRoot as _;
+use crate::security::fs_view::PathModel;
+use crate::security::fs_view::paths_start_with;
 use std::borrow::Cow;
 use std::ffi::OsStr;
 use std::path::Component;
@@ -220,9 +223,7 @@ impl SafePath {
                 Component::Normal(comp) => {
                     depth += 1;
 
-                    if cfg!(windows) {
-                        check_windows_component(comp, config)?;
-                    }
+                    check_component_for(view.path_model(), comp, config)?;
 
                     if has_banned_components {
                         let comp_str = comp
@@ -292,13 +293,12 @@ impl SafePath {
         if let Some(parent) = resolved.parent()
             && !ctx.is_trusted_parent(parent)
         {
-            match view.canonicalize(parent) {
-                Ok(canonical_parent) => {
-                    if !paths_start_with(&canonical_parent, dest) {
-                        return Err(ArchiveError::PathTraversal {
-                            path: path.to_path_buf(),
-                        });
-                    }
+            match view.canonicalize(parent, root) {
+                Ok(Containment::Within(_)) => {}
+                Ok(Containment::Escapes) => {
+                    return Err(ArchiveError::PathTraversal {
+                        path: path.to_path_buf(),
+                    });
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => {
@@ -312,13 +312,12 @@ impl SafePath {
 
         // Full path canonicalization: skip when symlinks are impossible
         if ctx.needs_full_canonicalize() {
-            match view.canonicalize(&resolved) {
-                Ok(canonical) => {
-                    if !paths_start_with(&canonical, dest) {
-                        return Err(ArchiveError::PathTraversal {
-                            path: path.to_path_buf(),
-                        });
-                    }
+            match view.canonicalize(&resolved, root) {
+                Ok(Containment::Within(_)) => {}
+                Ok(Containment::Escapes) => {
+                    return Err(ArchiveError::PathTraversal {
+                        path: path.to_path_buf(),
+                    });
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                     if !paths_start_with(&resolved, dest) {
@@ -389,6 +388,71 @@ pub(crate) enum WindowsComponentHazard {
     TrailingDotOrSpace,
 }
 
+/// Why a path component is hazardous on some supported platform but not
+/// necessarily on the host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PortableComponentHazard {
+    /// Not valid UTF-8, so UTF-16 and UTF-8 filesystems would read it
+    /// differently.
+    NotUtf8,
+    /// `\` separates components on Windows.
+    Backslash,
+    /// One of `<>"|?*` or a control character, which Windows refuses.
+    ForbiddenCharacter,
+}
+
+impl std::fmt::Display for PortableComponentHazard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::NotUtf8 => "not valid UTF-8",
+            Self::Backslash => "contains a backslash",
+            Self::ForbiddenCharacter => "contains a character Windows refuses",
+        })
+    }
+}
+
+/// Classifies `comp` against the hazards that [`PathModel::Portable`] adds to
+/// the Windows ones. Pure and platform-independent.
+pub(crate) fn portable_component_hazard(comp: &OsStr) -> Option<PortableComponentHazard> {
+    let Some(text) = comp.to_str() else {
+        return Some(PortableComponentHazard::NotUtf8);
+    };
+    if text.contains('\\') {
+        Some(PortableComponentHazard::Backslash)
+    } else if text
+        .contains(|c: char| matches!(c, '<' | '>' | '"' | '|' | '?' | '*') || c <= '\u{1f}')
+    {
+        Some(PortableComponentHazard::ForbiddenCharacter)
+    } else {
+        None
+    }
+}
+
+/// Rejects the component hazards of `model`: none for the host's own rules
+/// except on Windows, and the strictest set for [`PathModel::Portable`].
+pub(crate) fn check_component_for(
+    model: PathModel,
+    comp: &OsStr,
+    config: &SecurityConfig<Validated>,
+) -> Result<()> {
+    match model {
+        PathModel::Host if cfg!(windows) => check_windows_component(comp, config),
+        PathModel::Host => Ok(()),
+        PathModel::Portable => {
+            if let Some(hazard) = portable_component_hazard(comp) {
+                return Err(ArchiveError::violation(format!(
+                    "path component is not portable ({hazard}): {}",
+                    comp.display()
+                )));
+            }
+            check_windows_component(comp, config)
+        }
+    }
+}
+
+// TODO(#780): apply the Backslash/ForbiddenCharacter/C0 hazards to
+// Host-on-Windows too (Windows rejects them at create time), and update the
+// Windows checks in skills/exarch-cli/SKILL.md
 /// Classifies `comp`, reporting never-allowed hazards before the
 /// configurable reserved-name one. Pure and platform-independent.
 pub(crate) fn windows_component_hazard(comp: &OsStr) -> Option<WindowsComponentHazard> {
@@ -478,37 +542,6 @@ pub fn is_windows_reserved_component(comp: &OsStr) -> bool {
         (rest.next(), rest.next()),
         (Some('0'..='9' | '\u{b9}' | '\u{b2}' | '\u{b3}'), None)
     )
-}
-
-/// Case-insensitive path prefix check for macOS/Windows.
-///
-/// On case-insensitive filesystems (macOS, Windows), attackers can bypass
-/// path validation using different case (e.g., `../../USERS/victim/.ssh/`).
-///
-/// Compares `path` and `base` component-by-component rather than as raw
-/// strings, so a shared name prefix without a component boundary (e.g. base
-/// `/tmp/dest` against sibling `/tmp/destevil`) is correctly rejected. See
-/// GHSA-wcmx-7f9h-5mv5.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-fn paths_start_with(path: &Path, base: &Path) -> bool {
-    let mut path_components = path.components();
-    for base_component in base.components() {
-        let Some(path_component) = path_components.next() else {
-            return false;
-        };
-        let path_str = path_component.as_os_str().to_string_lossy().to_lowercase();
-        let base_str = base_component.as_os_str().to_string_lossy().to_lowercase();
-        if path_str != base_str {
-            return false;
-        }
-    }
-    true
-}
-
-/// Case-sensitive path prefix check for Unix (not macOS).
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn paths_start_with(path: &Path, base: &Path) -> bool {
-    path.starts_with(base)
 }
 
 /// Checks if a path contains null bytes.
@@ -998,7 +1031,7 @@ mod tests {
             .with_allow_symlinks(true)
             .validate()
             .expect("valid config");
-        let mut tree = VirtualTree::new(&dest);
+        let mut tree = VirtualTree::for_test(&dest);
         tree.insert(Path::new("up"), Node::Symlink(PathBuf::from("..")))
             .expect("insert");
 

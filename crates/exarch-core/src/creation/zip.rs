@@ -49,11 +49,7 @@ pub fn create_zip<P: AsRef<Path>, Q: AsRef<Path>>(
     sources: &[Q],
     config: &CreationConfig<Validated>,
 ) -> Result<CreationReport> {
-    let file = File::create(output.as_ref())?;
-    let (mut report, file) = create_zip_internal(file, sources, config)?;
-    drop(file);
-    report.bytes_compressed = std::fs::metadata(output.as_ref())?.len();
-    Ok(report)
+    create_zip_with_progress(output, sources, config, &mut NoopProgress)
 }
 
 /// Creates a ZIP archive with progress reporting.
@@ -136,24 +132,26 @@ pub fn create_zip_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
     progress: &mut dyn ProgressCallback,
 ) -> Result<CreationReport> {
     let file = File::create(output.as_ref())?;
-    let (mut report, file) = create_zip_internal_with_progress(file, sources, config, progress)?;
-    drop(file);
-    report.bytes_compressed = std::fs::metadata(output.as_ref())?.len();
-    Ok(report)
+    write_zip(file, sources, config, progress)
 }
 
 /// Internal function that creates ZIP with any writer and progress reporting.
 ///
-/// Returns `(report, writer)` so callers with a file-backed destination can
-/// measure the actual on-disk archive size after the writer is fully
-/// finished and flushed.
-fn create_zip_internal_with_progress<W: Write + Seek, P: AsRef<Path>>(
-    writer: W,
+/// `out` must be positioned at offset 0: ZIP records absolute offsets, so an
+/// archive appended to existing bytes would be corrupt. `bytes_compressed` is
+/// the writer position after the archive is finished.
+pub(crate) fn write_zip<W: Write + Seek, P: AsRef<Path>>(
+    mut out: W,
     sources: &[P],
     config: &CreationConfig<Validated>,
     progress: &mut dyn ProgressCallback,
-) -> Result<(CreationReport, W)> {
-    let mut zip = ZipWriter::new(writer);
+) -> Result<CreationReport> {
+    if out.stream_position()? != 0 {
+        return Err(ArchiveError::InvalidConfiguration {
+            reason: "ZIP output writer must be positioned at offset 0".into(),
+        });
+    }
+    let mut zip = ZipWriter::new(out);
     let mut report = CreationReport::default();
     let start = std::time::Instant::now();
 
@@ -229,26 +227,20 @@ fn create_zip_internal_with_progress<W: Write + Seek, P: AsRef<Path>>(
     }
 
     // Finish writing ZIP
-    let writer = zip.finish().map_err(|e| {
+    let mut writer = zip.finish().map_err(|e| {
         std::io::Error::other(IoContext::new(
             "failed to finish zip archive",
             e.to_string(),
         ))
     })?;
 
+    writer.flush()?;
+    report.bytes_compressed = writer.stream_position()?;
     report.duration = start.elapsed();
 
     tracker.on_complete();
 
-    Ok((report, writer))
-}
-
-fn create_zip_internal<W: Write + Seek, P: AsRef<Path>>(
-    writer: W,
-    sources: &[P],
-    config: &CreationConfig<Validated>,
-) -> Result<(CreationReport, W)> {
-    create_zip_internal_with_progress(writer, sources, config, &mut NoopProgress)
+    Ok(report)
 }
 
 /// Adds a single file to the ZIP archive with progress reporting and reusable

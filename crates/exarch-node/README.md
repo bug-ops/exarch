@@ -140,6 +140,37 @@ an end-of-archive marker); it comes with a Medium issue, so `status` is at least
 `'WARNING'`. With the check on, a TAR entry whose content fails to decode rejects
 the promise.
 
+### Archives in Memory
+
+`listArchiveBytes`, `verifyArchiveBytes` and `extractArchiveToMemory` (each with
+a `Sync` form) take the archive as a `Buffer` or `Uint8Array`. The format is
+detected from the leading bytes, or stated with `format` (`'Tar'`, `'TarGz'`,
+`'TarBz2'`, `'TarXz'`, `'TarZst'`, `'Zip'`, `'SevenZ'`). Nothing is written to
+disk.
+
+```javascript
+const fs = require('node:fs');
+const { listArchiveBytes, verifyArchiveBytes, extractArchiveToMemory } = require('exarch-rs');
+
+const data = fs.readFileSync('archive.tar.gz');
+
+const manifest = await listArchiveBytes(data);
+const report = await verifyArchiveBytes(data);
+
+const result = await extractArchiveToMemory(data, null, null, 64 * 1024 * 1024);
+for (const entry of result.entries) {
+  console.log(entry.path, entry.kind); // 'file', 'directory' or 'symlink'
+  if (entry.kind === 'file') {
+    const content = Buffer.from(entry.data); // entry.data is a Uint8Array
+  }
+}
+```
+
+**Note:** `maxBytes` caps payload plus path bytes plus 256 per entry and
+defaults to the config's `maxTotalSize`; exceeding it rejects with
+`QUOTA_EXCEEDED`. `pathModel: 'portable'` validates names against the strictest
+rules of every platform instead of this host's.
+
 ### Error Handling
 
 ```javascript

@@ -30,13 +30,17 @@ use crate::inspection::report::IssueSeverity;
 use crate::inspection::report::VerificationIssue;
 use crate::inspection::report::VerificationReport;
 use crate::security::fs_view::CollisionKind;
+use crate::security::fs_view::CollisionRecording;
 use crate::security::fs_view::Conflict;
 use crate::security::fs_view::FsView;
 use crate::security::fs_view::LinkKind;
 use crate::security::fs_view::ModelRoot as _;
 use crate::security::fs_view::NameCollision;
 use crate::security::fs_view::Node;
+use crate::security::fs_view::NodeBudget;
 use crate::security::fs_view::Occupant;
+use crate::security::fs_view::PathModel;
+use crate::security::fs_view::PlaceError;
 use crate::security::fs_view::VirtualRoot;
 use crate::security::fs_view::VirtualTree;
 use crate::security::fs_view::check_link_target_length;
@@ -82,7 +86,14 @@ pub(crate) fn verify_manifest_with_structure(
     structure: &ArchiveStructure<'_>,
     integrity: Option<IntegrityOutcome>,
 ) -> VerificationReport {
-    verify_with_tree(manifest, config, structure, integrity, VirtualTree::new)
+    verify_with_tree(manifest, config, structure, integrity, |root| {
+        VirtualTree::new(
+            root,
+            PathModel::Host,
+            NodeBudget::from_config(config),
+            CollisionRecording::Record,
+        )
+    })
 }
 
 /// Verifies against a tree built by `make_tree`, which lets tests choose how
@@ -471,13 +482,13 @@ fn verify_entry(
             _ => {
                 let recorded = record_entry(tree, safe_path.as_path(), &entry.kind);
                 issues.extend(collision_issues(tree));
-                if let Err(conflict) = recorded {
-                    issues.push(placement_issue(
+                if let Err(error) = recorded {
+                    issues.push(place_error_issue(
                         tree,
                         dest,
                         entry,
                         safe_path.as_path(),
-                        conflict,
+                        error,
                     ));
                 }
             }
@@ -588,7 +599,7 @@ fn record_entry(
     tree: &mut VirtualTree,
     path: &Path,
     kind: &ManifestEntryKind,
-) -> std::result::Result<(), Conflict> {
+) -> std::result::Result<(), PlaceError> {
     let node = match kind {
         ManifestEntryKind::File => Node::File,
         ManifestEntryKind::Directory => Node::Dir,
@@ -638,18 +649,33 @@ fn verify_deferred_hardlink(
     // A file over a file is accepted by the tree, but a hardlink cannot
     // replace one: it is created exclusively.
     let occupant = tree.occupant(link_path.as_path());
-    let conflict = match (tree.try_insert(link_path.as_path(), Node::File), occupant) {
-        (Err(conflict), _) => conflict,
-        (Ok(()), Some(occupant)) => Conflict::already_exists(occupant),
+    let error = match (tree.try_insert(link_path.as_path(), Node::File), occupant) {
+        (Err(error), _) => error,
+        (Ok(()), Some(occupant)) => PlaceError::Conflict(Conflict::already_exists(occupant)),
         (Ok(()), None) => return Ok(()),
     };
-    Err(placement_issue(
+    Err(place_error_issue(
         tree,
         dest,
         entry,
         link_path.as_path(),
-        conflict,
+        error,
     ))
+}
+
+fn place_error_issue(
+    tree: &VirtualTree,
+    dest: &VirtualRoot,
+    entry: &ArchiveEntry,
+    rel: &Path,
+    error: PlaceError,
+) -> VerificationIssue {
+    match error {
+        PlaceError::Conflict(conflict) => placement_issue(tree, dest, entry, rel, conflict),
+        PlaceError::Budget(exceeded) => {
+            VerificationIssue::from_error(&exceeded.into(), Some(entry.path.clone()))
+        }
+    }
 }
 
 /// What extraction does at a path an earlier entry already holds.

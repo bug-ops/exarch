@@ -16,6 +16,7 @@ pub use types::CompressionRatio;
 pub use types::PartialWrites;
 pub use types::PolicySetting;
 pub use types::QuotaResource;
+pub use types::ReaderFormatError;
 pub use types::Result;
 pub use types::ZipBombDetails;
 pub use types::ZipBombScope;

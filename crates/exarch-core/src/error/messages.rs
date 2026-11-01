@@ -9,6 +9,7 @@ use super::redaction::sanitize_io_error_for_error;
 use super::types::ArchiveError;
 use super::types::PartialWrites;
 use super::types::PolicySetting;
+use super::types::ReaderFormatError;
 use crate::ExtractionReport;
 use crate::closed_enum::closed_enum;
 
@@ -272,8 +273,12 @@ impl ArchiveError {
             Self::SourceNotAccessible { .. } => FfiKind::SourceNotAccessible,
             Self::OutputExists { .. } => FfiKind::OutputExists,
             Self::InvalidCompressionLevel { .. } => FfiKind::InvalidCompressionLevel,
-            Self::UnknownFormat { .. } => FfiKind::UnknownFormat,
-            Self::InvalidConfiguration { .. } => FfiKind::InvalidConfiguration,
+            Self::UnknownFormat { .. } | Self::ReaderFormat(ReaderFormatError::Unrecognized) => {
+                FfiKind::UnknownFormat
+            }
+            Self::InvalidConfiguration { .. } | Self::ReaderFormat(_) => {
+                FfiKind::InvalidConfiguration
+            }
             Self::PartialExtraction { source, .. } => source.ffi_kind(),
         }
     }
@@ -313,6 +318,7 @@ impl ArchiveError {
                 format!("cannot determine archive format from: {path}")
             }
             Self::InvalidConfiguration { reason } => format!("invalid configuration: {reason}"),
+            Self::ReaderFormat(reason) => reason.to_string(),
             Self::PartialExtraction { source, .. } => source.ffi_description(),
         }
     }

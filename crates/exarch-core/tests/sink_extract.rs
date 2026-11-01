@@ -194,17 +194,6 @@ fn a_tar_source_that_cannot_seek_is_extracted() {
 }
 
 #[test]
-fn seven_z_sources_are_not_supported() {
-    let mut sink = RecordingSink::default();
-    let reader = ArchiveReader::seekable(Cursor::new(Vec::new()), SeekableFormat::SevenZ);
-    let error = extract(reader, &mut sink).unwrap_err();
-    assert!(
-        matches!(error, ArchiveError::InvalidConfiguration { .. }),
-        "{error:?}"
-    );
-}
-
-#[test]
 fn atomic_extraction_is_not_supported() {
     let mut sink = RecordingSink::default();
     let options = ExtractionOptions::default().with_atomic(true);
@@ -343,4 +332,90 @@ fn skipped_duplicate_hardlink_is_counted_and_not_delivered() {
         "{:?}",
         report.warnings
     );
+}
+
+fn tree_node_quota(error: &ArchiveError) -> Option<usize> {
+    match error {
+        ArchiveError::PartialExtraction { source, .. } => tree_node_quota(source),
+        ArchiveError::QuotaExceeded {
+            resource: exarch_core::QuotaResource::TreeNodes { max },
+        } => Some(*max),
+        _ => None,
+    }
+}
+
+fn small_tree_config() -> SecurityConfig {
+    SecurityConfig::default()
+        .with_max_file_count(2)
+        .with_max_path_depth(2)
+}
+
+#[test]
+fn a_flood_of_directory_entries_exhausts_the_node_budget() {
+    let mut sink = RecordingSink::default();
+    let entries: Vec<_> = (0..16)
+        .map(|i| sink_support::tar_dir(&format!("d{i}/")))
+        .collect();
+    let error = extract_to_sink(
+        tar_reader(&entries),
+        &mut sink,
+        &small_tree_config(),
+        &ExtractionOptions::default(),
+    )
+    .unwrap_err();
+    assert_eq!(tree_node_quota(&error), Some(5), "{error:?}");
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[test]
+fn case_variant_directories_charge_the_node_budget() {
+    let mut sink = RecordingSink::default();
+    let entries: Vec<_> = [
+        "aaaa/", "Aaaa/", "aAaa/", "aaAa/", "aaaA/", "AAaa/", "AaAa/",
+    ]
+    .into_iter()
+    .map(sink_support::tar_dir)
+    .collect();
+    let error = extract_to_sink(
+        tar_reader(&entries),
+        &mut sink,
+        &small_tree_config(),
+        &ExtractionOptions::default(),
+    )
+    .unwrap_err();
+    assert_eq!(tree_node_quota(&error), Some(5), "{error:?}");
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[test]
+fn case_variant_directories_do_not_alias_on_a_case_sensitive_host() {
+    let mut sink = RecordingSink::default();
+    let entries: Vec<_> = ["aaaa/", "Aaaa/", "aAaa/", "aaAa/"]
+        .into_iter()
+        .map(sink_support::tar_dir)
+        .collect();
+    let config = SecurityConfig::default()
+        .with_max_file_count(2)
+        .with_max_path_depth(2);
+    extract_to_sink(
+        tar_reader(&entries),
+        &mut sink,
+        &config,
+        &ExtractionOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(sink.tree.dirs.len(), 4);
+}
+
+#[test]
+fn an_archive_within_the_node_budget_extracts() {
+    let mut sink = RecordingSink::default();
+    let entries = [sink_support::tar_dir("a/"), tar_file("a/f", b"x")];
+    extract_to_sink(
+        tar_reader(&entries),
+        &mut sink,
+        &small_tree_config(),
+        &ExtractionOptions::default(),
+    )
+    .unwrap();
 }

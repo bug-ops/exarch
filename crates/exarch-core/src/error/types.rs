@@ -220,6 +220,16 @@ pub enum QuotaResource {
         /// Maximum allowed decoder memory in bytes.
         max: u64,
     },
+    /// Node budget of the in-memory destination model exceeded.
+    TreeNodes {
+        /// Maximum allowed number of distinct names.
+        max: usize,
+    },
+    /// Capacity of an in-memory sink exceeded.
+    SinkCapacity {
+        /// Maximum number of payload bytes the sink accepts.
+        max: u64,
+    },
 }
 
 impl std::fmt::Display for QuotaResource {
@@ -240,6 +250,57 @@ impl std::fmt::Display for QuotaResource {
             Self::DecoderMemory { max } => {
                 write!(f, "quota exceeded: decoder memory (> {max} bytes)")
             }
+            Self::TreeNodes { max } => {
+                write!(
+                    f,
+                    "quota exceeded: destination tree nodes (> {max}, bounded by max_file_count x max_path_depth)"
+                )
+            }
+            Self::SinkCapacity { max } => {
+                write!(f, "quota exceeded: sink capacity (> {max} bytes)")
+            }
+        }
+    }
+}
+
+/// Why the format of an archive supplied as a reader could not be used.
+///
+/// `#[non_exhaustive]` so a future reason is not a breaking change for
+/// downstream matches.
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::ReaderFormatError;
+/// use exarch_core::SeekableFormat;
+///
+/// let err = ReaderFormatError::NeedsSeek(SeekableFormat::Zip);
+/// assert_eq!(err.to_string(), "zip archives need a seekable reader");
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ReaderFormatError {
+    /// The leading bytes match no supported format.
+    Unrecognized,
+    /// The format is recognized but needs a seekable source.
+    NeedsSeek(crate::SeekableFormat),
+    /// The format is recognized but the archive does not start at the
+    /// reader's start.
+    NotAtStart(crate::SeekableFormat),
+}
+
+impl std::fmt::Display for ReaderFormatError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unrecognized => f.write_str("archive format not recognized from its content"),
+            Self::NeedsSeek(format) => {
+                write!(f, "{} archives need a seekable reader", format.as_str())
+            }
+            Self::NotAtStart(format) => write!(
+                f,
+                "{} archive does not start at the beginning of the reader",
+                format.as_str()
+            ),
         }
     }
 }
@@ -354,6 +415,10 @@ pub enum ArchiveError {
         /// The path with unknown format.
         path: PathBuf,
     },
+
+    /// The format of an archive supplied as a reader could not be used.
+    #[error("{0}")]
+    ReaderFormat(ReaderFormatError),
 
     /// Invalid configuration provided.
     #[error("invalid configuration: {reason}")]

@@ -167,6 +167,12 @@ let report = ArchiveCreator::new()
 | [`ArchiveError`](https://docs.rs/exarch-core/latest/exarch_core/enum.ArchiveError.html) | Error types for all operations |
 | [`ValidationReport`](https://docs.rs/exarch-core/latest/exarch_core/struct.ValidationReport.html) | Per-entry verification result (re-exported at crate root) |
 
+### Readers, Sinks and Writers
+
+Archives that are not files on disk go through the same validation pipeline. `ArchiveReader` wraps a TAR stream or a seekable ZIP/7z source, and `ArchiveReader::detect` / `detect_stream` pick the format from the leading bytes. `extract_to_sink` and `extract_to_sink_with_progress` deliver validated entries to an `EntrySink` instead of a directory; `MemorySink` keeps them in memory under a `MemoryLimit` that counts payload, path bytes and a fixed per-entry overhead, and a full sink fails with `QuotaExceeded` (`SinkCapacity`). `PathModel::Portable` makes a sink validate against the strictest rules of every platform on every host. 7z archives are accepted by sinks too.
+
+In the other direction `ArchiveWriter` with `create_to_writer` / `create_to_writer_with_progress` builds a TAR (any codec) or ZIP into any `Write` (and `Seek` for ZIP) instead of a file.
+
 ### Error Handling
 
 ```rust

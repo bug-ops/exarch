@@ -31,7 +31,9 @@ def test_created_bytes_round_trip(source_tree, format):
     assert created.report.bytes_compressed == len(created.data)
 
     result = exarch.extract_archive_to_memory(created.data, format=format)
-    files = {path.rsplit("/", 1)[-1]: e.data for path, e in _entries(result).items() if e.kind == "file"}
+    files = {
+        path.rsplit("/", 1)[-1]: e.data for path, e in _entries(result).items() if e.kind == "file"
+    }
     assert files == {"a.txt": b"alpha", "b.txt": b"bravo" * 100}
 
 
@@ -94,7 +96,10 @@ def test_memory_progress_reports_every_entry(source_tree, format):
 def test_memory_progress_none_matches_plain(tar_gz_bytes):
     result = exarch.extract_archive_to_memory_with_progress(tar_gz_bytes)
 
-    assert result.report.files_extracted == exarch.extract_archive_to_memory(tar_gz_bytes).report.files_extracted
+    assert (
+        result.report.files_extracted
+        == exarch.extract_archive_to_memory(tar_gz_bytes).report.files_extracted
+    )
 
 
 def test_memory_progress_forwards_options(tar_gz_bytes):
@@ -146,7 +151,9 @@ class TestInspectionProgress:
         names = [entry.path for entry in exarch.list_archive_bytes(data).entries]
         _assert_numbered(calls, 0 if format == "TarGz" else len(names))
         assert len(calls) == len(names)
-        assert sorted(path.rstrip("/") for path, *_ in calls) == sorted(n.rstrip("/") for n in names)
+        assert sorted(path.rstrip("/") for path, *_ in calls) == sorted(
+            n.rstrip("/") for n in names
+        )
 
     def test_works_without_callback(self, tar_gz_bytes, call):
         assert call(tar_gz_bytes, None) is not None

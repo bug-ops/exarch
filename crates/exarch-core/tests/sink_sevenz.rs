@@ -16,6 +16,7 @@ use exarch_core::EntrySink;
 use exarch_core::ExtractionOptions;
 use exarch_core::MemoryLimit;
 use exarch_core::MemorySink;
+use exarch_core::PathModel;
 use exarch_core::ProgressCallback;
 use exarch_core::QuotaResource;
 use exarch_core::SecurityConfig;
@@ -396,10 +397,11 @@ fn a_255_byte_name_is_accepted_and_a_256_byte_name_refused() {
 fn the_portable_path_limit_applies_to_a_portable_sink() {
     let name = vec!["a".repeat(250); 5].join("/");
     let bytes = archive(&[Member::File(&name, b"hi")], false);
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     extract_bytes(bytes.clone(), &config(), &mut RecordingSink::default()).unwrap();
 
-    let error = extract_bytes(bytes, &config(), &mut MemorySink::default()).unwrap_err();
+    let mut sink = MemorySink::default().with_path_model(PathModel::Portable);
+    let error = extract_bytes(bytes, &config(), &mut sink).unwrap_err();
     assert!(is_name_too_long(&error), "{error:?}");
 }
 

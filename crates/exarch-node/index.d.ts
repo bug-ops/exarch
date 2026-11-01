@@ -924,6 +924,67 @@ export declare function extractArchive(archivePath: string, outputDir: string, c
 export declare function extractArchiveSync(archivePath: string, outputDir: string, config?: SecurityConfig | undefined | null, options?: ExtractionOptions | undefined | null): ExtractionReport
 
 /**
+ * Extract an archive held in memory into memory (async).
+ *
+ * The archive passes the same validation as `extractArchive`; nothing is
+ * written to disk.
+ *
+ * # Arguments
+ *
+ * * `data` - The archive bytes (copied before the call returns)
+ * * `config` - Optional `SecurityConfig` (uses secure defaults if omitted)
+ * * `options` - Optional `ExtractionOptions` (`atomic` is not supported)
+ * * `maxBytes` - The most bytes to keep: payload (file data, hardlink copies
+ *   and symlink targets) plus path bytes plus 256 per entry; defaults to the
+ *   config's `maxTotalSize`
+ * * `pathModel` - `'host'` (default) or `'portable'`
+ * * `format` - The archive format; detected from the leading bytes if omitted
+ *
+ * # Returns
+ *
+ * Promise resolving to `MemoryExtraction` with the report and the entries
+ *
+ * # Errors
+ *
+ * Rejects with `INVALID_CONFIGURATION` for a `maxBytes` that is not a positive
+ * whole number, `QUOTA_EXCEEDED` when a quota or `maxBytes` is exceeded, and
+ * the errors of `extractArchive` otherwise.
+ *
+ * # Examples
+ *
+ * ```javascript
+ * const { entries } = await extractArchiveToMemory(fs.readFileSync('a.tar.gz'));
+ * ```
+ */
+export declare function extractArchiveToMemory(data: Uint8Array, config?: SecurityConfig | undefined | null, options?: ExtractionOptions | undefined | null, maxBytes?: number | undefined | null, pathModel?: PathModel | undefined | null, format?: ArchiveType | undefined | null): Promise<MemoryExtraction>
+
+/**
+ * Extract an archive held in memory into memory (sync).
+ *
+ * Blocks the event loop until extraction completes. Prefer
+ * `extractArchiveToMemory`.
+ *
+ * # Arguments
+ *
+ * The arguments of `extractArchiveToMemory`.
+ *
+ * # Returns
+ *
+ * `MemoryExtraction` with the report and the entries
+ *
+ * # Errors
+ *
+ * The errors of `extractArchiveToMemory`.
+ *
+ * # Examples
+ *
+ * ```javascript
+ * const { entries } = extractArchiveToMemorySync(fs.readFileSync('a.zip'));
+ * ```
+ */
+export declare function extractArchiveToMemorySync(data: Uint8Array, config?: SecurityConfig | undefined | null, options?: ExtractionOptions | undefined | null, maxBytes?: number | undefined | null, pathModel?: PathModel | undefined | null, format?: ArchiveType | undefined | null): MemoryExtraction
+
+/**
  * Extract an archive to the specified directory with a progress callback
  * (async).
  *
@@ -1090,6 +1151,60 @@ export type IssueSeverity = 'INFO' | 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL'
 export declare function listArchive(archivePath: string, config?: SecurityConfig | undefined | null): Promise<ArchiveManifest>
 
 /**
+ * List the contents of an archive held in memory, without extracting (async).
+ *
+ * # Arguments
+ *
+ * * `data` - The archive bytes (a `Buffer` or any `Uint8Array`); copied before
+ *   the call returns
+ * * `config` - Optional `SecurityConfig` (uses secure defaults if omitted)
+ * * `format` - The archive format; detected from the leading bytes if omitted
+ *
+ * # Returns
+ *
+ * Promise resolving to `ArchiveManifest` with entry metadata
+ *
+ * # Errors
+ *
+ * Rejects with `UNKNOWN_FORMAT` if the format cannot be detected, and with
+ * the errors of `listArchive` otherwise.
+ *
+ * # Examples
+ *
+ * ```javascript
+ * const manifest = await listArchiveBytes(fs.readFileSync('archive.tar.gz'));
+ * ```
+ */
+export declare function listArchiveBytes(data: Uint8Array, config?: SecurityConfig | undefined | null, format?: ArchiveType | undefined | null): Promise<ArchiveManifest>
+
+/**
+ * List the contents of an archive held in memory, without extracting (sync).
+ *
+ * Blocks the event loop until listing completes. Prefer `listArchiveBytes`.
+ *
+ * # Arguments
+ *
+ * * `data` - The archive bytes
+ * * `config` - Optional `SecurityConfig` (uses secure defaults if omitted)
+ * * `format` - The archive format; detected from the leading bytes if omitted
+ *
+ * # Returns
+ *
+ * `ArchiveManifest` with entry metadata
+ *
+ * # Errors
+ *
+ * The errors of `listArchiveBytes`.
+ *
+ * # Examples
+ *
+ * ```javascript
+ * const manifest = listArchiveBytesSync(fs.readFileSync('archive.zip'));
+ * ```
+ */
+export declare function listArchiveBytesSync(data: Uint8Array, config?: SecurityConfig | undefined | null, format?: ArchiveType | undefined | null): ArchiveManifest
+
+/**
  * List archive contents without extracting (sync).
  *
  * Synchronous version of `listArchive`. Blocks the event loop until
@@ -1123,11 +1238,45 @@ export declare function listArchiveSync(archivePath: string, config?: SecurityCo
 /** Manifest entry type. */
 export type ManifestEntryType = 'File' | 'Directory' | 'Symlink' | 'Hardlink'
 
+/** An entry extracted into memory. */
+export interface MemoryEntry {
+  /** Entry path, relative, as delivered by extraction. */
+  path: string
+  /** What the entry is. */
+  kind: MemoryEntryKind
+  /**
+   * The file's bytes as a `Uint8Array` (a plain `Uint8Array`, not a
+   * `Buffer`; input parameters accept both); only for a file.
+   */
+  data?: Uint8Array
+  /**
+   * Permission bits after setuid and setgid were stripped; only for a file
+   * whose archive carries a mode.
+   */
+  mode?: number
+  /** Symlink target as the archive spells it; only for a symlink. */
+  target?: string
+}
+
+/** What a `MemoryEntry` holds. */
+export type MemoryEntryKind = 'file' | 'directory' | 'symlink'
+
+/** The result of `extractArchiveToMemory`. */
+export interface MemoryExtraction {
+  /** Extraction statistics. */
+  report: ExtractionReport
+  /** The extracted entries in path order. */
+  entries: Array<MemoryEntry>
+}
+
 /**
  * Value of the `writes` property: whether a failed extraction left files on
  * disk.
  */
 export type PartialWrites = 'kept' | 'rolled_back'
+
+/** The path semantics extraction validates names against. */
+export type PathModel = 'host' | 'portable'
 
 /**
  * Value of the `relaxableBy` property: the `SecurityConfig` setting whose
@@ -1237,6 +1386,61 @@ export type VerificationStatus = 'PASS' | 'FAIL' | 'WARNING'
  * ```
  */
 export declare function verifyArchive(archivePath: string, config?: SecurityConfig | undefined | null, options?: VerificationOptions | undefined | null): Promise<VerificationReport>
+
+/**
+ * Verify the security of an archive held in memory (async).
+ *
+ * # Arguments
+ *
+ * * `data` - The archive bytes (copied before the call returns)
+ * * `config` - Optional `SecurityConfig` (uses secure defaults if omitted)
+ * * `options` - Optional `VerificationOptions`
+ * * `format` - The archive format; detected from the leading bytes if omitted
+ *
+ * # Returns
+ *
+ * Promise resolving to `VerificationReport` with validation results
+ *
+ * # Errors
+ *
+ * The errors of `listArchiveBytes`.
+ *
+ * # Examples
+ *
+ * ```javascript
+ * const report = await verifyArchiveBytes(fs.readFileSync('archive.zip'));
+ * ```
+ */
+export declare function verifyArchiveBytes(data: Uint8Array, config?: SecurityConfig | undefined | null, options?: VerificationOptions | undefined | null, format?: ArchiveType | undefined | null): Promise<VerificationReport>
+
+/**
+ * Verify the security of an archive held in memory (sync).
+ *
+ * Blocks the event loop until verification completes. Prefer
+ * `verifyArchiveBytes`.
+ *
+ * # Arguments
+ *
+ * * `data` - The archive bytes
+ * * `config` - Optional `SecurityConfig` (uses secure defaults if omitted)
+ * * `options` - Optional `VerificationOptions`
+ * * `format` - The archive format; detected from the leading bytes if omitted
+ *
+ * # Returns
+ *
+ * `VerificationReport` with validation results
+ *
+ * # Errors
+ *
+ * The errors of `listArchiveBytes`.
+ *
+ * # Examples
+ *
+ * ```javascript
+ * const report = verifyArchiveBytesSync(fs.readFileSync('archive.zip'));
+ * ```
+ */
+export declare function verifyArchiveBytesSync(data: Uint8Array, config?: SecurityConfig | undefined | null, options?: VerificationOptions | undefined | null, format?: ArchiveType | undefined | null): VerificationReport
 
 /**
  * Verify archive security (sync).

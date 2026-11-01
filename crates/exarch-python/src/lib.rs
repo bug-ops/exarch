@@ -6,6 +6,7 @@
 
 use pyo3::prelude::*;
 
+mod buffer;
 mod config;
 mod error;
 mod report;
@@ -798,6 +799,9 @@ fn exarch(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(create_archive_with_progress, m)?)?;
     m.add_function(wrap_pyfunction!(list_archive, m)?)?;
     m.add_function(wrap_pyfunction!(verify_archive, m)?)?;
+    m.add_function(wrap_pyfunction!(buffer::list_archive_bytes, m)?)?;
+    m.add_function(wrap_pyfunction!(buffer::verify_archive_bytes, m)?)?;
+    m.add_function(wrap_pyfunction!(buffer::extract_archive_to_memory, m)?)?;
     #[cfg(feature = "panic-injection")]
     m.add_function(wrap_pyfunction!(_trigger_panic_for_testing, m)?)?;
 
@@ -816,6 +820,8 @@ fn exarch(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyVerificationIssue>()?;
     m.add_class::<PyIntegrityGaps>()?;
     m.add_class::<PyUnverifiedEntry>()?;
+    m.add_class::<buffer::PyMemoryEntry>()?;
+    m.add_class::<buffer::PyMemoryExtraction>()?;
 
     // Exception types
     register_exceptions(m)?;

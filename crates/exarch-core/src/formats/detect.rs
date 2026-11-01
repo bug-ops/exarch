@@ -1,6 +1,5 @@
 //! Archive format detection.
 
-use std::io::Read as _;
 use std::path::Path;
 
 use crate::ArchiveError;
@@ -86,6 +85,19 @@ pub(crate) enum FormatFamily {
     Tar(Option<CompressionCodec>),
     Zip,
     SevenZ,
+}
+
+impl FormatFamily {
+    /// The codec of a TAR family, or the seekable format of a container one.
+    pub(crate) const fn tar_codec(
+        self,
+    ) -> std::result::Result<Option<CompressionCodec>, crate::SeekableFormat> {
+        match self {
+            Self::Tar(codec) => Ok(codec),
+            Self::Zip => Err(crate::SeekableFormat::Zip),
+            Self::SevenZ => Err(crate::SeekableFormat::SevenZ),
+        }
+    }
 }
 
 impl ArchiveType {
@@ -228,29 +240,59 @@ pub(crate) fn detect_format_from_extension(path: &Path) -> Result<ArchiveType> {
 /// Returns `None` if the file cannot be read or no signature matches.
 fn detect_format_from_magic(path: &Path) -> Option<ArchiveType> {
     let mut file = std::fs::File::open(path).ok()?;
-    let mut buf = [0u8; MAGIC_READ_LEN];
-    let mut filled = 0;
+    let header = peek_header(&mut file).ok()?;
+    match_signature(header.as_slice())
+}
 
-    // Loop until the buffer is full or we reach EOF.
-    while filled < buf.len() {
-        match file.read(&mut buf[filled..]) {
+/// The leading bytes of a source, as many as [`MAGIC_READ_LEN`] allows.
+pub(crate) struct Header {
+    buf: [u8; MAGIC_READ_LEN],
+    filled: usize,
+}
+
+impl Header {
+    /// The bytes that were actually read.
+    pub(crate) fn as_slice(&self) -> &[u8] {
+        &self.buf[..self.filled]
+    }
+}
+
+/// Reads up to [`MAGIC_READ_LEN`] bytes from `reader`, looping over short
+/// reads and `Interrupted` until the buffer is full or the source ends.
+///
+/// # Errors
+///
+/// Returns the first read error other than `Interrupted`.
+pub(crate) fn peek_header<R: std::io::Read + ?Sized>(reader: &mut R) -> std::io::Result<Header> {
+    let mut header = Header {
+        buf: [0; MAGIC_READ_LEN],
+        filled: 0,
+    };
+    while header.filled < MAGIC_READ_LEN {
+        match reader.read(&mut header.buf[header.filled..]) {
             Ok(0) => break,
-            Ok(n) => filled += n,
+            Ok(n) => header.filled += n,
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-
-            Err(_) => return None,
+            Err(e) => return Err(e),
         }
     }
+    Ok(header)
+}
 
-    let header = &buf[..filled];
-
-    for &(offset, sig, archive_type) in MAGIC_SIGNATURES {
-        let end = offset.checked_add(sig.len())?;
-        if header.len() >= end && &header[offset..end] == sig {
-            return Some(archive_type);
-        }
-    }
-    None
+/// Matches `header` against [`MAGIC_SIGNATURES`]; the first entry in table
+/// order wins, so an offset-0 magic beats the `ustar` signature at 257.
+///
+/// The one signature table behind path, seekable and streaming detection.
+pub(crate) fn match_signature(header: &[u8]) -> Option<ArchiveType> {
+    MAGIC_SIGNATURES
+        .iter()
+        .find(|&&(offset, sig, _)| {
+            offset
+                .checked_add(sig.len())
+                .and_then(|end| header.get(offset..end))
+                .is_some_and(|window| window == sig)
+        })
+        .map(|&(_, _, archive_type)| archive_type)
 }
 
 #[cfg(test)]
@@ -610,5 +652,22 @@ mod tests {
         data[257..262].copy_from_slice(b"ustar");
         std::fs::write(&path, &data).unwrap();
         assert_eq!(detect_format(&path).unwrap(), ArchiveType::Tar);
+    }
+
+    #[test]
+    fn match_signature_prefers_offset_zero_magic_over_ustar() {
+        let mut header = [0u8; MAGIC_READ_LEN];
+        header[257..262].copy_from_slice(b"ustar");
+        assert_eq!(match_signature(&header), Some(ArchiveType::Tar));
+        header[..4].copy_from_slice(b"PK\x03\x04");
+        assert_eq!(match_signature(&header), Some(ArchiveType::Zip));
+    }
+
+    #[test]
+    fn match_signature_handles_short_and_empty_headers() {
+        assert_eq!(match_signature(&[]), None);
+        assert_eq!(match_signature(b"\x1f"), None);
+        assert_eq!(match_signature(b"\x1f\x8b"), Some(ArchiveType::TarGz));
+        assert_eq!(match_signature(&[0; 261]), None);
     }
 }

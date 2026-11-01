@@ -664,6 +664,10 @@ pub struct VerificationIssue {
     pub context: Option<String>,
 }
 
+fn high_invalid_archive(message: String) -> (IssueSeverity, IssueCategory, String) {
+    (IssueSeverity::High, IssueCategory::InvalidArchive, message)
+}
+
 impl VerificationIssue {
     /// The one Low-severity security finding: two directories that merge
     /// without either holding an entry, which changes nothing on disk.
@@ -766,11 +770,12 @@ impl VerificationIssue {
                 IssueCategory::InvalidArchive,
                 format!("Unknown format: {}", path.display()),
             ),
-            ArchiveError::InvalidConfiguration { reason } => (
-                IssueSeverity::High,
-                IssueCategory::InvalidArchive,
-                format!("Invalid configuration: {reason}"),
-            ),
+            ArchiveError::InvalidConfiguration { reason } => {
+                high_invalid_archive(format!("Invalid configuration: {reason}"))
+            }
+            ArchiveError::ReaderFormat(reason) => {
+                high_invalid_archive(format!("Reader format: {reason}"))
+            }
             ArchiveError::PartialExtraction { source, .. } => {
                 return Self::from_error(source, entry_path);
             }

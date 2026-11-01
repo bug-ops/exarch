@@ -5,12 +5,19 @@
 //! [`extract_to_sink`](crate::extract_to_sink). The constructors encode what
 //! each format needs: a TAR stream is forward-only, so any `Read` will do,
 //! while ZIP and 7z read a directory at the end of the archive and need `Seek`.
-//! The format is stated by the caller; nothing is sniffed from the bytes.
+//! The caller states the format with [`ArchiveReader::tar`],
+//! [`ArchiveReader::seekable`] or [`ArchiveReader::of_type`], or has it
+//! sniffed from the leading bytes by [`ArchiveReader::detect`] and
+//! [`ArchiveReader::detect_stream`].
 
 use std::io::BufReader;
+use std::io::Cursor;
 use std::io::Read;
 use std::io::Seek;
+use std::io::SeekFrom;
 
+use crate::ArchiveError;
+use crate::ReaderFormatError;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::VerificationOptions;
@@ -20,6 +27,9 @@ use crate::formats::TarArchive;
 use crate::formats::ZipArchive;
 use crate::formats::compression::CompressionCodec;
 use crate::formats::detect::ArchiveType;
+use crate::formats::detect::FormatFamily;
+use crate::formats::detect::match_signature;
+use crate::formats::detect::peek_header;
 use crate::formats::traits::ArchiveFormat;
 use crate::inspection::ArchiveManifest;
 use crate::inspection::VerificationReport;
@@ -128,6 +138,151 @@ impl<'a> ArchiveReader<'a> {
                 reader: Box::new(reader),
                 format,
             },
+        }
+    }
+
+    /// An archive of the stated `format` in `reader`, whichever way it is read.
+    ///
+    /// The reader must start at the archive, as for [`Self::tar`] and
+    /// [`Self::seekable`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::ArchiveReader;
+    /// use exarch_core::formats::detect::ArchiveType;
+    /// use std::io::Cursor;
+    ///
+    /// let reader = ArchiveReader::of_type(Cursor::new(Vec::<u8>::new()), ArchiveType::TarGz);
+    /// assert_eq!(reader.format(), ArchiveType::TarGz);
+    /// ```
+    #[must_use]
+    pub fn of_type<R: Read + Seek + Send + 'a>(reader: R, format: ArchiveType) -> Self {
+        match format.family() {
+            FormatFamily::Tar(codec) => Self::tar(reader, codec),
+            FormatFamily::Zip => Self::seekable(reader, SeekableFormat::Zip),
+            FormatFamily::SevenZ => Self::seekable(reader, SeekableFormat::SevenZ),
+        }
+    }
+
+    /// An archive held in memory: of the stated `format`, or detected from its
+    /// leading bytes when `format` is `None`.
+    ///
+    /// # Errors
+    ///
+    /// With `format` of `None`, the errors of [`Self::detect`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::ArchiveReader;
+    /// use exarch_core::formats::detect::ArchiveType;
+    ///
+    /// let bytes = b"PK\x05\x06\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0".to_vec();
+    /// let detected = ArchiveReader::from_bytes(bytes.clone(), None)?;
+    /// assert_eq!(detected.format(), ArchiveType::Zip);
+    ///
+    /// let stated = ArchiveReader::from_bytes(bytes, Some(ArchiveType::Tar))?;
+    /// assert_eq!(stated.format(), ArchiveType::Tar);
+    /// # Ok::<(), exarch_core::ArchiveError>(())
+    /// ```
+    pub fn from_bytes<B: AsRef<[u8]> + Send + 'a>(
+        bytes: B,
+        format: Option<ArchiveType>,
+    ) -> Result<Self> {
+        let cursor = Cursor::new(bytes);
+        match format {
+            Some(format) => Ok(Self::of_type(cursor, format)),
+            None => Self::detect(cursor),
+        }
+    }
+
+    /// Detects the format of the archive at the current position of a
+    /// seekable `reader` from its leading bytes.
+    ///
+    /// The reader is left at the position it was in. A TAR archive may start
+    /// anywhere; a ZIP or 7z archive must start at offset 0, because both
+    /// address their records by absolute offsets. Where several signatures
+    /// match, the first in table order wins: a container magic at the start
+    /// beats the `ustar` marker at offset 257. A v7 TAR (no `ustar` marker)
+    /// and a ZIP with data prepended are not recognized; use [`Self::tar`]
+    /// for the former.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArchiveError::ReaderFormat`] with `Unrecognized` if no
+    /// signature matches, or with `NotAtStart` if a ZIP or 7z signature is
+    /// found at a position other than 0. Returns [`ArchiveError::Io`] if the
+    /// reader cannot be read or repositioned.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::ArchiveReader;
+    /// use exarch_core::formats::detect::ArchiveType;
+    /// use std::io::Cursor;
+    ///
+    /// let empty_zip = b"PK\x05\x06\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
+    /// let reader = ArchiveReader::detect(Cursor::new(empty_zip.to_vec()))?;
+    /// assert_eq!(reader.format(), ArchiveType::Zip);
+    /// # Ok::<(), exarch_core::ArchiveError>(())
+    /// ```
+    pub fn detect<R: Read + Seek + Send + 'a>(mut reader: R) -> Result<Self> {
+        let start = reader.stream_position().map_err(ArchiveError::Io)?;
+        let header = peek_header(&mut reader).map_err(ArchiveError::Io)?;
+        reader
+            .seek(SeekFrom::Start(start))
+            .map_err(ArchiveError::Io)?;
+        let format = match_signature(header.as_slice())
+            .ok_or(ArchiveError::ReaderFormat(ReaderFormatError::Unrecognized))?;
+        match format.family().tar_codec() {
+            Err(container) if start != 0 => Err(ArchiveError::ReaderFormat(
+                ReaderFormatError::NotAtStart(container),
+            )),
+            _ => Ok(Self::of_type(reader, format)),
+        }
+    }
+
+    /// Detects the format of a forward-only `reader` from its leading bytes.
+    ///
+    /// Only TAR streams can be read without seeking. The bytes consumed for
+    /// detection are replayed in front of the rest of the stream, so nothing
+    /// is lost. The signature rules are those of [`Self::detect`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArchiveError::ReaderFormat`] with `NeedsSeek` if the bytes
+    /// are a ZIP or 7z signature, or with `Unrecognized` if no signature
+    /// matches. Returns [`ArchiveError::Io`] if the reader cannot be read.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::ArchiveError;
+    /// use exarch_core::ArchiveReader;
+    /// use exarch_core::ReaderFormatError;
+    /// use exarch_core::SeekableFormat;
+    ///
+    /// let zip: &[u8] = b"PK\x03\x04 and the rest";
+    /// assert!(matches!(
+    ///     ArchiveReader::detect_stream(zip),
+    ///     Err(ArchiveError::ReaderFormat(ReaderFormatError::NeedsSeek(
+    ///         SeekableFormat::Zip
+    ///     )))
+    /// ));
+    /// ```
+    pub fn detect_stream<R: Read + Send + 'a>(mut reader: R) -> Result<Self> {
+        let header = peek_header(&mut reader).map_err(ArchiveError::Io)?;
+        let format = match_signature(header.as_slice())
+            .ok_or(ArchiveError::ReaderFormat(ReaderFormatError::Unrecognized))?;
+        match format.family().tar_codec() {
+            Ok(codec) => {
+                let replay = Cursor::new(header.as_slice().to_vec());
+                Ok(Self::tar(replay.chain(reader), codec))
+            }
+            Err(container) => Err(ArchiveError::ReaderFormat(ReaderFormatError::NeedsSeek(
+                container,
+            ))),
         }
     }
 

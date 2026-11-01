@@ -111,6 +111,33 @@ without an end-of-archive marker); it comes with a Medium issue, so `status` is
 at least `"WARNING"`. With the check on, a TAR entry whose content fails to
 decode raises `InvalidArchiveError`.
 
+### Archives in Memory
+
+`list_archive_bytes`, `verify_archive_bytes` and `extract_archive_to_memory`
+take the archive as `bytes`. The format is detected from the leading bytes, or
+stated with `format` (`"Tar"`, `"TarGz"`, `"TarBz2"`, `"TarXz"`, `"TarZst"`,
+`"Zip"`, `"SevenZ"`). Nothing is written to disk.
+
+```python
+import exarch
+
+data = open("archive.tar.gz", "rb").read()
+
+manifest = exarch.list_archive_bytes(data)
+report = exarch.verify_archive_bytes(data)
+
+result = exarch.extract_archive_to_memory(data, max_bytes=64 * 1024 * 1024)
+for entry in result.entries:
+    print(entry.path, entry.kind)  # "file", "directory" or "symlink"
+    if entry.kind == "file":
+        content = entry.data  # bytes
+```
+
+**Note:** `max_bytes` caps payload plus path bytes plus 256 per entry and
+defaults to the config's `max_total_size`; exceeding it raises
+`QuotaExceededError`. `path_model="portable"` validates names against the
+strictest rules of every platform instead of this host's.
+
 ### Error Handling
 
 ```python

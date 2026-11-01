@@ -73,6 +73,20 @@ impl TryFrom<CoreArchiveType> for ArchiveType {
     }
 }
 
+impl From<ArchiveType> for CoreArchiveType {
+    fn from(value: ArchiveType) -> Self {
+        match value {
+            ArchiveType::Tar => Self::Tar,
+            ArchiveType::TarGz => Self::TarGz,
+            ArchiveType::TarBz2 => Self::TarBz2,
+            ArchiveType::TarXz => Self::TarXz,
+            ArchiveType::TarZst => Self::TarZst,
+            ArchiveType::Zip => Self::Zip,
+            ArchiveType::SevenZ => Self::SevenZ,
+        }
+    }
+}
+
 /// Manifest entry type.
 // Values must equal `exarch_core::inspection::ManifestEntryType::as_str`.
 #[napi(string_enum)]

@@ -10,7 +10,8 @@ use std::path::PathBuf;
 
 use super::DestDir;
 use super::SafePath;
-use super::safe_path::check_windows_component;
+use super::safe_path::check_component_for;
+use crate::security::fs_view::Containment;
 use crate::security::fs_view::FsView;
 use crate::security::fs_view::HostFs;
 use crate::security::fs_view::ModelRoot as _;
@@ -179,9 +180,7 @@ impl SafeSymlink {
         for component in target.components() {
             if let std::path::Component::Normal(comp) = component {
                 target_depth += 1;
-                if cfg!(windows) {
-                    check_windows_component(comp, config)?;
-                }
+                check_component_for(view.path_model(), comp, config)?;
                 let comp_str = comp.to_string_lossy();
                 if !config.is_path_component_allowed(&comp_str) {
                     return Err(ArchiveError::relaxable_violation(
@@ -220,7 +219,7 @@ impl SafeSymlink {
         // GHSA-83g3-92jg-28cx variant — issue #116).
         let link_parent = link.as_path().parent().unwrap_or_else(|| Path::new(""));
         let link_parent_full = dest.join(link_parent);
-        resolve_through_symlinks_in(&link_parent_full, target, dest, link.as_path(), view)?;
+        resolve_through_symlinks_in(&link_parent_full, target, root, link.as_path(), view)?;
 
         Ok(Self {
             link_path: link.as_path().to_path_buf(),
@@ -341,7 +340,7 @@ fn verify_parent_not_symlink<V: FsView>(path: &Path, dest: &Path, view: &V) -> R
 pub(crate) fn resolve_through_symlinks(
     start: &Path,
     target: &Path,
-    dest: &Path,
+    dest: &DestDir,
     link_path: &Path,
 ) -> Result<PathBuf> {
     resolve_through_symlinks_in(start, target, dest, link_path, &HostFs)
@@ -351,10 +350,11 @@ pub(crate) fn resolve_through_symlinks(
 pub(crate) fn resolve_through_symlinks_in<V: FsView>(
     start: &Path,
     target: &Path,
-    dest: &Path,
+    root: &V::Root,
     link_path: &Path,
     view: &V,
 ) -> Result<PathBuf> {
+    let dest = root.as_path();
     let mut current = start.to_path_buf();
 
     for component in target.components() {
@@ -365,11 +365,7 @@ pub(crate) fn resolve_through_symlinks_in<V: FsView>(
                 // operates on the real filesystem topology
                 // rather than the string representation.
                 if view.is_symlink(&current).unwrap_or(false) {
-                    current =
-                        view.canonicalize(&current)
-                            .map_err(|_| ArchiveError::SymlinkEscape {
-                                path: link_path.to_path_buf(),
-                            })?;
+                    current = canonical_within(view, &current, root, link_path)?;
                 }
                 if !(start.starts_with(&current) || view.is_dir(&current)) || !current.pop() {
                     return Err(ArchiveError::SymlinkEscape {
@@ -383,11 +379,7 @@ pub(crate) fn resolve_through_symlinks_in<V: FsView>(
                 // Resolve the component immediately if it is a symlink so that
                 // any subsequent `..` steps use the real resolved path.
                 if view.is_symlink(&current).unwrap_or(false) {
-                    current =
-                        view.canonicalize(&current)
-                            .map_err(|_| ArchiveError::SymlinkEscape {
-                                path: link_path.to_path_buf(),
-                            })?;
+                    current = canonical_within(view, &current, root, link_path)?;
                 }
             }
             _ => {
@@ -403,6 +395,22 @@ pub(crate) fn resolve_through_symlinks_in<V: FsView>(
     }
 
     Ok(current)
+}
+
+/// Canonicalizes `current` in `view`; a failure or a result outside `root` is
+/// a symlink escape.
+fn canonical_within<V: FsView>(
+    view: &V,
+    current: &Path,
+    root: &V::Root,
+    link_path: &Path,
+) -> Result<PathBuf> {
+    match view.canonicalize(current, root) {
+        Ok(Containment::Within(canonical)) => Ok(canonical),
+        Ok(Containment::Escapes) | Err(_) => Err(ArchiveError::SymlinkEscape {
+            path: link_path.to_path_buf(),
+        }),
+    }
 }
 
 #[cfg(test)]
@@ -1038,7 +1046,7 @@ mod tests {
             resolve_through_symlinks_in(
                 &root.join(start),
                 Path::new(target),
-                &root,
+                &DestDir::new(root.clone()).expect("dest"),
                 Path::new(LINK),
                 &HostFs,
             )
@@ -1050,12 +1058,12 @@ mod tests {
             target: &str,
         ) -> Result<PathBuf> {
             let root = Path::new("/dest");
-            let mut tree = VirtualTree::new(&VirtualRoot::at("/dest"));
+            let mut tree = VirtualTree::for_test(&VirtualRoot::at("/dest"));
             setup(&mut tree);
             resolve_through_symlinks_in(
                 &root.join(start),
                 Path::new(target),
-                root,
+                &VirtualRoot::at("/dest"),
                 Path::new(LINK),
                 &tree,
             )
@@ -1063,6 +1071,32 @@ mod tests {
 
         fn put(tree: &mut VirtualTree, path: &str, node: Node) {
             tree.insert(Path::new(path), node).expect("insert");
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn host_hop_that_leaves_the_root_and_returns_is_an_escape() {
+            let temp = TempDir::new().expect("tempdir");
+            let root = temp.path().canonicalize().expect("canonical root");
+            std::os::unix::fs::symlink("..", root.join("a")).expect("symlink");
+            let name = root.file_name().expect("name").to_string_lossy();
+            for target in [
+                format!("a/{name}/x"),
+                format!("a/{name}/../x"),
+                "a/..".into(),
+            ] {
+                assert_matches!(
+                    resolve_through_symlinks_in(
+                        &root,
+                        Path::new(&target),
+                        &DestDir::new(root.clone()).expect("dest"),
+                        Path::new(LINK),
+                        &HostFs,
+                    ),
+                    Err(ArchiveError::SymlinkEscape { .. }),
+                    "{target}"
+                );
+            }
         }
 
         #[test]

@@ -230,7 +230,8 @@ impl ArchiveError {
             | Self::QuotaExceeded { .. }
             | Self::SecurityViolation { .. }
             | Self::InvalidCompressionLevel { .. }
-            | Self::InvalidConfiguration { .. } => None,
+            | Self::InvalidConfiguration { .. }
+            | Self::ReaderFormat(_) => None,
         }
     }
 }

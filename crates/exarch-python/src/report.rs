@@ -995,6 +995,7 @@ mod tests {
     fn test_pyi_literal_aliases_match_core_enums() {
         use exarch_core::IntegrityStatus;
         use exarch_core::PartialWrites;
+        use exarch_core::PathModel;
         use exarch_core::PolicySetting;
         use exarch_core::UnverifiedReason;
         use exarch_core::ZipConsistencyPolicy;
@@ -1037,6 +1038,7 @@ mod tests {
             ),
             literal_line("_PartialWrites", PartialWrites::ALL, PartialWrites::as_str),
             literal_line("_PolicySetting", PolicySetting::ALL, PolicySetting::as_str),
+            literal_line("_PathModel", PathModel::ALL, PathModel::as_str),
         ];
         for line in expected {
             assert!(

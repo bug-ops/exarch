@@ -23,6 +23,8 @@ _IssueSeverity = Literal["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
 _IssueCategory = Literal["Path Traversal", "Symlink Escape", "Hardlink Escape", "Zip Bomb", "Invalid Permissions", "Quota Exceeded", "Security Policy", "Invalid Archive", "Suspicious Path", "Executable File", "Corrupt Data", "Integrity Incomplete", "Header Mismatch", "Duplicate Entry", "Overlapping Entries", "Hidden Entry", "Name Collision", "Archive Note"]  # noqa: E501  # fmt: skip
 _ZipConsistency = Literal["enforce", "ignore"]
 _PartialWrites = Literal["kept", "rolled_back"]
+_PathModel = Literal["host", "portable"]
+_MemoryEntryKind = Literal["file", "directory", "symlink"]
 _PolicySetting = Literal["symlinks", "hardlinks", "solid_archives", "banned_components", "max_path_depth", "windows_reserved_names", "max_tar_metadata_bytes"]  # noqa: E501  # fmt: skip
 
 class SecurityConfig:
@@ -1014,6 +1016,130 @@ def verify_archive(
         InvalidArchiveError: With the integrity check on, a TAR entry whose
             content fails to decode (a resource limit or I/O failure while
             decoding raises its own typed error)
+    """
+    ...
+
+def list_archive_bytes(
+    data: bytes,
+    config: SecurityConfig | None = None,
+    format: _ArchiveType | None = None,
+) -> ArchiveManifest:
+    """
+    List the contents of an archive held in memory, without extracting.
+
+    Args:
+        data: The archive bytes
+        config: Optional SecurityConfig (uses secure defaults if None)
+        format: The archive format; detected from the leading bytes if None
+
+    Returns:
+        ArchiveManifest with entry metadata
+
+    Raises:
+        ValueError: Unknown format
+        UnknownFormatError: The format cannot be detected from the bytes
+        InvalidArchiveError: Archive is corrupted
+    """
+    ...
+
+def verify_archive_bytes(
+    data: bytes,
+    config: SecurityConfig | None = None,
+    options: VerificationOptions | None = None,
+    format: _ArchiveType | None = None,
+) -> VerificationReport:
+    """
+    Verify the security of an archive held in memory.
+
+    Args:
+        data: The archive bytes
+        config: Optional SecurityConfig (uses secure defaults if None)
+        options: Optional VerificationOptions
+        format: The archive format; detected from the leading bytes if None
+
+    Returns:
+        VerificationReport with validation results
+
+    Raises:
+        ValueError: Unknown format
+        UnknownFormatError: The format cannot be detected from the bytes
+        InvalidArchiveError: Archive is corrupted
+    """
+    ...
+
+class MemoryEntry:
+    """An entry extracted into memory."""
+
+    @property
+    def path(self) -> str:
+        """Entry path, relative, as delivered by extraction."""
+        ...
+
+    @property
+    def kind(self) -> _MemoryEntryKind:
+        """What the entry is."""
+        ...
+
+    @property
+    def data(self) -> bytes | None:
+        """The file's bytes; None unless kind is "file"."""
+        ...
+
+    @property
+    def mode(self) -> int | None:
+        """Permission bits after setuid and setgid were stripped."""
+        ...
+
+    @property
+    def target(self) -> str | None:
+        """Symlink target as the archive spells it; None unless kind is "symlink"."""
+        ...
+
+class MemoryExtraction:
+    """The result of extract_archive_to_memory."""
+
+    @property
+    def report(self) -> ExtractionReport:
+        """Extraction statistics."""
+        ...
+
+    @property
+    def entries(self) -> list[MemoryEntry]:
+        """The extracted entries in path order."""
+        ...
+
+def extract_archive_to_memory(
+    data: bytes,
+    config: SecurityConfig | None = None,
+    options: ExtractionOptions | None = None,
+    max_bytes: int | None = None,
+    path_model: _PathModel | None = None,
+    format: _ArchiveType | None = None,
+) -> MemoryExtraction:
+    """
+    Extract an archive held in memory into memory.
+
+    The archive passes the same validation as extract_archive; nothing is
+    written to disk.
+
+    Args:
+        data: The archive bytes
+        config: Optional SecurityConfig (uses secure defaults if None)
+        options: Optional ExtractionOptions (atomic is not supported)
+        max_bytes: The most bytes to keep: payload (file data, hardlink copies
+            and symlink targets) plus path bytes plus 256 per entry; defaults
+            to the config's max_total_size
+        path_model: "host" (default) validates names against this platform's
+            rules, "portable" against the strictest rules of every platform
+        format: The archive format; detected from the leading bytes if None
+
+    Returns:
+        MemoryExtraction with the report and the extracted entries
+
+    Raises:
+        ValueError: Unknown format or path_model, or max_bytes of zero
+        QuotaExceededError: A quota, or max_bytes, was exceeded
+        UnknownFormatError: The format cannot be detected from the bytes
     """
     ...
 

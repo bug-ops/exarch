@@ -16,6 +16,7 @@ use crate::config::ExtractionOptions;
 use crate::config::Validated;
 use crate::creation::CreationConfig;
 use crate::creation::CreationReport;
+use crate::formats::SevenZArchive;
 use crate::formats::ZipArchive;
 use crate::formats::compression::CompressionCodec;
 use crate::formats::detect::ArchiveType;
@@ -750,6 +751,8 @@ pub fn verify_reader(
 
 /// Extracts an archive read from a reader into an [`EntrySink`].
 ///
+/// Equivalent to [`extract_to_sink_with_progress`] with a [`NoopProgress`].
+///
 /// Every entry passes the validation pipeline of [`extract_archive`] and is
 /// then delivered to `sink` instead of being written under a directory. See the
 /// [`sink`](crate::sink) module for what the sink may rely on and what it must
@@ -759,9 +762,15 @@ pub fn verify_reader(
 ///
 /// Returns the errors of [`extract_archive`], plus any error the sink returns:
 /// [`ArchiveError::Io`] if no entry was delivered yet,
-/// [`ArchiveError::PartialExtraction`] wrapping it afterwards. Also
-/// [`ArchiveError::InvalidConfiguration`] for a 7z source (not supported yet)
-/// and for `options.atomic`, which needs a directory to rename.
+/// [`ArchiveError::PartialExtraction`] wrapping it afterwards. A sink that
+/// reports [`MemorySinkFull`](crate::MemorySinkFull) ends the extraction with a
+/// [`QuotaResource::SinkCapacity`](crate::QuotaResource::SinkCapacity) quota
+/// error. Also [`ArchiveError::InvalidConfiguration`] for `options.atomic`,
+/// which needs a directory to rename.
+///
+/// A 7z source is read in two phases: everything the file table can refuse
+/// (admission, ratios, quotas, link policy, paths) is refused before the sink
+/// sees an entry, then the entries are decoded and delivered in archive order.
 ///
 /// # Examples
 ///
@@ -836,18 +845,69 @@ pub fn extract_to_sink<S: EntrySink>(
     config: &SecurityConfig,
     options: &ExtractionOptions,
 ) -> Result<ExtractionReport> {
+    extract_to_sink_with_progress(reader, sink, config, options, &mut NoopProgress)
+}
+
+/// Extracts an archive read from a reader into an [`EntrySink`], reporting
+/// progress.
+///
+/// Behaves as [`extract_to_sink`]; `progress` receives the same events as the
+/// path-based [`extract_archive_with_progress`].
+///
+/// # Errors
+///
+/// Returns the errors of [`extract_to_sink`].
+///
+/// # Examples
+///
+/// ```
+/// use std::io;
+///
+/// use exarch_core::ArchiveReader;
+/// use exarch_core::ExtractionOptions;
+/// use exarch_core::MemorySink;
+/// use exarch_core::NoopProgress;
+/// use exarch_core::SecurityConfig;
+/// use exarch_core::extract_to_sink_with_progress;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let mut builder = tar::Builder::new(Vec::new());
+/// let mut header = tar::Header::new_gnu();
+/// header.set_size(2);
+/// header.set_mode(0o644);
+/// builder.append_data(&mut header, "a.txt", &b"hi"[..])?;
+/// let bytes = builder.into_inner()?;
+///
+/// let mut sink = MemorySink::default();
+/// let report = extract_to_sink_with_progress(
+///     ArchiveReader::tar(io::Cursor::new(bytes), None),
+///     &mut sink,
+///     &SecurityConfig::default(),
+///     &ExtractionOptions::default(),
+///     &mut NoopProgress,
+/// )?;
+/// assert_eq!(report.files_extracted, 1);
+/// # Ok(())
+/// # }
+/// ```
+pub fn extract_to_sink_with_progress<S: EntrySink>(
+    reader: ArchiveReader<'_>,
+    sink: &mut S,
+    config: &SecurityConfig,
+    options: &ExtractionOptions,
+    progress: &mut dyn ProgressCallback,
+) -> Result<ExtractionReport> {
     if options.atomic {
         return Err(ArchiveError::InvalidConfiguration {
             reason: "atomic extraction renames a directory and cannot target a sink".into(),
         });
     }
     let config = config.clone().validate()?;
-    let mut progress = NoopProgress;
     match reader.into_source() {
         Source::Tar { stream, codec } => {
             let mut archive = tar_archive(stream, codec, config.max_decoder_memory)?;
             let mut target = SinkTarget::new(sink, &config);
-            archive.extract_into(&mut target, &config, options, &mut progress)
+            archive.extract_into(&mut target, &config, options, progress)
         }
         Source::Seekable {
             reader,
@@ -856,14 +916,17 @@ pub fn extract_to_sink<S: EntrySink>(
             let mut archive = ZipArchive::new(reader)?;
             let checked = archive.check_structure(&config)?;
             let mut target = SinkTarget::new(sink, &config);
-            archive.extract_into(checked, &mut target, &config, options, &mut progress)
+            archive.extract_into(checked, &mut target, &config, options, progress)
         }
         Source::Seekable {
+            reader,
             format: SeekableFormat::SevenZ,
-            ..
-        } => Err(ArchiveError::InvalidConfiguration {
-            reason: "7z archives cannot be extracted to a sink".into(),
-        }),
+        } => {
+            let mut archive = SevenZArchive::new(reader)?;
+            let mut target = SinkTarget::new(sink, &config);
+            let model = target.model();
+            archive.extract_into(&mut target, model, &config, options, progress)
+        }
     }
 }
 

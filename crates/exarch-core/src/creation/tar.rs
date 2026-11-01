@@ -13,6 +13,7 @@ use crate::creation::report::CreationReport;
 use crate::creation::walker::EntryType;
 use crate::creation::walker::collect_entries;
 use crate::formats::compression::CompressionCodec;
+use crate::writer::CountingWriter;
 use std::fs::File;
 use std::io::Write;
 use std::path::Path;
@@ -105,18 +106,31 @@ pub fn create_tar_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
     progress: &mut dyn ProgressCallback,
 ) -> Result<CreationReport> {
     let file = File::create(output.as_ref())?;
-    let mut report = if let Some(codec) = codec {
-        let encoder = codec.encoder(file, config.compression_level)?;
+    write_tar(file, codec, sources, config, progress)
+}
+
+/// Writes a TAR archive, optionally compressed, into `out`.
+///
+/// `bytes_compressed` is the number of bytes that reached `out`, counted
+/// below the encoder after it is finished and flushed.
+pub(crate) fn write_tar<W: Write, P: AsRef<Path>>(
+    out: W,
+    codec: Option<CompressionCodec>,
+    sources: &[P],
+    config: &CreationConfig<Validated>,
+    progress: &mut dyn ProgressCallback,
+) -> Result<CreationReport> {
+    let counter = CountingWriter::new(out);
+    let (mut report, mut counter) = if let Some(codec) = codec {
+        let encoder = codec.encoder(counter, config.compression_level)?;
         let (report, encoder) =
             create_tar_internal_with_progress(encoder, sources, config, progress)?;
-        encoder.finish()?;
-        report
+        (report, encoder.finish()?)
     } else {
-        let (report, file) = create_tar_internal_with_progress(file, sources, config, progress)?;
-        drop(file);
-        report
+        create_tar_internal_with_progress(counter, sources, config, progress)?
     };
-    report.bytes_compressed = std::fs::metadata(output.as_ref())?.len();
+    counter.flush()?;
+    report.bytes_compressed = counter.bytes();
     Ok(report)
 }
 

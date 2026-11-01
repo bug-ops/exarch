@@ -45,8 +45,18 @@ use napi::threadsafe_function::ThreadsafeFunction;
 use napi::threadsafe_function::ThreadsafeFunctionCallMode;
 use napi_derive::napi;
 
+#[cfg_attr(
+    test,
+    allow(dead_code, reason = "napi registers its functions outside test builds")
+)]
+mod buffer;
 mod config;
 mod error;
+#[cfg_attr(
+    test,
+    allow(dead_code, reason = "napi registers its functions outside test builds")
+)]
+mod memory;
 mod report;
 mod utils;
 

@@ -39,6 +39,7 @@ pub mod sink;
 #[cfg(test)]
 pub(crate) mod test_utils;
 pub mod types;
+pub mod writer;
 
 // Re-export main API types
 pub use api::create_archive;
@@ -48,6 +49,7 @@ pub use api::extract_archive_with_options;
 pub use api::extract_archive_with_options_and_progress;
 pub use api::extract_archive_with_progress;
 pub use api::extract_to_sink;
+pub use api::extract_to_sink_with_progress;
 pub use api::list_archive;
 pub use api::list_archive_with_options;
 pub use api::list_reader;
@@ -80,6 +82,7 @@ pub use error::PartialOutcome;
 pub use error::PartialWrites;
 pub use error::PolicySetting;
 pub use error::QuotaResource;
+pub use error::ReaderFormatError;
 pub use error::Result;
 pub use error::ZipBombDetails;
 pub use error::ZipBombScope;
@@ -107,6 +110,9 @@ pub use creation::ArchiveCreator;
 pub use creation::CreationConfig;
 pub use creation::CreationReport;
 pub use formats::traits::FormatCreator;
+pub use writer::ArchiveWriter;
+pub use writer::create_to_writer;
+pub use writer::create_to_writer_with_progress;
 
 // Re-export inspection types
 pub use inspection::ArchiveEntry;
@@ -147,7 +153,13 @@ pub use security::boundary::validate_config_entry;
 /// Validates a raw, caller-supplied path string before it enters the
 /// archive pipeline. Shared by `exarch-python` and `exarch-node`.
 pub use security::boundary::validate_raw_path_str;
+pub use security::fs_view::PathModel;
 pub use sink::EntrySink;
+pub use sink::MemoryEntry;
+pub use sink::MemoryFile;
+pub use sink::MemoryLimit;
+pub use sink::MemorySink;
+pub use sink::MemorySinkFull;
 
 // Re-export types module for easier access
 pub use types::DestDir;

@@ -37,6 +37,7 @@ use tempfile::TempDir;
 enum Kind {
     Tar,
     Zip,
+    SevenZ,
 }
 
 type Outcome = Result<ExtractionReport, ArchiveError>;
@@ -51,6 +52,7 @@ fn via_host(
     let name = match kind {
         Kind::Tar => "a.tar",
         Kind::Zip => "a.zip",
+        Kind::SevenZ => "a.7z",
     };
     let archive = dir.path().join(name);
     std::fs::write(&archive, bytes).unwrap();
@@ -73,6 +75,9 @@ fn via_sink(
     let reader = match kind {
         Kind::Tar => ArchiveReader::tar(Cursor::new(bytes.to_vec()), None),
         Kind::Zip => ArchiveReader::seekable(Cursor::new(bytes.to_vec()), SeekableFormat::Zip),
+        Kind::SevenZ => {
+            ArchiveReader::seekable(Cursor::new(bytes.to_vec()), SeekableFormat::SevenZ)
+        }
     };
     let mut sink = RecordingSink::default();
     let outcome = extract_to_sink(reader, &mut sink, config, options);
@@ -127,6 +132,14 @@ fn assert_parity(
                 signature(&host_error),
                 "host: {host_error}, sink: {sink_error}"
             );
+            false
+        }
+        (Err(host_error), Ok(_))
+            if cfg!(windows)
+                && host_error
+                    .to_string()
+                    .contains("symlinks are not supported on this platform") =>
+        {
             false
         }
         (host_result, sink_result) => panic!("host: {host_result:?}, sink: {sink_result:?}"),
@@ -631,4 +644,92 @@ fn zip_duplicates_and_extension_filter() {
     }
     config.allowed_extensions = vec!["txt".to_owned()];
     let _ = assert_parity(Kind::Zip, bytes, &config, &ExtractionOptions::default());
+}
+
+fn sevenz_fixtures() -> Vec<(String, Vec<u8>)> {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures");
+    let mut fixtures: Vec<_> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "7z"))
+        .map(|path| {
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            (name, std::fs::read(&path).unwrap())
+        })
+        .collect();
+    fixtures.sort();
+    assert!(fixtures.len() >= 15, "fixtures not found");
+    fixtures
+}
+
+fn sevenz_configs() -> Vec<SecurityConfig> {
+    vec![
+        default_config(),
+        links_config().with_allow_solid_archives(true),
+        default_config()
+            .with_allow_solid_archives(true)
+            .with_max_total_size(16),
+    ]
+}
+
+#[test]
+fn sevenz_fixtures_match_the_path_based_extraction() {
+    let mut accepted = 0;
+    for (name, bytes) in sevenz_fixtures() {
+        for config in sevenz_configs() {
+            for options in [ExtractionOptions::default(), overwrite()] {
+                eprintln!("fixture {name}");
+                accepted += usize::from(assert_parity(
+                    Kind::SevenZ,
+                    bytes.clone(),
+                    &config,
+                    &options,
+                ));
+            }
+        }
+    }
+    assert!(accepted > 20, "only {accepted} extractions succeeded");
+}
+
+#[test]
+fn sevenz_interleaved_empty_entries_are_delivered_in_archive_order() {
+    let (_, bytes) = sevenz_fixtures()
+        .into_iter()
+        .find(|(name, _)| name == "interleaved-empty.7z")
+        .unwrap();
+    let dir = TempDir::new().unwrap();
+    let archive = dir.path().join("a.7z");
+    std::fs::write(&archive, &bytes).unwrap();
+    let config = default_config().with_allow_solid_archives(true);
+    let in_archive_order: Vec<_> = exarch_core::list_archive(&archive, &config)
+        .unwrap()
+        .entries()
+        .iter()
+        .filter(|entry| matches!(entry.kind, exarch_core::ManifestEntryKind::File))
+        .map(|entry| entry.path.clone())
+        .collect();
+    assert!(in_archive_order.len() >= 3, "{in_archive_order:?}");
+
+    let (result, sink) = via_sink(Kind::SevenZ, &bytes, &config, &ExtractionOptions::default());
+    let report = result.unwrap();
+    assert_eq!(sink.finished, in_archive_order);
+    assert_eq!(sink.finished.len(), report.files_extracted);
+}
+
+#[test]
+fn sevenz_quota_bomb_leaves_the_sink_untouched() {
+    let (_, bytes) = sevenz_fixtures()
+        .into_iter()
+        .find(|(name, _)| name == "simple.7z")
+        .unwrap();
+    {
+        let config = default_config().with_max_total_size(1);
+        let (result, sink) = via_sink(Kind::SevenZ, &bytes, &config, &ExtractionOptions::default());
+        assert!(matches!(
+            result.unwrap_err(),
+            ArchiveError::QuotaExceeded { .. }
+        ));
+        assert!(sink.tree.files.is_empty() && sink.tree.dirs.is_empty());
+        assert!(sink.finished.is_empty());
+    }
 }

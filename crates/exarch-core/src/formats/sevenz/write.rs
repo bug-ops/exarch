@@ -9,6 +9,8 @@ use crate::config::Validated;
 use crate::copy::CopyBuffer;
 use crate::copy::copy_with_buffer;
 use crate::formats::common;
+use crate::security::fs_view::FsView;
+use crate::security::fs_view::HostFs;
 use crate::security::quota::QuotaPermit;
 use crate::types::DestDir;
 use crate::types::SafePath;
@@ -295,8 +297,21 @@ pub(super) fn refuse_undecoded_target(
     dest: &DestDir,
     config: &SecurityConfig<Validated>,
 ) -> Result<()> {
+    refuse_undecoded_target_in(link, file, dest, config, &HostFs)
+}
+
+/// [`refuse_undecoded_target`] against an arbitrary [`FsView`].
+pub(super) fn refuse_undecoded_target_in<V: FsView>(
+    link: &SafePath,
+    file: &sevenz_rust2::ArchiveEntry,
+    root: &V::Root,
+    config: &SecurityConfig<Validated>,
+    view: &V,
+) -> Result<()> {
     match link_storage(file) {
-        LinkStorage::Empty => SafeSymlink::validate(link, Path::new(""), dest, config).map(drop),
+        LinkStorage::Empty => {
+            SafeSymlink::validate_in(link, Path::new(""), root, config, view).map(drop)
+        }
         LinkStorage::Oversized(bytes) => Err(common::symlink_target_too_large(bytes)),
         LinkStorage::Stream => Ok(()),
     }

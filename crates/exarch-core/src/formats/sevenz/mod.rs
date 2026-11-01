@@ -1014,6 +1014,7 @@ mod decode;
 mod header;
 mod links;
 mod lzma2;
+mod sink;
 mod verify;
 mod write;
 

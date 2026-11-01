@@ -29,7 +29,7 @@ const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
     clippy::cast_sign_loss,
     reason = "bytes is a whole number in 1..=2^53-1 here"
 )]
-fn exact_positive_bytes(bytes: f64) -> Option<NonZeroU64> {
+pub fn exact_positive_bytes(bytes: f64) -> Option<NonZeroU64> {
     let whole =
         bytes.is_finite() && bytes.fract() == 0.0 && (1.0..=MAX_SAFE_INTEGER).contains(&bytes);
     whole.then(|| NonZeroU64::new(bytes as u64)).flatten()

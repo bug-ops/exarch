@@ -278,7 +278,7 @@ impl ExtractTarget for HostTarget<'_> {
                 let resolved = resolve_through_symlinks(
                     self.dest.as_path(),
                     target.as_path(),
-                    self.dest.as_path(),
+                    &self.dest,
                     link.as_path(),
                 )
                 .map_err(|_| ArchiveError::HardlinkEscape {

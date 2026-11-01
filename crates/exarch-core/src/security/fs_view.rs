@@ -27,6 +27,12 @@
 //!   host's table: two names it merges but the host keeps apart (for example
 //!   `i` and dotless `ı`) are reported as a name collision, never silently
 //!   merged;
+//! - [`PathModel::Portable`] replaces the per-OS rules with the strictest of
+//!   them on every host (see its docs). `zip.rs` still strips drive-relative
+//!   names under `allow_absolute_paths` by the host's rules, so a Portable sink
+//!   on Linux refuses what Windows would strip: it fails closed;
+//! - a path that leaves the root and re-enters it is reported as an escape
+//!   (`Containment::Escapes`), although the host would resolve it inside;
 //! - only extraction that skips an existing entry is modelled; with overwrite
 //!   semantics extraction keeps the last entry at a path, which cannot be
 //!   modelled here;
@@ -45,6 +51,9 @@ use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
 
+use crate::ArchiveError;
+use crate::QuotaResource;
+use crate::SecurityConfig;
 use crate::closed_enum::closed_enum;
 use crate::types::DestDir;
 
@@ -144,6 +153,123 @@ closed_enum! {
     }
 }
 
+closed_enum! {
+    /// The path semantics an [`EntrySink`](crate::EntrySink) is validated
+    /// against.
+    ///
+    /// `Host` applies the rules of the platform running the extraction.
+    /// `Portable` applies the strictest rules of every supported platform, on
+    /// every host, for a sink whose storage is read elsewhere:
+    ///
+    /// - names fold as on macOS (canonical decomposition plus a case fold), so
+    ///   two spellings of one name are one name;
+    /// - a component with a backslash, one of `<>"|?*`, a control character, a
+    ///   `:`, a trailing dot or space, a reserved Windows device name (unless
+    ///   `windows_reserved_names` is allowed) or bytes that are not UTF-8 is
+    ///   refused;
+    /// - a component is at most 255 and a path or symlink target at most 1023,
+    ///   counted in UTF-8 bytes and in UTF-16 units alike, and a symlink chain
+    ///   is cut off after 32 hops.
+    ///
+    /// On a Windows host `\` already separates the components of an entry
+    /// name when the path is parsed, so it is split there and not refused as a
+    /// backslash; every other host refuses it. Not modelled: 8.3 short names
+    /// and the legacy 260-unit `MAX_PATH`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::PathModel;
+    ///
+    /// assert_eq!(PathModel::default(), PathModel::Host);
+    /// assert_eq!(PathModel::Portable.as_str(), "portable");
+    /// ```
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    #[non_exhaustive]
+    pub enum PathModel {
+        /// The rules of the platform running the extraction.
+        #[default]
+        Host => "host",
+        /// The strictest rules of every supported platform.
+        Portable => "portable",
+    }
+}
+
+/// The length limits of a [`PathModel`].
+#[derive(Debug, Clone, Copy)]
+struct NameLimits {
+    component: usize,
+    path: usize,
+    symlink_target: usize,
+    hops: usize,
+}
+
+impl PathModel {
+    const fn limits(self) -> NameLimits {
+        match self {
+            Self::Host => NameLimits {
+                component: MAX_COMPONENT_LEN,
+                path: MAX_PATH_LEN,
+                symlink_target: MAX_SYMLINK_TARGET_LEN,
+                hops: MAX_SYMLINK_HOPS,
+            },
+            Self::Portable => NameLimits {
+                component: 255,
+                path: 1023,
+                symlink_target: 1023,
+                hops: 32,
+            },
+        }
+    }
+
+    fn name_len(self, name: &OsStr) -> usize {
+        match self {
+            Self::Host => name_len(name),
+            Self::Portable => portable_name_len(name),
+        }
+    }
+
+    /// Rejects entry names this model refuses with `ENAMETOOLONG`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the path or any of its components is too long.
+    pub(crate) fn check_name_lengths(self, path: &Path) -> io::Result<()> {
+        let limits = self.limits();
+        let too_long = self.name_len(path.as_os_str()) > limits.path
+            || path
+                .components()
+                .any(|c| self.name_len(c.as_os_str()) > limits.component);
+        if too_long {
+            return Err(name_too_long());
+        }
+        Ok(())
+    }
+
+    /// Rejects a link target this model refuses with `ENAMETOOLONG`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the target is too long for `kind`.
+    pub(crate) fn check_link_target_length(self, target: &Path, kind: LinkKind) -> io::Result<()> {
+        match kind {
+            LinkKind::Symlink
+                if self.name_len(target.as_os_str()) > self.limits().symlink_target =>
+            {
+                Err(name_too_long())
+            }
+            LinkKind::Symlink => Ok(()),
+            LinkKind::Hardlink => self.check_name_lengths(target),
+        }
+    }
+}
+
+/// A name's length in UTF-8 bytes, which is never below its length in UTF-16
+/// units, so one limit holds in both.
+fn portable_name_len(name: &OsStr) -> usize {
+    name.to_string_lossy().len()
+}
+
 #[cfg(windows)]
 fn name_len(name: &OsStr) -> usize {
     std::os::windows::ffi::OsStrExt::encode_wide(name).count()
@@ -160,14 +286,7 @@ fn name_len(name: &OsStr) -> usize {
 ///
 /// Returns an error if the path or any of its components is too long.
 pub fn check_name_lengths(path: &Path) -> io::Result<()> {
-    let too_long = name_len(path.as_os_str()) > MAX_PATH_LEN
-        || path
-            .components()
-            .any(|c| name_len(c.as_os_str()) > MAX_COMPONENT_LEN);
-    if too_long {
-        return Err(name_too_long());
-    }
-    Ok(())
+    PathModel::Host.check_name_lengths(path)
 }
 
 /// Rejects a link target the host would refuse with `ENAMETOOLONG`.
@@ -179,13 +298,7 @@ pub fn check_name_lengths(path: &Path) -> io::Result<()> {
 ///
 /// Returns an error if the target is too long for `kind`.
 pub fn check_link_target_length(target: &Path, kind: LinkKind) -> io::Result<()> {
-    match kind {
-        LinkKind::Symlink if name_len(target.as_os_str()) > MAX_SYMLINK_TARGET_LEN => {
-            Err(name_too_long())
-        }
-        LinkKind::Symlink => Ok(()),
-        LinkKind::Hardlink => check_name_lengths(target),
-    }
+    PathModel::Host.check_link_target_length(target, kind)
 }
 
 /// The error for a name beyond the host's limits.
@@ -248,10 +361,22 @@ impl ModelRoot for VirtualRoot {
     }
 }
 
+/// Where a canonicalized path ended up relative to the root of its view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Containment {
+    /// Inside the root, at this canonical path.
+    Within(PathBuf),
+    /// Outside the root, or not provably inside it.
+    Escapes,
+}
+
 /// Filesystem probes needed while validating archive entries.
 pub trait FsView {
     /// The root type a validator resolves paths against in this view.
     type Root: ModelRoot;
+
+    /// The path semantics validation applies in this view.
+    fn path_model(&self) -> PathModel;
 
     /// Returns `true` if `path` exists, following symlinks.
     fn exists(&self, path: &Path) -> bool;
@@ -267,13 +392,45 @@ pub trait FsView {
     /// not exist).
     fn is_symlink(&self, path: &Path) -> io::Result<bool>;
 
-    /// Resolves `path` to its canonical form.
+    /// Resolves `path` to its canonical form and says whether that lies inside
+    /// `root`.
     ///
     /// # Errors
     ///
     /// Returns an error if a component is missing or the chain cannot be
     /// resolved.
-    fn canonicalize(&self, path: &Path) -> io::Result<PathBuf>;
+    fn canonicalize(&self, path: &Path, root: &Self::Root) -> io::Result<Containment>;
+}
+
+/// Case-insensitive path prefix check for macOS/Windows.
+///
+/// On case-insensitive filesystems (macOS, Windows), attackers can bypass
+/// path validation using different case (e.g., `../../USERS/victim/.ssh/`).
+///
+/// Compares `path` and `base` component-by-component rather than as raw
+/// strings, so a shared name prefix without a component boundary (e.g. base
+/// `/tmp/dest` against sibling `/tmp/destevil`) is correctly rejected. See
+/// GHSA-wcmx-7f9h-5mv5.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub fn paths_start_with(path: &Path, base: &Path) -> bool {
+    let mut path_components = path.components();
+    for base_component in base.components() {
+        let Some(path_component) = path_components.next() else {
+            return false;
+        };
+        let path_str = path_component.as_os_str().to_string_lossy().to_lowercase();
+        let base_str = base_component.as_os_str().to_string_lossy().to_lowercase();
+        if path_str != base_str {
+            return false;
+        }
+    }
+    true
+}
+
+/// Case-sensitive path prefix check for Unix (not macOS).
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub fn paths_start_with(path: &Path, base: &Path) -> bool {
+    path.starts_with(base)
 }
 
 /// The real filesystem.
@@ -282,6 +439,10 @@ pub struct HostFs;
 
 impl FsView for HostFs {
     type Root = DestDir;
+
+    fn path_model(&self) -> PathModel {
+        PathModel::Host
+    }
 
     fn exists(&self, path: &Path) -> bool {
         path.exists()
@@ -295,8 +456,13 @@ impl FsView for HostFs {
         std::fs::symlink_metadata(path).map(|m| m.file_type().is_symlink())
     }
 
-    fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
-        std::fs::canonicalize(path)
+    fn canonicalize(&self, path: &Path, root: &DestDir) -> io::Result<Containment> {
+        let canonical = std::fs::canonicalize(path)?;
+        Ok(if paths_start_with(&canonical, root.as_path()) {
+            Containment::Within(canonical)
+        } else {
+            Containment::Escapes
+        })
     }
 }
 
@@ -387,6 +553,124 @@ impl From<io::Error> for Conflict {
     }
 }
 
+/// Bound on the names a [`VirtualTree`] stores.
+///
+/// A name is charged when a node is added and when a differently spelled
+/// alias of a node is remembered, whatever the kind of the entry, so a flood
+/// of directory entries or case variants cannot grow the tree without limit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NodeBudget {
+    max: usize,
+    used: usize,
+}
+
+impl NodeBudget {
+    /// A budget of `max_file_count * max_path_depth + 1` names: enough for
+    /// `max_file_count` files, each at the deepest allowed path with no name
+    /// shared. Explicit directory entries and aliases spend it too although
+    /// `max_file_count` does not count directories, so an archive of many
+    /// directories can exhaust it while within the file limit; raise
+    /// `max_file_count` or `max_path_depth` to allow more. Unbounded if either
+    /// is `usize::MAX`.
+    #[must_use]
+    pub fn from_config<State>(config: &SecurityConfig<State>) -> Self {
+        let max = if config.max_file_count == usize::MAX || config.max_path_depth == usize::MAX {
+            usize::MAX
+        } else {
+            config
+                .max_file_count
+                .saturating_mul(config.max_path_depth)
+                .saturating_add(1)
+        };
+        Self { max, used: 0 }
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn unbounded() -> Self {
+        Self {
+            max: usize::MAX,
+            used: 0,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn with_max(max: usize) -> Self {
+        Self { max, used: 0 }
+    }
+
+    fn charge(&mut self) -> Result<(), NodeBudgetExceeded> {
+        if self.used >= self.max {
+            return Err(NodeBudgetExceeded { max: self.max });
+        }
+        self.used += 1;
+        Ok(())
+    }
+}
+
+/// A [`NodeBudget`] that ran out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NodeBudgetExceeded {
+    max: usize,
+}
+
+impl From<NodeBudgetExceeded> for ArchiveError {
+    fn from(exceeded: NodeBudgetExceeded) -> Self {
+        Self::QuotaExceeded {
+            resource: QuotaResource::TreeNodes { max: exceeded.max },
+        }
+    }
+}
+
+/// Whether a [`VirtualTree`] keeps the name collisions it detects.
+///
+/// `verify` reports them; a sink only needs the merged path, so recording
+/// there would grow memory with every case variant for nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CollisionRecording {
+    /// Keep collisions for [`VirtualTree::take_collisions`] and
+    /// [`VirtualTree::take_empty_merges`].
+    Record,
+    /// Merge the names and forget that they collided.
+    Discard,
+}
+
+/// Why a [`VirtualTree`] refused to place a node.
+#[derive(Debug)]
+pub enum PlaceError {
+    /// Extraction would fail or change what a path resolves to.
+    Conflict(Conflict),
+    /// The tree is full.
+    Budget(NodeBudgetExceeded),
+}
+
+impl PlaceError {
+    #[cfg(test)]
+    pub(crate) fn into_conflict(self) -> Conflict {
+        match self {
+            Self::Conflict(conflict) => conflict,
+            Self::Budget(exceeded) => panic!("unexpected budget error: {exceeded:?}"),
+        }
+    }
+}
+
+impl From<Conflict> for PlaceError {
+    fn from(conflict: Conflict) -> Self {
+        Self::Conflict(conflict)
+    }
+}
+
+impl From<io::Error> for PlaceError {
+    fn from(error: io::Error) -> Self {
+        Self::Conflict(error.into())
+    }
+}
+
+impl From<NodeBudgetExceeded> for PlaceError {
+    fn from(exceeded: NodeBudgetExceeded) -> Self {
+        Self::Budget(exceeded)
+    }
+}
+
 type FoldFn = for<'a> fn(&'a OsStr) -> Cow<'a, OsStr>;
 
 /// The kind of a node in the in-memory tree.
@@ -439,7 +723,7 @@ const ROOT: usize = 0;
 
 enum Resolved {
     Inside { rel: PathBuf, id: usize },
-    Outside(PathBuf),
+    Outside,
 }
 
 /// Where an insert put its node.
@@ -463,28 +747,65 @@ struct Found {
 /// O(bytes of the path) regardless of how many entries share a prefix. A name
 /// is folded only the first time it is seen; repeats, such as the parents of
 /// every entry in a directory, hit the exact-spelling map.
-// TODO(critic): directory entries are uncounted; bound tree nodes for
-// long-lived sink extractions
+///
+/// Every name it stores is charged to a [`NodeBudget`].
 pub struct VirtualTree {
     root: PathBuf,
     nodes: Vec<TreeNode>,
+    model: PathModel,
     fold: FoldFn,
+    budget: NodeBudget,
+    recording: CollisionRecording,
     collisions: Vec<NameCollision>,
     /// Directories holding at least one empty merge.
     empty_merge_nodes: Vec<usize>,
 }
 
 impl VirtualTree {
-    /// Creates an empty tree rooted at `root`.
-    pub fn new(root: &VirtualRoot) -> Self {
+    /// Creates an empty tree rooted at `root` that applies `model`.
+    pub fn new(
+        root: &VirtualRoot,
+        model: PathModel,
+        budget: NodeBudget,
+        recording: CollisionRecording,
+    ) -> Self {
+        let fold = match model {
+            PathModel::Host => fold,
+            PathModel::Portable => portable_fold,
+        };
+        Self::build(root, model, fold, budget, recording)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(root: &VirtualRoot) -> Self {
         Self::with_fold(root, fold)
     }
 
+    #[cfg(test)]
     pub(crate) fn with_fold(root: &VirtualRoot, fold: FoldFn) -> Self {
+        Self::build(
+            root,
+            PathModel::Host,
+            fold,
+            NodeBudget::unbounded(),
+            CollisionRecording::Record,
+        )
+    }
+
+    fn build(
+        root: &VirtualRoot,
+        model: PathModel,
+        fold: FoldFn,
+        budget: NodeBudget,
+        recording: CollisionRecording,
+    ) -> Self {
         Self {
             root: root.as_path().to_path_buf(),
             nodes: vec![TreeNode::new(Node::Dir, OsStr::new(""), ROOT)],
+            model,
             fold,
+            budget,
+            recording,
             collisions: Vec::new(),
             empty_merge_nodes: Vec::new(),
         }
@@ -517,8 +838,9 @@ impl VirtualTree {
     /// an earlier directory (`IsADirectory`) or symlink.
     ///
     /// A failure also names what already occupies the path, so a caller can
-    /// tell what overwriting would do.
-    pub(crate) fn try_insert(&mut self, rel: &Path, node: Node) -> Result<(), Conflict> {
+    /// tell what overwriting would do. A tree that is out of budget refuses
+    /// with [`PlaceError::Budget`].
+    pub(crate) fn try_insert(&mut self, rel: &Path, node: Node) -> Result<(), PlaceError> {
         self.insert_node(rel, node).map(drop)
     }
 
@@ -526,7 +848,7 @@ impl VirtualTree {
     /// landed: the path relative to the root with every symlinked parent
     /// resolved and every component spelled as the tree first stored it, so two
     /// spellings of one name give one path.
-    pub(crate) fn place(&mut self, rel: &Path, node: Node) -> Result<PathBuf, Conflict> {
+    pub(crate) fn place(&mut self, rel: &Path, node: Node) -> Result<PathBuf, PlaceError> {
         Ok(self
             .insert_node(rel, node)?
             .map_or_else(PathBuf::new, |landed| {
@@ -551,19 +873,19 @@ impl VirtualTree {
         names.into_iter().rev().collect()
     }
 
-    fn insert_node(&mut self, rel: &Path, node: Node) -> Result<Option<Landed>, Conflict> {
+    fn insert_node(&mut self, rel: &Path, node: Node) -> Result<Option<Landed>, PlaceError> {
         let Some(name) = rel.file_name() else {
             return Ok(None);
         };
         let parent = self.ensure_dir(rel.parent().unwrap_or_else(|| Path::new("")))?;
         let existing = self.lookup(parent, name);
         if let Some(found) = existing {
-            self.settle_alias(parent, found, name, &node, rel, false);
+            self.settle_alias(parent, found, name, &node, rel, false)?;
         }
         let existing = existing.map(|f| f.id);
         let outcome = match (existing, node) {
             (None, node) => {
-                self.add_child(parent, name, node);
+                self.add_child(parent, name, node)?;
                 Ok(())
             }
             (Some(id), Node::Dir) => match self.node(id).kind {
@@ -604,13 +926,15 @@ impl VirtualTree {
                 }
             },
         };
-        outcome.map(|()| Some(Landed { parent, existing }))
+        outcome
+            .map(|()| Some(Landed { parent, existing }))
+            .map_err(PlaceError::Conflict)
     }
 
     #[cfg(test)]
     pub(crate) fn insert(&mut self, rel: &Path, node: Node) -> io::Result<()> {
         self.try_insert(rel, node)
-            .map_err(|conflict| conflict.error)
+            .map_err(|err| err.into_conflict().error)
     }
 
     /// What an earlier entry left at `rel`, without following a link at the
@@ -674,13 +998,17 @@ impl VirtualTree {
         incoming_node: &Node,
         incoming: &Path,
         incoming_has_contents: bool,
-    ) {
+    ) -> Result<(), NodeBudgetExceeded> {
         if !found.alias {
-            return;
+            return Ok(());
         }
+        self.budget.charge()?;
         self.node_mut(parent)
             .children
             .insert(name.to_os_string(), found.id);
+        if self.recording == CollisionRecording::Discard {
+            return Ok(());
+        }
         let existing = self.node(found.id);
         let has_contents = incoming_has_contents || !existing.children.is_empty();
         let kind = CollisionKind::of(&existing.kind, incoming_node, has_contents);
@@ -690,13 +1018,14 @@ impl VirtualTree {
             node.empty_merges
                 .push((existing_path, incoming.to_path_buf()));
             self.empty_merge_nodes.push(found.id);
-            return;
+            return Ok(());
         }
         self.collisions.push(NameCollision {
             existing: existing_path,
             incoming: incoming.to_path_buf(),
             kind,
         });
+        Ok(())
     }
 
     fn node(&self, id: usize) -> &TreeNode {
@@ -708,7 +1037,7 @@ impl VirtualTree {
     }
 
     fn lookup(&self, parent: usize, name: &OsStr) -> Option<Found> {
-        if name_len(name) > MAX_COMPONENT_LEN {
+        if self.model.name_len(name) > self.model.limits().component {
             return None;
         }
         let node = self.node(parent);
@@ -726,7 +1055,13 @@ impl VirtualTree {
     }
 
     /// Adds a node under `parent`.
-    fn add_child(&mut self, parent: usize, name: &OsStr, kind: Node) -> usize {
+    fn add_child(
+        &mut self,
+        parent: usize,
+        name: &OsStr,
+        kind: Node,
+    ) -> Result<usize, NodeBudgetExceeded> {
+        self.budget.charge()?;
         let id = self.nodes.len();
         self.nodes.push(TreeNode::new(kind, name, parent));
         let key = match (self.fold)(name) {
@@ -748,34 +1083,38 @@ impl VirtualTree {
                 kind: CollisionKind::DirectoriesWithContents,
             });
         }
-        id
+        Ok(id)
     }
 
-    fn ensure_dir(&mut self, rel: &Path) -> io::Result<usize> {
+    fn ensure_dir(&mut self, rel: &Path) -> Result<usize, PlaceError> {
         let mut current = ROOT;
         let mut walked = PathBuf::new();
         for component in rel.components() {
             let name = match component {
                 Component::Normal(name) => name,
                 Component::CurDir => continue,
-                _ => return Err(io::Error::from(io::ErrorKind::InvalidInput)),
+                _ => return Err(io::Error::from(io::ErrorKind::InvalidInput).into()),
             };
             walked.push(name);
             current = match self.lookup(current, name) {
-                None => self.add_child(current, name, Node::Dir),
+                None => self.add_child(current, name, Node::Dir)?,
                 Some(found) => {
-                    self.settle_alias(current, found, name, &Node::Dir, &walked, true);
+                    self.settle_alias(current, found, name, &Node::Dir, &walked, true)?;
                     match self.node(found.id).kind {
                         Node::Dir => found.id,
-                        Node::File => return Err(io::Error::from(io::ErrorKind::NotADirectory)),
-                        Node::OpaqueSymlink => return Err(unread_target_error()),
+                        Node::File => {
+                            return Err(io::Error::from(io::ErrorKind::NotADirectory).into());
+                        }
+                        Node::OpaqueSymlink => return Err(unread_target_error().into()),
                         Node::Symlink(_) => match self.resolve(&self.root.join(&walked))? {
                             Resolved::Inside { id, .. } if self.node(id).kind == Node::Dir => id,
                             Resolved::Inside { .. } => {
-                                return Err(io::Error::from(io::ErrorKind::NotADirectory));
+                                return Err(io::Error::from(io::ErrorKind::NotADirectory).into());
                             }
-                            Resolved::Outside(_) => {
-                                return Err(io::Error::other("path leaves the extraction root"));
+                            Resolved::Outside => {
+                                return Err(
+                                    io::Error::other("path leaves the extraction root").into()
+                                );
                             }
                         },
                     }
@@ -787,7 +1126,7 @@ impl VirtualTree {
 
     fn resolve(&self, path: &Path) -> io::Result<Resolved> {
         let Ok(rel) = path.strip_prefix(&self.root) else {
-            return Ok(Resolved::Outside(lexical(path.components())));
+            return Ok(Resolved::Outside);
         };
         let mut pending: VecDeque<Component<'_>> = rel.components().collect();
         let mut stack = vec![ROOT];
@@ -799,7 +1138,7 @@ impl VirtualTree {
                 Component::CurDir => {}
                 Component::ParentDir => {
                     if stack.len() == 1 {
-                        return Ok(Resolved::Outside(self.leave_root(pending)));
+                        return Ok(Resolved::Outside);
                     }
                     stack.pop();
                     current.pop();
@@ -830,15 +1169,13 @@ impl VirtualTree {
                         }
                         Node::Symlink(target) => {
                             hops += 1;
-                            if hops > MAX_SYMLINK_HOPS {
+                            if hops > self.model.limits().hops {
                                 return Err(io::Error::other("too many levels of symbolic links"));
                             }
                             if target.has_root()
                                 || target.components().next().is_some_and(is_prefix)
                             {
-                                return Ok(Resolved::Outside(lexical(
-                                    target.components().chain(pending),
-                                )));
+                                return Ok(Resolved::Outside);
                             }
                             for part in target.components().rev() {
                                 pending.push_front(part);
@@ -847,9 +1184,7 @@ impl VirtualTree {
                     }
                 }
                 Component::RootDir | Component::Prefix(_) => {
-                    return Ok(Resolved::Outside(lexical(
-                        std::iter::once(component).chain(pending),
-                    )));
+                    return Ok(Resolved::Outside);
                 }
             }
         }
@@ -858,25 +1193,14 @@ impl VirtualTree {
             id: stack.last().copied().unwrap_or(ROOT),
         })
     }
-
-    fn leave_root(&self, remaining: VecDeque<Component<'_>>) -> PathBuf {
-        let base = self.root.parent().unwrap_or(&self.root);
-        let mut out = base.to_path_buf();
-        for component in remaining {
-            match component {
-                Component::ParentDir => {
-                    out.pop();
-                }
-                Component::Normal(name) => out.push(name),
-                _ => {}
-            }
-        }
-        out
-    }
 }
 
 impl FsView for VirtualTree {
     type Root = VirtualRoot;
+
+    fn path_model(&self) -> PathModel {
+        self.model
+    }
 
     fn exists(&self, path: &Path) -> bool {
         matches!(self.resolve(path), Ok(Resolved::Inside { .. }))
@@ -907,13 +1231,13 @@ impl FsView for VirtualTree {
         ))
     }
 
-    fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
+    fn canonicalize(&self, path: &Path, _: &VirtualRoot) -> io::Result<Containment> {
         match self.resolve(path)? {
             Resolved::Inside { id, .. } if self.node(id).kind == Node::OpaqueSymlink => {
                 Err(unread_target_error())
             }
-            Resolved::Inside { rel, .. } => Ok(self.root.join(rel)),
-            Resolved::Outside(path) => Ok(path),
+            Resolved::Inside { rel, .. } => Ok(Containment::Within(self.root.join(rel))),
+            Resolved::Outside => Ok(Containment::Escapes),
         }
     }
 }
@@ -926,25 +1250,16 @@ fn is_prefix(component: Component<'_>) -> bool {
     matches!(component, Component::Prefix(_))
 }
 
-fn lexical<'a>(components: impl Iterator<Item = Component<'a>>) -> PathBuf {
-    let mut out = PathBuf::new();
-    for component in components {
-        match component {
-            Component::ParentDir => {
-                out.pop();
-            }
-            Component::CurDir => {}
-            other => out.push(other),
-        }
-    }
-    out
-}
-
 /// Compares names the way the host does, as far as it can be modelled.
 ///
 /// Non-UTF-8 names are folded lossily, which can only merge more names, and a
 /// merge of differently spelled names is always reported.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(target_os = "macos")]
+fn fold(name: &OsStr) -> Cow<'_, OsStr> {
+    portable_fold(name)
+}
+
+#[cfg(target_os = "windows")]
 fn fold(name: &OsStr) -> Cow<'_, OsStr> {
     let text = name.to_string_lossy();
     let folded = if text.is_ascii() {
@@ -960,9 +1275,20 @@ fn fold(name: &OsStr) -> Cow<'_, OsStr> {
     Cow::Borrowed(name)
 }
 
+/// The fold of [`PathModel::Portable`], the same on every host: the key
+/// macOS uses.
+fn portable_fold(name: &OsStr) -> Cow<'_, OsStr> {
+    let text = name.to_string_lossy();
+    let folded = if text.is_ascii() {
+        text.to_ascii_uppercase()
+    } else {
+        decomposed_fold(&text)
+    };
+    Cow::Owned(OsString::from(folded))
+}
+
 /// APFS compares canonically decomposed names case-insensitively.
-#[cfg(target_os = "macos")]
-fn fold_unicode(text: &str) -> String {
+fn decomposed_fold(text: &str) -> String {
     use unicode_normalization::UnicodeNormalization;
     upper_lower_upper(text.nfd())
 }
@@ -977,7 +1303,6 @@ fn fold_unicode(text: &str) -> String {
 ///
 /// Upper-casing first merges `ß` with `ẞ`, lower-casing merges the final
 /// sigma and `ϴ` with `θ`, and the last upper-casing makes the key stable.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn upper_lower_upper(chars: impl Iterator<Item = char>) -> String {
     chars
         .flat_map(char::to_uppercase)
@@ -999,6 +1324,17 @@ mod tests {
         t.insert(Path::new(path), node).unwrap();
     }
 
+    fn canon(t: &VirtualTree, path: &str) -> io::Result<Containment> {
+        t.canonicalize(Path::new(path), &VirtualRoot::at("/dest"))
+    }
+
+    fn within(t: &VirtualTree, path: &str) -> PathBuf {
+        match canon(t, path).unwrap() {
+            Containment::Within(p) => p,
+            Containment::Escapes => panic!("{path} escapes"),
+        }
+    }
+
     fn sym(target: &str) -> Node {
         Node::Symlink(PathBuf::from(target))
     }
@@ -1015,7 +1351,7 @@ mod tests {
     #[test]
     fn missing_component_is_not_found() {
         let t = tree();
-        let err = t.canonicalize(Path::new("/dest/nope")).unwrap_err();
+        let err = canon(&t, "/dest/nope").unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
     }
 
@@ -1025,20 +1361,34 @@ mod tests {
         put(&mut t, "real", Node::Dir);
         put(&mut t, "b", sym("real"));
         put(&mut t, "a", sym("b"));
-        assert_eq!(
-            t.canonicalize(Path::new("/dest/a")).unwrap(),
-            PathBuf::from("/dest/real")
-        );
+        assert_eq!(within(&t, "/dest/a"), PathBuf::from("/dest/real"));
     }
 
     #[test]
-    fn chain_leaving_root_yields_outside_path() {
+    fn chain_leaving_root_escapes() {
         let mut t = tree();
         put(&mut t, "y", sym("."));
         put(&mut t, "d", sym("y/.."));
         put(&mut t, "e", sym("d/.."));
-        let resolved = t.canonicalize(Path::new("/dest/e/secret")).unwrap();
-        assert!(!resolved.starts_with("/dest"), "{resolved:?}");
+        assert_eq!(canon(&t, "/dest/e/secret").unwrap(), Containment::Escapes);
+    }
+
+    #[test]
+    fn a_path_that_leaves_the_root_and_reenters_it_still_escapes() {
+        let mut t = VirtualTree::for_test(&VirtualRoot::new());
+        put(&mut t, "up", sym(".."));
+        put(&mut t, "abs", sym("/exarch-virtual-root/x"));
+        let root = VirtualRoot::new();
+        for target in [
+            "/exarch-virtual-root/up/exarch-virtual-root/x",
+            "/exarch-virtual-root/abs",
+        ] {
+            assert_eq!(
+                t.canonicalize(Path::new(target), &root).unwrap(),
+                Containment::Escapes,
+                "{target}"
+            );
+        }
     }
 
     #[test]
@@ -1046,7 +1396,7 @@ mod tests {
         let mut t = tree();
         put(&mut t, "a", sym("b"));
         put(&mut t, "b", sym("a"));
-        assert!(t.canonicalize(Path::new("/dest/a")).is_err());
+        assert!(canon(&t, "/dest/a").is_err());
     }
 
     #[test]
@@ -1058,8 +1408,8 @@ mod tests {
         }
         let over = format!("/dest/l{}", MAX_SYMLINK_HOPS + 1);
         let at = format!("/dest/l{MAX_SYMLINK_HOPS}");
-        assert!(t.canonicalize(Path::new(&over)).is_err());
-        assert!(t.canonicalize(Path::new(&at)).is_ok());
+        assert!(canon(&t, &over).is_err());
+        assert!(canon(&t, &at).is_ok());
     }
 
     #[cfg(any(unix, windows))]
@@ -1095,14 +1445,8 @@ mod tests {
         for i in 1..=resolvable + 1 {
             put(&mut t, &format!("l{i}"), sym(&format!("l{}", i - 1)));
         }
-        assert!(
-            t.canonicalize(Path::new(&format!("/dest/l{resolvable}")))
-                .is_ok()
-        );
-        assert!(
-            t.canonicalize(Path::new(&format!("/dest/l{}", resolvable + 1)))
-                .is_err()
-        );
+        assert!(canon(&t, &format!("/dest/l{resolvable}")).is_ok());
+        assert!(canon(&t, &format!("/dest/l{}", resolvable + 1)).is_err());
     }
 
     fn ascii_upper(name: &OsStr) -> Cow<'_, OsStr> {
@@ -1133,10 +1477,7 @@ mod tests {
             t.place(Path::new("A/x"), Node::File).unwrap(),
             PathBuf::from("a/x")
         );
-        assert_eq!(
-            t.canonicalize(Path::new("/dest/A/X")).unwrap(),
-            PathBuf::from("/dest/a/x")
-        );
+        assert_eq!(within(&t, "/dest/A/X"), PathBuf::from("/dest/a/x"));
     }
 
     #[test]
@@ -1146,6 +1487,89 @@ mod tests {
         put(&mut t, "f", Node::File);
         assert!(t.place(Path::new("f"), Node::Dir).is_err());
         assert!(t.place(Path::new("f/g"), Node::File).is_err());
+    }
+
+    fn budgeted(max: usize, recording: CollisionRecording) -> VirtualTree {
+        VirtualTree::build(
+            &VirtualRoot::at("/dest"),
+            PathModel::Host,
+            ascii_upper,
+            NodeBudget::with_max(max),
+            recording,
+        )
+    }
+
+    #[test]
+    fn node_budget_refuses_the_key_after_the_last() {
+        let mut t = budgeted(3, CollisionRecording::Record);
+        for name in ["a", "b", "c"] {
+            put(&mut t, name, Node::Dir);
+        }
+        let err = t.try_insert(Path::new("d"), Node::Dir).unwrap_err();
+        assert!(matches!(
+            err,
+            PlaceError::Budget(NodeBudgetExceeded { max: 3 })
+        ));
+        assert!(!t.exists(Path::new("/dest/d")));
+    }
+
+    #[test]
+    fn node_budget_charges_implicit_parents() {
+        let mut t = budgeted(2, CollisionRecording::Record);
+        let err = t.try_insert(Path::new("a/b/c"), Node::File).unwrap_err();
+        assert!(matches!(err, PlaceError::Budget(_)));
+    }
+
+    #[test]
+    fn node_budget_charges_alias_spellings_once() {
+        let mut t = budgeted(3, CollisionRecording::Discard);
+        put(&mut t, "dir", Node::Dir);
+        put(&mut t, "Dir", Node::Dir);
+        put(&mut t, "Dir", Node::Dir);
+        put(&mut t, "DIR", Node::Dir);
+        let err = t.try_insert(Path::new("dIr"), Node::Dir).unwrap_err();
+        assert!(matches!(err, PlaceError::Budget(_)));
+    }
+
+    #[test]
+    fn discard_keeps_no_collision_records_after_a_flood() {
+        let mut t = budgeted(usize::MAX, CollisionRecording::Discard);
+        put(&mut t, "d/f", Node::File);
+        for spelling in ["D", "d", "Dd"] {
+            let _ = t.insert(Path::new(spelling), Node::Dir);
+        }
+        put(&mut t, "D/g", Node::File);
+        put(&mut t, "Dir", Node::Dir);
+        put(&mut t, "dir", Node::Dir);
+        put(&mut t, "dir/x", Node::File);
+        assert!(t.take_collisions().is_empty());
+        assert!(t.take_empty_merges().is_empty());
+        assert!(t.exists(Path::new("/dest/D/f")));
+    }
+
+    #[test]
+    fn unbounded_config_budget_never_trips() {
+        let config = crate::SecurityConfig::default()
+            .with_max_file_count(usize::MAX)
+            .with_max_path_depth(8);
+        let mut t = VirtualTree::build(
+            &VirtualRoot::at("/dest"),
+            PathModel::Host,
+            fold,
+            NodeBudget::from_config(&config),
+            CollisionRecording::Discard,
+        );
+        for i in 0..1000 {
+            put(&mut t, &format!("d{i}"), Node::Dir);
+        }
+    }
+
+    #[test]
+    fn config_budget_is_files_times_depth_plus_one() {
+        let config = crate::SecurityConfig::default()
+            .with_max_file_count(10)
+            .with_max_path_depth(4);
+        assert_eq!(NodeBudget::from_config(&config).max, 41);
     }
 
     fn collisions_of(t: &mut VirtualTree) -> Vec<(String, String, CollisionKind)> {
@@ -1427,8 +1851,8 @@ mod tests {
     fn nothing_resolves_through_an_opaque_symlink() {
         let mut t = tree();
         put(&mut t, "d", Node::OpaqueSymlink);
-        assert!(t.canonicalize(Path::new("/dest/d")).is_err());
-        assert!(t.canonicalize(Path::new("/dest/d/x")).is_err());
+        assert!(canon(&t, "/dest/d").is_err());
+        assert!(canon(&t, "/dest/d/x").is_err());
         assert!(t.insert(Path::new("d/f"), Node::File).is_err());
     }
 
@@ -1437,7 +1861,7 @@ mod tests {
         let mut t = tree();
         put(&mut t, "d", Node::OpaqueSymlink);
         put(&mut t, "l", sym("d"));
-        assert!(t.canonicalize(Path::new("/dest/l")).is_err());
+        assert!(canon(&t, "/dest/l").is_err());
     }
 
     #[test]
@@ -1513,14 +1937,14 @@ mod tests {
         put(&mut t, "real", Node::Dir);
         put(&mut t, "d", sym("real"));
         for node in [sym("other"), Node::OpaqueSymlink] {
-            let conflict = t.try_insert(Path::new("d"), node).unwrap_err();
+            let conflict = t
+                .try_insert(Path::new("d"), node)
+                .unwrap_err()
+                .into_conflict();
             assert_eq!(conflict.error.kind(), io::ErrorKind::AlreadyExists);
             assert_eq!(conflict.occupant, Some(Occupant::Symlink));
         }
-        assert_eq!(
-            t.canonicalize(Path::new("/dest/d")).unwrap(),
-            PathBuf::from("/dest/real")
-        );
+        assert_eq!(within(&t, "/dest/d"), PathBuf::from("/dest/real"));
     }
 
     #[test]
@@ -1535,7 +1959,10 @@ mod tests {
     fn file_over_dir_is_refused_with_is_a_directory() {
         let mut t = tree();
         put(&mut t, "d/f", Node::File);
-        let conflict = t.try_insert(Path::new("d"), Node::File).unwrap_err();
+        let conflict = t
+            .try_insert(Path::new("d"), Node::File)
+            .unwrap_err()
+            .into_conflict();
         assert_eq!(conflict.error.kind(), io::ErrorKind::IsADirectory);
         assert_eq!(conflict.occupant, Some(Occupant::Directory));
     }
@@ -1607,9 +2034,7 @@ mod tests {
         let mut t = tree();
         put(&mut t, "d", Node::Dir);
         let long = "a".repeat(1 << 20);
-        let err = t
-            .canonicalize(&Path::new("/dest/d").join(&long))
-            .unwrap_err();
+        let err = canon(&t, &format!("/dest/d/{long}")).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
     }
 
@@ -1724,6 +2149,11 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         assert!(HostFs.exists(temp.path()));
         assert!(!HostFs.is_symlink(temp.path()).unwrap());
-        assert!(HostFs.canonicalize(&temp.path().join("nope")).is_err());
+        let root = DestDir::new(temp.path().to_path_buf()).unwrap();
+        assert!(
+            HostFs
+                .canonicalize(&temp.path().join("nope"), &root)
+                .is_err()
+        );
     }
 }

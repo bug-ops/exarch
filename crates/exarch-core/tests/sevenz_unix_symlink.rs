@@ -14,7 +14,9 @@ use std::io::Cursor;
 use std::path::Path;
 use std::path::PathBuf;
 
+use common::RawEntry;
 use common::flip_first;
+use common::solid_copy_7z;
 use exarch_core::ArchiveError;
 use exarch_core::ArchiveManifest;
 use exarch_core::CheckStatus;
@@ -65,6 +67,14 @@ enum Item<'a> {
 }
 
 impl Item<'_> {
+    fn name(&self) -> &str {
+        match self {
+            Item::File(name, _) | Item::Dir(name) | Item::Link(name, _) | Item::LinkDir(name) => {
+                name
+            }
+        }
+    }
+
     fn entry(self) -> (ArchiveEntry, &'static [u8]) {
         let unix = |mode: u32| UNIX_EXTENSION | (mode << 16);
         let streamed = |name: &str, data: &[u8], attributes: u32| {
@@ -103,6 +113,22 @@ enum Layout {
     /// end is pushed on its own, so the writer does not count it as a
     /// sub-stream of the block.
     SolidAroundDirs,
+    /// One solid block written by hand with a sub-stream only for the entries
+    /// with data, wherever the stream-less entries stand.
+    HandWrittenSolid,
+}
+
+fn hand_written_solid(items: &[Item<'_>]) -> Vec<u8> {
+    let entries: Vec<_> = items
+        .iter()
+        .map(|item| match *item {
+            Item::File(name, data) => RawEntry::File(name, data),
+            Item::Link(name, target) => RawEntry::Link(name, target),
+            Item::Dir(name) => RawEntry::Dir(name),
+            Item::LinkDir(_) => unreachable!("not used with a hand-written block"),
+        })
+        .collect();
+    solid_copy_7z(&entries)
 }
 
 fn build(items: &[Item<'_>], layout: Layout, stored: bool) -> Vec<u8> {
@@ -112,6 +138,7 @@ fn build(items: &[Item<'_>], layout: Layout, stored: bool) -> Vec<u8> {
     }
     let pairs: Vec<_> = items.iter().map(|item| item.entry()).collect();
     match layout {
+        Layout::HandWrittenSolid => return hand_written_solid(items),
         Layout::OneBlockEach => {
             for (entry, data) in pairs {
                 let reader = entry.has_stream.then(|| Cursor::new(data.to_vec()));
@@ -1047,7 +1074,7 @@ fn a_link_written_by_7zip_with_snl_is_a_unix_symlink_not_a_reparse_point() {
 /// Marks file `file` of a two-file archive stored with a plain header as
 /// stream-less (a directory), leaving every block as it was.
 ///
-/// The block of the file then keeps its stream count but no file maps to it.
+/// The block of the file then keeps its streams, which no file accounts for.
 /// The patch is built here from the header layout: 6 signature bytes, 2
 /// version bytes, the start header CRC, then the next header's offset, size
 /// and CRC.
@@ -1106,11 +1133,9 @@ fn orphan_block_archive(dir: &TempDir, stream_less: usize) -> PathBuf {
     path
 }
 
-/// An orphan block keeps its stream count and the first-file index 0, so it
-/// would decode over the first files of the archive with its own data. It is
-/// refused where the archive is admitted, by `extract` before any write and by
-/// `verify`, which never decodes it, and `list` reports only what the header
-/// holds.
+/// An orphan block holds streams that no file accounts for. It is refused where
+/// the archive is admitted, by `extract` before any write and by `verify`,
+/// which never decodes it, and `list` reports only what the header holds.
 fn assert_orphan_block_refused(path: &Path, mapping: [Option<usize>; 2]) {
     let archive = Archive::read(
         &mut Cursor::new(std::fs::read(path).unwrap()),
@@ -1126,7 +1151,7 @@ fn assert_orphan_block_refused(path: &Path, mapping: [Option<usize>; 2]) {
     let err = extract_archive(path, out.path(), &SecurityConfig::default()).unwrap_err();
     assert_matches!(
         err,
-        ArchiveError::InvalidArchive(reason) if reason.contains("other than the ones mapped")
+        ArchiveError::InvalidArchive(reason) if reason.contains("do not account for")
     );
     for name in ["a", "b"] {
         assert_eq!(std::fs::read(out.path().join(name)).unwrap(), b"sentinel");
@@ -1151,7 +1176,7 @@ fn assert_orphan_block_refused(path: &Path, mapping: [Option<usize>; 2]) {
 }
 
 #[test]
-fn an_orphan_trailing_block_is_refused_before_it_can_redeliver_the_first_file() {
+fn an_orphan_trailing_block_is_refused() {
     let dir = TempDir::new().unwrap();
     let path = orphan_block_archive(&dir, 1);
 
@@ -1159,7 +1184,7 @@ fn an_orphan_trailing_block_is_refused_before_it_can_redeliver_the_first_file() 
 }
 
 #[test]
-fn a_block_whose_span_covers_a_stream_less_entry_is_refused() {
+fn an_orphan_block_after_a_leading_stream_less_entry_is_refused() {
     let dir = TempDir::new().unwrap();
     let path = orphan_block_archive(&dir, 0);
 
@@ -1229,10 +1254,11 @@ fn verify_class(path: &Path, config: &SecurityConfig) -> &'static str {
 /// `S`, a link `L` to it and a file `F` below the link, with one block per
 /// entry and with the files in one solid block (`S` at either end of the
 /// block is pushed apart from it, so the writer does not count it as a
-/// sub-stream; `S` in the middle makes the block interleaved and is refused at
-/// admission by both). The stream map of every case is pinned. Parity holds
-/// under an integrity check only: a plain `verify` leaves 7z link targets
-/// unread.
+/// sub-stream; the writer cannot place `S` between the block's stream files
+/// without counting it, which would shift the sizes of the files after it, so
+/// `LSF` and `FSL` use a block written by hand). The stream map of every case
+/// is pinned. Parity holds under an integrity check only: a plain `verify`
+/// leaves 7z link targets unread.
 ///
 /// In `SLF` and `LSF` the file `d/f` is written through the archive's own link
 /// `d` into `sub/f`, as TAR does.
@@ -1263,11 +1289,11 @@ fn verify_and_extract_agree_for_every_order_of_a_directory_a_link_and_a_file() {
         ("LFS", [l, f, s], Layout::OneBlockEach, [Some(0), Some(1), N], "failed", "failed", "fail"),
         ("FLS", [f, l, s], Layout::OneBlockEach, [Some(0), Some(1), N], "extracted", "failed", "pass"),
         ("SLF", [s, l, f], Layout::SolidAroundDirs, [N, Some(0), Some(0)], "extracted", "extracted", "pass"),
-        ("LSF", [l, s, f], Layout::SolidAroundDirs, [Some(0), Some(0), Some(0)], "refused", "refused", "fail"),
         ("SFL", [s, f, l], Layout::SolidAroundDirs, [N, Some(0), Some(0)], "extracted", "failed", "pass"),
-        ("FSL", [f, s, l], Layout::SolidAroundDirs, [Some(0), Some(0), Some(0)], "refused", "refused", "fail"),
         ("LFS", [l, f, s], Layout::SolidAroundDirs, [Some(0), Some(0), N], "failed", "failed", "fail"),
         ("FLS", [f, l, s], Layout::SolidAroundDirs, [Some(0), Some(0), N], "extracted", "failed", "pass"),
+        ("LSF", [l, s, f], Layout::HandWrittenSolid, [Some(0), Some(0), Some(0)], "extracted", "extracted", "pass"),
+        ("FSL", [f, s, l], Layout::HandWrittenSolid, [Some(0), Some(0), Some(0)], "extracted", "failed", "pass"),
     ];
     let config = allow_symlinks().with_allow_solid_archives(true);
     for (order, items, layout, map, skipping, keeping, verify) in table {
@@ -1277,10 +1303,10 @@ fn verify_and_extract_agree_for_every_order_of_a_directory_a_link_and_a_file() {
         std::fs::write(&path, &bytes).unwrap();
         let label = format!(
             "{order} {}",
-            if layout == Layout::OneBlockEach {
-                "each"
-            } else {
-                "solid"
+            match layout {
+                Layout::OneBlockEach => "each",
+                Layout::HandWrittenSolid => "hand-written solid",
+                Layout::Solid | Layout::SolidAroundDirs => "solid",
             }
         );
 
@@ -1298,7 +1324,16 @@ fn verify_and_extract_agree_for_every_order_of_a_directory_a_link_and_a_file() {
         );
         assert_eq!(verify_class(&path, &config), verify, "{label} verify");
 
-        if matches!(order, "SLF" | "LSF") && layout == Layout::OneBlockEach
+        let names: Vec<_> = list_archive(&path, &config)
+            .unwrap()
+            .entries()
+            .iter()
+            .map(|e| e.path.display().to_string())
+            .collect();
+        let expected: Vec<_> = items.iter().map(|i| i.name().to_string()).collect();
+        assert_eq!(names, expected, "{label} list");
+
+        if matches!(order, "SLF" | "LSF") && layout != Layout::SolidAroundDirs
             || order == "SLF" && layout == Layout::SolidAroundDirs
         {
             let (container, out) = nested_dest();

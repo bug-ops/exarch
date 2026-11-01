@@ -1,5 +1,6 @@
 //! A 7z header with streams info and no files info is an invalid archive for
 //! `list`, `verify` and `extract` alike, never a panic (#746).
+//! `sevenz-rust2` 0.24.2 rejects it itself when the header is opened.
 //!
 //! The fixture is the 66-byte fuzzer vector from `sevenz-rust2`; see the
 //! provenance note in `tests/fixtures/generate_7z_fixtures.sh`.

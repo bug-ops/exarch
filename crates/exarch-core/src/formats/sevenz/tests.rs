@@ -2389,33 +2389,20 @@ fn test_stream_less_entry_before_a_block_is_admitted() {
     assert!(visited.contains(&"full.txt".to_string()));
 }
 
-/// `interleaved-empty.7z` has a stream-less entry between the stream files
-/// of one block. Upstream iterates the block as `num_unpack_sub_streams`
-/// consecutive files, so every stream-less entry inside the block pushes
-/// the last stream file out of reach (a directory has the same effect
-/// as an empty file); trailing and leading ones fall outside the span.
+/// `interleaved-empty.7z` has a stream-less entry between the stream files of
+/// one block; sevenz-rust2 0.24.2 includes it in the block span, so the walk
+/// visits every file once and the last stream file is not dropped.
 #[test]
-fn test_stream_less_entry_inside_a_block_is_refused_and_upstream_drops_a_file() {
+fn test_stream_less_entry_inside_a_block_is_admitted_and_every_file_is_visited() {
     let bytes = load_fixture("interleaved-empty.7z");
     let header = read_sevenz_header(&mut Cursor::new(bytes.clone())).unwrap();
-    let stream_files: Vec<_> = header
-        .files()
-        .iter()
-        .filter(|f| f.has_stream && f.size > 0)
-        .map(|f| f.name.clone())
-        .collect();
+    let names: Vec<_> = header.files().iter().map(|f| f.name.clone()).collect();
 
-    let refusals = block_refusals(&header);
-    assert_eq!(refusals.len(), 1);
-    assert_eq!(refusals[0].scope, RefusalScope::Block(first_block(&header)));
-    assert_matches!(refusals[0].error, ArchiveError::InvalidArchive(_));
+    assert!(block_refusals(&header).is_empty());
 
-    // If sevenz-rust2 starts visiting every stream file, the predicate can
-    // be relaxed. The walk itself fails closed on the dropped file.
     let (visited, result) = visit(&header, bytes);
-    let dropped = stream_files.iter().filter(|n| !visited.contains(n)).count();
-    assert_eq!(dropped, 1, "{visited:?}");
-    assert_matches!(result, Err(sevenz_rust2::Error::Other(_)));
+    result.unwrap();
+    assert_eq!(visited, names);
 }
 
 #[test]
@@ -2448,6 +2435,37 @@ fn test_decoder_memory_bound_uses_declared_file_sizes_beyond_the_unpack_size() {
             resource: QuotaResource::DecoderMemory { .. }
         }
     );
+}
+
+fn refusal_messages_after_resizing(sizes: [u64; 2]) -> Vec<String> {
+    let bytes = build_solid_sevenz_archive(&[("a", &[1u8; 16]), ("b", &[2u8; 16])], false);
+    let mut archive = Archive::read(&mut Cursor::new(bytes), &Password::empty()).unwrap();
+    archive.files[0].size = sizes[0];
+    archive.files[1].size = sizes[1];
+    block_refusals(&SevenZHeader::assume_checked(archive))
+        .into_iter()
+        .filter(|r| matches!(r.scope, RefusalScope::Block(_)))
+        .map(|r| match r.error {
+            ArchiveError::InvalidArchive(message) => message,
+            other => panic!("unexpected refusal {other:?}"),
+        })
+        .collect()
+}
+
+#[test]
+fn test_block_whose_files_do_not_sum_to_its_unpack_size_is_refused() {
+    assert!(refusal_messages_after_resizing([16, 16]).is_empty());
+
+    let messages = refusal_messages_after_resizing([16, 17]);
+    assert_eq!(messages.len(), 1);
+    assert!(messages[0].contains("do not account for"), "{messages:?}");
+}
+
+#[test]
+fn test_overflowing_file_sizes_count_as_a_mismatch() {
+    let messages = refusal_messages_after_resizing([u64::MAX, u64::MAX]);
+    assert_eq!(messages.len(), 1);
+    assert!(messages[0].contains("do not account for"), "{messages:?}");
 }
 
 fn sevenz_file(name: &str, stream: bool, size: u64, anti: bool) -> sevenz_rust2::ArchiveEntry {

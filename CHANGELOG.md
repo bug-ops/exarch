@@ -11,17 +11,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Core: `ArchiveReader`, `list_reader`, `verify_reader` and `extract_to_sink` with the `EntrySink` trait process TAR and ZIP archives from a reader without a filesystem path; `list_reader` and `verify_reader` also cover 7z (#754, #771).
 - CI: a `wasm` job builds `exarch-cli` for `wasm32-wasip1` and runs a wasmtime smoke test (#755, #771).
-- Core: `MemorySink` with `MemoryLimit` collects `extract_to_sink` output in memory, bounded by payload, path bytes and a per-entry overhead (#777).
-- Core: `extract_to_sink` extracts 7z archives with the same gates as path-based extraction (#772).
-- Core: `PathModel::Portable` validates sink names for any target OS and `EntrySink::path_model` selects it; `extract_to_sink_with_progress` reports progress (#778, #775).
-- Core: `ArchiveReader::detect`, `detect_stream`, `of_type` and `from_bytes` pick the format from the leading bytes (#774).
-- Core: `create_to_writer` and `create_to_writer_with_progress` create TAR and ZIP archives over `impl Write` (#773).
-- Python and Node: `list_archive_bytes`, `verify_archive_bytes` and `extract_archive_to_memory` work on in-memory archives (#776).
+- Core: `MemorySink` with `MemoryLimit` collects `extract_to_sink` output in memory, bounded by payload, path bytes and a per-entry overhead (#777, #787).
+- Core: `extract_to_sink` extracts 7z archives with the same gates as path-based extraction (#772, #787).
+- Core: `PathModel::Portable` validates sink names for any target OS and `EntrySink::path_model` selects it; `extract_to_sink_with_progress` reports progress (#778, #775, #787).
+- Core: `ArchiveReader::detect`, `detect_stream`, `of_type` and `from_bytes` pick the format from the leading bytes (#774, #787).
+- Core: `create_to_writer` and `create_to_writer_with_progress` create TAR and ZIP archives over `impl Write` (#773, #787).
+- Python and Node: `list_archive_bytes`, `verify_archive_bytes` and `extract_archive_to_memory` work on in-memory archives (#776, #787).
 
 ### Changed
 
-- **BREAKING:** `ArchiveError::ReaderFormat` and `QuotaResource::{TreeNodes, SinkCapacity}` are new variants; exhaustive matches must handle them (#774, #777, #779).
-- Core: the in-memory tree used by `verify` and `extract_to_sink` has a node budget tied to `max_file_count` and `max_path_depth`; `VirtualTree` treats a link path that leaves the root and returns as an escape (#779, #778).
+- **BREAKING:** `ArchiveError::ReaderFormat` and `QuotaResource::{TreeNodes, SinkCapacity}` are new variants; exhaustive matches must handle them (#774, #777, #779, #787).
+- Core: the in-memory tree used by `verify` and `extract_to_sink` has a node budget tied to `max_file_count` and `max_path_depth`; `VirtualTree` treats a link path that leaves the root and returns as an escape (#779, #778, #787).
 
 - Core: the `xz2` dependency is replaced by the maintained `liblzma` 0.4.9, which bundles xz 5.8 instead of 5.2.5 (#763, #771).
 - Core: `verify` no longer creates a temporary directory; it validates against an in-memory tree (#754, #771).

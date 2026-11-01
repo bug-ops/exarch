@@ -35,6 +35,7 @@ use crate::ParallelDecode;
 use crate::QuotaResource;
 use crate::SolidBlock;
 use crate::UnverifiedReason;
+#[cfg(unix)]
 use crate::copy::CopyBuffer;
 use crate::formats::target::Tally;
 use crate::inspection::integrity::IntegrityPass;

@@ -1042,7 +1042,6 @@ pub fn occupant_at_dest_error(rel: &Path, occupant: Occupant) -> std::io::Error 
 }
 
 /// The error for a symlink that occupies a path extraction would overwrite.
-#[cfg(unix)]
 pub fn symlink_at_dest_error(rel: &Path) -> std::io::Error {
     occupant_at_dest_error(rel, Occupant::Symlink)
 }

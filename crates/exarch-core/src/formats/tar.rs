@@ -18,7 +18,7 @@
 //!
 //! - **gzip** (.tar.gz, .tgz): Via `flate2` crate
 //! - **bzip2** (.tar.bz2, .tbz2): Via `bzip2` crate
-//! - **xz** (.tar.xz, .txz): Via `xz2` crate
+//! - **xz** (.tar.xz, .txz): Via `liblzma` crate
 //! - **zstd** (.tar.zst, .tzst): Via `zstd` crate
 //!
 //! # Security Features
@@ -107,7 +107,6 @@
 //! ```
 
 use std::fs::File;
-use std::io::BufReader;
 use std::io::Read;
 use std::path::Path;
 use std::time::Instant;
@@ -123,29 +122,26 @@ use crate::Result;
 use crate::SecurityConfig;
 use crate::VerificationOptions;
 use crate::config::Validated;
-use crate::copy::CopyBuffer;
 use crate::inspection::integrity::TarTrailer;
 use crate::inspection::list::ListPass;
-use crate::security::hardlink::hardlink_target_missing;
-use crate::security::permissions::SanitizedMode;
 use crate::security::quota::EntryCount;
-use crate::security::quota::QuotaPermit;
-use crate::security::validator::EntryValidator;
 use crate::security::validator::NodeKind;
 use crate::security::validator::ValidatedEntryType;
 use crate::security::validator::check_root_entry_is_directory;
 use crate::security::validator::require_non_empty_name;
-use crate::types::DestDir;
 use crate::types::EntryType;
 use crate::types::SafePath;
-use crate::types::safe_symlink::resolve_through_symlinks;
 
 use super::common;
 use super::compression::CompressionCodec;
 use super::tar_metadata_limit::budget_violation;
 use super::tar_metadata_limit::budgeted_reader;
 use super::tar_metadata_limit::budgeted_tar_entries;
+use super::target::ExtractTarget;
+use super::target::HostTarget;
+use super::target::Tally;
 use super::traits::ArchiveFormat;
+use crate::reader::decode_tar_stream;
 
 /// TAR archive handler with streaming extraction.
 ///
@@ -244,8 +240,9 @@ impl<R: Read> TarArchive<R> {
     }
 
     /// Processes a single TAR entry.
-    fn process_entry<ER: Read>(
+    fn process_entry<ER: Read, T: ExtractTarget>(
         entry: &mut tar::Entry<'_, ER>,
+        target: &mut T,
         ctx: &mut ExtractionContext<'_, '_>,
     ) -> Result<Option<HardlinkInfo>> {
         // Skip TAR metadata entries (PAX headers, GNU long names/links, sparse)
@@ -272,46 +269,33 @@ impl<R: Read> TarArchive<R> {
             && !common::check_extension_allowed(
                 &path,
                 ctx.config,
-                ctx.report,
+                ctx.tally.report,
                 ctx.disallowed_extension_skips,
             )
         {
             return Ok(None);
         }
 
-        let validated = ctx.validator.validate_entry(
-            &path,
-            &entry_type,
-            size,
-            None,
-            mode,
-            Some(ctx.dir_cache),
-        )?;
+        let validated = target.validate(&path, &entry_type, size, None, mode)?;
 
         // `into_parts()` consumes `validated` so the File arm can move its
-        // QuotaPermit by value into extract_file (mirrors 7z's
+        // QuotaPermit by value into the target (mirrors 7z's
         // process_entry_inner, issue #445), rather than only observing it
         // through entry_type()'s shared reference.
         match validated.into_parts() {
             (safe_path, ValidatedEntryType::File(permit), mode) => {
-                Self::extract_file(entry, &safe_path, mode, permit, ctx)?;
+                let size = entry.size();
+                target.file(entry, &safe_path, mode, permit, size, &mut ctx.tally)?;
                 Ok(None)
             }
 
             (safe_path, ValidatedEntryType::Directory, _) => {
-                common::create_directory(&safe_path, ctx.dest, ctx.report, ctx.dir_cache)?;
+                target.directory(&safe_path, &mut ctx.tally)?;
                 Ok(None)
             }
 
             (_, ValidatedEntryType::Symlink(safe_symlink), _) => {
-                common::create_symlink(
-                    &safe_symlink,
-                    ctx.dest,
-                    ctx.report,
-                    ctx.dir_cache,
-                    ctx.skip_duplicates,
-                    ctx.duplicate_skips,
-                )?;
+                target.symlink(&safe_symlink, &mut ctx.tally)?;
                 Ok(None)
             }
 
@@ -326,180 +310,122 @@ impl<R: Read> TarArchive<R> {
         }
     }
 
-    /// Extracts a regular file to disk.
-    fn extract_file<ER: Read>(
-        entry: &mut tar::Entry<'_, ER>,
-        safe_path: &SafePath,
-        mode: Option<SanitizedMode>,
-        permit: QuotaPermit,
-        ctx: &mut ExtractionContext<'_, '_>,
-    ) -> Result<()> {
-        let size = Some(entry.size());
-        common::extract_file_with_permit(
-            entry,
-            safe_path,
-            mode,
-            permit,
-            ctx.dest,
-            ctx.report,
-            size,
-            ctx.copy_buffer,
-            ctx.dir_cache,
-            ctx.skip_duplicates,
-            ctx.duplicate_skips,
-            ctx.progress,
-        )
-    }
+    /// Runs the extraction loop against `target`: the validation gates are the
+    /// same whether it writes to the filesystem or to an entry sink.
+    pub(crate) fn extract_into<T: ExtractTarget>(
+        &mut self,
+        target: &mut T,
+        config: &SecurityConfig<Validated>,
+        options: &ExtractionOptions,
+        progress: &mut dyn ProgressCallback,
+    ) -> Result<ExtractionReport> {
+        let start = Instant::now();
 
-    /// Creates a hardlink in the second pass by copying content.
-    ///
-    /// Uses a content copy instead of `fs::hard_link` to avoid shared-inode
-    /// corruption: a real OS hardlink would allow a subsequent write to
-    /// `link_path` to silently overwrite `target_path` (GHSA-2367-c296-3mp2
-    /// variant, issue #130).
-    ///
-    /// # Security - Symlink-at-Destination Rejection (issue #467)
-    ///
-    /// `Path::exists()` returns `false` for a dangling symlink, so a
-    /// pre-planted symlink at `link_path` used to bypass the old
-    /// existence-based duplicate check, and the subsequent `fs::copy`
-    /// followed it, writing archive content outside the extraction root.
-    /// The destination is now opened via `common::create_file_with_mode`
-    /// (mode `None`, since permissions are copied from the target's bytes
-    /// afterward, not set at creation) with `create_new = true`, which
-    /// atomically fails with `ErrorKind::AlreadyExists` for any pre-existing
-    /// path at `link_path` — symlink (dangling or not), regular file, or
-    /// directory — folding the duplicate check into the `open()` call
-    /// itself instead of a separate, bypassable `exists()` probe. This
-    /// reuses the same `O_EXCL`+`O_NOFOLLOW` (Unix) discipline as the
-    /// normal-file write path (issue #459) for consistency, though
-    /// `create_new`'s `O_EXCL` alone already refuses any pre-existing path.
-    ///
-    /// # Security - Target Read TOCTOU and Quota TOCTOU (issue #467)
-    ///
-    /// Hardlinks are validated in two passes: `EntryValidator::validate_entry`
-    /// (via `HardlinkTracker::validate_hardlink`) resolves `target` through
-    /// any on-disk symlinks and checks containment in pass one, but this
-    /// function — pass two — runs later, after every entry in the archive has
-    /// been validated and every non-hardlink entry extracted. Nothing
-    /// re-validates `target_path` in between. A plain path-based `File::open`
-    /// (or `std::fs::metadata`, as this function used to do to size the quota
-    /// reservation) would silently follow whatever is at `target_path` by the
-    /// time pass two runs — which, given an attacker-writable destination
-    /// directory, may not be what pass one validated at all (the target
-    /// swapped for a symlink escaping `dest` in between the two passes).
-    /// Separately, sizing the quota reservation from a path-based `stat` and
-    /// then copying from a *different*, separately-opened handle left its own
-    /// TOCTOU window: swapping `target_path` between the two operations could
-    /// charge the quota for N bytes while actually copying an unbounded
-    /// amount.
-    ///
-    /// Both are narrowed the same way: [`common::open_no_follow`] opens
-    /// `target_path` once, refusing to follow a symlink (Unix, via
-    /// `O_NOFOLLOW`) rather than a separate `stat`-then-`open`; the quota
-    /// reservation is sized from that same open handle's `fstat`, and the
-    /// copy reads from that same handle — never re-touching the path
-    /// afterward. A symlink at `target_path` is not automatically rejected,
-    /// though: it is a legitimate, common archive shape for a hardlink's
-    /// target to itself be a symlink created earlier in the *same*
-    /// extraction (already pass-one-validated). On `ErrorKind::FilesystemLoop`
-    /// from `open_no_follow`, [`resolve_through_symlinks`] re-runs the exact
-    /// containment check pass one already trusts, against the *current*
-    /// on-disk state; if it still resolves inside `dest`, the resolved
-    /// (symlink-free, since `canonicalize` dereferences fully) path is opened
-    /// instead. This narrows the TOCTOU window from "the entire gap between
-    /// pass one and pass two" down to "between this re-check and the open" —
-    /// consistent with the check-then-act discipline the rest of the pipeline
-    /// already accepts elsewhere (e.g. `DirCache`'s documented TOCTOU). If the
-    /// re-resolution instead lands outside `dest`, that is a genuine escape
-    /// attempt and is reported as such, not as a raw OS errno.
-    fn create_hardlink(info: HardlinkInfo, ctx: &mut ExtractionContext<'_, '_>) -> Result<()> {
-        let link_path = ctx.dest.join(&info.link_path);
-        let target_path = ctx.dest.join(&info.target_path);
+        let mut report = ExtractionReport::new();
 
-        if !target_path.exists() {
-            return Err(hardlink_target_missing(info.target_path.as_path()));
+        let mut hardlinks: SmallVec<[HardlinkInfo; 8]> = SmallVec::new();
+
+        let mut current_entry: usize = 0;
+
+        // Aggregated once, at every exit point, into a single warning per
+        // counter instead of one warning per skipped entry — keeps
+        // `report.warnings`'s growth independent of how many duplicate
+        // entries an archive contains (issue #490). Hardlinks are counted
+        // separately since they are format-specific to TAR (ZIP has no
+        // hardlink entry type).
+        let mut duplicate_skips: u64 = 0;
+        let mut hardlink_duplicate_skips: u64 = 0;
+        // Same aggregation, for entries rejected by the extension allowlist
+        // (issue #495).
+        let mut disallowed_extension_skips: u64 = 0;
+
+        let reader = self.inner.take().ok_or_else(|| {
+            ArchiveError::InvalidArchive("archive reader already consumed by list()".into())
+        })?;
+        let (budgeted, budget) = budgeted_reader(reader, config.max_tar_metadata_bytes);
+        let mut inner_archive = Archive::new(budgeted);
+        let mut entries = budgeted_tar_entries(&mut inner_archive, budget)
+            .map_err(|e| ArchiveError::InvalidArchive(format!("failed to read entries: {e}")))?;
+
+        let mut ctx = ExtractionContext {
+            tally: Tally {
+                report: &mut report,
+                skip_duplicates: options.skip_duplicates,
+                duplicate_skips: &mut duplicate_skips,
+                progress,
+            },
+            hardlink_duplicate_skips: &mut hardlink_duplicate_skips,
+            disallowed_extension_skips: &mut disallowed_extension_skips,
+            config,
+        };
+
+        while let Some(entry_result) = entries.next_entry() {
+            let mut guard = entry_result.map_err(|e| {
+                let raw = budget_violation(&e).unwrap_or_else(|| {
+                    ArchiveError::InvalidArchive(format!("failed to read entry: {e}"))
+                });
+                ctx.push_skip_warnings();
+                ArchiveError::partial_or(std::mem::take(ctx.tally.report), raw)
+            })?;
+
+            // TAR is streaming: total entry count is not known upfront, so pass
+            // 0.
+            let entry_path = guard
+                .path()
+                .ok()
+                .map_or_default(std::borrow::Cow::into_owned);
+            current_entry = current_entry.saturating_add(1);
+            ctx.tally
+                .progress
+                .on_entry_start(&entry_path, 0, current_entry);
+
+            // INVARIANT: every branch below must call on_entry_complete exactly
+            // once.
+            match Self::process_entry(&mut guard, target, &mut ctx) {
+                Ok(Some(hardlink_info)) => {
+                    ctx.tally.progress.on_entry_complete(&entry_path);
+                    hardlinks.push(hardlink_info);
+                }
+                Ok(None) => {
+                    ctx.tally.progress.on_entry_complete(&entry_path);
+                }
+                Err(e) => {
+                    ctx.tally.progress.on_entry_complete(&entry_path);
+                    // Abandoning: no further `next_entry()` calls follow, so
+                    // the guard's usual bounded drain is pointless I/O, not a
+                    // correctness requirement (see `TarEntryGuard::abandon`).
+                    guard.abandon();
+                    ctx.push_skip_warnings();
+                    return Err(ArchiveError::partial_or(
+                        std::mem::take(ctx.tally.report),
+                        e,
+                    ));
+                }
+            }
         }
 
-        // Create parent directories using cache
-        ctx.dir_cache.ensure_parent_dir(&link_path)?;
-
-        let link_file = match common::create_file_with_mode(&link_path, None, true) {
-            Ok(file) => file,
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                if ctx.skip_duplicates {
-                    common::checked_increment_files_skipped(ctx.report)?;
-                    *ctx.hardlink_duplicate_skips = ctx.hardlink_duplicate_skips.saturating_add(1);
-                    return Ok(());
-                }
-                return Err(ArchiveError::InvalidArchive(format!(
-                    "duplicate entry: {}",
-                    info.link_path.as_path().display()
-                )));
+        // Two-pass extraction: create hardlinks after all target files exist
+        for hardlink in hardlinks {
+            if let Err(e) = target.hardlink(
+                &hardlink.link_path,
+                &hardlink.target_path,
+                hardlink.counted,
+                &mut ctx.tally,
+                ctx.hardlink_duplicate_skips,
+            ) {
+                ctx.push_skip_warnings();
+                return Err(ArchiveError::partial_or(
+                    std::mem::take(ctx.tally.report),
+                    e,
+                ));
             }
-            Err(e) => return Err(ArchiveError::Io(e)),
-        };
-        let cleanup_guard = common::TempFileGuard::new(link_path);
+        }
 
-        // Opened once, refusing to follow a symlink at `target_path`; the
-        // quota reservation below and the copy further down both operate on
-        // this same handle instead of re-touching the path (issue #467).
-        let target_file = match common::open_no_follow(&target_path) {
-            Ok(file) => file,
-            Err(e) if common::is_filesystem_loop_error(&e) => {
-                // `target_path`'s final component is a symlink. Re-run pass
-                // one's own containment check against the current on-disk
-                // state; a symlink created by an earlier entry in this same
-                // extraction resolves safely inside `dest` and is opened at
-                // its resolved (symlink-free) location, while a genuine
-                // escape attempt is rejected as HardlinkEscape rather than
-                // surfacing as a raw ELOOP.
-                let resolved = resolve_through_symlinks(
-                    ctx.dest.as_path(),
-                    info.target_path.as_path(),
-                    ctx.dest.as_path(),
-                    info.link_path.as_path(),
-                )
-                .map_err(|_| ArchiveError::HardlinkEscape {
-                    path: info.link_path.as_path().to_path_buf(),
-                })?;
-                common::open_no_follow(&resolved)?
-            }
-            Err(e) => return Err(ArchiveError::Io(e)),
-        };
+        ctx.push_skip_warnings();
+        ctx.tally.progress.on_complete();
+        report.duration = start.elapsed();
 
-        // Every hardlink copies the target's real bytes to a new inode, so it
-        // must be charged against the same quota tracker as regular files
-        // (issue #426): otherwise N hardlinks to one small file extract N
-        // full copies with no size enforcement. The entry itself was counted
-        // in pass one (`info.counted`), so a skipped duplicate keeps its count
-        // slot but is charged no bytes, and the pending list is bounded by
-        // `max_file_count` before anything is copied. The permit is consumed
-        // by value below, so this charge cannot be spent twice.
-        let target_size = target_file.metadata()?.len();
-        let permit = ctx.validator.charge_hardlink(info.counted, target_size)?;
-
-        // Copy content between the two handles opened above. Any subsequent
-        // write to `link_path` cannot corrupt `target_path` because they are
-        // separate files.
-        let bytes_copied = common::copy_file_content_with_permit(target_file, link_file, permit)?;
-        cleanup_guard.persist();
-
-        ctx.report.files_extracted =
-            ctx.report
-                .files_extracted
-                .checked_add(1)
-                .ok_or(ArchiveError::QuotaExceeded {
-                    resource: crate::QuotaResource::IntegerOverflow,
-                })?;
-        ctx.report.bytes_written = ctx.report.bytes_written.checked_add(bytes_copied).ok_or(
-            ArchiveError::QuotaExceeded {
-                resource: crate::QuotaResource::IntegerOverflow,
-            },
-        )?;
-        ctx.progress.on_bytes_written(bytes_copied);
-
-        Ok(())
+        Ok(report)
     }
 }
 
@@ -519,131 +445,8 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
         options: &ExtractionOptions,
         progress: &mut dyn ProgressCallback,
     ) -> Result<ExtractionReport> {
-        let start = Instant::now();
-        let skip_duplicates = options.skip_duplicates;
-
-        let dest = DestDir::new_or_create(output_dir.to_path_buf())?;
-
-        let mut validator = EntryValidator::new(config, &dest);
-
-        let mut report = ExtractionReport::new();
-
-        let mut hardlinks: SmallVec<[HardlinkInfo; 8]> = SmallVec::new();
-
-        let mut copy_buffer = CopyBuffer::new();
-
-        let mut dir_cache = common::DirCache::new();
-
-        let mut current_entry: usize = 0;
-
-        // Aggregated once, at every exit point, into a single warning per
-        // counter instead of one warning per skipped entry — keeps
-        // `report.warnings`'s growth independent of how many duplicate
-        // entries an archive contains (issue #490). Hardlinks are counted
-        // separately since they are format-specific to TAR (ZIP has no
-        // hardlink entry type) and go through `create_hardlink` directly
-        // rather than `common::extract_file_with_permit`/`create_symlink`.
-        let mut duplicate_skips: u64 = 0;
-        let mut hardlink_duplicate_skips: u64 = 0;
-        // Same aggregation, for entries rejected by the extension allowlist
-        // (issue #495).
-        let mut disallowed_extension_skips: u64 = 0;
-
-        let reader = self.inner.take().ok_or_else(|| {
-            ArchiveError::InvalidArchive("archive reader already consumed by list()".into())
-        })?;
-        let (budgeted, budget) = budgeted_reader(reader, config.max_tar_metadata_bytes);
-        let mut inner_archive = Archive::new(budgeted);
-        let mut entries = budgeted_tar_entries(&mut inner_archive, budget)
-            .map_err(|e| ArchiveError::InvalidArchive(format!("failed to read entries: {e}")))?;
-
-        let mut ctx = ExtractionContext {
-            validator: &mut validator,
-            dest: &dest,
-            report: &mut report,
-            copy_buffer: &mut copy_buffer,
-            dir_cache: &mut dir_cache,
-            skip_duplicates,
-            duplicate_skips: &mut duplicate_skips,
-            hardlink_duplicate_skips: &mut hardlink_duplicate_skips,
-            disallowed_extension_skips: &mut disallowed_extension_skips,
-            config,
-            progress,
-        };
-
-        while let Some(entry_result) = entries.next_entry() {
-            let mut guard = entry_result.map_err(|e| {
-                let raw = budget_violation(&e).unwrap_or_else(|| {
-                    ArchiveError::InvalidArchive(format!("failed to read entry: {e}"))
-                });
-                push_duplicate_skip_warnings(
-                    ctx.report,
-                    *ctx.duplicate_skips,
-                    *ctx.hardlink_duplicate_skips,
-                    *ctx.disallowed_extension_skips,
-                );
-                ArchiveError::partial_or(std::mem::take(ctx.report), raw)
-            })?;
-
-            // TAR is streaming: total entry count is not known upfront, so pass
-            // 0.
-            let entry_path = guard
-                .path()
-                .ok()
-                .map_or_default(std::borrow::Cow::into_owned);
-            current_entry = current_entry.saturating_add(1);
-            ctx.progress.on_entry_start(&entry_path, 0, current_entry);
-
-            // INVARIANT: every branch below must call on_entry_complete exactly
-            // once.
-            match Self::process_entry(&mut guard, &mut ctx) {
-                Ok(Some(hardlink_info)) => {
-                    ctx.progress.on_entry_complete(&entry_path);
-                    hardlinks.push(hardlink_info);
-                }
-                Ok(None) => {
-                    ctx.progress.on_entry_complete(&entry_path);
-                }
-                Err(e) => {
-                    ctx.progress.on_entry_complete(&entry_path);
-                    // Abandoning: no further `next_entry()` calls follow, so
-                    // the guard's usual bounded drain is pointless I/O, not a
-                    // correctness requirement (see `TarEntryGuard::abandon`).
-                    guard.abandon();
-                    push_duplicate_skip_warnings(
-                        ctx.report,
-                        *ctx.duplicate_skips,
-                        *ctx.hardlink_duplicate_skips,
-                        *ctx.disallowed_extension_skips,
-                    );
-                    return Err(ArchiveError::partial_or(std::mem::take(ctx.report), e));
-                }
-            }
-        }
-
-        // Two-pass extraction: create hardlinks after all target files exist
-        for hardlink_info in hardlinks {
-            if let Err(e) = Self::create_hardlink(hardlink_info, &mut ctx) {
-                push_duplicate_skip_warnings(
-                    ctx.report,
-                    *ctx.duplicate_skips,
-                    *ctx.hardlink_duplicate_skips,
-                    *ctx.disallowed_extension_skips,
-                );
-                return Err(ArchiveError::partial_or(std::mem::take(ctx.report), e));
-            }
-        }
-
-        push_duplicate_skip_warnings(
-            ctx.report,
-            *ctx.duplicate_skips,
-            *ctx.hardlink_duplicate_skips,
-            *ctx.disallowed_extension_skips,
-        );
-        ctx.progress.on_complete();
-        report.duration = start.elapsed();
-
-        Ok(report)
+        let mut target = HostTarget::create(output_dir, config)?;
+        self.extract_into(&mut target, config, options, progress)
     }
 
     /// Lists the entries in the archive without extracting them.
@@ -692,22 +495,10 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
 }
 
 struct ExtractionContext<'a, 'v> {
-    validator: &'a mut EntryValidator<'v>,
-    dest: &'a DestDir,
-    report: &'a mut ExtractionReport,
-    copy_buffer: &'a mut CopyBuffer,
-    dir_cache: &'a mut common::DirCache,
-    skip_duplicates: bool,
-    /// Count of file/symlink entries skipped as pre-existing duplicates,
-    /// threaded through `common::extract_file_with_permit` and
-    /// `common::create_symlink`. Aggregated into a single warning by
-    /// [`push_duplicate_skip_warnings`] instead of one warning per entry
-    /// (issue #490).
-    duplicate_skips: &'a mut u64,
-    /// Count of hardlinks skipped as pre-existing duplicates in
-    /// [`TarArchive::create_hardlink`]. Tracked separately from
-    /// `duplicate_skips` because hardlinks are TAR-specific (ZIP has no
-    /// hardlink entry type) and are not routed through `common.rs`.
+    tally: Tally<'a>,
+    /// Count of hardlinks skipped as pre-existing duplicates. Tracked
+    /// separately from the tally's `duplicate_skips` because hardlinks are
+    /// TAR-specific (ZIP has no hardlink entry type).
     hardlink_duplicate_skips: &'a mut u64,
     /// Count of file entries skipped by `common::check_extension_allowed`
     /// because their extension is not in the allowlist. Aggregated into a
@@ -715,7 +506,17 @@ struct ExtractionContext<'a, 'v> {
     /// warning per entry (issue #495).
     disallowed_extension_skips: &'a mut u64,
     config: &'v SecurityConfig<Validated>,
-    progress: &'a mut dyn ProgressCallback,
+}
+
+impl ExtractionContext<'_, '_> {
+    fn push_skip_warnings(&mut self) {
+        push_duplicate_skip_warnings(
+            self.tally.report,
+            *self.tally.duplicate_skips,
+            *self.hardlink_duplicate_skips,
+            *self.disallowed_extension_skips,
+        );
+    }
 }
 
 /// Appends aggregated duplicate-skip and disallowed-extension warnings to
@@ -890,7 +691,7 @@ const UNBOUNDED_DECODER_MEMORY: u64 = u64::MAX;
 ///
 /// This is the single place that decides how a TAR file is buffered, so
 /// extraction, listing and the public `open_tar_*` functions share one read
-/// path: file, one [`BufReader`], then at most one decoder.
+/// path: file, one `BufReader`, then at most one decoder.
 ///
 /// # Errors
 ///
@@ -901,11 +702,7 @@ pub(crate) fn open_tar_stream(
     codec: Option<CompressionCodec>,
     max_decoder_memory: u64,
 ) -> Result<Box<dyn Read + Send>> {
-    let reader = BufReader::new(File::open(path)?);
-    match codec {
-        Some(codec) => codec.decoder(reader, max_decoder_memory),
-        None => Ok(Box::new(reader)),
-    }
+    decode_tar_stream(File::open(path)?, codec, max_decoder_memory)
 }
 
 /// Opens a gzip-compressed TAR archive (.tar.gz).
@@ -1673,7 +1470,7 @@ mod tests {
 
     #[test]
     fn test_extract_xz_compressed() {
-        use xz2::write::XzEncoder;
+        use liblzma::write::XzEncoder;
 
         // Create TAR archive
         let tar_data = create_test_tar(vec![("file.txt", b"compressed")]);
@@ -1684,7 +1481,7 @@ mod tests {
         let xz_data = encoder.finish().unwrap();
 
         // Extract
-        let decoder = xz2::read::XzDecoder::new(Cursor::new(xz_data));
+        let decoder = liblzma::read::XzDecoder::new(Cursor::new(xz_data));
         let mut archive = TarArchive::new(decoder);
 
         let temp = TempDir::new().unwrap();
@@ -2370,7 +2167,6 @@ mod tests {
         let sentinel_path = outside.path().join("sentinel.txt");
         std::fs::write(&sentinel_path, b"top secret").unwrap();
 
-        let dest = DestDir::new_or_create(temp.path().to_path_buf()).unwrap();
         let mut config = SecurityConfig::default();
         config.allowed.hardlinks = true;
         let config = config.validate().expect("valid config");
@@ -2381,9 +2177,9 @@ mod tests {
         // an attacker with write access to `dest` swaps in a symlink
         // escaping the destination — exactly the window pass one's
         // point-in-time check cannot see across.
-        let mut validator = EntryValidator::new(&config, &dest);
-        let validated = validator
-            .validate_entry(
+        let mut target = HostTarget::create(temp.path(), &config).unwrap();
+        let validated = target
+            .validate(
                 Path::new("loot.txt"),
                 &EntryType::Hardlink {
                     target: PathBuf::from("target.txt"),
@@ -2391,43 +2187,44 @@ mod tests {
                 0,
                 None,
                 None,
-                None,
             )
             .unwrap();
-        let (link_path, ValidatedEntryType::Hardlink { target, counted }, _) =
-            validated.into_parts()
+        let (
+            link_path,
+            ValidatedEntryType::Hardlink {
+                target: target_path,
+                counted,
+            },
+            _,
+        ) = validated.into_parts()
         else {
             panic!("expected a validated hardlink");
         };
         let info = HardlinkInfo {
             link_path,
-            target_path: target,
+            target_path,
             counted,
         };
-        std::os::unix::fs::symlink(&sentinel_path, dest.as_path().join("target.txt")).unwrap();
+        std::os::unix::fs::symlink(&sentinel_path, temp.path().join("target.txt")).unwrap();
 
         let mut report = ExtractionReport::new();
-        let mut copy_buffer = CopyBuffer::new();
-        let mut dir_cache = common::DirCache::new();
         let mut progress = crate::NoopProgress;
         let mut duplicate_skips = 0u64;
         let mut hardlink_duplicate_skips = 0u64;
-        let mut disallowed_extension_skips = 0u64;
-        let mut ctx = ExtractionContext {
-            validator: &mut validator,
-            dest: &dest,
+        let mut tally = Tally {
             report: &mut report,
-            copy_buffer: &mut copy_buffer,
-            dir_cache: &mut dir_cache,
             skip_duplicates: true,
             duplicate_skips: &mut duplicate_skips,
-            hardlink_duplicate_skips: &mut hardlink_duplicate_skips,
-            disallowed_extension_skips: &mut disallowed_extension_skips,
-            config: &config,
             progress: &mut progress,
         };
 
-        let result = TarArchive::<Cursor<Vec<u8>>>::create_hardlink(info, &mut ctx);
+        let result = target.hardlink(
+            &info.link_path,
+            &info.target_path,
+            info.counted,
+            &mut tally,
+            &mut hardlink_duplicate_skips,
+        );
 
         assert_matches!(
             result,

@@ -3,15 +3,20 @@
 use std::path::Path;
 
 use crate::ArchiveError;
+use crate::ArchiveReader;
+use crate::EntrySink;
 use crate::ExtractionReport;
+use crate::ListOptions;
 use crate::NoopProgress;
 use crate::ProgressCallback;
 use crate::Result;
 use crate::SecurityConfig;
+use crate::VerificationOptions;
 use crate::config::ExtractionOptions;
 use crate::config::Validated;
 use crate::creation::CreationConfig;
 use crate::creation::CreationReport;
+use crate::formats::ZipArchive;
 use crate::formats::compression::CompressionCodec;
 use crate::formats::detect::ArchiveType;
 use crate::formats::detect::FormatFamily;
@@ -20,6 +25,11 @@ use crate::formats::detect::detect_format_from_extension;
 use crate::formats::detect::is_zip_family_alias;
 use crate::inspection::ArchiveManifest;
 use crate::inspection::VerificationReport;
+use crate::inspection::list::ListPass;
+use crate::reader::SeekableFormat;
+use crate::reader::Source;
+use crate::reader::tar_archive;
+use crate::sink::SinkTarget;
 
 /// Extracts an archive to the specified output directory.
 ///
@@ -520,7 +530,7 @@ pub fn list_archive<P: AsRef<Path>>(
 }
 
 /// Lists archive contents without extracting, with
-/// [`ListOptions`](crate::ListOptions).
+/// [`ListOptions`].
 ///
 /// [`ListOptions::stored_targets`](crate::ListOptions::stored_targets) set to
 /// [`StoredTargets::Read`](crate::StoredTargets::Read) reads 7z symlink
@@ -649,6 +659,212 @@ pub fn verify_archive_with_options<P: AsRef<Path>>(
     options: &crate::VerificationOptions,
 ) -> Result<VerificationReport> {
     crate::inspection::verify_archive_with_options(archive_path, config, options)
+}
+
+/// Lists the contents of an archive read from a reader.
+///
+/// The reader counterpart of [`list_archive_with_options`]: the same listing,
+/// limits and failures, for an archive that is not a file on disk.
+///
+/// # Errors
+///
+/// Same as [`list_archive`], except that nothing is opened or detected: a
+/// malformed archive fails as it would from a file.
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::ArchiveReader;
+/// use exarch_core::ListOptions;
+/// use exarch_core::SecurityConfig;
+/// use exarch_core::list_reader;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let mut builder = tar::Builder::new(Vec::new());
+/// let mut header = tar::Header::new_gnu();
+/// header.set_size(2);
+/// header.set_mode(0o644);
+/// builder.append_data(&mut header, "a.txt", &b"hi"[..])?;
+/// let bytes = builder.into_inner()?;
+///
+/// let reader = ArchiveReader::tar(std::io::Cursor::new(bytes), None);
+/// let manifest = list_reader(reader, &SecurityConfig::default(), &ListOptions::default())?;
+/// assert_eq!(manifest.total_entries(), 1);
+/// # Ok(())
+/// # }
+/// ```
+pub fn list_reader(
+    reader: ArchiveReader<'_>,
+    config: &SecurityConfig,
+    options: &ListOptions,
+) -> Result<ArchiveManifest> {
+    let config = config.clone().validate()?;
+    reader.list(&config, &mut ListPass::Strict(options.stored_targets))
+}
+
+/// Verifies an archive read from a reader, optionally checking payload
+/// integrity.
+///
+/// The reader counterpart of [`verify_archive_with_options`]; nothing is
+/// written and no filesystem path is needed.
+///
+/// # Errors
+///
+/// Same as [`verify_archive_with_options`].
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::ArchiveReader;
+/// use exarch_core::SecurityConfig;
+/// use exarch_core::VerificationOptions;
+/// use exarch_core::VerificationStatus;
+/// use exarch_core::verify_reader;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let mut builder = tar::Builder::new(Vec::new());
+/// let mut header = tar::Header::new_gnu();
+/// header.set_size(2);
+/// header.set_mode(0o644);
+/// builder.append_data(&mut header, "a.txt", &b"hi"[..])?;
+/// let bytes = builder.into_inner()?;
+///
+/// let reader = ArchiveReader::tar(std::io::Cursor::new(bytes), None);
+/// let report = verify_reader(
+///     reader,
+///     &SecurityConfig::default(),
+///     &VerificationOptions::default(),
+/// )?;
+/// assert_eq!(report.status(), VerificationStatus::Pass);
+/// # Ok(())
+/// # }
+/// ```
+pub fn verify_reader(
+    reader: ArchiveReader<'_>,
+    config: &SecurityConfig,
+    options: &VerificationOptions,
+) -> Result<VerificationReport> {
+    let config = config.clone().validate()?;
+    reader.verify(&config, *options)
+}
+
+/// Extracts an archive read from a reader into an [`EntrySink`].
+///
+/// Every entry passes the validation pipeline of [`extract_archive`] and is
+/// then delivered to `sink` instead of being written under a directory. See the
+/// [`sink`](crate::sink) module for what the sink may rely on and what it must
+/// do.
+///
+/// # Errors
+///
+/// Returns the errors of [`extract_archive`], plus any error the sink returns:
+/// [`ArchiveError::Io`] if no entry was delivered yet,
+/// [`ArchiveError::PartialExtraction`] wrapping it afterwards. Also
+/// [`ArchiveError::InvalidConfiguration`] for a 7z source (not supported yet)
+/// and for `options.atomic`, which needs a directory to rename.
+///
+/// # Examples
+///
+/// ```
+/// use std::io;
+/// use std::path::Path;
+///
+/// use exarch_core::ArchiveReader;
+/// use exarch_core::EntrySink;
+/// use exarch_core::ExtractionOptions;
+/// use exarch_core::SafePath;
+/// use exarch_core::SanitizedMode;
+/// use exarch_core::SecurityConfig;
+/// use exarch_core::extract_to_sink;
+///
+/// #[derive(Default)]
+/// struct Count(usize);
+///
+/// impl EntrySink for Count {
+///     type File = io::Sink;
+///
+///     fn create_directory(&mut self, _: &SafePath) -> io::Result<()> {
+///         Ok(())
+///     }
+///
+///     fn create_file(
+///         &mut self,
+///         _: &SafePath,
+///         _: Option<SanitizedMode>,
+///         _: u64,
+///     ) -> io::Result<io::Sink> {
+///         Ok(io::sink())
+///     }
+///
+///     fn finish_file(&mut self, _: &SafePath, _: io::Sink) -> io::Result<()> {
+///         self.0 += 1;
+///         Ok(())
+///     }
+///
+///     fn create_symlink(&mut self, _: &SafePath, _: &Path) -> io::Result<()> {
+///         Ok(())
+///     }
+///
+///     fn create_hardlink(&mut self, _: &SafePath, _: &SafePath) -> io::Result<()> {
+///         Ok(())
+///     }
+/// }
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let mut builder = tar::Builder::new(Vec::new());
+/// let mut header = tar::Header::new_gnu();
+/// header.set_size(2);
+/// header.set_mode(0o644);
+/// builder.append_data(&mut header, "a.txt", &b"hi"[..])?;
+/// let bytes = builder.into_inner()?;
+///
+/// let mut sink = Count::default();
+/// let reader = ArchiveReader::tar(io::Cursor::new(bytes), None);
+/// extract_to_sink(
+///     reader,
+///     &mut sink,
+///     &SecurityConfig::default(),
+///     &ExtractionOptions::default(),
+/// )?;
+/// assert_eq!(sink.0, 1);
+/// # Ok(())
+/// # }
+/// ```
+pub fn extract_to_sink<S: EntrySink>(
+    reader: ArchiveReader<'_>,
+    sink: &mut S,
+    config: &SecurityConfig,
+    options: &ExtractionOptions,
+) -> Result<ExtractionReport> {
+    if options.atomic {
+        return Err(ArchiveError::InvalidConfiguration {
+            reason: "atomic extraction renames a directory and cannot target a sink".into(),
+        });
+    }
+    let config = config.clone().validate()?;
+    let mut progress = NoopProgress;
+    match reader.into_source() {
+        Source::Tar { stream, codec } => {
+            let mut archive = tar_archive(stream, codec, config.max_decoder_memory)?;
+            let mut target = SinkTarget::new(sink, &config);
+            archive.extract_into(&mut target, &config, options, &mut progress)
+        }
+        Source::Seekable {
+            reader,
+            format: SeekableFormat::Zip,
+        } => {
+            let mut archive = ZipArchive::new(reader)?;
+            let checked = archive.check_structure(&config)?;
+            let mut target = SinkTarget::new(sink, &config);
+            archive.extract_into(checked, &mut target, &config, options, &mut progress)
+        }
+        Source::Seekable {
+            format: SeekableFormat::SevenZ,
+            ..
+        } => Err(ArchiveError::InvalidConfiguration {
+            reason: "7z archives cannot be extracted to a sink".into(),
+        }),
+    }
 }
 
 /// Rejects creation for ZIP-family extensions that aren't plain `.zip`.

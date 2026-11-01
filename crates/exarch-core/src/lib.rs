@@ -32,8 +32,10 @@ pub mod formats;
 pub mod inspection;
 #[cfg(test)]
 use exarch_testkit::raw_zip;
+pub mod reader;
 pub mod report;
 pub mod security;
+pub mod sink;
 #[cfg(test)]
 pub(crate) mod test_utils;
 pub mod types;
@@ -45,10 +47,13 @@ pub use api::extract_archive;
 pub use api::extract_archive_with_options;
 pub use api::extract_archive_with_options_and_progress;
 pub use api::extract_archive_with_progress;
+pub use api::extract_to_sink;
 pub use api::list_archive;
 pub use api::list_archive_with_options;
+pub use api::list_reader;
 pub use api::verify_archive;
 pub use api::verify_archive_with_options;
+pub use api::verify_reader;
 pub use archive::Archive;
 pub use archive::ArchiveBuilder;
 pub use config::DecompressionBudget;
@@ -91,6 +96,8 @@ pub use error::redaction::sanitize_io_error_for_error;
 /// Redacts a host-derived filesystem path for an FFI error message in
 /// release builds. Shared by `exarch-python` and `exarch-node`.
 pub use error::redaction::sanitize_path_for_error;
+pub use reader::ArchiveReader;
+pub use reader::SeekableFormat;
 pub use report::ExtractionReport;
 pub use report::NoopProgress;
 pub use report::ProgressCallback;
@@ -123,6 +130,7 @@ pub use inspection::VerificationStatus;
 pub use security::fs_view::LinkKind;
 
 // Re-export security types
+pub use security::SanitizedMode;
 /// Summary statistics produced by the validation pipeline; see
 /// [`security::ValidationReport`].
 pub use security::ValidationReport;
@@ -139,6 +147,7 @@ pub use security::boundary::validate_config_entry;
 /// Validates a raw, caller-supplied path string before it enters the
 /// archive pipeline. Shared by `exarch-python` and `exarch-node`.
 pub use security::boundary::validate_raw_path_str;
+pub use sink::EntrySink;
 
 // Re-export types module for easier access
 pub use types::DestDir;

@@ -8,6 +8,7 @@ use crate::config::Validated;
 use crate::security::context::ValidationContext;
 use crate::security::fs_view::FsView;
 use crate::security::fs_view::HostFs;
+use crate::security::fs_view::ModelRoot as _;
 use std::borrow::Cow;
 use std::ffi::OsStr;
 use std::path::Component;
@@ -136,12 +137,12 @@ impl SafePath {
     /// Validates `path` against `view` instead of the real filesystem.
     pub(crate) fn validate_in<V: FsView>(
         path: &Path,
-        dest: &DestDir,
+        root: &V::Root,
         config: &SecurityConfig<Validated>,
         view: &V,
     ) -> Result<Self> {
-        let ctx = ValidationContext::new(config.allowed.symlinks);
-        Self::validate_with_context_in(path, dest, config, &ctx, view)
+        let ctx = ValidationContext::<V>::new(config.allowed.symlinks);
+        Self::validate_with_context_in(path, root, config, &ctx, view)
     }
 
     /// Validates with optimization context that can skip `canonicalize()`.
@@ -154,11 +155,12 @@ impl SafePath {
     /// All other validation steps (null bytes, absolute paths, parent
     /// traversal, depth, banned components, prefix check) are always
     /// performed regardless of context.
+    #[cfg(test)]
     pub(crate) fn validate_with_context(
         path: &Path,
         dest: &DestDir,
         config: &SecurityConfig<Validated>,
-        ctx: &ValidationContext,
+        ctx: &ValidationContext<'_, HostFs>,
     ) -> Result<Self> {
         Self::validate_with_context_in(path, dest, config, ctx, &HostFs)
     }
@@ -169,11 +171,12 @@ impl SafePath {
     )]
     pub(crate) fn validate_with_context_in<V: FsView>(
         path: &Path,
-        dest: &DestDir,
+        root: &V::Root,
         config: &SecurityConfig<Validated>,
-        ctx: &ValidationContext,
+        ctx: &ValidationContext<'_, V>,
         view: &V,
     ) -> Result<Self> {
+        let dest = root.as_path();
         // Reject empty paths explicitly
         if path.is_empty() {
             return Err(ArchiveError::violation(EMPTY_PATH_REASON.into()));
@@ -283,7 +286,7 @@ impl SafePath {
         };
 
         // Verify resolved path stays within destination
-        let resolved = dest.as_path().join(final_path.as_ref());
+        let resolved = dest.join(final_path.as_ref());
 
         // Parent canonicalization: skip when parent is trusted (in DirCache)
         if let Some(parent) = resolved.parent()
@@ -291,7 +294,7 @@ impl SafePath {
         {
             match view.canonicalize(parent) {
                 Ok(canonical_parent) => {
-                    if !paths_start_with(&canonical_parent, dest.as_path()) {
+                    if !paths_start_with(&canonical_parent, dest) {
                         return Err(ArchiveError::PathTraversal {
                             path: path.to_path_buf(),
                         });
@@ -311,14 +314,14 @@ impl SafePath {
         if ctx.needs_full_canonicalize() {
             match view.canonicalize(&resolved) {
                 Ok(canonical) => {
-                    if !paths_start_with(&canonical, dest.as_path()) {
+                    if !paths_start_with(&canonical, dest) {
                         return Err(ArchiveError::PathTraversal {
                             path: path.to_path_buf(),
                         });
                     }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    if !paths_start_with(&resolved, dest.as_path()) {
+                    if !paths_start_with(&resolved, dest) {
                         return Err(ArchiveError::PathTraversal {
                             path: path.to_path_buf(),
                         });
@@ -333,7 +336,7 @@ impl SafePath {
             }
         } else {
             // Symlinks impossible -- prefix check is still mandatory
-            if !paths_start_with(&resolved, dest.as_path()) {
+            if !paths_start_with(&resolved, dest) {
                 return Err(ArchiveError::PathTraversal {
                     path: path.to_path_buf(),
                 });
@@ -987,14 +990,15 @@ mod tests {
     #[test]
     fn validate_in_rejects_parent_chain_resolving_outside_tree_root() {
         use crate::security::fs_view::Node;
+        use crate::security::fs_view::VirtualRoot;
         use crate::security::fs_view::VirtualTree;
 
-        let (_temp, dest) = create_test_dest();
+        let dest = VirtualRoot::new();
         let config = SecurityConfig::default()
             .with_allow_symlinks(true)
             .validate()
             .expect("valid config");
-        let mut tree = VirtualTree::new(dest.as_path());
+        let mut tree = VirtualTree::new(&dest);
         tree.insert(Path::new("up"), Node::Symlink(PathBuf::from("..")))
             .expect("insert");
 

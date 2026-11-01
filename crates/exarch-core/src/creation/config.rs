@@ -131,7 +131,7 @@ impl Default for CreationConfigFields {
 /// [`FormatCreator::create`](crate::formats::traits::FormatCreator::create)
 /// require `CreationConfig<Validated>`. This makes skipping validation a
 /// compile error instead of a runtime gap — a forged or hand-mutated
-/// `compression_level` can no longer reach the `flate2`/`xz2` backends,
+/// `compression_level` can no longer reach the `flate2`/`liblzma` backends,
 /// which panic on out-of-range values instead of returning an error.
 ///
 /// # Sealing
@@ -498,7 +498,7 @@ mod tests {
     }
 
     /// Regression test for #443: a validated config must not let levels
-    /// 10-255 reach the `flate2`/`xz2` backends, which panic (rather than
+    /// 10-255 reach the `flate2`/`liblzma` backends, which panic (rather than
     /// error) on out-of-range values. `validate()` is the only path to
     /// `CreationConfig<Validated>`, and it rejects out-of-range levels
     /// regardless of how `compression_level` was set.

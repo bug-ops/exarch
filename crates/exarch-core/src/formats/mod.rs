@@ -7,6 +7,7 @@ pub mod detect;
 pub mod sevenz;
 pub mod tar;
 pub(crate) mod tar_metadata_limit;
+pub(crate) mod target;
 pub mod traits;
 pub mod zip;
 pub(crate) mod zip_structure;

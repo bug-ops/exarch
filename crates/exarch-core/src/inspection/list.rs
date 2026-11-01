@@ -284,6 +284,17 @@ fn list_tar(
     listing: &mut ListPass<'_, '_>,
 ) -> Result<ArchiveManifest> {
     let stream = open_tar_stream(archive_path, codec, config.max_decoder_memory)?;
+    list_tar_stream(stream, codec, format, config, listing)
+}
+
+/// Lists a TAR stream already wrapped in its `codec`'s decoder.
+pub(crate) fn list_tar_stream<R: Read>(
+    stream: R,
+    codec: Option<CompressionCodec>,
+    format: ArchiveType,
+    config: &SecurityConfig<Validated>,
+    listing: &mut ListPass<'_, '_>,
+) -> Result<ArchiveManifest> {
     let (budgeted, budget) = budgeted_reader(stream, config.max_tar_metadata_bytes);
     let archive = tar::Archive::new(budgeted);
     let trailer = if codec.is_some() {
@@ -1441,8 +1452,8 @@ mod tests {
 
     #[test]
     fn test_list_archive_tar_xz() {
+        use liblzma::write::XzEncoder;
         use std::io::Write;
-        use xz2::write::XzEncoder;
 
         let mut temp_file = NamedTempFile::with_suffix(".tar.xz").unwrap();
 

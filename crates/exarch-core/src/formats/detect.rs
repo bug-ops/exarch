@@ -89,6 +89,17 @@ pub(crate) enum FormatFamily {
 }
 
 impl ArchiveType {
+    /// The TAR type for a stream compressed with `codec`, or plain TAR.
+    pub(crate) const fn tar_with(codec: Option<CompressionCodec>) -> Self {
+        match codec {
+            None => Self::Tar,
+            Some(CompressionCodec::Gzip) => Self::TarGz,
+            Some(CompressionCodec::Bzip2) => Self::TarBz2,
+            Some(CompressionCodec::Xz) => Self::TarXz,
+            Some(CompressionCodec::Zstd) => Self::TarZst,
+        }
+    }
+
     /// Groups this type by the reader that handles it.
     pub(crate) const fn family(self) -> FormatFamily {
         match self {

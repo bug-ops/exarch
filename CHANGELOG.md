@@ -7,8 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Core: `ArchiveReader`, `list_reader`, `verify_reader` and `extract_to_sink` with the `EntrySink` trait process TAR and ZIP archives from a reader without a filesystem path; `list_reader` and `verify_reader` also cover 7z (#754, #771).
+- CI: a `wasm` job builds `exarch-cli` for `wasm32-wasip1` and runs a wasmtime smoke test (#755, #771).
+
 ### Changed
 
+- Core: the `xz2` dependency is replaced by the maintained `liblzma` 0.4.9, which bundles xz 5.8 instead of 5.2.5 (#763, #771).
+- Core: `verify` no longer creates a temporary directory; it validates against an in-memory tree (#754, #771).
 - 7z: bump `sevenz-rust2` to 0.24.2 (minimum version now 0.24.2); solid blocks with a stream-less entry between files are listed, verified and extracted instead of refused; a block whose file sizes do not add up to its decoded size, including a block with data and no sub-streams, is refused; the exarch stream-map proof is reduced to what 0.24.2 does not already reject (#675, #751, #770).
 
 - **BREAKING:** `ArchiveError::to_ffi_message` is replaced by the consuming `into_ffi_message`; `FfiErrorMessage` holds a typed `FfiKind` and `PartialOutcome` instead of string `code` and `context`, `error_code()` returns `ErrorCode`, and `PartialWrites` gains `ALL` and `Display`; Python and Node build their errors from it (#758, #768).

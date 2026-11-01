@@ -31,7 +31,7 @@ fn tar_bytes() -> Vec<u8> {
 }
 
 fn write_tar_xz(dir: &Path, level: u32) -> PathBuf {
-    let mut encoder = xz2::write::XzEncoder::new(Vec::new(), level);
+    let mut encoder = liblzma::write::XzEncoder::new(Vec::new(), level);
     encoder.write_all(&tar_bytes()).unwrap();
     let path = dir.join("a.tar.xz");
     std::fs::write(&path, encoder.finish().unwrap()).unwrap();
@@ -39,9 +39,9 @@ fn write_tar_xz(dir: &Path, level: u32) -> PathBuf {
 }
 
 fn write_lzma_alone_named_tar_xz(dir: &Path) -> PathBuf {
-    let options = xz2::stream::LzmaOptions::new_preset(6).unwrap();
-    let stream = xz2::stream::Stream::new_lzma_encoder(&options).unwrap();
-    let mut encoder = xz2::write::XzEncoder::new_stream(Vec::new(), stream);
+    let options = liblzma::stream::LzmaOptions::new_preset(6).unwrap();
+    let stream = liblzma::stream::Stream::new_lzma_encoder(&options).unwrap();
+    let mut encoder = liblzma::write::XzEncoder::new_stream(Vec::new(), stream);
     encoder.write_all(&tar_bytes()).unwrap();
     let path = dir.join("legacy.tar.xz");
     std::fs::write(&path, encoder.finish().unwrap()).unwrap();

@@ -10,7 +10,10 @@ use crate::Result;
 use crate::SecurityConfig;
 use crate::config::Validated;
 use crate::security::fs_view::FsView;
+#[cfg(any(test, feature = "testing"))]
 use crate::security::fs_view::HostFs;
+use crate::security::fs_view::ModelRoot as _;
+#[cfg(any(test, feature = "testing"))]
 use crate::types::DestDir;
 use crate::types::SafePath;
 use crate::types::safe_path::check_windows_component;
@@ -134,6 +137,7 @@ impl HardlinkTracker {
     /// # Ok(())
     /// # }
     /// ```
+    #[cfg(any(test, feature = "testing"))]
     pub fn validate_hardlink(
         &mut self,
         link_path: &SafePath,
@@ -153,10 +157,11 @@ impl HardlinkTracker {
         &mut self,
         link_path: &SafePath,
         target: &Path,
-        dest: &DestDir,
+        root: &V::Root,
         config: &SecurityConfig<Validated>,
         view: &V,
     ) -> Result<()> {
+        let dest = root.as_path();
         require_hardlinks_allowed(config)?;
 
         // Reject empty targets: they do not point anywhere.
@@ -211,14 +216,8 @@ impl HardlinkTracker {
         // extraction root via on-disk resolution even though string
         // normalization would pass (two-hop chain bypass,
         // GHSA-83g3-92jg-28cx variant — #116).
-        let resolved = resolve_through_symlinks_in(
-            dest.as_path(),
-            target,
-            dest.as_path(),
-            link_path.as_path(),
-            view,
-        )
-        .map_err(|_| ArchiveError::HardlinkEscape {
+        let resolved = resolve_through_symlinks_in(dest, target, dest, link_path.as_path(), view)
+            .map_err(|_| ArchiveError::HardlinkEscape {
             path: link_path.as_path().to_path_buf(),
         })?;
 

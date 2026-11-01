@@ -13,6 +13,7 @@ use super::SafePath;
 use super::safe_path::check_windows_component;
 use crate::security::fs_view::FsView;
 use crate::security::fs_view::HostFs;
+use crate::security::fs_view::ModelRoot as _;
 
 /// A validated symlink that is safe for extraction.
 ///
@@ -125,10 +126,11 @@ impl SafeSymlink {
     pub(crate) fn validate_in<V: FsView>(
         link: &SafePath,
         target: &Path,
-        dest: &DestDir,
+        root: &V::Root,
         config: &SecurityConfig<Validated>,
         view: &V,
     ) -> Result<Self> {
+        let dest = root.as_path();
         require_symlinks_allowed(config)?;
 
         // 1.5. Reject empty targets: an empty target does not point anywhere
@@ -217,14 +219,8 @@ impl SafeSymlink {
         // subsequent `..` traversal outside the extraction root (two-hop chain,
         // GHSA-83g3-92jg-28cx variant — issue #116).
         let link_parent = link.as_path().parent().unwrap_or_else(|| Path::new(""));
-        let link_parent_full = dest.as_path().join(link_parent);
-        resolve_through_symlinks_in(
-            &link_parent_full,
-            target,
-            dest.as_path(),
-            link.as_path(),
-            view,
-        )?;
+        let link_parent_full = dest.join(link_parent);
+        resolve_through_symlinks_in(&link_parent_full, target, dest, link.as_path(), view)?;
 
         Ok(Self {
             link_path: link.as_path().to_path_buf(),
@@ -295,8 +291,8 @@ pub(crate) fn has_root_or_prefix(target: &Path) -> bool {
 /// # Errors
 ///
 /// Returns `SymlinkEscape` if any parent component is a symlink.
-fn verify_parent_not_symlink<V: FsView>(path: &Path, dest: &DestDir, view: &V) -> Result<()> {
-    let mut current = dest.as_path().to_path_buf();
+fn verify_parent_not_symlink<V: FsView>(path: &Path, dest: &Path, view: &V) -> Result<()> {
+    let mut current = dest.to_path_buf();
 
     for component in path.parent().unwrap_or_else(|| Path::new("")).components() {
         current.push(component);
@@ -1030,6 +1026,7 @@ mod tests {
     mod parent_resolution {
         use super::*;
         use crate::security::fs_view::Node;
+        use crate::security::fs_view::VirtualRoot;
         use crate::security::fs_view::VirtualTree;
 
         const LINK: &str = "link";
@@ -1053,7 +1050,7 @@ mod tests {
             target: &str,
         ) -> Result<PathBuf> {
             let root = Path::new("/dest");
-            let mut tree = VirtualTree::new(root);
+            let mut tree = VirtualTree::new(&VirtualRoot::at("/dest"));
             setup(&mut tree);
             resolve_through_symlinks_in(
                 &root.join(start),

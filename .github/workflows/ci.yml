@@ -53,6 +53,7 @@ jobs:
               - 'deny.toml'
               - 'clippy.toml'
               - 'rustfmt.toml'
+              - '.github/scripts/wasi-smoke.sh'
             python:
               - 'crates/exarch-python/**'
               - 'crates/exarch-core/**'
@@ -684,6 +685,65 @@ jobs:
       - name: Check MSRV for exarch-core
         run: cargo check -p exarch-core --all-features
 
+  # WASI build + smoke test (CLI under wasmtime)
+  wasm:
+    name: WASI (wasm32-wasip1)
+    needs: [changes, format]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    if: |
+      needs.changes.outputs.rust == 'true' ||
+      github.ref == 'refs/heads/main' ||
+      github.ref == 'refs/heads/develop'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+          targets: wasm32-wasip1
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          shared-key: "wasm"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Install wasmtime
+        uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+        with:
+          tool: wasmtime
+
+      # Without a WASI libc, clang falls back to the host glibc headers, which are not usable for wasm32.
+      - name: Install WASI libc headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends wasi-libc
+          echo "CFLAGS_wasm32_wasip1=-nostdlibinc -isystem /usr/include/wasm32-wasi" >> "$GITHUB_ENV"
+
+      - name: Check exarch-core for WASI
+        run: cargo check -p exarch-core --all-features --target wasm32-wasip1
+
+      # Apple/GNU ar write no usable symbol index for wasm objects; llvm-ar is required to link the C codecs.
+      - name: Locate llvm-ar
+        run: |
+          ar_path="$(command -v llvm-ar || true)"
+          if [[ -z "$ar_path" ]]; then
+            ar_path="$(compgen -G '/usr/bin/llvm-ar-*' | sort -V | tail -n1 || true)"
+          fi
+          if [[ -z "$ar_path" ]]; then
+            echo "::error::llvm-ar not found on the runner"
+            exit 1
+          fi
+          echo "AR_wasm32_wasip1=$ar_path" >> "$GITHUB_ENV"
+
+      - name: Build exarch-cli for WASI
+        run: cargo build -p exarch-cli --target wasm32-wasip1
+
+      - name: Run WASI smoke test
+        run: bash .github/scripts/wasi-smoke.sh target/wasm32-wasip1/debug/exarch.wasm
+
   # Code coverage (Linux only) - codecov auto-distributes by paths
   coverage:
     name: Code Coverage
@@ -738,7 +798,7 @@ jobs:
   # All checks passed
   ci-success:
     name: CI Success
-    needs: [pin-check, format, clippy, documentation, security, test, test-release, test-python, test-node, test-node-runtimes, msrv, bench-build, fuzz-build]
+    needs: [pin-check, format, clippy, documentation, security, test, test-release, test-python, test-node, test-node-runtimes, msrv, wasm, bench-build, fuzz-build]
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -757,6 +817,7 @@ jobs:
             "${{ needs.test-node.result }}"
             "${{ needs.test-node-runtimes.result }}"
             "${{ needs.msrv.result }}"
+            "${{ needs.wasm.result }}"
             "${{ needs.bench-build.result }}"
             "${{ needs.fuzz-build.result }}"
           )

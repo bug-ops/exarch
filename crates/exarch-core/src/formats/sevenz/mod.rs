@@ -941,7 +941,12 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
             list_sevenz_parsed(&self.header, &mut self.source, config, listing)
         })?;
         let structure = ArchiveStructure::of_manifest(&listed.manifest).with_refusals(&issues);
-        verify_manifest_with_structure(&listed.manifest, config, &structure, listed.integrity)
+        Ok(verify_manifest_with_structure(
+            &listed.manifest,
+            config,
+            &structure,
+            listed.integrity,
+        ))
     }
 
     fn format_name(&self) -> &'static str {

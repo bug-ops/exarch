@@ -509,11 +509,11 @@ mod tests {
     }
 
     /// Regression test for #443: sweeps every tar compression backend
-    /// (flate2, bzip2, xz2, zstd) across the full 1-9 level range through
+    /// (flate2, bzip2, liblzma, zstd) across the full 1-9 level range through
     /// the validated `create_archive` path. This is the test that would
     /// have caught the flate2 1.1.9 backend swap that panicked on
     /// out-of-range levels — a level-1-and-9-only sweep on tar.gz alone
-    /// does not exercise `xz2::Stream::new_easy_encoder`, one of the two
+    /// does not exercise `liblzma::Stream::new_easy_encoder`, one of the two
     /// confirmed panic sites, at any level but the default.
     #[test]
     fn test_create_tar_compression_levels() {

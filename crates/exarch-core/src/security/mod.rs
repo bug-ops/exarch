@@ -8,6 +8,7 @@ pub(crate) mod hardlink;
 pub(crate) mod path;
 pub(crate) mod permissions;
 pub(crate) mod quota;
+#[cfg(any(test, feature = "testing"))]
 pub(crate) mod symlink;
 pub mod validator;
 pub(crate) mod zipbomb;

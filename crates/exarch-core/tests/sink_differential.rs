@@ -29,6 +29,7 @@ use sink_support::walk;
 use sink_support::zip_archive;
 use sink_support::zip_dir;
 use sink_support::zip_file;
+#[cfg(unix)]
 use sink_support::zip_symlink;
 use tempfile::TempDir;
 

@@ -248,13 +248,9 @@ pub(super) fn decode_archive_entries<R: Read + Seek>(
             Some(_) => {}
         }
     }
-    if handed == header.files().len() {
-        Ok(())
-    } else {
-        Err(sevenz_rust2::Error::Other(
-            "7z entries were not handed over exactly once".into(),
-        ))
-    }
+    (handed == header.files().len()).ok_or_else(|| {
+        sevenz_rust2::Error::Other("7z entries were not handed over exactly once".into())
+    })
 }
 
 /// Reads past a payload file that has no integrity slot (an entry the listing

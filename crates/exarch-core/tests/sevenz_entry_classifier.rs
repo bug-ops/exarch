@@ -9,6 +9,7 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use exarch_core::ArchiveError;
+use exarch_core::ErrorCode;
 use exarch_core::ExtractionOptions;
 use exarch_core::IssueSeverity;
 use exarch_core::ProgressCallback;
@@ -144,7 +145,7 @@ fn empty_name_is_rejected_by_list_verify_and_extract() {
         let extract_err = extract_archive(&archive, out.path(), &config).unwrap_err();
 
         for err in [list_err, verify_err, extract_err] {
-            assert_eq!(err.error_code(), "SECURITY_VIOLATION");
+            assert_eq!(err.error_code(), ErrorCode::SecurityViolation);
             assert!(err.to_string().contains("empty path"), "{err}");
         }
         assert!(dir_names(&out).is_empty());

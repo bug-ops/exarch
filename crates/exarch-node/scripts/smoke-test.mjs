@@ -85,8 +85,8 @@ async function main() {
     }
     assertOk(quotaError !== null, 'extractArchive did not reject an over-quota file');
     assertOk(
-      quotaError.message.startsWith('QUOTA_EXCEEDED'),
-      `expected QUOTA_EXCEEDED prefix, got: ${quotaError.message}`
+      quotaError.code === 'QUOTA_EXCEEDED',
+      `expected code QUOTA_EXCEEDED, got: ${quotaError.code} (${quotaError.message})`
     );
     console.log(`[${runtime}] quota violation: OK (rejected as expected)`);
 

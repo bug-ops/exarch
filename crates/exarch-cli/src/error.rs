@@ -232,16 +232,8 @@ fn quota_exceeded_context(
 /// so that callers can downcast via the anyhow chain (used by JSON error
 /// output).
 ///
-/// `allow_symlinks` suppresses the `--allow-symlinks` hint for `SymlinkEscape`
-/// errors when the flag is already active — in that case the escape is a
-/// genuine security violation, not a configuration issue.
-///
 /// A `PartialExtraction` keeps the `writes` outcome core recorded.
-pub fn convert_extraction_error(
-    err: ArchiveError,
-    archive: &Path,
-    allow_symlinks: bool,
-) -> anyhow::Error {
+pub fn convert_extraction_error(err: ArchiveError, archive: &Path) -> anyhow::Error {
     // Handle PartialExtraction before the borrow below.
     //
     // `PartialExtraction` is `#[error("{source}")]` with `#[source]`, so
@@ -261,7 +253,7 @@ pub fn convert_extraction_error(
         writes,
     } = err
     {
-        let inner = convert_extraction_error(*source, archive, allow_symlinks);
+        let inner = convert_extraction_error(*source, archive);
         return anyhow::Error::new(PartialExtractionContext {
             report,
             writes,
@@ -287,19 +279,10 @@ pub fn convert_extraction_error(
              Use --zip-consistency ignore only for archives from a trusted producer."
         ),
         ArchiveError::QuotaExceeded { resource } => quota_exceeded_context(resource, archive),
-        ArchiveError::SymlinkEscape { .. } => {
-            if allow_symlinks {
-                format!("Symlink escape blocked in '{archive}'")
-            } else {
-                format!(
-                    "Symlink rejected in '{archive}'\n\
-                     HINT: Use --allow-symlinks to extract symlinks (only if trusted source)."
-                )
-            }
-        }
-        ArchiveError::HardlinkEscape { .. } => format!(
-            "Hardlink rejected in '{archive}'\n\
-             HINT: Use --allow-hardlinks to extract hardlinks (only if trusted source)."
+        ArchiveError::SymlinkEscape { .. } | ArchiveError::HardlinkEscape { .. } => format!(
+            "Security violation: Archive '{archive}' has a link that escapes the destination\n\
+             HINT: a link resolves outside the destination (an archive link or an existing \
+             destination symlink); no flag relaxes this check."
         ),
         ArchiveError::Io(_) => format!("Failed to process '{archive}'"),
         ArchiveError::UnknownFormat { path } => format!(
@@ -349,15 +332,11 @@ pub fn convert_extraction_error(
 }
 
 /// Adds context to a generic error about archive operations.
-///
-/// `allow_symlinks` is forwarded to [`convert_extraction_error`] to suppress
-/// the `--allow-symlinks` hint when the flag is already active.
 pub fn add_archive_context<T>(
     result: Result<T, ArchiveError>,
     archive: &Path,
-    allow_symlinks: bool,
 ) -> anyhow::Result<T> {
-    result.map_err(|e| convert_extraction_error(e, archive, allow_symlinks))
+    result.map_err(|e| convert_extraction_error(e, archive))
 }
 
 #[cfg(test)]
@@ -371,7 +350,7 @@ mod tests {
         let err = ArchiveError::PathTraversal {
             path: PathBuf::from("../../../etc/passwd"),
         };
-        let converted = convert_extraction_error(err, Path::new("malicious.zip"), false);
+        let converted = convert_extraction_error(err, Path::new("malicious.zip"));
         let msg = format!("{converted:?}");
         assert!(msg.contains("path traversal"));
         assert!(msg.contains("malicious.zip"));
@@ -380,7 +359,7 @@ mod tests {
 
     fn zip_bomb_message(scope: ZipBombScope, compressed: u64, uncompressed: u64) -> String {
         let err = ArchiveError::ZipBomb(ZipBombDetails::new(scope, compressed, uncompressed));
-        let converted = convert_extraction_error(err, Path::new("bomb.zip"), false);
+        let converted = convert_extraction_error(err, Path::new("bomb.zip"));
         format!("{converted:?}")
     }
 
@@ -410,7 +389,7 @@ mod tests {
     fn test_path_traversal_path_appears_once() {
         let path = PathBuf::from("../../../etc/passwd");
         let err = ArchiveError::PathTraversal { path };
-        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"), false);
+        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"));
         let msg = format!("{converted:#}");
         assert_eq!(
             msg.matches("../../../etc/passwd").count(),
@@ -423,7 +402,7 @@ mod tests {
     fn test_symlink_escape_path_appears_once() {
         let path = PathBuf::from("link/to/escape");
         let err = ArchiveError::SymlinkEscape { path };
-        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"), false);
+        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"));
         let msg = format!("{converted:#}");
         assert_eq!(
             msg.matches("link/to/escape").count(),
@@ -433,34 +412,27 @@ mod tests {
     }
 
     #[test]
-    fn test_symlink_escape_hint_suppressed_when_flag_active() {
-        let path = PathBuf::from("link/to/escape");
-        let err = ArchiveError::SymlinkEscape { path };
-        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"), true);
-        let msg = format!("{converted:#}");
-        assert!(
-            !msg.contains("--allow-symlinks"),
-            "hint must be suppressed when --allow-symlinks is active, got: {msg}"
-        );
-    }
-
-    #[test]
-    fn test_symlink_escape_hint_shown_when_flag_inactive() {
-        let path = PathBuf::from("link/to/escape");
-        let err = ArchiveError::SymlinkEscape { path };
-        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"), false);
-        let msg = format!("{converted:#}");
-        assert!(
-            msg.contains("--allow-symlinks"),
-            "hint must be shown when --allow-symlinks is not active, got: {msg}"
-        );
+    fn test_link_escape_hint_states_no_flag_relaxes_it() {
+        for err in [
+            ArchiveError::SymlinkEscape {
+                path: PathBuf::from("link/to/escape"),
+            },
+            ArchiveError::HardlinkEscape {
+                path: PathBuf::from("hard/link/escape"),
+            },
+        ] {
+            let converted = convert_extraction_error(err, Path::new("archive.tar.gz"));
+            let msg = format!("{converted:#}");
+            assert!(msg.contains("no flag relaxes this check"), "{msg}");
+            assert!(!msg.contains("--allow-"), "{msg}");
+        }
     }
 
     #[test]
     fn test_hardlink_escape_path_appears_once() {
         let path = PathBuf::from("hard/link/escape");
         let err = ArchiveError::HardlinkEscape { path };
-        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"), false);
+        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"));
         let msg = format!("{converted:#}");
         assert_eq!(
             msg.matches("hard/link/escape").count(),
@@ -473,7 +445,7 @@ mod tests {
     fn test_convert_io_error() {
         let io_err = io::Error::new(io::ErrorKind::NotFound, "file not found");
         let err = ArchiveError::Io(io_err);
-        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"), false);
+        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"));
         let msg = format!("{converted:?}");
         assert!(msg.contains("I/O error"));
     }
@@ -488,7 +460,7 @@ mod tests {
             "Illegal byte sequence (os error 92)",
         );
         let err = ArchiveError::Io(io_err);
-        let converted = convert_extraction_error(err, Path::new("nonutf8.tar"), false);
+        let converted = convert_extraction_error(err, Path::new("nonutf8.tar"));
         let msg = format!("{converted:#}");
         assert_eq!(
             msg.matches("Illegal byte sequence (os error 92)").count(),
@@ -528,7 +500,7 @@ mod tests {
             report,
             writes: PartialWrites::Kept,
         };
-        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"), false);
+        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"));
         let msg = format!("{converted:#}");
         let occurrences = msg.matches("hardlink_escape_path").count();
         assert_eq!(
@@ -544,7 +516,7 @@ mod tests {
     fn test_output_exists_contains_path_and_hint() {
         let path = PathBuf::from("/tmp/output");
         let err = ArchiveError::OutputExists { path };
-        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"), false);
+        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"));
         let msg = format!("{converted:#}");
         assert!(msg.contains("/tmp/output"), "path missing: {msg}");
         assert!(msg.contains("--force"), "hint missing: {msg}");
@@ -554,7 +526,7 @@ mod tests {
     fn test_invalid_permissions_contains_mode_and_path() {
         let path = PathBuf::from("evil/file");
         let err = ArchiveError::InvalidPermissions { path, mode: 0o4755 };
-        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"), false);
+        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"));
         let msg = format!("{converted:#}");
         assert!(msg.contains("evil/file"), "path missing: {msg}");
         assert!(
@@ -566,7 +538,7 @@ mod tests {
     #[test]
     fn test_invalid_compression_level_contains_level() {
         let err = ArchiveError::InvalidCompressionLevel { level: 0 };
-        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"), false);
+        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"));
         let msg = format!("{converted:#}");
         assert!(msg.contains('0'), "level missing: {msg}");
         assert!(msg.contains("between 1 and 9"), "range hint missing: {msg}");
@@ -575,7 +547,7 @@ mod tests {
     #[test]
     fn test_security_violation_reason_appears_exactly_once() {
         let err = ArchiveError::violation("absolute path detected".to_string());
-        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"), false);
+        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"));
         let msg = format!("{converted:#}");
         assert_eq!(
             msg.matches("absolute path detected").count(),
@@ -593,7 +565,7 @@ mod tests {
         let err = ArchiveError::violation(
             "decompressed size exceeded the declared uncompressed size of 50 bytes".to_string(),
         );
-        let converted = convert_extraction_error(err, Path::new("archive.zip"), false);
+        let converted = convert_extraction_error(err, Path::new("archive.zip"));
         let msg = format!("{converted:#}");
         assert!(
             msg.contains("cannot be relaxed via any policy flag"),
@@ -614,7 +586,7 @@ mod tests {
 
     fn hint_for(setting: PolicySetting) -> String {
         let err = ArchiveError::relaxable_violation(setting, "refused".to_string());
-        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"), false);
+        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"));
         format!("{converted:#}")
     }
 
@@ -720,7 +692,7 @@ mod tests {
             report,
             writes: PartialWrites::Kept,
         };
-        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"), false);
+        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"));
         let msg = format!("{converted:#}");
         let occurrences = msg.matches("symlink_escape_path").count();
         assert_eq!(
@@ -755,7 +727,7 @@ mod tests {
             report,
             writes: PartialWrites::Kept,
         };
-        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"), false);
+        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"));
         let msg = format!("{converted:#}");
         assert!(msg.contains("Files skipped: 2"), "got: {msg}");
         assert!(msg.contains("Warnings:"), "got: {msg}");
@@ -788,7 +760,7 @@ mod tests {
             report,
             writes: PartialWrites::Kept,
         };
-        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"), false);
+        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"));
         let msg = format!("{converted:#}");
         assert!(
             msg.contains("were written to disk before the error"),
@@ -827,7 +799,7 @@ mod tests {
             report,
             writes: PartialWrites::RolledBack,
         };
-        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"), false);
+        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"));
         let msg = format!("{converted:#}");
         assert!(!msg.contains("written to disk"), "got: {msg}");
         assert!(!msg.contains("Inspect or remove"), "got: {msg}");
@@ -856,7 +828,7 @@ mod tests {
             report,
             writes: PartialWrites::RolledBack,
         };
-        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"), false);
+        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"));
         let msg = format!("{converted:#}");
         assert!(!msg.contains("Files skipped"), "got: {msg}");
         assert!(!msg.contains("Warnings:"), "got: {msg}");
@@ -886,7 +858,7 @@ mod tests {
             report,
             writes: PartialWrites::Kept,
         };
-        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"), false);
+        let converted = convert_extraction_error(err, Path::new("archive.tar.gz"));
         let msg = format!("{converted:#}");
         assert!(!msg.contains("Files skipped"), "got: {msg}");
         assert!(!msg.contains("Warnings:"), "got: {msg}");
@@ -897,7 +869,7 @@ mod tests {
         let err = ArchiveError::PathTraversal {
             path: PathBuf::from("../x"),
         };
-        let converted = convert_extraction_error(err, Path::new("a.tar"), false);
+        let converted = convert_extraction_error(err, Path::new("a.tar"));
         assert!(converted.downcast_ref::<CliContext>().is_some());
         assert!(
             converted
@@ -915,7 +887,7 @@ mod tests {
             report: ExtractionReport::default(),
             writes: PartialWrites::Kept,
         };
-        let converted = convert_extraction_error(err, Path::new("a.tar"), false);
+        let converted = convert_extraction_error(err, Path::new("a.tar"));
         assert!(
             converted
                 .downcast_ref::<PartialExtractionContext>()
@@ -937,7 +909,7 @@ mod tests {
     #[test]
     fn test_invalid_archive_reason_appears_once() {
         let err = ArchiveError::InvalidArchive("distinctive-reason".to_string());
-        let converted = convert_extraction_error(err, Path::new("a.tar"), false);
+        let converted = convert_extraction_error(err, Path::new("a.tar"));
         let msg = format!("{converted:#}");
         assert_eq!(msg.matches("distinctive-reason").count(), 1, "got: {msg}");
     }
@@ -955,10 +927,7 @@ mod tests {
             report,
             writes: PartialWrites::Kept,
         };
-        let msg = format!(
-            "{:#}",
-            convert_extraction_error(err, Path::new("a.tar"), false)
-        );
+        let msg = format!("{:#}", convert_extraction_error(err, Path::new("a.tar")));
         assert!(!msg.contains('\x1b'), "got: {msg:?}");
         assert!(msg.contains("\\x1b[31m\\x0aforged"), "got: {msg:?}");
     }

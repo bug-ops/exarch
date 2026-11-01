@@ -2,6 +2,104 @@
 /* eslint-disable */
 
 /**
+ * Properties of an error raised by exarch-core.
+ *
+ * `message` is the human-readable description only; everything
+ * machine-readable is a property. Core errors keep their core `code`
+ * (a rejected boundary path is `SECURITY_VIOLATION`, a rejected setter value
+ * `INVALID_CONFIGURATION`).
+ */
+export interface ExarchErrorBase extends Error {
+  code: ErrorCode
+  /** The `SecurityConfig` setting that relaxes this refusal, when one does. */
+  relaxableBy?: PolicySetting
+  /** The exception thrown by a progress callback. */
+  cause?: unknown
+}
+
+/**
+ * An `ErrorCode` that carries no counters: every code except
+ * `PROGRESS_CALLBACK_ERROR`, which always reports what was written.
+ */
+export type CounterlessErrorCode = Exclude<ErrorCode, 'PROGRESS_CALLBACK_ERROR'>
+
+/** An error with no partial-extraction outcome. */
+export interface ExarchErrorPlain extends ExarchErrorBase {
+  code: CounterlessErrorCode
+  writes?: undefined
+  filesExtracted?: undefined
+  bytesWritten?: undefined
+  filesSkipped?: undefined
+  warnings?: undefined
+  filesAdded?: undefined
+}
+
+/** An extraction failed after writing files that remain in the destination. */
+export interface ExarchErrorWritesKept extends ExarchErrorBase {
+  writes: 'kept'
+  filesExtracted: number
+  bytesWritten: number
+  filesSkipped: number
+  warnings: Array<string>
+  filesAdded?: undefined
+}
+
+/** An atomic extraction failed and its writes were discarded. */
+export interface ExarchErrorRolledBack extends ExarchErrorBase {
+  code: CounterlessErrorCode
+  writes: 'rolled_back'
+  filesExtracted?: undefined
+  bytesWritten?: undefined
+  filesSkipped?: undefined
+  warnings?: undefined
+  filesAdded?: undefined
+}
+
+/** A progress callback threw while archive creation succeeded. */
+export interface ExarchErrorCreationCallback extends ExarchErrorBase {
+  code: 'PROGRESS_CALLBACK_ERROR'
+  writes?: undefined
+  filesExtracted?: undefined
+  filesSkipped?: undefined
+  warnings?: undefined
+  filesAdded: number
+  bytesWritten: number
+}
+
+/**
+ * An error raised by the binding itself rather than by exarch-core: a
+ * negative size, an internal panic, a failed argument conversion. `code` is
+ * napi's status string (`GenericFailure`, `InvalidArg`, `StringExpected`, ...),
+ * not an `ErrorCode`, and none of the other properties are set.
+ */
+export interface ExarchNativeError extends Error {
+  code: string
+  relaxableBy?: undefined
+  writes?: undefined
+  filesExtracted?: undefined
+  bytesWritten?: undefined
+  filesSkipped?: undefined
+  warnings?: undefined
+  filesAdded?: undefined
+}
+
+/**
+ * Every error exarch rejects or throws with.
+ *
+ * Promises reject with, and sync functions throw, an object of this shape;
+ * narrow an `unknown` catch value with `err as ExarchError`. Discriminate on
+ * `writes`; `code` is an `ErrorCode` for every member except
+ * `ExarchNativeError`, so a `switch (err.code)` is exhaustive only after
+ * excluding it.
+ */
+export type ExarchError =
+  | ExarchErrorPlain
+  | ExarchErrorWritesKept
+  | ExarchErrorRolledBack
+  | ExarchErrorCreationCallback
+  | ExarchNativeError
+
+/**
  * Which binding artifact the generated loader actually loaded: `'native'` for
  * a native addon, otherwise the `platformArchABI` of the WASI flavor. Every
  * flavor napi-rs can build is listed, because `NAPI_RS_NATIVE_LIBRARY_PATH`
@@ -564,12 +662,12 @@ export declare function createArchiveSync(outputPath: string, sources: Array<str
  * abort creation early, since the progress callback contract has no
  * cancellation signal. The rejection therefore reports both signals:
  *
- * - Creation succeeded: the message is prefixed with `PROGRESS_CALLBACK_ERROR`
- *   and carries `filesAdded=N, bytesWritten=M`, so the caller can still see
- *   that an archive was written and needs cleaning up.
- * - Creation also failed: the core error stays primary and keeps its
- *   error-code prefix, with a fixed ` | progressCallbackError: see cause`
- *   marker appended. A throwing callback can never mask a core error.
+ * - Creation succeeded: `code` is `PROGRESS_CALLBACK_ERROR` and `filesAdded`
+ *   and `bytesWritten` are set, so the caller can still see that an archive
+ *   was written and needs cleaning up.
+ * - Creation also failed: the core error stays primary and keeps its `code`;
+ *   the callback's throw is attached as `cause`. A throwing callback can never
+ *   mask a core error.
  *
  * In both cases the original JS exception is available as the `cause`
  * property of the rejection value. The throw's own text and stack are never
@@ -701,6 +799,14 @@ export interface CreationReport {
 }
 
 /**
+ * Value of the `code` property on errors surfaced to JavaScript.
+ *
+ * Every core error code, plus `PROGRESS_CALLBACK_ERROR` for a progress
+ * callback that threw over a successful operation.
+ */
+export type ErrorCode = 'PATH_TRAVERSAL' | 'SYMLINK_ESCAPE' | 'HARDLINK_ESCAPE' | 'ZIP_BOMB' | 'ZIP_INCONSISTENCY' | 'QUOTA_EXCEEDED' | 'SECURITY_VIOLATION' | 'INVALID_ARCHIVE' | 'IO_ERROR' | 'INVALID_PERMISSIONS' | 'SOURCE_NOT_FOUND' | 'SOURCE_NOT_ACCESSIBLE' | 'OUTPUT_EXISTS' | 'INVALID_COMPRESSION_LEVEL' | 'UNKNOWN_FORMAT' | 'INVALID_CONFIGURATION' | 'PROGRESS_CALLBACK_ERROR'
+
+/**
  * Extract an archive to the specified directory (async).
  *
  * This function provides secure archive extraction with configurable
@@ -712,7 +818,7 @@ export interface CreationReport {
  *
  * ## Thread Safety and TOCTOU
  *
- * The extraction runs on a libuv thread pool worker thread. This creates
+ * The extraction runs on a tokio blocking-pool worker thread. This creates
  * a Time-Of-Check-Time-Of-Use (TOCTOU) race condition where the archive
  * file could be modified between validation and extraction. This is an
  * accepted tradeoff for async performance. For untrusted archives, ensure
@@ -722,7 +828,8 @@ export interface CreationReport {
  *
  * - Paths containing null bytes are rejected (security)
  * - Paths exceeding 4096 bytes are rejected (`DoS` prevention)
- * - All validation happens at the Node.js boundary before calling core library
+ * - Boundary validation runs before the core call; a rejection is a
+ *   `SECURITY_VIOLATION`
  *
  * # Arguments
  *
@@ -736,40 +843,32 @@ export interface CreationReport {
  *
  * # Errors
  *
- * Returns error for security violations or I/O errors. Error messages are
- * prefixed with error codes for discrimination in JavaScript:
+ * Rejects for security violations or I/O errors. The rejection is an `Error`
+ * (see `ExarchError`) whose `message` is the description only; discriminate
+ * on its properties instead of parsing text:
  *
- * - `PATH_TRAVERSAL`: Path traversal attempt detected
- * - `SYMLINK_ESCAPE`: Symlink points outside extraction directory
- * - `HARDLINK_ESCAPE`: Hardlink target outside extraction directory
- * - `ZIP_BOMB`: Potential zip bomb detected
- * - `ZIP_INCONSISTENCY`: ZIP structure is read differently by different tools
- * - `INVALID_PERMISSIONS`: File permissions are invalid or unsafe
- * - `QUOTA_EXCEEDED`: Resource quota exceeded
- * - `SECURITY_VIOLATION`: Security policy violation
- * - `UNSUPPORTED_FORMAT`: Archive format not supported
- * - `INVALID_ARCHIVE`: Archive is corrupted
- * - `IO_ERROR`: I/O operation failed
- *
- * A `SECURITY_VIOLATION` that a `SecurityConfig` setting relaxes carries an
- * anchored token right after the code: `SECURITY_VIOLATION: [relaxableBy=<id>]
- * operation denied ...`, where `<id>` is one of `symlinks`, `hardlinks`,
- * `solid_archives`, `banned_components`, `max_path_depth`,
- * `windows_reserved_names` or `max_tar_metadata_bytes`. Parse it with
- * `^SECURITY_VIOLATION: \[relaxableBy=([a-z_]+)\]`; the token is absent when
- * no setting relaxes the refusal. Changing the setting removes that refusal
- * only; the entry can still fail a later check. `windows_reserved_names` and
- * `max_tar_metadata_bytes` have no setter in this binding (Rust API only).
- *
- * When extraction fails after some files were already written (a partial
- * extraction), the message ends with ` | writes=kept, filesExtracted=N,
- * bytesWritten=M, filesSkipped=K, warnings=[...]` appended after the
- * error-code prefix. With `atomic` the destination is rolled back and the
- * message ends with ` | writes=rolled_back` and no counters. The
- * `warnings=[...]` fragment is
- * Rust's `Debug`-formatted `Vec<String>` rendering — it is for human/log
- * inspection only, is not guaranteed to be valid JSON, and must not be
- * `JSON.parse`d.
+ * - `code`: an `ErrorCode`: `PATH_TRAVERSAL`, `SYMLINK_ESCAPE`,
+ *   `HARDLINK_ESCAPE`, `ZIP_BOMB`, `ZIP_INCONSISTENCY`, `QUOTA_EXCEEDED`,
+ *   `SECURITY_VIOLATION`, `INVALID_ARCHIVE`, `IO_ERROR`,
+ *   `INVALID_PERMISSIONS`, `SOURCE_NOT_FOUND`, `SOURCE_NOT_ACCESSIBLE`,
+ *   `OUTPUT_EXISTS`, `INVALID_COMPRESSION_LEVEL`, `UNKNOWN_FORMAT`,
+ *   `INVALID_CONFIGURATION` or `PROGRESS_CALLBACK_ERROR`. A path rejected at
+ *   the boundary (null byte, too long) is a `SECURITY_VIOLATION` and a
+ *   rejected setter value an `INVALID_CONFIGURATION`. Errors raised by the
+ *   binding itself (a negative size, an internal panic) keep napi's status
+ *   (`GenericFailure`) as `code`.
+ * - `relaxableBy`: set on a `SECURITY_VIOLATION` that a `SecurityConfig`
+ *   setting relaxes, one of `symlinks`, `hardlinks`, `solid_archives`,
+ *   `banned_components`, `max_path_depth`, `windows_reserved_names` or
+ *   `max_tar_metadata_bytes`; absent when no setting relaxes the refusal.
+ *   Changing the setting removes that refusal only; the entry can still fail a
+ *   later check. `windows_reserved_names` and `max_tar_metadata_bytes` have no
+ *   setter in this binding (Rust API only).
+ * - `writes`, `filesExtracted`, `bytesWritten`, `filesSkipped`, `warnings`:
+ *   set when extraction fails after some files were already written. `writes`
+ *   is `'kept'` (files remain; the counters and the `warnings` string array
+ *   follow) or, with `atomic`, `'rolled_back'` (the destination was discarded;
+ *   no counters).
  *
  * # Examples
  *
@@ -859,9 +958,8 @@ export declare function extractArchiveSync(archivePath: string, outputDir: strin
  *
  * # Errors
  *
- * Returns error for security violations or I/O errors. Error messages are
- * prefixed with error codes for discrimination in JavaScript. See
- * `extractArchive` for the full list of error codes.
+ * Rejects for security violations or I/O errors. See `extractArchive` for the
+ * error properties (`code`, `relaxableBy`, `writes`, ...).
  *
  * If `progress` throws, the returned promise rejects instead of crashing the
  * process (see issue #465). Extraction has already run to completion (or
@@ -869,18 +967,16 @@ export declare function extractArchiveSync(archivePath: string, outputDir: strin
  * abort the extraction early, since the progress callback contract has no
  * cancellation signal. The rejection therefore reports both signals:
  *
- * - Extraction succeeded: the message is prefixed with
- *   `PROGRESS_CALLBACK_ERROR` and carries `filesExtracted=N, bytesWritten=M`,
- *   so the caller can still see what was written to disk.
- * - Extraction also failed: the core error stays primary and keeps its
- *   error-code prefix, with a fixed ` | progressCallbackError: see cause`
- *   marker appended. A throwing callback can never mask a security error such
- *   as `SYMLINK_ESCAPE`.
+ * - Extraction succeeded: `code` is `PROGRESS_CALLBACK_ERROR`, `writes` is
+ *   `'kept'` and `filesExtracted`, `bytesWritten`, `filesSkipped` and
+ *   `warnings` are set, so the caller can still see what was written to disk.
+ * - Extraction also failed: the core error stays primary and keeps its `code`;
+ *   the callback's throw is attached as `cause`. A throwing callback can never
+ *   mask a security error such as `SYMLINK_ESCAPE`.
  *
  * In both cases the original JS exception is available as the `cause`
  * property of the rejection value. The throw's own text and stack are never
- * copied into the message — read `cause` for the callback's error detail
- * rather than parsing it out of `message`.
+ * copied into the message — read `cause` for the callback's error detail.
  *
  * This holds regardless of what the callback *synchronously throws*,
  * including a bare primitive (`throw 'oops'`, `throw 42`, `throw true`):
@@ -1026,6 +1122,18 @@ export declare function listArchiveSync(archivePath: string, config?: SecurityCo
 
 /** Manifest entry type. */
 export type ManifestEntryType = 'File' | 'Directory' | 'Symlink' | 'Hardlink'
+
+/**
+ * Value of the `writes` property: whether a failed extraction left files on
+ * disk.
+ */
+export type PartialWrites = 'kept' | 'rolled_back'
+
+/**
+ * Value of the `relaxableBy` property: the `SecurityConfig` setting whose
+ * current value refused the entry.
+ */
+export type PolicySetting = 'symlinks' | 'hardlinks' | 'solid_archives' | 'banned_components' | 'max_path_depth' | 'windows_reserved_names' | 'max_tar_metadata_bytes'
 
 /** Number of items left unverified for one reason. */
 export interface UnverifiedCount {

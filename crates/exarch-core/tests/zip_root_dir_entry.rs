@@ -9,6 +9,7 @@ use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 
+use exarch_core::ErrorCode;
 use exarch_core::ManifestEntryKind;
 use exarch_core::SecurityConfig;
 use exarch_core::extract_archive;
@@ -46,7 +47,7 @@ fn write_zip(dir: &TempDir, bytes: &[u8]) -> PathBuf {
     path
 }
 
-fn extract_error_code(bytes: &[u8], config: &SecurityConfig) -> &'static str {
+fn extract_error_code(bytes: &[u8], config: &SecurityConfig) -> ErrorCode {
     let dir = TempDir::new().unwrap();
     let archive = write_zip(&dir, bytes);
     let out = TempDir::new().unwrap();
@@ -124,7 +125,10 @@ fn root_entry_with_payload_is_rejected_in_extract_list_and_verify() {
         zip.write_all(b"payload").unwrap();
     });
     let config = SecurityConfig::default();
-    assert_eq!(extract_error_code(&bytes, &config), "SECURITY_VIOLATION");
+    assert_eq!(
+        extract_error_code(&bytes, &config),
+        ErrorCode::SecurityViolation
+    );
 
     let dir = TempDir::new().unwrap();
     let archive = write_zip(&dir, &bytes);
@@ -142,7 +146,7 @@ fn root_symlink_entry_is_rejected_whether_or_not_symlinks_are_allowed() {
 
         assert_eq!(
             extract_error_code(&bytes, &config),
-            "SECURITY_VIOLATION",
+            ErrorCode::SecurityViolation,
             "allow_symlinks={allow}"
         );
         assert!(list_archive(&archive, &config).is_err(), "allow={allow}");
@@ -182,7 +186,7 @@ fn traversal_and_absolute_names_next_to_root_dir_entry_are_still_rejected() {
 
         assert_eq!(
             extract_error_code(&bytes, &SecurityConfig::default()),
-            "PATH_TRAVERSAL",
+            ErrorCode::PathTraversal,
             "{name:?}"
         );
     }

@@ -423,14 +423,12 @@ fn failing_prefix(data: &[u8], dict_size: u32, out: &mut [u8], done: usize) -> u
 /// Requires the decoder to be at its end marker.
 fn expect_end(reader: &mut impl Read) -> io::Result<()> {
     let mut probe = [0u8; 1];
-    if reader.read(&mut probe)? == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::new(
+    (reader.read(&mut probe)? == 0).ok_or_else(|| {
+        io::Error::new(
             io::ErrorKind::InvalidData,
             "LZMA2 run is longer than planned",
-        ))
-    }
+        )
+    })
 }
 
 /// Packed input of an inline stream, with an optional end marker appended.

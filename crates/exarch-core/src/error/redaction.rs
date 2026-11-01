@@ -15,13 +15,9 @@
 //! for genuinely host-derived paths and [`format_entry_path_for_error`] for
 //! archive-relative, attacker-authored paths — plus
 //! [`sanitize_io_error_for_error`] for I/O error messages (see #463, #464).
-//! Both bindings call these algorithms directly, per variant, in their own
-//! `convert_error`; [`ArchiveError::to_ffi_message`] uses them via
-//! [`ArchiveError::redacted_path`]. The mapping from variant to algorithm is
-//! therefore still applied independently in three places — here (via
-//! `redacted_path`), in `exarch-python::convert_error`, and in
-//! `exarch-node::convert_error` — only the two algorithms themselves are
-//! single-sourced.
+//! [`ArchiveError::into_ffi_message`] applies them via
+//! [`ArchiveError::redacted_path`], and the Python and Node.js bindings
+//! consume that message, so the variant-to-algorithm mapping lives only here.
 
 use std::path::Path;
 
@@ -188,15 +184,10 @@ impl ArchiveError {
     /// archive-relative, attacker-authored paths, or
     /// [`sanitize_path_for_error`] (redacted to filename-only in release
     /// builds) for genuinely host-derived paths (see #462). Used by
-    /// [`Self::to_ffi_message`]. `exarch-python` and `exarch-node` apply
-    /// this same variant-to-algorithm mapping independently in their own
-    /// `convert_error` — calling [`format_entry_path_for_error`] and
-    /// [`sanitize_path_for_error`] directly, per match arm, rather than
-    /// through this method — so the mapping itself is duplicated across
-    /// core, python, and node; only the two algorithms are single-sourced
-    /// (see #463). `test_never_redacted_variants_keep_full_path` and
+    /// [`Self::into_ffi_message`], which the bindings consume (see #463).
+    /// `test_never_redacted_variants_keep_full_path` and
     /// `test_host_path_variants_follow_profile_policy` below guard this
-    /// method's mapping; the bindings' own tests guard theirs.
+    /// method's mapping.
     ///
     /// [`Self::InvalidPermissions`] carries an archive entry path (see
     /// `check_permissions` in `inspection::verify`), not a host path, so it

@@ -1000,11 +1000,8 @@ mod tests {
 
         let mut f = formatter(Verbosity::Normal, false);
         let io = std::io::Error::other(format!("cannot write {HOSTILE}"));
-        let err = convert_extraction_error(
-            exarch_core::ArchiveError::Io(io),
-            Path::new("a\x1b.tar"),
-            false,
-        );
+        let err =
+            convert_extraction_error(exarch_core::ArchiveError::Io(io), Path::new("a\x1b.tar"));
         f.format_error("extract", &err);
         let text = err_text(&f);
         assert!(text.contains("Failed to process 'a\\x1b.tar'"), "{text:?}");
@@ -1019,7 +1016,6 @@ mod tests {
                 path: std::path::PathBuf::from(HOSTILE),
             },
             Path::new("a.tar"),
-            false,
         );
         let mut f = formatter(Verbosity::Normal, false);
         f.format_error("extract", &err);

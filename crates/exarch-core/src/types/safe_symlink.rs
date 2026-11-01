@@ -158,15 +158,10 @@ impl SafeSymlink {
         // drive-relative symlink target. Mirrors the identical guard in
         // `HardlinkTracker::validate_hardlink` (`security/hardlink.rs`) and
         // `SafePath::validate` (issue #491, GHSA-9ppj-qmqm-q256 class).
-        for component in target.components() {
-            if matches!(
-                component,
-                std::path::Component::Prefix(_) | std::path::Component::RootDir
-            ) {
-                return Err(ArchiveError::SymlinkEscape {
-                    path: link.as_path().to_path_buf(),
-                });
-            }
+        if has_root_or_prefix(target) {
+            return Err(ArchiveError::SymlinkEscape {
+                path: link.as_path().to_path_buf(),
+            });
         }
 
         // 2. Validate target is relative (redundant with the check above on
@@ -262,14 +257,25 @@ impl SafeSymlink {
 /// Returns `SecurityViolation` ("symlinks not allowed") when symlinks are
 /// disabled.
 pub(crate) fn require_symlinks_allowed(config: &SecurityConfig<Validated>) -> Result<()> {
-    if config.allowed.symlinks {
-        Ok(())
-    } else {
-        Err(ArchiveError::relaxable_violation(
-            PolicySetting::Symlinks,
-            "symlinks not allowed".into(),
-        ))
-    }
+    config.allowed.symlinks.ok_or_else(|| {
+        ArchiveError::relaxable_violation(PolicySetting::Symlinks, "symlinks not allowed".into())
+    })
+}
+
+/// Returns `true` when `target` contains a `Prefix` or `RootDir` component.
+///
+/// Such a target (drive, UNC, device namespace, or rooted path) is never
+/// relative to the destination. Link validators call this before any
+/// filesystem access so a hostile target such as `\\host\share\x` cannot
+/// trigger a network or device probe on Windows
+/// (GHSA-5qh5-c9fp-66jm class).
+pub(crate) fn has_root_or_prefix(target: &Path) -> bool {
+    target.components().any(|component| {
+        matches!(
+            component,
+            std::path::Component::Prefix(_) | std::path::Component::RootDir
+        )
+    })
 }
 
 /// Verifies that no component in the parent directory chain of `path` is a
@@ -962,6 +968,60 @@ mod tests {
             assert_matches!(
                 SafeSymlink::validate(&link, &PathBuf::from(target), &dest, &config),
                 Err(ArchiveError::SecurityViolation { .. }),
+                "{target}"
+            );
+        }
+    }
+
+    /// Targets whose first component is a root or prefix on every platform.
+    const ROOTED_TARGETS: [&str; 3] = ["/etc/passwd", "//host/share/x", "/"];
+
+    #[test]
+    fn test_has_root_or_prefix_flags_rooted_targets() {
+        for target in ROOTED_TARGETS {
+            assert!(has_root_or_prefix(Path::new(target)), "{target}");
+        }
+    }
+
+    #[test]
+    fn test_has_root_or_prefix_accepts_relative_targets() {
+        for target in ["a", "a/b", "../a", "./a"] {
+            assert!(!has_root_or_prefix(Path::new(target)), "{target}");
+        }
+    }
+
+    #[test]
+    fn test_safe_symlink_rejects_slash_unc_target_before_fs_access() {
+        let (_temp, dest) = create_test_dest();
+        let config = create_config_with_symlinks();
+        let link = SafePath::validate(&PathBuf::from("link"), &dest, &config).expect("link");
+
+        assert_matches!(
+            SafeSymlink::validate(&link, Path::new("//host/share/x"), &dest, &config),
+            Err(ArchiveError::SymlinkEscape { .. })
+        );
+    }
+
+    /// Regression for GHSA-5qh5-c9fp-66jm: UNC and device-namespace targets
+    /// must be rejected as escapes before any filesystem probe. Unverified
+    /// locally; runs only in the Windows CI job.
+    #[test]
+    #[cfg(windows)]
+    fn test_safe_symlink_rejects_unc_and_device_targets_windows() {
+        let (_temp, dest) = create_test_dest();
+        let config = create_config_with_symlinks();
+        let link = SafePath::validate(&PathBuf::from("link"), &dest, &config).expect("link");
+
+        for target in [
+            r"\\host\share\x",
+            "//host/share/x",
+            r"\\?\UNC\host\share\x",
+            r"\\.\UNC\host\share\x",
+            r"\??\UNC\host\share\x",
+        ] {
+            assert_matches!(
+                SafeSymlink::validate(&link, &PathBuf::from(target), &dest, &config),
+                Err(ArchiveError::SymlinkEscape { .. }),
                 "{target}"
             );
         }

@@ -1,5 +1,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use super::SEVENZ_MAGIC;
 use super::admit::RefusalScope;
 use super::admit::SevenZRefusal;
 use super::admit::sevenz_entry_compression;
@@ -342,9 +343,6 @@ fn unix_mode_is_ignored_without_windows_attributes() {
         SevenZClass::Present(SevenZKind::File)
     );
 }
-
-// 7z format magic bytes for signature validation
-const SEVENZ_MAGIC: [u8; 6] = [0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C];
 
 /// Load pre-generated fixture from tests/fixtures/
 pub(super) fn load_fixture(name: &str) -> Vec<u8> {

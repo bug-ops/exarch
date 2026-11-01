@@ -2,6 +2,7 @@
 
 #![allow(clippy::expect_used)]
 
+use std::assert_matches;
 use std::ffi::OsStr;
 use std::io::Cursor;
 use std::io::Read;
@@ -114,7 +115,7 @@ fn constant_refusals_carry_no_setting() {
         SafePath::validate(Path::new("a\0b"), &dest, &config),
         PolicySetting::BannedComponents,
     );
-    assert!(matches!(err, ArchiveError::SecurityViolation { .. }));
+    assert_matches!(err, ArchiveError::SecurityViolation { .. });
     assert_eq!(err.relaxable_by(), None);
 }
 
@@ -130,7 +131,9 @@ fn partial_extraction_delegates_relaxable_by() {
     };
     assert_eq!(err.relaxable_by(), Some(PolicySetting::Hardlinks));
     assert_eq!(
-        err.to_ffi_message().relaxable_by,
-        Some(PolicySetting::Hardlinks)
+        err.into_ffi_message().kind,
+        super::FfiKind::SecurityViolation {
+            relaxable_by: Some(PolicySetting::Hardlinks)
+        }
     );
 }

@@ -11,6 +11,7 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use exarch_core::CheckStatus;
+use exarch_core::ErrorCode;
 use exarch_core::ExtractionOptions;
 use exarch_core::SecurityConfig;
 use exarch_core::extract_archive_with_options;
@@ -170,7 +171,7 @@ fn assert_links_resolve_in_dest(out: &Path) {
     }
 }
 
-fn code(result: exarch_core::Result<exarch_core::ExtractionReport>) -> &'static str {
+fn code(result: exarch_core::Result<exarch_core::ExtractionReport>) -> ErrorCode {
     result.unwrap_err().error_code()
 }
 
@@ -178,7 +179,11 @@ fn code(result: exarch_core::Result<exarch_core::ExtractionReport>) -> &'static 
 fn symlink_target_with_unresolvable_parent_component_is_rejected() {
     for format in FORMATS {
         let fixture = Fixture::new(format, &[Link("a", "d/.."), Link("d", ".")]);
-        assert_eq!(code(fixture.extract(true)), "SYMLINK_ESCAPE", "{format:?}");
+        assert_eq!(
+            code(fixture.extract(true)),
+            ErrorCode::SymlinkEscape,
+            "{format:?}"
+        );
         fixture.assert_dest_only();
         assert_ne!(
             fixture.verify_status(),
@@ -192,7 +197,11 @@ fn symlink_target_with_unresolvable_parent_component_is_rejected() {
 fn symlink_target_leaving_dest_through_link_is_rejected() {
     for format in FORMATS {
         let fixture = Fixture::new(format, &[Link("d", "."), Link("a", "d/..")]);
-        assert_eq!(code(fixture.extract(true)), "SYMLINK_ESCAPE", "{format:?}");
+        assert_eq!(
+            code(fixture.extract(true)),
+            ErrorCode::SymlinkEscape,
+            "{format:?}"
+        );
         fixture.assert_dest_only();
         assert_ne!(
             fixture.verify_status(),
@@ -206,7 +215,11 @@ fn symlink_target_leaving_dest_through_link_is_rejected() {
 fn symlink_target_with_two_unresolvable_parent_components_is_rejected() {
     for format in FORMATS {
         let fixture = Fixture::new(format, &[Link("a", "d/e/../../f"), Dir("d/e/")]);
-        assert_eq!(code(fixture.extract(true)), "SYMLINK_ESCAPE", "{format:?}");
+        assert_eq!(
+            code(fixture.extract(true)),
+            ErrorCode::SymlinkEscape,
+            "{format:?}"
+        );
         assert_ne!(
             fixture.verify_status(),
             Some(CheckStatus::Pass),
@@ -219,7 +232,11 @@ fn symlink_target_with_two_unresolvable_parent_components_is_rejected() {
 fn hardlink_target_with_unresolvable_parent_component_is_rejected() {
     for format in TAR_ONLY {
         let fixture = Fixture::new(format, &[File("f"), Hardlink("h", "d/../f"), Dir("d/")]);
-        assert_eq!(code(fixture.extract(true)), "HARDLINK_ESCAPE", "{format:?}");
+        assert_eq!(
+            code(fixture.extract(true)),
+            ErrorCode::HardlinkEscape,
+            "{format:?}"
+        );
         assert_ne!(
             fixture.verify_status(),
             Some(CheckStatus::Pass),
@@ -259,7 +276,11 @@ fn symlink_target_through_existing_directory_extracts() {
 fn symlink_target_parent_component_must_resolve_in_entry_order() {
     for format in FORMATS {
         let fixture = Fixture::new(format, &[Link("x", "d/../f"), Dir("d/")]);
-        assert_eq!(code(fixture.extract(true)), "SYMLINK_ESCAPE", "{format:?}");
+        assert_eq!(
+            code(fixture.extract(true)),
+            ErrorCode::SymlinkEscape,
+            "{format:?}"
+        );
         assert_ne!(
             fixture.verify_status(),
             Some(CheckStatus::Pass),

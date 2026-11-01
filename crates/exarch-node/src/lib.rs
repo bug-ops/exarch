@@ -40,12 +40,6 @@
 //!
 //! MIT OR Apache-2.0
 
-// Allow trailing_empty_array from napi macro - this is expected behavior
-#![expect(
-    clippy::trailing_empty_array,
-    reason = "emitted by the napi macro expansion"
-)]
-
 use napi::bindgen_prelude::*;
 use napi::threadsafe_function::ThreadsafeFunction;
 use napi::threadsafe_function::ThreadsafeFunctionCallMode;
@@ -60,12 +54,18 @@ use config::CreationConfig;
 use config::ExtractionOptions;
 use config::SecurityConfig;
 use config::VerificationOptions;
-use error::convert_error;
+use error::Failure;
+use error::ProgressCallbackError;
+use error::run_sync;
+use error::spawn_blocking_promise;
 use report::ArchiveManifest;
 use report::CreationReport;
 use report::ExtractionReport;
 use report::VerificationReport;
 use utils::validate_path;
+
+/// Result of the binding-internal operations, before conversion to a JS error.
+type CoreResult<T> = std::result::Result<T, Failure>;
 
 // The `catch_unwind` guards throughout this module only convert Rust panics
 // into a catchable `Error` when the crate is built with `panic = "unwind"`;
@@ -76,17 +76,6 @@ const _: () = assert!(
     cfg!(panic = "unwind"),
     "exarch-node must be built with panic=unwind so catch_unwind can convert Rust panics into catchable JS errors; see issue #395"
 );
-
-/// Runs `f`, converting a Rust panic into a catchable napi `Error` instead of
-/// letting it unwind across the FFI boundary (see issue #395).
-///
-/// `context` is interpolated into the error message as "Internal panic
-/// during {context}".
-fn catch_panic_as_js_err<T>(context: &str, f: impl FnOnce() -> Result<T>) -> Result<T> {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
-        .map_err(|_| Error::from_reason(format!("Internal panic during {context}")))
-        .flatten()
-}
 
 /// Extract an archive to the specified directory (async).
 ///
@@ -99,7 +88,7 @@ fn catch_panic_as_js_err<T>(context: &str, f: impl FnOnce() -> Result<T>) -> Res
 ///
 /// ## Thread Safety and TOCTOU
 ///
-/// The extraction runs on a libuv thread pool worker thread. This creates
+/// The extraction runs on a tokio blocking-pool worker thread. This creates
 /// a Time-Of-Check-Time-Of-Use (TOCTOU) race condition where the archive
 /// file could be modified between validation and extraction. This is an
 /// accepted tradeoff for async performance. For untrusted archives, ensure
@@ -109,7 +98,8 @@ fn catch_panic_as_js_err<T>(context: &str, f: impl FnOnce() -> Result<T>) -> Res
 ///
 /// - Paths containing null bytes are rejected (security)
 /// - Paths exceeding 4096 bytes are rejected (`DoS` prevention)
-/// - All validation happens at the Node.js boundary before calling core library
+/// - Boundary validation runs before the core call; a rejection is a
+///   `SECURITY_VIOLATION`
 ///
 /// # Arguments
 ///
@@ -123,40 +113,32 @@ fn catch_panic_as_js_err<T>(context: &str, f: impl FnOnce() -> Result<T>) -> Res
 ///
 /// # Errors
 ///
-/// Returns error for security violations or I/O errors. Error messages are
-/// prefixed with error codes for discrimination in JavaScript:
+/// Rejects for security violations or I/O errors. The rejection is an `Error`
+/// (see `ExarchError`) whose `message` is the description only; discriminate
+/// on its properties instead of parsing text:
 ///
-/// - `PATH_TRAVERSAL`: Path traversal attempt detected
-/// - `SYMLINK_ESCAPE`: Symlink points outside extraction directory
-/// - `HARDLINK_ESCAPE`: Hardlink target outside extraction directory
-/// - `ZIP_BOMB`: Potential zip bomb detected
-/// - `ZIP_INCONSISTENCY`: ZIP structure is read differently by different tools
-/// - `INVALID_PERMISSIONS`: File permissions are invalid or unsafe
-/// - `QUOTA_EXCEEDED`: Resource quota exceeded
-/// - `SECURITY_VIOLATION`: Security policy violation
-/// - `UNSUPPORTED_FORMAT`: Archive format not supported
-/// - `INVALID_ARCHIVE`: Archive is corrupted
-/// - `IO_ERROR`: I/O operation failed
-///
-/// A `SECURITY_VIOLATION` that a `SecurityConfig` setting relaxes carries an
-/// anchored token right after the code: `SECURITY_VIOLATION: [relaxableBy=<id>]
-/// operation denied ...`, where `<id>` is one of `symlinks`, `hardlinks`,
-/// `solid_archives`, `banned_components`, `max_path_depth`,
-/// `windows_reserved_names` or `max_tar_metadata_bytes`. Parse it with
-/// `^SECURITY_VIOLATION: \[relaxableBy=([a-z_]+)\]`; the token is absent when
-/// no setting relaxes the refusal. Changing the setting removes that refusal
-/// only; the entry can still fail a later check. `windows_reserved_names` and
-/// `max_tar_metadata_bytes` have no setter in this binding (Rust API only).
-///
-/// When extraction fails after some files were already written (a partial
-/// extraction), the message ends with ` | writes=kept, filesExtracted=N,
-/// bytesWritten=M, filesSkipped=K, warnings=[...]` appended after the
-/// error-code prefix. With `atomic` the destination is rolled back and the
-/// message ends with ` | writes=rolled_back` and no counters. The
-/// `warnings=[...]` fragment is
-/// Rust's `Debug`-formatted `Vec<String>` rendering — it is for human/log
-/// inspection only, is not guaranteed to be valid JSON, and must not be
-/// `JSON.parse`d.
+/// - `code`: an `ErrorCode`: `PATH_TRAVERSAL`, `SYMLINK_ESCAPE`,
+///   `HARDLINK_ESCAPE`, `ZIP_BOMB`, `ZIP_INCONSISTENCY`, `QUOTA_EXCEEDED`,
+///   `SECURITY_VIOLATION`, `INVALID_ARCHIVE`, `IO_ERROR`,
+///   `INVALID_PERMISSIONS`, `SOURCE_NOT_FOUND`, `SOURCE_NOT_ACCESSIBLE`,
+///   `OUTPUT_EXISTS`, `INVALID_COMPRESSION_LEVEL`, `UNKNOWN_FORMAT`,
+///   `INVALID_CONFIGURATION` or `PROGRESS_CALLBACK_ERROR`. A path rejected at
+///   the boundary (null byte, too long) is a `SECURITY_VIOLATION` and a
+///   rejected setter value an `INVALID_CONFIGURATION`. Errors raised by the
+///   binding itself (a negative size, an internal panic) keep napi's status
+///   (`GenericFailure`) as `code`.
+/// - `relaxableBy`: set on a `SECURITY_VIOLATION` that a `SecurityConfig`
+///   setting relaxes, one of `symlinks`, `hardlinks`, `solid_archives`,
+///   `banned_components`, `max_path_depth`, `windows_reserved_names` or
+///   `max_tar_metadata_bytes`; absent when no setting relaxes the refusal.
+///   Changing the setting removes that refusal only; the entry can still fail a
+///   later check. `windows_reserved_names` and `max_tar_metadata_bytes` have no
+///   setter in this binding (Rust API only).
+/// - `writes`, `filesExtracted`, `bytesWritten`, `filesSkipped`, `warnings`:
+///   set when extraction fails after some files were already written. `writes`
+///   is `'kept'` (files remain; the counters and the `warnings` string array
+///   follow) or, with `atomic`, `'rolled_back'` (the destination was discarded;
+///   no counters).
 ///
 /// # Examples
 ///
@@ -174,52 +156,50 @@ fn catch_panic_as_js_err<T>(context: &str, f: impl FnOnce() -> Result<T>) -> Res
 /// const report = await extractArchive('archive.tar.gz', '/tmp/output', null, opts);
 /// ```
 #[napi]
-#[allow(clippy::needless_pass_by_value, clippy::trailing_empty_array)]
-pub async fn extract_archive(
+#[allow(clippy::needless_pass_by_value)]
+pub fn extract_archive<'env>(
+    env: &'env Env,
     archive_path: String,
     output_dir: String,
     config: Option<&SecurityConfig>,
     options: Option<&ExtractionOptions>,
-) -> Result<ExtractionReport> {
-    // Validate paths at boundary
-    // NOTE: Defense-in-depth - paths are validated here and again in core
-    // library. This boundary validation catches issues early and provides
-    // better error messages for Node.js users.
-    validate_path(&archive_path)?;
-    validate_path(&output_dir)?;
-
-    // Get owned config/options - clone only when Some, use default otherwise
+) -> Result<PromiseRaw<'env, ExtractionReport>> {
+    // Owned copies: the work outlives this call on the blocking pool.
     let config_owned: exarch_core::SecurityConfig = config.map_or_default(|c| c.as_core().clone());
     let options_owned: exarch_core::ExtractionOptions =
         options.map_or_default(|o| o.as_core().clone());
 
-    // Run extraction on tokio thread pool
-    //
-    // NAPI-RS with tokio_rt feature uses tokio runtime for async operations.
-    // spawn_blocking is required because archive extraction does blocking I/O.
-    // This moves the work to tokio's blocking thread pool rather than
-    // blocking the Node.js event loop.
-    //
     // NOTE: TOCTOU race condition - archive contents can change between
     // validation and extraction. This is an accepted limitation for async I/O.
     // For maximum security with untrusted archives, use extractArchiveSync()
     // or ensure exclusive file access (e.g., flock) during extraction.
-    let report = tokio::task::spawn_blocking(move || {
-        catch_panic_as_js_err("archive extraction", || {
-            exarch_core::extract_archive_with_options(
-                &archive_path,
-                &output_dir,
-                &config_owned,
-                &options_owned,
-            )
-            .map_err(convert_error)
-        })
-    })
-    .await
-    .map_err(|e| Error::from_reason(format!("task join error: {e}")))
-    .flatten()?;
+    spawn_blocking_promise(
+        env,
+        "archive extraction",
+        move || extract_core(&archive_path, &output_dir, &config_owned, &options_owned),
+        |report| Ok(ExtractionReport::from(report)),
+    )
+}
 
-    Ok(ExtractionReport::from(report))
+/// Validates the boundary paths, then extracts.
+///
+/// Defense-in-depth: paths are validated here and again in core. Boundary
+/// validation catches issues early; it runs inside the work so its error
+/// rejects like every other failure.
+fn extract_core(
+    archive_path: &str,
+    output_dir: &str,
+    config: &exarch_core::SecurityConfig,
+    options: &exarch_core::ExtractionOptions,
+) -> CoreResult<exarch_core::ExtractionReport> {
+    validate_path(archive_path)?;
+    validate_path(output_dir)?;
+    Ok(exarch_core::extract_archive_with_options(
+        archive_path,
+        output_dir,
+        config,
+        options,
+    )?)
 }
 
 /// Extract an archive to the specified directory (sync).
@@ -256,37 +236,23 @@ pub async fn extract_archive(
 #[napi]
 #[allow(clippy::needless_pass_by_value)]
 pub fn extract_archive_sync(
+    env: Env,
     archive_path: String,
     output_dir: String,
     config: Option<&SecurityConfig>,
     options: Option<&ExtractionOptions>,
 ) -> Result<ExtractionReport> {
-    // Validate paths at boundary
-    // NOTE: Defense-in-depth - paths are validated here and again in core
-    // library. This boundary validation catches issues early and provides
-    // better error messages for Node.js users.
-    validate_path(&archive_path)?;
-    validate_path(&output_dir)?;
-
     let default_config = exarch_core::SecurityConfig::default();
     let config_ref = config.map_or(&default_config, |c| c.as_core());
 
     let default_options = exarch_core::ExtractionOptions::default();
     let options_ref = options.map_or(&default_options, |o| o.as_core());
 
-    // Run extraction synchronously with panic safety
     // CRITICAL: Never panic across FFI boundary
-    let report = catch_panic_as_js_err("archive extraction", || {
-        exarch_core::extract_archive_with_options(
-            &archive_path,
-            &output_dir,
-            config_ref,
-            options_ref,
-        )
-        .map_err(convert_error)
-    })?;
-
-    Ok(ExtractionReport::from(report))
+    run_sync(env, "archive extraction", || {
+        extract_core(&archive_path, &output_dir, config_ref, options_ref)
+    })
+    .map(ExtractionReport::from)
 }
 
 /// Create an archive from source files and directories (async).
@@ -319,32 +285,43 @@ pub fn extract_archive_sync(
 /// ```
 #[napi]
 #[allow(clippy::needless_pass_by_value)]
-pub async fn create_archive(
+pub fn create_archive<'env>(
+    env: &'env Env,
     output_path: String,
     sources: Vec<String>,
     config: Option<&CreationConfig>,
-) -> Result<CreationReport> {
-    validate_path(&output_path)?;
-    for source in &sources {
-        validate_path(source)?;
-    }
-
-    // Get owned config - clone only when config is Some, use default otherwise
+) -> Result<PromiseRaw<'env, CreationReport>> {
     let config_owned: exarch_core::creation::CreationConfig =
         config.map_or_default(|c| c.as_core().clone());
 
-    let report = tokio::task::spawn_blocking(move || {
-        catch_panic_as_js_err("archive creation", || {
-            let sources_refs: Vec<&str> = sources.iter().map(String::as_str).collect();
-            exarch_core::create_archive(&output_path, &sources_refs, &config_owned)
-                .map_err(convert_error)
-        })
-    })
-    .await
-    .map_err(|e| Error::from_reason(format!("task join error: {e}")))
-    .flatten()?;
+    spawn_blocking_promise(
+        env,
+        "archive creation",
+        move || create_core(&output_path, &sources, &config_owned),
+        |report| Ok(CreationReport::from(report)),
+    )
+}
 
-    Ok(CreationReport::from(report))
+fn validate_create_paths(output_path: &str, sources: &[String]) -> CoreResult<()> {
+    validate_path(output_path)?;
+    sources
+        .iter()
+        .try_for_each(|source| validate_path(source))?;
+    Ok(())
+}
+
+fn create_core(
+    output_path: &str,
+    sources: &[String],
+    config: &exarch_core::creation::CreationConfig,
+) -> CoreResult<exarch_core::creation::CreationReport> {
+    validate_create_paths(output_path, sources)?;
+    let sources_refs: Vec<&str> = sources.iter().map(String::as_str).collect();
+    Ok(exarch_core::create_archive(
+        output_path,
+        &sources_refs,
+        config,
+    )?)
 }
 
 /// Create an archive from source files and directories (sync).
@@ -377,25 +354,18 @@ pub async fn create_archive(
 #[napi]
 #[allow(clippy::needless_pass_by_value)]
 pub fn create_archive_sync(
+    env: Env,
     output_path: String,
     sources: Vec<String>,
     config: Option<&CreationConfig>,
 ) -> Result<CreationReport> {
-    validate_path(&output_path)?;
-    for source in &sources {
-        validate_path(source)?;
-    }
-
     let default_config = exarch_core::creation::CreationConfig::default();
     let config_ref = config.map_or(&default_config, |c| c.as_core());
 
-    let sources_refs: Vec<&str> = sources.iter().map(String::as_str).collect();
-
-    let report = catch_panic_as_js_err("archive creation", || {
-        exarch_core::create_archive(&output_path, &sources_refs, config_ref).map_err(convert_error)
-    })?;
-
-    Ok(CreationReport::from(report))
+    run_sync(env, "archive creation", || {
+        create_core(&output_path, &sources, config_ref)
+    })
+    .map(CreationReport::from)
 }
 
 /// JavaScript source for a factory that wraps a progress callback so any
@@ -544,12 +514,12 @@ impl FromNapiValue for ProgressCallback {
 /// abort creation early, since the progress callback contract has no
 /// cancellation signal. The rejection therefore reports both signals:
 ///
-/// - Creation succeeded: the message is prefixed with `PROGRESS_CALLBACK_ERROR`
-///   and carries `filesAdded=N, bytesWritten=M`, so the caller can still see
-///   that an archive was written and needs cleaning up.
-/// - Creation also failed: the core error stays primary and keeps its
-///   error-code prefix, with a fixed ` | progressCallbackError: see cause`
-///   marker appended. A throwing callback can never mask a core error.
+/// - Creation succeeded: `code` is `PROGRESS_CALLBACK_ERROR` and `filesAdded`
+///   and `bytesWritten` are set, so the caller can still see that an archive
+///   was written and needs cleaning up.
+/// - Creation also failed: the core error stays primary and keeps its `code`;
+///   the callback's throw is attached as `cause`. A throwing callback can never
+///   mask a core error.
 ///
 /// In both cases the original JS exception is available as the `cause`
 /// property of the rejection value. The throw's own text and stack are never
@@ -582,8 +552,9 @@ impl FromNapiValue for ProgressCallback {
 /// console.log(`Created archive with ${report.filesAdded} files`);
 /// ```
 #[napi]
-#[allow(clippy::needless_pass_by_value, clippy::trailing_empty_array)]
-pub async fn create_archive_with_progress(
+#[allow(clippy::needless_pass_by_value)]
+pub fn create_archive_with_progress<'env>(
+    env: &'env Env,
     output_path: String,
     sources: Vec<String>,
     config: Option<&CreationConfig>,
@@ -591,34 +562,38 @@ pub async fn create_archive_with_progress(
         ts_arg_type = "(((err: Error | null, arg: [string, number, number, number]) => any)) | undefined | null"
     )]
     progress: Option<ProgressCallback>,
-) -> Result<CreationReport> {
-    validate_path(&output_path)?;
-    for source in &sources {
-        validate_path(source)?;
-    }
-
+) -> Result<PromiseRaw<'env, CreationReport>> {
     let config_owned: exarch_core::creation::CreationConfig =
         config.map_or_default(|c| c.as_core().clone());
     let progress = progress.map(|ProgressCallback(tsfn)| tsfn);
 
-    let report = tokio::task::spawn_blocking(move || {
-        catch_panic_as_js_err("archive creation with progress", || {
-            let sources_refs: Vec<&str> = sources.iter().map(String::as_str).collect();
-            run_create_with_optional_progress(
+    spawn_blocking_promise(
+        env,
+        "archive creation with progress",
+        move || {
+            create_with_progress_core(
                 &output_path,
-                &sources_refs,
+                &sources,
                 &config_owned,
                 progress,
                 ProgressDispatch::Awaited,
             )
-            .map_err(|err| Error::from(*err))
-        })
-    })
-    .await
-    .map_err(|e| Error::from_reason(format!("task join error: {e}")))
-    .flatten()?;
+        },
+        |report| Ok(CreationReport::from(report)),
+    )
+}
 
-    Ok(CreationReport::from(report))
+fn create_with_progress_core(
+    output_path: &str,
+    sources: &[String],
+    config: &exarch_core::creation::CreationConfig,
+    progress: Option<ThreadsafeFunction<(String, i64, i64, i64)>>,
+    dispatch: ProgressDispatch,
+) -> CoreResult<exarch_core::creation::CreationReport> {
+    validate_create_paths(output_path, sources)?;
+    let sources_refs: Vec<&str> = sources.iter().map(String::as_str).collect();
+    run_create_with_optional_progress(output_path, &sources_refs, config, progress, dispatch)
+        .map_err(Failure::Callback)
 }
 
 /// Create an archive from source files and directories with a progress
@@ -692,33 +667,25 @@ pub async fn create_archive_with_progress(
 #[napi]
 #[allow(clippy::needless_pass_by_value)]
 pub fn create_archive_with_progress_sync(
+    env: Env,
     output_path: String,
     sources: Vec<String>,
     config: Option<&CreationConfig>,
     progress: Option<ThreadsafeFunction<(String, i64, i64, i64)>>,
 ) -> Result<CreationReport> {
-    validate_path(&output_path)?;
-    for source in &sources {
-        validate_path(source)?;
-    }
-
     let default_config = exarch_core::creation::CreationConfig::default();
     let config_ref = config.map_or(&default_config, |c| c.as_core());
 
-    let sources_refs: Vec<&str> = sources.iter().map(String::as_str).collect();
-
-    let report = catch_panic_as_js_err("archive creation with progress", || {
-        run_create_with_optional_progress(
+    run_sync(env, "archive creation with progress", || {
+        create_with_progress_core(
             &output_path,
-            &sources_refs,
+            &sources,
             config_ref,
             progress,
             ProgressDispatch::Deferred,
         )
-        .map_err(|err| Error::from(*err))
-    })?;
-
-    Ok(CreationReport::from(report))
+    })
+    .map(CreationReport::from)
 }
 
 /// Runs `create_archive_with_progress` routing to the JS callback when
@@ -797,25 +764,27 @@ fn run_create_with_optional_progress(
 /// ```
 #[napi]
 #[allow(clippy::needless_pass_by_value)]
-pub async fn list_archive(
+pub fn list_archive<'env>(
+    env: &'env Env,
     archive_path: String,
     config: Option<&SecurityConfig>,
-) -> Result<ArchiveManifest> {
-    validate_path(&archive_path)?;
-
-    // Get owned config - clone only when config is Some, use default otherwise
+) -> Result<PromiseRaw<'env, ArchiveManifest>> {
     let config_owned: exarch_core::SecurityConfig = config.map_or_default(|c| c.as_core().clone());
 
-    let manifest = tokio::task::spawn_blocking(move || {
-        catch_panic_as_js_err("archive listing", || {
-            exarch_core::list_archive(&archive_path, &config_owned).map_err(convert_error)
-        })
-    })
-    .await
-    .map_err(|e| Error::from_reason(format!("task join error: {e}")))
-    .flatten()?;
+    spawn_blocking_promise(
+        env,
+        "archive listing",
+        move || list_core(&archive_path, &config_owned),
+        ArchiveManifest::try_from,
+    )
+}
 
-    ArchiveManifest::try_from(manifest)
+fn list_core(
+    archive_path: &str,
+    config: &exarch_core::SecurityConfig,
+) -> CoreResult<exarch_core::inspection::ArchiveManifest> {
+    validate_path(archive_path)?;
+    Ok(exarch_core::list_archive(archive_path, config)?)
 }
 
 /// List archive contents without extracting (sync).
@@ -848,16 +817,15 @@ pub async fn list_archive(
 #[napi]
 #[allow(clippy::needless_pass_by_value)]
 pub fn list_archive_sync(
+    env: Env,
     archive_path: String,
     config: Option<&SecurityConfig>,
 ) -> Result<ArchiveManifest> {
-    validate_path(&archive_path)?;
-
     let default_config = exarch_core::SecurityConfig::default();
     let config_ref = config.map_or(&default_config, |c| c.as_core());
 
-    let manifest = catch_panic_as_js_err("archive listing", || {
-        exarch_core::list_archive(&archive_path, config_ref).map_err(convert_error)
+    let manifest = run_sync(env, "archive listing", || {
+        list_core(&archive_path, config_ref)
     })?;
 
     ArchiveManifest::try_from(manifest)
@@ -898,28 +866,34 @@ pub fn list_archive_sync(
 /// ```
 #[napi]
 #[allow(clippy::needless_pass_by_value)]
-pub async fn verify_archive(
+pub fn verify_archive<'env>(
+    env: &'env Env,
     archive_path: String,
     config: Option<&SecurityConfig>,
     options: Option<&VerificationOptions>,
-) -> Result<VerificationReport> {
-    validate_path(&archive_path)?;
-
-    // Get owned config/options - clone only when Some, use default otherwise
+) -> Result<PromiseRaw<'env, VerificationReport>> {
     let config_owned: exarch_core::SecurityConfig = config.map_or_default(|c| c.as_core().clone());
     let options_owned: exarch_core::VerificationOptions = options.map_or_default(|o| *o.as_core());
 
-    let report = tokio::task::spawn_blocking(move || {
-        catch_panic_as_js_err("archive verification", || {
-            exarch_core::verify_archive_with_options(&archive_path, &config_owned, &options_owned)
-                .map_err(convert_error)
-        })
-    })
-    .await
-    .map_err(|e| Error::from_reason(format!("task join error: {e}")))
-    .flatten()?;
+    spawn_blocking_promise(
+        env,
+        "archive verification",
+        move || verify_core(&archive_path, &config_owned, options_owned),
+        VerificationReport::try_from,
+    )
+}
 
-    VerificationReport::try_from(report)
+fn verify_core(
+    archive_path: &str,
+    config: &exarch_core::SecurityConfig,
+    options: exarch_core::VerificationOptions,
+) -> CoreResult<exarch_core::inspection::VerificationReport> {
+    validate_path(archive_path)?;
+    Ok(exarch_core::verify_archive_with_options(
+        archive_path,
+        config,
+        &options,
+    )?)
 }
 
 /// Verify archive security (sync).
@@ -953,20 +927,18 @@ pub async fn verify_archive(
 #[napi]
 #[allow(clippy::needless_pass_by_value)]
 pub fn verify_archive_sync(
+    env: Env,
     archive_path: String,
     config: Option<&SecurityConfig>,
     options: Option<&VerificationOptions>,
 ) -> Result<VerificationReport> {
-    validate_path(&archive_path)?;
-
     let default_config = exarch_core::SecurityConfig::default();
     let config_ref = config.map_or(&default_config, |c| c.as_core());
     let default_options = exarch_core::VerificationOptions::default();
     let options_ref = options.map_or(&default_options, |o| o.as_core());
 
-    let report = catch_panic_as_js_err("archive verification", || {
-        exarch_core::verify_archive_with_options(&archive_path, config_ref, options_ref)
-            .map_err(convert_error)
+    let report = run_sync(env, "archive verification", || {
+        verify_core(&archive_path, config_ref, *options_ref)
     })?;
 
     VerificationReport::try_from(report)
@@ -1006,9 +978,8 @@ pub fn verify_archive_sync(
 ///
 /// # Errors
 ///
-/// Returns error for security violations or I/O errors. Error messages are
-/// prefixed with error codes for discrimination in JavaScript. See
-/// `extractArchive` for the full list of error codes.
+/// Rejects for security violations or I/O errors. See `extractArchive` for the
+/// error properties (`code`, `relaxableBy`, `writes`, ...).
 ///
 /// If `progress` throws, the returned promise rejects instead of crashing the
 /// process (see issue #465). Extraction has already run to completion (or
@@ -1016,18 +987,16 @@ pub fn verify_archive_sync(
 /// abort the extraction early, since the progress callback contract has no
 /// cancellation signal. The rejection therefore reports both signals:
 ///
-/// - Extraction succeeded: the message is prefixed with
-///   `PROGRESS_CALLBACK_ERROR` and carries `filesExtracted=N, bytesWritten=M`,
-///   so the caller can still see what was written to disk.
-/// - Extraction also failed: the core error stays primary and keeps its
-///   error-code prefix, with a fixed ` | progressCallbackError: see cause`
-///   marker appended. A throwing callback can never mask a security error such
-///   as `SYMLINK_ESCAPE`.
+/// - Extraction succeeded: `code` is `PROGRESS_CALLBACK_ERROR`, `writes` is
+///   `'kept'` and `filesExtracted`, `bytesWritten`, `filesSkipped` and
+///   `warnings` are set, so the caller can still see what was written to disk.
+/// - Extraction also failed: the core error stays primary and keeps its `code`;
+///   the callback's throw is attached as `cause`. A throwing callback can never
+///   mask a security error such as `SYMLINK_ESCAPE`.
 ///
 /// In both cases the original JS exception is available as the `cause`
 /// property of the rejection value. The throw's own text and stack are never
-/// copied into the message — read `cause` for the callback's error detail
-/// rather than parsing it out of `message`.
+/// copied into the message — read `cause` for the callback's error detail.
 ///
 /// This holds regardless of what the callback *synchronously throws*,
 /// including a bare primitive (`throw 'oops'`, `throw 42`, `throw true`):
@@ -1069,8 +1038,9 @@ pub fn verify_archive_sync(
 /// console.log(`Extracted ${report.filesExtracted} files`);
 /// ```
 #[napi]
-#[allow(clippy::needless_pass_by_value, clippy::trailing_empty_array)]
-pub async fn extract_archive_with_progress(
+#[allow(clippy::needless_pass_by_value)]
+pub fn extract_archive_with_progress<'env>(
+    env: &'env Env,
     archive_path: String,
     output_dir: String,
     config: Option<&SecurityConfig>,
@@ -1079,17 +1049,18 @@ pub async fn extract_archive_with_progress(
         ts_arg_type = "(((err: Error | null, arg: [string, number, number, number]) => any)) | undefined | null"
     )]
     progress: Option<ProgressCallback>,
-) -> Result<ExtractionReport> {
-    validate_path(&archive_path)?;
-    validate_path(&output_dir)?;
-
+) -> Result<PromiseRaw<'env, ExtractionReport>> {
     let config_owned: exarch_core::SecurityConfig = config.map_or_default(|c| c.as_core().clone());
     let options_owned: exarch_core::ExtractionOptions =
         options.map_or_default(|o| o.as_core().clone());
     let progress = progress.map(|ProgressCallback(tsfn)| tsfn);
 
-    let report = tokio::task::spawn_blocking(move || {
-        catch_panic_as_js_err("archive extraction with progress", || {
+    spawn_blocking_promise(
+        env,
+        "archive extraction with progress",
+        move || {
+            validate_path(&archive_path)?;
+            validate_path(&output_dir)?;
             run_extract_with_optional_progress(
                 &archive_path,
                 &output_dir,
@@ -1097,123 +1068,10 @@ pub async fn extract_archive_with_progress(
                 &options_owned,
                 progress,
             )
-            .map_err(|err| Error::from(*err))
-        })
-    })
-    .await
-    .map_err(|e| Error::from_reason(format!("task join error: {e}")))
-    .flatten()?;
-
-    Ok(ExtractionReport::from(report))
-}
-
-/// Error from running an extraction or a creation with a JS progress callback:
-/// either the core operation failed, or the JS callback itself threw.
-enum ProgressCallbackError {
-    /// The core operation failed. `callback` carries a JS progress callback
-    /// throw observed during the same run, if any.
-    Core {
-        source: exarch_core::ArchiveError,
-        callback: Option<Error>,
-    },
-    /// The JS progress callback threw while the extraction itself succeeded;
-    /// carries the already-converted napi error captured by
-    /// [`NodeProgressAdapter`] (see issue #465) plus the report describing
-    /// what was written to disk.
-    ExtractionCallback {
-        source: Error,
-        report: exarch_core::ExtractionReport,
-    },
-    /// The JS progress callback threw while the creation itself succeeded;
-    /// the creation counterpart of [`Self::ExtractionCallback`], carrying the
-    /// report describing the archive that was written.
-    CreationCallback {
-        source: Error,
-        report: exarch_core::creation::CreationReport,
-    },
-}
-
-/// Projects a [`ProgressCallbackError`] onto the single napi error the promise
-/// rejects with, without discarding either signal:
-///
-/// - A core failure stays primary and keeps its error-code prefix
-///   (`SYMLINK_ESCAPE`, `QUOTA_EXCEEDED`, …) at the start of the message, so a
-///   throwing callback cannot mask a security violation from callers that match
-///   on that prefix. A concurrent callback throw is flagged by a fixed marker
-///   in the message and attached as `cause`.
-/// - A callback throw over a successful extraction or creation is prefixed with
-///   `PROGRESS_CALLBACK_ERROR` and carries the report fields, so callers can
-///   still tell what was written to disk before deciding how to clean up.
-///
-/// In both cases the original JS exception is preserved as the `cause`
-/// property of the rejection, retaining its class and stack. Its text is never
-/// stringified into the message: the stack embeds an absolute host path (which
-/// #453 redacts everywhere else in release builds), and the throw content is
-/// attacker-influenced whenever the callback echoes archive entry data, which
-/// would let it spoof the machine-readable fields.
-impl From<ProgressCallbackError> for Error {
-    fn from(err: ProgressCallbackError) -> Self {
-        match err {
-            ProgressCallbackError::Core { source, callback } => {
-                let mut converted = convert_error(source);
-                if let Some(cb) = callback {
-                    // Fixed marker only: the throw's own text carries a host
-                    // path in its stack and is attacker-influenced when the
-                    // callback echoes archive entry data, so it must not reach
-                    // the parseable message. `cause` carries it losslessly.
-                    converted
-                        .reason
-                        .push_str(" | progressCallbackError: see cause");
-                    converted.set_cause(cb);
-                }
-                converted
-            }
-            ProgressCallbackError::ExtractionCallback { source, report } => {
-                callback_throw_over_success(
-                    "extraction",
-                    format_args!(
-                        "filesExtracted={}, bytesWritten={}",
-                        report.files_extracted, report.bytes_written
-                    ),
-                    source,
-                )
-            }
-            ProgressCallbackError::CreationCallback { source, report } => {
-                callback_throw_over_success(
-                    "creation",
-                    format_args!(
-                        "filesAdded={}, bytesWritten={}",
-                        report.files_added, report.bytes_written
-                    ),
-                    source,
-                )
-            }
-        }
-    }
-}
-
-/// Builds the rejection for a progress callback that threw over an otherwise
-/// successful operation: a fixed `PROGRESS_CALLBACK_ERROR` prefix, the report
-/// fields describing what was written, and the JS throw attached as `cause`.
-///
-/// `fields` must be built solely from report counters — the throw's own text
-/// and stack never enter the message (see the [`From`] impl above).
-fn callback_throw_over_success(
-    operation: &str,
-    fields: std::fmt::Arguments<'_>,
-    source: Error,
-) -> Error {
-    use std::fmt::Write;
-
-    let mut reason = String::with_capacity(128);
-    // Writing to a String never fails
-    let _ = write!(
-        &mut reason,
-        "PROGRESS_CALLBACK_ERROR: progress callback threw after successful {operation} | {fields}"
-    );
-    let mut converted = Error::new(Status::GenericFailure, reason);
-    converted.set_cause(source);
-    converted
+            .map_err(Failure::Callback)
+        },
+        |report| Ok(ExtractionReport::from(report)),
+    )
 }
 
 /// Runs `extract_archive_with_options_and_progress` routing to the JS callback
@@ -1372,475 +1230,146 @@ impl exarch_core::ProgressCallback for NodeProgressAdapter {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::uninlined_format_args,
-    clippy::manual_string_new
-)]
 mod tests {
+    use exarch_core::ArchiveError as CoreError;
+
     use super::*;
 
-    // CR-004: Path validation tests
-    #[tokio::test]
-    async fn test_extract_archive_rejects_null_byte_in_archive_path() {
-        let result = extract_archive(
-            "/tmp/test\0malicious.tar".to_string(),
-            "/tmp/output".to_string(),
-            None,
-            None,
-        )
-        .await;
-
-        assert!(result.is_err(), "should reject null bytes in archive path");
-        assert!(
-            result.unwrap_err().to_string().contains("null bytes"),
-            "error message should mention null bytes"
-        );
+    fn long_path() -> String {
+        "x".repeat(5000)
     }
 
-    #[tokio::test]
-    async fn test_extract_archive_rejects_null_byte_in_output_dir() {
-        let result = extract_archive(
-            "/tmp/test.tar".to_string(),
-            "/tmp/output\0malicious".to_string(),
-            None,
-            None,
-        )
-        .await;
-
-        assert!(result.is_err(), "should reject null bytes in output path");
-        assert!(
-            result.unwrap_err().to_string().contains("null bytes"),
-            "error message should mention null bytes"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_extract_archive_rejects_excessively_long_archive_path() {
-        let long_path = "x".repeat(5000);
-        let result = extract_archive(long_path, "/tmp/output".to_string(), None, None).await;
-
-        assert!(result.is_err(), "should reject excessively long paths");
-        assert!(
-            result.unwrap_err().to_string().contains("maximum length"),
-            "error message should mention length limit"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_extract_archive_rejects_excessively_long_output_dir() {
-        let long_path = "x".repeat(5000);
-        let result = extract_archive("/tmp/test.tar".to_string(), long_path, None, None).await;
-
-        assert!(result.is_err(), "should reject excessively long paths");
-        assert!(
-            result.unwrap_err().to_string().contains("maximum length"),
-            "error message should mention length limit"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_extract_archive_accepts_empty_paths() {
-        // Empty paths should be accepted at boundary validation
-        // Core library will handle actual path validation
-        let result = extract_archive("".to_string(), "".to_string(), None, None).await;
-
-        // If it fails, ensure it's not a boundary path validation error
-        // (empty paths pass boundary validation; core handles semantic
-        // validation)
-        if let Err(e) = result {
-            let err_msg = e.to_string();
-            assert!(
-                !err_msg.contains("null bytes") && !err_msg.contains("maximum length"),
-                "should not fail on boundary path validation, got: {}",
-                err_msg
-            );
+    /// Asserts `result` is the core `SecurityViolation` the boundary check
+    /// raises, with `needle` in its message.
+    fn assert_boundary_violation<T: std::fmt::Debug>(result: CoreResult<T>, needle: &str) {
+        match result {
+            Err(Failure::Core(err @ CoreError::SecurityViolation { .. })) => {
+                assert!(err.to_string().contains(needle), "got: {err}");
+            }
+            other => panic!("expected a boundary SecurityViolation, got {other:?}"),
         }
-        // If it succeeds, boundary validation passed (which is what we're
-        // testing)
     }
 
-    #[test]
-    fn test_extract_archive_sync_rejects_null_byte_in_archive_path() {
-        let result = extract_archive_sync(
-            "/tmp/test\0malicious.tar".to_string(),
-            "/tmp/output".to_string(),
-            None,
-            None,
-        );
-
-        assert!(result.is_err(), "should reject null bytes in archive path");
-        assert!(
-            result.unwrap_err().to_string().contains("null bytes"),
-            "error message should mention null bytes"
-        );
-    }
-
-    #[test]
-    fn test_extract_archive_sync_rejects_null_byte_in_output_dir() {
-        let result = extract_archive_sync(
-            "/tmp/test.tar".to_string(),
-            "/tmp/output\0malicious".to_string(),
-            None,
-            None,
-        );
-
-        assert!(result.is_err(), "should reject null bytes in output path");
-        assert!(
-            result.unwrap_err().to_string().contains("null bytes"),
-            "error message should mention null bytes"
-        );
-    }
-
-    #[test]
-    fn test_extract_archive_sync_rejects_excessively_long_archive_path() {
-        let long_path = "x".repeat(5000);
-        let result = extract_archive_sync(long_path, "/tmp/output".to_string(), None, None);
-
-        assert!(result.is_err(), "should reject excessively long paths");
-        assert!(
-            result.unwrap_err().to_string().contains("maximum length"),
-            "error message should mention length limit"
-        );
-    }
-
-    #[test]
-    fn test_extract_archive_sync_rejects_excessively_long_output_dir() {
-        let long_path = "x".repeat(5000);
-        let result = extract_archive_sync("/tmp/test.tar".to_string(), long_path, None, None);
-
-        assert!(result.is_err(), "should reject excessively long paths");
-        assert!(
-            result.unwrap_err().to_string().contains("maximum length"),
-            "error message should mention length limit"
-        );
-    }
-
-    #[test]
-    fn test_extract_archive_sync_accepts_valid_paths() {
-        // Test that valid paths pass boundary validation
-        // The actual extraction may succeed (empty archive) or fail (file not
-        // found) but should NOT fail due to path validation
-        let result = extract_archive_sync(
-            "/tmp/valid_test_path.tar".to_string(),
-            "/tmp/valid_output_path".to_string(),
-            None,
-            None,
-        );
-
-        // If it fails, ensure it's not a path validation error
-        if let Err(e) = result {
-            let err_msg = e.to_string();
+    /// Asserts `result` did not fail at the boundary: empty and valid paths
+    /// pass boundary validation, and core handles the rest.
+    fn assert_not_boundary_error<T>(result: CoreResult<T>) {
+        if let Err(err) = result {
+            let msg = err.to_string();
             assert!(
-                !err_msg.contains("null bytes") && !err_msg.contains("maximum length"),
-                "should not fail on path validation, got: {}",
-                err_msg
-            );
-        }
-        // If it succeeds, path validation passed (which is what we're testing)
-    }
-
-    #[test]
-    fn test_extract_archive_sync_accepts_relative_paths() {
-        // Test that valid relative paths pass boundary validation
-        let result = extract_archive_sync(
-            "relative_test.tar".to_string(),
-            "relative_output".to_string(),
-            None,
-            None,
-        );
-
-        // If it fails, ensure it's not a path validation error
-        if let Err(e) = result {
-            let err_msg = e.to_string();
-            assert!(
-                !err_msg.contains("null bytes") && !err_msg.contains("maximum length"),
-                "should not fail on path validation for relative paths, got: {}",
-                err_msg
-            );
-        }
-        // If it succeeds, path validation passed (which is what we're testing)
-    }
-
-    #[test]
-    fn test_extract_archive_sync_with_custom_config() {
-        let mut config = SecurityConfig::new();
-        config.set_max_file_size(1_000_000).unwrap();
-
-        // Test that valid paths pass boundary validation with custom config
-        let result = extract_archive_sync(
-            "custom_test.tar".to_string(),
-            "custom_output".to_string(),
-            Some(&config),
-            None,
-        );
-
-        // If it fails, ensure it's not a path validation error
-        if let Err(e) = result {
-            let err_msg = e.to_string();
-            assert!(
-                !err_msg.contains("null bytes") && !err_msg.contains("maximum length"),
-                "should not fail on path validation, got: {}",
-                err_msg
-            );
-        }
-        // If it succeeds, path validation passed (which is what we're testing)
-    }
-
-    // CR-004: create_archive path validation tests
-    #[tokio::test]
-    async fn test_create_archive_rejects_null_byte_in_output_path() {
-        let result = create_archive(
-            "/tmp/output\0malicious.tar".to_string(),
-            vec!["source/".to_string()],
-            None,
-        )
-        .await;
-
-        assert!(result.is_err(), "should reject null bytes in output path");
-        assert!(
-            result.unwrap_err().to_string().contains("null bytes"),
-            "error message should mention null bytes"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_create_archive_rejects_null_byte_in_source_path() {
-        let result = create_archive(
-            "/tmp/output.tar".to_string(),
-            vec!["source\0malicious/".to_string()],
-            None,
-        )
-        .await;
-
-        assert!(result.is_err(), "should reject null bytes in source path");
-        assert!(
-            result.unwrap_err().to_string().contains("null bytes"),
-            "error message should mention null bytes"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_create_archive_rejects_excessively_long_output_path() {
-        let long_path = "x".repeat(5000);
-        let result = create_archive(long_path, vec!["source/".to_string()], None).await;
-
-        assert!(result.is_err(), "should reject excessively long paths");
-        assert!(
-            result.unwrap_err().to_string().contains("maximum length"),
-            "error message should mention length limit"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_create_archive_rejects_excessively_long_source_path() {
-        let long_path = "x".repeat(5000);
-        let result = create_archive("/tmp/output.tar".to_string(), vec![long_path], None).await;
-
-        assert!(result.is_err(), "should reject excessively long paths");
-        assert!(
-            result.unwrap_err().to_string().contains("maximum length"),
-            "error message should mention length limit"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_create_archive_accepts_empty_sources_array() {
-        // Empty sources array should pass boundary validation
-        // Core library will handle actual validation
-        let result = create_archive("/tmp/output.tar".to_string(), vec![], None).await;
-
-        // If it fails, ensure it's not a boundary path validation error
-        if let Err(e) = result {
-            let err_msg = e.to_string();
-            assert!(
-                !err_msg.contains("null bytes") && !err_msg.contains("maximum length"),
-                "should not fail on boundary path validation, got: {}",
-                err_msg
+                !msg.contains("null bytes") && !msg.contains("maximum length"),
+                "should not fail on boundary path validation, got: {msg}"
             );
         }
     }
 
+    fn security() -> exarch_core::SecurityConfig {
+        exarch_core::SecurityConfig::default()
+    }
+
+    fn extraction() -> exarch_core::ExtractionOptions {
+        exarch_core::ExtractionOptions::default()
+    }
+
+    fn creation() -> exarch_core::creation::CreationConfig {
+        exarch_core::creation::CreationConfig::default()
+    }
+
     #[test]
-    fn test_create_archive_sync_rejects_null_byte_in_output_path() {
-        let result = create_archive_sync(
-            "/tmp/output\0malicious.tar".to_string(),
-            vec!["source/".to_string()],
+    fn test_extract_rejects_null_byte_in_archive_path() {
+        let result = extract_core("/tmp/test\0x.tar", "/tmp/out", &security(), &extraction());
+        assert_boundary_violation(result, "null bytes");
+    }
+
+    #[test]
+    fn test_extract_rejects_null_byte_in_output_dir() {
+        let result = extract_core("/tmp/test.tar", "/tmp/out\0x", &security(), &extraction());
+        assert_boundary_violation(result, "null bytes");
+    }
+
+    #[test]
+    fn test_extract_rejects_excessively_long_paths() {
+        let long = long_path();
+        let archive = extract_core(&long, "/tmp/out", &security(), &extraction());
+        assert_boundary_violation(archive, "maximum length");
+        let output = extract_core("/tmp/test.tar", &long, &security(), &extraction());
+        assert_boundary_violation(output, "maximum length");
+    }
+
+    #[test]
+    fn test_extract_accepts_empty_and_relative_paths() {
+        assert_not_boundary_error(extract_core("", "", &security(), &extraction()));
+        assert_not_boundary_error(extract_core(
+            "relative_test.tar",
+            "relative_output",
+            &security(),
+            &extraction(),
+        ));
+    }
+
+    #[test]
+    fn test_create_rejects_null_byte_in_output_and_sources() {
+        let sources = vec!["source/".to_string()];
+        assert_boundary_violation(
+            create_core("/tmp/out\0x.tar", &sources, &creation()),
+            "null bytes",
+        );
+        let bad_sources = vec!["ok/".to_string(), "src\0x".to_string()];
+        assert_boundary_violation(
+            create_core("/tmp/out.tar", &bad_sources, &creation()),
+            "null bytes",
+        );
+    }
+
+    #[test]
+    fn test_create_rejects_excessively_long_paths() {
+        let long = long_path();
+        assert_boundary_violation(
+            create_core(&long, &["source/".to_string()], &creation()),
+            "maximum length",
+        );
+        assert_boundary_violation(
+            create_core("/tmp/out.tar", &[long], &creation()),
+            "maximum length",
+        );
+    }
+
+    #[test]
+    fn test_create_accepts_empty_sources() {
+        assert_not_boundary_error(create_core(
+            "/tmp/exarch-empty-sources.tar",
+            &[],
+            &creation(),
+        ));
+    }
+
+    #[test]
+    fn test_create_with_progress_rejects_null_byte() {
+        let result = create_with_progress_core(
+            "/tmp/out\0x.tar",
+            &[],
+            &creation(),
             None,
+            ProgressDispatch::Deferred,
         );
-
-        assert!(result.is_err(), "should reject null bytes in output path");
-        assert!(
-            result.unwrap_err().to_string().contains("null bytes"),
-            "error message should mention null bytes"
-        );
+        assert_boundary_violation(result, "null bytes");
     }
 
     #[test]
-    fn test_create_archive_sync_rejects_null_byte_in_source_path() {
-        let result = create_archive_sync(
-            "/tmp/output.tar".to_string(),
-            vec!["source\0malicious/".to_string()],
-            None,
-        );
-
-        assert!(result.is_err(), "should reject null bytes in source path");
-        assert!(
-            result.unwrap_err().to_string().contains("null bytes"),
-            "error message should mention null bytes"
-        );
+    fn test_list_rejects_invalid_archive_path() {
+        assert_boundary_violation(list_core("/tmp/test\0x.tar", &security()), "null bytes");
+        assert_boundary_violation(list_core(&long_path(), &security()), "maximum length");
     }
 
     #[test]
-    fn test_create_archive_sync_rejects_excessively_long_output_path() {
-        let long_path = "x".repeat(5000);
-        let result = create_archive_sync(long_path, vec!["source/".to_string()], None);
-
-        assert!(result.is_err(), "should reject excessively long paths");
-        assert!(
-            result.unwrap_err().to_string().contains("maximum length"),
-            "error message should mention length limit"
+    fn test_verify_rejects_invalid_archive_path() {
+        let options = exarch_core::VerificationOptions::default();
+        assert_boundary_violation(
+            verify_core("/tmp/test\0x.tar", &security(), options),
+            "null bytes",
         );
-    }
-
-    #[test]
-    fn test_create_archive_sync_rejects_excessively_long_source_path() {
-        let long_path = "x".repeat(5000);
-        let result = create_archive_sync("/tmp/output.tar".to_string(), vec![long_path], None);
-
-        assert!(result.is_err(), "should reject excessively long paths");
-        assert!(
-            result.unwrap_err().to_string().contains("maximum length"),
-            "error message should mention length limit"
-        );
-    }
-
-    #[test]
-    fn test_create_archive_sync_accepts_empty_sources_array() {
-        // Empty sources array should pass boundary validation
-        let result = create_archive_sync("/tmp/output.tar".to_string(), vec![], None);
-
-        // If it fails, ensure it's not a boundary path validation error
-        if let Err(e) = result {
-            let err_msg = e.to_string();
-            assert!(
-                !err_msg.contains("null bytes") && !err_msg.contains("maximum length"),
-                "should not fail on boundary path validation, got: {}",
-                err_msg
-            );
-        }
-    }
-
-    // CR-004: list_archive path validation tests
-    #[tokio::test]
-    async fn test_list_archive_rejects_null_byte_in_archive_path() {
-        let result = list_archive("/tmp/test\0malicious.tar".to_string(), None).await;
-
-        assert!(result.is_err(), "should reject null bytes in archive path");
-        assert!(
-            result.unwrap_err().to_string().contains("null bytes"),
-            "error message should mention null bytes"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_list_archive_rejects_excessively_long_archive_path() {
-        let long_path = "x".repeat(5000);
-        let result = list_archive(long_path, None).await;
-
-        assert!(result.is_err(), "should reject excessively long paths");
-        assert!(
-            result.unwrap_err().to_string().contains("maximum length"),
-            "error message should mention length limit"
-        );
-    }
-
-    #[test]
-    fn test_list_archive_sync_rejects_null_byte_in_archive_path() {
-        let result = list_archive_sync("/tmp/test\0malicious.tar".to_string(), None);
-
-        assert!(result.is_err(), "should reject null bytes in archive path");
-        assert!(
-            result.unwrap_err().to_string().contains("null bytes"),
-            "error message should mention null bytes"
-        );
-    }
-
-    #[test]
-    fn test_list_archive_sync_rejects_excessively_long_archive_path() {
-        let long_path = "x".repeat(5000);
-        let result = list_archive_sync(long_path, None);
-
-        assert!(result.is_err(), "should reject excessively long paths");
-        assert!(
-            result.unwrap_err().to_string().contains("maximum length"),
-            "error message should mention length limit"
-        );
-    }
-
-    // CR-004: verify_archive path validation tests
-    #[tokio::test]
-    async fn test_verify_archive_rejects_null_byte_in_archive_path() {
-        let result = verify_archive("/tmp/test\0malicious.tar".to_string(), None, None).await;
-
-        assert!(result.is_err(), "should reject null bytes in archive path");
-        assert!(
-            result.unwrap_err().to_string().contains("null bytes"),
-            "error message should mention null bytes"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_verify_archive_rejects_excessively_long_archive_path() {
-        let long_path = "x".repeat(5000);
-        let result = verify_archive(long_path, None, None).await;
-
-        assert!(result.is_err(), "should reject excessively long paths");
-        assert!(
-            result.unwrap_err().to_string().contains("maximum length"),
-            "error message should mention length limit"
-        );
-    }
-
-    #[test]
-    fn test_verify_archive_sync_rejects_null_byte_in_archive_path() {
-        let result = verify_archive_sync("/tmp/test\0malicious.tar".to_string(), None, None);
-
-        assert!(result.is_err(), "should reject null bytes in archive path");
-        assert!(
-            result.unwrap_err().to_string().contains("null bytes"),
-            "error message should mention null bytes"
-        );
-    }
-
-    #[test]
-    fn test_verify_archive_sync_rejects_excessively_long_archive_path() {
-        let long_path = "x".repeat(5000);
-        let result = verify_archive_sync(long_path, None, None);
-
-        assert!(result.is_err(), "should reject excessively long paths");
-        assert!(
-            result.unwrap_err().to_string().contains("maximum length"),
-            "error message should mention length limit"
-        );
-    }
-
-    /// Regression test for #395: a panic inside the code guarded by
-    /// `catch_panic_as_js_err` (the exact helper
-    /// `extract_archive_with_progress` calls in production) must be
-    /// converted into a catchable `Error`, not left to unwind/abort.
-    #[test]
-    fn catch_panic_as_js_err_converts_panic_to_catchable_error() {
-        let result: Result<()> = catch_panic_as_js_err("test operation", || {
-            panic!("synthetic panic for #395 regression test")
-        });
-
-        let err = result.expect_err("panic must be converted into a catchable Error, not abort");
-        assert!(
-            err.to_string()
-                .contains("Internal panic during test operation"),
-            "unexpected error message: {err}"
+        assert_boundary_violation(
+            verify_core(&long_path(), &security(), options),
+            "maximum length",
         );
     }
 }

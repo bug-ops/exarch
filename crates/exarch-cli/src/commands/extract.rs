@@ -49,7 +49,6 @@ fn run_extraction(
     config: &SecurityConfig,
     options: &ExtractionOptions,
     progress: &mut dyn ProgressCallback,
-    allow_symlinks: bool,
     staging: Staging,
 ) -> Result<ExtractionReport> {
     let result =
@@ -58,7 +57,7 @@ fn run_extraction(
                 Staging::Direct => err,
                 Staging::Discarded => err.rolled_back(),
             });
-    add_archive_context(result, archive, allow_symlinks)
+    add_archive_context(result, archive)
 }
 
 /// Everything [`run_atomic_force_extraction`] needs, resolved and pinned by
@@ -111,7 +110,6 @@ fn run_atomic_force_extraction(
     config: &SecurityConfig,
     options: &ExtractionOptions,
     progress: &mut dyn ProgressCallback,
-    allow_symlinks: bool,
 ) -> Result<ExtractionReport> {
     let AtomicForceTarget {
         pin,
@@ -167,7 +165,6 @@ fn run_atomic_force_extraction(
         config,
         options,
         progress,
-        allow_symlinks,
         Staging::Discarded,
     )
     .with_context(|| temp_ref.disclose("extraction interrupted"))?;
@@ -760,7 +757,7 @@ fn list_for_extract(archive: &Path, config: &SecurityConfig) -> Result<ArchiveMa
             err,
             ArchiveError::ZipInconsistency(_) | ArchiveError::SecurityViolation { .. }
         ) {
-            return convert_extraction_error(err, archive, false);
+            return convert_extraction_error(err, archive);
         }
         anyhow::Error::from(err).context(format!("failed to list archive: {}", archive.display()))
     })
@@ -873,14 +870,7 @@ pub fn execute(
     };
 
     let report = if let Some(target) = atomic_force_target {
-        run_atomic_force_extraction(
-            &args.archive,
-            target,
-            &config,
-            &options,
-            progress.as_mut(),
-            args.links.allow_symlinks,
-        )?
+        run_atomic_force_extraction(&args.archive, target, &config, &options, progress.as_mut())?
     } else {
         run_extraction(
             &args.archive,
@@ -888,7 +878,6 @@ pub fn execute(
             &config,
             &options,
             progress.as_mut(),
-            args.links.allow_symlinks,
             Staging::Direct,
         )?
     };

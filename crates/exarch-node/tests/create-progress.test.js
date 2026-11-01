@@ -71,14 +71,11 @@ describe('createArchiveWithProgress', () => {
           throw new Error('boom from progress callback');
         }),
       (err) => {
-        assert.ok(
-          err.message.startsWith('PROGRESS_CALLBACK_ERROR:'),
-          `expected PROGRESS_CALLBACK_ERROR prefix, got: ${err.message}`
-        );
-        assert.match(err.message, /filesAdded=2/);
-        assert.match(err.message, /bytesWritten=\d+/);
-        // The throw's own text and stack must stay out of the parseable
-        // message — `cause` is the only channel for the callback's detail.
+        assert.strictEqual(err.code, 'PROGRESS_CALLBACK_ERROR');
+        assert.strictEqual(err.filesAdded, 2);
+        assert.strictEqual(typeof err.bytesWritten, 'number');
+        // The throw's own text and stack must stay out of the message —
+        // `cause` is the only channel for the callback's detail.
         assert.ok(!err.message.includes('boom from progress callback'));
         assert.strictEqual(err.cause.message, 'boom from progress callback');
         return true;
@@ -105,11 +102,7 @@ describe('createArchiveWithProgress', () => {
           throw new Error('boom from progress callback');
         }),
       (err) => {
-        assert.ok(
-          err.message.startsWith('IO_ERROR:'),
-          `core error code must stay primary, got: ${err.message}`
-        );
-        assert.ok(err.message.endsWith(' | progressCallbackError: see cause'));
+        assert.strictEqual(err.code, 'IO_ERROR');
         assert.ok(!err.message.includes('boom from progress callback'));
         assert.strictEqual(err.cause.message, 'boom from progress callback');
         return true;
@@ -207,11 +200,8 @@ describe('createArchiveWithProgress', () => {
           throw 'oops';
         }),
       (err) => {
-        assert.ok(
-          err.message.startsWith('PROGRESS_CALLBACK_ERROR:'),
-          `expected PROGRESS_CALLBACK_ERROR prefix, got: ${err.message}`
-        );
-        assert.match(err.message, /filesAdded=2/);
+        assert.strictEqual(err.code, 'PROGRESS_CALLBACK_ERROR');
+        assert.strictEqual(err.filesAdded, 2);
         assert.strictEqual(err.cause.message, 'progress callback threw a non-object value: oops');
         assert.strictEqual(err.cause.cause, 'oops');
         return true;

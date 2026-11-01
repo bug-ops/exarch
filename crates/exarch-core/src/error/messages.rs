@@ -1,203 +1,349 @@
 //! FFI error message formatting.
 //!
-//! Provides consistent error messages across Python and Node.js bindings
-//! while allowing platform-specific customization.
+//! The single source of binding-facing error data: a stable [`ErrorCode`], a
+//! typed [`FfiKind`] with the payload each code carries, a redacted
+//! description and the fate of partial output. Python, Node.js and the CLI
+//! consume [`FfiErrorMessage`] instead of re-matching [`ArchiveError`].
 
 use super::redaction::sanitize_io_error_for_error;
 use super::types::ArchiveError;
+use super::types::PartialWrites;
 use super::types::PolicySetting;
+use crate::ExtractionReport;
+use crate::closed_enum::closed_enum;
 
-/// Error message for FFI consumption.
+closed_enum! {
+    /// Stable machine-readable identifier of an [`ArchiveError`] variant.
+    ///
+    /// The spellings are part of every binding's observable contract; the
+    /// bindings take them from [`ErrorCode::as_str`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::ErrorCode;
+    ///
+    /// assert_eq!(ErrorCode::ZipBomb.as_str(), "ZIP_BOMB");
+    /// assert!(ErrorCode::ALL.contains(&ErrorCode::PathTraversal));
+    /// ```
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    #[non_exhaustive]
+    pub enum ErrorCode {
+        /// [`ArchiveError::PathTraversal`].
+        PathTraversal => "PATH_TRAVERSAL",
+        /// [`ArchiveError::SymlinkEscape`].
+        SymlinkEscape => "SYMLINK_ESCAPE",
+        /// [`ArchiveError::HardlinkEscape`].
+        HardlinkEscape => "HARDLINK_ESCAPE",
+        /// [`ArchiveError::ZipBomb`].
+        ZipBomb => "ZIP_BOMB",
+        /// [`ArchiveError::ZipInconsistency`].
+        ZipInconsistency => "ZIP_INCONSISTENCY",
+        /// [`ArchiveError::QuotaExceeded`].
+        QuotaExceeded => "QUOTA_EXCEEDED",
+        /// [`ArchiveError::SecurityViolation`].
+        SecurityViolation => "SECURITY_VIOLATION",
+        /// [`ArchiveError::InvalidArchive`].
+        InvalidArchive => "INVALID_ARCHIVE",
+        /// [`ArchiveError::Io`].
+        IoError => "IO_ERROR",
+        /// [`ArchiveError::InvalidPermissions`].
+        InvalidPermissions => "INVALID_PERMISSIONS",
+        /// [`ArchiveError::SourceNotFound`].
+        SourceNotFound => "SOURCE_NOT_FOUND",
+        /// [`ArchiveError::SourceNotAccessible`].
+        SourceNotAccessible => "SOURCE_NOT_ACCESSIBLE",
+        /// [`ArchiveError::OutputExists`].
+        OutputExists => "OUTPUT_EXISTS",
+        /// [`ArchiveError::InvalidCompressionLevel`].
+        InvalidCompressionLevel => "INVALID_COMPRESSION_LEVEL",
+        /// [`ArchiveError::UnknownFormat`].
+        UnknownFormat => "UNKNOWN_FORMAT",
+        /// [`ArchiveError::InvalidConfiguration`].
+        InvalidConfiguration => "INVALID_CONFIGURATION",
+    }
+}
+
+/// The error class of an [`FfiErrorMessage`], with the payload that class
+/// carries.
 ///
-/// Contains structured error information that can be converted to
-/// platform-specific error types (Python exceptions, Node.js Error objects).
+/// One variant per [`ErrorCode`]; [`FfiKind::code`] is the bijection.
+/// Payload lives inside the variant so a binding cannot read a field that
+/// does not exist for the class.
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::ArchiveError;
+/// use exarch_core::ErrorCode;
+/// use exarch_core::FfiKind;
+/// use std::assert_matches;
+///
+/// let msg = ArchiveError::violation("nope".into()).into_ffi_message();
+/// assert_matches!(msg.kind, FfiKind::SecurityViolation { relaxable_by: None });
+/// assert_eq!(msg.kind.code(), ErrorCode::SecurityViolation);
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum FfiKind {
+    /// Entry path escapes the destination.
+    PathTraversal,
+    /// Symlink target escapes the destination.
+    SymlinkEscape,
+    /// Hardlink target escapes the destination.
+    HardlinkEscape,
+    /// Compression ratio limit exceeded.
+    ZipBomb,
+    /// ZIP structure is ambiguous or self-contradictory.
+    ZipInconsistency,
+    /// A quota was exceeded.
+    QuotaExceeded,
+    /// Denied by security policy.
+    SecurityViolation {
+        /// The `SecurityConfig` setting whose current value refused the
+        /// entry; see [`ArchiveError::relaxable_by`].
+        relaxable_by: Option<PolicySetting>,
+    },
+    /// Archive is corrupted or malformed.
+    InvalidArchive,
+    /// I/O failure of the given kind.
+    Io(std::io::ErrorKind),
+    /// Invalid permission bits.
+    InvalidPermissions,
+    /// Creation source does not exist.
+    SourceNotFound,
+    /// Creation source cannot be read.
+    SourceNotAccessible,
+    /// Output file already exists.
+    OutputExists,
+    /// Compression level out of range.
+    InvalidCompressionLevel,
+    /// Archive format could not be determined.
+    UnknownFormat,
+    /// Configuration is invalid.
+    InvalidConfiguration,
+}
+
+impl FfiKind {
+    /// The stable [`ErrorCode`] of this class.
+    #[must_use]
+    pub const fn code(&self) -> ErrorCode {
+        match self {
+            Self::PathTraversal => ErrorCode::PathTraversal,
+            Self::SymlinkEscape => ErrorCode::SymlinkEscape,
+            Self::HardlinkEscape => ErrorCode::HardlinkEscape,
+            Self::ZipBomb => ErrorCode::ZipBomb,
+            Self::ZipInconsistency => ErrorCode::ZipInconsistency,
+            Self::QuotaExceeded => ErrorCode::QuotaExceeded,
+            Self::SecurityViolation { .. } => ErrorCode::SecurityViolation,
+            Self::InvalidArchive => ErrorCode::InvalidArchive,
+            Self::Io(_) => ErrorCode::IoError,
+            Self::InvalidPermissions => ErrorCode::InvalidPermissions,
+            Self::SourceNotFound => ErrorCode::SourceNotFound,
+            Self::SourceNotAccessible => ErrorCode::SourceNotAccessible,
+            Self::OutputExists => ErrorCode::OutputExists,
+            Self::InvalidCompressionLevel => ErrorCode::InvalidCompressionLevel,
+            Self::UnknownFormat => ErrorCode::UnknownFormat,
+            Self::InvalidConfiguration => ErrorCode::InvalidConfiguration,
+        }
+    }
+}
+
+/// What happened to the output of an extraction that stopped part-way.
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::PartialOutcome;
+/// use exarch_core::PartialWrites;
+///
+/// assert_eq!(
+///     PartialOutcome::RolledBack.writes(),
+///     PartialWrites::RolledBack
+/// );
+/// ```
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum PartialOutcome {
+    /// The written files remain in the destination; the report counts them.
+    Kept(ExtractionReport),
+    /// Atomic extraction discarded the written files; no counters are
+    /// meaningful.
+    RolledBack,
+}
+
+impl PartialOutcome {
+    /// The [`PartialWrites`] state matching this outcome.
+    #[must_use]
+    pub const fn writes(&self) -> PartialWrites {
+        match self {
+            Self::Kept(_) => PartialWrites::Kept,
+            Self::RolledBack => PartialWrites::RolledBack,
+        }
+    }
+}
+
+/// Error data for FFI consumption.
 ///
 /// `#[non_exhaustive]` and output-only: bindings read it, only
-/// [`ArchiveError::to_ffi_message`] builds it.
+/// [`ArchiveError::into_ffi_message`] builds it.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct FfiErrorMessage {
-    /// Error code (e.g., `PATH_TRAVERSAL`, `ZIP_BOMB`)
-    pub code: &'static str,
+    /// Error class and its class-specific payload.
+    pub kind: FfiKind,
 
-    /// Human-readable error description
+    /// Human-readable, redacted description.
     pub description: String,
 
-    /// Optional additional context
-    pub context: Option<String>,
-
-    /// The `SecurityConfig` setting whose current value refused the entry;
-    /// see [`ArchiveError::relaxable_by`].
-    pub relaxable_by: Option<PolicySetting>,
+    /// Set when the error came from a partially completed extraction.
+    pub partial: Option<PartialOutcome>,
 }
 
 impl FfiErrorMessage {
-    /// A message with no extra context and no relaxing setting.
-    const fn plain(code: &'static str, description: String) -> Self {
+    const fn new(kind: FfiKind, description: String) -> Self {
         Self {
-            code,
+            kind,
             description,
-            context: None,
-            relaxable_by: None,
+            partial: None,
         }
     }
 }
 
 impl ArchiveError {
-    /// Formats error for FFI consumption.
+    /// Converts the error into the data every binding consumes.
     ///
     /// Path and I/O-error text is redacted per the shared policy in
     /// [`super::redaction`] — see [`Self::redacted_path`] and
-    /// [`sanitize_io_error_for_error`] — so this always applies the same
-    /// policy `exarch-python` and `exarch-node` apply directly; there is no
-    /// separate `sanitize_paths` toggle to keep in sync with theirs.
+    /// [`sanitize_io_error_for_error`]. A [`Self::PartialExtraction`] yields
+    /// its source's message with [`FfiErrorMessage::partial`] set.
     ///
     /// # Examples
     ///
     /// ```
     /// use exarch_core::ArchiveError;
+    /// use exarch_core::ErrorCode;
     /// use std::path::PathBuf;
     ///
     /// let error = ArchiveError::PathTraversal {
     ///     path: PathBuf::from("../../etc/passwd"),
     /// };
     ///
-    /// let msg = error.to_ffi_message();
-    /// assert_eq!(msg.code, "PATH_TRAVERSAL");
+    /// let msg = error.into_ffi_message();
+    /// assert_eq!(msg.kind.code(), ErrorCode::PathTraversal);
     /// // Archive-relative, attacker-authored path: never redacted (#462).
     /// assert!(msg.description.contains("../../etc/passwd"));
     /// ```
     #[must_use]
-    pub fn to_ffi_message(&self) -> FfiErrorMessage {
+    pub fn into_ffi_message(self) -> FfiErrorMessage {
+        if let Self::PartialExtraction {
+            source,
+            report,
+            writes,
+        } = self
+        {
+            let mut msg = source.into_ffi_message();
+            msg.partial = Some(match writes {
+                PartialWrites::Kept => PartialOutcome::Kept(report),
+                PartialWrites::RolledBack => PartialOutcome::RolledBack,
+            });
+            return msg;
+        }
+        FfiErrorMessage::new(self.ffi_kind(), self.ffi_description())
+    }
+
+    /// The only variant-to-[`FfiKind`] table; [`Self::error_code`] derives
+    /// from it.
+    fn ffi_kind(&self) -> FfiKind {
+        match self {
+            Self::PathTraversal { .. } => FfiKind::PathTraversal,
+            Self::SymlinkEscape { .. } => FfiKind::SymlinkEscape,
+            Self::HardlinkEscape { .. } => FfiKind::HardlinkEscape,
+            Self::ZipBomb(_) => FfiKind::ZipBomb,
+            Self::ZipInconsistency(_) => FfiKind::ZipInconsistency,
+            Self::QuotaExceeded { .. } => FfiKind::QuotaExceeded,
+            Self::SecurityViolation { relaxable_by, .. } => FfiKind::SecurityViolation {
+                relaxable_by: *relaxable_by,
+            },
+            Self::InvalidArchive(_) => FfiKind::InvalidArchive,
+            Self::Io(io_err) => FfiKind::Io(io_err.kind()),
+            Self::InvalidPermissions { .. } => FfiKind::InvalidPermissions,
+            Self::SourceNotFound { .. } => FfiKind::SourceNotFound,
+            Self::SourceNotAccessible { .. } => FfiKind::SourceNotAccessible,
+            Self::OutputExists { .. } => FfiKind::OutputExists,
+            Self::InvalidCompressionLevel { .. } => FfiKind::InvalidCompressionLevel,
+            Self::UnknownFormat { .. } => FfiKind::UnknownFormat,
+            Self::InvalidConfiguration { .. } => FfiKind::InvalidConfiguration,
+            Self::PartialExtraction { source, .. } => source.ffi_kind(),
+        }
+    }
+
+    /// The redacted, binding-facing description.
+    fn ffi_description(&self) -> String {
         let path = self
             .redacted_path()
             .unwrap_or_else(|| "<unknown>".to_string());
         match self {
-            Self::PathTraversal { .. } => {
-                FfiErrorMessage::plain("PATH_TRAVERSAL", format!("path traversal detected: {path}"))
+            Self::PathTraversal { .. } => format!("path traversal detected: {path}"),
+            Self::SymlinkEscape { .. } => {
+                format!("symlink target outside extraction directory: {path}")
             }
-
-            Self::SymlinkEscape { .. } => FfiErrorMessage::plain(
-                "SYMLINK_ESCAPE",
-                format!("symlink target outside extraction directory: {path}"),
-            ),
-
-            Self::HardlinkEscape { .. } => FfiErrorMessage::plain(
-                "HARDLINK_ESCAPE",
-                format!("hardlink target outside extraction directory: {path}"),
-            ),
-
-            Self::ZipBomb(details) => FfiErrorMessage {
-                code: "ZIP_BOMB",
-                description: self.to_string(),
-                context: Some(format!(
-                    "{} compression ratio: {}",
-                    details.scope(),
-                    details.ratio()
-                )),
-                relaxable_by: None,
-            },
-
-            Self::ZipInconsistency(_) => {
-                FfiErrorMessage::plain("ZIP_INCONSISTENCY", self.to_string())
+            Self::HardlinkEscape { .. } => {
+                format!("hardlink target outside extraction directory: {path}")
             }
-
-            Self::QuotaExceeded { resource } => {
-                FfiErrorMessage::plain("QUOTA_EXCEEDED", resource.to_string())
+            Self::ZipBomb(_) | Self::ZipInconsistency(_) => self.to_string(),
+            Self::QuotaExceeded { resource } => resource.to_string(),
+            Self::SecurityViolation { reason, .. } => {
+                format!("operation denied by security policy: {reason}")
             }
-
-            Self::SecurityViolation {
-                reason,
-                relaxable_by,
-                ..
-            } => FfiErrorMessage {
-                code: "SECURITY_VIOLATION",
-                description: format!("operation denied by security policy: {reason}"),
-                context: None,
-                relaxable_by: *relaxable_by,
-            },
-
-            Self::InvalidArchive(reason) => {
-                FfiErrorMessage::plain("INVALID_ARCHIVE", format!("invalid archive: {reason}"))
+            Self::InvalidArchive(reason) => format!("invalid archive: {reason}"),
+            Self::Io(io_err) => sanitize_io_error_for_error(io_err),
+            Self::InvalidPermissions { mode, .. } => {
+                format!("invalid permissions for {path}: {mode:#o}")
             }
-
-            Self::Io(io_err) => FfiErrorMessage {
-                code: "IO_ERROR",
-                description: sanitize_io_error_for_error(io_err),
-                context: Some(io_err.kind().to_string()),
-                relaxable_by: None,
-            },
-
-            Self::InvalidPermissions { mode, .. } => FfiErrorMessage::plain(
-                "INVALID_PERMISSIONS",
-                format!("invalid permissions for {path}: {mode:#o}"),
-            ),
-
-            Self::SourceNotFound { .. } => {
-                FfiErrorMessage::plain("SOURCE_NOT_FOUND", format!("source path not found: {path}"))
+            Self::SourceNotFound { .. } => format!("source path not found: {path}"),
+            Self::SourceNotAccessible { .. } => {
+                format!("source path is not accessible: {path}")
             }
-
-            Self::SourceNotAccessible { .. } => FfiErrorMessage::plain(
-                "SOURCE_NOT_ACCESSIBLE",
-                format!("source path is not accessible: {path}"),
-            ),
-
-            Self::OutputExists { .. } => FfiErrorMessage::plain(
-                "OUTPUT_EXISTS",
-                format!("output file already exists: {path}"),
-            ),
-
-            Self::InvalidCompressionLevel { level } => FfiErrorMessage::plain(
-                "INVALID_COMPRESSION_LEVEL",
-                format!("invalid compression level {level}, must be 1-9"),
-            ),
-
-            Self::UnknownFormat { .. } => FfiErrorMessage::plain(
-                "UNKNOWN_FORMAT",
-                format!("cannot determine archive format from: {path}"),
-            ),
-
-            Self::InvalidConfiguration { reason } => FfiErrorMessage::plain(
-                "INVALID_CONFIGURATION",
-                format!("invalid configuration: {reason}"),
-            ),
-
-            Self::PartialExtraction { source, .. } => source.to_ffi_message(),
+            Self::OutputExists { .. } => format!("output file already exists: {path}"),
+            Self::InvalidCompressionLevel { level } => {
+                format!("invalid compression level {level}, must be 1-9")
+            }
+            Self::UnknownFormat { .. } => {
+                format!("cannot determine archive format from: {path}")
+            }
+            Self::InvalidConfiguration { reason } => format!("invalid configuration: {reason}"),
+            Self::PartialExtraction { source, .. } => source.ffi_description(),
         }
     }
 
-    /// Returns the error code as a static string.
+    /// Returns the stable [`ErrorCode`] of this error.
     ///
     /// Useful for matching on error types without full message formatting.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::ArchiveError;
+    /// use exarch_core::ErrorCode;
+    ///
+    /// let err = ArchiveError::violation("nope".into());
+    /// assert_eq!(err.error_code(), ErrorCode::SecurityViolation);
+    /// assert_eq!(err.error_code().as_str(), "SECURITY_VIOLATION");
+    /// ```
     #[must_use]
-    pub fn error_code(&self) -> &'static str {
-        match self {
-            Self::PathTraversal { .. } => "PATH_TRAVERSAL",
-            Self::SymlinkEscape { .. } => "SYMLINK_ESCAPE",
-            Self::HardlinkEscape { .. } => "HARDLINK_ESCAPE",
-            Self::ZipBomb(_) => "ZIP_BOMB",
-            Self::ZipInconsistency(_) => "ZIP_INCONSISTENCY",
-            Self::QuotaExceeded { .. } => "QUOTA_EXCEEDED",
-            Self::SecurityViolation { .. } => "SECURITY_VIOLATION",
-            Self::InvalidArchive(_) => "INVALID_ARCHIVE",
-            Self::Io(_) => "IO_ERROR",
-            Self::InvalidPermissions { .. } => "INVALID_PERMISSIONS",
-            Self::SourceNotFound { .. } => "SOURCE_NOT_FOUND",
-            Self::SourceNotAccessible { .. } => "SOURCE_NOT_ACCESSIBLE",
-            Self::OutputExists { .. } => "OUTPUT_EXISTS",
-            Self::InvalidCompressionLevel { .. } => "INVALID_COMPRESSION_LEVEL",
-            Self::UnknownFormat { .. } => "UNKNOWN_FORMAT",
-            Self::InvalidConfiguration { .. } => "INVALID_CONFIGURATION",
-            Self::PartialExtraction { source, .. } => source.error_code(),
-        }
+    pub fn error_code(&self) -> ErrorCode {
+        self.ffi_kind().code()
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::types::QuotaResource;
     use super::super::types::ZipBombDetails;
     use super::super::types::ZipBombScope;
     use super::*;
+    use std::assert_matches;
     use std::path::PathBuf;
 
     /// Regression test for #462: `PathTraversal` carries an
@@ -208,7 +354,7 @@ mod tests {
         let error = ArchiveError::PathTraversal {
             path: PathBuf::from("../../etc/passwd"),
         };
-        let msg = error.to_ffi_message();
+        let msg = error.into_ffi_message();
         assert!(msg.description.contains("../../etc/passwd"));
     }
 
@@ -222,7 +368,7 @@ mod tests {
         let error = ArchiveError::SourceNotFound {
             path: PathBuf::from("/srv/secret/app/x.txt"),
         };
-        let msg = error.to_ffi_message();
+        let msg = error.into_ffi_message();
         assert!(msg.description.contains("x.txt"));
         assert!(!msg.description.contains("/srv/secret"));
     }
@@ -236,7 +382,7 @@ mod tests {
             std::io::ErrorKind::PermissionDenied,
             "directory is not writable: /srv/secret/app/private-output",
         ));
-        let msg = error.to_ffi_message();
+        let msg = error.into_ffi_message();
         assert!(!msg.description.contains("/srv/secret"));
     }
 
@@ -247,31 +393,28 @@ mod tests {
                 ArchiveError::PathTraversal {
                     path: PathBuf::from("test"),
                 },
-                "PATH_TRAVERSAL",
+                ErrorCode::PathTraversal,
             ),
             (
                 ArchiveError::SymlinkEscape {
                     path: PathBuf::from("test"),
                 },
-                "SYMLINK_ESCAPE",
+                ErrorCode::SymlinkEscape,
             ),
             (
                 ArchiveError::ZipBomb(ZipBombDetails::new(ZipBombScope::Entry, 100, 10000)),
-                "ZIP_BOMB",
+                ErrorCode::ZipBomb,
             ),
         ];
 
         for (error, expected_code) in test_cases {
             assert_eq!(error.error_code(), expected_code);
-            assert_eq!(error.to_ffi_message().code, expected_code);
+            assert_eq!(error.into_ffi_message().kind.code(), expected_code);
         }
     }
 
-    #[test]
-    fn test_all_error_variants_have_codes() {
-        use super::super::types::QuotaResource;
-
-        let errors = vec![
+    fn one_error_per_variant() -> Vec<ArchiveError> {
+        vec![
             ArchiveError::PathTraversal {
                 path: PathBuf::from("test"),
             },
@@ -282,13 +425,13 @@ mod tests {
                 path: PathBuf::from("test"),
             },
             ArchiveError::ZipBomb(ZipBombDetails::new(ZipBombScope::Entry, 100, 10000)),
+            ArchiveError::ZipInconsistency(
+                super::super::zip_inconsistency::ZipInconsistency::OverlappingEntries,
+            ),
             ArchiveError::QuotaExceeded {
                 resource: QuotaResource::IntegerOverflow,
             },
             ArchiveError::violation("test".into()),
-            ArchiveError::UnknownFormat {
-                path: PathBuf::from("test.rar"),
-            },
             ArchiveError::InvalidArchive("test".into()),
             ArchiveError::Io(std::io::Error::other("test")),
             ArchiveError::InvalidPermissions {
@@ -311,15 +454,43 @@ mod tests {
             ArchiveError::InvalidConfiguration {
                 reason: "test".into(),
             },
-        ];
+        ]
+    }
 
-        for error in errors {
+    #[test]
+    fn test_all_error_variants_have_codes() {
+        for error in one_error_per_variant() {
             let code = error.error_code();
-            assert!(!code.is_empty(), "Error code should not be empty");
-
-            let msg = error.to_ffi_message();
-            assert_eq!(msg.code, code);
+            let msg = error.into_ffi_message();
+            assert_eq!(msg.kind.code(), code);
             assert!(!msg.description.is_empty());
+            assert!(msg.partial.is_none());
         }
+    }
+
+    #[test]
+    fn test_kind_code_covers_error_code_all_exactly_once() {
+        let mut seen: Vec<ErrorCode> = one_error_per_variant()
+            .into_iter()
+            .map(|e| e.into_ffi_message().kind.code())
+            .collect();
+        seen.sort_by_key(|c| c.as_str());
+        let mut expected = ErrorCode::ALL.to_vec();
+        expected.sort_by_key(|c| c.as_str());
+        assert_eq!(seen, expected);
+    }
+
+    #[test]
+    fn test_partial_extraction_sets_partial() {
+        let wrap = |writes| ArchiveError::PartialExtraction {
+            source: Box::new(ArchiveError::violation("x".into())),
+            report: ExtractionReport::default(),
+            writes,
+        };
+        let kept = wrap(PartialWrites::Kept).into_ffi_message();
+        assert_matches!(kept.partial, Some(PartialOutcome::Kept(_)));
+        assert_eq!(kept.kind.code(), ErrorCode::SecurityViolation);
+        let rolled = wrap(PartialWrites::RolledBack).into_ffi_message();
+        assert_matches!(rolled.partial, Some(PartialOutcome::RolledBack));
     }
 }

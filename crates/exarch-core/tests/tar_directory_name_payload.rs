@@ -9,6 +9,7 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use exarch_core::ArchiveError;
+use exarch_core::ErrorCode;
 use exarch_core::ManifestEntryKind;
 use exarch_core::SecurityConfig;
 use exarch_core::extract_archive;
@@ -77,7 +78,7 @@ fn smuggling_tar(typeflag: u8) -> Vec<u8> {
 }
 
 fn assert_invalid_archive(error: &ArchiveError) {
-    assert_eq!(error.error_code(), "INVALID_ARCHIVE", "{error}");
+    assert_eq!(error.error_code(), ErrorCode::InvalidArchive, "{error}");
     assert!(error.to_string().contains("a/b/"), "{error}");
 }
 

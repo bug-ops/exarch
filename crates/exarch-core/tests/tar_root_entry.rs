@@ -8,6 +8,7 @@ use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 
+use exarch_core::ErrorCode;
 use exarch_core::ExtractionOptions;
 use exarch_core::ManifestEntryKind;
 use exarch_core::SecurityConfig;
@@ -70,11 +71,19 @@ fn assert_rejected_everywhere(archive: &Path, config: &SecurityConfig, max_writt
     let out = TempDir::new().unwrap();
 
     let extract = extract_archive(archive, out.path(), config).unwrap_err();
-    assert_eq!(extract.error_code(), "SECURITY_VIOLATION", "{extract}");
+    assert_eq!(
+        extract.error_code(),
+        ErrorCode::SecurityViolation,
+        "{extract}"
+    );
     let list = list_archive(archive, config).unwrap_err();
-    assert_eq!(list.error_code(), "SECURITY_VIOLATION", "{list}");
+    assert_eq!(list.error_code(), ErrorCode::SecurityViolation, "{list}");
     let verify = verify_archive(archive, config).unwrap_err();
-    assert_eq!(verify.error_code(), "SECURITY_VIOLATION", "{verify}");
+    assert_eq!(
+        verify.error_code(),
+        ErrorCode::SecurityViolation,
+        "{verify}"
+    );
     assert!(std::fs::read_dir(out.path()).unwrap().count() <= max_written);
 }
 
@@ -162,7 +171,7 @@ fn root_file_is_rejected_when_an_extension_filter_would_skip_it() {
 
     let error = extract_archive(&archive, out.path(), &config).unwrap_err();
 
-    assert_eq!(error.error_code(), "SECURITY_VIOLATION", "{error}");
+    assert_eq!(error.error_code(), ErrorCode::SecurityViolation, "{error}");
 }
 
 #[test]
@@ -180,7 +189,7 @@ fn root_symlink_with_overwrite_is_rejected_and_leaves_the_destination_alone() {
     let error =
         extract_archive_with_options(&archive, out.path(), &link_config(), &options).unwrap_err();
 
-    assert_eq!(error.error_code(), "SECURITY_VIOLATION", "{error}");
+    assert_eq!(error.error_code(), ErrorCode::SecurityViolation, "{error}");
     assert_eq!(std::fs::read(out.path().join("keep")).unwrap(), b"k");
 }
 
@@ -222,9 +231,17 @@ fn trailing_slash_regular_entry_with_payload_is_refused_everywhere() {
     let listed = list_archive(&archive, &config).unwrap_err();
     let verified = verify_archive(&archive, &config).unwrap_err();
 
-    assert_eq!(extracted.error_code(), "INVALID_ARCHIVE", "{extracted}");
-    assert_eq!(listed.error_code(), "INVALID_ARCHIVE", "{listed}");
-    assert_eq!(verified.error_code(), "INVALID_ARCHIVE", "{verified}");
+    assert_eq!(
+        extracted.error_code(),
+        ErrorCode::InvalidArchive,
+        "{extracted}"
+    );
+    assert_eq!(listed.error_code(), ErrorCode::InvalidArchive, "{listed}");
+    assert_eq!(
+        verified.error_code(),
+        ErrorCode::InvalidArchive,
+        "{verified}"
+    );
     assert!(!out.path().join("sub/a.txt").exists());
 }
 

@@ -993,6 +993,11 @@ mod tests {
 
     #[test]
     fn test_pyi_literal_aliases_match_core_enums() {
+        use exarch_core::IntegrityStatus;
+        use exarch_core::PartialWrites;
+        use exarch_core::PolicySetting;
+        use exarch_core::UnverifiedReason;
+        use exarch_core::ZipConsistencyPolicy;
         use exarch_core::formats::detect::ArchiveType;
         use exarch_core::inspection::CheckStatus;
         use exarch_core::inspection::IssueCategory;
@@ -1015,6 +1020,23 @@ mod tests {
             literal_line("_CheckStatus", CheckStatus::ALL, CheckStatus::as_str),
             literal_line("_IssueSeverity", IssueSeverity::ALL, IssueSeverity::as_str),
             literal_line("_IssueCategory", IssueCategory::ALL, IssueCategory::as_str),
+            literal_line(
+                "_IntegrityStatus",
+                IntegrityStatus::ALL,
+                IntegrityStatus::as_str,
+            ),
+            literal_line(
+                "_UnverifiedReason",
+                UnverifiedReason::ALL,
+                UnverifiedReason::as_str,
+            ),
+            literal_line(
+                "_ZipConsistency",
+                ZipConsistencyPolicy::ALL,
+                ZipConsistencyPolicy::as_str,
+            ),
+            literal_line("_PartialWrites", PartialWrites::ALL, PartialWrites::as_str),
+            literal_line("_PolicySetting", PolicySetting::ALL, PolicySetting::as_str),
         ];
         for line in expected {
             assert!(

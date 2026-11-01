@@ -63,7 +63,7 @@ describe('ZIP structure policy', () => {
 
   it('extract rejects a cloaked zip before writing anything', async () => {
     const out = path.join(tempDir, 'out');
-    await assert.rejects(extractArchive(archive, out), /ZIP_INCONSISTENCY/);
+    await assert.rejects(extractArchive(archive, out), { code: 'ZIP_INCONSISTENCY' });
     assert.strictEqual(fs.existsSync(out), false);
   });
 
@@ -76,7 +76,7 @@ describe('ZIP structure policy', () => {
   });
 
   it('list rejects under enforce and succeeds under ignore', () => {
-    assert.throws(() => listArchiveSync(archive), /ZIP_INCONSISTENCY/);
+    assert.throws(() => listArchiveSync(archive), { code: 'ZIP_INCONSISTENCY' });
     const config = new SecurityConfig();
     config.setZipConsistency('ignore');
     assert.strictEqual(listArchiveSync(archive, config).totalEntries, 1);

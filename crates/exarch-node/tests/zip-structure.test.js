@@ -151,7 +151,7 @@ describe('ZIP structure through the Node API', () => {
     assert.strictEqual(report.totalEntries, 2);
     assert.ok(categories(report).has('Duplicate Entry'));
     assert.strictEqual(verifyArchiveSync(file, ignoring()).status, 'PASS');
-    assert.throws(() => listArchiveSync(file), /ZIP_INCONSISTENCY/);
+    assert.throws(() => listArchiveSync(file), { code: 'ZIP_INCONSISTENCY' });
   });
 
   it('reports central directory records past the end count and hidden headers', () => {
@@ -191,7 +191,7 @@ describe('ZIP structure through the Node API', () => {
       buildZip([{ name: 'a.txt', data: Buffer.from('hello'), localExtra: badTimestamp }])
     );
     const out = path.join(tempDir, 'out');
-    assert.throws(() => extractArchiveSync(file, out), /ZIP_INCONSISTENCY/);
+    assert.throws(() => extractArchiveSync(file, out), { code: 'ZIP_INCONSISTENCY' });
     assert.strictEqual(fs.existsSync(out), false);
     extractArchiveSync(file, out, ignoring());
     assert.strictEqual(fs.readFileSync(path.join(out, 'a.txt'), 'utf8'), 'hello');

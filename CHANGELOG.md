@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- 7z: bump `sevenz-rust2` to 0.24.2 (minimum version now 0.24.2); solid blocks with a stream-less entry between files are listed, verified and extracted instead of refused; a block whose file sizes do not add up to its decoded size, including a block with data and no sub-streams, is refused; the exarch stream-map proof is reduced to what 0.24.2 does not already reject (#675, #751).
+- 7z: bump `sevenz-rust2` to 0.24.2 (minimum version now 0.24.2); solid blocks with a stream-less entry between files are listed, verified and extracted instead of refused; a block whose file sizes do not add up to its decoded size, including a block with data and no sub-streams, is refused; the exarch stream-map proof is reduced to what 0.24.2 does not already reject (#675, #751, #770).
 
 - **BREAKING:** `ArchiveError::to_ffi_message` is replaced by the consuming `into_ffi_message`; `FfiErrorMessage` holds a typed `FfiKind` and `PartialOutcome` instead of string `code` and `context`, `error_code()` returns `ErrorCode`, and `PartialWrites` gains `ALL` and `Display`; Python and Node build their errors from it (#758, #768).
 - **BREAKING:** Node errors carry `err.code` (`ErrorCode`) and typed `relaxableBy`, `writes`, `filesExtracted`, `bytesWritten`, `filesSkipped`, `warnings` properties; `message` no longer has the `CODE: ` prefix, `[relaxableBy=]` token or `| writes=` suffix, and new `ErrorCode`, `PolicySetting`, `PartialWrites` and `ExarchError` types are exported (#760, #768).

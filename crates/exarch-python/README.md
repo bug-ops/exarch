@@ -138,6 +138,26 @@ defaults to the config's `max_total_size`; exceeding it raises
 `QuotaExceededError`. `path_model="portable"` validates names against the
 strictest rules of every platform instead of this host's.
 
+`list_archive_bytes_with_progress`, `verify_archive_bytes_with_progress` and
+`extract_archive_to_memory_with_progress` take a `progress` callback
+`(path, total, current, bytes_written)` after `config`; `current` counts from 1
+and `total` is 0 for TAR. A raising callback does not abort the run; if the run
+succeeded its exception is raised (with `progress_callback_error = True`) and the
+result is discarded.
+
+`create_archive_to_bytes(sources, format)` builds an archive in memory and
+returns a `CreatedArchive` with `data` and `report`:
+
+```python
+created = exarch.create_archive_to_bytes(["src/"], "TarGz")
+open("src.tar.gz", "wb").write(created.data)
+```
+
+**Note:** the whole archive is held in memory, up to about 2-3x its size at the
+peak, and there is no size cap. Sources must be regular files and directories;
+FIFOs and device files are not supported. Use `create_archive` for large
+archives.
+
 ### Error Handling
 
 ```python

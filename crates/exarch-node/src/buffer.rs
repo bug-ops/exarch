@@ -8,13 +8,16 @@ use napi::bindgen_prelude::Uint8Array;
 use napi_derive::napi;
 
 use crate::CoreResult;
+use crate::ProgressCallback;
 use crate::config::SecurityConfig;
 use crate::config::VerificationOptions;
+use crate::error::ProgressCallbackError;
 use crate::error::run_sync;
 use crate::error::spawn_blocking_promise;
 use crate::report::ArchiveManifest;
 use crate::report::ArchiveType;
 use crate::report::VerificationReport;
+use crate::run_with_optional_progress;
 
 fn list_core(
     data: impl AsRef<[u8]> + Send,
@@ -209,4 +212,153 @@ pub fn verify_archive_bytes_sync(
     })?;
 
     VerificationReport::try_from(report)
+}
+
+/// List the contents of an archive held in memory with a progress callback
+/// (async).
+///
+/// Same as `listArchiveBytes`, plus `progress`, called once per entry with
+/// `(err, [path, total, current, bytesWritten])` (`total` is `0` for TAR,
+/// `bytesWritten` always `0`).
+///
+/// # Arguments
+///
+/// The arguments of `listArchiveBytes`, then:
+///
+/// * `progress` - Optional progress callback
+///
+/// # Returns
+///
+/// Promise resolving to `ArchiveManifest` with entry metadata
+///
+/// # Errors
+///
+/// The errors of `listArchiveBytes`. If `progress` throws, the run still
+/// completes. When listing succeeded, the promise rejects with
+/// `PROGRESS_CALLBACK_ERROR` and the throw as `cause`; the manifest is
+/// discarded. When listing failed, the core error keeps its `code` and the
+/// throw is attached as `cause`.
+///
+/// # Examples
+///
+/// ```javascript
+/// const manifest = await listArchiveBytesWithProgress(
+///   fs.readFileSync('archive.zip'),
+///   null,
+///   null,
+///   (err, [path, total, current]) => console.log(`${current}/${total}: ${path}`),
+/// );
+/// ```
+#[napi]
+#[allow(clippy::needless_pass_by_value)]
+pub fn list_archive_bytes_with_progress<'env>(
+    env: &'env Env,
+    data: Uint8Array,
+    config: Option<&SecurityConfig>,
+    format: Option<ArchiveType>,
+    #[napi(
+        ts_arg_type = "(((err: Error | null, arg: [string, number, number, number]) => any)) | undefined | null"
+    )]
+    progress: Option<ProgressCallback>,
+) -> Result<PromiseRaw<'env, ArchiveManifest>> {
+    let config_owned: exarch_core::SecurityConfig = config.map_or_default(|c| c.as_core().clone());
+    let bytes = data.to_vec();
+    let progress = progress.map(|ProgressCallback(tsfn)| tsfn);
+
+    spawn_blocking_promise(
+        env,
+        "archive listing with progress",
+        move || {
+            run_with_optional_progress(
+                progress,
+                |progress| {
+                    let reader = ArchiveReader::from_bytes(bytes, format.map(Into::into))?;
+                    Ok(exarch_core::list_reader_with_progress(
+                        reader,
+                        &config_owned,
+                        &exarch_core::ListOptions::default(),
+                        progress,
+                    )?)
+                },
+                |source, _| ProgressCallbackError::ListCallback { source },
+            )
+        },
+        ArchiveManifest::try_from,
+    )
+}
+
+/// Verify the security of an archive held in memory with a progress callback
+/// (async).
+///
+/// Same as `verifyArchiveBytes`, plus `progress`, called once per entry with
+/// `(err, [path, total, current, bytesWritten])` (`total` is `0` for TAR,
+/// `bytesWritten` always `0`).
+///
+/// # Arguments
+///
+/// The arguments of `verifyArchiveBytes`, then:
+///
+/// * `progress` - Optional progress callback
+///
+/// # Returns
+///
+/// Promise resolving to `VerificationReport` with validation results
+///
+/// # Errors
+///
+/// The errors of `verifyArchiveBytes`. If `progress` throws, the run still
+/// completes. When verification returned a report (including one with status
+/// `FAIL`), the promise rejects with `PROGRESS_CALLBACK_ERROR` and the throw as
+/// `cause`; the report is discarded. When it errored, the core error keeps its
+/// `code` and the throw is attached as `cause`.
+///
+/// # Examples
+///
+/// ```javascript
+/// const report = await verifyArchiveBytesWithProgress(
+///   fs.readFileSync('archive.zip'),
+///   null,
+///   null,
+///   null,
+///   (err, [path, total, current]) => console.log(`${current}/${total}: ${path}`),
+/// );
+/// ```
+#[napi]
+#[allow(clippy::needless_pass_by_value)]
+pub fn verify_archive_bytes_with_progress<'env>(
+    env: &'env Env,
+    data: Uint8Array,
+    config: Option<&SecurityConfig>,
+    options: Option<&VerificationOptions>,
+    format: Option<ArchiveType>,
+    #[napi(
+        ts_arg_type = "(((err: Error | null, arg: [string, number, number, number]) => any)) | undefined | null"
+    )]
+    progress: Option<ProgressCallback>,
+) -> Result<PromiseRaw<'env, VerificationReport>> {
+    let config_owned: exarch_core::SecurityConfig = config.map_or_default(|c| c.as_core().clone());
+    let options_owned: exarch_core::VerificationOptions = options.map_or_default(|o| *o.as_core());
+    let bytes = data.to_vec();
+    let progress = progress.map(|ProgressCallback(tsfn)| tsfn);
+
+    spawn_blocking_promise(
+        env,
+        "archive verification with progress",
+        move || {
+            run_with_optional_progress(
+                progress,
+                |progress| {
+                    let reader = ArchiveReader::from_bytes(bytes, format.map(Into::into))?;
+                    Ok(exarch_core::verify_reader_with_progress(
+                        reader,
+                        &config_owned,
+                        &options_owned,
+                        progress,
+                    )?)
+                },
+                |source, _| ProgressCallbackError::VerifyCallback { source },
+            )
+        },
+        VerificationReport::try_from,
+    )
 }

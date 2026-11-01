@@ -817,13 +817,29 @@ impl<R: Read + Seek> ArchiveFormat for ZipArchive<R> {
         config: &SecurityConfig<Validated>,
         options: &VerificationOptions,
     ) -> Result<crate::inspection::VerificationReport> {
+        self.verify_with_progress(config, *options, &mut crate::NoopProgress)
+    }
+
+    fn format_name(&self) -> &'static str {
+        "zip"
+    }
+}
+
+impl<R: Read + Seek> ZipArchive<R> {
+    /// Verifies the archive, reporting each scanned entry to `progress`.
+    pub(crate) fn verify_with_progress(
+        &mut self,
+        config: &SecurityConfig<Validated>,
+        options: VerificationOptions,
+        progress: &mut dyn ProgressCallback,
+    ) -> Result<crate::inspection::VerificationReport> {
         use crate::inspection::list::list_zip_reader;
         use crate::inspection::report::ArchiveStructure;
         use crate::inspection::verify::list_for_verify;
         use crate::inspection::verify::verify_manifest_with_structure;
 
         self.check_count(config)?;
-        let listed = list_for_verify(config, *options, |listing| {
+        let listed = list_for_verify(config, options, progress, |listing| {
             list_zip_reader(self, config, listing)
         })?;
         let (findings, omitted) = match config.zip_consistency {
@@ -839,10 +855,6 @@ impl<R: Read + Seek> ArchiveFormat for ZipArchive<R> {
             &structure,
             listed.integrity,
         ))
-    }
-
-    fn format_name(&self) -> &'static str {
-        "zip"
     }
 }
 

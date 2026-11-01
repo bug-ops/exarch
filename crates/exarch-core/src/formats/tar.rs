@@ -484,9 +484,12 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
         config: &SecurityConfig<Validated>,
         options: &VerificationOptions,
     ) -> Result<crate::inspection::VerificationReport> {
-        crate::inspection::verify::verify_with(config, *options, |listing| {
-            self.list_with_pass(config, listing)
-        })
+        crate::inspection::verify::verify_with(
+            config,
+            *options,
+            &mut crate::NoopProgress,
+            |listing| self.list_with_pass(config, listing),
+        )
     }
 
     fn format_name(&self) -> &'static str {

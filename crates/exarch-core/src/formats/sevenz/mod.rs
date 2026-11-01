@@ -930,6 +930,22 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
         config: &SecurityConfig<Validated>,
         options: &VerificationOptions,
     ) -> Result<crate::inspection::VerificationReport> {
+        self.verify_with_progress(config, *options, &mut crate::NoopProgress)
+    }
+
+    fn format_name(&self) -> &'static str {
+        "7z"
+    }
+}
+
+impl<R: Read + Seek> SevenZArchive<R> {
+    /// Verifies the archive, reporting each scanned entry to `progress`.
+    pub(crate) fn verify_with_progress(
+        &mut self,
+        config: &SecurityConfig<Validated>,
+        options: VerificationOptions,
+        progress: &mut dyn ProgressCallback,
+    ) -> Result<crate::inspection::VerificationReport> {
         use crate::inspection::list::list_sevenz_parsed;
         use crate::inspection::report::ArchiveStructure;
         use crate::inspection::verify::list_for_verify;
@@ -937,7 +953,7 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
 
         let mut issues = refusal_issues(&sevenz_refusals(&self.header, config));
         issues.extend(anti_item_issue(self.anti_item_count()));
-        let listed = list_for_verify(config, *options, |listing| {
+        let listed = list_for_verify(config, options, progress, |listing| {
             list_sevenz_parsed(&self.header, &mut self.source, config, listing)
         })?;
         let structure = ArchiveStructure::of_manifest(&listed.manifest).with_refusals(&issues);
@@ -947,10 +963,6 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
             &structure,
             listed.integrity,
         ))
-    }
-
-    fn format_name(&self) -> &'static str {
-        "7z"
     }
 }
 
@@ -1006,6 +1018,7 @@ pub(crate) use links::LinkTable;
 pub(crate) use links::StoredLinkTarget;
 pub(crate) use links::deliver_undecoded_links;
 pub(crate) use links::walk_sevenz_links;
+pub(crate) use verify::is_decode_announced;
 pub(crate) use verify::verify_sevenz_blocks;
 
 mod admit;

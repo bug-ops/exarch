@@ -22,6 +22,7 @@ use crate::creation::tar::write_tar;
 use crate::creation::zip::write_zip;
 use crate::formats::compression::CompressionCodec;
 use crate::formats::detect::ArchiveType;
+use crate::formats::detect::FormatFamily;
 
 /// A seekable byte destination.
 pub(crate) trait WriteSeek: Write + Seek + Send {}
@@ -54,6 +55,12 @@ impl<W: Write> Write for CountingWriter<W> {
 
     fn flush(&mut self) -> std::io::Result<()> {
         self.inner.flush()
+    }
+}
+
+pub(crate) fn sevenz_creation_unsupported() -> ArchiveError {
+    ArchiveError::InvalidConfiguration {
+        reason: "7z archive creation is not supported".into(),
     }
 }
 
@@ -122,6 +129,39 @@ impl<'a> ArchiveWriter<'a> {
             destination: Destination::Zip {
                 stream: Box::new(writer),
             },
+        }
+    }
+
+    /// An archive of the given `format` written to `writer`.
+    ///
+    /// Picks [`tar`](Self::tar) or [`zip`](Self::zip) from `format`, for
+    /// callers that hold the format as a value. `Seek` is required because
+    /// the format is only known at run time.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidConfiguration`](ArchiveError::InvalidConfiguration) for
+    /// 7z, which cannot be created.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::ArchiveWriter;
+    /// use exarch_core::formats::detect::ArchiveType;
+    /// use std::io::Cursor;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let writer = ArchiveWriter::of_type(Cursor::new(Vec::<u8>::new()), ArchiveType::TarZst)?;
+    /// assert_eq!(writer.format(), ArchiveType::TarZst);
+    /// assert!(ArchiveWriter::of_type(Cursor::new(Vec::<u8>::new()), ArchiveType::SevenZ).is_err());
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn of_type<W: Write + Seek + Send + 'a>(writer: W, format: ArchiveType) -> Result<Self> {
+        match format.family() {
+            FormatFamily::Tar(codec) => Ok(Self::tar(writer, codec)),
+            FormatFamily::Zip => Ok(Self::zip(writer)),
+            FormatFamily::SevenZ => Err(sevenz_creation_unsupported()),
         }
     }
 
@@ -349,6 +389,22 @@ mod tests {
         let path = dir.path().join("p.zip");
         let report = create_archive(&path, &[src.path()], &config()).unwrap();
         assert_eq!(report.bytes_compressed, fs::metadata(&path).unwrap().len());
+    }
+
+    #[test]
+    fn test_of_type_round_trips_and_rejects_sevenz() {
+        let src = source_tree();
+        for format in [ArchiveType::Tar, ArchiveType::TarZst, ArchiveType::Zip] {
+            let mut out = Cursor::new(Vec::new());
+            let writer = ArchiveWriter::of_type(&mut out, format).unwrap();
+            assert_eq!(writer.format(), format);
+            create_to_writer(writer, &[src.path()], &config()).unwrap();
+            assert!(!out.get_ref().is_empty());
+        }
+        assert_matches!(
+            ArchiveWriter::of_type(Cursor::new(Vec::new()), ArchiveType::SevenZ),
+            Err(ArchiveError::InvalidConfiguration { .. })
+        );
     }
 
     #[test]

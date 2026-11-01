@@ -179,7 +179,7 @@ fn empty_and_unrecognized_input_is_unrecognized() {
 fn detect_stream_replays_only_the_bytes_it_read() {
     let bytes = compress(CompressionCodec::Gzip, &plain_tar());
     assert!(
-        bytes.len() < 262,
+        bytes.len() < 512,
         "the fixture must be shorter than the peek window"
     );
     let expected = listing(ArchiveReader::tar(
@@ -251,7 +251,7 @@ fn a_container_past_offset_zero_is_not_at_start() {
 }
 
 #[test]
-fn polyglot_with_zip_magic_is_zip_by_path_and_seekable_detection() {
+fn broken_checksum_header_with_zip_magic_is_zip_by_path_and_seekable_detection() {
     let mut bytes = plain_tar();
     bytes[..4].copy_from_slice(b"PK\x03\x04");
     assert_eq!(path_format(&bytes), ArchiveType::Zip);
@@ -268,7 +268,7 @@ fn polyglot_with_zip_magic_is_zip_by_path_and_seekable_detection() {
 }
 
 #[test]
-fn polyglot_with_gzip_magic_is_tar_gz_everywhere() {
+fn broken_checksum_header_with_gzip_magic_is_tar_gz_everywhere() {
     let mut bytes = plain_tar();
     bytes[..2].copy_from_slice(b"\x1f\x8b");
     assert_eq!(path_format(&bytes), ArchiveType::TarGz);
@@ -299,5 +299,125 @@ fn reader_format_errors_map_to_ffi_kinds() {
         let error = ArchiveError::ReaderFormat(reason);
         assert_matches!(error.error_code(), ErrorCode::InvalidConfiguration);
         assert_eq!(error.redacted_path(), None);
+    }
+}
+
+/// A plain TAR whose first member name starts with `prefix`, checksum sealed.
+fn tar_named_with_prefix(prefix: &[u8]) -> Vec<u8> {
+    let mut bytes = plain_tar();
+    bytes[..prefix.len()].copy_from_slice(prefix);
+    let mut header = tar::Header::new_gnu();
+    header.as_mut_bytes().copy_from_slice(&bytes[..512]);
+    header.set_cksum();
+    bytes[..512].copy_from_slice(header.as_bytes());
+    bytes
+}
+
+#[test]
+fn valid_tar_with_a_bzh_name_is_tar_everywhere() {
+    let bytes = tar_named_with_prefix(b"BZhfoo");
+    for name in ["x.tar", "x.bz2", "x.tar.gz", "x.zst", "x"] {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(name);
+        std::fs::write(&path, &bytes).unwrap();
+        assert_eq!(detect_format(&path).unwrap(), ArchiveType::Tar, "{name}");
+    }
+    assert_eq!(
+        ArchiveReader::detect(Cursor::new(bytes.clone()))
+            .unwrap()
+            .format(),
+        ArchiveType::Tar
+    );
+    let streamed = ArchiveReader::detect_stream(ReadOnly(Cursor::new(bytes.clone()))).unwrap();
+    assert_eq!(streamed.format(), ArchiveType::Tar);
+    let expected = listing(ArchiveReader::tar(Cursor::new(bytes.clone()), None));
+    assert_eq!(listing(streamed), expected);
+    assert_eq!(
+        listing(ArchiveReader::detect(Cursor::new(bytes)).unwrap()),
+        expected
+    );
+}
+
+#[test]
+fn a_sealed_ustar_block_does_not_override_gzip_zstd_or_xz() {
+    let cases: [(&[u8], ArchiveType); 3] = [
+        (b"\x1f\x8b", ArchiveType::TarGz),
+        (b"\x28\xb5\x2f\xfd", ArchiveType::TarZst),
+        (b"\xfd7zXZ\x00", ArchiveType::TarXz),
+    ];
+    for (prefix, expected) in cases {
+        let bytes = tar_named_with_prefix(prefix);
+        assert_eq!(path_format(&bytes), expected, "{prefix:?}");
+        assert_eq!(
+            ArchiveReader::detect(Cursor::new(bytes.clone()))
+                .unwrap()
+                .format(),
+            expected
+        );
+        assert_eq!(
+            ArchiveReader::detect_stream(ReadOnly(Cursor::new(bytes)))
+                .unwrap()
+                .format(),
+            expected
+        );
+    }
+}
+
+/// A gzip stream whose FEXTRA field swallows a checksum-valid ustar block.
+fn gzip_hiding_a_ustar_block() -> Vec<u8> {
+    let mut header = tar::Header::new_ustar();
+    let name = &mut header.as_old_mut().name;
+    name[..12].copy_from_slice(b"\x1f\x8b\x08\x04\0\0\0\0\0\xff\xf4\x01");
+    header.set_size(0);
+    header.set_cksum();
+    let inner = compress(CompressionCodec::Gzip, &plain_tar());
+    let mut bytes = header.as_bytes().to_vec();
+    bytes.extend_from_slice(&inner[10..]);
+    bytes
+}
+
+#[test]
+fn a_gzip_hiding_a_ustar_block_stays_gzip_in_every_entry_point() {
+    let bytes = gzip_hiding_a_ustar_block();
+    assert_eq!(path_format(&bytes), ArchiveType::TarGz);
+    assert_eq!(
+        ArchiveReader::detect(Cursor::new(bytes.clone()))
+            .unwrap()
+            .format(),
+        ArchiveType::TarGz
+    );
+    let streamed = ArchiveReader::detect_stream(ReadOnly(Cursor::new(bytes))).unwrap();
+    assert_eq!(streamed.format(), ArchiveType::TarGz);
+    assert!(listing(streamed).contains("a.txt"));
+}
+
+#[test]
+fn valid_tar_with_container_magic_name_stays_a_container() {
+    let zip = tar_named_with_prefix(b"PK\x03\x04");
+    assert_eq!(path_format(&zip), ArchiveType::Zip);
+    assert_eq!(
+        ArchiveReader::detect(Cursor::new(zip)).unwrap().format(),
+        ArchiveType::Zip
+    );
+    let seven_z = tar_named_with_prefix(b"7z\xbc\xaf\x27\x1c");
+    assert_eq!(path_format(&seven_z), ArchiveType::SevenZ);
+    assert_eq!(
+        ArchiveReader::detect(Cursor::new(seven_z))
+            .unwrap()
+            .format(),
+        ArchiveType::SevenZ
+    );
+}
+
+#[test]
+fn compressed_streams_are_still_detected_as_compressed() {
+    for (expected, bytes) in every_format().into_iter().skip(1).take(4) {
+        assert_eq!(path_format(&bytes), expected);
+        assert_eq!(
+            ArchiveReader::detect_stream(ReadOnly(Cursor::new(bytes)))
+                .unwrap()
+                .format(),
+            expected
+        );
     }
 }

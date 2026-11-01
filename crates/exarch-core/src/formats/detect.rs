@@ -8,11 +8,14 @@ use crate::closed_enum::closed_enum;
 use crate::formats::compression::CompressionCodec;
 use crate::formats::sevenz::SEVENZ_MAGIC;
 
-/// Number of bytes to read for magic-byte detection.
-///
-/// TAR USTAR signature sits at offset 257 and is 5 bytes long, so we need
-/// at least 262 bytes. All other signatures fit within the first 6 bytes.
-const MAGIC_READ_LEN: usize = 262;
+/// Number of bytes to read for magic-byte detection: one full TAR header block,
+/// so the USTAR signature at offset 257 and the checksum field at 148 are both
+/// available. All other signatures fit within the first 6 bytes.
+const MAGIC_READ_LEN: usize = 512;
+
+const TAR_BLOCK_LEN: usize = 512;
+const USTAR_MAGIC_OFFSET: usize = 257;
+const TAR_CKSUM_FIELD: std::ops::Range<usize> = 148..156;
 
 /// Magic byte signatures for each supported archive format.
 ///
@@ -138,7 +141,7 @@ impl ArchiveType {
 /// `ARCHIVE.TAR.GZ`); a bare `archive.gz` is not a recognised extension.
 ///
 /// **Phase 2 — magic bytes:** when extension detection fails (unrecognised or
-/// missing extension), the function reads up to the first 262 bytes of the file
+/// missing extension), the function reads up to the first 512 bytes of the file
 /// and matches against known magic-byte signatures. If the file is not readable
 /// (does not exist, is a directory, I/O error), phase 2 is silently skipped and
 /// [`ArchiveError::UnknownFormat`] is returned.
@@ -147,6 +150,15 @@ impl ArchiveType {
 /// identifies a *different* known format, the magic-byte result takes
 /// precedence. This covers the common case where a file was renamed or given
 /// the wrong extension.
+///
+/// **Precedence between signatures:** a ZIP or 7z magic at offset 0 always
+/// wins, and so do gzip, xz and zstd magics: no valid UTF-8 member name starts
+/// with them, while a gzip header can carry a whole ustar block in its extra
+/// field. Only `BZh` can open a member name, so a checksum-valid ustar header
+/// whose leading bytes are not a complete bzip2 stream header (`BZh`, a level
+/// digit, then the block or end-of-stream marker) is read as a plain TAR. An
+/// input that is valid under both readings keeps its compression view, as in
+/// bsdtar and `CPython`.
 ///
 /// **Note on compression signatures:** magic-byte detection maps GZ, BZ2, XZ,
 /// and Zstd signatures to their `Tar*` variants because those are the only
@@ -279,12 +291,57 @@ pub(crate) fn peek_header<R: std::io::Read + ?Sized>(reader: &mut R) -> std::io:
     Ok(header)
 }
 
+/// Whether `header` opens with a TAR header block: `ustar` at offset 257 and a
+/// checksum field that matches the tar reader's own rule (unsigned byte sum
+/// with the checksum field counted as spaces).
+fn is_ustar_header(header: &[u8]) -> bool {
+    let Some(block) = header.first_chunk::<TAR_BLOCK_LEN>() else {
+        return false;
+    };
+    if !block[USTAR_MAGIC_OFFSET..].starts_with(b"ustar") {
+        return false;
+    }
+    let sum: u32 = block
+        .iter()
+        .enumerate()
+        .map(|(i, &b)| {
+            if TAR_CKSUM_FIELD.contains(&i) {
+                u32::from(b' ')
+            } else {
+                u32::from(b)
+            }
+        })
+        .sum();
+    tar::Header::from_byte_slice(block)
+        .cksum()
+        .is_ok_and(|stored| stored == sum)
+}
+
+/// Whether `header` opens with a complete bzip2 stream header: `BZh`, a level
+/// digit, then the first block magic or the end-of-stream marker.
+fn is_bzip2_stream_start(header: &[u8]) -> bool {
+    const BLOCK_MAGIC: &[u8; 6] = b"1AY&SY";
+    const END_MAGIC: &[u8; 6] = &[0x17, 0x72, 0x45, 0x38, 0x50, 0x90];
+    header.starts_with(b"BZh")
+        && header
+            .get(3)
+            .is_some_and(|level| (b'1'..=b'9').contains(level))
+        && header
+            .get(4..10)
+            .is_some_and(|marker| marker == BLOCK_MAGIC || marker == END_MAGIC)
+}
+
 /// Matches `header` against [`MAGIC_SIGNATURES`]; the first entry in table
 /// order wins, so an offset-0 magic beats the `ustar` signature at 257.
 ///
+/// The one exception is a bzip2 magic that is not a complete bzip2 stream
+/// header: a checksum-valid ustar header outranks it, because a TAR member name
+/// can start with `BZh`. Input valid under both readings, and every other
+/// magic, keeps the offset-0 view.
+///
 /// The one signature table behind path, seekable and streaming detection.
 pub(crate) fn match_signature(header: &[u8]) -> Option<ArchiveType> {
-    MAGIC_SIGNATURES
+    let table_match = MAGIC_SIGNATURES
         .iter()
         .find(|&&(offset, sig, _)| {
             offset
@@ -292,7 +349,13 @@ pub(crate) fn match_signature(header: &[u8]) -> Option<ArchiveType> {
                 .and_then(|end| header.get(offset..end))
                 .is_some_and(|window| window == sig)
         })
-        .map(|&(_, _, archive_type)| archive_type)
+        .map(|&(_, _, archive_type)| archive_type);
+    match table_match {
+        Some(ArchiveType::TarBz2) if !is_bzip2_stream_start(header) && is_ustar_header(header) => {
+            Some(ArchiveType::Tar)
+        }
+        _ => table_match,
+    }
 }
 
 #[cfg(test)]
@@ -661,6 +724,59 @@ mod tests {
         assert_eq!(match_signature(&header), Some(ArchiveType::Tar));
         header[..4].copy_from_slice(b"PK\x03\x04");
         assert_eq!(match_signature(&header), Some(ArchiveType::Zip));
+    }
+
+    fn sealed_block(name: &[u8]) -> [u8; TAR_BLOCK_LEN] {
+        let mut header = tar::Header::new_ustar();
+        header.as_old_mut().name[..name.len()].copy_from_slice(name);
+        header.set_size(0);
+        header.set_cksum();
+        *header.as_bytes()
+    }
+
+    #[test]
+    fn is_ustar_header_accepts_only_a_sealed_block() {
+        let block = sealed_block(b"a.txt");
+        assert!(is_ustar_header(&block));
+
+        let mut off_by_one = block;
+        off_by_one[0] ^= 1;
+        assert!(!is_ustar_header(&off_by_one));
+
+        let mut non_numeric = block;
+        non_numeric[TAR_CKSUM_FIELD].copy_from_slice(b"xxxxxxx\0");
+        assert!(!is_ustar_header(&non_numeric));
+
+        assert!(!is_ustar_header(&block[..TAR_BLOCK_LEN - 1]));
+        assert!(!is_ustar_header(&[]));
+
+        let mut v7 = sealed_block(b"a.txt");
+        v7[USTAR_MAGIC_OFFSET..USTAR_MAGIC_OFFSET + 5].fill(0);
+        assert!(!is_ustar_header(&v7));
+    }
+
+    #[test]
+    fn only_a_bzip2_looking_name_loses_to_a_sealed_ustar_block() {
+        let cases: [(&[u8], Option<ArchiveType>); 8] = [
+            (b"BZhfoo.txt", Some(ArchiveType::Tar)),
+            (b"BZh91AY&SYfoo", Some(ArchiveType::TarBz2)),
+            (b"\x1f\x8bfoo", Some(ArchiveType::TarGz)),
+            (b"\x28\xb5\x2f\xfdfoo", Some(ArchiveType::TarZst)),
+            (b"\xfd7zXZ\0foo", Some(ArchiveType::TarXz)),
+            (b"PK\x03\x04foo", Some(ArchiveType::Zip)),
+            (b"7z\xbc\xaf\x27\x1cfoo", Some(ArchiveType::SevenZ)),
+            (b"plain.txt", Some(ArchiveType::Tar)),
+        ];
+        for (name, expected) in cases {
+            assert_eq!(match_signature(&sealed_block(name)), expected, "{name:?}");
+        }
+    }
+
+    #[test]
+    fn a_v7_tar_with_a_gzip_magic_name_stays_gzip() {
+        let mut block = sealed_block(b"\x1f\x8bfoo");
+        block[USTAR_MAGIC_OFFSET..USTAR_MAGIC_OFFSET + 5].fill(0);
+        assert_eq!(match_signature(&block), Some(ArchiveType::TarGz));
     }
 
     #[test]

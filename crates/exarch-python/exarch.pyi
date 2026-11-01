@@ -1143,6 +1143,113 @@ def extract_archive_to_memory(
     """
     ...
 
+def extract_archive_to_memory_with_progress(
+    data: bytes,
+    config: SecurityConfig | None = None,
+    progress: ProgressCallbackFn | None = None,
+    options: ExtractionOptions | None = None,
+    max_bytes: int | None = None,
+    path_model: _PathModel | None = None,
+    format: _ArchiveType | None = None,
+) -> MemoryExtraction:
+    """
+    Extract an archive held in memory into memory, reporting progress.
+
+    Same as extract_archive_to_memory, plus a callback invoked once per entry
+    with (path, total, current, bytes_written). The GIL is held during
+    extraction when progress is given.
+
+    Raises:
+        Whatever progress itself raises. If extraction succeeded, the
+        extracted entries are discarded and the exception carries
+        files_extracted, bytes_written and progress_callback_error = True.
+        If extraction failed, the core error is raised with the callback's
+        exception chained as __cause__.
+    """
+    ...
+
+def list_archive_bytes_with_progress(
+    data: bytes,
+    config: SecurityConfig | None = None,
+    progress: ProgressCallbackFn | None = None,
+    format: _ArchiveType | None = None,
+) -> ArchiveManifest:
+    """
+    List the contents of an archive held in memory, reporting progress.
+
+    Same as list_archive_bytes, plus a callback invoked once per entry with
+    (path, total, current, bytes_written); total is 0 for TAR and
+    bytes_written is always 0.
+
+    Raises:
+        Whatever progress itself raises. If listing succeeded, the manifest
+        is discarded and the exception carries progress_callback_error = True.
+        If listing failed, the core error is raised with the callback's
+        exception chained as __cause__.
+    """
+    ...
+
+def verify_archive_bytes_with_progress(
+    data: bytes,
+    config: SecurityConfig | None = None,
+    progress: ProgressCallbackFn | None = None,
+    options: VerificationOptions | None = None,
+    format: _ArchiveType | None = None,
+) -> VerificationReport:
+    """
+    Verify the security of an archive held in memory, reporting progress.
+
+    Same as verify_archive_bytes, plus a callback invoked once per entry with
+    (path, total, current, bytes_written); total is 0 for TAR and
+    bytes_written is always 0.
+
+    Raises:
+        Whatever progress itself raises. If verification returned a report
+        (even a failing one), the report is discarded and the exception
+        carries progress_callback_error = True. If it errored, the core error
+        is raised with the callback's exception chained as __cause__.
+    """
+    ...
+
+class CreatedArchive:
+    """The result of create_archive_to_bytes."""
+
+    @property
+    def data(self) -> bytes:
+        """The archive bytes."""
+        ...
+
+    @property
+    def report(self) -> CreationReport:
+        """Creation statistics."""
+        ...
+
+def create_archive_to_bytes(
+    sources: list[str | Path],
+    format: _ArchiveType,
+    config: CreationConfig | None = None,
+) -> CreatedArchive:
+    """
+    Create an archive from source files and directories into memory.
+
+    The whole archive is held in memory (about 2-3x its size at the peak) with
+    no size cap; use create_archive for large archives. Sources must be regular
+    files and directories; FIFOs and device files are not supported.
+
+    Args:
+        sources: List of source files/directories to include (str or pathlib.Path)
+        format: The archive format; "SevenZ" cannot be created
+        config: Optional CreationConfig (uses defaults if None)
+
+    Returns:
+        CreatedArchive with the archive bytes and the report
+
+    Raises:
+        ValueError: Unknown format, invalid sources, or "SevenZ"
+        IOError: A source cannot be read
+    """
+    ...
+
 class ArchiveError(Exception):
     """
     Base exception for all extraction errors.

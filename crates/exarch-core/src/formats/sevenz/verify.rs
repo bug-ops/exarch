@@ -17,6 +17,7 @@ use crate::inspection::integrity::DecodeFailure;
 use crate::inspection::integrity::DecodeOutcome;
 use crate::inspection::integrity::IntegrityPass;
 use crate::inspection::integrity::Slot;
+use crate::inspection::list::Progress;
 use crate::inspection::report::UnverifiedReason;
 use std::collections::BTreeSet;
 use std::io::Read;
@@ -37,15 +38,25 @@ pub(super) fn payload_by_block(
     slots: &[Option<Slot>],
 ) -> Vec<Vec<PayloadFile>> {
     let mut blocks = vec![Vec::new(); header.block_count()];
-    for (index, file) in header.files().iter().enumerate() {
-        let block = header.file_block(index);
-        if let (Some(block), Some(Some(slot)), true) =
-            (block, slots.get(index), is_sevenz_payload(file))
-        {
+    for index in 0..header.files().len() {
+        if let (Some(block), Some(Some(slot)), true) = (
+            header.file_block(index),
+            slots.get(index),
+            is_decode_announced(header, index, true),
+        ) {
             blocks[block.get()].push((index, *slot));
         }
     }
     blocks
+}
+
+/// Whether the integrity decode of the file at `index` (rather than the listing
+/// walk) reports it: a payload file that has an integrity slot (`has_slot`) and
+/// belongs to a block.
+pub fn is_decode_announced(header: &SevenZHeader, index: usize, has_slot: bool) -> bool {
+    has_slot
+        && header.file_block(index).is_some()
+        && header.files().get(index).is_some_and(is_sevenz_payload)
 }
 
 /// Decodes every payload block of a parsed 7z archive for an integrity pass.
@@ -73,6 +84,7 @@ pub fn verify_sevenz_blocks<R: Read + Seek>(
     header: &SevenZHeader,
     source: &mut R,
     pass: &mut IntegrityPass<'_>,
+    progress: &mut Progress<'_>,
     slots: &[Option<Slot>],
     mut links: Option<LinkCapture<'_>>,
 ) -> Result<()> {
@@ -86,6 +98,7 @@ pub fn verify_sevenz_blocks<R: Read + Seek>(
                     capture.mark_unreadable(header, indices());
                 }
                 mark_files(pass, header, refusal.unverified(), indices());
+                announce_skipped(progress, header, indices());
                 return Ok(());
             }
             RefusalScope::Block(index) => refused[index.get()] = Some(refusal.unverified()),
@@ -106,12 +119,17 @@ pub fn verify_sevenz_blocks<R: Read + Seek>(
                 capture.mark_unreadable(header, indices());
             }
             mark_files(pass, header, reason, indices());
+            announce_skipped(progress, header, indices());
         } else {
             let capture = links.as_mut().map(|capture| LinkCapture {
                 links: capture.links,
                 set: &mut *capture.set,
             });
-            verify_sevenz_block(header, source, pass, decode, block_index, files, capture)?;
+            let job = BlockJob {
+                index: block_index,
+                payload: files,
+            };
+            verify_sevenz_block(header, source, pass, progress, decode, job, capture)?;
         }
     }
     Ok(())
@@ -120,6 +138,18 @@ pub fn verify_sevenz_blocks<R: Read + Seek>(
 /// Path of the archive file at `index`, as listed in the manifest.
 pub(super) fn file_path(header: &SevenZHeader, index: usize) -> PathBuf {
     PathBuf::from(common::normalize_entry_name(&header.files()[index].name))
+}
+
+/// Announces and closes the archive files at `indices`, whose payload the
+/// decode never reached, so every payload file is reported exactly once.
+fn announce_skipped(
+    progress: &mut Progress<'_>,
+    header: &SevenZHeader,
+    indices: impl Iterator<Item = usize>,
+) {
+    for index in indices {
+        progress.begin(&file_path(header, index)).complete();
+    }
 }
 
 /// Marks the archive files at `indices` as unverified for `reason`.
@@ -179,26 +209,63 @@ pub(super) struct DecodeContext<'a> {
     knobs: DecodeKnobs,
 }
 
+/// Decodes one file of a block, announcing it when it is a payload file with an
+/// integrity slot, which the listing walk left to this decode.
+fn visit_announced(
+    scan: &mut BlockScan<'_, '_>,
+    progress: &mut Progress<'_>,
+    header: &SevenZHeader,
+    file: &sevenz_rust2::ArchiveEntry,
+    reader: &mut dyn Read,
+) -> bool {
+    let index = scan.next_file;
+    if !is_decode_announced(
+        header,
+        index,
+        matches!(scan.slots.get(index), Some(Some(_))),
+    ) {
+        return scan.visit(file, reader);
+    }
+    let path = file_path(header, index);
+    let in_flight = progress.begin(&path);
+    let keep_going = scan.visit(file, reader);
+    in_flight.complete();
+    keep_going
+}
+
+/// One block and the payload files it holds.
+#[derive(Clone, Copy)]
+pub(super) struct BlockJob<'a> {
+    index: BlockIndex,
+    payload: &'a [PayloadFile],
+}
+
 pub(super) fn verify_sevenz_block<R: Read + Seek>(
     header: &SevenZHeader,
     source: &mut R,
     pass: &mut IntegrityPass<'_>,
+    progress: &mut Progress<'_>,
     decode: DecodeContext<'_>,
-    block_index: BlockIndex,
-    payload: &[PayloadFile],
+    job: BlockJob<'_>,
     links: Option<LinkCapture<'_>>,
 ) -> Result<()> {
     let DecodeContext { slots, knobs } = decode;
+    let BlockJob {
+        index: block_index,
+        payload,
+    } = job;
     let block = header.block(block_index);
     let all = payload.iter().map(|&(index, _)| index);
 
     if payload.iter().any(|&(_, slot)| !pass.is_admitted(slot)) {
-        mark_files(pass, header, UnverifiedReason::ResourceLimit, all);
+        mark_files(pass, header, UnverifiedReason::ResourceLimit, all.clone());
+        announce_skipped(progress, header, all);
         return Ok(());
     }
 
     if !pass.try_charge(block_charge(block)) {
-        mark_files(pass, header, UnverifiedReason::OverBudget, all);
+        mark_files(pass, header, UnverifiedReason::OverBudget, all.clone());
+        announce_skipped(progress, header, all);
         return Ok(());
     }
 
@@ -221,11 +288,12 @@ pub(super) fn verify_sevenz_block<R: Read + Seek>(
         block_index,
         parallel,
         knobs,
-        &mut |file, reader| Ok(scan.visit(file, reader)),
+        &mut |file, reader| Ok(visit_announced(&mut scan, progress, header, file, reader)),
     );
     let (stop, visited) = (scan.stop.take(), scan.visited);
 
     let unvisited: Vec<usize> = all.filter(|index| !visited.contains(index)).collect();
+    announce_skipped(progress, header, unvisited.iter().copied());
     match (stop, result) {
         (Some(BlockStop::Fatal(e)), _) => return Err(e),
         (Some(BlockStop::Abandoned(reason)), _) => {

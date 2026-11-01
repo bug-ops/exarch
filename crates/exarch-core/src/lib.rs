@@ -53,9 +53,11 @@ pub use api::extract_to_sink_with_progress;
 pub use api::list_archive;
 pub use api::list_archive_with_options;
 pub use api::list_reader;
+pub use api::list_reader_with_progress;
 pub use api::verify_archive;
 pub use api::verify_archive_with_options;
 pub use api::verify_reader;
+pub use api::verify_reader_with_progress;
 pub use archive::Archive;
 pub use archive::ArchiveBuilder;
 pub use config::DecompressionBudget;
@@ -99,6 +101,8 @@ pub use error::redaction::sanitize_io_error_for_error;
 /// Redacts a host-derived filesystem path for an FFI error message in
 /// release builds. Shared by `exarch-python` and `exarch-node`.
 pub use error::redaction::sanitize_path_for_error;
+pub use inspection::list_archive_with_progress;
+pub use inspection::verify_archive_with_progress;
 pub use reader::ArchiveReader;
 pub use reader::SeekableFormat;
 pub use report::ExtractionReport;

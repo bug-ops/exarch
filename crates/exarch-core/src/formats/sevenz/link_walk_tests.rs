@@ -347,7 +347,12 @@ mod bytes_read {
         let (source, skipped) = counting(bytes.clone());
         list_sevenz_reader(source, &config, &mut ListPass::strict()).unwrap();
         let (source, read) = counting(bytes);
-        list_sevenz_reader(source, &config, &mut ListPass::Strict(StoredTargets::Read)).unwrap();
+        list_sevenz_reader(
+            source,
+            &config,
+            &mut ListPass::strict_with(StoredTargets::Read),
+        )
+        .unwrap();
 
         assert!(skipped.get() < 1_000, "{} bytes read", skipped.get());
         assert!(read.get() >= FILLER_LEN as u64, "{} bytes read", read.get());

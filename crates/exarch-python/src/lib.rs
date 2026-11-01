@@ -802,6 +802,19 @@ fn exarch(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(buffer::list_archive_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(buffer::verify_archive_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(buffer::extract_archive_to_memory, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        buffer::extract_archive_to_memory_with_progress,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(buffer::create_archive_to_bytes, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        buffer::list_archive_bytes_with_progress,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        buffer::verify_archive_bytes_with_progress,
+        m
+    )?)?;
     #[cfg(feature = "panic-injection")]
     m.add_function(wrap_pyfunction!(_trigger_panic_for_testing, m)?)?;
 
@@ -822,6 +835,7 @@ fn exarch(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyUnverifiedEntry>()?;
     m.add_class::<buffer::PyMemoryEntry>()?;
     m.add_class::<buffer::PyMemoryExtraction>()?;
+    m.add_class::<buffer::PyCreatedArchive>()?;
 
     // Exception types
     register_exceptions(m)?;

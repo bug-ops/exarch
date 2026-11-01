@@ -17,8 +17,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Core: `ArchiveReader::detect`, `detect_stream`, `of_type` and `from_bytes` pick the format from the leading bytes (#774, #787).
 - Core: `create_to_writer` and `create_to_writer_with_progress` create TAR and ZIP archives over `impl Write` (#773, #787).
 - Python and Node: `list_archive_bytes`, `verify_archive_bytes` and `extract_archive_to_memory` work on in-memory archives (#776, #787).
+- Core: `list_archive_with_progress`, `verify_archive_with_progress`, `list_reader_with_progress` and `verify_reader_with_progress` report per-entry progress (#782, #790).
+- Core: `ArchiveWriter::of_type` creates into a writer by `ArchiveType` (#784, #790).
+- Python and Node: `create_archive_to_bytes` / `createArchiveToBytes` return the archive bytes and report; in-memory extract, list and verify accept progress callbacks (#784, #783, #790).
+- Tests: p7zip 16.02 7z symlink fixtures for a link given as an argument and a link found in a directory (#727, #790).
 
 ### Changed
+
+- **BREAKING (Windows hosts):** `PathModel::Host` applies the `Portable` component rules, so entry names and link targets containing `<>"|?*`, control characters or non-Unicode text are refused as `SecurityViolation` (CLI JSON `error.kind` `IoError` -> `SecurityViolation`), symlink targets with them no longer create dangling links, and the in-memory Host sinks in Python and Node refuse them too (#780, #790).
+- Core: the host directory cache stops caching beyond a fixed 16 MiB of key bytes; uncached parents are validated on every entry (#786, #790).
+- Core: `extract_to_sink` on 7z checks name lengths before any block is decoded (#785, #790).
+- Core: a TAR whose first member name starts with `BZh` but is not a complete bzip2 header is detected as TAR; detection reads 512 bytes (#781, #790).
 
 - **BREAKING:** `ArchiveError::ReaderFormat` and `QuotaResource::{TreeNodes, SinkCapacity}` are new variants; exhaustive matches must handle them (#774, #777, #779, #787).
 - Core: the in-memory tree used by `verify` and `extract_to_sink` has a node budget tied to `max_file_count` and `max_path_depth`; `VirtualTree` treats a link path that leaves the root and returns as an escape (#779, #778, #787).

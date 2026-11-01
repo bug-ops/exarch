@@ -4,6 +4,8 @@ use std::path::Path;
 
 use crate::ArchiveError;
 use crate::IntegrityCheck;
+use crate::NoopProgress;
+use crate::ProgressCallback;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::VerificationOptions;
@@ -12,7 +14,6 @@ use crate::formats::SevenZArchive;
 use crate::formats::ZipArchive;
 use crate::formats::detect::FormatFamily;
 use crate::formats::detect::detect_format;
-use crate::formats::traits::ArchiveFormat;
 use crate::inspection::integrity::IntegrityOutcome;
 use crate::inspection::integrity::IntegrityPass;
 use crate::inspection::list::ListPass;
@@ -178,6 +179,7 @@ pub(crate) struct ListedForVerify {
 pub(crate) fn list_for_verify<F>(
     config: &SecurityConfig<Validated>,
     options: VerificationOptions,
+    progress: &mut dyn ProgressCallback,
     list: F,
 ) -> Result<ListedForVerify>
 where
@@ -185,12 +187,12 @@ where
 {
     match options.integrity {
         IntegrityCheck::Skip => Ok(ListedForVerify {
-            manifest: list(&mut ListPass::VerifyPreflight(None))?,
+            manifest: list(&mut ListPass::preflight(None).with_progress(progress))?,
             integrity: None,
         }),
         IntegrityCheck::DecodeToEof(budget) => {
             let mut pass = IntegrityPass::new(config, budget);
-            let manifest = list(&mut ListPass::VerifyPreflight(Some(&mut pass)))?;
+            let manifest = list(&mut ListPass::preflight(Some(&mut pass)).with_progress(progress))?;
             Ok(ListedForVerify {
                 manifest,
                 integrity: Some(pass.finish()),
@@ -204,12 +206,13 @@ where
 pub(crate) fn verify_with<F>(
     config: &SecurityConfig<Validated>,
     options: VerificationOptions,
+    progress: &mut dyn ProgressCallback,
     list: F,
 ) -> Result<VerificationReport>
 where
     F: FnOnce(&mut ListPass<'_, '_>) -> Result<ArchiveManifest>,
 {
-    let listed = list_for_verify(config, options, list)?;
+    let listed = list_for_verify(config, options, progress, list)?;
     Ok(verify_manifest(&listed.manifest, config, listed.integrity))
 }
 
@@ -274,8 +277,8 @@ where
 /// that hold entries, Low for two directories that hold none), so a merge is
 /// never silent. The fold approximates the host
 /// table, so a pair it merges that the host keeps apart is reported too.
-/// Windows component checks (reserved names, `:`, trailing dot or space) run
-/// only on Windows hosts.
+/// Windows component checks (reserved names, `:`, trailing dot or space,
+/// `<>"|?*`, control characters) run only on Windows hosts.
 ///
 /// Verification models extraction that skips an existing entry. With
 /// overwrite semantics extraction keeps the last entry at a path, which
@@ -389,23 +392,81 @@ pub fn verify_archive_with_options<P: AsRef<Path>>(
     config: &SecurityConfig,
     options: &VerificationOptions,
 ) -> Result<VerificationReport> {
+    verify_archive_with_progress(archive_path, config, options, &mut NoopProgress)
+}
+
+/// Verifies archive security, optionally checking payload integrity, reporting
+/// progress.
+///
+/// [`verify_archive_with_options`] with a [`ProgressCallback`]: every entry of
+/// the verification scan is announced with `on_entry_start` and closed with
+/// `on_entry_complete`, and `on_complete` fires once when a report is
+/// returned. A report whose status is `Fail` is still a report.
+///
+/// With [`IntegrityCheck::DecodeToEof`] the events fire while each payload is
+/// decoded, so they track the work; without it the scan reads metadata only
+/// and the events fire at that speed. `total` is 0 for TAR and the declared
+/// entry count for ZIP and 7z. `on_bytes_written` is never called. For a 7z
+/// archive the entries that carry no payload are announced first, then the
+/// payloads in decode order.
+///
+/// # Errors
+///
+/// As [`verify_archive_with_options`]. `on_complete` is not called on failure;
+/// every `on_entry_start` is still paired with an `on_entry_complete`.
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::NoopProgress;
+/// use exarch_core::SecurityConfig;
+/// use exarch_core::VerificationOptions;
+/// use exarch_core::VerificationStatus;
+/// use exarch_core::verify_archive_with_progress;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// # let dir = tempfile::tempdir()?;
+/// # let archive = dir.path().join("a.tar");
+/// # let mut builder = tar::Builder::new(Vec::new());
+/// # let mut header = tar::Header::new_gnu();
+/// # header.set_size(2);
+/// # header.set_mode(0o644);
+/// # builder.append_data(&mut header, "a.txt", &b"hi"[..])?;
+/// # std::fs::write(&archive, builder.into_inner()?)?;
+/// let report = verify_archive_with_progress(
+///     &archive,
+///     &SecurityConfig::default(),
+///     &VerificationOptions::default(),
+///     &mut NoopProgress,
+/// )?;
+/// assert_eq!(report.status(), VerificationStatus::Pass);
+/// # Ok(())
+/// # }
+/// ```
+pub fn verify_archive_with_progress<P: AsRef<Path>>(
+    archive_path: P,
+    config: &SecurityConfig,
+    options: &VerificationOptions,
+    progress: &mut dyn ProgressCallback,
+) -> Result<VerificationReport> {
     let validated_config = config.clone().validate()?;
     let archive_path = archive_path.as_ref();
     let format = detect_format(archive_path)?;
-    match format.family() {
+    let report = match format.family() {
         FormatFamily::Zip => {
             let file = std::fs::File::open(archive_path)?;
-            return ZipArchive::new(file)?.verify(&validated_config, options);
+            ZipArchive::new(file)?.verify_with_progress(&validated_config, *options, progress)?
         }
         FormatFamily::SevenZ => {
             let file = std::fs::File::open(archive_path)?;
-            return SevenZArchive::new(file)?.verify(&validated_config, options);
+            SevenZArchive::new(file)?.verify_with_progress(&validated_config, *options, progress)?
         }
-        FormatFamily::Tar(_) => {}
-    }
-    verify_with(&validated_config, *options, |listing| {
-        list_detected(archive_path, format, &validated_config, listing)
-    })
+        FormatFamily::Tar(_) => verify_with(&validated_config, *options, progress, |listing| {
+            list_detected(archive_path, format, &validated_config, listing)
+        })?,
+    };
+    progress.on_complete();
+    Ok(report)
 }
 
 struct EntryOutcome {

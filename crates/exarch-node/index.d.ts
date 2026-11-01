@@ -621,6 +621,62 @@ export declare function createArchive(outputPath: string, sources: Array<string>
 export declare function createArchiveSync(outputPath: string, sources: Array<string>, config?: CreationConfig | undefined | null): CreationReport
 
 /**
+ * Create an archive from source files and directories into memory (async).
+ *
+ * The whole archive is held in memory (about 2-3x its size at the peak) with
+ * no size cap, so use `createArchive` for large archives. Sources must be
+ * regular files and directories; FIFOs and device files are not supported.
+ *
+ * # Arguments
+ *
+ * * `sources` - Array of source files/directories to include
+ * * `format` - The archive format; `'SevenZ'` cannot be created
+ * * `config` - Optional `CreationConfig` (uses defaults if omitted)
+ *
+ * # Returns
+ *
+ * Promise resolving to `CreatedArchive` with the archive bytes and the report
+ *
+ * # Errors
+ *
+ * Rejects with `INVALID_CONFIGURATION` for `'SevenZ'`, and with the errors of
+ * `createArchive` otherwise.
+ *
+ * # Examples
+ *
+ * ```javascript
+ * const { data, report } = await createArchiveToBytes(['src/'], 'TarGz');
+ * ```
+ */
+export declare function createArchiveToBytes(sources: Array<string>, format: ArchiveType, config?: CreationConfig | undefined | null): Promise<CreatedArchive>
+
+/**
+ * Create an archive from source files and directories into memory (sync).
+ *
+ * Blocks the event loop until creation completes. Prefer
+ * `createArchiveToBytes`.
+ *
+ * # Arguments
+ *
+ * The arguments of `createArchiveToBytes`.
+ *
+ * # Returns
+ *
+ * `CreatedArchive` with the archive bytes and the report
+ *
+ * # Errors
+ *
+ * The errors of `createArchiveToBytes`.
+ *
+ * # Examples
+ *
+ * ```javascript
+ * const { data } = createArchiveToBytesSync(['src/'], 'Zip');
+ * ```
+ */
+export declare function createArchiveToBytesSync(sources: Array<string>, format: ArchiveType, config?: CreationConfig | undefined | null): CreatedArchive
+
+/**
  * Create an archive from source files and directories with a progress
  * callback (async).
  *
@@ -773,6 +829,14 @@ export declare function createArchiveWithProgress(outputPath: string, sources: A
  * ```
  */
 export declare function createArchiveWithProgressSync(outputPath: string, sources: Array<string>, config?: CreationConfig | undefined | null, progress?: (((err: Error | null, arg: [string, number, number, number]) => any)) | undefined | null): CreationReport
+
+/** An archive created in memory. */
+export interface CreatedArchive {
+  /** The archive bytes as a `Uint8Array`. */
+  data: Uint8Array
+  /** Creation statistics. */
+  report: CreationReport
+}
 
 /**
  * Report of an archive creation operation.
@@ -983,6 +1047,47 @@ export declare function extractArchiveToMemory(data: Uint8Array, config?: Securi
  * ```
  */
 export declare function extractArchiveToMemorySync(data: Uint8Array, config?: SecurityConfig | undefined | null, options?: ExtractionOptions | undefined | null, maxBytes?: number | undefined | null, pathModel?: PathModel | undefined | null, format?: ArchiveType | undefined | null): MemoryExtraction
+
+/**
+ * Extract an archive held in memory into memory with a progress callback
+ * (async).
+ *
+ * Same as `extractArchiveToMemory`, plus `progress`, called once per entry
+ * with `(err, [path, total, current, bytesWritten])` (see
+ * `extractArchiveWithProgress`; `bytesWritten` is always `0`).
+ *
+ * # Arguments
+ *
+ * The arguments of `extractArchiveToMemory`, then:
+ *
+ * * `progress` - Optional progress callback
+ *
+ * # Returns
+ *
+ * Promise resolving to `MemoryExtraction` with the report and the entries
+ *
+ * # Errors
+ *
+ * The errors of `extractArchiveToMemory`. If `progress` throws, the run
+ * still completes:
+ *
+ * - When extraction succeeded, the promise rejects with
+ *   `PROGRESS_CALLBACK_ERROR`, the throw as `cause`, and the report counters;
+ *   the extracted entries are discarded, as nothing was written to disk.
+ * - When extraction failed, the core error keeps its `code` and the throw is
+ *   attached as `cause`.
+ *
+ * # Examples
+ *
+ * ```javascript
+ * const { entries } = await extractArchiveToMemoryWithProgress(
+ *   fs.readFileSync('a.tar.gz'),
+ *   null, null, null, null, null,
+ *   (err, [path, total, current]) => console.log(`${current}/${total}: ${path}`),
+ * );
+ * ```
+ */
+export declare function extractArchiveToMemoryWithProgress(data: Uint8Array, config?: SecurityConfig | undefined | null, options?: ExtractionOptions | undefined | null, maxBytes?: number | undefined | null, pathModel?: PathModel | undefined | null, format?: ArchiveType | undefined | null, progress?: (((err: Error | null, arg: [string, number, number, number]) => any)) | undefined | null): Promise<MemoryExtraction>
 
 /**
  * Extract an archive to the specified directory with a progress callback
@@ -1203,6 +1308,45 @@ export declare function listArchiveBytes(data: Uint8Array, config?: SecurityConf
  * ```
  */
 export declare function listArchiveBytesSync(data: Uint8Array, config?: SecurityConfig | undefined | null, format?: ArchiveType | undefined | null): ArchiveManifest
+
+/**
+ * List the contents of an archive held in memory with a progress callback
+ * (async).
+ *
+ * Same as `listArchiveBytes`, plus `progress`, called once per entry with
+ * `(err, [path, total, current, bytesWritten])` (`total` is `0` for TAR,
+ * `bytesWritten` always `0`).
+ *
+ * # Arguments
+ *
+ * The arguments of `listArchiveBytes`, then:
+ *
+ * * `progress` - Optional progress callback
+ *
+ * # Returns
+ *
+ * Promise resolving to `ArchiveManifest` with entry metadata
+ *
+ * # Errors
+ *
+ * The errors of `listArchiveBytes`. If `progress` throws, the run still
+ * completes. When listing succeeded, the promise rejects with
+ * `PROGRESS_CALLBACK_ERROR` and the throw as `cause`; the manifest is
+ * discarded. When listing failed, the core error keeps its `code` and the
+ * throw is attached as `cause`.
+ *
+ * # Examples
+ *
+ * ```javascript
+ * const manifest = await listArchiveBytesWithProgress(
+ *   fs.readFileSync('archive.zip'),
+ *   null,
+ *   null,
+ *   (err, [path, total, current]) => console.log(`${current}/${total}: ${path}`),
+ * );
+ * ```
+ */
+export declare function listArchiveBytesWithProgress(data: Uint8Array, config?: SecurityConfig | undefined | null, format?: ArchiveType | undefined | null, progress?: (((err: Error | null, arg: [string, number, number, number]) => any)) | undefined | null): Promise<ArchiveManifest>
 
 /**
  * List archive contents without extracting (sync).
@@ -1441,6 +1585,46 @@ export declare function verifyArchiveBytes(data: Uint8Array, config?: SecurityCo
  * ```
  */
 export declare function verifyArchiveBytesSync(data: Uint8Array, config?: SecurityConfig | undefined | null, options?: VerificationOptions | undefined | null, format?: ArchiveType | undefined | null): VerificationReport
+
+/**
+ * Verify the security of an archive held in memory with a progress callback
+ * (async).
+ *
+ * Same as `verifyArchiveBytes`, plus `progress`, called once per entry with
+ * `(err, [path, total, current, bytesWritten])` (`total` is `0` for TAR,
+ * `bytesWritten` always `0`).
+ *
+ * # Arguments
+ *
+ * The arguments of `verifyArchiveBytes`, then:
+ *
+ * * `progress` - Optional progress callback
+ *
+ * # Returns
+ *
+ * Promise resolving to `VerificationReport` with validation results
+ *
+ * # Errors
+ *
+ * The errors of `verifyArchiveBytes`. If `progress` throws, the run still
+ * completes. When verification returned a report (including one with status
+ * `FAIL`), the promise rejects with `PROGRESS_CALLBACK_ERROR` and the throw as
+ * `cause`; the report is discarded. When it errored, the core error keeps its
+ * `code` and the throw is attached as `cause`.
+ *
+ * # Examples
+ *
+ * ```javascript
+ * const report = await verifyArchiveBytesWithProgress(
+ *   fs.readFileSync('archive.zip'),
+ *   null,
+ *   null,
+ *   null,
+ *   (err, [path, total, current]) => console.log(`${current}/${total}: ${path}`),
+ * );
+ * ```
+ */
+export declare function verifyArchiveBytesWithProgress(data: Uint8Array, config?: SecurityConfig | undefined | null, options?: VerificationOptions | undefined | null, format?: ArchiveType | undefined | null, progress?: (((err: Error | null, arg: [string, number, number, number]) => any)) | undefined | null): Promise<VerificationReport>
 
 /**
  * Verify archive security (sync).

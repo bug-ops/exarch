@@ -697,6 +697,7 @@ fn sevenz_fixtures_match_the_path_based_extraction() {
 /// A 7z archive that exercises every branch the host and sink share: a
 /// directory, a repeated path, a symlink, and a file the extension filter
 /// skips.
+#[cfg(unix)]
 fn sevenz_with_duplicates_and_links() -> Vec<u8> {
     use sevenz_rust2::ArchiveEntry;
     use sevenz_rust2::ArchiveWriter;
@@ -727,6 +728,7 @@ fn sevenz_with_duplicates_and_links() -> Vec<u8> {
     writer.finish().unwrap().into_inner()
 }
 
+#[cfg(unix)]
 #[test]
 fn sevenz_duplicates_links_and_filtered_files_match_the_path_based_extraction() {
     let bytes = sevenz_with_duplicates_and_links();

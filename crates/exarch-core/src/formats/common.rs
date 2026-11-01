@@ -1374,11 +1374,15 @@ mod tests {
             (Occupant::Symlink, "symlink", symlink_kind),
             (Occupant::File, "file", ErrorKind::AlreadyExists),
         ] {
-            let err = occupant_at_dest_error(Path::new("a/b"), occupant);
+            let rel = Path::new("a/b");
+            let err = occupant_at_dest_error(rel, occupant);
             assert_eq!(err.kind(), kind, "{occupant:?}");
             assert_eq!(
                 err.to_string(),
-                format!("refusing to replace the existing {noun} at a/b")
+                format!(
+                    "refusing to replace the existing {noun} at {}",
+                    rel.display()
+                )
             );
         }
     }

@@ -10,9 +10,7 @@ use crate::copy::CopyBuffer;
 use crate::copy::copy_with_buffer;
 use crate::formats::common;
 use crate::security::fs_view::FsView;
-use crate::security::fs_view::HostFs;
 use crate::security::quota::QuotaPermit;
-use crate::types::DestDir;
 use crate::types::SafePath;
 use crate::types::SafeSymlink;
 use std::io::ErrorKind;
@@ -258,9 +256,8 @@ pub(super) fn write_file_with_permit_using(
 /// symlinks and report a dangling symlink as absent, which would let a
 /// dangling symlink slip past both duplicate detection and the
 /// pre-existing-symlink rejection below (issues #468, #477, #478). Shared by
-/// both `SevenZArchive::extract`'s Step 1 pre-validation loop and
-/// `process_entry_inner`'s Step 3 extraction callback, so the two agree on
-/// what counts as "something already at this path".
+/// both the host pre-pass and the host target's file admission, so the two
+/// agree on what counts as "something already at this path".
 ///
 /// # TOCTOU
 ///
@@ -287,20 +284,11 @@ pub(super) fn lstat_dest(dest_path: &Path) -> std::io::Result<Option<std::fs::Me
 }
 
 /// Refuses, from the file table alone, a link whose target is empty or larger
-/// than a target may be, with the error reading it in Step 3 would give.
+/// than a target may be, with the error reading it during extraction would
+/// give.
 ///
-/// Any other target is read and validated once, in Step 3, so extraction
-/// decodes each block a single time.
-pub(super) fn refuse_undecoded_target(
-    link: &SafePath,
-    file: &sevenz_rust2::ArchiveEntry,
-    dest: &DestDir,
-    config: &SecurityConfig<Validated>,
-) -> Result<()> {
-    refuse_undecoded_target_in(link, file, dest, config, &HostFs)
-}
-
-/// [`refuse_undecoded_target`] against an arbitrary [`FsView`].
+/// Any other target is read and validated once, during extraction, so
+/// extraction decodes each block a single time.
 pub(super) fn refuse_undecoded_target_in<V: FsView>(
     link: &SafePath,
     file: &sevenz_rust2::ArchiveEntry,

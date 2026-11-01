@@ -5,15 +5,16 @@
 
 mod sink_support;
 
+use std::assert_matches;
 use std::io::Cursor;
 
 use exarch_core::ArchiveError;
 use exarch_core::ArchiveReader;
-use exarch_core::ExtractionOptions;
 use exarch_core::ExtractionReport;
 use exarch_core::MemorySink;
 use exarch_core::PathModel;
 use exarch_core::SecurityConfig;
+use exarch_core::SinkOptions;
 use exarch_core::extract_to_sink;
 use sink_support::tar_archive;
 use sink_support::tar_file;
@@ -29,7 +30,7 @@ fn run(
         ArchiveReader::tar(Cursor::new(archive), None),
         &mut sink,
         config,
-        &ExtractionOptions::default(),
+        &SinkOptions::default(),
     );
     (result, sink)
 }
@@ -244,13 +245,11 @@ fn portable_case_variant_directories_charge_the_node_budget() {
     while let ArchiveError::PartialExtraction { source, .. } = error {
         error = source;
     }
-    assert!(
-        matches!(
-            error,
-            ArchiveError::QuotaExceeded {
-                resource: exarch_core::QuotaResource::TreeNodes { max: 5 }
-            }
-        ),
+    assert_matches!(
+        error,
+        ArchiveError::QuotaExceeded {
+            resource: exarch_core::QuotaResource::TreeNodes { max: 5 }
+        },
         "{error:?}"
     );
 }
@@ -262,11 +261,9 @@ fn portable_symlink_chain_leaving_the_root_is_refused() {
         PathModel::Portable,
         &links(),
     );
-    assert!(
-        matches!(
-            result.unwrap_err(),
-            ArchiveError::SymlinkEscape { .. } | ArchiveError::PartialExtraction { .. }
-        ),
+    assert_matches!(
+        result.unwrap_err(),
+        ArchiveError::SymlinkEscape { .. } | ArchiveError::PartialExtraction { .. },
         "escape not refused"
     );
     assert!(sink.get(std::path::Path::new("d")).is_none());
@@ -295,8 +292,9 @@ fn portable_hardlink_escape_is_refused() {
             &all_links(),
         );
         let error = result.unwrap_err();
-        assert!(
-            matches!(root_cause(&error), ArchiveError::HardlinkEscape { .. }),
+        assert_matches!(
+            root_cause(&error),
+            ArchiveError::HardlinkEscape { .. },
             "{target}: {error:?}"
         );
         assert!(sink.get(std::path::Path::new("h")).is_none());
@@ -312,8 +310,9 @@ fn portable_absolute_symlink_target_is_refused() {
             &links(),
         );
         let error = result.unwrap_err();
-        assert!(
-            matches!(root_cause(&error), ArchiveError::SymlinkEscape { .. }),
+        assert_matches!(
+            root_cause(&error),
+            ArchiveError::SymlinkEscape { .. },
             "{target}: {error:?}"
         );
         assert_eq!(sink.iter().count(), 0);
@@ -333,8 +332,9 @@ fn portable_file_through_an_escaping_link_is_refused() {
             &links(),
         );
         let error = result.unwrap_err();
-        assert!(
-            matches!(root_cause(&error), ArchiveError::SymlinkEscape { .. }),
+        assert_matches!(
+            root_cause(&error),
+            ArchiveError::SymlinkEscape { .. },
             "{target}: {error:?}"
         );
         assert!(sink.get(std::path::Path::new("l/pwn")).is_none());
@@ -367,10 +367,7 @@ fn portable_limits_hold_for_the_path_an_entry_lands_at() {
         &links(),
     );
     let error = over.unwrap_err();
-    assert!(
-        matches!(root_cause(&error), ArchiveError::Io(_)),
-        "{error:?}"
-    );
+    assert_matches!(root_cause(&error), ArchiveError::Io(_), "{error:?}");
     assert!(
         sink.iter()
             .all(|(_, entry)| !matches!(entry, exarch_core::MemoryEntry::File { .. }))

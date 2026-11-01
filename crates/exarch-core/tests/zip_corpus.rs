@@ -16,6 +16,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use std::assert_matches;
 use std::io::Cursor;
 use std::io::Write;
 use std::path::Path;
@@ -245,11 +246,9 @@ fn decoy_central_directory_before_a_prefixed_directory_is_reported() {
 
         let dest = dir.path().join(format!("out-{label}"));
         std::fs::create_dir(&dest).unwrap();
-        assert!(
-            matches!(
-                extract_archive(&path, &dest, &SecurityConfig::default()),
-                Err(ArchiveError::SecurityViolation { .. } | ArchiveError::ZipInconsistency { .. })
-            ),
+        assert_matches!(
+            extract_archive(&path, &dest, &SecurityConfig::default()),
+            Err(ArchiveError::SecurityViolation { .. } | ArchiveError::ZipInconsistency { .. }),
             "{label}"
         );
     }

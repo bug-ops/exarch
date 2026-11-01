@@ -4,6 +4,7 @@
 
 #![allow(clippy::unwrap_used)]
 
+use std::assert_matches;
 use std::io::Cursor;
 use std::path::Path;
 use std::path::PathBuf;
@@ -107,8 +108,7 @@ fn reparse_file_and_nested_reparse_entries_are_refused_before_any_write() {
 
         let err = extract_archive(&archive, out.path(), &SecurityConfig::default()).unwrap_err();
 
-        assert!(
-            matches!(&err, ArchiveError::SecurityViolation { reason, .. } if reason.contains("reparse point")),
+        assert_matches!(&err, ArchiveError::SecurityViolation { reason, .. } if reason.contains("reparse point"),
             "{err}"
         );
         assert!(dir_names(&out).is_empty(), "a.txt must not be written");
@@ -449,8 +449,7 @@ fn anti_item_inside_a_solid_block_fails_closed_before_any_write() {
 
         let err = extract_archive(&archive, out.path(), &config).unwrap_err();
 
-        assert!(
-            matches!(&err, ArchiveError::InvalidArchive(m) if m.contains(refusal)),
+        assert_matches!(&err, ArchiveError::InvalidArchive(m) if m.contains(refusal),
             "anti item at {anti_at}: {err:?}"
         );
         assert!(dir_names(&out).is_empty(), "anti item at {anti_at}");
@@ -506,8 +505,7 @@ fn assert_refused_by_list_verify_and_extract(entries: Vec<Pushed>, expect: &str)
         verify_archive(&archive, &config).unwrap_err(),
         extract_archive(&archive, out.path(), &config).unwrap_err(),
     ] {
-        assert!(
-            matches!(&err, ArchiveError::SecurityViolation { reason, .. } if reason.contains(expect)),
+        assert_matches!(&err, ArchiveError::SecurityViolation { reason, .. } if reason.contains(expect),
             "{expect}: {err}"
         );
     }

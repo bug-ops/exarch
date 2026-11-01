@@ -23,11 +23,10 @@
 //!   platform on every host and suits a sink whose storage is read elsewhere.
 //! - Validation assumes an EMPTY namespace: the sink must start empty. Entries
 //!   the sink already holds are invisible to it.
-//! - Duplicates follow [`ExtractionOptions`](crate::ExtractionOptions)
-//!   `skip_duplicates` exactly as the path-based API does: skipped entries are
-//!   never delivered, and with overwrite a later file replaces an earlier one
-//!   (a second `create_file` for the same path) and a later symlink replaces an
-//!   earlier file.
+//! - Duplicates follow [`SinkOptions`] `skip_duplicates` exactly as the
+//!   path-based API does: skipped entries are never delivered, and with
+//!   overwrite a later file replaces an earlier one (a second `create_file` for
+//!   the same path) and a later symlink replaces an earlier file.
 //! - Quotas, ratio limits and declared-size enforcement count the bytes the
 //!   archive produces, not what the sink stores.
 //!
@@ -82,10 +81,10 @@
 //!
 //! use exarch_core::ArchiveReader;
 //! use exarch_core::EntrySink;
-//! use exarch_core::ExtractionOptions;
 //! use exarch_core::SafePath;
 //! use exarch_core::SanitizedMode;
 //! use exarch_core::SecurityConfig;
+//! use exarch_core::SinkOptions;
 //! use exarch_core::extract_to_sink;
 //!
 //! #[derive(Default)]
@@ -139,7 +138,7 @@
 //!     reader,
 //!     &mut sink,
 //!     &SecurityConfig::default(),
-//!     &ExtractionOptions::default(),
+//!     &SinkOptions::default(),
 //! )?;
 //! assert_eq!(report.files_extracted, 1);
 //! assert_eq!(sink.0[Path::new("docs/hello.txt")], b"hello");
@@ -150,10 +149,12 @@
 mod memory;
 
 pub use memory::MemoryEntry;
+pub use memory::MemoryEntryKind;
 pub use memory::MemoryFile;
 pub use memory::MemoryLimit;
 pub use memory::MemorySink;
-pub use memory::MemorySinkFull;
+pub use memory::extract_bytes_to_memory;
+pub use memory::utf8_entry_path;
 
 use std::collections::HashMap;
 use std::io;
@@ -163,6 +164,7 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use crate::ArchiveError;
+use crate::ExtractionOptions;
 use crate::QuotaResource;
 use crate::Result;
 use crate::SecurityConfig;
@@ -171,7 +173,12 @@ use crate::copy::CopyBuffer;
 use crate::copy::copy_with_buffer;
 use crate::formats::common;
 use crate::formats::target::ExtractTarget;
+use crate::formats::target::FileAdmission;
+use crate::formats::target::FileRequest;
 use crate::formats::target::Tally;
+use crate::security::admitted::EntrySize;
+use crate::security::admitted::ValidatedFile;
+use crate::security::admitted::ValidatedHardlink;
 use crate::security::fs_view::CollisionRecording;
 use crate::security::fs_view::Containment;
 use crate::security::fs_view::FsView as _;
@@ -188,12 +195,127 @@ use crate::security::hardlink::HardlinkTracker;
 use crate::security::hardlink::hardlink_target_missing;
 use crate::security::permissions::SanitizedMode;
 use crate::security::quota::EntryCount;
-use crate::security::quota::QuotaPermit;
-use crate::security::validator::ValidatedEntry;
 use crate::security::validator::ValidatorCore;
-use crate::types::EntryType;
 use crate::types::SafePath;
 use crate::types::SafeSymlink;
+
+/// What a sink extraction honours of [`ExtractionOptions`].
+///
+/// Atomic extraction renames a directory, which a sink does not have, so the
+/// only setting that carries over is the duplicate policy.
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::ExtractionOptions;
+/// use exarch_core::SinkOptions;
+///
+/// let options = SinkOptions::default().with_skip_duplicates(false);
+/// assert!(!options.skip_duplicates);
+///
+/// let atomic = ExtractionOptions::default().with_atomic(true);
+/// assert!(SinkOptions::try_from(&atomic).is_err());
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SinkOptions {
+    /// Skip an entry whose destination path an earlier entry already holds
+    /// (the default) instead of failing.
+    pub skip_duplicates: bool,
+}
+
+impl Default for SinkOptions {
+    fn default() -> Self {
+        Self {
+            skip_duplicates: true,
+        }
+    }
+}
+
+impl SinkOptions {
+    /// Sets whether a duplicate entry is skipped or fails the extraction.
+    #[must_use]
+    pub const fn with_skip_duplicates(mut self, skip: bool) -> Self {
+        self.skip_duplicates = skip;
+        self
+    }
+}
+
+impl SinkOptions {
+    /// The duplicate policy of path-based options, for extraction paths that
+    /// handle `atomic` themselves.
+    pub(crate) const fn duplicates_of(options: &ExtractionOptions) -> Self {
+        Self {
+            skip_duplicates: options.skip_duplicates,
+        }
+    }
+}
+
+impl TryFrom<&ExtractionOptions> for SinkOptions {
+    type Error = ArchiveError;
+
+    /// Carries the duplicate policy over from path-based options.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArchiveError::InvalidConfiguration`] for `atomic`, which needs
+    /// a directory to rename.
+    fn try_from(options: &ExtractionOptions) -> Result<Self> {
+        if options.atomic {
+            return Err(ArchiveError::InvalidConfiguration {
+                reason: "atomic extraction renames a directory and cannot target a sink".into(),
+            });
+        }
+        Ok(Self {
+            skip_duplicates: options.skip_duplicates,
+        })
+    }
+}
+
+/// The payload of the [`io::ErrorKind::QuotaExceeded`] error a sink returns
+/// when it has no room for an entry.
+///
+/// Extraction maps it to
+/// [`QuotaResource::SinkCapacity`], so a
+/// custom sink reports running out of space the same way [`MemorySink`] does,
+/// and not as a plain [`ArchiveError::Io`].
+///
+/// # Examples
+///
+/// ```
+/// use std::io;
+///
+/// use exarch_core::SinkFull;
+///
+/// let error = io::Error::new(io::ErrorKind::QuotaExceeded, SinkFull::new(1024));
+/// assert_eq!(error.to_string(), "sink is full (1024 bytes)");
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SinkFull {
+    max: u64,
+}
+
+impl SinkFull {
+    /// A full sink whose capacity is `max` bytes.
+    #[must_use]
+    pub const fn new(max: u64) -> Self {
+        Self { max }
+    }
+
+    /// The capacity that was exceeded, in bytes.
+    #[must_use]
+    pub const fn max(&self) -> u64 {
+        self.max
+    }
+}
+
+impl std::fmt::Display for SinkFull {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "sink is full ({} bytes)", self.max)
+    }
+}
+
+impl std::error::Error for SinkFull {}
 
 /// Receives the validated entries of an archive in extraction order.
 ///
@@ -363,18 +485,16 @@ fn place_error(error: PlaceError) -> ArchiveError {
     }
 }
 
-/// Maps an error a sink returned, keeping a full [`MemorySink`] typed.
+/// Maps an error a sink returned, keeping a full sink typed.
 fn sink_error(error: io::Error) -> ArchiveError {
     let full = error
         .get_ref()
-        .and_then(|inner| inner.downcast_ref::<MemorySinkFull>())
-        .map(MemorySinkFull::limit);
+        .and_then(|inner| inner.downcast_ref::<SinkFull>())
+        .map(SinkFull::max);
     full.map_or_else(
         || ArchiveError::Io(error),
-        |limit| ArchiveError::QuotaExceeded {
-            resource: QuotaResource::SinkCapacity {
-                max: limit.bytes().get(),
-            },
+        |max| ArchiveError::QuotaExceeded {
+            resource: QuotaResource::SinkCapacity { max },
         },
     )
 }
@@ -386,40 +506,76 @@ fn landed(resolved: PathBuf) -> SafePath {
     SafePath::new_unchecked(resolved)
 }
 
+impl<S: EntrySink> SinkTarget<'_, S> {
+    /// Applies the host's name limits, which the host meets when it writes.
+    fn check_limits(&self, path: &Path, link: Option<(&Path, LinkKind)>) -> Result<()> {
+        self.model
+            .check_name_lengths(path)
+            .map_err(ArchiveError::Io)?;
+        if let Some((target, kind)) = link {
+            self.model
+                .check_link_target_length(target, kind)
+                .map_err(ArchiveError::Io)?;
+        }
+        Ok(())
+    }
+}
+
 impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
-    fn validate(
+    type AdmittedFile = ValidatedFile;
+
+    fn validate_file(
         &mut self,
-        path: &Path,
-        entry_type: &EntryType,
-        size: u64,
-        compressed_size: Option<u64>,
-        mode: Option<u32>,
-    ) -> Result<ValidatedEntry> {
+        request: FileRequest<'_>,
+        _tally: &mut Tally<'_>,
+    ) -> Result<FileAdmission<ValidatedFile>> {
         let ctx = self.core.context();
-        let validated = self.core.validate_entry_in(
-            path,
-            entry_type,
-            size,
-            compressed_size,
-            mode,
+        let file = self.core.validate_file_in(
+            request.path,
+            request.size,
+            request.mode,
             &self.root,
             &self.tree,
             &ctx,
         )?;
-        // The host meets its name limits when it writes, after validation.
-        self.model
-            .check_name_lengths(path)
-            .map_err(ArchiveError::Io)?;
-        match entry_type {
-            EntryType::Symlink { target } => self
-                .model
-                .check_link_target_length(target, LinkKind::Symlink),
-            EntryType::Hardlink { target } => self
-                .model
-                .check_link_target_length(target, LinkKind::Hardlink),
-            EntryType::File | EntryType::Directory => Ok(()),
-        }
-        .map_err(ArchiveError::Io)?;
+        self.check_limits(request.path, None)?;
+        Ok(FileAdmission::Write(file))
+    }
+
+    fn validate_directory(&mut self, path: &Path, size: EntrySize) -> Result<SafePath> {
+        let ctx = self.core.context();
+        let safe_path = self
+            .core
+            .validate_directory_in(path, size, &self.root, &self.tree, &ctx)?;
+        self.check_limits(path, None)?;
+        Ok(safe_path)
+    }
+
+    fn validate_symlink(
+        &mut self,
+        path: &Path,
+        target: &Path,
+        size: EntrySize,
+    ) -> Result<SafeSymlink> {
+        let ctx = self.core.context();
+        let validated = self
+            .core
+            .validate_symlink_in(path, target, size, &self.root, &self.tree, &ctx)?;
+        self.check_limits(path, Some((target, LinkKind::Symlink)))?;
+        Ok(validated.symlink)
+    }
+
+    fn validate_hardlink(
+        &mut self,
+        path: &Path,
+        target: &Path,
+        size: EntrySize,
+    ) -> Result<ValidatedHardlink> {
+        let ctx = self.core.context();
+        let validated = self
+            .core
+            .validate_hardlink_in(path, target, size, &self.root, &self.tree, &ctx)?;
+        self.check_limits(path, Some((target, LinkKind::Hardlink)))?;
         Ok(validated)
     }
 
@@ -437,18 +593,17 @@ impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
     fn file<R: Read>(
         &mut self,
         reader: &mut R,
-        path: &SafePath,
-        mode: Option<SanitizedMode>,
-        _permit: QuotaPermit,
+        admitted: ValidatedFile,
         size: u64,
         tally: &mut Tally<'_>,
     ) -> Result<()> {
         // Overflow guard only, as on the host: the sum is not stored.
         common::checked_add_bytes(tally.report.bytes_written, size)?;
 
+        let ValidatedFile { path, mode, .. } = admitted;
         let rel = path.as_path();
-        match (self.tree.occupant(rel), tally.skip_duplicates) {
-            (Some(_), true) => return skip_duplicate(tally),
+        match (self.tree.occupant(rel), tally.options.skip_duplicates) {
+            (Some(_), true) => return tally.record_duplicate_skip().map(drop),
             (Some(occupant @ (Occupant::Directory | Occupant::Symlink)), false) => {
                 return Err(common::occupant_at_dest_error(rel, occupant).into());
             }
@@ -477,8 +632,8 @@ impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
         let rel = symlink.link_path();
         let target = symlink.target_path();
         let occupant = self.tree.occupant(rel);
-        match (occupant, tally.skip_duplicates) {
-            (Some(_), true) => return skip_duplicate(tally),
+        match (occupant, tally.options.skip_duplicates) {
+            (Some(_), true) => return tally.record_duplicate_skip().map(drop),
             (Some(Occupant::Directory), false) => {
                 return Err(common::occupant_at_dest_error(rel, Occupant::Directory).into());
             }
@@ -488,7 +643,10 @@ impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
                 let unchanged = self.tree.place(rel, Node::Symlink(target.to_path_buf()));
                 return match unchanged {
                     Ok(_) => common::checked_increment_files_skipped(tally.report),
-                    Err(_) => Err(common::occupant_at_dest_error(rel, Occupant::Symlink).into()),
+                    Err(PlaceError::Budget(exceeded)) => Err(exceeded.into()),
+                    Err(PlaceError::Conflict(_)) => {
+                        Err(common::occupant_at_dest_error(rel, Occupant::Symlink).into())
+                    }
                 };
             }
             (Some(Occupant::File) | None, _) => {}
@@ -541,7 +699,7 @@ impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
             )));
         }
         if self.tree.occupant(link.as_path()).is_some() {
-            if tally.skip_duplicates {
+            if tally.options.skip_duplicates {
                 common::checked_increment_files_skipped(tally.report)?;
                 *hardlink_duplicate_skips = hardlink_duplicate_skips.saturating_add(1);
                 return Ok(());
@@ -571,10 +729,4 @@ impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
         tally.progress.on_bytes_written(size);
         Ok(())
     }
-}
-
-fn skip_duplicate(tally: &mut Tally<'_>) -> Result<()> {
-    common::checked_increment_files_skipped(tally.report)?;
-    *tally.duplicate_skips = tally.duplicate_skips.saturating_add(1);
-    Ok(())
 }

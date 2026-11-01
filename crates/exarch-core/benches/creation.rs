@@ -22,7 +22,7 @@ use criterion::criterion_main;
 use exarch_core::create_archive;
 use exarch_core::creation::CreationConfig;
 use exarch_core::creation::filters;
-use exarch_core::formats::detect::ArchiveType;
+use exarch_core::formats::detect::CreatableFormat;
 use std::fs;
 use std::hint::black_box;
 use std::path::Path;
@@ -139,11 +139,11 @@ fn benchmark_create_tar_formats(c: &mut Criterion) {
     let source_dir = create_test_directory(&temp, 100);
 
     let formats = [
-        ("tar", ArchiveType::Tar),
-        ("tar.gz", ArchiveType::TarGz),
-        ("tar.bz2", ArchiveType::TarBz2),
-        ("tar.xz", ArchiveType::TarXz),
-        ("tar.zst", ArchiveType::TarZst),
+        ("tar", CreatableFormat::Tar),
+        ("tar.gz", CreatableFormat::TarGz),
+        ("tar.bz2", CreatableFormat::TarBz2),
+        ("tar.xz", CreatableFormat::TarXz),
+        ("tar.zst", CreatableFormat::TarZst),
     ];
 
     for (name, format) in formats {
@@ -195,7 +195,7 @@ fn benchmark_compression_levels(c: &mut Criterion) {
                 b.iter(|| {
                     let output = temp.path().join("output.tar.gz");
                     let config = CreationConfig::default()
-                        .with_format(Some(ArchiveType::TarGz))
+                        .with_format(Some(CreatableFormat::TarGz))
                         .with_compression_level(*level)
                         .unwrap();
                     let _ = create_archive(

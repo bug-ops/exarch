@@ -18,6 +18,7 @@ pub struct CliProgress {
     bar: ProgressBar,
     label: String,
     bytes_written: u64,
+    sized: bool,
 }
 
 impl CliProgress {
@@ -30,23 +31,52 @@ impl CliProgress {
     #[must_use]
     pub fn new(total: usize, message: &str) -> Self {
         let bar = ProgressBar::new(total as u64);
-
-        // Template: "Extracting [████████░░░░] 42/100 files"
-        // Bytes are appended via set_message to keep pos/len as entry counts.
-        bar.set_style(
-            ProgressStyle::default_bar()
-                .template("{msg} [{bar:40.cyan/blue}] {pos}/{len} files")
-                .unwrap_or_else(|_| ProgressStyle::default_bar())
-                .progress_chars("█▓░"),
-        );
-
+        bar.set_style(Self::sized_style());
         bar.set_message(message.to_string());
 
         Self {
             bar,
             label: message.to_string(),
             bytes_written: 0,
+            sized: true,
         }
+    }
+
+    /// Creates a progress bar for a run whose entry total is not known up
+    /// front.
+    ///
+    /// It shows a plain entry count until `on_entry_start` reports a non-zero
+    /// total (ZIP and 7z know theirs; a TAR stream does not), then becomes a
+    /// regular bar.
+    ///
+    /// # Arguments
+    ///
+    /// * `message` - Label displayed before the count (e.g., "Extracting")
+    #[must_use]
+    pub fn counting(message: &str) -> Self {
+        let bar = ProgressBar::new_spinner();
+        bar.set_style(
+            ProgressStyle::default_spinner()
+                .template("{msg} {pos} files")
+                .unwrap_or_else(|_| ProgressStyle::default_spinner()),
+        );
+        bar.set_message(message.to_string());
+
+        Self {
+            bar,
+            label: message.to_string(),
+            bytes_written: 0,
+            sized: false,
+        }
+    }
+
+    // Template: "Extracting [████████░░░░] 42/100 files". Bytes are appended
+    // via set_message to keep pos/len as entry counts.
+    fn sized_style() -> ProgressStyle {
+        ProgressStyle::default_bar()
+            .template("{msg} [{bar:40.cyan/blue}] {pos}/{len} files")
+            .unwrap_or_else(|_| ProgressStyle::default_bar())
+            .progress_chars("█▓░")
     }
 
     /// Checks if we should show progress (TTY detection).
@@ -63,7 +93,13 @@ impl Drop for CliProgress {
 }
 
 impl ProgressCallback for CliProgress {
-    fn on_entry_start(&mut self, _path: &Path, _total: usize, _current: usize) {}
+    fn on_entry_start(&mut self, _path: &Path, total: usize, _current: usize) {
+        if !self.sized && total > 0 {
+            self.sized = true;
+            self.bar.set_length(total as u64);
+            self.bar.set_style(Self::sized_style());
+        }
+    }
 
     fn on_bytes_written(&mut self, bytes: u64) {
         self.bytes_written += bytes;
@@ -146,5 +182,18 @@ mod tests {
         progress.on_entry_complete(Path::new("test.txt"));
 
         assert_eq!(progress.bytes_written, 1024);
+    }
+
+    #[test]
+    fn test_counting_progress_becomes_sized_once_total_is_known() {
+        let mut progress = CliProgress::counting("Testing");
+        assert!(!progress.sized);
+
+        progress.on_entry_start(Path::new("a"), 0, 1);
+        assert!(!progress.sized);
+
+        progress.on_entry_start(Path::new("b"), 7, 2);
+        assert!(progress.sized);
+        assert_eq!(progress.bar.length(), Some(7));
     }
 }

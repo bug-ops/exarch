@@ -138,6 +138,7 @@ use crate::ExtractionReport;
 use crate::ProgressCallback;
 use crate::Result;
 use crate::SecurityConfig;
+use crate::SinkOptions;
 use crate::VerificationOptions;
 use crate::ZipConsistencyPolicy;
 use crate::config::Validated;
@@ -147,17 +148,18 @@ use crate::inspection::integrity::DecodeFailure;
 use crate::inspection::integrity::DecodeOutcome;
 use crate::inspection::integrity::IntegrityPass;
 use crate::inspection::integrity::Slot;
+use crate::security::admitted::EntrySize;
 use crate::security::validator::EntryPath;
 use crate::security::validator::NodeKind;
-use crate::security::validator::ValidatedEntryType;
 use crate::security::validator::require_non_empty_name;
 use crate::security::zipbomb::DeclaredCompressedBudget;
-use crate::types::EntryType;
 use crate::types::safe_path::stream_separator_error;
 
 use super::common;
 use super::common::EntryCompleteGuard;
 use super::target::ExtractTarget;
+use super::target::FileAdmission;
+use super::target::FileRequest;
 use super::target::HostTarget;
 use super::target::Tally;
 use super::traits::ArchiveFormat;
@@ -607,34 +609,21 @@ impl<R: Read + Seek> ZipArchive<R> {
 
         let (uncompressed_size, compressed_size) = ZipEntryAdapter::get_sizes(&zip_file);
         let mode = zip_file.unix_mode();
+        let size = EntrySize {
+            uncompressed: uncompressed_size,
+            compressed: Some(compressed_size),
+        };
 
         let entry_kind = zip_entry_kind(zip_file.is_dir(), mode);
         if entry_kind == ZipEntryKind::Directory {
             drop(zip_file);
-            let validated = target.validate(
-                &path,
-                &EntryType::Directory,
-                uncompressed_size,
-                Some(compressed_size),
-                mode,
-            )?;
-            target.directory(validated.safe_path(), &mut ctx.tally)?;
+            let safe_path = target.validate_directory(&path, size)?;
+            target.directory(&safe_path, &mut ctx.tally)?;
         } else if entry_kind == ZipEntryKind::Symlink {
             let link_target = ZipEntryAdapter::read_symlink_target(&mut zip_file)?;
             drop(zip_file);
-            let entry_type = EntryType::Symlink {
-                target: link_target,
-            };
-            let validated = target.validate(
-                &path,
-                &entry_type,
-                uncompressed_size,
-                Some(compressed_size),
-                mode,
-            )?;
-            if let ValidatedEntryType::Symlink(safe_symlink) = validated.entry_type() {
-                target.symlink(safe_symlink, &mut ctx.tally)?;
-            }
+            let safe_symlink = target.validate_symlink(&path, &link_target, size)?;
+            target.symlink(&safe_symlink, &mut ctx.tally)?;
         } else {
             if !common::check_extension_allowed(
                 &path,
@@ -646,34 +635,16 @@ impl<R: Read + Seek> ZipArchive<R> {
             }
             // File: validate BEFORE writing (security invariant preserved),
             // then extract with the same zip_file (stream still at position 0)
-            let validated = target.validate(
-                &path,
-                &EntryType::File,
-                uncompressed_size,
-                Some(compressed_size),
+            let request = FileRequest {
+                path: &path,
+                size,
                 mode,
-            )?;
-            // into_parts() moves the QuotaPermit out by value into
-            // extract_file (mirrors 7z's process_entry_inner, issue #445),
-            // rather than only observing it through entry_type()'s shared
-            // reference. validate_entry(&EntryType::File, ..) always yields
-            // ValidatedEntryType::File, never another variant.
-            let (safe_path, entry_type, sanitized_mode) = validated.into_parts();
-            let ValidatedEntryType::File(permit) = entry_type else {
-                return Err(ArchiveError::violation(
-                    "validate_entry(EntryType::File) returned a non-File variant".into(),
-                ));
             };
-            target
-                .file(
-                    &mut zip_file,
-                    &safe_path,
-                    sanitized_mode,
-                    permit,
-                    uncompressed_size,
-                    &mut ctx.tally,
-                )
-                .map_err(|e| Self::classify_declared_size_overrun(e, uncompressed_size))?;
+            if let FileAdmission::Write(admitted) = target.validate_file(request, &mut ctx.tally)? {
+                target
+                    .file(&mut zip_file, admitted, uncompressed_size, &mut ctx.tally)
+                    .map_err(|e| Self::classify_declared_size_overrun(e, uncompressed_size))?;
+            }
         }
 
         Ok(())
@@ -706,11 +677,10 @@ impl<R: Read + Seek> ZipArchive<R> {
         _checked: StructureChecked,
         target: &mut T,
         config: &SecurityConfig<Validated>,
-        options: &ExtractionOptions,
+        options: SinkOptions,
         progress: &mut dyn ProgressCallback,
     ) -> Result<ExtractionReport> {
         let start = Instant::now();
-        let skip_duplicates = options.skip_duplicates;
 
         let mut report = ExtractionReport::new();
 
@@ -761,7 +731,7 @@ impl<R: Read + Seek> ZipArchive<R> {
             let mut ctx = ZipExtractionContext {
                 tally: Tally {
                     report: &mut report,
-                    skip_duplicates,
+                    options,
                     duplicate_skips: &mut duplicate_skips,
                     progress: guard.progress_mut(),
                 },
@@ -801,7 +771,13 @@ impl<R: Read + Seek> ArchiveFormat for ZipArchive<R> {
     ) -> Result<ExtractionReport> {
         let checked = self.check_structure(config)?;
         let mut target = HostTarget::create(output_dir, config)?;
-        self.extract_into(checked, &mut target, config, options, progress)
+        self.extract_into(
+            checked,
+            &mut target,
+            config,
+            SinkOptions::duplicates_of(options),
+            progress,
+        )
     }
 
     fn list(

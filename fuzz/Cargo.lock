@@ -215,6 +215,7 @@ dependencies = [
  "exarch-core",
  "libfuzzer-sys",
  "tempfile",
+ "unicode-normalization",
 ]
 
 [[package]]

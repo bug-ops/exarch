@@ -380,7 +380,7 @@ mod tests {
     use crate::api::extract_archive;
     use crate::creation::compression::compression_level_to_flate2;
     use crate::creation::compression::compression_level_to_zstd;
-    use crate::formats::detect::ArchiveType;
+    use crate::formats::detect::CreatableFormat;
     use std::assert_matches;
     use std::fs;
     use tempfile::TempDir;
@@ -396,7 +396,7 @@ mod tests {
         let config = CreationConfig::default()
             .with_exclude_patterns(vec![])
             .with_include_hidden(true)
-            .with_format(Some(ArchiveType::Tar));
+            .with_format(Some(CreatableFormat::Tar));
 
         let report = create_archive(
             &output,
@@ -424,7 +424,7 @@ mod tests {
         let config = CreationConfig::default()
             .with_exclude_patterns(vec![])
             .with_include_hidden(true)
-            .with_format(Some(ArchiveType::Tar));
+            .with_format(Some(CreatableFormat::Tar));
 
         let report = create_archive(&output, &[source_dir.path()], &config).unwrap();
 
@@ -447,7 +447,7 @@ mod tests {
             .with_exclude_patterns(vec![])
             .with_compression_level(9)
             .unwrap()
-            .with_format(Some(ArchiveType::TarGz));
+            .with_format(Some(CreatableFormat::TarGz));
 
         let report = create_archive(&output, &[source_dir.path()], &config).unwrap();
 
@@ -468,7 +468,7 @@ mod tests {
 
         let config = CreationConfig::default()
             .with_exclude_patterns(vec![])
-            .with_format(Some(ArchiveType::TarBz2));
+            .with_format(Some(CreatableFormat::TarBz2));
 
         let report = create_archive(&output, &[source_dir.path()], &config).unwrap();
 
@@ -489,7 +489,7 @@ mod tests {
 
         let config = CreationConfig::default()
             .with_exclude_patterns(vec![])
-            .with_format(Some(ArchiveType::TarXz));
+            .with_format(Some(CreatableFormat::TarXz));
 
         let report = create_archive(&output, &[source_dir.path()], &config).unwrap();
 
@@ -510,7 +510,7 @@ mod tests {
 
         let config = CreationConfig::default()
             .with_exclude_patterns(vec![])
-            .with_format(Some(ArchiveType::TarZst));
+            .with_format(Some(CreatableFormat::TarZst));
 
         let report = create_archive(&output, &[source_dir.path()], &config).unwrap();
 
@@ -537,10 +537,10 @@ mod tests {
         fs::write(source_dir.path().join("test.txt"), "a".repeat(10000)).unwrap();
 
         for format in [
-            ArchiveType::TarGz,
-            ArchiveType::TarBz2,
-            ArchiveType::TarXz,
-            ArchiveType::TarZst,
+            CreatableFormat::TarGz,
+            CreatableFormat::TarBz2,
+            CreatableFormat::TarXz,
+            CreatableFormat::TarZst,
         ] {
             for level in 1..=9 {
                 let output = temp.path().join(format!("output_{format:?}_{level}.tar"));
@@ -573,7 +573,7 @@ mod tests {
         let config = CreationConfig::default()
             .with_exclude_patterns(vec![])
             .with_preserve_permissions(true)
-            .with_format(Some(ArchiveType::Tar));
+            .with_format(Some(CreatableFormat::Tar));
 
         let report = create_archive(&output, &[source_dir.path()], &config).unwrap();
         assert_eq!(report.files_added, 1);
@@ -610,7 +610,7 @@ mod tests {
         let config = CreationConfig::default()
             .with_exclude_patterns(vec![])
             .with_preserve_permissions(false)
-            .with_format(Some(ArchiveType::Tar));
+            .with_format(Some(CreatableFormat::Tar));
 
         let report = create_archive(&output, &[source_dir.path()], &config).unwrap();
         assert_eq!(report.directories_added, 1);
@@ -642,7 +642,7 @@ mod tests {
         let config = CreationConfig::default()
             .with_exclude_patterns(vec![])
             .with_preserve_permissions(true)
-            .with_format(Some(ArchiveType::Tar));
+            .with_format(Some(CreatableFormat::Tar));
         create_archive(&output, &[source_dir.path()], &config).unwrap();
 
         let mut archive = tar::Archive::new(fs::File::open(&output).unwrap());
@@ -677,7 +677,7 @@ mod tests {
         let config = CreationConfig::default()
             .with_exclude_patterns(vec![])
             .with_include_hidden(true)
-            .with_format(Some(ArchiveType::Tar));
+            .with_format(Some(CreatableFormat::Tar));
 
         let report = create_archive(&output, &[source_dir.path()], &config).unwrap();
 
@@ -701,7 +701,7 @@ mod tests {
         let config = CreationConfig::default()
             .with_exclude_patterns(vec![])
             .with_include_hidden(true)
-            .with_format(Some(ArchiveType::TarGz));
+            .with_format(Some(CreatableFormat::TarGz));
 
         let report = create_archive(&output, &[source_dir.path()], &config).unwrap();
         assert!(report.files_added >= 2);
@@ -722,7 +722,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let output = temp.path().join("output.tar");
 
-        let config = CreationConfig::default().with_format(Some(ArchiveType::Tar));
+        let config = CreationConfig::default().with_format(Some(CreatableFormat::Tar));
         let result = create_archive(&output, &[Path::new("/nonexistent/path")], &config);
 
         assert!(result.is_err());
@@ -806,7 +806,7 @@ mod tests {
 
         let config = CreationConfig::default()
             .with_exclude_patterns(vec![])
-            .with_format(Some(ArchiveType::TarZst))
+            .with_format(Some(CreatableFormat::TarZst))
             .validate()
             .unwrap();
 

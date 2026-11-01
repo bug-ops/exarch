@@ -196,6 +196,7 @@ fn is_empty_sevenz_archive<R: Read + Seek>(err: &sevenz_rust2::Error, source: &m
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use std::assert_matches;
     use std::io::Cursor;
 
     const NO_FILES_INFO: &[u8] =
@@ -250,8 +251,7 @@ mod tests {
     fn check_rejects_pack_streams_without_blocks() {
         let bytes = archive_with_pack_stream_and_no_blocks();
         let err = read_sevenz_header(&mut Cursor::new(bytes)).unwrap_err();
-        assert!(
-            matches!(&err, ArchiveError::InvalidArchive(m) if m.starts_with("failed to open 7z archive: ")),
+        assert_matches!(&err, ArchiveError::InvalidArchive(m) if m.starts_with("failed to open 7z archive: "),
             "{err:?}"
         );
     }
@@ -283,8 +283,7 @@ mod tests {
     #[test]
     fn read_header_rejects_the_vector_as_invalid_archive() {
         let err = read_sevenz_header(&mut Cursor::new(NO_FILES_INFO)).unwrap_err();
-        assert!(
-            matches!(&err, ArchiveError::InvalidArchive(m) if m.starts_with("failed to open 7z archive: ")),
+        assert_matches!(&err, ArchiveError::InvalidArchive(m) if m.starts_with("failed to open 7z archive: "),
             "{err:?}"
         );
     }

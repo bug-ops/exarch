@@ -162,6 +162,17 @@ def test_traversal_is_rejected_like_the_path_api():
         exarch.extract_archive_to_memory(data)
 
 
+def test_failure_after_delivered_entries_reports_discarded_writes():
+    data = _tar([_file("a", b"x"), _file("../b", b"y")])
+
+    with pytest.raises(exarch.PathTraversalError) as info:
+        exarch.extract_archive_to_memory(data)
+
+    assert info.value.writes == "discarded"
+    assert not hasattr(info.value, "files_extracted")
+    assert not hasattr(info.value, "bytes_written")
+
+
 def test_unknown_format_name_and_undetectable_bytes():
     with pytest.raises(ValueError, match="format must be one of"):
         exarch.extract_archive_to_memory(b"", format="rar")

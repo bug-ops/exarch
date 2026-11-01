@@ -115,6 +115,7 @@ pub use creation::CreationConfig;
 pub use creation::CreationReport;
 pub use formats::traits::FormatCreator;
 pub use writer::ArchiveWriter;
+pub use writer::create_to_bytes;
 pub use writer::create_to_writer;
 pub use writer::create_to_writer_with_progress;
 
@@ -160,10 +161,14 @@ pub use security::boundary::validate_raw_path_str;
 pub use security::fs_view::PathModel;
 pub use sink::EntrySink;
 pub use sink::MemoryEntry;
+pub use sink::MemoryEntryKind;
 pub use sink::MemoryFile;
 pub use sink::MemoryLimit;
 pub use sink::MemorySink;
-pub use sink::MemorySinkFull;
+pub use sink::SinkFull;
+pub use sink::SinkOptions;
+pub use sink::extract_bytes_to_memory;
+pub use sink::utf8_entry_path;
 
 // Re-export types module for easier access
 pub use types::DestDir;

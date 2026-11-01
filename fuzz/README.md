@@ -1,10 +1,10 @@
 # exarch-core fuzzing harness
 
-`cargo-fuzz` (libFuzzer) targets for five of the seven untrusted archive
-parsers in `exarch-core` (the remaining one, `detect.rs`, is covered by a
-proptest instead — see below). This narrows the verification gap tracked in
-#577 — it does not close it. Five targets, 300 seconds each, run weekly on a
-corpus that persists across runs via CI cache; that is a real but narrow
+`cargo-fuzz` (libFuzzer) targets for the untrusted archive parsers in
+`exarch-core`, the in-memory path model behind `extract_to_sink`, and reader
+format detection. This narrows the verification gap tracked in #577 — it does
+not close it. Seven targets, 300 seconds each, run weekly on a corpus that
+persists across runs via CI cache; that is a real but narrow
 layer on top of the existing regression-test harness
 (`crates/exarch-core/tests/security/`), not a replacement for it.
 
@@ -32,8 +32,11 @@ code. It has its own `Cargo.toml`, `[workspace]` table, and committed
 | `zip` | `ZipArchive` parsing (central directory, per-entry headers) |
 | `sevenz` | `SevenZArchive` parsing (header, solid-block decode + memory cap — reachable since `allow_solid_archives` is enabled) |
 | `safe_path` | `SafePath::validate` directly, on raw entry-name bytes, with symlinks/hardlinks allowed so escape-detection logic is reachable |
+| `sink` | `extract_to_sink` into a `MemorySink` under both path models and both duplicate policies, with a check after every run (success or error) that no stored path sits below a stored symlink, that every stored symlink target stays inside the root when resolved through the other stored links, and that no stored path has a `..`, root or prefix component |
+| `detect` | `ArchiveReader::detect` restores the stream position from any offset; `detect_stream` replays the bytes it consumed, so the detected reader lists the same archive as one given the detected format explicitly |
 | `extract_archive` | The full pipeline: format detection (magic-byte path only, see below), decompression, all three handlers, real file writes (atomic extraction), with a containment check after every call so a successful path-traversal/symlink escape crashes the target instead of passing silently |
 
+The `detect` target covers the magic-byte path of format detection on readers.
 `detect.rs`'s extension-matching branch is covered by two mechanisms in
 `crates/exarch-core/tests/property_tests.rs`, not by any fuzz target —
 `extract_archive`'s input file is deliberately extensionless, so detection
@@ -46,10 +49,9 @@ always falls through to the magic-byte path from that target:
   rejected) that neither proptest's single-suffix extension generator can
   reach.
 
-This is a deliberate deviation from a literal reading of #577, which listed
-`detect.rs` as needing its own fuzz target; a pure `match` over a 13-entry
-table plus one `checked_add` bounds check gets stronger verification from
-tests run on every PR than from a weekly ASan build. Note that
+A pure `match` over a 13-entry table plus one `checked_add` bounds check gets
+stronger verification from tests run on every PR than from a weekly ASan
+build. Note that
 `property_tests.rs` inherits `required-features = ["testing"]` — it runs
 under `--all-features` (as CI does), but a bare `cargo nextest run -p
 exarch-core` skips the whole file silently.
@@ -95,7 +97,7 @@ would otherwise fail the build for no security reason.
 - **`fuzz-build`** (mandatory, every PR touching Rust code): `cargo +nightly
   check --manifest-path fuzz/Cargo.toml --all-targets`. Compile-only, catches
   a broken target before it can sit undetected until the next scheduled run.
-- **`fuzz`** (scheduled, weekly): runs all five targets for 300 seconds each
+- **`fuzz`** (scheduled, weekly): runs all seven targets for 300 seconds each
   against a corpus that persists via `actions/cache`. Not part of the
   required `ci-success` check — non-blocking by design.
 
@@ -124,7 +126,7 @@ would otherwise fail the build for no security reason.
 
 `fuzz/oss-fuzz/` holds the submission scaffolding for upstream
 [OSS-Fuzz](https://google.github.io/oss-fuzz/getting-started/new-project-guide/rust-lang/)
-integration: `project.yaml`, `Dockerfile`, and `build.sh`, building all five
+integration: `project.yaml`, `Dockerfile`, and `build.sh`, building all seven
 targets in `fuzz/fuzz_targets/` via `cargo fuzz build`. This is scaffolding
 only — actual onboarding requires a PR to `google/oss-fuzz` reviewed and
 merged by Google, which is external to this repository and not done here.

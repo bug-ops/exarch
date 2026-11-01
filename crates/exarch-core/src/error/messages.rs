@@ -171,6 +171,9 @@ pub enum PartialOutcome {
     /// Atomic extraction discarded the written files; no counters are
     /// meaningful.
     RolledBack,
+    /// An in-memory extraction dropped what it collected; no counters are
+    /// meaningful.
+    Discarded,
 }
 
 impl PartialOutcome {
@@ -180,6 +183,7 @@ impl PartialOutcome {
         match self {
             Self::Kept(_) => PartialWrites::Kept,
             Self::RolledBack => PartialWrites::RolledBack,
+            Self::Discarded => PartialWrites::Discarded,
         }
     }
 }
@@ -247,6 +251,7 @@ impl ArchiveError {
             msg.partial = Some(match writes {
                 PartialWrites::Kept => PartialOutcome::Kept(report),
                 PartialWrites::RolledBack => PartialOutcome::RolledBack,
+                PartialWrites::Discarded => PartialOutcome::Discarded,
             });
             return msg;
         }
@@ -498,5 +503,8 @@ mod tests {
         assert_eq!(kept.kind.code(), ErrorCode::SecurityViolation);
         let rolled = wrap(PartialWrites::RolledBack).into_ffi_message();
         assert_matches!(rolled.partial, Some(PartialOutcome::RolledBack));
+        let discarded = wrap(PartialWrites::Discarded).into_ffi_message();
+        assert_matches!(discarded.partial, Some(PartialOutcome::Discarded));
+        assert_eq!(PartialOutcome::Discarded.writes(), PartialWrites::Discarded);
     }
 }

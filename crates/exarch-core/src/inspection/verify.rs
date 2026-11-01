@@ -30,6 +30,7 @@ use crate::inspection::report::IssueCategory;
 use crate::inspection::report::IssueSeverity;
 use crate::inspection::report::VerificationIssue;
 use crate::inspection::report::VerificationReport;
+use crate::reader::SeekableFormat;
 use crate::security::fs_view::CollisionKind;
 use crate::security::fs_view::CollisionRecording;
 use crate::security::fs_view::Conflict;
@@ -453,11 +454,11 @@ pub fn verify_archive_with_progress<P: AsRef<Path>>(
     let archive_path = archive_path.as_ref();
     let format = detect_format(archive_path)?;
     let report = match format.family() {
-        FormatFamily::Zip => {
+        FormatFamily::Seekable(SeekableFormat::Zip) => {
             let file = std::fs::File::open(archive_path)?;
             ZipArchive::new(file)?.verify_with_progress(&validated_config, *options, progress)?
         }
-        FormatFamily::SevenZ => {
+        FormatFamily::Seekable(SeekableFormat::SevenZ) => {
             let file = std::fs::File::open(archive_path)?;
             SevenZArchive::new(file)?.verify_with_progress(&validated_config, *options, progress)?
         }

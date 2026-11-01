@@ -19,7 +19,8 @@ use crate::creation::CreationReport;
 use crate::formats::SevenZArchive;
 use crate::formats::ZipArchive;
 use crate::formats::compression::CompressionCodec;
-use crate::formats::detect::ArchiveType;
+use crate::formats::detect::CreatableFormat;
+use crate::formats::detect::CreationFamily;
 use crate::formats::detect::FormatFamily;
 use crate::formats::detect::detect_format;
 use crate::formats::detect::detect_format_from_extension;
@@ -30,6 +31,7 @@ use crate::inspection::list::ListPass;
 use crate::reader::SeekableFormat;
 use crate::reader::Source;
 use crate::reader::tar_archive;
+use crate::sink::SinkOptions;
 use crate::sink::SinkTarget;
 
 /// Extracts an archive to the specified output directory.
@@ -140,8 +142,12 @@ fn extract_impl<P: AsRef<Path>, Q: AsRef<Path>>(
         FormatFamily::Tar(codec) => {
             extract_tar(archive_path, output_dir, config, options, progress, codec)
         }
-        FormatFamily::Zip => extract_zip(archive_path, output_dir, config, options, progress),
-        FormatFamily::SevenZ => extract_7z(archive_path, output_dir, config, options, progress),
+        FormatFamily::Seekable(SeekableFormat::Zip) => {
+            extract_zip(archive_path, output_dir, config, options, progress)
+        }
+        FormatFamily::Seekable(SeekableFormat::SevenZ) => {
+            extract_7z(archive_path, output_dir, config, options, progress)
+        }
     }
 }
 
@@ -272,15 +278,18 @@ fn extract_atomic<P: AsRef<Path>, Q: AsRef<Path>>(
 
     std::fs::create_dir_all(parent).map_err(ArchiveError::Io)?;
 
-    let temp_dir = tempfile::tempdir_in(parent).map_err(|e| {
-        ArchiveError::Io(std::io::Error::new(
-            e.kind(),
-            format!(
-                "failed to create temp directory in {}: {e}",
-                parent.display()
-            ),
-        ))
-    })?;
+    let temp_dir = tempfile::Builder::new()
+        .prefix(".exarch-")
+        .tempdir_in(parent)
+        .map_err(|e| {
+            ArchiveError::Io(std::io::Error::new(
+                e.kind(),
+                format!(
+                    "failed to create temp directory in {}: {e}",
+                    parent.display()
+                ),
+            ))
+        })?;
 
     let result = extract_impl(archive_path, temp_dir.path(), config, options, progress);
 
@@ -463,7 +472,7 @@ pub fn create_archive_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
     // (war/ear/vsix/nbm) - which exarch doesn't produce. Silently emitting
     // a bare ZIP with one of these extensions would be misleading, so we
     // error instead. Callers who need the override can set
-    // CreationConfig::format = Some(ArchiveType::Zip).
+    // CreationConfig::format = Some(CreatableFormat::Zip).
     if config.format.is_none() {
         reject_zip_family_creation(output)?;
     }
@@ -472,17 +481,14 @@ pub fn create_archive_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
     let format = determine_creation_format(output, config)?;
 
     let source_refs: Vec<&Path> = sources.iter().map(AsRef::as_ref).collect();
-    let creator = creator_for_format(format)?;
+    let creator = creator_for_format(format);
     creator.create(output, &source_refs, config, progress)
 }
 
-fn creator_for_format(
-    format: ArchiveType,
-) -> Result<Box<dyn crate::formats::traits::FormatCreator>> {
+fn creator_for_format(format: CreatableFormat) -> Box<dyn crate::formats::traits::FormatCreator> {
     match format.family() {
-        FormatFamily::Tar(codec) => Ok(Box::new(crate::creation::TarCreator(codec))),
-        FormatFamily::Zip => Ok(Box::new(crate::creation::ZipCreator)),
-        FormatFamily::SevenZ => Err(crate::writer::sevenz_creation_unsupported()),
+        CreationFamily::Tar(codec) => Box::new(crate::creation::TarCreator(codec)),
+        CreationFamily::Zip => Box::new(crate::creation::ZipCreator),
     }
 }
 
@@ -866,10 +872,9 @@ pub fn verify_reader_with_progress(
 /// Returns the errors of [`extract_archive`], plus any error the sink returns:
 /// [`ArchiveError::Io`] if no entry was delivered yet,
 /// [`ArchiveError::PartialExtraction`] wrapping it afterwards. A sink that
-/// reports [`MemorySinkFull`](crate::MemorySinkFull) ends the extraction with a
+/// reports [`SinkFull`](crate::SinkFull) ends the extraction with a
 /// [`QuotaResource::SinkCapacity`](crate::QuotaResource::SinkCapacity) quota
-/// error. Also [`ArchiveError::InvalidConfiguration`] for `options.atomic`,
-/// which needs a directory to rename.
+/// error.
 ///
 /// A 7z source is read in two phases: everything the file table can refuse
 /// (admission, ratios, quotas, link policy, paths, name lengths) is refused
@@ -884,10 +889,10 @@ pub fn verify_reader_with_progress(
 ///
 /// use exarch_core::ArchiveReader;
 /// use exarch_core::EntrySink;
-/// use exarch_core::ExtractionOptions;
 /// use exarch_core::SafePath;
 /// use exarch_core::SanitizedMode;
 /// use exarch_core::SecurityConfig;
+/// use exarch_core::SinkOptions;
 /// use exarch_core::extract_to_sink;
 ///
 /// #[derive(Default)]
@@ -937,7 +942,7 @@ pub fn verify_reader_with_progress(
 ///     reader,
 ///     &mut sink,
 ///     &SecurityConfig::default(),
-///     &ExtractionOptions::default(),
+///     &SinkOptions::default(),
 /// )?;
 /// assert_eq!(sink.0, 1);
 /// # Ok(())
@@ -947,7 +952,7 @@ pub fn extract_to_sink<S: EntrySink>(
     reader: ArchiveReader<'_>,
     sink: &mut S,
     config: &SecurityConfig,
-    options: &ExtractionOptions,
+    options: &SinkOptions,
 ) -> Result<ExtractionReport> {
     extract_to_sink_with_progress(reader, sink, config, options, &mut NoopProgress)
 }
@@ -968,10 +973,10 @@ pub fn extract_to_sink<S: EntrySink>(
 /// use std::io;
 ///
 /// use exarch_core::ArchiveReader;
-/// use exarch_core::ExtractionOptions;
 /// use exarch_core::MemorySink;
 /// use exarch_core::NoopProgress;
 /// use exarch_core::SecurityConfig;
+/// use exarch_core::SinkOptions;
 /// use exarch_core::extract_to_sink_with_progress;
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -987,7 +992,7 @@ pub fn extract_to_sink<S: EntrySink>(
 ///     ArchiveReader::tar(io::Cursor::new(bytes), None),
 ///     &mut sink,
 ///     &SecurityConfig::default(),
-///     &ExtractionOptions::default(),
+///     &SinkOptions::default(),
 ///     &mut NoopProgress,
 /// )?;
 /// assert_eq!(report.files_extracted, 1);
@@ -998,20 +1003,15 @@ pub fn extract_to_sink_with_progress<S: EntrySink>(
     reader: ArchiveReader<'_>,
     sink: &mut S,
     config: &SecurityConfig,
-    options: &ExtractionOptions,
+    options: &SinkOptions,
     progress: &mut dyn ProgressCallback,
 ) -> Result<ExtractionReport> {
-    if options.atomic {
-        return Err(ArchiveError::InvalidConfiguration {
-            reason: "atomic extraction renames a directory and cannot target a sink".into(),
-        });
-    }
     let config = config.clone().validate()?;
     match reader.into_source() {
         Source::Tar { stream, codec } => {
             let mut archive = tar_archive(stream, codec, config.max_decoder_memory)?;
             let mut target = SinkTarget::new(sink, &config);
-            archive.extract_into(&mut target, &config, options, progress)
+            archive.extract_into(&mut target, &config, *options, progress)
         }
         Source::Seekable {
             reader,
@@ -1020,16 +1020,16 @@ pub fn extract_to_sink_with_progress<S: EntrySink>(
             let mut archive = ZipArchive::new(reader)?;
             let checked = archive.check_structure(&config)?;
             let mut target = SinkTarget::new(sink, &config);
-            archive.extract_into(checked, &mut target, &config, options, progress)
+            archive.extract_into(checked, &mut target, &config, *options, progress)
         }
         Source::Seekable {
             reader,
             format: SeekableFormat::SevenZ,
         } => {
             let mut archive = SevenZArchive::new(reader)?;
+            let admission = archive.admit(&config)?;
             let mut target = SinkTarget::new(sink, &config);
-            let model = target.model();
-            archive.extract_into(&mut target, model, &config, options, progress)
+            archive.extract_into(admission, &mut target, *options, progress)
         }
     }
 }
@@ -1049,7 +1049,7 @@ fn reject_zip_family_creation(output: &Path) -> Result<()> {
             "creation for .{ext_lower} isn't supported: the format is ZIP-based but \
              requires extra structure (signing, manifests, ordering) that exarch \
              doesn't produce. Use .zip, or set CreationConfig::format = Some(\
-             exarch_core::formats::detect::ArchiveType::Zip) to override."
+             exarch_core::formats::detect::CreatableFormat::Zip) to override."
         )));
     }
     Ok(())
@@ -1063,14 +1063,14 @@ fn reject_zip_family_creation(output: &Path) -> Result<()> {
 fn determine_creation_format<State>(
     output: &Path,
     config: &CreationConfig<State>,
-) -> Result<ArchiveType> {
+) -> Result<CreatableFormat> {
     // If format explicitly set in config, use it
     if let Some(format) = config.format {
         return Ok(format);
     }
 
     // Auto-detect from extension only — never from magic bytes.
-    detect_format_from_extension(output)
+    CreatableFormat::try_from(detect_format_from_extension(output)?)
 }
 
 #[cfg(test)]
@@ -1099,7 +1099,7 @@ mod tests {
         let config = CreationConfig::default();
         let path = PathBuf::from("archive.tar");
         let format = determine_creation_format(&path, &config).unwrap();
-        assert_eq!(format, ArchiveType::Tar);
+        assert_eq!(format, CreatableFormat::Tar);
     }
 
     #[test]
@@ -1107,11 +1107,11 @@ mod tests {
         let config = CreationConfig::default();
         let path = PathBuf::from("archive.tar.gz");
         let format = determine_creation_format(&path, &config).unwrap();
-        assert_eq!(format, ArchiveType::TarGz);
+        assert_eq!(format, CreatableFormat::TarGz);
 
         let path2 = PathBuf::from("archive.tgz");
         let format2 = determine_creation_format(&path2, &config).unwrap();
-        assert_eq!(format2, ArchiveType::TarGz);
+        assert_eq!(format2, CreatableFormat::TarGz);
     }
 
     #[test]
@@ -1119,7 +1119,7 @@ mod tests {
         let config = CreationConfig::default();
         let path = PathBuf::from("archive.tar.bz2");
         let format = determine_creation_format(&path, &config).unwrap();
-        assert_eq!(format, ArchiveType::TarBz2);
+        assert_eq!(format, CreatableFormat::TarBz2);
     }
 
     #[test]
@@ -1127,7 +1127,7 @@ mod tests {
         let config = CreationConfig::default();
         let path = PathBuf::from("archive.tar.xz");
         let format = determine_creation_format(&path, &config).unwrap();
-        assert_eq!(format, ArchiveType::TarXz);
+        assert_eq!(format, CreatableFormat::TarXz);
     }
 
     #[test]
@@ -1135,7 +1135,7 @@ mod tests {
         let config = CreationConfig::default();
         let path = PathBuf::from("archive.tar.zst");
         let format = determine_creation_format(&path, &config).unwrap();
-        assert_eq!(format, ArchiveType::TarZst);
+        assert_eq!(format, CreatableFormat::TarZst);
     }
 
     #[test]
@@ -1143,15 +1143,15 @@ mod tests {
         let config = CreationConfig::default();
         let path = PathBuf::from("archive.zip");
         let format = determine_creation_format(&path, &config).unwrap();
-        assert_eq!(format, ArchiveType::Zip);
+        assert_eq!(format, CreatableFormat::Zip);
     }
 
     #[test]
     fn test_determine_creation_format_explicit() {
-        let config = CreationConfig::default().with_format(Some(ArchiveType::TarGz));
+        let config = CreationConfig::default().with_format(Some(CreatableFormat::TarGz));
         let path = PathBuf::from("archive.xyz");
         let format = determine_creation_format(&path, &config).unwrap();
-        assert_eq!(format, ArchiveType::TarGz);
+        assert_eq!(format, CreatableFormat::TarGz);
     }
 
     #[test]
@@ -1175,7 +1175,7 @@ mod tests {
         let format = determine_creation_format(&path, &config).unwrap();
         assert_eq!(
             format,
-            ArchiveType::Zip,
+            CreatableFormat::Zip,
             "creation format must follow extension, not stale on-disk magic bytes"
         );
     }
@@ -1237,7 +1237,7 @@ mod tests {
         let src = dest.path().join("source.txt");
         std::fs::write(&src, b"hello").unwrap();
         let archive_path = dest.path().join("output.apk");
-        let config = CreationConfig::default().with_format(Some(ArchiveType::Zip));
+        let config = CreationConfig::default().with_format(Some(CreatableFormat::Zip));
         let result = create_archive(&archive_path, &[&src], &config);
         assert!(
             result.is_ok(),
@@ -1483,7 +1483,7 @@ mod tests {
         let src_dir = tempfile::TempDir::new().unwrap();
         std::fs::write(src_dir.path().join("x.txt"), b"foo").unwrap();
         std::fs::write(src_dir.path().join("y.txt"), b"bar").unwrap();
-        let config = CreationConfig::default().with_format(Some(ArchiveType::Zip));
+        let config = CreationConfig::default().with_format(Some(CreatableFormat::Zip));
         create_archive(&archive_path, &[src_dir.path()], &config).unwrap();
 
         let dest = tempfile::TempDir::new().unwrap();
@@ -1644,7 +1644,7 @@ mod tests {
         let archive_path = tmp.path().join("test.zip");
         let src_dir = tempfile::TempDir::new().unwrap();
         std::fs::write(src_dir.path().join("data.txt"), b"hello world").unwrap();
-        let config = CreationConfig::default().with_format(Some(ArchiveType::Zip));
+        let config = CreationConfig::default().with_format(Some(CreatableFormat::Zip));
         create_archive(&archive_path, &[src_dir.path()], &config).unwrap();
 
         let dest = tempfile::TempDir::new().unwrap();

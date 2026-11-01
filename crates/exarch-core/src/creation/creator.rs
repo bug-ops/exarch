@@ -7,7 +7,7 @@ use crate::creation::config::CreationConfig;
 use crate::creation::report::CreationReport;
 use crate::error::ArchiveError;
 use crate::error::Result;
-use crate::formats::detect::ArchiveType;
+use crate::formats::detect::CreatableFormat;
 
 /// Builder for creating archives with fluent API.
 ///
@@ -222,12 +222,12 @@ impl ArchiveCreator {
     ///
     /// ```
     /// use exarch_core::creation::ArchiveCreator;
-    /// use exarch_core::formats::detect::ArchiveType;
+    /// use exarch_core::formats::detect::CreatableFormat;
     ///
-    /// let creator = ArchiveCreator::new().format(ArchiveType::TarGz);
+    /// let creator = ArchiveCreator::new().format(CreatableFormat::TarGz);
     /// ```
     #[must_use]
-    pub fn format(mut self, format: ArchiveType) -> Self {
+    pub fn format(mut self, format: CreatableFormat) -> Self {
         self.config.format = Some(format);
         self
     }
@@ -276,7 +276,7 @@ impl ArchiveCreator {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::formats::detect::ArchiveType;
+    use crate::formats::detect::CreatableFormat;
     use std::assert_matches;
     use std::path::PathBuf;
 
@@ -320,7 +320,7 @@ mod tests {
             .exclude("*.log")
             .exclude("target/")
             .strip_prefix("/base")
-            .format(ArchiveType::TarGz);
+            .format(CreatableFormat::TarGz);
 
         assert_eq!(creator.config.compression_level, Some(9));
         assert!(creator.config.follow_symlinks);
@@ -338,7 +338,7 @@ mod tests {
                 .contains(&"target/".to_string())
         );
         assert_eq!(creator.config.strip_prefix, Some(PathBuf::from("/base")));
-        assert_eq!(creator.config.format, Some(ArchiveType::TarGz));
+        assert_eq!(creator.config.format, Some(CreatableFormat::TarGz));
     }
 
     #[test]

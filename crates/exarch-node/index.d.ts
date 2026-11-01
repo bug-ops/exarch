@@ -55,6 +55,20 @@ export interface ExarchErrorRolledBack extends ExarchErrorBase {
   filesAdded?: undefined
 }
 
+/**
+ * An in-memory extraction failed, or its progress callback threw after it
+ * succeeded; the entries it had collected were dropped. Nothing was written to
+ * disk.
+ */
+export interface ExarchErrorDiscarded extends ExarchErrorBase {
+  writes: 'discarded'
+  filesExtracted?: undefined
+  bytesWritten?: undefined
+  filesSkipped?: undefined
+  warnings?: undefined
+  filesAdded?: undefined
+}
+
 /** A progress callback threw while archive creation succeeded. */
 export interface ExarchErrorCreationCallback extends ExarchErrorBase {
   code: 'PROGRESS_CALLBACK_ERROR'
@@ -96,6 +110,7 @@ export type ExarchError =
   | ExarchErrorPlain
   | ExarchErrorWritesKept
   | ExarchErrorRolledBack
+  | ExarchErrorDiscarded
   | ExarchErrorCreationCallback
   | ExarchNativeError
 
@@ -1417,7 +1432,7 @@ export interface MemoryExtraction {
  * Value of the `writes` property: whether a failed extraction left files on
  * disk.
  */
-export type PartialWrites = 'kept' | 'rolled_back'
+export type PartialWrites = 'kept' | 'rolled_back' | 'discarded'
 
 /** The path semantics extraction validates names against. */
 export type PathModel = 'host' | 'portable'

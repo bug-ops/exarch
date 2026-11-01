@@ -160,8 +160,7 @@ impl<'a> ArchiveReader<'a> {
     pub fn of_type<R: Read + Seek + Send + 'a>(reader: R, format: ArchiveType) -> Self {
         match format.family() {
             FormatFamily::Tar(codec) => Self::tar(reader, codec),
-            FormatFamily::Zip => Self::seekable(reader, SeekableFormat::Zip),
-            FormatFamily::SevenZ => Self::seekable(reader, SeekableFormat::SevenZ),
+            FormatFamily::Seekable(container) => Self::seekable(reader, container),
         }
     }
 
@@ -239,8 +238,8 @@ impl<'a> ArchiveReader<'a> {
             .map_err(ArchiveError::Io)?;
         let format = match_signature(header.as_slice())
             .ok_or(ArchiveError::ReaderFormat(ReaderFormatError::Unrecognized))?;
-        match format.family().tar_codec() {
-            Err(container) if start != 0 => Err(ArchiveError::ReaderFormat(
+        match format.family() {
+            FormatFamily::Seekable(container) if start != 0 => Err(ArchiveError::ReaderFormat(
                 ReaderFormatError::NotAtStart(container),
             )),
             _ => Ok(Self::of_type(reader, format)),
@@ -263,31 +262,33 @@ impl<'a> ArchiveReader<'a> {
     /// # Examples
     ///
     /// ```
+    /// use std::assert_matches;
+    ///
     /// use exarch_core::ArchiveError;
     /// use exarch_core::ArchiveReader;
     /// use exarch_core::ReaderFormatError;
     /// use exarch_core::SeekableFormat;
     ///
     /// let zip: &[u8] = b"PK\x03\x04 and the rest";
-    /// assert!(matches!(
+    /// assert_matches!(
     ///     ArchiveReader::detect_stream(zip),
     ///     Err(ArchiveError::ReaderFormat(ReaderFormatError::NeedsSeek(
     ///         SeekableFormat::Zip
     ///     )))
-    /// ));
+    /// );
     /// ```
     pub fn detect_stream<R: Read + Send + 'a>(mut reader: R) -> Result<Self> {
         let header = peek_header(&mut reader).map_err(ArchiveError::Io)?;
         let format = match_signature(header.as_slice())
             .ok_or(ArchiveError::ReaderFormat(ReaderFormatError::Unrecognized))?;
-        match format.family().tar_codec() {
-            Ok(codec) => {
+        match format.family() {
+            FormatFamily::Tar(codec) => {
                 let replay = Cursor::new(header.as_slice().to_vec());
                 Ok(Self::tar(replay.chain(reader), codec))
             }
-            Err(container) => Err(ArchiveError::ReaderFormat(ReaderFormatError::NeedsSeek(
-                container,
-            ))),
+            FormatFamily::Seekable(container) => Err(ArchiveError::ReaderFormat(
+                ReaderFormatError::NeedsSeek(container),
+            )),
         }
     }
 

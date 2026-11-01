@@ -14,17 +14,21 @@ use crate::ExtractionReport;
 use crate::ProgressCallback;
 use crate::Result;
 use crate::SecurityConfig;
+use crate::SinkOptions;
 use crate::config::Validated;
 use crate::copy::CopyBuffer;
+use crate::security::admitted::EntrySize;
+use crate::security::admitted::ValidatedFile;
+use crate::security::admitted::ValidatedHardlink;
+use crate::security::context::ValidationContext;
 use crate::security::fs_view::HostFs;
 use crate::security::hardlink::hardlink_target_missing;
-use crate::security::permissions::SanitizedMode;
 use crate::security::quota::EntryCount;
 use crate::security::quota::QuotaPermit;
-use crate::security::validator::ValidatedEntry;
+use crate::security::validator::EntryPath;
+use crate::security::validator::NodeKind;
 use crate::security::validator::ValidatorCore;
 use crate::types::DestDir;
-use crate::types::EntryType;
 use crate::types::SafePath;
 use crate::types::SafeSymlink;
 use crate::types::safe_symlink::resolve_through_symlinks;
@@ -34,34 +38,92 @@ use super::common;
 /// The per-run counters a target updates while it writes.
 pub struct Tally<'a> {
     pub(crate) report: &'a mut ExtractionReport,
-    pub(crate) skip_duplicates: bool,
+    pub(crate) options: SinkOptions,
     /// File and symlink entries skipped as pre-existing duplicates.
     pub(crate) duplicate_skips: &'a mut u64,
     pub(crate) progress: &'a mut dyn ProgressCallback,
 }
 
+impl Tally<'_> {
+    /// Counts one entry skipped as a pre-existing duplicate.
+    ///
+    /// A target that skips a file at admission returns the token as
+    /// [`FileAdmission::Skipped`]; other skip sites count through this method
+    /// without one.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the skipped-files counter would overflow.
+    pub(crate) fn record_duplicate_skip(&mut self) -> Result<DuplicateSkipped> {
+        common::checked_increment_files_skipped(self.report)?;
+        *self.duplicate_skips = self.duplicate_skips.saturating_add(1);
+        Ok(DuplicateSkipped(()))
+    }
+}
+
+/// What [`Tally::record_duplicate_skip`] returns once a duplicate entry is
+/// counted as skipped, so a target that skips in `validate_file` has to count
+/// it.
+#[derive(Debug)]
+pub struct DuplicateSkipped(());
+
+/// A file entry as a target is asked to admit it.
+#[derive(Debug, Clone, Copy)]
+pub struct FileRequest<'p> {
+    pub(crate) path: &'p Path,
+    pub(crate) size: EntrySize,
+    pub(crate) mode: Option<u32>,
+}
+
+/// A target's decision on a requested file.
+#[derive(Debug)]
+pub enum FileAdmission<A> {
+    /// The file is admitted and is to be written with `A`.
+    Write(A),
+    /// The file duplicates an existing path and was skipped.
+    Skipped(DuplicateSkipped),
+}
+
 /// The validation and write half of an extraction.
 pub trait ExtractTarget {
-    /// Validates one entry against the target's own view of the destination.
-    fn validate(
+    /// What a target needs to write a file it admitted.
+    type AdmittedFile;
+
+    /// Validates a regular file and reserves its size against the quota, or
+    /// skips it as a duplicate.
+    fn validate_file(
+        &mut self,
+        request: FileRequest<'_>,
+        tally: &mut Tally<'_>,
+    ) -> Result<FileAdmission<Self::AdmittedFile>>;
+
+    /// Validates a directory entry.
+    fn validate_directory(&mut self, path: &Path, size: EntrySize) -> Result<SafePath>;
+
+    /// Validates a symlink entry and its target.
+    fn validate_symlink(
         &mut self,
         path: &Path,
-        entry_type: &EntryType,
-        size: u64,
-        compressed_size: Option<u64>,
-        mode: Option<u32>,
-    ) -> Result<ValidatedEntry>;
+        target: &Path,
+        size: EntrySize,
+    ) -> Result<SafeSymlink>;
+
+    /// Validates a hardlink entry for the second pass.
+    fn validate_hardlink(
+        &mut self,
+        path: &Path,
+        target: &Path,
+        size: EntrySize,
+    ) -> Result<ValidatedHardlink>;
 
     /// Creates a validated directory.
     fn directory(&mut self, path: &SafePath, tally: &mut Tally<'_>) -> Result<()>;
 
-    /// Streams a validated file from `reader`, enforcing the declared `size`.
+    /// Streams an admitted file from `reader`, enforcing the declared `size`.
     fn file<R: Read>(
         &mut self,
         reader: &mut R,
-        path: &SafePath,
-        mode: Option<SanitizedMode>,
-        permit: QuotaPermit,
+        admitted: Self::AdmittedFile,
         size: u64,
         tally: &mut Tally<'_>,
     ) -> Result<()>;
@@ -80,49 +142,139 @@ pub trait ExtractTarget {
     ) -> Result<()>;
 }
 
+/// Whether path validation may rely on directories this run already created.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DirCacheTrust {
+    /// A cached directory is taken as is.
+    Trusted,
+    /// Every parent is canonicalized again, so a directory swapped for a
+    /// symlink between entries is caught.
+    Revalidate,
+}
+
 /// Extraction onto the real filesystem.
 pub struct HostTarget<'a> {
     dest: DestDir,
     dir_cache: common::DirCache,
     copy_buffer: CopyBuffer,
     core: ValidatorCore<'a>,
+    trust: DirCacheTrust,
 }
 
 impl<'a> HostTarget<'a> {
     /// Creates `output_dir` if needed and a target writing into it.
     pub(crate) fn create(output_dir: &Path, config: &'a SecurityConfig<Validated>) -> Result<Self> {
+        Self::with_trust(output_dir, config, DirCacheTrust::Trusted)
+    }
+
+    /// Like [`Self::create`], but every entry re-validates its parents, as 7z
+    /// extraction requires.
+    pub(crate) fn for_sevenz(
+        output_dir: &Path,
+        config: &'a SecurityConfig<Validated>,
+    ) -> Result<Self> {
+        Self::with_trust(output_dir, config, DirCacheTrust::Revalidate)
+    }
+
+    fn with_trust(
+        output_dir: &Path,
+        config: &'a SecurityConfig<Validated>,
+        trust: DirCacheTrust,
+    ) -> Result<Self> {
         Ok(Self {
             dest: DestDir::new_or_create(output_dir.to_path_buf())?,
             dir_cache: common::DirCache::new(),
             copy_buffer: CopyBuffer::new(),
             core: ValidatorCore::new(config),
+            trust,
         })
+    }
+
+    pub(super) const fn dest(&self) -> &DestDir {
+        &self.dest
+    }
+
+    pub(super) fn copy_buffer_mut(&mut self) -> &mut CopyBuffer {
+        &mut self.copy_buffer
+    }
+
+    pub(super) fn dir_cache_mut(&mut self) -> &mut common::DirCache {
+        &mut self.dir_cache
+    }
+
+    /// Validates only the path of an entry, leaving quota to the caller.
+    pub(super) fn validate_path(&self, path: &Path, kind: NodeKind) -> Result<EntryPath<SafePath>> {
+        let ctx = Self::context(&self.core, &self.dir_cache, self.trust);
+        self.core
+            .validate_entry_path_in(path, kind, &self.dest, &HostFs, &ctx)
+    }
+
+    /// Reserves `size` bytes of quota for a file.
+    pub(super) fn reserve_file(&mut self, size: u64) -> Result<QuotaPermit> {
+        self.core.reserve_file(size)
+    }
+
+    fn context<'c>(
+        core: &ValidatorCore<'_>,
+        dir_cache: &'c common::DirCache,
+        trust: DirCacheTrust,
+    ) -> ValidationContext<'c, HostFs> {
+        let ctx = core.context::<HostFs>();
+        match trust {
+            DirCacheTrust::Trusted => ctx.with_dir_cache(dir_cache),
+            DirCacheTrust::Revalidate => ctx,
+        }
     }
 }
 
 impl ExtractTarget for HostTarget<'_> {
-    fn validate(
+    type AdmittedFile = ValidatedFile;
+
+    fn validate_file(
+        &mut self,
+        request: FileRequest<'_>,
+        _tally: &mut Tally<'_>,
+    ) -> Result<FileAdmission<ValidatedFile>> {
+        let ctx = Self::context(&self.core, &self.dir_cache, self.trust);
+        self.core
+            .validate_file_in(
+                request.path,
+                request.size,
+                request.mode,
+                &self.dest,
+                &HostFs,
+                &ctx,
+            )
+            .map(FileAdmission::Write)
+    }
+
+    fn validate_directory(&mut self, path: &Path, size: EntrySize) -> Result<SafePath> {
+        let ctx = Self::context(&self.core, &self.dir_cache, self.trust);
+        self.core
+            .validate_directory_in(path, size, &self.dest, &HostFs, &ctx)
+    }
+
+    fn validate_symlink(
         &mut self,
         path: &Path,
-        entry_type: &EntryType,
-        size: u64,
-        compressed_size: Option<u64>,
-        mode: Option<u32>,
-    ) -> Result<ValidatedEntry> {
-        let ctx = self
-            .core
-            .context::<HostFs>()
-            .with_dir_cache(&self.dir_cache);
-        self.core.validate_entry_in(
-            path,
-            entry_type,
-            size,
-            compressed_size,
-            mode,
-            &self.dest,
-            &HostFs,
-            &ctx,
-        )
+        target: &Path,
+        size: EntrySize,
+    ) -> Result<SafeSymlink> {
+        let ctx = Self::context(&self.core, &self.dir_cache, self.trust);
+        self.core
+            .validate_symlink_in(path, target, size, &self.dest, &HostFs, &ctx)
+            .map(|validated| validated.symlink)
+    }
+
+    fn validate_hardlink(
+        &mut self,
+        path: &Path,
+        target: &Path,
+        size: EntrySize,
+    ) -> Result<ValidatedHardlink> {
+        let ctx = Self::context(&self.core, &self.dir_cache, self.trust);
+        self.core
+            .validate_hardlink_in(path, target, size, &self.dest, &HostFs, &ctx)
     }
 
     fn directory(&mut self, path: &SafePath, tally: &mut Tally<'_>) -> Result<()> {
@@ -132,23 +284,21 @@ impl ExtractTarget for HostTarget<'_> {
     fn file<R: Read>(
         &mut self,
         reader: &mut R,
-        path: &SafePath,
-        mode: Option<SanitizedMode>,
-        permit: QuotaPermit,
+        admitted: ValidatedFile,
         size: u64,
         tally: &mut Tally<'_>,
     ) -> Result<()> {
         common::extract_file_with_permit(
             reader,
-            path,
-            mode,
-            permit,
+            &admitted.path,
+            admitted.mode,
+            admitted.permit,
             &self.dest,
             tally.report,
             Some(size),
             &mut self.copy_buffer,
             &mut self.dir_cache,
-            tally.skip_duplicates,
+            tally.options,
             tally.duplicate_skips,
             tally.progress,
         )
@@ -160,7 +310,7 @@ impl ExtractTarget for HostTarget<'_> {
             &self.dest,
             tally.report,
             &mut self.dir_cache,
-            tally.skip_duplicates,
+            tally.options,
             tally.duplicate_skips,
         )
     }
@@ -248,7 +398,7 @@ impl ExtractTarget for HostTarget<'_> {
         let link_file = match common::create_file_with_mode(&link_path, None, true) {
             Ok(file) => file,
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                if tally.skip_duplicates {
+                if tally.options.skip_duplicates {
                     common::checked_increment_files_skipped(tally.report)?;
                     *hardlink_duplicate_skips = hardlink_duplicate_skips.saturating_add(1);
                     return Ok(());

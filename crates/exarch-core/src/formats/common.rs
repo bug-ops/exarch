@@ -34,10 +34,14 @@ use crate::ExtractionReport;
 use crate::ProgressCallback;
 use crate::Result;
 use crate::SecurityConfig;
+use crate::SinkOptions;
 use crate::config::Validated;
 use crate::copy::CopyBuffer;
 use crate::copy::copy_with_buffer;
 use crate::error::QuotaResource;
+use crate::security::fs_view::Containment;
+use crate::security::fs_view::FsView;
+use crate::security::fs_view::HostFs;
 use crate::security::fs_view::Occupant;
 use crate::security::permissions::SanitizedMode;
 use crate::security::quota::QuotaPermit;
@@ -729,11 +733,8 @@ pub fn create_file_with_mode(
 /// `EntryValidator::validate_entry`, proven by the [`QuotaPermit`] passed in
 /// by value: a `QuotaPermit` is neither `Clone` nor `Copy`, so this function
 /// cannot be called at all without the caller having moved a genuine permit
-/// out of a `ValidatedEntryType::File` via [`ValidatedEntry::into_parts`]
-/// (mirrors 7z's `write_file_with_permit`, issue #445). This guards
-/// `report.bytes_written` against overflow before writing.
-///
-/// [`ValidatedEntry::into_parts`]: crate::security::validator::ValidatedEntry::into_parts
+/// out of a validated file (mirrors 7z's `write_file_with_permit`, issue
+/// #445). This guards `report.bytes_written` against overflow before writing.
 ///
 /// # Type Parameters
 ///
@@ -782,10 +783,11 @@ pub fn extract_file_with_permit<R: Read>(
     expected_size: Option<u64>,
     copy_buffer: &mut CopyBuffer,
     dir_cache: &mut DirCache,
-    skip_duplicates: bool,
+    options: SinkOptions,
     duplicate_skips: &mut u64,
     progress: &mut dyn ProgressCallback,
 ) -> Result<()> {
+    let skip_duplicates = options.skip_duplicates;
     let output_path = dest.join(safe_path);
 
     // Create parent directories if needed using cache
@@ -884,12 +886,48 @@ pub fn create_directory(
 ) -> Result<()> {
     let dir_path = dest.join(safe_path);
 
+    // NOTE: a directory replaced after it was cached is not seen here; the next
+    // entry's revalidating cache (7z) catches it.
+    if !dir_cache.contains(&dir_path) {
+        check_directory_occupant(&dir_path, safe_path.as_path(), dest)?;
+    }
+
     // Use cache to avoid redundant mkdir syscalls
     dir_cache.ensure_dir(&dir_path)?;
 
     report.directories_created += 1;
 
     Ok(())
+}
+
+/// Fails with an entry-naming error when `dir_path` holds something a
+/// directory entry cannot become: a file ([`occupant_at_dest_error`]), or a
+/// symlink that does not resolve to a directory inside `dest` (a security
+/// violation, the category `verify` reports for it).
+fn check_directory_occupant(dir_path: &Path, rel: &Path, dest: &DestDir) -> Result<()> {
+    // A trailing separator makes the probe follow a symlink, or fail with
+    // `ENOTDIR` on a file, instead of describing the occupant itself.
+    let dir_path: PathBuf = dir_path.components().collect();
+    let file_type = match std::fs::symlink_metadata(&dir_path) {
+        Ok(metadata) => metadata.file_type(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    if file_type.is_dir() {
+        return Ok(());
+    }
+    if file_type.is_symlink() {
+        let lands_in_dest_dir = matches!(
+            HostFs.canonicalize(&dir_path, dest),
+            Ok(Containment::Within(resolved)) if resolved.is_dir()
+        );
+        return if lands_in_dest_dir {
+            Ok(())
+        } else {
+            Err(ArchiveError::violation(Occupant::Symlink.refusal(rel)))
+        };
+    }
+    Err(occupant_at_dest_error(rel, Occupant::File).into())
 }
 
 /// Creates a symbolic link from a validated symlink entry.
@@ -935,9 +973,10 @@ pub fn create_symlink(
     dest: &DestDir,
     report: &mut ExtractionReport,
     dir_cache: &mut DirCache,
-    skip_duplicates: bool,
+    options: SinkOptions,
     duplicate_skips: &mut u64,
 ) -> Result<()> {
+    let skip_duplicates = options.skip_duplicates;
     #[cfg(unix)]
     {
         use std::os::unix::fs::symlink;
@@ -999,14 +1038,7 @@ pub fn occupant_at_dest_error(rel: &Path, occupant: Occupant) -> std::io::Error 
         Occupant::Symlink => symlink_kind,
         Occupant::File => ErrorKind::AlreadyExists,
     };
-    std::io::Error::new(
-        kind,
-        format!(
-            "refusing to replace the existing {} at {}",
-            occupant.noun(),
-            rel.display()
-        ),
-    )
+    std::io::Error::new(kind, occupant.refusal(rel))
 }
 
 /// The error for a symlink that occupies a path extraction would overwrite.
@@ -1379,6 +1411,73 @@ mod tests {
         }
     }
 
+    fn make_directory(
+        dest: &DestDir,
+        name: &str,
+        dir_cache: &mut DirCache,
+    ) -> crate::Result<ExtractionReport> {
+        let config = SecurityConfig::default().validate().expect("valid config");
+        let safe_path = SafePath::validate(&PathBuf::from(name), dest, &config).expect("safe path");
+        let mut report = ExtractionReport::default();
+        create_directory(&safe_path, dest, &mut report, dir_cache).map(|()| report)
+    }
+
+    #[test]
+    fn test_create_directory_over_a_file_names_the_entry() {
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
+        std::fs::write(temp.path().join("x"), b"f").expect("write file");
+
+        let err = make_directory(&dest, "x/", &mut DirCache::new()).expect_err("must be refused");
+
+        assert_matches!(&err, ArchiveError::Io(e) if e.kind() == std::io::ErrorKind::AlreadyExists);
+        assert!(
+            err.to_string()
+                .contains("refusing to replace the existing file at x"),
+            "{err}"
+        );
+        assert!(temp.path().join("x").is_file());
+    }
+
+    #[test]
+    fn test_create_directory_over_an_existing_directory_is_idempotent() {
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
+        std::fs::create_dir(temp.path().join("d")).expect("create dir");
+
+        let mut cache = DirCache::new();
+        make_directory(&dest, "d", &mut cache).expect("existing directory is accepted");
+        make_directory(&dest, "d", &mut cache).expect("cached directory is accepted");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_create_directory_over_a_dangling_symlink_is_refused() {
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
+        std::os::unix::fs::symlink("t", temp.path().join("x")).expect("create symlink");
+
+        let err = make_directory(&dest, "x/", &mut DirCache::new()).expect_err("must be refused");
+
+        assert!(
+            err.to_string()
+                .contains("refusing to replace the existing symlink at x"),
+            "{err}"
+        );
+        assert!(!temp.path().join("t").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_create_directory_over_a_symlink_to_a_directory_inside_dest_is_accepted() {
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
+        std::fs::create_dir(temp.path().join("real")).expect("create dir");
+        std::os::unix::fs::symlink("real", temp.path().join("x")).expect("create symlink");
+
+        make_directory(&dest, "x", &mut DirCache::new()).expect("in-dest directory link accepted");
+    }
+
     #[test]
     fn test_extract_file_with_permit_integer_overflow_check() {
         let temp = TempDir::new().expect("failed to create temp dir");
@@ -1412,7 +1511,7 @@ mod tests {
             expected_size,
             &mut copy_buffer,
             &mut dir_cache,
-            true,
+            SinkOptions::default(),
             &mut 0u64,
             &mut NoopProgress,
         );
@@ -1476,7 +1575,7 @@ mod tests {
             None,
             &mut copy_buffer,
             &mut dir_cache,
-            true,
+            SinkOptions::default(),
             &mut duplicate_skips,
             &mut NoopProgress,
         );
@@ -1525,7 +1624,7 @@ mod tests {
             Some(50),
             &mut copy_buffer,
             &mut dir_cache,
-            true,
+            SinkOptions::default(),
             &mut 0u64,
             &mut NoopProgress,
         );
@@ -1571,7 +1670,7 @@ mod tests {
             Some(1000),
             &mut copy_buffer,
             &mut dir_cache,
-            true,
+            SinkOptions::default(),
             &mut 0u64,
             &mut NoopProgress,
         );
@@ -1628,7 +1727,8 @@ mod tests {
             Some(50),
             &mut copy_buffer,
             &mut dir_cache,
-            false, // skip_duplicates = false: --force overwrite
+            SinkOptions::default().with_skip_duplicates(false), /* skip_duplicates = false:
+                                                                 * --force overwrite */
             &mut 0u64,
             &mut NoopProgress,
         );
@@ -2102,7 +2202,7 @@ mod tests {
             None,
             &mut copy_buffer,
             &mut dir_cache,
-            true,
+            SinkOptions::default(),
             &mut 0u64,
             &mut NoopProgress,
         )
@@ -2189,7 +2289,7 @@ mod tests {
             &dest,
             &mut report,
             &mut dir_cache,
-            false,
+            SinkOptions::default().with_skip_duplicates(false),
             &mut 0u64,
         )
         .expect("first create_symlink should succeed");
@@ -2201,7 +2301,7 @@ mod tests {
             &dest,
             &mut report,
             &mut dir_cache,
-            false,
+            SinkOptions::default().with_skip_duplicates(false),
             &mut 0u64,
         )
         .expect("an identical link is an unchanged duplicate");
@@ -2217,13 +2317,14 @@ mod tests {
             &dest,
             &mut report,
             &mut dir_cache,
-            false,
+            SinkOptions::default().with_skip_duplicates(false),
             &mut 0u64,
         )
         .expect_err("a link with another target must not be replaced");
-        assert!(
-            matches!(&err, ArchiveError::Io(e)
-                if e.kind() == symlink_at_dest_error(Path::new("link.txt")).kind()),
+        assert_matches!(
+            &err,
+            ArchiveError::Io(e)
+                if e.kind() == symlink_at_dest_error(Path::new("link.txt")).kind(),
             "{err:?}"
         );
         assert_eq!(report.symlinks_created, 1);
@@ -2260,7 +2361,7 @@ mod tests {
             &dest,
             &mut report,
             &mut DirCache::new(),
-            false,
+            SinkOptions::default().with_skip_duplicates(false),
             &mut 0u64,
         )
         .expect("a file is replaced");

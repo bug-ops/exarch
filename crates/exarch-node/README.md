@@ -213,11 +213,11 @@ try {
 |----------|----------|-------|
 | `code` | always | An `ErrorCode` such as `'PATH_TRAVERSAL'`, `'QUOTA_EXCEEDED'` or `'SECURITY_VIOLATION'`. A path rejected at the boundary (null byte, too long) is `'SECURITY_VIOLATION'` and a rejected setter value is `'INVALID_CONFIGURATION'`. Errors raised by the binding itself (negative sizes, an internal panic, a failed argument conversion) are `ExarchNativeError`: `code` is napi's status string (`'GenericFailure'`, `'InvalidArg'`, ...), not an `ErrorCode`, and no other property is set. |
 | `relaxableBy` | a `SECURITY_VIOLATION` that a `SecurityConfig` setting would admit | The `PolicySetting` id, for example `'symlinks'` |
-| `writes` | an extraction failed after writing files | `'kept'` or `'rolled_back'` (atomic extraction discarded the output) |
+| `writes` | an extraction failed after producing output | `'kept'`, `'rolled_back'` (atomic extraction discarded the output) or `'discarded'` (an in-memory extraction wrote nothing to disk and dropped its entries) |
 | `filesExtracted`, `bytesWritten`, `filesSkipped`, `warnings` | `writes === 'kept'` | Counters and a `string[]` |
 | `cause` | a progress callback threw | The exception the callback threw |
 
-If a progress callback throws while the operation itself succeeds, the rejection has `code === 'PROGRESS_CALLBACK_ERROR'` and the counters of what was written (`filesExtracted`... for extraction, `filesAdded` and `bytesWritten` for creation).
+If a progress callback throws while the operation itself succeeds, the rejection has `code === 'PROGRESS_CALLBACK_ERROR'` and the counters of what was written (`filesExtracted`... for extraction, `filesAdded` and `bytesWritten` for creation). The in-memory extraction functions write nothing, so their rejection carries `writes === 'discarded'` and no counters.
 
 **Breaking change:** earlier versions put the code, a `[relaxableBy=<id>]` token and a `| writes=...` suffix into `message`. Read the properties instead.
 

@@ -5,6 +5,7 @@
 
 mod sink_support;
 
+use std::assert_matches;
 use std::io::Cursor;
 use std::io::Read;
 use std::io::Write;
@@ -213,8 +214,9 @@ fn list_reader_rejects_a_traversal_name_like_the_path_api() {
     let reader = ArchiveReader::tar(Cursor::new(bytes), None);
     let error =
         list_reader(reader, &SecurityConfig::default(), &ListOptions::default()).unwrap_err();
-    assert!(
-        matches!(error, exarch_core::ArchiveError::PathTraversal { .. }),
+    assert_matches!(
+        error,
+        exarch_core::ArchiveError::PathTraversal { .. },
         "{error}"
     );
 }

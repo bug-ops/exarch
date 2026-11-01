@@ -1,0 +1,352 @@
+//! The one 7z extraction loop, shared by every destination.
+//!
+//! A destination is an [`ExtractTarget`] that also answers the pre-pass: the
+//! checks that can refuse an archive from its file table alone, before the
+//! target sees an entry. Admission, the pre-pass, the empty-archive
+//! short-circuit and the decode loop are the same for the host filesystem and
+//! for an entry sink; only the [`SevenZTarget`] hooks differ.
+
+use std::io;
+use std::io::Read;
+use std::io::Seek;
+use std::path::Path;
+use std::path::PathBuf;
+
+use super::SevenZArchive;
+use super::StoredLinkTarget;
+use super::classify::SevenZClass;
+use super::classify::SevenZKind;
+use super::classify::abort_with;
+use super::classify::reparse_point_refusal;
+use super::decode::decode_archive_entries;
+use super::iter_sevenz_refusals;
+use super::links::read_sevenz_link_target;
+use super::lzma2::DecodeKnobs;
+use super::push_anti_item_warning;
+use super::push_skip_warnings;
+use crate::ArchiveError;
+use crate::ExtractionReport;
+use crate::ProgressCallback;
+use crate::Result;
+use crate::SecurityConfig;
+use crate::SinkOptions;
+use crate::config::Validated;
+use crate::formats::common;
+use crate::formats::common::EntryCompleteGuard;
+use crate::formats::target::ExtractTarget;
+use crate::formats::target::FileAdmission;
+use crate::formats::target::FileRequest;
+use crate::formats::target::Tally;
+use crate::security::admitted::EntrySize;
+use crate::security::validator::EntryPath;
+use crate::security::validator::NodeKind;
+use crate::security::zipbomb::validate_entry_compression;
+use crate::types::SafePath;
+use crate::types::safe_symlink::require_symlinks_allowed;
+
+/// The configuration under which an archive passed admission: solid policy,
+/// decoder memory, coders and block layout.
+///
+/// Extraction reads its configuration from the token, so the checks of the
+/// pre-pass and the decode use the one `config` admission used. The token is
+/// made by [`SevenZArchive::admit`] and does not borrow the archive; pass it
+/// back to the same archive.
+#[derive(Debug, Clone, Copy)]
+pub struct SevenZAdmission<'c> {
+    config: &'c SecurityConfig<Validated>,
+}
+
+impl<'c> SevenZAdmission<'c> {
+    /// The configuration the archive was admitted under.
+    pub const fn config(self) -> &'c SecurityConfig<Validated> {
+        self.config
+    }
+}
+
+/// What the pre-pass does with a file entry once its destination is known.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FilePlan {
+    /// Reserve the file's quota.
+    Reserve,
+    /// Extraction will skip the entry as a duplicate, so it reserves nothing.
+    Skip,
+}
+
+/// The destination-specific half of the pre-pass.
+///
+/// Each method is one place where the host filesystem and an entry sink
+/// differ; the order of the checks around them is fixed by
+/// [`SevenZArchive::run_pre_pass`].
+pub trait PrePass {
+    /// Validates an entry's path against the destination as it is now.
+    fn validate_path(&mut self, path: &Path, kind: NodeKind) -> Result<EntryPath<SafePath>>;
+
+    /// Checks a directory entry.
+    fn directory(&mut self, path: &Path) -> Result<()>;
+
+    /// Checks a symlink entry whose target is still undecoded.
+    fn symlink(
+        &mut self,
+        link: &SafePath,
+        path: &Path,
+        file: &sevenz_rust2::ArchiveEntry,
+    ) -> Result<()>;
+
+    /// Checks a file entry against what already occupies its destination.
+    fn file(&mut self, safe_path: &SafePath, path: &Path) -> Result<FilePlan>;
+
+    /// Reserves quota for a symlink.
+    fn reserve_symlink(&mut self, size: u64) -> Result<()>;
+
+    /// Reserves quota for a file.
+    fn reserve_file(&mut self, size: u64) -> Result<()>;
+}
+
+/// A destination the shared 7z loop can extract into.
+pub trait SevenZTarget: ExtractTarget {
+    /// Runs `run` against a fresh pre-pass over this destination.
+    ///
+    /// The pre-pass keeps its own quota, so the extraction that follows does
+    /// not count an entry twice.
+    fn with_pre_pass(
+        &self,
+        config: &SecurityConfig<Validated>,
+        options: SinkOptions,
+        run: &mut dyn FnMut(&mut dyn PrePass) -> Result<()>,
+    ) -> Result<()>;
+}
+
+impl<R: Read + Seek> SevenZArchive<R> {
+    /// Admits the archive under `config`, or returns the first refusal.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first admission refusal.
+    pub(crate) fn admit<'c>(
+        &self,
+        config: &'c SecurityConfig<Validated>,
+    ) -> Result<SevenZAdmission<'c>> {
+        if let Some(refusal) = iter_sevenz_refusals(&self.header, config).next() {
+            return Err(refusal.into_error());
+        }
+        Ok(SevenZAdmission { config })
+    }
+
+    /// Extracts into `target`.
+    ///
+    /// Everything that can be refused from the file table alone (ratios,
+    /// quotas, link policy, paths) is refused before the target sees an entry.
+    pub(crate) fn extract_into<T: SevenZTarget>(
+        &mut self,
+        admission: SevenZAdmission<'_>,
+        target: &mut T,
+        options: SinkOptions,
+        progress: &mut dyn ProgressCallback,
+    ) -> Result<ExtractionReport> {
+        let config = admission.config();
+        target.with_pre_pass(config, options, &mut |pre| self.run_pre_pass(config, pre))?;
+
+        let total = self
+            .entries
+            .iter()
+            .filter(|entry| matches!(entry.class, SevenZClass::Present(_)))
+            .count();
+        let anti_items = self.anti_item_count();
+        if total == 0 {
+            let mut report = ExtractionReport::new();
+            push_anti_item_warning(&mut report, anti_items);
+            return Ok(report);
+        }
+
+        let report = self.decode_into(target, config, options, progress, total, anti_items)?;
+        progress.on_complete();
+        Ok(report)
+    }
+
+    /// The checks that need only the file table, in the order every
+    /// destination applies them.
+    fn run_pre_pass(
+        &self,
+        config: &SecurityConfig<Validated>,
+        pre: &mut dyn PrePass,
+    ) -> Result<()> {
+        for (index, entry) in self.entries.iter().enumerate() {
+            let Some(kind) = entry.class.present(&entry.name)? else {
+                continue;
+            };
+            let path = PathBuf::from(common::normalize_entry_name(&entry.name));
+            let safe_path = match pre.validate_path(&path, kind.node_kind())? {
+                EntryPath::Root(_) => continue,
+                EntryPath::Child(safe_path) => safe_path,
+            };
+            match kind {
+                SevenZKind::Directory => pre.directory(&path)?,
+                SevenZKind::ReparsePoint => return Err(reparse_point_refusal(&entry.name)),
+                SevenZKind::UnixSymlink => {
+                    validate_entry_compression(&entry.compression, entry.size, config)?;
+                    require_symlinks_allowed(config)?;
+                    pre.symlink(&safe_path, &path, &self.header.files()[index])?;
+                    pre.reserve_symlink(entry.size)?;
+                }
+                SevenZKind::File => {
+                    // The ratio is a property of the archive, not of the
+                    // destination, so it is checked before the duplicate skip,
+                    // matching what `verify` reports.
+                    validate_entry_compression(&entry.compression, entry.size, config)?;
+                    if pre.file(&safe_path, &path)? == FilePlan::Reserve {
+                        pre.reserve_file(entry.size)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn decode_into<T: SevenZTarget>(
+        &mut self,
+        target: &mut T,
+        config: &SecurityConfig<Validated>,
+        options: SinkOptions,
+        progress: &mut dyn ProgressCallback,
+        total: usize,
+        anti_items: u64,
+    ) -> Result<ExtractionReport> {
+        let mut report = ExtractionReport::new();
+        let mut duplicate_skips = 0_u64;
+        let mut disallowed_extension_skips = 0_u64;
+        let mut pending_error: Option<ArchiveError> = None;
+        let mut index = 0_usize;
+        let is_solid = self.header.is_solid();
+
+        let mut each = |entry: &sevenz_rust2::ArchiveEntry,
+                        reader: &mut dyn Read|
+         -> std::result::Result<bool, sevenz_rust2::Error> {
+            let kind = match SevenZClass::of(entry).present(&entry.name) {
+                Ok(Some(kind)) => kind,
+                Ok(None) => return Ok(true),
+                Err(refusal) => return Err(abort_with(&mut pending_error, refusal)),
+            };
+            let path = PathBuf::from(common::normalize_entry_name(&entry.name));
+            index = index.saturating_add(1);
+            progress.on_entry_start(&path, total, index);
+            let mut guard = EntryCompleteGuard::new(&mut *progress, &path);
+
+            let outcome = {
+                let mut tally = Tally {
+                    report: &mut report,
+                    options,
+                    duplicate_skips: &mut duplicate_skips,
+                    progress: guard.progress_mut(),
+                };
+                process_entry(
+                    target,
+                    entry,
+                    kind,
+                    &mut *reader,
+                    &path,
+                    config,
+                    &mut disallowed_extension_skips,
+                    &mut tally,
+                )
+            };
+            // Entries of a solid block share one decoder stream: bytes a
+            // skipped entry left unread would be served to the next entry.
+            let outcome = outcome.and_then(|()| {
+                if is_solid {
+                    io::copy(&mut (&mut *reader).take(entry.size), &mut io::sink())
+                        .map(drop)
+                        .map_err(ArchiveError::Io)
+                } else {
+                    Ok(())
+                }
+            });
+            match outcome {
+                Ok(()) => {
+                    guard.complete();
+                    Ok(true)
+                }
+                Err(error) => Err(abort_with(&mut pending_error, error)),
+            }
+        };
+
+        let result = decode_archive_entries(
+            &mut self.source,
+            &self.header,
+            config.parallel_decode,
+            DecodeKnobs::production(),
+            &mut each,
+        );
+        push_skip_warnings(
+            &mut report,
+            (duplicate_skips, disallowed_extension_skips),
+            anti_items,
+        );
+        match result {
+            Ok(()) => Ok(report),
+            Err(error) => Err(ArchiveError::partial_or(
+                report,
+                pending_error
+                    .take()
+                    .unwrap_or_else(|| ArchiveError::from(error)),
+            )),
+        }
+    }
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "arguments are threaded through from the decode loop; a parameter struct adds indirection"
+)]
+pub(super) fn process_entry<T: ExtractTarget>(
+    target: &mut T,
+    entry: &sevenz_rust2::ArchiveEntry,
+    kind: SevenZKind,
+    reader: &mut dyn Read,
+    path: &Path,
+    config: &SecurityConfig<Validated>,
+    disallowed_extension_skips: &mut u64,
+    tally: &mut Tally<'_>,
+) -> Result<()> {
+    let size = EntrySize {
+        uncompressed: entry.size,
+        compressed: None,
+    };
+    match kind {
+        SevenZKind::ReparsePoint => Err(reparse_point_refusal(&entry.name)),
+        SevenZKind::UnixSymlink => {
+            let link_target = match read_sevenz_link_target(reader, entry.size)? {
+                Ok(StoredLinkTarget::Read(link_target)) => link_target,
+                Ok(StoredLinkTarget::Oversized { bytes }) => {
+                    return Err(common::symlink_target_too_large(bytes));
+                }
+                Err(failure) => return Err(failure.into_extract_error(&entry.name)),
+            };
+            let symlink = target.validate_symlink(path, &link_target, size)?;
+            target.symlink(&symlink, tally)
+        }
+        SevenZKind::Directory => {
+            let safe_path = target.validate_directory(path, size)?;
+            target.directory(&safe_path, tally)
+        }
+        SevenZKind::File => {
+            if !common::check_extension_allowed(
+                path,
+                config,
+                tally.report,
+                disallowed_extension_skips,
+            ) {
+                return Ok(());
+            }
+            let request = FileRequest {
+                path,
+                size,
+                mode: None,
+            };
+            if let FileAdmission::Write(admitted) = target.validate_file(request, tally)? {
+                let mut reader = reader;
+                target.file(&mut reader, admitted, entry.size, tally)?;
+            }
+            Ok(())
+        }
+    }
+}

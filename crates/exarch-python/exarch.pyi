@@ -22,7 +22,7 @@ _UnverifiedReason = Literal["over_budget", "resource_limit", "solid_policy", "si
 _IssueSeverity = Literal["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
 _IssueCategory = Literal["Path Traversal", "Symlink Escape", "Hardlink Escape", "Zip Bomb", "Invalid Permissions", "Quota Exceeded", "Security Policy", "Invalid Archive", "Suspicious Path", "Executable File", "Corrupt Data", "Integrity Incomplete", "Header Mismatch", "Duplicate Entry", "Overlapping Entries", "Hidden Entry", "Name Collision", "Archive Note"]  # noqa: E501  # fmt: skip
 _ZipConsistency = Literal["enforce", "ignore"]
-_PartialWrites = Literal["kept", "rolled_back"]
+_PartialWrites = Literal["kept", "rolled_back", "discarded"]
 _PathModel = Literal["host", "portable"]
 _MemoryEntryKind = Literal["file", "directory", "symlink"]
 _PolicySetting = Literal["symlinks", "hardlinks", "solid_archives", "banned_components", "max_path_depth", "windows_reserved_names", "max_tar_metadata_bytes"]  # noqa: E501  # fmt: skip
@@ -813,7 +813,9 @@ def extract_archive(
         then carries ``writes == "rolled_back"`` and none of the counter
         attributes. Detect files left on disk via
         ``getattr(e, "writes", None) == "kept"``; ``hasattr(e, "writes")``
-        is also true after a rollback. A symlink entry over an existing symlink
+        is also true after a rollback. The ``*_to_memory`` functions write
+        nothing to disk: their failures carry ``writes == "discarded"`` and none
+        of the counter attributes. A symlink entry over an existing symlink
         with a different target, with overwrite enabled (``skip_duplicates``
         off), raises the builtin ``OSError`` (``ELOOP``), not
         ``SymlinkEscapeError``. See
@@ -1162,7 +1164,7 @@ def extract_archive_to_memory_with_progress(
     Raises:
         Whatever progress itself raises. If extraction succeeded, the
         extracted entries are discarded and the exception carries
-        files_extracted, bytes_written and progress_callback_error = True.
+        writes == "discarded" (no counters) and progress_callback_error = True.
         If extraction failed, the core error is raised with the callback's
         exception chained as __cause__.
     """
@@ -1257,7 +1259,8 @@ class ArchiveError(Exception):
     Attributes:
         writes: Set only when extraction failed after recording progress:
             ``"kept"`` if the written files remain on disk, ``"rolled_back"``
-            if atomic extraction discarded them.
+            if atomic extraction discarded them, ``"discarded"`` if an
+            in-memory extraction dropped the entries it had collected.
     """
 
     writes: _PartialWrites

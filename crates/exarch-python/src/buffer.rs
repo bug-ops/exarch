@@ -5,13 +5,17 @@ use std::path::Path;
 
 use exarch_core::ArchiveError;
 use exarch_core::ArchiveReader;
-use exarch_core::ArchiveWriter;
 use exarch_core::MemoryEntry;
+use exarch_core::MemoryEntryKind;
 use exarch_core::MemoryLimit;
 use exarch_core::MemorySink;
+use exarch_core::PartialWrites;
 use exarch_core::PathModel;
 use exarch_core::SanitizedMode;
+use exarch_core::extract_bytes_to_memory;
 use exarch_core::formats::detect::ArchiveType;
+use exarch_core::formats::detect::CreatableFormat;
+use exarch_core::utf8_entry_path;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -74,27 +78,6 @@ fn parse_path_model(path_model: Option<&str>) -> PyResult<Option<PathModel>> {
     parse_variant("path_model", PathModel::ALL, PathModel::as_str, path_model)
 }
 
-/// What a [`PyMemoryEntry`] holds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MemoryEntryKind {
-    File,
-    Directory,
-    Symlink,
-}
-
-impl MemoryEntryKind {
-    #[cfg(test)]
-    const ALL: &'static [Self] = &[Self::File, Self::Directory, Self::Symlink];
-
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::File => "file",
-            Self::Directory => "directory",
-            Self::Symlink => "symlink",
-        }
-    }
-}
-
 /// An entry extracted into memory.
 ///
 /// # Attributes
@@ -154,17 +137,15 @@ impl PyMemoryEntry {
 impl PyMemoryEntry {
     fn new(py: Python<'_>, path: &Path, entry: MemoryEntry) -> PyResult<Self> {
         let path = utf8(path)?;
-        let (kind, data, mode, target) = match entry {
+        let kind = entry.kind();
+        let (data, mode, target) = match entry {
             MemoryEntry::File { data, mode } => (
-                MemoryEntryKind::File,
                 Some(PyBytes::new(py, &data).unbind()),
                 mode.map(SanitizedMode::as_u32),
                 None,
             ),
-            MemoryEntry::Symlink { target } => {
-                (MemoryEntryKind::Symlink, None, None, Some(utf8(&target)?))
-            }
-            MemoryEntry::Directory => (MemoryEntryKind::Directory, None, None, None),
+            MemoryEntry::Symlink { target } => (None, None, Some(utf8(&target)?)),
+            MemoryEntry::Directory => (None, None, None),
             _ => {
                 return Err(PyRuntimeError::new_err(
                     "exarch-python is older than exarch-core: unknown memory entry kind",
@@ -184,12 +165,9 @@ impl PyMemoryEntry {
 /// The text of `path`, or an error: a lossy conversion could merge two
 /// distinct entries into one name.
 fn utf8(path: &Path) -> PyResult<String> {
-    path.to_str().map(str::to_owned).ok_or_else(|| {
-        convert_error(ArchiveError::InvalidArchive(format!(
-            "entry path is not valid UTF-8: {}",
-            path.display()
-        )))
-    })
+    utf8_entry_path(path)
+        .map(str::to_owned)
+        .map_err(convert_error)
 }
 
 /// Validates `max_bytes`: a positive count that fits in 64 bits.
@@ -199,7 +177,11 @@ fn parse_max_bytes(max_bytes: Option<i128>) -> PyResult<Option<NonZeroU64>> {
             u64::try_from(bytes)
                 .ok()
                 .and_then(NonZeroU64::new)
-                .ok_or_else(|| PyValueError::new_err("max_bytes must be positive"))
+                .ok_or_else(|| {
+                    convert_error(ArchiveError::InvalidConfiguration {
+                        reason: "max_bytes must be a positive whole number of bytes".into(),
+                    })
+                })
         })
         .transpose()
 }
@@ -328,9 +310,9 @@ pub fn extract_archive_to_memory(
 /// not called again once it has raised.
 ///
 /// - If extraction succeeds, the callback's exception is raised and the
-///   extracted entries are discarded, because nothing was written to disk.
-///   `files_extracted` and `bytes_written` attributes and a
-///   `progress_callback_error = True` marker are attached to it.
+///   extracted entries are discarded, because nothing was written to disk. A
+///   `writes = "discarded"` attribute and a `progress_callback_error = True`
+///   marker are attached to it; it carries no counters.
 /// - If extraction fails, the core error takes priority and the callback's
 ///   exception is chained onto it via `__cause__`.
 ///
@@ -377,9 +359,8 @@ pub fn extract_archive_to_memory_with_progress(
         "archive extraction with progress",
         progress,
         |progress| request.run(data, progress),
-        |exc, done| {
-            let _ = exc.setattr("files_extracted", done.0.files_extracted);
-            let _ = exc.setattr("bytes_written", done.0.bytes_written);
+        |exc, _| {
+            let _ = exc.setattr("writes", PartialWrites::Discarded.as_str());
         },
     )?;
     into_py_extraction(py, report, sink)
@@ -553,8 +534,8 @@ pub fn verify_archive_bytes_with_progress(
 /// The validated arguments shared by the in-memory extraction functions.
 struct MemoryRequest {
     config: exarch_core::SecurityConfig,
-    options: exarch_core::ExtractionOptions,
-    limit: MemoryLimit,
+    options: exarch_core::SinkOptions,
+    limit: Option<MemoryLimit>,
     path_model: PathModel,
     format: Option<ArchiveType>,
 }
@@ -573,10 +554,13 @@ impl MemoryRequest {
         let config = config.map_or_else(exarch_core::SecurityConfig::default, |c| {
             c.as_core().clone()
         });
-        let options = options.map_or_else(exarch_core::ExtractionOptions::default, |o| {
-            o.as_core().clone()
-        });
-        let limit = max_bytes.map_or_else(|| MemoryLimit::from_config(&config), MemoryLimit::new);
+        let options = options
+            .map_or_else(
+                || Ok(exarch_core::SinkOptions::default()),
+                |o| exarch_core::SinkOptions::try_from(o.as_core()),
+            )
+            .map_err(convert_error)?;
+        let limit = max_bytes.map(MemoryLimit::new);
         Ok(Self {
             config,
             options,
@@ -591,16 +575,15 @@ impl MemoryRequest {
         data: PyBackedBytes,
         progress: &mut dyn exarch_core::ProgressCallback,
     ) -> exarch_core::Result<(exarch_core::ExtractionReport, MemorySink)> {
-        let reader = ArchiveReader::from_bytes(data, self.format)?;
-        let mut sink = MemorySink::new(self.limit).with_path_model(self.path_model);
-        let report = exarch_core::extract_to_sink_with_progress(
-            reader,
-            &mut sink,
+        extract_bytes_to_memory(
+            data,
+            self.format,
             &self.config,
             &self.options,
+            self.limit,
+            self.path_model,
             progress,
-        )?;
-        Ok((report, sink))
+        )
     }
 }
 
@@ -689,6 +672,7 @@ pub fn create_archive_to_bytes(
     config: Option<&PyCreationConfig>,
 ) -> PyResult<PyCreatedArchive> {
     let format = parse_one("format", ArchiveType::ALL, ArchiveType::as_str, &format)?;
+    let format = CreatableFormat::try_from(format).map_err(convert_error)?;
     let sources_list: Vec<Bound<'_, PyAny>> = sources.extract()?;
     let source_paths: Vec<String> = sources_list
         .iter()
@@ -698,12 +682,7 @@ pub fn create_archive_to_bytes(
     let config_ref = config.map_or(&default_config, |c| c.as_core());
 
     let (bytes, report) = catch_panic_as_py_err("archive creation", || {
-        py.detach(|| {
-            let mut out = std::io::Cursor::new(Vec::new());
-            let writer = ArchiveWriter::of_type(&mut out, format)?;
-            let report = exarch_core::create_to_writer(writer, &source_paths, config_ref)?;
-            Ok((out.into_inner(), report))
-        })
+        py.detach(|| exarch_core::create_to_bytes(&source_paths, format, config_ref))
     })?;
 
     Ok(PyCreatedArchive {

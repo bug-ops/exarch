@@ -155,6 +155,18 @@ describe('extractArchiveToMemory', () => {
     });
   });
 
+  it('reports discarded writes when it fails after delivering entries', async () => {
+    const first = rawTar(Buffer.from('a'), Buffer.from('x')).subarray(0, 1024);
+    const second = rawTar(Buffer.from('../b'), Buffer.from('y'));
+    await assert.rejects(extractArchiveToMemory(Buffer.concat([first, second])), (err) => {
+      assert.strictEqual(err.code, 'PATH_TRAVERSAL');
+      assert.strictEqual(err.writes, 'discarded');
+      assert.strictEqual(err.filesExtracted, undefined);
+      assert.strictEqual(err.bytesWritten, undefined);
+      return true;
+    });
+  });
+
   it('rejects undetectable bytes as UNKNOWN_FORMAT', async () => {
     await assert.rejects(extractArchiveToMemory(Buffer.from('not an archive')), {
       code: 'UNKNOWN_FORMAT',

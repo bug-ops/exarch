@@ -259,23 +259,10 @@ pub(super) fn coder_memory(coder: &sevenz_rust2::Coder, unpack_size: u64) -> Opt
     }
 }
 
-/// What the file table says about one block, gathered in a single pass.
-#[derive(Debug, Default, Clone, Copy)]
-pub(super) struct BlockShape {
-    /// Sum of the declared sizes of the files mapped to the block.
-    declared_size: u64,
-    /// A stream-less file sits between the block's stream files.
-    interleaved_entry: bool,
-    /// The block declares streams, but the files it decodes are not exactly the
-    /// files mapped to it: an orphan block no file maps to, or a stream count
-    /// that disagrees with the mapping.
-    span_mismatch: bool,
-}
-
-/// The files the decoder hands out for `block`: the span of its first file and
-/// its `num_unpack_sub_streams`.
+/// The files the decoder hands out for `block`: the span from its first to its
+/// last mapped file, stream-less files in between included.
 ///
-/// [`SevenZHeader`] proved that the span lies within the archive's files.
+/// `sevenz-rust2` builds the span within the archive's files.
 pub(super) fn block_span(header: &SevenZHeader, block: BlockIndex) -> std::ops::Range<usize> {
     let password = Password::empty();
     let mut no_source = io::Cursor::new(&[][..]);
@@ -285,38 +272,17 @@ pub(super) fn block_span(header: &SevenZHeader, block: BlockIndex) -> std::ops::
     first..first.saturating_add(count)
 }
 
-/// Maps every block to its [`BlockShape`] through
-/// `stream_map.file_block_index`.
-///
-/// sevenz-rust2 hands a block the contiguous span of `num_unpack_sub_streams`
-/// files after its first file, so a stream-less file mapped to a block (the
-/// map leaves leading and trailing ones unmapped) pushes the block's last
-/// stream file out of the span and the decoder skips it. A trailing block that
-/// no file maps to keeps a first-file index of 0, so its span would re-deliver
-/// the first files of the archive with its own data.
-pub(super) fn block_shapes(header: &SevenZHeader) -> Vec<BlockShape> {
-    let mut shapes = vec![BlockShape::default(); header.block_count()];
-    let spans: Vec<_> = header
-        .block_indices()
-        .map(|block| block_span(header, block))
-        .collect();
-    let mut mapped = vec![0usize; header.block_count()];
-    let mut outside_span = vec![false; header.block_count()];
+/// Sum of the declared sizes of the files mapped to each block, through
+/// `stream_map.file_block_index`; `None` for a block whose sum overflows.
+pub(super) fn declared_sizes(header: &SevenZHeader) -> Vec<Option<u64>> {
+    let mut sizes = vec![Some(0u64); header.block_count()];
     for (index, file) in header.files().iter().enumerate() {
         if let Some(block) = header.file_block(index) {
-            let block = block.get();
-            let shape = &mut shapes[block];
-            shape.declared_size = shape.declared_size.saturating_add(file.size);
-            shape.interleaved_entry |= !file.has_stream;
-            mapped[block] += 1;
-            outside_span[block] |= !spans[block].contains(&index);
+            let size = &mut sizes[block.get()];
+            *size = size.and_then(|sum| sum.checked_add(file.size));
         }
     }
-    for (block, shape) in shapes.iter_mut().enumerate() {
-        shape.span_mismatch = !spans[block].is_empty()
-            && (outside_span[block] || mapped[block] != spans[block].len());
-    }
-    shapes
+    sizes
 }
 
 /// Bytes to charge to a decompression budget for decoding `block`.
@@ -345,16 +311,15 @@ pub(super) fn block_charge(block: &sevenz_rust2::Block) -> u64 {
 /// [`ArchiveError::QuotaExceeded`] when the decoder memory exceeds the limit,
 /// and with [`UnverifiedReason::NotDecodable`] for AES content encryption
 /// ([`ArchiveError::SecurityViolation`]) and for an unknown method,
-/// unparseable coder properties, a stream-less file inside the block, or a
-/// block whose decoded files are not the files mapped to it
-/// ([`ArchiveError::InvalidArchive`]).
+/// unparseable coder properties, or a block whose files do not add up to its
+/// decoded size ([`ArchiveError::InvalidArchive`]).
 pub(super) fn admit_sevenz_block(
     block: &sevenz_rust2::Block,
-    shape: BlockShape,
+    declared_size: Option<u64>,
     config: &SecurityConfig<Validated>,
 ) -> std::result::Result<(), Refused> {
     let not_decodable = |error| Refused::new(UnverifiedReason::NotDecodable, error);
-    let output = block_charge(block).max(shape.declared_size);
+    let output = block_charge(block).max(declared_size.unwrap_or_default());
     let mut memory: u64 = 0;
     for coder in &block.coders {
         if coder.encoder_method_id() == sevenz_rust2::EncoderMethod::ID_AES256_SHA256 {
@@ -377,15 +342,11 @@ pub(super) fn admit_sevenz_block(
             },
         ));
     }
-    if shape.interleaved_entry {
+    // TODO(#769): compare stream files with sub-streams once sevenz-rust2
+    // exposes the count; the size sum misses zero-size shifts
+    if declared_size != Some(block.get_unpack_size()) {
         return Err(not_decodable(ArchiveError::InvalidArchive(
-            "7z block interleaves a stream-less entry, so a file of the block would be skipped"
-                .into(),
-        )));
-    }
-    if shape.span_mismatch {
-        return Err(not_decodable(ArchiveError::InvalidArchive(
-            "7z block decodes files other than the ones mapped to it".into(),
+            "7z block's files do not account for its decoded size".into(),
         )));
     }
     Ok(())
@@ -433,7 +394,7 @@ impl SevenZRefusal {
 /// This is the single admission point: `extract` fails on the first refusal
 /// and `verify` reports each, so the two cannot disagree. It covers the solid
 /// policy and, per block, decoder memory, unknown coders, AES content
-/// encryption and stream-less files interleaved in a block.
+/// encryption.
 ///
 /// The iterator is lazy: `extract` takes only the first refusal and stops
 /// checking blocks there.
@@ -448,15 +409,14 @@ pub fn iter_sevenz_refusals<'a>(
     )
     .err()
     .map(|refused| SevenZRefusal::new(RefusalScope::Archive, refused));
-    let blocks =
-        header
-            .block_indices()
-            .zip(block_shapes(header))
-            .filter_map(move |(index, shape)| {
-                admit_sevenz_block(header.block(index), shape, config)
-                    .err()
-                    .map(|refused| SevenZRefusal::new(RefusalScope::Block(index), refused))
-            });
+    let blocks = header
+        .block_indices()
+        .zip(declared_sizes(header))
+        .filter_map(move |(index, declared)| {
+            admit_sevenz_block(header.block(index), declared, config)
+                .err()
+                .map(|refused| SevenZRefusal::new(RefusalScope::Block(index), refused))
+        });
     solid.into_iter().chain(blocks)
 }
 

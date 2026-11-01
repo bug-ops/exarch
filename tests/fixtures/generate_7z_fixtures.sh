@@ -83,8 +83,9 @@ ln hardlink-test/original.txt hardlink-test/link.txt  # Hard link
 echo "✓ Created hardlink.7z (hardlink)"
 
 # 9. interleaved-empty.7z / interleaved-empty-badcrc.7z - a solid block whose
-# stream-less file sits between its stream files, so sevenz-rust2 never visits
-# the last stream file. The second archive also has a wrong CRC for c.txt.
+# stream-less file sits between its stream files (the block span of
+# sevenz-rust2 < 0.24.2 stopped before the last stream file). The second
+# archive also has a wrong CRC for c.txt.
 mkdir interleave
 for name in d a b c; do
     head -c 1000 /dev/zero | tr '\0' "$name" > "interleave/$name.txt"

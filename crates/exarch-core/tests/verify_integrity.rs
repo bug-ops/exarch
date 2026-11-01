@@ -649,36 +649,30 @@ fn sevenz_size_preserving_filter_is_not_charged_twice() {
     assert_eq!(report.integrity_status(), IntegrityStatus::Pass);
 }
 
-/// sevenz-rust2 decodes a block as the contiguous span of its stream count, so
-/// a stream-less file between the stream files pushes the last one out of the
-/// decoder's reach. Verify refuses the block like extract does and counts the
-/// payload as unverified, never as `OK`.
+/// A stream-less file between the stream files of a solid block is part of the
+/// block's span, so verify reaches the last stream file: an intact archive
+/// passes and a wrong CRC on that last file is reported, never hidden.
 #[test]
 fn sevenz_interleaved_empty_file_cannot_hide_a_payload_file() {
-    for name in ["interleaved-empty.7z", "interleaved-empty-badcrc.7z"] {
-        let report =
-            verify_archive_with_options(fixture(name), &solid_config(), &default_integrity())
-                .unwrap();
-        assert_eq!(report.status(), VerificationStatus::Fail, "{name}");
-        assert_eq!(count(&report, IssueCategory::InvalidArchive), 1, "{name}");
-        assert_eq!(
-            report.integrity_status(),
-            IntegrityStatus::Incomplete,
-            "{name}"
-        );
-        assert_eq!(
-            count(&report, IssueCategory::IntegrityIncomplete),
-            1,
-            "{name}"
-        );
-        assert!(
-            report
-                .issues()
-                .iter()
-                .any(|i| i.message.contains("not decodable: 3")),
-            "{name}"
-        );
-    }
+    let report = verify_archive_with_options(
+        fixture("interleaved-empty.7z"),
+        &solid_config(),
+        &default_integrity(),
+    )
+    .unwrap();
+    assert_eq!(report.status(), VerificationStatus::Pass);
+    assert_eq!(report.integrity_status(), IntegrityStatus::Pass);
+
+    let report = verify_archive_with_options(
+        fixture("interleaved-empty-badcrc.7z"),
+        &solid_config(),
+        &default_integrity(),
+    )
+    .unwrap();
+    assert_eq!(report.status(), VerificationStatus::Fail);
+    assert_eq!(report.integrity_status(), IntegrityStatus::Fail);
+    assert_eq!(corrupt_paths(&report), ["c.txt"]);
+    assert_eq!(count(&report, IssueCategory::IntegrityIncomplete), 0);
 }
 
 /// A GNU sparse entry whose stored data is 512 bytes but whose real size is
@@ -923,7 +917,6 @@ fn sevenz_verify_and_extract_agree_on_every_refusal() {
             "encrypted-content-plain-header.7z",
             SecurityConfig::default(),
         ),
-        ("interleaved-empty.7z", solid_config()),
     ];
     for (name, config) in refused {
         let path = fixture(name);
@@ -1033,9 +1026,65 @@ fn sevenz_list_shows_every_entry_of_an_interleaved_block() {
 }
 
 #[test]
-fn sevenz_extract_fails_closed_on_an_interleaved_stream_less_entry() {
-    let err = extract_refusal(&fixture("interleaved-empty.7z"), &solid_config());
-    assert_matches!(err, ArchiveError::InvalidArchive(_), "{err:?}");
+fn sevenz_extract_writes_every_file_of_an_interleaved_block() {
+    let dest = TempDir::new().unwrap();
+    let report = exarch_core::extract_archive(
+        fixture("interleaved-empty.7z"),
+        dest.path(),
+        &solid_config(),
+    )
+    .unwrap();
+    assert_eq!(report.files_extracted, 4);
+    for (name, byte) in [("d.txt", b'A'), ("b.txt", b'B'), ("c.txt", b'C')] {
+        assert_eq!(
+            std::fs::read(dest.path().join(name)).unwrap(),
+            vec![byte; 1000],
+            "{name}"
+        );
+    }
+    assert!(std::fs::read(dest.path().join("a.txt")).unwrap().is_empty());
+}
+
+#[test]
+fn sevenz_extract_rejects_a_bad_crc_on_the_last_file_of_an_interleaved_block() {
+    let dest = TempDir::new().unwrap();
+    let err = exarch_core::extract_archive(
+        fixture("interleaved-empty-badcrc.7z"),
+        dest.path(),
+        &solid_config(),
+    )
+    .unwrap_err();
+    assert!(
+        format!("{err:?}").contains("ChecksumVerificationFailed"),
+        "{err:?}"
+    );
+    assert!(!dest.path().join("c.txt").exists());
+}
+
+/// A directory between the files of a solid block, written the way 7-Zip does
+/// (no sub-stream for it), is handed over in place and shifts nothing.
+#[test]
+fn sevenz_directory_between_the_files_of_a_solid_block_is_listed_verified_and_extracted() {
+    let dir = TempDir::new().unwrap();
+    let bytes = common::solid_copy_7z(&[
+        common::RawEntry::File("a.txt", GOOD),
+        common::RawEntry::Dir("d"),
+        common::RawEntry::File("b.txt", OTHER),
+    ]);
+    let path = write(&dir, "dir-between.7z", &bytes);
+
+    let manifest = exarch_core::list_archive(&path, &solid_config()).unwrap();
+    assert_eq!(manifest.total_entries(), 3);
+
+    let report = verify_archive_with_options(&path, &solid_config(), &default_integrity()).unwrap();
+    assert_eq!(report.status(), VerificationStatus::Pass);
+    assert_eq!(report.integrity_status(), IntegrityStatus::Pass);
+
+    let out = TempDir::new().unwrap();
+    exarch_core::extract_archive(&path, out.path(), &solid_config()).unwrap();
+    assert_eq!(std::fs::read(out.path().join("a.txt")).unwrap(), GOOD);
+    assert_eq!(std::fs::read(out.path().join("b.txt")).unwrap(), OTHER);
+    assert!(out.path().join("d").is_dir());
 }
 
 #[test]

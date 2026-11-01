@@ -30,11 +30,8 @@ pub(super) type PayloadFile = (usize, Slot);
 /// Groups the payload files of each block through
 /// `stream_map.file_block_index`.
 ///
-/// sevenz-rust2 hands a block the contiguous span of `num_unpack_sub_streams`
-/// files after its first file, so a stream-less file placed between a block's
-/// stream files pushes the last of them out of the span. Going through the
-/// file-to-block map instead lets the caller see every payload file that
-/// belongs to a block, whether or not the decoder visits it.
+/// Going through the file-to-block map lets the caller see every payload file
+/// that belongs to a block, whether or not the decoder visits it.
 pub(super) fn payload_by_block(
     header: &SevenZHeader,
     slots: &[Option<Slot>],

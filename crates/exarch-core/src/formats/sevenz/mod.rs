@@ -74,9 +74,9 @@
 //! `extract` and `verify` share one admission step, `sevenz_refusals`. Before
 //! any byte is decoded, every block's coder memory (LZMA/LZMA2 dictionary,
 //! `PPMd` memory) is checked against `max_decoder_memory`, and blocks with an
-//! unknown coder, AES content encryption, a stream-less entry between their
-//! stream files, or a stream count that disagrees with the files mapped to
-//! them (an orphan block) are refused.
+//! unknown coder, AES content encryption, or whose files do not add up
+//! to the decoded size (an orphan block, or sub-streams shifted by an
+//! entry without data) are refused.
 //!
 //! # Parallel LZMA2 Decoding
 //!

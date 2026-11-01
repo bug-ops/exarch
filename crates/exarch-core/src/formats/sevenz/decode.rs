@@ -175,35 +175,14 @@ pub(super) fn parallel_stream(
     })
 }
 
-/// The span of `block` once checked against the file-to-block map: every file
-/// the decoder would hand out must be mapped to the block.
-///
-/// Admission refuses a block whose span differs from its mapped files before
-/// anything is decoded; this is the same rule at the point of use.
-pub(super) fn mapped_block_span(
-    header: &SevenZHeader,
-    block: BlockIndex,
-) -> std::result::Result<std::ops::Range<usize>, sevenz_rust2::Error> {
-    let span = block_span(header, block);
-    let mapped = span
-        .clone()
-        .all(|file| header.file_block(file) == Some(block));
-    if mapped {
-        Ok(span)
-    } else {
-        Err(sevenz_rust2::Error::Other(
-            "7z block decodes files other than the ones mapped to it".into(),
-        ))
-    }
-}
-
 /// Hands each entry to `each` in archive order.
 ///
 /// A file without data is handed over where it stands; the first file of a
 /// block decodes the whole block, which hands over the block's files, so the
 /// archive's own order is what every other operation (`list`, `verify`,
-/// TAR, ZIP) uses. Blocks without files are decoded as they come, to keep
-/// their errors; a block no file maps to is never decoded.
+/// TAR, ZIP) uses. Blocks without sub-streams are decoded as they come, to keep
+/// their errors; a block no file maps to is never decoded, and admission
+/// refuses one that holds data.
 ///
 /// Returns an error when the entries handed over are not exactly the entries
 /// of the archive, once each.
@@ -231,14 +210,9 @@ pub(super) fn decode_archive_entries<R: Read + Seek>(
                     .skip(next_block)
                     .take(block.get() - next_block)
                 {
-                    if !block_span(header, fileless).is_empty() {
-                        return Err(sevenz_rust2::Error::Other(
-                            "7z block with streams is skipped by the file order".into(),
-                        ));
-                    }
                     decode_block_entries(source, header, fileless, parallel, knobs, each)?;
                 }
-                let span = mapped_block_span(header, block)?;
+                let span = block_span(header, block);
                 if !decode_block_entries(source, header, block, parallel, knobs, each)? {
                     return Ok(());
                 }

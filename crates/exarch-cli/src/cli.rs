@@ -36,6 +36,11 @@ pub enum Commands {
     /// Extract archive contents
     Extract(ExtractArgs),
     /// Create a new archive
+    #[command(
+        after_help = "A ZIP entry that compresses more than 100x is refused by default \
+                            extraction as a zip bomb (create warns when it writes one); extract \
+                            it with --max-compression-ratio set to the ratio the warning names."
+    )]
     Create(CreateArgs),
     /// List archive contents without extraction
     List(ListArgs),

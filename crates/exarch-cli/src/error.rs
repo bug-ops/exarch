@@ -14,6 +14,7 @@ use exarch_core::PolicySetting;
 use exarch_core::SecurityConfig;
 use exarch_core::ZipBombDetails;
 use exarch_core::ZipBombScope;
+use exarch_core::formats::detect::ArchiveType;
 use std::fmt;
 use std::path::Path;
 
@@ -154,7 +155,7 @@ impl fmt::Display for PartialExtractionContext {
             // The counts and warnings describe the discarded run, not the
             // destination.
             PartialWrites::RolledBack => f.write_str(
-                "WARNING: Extraction was stopped. --atomic discarded the partial extraction; the \
+                "WARNING: Extraction was stopped. The partial extraction was discarded; the \
                  destination was left unchanged.",
             ),
             // Forward-compat for a `PartialWrites` state added after this
@@ -207,6 +208,15 @@ fn relaxation_hint(relaxable_by: Option<PolicySetting>) -> String {
         }
         Some(_) => "Relax the SecurityConfig setting that refused this entry.".to_owned(),
     }
+}
+
+/// The archive formats the detector accepts, as canonical extensions.
+fn supported_formats() -> String {
+    ArchiveType::ALL
+        .iter()
+        .map(|t| t.extension())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn quota_exceeded_context(
@@ -287,8 +297,9 @@ pub fn convert_extraction_error(err: ArchiveError, archive: &Path) -> anyhow::Er
         ArchiveError::Io(_) => format!("Failed to process '{archive}'"),
         ArchiveError::UnknownFormat { path } => format!(
             "Cannot determine archive format: {}\n\
-             HINT: Supported formats: tar, tar.gz, tar.bz2, tar.xz, tar.zstd, zip",
-            TerminalPath::new(path)
+             HINT: Supported formats: {}",
+            TerminalPath::new(path),
+            supported_formats(),
         ),
         ArchiveError::InvalidArchive(_) => format!(
             "Invalid archive '{archive}'\n\

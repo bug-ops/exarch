@@ -6,6 +6,7 @@
 mod common;
 mod sink_support;
 
+use std::assert_matches;
 use std::io::Cursor;
 use std::num::NonZeroU64;
 use std::path::Path;
@@ -13,7 +14,6 @@ use std::path::Path;
 use exarch_core::ArchiveError;
 use exarch_core::ArchiveReader;
 use exarch_core::EntrySink;
-use exarch_core::ExtractionOptions;
 use exarch_core::MemoryLimit;
 use exarch_core::MemorySink;
 use exarch_core::PathModel;
@@ -21,6 +21,7 @@ use exarch_core::ProgressCallback;
 use exarch_core::QuotaResource;
 use exarch_core::SecurityConfig;
 use exarch_core::SeekableFormat;
+use exarch_core::SinkOptions;
 use exarch_core::extract_archive_with_progress;
 use exarch_core::extract_to_sink_with_progress;
 use sevenz_rust2::ArchiveEntry;
@@ -85,7 +86,7 @@ fn sink_events(reader: ArchiveReader<'_>) -> Vec<String> {
         reader,
         &mut RecordingSink::default(),
         &config(),
-        &ExtractionOptions::default(),
+        &SinkOptions::default(),
         &mut events,
     )
     .unwrap();
@@ -138,13 +139,11 @@ fn a_full_memory_sink_stays_typed_through_the_7z_abort() {
     while let ArchiveError::PartialExtraction { source, .. } = cause {
         cause = source;
     }
-    assert!(
-        matches!(
-            cause,
-            ArchiveError::QuotaExceeded {
-                resource: QuotaResource::SinkCapacity { max: 1 }
-            }
-        ),
+    assert_matches!(
+        cause,
+        ArchiveError::QuotaExceeded {
+            resource: QuotaResource::SinkCapacity { max: 1 }
+        },
         "{error:?}"
     );
 }
@@ -164,7 +163,7 @@ fn the_empty_archive_extracts_nothing_and_never_completes() {
         ArchiveReader::seekable(Cursor::new(fixture("empty.7z")), SeekableFormat::SevenZ),
         &mut RecordingSink::default(),
         &config(),
-        &ExtractionOptions::default(),
+        &SinkOptions::default(),
         &mut events,
     )
     .unwrap();
@@ -178,14 +177,11 @@ fn a_source_that_is_not_a_7z_is_rejected() {
         ArchiveReader::seekable(Cursor::new(vec![0; 64]), SeekableFormat::SevenZ),
         &mut RecordingSink::default(),
         &config(),
-        &ExtractionOptions::default(),
+        &SinkOptions::default(),
         &mut Events::default(),
     )
     .unwrap_err();
-    assert!(
-        matches!(error, ArchiveError::InvalidArchive(_)),
-        "{error:?}"
-    );
+    assert_matches!(error, ArchiveError::InvalidArchive(_), "{error:?}");
 }
 
 #[test]
@@ -199,7 +195,7 @@ fn symlinks_are_delivered_where_the_archive_allows_them() {
         ),
         &mut sink,
         &config,
-        &ExtractionOptions::default(),
+        &SinkOptions::default(),
         &mut Events::default(),
     )
     .unwrap();
@@ -216,14 +212,11 @@ fn symlinks_are_refused_unless_allowed() {
         ),
         &mut RecordingSink::default(),
         &config(),
-        &ExtractionOptions::default(),
+        &SinkOptions::default(),
         &mut Events::default(),
     )
     .unwrap_err();
-    assert!(
-        matches!(error, ArchiveError::SecurityViolation { .. }),
-        "{error:?}"
-    );
+    assert_matches!(error, ArchiveError::SecurityViolation { .. }, "{error:?}");
 }
 
 const UNIX_EXTENSION: u32 = 0x8000;
@@ -285,7 +278,7 @@ fn extract_bytes<S: EntrySink>(
         ArchiveReader::seekable(Cursor::new(bytes), SeekableFormat::SevenZ),
         sink,
         config,
-        &ExtractionOptions::default(),
+        &SinkOptions::default(),
         &mut Events::default(),
     )
 }
@@ -309,7 +302,7 @@ fn a_ratio_bomb_is_refused_before_the_sink_sees_an_entry() {
     );
     let mut sink = RecordingSink::default();
     let error = extract_bytes(bytes, &config(), &mut sink).unwrap_err();
-    assert!(matches!(error, ArchiveError::ZipBomb(_)), "{error:?}");
+    assert_matches!(error, ArchiveError::ZipBomb(_), "{error:?}");
     assert!(sink.finished.is_empty() && sink.tree.dirs.is_empty());
 }
 
@@ -322,11 +315,12 @@ fn an_escaping_symlink_is_refused_after_the_earlier_entries() {
     let mut sink = RecordingSink::default();
     let config = config().with_allow_symlinks(true);
     let error = extract_bytes(bytes, &config, &mut sink).unwrap_err();
-    assert!(
-        matches!(cause(&error), ArchiveError::SymlinkEscape { .. }),
+    assert_matches!(
+        cause(&error),
+        ArchiveError::SymlinkEscape { .. },
         "{error:?}"
     );
-    assert!(matches!(error, ArchiveError::PartialExtraction { .. }));
+    assert_matches!(error, ArchiveError::PartialExtraction { .. });
     assert!(sink.tree.symlinks.is_empty());
     assert_eq!(sink.finished.len(), 1);
 }
@@ -427,8 +421,7 @@ fn a_reparse_point_is_refused_before_any_delivery() {
     );
     let mut sink = RecordingSink::default();
     let error = extract_bytes(bytes, &config(), &mut sink).unwrap_err();
-    assert!(
-        matches!(&error, ArchiveError::SecurityViolation { reason, .. } if reason.contains("reparse point")),
+    assert_matches!(&error, ArchiveError::SecurityViolation { reason, .. } if reason.contains("reparse point"),
         "{error:?}"
     );
     assert!(sink.finished.is_empty());
@@ -446,10 +439,7 @@ fn a_corrupt_stream_is_a_partial_extraction_and_publishes_nothing_of_the_bad_fil
     common::flip_first(&mut bytes, b"SECOND-PAYLOAD");
     let mut sink = RecordingSink::default();
     let error = extract_bytes(bytes, &config(), &mut sink).unwrap_err();
-    assert!(
-        matches!(error, ArchiveError::PartialExtraction { .. }),
-        "{error:?}"
-    );
+    assert_matches!(error, ArchiveError::PartialExtraction { .. }, "{error:?}");
     assert_eq!(sink.tree.files.len(), 1);
     assert!(sink.tree.files.contains_key(Path::new("first.txt")));
 }
@@ -459,10 +449,7 @@ fn a_symlink_through_the_sink_is_refused_without_allow_symlinks() {
     let bytes = archive(&[Member::Link("l", b"a.txt")], false);
     let mut sink = RecordingSink::default();
     let error = extract_bytes(bytes, &config(), &mut sink).unwrap_err();
-    assert!(
-        matches!(error, ArchiveError::SecurityViolation { .. }),
-        "{error:?}"
-    );
+    assert_matches!(error, ArchiveError::SecurityViolation { .. }, "{error:?}");
     assert!(sink.tree.symlinks.is_empty());
 }
 
@@ -474,7 +461,7 @@ fn extract(
         ArchiveReader::seekable(Cursor::new(fixture(name)), SeekableFormat::SevenZ),
         sink,
         &config(),
-        &ExtractionOptions::default(),
+        &SinkOptions::default(),
         &mut Events::default(),
     )
 }

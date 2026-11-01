@@ -5,6 +5,7 @@
 
 mod sink_support;
 
+use std::assert_matches;
 use std::io;
 use std::io::Cursor;
 use std::io::Read;
@@ -15,10 +16,13 @@ use exarch_core::ArchiveError;
 use exarch_core::ArchiveReader;
 use exarch_core::EntrySink;
 use exarch_core::ExtractionOptions;
+use exarch_core::QuotaResource;
 use exarch_core::SafePath;
 use exarch_core::SanitizedMode;
 use exarch_core::SecurityConfig;
 use exarch_core::SeekableFormat;
+use exarch_core::SinkFull;
+use exarch_core::SinkOptions;
 use exarch_core::extract_to_sink;
 use exarch_core::formats::compression::CompressionCodec;
 use exarch_testkit::raw_zip::RawEntry;
@@ -52,13 +56,14 @@ fn extract(
         reader,
         sink,
         &SecurityConfig::default(),
-        &ExtractionOptions::default(),
+        &SinkOptions::default(),
     )
 }
 
 /// A sink whose methods can be made to fail.
 #[derive(Default)]
 struct FailingSink {
+    full_at: Option<u64>,
     fail_create: bool,
     fail_finish: bool,
     fail_directory: bool,
@@ -83,6 +88,12 @@ impl EntrySink for FailingSink {
         _: Option<SanitizedMode>,
         _: u64,
     ) -> io::Result<Vec<u8>> {
+        if let Some(max) = self.full_at {
+            return Err(io::Error::new(
+                io::ErrorKind::QuotaExceeded,
+                SinkFull::new(max),
+            ));
+        }
         if self.fail_create {
             return Err(io::Error::other("create refused"));
         }
@@ -113,13 +124,29 @@ impl EntrySink for FailingSink {
 }
 
 #[test]
+fn a_custom_sink_reports_a_full_sink_as_sink_capacity() {
+    let mut sink = FailingSink {
+        full_at: Some(7),
+        ..FailingSink::default()
+    };
+    let error = extract(tar_reader(&[tar_file("a", b"x")]), &mut sink).unwrap_err();
+    assert_matches!(
+        error,
+        ArchiveError::QuotaExceeded {
+            resource: QuotaResource::SinkCapacity { max: 7 }
+        },
+        "{error:?}"
+    );
+}
+
+#[test]
 fn a_failing_finish_file_ends_the_extraction_with_io() {
     let mut sink = FailingSink {
         fail_finish: true,
         ..FailingSink::default()
     };
     let error = extract(tar_reader(&[tar_file("a", b"x")]), &mut sink).unwrap_err();
-    assert!(matches!(error, ArchiveError::Io(_)), "{error:?}");
+    assert_matches!(error, ArchiveError::Io(_), "{error:?}");
 }
 
 #[test]
@@ -129,7 +156,7 @@ fn a_failing_create_file_ends_the_extraction_with_io() {
         ..FailingSink::default()
     };
     let error = extract(tar_reader(&[tar_file("a", b"x")]), &mut sink).unwrap_err();
-    assert!(matches!(error, ArchiveError::Io(_)), "{error:?}");
+    assert_matches!(error, ArchiveError::Io(_), "{error:?}");
 }
 
 #[test]
@@ -147,11 +174,9 @@ fn a_crc_corrupt_zip_entry_is_never_finished() {
 
     let error = extract(zip_reader(bytes), &mut sink).unwrap_err();
 
-    assert!(
-        matches!(
-            error,
-            ArchiveError::PartialExtraction { .. } | ArchiveError::Io(_)
-        ),
+    assert_matches!(
+        error,
+        ArchiveError::PartialExtraction { .. } | ArchiveError::Io(_),
         "{error:?}"
     );
     assert_eq!(sink.finished, [PathBuf::from("ok")]);
@@ -169,10 +194,7 @@ fn a_forged_declared_size_is_a_security_violation_and_not_finished() {
 
     let error = extract(zip_reader(zip_archive(vec![entry])), &mut sink).unwrap_err();
 
-    assert!(
-        matches!(error, ArchiveError::SecurityViolation { .. }),
-        "{error:?}"
-    );
+    assert_matches!(error, ArchiveError::SecurityViolation { .. }, "{error:?}");
     assert!(sink.finished.is_empty());
 }
 
@@ -194,21 +216,12 @@ fn a_tar_source_that_cannot_seek_is_extracted() {
 }
 
 #[test]
-fn atomic_extraction_is_not_supported() {
-    let mut sink = RecordingSink::default();
-    let options = ExtractionOptions::default().with_atomic(true);
-    let error = extract_to_sink(
-        tar_reader(&[tar_file("a", b"x")]),
-        &mut sink,
-        &SecurityConfig::default(),
-        &options,
-    )
-    .unwrap_err();
-    assert!(
-        matches!(error, ArchiveError::InvalidConfiguration { .. }),
-        "{error:?}"
+fn atomic_options_cannot_become_sink_options() {
+    let atomic = ExtractionOptions::default().with_atomic(true);
+    assert_matches!(
+        SinkOptions::try_from(&atomic),
+        Err(ArchiveError::InvalidConfiguration { .. })
     );
-    assert!(sink.finished.is_empty());
 }
 
 #[test]
@@ -236,9 +249,9 @@ fn links_config() -> SecurityConfig {
 fn extract_links(
     entries: &[Vec<u8>],
     sink: &mut impl EntrySink,
-    options: &ExtractionOptions,
+    options: SinkOptions,
 ) -> Result<exarch_core::ExtractionReport, ArchiveError> {
-    extract_to_sink(tar_reader(entries), sink, &links_config(), options)
+    extract_to_sink(tar_reader(entries), sink, &links_config(), &options)
 }
 
 fn is_io(error: &ArchiveError) -> bool {
@@ -256,7 +269,7 @@ fn failing_directory_symlink_and_hardlink_hooks_end_with_io() {
         fail_directory: true,
         ..FailingSink::default()
     };
-    let error = extract_links(&dir, &mut sink, &ExtractionOptions::default()).unwrap_err();
+    let error = extract_links(&dir, &mut sink, SinkOptions::default()).unwrap_err();
     assert!(is_io(&error), "{error:?}");
 
     let link = [tar_file("t", b"x"), sink_support::tar_symlink("s", "t")];
@@ -264,7 +277,7 @@ fn failing_directory_symlink_and_hardlink_hooks_end_with_io() {
         fail_symlink: true,
         ..FailingSink::default()
     };
-    let error = extract_links(&link, &mut sink, &ExtractionOptions::default()).unwrap_err();
+    let error = extract_links(&link, &mut sink, SinkOptions::default()).unwrap_err();
     assert!(is_io(&error), "{error:?}");
 
     let hard = [tar_file("t", b"x"), sink_support::tar_hardlink("h", "t")];
@@ -272,7 +285,7 @@ fn failing_directory_symlink_and_hardlink_hooks_end_with_io() {
         fail_hardlink: true,
         ..FailingSink::default()
     };
-    let error = extract_links(&hard, &mut sink, &ExtractionOptions::default()).unwrap_err();
+    let error = extract_links(&hard, &mut sink, SinkOptions::default()).unwrap_err();
     assert!(is_io(&error), "{error:?}");
 }
 
@@ -284,7 +297,7 @@ fn hardlink_to_a_symlink_to_a_file_is_delivered_at_the_resolved_target() {
         sink_support::tar_symlink("s", "t"),
         sink_support::tar_hardlink("h", "s"),
     ];
-    extract_links(&entries, &mut sink, &ExtractionOptions::default()).unwrap();
+    extract_links(&entries, &mut sink, SinkOptions::default()).unwrap();
     assert_eq!(sink.tree.files[Path::new("h")], b"data");
 }
 
@@ -295,7 +308,7 @@ fn hardlink_to_a_dangling_symlink_is_rejected() {
         sink_support::tar_symlink("s", "nowhere"),
         sink_support::tar_hardlink("h", "s"),
     ];
-    let error = extract_links(&entries, &mut sink, &ExtractionOptions::default()).unwrap_err();
+    let error = extract_links(&entries, &mut sink, SinkOptions::default()).unwrap_err();
     assert!(!sink.tree.files.contains_key(Path::new("h")), "{error:?}");
 }
 
@@ -306,14 +319,11 @@ fn hardlink_to_a_directory_is_invalid_for_the_sink() {
         sink_support::tar_dir("d/"),
         sink_support::tar_hardlink("h", "d"),
     ];
-    let error = extract_links(&entries, &mut sink, &ExtractionOptions::default()).unwrap_err();
+    let error = extract_links(&entries, &mut sink, SinkOptions::default()).unwrap_err();
     let ArchiveError::PartialExtraction { source, .. } = &error else {
         panic!("{error:?}");
     };
-    assert!(
-        matches!(**source, ArchiveError::InvalidArchive(_)),
-        "{error:?}"
-    );
+    assert_matches!(**source, ArchiveError::InvalidArchive(_), "{error:?}");
 }
 
 #[test]
@@ -324,7 +334,7 @@ fn skipped_duplicate_hardlink_is_counted_and_not_delivered() {
         tar_file("h", b"y"),
         sink_support::tar_hardlink("h", "t"),
     ];
-    let report = extract_links(&entries, &mut sink, &ExtractionOptions::default()).unwrap();
+    let report = extract_links(&entries, &mut sink, SinkOptions::default()).unwrap();
     assert_eq!(report.files_skipped, 1);
     assert_eq!(sink.tree.files[Path::new("h")], b"y");
     assert!(
@@ -360,7 +370,7 @@ fn a_flood_of_directory_entries_exhausts_the_node_budget() {
         tar_reader(&entries),
         &mut sink,
         &small_tree_config(),
-        &ExtractionOptions::default(),
+        &SinkOptions::default(),
     )
     .unwrap_err();
     assert_eq!(tree_node_quota(&error), Some(5), "{error:?}");
@@ -380,7 +390,7 @@ fn case_variant_directories_charge_the_node_budget() {
         tar_reader(&entries),
         &mut sink,
         &small_tree_config(),
-        &ExtractionOptions::default(),
+        &SinkOptions::default(),
     )
     .unwrap_err();
     assert_eq!(tree_node_quota(&error), Some(5), "{error:?}");
@@ -401,7 +411,7 @@ fn case_variant_directories_do_not_alias_on_a_case_sensitive_host() {
         tar_reader(&entries),
         &mut sink,
         &config,
-        &ExtractionOptions::default(),
+        &SinkOptions::default(),
     )
     .unwrap();
     assert_eq!(sink.tree.dirs.len(), 4);
@@ -415,7 +425,7 @@ fn an_archive_within_the_node_budget_extracts() {
         tar_reader(&entries),
         &mut sink,
         &small_tree_config(),
-        &ExtractionOptions::default(),
+        &SinkOptions::default(),
     )
     .unwrap();
 }

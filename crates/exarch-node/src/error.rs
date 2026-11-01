@@ -151,6 +151,9 @@ pub enum PartialWrites {
     /// Atomic extraction discarded the written files.
     #[napi(value = "rolled_back")]
     RolledBack,
+    /// An in-memory extraction dropped the entries it had collected.
+    #[napi(value = "discarded")]
+    Discarded,
 }
 
 /// Any failure on its way to becoming a JS `Error`.
@@ -196,6 +199,12 @@ pub enum ProgressCallbackError {
         source: Error,
         /// What was written to disk.
         report: CoreExtractionReport,
+    },
+    /// The JS progress callback threw while an in-memory extraction itself
+    /// succeeded; the collected entries are discarded.
+    MemoryExtractionCallback {
+        /// The JS throw, attached as `cause`.
+        source: Error,
     },
     /// The JS progress callback threw while the creation itself succeeded.
     CreationCallback {
@@ -315,6 +324,13 @@ fn describe(failure: Failure) -> Result<Described, Error> {
                 describe_callback_over_success(
                     "extraction",
                     Details::Extraction(PartialOutcome::Kept(report)),
+                    source,
+                )
+            }
+            ProgressCallbackError::MemoryExtractionCallback { source } => {
+                describe_callback_over_success(
+                    "extraction",
+                    Details::Extraction(PartialOutcome::Discarded),
                     source,
                 )
             }
@@ -466,7 +482,8 @@ impl fmt::Display for Failure {
             Self::Core(err) => write!(f, "{err}"),
             Self::Callback(err) => match err.as_ref() {
                 ProgressCallbackError::Core { source, .. } => write!(f, "{source}"),
-                ProgressCallbackError::ExtractionCallback { .. } => {
+                ProgressCallbackError::ExtractionCallback { .. }
+                | ProgressCallbackError::MemoryExtractionCallback { .. } => {
                     f.write_str("progress callback threw after successful extraction")
                 }
                 ProgressCallbackError::CreationCallback { .. } => {
@@ -724,6 +741,22 @@ mod tests {
         assert_eq!(d.props.code, JsCode::ProgressCallback);
         assert!(d.props.cause.is_some());
         assert!(!d.description.contains("boom"), "{d:?}");
+    }
+
+    #[test]
+    fn test_callback_over_memory_extraction_success_reports_discarded_without_counters() {
+        let d = describe(Failure::from(
+            ProgressCallbackError::MemoryExtractionCallback {
+                source: Error::from_reason("boom"),
+            },
+        ))
+        .expect("callback errors are described");
+        assert_eq!(d.props.code, JsCode::ProgressCallback);
+        assert!(d.props.cause.is_some());
+        assert_matches!(
+            d.props.details,
+            Details::Extraction(PartialOutcome::Discarded)
+        );
     }
 
     #[test]

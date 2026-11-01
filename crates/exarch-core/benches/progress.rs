@@ -13,7 +13,7 @@ use exarch_core::create_archive;
 use exarch_core::creation::CreationConfig;
 use exarch_core::creation::tar::create_tar_with_progress;
 use exarch_core::creation::zip::create_zip_with_progress;
-use exarch_core::formats::detect::ArchiveType;
+use exarch_core::formats::detect::CreatableFormat;
 use std::fs;
 use std::hint::black_box;
 use std::path::Path;
@@ -66,7 +66,7 @@ fn benchmark_tar_no_progress(c: &mut Criterion) {
     let source = TempDir::new().unwrap();
     create_test_directory(&source, 100, 1024); // 100 files, 1 KB each
 
-    let config = CreationConfig::default().with_format(Some(ArchiveType::Tar));
+    let config = CreationConfig::default().with_format(Some(CreatableFormat::Tar));
 
     c.bench_function("tar_creation_no_progress", |b| {
         b.iter(|| {
@@ -122,7 +122,7 @@ fn benchmark_zip_no_progress(c: &mut Criterion) {
     let source = TempDir::new().unwrap();
     create_test_directory(&source, 100, 1024); // 100 files, 1 KB each
 
-    let config = CreationConfig::default().with_format(Some(ArchiveType::Zip));
+    let config = CreationConfig::default().with_format(Some(CreatableFormat::Zip));
 
     c.bench_function("zip_creation_no_progress", |b| {
         b.iter(|| {

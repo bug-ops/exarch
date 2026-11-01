@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Core: `create` warns about ZIP entries over the default compression-ratio limit (#801, #808).
+- Core: `PartialWrites::Discarded` reports in-memory extraction errors that wrote nothing to disk (#800, #808).
+- Fuzz: `sink` and `detect` targets cover `extract_to_sink`, the in-memory path model and reader format detection (#798, #808).
+- Tests: hardlink member attributes never reach a symlink target (#791, #808).
 - Core: `ArchiveReader`, `list_reader`, `verify_reader` and `extract_to_sink` with the `EntrySink` trait process TAR and ZIP archives from a reader without a filesystem path; `list_reader` and `verify_reader` also cover 7z (#754, #771).
 - CI: a `wasm` job builds `exarch-cli` for `wasm32-wasip1` and runs a wasmtime smoke test (#755, #771).
 - Core: `MemorySink` with `MemoryLimit` collects `extract_to_sink` output in memory, bounded by payload, path bytes and a per-entry overhead (#777, #787).
@@ -24,6 +28,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING:** `extract_to_sink*` take `&SinkOptions`, `MemorySinkFull` is replaced by `SinkFull`, `ArchiveWriter::of_type` is infallible and takes `CreatableFormat`, `CreationConfig::format` is `CreatableFormat` (#794, #795, #808).
+- Core: `ExtractTarget` admits files, directories, symlinks and hardlinks through typed per-kind results, and 7z uses one extraction loop for host and sink targets (#793, #792, #808).
+- CLI: a TAR extracted into a missing destination is read once and extracted atomically; a refusal leaves nothing behind and reports `writes: rolled_back` (#799, #808).
+- CLI: errors from the pre-extraction list pass carry the category hint, and the unknown-format hint lists 7z (#796, #808).
+- Core: a directory entry over a file or a symlink is refused with the same entry-naming message in `extract` and `verify` (#802, #803, #808).
 - **BREAKING (Windows hosts):** `PathModel::Host` applies the `Portable` component rules, so entry names and link targets containing `<>"|?*`, control characters or non-Unicode text are refused as `SecurityViolation` (CLI JSON `error.kind` `IoError` -> `SecurityViolation`), symlink targets with them no longer create dangling links, and the in-memory Host sinks in Python and Node refuse them too (#780, #790).
 - Core: the host directory cache stops caching beyond a fixed 16 MiB of key bytes; uncached parents are validated on every entry (#786, #790).
 - Core: `extract_to_sink` on 7z checks name lengths before any block is decoded (#785, #790).

@@ -7,10 +7,19 @@ use std::num::NonZeroU64;
 use std::path::Path;
 use std::path::PathBuf;
 
+use crate::ArchiveError;
+use crate::ArchiveReader;
+use crate::ExtractionReport;
+use crate::ProgressCallback;
+use crate::Result;
 use crate::SecurityConfig;
+use crate::closed_enum::closed_enum;
+use crate::formats::detect::ArchiveType;
 use crate::security::fs_view::PathModel;
 use crate::security::permissions::SanitizedMode;
 use crate::sink::EntrySink;
+use crate::sink::SinkFull;
+use crate::sink::SinkOptions;
 use crate::types::SafePath;
 
 const DEFAULT_LIMIT_BYTES: u64 = 500 * 1024 * 1024;
@@ -70,37 +79,6 @@ impl MemoryLimit {
     }
 }
 
-/// The error a [`MemorySink`] raises, as the payload of an
-/// [`io::ErrorKind::QuotaExceeded`] error, when an entry (a file, directory,
-/// symlink or hardlink copy) would push the charged bytes past its
-/// [`MemoryLimit`].
-///
-/// Extraction maps it to
-/// [`QuotaResource::SinkCapacity`](crate::QuotaResource::SinkCapacity). It is
-/// raised by the methods of the sink (`create_file` against the declared size,
-/// and again from `finish_file`, `create_directory`, `create_symlink` and
-/// `create_hardlink`), never by the writer of a file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MemorySinkFull {
-    limit: MemoryLimit,
-}
-
-impl MemorySinkFull {
-    /// The limit that was exceeded.
-    #[must_use]
-    pub const fn limit(&self) -> MemoryLimit {
-        self.limit
-    }
-}
-
-impl std::fmt::Display for MemorySinkFull {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "memory sink is full ({} bytes)", self.limit.bytes())
-    }
-}
-
-impl std::error::Error for MemorySinkFull {}
-
 /// An entry held by a [`MemorySink`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -122,7 +100,43 @@ pub enum MemoryEntry {
     },
 }
 
+closed_enum! {
+    /// What a [`MemoryEntry`] holds.
+    ///
+    /// The string form is the one every language binding reports.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::MemoryEntry;
+    /// use exarch_core::MemoryEntryKind;
+    ///
+    /// assert_eq!(MemoryEntry::Directory.kind(), MemoryEntryKind::Directory);
+    /// assert_eq!(MemoryEntryKind::Symlink.as_str(), "symlink");
+    /// ```
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[non_exhaustive]
+    pub enum MemoryEntryKind {
+        /// A regular file.
+        File => "file",
+        /// A directory the archive names explicitly.
+        Directory => "directory",
+        /// A symbolic link, stored as data.
+        Symlink => "symlink",
+    }
+}
+
 impl MemoryEntry {
+    /// What the entry holds.
+    #[must_use]
+    pub const fn kind(&self) -> MemoryEntryKind {
+        match self {
+            Self::File { .. } => MemoryEntryKind::File,
+            Self::Directory => MemoryEntryKind::Directory,
+            Self::Symlink { .. } => MemoryEntryKind::Symlink,
+        }
+    }
+
     /// The bytes the entry holds besides its path.
     fn payload_bytes(&self) -> u64 {
         match self {
@@ -131,6 +145,94 @@ impl MemoryEntry {
             Self::Directory => 0,
         }
     }
+}
+
+/// The text of an entry path, or [`ArchiveError::InvalidArchive`] when it is
+/// not valid UTF-8: a lossy conversion could merge two distinct entries into
+/// one name.
+///
+/// # Errors
+///
+/// Returns [`ArchiveError::InvalidArchive`] for a path that is not UTF-8.
+///
+/// # Examples
+///
+/// ```
+/// use std::path::Path;
+///
+/// use exarch_core::utf8_entry_path;
+///
+/// assert_eq!(utf8_entry_path(Path::new("a/b.txt")).unwrap(), "a/b.txt");
+/// ```
+pub fn utf8_entry_path(path: &Path) -> Result<&str> {
+    path.to_str().ok_or_else(|| {
+        ArchiveError::InvalidArchive(format!("entry path is not valid UTF-8: {}", path.display()))
+    })
+}
+
+/// Extracts an archive held in memory into a [`MemorySink`].
+///
+/// The format is detected from the leading bytes unless `format` is given;
+/// `limit` defaults to [`MemoryLimit::from_config`]. A failure after entries
+/// were delivered reports [`PartialWrites::Discarded`](crate::PartialWrites):
+/// nothing is written to disk and the entries are dropped with the error.
+///
+/// # Errors
+///
+/// Returns the errors of
+/// [`extract_to_sink_with_progress`](crate::extract_to_sink_with_progress), and
+/// [`ArchiveError::UnknownFormat`] or a reader-format error when the
+/// format cannot be determined.
+///
+/// # Examples
+///
+/// ```
+/// use std::assert_matches;
+///
+/// use exarch_core::MemoryEntry;
+/// use exarch_core::NoopProgress;
+/// use exarch_core::PathModel;
+/// use exarch_core::SecurityConfig;
+/// use exarch_core::SinkOptions;
+/// use exarch_core::extract_bytes_to_memory;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let mut builder = tar::Builder::new(Vec::new());
+/// let mut header = tar::Header::new_gnu();
+/// header.set_size(2);
+/// header.set_mode(0o644);
+/// builder.append_data(&mut header, "a.txt", &b"hi"[..])?;
+///
+/// let (report, sink) = extract_bytes_to_memory(
+///     builder.into_inner()?,
+///     None,
+///     &SecurityConfig::default(),
+///     &SinkOptions::default(),
+///     None,
+///     PathModel::Host,
+///     &mut NoopProgress,
+/// )?;
+/// assert_eq!(report.files_extracted, 1);
+/// let entries = sink.into_entries();
+/// assert_matches!(entries.values().next(), Some(MemoryEntry::File { .. }));
+/// # Ok(())
+/// # }
+/// ```
+pub fn extract_bytes_to_memory<B: AsRef<[u8]> + Send>(
+    bytes: B,
+    format: Option<ArchiveType>,
+    config: &SecurityConfig,
+    options: &SinkOptions,
+    limit: Option<MemoryLimit>,
+    model: PathModel,
+    progress: &mut dyn ProgressCallback,
+) -> Result<(ExtractionReport, MemorySink)> {
+    let reader = ArchiveReader::from_bytes(bytes, format)?;
+    let limit = limit.unwrap_or_else(|| MemoryLimit::from_config(config));
+    let mut sink = MemorySink::new(limit).with_path_model(model);
+    let report = crate::extract_to_sink_with_progress(reader, &mut sink, config, options, progress)
+        .map_err(ArchiveError::discarded)?;
+    Ok((report, sink))
 }
 
 /// The writer of a file being stored by a [`MemorySink`].
@@ -166,11 +268,12 @@ impl Write for MemoryFile {
 /// # Examples
 ///
 /// ```
+/// use std::assert_matches;
 /// use std::io;
 /// use std::path::Path;
 ///
 /// use exarch_core::ArchiveReader;
-/// use exarch_core::ExtractionOptions;
+/// use exarch_core::SinkOptions;
 /// use exarch_core::MemoryEntry;
 /// use exarch_core::MemorySink;
 /// use exarch_core::SecurityConfig;
@@ -190,12 +293,12 @@ impl Write for MemoryFile {
 ///     reader,
 ///     &mut sink,
 ///     &SecurityConfig::default(),
-///     &ExtractionOptions::default(),
+///     &SinkOptions::default(),
 /// )?;
-/// assert!(matches!(
+/// assert_matches!(
 ///     sink.get(Path::new("docs/hello.txt")),
 ///     Some(MemoryEntry::File { data, .. }) if data == b"hello"
-/// ));
+/// );
 /// assert_eq!(
 ///     sink.stored_bytes(),
 ///     MemorySink::ENTRY_OVERHEAD + "docs/hello.txt".len() as u64 + 5
@@ -286,7 +389,7 @@ impl MemorySink {
     fn full(&self) -> io::Error {
         io::Error::new(
             io::ErrorKind::QuotaExceeded,
-            MemorySinkFull { limit: self.limit },
+            SinkFull::new(self.limit.bytes().get()),
         )
     }
 

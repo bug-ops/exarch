@@ -12,6 +12,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 tempfile = "3"
+unicode-normalization = "0.1"
 exarch-core = { path = "../crates/exarch-core" }
 
 [workspace]
@@ -50,6 +51,20 @@ bench = false
 [[bin]]
 name = "extract_archive"
 path = "fuzz_targets/extract_archive.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sink"
+path = "fuzz_targets/sink.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "detect"
+path = "fuzz_targets/detect.rs"
 test = false
 doc = false
 bench = false

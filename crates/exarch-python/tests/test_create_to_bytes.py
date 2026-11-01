@@ -119,7 +119,8 @@ def test_raising_callback_surfaces_and_discards_entries(tar_gz_bytes):
 
     assert len(calls) == 1
     assert info.value.progress_callback_error is True
-    assert info.value.files_extracted >= 1
+    assert info.value.writes == "discarded"
+    assert not hasattr(info.value, "files_extracted")
 
 
 def test_raising_callback_does_not_mask_core_error(tar_gz_bytes):

@@ -146,6 +146,15 @@ exarch create out.tar.gz src/ --json
 > the symlink and store the target's content — for a directory symlink, this means walking and
 > archiving the entire target tree.
 
+A ZIP entry that compresses more than 100x (repetitive logs, zero-filled data, a 5 KB run of one
+character) is refused by default `extract` and `verify` as a zip bomb, while the same content in a
+`.tar.gz` extracts. `create` of a `.zip` therefore adds a `warnings` entry (text and
+`data.warnings` in `--json`) with the number of such entries and the smallest ratio that admits
+them (`ZIP archive has 1 entry over the default extraction ratio limit of 100x; ... at least 218`);
+extract or verify that archive with `--max-compression-ratio 218`. Only a path create is scanned
+(the archive is read back once); a library caller that supplies its own writer gets no warning.
+Verified live: `exarch create r.zip src` for a 5000-byte `B` run prints the warning and exits `0`.
+
 `exarch` refuses to *create* 7z archives (7z is extract-only) and refuses to create archives
 under ZIP-family extensions that carry extra format semantics: `.jar`, `.war`, `.ear`, `.nar`,
 `.nbm`, `.apk`, `.aab`, `.ipa`, `.appx`, `.msix`, `.whl`, `.vsix`, `.xpi`, `.epub` — use plain
@@ -178,7 +187,7 @@ alike with `error.kind` `SecurityViolation` and exit `1`, whatever flags are set
 `verify` used to list such an entry as a file, or call a FIFO `InvalidArchive`). Verified with the
 debug binary on a TAR holding `ok.txt` and a FIFO: `list` and `verify` give `operation denied by
 security policy: FIFO entries not supported`; with a `V` entry the message reads `unsupported
-entry type: __Nonexhaustive(86)`, and `extract` prefixes it with `failed to list archive`.
+entry type: __Nonexhaustive(86)`, and `extract` gives the same message with its `HINT` (the list pass no longer prefixes errors with `failed to list archive`).
 
 ### `verify <ARCHIVE>`
 
@@ -275,8 +284,8 @@ exit `1`; `--allow-symlinks` alone leaves only the hardlink finding; both flags 
 - `verify` models only the archive's own entries. It cannot see files, directories or links already present in the extraction destination, so a `PASS` does not guarantee that extraction into a non-empty destination succeeds.
 - Symlink chains are resolved with a per-OS hop limit in `verify`'s model: macOS 33, Linux glibc 40, Linux musl 39, Windows 63 (not verified on a Windows host), other Unix 32. The first three match `std::fs::canonicalize`, which `extract` uses; a different filesystem or kernel configuration can still disagree, so a `PASS` does not guarantee that a deep chain extracts. Verified live on macOS: chains of up to 34 links pass `verify` and `extract`, a 35-link chain fails both.
 - A hardlink whose target does not exist in the archive fails with `Invalid archive: hardlink target does not exist: <target>`, matching `extract`.
-- `verify` reports as `HIGH` issues (exit `1`) the entry shapes the host rejects: an entry beneath a regular file (`I/O error: not a directory`), a directory over an existing file (`I/O error: entity already exists`), a parent chain that loops or leaves the destination, a hardlink whose target is a directory (`hardlink target is a directory: <target>`), a link whose placement can make extraction fail (a symlink over an earlier file, or an entry or hardlink below a dangling symlink), reported as `Security Policy` with `Security violation: extraction fails at <path>: <error>` (below a dangling symlink; fails under every option set) or `Security violation: extraction can fail at <path> unless duplicates are skipped: <error>` (symlink over an earlier file) and `Security: FAILED` (verified live on TARs with `--allow-symlinks --allow-hardlinks`; a directory over a file stays an `I/O error` with `Security: OK`), and an entry or hardlink target with a name component over 255 bytes (UTF-16 units on Windows) or a path over the host's limit, and a symlink target over the host's path limit (`I/O error: file name too long`). The path limit is per host: 4095 bytes on Linux, 1023 on macOS and other Unix, 32767 UTF-16 units on Windows. A symlink target is checked against its own limit only, so a long component is accepted there: the path limit on Unix, 4091 UTF-16 units on Windows (the 16 KiB reparse buffer holds the substitute and print names of a relative target; extraction never creates absolute targets). Two gaps remain: the check sees the entry's relative path, not the destination prefix extraction adds, so `verify` can PASS while `extract` fails with `File name too long` when the destination path is long; and the Windows symlink target limit is checked against `CreateSymbolicLinkW` by a Windows-only test, not by a live run on every host. `list` fails on an entry whose path is over those limits (`I/O error: file name too long`); `verify` does not keep such a path and reports up to 16 archive-level `HIGH` issues naming the entry position and byte length, then one summary issue counting the rest; with `--check-integrity` each dropped entry also counts as unverified with the reason `path_too_long`, so the integrity result is `INCOMPLETE` rather than `OK`.
-- `verify` has no overwrite option and models first-entry-wins extraction. Without `--force`, `extract` skips a later entry at an already-written path (verified live: entries `f`=`one` then `f`=`two` leave `one`, with a `skipped 1 entry as pre-existing duplicates` warning); with `--force` a later entry overwrites it (the same archive leaves `two`). `verify` cannot model the `--force` outcome and reports a `HIGH` issue where a symlink entry follows an earlier file entry at the same path, even though plain `extract` skips that symlink. Where an overwrite would fail without replacing anything (a symlink over an earlier symlink with another target or over a directory, a file over a directory or symlink, a hardlink over any earlier entry), `verify` adds a `LOW` `Invalid Archive` note (`extraction with overwrite fails at <path>: an earlier entry is a <kind>`, plus `(default extraction skips this entry)` for a symlink) and the status stays `PASS`. A repeated symlink with the same target is not noted. A symlink entry over an existing symlink is skipped by plain `extract` (verified live on a TAR whose `d` symlink is repeated with another target: exit `0`, `skipped 1 entry as pre-existing duplicates`, where it used to fail with `SymlinkEscape`). Under `--force` an existing symlink with another target is never re-pointed: `extract` fails with `I/O error: refusing to replace the existing symlink at <path>` (`error.kind` `IoError`, `partial_report.writes` `"kept"`). A regular file over an earlier directory or symlink entry fails `extract --force` the same way and names the entry: `I/O error: refusing to replace the existing directory at d` or `... the existing symlink at l` (verified live on TARs; 7z uses the same wording, covered by a test only). The wording says what occupies the path and not that an archive entry put it there, since the destination may already have held it. A symlink with the same target is left as it is, so re-extracting an archive with `--force` into its own output succeeds, dangling links included. `verify` does not flag a symlink's recorded mode (Linux writes `0o777` on every link and extraction ignores it), so `verify --strict` exits `0` for it; a hardlink entry's recorded mode is not checked either, since extraction never applies a link entry's own mode (verified live: `verify --strict --allow-hardlinks` on a TAR whose hardlink records mode `0o777` prints `PASS` and exits `0`).
+- `verify` reports as `HIGH` issues (exit `1`) the entry shapes the host rejects: an entry beneath a regular file (`I/O error: not a directory`), a directory over an earlier file (`I/O error: refusing to replace the existing file at <path>`, the text `extract` gives, with and without `--force`, also for a file the destination already held) or over an earlier symlink that does not resolve to a directory inside the destination (`extraction fails at <path>: refusing to replace the existing symlink at <path>`; `extract` refuses it too with `error.kind` `SecurityViolation` and creates nothing through the link, while a link that resolves to an in-destination directory is accepted), a parent chain that loops or leaves the destination, a hardlink whose target is a directory (`hardlink target is a directory: <target>`), a link whose placement can make extraction fail (a symlink over an earlier file, or an entry or hardlink below a dangling symlink), reported as `Security Policy` with `Security violation: extraction fails at <path>: <error>` (below a dangling symlink; fails under every option set) or `Security violation: extraction can fail at <path> unless duplicates are skipped: <error>` (symlink over an earlier file) and `Security: FAILED` (verified live on TARs with `--allow-symlinks --allow-hardlinks`; a directory over a file stays an `I/O error` with `Security: OK`), and an entry or hardlink target with a name component over 255 bytes (UTF-16 units on Windows) or a path over the host's limit, and a symlink target over the host's path limit (`I/O error: file name too long`). The path limit is per host: 4095 bytes on Linux, 1023 on macOS and other Unix, 32767 UTF-16 units on Windows. A symlink target is checked against its own limit only, so a long component is accepted there: the path limit on Unix, 4091 UTF-16 units on Windows (the 16 KiB reparse buffer holds the substitute and print names of a relative target; extraction never creates absolute targets). Two gaps remain: the check sees the entry's relative path, not the destination prefix extraction adds, so `verify` can PASS while `extract` fails with `File name too long` when the destination path is long; and the Windows symlink target limit is checked against `CreateSymbolicLinkW` by a Windows-only test, not by a live run on every host. `list` fails on an entry whose path is over those limits (`I/O error: file name too long`); `verify` does not keep such a path and reports up to 16 archive-level `HIGH` issues naming the entry position and byte length, then one summary issue counting the rest; with `--check-integrity` each dropped entry also counts as unverified with the reason `path_too_long`, so the integrity result is `INCOMPLETE` rather than `OK`.
+- `verify` has no overwrite option and models first-entry-wins extraction. Without `--force`, `extract` skips a later entry at an already-written path (verified live: entries `f`=`one` then `f`=`two` leave `one`, with a `skipped 1 entry as pre-existing duplicates` warning); with `--force` a later entry overwrites it (the same archive leaves `two`). `verify` cannot model the `--force` outcome and reports a `HIGH` issue where a symlink entry follows an earlier file entry at the same path, even though plain `extract` skips that symlink. Where an overwrite would fail without replacing anything (a symlink over an earlier symlink with another target or over a directory, a file over a directory or symlink, a hardlink over any earlier entry), `verify` adds a `LOW` `Invalid Archive` note (`extraction with overwrite fails at <path>: an earlier entry is a <kind>`, plus `(default extraction skips this entry)` for a symlink) and the status stays `PASS`. A repeated symlink with the same target is not noted. A symlink entry over an existing symlink is skipped by plain `extract` (verified live on a TAR whose `d` symlink is repeated with another target: exit `0`, `skipped 1 entry as pre-existing duplicates`, where it used to fail with `SymlinkEscape`). Under `--force` an existing symlink with another target is never re-pointed: `extract` fails with `I/O error: refusing to replace the existing symlink at <path>` (`error.kind` `IoError`, `partial_report.writes` `"kept"` in an existing destination and `"rolled_back"` for a TAR into a new one). A regular file over an earlier directory or symlink entry fails `extract --force` the same way and names the entry: `I/O error: refusing to replace the existing directory at d` or `... the existing symlink at l` (verified live on TARs; 7z uses the same wording, covered by a test only). The wording says what occupies the path and not that an archive entry put it there, since the destination may already have held it. A symlink with the same target is left as it is, so re-extracting an archive with `--force` into its own output succeeds, dangling links included. `verify` does not flag a symlink's recorded mode (Linux writes `0o777` on every link and extraction ignores it), so `verify --strict` exits `0` for it; a hardlink entry's recorded mode is not checked either, since extraction never applies a link entry's own mode (verified live: `verify --strict --allow-hardlinks` on a TAR whose hardlink records mode `0o777` prints `PASS` and exits `0`).
 - On macOS names are compared after NFD and a per-character case fold, on Windows after the same fold without normalisation, elsewhere exactly. Two entries whose names differ but compare equal under that fold are reported as a `"Name Collision"` issue, never merged silently: `HIGH` when their kinds differ or a symlink is involved (a hardlink over a file counts as a file), `MEDIUM` for two files or for two directories that hold entries (`status` `WARNING`, `Security: WARNING`), `LOW` for two directories that hold no entries (listed, but `status` stays `PASS` and `Security: OK`). A spelling is reported once, however many entries use it. Verified live on macOS: `café.txt` in NFC and NFD spellings, `straße.txt` and `straẞe.txt`, `a.txt` and `A.txt`, and `Dir/a.txt` with `dir/b.txt` give `MEDIUM`; the empty directory entries `Dir/` and `dir/` give `LOW`. The fold approximates the host's table, so a pair it merges that the host keeps apart is reported too.
 - Windows component checks (reserved device names, alternate data streams, trailing dot or space, `<>"|?*`, control characters) run only when `verify` itself runs on a Windows host, so results are not host-independent.
 
@@ -466,7 +475,8 @@ For `extract`, when some files were already written before a mid-archive failure
 a structured `error.partial_report` object (`files_extracted`, `directories_created`,
 `symlinks_created`, `bytes_written`, `files_skipped`, `warnings`, `writes`). `writes` is
 `"kept"` when the extracted items remain in the destination and `"rolled_back"` under `--atomic`
-(including `--atomic --force`), where the partial extraction is discarded and the destination is
+(including `--atomic --force`) and for a TAR extracted into a destination that does not exist yet
+(see the note below), where the partial extraction is discarded and the destination is
 left unchanged; the counts then describe what was discarded. Verified live against a
 three-entry archive where the first entry extracts, the second is skipped for a disallowed
 extension (via `--allowed-extensions`), and the third is a symlink rejected by the (default-off)
@@ -492,15 +502,27 @@ only when the keycap U+20E3 follows), U+E0100..U+E01EF after a CJK ideograph, an
 variation selectors after a Mongolian letter. Anywhere else it is escaped, so `report1.pdf` and
 `report1\u{fe0f}.pdf` print differently. Use `--json` for the exact path. A TAR regular, continuous
 or sparse-file entry whose name ends in `/` and that carries data fails `list`, `verify` and
-`extract` with `InvalidArchive`. The CLI writes nothing in that case, because `extract` lists the
-archive first and the list pass fails (verified live: `out/` is not created, exit `1`, no
-`partial_report`); only the Rust, Node and Python extract entry points, which do not run that pass,
-report a partial extraction with the entries before it kept. A failed `extract --atomic` reports `writes: "rolled_back"` and
-leaves the destination unchanged.
+`extract` with `InvalidArchive`. The CLI writes nothing in that case: into an existing destination
+`extract` lists the archive first and the list pass fails (verified live: no `partial_report`), and
+into a destination that does not exist yet the atomic single pass rolls back (verified live:
+`out/` is not created, exit `1`, `writes: "rolled_back"` when an earlier entry had been extracted).
+Only the Rust, Node and Python extract entry points, which do not run that pass, report a partial
+extraction with the entries before it kept. A failed `extract --atomic` reports
+`writes: "rolled_back"` and leaves the destination unchanged.
 
-Note: `extract` always lists the archive first (`list_archive()`, sharing `--max-file-count`,
+Note: `extract` lists the archive first (`list_archive()`, sharing `--max-file-count`,
 `--max-total-size`, and `--max-file-size` with the extraction config) to detect output
-conflicts and size the progress bar. Quota violations (file count, total size, per-file size)
+conflicts and size the progress bar, except for a TAR (any codec) whose destination does not
+exist yet and whose parent directory does. That run skips the list pass, which for a compressed
+TAR is a second full decode, and extracts atomically: a refusal anywhere in the archive leaves
+nothing on disk, creates no parent directory, and reports `writes: "rolled_back"` (with the counts
+of the discarded run) and the extraction's own error text. The progress bar then shows an entry
+count without a total (TAR does not know it). There is no gain when the destination exists (this
+includes the default, the current directory), when its parent is missing, or for ZIP and 7z,
+whose list pass reads headers only; those runs behave as described here.
+A run killed mid-extraction (SIGTERM, Ctrl-C) cannot clean up, so its hidden staging directory
+`.exarch-XXXXXX` stays in the destination's parent and `out/` does not exist; delete the staging
+directory by hand. Quota violations (file count, total size, per-file size)
 are therefore caught during this pre-flight pass and reported as a plain error with **no**
 `partial_report`, since extraction never starts. Only checks that require the real destination
 directory — symlink/hardlink escape — can still produce a mid-archive partial extraction.
@@ -556,7 +578,7 @@ Error (`extract`, path traversal):
   "status": "error",
   "error": {
     "kind": "PathTraversal",
-    "message": "failed to list archive: evil.tar: path traversal detected: ../../etc/passwd"
+    "message": "Security violation: Archive 'evil.tar' attempted path traversal\nHINT: This archive may be malicious. Do not extract from untrusted sources.: path traversal detected: ../../etc/passwd"
   }
 }
 ```
@@ -564,7 +586,8 @@ Error (`extract`, path traversal):
 Error (`extract`, mid-archive security failure with partial progress — note the structured
 `error.partial_report` field, including `files_skipped`/`warnings`; the archive's first entry
 extracts, its second entry is skipped for a disallowed extension, then a symlink entry is
-rejected because `--allow-symlinks` was not passed):
+rejected because `--allow-symlinks` was not passed; shown for an existing destination, where the
+partial extraction is kept):
 
 ```json
 {

@@ -10,6 +10,10 @@ use crate::Result;
 use crate::SecurityConfig;
 use crate::config::Validated;
 use crate::formats::common::DirCache;
+use crate::security::admitted::EntrySize;
+use crate::security::admitted::ValidatedFile;
+use crate::security::admitted::ValidatedHardlink;
+use crate::security::admitted::ValidatedSymlink;
 use crate::security::context::ValidationContext;
 use crate::security::fs_view::FsView;
 use crate::security::fs_view::HostFs;
@@ -174,21 +178,6 @@ impl ValidatedEntry {
     pub fn mode(&self) -> Option<SanitizedMode> {
         self.mode
     }
-
-    /// Consumes the entry, returning its validated parts by value.
-    ///
-    /// `entry_type()` only lends a shared reference, which is enough to
-    /// observe a `QuotaPermit` but not to move it out of the `File` variant
-    /// — `QuotaPermit` is neither `Clone` nor `Copy` by design, so ownership
-    /// can only be obtained by consuming the `ValidatedEntry` that holds it.
-    /// Write paths that need to thread the permit by value into a helper
-    /// (mirroring `formats::common::copy_file_content_with_permit`'s guarantee)
-    /// call this instead of `entry_type()`.
-    #[inline]
-    #[must_use]
-    pub(crate) fn into_parts(self) -> (SafePath, ValidatedEntryType, Option<SanitizedMode>) {
-        (self.safe_path, self.entry_type, self.mode)
-    }
 }
 
 /// Validated entry type variants.
@@ -289,68 +278,139 @@ impl<'a> ValidatorCore<'a> {
         view: &V,
         ctx: &ValidationContext<'_, V>,
     ) -> Result<ValidatedEntry> {
-        let kind = NodeKind::directory_if(matches!(entry_type, EntryType::Directory));
-        let safe_path = self
-            .validate_entry_path_in(path, kind, root, view, ctx)?
-            .into_inner();
-
-        let (validated_type, sanitized_mode) = match entry_type {
+        let size = EntrySize {
+            uncompressed: uncompressed_size,
+            compressed: compressed_size,
+        };
+        match entry_type {
             EntryType::File => {
-                let permit = self.quota_tracker.reserve(uncompressed_size, self.config)?;
-                self.check_ratio(compressed_size, uncompressed_size)?;
-                let sanitized = mode.map(|m| sanitize_permissions(m, self.config));
-                (ValidatedEntryType::File(permit), sanitized)
+                let file = self.validate_file_in(path, size, mode, root, view, ctx)?;
+                Ok(ValidatedEntry::new(
+                    file.path,
+                    ValidatedEntryType::File(file.permit),
+                    file.mode,
+                ))
             }
-
             EntryType::Directory => {
-                self.check_ratio(compressed_size, uncompressed_size)?;
-                (ValidatedEntryType::Directory, None)
+                let safe_path = self.validate_directory_in(path, size, root, view, ctx)?;
+                Ok(ValidatedEntry::new(
+                    safe_path,
+                    ValidatedEntryType::Directory,
+                    None,
+                ))
             }
-
             EntryType::Symlink { target } => {
-                self.check_ratio(compressed_size, uncompressed_size)?;
-                require_symlinks_allowed(self.config)?;
-                self.reserve_symlink(uncompressed_size)?;
-                let safe_symlink =
-                    SafeSymlink::validate_in(&safe_path, target, root, self.config, view)?;
-                self.symlink_seen = true;
-                (ValidatedEntryType::Symlink(safe_symlink), None)
+                let symlink = self.validate_symlink_in(path, target, size, root, view, ctx)?;
+                Ok(ValidatedEntry::new(
+                    symlink.link,
+                    ValidatedEntryType::Symlink(symlink.symlink),
+                    None,
+                ))
             }
-
             EntryType::Hardlink { target } => {
-                self.check_ratio(compressed_size, uncompressed_size)?;
-                require_hardlinks_allowed(self.config)?;
-                let counted = self.quota_tracker.reserve_count(self.config)?;
-
-                // Hardlink tracker validates: absolute paths, traversal,
-                // normalization, escapes
-                self.hardlink_tracker.validate_hardlink_in(
-                    &safe_path,
-                    target,
-                    root,
-                    self.config,
-                    view,
-                )?;
-
-                // SAFETY: validate_hardlink_in verified target is relative,
-                // normalized, within the root
-                let target_safe = SafePath::new_unchecked(target.clone());
-
-                (
+                let link = self.validate_hardlink_in(path, target, size, root, view, ctx)?;
+                Ok(ValidatedEntry::new(
+                    link.link,
                     ValidatedEntryType::Hardlink {
-                        target: target_safe,
-                        counted,
+                        target: link.target,
+                        counted: link.counted,
                     },
                     None,
-                )
+                ))
             }
-        };
+        }
+    }
 
-        Ok(ValidatedEntry::new(
-            safe_path,
-            validated_type,
-            sanitized_mode,
-        ))
+    /// Validates a regular file: path, quota reservation, ratio and mode.
+    pub(crate) fn validate_file_in<V: FsView>(
+        &mut self,
+        path: &Path,
+        size: EntrySize,
+        mode: Option<u32>,
+        root: &V::Root,
+        view: &V,
+        ctx: &ValidationContext<'_, V>,
+    ) -> Result<ValidatedFile> {
+        let safe_path = self
+            .validate_entry_path_in(path, NodeKind::NonDirectory, root, view, ctx)?
+            .into_inner();
+        let permit = self.quota_tracker.reserve(size.uncompressed, self.config)?;
+        self.check_ratio(size.compressed, size.uncompressed)?;
+        Ok(ValidatedFile {
+            path: safe_path,
+            permit,
+            mode: mode.map(|m| sanitize_permissions(m, self.config)),
+        })
+    }
+
+    /// Validates a directory entry: path and ratio.
+    pub(crate) fn validate_directory_in<V: FsView>(
+        &self,
+        path: &Path,
+        size: EntrySize,
+        root: &V::Root,
+        view: &V,
+        ctx: &ValidationContext<'_, V>,
+    ) -> Result<SafePath> {
+        let safe_path = self
+            .validate_entry_path_in(path, NodeKind::Directory, root, view, ctx)?
+            .into_inner();
+        self.check_ratio(size.compressed, size.uncompressed)?;
+        Ok(safe_path)
+    }
+
+    /// Validates a symlink entry: path, ratio, policy, quota and target.
+    pub(crate) fn validate_symlink_in<V: FsView>(
+        &mut self,
+        path: &Path,
+        target: &Path,
+        size: EntrySize,
+        root: &V::Root,
+        view: &V,
+        ctx: &ValidationContext<'_, V>,
+    ) -> Result<ValidatedSymlink> {
+        let safe_path = self
+            .validate_entry_path_in(path, NodeKind::NonDirectory, root, view, ctx)?
+            .into_inner();
+        self.check_ratio(size.compressed, size.uncompressed)?;
+        require_symlinks_allowed(self.config)?;
+        self.reserve_symlink(size.uncompressed)?;
+        let symlink = SafeSymlink::validate_in(&safe_path, target, root, self.config, view)?;
+        self.symlink_seen = true;
+        Ok(ValidatedSymlink {
+            link: safe_path,
+            symlink,
+        })
+    }
+
+    /// Validates a hardlink entry: path, ratio, policy, count and target.
+    pub(crate) fn validate_hardlink_in<V: FsView>(
+        &mut self,
+        path: &Path,
+        target: &Path,
+        size: EntrySize,
+        root: &V::Root,
+        view: &V,
+        ctx: &ValidationContext<'_, V>,
+    ) -> Result<ValidatedHardlink> {
+        let safe_path = self
+            .validate_entry_path_in(path, NodeKind::NonDirectory, root, view, ctx)?
+            .into_inner();
+        self.check_ratio(size.compressed, size.uncompressed)?;
+        require_hardlinks_allowed(self.config)?;
+        let counted = self.quota_tracker.reserve_count(self.config)?;
+
+        self.hardlink_tracker
+            .validate_hardlink_in(&safe_path, target, root, self.config, view)?;
+
+        // SAFETY: validate_hardlink_in verified target is relative, normalized,
+        // within the root
+        let target_safe = SafePath::new_unchecked(target.to_path_buf());
+        Ok(ValidatedHardlink {
+            link: safe_path,
+            target: target_safe,
+            counted,
+        })
     }
 
     /// See [`EntryValidator::validate_entry_path`].
@@ -526,72 +586,6 @@ impl<'a> EntryValidator<'a> {
         )
     }
 
-    /// Validates only the path portion of an entry — traversal, absolute-path,
-    /// depth, and symlink-escape-adjacent checks — without reserving quota or
-    /// applying type-specific validation (symlink/hardlink target checks,
-    /// permission sanitization).
-    ///
-    /// Split out of [`validate_entry`](Self::validate_entry), which calls
-    /// this for its own path-validation step so the two never diverge.
-    /// Callers that must resolve an entry's destination path *before*
-    /// deciding whether to reserve quota — 7z's duplicate-skip check (issue
-    /// #478), which needs the path to check for a pre-existing file at the
-    /// destination — use this together with
-    /// [`reserve_file`](Self::reserve_file) instead of `validate_entry`, so
-    /// a skipped entry never reserves quota it will not use.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ArchiveError::PathTraversal`](crate::ArchiveError::PathTraversal)
-    /// or another path-validation error if `path` fails validation, and
-    /// [`ArchiveError::SecurityViolation`](crate::ArchiveError::SecurityViolation)
-    /// for a root entry (`.`) whose `kind` is not a directory.
-    pub(crate) fn validate_entry_path(
-        &self,
-        path: &Path,
-        kind: NodeKind,
-        dir_cache: Option<&DirCache>,
-    ) -> Result<EntryPath<SafePath>> {
-        let ctx = self.host_context(dir_cache);
-        self.core
-            .validate_entry_path_in(path, kind, self.dest, &HostFs, &ctx)
-    }
-
-    /// Reserves quota capacity for a regular file's byte count, independent
-    /// of path validation.
-    ///
-    /// Mirrors [`charge_hardlink`](Self::charge_hardlink), which exists for
-    /// the same reason on the hardlink path: reserving quota unconditionally
-    /// inside `validate_entry` and only checking for a duplicate afterward
-    /// would permanently consume the entry's quota allotment on the skip
-    /// path, since [`QuotaPermit`] has no `Drop` impl to release it. Used by
-    /// 7z's extraction callback together with
-    /// [`validate_entry_path`](Self::validate_entry_path) (issue #478).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ArchiveError::QuotaExceeded`](crate::ArchiveError::QuotaExceeded)
-    /// if recording `size` bytes would exceed `max_file_size`,
-    /// `max_file_count`, or `max_total_size`.
-    pub(crate) fn reserve_file(&mut self, size: u64) -> Result<QuotaPermit> {
-        self.core.reserve_file(size)
-    }
-
-    /// Reserves quota capacity for a symlink, charging its stored size the way
-    /// `list` and `verify` do.
-    ///
-    /// Counts the symlink against `max_file_count` so a link flood is bounded
-    /// like a file flood. The permit is discarded: no writer consumes one for a
-    /// link.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ArchiveError::QuotaExceeded`] if recording the link would
-    /// exceed `max_file_size`, `max_file_count`, or `max_total_size`.
-    pub(crate) fn reserve_symlink(&mut self, size: u64) -> Result<()> {
-        self.core.reserve_symlink(size)
-    }
-
     /// Charges a hardlink's copied byte count against the shared quota tracker,
     /// returning a capability token that proves the charge succeeded.
     ///
@@ -672,27 +666,6 @@ mod tests {
         );
         let child = EntryPath::of(Path::new("a"));
         assert!(child.require_directory_root(NodeKind::NonDirectory).is_ok());
-    }
-
-    #[test]
-    fn test_validate_entry_path_returns_root_for_directory_and_rejects_file() {
-        let temp = TempDir::new().expect("failed to create temp dir");
-        let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
-        let config = SecurityConfig::default().validate().expect("valid config");
-        let validator = EntryValidator::new(&config, &dest);
-
-        let root = validator
-            .validate_entry_path(Path::new("."), NodeKind::Directory, None)
-            .expect("root directory");
-        assert!(root.is_root());
-        assert_matches!(
-            validator.validate_entry_path(Path::new("."), NodeKind::NonDirectory, None),
-            Err(ArchiveError::SecurityViolation { .. })
-        );
-        let child = validator
-            .validate_entry_path(Path::new("a.txt"), NodeKind::NonDirectory, None)
-            .expect("child");
-        assert!(!child.is_root());
     }
 
     #[test]
@@ -1189,8 +1162,8 @@ mod tests {
             None,
             None,
         )?;
-        match entry.into_parts() {
-            (_, ValidatedEntryType::Hardlink { counted, .. }, _) => Ok(counted),
+        match entry.entry_type {
+            ValidatedEntryType::Hardlink { counted, .. } => Ok(counted),
             other => panic!("expected a hardlink, got {other:?}"),
         }
     }

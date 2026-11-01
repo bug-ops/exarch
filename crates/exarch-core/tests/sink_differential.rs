@@ -6,6 +6,7 @@
 
 mod sink_support;
 
+use std::assert_matches;
 use std::io::Cursor;
 
 use exarch_core::ArchiveError;
@@ -14,6 +15,7 @@ use exarch_core::ExtractionOptions;
 use exarch_core::ExtractionReport;
 use exarch_core::SecurityConfig;
 use exarch_core::SeekableFormat;
+use exarch_core::SinkOptions;
 use exarch_core::extract_archive_with_options;
 use exarch_core::extract_to_sink;
 use sink_support::RecordingSink;
@@ -80,7 +82,8 @@ fn via_sink(
         }
     };
     let mut sink = RecordingSink::default();
-    let outcome = extract_to_sink(reader, &mut sink, config, options);
+    let options = SinkOptions::try_from(options).unwrap();
+    let outcome = extract_to_sink(reader, &mut sink, config, &options);
     (outcome, sink)
 }
 
@@ -691,6 +694,62 @@ fn sevenz_fixtures_match_the_path_based_extraction() {
     assert!(accepted > 20, "only {accepted} extractions succeeded");
 }
 
+/// A 7z archive that exercises every branch the host and sink share: a
+/// directory, a repeated path, a symlink, and a file the extension filter
+/// skips.
+#[cfg(unix)]
+fn sevenz_with_duplicates_and_links() -> Vec<u8> {
+    use sevenz_rust2::ArchiveEntry;
+    use sevenz_rust2::ArchiveWriter;
+
+    const UNIX_EXTENSION: u32 = 0x8000;
+    const S_IFLNK: u32 = 0o120_000;
+
+    let mut writer = ArchiveWriter::new(Cursor::new(Vec::new())).unwrap();
+    let dir = ArchiveEntry::new_directory("dir");
+    writer.push_archive_entry::<&[u8]>(dir, None).unwrap();
+    for (name, data) in [
+        ("dir/a.txt", &b"first"[..]),
+        ("dir/a.txt", &b"second"[..]),
+        ("dir/b.bin", &b"binary"[..]),
+    ] {
+        let mut entry = ArchiveEntry::new_file(name);
+        entry.has_stream = true;
+        entry.size = data.len() as u64;
+        writer.push_archive_entry(entry, Some(data)).unwrap();
+    }
+    let target = b"dir/a.txt";
+    let mut link = ArchiveEntry::new_file("ln");
+    link.has_stream = true;
+    link.size = target.len() as u64;
+    link.has_windows_attributes = true;
+    link.windows_attributes = UNIX_EXTENSION | ((S_IFLNK | 0o777) << 16);
+    writer.push_archive_entry(link, Some(&target[..])).unwrap();
+    writer.finish().unwrap().into_inner()
+}
+
+#[cfg(unix)]
+#[test]
+fn sevenz_duplicates_links_and_filtered_files_match_the_path_based_extraction() {
+    let bytes = sevenz_with_duplicates_and_links();
+    let mut accepted = 0;
+    for config in [
+        default_config(),
+        links_config(),
+        links_config().with_allowed_extensions(vec!["txt".to_owned()]),
+    ] {
+        for options in [ExtractionOptions::default(), overwrite()] {
+            accepted += usize::from(assert_parity(
+                Kind::SevenZ,
+                bytes.clone(),
+                &config,
+                &options,
+            ));
+        }
+    }
+    assert!(accepted >= 2, "only {accepted} extractions succeeded");
+}
+
 #[test]
 fn sevenz_interleaved_empty_entries_are_delivered_in_archive_order() {
     let (_, bytes) = sevenz_fixtures()
@@ -725,10 +784,7 @@ fn sevenz_quota_bomb_leaves_the_sink_untouched() {
     {
         let config = default_config().with_max_total_size(1);
         let (result, sink) = via_sink(Kind::SevenZ, &bytes, &config, &ExtractionOptions::default());
-        assert!(matches!(
-            result.unwrap_err(),
-            ArchiveError::QuotaExceeded { .. }
-        ));
+        assert_matches!(result.unwrap_err(), ArchiveError::QuotaExceeded { .. });
         assert!(sink.tree.files.is_empty() && sink.tree.dirs.is_empty());
         assert!(sink.finished.is_empty());
     }

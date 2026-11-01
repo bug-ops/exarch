@@ -1,16 +1,18 @@
 //! Extraction of an archive held in memory into memory.
 
-use std::io::Cursor;
 use std::path::Path;
 use std::path::PathBuf;
 
-use exarch_core::ArchiveReader;
-use exarch_core::ArchiveWriter;
 use exarch_core::MemoryEntry as CoreMemoryEntry;
 use exarch_core::MemoryLimit;
 use exarch_core::MemorySink;
 use exarch_core::PathModel as CorePathModel;
 use exarch_core::SanitizedMode;
+use exarch_core::SinkOptions;
+use exarch_core::extract_bytes_to_memory;
+use exarch_core::formats::detect::ArchiveType as CoreArchiveType;
+use exarch_core::formats::detect::CreatableFormat;
+use exarch_core::utf8_entry_path;
 use napi::Env;
 use napi::bindgen_prelude::PromiseRaw;
 use napi::bindgen_prelude::Result;
@@ -92,12 +94,7 @@ pub struct MemoryEntry {
 /// The text of `path`, or an error: a lossy conversion could merge two
 /// distinct entries into one name.
 fn utf8(path: &Path) -> CoreResult<String> {
-    path.to_str().map(str::to_owned).ok_or_else(|| {
-        Failure::Core(exarch_core::ArchiveError::InvalidArchive(format!(
-            "entry path is not valid UTF-8: {}",
-            path.display()
-        )))
-    })
+    Ok(utf8_entry_path(path).map(str::to_owned)?)
 }
 
 impl TryFrom<(PathBuf, CoreMemoryEntry)> for MemoryEntry {
@@ -192,7 +189,7 @@ impl<B: AsRef<[u8]> + Send> MemoryJob<B> {
         let (report, sink) = run_with_optional_progress(
             progress,
             |progress| self.extract(progress),
-            |source, (report, _)| ProgressCallbackError::ExtractionCallback { source, report },
+            |source, _| ProgressCallbackError::MemoryExtractionCallback { source },
         )?;
         into_memory_extraction(report, sink)
     }
@@ -201,22 +198,24 @@ impl<B: AsRef<[u8]> + Send> MemoryJob<B> {
         self,
         progress: &mut dyn exarch_core::ProgressCallback,
     ) -> CoreResult<(exarch_core::ExtractionReport, MemorySink)> {
-        let limit = match self.max_bytes {
-            Some(bytes) => {
-                MemoryLimit::new(exact_positive_bytes(bytes).ok_or_else(invalid_max_bytes)?)
-            }
-            None => MemoryLimit::from_config(&self.config),
-        };
-        let reader = ArchiveReader::from_bytes(self.data, self.format.map(Into::into))?;
-        let mut sink = MemorySink::new(limit).with_path_model(self.path_model);
-        let report = exarch_core::extract_to_sink_with_progress(
-            reader,
-            &mut sink,
+        let limit = self
+            .max_bytes
+            .map(|bytes| {
+                exact_positive_bytes(bytes)
+                    .map(MemoryLimit::new)
+                    .ok_or_else(invalid_max_bytes)
+            })
+            .transpose()?;
+        let options = SinkOptions::try_from(&self.options)?;
+        Ok(extract_bytes_to_memory(
+            self.data,
+            self.format.map(Into::into),
             &self.config,
-            &self.options,
+            &options,
+            limit,
+            self.path_model,
             progress,
-        )?;
-        Ok((report, sink))
+        )?)
     }
 }
 
@@ -322,11 +321,10 @@ fn create_to_bytes_core(
     sources
         .iter()
         .try_for_each(|source| validate_path(source))?;
-    let mut out = Cursor::new(Vec::new());
-    let writer = ArchiveWriter::of_type(&mut out, format.into())?;
-    let report = exarch_core::create_to_writer(writer, sources, config)?;
+    let format = CreatableFormat::try_from(CoreArchiveType::from(format))?;
+    let (bytes, report) = exarch_core::create_to_bytes(sources, format, config)?;
     Ok(CreatedArchive {
-        data: Uint8Array::from(out.into_inner()),
+        data: Uint8Array::from(bytes),
         report: CreationReport::from(report),
     })
 }

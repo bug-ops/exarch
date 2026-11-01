@@ -10,11 +10,11 @@
 //! proves that a crafted `.7z` archive with a relative-traversal entry name
 //! or an absolute-path entry name is rejected by `SevenZArchive::extract`
 //! before any file is written, mirroring upstream's own PoC/regression test.
-//! Both entries are caught by the Step-1 pre-validation pass that runs
-//! before any entry is read; the separate extraction-time re-validation
-//! layer (`process_entry_inner`'s defense-in-depth check) is exercised
-//! directly by `test_process_entry_inner_rejects_traversal_independently`
-//! in `crates/exarch-core/src/formats/sevenz.rs`.
+//! Both entries are caught by the pre-pass that runs before any entry is
+//! read; the separate extraction-time re-validation layer (`process_entry`'s
+//! defense-in-depth check) is exercised directly by
+//! `test_process_entry_rejects_traversal_independently` in
+//! `crates/exarch-core/src/formats/sevenz/tests.rs`.
 
 #![allow(clippy::unwrap_used)]
 

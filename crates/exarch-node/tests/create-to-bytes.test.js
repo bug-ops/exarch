@@ -153,7 +153,8 @@ describe('extractArchiveToMemoryWithProgress', () => {
       (err) => {
         assert.strictEqual(err.code, 'PROGRESS_CALLBACK_ERROR');
         assert.strictEqual(err.cause, boom);
-        assert.strictEqual(err.filesExtracted, 2);
+        assert.strictEqual(err.writes, 'discarded');
+        assert.strictEqual(err.filesExtracted, undefined);
         assert.strictEqual(err.entries, undefined);
         return true;
       }

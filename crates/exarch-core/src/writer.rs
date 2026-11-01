@@ -8,6 +8,7 @@
 //! On error the writer may already hold a partial archive; the caller owns it
 //! and decides whether to discard it.
 
+use std::io::Cursor;
 use std::io::Seek;
 use std::io::Write;
 use std::path::Path;
@@ -19,10 +20,11 @@ use crate::NoopProgress;
 use crate::ProgressCallback;
 use crate::Result;
 use crate::creation::tar::write_tar;
+use crate::creation::zip::warn_on_extraction_ratio;
 use crate::creation::zip::write_zip;
 use crate::formats::compression::CompressionCodec;
-use crate::formats::detect::ArchiveType;
-use crate::formats::detect::FormatFamily;
+use crate::formats::detect::CreatableFormat;
+use crate::formats::detect::CreationFamily;
 
 /// A seekable byte destination.
 pub(crate) trait WriteSeek: Write + Seek + Send {}
@@ -83,14 +85,14 @@ enum Destination<'a> {
 /// ```
 /// use exarch_core::ArchiveWriter;
 /// use exarch_core::formats::CompressionCodec;
-/// use exarch_core::formats::detect::ArchiveType;
+/// use exarch_core::formats::detect::CreatableFormat;
 /// use std::io::Cursor;
 ///
 /// let tar = ArchiveWriter::tar(Vec::<u8>::new(), Some(CompressionCodec::Gzip));
-/// assert_eq!(tar.format(), ArchiveType::TarGz);
+/// assert_eq!(tar.format(), CreatableFormat::TarGz);
 ///
 /// let zip = ArchiveWriter::zip(Cursor::new(Vec::<u8>::new()));
-/// assert_eq!(zip.format(), ArchiveType::Zip);
+/// assert_eq!(zip.format(), CreatableFormat::Zip);
 /// ```
 pub struct ArchiveWriter<'a> {
     destination: Destination<'a>,
@@ -138,39 +140,29 @@ impl<'a> ArchiveWriter<'a> {
     /// callers that hold the format as a value. `Seek` is required because
     /// the format is only known at run time.
     ///
-    /// # Errors
-    ///
-    /// Returns [`InvalidConfiguration`](ArchiveError::InvalidConfiguration) for
-    /// 7z, which cannot be created.
-    ///
     /// # Examples
     ///
     /// ```
     /// use exarch_core::ArchiveWriter;
-    /// use exarch_core::formats::detect::ArchiveType;
+    /// use exarch_core::formats::detect::CreatableFormat;
     /// use std::io::Cursor;
     ///
-    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// let writer = ArchiveWriter::of_type(Cursor::new(Vec::<u8>::new()), ArchiveType::TarZst)?;
-    /// assert_eq!(writer.format(), ArchiveType::TarZst);
-    /// assert!(ArchiveWriter::of_type(Cursor::new(Vec::<u8>::new()), ArchiveType::SevenZ).is_err());
-    /// # Ok(())
-    /// # }
+    /// let writer = ArchiveWriter::of_type(Cursor::new(Vec::<u8>::new()), CreatableFormat::TarZst);
+    /// assert_eq!(writer.format(), CreatableFormat::TarZst);
     /// ```
-    pub fn of_type<W: Write + Seek + Send + 'a>(writer: W, format: ArchiveType) -> Result<Self> {
+    pub fn of_type<W: Write + Seek + Send + 'a>(writer: W, format: CreatableFormat) -> Self {
         match format.family() {
-            FormatFamily::Tar(codec) => Ok(Self::tar(writer, codec)),
-            FormatFamily::Zip => Ok(Self::zip(writer)),
-            FormatFamily::SevenZ => Err(sevenz_creation_unsupported()),
+            CreationFamily::Tar(codec) => Self::tar(writer, codec),
+            CreationFamily::Zip => Self::zip(writer),
         }
     }
 
     /// The format the writer was declared to receive.
     #[must_use]
-    pub const fn format(&self) -> ArchiveType {
+    pub const fn format(&self) -> CreatableFormat {
         match self.destination {
-            Destination::Tar { codec, .. } => ArchiveType::tar_with(codec),
-            Destination::Zip { .. } => ArchiveType::Zip,
+            Destination::Tar { codec, .. } => CreatableFormat::tar_with(codec),
+            Destination::Zip { .. } => CreatableFormat::Zip,
         }
     }
 }
@@ -178,14 +170,13 @@ impl<'a> ArchiveWriter<'a> {
 /// Creates an archive from `sources` into `writer`.
 ///
 /// Same as [`create_archive`](crate::create_archive) with the output in a
-/// writer. `CreationReport::bytes_compressed` is the number of bytes written
-/// to it.
+/// writer. The writer fixes the format, so `config.format` is ignored.
+/// `CreationReport::bytes_compressed` is the number of bytes written to it.
 ///
 /// # Errors
 ///
 /// Returns an error if:
 /// - the configuration is invalid
-/// - `config.format` is set and differs from [`ArchiveWriter::format`]
 /// - a source does not exist or cannot be read
 /// - writing to the writer fails
 ///
@@ -258,21 +249,59 @@ pub fn create_to_writer_with_progress<P: AsRef<Path>>(
     progress: &mut dyn ProgressCallback,
 ) -> Result<CreationReport> {
     let config = config.clone().validate()?;
-    if let Some(requested) = config.format {
-        let declared = writer.format();
-        if requested != declared {
-            return Err(ArchiveError::InvalidConfiguration {
-                reason: format!(
-                    "config format {requested:?} does not match the writer format {declared:?}"
-                ),
-            });
-        }
-    }
 
     match writer.destination {
         Destination::Tar { stream, codec } => write_tar(stream, codec, sources, &config, progress),
-        Destination::Zip { stream } => write_zip(stream, sources, &config, progress),
+        Destination::Zip { stream } => {
+            write_zip(stream, sources, &config, progress).map(|(report, _)| report)
+        }
     }
+}
+
+/// Creates an archive of `format` from `sources` and returns its bytes.
+///
+/// The whole archive is held in memory, so use
+/// [`create_archive`](crate::create_archive) for large ones. Because the
+/// finished ZIP can be read back, a ZIP result carries the same warning as
+/// [`create_archive`](crate::create_archive) when default extraction would
+/// refuse an entry as a zip bomb.
+///
+/// # Errors
+///
+/// Returns the errors of [`create_to_writer`].
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::CreationConfig;
+/// use exarch_core::create_to_bytes;
+/// use exarch_core::formats::detect::CreatableFormat;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let src = tempfile::tempdir()?;
+/// std::fs::write(src.path().join("a.txt"), b"hello")?;
+///
+/// let (bytes, report) = create_to_bytes(
+///     &[src.path()],
+///     CreatableFormat::TarGz,
+///     &CreationConfig::default(),
+/// )?;
+/// assert_eq!(report.bytes_compressed, bytes.len() as u64);
+/// # Ok(())
+/// # }
+/// ```
+pub fn create_to_bytes<P: AsRef<Path>>(
+    sources: &[P],
+    format: CreatableFormat,
+    config: &CreationConfig,
+) -> Result<(Vec<u8>, CreationReport)> {
+    let mut out = Cursor::new(Vec::new());
+    let writer = ArchiveWriter::of_type(&mut out, format);
+    let mut report = create_to_writer(writer, sources, config)?;
+    if format == CreatableFormat::Zip {
+        warn_on_extraction_ratio(&mut out, &mut report);
+    }
+    Ok((out.into_inner(), report))
 }
 
 #[cfg(test)]
@@ -392,39 +421,61 @@ mod tests {
     }
 
     #[test]
-    fn test_of_type_round_trips_and_rejects_sevenz() {
+    fn test_create_to_bytes_round_trips_every_creatable_format() {
         let src = source_tree();
-        for format in [ArchiveType::Tar, ArchiveType::TarZst, ArchiveType::Zip] {
+        for &format in CreatableFormat::ALL {
+            let (bytes, report) = create_to_bytes(&[src.path()], format, &config()).unwrap();
+            assert_eq!(report.bytes_compressed, bytes.len() as u64, "{format}");
+            let reader = crate::ArchiveReader::from_bytes(bytes, None).unwrap();
+            assert_eq!(
+                crate::formats::detect::ArchiveType::from(format),
+                reader.format()
+            );
+        }
+    }
+
+    #[test]
+    fn test_create_to_bytes_zip_warns_about_extraction_ratio() {
+        let src = TempDir::new().unwrap();
+        fs::write(src.path().join("zeros"), vec![0u8; 100_000]).unwrap();
+        let (_, report) = create_to_bytes(&[src.path()], CreatableFormat::Zip, &config()).unwrap();
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("extraction ratio limit")),
+            "{:?}",
+            report.warnings
+        );
+        let (_, report) =
+            create_to_bytes(&[src.path()], CreatableFormat::TarGz, &config()).unwrap();
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+    }
+
+    #[test]
+    fn test_of_type_round_trips_every_creatable_format() {
+        let src = source_tree();
+        for &format in CreatableFormat::ALL {
             let mut out = Cursor::new(Vec::new());
-            let writer = ArchiveWriter::of_type(&mut out, format).unwrap();
+            let writer = ArchiveWriter::of_type(&mut out, format);
             assert_eq!(writer.format(), format);
             create_to_writer(writer, &[src.path()], &config()).unwrap();
             assert!(!out.get_ref().is_empty());
         }
-        assert_matches!(
-            ArchiveWriter::of_type(Cursor::new(Vec::new()), ArchiveType::SevenZ),
-            Err(ArchiveError::InvalidConfiguration { .. })
-        );
     }
 
     #[test]
-    fn test_format_mismatch_is_rejected() {
+    fn test_writer_format_wins_over_config_format() {
         let src = source_tree();
-        let cfg = config().with_format(Some(ArchiveType::Zip));
-        let result = create_to_writer(ArchiveWriter::tar(Vec::new(), None), &[src.path()], &cfg);
-        assert_matches!(result, Err(ArchiveError::InvalidConfiguration { .. }));
-    }
-
-    #[test]
-    fn test_matching_format_is_accepted() {
-        let src = source_tree();
-        let cfg = config().with_format(Some(ArchiveType::TarGz));
+        let cfg = config().with_format(Some(CreatableFormat::Zip));
+        let mut out = Cursor::new(Vec::new());
         create_to_writer(
-            ArchiveWriter::tar(Vec::new(), Some(CompressionCodec::Gzip)),
+            ArchiveWriter::tar(&mut out, Some(CompressionCodec::Gzip)),
             &[src.path()],
             &cfg,
         )
         .unwrap();
+        assert_eq!(&out.get_ref()[..2], b"\x1f\x8b");
     }
 
     #[test]

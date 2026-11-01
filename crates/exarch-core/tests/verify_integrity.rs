@@ -402,8 +402,7 @@ fn tar_gz_invalid_deflate_block_inside_an_entry_is_a_hard_error() {
     let path = write(&dir, "a.tar.gz", &gz_with_bad_second_block(&tar, 10_000));
 
     let err = verify_err(&path, default_integrity());
-    assert!(
-        matches!(&err, ArchiveError::InvalidArchive(m) if m.contains("integrity check failed")),
+    assert_matches!(&err, ArchiveError::InvalidArchive(m) if m.contains("integrity check failed"),
         "{err:?}"
     );
 }

@@ -15,7 +15,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 SEEDS="$REPO_ROOT/fuzz/seeds"
 CORPUS="$REPO_ROOT/fuzz/corpus"
 
-for target in tar zip sevenz safe_path extract_archive; do
+for target in tar zip sevenz safe_path extract_archive sink detect; do
   mkdir -p "$SEEDS/$target"
   # cargo-fuzz requires an explicitly-passed corpus dir to already exist; it
   # only auto-creates the default (no-arg) path. Without this, every matrix
@@ -91,10 +91,19 @@ done
 # against a generated one, and copy_seed()'s fail-loud check enforces that a
 # collision is never resolved silently either way -- it errors instead, so a
 # clashing slug must be renamed rather than accidentally dropping a seed.
-for target in tar zip sevenz safe_path extract_archive; do
+for target in tar zip sevenz safe_path extract_archive sink detect; do
   for f in "$REPO_ROOT"/crates/exarch-core/tests/fixtures/fuzz/"$target"/*.bin; do
     copy_seed "$f" "$target"
   done
+done
+
+# The sink and detect targets read the same archives as extract_archive. detect
+# spends its first input byte on a start offset, so its seeds get a zero byte
+# in front. Committed crash reproducers for either target were copied above and
+# are kept as they are.
+for f in "$SEEDS/extract_archive"/*; do
+  copy_seed "$f" sink
+  { printf '\0'; cat "$f"; } >"$SEEDS/detect/$(basename "$f")"
 done
 
 # (c) Hand-written safe_path traversal / edge-case seeds. safe_path takes

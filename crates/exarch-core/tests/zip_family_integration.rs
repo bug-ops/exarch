@@ -16,7 +16,7 @@ use exarch_core::SecurityConfig;
 use exarch_core::create_archive;
 use exarch_core::creation::CreationConfig;
 use exarch_core::extract_archive;
-use exarch_core::formats::detect::ArchiveType;
+use exarch_core::formats::detect::CreatableFormat;
 use exarch_core::formats::detect::ZIP_FAMILY_ALIASES;
 use exarch_core::list_archive;
 use exarch_core::verify_archive;
@@ -185,10 +185,10 @@ fn explicit_format_override_allows_zip_family_creation() {
     let src = dest.path().join("source.txt");
     std::fs::write(&src, b"hello").unwrap();
     let mut config = CreationConfig::default();
-    config.format = Some(ArchiveType::Zip);
+    config.format = Some(CreatableFormat::Zip);
     let output = dest.path().join("out.apk");
     create_archive(&output, &[&src], &config)
-        .expect("explicit ArchiveType::Zip should bypass the guard");
+        .expect("explicit CreatableFormat::Zip should bypass the guard");
     assert!(output.exists());
 }
 

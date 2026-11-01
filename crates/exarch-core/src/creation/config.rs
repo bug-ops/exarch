@@ -4,7 +4,7 @@ use crate::ArchiveError;
 use crate::Result;
 use crate::config::Unvalidated;
 use crate::config::Validated;
-use crate::formats::detect::ArchiveType;
+use crate::formats::detect::CreatableFormat;
 use std::marker::PhantomData;
 use std::ops::Deref;
 use std::ops::DerefMut;
@@ -74,10 +74,12 @@ pub struct CreationConfigFields {
 
     /// Archive format to create.
     ///
-    /// `None` means auto-detect from output file extension.
+    /// `None` means auto-detect from output file extension. Ignored by
+    /// [`create_to_writer`](crate::create_to_writer), whose writer already
+    /// fixes the format.
     ///
     /// Default: `None`.
-    pub format: Option<ArchiveType>,
+    pub format: Option<CreatableFormat>,
 }
 
 impl Default for CreationConfigFields {
@@ -323,13 +325,13 @@ impl CreationConfig<Unvalidated> {
     ///
     /// ```
     /// use exarch_core::creation::CreationConfig;
-    /// use exarch_core::formats::detect::ArchiveType;
+    /// use exarch_core::formats::detect::CreatableFormat;
     ///
-    /// let config = CreationConfig::default().with_format(Some(ArchiveType::TarGz));
-    /// assert_eq!(config.format, Some(ArchiveType::TarGz));
+    /// let config = CreationConfig::default().with_format(Some(CreatableFormat::TarGz));
+    /// assert_eq!(config.format, Some(CreatableFormat::TarGz));
     /// ```
     #[must_use]
-    pub fn with_format(mut self, format: Option<ArchiveType>) -> Self {
+    pub fn with_format(mut self, format: Option<CreatableFormat>) -> Self {
         self.fields.format = format;
         self
     }
@@ -404,7 +406,7 @@ mod tests {
             .with_compression_level(9)
             .unwrap()
             .with_preserve_permissions(false)
-            .with_format(Some(ArchiveType::TarGz));
+            .with_format(Some(CreatableFormat::TarGz));
 
         assert!(config.follow_symlinks);
         assert!(config.include_hidden);
@@ -413,7 +415,7 @@ mod tests {
         assert_eq!(config.strip_prefix, Some(PathBuf::from("/base")));
         assert_eq!(config.compression_level, Some(9));
         assert!(!config.preserve_permissions);
-        assert_eq!(config.format, Some(ArchiveType::TarGz));
+        assert_eq!(config.format, Some(CreatableFormat::TarGz));
     }
 
     #[test]

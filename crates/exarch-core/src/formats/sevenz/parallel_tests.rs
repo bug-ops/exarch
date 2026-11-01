@@ -4,6 +4,7 @@
 
 use super::decode::decode_archive_entries;
 use super::decode::parallel_stream;
+use super::lzma2::DecodeKnobs;
 use crate::ParallelDecode;
 use std::io::Cursor;
 

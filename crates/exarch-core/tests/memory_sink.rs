@@ -4,6 +4,7 @@
 
 mod sink_support;
 
+use std::assert_matches;
 use std::io::Cursor;
 use std::num::NonZeroU64;
 use std::path::Path;
@@ -14,12 +15,20 @@ use exarch_core::ArchiveReader;
 use exarch_core::ExtractionOptions;
 use exarch_core::ExtractionReport;
 use exarch_core::MemoryEntry;
+use exarch_core::MemoryEntryKind;
 use exarch_core::MemoryLimit;
 use exarch_core::MemorySink;
+use exarch_core::NoopProgress;
+use exarch_core::PartialWrites;
+use exarch_core::PathModel;
 use exarch_core::QuotaResource;
 use exarch_core::SecurityConfig;
 use exarch_core::SeekableFormat;
+use exarch_core::SinkOptions;
+use exarch_core::extract_bytes_to_memory;
 use exarch_core::extract_to_sink;
+#[cfg(unix)]
+use exarch_core::utf8_entry_path;
 use sink_support::tar_archive;
 use sink_support::tar_dir;
 use sink_support::tar_entry_mode;
@@ -52,13 +61,13 @@ fn run_tar(
     entries: &[Vec<u8>],
     sink: &mut MemorySink,
     config: &SecurityConfig,
-    options: &ExtractionOptions,
+    options: SinkOptions,
 ) -> Result<ExtractionReport, ArchiveError> {
     extract_to_sink(
         ArchiveReader::tar(Cursor::new(tar_archive(entries)), None),
         sink,
         config,
-        options,
+        &options,
     )
 }
 
@@ -102,19 +111,16 @@ fn a_tar_round_trips_files_directories_and_links() {
         tar_symlink("d/link", "a.txt"),
         tar_hardlink("d/copy", "d/a.txt"),
     ];
-    let report = run_tar(&entries, &mut sink, &links(), &ExtractionOptions::default()).unwrap();
+    let report = run_tar(&entries, &mut sink, &links(), SinkOptions::default()).unwrap();
 
     assert_eq!(report.files_extracted, 2);
-    assert!(matches!(
-        sink.get(Path::new("d")),
-        Some(MemoryEntry::Directory)
-    ));
+    assert_matches!(sink.get(Path::new("d")), Some(MemoryEntry::Directory));
     assert_eq!(file_bytes(&sink, "d/a.txt"), b"alpha");
     assert_eq!(file_bytes(&sink, "d/copy"), b"alpha");
-    assert!(matches!(
+    assert_matches!(
         sink.get(Path::new("d/link")),
         Some(MemoryEntry::Symlink { target }) if target == Path::new("a.txt")
-    ));
+    );
     assert_eq!(
         sink.stored_bytes(),
         charge("d", 0) + charge("d/a.txt", 5) + charge("d/link", 5) + charge("d/copy", 5)
@@ -129,7 +135,7 @@ fn a_zip_round_trips() {
         ArchiveReader::seekable(Cursor::new(bytes), SeekableFormat::Zip),
         &mut sink,
         &SecurityConfig::default(),
-        &ExtractionOptions::default(),
+        &SinkOptions::default(),
     )
     .unwrap();
     assert_eq!(file_bytes(&sink, "d/a.txt"), b"alpha");
@@ -143,7 +149,7 @@ fn into_entries_hands_over_everything() {
         &[tar_file("a", b"x"), tar_file("b", b"y")],
         &mut sink,
         &SecurityConfig::default(),
-        &ExtractionOptions::default(),
+        SinkOptions::default(),
     )
     .unwrap();
     let entries = sink.into_entries();
@@ -162,11 +168,11 @@ fn exceeding_the_limit_is_a_typed_quota_error_and_wraps_after_delivery() {
         &entries,
         &mut sink,
         &SecurityConfig::default(),
-        &ExtractionOptions::default(),
+        SinkOptions::default(),
     )
     .unwrap_err();
 
-    assert!(matches!(error, ArchiveError::PartialExtraction { .. }));
+    assert_matches!(error, ArchiveError::PartialExtraction { .. });
     assert_eq!(sink_capacity(&error), Some(one + 10), "{error:?}");
     assert_eq!(file_bytes(&sink, "a"), b"12345");
     assert!(sink.get(Path::new("b")).is_none());
@@ -180,15 +186,15 @@ fn the_first_entry_over_the_limit_is_not_wrapped() {
         &[tar_file("a", b"12345")],
         &mut sink,
         &SecurityConfig::default(),
-        &ExtractionOptions::default(),
+        SinkOptions::default(),
     )
     .unwrap_err();
-    assert!(matches!(
+    assert_matches!(
         error,
         ArchiveError::QuotaExceeded {
             resource: QuotaResource::SinkCapacity { max: 4 }
         }
-    ));
+    );
     assert_eq!(sink.iter().count(), 0);
 }
 
@@ -208,7 +214,7 @@ fn a_declared_size_over_the_limit_is_refused_before_any_allocation() {
         &[header.as_bytes().to_vec()],
         &mut sink,
         &config,
-        &ExtractionOptions::default(),
+        SinkOptions::default(),
     )
     .unwrap_err();
     assert_eq!(sink_capacity(&error), Some(KIB), "{error:?}");
@@ -218,12 +224,12 @@ fn a_declared_size_over_the_limit_is_refused_before_any_allocation() {
 fn overwriting_a_file_near_the_limit_releases_the_old_bytes() {
     let one = charge("a", 9);
     let mut sink = MemorySink::new(limit(one + 4));
-    let options = ExtractionOptions::default().with_skip_duplicates(false);
+    let options = SinkOptions::default().with_skip_duplicates(false);
     run_tar(
         &[tar_file("a", b"123456789"), tar_file("a", b"abcdefghi")],
         &mut sink,
         &SecurityConfig::default(),
-        &options,
+        options,
     )
     .unwrap();
     assert_eq!(file_bytes(&sink, "a"), b"abcdefghi");
@@ -233,19 +239,16 @@ fn overwriting_a_file_near_the_limit_releases_the_old_bytes() {
 #[test]
 fn a_symlink_over_a_file_frees_the_file_bytes() {
     let mut sink = MemorySink::new(limit(KIB));
-    let options = ExtractionOptions::default().with_skip_duplicates(false);
+    let options = SinkOptions::default().with_skip_duplicates(false);
     run_tar(
         &[tar_file("l", &[7; 50]), tar_symlink("l", "t")],
         &mut sink,
         &links(),
-        &options,
+        options,
     )
     .unwrap();
     assert_eq!(sink.stored_bytes(), charge("l", 1));
-    assert!(matches!(
-        sink.get(Path::new("l")),
-        Some(MemoryEntry::Symlink { .. })
-    ));
+    assert_matches!(sink.get(Path::new("l")), Some(MemoryEntry::Symlink { .. }));
 }
 
 #[test]
@@ -253,23 +256,11 @@ fn a_hardlink_copy_counts_against_the_limit() {
     let entries = [tar_file("t", &[1; 40]), tar_hardlink("h", "t")];
     let both = charge("t", 40) + charge("h", 40);
     let mut roomy = MemorySink::new(limit(both));
-    run_tar(
-        &entries,
-        &mut roomy,
-        &links(),
-        &ExtractionOptions::default(),
-    )
-    .unwrap();
+    run_tar(&entries, &mut roomy, &links(), SinkOptions::default()).unwrap();
     assert_eq!(roomy.stored_bytes(), both);
 
     let mut tight = MemorySink::new(limit(both - 1));
-    let error = run_tar(
-        &entries,
-        &mut tight,
-        &links(),
-        &ExtractionOptions::default(),
-    )
-    .unwrap_err();
+    let error = run_tar(&entries, &mut tight, &links(), SinkOptions::default()).unwrap_err();
     assert_eq!(sink_capacity(&error), Some(both - 1), "{error:?}");
     assert!(tight.get(Path::new("h")).is_none());
     assert_eq!(tight.stored_bytes(), charge("t", 40));
@@ -282,7 +273,7 @@ fn symlink_targets_count_against_the_limit() {
         &[tar_symlink("l", "long-target")],
         &mut sink,
         &links(),
-        &ExtractionOptions::default(),
+        SinkOptions::default(),
     )
     .unwrap_err();
     assert_eq!(sink_capacity(&error), Some(OVERHEAD + 3), "{error:?}");
@@ -299,7 +290,7 @@ fn a_flood_of_long_directory_names_fills_the_sink_instead_of_growing_it() {
         &entries,
         &mut sink,
         &SecurityConfig::default(),
-        &ExtractionOptions::default(),
+        SinkOptions::default(),
     )
     .unwrap_err();
     assert_eq!(sink_capacity(&error), Some(budget), "{error:?}");
@@ -315,7 +306,7 @@ fn a_directory_alone_is_charged_its_path_and_the_overhead() {
         &[tar_dir("some/dir/")],
         &mut sink,
         &SecurityConfig::default(),
-        &ExtractionOptions::default(),
+        SinkOptions::default(),
     )
     .unwrap();
     assert_eq!(sink.stored_bytes(), charge("some/dir", 0));
@@ -329,7 +320,7 @@ fn a_stored_file_keeps_no_spare_capacity() {
         &[tar_file("big", &payload)],
         &mut sink,
         &SecurityConfig::default(),
-        &ExtractionOptions::default(),
+        SinkOptions::default(),
     )
     .unwrap();
     match sink.get(Path::new("big")) {
@@ -356,7 +347,7 @@ fn setuid_and_setgid_are_stripped_from_the_stored_mode() {
             )],
             &mut sink,
             &config,
-            &ExtractionOptions::default(),
+            SinkOptions::default(),
         )
         .unwrap();
         match sink.get(Path::new("f")) {
@@ -384,7 +375,7 @@ fn the_limit_follows_the_config_quota() {
         &[tar_file("a", &[0; 1024])],
         &mut sink,
         &config,
-        &ExtractionOptions::default(),
+        SinkOptions::default(),
     )
     .unwrap();
     assert_eq!(sink.stored_bytes(), charge("a", 1024));
@@ -410,9 +401,108 @@ fn a_failed_file_publishes_nothing() {
         ArchiveReader::tar(Cursor::new(truncated), None),
         &mut sink,
         &SecurityConfig::default(),
-        &ExtractionOptions::default(),
+        &SinkOptions::default(),
     );
     assert!(result.is_err());
     assert!(sink.get(Path::new("t")).is_none());
     assert_eq!(sink.stored_bytes(), 0);
+}
+
+#[test]
+fn extract_bytes_to_memory_detects_the_format_and_applies_the_default_limit() {
+    let bytes = tar_archive(&[tar_dir("d/"), tar_file("d/a.txt", b"alpha")]);
+
+    let (report, sink) = extract_bytes_to_memory(
+        bytes,
+        None,
+        &SecurityConfig::default(),
+        &SinkOptions::default(),
+        None,
+        PathModel::Host,
+        &mut NoopProgress,
+    )
+    .unwrap();
+
+    assert_eq!(report.files_extracted, 1);
+    assert_eq!(
+        sink.limit(),
+        MemoryLimit::from_config(&SecurityConfig::default())
+    );
+    assert_eq!(
+        sink.get(Path::new("d")).map(MemoryEntry::kind),
+        Some(MemoryEntryKind::Directory)
+    );
+    assert_eq!(
+        sink.get(Path::new("d/a.txt")).map(MemoryEntry::kind),
+        Some(MemoryEntryKind::File)
+    );
+}
+
+#[test]
+fn extract_bytes_to_memory_reports_discarded_writes_after_delivered_entries() {
+    let bytes = tar_archive(&[tar_file("a", b"x"), tar_file("../b", b"y")]);
+
+    let error = extract_bytes_to_memory(
+        bytes,
+        None,
+        &SecurityConfig::default(),
+        &SinkOptions::default(),
+        None,
+        PathModel::Host,
+        &mut NoopProgress,
+    )
+    .unwrap_err();
+
+    assert_matches!(
+        error,
+        ArchiveError::PartialExtraction {
+            writes: PartialWrites::Discarded,
+            ..
+        },
+        "{error:?}"
+    );
+}
+
+#[test]
+fn extract_bytes_to_memory_honours_an_explicit_limit() {
+    let bytes = tar_archive(&[tar_file("a", b"0123456789")]);
+
+    let error = extract_bytes_to_memory(
+        bytes,
+        None,
+        &SecurityConfig::default(),
+        &SinkOptions::default(),
+        Some(limit(4)),
+        PathModel::Host,
+        &mut NoopProgress,
+    )
+    .unwrap_err();
+
+    assert_eq!(sink_capacity(&error), Some(4), "{error:?}");
+}
+
+#[test]
+fn sink_options_keep_the_duplicate_policy_and_refuse_atomic() {
+    let overwrite = ExtractionOptions::default().with_skip_duplicates(false);
+    assert!(!SinkOptions::try_from(&overwrite).unwrap().skip_duplicates);
+    assert!(
+        SinkOptions::try_from(&ExtractionOptions::default())
+            .unwrap()
+            .skip_duplicates
+    );
+    assert_matches!(
+        SinkOptions::try_from(&ExtractionOptions::default().with_atomic(true)),
+        Err(ArchiveError::InvalidConfiguration { .. })
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn utf8_entry_path_refuses_names_that_are_not_text() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt as _;
+
+    assert_eq!(utf8_entry_path(Path::new("a/b")).unwrap(), "a/b");
+    let bad = Path::new(OsStr::from_bytes(b"bad\xff"));
+    assert_matches!(utf8_entry_path(bad), Err(ArchiveError::InvalidArchive(_)));
 }

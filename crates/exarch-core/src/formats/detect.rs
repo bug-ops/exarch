@@ -81,26 +81,115 @@ closed_enum! {
     }
 }
 
+closed_enum! {
+    /// Archive formats exarch can create.
+    ///
+    /// The subset of [`ArchiveType`] with a writer: 7z can be read but not
+    /// created, so it is absent here and a creation API cannot be asked for it.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::formats::detect::ArchiveType;
+    /// use exarch_core::formats::detect::CreatableFormat;
+    ///
+    /// assert_eq!(ArchiveType::from(CreatableFormat::TarGz), ArchiveType::TarGz);
+    /// assert_eq!(
+    ///     CreatableFormat::try_from(ArchiveType::Zip).unwrap(),
+    ///     CreatableFormat::Zip
+    /// );
+    /// assert!(CreatableFormat::try_from(ArchiveType::SevenZ).is_err());
+    /// ```
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[non_exhaustive]
+    pub enum CreatableFormat {
+        /// Tar archive (uncompressed).
+        Tar => "Tar",
+        /// Gzip-compressed tar archive.
+        TarGz => "TarGz",
+        /// Bzip2-compressed tar archive.
+        TarBz2 => "TarBz2",
+        /// XZ-compressed tar archive.
+        TarXz => "TarXz",
+        /// Zstd-compressed tar archive.
+        TarZst => "TarZst",
+        /// ZIP archive.
+        Zip => "Zip",
+    }
+}
+
+/// How a [`CreatableFormat`] is written: a TAR stream with an optional codec,
+/// or a ZIP container.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CreationFamily {
+    Tar(Option<CompressionCodec>),
+    Zip,
+}
+
+impl CreatableFormat {
+    /// The TAR format for a stream compressed with `codec`, or plain TAR.
+    pub(crate) const fn tar_with(codec: Option<CompressionCodec>) -> Self {
+        match codec {
+            None => Self::Tar,
+            Some(CompressionCodec::Gzip) => Self::TarGz,
+            Some(CompressionCodec::Bzip2) => Self::TarBz2,
+            Some(CompressionCodec::Xz) => Self::TarXz,
+            Some(CompressionCodec::Zstd) => Self::TarZst,
+        }
+    }
+
+    /// Groups this format by the writer that handles it.
+    pub(crate) const fn family(self) -> CreationFamily {
+        match self {
+            Self::Tar => CreationFamily::Tar(None),
+            Self::TarGz => CreationFamily::Tar(Some(CompressionCodec::Gzip)),
+            Self::TarBz2 => CreationFamily::Tar(Some(CompressionCodec::Bzip2)),
+            Self::TarXz => CreationFamily::Tar(Some(CompressionCodec::Xz)),
+            Self::TarZst => CreationFamily::Tar(Some(CompressionCodec::Zstd)),
+            Self::Zip => CreationFamily::Zip,
+        }
+    }
+}
+
+impl From<CreatableFormat> for ArchiveType {
+    fn from(format: CreatableFormat) -> Self {
+        match format {
+            CreatableFormat::Tar => Self::Tar,
+            CreatableFormat::TarGz => Self::TarGz,
+            CreatableFormat::TarBz2 => Self::TarBz2,
+            CreatableFormat::TarXz => Self::TarXz,
+            CreatableFormat::TarZst => Self::TarZst,
+            CreatableFormat::Zip => Self::Zip,
+        }
+    }
+}
+
+impl TryFrom<ArchiveType> for CreatableFormat {
+    type Error = ArchiveError;
+
+    /// # Errors
+    ///
+    /// Returns [`ArchiveError::InvalidConfiguration`] for 7z, which cannot be
+    /// created.
+    fn try_from(format: ArchiveType) -> Result<Self> {
+        match format {
+            ArchiveType::Tar => Ok(Self::Tar),
+            ArchiveType::TarGz => Ok(Self::TarGz),
+            ArchiveType::TarBz2 => Ok(Self::TarBz2),
+            ArchiveType::TarXz => Ok(Self::TarXz),
+            ArchiveType::TarZst => Ok(Self::TarZst),
+            ArchiveType::Zip => Ok(Self::Zip),
+            ArchiveType::SevenZ => Err(crate::writer::sevenz_creation_unsupported()),
+        }
+    }
+}
+
 /// How an [`ArchiveType`] is read: a TAR stream with an optional codec, or a
 /// container format with its own handler.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FormatFamily {
     Tar(Option<CompressionCodec>),
-    Zip,
-    SevenZ,
-}
-
-impl FormatFamily {
-    /// The codec of a TAR family, or the seekable format of a container one.
-    pub(crate) const fn tar_codec(
-        self,
-    ) -> std::result::Result<Option<CompressionCodec>, crate::SeekableFormat> {
-        match self {
-            Self::Tar(codec) => Ok(codec),
-            Self::Zip => Err(crate::SeekableFormat::Zip),
-            Self::SevenZ => Err(crate::SeekableFormat::SevenZ),
-        }
-    }
+    Seekable(crate::SeekableFormat),
 }
 
 impl ArchiveType {
@@ -115,6 +204,31 @@ impl ArchiveType {
         }
     }
 
+    /// The canonical file extension for this type, without a leading dot.
+    ///
+    /// Extension detection maps the result back to the same type.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::formats::detect::ArchiveType;
+    ///
+    /// assert_eq!(ArchiveType::TarGz.extension(), "tar.gz");
+    /// assert_eq!(ArchiveType::SevenZ.extension(), "7z");
+    /// ```
+    #[must_use]
+    pub const fn extension(self) -> &'static str {
+        match self {
+            Self::Tar => "tar",
+            Self::TarGz => "tar.gz",
+            Self::TarBz2 => "tar.bz2",
+            Self::TarXz => "tar.xz",
+            Self::TarZst => "tar.zst",
+            Self::Zip => "zip",
+            Self::SevenZ => "7z",
+        }
+    }
+
     /// Groups this type by the reader that handles it.
     pub(crate) const fn family(self) -> FormatFamily {
         match self {
@@ -123,8 +237,8 @@ impl ArchiveType {
             Self::TarBz2 => FormatFamily::Tar(Some(CompressionCodec::Bzip2)),
             Self::TarXz => FormatFamily::Tar(Some(CompressionCodec::Xz)),
             Self::TarZst => FormatFamily::Tar(Some(CompressionCodec::Zstd)),
-            Self::Zip => FormatFamily::Zip,
-            Self::SevenZ => FormatFamily::SevenZ,
+            Self::Zip => FormatFamily::Seekable(crate::SeekableFormat::Zip),
+            Self::SevenZ => FormatFamily::Seekable(crate::SeekableFormat::SevenZ),
         }
     }
 }
@@ -378,6 +492,28 @@ mod tests {
     }
 
     #[test]
+    fn test_archive_type_extension_round_trips_through_detection() {
+        for &t in ArchiveType::ALL {
+            let name = format!("archive.{}", t.extension());
+            assert_eq!(detect_format_from_extension(Path::new(&name)).unwrap(), t);
+        }
+    }
+
+    #[test]
+    fn test_creatable_format_round_trips_through_archive_type() {
+        for &format in CreatableFormat::ALL {
+            let archive_type = ArchiveType::from(format);
+            assert_eq!(CreatableFormat::try_from(archive_type).unwrap(), format);
+            assert_eq!(archive_type.as_str(), format.as_str());
+        }
+        assert_eq!(CreatableFormat::ALL.len(), ArchiveType::ALL.len() - 1);
+        assert_matches!(
+            CreatableFormat::try_from(ArchiveType::SevenZ),
+            Err(ArchiveError::InvalidConfiguration { .. })
+        );
+    }
+
+    #[test]
     fn test_family_maps_tar_codecs() {
         assert_eq!(ArchiveType::Tar.family(), FormatFamily::Tar(None));
         assert_eq!(
@@ -396,8 +532,14 @@ mod tests {
             ArchiveType::TarZst.family(),
             FormatFamily::Tar(Some(CompressionCodec::Zstd))
         );
-        assert_eq!(ArchiveType::Zip.family(), FormatFamily::Zip);
-        assert_eq!(ArchiveType::SevenZ.family(), FormatFamily::SevenZ);
+        assert_eq!(
+            ArchiveType::Zip.family(),
+            FormatFamily::Seekable(crate::SeekableFormat::Zip)
+        );
+        assert_eq!(
+            ArchiveType::SevenZ.family(),
+            FormatFamily::Seekable(crate::SeekableFormat::SevenZ)
+        );
     }
 
     #[test]

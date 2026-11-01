@@ -133,8 +133,7 @@ fn verify_reports_traversal_hidden_in_a_later_member() {
 
         let err = verify_archive(&archive, &SecurityConfig::default()).unwrap_err();
 
-        assert!(
-            matches!(&err, ArchiveError::PathTraversal { path } if path.ends_with("escape.txt")),
+        assert_matches!(&err, ArchiveError::PathTraversal { path } if path.ends_with("escape.txt"),
             "{name}: {err:?}"
         );
     }

@@ -430,8 +430,9 @@ pub enum ArchiveError {
     /// Extraction stopped mid-archive after recording progress.
     ///
     /// `writes` says whether that output is still on disk
-    /// ([`PartialWrites::Kept`]) or was discarded by atomic rollback
-    /// ([`PartialWrites::RolledBack`]).
+    /// ([`PartialWrites::Kept`]), was discarded by atomic rollback
+    /// ([`PartialWrites::RolledBack`]), or was never written anywhere
+    /// ([`PartialWrites::Discarded`]).
     #[error("{source}")]
     PartialExtraction {
         /// The original error that stopped extraction.
@@ -447,9 +448,10 @@ pub enum ArchiveError {
 closed_enum! {
     /// Fate of the files recorded in a [`ArchiveError::PartialExtraction`] report.
     ///
-    /// Atomic extraction discards its temporary directory on failure, so the
-    /// report's counters describe work that no longer exists on disk. Front ends
-    /// use this state to avoid presenting those counters as leftovers.
+    /// Atomic extraction discards its temporary directory on failure, and an
+    /// in-memory extraction drops what it collected, so the report's counters
+    /// describe work that no longer exists. Front ends use this state to avoid
+    /// presenting those counters as leftovers.
     ///
     /// # Examples
     ///
@@ -458,7 +460,8 @@ closed_enum! {
     ///
     /// assert_eq!(PartialWrites::Kept.as_str(), "kept");
     /// assert_eq!(PartialWrites::RolledBack.to_string(), "rolled_back");
-    /// assert_eq!(PartialWrites::ALL.len(), 2);
+    /// assert_eq!(PartialWrites::Discarded.as_str(), "discarded");
+    /// assert_eq!(PartialWrites::ALL.len(), 3);
     /// ```
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     #[non_exhaustive]
@@ -471,6 +474,9 @@ closed_enum! {
         /// Cleanup is best effort: a failed removal can leave a `.tmp*` sibling
         /// in the destination's parent directory.
         RolledBack => "rolled_back",
+        /// The extraction collected its entries in memory, wrote nothing to a
+        /// destination, and dropped them with the error.
+        Discarded => "discarded",
     }
 }
 
@@ -717,6 +723,41 @@ impl ArchiveError {
                 source,
                 report,
                 writes: PartialWrites::RolledBack,
+            },
+            other => other,
+        }
+    }
+
+    /// Marks a [`Self::PartialExtraction`] as never written to a destination,
+    /// for an in-memory extraction that drops its entries on failure; any
+    /// other error is returned unchanged.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::ArchiveError;
+    /// use exarch_core::ExtractionReport;
+    /// use exarch_core::PartialWrites;
+    ///
+    /// let err = ArchiveError::PartialExtraction {
+    ///     source: Box::new(ArchiveError::violation("x".into())),
+    ///     report: ExtractionReport::default(),
+    ///     writes: PartialWrites::Kept,
+    /// };
+    /// match err.discarded() {
+    ///     ArchiveError::PartialExtraction { writes, .. } => {
+    ///         assert_eq!(writes, PartialWrites::Discarded);
+    ///     }
+    ///     other => panic!("unexpected: {other:?}"),
+    /// }
+    /// ```
+    #[must_use]
+    pub fn discarded(self) -> Self {
+        match self {
+            Self::PartialExtraction { source, report, .. } => Self::PartialExtraction {
+                source,
+                report,
+                writes: PartialWrites::Discarded,
             },
             other => other,
         }

@@ -120,13 +120,14 @@ use crate::ExtractionReport;
 use crate::ProgressCallback;
 use crate::Result;
 use crate::SecurityConfig;
+use crate::SinkOptions;
 use crate::VerificationOptions;
 use crate::config::Validated;
 use crate::inspection::integrity::TarTrailer;
 use crate::inspection::list::ListPass;
+use crate::security::admitted::EntrySize;
 use crate::security::quota::EntryCount;
 use crate::security::validator::NodeKind;
-use crate::security::validator::ValidatedEntryType;
 use crate::security::validator::check_root_entry_is_directory;
 use crate::security::validator::require_non_empty_name;
 use crate::types::EntryType;
@@ -138,6 +139,8 @@ use super::tar_metadata_limit::budget_violation;
 use super::tar_metadata_limit::budgeted_reader;
 use super::tar_metadata_limit::budgeted_tar_entries;
 use super::target::ExtractTarget;
+use super::target::FileAdmission;
+use super::target::FileRequest;
 use super::target::HostTarget;
 use super::target::Tally;
 use super::traits::ArchiveFormat;
@@ -276,35 +279,49 @@ impl<R: Read> TarArchive<R> {
             return Ok(None);
         }
 
-        let validated = target.validate(&path, &entry_type, size, None, mode)?;
+        let entry_size = EntrySize {
+            uncompressed: size,
+            compressed: None,
+        };
 
-        // `into_parts()` consumes `validated` so the File arm can move its
-        // QuotaPermit by value into the target (mirrors 7z's
-        // process_entry_inner, issue #445), rather than only observing it
-        // through entry_type()'s shared reference.
-        match validated.into_parts() {
-            (safe_path, ValidatedEntryType::File(permit), mode) => {
-                let size = entry.size();
-                target.file(entry, &safe_path, mode, permit, size, &mut ctx.tally)?;
+        match &entry_type {
+            EntryType::File => {
+                let request = FileRequest {
+                    path: &path,
+                    size: entry_size,
+                    mode,
+                };
+                if let FileAdmission::Write(admitted) =
+                    target.validate_file(request, &mut ctx.tally)?
+                {
+                    target.file(entry, admitted, entry.size(), &mut ctx.tally)?;
+                }
                 Ok(None)
             }
 
-            (safe_path, ValidatedEntryType::Directory, _) => {
+            EntryType::Directory => {
+                let safe_path = target.validate_directory(&path, entry_size)?;
                 target.directory(&safe_path, &mut ctx.tally)?;
                 Ok(None)
             }
 
-            (_, ValidatedEntryType::Symlink(safe_symlink), _) => {
+            EntryType::Symlink {
+                target: link_target,
+            } => {
+                let safe_symlink = target.validate_symlink(&path, link_target, entry_size)?;
                 target.symlink(&safe_symlink, &mut ctx.tally)?;
                 Ok(None)
             }
 
-            (safe_path, ValidatedEntryType::Hardlink { target, counted }, _) => {
+            EntryType::Hardlink {
+                target: link_target,
+            } => {
+                let link = target.validate_hardlink(&path, link_target, entry_size)?;
                 // Two-pass: defer hardlink creation until target files exist
                 Ok(Some(HardlinkInfo {
-                    link_path: safe_path,
-                    target_path: target,
-                    counted,
+                    link_path: link.link,
+                    target_path: link.target,
+                    counted: link.counted,
                 }))
             }
         }
@@ -316,7 +333,7 @@ impl<R: Read> TarArchive<R> {
         &mut self,
         target: &mut T,
         config: &SecurityConfig<Validated>,
-        options: &ExtractionOptions,
+        options: SinkOptions,
         progress: &mut dyn ProgressCallback,
     ) -> Result<ExtractionReport> {
         let start = Instant::now();
@@ -350,7 +367,7 @@ impl<R: Read> TarArchive<R> {
         let mut ctx = ExtractionContext {
             tally: Tally {
                 report: &mut report,
-                skip_duplicates: options.skip_duplicates,
+                options,
                 duplicate_skips: &mut duplicate_skips,
                 progress,
             },
@@ -446,7 +463,12 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
         progress: &mut dyn ProgressCallback,
     ) -> Result<ExtractionReport> {
         let mut target = HostTarget::create(output_dir, config)?;
-        self.extract_into(&mut target, config, options, progress)
+        self.extract_into(
+            &mut target,
+            config,
+            SinkOptions::duplicates_of(options),
+            progress,
+        )
     }
 
     /// Lists the entries in the archive without extracting them.
@@ -524,7 +546,7 @@ impl ExtractionContext<'_, '_> {
 
 /// Appends aggregated duplicate-skip and disallowed-extension warnings to
 /// `report`, one entry per non-zero counter, mirroring 7z's single
-/// end-of-extraction warning (`SevenZArchive::extract_with_callback`)
+/// end-of-extraction warning (`SevenZArchive::extract_into`)
 /// instead of one warning per skipped entry (issues #490, #495).
 fn push_duplicate_skip_warnings(
     report: &mut ExtractionReport,
@@ -872,8 +894,6 @@ mod tests {
     use std::assert_matches;
     use std::io::Cursor;
     use std::io::Write;
-    #[cfg(unix)]
-    use std::path::PathBuf;
     use tempfile::TempDir;
 
     #[test]
@@ -2182,31 +2202,19 @@ mod tests {
         // point-in-time check cannot see across.
         let mut target = HostTarget::create(temp.path(), &config).unwrap();
         let validated = target
-            .validate(
+            .validate_hardlink(
                 Path::new("loot.txt"),
-                &EntryType::Hardlink {
-                    target: PathBuf::from("target.txt"),
+                Path::new("target.txt"),
+                EntrySize {
+                    uncompressed: 0,
+                    compressed: None,
                 },
-                0,
-                None,
-                None,
             )
             .unwrap();
-        let (
-            link_path,
-            ValidatedEntryType::Hardlink {
-                target: target_path,
-                counted,
-            },
-            _,
-        ) = validated.into_parts()
-        else {
-            panic!("expected a validated hardlink");
-        };
         let info = HardlinkInfo {
-            link_path,
-            target_path,
-            counted,
+            link_path: validated.link,
+            target_path: validated.target,
+            counted: validated.counted,
         };
         std::os::unix::fs::symlink(&sentinel_path, temp.path().join("target.txt")).unwrap();
 
@@ -2216,7 +2224,7 @@ mod tests {
         let mut hardlink_duplicate_skips = 0u64;
         let mut tally = Tally {
             report: &mut report,
-            skip_duplicates: true,
+            options: SinkOptions::default(),
             duplicate_skips: &mut duplicate_skips,
             progress: &mut progress,
         };

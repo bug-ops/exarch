@@ -1,5 +1,6 @@
 //! Security validation modules.
 
+pub(crate) mod admitted;
 pub(crate) mod boundary;
 pub(crate) mod context;
 pub(crate) mod fs_view;

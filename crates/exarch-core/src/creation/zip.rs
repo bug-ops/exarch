@@ -4,10 +4,14 @@
 //! compression levels and security options.
 
 use crate::ArchiveError;
+use crate::CompressionRatio;
 use crate::IoContext;
 use crate::NoopProgress;
 use crate::ProgressCallback;
 use crate::Result;
+use crate::SecurityConfig;
+use crate::ZipBombDetails;
+use crate::ZipBombScope;
 use crate::config::Validated;
 use crate::creation::config::CreationConfig;
 use crate::creation::progress::ProgressTracker;
@@ -15,6 +19,7 @@ use crate::creation::report::CreationReport;
 use crate::creation::walker::EntryType;
 use crate::creation::walker::collect_entries;
 use std::fs::File;
+use std::fs::OpenOptions;
 use std::io::Read;
 use std::io::Seek;
 use std::io::Write;
@@ -131,21 +136,39 @@ pub fn create_zip_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
     config: &CreationConfig<Validated>,
     progress: &mut dyn ProgressCallback,
 ) -> Result<CreationReport> {
-    let file = File::create(output.as_ref())?;
-    write_zip(file, sources, config, progress)
+    let (file, readable) = match OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(output.as_ref())
+    {
+        Ok(file) => (file, true),
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            (File::create(output.as_ref())?, false)
+        }
+        Err(e) => return Err(e.into()),
+    };
+    let (mut report, mut file) = write_zip(file, sources, config, progress)?;
+    if readable {
+        warn_on_extraction_ratio(&mut file, &mut report);
+    }
+    Ok(report)
 }
 
 /// Internal function that creates ZIP with any writer and progress reporting.
 ///
 /// `out` must be positioned at offset 0: ZIP records absolute offsets, so an
 /// archive appended to existing bytes would be corrupt. `bytes_compressed` is
-/// the writer position after the archive is finished.
+/// the writer position after the archive is finished. The finished writer is
+/// returned so a caller that can read it back may run
+/// [`warn_on_extraction_ratio`].
 pub(crate) fn write_zip<W: Write + Seek, P: AsRef<Path>>(
     mut out: W,
     sources: &[P],
     config: &CreationConfig<Validated>,
     progress: &mut dyn ProgressCallback,
-) -> Result<CreationReport> {
+) -> Result<(CreationReport, W)> {
     if out.stream_position()? != 0 {
         return Err(ArchiveError::InvalidConfiguration {
             reason: "ZIP output writer must be positioned at offset 0".into(),
@@ -240,7 +263,60 @@ pub(crate) fn write_zip<W: Write + Seek, P: AsRef<Path>>(
 
     tracker.on_complete();
 
-    Ok(report)
+    Ok((report, writer))
+}
+
+/// Adds a warning to `report` when default extraction would refuse an entry of
+/// the finished archive in `archive` as a zip bomb.
+///
+/// The ratio check applies to every ZIP entry, so highly compressible content
+/// (logs, zero-filled data) written here round-trips only after the extraction
+/// limit is raised; TAR archives of the same content are not affected. The
+/// warning gives the number of affected entries and the smallest limit that
+/// admits all of them. Writers that cannot be read back are not scanned.
+///
+/// The scan is a diagnostic on an archive that is already complete, so a
+/// failure to read it back becomes a warning instead of an error.
+pub(crate) fn warn_on_extraction_ratio<R: Read + Seek>(archive: R, report: &mut CreationReport) {
+    match extraction_ratio_warning(archive) {
+        Ok(Some(warning)) => report.add_warning(warning),
+        Ok(None) => {}
+        Err(e) => report.add_warning(format!(
+            "could not check the ZIP entries against the default extraction ratio limit: {e}"
+        )),
+    }
+}
+
+fn extraction_ratio_warning<R: Read + Seek>(
+    archive: R,
+) -> std::result::Result<Option<String>, zip::result::ZipError> {
+    let limit = SecurityConfig::default().max_compression_ratio;
+    let mut zip = zip::ZipArchive::new(archive)?;
+
+    let mut over_limit = 0usize;
+    let mut highest = 0.0_f64;
+    for index in 0..zip.len() {
+        let entry = zip.by_index_raw(index)?;
+        let details =
+            ZipBombDetails::new(ZipBombScope::Entry, entry.compressed_size(), entry.size());
+        if let CompressionRatio::Finite(ratio) = details.ratio()
+            && ratio > limit
+        {
+            over_limit += 1;
+            highest = highest.max(ratio);
+        }
+    }
+
+    if over_limit == 0 {
+        return Ok(None);
+    }
+    let noun = if over_limit == 1 { "entry" } else { "entries" };
+    Ok(Some(format!(
+        "ZIP archive has {over_limit} {noun} over the default extraction ratio limit of \
+         {limit}x; default extraction refuses it as a zip bomb unless the maximum compression \
+         ratio is at least {needed}",
+        needed = highest.ceil(),
+    )))
 }
 
 /// Adds a single file to the ZIP archive with progress reporting and reusable
@@ -388,6 +464,68 @@ mod tests {
         assert_eq!(report.files_added, 1);
         assert!(report.bytes_written > 0);
         assert!(output.exists());
+    }
+
+    fn zip_report_for(content: &[u8]) -> CreationReport {
+        let temp = TempDir::new().unwrap();
+        let source_dir = TempDir::new().unwrap();
+        fs::write(source_dir.path().join("data"), content).unwrap();
+        let config = CreationConfig::default().validate().unwrap();
+        create_zip(
+            temp.path().join("out.zip"),
+            &[source_dir.path().join("data")],
+            &config,
+        )
+        .unwrap()
+    }
+
+    fn needed_ratio(warning: &str) -> f64 {
+        warning.rsplit(' ').next().unwrap().parse().unwrap()
+    }
+
+    #[test]
+    fn test_create_zip_warns_when_default_extraction_would_refuse_an_entry() {
+        let report = zip_report_for(&[b'B'; 5000]);
+
+        assert_eq!(report.warnings.len(), 1, "{:?}", report.warnings);
+        let warning = &report.warnings[0];
+        assert!(warning.starts_with(
+            "ZIP archive has 1 entry over the default extraction ratio limit of 100x"
+        ));
+        assert!(needed_ratio(warning) > 100.0);
+    }
+
+    #[test]
+    fn test_create_zip_needed_ratio_admits_the_archive() {
+        let temp = TempDir::new().unwrap();
+        let source_dir = TempDir::new().unwrap();
+        fs::write(source_dir.path().join("data"), [b'B'; 5000]).unwrap();
+        let output = temp.path().join("out.zip");
+        let config = CreationConfig::default().validate().unwrap();
+        let report = create_zip(&output, &[source_dir.path().join("data")], &config).unwrap();
+        let needed = needed_ratio(&report.warnings[0]);
+
+        let dest = temp.path().join("dest");
+        let admitting = crate::SecurityConfig::default().with_max_compression_ratio(needed);
+        crate::api::extract_archive(&output, &dest, &admitting).unwrap();
+        assert!(dest.join("data").exists());
+    }
+
+    #[test]
+    fn test_ratio_scan_failure_degrades_to_a_warning() {
+        let mut report = CreationReport::default();
+
+        warn_on_extraction_ratio(std::io::Cursor::new(b"not a zip".to_vec()), &mut report);
+
+        assert_eq!(report.warnings.len(), 1, "{:?}", report.warnings);
+        assert!(report.warnings[0].starts_with("could not check the ZIP entries"));
+    }
+
+    #[test]
+    fn test_create_zip_no_ratio_warning_for_ordinary_content() {
+        let report = zip_report_for(b"Hello ZIP");
+
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
     }
 
     #[test]

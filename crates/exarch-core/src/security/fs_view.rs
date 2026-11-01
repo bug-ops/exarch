@@ -527,6 +527,17 @@ impl Occupant {
             Self::Symlink => "symlink",
         }
     }
+
+    /// The text of a refusal to replace this occupant at `rel`, shared by the
+    /// host extraction error and the `verify` model so both name the entry and
+    /// the occupant in the same words.
+    pub(crate) fn refusal(self, rel: &Path) -> String {
+        format!(
+            "refusing to replace the existing {} at {}",
+            self.noun(),
+            rel.components().collect::<PathBuf>().display()
+        )
+    }
 }
 
 /// A failed [`VirtualTree::try_insert`].
@@ -542,6 +553,15 @@ impl Conflict {
     pub(crate) fn already_exists(occupant: Occupant) -> Self {
         Self {
             error: io::Error::from(io::ErrorKind::AlreadyExists),
+            occupant: Some(occupant),
+        }
+    }
+
+    /// [`already_exists`](Self::already_exists) whose error names `rel` and
+    /// the occupant.
+    pub(crate) fn already_exists_at(occupant: Occupant, rel: &Path) -> Self {
+        Self {
+            error: io::Error::new(io::ErrorKind::AlreadyExists, occupant.refusal(rel)),
             occupant: Some(occupant),
         }
     }
@@ -893,13 +913,13 @@ impl VirtualTree {
             }
             (Some(id), Node::Dir) => match self.node(id).kind {
                 Node::Dir => Ok(()),
-                Node::File => Err(Conflict::already_exists(Occupant::File)),
-                Node::OpaqueSymlink => Err(Conflict::already_exists(Occupant::Symlink)),
+                Node::File => Err(Conflict::already_exists_at(Occupant::File, rel)),
+                Node::OpaqueSymlink => Err(Conflict::already_exists_at(Occupant::Symlink, rel)),
                 Node::Symlink(_) => {
                     if self.resolves_to_dir(&self.root.join(rel)) {
                         Ok(())
                     } else {
-                        Err(Conflict::already_exists(Occupant::Symlink))
+                        Err(Conflict::already_exists_at(Occupant::Symlink, rel))
                     }
                 }
             },
@@ -1318,6 +1338,7 @@ fn upper_lower_upper(chars: impl Iterator<Item = char>) -> String {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use std::assert_matches;
 
     fn tree() -> VirtualTree {
         VirtualTree::with_fold(&VirtualRoot::at("/dest"), fold)
@@ -1509,10 +1530,7 @@ mod tests {
             put(&mut t, name, Node::Dir);
         }
         let err = t.try_insert(Path::new("d"), Node::Dir).unwrap_err();
-        assert!(matches!(
-            err,
-            PlaceError::Budget(NodeBudgetExceeded { max: 3 })
-        ));
+        assert_matches!(err, PlaceError::Budget(NodeBudgetExceeded { max: 3 }));
         assert!(!t.exists(Path::new("/dest/d")));
     }
 
@@ -1520,7 +1538,7 @@ mod tests {
     fn node_budget_charges_implicit_parents() {
         let mut t = budgeted(2, CollisionRecording::Record);
         let err = t.try_insert(Path::new("a/b/c"), Node::File).unwrap_err();
-        assert!(matches!(err, PlaceError::Budget(_)));
+        assert_matches!(err, PlaceError::Budget(_));
     }
 
     #[test]
@@ -1531,7 +1549,7 @@ mod tests {
         put(&mut t, "Dir", Node::Dir);
         put(&mut t, "DIR", Node::Dir);
         let err = t.try_insert(Path::new("dIr"), Node::Dir).unwrap_err();
-        assert!(matches!(err, PlaceError::Budget(_)));
+        assert_matches!(err, PlaceError::Budget(_));
     }
 
     #[test]

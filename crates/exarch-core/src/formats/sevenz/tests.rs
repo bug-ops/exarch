@@ -13,9 +13,12 @@ use super::classify::UnsupportedEntry;
 use super::classify::is_windows_reparse_point;
 use super::classify::reparse_point_refusal;
 use super::decode::decode_archive_entries;
+use super::extract::process_entry;
 use super::header::BlockIndex;
+use super::host::SevenZHostTarget;
 use super::links::BlockScan;
 use super::links::BlockStop;
+use super::lzma2::DecodeKnobs;
 use super::verify::entries_uncovered_by_block_crc;
 use super::verify::payload_by_block;
 #[cfg(unix)]
@@ -32,13 +35,18 @@ use crate::ParallelDecode;
 use crate::QuotaResource;
 use crate::SolidBlock;
 use crate::UnverifiedReason;
+#[cfg(unix)]
+use crate::copy::CopyBuffer;
+use crate::formats::target::Tally;
 use crate::inspection::integrity::IntegrityPass;
 #[cfg(unix)]
 use crate::security::QuotaPermit;
+use crate::types::EntryType;
 use sevenz_rust2::Archive;
 use sevenz_rust2::Password;
 use std::assert_matches;
 use std::collections::BTreeSet;
+use std::io;
 use std::io::Cursor;
 use std::path::PathBuf;
 use tempfile::TempDir;
@@ -1903,62 +1911,51 @@ fn test_7z_absolute_path_traversal_still_rejected_with_flag() {
 }
 
 /// Regression test for GHSA-qh76-45cr-8xrc / CVE-2026-61725 (7z Zip-Slip):
-/// proves the extraction-time re-validation inside `process_entry_inner`
-/// (the "defense in depth" layer noted at the top of
-/// `extract_with_callback`, which compensates for deliberately bypassing
-/// upstream's own Zip-Slip guard) independently rejects a traversal
-/// entry.
+/// proves the extraction-time re-validation inside `process_entry` (the
+/// "defense in depth" layer, which compensates for deliberately bypassing
+/// upstream's own Zip-Slip guard) independently rejects a traversal entry.
 ///
-/// `SevenZArchive::extract` always pre-validates every entry in Step 1
-/// before this callback ever runs, so a traversal entry reaching
-/// `extract()` is caught there first (see the `test_7z_*_rejected*`
-/// tests above). This test calls `process_entry_inner` directly to
-/// exercise the callback layer in isolation, proving it is not dead
-/// code should Step 1 ever be bypassed or restructured.
+/// `SevenZArchive::extract` always runs the pre-pass over every entry before
+/// the decode loop, so a traversal entry reaching `extract()` is caught there
+/// first (see the `test_7z_*_rejected*` tests above). This test calls
+/// `process_entry` directly to exercise the loop layer in isolation, proving
+/// it is not dead code should the pre-pass ever be bypassed or restructured.
 #[test]
-fn test_process_entry_inner_rejects_traversal_independently() {
+fn test_process_entry_rejects_traversal_independently() {
     let temp = TempDir::new().unwrap();
-    let dest = DestDir::new_or_create(temp.path().to_path_buf()).unwrap();
     let config = SecurityConfig::default().validate().expect("valid config");
-    let mut validator = EntryValidator::new(&config, &dest);
-    let mut dir_cache = common::DirCache::new();
+    let mut target = SevenZHostTarget::create(temp.path(), &config).unwrap();
     let mut report = ExtractionReport::new();
     let mut duplicate_skips = 0u64;
     let mut disallowed_extension_skips = 0u64;
-    let mut pending_error = None;
-    let mut copy_buffer = CopyBuffer::new();
+    let mut progress = crate::NoopProgress;
+    let mut tally = Tally {
+        report: &mut report,
+        options: SinkOptions::default().with_skip_duplicates(false),
+        duplicate_skips: &mut duplicate_skips,
+        progress: &mut progress,
+    };
 
     let mut entry = sevenz_rust2::ArchiveEntry::new_file("../../evil.txt");
     entry.has_stream = true;
     entry.size = 5;
     let entry_path = std::path::PathBuf::from(common::normalize_entry_name(&entry.name));
 
-    let result = SevenZArchive::<Cursor<Vec<u8>>>::process_entry_inner(
+    let result = process_entry(
+        &mut target,
         &entry,
         SevenZKind::File,
         &mut std::io::empty(),
         &entry_path,
-        &mut validator,
-        &dest,
-        &mut report,
-        &mut dir_cache,
-        false,
         &config,
-        &mut duplicate_skips,
         &mut disallowed_extension_skips,
-        &mut pending_error,
-        &mut copy_buffer,
+        &mut tally,
     );
 
-    assert!(
-        result.is_err(),
-        "callback re-validation must independently reject a traversal entry via its own \
-         validate_entry call, got: {result:?}"
-    );
     assert_matches!(
-        pending_error,
-        Some(ArchiveError::PathTraversal { .. }),
-        "the typed error must reach the caller, not a stringified one"
+        result,
+        Err(ArchiveError::PathTraversal { .. }),
+        "the loop must independently reject a traversal entry with a typed error, got: {result:?}"
     );
 }
 
@@ -1968,47 +1965,47 @@ fn test_process_entry_inner_rejects_traversal_independently() {
 /// `common.rs`'s `test_extract_file_with_permit_integer_overflow_check`
 /// for `bytes_written`.
 #[test]
-fn test_process_entry_inner_duplicate_skips_saturates_at_max() {
+fn test_process_entry_duplicate_skips_saturates_at_max() {
     let temp = TempDir::new().unwrap();
-    let dest = DestDir::new_or_create(temp.path().to_path_buf()).unwrap();
     std::fs::write(temp.path().join("existing.txt"), b"already here").unwrap();
 
     let config = SecurityConfig::default().validate().expect("valid config");
-    let mut validator = EntryValidator::new(&config, &dest);
-    let mut dir_cache = common::DirCache::new();
+    let mut target = SevenZHostTarget::create(temp.path(), &config).unwrap();
     let mut report = ExtractionReport::new();
     let mut duplicate_skips = u64::MAX;
     let mut disallowed_extension_skips = 0u64;
-    let mut pending_error = None;
-    let mut copy_buffer = CopyBuffer::new();
+    let mut progress = crate::NoopProgress;
 
     let mut entry = sevenz_rust2::ArchiveEntry::new_file("existing.txt");
     entry.has_stream = true;
     entry.size = 5;
     let entry_path = std::path::PathBuf::from(common::normalize_entry_name(&entry.name));
 
-    let result = SevenZArchive::<Cursor<Vec<u8>>>::process_entry_inner(
-        &entry,
-        SevenZKind::File,
-        &mut std::io::empty(),
-        &entry_path,
-        &mut validator,
-        &dest,
-        &mut report,
-        &mut dir_cache,
-        true, // skip_duplicates
-        &config,
-        &mut duplicate_skips,
-        &mut disallowed_extension_skips,
-        &mut pending_error,
-        &mut copy_buffer,
-    );
+    let result = {
+        let mut tally = Tally {
+            report: &mut report,
+            options: SinkOptions::default(),
+            duplicate_skips: &mut duplicate_skips,
+            progress: &mut progress,
+        };
+        process_entry(
+            &mut target,
+            &entry,
+            SevenZKind::File,
+            &mut std::io::empty(),
+            &entry_path,
+            &config,
+            &mut disallowed_extension_skips,
+            &mut tally,
+        )
+    };
 
     assert_matches!(
         result,
-        Ok(0),
+        Ok(()),
         "duplicate skip must not error, got: {result:?}"
     );
+    assert_eq!(report.files_skipped, 1);
     assert_eq!(
         duplicate_skips,
         u64::MAX,
@@ -2064,7 +2061,7 @@ fn test_skip_duplicates_detects_dangling_symlink_at_destination() {
 /// sits at `dest_path`, symlink or not, without following it, and
 /// nothing upstream of that rename rejected a symlink destination the
 /// way TAR/ZIP's `O_NOFOLLOW`/`ELOOP` in `create_file_with_mode` does.
-/// `process_entry_inner` now checks `lstat_dest` before reserving quota
+/// The host target now checks `lstat_dest` before reserving quota
 /// or removing anything, and fails with the same `ELOOP` I/O error
 /// TAR/ZIP produce instead of silently replacing the symlink.
 #[test]
@@ -2231,8 +2228,110 @@ fn test_skip_duplicates_aggregates_single_warning() {
     );
 }
 
+/// Replaces `a` with a link to another directory once `a/file1.txt` is
+/// extracted, the way a misbehaving `ProgressCallback` could.
+#[cfg(unix)]
+struct DirSwapper {
+    dest_root: std::path::PathBuf,
+    outside_root: std::path::PathBuf,
+}
+
+#[cfg(unix)]
+impl crate::ProgressCallback for DirSwapper {
+    fn on_entry_start(&mut self, _path: &std::path::Path, _total: usize, _current: usize) {}
+
+    fn on_bytes_written(&mut self, _bytes: u64) {}
+
+    fn on_entry_complete(&mut self, path: &std::path::Path) {
+        if path == std::path::Path::new("a/file1.txt") {
+            let a = self.dest_root.join("a");
+            std::fs::remove_dir_all(&a).unwrap();
+            std::os::unix::fs::symlink(&self.outside_root, &a).unwrap();
+        }
+    }
+
+    fn on_complete(&mut self) {}
+}
+
+/// An archive of `a/file1.txt` followed by `follow`, whose parent `a` the
+/// [`DirSwapper`] replaces in between.
+#[cfg(unix)]
+fn make_swap_archive(follow: sevenz_rust2::ArchiveEntry, follow_data: &[u8]) -> Vec<u8> {
+    use sevenz_rust2::ArchiveEntry;
+    use sevenz_rust2::ArchiveWriter;
+    use sevenz_rust2::EncoderConfiguration;
+    use sevenz_rust2::EncoderMethod;
+
+    let mut writer = ArchiveWriter::new(Cursor::new(Vec::new())).unwrap();
+    writer.set_content_methods(vec![EncoderConfiguration::new(EncoderMethod::COPY)]);
+    let mut first = ArchiveEntry::new_file("a/file1.txt");
+    first.has_stream = true;
+    first.size = 3;
+    writer
+        .push_archive_entry(first, Some(Cursor::new(&b"one"[..])))
+        .unwrap();
+    let data = follow.has_stream.then(|| Cursor::new(follow_data.to_vec()));
+    writer.push_archive_entry(follow, data).unwrap();
+    writer.finish().unwrap().into_inner()
+}
+
+/// Extracts `archive_bytes` while `a` is swapped for a link to another
+/// directory, and asserts extraction fails and creates nothing outside.
+#[cfg(unix)]
+fn assert_swapped_parent_is_refused(archive_bytes: Vec<u8>, config: &SecurityConfig<Validated>) {
+    let mut archive = SevenZArchive::new(Cursor::new(archive_bytes)).unwrap();
+    let dest = TempDir::new().unwrap();
+    let outside = TempDir::new().unwrap();
+    let mut swapper = DirSwapper {
+        dest_root: dest.path().to_path_buf(),
+        outside_root: outside.path().to_path_buf(),
+    };
+
+    let result = archive.extract(
+        dest.path(),
+        config,
+        &ExtractionOptions::default(),
+        &mut swapper,
+    );
+
+    assert!(
+        result.is_err(),
+        "an entry under a parent swapped for a symlink must be refused: {result:?}"
+    );
+    assert_eq!(
+        std::fs::read_dir(outside.path()).unwrap().count(),
+        0,
+        "nothing may be created outside the destination root"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn test_directory_entry_under_swapped_parent_is_rejected() {
+    let archive = make_swap_archive(sevenz_rust2::ArchiveEntry::new_directory("a/sub"), b"");
+    let config = SecurityConfig::default().validate().expect("valid config");
+    assert_swapped_parent_is_refused(archive, &config);
+}
+
+/// An outcome guard, not a `Revalidate` guard: `SafeSymlink::validate_in`
+/// canonicalizes the link's parent itself, so this passes under either
+/// `DirCacheTrust`. The directory-entry test above is the discriminating one.
+#[test]
+#[cfg(unix)]
+fn test_symlink_entry_under_swapped_parent_is_rejected() {
+    let mut link = with_unix_mode(sevenz_rust2::ArchiveEntry::new_file("a/link"), 0o120_777);
+    link.has_stream = true;
+    link.size = 9;
+    let archive = make_swap_archive(link, b"file1.txt");
+    let config = SecurityConfig::default()
+        .with_allow_symlinks(true)
+        .validate()
+        .expect("valid config");
+    assert_swapped_parent_is_refused(archive, &config);
+}
+
 /// Regression test for issue #492 adversarial review, finding C1:
-/// `process_entry_inner` must re-validate every entry's path without
+/// The 7z host target must re-validate every entry's path without
 /// trusting `dir_cache`'s record of directories it has already created.
 /// If something outside the archive's own entries — e.g. a misbehaving
 /// `ProgressCallback` — replaces a previously-created directory with a
@@ -2245,27 +2344,6 @@ fn test_skip_duplicates_aggregates_single_warning() {
 #[test]
 #[cfg(unix)]
 fn test_dir_swapped_for_symlink_between_entries_is_rejected() {
-    struct DirSwapper {
-        dest_root: std::path::PathBuf,
-        outside_root: std::path::PathBuf,
-    }
-
-    impl crate::ProgressCallback for DirSwapper {
-        fn on_entry_start(&mut self, _path: &std::path::Path, _total: usize, _current: usize) {}
-
-        fn on_bytes_written(&mut self, _bytes: u64) {}
-
-        fn on_entry_complete(&mut self, path: &std::path::Path) {
-            if path == std::path::Path::new("a/file1.txt") {
-                let a = self.dest_root.join("a");
-                std::fs::remove_dir_all(&a).unwrap();
-                std::os::unix::fs::symlink(&self.outside_root, &a).unwrap();
-            }
-        }
-
-        fn on_complete(&mut self) {}
-    }
-
     let data = make_sevenz_archive(&[("a/file1.txt", b"one"), ("a/file2.txt", b"two")]);
     let mut archive = SevenZArchive::new(Cursor::new(data)).unwrap();
 

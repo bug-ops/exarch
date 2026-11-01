@@ -15,7 +15,7 @@ use exarch_core::SecurityConfig;
 use exarch_core::create_archive;
 use exarch_core::creation::CreationConfig;
 use exarch_core::extract_archive;
-use exarch_core::formats::detect::ArchiveType;
+use exarch_core::formats::detect::CreatableFormat;
 use exarch_core::types::DestDir;
 use exarch_core::types::SafePath;
 use exarch_core::types::SafeSymlink;
@@ -320,11 +320,11 @@ macro_rules! roundtrip_test {
     };
 }
 
-roundtrip_test!(roundtrip_tar_gz, "tar.gz", ArchiveType::TarGz);
-roundtrip_test!(roundtrip_tar_bz2, "tar.bz2", ArchiveType::TarBz2);
-roundtrip_test!(roundtrip_tar_xz, "tar.xz", ArchiveType::TarXz);
-roundtrip_test!(roundtrip_tar_zst, "tar.zst", ArchiveType::TarZst);
-roundtrip_test!(roundtrip_zip, "zip", ArchiveType::Zip);
+roundtrip_test!(roundtrip_tar_gz, "tar.gz", CreatableFormat::TarGz);
+roundtrip_test!(roundtrip_tar_bz2, "tar.bz2", CreatableFormat::TarBz2);
+roundtrip_test!(roundtrip_tar_xz, "tar.xz", CreatableFormat::TarXz);
+roundtrip_test!(roundtrip_tar_zst, "tar.zst", CreatableFormat::TarZst);
+roundtrip_test!(roundtrip_zip, "zip", CreatableFormat::Zip);
 
 // ============================================================================
 // Empty directory preservation tests (issue #400)
@@ -383,11 +383,11 @@ macro_rules! empty_dir_roundtrip_test {
     };
 }
 
-empty_dir_roundtrip_test!(empty_dirs_tar, "tar", ArchiveType::Tar);
-empty_dir_roundtrip_test!(empty_dirs_tar_gz, "tar.gz", ArchiveType::TarGz);
-empty_dir_roundtrip_test!(empty_dirs_tar_bz2, "tar.bz2", ArchiveType::TarBz2);
-empty_dir_roundtrip_test!(empty_dirs_tar_xz, "tar.xz", ArchiveType::TarXz);
-empty_dir_roundtrip_test!(empty_dirs_tar_zst, "tar.zst", ArchiveType::TarZst);
+empty_dir_roundtrip_test!(empty_dirs_tar, "tar", CreatableFormat::Tar);
+empty_dir_roundtrip_test!(empty_dirs_tar_gz, "tar.gz", CreatableFormat::TarGz);
+empty_dir_roundtrip_test!(empty_dirs_tar_bz2, "tar.bz2", CreatableFormat::TarBz2);
+empty_dir_roundtrip_test!(empty_dirs_tar_xz, "tar.xz", CreatableFormat::TarXz);
+empty_dir_roundtrip_test!(empty_dirs_tar_zst, "tar.zst", CreatableFormat::TarZst);
 
 /// Parity check (SC-003): the same source tree with nested empty
 /// directories produces the same directory-entry count for TAR and ZIP.
@@ -401,10 +401,10 @@ fn empty_dirs_parity_between_tar_gz_and_zip() {
 
     let tar_config = CreationConfig::default()
         .with_include_hidden(true)
-        .with_format(Some(ArchiveType::TarGz));
+        .with_format(Some(CreatableFormat::TarGz));
     let zip_config = CreationConfig::default()
         .with_include_hidden(true)
-        .with_format(Some(ArchiveType::Zip));
+        .with_format(Some(CreatableFormat::Zip));
 
     let tar_report = create_archive(&tar_gz, &[src.path()], &tar_config).unwrap();
     let zip_report = create_archive(&zip, &[src.path()], &zip_config).unwrap();
@@ -449,26 +449,30 @@ macro_rules! bytes_compressed_matches_disk_test {
     };
 }
 
-bytes_compressed_matches_disk_test!(bytes_compressed_matches_disk_zip, "zip", ArchiveType::Zip);
+bytes_compressed_matches_disk_test!(
+    bytes_compressed_matches_disk_zip,
+    "zip",
+    CreatableFormat::Zip
+);
 bytes_compressed_matches_disk_test!(
     bytes_compressed_matches_disk_tar_gz,
     "tar.gz",
-    ArchiveType::TarGz
+    CreatableFormat::TarGz
 );
 bytes_compressed_matches_disk_test!(
     bytes_compressed_matches_disk_tar_bz2,
     "tar.bz2",
-    ArchiveType::TarBz2
+    CreatableFormat::TarBz2
 );
 bytes_compressed_matches_disk_test!(
     bytes_compressed_matches_disk_tar_xz,
     "tar.xz",
-    ArchiveType::TarXz
+    CreatableFormat::TarXz
 );
 bytes_compressed_matches_disk_test!(
     bytes_compressed_matches_disk_tar_zst,
     "tar.zst",
-    ArchiveType::TarZst
+    CreatableFormat::TarZst
 );
 
 /// Plain (uncompressed) TAR: `bytes_compressed` still reflects the actual
@@ -480,7 +484,7 @@ fn bytes_compressed_matches_disk_plain_tar() {
     let archive_dir = TempDir::new().unwrap();
     let archive = archive_dir.path().join("out.tar");
 
-    let config = CreationConfig::default().with_format(Some(ArchiveType::Tar));
+    let config = CreationConfig::default().with_format(Some(CreatableFormat::Tar));
     let report = create_archive(&archive, &[src.path()], &config).unwrap();
 
     let on_disk = fs::metadata(&archive).unwrap().len();
@@ -501,7 +505,7 @@ fn bytes_compressed_matches_disk_across_compression_levels() {
         let archive = archive_dir.path().join("out.tar.gz");
 
         let config = CreationConfig::default()
-            .with_format(Some(ArchiveType::TarGz))
+            .with_format(Some(CreatableFormat::TarGz))
             .with_compression_level(level)
             .unwrap();
         let report = create_archive(&archive, &[src.path()], &config).unwrap();
@@ -535,7 +539,7 @@ fn bytes_compressed_matches_disk_incompressible_data() {
     let archive_dir = TempDir::new().unwrap();
     let archive = archive_dir.path().join("out.tar.gz");
 
-    let config = CreationConfig::default().with_format(Some(ArchiveType::TarGz));
+    let config = CreationConfig::default().with_format(Some(CreatableFormat::TarGz));
     let report = create_archive(&archive, &[src.path()], &config).unwrap();
 
     let on_disk = fs::metadata(&archive).unwrap().len();
@@ -559,7 +563,7 @@ fn only_empty_directories_no_files_roundtrip() {
 
     let config = CreationConfig::default()
         .with_include_hidden(true)
-        .with_format(Some(ArchiveType::TarGz));
+        .with_format(Some(CreatableFormat::TarGz));
     let report = create_archive(&archive, &[src.path()], &config).unwrap();
 
     // a, a/b, a/b/c = 3 directory entries; zero files.
@@ -590,7 +594,7 @@ fn empty_dir_unicode_and_space_names_roundtrip_tar() {
 
     let config = CreationConfig::default()
         .with_include_hidden(true)
-        .with_format(Some(ArchiveType::TarGz));
+        .with_format(Some(CreatableFormat::TarGz));
     let report = create_archive(&archive, &[src.path()], &config).unwrap();
     assert_eq!(report.directories_added, 2);
 
@@ -625,7 +629,7 @@ fn dir_symlink_source_without_follow_symlinks_archives_as_symlink_tar() {
     let archive_dir = TempDir::new().unwrap();
     let archive = archive_dir.path().join("out.tar.gz");
 
-    let config = CreationConfig::default().with_format(Some(ArchiveType::TarGz));
+    let config = CreationConfig::default().with_format(Some(CreatableFormat::TarGz));
     let report = create_archive(&archive, &[&link_path], &config).unwrap();
 
     assert_eq!(report.files_added, 0);
@@ -650,7 +654,7 @@ fn dir_symlink_source_with_follow_symlinks_walks_tree_tar() {
     let archive = archive_dir.path().join("out.tar.gz");
 
     let config = CreationConfig::default()
-        .with_format(Some(ArchiveType::TarGz))
+        .with_format(Some(CreatableFormat::TarGz))
         .with_follow_symlinks(true);
     let report = create_archive(&archive, &[&link_path], &config).unwrap();
 
@@ -681,7 +685,7 @@ fn dir_symlink_source_with_follow_symlinks_walks_tree_zip() {
     let archive = archive_dir.path().join("out.zip");
 
     let config = CreationConfig::default()
-        .with_format(Some(ArchiveType::Zip))
+        .with_format(Some(CreatableFormat::Zip))
         .with_follow_symlinks(true);
     let report = create_archive(&archive, &[&link_path], &config).unwrap();
 

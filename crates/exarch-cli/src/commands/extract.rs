@@ -15,7 +15,6 @@ use crate::progress::CliProgress;
 use crate::progress::VerboseProgress;
 use anyhow::Context;
 use anyhow::Result;
-use exarch_core::ArchiveError;
 use exarch_core::ArchiveManifest;
 use exarch_core::ExtractionOptions;
 use exarch_core::ExtractionReport;
@@ -26,6 +25,8 @@ use exarch_core::ProgressCallback;
 use exarch_core::SecurityConfig;
 use exarch_core::StoredTargets;
 use exarch_core::extract_archive_with_options_and_progress;
+use exarch_core::formats::detect::ArchiveType;
+use exarch_core::formats::detect::detect_format;
 use exarch_core::list_archive_with_options;
 use std::env;
 use std::ffi::OsStr;
@@ -748,19 +749,64 @@ fn filter_banned_components(raw: &[String]) -> Vec<String> {
 /// as `list` does whatever the link policy, so such a target fails with its own
 /// error before extraction can say that symlinks are not allowed.
 ///
-/// A ZIP structure rejection or a security violation keeps its own message and
-/// hint, since that is the error the user has to act on.
+/// Every failure keeps the category message and hint extraction would give the
+/// same error, since that is the error the user has to act on.
 fn list_for_extract(archive: &Path, config: &SecurityConfig) -> Result<ArchiveManifest> {
     let options = ListOptions::default().with_stored_targets(StoredTargets::Skip);
-    list_archive_with_options(archive, config, &options).map_err(|err| {
-        if matches!(
-            err,
-            ArchiveError::ZipInconsistency(_) | ArchiveError::SecurityViolation { .. }
-        ) {
-            return convert_extraction_error(err, archive);
-        }
-        anyhow::Error::from(err).context(format!("failed to list archive: {}", archive.display()))
-    })
+    list_archive_with_options(archive, config, &options)
+        .map_err(|err| convert_extraction_error(err, archive))
+}
+
+/// Whether nothing can exist at `output_dir` yet and its parent is an existing
+/// directory.
+///
+/// Such a destination has no conflicts to look for and no pre-existing content
+/// a failed run could damage, so a TAR extraction skips the list pass (a full
+/// second decode of a compressed stream) and runs atomically instead: a
+/// refusal leaves nothing behind and creates no parent directory. An empty
+/// parent (`out/`) means the current directory.
+fn is_fresh_destination(output_dir: &Path) -> bool {
+    let absent = matches!(
+        output_dir.symlink_metadata(),
+        Err(ref e) if e.kind() == io::ErrorKind::NotFound
+    );
+    let parent = match output_dir.parent() {
+        Some(p) if !p.is_empty() => p,
+        _ => Path::new("."),
+    };
+    absent && parent.is_dir()
+}
+
+/// Whether `archive` is a TAR stream, the only family whose list pass costs a
+/// second decode; ZIP and 7z list from their headers, and their list pass also
+/// carries header-level diagnostics that extraction reports differently.
+fn is_tar_archive(archive: &Path) -> bool {
+    matches!(
+        detect_format(archive),
+        Ok(ArchiveType::Tar
+            | ArchiveType::TarGz
+            | ArchiveType::TarBz2
+            | ArchiveType::TarXz
+            | ArchiveType::TarZst)
+    )
+}
+
+/// Number of entries the progress bar counts: every listed entry, or only the
+/// files with an allowed extension when an extension filter is active.
+fn listed_entry_count(manifest: &ArchiveManifest, config: &SecurityConfig) -> usize {
+    if config.allowed_extensions.is_empty() {
+        manifest.entries().len()
+    } else {
+        manifest
+            .entries()
+            .iter()
+            .filter(|e| e.kind == ManifestEntryKind::File)
+            .filter(|e| {
+                let ext = e.path.extension().and_then(|s| s.to_str());
+                config.is_path_extension_allowed(ext)
+            })
+            .count()
+    }
 }
 
 pub fn execute(
@@ -812,9 +858,14 @@ pub fn execute(
         .with_max_path_depth(config.max_path_depth)
         .with_banned_path_components(config.banned_path_components.clone());
 
-    let manifest = list_for_extract(&args.archive, &list_config)?;
+    let single_pass = is_fresh_destination(&output_dir) && is_tar_archive(&args.archive);
+    let manifest = if single_pass {
+        None
+    } else {
+        Some(list_for_extract(&args.archive, &list_config)?)
+    };
 
-    if !args.force && !args.atomic {
+    if let Some(manifest) = manifest.as_ref().filter(|_| !args.force && !args.atomic) {
         let conflicts: Vec<_> = manifest
             .entries()
             .iter()
@@ -835,20 +886,6 @@ pub fn execute(
         }
     }
 
-    let entry_count = if config.allowed_extensions.is_empty() {
-        manifest.entries().len()
-    } else {
-        manifest
-            .entries()
-            .iter()
-            .filter(|e| e.kind == ManifestEntryKind::File)
-            .filter(|e| {
-                let ext = e.path.extension().and_then(|s| s.to_str());
-                config.is_path_extension_allowed(ext)
-            })
-            .count()
-    };
-
     // --atomic + --force over a pre-existing destination needs a swap that
     // core's `extract_atomic` doesn't perform itself (it refuses to replace
     // an existing directory, by design, so a pre-existing destination is
@@ -858,14 +895,15 @@ pub fn execute(
     let atomic_force_target = resolve_atomic_force_replace(args, &output_dir)?;
 
     let options = ExtractionOptions::default()
-        .with_atomic(args.atomic && atomic_force_target.is_none())
+        .with_atomic((args.atomic || single_pass) && atomic_force_target.is_none())
         .with_skip_duplicates(!args.force);
 
     let mut progress: Box<dyn ProgressCallback> = match verbosity {
         Verbosity::Verbose => Box::new(VerboseProgress::new()),
-        Verbosity::Normal if CliProgress::should_show() => {
-            Box::new(CliProgress::new(entry_count, "Extracting"))
-        }
+        Verbosity::Normal if CliProgress::should_show() => Box::new(manifest.as_ref().map_or_else(
+            || CliProgress::counting("Extracting"),
+            |manifest| CliProgress::new(listed_entry_count(manifest, &config), "Extracting"),
+        )),
         Verbosity::Quiet | Verbosity::Normal => Box::new(NoopProgress),
     };
 

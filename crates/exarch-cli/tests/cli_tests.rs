@@ -3042,22 +3042,24 @@ fn legitimate_sparse_hole_fixture() -> Vec<u8> {
 }
 
 /// Pins the documented residual limitation of the C1/C2/C3 drain-bound fix
-/// (issue #414) specifically at the CLI level: `exarch extract` runs its
-/// own `list_archive` pre-flight (for progress-bar/conflict detection,
-/// `src/commands/extract.rs`) ahead of the actual extraction, so a
-/// legitimate GNU sparse file whose hole exceeds the synthetic-bytes drain
-/// cap is rejected by the CLI even though the underlying library's
-/// `extract_archive`/`TarArchive::extract` calls (which never run that
-/// pre-flight) handle the identical archive cleanly. This is a deliberately
-/// accepted trade-off (P3 follow-up tracked separately), not a bug — this
-/// test exists so the CLI-specific angle of that trade-off cannot silently
-/// change without a test noticing.
+/// (issue #414) specifically at the CLI level: when the destination already
+/// exists, `exarch extract` runs its own `list_archive` pre-flight (for
+/// progress-bar/conflict detection, `src/commands/extract.rs`) ahead of the
+/// actual extraction, so a legitimate GNU sparse file whose hole exceeds the
+/// synthetic-bytes drain cap is rejected by the CLI even though the underlying
+/// library's `extract_archive`/`TarArchive::extract` calls (which never run
+/// that pre-flight) handle the identical archive cleanly. A fresh destination
+/// skips the pre-flight (#799) and extracts it. This is a deliberately
+/// accepted trade-off (P3 follow-up tracked separately), not a bug — this test
+/// exists so the CLI-specific angle of that trade-off cannot silently change
+/// without a test noticing.
 #[test]
 fn test_extract_known_limitation_cli_rejects_legitimate_sparse_hole_above_synthetic_cap() {
     let temp = TempDir::new().expect("failed to create temp dir");
     let archive_path = temp.path().join("legit_sparse.tar");
     std::fs::write(&archive_path, legitimate_sparse_hole_fixture()).expect("write sparse fixture");
     let out_dir = temp.path().join("out");
+    std::fs::create_dir(&out_dir).expect("create destination");
 
     exarch_cmd()
         .arg("extract")
@@ -3069,6 +3071,13 @@ fn test_extract_known_limitation_cli_rejects_legitimate_sparse_hole_above_synthe
             predicate::str::contains("Rust API only")
                 .and(predicate::str::contains("with_max_tar_metadata_bytes")),
         );
+
+    exarch_cmd()
+        .arg("extract")
+        .arg(&archive_path)
+        .arg(temp.path().join("fresh"))
+        .assert()
+        .success();
 }
 
 // ============================================================================
@@ -5203,4 +5212,391 @@ fn test_extract_force_file_over_symlink_names_the_entry() {
             predicate::str::contains("refusing to replace the existing symlink at l")
                 .and(predicate::str::contains("os error").not()),
         );
+}
+
+/// Builds a TAR holding `ok.txt` followed by a `../evil.txt` entry, which the
+/// tar crate's path setters refuse to write, so the name is set raw.
+fn create_tar_with_trailing_traversal(path: &std::path::Path) {
+    let mut builder = tar::Builder::new(Vec::new());
+    for name in ["ok.txt", "../evil.txt"] {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(1);
+        header.set_mode(0o644);
+        let raw = &mut header.as_old_mut().name;
+        raw[..name.len()].copy_from_slice(name.as_bytes());
+        header.set_cksum();
+        builder.append(&header, &b"x"[..]).expect("append entry");
+    }
+    std::fs::write(path, builder.into_inner().expect("tar")).expect("write");
+}
+
+/// Regression test for #799: a fresh relative destination is extracted in one
+/// pass and created by the run.
+#[test]
+fn test_extract_into_fresh_relative_destination_creates_it() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+
+    exarch_cmd()
+        .current_dir(temp.path())
+        .arg("extract")
+        .arg(fixture_path("sample.tar.gz"))
+        .arg("out/")
+        .assert()
+        .success();
+
+    assert!(temp.path().join("out").is_dir());
+}
+
+/// Regression test for #799: a refusal on a fresh relative destination comes
+/// from the extraction itself, reports the rolled-back run, and leaves no
+/// destination behind.
+#[test]
+fn test_extract_refusal_into_fresh_relative_destination_is_rolled_back() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    create_tar_with_trailing_traversal(&temp.path().join("evil.tar"));
+
+    exarch_cmd()
+        .current_dir(temp.path())
+        .arg("extract")
+        .arg("evil.tar")
+        .arg("out/")
+        .assert()
+        .code(1)
+        .stderr(
+            predicate::str::contains("partial extraction was discarded")
+                .and(predicate::str::contains("path traversal"))
+                .and(predicate::str::contains("failed to list archive").not()),
+        );
+
+    assert!(!temp.path().join("out").exists());
+    assert!(!temp.path().join("evil.txt").exists());
+}
+
+/// Regression test for #799: the single pass reports `rolled_back` in JSON.
+#[test]
+fn test_extract_refusal_into_fresh_destination_json_reports_rolled_back() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("evil.tar");
+    create_tar_with_trailing_traversal(&archive);
+    let out = temp.path().join("out");
+
+    let stdout = exarch_cmd()
+        .arg("extract")
+        .arg("--json")
+        .arg(&archive)
+        .arg(&out)
+        .assert()
+        .code(1)
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: serde_json::Value = serde_json::from_slice(&stdout).expect("valid JSON");
+    assert_eq!(json["error"]["kind"], "PathTraversal");
+    assert_eq!(json["error"]["partial_report"]["writes"], "rolled_back");
+    assert!(!out.exists());
+}
+
+/// A missing parent keeps the list pass, so a refused archive creates no
+/// parent directory either.
+#[test]
+fn test_extract_refusal_with_missing_parent_creates_nothing() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("evil.tar");
+    create_tar_with_trailing_traversal(&archive);
+
+    exarch_cmd()
+        .arg("extract")
+        .arg(&archive)
+        .arg(temp.path().join("missing").join("out"))
+        .assert()
+        .code(1);
+
+    assert!(!temp.path().join("missing").exists());
+}
+
+/// Regression test for #796: a failure of the pre-extraction list pass keeps
+/// the category message and hint extraction gives the same error.
+#[test]
+fn test_extract_list_pass_failure_keeps_category_context() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("evil.tar");
+    create_tar_with_trailing_traversal(&archive);
+    let out = temp.path().join("out");
+    std::fs::create_dir(&out).expect("create destination");
+
+    exarch_cmd()
+        .arg("extract")
+        .arg(&archive)
+        .arg(&out)
+        .assert()
+        .code(1)
+        .stderr(
+            predicate::str::contains("attempted path traversal")
+                .and(predicate::str::contains(
+                    "HINT: This archive may be malicious",
+                ))
+                .and(predicate::str::contains("failed to list archive").not()),
+        );
+}
+
+/// Regression test for #796: the format hint lists what the detector accepts.
+#[test]
+fn test_extract_unknown_format_hint_lists_detected_formats() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("a.unknownext");
+    std::fs::write(&archive, b"hello").expect("write file");
+
+    exarch_cmd()
+        .arg("extract")
+        .arg(&archive)
+        .arg(temp.path().join("out"))
+        .assert()
+        .code(1)
+        .stderr(
+            predicate::str::contains("Cannot determine archive format")
+                .and(predicate::str::contains(
+                    "HINT: Supported formats: tar, tar.gz",
+                ))
+                .and(predicate::str::contains("7z"))
+                .and(predicate::str::contains("tar.zstd").not()),
+        );
+}
+
+/// Regression test for #801: `create` warns about a ZIP entry that default
+/// extraction refuses, and the ratio the warning names admits the archive.
+#[test]
+fn test_create_zip_warns_about_entry_default_extraction_refuses() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let src = temp.path().join("src");
+    std::fs::create_dir(&src).expect("create source dir");
+    std::fs::write(src.join("b"), "B".repeat(5000)).expect("write source file");
+    let archive = temp.path().join("r.zip");
+
+    exarch_cmd()
+        .arg("create")
+        .arg(&archive)
+        .arg(&src)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "default extraction ratio limit of 100x",
+        ));
+
+    exarch_cmd()
+        .arg("extract")
+        .arg(&archive)
+        .arg(temp.path().join("refused"))
+        .assert()
+        .code(1);
+
+    exarch_cmd()
+        .arg("extract")
+        .arg("--max-compression-ratio")
+        .arg("218")
+        .arg(&archive)
+        .arg(temp.path().join("admitted"))
+        .assert()
+        .success();
+}
+
+#[test]
+fn test_create_tar_gz_of_compressible_data_has_no_ratio_warning() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let src = temp.path().join("src");
+    std::fs::create_dir(&src).expect("create source dir");
+    std::fs::write(src.join("b"), "B".repeat(5000)).expect("write source file");
+
+    exarch_cmd()
+        .arg("create")
+        .arg(temp.path().join("r.tar.gz"))
+        .arg(&src)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Warnings").not());
+}
+
+/// Regression test for #802: a directory entry over an earlier file names the
+/// entry and the occupant, with and without `--force`, and `verify` agrees.
+#[test]
+fn test_extract_directory_over_file_names_the_entry() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("dir_over_file.tar");
+    tar_entries_archive(
+        &archive,
+        &[
+            ("x", tar::EntryType::Regular, ""),
+            ("x/", tar::EntryType::Directory, ""),
+        ],
+    );
+    for force in [false, true] {
+        let mut cmd = exarch_cmd();
+        cmd.arg("extract");
+        if force {
+            cmd.arg("--force");
+        }
+        cmd.arg(&archive)
+            .arg(temp.path().join(format!("out_{force}")))
+            .assert()
+            .code(1)
+            .stderr(
+                predicate::str::contains("refusing to replace the existing file at x")
+                    .and(predicate::str::contains("os error").not()),
+            );
+    }
+
+    exarch_cmd()
+        .arg("verify")
+        .arg(&archive)
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "refusing to replace the existing file at x",
+        ));
+}
+
+/// Regression test for #802: the occupant may be a file the destination
+/// already held.
+#[test]
+fn test_extract_directory_over_preexisting_file_names_the_entry() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("dirx.tar");
+    tar_entries_archive(&archive, &[("x/", tar::EntryType::Directory, "")]);
+    let out = temp.path().join("out");
+    std::fs::create_dir(&out).expect("create destination");
+    std::fs::write(out.join("x"), "f").expect("write occupant");
+
+    exarch_cmd()
+        .arg("extract")
+        .arg(&archive)
+        .arg(&out)
+        .assert()
+        .code(1)
+        .stderr(
+            predicate::str::contains("refusing to replace the existing file at x")
+                .and(predicate::str::contains("os error").not()),
+        );
+}
+
+/// Regression test for #803: a directory entry over a symlink the archive
+/// created is refused by `extract` and `verify` alike, and nothing is created
+/// through the link.
+#[cfg(unix)]
+#[test]
+fn test_extract_directory_over_archive_symlink_is_refused() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("dir_over_sym.tar");
+    tar_entries_archive(
+        &archive,
+        &[
+            ("x", tar::EntryType::Symlink, "t"),
+            ("x/", tar::EntryType::Directory, ""),
+        ],
+    );
+    let out = temp.path().join("out");
+    std::fs::create_dir(&out).expect("create destination");
+
+    exarch_cmd()
+        .arg("extract")
+        .arg("--allow-symlinks")
+        .arg(&archive)
+        .arg(&out)
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains(
+            "refusing to replace the existing symlink at x",
+        ));
+    assert!(!out.join("t").exists());
+
+    exarch_cmd()
+        .arg("verify")
+        .arg("--allow-symlinks")
+        .arg(&archive)
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "refusing to replace the existing symlink at x",
+        ));
+}
+
+/// A directory entry over an archive symlink that resolves to a directory
+/// inside the destination stays valid.
+#[cfg(unix)]
+#[test]
+fn test_extract_directory_over_symlink_to_directory_in_dest_is_accepted() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("dir_over_dir_link.tar");
+    tar_entries_archive(
+        &archive,
+        &[
+            ("real/", tar::EntryType::Directory, ""),
+            ("x", tar::EntryType::Symlink, "real"),
+            ("x/", tar::EntryType::Directory, ""),
+        ],
+    );
+
+    exarch_cmd()
+        .arg("extract")
+        .arg("--allow-symlinks")
+        .arg(&archive)
+        .arg(temp.path().join("out"))
+        .assert()
+        .success();
+}
+
+/// A directory entry over an archive symlink is a security violation in
+/// `extract --json`, the category `verify` reports for it.
+#[cfg(unix)]
+#[test]
+fn test_extract_directory_over_archive_symlink_json_kind_is_security_violation() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("dir_over_sym.tar");
+    tar_entries_archive(
+        &archive,
+        &[
+            ("x", tar::EntryType::Symlink, "t"),
+            ("x/", tar::EntryType::Directory, ""),
+        ],
+    );
+    let out = temp.path().join("out");
+    std::fs::create_dir(&out).expect("create destination");
+
+    let stdout = exarch_cmd()
+        .arg("extract")
+        .arg("--json")
+        .arg("--allow-symlinks")
+        .arg(&archive)
+        .arg(&out)
+        .assert()
+        .code(1)
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: serde_json::Value = serde_json::from_slice(&stdout).expect("valid JSON");
+    assert_eq!(json["error"]["kind"], "SecurityViolation");
+}
+
+/// Regression test for the atomic single pass: a refusal leaves no staging
+/// directory behind in the parent.
+#[test]
+fn test_extract_refusal_into_fresh_destination_leaves_no_staging_directory() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("evil.tar");
+    create_tar_with_trailing_traversal(&archive);
+
+    exarch_cmd()
+        .current_dir(temp.path())
+        .arg("extract")
+        .arg("evil.tar")
+        .arg("out")
+        .assert()
+        .code(1);
+
+    let leftovers: Vec<_> = std::fs::read_dir(temp.path())
+        .expect("read parent")
+        .map(|e| e.expect("entry").file_name())
+        .filter(|n| n != "evil.tar")
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
 }

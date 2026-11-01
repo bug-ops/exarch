@@ -72,6 +72,7 @@ use crate::inspection::manifest::LinkTarget;
 use crate::inspection::manifest::ManifestEntryKind;
 use crate::inspection::manifest::ManifestEntryType;
 use crate::inspection::report::UnverifiedReason;
+use crate::reader::SeekableFormat;
 use crate::security::fs_view::LinkKind;
 use crate::security::fs_view::MAX_SYMLINK_TARGET_BYTES;
 use crate::security::fs_view::check_name_lengths;
@@ -142,6 +143,8 @@ pub fn list_archive<P: AsRef<Path>>(
 /// # Examples
 ///
 /// ```
+/// use std::assert_matches;
+///
 /// use exarch_core::LinkTarget;
 /// use exarch_core::ListOptions;
 /// use exarch_core::ManifestEntryKind;
@@ -165,21 +168,21 @@ pub fn list_archive<P: AsRef<Path>>(
 /// let config = SecurityConfig::default();
 ///
 /// let manifest = list_archive_with_options(&archive, &config, &ListOptions::default())?;
-/// assert!(matches!(
+/// assert_matches!(
 ///     &manifest.entries()[0].kind,
 ///     ManifestEntryKind::Symlink {
 ///         target: LinkTarget::Unread
 ///     }
-/// ));
+/// );
 ///
 /// let options = ListOptions::default().with_stored_targets(StoredTargets::Read);
 /// let manifest = list_archive_with_options(&archive, &config, &options)?;
-/// assert!(matches!(
+/// assert_matches!(
 ///     &manifest.entries()[0].kind,
 ///     ManifestEntryKind::Symlink {
 ///         target: LinkTarget::Recorded(_)
 ///     }
-/// ));
+/// );
 /// # Ok(())
 /// # }
 /// ```
@@ -409,8 +412,10 @@ pub(crate) fn list_detected(
 ) -> Result<ArchiveManifest> {
     match format.family() {
         FormatFamily::Tar(codec) => list_tar(archive_path, codec, format, config, listing),
-        FormatFamily::Zip => list_zip(archive_path, config, listing),
-        FormatFamily::SevenZ => list_sevenz(archive_path, config, listing),
+        FormatFamily::Seekable(SeekableFormat::Zip) => list_zip(archive_path, config, listing),
+        FormatFamily::Seekable(SeekableFormat::SevenZ) => {
+            list_sevenz(archive_path, config, listing)
+        }
     }
 }
 
@@ -2781,8 +2786,7 @@ mod tests {
     }
 
     fn assert_name_too_long(result: &Result<ArchiveManifest>) {
-        assert!(
-            matches!(result, Err(ArchiveError::Io(e)) if e.to_string() == "file name too long"),
+        assert_matches!(result, Err(ArchiveError::Io(e)) if e.to_string() == "file name too long",
             "expected name-too-long error, got {result:?}"
         );
     }

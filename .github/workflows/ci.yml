@@ -715,6 +715,13 @@ jobs:
         with:
           tool: wasmtime
 
+      # Without a WASI libc, clang falls back to the host glibc headers, which are not usable for wasm32.
+      - name: Install WASI libc headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends wasi-libc
+          echo "CFLAGS_wasm32_wasip1=-nostdlibinc -isystem /usr/include/wasm32-wasi" >> "$GITHUB_ENV"
+
       - name: Check exarch-core for WASI
         run: cargo check -p exarch-core --all-features --target wasm32-wasip1
 

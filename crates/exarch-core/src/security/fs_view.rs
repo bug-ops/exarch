@@ -157,7 +157,10 @@ closed_enum! {
     /// The path semantics an [`EntrySink`](crate::EntrySink) is validated
     /// against.
     ///
-    /// `Host` applies the rules of the platform running the extraction.
+    /// `Host` applies the rules of the platform running the extraction. On a
+    /// Windows host that means the component rules of `Portable` (every
+    /// character Windows refuses, reserved names, `:`, trailing dot or space);
+    /// on other hosts component names are not restricted.
     /// `Portable` applies the strictest rules of every supported platform, on
     /// every host, for a sink whose storage is read elsewhere:
     ///

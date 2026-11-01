@@ -1,9 +1,11 @@
 //! Extraction of an archive held in memory into memory.
 
+use std::io::Cursor;
 use std::path::Path;
 use std::path::PathBuf;
 
 use exarch_core::ArchiveReader;
+use exarch_core::ArchiveWriter;
 use exarch_core::MemoryEntry as CoreMemoryEntry;
 use exarch_core::MemoryLimit;
 use exarch_core::MemorySink;
@@ -13,18 +15,25 @@ use napi::Env;
 use napi::bindgen_prelude::PromiseRaw;
 use napi::bindgen_prelude::Result;
 use napi::bindgen_prelude::Uint8Array;
+use napi::threadsafe_function::ThreadsafeFunction;
 use napi_derive::napi;
 
 use crate::CoreResult;
+use crate::ProgressCallback;
+use crate::config::CreationConfig;
 use crate::config::ExtractionOptions;
 use crate::config::SecurityConfig;
 use crate::config::exact_positive_bytes;
 use crate::error::Failure;
+use crate::error::ProgressCallbackError;
 use crate::error::run_sync;
 use crate::error::spawn_blocking_promise;
 use crate::report::ArchiveType;
+use crate::report::CreationReport;
 use crate::report::ExtractionReport;
 use crate::report::unknown_variant;
+use crate::run_with_optional_progress;
+use crate::utils::validate_path;
 
 /// The path semantics extraction validates names against.
 // Values must equal `exarch_core::PathModel::as_str`.
@@ -168,6 +177,30 @@ impl<B: AsRef<[u8]> + Send> MemoryJob<B> {
     }
 
     fn run(self) -> CoreResult<MemoryExtraction> {
+        let (report, sink) = self.extract(&mut exarch_core::NoopProgress)?;
+        into_memory_extraction(report, sink)
+    }
+
+    /// Runs with the JS callback `progress`, merging a core failure and a
+    /// callback throw the way `extractArchiveWithProgress` does. A throw after
+    /// a successful run discards the entries: the rejection carries only the
+    /// report counters.
+    fn run_with_progress(
+        self,
+        progress: Option<ThreadsafeFunction<(String, i64, i64, i64)>>,
+    ) -> CoreResult<MemoryExtraction> {
+        let (report, sink) = run_with_optional_progress(
+            progress,
+            |progress| self.extract(progress),
+            |source, (report, _)| ProgressCallbackError::ExtractionCallback { source, report },
+        )?;
+        into_memory_extraction(report, sink)
+    }
+
+    fn extract(
+        self,
+        progress: &mut dyn exarch_core::ProgressCallback,
+    ) -> CoreResult<(exarch_core::ExtractionReport, MemorySink)> {
         let limit = match self.max_bytes {
             Some(bytes) => {
                 MemoryLimit::new(exact_positive_bytes(bytes).ok_or_else(invalid_max_bytes)?)
@@ -176,16 +209,209 @@ impl<B: AsRef<[u8]> + Send> MemoryJob<B> {
         };
         let reader = ArchiveReader::from_bytes(self.data, self.format.map(Into::into))?;
         let mut sink = MemorySink::new(limit).with_path_model(self.path_model);
-        let report = exarch_core::extract_to_sink(reader, &mut sink, &self.config, &self.options)?;
-        Ok(MemoryExtraction {
-            report: ExtractionReport::from(report),
-            entries: sink
-                .into_entries()
-                .into_iter()
-                .map(MemoryEntry::try_from)
-                .collect::<CoreResult<_>>()?,
-        })
+        let report = exarch_core::extract_to_sink_with_progress(
+            reader,
+            &mut sink,
+            &self.config,
+            &self.options,
+            progress,
+        )?;
+        Ok((report, sink))
     }
+}
+
+fn into_memory_extraction(
+    report: exarch_core::ExtractionReport,
+    sink: MemorySink,
+) -> CoreResult<MemoryExtraction> {
+    Ok(MemoryExtraction {
+        report: ExtractionReport::from(report),
+        entries: sink
+            .into_entries()
+            .into_iter()
+            .map(MemoryEntry::try_from)
+            .collect::<CoreResult<_>>()?,
+    })
+}
+
+/// Extract an archive held in memory into memory with a progress callback
+/// (async).
+///
+/// Same as `extractArchiveToMemory`, plus `progress`, called once per entry
+/// with `(err, [path, total, current, bytesWritten])` (see
+/// `extractArchiveWithProgress`; `bytesWritten` is always `0`).
+///
+/// # Arguments
+///
+/// The arguments of `extractArchiveToMemory`, then:
+///
+/// * `progress` - Optional progress callback
+///
+/// # Returns
+///
+/// Promise resolving to `MemoryExtraction` with the report and the entries
+///
+/// # Errors
+///
+/// The errors of `extractArchiveToMemory`. If `progress` throws, the run
+/// still completes:
+///
+/// - When extraction succeeded, the promise rejects with
+///   `PROGRESS_CALLBACK_ERROR`, the throw as `cause`, and the report counters;
+///   the extracted entries are discarded, as nothing was written to disk.
+/// - When extraction failed, the core error keeps its `code` and the throw is
+///   attached as `cause`.
+///
+/// # Examples
+///
+/// ```javascript
+/// const { entries } = await extractArchiveToMemoryWithProgress(
+///   fs.readFileSync('a.tar.gz'),
+///   null, null, null, null, null,
+///   (err, [path, total, current]) => console.log(`${current}/${total}: ${path}`),
+/// );
+/// ```
+#[napi]
+// The JS signature is positional: `extractArchiveToMemory`'s arguments plus `progress`.
+#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
+pub fn extract_archive_to_memory_with_progress<'env>(
+    env: &'env Env,
+    data: Uint8Array,
+    config: Option<&SecurityConfig>,
+    options: Option<&ExtractionOptions>,
+    max_bytes: Option<f64>,
+    path_model: Option<PathModel>,
+    format: Option<ArchiveType>,
+    #[napi(
+        ts_arg_type = "(((err: Error | null, arg: [string, number, number, number]) => any)) | undefined | null"
+    )]
+    progress: Option<ProgressCallback>,
+) -> Result<PromiseRaw<'env, MemoryExtraction>> {
+    let job = MemoryJob::new(
+        data.to_vec(),
+        config,
+        options,
+        max_bytes,
+        path_model,
+        format,
+    );
+    let progress = progress.map(|ProgressCallback(tsfn)| tsfn);
+
+    spawn_blocking_promise(
+        env,
+        "archive extraction with progress",
+        move || job.run_with_progress(progress),
+        Ok,
+    )
+}
+
+/// An archive created in memory.
+#[napi(object)]
+pub struct CreatedArchive {
+    /// The archive bytes as a `Uint8Array`.
+    pub data: Uint8Array,
+    /// Creation statistics.
+    pub report: CreationReport,
+}
+
+fn create_to_bytes_core(
+    sources: &[String],
+    format: ArchiveType,
+    config: &exarch_core::creation::CreationConfig,
+) -> CoreResult<CreatedArchive> {
+    sources
+        .iter()
+        .try_for_each(|source| validate_path(source))?;
+    let mut out = Cursor::new(Vec::new());
+    let writer = ArchiveWriter::of_type(&mut out, format.into())?;
+    let report = exarch_core::create_to_writer(writer, sources, config)?;
+    Ok(CreatedArchive {
+        data: Uint8Array::from(out.into_inner()),
+        report: CreationReport::from(report),
+    })
+}
+
+/// Create an archive from source files and directories into memory (async).
+///
+/// The whole archive is held in memory (about 2-3x its size at the peak) with
+/// no size cap, so use `createArchive` for large archives. Sources must be
+/// regular files and directories; FIFOs and device files are not supported.
+///
+/// # Arguments
+///
+/// * `sources` - Array of source files/directories to include
+/// * `format` - The archive format; `'SevenZ'` cannot be created
+/// * `config` - Optional `CreationConfig` (uses defaults if omitted)
+///
+/// # Returns
+///
+/// Promise resolving to `CreatedArchive` with the archive bytes and the report
+///
+/// # Errors
+///
+/// Rejects with `INVALID_CONFIGURATION` for `'SevenZ'`, and with the errors of
+/// `createArchive` otherwise.
+///
+/// # Examples
+///
+/// ```javascript
+/// const { data, report } = await createArchiveToBytes(['src/'], 'TarGz');
+/// ```
+#[napi]
+#[allow(clippy::needless_pass_by_value)]
+pub fn create_archive_to_bytes<'env>(
+    env: &'env Env,
+    sources: Vec<String>,
+    format: ArchiveType,
+    config: Option<&CreationConfig>,
+) -> Result<PromiseRaw<'env, CreatedArchive>> {
+    let config_owned: exarch_core::creation::CreationConfig =
+        config.map_or_default(|c| c.as_core().clone());
+
+    spawn_blocking_promise(
+        env,
+        "archive creation",
+        move || create_to_bytes_core(&sources, format, &config_owned),
+        Ok,
+    )
+}
+
+/// Create an archive from source files and directories into memory (sync).
+///
+/// Blocks the event loop until creation completes. Prefer
+/// `createArchiveToBytes`.
+///
+/// # Arguments
+///
+/// The arguments of `createArchiveToBytes`.
+///
+/// # Returns
+///
+/// `CreatedArchive` with the archive bytes and the report
+///
+/// # Errors
+///
+/// The errors of `createArchiveToBytes`.
+///
+/// # Examples
+///
+/// ```javascript
+/// const { data } = createArchiveToBytesSync(['src/'], 'Zip');
+/// ```
+#[napi]
+#[allow(clippy::needless_pass_by_value)]
+pub fn create_archive_to_bytes_sync(
+    env: Env,
+    sources: Vec<String>,
+    format: ArchiveType,
+    config: Option<&CreationConfig>,
+) -> Result<CreatedArchive> {
+    let default_config = exarch_core::creation::CreationConfig::default();
+    let config_ref = config.map_or(&default_config, |c| c.as_core());
+
+    run_sync(env, "archive creation", || {
+        create_to_bytes_core(&sources, format, config_ref)
+    })
 }
 
 /// Extract an archive held in memory into memory (async).

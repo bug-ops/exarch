@@ -10,6 +10,8 @@ use std::time::SystemTime;
 
 use crate::ArchiveError;
 use crate::ListOptions;
+use crate::NoopProgress;
+use crate::ProgressCallback;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::StoredTargets;
@@ -17,6 +19,7 @@ use crate::config::Validated;
 #[cfg(test)]
 use crate::error::QuotaResource;
 use crate::formats::ZipArchive;
+use crate::formats::common::EntryCompleteGuard;
 use crate::formats::common::encrypted_archive_error;
 use crate::formats::common::normalize_entry_name;
 use crate::formats::common::symlink_target_too_large;
@@ -32,6 +35,7 @@ use crate::formats::sevenz::SevenZHeader;
 use crate::formats::sevenz::SevenZKind;
 use crate::formats::sevenz::StoredLinkTarget;
 use crate::formats::sevenz::deliver_undecoded_links;
+use crate::formats::sevenz::is_decode_announced;
 use crate::formats::sevenz::read_sevenz_header;
 use crate::formats::sevenz::sevenz_entry_compression;
 use crate::formats::sevenz::verify_sevenz_blocks;
@@ -184,20 +188,79 @@ pub fn list_archive_with_options<P: AsRef<Path>>(
     config: &SecurityConfig,
     options: &ListOptions,
 ) -> Result<ArchiveManifest> {
-    let config = config.clone().validate()?;
-    list_validated(
-        archive_path.as_ref(),
-        &config,
-        &mut ListPass::Strict(options.stored_targets),
-    )
+    list_archive_with_progress(archive_path, config, options, &mut NoopProgress)
 }
 
-/// Which listing runs: the bare `list_archive`, or `verify`'s pre-flight.
+/// Lists archive contents without extracting, reporting progress.
+///
+/// [`list_archive_with_options`] with a [`ProgressCallback`]: every listed
+/// entry is announced with `on_entry_start` and closed with
+/// `on_entry_complete`, and `on_complete` fires once after the manifest was
+/// built.
+///
+/// `total` is 0 for TAR, whose entry count is unknown until the stream ends,
+/// and the number of entries the file table declares for ZIP and 7z. That
+/// count can exceed the announced entries: 7z anti items and entries dropped
+/// for their path are never announced. `on_bytes_written` is never called. The
+/// events of a 7z listing fire while the file table is walked; reading link
+/// targets ([`StoredTargets::Read`]) decodes afterwards without further
+/// events.
+///
+/// # Errors
+///
+/// Same as [`list_archive`]. `on_complete` is not called on failure; every
+/// `on_entry_start` is still paired with an `on_entry_complete`.
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::ListOptions;
+/// use exarch_core::NoopProgress;
+/// use exarch_core::SecurityConfig;
+/// use exarch_core::list_archive_with_progress;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// # let dir = tempfile::tempdir()?;
+/// # let archive = dir.path().join("a.tar");
+/// # let mut builder = tar::Builder::new(Vec::new());
+/// # let mut header = tar::Header::new_gnu();
+/// # header.set_size(2);
+/// # header.set_mode(0o644);
+/// # builder.append_data(&mut header, "a.txt", &b"hi"[..])?;
+/// # std::fs::write(&archive, builder.into_inner()?)?;
+/// let manifest = list_archive_with_progress(
+///     &archive,
+///     &SecurityConfig::default(),
+///     &ListOptions::default(),
+///     &mut NoopProgress,
+/// )?;
+/// assert_eq!(manifest.total_entries(), 1);
+/// # Ok(())
+/// # }
+/// ```
+pub fn list_archive_with_progress<P: AsRef<Path>>(
+    archive_path: P,
+    config: &SecurityConfig,
+    options: &ListOptions,
+    progress: &mut dyn ProgressCallback,
+) -> Result<ArchiveManifest> {
+    let config = config.clone().validate()?;
+    let manifest = list_validated(
+        archive_path.as_ref(),
+        &config,
+        &mut ListPass::strict_with(options.stored_targets).with_progress(progress),
+    )?;
+    progress.on_complete();
+    Ok(manifest)
+}
+
+/// What a listing does with the payloads: the bare `list_archive`, or
+/// `verify`'s pre-flight.
 ///
 /// The pre-flight defers rejections that `verify_entry` reports as issues, and
 /// may decode payloads through an integrity pass. Only the pre-flight can carry
 /// a pass, so a strict listing that decodes is unrepresentable.
-pub(crate) enum ListPass<'a, 'c> {
+pub(crate) enum PassMode<'a, 'c> {
     /// Bare listing: every policy violation fails the listing. Carries whether
     /// link targets kept in entry data are read.
     Strict(StoredTargets),
@@ -205,25 +268,100 @@ pub(crate) enum ListPass<'a, 'c> {
     VerifyPreflight(Option<&'a mut IntegrityPass<'c>>),
 }
 
-impl<'c> ListPass<'_, 'c> {
-    /// A bare listing with the default [`StoredTargets`], which leaves 7z link
-    /// targets unread.
-    pub(crate) const fn strict() -> Self {
-        Self::Strict(StoredTargets::Skip)
-    }
-
-    /// Returns the integrity pass, which only the pre-flight can carry.
-    pub(crate) fn integrity(&mut self) -> Option<&mut IntegrityPass<'c>> {
+impl<'c> PassMode<'_, 'c> {
+    fn integrity(&mut self) -> Option<&mut IntegrityPass<'c>> {
         match self {
             Self::Strict(_) => None,
             Self::VerifyPreflight(pass) => pass.as_deref_mut(),
         }
     }
+}
+
+enum Reporter<'a> {
+    Noop(NoopProgress),
+    Callback(&'a mut dyn ProgressCallback),
+}
+
+/// Entry progress of one listing: the callback plus the counters its events
+/// carry.
+pub(crate) struct Progress<'a> {
+    reporter: Reporter<'a>,
+    total: usize,
+    started: usize,
+}
+
+impl Progress<'_> {
+    const fn noop() -> Self {
+        Self {
+            reporter: Reporter::Noop(NoopProgress),
+            total: 0,
+            started: 0,
+        }
+    }
+
+    /// Sets the `total` that following entry events report.
+    pub(crate) const fn set_total(&mut self, total: usize) {
+        self.total = total;
+    }
+
+    /// Announces the entry at `path`; the guard closes it when completed or
+    /// dropped, including on an early `?` return.
+    pub(crate) fn begin<'p>(&'p mut self, path: &'p Path) -> EntryCompleteGuard<'p> {
+        self.started += 1;
+        let (total, current) = (self.total, self.started);
+        let callback: &'p mut dyn ProgressCallback = match &mut self.reporter {
+            Reporter::Noop(noop) => noop,
+            Reporter::Callback(callback) => &mut **callback,
+        };
+        callback.on_entry_start(path, total, current);
+        EntryCompleteGuard::new(callback, path)
+    }
+}
+
+/// One listing pass: what it does with payloads and where it reports entries.
+pub(crate) struct ListPass<'a, 'c> {
+    mode: PassMode<'a, 'c>,
+    progress: Progress<'a>,
+}
+
+impl<'a, 'c> ListPass<'a, 'c> {
+    /// A bare listing with the default [`StoredTargets`], which leaves 7z link
+    /// targets unread.
+    pub(crate) const fn strict() -> Self {
+        Self::strict_with(StoredTargets::Skip)
+    }
+
+    /// A bare listing with the given [`StoredTargets`].
+    pub(crate) const fn strict_with(targets: StoredTargets) -> Self {
+        Self {
+            mode: PassMode::Strict(targets),
+            progress: Progress::noop(),
+        }
+    }
+
+    /// `verify`'s pre-flight, decoding payloads through `pass` when given.
+    pub(crate) const fn preflight(pass: Option<&'a mut IntegrityPass<'c>>) -> Self {
+        Self {
+            mode: PassMode::VerifyPreflight(pass),
+            progress: Progress::noop(),
+        }
+    }
+
+    /// Reports every entry to `callback`.
+    pub(crate) fn with_progress(mut self, callback: &'a mut dyn ProgressCallback) -> Self {
+        self.progress.reporter = Reporter::Callback(callback);
+        self
+    }
+
+    /// Returns the integrity pass, which only the pre-flight can carry.
+    pub(crate) fn integrity(&mut self) -> Option<&mut IntegrityPass<'c>> {
+        self.mode.integrity()
+    }
 
     const fn mode(&self) -> ListMode {
-        match self {
-            Self::Strict(_) => ListMode::Strict,
-            Self::VerifyPreflight(_) => ListMode::VerifyPreflight,
+        match self.mode {
+            PassMode::Strict(_) => ListMode::Strict,
+            PassMode::VerifyPreflight(_) => ListMode::VerifyPreflight,
         }
     }
 }
@@ -232,9 +370,9 @@ impl<'c> ListPass<'_, 'c> {
 /// integrity pass.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ListMode {
-    /// See [`ListPass::Strict`].
+    /// See [`PassMode::Strict`].
     Strict,
-    /// See [`ListPass::VerifyPreflight`].
+    /// See [`PassMode::VerifyPreflight`].
     VerifyPreflight,
 }
 
@@ -425,12 +563,18 @@ fn list_tar_entries<R: std::io::Read>(
             modified,
         };
 
-        if let Some(pass) = listing.integrity() {
+        let ListPass {
+            mode: pass_mode,
+            progress,
+        } = &mut *listing;
+        let in_flight = progress.begin(&archive_entry.path);
+        if let Some(pass) = pass_mode.integrity() {
             let slot = pass.begin_entry(size, &archive_entry.compression);
             if entry_type == ManifestEntryType::File && size > 0 {
                 verify_tar_payload(pass, slot, &mut entry, &archive_entry.path)?;
             }
         }
+        in_flight.complete();
 
         manifest.add_entry(archive_entry)?;
     }
@@ -514,6 +658,7 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
     let mut manifest = ArchiveManifest::new(ArchiveType::Zip);
     let mut quota = QuotaTracker::new();
     let archive = archive.reader_mut();
+    listing.progress.set_total(archive.len());
 
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i).map_err(|e| {
@@ -561,7 +706,12 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
             })
         });
 
-        let mut tracked = listing.integrity().map(|pass| {
+        let ListPass {
+            mode: pass_mode,
+            progress,
+        } = &mut *listing;
+        let in_flight = progress.begin(&path);
+        let mut tracked = pass_mode.integrity().map(|pass| {
             let slot = pass.begin_entry(size, &compression);
             (pass, slot)
         });
@@ -607,6 +757,7 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
         } else {
             LinkTarget::Missing
         };
+        in_flight.complete();
 
         let archive_entry = ArchiveEntry {
             path,
@@ -652,7 +803,11 @@ pub(crate) fn list_sevenz_parsed<R: Read + Seek>(
         links,
     } = list_sevenz_archive(header, source_len, config, listing)?;
     let list_mode = listing.mode();
-    let targets = SevenZTargets::of(listing, config.allowed.symlinks);
+    let ListPass {
+        mode: pass_mode,
+        progress,
+    } = listing;
+    let targets = SevenZTargets::of(pass_mode, config.allowed.symlinks);
     let settle_header_targets = |manifest: &mut ArchiveManifest| {
         deliver_undecoded_links(header, links.indices(), &mut |index, outcome| {
             record_link_target(manifest, &links, list_mode, index, outcome)
@@ -663,7 +818,7 @@ pub(crate) fn list_sevenz_parsed<R: Read + Seek>(
     match targets {
         SevenZTargets::Leave(pass) => {
             if let Some(pass) = pass {
-                verify_sevenz_blocks(header, &mut source, pass, &slots, None)?;
+                verify_sevenz_blocks(header, &mut source, pass, progress, &slots, None)?;
             }
         }
         SevenZTargets::Free => settle_header_targets(&mut manifest)?,
@@ -683,7 +838,7 @@ pub(crate) fn list_sevenz_parsed<R: Read + Seek>(
                 links: &links,
                 set: &mut |position, target| manifest.set_link_target(position, target),
             };
-            verify_sevenz_blocks(header, &mut source, pass, &slots, Some(capture))?;
+            verify_sevenz_blocks(header, &mut source, pass, progress, &slots, Some(capture))?;
         }
     }
     Ok(manifest)
@@ -709,11 +864,11 @@ enum SevenZTargets<'p, 'c> {
 }
 
 impl<'p, 'c> SevenZTargets<'p, 'c> {
-    fn of(listing: &'p mut ListPass<'_, 'c>, symlinks_allowed: bool) -> Self {
-        match listing {
-            ListPass::Strict(StoredTargets::Read) => Self::Walk,
-            ListPass::Strict(StoredTargets::Skip) => Self::Free,
-            ListPass::VerifyPreflight(pass) => match (pass.as_deref_mut(), symlinks_allowed) {
+    fn of(mode: &'p mut PassMode<'_, 'c>, symlinks_allowed: bool) -> Self {
+        match mode {
+            PassMode::Strict(StoredTargets::Read) => Self::Walk,
+            PassMode::Strict(StoredTargets::Skip) => Self::Free,
+            PassMode::VerifyPreflight(pass) => match (pass.as_deref_mut(), symlinks_allowed) {
                 (pass, false) => Self::Leave(pass),
                 (None, true) => Self::Free,
                 (Some(pass), true) => Self::Capture(pass),
@@ -780,6 +935,7 @@ fn list_sevenz_archive(
     // its path, or without a pass.
     let mut slots = Vec::with_capacity(header.files().len());
     let mut links = LinkTable::default();
+    listing.progress.set_total(header.files().len());
 
     for (index, (entry, compression)) in header
         .files()
@@ -818,11 +974,18 @@ fn list_sevenz_archive(
             .has_last_modified_date
             .then(|| SystemTime::from(entry.last_modified_date));
 
-        slots.push(
-            listing
-                .integrity()
-                .map(|pass| pass.begin_entry(size, &compression)),
-        );
+        let ListPass {
+            mode: pass_mode,
+            progress,
+        } = &mut *listing;
+        let slot = pass_mode
+            .integrity()
+            .map(|pass| pass.begin_entry(size, &compression));
+        slots.push(slot);
+        // A payload with a slot is announced from its block decode instead.
+        if !is_decode_announced(header, index, slot.is_some()) {
+            progress.begin(&path).complete();
+        }
 
         let target = if kind == SevenZKind::ReparsePoint {
             LinkTarget::Unreadable
@@ -2614,11 +2777,7 @@ mod tests {
     }
 
     fn list_preflight(path: &Path, config: SecurityConfig) -> Result<ArchiveManifest> {
-        list_validated(
-            path,
-            &config.validate()?,
-            &mut ListPass::VerifyPreflight(None),
-        )
+        list_validated(path, &config.validate()?, &mut ListPass::preflight(None))
     }
 
     fn assert_name_too_long(result: &Result<ArchiveManifest>) {
@@ -2848,7 +3007,7 @@ mod tests {
             .with_allow_absolute_paths(true)
             .validate()
             .unwrap();
-        let manifest = list_zip_reader(&mut archive, &config, &mut ListPass::VerifyPreflight(None))
+        let manifest = list_zip_reader(&mut archive, &config, &mut ListPass::preflight(None))
             .expect("the pre-flight must let a NUL-byte ZIP entry path through");
 
         assert_eq!(manifest.total_entries(), 1);
@@ -3138,7 +3297,7 @@ mod tests {
 
         let mut archive = ZipArchive::new(Cursor::new(zip_bytes)).unwrap();
         let manifest =
-            list_zip_reader(&mut archive, &strict, &mut ListPass::VerifyPreflight(None)).unwrap();
+            list_zip_reader(&mut archive, &strict, &mut ListPass::preflight(None)).unwrap();
         assert_matches!(
             &manifest.entries()[0].kind,
             ManifestEntryKind::Symlink {
@@ -3165,7 +3324,7 @@ mod tests {
         let mut archive = ZipArchive::new(Cursor::new(bytes)).unwrap();
         let config = SecurityConfig::default().validate().unwrap();
         let manifest =
-            list_zip_reader(&mut archive, &config, &mut ListPass::VerifyPreflight(None)).unwrap();
+            list_zip_reader(&mut archive, &config, &mut ListPass::preflight(None)).unwrap();
         assert_matches!(
             &manifest.entries()[0].kind,
             ManifestEntryKind::Symlink {

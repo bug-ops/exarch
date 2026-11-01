@@ -81,8 +81,8 @@ const MAGIC_CASES: &[(usize, &[u8], ArchiveType)] = &[
 
 /// Number of bytes `detect_format`'s magic phase reads
 /// (`detect::MAGIC_READ_LEN`, private) -- long enough to hold the offset-257
-/// USTAR signature.
-const MAGIC_READ_LEN: usize = 262;
+/// USTAR signature and the checksum field.
+const MAGIC_READ_LEN: usize = 512;
 
 /// The `.gz`-stem branch (`archive.tar.gz` -> `TarGz`, but bare `archive.gz`
 /// is rejected) is a composite two-suffix extension the proptests below
@@ -667,5 +667,32 @@ proptest! {
 
         let detected = detect_format(&path).expect("known magic bytes must detect");
         prop_assert_eq!(detected, magic_type);
+    }
+
+    /// A checksum-valid ustar header overrides only a `BZh` name prefix; gzip,
+    /// zstd and xz magics keep their compression view.
+    #[test]
+    fn prop_detect_format_valid_ustar_header_overrides_only_bzh(
+        (magic, expected) in prop::sample::select(vec![
+            (b"\x1f\x8b".to_vec(), ArchiveType::TarGz),
+            (b"\x28\xb5\x2f\xfd".to_vec(), ArchiveType::TarZst),
+            (b"BZh".to_vec(), ArchiveType::Tar),
+            (b"\xfd\x37\x7a\x58\x5a\x00".to_vec(), ArchiveType::TarXz),
+        ]),
+        tail in prop::collection::vec(any::<u8>(), 0..50),
+        ext in prop::sample::select(vec!["tar", "gz", "bz2", "xz", "zst", "bin"]),
+    ) {
+        let mut header = tar::Header::new_ustar();
+        let name = header.as_old_mut().name.as_mut_slice();
+        name[..magic.len()].copy_from_slice(&magic);
+        name[magic.len()..magic.len() + tail.len()].copy_from_slice(&tail);
+        header.set_size(0);
+        header.set_cksum();
+
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let path = temp.path().join(format!("archive.{ext}"));
+        std::fs::write(&path, header.as_bytes()).expect("failed to write fixture");
+
+        prop_assert_eq!(detect_format(&path).expect("must detect"), expected);
     }
 }

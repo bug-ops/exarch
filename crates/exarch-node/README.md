@@ -171,6 +171,25 @@ defaults to the config's `maxTotalSize`; exceeding it rejects with
 `QUOTA_EXCEEDED`. `pathModel: 'portable'` validates names against the strictest
 rules of every platform instead of this host's.
 
+`listArchiveBytesWithProgress`, `verifyArchiveBytesWithProgress` and
+`extractArchiveToMemoryWithProgress` (async only) take a `progress` callback as
+their last argument, called with `(err, [path, total, current, bytesWritten])`;
+`current` counts from 1 and `total` is 0 for TAR. A throwing callback does not
+abort the run; if the run succeeded the promise rejects with
+`PROGRESS_CALLBACK_ERROR` and the result is discarded.
+
+`createArchiveToBytes(sources, format)` (and `createArchiveToBytesSync`) builds
+an archive in memory and resolves to `{ data, report }`:
+
+```javascript
+const { data, report } = await createArchiveToBytes(['src/'], 'TarGz');
+```
+
+**Note:** the whole archive is held in memory, up to about 2-3x its size at the
+peak, and there is no size cap. Sources must be regular files and directories;
+FIFOs and device files are not supported. Use `createArchive` for large
+archives.
+
 ### Error Handling
 
 ```javascript

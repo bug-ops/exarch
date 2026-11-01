@@ -12,6 +12,7 @@ use std::path::Path;
 
 use exarch_core::ArchiveError;
 use exarch_core::ArchiveReader;
+use exarch_core::EntrySink;
 use exarch_core::ExtractionOptions;
 use exarch_core::MemoryLimit;
 use exarch_core::MemorySink;
@@ -230,6 +231,7 @@ const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
 const S_IFLNK: u32 = 0o12_0000;
 
 enum Member<'a> {
+    Dir(&'a str),
     File(&'a str, &'a [u8]),
     Link(&'a str, &'a [u8]),
     Junction(&'a str),
@@ -249,6 +251,12 @@ fn archive(members: &[Member<'_>], stored: bool) -> Vec<u8> {
                 entry.windows_attributes = UNIX_EXTENSION | ((S_IFLNK | 0o777) << 16);
                 (entry, target)
             }
+            Member::Dir(name) => {
+                writer
+                    .push_archive_entry(ArchiveEntry::new_directory(name), None::<Cursor<Vec<u8>>>)
+                    .unwrap();
+                continue;
+            }
             Member::Junction(name) => {
                 let mut entry = ArchiveEntry::new_directory(name);
                 entry.has_windows_attributes = true;
@@ -267,10 +275,10 @@ fn archive(members: &[Member<'_>], stored: bool) -> Vec<u8> {
     writer.finish().unwrap().into_inner()
 }
 
-fn extract_bytes(
+fn extract_bytes<S: EntrySink>(
     bytes: Vec<u8>,
     config: &SecurityConfig,
-    sink: &mut RecordingSink,
+    sink: &mut S,
 ) -> Result<exarch_core::ExtractionReport, ArchiveError> {
     extract_to_sink_with_progress(
         ArchiveReader::seekable(Cursor::new(bytes), SeekableFormat::SevenZ),
@@ -319,6 +327,93 @@ fn an_escaping_symlink_is_refused_after_the_earlier_entries() {
     );
     assert!(matches!(error, ArchiveError::PartialExtraction { .. }));
     assert!(sink.tree.symlinks.is_empty());
+    assert_eq!(sink.finished.len(), 1);
+}
+
+fn is_name_too_long(error: &ArchiveError) -> bool {
+    matches!(error, ArchiveError::Io(io) if io.kind() == std::io::ErrorKind::InvalidFilename)
+}
+
+#[test]
+fn an_overlong_name_is_refused_before_any_block_is_decoded() {
+    let long = "a".repeat(256);
+    let mut bytes = archive(
+        &[
+            Member::File("ok.txt", b"FIRST-PAYLOAD-0123456789"),
+            Member::File(&long, b"hi"),
+        ],
+        true,
+    );
+    common::flip_first(&mut bytes, b"FIRST-PAYLOAD");
+    let mut sink = RecordingSink::default();
+    let error = extract_bytes(bytes, &config(), &mut sink).unwrap_err();
+    assert!(is_name_too_long(&error), "{error:?}");
+    assert!(sink.finished.is_empty() && sink.tree.dirs.is_empty());
+}
+
+#[test]
+fn an_overlong_directory_name_is_refused_before_any_delivery() {
+    let bytes = archive(
+        &[Member::File("ok.txt", b"hi"), Member::Dir(&"d".repeat(256))],
+        false,
+    );
+    let mut sink = RecordingSink::default();
+    let error = extract_bytes(bytes, &config(), &mut sink).unwrap_err();
+    assert!(is_name_too_long(&error), "{error:?}");
+    assert!(sink.finished.is_empty() && sink.tree.dirs.is_empty());
+}
+
+#[test]
+fn an_overlong_symlink_name_is_refused_before_any_delivery() {
+    let bytes = archive(
+        &[
+            Member::File("ok.txt", b"hi"),
+            Member::Link(&"l".repeat(256), b"ok.txt"),
+        ],
+        false,
+    );
+    let mut sink = RecordingSink::default();
+    let config = config().with_allow_symlinks(true);
+    let error = extract_bytes(bytes, &config, &mut sink).unwrap_err();
+    assert!(is_name_too_long(&error), "{error:?}");
+    assert!(sink.finished.is_empty() && sink.tree.symlinks.is_empty());
+}
+
+#[test]
+fn a_255_byte_name_is_accepted_and_a_256_byte_name_refused() {
+    let at_limit = "a".repeat(255);
+    let bytes = archive(&[Member::File(&at_limit, b"hi")], false);
+    let mut sink = RecordingSink::default();
+    extract_bytes(bytes, &config(), &mut sink).unwrap();
+    assert!(sink.tree.files.contains_key(Path::new(&at_limit)));
+
+    let bytes = archive(&[Member::File(&"a".repeat(256), b"hi")], false);
+    let error = extract_bytes(bytes, &config(), &mut RecordingSink::default()).unwrap_err();
+    assert!(is_name_too_long(&error), "{error:?}");
+}
+
+#[test]
+fn the_portable_path_limit_applies_to_a_portable_sink() {
+    let name = vec!["a".repeat(250); 5].join("/");
+    let bytes = archive(&[Member::File(&name, b"hi")], false);
+    #[cfg(target_os = "linux")]
+    extract_bytes(bytes.clone(), &config(), &mut RecordingSink::default()).unwrap();
+
+    let error = extract_bytes(bytes, &config(), &mut MemorySink::default()).unwrap_err();
+    assert!(is_name_too_long(&error), "{error:?}");
+}
+
+#[test]
+fn an_overlong_name_of_a_skipped_extension_is_not_refused() {
+    let long = format!("{}.bin", "a".repeat(256));
+    let bytes = archive(
+        &[Member::File("ok.txt", b"hi"), Member::File(&long, b"hi")],
+        false,
+    );
+    let config = config().with_allowed_extensions(vec!["txt".to_string()]);
+    let mut sink = RecordingSink::default();
+    let report = extract_bytes(bytes, &config, &mut sink).unwrap();
+    assert_eq!(report.files_skipped, 1);
     assert_eq!(sink.finished.len(), 1);
 }
 

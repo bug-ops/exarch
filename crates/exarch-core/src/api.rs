@@ -482,9 +482,7 @@ fn creator_for_format(
     match format.family() {
         FormatFamily::Tar(codec) => Ok(Box::new(crate::creation::TarCreator(codec))),
         FormatFamily::Zip => Ok(Box::new(crate::creation::ZipCreator)),
-        FormatFamily::SevenZ => Err(ArchiveError::InvalidConfiguration {
-            reason: "7z archive creation is not supported".into(),
-        }),
+        FormatFamily::SevenZ => Err(crate::writer::sevenz_creation_unsupported()),
     }
 }
 
@@ -699,8 +697,61 @@ pub fn list_reader(
     config: &SecurityConfig,
     options: &ListOptions,
 ) -> Result<ArchiveManifest> {
+    list_reader_with_progress(reader, config, options, &mut NoopProgress)
+}
+
+/// Lists the contents of an archive read from a reader, reporting progress.
+///
+/// [`list_reader`] with a [`ProgressCallback`], which sees the events of
+/// [`list_archive_with_progress`](crate::list_archive_with_progress): one
+/// `on_entry_start` / `on_entry_complete` pair per listed entry, `total` 0 for
+/// TAR, and `on_complete` once after the manifest was built.
+///
+/// # Errors
+///
+/// Same as [`list_reader`]. `on_complete` is not called on failure.
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::ArchiveReader;
+/// use exarch_core::ListOptions;
+/// use exarch_core::NoopProgress;
+/// use exarch_core::SecurityConfig;
+/// use exarch_core::list_reader_with_progress;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let mut builder = tar::Builder::new(Vec::new());
+/// let mut header = tar::Header::new_gnu();
+/// header.set_size(2);
+/// header.set_mode(0o644);
+/// builder.append_data(&mut header, "a.txt", &b"hi"[..])?;
+/// let bytes = builder.into_inner()?;
+///
+/// let reader = ArchiveReader::tar(std::io::Cursor::new(bytes), None);
+/// let manifest = list_reader_with_progress(
+///     reader,
+///     &SecurityConfig::default(),
+///     &ListOptions::default(),
+///     &mut NoopProgress,
+/// )?;
+/// assert_eq!(manifest.total_entries(), 1);
+/// # Ok(())
+/// # }
+/// ```
+pub fn list_reader_with_progress(
+    reader: ArchiveReader<'_>,
+    config: &SecurityConfig,
+    options: &ListOptions,
+    progress: &mut dyn ProgressCallback,
+) -> Result<ArchiveManifest> {
     let config = config.clone().validate()?;
-    reader.list(&config, &mut ListPass::Strict(options.stored_targets))
+    let manifest = reader.list(
+        &config,
+        &mut ListPass::strict_with(options.stored_targets).with_progress(progress),
+    )?;
+    progress.on_complete();
+    Ok(manifest)
 }
 
 /// Verifies an archive read from a reader, optionally checking payload
@@ -745,8 +796,60 @@ pub fn verify_reader(
     config: &SecurityConfig,
     options: &VerificationOptions,
 ) -> Result<VerificationReport> {
+    verify_reader_with_progress(reader, config, options, &mut NoopProgress)
+}
+
+/// Verifies an archive read from a reader, reporting progress.
+///
+/// [`verify_reader`] with a [`ProgressCallback`], which sees the events of
+/// [`verify_archive_with_progress`](crate::verify_archive_with_progress): one
+/// `on_entry_start` / `on_entry_complete` pair per scanned entry, and
+/// `on_complete` once when a report is returned, including one whose status
+/// is `Fail`.
+///
+/// # Errors
+///
+/// Same as [`verify_reader`]. `on_complete` is not called on failure.
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::ArchiveReader;
+/// use exarch_core::NoopProgress;
+/// use exarch_core::SecurityConfig;
+/// use exarch_core::VerificationOptions;
+/// use exarch_core::VerificationStatus;
+/// use exarch_core::verify_reader_with_progress;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let mut builder = tar::Builder::new(Vec::new());
+/// let mut header = tar::Header::new_gnu();
+/// header.set_size(2);
+/// header.set_mode(0o644);
+/// builder.append_data(&mut header, "a.txt", &b"hi"[..])?;
+/// let bytes = builder.into_inner()?;
+///
+/// let reader = ArchiveReader::tar(std::io::Cursor::new(bytes), None);
+/// let report = verify_reader_with_progress(
+///     reader,
+///     &SecurityConfig::default(),
+///     &VerificationOptions::default(),
+///     &mut NoopProgress,
+/// )?;
+/// assert_eq!(report.status(), VerificationStatus::Pass);
+/// # Ok(())
+/// # }
+/// ```
+pub fn verify_reader_with_progress(
+    reader: ArchiveReader<'_>,
+    config: &SecurityConfig,
+    options: &VerificationOptions,
+    progress: &mut dyn ProgressCallback,
+) -> Result<VerificationReport> {
     let config = config.clone().validate()?;
-    reader.verify(&config, *options)
+    let report = reader.verify(&config, *options, progress)?;
+    progress.on_complete();
+    Ok(report)
 }
 
 /// Extracts an archive read from a reader into an [`EntrySink`].
@@ -769,8 +872,9 @@ pub fn verify_reader(
 /// which needs a directory to rename.
 ///
 /// A 7z source is read in two phases: everything the file table can refuse
-/// (admission, ratios, quotas, link policy, paths) is refused before the sink
-/// sees an entry, then the entries are decoded and delivered in archive order.
+/// (admission, ratios, quotas, link policy, paths, name lengths) is refused
+/// before the sink sees an entry, then the entries are decoded and delivered in
+/// archive order.
 ///
 /// # Examples
 ///

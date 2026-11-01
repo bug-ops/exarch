@@ -435,24 +435,51 @@ pub(crate) fn check_component_for(
     comp: &OsStr,
     config: &SecurityConfig<Validated>,
 ) -> Result<()> {
-    match model {
-        PathModel::Host if cfg!(windows) => check_windows_component(comp, config),
-        PathModel::Host => Ok(()),
-        PathModel::Portable => {
-            if let Some(hazard) = portable_component_hazard(comp) {
-                return Err(ArchiveError::violation(format!(
-                    "path component is not portable ({hazard}): {}",
-                    comp.display()
-                )));
-            }
-            check_windows_component(comp, config)
-        }
-    }
+    let host = if cfg!(windows) {
+        HostOs::Windows
+    } else {
+        HostOs::Other
+    };
+    check_component_on(model, host, comp, config)
 }
 
-// TODO(#780): apply the Backslash/ForbiddenCharacter/C0 hazards to
-// Host-on-Windows too (Windows rejects them at create time), and update the
-// Windows checks in skills/exarch-cli/SKILL.md
+/// The platform whose component rules a [`PathModel::Host`] check applies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HostOs {
+    Windows,
+    Other,
+}
+
+/// [`check_component_for`] with the host platform made explicit, so the
+/// Windows behaviour is testable everywhere.
+pub(crate) fn check_component_on(
+    model: PathModel,
+    host: HostOs,
+    comp: &OsStr,
+    config: &SecurityConfig<Validated>,
+) -> Result<()> {
+    if model == PathModel::Host && host == HostOs::Other {
+        return Ok(());
+    }
+    if let Some(hazard) = portable_component_hazard(comp) {
+        let name = escaped_component(comp);
+        let message = match model {
+            PathModel::Portable => format!("path component is not portable ({hazard}): {name}"),
+            PathModel::Host => format!("path component {hazard}: {name}"),
+        };
+        return Err(ArchiveError::violation(message));
+    }
+    check_windows_component(comp, config)
+}
+
+/// Spells `comp` with control characters escaped, for error messages.
+fn escaped_component(comp: &OsStr) -> String {
+    comp.to_string_lossy()
+        .chars()
+        .flat_map(char::escape_debug)
+        .collect()
+}
+
 /// Classifies `comp`, reporting never-allowed hazards before the
 /// configurable reserved-name one. Pure and platform-independent.
 pub(crate) fn windows_component_hazard(comp: &OsStr) -> Option<WindowsComponentHazard> {
@@ -483,14 +510,14 @@ pub(crate) fn check_windows_component(
         }
         Some(WindowsComponentHazard::ReservedDeviceName) => Err(ArchiveError::relaxable_violation(
             PolicySetting::WindowsReservedNames,
-            format!("Windows reserved device name: {}", comp.display()),
+            format!("Windows reserved device name: {}", escaped_component(comp)),
         )),
         Some(WindowsComponentHazard::StreamSeparator) => {
-            Err(stream_separator_error(&comp.display().to_string()))
+            Err(stream_separator_error(&escaped_component(comp)))
         }
         Some(WindowsComponentHazard::TrailingDotOrSpace) => Err(ArchiveError::violation(format!(
             "path component ends with '.' or ' ': {}",
-            comp.display()
+            escaped_component(comp)
         ))),
     }
 }
@@ -1663,6 +1690,135 @@ mod tests {
         assert!(
             !paths_start_with(shorter, base),
             "a path shorter than base must never be treated as containing base"
+        );
+    }
+
+    fn default_config() -> SecurityConfig<Validated> {
+        SecurityConfig::default().validate().expect("valid config")
+    }
+
+    #[test]
+    fn test_portable_component_message_is_portable_flavoured() {
+        let err = check_component_for(PathModel::Portable, OsStr::new("a?b"), &default_config())
+            .expect_err("`?` must be refused");
+        assert!(
+            err.to_string()
+                .contains("not portable (contains a character Windows refuses)"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_host_component_rules_are_empty_off_windows() {
+        for name in ["a?b", "a<b", "a\u{1}b", "a:b", "CON", "x."] {
+            check_component_on(
+                PathModel::Host,
+                HostOs::Other,
+                OsStr::new(name),
+                &default_config(),
+            )
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        }
+    }
+
+    #[test]
+    fn test_host_component_refuses_portable_hazards_on_windows() {
+        for name in [
+            "a?b", "a<b", "a>b", "a\"b", "a|b", "a*b", "a\u{1}b", "a:b", "x.",
+        ] {
+            let err = check_component_on(
+                PathModel::Host,
+                HostOs::Windows,
+                OsStr::new(name),
+                &default_config(),
+            )
+            .expect_err(name);
+            assert_matches!(err, ArchiveError::SecurityViolation { .. });
+            assert!(!err.to_string().contains("not portable"), "{err}");
+        }
+    }
+
+    #[test]
+    fn test_component_error_escapes_control_characters() {
+        for (model, host) in [
+            (PathModel::Host, HostOs::Windows),
+            (PathModel::Portable, HostOs::Other),
+        ] {
+            let err =
+                check_component_on(model, host, OsStr::new("a\u{1b}[31mb"), &default_config())
+                    .expect_err("control character");
+            let text = err.to_string();
+            assert!(!text.contains('\u{1b}'), "{text:?}");
+            assert!(text.contains("\\u{1b}"), "{text:?}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_non_utf8_component_refused_by_windows_host_model() {
+        use std::os::unix::ffi::OsStrExt;
+        let err = check_component_on(
+            PathModel::Host,
+            HostOs::Windows,
+            OsStr::from_bytes(b"a\xffb"),
+            &default_config(),
+        )
+        .expect_err("non-UTF-8");
+        assert_matches!(err, ArchiveError::SecurityViolation { .. });
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_host_refuses_forbidden_character_name_and_symlink_target_on_windows() {
+        let (_temp, dest) = create_test_dest();
+        let config = SecurityConfig::permissive()
+            .validate()
+            .expect("valid config");
+        assert_matches!(
+            SafePath::validate(Path::new("dir/a?b"), &dest, &config),
+            Err(ArchiveError::SecurityViolation { .. })
+        );
+        let link = SafePath::validate(Path::new("link"), &dest, &config).expect("link path");
+        assert_matches!(
+            crate::types::SafeSymlink::validate(&link, Path::new("a<b"), &dest, &config),
+            Err(ArchiveError::SecurityViolation { .. })
+        );
+    }
+
+    #[test]
+    fn test_uncached_parent_still_validates() {
+        let (_temp, dest) = create_test_dest();
+        let config = default_config();
+        let mut cache = DirCache::with_max_bytes(0);
+        cache
+            .ensure_dir(&dest.as_path().join("d1/d2"))
+            .expect("should create dir");
+        assert!(!cache.contains(&dest.as_path().join("d1/d2")));
+
+        let ctx = ValidationContext::new(false).with_dir_cache(&cache);
+        let result = SafePath::validate_with_context(Path::new("d1/d2/f"), &dest, &config, &ctx);
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_symlink_planted_in_uncached_parent_is_refused() {
+        let (_temp, dest) = create_test_dest();
+        let outside = TempDir::new().expect("failed to create temp dir");
+        let config = default_config();
+        let mut cache = DirCache::with_max_bytes(0);
+        let parent = dest.as_path().join("d1/d2");
+        cache.ensure_dir(&parent).expect("should create dir");
+
+        std::fs::remove_dir(&parent).expect("remove");
+        std::os::unix::fs::symlink(outside.path(), &parent).expect("symlink");
+
+        let ctx = ValidationContext::new(false).with_dir_cache(&cache);
+        let result = SafePath::validate_with_context(Path::new("d1/d2/f"), &dest, &config, &ctx);
+        assert_matches!(
+            result,
+            Err(ArchiveError::PathTraversal { .. }),
+            "{result:?}"
         );
     }
 }

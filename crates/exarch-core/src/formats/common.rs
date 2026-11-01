@@ -77,8 +77,8 @@ impl<'a> EntryCompleteGuard<'a> {
     /// Fire `on_entry_complete` immediately and prevent the drop from firing
     /// again.
     pub fn complete(mut self) {
-        self.progress.on_entry_complete(self.path);
         self.fired = true;
+        self.progress.on_entry_complete(self.path);
     }
 }
 
@@ -110,7 +110,8 @@ impl Drop for EntryCompleteGuard<'_> {
 /// - Reduces syscalls by ~95% for deeply nested archives
 /// - Memory overhead: O(d) where d is number of unique directories
 /// - Lookup cost: O(1) average with `FxHasher` (faster than `SipHash`)
-/// - Default capacity: 128 directories (tunable via `with_capacity`)
+/// - Memory is bounded by a fixed budget of 16 MiB of key bytes (see [Bounded
+///   memory](#bounded-memory))
 ///
 /// # TOCTOU Safety
 ///
@@ -127,16 +128,19 @@ impl Drop for EntryCompleteGuard<'_> {
 /// 4. **Industry standard**: TAR, ZIP, and other extractors use similar caching
 ///    without additional synchronization.
 ///
-/// # Future Work
+/// # Bounded memory
 ///
-/// Potential quota features for future versions:
-/// - `max_directory_depth`: Limit nesting depth (`DoS` protection)
-/// - `max_unique_directories`: Limit total directory count (memory limit)
+/// The cache is only a shortcut for directories this extraction created, so it
+/// holds at most [`DIR_CACHE_MAX_BYTES`] (16 MiB) of key bytes: each key is
+/// charged its path length plus `size_of::<PathBuf>()`, and a key that would
+/// exceed the budget is skipped, not stored. Hash-set overhead and allocator
+/// rounding come on top, so the real ceiling is higher than 16 MiB. The bound
+/// is fixed and independent of the entry-count quota, which would allow
+/// gigabytes of keys at its defaults.
 ///
-/// These are deferred because:
-/// - Current `max_total_size` quota provides sufficient `DoS` protection
-/// - Real-world archives rarely exceed reasonable directory counts
-/// - Simpler implementation reduces attack surface
+/// A skipped directory is still created. It only costs speed: a path whose
+/// parent is not cached is canonicalized again on every entry, so the cap
+/// never weakens a security check.
 ///
 /// # Examples
 ///
@@ -156,42 +160,33 @@ impl Drop for EntryCompleteGuard<'_> {
 #[derive(Debug)]
 pub struct DirCache {
     created: FxHashSet<PathBuf>,
+    used_bytes: usize,
+    max_bytes: usize,
 }
 
+/// Budget of key bytes a [`DirCache`] may hold: 16 MiB.
+pub const DIR_CACHE_MAX_BYTES: usize = 16 * 1024 * 1024;
+
 impl DirCache {
-    /// Creates a new directory cache with default capacity (128).
-    ///
-    /// This is sufficient for most archives. Use [`with_capacity`] if you
-    /// know the archive has significantly more unique directories.
+    /// Creates a new directory cache bounded by [`DIR_CACHE_MAX_BYTES`].
     ///
     /// # Examples
     ///
     /// ```ignore
     /// let cache = DirCache::new();
     /// ```
-    ///
-    /// [`with_capacity`]: Self::with_capacity
     #[must_use]
     #[inline]
     pub fn new() -> Self {
-        Self::with_capacity(128)
+        Self::with_max_bytes(DIR_CACHE_MAX_BYTES)
     }
 
-    /// Creates a new directory cache with specified capacity.
-    ///
-    /// Pre-allocating capacity avoids rehashing during extraction.
-    ///
-    /// # Examples
-    ///
-    /// ```ignore
-    /// // For archives with many unique directories
-    /// let cache = DirCache::with_capacity(1000);
-    /// ```
-    #[must_use]
-    pub fn with_capacity(capacity: usize) -> Self {
+    pub(crate) fn with_max_bytes(max_bytes: usize) -> Self {
         use rustc_hash::FxBuildHasher;
         Self {
-            created: FxHashSet::with_capacity_and_hasher(capacity, FxBuildHasher),
+            created: FxHashSet::with_capacity_and_hasher(128, FxBuildHasher),
+            used_bytes: 0,
+            max_bytes,
         }
     }
 
@@ -199,14 +194,30 @@ impl DirCache {
     ///
     /// This avoids duplicating the ancestor-walking logic in both
     /// `ensure_parent_dir` and `ensure_dir`.
+    ///
+    /// Also charges the ancestors of the destination when `path` is absolute
+    /// (at most the depth of the destination, a few short keys). A key that
+    /// does not fit the budget is skipped on its own; shorter ancestors are
+    /// still tried.
     fn cache_ancestors(&mut self, path: &Path) {
         let mut current = path;
         while !current.is_empty() {
-            self.created.insert(current.to_path_buf());
+            self.insert_within_budget(current);
             match current.parent() {
                 Some(p) if !p.is_empty() => current = p,
                 _ => break,
             }
+        }
+    }
+
+    fn insert_within_budget(&mut self, path: &Path) {
+        if self.created.contains(path) {
+            return;
+        }
+        let charge = path.as_os_str().len() + std::mem::size_of::<PathBuf>();
+        if self.max_bytes - self.used_bytes >= charge {
+            self.created.insert(path.to_path_buf());
+            self.used_bytes += charge;
         }
     }
 
@@ -474,6 +485,15 @@ pub fn checked_increment_files_skipped(report: &mut ExtractionReport) -> Result<
     Ok(())
 }
 
+/// Whether the extension allowlist admits `path`, without recording a skip.
+///
+/// The predicate behind [`check_extension_allowed`], for pre-validation passes
+/// that must agree with delivery on which files are skipped.
+#[must_use]
+pub fn is_extension_allowed(path: &Path, config: &SecurityConfig<Validated>) -> bool {
+    config.is_path_extension_allowed(path.extension().and_then(|e| e.to_str()))
+}
+
 /// Returns `true` if `path`'s extension passes `config`'s allowlist.
 ///
 /// If the extension is not allowed, records the skip (increments
@@ -512,8 +532,7 @@ pub fn check_extension_allowed(
     report: &mut ExtractionReport,
     disallowed_extension_skips: &mut u64,
 ) -> bool {
-    let ext = path.extension().and_then(|e| e.to_str());
-    if config.is_path_extension_allowed(ext) {
+    if is_extension_allowed(path, config) {
         return true;
     }
 
@@ -1784,12 +1803,97 @@ mod tests {
         }
     }
 
-    /// Test `DirCache::with_capacity` constructor
     #[test]
-    fn test_dir_cache_with_capacity() {
-        let cache = DirCache::with_capacity(1000);
-        // Just verify it constructs without panic
-        assert_eq!(cache.created.len(), 0, "should start empty");
+    fn test_dir_cache_budget_holds_with_long_components() {
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let base = temp.path().as_os_str().len() + std::mem::size_of::<PathBuf>();
+        let budget = base * 3 + 300;
+        let mut cache = DirCache::with_max_bytes(budget);
+
+        let mut deep = temp.path().to_path_buf();
+        for i in 0..6 {
+            deep.push(format!("{i}{}", "x".repeat(100)));
+        }
+        let file = deep.join("f.txt");
+
+        assert!(cache.ensure_parent_dir(&file).expect("should create"));
+        assert!(deep.is_dir(), "directories are created even when uncached");
+        assert!(cache.used_bytes <= budget, "used {}", cache.used_bytes);
+        assert!(!cache.contains(&deep), "deepest key exceeds the budget");
+        assert!(
+            cache.created.len() >= 2,
+            "keys that fit are still cached: {:?}",
+            cache.created
+        );
+    }
+
+    #[test]
+    fn test_dir_cache_zero_budget_caches_nothing() {
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let mut cache = DirCache::with_max_bytes(0);
+        let dir = temp.path().join("a/b");
+        assert!(cache.ensure_dir(&dir).expect("should create"));
+        assert!(dir.is_dir());
+        assert!(cache.created.is_empty());
+        assert_eq!(cache.used_bytes, 0);
+    }
+
+    #[test]
+    fn test_entry_complete_guard_panicking_callback_fires_once() {
+        use std::panic::AssertUnwindSafe;
+        use std::panic::catch_unwind;
+
+        struct Panicking(u32);
+        impl ProgressCallback for Panicking {
+            fn on_entry_start(&mut self, _: &Path, _: usize, _: usize) {}
+
+            fn on_bytes_written(&mut self, _: u64) {}
+
+            fn on_entry_complete(&mut self, _: &Path) {
+                self.0 += 1;
+                panic!("callback panic");
+            }
+
+            fn on_complete(&mut self) {}
+        }
+
+        let mut progress = Panicking(0);
+        let path = PathBuf::from("f");
+        let outcome = catch_unwind(AssertUnwindSafe(|| {
+            EntryCompleteGuard::new(&mut progress, &path).complete();
+        }));
+        assert!(outcome.is_err());
+        assert_eq!(progress.0, 1, "Drop must not fire the callback again");
+    }
+
+    #[test]
+    fn test_dir_cache_skips_per_key_not_sticky() {
+        let mut cache = DirCache::with_max_bytes(256);
+        let long = PathBuf::from(format!("/{}", "a".repeat(400)));
+        cache.cache_ancestors(&long.join("b"));
+        assert!(!cache.contains(&long), "oversized key is skipped");
+        cache.cache_ancestors(Path::new("/s"));
+        assert!(
+            cache.contains(Path::new("/s")),
+            "later small key still fits"
+        );
+    }
+
+    #[test]
+    fn test_dir_cache_default_budget_never_exceeded() {
+        let mut cache = DirCache::new();
+        for entry in 0..10_000 {
+            let mut path = PathBuf::from("/d");
+            for level in 0..32 {
+                path.push(format!("{entry:05}-{level:02}-{}", "n".repeat(60)));
+            }
+            cache.cache_ancestors(&path);
+            assert!(cache.used_bytes <= DIR_CACHE_MAX_BYTES);
+        }
+        assert!(
+            cache.used_bytes > DIR_CACHE_MAX_BYTES / 2,
+            "budget is actually exercised"
+        );
     }
 
     /// Test `DirCache::contains` method

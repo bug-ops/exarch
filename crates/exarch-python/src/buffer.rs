@@ -5,6 +5,7 @@ use std::path::Path;
 
 use exarch_core::ArchiveError;
 use exarch_core::ArchiveReader;
+use exarch_core::ArchiveWriter;
 use exarch_core::MemoryEntry;
 use exarch_core::MemoryLimit;
 use exarch_core::MemorySink;
@@ -17,16 +18,41 @@ use pyo3::prelude::*;
 use pyo3::pybacked::PyBackedBytes;
 use pyo3::types::PyBytes;
 
+use crate::PyProgressAdapter;
 use crate::catch_panic_as_py_err;
+use crate::catch_panic_as_py_result;
+use crate::config::PyCreationConfig;
 use crate::config::PyExtractionOptions;
 use crate::config::PySecurityConfig;
 use crate::config::PyVerificationOptions;
 use crate::error::convert_error;
+use crate::merge_progress_result;
+use crate::path_to_string;
 use crate::report::PyArchiveManifest;
+use crate::report::PyCreationReport;
 use crate::report::PyExtractionReport;
 use crate::report::PyVerificationReport;
 
 /// Parses the string form of a closed core enum (`ALL` and `as_str`).
+fn parse_one<T: Copy>(
+    what: &str,
+    all: &[T],
+    as_str: fn(T) -> &'static str,
+    value: &str,
+) -> PyResult<T> {
+    all.iter()
+        .copied()
+        .find(|variant| as_str(*variant) == value)
+        .ok_or_else(|| {
+            let allowed: Vec<_> = all.iter().map(|variant| as_str(*variant)).collect();
+            PyValueError::new_err(format!(
+                "{what} must be one of {}, got {value:?}",
+                allowed.join(", ")
+            ))
+        })
+}
+
+/// Parses an optional string form of a closed core enum.
 fn parse_variant<T: Copy>(
     what: &str,
     all: &[T],
@@ -34,18 +60,7 @@ fn parse_variant<T: Copy>(
     value: Option<&str>,
 ) -> PyResult<Option<T>> {
     value
-        .map(|value| {
-            all.iter()
-                .copied()
-                .find(|variant| as_str(*variant) == value)
-                .ok_or_else(|| {
-                    let allowed: Vec<_> = all.iter().map(|variant| as_str(*variant)).collect();
-                    PyValueError::new_err(format!(
-                        "{what} must be one of {}, got {value:?}",
-                        allowed.join(", ")
-                    ))
-                })
-        })
+        .map(|value| parse_one(what, all, as_str, value))
         .transpose()
 }
 
@@ -269,24 +284,331 @@ pub fn extract_archive_to_memory(
     path_model: Option<String>,
     format: Option<String>,
 ) -> PyResult<PyMemoryExtraction> {
-    let format = parse_format(format.as_deref())?;
-    let path_model = parse_path_model(path_model.as_deref())?.unwrap_or_default();
-    let max_bytes = parse_max_bytes(max_bytes)?;
-    let default_config = exarch_core::SecurityConfig::default();
-    let config_ref = config.map_or(&default_config, |c| c.as_core());
-    let default_options = exarch_core::ExtractionOptions::default();
-    let options_ref = options.map_or(&default_options, |o| o.as_core());
-    let limit = max_bytes.map_or_else(|| MemoryLimit::from_config(config_ref), MemoryLimit::new);
+    let request = MemoryRequest::parse(
+        config,
+        options,
+        max_bytes,
+        path_model.as_deref(),
+        format.as_deref(),
+    )?;
 
     let (report, sink) = catch_panic_as_py_err("archive extraction", || {
-        py.detach(|| {
-            let reader = ArchiveReader::from_bytes(data, format)?;
-            let mut sink = MemorySink::new(limit).with_path_model(path_model);
-            let report = exarch_core::extract_to_sink(reader, &mut sink, config_ref, options_ref)?;
-            Ok((report, sink))
-        })
+        py.detach(|| request.run(data, &mut exarch_core::NoopProgress))
     })?;
+    into_py_extraction(py, report, sink)
+}
 
+/// Extract an archive held in memory into memory, with a progress callback.
+///
+/// Same as `extract_archive_to_memory`, plus `progress`, called once per entry
+/// with `(path: str, total: int, current: int, bytes_written: int)`.
+///
+/// # Arguments
+///
+/// * `data` - The archive bytes
+/// * `config` - Optional `SecurityConfig` (uses secure defaults if None)
+/// * `progress` - Optional progress callback function
+/// * `options` - Optional `ExtractionOptions` (`atomic` is not supported)
+/// * `max_bytes` - See `extract_archive_to_memory`
+/// * `path_model` - See `extract_archive_to_memory`
+/// * `format` - The archive format; detected from the leading bytes if None
+///
+/// # Returns
+///
+/// `MemoryExtraction` with the report and the extracted entries
+///
+/// # Raises
+///
+/// * The exceptions of `extract_archive_to_memory`
+/// * Whatever `progress` itself raises - see the note below
+///
+/// # A raising `progress` propagates instead of being swallowed
+///
+/// Extraction runs to completion; a raising `progress` cannot abort it, and is
+/// not called again once it has raised.
+///
+/// - If extraction succeeds, the callback's exception is raised and the
+///   extracted entries are discarded, because nothing was written to disk.
+///   `files_extracted` and `bytes_written` attributes and a
+///   `progress_callback_error = True` marker are attached to it.
+/// - If extraction fails, the core error takes priority and the callback's
+///   exception is chained onto it via `__cause__`.
+///
+/// The GIL is held during extraction when `progress` is given.
+///
+/// # Examples
+///
+/// ```python
+/// from exarch import extract_archive_to_memory_with_progress
+///
+/// def progress(path, total, current, bytes_written):
+///     print(f"{current}/{total}: {path}")
+///
+/// with open("archive.tar.gz", "rb") as f:
+///     result = extract_archive_to_memory_with_progress(f.read(), None, progress)
+/// ```
+#[pyfunction]
+#[expect(
+    clippy::needless_pass_by_value,
+    clippy::too_many_arguments,
+    reason = "pyo3 cannot extract `&str` under abi3-py39; the signature mirrors the sibling function"
+)]
+#[pyo3(signature = (data, config=None, progress=None, options=None, max_bytes=None, path_model=None, format=None))]
+pub fn extract_archive_to_memory_with_progress(
+    py: Python<'_>,
+    data: PyBackedBytes,
+    config: Option<&PySecurityConfig>,
+    progress: Option<Py<PyAny>>,
+    options: Option<&PyExtractionOptions>,
+    max_bytes: Option<i128>,
+    path_model: Option<String>,
+    format: Option<String>,
+) -> PyResult<PyMemoryExtraction> {
+    let request = MemoryRequest::parse(
+        config,
+        options,
+        max_bytes,
+        path_model.as_deref(),
+        format.as_deref(),
+    )?;
+
+    let (report, sink) = run_with_optional_progress(
+        py,
+        "archive extraction with progress",
+        progress,
+        |progress| request.run(data, progress),
+        |exc, done| {
+            let _ = exc.setattr("files_extracted", done.0.files_extracted);
+            let _ = exc.setattr("bytes_written", done.0.bytes_written);
+        },
+    )?;
+    into_py_extraction(py, report, sink)
+}
+
+/// Runs `run` with the Python callback `progress`, holding the GIL, or with the
+/// GIL released and a no-op reporter when `progress` is absent.
+///
+/// A raising callback is merged with the result by `merge_progress_result`;
+/// `attach` adds counters to the callback's exception when the run succeeded
+/// (the successful value is discarded).
+fn run_with_optional_progress<T: Send>(
+    py: Python<'_>,
+    context: &str,
+    progress: Option<Py<PyAny>>,
+    run: impl FnOnce(&mut dyn exarch_core::ProgressCallback) -> exarch_core::Result<T> + Send,
+    attach: impl FnOnce(&Bound<'_, PyAny>, &T),
+) -> PyResult<T> {
+    match progress {
+        None => catch_panic_as_py_err(context, || {
+            py.detach(|| run(&mut exarch_core::NoopProgress))
+        }),
+        Some(callback) => {
+            let mut adapter = PyProgressAdapter::new(callback);
+            let result = catch_panic_as_py_result(context, || Ok(run(&mut adapter)))?;
+            merge_progress_result(py, result, adapter.into_callback_error(), attach)
+        }
+    }
+}
+
+/// List the contents of an archive held in memory, with a progress callback.
+///
+/// Same as `list_archive_bytes`, plus `progress`, called once per entry with
+/// `(path: str, total: int, current: int, bytes_written: int)`. `total` is 0
+/// for TAR, and `bytes_written` is always 0.
+///
+/// # Arguments
+///
+/// * `data` - The archive bytes
+/// * `config` - Optional `SecurityConfig` (uses secure defaults if None)
+/// * `progress` - Optional progress callback function
+/// * `format` - The archive format; detected from the leading bytes if None
+///
+/// # Returns
+///
+/// `ArchiveManifest` with entry metadata
+///
+/// # Raises
+///
+/// * The exceptions of `list_archive_bytes`
+/// * Whatever `progress` itself raises: listing runs to completion, and if it
+///   succeeded the callback's exception is raised and the manifest discarded,
+///   with a `progress_callback_error = True` marker. If listing failed, the
+///   core error is raised with the callback's exception as `__cause__`.
+///
+/// # Examples
+///
+/// ```python
+/// from exarch import list_archive_bytes_with_progress
+///
+/// def progress(path, total, current, bytes_written):
+///     print(f"{current}/{total}: {path}")
+///
+/// with open("archive.zip", "rb") as f:
+///     manifest = list_archive_bytes_with_progress(f.read(), None, progress)
+/// ```
+#[pyfunction]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "pyo3 cannot extract `&str` under abi3-py39"
+)]
+#[pyo3(signature = (data, config=None, progress=None, format=None))]
+pub fn list_archive_bytes_with_progress(
+    py: Python<'_>,
+    data: PyBackedBytes,
+    config: Option<&PySecurityConfig>,
+    progress: Option<Py<PyAny>>,
+    format: Option<String>,
+) -> PyResult<PyArchiveManifest> {
+    let format = parse_format(format.as_deref())?;
+    let default_config = exarch_core::SecurityConfig::default();
+    let config_ref = config.map_or(&default_config, |c| c.as_core());
+    let options = exarch_core::ListOptions::default();
+
+    let manifest = run_with_optional_progress(
+        py,
+        "archive listing with progress",
+        progress,
+        |progress| {
+            let reader = ArchiveReader::from_bytes(data, format)?;
+            exarch_core::list_reader_with_progress(reader, config_ref, &options, progress)
+        },
+        |_, _| {},
+    )?;
+
+    Ok(PyArchiveManifest::from(manifest))
+}
+
+/// Verify the security of an archive held in memory, with a progress callback.
+///
+/// Same as `verify_archive_bytes`, plus `progress`, called once per entry with
+/// `(path: str, total: int, current: int, bytes_written: int)`. `total` is 0
+/// for TAR, and `bytes_written` is always 0.
+///
+/// # Arguments
+///
+/// * `data` - The archive bytes
+/// * `config` - Optional `SecurityConfig` (uses secure defaults if None)
+/// * `progress` - Optional progress callback function
+/// * `options` - Optional `VerificationOptions`
+/// * `format` - The archive format; detected from the leading bytes if None
+///
+/// # Returns
+///
+/// `VerificationReport` with validation results
+///
+/// # Raises
+///
+/// * The exceptions of `verify_archive_bytes`
+/// * Whatever `progress` itself raises: if verification returned a report
+///   (including a failing one), the callback's exception is raised and the
+///   report discarded, with a `progress_callback_error = True` marker. If it
+///   errored, the core error is raised with the callback's exception as
+///   `__cause__`.
+///
+/// # Examples
+///
+/// ```python
+/// from exarch import verify_archive_bytes_with_progress
+///
+/// def progress(path, total, current, bytes_written):
+///     print(f"{current}/{total}: {path}")
+///
+/// with open("archive.zip", "rb") as f:
+///     report = verify_archive_bytes_with_progress(f.read(), None, progress)
+/// ```
+#[pyfunction]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "pyo3 cannot extract `&str` under abi3-py39"
+)]
+#[pyo3(signature = (data, config=None, progress=None, options=None, format=None))]
+pub fn verify_archive_bytes_with_progress(
+    py: Python<'_>,
+    data: PyBackedBytes,
+    config: Option<&PySecurityConfig>,
+    progress: Option<Py<PyAny>>,
+    options: Option<&PyVerificationOptions>,
+    format: Option<String>,
+) -> PyResult<PyVerificationReport> {
+    let format = parse_format(format.as_deref())?;
+    let default_config = exarch_core::SecurityConfig::default();
+    let config_ref = config.map_or(&default_config, |c| c.as_core());
+    let default_options = exarch_core::VerificationOptions::default();
+    let options_ref = options.map_or(&default_options, |o| o.as_core());
+
+    let report = run_with_optional_progress(
+        py,
+        "archive verification with progress",
+        progress,
+        |progress| {
+            let reader = ArchiveReader::from_bytes(data, format)?;
+            exarch_core::verify_reader_with_progress(reader, config_ref, options_ref, progress)
+        },
+        |_, _| {},
+    )?;
+
+    Ok(PyVerificationReport::from(report))
+}
+
+/// The validated arguments shared by the in-memory extraction functions.
+struct MemoryRequest {
+    config: exarch_core::SecurityConfig,
+    options: exarch_core::ExtractionOptions,
+    limit: MemoryLimit,
+    path_model: PathModel,
+    format: Option<ArchiveType>,
+}
+
+impl MemoryRequest {
+    fn parse(
+        config: Option<&PySecurityConfig>,
+        options: Option<&PyExtractionOptions>,
+        max_bytes: Option<i128>,
+        path_model: Option<&str>,
+        format: Option<&str>,
+    ) -> PyResult<Self> {
+        let format = parse_format(format)?;
+        let path_model = parse_path_model(path_model)?.unwrap_or_default();
+        let max_bytes = parse_max_bytes(max_bytes)?;
+        let config = config.map_or_else(exarch_core::SecurityConfig::default, |c| {
+            c.as_core().clone()
+        });
+        let options = options.map_or_else(exarch_core::ExtractionOptions::default, |o| {
+            o.as_core().clone()
+        });
+        let limit = max_bytes.map_or_else(|| MemoryLimit::from_config(&config), MemoryLimit::new);
+        Ok(Self {
+            config,
+            options,
+            limit,
+            path_model,
+            format,
+        })
+    }
+
+    fn run(
+        &self,
+        data: PyBackedBytes,
+        progress: &mut dyn exarch_core::ProgressCallback,
+    ) -> exarch_core::Result<(exarch_core::ExtractionReport, MemorySink)> {
+        let reader = ArchiveReader::from_bytes(data, self.format)?;
+        let mut sink = MemorySink::new(self.limit).with_path_model(self.path_model);
+        let report = exarch_core::extract_to_sink_with_progress(
+            reader,
+            &mut sink,
+            &self.config,
+            &self.options,
+            progress,
+        )?;
+        Ok((report, sink))
+    }
+}
+
+fn into_py_extraction(
+    py: Python<'_>,
+    report: exarch_core::ExtractionReport,
+    sink: MemorySink,
+) -> PyResult<PyMemoryExtraction> {
     let entries = sink
         .into_entries()
         .into_iter()
@@ -295,6 +617,98 @@ pub fn extract_archive_to_memory(
     Ok(PyMemoryExtraction {
         report: PyExtractionReport::from(report),
         entries,
+    })
+}
+
+/// The result of [`create_archive_to_bytes`].
+///
+/// # Attributes
+///
+/// * `data` - The archive bytes
+/// * `report` - The `CreationReport`
+#[pyclass(name = "CreatedArchive", frozen)]
+pub struct PyCreatedArchive {
+    data: Py<PyBytes>,
+    report: PyCreationReport,
+}
+
+#[pymethods]
+impl PyCreatedArchive {
+    #[getter]
+    fn data(&self, py: Python<'_>) -> Py<PyBytes> {
+        self.data.clone_ref(py)
+    }
+
+    #[getter]
+    fn report(&self) -> PyCreationReport {
+        self.report.clone()
+    }
+}
+
+/// Create an archive from source files and directories into memory.
+///
+/// The whole archive is held in memory (about 2-3x its size at the peak) with
+/// no size cap, so use `create_archive` for large archives. Sources must be
+/// regular files and directories; FIFOs and device files are not supported.
+///
+/// # Arguments
+///
+/// * `sources` - List of source files/directories to include (str or
+///   pathlib.Path)
+/// * `format` - One of `"Tar"`, `"TarGz"`, `"TarBz2"`, `"TarXz"`, `"TarZst"` or
+///   `"Zip"`; `"SevenZ"` cannot be created
+/// * `config` - Optional `CreationConfig` (uses defaults if None)
+///
+/// # Returns
+///
+/// `CreatedArchive` with the archive bytes and the report
+///
+/// # Raises
+///
+/// * `ValueError` - Unknown `format`, invalid sources, or `"SevenZ"`
+/// * `IOError` - A source cannot be read
+///
+/// # Examples
+///
+/// ```python
+/// from exarch import create_archive_to_bytes
+///
+/// created = create_archive_to_bytes(["src/"], "TarGz")
+/// print(len(created.data), created.report.files_added)
+/// ```
+#[pyfunction]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "pyo3 cannot extract `&str` under abi3-py39"
+)]
+#[pyo3(signature = (sources, format, config=None))]
+pub fn create_archive_to_bytes(
+    py: Python<'_>,
+    sources: &Bound<'_, PyAny>,
+    format: String,
+    config: Option<&PyCreationConfig>,
+) -> PyResult<PyCreatedArchive> {
+    let format = parse_one("format", ArchiveType::ALL, ArchiveType::as_str, &format)?;
+    let sources_list: Vec<Bound<'_, PyAny>> = sources.extract()?;
+    let source_paths: Vec<String> = sources_list
+        .iter()
+        .map(|source| path_to_string(py, source))
+        .collect::<PyResult<_>>()?;
+    let default_config = exarch_core::creation::CreationConfig::default();
+    let config_ref = config.map_or(&default_config, |c| c.as_core());
+
+    let (bytes, report) = catch_panic_as_py_err("archive creation", || {
+        py.detach(|| {
+            let mut out = std::io::Cursor::new(Vec::new());
+            let writer = ArchiveWriter::of_type(&mut out, format)?;
+            let report = exarch_core::create_to_writer(writer, &source_paths, config_ref)?;
+            Ok((out.into_inner(), report))
+        })
+    })?;
+
+    Ok(PyCreatedArchive {
+        data: PyBytes::new(py, &bytes).unbind(),
+        report: PyCreationReport::from(report),
     })
 }
 

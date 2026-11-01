@@ -17,6 +17,7 @@ use std::io::Seek;
 use std::io::SeekFrom;
 
 use crate::ArchiveError;
+use crate::ProgressCallback;
 use crate::ReaderFormatError;
 use crate::Result;
 use crate::SecurityConfig;
@@ -30,7 +31,6 @@ use crate::formats::detect::ArchiveType;
 use crate::formats::detect::FormatFamily;
 use crate::formats::detect::match_signature;
 use crate::formats::detect::peek_header;
-use crate::formats::traits::ArchiveFormat;
 use crate::inspection::ArchiveManifest;
 use crate::inspection::VerificationReport;
 use crate::inspection::list::ListPass;
@@ -204,7 +204,11 @@ impl<'a> ArchiveReader<'a> {
     /// anywhere; a ZIP or 7z archive must start at offset 0, because both
     /// address their records by absolute offsets. Where several signatures
     /// match, the first in table order wins: a container magic at the start
-    /// beats the `ustar` marker at offset 257. A v7 TAR (no `ustar` marker)
+    /// beats the `ustar` marker at offset 257, and so do gzip, xz and zstd
+    /// magics. Only `BZh` can open a member name, so a checksum-valid ustar
+    /// header that does not start with a complete bzip2 stream header is read
+    /// as a plain TAR; input valid under both readings stays bzip2. A v7 TAR
+    /// (no `ustar` marker)
     /// and a ZIP with data prepended are not recognized; use [`Self::tar`]
     /// for the former.
     ///
@@ -247,7 +251,8 @@ impl<'a> ArchiveReader<'a> {
     ///
     /// Only TAR streams can be read without seeking. The bytes consumed for
     /// detection are replayed in front of the rest of the stream, so nothing
-    /// is lost. The signature rules are those of [`Self::detect`].
+    /// is lost. The signature rules are those of [`Self::detect`]. Up to 512
+    /// bytes are peeked, or the stream is read to its end if it is shorter.
     ///
     /// # Errors
     ///
@@ -332,23 +337,24 @@ impl<'a> ArchiveReader<'a> {
         self,
         config: &SecurityConfig<Validated>,
         options: VerificationOptions,
+        progress: &mut dyn ProgressCallback,
     ) -> Result<VerificationReport> {
         let format = self.format();
         match self.source {
             Source::Tar { stream, codec } => {
                 let decoded = decode_tar_stream(stream, codec, config.max_decoder_memory)?;
-                verify_with(config, options, |listing| {
+                verify_with(config, options, progress, |listing| {
                     list_tar_stream(decoded, codec, format, config, listing)
                 })
             }
             Source::Seekable {
                 reader,
                 format: SeekableFormat::Zip,
-            } => ZipArchive::new(reader)?.verify(config, &options),
+            } => ZipArchive::new(reader)?.verify_with_progress(config, options, progress),
             Source::Seekable {
                 reader,
                 format: SeekableFormat::SevenZ,
-            } => SevenZArchive::new(reader)?.verify(config, &options),
+            } => SevenZArchive::new(reader)?.verify_with_progress(config, options, progress),
         }
     }
 }

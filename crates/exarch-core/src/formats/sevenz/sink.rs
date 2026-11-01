@@ -1,7 +1,8 @@
 //! 7z extraction into an [`ExtractTarget`] other than the host filesystem.
 //!
 //! The gates are the host's: admission, the ratio and quota pre-validation, the
-//! entry-kind refusals, the link-target read, the solid drain. Only the
+//! entry-kind refusals, the name-length limits of the path model, the
+//! link-target read, the solid drain. Only the
 //! destination differs: the pre-validation runs against an empty in-memory tree
 //! instead of the disk, because nothing can occupy a sink before the first
 //! entry.
@@ -92,6 +93,11 @@ impl<R: Read + Seek> SevenZArchive<R> {
     }
 
     /// The host's pre-validation, against an empty tree.
+    ///
+    /// Name lengths are checked for the entries delivery would validate (files
+    /// with a disallowed extension are skipped there). The length of the path
+    /// an entry lands at after earlier symlinks resolve stays a delivery-time
+    /// check, because 7z link targets are undecoded here.
     fn prevalidate_for_target(
         &self,
         model: PathModel,
@@ -117,9 +123,10 @@ impl<R: Read + Seek> SevenZArchive<R> {
                     EntryPath::Child(safe_path) => safe_path,
                 };
             match kind {
-                SevenZKind::Directory => {}
+                SevenZKind::Directory => check_name_lengths(model, &path)?,
                 SevenZKind::ReparsePoint => return Err(reparse_point_refusal(&entry.name)),
                 SevenZKind::UnixSymlink => {
+                    check_name_lengths(model, &path)?;
                     validate_entry_compression(&entry.compression, entry.size, config)?;
                     require_symlinks_allowed(config)?;
                     refuse_undecoded_target_in(
@@ -132,6 +139,9 @@ impl<R: Read + Seek> SevenZArchive<R> {
                     core.reserve_symlink(entry.size)?;
                 }
                 SevenZKind::File => {
+                    if common::is_extension_allowed(&path, config) {
+                        check_name_lengths(model, &path)?;
+                    }
                     validate_entry_compression(&entry.compression, entry.size, config)?;
                     core.reserve_file(entry.size).map(drop)?;
                 }
@@ -229,6 +239,10 @@ impl<R: Read + Seek> SevenZArchive<R> {
             )),
         }
     }
+}
+
+fn check_name_lengths(model: PathModel, path: &Path) -> Result<()> {
+    model.check_name_lengths(path).map_err(ArchiveError::Io)
 }
 
 #[expect(

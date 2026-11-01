@@ -1020,8 +1020,7 @@ fn a_corrupt_link_inside_a_solid_block_fails_extract() {
 /// `symlink-snl.7z` was written by 7-Zip 26.05 with `-snl` (see
 /// `tests/fixtures/generate_7z_fixtures.sh`). The link carries `S_IFLNK` in the
 /// Unix extension and no Windows reparse-point bit, so it is a Unix symlink
-/// for exarch and not a refused reparse point. Fixtures from p7zip on Linux and
-/// from 7-Zip for Windows are tracked in #727.
+/// for exarch and not a refused reparse point.
 #[cfg(unix)]
 #[test]
 fn a_link_written_by_7zip_with_snl_is_a_unix_symlink_not_a_reparse_point() {
@@ -1342,6 +1341,105 @@ fn verify_and_extract_agree_for_every_order_of_a_directory_a_link_and_a_file() {
             assert_eq!(std::fs::read(out.join("sub/f")).unwrap(), b"x", "{label}");
             assert_nothing_outside(&container, &label);
         }
+    }
+}
+
+/// `symlink-p7zip-dir.7z` was written by p7zip 16.02 on Debian with
+/// `7z a x.7z pkg`, so `pkg/link.txt` was met while recursing into a directory
+/// and is stored with `S_IFLNK` (see
+/// `tests/fixtures/generate_7z_p7zip_fixture.sh`). It is a Unix symlink for
+/// exarch, as it is for bsdtar and 7zz.
+#[cfg(unix)]
+#[test]
+fn a_link_found_by_p7zip_16_02_in_a_directory_is_a_unix_symlink() {
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/symlink-p7zip-dir.7z");
+
+    let archive = Archive::read(
+        &mut Cursor::new(std::fs::read(&path).unwrap()),
+        &Password::empty(),
+    )
+    .unwrap();
+    let link = archive
+        .files
+        .iter()
+        .find(|f| f.name == "pkg/link.txt")
+        .unwrap();
+    assert!(link.has_windows_attributes);
+    assert_ne!(link.windows_attributes & UNIX_EXTENSION, 0);
+    assert_eq!((link.windows_attributes >> 16) & 0o17_0000, S_IFLNK);
+
+    assert_eq!(
+        default_link_target(&path, &allow_symlinks()),
+        LinkTarget::Unread
+    );
+    assert_eq!(
+        link_target(&path, &SecurityConfig::default()),
+        LinkTarget::Recorded(PathBuf::from("target.txt"))
+    );
+    let report =
+        verify_archive_with_options(&path, &allow_symlinks(), &integrity(1 << 20)).unwrap();
+    assert_eq!(report.security_status(), CheckStatus::Pass);
+
+    let refused = TempDir::new().unwrap();
+    assert_matches!(
+        extract_archive(&path, refused.path(), &SecurityConfig::default()),
+        Err(ArchiveError::SecurityViolation { reason, .. }) if reason.contains("symlinks not allowed")
+    );
+    assert!(dir_is_empty(&refused));
+
+    let out = TempDir::new().unwrap();
+    extract_archive(&path, out.path(), &allow_symlinks()).unwrap();
+    assert_eq!(
+        std::fs::read_link(out.path().join("pkg/link.txt")).unwrap(),
+        Path::new("target.txt")
+    );
+    assert_eq!(
+        std::fs::read(out.path().join("pkg/target.txt")).unwrap(),
+        b"p7zip target\n"
+    );
+}
+
+/// `symlink-p7zip.7z` was written by p7zip 16.02 on Debian with
+/// `7z a x.7z target.txt link.txt`. A link named on the command line is
+/// stored as a regular file (mode `0o100644`) holding the target text, so it
+/// is a regular file for exarch whatever the symlink policy, as it is for
+/// p7zip itself. The link found in a directory is the case above.
+#[test]
+fn a_link_written_by_p7zip_16_02_is_a_regular_file() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/symlink-p7zip.7z");
+
+    let archive = Archive::read(
+        &mut Cursor::new(std::fs::read(&path).unwrap()),
+        &Password::empty(),
+    )
+    .unwrap();
+    let link = archive.files.iter().find(|f| f.name == "link.txt").unwrap();
+    assert!(link.has_windows_attributes);
+    assert_ne!(link.windows_attributes & UNIX_EXTENSION, 0);
+    assert_eq!((link.windows_attributes >> 16) & 0o17_0000, S_IFREG);
+
+    for config in [SecurityConfig::default(), allow_symlinks()] {
+        let manifest = list_archive(&path, &config).unwrap();
+        assert!(
+            manifest
+                .entries()
+                .iter()
+                .all(|entry| !matches!(entry.kind, ManifestEntryKind::Symlink { .. })),
+            "no entry is a link"
+        );
+        let report = verify_archive_with_options(&path, &config, &integrity(1 << 20)).unwrap();
+        assert_eq!(report.security_status(), CheckStatus::Pass);
+
+        let out = TempDir::new().unwrap();
+        extract_archive(&path, out.path(), &config).unwrap();
+        let extracted = out.path().join("link.txt");
+        assert!(!extracted.is_symlink());
+        assert_eq!(std::fs::read(&extracted).unwrap(), b"target.txt");
+        assert_eq!(
+            std::fs::read(out.path().join("target.txt")).unwrap(),
+            b"p7zip target\n"
+        );
     }
 }
 

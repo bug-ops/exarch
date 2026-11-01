@@ -204,6 +204,18 @@ pub enum ProgressCallbackError {
         /// The archive that was written.
         report: CoreCreationReport,
     },
+    /// The JS progress callback threw while a listing itself succeeded; the
+    /// manifest is discarded.
+    ListCallback {
+        /// The JS throw, attached as `cause`.
+        source: Error,
+    },
+    /// The JS progress callback threw while a verification itself succeeded;
+    /// the report is discarded.
+    VerifyCallback {
+        /// The JS throw, attached as `cause`.
+        source: Error,
+    },
 }
 
 /// Builds the JS `Error` for a failure on the JS thread.
@@ -315,6 +327,12 @@ fn describe(failure: Failure) -> Result<Described, Error> {
                     },
                     source,
                 )
+            }
+            ProgressCallbackError::ListCallback { source } => {
+                describe_callback_over_success("listing", Details::None, source)
+            }
+            ProgressCallbackError::VerifyCallback { source } => {
+                describe_callback_over_success("verification", Details::None, source)
             }
         }),
         Failure::Native(err) => Err(err),
@@ -453,6 +471,12 @@ impl fmt::Display for Failure {
                 }
                 ProgressCallbackError::CreationCallback { .. } => {
                     f.write_str("progress callback threw after successful creation")
+                }
+                ProgressCallbackError::ListCallback { .. } => {
+                    f.write_str("progress callback threw after successful listing")
+                }
+                ProgressCallbackError::VerifyCallback { .. } => {
+                    f.write_str("progress callback threw after successful verification")
                 }
             },
             Self::Native(err) => write!(f, "{}", err.reason),

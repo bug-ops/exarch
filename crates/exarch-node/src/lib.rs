@@ -1163,6 +1163,36 @@ struct NodeProgressAdapter {
     callback_error: Option<Error>,
 }
 
+/// Runs `run` with the JS callback `progress` (or a no-op reporter when absent)
+/// on a worker thread, merging a core failure and a callback throw the way
+/// `extractArchiveWithProgress` does.
+///
+/// A throw after a successful run becomes the error built by `over_success`,
+/// which receives the successful value so it can keep its counters; the value
+/// itself is discarded.
+fn run_with_optional_progress<T>(
+    progress: Option<ThreadsafeFunction<(String, i64, i64, i64)>>,
+    run: impl FnOnce(&mut dyn exarch_core::ProgressCallback) -> CoreResult<T>,
+    over_success: impl FnOnce(Error, T) -> ProgressCallbackError,
+) -> CoreResult<T> {
+    let Some(tsfn) = progress else {
+        return run(&mut exarch_core::NoopProgress);
+    };
+    let mut adapter = NodeProgressAdapter::new(tsfn, ProgressDispatch::Awaited);
+    let result = run(&mut adapter);
+    match (result, adapter.into_callback_error()) {
+        (Ok(value), None) => Ok(value),
+        (Ok(value), Some(source)) => Err(Failure::Callback(Box::new(over_success(source, value)))),
+        (Err(Failure::Core(source)), callback) => {
+            Err(Failure::Callback(Box::new(ProgressCallbackError::Core {
+                source,
+                callback,
+            })))
+        }
+        (Err(other), _) => Err(other),
+    }
+}
+
 /// How a progress dispatch reaches the JavaScript thread, which decides whether
 /// a callback throw can be reported through the operation's own result.
 #[derive(Clone, Copy)]

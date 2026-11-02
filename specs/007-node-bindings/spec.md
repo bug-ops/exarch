@@ -9,7 +9,7 @@ tags:
   - ffi
   - rust
 created: 2026-05-20
-updated: 2026-10-26
+updated: 2026-11-02
 status: draft
 related:
   - "[[constitution]]"
@@ -17,6 +17,7 @@ related:
   - "[[001-security-pipeline/spec]]"
   - "[[003-config-api/spec]]"
   - "[[004-progress-tracking/spec]]"
+  - "[[020-reader-sink-and-in-memory-api/spec]]"
 ---
 
 # Feature: Node.js Bindings
@@ -86,14 +87,14 @@ THEN a JavaScript Error is thrown synchronously
 ### US-003: Named JavaScript Error Types
 
 AS A Node.js developer
-I WANT Rust ArchiveError variants to produce named JS Error objects
-SO THAT I can differentiate errors in a catch block by type name
+I WANT Rust ArchiveError variants to produce JS Error objects with typed properties
+SO THAT I can differentiate errors in a catch block without parsing message text
 
 **Acceptance criteria:**
 ```
 GIVEN an archive with a path traversal entry
 WHEN extractArchive() rejects
-THEN the rejected Error message starts with "PATH_TRAVERSAL:"
+THEN the rejected Error has code === "PATH_TRAVERSAL" and a message holding the description only
 ```
 
 ### US-004: TypeScript Definitions
@@ -129,7 +130,7 @@ THEN extraction respects those settings
 | FR-080 | THE SYSTEM SHALL expose async Node.js functions returning Promises: `extractArchive`, `extractArchiveWithProgress`, `createArchive`, `createArchiveWithProgress`, `createArchiveWithProgressSync`, `listArchive`, `verifyArchive` (`createArchiveWithProgress`/`Sync` added v0.6.0, #455, mirroring the existing `extractArchiveWithProgress` async/sync pattern via the shared `NodeProgressAdapter`) | must |
 | FR-081 | ALL async operations SHALL run on the libuv thread pool, not the main event loop thread | must |
 | FR-082 | WHEN paths contain null bytes or exceed 4096 bytes, THE SYSTEM SHALL throw a synchronous JavaScript Error before spawning a thread | must |
-| FR-083 | Rust `ArchiveError` variants SHALL map to named JavaScript Error types; when `PartialExtraction` wraps an inner error, the error message SHALL begin with the specific inner error code (e.g. `SYMLINK_ESCAPE`, `QUOTA_EXCEEDED`) and SHALL append `filesExtracted` and `bytesWritten` fields for caller inspection | must |
+| FR-083 | Every rejected Promise and synchronous throw SHALL be an `Error` (`ExarchError` in `index.d.ts`) whose `message` is the human-readable description only and whose machine-readable data is in typed properties built from `exarch_core::ArchiveError::into_ffi_message()` (BREAKING in v0.8.0, #758, #760, #768): `code` (`ErrorCode`, the stable upper-snake core code, or `PROGRESS_CALLBACK_ERROR`), `relaxableBy?` (`PolicySetting`), `writes?` (`PartialWrites`: `'kept'`, `'rolled_back'`, `'discarded'`), and, when `writes === 'kept'`, `filesExtracted`, `bytesWritten`, `filesSkipped`, `warnings`; when `PartialExtraction` wraps an inner error, `code` is the inner error's code. The types `ErrorCode`, `PolicySetting`, `PartialWrites` and `ExarchError` (a union discriminated on `writes`, including `ExarchNativeError` for binding-raised errors whose `code` is napi's status string) are exported | must |
 | FR-084 | `SecurityConfig` and `CreationConfig` SHALL be exposed as JavaScript classes with fluent builder methods; `SecurityConfig` SHALL expose `allowSolidArchives` getter consistent with `allowSymlinks`, `allowHardlinks`, `allowAbsolutePaths`, `allowWorldWritable` | must |
 | FR-085 | `ExtractionReport`, `CreationReport`, `ArchiveManifest`, and `VerificationReport` SHALL be exposed as JavaScript objects with typed fields | must |
 | FR-088 | `ExtractionOptions` SHALL be exposed as a JavaScript class with builder methods `withAtomic(bool?)` and `withSkipDuplicates(bool?)`; both `extractArchive` and `extractArchiveWithProgress` SHALL accept an optional `options` parameter | must |
@@ -138,14 +139,17 @@ THEN extraction respects those settings
 | FR-086 | napi-rs SHALL generate TypeScript `.d.ts` files for all exported functions and classes | must |
 | FR-087 | ALL path arguments SHALL accept `string` type in JavaScript | must |
 | FR-091 | `SecurityConfig.setAllowSymlinks`/`setAllowHardlinks`/`setAllowAbsolutePaths`/`setAllowWorldWritable`/`setAllowSolidArchives`/`setPreservePermissions`, `CreationConfig.setPreservePermissions`/`setFollowSymlinks`/`setIncludeHidden`, and `ExtractionOptions.withSkipDuplicates`/`withAtomic` SHALL take a mandatory `boolean` argument, not `Option<bool>` resolved via `.unwrap_or(true)`; omitting the argument, or passing explicit `undefined`/`null`, SHALL be a compile-time TypeScript error / runtime napi error rather than silently flipping the flag to the permissive `true` state (v0.6.0, #442, BREAKING) | must |
-| FR-092 | WHEN a `PartialExtraction` error is converted to a JS error, THE SYSTEM SHALL append `filesSkipped=N` and a `warnings=[...]` fragment (Rust-`Debug`-formatted, not guaranteed valid JSON) to the message, in addition to the existing `filesExtracted`/`bytesWritten`; since v0.7.0 the fragment starts ` | writes=kept`, and an atomic rollback appends only ` | writes=rolled_back` without counters (v0.6.0, #508; v0.7.0, #747) | must |
+| FR-092 | WHEN a `PartialExtraction` error is converted to a JS error, THE SYSTEM SHALL set `writes` and, only while the written files remain (`'kept'`), the properties `filesExtracted`, `bytesWritten`, `filesSkipped` and `warnings` (an `Array<string>`); an atomic rollback sets only `writes: 'rolled_back'` and an in-memory extraction that dropped its entries only `writes: 'discarded'`. Before v0.8.0 these were appended to the message as ` \| writes=kept, filesExtracted=N, ...` (v0.6.0, #508; v0.7.0, #747; v0.8.0, #760, #768, #800, #808) | must |
 | FR-093 | WHEN a progress callback throws (an `Error`/object, or a bare primitive) during `extractArchiveWithProgress` or `createArchiveWithProgress`, THE SYSTEM SHALL capture it (via `call_async_catch` plus a JS shim that pre-empts napi-rs's primitive-throw escalation) and reject the returned Promise instead of crashing the process with `napi_fatal_exception`; `createArchiveWithProgressSync` cannot use the awaiting dispatch (would deadlock the blocked event loop) and remains a documented, unaffected exception — a throw there surfaces as an ordinary `uncaughtException` (v0.6.0, #465, #473) | must |
 | FR-094 | ALL path-carrying `ArchiveError` variants SHALL be redacted for release-build error messages via the shared `exarch_core::error::redaction` module, matching the Python binding's policy (archive-relative paths never redacted; host-derived paths redacted to filename-only or `ErrorKind` description) (v0.6.0, #453, #463) | must |
 | FR-095 | `verifyArchive(archivePath, config?, options?)` (and `verifyArchiveSync`) SHALL accept a `VerificationOptions` class; `withIntegrityCheck(budget?)` decodes the payload to the decoder's EOF (default budget 500 MiB, independent of `maxTotalSize`; error for a zero or negative budget), otherwise `integrityStatus` is `'SKIPPED'` (v0.7.0, #670) | must |
 | FR-096 | `VerificationReport` SHALL expose `status`, `integrityStatus`, `integrityGaps?` (absent unless the check ran: `counts: UnverifiedCount[]`, `entries: UnverifiedEntry[]`, `omitted`), `securityStatus`, `issues`, `totalEntries`, `suspiciousEntries`, `totalSize` and `format`; report enum fields are typed string unions in `index.d.ts` (`VerificationStatus`, `CheckStatus`, `IntegrityStatus`, `IssueSeverity`, `IssueCategory`, `UnverifiedReason`, `ManifestEntryType`, `ArchiveType`, `ZipConsistencyPolicy`) (v0.7.0, #624, #672, #684) | must |
 | FR-097 | `SecurityConfig` SHALL expose `setParallelDecodeMemory(size?)` (`null`/omitted decodes on one thread; default 128 MiB, 1 GiB for `permissive()`; error for a non-positive size) with a `parallelDecodeMemory` getter, and `setZipConsistency('enforce' \| 'ignore')` (default `'enforce'`) with a `zipConsistency` getter (v0.7.0, #671, #688) | must |
-| FR-098 | A `SECURITY_VIOLATION` that a `SecurityConfig` setting relaxes SHALL start its message `SECURITY_VIOLATION: [relaxableBy=<id>] operation denied ...`, with `<id>` one of `symlinks`, `hardlinks`, `solid_archives`, `banned_components`, `max_path_depth`, `windows_reserved_names`, `max_tar_metadata_bytes`; the token is absent when no setting relaxes the refusal and a violation reason cannot forge it (v0.7.0, #741, #757) | must |
+| FR-098 | A `SECURITY_VIOLATION` that a `SecurityConfig` setting relaxes SHALL carry the property `relaxableBy` with `<id>` one of `symlinks`, `hardlinks`, `solid_archives`, `banned_components`, `max_path_depth`, `windows_reserved_names`, `max_tar_metadata_bytes` (`PolicySetting`); the property is absent when no setting relaxes the refusal and a violation reason cannot forge it. The `[relaxableBy=<id>]` message token of v0.7.0 no longer exists (v0.7.0, #741, #757; v0.8.0, #760, #768) | must |
 | FR-099 | Report size and duration getters SHALL clamp values above `i64::MAX` to `i64::MAX` instead of wrapping (v0.7.0, #583, #697) | must |
+| FR-100 | A progress callback that throws SHALL surface as the rejection or throw with `code` `PROGRESS_CALLBACK_ERROR`, the exception as `cause` (the `\| progressCallbackError` message marker is removed), and, when the operation itself succeeded, the counters: `filesExtracted`/`bytesWritten`/`filesSkipped`/`warnings` for an extraction (`writes: 'kept'`), `filesAdded` and `bytesWritten` for a creation, `writes: 'discarded'` for an in-memory extraction; if the operation failed, the core error stays primary with the callback's exception as `cause` (v0.8.0, #760, #768, #783, #790) | must |
+| FR-101 | THE SYSTEM SHALL expose in-memory functions on `Uint8Array` input: `listArchiveBytes(data, config?, format?)`, `verifyArchiveBytes(data, config?, options?, format?)`, `extractArchiveToMemory(data, config?, options?, maxBytes?, pathModel?, format?)` resolving `MemoryExtraction { report, entries }` of `MemoryEntry { path, kind, data?, mode?, target? }`, and `createArchiveToBytes(sources, format, config?)` resolving `CreatedArchive { data, report }`, each with a `Sync` counterpart; `listArchiveBytesWithProgress`, `verifyArchiveBytesWithProgress` and `extractArchiveToMemoryWithProgress` take the same `(err, [path, total, current, bytesWritten])` callback as the path-based progress functions. `data` is copied before the call returns; `maxBytes` must be a positive whole number (default the config's `maxTotalSize`); `pathModel` is `'host'` or `'portable'`; `atomic` is unsupported; `format` is detected from the leading bytes when omitted; `'SevenZ'` cannot be created (`INVALID_CONFIGURATION`); a `MemoryEntry.data` is a plain `Uint8Array`, not a `Buffer` ([[020-reader-sink-and-in-memory-api/spec]]; v0.8.0, #776, #787, #790) | must |
+| FR-102 | Quota errors for a single oversized file SHALL use the core wording `single file size` (v0.8.0, #760, #768) | should |
 
 ## 4. Non-Functional Requirements
 
@@ -167,6 +171,8 @@ THEN extraction respects those settings
 | `CreationReport` (JS object) | Result of creation | `filesAdded`, `bytesWritten`, `duration` |
 | `ArchiveManifest` (JS object) | Archive listing result | `totalEntries`, `totalSize`, `format`, `entries` |
 | `VerificationReport` (JS object) | Verification result | `status`, `integrityStatus`, `integrityGaps`, `securityStatus`, `issues`, `totalEntries`, `suspiciousEntries`, `totalSize`, `format` |
+| `MemoryExtraction` / `MemoryEntry` / `CreatedArchive` (JS objects) | Results of the in-memory functions (v0.8.0) | `report`, `entries` / `path`, `kind` (`'file'`, `'directory'`, `'symlink'`), `data`, `mode`, `target` / `data`, `report` |
+| `ExarchError` (TS type) | Union of the shapes a rejection or throw can have (v0.8.0) | discriminated on `writes`; `code: ErrorCode`, `relaxableBy?`, `cause?` |
 | `VerificationOptions` (JS class) | Options for `verifyArchive` (v0.7.0, #670) | `withIntegrityCheck(budget?)`, `integrityCheck`, `decompressionBudget` |
 
 ### TypeScript API Surface
@@ -204,6 +210,14 @@ function verifyArchive(
     config?: SecurityConfig,
     options?: VerificationOptions
 ): Promise<VerificationReport>
+
+// In-memory (v0.8.0); each also exists as <name>Sync, and the progress variants
+// listArchiveBytesWithProgress, verifyArchiveBytesWithProgress and
+// extractArchiveToMemoryWithProgress take a trailing progress callback
+function listArchiveBytes(data: Uint8Array, config?: SecurityConfig, format?: ArchiveType): Promise<ArchiveManifest>
+function verifyArchiveBytes(data: Uint8Array, config?: SecurityConfig, options?: VerificationOptions, format?: ArchiveType): Promise<VerificationReport>
+function extractArchiveToMemory(data: Uint8Array, config?: SecurityConfig, options?: ExtractionOptions, maxBytes?: number, pathModel?: PathModel, format?: ArchiveType): Promise<MemoryExtraction>
+function createArchiveToBytes(sources: string[], format: ArchiveType, config?: CreationConfig): Promise<CreatedArchive>
 
 class SecurityConfig {
     setMaxFileSize(size: number): this
@@ -275,23 +289,26 @@ class ExtractionOptions {
 
 ### JavaScript Error Mapping
 
-Errors are rejected `Error` objects whose message starts with an upper-snake error code (`convert_error` in `crates/exarch-node/src/error.rs`).
+Errors are rejected (or thrown, for `Sync` functions) `Error` objects. Since v0.8.0 the `message` is the description only; the class of the failure is the `code` property, built in `crates/exarch-node/src/error.rs` from `ArchiveError::into_ffi_message()` (one `FfiKind` per `ErrorCode`). Before v0.8.0 the code was the upper-snake prefix of the message (`PATH_TRAVERSAL: ...`) with `[relaxableBy=<id>]` and ` | writes=...` fragments.
 
-| Rust `ArchiveError` variant | Message prefix |
+| Rust `ArchiveError` variant | `code` |
 |---|---|
-| `PathTraversal` | `PATH_TRAVERSAL:` |
-| `SymlinkEscape` | `SYMLINK_ESCAPE:` |
-| `HardlinkEscape` | `HARDLINK_ESCAPE:` |
-| `ZipBomb` | `ZIP_BOMB:` (also an entry claiming data from zero compressed bytes, v0.7.0, #653) |
-| `ZipInconsistency` | `ZIP_INCONSISTENCY:` (v0.7.0, #671) |
-| `InvalidPermissions` | `INVALID_PERMISSIONS:` |
-| `QuotaExceeded` | `QUOTA_EXCEEDED:` |
-| `SecurityViolation` | `SECURITY_VIOLATION: [relaxableBy=<id>] operation denied by security policy: ...`; the token is present only when a setting relaxes the refusal (v0.7.0, #741, #757) |
-| `UnknownFormat` | `UNKNOWN_FORMAT:` |
-| `InvalidConfiguration` | `INVALID_CONFIGURATION:` |
-| `InvalidArchive` | `INVALID_ARCHIVE:` |
-| `Io` | `IO_ERROR:` |
-| `PartialExtraction` | The inner error's message is preserved and ` \| writes=kept, filesExtracted=N, bytesWritten=M, filesSkipped=K, warnings=[...]` is appended; after an atomic rollback only ` \| writes=rolled_back` is appended (v0.6.0, #508; v0.7.0, #735, #747) |
+| `PathTraversal` | `PATH_TRAVERSAL` |
+| `SymlinkEscape` | `SYMLINK_ESCAPE` |
+| `HardlinkEscape` | `HARDLINK_ESCAPE` |
+| `ZipBomb` | `ZIP_BOMB` (also an entry claiming data from zero compressed bytes, v0.7.0, #653) |
+| `ZipInconsistency` | `ZIP_INCONSISTENCY` (v0.7.0, #671) |
+| `InvalidPermissions` | `INVALID_PERMISSIONS` |
+| `QuotaExceeded` | `QUOTA_EXCEEDED` |
+| `SecurityViolation` | `SECURITY_VIOLATION`, with `relaxableBy` set only when a setting relaxes the refusal (v0.7.0, #741, #757); a path rejected at the JS boundary (null byte, too long) is also `SECURITY_VIOLATION` |
+| `UnknownFormat`, `ReaderFormat(Unrecognized)` | `UNKNOWN_FORMAT` |
+| `InvalidConfiguration`, `ReaderFormat(NeedsSeek \| NotAtStart)` | `INVALID_CONFIGURATION` (also a rejected setter value) |
+| `InvalidArchive` | `INVALID_ARCHIVE` |
+| `Io` | `IO_ERROR` |
+| `SourceNotFound`, `SourceNotAccessible`, `OutputExists`, `InvalidCompressionLevel` | `SOURCE_NOT_FOUND`, `SOURCE_NOT_ACCESSIBLE`, `OUTPUT_EXISTS`, `INVALID_COMPRESSION_LEVEL` |
+| `PartialExtraction` | The inner error's `code`; `writes` is `'kept'` with `filesExtracted`, `bytesWritten`, `filesSkipped`, `warnings` set, `'rolled_back'` after an atomic rollback, or `'discarded'` after an in-memory extraction, the last two without counters (v0.6.0, #508; v0.7.0, #735, #747; v0.8.0, #760, #800) |
+| progress callback threw | `PROGRESS_CALLBACK_ERROR` (Node-only), the throw as `cause` (FR-100) |
+| error raised by the binding itself (negative size, internal panic, failed argument conversion) | napi status string such as `GenericFailure` or `InvalidArg` (`ExarchNativeError`) |
 
 > [!note] PartialExtraction fix in v0.4.0 and v0.4.1 (#210, #251)
 > In v0.4.0 the error message for `PartialExtraction` was extended to include
@@ -310,14 +327,16 @@ Errors are rejected `Error` objects whose message starts with an upper-snake err
 | Path is `null` or `undefined` | TypeError thrown by napi-rs before boundary check |
 | Path contains null byte | Synchronous `Error` thrown before Promise creation |
 | Path exceeds 4096 bytes | Synchronous `Error` thrown before Promise creation |
-| Rust returns `ArchiveError::PathTraversal` | Promise rejects with `PathTraversalError` |
-| Rust returns `ArchiveError::PartialExtraction` | Promise rejects with the specific inner error code as prefix (e.g. `SYMLINK_ESCAPE: ...`); message appends `writes=kept` with `filesExtracted`, `bytesWritten`, `filesSkipped`, and `warnings=[...]` (v0.6.0, #508), or just `writes=rolled_back` after an atomic rollback (v0.7.0, #747) |
-| `SecurityViolation` a `SecurityConfig` setting relaxes | Message starts `SECURITY_VIOLATION: [relaxableBy=<id>] ...`; parse with `^SECURITY_VIOLATION: \[relaxableBy=([a-z_]+)\]` (v0.7.0, #741, #757) |
+| Rust returns `ArchiveError::PathTraversal` | Promise rejects with an `Error` whose `code` is `PATH_TRAVERSAL` |
+| Rust returns `ArchiveError::PartialExtraction` | Promise rejects with the inner error's `code` (e.g. `SYMLINK_ESCAPE`); `writes: 'kept'` with `filesExtracted`, `bytesWritten`, `filesSkipped` and `warnings` properties (v0.6.0, #508; properties since v0.8.0, #760), or only `writes: 'rolled_back'` after an atomic rollback (v0.7.0, #747) or `'discarded'` after an in-memory extraction (v0.8.0) |
+| `SecurityViolation` a `SecurityConfig` setting relaxes | `err.code === 'SECURITY_VIOLATION'` and `err.relaxableBy` is the setting id; the message carries no token (v0.7.0, #741, #757; property since v0.8.0, #760) |
 | `verifyArchive` without `VerificationOptions().withIntegrityCheck()` | `integrityStatus` is `'SKIPPED'` and `integrityGaps` is absent (v0.7.0, #670) |
 | Thread pool exhausted | Promise eventually resolves when thread becomes available; no timeout |
 | `sources` array is empty for `createArchive` | [NEEDS CLARIFICATION: reject immediately or produce empty archive?] |
 | Boolean setter (e.g. `setAllowSymlinks`) called with no argument, or explicit `undefined`/`null` | Runtime napi error / compile-time TypeScript error, not a silent `true` default (v0.6.0, #442, BREAKING) |
-| Progress callback throws an `Error`, object, or bare primitive during `extractArchiveWithProgress`/`createArchiveWithProgress` | Captured; rejects the returned Promise instead of crashing the process (v0.6.0, #465, #473) |
+| Progress callback throws an `Error`, object, or bare primitive during `extractArchiveWithProgress`/`createArchiveWithProgress` | Captured; rejects the returned Promise instead of crashing the process (v0.6.0, #465, #473); since v0.8.0 the rejection has `code` `PROGRESS_CALLBACK_ERROR` when the operation succeeded and the throw as `cause` |
+| `extractArchiveToMemory` with `atomic` or a `maxBytes` that is not a positive whole number, or `createArchiveToBytes` with `'SevenZ'` | Rejects with `INVALID_CONFIGURATION` (v0.8.0); a `format` or `pathModel` outside the string unions is a napi argument error, not a core code |
+| Format cannot be detected from the bytes | Rejects with `UNKNOWN_FORMAT` (v0.8.0) |
 | Progress callback throws during `createArchiveWithProgressSync` | Surfaces as an ordinary `uncaughtException` after the function has already returned its `CreationReport` — cannot be merged into the result (documented limitation, unaffected by #465/#473 since it never enters the awaiting dispatch path) |
 
 ## 7. Success Criteria
@@ -326,7 +345,7 @@ Errors are rejected `Error` objects whose message starts with an upper-snake err
 |----|--------|--------|
 | SC-001 | All async functions resolve with correct report objects | `npm test` passes |
 | SC-002 | Event loop not blocked during extraction | Test with concurrent timer; timer fires during extraction |
-| SC-003 | All `ArchiveError` variants produce named JS Errors | Test for each variant |
+| SC-003 | All `ArchiveError` variants produce JS Errors with the right `code` and typed properties | Test for each variant (`error-properties.test.js`, `error-cause-chain.test.js`) |
 | SC-004 | Path boundary validation throws synchronously | Unit test: no Promise.reject, synchronous throw |
 | SC-005 | TypeScript definitions are valid and complete | `tsc --noEmit` passes on test file |
 
@@ -335,7 +354,7 @@ Errors are rejected `Error` objects whose message starts with an upper-snake err
 ### Always (without asking)
 - Validate paths synchronously at the JS boundary before creating a Promise
 - Run all I/O on the libuv thread pool via napi-rs async pattern
-- Map every `ArchiveError` variant to a named JS Error
+- Map every `ArchiveError` variant to a JS Error `code` through `into_ffi_message()`, never by re-matching `ArchiveError` in the binding
 - Keep all security logic in `exarch-core`; Node.js crate contains only type mapping
 
 ### Ask First
@@ -365,5 +384,6 @@ Errors are rejected `Error` objects whose message starts with an upper-snake err
 - [[MOC-specs]] — all specifications
 - [[001-security-pipeline/spec]] — security pipeline invoked by Node.js bindings
 - [[003-config-api/spec]] — `SecurityConfig` and `CreationConfig` types
+- [[020-reader-sink-and-in-memory-api/spec]] — core API behind the in-memory functions
 - [[004-progress-tracking/spec]] — `ProgressCallback` and `NodeProgressAdapter` (progress callbacks supported via `ThreadsafeFunction` since v0.4.1; creation-side progress and callback-throw hardening since v0.6.0)
 - [[001-exarch-system/spec]] — original monolithic spec (archived)

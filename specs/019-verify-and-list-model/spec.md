@@ -9,6 +9,7 @@ tags:
   - rust
   - inspection
 created: 2026-10-26
+updated: 2026-11-02
 status: implemented
 related:
   - "[[constitution]]"
@@ -20,6 +21,7 @@ related:
   - "[[016-sanitized-mode-and-non-exhaustive-enums/spec]]"
   - "[[017-zip-header-consistency/spec]]"
   - "[[018-7z-stream-map-panic/spec]]"
+  - "[[020-reader-sink-and-in-memory-api/spec]]"
 ---
 
 # Feature: Verify and List Reporting Model
@@ -176,7 +178,7 @@ SO THAT link escapes, entries under files and overwrite conflicts are found with
 
 | ID | Requirement | Priority |
 |----|------------|----------|
-| FR-040 | Verification SHALL validate entries against a `VirtualTree` of what extraction would create, rooted at a temporary directory used only as a path anchor; no archive content SHALL be written | must |
+| FR-040 | Verification SHALL validate entries against a `VirtualTree` of what extraction would create, rooted at a fixed virtual root path (`/exarch-virtual-root`, `C:\exarch-virtual-root` on Windows) used only as a path anchor; `verify` SHALL create no temporary directory and no archive content SHALL be written (v0.8.0, #754, #771) | must |
 | FR-041 | Each entry SHALL pass, in order: name-length check, `SafePath::validate_in`, quota reserve, compression-ratio check, then link validation (`SafeSymlink::validate_in` / `HardlinkTracker::validate_hardlink_in`) against the tree; link escapes SHALL be reported as `SymlinkEscape` / `HardlinkEscape` | must |
 | FR-042 | Tree nodes SHALL be `Dir`, `File`, `Symlink(target)` and `OpaqueSymlink` (a link whose target was not read: it exists but a path resolving through or onto it is an error) | must |
 | FR-043 | The first entry at a path SHALL win, mirroring extraction that skips an existing entry; a symlink over an earlier file SHALL replace it in the tree and be reported as a security finding (`SecurityPolicy`), since overwrite semantics would change what the path resolves to | must |
@@ -185,9 +187,17 @@ SO THAT link escapes, entries under files and overwrite conflicts are found with
 | FR-046 | Hardlinks SHALL be materialized after every other entry: link path and target are re-validated against the final tree, the target must exist and must not resolve to a directory, and a hardlink cannot replace an existing entry | must |
 | FR-047 | Symlink chains SHALL be cut off after `MAX_SYMLINK_HOPS` (macOS 33, glibc 40, musl 39, Windows 63 unverified, other Unix 32), matching `std::fs::canonicalize` | must |
 | FR-048 | Name lengths SHALL use per-OS limits (`MAX_COMPONENT_LEN` 255, `MAX_PATH_LEN` Linux 4095, macOS and other Unix 1023, Windows 32767 UTF-16 units); a symlink target is checked against `MAX_SYMLINK_TARGET_LEN` only. Over-long entries SHALL be dropped to `OversizedEntry` and reported as I/O issues, the first 16 individually and the rest in one closing issue | must |
-| FR-049 | Names SHALL be compared after NFD plus a per-character case fold on macOS, the same fold without normalisation on Windows, and exactly elsewhere; two names that differ exactly but fold equal SHALL be recorded as a `NameCollision` and never merged silently. Severity: `CollisionKind::Mixed` (kinds differ or a symlink involved) High; `Files` and `DirectoriesWithContents` Medium; `Directories` (neither holds entries) Low | must |
+| FR-049 | Names SHALL be compared after NFD plus a per-character case fold on macOS, the same fold without normalisation on Windows, and exactly elsewhere (under `PathModel::Portable` the macOS fold applies on every host and the name limits are fixed at 255 per component and 1023 per path); two names that differ exactly but fold equal SHALL be recorded as a `NameCollision` and never merged silently. Severity: `CollisionKind::Mixed` (kinds differ or a symlink involved) High; `Files` and `DirectoriesWithContents` Medium; `Directories` (neither holds entries) Low | must |
 | FR-050 | Symlinks whose targets are `Unread` while symlinks are allowed SHALL produce one archive-level Medium `SecurityPolicy` issue counting them; entries beneath or through an unread link are reported as failures. With symlinks disallowed, an `Unread` or `Unreadable` target SHALL be reported as the policy violation | must |
 | FR-051 | A missing link target SHALL be reported as a `SecurityPolicy` violation | must |
+
+### 3.6 Entry points and in-memory budget (v0.8.0)
+
+| ID | Requirement | Priority |
+|----|------------|----------|
+| FR-052 | `list_reader`, `verify_reader`, `list_archive_with_progress`, `verify_archive_with_progress`, `list_reader_with_progress` and `verify_reader_with_progress` SHALL produce the manifest and report defined above for TAR, ZIP and 7z; the reader forms take an `ArchiveReader` instead of a path ([[020-reader-sink-and-in-memory-api/spec]]) and the progress forms follow [[004-progress-tracking/spec]] (#754, #771, #782, #790) | must |
+| FR-053 | The in-memory tree SHALL charge every distinct name against a node budget of `max_file_count * max_path_depth + 1` and fail with `QuotaExceeded { resource: TreeNodes { max } }` when it is exhausted; a link path that leaves the root and returns SHALL be an escape, though the host would resolve it inside (#778, #779, #787) | must |
+| FR-054 | A directory entry over a file or a symlink SHALL be refused with the same entry-naming message in `extract` and `verify` (#802, #803) | must |
 
 ## 4. Non-Functional Requirements
 
@@ -274,6 +284,7 @@ None — retrospective spec documenting shipped behavior.
 - [[016-sanitized-mode-and-non-exhaustive-enums/spec]] — `IssueCategory` non-exhaustive hardening
 - [[017-zip-header-consistency/spec]] — ZIP structure findings reported as issues
 - [[018-7z-stream-map-panic/spec]] — 7z stream-map handling
+- [[020-reader-sink-and-in-memory-api/spec]] — reader entry points, sink extraction over the same in-memory tree
 - `crates/exarch-core/src/inspection/manifest.rs`, `report.rs`, `verify.rs`, `list.rs`, `integrity.rs`
 - `crates/exarch-core/src/config.rs` — `VerificationOptions`, `IntegrityCheck`, `DecompressionBudget`, `ListOptions`, `StoredTargets`
 - `crates/exarch-core/src/security/fs_view.rs` — `VirtualTree`, limits, `NameCollision`

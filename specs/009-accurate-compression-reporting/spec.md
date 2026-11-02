@@ -69,7 +69,7 @@ values are shown in `exarch create`'s text and `--json` output. In practice,
   parameter passed into `create_tar_internal_with_progress` — which, for the
   compressed variants, is the compression *encoder* itself (e.g.
   `flate2::write::GzEncoder`, `bzip2::write::BzEncoder`,
-  `xz2::write::XzEncoder`, `zstd::Encoder`; see `create_tar_gz_with_progress`,
+  `liblzma::write::XzEncoder` (`xz2` before v0.8.0), `zstd::Encoder`; see `create_tar_gz_with_progress`,
   `create_tar_bz2_with_progress`, `create_tar_xz_with_progress`,
   `create_tar_zst_with_progress` at lines 119-206). `tar::Builder` writes the
   raw TAR byte stream (headers + 512-byte block padding + file content) into

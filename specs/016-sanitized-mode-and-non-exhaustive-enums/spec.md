@@ -149,8 +149,9 @@ THEN the downstream crate's build breaks with "non-exhaustive patterns" only if 
 
 > [!note] v0.7.0: the pattern extends to new public enums
 > Enums added in v0.7.0 are `#[non_exhaustive]` from the start: `PolicySetting`, `ZipBombScope`,
-> `PartialWrites`, `ZipConsistencyPolicy`, `ParallelDecode`, `StoredTargets` and `IntegrityCheck`;
+> `PartialWrites` (a `Discarded` variant was added in v0.8.0, #800, #808), `ZipConsistencyPolicy`, `ParallelDecode`, `StoredTargets` and `IntegrityCheck`;
 > `ValidatedEntryType::Hardlink` and `SecurityViolation` are `#[non_exhaustive]` variants (#652, #671, #688, #757).
+> v0.8.0 adds `FfiKind`, `ErrorCode`, `PartialOutcome`, `ReaderFormatError`, `PathModel`, `CreatableFormat`, `SeekableFormat`, `MemoryEntryKind` and `SinkOptions` as `#[non_exhaustive]` from the start, and `ArchiveError::ReaderFormat` and `QuotaResource::{TreeNodes, SinkCapacity}` as new variants of existing `#[non_exhaustive]` types (#768, #787, #808).
 
 ## 6. Edge Cases and Error Handling
 

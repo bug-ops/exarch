@@ -8,7 +8,7 @@ tags:
   - config
   - rust
 created: 2026-05-20
-updated: 2026-10-26
+updated: 2026-11-02
 status: draft
 related:
   - "[[constitution]]"
@@ -17,6 +17,7 @@ related:
   - "[[002-format-handlers/spec]]"
   - "[[014-config-typestate-validation/spec]]"
   - "[[017-zip-header-consistency/spec]]"
+  - "[[020-reader-sink-and-in-memory-api/spec]]"
 ---
 
 # Feature: Configuration API
@@ -159,7 +160,7 @@ THEN no files are present in the output directory; the temp dir is cleaned up
 | FR-030 | `SecurityConfig` SHALL expose 21 fluent builder methods: `with_max_file_size`, `with_max_total_size`, `with_max_compression_ratio`, `with_max_solid_compression_ratio`, `with_max_file_count`, `with_max_path_depth`, `with_allowed`, `with_allow_symlinks`, `with_allow_hardlinks`, `with_allow_absolute_paths`, `with_allow_world_writable`, `with_allow_windows_reserved_names`, `with_preserve_permissions`, `with_allowed_extensions`, `with_banned_path_components`, `with_allow_solid_archives`, `with_max_solid_block_memory`, `with_max_tar_metadata_bytes`, `with_max_decoder_memory`, `with_parallel_decode`, `with_zip_consistency`; each returns `Self` | must |
 | FR-031 | `SecurityConfig`, `AllowedFeatures`, and `ExtractionOptions` SHALL be annotated `#[non_exhaustive]`; external crates must use `Default::default()` plus builder methods — struct literal construction is a compile error | must |
 | FR-032 | `SecurityConfig::validate()` SHALL return `InvalidConfiguration` if: any numeric limit is zero (`max_file_size`, `max_total_size`, `max_file_count`, `max_path_depth`, `max_solid_block_memory`, `max_tar_metadata_bytes`, `max_decoder_memory`), or `max_compression_ratio` or `max_solid_compression_ratio` is zero, negative, or non-finite | must |
-| FR-033 | `CreationConfig` SHALL support: `follow_symlinks`, `include_hidden`, `max_file_size`, `exclude_patterns` (glob), `strip_prefix`, `compression_level` (1–9), `preserve_permissions`, `format` override; `with_compression_level` returns `Result<Self, ArchiveError>` — callers must propagate the error with `?`; passing a level outside 1–9 returns `ArchiveError::InvalidCompressionLevel` instead of panicking | must |
+| FR-033 | `CreationConfig` SHALL support: `follow_symlinks`, `include_hidden`, `max_file_size`, `exclude_patterns` (glob), `strip_prefix`, `compression_level` (1–9), `preserve_permissions`, `format: Option<CreatableFormat>` override (`CreatableFormat` has no 7z variant, so a 7z creation request is unrepresentable; v0.8.0, #794, #808); `with_compression_level` returns `Result<Self, ArchiveError>` — callers must propagate the error with `?`; passing a level outside 1–9 returns `ArchiveError::InvalidCompressionLevel` instead of panicking | must |
 | FR-034 | `ExtractionOptions` SHALL support: `atomic` (temp-dir + rename) via `with_atomic`, `skip_duplicates` (default true) via `with_skip_duplicates` | must |
 | FR-035 | WHEN `ExtractionOptions::atomic` is true, THE SYSTEM SHALL extract to a temp dir in the same parent as the output directory and atomically rename on success | must |
 | FR-036 | WHEN atomic extraction fails, THE SYSTEM SHALL delete the temp dir before returning the error | must |
@@ -174,6 +175,7 @@ THEN no files are present in the output directory; the temp dir is cleaned up
 | FR-045 | `SecurityConfig` SHALL expose `parallel_decode: ParallelDecode` (`Sequential` or `Bounded(NonZeroU64)`) bounding the lookahead memory of parallel 7z LZMA2 decoding, separately from `max_decoder_memory`; the CLI exposes it as `--parallel-decode-memory` | must |
 | FR-046 | `max_solid_compression_ratio` (7z solid blocks) and `max_decoder_memory` (xz and 7z decoder window; breach is `QuotaExceeded { DecoderMemory }`) SHALL be Rust-API-only settings, not exposed by the CLI or the Python/Node bindings | must |
 | FR-047 | `max_file_count` SHALL bound the files, symlinks and hardlinks that `extract` creates (directories are not counted); `list` and `verify` count every entry | must |
+| FR-048 | `SinkOptions` (`#[non_exhaustive]`, Copy; field `skip_duplicates`, default true, builder `with_skip_duplicates`) SHALL be the options of `extract_to_sink*`; `SinkOptions::try_from(&ExtractionOptions)` SHALL carry the duplicate policy over and fail with `InvalidConfiguration` when `atomic` is set; `MemoryLimit::from_config(&SecurityConfig)` SHALL derive a non-zero memory bound from `max_total_size` (v0.8.0, #794, #808; see [[020-reader-sink-and-in-memory-api/spec]]) | must |
 
 ## 4. Non-Functional Requirements
 
@@ -194,8 +196,10 @@ THEN no files are present in the output directory; the temp dir is cleaned up
 | `ZipConsistencyPolicy` | `#[non_exhaustive]` enum: handling of ZIP archives that different readers interpret differently | `Enforce` (default), `Ignore`; `as_str()` |
 | `VerificationOptions` / `IntegrityCheck` / `DecompressionBudget` | Options for `verify_archive_with_options`; the budget lives inside `IntegrityCheck::DecodeToEof`, so a budget without the check is unrepresentable | `integrity: IntegrityCheck` (`Skip` default, `DecodeToEof(DecompressionBudget)`); budget default 500 MiB, non-zero |
 | `ListOptions` / `StoredTargets` | Options for `list_archive_with_options`; whether 7z link targets kept in compressed entry data are read | `stored_targets: StoredTargets` (`Skip` default, `Read`) |
-| `CreationConfig<State = Unvalidated>` | Configuration for archive creation; typestate over `Unvalidated`/`Validated` since v0.6.0 (mirrors `SecurityConfig`) | `follow_symlinks`, `include_hidden`, `max_file_size`, `exclude_patterns`, `strip_prefix`, `compression_level` (1–9), `preserve_permissions`, `format: Option<ArchiveType>`; fields sealed behind `CreationConfigFields` (`#[non_exhaustive]`) |
+| `CreationConfig<State = Unvalidated>` | Configuration for archive creation; typestate over `Unvalidated`/`Validated` since v0.6.0 (mirrors `SecurityConfig`) | `follow_symlinks`, `include_hidden`, `max_file_size`, `exclude_patterns`, `strip_prefix`, `compression_level` (1–9), `preserve_permissions`, `format: Option<CreatableFormat>`; fields sealed behind `CreationConfigFields` (`#[non_exhaustive]`) |
 | `ExtractionOptions` | Operational options for extraction (non-security) | `atomic: bool`, `skip_duplicates: bool` |
+| `SinkOptions` | Options of sink extraction (v0.8.0) | `skip_duplicates: bool` (default true); `TryFrom<&ExtractionOptions>` rejects `atomic` |
+| `CreatableFormat` | `#[non_exhaustive]` archive formats that can be created (v0.8.0) | `Tar`, `TarGz`, `TarBz2`, `TarXz`, `TarZst`, `Zip`; converts into `ArchiveType`, the reverse fails for 7z |
 | `Unvalidated` / `Validated` | Zero-sized phantom marker types re-exported at crate root | Encode config validation state at compile time; used as the default and post-`validate()` type parameter of `SecurityConfig`/`CreationConfig` respectively |
 
 ### SecurityConfig Defaults
@@ -232,7 +236,7 @@ THEN no files are present in the output directory; the temp dir is cleaned up
 | `DecompressionBudget::try_from_bytes(0)` | `InvalidConfiguration`; `ParallelDecode::Bounded` takes a `NonZeroU64`, so a zero lookahead is unrepresentable |
 | `SecurityConfig` with an empty, null-byte-containing, or >255-byte `allowed_extensions`/`banned_path_components` entry | `validate()` returns `InvalidConfiguration` (v0.6.0, #449) |
 | `compression_level` outside 1–9 (0 or > 9) | `ArchiveCreator::compression_level` (and `CreationConfig::with_compression_level`) returns `Err(ArchiveError::InvalidCompressionLevel)`; callers must handle with `?` or explicit match |
-| A hand-built `CreationConfig` with `compression_level: Some(200)` reaches `flate2`/`xz2` directly (bypassing the high-level `with_compression_level` contract) | No longer possible: `creation::tar::*`/`creation::zip::*` and `FormatCreator::create` require `&CreationConfig<Validated>`, so an invalid compression level cannot compile its way past validation (v0.6.0, #443 — previously an `assert!`/`unwrap()` panic inside the compression backend, a panic-based DoS) |
+| A hand-built `CreationConfig` with `compression_level: Some(200)` reaches `flate2`/`liblzma` directly (bypassing the high-level `with_compression_level` contract) | No longer possible: `creation::tar::*`/`creation::zip::*` and `FormatCreator::create` require `&CreationConfig<Validated>`, so an invalid compression level cannot compile its way past validation (v0.6.0, #443 — previously an `assert!`/`unwrap()` panic inside the compression backend, a panic-based DoS) |
 | `atomic = true` and output on a different filesystem than temp dir | `fs::rename` may fail; caller receives `ArchiveError::Io` |
 | `skip_duplicates = false` and duplicate entry | `ArchiveError::InvalidArchive` (duplicate entry) |
 | Atomic extraction fails mid-archive | Temp dir deleted; `ArchiveError` returned; no files in output dir |
@@ -279,4 +283,5 @@ THEN no files are present in the output directory; the temp dir is cleaned up
 - [[001-security-pipeline/spec]] — consumes `SecurityConfig` and `AllowedFeatures`
 - [[002-format-handlers/spec]] — consumes `CreationConfig` and `ExtractionOptions`
 - [[014-config-typestate-validation/spec]] — `Unvalidated`/`Validated` typestate design in detail
+- [[020-reader-sink-and-in-memory-api/spec]] — `SinkOptions`, `CreatableFormat`, `MemoryLimit` consumers
 - [[001-exarch-system/spec]] — original monolithic spec (archived)

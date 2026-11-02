@@ -96,6 +96,7 @@ use std::sync::Mutex;
 use std::sync::MutexGuard;
 use std::sync::PoisonError;
 
+use zip::CompressionMethod;
 use zip::ZipArchive as ZipReader;
 use zip::ZipReadOptions;
 use zip::result::ZipError;
@@ -108,7 +109,11 @@ use super::chunk_search::search_chunks;
 use super::common;
 use super::zip::admit_zip_entry;
 use super::zip::is_password_required;
-use super::zip_tail::hidden_behind_deflate;
+use super::zip_tail::DeflateEnd;
+use super::zip_tail::deflate_stream_end;
+use super::zip_tail::holds_record_signature;
+use super::zip_tail::is_reachable_header;
+use super::zip_tail::judge_descriptor_after_data;
 use super::zip_tail::judge_first_signature;
 use super::zip_tail::scan;
 use crate::ArchiveError;
@@ -550,6 +555,7 @@ struct EntryLayout {
     /// How a streaming reader ends the entry, when its sizes follow the data.
     descriptor: Option<DescriptorExit>,
     /// Compressed and uncompressed size the central directory declares.
+    method: CompressionMethod,
     compressed: u64,
     size: u64,
     /// CRC-32 of the uncompressed data the central directory declares.
@@ -745,6 +751,7 @@ fn layout_of<R: Read>(file: &zip::read::ZipFile<'_, R>, index: usize) -> Result<
             .then(|| DescriptorExit::of(file.compression())),
         compressed: file.compressed_size(),
         size: file.size(),
+        method: file.compression(),
         crc32: file.crc32(),
         kind: EntryKind::of_central(file.is_dir(), file.unix_mode()),
     })
@@ -979,17 +986,19 @@ const PREFIX_CHUNK: usize = 128 * 1024;
 /// the longest name.
 const PREFIX_LOOKAHEAD: usize = LFH_FIXED_LEN + u16::MAX as usize;
 
-/// Chunk sizes of the two searches.
+/// Chunk sizes of the two searches, and the output the census may decode.
 #[derive(Debug, Clone, Copy)]
 struct ChunkSizes {
     gap: usize,
     prefix: usize,
+    decode: u64,
 }
 
 impl ChunkSizes {
     const PRODUCTION: Self = Self {
         gap: GAP_CHUNK,
         prefix: PREFIX_CHUNK,
+        decode: CENSUS_DECODE_BUDGET,
     };
 }
 
@@ -1000,6 +1009,10 @@ const MAX_VERSION_NEEDED: u16 = 63;
 const RESERVED_FLAG_BITS: u16 = 0xD780;
 
 const DATA_DESCRIPTOR_FLAG: u16 = 0x0008;
+
+/// Bytes read past the declared end of an entry, so that a record signature
+/// that starts inside the declared range and ends past it is found.
+const STRADDLE_LOOKAHEAD: u64 = 3;
 
 /// Output the census decodes per archive to find where deflate streams end; the
 /// integrity pass, which has a budget of its own, covers what exceeds it.
@@ -1077,7 +1090,7 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
             chunks,
             next_unjudged: 0,
             exhausted: false,
-            decode_budget: CENSUS_DECODE_BUDGET,
+            decode_budget: chunks.decode,
             #[cfg(test)]
             reads: 0,
         }
@@ -1351,63 +1364,96 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
         if layout.compressed < DATA_DESCRIPTOR_SIGNATURE.len() as u64 {
             return Ok(());
         }
+        let judge = if layout.method == CompressionMethod::Stored {
+            judge_descriptor_after_data
+        } else {
+            judge_first_signature
+        };
         self.reader.seek(SeekFrom::Start(layout.data_start))?;
         let mut data = Read::take(&mut *self.reader, layout.compressed);
         let found = scan(
             &mut data,
             layout.compressed,
             DATA_DESCRIPTOR_SIGNATURE,
-            judge_first_signature,
+            judge,
         )?;
         let Some(at) = found else {
             return Ok(());
         };
-        let signature = layout.data_start.saturating_add(at);
+        self.search_behind(layout.data_start.saturating_add(at), layout.end, findings)
+    }
+
+    /// Searches from the position where a streaming reader leaves an entry's
+    /// data for local headers and record signatures, as a gap.
+    ///
+    /// With duplicate names the gaps are not searched, so the positions where
+    /// the next header can start behind each descriptor width are probed
+    /// instead.
+    fn search_behind(&mut self, from: u64, to: u64, findings: &mut Findings) -> Result<()> {
         if !self.search_gaps {
             for width in DescriptorWidth::ALL {
                 self.probe(
-                    signature.saturating_add(width.bytes()),
+                    from.saturating_add(width.bytes()),
                     HiddenRegion::DescriptorTail,
                     findings,
                 )?;
             }
         }
         self.gap(
-            signature,
-            layout.end,
+            from,
+            to,
             Followed::ByEntry,
             HiddenRegion::DescriptorTail,
             findings,
         )
     }
 
-    /// Reports a local header behind the end of the compressed stream of a
-    /// deflated descriptor entry, inside its declared range.
+    /// Checks the declared range of a deflated descriptor entry against where
+    /// its compressed stream ends.
     ///
-    /// A streaming reader ends such an entry where its stream ends, so bytes
-    /// after that point are read as headers. The stream end takes decoding to
-    /// find, so the declared range is decoded only when it holds a header
-    /// signature at all.
+    /// A streaming reader ends such an entry where its stream ends, so the
+    /// bytes from there to the declared end are read as records, and a stream
+    /// that does not end inside the declared range, or decodes to more than
+    /// the declared size, ends the entry somewhere else. The decode is paid
+    /// from a budget per archive; an entry the budget does not cover is
+    /// refused when its range holds a record signature, since then the stream
+    /// end decides whether the record is reached.
     fn check_inflated_resume(
         &mut self,
         layout: &EntryLayout,
         findings: &mut Findings,
     ) -> Result<()> {
-        let Some(offset) = hidden_behind_deflate(
-            &mut *self.reader,
-            layout.data_start,
-            layout.compressed,
-            layout.size,
-            &mut self.decode_budget,
-        )?
-        else {
-            return Ok(());
+        let undecided = match self.decode_budget.checked_sub(layout.size) {
+            Some(left) => {
+                self.decode_budget = left;
+                match deflate_stream_end(
+                    &mut *self.reader,
+                    layout.data_start,
+                    layout.compressed,
+                    layout.size,
+                )? {
+                    DeflateEnd::At(end) if end < layout.end => {
+                        return self.search_behind(
+                            end,
+                            layout.end.saturating_add(STRADDLE_LOOKAHEAD),
+                            findings,
+                        );
+                    }
+                    DeflateEnd::At(_) => false,
+                    DeflateEnd::Undecided => true,
+                }
+            }
+            None => {
+                holds_record_signature(&mut *self.reader, layout.data_start, layout.compressed)?
+            }
         };
-        if !findings.try_push(Slot::Hidden, || ZipInconsistency::HiddenLocalHeader {
-            offset,
-            region: HiddenRegion::DescriptorTail,
-        }) {
-            self.exhausted = true;
+        if undecided {
+            findings.push_with(Slot::DescriptorOverrun, || {
+                ZipInconsistency::DescriptorOverrun {
+                    entry: layout.entry,
+                    offset: layout.end,
+                }
+            });
         }
         Ok(())
     }
@@ -1467,13 +1513,15 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
             return;
         }
         self.next_unjudged = position + 1;
-        let name_len = u64::from(le16::<26, LFH_FIXED_LEN>(header));
-        let extra_len = u64::from(le16::<28, LFH_FIXED_LEN>(header));
-        let end = position + LFH_FIXED_LEN as u64 + name_len + extra_len;
-        // A nameless header still makes a streaming reader skip its compressed
-        // size.
-        if (name_len > 0 || le32::<18, LFH_FIXED_LEN>(header) > 0)
-            && end <= self.map.directory_start
+        // In a gap, a header whose fixed part reaches into the directory reads
+        // the directory's bytes: the tail of a descriptor whose size field
+        // spells the signature looks like one. A name running past the
+        // directory is still a header, and so is any header inside an entry's
+        // declared range.
+        let fits = region != HiddenRegion::Gap
+            || position + LFH_FIXED_LEN as u64 <= self.map.directory_start;
+        if is_reachable_header(header)
+            && fits
             && !findings.try_push(Slot::Hidden, || ZipInconsistency::HiddenLocalHeader {
                 offset: position,
                 region,
@@ -1722,7 +1770,7 @@ fn is_plausible_prefix_header(candidate: &[u8], room: u64) -> bool {
     };
     let name_len = usize::from(le16::<26, LFH_FIXED_LEN>(header));
     let flags = le16::<6, LFH_FIXED_LEN>(header);
-    if name_len == 0
+    if (name_len == 0 && le16::<28, LFH_FIXED_LEN>(header) == 0)
         || le16::<4, LFH_FIXED_LEN>(header) > MAX_VERSION_NEEDED
         || flags & RESERVED_FLAG_BITS != 0
         || !KNOWN_METHODS.contains(&le16::<8, LFH_FIXED_LEN>(header))

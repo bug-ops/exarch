@@ -97,7 +97,11 @@ proptest! {
     ) {
         let prefix = [if starts_with_pk { &b"PK"[..] } else { &[] }, &prefix].concat();
         let bytes = archive(&prefix, &between, before_directory);
-        let chunks = ChunkSizes { gap, prefix: prefix_chunk };
+        let chunks = ChunkSizes {
+            gap,
+            prefix: prefix_chunk,
+            ..ChunkSizes::PRODUCTION
+        };
         let expected = findings_at(&bytes, ChunkSizes::PRODUCTION);
         prop_assume!(expected.is_some());
         prop_assert_eq!(findings_at(&bytes, chunks), expected);

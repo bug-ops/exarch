@@ -4,6 +4,7 @@
 
 mod sink_support;
 
+use std::assert_matches;
 use std::io;
 use std::io::Cursor;
 use std::path::Path;
@@ -68,19 +69,19 @@ fn every_kind_is_delivered_and_a_hardlink_comes_last_by_reference() {
             MemoryEntryKind::Hardlink
         ]
     );
-    assert!(matches!(
+    assert_matches!(
         &delivered[1].1,
         MemoryEntry::File { data, .. } if data == b"hello"
-    ));
-    assert!(matches!(
+    );
+    assert_matches!(
         &delivered[2].1,
         MemoryEntry::Symlink { target } if target == Path::new("d/a.txt")
-    ));
+    );
     assert_eq!(delivered[3].0, Path::new("h"));
-    assert!(matches!(
+    assert_matches!(
         &delivered[3].1,
         MemoryEntry::Hardlink { target } if target == Path::new("d/a.txt")
-    ));
+    );
     assert_eq!(MemoryEntryKind::Hardlink.as_str(), "hardlink");
 }
 
@@ -95,10 +96,10 @@ fn a_hardlink_target_is_the_resolved_path() {
     let (result, delivered) = collect(&entries, &links(), SinkOptions::default());
 
     result.unwrap();
-    assert!(matches!(
+    assert_matches!(
         &delivered.last().unwrap().1,
         MemoryEntry::Hardlink { target } if target == Path::new("d/a.txt")
-    ));
+    );
 }
 
 #[test]

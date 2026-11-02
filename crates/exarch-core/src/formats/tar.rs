@@ -1366,9 +1366,9 @@ mod tests {
             &ExtractionOptions::default(),
             &mut crate::NoopProgress,
         );
-        assert!(
-            matches!(&result, Err(e) if e.error_code() == crate::ErrorCode::InvalidArchive),
-            "{result:?}"
+        assert_eq!(
+            result.unwrap_err().error_code(),
+            crate::ErrorCode::InvalidArchive
         );
         assert!(!temp.path().join("sparse.txt").exists());
     }

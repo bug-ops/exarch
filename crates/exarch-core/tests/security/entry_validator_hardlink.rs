@@ -36,7 +36,6 @@ fn test_hardlink_absolute_target() {
         0,
         None,
         None,
-        None,
     );
 
     assert_matches!(result, Err(ArchiveError::HardlinkEscape { .. }));
@@ -61,7 +60,6 @@ fn test_hardlink_parent_traversal() {
         0,
         None,
         None,
-        None,
     );
 
     assert_matches!(result, Err(ArchiveError::HardlinkEscape { .. }));
@@ -81,7 +79,6 @@ fn test_hardlink_disabled_by_default() {
             target: PathBuf::from("target.txt"),
         },
         0,
-        None,
         None,
         None,
     );
@@ -108,7 +105,6 @@ fn test_hardlink_relative_safe() {
         0,
         None,
         None,
-        None,
     );
 
     assert!(result.is_ok(), "Safe relative hardlink should be allowed");
@@ -131,7 +127,6 @@ fn test_hardlink_same_directory() {
             target: PathBuf::from("target.txt"),
         },
         0,
-        None,
         None,
         None,
     );
@@ -159,7 +154,6 @@ fn test_multiple_hardlinks_tracked() {
             0,
             None,
             None,
-            None,
         )
         .unwrap();
 
@@ -170,7 +164,6 @@ fn test_multiple_hardlinks_tracked() {
                 target: PathBuf::from("target2.txt"),
             },
             0,
-            None,
             None,
             None,
         )
@@ -198,7 +191,6 @@ fn test_hardlink_chain_escape() {
             target: PathBuf::from("../../../../etc/passwd"),
         },
         0,
-        None,
         None,
         None,
     );

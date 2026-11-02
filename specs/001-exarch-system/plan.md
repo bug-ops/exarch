@@ -113,14 +113,14 @@ exarch/
     │   │   │   ├── mod.rs              # re-exports TarArchive, ZipArchive, SevenZArchive
     │   │   │   ├── traits.rs           # ArchiveFormat, FormatCreator traits
     │   │   │   ├── detect.rs           # detect_format(), ArchiveType enum, ZIP_FAMILY_ALIASES
-    │   │   │   ├── common.rs           # DirCache (avoid redundant canonicalize syscalls)
+    │   │   │   ├── common.rs           # DirWalker is in dir_walker.rs (lstat of each component)
     │   │   │   ├── compression.rs      # shared compression helpers
     │   │   │   ├── tar.rs              # TarArchive<R: Read> impl ArchiveFormat
     │   │   │   ├── zip.rs              # ZipArchive impl ArchiveFormat
     │   │   │   └── sevenz.rs           # SevenZArchive impl ArchiveFormat
     │   │   ├── security/
     │   │   │   ├── mod.rs
-    │   │   │   ├── context.rs          # ValidationContext (per-entry state, dir_cache ref)
+    │   │   │   ├── context.rs          # ValidationContext (per-entry state)
     │   │   │   ├── path.rs             # validate_path() → SafePath
     │   │   │   ├── symlink.rs          # validate_symlink() → SafeSymlink
     │   │   │   ├── hardlink.rs         # HardlinkTracker
@@ -434,8 +434,10 @@ Key implementation notes:
 **Path validation** (`security/path.rs`): Uses `PathBuf::components()` to detect
 `..` without calling `canonicalize()` for each entry (expensive). `canonicalize()`
 is called only when a symlink has been seen previously (tracked by `symlink_seen`
-flag in `EntryValidator`). `DirCache` caches directories created by the extractor
-to skip `canonicalize()` for known-safe parents.
+flag in `EntryValidator`). `DirWalker` creates each entry's
+parent directories component by component, refusing any existing symlink via `lstat`
+(no directory cache; the earlier `DirCache` trusted-parent skip was removed). The
+parent `canonicalize()` is skipped only when the parent is the destination root.
 
 **Quota tracking** (`security/quota.rs`): `QuotaTracker` accumulates file count and
 total bytes. Checked before writing each entry. Not reversible — once exceeded,
@@ -476,7 +478,7 @@ heuristic: assumes single solid block (actual block boundaries not exposed by
 - **Bottlenecks**: decompression CPU-bound for xz/bz2; I/O-bound for gz/zst; 7z solid archives decompress entire block into memory before writing
 - **`BufReader`**: wraps all TAR file handles to reduce syscall count
 - **`CopyBuffer`**: reusable buffer in `copy.rs` for file I/O; avoids per-entry allocations
-- **`DirCache`**: avoids repeated `canonicalize()` for directory parents already created by the extractor
+- **`DirWalker`**: creates and `lstat`-checks each directory component (replaced the former `DirCache`)
 - **`EntryValidator` with references**: eliminates one `SecurityConfig` + `DestDir` clone per extraction call (measurable at high file counts)
 - **`SmallVec`**: used in path component accumulation to avoid heap allocation for short paths
 

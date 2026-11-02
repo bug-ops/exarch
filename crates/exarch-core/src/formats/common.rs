@@ -20,9 +20,7 @@
 //! - [`push_disallowed_extension_warning`]: Aggregated disallowed-extension
 //!   skip warning
 
-use rustc_hash::FxHashSet;
 use std::fs::File;
-use std::fs::create_dir_all;
 use std::io::BufWriter;
 use std::io::Read;
 use std::io::Write;
@@ -39,6 +37,7 @@ use crate::config::Validated;
 use crate::copy::CopyBuffer;
 use crate::copy::copy_with_buffer;
 use crate::error::QuotaResource;
+use crate::formats::dir_walker::DirWalker;
 use crate::security::fs_view::Containment;
 use crate::security::fs_view::FsView;
 use crate::security::fs_view::HostFs;
@@ -91,237 +90,6 @@ impl Drop for EntryCompleteGuard<'_> {
         if !self.fired {
             self.progress.on_entry_complete(self.path);
         }
-    }
-}
-
-/// Cache for tracking created directories during extraction.
-///
-/// Reduces redundant mkdir syscalls for nested archive structures.
-/// For example, extracting 1000 files in nested directories without caching
-/// can result in ~3000 mkdir syscalls. With caching, this reduces to ~150.
-///
-/// # Implementation
-///
-/// Uses an in-memory `FxHashSet<PathBuf>` to track all created directory paths.
-/// `FxHashSet` is a faster non-cryptographic hash from rustc, optimized for
-/// performance when hash DOS protection is not needed.
-///
-/// When a directory needs to be created, we first check the cache to avoid
-/// redundant syscalls.
-///
-/// # Performance
-///
-/// - Reduces syscalls by ~95% for deeply nested archives
-/// - Memory overhead: O(d) where d is number of unique directories
-/// - Lookup cost: O(1) average with `FxHasher` (faster than `SipHash`)
-/// - Memory is bounded by a fixed budget of 16 MiB of key bytes (see [Bounded
-///   memory](#bounded-memory))
-///
-/// # TOCTOU Safety
-///
-/// This cache creates a potential Time-Of-Check-Time-Of-Use (TOCTOU) race:
-/// another process could delete cached directories between our check and use.
-/// However, this is NOT a security concern because:
-///
-/// 1. **Fail-safe**: If a cached directory is deleted, subsequent file creation
-///    will fail with ENOENT, causing extraction to abort cleanly.
-/// 2. **No privilege escalation**: Cache only tracks directories we created,
-///    not arbitrary filesystem state.
-/// 3. **Defense in depth**: Path validation happens before caching (blocks
-///    traversal, absolute paths, etc.).
-/// 4. **Industry standard**: TAR, ZIP, and other extractors use similar caching
-///    without additional synchronization.
-///
-/// # Bounded memory
-///
-/// The cache is only a shortcut for directories this extraction created, so it
-/// holds at most [`DIR_CACHE_MAX_BYTES`] (16 MiB) of key bytes: each key is
-/// charged its path length plus `size_of::<PathBuf>()`, and a key that would
-/// exceed the budget is skipped, not stored. Hash-set overhead and allocator
-/// rounding come on top, so the real ceiling is higher than 16 MiB. The bound
-/// is fixed and independent of the entry-count quota, which would allow
-/// gigabytes of keys at its defaults.
-///
-/// A skipped directory is still created. It only costs speed: a path whose
-/// parent is not cached is canonicalized again on every entry, so the cap
-/// never weakens a security check.
-///
-/// # Examples
-///
-/// ```ignore
-/// use exarch_core::formats::common::DirCache;
-/// use std::path::Path;
-///
-/// let mut cache = DirCache::new();
-///
-/// // First call creates directory and caches all ancestors
-/// cache.ensure_parent_dir(Path::new("a/b/c/file.txt"))?;
-///
-/// // Second call skips mkdir - already cached
-/// cache.ensure_parent_dir(Path::new("a/b/c/file2.txt"))?;
-/// # Ok::<(), std::io::Error>(())
-/// ```
-#[derive(Debug)]
-pub struct DirCache {
-    created: FxHashSet<PathBuf>,
-    used_bytes: usize,
-    max_bytes: usize,
-}
-
-/// Budget of key bytes a [`DirCache`] may hold: 16 MiB.
-pub const DIR_CACHE_MAX_BYTES: usize = 16 * 1024 * 1024;
-
-impl DirCache {
-    /// Creates a new directory cache bounded by [`DIR_CACHE_MAX_BYTES`].
-    ///
-    /// # Examples
-    ///
-    /// ```ignore
-    /// let cache = DirCache::new();
-    /// ```
-    #[must_use]
-    #[inline]
-    pub fn new() -> Self {
-        Self::with_max_bytes(DIR_CACHE_MAX_BYTES)
-    }
-
-    pub(crate) fn with_max_bytes(max_bytes: usize) -> Self {
-        use rustc_hash::FxBuildHasher;
-        Self {
-            created: FxHashSet::with_capacity_and_hasher(128, FxBuildHasher),
-            used_bytes: 0,
-            max_bytes,
-        }
-    }
-
-    /// Private helper to cache all ancestor directories of a path.
-    ///
-    /// This avoids duplicating the ancestor-walking logic in both
-    /// `ensure_parent_dir` and `ensure_dir`.
-    ///
-    /// Also charges the ancestors of the destination when `path` is absolute
-    /// (at most the depth of the destination, a few short keys). A key that
-    /// does not fit the budget is skipped on its own; shorter ancestors are
-    /// still tried.
-    fn cache_ancestors(&mut self, path: &Path) {
-        let mut current = path;
-        while !current.is_empty() {
-            self.insert_within_budget(current);
-            match current.parent() {
-                Some(p) if !p.is_empty() => current = p,
-                _ => break,
-            }
-        }
-    }
-
-    fn insert_within_budget(&mut self, path: &Path) {
-        if self.created.contains(path) {
-            return;
-        }
-        let charge = path.as_os_str().len() + std::mem::size_of::<PathBuf>();
-        if self.max_bytes - self.used_bytes >= charge {
-            self.created.insert(path.to_path_buf());
-            self.used_bytes += charge;
-        }
-    }
-
-    /// Checks if a path is in the cache (i.e., was created by us).
-    #[inline]
-    pub fn contains(&self, path: &Path) -> bool {
-        self.created.contains(path)
-    }
-
-    /// Ensures parent directory exists, using cache to skip redundant mkdir
-    /// calls.
-    ///
-    /// This function creates the parent directory of the given file path if it
-    /// does not exist. All ancestor directories are also created and cached.
-    ///
-    /// # Performance
-    ///
-    /// - First call for a directory: Creates directory and caches all ancestors
-    /// - Subsequent calls for same directory: O(1) cache lookup, no syscall
-    ///
-    /// # Returns
-    ///
-    /// - `Ok(true)` if directory was created
-    /// - `Ok(false)` if directory already existed (cached or no parent)
-    ///
-    /// # Errors
-    ///
-    /// Returns an I/O error if directory creation fails.
-    ///
-    /// # Examples
-    ///
-    /// ```ignore
-    /// let mut cache = DirCache::new();
-    /// let created = cache.ensure_parent_dir(Path::new("a/b/file.txt"))?;
-    /// assert!(created); // First call creates directory
-    ///
-    /// let created = cache.ensure_parent_dir(Path::new("a/b/file2.txt"))?;
-    /// assert!(!created); // Second call finds cached directory
-    /// ```
-    #[inline]
-    pub fn ensure_parent_dir(&mut self, file_path: &Path) -> std::io::Result<bool> {
-        if let Some(parent) = file_path.parent() {
-            if parent.is_empty() {
-                return Ok(false);
-            }
-            if !self.created.contains(parent) {
-                create_dir_all(parent)?;
-                self.cache_ancestors(parent);
-                return Ok(true);
-            }
-        }
-        Ok(false)
-    }
-
-    /// Ensures a directory exists (for directory entries in archives).
-    ///
-    /// This function creates the directory if it does not exist. All ancestor
-    /// directories are also created and cached.
-    ///
-    /// # Performance
-    ///
-    /// - First call for a directory: Creates directory and caches all ancestors
-    /// - Subsequent calls for same directory: O(1) cache lookup, no syscall
-    ///
-    /// # Returns
-    ///
-    /// - `Ok(true)` if directory was created
-    /// - `Ok(false)` if directory already existed (cached or empty path)
-    ///
-    /// # Errors
-    ///
-    /// Returns an I/O error if directory creation fails.
-    ///
-    /// # Examples
-    ///
-    /// ```ignore
-    /// let mut cache = DirCache::new();
-    /// let created = cache.ensure_dir(Path::new("a/b/c"))?;
-    /// assert!(created); // First call creates directory
-    ///
-    /// let created = cache.ensure_dir(Path::new("a/b/c"))?;
-    /// assert!(!created); // Second call finds cached directory
-    /// ```
-    #[inline]
-    pub fn ensure_dir(&mut self, dir_path: &Path) -> std::io::Result<bool> {
-        if dir_path.is_empty() {
-            return Ok(false);
-        }
-        if !self.created.contains(dir_path) {
-            create_dir_all(dir_path)?;
-            self.cache_ancestors(dir_path);
-            return Ok(true);
-        }
-        Ok(false)
-    }
-}
-
-impl Default for DirCache {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -676,7 +444,9 @@ pub fn create_file_with_mode(
 ///
 /// Returns an I/O error if file creation fails, including
 /// `ErrorKind::AlreadyExists` when `create_new` is `true` and `path` already
-/// exists.
+/// exists, or a bare `AlreadyExists` when `create_new` is `false` and the
+/// final component of `path` is a symlink (the caller names the entry through
+/// [`name_occupant_on_open_error`]).
 #[inline]
 #[cfg(not(unix))]
 pub fn create_file_with_mode(
@@ -690,6 +460,10 @@ pub fn create_file_with_mode(
             .create_new(true)
             .open(path)
     } else {
+        // No O_NOFOLLOW off Unix: refuse a symlink via lstat before truncating.
+        if std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink()) {
+            return Err(std::io::ErrorKind::AlreadyExists.into());
+        }
         File::create(path)
     }
 }
@@ -697,7 +471,7 @@ pub fn create_file_with_mode(
 /// Generic file extraction implementation used by all format adapters.
 ///
 /// This function consolidates file extraction logic to ensure consistent:
-/// - Directory creation with caching
+/// - Directory creation through the validated directory walker
 /// - Buffered I/O (64KB buffer)
 /// - Exclusive file creation with permission enforcement (Unix only)
 /// - Quota tracking with overflow protection
@@ -753,7 +527,8 @@ pub fn create_file_with_mode(
 ///   quota pre-check and, per the security note above, enforced as a hard
 ///   streaming ceiling and exact post-copy match
 /// * `copy_buffer` - Reusable buffer for I/O operations
-/// * `dir_cache` - Directory cache to reduce redundant mkdir syscalls
+/// * `dirs` - Creates and vets the parent directories
+/// * `options` - Duplicate-handling policy for a pre-existing destination path
 /// * `duplicate_skips` - Counter incremented (not pushed as a warning string)
 ///   when a duplicate entry is skipped; the caller aggregates it into a single
 ///   warning after extraction completes, mirroring 7z's `duplicate_skips`
@@ -782,7 +557,7 @@ pub fn extract_file_with_permit<R: Read>(
     report: &mut ExtractionReport,
     expected_size: Option<u64>,
     copy_buffer: &mut CopyBuffer,
-    dir_cache: &mut DirCache,
+    dirs: DirWalker,
     options: SinkOptions,
     duplicate_skips: &mut u64,
     progress: &mut dyn ProgressCallback,
@@ -790,8 +565,7 @@ pub fn extract_file_with_permit<R: Read>(
     let skip_duplicates = options.skip_duplicates;
     let output_path = dest.join(safe_path);
 
-    // Create parent directories if needed using cache
-    dir_cache.ensure_parent_dir(&output_path)?;
+    dirs.ensure_parent(dest, safe_path.as_path())?;
 
     // The size was already reserved against QuotaTracker during
     // validate_entry (proven by the QuotaPermit consumed above); this only
@@ -860,7 +634,7 @@ pub fn extract_file_with_permit<R: Read>(
 /// # Idempotent Behavior
 ///
 /// This function is idempotent - calling it multiple times for the same
-/// directory has no effect thanks to the directory cache.
+/// directory has no effect.
 ///
 /// # Quota Tracking
 ///
@@ -873,27 +647,20 @@ pub fn extract_file_with_permit<R: Read>(
 /// * `safe_path` - Validated destination-relative path of the directory
 /// * `dest` - Destination directory
 /// * `report` - Extraction statistics (updated)
-/// * `dir_cache` - Directory cache to reduce redundant mkdir syscalls
+/// * `dirs` - Creates and vets the directory
 ///
 /// # Errors
 ///
-/// Returns an error if directory creation fails due to I/O errors.
+/// Returns an error if directory creation fails due to I/O errors or a
+/// component is a symlink the policy refuses.
 pub fn create_directory(
     safe_path: &SafePath,
     dest: &DestDir,
     report: &mut ExtractionReport,
-    dir_cache: &mut DirCache,
+    dirs: DirWalker,
 ) -> Result<()> {
-    let dir_path = dest.join(safe_path);
-
-    // NOTE: a directory replaced after it was cached is not seen here; the next
-    // entry's revalidating cache (7z) catches it.
-    if !dir_cache.contains(&dir_path) {
-        check_directory_occupant(&dir_path, safe_path.as_path(), dest)?;
-    }
-
-    // Use cache to avoid redundant mkdir syscalls
-    dir_cache.ensure_dir(&dir_path)?;
+    check_directory_occupant(&dest.join(safe_path), safe_path.as_path(), dest)?;
+    dirs.ensure_dir(dest, safe_path.as_path())?;
 
     report.directories_created += 1;
 
@@ -933,8 +700,8 @@ fn check_directory_occupant(dir_path: &Path, rel: &Path, dest: &DestDir) -> Resu
 /// Creates a symbolic link from a validated symlink entry.
 ///
 /// This is a shared helper used by both TAR and ZIP extractors.
-/// Parent directories are created automatically if needed using the directory
-/// cache.
+/// Parent directories are created automatically if needed through the
+/// directory walker.
 ///
 /// # Platform Support
 ///
@@ -952,7 +719,8 @@ fn check_directory_occupant(dir_path: &Path, rel: &Path, dest: &DestDir) -> Resu
 /// * `safe_symlink` - Validated symlink entry
 /// * `dest` - Destination directory
 /// * `report` - Extraction statistics (updated)
-/// * `dir_cache` - Directory cache to reduce redundant mkdir syscalls
+/// * `dirs` - Creates and vets the parent directories
+/// * `options` - Duplicate-handling policy for a pre-existing destination path
 /// * `duplicate_skips` - Counter incremented (not pushed as a warning string)
 ///   when a duplicate symlink is skipped; the caller aggregates it into a
 ///   single warning after extraction completes, mirroring 7z's
@@ -972,7 +740,7 @@ pub fn create_symlink(
     safe_symlink: &SafeSymlink,
     dest: &DestDir,
     report: &mut ExtractionReport,
-    dir_cache: &mut DirCache,
+    dirs: DirWalker,
     options: SinkOptions,
     duplicate_skips: &mut u64,
 ) -> Result<()> {
@@ -984,8 +752,7 @@ pub fn create_symlink(
         let link_path = dest.join_path(safe_symlink.link_path());
         let target_path = safe_symlink.target_path();
 
-        // Create parent directories using cache
-        dir_cache.ensure_parent_dir(&link_path)?;
+        dirs.ensure_parent(dest, safe_symlink.link_path())?;
 
         if let Ok(existing) = link_path.symlink_metadata() {
             if skip_duplicates {
@@ -1059,8 +826,8 @@ fn name_occupant_on_open_error(path: &Path, rel: &Path, err: std::io::Error) -> 
 
 /// The occupant of `path` whose presence explains `err`, if any.
 ///
-/// A symlink is named only on Unix, where its refusal is identified by the
-/// `ELOOP` error.
+/// A symlink refusal is identified by `ELOOP` on Unix and by the
+/// `AlreadyExists` that `create_file_with_mode` returns elsewhere.
 fn refused_occupant(path: &Path, err: &std::io::Error) -> Option<Occupant> {
     use std::io::ErrorKind;
 
@@ -1071,10 +838,10 @@ fn refused_occupant(path: &Path, err: &std::io::Error) -> Option<Occupant> {
         return Some(Occupant::Directory);
     }
     #[cfg(unix)]
-    if file_type.is_symlink() && err.raw_os_error() == Some(libc::ELOOP) {
-        return Some(Occupant::Symlink);
-    }
-    None
+    let symlink_refusal = err.raw_os_error() == Some(libc::ELOOP);
+    #[cfg(not(unix))]
+    let symlink_refusal = err.kind() == ErrorKind::AlreadyExists;
+    (file_type.is_symlink() && symlink_refusal).then_some(Occupant::Symlink)
 }
 
 /// Fails on a host that cannot create symlinks, so a format can refuse a link
@@ -1360,6 +1127,10 @@ mod tests {
         sanitize_permissions(mode, &config)
     }
 
+    fn test_walker() -> DirWalker {
+        DirWalker::new(&SecurityConfig::default().validate().expect("valid config"))
+    }
+
     #[test]
     fn occupant_error_names_the_entry_and_the_occupant() {
         use std::io::ErrorKind;
@@ -1417,12 +1188,15 @@ mod tests {
     fn make_directory(
         dest: &DestDir,
         name: &str,
-        dir_cache: &mut DirCache,
+        allow_symlinks: bool,
     ) -> crate::Result<ExtractionReport> {
-        let config = SecurityConfig::default().validate().expect("valid config");
+        let config = SecurityConfig::default()
+            .with_allow_symlinks(allow_symlinks)
+            .validate()
+            .expect("valid config");
         let safe_path = SafePath::validate(&PathBuf::from(name), dest, &config).expect("safe path");
         let mut report = ExtractionReport::default();
-        create_directory(&safe_path, dest, &mut report, dir_cache).map(|()| report)
+        create_directory(&safe_path, dest, &mut report, DirWalker::new(&config)).map(|()| report)
     }
 
     #[test]
@@ -1431,7 +1205,7 @@ mod tests {
         let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
         std::fs::write(temp.path().join("x"), b"f").expect("write file");
 
-        let err = make_directory(&dest, "x/", &mut DirCache::new()).expect_err("must be refused");
+        let err = make_directory(&dest, "x/", false).expect_err("must be refused");
 
         assert_matches!(&err, ArchiveError::Io(e) if e.kind() == std::io::ErrorKind::AlreadyExists);
         assert!(
@@ -1448,9 +1222,8 @@ mod tests {
         let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
         std::fs::create_dir(temp.path().join("d")).expect("create dir");
 
-        let mut cache = DirCache::new();
-        make_directory(&dest, "d", &mut cache).expect("existing directory is accepted");
-        make_directory(&dest, "d", &mut cache).expect("cached directory is accepted");
+        make_directory(&dest, "d", false).expect("existing directory is accepted");
+        make_directory(&dest, "d", false).expect("repeated directory entry is accepted");
     }
 
     #[cfg(unix)]
@@ -1460,7 +1233,7 @@ mod tests {
         let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
         std::os::unix::fs::symlink("t", temp.path().join("x")).expect("create symlink");
 
-        let err = make_directory(&dest, "x/", &mut DirCache::new()).expect_err("must be refused");
+        let err = make_directory(&dest, "x/", false).expect_err("must be refused");
 
         assert!(
             err.to_string()
@@ -1478,7 +1251,9 @@ mod tests {
         std::fs::create_dir(temp.path().join("real")).expect("create dir");
         std::os::unix::fs::symlink("real", temp.path().join("x")).expect("create symlink");
 
-        make_directory(&dest, "x", &mut DirCache::new()).expect("in-dest directory link accepted");
+        make_directory(&dest, "x", true).expect("in-dest directory link accepted");
+        let err = make_directory(&dest, "x", false).expect_err("refused when symlinks are off");
+        assert_matches!(err, ArchiveError::SecurityViolation { .. });
     }
 
     #[test]
@@ -1487,7 +1262,7 @@ mod tests {
         let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
         let mut report = ExtractionReport::default();
         let mut copy_buffer = CopyBuffer::new();
-        let mut dir_cache = DirCache::new();
+        let dirs = test_walker();
 
         // Set bytes_written to a value close to u64::MAX
         report.bytes_written = u64::MAX - 100;
@@ -1513,7 +1288,7 @@ mod tests {
             &mut report,
             expected_size,
             &mut copy_buffer,
-            &mut dir_cache,
+            dirs,
             SinkOptions::default(),
             &mut 0u64,
             &mut NoopProgress,
@@ -1547,7 +1322,7 @@ mod tests {
         let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
         let mut report = ExtractionReport::default();
         let mut copy_buffer = CopyBuffer::new();
-        let mut dir_cache = DirCache::new();
+        let dirs = test_walker();
         let mut duplicate_skips = 0u64;
 
         // Set files_skipped to usize::MAX so the duplicate-skip path's
@@ -1577,7 +1352,7 @@ mod tests {
             &mut report,
             None,
             &mut copy_buffer,
-            &mut dir_cache,
+            dirs,
             SinkOptions::default(),
             &mut duplicate_skips,
             &mut NoopProgress,
@@ -1603,7 +1378,7 @@ mod tests {
         let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
         let mut report = ExtractionReport::default();
         let mut copy_buffer = CopyBuffer::new();
-        let mut dir_cache = DirCache::new();
+        let dirs = test_walker();
 
         let config = SecurityConfig::default().validate().expect("valid config");
         // Declares 50 bytes, mirroring the PoC's forged uncompressed_size.
@@ -1626,7 +1401,7 @@ mod tests {
             &mut report,
             Some(50),
             &mut copy_buffer,
-            &mut dir_cache,
+            dirs,
             SinkOptions::default(),
             &mut 0u64,
             &mut NoopProgress,
@@ -1652,7 +1427,7 @@ mod tests {
         let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
         let mut report = ExtractionReport::default();
         let mut copy_buffer = CopyBuffer::new();
-        let mut dir_cache = DirCache::new();
+        let dirs = test_walker();
 
         let config = SecurityConfig::default().validate().expect("valid config");
         let permit = QuotaTracker::new()
@@ -1672,7 +1447,7 @@ mod tests {
             &mut report,
             Some(1000),
             &mut copy_buffer,
-            &mut dir_cache,
+            dirs,
             SinkOptions::default(),
             &mut 0u64,
             &mut NoopProgress,
@@ -1704,7 +1479,7 @@ mod tests {
         let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
         let mut report = ExtractionReport::default();
         let mut copy_buffer = CopyBuffer::new();
-        let mut dir_cache = DirCache::new();
+        let dirs = test_walker();
 
         // Pre-existing destination file, as if from a prior extraction.
         std::fs::write(temp.path().join("target.txt"), b"pre-existing content")
@@ -1729,9 +1504,8 @@ mod tests {
             &mut report,
             Some(50),
             &mut copy_buffer,
-            &mut dir_cache,
-            SinkOptions::default().with_skip_duplicates(false), /* skip_duplicates = false:
-                                                                 * --force overwrite */
+            dirs,
+            SinkOptions::default().with_skip_duplicates(false),
             &mut 0u64,
             &mut NoopProgress,
         );
@@ -1740,293 +1514,6 @@ mod tests {
         assert!(
             temp.path().join("target.txt").exists(),
             "aborted --force overwrite must not delete the destination path entirely"
-        );
-    }
-
-    /// Test `DirCache` basic functionality
-    #[test]
-    fn test_dir_cache_basic() {
-        let temp = TempDir::new().expect("failed to create temp dir");
-        let mut cache = DirCache::new();
-
-        let file_path = temp.path().join("a/b/c/file.txt");
-
-        // First call creates directory
-        let created = cache
-            .ensure_parent_dir(&file_path)
-            .expect("should create dir");
-        assert!(created, "first call should create directory");
-        assert!(temp.path().join("a/b/c").exists());
-
-        // Second call finds cached directory
-        let created = cache
-            .ensure_parent_dir(&file_path)
-            .expect("should use cache");
-        assert!(!created, "second call should use cache");
-    }
-
-    /// Test `DirCache` with nested paths
-    #[test]
-    fn test_dir_cache_nested_paths() {
-        let temp = TempDir::new().expect("failed to create temp dir");
-        let mut cache = DirCache::new();
-
-        // Create deep nested directory
-        let file1 = temp.path().join("a/b/c/d/file1.txt");
-        cache.ensure_parent_dir(&file1).expect("should create");
-        assert!(temp.path().join("a/b/c/d").exists());
-
-        // All ancestors should be cached
-        let file2 = temp.path().join("a/b/other.txt");
-        let created = cache.ensure_parent_dir(&file2).expect("should use cache");
-        assert!(!created, "ancestor should be cached");
-    }
-
-    /// Test `DirCache` `ensure_dir` method
-    #[test]
-    fn test_dir_cache_ensure_dir() {
-        let temp = TempDir::new().expect("failed to create temp dir");
-        let mut cache = DirCache::new();
-
-        let dir_path = temp.path().join("a/b/c");
-
-        // First call creates directory
-        let created = cache.ensure_dir(&dir_path).expect("should create dir");
-        assert!(created, "first call should create directory");
-        assert!(dir_path.exists());
-
-        // Second call finds cached directory
-        let created = cache.ensure_dir(&dir_path).expect("should use cache");
-        assert!(!created, "second call should use cache");
-    }
-
-    /// Test `DirCache` with empty parent path
-    #[test]
-    fn test_dir_cache_empty_parent() {
-        use std::path::PathBuf;
-        let mut cache = DirCache::new();
-
-        // Relative file path with no parent directory
-        let file_path = PathBuf::from("file.txt");
-        let created = cache
-            .ensure_parent_dir(&file_path)
-            .expect("should handle empty parent");
-        assert!(!created, "file with no directory should return false");
-    }
-
-    /// Test `DirCache` with single component path
-    #[test]
-    fn test_dir_cache_single_component() {
-        let temp = TempDir::new().expect("failed to create temp dir");
-        let mut cache = DirCache::new();
-
-        // Path with single component (no parent except current dir)
-        let file_path = temp.path().join("file.txt");
-        let created = cache
-            .ensure_parent_dir(&file_path)
-            .expect("should handle single component");
-
-        // Parent is temp.path(), which was not in cache, so it gets
-        // created/cached
-        assert!(created, "parent directory gets cached on first call");
-
-        // Second call should use cache
-        let file_path2 = temp.path().join("file2.txt");
-        let created = cache
-            .ensure_parent_dir(&file_path2)
-            .expect("should use cache");
-        assert!(!created, "second call uses cached parent");
-    }
-
-    /// Test `DirCache` with pre-existing directory
-    #[test]
-    fn test_dir_cache_preexisting_directory() {
-        let temp = TempDir::new().expect("failed to create temp dir");
-        let mut cache = DirCache::new();
-
-        // Create directory manually first
-        let dir_path = temp.path().join("existing/dir");
-        std::fs::create_dir_all(&dir_path).expect("should create dir");
-
-        // First call should still return true (not in cache)
-        let created = cache.ensure_dir(&dir_path).expect("should succeed");
-        assert!(created, "first call creates cache entry even if dir exists");
-
-        // Second call should return false (cached)
-        let created = cache.ensure_dir(&dir_path).expect("should succeed");
-        assert!(!created, "second call uses cache");
-    }
-
-    /// Test `DirCache` with deep nesting (stress test)
-    #[test]
-    fn test_dir_cache_deep_nesting() {
-        let temp = TempDir::new().expect("failed to create temp dir");
-        let mut cache = DirCache::new();
-
-        // Create path with 100 levels of nesting
-        let mut path = temp.path().to_path_buf();
-        for i in 0..100 {
-            path.push(format!("level{i}"));
-        }
-        path.push("file.txt");
-
-        // First call creates all 100 levels
-        let created = cache
-            .ensure_parent_dir(&path)
-            .expect("should create deep nesting");
-        assert!(created, "deep nesting should be created");
-
-        // Verify all levels exist
-        let parent = path.parent().expect("should have parent");
-        assert!(parent.exists(), "all levels should exist");
-
-        // Second call should use cache
-        let created = cache.ensure_parent_dir(&path).expect("should use cache");
-        assert!(!created, "deep nesting should be cached");
-    }
-
-    /// Test `DirCache` with multiple files in same directory
-    #[test]
-    fn test_dir_cache_multiple_files_same_dir() {
-        let temp = TempDir::new().expect("failed to create temp dir");
-        let mut cache = DirCache::new();
-
-        let dir = temp.path().join("shared/directory");
-
-        // First file creates directory
-        let file1 = dir.join("file1.txt");
-        let created = cache.ensure_parent_dir(&file1).expect("should create dir");
-        assert!(created, "first file creates directory");
-
-        // Subsequent files in same directory use cache
-        for i in 2..=10 {
-            let file = dir.join(format!("file{i}.txt"));
-            let created = cache.ensure_parent_dir(&file).expect("should use cache");
-            assert!(!created, "file {i} should use cached directory");
-        }
-    }
-
-    #[test]
-    fn test_dir_cache_budget_holds_with_long_components() {
-        let temp = TempDir::new().expect("failed to create temp dir");
-        let base = temp.path().as_os_str().len() + std::mem::size_of::<PathBuf>();
-        let budget = base * 3 + 300;
-        let mut cache = DirCache::with_max_bytes(budget);
-
-        let mut deep = temp.path().to_path_buf();
-        for i in 0..6 {
-            deep.push(format!("{i}{}", "x".repeat(100)));
-        }
-        let file = deep.join("f.txt");
-
-        assert!(cache.ensure_parent_dir(&file).expect("should create"));
-        assert!(deep.is_dir(), "directories are created even when uncached");
-        assert!(cache.used_bytes <= budget, "used {}", cache.used_bytes);
-        assert!(!cache.contains(&deep), "deepest key exceeds the budget");
-        assert!(
-            cache.created.len() >= 2,
-            "keys that fit are still cached: {:?}",
-            cache.created
-        );
-    }
-
-    #[test]
-    fn test_dir_cache_zero_budget_caches_nothing() {
-        let temp = TempDir::new().expect("failed to create temp dir");
-        let mut cache = DirCache::with_max_bytes(0);
-        let dir = temp.path().join("a/b");
-        assert!(cache.ensure_dir(&dir).expect("should create"));
-        assert!(dir.is_dir());
-        assert!(cache.created.is_empty());
-        assert_eq!(cache.used_bytes, 0);
-    }
-
-    #[test]
-    fn test_entry_complete_guard_panicking_callback_fires_once() {
-        use std::panic::AssertUnwindSafe;
-        use std::panic::catch_unwind;
-
-        struct Panicking(u32);
-        impl ProgressCallback for Panicking {
-            fn on_entry_start(&mut self, _: &Path, _: usize, _: usize) {}
-
-            fn on_bytes_written(&mut self, _: u64) {}
-
-            fn on_entry_complete(&mut self, _: &Path) {
-                self.0 += 1;
-                panic!("callback panic");
-            }
-
-            fn on_complete(&mut self) {}
-        }
-
-        let mut progress = Panicking(0);
-        let path = PathBuf::from("f");
-        let outcome = catch_unwind(AssertUnwindSafe(|| {
-            EntryCompleteGuard::new(&mut progress, &path).complete();
-        }));
-        assert!(outcome.is_err());
-        assert_eq!(progress.0, 1, "Drop must not fire the callback again");
-    }
-
-    #[test]
-    fn test_dir_cache_skips_per_key_not_sticky() {
-        let mut cache = DirCache::with_max_bytes(256);
-        let long = PathBuf::from(format!("/{}", "a".repeat(400)));
-        cache.cache_ancestors(&long.join("b"));
-        assert!(!cache.contains(&long), "oversized key is skipped");
-        cache.cache_ancestors(Path::new("/s"));
-        assert!(
-            cache.contains(Path::new("/s")),
-            "later small key still fits"
-        );
-    }
-
-    #[test]
-    fn test_dir_cache_default_budget_never_exceeded() {
-        let mut cache = DirCache::new();
-        for entry in 0..10_000 {
-            let mut path = PathBuf::from("/d");
-            for level in 0..32 {
-                path.push(format!("{entry:05}-{level:02}-{}", "n".repeat(60)));
-            }
-            cache.cache_ancestors(&path);
-            assert!(cache.used_bytes <= DIR_CACHE_MAX_BYTES);
-        }
-        assert!(
-            cache.used_bytes > DIR_CACHE_MAX_BYTES / 2,
-            "budget is actually exercised"
-        );
-    }
-
-    /// Test `DirCache::contains` method
-    #[test]
-    fn test_dir_cache_contains() {
-        let temp = TempDir::new().expect("failed to create temp dir");
-        let mut cache = DirCache::new();
-
-        let dir_path = temp.path().join("a/b/c");
-
-        // Before creation, should not contain
-        assert!(
-            !cache.contains(&dir_path),
-            "should not contain before creation"
-        );
-
-        // Create directory
-        cache.ensure_dir(&dir_path).expect("should create dir");
-
-        // After creation, should contain
-        assert!(cache.contains(&dir_path), "should contain after creation");
-
-        // Ancestors should also be cached
-        assert!(
-            cache.contains(&temp.path().join("a/b")),
-            "ancestor should be cached"
-        );
-        assert!(
-            cache.contains(&temp.path().join("a")),
-            "ancestor should be cached"
         );
     }
 
@@ -2181,7 +1668,7 @@ mod tests {
         let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
         let mut report = ExtractionReport::default();
         let mut copy_buffer = CopyBuffer::new();
-        let mut dir_cache = DirCache::new();
+        let dirs = test_walker();
 
         let config = SecurityConfig::default().validate().expect("valid config");
 
@@ -2204,7 +1691,7 @@ mod tests {
             &mut report,
             None,
             &mut copy_buffer,
-            &mut dir_cache,
+            dirs,
             SinkOptions::default(),
             &mut 0u64,
             &mut NoopProgress,
@@ -2285,13 +1772,13 @@ mod tests {
                 .expect("safe symlink");
 
         let mut report = ExtractionReport::default();
-        let mut dir_cache = DirCache::new();
+        let dirs = test_walker();
 
         create_symlink(
             &safe_symlink,
             &dest,
             &mut report,
-            &mut dir_cache,
+            dirs,
             SinkOptions::default().with_skip_duplicates(false),
             &mut 0u64,
         )
@@ -2303,7 +1790,7 @@ mod tests {
             &safe_symlink,
             &dest,
             &mut report,
-            &mut dir_cache,
+            dirs,
             SinkOptions::default().with_skip_duplicates(false),
             &mut 0u64,
         )
@@ -2319,7 +1806,7 @@ mod tests {
             &other_safe_symlink,
             &dest,
             &mut report,
-            &mut dir_cache,
+            dirs,
             SinkOptions::default().with_skip_duplicates(false),
             &mut 0u64,
         )
@@ -2363,7 +1850,7 @@ mod tests {
             &safe_symlink,
             &dest,
             &mut report,
-            &mut DirCache::new(),
+            test_walker(),
             SinkOptions::default().with_skip_duplicates(false),
             &mut 0u64,
         )
@@ -2459,5 +1946,33 @@ mod tests {
             report.warnings,
             vec!["skipped 3 entries as pre-existing duplicates".to_string()]
         );
+    }
+
+    #[test]
+    fn test_entry_complete_guard_panicking_callback_fires_once() {
+        use std::panic::AssertUnwindSafe;
+        use std::panic::catch_unwind;
+
+        struct Panicking(u32);
+        impl ProgressCallback for Panicking {
+            fn on_entry_start(&mut self, _: &Path, _: usize, _: usize) {}
+
+            fn on_bytes_written(&mut self, _: u64) {}
+
+            fn on_entry_complete(&mut self, _: &Path) {
+                self.0 += 1;
+                panic!("callback panic");
+            }
+
+            fn on_complete(&mut self) {}
+        }
+
+        let mut progress = Panicking(0);
+        let path = PathBuf::from("f");
+        let outcome = catch_unwind(AssertUnwindSafe(|| {
+            EntryCompleteGuard::new(&mut progress, &path).complete();
+        }));
+        assert!(outcome.is_err());
+        assert_eq!(progress.0, 1, "Drop must not fire the callback again");
     }
 }

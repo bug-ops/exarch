@@ -9,7 +9,6 @@ use crate::ArchiveError;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::config::Validated;
-use crate::formats::common::DirCache;
 use crate::security::admitted::EntrySize;
 use crate::security::admitted::ValidatedFile;
 use crate::security::admitted::ValidatedHardlink;
@@ -254,7 +253,7 @@ impl<'a> ValidatorCore<'a> {
 
     /// A context reflecting the symlinks seen so far; build a fresh one for
     /// every entry.
-    pub(crate) fn context<'c, V: FsView>(&self) -> ValidationContext<'c, V> {
+    pub(crate) fn context<V: FsView>(&self) -> ValidationContext<V> {
         let mut ctx = ValidationContext::new(self.config.allowed.symlinks);
         if self.symlink_seen {
             ctx.mark_symlink_seen();
@@ -276,7 +275,7 @@ impl<'a> ValidatorCore<'a> {
         mode: Option<u32>,
         root: &V::Root,
         view: &V,
-        ctx: &ValidationContext<'_, V>,
+        ctx: &ValidationContext<V>,
     ) -> Result<ValidatedEntry> {
         let size = EntrySize {
             uncompressed: uncompressed_size,
@@ -329,7 +328,7 @@ impl<'a> ValidatorCore<'a> {
         mode: Option<u32>,
         root: &V::Root,
         view: &V,
-        ctx: &ValidationContext<'_, V>,
+        ctx: &ValidationContext<V>,
     ) -> Result<ValidatedFile> {
         let safe_path = self
             .validate_entry_path_in(path, NodeKind::NonDirectory, root, view, ctx)?
@@ -350,7 +349,7 @@ impl<'a> ValidatorCore<'a> {
         size: EntrySize,
         root: &V::Root,
         view: &V,
-        ctx: &ValidationContext<'_, V>,
+        ctx: &ValidationContext<V>,
     ) -> Result<SafePath> {
         let safe_path = self
             .validate_entry_path_in(path, NodeKind::Directory, root, view, ctx)?
@@ -367,7 +366,7 @@ impl<'a> ValidatorCore<'a> {
         size: EntrySize,
         root: &V::Root,
         view: &V,
-        ctx: &ValidationContext<'_, V>,
+        ctx: &ValidationContext<V>,
     ) -> Result<ValidatedSymlink> {
         let safe_path = self
             .validate_entry_path_in(path, NodeKind::NonDirectory, root, view, ctx)?
@@ -391,7 +390,7 @@ impl<'a> ValidatorCore<'a> {
         size: EntrySize,
         root: &V::Root,
         view: &V,
-        ctx: &ValidationContext<'_, V>,
+        ctx: &ValidationContext<V>,
     ) -> Result<ValidatedHardlink> {
         let safe_path = self
             .validate_entry_path_in(path, NodeKind::NonDirectory, root, view, ctx)?
@@ -420,7 +419,7 @@ impl<'a> ValidatorCore<'a> {
         kind: NodeKind,
         root: &V::Root,
         view: &V,
-        ctx: &ValidationContext<'_, V>,
+        ctx: &ValidationContext<V>,
     ) -> Result<EntryPath<SafePath>> {
         let entry_path = EntryPath::of(path).require_directory_root(kind)?;
         let validate =
@@ -504,7 +503,6 @@ impl<'a> ValidatorCore<'a> {
 ///     1024,        // uncompressed size
 ///     Some(512),   // compressed size
 ///     Some(0o644), // mode
-///     None,        // dir_cache
 /// )?;
 ///
 /// let report = validator.finish();
@@ -529,14 +527,6 @@ impl<'a> EntryValidator<'a> {
         }
     }
 
-    fn host_context<'c>(&self, dir_cache: Option<&'c DirCache>) -> ValidationContext<'c, HostFs> {
-        let ctx = self.core.context();
-        match dir_cache {
-            Some(cache) => ctx.with_dir_cache(cache),
-            None => ctx,
-        }
-    }
-
     /// Validates an archive entry.
     ///
     /// This method orchestrates all security validations:
@@ -546,9 +536,6 @@ impl<'a> EntryValidator<'a> {
     ///    Directories are not counted
     /// 3. Compression ratio validation (zip bomb detection)
     /// 4. Type-specific validation (symlink, hardlink, permissions)
-    ///
-    /// When `dir_cache` is provided, path validation can skip expensive
-    /// `canonicalize()` syscalls for parents that were created by us.
     ///
     /// # Errors
     ///
@@ -571,9 +558,8 @@ impl<'a> EntryValidator<'a> {
         uncompressed_size: u64,
         compressed_size: Option<u64>,
         mode: Option<u32>,
-        dir_cache: Option<&DirCache>,
     ) -> Result<ValidatedEntry> {
-        let ctx = self.host_context(dir_cache);
+        let ctx = self.core.context::<HostFs>();
         self.core.validate_entry_in(
             path,
             entry_type,
@@ -693,7 +679,6 @@ mod tests {
             1024,
             None,
             Some(0o644),
-            None,
         );
 
         assert!(result.is_ok());
@@ -711,7 +696,7 @@ mod tests {
         let mut validator = EntryValidator::new(&config, &dest);
 
         let result =
-            validator.validate_entry(Path::new("dir"), &EntryType::Directory, 0, None, None, None);
+            validator.validate_entry(Path::new("dir"), &EntryType::Directory, 0, None, None);
 
         assert!(result.is_ok());
         let entry = result.unwrap();
@@ -732,7 +717,6 @@ mod tests {
             1024,
             None,
             Some(0o644),
-            None,
         );
 
         assert!(result.is_err());
@@ -753,7 +737,6 @@ mod tests {
             1000,
             None,
             Some(0o644),
-            None,
         );
 
         assert!(result.is_err());
@@ -776,7 +759,6 @@ mod tests {
                     100,
                     None,
                     Some(0o644),
-                    None,
                 )
                 .is_ok()
         );
@@ -788,7 +770,6 @@ mod tests {
                     100,
                     None,
                     Some(0o644),
-                    None,
                 )
                 .is_ok()
         );
@@ -799,7 +780,6 @@ mod tests {
             100,
             None,
             Some(0o644),
-            None,
         );
         assert!(result.is_err());
     }
@@ -817,7 +797,6 @@ mod tests {
             1_000_000,
             Some(100),
             Some(0o644),
-            None,
         );
 
         assert!(result.is_err());
@@ -837,7 +816,6 @@ mod tests {
                 1024,
                 None,
                 Some(0o644),
-                None,
             )
             .unwrap();
 
@@ -848,7 +826,6 @@ mod tests {
                 2048,
                 None,
                 Some(0o644),
-                None,
             )
             .unwrap();
 
@@ -870,7 +847,6 @@ mod tests {
             1024,
             None,
             Some(0o4755),
-            None,
         );
 
         assert!(result.is_ok());
@@ -893,7 +869,6 @@ mod tests {
                 target: PathBuf::from("target.txt"),
             },
             0,
-            None,
             None,
             None,
         );
@@ -921,7 +896,6 @@ mod tests {
             0,
             None,
             None,
-            None,
         );
 
         assert!(result.is_ok());
@@ -946,12 +920,11 @@ mod tests {
                 1024,
                 None,
                 Some(0o644),
-                None,
             )
             .unwrap();
 
         validator
-            .validate_entry(Path::new("dir"), &EntryType::Directory, 0, None, None, None)
+            .validate_entry(Path::new("dir"), &EntryType::Directory, 0, None, None)
             .unwrap();
 
         validator
@@ -961,7 +934,6 @@ mod tests {
                     target: PathBuf::from("file1.txt"),
                 },
                 0,
-                None,
                 None,
                 None,
             )
@@ -988,7 +960,6 @@ mod tests {
             0,
             None,
             None,
-            None,
         );
 
         assert!(result.is_ok(), "empty directory should be valid");
@@ -1011,14 +982,8 @@ mod tests {
         // Multiple nested empty directories
         let dirs = ["a/", "a/b/", "a/b/c/"];
         for dir in &dirs {
-            let result = validator.validate_entry(
-                Path::new(dir),
-                &EntryType::Directory,
-                0,
-                None,
-                None,
-                None,
-            );
+            let result =
+                validator.validate_entry(Path::new(dir), &EntryType::Directory, 0, None, None);
             assert!(result.is_ok(), "nested directory {dir} should be valid");
         }
 
@@ -1072,7 +1037,6 @@ mod tests {
             1024,
             None,
             Some(0o644),
-            None,
         );
         assert!(result1.is_ok());
 
@@ -1082,7 +1046,6 @@ mod tests {
             2048,
             None,
             Some(0o644),
-            None,
         );
         assert!(result2.is_ok());
 
@@ -1090,31 +1053,6 @@ mod tests {
         assert_eq!(
             config.max_file_size,
             SecurityConfig::default().max_file_size
-        );
-    }
-
-    #[test]
-    fn test_validate_entry_with_dir_cache() {
-        let temp = TempDir::new().expect("failed to create temp dir");
-        let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
-        let config = SecurityConfig::default().validate().expect("valid config");
-        let mut validator = EntryValidator::new(&config, &dest);
-
-        let sub = dest.as_path().join("subdir");
-        let mut dir_cache = DirCache::new();
-        dir_cache.ensure_dir(&sub).expect("should create dir");
-
-        let result = validator.validate_entry(
-            Path::new("subdir/file.txt"),
-            &EntryType::File,
-            100,
-            None,
-            Some(0o644),
-            Some(&dir_cache),
-        );
-        assert!(
-            result.is_ok(),
-            "entry with dir_cache should validate: {result:?}"
         );
     }
 
@@ -1139,7 +1077,6 @@ mod tests {
                 0,
                 None,
                 None,
-                None,
             )
             .unwrap();
 
@@ -1160,7 +1097,6 @@ mod tests {
             0,
             None,
             None,
-            None,
         )?;
         match entry.entry_type {
             ValidatedEntryType::Hardlink { counted, .. } => Ok(counted),
@@ -1178,7 +1114,6 @@ mod tests {
                 target: PathBuf::from("target.txt"),
             },
             0,
-            None,
             None,
             None,
         )
@@ -1223,7 +1158,6 @@ mod tests {
                 100,
                 None,
                 Some(0o644),
-                None,
             )
             .unwrap();
 
@@ -1301,7 +1235,7 @@ mod tests {
         let config = config.validate().expect("valid config");
         let mut validator = EntryValidator::new(&config, &dest);
         validator
-            .validate_entry(Path::new("f"), &EntryType::File, 1, None, None, None)
+            .validate_entry(Path::new("f"), &EntryType::File, 1, None, None)
             .unwrap();
 
         let result = validate_symlink_entry(&mut validator, "l1");
@@ -1322,7 +1256,7 @@ mod tests {
         let config = config.validate().expect("valid config");
         let mut validator = EntryValidator::new(&config, &dest);
         validator
-            .validate_entry(Path::new("f"), &EntryType::File, 1, None, None, None)
+            .validate_entry(Path::new("f"), &EntryType::File, 1, None, None)
             .unwrap();
 
         let result = validate_hardlink_entry(&mut validator, "l1");

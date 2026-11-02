@@ -310,7 +310,7 @@ crates/exarch-core/benches/
 
 ### Optimizations (v0.2.1)
 
-- **Directory caching** — Reduces mkdir syscalls by ~95% via FxHashSet caching
+- **Directory caching** (historical, v0.2.1) — since replaced by `DirWalker`, which `lstat`-checks every directory component
 - **Atomic permission setting** — Sets Unix permissions during file creation (1 syscall vs 2)
 
 > [!NOTE]

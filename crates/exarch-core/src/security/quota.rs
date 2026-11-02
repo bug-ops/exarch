@@ -58,7 +58,6 @@ use crate::config::Validated;
 ///     1024, // uncompressed size
 ///     None, // compressed size
 ///     None, // mode
-///     None, // dir_cache
 /// )?;
 ///
 /// if let ValidatedEntryType::File(permit) = entry.entry_type() {
@@ -110,7 +109,6 @@ pub struct QuotaPermit(PhantomData<()>);
 ///         target: PathBuf::from("target.txt"),
 ///     },
 ///     0,
-///     None,
 ///     None,
 ///     None,
 /// )?;

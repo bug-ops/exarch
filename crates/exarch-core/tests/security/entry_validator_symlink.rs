@@ -35,7 +35,6 @@ fn test_symlink_absolute_target() {
         0,
         None,
         None,
-        None,
     );
 
     assert_matches!(result, Err(ArchiveError::SymlinkEscape { .. }));
@@ -60,7 +59,6 @@ fn test_symlink_parent_traversal() {
         0,
         None,
         None,
-        None,
     );
 
     assert_matches!(result, Err(ArchiveError::SymlinkEscape { .. }));
@@ -80,7 +78,6 @@ fn test_symlink_disabled_by_default() {
             target: PathBuf::from("target.txt"),
         },
         0,
-        None,
         None,
         None,
     );
@@ -107,7 +104,6 @@ fn test_symlink_relative_safe() {
         0,
         None,
         None,
-        None,
     );
 
     assert!(result.is_ok(), "Safe relative symlink should be allowed");
@@ -130,7 +126,6 @@ fn test_symlink_same_directory() {
             target: PathBuf::from("target.txt"),
         },
         0,
-        None,
         None,
         None,
     );
@@ -156,7 +151,6 @@ fn test_symlink_chain_escape() {
             target: PathBuf::from("../../../../etc/passwd"),
         },
         0,
-        None,
         None,
         None,
     );

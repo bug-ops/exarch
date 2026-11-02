@@ -314,7 +314,6 @@ fn benchmark_entry_validator(c: &mut Criterion) {
                 black_box(1024),
                 black_box(None),
                 black_box(Some(0o644)),
-                None,
             )
         });
     });
@@ -329,7 +328,6 @@ fn benchmark_entry_validator(c: &mut Criterion) {
                 black_box(10240),
                 black_box(Some(5120)), // 2x compression
                 black_box(Some(0o644)),
-                None,
             )
         });
     });
@@ -344,7 +342,6 @@ fn benchmark_entry_validator(c: &mut Criterion) {
                 black_box(0),
                 black_box(None),
                 black_box(None),
-                None,
             )
         });
     });
@@ -355,14 +352,7 @@ fn benchmark_entry_validator(c: &mut Criterion) {
             let mut validator = EntryValidator::new(&config, &dest);
             for i in 0..100 {
                 let path = PathBuf::from(format!("dir/file_{i}.txt"));
-                let _ = validator.validate_entry(
-                    &path,
-                    &EntryType::File,
-                    1024,
-                    None,
-                    Some(0o644),
-                    None,
-                );
+                let _ = validator.validate_entry(&path, &EntryType::File, 1024, None, Some(0o644));
             }
             validator.finish()
         });
@@ -382,20 +372,14 @@ fn benchmark_entry_validator(c: &mut Criterion) {
             // Add directories
             for i in 0..10 {
                 let path = PathBuf::from(format!("dir_{i}"));
-                let _ = validator.validate_entry(&path, &EntryType::Directory, 0, None, None, None);
+                let _ = validator.validate_entry(&path, &EntryType::Directory, 0, None, None);
             }
 
             // Add files
             for i in 0..80 {
                 let path = PathBuf::from(format!("dir_{}/file_{}.txt", i % 10, i));
-                let _ = validator.validate_entry(
-                    &path,
-                    &EntryType::File,
-                    1024,
-                    Some(512),
-                    Some(0o644),
-                    None,
-                );
+                let _ =
+                    validator.validate_entry(&path, &EntryType::File, 1024, Some(512), Some(0o644));
             }
 
             // Add symlinks
@@ -407,7 +391,6 @@ fn benchmark_entry_validator(c: &mut Criterion) {
                         target: PathBuf::from(format!("dir_0/file_{i}.txt")),
                     },
                     0,
-                    None,
                     None,
                     None,
                 );
@@ -422,7 +405,6 @@ fn benchmark_entry_validator(c: &mut Criterion) {
                         target: PathBuf::from(format!("dir_1/file_{i}.txt")),
                     },
                     0,
-                    None,
                     None,
                     None,
                 );
@@ -453,8 +435,7 @@ fn benchmark_validation_throughput(c: &mut Criterion) {
         b.iter(|| {
             let mut validator = EntryValidator::new(&config, &dest);
             for path in &paths {
-                let _ =
-                    validator.validate_entry(path, &EntryType::File, 1024, None, Some(0o644), None);
+                let _ = validator.validate_entry(path, &EntryType::File, 1024, None, Some(0o644));
             }
             validator.finish()
         });

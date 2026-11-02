@@ -213,7 +213,7 @@ exarch/
 
 ## Performance
 
-exarch uses optimized I/O with directory caching and atomic permission setting to outperform native archive libraries:
+exarch uses optimized I/O with atomic permission setting to outperform native archive libraries:
 
 | Comparison | Average Speedup | Max Speedup |
 |------------|-----------------|-------------|

@@ -20,7 +20,6 @@ use crate::copy::CopyBuffer;
 use crate::security::admitted::EntrySize;
 use crate::security::admitted::ValidatedFile;
 use crate::security::admitted::ValidatedHardlink;
-use crate::security::context::ValidationContext;
 use crate::security::fs_view::HostFs;
 use crate::security::hardlink::hardlink_target_missing;
 use crate::security::quota::EntryCount;
@@ -34,6 +33,7 @@ use crate::types::SafeSymlink;
 use crate::types::safe_symlink::resolve_through_symlinks;
 
 use super::common;
+use super::dir_walker::DirWalker;
 
 /// The per-run counters a target updates while it writes.
 pub struct Tally<'a> {
@@ -142,51 +142,22 @@ pub trait ExtractTarget {
     ) -> Result<()>;
 }
 
-/// Whether path validation may rely on directories this run already created.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DirCacheTrust {
-    /// A cached directory is taken as is.
-    Trusted,
-    /// Every parent is canonicalized again, so a directory swapped for a
-    /// symlink between entries is caught.
-    Revalidate,
-}
-
 /// Extraction onto the real filesystem.
 pub struct HostTarget<'a> {
     dest: DestDir,
-    dir_cache: common::DirCache,
+    dirs: DirWalker,
     copy_buffer: CopyBuffer,
     core: ValidatorCore<'a>,
-    trust: DirCacheTrust,
 }
 
 impl<'a> HostTarget<'a> {
     /// Creates `output_dir` if needed and a target writing into it.
     pub(crate) fn create(output_dir: &Path, config: &'a SecurityConfig<Validated>) -> Result<Self> {
-        Self::with_trust(output_dir, config, DirCacheTrust::Trusted)
-    }
-
-    /// Like [`Self::create`], but every entry re-validates its parents, as 7z
-    /// extraction requires.
-    pub(crate) fn for_sevenz(
-        output_dir: &Path,
-        config: &'a SecurityConfig<Validated>,
-    ) -> Result<Self> {
-        Self::with_trust(output_dir, config, DirCacheTrust::Revalidate)
-    }
-
-    fn with_trust(
-        output_dir: &Path,
-        config: &'a SecurityConfig<Validated>,
-        trust: DirCacheTrust,
-    ) -> Result<Self> {
         Ok(Self {
             dest: DestDir::new_or_create(output_dir.to_path_buf())?,
-            dir_cache: common::DirCache::new(),
+            dirs: DirWalker::new(config),
             copy_buffer: CopyBuffer::new(),
             core: ValidatorCore::new(config),
-            trust,
         })
     }
 
@@ -198,13 +169,13 @@ impl<'a> HostTarget<'a> {
         &mut self.copy_buffer
     }
 
-    pub(super) fn dir_cache_mut(&mut self) -> &mut common::DirCache {
-        &mut self.dir_cache
+    pub(super) const fn dirs(&self) -> DirWalker {
+        self.dirs
     }
 
     /// Validates only the path of an entry, leaving quota to the caller.
     pub(super) fn validate_path(&self, path: &Path, kind: NodeKind) -> Result<EntryPath<SafePath>> {
-        let ctx = Self::context(&self.core, &self.dir_cache, self.trust);
+        let ctx = self.core.context::<HostFs>();
         self.core
             .validate_entry_path_in(path, kind, &self.dest, &HostFs, &ctx)
     }
@@ -212,18 +183,6 @@ impl<'a> HostTarget<'a> {
     /// Reserves `size` bytes of quota for a file.
     pub(super) fn reserve_file(&mut self, size: u64) -> Result<QuotaPermit> {
         self.core.reserve_file(size)
-    }
-
-    fn context<'c>(
-        core: &ValidatorCore<'_>,
-        dir_cache: &'c common::DirCache,
-        trust: DirCacheTrust,
-    ) -> ValidationContext<'c, HostFs> {
-        let ctx = core.context::<HostFs>();
-        match trust {
-            DirCacheTrust::Trusted => ctx.with_dir_cache(dir_cache),
-            DirCacheTrust::Revalidate => ctx,
-        }
     }
 }
 
@@ -235,7 +194,7 @@ impl ExtractTarget for HostTarget<'_> {
         request: FileRequest<'_>,
         _tally: &mut Tally<'_>,
     ) -> Result<FileAdmission<ValidatedFile>> {
-        let ctx = Self::context(&self.core, &self.dir_cache, self.trust);
+        let ctx = self.core.context::<HostFs>();
         self.core
             .validate_file_in(
                 request.path,
@@ -249,7 +208,7 @@ impl ExtractTarget for HostTarget<'_> {
     }
 
     fn validate_directory(&mut self, path: &Path, size: EntrySize) -> Result<SafePath> {
-        let ctx = Self::context(&self.core, &self.dir_cache, self.trust);
+        let ctx = self.core.context::<HostFs>();
         self.core
             .validate_directory_in(path, size, &self.dest, &HostFs, &ctx)
     }
@@ -260,7 +219,7 @@ impl ExtractTarget for HostTarget<'_> {
         target: &Path,
         size: EntrySize,
     ) -> Result<SafeSymlink> {
-        let ctx = Self::context(&self.core, &self.dir_cache, self.trust);
+        let ctx = self.core.context::<HostFs>();
         self.core
             .validate_symlink_in(path, target, size, &self.dest, &HostFs, &ctx)
             .map(|validated| validated.symlink)
@@ -272,13 +231,13 @@ impl ExtractTarget for HostTarget<'_> {
         target: &Path,
         size: EntrySize,
     ) -> Result<ValidatedHardlink> {
-        let ctx = Self::context(&self.core, &self.dir_cache, self.trust);
+        let ctx = self.core.context::<HostFs>();
         self.core
             .validate_hardlink_in(path, target, size, &self.dest, &HostFs, &ctx)
     }
 
     fn directory(&mut self, path: &SafePath, tally: &mut Tally<'_>) -> Result<()> {
-        common::create_directory(path, &self.dest, tally.report, &mut self.dir_cache)
+        common::create_directory(path, &self.dest, tally.report, self.dirs)
     }
 
     fn file<R: Read>(
@@ -297,7 +256,7 @@ impl ExtractTarget for HostTarget<'_> {
             tally.report,
             Some(size),
             &mut self.copy_buffer,
-            &mut self.dir_cache,
+            self.dirs,
             tally.options,
             tally.duplicate_skips,
             tally.progress,
@@ -309,7 +268,7 @@ impl ExtractTarget for HostTarget<'_> {
             symlink,
             &self.dest,
             tally.report,
-            &mut self.dir_cache,
+            self.dirs,
             tally.options,
             tally.duplicate_skips,
         )
@@ -374,7 +333,7 @@ impl ExtractTarget for HostTarget<'_> {
     /// instead. This narrows the TOCTOU window from "the entire gap between
     /// pass one and pass two" down to "between this re-check and the open" —
     /// consistent with the check-then-act discipline the rest of the pipeline
-    /// already accepts elsewhere (e.g. `DirCache`'s documented TOCTOU). If the
+    /// already accepts elsewhere (e.g. `DirWalker`'s documented TOCTOU). If the
     /// re-resolution instead lands outside `dest`, that is a genuine escape
     /// attempt and is reported as such, not as a raw OS errno.
     fn hardlink(
@@ -392,8 +351,7 @@ impl ExtractTarget for HostTarget<'_> {
             return Err(hardlink_target_missing(target.as_path()));
         }
 
-        // Create parent directories using cache
-        self.dir_cache.ensure_parent_dir(&link_path)?;
+        self.dirs.ensure_parent(&self.dest, link.as_path())?;
 
         let link_file = match common::create_file_with_mode(&link_path, None, true) {
             Ok(file) => file,

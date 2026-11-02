@@ -152,6 +152,7 @@ fn relative_to(dest: &DestDir, path: &Path) -> PathBuf {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use std::assert_matches;
     use std::os::unix::fs::symlink;
     use tempfile::TempDir;
 
@@ -207,10 +208,7 @@ mod tests {
             .ensure_dir(&dest, Path::new("redirect/sub"))
             .unwrap_err();
 
-        assert!(
-            matches!(err, ArchiveError::SecurityViolation { .. }),
-            "{err}"
-        );
+        assert_matches!(err, ArchiveError::SecurityViolation { .. }, "{err}");
         assert!(!outside.join("sub").exists());
     }
 
@@ -236,7 +234,7 @@ mod tests {
             .ensure_dir(&dest, Path::new("redirect/sub"))
             .unwrap_err();
 
-        assert!(matches!(err, ArchiveError::SymlinkEscape { .. }), "{err}");
+        assert_matches!(err, ArchiveError::SymlinkEscape { .. }, "{err}");
         assert!(!outside.join("sub").exists());
     }
 
@@ -274,7 +272,7 @@ mod tests {
             .ensure_dir(&dest, Path::new("f/x"))
             .unwrap_err();
 
-        assert!(matches!(err, ArchiveError::Io(_)), "{err}");
+        assert_matches!(err, ArchiveError::Io(_), "{err}");
     }
 
     #[test]
@@ -282,10 +280,7 @@ mod tests {
         let (_root, dest, _) = dest_with_outside();
         for bad in ["../x", "/abs", "a/../../x"] {
             let err = walker(false).ensure_dir(&dest, Path::new(bad)).unwrap_err();
-            assert!(
-                matches!(err, ArchiveError::PathTraversal { .. }),
-                "{bad}: {err}"
-            );
+            assert_matches!(err, ArchiveError::PathTraversal { .. }, "{bad}: {err}");
         }
     }
 

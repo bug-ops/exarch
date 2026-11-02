@@ -1811,9 +1811,10 @@ mod tests {
             &mut 0u64,
         )
         .expect_err("a link with another target must not be replaced");
-        assert!(
-            matches!(&err, ArchiveError::Io(e)
-                if e.kind() == symlink_at_dest_error(Path::new("link.txt")).kind()),
+        assert_matches!(
+            &err,
+            ArchiveError::Io(e)
+                if e.kind() == symlink_at_dest_error(Path::new("link.txt")).kind(),
             "{err:?}"
         );
         assert_eq!(report.symlinks_created, 1);

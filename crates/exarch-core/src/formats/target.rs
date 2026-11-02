@@ -10,6 +10,7 @@ use std::fs::File;
 use std::io::Read;
 use std::path::Component;
 use std::path::Path;
+use std::path::PathBuf;
 
 use crate::ArchiveError;
 use crate::ExtractionReport;
@@ -25,6 +26,7 @@ use crate::security::admitted::ValidatedHardlink;
 use crate::security::fs_view::HostFs;
 use crate::security::fs_view::Occupant;
 use crate::security::hardlink::hardlink_target_missing;
+use crate::security::permissions::sanitize_permissions;
 use crate::security::quota::EntryCount;
 use crate::security::quota::QuotaPermit;
 use crate::security::validator::EntryPath;
@@ -153,6 +155,7 @@ pub struct HostTarget<'a> {
     dirs: DirWalker,
     copy_buffer: CopyBuffer,
     core: ValidatorCore<'a>,
+    config: &'a SecurityConfig<Validated>,
 }
 
 impl<'a> HostTarget<'a> {
@@ -163,6 +166,7 @@ impl<'a> HostTarget<'a> {
             dirs: DirWalker::new(config),
             copy_buffer: CopyBuffer::new(),
             core: ValidatorCore::new(config),
+            config,
         })
     }
 
@@ -309,15 +313,19 @@ impl ExtractTarget for HostTarget<'_> {
     /// as an exact ceiling, so a target that grows afterwards fails closed
     /// instead of writing past the reservation.
     ///
+    /// The link is created with the target's permission bits sanitized like an
+    /// archive mode (no setuid, setgid or, unless allowed, world-write bits)
+    /// and set on the open descriptor before any byte is written, so a target
+    /// in the destination that was never extracted by this run cannot hand a
+    /// wider mode to its copy, and a private target is never readable through
+    /// the copy while it is being written.
+    ///
     /// A symlink at the target is not automatically rejected: a hardlink may
     /// legitimately point at a symlink created earlier in the same extraction.
     /// It is resolved with the containment check pass one already trusts and
     /// the resolved, symlink-free path is walked again with every symlink
     /// refused. A resolution that leaves `dest` is reported as
     /// `HardlinkEscape`.
-    ///
-    /// When symlinks are not allowed, a target below a pre-existing symlinked
-    /// directory inside `dest` is refused like any other entry below one.
     fn hardlink(
         &mut self,
         link: &SafePath,
@@ -326,10 +334,18 @@ impl ExtractTarget for HostTarget<'_> {
         tally: &mut Tally<'_>,
         hardlink_duplicate_skips: &mut u64,
     ) -> Result<()> {
-        let (target_file, target_size) = self.open_hardlink_target(link, target)?;
+        let OpenedTarget {
+            file: target_file,
+            len: target_size,
+            mode: target_mode,
+        } = self.open_hardlink_target(link, target)?;
+        // The target may be a pre-existing file of the destination, so its mode
+        // is sanitized like an archive mode: never setuid, setgid or (unless
+        // allowed) world-writable, and never wider than the target.
+        let link_mode = target_mode.map(|mode| sanitize_permissions(mode, self.config));
 
         let (link_dir, link_leaf) = self.dirs.ensure_parent(&self.root, link.as_path())?;
-        let link_file = match link_dir.create_new(link_leaf, None) {
+        let link_file = match link_dir.create_new(link_leaf, link_mode) {
             Ok(file) => file,
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 if tally.options.skip_duplicates {
@@ -379,8 +395,8 @@ impl ExtractTarget for HostTarget<'_> {
 
 impl HostTarget<'_> {
     /// Opens the content source of a hardlink and returns it with its `fstat`
-    /// size.
-    fn open_hardlink_target(&self, link: &SafePath, target: &SafePath) -> Result<(File, u64)> {
+    /// size and permission bits.
+    fn open_hardlink_target(&self, link: &SafePath, target: &SafePath) -> Result<OpenedTarget> {
         let file = if target
             .as_path()
             .components()
@@ -399,17 +415,34 @@ impl HostTarget<'_> {
                 target.as_path().display()
             )));
         }
-        Ok((file, meta.len()))
+        #[cfg(unix)]
+        let mode = {
+            use std::os::unix::fs::PermissionsExt;
+            Some(meta.permissions().mode() & 0o7777)
+        };
+        #[cfg(not(unix))]
+        let mode = None;
+        Ok(OpenedTarget {
+            len: meta.len(),
+            mode,
+            file,
+        })
     }
 
     /// Opens a hardlink target by name, falling back to its resolved location
     /// when the final component is a symlink.
     fn open_direct(&self, link: &SafePath, target: &SafePath) -> Result<File> {
         let missing = || hardlink_target_missing(target.as_path());
-        let (dir, leaf) = self
-            .dirs
-            .open_parent(&self.root, target.as_path())
-            .map_err(|e| not_found_as(e, missing))?;
+        let (dir, leaf) = match self.dirs.open_parent(&self.root, target.as_path()) {
+            Ok(opened) => opened,
+            // A pre-existing symlinked directory in the chain is read through
+            // like a leaf symlink: resolved, checked for containment in `dest`
+            // and walked again with every symlink refused.
+            Err(_) if self.has_symlink_parent(target.as_path()) => {
+                return self.open_through_symlink(link, target);
+            }
+            Err(err) => return Err(not_found_as(err, missing)),
+        };
         match dir.open_read(leaf) {
             Ok(file) => Ok(file),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(missing()),
@@ -418,6 +451,21 @@ impl HostTarget<'_> {
                 _ => Err(ArchiveError::Io(e)),
             },
         }
+    }
+
+    /// Whether a parent component of `rel` is a symlink right now. Only picks
+    /// the route: the resolved walk that follows enforces containment and
+    /// refuses any symlink by file descriptor.
+    fn has_symlink_parent(&self, rel: &Path) -> bool {
+        let mut prefix = PathBuf::new();
+        rel.parent()
+            .into_iter()
+            .flat_map(Path::components)
+            .any(|c| {
+                prefix.push(c);
+                std::fs::symlink_metadata(self.root.dest().join_path(&prefix))
+                    .is_ok_and(|meta| meta.file_type().is_symlink())
+            })
     }
 
     /// Opens a hardlink target through its resolved, symlink-free location:
@@ -449,6 +497,15 @@ impl HostTarget<'_> {
             Err(e) => Err(ArchiveError::Io(e)),
         }
     }
+}
+
+/// A hardlink's content source, as `fstat` saw it.
+struct OpenedTarget {
+    file: File,
+    len: u64,
+    /// The permission bits (including setuid, setgid and sticky); `None` where
+    /// the platform has none.
+    mode: Option<u32>,
 }
 
 /// Replaces an I/O `NotFound` with `missing()`; any other error is unchanged.

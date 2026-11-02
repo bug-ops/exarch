@@ -997,17 +997,15 @@ fn hardlink_target_changed(error: CopyError) -> ArchiveError {
 /// for that many bytes, so a target that grew after the `fstat` fails closed
 /// instead of writing past the charged permit, and one that shrank fails too.
 ///
-/// On Unix, `from`'s permission bits are copied to `to` afterward, matching
-/// `std::fs::copy`'s behavior. `from`'s permissions were already sanitized
-/// when the target file was extracted as a regular file (setuid/setgid
-/// stripped), so re-applying them to the brand-new `to` here does not
-/// reintroduce anything unsanitized.
+/// Permissions are not copied here: the caller creates `to` with the
+/// sanitized mode of the target before any byte is written (a pre-existing
+/// target in the destination can carry setuid, setgid or world-write bits that
+/// extraction never sanitized).
 ///
 /// # Errors
 ///
 /// Returns `SecurityViolation` if the target's length differs from
-/// `expected_len`, and an I/O error if the copy or (on Unix) applying
-/// permissions fails.
+/// `expected_len`, and an I/O error if the copy fails.
 pub fn copy_file_content_with_permit(
     mut from: File,
     mut to: File,
@@ -1015,16 +1013,8 @@ pub fn copy_file_content_with_permit(
     copy_buffer: &mut CopyBuffer,
     _permit: QuotaPermit,
 ) -> Result<u64> {
-    let bytes_copied = copy_bounded(&mut from, &mut to, copy_buffer, Some(expected_len))
-        .map_err(hardlink_target_changed)?;
-
-    #[cfg(unix)]
-    {
-        let permissions = from.metadata()?.permissions();
-        to.set_permissions(permissions)?;
-    }
-
-    Ok(bytes_copied)
+    copy_bounded(&mut from, &mut to, copy_buffer, Some(expected_len))
+        .map_err(hardlink_target_changed)
 }
 
 #[cfg(test)]

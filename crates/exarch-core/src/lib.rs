@@ -164,6 +164,7 @@ pub use security::boundary::validate_config_entry;
 /// archive pipeline. Shared by `exarch-python` and `exarch-node`.
 pub use security::boundary::validate_raw_path_str;
 pub use security::fs_view::PathModel;
+pub use sink::CallbackSink;
 pub use sink::EntrySink;
 pub use sink::MemoryEntry;
 pub use sink::MemoryEntryKind;

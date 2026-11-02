@@ -28,7 +28,7 @@ impl FailureSlot {
     /// Stores `err` unless an earlier failure is held, and returns the
     /// `io::Error` for the core. The kind is never `Interrupted` or
     /// `WouldBlock`, so `read_exact` and `io::copy` cannot retry into Python.
-    fn record(&self, err: PyErr) -> io::Error {
+    pub fn record(&self, err: PyErr) -> io::Error {
         let io_error = io::Error::other(format!("file object failed: {err}"));
         self.lock().get_or_insert(err);
         io_error

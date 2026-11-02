@@ -1,21 +1,24 @@
 //! Parent-directory creation that never walks through a link it did not vet.
 //!
-//! Every component below the destination is inspected with `lstat` on every
-//! call and created with a plain `mkdir`, so a symlink planted in the
-//! destination is refused instead of followed, and nothing is remembered
-//! between entries that a later swap could invalidate.
+//! The walk starts at the destination's pinned directory handle and descends
+//! one component at a time with `openat(NOFOLLOW)`, creating missing
+//! components with `mkdirat`. Every step operates on the handle the previous
+//! step returned, so a symlink swapped in for an already vetted component
+//! cannot redirect what follows, and nothing is remembered between entries.
+//! The returned [`VettedDir`] is the handle the caller writes through.
 //!
-//! # Residual TOCTOU
+//! The walk holds at most two descriptors: the current directory and the one
+//! being opened.
 //!
-//! The check is path-based: a local attacker who can write inside the
-//! destination while an entry is being written can still swap a vetted
-//! component for a symlink between the check and the `open`/`symlink` that
-//! follows it (`O_NOFOLLOW` covers only the last component). Closing that
-//! window needs `openat`-relative writes from a pinned directory descriptor.
+//! # Failure handling
+//!
+//! A failed open is classified by `fstatat(NOFOLLOW)`, not by `errno`, because
+//! platforms disagree on what a directory open of a symlink reports. A missing
+//! component is created and opened once more; a second failure, or any
+//! failure whose probe finds nothing to blame, returns the original I/O error
+//! so an attacker who removes and re-creates entries cannot make the walk
+//! retry forever.
 
-use std::fs;
-use std::io;
-use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -24,8 +27,11 @@ use crate::PolicySetting;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::config::Validated;
+use crate::formats::pinned_dir::Leaf;
+use crate::formats::pinned_dir::PinnedRoot;
+use crate::formats::pinned_dir::VettedDir;
+use crate::security::fs_view::Occupant;
 use crate::security::fs_view::ParentBlocker;
-use crate::types::DestDir;
 
 /// What an existing symlink among the parent components may be.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,6 +53,23 @@ impl LinkPolicy {
     }
 }
 
+/// What a walk does with a component that does not exist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Missing {
+    Create,
+    Fail,
+}
+
+/// Which symlink rule a walk applies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Links {
+    /// The walker's configured [`LinkPolicy`].
+    Policy,
+    /// Any symlink is a blocker; used to re-walk a path that was already
+    /// resolved to a symlink-free form.
+    Strict,
+}
+
 /// Creates and vets the directories that archive entries are written into.
 #[derive(Debug, Clone, Copy)]
 pub struct DirWalker {
@@ -61,7 +84,8 @@ impl DirWalker {
         }
     }
 
-    /// Creates `dest/rel` and every missing ancestor, vetting each component.
+    /// Creates `dest/rel` and every missing ancestor, vetting each component,
+    /// and returns a handle on the directory.
     ///
     /// # Errors
     ///
@@ -71,86 +95,166 @@ impl DirWalker {
     /// and an I/O error when a component is a file or cannot be created. A
     /// blocking component is reported against `rel` with the same text and
     /// category as `verify`.
-    pub fn ensure_dir(self, dest: &DestDir, rel: &Path) -> Result<()> {
-        self.walk(dest, rel, rel)
+    pub(crate) fn ensure_dir(self, root: &PinnedRoot, rel: &Path) -> Result<VettedDir> {
+        self.descend(root, rel, rel, Missing::Create, Links::Policy)
     }
 
-    /// Creates the parent directory of `dest/rel` like [`Self::ensure_dir`].
+    /// Creates the parent directory of `dest/rel` like [`Self::ensure_dir`]
+    /// and returns it with the name of the entry inside it.
     ///
     /// # Errors
     ///
-    /// Same as [`Self::ensure_dir`].
-    pub fn ensure_parent(self, dest: &DestDir, rel: &Path) -> Result<()> {
-        rel.parent()
-            .map_or(Ok(()), |parent| self.walk(dest, parent, rel))
+    /// Same as [`Self::ensure_dir`], plus `PathTraversal` when `rel` does not
+    /// end in a normal name.
+    pub(crate) fn ensure_parent<'p>(
+        self,
+        root: &PinnedRoot,
+        rel: &'p Path,
+    ) -> Result<(VettedDir, Leaf<'p>)> {
+        let (parent, leaf) = Leaf::split(rel)?;
+        let dir = self.descend(root, parent, rel, Missing::Create, Links::Policy)?;
+        Ok((dir, leaf))
     }
 
-    fn walk(self, dest: &DestDir, dir: &Path, entry: &Path) -> Result<()> {
-        let mut current = dest.as_path().to_path_buf();
+    /// Opens the parent directory of `dest/rel` without creating anything.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::ensure_parent`]; a missing component is an I/O error of
+    /// kind `NotFound`.
+    pub(crate) fn open_parent<'p>(
+        self,
+        root: &PinnedRoot,
+        rel: &'p Path,
+    ) -> Result<(VettedDir, Leaf<'p>)> {
+        let (parent, leaf) = Leaf::split(rel)?;
+        let dir = self.descend(root, parent, rel, Missing::Fail, Links::Policy)?;
+        Ok((dir, leaf))
+    }
+
+    /// Like [`Self::open_parent`], but any symlink on the way is refused. For
+    /// a path that was resolved through symlinks and is expected to be free of
+    /// them.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::open_parent`].
+    pub(crate) fn open_resolved_parent<'p>(
+        self,
+        root: &PinnedRoot,
+        rel: &'p Path,
+    ) -> Result<(VettedDir, Leaf<'p>)> {
+        let (parent, leaf) = Leaf::split(rel)?;
+        let dir = self.descend(root, parent, rel, Missing::Fail, Links::Strict)?;
+        Ok((dir, leaf))
+    }
+
+    fn descend(
+        self,
+        root: &PinnedRoot,
+        dir: &Path,
+        entry: &Path,
+        missing: Missing,
+        links: Links,
+    ) -> Result<VettedDir> {
+        let mut walked = PathBuf::new();
+        let mut current: Option<VettedDir> = None;
         for component in dir.components() {
-            match component {
-                Component::Normal(name) => current.push(name),
-                Component::CurDir => continue,
-                Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
-                    return Err(ArchiveError::PathTraversal {
-                        path: dir.to_path_buf(),
-                    });
+            let Some(leaf) = Leaf::from_component(component) else {
+                if matches!(component, std::path::Component::CurDir) {
+                    continue;
                 }
+                return Err(ArchiveError::PathTraversal {
+                    path: dir.to_path_buf(),
+                });
+            };
+            walked.push(leaf.as_os_str());
+            let parent = current.as_ref().unwrap_or_else(|| root.dir());
+            let next = self.step(root, parent, leaf, &walked, entry, missing, links)?;
+            current = Some(next);
+        }
+        match current {
+            Some(dir) => Ok(dir),
+            None => Ok(root.dir().reopen()?),
+        }
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the walk state is threaded through unchanged; a parameter struct adds indirection"
+    )]
+    fn step(
+        self,
+        root: &PinnedRoot,
+        parent: &VettedDir,
+        leaf: Leaf<'_>,
+        walked: &Path,
+        entry: &Path,
+        missing: Missing,
+        links: Links,
+    ) -> Result<VettedDir> {
+        let mut err = match parent.open_dir(leaf) {
+            Ok(dir) => return Ok(dir),
+            Err(e) => e,
+        };
+        if err.kind() == std::io::ErrorKind::NotFound && missing == Missing::Create {
+            match parent.make_dir(leaf) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(e.into()),
             }
-            self.vet_or_create(dest, &current, entry)?;
+            err = match parent.open_dir(leaf) {
+                Ok(dir) => return Ok(dir),
+                Err(e) => e,
+            };
         }
-        Ok(())
-    }
-
-    fn vet_or_create(self, dest: &DestDir, dir: &Path, entry: &Path) -> Result<()> {
-        match fs::symlink_metadata(dir) {
-            Ok(meta) => self.vet(dest, dir, entry, meta.file_type()),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => match fs::create_dir(dir) {
-                Ok(()) => Ok(()),
-                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-                    self.vet(dest, dir, entry, fs::symlink_metadata(dir)?.file_type())
-                }
-                Err(e) => Err(e.into()),
-            },
-            Err(e) => Err(e.into()),
+        match parent.probe(leaf) {
+            Ok(Some(Occupant::Symlink)) => self.follow(root, walked, entry, links),
+            Ok(Some(Occupant::File)) => Err(ParentBlocker::File.error(entry, walked)),
+            Ok(Some(Occupant::Directory) | None) | Err(_) => Err(err.into()),
         }
     }
 
-    fn vet(self, dest: &DestDir, dir: &Path, entry: &Path, file_type: fs::FileType) -> Result<()> {
-        let parent = relative_to(dest, dir);
-        if file_type.is_dir() {
-            return Ok(());
-        }
-        if !file_type.is_symlink() {
-            return Err(ParentBlocker::File.error(entry, &parent));
+    /// Resolves the symlink component `walked` under the active rule.
+    fn follow(
+        self,
+        root: &PinnedRoot,
+        walked: &Path,
+        entry: &Path,
+        links: Links,
+    ) -> Result<VettedDir> {
+        if links == Links::Strict {
+            return Err(ParentBlocker::Symlink.error(entry, walked));
         }
         match self.links {
             LinkPolicy::Refuse => Err(ArchiveError::relaxable_violation(
                 PolicySetting::Symlinks,
-                format!("path component is a symlink: {}", parent.display()),
+                format!("path component is a symlink: {}", walked.display()),
             )),
-            LinkPolicy::ContainedOnly => match fs::canonicalize(dir) {
-                Ok(resolved) if !resolved.starts_with(dest.as_path()) => {
-                    Err(ParentBlocker::Escape.error(entry, &parent))
+            LinkPolicy::ContainedOnly => {
+                let dest = root.dest().as_path();
+                match std::fs::canonicalize(dest.join(walked)) {
+                    Ok(resolved) if !resolved.starts_with(dest) => {
+                        Err(ParentBlocker::Escape.error(entry, walked))
+                    }
+                    Ok(resolved) if resolved.is_dir() => {
+                        let inside = resolved.strip_prefix(dest).unwrap_or(&resolved);
+                        self.descend(root, inside, entry, Missing::Fail, Links::Strict)
+                    }
+                    Ok(_) | Err(_) => Err(ParentBlocker::Symlink.error(entry, walked)),
                 }
-                Ok(resolved) if resolved.is_dir() => Ok(()),
-                Ok(_) | Err(_) => Err(ParentBlocker::Symlink.error(entry, &parent)),
-            },
+            }
         }
     }
-}
-
-fn relative_to(dest: &DestDir, path: &Path) -> PathBuf {
-    path.strip_prefix(dest.as_path())
-        .unwrap_or(path)
-        .to_path_buf()
 }
 
 #[cfg(all(test, unix))]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::types::DestDir;
     use std::assert_matches;
+    use std::fs;
     use std::os::unix::fs::symlink;
     use tempfile::TempDir;
 
@@ -162,7 +266,7 @@ mod tests {
         DirWalker::new(&config)
     }
 
-    fn dest_with_outside() -> (TempDir, DestDir, PathBuf) {
+    fn dest_with_outside() -> (TempDir, PinnedRoot, PathBuf) {
         let root = TempDir::new().unwrap();
         let dest = root.path().join("dest");
         let outside = root.path().join("outside");
@@ -170,7 +274,7 @@ mod tests {
         fs::create_dir(&outside).unwrap();
         (
             root,
-            DestDir::new(dest).unwrap(),
+            PinnedRoot::open(DestDir::new(dest).unwrap()).unwrap(),
             outside.canonicalize().unwrap(),
         )
     }
@@ -186,21 +290,37 @@ mod tests {
             .ensure_parent(&dest, Path::new("a/b/c/f.txt"))
             .unwrap();
 
-        assert!(dest.as_path().join("a/b/c").is_dir());
+        assert!(dest.dest().as_path().join("a/b/c").is_dir());
     }
 
     #[test]
     fn parent_of_a_top_level_name_is_the_destination() {
         let (_root, dest, _) = dest_with_outside();
-        walker(false)
+        let (dir, leaf) = walker(false)
             .ensure_parent(&dest, Path::new("f.txt"))
             .unwrap();
+
+        dir.create_new(leaf, None).unwrap();
+
+        assert!(dest.dest().as_path().join("f.txt").is_file());
+    }
+
+    #[test]
+    fn open_parent_does_not_create_and_reports_not_found() {
+        let (_root, dest, _) = dest_with_outside();
+
+        let err = walker(false)
+            .open_parent(&dest, Path::new("missing/f"))
+            .unwrap_err();
+
+        assert_matches!(&err, ArchiveError::Io(e) if e.kind() == std::io::ErrorKind::NotFound);
+        assert!(!dest.dest().as_path().join("missing").exists());
     }
 
     #[test]
     fn refuses_a_symlink_component_without_creating_below_it() {
         let (_root, dest, outside) = dest_with_outside();
-        symlink(&outside, dest.as_path().join("redirect")).unwrap();
+        symlink(&outside, dest.dest().as_path().join("redirect")).unwrap();
 
         let err = walker(false)
             .ensure_dir(&dest, Path::new("redirect/sub"))
@@ -214,7 +334,7 @@ mod tests {
     fn refuses_a_symlink_to_a_file_component() {
         let (_root, dest, outside) = dest_with_outside();
         fs::write(outside.join("f"), b"x").unwrap();
-        symlink(outside.join("f"), dest.as_path().join("link")).unwrap();
+        symlink(outside.join("f"), dest.dest().as_path().join("link")).unwrap();
 
         assert!(
             walker(false)
@@ -226,7 +346,7 @@ mod tests {
     #[test]
     fn contained_policy_refuses_an_escaping_symlink() {
         let (_root, dest, outside) = dest_with_outside();
-        symlink(&outside, dest.as_path().join("redirect")).unwrap();
+        symlink(&outside, dest.dest().as_path().join("redirect")).unwrap();
 
         let err = walker(true)
             .ensure_dir(&dest, Path::new("redirect/sub"))
@@ -239,20 +359,20 @@ mod tests {
     #[test]
     fn contained_policy_accepts_a_link_to_a_directory_inside_dest() {
         let (_root, dest, _) = dest_with_outside();
-        fs::create_dir(dest.as_path().join("real")).unwrap();
-        symlink("real", dest.as_path().join("alias")).unwrap();
+        fs::create_dir(dest.dest().as_path().join("real")).unwrap();
+        symlink("real", dest.dest().as_path().join("alias")).unwrap();
 
         walker(true)
             .ensure_dir(&dest, Path::new("alias/sub"))
             .unwrap();
 
-        assert!(dest.as_path().join("real/sub").is_dir());
+        assert!(dest.dest().as_path().join("real/sub").is_dir());
     }
 
     #[test]
     fn contained_policy_refuses_a_dangling_symlink() {
         let (_root, dest, _) = dest_with_outside();
-        symlink("missing", dest.as_path().join("dangling")).unwrap();
+        symlink("missing", dest.dest().as_path().join("dangling")).unwrap();
 
         assert!(
             walker(true)
@@ -264,7 +384,7 @@ mod tests {
     #[test]
     fn refuses_a_regular_file_component() {
         let (_root, dest, _) = dest_with_outside();
-        fs::write(dest.as_path().join("f"), b"x").unwrap();
+        fs::write(dest.dest().as_path().join("f"), b"x").unwrap();
 
         let err = walker(false)
             .ensure_dir(&dest, Path::new("f/x"))
@@ -288,9 +408,58 @@ mod tests {
         let walker = walker(false);
         walker.ensure_dir(&dest, Path::new("d")).unwrap();
 
-        fs::remove_dir(dest.as_path().join("d")).unwrap();
-        symlink(&outside, dest.as_path().join("d")).unwrap();
+        fs::remove_dir(dest.dest().as_path().join("d")).unwrap();
+        symlink(&outside, dest.dest().as_path().join("d")).unwrap();
 
         assert!(walker.ensure_parent(&dest, Path::new("d/f")).is_err());
+    }
+
+    #[test]
+    fn a_swap_after_a_walk_does_not_redirect_writes_through_the_returned_handle() {
+        let (_root, dest, outside) = dest_with_outside();
+        let base = dest.dest().as_path().to_path_buf();
+        let (dir, leaf) = walker(false)
+            .ensure_parent(&dest, Path::new("a/b/f"))
+            .unwrap();
+
+        fs::rename(base.join("a"), base.join("a_moved")).unwrap();
+        symlink(&outside, base.join("a")).unwrap();
+        dir.create_new(leaf, None).unwrap();
+
+        assert!(base.join("a_moved/b/f").is_file());
+        assert_eq!(fs::read_dir(&outside).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn components_swapped_while_walking_never_write_outside() {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::atomic::Ordering;
+
+        let (_root, dest, outside) = dest_with_outside();
+        let base = dest.dest().as_path().to_path_buf();
+        let stop = AtomicBool::new(false);
+        let walker = walker(false);
+
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                while !stop.load(Ordering::Relaxed) {
+                    let moved = base.join("d_moved");
+                    if fs::rename(base.join("d"), &moved).is_ok() {
+                        let _ = symlink(&outside, base.join("d"));
+                        let _ = fs::remove_file(base.join("d"));
+                        let _ = fs::rename(&moved, base.join("d"));
+                    }
+                }
+            });
+            for i in 0..200 {
+                let rel = PathBuf::from(format!("d/sub/f{i}"));
+                if let Ok((dir, leaf)) = walker.ensure_parent(&dest, &rel) {
+                    let _ = dir.create_new(leaf, None);
+                }
+            }
+            stop.store(true, Ordering::Relaxed);
+        });
+
+        assert_eq!(fs::read_dir(&outside).unwrap().count(), 0);
     }
 }

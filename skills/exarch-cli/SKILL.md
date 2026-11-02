@@ -505,7 +505,7 @@ variation selectors after a Mongolian letter. Anywhere else it is escaped, so `r
 or sparse-file entry whose name ends in `/` and that carries data fails `list`, `verify` and
 `extract` with `InvalidArchive`. The CLI writes nothing in that case: into an existing destination
 `extract` lists the archive first and the list pass fails (verified live: no `partial_report`), and
-into a destination that does not exist yet the atomic single pass rolls back (verified live:
+into a destination that does not exist yet, or with `--atomic`, the atomic single pass rolls back (verified live:
 `out/` is not created, exit `1`, `writes: "rolled_back"` when an earlier entry had been extracted).
 Only the Rust, Node and Python extract entry points, which do not run that pass, report a partial
 extraction with the entries before it kept. A failed `extract --atomic` reports
@@ -513,8 +513,14 @@ extraction with the entries before it kept. A failed `extract --atomic` reports
 
 Note: `extract` lists the archive first (`list_archive()`, sharing `--max-file-count`,
 `--max-total-size`, and `--max-file-size` with the extraction config) to detect output
-conflicts and size the progress bar, except for a TAR (any codec) whose destination does not
-exist yet and whose parent directory does. That run skips the list pass, which for a compressed
+conflicts and size the progress bar, except for a TAR (any codec) extracted with `--atomic`
+(including `--atomic --force` over an existing destination), or whose destination does not
+exist yet and whose parent directory does. `--atomic` decodes a TAR once: the list pass would
+only size the progress bar, so it is skipped. A refusal then comes from the staged extraction
+itself and is reported as `writes: "rolled_back"` with a partial report (verified live over an
+existing destination, exit `1`, destination unchanged), and the staging directory in the
+destination's parent filesystem can grow up to `--max-total-size` before a quota refusal.
+Those runs skip the list pass, which for a compressed
 TAR is a second full decode, and extracts atomically: a refusal anywhere in the archive leaves
 nothing on disk, creates no parent directory, and reports `writes: "rolled_back"` (with the counts
 of the discarded run) and the extraction's own error text. The progress bar then shows an entry
@@ -524,9 +530,9 @@ decoder error, write failure, larger stream or stricter decoder-memory limit fal
 whose list pass reads headers only; those runs behave as described here.
 A run killed mid-extraction (SIGTERM, Ctrl-C) cannot clean up, so its hidden staging directory
 `.exarch-XXXXXX` stays in the destination's parent and `out/` does not exist; delete the staging
-directory by hand. Quota violations (file count, total size, per-file size)
-are therefore caught during this pre-flight pass and reported as a plain error with **no**
-`partial_report`, since extraction never starts. Only checks that require the real destination
+directory by hand. Without `--atomic` into an existing destination, quota violations (file
+count, total size, per-file size) are therefore caught during this pre-flight pass and
+reported as a plain error with **no** `partial_report`, since extraction never starts. Only checks that require the real destination
 directory — symlink/hardlink escape — can still produce a mid-archive partial extraction.
 
 ### Verified examples

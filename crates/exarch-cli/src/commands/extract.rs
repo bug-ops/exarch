@@ -875,7 +875,10 @@ pub fn execute(
         .with_max_decoder_memory(config.max_decoder_memory)
         .with_banned_path_components(config.banned_path_components.clone());
 
-    let single_pass = is_fresh_destination(&output_dir) && is_tar_archive(&args.archive);
+    // Under `--atomic` the list pass would only size the progress bar: no
+    // conflict check runs and the staged extraction refuses on its own.
+    let single_pass =
+        is_tar_archive(&args.archive) && (args.atomic || is_fresh_destination(&output_dir));
     let listed = if single_pass {
         None
     } else {

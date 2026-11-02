@@ -3,7 +3,6 @@
 use std::path::Path;
 use std::path::PathBuf;
 
-use exarch_core::ArchiveReader;
 use exarch_core::MemoryEntry as CoreMemoryEntry;
 use exarch_core::MemoryExtractRequest;
 use exarch_core::MemoryLimit;
@@ -23,6 +22,7 @@ use napi_derive::napi;
 
 use crate::CoreResult;
 use crate::ProgressCallback;
+use crate::ProgressDispatch;
 use crate::config::CreationConfig;
 use crate::config::ExtractionOptions;
 use crate::config::SecurityConfig;
@@ -36,6 +36,8 @@ use crate::report::CreationReport;
 use crate::report::ExtractionReport;
 use crate::report::unknown_variant;
 use crate::run_with_optional_progress;
+use crate::stream::ArchiveSource;
+use crate::stream::IntoSource;
 use crate::utils::validate_path;
 
 /// The path semantics extraction validates names against.
@@ -73,6 +75,10 @@ pub enum MemoryEntryKind {
     /// A symbolic link, stored as data.
     #[napi(value = "symlink")]
     Symlink,
+    /// A hard link to an already delivered file, by reference; only
+    /// `extractArchiveToCallback` delivers it.
+    #[napi(value = "hardlink")]
+    Hardlink,
 }
 
 /// An entry extracted into memory.
@@ -88,7 +94,9 @@ pub struct MemoryEntry {
     /// Permission bits after setuid and setgid were stripped; only for a file
     /// whose archive carries a mode.
     pub mode: Option<u32>,
-    /// Symlink target as the archive spells it; only for a symlink.
+    /// For a symlink, the target as the archive spells it, relative to the
+    /// link; for a hardlink, the root-relative resolved path of an already
+    /// delivered entry, a file or an earlier hardlink. Absent for other kinds.
     pub target: Option<String>,
 }
 
@@ -124,6 +132,13 @@ impl TryFrom<(PathBuf, CoreMemoryEntry)> for MemoryEntry {
                 mode: None,
                 target: Some(utf8(&target)?),
             },
+            CoreMemoryEntry::Hardlink { target } => Self {
+                path,
+                kind: MemoryEntryKind::Hardlink,
+                data: None,
+                mode: None,
+                target: Some(utf8(&target)?),
+            },
             CoreMemoryEntry::Directory => Self {
                 path,
                 kind: MemoryEntryKind::Directory,
@@ -146,8 +161,8 @@ pub struct MemoryExtraction {
 }
 
 /// The inputs of an extraction into memory, owned so they can cross threads.
-struct MemoryJob<B> {
-    data: B,
+struct MemoryJob<S> {
+    data: S,
     config: exarch_core::SecurityConfig,
     options: exarch_core::ExtractionOptions,
     max_bytes: Option<f64>,
@@ -161,9 +176,9 @@ fn invalid_max_bytes() -> Failure {
     })
 }
 
-impl<B: AsRef<[u8]> + Send> MemoryJob<B> {
+impl<S: IntoSource> MemoryJob<S> {
     fn new(
-        data: B,
+        data: S,
         config: Option<&SecurityConfig>,
         options: Option<&ExtractionOptions>,
         max_bytes: Option<f64>,
@@ -192,9 +207,11 @@ impl<B: AsRef<[u8]> + Send> MemoryJob<B> {
     fn run_with_progress(
         self,
         progress: Option<ThreadsafeFunction<(String, i64, i64, i64)>>,
+        dispatch: ProgressDispatch,
     ) -> CoreResult<MemoryExtraction> {
         let (report, sink) = run_with_optional_progress(
             progress,
+            dispatch,
             |progress| self.extract(progress),
             |source, _| ProgressCallbackError::MemoryExtractionCallback { source },
         )?;
@@ -205,24 +222,32 @@ impl<B: AsRef<[u8]> + Send> MemoryJob<B> {
         self,
         progress: &mut dyn exarch_core::ProgressCallback,
     ) -> CoreResult<(exarch_core::ExtractionReport, MemorySink)> {
-        let limit = self
+        let prepared = self
             .max_bytes
             .map(|bytes| {
                 exact_positive_bytes(bytes)
                     .map(MemoryLimit::new)
                     .ok_or_else(invalid_max_bytes)
             })
-            .transpose()?;
-        let options = SinkOptions::try_from(&self.options)?;
+            .transpose()
+            .and_then(|limit| Ok((limit, SinkOptions::try_from(&self.options)?)));
+        let (limit, options) = match prepared {
+            Ok(prepared) => prepared,
+            Err(failure) => {
+                self.data.abandon();
+                return Err(failure);
+            }
+        };
         let mut request = MemoryExtractRequest::default()
-            .with_config(self.config)
+            .with_config(self.config.clone())
             .with_options(options)
             .with_path_model(self.path_model);
         if let Some(limit) = limit {
             request = request.with_limit(limit);
         }
-        let reader = ArchiveReader::from_bytes(self.data, self.format.map(Into::into))?;
-        Ok(extract_reader_to_memory(reader, &request, progress)?)
+        self.data.run(self.format, |reader| {
+            Ok(extract_reader_to_memory(reader, &request, progress)?)
+        })
     }
 }
 
@@ -282,7 +307,7 @@ fn into_memory_extraction(
 #[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
 pub fn extract_archive_to_memory_with_progress<'env>(
     env: &'env Env,
-    data: Uint8Array,
+    #[napi(ts_arg_type = "Uint8Array | AsyncIterable<Uint8Array>")] data: ArchiveSource,
     config: Option<&SecurityConfig>,
     options: Option<&ExtractionOptions>,
     max_bytes: Option<f64>,
@@ -293,20 +318,13 @@ pub fn extract_archive_to_memory_with_progress<'env>(
     )]
     progress: Option<ProgressCallback>,
 ) -> Result<PromiseRaw<'env, MemoryExtraction>> {
-    let job = MemoryJob::new(
-        data.to_vec(),
-        config,
-        options,
-        max_bytes,
-        path_model,
-        format,
-    );
+    let job = MemoryJob::new(data, config, options, max_bytes, path_model, format);
     let progress = progress.map(|ProgressCallback(tsfn)| tsfn);
 
     spawn_blocking_promise(
         env,
         "archive extraction with progress",
-        move || job.run_with_progress(progress),
+        move || job.run_with_progress(progress, ProgressDispatch::Awaited),
         Ok,
     )
 }
@@ -426,7 +444,9 @@ pub fn create_archive_to_bytes_sync(
 ///
 /// # Arguments
 ///
-/// * `data` - The archive bytes (copied before the call returns)
+/// * `data` - The archive bytes (copied before the call returns), or an
+///   `AsyncIterable<Uint8Array>` (TAR family only), read from a worker thread
+///   and closed (`return()`) however the call ends
 /// * `config` - Optional `SecurityConfig` (uses secure defaults if omitted)
 /// * `options` - Optional `ExtractionOptions` (`atomic` is not supported)
 /// * `maxBytes` - The most bytes to keep: payload (file data, hardlink copies
@@ -454,21 +474,14 @@ pub fn create_archive_to_bytes_sync(
 #[allow(clippy::needless_pass_by_value)]
 pub fn extract_archive_to_memory<'env>(
     env: &'env Env,
-    data: Uint8Array,
+    #[napi(ts_arg_type = "Uint8Array | AsyncIterable<Uint8Array>")] data: ArchiveSource,
     config: Option<&SecurityConfig>,
     options: Option<&ExtractionOptions>,
     max_bytes: Option<f64>,
     path_model: Option<PathModel>,
     format: Option<ArchiveType>,
 ) -> Result<PromiseRaw<'env, MemoryExtraction>> {
-    let job = MemoryJob::new(
-        data.to_vec(),
-        config,
-        options,
-        max_bytes,
-        path_model,
-        format,
-    );
+    let job = MemoryJob::new(data, config, options, max_bytes, path_model, format);
 
     spawn_blocking_promise(env, "archive extraction", move || job.run(), Ok)
 }
@@ -509,6 +522,58 @@ pub fn extract_archive_to_memory_sync(
     let job = MemoryJob::new(&*data, config, options, max_bytes, path_model, format);
 
     run_sync(env, "archive extraction", move || job.run())
+}
+
+/// Extract an archive held in memory into memory with a progress callback
+/// (sync).
+///
+/// Blocks the event loop until extraction completes. Same as
+/// `extractArchiveToMemoryWithProgress`, except that the calls to `progress`
+/// are queued and arrive only after this function has returned; a throw there
+/// becomes an `uncaughtException`, not an error from here (see
+/// `createArchiveWithProgressSync`).
+///
+/// # Arguments
+///
+/// The arguments of `extractArchiveToMemorySync`, then:
+///
+/// * `progress` - Optional progress callback
+///
+/// # Returns
+///
+/// `MemoryExtraction` with the report and the entries
+///
+/// # Errors
+///
+/// The errors of `extractArchiveToMemorySync`.
+///
+/// # Examples
+///
+/// ```javascript
+/// const { entries } = extractArchiveToMemoryWithProgressSync(
+///   fs.readFileSync('a.tar.gz'),
+///   null, null, null, null, null,
+///   (err, [path, total, current]) => console.log(`${current}/${total}: ${path}`),
+/// );
+/// ```
+#[napi]
+// The JS signature is positional: `extractArchiveToMemorySync`'s arguments plus `progress`.
+#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
+pub fn extract_archive_to_memory_with_progress_sync(
+    env: Env,
+    data: Uint8Array,
+    config: Option<&SecurityConfig>,
+    options: Option<&ExtractionOptions>,
+    max_bytes: Option<f64>,
+    path_model: Option<PathModel>,
+    format: Option<ArchiveType>,
+    progress: Option<ThreadsafeFunction<(String, i64, i64, i64)>>,
+) -> Result<MemoryExtraction> {
+    let job = MemoryJob::new(&*data, config, options, max_bytes, path_model, format);
+
+    run_sync(env, "archive extraction with progress", move || {
+        job.run_with_progress(progress, ProgressDispatch::Deferred)
+    })
 }
 
 #[cfg(test)]

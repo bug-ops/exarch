@@ -59,8 +59,10 @@ use crate::inspection::list::list_tar_stream;
 /// Beyond it the spool is dropped and extraction decodes again. Data after the
 /// TAR end marker is decoded into the spool up to this limit before the
 /// listing returns, without progress output (about 4 s for bzip2 at the cap).
-/// TODO(critic): decoded TAR streams over this limit still decode twice (#807
-/// follow-up).
+///
+/// Decoded streams over the limit decode twice. That cost is accepted: a larger
+/// spool would be an unbounded temporary file (RAM on a tmpfs). A caller that
+/// extracts atomically can skip the list pass and decode once.
 const REPLAY_LIMIT: u64 = 256 * 1024 * 1024;
 
 const SPOOL_BUFFER: usize = 64 * 1024;
@@ -244,11 +246,19 @@ fn list_with_limit(
 /// Whether the decoded stream can fit the limit, judged from the file alone;
 /// a larger one would pay for a spool that is then thrown away. Only a hint:
 /// a wrong guess costs the optimisation or a wasted spool, never correctness.
+///
+/// A gzip trailer that cannot describe the file (a decoded size under half the
+/// compressed length, as a tiny last member after a large one gives) says
+/// nothing about the whole stream and counts as too large. A missing trailer is
+/// not a reason to skip the spool.
 fn fits(archive: &Path, codec: CompressionCodec, limit: u64) -> bool {
-    let compressed_fits = std::fs::metadata(archive).is_ok_and(|m| m.len() <= limit);
-    compressed_fits
+    let Ok(compressed_len) = std::fs::metadata(archive).map(|m| m.len()) else {
+        return false;
+    };
+    compressed_len <= limit
         && (codec != CompressionCodec::Gzip
-            || gzip_decoded_size(archive).is_none_or(|size| size <= limit))
+            || gzip_decoded_size(archive)
+                .is_none_or(|size| size.saturating_mul(2) >= compressed_len && size <= limit))
 }
 
 /// The decoded size a gzip file declares in its trailer (modulo 2^32, and of
@@ -498,6 +508,32 @@ mod tests {
         assert!(!fits(&archive, CompressionCodec::Gzip, 4096));
         assert!(fits(&archive, CompressionCodec::Gzip, REPLAY_LIMIT));
         assert!(fits(&archive, CompressionCodec::Bzip2, 4096));
+    }
+
+    #[test]
+    fn a_gzip_trailer_of_a_tiny_last_member_does_not_vouch_for_the_stream() {
+        let dir = TempDir::new().unwrap();
+        // High-entropy content keeps the first member's compressed size near
+        // its decoded size, far above twice the tiny member's trailer size.
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let noise: Vec<u8> = (0..256 * 1024)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state.to_le_bytes()[0]
+            })
+            .collect();
+        let large = encoded(
+            CompressionCodec::Gzip,
+            &create_test_tar(vec![("big.bin", &noise)]),
+        );
+        let tiny = encoded(CompressionCodec::Gzip, b"x");
+        let archive = write_archive(&dir, CompressionCodec::Gzip, &[large, tiny].concat());
+
+        assert_eq!(gzip_decoded_size(&archive), Some(1));
+        assert!(!fits(&archive, CompressionCodec::Gzip, REPLAY_LIMIT));
+        assert!(list(&archive, REPLAY_LIMIT).spool.is_none());
     }
 
     #[test]

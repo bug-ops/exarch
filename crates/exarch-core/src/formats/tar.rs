@@ -436,6 +436,8 @@ impl<R: Read> TarArchive<R> {
             }
         }
 
+        // TODO(#838): the compressed stream's trailer (gzip CRC/ISIZE) is never
+        // read after the end marker, so corrupt data extracts silently.
         if let Err(e) = entries.finish() {
             ctx.push_skip_warnings();
             return Err(ArchiveError::partial_or(
@@ -2064,6 +2066,248 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    fn hardlink_config() -> SecurityConfig<Validated> {
+        let mut config = SecurityConfig::default();
+        config.allowed.hardlinks = true;
+        config.validate().expect("valid config")
+    }
+
+    /// Issue #818: a hardlink target swapped for a FIFO between the two passes
+    /// must be refused without blocking on the open or the read.
+    #[test]
+    #[cfg(unix)]
+    fn test_hardlink_target_swapped_for_fifo_is_refused_without_blocking() {
+        let temp = TempDir::new().unwrap();
+        let dest = temp.path().to_path_buf();
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        std::thread::spawn(move || {
+            let config = hardlink_config();
+            let outcome = (|| -> std::result::Result<Result<()>, String> {
+                let mut target = HostTarget::create(&dest, &config).map_err(|e| e.to_string())?;
+                let validated = target
+                    .validate_hardlink(
+                        Path::new("loot.txt"),
+                        Path::new("pipe"),
+                        EntrySize {
+                            uncompressed: 0,
+                            compressed: None,
+                        },
+                    )
+                    .map_err(|e| e.to_string())?;
+                let made = std::process::Command::new("mkfifo")
+                    .arg(dest.join("pipe"))
+                    .status()
+                    .map_err(|e| e.to_string())?;
+                if !made.success() {
+                    return Err("mkfifo failed".into());
+                }
+                let mut report = ExtractionReport::new();
+                let mut progress = crate::NoopProgress;
+                let (mut skips, mut link_skips) = (0u64, 0u64);
+                let mut tally = Tally {
+                    report: &mut report,
+                    options: SinkOptions::default(),
+                    duplicate_skips: &mut skips,
+                    progress: &mut progress,
+                };
+                Ok(target.hardlink(
+                    &validated.link,
+                    &validated.target,
+                    validated.counted,
+                    &mut tally,
+                    &mut link_skips,
+                ))
+            })();
+            let _ = tx.send(outcome);
+        });
+
+        let outcome = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("hardlink must not block on a FIFO target")
+            .expect("setup");
+        let err = outcome.expect_err("a FIFO target must be refused");
+        assert_matches!(&err, ArchiveError::InvalidArchive(m) if m.contains("not a regular file"));
+        assert!(!temp.path().join("loot.txt").exists());
+    }
+
+    #[cfg(unix)]
+    fn hardlink_only_tar(link_name: &str) -> Vec<u8> {
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut link_header = tar::Header::new_gnu();
+        link_header.set_entry_type(tar::EntryType::Link);
+        link_header.set_link_name(link_name).unwrap();
+        link_header.set_size(0);
+        link_header.set_cksum();
+        builder
+            .append_data(&mut link_header, "h", &[] as &[u8])
+            .unwrap();
+        builder.into_inner().unwrap()
+    }
+
+    #[cfg(unix)]
+    fn extract_hardlink_only(dest: &Path, link_name: &str) -> Result<ExtractionReport> {
+        TarArchive::new(Cursor::new(hardlink_only_tar(link_name))).extract(
+            dest,
+            &hardlink_config(),
+            &ExtractionOptions::default(),
+            &mut crate::NoopProgress,
+        )
+    }
+
+    /// Issue #818: a pre-existing symlink inside `dest` is read through for a
+    /// hardlink target however the path is spelled (a directory in the chain,
+    /// `..` after a directory, or the leaf), as before the pinned directories.
+    #[test]
+    #[cfg(unix)]
+    fn test_hardlink_target_through_preexisting_symlinks_is_copied() {
+        for spelling in ["alias/f.txt", "x/../alias/f.txt", "lnk"] {
+            let temp = TempDir::new().unwrap();
+            std::fs::create_dir(temp.path().join("real")).unwrap();
+            std::fs::create_dir(temp.path().join("x")).unwrap();
+            std::fs::write(temp.path().join("real/f.txt"), b"data").unwrap();
+            std::os::unix::fs::symlink("real", temp.path().join("alias")).unwrap();
+            std::os::unix::fs::symlink("real/f.txt", temp.path().join("lnk")).unwrap();
+
+            extract_hardlink_only(temp.path(), spelling).unwrap();
+
+            assert_eq!(
+                std::fs::read(temp.path().join("h")).unwrap(),
+                b"data",
+                "{spelling}"
+            );
+            assert!(
+                !std::fs::symlink_metadata(temp.path().join("h"))
+                    .unwrap()
+                    .file_type()
+                    .is_symlink(),
+                "{spelling}"
+            );
+        }
+    }
+
+    /// The copy of a pre-existing target never gets wider permissions than the
+    /// target, and never setuid, setgid or (unless allowed) world-writable
+    /// bits.
+    #[test]
+    #[cfg(unix)]
+    fn test_hardlink_copy_sanitizes_the_mode_of_a_preexisting_target() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let allow_world_writable = {
+            let mut config = SecurityConfig::default();
+            config.allowed.hardlinks = true;
+            config.allowed.world_writable = true;
+            config.validate().unwrap()
+        };
+        for (target_mode, config, expected) in [
+            (0o4755, hardlink_config(), 0o755),
+            (0o2755, hardlink_config(), 0o755),
+            (0o777, hardlink_config(), 0o775),
+            (0o777, allow_world_writable, 0o777),
+            (0o600, hardlink_config(), 0o600),
+            (0o444, hardlink_config(), 0o444),
+        ] {
+            let temp = TempDir::new().unwrap();
+            let target = temp.path().join("t");
+            std::fs::write(&target, b"data").unwrap();
+            std::fs::set_permissions(&target, std::fs::Permissions::from_mode(target_mode))
+                .unwrap();
+
+            TarArchive::new(Cursor::new(hardlink_only_tar("t")))
+                .extract(
+                    temp.path(),
+                    &config,
+                    &ExtractionOptions::default(),
+                    &mut crate::NoopProgress,
+                )
+                .unwrap();
+
+            let copy = std::fs::metadata(temp.path().join("h")).unwrap();
+            assert_eq!(
+                copy.permissions().mode() & 0o7777,
+                expected,
+                "target mode {target_mode:o}"
+            );
+            assert_eq!(std::fs::read(temp.path().join("h")).unwrap(), b"data");
+        }
+    }
+
+    /// Issue #818: reading through a pre-existing symlink never leaves `dest`.
+    #[test]
+    #[cfg(unix)]
+    fn test_hardlink_target_through_an_escaping_symlink_is_refused() {
+        let root = TempDir::new().unwrap();
+        let dest = root.path().join("dest");
+        let outside = root.path().join("outside");
+        std::fs::create_dir(&dest).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        std::os::unix::fs::symlink(&outside, dest.join("esc")).unwrap();
+        std::os::unix::fs::symlink(outside.join("secret.txt"), dest.join("leaf")).unwrap();
+
+        for spelling in ["esc/secret.txt", "leaf"] {
+            let result = extract_hardlink_only(&dest, spelling);
+
+            assert!(result.is_err(), "{spelling}: {result:?}");
+            assert!(!dest.join("h").exists(), "{spelling}");
+        }
+    }
+
+    /// Issue #818: a parent directory swapped for a symlink while a 200-entry
+    /// archive extracts must never put a file outside the destination.
+    #[test]
+    #[cfg(unix)]
+    fn test_components_swapped_during_extraction_never_write_outside() {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::atomic::Ordering;
+
+        let root = TempDir::new().unwrap();
+        let dest = root.path().join("dest");
+        let outside = root.path().join("outside");
+        std::fs::create_dir(&dest).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+
+        let mut builder = tar::Builder::new(Vec::new());
+        for i in 0..200 {
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Regular);
+            header.set_size(4);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, format!("d/sub/f{i}"), b"data" as &[u8])
+                .unwrap();
+        }
+        let data = builder.into_inner().unwrap();
+        let config = SecurityConfig::default().validate().expect("valid config");
+        let stop = AtomicBool::new(false);
+
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                while !stop.load(Ordering::Relaxed) {
+                    let moved = dest.join("d_moved");
+                    if std::fs::rename(dest.join("d"), &moved).is_ok() {
+                        let _ = std::os::unix::fs::symlink(&outside, dest.join("d"));
+                        let _ = std::fs::remove_file(dest.join("d"));
+                        let _ = std::fs::rename(&moved, dest.join("d"));
+                    }
+                }
+            });
+            let mut archive = TarArchive::new(Cursor::new(data.clone()));
+            let _ = archive.extract(
+                &dest,
+                &config,
+                &ExtractionOptions::default(),
+                &mut crate::NoopProgress,
+            );
+            stop.store(true, Ordering::Relaxed);
+        });
+
+        assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
+    }
+
     /// Builds a TAR with a regular file entry (`target.txt`) followed by a
     /// hardlink entry (`hardlink.txt`) pointing at it.
     #[cfg(unix)]
@@ -2201,8 +2445,8 @@ mod tests {
     /// `create_hardlink` at all — asserting against that scenario would
     /// pass identically on the pre-#467-fix code and prove nothing about
     /// this change. Simulating the race directly is the only way to
-    /// exercise `open_no_follow`'s `ErrorKind::FilesystemLoop` retry path
-    /// and its `resolve_through_symlinks` re-validation.
+    /// exercise the symlink-at-target re-resolution path of
+    /// `HostTarget::hardlink` and its `resolve_through_symlinks` re-validation.
     #[test]
     #[cfg(unix)]
     fn test_hardlink_target_swapped_for_escaping_symlink_between_passes() {
@@ -2309,7 +2553,7 @@ mod tests {
     }
 
     /// Regression test for issue #467's
-    /// `open_no_follow`/`ErrorKind::FilesystemLoop` re-resolution path: a
+    /// symlink-at-target re-resolution path of `HostTarget::hardlink`: a
     /// hardlink whose target is itself a symlink pointing *inside* `dest`
     /// (a legitimate, common archive shape — two links sharing an inode,
     /// where the second is stored as a `Symlink` entry rather than a second

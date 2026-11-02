@@ -159,7 +159,7 @@ const report = await verifyArchiveBytes(data);
 
 const result = await extractArchiveToMemory(data, null, null, 64 * 1024 * 1024);
 for (const entry of result.entries) {
-  console.log(entry.path, entry.kind); // 'file', 'directory' or 'symlink'
+  console.log(entry.path, entry.kind); // 'file', 'directory' or 'symlink'; 'hardlink' only from extractArchiveToCallback
   if (entry.kind === 'file') {
     const content = Buffer.from(entry.data); // entry.data is a Uint8Array
   }
@@ -177,6 +177,58 @@ their last argument, called with `(err, [path, total, current, bytesWritten])`;
 `current` counts from 1 and `total` is 0 for TAR. A throwing callback does not
 abort the run; if the run succeeded the promise rejects with
 `PROGRESS_CALLBACK_ERROR` and the result is discarded.
+
+The async forms of these functions (and of their `WithProgress` variants) also
+take an `AsyncIterable<Uint8Array>` as the archive, for example
+`fs.createReadStream(path)` or an HTTP response body. It must be a TAR family
+format (plain or compressed). It is read from a worker thread, one chunk at a
+time, and closed (`return()`) however the call ends, so a refused archive does
+not leave the stream open. A throwing or rejecting stream rejects with
+`STREAM_ERROR` and the thrown value as `cause`. The sync functions take bytes
+only. A stream that never yields keeps the call pending, and an `onEntry`
+promise that never settles does the same; there is no timeout yet. Each
+in-flight stream or `onEntry` call pins a thread of the blocking pool for the
+whole call, so many slow streams (for example HTTP bodies) can exhaust the pool
+and stall every other async exarch call in the process.
+
+`extractArchiveToCallback(data, onEntry, config?, options?, pathModel?, format?)`
+hands each verified entry to `onEntry(entry)` instead of collecting them, so
+memory use is one file at a time (bounded by `maxFileSize`). A file arrives
+whole, after its size was verified. Entries are provisional: each is
+delivered as soon as it is verified, so a later failure refuses the archive
+after earlier entries were already delivered; treat the results as final only
+once the promise resolved. The gzip CRC of a `.tar.gz` is never checked on
+extraction, so a corrupt compressed stream can deliver altered data without an
+error. The extraction waits for the promise
+`onEntry` returns before it reads on, so a slow consumer applies backpressure.
+A throw or rejection stops the extraction and rejects with
+`ENTRY_CALLBACK_ERROR` and the thrown value as `cause`; a thrown primitive is
+wrapped in an `Error` whose `cause` is the primitive (a Symbol is stringified). A `'symlink'` entry's
+`target` is spelled as the archive stores it, relative to the link. A
+`'hardlink'` entry comes last and by reference: its `target` is the
+root-relative resolved path of an entry already delivered, a file or an
+earlier hardlink (a chain is delivered link by link). With
+`skipDuplicates` off a path can be delivered more than once and a hardlink
+refers to the latest delivery; implicit parent directories are not delivered.
+
+```javascript
+const sizes = new Map();
+await extractArchiveToCallback(fs.createReadStream('archive.tar.gz'), async (entry) => {
+  if (entry.kind === 'file') sizes.set(entry.path, entry.data.length);
+});
+```
+
+`extractArchiveToCallbackSync` runs `onEntry` on the JavaScript thread and
+takes bytes only, which it copies before `onEntry` first runs, so a callback
+can neither detach nor change the input under the parser. A callback that returns a promise is refused with
+`ENTRY_CALLBACK_ERROR` and a `TypeError` as `cause` (its rejection is silenced,
+so it cannot become an unhandled rejection); use the async function for async
+work.
+
+`extractArchiveToMemoryWithProgressSync`, `listArchiveBytesWithProgressSync` and
+`verifyArchiveBytesWithProgressSync` take the progress callback last; its calls
+arrive only after the function has returned, and a throw there is an
+`uncaughtException`, as with `createArchiveWithProgressSync`.
 
 `createArchiveToBytes(sources, format)` (and `createArchiveToBytesSync`) builds
 an archive in memory and resolves to `{ data, report }`:
@@ -207,7 +259,7 @@ try {
 }
 ```
 
-`error.message` is the human-readable description only. Everything machine-readable is a property, typed as `ExarchError` in `index.d.ts`: a union you can narrow on `writes`, whose `code` is an `ErrorCode` for every member except `ExarchNativeError`, so exclude that member before an exhaustive `switch (error.code)`.
+`error.message` is the human-readable description only. The generated `index.d.ts` names `AsyncIterable` and carries a `lib="es2018.asynciterable"` reference. Everything machine-readable is a property, typed as `ExarchError` in `index.d.ts`: a union you can narrow on `writes`, whose `code` is an `ErrorCode` for every member except `ExarchNativeError`, so exclude that member before an exhaustive `switch (error.code)`.
 
 | Property | Set when | Value |
 |----------|----------|-------|
@@ -215,7 +267,9 @@ try {
 | `relaxableBy` | a `SECURITY_VIOLATION` that a `SecurityConfig` setting would admit | The `PolicySetting` id, for example `'symlinks'` |
 | `writes` | an extraction failed after producing output | `'kept'`, `'rolled_back'` (atomic extraction discarded the output) or `'discarded'` (an in-memory extraction wrote nothing to disk and dropped its entries) |
 | `filesExtracted`, `bytesWritten`, `filesSkipped`, `warnings` | `writes === 'kept'` | Counters and a `string[]` |
-| `cause` | a progress callback threw | The exception the callback threw |
+| `cause` | a progress callback, an `onEntry` callback or an `AsyncIterable` archive threw | The exception it threw (a thrown primitive is wrapped in an `Error` whose `cause` is the primitive) |
+
+`code === 'ENTRY_CALLBACK_ERROR'` means an `onEntry` callback threw or rejected and `code === 'STREAM_ERROR'` that an `AsyncIterable` archive did; both carry no counters and take priority over the core error they caused.
 
 If a progress callback throws while the operation itself succeeds, the rejection has `code === 'PROGRESS_CALLBACK_ERROR'` and the counters of what was written (`filesExtracted`... for extraction, `filesAdded` and `bytesWritten` for creation). The in-memory extraction functions write nothing, so their rejection carries `writes === 'discarded'` and no counters.
 

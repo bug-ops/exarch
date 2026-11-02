@@ -7,18 +7,19 @@
 //! # Functions
 //!
 //! - [`extract_file_with_permit`]: Generic file extraction with buffered I/O
-//! - [`create_file_with_mode`]: O_NOFOLLOW/O_EXCL-safe file creation, also used
-//!   by 7z for its temp file (issues #459, #471)
 //! - [`create_directory`]: Directory creation (idempotent)
 //! - [`create_symlink`]: Symbolic link creation (Unix only)
-//! - [`open_no_follow`]: Read-only open that refuses to follow a symlink
-//! - [`is_filesystem_loop_error`]: Detects the `ELOOP` error `open_no_follow`
-//!   produces
+//! - [`is_filesystem_loop_error`]: Detects the `ELOOP` error an `O_NOFOLLOW`
+//!   open produces
 //! - [`copy_file_content_with_permit`]: Hardlink content copy between
 //!   already-open source/destination handles
 //! - [`check_extension_allowed`]: Extension allowlist filtering
 //! - [`push_disallowed_extension_warning`]: Aggregated disallowed-extension
 //!   skip warning
+//!
+//! Every write below the destination goes through a
+//! [`VettedDir`](crate::formats::pinned_dir::VettedDir), so no path is
+//! resolved a second time between a check and the act that follows it.
 
 use std::fs::File;
 use std::io::BufWriter;
@@ -26,8 +27,6 @@ use std::io::Read;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::Ordering;
 
 use crate::ArchiveError;
 use crate::ExtractionReport;
@@ -37,9 +36,16 @@ use crate::SecurityConfig;
 use crate::SinkOptions;
 use crate::config::Validated;
 use crate::copy::CopyBuffer;
+use crate::copy::CopyError;
+use crate::copy::copy_bounded;
 use crate::copy::copy_with_buffer;
 use crate::error::QuotaResource;
 use crate::formats::dir_walker::DirWalker;
+use crate::formats::pinned_dir::Leaf;
+use crate::formats::pinned_dir::PinnedRoot;
+use crate::formats::pinned_dir::TempFileGuard;
+use crate::formats::pinned_dir::TempLeaf;
+use crate::formats::pinned_dir::VettedDir;
 use crate::security::fs_view::Containment;
 use crate::security::fs_view::FsView;
 use crate::security::fs_view::HostFs;
@@ -316,121 +322,6 @@ pub fn check_extension_allowed(
     false
 }
 
-/// Creates a file with permissions enforced after creation to bypass umask.
-///
-/// On Unix platforms, this function uses `OpenOptions::mode()` to hint the
-/// desired mode during `open()`, then calls `File::set_permissions()` on the
-/// already-open file descriptor (`fchmod`) to enforce the exact sanitized
-/// mode. The second call is required because `OpenOptions::mode()` is
-/// subject to the process umask and the resulting permissions may be
-/// narrower than requested. Operating on the open descriptor rather than
-/// `std::fs::set_permissions(path, ..)` avoids re-resolving `path` from the
-/// filesystem root a second time, which would otherwise reopen a TOCTOU
-/// window between file creation and permission enforcement (issue #460).
-///
-/// On non-Unix platforms, permissions are not supported and mode is ignored.
-///
-/// The file is always created with `O_EXCL` semantics
-/// (`OpenOptions::create_new`): the call atomically fails with
-/// `ErrorKind::AlreadyExists` if `path` already exists, so an existing inode
-/// is never opened for writing. Callers that must replace an existing entry
-/// create a sibling file and rename it over the entry.
-///
-/// # Security - Symlink-at-Destination Rejection (issue #459)
-///
-/// On Unix, the open also passes `O_NOFOLLOW`, so a symlink at `path`'s final
-/// component is never followed; `O_EXCL` already rejects any existing path,
-/// symlinks included.
-///
-/// # Performance
-///
-/// - Unix, `mode.is_some()`: 2 syscalls (`open` with mode hint + `fchmod` to
-///   bypass umask)
-/// - Unix, `mode.is_none()`: 1 syscall (`open`, no permission enforcement to
-///   perform)
-/// - Non-Unix: 1 syscall (`open`)
-///
-/// # Security - Mode Sanitization Requirement
-///
-/// **CRITICAL**: This function trusts the caller to provide safe mode values.
-/// The `mode` parameter MUST be sanitized before calling this function to:
-///
-/// - Strip setuid bit (0o4000) if required by security policy
-/// - Strip setgid bit (0o2000) if required by security policy
-/// - Strip sticky bit (0o1000) if required by security policy
-/// - Ensure world-writable permissions are only set if allowed
-///
-/// The [`SanitizedMode`] parameter type enforces mode sanitization at
-/// compile time: only
-/// [`sanitize_permissions`](crate::security::sanitize_permissions)
-/// can construct one, so a raw, unsanitized mode read from an archive header
-/// cannot reach this function by mistake.
-///
-/// # Arguments
-///
-/// * `path` - Path where file should be created
-/// * `mode` - Optional pre-sanitized Unix file mode
-///
-/// # Errors
-///
-/// Returns an I/O error if file creation fails, including
-/// `ErrorKind::AlreadyExists` when `path` already exists.
-#[inline]
-#[cfg(unix)]
-pub fn create_file_with_mode(path: &Path, mode: Option<SanitizedMode>) -> std::io::Result<File> {
-    use std::fs::OpenOptions;
-    use std::fs::Permissions;
-    use std::os::unix::fs::OpenOptionsExt;
-    use std::os::unix::fs::PermissionsExt;
-
-    let mut opts = OpenOptions::new();
-    opts.write(true).create_new(true);
-    opts.custom_flags(libc::O_NOFOLLOW);
-
-    if let Some(m) = mode {
-        // Apply sanitized mode during open (already stripped setuid/setgid)
-        opts.mode(m.as_u32());
-    }
-
-    let file = opts.open(path)?;
-
-    // OpenOptions::mode() is subject to the process umask, which may reduce
-    // the requested permissions. Call set_permissions() explicitly to enforce
-    // the exact sanitized mode, bypassing umask. Applied to the already-open
-    // file descriptor (fchmod) rather than std::fs::set_permissions(path, ..),
-    // which would re-resolve path from the filesystem root and reopen a
-    // TOCTOU window between this open() and the permission change (issue
-    // #460).
-    if let Some(m) = mode {
-        file.set_permissions(Permissions::from_mode(m.as_u32()))?;
-    }
-
-    Ok(file)
-}
-
-/// Creates a file (non-Unix platforms ignore mode parameter).
-///
-/// This is the fallback implementation for platforms that do not support
-/// Unix-style file permissions.
-///
-/// # Arguments
-///
-/// * `path` - Path where file should be created
-/// * `_mode` - Ignored on non-Unix platforms
-///
-/// # Errors
-///
-/// Returns an I/O error if file creation fails, including
-/// `ErrorKind::AlreadyExists` when `path` already exists.
-#[inline]
-#[cfg(not(unix))]
-pub fn create_file_with_mode(path: &Path, _mode: Option<SanitizedMode>) -> std::io::Result<File> {
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-}
-
 /// Generic file extraction implementation used by all format adapters.
 ///
 /// This function consolidates file extraction logic to ensure consistent:
@@ -462,7 +353,14 @@ pub fn create_file_with_mode(path: &Path, _mode: Option<SanitizedMode>) -> std::
 /// reopening a TOCTOU window between file creation and permission
 /// enforcement (issue #460). This ensures the exact sanitized mode from
 /// `SecurityConfig` is applied, regardless of the caller's umask. See
-/// [`create_file_with_mode`] for the full contract.
+/// [`VettedDir::create_new`] for the full contract.
+///
+/// # Security - Pinned Parent Directory (issue #818)
+///
+/// The parent directory is walked once into a [`VettedDir`] handle, and the
+/// create, the optional temp-file rename and the cleanup all happen relative
+/// to that handle. A parent component swapped for a symlink after the walk
+/// cannot redirect the write.
 ///
 /// # Correctness
 ///
@@ -484,7 +382,7 @@ pub fn create_file_with_mode(path: &Path, _mode: Option<SanitizedMode>) -> std::
 /// * `mode` - Sanitized Unix file mode, if any
 /// * `_permit` - Proof that this file's size was already reserved against the
 ///   quota tracker; consumed by value and otherwise unused
-/// * `dest` - Destination directory
+/// * `root` - Destination directory, pinned by an open handle
 /// * `report` - Extraction statistics (updated)
 /// * `expected_size` - Declared uncompressed size (if known); used for the
 ///   quota pre-check and, per the security note above, enforced as a hard
@@ -516,7 +414,7 @@ pub fn extract_file_with_permit<R: Read>(
     safe_path: &SafePath,
     mode: Option<SanitizedMode>,
     _permit: QuotaPermit,
-    dest: &DestDir,
+    root: &PinnedRoot,
     report: &mut ExtractionReport,
     expected_size: Option<u64>,
     copy_buffer: &mut CopyBuffer,
@@ -526,9 +424,8 @@ pub fn extract_file_with_permit<R: Read>(
     progress: &mut dyn ProgressCallback,
 ) -> Result<()> {
     let skip_duplicates = options.skip_duplicates;
-    let output_path = dest.join(safe_path);
 
-    dirs.ensure_parent(dest, safe_path.as_path())?;
+    let (parent, leaf) = dirs.ensure_parent(root, safe_path.as_path())?;
 
     // The size was already reserved against QuotaTracker during
     // validate_entry (proven by the QuotaPermit consumed above); this only
@@ -542,8 +439,7 @@ pub fn extract_file_with_permit<R: Read>(
     let Some(OutputSlot {
         file: output_file,
         written_at,
-        replaces,
-    }) = open_output_slot(&output_path, safe_path.as_path(), mode, skip_duplicates)?
+    }) = open_output_slot(&parent, leaf, safe_path.as_path(), mode, skip_duplicates)?
     else {
         checked_increment_files_skipped(report)?;
         *duplicate_skips = duplicate_skips.saturating_add(1);
@@ -552,12 +448,12 @@ pub fn extract_file_with_permit<R: Read>(
 
     // Removes the partial file when the copy aborts (forged `expected_size`);
     // `written_at` never holds a pre-existing entry, so nothing else is lost.
-    let guard = TempFileGuard::new(written_at.clone());
+    let guard = written_at.guard(&parent, leaf);
     let mut buffered_writer = BufWriter::with_capacity(64 * 1024, output_file);
     let bytes_written = copy_with_buffer(reader, &mut buffered_writer, copy_buffer, expected_size)?;
     buffered_writer.flush()?;
     drop(buffered_writer);
-    commit_output(&written_at, replaces.as_deref(), safe_path.as_path())?;
+    commit_output(&parent, &written_at, leaf, safe_path.as_path())?;
     guard.persist();
 
     if bytes_written > 0 {
@@ -573,40 +469,32 @@ pub fn extract_file_with_permit<R: Read>(
 /// Maximum attempts to create a uniquely named sibling temp file before
 /// giving up.
 ///
-/// Bounds retry cost when predicted `.{name}.exarch-tmp-{pid}-{counter}` paths
-/// are pre-occupied; a genuine collision from concurrent extraction into the
-/// same directory resolves on the first or second attempt.
+/// Bounds retry cost when predicted `.exarch-tmp-{pid}-{counter}` names are
+/// pre-occupied; a genuine collision from concurrent extraction into the same
+/// directory resolves on the first or second attempt.
 pub const MAX_TEMP_FILE_CREATE_ATTEMPTS: u32 = 8;
 
-static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-/// Returns the next candidate temp path next to `dest_path`.
+/// Creates a new file in `dir` under the first free name drawn from
+/// `next_candidate`, retrying on `AlreadyExists` up to
+/// [`MAX_TEMP_FILE_CREATE_ATTEMPTS`] times.
 ///
-/// The name is independent of `dest_path`'s own name so that it stays within
-/// the filesystem's name-length limit however long that name is.
-pub fn temp_sibling_path(dest_path: &Path) -> PathBuf {
-    let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    dest_path.with_file_name(format!(".exarch-tmp-{}-{counter}", std::process::id()))
-}
-
-/// Creates a new file at the first free path drawn from `next_candidate`,
-/// retrying on `AlreadyExists` up to [`MAX_TEMP_FILE_CREATE_ATTEMPTS`] times.
-///
-/// Each attempt uses `create_new` (`O_EXCL`), so a planted entry at a
-/// predicted path is never followed or reused.
+/// Each attempt uses [`VettedDir::create_new`] (`O_EXCL`), so a planted entry
+/// at a predicted name is never followed or reused. `entry` names the file the
+/// temp file stands in for, for the error text only.
 ///
 /// # Errors
 ///
 /// Returns the first non-`AlreadyExists` I/O error, or `AlreadyExists` when
 /// every attempt collided.
 pub fn create_temp_sibling(
-    dest_path: &Path,
+    dir: &VettedDir,
+    entry: Leaf<'_>,
     mode: Option<SanitizedMode>,
-    mut next_candidate: impl FnMut() -> PathBuf,
-) -> std::io::Result<(PathBuf, File)> {
+    mut next_candidate: impl FnMut() -> TempLeaf,
+) -> std::io::Result<(TempLeaf, File)> {
     for _ in 0..MAX_TEMP_FILE_CREATE_ATTEMPTS {
         let candidate = next_candidate();
-        match create_file_with_mode(&candidate, mode) {
+        match dir.create_new(candidate.as_leaf(), mode) {
             Ok(file) => return Ok((candidate, file)),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(e) => return Err(e),
@@ -616,59 +504,78 @@ pub fn create_temp_sibling(
         std::io::ErrorKind::AlreadyExists,
         format!(
             "failed to create a unique temp file for {} after {MAX_TEMP_FILE_CREATE_ATTEMPTS} attempts",
-            dest_path.display()
+            Path::new(entry.as_os_str()).display()
         ),
     ))
+}
+
+/// Where an output file was written before it reaches its final name.
+enum WrittenAt {
+    /// The final name itself.
+    Final,
+    /// A sibling temp file that is renamed over the existing entry.
+    Temp(TempLeaf),
+}
+
+impl WrittenAt {
+    /// A guard that removes the written file unless persisted.
+    fn guard<'d>(&self, dir: &'d VettedDir, final_name: Leaf<'_>) -> TempFileGuard<'d> {
+        match self {
+            Self::Final => TempFileGuard::new(dir, final_name),
+            Self::Temp(temp) => TempFileGuard::for_temp(dir, temp.clone()),
+        }
+    }
 }
 
 /// An open, empty output file and where its content must end up.
 struct OutputSlot {
     file: File,
-    /// Path the file was created at.
-    written_at: PathBuf,
-    /// Pre-existing entry to atomically replace once the content is complete.
-    replaces: Option<PathBuf>,
+    written_at: WrittenAt,
 }
 
 /// Opens the destination for a regular-file entry without ever writing
 /// through an existing inode.
 ///
-/// A free path is created in place with `O_EXCL`. When an entry already
+/// A free name is created in place with `O_EXCL`. When an entry already
 /// exists, overwrite mode writes a fresh sibling temp file that the caller
 /// renames over the entry, so other hardlinks to the old inode keep their
 /// content. Returns `None` when the entry exists and `skip_duplicates` is set.
 fn open_output_slot(
-    output_path: &Path,
+    dir: &VettedDir,
+    leaf: Leaf<'_>,
     rel: &Path,
     mode: Option<SanitizedMode>,
     skip_duplicates: bool,
 ) -> Result<Option<OutputSlot>> {
-    match create_file_with_mode(output_path, mode) {
+    match dir.create_new(leaf, mode) {
         Ok(file) => Ok(Some(OutputSlot {
             file,
-            written_at: output_path.to_path_buf(),
-            replaces: None,
+            written_at: WrittenAt::Final,
         })),
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && skip_duplicates => Ok(None),
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            refuse_non_file_occupant(output_path, rel)?;
-            let (written_at, file) =
-                create_temp_sibling(output_path, mode, || temp_sibling_path(output_path))
-                    .map_err(|e| replace_error(rel, &e))?;
+            refuse_non_file_occupant(dir, leaf, rel)?;
+            let (temp, file) = create_temp_sibling(dir, leaf, mode, TempLeaf::next)
+                .map_err(|e| replace_error(rel, &e))?;
             Ok(Some(OutputSlot {
                 file,
-                written_at,
-                replaces: Some(output_path.to_path_buf()),
+                written_at: WrittenAt::Temp(temp),
             }))
         }
-        Err(e) => Err(name_occupant_on_open_error(output_path, rel, e).into()),
+        Err(e) => Err(name_occupant_on_open_error(dir, leaf, rel, e).into()),
     }
 }
 
-/// Renames the completed `written_at` over the entry it replaces, if any.
-fn commit_output(written_at: &Path, replaces: Option<&Path>, rel: &Path) -> Result<()> {
-    if let Some(final_path) = replaces {
-        std::fs::rename(written_at, final_path).map_err(|e| replace_error(rel, &e))?;
+/// Renames the completed temp file over the entry it replaces, if any.
+fn commit_output(
+    dir: &VettedDir,
+    written_at: &WrittenAt,
+    leaf: Leaf<'_>,
+    rel: &Path,
+) -> Result<()> {
+    if let WrittenAt::Temp(temp) = written_at {
+        dir.rename_within(temp.as_leaf(), leaf)
+            .map_err(|e| replace_error(rel, &e))?;
     }
     Ok(())
 }
@@ -685,19 +592,14 @@ fn replace_error(rel: &Path, err: &std::io::Error) -> std::io::Error {
     )
 }
 
-/// Fails with an entry-naming error when `path` holds a directory or a
+/// Fails with an entry-naming error when `leaf` holds a directory or a
 /// symlink, which an overwrite never replaces.
-fn refuse_non_file_occupant(path: &Path, rel: &Path) -> Result<()> {
-    let Ok(metadata) = std::fs::symlink_metadata(path) else {
-        return Ok(());
-    };
-    let file_type = metadata.file_type();
-    if file_type.is_dir() {
-        Err(occupant_at_dest_error(rel, Occupant::Directory).into())
-    } else if file_type.is_symlink() {
-        Err(occupant_at_dest_error(rel, Occupant::Symlink).into())
-    } else {
-        Ok(())
+fn refuse_non_file_occupant(dir: &VettedDir, leaf: Leaf<'_>, rel: &Path) -> Result<()> {
+    match dir.probe(leaf) {
+        Ok(Some(occupant @ (Occupant::Directory | Occupant::Symlink))) => {
+            Err(occupant_at_dest_error(rel, occupant).into())
+        }
+        Ok(Some(Occupant::File) | None) | Err(_) => Ok(()),
     }
 }
 
@@ -719,7 +621,7 @@ fn refuse_non_file_occupant(path: &Path, rel: &Path) -> Result<()> {
 /// # Arguments
 ///
 /// * `safe_path` - Validated destination-relative path of the directory
-/// * `dest` - Destination directory
+/// * `root` - Destination directory, pinned by an open handle
 /// * `report` - Extraction statistics (updated)
 /// * `dirs` - Creates and vets the directory
 ///
@@ -729,12 +631,16 @@ fn refuse_non_file_occupant(path: &Path, rel: &Path) -> Result<()> {
 /// component is a symlink the policy refuses.
 pub fn create_directory(
     safe_path: &SafePath,
-    dest: &DestDir,
+    root: &PinnedRoot,
     report: &mut ExtractionReport,
     dirs: DirWalker,
 ) -> Result<()> {
-    check_directory_occupant(&dest.join(safe_path), safe_path.as_path(), dest)?;
-    dirs.ensure_dir(dest, safe_path.as_path())?;
+    check_directory_occupant(
+        &root.dest().join(safe_path),
+        safe_path.as_path(),
+        root.dest(),
+    )?;
+    dirs.ensure_dir(root, safe_path.as_path())?;
 
     report.directories_created += 1;
 
@@ -745,6 +651,9 @@ pub fn create_directory(
 /// directory entry cannot become: a file ([`occupant_at_dest_error`]), or a
 /// symlink that does not resolve to a directory inside `dest` (a security
 /// violation, the category `verify` reports for it).
+///
+/// The path-based `lstat` here only chooses the error message; the fd-relative
+/// walk in [`DirWalker::ensure_dir`] enforces the same refusals again.
 fn check_directory_occupant(dir_path: &Path, rel: &Path, dest: &DestDir) -> Result<()> {
     // A trailing separator makes the probe follow a symlink, or fail with
     // `ENOTDIR` on a file, instead of describing the occupant itself.
@@ -793,7 +702,7 @@ fn check_directory_occupant(dir_path: &Path, rel: &Path, dest: &DestDir) -> Resu
 /// # Arguments
 ///
 /// * `safe_symlink` - Validated symlink entry
-/// * `dest` - Destination directory
+/// * `root` - Destination directory, pinned by an open handle
 /// * `report` - Extraction statistics (updated)
 /// * `dirs` - Creates and vets the parent directories
 /// * `options` - Duplicate-handling policy for a pre-existing destination path
@@ -814,7 +723,7 @@ fn check_directory_occupant(dir_path: &Path, rel: &Path, dest: &DestDir) -> Resu
 #[allow(unused_variables)]
 pub fn create_symlink(
     safe_symlink: &SafeSymlink,
-    dest: &DestDir,
+    root: &PinnedRoot,
     report: &mut ExtractionReport,
     dirs: DirWalker,
     options: SinkOptions,
@@ -823,33 +732,29 @@ pub fn create_symlink(
     let skip_duplicates = options.skip_duplicates;
     #[cfg(unix)]
     {
-        use std::os::unix::fs::symlink;
-
-        let link_path = dest.join_path(safe_symlink.link_path());
         let target_path = safe_symlink.target_path();
 
-        dirs.ensure_parent(dest, safe_symlink.link_path())?;
+        let (parent, leaf) = dirs.ensure_parent(root, safe_symlink.link_path())?;
 
-        if let Ok(existing) = link_path.symlink_metadata() {
+        if let Some(existing) = parent.probe(leaf)? {
             if skip_duplicates {
                 checked_increment_files_skipped(report)?;
                 *duplicate_skips = duplicate_skips.saturating_add(1);
                 return Ok(());
             }
-            if existing.file_type().is_symlink() {
+            if existing == Occupant::Symlink {
                 // An unchanged link re-points nothing; a different target could
                 // re-point a path that an earlier link's `..` resolved through.
-                if std::fs::read_link(&link_path)? == target_path {
+                if parent.read_link(leaf)? == target_path {
                     checked_increment_files_skipped(report)?;
                     return Ok(());
                 }
                 return Err(symlink_at_dest_error(safe_symlink.link_path()).into());
             }
-            std::fs::remove_file(&link_path)?;
+            parent.remove_file(leaf)?;
         }
 
-        // Create symlink
-        symlink(target_path, &link_path)?;
+        parent.symlink(target_path, leaf)?;
 
         report.symlinks_created += 1;
 
@@ -894,30 +799,37 @@ pub fn symlink_at_dest_error(rel: &Path) -> std::io::Error {
 /// the directory or symlink that holds the path; any other failure (including
 /// a different errno on such a path) is returned unchanged.
 ///
-/// Runs only on the error path, via `symlink_metadata`, so the success path
+/// Runs only on the error path, via a `probe` of the name, so the success path
 /// costs nothing.
-fn name_occupant_on_open_error(path: &Path, rel: &Path, err: std::io::Error) -> std::io::Error {
-    refused_occupant(path, &err).map_or(err, |occupant| occupant_at_dest_error(rel, occupant))
+fn name_occupant_on_open_error(
+    dir: &VettedDir,
+    leaf: Leaf<'_>,
+    rel: &Path,
+    err: std::io::Error,
+) -> std::io::Error {
+    refused_occupant(dir, leaf, &err).map_or(err, |occupant| occupant_at_dest_error(rel, occupant))
 }
 
-/// The occupant of `path` whose presence explains `err`, if any.
+/// The occupant of `leaf` whose presence explains `err`, if any.
 ///
 /// A symlink refusal is identified by `ELOOP` on Unix and by the
-/// `AlreadyExists` that `create_file_with_mode` returns elsewhere.
-fn refused_occupant(path: &Path, err: &std::io::Error) -> Option<Occupant> {
+/// `AlreadyExists` that `VettedDir::create_new` returns elsewhere.
+fn refused_occupant(dir: &VettedDir, leaf: Leaf<'_>, err: &std::io::Error) -> Option<Occupant> {
     use std::io::ErrorKind;
 
-    let file_type = std::fs::symlink_metadata(path).ok()?.file_type();
+    let occupant = dir.probe(leaf).ok()??;
     let dir_refusal = err.kind() == ErrorKind::IsADirectory
         || (cfg!(not(unix)) && err.kind() == ErrorKind::PermissionDenied);
-    if file_type.is_dir() && dir_refusal {
-        return Some(Occupant::Directory);
+    let symlink_refusal = if cfg!(unix) {
+        is_filesystem_loop_error(err)
+    } else {
+        err.kind() == ErrorKind::AlreadyExists
+    };
+    match occupant {
+        Occupant::Directory if dir_refusal => Some(Occupant::Directory),
+        Occupant::Symlink if symlink_refusal => Some(Occupant::Symlink),
+        Occupant::Directory | Occupant::Symlink | Occupant::File => None,
     }
-    #[cfg(unix)]
-    let symlink_refusal = err.raw_os_error() == Some(libc::ELOOP);
-    #[cfg(not(unix))]
-    let symlink_refusal = err.kind() == ErrorKind::AlreadyExists;
-    (file_type.is_symlink() && symlink_refusal).then_some(Occupant::Symlink)
 }
 
 /// Fails on a host that cannot create symlinks, so a format can refuse a link
@@ -1030,59 +942,16 @@ pub fn symlink_target_from_bytes(target_bytes: &[u8]) -> Result<PathBuf> {
     Ok(PathBuf::from(target_str))
 }
 
-/// Opens `path` for reading, refusing to follow a symlink at its final path
-/// component.
-///
-/// # Security - Hardlink-Target TOCTOU Rejection (issue #467)
-///
-/// A hardlink's target is validated for containment in an earlier pass
-/// (`HardlinkTracker::validate_hardlink`, resolving on-disk symlinks as of
-/// that point in time) but nothing re-validates it by the time a later pass
-/// actually reads it — a plain `File::open` at that point would silently
-/// follow whatever is at the target path *then*, which given an
-/// attacker-writable destination directory may no longer be what the
-/// earlier pass validated. On Unix, this is closed with `O_NOFOLLOW`: the
-/// open fails instead of following a symlink planted or swapped in at the
-/// target path since. Callers should reserve quota and copy from the
-/// returned handle rather than re-opening `path`, to avoid a TOCTOU window
-/// between a path-based size check and a separate path-based read. A symlink
-/// at `path` is not automatically an attack, though — see
-/// [`resolve_through_symlinks`](crate::types::safe_symlink::resolve_through_symlinks)
-/// for the re-validation callers should perform on `ErrorKind::FilesystemLoop`
-/// before treating it as one.
-///
-/// This mitigation is Unix-only: non-Unix platforms have no `O_NOFOLLOW`
-/// equivalent wired up here, so the TOCTOU window this closes on Unix
-/// remains open on those platforms.
-///
-/// # Errors
-///
-/// Returns an I/O error if `path` does not exist, is a symlink (Unix only,
-/// via `ELOOP`), or otherwise cannot be opened for reading.
-// TODO(critic): wasm32-wasi gets no O_NOFOLLOW here; use
-// std::os::wasi::fs::OpenOptionsExt lookup flags
-pub fn open_no_follow(path: &Path) -> std::io::Result<File> {
-    let mut opts = std::fs::OpenOptions::new();
-    opts.read(true);
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.custom_flags(libc::O_NOFOLLOW);
-    }
-
-    opts.open(path)
-}
-
 /// Returns `true` if `error` is the "too many levels of symbolic links"
-/// error (`ELOOP` on Unix) that [`open_no_follow`] produces when its final
+/// error (`ELOOP` on Unix) that an `O_NOFOLLOW` open produces when its final
 /// path component is a symlink.
 ///
 /// `std::io::ErrorKind::FilesystemLoop` exists for exactly this case but is
 /// not yet stable (`io_error_more`, rust-lang/rust#86442 as of this crate's
 /// MSRV), so this compares the raw OS error code directly on Unix. Always
-/// `false` on non-Unix, since [`open_no_follow`] has no `O_NOFOLLOW`
-/// equivalent there and cannot produce this specific error.
+/// `false` on non-Unix, which has no `O_NOFOLLOW` equivalent wired up here.
+/// Used only to word an error: whether a symlink is to blame is decided by a
+/// `probe` of the name, not by this code.
 #[must_use]
 pub fn is_filesystem_loop_error(error: &std::io::Error) -> bool {
     #[cfg(unix)]
@@ -1093,6 +962,17 @@ pub fn is_filesystem_loop_error(error: &std::io::Error) -> bool {
     {
         let _ = error;
         false
+    }
+}
+
+/// The error for a hardlink target that changed between the `fstat` that sized
+/// its quota reservation and the end of the copy.
+fn hardlink_target_changed(error: CopyError) -> ArchiveError {
+    match error {
+        CopyError::Overrun { .. } | CopyError::Short { .. } => {
+            ArchiveError::violation("hardlink target changed while it was being copied".into())
+        }
+        other => other.into(),
     }
 }
 
@@ -1107,75 +987,34 @@ pub fn is_filesystem_loop_error(error: &std::io::Error) -> bool {
 /// # Security - Symlink Rejection and Quota TOCTOU (issue #467)
 ///
 /// Unlike `std::fs::copy(from, to)`, both `from` and `to` are already-open
-/// [`File`] handles rather than paths. Callers obtain `to` via
-/// `OpenOptions::create_new` (refusing to create through a pre-existing
-/// destination path, symlink or not) and `from` via [`open_no_follow`]
-/// (refusing to follow a symlink at the source path), and reserve quota from
-/// `from`'s already-open `fstat`, not a separate path-based `stat`. Passing
-/// paths instead would both re-expose the symlink-follow read this function
-/// exists to prevent, and reopen a TOCTOU window where the reserved size and
-/// the actually-copied bytes come from two different filesystem objects.
+/// [`File`] handles rather than paths. Callers obtain `to` from
+/// [`VettedDir::create_new`] (refusing to create through a pre-existing
+/// destination name, symlink or not) and `from` from [`VettedDir::open_read`]
+/// (refusing to follow a symlink), and reserve quota from `from`'s `fstat`
+/// size, passed as `expected_len`.
 ///
-/// On Unix, `from`'s permission bits are copied to `to` afterward, matching
-/// `std::fs::copy`'s behavior. `from`'s permissions were already sanitized
-/// when the target file was extracted as a regular file (setuid/setgid
-/// stripped), so re-applying them to the brand-new `to` here does not
-/// reintroduce anything unsanitized.
+/// `expected_len` is a hard ceiling and an exact length: the quota was charged
+/// for that many bytes, so a target that grew after the `fstat` fails closed
+/// instead of writing past the charged permit, and one that shrank fails too.
+///
+/// Permissions are not copied here: the caller creates `to` with the
+/// sanitized mode of the target before any byte is written (a pre-existing
+/// target in the destination can carry setuid, setgid or world-write bits that
+/// extraction never sanitized).
 ///
 /// # Errors
 ///
-/// Returns an I/O error if the copy or (on Unix) applying permissions fails.
+/// Returns `SecurityViolation` if the target's length differs from
+/// `expected_len`, and an I/O error if the copy fails.
 pub fn copy_file_content_with_permit(
     mut from: File,
     mut to: File,
+    expected_len: u64,
+    copy_buffer: &mut CopyBuffer,
     _permit: QuotaPermit,
-) -> std::io::Result<u64> {
-    let bytes_copied = std::io::copy(&mut from, &mut to)?;
-
-    #[cfg(unix)]
-    {
-        let permissions = from.metadata()?.permissions();
-        to.set_permissions(permissions)?;
-    }
-
-    Ok(bytes_copied)
-}
-
-/// RAII guard that removes a file at `path` when dropped, unless [`persist`]
-/// was called first.
-///
-/// Shared between TAR's hardlink-content copy and 7z's temp-file-then-rename
-/// write path so a fallible step between file creation and the operation's
-/// success point (quota reservation, the copy itself) does not leave a
-/// partial artifact behind on the error path.
-///
-/// [`persist`]: TempFileGuard::persist
-pub struct TempFileGuard {
-    path: PathBuf,
-    should_cleanup: bool,
-}
-
-impl TempFileGuard {
-    /// Creates a new guard that will remove `path` on drop.
-    pub fn new(path: PathBuf) -> Self {
-        Self {
-            path,
-            should_cleanup: true,
-        }
-    }
-
-    /// Marks the file as successfully processed, preventing cleanup on drop.
-    pub fn persist(mut self) {
-        self.should_cleanup = false;
-    }
-}
-
-impl Drop for TempFileGuard {
-    fn drop(&mut self) {
-        if self.should_cleanup {
-            let _ = std::fs::remove_file(&self.path);
-        }
-    }
+) -> Result<u64> {
+    copy_bounded(&mut from, &mut to, copy_buffer, Some(expected_len))
+        .map_err(hardlink_target_changed)
 }
 
 #[cfg(test)]
@@ -1205,6 +1044,18 @@ mod tests {
 
     fn test_walker() -> DirWalker {
         DirWalker::new(&SecurityConfig::default().validate().expect("valid config"))
+    }
+
+    fn pinned(dest: &DestDir) -> PinnedRoot {
+        PinnedRoot::open(dest.clone()).expect("open destination")
+    }
+
+    /// Creates `path` the way extraction does: exclusively, relative to a
+    /// handle on its parent directory.
+    fn create_file_with_mode(path: &Path, mode: Option<SanitizedMode>) -> std::io::Result<File> {
+        let parent = pinned(&DestDir::new(path.parent().expect("parent")).expect("dest"));
+        let (_, leaf) = Leaf::split(Path::new(path.file_name().expect("name"))).expect("leaf");
+        parent.dir().reopen()?.create_new(leaf, mode)
     }
 
     #[test]
@@ -1240,24 +1091,31 @@ mod tests {
         use std::io::ErrorKind;
 
         let temp = TempDir::new().expect("temp dir");
-        let dir = temp.path().join("d");
-        std::fs::create_dir(&dir).expect("mkdir");
+        std::fs::create_dir(temp.path().join("d")).expect("mkdir");
+        let root = pinned(&DestDir::new(temp.path()).expect("dest"));
+        let dir = root.dir();
+        let leaf = |name: &'static str| Leaf::split(Path::new(name)).expect("leaf").1;
 
         let refused = Error::from(ErrorKind::IsADirectory);
-        assert_matches!(refused_occupant(&dir, &refused), Some(Occupant::Directory));
+        assert_matches!(
+            refused_occupant(dir, leaf("d"), &refused),
+            Some(Occupant::Directory)
+        );
         let unrelated = Error::from(ErrorKind::Other);
-        assert_matches!(refused_occupant(&dir, &unrelated), None);
-        assert_matches!(refused_occupant(&temp.path().join("gone"), &refused), None);
+        assert_matches!(refused_occupant(dir, leaf("d"), &unrelated), None);
+        assert_matches!(refused_occupant(dir, leaf("gone"), &refused), None);
 
         #[cfg(unix)]
         {
-            let link = temp.path().join("l");
-            std::os::unix::fs::symlink("t", &link).expect("symlink");
+            std::os::unix::fs::symlink("t", temp.path().join("l")).expect("symlink");
             let loop_err = Error::from_raw_os_error(libc::ELOOP);
-            assert_matches!(refused_occupant(&link, &loop_err), Some(Occupant::Symlink));
-            assert_matches!(refused_occupant(&link, &unrelated), None);
+            assert_matches!(
+                refused_occupant(dir, leaf("l"), &loop_err),
+                Some(Occupant::Symlink)
+            );
+            assert_matches!(refused_occupant(dir, leaf("l"), &unrelated), None);
             let too_many_files = Error::from_raw_os_error(libc::EMFILE);
-            assert_matches!(refused_occupant(&link, &too_many_files), None);
+            assert_matches!(refused_occupant(dir, leaf("l"), &too_many_files), None);
         }
     }
 
@@ -1272,7 +1130,13 @@ mod tests {
             .expect("valid config");
         let safe_path = SafePath::validate(&PathBuf::from(name), dest, &config).expect("safe path");
         let mut report = ExtractionReport::default();
-        create_directory(&safe_path, dest, &mut report, DirWalker::new(&config)).map(|()| report)
+        create_directory(
+            &safe_path,
+            &pinned(dest),
+            &mut report,
+            DirWalker::new(&config),
+        )
+        .map(|()| report)
     }
 
     #[test]
@@ -1360,7 +1224,7 @@ mod tests {
             &safe_path,
             Some(sanitized(0o644)),
             permit,
-            &dest,
+            &pinned(&dest),
             &mut report,
             expected_size,
             &mut copy_buffer,
@@ -1412,9 +1276,9 @@ mod tests {
         let safe_path = SafePath::validate(&PathBuf::from("test.txt"), &dest, &config)
             .expect("path should be valid");
 
-        // Pre-create the destination file so create_file_with_mode's
-        // create_new(true) hits AlreadyExists, taking the duplicate-skip
-        // branch that increments files_skipped.
+        // Pre-create the destination file so the exclusive create hits
+        // AlreadyExists, taking the duplicate-skip branch that increments
+        // files_skipped.
         std::fs::write(temp.path().join("test.txt"), b"existing").expect("failed to seed file");
 
         let mut reader = Cursor::new(b"test data");
@@ -1424,7 +1288,7 @@ mod tests {
             &safe_path,
             Some(sanitized(0o644)),
             permit,
-            &dest,
+            &pinned(&dest),
             &mut report,
             None,
             &mut copy_buffer,
@@ -1473,7 +1337,7 @@ mod tests {
             &safe_path,
             Some(sanitized(0o644)),
             permit,
-            &dest,
+            &pinned(&dest),
             &mut report,
             Some(50),
             &mut copy_buffer,
@@ -1519,7 +1383,7 @@ mod tests {
             &safe_path,
             Some(sanitized(0o644)),
             permit,
-            &dest,
+            &pinned(&dest),
             &mut report,
             Some(1000),
             &mut copy_buffer,
@@ -1570,7 +1434,7 @@ mod tests {
             &safe_path,
             Some(sanitized(0o644)),
             permit,
-            &dest,
+            &pinned(&dest),
             &mut report,
             Some(50),
             &mut copy_buffer,
@@ -1597,14 +1461,50 @@ mod tests {
         let occupied = temp.path().join("d");
         std::fs::create_dir(&occupied).expect("failed to create dir");
         std::fs::write(occupied.join("child"), b"x").expect("failed to seed child");
+        let root = pinned(&DestDir::new(temp.path()).expect("dest"));
+        let dir = root.dir();
+        let leaf = Leaf::split(Path::new("d")).expect("leaf").1;
+        let written_at = WrittenAt::Temp(TempLeaf::named(".exarch-tmp-test"));
 
-        let guard = TempFileGuard::new(written.clone());
-        let err = commit_output(&written, Some(&occupied), Path::new("d")).unwrap_err();
+        let guard = written_at.guard(dir, leaf);
+        let err = commit_output(dir, &written_at, leaf, Path::new("d")).unwrap_err();
         drop(guard);
 
         assert!(err.to_string().contains("at d"), "{err}");
         assert!(!written.exists(), "temp file must be removed");
         assert!(occupied.join("child").exists());
+    }
+
+    /// Issue #818: the hardlink copy is bounded by the size the quota was
+    /// charged for, so a target that grew or shrank after the `fstat` fails
+    /// closed with its own message instead of the archive's "declared size".
+    #[test]
+    fn hardlink_copy_fails_closed_when_the_target_changes_size() {
+        let temp = TempDir::new().expect("temp dir");
+        let config = SecurityConfig::default().validate().expect("valid config");
+        let source = temp.path().join("source");
+        std::fs::write(&source, vec![b'x'; 100_000]).expect("seed source");
+
+        for (charged, ok) in [(100_000u64, true), (10, false), (200_000, false)] {
+            let permit = QuotaTracker::new()
+                .reserve(charged, &config)
+                .expect("reservation");
+            let to = temp.path().join(format!("copy-{charged}"));
+            let result = copy_file_content_with_permit(
+                File::open(&source).expect("open source"),
+                File::create(&to).expect("create copy"),
+                charged,
+                &mut CopyBuffer::new(),
+                permit,
+            );
+            if ok {
+                assert_eq!(result.expect("exact length copies"), 100_000);
+            } else {
+                let err = result.expect_err("a changed length must fail");
+                assert_matches!(&err, ArchiveError::SecurityViolation { .. });
+                assert!(err.to_string().contains("hardlink target changed"), "{err}");
+            }
+        }
     }
 
     /// H1: Test `create_file_with_mode()` with Unix mode 0o644
@@ -1777,7 +1677,7 @@ mod tests {
             &safe_path,
             Some(sanitized_mode),
             permit,
-            &dest,
+            &pinned(&dest),
             &mut report,
             None,
             &mut copy_buffer,
@@ -1866,7 +1766,7 @@ mod tests {
 
         create_symlink(
             &safe_symlink,
-            &dest,
+            &pinned(&dest),
             &mut report,
             dirs,
             SinkOptions::default().with_skip_duplicates(false),
@@ -1878,7 +1778,7 @@ mod tests {
         let unchanged = report.symlinks_created;
         create_symlink(
             &safe_symlink,
-            &dest,
+            &pinned(&dest),
             &mut report,
             dirs,
             SinkOptions::default().with_skip_duplicates(false),
@@ -1894,7 +1794,7 @@ mod tests {
                 .expect("safe symlink");
         let err = create_symlink(
             &other_safe_symlink,
-            &dest,
+            &pinned(&dest),
             &mut report,
             dirs,
             SinkOptions::default().with_skip_duplicates(false),
@@ -1938,7 +1838,7 @@ mod tests {
         let mut report = ExtractionReport::default();
         create_symlink(
             &safe_symlink,
-            &dest,
+            &pinned(&dest),
             &mut report,
             test_walker(),
             SinkOptions::default().with_skip_duplicates(false),

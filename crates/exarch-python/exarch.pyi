@@ -31,7 +31,7 @@ _IssueCategory = Literal["Path Traversal", "Symlink Escape", "Hardlink Escape", 
 _ZipConsistency = Literal["enforce", "ignore"]
 _PartialWrites = Literal["kept", "rolled_back", "discarded"]
 _PathModel = Literal["host", "portable"]
-_MemoryEntryKind = Literal["file", "directory", "symlink"]
+_MemoryEntryKind = Literal["file", "directory", "symlink", "hardlink"]
 _PolicySetting = Literal["symlinks", "hardlinks", "solid_archives", "banned_components", "max_path_depth", "windows_reserved_names", "max_tar_metadata_bytes"]  # noqa: E501  # fmt: skip
 
 class SecurityConfig:
@@ -1105,7 +1105,11 @@ class MemoryEntry:
 
     @property
     def target(self) -> str | None:
-        """Symlink target as the archive spells it; None unless kind is "symlink"."""
+        """
+        For "symlink", the target as the archive spells it, relative to the
+        link; for "hardlink", the root-relative resolved path of an already
+        delivered entry, a file or an earlier hardlink. None for other kinds.
+        """
         ...
 
 class MemoryExtraction:
@@ -1155,6 +1159,54 @@ def extract_archive_to_memory(
         ValueError: Unknown format or path_model, or max_bytes of zero
         QuotaExceededError: A quota, or max_bytes, was exceeded
         UnknownFormatError: The format cannot be detected from the bytes
+    """
+    ...
+
+def extract_archive_to_callback(
+    data: _ArchiveData,
+    on_entry: Callable[[MemoryEntry], object],
+    config: SecurityConfig | None = None,
+    options: ExtractionOptions | None = None,
+    path_model: _PathModel | None = None,
+    format: _ArchiveType | None = None,
+) -> ExtractionReport:
+    """
+    Extract an archive into a callback, one verified entry at a time.
+
+    Nothing is written to disk and nothing is kept. on_entry receives a
+    MemoryEntry per entry in extraction order; its return value is ignored.
+    A file arrives whole, after its declared size was verified, so memory use
+    is one file, bounded by the config's max_file_size. The GIL is released
+    during I/O and taken once per entry.
+
+    Entries are provisional: each is delivered as soon as it is verified, so a
+    later failure refuses the archive after earlier entries were already
+    delivered. Treat the results as final only once the call returned. The
+    gzip CRC of a .tar.gz is never checked on extraction, so a corrupt
+    compressed stream can deliver altered data without an error.
+
+    A "symlink" entry's target is spelled as the archive stores it, relative
+    to the link. A "hardlink" entry is delivered by reference after every other
+    entry: its target is the root-relative resolved path of an entry already
+    delivered, a file or an earlier hardlink (a chain is delivered link by
+    link). With skip_duplicates False one path can be delivered more than
+    once and a hardlink refers to the latest delivery. Implicit parent
+    directories are not delivered.
+
+    Args:
+        data: The archive bytes, or a binary file object (see
+            extract_archive_to_memory)
+        on_entry: Called with each MemoryEntry
+        config: Optional SecurityConfig (uses secure defaults if None)
+        options: Optional ExtractionOptions (atomic is not supported)
+        path_model: "host" (default) or "portable"
+        format: The archive format; detected from the leading bytes if None
+
+    Raises:
+        TypeError: on_entry is not callable
+        ValueError: Unknown format or path_model
+        Whatever on_entry raises, unchanged: the first exception stops the
+        extraction and is re-raised as is, with no marker added.
     """
     ...
 

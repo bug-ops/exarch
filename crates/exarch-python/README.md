@@ -173,9 +173,11 @@ stream can deliver altered data without an error.
 ```python
 sizes = {}
 
+
 def on_entry(entry):
     if entry.kind == "file":
         sizes[entry.path] = len(entry.data)
+
 
 report = exarch.extract_archive_to_callback(data, on_entry)
 ```

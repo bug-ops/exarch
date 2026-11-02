@@ -556,9 +556,7 @@ pub fn extract_file_with_permit<R: Read>(
     let bytes_written = copy_with_buffer(reader, &mut buffered_writer, copy_buffer, expected_size)?;
     buffered_writer.flush()?;
     drop(buffered_writer);
-    if let Some(final_path) = replaces {
-        std::fs::rename(&written_at, final_path)?;
-    }
+    commit_output(&written_at, replaces.as_deref(), safe_path.as_path())?;
     guard.persist();
 
     if bytes_written > 0 {
@@ -582,15 +580,12 @@ pub const MAX_TEMP_FILE_CREATE_ATTEMPTS: u32 = 8;
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Returns the next candidate temp path next to `dest_path`.
+///
+/// The name is independent of `dest_path`'s own name so that it stays within
+/// the filesystem's name-length limit however long that name is.
 pub fn temp_sibling_path(dest_path: &Path) -> PathBuf {
-    let name = dest_path
-        .file_name()
-        .map_or_else(|| "file".to_string(), |n| n.to_string_lossy().to_string());
     let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    dest_path.with_file_name(format!(
-        ".{name}.exarch-tmp-{}-{counter}",
-        std::process::id()
-    ))
+    dest_path.with_file_name(format!(".exarch-tmp-{}-{counter}", std::process::id()))
 }
 
 /// Creates a new file at the first free path drawn from `next_candidate`,
@@ -657,7 +652,8 @@ fn open_output_slot(
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             refuse_non_file_occupant(output_path, rel)?;
             let (written_at, file) =
-                create_temp_sibling(output_path, mode, || temp_sibling_path(output_path))?;
+                create_temp_sibling(output_path, mode, || temp_sibling_path(output_path))
+                    .map_err(|e| replace_error(rel, &e))?;
             Ok(Some(OutputSlot {
                 file,
                 written_at,
@@ -666,6 +662,26 @@ fn open_output_slot(
         }
         Err(e) => Err(name_occupant_on_open_error(output_path, rel, e).into()),
     }
+}
+
+/// Renames the completed `written_at` over the entry it replaces, if any.
+fn commit_output(written_at: &Path, replaces: Option<&Path>, rel: &Path) -> Result<()> {
+    if let Some(final_path) = replaces {
+        std::fs::rename(written_at, final_path).map_err(|e| replace_error(rel, &e))?;
+    }
+    Ok(())
+}
+
+/// Wraps a failure to replace the existing entry at `rel`, keeping its kind
+/// and naming the entry.
+fn replace_error(rel: &Path, err: &std::io::Error) -> std::io::Error {
+    std::io::Error::new(
+        err.kind(),
+        format!(
+            "cannot replace the existing file at {}: {err}",
+            rel.display()
+        ),
+    )
 }
 
 /// Fails with an entry-naming error when `path` holds a directory or a
@@ -1568,6 +1584,24 @@ mod tests {
         );
         let leftovers = std::fs::read_dir(temp.path()).expect("read dir").count();
         assert_eq!(leftovers, 1, "no temp file may remain after an abort");
+    }
+
+    #[test]
+    fn failed_commit_names_the_entry_and_guard_removes_the_temp_file() {
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let written = temp.path().join(".exarch-tmp-test");
+        std::fs::write(&written, b"data").expect("failed to seed temp file");
+        let occupied = temp.path().join("d");
+        std::fs::create_dir(&occupied).expect("failed to create dir");
+        std::fs::write(occupied.join("child"), b"x").expect("failed to seed child");
+
+        let guard = TempFileGuard::new(written.clone());
+        let err = commit_output(&written, Some(&occupied), Path::new("d")).unwrap_err();
+        drop(guard);
+
+        assert!(err.to_string().contains("at d"), "{err}");
+        assert!(!written.exists(), "temp file must be removed");
+        assert!(occupied.join("child").exists());
     }
 
     /// H1: Test `create_file_with_mode()` with Unix mode 0o644

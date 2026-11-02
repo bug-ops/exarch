@@ -17,6 +17,7 @@ use exarch_core::SecurityConfig;
 use exarch_core::extract_archive;
 use exarch_core::list_archive;
 use exarch_core::verify_archive;
+use proptest::prelude::*;
 use tempfile::TempDir;
 
 const REGULAR: u8 = b'0';
@@ -625,4 +626,468 @@ fn gnu_long_name_traversal_alone_is_still_a_path_traversal() {
             .error_code(),
         ErrorCode::PathTraversal
     );
+}
+
+fn with_checksum(mut block: Vec<u8>, lead: u8) -> Vec<u8> {
+    let sum = checksum_of(&block);
+    block[CHECKSUM_FIELD].copy_from_slice(format!("{}{sum:06o}\0", char::from(lead)).as_bytes());
+    block
+}
+
+fn with_size(block: Vec<u8>, lead: u8, size: usize) -> Vec<u8> {
+    let field = format!("{}{size:010o}\0", char::from(lead));
+    patched(block, &[(SIZE_FIELD.start, field.as_bytes())])
+}
+
+fn extension_header(
+    typeflag: u8,
+    body: &[u8],
+    corrupt: impl FnOnce(Vec<u8>) -> Vec<u8>,
+) -> Vec<u8> {
+    pad([
+        corrupt(header("hdr", typeflag, body.len(), "")),
+        body.to_vec(),
+    ]
+    .concat())
+}
+
+fn pax_body(records: &[(&str, &str)]) -> Vec<u8> {
+    records
+        .iter()
+        .map(|(k, v)| pax_record(k, v))
+        .collect::<String>()
+        .into_bytes()
+}
+
+fn local_pax_with_plus_length(key: &str, value: &str) -> Vec<u8> {
+    let payload = format!(" {key}={value}\n");
+    let mut total = payload.len() + 2;
+    while format!("+{total}").len() + payload.len() != total {
+        total = format!("+{total}").len() + payload.len();
+    }
+    raw_extension(PAX_LOCAL, format!("+{total}{payload}").as_bytes())
+}
+
+fn hidden_pair() -> Vec<u8> {
+    pad([
+        link("hlink", SYMLINK, "/etc/passwd"),
+        entry("hidden.txt", REGULAR, b"SMUGGLED\n"),
+    ]
+    .concat())
+}
+
+fn pre() -> Vec<u8> {
+    entry("pre.txt", REGULAR, b"x")
+}
+
+fn swallowing_member(name: &str, declared: usize) -> Vec<u8> {
+    pad([header(name, REGULAR, declared, ""), hidden_pair()].concat())
+}
+
+fn plus_size_extension(typeflag: u8, body: &[u8]) -> Vec<u8> {
+    extension_header(typeflag, body, |h| with_size(h, b'+', body.len()))
+}
+
+fn plus_checksum_extension(typeflag: u8, body: &[u8]) -> Vec<u8> {
+    extension_header(typeflag, body, |h| with_checksum(h, b'+'))
+}
+
+struct Refusal {
+    name: &'static str,
+    bytes: Vec<u8>,
+    expected: &'static str,
+}
+
+fn refusal(name: &'static str, entries: &[Vec<u8>], expected: &'static str) -> Refusal {
+    Refusal {
+        name,
+        bytes: tar_of(entries),
+        expected,
+    }
+}
+
+fn non_canonical_extension_archives() -> Vec<Refusal> {
+    let mut cases = non_canonical_extension_number_archives();
+    cases.extend(non_canonical_pax_framing_archives());
+    cases
+}
+
+fn non_canonical_extension_number_archives() -> Vec<Refusal> {
+    let hidden_len = hidden_pair().len();
+    let size_body = pax_body(&[("size", &hidden_len.to_string())]);
+    vec![
+        refusal(
+            "x1",
+            &[
+                pre(),
+                plus_size_extension(PAX_LOCAL, &pax_body(&[("path", "from_pax.txt")])),
+                entry("ustar.txt", REGULAR, b"d"),
+            ],
+            "size field",
+        ),
+        refusal(
+            "x2",
+            &[
+                pre(),
+                plus_size_extension(GNU_LONG_NAME, b"from_L.txt\0"),
+                entry("ustar.txt", REGULAR, b"d"),
+            ],
+            "size field",
+        ),
+        refusal(
+            "x3",
+            &[
+                pre(),
+                plus_checksum_extension(PAX_LOCAL, &size_body),
+                swallowing_member("a.txt", 0),
+            ],
+            "checksum field",
+        ),
+        refusal(
+            "p1",
+            &[
+                pre(),
+                plus_checksum_extension(GNU_LONG_NAME, b"long_name.txt\0"),
+                swallowing_member("a.txt", hidden_len),
+            ],
+            "checksum field",
+        ),
+        refusal(
+            "p2",
+            &[
+                pre(),
+                plus_checksum_extension(GNU_LONG_LINK, b"benign_target\0"),
+                link("lnk", SYMLINK, "/etc/passwd"),
+            ],
+            "checksum field",
+        ),
+        refusal(
+            "p3",
+            &[
+                pre(),
+                plus_checksum_extension(PAX_LOCAL, &pax_body(&[("linkpath", "benign_target")])),
+                link("lnk", SYMLINK, "/etc/passwd"),
+            ],
+            "checksum field",
+        ),
+        refusal(
+            "p10",
+            &[
+                pre(),
+                plus_checksum_extension(PAX_LOCAL, &pax_body(&[("path", "from_pax.txt")])),
+                entry("ustar.txt", REGULAR, b"d"),
+            ],
+            "checksum field",
+        ),
+    ]
+}
+
+fn non_canonical_pax_framing_archives() -> Vec<Refusal> {
+    let hidden_len = hidden_pair().len();
+    let blank_line = format!(
+        "{}\n{}",
+        pax_record("path", "p.txt"),
+        pax_record("size", "0")
+    );
+    vec![
+        refusal(
+            "e",
+            &[
+                pre(),
+                local_pax_with_plus_length("size", &hidden_len.to_string()),
+                swallowing_member("a.txt", 0),
+            ],
+            "malformed PAX record",
+        ),
+        refusal(
+            "e2",
+            &[
+                pre(),
+                local_pax_with_plus_length("path", "pax_name.txt"),
+                entry("ustar_name.txt", REGULAR, b"d"),
+            ],
+            "malformed PAX record",
+        ),
+        refusal(
+            "l",
+            &[
+                raw_extension(PAX_LOCAL, blank_line.as_bytes()),
+                swallowing_member("a.txt", hidden_len),
+            ],
+            "malformed PAX record",
+        ),
+        refusal(
+            "p4",
+            &[
+                pre(),
+                local_pax_with_plus_length("linkpath", "benign_target"),
+                link("lnk", SYMLINK, "/etc/passwd"),
+            ],
+            "malformed PAX record",
+        ),
+    ]
+}
+
+#[test]
+fn non_canonical_extension_header_numbers_and_pax_framing_are_refused() {
+    for case in non_canonical_extension_archives() {
+        eprintln!("case {}", case.name);
+        assert_refused_everywhere(&case.bytes, case.expected);
+    }
+}
+
+#[test]
+fn non_canonical_extension_header_is_refused_through_gzip() {
+    use std::io::Write;
+
+    let case = non_canonical_extension_archives()
+        .into_iter()
+        .find(|case| case.name == "x3")
+        .unwrap();
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    encoder.write_all(&case.bytes).unwrap();
+
+    let dir = TempDir::new().unwrap();
+    let archive = dir.path().join("a.tar.gz");
+    std::fs::write(&archive, encoder.finish().unwrap()).unwrap();
+    let config = config();
+    assert_ambiguous(&list_archive(&archive, &config).unwrap_err(), case.expected);
+    assert_ambiguous(
+        &verify_archive(&archive, &config).unwrap_err(),
+        case.expected,
+    );
+    let out = TempDir::new().unwrap();
+    assert_ambiguous(
+        &extract_archive(&archive, out.path().join("out"), &config).unwrap_err(),
+        case.expected,
+    );
+}
+
+#[test]
+fn schily_realsize_record_is_refused() {
+    let bytes = tar_of(&[
+        extension(PAX_LOCAL, &[("SCHILY.realsize", "1073741824")]),
+        entry("big.txt", REGULAR, b"x"),
+    ]);
+    assert_refused_everywhere(&bytes, "SCHILY.realsize");
+}
+
+fn builder_archive(build: impl FnOnce(&mut tar::Builder<Vec<u8>>)) -> Vec<u8> {
+    let mut builder = tar::Builder::new(Vec::new());
+    build(&mut builder);
+    builder.into_inner().unwrap()
+}
+
+fn append_sized(builder: &mut tar::Builder<Vec<u8>>, name: &str, declared: u64, data: &[u8]) {
+    let mut header = tar::Header::new_gnu();
+    header.set_size(declared);
+    header.set_mode(0o644);
+    header.set_cksum();
+    builder.append_data(&mut header, name, data).unwrap();
+}
+
+#[test]
+fn archives_from_the_tar_builder_are_accepted() {
+    let long_name = format!("{}/{}/file.txt", "d".repeat(120), "e".repeat(120));
+    let archives = [
+        builder_archive(|b| {
+            append_sized(b, &long_name, 4, b"long");
+            append_sized(b, "short.txt", 5, b"short");
+        }),
+        builder_archive(|b| {
+            b.append_pax_extensions([("path", long_name.as_bytes()), ("mtime", b"1700000000.5")])
+                .unwrap();
+            append_sized(b, "placeholder.txt", 3, b"pax");
+        }),
+        builder_archive(|b| {
+            b.append_pax_extensions([("size", &b"5"[..])]).unwrap();
+            append_sized(b, "sized.txt", 0, b"hello");
+        }),
+    ];
+    for bytes in archives {
+        let dir = TempDir::new().unwrap();
+        let archive = write_archive(&dir, &bytes);
+        list_archive(&archive, &config()).unwrap();
+        verify_archive(&archive, &config()).unwrap();
+        let out = TempDir::new().unwrap();
+        extract_archive(&archive, out.path(), &config()).unwrap();
+    }
+}
+
+#[test]
+fn git_archive_global_header_with_a_comment_is_accepted() {
+    let comment = "0123456789abcdef0123456789abcdef01234567";
+    let bytes = tar_of(&[
+        extension(PAX_GLOBAL, &[("comment", comment)]),
+        pad(header("dir/", DIRECTORY, 0, "")),
+        entry("dir/a.txt", REGULAR, b"a"),
+    ]);
+    let dir = TempDir::new().unwrap();
+    let archive = write_archive(&dir, &bytes);
+    assert_eq!(
+        list_archive(&archive, &config()).unwrap().entries().len(),
+        2
+    );
+    verify_archive(&archive, &config()).unwrap();
+}
+
+#[test]
+fn pax_long_name_and_long_link_headers_may_share_a_window() {
+    let long_name = format!("{}/file.txt", "d".repeat(150));
+    let bytes = tar_of(&[
+        entry("t.txt", REGULAR, b"t"),
+        extension(PAX_LOCAL, &[("mtime", "1700000000")]),
+        gnu_long(GNU_LONG_NAME, &long_name),
+        gnu_long(GNU_LONG_LINK, "t.txt"),
+        link("placeholder", SYMLINK, "t.txt"),
+    ]);
+    let dir = TempDir::new().unwrap();
+    let archive = write_archive(&dir, &bytes);
+    let manifest = list_archive(&archive, &config()).unwrap();
+    assert_eq!(manifest.entries()[1].path, Path::new(&long_name));
+}
+
+#[test]
+fn extension_header_with_a_base256_size_is_accepted() {
+    let body = pax_body(&[("path", "long.txt")]);
+    let mut field = [0u8; 12];
+    field[0] = 0x80;
+    field[11] = u8::try_from(body.len()).unwrap();
+    let header = patched(
+        header("hdr", PAX_LOCAL, body.len(), ""),
+        &[(SIZE_FIELD.start, &field)],
+    );
+    let bytes = tar_of(&[
+        pad([header, body].concat()),
+        entry("placeholder.txt", REGULAR, b"d"),
+    ]);
+    let dir = TempDir::new().unwrap();
+    let archive = write_archive(&dir, &bytes);
+    let manifest = list_archive(&archive, &config()).unwrap();
+    assert_eq!(manifest.entries()[0].path, Path::new("long.txt"));
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Naming {
+    Plain,
+    GnuLong,
+    PaxPath,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Corruption {
+    PlusSize,
+    VerticalTabSize,
+    PlusChecksum,
+    VerticalTabChecksum,
+}
+
+fn corrupt(block: Vec<u8>, size: usize, corruption: Option<Corruption>) -> Vec<u8> {
+    match corruption {
+        None => block,
+        Some(Corruption::PlusSize) => with_size(block, b'+', size),
+        Some(Corruption::VerticalTabSize) => with_size(block, 0x0b, size),
+        Some(Corruption::PlusChecksum) => with_checksum(block, b'+'),
+        Some(Corruption::VerticalTabChecksum) => with_checksum(block, 0x0b),
+    }
+}
+
+fn named_entry(naming: Naming, name: &str, data: &[u8], corruption: Option<Corruption>) -> Vec<u8> {
+    let (typeflag, body) = match naming {
+        Naming::Plain => return entry(&name[..name.len().min(100)], REGULAR, data),
+        Naming::GnuLong => {
+            let mut body = name.as_bytes().to_vec();
+            body.push(0);
+            (GNU_LONG_NAME, body)
+        }
+        Naming::PaxPath => (PAX_LOCAL, pax_body(&[("path", name)])),
+    };
+    let block = corrupt(
+        header("hdr", typeflag, body.len(), ""),
+        body.len(),
+        corruption,
+    );
+    [
+        pad([block, body].concat()),
+        entry("placeholder", REGULAR, data),
+    ]
+    .concat()
+}
+
+type Leading = Vec<(Naming, String, Vec<u8>)>;
+
+fn archive_with(leading: &Leading, target: (Naming, &str, &[u8], Option<Corruption>)) -> Vec<u8> {
+    let mut entries: Vec<Vec<u8>> = leading
+        .iter()
+        .map(|(naming, name, data)| named_entry(*naming, name, data, None))
+        .collect();
+    entries.push(named_entry(target.0, target.1, target.2, target.3));
+    tar_of(&entries)
+}
+
+fn naming_strategy() -> impl Strategy<Value = Naming> {
+    prop_oneof![
+        Just(Naming::Plain),
+        Just(Naming::GnuLong),
+        Just(Naming::PaxPath)
+    ]
+}
+
+fn extension_naming_strategy() -> impl Strategy<Value = Naming> {
+    prop_oneof![Just(Naming::GnuLong), Just(Naming::PaxPath)]
+}
+
+fn corruption_strategy() -> impl Strategy<Value = Corruption> {
+    prop_oneof![
+        Just(Corruption::PlusSize),
+        Just(Corruption::VerticalTabSize),
+        Just(Corruption::PlusChecksum),
+        Just(Corruption::VerticalTabChecksum),
+    ]
+}
+
+fn name_strategy() -> impl Strategy<Value = String> {
+    prop_oneof!["[a-z]{1,40}", "[a-z]{101,200}"]
+}
+
+fn data_strategy() -> impl Strategy<Value = Vec<u8>> {
+    prop::collection::vec(any::<u8>(), 0..1200)
+}
+
+fn leading_strategy() -> impl Strategy<Value = Leading> {
+    prop::collection::vec((naming_strategy(), name_strategy(), data_strategy()), 0..4)
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(96))]
+
+    #[test]
+    fn canonical_archives_are_never_refused(
+        leading in leading_strategy(),
+        naming in naming_strategy(),
+        name in name_strategy(),
+        data in data_strategy(),
+    ) {
+        let bytes = archive_with(&leading, (naming, &name, &data, None));
+        let dir = TempDir::new().unwrap();
+        let archive = write_archive(&dir, &bytes);
+        let manifest = list_archive(&archive, &config()).unwrap();
+        prop_assert_eq!(manifest.entries().len(), leading.len() + 1);
+        prop_assert!(verify_archive(&archive, &config()).is_ok());
+    }
+
+    #[test]
+    fn non_canonical_extension_header_numbers_are_never_accepted(
+        leading in leading_strategy(),
+        naming in extension_naming_strategy(),
+        corruption in corruption_strategy(),
+        name in name_strategy(),
+        data in data_strategy(),
+    ) {
+        let bytes = archive_with(&leading, (naming, &name, &data, Some(corruption)));
+        let dir = TempDir::new().unwrap();
+        let archive = write_archive(&dir, &bytes);
+        prop_assert!(list_archive(&archive, &config()).is_err());
+        prop_assert!(verify_archive(&archive, &config()).is_err());
+    }
 }

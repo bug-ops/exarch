@@ -4,22 +4,20 @@ use std::num::NonZeroU64;
 use std::path::Path;
 
 use exarch_core::ArchiveError;
-use exarch_core::ArchiveReader;
 use exarch_core::MemoryEntry;
 use exarch_core::MemoryEntryKind;
+use exarch_core::MemoryExtractRequest;
 use exarch_core::MemoryLimit;
 use exarch_core::MemorySink;
 use exarch_core::PartialWrites;
 use exarch_core::PathModel;
 use exarch_core::SanitizedMode;
-use exarch_core::extract_bytes_to_memory;
+use exarch_core::extract_reader_to_memory;
 use exarch_core::formats::detect::ArchiveType;
 use exarch_core::formats::detect::CreatableFormat;
-use exarch_core::utf8_entry_path;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::pybacked::PyBackedBytes;
 use pyo3::types::PyBytes;
 
 use crate::PyProgressAdapter;
@@ -36,6 +34,7 @@ use crate::report::PyArchiveManifest;
 use crate::report::PyCreationReport;
 use crate::report::PyExtractionReport;
 use crate::report::PyVerificationReport;
+use crate::stream::ArchiveInput;
 
 /// Parses the string form of a closed core enum (`ALL` and `as_str`).
 fn parse_one<T: Copy>(
@@ -165,9 +164,12 @@ impl PyMemoryEntry {
 /// The text of `path`, or an error: a lossy conversion could merge two
 /// distinct entries into one name.
 fn utf8(path: &Path) -> PyResult<String> {
-    utf8_entry_path(path)
-        .map(str::to_owned)
-        .map_err(convert_error)
+    path.to_str().map(str::to_owned).ok_or_else(|| {
+        convert_error(ArchiveError::InvalidArchive(format!(
+            "entry path is not valid UTF-8: {}",
+            path.display()
+        )))
+    })
 }
 
 /// Validates `max_bytes`: a positive count that fits in 64 bits.
@@ -259,7 +261,7 @@ impl PyMemoryExtraction {
 #[pyo3(signature = (data, config=None, options=None, max_bytes=None, path_model=None, format=None))]
 pub fn extract_archive_to_memory(
     py: Python<'_>,
-    data: PyBackedBytes,
+    data: ArchiveInput,
     config: Option<&PySecurityConfig>,
     options: Option<&PyExtractionOptions>,
     max_bytes: Option<i128>,
@@ -274,9 +276,11 @@ pub fn extract_archive_to_memory(
         format.as_deref(),
     )?;
 
-    let (report, sink) = catch_panic_as_py_err("archive extraction", || {
+    let slot = data.failure_slot();
+    let result = catch_panic_as_py_err("archive extraction", || {
         py.detach(|| request.run(data, &mut exarch_core::NoopProgress))
-    })?;
+    });
+    let (report, sink) = slot.surface(result)?;
     into_py_extraction(py, report, sink)
 }
 
@@ -338,7 +342,7 @@ pub fn extract_archive_to_memory(
 #[pyo3(signature = (data, config=None, progress=None, options=None, max_bytes=None, path_model=None, format=None))]
 pub fn extract_archive_to_memory_with_progress(
     py: Python<'_>,
-    data: PyBackedBytes,
+    data: ArchiveInput,
     config: Option<&PySecurityConfig>,
     progress: Option<Py<PyAny>>,
     options: Option<&PyExtractionOptions>,
@@ -354,7 +358,8 @@ pub fn extract_archive_to_memory_with_progress(
         format.as_deref(),
     )?;
 
-    let (report, sink) = run_with_optional_progress(
+    let slot = data.failure_slot();
+    let result = run_with_optional_progress(
         py,
         "archive extraction with progress",
         progress,
@@ -362,7 +367,8 @@ pub fn extract_archive_to_memory_with_progress(
         |exc, _| {
             let _ = exc.setattr("writes", PartialWrites::Discarded.as_str());
         },
-    )?;
+    );
+    let (report, sink) = slot.surface(result)?;
     into_py_extraction(py, report, sink)
 }
 
@@ -435,7 +441,7 @@ fn run_with_optional_progress<T: Send>(
 #[pyo3(signature = (data, config=None, progress=None, format=None))]
 pub fn list_archive_bytes_with_progress(
     py: Python<'_>,
-    data: PyBackedBytes,
+    data: ArchiveInput,
     config: Option<&PySecurityConfig>,
     progress: Option<Py<PyAny>>,
     format: Option<String>,
@@ -445,16 +451,18 @@ pub fn list_archive_bytes_with_progress(
     let config_ref = config.map_or(&default_config, |c| c.as_core());
     let options = exarch_core::ListOptions::default();
 
-    let manifest = run_with_optional_progress(
+    let slot = data.failure_slot();
+    let result = run_with_optional_progress(
         py,
         "archive listing with progress",
         progress,
         |progress| {
-            let reader = ArchiveReader::from_bytes(data, format)?;
+            let reader = data.into_reader(format)?;
             exarch_core::list_reader_with_progress(reader, config_ref, &options, progress)
         },
         |_, _| {},
-    )?;
+    );
+    let manifest = slot.surface(result)?;
 
     Ok(PyArchiveManifest::from(manifest))
 }
@@ -505,7 +513,7 @@ pub fn list_archive_bytes_with_progress(
 #[pyo3(signature = (data, config=None, progress=None, options=None, format=None))]
 pub fn verify_archive_bytes_with_progress(
     py: Python<'_>,
-    data: PyBackedBytes,
+    data: ArchiveInput,
     config: Option<&PySecurityConfig>,
     progress: Option<Py<PyAny>>,
     options: Option<&PyVerificationOptions>,
@@ -517,26 +525,25 @@ pub fn verify_archive_bytes_with_progress(
     let default_options = exarch_core::VerificationOptions::default();
     let options_ref = options.map_or(&default_options, |o| o.as_core());
 
-    let report = run_with_optional_progress(
+    let slot = data.failure_slot();
+    let result = run_with_optional_progress(
         py,
         "archive verification with progress",
         progress,
         |progress| {
-            let reader = ArchiveReader::from_bytes(data, format)?;
+            let reader = data.into_reader(format)?;
             exarch_core::verify_reader_with_progress(reader, config_ref, options_ref, progress)
         },
         |_, _| {},
-    )?;
+    );
+    let report = slot.surface(result)?;
 
     Ok(PyVerificationReport::from(report))
 }
 
 /// The validated arguments shared by the in-memory extraction functions.
 struct MemoryRequest {
-    config: exarch_core::SecurityConfig,
-    options: exarch_core::SinkOptions,
-    limit: Option<MemoryLimit>,
-    path_model: PathModel,
+    request: MemoryExtractRequest,
     format: Option<ArchiveType>,
 }
 
@@ -560,30 +567,23 @@ impl MemoryRequest {
                 |o| exarch_core::SinkOptions::try_from(o.as_core()),
             )
             .map_err(convert_error)?;
-        let limit = max_bytes.map(MemoryLimit::new);
-        Ok(Self {
-            config,
-            options,
-            limit,
-            path_model,
-            format,
-        })
+        let mut request = MemoryExtractRequest::default()
+            .with_config(config)
+            .with_options(options)
+            .with_path_model(path_model);
+        if let Some(bytes) = max_bytes {
+            request = request.with_limit(MemoryLimit::new(bytes));
+        }
+        Ok(Self { request, format })
     }
 
     fn run(
         &self,
-        data: PyBackedBytes,
+        data: ArchiveInput,
         progress: &mut dyn exarch_core::ProgressCallback,
     ) -> exarch_core::Result<(exarch_core::ExtractionReport, MemorySink)> {
-        extract_bytes_to_memory(
-            data,
-            self.format,
-            &self.config,
-            &self.options,
-            self.limit,
-            self.path_model,
-            progress,
-        )
+        let reader = data.into_reader(self.format)?;
+        extract_reader_to_memory(reader, &self.request, progress)
     }
 }
 
@@ -727,7 +727,7 @@ pub fn create_archive_to_bytes(
 #[pyo3(signature = (data, config=None, format=None))]
 pub fn list_archive_bytes(
     py: Python<'_>,
-    data: PyBackedBytes,
+    data: ArchiveInput,
     config: Option<&PySecurityConfig>,
     format: Option<String>,
 ) -> PyResult<PyArchiveManifest> {
@@ -736,12 +736,14 @@ pub fn list_archive_bytes(
     let config_ref = config.map_or(&default_config, |c| c.as_core());
     let options = exarch_core::ListOptions::default();
 
-    let manifest = catch_panic_as_py_err("archive listing", || {
+    let slot = data.failure_slot();
+    let result = catch_panic_as_py_err("archive listing", || {
         py.detach(|| {
-            let reader = ArchiveReader::from_bytes(data, format)?;
+            let reader = data.into_reader(format)?;
             exarch_core::list_reader(reader, config_ref, &options)
         })
-    })?;
+    });
+    let manifest = slot.surface(result)?;
 
     Ok(PyArchiveManifest::from(manifest))
 }
@@ -780,7 +782,7 @@ pub fn list_archive_bytes(
 #[pyo3(signature = (data, config=None, options=None, format=None))]
 pub fn verify_archive_bytes(
     py: Python<'_>,
-    data: PyBackedBytes,
+    data: ArchiveInput,
     config: Option<&PySecurityConfig>,
     options: Option<&PyVerificationOptions>,
     format: Option<String>,
@@ -791,12 +793,14 @@ pub fn verify_archive_bytes(
     let default_options = exarch_core::VerificationOptions::default();
     let options_ref = options.map_or(&default_options, |o| o.as_core());
 
-    let report = catch_panic_as_py_err("archive verification", || {
+    let slot = data.failure_slot();
+    let result = catch_panic_as_py_err("archive verification", || {
         py.detach(|| {
-            let reader = ArchiveReader::from_bytes(data, format)?;
+            let reader = data.into_reader(format)?;
             exarch_core::verify_reader(reader, config_ref, options_ref)
         })
-    })?;
+    });
+    let report = slot.surface(result)?;
 
     Ok(PyVerificationReport::from(report))
 }

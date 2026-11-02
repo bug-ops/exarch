@@ -778,6 +778,9 @@ fn placement_issue(
 ) -> VerificationIssue {
     let kind = &entry.kind;
     let entry_path = Some(entry.path.clone());
+    if let Some(blocked) = &conflict.blocked {
+        return VerificationIssue::from_error(&blocked.error(), entry_path);
+    }
     let error = match Placement::of(kind, &conflict) {
         Placement::RefusedUnderOverwrite(occupant) => {
             let mut issue = VerificationIssue::new(
@@ -998,14 +1001,18 @@ mod tests {
             .find(|i| i.category == IssueCategory::SecurityPolicy)
             .unwrap_or_else(|| panic!("no SecurityPolicy issue: {:?}", report.issues()));
         assert_eq!(issue.severity, IssueSeverity::High);
-        assert!(issue.message.contains(expected), "{}", issue.message);
+        assert!(
+            issue.message.replace('\\', "/").contains(expected),
+            "{}",
+            issue.message
+        );
     }
 
     #[test]
     fn dangling_link_used_as_a_parent_fails_the_security_status() {
         assert_link_placement_finding(
             vec![("d", symlink_to("sub")), ("d/f", ManifestEntryKind::File)],
-            "extraction fails at d/f:",
+            "refusing to create d/f under the existing symlink at d",
         );
     }
 
@@ -1113,7 +1120,7 @@ mod tests {
                 ("t", ManifestEntryKind::File),
                 ("d/h", hardlink_to("t")),
             ],
-            "extraction fails at d/h:",
+            "refusing to create d/h under the existing symlink at d",
         );
     }
 

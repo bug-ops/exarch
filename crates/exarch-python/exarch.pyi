@@ -8,9 +8,16 @@ and other common vulnerabilities.
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Protocol
 
 __version__: str
+
+class _ArchiveFile(Protocol):
+    """A binary file object: ``read(n)`` returns at most ``n`` bytes; ``seek``/``tell`` optional."""
+
+    def read(self, size: int, /) -> bytes: ...
+
+_ArchiveData = bytes | bytearray | _ArchiveFile
 
 # Stub-only aliases: the native module does not export them at runtime.
 _ArchiveType = Literal["Tar", "TarGz", "TarBz2", "TarXz", "TarZst", "Zip", "SevenZ"]
@@ -1022,7 +1029,7 @@ def verify_archive(
     ...
 
 def list_archive_bytes(
-    data: bytes,
+    data: _ArchiveData,
     config: SecurityConfig | None = None,
     format: _ArchiveType | None = None,
 ) -> ArchiveManifest:
@@ -1030,7 +1037,9 @@ def list_archive_bytes(
     List the contents of an archive held in memory, without extracting.
 
     Args:
-        data: The archive bytes
+        data: The archive bytes, or a binary file object. A file object is read from
+            its current position; if it is seekable any format works, otherwise only
+            the TAR family. An exception it raises propagates unchanged.
         config: Optional SecurityConfig (uses secure defaults if None)
         format: The archive format; detected from the leading bytes if None
 
@@ -1045,7 +1054,7 @@ def list_archive_bytes(
     ...
 
 def verify_archive_bytes(
-    data: bytes,
+    data: _ArchiveData,
     config: SecurityConfig | None = None,
     options: VerificationOptions | None = None,
     format: _ArchiveType | None = None,
@@ -1054,7 +1063,9 @@ def verify_archive_bytes(
     Verify the security of an archive held in memory.
 
     Args:
-        data: The archive bytes
+        data: The archive bytes, or a binary file object. A file object is read from
+            its current position; if it is seekable any format works, otherwise only
+            the TAR family. An exception it raises propagates unchanged.
         config: Optional SecurityConfig (uses secure defaults if None)
         options: Optional VerificationOptions
         format: The archive format; detected from the leading bytes if None
@@ -1111,7 +1122,7 @@ class MemoryExtraction:
         ...
 
 def extract_archive_to_memory(
-    data: bytes,
+    data: _ArchiveData,
     config: SecurityConfig | None = None,
     options: ExtractionOptions | None = None,
     max_bytes: int | None = None,
@@ -1125,7 +1136,9 @@ def extract_archive_to_memory(
     written to disk.
 
     Args:
-        data: The archive bytes
+        data: The archive bytes, or a binary file object. A file object is read from
+            its current position; if it is seekable any format works, otherwise only
+            the TAR family. An exception it raises propagates unchanged.
         config: Optional SecurityConfig (uses secure defaults if None)
         options: Optional ExtractionOptions (atomic is not supported)
         max_bytes: The most bytes to keep: payload (file data, hardlink copies
@@ -1146,7 +1159,7 @@ def extract_archive_to_memory(
     ...
 
 def extract_archive_to_memory_with_progress(
-    data: bytes,
+    data: _ArchiveData,
     config: SecurityConfig | None = None,
     progress: ProgressCallbackFn | None = None,
     options: ExtractionOptions | None = None,
@@ -1171,7 +1184,7 @@ def extract_archive_to_memory_with_progress(
     ...
 
 def list_archive_bytes_with_progress(
-    data: bytes,
+    data: _ArchiveData,
     config: SecurityConfig | None = None,
     progress: ProgressCallbackFn | None = None,
     format: _ArchiveType | None = None,
@@ -1192,7 +1205,7 @@ def list_archive_bytes_with_progress(
     ...
 
 def verify_archive_bytes_with_progress(
-    data: bytes,
+    data: _ArchiveData,
     config: SecurityConfig | None = None,
     progress: ProgressCallbackFn | None = None,
     options: VerificationOptions | None = None,

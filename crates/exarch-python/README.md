@@ -114,9 +114,10 @@ decode raises `InvalidArchiveError`.
 ### Archives in Memory
 
 `list_archive_bytes`, `verify_archive_bytes` and `extract_archive_to_memory`
-take the archive as `bytes`. The format is detected from the leading bytes, or
-stated with `format` (`"Tar"`, `"TarGz"`, `"TarBz2"`, `"TarXz"`, `"TarZst"`,
-`"Zip"`, `"SevenZ"`). Nothing is written to disk.
+take the archive as `bytes` or a binary file object. The format is detected
+from the leading bytes, or stated with `format` (`"Tar"`, `"TarGz"`,
+`"TarBz2"`, `"TarXz"`, `"TarZst"`, `"Zip"`, `"SevenZ"`). Nothing is written to
+disk.
 
 ```python
 import exarch
@@ -131,6 +132,15 @@ for entry in result.entries:
     print(entry.path, entry.kind)  # "file", "directory" or "symlink"
     if entry.kind == "file":
         content = entry.data  # bytes
+```
+
+A file object is read from its current position. If it is `seekable()` every
+format works; otherwise only TAR (plain or compressed) can be read. An exception
+raised by the object propagates unchanged instead of becoming a verdict.
+
+```python
+with open("archive.tar.gz", "rb") as f:
+    manifest = exarch.list_archive_bytes(f)
 ```
 
 **Note:** `max_bytes` caps payload plus path bytes plus 256 per entry and

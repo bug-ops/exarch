@@ -2093,6 +2093,81 @@ fn test_duplicate_rejects_dangling_symlink_when_not_skipping() {
     );
 }
 
+fn extract_forced(data: Vec<u8>, out: &std::path::Path) -> Result<ExtractionReport> {
+    let mut archive = SevenZArchive::new(Cursor::new(data)).unwrap();
+    let config = SecurityConfig::default().validate().expect("valid config");
+    let options = ExtractionOptions {
+        skip_duplicates: false,
+        ..ExtractionOptions::default()
+    };
+    archive.extract(out, &config, &options, &mut crate::NoopProgress)
+}
+
+fn directory_entry_names(dir: &std::path::Path) -> Vec<std::ffi::OsString> {
+    let mut names: Vec<_> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    names.sort();
+    names
+}
+
+/// Regression test for #806: a decode failure while forcing a file over an
+/// existing one must leave the original in place instead of deleting it first.
+#[test]
+fn test_force_overwrite_decode_failure_keeps_original() {
+    let payload: Vec<u8> = (0..4096u32).map(|i| (i * 31 % 251) as u8).collect();
+    let mut data = make_sevenz_archive(&[("target.bin", &payload)]);
+    data[32 + 100] ^= 0xFF;
+
+    let temp = TempDir::new().unwrap();
+    let dest = temp.path().join("target.bin");
+    std::fs::write(&dest, b"original content").unwrap();
+
+    let result = extract_forced(data, temp.path());
+
+    assert!(result.is_err(), "corrupt payload must fail: {result:?}");
+    assert_eq!(std::fs::read(&dest).unwrap(), b"original content");
+    assert_eq!(directory_entry_names(temp.path()), ["target.bin"]);
+}
+
+#[test]
+fn test_force_overwrite_replaces_regular_file() {
+    let data = make_sevenz_archive(&[("target.bin", b"replacement")]);
+
+    let temp = TempDir::new().unwrap();
+    let dest = temp.path().join("target.bin");
+    std::fs::write(&dest, b"original content, longer").unwrap();
+
+    let report = extract_forced(data, temp.path()).unwrap();
+
+    assert_eq!(report.files_extracted, 1);
+    assert_eq!(std::fs::read(&dest).unwrap(), b"replacement");
+    assert_eq!(directory_entry_names(temp.path()), ["target.bin"]);
+}
+
+#[test]
+#[cfg(unix)]
+fn test_force_overwrite_replaces_file_with_fresh_inode() {
+    use std::os::unix::fs::MetadataExt;
+
+    let data = make_sevenz_archive(&[("target.bin", b"replacement")]);
+
+    let other = TempDir::new().unwrap();
+    let other_path = other.path().join("other");
+    std::fs::write(&other_path, b"other content").unwrap();
+    let temp = TempDir::new().unwrap();
+    let dest = temp.path().join("target.bin");
+    std::fs::hard_link(&other_path, &dest).unwrap();
+
+    extract_forced(data, temp.path()).unwrap();
+
+    let meta = std::fs::symlink_metadata(&dest).unwrap();
+    assert!(meta.is_file());
+    assert_eq!(meta.nlink(), 1);
+    assert_eq!(std::fs::read(&dest).unwrap(), b"replacement");
+}
+
 /// Regression test for issue #483: extracting a file entry onto a
 /// pre-existing *directory* at the destination path must fail instead of
 /// recursively deleting the directory tree via `remove_dir_all`.

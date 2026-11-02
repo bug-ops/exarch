@@ -19,6 +19,7 @@ use exarch_core::ArchiveManifest;
 use exarch_core::ExtractionOptions;
 use exarch_core::ExtractionReport;
 use exarch_core::ListOptions;
+use exarch_core::ListedArchive;
 use exarch_core::ManifestEntryKind;
 use exarch_core::NoopProgress;
 use exarch_core::ProgressCallback;
@@ -27,7 +28,7 @@ use exarch_core::StoredTargets;
 use exarch_core::extract_archive_with_options_and_progress;
 use exarch_core::formats::detect::ArchiveType;
 use exarch_core::formats::detect::detect_format;
-use exarch_core::list_archive_with_options;
+use exarch_core::list_archive_for_extraction;
 use std::env;
 use std::ffi::OsStr;
 use std::ffi::OsString;
@@ -44,20 +45,33 @@ enum Staging {
     Discarded,
 }
 
+/// What [`run_extraction`] reads the archive from.
+enum Source {
+    /// The archive file, decoded as extraction reads it.
+    Archive,
+    /// An archive already listed, which may hold its decoded stream.
+    Listed(ListedArchive),
+}
+
 fn run_extraction(
     archive: &Path,
+    source: Source,
     output_dir: &Path,
     config: &SecurityConfig,
     options: &ExtractionOptions,
     progress: &mut dyn ProgressCallback,
     staging: Staging,
 ) -> Result<ExtractionReport> {
-    let result =
-        extract_archive_with_options_and_progress(archive, output_dir, config, options, progress)
-            .map_err(|err| match staging {
-                Staging::Direct => err,
-                Staging::Discarded => err.rolled_back(),
-            });
+    let result = match source {
+        Source::Archive => extract_archive_with_options_and_progress(
+            archive, output_dir, config, options, progress,
+        ),
+        Source::Listed(listed) => listed.extract(output_dir, config, options, progress),
+    }
+    .map_err(|err| match staging {
+        Staging::Direct => err,
+        Staging::Discarded => err.rolled_back(),
+    });
     add_archive_context(result, archive)
 }
 
@@ -107,6 +121,7 @@ struct AtomicForceTarget {
 /// wide.
 fn run_atomic_force_extraction(
     archive: &Path,
+    source: Source,
     target: AtomicForceTarget,
     config: &SecurityConfig,
     options: &ExtractionOptions,
@@ -162,6 +177,7 @@ fn run_atomic_force_extraction(
 
     let mut report = run_extraction(
         archive,
+        source,
         temp_dir.path(),
         config,
         options,
@@ -751,9 +767,9 @@ fn filter_banned_components(raw: &[String]) -> Vec<String> {
 ///
 /// Every failure keeps the category message and hint extraction would give the
 /// same error, since that is the error the user has to act on.
-fn list_for_extract(archive: &Path, config: &SecurityConfig) -> Result<ArchiveManifest> {
+fn list_for_extract(archive: &Path, config: &SecurityConfig) -> Result<ListedArchive> {
     let options = ListOptions::default().with_stored_targets(StoredTargets::Skip);
-    list_archive_with_options(archive, config, &options)
+    list_archive_for_extraction(archive, config, &options)
         .map_err(|err| convert_extraction_error(err, archive))
 }
 
@@ -856,16 +872,18 @@ pub fn execute(
         .with_zip_consistency(config.zip_consistency)
         .with_allow_absolute_paths(config.allowed.absolute_paths)
         .with_max_path_depth(config.max_path_depth)
+        .with_max_decoder_memory(config.max_decoder_memory)
         .with_banned_path_components(config.banned_path_components.clone());
 
     let single_pass = is_fresh_destination(&output_dir) && is_tar_archive(&args.archive);
-    let manifest = if single_pass {
+    let listed = if single_pass {
         None
     } else {
         Some(list_for_extract(&args.archive, &list_config)?)
     };
+    let manifest = listed.as_ref().map(ListedArchive::manifest);
 
-    if let Some(manifest) = manifest.as_ref().filter(|_| !args.force && !args.atomic) {
+    if let Some(manifest) = manifest.filter(|_| !args.force && !args.atomic) {
         let conflicts: Vec<_> = manifest
             .entries()
             .iter()
@@ -900,18 +918,27 @@ pub fn execute(
 
     let mut progress: Box<dyn ProgressCallback> = match verbosity {
         Verbosity::Verbose => Box::new(VerboseProgress::new()),
-        Verbosity::Normal if CliProgress::should_show() => Box::new(manifest.as_ref().map_or_else(
+        Verbosity::Normal if CliProgress::should_show() => Box::new(manifest.map_or_else(
             || CliProgress::counting("Extracting"),
             |manifest| CliProgress::new(listed_entry_count(manifest, &config), "Extracting"),
         )),
         Verbosity::Quiet | Verbosity::Normal => Box::new(NoopProgress),
     };
 
+    let source = listed.map_or(Source::Archive, Source::Listed);
     let report = if let Some(target) = atomic_force_target {
-        run_atomic_force_extraction(&args.archive, target, &config, &options, progress.as_mut())?
+        run_atomic_force_extraction(
+            &args.archive,
+            source,
+            target,
+            &config,
+            &options,
+            progress.as_mut(),
+        )?
     } else {
         run_extraction(
             &args.archive,
+            source,
             &output_dir,
             &config,
             &options,

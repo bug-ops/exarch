@@ -94,7 +94,7 @@ SO THAT a hostile archive cannot exhaust memory beyond a stated cap
 **Acceptance criteria:**
 ```
 GIVEN an archive whose entries exceed the MemoryLimit
-WHEN extract_bytes_to_memory() runs
+WHEN extract_reader_to_memory() runs
 THEN it fails with QuotaExceeded { resource: SinkCapacity { max } }
 AND the error is PartialExtraction with writes == Discarded when an entry had been collected
 ```
@@ -177,8 +177,8 @@ SO THAT a web handler never writes an untrusted archive to disk
 | FR-030 | `MemorySink` SHALL collect entries as `MemoryEntry::{File { data, mode }, Directory, Symlink { target }}` in a path-ordered map, bounded by a `MemoryLimit` that counts payload bytes (file data, hardlink copies, symlink targets), path bytes and `MemorySink::ENTRY_OVERHEAD` (256) per entry; exceeding it SHALL return the `SinkFull` error | must |
 | FR-031 | `MemoryLimit` SHALL wrap a `NonZeroU64`, offer `DEFAULT` (500 MiB) and `from_config` (the config's `max_total_size`, zero becoming one byte), so a zero limit is unrepresentable | must |
 | FR-032 | `MemorySink::with_path_model` SHALL select the model; accessors SHALL be `get`, `iter`, `into_entries`, `limit` and `stored_bytes` | must |
-| FR-033 | `extract_bytes_to_memory(bytes, format, config, options, limit, model, progress)` SHALL extract an in-memory archive into a `MemorySink` (limit defaulting to `MemoryLimit::from_config`) and convert a partial failure to `PartialWrites::Discarded` via `ArchiveError::discarded` | must |
-| FR-034 | `utf8_entry_path` SHALL convert a delivered path to `&str` or fail, for bindings that expose paths as strings | should |
+| FR-033 | `extract_reader_to_memory(reader, &MemoryExtractRequest, progress)` SHALL extract the archive in an `ArchiveReader` (built with `ArchiveReader::from_bytes` for bytes) into a `MemorySink` (limit defaulting to `MemoryLimit::from_config`) and convert a partial failure to `PartialWrites::Discarded` | must |
+| FR-034 | Language bindings that expose entry paths as strings SHALL fail with `InvalidArchive` ("entry path is not valid UTF-8: ...") for a path that is not UTF-8, each with a private check | should |
 
 ### 3.5 Writer
 

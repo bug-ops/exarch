@@ -12,10 +12,12 @@ use std::path::PathBuf;
 
 use exarch_core::ArchiveError;
 use exarch_core::ArchiveReader;
+use exarch_core::EntrySink as _;
 use exarch_core::ExtractionOptions;
 use exarch_core::ExtractionReport;
 use exarch_core::MemoryEntry;
 use exarch_core::MemoryEntryKind;
+use exarch_core::MemoryExtractRequest;
 use exarch_core::MemoryLimit;
 use exarch_core::MemorySink;
 use exarch_core::NoopProgress;
@@ -25,10 +27,8 @@ use exarch_core::QuotaResource;
 use exarch_core::SecurityConfig;
 use exarch_core::SeekableFormat;
 use exarch_core::SinkOptions;
-use exarch_core::extract_bytes_to_memory;
+use exarch_core::extract_reader_to_memory;
 use exarch_core::extract_to_sink;
-#[cfg(unix)]
-use exarch_core::utf8_entry_path;
 use sink_support::tar_archive;
 use sink_support::tar_dir;
 use sink_support::tar_entry_mode;
@@ -409,16 +409,12 @@ fn a_failed_file_publishes_nothing() {
 }
 
 #[test]
-fn extract_bytes_to_memory_detects_the_format_and_applies_the_default_limit() {
+fn extract_reader_to_memory_detects_the_format_and_applies_the_default_limit() {
     let bytes = tar_archive(&[tar_dir("d/"), tar_file("d/a.txt", b"alpha")]);
 
-    let (report, sink) = extract_bytes_to_memory(
-        bytes,
-        None,
-        &SecurityConfig::default(),
-        &SinkOptions::default(),
-        None,
-        PathModel::Host,
+    let (report, sink) = extract_reader_to_memory(
+        ArchiveReader::from_bytes(bytes, None).unwrap(),
+        &MemoryExtractRequest::default(),
         &mut NoopProgress,
     )
     .unwrap();
@@ -439,16 +435,12 @@ fn extract_bytes_to_memory_detects_the_format_and_applies_the_default_limit() {
 }
 
 #[test]
-fn extract_bytes_to_memory_reports_discarded_writes_after_delivered_entries() {
+fn extract_reader_to_memory_reports_discarded_writes_after_delivered_entries() {
     let bytes = tar_archive(&[tar_file("a", b"x"), tar_file("../b", b"y")]);
 
-    let error = extract_bytes_to_memory(
-        bytes,
-        None,
-        &SecurityConfig::default(),
-        &SinkOptions::default(),
-        None,
-        PathModel::Host,
+    let error = extract_reader_to_memory(
+        ArchiveReader::from_bytes(bytes, None).unwrap(),
+        &MemoryExtractRequest::default(),
         &mut NoopProgress,
     )
     .unwrap_err();
@@ -464,21 +456,76 @@ fn extract_bytes_to_memory_reports_discarded_writes_after_delivered_entries() {
 }
 
 #[test]
-fn extract_bytes_to_memory_honours_an_explicit_limit() {
+fn extract_reader_to_memory_honours_an_explicit_limit() {
     let bytes = tar_archive(&[tar_file("a", b"0123456789")]);
 
-    let error = extract_bytes_to_memory(
-        bytes,
-        None,
-        &SecurityConfig::default(),
-        &SinkOptions::default(),
-        Some(limit(4)),
-        PathModel::Host,
+    let error = extract_reader_to_memory(
+        ArchiveReader::from_bytes(bytes, None).unwrap(),
+        &MemoryExtractRequest::default().with_limit(limit(4)),
         &mut NoopProgress,
     )
     .unwrap_err();
 
     assert_eq!(sink_capacity(&error), Some(4), "{error:?}");
+}
+
+#[test]
+fn extract_reader_to_memory_derives_the_default_limit_from_the_request_config() {
+    let request = MemoryExtractRequest::default()
+        .with_config(SecurityConfig::default().with_max_total_size(4096))
+        .with_path_model(PathModel::Portable);
+
+    let (_, sink) = extract_reader_to_memory(
+        ArchiveReader::from_bytes(tar_archive(&[tar_file("a", b"x")]), None).unwrap(),
+        &request,
+        &mut NoopProgress,
+    )
+    .unwrap();
+
+    assert_eq!(sink.limit(), limit(4096));
+    assert_eq!(sink.path_model(), PathModel::Portable);
+}
+
+#[cfg(unix)]
+#[test]
+fn extract_reader_to_memory_applies_the_request_path_model() {
+    let archive = || tar_archive(&[tar_file("a?b", b"x")]);
+    let reader = |bytes| ArchiveReader::from_bytes(bytes, None).unwrap();
+
+    let (_, host) = extract_reader_to_memory(
+        reader(archive()),
+        &MemoryExtractRequest::default(),
+        &mut NoopProgress,
+    )
+    .unwrap();
+    assert!(host.get(Path::new("a?b")).is_some());
+
+    let request = MemoryExtractRequest::default().with_path_model(PathModel::Portable);
+    let error =
+        extract_reader_to_memory(reader(archive()), &request, &mut NoopProgress).unwrap_err();
+    assert!(error.to_string().contains("not portable"), "{error}");
+}
+
+#[test]
+fn extract_reader_to_memory_applies_the_request_options() {
+    let archive = || tar_archive(&[tar_file("a", b"first"), tar_file("a", b"second")]);
+    let data_of = |request: &MemoryExtractRequest| {
+        let (_, sink) = extract_reader_to_memory(
+            ArchiveReader::from_bytes(archive(), None).unwrap(),
+            request,
+            &mut NoopProgress,
+        )
+        .unwrap();
+        match sink.get(Path::new("a")) {
+            Some(MemoryEntry::File { data, .. }) => data.clone(),
+            other => panic!("unexpected entry: {other:?}"),
+        }
+    };
+
+    assert_eq!(data_of(&MemoryExtractRequest::default()), b"first");
+    let overwrite = MemoryExtractRequest::default()
+        .with_options(SinkOptions::default().with_skip_duplicates(false));
+    assert_eq!(data_of(&overwrite), b"second");
 }
 
 #[test]
@@ -494,15 +541,4 @@ fn sink_options_keep_the_duplicate_policy_and_refuse_atomic() {
         SinkOptions::try_from(&ExtractionOptions::default().with_atomic(true)),
         Err(ArchiveError::InvalidConfiguration { .. })
     );
-}
-
-#[cfg(unix)]
-#[test]
-fn utf8_entry_path_refuses_names_that_are_not_text() {
-    use std::ffi::OsStr;
-    use std::os::unix::ffi::OsStrExt as _;
-
-    assert_eq!(utf8_entry_path(Path::new("a/b")).unwrap(), "a/b");
-    let bad = Path::new(OsStr::from_bytes(b"bad\xff"));
-    assert_matches!(utf8_entry_path(bad), Err(ArchiveError::InvalidArchive(_)));
 }

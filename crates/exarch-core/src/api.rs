@@ -205,10 +205,23 @@ pub fn extract_archive_with_options_and_progress<P: AsRef<Path>, Q: AsRef<Path>>
     options: &ExtractionOptions,
     progress: &mut dyn ProgressCallback,
 ) -> Result<ExtractionReport> {
+    extract_staged(output_dir.as_ref(), options, |dir| {
+        extract_impl(archive_path, dir, config, options, progress)
+    })
+}
+
+/// Runs `extract` into `output_dir`, or into a staging directory that is
+/// renamed over `output_dir` on success when `options` ask for atomic
+/// extraction.
+pub(crate) fn extract_staged(
+    output_dir: &Path,
+    options: &ExtractionOptions,
+    extract: impl FnOnce(&Path) -> Result<ExtractionReport>,
+) -> Result<ExtractionReport> {
     if options.atomic {
-        extract_atomic(archive_path, output_dir, config, options, progress)
+        extract_atomic(output_dir, extract)
     } else {
-        extract_impl(archive_path, output_dir, config, options, progress)
+        extract(output_dir)
     }
 }
 
@@ -252,15 +265,10 @@ pub fn extract_archive_with_options<P: AsRef<Path>, Q: AsRef<Path>>(
     extract_archive_with_options_and_progress(archive_path, output_dir, config, options, &mut noop)
 }
 
-fn extract_atomic<P: AsRef<Path>, Q: AsRef<Path>>(
-    archive_path: P,
-    output_dir: Q,
-    config: &SecurityConfig,
-    options: &ExtractionOptions,
-    progress: &mut dyn ProgressCallback,
+fn extract_atomic(
+    output_dir: &Path,
+    extract: impl FnOnce(&Path) -> Result<ExtractionReport>,
 ) -> Result<ExtractionReport> {
-    let output_dir = output_dir.as_ref();
-
     // Canonicalize output_dir to resolve any symlinks in the path before
     // computing the parent, so temp dir lands on the same filesystem.
     // If output_dir doesn't exist yet, use its lexical parent.
@@ -291,7 +299,7 @@ fn extract_atomic<P: AsRef<Path>, Q: AsRef<Path>>(
             ))
         })?;
 
-    let result = extract_impl(archive_path, temp_dir.path(), config, options, progress);
+    let result = extract(temp_dir.path());
 
     match result {
         Ok(report) => {
@@ -332,13 +340,24 @@ fn extract_tar(
     progress: &mut dyn ProgressCallback,
     codec: Option<CompressionCodec>,
 ) -> Result<ExtractionReport> {
-    use crate::formats::TarArchive;
     use crate::formats::tar::open_tar_stream;
-    use crate::formats::traits::ArchiveFormat;
 
     let stream = open_tar_stream(archive_path, codec, config.max_decoder_memory)?;
-    let mut archive = TarArchive::new(stream);
-    archive.extract(output_dir, config, options, progress)
+    extract_tar_stream(stream, output_dir, config, options, progress)
+}
+
+/// Extracts a TAR stream that is already decoded.
+pub(crate) fn extract_tar_stream<R: std::io::Read>(
+    stream: R,
+    output_dir: &Path,
+    config: &SecurityConfig<Validated>,
+    options: &ExtractionOptions,
+    progress: &mut dyn ProgressCallback,
+) -> Result<ExtractionReport> {
+    use crate::formats::TarArchive;
+    use crate::formats::traits::ArchiveFormat;
+
+    TarArchive::new(stream).extract(output_dir, config, options, progress)
 }
 
 fn extract_zip(

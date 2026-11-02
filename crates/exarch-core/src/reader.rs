@@ -164,6 +164,33 @@ impl<'a> ArchiveReader<'a> {
         }
     }
 
+    /// An archive of the stated `format` in a forward-only `reader`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArchiveError::ReaderFormat`] with `NeedsSeek` if `format` is
+    /// ZIP or 7z, which cannot be read without seeking.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::ArchiveReader;
+    /// use exarch_core::formats::detect::ArchiveType;
+    ///
+    /// let tar = ArchiveReader::of_stream(&b""[..], ArchiveType::TarGz)?;
+    /// assert_eq!(tar.format(), ArchiveType::TarGz);
+    /// assert!(ArchiveReader::of_stream(&b""[..], ArchiveType::Zip).is_err());
+    /// # Ok::<(), exarch_core::ArchiveError>(())
+    /// ```
+    pub fn of_stream<R: Read + Send + 'a>(reader: R, format: ArchiveType) -> Result<Self> {
+        match format.family() {
+            FormatFamily::Tar(codec) => Ok(Self::tar(reader, codec)),
+            FormatFamily::Seekable(container) => Err(ArchiveError::ReaderFormat(
+                ReaderFormatError::NeedsSeek(container),
+            )),
+        }
+    }
+
     /// An archive held in memory: of the stated `format`, or detected from its
     /// leading bytes when `format` is `None`.
     ///
@@ -385,4 +412,39 @@ pub(crate) fn tar_archive<'r, R: Read + Send + 'r>(
     max_decoder_memory: u64,
 ) -> Result<TarArchive<Box<dyn Read + Send + 'r>>> {
     decode_tar_stream(reader, codec, max_decoder_memory).map(TarArchive::new)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::assert_matches;
+
+    use super::*;
+    use crate::SeekableFormat;
+
+    #[test]
+    fn test_of_stream_keeps_every_tar_codec() -> Result<()> {
+        for format in [
+            ArchiveType::Tar,
+            ArchiveType::TarBz2,
+            ArchiveType::TarXz,
+            ArchiveType::TarZst,
+        ] {
+            let reader = ArchiveReader::of_stream(&b""[..], format)?;
+            assert_eq!(reader.format(), format);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_of_stream_refuses_seekable_formats() {
+        for (format, container) in [
+            (ArchiveType::Zip, SeekableFormat::Zip),
+            (ArchiveType::SevenZ, SeekableFormat::SevenZ),
+        ] {
+            assert_matches!(
+                ArchiveReader::of_stream(&b""[..], format),
+                Err(ArchiveError::ReaderFormat(ReaderFormatError::NeedsSeek(c))) if c == container
+            );
+        }
+    }
 }

@@ -149,11 +149,11 @@ mod memory;
 
 pub use memory::MemoryEntry;
 pub use memory::MemoryEntryKind;
+pub use memory::MemoryExtractRequest;
 pub use memory::MemoryFile;
 pub use memory::MemoryLimit;
 pub use memory::MemorySink;
-pub use memory::extract_bytes_to_memory;
-pub use memory::utf8_entry_path;
+pub use memory::extract_reader_to_memory;
 
 use std::collections::HashMap;
 use std::io;
@@ -479,7 +479,7 @@ impl<'a, S: EntrySink> SinkTarget<'a, S> {
 
 fn place_error(error: PlaceError) -> ArchiveError {
     match error {
-        PlaceError::Conflict(conflict) => ArchiveError::Io(conflict.error),
+        PlaceError::Conflict(conflict) => conflict.into_archive_error(),
         PlaceError::Budget(exceeded) => exceeded.into(),
     }
 }

@@ -3,16 +3,17 @@
 use std::path::Path;
 use std::path::PathBuf;
 
+use exarch_core::ArchiveReader;
 use exarch_core::MemoryEntry as CoreMemoryEntry;
+use exarch_core::MemoryExtractRequest;
 use exarch_core::MemoryLimit;
 use exarch_core::MemorySink;
 use exarch_core::PathModel as CorePathModel;
 use exarch_core::SanitizedMode;
 use exarch_core::SinkOptions;
-use exarch_core::extract_bytes_to_memory;
+use exarch_core::extract_reader_to_memory;
 use exarch_core::formats::detect::ArchiveType as CoreArchiveType;
 use exarch_core::formats::detect::CreatableFormat;
-use exarch_core::utf8_entry_path;
 use napi::Env;
 use napi::bindgen_prelude::PromiseRaw;
 use napi::bindgen_prelude::Result;
@@ -94,7 +95,13 @@ pub struct MemoryEntry {
 /// The text of `path`, or an error: a lossy conversion could merge two
 /// distinct entries into one name.
 fn utf8(path: &Path) -> CoreResult<String> {
-    Ok(utf8_entry_path(path).map(str::to_owned)?)
+    path.to_str().map(str::to_owned).ok_or_else(|| {
+        exarch_core::ArchiveError::InvalidArchive(format!(
+            "entry path is not valid UTF-8: {}",
+            path.display()
+        ))
+        .into()
+    })
 }
 
 impl TryFrom<(PathBuf, CoreMemoryEntry)> for MemoryEntry {
@@ -207,15 +214,15 @@ impl<B: AsRef<[u8]> + Send> MemoryJob<B> {
             })
             .transpose()?;
         let options = SinkOptions::try_from(&self.options)?;
-        Ok(extract_bytes_to_memory(
-            self.data,
-            self.format.map(Into::into),
-            &self.config,
-            &options,
-            limit,
-            self.path_model,
-            progress,
-        )?)
+        let mut request = MemoryExtractRequest::default()
+            .with_config(self.config)
+            .with_options(options)
+            .with_path_model(self.path_model);
+        if let Some(limit) = limit {
+            request = request.with_limit(limit);
+        }
+        let reader = ArchiveReader::from_bytes(self.data, self.format.map(Into::into))?;
+        Ok(extract_reader_to_memory(reader, &request, progress)?)
     }
 }
 

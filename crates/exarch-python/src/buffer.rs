@@ -4,6 +4,7 @@ use std::num::NonZeroU64;
 use std::path::Path;
 
 use exarch_core::ArchiveError;
+use exarch_core::CallbackSink;
 use exarch_core::MemoryEntry;
 use exarch_core::MemoryEntryKind;
 use exarch_core::MemoryExtractRequest;
@@ -11,11 +12,13 @@ use exarch_core::MemoryLimit;
 use exarch_core::MemorySink;
 use exarch_core::PartialWrites;
 use exarch_core::PathModel;
+use exarch_core::SafePath;
 use exarch_core::SanitizedMode;
 use exarch_core::extract_reader_to_memory;
 use exarch_core::formats::detect::ArchiveType;
 use exarch_core::formats::detect::CreatableFormat;
 use pyo3::exceptions::PyRuntimeError;
+use pyo3::exceptions::PyTypeError;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
@@ -82,12 +85,14 @@ fn parse_path_model(path_model: Option<&str>) -> PyResult<Option<PathModel>> {
 /// # Attributes
 ///
 /// * `path` - Entry path, relative, as delivered by extraction
-/// * `kind` - `"file"`, `"directory"` or `"symlink"`
+/// * `kind` - `"file"`, `"directory"`, `"symlink"` or `"hardlink"` (the last
+///   only from `extract_archive_to_callback`)
 /// * `data` - The file's bytes (`None` unless `kind` is `"file"`)
 /// * `mode` - Permission bits after setuid and setgid were stripped (`None`
 ///   unless a file whose archive carries a mode)
-/// * `target` - Symlink target as the archive spells it (`None` unless `kind`
-///   is `"symlink"`)
+/// * `target` - For `"symlink"`, the target as the archive spells it, relative
+///   to the link; for `"hardlink"`, the root-relative resolved path of an
+///   already delivered file (`None` for other kinds)
 #[pyclass(name = "MemoryEntry", frozen)]
 pub struct PyMemoryEntry {
     path: String,
@@ -143,7 +148,9 @@ impl PyMemoryEntry {
                 mode.map(SanitizedMode::as_u32),
                 None,
             ),
-            MemoryEntry::Symlink { target } => (None, None, Some(utf8(&target)?)),
+            MemoryEntry::Symlink { target } | MemoryEntry::Hardlink { target } => {
+                (None, None, Some(utf8(&target)?))
+            }
             MemoryEntry::Directory => (None, None, None),
             _ => {
                 return Err(PyRuntimeError::new_err(
@@ -541,9 +548,116 @@ pub fn verify_archive_bytes_with_progress(
     Ok(PyVerificationReport::from(report))
 }
 
+/// Extract an archive held in memory, handing every verified entry to a
+/// callback.
+///
+/// Nothing is written to disk and nothing is kept: `on_entry` receives a
+/// `MemoryEntry` per entry, in extraction order, after the entry was verified
+/// (a file arrives whole, after its declared size was checked). Memory use is
+/// one file at a time, bounded by the config's `max_file_size`.
+///
+/// # Arguments
+///
+/// * `data` - The archive bytes, or a binary file object
+/// * `on_entry` - Called with each `MemoryEntry`; its return value is ignored
+/// * `config` - Optional `SecurityConfig` (uses secure defaults if None)
+/// * `options` - Optional `ExtractionOptions` (`atomic` is not supported)
+/// * `path_model` - `"host"` (default) or `"portable"`
+/// * `format` - The archive format; detected from the leading bytes if None
+///
+/// # Returns
+///
+/// `ExtractionReport` with extraction statistics
+///
+/// # Raises
+///
+/// * `TypeError` - `on_entry` is not callable
+/// * `ValueError` - Unknown `format` or `path_model`
+/// * Whatever `on_entry` raises, unchanged: the first exception stops the
+///   extraction and is re-raised as is, with no marker or attribute added
+/// * The exceptions of `extract_archive`
+///
+/// # Entry kinds
+///
+/// A `"symlink"` entry's `target` is spelled as the archive stores it, relative
+/// to the link. A `"hardlink"` entry is delivered by reference, after every
+/// other entry: its `target` is the root-relative resolved path of a file that
+/// was already delivered, and no bytes are repeated. With
+/// `ExtractionOptions().with_skip_duplicates(False)` one path can be
+/// delivered more than once and a hardlink refers to the latest delivery.
+/// Implicit parent directories are not delivered. The GIL is released during
+/// I/O and taken once per entry.
+///
+/// # Examples
+///
+/// ```python
+/// from exarch import extract_archive_to_callback
+///
+/// sizes = {}
+/// def on_entry(entry):
+///     if entry.kind == "file":
+///         sizes[entry.path] = len(entry.data)
+///
+/// with open("archive.tar.gz", "rb") as f:
+///     report = extract_archive_to_callback(f.read(), on_entry)
+/// ```
+#[pyfunction]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "pyo3 cannot extract `&str` under abi3-py39"
+)]
+#[pyo3(signature = (data, on_entry, config=None, options=None, path_model=None, format=None))]
+pub fn extract_archive_to_callback(
+    py: Python<'_>,
+    data: ArchiveInput,
+    on_entry: Py<PyAny>,
+    config: Option<&PySecurityConfig>,
+    options: Option<&PyExtractionOptions>,
+    path_model: Option<String>,
+    format: Option<String>,
+) -> PyResult<PyExtractionReport> {
+    if !on_entry.bind(py).is_callable() {
+        return Err(PyTypeError::new_err("on_entry must be callable"));
+    }
+    let request = MemoryRequest::parse(
+        config,
+        options,
+        None,
+        path_model.as_deref(),
+        format.as_deref(),
+    )?;
+
+    let slot = data.failure_slot();
+    let result = catch_panic_as_py_err("archive extraction to a callback", || {
+        py.detach(|| {
+            let mut sink = CallbackSink::new(|path: &SafePath, entry| {
+                Python::attach(|py| {
+                    let entry = PyMemoryEntry::new(py, path.as_path(), entry)
+                        .and_then(|entry| Py::new(py, entry))?;
+                    on_entry.call1(py, (entry,)).map(drop)
+                })
+                .map_err(|err| slot.record(err))
+            })
+            .with_path_model(request.path_model);
+            let reader = data.into_reader(request.format)?;
+            exarch_core::extract_to_sink_with_progress(
+                reader,
+                &mut sink,
+                &request.config,
+                &request.options,
+                &mut exarch_core::NoopProgress,
+            )
+        })
+    });
+    slot.surface(result).map(PyExtractionReport::from)
+}
+
 /// The validated arguments shared by the in-memory extraction functions.
 struct MemoryRequest {
     request: MemoryExtractRequest,
+    config: exarch_core::SecurityConfig,
+    options: exarch_core::SinkOptions,
+    path_model: PathModel,
     format: Option<ArchiveType>,
 }
 
@@ -568,13 +682,19 @@ impl MemoryRequest {
             )
             .map_err(convert_error)?;
         let mut request = MemoryExtractRequest::default()
-            .with_config(config)
+            .with_config(config.clone())
             .with_options(options)
             .with_path_model(path_model);
         if let Some(bytes) = max_bytes {
             request = request.with_limit(MemoryLimit::new(bytes));
         }
-        Ok(Self { request, format })
+        Ok(Self {
+            request,
+            config,
+            options,
+            path_model,
+            format,
+        })
     }
 
     fn run(

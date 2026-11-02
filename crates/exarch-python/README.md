@@ -155,6 +155,26 @@ and `total` is 0 for TAR. A raising callback does not abort the run; if the run
 succeeded its exception is raised (with `progress_callback_error = True`) and the
 result is discarded.
 
+`extract_archive_to_callback(data, on_entry)` hands each verified entry to
+`on_entry(entry)` instead of collecting them, so memory use is one file at a
+time (bounded by `max_file_size`). A file arrives whole, after its size was
+verified. An exception raised by `on_entry` stops the extraction and is raised
+unchanged. A `"symlink"` entry's `target` is spelled as the archive stores it,
+relative to the link. A `"hardlink"` entry comes last and by reference: its
+`target` is the root-relative resolved path of a file already delivered. With
+`skip_duplicates` off a path can be delivered more than once and a hardlink
+refers to the latest delivery; implicit parent directories are not delivered.
+
+```python
+sizes = {}
+
+def on_entry(entry):
+    if entry.kind == "file":
+        sizes[entry.path] = len(entry.data)
+
+report = exarch.extract_archive_to_callback(data, on_entry)
+```
+
 `create_archive_to_bytes(sources, format)` builds an archive in memory and
 returns a `CreatedArchive` with `data` and `report`:
 

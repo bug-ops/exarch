@@ -803,6 +803,7 @@ fn exarch(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(buffer::list_archive_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(buffer::verify_archive_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(buffer::extract_archive_to_memory, m)?)?;
+    m.add_function(wrap_pyfunction!(buffer::extract_archive_to_callback, m)?)?;
     m.add_function(wrap_pyfunction!(
         buffer::extract_archive_to_memory_with_progress,
         m

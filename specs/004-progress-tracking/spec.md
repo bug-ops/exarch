@@ -161,8 +161,7 @@ ProgressCallback: Send
 
 > [!note] ExtractionContext
 > `ExtractionContext<'_, '_>` is a private TAR helper struct introduced in v0.4.0
-> that groups `validator`, `dest`, `report`, `copy_buffer`, `dir_cache`,
-> `skip_duplicates`, the skip counters, `config`, and `progress` to reduce helper
+> that groups `tally`, the skip counters, `config`, and `progress` to reduce helper
 > function arity. ZIP has an analogous `ZipExtractionContext`. It is not part of the public
 > API but is documented here because `ProgressCallback` is passed through it.
 

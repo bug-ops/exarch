@@ -51,7 +51,7 @@ in-memory functions.
 ### Out of Scope
 
 - Streaming (forward-only) ZIP or 7z input: both need `Seek`
-- Extracting a sink's output to a real filesystem with the path-based defences (`DirCache`, `O_NOFOLLOW`, `create_new`); use `extract_archive`
+- Extracting a sink's output to a real filesystem with the path-based defences (`DirWalker`, `O_NOFOLLOW`, `create_new`); use `extract_archive`
 - 7z creation
 - A Rust async interface
 

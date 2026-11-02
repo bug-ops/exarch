@@ -29,7 +29,7 @@ related:
 > [!info] Metadata
 > **Subsystem**: exarch-core / formats
 > **MSRV**: Rust 1.98.0
-> **Codec and container dependencies (v0.8.0)**: `zip` 9.x (`Cargo.toml` `9.1`, locked 9.2.2; floor 9.0.5), `liblzma` 0.4.9 static for xz (bundles xz 5.8; replaces `xz2`, #763, #771), `sevenz-rust2` 0.24.2 (minimum), `lzma-rust2` 0.24
+> **Codec and container dependencies (v0.8.0)**: `zip` 9.x (`Cargo.toml` `9.2`, locked 9.2.2; floor 9.0.5), `liblzma` 0.4.9 static for xz (bundles xz 5.8; replaces `xz2`, #763, #771), `sevenz-rust2` 0.24.2 (minimum), `lzma-rust2` 0.24
 > **Source**: extracted from [[001-exarch-system/spec]]
 
 ## 1. Overview
@@ -214,7 +214,7 @@ THEN magic bytes take precedence over the extension
 | `ZipArchive` | ZIP handler | Implements `ArchiveFormat`; creation is `ZipCreator`; `ZipFile::name()` returns `Result<Cow<str>, ZipError>` in zip 9.x |
 | `SevenZArchive` | 7z handler (read-only) | Implements `ArchiveFormat` only (extraction goes through the single loop in `formats/sevenz/extract.rs`, v0.8.0); fires `on_entry_start`/`on_entry_complete` per-entry, interleaved with I/O; the header is parsed once into a `SevenZHeader` (`formats/sevenz/header.rs`) and entries are decoded in archive order through `BlockDecoder::for_each_entries` (`formats/sevenz/decode.rs`), never `decompress_with_extract_fn`, so `EntryValidator` remains the sole path-security guard (v0.5.1); entry names are normalized via `formats::common::normalize_entry_name` before validation; the handler is split into `admit`, `classify`, `decode`, `extract`, `header`, `host`, `links`, `lzma2`, `sink`, `verify` and `write` modules |
 | `ExtractTarget` | Validation-and-write half of a TAR or ZIP extraction (v0.8.0): `HostTarget` for the filesystem, a sink target for `EntrySink`; per-kind `validate_*` return typed proofs from `security::admitted` | `validate_file` (returns `FileAdmission::{Write, Skipped}`), `validate_directory`, `validate_symlink`, `validate_hardlink`, `directory`, `file`, `symlink`, `hardlink` |
-| `ExtractionContext<'_, '_>` | Private TAR helper struct reducing extraction helper arity | Groups `validator`, `dest`, `report`, `copy_buffer`, `dir_cache`, `skip_duplicates` |
+| `ExtractionContext<'_, '_>` | Private TAR helper struct reducing extraction helper arity | Groups `validator`, `dest`, `report`, `tally`, the skip counters, `config` |
 
 ### ArchiveType Detection Rules
 
@@ -304,7 +304,7 @@ FormatCreator:
 
 > [!note] zip dependency
 > Upgraded from 8.6.0 to 9.0.0-pre2 in v0.4.0, to 9.1.0 in v0.7.0 and to the 9.x line in
-> v0.8.0 (`Cargo.toml` `9.1`, locked 9.2.2; floor 9.0.5, which
+> v0.8.0 (`Cargo.toml` `9.2`, locked 9.2.2; floor 9.0.5, which
 > excludes versions with unpatched read-path vulnerabilities; 9.1.0 also reuses one DEFLATE
 > compressor across entries on creation). `ZipFile::name()` returns
 > `Result<Cow<str>, ZipError>` instead of `&str`; all call sites propagate the

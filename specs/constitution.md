@@ -37,7 +37,7 @@ status: permanent
 - CLI: `clap` 4.x with derive macros
 - Python bindings: `pyo3` 0.29, `maturin`, GIL released during I/O
 - Node.js bindings: `napi-rs` 3.x, async Promises via tokio thread pool
-- Compression: `flate2` (gz), `bzip2` (bz2), `liblzma` 0.4.9 (xz, static; replaced `xz2` in v0.8.0), `zstd` (zst), `zip` 9.x (`Cargo.toml` `9.1`, locked 9.2.2), `typed-path` 0.13 (ZIP entry-name prefix grammar), `sevenz-rust2` 0.24.2 (7z, minimum version) with `lzma-rust2` 0.24
+- Compression: `flate2` (gz), `bzip2` (bz2), `liblzma` 0.4.9 (xz, static; replaced `xz2` in v0.8.0), `zstd` (zst), `zip` 9.x (`Cargo.toml` `9.2`, locked 9.2.2), `typed-path` 0.13 (ZIP entry-name prefix grammar), `sevenz-rust2` 0.24.2 (7z, minimum version) with `lzma-rust2` 0.24
 - Testing: `cargo nextest`, `proptest` for property-based tests, `criterion` + `dhat` for benchmarks
 
 ## III. Testing (NON-NEGOTIABLE)

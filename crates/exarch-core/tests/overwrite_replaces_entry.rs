@@ -1,13 +1,10 @@
 //! `--force` extraction replaces the destination entry instead of writing
 //! through its existing inode.
 
-#![cfg(unix)]
 #![allow(clippy::unwrap_used)]
 
 use std::io::Cursor;
 use std::io::Write;
-use std::os::unix::fs::MetadataExt;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -19,24 +16,24 @@ use tempfile::TempDir;
 const NEW_CONTENT: &[u8] = b"new content";
 const OUTSIDE_CONTENT: &[u8] = b"outside secret";
 
-fn tar_archive(dir: &TempDir) -> PathBuf {
+type MakeArchive = fn(&TempDir, &str) -> PathBuf;
+
+fn tar_archive(dir: &TempDir, name: &str) -> PathBuf {
     let mut header = tar::Header::new_gnu();
     header.set_entry_type(tar::EntryType::Regular);
     header.set_mode(0o640);
     header.set_size(NEW_CONTENT.len() as u64);
-    header.set_path("f").unwrap();
-    header.set_cksum();
     let mut builder = tar::Builder::new(Vec::new());
-    builder.append(&header, NEW_CONTENT).unwrap();
+    builder.append_data(&mut header, name, NEW_CONTENT).unwrap();
     let path = dir.path().join("a.tar");
     std::fs::write(&path, builder.into_inner().unwrap()).unwrap();
     path
 }
 
-fn zip_archive(dir: &TempDir) -> PathBuf {
+fn zip_archive(dir: &TempDir, name: &str) -> PathBuf {
     let options = zip::write::SimpleFileOptions::default().unix_permissions(0o640);
     let mut writer = zip::write::ZipWriter::new(Cursor::new(Vec::new()));
-    writer.start_file("f", options).unwrap();
+    writer.start_file(name, options).unwrap();
     writer.write_all(NEW_CONTENT).unwrap();
     let path = dir.path().join("a.zip");
     std::fs::write(&path, writer.finish().unwrap().into_inner()).unwrap();
@@ -53,9 +50,9 @@ fn force(archive: &Path, out: &Path) {
     .unwrap();
 }
 
-fn assert_hardlink_overwrite_leaves_outside_untouched(make: fn(&TempDir) -> PathBuf) {
+fn assert_hardlink_overwrite_leaves_outside_untouched(make: MakeArchive) {
     let work = TempDir::new().unwrap();
-    let archive = make(&work);
+    let archive = make(&work, "f");
     let outside = work.path().join("outside");
     std::fs::write(&outside, OUTSIDE_CONTENT).unwrap();
     let out = TempDir::new().unwrap();
@@ -64,26 +61,78 @@ fn assert_hardlink_overwrite_leaves_outside_untouched(make: fn(&TempDir) -> Path
     force(&archive, out.path());
 
     assert_eq!(std::fs::read(&outside).unwrap(), OUTSIDE_CONTENT);
-    assert_eq!(std::fs::metadata(&outside).unwrap().nlink(), 1);
     assert_eq!(std::fs::read(out.path().join("f")).unwrap(), NEW_CONTENT);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(std::fs::metadata(&outside).unwrap().nlink(), 1);
+    }
 }
 
-fn assert_plain_overwrite_replaces_content_and_mode(make: fn(&TempDir) -> PathBuf) {
+fn assert_plain_overwrite_replaces_content_and_mode(make: MakeArchive) {
     let work = TempDir::new().unwrap();
-    let archive = make(&work);
+    let archive = make(&work, "f");
     let out = TempDir::new().unwrap();
     let target = out.path().join("f");
     std::fs::write(&target, b"old").unwrap();
-    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
 
     force(&archive, out.path());
 
     assert_eq!(std::fs::read(&target).unwrap(), NEW_CONTENT);
-    assert_eq!(
-        std::fs::metadata(&target).unwrap().permissions().mode() & 0o7777,
-        0o640
-    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o7777,
+            0o640
+        );
+    }
     assert_eq!(std::fs::read_dir(out.path()).unwrap().count(), 1);
+}
+
+fn assert_long_name_overwrite_succeeds(make: MakeArchive) {
+    let name = "n".repeat(240);
+    let work = TempDir::new().unwrap();
+    let archive = make(&work, &name);
+    let out = TempDir::new().unwrap();
+    std::fs::write(out.path().join(&name), b"old").unwrap();
+
+    force(&archive, out.path());
+
+    assert_eq!(std::fs::read(out.path().join(&name)).unwrap(), NEW_CONTENT);
+    assert_eq!(std::fs::read_dir(out.path()).unwrap().count(), 1);
+}
+
+#[cfg(unix)]
+fn assert_fifo_target_is_replaced(make: MakeArchive) {
+    let work = TempDir::new().unwrap();
+    let archive = make(&work, "f");
+    let out = TempDir::new().unwrap();
+    let fifo = out.path().join("f");
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success()
+    );
+
+    let out_path = out.path().to_path_buf();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        force(&archive, &out_path);
+        let _ = tx.send(());
+    });
+    // A timeout here means extraction blocked on the FIFO.
+    rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+
+    assert!(std::fs::symlink_metadata(&fifo).unwrap().is_file());
+    assert_eq!(std::fs::read(&fifo).unwrap(), NEW_CONTENT);
 }
 
 #[test]
@@ -104,4 +153,26 @@ fn tar_force_replaces_content_and_mode() {
 #[test]
 fn zip_force_replaces_content_and_mode() {
     assert_plain_overwrite_replaces_content_and_mode(zip_archive);
+}
+
+#[test]
+fn tar_force_over_long_name_succeeds() {
+    assert_long_name_overwrite_succeeds(tar_archive);
+}
+
+#[test]
+fn zip_force_over_long_name_succeeds() {
+    assert_long_name_overwrite_succeeds(zip_archive);
+}
+
+#[cfg(unix)]
+#[test]
+fn tar_force_replaces_fifo() {
+    assert_fifo_target_is_replaced(tar_archive);
+}
+
+#[cfg(unix)]
+#[test]
+fn zip_force_replaces_fifo() {
+    assert_fifo_target_is_replaced(zip_archive);
 }

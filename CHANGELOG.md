@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Core: TAR and ZIP overwrite (`--force`) replaces the destination file through a sibling temp file and rename instead of writing through the existing inode (#819).
+- Core: an overwritten file is now replaced even when read-only, needs a writable parent directory, loses its previous owner, ACLs and extended attributes, and takes `0666 & ~umask` when the entry records no mode (#819).
 
 ## [0.8.0] - 2026-11-02
 

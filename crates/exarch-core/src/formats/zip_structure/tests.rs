@@ -299,7 +299,11 @@ fn descriptor_size_equal_to_the_header_magic_is_not_a_hidden_header() {
     entry.size = MAGIC_AS_SIZE;
     let built = RawZip::new(vec![entry]).build();
     let archive = open_bytes(built.bytes);
-    assert!(archive.structure().findings().is_empty());
+    assert!(
+        archive.structure().findings().is_empty(),
+        "{:?}",
+        archive.structure().findings()
+    );
     assert!(archive.structure().gap_reads() <= MAX_READS_PER_DESCRIPTOR);
 }
 

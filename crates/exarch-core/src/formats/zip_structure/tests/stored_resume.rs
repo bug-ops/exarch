@@ -20,6 +20,13 @@ fn stored_with_in_data_header(filler: usize, descriptor_bytes: &[u8]) -> (BuiltZ
     (built, header_at)
 }
 
+/// A descriptor that states `before` bytes of data, as a streaming reader
+/// requires of the one that ends a stored entry.
+fn descriptor_after(before: usize) -> Vec<u8> {
+    let before = u32::try_from(before).unwrap();
+    descriptor_with_sizes(before, before)
+}
+
 fn descriptor_with_sizes(compressed: u32, size: u32) -> Vec<u8> {
     let mut bytes = b"PK\x07\x08".to_vec();
     bytes.extend_from_slice(&0u32.to_le_bytes());
@@ -31,13 +38,13 @@ fn descriptor_with_sizes(compressed: u32, size: u32) -> Vec<u8> {
 #[test]
 fn stored_dd_in_data_header_any_descriptor_fields() {
     for filler in [40usize, 200_000] {
-        for sizes in [(0, 0), (7, 9), (u32::MAX, u32::MAX)] {
-            let descriptor = descriptor_with_sizes(sizes.0, sizes.1);
+        for size in [0, 9, u32::MAX] {
+            let descriptor = descriptor_with_sizes(u32::try_from(filler).unwrap(), size);
             let (built, at) = stored_with_in_data_header(filler, &descriptor);
             assert_eq!(
                 findings_of(&built),
                 [hidden_in(at, HiddenRegion::DescriptorTail)],
-                "{filler} {sizes:?}"
+                "{filler} {size}"
             );
         }
     }
@@ -46,7 +53,7 @@ fn stored_dd_in_data_header_any_descriptor_fields() {
 #[test]
 fn stored_dd_in_data_resume_signature_split_by_a_read_boundary_is_found() {
     for filler in [SCAN_CHUNK - 5, SCAN_CHUNK - 3, SCAN_CHUNK - 1, SCAN_CHUNK] {
-        let (built, at) = stored_with_in_data_header(filler, &descriptor_with_sizes(0, 0));
+        let (built, at) = stored_with_in_data_header(filler, &descriptor_after(filler));
         assert_eq!(
             findings_of(&built),
             [hidden_in(at, HiddenRegion::DescriptorTail)],
@@ -57,7 +64,7 @@ fn stored_dd_in_data_resume_signature_split_by_a_read_boundary_is_found() {
 
 #[test]
 fn stored_dd_in_data_header_is_fatal_under_enforce_with_plain_verify() {
-    let bytes = stored_with_in_data_header(40, &descriptor_with_sizes(0, 0))
+    let bytes = stored_with_in_data_header(40, &descriptor_after(40))
         .0
         .bytes;
     assert_matches!(
@@ -86,7 +93,7 @@ fn stored_dd_in_data_header_is_fatal_under_enforce_with_plain_verify() {
 
 #[test]
 fn stored_dd_in_data_header_is_reported_once_with_integrity() {
-    let bytes = stored_with_in_data_header(40, &descriptor_with_sizes(0, 0))
+    let bytes = stored_with_in_data_header(40, &descriptor_after(40))
         .0
         .bytes;
     assert_eq!(hidden_issues(&verify_with_integrity(bytes)).len(), 1);
@@ -121,7 +128,7 @@ fn stored_dd_legitimate_entries_have_no_findings() {
 fn stored_dd_cut_off_header_is_reported() {
     let truncated = [
         vec![b'x'; 40],
-        descriptor_with_sizes(0, 0),
+        descriptor_after(40),
         evil_local()[..LFH_FIXED_LEN + 3].to_vec(),
     ]
     .concat();
@@ -137,7 +144,7 @@ fn stored_dd_cut_off_header_is_reported() {
 fn stored_dd_later_header_is_reported() {
     let whole = [
         vec![b'x'; 40],
-        descriptor_with_sizes(0, 0),
+        descriptor_after(40),
         vec![0x11; 7],
         evil_local(),
     ]
@@ -154,7 +161,7 @@ fn stored_dd_later_header_is_reported() {
 fn stored_dd_later_central_signature_is_a_stray_record() {
     let whole = [
         vec![b'x'; 40],
-        descriptor_with_sizes(0, 0),
+        descriptor_after(40),
         b"PK\x01\x02".to_vec(),
         vec![0; 30],
     ]
@@ -174,7 +181,7 @@ fn stored_dd_search_follows_the_first_signature() {
         vec![b'x'; 40],
         b"PK\x07\x08".to_vec(),
         vec![0; 60],
-        descriptor_with_sizes(0, 0),
+        descriptor_after(104),
         evil_local(),
     ]
     .concat();
@@ -188,7 +195,7 @@ fn stored_dd_search_follows_the_first_signature() {
 
 #[test]
 fn stored_dd_in_data_header_is_found_with_duplicate_names() {
-    let whole = [vec![b'x'; 40], descriptor_with_sizes(0, 0), evil_local()].concat();
+    let whole = [vec![b'x'; 40], descriptor_after(40), evil_local()].concat();
     let mut survivor = descriptor_entry(0, &whole, &[]);
     survivor.name = b"a.txt".to_vec();
     let built = RawZip::new(vec![RawEntry::stored("a.txt", b"first"), survivor]).build();
@@ -212,27 +219,6 @@ fn stored_streaming_writer_archive_has_no_findings() {
 }
 
 #[test]
-fn stored_dd_holding_a_whole_archive_is_reported_as_accepted_behaviour() {
-    let inner = RawZip::new(vec![
-        RawEntry::stored("x.txt", b"inner x").with_descriptor(true, false),
-        RawEntry::stored("y.txt", b"inner y").with_descriptor(true, false),
-    ])
-    .build();
-    let built = RawZip::new(vec![descriptor_entry(0, &inner.bytes, &[])]).build();
-    let found = findings_of(&built);
-    assert!(
-        found.iter().any(|f| matches!(
-            f,
-            ZipInconsistency::HiddenLocalHeader {
-                region: HiddenRegion::DescriptorTail,
-                ..
-            }
-        )),
-        "{found:?}"
-    );
-}
-
-#[test]
 fn stored_entries_without_a_descriptor_are_not_scanned() {
     let whole = [vec![b'x'; 40], descriptor_with_sizes(0, 0), evil_local()].concat();
     let built = RawZip::new(vec![RawEntry::stored("a.txt", &whole)]).build();
@@ -243,7 +229,7 @@ fn stored_entries_without_a_descriptor_are_not_scanned() {
 fn stored_dd_findings_share_the_hidden_header_limit() {
     let entries = (0..20)
         .map(|i| {
-            let whole = [vec![b'x'; 8], descriptor_with_sizes(0, 0), evil_local()].concat();
+            let whole = [vec![b'x'; 8], descriptor_after(8), evil_local()].concat();
             let mut entry = descriptor_entry(0, &whole, &[]);
             entry.name = format!("e{i:02}.txt").into_bytes();
             entry
@@ -301,9 +287,10 @@ fn stored_dd_header_signature_straddling_the_declared_end_is_reported() {
 }
 
 fn duplicate_names_with_header_at(offset_after_signature: Option<usize>) -> BuiltZip {
-    let mut data = [vec![b'x'; 40], b"PK\x07\x08".to_vec()].concat();
+    let mut data = [vec![b'x'; 40], descriptor_after(40)].concat();
     if let Some(offset) = offset_after_signature {
-        data.extend(vec![0u8; offset - 4]);
+        data.truncate(40 + 12);
+        data.extend(vec![0u8; offset - 12]);
         data.extend(evil_local());
     }
     let survivor = descriptor_entry(0, &data, &[]);

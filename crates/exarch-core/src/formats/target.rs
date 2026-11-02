@@ -353,7 +353,7 @@ impl ExtractTarget for HostTarget<'_> {
 
         self.dirs.ensure_parent(&self.dest, link.as_path())?;
 
-        let link_file = match common::create_file_with_mode(&link_path, None, true) {
+        let link_file = match common::create_file_with_mode(&link_path, None) {
             Ok(file) => file,
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 if tally.options.skip_duplicates {

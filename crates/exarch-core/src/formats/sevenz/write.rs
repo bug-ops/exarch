@@ -18,22 +18,6 @@ use std::io::Read;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
-use std::process::id;
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::Ordering;
-
-// Atomic counter for generating unique temporary file names
-pub(super) static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-/// Maximum number of attempts to create a uniquely-named temp file before
-/// giving up.
-///
-/// Bounds retry cost if an attacker has pre-planted symlinks at several
-/// predicted `.{name}.exarch-tmp-{pid}-{counter}` paths (issue #471); a
-/// genuine collision from concurrent extraction into the same directory
-/// resolves on the first or second attempt since `TEMP_COUNTER` is
-/// monotonically increasing per process.
-pub(super) const MAX_TEMP_FILE_CREATE_ATTEMPTS: u32 = 8;
 
 /// Writes `reader`'s bytes directly to `dest_path` (no temp file, no
 /// rename), consuming the [`QuotaPermit`] that authorized the write.
@@ -79,7 +63,7 @@ pub(super) fn write_file_direct(
     copy_buffer: &mut CopyBuffer,
     _permit: QuotaPermit,
 ) -> Result<u64> {
-    let file = common::create_file_with_mode(dest_path, None, true)?;
+    let file = common::create_file_with_mode(dest_path, None)?;
     // A decode failure partway through the copy would otherwise leave a
     // truncated file at dest_path (issue #492 adversarial review, finding
     // M1): since this branch only runs when nothing occupied dest_path
@@ -131,7 +115,8 @@ pub(super) fn write_file_direct(
 /// path (issue #459) for consistency, though `create_new`'s `O_EXCL` alone
 /// already refuses any pre-existing path instead of following it. On
 /// collision (`ErrorKind::AlreadyExists`), a fresh counter value is drawn
-/// and creation is retried up to [`MAX_TEMP_FILE_CREATE_ATTEMPTS`] times.
+/// and creation is retried up to [`common::MAX_TEMP_FILE_CREATE_ATTEMPTS`]
+/// times.
 ///
 /// # Security - Streaming Size Enforcement (GHSA-5j8q-wxg5-hj4r)
 ///
@@ -142,8 +127,8 @@ pub(super) fn write_file_direct(
 /// # Errors
 ///
 /// Returns an error if a unique temp file cannot be created within
-/// [`MAX_TEMP_FILE_CREATE_ATTEMPTS`] attempts, if the copy or rename fails,
-/// or if the actual decompressed byte count exceeds or falls short of
+/// [`common::MAX_TEMP_FILE_CREATE_ATTEMPTS`] attempts, if the copy or rename
+/// fails, or if the actual decompressed byte count exceeds or falls short of
 /// `expected_size`.
 pub(super) fn write_file_with_permit(
     reader: &mut dyn Read,
@@ -152,22 +137,13 @@ pub(super) fn write_file_with_permit(
     copy_buffer: &mut CopyBuffer,
     permit: QuotaPermit,
 ) -> Result<u64> {
-    let pid = id();
-    let original_name = dest_path
-        .file_name()
-        .map_or_else(|| "file".to_string(), |n| n.to_string_lossy().to_string());
-
     write_file_with_permit_using(
         reader,
         dest_path,
         expected_size,
         copy_buffer,
         permit,
-        || {
-            let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-            let temp_name = format!(".{original_name}.exarch-tmp-{pid}-{counter}");
-            dest_path.with_file_name(&temp_name)
-        },
+        || common::temp_sibling_path(dest_path),
     )
 }
 
@@ -192,8 +168,8 @@ pub(super) fn write_file_with_permit(
 /// # Errors
 ///
 /// Returns an error if a unique temp file cannot be created within
-/// [`MAX_TEMP_FILE_CREATE_ATTEMPTS`] attempts, if the copy or rename fails,
-/// or if the actual decompressed byte count exceeds or falls short of
+/// [`common::MAX_TEMP_FILE_CREATE_ATTEMPTS`] attempts, if the copy or rename
+/// fails, or if the actual decompressed byte count exceeds or falls short of
 /// `expected_size`.
 pub(super) fn write_file_with_permit_using(
     reader: &mut dyn Read,
@@ -201,31 +177,9 @@ pub(super) fn write_file_with_permit_using(
     expected_size: u64,
     copy_buffer: &mut CopyBuffer,
     _permit: QuotaPermit,
-    mut next_candidate_path: impl FnMut() -> PathBuf,
+    next_candidate_path: impl FnMut() -> PathBuf,
 ) -> Result<u64> {
-    let mut created: Option<(PathBuf, std::fs::File)> = None;
-    for _ in 0..MAX_TEMP_FILE_CREATE_ATTEMPTS {
-        let candidate_path = next_candidate_path();
-
-        match common::create_file_with_mode(&candidate_path, None, true) {
-            Ok(file) => {
-                created = Some((candidate_path, file));
-                break;
-            }
-            Err(e) if e.kind() == ErrorKind::AlreadyExists => {}
-            Err(e) => return Err(e.into()),
-        }
-    }
-
-    let (temp_path, temp_file) = created.ok_or_else(|| {
-        std::io::Error::new(
-            ErrorKind::AlreadyExists,
-            format!(
-                "failed to create a unique temp file for {} after {MAX_TEMP_FILE_CREATE_ATTEMPTS} attempts",
-                dest_path.display()
-            ),
-        )
-    })?;
+    let (temp_path, temp_file) = common::create_temp_sibling(dest_path, None, next_candidate_path)?;
 
     // Declared before `writer` takes ownership of `temp_file` below, for the
     // same reason as write_file_direct's `guard`: reverse-declaration-order

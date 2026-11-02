@@ -99,16 +99,16 @@ fn tar_open_failure_without_dir_or_symlink_keeps_the_original_error() {
     use std::os::unix::fs::PermissionsExt;
 
     let dir = TempDir::new().unwrap();
-    let archive = write_tar(&dir, &[tar_entry("f", tar::EntryType::Regular, b"x", None)]);
+    let archive = write_tar(
+        &dir,
+        &[tar_entry("d/f", tar::EntryType::Regular, b"x", None)],
+    );
     let out = TempDir::new().unwrap();
-    let occupied = out.path().join("f");
-    std::fs::write(&occupied, b"keep").unwrap();
-    std::fs::set_permissions(&occupied, std::fs::Permissions::from_mode(0o444)).unwrap();
-    if std::fs::OpenOptions::new()
-        .write(true)
-        .open(&occupied)
-        .is_ok()
-    {
+    let locked = out.path().join("d");
+    std::fs::create_dir(&locked).unwrap();
+    std::fs::write(locked.join("f"), b"keep").unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+    if std::fs::File::create(locked.join("probe")).is_ok() {
         return;
     }
 
@@ -120,6 +120,7 @@ fn tar_open_failure_without_dir_or_symlink_keeps_the_original_error() {
     )
     .unwrap_err();
 
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
     let message = error.to_string();
     assert!(!message.contains("refusing to replace"), "{message}");
     assert!(message.contains("Permission denied"), "{message}");

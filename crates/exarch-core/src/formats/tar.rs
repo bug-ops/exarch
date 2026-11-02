@@ -146,7 +146,6 @@ use crate::types::SafePath;
 
 use super::common;
 use super::compression::CompressionCodec;
-use super::tar_extension_headers::check_entry_headers;
 use super::tar_metadata_limit::budget_violation;
 use super::tar_metadata_limit::budgeted_reader;
 use super::tar_metadata_limit::budgeted_tar_entries;
@@ -260,8 +259,6 @@ impl<R: Read> TarArchive<R> {
         target: &mut T,
         ctx: &mut ExtractionContext<'_, '_>,
     ) -> Result<Option<HardlinkInfo>> {
-        check_entry_headers(entry, ctx.config.max_tar_metadata_bytes)?;
-
         // Skip TAR metadata entries (PAX headers, GNU long names/links, sparse)
         if TarEntryAdapter::is_metadata_entry(entry) {
             return Ok(None);
@@ -391,12 +388,16 @@ impl<R: Read> TarArchive<R> {
         };
 
         while let Some(entry_result) = entries.next_entry() {
-            let mut guard = entry_result.map_err(|e| {
+            let guard = entry_result.map_err(|e| {
                 let raw = budget_violation(&e).unwrap_or_else(|| {
                     ArchiveError::InvalidArchive(format!("failed to read entry: {e}"))
                 });
                 ctx.push_skip_warnings();
                 ArchiveError::partial_or(std::mem::take(ctx.tally.report), raw)
+            })?;
+            let mut guard = guard.check(config.max_tar_metadata_bytes).map_err(|e| {
+                ctx.push_skip_warnings();
+                ArchiveError::partial_or(std::mem::take(ctx.tally.report), e)
             })?;
 
             // TAR is streaming: total entry count is not known upfront, so pass

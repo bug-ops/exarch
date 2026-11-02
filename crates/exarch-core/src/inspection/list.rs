@@ -45,8 +45,7 @@ use crate::formats::tar::effective_entry_type;
 use crate::formats::tar::is_metadata_type;
 use crate::formats::tar::open_tar_stream;
 use crate::formats::tar::tar_node;
-use crate::formats::tar_extension_headers::check_entry_headers;
-use crate::formats::tar_metadata_limit::TarEntryGuard;
+use crate::formats::tar_metadata_limit::CheckedTarEntry;
 use crate::formats::tar_metadata_limit::TarReadBudget;
 use crate::formats::tar_metadata_limit::budget_violation;
 use crate::formats::tar_metadata_limit::budgeted_reader;
@@ -470,13 +469,13 @@ fn list_tar_entries<R: std::io::Read>(
         .map_err(|e| ArchiveError::InvalidArchive(format!("failed to read TAR entries: {e}")))?;
 
     while let Some(entry_result) = entries.next_entry() {
-        let mut entry = entry_result.map_err(|e| {
-            budget_violation(&e).unwrap_or_else(|| {
-                ArchiveError::InvalidArchive(format!("failed to read TAR entry: {e}"))
-            })
-        })?;
-
-        check_entry_headers(&mut entry, config.max_tar_metadata_bytes)?;
+        let mut entry = entry_result
+            .map_err(|e| {
+                budget_violation(&e).unwrap_or_else(|| {
+                    ArchiveError::InvalidArchive(format!("failed to read TAR entry: {e}"))
+                })
+            })?
+            .check(config.max_tar_metadata_bytes)?;
 
         // Skip TAR metadata entries (PAX headers, GNU long names/links)
         if is_metadata_type(entry.header().entry_type()) {
@@ -606,7 +605,7 @@ fn list_tar_entries<R: std::io::Read>(
 fn verify_tar_payload<R: Read>(
     pass: &mut IntegrityPass<'_>,
     slot: Slot,
-    entry: &mut TarEntryGuard<'_, '_, R>,
+    entry: &mut CheckedTarEntry<'_, '_, R>,
     path: &Path,
 ) -> Result<()> {
     let declared = entry.size();

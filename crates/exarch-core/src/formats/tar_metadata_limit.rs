@@ -125,6 +125,12 @@
 //!
 //! # Invariant: this module must never peek at archive content
 //!
+//! The one thing this module does with the bytes is copy them: while armed,
+//! [`BudgetedReader`] appends every byte it delivers to a window that
+//! [`TarEntryGuard::check`] hands to `tar_extension_headers`, which verifies it
+//! against the framing `tar` itself reported. The copy is never interpreted
+//! here, and `tar` stays the only authority on where entries begin and end.
+//!
 //! Nothing in this file reads a typeflag, checks magic bytes, or tracks a PAX
 //! record — not even for a read-only "sanity check" or a diagnostic message.
 //! That absence is not an implementation gap; it is the entire reason the
@@ -144,8 +150,13 @@ use std::io;
 use std::io::Read;
 use std::marker::PhantomData;
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::PoisonError;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
+
+use super::tar_extension_headers::check_entry_headers;
+use crate::Result;
 
 /// Hard, non-configurable ceiling on how many *synthesized* bytes (drained
 /// output with no corresponding read from the underlying reader)
@@ -231,6 +242,19 @@ struct BudgetState {
     /// [`CUMULATIVE_SYNTHETIC_CAP_BYTES`] in
     /// [`BudgetedEntries::next_entry`].
     cumulative_synthetic: AtomicU64,
+    /// Copy of every byte delivered while armed, cleared by `arm()`. Bounded
+    /// by `limit` because a read past it fails. Recorded only, never
+    /// interpreted here.
+    window: Mutex<Vec<u8>>,
+}
+
+impl BudgetState {
+    fn record(&self, bytes: &[u8]) {
+        self.window
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .extend_from_slice(bytes);
+    }
 }
 
 /// Cheap, cloneable handle used to arm/disarm the budget around the gap
@@ -245,6 +269,11 @@ pub struct TarReadBudget(Arc<BudgetState>);
 impl TarReadBudget {
     /// Starts (or restarts) counting: `consumed = 0`, `allowance = limit`.
     fn arm(&self) {
+        self.0
+            .window
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
         self.0.consumed.store(0, Ordering::Relaxed);
         self.0.allowance.store(self.0.limit, Ordering::Relaxed);
     }
@@ -254,6 +283,18 @@ impl TarReadBudget {
     /// entry's *own* data must never count against the metadata budget.
     fn disarm(&self) {
         self.0.allowance.store(DISARMED, Ordering::Relaxed);
+    }
+
+    /// Hands out the bytes recorded since the last `arm()`.
+    ///
+    /// The buffer goes back through [`return_window`](Self::return_window) so
+    /// its capacity is reused by the next window.
+    fn take_window(&self) -> Vec<u8> {
+        std::mem::take(&mut *self.0.window.lock().unwrap_or_else(PoisonError::into_inner))
+    }
+
+    fn return_window(&self, bytes: Vec<u8>) {
+        *self.0.window.lock().unwrap_or_else(PoisonError::into_inner) = bytes;
     }
 
     /// Total bytes read from the underlying reader so far — monotonic,
@@ -439,6 +480,7 @@ impl<R: Read> Read for BudgetedReader<R> {
             .unwrap_or(usize::MAX)
             .min(buf.len());
         let n = self.inner.read(&mut buf[..want])?;
+        self.state.record(&buf[..n]);
         self.state.consumed.fetch_add(n as u64, Ordering::Relaxed);
         self.state.total_read.fetch_add(n as u64, Ordering::Relaxed);
         Ok(n)
@@ -463,12 +505,46 @@ pub fn budgeted_reader<R: Read>(inner: R, limit: u64) -> (BudgetedReader<R>, Tar
         allowance: AtomicU64::new(limit),
         total_read: AtomicU64::new(0),
         cumulative_synthetic: AtomicU64::new(0),
+        window: Mutex::new(Vec::new()),
     });
     let reader = BudgetedReader {
         inner,
         state: Arc::clone(&state),
     };
     (reader, TarReadBudget(state))
+}
+
+/// The bytes `tar` consumed between two entries: padding, extension headers
+/// and their bodies, and the header of the entry that was yielded.
+///
+/// Captured verbatim by [`BudgetedReader`] while the budget is armed, so its
+/// size is bounded by the metadata limit. `start` is the offset of the first
+/// byte from the beginning of the archive.
+pub struct MetadataWindow<'a> {
+    start: u64,
+    bytes: &'a [u8],
+}
+
+impl<'a> MetadataWindow<'a> {
+    /// Wraps `bytes` that were read starting at offset `start`.
+    pub const fn new(start: u64, bytes: &'a [u8]) -> Self {
+        Self { start, bytes }
+    }
+
+    /// Offset of the first captured byte from the start of the archive.
+    pub const fn start(&self) -> u64 {
+        self.start
+    }
+
+    /// The captured bytes.
+    pub const fn bytes(&self) -> &'a [u8] {
+        self.bytes
+    }
+
+    /// Offset one past the last captured byte.
+    pub const fn end(&self) -> u64 {
+        self.start.saturating_add(self.bytes.len() as u64)
+    }
 }
 
 /// A `tar::Entry` on loan from [`BudgetedEntries::next_entry`], guaranteed
@@ -480,14 +556,19 @@ pub fn budgeted_reader<R: Read>(inner: R, limit: u64) -> (BudgetedReader<R>, Tar
 /// is drained before the next iteration step" invariant the whole module
 /// depends on is therefore enforced by the borrow checker, not by review
 /// convention.
+///
+/// The guard is the *unchecked* state: it gives no access to the entry. The
+/// only way to a `tar::Entry` is [`check`](Self::check), which verifies the
+/// bytes `tar` consumed to reach it.
 pub struct TarEntryGuard<'a, 's, R: Read> {
     entry: tar::Entry<'a, BudgetedReader<R>>,
+    window_start: u64,
     budget: TarReadBudget,
     abandoned: bool,
     _borrow: PhantomData<&'s mut ()>,
 }
 
-impl<R: Read> TarEntryGuard<'_, '_, R> {
+impl<'a, 's, R: Read> TarEntryGuard<'a, 's, R> {
     /// Suppresses the bounded drain this guard would otherwise perform on
     /// drop.
     ///
@@ -498,19 +579,55 @@ impl<R: Read> TarEntryGuard<'_, '_, R> {
     pub fn abandon(&mut self) {
         self.abandoned = true;
     }
-}
 
-impl<'a, R: Read> std::ops::Deref for TarEntryGuard<'a, '_, R> {
-    type Target = tar::Entry<'a, BudgetedReader<R>>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.entry
+    /// Verifies the entry's headers and the bytes `tar` consumed to reach
+    /// it, and unlocks the entry.
+    ///
+    /// `metadata_limit` bounds how much of a global PAX header is read.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::ArchiveError::InvalidArchive`] when the headers are
+    /// ambiguous; the guard is then abandoned, as no further entry is read.
+    pub fn check(mut self, metadata_limit: u64) -> Result<CheckedTarEntry<'a, 's, R>> {
+        let bytes = self.budget.take_window();
+        let window = MetadataWindow::new(self.window_start, &bytes);
+        let checked = check_entry_headers(&mut self.entry, &window, metadata_limit);
+        self.budget.return_window(bytes);
+        match checked {
+            Ok(()) => Ok(CheckedTarEntry(self)),
+            Err(e) => {
+                self.abandoned = true;
+                Err(e)
+            }
+        }
     }
 }
 
-impl<R: Read> std::ops::DerefMut for TarEntryGuard<'_, '_, R> {
+/// A [`TarEntryGuard`] whose headers passed [`TarEntryGuard::check`].
+///
+/// Constructible only by `check`, so holding a `tar::Entry` through this type
+/// proves the checks ran. Dropping it drains the entry like the guard does.
+pub struct CheckedTarEntry<'a, 's, R: Read>(TarEntryGuard<'a, 's, R>);
+
+impl<R: Read> CheckedTarEntry<'_, '_, R> {
+    /// Suppresses the bounded drain on drop; see [`TarEntryGuard::abandon`].
+    pub fn abandon(&mut self) {
+        self.0.abandon();
+    }
+}
+
+impl<'a, R: Read> std::ops::Deref for CheckedTarEntry<'a, '_, R> {
+    type Target = tar::Entry<'a, BudgetedReader<R>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0.entry
+    }
+}
+
+impl<R: Read> std::ops::DerefMut for CheckedTarEntry<'_, '_, R> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.entry
+        &mut self.0.entry
     }
 }
 
@@ -566,6 +683,8 @@ impl<R: Read> Drop for TarEntryGuard<'_, '_, R> {
 pub struct BudgetedEntries<'a, R: Read> {
     entries: tar::Entries<'a, BudgetedReader<R>>,
     budget: TarReadBudget,
+    /// `total_read` when iteration began; window offsets are relative to it.
+    origin: u64,
     /// Set once `next_entry` has yielded an `Err`; latches further calls to
     /// `None` instead of re-yielding (or re-deriving) an error. Without
     /// this, a hypothetical caller that logs an error from `next_entry` and
@@ -580,6 +699,7 @@ impl<'a, R: Read> BudgetedEntries<'a, R> {
     fn new(entries: tar::Entries<'a, BudgetedReader<R>>, budget: TarReadBudget) -> Self {
         Self {
             entries,
+            origin: budget.total_read(),
             budget,
             poisoned: false,
         }
@@ -611,6 +731,7 @@ impl<'a, R: Read> BudgetedEntries<'a, R> {
             self.poisoned = true;
             return Some(Err(err));
         }
+        let start = self.budget.total_read() - self.origin;
         self.budget.arm();
         let result = self.entries.next();
         self.budget.disarm();
@@ -623,6 +744,7 @@ impl<'a, R: Read> BudgetedEntries<'a, R> {
             }
             Some(Ok(entry)) => Some(Ok(TarEntryGuard {
                 entry,
+                window_start: start,
                 budget: self.budget.clone(),
                 abandoned: false,
                 _borrow: PhantomData,
@@ -748,7 +870,9 @@ mod tests {
         let mut guard = entries
             .next_entry()
             .expect("one entry")
-            .expect("no io error");
+            .expect("no io error")
+            .check(4096)
+            .unwrap();
         let mut content = Vec::new();
         guard.read_to_end(&mut content).unwrap();
         assert_eq!(content, b"hello");
@@ -787,10 +911,40 @@ mod tests {
         let mut second_guard = entries
             .next_entry()
             .expect("second entry must still be reachable")
-            .expect("no io error");
+            .expect("no io error")
+            .check(4096)
+            .unwrap();
         let mut content = Vec::new();
         second_guard.read_to_end(&mut content).unwrap();
         assert_eq!(content, b"hello");
+    }
+
+    #[test]
+    fn window_holds_the_bytes_read_between_two_entries() {
+        let mut data = one_entry_tar("first.txt", b"unread content");
+        data.truncate(data.len() - 1024);
+        data.extend_from_slice(&one_entry_tar("second.txt", b"hello"));
+
+        let (reader, budget) = budgeted_reader(Cursor::new(data), 4096);
+        let handle = budget.clone();
+        let mut archive = tar::Archive::new(reader);
+        let mut entries = budgeted_tar_entries(&mut archive, budget).unwrap();
+
+        let first = entries.next_entry().unwrap().unwrap();
+        assert_eq!(first.window_start, 0);
+        assert_eq!(handle.take_window().len(), 512);
+        drop(first);
+
+        let second = entries.next_entry().unwrap().unwrap();
+        assert_eq!(second.window_start, 512 + 14);
+        let window = handle.take_window();
+        assert_eq!(window.len(), (512 - 14) + 512);
+        assert_eq!(
+            MetadataWindow::new(second.window_start, &window).end(),
+            1536
+        );
+        handle.return_window(window);
+        second.check(4096).unwrap();
     }
 
     #[test]

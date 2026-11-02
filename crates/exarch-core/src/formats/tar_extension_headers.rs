@@ -8,12 +8,15 @@
 //! archive that relies on any of those choices reads as different files in
 //! different tools.
 //!
-//! This module does not parse archives itself. It inspects the header and the
+//! This module does not frame archives itself. It inspects the header and the
 //! extension records the `tar` crate has already attached to a yielded entry
 //! and refuses the constructs on which the readers are known to disagree. The
 //! raw bytes of a merged `x`, `L` or `K` header are not visible after the
-//! `tar` crate consumes them, so their own numeric fields and the framing of a
-//! local PAX body are not checked here.
+//! `tar` crate consumes them, so the [`window`] child module verifies the
+//! bytes the `tar` crate read to reach the entry: the checksum and size of
+//! every header and the framing of a local PAX body.
+
+mod window;
 
 use std::collections::HashSet;
 use std::io::Read;
@@ -25,11 +28,13 @@ use tar::PaxExtensions;
 
 use crate::ArchiveError;
 use crate::Result;
+use crate::formats::tar_metadata_limit::MetadataWindow;
 
 const PAX_PATH: &[u8] = b"path";
 const PAX_LINKPATH: &[u8] = b"linkpath";
 const PAX_SIZE: &[u8] = b"size";
 const PAX_SPARSE_PREFIX: &[u8] = b"GNU.sparse.";
+const PAX_REALSIZE: &[u8] = b"SCHILY.realsize";
 
 /// Longest PAX record `libarchive` accepts, in bytes.
 const MAX_PAX_RECORD_BYTES: usize = 999_999;
@@ -55,7 +60,7 @@ enum ExtensionConflict {
     #[error("duplicate PAX record {0:?}")]
     DuplicateRecord(String),
     #[error("PAX record {0:?} is not supported")]
-    SparseRecord(String),
+    UnsupportedRecord(String),
     #[error("PAX `size` record is not a decimal number")]
     InvalidSize,
     #[error("global PAX record {0:?} would apply to later entries")]
@@ -79,6 +84,12 @@ enum ExtensionConflict {
     NonCanonicalNumber { field: &'static str },
     #[error("header carries a prefix field without a ustar magic")]
     PrefixWithoutUstar,
+    #[error("header checksum does not match the header bytes")]
+    ChecksumMismatch,
+    #[error("duplicate {0:?} extension header")]
+    DuplicateExtensionHeader(window::ExtensionKind),
+    #[error("bytes read before the entry do not match the position of its header")]
+    WindowMismatch,
 }
 
 impl From<ExtensionConflict> for ArchiveError {
@@ -141,8 +152,8 @@ fn scan_records(records: PaxExtensions<'_>, scope: PaxScope) -> Result<PathOverr
         if !seen.insert(key) {
             return Err(ExtensionConflict::DuplicateRecord(lossy(key)).into());
         }
-        if key.starts_with(PAX_SPARSE_PREFIX) {
-            return Err(ExtensionConflict::SparseRecord(lossy(key)).into());
+        if key.starts_with(PAX_SPARSE_PREFIX) || key == PAX_REALSIZE {
+            return Err(ExtensionConflict::UnsupportedRecord(lossy(key)).into());
         }
         let overrides_entry = [PAX_PATH, PAX_LINKPATH, PAX_SIZE].contains(&key);
         if scope == PaxScope::Global && overrides_entry {
@@ -211,14 +222,17 @@ fn is_plain_base256(field: &[u8]) -> bool {
 }
 
 fn check_header_fields(header: &Header) -> Result<()> {
-    let bytes = header.as_bytes();
+    check_header_block(header.as_bytes(), header.as_ustar().is_some())
+}
+
+fn check_header_block(bytes: &[u8; 512], has_ustar_magic: bool) -> Result<()> {
     if !is_plain_octal(&bytes[SIZE_FIELD]) && !is_plain_base256(&bytes[SIZE_FIELD]) {
         return Err(ExtensionConflict::NonCanonicalNumber { field: "size" }.into());
     }
     if !is_plain_octal(&bytes[CHECKSUM_FIELD]) {
         return Err(ExtensionConflict::NonCanonicalNumber { field: "checksum" }.into());
     }
-    if header.as_ustar().is_none() && bytes[PREFIX_OFFSET] != 0 {
+    if !has_ustar_magic && bytes[PREFIX_OFFSET] != 0 {
         return Err(ExtensionConflict::PrefixWithoutUstar.into());
     }
     Ok(())
@@ -228,15 +242,20 @@ fn check_header_fields(header: &Header) -> Result<()> {
 /// differently.
 ///
 /// Called for every entry the `tar` crate yields, metadata entries included,
-/// before the entry is listed, verified or extracted. The header's size and
-/// checksum fields must be plain octal (or a base-256 size), a header without
-/// a ustar magic must leave the `prefix` area empty, and GNU sparse entries
-/// are refused. A local PAX header must have unique, well-formed records, no
-/// GNU sparse records and no GNU long name or link record overriding its
-/// `path` or `linkpath`. A global PAX header (`git archive` writes one
-/// carrying only a `comment`) must be well-formed, must not carry `path`,
-/// `linkpath` or `size`, and must not follow a local header or a GNU long
-/// record.
+/// before the entry is listed, verified or extracted, by
+/// `TarEntryGuard::check`. `window` holds the bytes the `tar` crate read to
+/// reach the entry: the checksum and size of every header in it must be plain,
+/// a local PAX body must have canonical framing, and the blocks must end
+/// exactly at the entry's header.
+///
+/// The header's size and checksum fields must be plain octal (or a base-256
+/// size), a header without a ustar magic must leave the `prefix` area empty,
+/// and GNU sparse entries are refused. A local PAX header must have unique,
+/// well-formed records, no GNU sparse or `SCHILY.realsize` records and no GNU
+/// long name or link record overriding its `path` or `linkpath`. A global PAX
+/// header (`git archive` writes one carrying only a `comment`) must be
+/// well-formed, must not carry `path`, `linkpath` or `size`, and must not
+/// follow a local header or a GNU long record.
 ///
 /// `metadata_limit` bounds how much of a global header is read.
 ///
@@ -244,7 +263,20 @@ fn check_header_fields(header: &Header) -> Result<()> {
 ///
 /// Returns [`ArchiveError::InvalidArchive`] naming the ambiguous construct, or
 /// when the header body cannot be read.
-pub fn check_entry_headers<R: Read>(entry: &mut Entry<'_, R>, metadata_limit: u64) -> Result<()> {
+pub fn check_entry_headers<R: Read>(
+    entry: &mut Entry<'_, R>,
+    window: &MetadataWindow<'_>,
+    metadata_limit: u64,
+) -> Result<()> {
+    check_parsed_headers(entry, metadata_limit)?;
+    window::check_window(
+        window,
+        entry.raw_header_position(),
+        entry.raw_file_position(),
+    )
+}
+
+fn check_parsed_headers<R: Read>(entry: &mut Entry<'_, R>, metadata_limit: u64) -> Result<()> {
     check_header_fields(entry.header())?;
     match entry.header().entry_type() {
         kind @ (EntryType::XHeader | EntryType::GNULongName | EntryType::GNULongLink) => {

@@ -156,6 +156,32 @@ fn assert_is_budget_violation(result: &exarch_core::Result<impl std::fmt::Debug>
     }
 }
 
+fn assert_is_ambiguous_header(result: &exarch_core::Result<impl std::fmt::Debug>) {
+    match result {
+        Err(ArchiveError::InvalidArchive(reason)) => assert!(
+            reason.contains("ambiguous TAR extension headers"),
+            "reason should name the ambiguous extension header: {reason}"
+        ),
+        other => panic!("expected an ambiguous-header InvalidArchive, got: {other:?}"),
+    }
+}
+
+/// What a historical-shape archive is refused for.
+#[derive(Clone, Copy)]
+enum Refusal {
+    MetadataBudget,
+    AmbiguousHeader,
+}
+
+impl Refusal {
+    fn assert_matches(self, result: &exarch_core::Result<impl std::fmt::Debug>) {
+        match self {
+            Self::MetadataBudget => assert_is_budget_violation(result),
+            Self::AmbiguousHeader => assert_is_ambiguous_header(result),
+        }
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // TarArchive::extract() — direct entry point
 // ─────────────────────────────────────────────────────────────────────────
@@ -408,7 +434,7 @@ fn s3_shape_bomb(bomb_real_bytes: usize) -> Vec<u8> {
     out
 }
 
-fn assert_all_entry_points_reject(bomb: &[u8], file_name: &str) {
+fn assert_all_entry_points_reject(bomb: &[u8], file_name: &str, refusal: Refusal) {
     let config = SecurityConfig::default().with_max_tar_metadata_bytes(4096);
     let validated_config = config.clone().validate().unwrap();
 
@@ -420,29 +446,33 @@ fn assert_all_entry_points_reject(bomb: &[u8], file_name: &str) {
         &ExtractionOptions::default(),
         &mut NoopProgress,
     );
-    assert_is_budget_violation(&result);
+    refusal.assert_matches(&result);
 
     let temp = TempDir::new().unwrap();
     let path = write_tar_file(&temp, file_name, bomb);
-    assert_is_budget_violation(&exarch_core::list_archive(&path, &config));
-    assert_is_budget_violation(&exarch_core::verify_archive(&path, &config));
+    refusal.assert_matches(&exarch_core::list_archive(&path, &config));
+    refusal.assert_matches(&exarch_core::verify_archive(&path, &config));
     let out = temp.path().join("out");
-    assert_is_budget_violation(&exarch_core::extract_archive(&path, &out, &config));
+    refusal.assert_matches(&exarch_core::extract_archive(&path, &out, &config));
 }
 
 #[test]
 fn s1_shape_pax_size_zero_override_hiding_a_bomb_is_still_rejected() {
-    assert_all_entry_points_reject(&s1_shape_bomb(8192), "s1.tar");
+    assert_all_entry_points_reject(&s1_shape_bomb(8192), "s1.tar", Refusal::MetadataBudget);
 }
 
 #[test]
 fn s2_shape_invalid_magic_pax_override_hiding_a_bomb_is_still_rejected() {
-    assert_all_entry_points_reject(&s2_shape_bomb(8192), "s2.tar");
+    // The leading extension header without magic is refused before the
+    // budget is ever reached.
+    assert_all_entry_points_reject(&s2_shape_bomb(8192), "s2.tar", Refusal::AmbiguousHeader);
 }
 
 #[test]
 fn s3_shape_pax_global_header_hiding_a_bomb_is_still_rejected() {
-    assert_all_entry_points_reject(&s3_shape_bomb(8192), "s3.tar");
+    // A global header right after a local one is refused before the budget is
+    // ever reached.
+    assert_all_entry_points_reject(&s3_shape_bomb(8192), "s3.tar", Refusal::AmbiguousHeader);
 }
 
 #[test]

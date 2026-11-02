@@ -45,6 +45,7 @@ use crate::formats::tar::effective_entry_type;
 use crate::formats::tar::is_metadata_type;
 use crate::formats::tar::open_tar_stream;
 use crate::formats::tar::tar_node;
+use crate::formats::tar_extension_headers::check_entry_headers;
 use crate::formats::tar_metadata_limit::TarEntryGuard;
 use crate::formats::tar_metadata_limit::TarReadBudget;
 use crate::formats::tar_metadata_limit::budget_violation;
@@ -474,6 +475,8 @@ fn list_tar_entries<R: std::io::Read>(
                 ArchiveError::InvalidArchive(format!("failed to read TAR entry: {e}"))
             })
         })?;
+
+        check_entry_headers(&mut entry, config.max_tar_metadata_bytes)?;
 
         // Skip TAR metadata entries (PAX headers, GNU long names/links)
         if is_metadata_type(entry.header().entry_type()) {

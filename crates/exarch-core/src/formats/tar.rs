@@ -7,6 +7,14 @@
 //! - **pax** (POSIX.1-2001): Extended header format for long paths/metadata
 //! - **gnu** (GNU tar): GNU extensions for sparse files and incremental backups
 //!
+//! # Header Consistency
+//!
+//! Constructs that readers resolve differently are refused as ambiguous rather
+//! than interpreted: a directory, symlink or hardlink that declares a payload,
+//! duplicate PAX records, `GNU.sparse.*` records, a PAX `path` or `linkpath`
+//! stacked with a GNU long name or link record, and a global PAX header that
+//! carries `path`, `linkpath` or `size`.
+//!
 //! # Format Detection
 //!
 //! The TAR format is auto-detected based on header magic bytes. No explicit
@@ -135,6 +143,7 @@ use crate::types::SafePath;
 
 use super::common;
 use super::compression::CompressionCodec;
+use super::tar_extension_headers::check_entry_headers;
 use super::tar_metadata_limit::budget_violation;
 use super::tar_metadata_limit::budgeted_reader;
 use super::tar_metadata_limit::budgeted_tar_entries;
@@ -248,6 +257,8 @@ impl<R: Read> TarArchive<R> {
         target: &mut T,
         ctx: &mut ExtractionContext<'_, '_>,
     ) -> Result<Option<HardlinkInfo>> {
+        check_entry_headers(entry, ctx.config.max_tar_metadata_bytes)?;
+
         // Skip TAR metadata entries (PAX headers, GNU long names/links, sparse)
         if TarEntryAdapter::is_metadata_entry(entry) {
             return Ok(None);
@@ -682,9 +693,23 @@ pub(crate) fn tar_node(kind: tar::EntryType) -> Result<TarNode> {
 /// Returns [`ArchiveError::InvalidArchive`] for a file-typed entry with a
 /// directory name that carries a payload: reading it as a directory would drop
 /// its data without a trace, and reading it as a file would create a name the
-/// archive declares to be a directory.
+/// archive declares to be a directory. A directory, symbolic link or hard link
+/// that declares a payload is refused for the same reason: readers disagree on
+/// whether the payload blocks are data or further headers.
 pub(crate) fn effective_entry_type<R: Read>(entry: &tar::Entry<'_, R>) -> Result<tar::EntryType> {
     let kind = entry.header().entry_type();
+    if entry.size() != 0
+        && matches!(
+            kind,
+            tar::EntryType::Directory | tar::EntryType::Symlink | tar::EntryType::Link
+        )
+    {
+        return Err(ArchiveError::InvalidArchive(format!(
+            "{kind:?} entry declares a {} byte payload: {}",
+            entry.size(),
+            String::from_utf8_lossy(&entry.path_bytes())
+        )));
+    }
     let is_file_typed = matches!(
         kind,
         tar::EntryType::Regular | tar::EntryType::Continuous | tar::EntryType::GNUSparse
@@ -1189,7 +1214,7 @@ mod tests {
         // Add a PAX global header entry
         let mut header = tar::Header::new_gnu();
         header.set_entry_type(tar::EntryType::XGlobalHeader);
-        let pax_data = b"16 comment=hi\n";
+        let pax_data = b"14 comment=hi\n";
         header.set_size(pax_data.len() as u64);
         header.set_cksum();
         builder

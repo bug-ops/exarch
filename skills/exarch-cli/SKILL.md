@@ -189,6 +189,8 @@ debug binary on a TAR holding `ok.txt` and a FIFO: `list` and `verify` give `ope
 security policy: FIFO entries not supported`; with a `V` entry the message reads `unsupported
 entry type: __Nonexhaustive(86)`, and `extract` gives the same message with its `HINT` (the list pass no longer prefixes errors with `failed to list archive`).
 
+A TAR whose headers other readers (`bsdtar`, CPython `tarfile`) would resolve differently fails `list`, `verify` and `extract` alike with `error.kind` `InvalidArchive` and exit `1`: a directory, symlink or hardlink that declares a payload, a PAX header with duplicate records, a non-numeric `size` or any `GNU.sparse.*` record, a PAX `path`/`linkpath` stacked with a GNU long name/link record, a global PAX header (`g`) carrying `path`, `linkpath` or `size` or following a local one, and an extension-header typeflag without ustar/GNU magic. A global header with other records, such as the `comment` that `git archive` writes, is accepted. Verified with the debug binary: `list --json` on a TAR with two PAX `path` records gives `invalid archive: ambiguous TAR extension headers: duplicate PAX record "path"`, and a directory entry with `size` 1024 gives `invalid archive: Directory entry declares a 1024 byte payload: x/`.
+
 ### `verify <ARCHIVE>`
 
 ```bash

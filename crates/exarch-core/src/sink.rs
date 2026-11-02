@@ -63,13 +63,12 @@
 //! resident with 7-byte names and 223 MB with 99-byte names (about 1.6 bytes
 //! per name byte on top of about 550 bytes per name), so names of 255 bytes
 //! reach roughly 300 MB. [`MemoryLimit`] counts the payload, the path bytes and
-//! a fixed 256 bytes per entry, but not this overhead. The host `DirCache` of
-//! the path-based API is not bounded by it.
+//! a fixed 256 bytes per entry, but not this overhead.
 //!
-//! A sink that writes to a real filesystem loses the `DirCache`, `O_NOFOLLOW`
-//! and `create_new` defences the path-based API relies on (the pre-existing
-//! destination symlink class). Use [`extract_archive`](crate::extract_archive)
-//! for that.
+//! A sink that writes to a real filesystem loses the per-component symlink
+//! vetting, `O_NOFOLLOW` and `create_new` defences the path-based API relies
+//! on (the pre-existing destination symlink class). Use
+//! [`extract_archive`](crate::extract_archive) for that.
 //!
 //! # Examples
 //!

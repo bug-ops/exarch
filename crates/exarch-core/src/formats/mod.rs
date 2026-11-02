@@ -4,6 +4,7 @@ pub(crate) mod chunk_search;
 pub(crate) mod common;
 pub mod compression;
 pub mod detect;
+pub(crate) mod dir_walker;
 pub mod sevenz;
 pub mod tar;
 pub(crate) mod tar_metadata_limit;

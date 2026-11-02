@@ -21,7 +21,7 @@
 //! `SafeSymlink::validate`/hardlink validation directly against a
 //! hand-constructed on-disk symlink, which does not exercise
 //! `validate_entry_path`'s canonicalize-skipping optimizations
-//! (`mark_symlink_seen`, `with_dir_cache`) the way a real archive extraction
+//! (`mark_symlink_seen`) the way a real archive extraction
 //! does.
 
 use exarch_core::ExtractionOptions;

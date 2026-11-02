@@ -191,7 +191,7 @@ THEN the written file has those bits cleared; ValidatedEntry.mode reflects the s
 | NFR-004 | Security | Default banned components: `.git`, `.ssh`, `.gnupg`, `.aws`, `.kube`, `.docker`, `.env` |
 | NFR-005 | Safety | `deny(unsafe_code)` workspace-wide — no exceptions in this module |
 | NFR-006 | Performance | `canonicalize()` is NOT called per-entry for path traversal; `PathBuf::components()` used instead |
-| NFR-007 | Performance | `DirCache` caches directories created by the extractor to avoid repeated `canonicalize()` syscalls |
+| NFR-007 | Performance | `DirWalker` creates and `lstat`-checks every directory component of an entry, and path validation skips the parent `canonicalize()` when the parent is the destination root |
 | NFR-008 | Reliability | Quota tracking (`QuotaTracker`) is not reversible — once exceeded, extraction halts |
 
 ## 5. Data Model

@@ -2313,9 +2313,8 @@ fn test_directory_entry_under_swapped_parent_is_rejected() {
     assert_swapped_parent_is_refused(archive, &config);
 }
 
-/// An outcome guard, not a `Revalidate` guard: `SafeSymlink::validate_in`
-/// canonicalizes the link's parent itself, so this passes under either
-/// `DirCacheTrust`. The directory-entry test above is the discriminating one.
+/// An outcome guard: `SafeSymlink::validate_in` canonicalizes the link's
+/// parent itself. The directory-entry test above is the discriminating one.
 #[test]
 #[cfg(unix)]
 fn test_symlink_entry_under_swapped_parent_is_rejected() {
@@ -2332,7 +2331,7 @@ fn test_symlink_entry_under_swapped_parent_is_rejected() {
 
 /// Regression test for issue #492 adversarial review, finding C1:
 /// The 7z host target must re-validate every entry's path without
-/// trusting `dir_cache`'s record of directories it has already created.
+/// trusting any record of directories it has already created.
 /// If something outside the archive's own entries — e.g. a misbehaving
 /// `ProgressCallback` — replaces a previously-created directory with a
 /// symlink between two entries that share it as a parent, the trust

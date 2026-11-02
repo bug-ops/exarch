@@ -1,7 +1,6 @@
 //! 7z extraction onto the host filesystem.
 //!
-//! [`SevenZHostTarget`] is a [`HostTarget`] that re-validates every parent
-//! instead of trusting its directory cache, and that writes a file over an
+//! [`SevenZHostTarget`] is a [`HostTarget`] that writes a file over an
 //! existing regular file through a temp file and a rename, so a decode failure
 //! cannot leave a truncated file where the original stood.
 
@@ -110,7 +109,7 @@ impl<'a> SevenZHostTarget<'a> {
     /// Creates `output_dir` if needed and a target writing into it.
     pub(super) fn create(output_dir: &Path, config: &'a SecurityConfig<Validated>) -> Result<Self> {
         Ok(Self {
-            inner: HostTarget::for_sevenz(output_dir, config)?,
+            inner: HostTarget::create(output_dir, config)?,
         })
     }
 }
@@ -128,7 +127,9 @@ impl ExtractTarget for SevenZHostTarget<'_> {
             .validate_path(request.path, NodeKind::NonDirectory)?
             .into_inner();
         let dest_path = self.inner.dest().join_path(safe_path.as_path());
-        self.inner.dir_cache_mut().ensure_parent_dir(&dest_path)?;
+        self.inner
+            .dirs()
+            .ensure_parent(self.inner.dest(), safe_path.as_path())?;
 
         let occupancy = DestOccupancy::probe(&dest_path)?;
         if occupancy.is_occupied() && tally.options.skip_duplicates {
@@ -229,8 +230,7 @@ impl ExtractTarget for SevenZHostTarget<'_> {
     }
 }
 
-/// The host's pre-pass: paths against the disk as it is now, no directory
-/// cache.
+/// The host's pre-pass: paths against the disk as it is now.
 struct HostPrePass<'a> {
     core: ValidatorCore<'a>,
     dest: &'a DestDir,
@@ -240,7 +240,7 @@ struct HostPrePass<'a> {
 
 impl PrePass for HostPrePass<'_> {
     fn validate_path(&mut self, path: &Path, kind: NodeKind) -> Result<EntryPath<SafePath>> {
-        let ctx: ValidationContext<'_, HostFs> = self.core.context();
+        let ctx: ValidationContext<HostFs> = self.core.context();
         self.core
             .validate_entry_path_in(path, kind, self.dest, &HostFs, &ctx)
     }

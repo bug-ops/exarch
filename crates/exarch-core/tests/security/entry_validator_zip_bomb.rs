@@ -38,7 +38,6 @@ fn test_42_zip_bomb_rejected_by_default_file_size_quota() {
         4_500_000_000_000_000, // 4.5 PB
         Some(42_000),          // 42 KB
         Some(0o644),
-        None,
     );
 
     assert_matches!(
@@ -71,7 +70,6 @@ fn test_42_zip_bomb_simulation() {
         4_500_000_000_000_000, // 4.5 PB
         Some(42_000),          // 42 KB
         Some(0o644),
-        None,
     );
 
     assert_matches!(result, Err(ArchiveError::ZipBomb(_)));
@@ -92,7 +90,6 @@ fn test_high_compression_ratio_individual() {
         1_000_000,
         Some(1_000),
         Some(0o644),
-        None,
     );
 
     assert_matches!(result, Err(ArchiveError::ZipBomb(_)));
@@ -113,7 +110,6 @@ fn test_normal_compression_allowed() {
         10_000,
         Some(1_000),
         Some(0o644),
-        None,
     );
 
     assert!(result.is_ok());
@@ -134,7 +130,6 @@ fn test_boundary_compression_ratio() {
         100_000,
         Some(1_000),
         Some(0o644),
-        None,
     );
 
     assert!(
@@ -158,7 +153,6 @@ fn test_just_over_compression_ratio() {
         100_001,
         Some(1_000),
         Some(0o644),
-        None,
     );
 
     assert_matches!(result, Err(ArchiveError::ZipBomb(_)));
@@ -182,7 +176,6 @@ fn test_zero_compressed_nonzero_uncompressed_rejected() {
         1000,
         Some(0),
         Some(0o644),
-        None,
     );
 
     assert_matches!(
@@ -207,7 +200,6 @@ fn test_both_sizes_zero_allowed() {
         0,
         Some(0),
         Some(0o644),
-        None,
     );
 
     assert!(result.is_ok());
@@ -228,7 +220,6 @@ fn test_uncompressed_archive() {
         1_000_000,
         None,
         Some(0o644),
-        None,
     );
 
     assert!(
@@ -255,7 +246,6 @@ fn test_permissive_compression_ratio() {
         500_000,
         Some(1_000),
         Some(0o644),
-        None,
     );
 
     assert!(

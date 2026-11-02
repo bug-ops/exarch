@@ -34,7 +34,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CLI: errors from the pre-extraction list pass carry the category hint, and the unknown-format hint lists 7z (#796, #808).
 - Core: a directory entry over a file or a symlink is refused with the same entry-naming message in `extract` and `verify` (#802, #803, #808).
 - **BREAKING (Windows hosts):** `PathModel::Host` applies the `Portable` component rules, so entry names and link targets containing `<>"|?*`, control characters or non-Unicode text are refused as `SecurityViolation` (CLI JSON `error.kind` `IoError` -> `SecurityViolation`), symlink targets with them no longer create dangling links, and the in-memory Host sinks in Python and Node refuse them too (#780, #790).
-- Core: the host directory cache stops caching beyond a fixed 16 MiB of key bytes; uncached parents are validated on every entry (#786, #790).
 - Core: `extract_to_sink` on 7z checks name lengths before any block is decoded (#785, #790).
 - Core: a TAR whose first member name starts with `BZh` but is not a complete bzip2 header is detected as TAR; detection reads 512 bytes (#781, #790).
 
@@ -55,6 +54,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `exarch.pyi` drift guard covers all Literal aliases (#761, #768).
 - Internal cleanups after #752 and #757 (#762, #768).
 - Windows regression tests for UNC and device-namespace link targets (#764, #768).
+
+### Security
+
+- **BREAKING:** `EntryValidator::validate_entry` drops the `dir_cache` parameter, and `ValidationContext` loses its lifetime parameter.
+- Core: extraction validates every parent component below the destination on each write and no longer follows a symlink that was already there.
 
 ## [0.7.0] - 2026-10-26
 

@@ -194,7 +194,6 @@ match extract_archive("archive.tar.gz", "/output", &SecurityConfig::default()) {
 
 Optimized for throughput with:
 
-- **Directory caching** — FxHashSet caching reduces mkdir syscalls by ~95%
 - **Atomic permission setting** — Sets Unix permissions during file creation (1 syscall vs 2)
 - Streaming extraction (no full archive buffering)
 - Reusable 64KB copy buffers per archive

@@ -57,8 +57,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
-- **BREAKING:** `EntryValidator::validate_entry` drops the `dir_cache` parameter, and `ValidationContext` loses its lifetime parameter.
-- Core: extraction validates every parent component below the destination on each write and no longer follows a symlink that was already there.
+- **BREAKING:** `EntryValidator::validate_entry` drops the `dir_cache` parameter, and `ValidationContext` loses its lifetime parameter (#816).
+- Core: extraction validates every parent component below the destination on each write and no longer follows a symlink that was already there (#816).
 
 ## [0.7.0] - 2026-10-26
 

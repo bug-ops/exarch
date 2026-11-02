@@ -26,6 +26,8 @@ use std::io::Read;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 
 use crate::ArchiveError;
 use crate::ExtractionReport;
@@ -327,24 +329,17 @@ pub fn check_extension_allowed(
 ///
 /// On non-Unix platforms, permissions are not supported and mode is ignored.
 ///
-/// When `create_new` is `true`, the file is opened with `O_EXCL` semantics
+/// The file is always created with `O_EXCL` semantics
 /// (`OpenOptions::create_new`): the call atomically fails with
-/// `ErrorKind::AlreadyExists` if `path` already exists, instead of truncating
-/// it. This folds the caller's duplicate-detection into the `open()` syscall
-/// itself rather than requiring a separate `exists()` stat beforehand.
+/// `ErrorKind::AlreadyExists` if `path` already exists, so an existing inode
+/// is never opened for writing. Callers that must replace an existing entry
+/// create a sibling file and rename it over the entry.
 ///
 /// # Security - Symlink-at-Destination Rejection (issue #459)
 ///
-/// On Unix, every open passes `O_NOFOLLOW`: if `path`'s final component is a
-/// symlink (dangling or not — planted by something other than this
-/// extraction, since `SafeSymlink::validate` already prevents an in-archive
-/// symlink entry from escaping `dest`), the call fails with `ELOOP` instead
-/// of following the link. Without this, `path.exists()` (used by the old,
-/// now-removed pre-check) returns `false` for a dangling symlink, and a plain
-/// `File::create` follows it, writing archive content outside the
-/// extraction root. `create_new`'s `O_EXCL` already rejects any existing
-/// path including symlinks, so `O_NOFOLLOW` is redundant there; it is the
-/// only guard on the `create`+`truncate` (`create_new = false`) branch.
+/// On Unix, the open also passes `O_NOFOLLOW`, so a symlink at `path`'s final
+/// component is never followed; `O_EXCL` already rejects any existing path,
+/// symlinks included.
 ///
 /// # Performance
 ///
@@ -374,38 +369,22 @@ pub fn check_extension_allowed(
 ///
 /// * `path` - Path where file should be created
 /// * `mode` - Optional pre-sanitized Unix file mode
-/// * `create_new` - If `true`, fail with `AlreadyExists` instead of truncating
-///   an existing file at `path`
 ///
 /// # Errors
 ///
 /// Returns an I/O error if file creation fails, including
-/// `ErrorKind::AlreadyExists` when `create_new` is `true` and `path` already
-/// exists, or `ELOOP` (via `custom_flags(O_NOFOLLOW)`) when `path`'s final
-/// component is a symlink on any branch.
+/// `ErrorKind::AlreadyExists` when `path` already exists.
 #[inline]
 #[cfg(unix)]
-pub fn create_file_with_mode(
-    path: &Path,
-    mode: Option<SanitizedMode>,
-    create_new: bool,
-) -> std::io::Result<File> {
+pub fn create_file_with_mode(path: &Path, mode: Option<SanitizedMode>) -> std::io::Result<File> {
     use std::fs::OpenOptions;
     use std::fs::Permissions;
     use std::os::unix::fs::OpenOptionsExt;
     use std::os::unix::fs::PermissionsExt;
 
     let mut opts = OpenOptions::new();
-    opts.write(true);
-    // O_NOFOLLOW rejects a symlink at `path` on every branch (issue #459);
-    // `create_new`'s O_EXCL already implies this, but the create+truncate
-    // branch below has no other protection against a planted symlink.
+    opts.write(true).create_new(true);
     opts.custom_flags(libc::O_NOFOLLOW);
-    if create_new {
-        opts.create_new(true);
-    } else {
-        opts.create(true).truncate(true);
-    }
 
     if let Some(m) = mode {
         // Apply sanitized mode during open (already stripped setuid/setgid)
@@ -437,35 +416,18 @@ pub fn create_file_with_mode(
 ///
 /// * `path` - Path where file should be created
 /// * `_mode` - Ignored on non-Unix platforms
-/// * `create_new` - If `true`, fail with `AlreadyExists` instead of truncating
-///   an existing file at `path`
 ///
 /// # Errors
 ///
 /// Returns an I/O error if file creation fails, including
-/// `ErrorKind::AlreadyExists` when `create_new` is `true` and `path` already
-/// exists, or a bare `AlreadyExists` when `create_new` is `false` and the
-/// final component of `path` is a symlink (the caller names the entry through
-/// [`name_occupant_on_open_error`]).
+/// `ErrorKind::AlreadyExists` when `path` already exists.
 #[inline]
 #[cfg(not(unix))]
-pub fn create_file_with_mode(
-    path: &Path,
-    _mode: Option<SanitizedMode>,
-    create_new: bool,
-) -> std::io::Result<File> {
-    if create_new {
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(path)
-    } else {
-        // No O_NOFOLLOW off Unix: refuse a symlink via lstat before truncating.
-        if std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink()) {
-            return Err(std::io::ErrorKind::AlreadyExists.into());
-        }
-        File::create(path)
-    }
+pub fn create_file_with_mode(path: &Path, _mode: Option<SanitizedMode>) -> std::io::Result<File> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
 }
 
 /// Generic file extraction implementation used by all format adapters.
@@ -576,46 +538,28 @@ pub fn extract_file_with_permit<R: Read>(
         checked_add_bytes(report.bytes_written, size)?;
     }
 
-    // Folds the duplicate-existence check into the open() syscall itself
-    // (create_new(true) atomically fails with AlreadyExists) instead of a
-    // separate exists() stat followed by a truncating create — one syscall
-    // per extracted file instead of two.
-    let output_file = match create_file_with_mode(&output_path, mode, skip_duplicates) {
-        Ok(file) => file,
-        Err(e) if skip_duplicates && e.kind() == std::io::ErrorKind::AlreadyExists => {
-            checked_increment_files_skipped(report)?;
-            *duplicate_skips = duplicate_skips.saturating_add(1);
-            return Ok(());
-        }
-        Err(e) if skip_duplicates => return Err(e.into()),
-        Err(e) => {
-            return Err(name_occupant_on_open_error(&output_path, safe_path.as_path(), e).into());
-        }
+    let Some(OutputSlot {
+        file: output_file,
+        written_at,
+        replaces,
+    }) = open_output_slot(&output_path, safe_path.as_path(), mode, skip_duplicates)?
+    else {
+        checked_increment_files_skipped(report)?;
+        *duplicate_skips = duplicate_skips.saturating_add(1);
+        return Ok(());
     };
 
-    // SECURITY: guards against leaving a partial file on disk when
-    // copy_with_buffer aborts mid-stream because expected_size was forged
-    // (GHSA-5j8q-wxg5-hj4r) — the `?` below returns before `persist()` runs,
-    // so the guard's Drop removes whatever was written so far.
-    //
-    // Only armed when `skip_duplicates` is true: that is exactly the branch
-    // where `create_file_with_mode` used `create_new(true)` above, so
-    // `output_path` is guaranteed to have held nothing before this call and
-    // deleting it on abort loses nothing. When `skip_duplicates` is false
-    // (`--force`/overwrite), `create_file_with_mode` already truncated a
-    // possibly pre-existing file in place before any of this ran — deleting
-    // that truncated stub on abort would be new behavior this security fix
-    // has no reason to introduce (unlike 7z's temp+rename, TAR/ZIP's
-    // in-place overwrite was never atomic; restoring the original on failure
-    // would need that same restructuring, tracked separately, not folded
-    // into this patch).
-    let guard = skip_duplicates.then(|| TempFileGuard::new(output_path));
+    // Removes the partial file when the copy aborts (forged `expected_size`);
+    // `written_at` never holds a pre-existing entry, so nothing else is lost.
+    let guard = TempFileGuard::new(written_at.clone());
     let mut buffered_writer = BufWriter::with_capacity(64 * 1024, output_file);
     let bytes_written = copy_with_buffer(reader, &mut buffered_writer, copy_buffer, expected_size)?;
     buffered_writer.flush()?;
-    if let Some(guard) = guard {
-        guard.persist();
+    drop(buffered_writer);
+    if let Some(final_path) = replaces {
+        std::fs::rename(&written_at, final_path)?;
     }
+    guard.persist();
 
     if bytes_written > 0 {
         progress.on_bytes_written(bytes_written);
@@ -625,6 +569,119 @@ pub fn extract_file_with_permit<R: Read>(
     report.bytes_written = checked_add_bytes(report.bytes_written, bytes_written)?;
 
     Ok(())
+}
+
+/// Maximum attempts to create a uniquely named sibling temp file before
+/// giving up.
+///
+/// Bounds retry cost when predicted `.{name}.exarch-tmp-{pid}-{counter}` paths
+/// are pre-occupied; a genuine collision from concurrent extraction into the
+/// same directory resolves on the first or second attempt.
+pub const MAX_TEMP_FILE_CREATE_ATTEMPTS: u32 = 8;
+
+static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Returns the next candidate temp path next to `dest_path`.
+pub fn temp_sibling_path(dest_path: &Path) -> PathBuf {
+    let name = dest_path
+        .file_name()
+        .map_or_else(|| "file".to_string(), |n| n.to_string_lossy().to_string());
+    let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    dest_path.with_file_name(format!(
+        ".{name}.exarch-tmp-{}-{counter}",
+        std::process::id()
+    ))
+}
+
+/// Creates a new file at the first free path drawn from `next_candidate`,
+/// retrying on `AlreadyExists` up to [`MAX_TEMP_FILE_CREATE_ATTEMPTS`] times.
+///
+/// Each attempt uses `create_new` (`O_EXCL`), so a planted entry at a
+/// predicted path is never followed or reused.
+///
+/// # Errors
+///
+/// Returns the first non-`AlreadyExists` I/O error, or `AlreadyExists` when
+/// every attempt collided.
+pub fn create_temp_sibling(
+    dest_path: &Path,
+    mode: Option<SanitizedMode>,
+    mut next_candidate: impl FnMut() -> PathBuf,
+) -> std::io::Result<(PathBuf, File)> {
+    for _ in 0..MAX_TEMP_FILE_CREATE_ATTEMPTS {
+        let candidate = next_candidate();
+        match create_file_with_mode(&candidate, mode) {
+            Ok(file) => return Ok((candidate, file)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        format!(
+            "failed to create a unique temp file for {} after {MAX_TEMP_FILE_CREATE_ATTEMPTS} attempts",
+            dest_path.display()
+        ),
+    ))
+}
+
+/// An open, empty output file and where its content must end up.
+struct OutputSlot {
+    file: File,
+    /// Path the file was created at.
+    written_at: PathBuf,
+    /// Pre-existing entry to atomically replace once the content is complete.
+    replaces: Option<PathBuf>,
+}
+
+/// Opens the destination for a regular-file entry without ever writing
+/// through an existing inode.
+///
+/// A free path is created in place with `O_EXCL`. When an entry already
+/// exists, overwrite mode writes a fresh sibling temp file that the caller
+/// renames over the entry, so other hardlinks to the old inode keep their
+/// content. Returns `None` when the entry exists and `skip_duplicates` is set.
+fn open_output_slot(
+    output_path: &Path,
+    rel: &Path,
+    mode: Option<SanitizedMode>,
+    skip_duplicates: bool,
+) -> Result<Option<OutputSlot>> {
+    match create_file_with_mode(output_path, mode) {
+        Ok(file) => Ok(Some(OutputSlot {
+            file,
+            written_at: output_path.to_path_buf(),
+            replaces: None,
+        })),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && skip_duplicates => Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            refuse_non_file_occupant(output_path, rel)?;
+            let (written_at, file) =
+                create_temp_sibling(output_path, mode, || temp_sibling_path(output_path))?;
+            Ok(Some(OutputSlot {
+                file,
+                written_at,
+                replaces: Some(output_path.to_path_buf()),
+            }))
+        }
+        Err(e) => Err(name_occupant_on_open_error(output_path, rel, e).into()),
+    }
+}
+
+/// Fails with an entry-naming error when `path` holds a directory or a
+/// symlink, which an overwrite never replaces.
+fn refuse_non_file_occupant(path: &Path, rel: &Path) -> Result<()> {
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        return Ok(());
+    };
+    let file_type = metadata.file_type();
+    if file_type.is_dir() {
+        Err(occupant_at_dest_error(rel, Occupant::Directory).into())
+    } else if file_type.is_symlink() {
+        Err(occupant_at_dest_error(rel, Occupant::Symlink).into())
+    } else {
+        Ok(())
+    }
 }
 
 /// Creates a directory from a validated entry.
@@ -1464,17 +1521,11 @@ mod tests {
         );
     }
 
-    /// Security-review follow-up for GHSA-5j8q-wxg5-hj4r: with
-    /// `skip_duplicates = false` (`--force`), a pre-existing destination
-    /// file must not be *deleted* by an aborted forged-size entry. The
-    /// `TempFileGuard` added for the streaming ceiling is only armed when
-    /// this call created the file itself (`skip_duplicates = true`,
-    /// `create_new`); the overwrite branch already truncated the
-    /// pre-existing file in place before any size check ran (pre-existing,
-    /// non-atomic behavior this security fix does not change), so on abort
-    /// the truncated file is left as-is rather than additionally deleted.
+    /// With `skip_duplicates = false` (`--force`), an aborted forged-size
+    /// entry must leave the pre-existing destination file untouched and no
+    /// temp file behind.
     #[test]
-    fn test_extract_file_with_permit_force_overwrite_forged_size_does_not_delete_destination() {
+    fn test_extract_file_with_permit_force_overwrite_forged_size_keeps_destination() {
         let temp = TempDir::new().expect("failed to create temp dir");
         let dest = DestDir::new(temp.path().to_path_buf()).expect("failed to create dest");
         let mut report = ExtractionReport::default();
@@ -1511,10 +1562,12 @@ mod tests {
         );
 
         assert_matches!(result, Err(ArchiveError::SecurityViolation { .. }));
-        assert!(
-            temp.path().join("target.txt").exists(),
-            "aborted --force overwrite must not delete the destination path entirely"
+        assert_eq!(
+            std::fs::read(temp.path().join("target.txt")).expect("read target"),
+            b"pre-existing content"
         );
+        let leftovers = std::fs::read_dir(temp.path()).expect("read dir").count();
+        assert_eq!(leftovers, 1, "no temp file may remain after an abort");
     }
 
     /// H1: Test `create_file_with_mode()` with Unix mode 0o644
@@ -1527,8 +1580,8 @@ mod tests {
         let file_path = temp.path().join("test_0o644.txt");
 
         // Create file with mode 0o644
-        let file = create_file_with_mode(&file_path, Some(sanitized(0o644)), false)
-            .expect("should create file");
+        let file =
+            create_file_with_mode(&file_path, Some(sanitized(0o644))).expect("should create file");
         drop(file);
 
         // Verify file exists
@@ -1556,8 +1609,8 @@ mod tests {
         let file_path = temp.path().join("test_0o755.txt");
 
         // Create file with mode 0o755
-        let file = create_file_with_mode(&file_path, Some(sanitized(0o755)), false)
-            .expect("should create file");
+        let file =
+            create_file_with_mode(&file_path, Some(sanitized(0o755))).expect("should create file");
         drop(file);
 
         // Verify file exists
@@ -1585,8 +1638,8 @@ mod tests {
         let file_path = temp.path().join("test_0o600.txt");
 
         // Create file with mode 0o600
-        let file = create_file_with_mode(&file_path, Some(sanitized(0o600)), false)
-            .expect("should create file");
+        let file =
+            create_file_with_mode(&file_path, Some(sanitized(0o600))).expect("should create file");
         drop(file);
 
         // Verify file exists
@@ -1612,7 +1665,7 @@ mod tests {
         let file_path = temp.path().join("test_none.txt");
 
         // Create file with mode=None (should use system defaults)
-        let file = create_file_with_mode(&file_path, None, false).expect("should create file");
+        let file = create_file_with_mode(&file_path, None).expect("should create file");
         drop(file);
 
         // Verify file exists
@@ -1634,7 +1687,7 @@ mod tests {
         let file_path = temp.path().join("test_none_unix.txt");
 
         // Create file with mode=None
-        let file = create_file_with_mode(&file_path, None, false).expect("should create file");
+        let file = create_file_with_mode(&file_path, None).expect("should create file");
         drop(file);
 
         // Verify file exists
@@ -1733,7 +1786,7 @@ mod tests {
         // process-global but safe to mutate here. Restored unconditionally.
         let previous_umask = unsafe { libc::umask(0o077) };
 
-        let result = create_file_with_mode(&file_path, Some(sanitized(0o755)), false);
+        let result = create_file_with_mode(&file_path, Some(sanitized(0o755)));
 
         // Restore previous umask unconditionally before any assert.
         unsafe { libc::umask(previous_umask) };

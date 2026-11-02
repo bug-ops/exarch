@@ -50,6 +50,11 @@ use napi_derive::napi;
     allow(dead_code, reason = "napi registers its functions outside test builds")
 )]
 mod buffer;
+#[cfg_attr(
+    test,
+    allow(dead_code, reason = "napi registers its functions outside test builds")
+)]
+mod callback;
 mod config;
 mod error;
 #[cfg_attr(
@@ -58,6 +63,7 @@ mod error;
 )]
 mod memory;
 mod report;
+mod stream;
 mod utils;
 
 use config::CreationConfig;
@@ -1172,13 +1178,14 @@ struct NodeProgressAdapter {
 /// itself is discarded.
 fn run_with_optional_progress<T>(
     progress: Option<ThreadsafeFunction<(String, i64, i64, i64)>>,
+    dispatch: ProgressDispatch,
     run: impl FnOnce(&mut dyn exarch_core::ProgressCallback) -> CoreResult<T>,
     over_success: impl FnOnce(Error, T) -> ProgressCallbackError,
 ) -> CoreResult<T> {
     let Some(tsfn) = progress else {
         return run(&mut exarch_core::NoopProgress);
     };
-    let mut adapter = NodeProgressAdapter::new(tsfn, ProgressDispatch::Awaited);
+    let mut adapter = NodeProgressAdapter::new(tsfn, dispatch);
     let result = run(&mut adapter);
     match (result, adapter.into_callback_error()) {
         (Ok(value), None) => Ok(value),

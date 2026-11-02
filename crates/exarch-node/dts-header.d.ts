@@ -13,7 +13,11 @@ export interface ExarchErrorBase extends Error {
   code: ErrorCode
   /** The `SecurityConfig` setting that relaxes this refusal, when one does. */
   relaxableBy?: PolicySetting
-  /** The exception thrown by a progress callback. */
+  /**
+   * The exception thrown by a progress callback, an `onEntry` callback or an
+   * `AsyncIterable` archive. A thrown primitive is wrapped in an `Error` whose
+   * `cause` is the primitive.
+   */
   cause?: unknown
 }
 

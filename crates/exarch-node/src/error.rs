@@ -45,6 +45,14 @@ use crate::report::saturating_u32;
 /// otherwise successful operation. Node-only: core has no such error.
 pub const PROGRESS_CALLBACK_ERROR: &str = "PROGRESS_CALLBACK_ERROR";
 
+/// `code` of a failure of the `AsyncIterable` an archive is read from.
+/// Node-only: core has no such error.
+pub const STREAM_ERROR: &str = "STREAM_ERROR";
+
+/// `code` of a throwing or rejecting `onEntry` callback. Node-only: core has
+/// no such error.
+pub const ENTRY_CALLBACK_ERROR: &str = "ENTRY_CALLBACK_ERROR";
+
 /// Value of the `code` property on errors surfaced to JavaScript.
 ///
 /// Every core error code, plus `PROGRESS_CALLBACK_ERROR` for a progress
@@ -106,6 +114,12 @@ pub enum ErrorCode {
     /// A JS progress callback threw while the operation itself succeeded.
     #[napi(value = "PROGRESS_CALLBACK_ERROR")]
     ProgressCallbackError,
+    /// The `AsyncIterable` an archive is read from threw or rejected.
+    #[napi(value = "STREAM_ERROR")]
+    StreamError,
+    /// An `onEntry` callback threw or rejected; extraction stopped there.
+    #[napi(value = "ENTRY_CALLBACK_ERROR")]
+    EntryCallbackError,
 }
 
 /// Value of the `relaxableBy` property: the `SecurityConfig` setting whose
@@ -225,6 +239,18 @@ pub enum ProgressCallbackError {
         /// The JS throw, attached as `cause`.
         source: Error,
     },
+    /// The `AsyncIterable` an archive is read from failed. Primary over the
+    /// core error it caused.
+    Stream {
+        /// The normalized JS throw, attached as `cause`.
+        source: Error,
+    },
+    /// An `onEntry` callback threw or rejected. Primary over the core error it
+    /// caused.
+    EntryCallback {
+        /// The normalized JS throw, attached as `cause`.
+        source: Error,
+    },
 }
 
 /// Builds the JS `Error` for a failure on the JS thread.
@@ -242,6 +268,8 @@ pub trait IntoJsError {
 enum JsCode {
     Core(CoreErrorCode),
     ProgressCallback,
+    Stream,
+    EntryCallback,
 }
 
 impl JsCode {
@@ -249,6 +277,8 @@ impl JsCode {
         match self {
             Self::Core(code) => code.as_str(),
             Self::ProgressCallback => PROGRESS_CALLBACK_ERROR,
+            Self::Stream => STREAM_ERROR,
+            Self::EntryCallback => ENTRY_CALLBACK_ERROR,
         }
     }
 }
@@ -315,6 +345,18 @@ fn describe_callback_over_success(operation: &str, details: Details, source: Err
     }
 }
 
+fn describe_js_failure(code: JsCode, description: &str, source: Error) -> Described {
+    Described {
+        description: description.to_owned(),
+        props: ErrorProps {
+            code,
+            relaxable_by: None,
+            details: Details::None,
+            cause: Some(source),
+        },
+    }
+}
+
 fn describe(failure: Failure) -> Result<Described, Error> {
     match failure {
         Failure::Core(err) => Ok(describe_core(err, None)),
@@ -349,6 +391,12 @@ fn describe(failure: Failure) -> Result<Described, Error> {
             }
             ProgressCallbackError::VerifyCallback { source } => {
                 describe_callback_over_success("verification", Details::None, source)
+            }
+            ProgressCallbackError::Stream { source } => {
+                describe_js_failure(JsCode::Stream, "archive stream failed", source)
+            }
+            ProgressCallbackError::EntryCallback { source } => {
+                describe_js_failure(JsCode::EntryCallback, "entry callback threw", source)
             }
         }),
         Failure::Native(err) => Err(err),
@@ -495,6 +543,8 @@ impl fmt::Display for Failure {
                 ProgressCallbackError::VerifyCallback { .. } => {
                     f.write_str("progress callback threw after successful verification")
                 }
+                ProgressCallbackError::Stream { .. } => f.write_str("archive stream failed"),
+                ProgressCallbackError::EntryCallback { .. } => f.write_str("entry callback threw"),
             },
             Self::Native(err) => write!(f, "{}", err.reason),
         }
@@ -529,12 +579,14 @@ mod tests {
     }
 
     #[test]
-    fn test_error_code_union_matches_core_plus_progress_callback() {
+    fn test_error_code_union_matches_core_plus_node_only_codes() {
         let mut expected: BTreeSet<String> = CoreErrorCode::ALL
             .iter()
             .map(|code| code.as_str().to_string())
             .collect();
         expected.insert(PROGRESS_CALLBACK_ERROR.to_string());
+        expected.insert(STREAM_ERROR.to_string());
+        expected.insert(ENTRY_CALLBACK_ERROR.to_string());
         assert_eq!(dts_union("ErrorCode"), expected);
     }
 

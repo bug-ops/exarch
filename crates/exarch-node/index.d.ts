@@ -13,7 +13,11 @@ export interface ExarchErrorBase extends Error {
   code: ErrorCode
   /** The `SecurityConfig` setting that relaxes this refusal, when one does. */
   relaxableBy?: PolicySetting
-  /** The exception thrown by a progress callback. */
+  /**
+   * The exception thrown by a progress callback, an `onEntry` callback or an
+   * `AsyncIterable` archive. A thrown primitive is wrapped in an `Error` whose
+   * `cause` is the primitive.
+   */
   cause?: unknown
 }
 
@@ -883,7 +887,7 @@ export interface CreationReport {
  * Every core error code, plus `PROGRESS_CALLBACK_ERROR` for a progress
  * callback that threw over a successful operation.
  */
-export type ErrorCode = 'PATH_TRAVERSAL' | 'SYMLINK_ESCAPE' | 'HARDLINK_ESCAPE' | 'ZIP_BOMB' | 'ZIP_INCONSISTENCY' | 'QUOTA_EXCEEDED' | 'SECURITY_VIOLATION' | 'INVALID_ARCHIVE' | 'IO_ERROR' | 'INVALID_PERMISSIONS' | 'SOURCE_NOT_FOUND' | 'SOURCE_NOT_ACCESSIBLE' | 'OUTPUT_EXISTS' | 'INVALID_COMPRESSION_LEVEL' | 'UNKNOWN_FORMAT' | 'INVALID_CONFIGURATION' | 'PROGRESS_CALLBACK_ERROR'
+export type ErrorCode = 'PATH_TRAVERSAL' | 'SYMLINK_ESCAPE' | 'HARDLINK_ESCAPE' | 'ZIP_BOMB' | 'ZIP_INCONSISTENCY' | 'QUOTA_EXCEEDED' | 'SECURITY_VIOLATION' | 'INVALID_ARCHIVE' | 'IO_ERROR' | 'INVALID_PERMISSIONS' | 'SOURCE_NOT_FOUND' | 'SOURCE_NOT_ACCESSIBLE' | 'OUTPUT_EXISTS' | 'INVALID_COMPRESSION_LEVEL' | 'UNKNOWN_FORMAT' | 'INVALID_CONFIGURATION' | 'PROGRESS_CALLBACK_ERROR' | 'STREAM_ERROR' | 'ENTRY_CALLBACK_ERROR'
 
 /**
  * Extract an archive to the specified directory (async).
@@ -1003,6 +1007,88 @@ export declare function extractArchive(archivePath: string, outputDir: string, c
 export declare function extractArchiveSync(archivePath: string, outputDir: string, config?: SecurityConfig | undefined | null, options?: ExtractionOptions | undefined | null): ExtractionReport
 
 /**
+ * Extract an archive held in memory, handing every verified entry to a
+ * callback (async).
+ *
+ * Nothing is written to disk and nothing is kept. `onEntry` receives a
+ * `MemoryEntry` per entry in extraction order, after the entry was verified;
+ * a file arrives whole, so memory use is one file, bounded by the config's
+ * `maxFileSize`. The extraction waits for each call, and for the promise it
+ * returns, before it reads on, so a slow consumer holds it back.
+ *
+ * A `'symlink'` entry's `target` is spelled as the archive stores it,
+ * relative to the link. A `'hardlink'` entry is delivered by reference after
+ * every other entry: its `target` is the root-relative resolved path of a
+ * file already delivered. With `skipDuplicates` off one path can be delivered
+ * more than once and a hardlink refers to the latest delivery. Implicit
+ * parent directories are not delivered.
+ *
+ * # Arguments
+ *
+ * * `data` - The archive bytes (copied before the call returns), or an
+ *   `AsyncIterable<Uint8Array>` (TAR family only), read from a worker thread
+ *   and closed (`return()`) however the call ends
+ * * `onEntry` - Called with each entry; may return a promise
+ * * `config` - Optional `SecurityConfig` (uses secure defaults if omitted)
+ * * `options` - Optional `ExtractionOptions` (`atomic` is not supported)
+ * * `pathModel` - `'host'` (default) or `'portable'`
+ * * `format` - The archive format; detected from the leading bytes if omitted
+ *
+ * # Returns
+ *
+ * Promise resolving to the `ExtractionReport`
+ *
+ * # Errors
+ *
+ * Rejects with `ENTRY_CALLBACK_ERROR` and the thrown value as `cause` when
+ * `onEntry` throws or rejects (a non-object is wrapped in an `Error` whose
+ * `cause` is the primitive), with `STREAM_ERROR` when the iterable throws,
+ * and with the errors of `extractArchive` otherwise.
+ *
+ * # Examples
+ *
+ * ```javascript
+ * const sizes = new Map();
+ * await extractArchiveToCallback(fs.readFileSync('a.tar.gz'), (entry) => {
+ *   if (entry.kind === 'file') sizes.set(entry.path, entry.data.length);
+ * });
+ * ```
+ */
+export declare function extractArchiveToCallback(data: Uint8Array | AsyncIterable<Uint8Array>, onEntry: (entry: MemoryEntry) => void | Promise<void>, config?: SecurityConfig | undefined | null, options?: ExtractionOptions | undefined | null, pathModel?: PathModel | undefined | null, format?: ArchiveType | undefined | null): Promise<ExtractionReport>
+
+/**
+ * Extract an archive held in memory, handing every verified entry to a
+ * callback (sync).
+ *
+ * Blocks the event loop until extraction completes. `onEntry` runs on the
+ * JavaScript thread and must be synchronous: a callback that returns a
+ * promise is refused, because the extraction cannot wait for it. Its
+ * rejection is silenced and the call fails with `ENTRY_CALLBACK_ERROR` and a
+ * `TypeError` as `cause`. Prefer `extractArchiveToCallback`.
+ *
+ * # Arguments
+ *
+ * The arguments of `extractArchiveToCallback`, except that `data` must be a
+ * `Uint8Array`.
+ *
+ * # Returns
+ *
+ * The `ExtractionReport`
+ *
+ * # Errors
+ *
+ * The errors of `extractArchiveToCallback`.
+ *
+ * # Examples
+ *
+ * ```javascript
+ * const names = [];
+ * extractArchiveToCallbackSync(fs.readFileSync('a.zip'), (entry) => names.push(entry.path));
+ * ```
+ */
+export declare function extractArchiveToCallbackSync(data: Uint8Array, onEntry: (entry: MemoryEntry) => void, config?: SecurityConfig | undefined | null, options?: ExtractionOptions | undefined | null, pathModel?: PathModel | undefined | null, format?: ArchiveType | undefined | null): ExtractionReport
+
+/**
  * Extract an archive held in memory into memory (async).
  *
  * The archive passes the same validation as `extractArchive`; nothing is
@@ -1010,7 +1096,9 @@ export declare function extractArchiveSync(archivePath: string, outputDir: strin
  *
  * # Arguments
  *
- * * `data` - The archive bytes (copied before the call returns)
+ * * `data` - The archive bytes (copied before the call returns), or an
+ *   `AsyncIterable<Uint8Array>` (TAR family only), read from a worker thread
+ *   and closed (`return()`) however the call ends
  * * `config` - Optional `SecurityConfig` (uses secure defaults if omitted)
  * * `options` - Optional `ExtractionOptions` (`atomic` is not supported)
  * * `maxBytes` - The most bytes to keep: payload (file data, hardlink copies
@@ -1035,7 +1123,7 @@ export declare function extractArchiveSync(archivePath: string, outputDir: strin
  * const { entries } = await extractArchiveToMemory(fs.readFileSync('a.tar.gz'));
  * ```
  */
-export declare function extractArchiveToMemory(data: Uint8Array, config?: SecurityConfig | undefined | null, options?: ExtractionOptions | undefined | null, maxBytes?: number | undefined | null, pathModel?: PathModel | undefined | null, format?: ArchiveType | undefined | null): Promise<MemoryExtraction>
+export declare function extractArchiveToMemory(data: Uint8Array | AsyncIterable<Uint8Array>, config?: SecurityConfig | undefined | null, options?: ExtractionOptions | undefined | null, maxBytes?: number | undefined | null, pathModel?: PathModel | undefined | null, format?: ArchiveType | undefined | null): Promise<MemoryExtraction>
 
 /**
  * Extract an archive held in memory into memory (sync).
@@ -1102,7 +1190,43 @@ export declare function extractArchiveToMemorySync(data: Uint8Array, config?: Se
  * );
  * ```
  */
-export declare function extractArchiveToMemoryWithProgress(data: Uint8Array, config?: SecurityConfig | undefined | null, options?: ExtractionOptions | undefined | null, maxBytes?: number | undefined | null, pathModel?: PathModel | undefined | null, format?: ArchiveType | undefined | null, progress?: (((err: Error | null, arg: [string, number, number, number]) => any)) | undefined | null): Promise<MemoryExtraction>
+export declare function extractArchiveToMemoryWithProgress(data: Uint8Array | AsyncIterable<Uint8Array>, config?: SecurityConfig | undefined | null, options?: ExtractionOptions | undefined | null, maxBytes?: number | undefined | null, pathModel?: PathModel | undefined | null, format?: ArchiveType | undefined | null, progress?: (((err: Error | null, arg: [string, number, number, number]) => any)) | undefined | null): Promise<MemoryExtraction>
+
+/**
+ * Extract an archive held in memory into memory with a progress callback
+ * (sync).
+ *
+ * Blocks the event loop until extraction completes. Same as
+ * `extractArchiveToMemoryWithProgress`, except that the calls to `progress`
+ * are queued and arrive only after this function has returned; a throw there
+ * becomes an `uncaughtException`, not an error from here (see
+ * `createArchiveWithProgressSync`).
+ *
+ * # Arguments
+ *
+ * The arguments of `extractArchiveToMemorySync`, then:
+ *
+ * * `progress` - Optional progress callback
+ *
+ * # Returns
+ *
+ * `MemoryExtraction` with the report and the entries
+ *
+ * # Errors
+ *
+ * The errors of `extractArchiveToMemorySync`.
+ *
+ * # Examples
+ *
+ * ```javascript
+ * const { entries } = extractArchiveToMemoryWithProgressSync(
+ *   fs.readFileSync('a.tar.gz'),
+ *   null, null, null, null, null,
+ *   (err, [path, total, current]) => console.log(`${current}/${total}: ${path}`),
+ * );
+ * ```
+ */
+export declare function extractArchiveToMemoryWithProgressSync(data: Uint8Array, config?: SecurityConfig | undefined | null, options?: ExtractionOptions | undefined | null, maxBytes?: number | undefined | null, pathModel?: PathModel | undefined | null, format?: ArchiveType | undefined | null, progress?: (((err: Error | null, arg: [string, number, number, number]) => any)) | undefined | null): MemoryExtraction
 
 /**
  * Extract an archive to the specified directory with a progress callback
@@ -1275,8 +1399,9 @@ export declare function listArchive(archivePath: string, config?: SecurityConfig
  *
  * # Arguments
  *
- * * `data` - The archive bytes (a `Buffer` or any `Uint8Array`); copied before
- *   the call returns
+ * * `data` - The archive bytes (a `Buffer` or any `Uint8Array`), copied before
+ *   the call returns, or an `AsyncIterable<Uint8Array>` (TAR family only) read
+ *   from a worker thread and closed (`return()`) however the call ends
  * * `config` - Optional `SecurityConfig` (uses secure defaults if omitted)
  * * `format` - The archive format; detected from the leading bytes if omitted
  *
@@ -1295,7 +1420,7 @@ export declare function listArchive(archivePath: string, config?: SecurityConfig
  * const manifest = await listArchiveBytes(fs.readFileSync('archive.tar.gz'));
  * ```
  */
-export declare function listArchiveBytes(data: Uint8Array, config?: SecurityConfig | undefined | null, format?: ArchiveType | undefined | null): Promise<ArchiveManifest>
+export declare function listArchiveBytes(data: Uint8Array | AsyncIterable<Uint8Array>, config?: SecurityConfig | undefined | null, format?: ArchiveType | undefined | null): Promise<ArchiveManifest>
 
 /**
  * List the contents of an archive held in memory, without extracting (sync).
@@ -1361,7 +1486,44 @@ export declare function listArchiveBytesSync(data: Uint8Array, config?: Security
  * );
  * ```
  */
-export declare function listArchiveBytesWithProgress(data: Uint8Array, config?: SecurityConfig | undefined | null, format?: ArchiveType | undefined | null, progress?: (((err: Error | null, arg: [string, number, number, number]) => any)) | undefined | null): Promise<ArchiveManifest>
+export declare function listArchiveBytesWithProgress(data: Uint8Array | AsyncIterable<Uint8Array>, config?: SecurityConfig | undefined | null, format?: ArchiveType | undefined | null, progress?: (((err: Error | null, arg: [string, number, number, number]) => any)) | undefined | null): Promise<ArchiveManifest>
+
+/**
+ * List the contents of an archive held in memory with a progress callback
+ * (sync).
+ *
+ * Blocks the event loop until listing completes. Same as
+ * `listArchiveBytesWithProgress`, except that the calls to `progress` are
+ * queued and arrive only after this function has returned; a throw there
+ * becomes an `uncaughtException`, not an error from here (see
+ * `createArchiveWithProgressSync`).
+ *
+ * # Arguments
+ *
+ * The arguments of `listArchiveBytesSync`, then:
+ *
+ * * `progress` - Optional progress callback
+ *
+ * # Returns
+ *
+ * `ArchiveManifest` with entry metadata
+ *
+ * # Errors
+ *
+ * The errors of `listArchiveBytesSync`.
+ *
+ * # Examples
+ *
+ * ```javascript
+ * const manifest = listArchiveBytesWithProgressSync(
+ *   fs.readFileSync('archive.zip'),
+ *   null,
+ *   null,
+ *   (err, [path, total, current]) => console.log(`${current}/${total}: ${path}`),
+ * );
+ * ```
+ */
+export declare function listArchiveBytesWithProgressSync(data: Uint8Array, config?: SecurityConfig | undefined | null, format?: ArchiveType | undefined | null, progress?: (((err: Error | null, arg: [string, number, number, number]) => any)) | undefined | null): ArchiveManifest
 
 /**
  * List archive contents without extracting (sync).
@@ -1413,12 +1575,16 @@ export interface MemoryEntry {
    * whose archive carries a mode.
    */
   mode?: number
-  /** Symlink target as the archive spells it; only for a symlink. */
+  /**
+   * For a symlink, the target as the archive spells it, relative to the
+   * link; for a hardlink, the root-relative resolved path of an already
+   * delivered file. Absent for other kinds.
+   */
   target?: string
 }
 
 /** What a `MemoryEntry` holds. */
-export type MemoryEntryKind = 'file' | 'directory' | 'symlink'
+export type MemoryEntryKind = 'file' | 'directory' | 'symlink' | 'hardlink'
 
 /** The result of `extractArchiveToMemory`. */
 export interface MemoryExtraction {
@@ -1570,7 +1736,7 @@ export declare function verifyArchive(archivePath: string, config?: SecurityConf
  * const report = await verifyArchiveBytes(fs.readFileSync('archive.zip'));
  * ```
  */
-export declare function verifyArchiveBytes(data: Uint8Array, config?: SecurityConfig | undefined | null, options?: VerificationOptions | undefined | null, format?: ArchiveType | undefined | null): Promise<VerificationReport>
+export declare function verifyArchiveBytes(data: Uint8Array | AsyncIterable<Uint8Array>, config?: SecurityConfig | undefined | null, options?: VerificationOptions | undefined | null, format?: ArchiveType | undefined | null): Promise<VerificationReport>
 
 /**
  * Verify the security of an archive held in memory (sync).
@@ -1639,7 +1805,45 @@ export declare function verifyArchiveBytesSync(data: Uint8Array, config?: Securi
  * );
  * ```
  */
-export declare function verifyArchiveBytesWithProgress(data: Uint8Array, config?: SecurityConfig | undefined | null, options?: VerificationOptions | undefined | null, format?: ArchiveType | undefined | null, progress?: (((err: Error | null, arg: [string, number, number, number]) => any)) | undefined | null): Promise<VerificationReport>
+export declare function verifyArchiveBytesWithProgress(data: Uint8Array | AsyncIterable<Uint8Array>, config?: SecurityConfig | undefined | null, options?: VerificationOptions | undefined | null, format?: ArchiveType | undefined | null, progress?: (((err: Error | null, arg: [string, number, number, number]) => any)) | undefined | null): Promise<VerificationReport>
+
+/**
+ * Verify the security of an archive held in memory with a progress callback
+ * (sync).
+ *
+ * Blocks the event loop until verification completes. Same as
+ * `verifyArchiveBytesWithProgress`, except that the calls to `progress` are
+ * queued and arrive only after this function has returned; a throw there
+ * becomes an `uncaughtException`, not an error from here (see
+ * `createArchiveWithProgressSync`).
+ *
+ * # Arguments
+ *
+ * The arguments of `verifyArchiveBytesSync`, then:
+ *
+ * * `progress` - Optional progress callback
+ *
+ * # Returns
+ *
+ * `VerificationReport` with validation results
+ *
+ * # Errors
+ *
+ * The errors of `verifyArchiveBytesSync`.
+ *
+ * # Examples
+ *
+ * ```javascript
+ * const report = verifyArchiveBytesWithProgressSync(
+ *   fs.readFileSync('archive.zip'),
+ *   null,
+ *   null,
+ *   null,
+ *   (err, [path, total, current]) => console.log(`${current}/${total}: ${path}`),
+ * );
+ * ```
+ */
+export declare function verifyArchiveBytesWithProgressSync(data: Uint8Array, config?: SecurityConfig | undefined | null, options?: VerificationOptions | undefined | null, format?: ArchiveType | undefined | null, progress?: (((err: Error | null, arg: [string, number, number, number]) => any)) | undefined | null): VerificationReport
 
 /**
  * Verify archive security (sync).

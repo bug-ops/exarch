@@ -196,7 +196,8 @@ fn check_record_framing(body: &[u8]) -> Result<()> {
 /// Whether `field` is digits `0`-`7` between optional leading spaces and
 /// trailing spaces or NULs, the only form every reader reads the same way.
 fn is_plain_octal(field: &[u8]) -> bool {
-    let trimmed = field.trim_ascii_start();
+    let leading_spaces = field.iter().take_while(|&&b| b == b' ').count();
+    let trimmed = &field[leading_spaces..];
     let digits = trimmed
         .iter()
         .take_while(|b| (b'0'..=b'7').contains(b))
@@ -319,6 +320,6 @@ fn check_global_header<R: Read>(entry: &mut Entry<'_, R>, metadata_limit: u64) -
         return Err(ExtensionConflict::LongRecordBeforeGlobal.into());
     }
 
-    check_record_framing(&body)?;
-    scan_records(PaxExtensions::new(&body), PaxScope::Global).map(|_| ())
+    scan_records(PaxExtensions::new(&body), PaxScope::Global)?;
+    check_record_framing(&body)
 }

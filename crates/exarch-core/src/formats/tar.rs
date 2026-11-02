@@ -9,11 +9,14 @@
 //!
 //! # Header Consistency
 //!
-//! Constructs that readers resolve differently are refused as ambiguous rather
-//! than interpreted: a directory, symlink or hardlink that declares a payload,
-//! duplicate PAX records, `GNU.sparse.*` records and `S` entries, a PAX `path`
-//! or `linkpath` stacked with a GNU long name or link record, and a global PAX
-//! header that carries `path`, `linkpath` or `size`.
+//! Specific constructs that readers parse differently are refused as ambiguous
+//! rather than interpreted: a directory, symlink or hardlink that declares a
+//! payload, GNU sparse entries, signed or control-character size and checksum
+//! fields, a `prefix` field without a ustar magic, duplicate, empty-key,
+//! over-long or `GNU.sparse.*` PAX records, a PAX `path` or `linkpath` stacked
+//! with a GNU long name or link record, and global PAX headers that override
+//! `path`, `linkpath` or `size`, are malformed, or follow a local header or a
+//! GNU long record.
 //!
 //! # Format Detection
 //!

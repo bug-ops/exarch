@@ -357,3 +357,272 @@ fn legitimate_gnu_long_link_is_accepted() {
         extract_archive(&archive, out.path(), &config()).unwrap();
     }
 }
+
+const SIZE_FIELD: std::ops::Range<usize> = 124..136;
+const CHECKSUM_FIELD: std::ops::Range<usize> = 148..156;
+
+fn refresh_checksum(block: &mut [u8]) {
+    block[CHECKSUM_FIELD].fill(b' ');
+    let sum: u32 = block.iter().map(|&b| u32::from(b)).sum();
+    block[CHECKSUM_FIELD].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
+}
+
+fn patched(mut block: Vec<u8>, edits: &[(usize, &[u8])]) -> Vec<u8> {
+    for (offset, bytes) in edits {
+        block[*offset..*offset + bytes.len()].copy_from_slice(bytes);
+    }
+    refresh_checksum(&mut block);
+    block
+}
+
+fn hidden_payload() -> Vec<u8> {
+    let mut payload = entry("hidden.txt", REGULAR, b"hidden\n");
+    payload.resize(1024, 0);
+    payload
+}
+
+fn with_size_field(field: &[u8; 12]) -> Vec<u8> {
+    let header = patched(
+        header("a.txt", REGULAR, 1024, ""),
+        &[(SIZE_FIELD.start, field)],
+    );
+    tar_of(&[
+        entry("pre.txt", REGULAR, b"x"),
+        pad([header, hidden_payload()].concat()),
+    ])
+}
+
+fn with_checksum_field(field: [u8; 8]) -> Vec<u8> {
+    let mut block = header("a.txt", REGULAR, 1024, "");
+    block[CHECKSUM_FIELD].copy_from_slice(&field);
+    tar_of(&[
+        entry("pre.txt", REGULAR, b"x"),
+        pad([block, hidden_payload()].concat()),
+    ])
+}
+
+fn checksum_of(block: &[u8]) -> u32 {
+    block
+        .iter()
+        .enumerate()
+        .map(|(i, &b)| u32::from(if CHECKSUM_FIELD.contains(&i) { b' ' } else { b }))
+        .sum()
+}
+
+#[test]
+fn non_canonical_size_fields_are_refused() {
+    for field in [
+        b"+0000002000\0",
+        b"\x0b0000002000\0",
+        b"\n0000002000\0",
+        b"\x0c0000002000\0",
+    ] {
+        assert_refused_everywhere(&with_size_field(field), "size field");
+    }
+}
+
+#[test]
+fn base256_size_with_a_sign_or_high_bytes_is_refused() {
+    let mut signed = [0u8; 12];
+    signed[0] = 0xC0;
+    signed[11] = 0x80;
+    let mut wide = [0u8; 12];
+    wide[0] = 0x80;
+    wide[3] = 1;
+    wide[11] = 0x80;
+    for field in [signed, wide] {
+        assert_refused_everywhere(&with_size_field(&field), "size field");
+    }
+}
+
+#[test]
+fn non_canonical_checksum_fields_are_refused() {
+    let sum = checksum_of(&header("a.txt", REGULAR, 1024, ""));
+    for lead in [b'+', 0x0b, b'\n'] {
+        let mut field = [0u8; 8];
+        field[0] = lead;
+        field[1..7].copy_from_slice(format!("{sum:06o}").as_bytes());
+        assert_refused_everywhere(&with_checksum_field(field), "checksum field");
+    }
+}
+
+#[test]
+fn canonical_numeric_fields_are_accepted() {
+    let mut base256 = [0u8; 12];
+    base256[0] = 0x80;
+    base256[10] = 0x04;
+    for field in [*b"      2000 \0", base256] {
+        let header = patched(
+            header("a.txt", REGULAR, 1024, ""),
+            &[(SIZE_FIELD.start, &field)],
+        );
+        let bytes = tar_of(&[pad([header, hidden_payload()].concat())]);
+        let dir = TempDir::new().unwrap();
+        let archive = write_archive(&dir, &bytes);
+        list_archive(&archive, &config()).unwrap();
+    }
+}
+
+#[test]
+fn gnu_sparse_entries_are_refused() {
+    let plain = tar_of(&[
+        entry("pre.txt", REGULAR, b"x"),
+        pad(patched(
+            header("sparse.bin", b'S', 0, ""),
+            &[(483, b"00000000000\0")],
+        )),
+    ]);
+    assert_refused_everywhere(&plain, "GNU sparse entries are not supported");
+
+    let mut sparse = patched(
+        header("sparse.bin", b'S', 512, ""),
+        &[
+            (386, b"00000000000\0"),
+            (398, b"00000001000\0"),
+            (482, &[2]),
+            (483, b"00000001000\0"),
+        ],
+    );
+    sparse.extend(vec![0u8; 512]);
+    let desync = tar_of(&[sparse, pad(header("benign.txt", REGULAR, 512, ""))]);
+    assert_refused_everywhere(&desync, "GNU sparse entries are not supported");
+}
+
+#[test]
+fn global_header_after_gnu_long_record_is_refused() {
+    let global = extension(PAX_GLOBAL, &[("comment", "hi")]);
+    let empty_global = extension(PAX_GLOBAL, &[]);
+    let cases = [
+        tar_of(&[
+            gnu_long(GNU_LONG_NAME, "renamed.txt"),
+            global.clone(),
+            entry("plain.txt", REGULAR, b"d"),
+        ]),
+        tar_of(&[
+            gnu_long(GNU_LONG_LINK, "/etc/passwd"),
+            global,
+            link("lnk", SYMLINK, "benign"),
+        ]),
+        tar_of(&[
+            gnu_long(GNU_LONG_NAME, "renamed.txt"),
+            empty_global,
+            entry("plain.txt", REGULAR, b"d"),
+        ]),
+    ];
+    for bytes in cases {
+        assert_refused_everywhere(&bytes, "follows a GNU long name or link record");
+    }
+}
+
+fn raw_extension(typeflag: u8, body: &[u8]) -> Vec<u8> {
+    pad([header("pax", typeflag, body.len(), ""), body.to_vec()].concat())
+}
+
+#[test]
+fn pax_records_with_an_empty_key_are_refused() {
+    let body = [
+        pax_record("", "v").into_bytes(),
+        pax_record("path", "after.txt").into_bytes(),
+    ]
+    .concat();
+    for typeflag in [PAX_LOCAL, PAX_GLOBAL] {
+        let bytes = tar_of(&[
+            entry("pre.txt", REGULAR, b"x"),
+            raw_extension(typeflag, &body),
+            entry("u.txt", REGULAR, b"d"),
+        ]);
+        assert_refused_everywhere(&bytes, "empty key");
+    }
+}
+
+#[test]
+fn pax_records_longer_than_the_reference_limit_are_refused() {
+    let big = "A".repeat(1_000_000);
+    for typeflag in [PAX_LOCAL, PAX_GLOBAL] {
+        let bytes = tar_of(&[
+            entry("pre.txt", REGULAR, b"x"),
+            extension(typeflag, &[("comment", &big), ("mtime", "0")]),
+            entry("u.txt", REGULAR, b"d"),
+        ]);
+        assert_refused_everywhere(&bytes, "longer than 999999 bytes");
+    }
+}
+
+#[test]
+fn global_pax_header_framing_must_be_canonical() {
+    let good = pax_record("comment", "hi");
+    let bodies = [
+        format!("+{good}").into_bytes(),
+        format!("0{good}").into_bytes(),
+        format!("{good}\n{}", pax_record("comment2", "x")).into_bytes(),
+        format!("{good}trailing").into_bytes(),
+    ];
+    for body in bodies {
+        let bytes = tar_of(&[
+            raw_extension(PAX_GLOBAL, &body),
+            entry("u.txt", REGULAR, b"d"),
+        ]);
+        assert_refused_everywhere(&bytes, "malformed PAX record");
+    }
+}
+
+#[test]
+fn prefix_field_without_a_ustar_magic_is_refused() {
+    let with_prefix = |magic: &[u8; 8]| {
+        tar_of(&[pad(patched(
+            header("a.txt", REGULAR, 0, ""),
+            &[(257, magic), (345, b"pfx")],
+        ))])
+    };
+    for magic in [b"ustar  \0", b"\0\0\0\0\0\0\0\0", b"ustar\0  "] {
+        assert_refused_everywhere(&with_prefix(magic), "prefix field");
+    }
+}
+
+#[test]
+fn ustar_prefix_field_is_accepted() {
+    let bytes = tar_of(&[pad(patched(
+        header("a.txt", REGULAR, 0, ""),
+        &[(257, b"ustar\0"), (263, b"00"), (345, b"pfx")],
+    ))]);
+    let dir = TempDir::new().unwrap();
+    let archive = write_archive(&dir, &bytes);
+    let manifest = list_archive(&archive, &config()).unwrap();
+    assert_eq!(manifest.entries()[0].path, Path::new("pfx/a.txt"));
+}
+
+#[test]
+fn long_keys_are_truncated_in_error_messages() {
+    let key = "k".repeat(1000);
+    let bytes = tar_of(&[
+        extension(PAX_LOCAL, &[(&key, "1"), (&key, "2")]),
+        entry("a.txt", REGULAR, b"a"),
+    ]);
+    let dir = TempDir::new().unwrap();
+    let archive = write_archive(&dir, &bytes);
+    let message = list_archive(&archive, &config()).unwrap_err().to_string();
+    assert!(message.contains("..."), "{message}");
+    assert!(message.len() < 400, "{} bytes: {message}", message.len());
+}
+
+#[test]
+fn gnu_long_name_traversal_alone_is_still_a_path_traversal() {
+    let bytes = tar_of(&[
+        gnu_long(GNU_LONG_NAME, "../../escape.txt"),
+        entry("u.txt", REGULAR, b"d"),
+    ]);
+    let dir = TempDir::new().unwrap();
+    let archive = write_archive(&dir, &bytes);
+    assert_eq!(
+        list_archive(&archive, &config()).unwrap_err().error_code(),
+        ErrorCode::PathTraversal
+    );
+    let root = TempDir::new().unwrap();
+    let out = root.path().join("out");
+    assert_eq!(
+        extract_archive(&archive, &out, &config())
+            .unwrap_err()
+            .error_code(),
+        ErrorCode::PathTraversal
+    );
+}

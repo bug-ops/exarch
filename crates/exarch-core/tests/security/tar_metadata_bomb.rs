@@ -434,6 +434,30 @@ fn s3_shape_bomb(bomb_real_bytes: usize) -> Vec<u8> {
     out
 }
 
+/// S3 shape without the leading local PAX header: a global header, a decoy,
+/// then the bomb. The global header is accepted, so only the budget stops it.
+fn s3_shape_global_only_bomb(bomb_real_bytes: usize) -> Vec<u8> {
+    let mut out = Vec::new();
+    let global_body = pax_record(b"comment", b"hi");
+    out.extend_from_slice(&header(
+        b"././@PaxHeader",
+        global_body.len() as u64,
+        b'g',
+        true,
+    ));
+    pad_to_block(&mut out, &global_body);
+    out.extend_from_slice(&header(b"decoy.txt", 4096, b'0', true));
+    pad_to_block(&mut out, &vec![b'D'; 4096]);
+    out.extend_from_slice(&header(
+        b"././@LongLink",
+        bomb_real_bytes as u64,
+        b'L',
+        true,
+    ));
+    pad_to_block(&mut out, &vec![b'A'; bomb_real_bytes]);
+    out
+}
+
 fn assert_all_entry_points_reject(bomb: &[u8], file_name: &str, refusal: Refusal) {
     let config = SecurityConfig::default().with_max_tar_metadata_bytes(4096);
     let validated_config = config.clone().validate().unwrap();
@@ -473,6 +497,15 @@ fn s3_shape_pax_global_header_hiding_a_bomb_is_still_rejected() {
     // A global header right after a local one is refused before the budget is
     // ever reached.
     assert_all_entry_points_reject(&s3_shape_bomb(8192), "s3.tar", Refusal::AmbiguousHeader);
+}
+
+#[test]
+fn s3_shape_global_header_without_a_local_header_still_reaches_the_budget() {
+    assert_all_entry_points_reject(
+        &s3_shape_global_only_bomb(8192),
+        "s3_global_only.tar",
+        Refusal::MetadataBudget,
+    );
 }
 
 #[test]

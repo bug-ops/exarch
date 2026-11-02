@@ -13,7 +13,7 @@ members = [
 exclude = ["fuzz"]
 
 [workspace.package]
-version = "0.7.0"
+version = "0.8.0"
 authors = ["bug-ops"]
 edition = "2024"
 rust-version = "1.98.0"
@@ -24,7 +24,7 @@ keywords = ["archive", "extraction", "security", "tar", "zip"]
 categories = ["compression", "filesystem"]
 
 [workspace.dependencies]
-exarch-core = { path = "crates/exarch-core", version = "0.7.0" }
+exarch-core = { path = "crates/exarch-core", version = "0.8.0" }
 exarch-testkit = { path = "crates/exarch-testkit" }
 anyhow = "1.0"
 assert_cmd = "2.2"
@@ -39,9 +39,9 @@ indicatif = "0.18"
 libc = "0.2"
 liblzma = { version = "0.4.9", features = ["static"] }
 lzma-rust2 = { version = "0.24", default-features = false, features = ["std"] }
-napi = "3.15"
+napi = "3.16"
 napi-build = "2.6"
-napi-derive = "3.6"
+napi-derive = "3.7"
 predicates = "3.1"
 proptest = "1.12"
 pyo3 = "0.30"
@@ -59,7 +59,7 @@ trybuild = "1.0"
 typed-path = { version = "0.13", default-features = false }
 unicode-normalization = "0.1.26"
 walkdir = "2.5"
-zip = { version = "9.1", default-features = false }
+zip = { version = "9.2", default-features = false }
 zstd = "0.14"
 
 [workspace.lints.clippy]

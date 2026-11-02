@@ -22,6 +22,7 @@ Memory-safe archive extraction and creation library with Python and Node.js bind
 - **Type-driven safety** — Rust's type system ensures validated paths can only be constructed through security checks
 - **Extension allowlists** — Optional `allowed_extensions` filter restricts extraction to a specific set of file extensions across TAR, ZIP, and 7z handlers
 - **Fluent configuration** — 15 `with_*` builder methods on `SecurityConfig` and 2 on `ExtractionOptions` for ergonomic setup
+- **In-memory processing** — `ArchiveReader`, `extract_to_sink` with `MemorySink`, and `create_to_writer` validate and build archives without a filesystem path, with in-memory functions in Python and Node.js
 - **Multi-language support** — Native bindings for Python (PyO3) and Node.js (napi-rs)
 - **Zero unsafe code** — Core library contains no unsafe Rust code
 - **High performance** — Optimized I/O with reusable buffers and streaming operations
@@ -32,7 +33,7 @@ Memory-safe archive extraction and creation library with Python and Node.js bind
 
 ```toml
 [dependencies]
-exarch-core = "0.7"
+exarch-core = "0.8"
 ```
 
 > [!IMPORTANT]

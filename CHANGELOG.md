@@ -7,58 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-02
+
 ### Added
 
-- Core: `create` warns about ZIP entries over the default compression-ratio limit (#801, #808).
-- Core: `PartialWrites::Discarded` reports in-memory extraction errors that wrote nothing to disk (#800, #808).
-- Fuzz: `sink` and `detect` targets cover `extract_to_sink`, the in-memory path model and reader format detection (#798, #808).
-- Tests: hardlink member attributes never reach a symlink target (#791, #808).
-- Core: `ArchiveReader`, `list_reader`, `verify_reader` and `extract_to_sink` with the `EntrySink` trait process TAR and ZIP archives from a reader without a filesystem path; `list_reader` and `verify_reader` also cover 7z (#754, #771).
-- CI: a `wasm` job builds `exarch-cli` for `wasm32-wasip1` and runs a wasmtime smoke test (#755, #771).
-- Core: `MemorySink` with `MemoryLimit` collects `extract_to_sink` output in memory, bounded by payload, path bytes and a per-entry overhead (#777, #787).
-- Core: `extract_to_sink` extracts 7z archives with the same gates as path-based extraction (#772, #787).
-- Core: `PathModel::Portable` validates sink names for any target OS and `EntrySink::path_model` selects it; `extract_to_sink_with_progress` reports progress (#778, #775, #787).
-- Core: `ArchiveReader::detect`, `detect_stream`, `of_type` and `from_bytes` pick the format from the leading bytes (#774, #787).
-- Core: `create_to_writer` and `create_to_writer_with_progress` create TAR and ZIP archives over `impl Write` (#773, #787).
-- Python and Node: `list_archive_bytes`, `verify_archive_bytes` and `extract_archive_to_memory` work on in-memory archives (#776, #787).
-- Core: `list_archive_with_progress`, `verify_archive_with_progress`, `list_reader_with_progress` and `verify_reader_with_progress` report per-entry progress (#782, #790).
-- Core: `ArchiveWriter::of_type` creates into a writer by `ArchiveType` (#784, #790).
-- Python and Node: `create_archive_to_bytes` / `createArchiveToBytes` return the archive bytes and report; in-memory extract, list and verify accept progress callbacks (#784, #783, #790).
-- Tests: p7zip 16.02 7z symlink fixtures for a link given as an argument and a link found in a directory (#727, #790).
+- Core: `ArchiveReader` (`detect`, `detect_stream`, `of_type`, `from_bytes`), `list_reader` and `verify_reader` process TAR and ZIP archives, and 7z for list and verify, from a reader without a filesystem path (#754, #774, #771, #787).
+- Core: `extract_to_sink` with the `EntrySink` trait extracts TAR, ZIP and 7z through the same gates as path-based extraction; `MemorySink` with `MemoryLimit` collects the output in memory, and `PathModel::Portable` validates sink names for any target OS (#772, #775, #777, #778, #787).
+- Core: `create_to_writer` and `ArchiveWriter::of_type` create TAR and ZIP over `impl Write` (#773, #784, #787, #790).
+- Core: `list_archive`, `verify_archive`, `list_reader`, `verify_reader` and `extract_to_sink` have `_with_progress` variants that report per-entry progress (#775, #782, #787, #790).
+- Core: `PartialWrites::Discarded` reports in-memory extraction errors that wrote nothing, and `create` warns about ZIP entries over the default compression-ratio limit (#800, #801, #808).
+- Python and Node: `list_archive_bytes`, `verify_archive_bytes`, `extract_archive_to_memory` and `create_archive_to_bytes` / `createArchiveToBytes` work on in-memory archives, with progress callbacks (#776, #783, #784, #787, #790).
 
 ### Changed
 
-- **BREAKING:** `extract_to_sink*` take `&SinkOptions`, `MemorySinkFull` is replaced by `SinkFull`, `ArchiveWriter::of_type` is infallible and takes `CreatableFormat`, `CreationConfig::format` is `CreatableFormat` (#794, #795, #808).
-- Core: `ExtractTarget` admits files, directories, symlinks and hardlinks through typed per-kind results, and 7z uses one extraction loop for host and sink targets (#793, #792, #808).
-- CLI: a TAR extracted into a missing destination is read once and extracted atomically; a refusal leaves nothing behind and reports `writes: rolled_back` (#799, #808).
-- CLI: errors from the pre-extraction list pass carry the category hint, and the unknown-format hint lists 7z (#796, #808).
-- Core: a directory entry over a file or a symlink is refused with the same entry-naming message in `extract` and `verify` (#802, #803, #808).
-- **BREAKING (Windows hosts):** `PathModel::Host` applies the `Portable` component rules, so entry names and link targets containing `<>"|?*`, control characters or non-Unicode text are refused as `SecurityViolation` (CLI JSON `error.kind` `IoError` -> `SecurityViolation`), symlink targets with them no longer create dangling links, and the in-memory Host sinks in Python and Node refuse them too (#780, #790).
-- Core: `extract_to_sink` on 7z checks name lengths before any block is decoded (#785, #790).
-- Core: a TAR whose first member name starts with `BZh` but is not a complete bzip2 header is detected as TAR; detection reads 512 bytes (#781, #790).
-
-- **BREAKING:** `ArchiveError::ReaderFormat` and `QuotaResource::{TreeNodes, SinkCapacity}` are new variants; exhaustive matches must handle them (#774, #777, #779, #787).
-- Core: the in-memory tree used by `verify` and `extract_to_sink` has a node budget tied to `max_file_count` and `max_path_depth`; `VirtualTree` treats a link path that leaves the root and returns as an escape (#779, #778, #787).
-
-- Core: the `xz2` dependency is replaced by the maintained `liblzma` 0.4.9, which bundles xz 5.8 instead of 5.2.5 (#763, #771).
-- Core: `verify` no longer creates a temporary directory; it validates against an in-memory tree (#754, #771).
-- 7z: bump `sevenz-rust2` to 0.24.2 (minimum version now 0.24.2); solid blocks with a stream-less entry between files are listed, verified and extracted instead of refused; a block whose file sizes do not add up to its decoded size, including a block with data and no sub-streams, is refused; the exarch stream-map proof is reduced to what 0.24.2 does not already reject (#675, #751, #770).
-
-- **BREAKING:** `ArchiveError::to_ffi_message` is replaced by the consuming `into_ffi_message`; `FfiErrorMessage` holds a typed `FfiKind` and `PartialOutcome` instead of string `code` and `context`, `error_code()` returns `ErrorCode`, and `PartialWrites` gains `ALL` and `Display`; Python and Node build their errors from it (#758, #768).
-- **BREAKING:** Node errors carry `err.code` (`ErrorCode`) and typed `relaxableBy`, `writes`, `filesExtracted`, `bytesWritten`, `filesSkipped`, `warnings` properties; `message` no longer has the `CODE: ` prefix, `[relaxableBy=]` token or `| writes=` suffix, and new `ErrorCode`, `PolicySetting`, `PartialWrites` and `ExarchError` types are exported (#760, #768).
-- Python and Node quota errors use the core wording `single file size`; Node progress-callback failures drop the `| progressCallbackError` marker and expose `cause`, plus `filesAdded` and `bytesWritten` on creation (#758, #760, #768).
-- CLI: a link escape (symlink or hardlink) no longer hints at `--allow-symlinks` or `--allow-hardlinks`, which never lift it (#759, #768).
-- `extract --force` over a directory or symlink names the entry, for example `refusing to replace the existing directory at d`, for TAR, ZIP and 7z; the core `Io` error no longer carries `raw_os_error()` in these cases (#765, #768).
+- **BREAKING:** `extract_to_sink*` take `&SinkOptions`, `MemorySinkFull` is replaced by `SinkFull`, `ArchiveWriter::of_type` is infallible and takes `CreatableFormat`, `CreationConfig::format` is `CreatableFormat`, and `ArchiveError::ReaderFormat` and `QuotaResource::{TreeNodes, SinkCapacity}` are new variants (#774, #777, #779, #787, #794, #795, #808).
+- **BREAKING:** `ArchiveError::to_ffi_message` is replaced by the consuming `into_ffi_message`; `FfiErrorMessage` holds a typed `FfiKind` and `PartialOutcome`, `error_code()` returns `ErrorCode`, and `PartialWrites` gains `ALL` and `Display` (#758, #768).
+- **BREAKING:** Node errors carry `err.code` and typed `relaxableBy`, `writes`, `filesExtracted`, `bytesWritten`, `filesSkipped`, `warnings` properties; `message` loses the `CODE: ` prefix, `[relaxableBy=]` token and `| writes=` suffix, and `ErrorCode`, `PolicySetting`, `PartialWrites` and `ExarchError` are exported (#760, #768).
+- **BREAKING (Windows hosts):** `PathModel::Host` applies the `Portable` component rules, so names and link targets containing `<>"|?*`, control characters or non-Unicode text are refused as `SecurityViolation` (CLI JSON `error.kind` `IoError` -> `SecurityViolation`), in Python and Node in-memory sinks too (#780, #790).
+- Core: `ExtractTarget` admits files, directories, symlinks and hardlinks through typed per-kind results, and 7z uses one extraction loop for host and sink targets (#792, #793, #808).
+- Core: `verify` validates against an in-memory tree with a node budget tied to `max_file_count` and `max_path_depth`, creates no temporary directory, and treats a link path that leaves the root and returns as an escape (#754, #778, #779, #771, #787).
+- Core: the `xz2` dependency is replaced by `liblzma` 0.4.9, which bundles xz 5.8 instead of 5.2.5 (#763, #771).
+- 7z: `sevenz-rust2` 0.24.2 (minimum version now 0.24.2); solid blocks with a stream-less entry between files are listed, verified and extracted, and a block whose file sizes do not add up to its decoded size is refused (#675, #751, #770).
+- Core: `extract_to_sink` on 7z checks name lengths before any block is decoded, and a TAR whose first member name starts with `BZh` is detected as TAR (#781, #785, #790).
+- Core: a directory entry over a file or a symlink, and `extract --force` over a directory or symlink, are refused with a message naming the entry in `extract` and `verify` for TAR, ZIP and 7z; the core `Io` error no longer carries `raw_os_error()` there (#765, #768, #802, #803, #808).
+- CLI: a TAR extracted into a missing destination is read once and extracted atomically, and a refusal leaves nothing behind and reports `writes: rolled_back` (#799, #808).
+- CLI: errors from the pre-extraction list pass carry the category hint, the unknown-format hint lists 7z, and a link escape no longer hints at `--allow-symlinks` or `--allow-hardlinks` (#759, #768, #796, #808).
 - CLI: human-readable output escapes all `Default_Ignorable_Code_Point` characters in entry names, keeping variation selectors only after the character they modify (#753, #768).
-- `exarch-cli` skill: a TAR directory-name payload fails `extract` before anything is written (#766, #768).
-- `exarch.pyi` drift guard covers all Literal aliases (#761, #768).
-- Internal cleanups after #752 and #757 (#762, #768).
-- Windows regression tests for UNC and device-namespace link targets (#764, #768).
+- Python and Node: quota errors use the core wording `single file size`; Node progress-callback failures drop the `| progressCallbackError` marker and expose `cause`, plus `filesAdded` and `bytesWritten` on creation (#758, #760, #768).
+- Internal: `exarch-cli` skill documents the TAR directory-name payload failure, `exarch.pyi` drift guard covers all Literal aliases, cleanups after #752 and #757, and Windows regression tests cover UNC and device-namespace link targets (#761, #762, #764, #766, #768).
 
 ### Security
 
 - **BREAKING:** `EntryValidator::validate_entry` drops the `dir_cache` parameter, and `ValidationContext` loses its lifetime parameter (#816).
-- Core: extraction validates every parent component below the destination on each write and no longer follows a symlink that was already there (#816).
+- Core: extraction validates every parent component below the destination on each write and no longer follows a symlink that was already there; the host directory cache is removed (#786, #816).
+
+### Dependencies
+
+- Bumped `lzma-rust2` to 0.24, `napi` to 3.16, `napi-derive` to 3.7, `rustix` to 1.1.6, `zip` to 9.2 and `@biomejs/biome` to 2.6.4, refreshed `Cargo.lock` and `pnpm-lock.yaml`, and applied the minor and patch updates in `fuzz` (#811, #812, #814).
+
+### CI
+
+- A `wasm` job builds `exarch-cli` for `wasm32-wasip1` and runs a wasmtime smoke test (#755, #771).
+- Fuzz targets `sink` and `detect` cover `extract_to_sink`, the in-memory path model and reader format detection (#798, #808).
+- Tests: p7zip 16.02 7z symlink fixtures and a check that hardlink member attributes never reach a symlink target (#727, #791, #790, #808).
+- Bumped `taiki-e/install-action` to 2.88.1, `astral-sh/setup-uv` to 10.3.3 and `pypa/gh-action-pypi-publish` to 1.14.3 (#809, #810, #813).
 
 ## [0.7.0] - 2026-10-26
 
@@ -2212,7 +2204,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 64KB reusable copy buffers
 - LRU cache for symlink target resolution
 
-[Unreleased]: https://github.com/bug-ops/exarch/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/bug-ops/exarch/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/bug-ops/exarch/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/bug-ops/exarch/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/bug-ops/exarch/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/bug-ops/exarch/compare/v0.5.2...v0.6.0

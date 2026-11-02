@@ -1,6 +1,6 @@
 {
   "name": "exarch-rs",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Memory-safe archive extraction library with built-in security validation",
   "main": "index.js",
   "types": "index.d.ts",
@@ -53,7 +53,7 @@
     "check:ci": "biome check ."
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.6.3",
+    "@biomejs/biome": "^2.6.4",
     "@napi-rs/cli": "3.10.9",
     "typescript": "5.9.3"
   },

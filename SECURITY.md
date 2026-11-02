@@ -36,6 +36,17 @@ This library implements archive extraction with security as a primary design goa
 - **File Count Limits**: Prevents DoS via excessive file creation
 - **Path Depth Limits**: Prevents deep directory nesting attacks
 
+### In-Memory Extraction
+
+`extract_to_sink` and the Python and Node in-memory functions run archive entries through the same validation pipeline but write to an `EntrySink` instead of the filesystem:
+
+- **Memory Cap**: `MemorySink` refuses to grow past its `MemoryLimit` (500 MiB by default, counting payload plus per-entry path and overhead bytes) and fails with a `QuotaExceeded` I/O error carrying `SinkFull`
+- **Path Model**: `PathModel::Host` (the default) applies the rules of the platform running the extraction; on a Windows host that includes the component rules of `Portable`, while other hosts do not restrict component names. `PathModel::Portable` applies the strictest rules of every supported platform on every host (characters and names Windows refuses, case and Unicode-normalization folding, length limits). Use `Portable` when the stored entries are read on a different platform
+
+### Atomic Extraction in the CLI
+
+When the destination of a TAR extraction does not exist yet (and its parent does), `exarch extract` extracts into a hidden staging directory and renames it into place only on success. A refusal anywhere in the archive leaves nothing on disk and is reported with `writes: "rolled_back"`. A process killed mid-extraction leaves its `.exarch-XXXXXX` staging directory next to the destination; delete it by hand.
+
 ### Component Filtering
 
 - **Banned Components**: Default deny-list for sensitive directories (`.git`, `.ssh`, `.gnupg`, `.aws`, `.kube`, `.docker`, `.env`)

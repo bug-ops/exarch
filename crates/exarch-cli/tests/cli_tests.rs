@@ -2552,11 +2552,17 @@ fn test_extract_and_verify_name_an_entry_under_a_file() {
         .arg(temp.path().join("out"))
         .assert()
         .failure()
-        .stderr(predicate::str::contains(text));
+        .stderr(predicate::function(|stderr: &str| {
+            stderr.replace('\\', "/").contains(text)
+        }));
     let verify = exarch_cmd().arg("verify").arg(&archive).assert().failure();
     let output = verify.get_output();
     let combined = [output.stdout.as_slice(), output.stderr.as_slice()].concat();
-    assert!(String::from_utf8_lossy(&combined).contains(text));
+    assert!(
+        String::from_utf8_lossy(&combined)
+            .replace('\\', "/")
+            .contains(text)
+    );
 }
 
 fn names_in(dir: &std::path::Path) -> Vec<std::ffi::OsString> {

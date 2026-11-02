@@ -167,18 +167,19 @@ fn real_7zip_symlink_archive_is_listed_as_symlinks_and_refused() {
         .unwrap();
     assert!(status.success());
 
-    let manifest = list_archive(&archive, &SecurityConfig::default()).unwrap();
+    let config = SecurityConfig::default().with_allow_solid_archives(true);
+    let manifest = list_archive(&archive, &config).unwrap();
     let symlinks = manifest
         .entries()
         .iter()
         .filter(|e| matches!(e.kind, ManifestEntryKind::Symlink { .. }))
         .count();
     assert_eq!(symlinks, 2);
-    let report = verify_archive(&archive, &SecurityConfig::default()).unwrap();
+    let report = verify_archive(&archive, &config).unwrap();
     assert_eq!(report.status(), VerificationStatus::Fail);
     let out = TempDir::new().unwrap();
     assert_matches!(
-        extract_archive(&archive, out.path(), &SecurityConfig::default()),
+        extract_archive(&archive, out.path(), &config),
         Err(ArchiveError::SecurityViolation { reason, .. }) if reason.contains("reparse point")
     );
     assert_eq!(std::fs::read_dir(out.path()).unwrap().count(), 0);

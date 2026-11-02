@@ -1001,7 +1001,11 @@ mod tests {
             .find(|i| i.category == IssueCategory::SecurityPolicy)
             .unwrap_or_else(|| panic!("no SecurityPolicy issue: {:?}", report.issues()));
         assert_eq!(issue.severity, IssueSeverity::High);
-        assert!(issue.message.contains(expected), "{}", issue.message);
+        assert!(
+            issue.message.replace('\\', "/").contains(expected),
+            "{}",
+            issue.message
+        );
     }
 
     #[test]

@@ -2329,10 +2329,16 @@ mod tests {
 
         let (kind, text) = classified(ParentBlocker::File.error(entry, parent));
         assert_eq!(kind, "io");
-        assert!(text.ends_with("refusing to create x/y/z under the existing file at x"));
+        assert!(
+            text.replace('\\', "/")
+                .ends_with("refusing to create x/y/z under the existing file at x")
+        );
         let (kind, text) = classified(ParentBlocker::Symlink.error(entry, parent));
         assert_eq!(kind, "violation");
-        assert!(text.contains("refusing to create x/y/z under the existing symlink at x"));
+        assert!(
+            text.replace('\\', "/")
+                .contains("refusing to create x/y/z under the existing symlink at x")
+        );
         assert_eq!(
             classified(ParentBlocker::Escape.error(entry, parent)),
             ("escape", "x".to_owned())
@@ -2355,7 +2361,10 @@ mod tests {
         assert_eq!(conflict.occupant, None);
         let (kind, text) = classified(conflict.into_archive_error());
         assert_eq!(kind, "io");
-        assert!(text.ends_with("refusing to create x/a/f under the existing file at x"));
+        assert!(
+            text.replace('\\', "/")
+                .ends_with("refusing to create x/a/f under the existing file at x")
+        );
     }
 
     #[test]
@@ -2371,7 +2380,10 @@ mod tests {
 
             let (kind, text) = classified(conflict.into_archive_error());
             assert_eq!(kind, "violation", "{target}");
-            assert!(text.contains("refusing to create x/f under the existing symlink at x"));
+            assert!(
+                text.replace('\\', "/")
+                    .contains("refusing to create x/f under the existing symlink at x")
+            );
         }
     }
 

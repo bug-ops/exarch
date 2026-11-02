@@ -83,12 +83,12 @@ fn run(entries: &[Vec<u8>]) -> Outcome {
 
 fn assert_refusal(outcome: &Outcome, text: &str) {
     assert!(
-        outcome.extract_message.contains(text),
+        outcome.extract_message.replace('\\', "/").contains(text),
         "{}",
         outcome.extract_message
     );
     assert!(
-        outcome.verify_message.contains(text),
+        outcome.verify_message.replace('\\', "/").contains(text),
         "{}",
         outcome.verify_message
     );
@@ -206,6 +206,7 @@ fn destination_file_parent_names_the_entry() {
     assert!(
         error
             .to_string()
+            .replace('\\', "/")
             .contains("refusing to create x/f under the existing file at x"),
         "{error}"
     );

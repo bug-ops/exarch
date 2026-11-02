@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Core: TAR and ZIP overwrite (`--force`) replaces the destination file through a sibling temp file and rename instead of writing through the existing inode (#819).
 - Core: ZIP verification of data-descriptor entries covers deflate and every scanned method without `--check-integrity`, and a descriptor must carry the entry's CRC-32 to end a scanned entry (#821).
 - Core: an overwritten file is now replaced even when read-only, needs a writable parent directory, loses its previous owner, ACLs and extended attributes, and takes `0666 & ~umask` when no mode is passed (#822).
-- **BREAKING:** TAR header and PAX/GNU extension parsing is consistent with `bsdtar` and CPython `tarfile`: a directory, symlink or hardlink with a payload, duplicate PAX records, `GNU.sparse.*` records, PAX `path`/`linkpath` stacked with GNU long name/link records, and global PAX headers carrying `path`, `linkpath` or `size` are refused with `InvalidArchive` in `list`, `verify` and `extract`.
+- **BREAKING:** TAR header and PAX/GNU extension parsing is consistent with `bsdtar` and CPython `tarfile`: a directory, symlink or hardlink with a payload, duplicate PAX records, `GNU.sparse.*` records, PAX `path`/`linkpath` stacked with GNU long name/link records, and global PAX headers carrying `path`, `linkpath` or `size` are refused with `InvalidArchive` in `list`, `verify` and `extract` (#820).
 
 ## [0.8.0] - 2026-11-02
 

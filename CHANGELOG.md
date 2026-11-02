@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Core: TAR and ZIP overwrite (`--force`) replaces the destination file through a sibling temp file and rename instead of writing through the existing inode (#819).
-- Core: ZIP verification of data-descriptor entries covers deflate and every scanned method without `--check-integrity`, and a descriptor must carry the entry's CRC-32 to end a scanned entry.
+- Core: ZIP verification of data-descriptor entries covers deflate and every scanned method without `--check-integrity`, and a descriptor must carry the entry's CRC-32 to end a scanned entry (#821).
 
 ## [0.8.0] - 2026-11-02
 

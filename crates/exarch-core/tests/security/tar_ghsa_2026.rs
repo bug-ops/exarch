@@ -155,12 +155,12 @@ fn extract_with_config(
 // GHSA-vmf3: PAX/GNU long-name smuggling and stream re-framing
 // ─────────────────────────────────────────────────────────────────────────
 
-/// GNU longname is benign, PAX `path` is a traversal attempt. `tar` resolves
-/// naming precedence as GNU long-name > PAX `path` > ustar name, so the
-/// malicious PAX path is never applied at all — the entry extracts safely
-/// under its benign GNU-supplied name, and no escaping path is ever written.
+/// GNU longname is benign, PAX `path` is a traversal attempt. `tar` always
+/// gives the GNU long name precedence, while `bsdtar` and Python's `tarfile`
+/// apply whichever of the two records comes first, so the stacked records are
+/// ambiguous and the archive is refused outright.
 #[test]
-fn ghsa_vmf3_gnu_longname_benign_pax_path_traversal_ignored_by_precedence() {
+fn stacked_gnu_longname_and_pax_path_with_benign_gnu_name_is_refused() {
     let mut t = Vec::new();
     gnu_longname(&mut t, b'L', b"benign_from_gnu.txt");
     let mut recs = pax_record(b"path", b"../../PWNED_FROM_PAX.txt");
@@ -171,22 +171,19 @@ fn ghsa_vmf3_gnu_longname_benign_pax_path_traversal_ignored_by_precedence() {
     eof(&mut t);
 
     let (result, temp) = extract(&t);
-    let report = result.expect("GNU long-name precedence must win, extracting safely");
-    assert_eq!(
-        report.files_extracted, 1,
-        "exactly one entry must be written"
+    assert_matches!(
+        result,
+        Err(ArchiveError::InvalidArchive(_)),
+        "stacked GNU long name and PAX path must be refused, got: {result:?}"
     );
-    assert!(
-        temp.path().join("benign_from_gnu.txt").exists(),
-        "must extract under the winning (benign) GNU long-name"
-    );
+    assert!(!temp.path().join("benign_from_gnu.txt").exists());
 }
 
-/// GNU longname is a traversal attempt, PAX `path` is benign: the GNU name
-/// (lower precedence but still validated as the entry advances) must not
-/// allow the escape through.
+/// GNU longname is a traversal attempt, PAX `path` is benign: the readers
+/// disagree on which name applies, so the archive is refused before either
+/// name is used.
 #[test]
-fn ghsa_vmf3_gnu_longname_traversal_pax_path_benign_rejected() {
+fn stacked_gnu_longname_and_pax_path_with_traversal_gnu_name_is_refused() {
     let mut t = Vec::new();
     gnu_longname(&mut t, b'L', b"../../PWNED_FROM_GNU.txt");
     let recs = pax_record(b"path", b"benign_from_pax.txt");
@@ -198,8 +195,8 @@ fn ghsa_vmf3_gnu_longname_traversal_pax_path_benign_rejected() {
     let (result, _temp) = extract(&t);
     assert_matches!(
         result,
-        Err(ArchiveError::PathTraversal { .. }),
-        "GNU longname traversal must be rejected, got: {result:?}"
+        Err(ArchiveError::InvalidArchive(_)),
+        "stacked GNU long name and PAX path must be refused, got: {result:?}"
     );
 }
 

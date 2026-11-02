@@ -3012,18 +3012,14 @@ fn gnu_sparse_header(
     h
 }
 
-/// Builds a raw single-entry TAR with a GNU sparse header shaped so that
-/// `exarch-core`'s bounded drain (`SYNTHETIC_PAD_CAP_BYTES`, currently
-/// 8 MiB) gives up mid-hole, leaving the trailing real data segment
-/// entirely unread — see the matching (and more detailed) construction and
-/// rationale in `exarch-core`'s `tar_metadata_bomb.rs`, in the test named
-/// `known_limitation_legitimate_sparse_hole_above_the_synthetic_cap_is_rejected`.
-fn legitimate_sparse_hole_fixture() -> Vec<u8> {
+/// Builds a raw single-entry TAR with a GNU sparse header declaring a large
+/// hole followed by a real data segment.
+fn gnu_sparse_fixture() -> Vec<u8> {
     const BLOCK: usize = 512;
     let gap = 12 * 1024 * 1024u64;
     let real_trailing = 6 * 1024 * 1024u64;
     let mut out = gnu_sparse_header(
-        b"legit_sparse.bin",
+        b"sparse.bin",
         real_trailing,
         gap + real_trailing,
         gap,
@@ -3041,43 +3037,27 @@ fn legitimate_sparse_hole_fixture() -> Vec<u8> {
     out
 }
 
-/// Pins the documented residual limitation of the C1/C2/C3 drain-bound fix
-/// (issue #414) specifically at the CLI level: when the destination already
-/// exists, `exarch extract` runs its own `list_archive` pre-flight (for
-/// progress-bar/conflict detection, `src/commands/extract.rs`) ahead of the
-/// actual extraction, so a legitimate GNU sparse file whose hole exceeds the
-/// synthetic-bytes drain cap is rejected by the CLI even though the underlying
-/// library's `extract_archive`/`TarArchive::extract` calls (which never run
-/// that pre-flight) handle the identical archive cleanly. A fresh destination
-/// skips the pre-flight (#799) and extracts it. This is a deliberately
-/// accepted trade-off (P3 follow-up tracked separately), not a bug — this test
-/// exists so the CLI-specific angle of that trade-off cannot silently change
-/// without a test noticing.
+/// GNU sparse entries are refused whether the destination exists (list
+/// pre-flight) or not.
 #[test]
-fn test_extract_known_limitation_cli_rejects_legitimate_sparse_hole_above_synthetic_cap() {
+fn test_extract_cli_refuses_gnu_sparse_entry() {
     let temp = TempDir::new().expect("failed to create temp dir");
-    let archive_path = temp.path().join("legit_sparse.tar");
-    std::fs::write(&archive_path, legitimate_sparse_hole_fixture()).expect("write sparse fixture");
+    let archive_path = temp.path().join("sparse.tar");
+    std::fs::write(&archive_path, gnu_sparse_fixture()).expect("write sparse fixture");
     let out_dir = temp.path().join("out");
     std::fs::create_dir(&out_dir).expect("create destination");
 
-    exarch_cmd()
-        .arg("extract")
-        .arg(&archive_path)
-        .arg(&out_dir)
-        .assert()
-        .failure()
-        .stderr(
-            predicate::str::contains("Rust API only")
-                .and(predicate::str::contains("with_max_tar_metadata_bytes")),
-        );
-
-    exarch_cmd()
-        .arg("extract")
-        .arg(&archive_path)
-        .arg(temp.path().join("fresh"))
-        .assert()
-        .success();
+    for destination in [out_dir, temp.path().join("fresh")] {
+        exarch_cmd()
+            .arg("extract")
+            .arg(&archive_path)
+            .arg(&destination)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(
+                "GNU sparse entries are not supported",
+            ));
+    }
 }
 
 // ============================================================================

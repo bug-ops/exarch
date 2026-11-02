@@ -21,12 +21,6 @@ use tempfile::TempDir;
 
 const REGULAR: u8 = b'0';
 const CONTINUOUS: u8 = b'7';
-const GNU_SPARSE: u8 = b'S';
-
-fn octal_field(dest: &mut [u8], value: usize) {
-    let text = format!("{value:011o}\0");
-    dest.copy_from_slice(text.as_bytes());
-}
 
 fn entry(name: &str, typeflag: u8, data: &[u8]) -> Vec<u8> {
     let mut header = tar::Header::new_gnu();
@@ -36,13 +30,6 @@ fn entry(name: &str, typeflag: u8, data: &[u8]) -> Vec<u8> {
     header.set_cksum();
     let mut block = header.as_bytes().to_vec();
     block[156] = typeflag;
-    if typeflag == GNU_SPARSE {
-        // One sparse segment covering the whole payload, real size = payload.
-        octal_field(&mut block[386..398], 0);
-        octal_field(&mut block[398..410], data.len());
-        block[482] = 0;
-        octal_field(&mut block[483..495], data.len());
-    }
     block[148..156].fill(b' ');
     let checksum: u32 = block.iter().map(|&b| u32::from(b)).sum();
     block[148..156].copy_from_slice(format!("{checksum:06o}\0 ").as_bytes());
@@ -100,7 +87,7 @@ fn assert_refused_everywhere(archive: &Path) {
 
 #[test]
 fn directory_named_file_with_payload_is_refused_in_tar() {
-    for typeflag in [REGULAR, CONTINUOUS, GNU_SPARSE] {
+    for typeflag in [REGULAR, CONTINUOUS] {
         let dir = TempDir::new().unwrap();
         let archive = write_archive(&dir, "smuggle.tar", &smuggling_tar(typeflag));
         assert_refused_everywhere(&archive);

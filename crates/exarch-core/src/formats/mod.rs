@@ -7,6 +7,7 @@ pub mod detect;
 pub(crate) mod dir_walker;
 pub mod sevenz;
 pub mod tar;
+pub(crate) mod tar_extension_headers;
 pub(crate) mod tar_metadata_limit;
 pub(crate) mod target;
 pub mod traits;

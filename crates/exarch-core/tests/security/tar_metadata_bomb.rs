@@ -156,6 +156,32 @@ fn assert_is_budget_violation(result: &exarch_core::Result<impl std::fmt::Debug>
     }
 }
 
+fn assert_is_ambiguous_header(result: &exarch_core::Result<impl std::fmt::Debug>) {
+    match result {
+        Err(ArchiveError::InvalidArchive(reason)) => assert!(
+            reason.contains("ambiguous TAR header"),
+            "reason should name the ambiguous extension header: {reason}"
+        ),
+        other => panic!("expected an ambiguous-header InvalidArchive, got: {other:?}"),
+    }
+}
+
+/// What a historical-shape archive is refused for.
+#[derive(Clone, Copy)]
+enum Refusal {
+    MetadataBudget,
+    AmbiguousHeader,
+}
+
+impl Refusal {
+    fn assert_matches(self, result: &exarch_core::Result<impl std::fmt::Debug>) {
+        match self {
+            Self::MetadataBudget => assert_is_budget_violation(result),
+            Self::AmbiguousHeader => assert_is_ambiguous_header(result),
+        }
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // TarArchive::extract() — direct entry point
 // ─────────────────────────────────────────────────────────────────────────
@@ -408,7 +434,31 @@ fn s3_shape_bomb(bomb_real_bytes: usize) -> Vec<u8> {
     out
 }
 
-fn assert_all_entry_points_reject(bomb: &[u8], file_name: &str) {
+/// S3 shape without the leading local PAX header: a global header, a decoy,
+/// then the bomb. The global header is accepted, so only the budget stops it.
+fn s3_shape_global_only_bomb(bomb_real_bytes: usize) -> Vec<u8> {
+    let mut out = Vec::new();
+    let global_body = pax_record(b"comment", b"hi");
+    out.extend_from_slice(&header(
+        b"././@PaxHeader",
+        global_body.len() as u64,
+        b'g',
+        true,
+    ));
+    pad_to_block(&mut out, &global_body);
+    out.extend_from_slice(&header(b"decoy.txt", 4096, b'0', true));
+    pad_to_block(&mut out, &vec![b'D'; 4096]);
+    out.extend_from_slice(&header(
+        b"././@LongLink",
+        bomb_real_bytes as u64,
+        b'L',
+        true,
+    ));
+    pad_to_block(&mut out, &vec![b'A'; bomb_real_bytes]);
+    out
+}
+
+fn assert_all_entry_points_reject(bomb: &[u8], file_name: &str, refusal: Refusal) {
     let config = SecurityConfig::default().with_max_tar_metadata_bytes(4096);
     let validated_config = config.clone().validate().unwrap();
 
@@ -420,29 +470,42 @@ fn assert_all_entry_points_reject(bomb: &[u8], file_name: &str) {
         &ExtractionOptions::default(),
         &mut NoopProgress,
     );
-    assert_is_budget_violation(&result);
+    refusal.assert_matches(&result);
 
     let temp = TempDir::new().unwrap();
     let path = write_tar_file(&temp, file_name, bomb);
-    assert_is_budget_violation(&exarch_core::list_archive(&path, &config));
-    assert_is_budget_violation(&exarch_core::verify_archive(&path, &config));
+    refusal.assert_matches(&exarch_core::list_archive(&path, &config));
+    refusal.assert_matches(&exarch_core::verify_archive(&path, &config));
     let out = temp.path().join("out");
-    assert_is_budget_violation(&exarch_core::extract_archive(&path, &out, &config));
+    refusal.assert_matches(&exarch_core::extract_archive(&path, &out, &config));
 }
 
 #[test]
 fn s1_shape_pax_size_zero_override_hiding_a_bomb_is_still_rejected() {
-    assert_all_entry_points_reject(&s1_shape_bomb(8192), "s1.tar");
+    assert_all_entry_points_reject(&s1_shape_bomb(8192), "s1.tar", Refusal::MetadataBudget);
 }
 
 #[test]
 fn s2_shape_invalid_magic_pax_override_hiding_a_bomb_is_still_rejected() {
-    assert_all_entry_points_reject(&s2_shape_bomb(8192), "s2.tar");
+    // The leading extension header without magic is refused before the
+    // budget is ever reached.
+    assert_all_entry_points_reject(&s2_shape_bomb(8192), "s2.tar", Refusal::AmbiguousHeader);
 }
 
 #[test]
 fn s3_shape_pax_global_header_hiding_a_bomb_is_still_rejected() {
-    assert_all_entry_points_reject(&s3_shape_bomb(8192), "s3.tar");
+    // A global header right after a local one is refused before the budget is
+    // ever reached.
+    assert_all_entry_points_reject(&s3_shape_bomb(8192), "s3.tar", Refusal::AmbiguousHeader);
+}
+
+#[test]
+fn s3_shape_global_header_without_a_local_header_still_reaches_the_budget() {
+    assert_all_entry_points_reject(
+        &s3_shape_global_only_bomb(8192),
+        "s3_global_only.tar",
+        Refusal::MetadataBudget,
+    );
 }
 
 #[test]
@@ -656,94 +719,39 @@ fn list_and_extract_archive_also_stay_bounded_against_gnu_sparse_realsize_bomb()
     );
 }
 
+fn assert_is_sparse_refusal(result: &exarch_core::Result<impl std::fmt::Debug>) {
+    match result {
+        Err(ArchiveError::InvalidArchive(reason)) => assert!(
+            reason.contains("GNU sparse entries are not supported"),
+            "reason should name the refused sparse entry: {reason}"
+        ),
+        other => panic!("expected a sparse-entry InvalidArchive, got: {other:?}"),
+    }
+}
+
 #[test]
-fn known_limitation_legitimate_sparse_hole_above_the_synthetic_cap_is_rejected() {
-    // Pins the module's documented residual limitation (see
-    // `formats::tar_metadata_limit`'s module docs): a *legitimate* GNU
-    // sparse file whose real hole exceeds `SYNTHETIC_PAD_CAP_BYTES` is
-    // indistinguishable, by pure byte accounting, from the C1 attack shape
-    // when skipped unread on `list_archive`/`verify_archive` — both produce
-    // output with no corresponding read. This is a deliberately accepted
-    // trade-off (P3 follow-up tracked separately), not a bug: this test
-    // exists so a future change to `SYNTHETIC_PAD_CAP_BYTES` cannot silently
-    // move this threshold without a test noticing.
-    //
-    // `exarch_core::extract_archive` (the library function) is unaffected —
-    // it never calls `list_archive` itself, so this exact shape extracts
-    // cleanly through it. The `exarch` CLI's `extract` *command* runs its
-    // own separate `list_archive` pre-flight for progress-bar/conflict
-    // detection (`exarch-cli/src/commands/extract.rs`), so it IS affected;
-    // that CLI-specific behavior is pinned separately in
-    // `exarch-cli/tests/cli_tests.rs`, which can invoke the actual binary.
-    //
-    // Shape: a leading hole (bigger than the 8 MiB synthetic cap, so the drop's
-    // drain gives up while still inside the virtual hole, never touching
-    // the trailing real data) followed by a real trailing data segment
-    // (bigger than the default 4 MiB `max_tar_metadata_bytes`): with the
-    // drop having consumed zero real bytes, `tar`'s own catch-up skip to
-    // the next header — which runs *while the metadata budget is armed* —
-    // must consume the entire unread real segment itself, tripping the
-    // budget. A hole with a *small* trailing real segment, or one under the
-    // synthetic cap, does not reproduce this: physical stream position is
-    // untouched by virtual padding either way, so only a large real segment
-    // left entirely unread by the drop actually costs anything once `tar`
-    // catches up.
+fn gnu_sparse_entry_with_a_large_hole_is_refused_by_every_entry_point() {
+    // GNU sparse entries are refused outright: readers disagree on how an
+    // old-format sparse header with extension blocks is framed, so no hole
+    // size, small or large, reaches the synthetic-byte accounting.
     let gap = 12 * 1024 * 1024u64;
     let real_trailing = 6 * 1024 * 1024u64;
-    let bomb_hdr = gnu_sparse_header(
-        b"legit_sparse.bin",
+    let mut bomb = gnu_sparse_header(
+        b"sparse.bin",
         real_trailing,
         gap + real_trailing,
         &[(gap, real_trailing)],
     );
-    let mut bomb = bomb_hdr;
     pad_to_block(&mut bomb, &vec![b'D'; real_trailing as usize]);
     bomb.extend(std::iter::repeat_n(0u8, BLOCK * 2));
     let config = SecurityConfig::default();
 
     let temp = TempDir::new().unwrap();
-    let path = write_tar_file(&temp, "legit_sparse_hole.tar", &bomb);
-    let result = exarch_core::list_archive(&path, &config);
-    assert!(
-        result.is_err(),
-        "known limitation: a legitimate sparse hole above the synthetic cap is currently \
-         rejected by list_archive, got: {result:?}"
-    );
-
-    let result = exarch_core::verify_archive(&path, &config);
-    assert!(
-        result.is_err(),
-        "known limitation: a legitimate sparse hole above the synthetic cap is currently \
-         rejected by verify_archive, got: {result:?}"
-    );
-
-    // `extract_archive` (library) never calls `list_archive` itself, so it
-    // reads the entry directly and is unaffected — confirming the
-    // limitation is specific to the metadata-only paths above, not to
-    // extraction in general.
+    let path = write_tar_file(&temp, "sparse_hole.tar", &bomb);
+    assert_is_sparse_refusal(&exarch_core::list_archive(&path, &config));
+    assert_is_sparse_refusal(&exarch_core::verify_archive(&path, &config));
     let out = temp.path().join("out");
-    let report = exarch_core::extract_archive(&path, &out, &config).expect(
-        "extract_archive reads the entry itself (no list_archive pre-flight in the library \
-         function) and is not subject to this limitation",
-    );
-    assert_eq!(report.files_extracted, 1);
-
-    // A direct `TarArchive::extract` library call is unaffected for the
-    // same reason: the entry is actually read, not drained unread.
-    let mut archive = TarArchive::new(Cursor::new(bomb));
-    let validated_config = config.validate().unwrap();
-    let report = archive
-        .extract(
-            temp.path().join("direct_out").as_path(),
-            &validated_config,
-            &ExtractionOptions::default(),
-            &mut NoopProgress,
-        )
-        .expect(
-            "a direct TarArchive::extract call reads the entry itself and is not subject to \
-             this limitation",
-        );
-    assert_eq!(report.files_extracted, 1);
+    assert_is_sparse_refusal(&exarch_core::extract_archive(&path, &out, &config));
 }
 
 /// Builds a 3-entry TAR: a small allowed file, a large disallowed-extension
@@ -884,34 +892,18 @@ fn list_and_verify_accept_a_single_legitimate_entry_at_every_size_that_broke_c2(
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// Issue #422: cumulative synthetic-byte budget across many small entries
+// Many GNU sparse entries
 // ─────────────────────────────────────────────────────────────────────────
 //
-// SYNTHETIC_PAD_CAP_BYTES (formats::tar_metadata_limit) bounds the drain
-// cost of any *single* unread GNU sparse entry, but a caller with an
-// extension allowlist configured skips disallowed entries before
-// QuotaTracker ever runs (PR #421 moved the check there specifically to
-// stop quota from double-counting files that end up skipped) — so nothing
-// previously bounded the *count* of synthetic-heavy entries an archive
-// could contain. An archive of many small extension-filtered GNU sparse
-// entries could sum to an unbounded amount of wasted drain work even though
-// each entry alone stayed within its own cap. The deterministic version of
-// this regression (entry-yield counts, not wall-clock) lives in
-// `formats::tar_metadata_limit`'s own test module, which can drive the
-// crate-internal `BudgetedEntries` iterator directly; the tests below
-// exercise the same shapes through the public API these internals actually
-// serve, so wall-clock is the only externally observable "failed fast"
-// signal available here. (Since #505, a skip-only report — nonzero
-// `files_skipped` but zero `total_items()` — does populate `PartialExtraction`
-// on a later failure, but `assert_is_budget_violation` below deliberately
-// keys off `is_security_violation()`/`context()`, which delegate through
-// `PartialExtraction` either way, so it is agnostic to whether that wrapping
-// occurred.)
+// The cumulative synthetic-byte budget (`formats::tar_metadata_limit`) bounds
+// the drain cost of many unread sparse entries. Sparse entries are now refused
+// at the first one, so that budget is exercised only by the unit tests in
+// `formats::tar_metadata_limit`; here every public entry point must stop at
+// the first sparse entry instead of draining the rest.
 
 /// Builds a multi-entry TAR of `n` GNU sparse entries, each named
 /// `spam{i}.bin`, each declaring a hole (`gap`) beyond its one physical
-/// backing block — many small copies of the same C1 shape used above,
-/// concatenated instead of standing alone.
+/// backing block.
 fn many_sparse_bombs_tar(n: usize, gap: u64) -> Vec<u8> {
     let mut out = Vec::new();
     for i in 0..n {
@@ -931,142 +923,27 @@ fn many_sparse_bombs_tar(n: usize, gap: u64) -> Vec<u8> {
 }
 
 #[test]
-fn extract_rejects_many_extension_filtered_sparse_entries_via_cumulative_budget() {
-    // Reproduces the issue directly: an extension allowlist skips every one
-    // of 200 small sparse-bomb entries before QuotaTracker ever sees them,
-    // so max_total_size/max_file_count provide no cover. Without a
-    // cumulative bound, extraction would drain every entry (bounded per-entry
-    // but unbounded in sum) and eventually "succeed" having done far more
-    // work than a well-formed archive of this size should ever cost. With
-    // the fix, iteration must fail fast once the cross-entry synthetic sum
-    // exceeds the cumulative cap (roughly 128 maximally-saturating entries
-    // at the current 1 GiB cap) — well before entry 200.
-    let bomb = many_sparse_bombs_tar(200, 1u64 << 40);
-    let config = SecurityConfig::default().with_allowed_extensions(vec!["txt".to_string()]);
+fn many_sparse_entries_are_refused_by_every_entry_point_without_draining() {
+    let bomb = many_sparse_bombs_tar(300, 1u64 << 40);
+    let config = SecurityConfig::default()
+        .with_max_file_size(u64::MAX)
+        .with_max_total_size(u64::MAX)
+        .with_max_file_count(usize::MAX)
+        .with_allowed_extensions(vec!["txt".to_string()]);
 
     let temp = TempDir::new().unwrap();
     let path = write_tar_file(&temp, "many_sparse.tar", &bomb);
     let out = temp.path().join("out");
 
     let start = std::time::Instant::now();
-    let result = exarch_core::extract_archive(&path, &out, &config);
+    assert_is_sparse_refusal(&exarch_core::list_archive(&path, &config));
+    assert_is_sparse_refusal(&exarch_core::verify_archive(&path, &config));
+    assert_is_sparse_refusal(&exarch_core::extract_archive(&path, &out, &config));
     let elapsed = start.elapsed();
-
-    assert_is_budget_violation(&result);
     assert!(
         elapsed < SPARSE_BOMB_WALL_CLOCK_BOUND,
-        "extract must not scale with the number of skipped synthetic-heavy entries, took \
-         {elapsed:?}"
+        "refusing sparse entries must not scale with the entry count, took {elapsed:?}"
     );
-}
-
-#[test]
-fn extract_rejects_many_extension_filtered_sub_cap_sparse_entries_via_cumulative_budget() {
-    // Regression for critic finding S3: the test above only proves the
-    // budget trips when every entry individually saturates
-    // SYNTHETIC_PAD_CAP_BYTES (8 MiB). The issue's own reported shape is
-    // 20,000 *small* entries — each producing far less synthesized output
-    // than the per-entry cap on its own — whose sum, not any single entry,
-    // exceeds the cumulative cap. A regression that only accumulated when
-    // the per-entry cap tripped would pass the test above but let this one
-    // drain in full. 300 entries of a 4 MiB (sub-cap) hole each are needed
-    // to exceed the 1 GiB cumulative cap (~256 entries) with margin.
-    let bomb = many_sparse_bombs_tar(300, 4 * 1024 * 1024);
-    let config = SecurityConfig::default().with_allowed_extensions(vec!["txt".to_string()]);
-
-    let temp = TempDir::new().unwrap();
-    let path = write_tar_file(&temp, "many_sub_cap_sparse.tar", &bomb);
-    let out = temp.path().join("out");
-
-    let start = std::time::Instant::now();
-    let result = exarch_core::extract_archive(&path, &out, &config);
-    let elapsed = start.elapsed();
-
-    assert_is_budget_violation(&result);
-    assert!(
-        elapsed < SPARSE_BOMB_WALL_CLOCK_BOUND,
-        "extract must not scale with the number of skipped sub-cap synthetic-heavy entries, \
-         took {elapsed:?}"
-    );
-}
-
-#[test]
-fn list_and_verify_bound_total_drain_across_many_sparse_entries_even_with_relaxed_quota() {
-    // The cumulative budget lives in `next_entry()`, used by extract, list,
-    // and (via list) verify alike — not gated on extension filtering at
-    // all — so it also covers a caller that legitimately relaxes quota
-    // limits (e.g. to list/verify a huge archive) and would otherwise let
-    // QuotaTracker wave every sparse-bomb entry through instead of catching
-    // it early.
-    //
-    // This config relaxation is deliberately broader than what
-    // `ListPass::VerifyPreflight` (inspection/list.rs) applies on its
-    // own — it only lifts the per-file size limit, not
-    // `max_total_size`/`max_file_count`, so `verify_archive` under its
-    // *default* config would already reject a huge declared `realsize` via
-    // ordinary total-size quota before ever reaching the cumulative
-    // synthetic path. The manual relaxation below represents a caller who
-    // has legitimately raised every quota limit (e.g. to inspect a
-    // multi-terabyte archive), which is exactly the case
-    // `ListPass::VerifyPreflight` does *not* cover and where this budget is
-    // the only remaining defense.
-    let bomb = many_sparse_bombs_tar(200, 1u64 << 40);
-    let config = SecurityConfig::default()
-        .with_max_file_size(u64::MAX)
-        .with_max_total_size(u64::MAX)
-        .with_max_file_count(usize::MAX);
-
-    let temp = TempDir::new().unwrap();
-    let path = write_tar_file(&temp, "many_sparse_relaxed.tar", &bomb);
-
-    let start = std::time::Instant::now();
-    let result = exarch_core::list_archive(&path, &config);
-    let elapsed = start.elapsed();
-    assert_is_budget_violation(&result);
-    assert!(
-        elapsed < SPARSE_BOMB_WALL_CLOCK_BOUND,
-        "list must not scale with the number of unbounded-quota sparse entries, took {elapsed:?}"
-    );
-
-    let start = std::time::Instant::now();
-    let result = exarch_core::verify_archive(&path, &config);
-    let elapsed = start.elapsed();
-    assert_is_budget_violation(&result);
-    assert!(
-        elapsed < SPARSE_BOMB_WALL_CLOCK_BOUND,
-        "verify must not scale with the number of unbounded-quota sparse entries, took {elapsed:?}"
-    );
-}
-
-#[test]
-fn list_and_verify_accept_many_sparse_entries_comfortably_under_the_cumulative_cap() {
-    // Regression for critic finding N1: every other cumulative-budget test
-    // either derives its entry count from CUMULATIVE_SYNTHETIC_CAP_BYTES or
-    // deliberately exceeds it, so none would notice if the cap were
-    // silently retuned back down (e.g. to the original, too-tight 64 MiB) —
-    // that would reintroduce the exact S1 false-positive undetected. This
-    // pins the acceptance side: 50 entries, each individually saturating
-    // SYNTHETIC_PAD_CAP_BYTES (8 MiB), sum to ~400 MiB — comfortably under
-    // the 1 GiB cap, and already far more large-hole sparse entries than a
-    // real archive would plausibly contain — and must still list and verify
-    // cleanly, not trip the cumulative budget.
-    const ENTRY_COUNT: usize = 50;
-    let bomb = many_sparse_bombs_tar(ENTRY_COUNT, 1u64 << 40);
-    let config = SecurityConfig::default()
-        .with_max_file_size(u64::MAX)
-        .with_max_total_size(u64::MAX)
-        .with_max_file_count(usize::MAX);
-
-    let temp = TempDir::new().unwrap();
-    let path = write_tar_file(&temp, "many_sparse_under_cap.tar", &bomb);
-
-    let manifest = exarch_core::list_archive(&path, &config)
-        .expect("an archive comfortably under the cumulative synthetic cap must list cleanly");
-    assert_eq!(manifest.total_entries(), ENTRY_COUNT);
-
-    let report = exarch_core::verify_archive(&path, &config)
-        .expect("an archive comfortably under the cumulative synthetic cap must verify cleanly");
-    assert_eq!(report.status(), exarch_core::VerificationStatus::Pass);
 }
 
 #[test]

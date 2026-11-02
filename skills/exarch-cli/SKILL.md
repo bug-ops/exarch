@@ -323,13 +323,11 @@ only as a directory or an empty regular file; a `.` symlink or a `.` with data i
 `extract`, `list` and `verify`. A descriptor, local header and data hidden
 inside the declared range of a data-descriptor entry (streaming readers end such an entry at the
 end of its data, `zip` at the declared size) is found by plain `verify`, `list` and `extract` for a
-stored entry: the declared range is scanned for a descriptor signature and searched from there like a gap
-(`"Hidden Entry"`, exit `1`, with and without `--check-integrity`). A ZIP-based file (a JAR or an ODF package, for example)
+stored entry and for any method but deflate (bzip2, zstd): the declared range is scanned for a descriptor signature and searched from there like a gap
+(`"Hidden Entry"`, exit `1`, with and without `--check-integrity`). A descriptor that ends such a scanned entry has to carry the entry's CRC-32 as well as its sizes; one with another CRC does not end the entry, so the reader runs on and the archive is reported as a descriptor overrun. A ZIP-based file (a JAR or an ODF package, for example)
 stored whole in an entry that a streaming writer gave a data descriptor is reported the same way, an accepted
 false positive: pass `--zip-consistency ignore` for archives from a trusted producer.
-For a compressed entry (deflate, bzip2, zstd) it is detected only with `--check-integrity`,
-which decodes the entry to find where its stream ends (`"Hidden Entry"` on that entry, exit `1`; not raised under `--zip-consistency ignore`; a tail that cannot be decided counts as an unverified item with the reason `descriptor_tail`;
-plain `verify` passes it, verified live with a crafted deflate archive). Not covered: central
+For a deflated entry the declared range is decoded when it holds a local header signature, to find where its stream ends, and a header behind that point is reported by plain `verify`, `list` and `extract` too (`"Hidden Entry"`, exit `1`; not raised under `--zip-consistency ignore`). The decode is limited to 256 MiB of output per archive; with `--check-integrity`, bzip2 and zstd entries, and deflated ones past that limit, are decoded for a header behind the end of the stream (reported once; a tail that cannot be decided counts as an unverified item with the reason `descriptor_tail`). Verified live with crafted deflate, zstd and forged-CRC archives, each failing plain `verify` while `bsdtar` read from a pipe extracted a file the central directory does not list. Not covered: central
 directory signatures inside the stub of a file that does not start with `PK`, and other streaming-reader layouts tracked in #686. A central or end record signature behind the last entry is not reported, except in a prefixed archive, where the stretch from the end record's directory offset to the actual directory is searched (a decoy directory that readers up to `zip` 9.0.5 would take is reported as a stray central or end record); a decoy inside the declared data range of the last entry is not scanned. Pre-ZIP64 archives
 with more than 65535 entries (a wrapped end-record count) and archives with orphaned local headers
 or a central directory signature in a gap before an entry, left by in-place updaters, are rejected under `enforce`; so are ZIP64 directory entries written by the

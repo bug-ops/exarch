@@ -5,15 +5,20 @@
 //! descriptor and the next local header. Bytes between the stream end and the
 //! declared end are therefore invisible to a random-access reader and
 //! readable by a streaming one. Telling where the stream ends takes decoding,
-//! so the check runs only with an integrity pass, after the entry has decoded
-//! cleanly through the `zip` crate. Stored entries need no decoding and are
-//! searched by the census instead (see [`judge_first_signature`]).
+//! so the check runs with an integrity pass, after the entry has decoded
+//! cleanly through the `zip` crate. The census also decodes deflated entries
+//! itself within a fixed budget (see [`hidden_behind_deflate`]), which
+//! the integrity pass completes. A streaming reader scans
+//! stored data, and the data of every method but deflate, for a descriptor
+//! signature instead, which the census searches for (see
+//! [`judge_first_signature`]).
 
 use std::cell::Cell;
 use std::cell::RefCell;
 use std::io::BufReader;
 use std::io::Read;
 use std::io::Seek;
+use std::io::SeekFrom;
 use std::io::sink;
 use std::path::Path;
 use std::rc::Rc;
@@ -29,6 +34,7 @@ use super::zip::ZipMethod;
 use super::zip_structure::LFH_FIXED_LEN;
 use super::zip_structure::LFH_SIGNATURE;
 use super::zip_structure::le16;
+use super::zip_structure::le32;
 use crate::ArchiveError;
 use crate::HiddenRegion;
 use crate::Result;
@@ -94,7 +100,8 @@ impl DescriptorTail {
     /// Does nothing under `--zip-consistency ignore`. A tail the budget
     /// cannot cover, or whose raw decode disagrees with the `zip` crate's, is
     /// listed by path as unverified (`DescriptorTail`) instead of being passed
-    /// over silently.
+    /// over silently. A header the census already `reported` is not recorded
+    /// a second time.
     ///
     /// # Errors
     ///
@@ -106,6 +113,7 @@ impl DescriptorTail {
         pass: &mut IntegrityPass<'_>,
         slot: Slot,
         path: &Path,
+        reported: &[ZipInconsistency],
     ) -> Result<()> {
         if pass.config().zip_consistency != ZipConsistencyPolicy::Enforce {
             return Ok(());
@@ -125,10 +133,14 @@ impl DescriptorTail {
             }
             Tail::Hidden(found) => found,
         };
-        let finding = ArchiveError::ZipInconsistency(ZipInconsistency::HiddenLocalHeader {
+        let hidden = ZipInconsistency::HiddenLocalHeader {
             offset: self.data_start.saturating_add(found),
             region: HiddenRegion::DescriptorTail,
-        });
+        };
+        if reported.contains(&hidden) {
+            return Ok(());
+        }
+        let finding = ArchiveError::ZipInconsistency(hidden);
         pass.push_issue(
             slot,
             VerificationIssue::from_error(&finding, Some(path.to_path_buf())),
@@ -167,6 +179,52 @@ impl DescriptorTail {
         let found = scan(&mut rest, slack, LFH_SIGNATURE, judge_header_in_slack)?;
         Ok(found.map_or(Tail::Clean, |at| Tail::Hidden(stream_end + at)))
     }
+}
+
+/// Offset in the file of a local header behind the end of the deflate stream of
+/// a descriptor entry whose data is `compressed` bytes at `data_start`, or
+/// `None` when the declared range ends with the stream or holds no header.
+///
+/// The range is searched for a header signature first, which costs one read of
+/// the declared bytes; only a range that has one is decoded, and the decoder's
+/// output is bounded by `size`, which is charged to `budget`. An entry that
+/// does not fit the budget, and a stream that does not decode, are left to the
+/// integrity pass.
+///
+/// # Errors
+///
+/// Returns the I/O error of a failing read.
+pub(super) fn hidden_behind_deflate<R: Read + Seek>(
+    reader: &mut R,
+    data_start: u64,
+    compressed: u64,
+    size: u64,
+    budget: &mut u64,
+) -> Result<Option<u64>> {
+    if compressed <= LFH_FIXED_LEN as u64 {
+        return Ok(None);
+    }
+    reader.seek(SeekFrom::Start(data_start))?;
+    let mut data = Read::take(&mut *reader, compressed);
+    if scan(&mut data, compressed, LFH_SIGNATURE, judge_header_in_slack)?.is_none() {
+        return Ok(None);
+    }
+    let Some(left) = budget.checked_sub(size) else {
+        return Ok(None);
+    };
+    *budget = left;
+    reader.seek(SeekFrom::Start(data_start))?;
+    let tail = DescriptorTail {
+        method: Compressed::Deflate,
+        data_start,
+        compressed,
+        size,
+    };
+    let raw = Read::take(&mut *reader, compressed);
+    Ok(match tail.find_hidden(raw)? {
+        Tail::Hidden(at) => Some(data_start.saturating_add(at)),
+        Tail::Clean | Tail::Undecided => None,
+    })
 }
 
 /// What the tail check concluded about one entry.
@@ -243,14 +301,14 @@ pub(super) enum Judgement {
 }
 
 /// Judges a header signature in the bytes behind a compressed stream: a header
-/// with a name that fits in the rest of the declared range.
-fn judge_header_in_slack(bytes: &[u8], at: u64, total: u64) -> Judgement {
+/// with a name, or a nameless one that still makes a streaming reader skip its
+/// compressed size. The name may run past the declared range, since a reader
+/// takes the bytes after it as part of the name.
+fn judge_header_in_slack(bytes: &[u8], _: u64, _: u64) -> Judgement {
     let Some(header) = bytes.first_chunk::<LFH_FIXED_LEN>() else {
         return Judgement::NeedMore;
     };
-    let name_len = u64::from(le16::<26, LFH_FIXED_LEN>(header));
-    let extra_len = u64::from(le16::<28, LFH_FIXED_LEN>(header));
-    if name_len > 0 && at + LFH_FIXED_LEN as u64 + name_len + extra_len <= total {
+    if le16::<26, LFH_FIXED_LEN>(header) > 0 || le32::<18, LFH_FIXED_LEN>(header) > 0 {
         Judgement::Hit(0)
     } else {
         Judgement::Miss
@@ -376,7 +434,7 @@ mod tests {
         let config = SecurityConfig::default().validate().unwrap();
         let mut pass = IntegrityPass::new(&config, DecompressionBudget::DEFAULT);
         let slot = pass.begin_entry(0, &crate::EntryCompression::Unknown);
-        tail.check(&mut archive, 0, &mut pass, slot, Path::new("a.txt"))
+        tail.check(&mut archive, 0, &mut pass, slot, Path::new("a.txt"), &[])
             .unwrap();
 
         let gaps = pass.finish().gaps;

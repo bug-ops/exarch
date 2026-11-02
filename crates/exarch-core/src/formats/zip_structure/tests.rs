@@ -27,6 +27,7 @@ use crate::raw_zip::RawZip;
 use crate::raw_zip::deflate_zeros;
 use crate::test_utils::create_test_zip;
 
+mod descriptor_resume;
 mod stored_resume;
 mod streaming;
 mod xl_type;
@@ -1446,7 +1447,7 @@ fn header_hidden_behind_a_compressed_stream_is_found_with_integrity() {
                 &VerificationOptions::default(),
             )
             .unwrap();
-        assert!(hidden_issues(&plain).is_empty(), "method {method}");
+        assert_eq!(hidden_issues(&plain).len(), 1, "method {method}");
     }
 }
 
@@ -1884,7 +1885,7 @@ fn stray_central_record_is_fatal_under_enforce_and_reported_by_verify() {
 #[test]
 fn descriptor_tail_the_budget_cannot_cover_is_listed_with_its_own_reason() {
     let payload = b"hello hello hello hello";
-    let built = RawZip::new(vec![descriptor_entry(8, payload, &descriptor(payload, 0))]).build();
+    let built = RawZip::new(vec![descriptor_entry(12, payload, &descriptor(payload, 0))]).build();
     let report = open_bytes(built.bytes)
         .verify(
             &config(ZipConsistencyPolicy::Enforce),

@@ -96,7 +96,6 @@ use std::sync::Mutex;
 use std::sync::MutexGuard;
 use std::sync::PoisonError;
 
-use zip::CompressionMethod;
 use zip::ZipArchive as ZipReader;
 use zip::ZipReadOptions;
 use zip::result::ZipError;
@@ -109,6 +108,7 @@ use super::chunk_search::search_chunks;
 use super::common;
 use super::zip::admit_zip_entry;
 use super::zip::is_password_required;
+use super::zip_tail::hidden_behind_deflate;
 use super::zip_tail::judge_first_signature;
 use super::zip_tail::scan;
 use crate::ArchiveError;
@@ -549,10 +549,11 @@ struct EntryLayout {
     end: u64,
     /// How a streaming reader ends the entry, when its sizes follow the data.
     descriptor: Option<DescriptorExit>,
-    method: CompressionMethod,
     /// Compressed and uncompressed size the central directory declares.
     compressed: u64,
     size: u64,
+    /// CRC-32 of the uncompressed data the central directory declares.
+    crc32: u32,
     /// Type the central directory gives the entry.
     kind: EntryKind,
 }
@@ -742,9 +743,9 @@ fn layout_of<R: Read>(file: &zip::read::ZipFile<'_, R>, index: usize) -> Result<
             .flags()
             .is_using_data_descriptor()
             .then(|| DescriptorExit::of(file.compression())),
-        method: file.compression(),
         compressed: file.compressed_size(),
         size: file.size(),
+        crc32: file.crc32(),
         kind: EntryKind::of_central(file.is_dir(), file.unix_mode()),
     })
 }
@@ -1000,6 +1001,10 @@ const RESERVED_FLAG_BITS: u16 = 0xD780;
 
 const DATA_DESCRIPTOR_FLAG: u16 = 0x0008;
 
+/// Output the census decodes per archive to find where deflate streams end; the
+/// integrity pass, which has a budget of its own, covers what exceeds it.
+const CENSUS_DECODE_BUDGET: u64 = 256 * 1024 * 1024;
+
 /// Compression methods assigned to a format the ecosystem uses.
 const KNOWN_METHODS: [u16; 9] = [0, 8, 9, 12, 14, 93, 95, 98, 99];
 
@@ -1038,6 +1043,9 @@ struct GapChecker<'a, R> {
     /// Signature hits below this offset were already judged.
     next_unjudged: u64,
     exhausted: bool,
+    /// Output bytes the census may still decode to find the end of deflate
+    /// streams.
+    decode_budget: u64,
     /// Reads of the gap search, for the tests that bound them.
     #[cfg(test)]
     reads: usize,
@@ -1069,6 +1077,7 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
             chunks,
             next_unjudged: 0,
             exhausted: false,
+            decode_budget: CENSUS_DECODE_BUDGET,
             #[cfg(test)]
             reads: 0,
         }
@@ -1123,8 +1132,9 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
                     .get(starts.partition_point(|&s| s <= layout.header_start))
                     .copied()
                     .unwrap_or(self.map.directory_start);
-                if layout.method == CompressionMethod::Stored {
-                    self.check_stored_resume(layout, findings)?;
+                match exit {
+                    DescriptorExit::Scan => self.check_scanned_resume(layout, findings)?,
+                    DescriptorExit::Inflate => self.check_inflated_resume(layout, findings)?,
                 }
                 self.check_descriptor(layout, exit, next, findings)?;
             }
@@ -1322,16 +1332,22 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
         Ok(())
     }
 
-    /// Searches the declared range of a stored descriptor entry from its
-    /// first descriptor signature on, as a gap.
+    /// Searches the declared range of a descriptor entry whose end a streaming
+    /// reader finds by scanning, from its first descriptor signature on, as a
+    /// gap.
     ///
-    /// A streaming reader cannot decode stored data, so it ends the entry at
-    /// the first descriptor signature in it, which can lie before the declared
-    /// end the central directory gives, and reads on from there like from any
-    /// gap. The signature scan is bounded by the entry's declared size, which
-    /// the archive-wide budget caps, keeps one chunk in memory and is not
-    /// counted in `reads`; the gap search that follows is.
-    fn check_stored_resume(&mut self, layout: &EntryLayout, findings: &mut Findings) -> Result<()> {
+    /// A streaming reader cannot decode such data (stored, or any method but
+    /// deflate), so it ends the entry at the first descriptor signature in it,
+    /// which can lie before the declared end the central directory gives, and
+    /// reads on from there like from any gap. The signature scan is bounded by
+    /// the entry's declared size, which the archive-wide budget caps, keeps one
+    /// chunk in memory and is not counted in `reads`; the gap search that
+    /// follows is.
+    fn check_scanned_resume(
+        &mut self,
+        layout: &EntryLayout,
+        findings: &mut Findings,
+    ) -> Result<()> {
         if layout.compressed < DATA_DESCRIPTOR_SIGNATURE.len() as u64 {
             return Ok(());
         }
@@ -1363,6 +1379,37 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
             HiddenRegion::DescriptorTail,
             findings,
         )
+    }
+
+    /// Reports a local header behind the end of the compressed stream of a
+    /// deflated descriptor entry, inside its declared range.
+    ///
+    /// A streaming reader ends such an entry where its stream ends, so bytes
+    /// after that point are read as headers. The stream end takes decoding to
+    /// find, so the declared range is decoded only when it holds a header
+    /// signature at all.
+    fn check_inflated_resume(
+        &mut self,
+        layout: &EntryLayout,
+        findings: &mut Findings,
+    ) -> Result<()> {
+        let Some(offset) = hidden_behind_deflate(
+            &mut *self.reader,
+            layout.data_start,
+            layout.compressed,
+            layout.size,
+            &mut self.decode_budget,
+        )?
+        else {
+            return Ok(());
+        };
+        if !findings.try_push(Slot::Hidden, || ZipInconsistency::HiddenLocalHeader {
+            offset,
+            region: HiddenRegion::DescriptorTail,
+        }) {
+            self.exhausted = true;
+        }
+        Ok(())
     }
 
     /// Judges the bytes at one position as a possible local header.

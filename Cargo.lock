@@ -633,6 +633,7 @@ dependencies = [
  "liblzma",
  "lzma-rust2 0.24.0",
  "proptest",
+ "rustix",
  "sevenz-rust2",
  "smallvec",
  "tar",

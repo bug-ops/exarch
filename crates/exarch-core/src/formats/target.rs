@@ -6,7 +6,9 @@
 //! [`ExtractTarget`], so the host filesystem ([`HostTarget`]) and an
 //! `EntrySink` run the same gates.
 
+use std::fs::File;
 use std::io::Read;
+use std::path::Component;
 use std::path::Path;
 
 use crate::ArchiveError;
@@ -21,6 +23,7 @@ use crate::security::admitted::EntrySize;
 use crate::security::admitted::ValidatedFile;
 use crate::security::admitted::ValidatedHardlink;
 use crate::security::fs_view::HostFs;
+use crate::security::fs_view::Occupant;
 use crate::security::hardlink::hardlink_target_missing;
 use crate::security::quota::EntryCount;
 use crate::security::quota::QuotaPermit;
@@ -34,6 +37,8 @@ use crate::types::safe_symlink::resolve_through_symlinks;
 
 use super::common;
 use super::dir_walker::DirWalker;
+use super::pinned_dir::PinnedRoot;
+use super::pinned_dir::TempFileGuard;
 
 /// The per-run counters a target updates while it writes.
 pub struct Tally<'a> {
@@ -144,7 +149,7 @@ pub trait ExtractTarget {
 
 /// Extraction onto the real filesystem.
 pub struct HostTarget<'a> {
-    dest: DestDir,
+    root: PinnedRoot,
     dirs: DirWalker,
     copy_buffer: CopyBuffer,
     core: ValidatorCore<'a>,
@@ -154,7 +159,7 @@ impl<'a> HostTarget<'a> {
     /// Creates `output_dir` if needed and a target writing into it.
     pub(crate) fn create(output_dir: &Path, config: &'a SecurityConfig<Validated>) -> Result<Self> {
         Ok(Self {
-            dest: DestDir::new_or_create(output_dir.to_path_buf())?,
+            root: PinnedRoot::open(DestDir::new_or_create(output_dir.to_path_buf())?)?,
             dirs: DirWalker::new(config),
             copy_buffer: CopyBuffer::new(),
             core: ValidatorCore::new(config),
@@ -162,7 +167,11 @@ impl<'a> HostTarget<'a> {
     }
 
     pub(super) const fn dest(&self) -> &DestDir {
-        &self.dest
+        self.root.dest()
+    }
+
+    pub(super) const fn root(&self) -> &PinnedRoot {
+        &self.root
     }
 
     pub(super) fn copy_buffer_mut(&mut self) -> &mut CopyBuffer {
@@ -177,7 +186,7 @@ impl<'a> HostTarget<'a> {
     pub(super) fn validate_path(&self, path: &Path, kind: NodeKind) -> Result<EntryPath<SafePath>> {
         let ctx = self.core.context::<HostFs>();
         self.core
-            .validate_entry_path_in(path, kind, &self.dest, &HostFs, &ctx)
+            .validate_entry_path_in(path, kind, self.root.dest(), &HostFs, &ctx)
     }
 
     /// Reserves `size` bytes of quota for a file.
@@ -200,7 +209,7 @@ impl ExtractTarget for HostTarget<'_> {
                 request.path,
                 request.size,
                 request.mode,
-                &self.dest,
+                self.root.dest(),
                 &HostFs,
                 &ctx,
             )
@@ -210,7 +219,7 @@ impl ExtractTarget for HostTarget<'_> {
     fn validate_directory(&mut self, path: &Path, size: EntrySize) -> Result<SafePath> {
         let ctx = self.core.context::<HostFs>();
         self.core
-            .validate_directory_in(path, size, &self.dest, &HostFs, &ctx)
+            .validate_directory_in(path, size, self.root.dest(), &HostFs, &ctx)
     }
 
     fn validate_symlink(
@@ -221,7 +230,7 @@ impl ExtractTarget for HostTarget<'_> {
     ) -> Result<SafeSymlink> {
         let ctx = self.core.context::<HostFs>();
         self.core
-            .validate_symlink_in(path, target, size, &self.dest, &HostFs, &ctx)
+            .validate_symlink_in(path, target, size, self.root.dest(), &HostFs, &ctx)
             .map(|validated| validated.symlink)
     }
 
@@ -233,11 +242,11 @@ impl ExtractTarget for HostTarget<'_> {
     ) -> Result<ValidatedHardlink> {
         let ctx = self.core.context::<HostFs>();
         self.core
-            .validate_hardlink_in(path, target, size, &self.dest, &HostFs, &ctx)
+            .validate_hardlink_in(path, target, size, self.root.dest(), &HostFs, &ctx)
     }
 
     fn directory(&mut self, path: &SafePath, tally: &mut Tally<'_>) -> Result<()> {
-        common::create_directory(path, &self.dest, tally.report, self.dirs)
+        common::create_directory(path, &self.root, tally.report, self.dirs)
     }
 
     fn file<R: Read>(
@@ -252,7 +261,7 @@ impl ExtractTarget for HostTarget<'_> {
             &admitted.path,
             admitted.mode,
             admitted.permit,
-            &self.dest,
+            &self.root,
             tally.report,
             Some(size),
             &mut self.copy_buffer,
@@ -266,7 +275,7 @@ impl ExtractTarget for HostTarget<'_> {
     fn symlink(&mut self, symlink: &SafeSymlink, tally: &mut Tally<'_>) -> Result<()> {
         common::create_symlink(
             symlink,
-            &self.dest,
+            &self.root,
             tally.report,
             self.dirs,
             tally.options,
@@ -283,59 +292,32 @@ impl ExtractTarget for HostTarget<'_> {
     ///
     /// # Security - Symlink-at-Destination Rejection (issue #467)
     ///
-    /// `Path::exists()` returns `false` for a dangling symlink, so a
-    /// pre-planted symlink at `link_path` used to bypass the old
-    /// existence-based duplicate check, and the subsequent `fs::copy`
-    /// followed it, writing archive content outside the extraction root.
-    /// The destination is now opened via `common::create_file_with_mode`
-    /// (mode `None`, since permissions are copied from the target's bytes
-    /// afterward, not set at creation) with `create_new = true`, which
-    /// atomically fails with `ErrorKind::AlreadyExists` for any pre-existing
-    /// path at `link_path` — symlink (dangling or not), regular file, or
-    /// directory — folding the duplicate check into the `open()` call
-    /// itself instead of a separate, bypassable `exists()` probe. This
-    /// reuses the same `O_EXCL`+`O_NOFOLLOW` (Unix) discipline as the
-    /// normal-file write path (issue #459) for consistency, though
-    /// `create_new`'s `O_EXCL` alone already refuses any pre-existing path.
+    /// The link is created with `O_EXCL | O_NOFOLLOW` relative to its pinned
+    /// parent directory, which atomically fails with `AlreadyExists` for any
+    /// pre-existing name: a symlink (dangling or not), a file or a directory.
+    /// A separate `exists()` probe would report a dangling symlink as absent
+    /// and could be raced.
     ///
-    /// # Security - Target Read TOCTOU and Quota TOCTOU (issue #467)
+    /// # Security - Target Read TOCTOU and Quota TOCTOU (issues #467, #818)
     ///
-    /// Hardlinks are validated in two passes: `validate` (via
-    /// `HardlinkTracker::validate_hardlink_in`) resolves `target` through
-    /// any on-disk symlinks and checks containment in pass one, but this
-    /// function — pass two — runs later, after every entry in the archive has
-    /// been validated and every non-hardlink entry extracted. Nothing
-    /// re-validates `target_path` in between. A plain path-based `File::open`
-    /// (or `std::fs::metadata`, as this function used to do to size the quota
-    /// reservation) would silently follow whatever is at `target_path` by the
-    /// time pass two runs — which, given an attacker-writable destination
-    /// directory, may not be what pass one validated at all (the target
-    /// swapped for a symlink escaping `dest` in between the two passes).
-    /// Separately, sizing the quota reservation from a path-based `stat` and
-    /// then copying from a *different*, separately-opened handle left its own
-    /// TOCTOU window: swapping `target_path` between the two operations could
-    /// charge the quota for N bytes while actually copying an unbounded
-    /// amount.
+    /// Hardlinks are validated in two passes, and nothing re-validates the
+    /// target between them, so the target is opened once, relative to its
+    /// pinned parent directory, with `O_NOFOLLOW | O_NONBLOCK`. The handle is
+    /// checked to be a regular file (a FIFO swapped in cannot stall the open
+    /// or the read); the quota reservation is sized from that handle's
+    /// `fstat`, and the copy reads from the same handle with the `fstat` size
+    /// as an exact ceiling, so a target that grows afterwards fails closed
+    /// instead of writing past the reservation.
     ///
-    /// Both are narrowed the same way: [`common::open_no_follow`] opens
-    /// `target_path` once, refusing to follow a symlink (Unix, via
-    /// `O_NOFOLLOW`) rather than a separate `stat`-then-`open`; the quota
-    /// reservation is sized from that same open handle's `fstat`, and the
-    /// copy reads from that same handle — never re-touching the path
-    /// afterward. A symlink at `target_path` is not automatically rejected,
-    /// though: it is a legitimate, common archive shape for a hardlink's
-    /// target to itself be a symlink created earlier in the *same*
-    /// extraction (already pass-one-validated). On `ErrorKind::FilesystemLoop`
-    /// from `open_no_follow`, [`resolve_through_symlinks`] re-runs the exact
-    /// containment check pass one already trusts, against the *current*
-    /// on-disk state; if it still resolves inside `dest`, the resolved
-    /// (symlink-free, since `canonicalize` dereferences fully) path is opened
-    /// instead. This narrows the TOCTOU window from "the entire gap between
-    /// pass one and pass two" down to "between this re-check and the open" —
-    /// consistent with the check-then-act discipline the rest of the pipeline
-    /// already accepts elsewhere (e.g. `DirWalker`'s documented TOCTOU). If the
-    /// re-resolution instead lands outside `dest`, that is a genuine escape
-    /// attempt and is reported as such, not as a raw OS errno.
+    /// A symlink at the target is not automatically rejected: a hardlink may
+    /// legitimately point at a symlink created earlier in the same extraction.
+    /// It is resolved with the containment check pass one already trusts and
+    /// the resolved, symlink-free path is walked again with every symlink
+    /// refused. A resolution that leaves `dest` is reported as
+    /// `HardlinkEscape`.
+    ///
+    /// When symlinks are not allowed, a target below a pre-existing symlinked
+    /// directory inside `dest` is refused like any other entry below one.
     fn hardlink(
         &mut self,
         link: &SafePath,
@@ -344,16 +326,10 @@ impl ExtractTarget for HostTarget<'_> {
         tally: &mut Tally<'_>,
         hardlink_duplicate_skips: &mut u64,
     ) -> Result<()> {
-        let link_path = self.dest.join(link);
-        let target_path = self.dest.join(target);
+        let (target_file, target_size) = self.open_hardlink_target(link, target)?;
 
-        if !target_path.exists() {
-            return Err(hardlink_target_missing(target.as_path()));
-        }
-
-        self.dirs.ensure_parent(&self.dest, link.as_path())?;
-
-        let link_file = match common::create_file_with_mode(&link_path, None) {
+        let (link_dir, link_leaf) = self.dirs.ensure_parent(&self.root, link.as_path())?;
+        let link_file = match link_dir.create_new(link_leaf, None) {
             Ok(file) => file,
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 if tally.options.skip_duplicates {
@@ -368,34 +344,7 @@ impl ExtractTarget for HostTarget<'_> {
             }
             Err(e) => return Err(ArchiveError::Io(e)),
         };
-        let cleanup_guard = common::TempFileGuard::new(link_path);
-
-        // Opened once, refusing to follow a symlink at `target_path`; the
-        // quota reservation below and the copy further down both operate on
-        // this same handle instead of re-touching the path (issue #467).
-        let target_file = match common::open_no_follow(&target_path) {
-            Ok(file) => file,
-            Err(e) if common::is_filesystem_loop_error(&e) => {
-                // `target_path`'s final component is a symlink. Re-run pass
-                // one's own containment check against the current on-disk
-                // state; a symlink created by an earlier entry in this same
-                // extraction resolves safely inside `dest` and is opened at
-                // its resolved (symlink-free) location, while a genuine
-                // escape attempt is rejected as HardlinkEscape rather than
-                // surfacing as a raw ELOOP.
-                let resolved = resolve_through_symlinks(
-                    self.dest.as_path(),
-                    target.as_path(),
-                    &self.dest,
-                    link.as_path(),
-                )
-                .map_err(|_| ArchiveError::HardlinkEscape {
-                    path: link.as_path().to_path_buf(),
-                })?;
-                common::open_no_follow(&resolved)?
-            }
-            Err(e) => return Err(ArchiveError::Io(e)),
-        };
+        let cleanup_guard = TempFileGuard::new(&link_dir, link_leaf);
 
         // Every hardlink copies the target's real bytes to a new inode, so it
         // must be charged against the same quota tracker as regular files
@@ -405,13 +354,18 @@ impl ExtractTarget for HostTarget<'_> {
         // slot but is charged no bytes, and the pending list is bounded by
         // `max_file_count` before anything is copied. The permit is consumed
         // by value below, so this charge cannot be spent twice.
-        let target_size = target_file.metadata()?.len();
         let permit = self.core.charge_hardlink(counted, target_size)?;
 
         // Copy content between the two handles opened above. Any subsequent
-        // write to `link_path` cannot corrupt `target_path` because they are
+        // write to the link cannot corrupt the target because they are
         // separate files.
-        let bytes_copied = common::copy_file_content_with_permit(target_file, link_file, permit)?;
+        let bytes_copied = common::copy_file_content_with_permit(
+            target_file,
+            link_file,
+            target_size,
+            &mut self.copy_buffer,
+            permit,
+        )?;
         cleanup_guard.persist();
 
         tally.report.files_extracted = common::checked_add_count(tally.report.files_extracted, 1)?;
@@ -420,5 +374,87 @@ impl ExtractTarget for HostTarget<'_> {
         tally.progress.on_bytes_written(bytes_copied);
 
         Ok(())
+    }
+}
+
+impl HostTarget<'_> {
+    /// Opens the content source of a hardlink and returns it with its `fstat`
+    /// size.
+    fn open_hardlink_target(&self, link: &SafePath, target: &SafePath) -> Result<(File, u64)> {
+        let file = if target
+            .as_path()
+            .components()
+            .any(|c| matches!(c, Component::ParentDir))
+        {
+            // A validated target may step out of a directory it entered
+            // (`d/../f`); only the resolved form can be walked by name.
+            self.open_through_symlink(link, target)?
+        } else {
+            self.open_direct(link, target)?
+        };
+        let meta = file.metadata()?;
+        if !meta.is_file() {
+            return Err(ArchiveError::InvalidArchive(format!(
+                "hardlink target is not a regular file: {}",
+                target.as_path().display()
+            )));
+        }
+        Ok((file, meta.len()))
+    }
+
+    /// Opens a hardlink target by name, falling back to its resolved location
+    /// when the final component is a symlink.
+    fn open_direct(&self, link: &SafePath, target: &SafePath) -> Result<File> {
+        let missing = || hardlink_target_missing(target.as_path());
+        let (dir, leaf) = self
+            .dirs
+            .open_parent(&self.root, target.as_path())
+            .map_err(|e| not_found_as(e, missing))?;
+        match dir.open_read(leaf) {
+            Ok(file) => Ok(file),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(missing()),
+            Err(e) => match dir.probe(leaf) {
+                Ok(Some(Occupant::Symlink)) => self.open_through_symlink(link, target),
+                _ => Err(ArchiveError::Io(e)),
+            },
+        }
+    }
+
+    /// Opens a hardlink target through its resolved, symlink-free location:
+    /// a symlink created earlier in this extraction, or a path with `..`.
+    fn open_through_symlink(&self, link: &SafePath, target: &SafePath) -> Result<File> {
+        let missing = || hardlink_target_missing(target.as_path());
+        // The path-based `exists` only picks the error: a dangling link is a
+        // missing target, not an escape.
+        if !self.root.dest().join(target).exists() {
+            return Err(missing());
+        }
+        let escape = || ArchiveError::HardlinkEscape {
+            path: link.as_path().to_path_buf(),
+        };
+        let dest = self.root.dest();
+        let resolved =
+            resolve_through_symlinks(dest.as_path(), target.as_path(), dest, link.as_path())
+                .map_err(|_| escape())?;
+        let inside = resolved
+            .strip_prefix(dest.as_path())
+            .map_err(|_| escape())?;
+        let (dir, leaf) = self
+            .dirs
+            .open_resolved_parent(&self.root, inside)
+            .map_err(|e| not_found_as(e, missing))?;
+        match dir.open_read(leaf) {
+            Ok(file) => Ok(file),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(missing()),
+            Err(e) => Err(ArchiveError::Io(e)),
+        }
+    }
+}
+
+/// Replaces an I/O `NotFound` with `missing()`; any other error is unchanged.
+fn not_found_as(err: ArchiveError, missing: impl FnOnce() -> ArchiveError) -> ArchiveError {
+    match err {
+        ArchiveError::Io(e) if e.kind() == std::io::ErrorKind::NotFound => missing(),
+        other => other,
     }
 }

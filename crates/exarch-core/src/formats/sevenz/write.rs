@@ -9,6 +9,10 @@ use crate::config::Validated;
 use crate::copy::CopyBuffer;
 use crate::copy::copy_with_buffer;
 use crate::formats::common;
+use crate::formats::pinned_dir::Leaf;
+use crate::formats::pinned_dir::TempFileGuard;
+use crate::formats::pinned_dir::TempLeaf;
+use crate::formats::pinned_dir::VettedDir;
 use crate::security::fs_view::FsView;
 use crate::security::quota::QuotaPermit;
 use crate::types::SafePath;
@@ -17,22 +21,25 @@ use std::io::ErrorKind;
 use std::io::Read;
 use std::io::Write;
 use std::path::Path;
-use std::path::PathBuf;
 
-/// Writes `reader`'s bytes directly to `dest_path` (no temp file, no
+/// Writes `reader`'s bytes directly to `leaf` in `parent` (no temp file, no
 /// rename), consuming the [`QuotaPermit`] that authorized the write.
 ///
-/// Used for the common case where nothing currently occupies `dest_path`
-/// (issue #492): opens `dest_path` itself via `common::create_file_with_mode`
-/// with `create_new = true`, giving the same `O_EXCL`+`O_NOFOLLOW` (Unix)
-/// guarantee against a symlink race as [`write_file_with_permit`]'s temp file
-/// and as TAR/ZIP's [`common::extract_file_with_permit`] — just without the
-/// two extra syscalls (open+rename of a temp file) that only matter when
-/// something needs to be atomically replaced. Callers must have already
-/// confirmed `dest_path` has no pre-existing occupant (see
-/// [`lstat_dest`]); when it does, use [`write_file_with_permit`] instead so a
-/// decode failure mid-stream cannot leave a truncated file where the
-/// original stood.
+/// Used for the common case where nothing currently occupies `leaf`
+/// (issue #492): creates `leaf` itself via [`VettedDir::create_new`], giving
+/// the same `O_EXCL`+`O_NOFOLLOW` guarantee against a symlink race as
+/// [`write_file_with_permit`]'s temp file and as TAR/ZIP's
+/// [`common::extract_file_with_permit`] — just without the two extra syscalls
+/// (create+rename of a temp file) that only matter when something needs to be
+/// atomically replaced. Callers must have already confirmed `leaf` has no
+/// pre-existing occupant (see [`DestOccupancy`](super::host)); when it does,
+/// use [`write_file_with_permit`] instead so a decode failure mid-stream
+/// cannot leave a truncated file where the original stood.
+///
+/// `parent` is the pinned directory handle the caller obtained from the
+/// directory walker; the create, the cleanup on failure and every later step
+/// are relative to it, so a parent component swapped after the walk cannot
+/// redirect the write (issue #818).
 ///
 /// Taking `permit` by value mirrors the guarantee
 /// [`common::copy_file_content_with_permit`] gives TAR's hardlink path, and
@@ -58,25 +65,24 @@ use std::path::PathBuf;
 /// `expected_size`.
 pub(super) fn write_file_direct(
     reader: &mut dyn Read,
-    dest_path: &Path,
+    parent: &VettedDir,
+    leaf: Leaf<'_>,
     expected_size: u64,
     copy_buffer: &mut CopyBuffer,
     _permit: QuotaPermit,
 ) -> Result<u64> {
-    let file = common::create_file_with_mode(dest_path, None)?;
+    let file = parent.create_new(leaf, None)?;
     // A decode failure partway through the copy would otherwise leave a
-    // truncated file at dest_path (issue #492 adversarial review, finding
-    // M1): since this branch only runs when nothing occupied dest_path
-    // beforehand, it is always safe to remove whatever we just started
-    // writing there. Mirrors write_file_with_permit_using's TempFileGuard
-    // use, just applied directly to dest_path instead of a temp path.
+    // truncated file at `leaf` (issue #492 adversarial review, finding M1):
+    // since this branch only runs when nothing occupied `leaf` beforehand, it
+    // is always safe to remove whatever we just started writing there.
     //
     // Declared before `writer` takes ownership of `file` below: Rust drops
     // locals in reverse declaration order, so on an error unwind `writer`
     // (and the `file` it owns) drops — and closes the fd — before `guard`
-    // attempts to remove the path. Reversing this order would let the guard
+    // attempts to remove the name. Reversing this order would let the guard
     // try to unlink a still-open file, a silent no-op on Windows.
-    let guard = common::TempFileGuard::new(dest_path.to_path_buf());
+    let guard = TempFileGuard::new(parent, leaf);
     // 64KiB write buffering to cut per-file syscall count (finding M2),
     // matching TAR/ZIP's common::extract_file_with_permit.
     let mut writer = std::io::BufWriter::with_capacity(64 * 1024, file);
@@ -86,14 +92,15 @@ pub(super) fn write_file_direct(
     Ok(bytes_written)
 }
 
-/// Writes `reader`'s bytes to `dest_path` via an atomic temp-file-then-rename,
-/// consuming the [`QuotaPermit`] that authorized the write.
+/// Writes `reader`'s bytes to `leaf` in `parent` via an atomic
+/// temp-file-then-rename, consuming the [`QuotaPermit`] that authorized the
+/// write.
 ///
-/// Used only when `dest_path` has a pre-existing occupant being overwritten
+/// Used only when `leaf` has a pre-existing occupant being overwritten
 /// (issue #492): atomicity matters here because a decode failure mid-stream
-/// must not leave a truncated file where the original stood. When
-/// `dest_path` is known to have no pre-existing occupant, [`write_file_direct`]
-/// skips the temp file and rename entirely.
+/// must not leave a truncated file where the original stood. When `leaf` is
+/// known to have no pre-existing occupant, [`write_file_direct`] skips the
+/// temp file and rename entirely.
 ///
 /// Taking `permit` by value mirrors the guarantee
 /// [`common::copy_file_content_with_permit`] gives TAR's hardlink path, and
@@ -107,16 +114,13 @@ pub(super) fn write_file_direct(
 ///
 /// The temp file name is predictable from the process PID and a per-process
 /// monotonic counter, so a pre-planted symlink (dangling or not) at a
-/// predicted temp path used to be silently followed by `File::create`,
+/// predicted temp name used to be silently followed by `File::create`,
 /// writing archive content outside the extraction root. The temp file is
-/// now opened via `common::create_file_with_mode` (mode `None`, since 7z
-/// never exposes a Unix mode to sanitize) with `create_new = true`, reusing
-/// the same `O_EXCL`+`O_NOFOLLOW` (Unix) discipline as the normal-file write
-/// path (issue #459) for consistency, though `create_new`'s `O_EXCL` alone
-/// already refuses any pre-existing path instead of following it. On
-/// collision (`ErrorKind::AlreadyExists`), a fresh counter value is drawn
-/// and creation is retried up to [`common::MAX_TEMP_FILE_CREATE_ATTEMPTS`]
-/// times.
+/// now created via [`VettedDir::create_new`] (`O_EXCL | O_NOFOLLOW`), which
+/// refuses any pre-existing name instead of following it. On collision
+/// (`ErrorKind::AlreadyExists`), a fresh counter value is drawn and creation
+/// is retried up to [`common::MAX_TEMP_FILE_CREATE_ATTEMPTS`] times. The temp
+/// file, the rename and the cleanup are all relative to `parent` (issue #818).
 ///
 /// # Security - Streaming Size Enforcement (GHSA-5j8q-wxg5-hj4r)
 ///
@@ -132,32 +136,33 @@ pub(super) fn write_file_direct(
 /// `expected_size`.
 pub(super) fn write_file_with_permit(
     reader: &mut dyn Read,
-    dest_path: &Path,
+    parent: &VettedDir,
+    leaf: Leaf<'_>,
     expected_size: u64,
     copy_buffer: &mut CopyBuffer,
     permit: QuotaPermit,
 ) -> Result<u64> {
     write_file_with_permit_using(
         reader,
-        dest_path,
+        parent,
+        leaf,
         expected_size,
         copy_buffer,
         permit,
-        || common::temp_sibling_path(dest_path),
+        TempLeaf::next,
     )
 }
 
 /// Implementation behind [`write_file_with_permit`], parameterized over the
-/// candidate temp-path generator.
+/// candidate temp-name generator.
 ///
 /// Tests inject a private, non-shared generator here instead of calling
-/// [`write_file_with_permit`] directly, so that predicting which paths a
-/// test run will attempt never depends on the process-global
-/// [`TEMP_COUNTER`] — a global shared with every other test in the same
-/// binary that also happens to write a 7z file, and therefore not something
-/// a single test can safely predict under `cargo test`'s default
-/// multi-threaded execution (only nextest's one-test-per-process model would
-/// make that safe).
+/// [`write_file_with_permit`] directly, so that predicting which names a test
+/// run will attempt never depends on the process-global temp counter — a
+/// global shared with every other test in the same binary that also happens to
+/// write a 7z file, and therefore not something a single test can safely
+/// predict under `cargo test`'s default multi-threaded execution (only
+/// nextest's one-test-per-process model would make that safe).
 ///
 /// # Security - Streaming Size Enforcement (GHSA-5j8q-wxg5-hj4r)
 ///
@@ -173,22 +178,21 @@ pub(super) fn write_file_with_permit(
 /// `expected_size`.
 pub(super) fn write_file_with_permit_using(
     reader: &mut dyn Read,
-    dest_path: &Path,
+    parent: &VettedDir,
+    leaf: Leaf<'_>,
     expected_size: u64,
     copy_buffer: &mut CopyBuffer,
     _permit: QuotaPermit,
-    next_candidate_path: impl FnMut() -> PathBuf,
+    next_candidate: impl FnMut() -> TempLeaf,
 ) -> Result<u64> {
-    let (temp_path, temp_file) = common::create_temp_sibling(dest_path, None, next_candidate_path)?;
+    let (temp, temp_file) = common::create_temp_sibling(parent, leaf, None, next_candidate)?;
 
     // Declared before `writer` takes ownership of `temp_file` below, for the
     // same reason as write_file_direct's `guard`: reverse-declaration-order
     // drop means `writer` (owning `temp_file`) closes the fd before
-    // `temp_guard` attempts to remove `temp_path` on an error unwind,
+    // `temp_guard` attempts to remove the temp name on an error unwind,
     // instead of racing a still-open handle (a silent no-op on Windows).
-    // `temp_file` is moved into `writer` rather than merely borrowed so
-    // there is no separate `temp_file` binding left to outlive `writer`.
-    let temp_guard = common::TempFileGuard::new(temp_path.clone());
+    let temp_guard = TempFileGuard::for_temp(parent, temp.clone());
     // 64KiB write buffering to cut per-file syscall count (issue #492
     // adversarial review, finding M2), matching TAR/ZIP's
     // common::extract_file_with_permit.
@@ -198,7 +202,7 @@ pub(super) fn write_file_with_permit_using(
     // Explicit close before rename: renaming a still-open file is fine on
     // Unix but the handle should not outlive its purpose regardless.
     drop(writer);
-    std::fs::rename(&temp_path, dest_path)?;
+    parent.rename_within(temp.as_leaf(), leaf)?;
     temp_guard.persist();
 
     Ok(bytes_written)
@@ -209,26 +213,24 @@ pub(super) fn write_file_with_permit_using(
 /// Uses `symlink_metadata` rather than `exists()`/`is_dir()`: those follow
 /// symlinks and report a dangling symlink as absent, which would let a
 /// dangling symlink slip past both duplicate detection and the
-/// pre-existing-symlink rejection below (issues #468, #477, #478). Shared by
-/// both the host pre-pass and the host target's file admission, so the two
-/// agree on what counts as "something already at this path".
+/// pre-existing-symlink rejection below (issues #468, #477, #478). Used by the
+/// host pre-pass, which only decides whether to skip or refuse an entry before
+/// anything is written.
 ///
 /// # TOCTOU
 ///
-/// This check is advisory, not atomic: nothing prevents the filesystem state
-/// at `dest_path` from changing between this lstat and the later write. That
-/// window is benign on both of 7z's write paths (issue #492), for different
-/// reasons:
+/// This check is advisory, not atomic: the write itself re-probes the name
+/// relative to its pinned parent directory ([`VettedDir::probe`]) and both of
+/// 7z's write paths enforce the outcome again (issues #492, #818):
 ///
-/// - When nothing occupied `dest_path` ([`write_file_direct`]): the fast path
-///   opens `dest_path` itself via `common::create_file_with_mode` with
-///   `create_new = true`, the same `O_EXCL`+`O_NOFOLLOW` (Unix) guarantee
-///   TAR/ZIP's `O_NOFOLLOW` open gives — anything planted in the race window
-///   makes that open fail with `AlreadyExists` instead of being followed.
-/// - When something did occupy `dest_path` ([`write_file_with_permit`]): this
-///   branch never opens `dest_path` itself, and `rename(2)` replaces whatever
-///   occupies the destination without following a symlink planted there in the
-///   interim, so a race cannot redirect the write through a symlink target.
+/// - When nothing occupied the name ([`write_file_direct`]): the fast path
+///   creates it with `O_EXCL | O_NOFOLLOW`, so anything planted in the race
+///   window makes that create fail with `AlreadyExists` instead of being
+///   followed.
+/// - When something did occupy it ([`write_file_with_permit`]): this branch
+///   never opens the name itself, and `renameat` replaces whatever occupies it
+///   without following a symlink planted there in the interim, so a race cannot
+///   redirect the write through a symlink target.
 pub(super) fn lstat_dest(dest_path: &Path) -> std::io::Result<Option<std::fs::Metadata>> {
     match std::fs::symlink_metadata(dest_path) {
         Ok(meta) => Ok(Some(meta)),

@@ -19,6 +19,9 @@ use crate::SecurityConfig;
 use crate::SinkOptions;
 use crate::config::Validated;
 use crate::formats::common;
+use crate::formats::pinned_dir::Leaf;
+use crate::formats::pinned_dir::VettedDir;
+use crate::formats::pinned_dir::occupant_of;
 use crate::formats::target::ExtractTarget;
 use crate::formats::target::FileAdmission;
 use crate::formats::target::FileRequest;
@@ -47,15 +50,28 @@ enum DestOccupancy {
 }
 
 impl DestOccupancy {
-    /// Looks at `dest_path` without following a symlink, so a dangling link
-    /// counts as occupied.
-    fn probe(dest_path: &Path) -> std::io::Result<Self> {
-        Ok(match lstat_dest(dest_path)? {
+    fn of(occupant: Option<Occupant>) -> Self {
+        match occupant {
             None => Self::Vacant,
-            Some(meta) if meta.file_type().is_symlink() => Self::Symlink,
-            Some(meta) if meta.is_dir() => Self::Directory,
-            Some(_) => Self::RegularFile,
-        })
+            Some(Occupant::File) => Self::RegularFile,
+            Some(Occupant::Symlink) => Self::Symlink,
+            Some(Occupant::Directory) => Self::Directory,
+        }
+    }
+
+    /// Looks at `leaf` in `parent` without following a symlink, so a dangling
+    /// link counts as occupied.
+    fn probe(parent: &VettedDir, leaf: Leaf<'_>) -> std::io::Result<Self> {
+        parent.probe(leaf).map(Self::of)
+    }
+
+    /// Path-based variant for the pre-pass, whose result only decides whether
+    /// to skip or refuse an entry before anything is written; the write
+    /// re-probes relative to its pinned parent.
+    fn probe_path(dest_path: &Path) -> std::io::Result<Self> {
+        Ok(Self::of(
+            lstat_dest(dest_path)?.map(|meta| occupant_of(meta.file_type())),
+        ))
     }
 
     const fn is_occupied(self) -> bool {
@@ -98,6 +114,7 @@ enum WriteMode {
 pub(super) struct SevenZAdmittedFile {
     file: ValidatedFile,
     write_mode: WriteMode,
+    parent: VettedDir,
 }
 
 /// A host destination for 7z extraction.
@@ -126,12 +143,12 @@ impl ExtractTarget for SevenZHostTarget<'_> {
             .inner
             .validate_path(request.path, NodeKind::NonDirectory)?
             .into_inner();
-        let dest_path = self.inner.dest().join_path(safe_path.as_path());
-        self.inner
+        let (parent, leaf) = self
+            .inner
             .dirs()
-            .ensure_parent(self.inner.dest(), safe_path.as_path())?;
+            .ensure_parent(self.inner.root(), safe_path.as_path())?;
 
-        let occupancy = DestOccupancy::probe(&dest_path)?;
+        let occupancy = DestOccupancy::probe(&parent, leaf)?;
         if occupancy.is_occupied() && tally.options.skip_duplicates {
             return tally.record_duplicate_skip().map(FileAdmission::Skipped);
         }
@@ -147,6 +164,7 @@ impl ExtractTarget for SevenZHostTarget<'_> {
                 mode: None,
             },
             write_mode,
+            parent,
         }))
     }
 
@@ -183,19 +201,25 @@ impl ExtractTarget for SevenZHostTarget<'_> {
         size: u64,
         tally: &mut Tally<'_>,
     ) -> Result<()> {
-        let SevenZAdmittedFile { file, write_mode } = admitted;
-        let dest_path = self.inner.dest().join_path(file.path.as_path());
+        let SevenZAdmittedFile {
+            file,
+            write_mode,
+            parent,
+        } = admitted;
+        let (_, leaf) = Leaf::split(file.path.as_path())?;
         let written = match write_mode {
             WriteMode::CreateNew => write_file_direct(
                 reader,
-                &dest_path,
+                &parent,
+                leaf,
                 size,
                 self.inner.copy_buffer_mut(),
                 file.permit,
             )?,
             WriteMode::ReplaceRegular => write_file_with_permit(
                 reader,
-                &dest_path,
+                &parent,
+                leaf,
                 size,
                 self.inner.copy_buffer_mut(),
                 file.permit,
@@ -258,7 +282,7 @@ impl PrePass for HostPrePass<'_> {
 
     fn file(&mut self, safe_path: &SafePath, _path: &Path) -> Result<FilePlan> {
         let dest_path = self.dest.join_path(safe_path.as_path());
-        let occupancy = DestOccupancy::probe(&dest_path)?;
+        let occupancy = DestOccupancy::probe_path(&dest_path)?;
         if occupancy.is_occupied() && self.options.skip_duplicates {
             return Ok(FilePlan::Skip);
         }

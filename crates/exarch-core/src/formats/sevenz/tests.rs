@@ -37,6 +37,14 @@ use crate::UnverifiedReason;
 use crate::copy::CopyBuffer;
 #[cfg(unix)]
 use crate::formats::common::MAX_TEMP_FILE_CREATE_ATTEMPTS;
+#[cfg(unix)]
+use crate::formats::pinned_dir::Leaf;
+#[cfg(unix)]
+use crate::formats::pinned_dir::PinnedRoot;
+#[cfg(unix)]
+use crate::formats::pinned_dir::TempLeaf;
+#[cfg(unix)]
+use crate::formats::pinned_dir::VettedDir;
 use crate::formats::target::Tally;
 use crate::inspection::integrity::IntegrityPass;
 #[cfg(unix)]
@@ -408,6 +416,21 @@ fn test_load_fixture_helper() {
     assert_eq!(&data[0..6], &SEVENZ_MAGIC);
 }
 
+/// A handle on `dir` for tests that call the write primitives directly.
+#[cfg(unix)]
+fn parent_of(dir: &std::path::Path) -> VettedDir {
+    PinnedRoot::open_for_test(dir)
+        .unwrap()
+        .dir()
+        .reopen()
+        .unwrap()
+}
+
+#[cfg(unix)]
+fn leaf(name: &str) -> Leaf<'_> {
+    Leaf::split(std::path::Path::new(name)).unwrap().1
+}
+
 /// Reserves a throwaway [`QuotaPermit`] for use in tests that call
 /// `write_file_with_permit` directly, bypassing the normal validation
 /// pipeline that would otherwise produce one.
@@ -456,19 +479,20 @@ fn test_write_file_with_permit_skips_planted_symlinks() {
     }
 
     let mut next_candidate = 0u32;
-    let temp_dir_path = temp.path().to_path_buf();
     let mut reader = Cursor::new(b"legit content".to_vec());
     let mut copy_buffer = CopyBuffer::new();
+    let parent = parent_of(temp.path());
     let bytes_written = write_file_with_permit_using(
         &mut reader,
-        &dest_path,
+        &parent,
+        leaf("real-output.txt"),
         13,
         &mut copy_buffer,
         test_permit(),
         || {
-            let path = temp_dir_path.join(format!(".candidate-{next_candidate}.tmp"));
+            let name = TempLeaf::named(&format!(".candidate-{next_candidate}.tmp"));
             next_candidate += 1;
-            path
+            name
         },
     )
     .expect("should retry past every planted symlink and succeed");
@@ -514,19 +538,20 @@ fn test_write_file_with_permit_gives_up_after_max_attempts() {
     }
 
     let mut next_candidate = 0u32;
-    let temp_dir_path = temp.path().to_path_buf();
     let mut reader = Cursor::new(b"legit content".to_vec());
     let mut copy_buffer = CopyBuffer::new();
+    let parent = parent_of(temp.path());
     let result = write_file_with_permit_using(
         &mut reader,
-        &dest_path,
+        &parent,
+        leaf("real-output.txt"),
         13,
         &mut copy_buffer,
         test_permit(),
         || {
-            let path = temp_dir_path.join(format!(".candidate-{next_candidate}.tmp"));
+            let name = TempLeaf::named(&format!(".candidate-{next_candidate}.tmp"));
             next_candidate += 1;
-            path
+            name
         },
     );
 
@@ -556,7 +581,14 @@ fn test_write_file_direct_forged_size_aborts_and_cleans_up() {
     let mut reader = Cursor::new(&real_data);
     let mut copy_buffer = CopyBuffer::new();
 
-    let result = write_file_direct(&mut reader, &dest_path, 50, &mut copy_buffer, test_permit());
+    let result = write_file_direct(
+        &mut reader,
+        &parent_of(temp.path()),
+        leaf("bomb.bin"),
+        50,
+        &mut copy_buffer,
+        test_permit(),
+    );
 
     assert!(
         result.is_err(),
@@ -594,8 +626,14 @@ fn test_write_file_with_permit_forged_size_aborts_and_leaves_original_untouched(
     let mut reader = Cursor::new(&real_data);
     let mut copy_buffer = CopyBuffer::new();
 
-    let result =
-        write_file_with_permit(&mut reader, &dest_path, 50, &mut copy_buffer, test_permit());
+    let result = write_file_with_permit(
+        &mut reader,
+        &parent_of(temp.path()),
+        leaf("existing.bin"),
+        50,
+        &mut copy_buffer,
+        test_permit(),
+    );
 
     assert!(
         result.is_err(),
@@ -2060,7 +2098,7 @@ fn test_skip_duplicates_detects_dangling_symlink_at_destination() {
 /// `write_file_with_permit`'s temp-file + `rename` replaces whatever
 /// sits at `dest_path`, symlink or not, without following it, and
 /// nothing upstream of that rename rejected a symlink destination the
-/// way TAR/ZIP's `O_NOFOLLOW`/`ELOOP` in `create_file_with_mode` does.
+/// way TAR/ZIP's `O_NOFOLLOW`/`ELOOP` in `VettedDir::create_new` does.
 /// The host target now checks `lstat_dest` before reserving quota
 /// or removing anything, and fails with the same `ELOOP` I/O error
 /// TAR/ZIP produce instead of silently replacing the symlink.

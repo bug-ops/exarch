@@ -80,9 +80,10 @@ impl DestDir {
     /// - Canonicalizing the path, which resolves symlinks
     /// - Validating all extracted paths against the canonical destination
     ///
-    /// Full TOCTOU mitigation would require using `openat()` family of
-    /// functions for all subsequent operations, which is platform-specific
-    /// and complex.
+    /// Extraction narrows this further: the destination is opened once and
+    /// every write below it is relative to that directory handle (see the
+    /// `pinned_dir` module). The gap between `canonicalize` and that open
+    /// remains, and needs write access to the destination's parent to use.
     ///
     /// # Errors
     ///

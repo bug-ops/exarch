@@ -145,8 +145,10 @@
 //! # }
 //! ```
 
+mod callback;
 mod memory;
 
+pub use callback::CallbackSink;
 pub use memory::MemoryEntry;
 pub use memory::MemoryEntryKind;
 pub use memory::MemoryExtractRequest;

@@ -94,7 +94,15 @@ pub enum MemoryEntry {
     Directory,
     /// A symbolic link, stored as data.
     Symlink {
-        /// The target as the archive spells it.
+        /// The target as the archive spells it, relative to the link.
+        target: PathBuf,
+    },
+    /// A hard link to a file that was already delivered, by reference.
+    ///
+    /// Only a [`CallbackSink`](crate::CallbackSink) delivers it; a
+    /// [`MemorySink`] stores a hardlink as a copy of the file.
+    Hardlink {
+        /// The root-relative, resolved path of the file the link refers to.
         target: PathBuf,
     },
 }
@@ -122,6 +130,8 @@ closed_enum! {
         Directory => "directory",
         /// A symbolic link, stored as data.
         Symlink => "symlink",
+        /// A hard link to an already delivered file, by reference.
+        Hardlink => "hardlink",
     }
 }
 
@@ -133,6 +143,7 @@ impl MemoryEntry {
             Self::File { .. } => MemoryEntryKind::File,
             Self::Directory => MemoryEntryKind::Directory,
             Self::Symlink { .. } => MemoryEntryKind::Symlink,
+            Self::Hardlink { .. } => MemoryEntryKind::Hardlink,
         }
     }
 
@@ -140,7 +151,7 @@ impl MemoryEntry {
     fn payload_bytes(&self) -> u64 {
         match self {
             Self::File { data, .. } => data.len() as u64,
-            Self::Symlink { target } => target.as_os_str().len() as u64,
+            Self::Symlink { target } | Self::Hardlink { target } => target.as_os_str().len() as u64,
             Self::Directory => 0,
         }
     }
@@ -271,6 +282,25 @@ pub fn extract_reader_to_memory(
 pub struct MemoryFile {
     data: Vec<u8>,
     mode: Option<SanitizedMode>,
+}
+
+impl MemoryFile {
+    /// A writer for a file of `size` bytes, pre-allocating at most 64 KiB so a
+    /// forged size cannot reserve memory before any byte arrives.
+    pub(crate) fn with_size(size: u64, mode: Option<SanitizedMode>) -> Self {
+        let capacity = usize::try_from(size.min(INITIAL_CAPACITY_CAP)).unwrap_or(0);
+        Self {
+            data: Vec::with_capacity(capacity),
+            mode,
+        }
+    }
+
+    /// The completed file, with its buffer shrunk to the bytes received.
+    pub(crate) fn into_entry(self) -> MemoryEntry {
+        let Self { mut data, mode } = self;
+        data.shrink_to_fit();
+        MemoryEntry::File { data, mode }
+    }
 }
 
 impl Write for MemoryFile {
@@ -474,17 +504,11 @@ impl EntrySink for MemorySink {
         self.charged_with(path.as_path(), size)?;
         self.stored = self.stored.saturating_sub(self.held_at(path.as_path()));
         self.entries.remove(path.as_path());
-        let capacity = usize::try_from(size.min(INITIAL_CAPACITY_CAP)).unwrap_or(0);
-        Ok(MemoryFile {
-            data: Vec::with_capacity(capacity),
-            mode,
-        })
+        Ok(MemoryFile::with_size(size, mode))
     }
 
     fn finish_file(&mut self, path: &SafePath, file: MemoryFile) -> io::Result<()> {
-        let MemoryFile { mut data, mode } = file;
-        data.shrink_to_fit();
-        self.store(path, MemoryEntry::File { data, mode })
+        self.store(path, file.into_entry())
     }
 
     fn create_symlink(&mut self, link: &SafePath, target: &Path) -> io::Result<()> {

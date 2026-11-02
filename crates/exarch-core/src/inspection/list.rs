@@ -662,6 +662,7 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
     let list_mode = listing.mode();
     let mut manifest = ArchiveManifest::new(ArchiveType::Zip);
     let mut quota = QuotaTracker::new();
+    let reported = archive.structure().findings().to_vec();
     let archive = archive.reader_mut();
     listing.progress.set_total(archive.len());
 
@@ -737,7 +738,7 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
         drop(entry);
 
         if let (Some(tail), Some((pass, slot))) = (descriptor_tail, tracked.as_mut()) {
-            tail.check(archive, i, pass, *slot, &path)?;
+            tail.check(archive, i, pass, *slot, &path, &reported)?;
         }
 
         let target = if entry_type == ManifestEntryType::Symlink {

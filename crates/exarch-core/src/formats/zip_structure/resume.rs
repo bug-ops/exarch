@@ -8,8 +8,10 @@
 //! - extraction ends a deflated entry at the end of its compressed stream and
 //!   any other entry at a signed descriptor (an entry without a signature has
 //!   no defined end), then consumes the descriptor by matching each possible
-//!   layout (24, 20, 16 and 12 bytes) against the entry's actual sizes, the CRC
-//!   being ignored;
+//!   layout (24, 20, 16 and 12 bytes) against the entry's actual sizes; the
+//!   descriptor that ends a scanned entry has to carry the entry's CRC as well,
+//!   or the reader reads on past it, while after a deflated entry the CRC is
+//!   ignored;
 //! - listing skips the entry without decoding it: it consumes the local
 //!   compressed size when that is not zero (after resolving a 32-bit escape
 //!   through the ZIP64 extra field), and otherwise resumes where a deflated
@@ -17,14 +19,15 @@
 //!   resumes after 16 bytes, or 24 when the local header carries a ZIP64 extra
 //!   field.
 //!
-//! The model resumes from the end of the declared data. A stored entry's
-//! declared range is also searched for an in-data descriptor signature, where
-//! listing resumes earlier (see `GapChecker::check_stored_resume`); the end of
-//! a compressed stream inside the declared range is left to `zip_tail`.
+//! The model resumes from the end of the declared data. The declared range of
+//! a scanned entry is also searched for an in-data descriptor signature, where
+//! the reader resumes earlier (see `GapChecker::check_scanned_resume`), and
+//! that of a deflated entry is decoded to find where its stream ends (see
+//! `GapChecker::check_inflated_resume`).
 //!
 //! Where the two modes disagree the further resume position wins, since either
 //! reader can be the one that skips an entry. The sizes are those of the
-//! central directory; the CRC is a wildcard.
+//! central directory, and so is the CRC the scanned entry is compared with.
 
 use zip::CompressionMethod;
 
@@ -73,6 +76,14 @@ pub(super) enum DescriptorWidth {
     TwentyFour,
 }
 
+/// Whether a reader that matches a descriptor against an entry compares its
+/// CRC with the entry's too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CrcCheck {
+    Ignored,
+    Compared,
+}
+
 impl DescriptorWidth {
     pub(super) const ALL: [Self; 4] = [Self::Twelve, Self::Sixteen, Self::Twenty, Self::TwentyFour];
 
@@ -94,8 +105,9 @@ impl DescriptorWidth {
     }
 
     /// Whether `at_end` starts with a descriptor of this width for an entry of
-    /// the given sizes. The CRC is not compared.
-    fn matches(self, at_end: &[u8], compressed: u64, size: u64) -> bool {
+    /// the sizes of `layout`, carrying its CRC when `crc` says to compare it.
+    fn matches(self, at_end: &[u8], layout: &EntryLayout, crc: CrcCheck) -> bool {
+        let (compressed, size) = (layout.compressed, layout.size);
         let sizes_at = if self.signed() {
             if !at_end.starts_with(&DATA_DESCRIPTOR_SIGNATURE) {
                 return false;
@@ -104,6 +116,9 @@ impl DescriptorWidth {
         } else {
             4
         };
+        if crc == CrcCheck::Compared && le_u32(at_end, sizes_at - 4) != Some(layout.crc32) {
+            return false;
+        }
         let field = if self.wide() { 8 } else { 4 };
         let Some(sizes) = at_end.get(sizes_at..sizes_at + 2 * field) else {
             return false;
@@ -211,6 +226,14 @@ impl LocalFacts {
     }
 }
 
+/// The widest descriptor layout `at_end` matches.
+fn find_width(at_end: &[u8], layout: &EntryLayout, crc: CrcCheck) -> Option<DescriptorWidth> {
+    DescriptorWidth::ALL
+        .into_iter()
+        .rev()
+        .find(|width| width.matches(at_end, layout, crc))
+}
+
 /// Where a streaming reader resumes after the data of `layout`, a descriptor
 /// entry that ends as `exit` says, given the bytes that follow the data.
 pub(super) fn streaming_resume(
@@ -220,14 +243,14 @@ pub(super) fn streaming_resume(
     at_end: &[u8],
 ) -> Resume {
     let signed = at_end.starts_with(&DATA_DESCRIPTOR_SIGNATURE);
-    let extraction = if exit == DescriptorExit::Scan && !signed {
-        Resume::Unbounded
-    } else {
-        DescriptorWidth::ALL
-            .into_iter()
-            .rev()
-            .find(|width| width.matches(at_end, layout.compressed, layout.size))
-            .map_or(Resume::AtEnd, Resume::After)
+    let extraction = match exit {
+        DescriptorExit::Inflate => {
+            find_width(at_end, layout, CrcCheck::Ignored).map_or(Resume::AtEnd, Resume::After)
+        }
+        DescriptorExit::Scan if signed => {
+            find_width(at_end, layout, CrcCheck::Compared).map_or(Resume::Unbounded, Resume::After)
+        }
+        DescriptorExit::Scan => Resume::Unbounded,
     };
     let listing = if local.compressed > 0 {
         Resume::At(layout.data_start.saturating_add(local.compressed))
@@ -256,6 +279,7 @@ mod tests {
     const END: u64 = 100;
     const COMPRESSED: u64 = 7;
     const SIZE: u64 = 9;
+    const CRC: u32 = 0xC0DE_C0DE;
 
     fn layout(exit: DescriptorExit) -> EntryLayout {
         EntryLayout {
@@ -264,9 +288,9 @@ mod tests {
             data_start: 93,
             end: END,
             descriptor: Some(exit),
-            method: CompressionMethod::Stored,
             compressed: COMPRESSED,
             size: SIZE,
+            crc32: CRC,
             kind: EntryKind::Regular,
         }
     }
@@ -400,7 +424,7 @@ mod tests {
 
     #[test]
     fn scanned_listing_follows_the_signature_and_the_zip64_extra() {
-        let signed = followed_by_header(PK78.to_vec());
+        let signed = followed_by_header(descriptor(true, false, CRC, COMPRESSED, SIZE));
         assert_eq!(
             streaming_resume(
                 &layout(DescriptorExit::Scan),
@@ -423,15 +447,15 @@ mod tests {
 
     #[test]
     fn scanned_listing_skips_the_local_compressed_size_when_there_is_one() {
-        let signed = followed_by_header(PK78.to_vec());
+        let signed = followed_by_header(descriptor(true, false, CRC, COMPRESSED, SIZE));
         assert_eq!(
             streaming_resume(
                 &layout(DescriptorExit::Scan),
                 DescriptorExit::Scan,
-                local(false, 14),
+                local(false, 30),
                 &signed
             ),
-            Resume::At(107)
+            Resume::At(123)
         );
         assert_eq!(
             streaming_resume(
@@ -440,7 +464,7 @@ mod tests {
                 local(true, COMPRESSED),
                 &signed
             ),
-            Resume::AtEnd
+            Resume::After(DescriptorWidth::Sixteen)
         );
         let unsigned = followed_by_header(descriptor(false, false, 0, COMPRESSED, SIZE));
         assert_eq!(
@@ -456,7 +480,7 @@ mod tests {
 
     #[test]
     fn a_local_compressed_size_is_skipped_whatever_the_extraction_finds() {
-        let signed = followed_by_header(PK78.to_vec());
+        let signed = followed_by_header(descriptor(true, false, CRC, COMPRESSED, SIZE));
         assert_eq!(
             streaming_resume(
                 &layout(DescriptorExit::Scan),
@@ -479,7 +503,7 @@ mod tests {
 
     #[test]
     fn the_furthest_resume_of_the_two_readers_wins() {
-        let signed = followed_by_header(descriptor(true, false, 0, COMPRESSED, SIZE));
+        let signed = followed_by_header(descriptor(true, false, CRC, COMPRESSED, SIZE));
         assert_eq!(
             streaming_resume(
                 &layout(DescriptorExit::Scan),
@@ -498,7 +522,7 @@ mod tests {
             ),
             Resume::At(123)
         );
-        let wide = followed_by_header(descriptor(true, true, 0, COMPRESSED, SIZE));
+        let wide = followed_by_header(descriptor(true, true, CRC, COMPRESSED, SIZE));
         assert_eq!(
             streaming_resume(
                 &layout(DescriptorExit::Scan),
@@ -507,6 +531,56 @@ mod tests {
                 &wide
             ),
             Resume::After(DescriptorWidth::TwentyFour)
+        );
+    }
+
+    #[test]
+    fn a_scanned_entry_is_not_ended_by_a_descriptor_with_another_crc() {
+        for (signed, wide) in [(true, false), (true, true)] {
+            let forged = followed_by_header(descriptor(signed, wide, CRC ^ 1, COMPRESSED, SIZE));
+            assert_eq!(
+                streaming_resume(
+                    &layout(DescriptorExit::Scan),
+                    DescriptorExit::Scan,
+                    local(false, 0),
+                    &forged
+                ),
+                Resume::Unbounded,
+                "{wide}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_scanned_entry_is_ended_by_a_descriptor_of_every_signed_width_with_its_crc() {
+        for (wide, width) in [
+            (false, DescriptorWidth::Sixteen),
+            (true, DescriptorWidth::TwentyFour),
+        ] {
+            let honest = followed_by_header(descriptor(true, wide, CRC, COMPRESSED, SIZE));
+            assert_eq!(
+                streaming_resume(
+                    &layout(DescriptorExit::Scan),
+                    DescriptorExit::Scan,
+                    local(wide, 0),
+                    &honest
+                ),
+                Resume::After(width)
+            );
+        }
+    }
+
+    #[test]
+    fn a_deflated_entry_ends_with_its_stream_whatever_the_descriptor_crc() {
+        let forged = followed_by_header(descriptor(true, false, CRC ^ 1, COMPRESSED, SIZE));
+        assert_eq!(
+            streaming_resume(
+                &layout(DescriptorExit::Inflate),
+                DescriptorExit::Inflate,
+                local(false, 0),
+                &forged
+            ),
+            Resume::After(DescriptorWidth::Sixteen)
         );
     }
 

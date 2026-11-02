@@ -240,15 +240,6 @@ fn stored_entries_without_a_descriptor_are_not_scanned() {
 }
 
 #[test]
-fn deflate_dd_tail_stays_integrity_only() {
-    let payload = b"hello hello hello hello";
-    let tail = [descriptor(payload, 0), evil_local()].concat();
-    let built = RawZip::new(vec![descriptor_entry(8, payload, &tail)]).build();
-    assert!(findings_of(&built).is_empty());
-    assert_eq!(hidden_issues(&verify_with_integrity(built.bytes)).len(), 1);
-}
-
-#[test]
 fn stored_dd_findings_share_the_hidden_header_limit() {
     let entries = (0..20)
         .map(|i| {

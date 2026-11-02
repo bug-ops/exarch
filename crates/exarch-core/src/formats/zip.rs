@@ -516,7 +516,6 @@ impl<R: Read + Seek> ZipArchive<R> {
     }
 
     /// What the structural census found when the archive was opened.
-    #[cfg(test)]
     pub(crate) const fn structure(&self) -> &ZipStructure {
         &self.structure
     }

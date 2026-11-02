@@ -12,6 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Core: `list_archive_for_extraction` and `ListedArchive` reuse the list pass's decode for gz, bz2 and xz TAR up to 256 MiB, and `ArchiveReader::of_stream` opens a non-seekable TAR stream (#828).
 - Python: the in-memory functions accept binary file objects as well as bytes (#828).
 - Tests: the ZIP corpus builds a Windows Explorer archive on Windows CI, and a Windows 7-Zip reparse-point symlink test covers 7z (#828).
+- Core: `CallbackSink` hands each verified in-memory entry to a closure, and `MemoryEntry::Hardlink` reports a hardlink by reference (#PR).
+- Python: `extract_archive_to_callback` delivers each entry to a callable and re-raises its exception unchanged (#PR).
+- Node: `extractArchiveToCallback` (async and sync), `AsyncIterable` input for TAR in the async in-memory functions, three sync `WithProgress` variants, and the `STREAM_ERROR` and `ENTRY_CALLBACK_ERROR` codes (#PR).
 
 ### Changed
 
@@ -28,11 +31,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **BREAKING:** ZIP verification refuses directory and special entries that carry data and compressed entries whose stream ends before the declared range with a record behind it; new `ZipInconsistency::{NonRegularPayload, StreamEndUnknown}`, `HiddenRegion::StreamTail`, `ZipNonRegularKind` and `ZipStreamUndecided` (#837).
 - Core: ZIP verification checks stored data-descriptor entries from their first descriptor signature, whatever sizes the descriptor states; a stored entry holding a nested archive with signed descriptors is now reported (#837).
 - Core: ZIP entry-data checks run once at open under `--zip-consistency enforce` with a bounded decode budget and recheck allowance scaled by `max_total_size`, and `--zip-consistency ignore` skips them (#837).
+- Core: extraction writes, renames, unlinks and symlinks below the destination go through a pinned directory descriptor on Unix and WASI, closing the component-swap window left by path-based checks (#PR).
+- Core: a hardlink to a non-regular target is `InvalidArchive`, and a target that changes size during the copy is a `SecurityViolation`; the copy no longer uses `copy_file_range` (#PR).
+- Core: a file created with a mode is created owner-only and then set to the exact mode (#PR).
+- Node: `index.d.ts` uses `AsyncIterable`, which needs the `es2018` lib (#PR).
+- `exarch extract --atomic` decodes a TAR once, so a refusal now arrives as a `rolled_back` partial report instead of a pre-write error, and its progress bar has no total (#PR).
 
 ### Fixed
 
 - `extract` and `verify` name the entry and the blocking file or symlink, with the same category, for an entry below a file, a dangling symlink or a looping symlink (#828).
 - 7z `--force` no longer deletes the existing file before the replacement is decoded (#828).
+- A hardlink copy takes the sanitized mode of its target, so a pre-existing setuid, setgid or world-writable target no longer yields a wider copy (#PR).
 
 ## [0.8.0] - 2026-11-02
 

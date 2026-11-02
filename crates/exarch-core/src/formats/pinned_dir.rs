@@ -22,7 +22,10 @@
 //! Apple platforms (falling back to `O_RDONLY` if the kernel rejects it), so a
 //! directory with mode `0o311` or a destination with mode `0o733` stays usable:
 //! the path-based calls this replaces needed only search and write permission.
-//! Other Unix targets and WASI open directories read-only.
+//! Other Unix targets and WASI have no such mode and open directories
+//! read-only, so there a directory without read permission fails with
+//! `EACCES` where path-based code worked. None of them is a shipped target for
+//! the bindings or the CLI release builds.
 //!
 //! # Residual risks
 //!
@@ -354,8 +357,7 @@ mod imp {
     use crate::security::permissions::SanitizedMode;
 
     /// A directory below the destination, by path.
-    // TODO(critic): path-based on Windows; residual component-swap TOCTOU
-    // (follow-up issue)
+    // TODO(#839): path-based on Windows; residual component-swap TOCTOU.
     #[derive(Debug)]
     pub struct VettedDir(PathBuf);
 

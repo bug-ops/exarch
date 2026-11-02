@@ -102,6 +102,33 @@ fn a_hardlink_target_is_the_resolved_path() {
 }
 
 #[test]
+fn a_hardlink_chain_is_delivered_link_by_link() {
+    let entries = [
+        tar_file("a", b"x"),
+        tar_hardlink("b", "a"),
+        tar_hardlink("c", "b"),
+    ];
+
+    let (result, delivered) = collect(&entries, &links(), SinkOptions::default());
+
+    result.unwrap();
+    let targets: Vec<_> = delivered
+        .iter()
+        .filter_map(|(path, entry)| match entry {
+            MemoryEntry::Hardlink { target } => Some((path.clone(), target.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        targets,
+        [
+            (PathBuf::from("b"), PathBuf::from("a")),
+            (PathBuf::from("c"), PathBuf::from("b")),
+        ]
+    );
+}
+
+#[test]
 fn under_overwrite_a_path_is_delivered_again() {
     let entries = [tar_file("a", b"one"), tar_file("a", b"two!")];
 

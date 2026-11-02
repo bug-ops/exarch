@@ -1108,7 +1108,7 @@ class MemoryEntry:
         """
         For "symlink", the target as the archive spells it, relative to the
         link; for "hardlink", the root-relative resolved path of an already
-        delivered file. None for other kinds.
+        delivered entry, a file or an earlier hardlink. None for other kinds.
         """
         ...
 
@@ -1179,10 +1179,17 @@ def extract_archive_to_callback(
     is one file, bounded by the config's max_file_size. The GIL is released
     during I/O and taken once per entry.
 
+    Entries are provisional: each is delivered as soon as it is verified, so a
+    later failure refuses the archive after earlier entries were already
+    delivered. Treat the results as final only once the call returned. The
+    gzip CRC of a .tar.gz is never checked on extraction, so a corrupt
+    compressed stream can deliver altered data without an error.
+
     A "symlink" entry's target is spelled as the archive stores it, relative
     to the link. A "hardlink" entry is delivered by reference after every other
-    entry: its target is the root-relative resolved path of a file already
-    delivered. With skip_duplicates False one path can be delivered more than
+    entry: its target is the root-relative resolved path of an entry already
+    delivered, a file or an earlier hardlink (a chain is delivered link by
+    link). With skip_duplicates False one path can be delivered more than
     once and a hardlink refers to the latest delivery. Implicit parent
     directories are not delivered.
 

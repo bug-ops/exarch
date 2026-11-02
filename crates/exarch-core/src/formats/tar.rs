@@ -436,6 +436,8 @@ impl<R: Read> TarArchive<R> {
             }
         }
 
+        // TODO(#838): the compressed stream's trailer (gzip CRC/ISIZE) is never
+        // read after the end marker, so corrupt data extracts silently.
         if let Err(e) = entries.finish() {
             ctx.push_skip_warnings();
             return Err(ArchiveError::partial_or(
@@ -2130,37 +2132,125 @@ mod tests {
         assert!(!temp.path().join("loot.txt").exists());
     }
 
-    /// Issue #818: with symlinks refused, a hardlink target below a
-    /// pre-existing symlinked directory is refused like any other entry below
-    /// one, instead of being read through the link.
-    #[test]
-    #[cfg(unix)]
-    fn test_hardlink_target_below_preexisting_symlinked_directory_is_refused() {
-        let temp = TempDir::new().unwrap();
-        std::fs::create_dir(temp.path().join("real")).unwrap();
-        std::fs::write(temp.path().join("real/f.txt"), b"data").unwrap();
-        std::os::unix::fs::symlink("real", temp.path().join("alias")).unwrap();
-
+    fn hardlink_only_tar(link_name: &str) -> Vec<u8> {
         let mut builder = tar::Builder::new(Vec::new());
         let mut link_header = tar::Header::new_gnu();
         link_header.set_entry_type(tar::EntryType::Link);
-        link_header.set_link_name("alias/f.txt").unwrap();
+        link_header.set_link_name(link_name).unwrap();
         link_header.set_size(0);
         link_header.set_cksum();
         builder
             .append_data(&mut link_header, "h", &[] as &[u8])
             .unwrap();
-        let mut archive = TarArchive::new(Cursor::new(builder.into_inner().unwrap()));
+        builder.into_inner().unwrap()
+    }
 
-        let result = archive.extract(
-            temp.path(),
+    fn extract_hardlink_only(dest: &Path, link_name: &str) -> Result<ExtractionReport> {
+        TarArchive::new(Cursor::new(hardlink_only_tar(link_name))).extract(
+            dest,
             &hardlink_config(),
             &ExtractionOptions::default(),
             &mut crate::NoopProgress,
-        );
+        )
+    }
 
-        assert!(result.is_err(), "{result:?}");
-        assert!(!temp.path().join("h").exists());
+    /// Issue #818: a pre-existing symlink inside `dest` is read through for a
+    /// hardlink target however the path is spelled (a directory in the chain,
+    /// `..` after a directory, or the leaf), as before the pinned directories.
+    #[test]
+    #[cfg(unix)]
+    fn test_hardlink_target_through_preexisting_symlinks_is_copied() {
+        for spelling in ["alias/f.txt", "x/../alias/f.txt", "lnk"] {
+            let temp = TempDir::new().unwrap();
+            std::fs::create_dir(temp.path().join("real")).unwrap();
+            std::fs::create_dir(temp.path().join("x")).unwrap();
+            std::fs::write(temp.path().join("real/f.txt"), b"data").unwrap();
+            std::os::unix::fs::symlink("real", temp.path().join("alias")).unwrap();
+            std::os::unix::fs::symlink("real/f.txt", temp.path().join("lnk")).unwrap();
+
+            extract_hardlink_only(temp.path(), spelling).unwrap();
+
+            assert_eq!(
+                std::fs::read(temp.path().join("h")).unwrap(),
+                b"data",
+                "{spelling}"
+            );
+            assert!(
+                !std::fs::symlink_metadata(temp.path().join("h"))
+                    .unwrap()
+                    .file_type()
+                    .is_symlink(),
+                "{spelling}"
+            );
+        }
+    }
+
+    /// The copy of a pre-existing target never gets wider permissions than the
+    /// target, and never setuid, setgid or (unless allowed) world-writable
+    /// bits.
+    #[test]
+    #[cfg(unix)]
+    fn test_hardlink_copy_sanitizes_the_mode_of_a_preexisting_target() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let allow_world_writable = {
+            let mut config = SecurityConfig::default();
+            config.allowed.hardlinks = true;
+            config.allowed.world_writable = true;
+            config.validate().unwrap()
+        };
+        for (target_mode, config, expected) in [
+            (0o4755, hardlink_config(), 0o755),
+            (0o2755, hardlink_config(), 0o755),
+            (0o777, hardlink_config(), 0o775),
+            (0o777, allow_world_writable, 0o777),
+            (0o600, hardlink_config(), 0o600),
+            (0o444, hardlink_config(), 0o444),
+        ] {
+            let temp = TempDir::new().unwrap();
+            let target = temp.path().join("t");
+            std::fs::write(&target, b"data").unwrap();
+            std::fs::set_permissions(&target, std::fs::Permissions::from_mode(target_mode))
+                .unwrap();
+
+            TarArchive::new(Cursor::new(hardlink_only_tar("t")))
+                .extract(
+                    temp.path(),
+                    &config,
+                    &ExtractionOptions::default(),
+                    &mut crate::NoopProgress,
+                )
+                .unwrap();
+
+            let copy = std::fs::metadata(temp.path().join("h")).unwrap();
+            assert_eq!(
+                copy.permissions().mode() & 0o7777,
+                expected,
+                "target mode {target_mode:o}"
+            );
+            assert_eq!(std::fs::read(temp.path().join("h")).unwrap(), b"data");
+        }
+    }
+
+    /// Issue #818: reading through a pre-existing symlink never leaves `dest`.
+    #[test]
+    #[cfg(unix)]
+    fn test_hardlink_target_through_an_escaping_symlink_is_refused() {
+        let root = TempDir::new().unwrap();
+        let dest = root.path().join("dest");
+        let outside = root.path().join("outside");
+        std::fs::create_dir(&dest).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        std::os::unix::fs::symlink(&outside, dest.join("esc")).unwrap();
+        std::os::unix::fs::symlink(outside.join("secret.txt"), dest.join("leaf")).unwrap();
+
+        for spelling in ["esc/secret.txt", "leaf"] {
+            let result = extract_hardlink_only(&dest, spelling);
+
+            assert!(result.is_err(), "{spelling}: {result:?}");
+            assert!(!dest.join("h").exists(), "{spelling}");
+        }
     }
 
     /// Issue #818: a parent directory swapped for a symlink while a 200-entry

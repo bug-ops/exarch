@@ -92,7 +92,8 @@ fn parse_path_model(path_model: Option<&str>) -> PyResult<Option<PathModel>> {
 ///   unless a file whose archive carries a mode)
 /// * `target` - For `"symlink"`, the target as the archive spells it, relative
 ///   to the link; for `"hardlink"`, the root-relative resolved path of an
-///   already delivered file (`None` for other kinds)
+///   already delivered entry, a file or an earlier hardlink (`None` for other
+///   kinds)
 #[pyclass(name = "MemoryEntry", frozen)]
 pub struct PyMemoryEntry {
     path: String,
@@ -577,12 +578,22 @@ pub fn verify_archive_bytes_with_progress(
 ///   extraction and is re-raised as is, with no marker or attribute added
 /// * The exceptions of `extract_archive`
 ///
+/// # Entries are provisional
+///
+/// An entry is delivered as soon as it is verified, before the rest of the
+/// archive is read. A later failure refuses the archive after earlier entries
+/// were already delivered, so treat the results as final only once the call
+/// returned. The size of a file is checked, but a stream-level checksum is not:
+/// the gzip CRC of a `.tar.gz` is never checked on extraction, so a corrupt
+/// compressed stream can deliver altered data without an error.
+///
 /// # Entry kinds
 ///
 /// A `"symlink"` entry's `target` is spelled as the archive stores it, relative
 /// to the link. A `"hardlink"` entry is delivered by reference, after every
-/// other entry: its `target` is the root-relative resolved path of a file that
-/// was already delivered, and no bytes are repeated. With
+/// other entry: its `target` is the root-relative resolved path of an entry
+/// that was already delivered, a file or an earlier hardlink (a chain is
+/// delivered link by link), and no bytes are repeated. With
 /// `ExtractionOptions().with_skip_duplicates(False)` one path can be
 /// delivered more than once and a hardlink refers to the latest delivery.
 /// Implicit parent directories are not delivered. The GIL is released during

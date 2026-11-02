@@ -161,9 +161,14 @@ time (bounded by `max_file_size`). A file arrives whole, after its size was
 verified. An exception raised by `on_entry` stops the extraction and is raised
 unchanged. A `"symlink"` entry's `target` is spelled as the archive stores it,
 relative to the link. A `"hardlink"` entry comes last and by reference: its
-`target` is the root-relative resolved path of a file already delivered. With
+`target` is the root-relative resolved path of an entry already delivered, a
+file or an earlier hardlink (a chain is delivered link by link). With
 `skip_duplicates` off a path can be delivered more than once and a hardlink
 refers to the latest delivery; implicit parent directories are not delivered.
+Entries are provisional: each is delivered as soon as it is verified, so a later
+failure refuses the archive after earlier entries were already delivered. The
+gzip CRC of a `.tar.gz` is never checked on extraction, so a corrupt compressed
+stream can deliver altered data without an error.
 
 ```python
 sizes = {}

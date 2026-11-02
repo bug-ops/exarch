@@ -97,12 +97,13 @@ pub enum MemoryEntry {
         /// The target as the archive spells it, relative to the link.
         target: PathBuf,
     },
-    /// A hard link to a file that was already delivered, by reference.
+    /// A hard link to an entry that was already delivered, by reference.
     ///
     /// Only a [`CallbackSink`](crate::CallbackSink) delivers it; a
     /// [`MemorySink`] stores a hardlink as a copy of the file.
     Hardlink {
-        /// The root-relative, resolved path of the file the link refers to.
+        /// The root-relative, resolved path of an already delivered entry: a
+        /// file, or an earlier hardlink (a chain is delivered link by link).
         target: PathBuf,
     },
 }

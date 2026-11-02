@@ -13,10 +13,21 @@ use crate::types::SafePath;
 /// An [`EntrySink`] that delivers each entry to a closure as it is verified.
 ///
 /// The closure receives the entry's validated path and a [`MemoryEntry`]. A
-/// file is delivered whole, after all of its bytes were written and checked
-/// against the declared size, so the closure never sees data from a forged or
-/// corrupt entry. The memory held at any moment is one file, bounded by the
-/// configuration's `max_file_size`; the sink keeps nothing after delivery.
+/// file is delivered whole, after all of its bytes were written and the stream
+/// delivered exactly the size the archive declares. The memory held at any
+/// moment is one file, bounded by the configuration's `max_file_size`; the sink
+/// keeps nothing after delivery.
+///
+/// # Entries are provisional
+///
+/// An entry is delivered as soon as it is verified, before the rest of the
+/// archive is read. A later failure (a corrupt or refused member further on)
+/// ends the extraction after earlier entries were delivered, so treat what the
+/// closure received as final only once the extraction returned `Ok`. A
+/// stream-level checksum is not verified: the gzip trailer CRC of a `.tar.gz`
+/// is never checked on extraction, so a corrupt compressed stream can deliver
+/// altered data without an error. Only verification with integrity checking
+/// reports it.
 ///
 /// An error from the closure ends the extraction like any other sink error
 /// (see [`EntrySink`]).
@@ -26,8 +37,9 @@ use crate::types::SafePath;
 /// - A [`MemoryEntry::Symlink`] target is spelled as the archive stores it and
 ///   is relative to the directory of the link.
 /// - A [`MemoryEntry::Hardlink`] target is the root-relative, resolved path of
-///   a file that was already delivered. The sink holds no bytes, so the closure
-///   resolves the reference against what it kept.
+///   an entry that was already delivered: a file, or an earlier hardlink, so a
+///   chain of links is delivered link by link. The sink holds no bytes, so the
+///   closure resolves the reference against what it kept.
 ///
 /// # Delivery rules
 ///
@@ -64,7 +76,7 @@ use crate::types::SafePath;
 ///     if let MemoryEntry::File { data, .. } = entry {
 ///         seen.push((path.as_path().to_path_buf(), data));
 ///     }
-///     Ok::<(), io::Error>(())
+///     Ok(())
 /// });
 /// let reader = ArchiveReader::tar(io::Cursor::new(archive), None);
 /// extract_to_sink(
@@ -109,8 +121,7 @@ where
     /// use exarch_core::EntrySink as _;
     /// use exarch_core::PathModel;
     ///
-    /// let sink =
-    ///     CallbackSink::new(|_, _| Ok::<(), io::Error>(())).with_path_model(PathModel::Portable);
+    /// let sink = CallbackSink::new(|_, _| Ok(())).with_path_model(PathModel::Portable);
     /// assert_eq!(sink.path_model(), PathModel::Portable);
     /// ```
     #[must_use]

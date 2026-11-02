@@ -42,7 +42,8 @@ use crate::report::ArchiveType;
 /// A thrown or rejected non-object is wrapped in an `Error` whose `cause` is
 /// the primitive (a Symbol stringified: napi-rs coerces `cause` to a string
 /// when it reads it back, which throws for a raw Symbol).
-const CLASSIFY_SOURCE_JS: &str = r#"(source) => {
+const CLASSIFY_SOURCE_JS: &str = js_with_normalizer!(
+    r#"(source) => {
   if (ArrayBuffer.isView(source)) {
     return undefined;
   }
@@ -50,14 +51,6 @@ const CLASSIFY_SOURCE_JS: &str = r#"(source) => {
   if (typeof factory !== "function") {
     throw new TypeError("data must be a Uint8Array or an AsyncIterable<Uint8Array>");
   }
-  const normalize = (thrown) => {
-    if (thrown !== null && (typeof thrown === "object" || typeof thrown === "function")) {
-      return thrown;
-    }
-    const wrapped = new Error("stream threw a non-object value: " + String(thrown));
-    wrapped.cause = typeof thrown === "symbol" ? String(thrown) : thrown;
-    return wrapped;
-  };
   let iterator;
   const start = () => {
     if (iterator === undefined) {
@@ -77,7 +70,7 @@ const CLASSIFY_SOURCE_JS: &str = r#"(source) => {
         }
         return new Uint8Array(step.value);
       } catch (thrown) {
-        throw normalize(thrown);
+        throw normalizeThrown("stream", thrown);
       }
     },
     close: async () => {
@@ -89,14 +82,16 @@ const CLASSIFY_SOURCE_JS: &str = r#"(source) => {
       } catch (_) {}
     },
   };
-}"#;
+}"#
+);
 
 type NextFn = ThreadsafeFunction<(), Promise<Option<Uint8Array>>, (), Status, false>;
 type CloseFn = ThreadsafeFunction<(), Promise<()>, (), Status, false>;
 
 /// The two functions that drive an `AsyncIterable`, and what went wrong.
-// TODO(critic): a stalled `AsyncIterable` hangs the operation and keeps the
-// event loop alive; add an `AbortSignal` or a timeout.
+// TODO(#840): a stalled AsyncIterable or a never-settling `onEntry` promise
+// hangs the op, keeps the loop alive and pins a blocking-pool thread; add
+// AbortSignal/timeout.
 struct StreamShared {
     next: NextFn,
     close: CloseFn,

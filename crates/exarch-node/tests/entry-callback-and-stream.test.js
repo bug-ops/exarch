@@ -275,6 +275,72 @@ describe('extractArchiveToCallbackSync', () => {
   it('rejects a stream for the sync function', () => {
     assert.throws(() => extractArchiveToCallbackSync(chunked(archive), () => {}));
   });
+
+  describe('input aliasing', () => {
+    const COUNT = 300;
+    const SIZE = 1024;
+    const big = tar(
+      Array.from({ length: COUNT }, (_, i) =>
+        tarEntry(`f${i}.bin`, { data: Buffer.alloc(SIZE, 0x42) })
+      )
+    );
+
+    const intact = (seen) =>
+      seen.length === COUNT && seen.every((entry) => entry.data.every((byte) => byte === 0x42));
+
+    it('is not affected by a callback that detaches the input buffer', (t) => {
+      if (typeof ArrayBuffer.prototype.transfer !== 'function') {
+        t.skip('ArrayBuffer.prototype.transfer is not available');
+        return;
+      }
+      const data = new Uint8Array(big);
+      const seen = [];
+      const keep = [];
+      extractArchiveToCallbackSync(data, (entry) => {
+        seen.push(entry);
+        if (seen.length === 1) {
+          data.buffer.transfer(16);
+          for (let i = 0; i < 64; i += 1) {
+            keep.push(Buffer.alloc(big.length, 0x41));
+          }
+        }
+      });
+      assert.strictEqual(data.buffer.detached, true);
+      assert.ok(intact(seen));
+    });
+
+    it('is not affected by a callback that overwrites the next members', () => {
+      const data = new Uint8Array(big);
+      const seen = [];
+      extractArchiveToCallbackSync(data, (entry) => {
+        seen.push(entry);
+        if (seen.length === 1) {
+          data.fill(0x41, 2048);
+        }
+      });
+      assert.ok(intact(seen));
+    });
+  });
+
+  it('delivers a hardlink chain link by link', () => {
+    const chain = tar([
+      file('a', 'x'),
+      tarEntry('b', { type: '1', link: 'a' }),
+      tarEntry('c', { type: '1', link: 'b' }),
+    ]);
+    const links = [];
+    extractArchiveToCallbackSync(
+      chain,
+      (entry) => {
+        if (entry.kind === 'hardlink') links.push([entry.path, entry.target]);
+      },
+      linksConfig()
+    );
+    assert.deepStrictEqual(links, [
+      ['b', 'a'],
+      ['c', 'b'],
+    ]);
+  });
 });
 
 describe('AsyncIterable input', () => {
@@ -321,13 +387,29 @@ describe('AsyncIterable input', () => {
     assert.ok(events.length >= 3);
   });
 
-  it('refuses a ZIP stream', async () => {
+  it('refuses a ZIP stream and closes it', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'exarch-stream-'));
     try {
       fs.writeFileSync(path.join(dir, 'a.txt'), 'x');
       const zipPath = path.join(dir, 'a.zip');
       createArchiveSync(zipPath, [path.join(dir, 'a.txt')]);
-      await assert.rejects(extractArchiveToMemory(chunked(fs.readFileSync(zipPath))));
+      const zip = fs.readFileSync(zipPath);
+      let closed = false;
+      const source = {
+        async *[Symbol.asyncIterator]() {
+          try {
+            yield* chunked(zip);
+          } finally {
+            closed = true;
+          }
+        },
+      };
+      await assert.rejects(extractArchiveToMemory(source), (err) => {
+        assert.notStrictEqual(err.code, 'STREAM_ERROR');
+        assert.match(err.message, /seek|stream|format/i);
+        return true;
+      });
+      assert.strictEqual(closed, true);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }

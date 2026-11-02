@@ -96,7 +96,7 @@ pub struct MemoryEntry {
     pub mode: Option<u32>,
     /// For a symlink, the target as the archive spells it, relative to the
     /// link; for a hardlink, the root-relative resolved path of an already
-    /// delivered file. Absent for other kinds.
+    /// delivered entry, a file or an earlier hardlink. Absent for other kinds.
     pub target: Option<String>,
 }
 

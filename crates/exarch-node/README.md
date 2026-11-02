@@ -185,20 +185,29 @@ format (plain or compressed). It is read from a worker thread, one chunk at a
 time, and closed (`return()`) however the call ends, so a refused archive does
 not leave the stream open. A throwing or rejecting stream rejects with
 `STREAM_ERROR` and the thrown value as `cause`. The sync functions take bytes
-only. A stream that never yields keeps the call pending; there is no timeout
-yet.
+only. A stream that never yields keeps the call pending, and an `onEntry`
+promise that never settles does the same; there is no timeout yet. Each
+in-flight stream or `onEntry` call pins a thread of the blocking pool for the
+whole call, so many slow streams (for example HTTP bodies) can exhaust the pool
+and stall every other async exarch call in the process.
 
 `extractArchiveToCallback(data, onEntry, config?, options?, pathModel?, format?)`
 hands each verified entry to `onEntry(entry)` instead of collecting them, so
 memory use is one file at a time (bounded by `maxFileSize`). A file arrives
-whole, after its size was verified. The extraction waits for the promise
+whole, after its size was verified. Entries are provisional: each is
+delivered as soon as it is verified, so a later failure refuses the archive
+after earlier entries were already delivered; treat the results as final only
+once the promise resolved. The gzip CRC of a `.tar.gz` is never checked on
+extraction, so a corrupt compressed stream can deliver altered data without an
+error. The extraction waits for the promise
 `onEntry` returns before it reads on, so a slow consumer applies backpressure.
 A throw or rejection stops the extraction and rejects with
 `ENTRY_CALLBACK_ERROR` and the thrown value as `cause`; a thrown primitive is
-wrapped in an `Error` whose `cause` is the primitive. A `'symlink'` entry's
+wrapped in an `Error` whose `cause` is the primitive (a Symbol is stringified). A `'symlink'` entry's
 `target` is spelled as the archive stores it, relative to the link. A
 `'hardlink'` entry comes last and by reference: its `target` is the
-root-relative resolved path of a file already delivered. With
+root-relative resolved path of an entry already delivered, a file or an
+earlier hardlink (a chain is delivered link by link). With
 `skipDuplicates` off a path can be delivered more than once and a hardlink
 refers to the latest delivery; implicit parent directories are not delivered.
 
@@ -210,7 +219,8 @@ await extractArchiveToCallback(fs.createReadStream('archive.tar.gz'), async (ent
 ```
 
 `extractArchiveToCallbackSync` runs `onEntry` on the JavaScript thread and
-takes bytes only. A callback that returns a promise is refused with
+takes bytes only, which it copies before `onEntry` first runs, so a callback
+can neither detach nor change the input under the parser. A callback that returns a promise is refused with
 `ENTRY_CALLBACK_ERROR` and a `TypeError` as `cause` (its rejection is silenced,
 so it cannot become an unhandled rejection); use the async function for async
 work.
@@ -249,7 +259,7 @@ try {
 }
 ```
 
-`error.message` is the human-readable description only. Everything machine-readable is a property, typed as `ExarchError` in `index.d.ts`: a union you can narrow on `writes`, whose `code` is an `ErrorCode` for every member except `ExarchNativeError`, so exclude that member before an exhaustive `switch (error.code)`.
+`error.message` is the human-readable description only. The generated `index.d.ts` names `AsyncIterable` and carries a `lib="es2018.asynciterable"` reference. Everything machine-readable is a property, typed as `ExarchError` in `index.d.ts`: a union you can narrow on `writes`, whose `code` is an `ErrorCode` for every member except `ExarchNativeError`, so exclude that member before an exhaustive `switch (error.code)`.
 
 | Property | Set when | Value |
 |----------|----------|-------|

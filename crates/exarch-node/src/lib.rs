@@ -45,6 +45,34 @@ use napi::threadsafe_function::ThreadsafeFunction;
 use napi::threadsafe_function::ThreadsafeFunctionCallMode;
 use napi_derive::napi;
 
+/// Wraps a JavaScript shim `$body` (an expression) in an IIFE that defines
+/// `normalizeThrown(what, thrown)`: an object or function passes through
+/// unchanged, any other value becomes an `Error` named after `what` whose
+/// `cause` is the value (a Symbol stringified, because napi-rs coerces `cause`
+/// to a string when it reads it back, which throws for a raw Symbol).
+///
+/// One definition serves every shim that catches a throw before napi-rs sees
+/// it: a primitive crossing that boundary can crash the host process.
+macro_rules! js_with_normalizer {
+    ($body:literal) => {
+        concat!(
+            "(() => {\n",
+            "const normalizeThrown = (what, thrown) => {\n",
+            "  if (thrown !== null && (typeof thrown === \"object\" || typeof thrown === \"function\")) {\n",
+            "    return thrown;\n",
+            "  }\n",
+            "  const wrapped = new Error(what + \" threw a non-object value: \" + String(thrown));\n",
+            "  wrapped.cause = typeof thrown === \"symbol\" ? String(thrown) : thrown;\n",
+            "  return wrapped;\n",
+            "};\n",
+            "return ",
+            $body,
+            ";\n",
+            "})()"
+        )
+    };
+}
+
 #[cfg_attr(
     test,
     allow(dead_code, reason = "napi registers its functions outside test builds")
@@ -411,18 +439,15 @@ pub fn create_archive_sync(
 /// which throws `TypeError: Cannot convert a Symbol value to a string` for a
 /// raw `Symbol` — reproducing this fix's own target crash one layer further
 /// in, uncatchably under `--force-node-api-uncaught-exceptions-policy=true`.
-const WRAP_PROGRESS_CALLBACK_JS: &str = r#"(callback) => function progressCallbackWrapper(err, arg) {
+const WRAP_PROGRESS_CALLBACK_JS: &str = js_with_normalizer!(
+    r#"(callback) => function progressCallbackWrapper(err, arg) {
   try {
     return callback(err, arg);
   } catch (thrown) {
-    if (thrown !== null && (typeof thrown === "object" || typeof thrown === "function")) {
-      throw thrown;
-    }
-    const wrapped = new Error("progress callback threw a non-object value: " + String(thrown));
-    wrapped.cause = typeof thrown === "symbol" ? String(thrown) : thrown;
-    throw wrapped;
+    throw normalizeThrown("progress callback", thrown);
   }
-}"#;
+}"#
+);
 
 /// Argument type for a progress callback that wraps the JS value with
 /// `WRAP_PROGRESS_CALLBACK_JS` before building the [`ThreadsafeFunction`].

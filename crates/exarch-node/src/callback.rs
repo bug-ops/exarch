@@ -43,37 +43,27 @@ use crate::stream::IntoSource;
 ///
 /// A thrown or rejected non-object is wrapped in an `Error` whose `cause` is
 /// the primitive (a Symbol stringified, see `stream.rs`).
-const WRAP_ENTRY_CALLBACK_JS: &str = r#"(callback) => async function entryCallback(entry) {
+const WRAP_ENTRY_CALLBACK_JS: &str = js_with_normalizer!(
+    r#"(callback) => async function entryCallback(entry) {
   try {
     await callback(entry);
   } catch (thrown) {
-    if (thrown !== null && (typeof thrown === "object" || typeof thrown === "function")) {
-      throw thrown;
-    }
-    const wrapped = new Error("onEntry threw a non-object value: " + String(thrown));
-    wrapped.cause = typeof thrown === "symbol" ? String(thrown) : thrown;
-    throw wrapped;
+    throw normalizeThrown("onEntry", thrown);
   }
-}"#;
+}"#
+);
 
 /// `onEntry` for the sync function: returns what went wrong instead of
 /// throwing, so no exception is left pending in the JS environment. A callback
 /// that returns a thenable is refused: the extraction cannot wait for it, and
 /// its rejection is silenced so it cannot become an unhandled rejection.
-const WRAP_ENTRY_CALLBACK_SYNC_JS: &str = r#"(callback) => function entryCallbackSync(entry) {
-  const normalize = (thrown) => {
-    if (thrown !== null && (typeof thrown === "object" || typeof thrown === "function")) {
-      return thrown;
-    }
-    const wrapped = new Error("onEntry threw a non-object value: " + String(thrown));
-    wrapped.cause = typeof thrown === "symbol" ? String(thrown) : thrown;
-    return wrapped;
-  };
+const WRAP_ENTRY_CALLBACK_SYNC_JS: &str = js_with_normalizer!(
+    r#"(callback) => function entryCallbackSync(entry) {
   let result;
   try {
     result = callback(entry);
   } catch (thrown) {
-    return normalize(thrown);
+    return normalizeThrown("onEntry", thrown);
   }
   try {
     if (result !== null && result !== undefined && typeof result.then === "function") {
@@ -83,10 +73,11 @@ const WRAP_ENTRY_CALLBACK_SYNC_JS: &str = r#"(callback) => function entryCallbac
       return new TypeError("onEntry returned a promise; use extractArchiveToCallback");
     }
   } catch (thrown) {
-    return normalize(thrown);
+    return normalizeThrown("onEntry", thrown);
   }
   return undefined;
-}"#;
+}"#
+);
 
 type EntryFn = ThreadsafeFunction<MemoryEntry, Promise<()>, MemoryEntry, Status, false>;
 
@@ -193,10 +184,17 @@ impl CallbackJob {
 /// `maxFileSize`. The extraction waits for each call, and for the promise it
 /// returns, before it reads on, so a slow consumer holds it back.
 ///
+/// Entries are provisional: each is delivered as soon as it is verified, so a
+/// later failure refuses the archive after earlier entries were already
+/// delivered. Treat the results as final only once the promise resolved. The
+/// gzip CRC of a `.tar.gz` is never checked on extraction, so a corrupt
+/// compressed stream can deliver altered data without an error.
+///
 /// A `'symlink'` entry's `target` is spelled as the archive stores it,
 /// relative to the link. A `'hardlink'` entry is delivered by reference after
-/// every other entry: its `target` is the root-relative resolved path of a
-/// file already delivered. With `skipDuplicates` off one path can be delivered
+/// every other entry: its `target` is the root-relative resolved path of an
+/// entry already delivered, a file or an earlier hardlink (a chain is
+/// delivered link by link). With `skipDuplicates` off one path can be delivered
 /// more than once and a hardlink refers to the latest delivery. Implicit
 /// parent directories are not delivered.
 ///
@@ -270,7 +268,7 @@ pub fn extract_archive_to_callback<'env>(
 /// # Arguments
 ///
 /// The arguments of `extractArchiveToCallback`, except that `data` must be a
-/// `Uint8Array`.
+/// `Uint8Array`, which is copied before `onEntry` first runs.
 ///
 /// # Returns
 ///
@@ -307,7 +305,9 @@ pub fn extract_archive_to_callback_sync<'env>(
     let wrapped = factory.call(on_entry.to_unknown())?;
 
     run_sync(env, "archive extraction to a callback", || {
-        job.run(&*data, |entry| {
+        // Copied: `onEntry` runs JS while the archive is parsed, and JS can
+        // mutate or detach the caller's buffer under a borrowed slice.
+        job.run(data.to_vec(), |entry| {
             let outcome = wrapped
                 .call(entry)
                 .map_err(|source| ProgressCallbackError::EntryCallback { source })?;

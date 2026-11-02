@@ -27,7 +27,10 @@ use crate::raw_zip::RawZip;
 use crate::raw_zip::deflate_zeros;
 use crate::test_utils::create_test_zip;
 
+mod decode_budget;
 mod descriptor_resume;
+mod known_size_stream_end;
+mod non_regular_payload;
 mod stored_resume;
 mod streaming;
 mod xl_type;
@@ -589,7 +592,7 @@ fn findings_are_capped_per_kind() {
     assert_eq!(archive.structure().central_entries(), 200);
 }
 
-fn evil_local() -> Vec<u8> {
+fn unmapped_local() -> Vec<u8> {
     let evil = RawZip::new(vec![RawEntry::stored("evil.sh", b"echo pwned\n")]).build();
     evil.bytes[..evil.directory_start].to_vec()
 }
@@ -607,7 +610,7 @@ fn hidden_in(offset: usize, region: HiddenRegion) -> ZipInconsistency {
 
 #[test]
 fn local_header_at_file_start_before_the_archive_is_found() {
-    let mut bytes = evil_local();
+    let mut bytes = unmapped_local();
     bytes.extend(two_files().build().bytes);
     let archive = open_bytes(bytes);
     assert_eq!(
@@ -618,7 +621,7 @@ fn local_header_at_file_start_before_the_archive_is_found() {
 
 #[test]
 fn local_header_after_padding_is_found() {
-    let local = evil_local();
+    let local = unmapped_local();
     for (label, padding) in [
         ("one zero byte", vec![0u8]),
         ("signature prefix", b"PK".to_vec()),
@@ -638,7 +641,7 @@ fn local_header_after_padding_is_found() {
 
 #[test]
 fn local_header_between_two_entries_is_found() {
-    let local = evil_local();
+    let local = unmapped_local();
     let mut first = RawEntry::stored("a.txt", b"hello");
     first.padding_after = 3;
     let mut built = RawZip::new(vec![first, RawEntry::stored("b.txt", b"world")]).build();
@@ -678,7 +681,7 @@ fn embedded_signature_in_a_stub_or_gap_is_not_a_hidden_header() {
 
 #[test]
 fn large_gaps_are_searched_across_read_boundaries() {
-    let local = evil_local();
+    let local = unmapped_local();
     for padding in [GAP_CHUNK - 1, GAP_CHUNK, GAP_CHUNK + 5] {
         let mut zip = RawZip::new(vec![RawEntry::stored("a.txt", b"hello")]);
         zip.before_directory = [vec![0u8; padding], local.clone()].concat();
@@ -714,7 +717,7 @@ fn with_prefix_stub(archive: Vec<u8>) -> Vec<u8> {
 
 #[test]
 fn many_header_mismatches_do_not_push_out_other_findings() {
-    let local = evil_local();
+    let local = unmapped_local();
     let entries: Vec<_> = (0..40)
         .map(|i| RawEntry::stored(&format!("f{i:02}.txt"), b"x"))
         .collect();
@@ -773,7 +776,7 @@ fn every_structural_finding_is_ignored_under_the_ignore_policy() {
     let mut uncounted = two_files();
     uncounted.end_count = Some(1);
     let mut hidden = RawZip::new(vec![RawEntry::stored("a.txt", b"hello")]);
-    hidden.before_directory = evil_local();
+    hidden.before_directory = unmapped_local();
     let mut overlap = two_files().build();
     let second_record = overlap.directory_start + (46 + "a.txt".len());
     let first = u32::try_from(overlap.local_offsets[0])
@@ -1028,7 +1031,7 @@ fn ignore_policy_adds_no_omitted_findings_note() {
 #[test]
 fn suspicious_entries_never_exceed_the_entries() {
     let mut zip = RawZip::new(vec![RawEntry::stored("a.txt", b"hello")]);
-    zip.before_directory = evil_local().repeat(20);
+    zip.before_directory = unmapped_local().repeat(20);
     let report = open_bytes(zip.build().bytes)
         .verify(
             &config(ZipConsistencyPolicy::Enforce),
@@ -1172,7 +1175,7 @@ fn with_prefix(prefix: Vec<u8>) -> ZipArchive<Cursor<Vec<u8>>> {
 fn local_header_inside_the_prefix_is_found() {
     for lead in [1usize, 100, 70_000, 131_000, 131_072 - 10, 300_000] {
         let mut prefix = vec![b'#'; lead];
-        prefix.extend(evil_local());
+        prefix.extend(unmapped_local());
         prefix.extend(vec![b'#'; 50]);
         let archive = with_prefix(prefix);
         assert_eq!(
@@ -1281,7 +1284,7 @@ fn self_extractor_stub_is_not_a_hidden_header() {
 #[test]
 fn header_hidden_in_an_absolute_offset_stub_is_found() {
     let mut stub = vec![b'#'; 64];
-    stub.extend(evil_local());
+    stub.extend(unmapped_local());
     let absolute = with_absolute_offsets(&stub, &two_files().build());
     let archive = open_bytes(absolute);
     assert_eq!(
@@ -1424,7 +1427,7 @@ fn header_hidden_behind_a_compressed_stream_is_found_with_integrity() {
     let payload = b"hello hello hello hello";
     for method in [8u16, 12, 93] {
         let stream_len = compress(method, payload).len();
-        let mut tail = [descriptor(payload, 0), evil_local()].concat();
+        let mut tail = [descriptor(payload, 0), unmapped_local()].concat();
         if method == 93 {
             // A bare tail makes the zstd decoder fail; a skippable frame is
             // decoded around, so only the stream end shows what it hides.
@@ -1459,7 +1462,12 @@ fn header_hidden_behind_a_compressed_stream_is_found_with_integrity() {
 fn header_hidden_inside_stored_data_is_found_with_integrity() {
     for filler in [5usize, 200_000] {
         let content = vec![b'x'; filler];
-        let whole = [content.clone(), descriptor(&content, filler), evil_local()].concat();
+        let whole = [
+            content.clone(),
+            descriptor(&content, filler),
+            unmapped_local(),
+        ]
+        .concat();
         let built = RawZip::new(vec![descriptor_entry(0, &whole, &[])]).build();
         let expected = built.local_offsets[0] + 30 + 5 + filler + 16;
         let plain = open_bytes(built.bytes.clone())
@@ -1676,7 +1684,7 @@ fn failed_refill_leaves_no_stale_window() {
 #[test]
 fn header_in_a_skippable_frame_between_zstd_frames_is_found() {
     let (first, second) = (b"hello hello ".as_slice(), b"world world".as_slice());
-    let hidden = [descriptor(first, 0), evil_local()].concat();
+    let hidden = [descriptor(first, 0), unmapped_local()].concat();
     let mut skippable = 0x184D_2A50u32.to_le_bytes().to_vec();
     skippable.extend_from_slice(&u32::try_from(hidden.len()).unwrap().to_le_bytes());
     skippable.extend(hidden);
@@ -1692,7 +1700,7 @@ fn header_in_a_skippable_frame_between_zstd_frames_is_found() {
 #[test]
 fn descriptor_tail_check_is_off_under_the_ignore_policy() {
     let payload = b"hello hello hello hello";
-    let tail = [descriptor(payload, 0), evil_local()].concat();
+    let tail = [descriptor(payload, 0), unmapped_local()].concat();
     let built = RawZip::new(vec![descriptor_entry(8, payload, &tail)]).build();
     let report = open_bytes(built.bytes)
         .verify(

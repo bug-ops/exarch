@@ -335,7 +335,7 @@ fn descriptor_overrun_is_found_with_duplicate_names_too() {
 
 #[test]
 fn hidden_header_behind_every_descriptor_width_is_probed_with_duplicate_names() {
-    let evil = evil_local();
+    let unmapped_bytes = unmapped_local();
     for (signature, zip64, width) in [
         (true, false, 16usize),
         (false, false, 12),
@@ -346,10 +346,11 @@ fn hidden_header_behind_every_descriptor_width_is_probed_with_duplicate_names() 
         let mut survivor = RawEntry::deflated("a.txt", b"hello")
             .unwrap()
             .with_descriptor(signature, zip64);
-        survivor.padding_after = evil.len();
+        survivor.padding_after = unmapped_bytes.len();
         let end = data_end(&survivor, data_end(&shadowed, 0));
         let mut built = RawZip::new(vec![shadowed, survivor]).build();
-        built.bytes[end + width..end + width + evil.len()].copy_from_slice(&evil);
+        built.bytes[end + width..end + width + unmapped_bytes.len()]
+            .copy_from_slice(&unmapped_bytes);
         assert!(
             findings_of(&built).contains(&hidden_at(end + width)),
             "{signature} {zip64}"
@@ -380,7 +381,7 @@ fn nameless_header_in_a_gap_is_found_when_it_skips_data() {
 
 #[test]
 fn header_split_by_a_read_boundary_is_found_whatever_the_overlap() {
-    let local = evil_local();
+    let local = unmapped_local();
     for tail in 4..=36 {
         let padding = GAP_CHUNK - tail;
         let mut zip = RawZip::new(vec![RawEntry::stored("a.txt", b"hello")]);
@@ -440,7 +441,7 @@ fn truncated_header_at_the_end_of_the_last_chunk_is_judged_from_the_file() {
 
 #[test]
 fn truncated_header_at_the_end_of_a_middle_chunk_costs_no_extra_read() {
-    let local = evil_local();
+    let local = unmapped_local();
     let mut zip = RawZip::new(vec![RawEntry::stored("a.txt", b"hello")]);
     zip.before_directory = [vec![0u8; GAP_CHUNK - 20], local.clone()].concat();
     let built = zip.build();

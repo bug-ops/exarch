@@ -47,6 +47,14 @@ pub(super) enum HostSystem {
 }
 
 impl HostSystem {
+    pub(super) const fn of(system: zip::System) -> Self {
+        match system {
+            zip::System::Dos => Self::Dos,
+            zip::System::Unix => Self::Unix,
+            _ => Self::Other,
+        }
+    }
+
     pub(super) const fn from_byte(byte: u8) -> Self {
         match byte {
             HOST_DOS => Self::Dos,
@@ -130,6 +138,13 @@ pub(super) fn reader_kind(
 ) -> Option<EntryKind> {
     let file_type = local.file_type.or(central.file_type)?;
     Some(file_type.kind(is_directory_name(name, local_extra, local.host)))
+}
+
+/// The type a streaming reader gives an entry from its central name and
+/// attributes: a trailing slash, the Unix type bits or the DOS directory
+/// attribute, whichever the host system makes it read.
+pub(super) fn declared_kind(host: HostSystem, attributes: u32, name: &[u8]) -> EntryKind {
+    XlFileType::of_attributes(host, attributes).kind(is_directory_name(name, &[], host))
 }
 
 /// Whether the reader's final name for an entry marks a directory.

@@ -510,6 +510,20 @@ impl<R: Read + Seek> ZipArchive<R> {
         Ok(Self { inner, structure })
     }
 
+    /// Opens `reader` for the structural policy of `config`.
+    ///
+    /// Under [`ZipConsistencyPolicy::Ignore`] the findings that need entry
+    /// data to be read are discarded anyway, so they are not computed.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`ZipArchive::new`].
+    pub(crate) fn for_config(reader: R, config: &SecurityConfig<Validated>) -> Result<Self> {
+        let checks = zip_structure::StreamChecks::of(config.zip_consistency);
+        let (inner, structure) = zip_structure::open_with(reader, checks, config.max_total_size)?;
+        Ok(Self { inner, structure })
+    }
+
     /// The underlying reader, for listing.
     pub(crate) fn reader_mut(&mut self) -> &mut ZipReader<Shared<R>> {
         &mut self.inner
@@ -550,11 +564,25 @@ impl<R: Read + Seek> ZipArchive<R> {
         crate::inspection::list::list_zip_reader(self, config, listing)
     }
 
+    /// Fails closed when the archive was opened without the checks that read
+    /// entry data but the policy enforces their findings.
+    fn check_stream_checks(&self, config: &SecurityConfig<Validated>) -> Result<()> {
+        if config.zip_consistency == ZipConsistencyPolicy::Enforce
+            && self.structure.checks() == zip_structure::StreamChecks::Skip
+        {
+            return Err(ArchiveError::InvalidConfiguration {
+                reason: "ZIP archive was opened for a policy that skips stream checks".into(),
+            });
+        }
+        Ok(())
+    }
+
     pub(crate) fn check_structure(
         &self,
         config: &SecurityConfig<Validated>,
     ) -> Result<StructureChecked> {
         self.check_count(config)?;
+        self.check_stream_checks(config)?;
         if config.zip_consistency == ZipConsistencyPolicy::Enforce
             && let Some(finding) = self.structure.findings().first()
         {
@@ -814,6 +842,7 @@ impl<R: Read + Seek> ZipArchive<R> {
         use crate::inspection::verify::verify_manifest_with_structure;
 
         self.check_count(config)?;
+        self.check_stream_checks(config)?;
         let listed = list_for_verify(config, options, progress, |listing| {
             list_zip_reader(self, config, listing)
         })?;

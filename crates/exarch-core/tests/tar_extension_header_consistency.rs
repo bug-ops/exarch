@@ -1091,3 +1091,197 @@ proptest! {
         prop_assert!(verify_archive(&archive, &config()).is_err());
     }
 }
+
+fn with_padding_bytes(typeflag: u8, body: &[u8], padding: &[u8]) -> Vec<u8> {
+    let mut bytes = raw_extension(typeflag, body);
+    let at = 512 + body.len();
+    assert!(at + padding.len() <= bytes.len(), "padding does not fit");
+    bytes[at..at + padding.len()].copy_from_slice(padding);
+    bytes
+}
+
+fn long_path(len: usize) -> String {
+    let mut path: String = "dddddddd/".repeat(len / 9 + 1);
+    path.truncate(len - 1);
+    path.push('f');
+    path
+}
+
+const NON_ZERO_PADDING: &str = "non-zero padding";
+const NOT_ONE_STRING: &str = "not a single NUL-terminated string";
+
+#[test]
+fn local_pax_header_with_records_in_the_padding_is_refused() {
+    let body = pax_body(&[("mtime", "1700000000")]);
+    let size_record = pax_record("size", "1024");
+    let bytes = tar_of(&[
+        with_padding_bytes(PAX_LOCAL, &body, size_record.as_bytes()),
+        entry("a.txt", REGULAR, b"a"),
+    ]);
+    assert_refused_everywhere(&bytes, NON_ZERO_PADDING);
+}
+
+#[test]
+fn local_pax_header_with_a_path_record_in_the_padding_is_refused() {
+    let body = pax_body(&[("mtime", "1700000000")]);
+    let path_record = pax_record("path", "other.txt");
+    let bytes = tar_of(&[
+        with_padding_bytes(PAX_LOCAL, &body, path_record.as_bytes()),
+        entry("a.txt", REGULAR, b"a"),
+    ]);
+    assert_refused_everywhere(&bytes, NON_ZERO_PADDING);
+}
+
+#[test]
+fn local_pax_header_with_a_linkpath_record_in_the_padding_is_refused() {
+    let body = pax_body(&[("mtime", "1700000000")]);
+    let record = pax_record("linkpath", "other.txt");
+    let bytes = tar_of(&[
+        entry("t.txt", REGULAR, b"t"),
+        with_padding_bytes(PAX_LOCAL, &body, record.as_bytes()),
+        link("lnk", SYMLINK, "t.txt"),
+    ]);
+    assert_refused_everywhere(&bytes, NON_ZERO_PADDING);
+}
+
+#[test]
+fn global_pax_header_with_a_path_record_in_the_padding_is_refused() {
+    let body = pax_body(&[("comment", "0123456789")]);
+    let record = pax_record("path", "other.txt");
+    let bytes = tar_of(&[
+        with_padding_bytes(PAX_GLOBAL, &body, record.as_bytes()),
+        entry("a.txt", REGULAR, b"a"),
+    ]);
+    assert_refused_everywhere(&bytes, NON_ZERO_PADDING);
+}
+
+#[test]
+fn global_pax_header_with_a_last_padding_byte_set_is_refused() {
+    let body = pax_body(&[("comment", "0123456789")]);
+    let mut padding = vec![0u8; 512 - body.len()];
+    *padding.last_mut().unwrap() = 1;
+    let bytes = tar_of(&[
+        with_padding_bytes(PAX_GLOBAL, &body, &padding),
+        entry("a.txt", REGULAR, b"a"),
+        entry("b.txt", REGULAR, b"b"),
+    ]);
+    assert_refused_everywhere(&bytes, NON_ZERO_PADDING);
+}
+
+#[test]
+fn gnu_long_records_with_non_zero_padding_are_refused() {
+    for typeflag in [GNU_LONG_NAME, GNU_LONG_LINK] {
+        let body = b"long/name.txt\0";
+        let target = if typeflag == GNU_LONG_NAME {
+            entry("placeholder.txt", REGULAR, b"a")
+        } else {
+            link("lnk", SYMLINK, "t.txt")
+        };
+        let bytes = tar_of(&[
+            entry("t.txt", REGULAR, b"t"),
+            with_padding_bytes(typeflag, body, b"other.txt\0"),
+            target,
+        ]);
+        assert_refused_everywhere(&bytes, NON_ZERO_PADDING);
+    }
+}
+
+#[test]
+fn gnu_long_records_without_a_terminating_nul_are_refused() {
+    for typeflag in [GNU_LONG_NAME, GNU_LONG_LINK] {
+        let target = if typeflag == GNU_LONG_NAME {
+            entry("placeholder.txt", REGULAR, b"a")
+        } else {
+            link("lnk", SYMLINK, "t.txt")
+        };
+        let bytes = tar_of(&[
+            entry("t.txt", REGULAR, b"t"),
+            raw_extension(typeflag, b"long/name.txt"),
+            target,
+        ]);
+        assert_refused_everywhere(&bytes, NOT_ONE_STRING);
+    }
+}
+
+#[test]
+fn gnu_long_records_with_a_doubled_nul_are_refused() {
+    let bytes = tar_of(&[
+        raw_extension(GNU_LONG_NAME, b"long/name.txt\0\0"),
+        entry("placeholder.txt", REGULAR, b"a"),
+    ]);
+    assert_refused_everywhere(&bytes, NOT_ONE_STRING);
+}
+
+#[test]
+fn gnu_long_records_with_an_inner_nul_are_refused() {
+    let bytes = tar_of(&[
+        raw_extension(GNU_LONG_NAME, b"long\0name.txt\0"),
+        entry("placeholder.txt", REGULAR, b"a"),
+    ]);
+    let dir = TempDir::new().unwrap();
+    let archive = write_archive(&dir, &bytes);
+    assert!(list_archive(&archive, &config()).is_err());
+    let report = verify_archive(&archive, &config()).unwrap();
+    assert_eq!(report.status(), exarch_core::VerificationStatus::Fail);
+    let out = TempDir::new().unwrap();
+    assert!(extract_archive(&archive, out.path(), &config()).is_err());
+}
+
+#[test]
+fn extension_bodies_that_fill_whole_blocks_are_accepted() {
+    let value = "a".repeat(499);
+    let record = pax_record("comment", &value);
+    assert_eq!(record.len(), 512);
+    let path = long_path(511);
+    let bytes = tar_of(&[
+        raw_extension(PAX_GLOBAL, record.as_bytes()),
+        raw_extension(PAX_LOCAL, record.as_bytes()),
+        gnu_long(GNU_LONG_NAME, &path),
+        entry("placeholder.txt", REGULAR, b"a"),
+        entry("b.txt", REGULAR, b"b"),
+    ]);
+    assert_eq!(gnu_long(GNU_LONG_NAME, &path).len(), 1024);
+    let dir = TempDir::new().unwrap();
+    let archive = write_archive(&dir, &bytes);
+    let manifest = list_archive(&archive, &config()).unwrap();
+    assert_eq!(manifest.entries().len(), 2);
+    assert_eq!(manifest.entries()[0].path, Path::new(&path));
+    verify_archive(&archive, &config()).unwrap();
+}
+
+#[test]
+fn non_zero_regular_entry_padding_is_not_an_extension_header_concern() {
+    let mut regular = entry("a.txt", REGULAR, b"a");
+    regular[512 + 1] = 7;
+    let bytes = tar_of(&[regular, entry("b.txt", REGULAR, b"b")]);
+    let dir = TempDir::new().unwrap();
+    let archive = write_archive(&dir, &bytes);
+    assert_eq!(
+        list_archive(&archive, &config()).unwrap().entries().len(),
+        2
+    );
+}
+
+#[test]
+fn trailing_global_pax_header_with_records_in_the_padding_is_refused() {
+    let body = pax_body(&[("comment", "0123456789")]);
+    let record = pax_record("path", "other.txt");
+    let bytes = tar_of(&[
+        entry("a.txt", REGULAR, b"a"),
+        with_padding_bytes(PAX_GLOBAL, &body, record.as_bytes()),
+    ]);
+    assert_refused_everywhere(&bytes, NON_ZERO_PADDING);
+}
+
+#[test]
+fn trailing_global_pax_header_with_zero_padding_is_accepted() {
+    let bytes = tar_of(&[
+        entry("a.txt", REGULAR, b"a"),
+        extension(PAX_GLOBAL, &[("comment", "0123456789")]),
+    ]);
+    let dir = TempDir::new().unwrap();
+    let archive = write_archive(&dir, &bytes);
+    verify_archive(&archive, &config()).unwrap();
+    let out = TempDir::new().unwrap();
+    extract_archive(&archive, out.path(), &config()).unwrap();
+}

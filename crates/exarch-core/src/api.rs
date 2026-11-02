@@ -372,7 +372,7 @@ fn extract_zip(
     use std::fs::File;
 
     let file = File::open(archive_path)?;
-    let mut archive = ZipArchive::new(file)?;
+    let mut archive = ZipArchive::for_config(file, config)?;
     archive.extract(output_dir, config, options, progress)
 }
 
@@ -1036,7 +1036,7 @@ pub fn extract_to_sink_with_progress<S: EntrySink>(
             reader,
             format: SeekableFormat::Zip,
         } => {
-            let mut archive = ZipArchive::new(reader)?;
+            let mut archive = ZipArchive::for_config(reader, &config)?;
             let checked = archive.check_structure(&config)?;
             let mut target = SinkTarget::new(sink, &config);
             archive.extract_into(checked, &mut target, &config, *options, progress)

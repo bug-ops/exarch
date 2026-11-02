@@ -86,10 +86,14 @@ enum ExtensionConflict {
     PrefixWithoutUstar,
     #[error("header checksum does not match the header bytes")]
     ChecksumMismatch,
-    #[error("duplicate {0:?} extension header")]
+    #[error("duplicate {0} extension header")]
     DuplicateExtensionHeader(window::ExtensionKind),
     #[error("bytes read before the entry do not match the position of its header")]
     WindowMismatch,
+    #[error("extension header body is followed by non-zero padding")]
+    NonZeroPadding,
+    #[error("{0} extension header is not a single NUL-terminated string")]
+    MalformedLongRecord(window::ExtensionKind),
 }
 
 impl From<ExtensionConflict> for ArchiveError {
@@ -103,6 +107,17 @@ impl From<ExtensionConflict> for ArchiveError {
 enum PaxScope {
     Local,
     Global,
+}
+
+/// Kind of the entry a header window follows, which decides whether the
+/// padding at the start of the window belongs to a global PAX body.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PrecedingEntry {
+    /// No entry yet, or an entry whose padding readers never parse.
+    #[default]
+    Other,
+    /// A global PAX header, whose padded block readers parse as records.
+    GlobalPax,
 }
 
 /// Path overrides a local PAX header carries, owned so the entry can be
@@ -238,6 +253,22 @@ fn check_header_block(bytes: &[u8; 512], has_ustar_magic: bool) -> Result<()> {
     Ok(())
 }
 
+/// Checks the bytes `tar` read after the last entry when that entry was a
+/// global PAX header: its padding must be zero like any extension body's.
+///
+/// # Errors
+///
+/// Returns [`ArchiveError::InvalidArchive`] when the padding is not zero.
+pub fn check_trailing_headers(
+    window: &MetadataWindow<'_>,
+    preceding: PrecedingEntry,
+) -> Result<()> {
+    match preceding {
+        PrecedingEntry::GlobalPax => window::check_trailing_global_padding(window),
+        PrecedingEntry::Other => Ok(()),
+    }
+}
+
 /// Refuses an entry whose header or extension headers readers would resolve
 /// differently.
 ///
@@ -257,7 +288,12 @@ fn check_header_block(bytes: &[u8; 512], has_ustar_magic: bool) -> Result<()> {
 /// well-formed, must not carry `path`, `linkpath` or `size`, and must not
 /// follow a local header or a GNU long record.
 ///
-/// `metadata_limit` bounds how much of a global header is read.
+/// `metadata_limit` bounds how much of a global header is read. `preceding`
+/// is the value returned for the previous entry: the padding after a global
+/// header and after every extension header body must be zero, and a GNU long
+/// name or link body must be one NUL-terminated string.
+///
+/// Returns the kind of this entry, to pass as `preceding` for the next one.
 ///
 /// # Errors
 ///
@@ -267,13 +303,20 @@ pub fn check_entry_headers<R: Read>(
     entry: &mut Entry<'_, R>,
     window: &MetadataWindow<'_>,
     metadata_limit: u64,
-) -> Result<()> {
+    preceding: PrecedingEntry,
+) -> Result<PrecedingEntry> {
     check_parsed_headers(entry, metadata_limit)?;
     window::check_window(
         window,
+        preceding,
         entry.raw_header_position(),
         entry.raw_file_position(),
-    )
+    )?;
+    Ok(if entry.header().entry_type() == EntryType::XGlobalHeader {
+        PrecedingEntry::GlobalPax
+    } else {
+        PrecedingEntry::Other
+    })
 }
 
 fn check_parsed_headers<R: Read>(entry: &mut Entry<'_, R>, metadata_limit: u64) -> Result<()> {

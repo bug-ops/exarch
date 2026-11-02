@@ -17,6 +17,7 @@ use std::ops::Range;
 
 use super::CHECKSUM_FIELD;
 use super::ExtensionConflict;
+use super::PrecedingEntry;
 use super::SIZE_FIELD;
 use super::check_header_block;
 use super::check_record_framing;
@@ -39,6 +40,16 @@ pub(super) enum ExtensionKind {
     Pax,
     LongName,
     LongLink,
+}
+
+impl std::fmt::Display for ExtensionKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Pax => "PAX",
+            Self::LongName => "GNU long name",
+            Self::LongLink => "GNU long link",
+        })
+    }
 }
 
 impl ExtensionKind {
@@ -112,6 +123,10 @@ fn first_header_offset(window_start: u64) -> Result<usize> {
 
 /// Verifies the bytes `tar` read to reach an entry.
 ///
+/// After a global PAX header the padding up to the first block boundary must
+/// be zero, as must the padding after every extension header body, and a GNU
+/// long name or link body must be one string ending in a single NUL.
+///
 /// `header_pos` and `file_pos` are the offsets the `tar` crate reports for the
 /// yielded entry's header and data.
 ///
@@ -123,11 +138,15 @@ fn first_header_offset(window_start: u64) -> Result<usize> {
 /// crate yielded.
 pub(super) fn check_window(
     window: &MetadataWindow<'_>,
+    preceding: PrecedingEntry,
     header_pos: u64,
     file_pos: u64,
 ) -> Result<()> {
     let bytes = window.bytes();
     let mut offset = first_header_offset(window.start())?;
+    if preceding == PrecedingEntry::GlobalPax {
+        check_zero_padding(bytes.get(..offset))?;
+    }
     let mut seen: Vec<ExtensionKind> = Vec::new();
     loop {
         let block = block_at(bytes, offset).ok_or(ExtensionConflict::WindowMismatch)?;
@@ -148,10 +167,43 @@ pub(super) fn check_window(
             .ok_or(ExtensionConflict::WindowMismatch)?;
         if kind == ExtensionKind::Pax {
             check_record_framing(body)?;
+        } else {
+            check_long_record(kind, body)?;
         }
+        let body_end = body_start + body.len();
         offset = body_start
             .checked_add(body.len().next_multiple_of(BLOCK))
             .ok_or(ExtensionConflict::WindowMismatch)?;
+        check_zero_padding(bytes.get(body_end..offset))?;
+    }
+}
+
+/// Checks the padding after a trailing global PAX header, in the window the
+/// `tar` crate read before reporting the end of the archive. An archive that
+/// ends inside the padding has nothing left to disagree on.
+pub(super) fn check_trailing_global_padding(window: &MetadataWindow<'_>) -> Result<()> {
+    let bytes = window.bytes();
+    let end = first_header_offset(window.start())?.min(bytes.len());
+    check_zero_padding(bytes.get(..end))
+}
+
+fn check_zero_padding(padding: Option<&[u8]>) -> Result<()> {
+    let padding = padding.ok_or(ExtensionConflict::WindowMismatch)?;
+    if padding.iter().all(|&b| b == 0) {
+        Ok(())
+    } else {
+        Err(ExtensionConflict::NonZeroPadding.into())
+    }
+}
+
+/// Readers cut a GNU long name or link at the first NUL of the padded block,
+/// so a non-empty body must end in exactly one NUL. A NUL elsewhere in the
+/// text is refused later as a path or target containing null bytes.
+fn check_long_record(kind: ExtensionKind, body: &[u8]) -> Result<()> {
+    match body.split_last() {
+        None => Ok(()),
+        Some((0, text)) if text.last() != Some(&0) => Ok(()),
+        _ => Err(ExtensionConflict::MalformedLongRecord(kind).into()),
     }
 }
 
@@ -208,7 +260,7 @@ mod tests {
     fn a_bare_final_header_is_accepted() {
         let bytes = header_block(b'0', 0);
         let window = MetadataWindow::new(0, &bytes);
-        check_window(&window, 0, 512).unwrap();
+        check_window(&window, PrecedingEntry::Other, 0, 512).unwrap();
     }
 
     #[test]
@@ -216,28 +268,37 @@ mod tests {
         let mut bytes = vec![0u8; 5];
         bytes.extend(header_block(b'0', 0));
         let window = MetadataWindow::new(507, &bytes);
-        check_window(&window, 512, 1024).unwrap();
+        check_window(&window, PrecedingEntry::Other, 512, 1024).unwrap();
     }
 
     #[test]
     fn a_window_ending_past_the_reported_file_position_is_refused() {
         let bytes = header_block(b'0', 0);
         let window = MetadataWindow::new(0, &bytes);
-        assert_refused(check_window(&window, 0, 1024), "do not match");
+        assert_refused(
+            check_window(&window, PrecedingEntry::Other, 0, 1024),
+            "do not match",
+        );
     }
 
     #[test]
     fn a_final_header_at_another_position_than_reported_is_refused() {
         let bytes = header_block(b'0', 0);
         let window = MetadataWindow::new(0, &bytes);
-        assert_refused(check_window(&window, 512, 512), "do not match");
+        assert_refused(
+            check_window(&window, PrecedingEntry::Other, 512, 512),
+            "do not match",
+        );
     }
 
     #[test]
     fn a_window_that_ends_inside_a_header_is_refused() {
         let bytes = header_block(b'0', 0);
         let window = MetadataWindow::new(0, &bytes[..300]);
-        assert_refused(check_window(&window, 0, 300), "do not match");
+        assert_refused(
+            check_window(&window, PrecedingEntry::Other, 0, 300),
+            "do not match",
+        );
     }
 
     #[test]
@@ -245,14 +306,17 @@ mod tests {
         let body = b"18 path=long/name\n";
         let bytes = [pax_extension(body), header_block(b'0', 0)].concat();
         let window = MetadataWindow::new(0, &bytes);
-        check_window(&window, 1024, 1536).unwrap();
+        check_window(&window, PrecedingEntry::Other, 1024, 1536).unwrap();
     }
 
     #[test]
     fn an_extension_body_running_past_the_window_is_refused() {
         let bytes = [header_block(b'x', 4096), vec![0u8; 512]].concat();
         let window = MetadataWindow::new(0, &bytes);
-        assert_refused(check_window(&window, 512, 1024), "do not match");
+        assert_refused(
+            check_window(&window, PrecedingEntry::Other, 512, 1024),
+            "do not match",
+        );
     }
 
     #[test]
@@ -265,7 +329,10 @@ mod tests {
         ]
         .concat();
         let window = MetadataWindow::new(0, &bytes);
-        assert_refused(check_window(&window, 2048, 2560), "duplicate");
+        assert_refused(
+            check_window(&window, PrecedingEntry::Other, 2048, 2560),
+            "duplicate",
+        );
     }
 
     #[test]
@@ -273,7 +340,10 @@ mod tests {
         let body = b"+20 path=long/name\n";
         let bytes = [pax_extension(body), header_block(b'0', 0)].concat();
         let window = MetadataWindow::new(0, &bytes);
-        assert_refused(check_window(&window, 1024, 1536), "malformed PAX record");
+        assert_refused(
+            check_window(&window, PrecedingEntry::Other, 1024, 1536),
+            "malformed PAX record",
+        );
     }
 
     #[test]
@@ -281,7 +351,10 @@ mod tests {
         let mut block = header_block(b'0', 0);
         block[0] = b'a';
         let window = MetadataWindow::new(0, &block);
-        assert_refused(check_window(&window, 0, 512), "checksum");
+        assert_refused(
+            check_window(&window, PrecedingEntry::Other, 0, 512),
+            "checksum",
+        );
     }
 
     #[test]
@@ -297,6 +370,9 @@ mod tests {
         extension[CHECKSUM_FIELD].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
         let bytes = [extension, header_block(b'0', 0)].concat();
         let window = MetadataWindow::new(0, &bytes);
-        assert_refused(check_window(&window, 1024, 1536), "size field");
+        assert_refused(
+            check_window(&window, PrecedingEntry::Other, 1024, 1536),
+            "size field",
+        );
     }
 }

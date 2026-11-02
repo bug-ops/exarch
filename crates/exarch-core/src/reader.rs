@@ -353,7 +353,7 @@ impl<'a> ArchiveReader<'a> {
             Source::Seekable {
                 reader,
                 format: SeekableFormat::Zip,
-            } => ZipArchive::new(reader)?.list_with(config, listing),
+            } => ZipArchive::for_config(reader, config)?.list_with(config, listing),
             Source::Seekable {
                 reader,
                 format: SeekableFormat::SevenZ,
@@ -378,7 +378,8 @@ impl<'a> ArchiveReader<'a> {
             Source::Seekable {
                 reader,
                 format: SeekableFormat::Zip,
-            } => ZipArchive::new(reader)?.verify_with_progress(config, options, progress),
+            } => ZipArchive::for_config(reader, config)?
+                .verify_with_progress(config, options, progress),
             Source::Seekable {
                 reader,
                 format: SeekableFormat::SevenZ,

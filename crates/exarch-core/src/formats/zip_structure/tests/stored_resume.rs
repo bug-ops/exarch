@@ -14,7 +14,12 @@ use crate::formats::zip_tail::SCAN_CHUNK;
 /// A stored descriptor entry whose data is `filler`, a descriptor with the
 /// given sizes, and a complete local entry.
 fn stored_with_in_data_header(filler: usize, descriptor_bytes: &[u8]) -> (BuiltZip, usize) {
-    let whole = [vec![b'x'; filler], descriptor_bytes.to_vec(), evil_local()].concat();
+    let whole = [
+        vec![b'x'; filler],
+        descriptor_bytes.to_vec(),
+        unmapped_local(),
+    ]
+    .concat();
     let built = RawZip::new(vec![descriptor_entry(0, &whole, &[])]).build();
     let header_at = built.local_offsets[0] + LFH_FIXED_LEN + 5 + filler + descriptor_bytes.len();
     (built, header_at)
@@ -129,7 +134,7 @@ fn stored_dd_cut_off_header_is_reported() {
     let truncated = [
         vec![b'x'; 40],
         descriptor_after(40),
-        evil_local()[..LFH_FIXED_LEN + 3].to_vec(),
+        unmapped_local()[..LFH_FIXED_LEN + 3].to_vec(),
     ]
     .concat();
     let built = RawZip::new(vec![descriptor_entry(0, &truncated, &[])]).build();
@@ -146,7 +151,7 @@ fn stored_dd_later_header_is_reported() {
         vec![b'x'; 40],
         descriptor_after(40),
         vec![0x11; 7],
-        evil_local(),
+        unmapped_local(),
     ]
     .concat();
     let built = RawZip::new(vec![descriptor_entry(0, &whole, &[])]).build();
@@ -182,7 +187,7 @@ fn stored_dd_search_follows_the_first_signature() {
         b"PK\x07\x08".to_vec(),
         vec![0; 60],
         descriptor_after(104),
-        evil_local(),
+        unmapped_local(),
     ]
     .concat();
     let built = RawZip::new(vec![descriptor_entry(0, &whole, &[])]).build();
@@ -195,7 +200,7 @@ fn stored_dd_search_follows_the_first_signature() {
 
 #[test]
 fn stored_dd_in_data_header_is_found_with_duplicate_names() {
-    let whole = [vec![b'x'; 40], descriptor_after(40), evil_local()].concat();
+    let whole = [vec![b'x'; 40], descriptor_after(40), unmapped_local()].concat();
     let mut survivor = descriptor_entry(0, &whole, &[]);
     survivor.name = b"a.txt".to_vec();
     let built = RawZip::new(vec![RawEntry::stored("a.txt", b"first"), survivor]).build();
@@ -220,7 +225,12 @@ fn stored_streaming_writer_archive_has_no_findings() {
 
 #[test]
 fn stored_entries_without_a_descriptor_are_not_scanned() {
-    let whole = [vec![b'x'; 40], descriptor_with_sizes(0, 0), evil_local()].concat();
+    let whole = [
+        vec![b'x'; 40],
+        descriptor_with_sizes(0, 0),
+        unmapped_local(),
+    ]
+    .concat();
     let built = RawZip::new(vec![RawEntry::stored("a.txt", &whole)]).build();
     assert!(findings_of(&built).is_empty());
 }
@@ -229,7 +239,7 @@ fn stored_entries_without_a_descriptor_are_not_scanned() {
 fn stored_dd_findings_share_the_hidden_header_limit() {
     let entries = (0..20)
         .map(|i| {
-            let whole = [vec![b'x'; 8], descriptor_after(8), evil_local()].concat();
+            let whole = [vec![b'x'; 8], descriptor_after(8), unmapped_local()].concat();
             let mut entry = descriptor_entry(0, &whole, &[]);
             entry.name = format!("e{i:02}.txt").into_bytes();
             entry
@@ -291,7 +301,7 @@ fn duplicate_names_with_header_at(offset_after_signature: Option<usize>) -> Buil
     if let Some(offset) = offset_after_signature {
         data.truncate(40 + 12);
         data.extend(vec![0u8; offset - 12]);
-        data.extend(evil_local());
+        data.extend(unmapped_local());
     }
     let survivor = descriptor_entry(0, &data, &[]);
     RawZip::new(vec![RawEntry::stored("a.txt", b"first"), survivor]).build()

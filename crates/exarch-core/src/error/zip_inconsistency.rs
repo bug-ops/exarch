@@ -146,6 +146,58 @@ closed_enum! {
         /// Bytes behind the end of the compressed stream of a data-descriptor
         /// entry, inside the range its central directory record declares
         DescriptorTail => "inside the range of a data-descriptor entry",
+
+        /// Bytes behind the end of the compressed stream of an entry whose
+        /// sizes the local header states, inside the range its central
+        /// directory record declares
+        StreamTail => "behind the compressed stream of an entry",
+    }
+}
+
+closed_enum! {
+    /// Why the end of an entry's compressed stream could not be established.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::ZipStreamUndecided;
+    ///
+    /// assert_eq!(
+    ///     ZipStreamUndecided::Rejected.to_string(),
+    ///     "the decoder does not accept the stream within the declared range"
+    /// );
+    /// ```
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[non_exhaustive]
+    pub enum ZipStreamUndecided {
+        /// The decoder rejects the bytes, or the stream does not end inside
+        /// the declared range
+        Rejected => "the decoder does not accept the stream within the declared range",
+
+        /// Decoding the entry would exceed the budget the check may decode per
+        /// archive, and its bytes hold a record a streaming reader acts on
+        BudgetExhausted => "decoding it exceeds the decode budget and its bytes hold a record",
+    }
+}
+
+closed_enum! {
+    /// Kind of entry that is not a regular file but declares a payload.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::ZipNonRegularKind;
+    ///
+    /// assert_eq!(ZipNonRegularKind::Directory.to_string(), "directory");
+    /// ```
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[non_exhaustive]
+    pub enum ZipNonRegularKind {
+        /// Directory
+        Directory => "directory",
+
+        /// Device node, socket or other special file
+        Special => "special file",
     }
 }
 
@@ -274,6 +326,29 @@ pub enum ZipInconsistency {
         offset: u64,
     },
 
+    /// A directory or special file entry declares a payload, which readers
+    /// disagree on whether to skip or to read on as further records.
+    NonRegularPayload {
+        /// Entry that declares the payload.
+        entry: ZipEntryIndex,
+        /// What the entry is.
+        kind: ZipNonRegularKind,
+        /// Compressed size the central directory declares.
+        compressed_size: u64,
+    },
+
+    /// The end of an entry's compressed stream cannot be established inside
+    /// its declared range, so a reader that ends the entry where the stream
+    /// ends resumes at an unknown position.
+    StreamEndUnknown {
+        /// Entry whose stream end is unknown.
+        entry: ZipEntryIndex,
+        /// Absolute offset where the entry's declared range ends.
+        offset: u64,
+        /// Why the end could not be established.
+        reason: ZipStreamUndecided,
+    },
+
     /// The central directory holds more records than its end record counts.
     UncountedCentralRecords {
         /// Count claimed by the end of central directory record.
@@ -341,6 +416,24 @@ impl std::fmt::Display for ZipInconsistency {
                 f,
                 "data descriptor of entry {entry} at offset {offset} makes a streaming reader \
                  resume past the next entry"
+            ),
+            Self::NonRegularPayload {
+                entry,
+                kind,
+                compressed_size,
+            } => write!(
+                f,
+                "{kind} entry {entry} declares a payload of {compressed_size} bytes"
+            ),
+            Self::StreamEndUnknown {
+                entry,
+                offset,
+                reason,
+            } => write!(
+                f,
+                "the end of the compressed stream of entry {entry} cannot be established \
+                 ({reason}) in its declared range ending at offset {offset}, so a streaming \
+                 reader may resume elsewhere"
             ),
             Self::XlTypeDivergence { entry, offset } => write!(
                 f,
@@ -432,6 +525,26 @@ mod tests {
             .to_string(),
             "data descriptor of entry 2 at offset 70 makes a streaming reader resume past the \
              next entry"
+        );
+        assert_eq!(
+            ZipInconsistency::NonRegularPayload {
+                entry: ZipEntryIndex::new(2),
+                kind: ZipNonRegularKind::Directory,
+                compressed_size: 9
+            }
+            .to_string(),
+            "directory entry 2 declares a payload of 9 bytes"
+        );
+        assert_eq!(
+            ZipInconsistency::StreamEndUnknown {
+                entry: ZipEntryIndex::new(2),
+                offset: 70,
+                reason: ZipStreamUndecided::BudgetExhausted
+            }
+            .to_string(),
+            "the end of the compressed stream of entry 2 cannot be established (decoding it \
+             exceeds the decode budget and its bytes hold a record) in its declared range \
+             ending at offset 70, so a streaming reader may resume elsewhere"
         );
         assert_eq!(
             ZipInconsistency::XlTypeDivergence {

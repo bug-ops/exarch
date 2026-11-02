@@ -436,6 +436,14 @@ impl<R: Read> TarArchive<R> {
             }
         }
 
+        if let Err(e) = entries.finish() {
+            ctx.push_skip_warnings();
+            return Err(ArchiveError::partial_or(
+                std::mem::take(ctx.tally.report),
+                e,
+            ));
+        }
+
         // Two-pass extraction: create hardlinks after all target files exist
         for hardlink in hardlinks {
             if let Err(e) = target.hardlink(
@@ -1266,7 +1274,7 @@ mod tests {
         // Add a GNU long name entry
         let mut header = tar::Header::new_gnu();
         header.set_entry_type(tar::EntryType::GNULongName);
-        let long_name = b"very_long_filename.txt";
+        let long_name = b"very_long_filename.txt\0";
         header.set_size(long_name.len() as u64);
         header.set_cksum();
         builder
@@ -1308,7 +1316,7 @@ mod tests {
         // Add a GNU long link entry (metadata, should be skipped)
         let mut header = tar::Header::new_gnu();
         header.set_entry_type(tar::EntryType::GNULongLink);
-        let long_link = b"target.txt";
+        let long_link = b"target.txt\0";
         header.set_size(long_link.len() as u64);
         header.set_cksum();
         builder

@@ -32,9 +32,9 @@ fn deflate_header_behind_the_stream_end_is_found_without_integrity() {
     let stream_len = compress(8, payload).len();
     let signed = descriptor(payload, 0);
     for (tail, skipped) in [
-        ([signed.clone(), evil_local()].concat(), 16),
-        ([signed[4..].to_vec(), evil_local()].concat(), 12),
-        (evil_local(), 0),
+        ([signed.clone(), unmapped_local()].concat(), 16),
+        ([signed[4..].to_vec(), unmapped_local()].concat(), 12),
+        (unmapped_local(), 0),
     ] {
         let built = RawZip::new(vec![descriptor_entry(8, payload, &tail)]).build();
         let at = data_start(&built, 0) + stream_len + skipped;
@@ -57,7 +57,7 @@ fn deflate_header_behind_the_stream_end_is_found_without_integrity() {
 #[test]
 fn deflate_header_behind_the_stream_end_is_fatal_for_listing_under_enforce() {
     let payload = b"hello hello hello hello";
-    let tail = [descriptor(payload, 0), evil_local()].concat();
+    let tail = [descriptor(payload, 0), unmapped_local()].concat();
     let built = RawZip::new(vec![descriptor_entry(8, payload, &tail)]).build();
     assert_matches!(
         open_bytes(built.bytes.clone()).list(&config(ZipConsistencyPolicy::Enforce)),
@@ -78,7 +78,7 @@ fn deflate_header_behind_the_stream_end_is_fatal_for_listing_under_enforce() {
 #[test]
 fn deflate_header_behind_the_stream_end_is_found_with_duplicate_names() {
     let payload = b"hello hello hello hello";
-    let tail = [descriptor(payload, 0), evil_local()].concat();
+    let tail = [descriptor(payload, 0), unmapped_local()].concat();
     let built = RawZip::new(vec![
         RawEntry::stored("a.txt", b"first"),
         descriptor_entry(8, payload, &tail),
@@ -124,7 +124,7 @@ fn deflate_streaming_writer_archive_has_no_findings() {
     assert!(open_bytes(bytes).structure().findings().is_empty());
 }
 
-fn zstd_raw_frame(content: &[u8]) -> Vec<u8> {
+pub(super) fn zstd_raw_frame(content: &[u8]) -> Vec<u8> {
     let len = u8::try_from(content.len()).unwrap();
     let block = u32::try_from(content.len() << 3 | 1).unwrap().to_le_bytes();
     [
@@ -140,7 +140,7 @@ fn zstd_header_behind_a_descriptor_signature_in_the_frame_is_found_without_integ
     let mut content = b"benign text\n".to_vec();
     content.extend_from_slice(b"PK\x07\x08");
     content.extend_from_slice(&[0; 12]);
-    content.extend(evil_local());
+    content.extend(unmapped_local());
     assert!(content.len() < 256);
     let mut entry = RawEntry::stored("a.txt", &content).with_descriptor(true, false);
     entry.method = 93;
@@ -231,9 +231,18 @@ fn deflate_header_whose_name_runs_past_the_declared_range_is_found() {
     }
 }
 
-fn findings_with_decode_budget(built: &BuiltZip, decode: u64) -> Vec<ZipInconsistency> {
+pub(super) fn findings_with_decode_budget(built: &BuiltZip, decode: u64) -> Vec<ZipInconsistency> {
+    findings_with_budgets(built, decode, ChunkSizes::PRODUCTION.recheck)
+}
+
+pub(super) fn findings_with_budgets(
+    built: &BuiltZip,
+    decode: u64,
+    recheck: u64,
+) -> Vec<ZipInconsistency> {
     let chunks = ChunkSizes {
         decode,
+        recheck,
         ..ChunkSizes::PRODUCTION
     };
     let (_, structure) = open_chunked(Cursor::new(built.bytes.clone()), chunks).unwrap();
@@ -242,7 +251,7 @@ fn findings_with_decode_budget(built: &BuiltZip, decode: u64) -> Vec<ZipInconsis
 
 fn hidden_after_deflate_stream() -> (BuiltZip, usize) {
     let payload = b"hello hello hello hello";
-    let tail = [descriptor(payload, 0), evil_local()].concat();
+    let tail = [descriptor(payload, 0), unmapped_local()].concat();
     let built = RawZip::new(vec![descriptor_entry(8, payload, &tail)]).build();
     let at = data_start(&built, 0) + compress(8, payload).len() + 16;
     (built, at)
@@ -264,7 +273,7 @@ fn deflate_decoding_within_the_budget_finds_the_header() {
 #[test]
 fn deflate_decoding_is_charged_for_the_bytes_produced_not_the_declared_size() {
     let payload = b"hello hello hello hello";
-    let tail = [descriptor(payload, 0), evil_local()].concat();
+    let tail = [descriptor(payload, 0), unmapped_local()].concat();
     let mut entry = descriptor_entry(8, payload, &tail);
     entry.size = 1 << 30;
     let built = RawZip::new(vec![entry]).build();
@@ -276,9 +285,13 @@ fn deflate_decoding_is_charged_for_the_bytes_produced_not_the_declared_size() {
 }
 
 #[test]
-fn deflate_entry_the_budget_cannot_cover_is_refused_when_it_holds_a_record_signature() {
-    let (built, _) = hidden_after_deflate_stream();
-    let found = findings_with_decode_budget(&built, 22);
+fn deflate_entry_the_budget_cannot_cover_is_checked_again_when_it_holds_a_record() {
+    let (built, at) = hidden_after_deflate_stream();
+    assert_eq!(
+        findings_with_decode_budget(&built, 22),
+        [hidden_in(at, HiddenRegion::DescriptorTail)]
+    );
+    let found = findings_with_budgets(&built, 22, 22);
     assert!(has_overrun(&found, 0), "{found:?}");
 }
 
@@ -290,13 +303,29 @@ fn deflate_entry_the_budget_cannot_cover_passes_without_a_record_signature() {
 }
 
 #[test]
-fn deflate_entry_the_budget_cannot_cover_is_refused_for_a_signature_cut_at_the_end() {
+fn deflate_entry_the_budget_cannot_cover_passes_for_a_signature_prefix_without_a_record() {
     let payload = b"hello hello hello hello";
-    for cut in [&b"PK"[..], b"PK\x03"] {
-        let built = RawZip::new(vec![descriptor_entry(8, payload, cut)]).build();
+    for cut in [&b"P"[..], b"PK", b"PK\x03"] {
+        let built = RawZip::new(vec![
+            descriptor_entry(8, payload, cut),
+            RawEntry::stored("b.txt", b"world"),
+        ])
+        .build();
         let found = findings_with_decode_budget(&built, 0);
-        assert!(has_overrun(&found, 0), "{cut:?}: {found:?}");
+        assert!(!has_overrun(&found, 0), "{cut:?}: {found:?}");
     }
+}
+
+#[test]
+fn deflate_entry_the_budget_cannot_cover_is_refused_for_a_header_straddling_the_end() {
+    let payload = b"hello hello hello hello";
+    let mut entry = descriptor_entry(8, payload, &unmapped_local());
+    entry.declared_compressed = Some((compress(8, payload).len() + 10) as u64);
+    let built = RawZip::new(vec![entry]).build();
+    let found = findings_with_budgets(&built, 0, 0);
+    assert!(has_overrun(&found, 0), "{found:?}");
+    assert_eq!(findings_with_decode_budget(&built, 0), findings_of(&built));
+    assert!(!findings_of(&built).is_empty());
 }
 
 #[test]
@@ -322,7 +351,7 @@ fn deflate_header_straddling_the_declared_end_is_found() {
     let payload = b"hello hello hello hello";
     let stream_len = compress(8, payload).len();
     for kept in [10, 20, 29] {
-        let tail = [descriptor(payload, 0), evil_local()[..kept].to_vec()].concat();
+        let tail = [descriptor(payload, 0), unmapped_local()[..kept].to_vec()].concat();
         let built = RawZip::new(vec![descriptor_entry(8, payload, &tail)]).build();
         let at = data_start(&built, 0) + stream_len + 16;
         let found = findings_of(&built);
@@ -414,10 +443,10 @@ fn a_nameless_header_with_an_extra_field_is_a_hidden_header_wherever_it_sits() {
 }
 
 #[test]
-fn a_stored_entry_holding_a_nested_archive_with_descriptors_has_no_findings() {
+fn a_stored_entry_holding_a_nested_archive_without_signed_descriptors_has_no_findings() {
     let inner = RawZip::new(vec![
-        RawEntry::stored("x.txt", b"inner x").with_descriptor(true, false),
-        RawEntry::stored("y.txt", b"inner y").with_descriptor(true, false),
+        RawEntry::stored("x.txt", b"inner x").with_descriptor(false, false),
+        RawEntry::stored("y.txt", b"inner y"),
     ])
     .build();
     let built = RawZip::new(vec![

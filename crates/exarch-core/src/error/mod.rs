@@ -26,6 +26,8 @@ pub use zip_inconsistency::HiddenRegion;
 pub use zip_inconsistency::ZipEntryIndex;
 pub use zip_inconsistency::ZipHeaderField;
 pub use zip_inconsistency::ZipInconsistency;
+pub use zip_inconsistency::ZipNonRegularKind;
+pub use zip_inconsistency::ZipStreamUndecided;
 pub use zip_inconsistency::ZipUncomparable;
 
 #[cfg(test)]

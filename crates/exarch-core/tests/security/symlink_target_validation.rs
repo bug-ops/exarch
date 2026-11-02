@@ -33,11 +33,17 @@ fn build_tar_with_raw_link_target(
 ) -> Vec<u8> {
     let mut builder = tar::Builder::new(Vec::new());
 
+    let mut payload = raw_target.to_vec();
+    if !payload.is_empty() {
+        payload.push(0);
+    }
     let mut long_link_header = tar::Header::new_gnu();
     long_link_header.set_entry_type(tar::EntryType::GNULongLink);
-    long_link_header.set_size(raw_target.len() as u64);
+    long_link_header.set_size(payload.len() as u64);
     long_link_header.set_cksum();
-    builder.append(&long_link_header, raw_target).unwrap();
+    builder
+        .append(&long_link_header, payload.as_slice())
+        .unwrap();
 
     let mut header = tar::Header::new_gnu();
     header.set_entry_type(entry_type);

@@ -22,8 +22,8 @@
 //! The model resumes from the end of the declared data. The declared range of
 //! a scanned entry is also searched for an in-data descriptor signature, where
 //! the reader resumes earlier (see `GapChecker::check_scanned_resume`), and
-//! that of a deflated entry is decoded to find where its stream ends (see
-//! `GapChecker::check_inflated_resume`).
+//! that of a compressed entry, with a descriptor or without, is decoded to
+//! find where its stream ends (see `GapChecker::check_inflated_resume`).
 //!
 //! Where the two modes disagree the further resume position wins, since either
 //! reader can be the one that skips an entry. The sizes are those of the
@@ -293,6 +293,8 @@ mod tests {
             size: SIZE,
             crc32: CRC,
             kind: EntryKind::Regular,
+            reader_kind: EntryKind::Regular,
+            stream: None,
         }
     }
 

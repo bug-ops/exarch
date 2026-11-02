@@ -456,7 +456,11 @@ pub fn verify_archive_with_progress<P: AsRef<Path>>(
     let report = match format.family() {
         FormatFamily::Seekable(SeekableFormat::Zip) => {
             let file = std::fs::File::open(archive_path)?;
-            ZipArchive::new(file)?.verify_with_progress(&validated_config, *options, progress)?
+            ZipArchive::for_config(file, &validated_config)?.verify_with_progress(
+                &validated_config,
+                *options,
+                progress,
+            )?
         }
         FormatFamily::Seekable(SeekableFormat::SevenZ) => {
             let file = std::fs::File::open(archive_path)?;

@@ -119,6 +119,8 @@ impl VerificationReport {
                 ZipInconsistency::HeaderMismatch { entry, .. }
                 | ZipInconsistency::HeaderUncomparable { entry, .. }
                 | ZipInconsistency::DescriptorOverrun { entry, .. }
+                | ZipInconsistency::NonRegularPayload { entry, .. }
+                | ZipInconsistency::StreamEndUnknown { entry, .. }
                 | ZipInconsistency::XlTypeDivergence { entry, .. } => {
                     manifest.position_of_zip_entry(*entry)
                 }
@@ -890,6 +892,8 @@ impl IssueCategory {
             | ZipInconsistency::StrayCentralRecord { .. }
             | ZipInconsistency::StrayEndRecord { .. }
             | ZipInconsistency::DescriptorOverrun { .. }
+            | ZipInconsistency::NonRegularPayload { .. }
+            | ZipInconsistency::StreamEndUnknown { .. }
             | ZipInconsistency::XlTypeDivergence { .. }
             | ZipInconsistency::UncountedCentralRecords { .. }
             | ZipInconsistency::IgnoredEndRecord { .. } => Self::HiddenEntry,

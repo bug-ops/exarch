@@ -24,6 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **BREAKING (bindings):** an entry below a dangling or looping symlink raises `SecurityViolation` instead of an I/O error, and below a contained non-directory link `SecurityViolation` instead of `SymlinkEscape` (#828).
 - `exarch extract` into an existing destination decodes a gz, bz2 or xz TAR once instead of twice (#828).
 - **BREAKING:** `list`, `verify` and `extract` refuse non-canonical checksum or size fields in TAR `x`, `L` and `K` headers, non-canonical local PAX record framing and the PAX `SCHILY.realsize` record, with `InvalidArchive` (#829).
+- **BREAKING:** `list`, `verify` and `extract` refuse non-zero padding after TAR `x`, `g`, `L` and `K` bodies and `L`/`K` bodies that do not end in a single NUL, with `InvalidArchive` (#837).
+- **BREAKING:** ZIP verification refuses directory and special entries that carry data and compressed entries whose stream ends before the declared range with a record behind it; new `ZipInconsistency::{NonRegularPayload, StreamEndUnknown}`, `HiddenRegion::StreamTail`, `ZipNonRegularKind` and `ZipStreamUndecided` (#837).
+- Core: ZIP verification checks stored data-descriptor entries from their first descriptor signature, whatever sizes the descriptor states; a stored entry holding a nested archive with signed descriptors is now reported (#837).
+- Core: ZIP entry-data checks run once at open under `--zip-consistency enforce` with a bounded decode budget and recheck allowance scaled by `max_total_size`, and `--zip-consistency ignore` skips them (#837).
 
 ### Fixed
 

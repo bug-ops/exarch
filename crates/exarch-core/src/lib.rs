@@ -92,6 +92,8 @@ pub use error::ZipBombScope;
 pub use error::ZipEntryIndex;
 pub use error::ZipHeaderField;
 pub use error::ZipInconsistency;
+pub use error::ZipNonRegularKind;
+pub use error::ZipStreamUndecided;
 pub use error::ZipUncomparable;
 /// Formats an archive-relative, attacker-authored path for an FFI error
 /// message without redaction. Shared by `exarch-python` and `exarch-node`.

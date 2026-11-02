@@ -37,9 +37,12 @@
 //!   entry (see `zip_tail`), and only under the enforcing policy; plain
 //!   `verify`, `list` and `extract` do not. A tail that cannot be decided
 //!   (budget, a raw decode that disagrees with the crate's) is counted as
-//!   unverified. A stored entry needs no decoding: its declared range is
-//!   searched from its first descriptor signature on, as a gap, since that is
-//!   where a streaming reader resumes.
+//!   unverified. A stored descriptor entry needs no decoding: its declared
+//!   range is searched from its first descriptor signature on, as a gap, since
+//!   that is where a streaming reader resumes. A compressed entry whose local
+//!   header states its sizes is decoded to the end of its stream within the
+//!   same per-archive budget, and the bytes from there to the declared end are
+//!   searched as a gap.
 //!
 //! The bytes before the first entry (the stub of a self-extractor, whether or
 //! not its offsets were rewritten) are searched with a stricter judge than the
@@ -107,23 +110,27 @@ use super::chunk_search::ChunkSource;
 use super::chunk_search::Flow;
 use super::chunk_search::search_chunks;
 use super::common;
+use super::zip::ZipMethod;
 use super::zip::admit_zip_entry;
 use super::zip::is_password_required;
-use super::zip_tail::DeflateEnd;
-use super::zip_tail::deflate_stream_end;
-use super::zip_tail::holds_record_signature;
+use super::zip_tail::Compressed;
+use super::zip_tail::StreamEnd;
+use super::zip_tail::holds_reader_record;
 use super::zip_tail::is_reachable_header;
-use super::zip_tail::judge_descriptor_after_data;
 use super::zip_tail::judge_first_signature;
 use super::zip_tail::scan;
+use super::zip_tail::stream_end;
 use crate::ArchiveError;
 use crate::Result;
+use crate::ZipConsistencyPolicy;
 use crate::error::CentralRecordOrdinal;
 use crate::error::EndRecordKind;
 use crate::error::HiddenRegion;
 use crate::error::ZipEntryIndex;
 use crate::error::ZipHeaderField;
 use crate::error::ZipInconsistency;
+use crate::error::ZipNonRegularKind;
+use crate::error::ZipStreamUndecided;
 use crate::error::ZipUncomparable;
 use crate::security::zipbomb::DeclaredCompressedBudget;
 use resume::DESCRIPTOR_LOOKAHEAD;
@@ -134,12 +141,13 @@ use resume::streaming_resume;
 use xl_type::EntryKind;
 use xl_type::HostSystem;
 use xl_type::XlScan;
+use xl_type::declared_kind;
 use xl_type::reader_kind;
 
-const CDFH_SIGNATURE: [u8; 4] = *b"PK\x01\x02";
+pub(super) const CDFH_SIGNATURE: [u8; 4] = *b"PK\x01\x02";
 pub(super) const LFH_SIGNATURE: [u8; 4] = *b"PK\x03\x04";
 pub(super) const DATA_DESCRIPTOR_SIGNATURE: [u8; 4] = *b"PK\x07\x08";
-const EOCD_SIGNATURE: [u8; 4] = *b"PK\x05\x06";
+pub(super) const EOCD_SIGNATURE: [u8; 4] = *b"PK\x05\x06";
 const CDFH_FIXED_LEN: usize = 46;
 pub(super) const LFH_FIXED_LEN: usize = 30;
 const EOCD_FIXED_LEN: usize = 22;
@@ -148,7 +156,7 @@ const EOCD_FIXED_LEN: usize = 22;
 const EOCD_SEARCH_WINDOW: u64 = EOCD_FIXED_LEN as u64 + 4 + 65_536;
 const ZIP64_LOCATOR_SIGNATURE: [u8; 4] = *b"PK\x06\x07";
 const ZIP64_LOCATOR_LEN: usize = 20;
-const ZIP64_END_SIGNATURE: [u8; 4] = *b"PK\x06\x06";
+pub(super) const ZIP64_END_SIGNATURE: [u8; 4] = *b"PK\x06\x06";
 const ZIP64_END_FIXED_LEN: usize = 56;
 const ZIP64_END_DIRECTORY_AT: usize = 48;
 const ZIP64_EXTRA_ID: u16 = 0x0001;
@@ -212,6 +220,8 @@ enum_with_all! {
         StrayCentral,
         StrayEnd,
         DescriptorOverrun,
+        NonRegularPayload,
+        StreamEnd,
         XlType,
         Overlap,
         Uncounted,
@@ -236,6 +246,8 @@ impl Slot {
             | Self::StrayCentral
             | Self::StrayEnd
             | Self::DescriptorOverrun
+            | Self::NonRegularPayload
+            | Self::StreamEnd
             | Self::XlType => 16,
             Self::Overlap | Self::Uncounted | Self::IgnoredEnd => 1,
         }
@@ -309,6 +321,8 @@ fn slot_of(finding: &ZipInconsistency) -> Slot {
         ZipInconsistency::StrayCentralRecord { .. } => Slot::StrayCentral,
         ZipInconsistency::StrayEndRecord { .. } => Slot::StrayEnd,
         ZipInconsistency::DescriptorOverrun { .. } => Slot::DescriptorOverrun,
+        ZipInconsistency::NonRegularPayload { .. } => Slot::NonRegularPayload,
+        ZipInconsistency::StreamEndUnknown { .. } => Slot::StreamEnd,
         ZipInconsistency::XlTypeDivergence { .. } => Slot::XlType,
         ZipInconsistency::OverlappingEntries => Slot::Overlap,
         ZipInconsistency::UncountedCentralRecords { .. } => Slot::Uncounted,
@@ -507,6 +521,7 @@ impl<R: Read + Seek> Seek for Shared<R> {
 pub struct ZipStructure {
     central_entries: usize,
     findings: Findings,
+    checks: StreamChecks,
     #[cfg(test)]
     gap_reads: usize,
 }
@@ -518,6 +533,7 @@ impl ZipStructure {
         Self {
             central_entries,
             findings: Findings::default(),
+            checks: StreamChecks::Run,
             gap_reads: 0,
         }
     }
@@ -531,6 +547,12 @@ impl ZipStructure {
     /// Retained findings, in discovery order.
     pub(crate) fn findings(&self) -> &[ZipInconsistency] {
         &self.findings.items
+    }
+
+    /// Whether the census read entry data, which the findings of a policy that
+    /// enforces them depend on.
+    pub(crate) const fn checks(&self) -> StreamChecks {
+        self.checks
     }
 
     /// Findings beyond the per-kind retention limits, which were only counted.
@@ -562,6 +584,11 @@ struct EntryLayout {
     crc32: u32,
     /// Type the central directory gives the entry.
     kind: EntryKind,
+    /// Type a streaming reader gives the entry from its name and central
+    /// attributes.
+    reader_kind: EntryKind,
+    /// How the entry's stream is decoded, for the methods that have one.
+    stream: Option<Compressed>,
 }
 
 /// The central directory as the `zip` crate maps it.
@@ -606,6 +633,57 @@ pub fn open<R: Read + Seek>(reader: R) -> Result<(ZipReader<Shared<R>>, ZipStruc
     open_chunked(reader, ChunkSizes::PRODUCTION)
 }
 
+/// Like [`open`], running the checks that read entry data (decoding streams,
+/// scanning stored data) only when `checks` asks for them.
+///
+/// The findings of those checks are discarded under
+/// [`ZipConsistencyPolicy::Ignore`](crate::ZipConsistencyPolicy), so an
+/// archive opened for that policy skips their cost.
+///
+/// `quota` is the total output the caller lets an extraction produce. The
+/// allowance for checking again entries whose bytes spell a record signature
+/// is the larger of that and the default census budget, so an archive full of
+/// nested archives that extraction admits is not refused for its size. The
+/// census then decodes at most the budget plus that allowance.
+///
+/// # Errors
+///
+/// Same as [`open`].
+pub fn open_with<R: Read + Seek>(
+    reader: R,
+    checks: StreamChecks,
+    quota: u64,
+) -> Result<(ZipReader<Shared<R>>, ZipStructure)> {
+    open_chunked(
+        reader,
+        ChunkSizes {
+            stream_checks: checks,
+            recheck: CENSUS_DECODE_BUDGET.max(quota),
+            ..ChunkSizes::PRODUCTION
+        },
+    )
+}
+
+/// Whether the census reads entry data to find where streaming readers
+/// resume inside it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamChecks {
+    /// Decode compressed streams and scan stored descriptor data.
+    Run,
+    /// Check only what the headers and the gaps between entries show.
+    Skip,
+}
+
+impl StreamChecks {
+    /// The checks a policy needs: none when it discards the findings.
+    pub const fn of(policy: ZipConsistencyPolicy) -> Self {
+        match policy {
+            ZipConsistencyPolicy::Enforce => Self::Run,
+            ZipConsistencyPolicy::Ignore => Self::Skip,
+        }
+    }
+}
+
 fn open_chunked<R: Read + Seek>(
     reader: R,
     chunks: ChunkSizes,
@@ -630,6 +708,7 @@ fn open_chunked<R: Read + Seek>(
         ZipStructure {
             central_entries: census.central_entries,
             findings,
+            checks: chunks.stream_checks,
             #[cfg(test)]
             gap_reads: census.gap_reads,
         },
@@ -731,6 +810,7 @@ fn scan_entries<R: Read + Seek>(
         scan.findings
             .push_with(Slot::Overlap, || ZipInconsistency::OverlappingEntries);
     }
+    payload_findings(&scan.layouts, &mut scan.findings);
     Ok(scan)
 }
 
@@ -754,7 +834,45 @@ fn layout_of<R: Read>(file: &zip::read::ZipFile<'_, R>, index: usize) -> Result<
         method: file.compression(),
         crc32: file.crc32(),
         kind: EntryKind::of_central(file.is_dir(), file.unix_mode()),
+        reader_kind: declared_kind(
+            HostSystem::of(file.system()),
+            file.external_attributes(),
+            file.name_raw(),
+        ),
+        stream: ZipMethod::try_from(file.compression())
+            .ok()
+            .and_then(Compressed::of),
     })
+}
+
+/// Entries that are not regular files yet declare a payload.
+fn payload_findings(layouts: &[EntryLayout], findings: &mut Findings) {
+    for layout in layouts {
+        let kind = match (layout.reader_kind, layout.kind) {
+            (EntryKind::Directory, _) | (_, EntryKind::Directory) => ZipNonRegularKind::Directory,
+            (EntryKind::Special, _) => ZipNonRegularKind::Special,
+            _ => continue,
+        };
+        if layout.size != 0 || layout.compressed >= payload_threshold(layout.method) {
+            findings.push_with(Slot::NonRegularPayload, || {
+                ZipInconsistency::NonRegularPayload {
+                    entry: layout.entry,
+                    kind,
+                    compressed_size: layout.compressed,
+                }
+            });
+        }
+    }
+}
+
+/// Compressed size from which an entry whose uncompressed size is zero
+/// still carries a payload: stored data must be empty, while a compressed
+/// stream of nothing is a few bytes and cannot hold a local header.
+const fn payload_threshold(method: CompressionMethod) -> u64 {
+    match method {
+        CompressionMethod::Stored => 1,
+        _ => LFH_FIXED_LEN as u64,
+    }
 }
 
 /// Whether any byte belongs to two entries (header included) or an entry
@@ -992,6 +1110,8 @@ struct ChunkSizes {
     gap: usize,
     prefix: usize,
     decode: u64,
+    recheck: u64,
+    stream_checks: StreamChecks,
 }
 
 impl ChunkSizes {
@@ -999,6 +1119,8 @@ impl ChunkSizes {
         gap: GAP_CHUNK,
         prefix: PREFIX_CHUNK,
         decode: CENSUS_DECODE_BUDGET,
+        recheck: CENSUS_DECODE_BUDGET,
+        stream_checks: StreamChecks::Run,
     };
 }
 
@@ -1059,6 +1181,9 @@ struct GapChecker<'a, R> {
     /// Output bytes the census may still decode to find the end of deflate
     /// streams.
     decode_budget: u64,
+    /// Per-archive output the census may decode to check again entries whose
+    /// bytes spell a record signature after the budget is spent.
+    recheck_budget: u64,
     /// Reads of the gap search, for the tests that bound them.
     #[cfg(test)]
     reads: usize,
@@ -1091,6 +1216,7 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
             next_unjudged: 0,
             exhausted: false,
             decode_budget: chunks.decode,
+            recheck_budget: chunks.recheck,
             #[cfg(test)]
             reads: 0,
         }
@@ -1145,11 +1271,18 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
                     .get(starts.partition_point(|&s| s <= layout.header_start))
                     .copied()
                     .unwrap_or(self.map.directory_start);
-                match exit {
-                    DescriptorExit::Scan => self.check_scanned_resume(layout, findings)?,
-                    DescriptorExit::Inflate => self.check_inflated_resume(layout, findings)?,
+                match (exit, self.chunks.stream_checks) {
+                    (_, StreamChecks::Skip) => {}
+                    (DescriptorExit::Scan, StreamChecks::Run) => {
+                        self.check_scanned_resume(layout, findings)?;
+                    }
+                    (DescriptorExit::Inflate, StreamChecks::Run) => {
+                        self.check_inflated_resume(layout, findings)?;
+                    }
                 }
                 self.check_descriptor(layout, exit, next, findings)?;
+            } else if layout.compressed > 0 && self.chunks.stream_checks == StreamChecks::Run {
+                self.check_inflated_resume(layout, findings)?;
             }
         }
         // Readers up to `zip` 9.0.5 take the first central record at or after
@@ -1350,12 +1483,13 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
     /// gap.
     ///
     /// A streaming reader cannot decode such data (stored, or any method but
-    /// deflate), so it ends the entry at the first descriptor signature in it,
-    /// which can lie before the declared end the central directory gives, and
-    /// reads on from there like from any gap. The signature scan is bounded by
-    /// the entry's declared size, which the archive-wide budget caps, keeps one
-    /// chunk in memory and is not counted in `reads`; the gap search that
-    /// follows is.
+    /// deflate), so it ends the entry at the first descriptor signature in it
+    /// (some of its modes whatever the descriptor states, which is why no
+    /// later signature is waited for), which can lie before the declared end
+    /// the central directory gives, and reads on from there like from any gap.
+    /// The signature scan is bounded by the entry's declared size, which the
+    /// archive-wide budget caps, keeps one chunk in memory and is not counted
+    /// in `reads`; the gap search that follows is.
     fn check_scanned_resume(
         &mut self,
         layout: &EntryLayout,
@@ -1364,23 +1498,23 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
         if layout.compressed < DATA_DESCRIPTOR_SIGNATURE.len() as u64 {
             return Ok(());
         }
-        let judge = if layout.method == CompressionMethod::Stored {
-            judge_descriptor_after_data
-        } else {
-            judge_first_signature
-        };
         self.reader.seek(SeekFrom::Start(layout.data_start))?;
         let mut data = Read::take(&mut *self.reader, layout.compressed);
         let found = scan(
             &mut data,
             layout.compressed,
             DATA_DESCRIPTOR_SIGNATURE,
-            judge,
+            judge_first_signature,
         )?;
         let Some(at) = found else {
             return Ok(());
         };
-        self.search_behind(layout.data_start.saturating_add(at), layout.end, findings)
+        self.search_behind(
+            layout.data_start.saturating_add(at),
+            layout.end,
+            HiddenRegion::DescriptorTail,
+            findings,
+        )
     }
 
     /// Searches from the position where a streaming reader leaves an entry's
@@ -1389,69 +1523,124 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
     /// With duplicate names the gaps are not searched, so the positions where
     /// the next header can start behind each descriptor width are probed
     /// instead.
-    fn search_behind(&mut self, from: u64, to: u64, findings: &mut Findings) -> Result<()> {
+    fn search_behind(
+        &mut self,
+        from: u64,
+        to: u64,
+        region: HiddenRegion,
+        findings: &mut Findings,
+    ) -> Result<()> {
         if !self.search_gaps {
             for width in DescriptorWidth::ALL {
-                self.probe(
-                    from.saturating_add(width.bytes()),
-                    HiddenRegion::DescriptorTail,
-                    findings,
-                )?;
+                self.probe(from.saturating_add(width.bytes()), region, findings)?;
             }
         }
-        self.gap(
-            from,
-            to,
-            Followed::ByEntry,
-            HiddenRegion::DescriptorTail,
-            findings,
-        )
+        self.gap(from, to, Followed::ByEntry, region, findings)
     }
 
-    /// Checks the declared range of a deflated descriptor entry against where
-    /// its compressed stream ends.
+    /// Checks the declared range of a compressed entry against where its
+    /// stream ends.
     ///
-    /// A streaming reader ends such an entry where its stream ends, so the
-    /// bytes from there to the declared end are read as records, and a stream
-    /// that does not end inside the declared range, or decodes to more than
-    /// the declared size, ends the entry somewhere else. The decode is paid
-    /// from a budget per archive; an entry the budget does not cover is
-    /// refused when its range holds a record signature, since then the stream
-    /// end decides whether the record is reached.
+    /// A streaming reader ends such an entry where its stream ends, whether
+    /// or not a descriptor follows, so the bytes from there to the declared
+    /// end are read as records, and a stream that does not end inside the
+    /// declared range, or decodes to more than the declared size, ends the
+    /// entry somewhere else. An entry that states its sizes is decoded
+    /// whatever size it states, since a reader that ends it at its stream end
+    /// does too; extraction enforces the stated size on its own. The decode is
+    /// paid from a budget per archive. An entry the budget does not cover is
+    /// searched for a record by the rules of the gap search; a hit is checked
+    /// again by decoding the entry up to its declared size from a second
+    /// allowance, since compressed data can spell a signature by chance. It
+    /// is refused when the stream runs past that size, cannot be decoded
+    /// within that allowance, or leaves a record behind its end.
     fn check_inflated_resume(
         &mut self,
         layout: &EntryLayout,
         findings: &mut Findings,
     ) -> Result<()> {
-        let undecided = match deflate_stream_end(
+        let Some(method) = layout.stream else {
+            return Ok(());
+        };
+        let region = if layout.descriptor.is_some() {
+            HiddenRegion::DescriptorTail
+        } else {
+            HiddenRegion::StreamTail
+        };
+        let decoded_up_to = if layout.descriptor.is_some() {
+            layout.size
+        } else {
+            u64::MAX
+        };
+        let undecided = match stream_end(
             &mut *self.reader,
+            method,
             layout.data_start,
             layout.compressed,
-            layout.size,
+            decoded_up_to,
             &mut self.decode_budget,
         )? {
-            DeflateEnd::At(end) if end < layout.end => {
-                return self.search_behind(
-                    end,
-                    layout.end.saturating_add(STRADDLE_LOOKAHEAD),
-                    findings,
-                );
-            }
-            DeflateEnd::At(_) => false,
-            DeflateEnd::Undecided => true,
-            DeflateEnd::OverBudget => {
-                holds_record_signature(&mut *self.reader, layout.data_start, layout.compressed)?
+            StreamEnd::At(end) => return self.search_slack(layout, end, region, findings),
+            StreamEnd::Undecided => Some(ZipStreamUndecided::Rejected),
+            StreamEnd::OverBudget => {
+                if holds_reader_record(&mut *self.reader, layout.data_start, layout.compressed)? {
+                    match stream_end(
+                        &mut *self.reader,
+                        method,
+                        layout.data_start,
+                        layout.compressed,
+                        layout.size,
+                        &mut self.recheck_budget,
+                    )? {
+                        StreamEnd::At(end) => {
+                            return self.search_slack(layout, end, region, findings);
+                        }
+                        StreamEnd::Undecided => Some(ZipStreamUndecided::Rejected),
+                        StreamEnd::OverBudget => Some(ZipStreamUndecided::BudgetExhausted),
+                    }
+                } else {
+                    None
+                }
             }
         };
-        if undecided {
+        let Some(reason) = undecided else {
+            return Ok(());
+        };
+        if layout.descriptor.is_some() {
             findings.push_with(Slot::DescriptorOverrun, || {
                 ZipInconsistency::DescriptorOverrun {
                     entry: layout.entry,
                     offset: layout.end,
                 }
             });
+        } else {
+            findings.push_with(Slot::StreamEnd, || ZipInconsistency::StreamEndUnknown {
+                entry: layout.entry,
+                offset: layout.end,
+                reason,
+            });
         }
         Ok(())
+    }
+
+    /// Searches the bytes between the end of an entry's stream and its
+    /// declared end, when the stream ends before it.
+    fn search_slack(
+        &mut self,
+        layout: &EntryLayout,
+        stream_end: u64,
+        region: HiddenRegion,
+        findings: &mut Findings,
+    ) -> Result<()> {
+        if stream_end >= layout.end {
+            return Ok(());
+        }
+        self.search_behind(
+            stream_end,
+            layout.end.saturating_add(STRADDLE_LOOKAHEAD),
+            region,
+            findings,
+        )
     }
 
     /// Judges the bytes at one position as a possible local header.

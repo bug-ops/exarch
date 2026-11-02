@@ -586,6 +586,7 @@ fn list_tar_entries<R: std::io::Read>(
         manifest.add_entry(archive_entry)?;
     }
 
+    entries.finish()?;
     drop(entries);
     if let Some(pass) = listing.integrity() {
         pass.check_tar_trailer(&mut archive.into_inner(), trailer)?;
@@ -624,7 +625,7 @@ fn list_zip(
     listing: &mut ListPass<'_, '_>,
 ) -> Result<ArchiveManifest> {
     let file = File::open(archive_path)?;
-    ZipArchive::new(file)?.list_with(config, listing)
+    ZipArchive::for_config(file, config)?.list_with(config, listing)
 }
 
 /// Lists entries from an already budget-wrapped TAR reader.

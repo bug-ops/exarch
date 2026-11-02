@@ -152,10 +152,13 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::PoisonError;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
+use super::tar_extension_headers::PrecedingEntry;
 use super::tar_extension_headers::check_entry_headers;
+use super::tar_extension_headers::check_trailing_headers;
 use crate::Result;
 
 /// Hard, non-configurable ceiling on how many *synthesized* bytes (drained
@@ -246,6 +249,9 @@ struct BudgetState {
     /// by `limit` because a read past it fails. Recorded only, never
     /// interpreted here.
     window: Mutex<Vec<u8>>,
+    /// Whether the last checked entry was a global PAX header; accessed only
+    /// through [`TarReadBudget::preceding`].
+    after_global: AtomicBool,
 }
 
 impl BudgetState {
@@ -295,6 +301,20 @@ impl TarReadBudget {
 
     fn return_window(&self, bytes: Vec<u8>) {
         *self.0.window.lock().unwrap_or_else(PoisonError::into_inner) = bytes;
+    }
+
+    fn preceding(&self) -> PrecedingEntry {
+        if self.0.after_global.load(Ordering::Relaxed) {
+            PrecedingEntry::GlobalPax
+        } else {
+            PrecedingEntry::Other
+        }
+    }
+
+    fn set_preceding(&self, kind: PrecedingEntry) {
+        self.0
+            .after_global
+            .store(kind == PrecedingEntry::GlobalPax, Ordering::Relaxed);
     }
 
     /// Total bytes read from the underlying reader so far — monotonic,
@@ -506,6 +526,7 @@ pub fn budgeted_reader<R: Read>(inner: R, limit: u64) -> (BudgetedReader<R>, Tar
         total_read: AtomicU64::new(0),
         cumulative_synthetic: AtomicU64::new(0),
         window: Mutex::new(Vec::new()),
+        after_global: AtomicBool::new(false),
     });
     let reader = BudgetedReader {
         inner,
@@ -592,10 +613,18 @@ impl<'a, 's, R: Read> TarEntryGuard<'a, 's, R> {
     pub fn check(mut self, metadata_limit: u64) -> Result<CheckedTarEntry<'a, 's, R>> {
         let bytes = self.budget.take_window();
         let window = MetadataWindow::new(self.window_start, &bytes);
-        let checked = check_entry_headers(&mut self.entry, &window, metadata_limit);
+        let checked = check_entry_headers(
+            &mut self.entry,
+            &window,
+            metadata_limit,
+            self.budget.preceding(),
+        );
         self.budget.return_window(bytes);
         match checked {
-            Ok(()) => Ok(CheckedTarEntry(self)),
+            Ok(kind) => {
+                self.budget.set_preceding(kind);
+                Ok(CheckedTarEntry(self))
+            }
             Err(e) => {
                 self.abandoned = true;
                 Err(e)
@@ -693,6 +722,9 @@ pub struct BudgetedEntries<'a, R: Read> {
     /// cumulative budget trips, since the violation condition never clears
     /// itself.
     poisoned: bool,
+    /// Window start of the read that found the end of the archive; consumed
+    /// by [`finish`](Self::finish).
+    end_window_start: Option<u64>,
 }
 
 impl<'a, R: Read> BudgetedEntries<'a, R> {
@@ -702,7 +734,29 @@ impl<'a, R: Read> BudgetedEntries<'a, R> {
             origin: budget.total_read(),
             budget,
             poisoned: false,
+            end_window_start: None,
         }
+    }
+
+    /// Verifies the bytes `tar` read after the last entry.
+    ///
+    /// Call it once `next_entry` has returned `None`: the padding after a
+    /// trailing global PAX header is only read there, so skipping this call
+    /// leaves it unchecked.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::ArchiveError::InvalidArchive`] when that padding is
+    /// not zero.
+    pub fn finish(&mut self) -> Result<()> {
+        let Some(start) = self.end_window_start.take() else {
+            return Ok(());
+        };
+        let bytes = self.budget.take_window();
+        let checked =
+            check_trailing_headers(&MetadataWindow::new(start, &bytes), self.budget.preceding());
+        self.budget.return_window(bytes);
+        checked
     }
 
     /// Arms the budget, asks `tar` for the next entry, disarms the budget,
@@ -737,7 +791,10 @@ impl<'a, R: Read> BudgetedEntries<'a, R> {
         self.budget.disarm();
 
         match result {
-            None => None,
+            None => {
+                self.end_window_start = Some(start);
+                None
+            }
             Some(Err(e)) => {
                 self.poisoned = true;
                 Some(Err(e))

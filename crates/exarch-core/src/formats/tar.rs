@@ -11,9 +11,9 @@
 //!
 //! Constructs that readers resolve differently are refused as ambiguous rather
 //! than interpreted: a directory, symlink or hardlink that declares a payload,
-//! duplicate PAX records, `GNU.sparse.*` records, a PAX `path` or `linkpath`
-//! stacked with a GNU long name or link record, and a global PAX header that
-//! carries `path`, `linkpath` or `size`.
+//! duplicate PAX records, `GNU.sparse.*` records and `S` entries, a PAX `path`
+//! or `linkpath` stacked with a GNU long name or link record, and a global PAX
+//! header that carries `path`, `linkpath` or `size`.
 //!
 //! # Format Detection
 //!
@@ -51,7 +51,7 @@
 //! | Symlinks | ✅ Yes | Unix only, requires `config.allowed.symlinks = true` |
 //! | Hardlinks | ✅ Yes | Two-pass extraction, requires `config.allowed.hardlinks = true` |
 //! | Continuous | ✅ Yes | Treated as regular file |
-//! | GNU sparse | ✅ Yes | Treated as regular file |
+//! | GNU sparse | ❌ No | Refused as ambiguous |
 //! | PAX headers (`XHeader`, `XGlobalHeader`) | Skipped | Format-internal metadata |
 //! | GNU metadata (`GNULongName`, `GNULongLink`) | Skipped | Format-internal metadata |
 //! | Char devices | ❌ No | Rejected with `UnsupportedFeature` error |
@@ -663,7 +663,7 @@ pub(crate) fn tar_node(kind: tar::EntryType) -> Result<TarNode> {
     use tar::EntryType as TarType;
 
     match kind {
-        TarType::Regular | TarType::Continuous | TarType::GNUSparse => Ok(TarNode::File),
+        TarType::Regular | TarType::Continuous => Ok(TarNode::File),
         TarType::Directory => Ok(TarNode::Directory),
         TarType::Symlink => Ok(TarNode::Symlink),
         TarType::Link => Ok(TarNode::Hardlink),
@@ -681,7 +681,7 @@ pub(crate) fn tar_node(kind: tar::EntryType) -> Result<TarNode> {
 }
 
 /// Returns the type an entry stands for, reading an empty file-typed header
-/// (regular, contiguous or sparse) whose name ends in `/` as a directory.
+/// (regular or contiguous) whose name ends in `/` as a directory.
 ///
 /// V7 and other pre-ustar writers (`bsdtar --format v7`) store directories as
 /// regular entries with a trailing slash; GNU tar, libarchive and `tar-rs`'s
@@ -710,10 +710,7 @@ pub(crate) fn effective_entry_type<R: Read>(entry: &tar::Entry<'_, R>) -> Result
             String::from_utf8_lossy(&entry.path_bytes())
         )));
     }
-    let is_file_typed = matches!(
-        kind,
-        tar::EntryType::Regular | tar::EntryType::Continuous | tar::EntryType::GNUSparse
-    );
+    let is_file_typed = matches!(kind, tar::EntryType::Regular | tar::EntryType::Continuous);
     if !is_file_typed || !entry.path_bytes().ends_with(b"/") {
         return Ok(kind);
     }
@@ -1343,14 +1340,8 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_gnu_sparse_as_file() {
+    fn test_gnu_sparse_entry_is_refused() {
         let mut builder = tar::Builder::new(Vec::new());
-
-        // GNUSparse entries are treated as regular files by to_entry_type().
-        // The `tar` crate may reject a malformed sparse header at read time,
-        // which would manifest as an InvalidArchive error rather than a
-        // SecurityViolation. Either outcome is acceptable — we verify the
-        // entry type mapping is handled without panicking.
         let mut header = tar::Header::new_gnu();
         header.set_entry_type(tar::EntryType::GNUSparse);
         header.set_size(6);
@@ -1366,24 +1357,17 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default().validate().expect("valid config");
 
-        // Either succeeds (extracted as regular file) or fails with
-        // InvalidArchive due to missing GNU sparse extension headers.
-        // A SecurityViolation must NOT be returned for this entry type.
-        match archive.extract(
+        let result = archive.extract(
             temp.path(),
             &config,
             &ExtractionOptions::default(),
             &mut crate::NoopProgress,
-        ) {
-            Ok(report) => {
-                assert_eq!(report.files_extracted, 1);
-                assert!(temp.path().join("sparse.txt").exists());
-            }
-            Err(ArchiveError::InvalidArchive(_)) => {
-                // Acceptable: tar crate rejects malformed sparse header
-            }
-            Err(e) => panic!("unexpected error for GNUSparse entry: {e}"),
-        }
+        );
+        assert!(
+            matches!(&result, Err(e) if e.error_code() == crate::ErrorCode::InvalidArchive),
+            "{result:?}"
+        );
+        assert!(!temp.path().join("sparse.txt").exists());
     }
 
     #[test]

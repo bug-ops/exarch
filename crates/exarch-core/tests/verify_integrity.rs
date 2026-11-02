@@ -696,21 +696,12 @@ fn gnu_sparse_tar() -> Vec<u8> {
 }
 
 #[test]
-fn tar_gnu_sparse_entry_is_charged_its_real_size() {
+fn tar_gnu_sparse_entry_is_refused() {
     let dir = TempDir::new().unwrap();
     let path = write(&dir, "sparse.tar", &gnu_sparse_tar());
 
-    let roomy = verify(&path, integrity(2_000_000));
-    assert_eq!(roomy.integrity_status(), IntegrityStatus::Pass);
-
-    let tight = verify(&path, integrity(1_000_511));
-    assert_eq!(tight.integrity_status(), IntegrityStatus::Incomplete);
-    assert!(
-        tight
-            .issues()
-            .iter()
-            .any(|i| i.message.contains("over budget: 1"))
-    );
+    let error = verify_err(&path, integrity(2_000_000));
+    assert_matches!(error, ArchiveError::InvalidArchive(_));
 }
 
 #[test]

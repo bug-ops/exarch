@@ -601,21 +601,16 @@ fn list_tar_entries<R: std::io::Read>(
 /// A decode failure inside entry content is a hard error: the scan cannot
 /// continue past it, and a report over the entries read so far would let
 /// security look fine for entries that were never inspected. Listing already
-/// decodes every entry through the guard's drain, so only GNU sparse entries
-/// (whose synthesized zeros the drain caps) are charged to the budget.
+/// decodes every entry through the guard's drain, so no entry is charged to
+/// the budget.
 fn verify_tar_payload<R: Read>(
     pass: &mut IntegrityPass<'_>,
     slot: Slot,
     entry: &mut TarEntryGuard<'_, '_, R>,
     path: &Path,
 ) -> Result<()> {
-    let charge = if entry.header().entry_type() == tar::EntryType::GNUSparse {
-        Charge::Declared
-    } else {
-        Charge::Free
-    };
     let declared = entry.size();
-    match pass.decode(slot, &mut **entry, declared, charge) {
+    match pass.decode(slot, &mut **entry, declared, Charge::Free) {
         DecodeOutcome::Failed(failure) => {
             entry.abandon();
             Err(failure.into_tar_error(path))

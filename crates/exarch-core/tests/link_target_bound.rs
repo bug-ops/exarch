@@ -1,9 +1,10 @@
 //! Link targets over the host's name limits are not kept in memory (#655).
 //!
-//! Many hardlinks whose PAX `linkpath` is 1 MiB would hold gigabytes in the
-//! manifest if each target were retained. Peak heap usage is measured with a
-//! counting allocator: it must stay near one target, not scale with their
-//! number. Its own test binary because `#[global_allocator]` is process-wide.
+//! Many hardlinks whose PAX `linkpath` is close to the 999999-byte record cap
+//! would hold gigabytes in the manifest if each target were retained. Peak heap
+//! usage is measured with a counting allocator: it must stay near one target,
+//! not scale with their number. Its own test binary because
+//! `#[global_allocator]` is process-wide.
 
 #![allow(clippy::unwrap_used)]
 
@@ -16,7 +17,7 @@ use exarch_core::VerificationStatus;
 use exarch_core::verify_archive;
 use tempfile::TempDir;
 
-const TARGET_BYTES: usize = 1024 * 1024;
+const TARGET_BYTES: usize = 900_000;
 const LINKS: usize = 64;
 
 fn pax_linkpath_record(target: &[u8]) -> Vec<u8> {
@@ -77,7 +78,7 @@ fn oversized_link_targets_are_not_retained() {
         .filter(|i| i.category == IssueCategory::InvalidArchive)
         .count();
     assert_eq!(reported, LINKS);
-    // Retaining every target would need LINKS x 1 MiB = 64 MiB.
+    // Retaining every target would need LINKS x 900 KB = 57 MB.
     assert!(
         peak < 16 * TARGET_BYTES,
         "peak heap {peak} bytes grows with the number of oversized targets"

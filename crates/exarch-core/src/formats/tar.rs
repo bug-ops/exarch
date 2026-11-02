@@ -2132,6 +2132,7 @@ mod tests {
         assert!(!temp.path().join("loot.txt").exists());
     }
 
+    #[cfg(unix)]
     fn hardlink_only_tar(link_name: &str) -> Vec<u8> {
         let mut builder = tar::Builder::new(Vec::new());
         let mut link_header = tar::Header::new_gnu();
@@ -2145,6 +2146,7 @@ mod tests {
         builder.into_inner().unwrap()
     }
 
+    #[cfg(unix)]
     fn extract_hardlink_only(dest: &Path, link_name: &str) -> Result<ExtractionReport> {
         TarArchive::new(Cursor::new(hardlink_only_tar(link_name))).extract(
             dest,

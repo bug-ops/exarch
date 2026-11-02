@@ -9,7 +9,7 @@ tags:
   - ffi
   - rust
 created: 2026-05-20
-updated: 2026-10-26
+updated: 2026-11-02
 status: draft
 related:
   - "[[constitution]]"
@@ -17,6 +17,7 @@ related:
   - "[[001-security-pipeline/spec]]"
   - "[[003-config-api/spec]]"
   - "[[004-progress-tracking/spec]]"
+  - "[[020-reader-sink-and-in-memory-api/spec]]"
 ---
 
 # Feature: Python Bindings
@@ -144,7 +145,7 @@ THEN extraction respects those settings
 | FR-072 | WHEN paths contain null bytes or exceed 4096 bytes, THE SYSTEM SHALL raise `SecurityViolationError` (via the shared `exarch_core::validate_raw_path_str()` and the existing `convert_error()` path) at the Python boundary before calling into Rust (v0.6.0, #406 — previously a bare `ValueError`) | must |
 | FR-073 | WHEN no Python progress callback is provided, THE SYSTEM SHALL release the GIL during extraction/creation | must |
 | FR-074 | WHEN a Python progress callback is provided, THE SYSTEM SHALL NOT release the GIL (callback requires GIL to invoke Python) | must |
-| FR-075 | Rust `ArchiveError` variants SHALL map to specific Python exception types; `SourceNotFound`/`OutputExists` → `PyIOError`; `InvalidCompressionLevel`/`InvalidConfiguration` → `PyValueError`; `PartialExtraction` → the specific inner exception type (e.g. `SymlinkEscapeError`, `QuotaExceededError`) with `files_extracted` and `bytes_written` attributes attached to that exception | must |
+| FR-075 | Rust `ArchiveError` variants SHALL map to specific Python exception types; `SourceNotFound`/`OutputExists` → `PyIOError`; `InvalidCompressionLevel`/`InvalidConfiguration` → `PyValueError`; `PartialExtraction` → the specific inner exception type (e.g. `SymlinkEscapeError`, `QuotaExceededError`) with `files_extracted` and `bytes_written` attributes attached to that exception; since v0.8.0 the class, message and attributes all derive from one `exarch_core::ArchiveError::into_ffi_message()` (a typed `FfiKind` plus `PartialOutcome`), and the binding only picks the Python class per `FfiKind` (`FfiKind::Io(kind)` maps to the matching `OSError`; core `ReaderFormat` errors map to `UnknownFormatError` for an unrecognized format and `ValueError` otherwise) (#758, #768) | must |
 | FR-076 | ALL Python exception types SHALL be subclasses of `ExarchError(Exception)` | must |
 | FR-077 | `PySecurityConfig` and `PyCreationConfig` SHALL expose the same fluent builder API as the Rust counterparts | must |
 | FR-078 | `PyExtractionReport`, `PyCreationReport`, `PyArchiveManifest`, and `PyVerificationReport` SHALL expose all fields as Python attributes | must |
@@ -155,8 +156,11 @@ THEN extraction respects those settings
 | FR-083 | `VerificationReport` SHALL expose `integrity_status` (`"OK"`, `"FAILED"`, `"INCOMPLETE"`, `"SKIPPED"`), `integrity_gaps` (`None` unless the check ran, else `IntegrityGaps` with `counts`, `entries` of `UnverifiedEntry(path, reason)`, `omitted`, `total`) and `security_status`; report enum-like getters return strings annotated with `Literal` types in `exarch.pyi` (v0.7.0, #624, #672, #684) | must |
 | FR-084 | `SecurityConfig` SHALL expose `with_parallel_decode_memory(size: int \| None)` (`None` decodes on one thread; default 128 MiB, 1 GiB for `permissive()`; `ValueError` for zero, negative or above 2**64 - 1) and `with_zip_consistency("enforce" \| "ignore")` (default `"enforce"`; `ValueError` for any other string), each with a matching property (v0.7.0, #671, #688) | must |
 | FR-085 | `SecurityViolationError` SHALL carry a `relaxable_by` attribute: the stable id of the `SecurityConfig` setting that refused the entry (`"symlinks"`, `"hardlinks"`, `"solid_archives"`, `"banned_components"`, `"max_path_depth"`, `"windows_reserved_names"`, `"max_tar_metadata_bytes"`), or `None` (class default) when no setting relaxes the refusal (v0.7.0, #741, #757) | must |
-| FR-086 | WHEN `CoreError::PartialExtraction` is converted, THE SYSTEM SHALL always attach `writes` (`"kept"` or `"rolled_back"`) to the raised exception and attach `files_extracted`, `bytes_written`, `files_skipped` and `warnings` only when `writes == "kept"`; after an `ExtractionOptions.atomic` rollback the counters describe a discarded run and are omitted (v0.7.0, #735, #747) | must |
+| FR-086 | WHEN `CoreError::PartialExtraction` is converted, THE SYSTEM SHALL always attach `writes` (`"kept"`, `"rolled_back"` or, for an in-memory extraction, `"discarded"`) to the raised exception and attach `files_extracted`, `bytes_written`, `files_skipped` and `warnings` only when `writes == "kept"`; after an `ExtractionOptions.atomic` rollback, or an in-memory extraction that dropped its entries, the counters describe a discarded run and are omitted (v0.7.0, #735, #747; v0.8.0, #800, #808) | must |
 | FR-087 | `ArchiveError::ZipBomb` SHALL map to `ZipBombError` (including an entry claiming data from zero compressed bytes, previously `InvalidArchiveError`), and `ArchiveError::ZipInconsistency` SHALL map to the new `ZipInconsistencyError`, a subclass of `SecurityViolationError` (v0.7.0, #653, #671) | must |
+| FR-088 | THE SYSTEM SHALL expose in-memory functions that take and return bytes: `list_archive_bytes(data, config=None, format=None)`, `verify_archive_bytes(data, config=None, options=None, format=None)`, `extract_archive_to_memory(data, config=None, options=None, max_bytes=None, path_model=None, format=None)` returning `MemoryExtraction(report, entries)` of `MemoryEntry(path, kind, data, mode, target)`, and `create_archive_to_bytes(sources, format, config=None)` returning `CreatedArchive(data, report)`; `format` is detected from the leading bytes when `None`; `atomic` is unsupported for extraction; `max_bytes` defaults to the config's `max_total_size`; `path_model` is `"host"` or `"portable"`; `"SevenZ"` cannot be created; all validation is in `exarch-core` ([[020-reader-sink-and-in-memory-api/spec]]; v0.8.0, #776, #787, #790) | must |
+| FR-089 | THE SYSTEM SHALL expose `extract_archive_to_memory_with_progress`, `list_archive_bytes_with_progress` and `verify_archive_bytes_with_progress`, each taking a `progress` callback of `(path, total, current, bytes_written)` with the GIL held; the in-memory functions without a callback SHALL release the GIL. A callback that raises after the operation succeeded SHALL discard the result and raise the callback's exception with `progress_callback_error = True` (an in-memory extraction also carries `writes == "discarded"`); if the operation failed, the core error stays primary with the callback's exception as `__cause__` (v0.8.0, #783, #784, #790) | must |
+| FR-090 | A quota error for a single oversized file SHALL use the core wording `single file size` in the Python message (v0.8.0, #758, #768) | should |
 
 ## 4. Non-Functional Requirements
 
@@ -180,6 +184,7 @@ THEN extraction respects those settings
 | `PyVerificationReport` | Python class wrapping `VerificationReport` | `status`, `issues`, `total_entries`, `total_size`, `integrity_status`, `integrity_gaps`, `security_status` |
 | `PyVerificationOptions` | Python class `VerificationOptions` wrapping core `VerificationOptions` (v0.7.0, #670) | `with_integrity_check(budget)`, `integrity_check`, `decompression_budget` |
 | `PyIntegrityGaps` / `PyUnverifiedEntry` | Python classes `IntegrityGaps` / `UnverifiedEntry` wrapping the report's unverified-entry data (v0.7.0, #672) | `counts`, `entries`, `omitted`, `total` / `path`, `reason` |
+| `MemoryExtraction` / `MemoryEntry` / `CreatedArchive` | Results of the in-memory functions (v0.8.0) | `report`, `entries` / `path`, `kind` (`"file"`, `"directory"`, `"symlink"`), `data`, `mode`, `target` / `data`, `report` |
 | `PyProgressAdapter` | Internal adapter calling Python progress callbacks from Rust | Holds `PyObject` reference; `unsafe impl Send` |
 
 ### Python Exception Hierarchy
@@ -241,6 +246,13 @@ def create_archive_with_progress(output_path, sources, config=None, progress=Non
 def list_archive(archive_path, config=None) -> ArchiveManifest
 def verify_archive(archive_path, config=None, options=None) -> VerificationReport
 
+# In-memory (v0.8.0): bytes in, bytes or entries out; nothing is written to disk
+def list_archive_bytes(data, config=None, format=None) -> ArchiveManifest
+def verify_archive_bytes(data, config=None, options=None, format=None) -> VerificationReport
+def extract_archive_to_memory(data, config=None, options=None, max_bytes=None, path_model=None, format=None) -> MemoryExtraction
+def create_archive_to_bytes(sources, format, config=None) -> CreatedArchive
+# *_with_progress variants: extract_archive_to_memory_with_progress, list_archive_bytes_with_progress, verify_archive_bytes_with_progress
+
 class VerificationOptions:
     def with_integrity_check(self, budget: int | None = None) -> VerificationOptions
 
@@ -281,6 +293,9 @@ class ExtractionOptions:
 | Rust returns `ArchiveError::InvalidCompressionLevel` or `InvalidConfiguration` | `PyValueError` raised (not `InvalidArchiveError`) |
 | Rust returns `ArchiveError::PartialExtraction` | The specific inner exception (e.g. `SymlinkEscapeError`) is raised; `files_extracted`, `bytes_written`, `files_skipped`, and `warnings` attributes are attached (v0.6.0, #508) together with `writes == "kept"`; detect files left on disk via `getattr(e, "writes", None) == "kept"` |
 | Progress callback raises Python exception | Captured, not discarded (v0.6.0, #489); extraction/creation still runs to completion (no cancellation signal), then the exception propagates on success with `progress_callback_error = True`, or chains onto the core error via `__cause__` on failure |
+| In-memory extraction fails after collecting entries | The inner exception carries `writes == "discarded"` and none of the counter attributes (v0.8.0, #800) |
+| `extract_archive_to_memory` with `atomic` set, `max_bytes` zero or not a positive whole number, an unknown `format` or `path_model`, or `create_archive_to_bytes` with `"SevenZ"` | `ValueError` (v0.8.0) |
+| Format cannot be detected from the bytes | `UnknownFormatError` (v0.8.0) |
 | Rust returns `ArchiveError::PartialExtraction` after an atomic rollback | The inner exception carries `writes == "rolled_back"` and none of the counter attributes (v0.7.0, #747) |
 | Symlink entry over an existing symlink with a different target, overwrite enabled | Builtin `OSError` (`ELOOP`), not `SymlinkEscapeError` (v0.7.0, #752) |
 | Rust returns `ArchiveError::SecurityViolation` that a setting relaxes | `SecurityViolationError` with `relaxable_by` set to the setting id (v0.7.0, #741, #757) |
@@ -329,4 +344,5 @@ class ExtractionOptions:
 - [[001-security-pipeline/spec]] — security pipeline invoked by Python bindings
 - [[003-config-api/spec]] — `SecurityConfig` and `CreationConfig` types
 - [[004-progress-tracking/spec]] — `ProgressCallback` and `PyProgressAdapter`
+- [[020-reader-sink-and-in-memory-api/spec]] — core API behind the in-memory functions
 - [[001-exarch-system/spec]] — original monolithic spec (archived)

@@ -8,7 +8,7 @@ tags:
   - archive
   - rust
 created: 2026-05-20
-updated: 2026-10-26
+updated: 2026-11-02
 status: draft
 related:
   - "[[constitution]]"
@@ -21,6 +21,7 @@ related:
   - "[[013-quota-permit-capability-token/spec]]"
   - "[[017-zip-header-consistency/spec]]"
   - "[[018-7z-stream-map-panic/spec]]"
+  - "[[020-reader-sink-and-in-memory-api/spec]]"
 ---
 
 # Feature: Format Handlers
@@ -28,7 +29,7 @@ related:
 > [!info] Metadata
 > **Subsystem**: exarch-core / formats
 > **MSRV**: Rust 1.98.0
-> **zip dependency**: 9.1.0 (floor 9.0.5)
+> **Codec and container dependencies (v0.8.0)**: `zip` 9.x (`Cargo.toml` `9.2`, locked 9.2.2; floor 9.0.5), `liblzma` 0.4.9 static for xz (bundles xz 5.8; replaces `xz2`, #763, #771), `sevenz-rust2` 0.24.2 (minimum), `lzma-rust2` 0.24
 > **Source**: extracted from [[001-exarch-system/spec]]
 
 ## 1. Overview
@@ -53,7 +54,7 @@ using both file extension and a fixed set of ZIP-family aliases.
 - RAR archive support
 - Archive encryption or signing
 - 7z archive creation (extraction only — `FormatCreator` not implemented for 7z)
-- Streaming/incremental extraction over network (local files only)
+- Network transport: input is a local path or a caller-supplied reader; ZIP and 7z readers must be seekable (see [[020-reader-sink-and-in-memory-api/spec]])
 
 ## 2. User Stories
 
@@ -184,6 +185,12 @@ THEN magic bytes take precedence over the extension
 | FR-042 | WHEN a ZIP is opened, THE SYSTEM SHALL apply the structure checks governed by `SecurityConfig::zip_consistency` (`ZipConsistencyPolicy::Enforce` by default), as specified in [[017-zip-header-consistency/spec]] (0.7.0, #671) | must |
 | FR-043 | THE SYSTEM SHALL classify every 7z entry once, in `formats::sevenz::classify` (`SevenZClass`), for `extract`, `list` and `verify`: anti-items are skipped (one warning in `extract`, an informational `IssueCategory::ArchiveNote` in `verify`); a FIFO, socket, device node, undefined Unix type, a recorded kind that contradicts the entry's own kind, a reparse-point entry, or an empty name is refused with `SecurityViolation`; a Unix-mode symlink is validated through the symlink policy and `extract` creates it only under `allow_symlinks` (0.7.0, #707, #708, #710, #713, #715, #717, #723) | must |
 | FR-044 | WHEN extracting or verifying a 7z archive, THE SYSTEM SHALL open the header once into a `SevenZHeader` whose stream map is proven to cover every block and file ([[018-7z-stream-map-panic/spec]]), walk entries in archive order, check every block's coder memory against `max_decoder_memory` (default 256 MiB) before decoding, bound a solid block as a whole by `max_solid_compression_ratio` (Rust API only, default 1000.0), and decode single-stream LZMA2 blocks on worker threads within the `ParallelDecode` lookahead (default 128 MiB) with the same output and error kinds as sequential decoding (0.7.0, #652, #688, #728, #752) | must |
+| FR-045 | WHEN a TAR is xz-compressed, THE SYSTEM SHALL decode through `liblzma` (static, concatenated streams) with the memory limit set from `max_decoder_memory`, mapping liblzma's memory-limit error to `QuotaExceeded { resource: DecoderMemory { max } }`; creation SHALL encode with `liblzma` at the requested preset (v0.8.0, #763, #771) | must |
+| FR-046 | WHEN a 7z block contains an entry with no stream (an empty file, directory or anti-item) between files, THE SYSTEM SHALL list, verify and extract the block, relying on `sevenz-rust2` 0.24.2 covering every entry of a block; a block whose file sizes do not add up to its decoded size, including a block with data and no sub-streams, SHALL be refused before any byte is decoded (v0.8.0, #675, #751, #770) | must |
+| FR-047 | THE SYSTEM SHALL extract 7z through one loop (`formats::sevenz::extract`) shared by the host filesystem and an `EntrySink`, with the per-destination differences confined to the `SevenZTarget` hooks (`SevenZHostTarget`, sink target); TAR and ZIP keep their per-format loops and send only validation and the final write through `ExtractTarget` (v0.8.0, #792, #793, #808; see [[020-reader-sink-and-in-memory-api/spec]]) | must |
+| FR-048 | THE SYSTEM SHALL provide reader-based `list_reader`, `verify_reader` and `extract_to_sink` for TAR, ZIP and 7z (7z in `list_reader` and `verify_reader` since #771, in `extract_to_sink` since #787), and `verify` SHALL create no temporary directory (v0.8.0, #754, #771, #772, #787) | must |
+| FR-049 | WHEN a TAR's first member name starts with `BZh` but the leading bytes are not a complete bzip2 stream header, THE SYSTEM SHALL detect it as TAR rather than bzip2-compressed TAR; magic-byte detection reads 512 bytes and a ZIP, 7z, gzip, xz or zstd magic at offset 0 always wins over the `ustar` marker (v0.8.0, #781, #790) | must |
+| FR-050 | THE SYSTEM SHALL build `exarch-core` and `exarch-cli` for `wasm32-wasip1` (CI job `wasm`, wasmtime smoke test) (v0.8.0, #755, #771) | must |
 
 ## 4. Non-Functional Requirements
 
@@ -194,6 +201,7 @@ THEN magic bytes take precedence over the extension
 | NFR-003 | Reliability | Solid 7z archives are rejected by default (`allow_solid_archives: false`) |
 | NFR-004 | Portability | Format detection is case-insensitive on extension matching |
 | NFR-005 | Maintainability | Every format handler implements `ArchiveFormat` — no format-specific logic in `api.rs` |
+| NFR-006 | Portability | The crate has no hard dependency on a filesystem path for list, verify or sink extraction, and compiles for `wasm32-wasip1` (FR-050) |
 
 ## 5. Data Model
 
@@ -201,11 +209,12 @@ THEN magic bytes take precedence over the extension
 |--------|-------------|----------------|
 | `ArchiveType` | Enum of supported archive formats | `Tar`, `TarGz`, `TarBz2`, `TarXz`, `TarZst`, `Zip`, `SevenZ` |
 | `ArchiveFormat` | Trait implemented by every format handler | Methods: `extract`, `list`, `verify`, `format_name` |
-| `FormatCreator` | Trait for archive creation; implemented by two crate-private structs (0.7.0, #652) | `TarCreator(Option<CompressionCodec>)` (`None` is plain `.tar`) and `ZipCreator`; dispatched via `creator_for_format()` over `FormatFamily` |
+| `FormatCreator` | Trait for archive creation; implemented by two crate-private structs (0.7.0, #652) | `TarCreator(Option<CompressionCodec>)` (`None` is plain `.tar`) and `ZipCreator`; dispatched via `creator_for_format()` over `CreationFamily` of a `CreatableFormat` (v0.8.0), so a 7z request cannot reach the dispatcher |
 | `TarArchive<R>` | TAR handler generic over decompressor type | Implements `ArchiveFormat`; `list()` consumes the internal reader (TAR is forward-only); do not call `extract()` on the same instance; `open_tar_gz`, `open_tar_bz2`, `open_tar_zst(path)` and `open_tar_xz(path, &SecurityConfig<Validated>)` return `TarArchive<Box<dyn Read + Send>>` (the xz decoder is bounded by `max_decoder_memory` fixed at open) |
 | `ZipArchive` | ZIP handler | Implements `ArchiveFormat`; creation is `ZipCreator`; `ZipFile::name()` returns `Result<Cow<str>, ZipError>` in zip 9.x |
-| `SevenZArchive` | 7z handler (read-only) | Implements `ArchiveFormat` only; fires `on_entry_start`/`on_entry_complete` per-entry, interleaved with I/O; the header is parsed once into a `SevenZHeader` (`formats/sevenz/header.rs`) and entries are decoded in archive order through `BlockDecoder::for_each_entries` (`formats/sevenz/decode.rs`), never `decompress_with_extract_fn`, so `EntryValidator` remains the sole path-security guard (v0.5.1); entry names are normalized via `formats::common::normalize_entry_name` before validation; the handler is split into `admit`, `classify`, `decode`, `header`, `links`, `lzma2`, `verify` and `write` modules |
-| `ExtractionContext<'_, '_>` | Private TAR helper struct reducing extraction helper arity | Groups `validator`, `dest`, `report`, `copy_buffer`, `dir_cache`, `skip_duplicates` |
+| `SevenZArchive` | 7z handler (read-only) | Implements `ArchiveFormat` only (extraction goes through the single loop in `formats/sevenz/extract.rs`, v0.8.0); fires `on_entry_start`/`on_entry_complete` per-entry, interleaved with I/O; the header is parsed once into a `SevenZHeader` (`formats/sevenz/header.rs`) and entries are decoded in archive order through `BlockDecoder::for_each_entries` (`formats/sevenz/decode.rs`), never `decompress_with_extract_fn`, so `EntryValidator` remains the sole path-security guard (v0.5.1); entry names are normalized via `formats::common::normalize_entry_name` before validation; the handler is split into `admit`, `classify`, `decode`, `extract`, `header`, `host`, `links`, `lzma2`, `sink`, `verify` and `write` modules |
+| `ExtractTarget` | Validation-and-write half of a TAR or ZIP extraction (v0.8.0): `HostTarget` for the filesystem, a sink target for `EntrySink`; per-kind `validate_*` return typed proofs from `security::admitted` | `validate_file` (returns `FileAdmission::{Write, Skipped}`), `validate_directory`, `validate_symlink`, `validate_hardlink`, `directory`, `file`, `symlink`, `hardlink` |
+| `ExtractionContext<'_, '_>` | Private TAR helper struct reducing extraction helper arity | Groups `validator`, `dest`, `report`, `tally`, the skip counters, `config` |
 
 ### ArchiveType Detection Rules
 
@@ -262,10 +271,10 @@ FormatCreator:
 > [!note] v0.6.0: `ValidatedEntryType::File` carries a `QuotaPermit` (#436, #439, #440, #447)
 > Every format's file-write path (`formats::common::extract_file_with_permit` for TAR/ZIP,
 > `formats::sevenz::write_file_with_permit` for 7z) now takes the `QuotaPermit` capability token
-> by value instead of matching-and-dropping it (`_`). TAR's dispatch matches exhaustively on
-> `ValidatedEntry::into_parts()`, so only the `File` arm can bind a permit — a compiler-enforced
-> impossibility for any other arm to accidentally reach a write with no quota charge. ZIP retains
-> a runtime fail-closed guard since its dispatch is not a single exhaustive match. See
+> by value instead of matching-and-dropping it (`_`). Since v0.8.0 (#793, #808) the permit
+> comes from the typed `ValidatedFile` that `ExtractTarget::validate_file` returns, so no handler
+> matches on `ValidatedEntryType` any more and only the file path can obtain a permit; the
+> v0.6.0 ZIP runtime guard and TAR exhaustive match were removed. See
 > [[013-quota-permit-capability-token/spec]] for the full pattern.
 
 > [!note] v0.6.0: 7z extraction performance parity with `sevenz_rust2::decompress_file` (#492)
@@ -294,7 +303,8 @@ FormatCreator:
 > creation gained the `follow_symlinks` handling it was previously missing entirely.
 
 > [!note] zip dependency
-> Upgraded from 8.6.0 to 9.0.0-pre2 in v0.4.0, and to 9.1.0 in v0.7.0 (floor 9.0.5, which
+> Upgraded from 8.6.0 to 9.0.0-pre2 in v0.4.0, to 9.1.0 in v0.7.0 and to the 9.x line in
+> v0.8.0 (`Cargo.toml` `9.2`, locked 9.2.2; floor 9.0.5, which
 > excludes versions with unpatched read-path vulnerabilities; 9.1.0 also reuses one DEFLATE
 > compressor across entries on creation). `ZipFile::name()` returns
 > `Result<Cow<str>, ZipError>` instead of `&str`; all call sites propagate the
@@ -363,6 +373,10 @@ FormatCreator:
 | 7z Unix-mode symlink | Created by `extract` only under `allow_symlinks` after its target passes the symlink policy; `list` reads the target only on request (0.7.0, FR-043) |
 | 7z header with streams info and no files info | `InvalidArchive` from `list`, `verify` and `extract` (0.7.0, #752; see [[018-7z-stream-map-panic/spec]]) |
 | 7z block whose decoder memory exceeds `max_decoder_memory`, or a solid block over `max_solid_compression_ratio` | Refused (decoder memory before any byte is decoded; the solid ratio from the header's declared sizes) (0.7.0, FR-044) |
+| 7z solid block with a stream-less entry between files | Listed, verified and extracted (v0.8.0, FR-046; previously refused) |
+| 7z block whose file sizes do not add up to its decoded size, or a block with data and no sub-streams | Refused before any byte is decoded (v0.8.0, FR-046) |
+| TAR whose first member name begins with `BZh` but is not a complete bzip2 header | Detected as TAR, not bzip2 (v0.8.0, FR-049) |
+| xz stream needing more decoder memory than `max_decoder_memory` | `QuotaExceeded { resource: DecoderMemory { max } }` (FR-045) |
 | `list_archive` on an entry larger than `max_file_size` | Rejected during listing, same as extraction (fixed v0.6.0, #396 — breaking change; `verify_archive`'s internal pre-flight listing keeps `max_file_size` unlimited so an oversized entry surfaces as a `VerificationIssue` instead of aborting before any report exists) |
 
 ## 7. Success Criteria
@@ -412,4 +426,5 @@ FormatCreator:
 - [[013-quota-permit-capability-token/spec]] — `QuotaPermit` pattern consumed by every format's file-write path
 - [[017-zip-header-consistency/spec]] — ZIP structure checks and `ZipConsistencyPolicy`
 - [[018-7z-stream-map-panic/spec]] — `SevenZHeader` stream-map validation
+- [[020-reader-sink-and-in-memory-api/spec]] — reader, sink and writer APIs over these handlers
 - [[001-exarch-system/spec]] — original monolithic spec (archived)

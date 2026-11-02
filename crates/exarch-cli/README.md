@@ -158,6 +158,9 @@ exarch extract --atomic --force archive.tar.gz /var/www/current
 > [!CAUTION]
 > Only use `--allow-symlinks` and `--allow-hardlinks` with archives from trusted sources. These options can be exploited by malicious archives.
 
+> [!NOTE]
+> A TAR extracted into a destination that does not exist yet, under an existing parent directory, is read once and extracted atomically without `--atomic`: a refused archive leaves nothing behind and reports `writes: rolled_back`.
+
 > [!IMPORTANT]
 > `--atomic --force` rejects a destination that is itself a symlink (or, on Windows, a junction/reparse point) — pass the resolved target path instead. On Unix it also requires read permission on the destination's parent directory (used to pin it by file descriptor for the swap); the destination itself does not need to be readable.
 

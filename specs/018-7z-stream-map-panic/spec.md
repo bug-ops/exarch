@@ -31,8 +31,8 @@ related:
 > **MSRV**: Rust 1.98.0
 > **Origin**: continuous-improvement finding at HEAD `c95a85b` ; issue #746, fixed by #752 (0.7.0)
 > **Type / priority**: bug (panic / denial of service on untrusted input), P1
-> **Dependency**: `sevenz-rust2` 0.24.1 (locked)
-> **Status**: implemented in #752; the wrapper is `SevenZHeader`, obtained only from `read_sevenz_header` (`formats/sevenz/header.rs`); see the resolutions in section 9
+> **Dependency**: `sevenz-rust2` 0.24.1 when implemented (#752); 0.24.2 minimum since v0.8.0 (#770), which rejects the header itself at open
+> **Status**: implemented in #752, narrowed in v0.8.0 (#751, #770: see FR-002, FR-003 and FR-011 below); the wrapper is `SevenZHeader`, obtained only from `read_sevenz_header` (`formats/sevenz/header.rs`); see the resolutions in section 9
 
 ## 1. Overview
 
@@ -69,6 +69,9 @@ Code reading confirms the direct-indexing sites in `crates/exarch-core/src/forma
 A neighbouring family indexes `stream_map.file_block_index[index]` by file index (`admit.rs:99`, `:114`, `:277`; `verify.rs:40`; `links.rs:216`, `:280`; `decode.rs:221`) and `first_pack[block]` (`admit.rs:82`). These are safe today only because `sevenz-rust2` happens to build `file_block_index` with exactly `files.len()` entries and every `Some(block)` below `blocks.len()`; exarch relies on a dependency's internal invariant with no check and no type that states it.
 
 Upstream fixed this class in `hasenbanck/sevenz-rust2` master (commits `b7093c37` and `df5b7a96`, 2026-10-25, fuzzer-found): a header with streams but no files info is now an `Error` at open. The fix is not in any release (latest crates.io release is 0.24.1, which is locked), so a version bump cannot close the defect today. An exarch-side guard is needed regardless as defense in depth: the invariant "the stream map covers every block" belongs to a dependency's private construction logic and exarch should not depend on it silently.
+
+> [!note] v0.8.0
+> The upstream fix shipped in `sevenz-rust2` 0.24.2, which exarch has required since v0.8.0 (#770). The paragraph above and the site table describe the state when #752 was implemented; see FR-012 for what remains.
 
 There are two independent open paths for a 7z archive, each with its own copy of the open-error mapping:
 
@@ -150,7 +153,8 @@ THEN every such index goes through the validated wrapper
 | FR-008 | WHEN a valid archive is opened (including the valid empty 7z archive that `sevenz-rust2` reports as `UnexpectedEof`, and an archive with files but no blocks) THE SYSTEM SHALL accept it exactly as before | must |
 | FR-009 | THE SYSTEM SHALL keep a regression test that opens the 66-byte upstream vector through `extract_archive`, `verify_archive` and `list_archive` (and the CLI) and asserts `ArchiveError::InvalidArchive` for each | must |
 | FR-010 | THE SYSTEM SHALL ship the vector as a committed fixture that the fuzz seed assembly (`fuzz/seed-corpus.sh`) places into the `sevenz` corpus (location: section 9) | must |
-| FR-011 | WHEN `sevenz-rust2` releases a version that rejects this header at open THE PROJECT SHOULD re-evaluate the open-time check for that case and record the outcome (keep the wrapper, drop only the redundant branch); the check is not blocked on that release | should |
+| FR-011 | WHEN `sevenz-rust2` releases a version that rejects this header at open THE PROJECT SHOULD re-evaluate the open-time check for that case and record the outcome (keep the wrapper, drop only the redundant branch); the check is not blocked on that release. Done for 0.24.2 in #751 and #770 (FR-012) | should |
+| FR-012 | WITH `sevenz-rust2` 0.24.2 as the minimum version (v0.8.0, #770), THE SYSTEM SHALL rely on upstream, which rejects a header with streams info and no files info at open (`no files info`) and builds every table sized to the blocks and files, so `SevenZHeader::check` SHALL retain only the pack-stream-offsets check (the offsets length must equal the pack stream count, which upstream leaves empty for a header that lists pack streams but no blocks); FR-002 and FR-003 are no longer checked by exarch for the block, file and span tables, and the 66-byte vector still yields `InvalidArchive` with the `failed to open 7z archive:` prefix through `list`, `verify` and `extract` | must |
 
 ## 4. Non-Functional Requirements
 

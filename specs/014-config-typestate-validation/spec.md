@@ -40,7 +40,7 @@ itself, or a future refactor) from skipping it. Two concrete instances of this g
 existed in practice:
 
 - A hand-built `CreationConfig` with a forged `compression_level: Some(200)` could reach
-  `flate2`'s `zlib-rs` backend or `xz2` directly, bypassing the `InvalidCompressionLevel`
+  `flate2`'s `zlib-rs` backend or `liblzma` (`xz2` before v0.8.0) directly, bypassing the `InvalidCompressionLevel`
   contract enforced only at the two high-level entry points, and trigger an
   `assert!`/`unwrap()` panic inside the compression backend — a panic-based
   denial-of-service reachable from a config value, not archive content.
@@ -108,7 +108,7 @@ AS A security reviewer
 I WANT it to be impossible for an invalid `compression_level` to reach the compression
 backend without going through `InvalidCompressionLevel` validation first
 SO THAT a hand-built `CreationConfig` (bypassing the high-level builder) cannot trigger
-an `assert!`/`unwrap()` panic inside `flate2`/`xz2`
+an `assert!`/`unwrap()` panic inside `flate2`/`xz2` (`liblzma` since v0.8.0)
 
 **Acceptance criteria:**
 ```
@@ -154,7 +154,7 @@ THEN the code does not compile — those functions require &CreationConfig<Valid
 | `SecurityConfigFields` | Private struct sealing `SecurityConfig`'s actual fields | Reached via `Deref` (both states) / `DerefMut` (`Unvalidated` only) |
 | `CreationConfig<State = Unvalidated>` | Archive-creation configuration, now generic over validation state (mirrors `SecurityConfig`) | `with_*` builders only on `Unvalidated`; `validate(self) -> Result<CreationConfig<Validated>>` |
 | `CreationConfigFields` | `#[non_exhaustive]` private struct sealing `CreationConfig`'s actual fields | Reached via `Deref` (both states) / `DerefMut` (`Unvalidated` only) |
-| `ValidatedEntry` | Sealed as part of this hardening pass | Private fields, `pub(crate)` constructor, `safe_path()`/`entry_type()`/`mode()` public accessors and a crate-private `into_parts()` |
+| `ValidatedEntry` | Sealed as part of this hardening pass | Private fields, `pub(crate)` constructor, `safe_path()`/`entry_type()`/`mode()` public accessors and a crate-private `into_parts()` (removed in v0.8.0, #808; see [[013-quota-permit-capability-token/spec]]) |
 | `ValidatedEntryType` | `#[non_exhaustive]` since this hardening; `Symlink`/`Hardlink` variants wrap the already-sealed `SafeSymlink`/`SafePath` (`Hardlink` also carries an `EntryCount`, see [[013-quota-permit-capability-token/spec]]) | Payloads unforgeable even from inside the crate |
 | `SecurityConfigFields` fields added in v0.7.0 | `max_solid_compression_ratio`, `max_decoder_memory`, `parallel_decode`, `zip_consistency`; each is validated or typed by `validate()` / its own enum (`ParallelDecode`, `ZipConsistencyPolicy`) | `validate()` rejects zero `max_decoder_memory` and a non-positive or non-finite `max_solid_compression_ratio`; see [[003-config-api/spec]] |
 
@@ -176,7 +176,7 @@ THEN the code does not compile — those functions require &CreationConfig<Valid
 | ID | Metric | Target |
 |----|--------|--------|
 | SC-001 | Extraction/listing/verification reachable with an unvalidated `SecurityConfig` | Impossible — compile error for any code path bypassing the top-level functions |
-| SC-002 | Panic-based DoS via forged `compression_level` (the concrete #443 finding) | Impossible — cannot reach `flate2`/`xz2` without a `CreationConfig<Validated>` |
+| SC-002 | Panic-based DoS via forged `compression_level` (the concrete #443 finding) | Impossible — cannot reach `flate2`/`liblzma` without a `CreationConfig<Validated>` |
 | SC-003 | Zero behavior change for existing top-level-API callers | `exarch-cli`, `exarch-python`, `exarch-node` compile and pass their existing test suites unchanged (only `exarch-cli`'s `create` command's struct-literal `CreationConfig` construction needed updating) |
 | SC-004 | Zero runtime overhead vs. pre-v0.6.0 | Confirmed — phantom types have no runtime representation |
 

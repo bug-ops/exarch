@@ -8,7 +8,7 @@ tags:
   - progress
   - rust
 created: 2026-05-20
-updated: 2026-10-26
+updated: 2026-11-02
 status: draft
 related:
   - "[[constitution]]"
@@ -17,6 +17,8 @@ related:
   - "[[005-cli/spec]]"
   - "[[006-python-bindings/spec]]"
   - "[[007-node-bindings/spec]]"
+  - "[[019-verify-and-list-model/spec]]"
+  - "[[020-reader-sink-and-in-memory-api/spec]]"
 ---
 
 # Feature: Progress Tracking
@@ -121,6 +123,10 @@ THEN on_entry_start and on_entry_complete are called for each source file added
 | FR-044 | Format handlers SHALL accept `&mut dyn ProgressCallback` and call it consistently for each entry; callbacks SHALL fire per-entry interleaved with actual I/O (not batched before or after), and every `on_entry_start` SHALL be paired with exactly one `on_entry_complete`, also when the entry fails | must |
 | FR-045 | `on_bytes_written` SHALL be called with the number of bytes written for the entry just extracted (once per written file), not a cumulative total | must |
 | FR-046 | `on_entry_start` SHALL receive the total number of entries (if known) and the current entry index | must |
+| FR-047 | `list_archive_with_progress`, `list_reader_with_progress`, `verify_archive_with_progress` and `verify_reader_with_progress` SHALL announce each listed or verified entry with `on_entry_start` and close it with `on_entry_complete`, and call `on_complete` once after the result was built; `on_complete` SHALL NOT fire on failure and every `on_entry_start` is still paired with an `on_entry_complete` (v0.8.0, #782, #790) | must |
+| FR-048 | In listing and verification `total` SHALL be 0 for TAR (the count is unknown until the stream ends) and the entry count the file table declares for ZIP and 7z (which can exceed the announced entries: 7z anti-items and entries dropped for their path are never announced); `on_bytes_written` SHALL never be called (v0.8.0, #782, #790) | must |
+| FR-049 | With `IntegrityCheck::DecodeToEof` the verification events SHALL fire while each payload is decoded; without it they fire at metadata-scan speed; for 7z the entries that carry no payload are announced first, then the payloads in decode order. The events of a 7z listing fire while the file table is walked, and reading link targets (`StoredTargets::Read`) decodes afterwards without further events (v0.8.0, #790) | must |
+| FR-050 | `extract_to_sink_with_progress` and `create_to_writer_with_progress` SHALL follow the same contract as `extract_archive_with_progress` and `create_archive_with_progress` (v0.8.0, #778, #787) | must |
 
 ## 4. Non-Functional Requirements
 
@@ -155,8 +161,7 @@ ProgressCallback: Send
 
 > [!note] ExtractionContext
 > `ExtractionContext<'_, '_>` is a private TAR helper struct introduced in v0.4.0
-> that groups `validator`, `dest`, `report`, `copy_buffer`, `dir_cache`,
-> `skip_duplicates`, the skip counters, `config`, and `progress` to reduce helper
+> that groups `tally`, the skip counters, `config`, and `progress` to reduce helper
 > function arity. ZIP has an analogous `ZipExtractionContext`. It is not part of the public
 > API but is documented here because `ProgressCallback` is passed through it.
 
@@ -168,10 +173,12 @@ ProgressCallback: Send
 | Extraction fails after N successful entries | `on_entry_complete` called for the N successful entries and for the failing one; `on_complete` NOT called |
 | 7z anti-item (a deletion marker `extract` skips) | No callbacks fire for it |
 | `on_bytes_written` called with 0 bytes | Allowed; implementations must handle gracefully |
-| Archive with unknown total entry count | `total` argument to `on_entry_start` is 0 |
+| Archive with unknown total entry count | `total` argument to `on_entry_start` is 0 (TAR in extraction, listing and verification) |
+| Listing or verification progress for an entry | `on_bytes_written` is never called (FR-048) |
 | Progress callback panics | Panic propagates as normal Rust panic; not caught by exarch |
 | Creation progress for large directories | `on_entry_start` called for each file; total is file count from walk |
 | Python progress callback raises an exception (v0.6.0, #489) | Captured, not silently swallowed (previously discarded via `let _ = ...`); the `ProgressCallback` contract has no cancellation signal, so the operation still runs to completion, and if it otherwise succeeded the callback's exception now propagates to the caller carrying `files_extracted`/`files_added`, `bytes_written`, and a `progress_callback_error = True` marker attribute — see [[006-python-bindings/spec]] |
+| Python or Node.js progress callback raises during an in-memory list, verify or extract (v0.8.0, #784, #783, #790) | Handled like the path-based calls: if the operation failed, its error is primary with the callback's exception chained (`__cause__` / `cause`); if it succeeded, the result is discarded and the callback's exception is raised (Python: `progress_callback_error = True`; Node: `code` `PROGRESS_CALLBACK_ERROR`); an in-memory extraction additionally carries `writes: discarded` and no counters — see [[006-python-bindings/spec]] and [[007-node-bindings/spec]] |
 | Node.js progress callback throws an `Error`/object (v0.6.0, #465) | Captured via `call_async_catch` instead of routing through `napi_fatal_exception` (which previously crashed the process uncatchably even inside `try`/`catch`); rejects the returned Promise instead — see [[007-node-bindings/spec]] |
 | Node.js progress callback throws a bare primitive (string/number/boolean) (v0.6.0, #473) | Also captured, not just `Error`/object throws — closed a separate napi-rs `napi_create_reference()` escalation gap via a JS shim wrapping the callback; does not cover `createArchiveWithProgressSync`, which dispatches unawaited and was never affected by this class of bug |
 
@@ -214,4 +221,6 @@ ProgressCallback: Send
 - [[005-cli/spec]] — indicatif-based `ProgressCallback` implementation
 - [[006-python-bindings/spec]] — `PyProgressAdapter` and GIL interaction; callback exception propagation
 - [[007-node-bindings/spec]] — `NodeProgressAdapter`, `createArchiveWithProgress`/`Sync`, primitive-throw hardening
+- [[019-verify-and-list-model/spec]] — listing and verification passes that report progress
+- [[020-reader-sink-and-in-memory-api/spec]] — reader, sink and writer variants of the progress-reporting calls
 - [[001-exarch-system/spec]] — original monolithic spec (archived)

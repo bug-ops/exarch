@@ -138,6 +138,42 @@ cargo nextest run -p exarch-core test_name
 cargo llvm-cov nextest --all-features --workspace --html
 ```
 
+### WASI Build
+
+CI builds `exarch-core` and the CLI for `wasm32-wasip1` and runs a smoke test
+under `wasmtime` (`.github/scripts/wasi-smoke.sh`). Run the same steps locally
+when a change touches I/O or a C codec (`liblzma` is built from
+source and linked statically):
+
+```bash
+rustup target add wasm32-wasip1
+cargo check -p exarch-core --all-features --target wasm32-wasip1
+cargo build -p exarch-cli --target wasm32-wasip1
+bash .github/scripts/wasi-smoke.sh target/wasm32-wasip1/debug/exarch.wasm
+```
+
+The C codecs need a WASI libc and `llvm-ar`; the `wasm` job in
+`.github/workflows/ci.yml` shows the `CFLAGS_wasm32_wasip1` and
+`AR_wasm32_wasip1` settings it uses.
+
+### Fuzzing
+
+Seven `cargo-fuzz` targets live in `fuzz/` (`tar`, `zip`, `sevenz`,
+`safe_path`, `extract_archive`, `sink`, `detect`). Changes to archive parsers,
+`extract_to_sink` or `ArchiveReader::detect` must keep `cargo +nightly check
+--manifest-path fuzz/Cargo.toml --all-targets` passing. See
+[`fuzz/README.md`](fuzz/README.md) for running targets and turning a crash into
+a regression test.
+
+### Test Fixtures
+
+7z fixtures in `tests/fixtures/` are generated, not hand-edited:
+
+- `tests/fixtures/generate_7z_fixtures.sh` needs `p7zip` (`7z`); the
+  `symlink-snl.7z` step also needs `7zz` from 7-Zip 26.05.
+- `tests/fixtures/generate_7z_p7zip_fixture.sh` needs Docker; it builds
+  `symlink-p7zip.7z` and `symlink-p7zip-dir.7z` with a pinned p7zip 16.02.
+
 ### Writing Tests
 
 - Place unit tests in the same file as the code being tested

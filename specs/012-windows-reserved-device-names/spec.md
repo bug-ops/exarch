@@ -15,6 +15,7 @@ related:
   - "[[constitution]]"
   - "[[MOC-specs]]"
   - "[[001-security-pipeline/spec]]"
+  - "[[020-reader-sink-and-in-memory-api/spec]]"
 ---
 
 # Feature: Windows Reserved Device Name Validation in SafePath
@@ -23,7 +24,7 @@ related:
 > **Type**: bug (path-validation robustness gap, Windows-specific)
 > **Priority**: P2
 > **Subsystem**: exarch-core (`crates/exarch-core/src/types/safe_path.rs`)
-> **Status**: implemented in 0.7.0 (#652): `is_windows_reserved_component` and `check_windows_component` in `safe_path.rs`, opt-out `AllowedFeatures::windows_reserved_names` via `SecurityConfig::with_allow_windows_reserved_names` (see section 9 for the resolved decisions and deviations)
+> **Status**: implemented in 0.7.0 (#652): `is_windows_reserved_component` and `check_windows_component` in `safe_path.rs`, opt-out `AllowedFeatures::windows_reserved_names` via `SecurityConfig::with_allow_windows_reserved_names` (see section 9 for the resolved decisions and deviations); extended in 0.8.0 (#780, #790): the check now runs through a `PathModel` (see below)
 > **Origin**: CVE/vulnerability-class monitoring cycle against the tracked
 > Reference Project `python/cpython` (tarfile module), per
 > `.claude/rules/continuous-improvement.md`. Commit `8b430d6f` (2026-07-02,
@@ -159,7 +160,7 @@ Use EARS notation. Prefix with FR-NNN.
 | ID | Requirement | Priority |
 |----|------------|----------|
 | FR-001 | WHEN a path component (`Component::Normal`, at any depth — not only the final component) case-insensitively matches a Windows reserved device name (`CON`, `PRN`, `AUX`, `NUL`, `COM1`-`COM9`, `LPT1`-`LPT9`), with or without a trailing extension, THE SYSTEM SHALL reject the entry with `ArchiveError::SecurityViolation`, consistent with the existing `banned_path_components` rejection path in the same component loop | must |
-| FR-002 | WHEN the extraction target platform is not Windows THE SYSTEM SHALL NOT apply reserved-device-name validation, since no equivalent reserved names exist on Unix/macOS filesystems and applying the check there would be a pure behavior regression with no security benefit | must |
+| FR-002 | WHEN the extraction target platform is not Windows THE SYSTEM SHALL NOT apply reserved-device-name validation, since no equivalent reserved names exist on Unix/macOS filesystems and applying the check there would be a pure behavior regression with no security benefit; the reserved-name check is part of the component rules of `PathModel` (see [[020-reader-sink-and-in-memory-api/spec]]): `Host` applies them only on a Windows host, `PathModel::Portable` applies them on every host (for example for an in-memory sink whose output is read on Windows) | must |
 | FR-003 | WHEN a `SecurityConfig` is constructed via the builder, callers SHALL be able to explicitly opt out of reserved-device-name rejection (default: enabled/reject), analogous to how `with_banned_path_components` customizes the existing banned-component list | should |
 | FR-004 | WHEN validating a path component against the reserved-name set THE SYSTEM SHALL strip only a single trailing extension (text after the last `.`) before comparison, so that `CON.txt` and `CON` both match but `CONTACT.txt` (a superstring, not an exact reserved base name) does not falsely match | must |
 | FR-005 | WHEN a reserved-name violation occurs during `list_archive` or `verify_archive` preflight in the verify pre-flight (`ListPass::VerifyPreflight`, `inspection/list.rs`) THE SYSTEM SHALL surface it as a graceful `VerificationIssue`, matching how other list-level security violations already degrade in that mode, rather than hard-aborting | should |
@@ -244,6 +245,15 @@ new persisted or transmitted entity is introduced.
 
 ## 9. Open Questions
 
+- **Resolved in 0.8.0: Windows hosts apply the full `Portable` component rules (#780, #790).**
+  `PathModel::Host` on a Windows host now also refuses, as a never-relaxable
+  `SecurityViolation`, any entry name or link target component containing
+  `<>"|?*`, a control character or non-Unicode text (previously only
+  device names, `:` and a trailing dot or space were checked there; the others
+  failed later as an `IoError` at create time, which is now `SecurityViolation` in the CLI
+  `--json` `error.kind`). A symlink target with such a component no longer
+  creates a dangling link. Other hosts are unchanged under `Host`. Error messages
+  escape control characters in the offending component.
 - **Resolved: reject by default.** `AllowedFeatures::windows_reserved_names`
   defaults to `false`; `SecurityConfig::with_allow_windows_reserved_names(true)`
   is the Rust-only opt-out (no CLI flag, no Python or Node setter), and the

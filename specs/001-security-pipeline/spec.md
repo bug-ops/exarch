@@ -8,7 +8,7 @@ tags:
   - security
   - rust
 created: 2026-05-20
-updated: 2026-10-26
+updated: 2026-11-02
 status: draft
 related:
   - "[[constitution]]"
@@ -19,6 +19,7 @@ related:
   - "[[014-config-typestate-validation/spec]]"
   - "[[016-sanitized-mode-and-non-exhaustive-enums/spec]]"
   - "[[017-zip-header-consistency/spec]]"
+  - "[[020-reader-sink-and-in-memory-api/spec]]"
 ---
 
 # Feature: Security Pipeline
@@ -180,6 +181,10 @@ THEN the written file has those bits cleared; ValidatedEntry.mode reflects the s
 | FR-021 | WHEN a path component or link-target component is validated on Windows, THE SYSTEM SHALL reject a component containing `:` or ending in `.` or a space with `SecurityViolation` (never relaxable), and a legacy device name (`CON`, `NUL`, `COM1`, ...) with `SecurityViolation` relaxable by `AllowedFeatures::windows_reserved_names` (`PolicySetting::WindowsReservedNames`); `is_windows_reserved_component` is public and `SecurityConfig::permissive()` does not enable the opt-out | must |
 | FR-022 | WHEN an entry names the archive root (`.` or `./`), THE SYSTEM SHALL accept it only as a directory (for ZIP also an empty regular file, which the `zip` crate reads for a bare `.`) and reject any other kind or a payload with `SecurityViolation`; the rule is classified once (`EntryPath::Root`/`Child`, `NodeKind`) so `extract`, `list` and `verify` agree. An empty entry name is `SecurityViolation` | must |
 | FR-023 | WHEN a decoder would exceed `max_decoder_memory` (xz dictionary and state, 7z decoder window), THE SYSTEM SHALL fail with `QuotaExceeded { resource: DecoderMemory { max } }`; 7z parallel LZMA2 lookahead is bounded separately by `parallel_decode` (`ParallelDecode`) | must |
+| FR-024 | THE SYSTEM SHALL validate every entry against a `PathModel` (`Host` or `Portable`, see [[020-reader-sink-and-in-memory-api/spec]]); `Host` applies the running platform's component rules and, on a Windows host, the `Portable` component rules, so a name or link target containing `<>"\|?*`, a control character, `:`, a trailing dot or space, or non-Unicode text is refused with `SecurityViolation` (never relaxable) and a symlink target with such a component no longer creates a dangling link; `Portable` applies the strictest rules of every platform on every host (v0.8.0, #778, #780, #787, #790) | must |
+| FR-025 | `ValidatorCore` SHALL hand an extraction target one typed proof per entry kind (`ValidatedFile` carrying its `QuotaPermit`, `ValidatedSymlink`, `ValidatedHardlink`, `EntrySize`; `security::admitted`), constructed only by the validator, so the host filesystem and an `EntrySink` run the same gates and a target cannot write a file whose quota was not reserved (v0.8.0, #793, #808) | must |
+| FR-026 | WHEN a directory entry targets a path held by a file or a symlink, THE SYSTEM SHALL refuse it with the same entry-naming message in `extract` and `verify`; `extract --force` over an existing directory or symlink SHALL name the entry (`refusing to replace the existing directory at d`) for TAR, ZIP and 7z (v0.8.0, #765, #802, #803) | must |
+| FR-027 | THE SYSTEM SHALL bound the in-memory destination model used by `verify` and `extract_to_sink` by a node budget of `max_file_count * max_path_depth + 1` names, failing with `QuotaExceeded { resource: TreeNodes { max } }`, and SHALL treat a link path that leaves the root and returns as an escape (v0.8.0, #778, #779, #787) | must |
 
 ## 4. Non-Functional Requirements
 
@@ -200,9 +205,9 @@ THEN the written file has those bits cleared; ValidatedEntry.mode reflects the s
 |--------|-------------|----------------|
 | `SafePath` | Newtype for a validated archive entry path; can only be constructed after all traversal, depth, and component checks pass | Wraps `PathBuf`; invariant: no traversal, within dest, depth within limit |
 | `SafeSymlink` | Newtype for a symlink target confirmed to resolve within `output_dir` | `link_path()`, `target_path()`; sealed constructor |
-| `ValidatedEntry` | Archive entry that has passed the full security pipeline; sealed (private fields, `pub(crate)` constructor) since v0.6.0 | `safe_path()`, `entry_type()`, `mode()`, `into_parts()` accessors — no direct field access from outside `exarch-core` |
+| `ValidatedEntry` | Archive entry that has passed the full security pipeline; sealed (private fields, `pub(crate)` constructor) since v0.6.0 | `safe_path()`, `entry_type()`, `mode()` accessors — no direct field access from outside `exarch-core` (`into_parts()` was removed in v0.8.0; extraction targets take owned proofs from `ValidatedFile` and its siblings, FR-025) |
 | `ValidatedEntryType` | `#[non_exhaustive]` enum of post-validation entry classifications | `File(QuotaPermit)` (carries a capability token since v0.6.0), `Directory`, `Symlink(SafeSymlink)`, `Hardlink { target: SafePath, counted: EntryCount }` (`#[non_exhaustive]` variant) |
-| `EntryValidator` | Stateful orchestrator running all security checks in order per entry | Holds `QuotaTracker`, `HardlinkTracker`, `symlink_seen` flag; references `SecurityConfig<Validated>` and `DestDir`; `validate_entry_path` splits path validation from quota reservation for callers needing the destination path before deciding whether to charge quota (7z's duplicate check) |
+| `EntryValidator` | Stateful orchestrator running all security checks in order per entry | Public wrapper over the crate-private `ValidatorCore` (holds `QuotaTracker`, `HardlinkTracker`, `symlink_seen` flag, `SecurityConfig<Validated>`) plus a `DestDir`; since v0.8.0 `ValidatorCore` takes the root and `FsView` per call (`HostFs` for the disk, `VirtualTree` for verification and sinks), exposes `validate_file_in`/`validate_directory_in`/`validate_symlink_in`/`validate_hardlink_in` returning typed proofs, and keeps `validate_entry_path_in` + `reserve_file` split for 7z's duplicate check (the former public `EntryValidator::validate_entry_path` was removed, #808) |
 | `PolicySetting` | `#[non_exhaustive]` enum naming the `SecurityConfig` setting whose current value refused an entry | `as_str()` identifier (`symlinks`, `hardlinks`, `solid_archives`, `banned_components`, `max_path_depth`, `windows_reserved_names`, `max_tar_metadata_bytes`); `PolicySetting::ALL` |
 | `ZipBombDetails` | Payload of `ArchiveError::ZipBomb`: scope and compressed/uncompressed sizes | `scope()` is `ZipBombScope::{Entry, SolidBlock}`; `ratio()` derives a `CompressionRatio::{Finite, Unbounded}` so the ratio cannot contradict the sizes |
 | `QuotaTracker` | Accumulates entry count (files, symlinks, hardlinks) and total bytes; rejects on limit exceeded | `reserve()` (renamed from `record_file()` in v0.6.0) produces `QuotaPermit`; crate-private `reserve_count()` produces `EntryCount` and `charge()` spends it |
@@ -342,6 +347,9 @@ THEN the written file has those bits cleared; ValidatedEntry.mode reflects the s
 | Path depth > `max_path_depth` | `ArchiveError::SecurityViolation`, `relaxable_by() == Some(PolicySetting::MaxPathDepth)` |
 | Root entry (`.`) that is not a directory | `ArchiveError::SecurityViolation` (no setting relaxes it) |
 | Windows only: component with `:` or a trailing `.`/space | `ArchiveError::SecurityViolation` (never relaxable) |
+| Windows host, or `PathModel::Portable` on any host: component with `<>"\|?*`, a control character or non-Unicode text | `ArchiveError::SecurityViolation` (never relaxable); CLI JSON `error.kind` is `SecurityViolation`, previously `IoError` on Windows (v0.8.0, FR-024) |
+| Directory entry over a file or a symlink | Refused with an entry-naming message, identical in `extract` and `verify` (v0.8.0, FR-026) |
+| In-memory model exceeds its node budget | `ArchiveError::QuotaExceeded { resource: TreeNodes { max } }` (v0.8.0, FR-027) |
 | Windows only: reserved device name (`CON`, `NUL.txt`) | `ArchiveError::SecurityViolation`, `relaxable_by() == Some(PolicySetting::WindowsReservedNames)` |
 | File exceeds `max_file_size` | `ArchiveError::QuotaExceeded { resource: FileSize { .. } }` |
 | Total size exceeds `max_total_size` | `ArchiveError::QuotaExceeded { resource: TotalSize { .. } }` |
@@ -424,6 +432,7 @@ THEN the written file has those bits cleared; ValidatedEntry.mode reflects the s
 - [[015-atomic-force-destination-swap-hardening/spec]] — CLI-side `--atomic --force` symlink/TOCTOU hardening (GHSA-x8wr-7ww2-c94x)
 - [[016-sanitized-mode-and-non-exhaustive-enums/spec]] — `SanitizedMode` capability-token newtype and `#[non_exhaustive]` enum hardening
 - [[017-zip-header-consistency/spec]] — `ZipConsistencyPolicy` and ZIP structure checks
+- [[020-reader-sink-and-in-memory-api/spec]] — `PathModel`, sink and in-memory destination model
 - [[001-exarch-system/spec]] — original monolithic spec (archived)
 - `crates/exarch-core/src/types/safe_path.rs` — `paths_start_with`
 - Advisory GHSA-wcmx-7f9h-5mv5 — the macOS/Windows sibling-directory containment bypass fixed here

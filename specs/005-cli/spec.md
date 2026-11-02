@@ -8,7 +8,7 @@ tags:
   - cli
   - rust
 created: 2026-05-20
-updated: 2026-10-26
+updated: 2026-11-02
 status: draft
 related:
   - "[[constitution]]"
@@ -16,6 +16,8 @@ related:
   - "[[003-config-api/spec]]"
   - "[[004-progress-tracking/spec]]"
   - "[[015-atomic-force-destination-swap-hardening/spec]]"
+  - "[[019-verify-and-list-model/spec]]"
+  - "[[020-reader-sink-and-in-memory-api/spec]]"
 ---
 
 # Feature: CLI
@@ -151,7 +153,7 @@ THEN stdout contains valid JSON with all report fields; stderr contains no progr
 | FR-069 | WHEN `--verbose` is set, THE CLI SHALL print one line per extracted entry to stderr including entry type indicator (`f`/`d`/`l`), uncompressed size, and relative path; `--quiet` takes precedence when both are set | must |
 | FR-070 | THE CLI progress bar SHALL use `indicatif` in human mode and be suppressed in `--json` and `--quiet` modes | must |
 | FR-071 | Human-readable output SHALL use SI suffixes (K, M, G) for byte counts when `-H/--human-readable` is set | should |
-| FR-072 | WHEN `--allow-symlinks` is already active and a symlink escape is blocked, THE CLI SHALL NOT emit the `--allow-symlinks` hint; the hint is only relevant when symlinks are not yet enabled | must |
+| FR-072 | WHEN `--allow-symlinks` is already active and a symlink escape is blocked, THE CLI SHALL NOT emit the `--allow-symlinks` hint; the hint is only relevant when symlinks are not yet enabled; since v0.8.0 a symlink or hardlink escape never hints at `--allow-symlinks` or `--allow-hardlinks` at all, because neither flag lifts an escape (#759, #768) | must |
 | FR-073 | WHEN `--json` is used, the JSON `message` field for `PartialExtraction`, `PathTraversal`, `SymlinkEscape`, `HardlinkEscape`, `QuotaExceeded`, and `ZipBomb` errors SHALL NOT repeat inner error text that already appears in the structured fields | must |
 | FR-074 | `verify` SHALL support `--strict` flag: when set, a `VerificationReport` with `Warning` status causes the process to exit with code 2 instead of 0; without the flag, exit 0 on warnings is unchanged | must |
 | FR-075 | WHEN `list -l` or `list --json -l` is run and an entry is a symlink or hardlink, THE CLI SHALL include the target path in the output; text format: `l755  0  link.txt -> target.txt`; JSON format: `symlink_target` and `hardlink_target` fields populated | must |
@@ -175,7 +177,12 @@ THEN stdout contains valid JSON with all report fields; stderr contains no progr
 | FR-093 | `list --read-link-targets` SHALL read 7z symlink targets (decoding the blocks that hold them); without it 7z link targets are not read (v0.7.0, #714, #718, #723) | must |
 | FR-094 | `verify --json` `data` SHALL carry `integrity_status` (`OK`, `FAILED`, `INCOMPLETE`, `SKIPPED`) and `integrity_gaps` (`null` when none, else `counts` keyed by reason, `entries` of `{path, reason}`, and `omitted`) (v0.7.0, #672, #684) | must |
 | FR-095 | The `--json` error envelope SHALL carry `error.relaxable_by` (the stable `PolicySetting` id, e.g. `symlinks`, `solid_archives`) only for a `SecurityViolation` a `SecurityConfig` setting relaxes, and `error.partial_report.writes` (`kept` or `rolled_back`) for a `PartialExtraction`; after `--atomic` rollback the report describes the discarded run (v0.7.0, #725, #741, #757) | must |
-| FR-096 | Human-readable output SHALL escape control and Unicode format characters (including bidirectional controls) in entry paths, link targets and other archive-derived text (v0.7.0, #741, #745, #749, #752, #757) | must |
+| FR-096 | Human-readable output SHALL escape control and Unicode format characters (including bidirectional controls) in entry paths, link targets and other archive-derived text (v0.7.0, #741, #745, #749, #752, #757); since v0.8.0 this covers every `Default_Ignorable_Code_Point` character, keeping a variation selector only after the character it modifies (#753, #768) | must |
+| FR-097 | WHEN `extract` targets a destination that does not exist and whose parent is an existing directory, AND the archive is a TAR variant, THE CLI SHALL skip the pre-extraction list pass (a second decode of a compressed stream), extract atomically so a refusal leaves nothing behind and creates no parent directory, and report such a failure with `writes: rolled_back` (`--json` `error.partial_report.writes`); the progress bar then counts entries instead of showing a total. ZIP and 7z archives keep the list pass (v0.8.0, #799, #808) | must |
+| FR-098 | WHEN the pre-extraction list pass fails, THE CLI SHALL report the error with the category message and hint `extract` would give the same error (not a generic "failed to list archive" wrapper), and the unknown-format hint SHALL list every supported archive extension, including 7z (v0.8.0, #796, #808) | must |
+| FR-099 | WHEN `extract --force` would replace an existing directory or symlink with a file, THE CLI SHALL fail naming the entry (`refusing to replace the existing directory at d`) for TAR, ZIP and 7z (v0.8.0, #765, #768) | must |
+| FR-100 | WHEN `create` writes a ZIP, THE CLI SHALL surface the core warning for entries that default extraction would refuse as a zip bomb, naming the entry count and the `--max-compression-ratio` value that admits them, and `create --help` SHALL say so (v0.8.0, #801, #808) | should |
+| FR-101 | THE CLI SHALL build for `wasm32-wasip1` and pass a wasmtime smoke test in CI (v0.8.0, #755, #771) | should |
 
 ## 4. Non-Functional Requirements
 
@@ -255,7 +262,8 @@ exarch completion <SHELL>    # bash | zsh | fish | powershell | elvish  (output 
 | `verify` without `--check-integrity` | `integrity_status` is `SKIPPED`; `--check-security` no longer exists (v0.7.0, #624) |
 | `verify --decompression-budget` without `--check-integrity`, or with `0` | Rejected at argument parsing (v0.7.0) |
 | `SecurityViolation` a `SecurityConfig` setting relaxes, `--json` | `error.relaxable_by` names the setting; the field is absent otherwise (v0.7.0, #741, #757) |
-| `extract --atomic` fails and rolls back, `--json` | `error.partial_report.writes` is `rolled_back`; without `--atomic` it is `kept` (v0.7.0, #725) |
+| `extract --atomic` fails and rolls back, `--json` | `error.partial_report.writes` is `rolled_back`; without `--atomic` it is `kept`, except for a TAR into a missing destination, which is atomic implicitly (v0.7.0, #725; v0.8.0, FR-097) |
+| TAR extracted into a destination that does not exist, refused by a security check | Nothing is created, including no parent directory; human output says the partial extraction was discarded and the destination left unchanged (v0.8.0, FR-097) |
 | `extract --atomic --force` onto a destination that is itself a symlink | Rejected on all platforms (GHSA-x8wr-7ww2-c94x, v0.6.0) — pass the resolved target path instead |
 | `extract --atomic --force` where an intermediate destination path component is replaced with a symlink mid-extraction | Swap is confined to the pinned parent fd; a `dev`/`ino` identity mismatch immediately before the destructive swap aborts it with a distinct error (v0.6.0, #526) |
 | `extract --atomic --force` fails after a mid-extraction redirect leaves a temp/backup directory behind at an unexpected path | Error output discloses the directory's actual current path, resolved via an open fd (v0.6.0, #530); in the ordinary non-redirected case, cleanup succeeds and nothing is disclosed or left behind |
@@ -306,4 +314,6 @@ exarch completion <SHELL>    # bash | zsh | fish | powershell | elvish  (output 
 - [[003-config-api/spec]] — config types translated from CLI flags
 - [[004-progress-tracking/spec]] — indicatif-based `ProgressCallback` used by CLI
 - [[015-atomic-force-destination-swap-hardening/spec]] — `--atomic --force` symlink/TOCTOU hardening in detail
+- [[019-verify-and-list-model/spec]] — list and verify output model
+- [[020-reader-sink-and-in-memory-api/spec]] — WASI build and the in-memory APIs the CLI does not expose
 - [[001-exarch-system/spec]] — original monolithic spec (archived)

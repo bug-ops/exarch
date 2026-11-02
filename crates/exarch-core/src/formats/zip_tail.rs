@@ -147,37 +147,52 @@ impl DescriptorTail {
         Ok(())
     }
 
-    fn decode_stream<R: Read>(self, raw: R) -> Result<Option<(BufReader<Counted<R>>, u64)>> {
+    fn decode_stream<R: Read>(self, raw: R) -> Result<Decoded<R>> {
         let source = Rc::new(Source::default());
         let raw = BufReader::new(Counted {
             inner: raw,
             state: Rc::clone(&source),
         });
-        let decoded = match self.method {
+        let (drained, rest) = match self.method {
             Compressed::Deflate => {
                 let mut decoder = flate2::bufread::DeflateDecoder::new(raw);
-                drain(&mut decoder, self.size, &source)?.map(|()| decoder.into_inner())
+                let drained = drain(&mut decoder, self.size, &source)?;
+                (drained, decoder.into_inner())
             }
             Compressed::Bzip2 => {
                 let mut decoder = bzip2::bufread::BzDecoder::new(raw);
-                drain(&mut decoder, self.size, &source)?.map(|()| decoder.into_inner())
+                let drained = drain(&mut decoder, self.size, &source)?;
+                (drained, decoder.into_inner())
             }
             Compressed::Zstd => {
                 let mut decoder = zstd::stream::read::Decoder::with_buffer(raw)
                     .map_err(ArchiveError::Io)?
                     .single_frame();
-                drain(&mut decoder, self.size, &source)?.map(|()| decoder.finish())
+                let drained = drain(&mut decoder, self.size, &source)?;
+                (drained, decoder.finish())
             }
         };
-        Ok(decoded.map(|rest| {
-            let unread = u64::try_from(rest.buffer().len()).unwrap_or(u64::MAX);
-            let stream_end = source.consumed.get().saturating_sub(unread);
-            (rest, stream_end)
-        }))
+        Ok(match drained {
+            Drained::Within(produced) => {
+                let unread = u64::try_from(rest.buffer().len()).unwrap_or(u64::MAX);
+                Decoded::Ended {
+                    stream_end: source.consumed.get().saturating_sub(unread),
+                    rest,
+                    produced,
+                }
+            }
+            Drained::OverCap => Decoded::OverCap,
+            Drained::Failed => Decoded::Failed,
+        })
     }
 
     fn find_hidden(self, raw: impl Read) -> Result<Tail> {
-        let Some((mut rest, stream_end)) = self.decode_stream(raw)? else {
+        let Decoded::Ended {
+            mut rest,
+            stream_end,
+            ..
+        } = self.decode_stream(raw)?
+        else {
             return Ok(Tail::Undecided);
         };
         let slack = self.compressed.saturating_sub(stream_end);
@@ -194,11 +209,14 @@ pub(super) enum DeflateEnd {
     /// The declared range does not hold one stream that decodes to at most the
     /// declared size, so a streaming reader ends the entry somewhere else.
     Undecided,
+    /// The stream decodes to more than the decode budget has left, so its end
+    /// is unknown.
+    OverBudget,
 }
 
 /// Decodes the declared range of a deflated descriptor entry, `compressed`
 /// bytes at `data_start`, producing at most `size` bytes, to find where its
-/// stream ends.
+/// stream ends. The bytes produced are taken from `budget`.
 ///
 /// # Errors
 ///
@@ -208,19 +226,45 @@ pub(super) fn deflate_stream_end<R: Read + Seek>(
     data_start: u64,
     compressed: u64,
     size: u64,
+    budget: &mut u64,
 ) -> Result<DeflateEnd> {
     reader.seek(SeekFrom::Start(data_start))?;
+    let cap = size.min(*budget);
     let tail = DescriptorTail {
         method: Compressed::Deflate,
         data_start,
         compressed,
-        size,
+        size: cap,
     };
     let raw = Read::take(&mut *reader, compressed);
     Ok(match tail.decode_stream(raw)? {
-        Some((_, end)) => DeflateEnd::At(data_start.saturating_add(end)),
-        None => DeflateEnd::Undecided,
+        Decoded::Ended {
+            stream_end,
+            produced,
+            ..
+        } => {
+            *budget = budget.saturating_sub(produced);
+            DeflateEnd::At(data_start.saturating_add(stream_end))
+        }
+        Decoded::OverCap if cap < size => DeflateEnd::OverBudget,
+        Decoded::OverCap | Decoded::Failed => DeflateEnd::Undecided,
     })
+}
+
+/// How decoding one stream ended.
+enum Decoded<R> {
+    Ended {
+        /// What the decoder did not consume of the buffered input.
+        rest: BufReader<Counted<R>>,
+        /// Compressed bytes the stream occupies.
+        stream_end: u64,
+        /// Bytes the stream decoded to.
+        produced: u64,
+    },
+    /// The stream decodes to more than the cap.
+    OverCap,
+    /// The decoder rejected the bytes.
+    Failed,
 }
 
 /// Whether `bytes` start a local header, central directory or end record
@@ -288,18 +332,28 @@ enum Tail {
 /// passed that check through the `zip` crate, and a decoder that stops after
 /// the first stream of a multi-stream entry (zstd frames, bzip2 streams) ends
 /// short while the rest of the declared range is still data to search.
-/// `None` means the decoder rejected the bytes or overran the declared size; an
-/// error the underlying reader raised is returned as such.
-fn drain(decoder: &mut impl Read, declared: u64, source: &Source) -> Result<Option<()>> {
+/// An error the underlying reader raised is returned as such.
+fn drain(decoder: &mut impl Read, declared: u64, source: &Source) -> Result<Drained> {
     let mut limited = decoder.take(declared.saturating_add(1));
     let copied = std::io::copy(&mut limited, &mut sink());
     if let Some(failure) = source.failure.take() {
         return Err(ArchiveError::Io(failure));
     }
     Ok(match copied {
-        Ok(produced) if produced <= declared => Some(()),
-        Ok(_) | Err(_) => None,
+        Ok(produced) if produced <= declared => Drained::Within(produced),
+        Ok(_) => Drained::OverCap,
+        Err(_) => Drained::Failed,
     })
+}
+
+/// How draining a decoder ended.
+enum Drained {
+    /// The stream ended after this many bytes.
+    Within(u64),
+    /// The stream produced more than the cap.
+    OverCap,
+    /// The decoder rejected the bytes or the input ended early.
+    Failed,
 }
 
 /// What the raw reader behind a decoder has done: how much it handed out and
@@ -474,7 +528,10 @@ mod tests {
             state: Rc::clone(&source),
         });
         let mut decoder = flate2::bufread::DeflateDecoder::new(raw);
-        drain(&mut decoder, declared, &source)
+        Ok(match drain(&mut decoder, declared, &source)? {
+            Drained::Within(_) => Some(()),
+            Drained::OverCap | Drained::Failed => None,
+        })
     }
 
     #[test]

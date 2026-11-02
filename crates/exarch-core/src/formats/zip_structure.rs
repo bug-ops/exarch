@@ -1423,27 +1423,23 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
         layout: &EntryLayout,
         findings: &mut Findings,
     ) -> Result<()> {
-        let undecided = match self.decode_budget.checked_sub(layout.size) {
-            Some(left) => {
-                self.decode_budget = left;
-                match deflate_stream_end(
-                    &mut *self.reader,
-                    layout.data_start,
-                    layout.compressed,
-                    layout.size,
-                )? {
-                    DeflateEnd::At(end) if end < layout.end => {
-                        return self.search_behind(
-                            end,
-                            layout.end.saturating_add(STRADDLE_LOOKAHEAD),
-                            findings,
-                        );
-                    }
-                    DeflateEnd::At(_) => false,
-                    DeflateEnd::Undecided => true,
-                }
+        let undecided = match deflate_stream_end(
+            &mut *self.reader,
+            layout.data_start,
+            layout.compressed,
+            layout.size,
+            &mut self.decode_budget,
+        )? {
+            DeflateEnd::At(end) if end < layout.end => {
+                return self.search_behind(
+                    end,
+                    layout.end.saturating_add(STRADDLE_LOOKAHEAD),
+                    findings,
+                );
             }
-            None => {
+            DeflateEnd::At(_) => false,
+            DeflateEnd::Undecided => true,
+            DeflateEnd::OverBudget => {
                 holds_record_signature(&mut *self.reader, layout.data_start, layout.compressed)?
             }
         };

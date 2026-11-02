@@ -262,6 +262,20 @@ fn deflate_decoding_within_the_budget_finds_the_header() {
 }
 
 #[test]
+fn deflate_decoding_is_charged_for_the_bytes_produced_not_the_declared_size() {
+    let payload = b"hello hello hello hello";
+    let tail = [descriptor(payload, 0), evil_local()].concat();
+    let mut entry = descriptor_entry(8, payload, &tail);
+    entry.size = 1 << 30;
+    let built = RawZip::new(vec![entry]).build();
+    let at = data_start(&built, 0) + compress(8, payload).len() + 16;
+    assert_eq!(
+        findings_with_decode_budget(&built, 23),
+        [hidden_in(at, HiddenRegion::DescriptorTail)]
+    );
+}
+
+#[test]
 fn deflate_entry_the_budget_cannot_cover_is_refused_when_it_holds_a_record_signature() {
     let (built, _) = hidden_after_deflate_stream();
     let found = findings_with_decode_budget(&built, 22);

@@ -288,6 +288,7 @@ mod tests {
             data_start: 93,
             end: END,
             descriptor: Some(exit),
+            method: CompressionMethod::Stored,
             compressed: COMPRESSED,
             size: SIZE,
             crc32: CRC,

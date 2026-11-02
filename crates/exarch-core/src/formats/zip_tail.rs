@@ -7,11 +7,10 @@
 //! readable by a streaming one. Telling where the stream ends takes decoding,
 //! so the check runs with an integrity pass, after the entry has decoded
 //! cleanly through the `zip` crate. The census also decodes deflated entries
-//! itself within a fixed budget (see [`hidden_behind_deflate`]), which
-//! the integrity pass completes. A streaming reader scans
-//! stored data, and the data of every method but deflate, for a descriptor
-//! signature instead, which the census searches for (see
-//! [`judge_first_signature`]).
+//! itself within a fixed budget (see [`deflate_stream_end`]), which the
+//! integrity pass completes. A streaming reader scans stored data, and the
+//! data of every method but deflate, for a descriptor signature instead, which
+//! the census searches for (see [`judge_first_signature`]).
 
 use std::cell::Cell;
 use std::cell::RefCell;
@@ -148,83 +147,173 @@ impl DescriptorTail {
         Ok(())
     }
 
-    fn find_hidden(self, raw: impl Read) -> Result<Tail> {
+    fn decode_stream<R: Read>(self, raw: R) -> Result<Decoded<R>> {
         let source = Rc::new(Source::default());
         let raw = BufReader::new(Counted {
             inner: raw,
             state: Rc::clone(&source),
         });
-        let decoded = match self.method {
+        let (drained, rest) = match self.method {
             Compressed::Deflate => {
                 let mut decoder = flate2::bufread::DeflateDecoder::new(raw);
-                drain(&mut decoder, self.size, &source)?.map(|()| decoder.into_inner())
+                let drained = drain(&mut decoder, self.size, &source)?;
+                (drained, decoder.into_inner())
             }
             Compressed::Bzip2 => {
                 let mut decoder = bzip2::bufread::BzDecoder::new(raw);
-                drain(&mut decoder, self.size, &source)?.map(|()| decoder.into_inner())
+                let drained = drain(&mut decoder, self.size, &source)?;
+                (drained, decoder.into_inner())
             }
             Compressed::Zstd => {
                 let mut decoder = zstd::stream::read::Decoder::with_buffer(raw)
                     .map_err(ArchiveError::Io)?
                     .single_frame();
-                drain(&mut decoder, self.size, &source)?.map(|()| decoder.finish())
+                let drained = drain(&mut decoder, self.size, &source)?;
+                (drained, decoder.finish())
             }
         };
-        let Some(mut rest) = decoded else {
+        Ok(match drained {
+            Drained::Within(produced) => {
+                let unread = u64::try_from(rest.buffer().len()).unwrap_or(u64::MAX);
+                Decoded::Ended {
+                    stream_end: source.consumed.get().saturating_sub(unread),
+                    rest,
+                    produced,
+                }
+            }
+            Drained::OverCap => Decoded::OverCap,
+            Drained::Failed => Decoded::Failed,
+        })
+    }
+
+    fn find_hidden(self, raw: impl Read) -> Result<Tail> {
+        let Decoded::Ended {
+            mut rest,
+            stream_end,
+            ..
+        } = self.decode_stream(raw)?
+        else {
             return Ok(Tail::Undecided);
         };
-        let unread = u64::try_from(rest.buffer().len()).unwrap_or(u64::MAX);
-        let stream_end = source.consumed.get().saturating_sub(unread);
         let slack = self.compressed.saturating_sub(stream_end);
         let found = scan(&mut rest, slack, LFH_SIGNATURE, judge_header_in_slack)?;
         Ok(found.map_or(Tail::Clean, |at| Tail::Hidden(stream_end + at)))
     }
 }
 
-/// Offset in the file of a local header behind the end of the deflate stream of
-/// a descriptor entry whose data is `compressed` bytes at `data_start`, or
-/// `None` when the declared range ends with the stream or holds no header.
-///
-/// The range is searched for a header signature first, which costs one read of
-/// the declared bytes; only a range that has one is decoded, and the decoder's
-/// output is bounded by `size`, which is charged to `budget`. An entry that
-/// does not fit the budget, and a stream that does not decode, are left to the
-/// integrity pass.
+/// Where the compressed stream of a deflated descriptor entry ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DeflateEnd {
+    /// Absolute offset of the first byte behind the stream.
+    At(u64),
+    /// The declared range does not hold one stream that decodes to at most the
+    /// declared size, so a streaming reader ends the entry somewhere else.
+    Undecided,
+    /// The stream decodes to more than the decode budget has left, so its end
+    /// is unknown.
+    OverBudget,
+}
+
+/// Decodes the declared range of a deflated descriptor entry, `compressed`
+/// bytes at `data_start`, producing at most `size` bytes, to find where its
+/// stream ends. The bytes produced are taken from `budget`.
 ///
 /// # Errors
 ///
 /// Returns the I/O error of a failing read.
-pub(super) fn hidden_behind_deflate<R: Read + Seek>(
+pub(super) fn deflate_stream_end<R: Read + Seek>(
     reader: &mut R,
     data_start: u64,
     compressed: u64,
     size: u64,
     budget: &mut u64,
-) -> Result<Option<u64>> {
-    if compressed <= LFH_FIXED_LEN as u64 {
-        return Ok(None);
-    }
+) -> Result<DeflateEnd> {
     reader.seek(SeekFrom::Start(data_start))?;
-    let mut data = Read::take(&mut *reader, compressed);
-    if scan(&mut data, compressed, LFH_SIGNATURE, judge_header_in_slack)?.is_none() {
-        return Ok(None);
-    }
-    let Some(left) = budget.checked_sub(size) else {
-        return Ok(None);
-    };
-    *budget = left;
-    reader.seek(SeekFrom::Start(data_start))?;
+    let cap = size.min(*budget);
     let tail = DescriptorTail {
         method: Compressed::Deflate,
         data_start,
         compressed,
-        size,
+        size: cap,
     };
     let raw = Read::take(&mut *reader, compressed);
-    Ok(match tail.find_hidden(raw)? {
-        Tail::Hidden(at) => Some(data_start.saturating_add(at)),
-        Tail::Clean | Tail::Undecided => None,
+    Ok(match tail.decode_stream(raw)? {
+        Decoded::Ended {
+            stream_end,
+            produced,
+            ..
+        } => {
+            *budget = budget.saturating_sub(produced);
+            DeflateEnd::At(data_start.saturating_add(stream_end))
+        }
+        Decoded::OverCap if cap < size => DeflateEnd::OverBudget,
+        Decoded::OverCap | Decoded::Failed => DeflateEnd::Undecided,
     })
+}
+
+/// How decoding one stream ended.
+enum Decoded<R> {
+    Ended {
+        /// What the decoder did not consume of the buffered input.
+        rest: BufReader<Counted<R>>,
+        /// Compressed bytes the stream occupies.
+        stream_end: u64,
+        /// Bytes the stream decoded to.
+        produced: u64,
+    },
+    /// The stream decodes to more than the cap.
+    OverCap,
+    /// The decoder rejected the bytes.
+    Failed,
+}
+
+/// Whether `bytes` start a local header, central directory or end record
+/// signature, or are the beginning of one.
+fn starts_record_signature(bytes: &[u8]) -> bool {
+    const SIGNATURES: [[u8; 4]; 3] = [*b"PK\x01\x02", *b"PK\x03\x04", *b"PK\x05\x06"];
+    SIGNATURES.iter().any(|signature| {
+        let len = bytes.len().min(signature.len());
+        bytes[..len] == signature[..len]
+    })
+}
+
+/// Whether the `compressed` bytes at `data_start` hold a record signature, or
+/// end in the beginning of one, which a streaming reader that resumes inside
+/// the data reads as a record.
+///
+/// # Errors
+///
+/// Returns the I/O error of a failing read.
+pub(super) fn holds_record_signature<R: Read + Seek>(
+    reader: &mut R,
+    data_start: u64,
+    compressed: u64,
+) -> Result<bool> {
+    const OVERLAP: usize = 3;
+    reader.seek(SeekFrom::Start(data_start))?;
+    let mut data = Read::take(&mut *reader, compressed);
+    let mut buf = vec![0u8; SCAN_CHUNK + OVERLAP];
+    let mut carried = 0;
+    loop {
+        let read = data.read(&mut buf[carried..])?;
+        let filled = carried + read;
+        let window = &buf[..filled];
+        if window
+            .array_windows::<4>()
+            .any(|w| starts_record_signature(w))
+        {
+            return Ok(true);
+        }
+        if read == 0 {
+            let tail = &window[filled.saturating_sub(OVERLAP)..];
+            return Ok((0..tail.len()).any(|at| {
+                let rest = &tail[at..];
+                rest.starts_with(b"P") && starts_record_signature(rest)
+            }));
+        }
+        carried = filled.min(OVERLAP);
+        buf.copy_within(filled - carried..filled, 0);
+    }
 }
 
 /// What the tail check concluded about one entry.
@@ -243,18 +332,28 @@ enum Tail {
 /// passed that check through the `zip` crate, and a decoder that stops after
 /// the first stream of a multi-stream entry (zstd frames, bzip2 streams) ends
 /// short while the rest of the declared range is still data to search.
-/// `None` means the decoder rejected the bytes or overran the declared size; an
-/// error the underlying reader raised is returned as such.
-fn drain(decoder: &mut impl Read, declared: u64, source: &Source) -> Result<Option<()>> {
+/// An error the underlying reader raised is returned as such.
+fn drain(decoder: &mut impl Read, declared: u64, source: &Source) -> Result<Drained> {
     let mut limited = decoder.take(declared.saturating_add(1));
     let copied = std::io::copy(&mut limited, &mut sink());
     if let Some(failure) = source.failure.take() {
         return Err(ArchiveError::Io(failure));
     }
     Ok(match copied {
-        Ok(produced) if produced <= declared => Some(()),
-        Ok(_) | Err(_) => None,
+        Ok(produced) if produced <= declared => Drained::Within(produced),
+        Ok(_) => Drained::OverCap,
+        Err(_) => Drained::Failed,
     })
+}
+
+/// How draining a decoder ended.
+enum Drained {
+    /// The stream ended after this many bytes.
+    Within(u64),
+    /// The stream produced more than the cap.
+    OverCap,
+    /// The decoder rejected the bytes or the input ended early.
+    Failed,
 }
 
 /// What the raw reader behind a decoder has done: how much it handed out and
@@ -308,17 +407,47 @@ fn judge_header_in_slack(bytes: &[u8], _: u64, _: u64) -> Judgement {
     let Some(header) = bytes.first_chunk::<LFH_FIXED_LEN>() else {
         return Judgement::NeedMore;
     };
-    if le16::<26, LFH_FIXED_LEN>(header) > 0 || le32::<18, LFH_FIXED_LEN>(header) > 0 {
+    if is_reachable_header(header) {
         Judgement::Hit(0)
     } else {
         Judgement::Miss
     }
 }
 
-/// Accepts the first signature hit: a streaming reader ends a stored entry at
-/// the first descriptor signature in its data and resynchronises from there.
+/// Whether a streaming reader takes something from this local header: a name,
+/// a name in an extra field (the Unicode Path field names a header without
+/// one), or a compressed size to skip.
+pub(super) fn is_reachable_header(header: &[u8; LFH_FIXED_LEN]) -> bool {
+    le16::<26, LFH_FIXED_LEN>(header) > 0
+        || le16::<28, LFH_FIXED_LEN>(header) > 0
+        || le32::<18, LFH_FIXED_LEN>(header) > 0
+}
+
+/// Accepts the first signature hit: a streaming reader ends a compressed entry
+/// it cannot decode at the first descriptor signature in its data and
+/// resynchronises from there.
 pub(super) const fn judge_first_signature(_: &[u8], _: u64, _: u64) -> Judgement {
     Judgement::Hit(0)
+}
+
+/// Accepts a signature hit that starts a descriptor stating the length of the
+/// data before it: a streaming reader ends a stored entry only there, since it
+/// takes any other signature for data.
+pub(super) fn judge_descriptor_after_data(bytes: &[u8], at: u64, _: u64) -> Judgement {
+    let (Some(narrow), Some(wide)) = (bytes.get(8..12), bytes.get(8..16)) else {
+        return Judgement::NeedMore;
+    };
+    let narrow = u64::from(u32::from_le_bytes([
+        narrow[0], narrow[1], narrow[2], narrow[3],
+    ]));
+    let wide = u64::from_le_bytes([
+        wide[0], wide[1], wide[2], wide[3], wide[4], wide[5], wide[6], wide[7],
+    ]);
+    if narrow == at || wide == at {
+        Judgement::Hit(0)
+    } else {
+        Judgement::Miss
+    }
 }
 
 /// Streams `data` (`total` bytes) in bounded chunks and returns the offset
@@ -399,7 +528,10 @@ mod tests {
             state: Rc::clone(&source),
         });
         let mut decoder = flate2::bufread::DeflateDecoder::new(raw);
-        drain(&mut decoder, declared, &source)
+        Ok(match drain(&mut decoder, declared, &source)? {
+            Drained::Within(_) => Some(()),
+            Drained::OverCap | Drained::Failed => None,
+        })
     }
 
     #[test]

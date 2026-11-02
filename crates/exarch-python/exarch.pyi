@@ -13,7 +13,7 @@ from typing import Literal, Protocol
 __version__: str
 
 class _ArchiveFile(Protocol):
-    """A binary file object: ``read(n)`` returning at most ``n`` bytes, and ideally ``seekable``/``tell``/``seek``."""
+    """A binary file object: ``read(n)`` returns at most ``n`` bytes; ``seek``/``tell`` optional."""
 
     def read(self, size: int, /) -> bytes: ...
 

@@ -210,6 +210,47 @@ fn a_forged_descriptor_crc_is_fatal_under_enforce_with_plain_verify() {
 }
 
 #[test]
+fn deflate_header_whose_name_runs_past_the_declared_range_is_found() {
+    let payload = b"hello hello hello hello";
+    let stream_len = compress(8, payload).len();
+    let mut spanning = local_header(20, 0, 0, b"x/", 0);
+    spanning[26..28].copy_from_slice(&53u16.to_le_bytes());
+    let nameless = local_header(20, 0, 0, b"", 9);
+    for (label, header) in [("spanning", spanning), ("nameless", nameless)] {
+        let tail = [descriptor(payload, 0), header].concat();
+        let built = RawZip::new(vec![
+            descriptor_entry(8, payload, &tail),
+            RawEntry::stored("b.txt", b"world"),
+        ])
+        .build();
+        let at = data_start(&built, 0) + stream_len + 16;
+        assert!(
+            findings_of(&built).contains(&hidden_in(at, HiddenRegion::DescriptorTail)),
+            "{label}"
+        );
+    }
+}
+
+#[test]
+fn deflate_decoding_stops_when_the_census_budget_is_spent() {
+    let payload = b"hello hello hello hello";
+    let tail = [descriptor(payload, 0), evil_local()].concat();
+    let built = RawZip::new(vec![descriptor_entry(8, payload, &tail)]).build();
+    let start = data_start(&built, 0) as u64;
+    let compressed = (compress(8, payload).len() + tail.len()) as u64;
+    let size = payload.len() as u64;
+    let mut reader = Cursor::new(built.bytes);
+    let mut budget = size - 1;
+    let found = hidden_behind_deflate(&mut reader, start, compressed, size, &mut budget);
+    assert_eq!(found.unwrap(), None);
+    assert_eq!(budget, size - 1);
+    let mut budget = size;
+    let found = hidden_behind_deflate(&mut reader, start, compressed, size, &mut budget);
+    assert!(found.unwrap().is_some());
+    assert_eq!(budget, 0);
+}
+
+#[test]
 fn a_forged_crc_does_not_change_a_deflated_entrys_end() {
     let found = findings_of(&forged_crc_entry(8, 0xDEAD_BEEF));
     assert!(found.is_empty(), "{found:?}");

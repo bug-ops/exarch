@@ -6,8 +6,9 @@
 //! declared end are therefore invisible to a random-access reader and
 //! readable by a streaming one. Telling where the stream ends takes decoding,
 //! so the check runs with an integrity pass, after the entry has decoded
-//! cleanly through the `zip` crate, except for deflate, which the census
-//! decodes itself (see [`hidden_behind_deflate`]). A streaming reader scans
+//! cleanly through the `zip` crate. The census also decodes deflated entries
+//! itself within a fixed budget (see [`hidden_behind_deflate`]), which
+//! the integrity pass completes. A streaming reader scans
 //! stored data, and the data of every method but deflate, for a descriptor
 //! signature instead, which the census searches for (see
 //! [`judge_first_signature`]).
@@ -33,6 +34,7 @@ use super::zip::ZipMethod;
 use super::zip_structure::LFH_FIXED_LEN;
 use super::zip_structure::LFH_SIGNATURE;
 use super::zip_structure::le16;
+use super::zip_structure::le32;
 use crate::ArchiveError;
 use crate::HiddenRegion;
 use crate::Result;
@@ -54,11 +56,11 @@ enum Compressed {
 }
 
 impl Compressed {
-    /// `None` for stored data, which has no stream end to find, and for
-    /// deflate, which the census decodes.
+    /// `None` for stored data, which has no stream end to find.
     const fn of(method: ZipMethod) -> Option<Self> {
         match method {
-            ZipMethod::Stored | ZipMethod::Deflate => None,
+            ZipMethod::Stored => None,
+            ZipMethod::Deflate => Some(Self::Deflate),
             ZipMethod::Bzip2 => Some(Self::Bzip2),
             ZipMethod::Zstd => Some(Self::Zstd),
         }
@@ -185,7 +187,8 @@ impl DescriptorTail {
 ///
 /// The range is searched for a header signature first, which costs one read of
 /// the declared bytes; only a range that has one is decoded, and the decoder's
-/// output is bounded by `size`. A stream that does not decode is left to the
+/// output is bounded by `size`, which is charged to `budget`. An entry that
+/// does not fit the budget, and a stream that does not decode, are left to the
 /// integrity pass.
 ///
 /// # Errors
@@ -196,6 +199,7 @@ pub(super) fn hidden_behind_deflate<R: Read + Seek>(
     data_start: u64,
     compressed: u64,
     size: u64,
+    budget: &mut u64,
 ) -> Result<Option<u64>> {
     if compressed <= LFH_FIXED_LEN as u64 {
         return Ok(None);
@@ -205,6 +209,10 @@ pub(super) fn hidden_behind_deflate<R: Read + Seek>(
     if scan(&mut data, compressed, LFH_SIGNATURE, judge_header_in_slack)?.is_none() {
         return Ok(None);
     }
+    let Some(left) = budget.checked_sub(size) else {
+        return Ok(None);
+    };
+    *budget = left;
     reader.seek(SeekFrom::Start(data_start))?;
     let tail = DescriptorTail {
         method: Compressed::Deflate,
@@ -293,14 +301,14 @@ pub(super) enum Judgement {
 }
 
 /// Judges a header signature in the bytes behind a compressed stream: a header
-/// with a name that fits in the rest of the declared range.
-fn judge_header_in_slack(bytes: &[u8], at: u64, total: u64) -> Judgement {
+/// with a name, or a nameless one that still makes a streaming reader skip its
+/// compressed size. The name may run past the declared range, since a reader
+/// takes the bytes after it as part of the name.
+fn judge_header_in_slack(bytes: &[u8], _: u64, _: u64) -> Judgement {
     let Some(header) = bytes.first_chunk::<LFH_FIXED_LEN>() else {
         return Judgement::NeedMore;
     };
-    let name_len = u64::from(le16::<26, LFH_FIXED_LEN>(header));
-    let extra_len = u64::from(le16::<28, LFH_FIXED_LEN>(header));
-    if name_len > 0 && at + LFH_FIXED_LEN as u64 + name_len + extra_len <= total {
+    if le16::<26, LFH_FIXED_LEN>(header) > 0 || le32::<18, LFH_FIXED_LEN>(header) > 0 {
         Judgement::Hit(0)
     } else {
         Judgement::Miss

@@ -1001,6 +1001,10 @@ const RESERVED_FLAG_BITS: u16 = 0xD780;
 
 const DATA_DESCRIPTOR_FLAG: u16 = 0x0008;
 
+/// Output the census decodes per archive to find where deflate streams end; the
+/// integrity pass, which has a budget of its own, covers what exceeds it.
+const CENSUS_DECODE_BUDGET: u64 = 256 * 1024 * 1024;
+
 /// Compression methods assigned to a format the ecosystem uses.
 const KNOWN_METHODS: [u16; 9] = [0, 8, 9, 12, 14, 93, 95, 98, 99];
 
@@ -1039,6 +1043,9 @@ struct GapChecker<'a, R> {
     /// Signature hits below this offset were already judged.
     next_unjudged: u64,
     exhausted: bool,
+    /// Output bytes the census may still decode to find the end of deflate
+    /// streams.
+    decode_budget: u64,
     /// Reads of the gap search, for the tests that bound them.
     #[cfg(test)]
     reads: usize,
@@ -1070,6 +1077,7 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
             chunks,
             next_unjudged: 0,
             exhausted: false,
+            decode_budget: CENSUS_DECODE_BUDGET,
             #[cfg(test)]
             reads: 0,
         }
@@ -1390,6 +1398,7 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
             layout.data_start,
             layout.compressed,
             layout.size,
+            &mut self.decode_budget,
         )?
         else {
             return Ok(());

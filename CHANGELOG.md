@@ -29,6 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `extract` and `verify` name the entry and the blocking file or symlink, with the same category, for an entry below a file, a dangling symlink or a looping symlink (#828).
 - 7z `--force` no longer deletes the existing file before the replacement is decoded (#828).
 - **BREAKING:** `list`, `verify` and `extract` refuse non-canonical checksum or size fields in TAR `x`, `L` and `K` headers, non-canonical local PAX record framing and the PAX `SCHILY.realsize` record, with `InvalidArchive`.
+- **BREAKING:** `list`, `verify` and `extract` refuse non-canonical checksum or size fields in TAR `x`, `L` and `K` headers, non-canonical local PAX record framing and the PAX `SCHILY.realsize` record, with `InvalidArchive` (#829).
 
 ## [0.8.0] - 2026-11-02
 

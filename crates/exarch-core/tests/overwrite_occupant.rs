@@ -94,6 +94,17 @@ fn tar_file_over_symlink_names_the_entry() {
 }
 
 #[cfg(unix)]
+struct Unlock(PathBuf);
+
+#[cfg(unix)]
+impl Drop for Unlock {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+    }
+}
+
+#[cfg(unix)]
 #[test]
 fn tar_open_failure_without_dir_or_symlink_keeps_the_original_error() {
     use std::os::unix::fs::PermissionsExt;
@@ -108,6 +119,8 @@ fn tar_open_failure_without_dir_or_symlink_keeps_the_original_error() {
     std::fs::create_dir(&locked).unwrap();
     std::fs::write(locked.join("f"), b"keep").unwrap();
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+    let _unlock = Unlock(locked.clone());
     if std::fs::File::create(locked.join("probe")).is_ok() {
         return;
     }
@@ -120,7 +133,6 @@ fn tar_open_failure_without_dir_or_symlink_keeps_the_original_error() {
     )
     .unwrap_err();
 
-    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
     let message = error.to_string();
     assert!(!message.contains("refusing to replace"), "{message}");
     assert!(message.contains("Permission denied"), "{message}");

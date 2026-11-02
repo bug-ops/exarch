@@ -32,6 +32,9 @@ wildcards = "allow"
 highlight = "all"
 workspace-default-features = "allow"
 external-default-features = "allow"
+skip = [
+    { crate = "lzma-rust2@0.23.0", reason = "pulled in by sevenz-rust2 0.24.2; drop once it moves to 0.24" },
+]
 
 [sources]
 unknown-registry = "deny"

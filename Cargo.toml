@@ -38,7 +38,7 @@ flate2 = "1.1"
 indicatif = "0.18"
 libc = "0.2"
 liblzma = { version = "0.4.9", features = ["static"] }
-lzma-rust2 = { version = "0.23", default-features = false, features = ["std"] }
+lzma-rust2 = { version = "0.24", default-features = false, features = ["std"] }
 napi = "3.15"
 napi-build = "2.6"
 napi-derive = "3.6"

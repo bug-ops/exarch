@@ -21,16 +21,16 @@ use crate::SinkOptions;
 use crate::config::Validated;
 use crate::copy::CopyBuffer;
 use crate::security::admitted::EntrySize;
+use crate::security::admitted::PendingFile;
 use crate::security::admitted::ValidatedFile;
 use crate::security::admitted::ValidatedHardlink;
+use crate::security::context::ValidationContext;
 use crate::security::fs_view::HostFs;
 use crate::security::fs_view::Occupant;
 use crate::security::hardlink::hardlink_target_missing;
 use crate::security::permissions::sanitize_permissions;
 use crate::security::quota::EntryCount;
-use crate::security::quota::QuotaPermit;
-use crate::security::validator::EntryPath;
-use crate::security::validator::NodeKind;
+use crate::security::validator::FileScreen;
 use crate::security::validator::ValidatorCore;
 use crate::types::DestDir;
 use crate::types::SafePath;
@@ -48,6 +48,8 @@ pub struct Tally<'a> {
     pub(crate) options: SinkOptions,
     /// File and symlink entries skipped as pre-existing duplicates.
     pub(crate) duplicate_skips: &'a mut u64,
+    /// File entries skipped by the extension allowlist.
+    pub(crate) extension_skips: &'a mut u64,
     pub(crate) progress: &'a mut dyn ProgressCallback,
 }
 
@@ -61,18 +63,37 @@ impl Tally<'_> {
     /// # Errors
     ///
     /// Returns an error when the skipped-files counter would overflow.
-    pub(crate) fn record_duplicate_skip(&mut self) -> Result<DuplicateSkipped> {
+    pub(crate) fn record_duplicate_skip(&mut self) -> Result<SkipRecorded> {
         common::checked_increment_files_skipped(self.report)?;
         *self.duplicate_skips = self.duplicate_skips.saturating_add(1);
-        Ok(DuplicateSkipped(()))
+        Ok(SkipRecorded(()))
+    }
+
+    /// Counts one file skipped by the extension allowlist.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the skipped-files counter would overflow.
+    pub(crate) fn record_extension_skip(&mut self) -> Result<SkipRecorded> {
+        common::checked_increment_files_skipped(self.report)?;
+        *self.extension_skips = self.extension_skips.saturating_add(1);
+        Ok(SkipRecorded(()))
+    }
+
+    /// Counts one written file of `written` bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a counter would overflow.
+    pub(crate) fn record_file(&mut self, written: u64) -> Result<()> {
+        common::record_file_written(self.report, self.progress, written)
     }
 }
 
-/// What [`Tally::record_duplicate_skip`] returns once a duplicate entry is
-/// counted as skipped, so a target that skips in `validate_file` has to count
-/// it.
+/// What [`Tally`]'s `record_*_skip` methods return once a file is counted as
+/// skipped, so a target that skips in `validate_file` has to count it.
 #[derive(Debug)]
-pub struct DuplicateSkipped(());
+pub struct SkipRecorded(());
 
 /// A file entry as a target is asked to admit it.
 #[derive(Debug, Clone, Copy)]
@@ -87,8 +108,8 @@ pub struct FileRequest<'p> {
 pub enum FileAdmission<A> {
     /// The file is admitted and is to be written with `A`.
     Write(A),
-    /// The file duplicates an existing path and was skipped.
-    Skipped(DuplicateSkipped),
+    /// The file was skipped (a duplicate, or a disallowed extension).
+    Skipped(SkipRecorded),
 }
 
 /// The validation and write half of an extraction.
@@ -96,8 +117,9 @@ pub trait ExtractTarget {
     /// What a target needs to write a file it admitted.
     type AdmittedFile;
 
-    /// Validates a regular file and reserves its size against the quota, or
-    /// skips it as a duplicate.
+    /// Validates a regular file's path, then skips it when its extension is
+    /// disallowed or it duplicates an existing path, or else reserves its size
+    /// against the quota.
     fn validate_file(
         &mut self,
         request: FileRequest<'_>,
@@ -186,16 +208,33 @@ impl<'a> HostTarget<'a> {
         self.dirs
     }
 
-    /// Validates only the path of an entry, leaving quota to the caller.
-    pub(super) fn validate_path(&self, path: &Path, kind: NodeKind) -> Result<EntryPath<SafePath>> {
+    /// A validation context whose parent probe the directory walker takes over
+    /// where the root is pinned: every path validated here is written through
+    /// `DirWalker` on this root, which vets each parent at write time.
+    fn context(&self) -> ValidationContext<HostFs> {
         let ctx = self.core.context::<HostFs>();
-        self.core
-            .validate_entry_path_in(path, kind, self.root.dest(), &HostFs, &ctx)
+        #[cfg(any(unix, target_os = "wasi"))]
+        let ctx = ctx.with_walker(self.root.backs_parent_probe());
+        ctx
     }
 
-    /// Reserves `size` bytes of quota for a file.
-    pub(super) fn reserve_file(&mut self, size: u64) -> Result<QuotaPermit> {
-        self.core.reserve_file(size)
+    /// Validates a file's path and applies the extension allowlist, leaving
+    /// quota to the caller.
+    pub(super) fn screen_file(&self, request: FileRequest<'_>) -> Result<FileScreen> {
+        let ctx = self.context();
+        self.core.screen_file_path_in(
+            request.path,
+            request.size,
+            request.mode,
+            self.root.dest(),
+            &HostFs,
+            &ctx,
+        )
+    }
+
+    /// Reserves the quota of a screened file.
+    pub(super) fn admit_file(&mut self, pending: PendingFile) -> Result<ValidatedFile> {
+        self.core.admit_file(pending)
     }
 }
 
@@ -205,23 +244,18 @@ impl ExtractTarget for HostTarget<'_> {
     fn validate_file(
         &mut self,
         request: FileRequest<'_>,
-        _tally: &mut Tally<'_>,
+        tally: &mut Tally<'_>,
     ) -> Result<FileAdmission<ValidatedFile>> {
-        let ctx = self.core.context::<HostFs>();
-        self.core
-            .validate_file_in(
-                request.path,
-                request.size,
-                request.mode,
-                self.root.dest(),
-                &HostFs,
-                &ctx,
-            )
-            .map(FileAdmission::Write)
+        match self.screen_file(request)? {
+            FileScreen::DisallowedExtension => {
+                tally.record_extension_skip().map(FileAdmission::Skipped)
+            }
+            FileScreen::Pending(pending) => self.admit_file(pending).map(FileAdmission::Write),
+        }
     }
 
     fn validate_directory(&mut self, path: &Path, size: EntrySize) -> Result<SafePath> {
-        let ctx = self.core.context::<HostFs>();
+        let ctx = self.context();
         self.core
             .validate_directory_in(path, size, self.root.dest(), &HostFs, &ctx)
     }
@@ -232,7 +266,7 @@ impl ExtractTarget for HostTarget<'_> {
         target: &Path,
         size: EntrySize,
     ) -> Result<SafeSymlink> {
-        let ctx = self.core.context::<HostFs>();
+        let ctx = self.context();
         self.core
             .validate_symlink_in(path, target, size, self.root.dest(), &HostFs, &ctx)
             .map(|validated| validated.symlink)
@@ -244,7 +278,7 @@ impl ExtractTarget for HostTarget<'_> {
         target: &Path,
         size: EntrySize,
     ) -> Result<ValidatedHardlink> {
-        let ctx = self.core.context::<HostFs>();
+        let ctx = self.context();
         self.core
             .validate_hardlink_in(path, target, size, self.root.dest(), &HostFs, &ctx)
     }
@@ -260,11 +294,12 @@ impl ExtractTarget for HostTarget<'_> {
         size: u64,
         tally: &mut Tally<'_>,
     ) -> Result<()> {
+        let (path, permit, mode) = admitted.into_parts();
         common::extract_file_with_permit(
             reader,
-            &admitted.path,
-            admitted.mode,
-            admitted.permit,
+            &path,
+            mode,
+            permit,
             &self.root,
             tally.report,
             Some(size),
@@ -344,7 +379,7 @@ impl ExtractTarget for HostTarget<'_> {
         // allowed) world-writable, and never wider than the target.
         let link_mode = target_mode.map(|mode| sanitize_permissions(mode, self.config));
 
-        let (link_dir, link_leaf) = self.dirs.ensure_parent(&self.root, link.as_path())?;
+        let (link_dir, link_leaf) = self.dirs.ensure_parent(&self.root, link)?;
         let link_file = match link_dir.create_new(link_leaf, link_mode) {
             Ok(file) => file,
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -384,12 +419,7 @@ impl ExtractTarget for HostTarget<'_> {
         )?;
         cleanup_guard.persist();
 
-        tally.report.files_extracted = common::checked_add_count(tally.report.files_extracted, 1)?;
-        tally.report.bytes_written =
-            common::checked_add_bytes(tally.report.bytes_written, bytes_copied)?;
-        tally.progress.on_bytes_written(bytes_copied);
-
-        Ok(())
+        tally.record_file(bytes_copied)
     }
 }
 
@@ -433,7 +463,7 @@ impl HostTarget<'_> {
     /// when the final component is a symlink.
     fn open_direct(&self, link: &SafePath, target: &SafePath) -> Result<File> {
         let missing = || hardlink_target_missing(target.as_path());
-        let (dir, leaf) = match self.dirs.open_parent(&self.root, target.as_path()) {
+        let (dir, leaf) = match self.dirs.open_parent(&self.root, target) {
             Ok(opened) => opened,
             // A pre-existing symlinked directory in the chain is read through
             // like a leaf symlink: resolved, checked for containment in `dest`

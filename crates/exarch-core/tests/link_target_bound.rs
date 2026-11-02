@@ -20,25 +20,9 @@ use tempfile::TempDir;
 const TARGET_BYTES: usize = 900_000;
 const LINKS: usize = 64;
 
-fn pax_linkpath_record(target: &[u8]) -> Vec<u8> {
-    let base = "linkpath".len() + target.len() + 3;
-    let mut len = base + 1;
-    loop {
-        let candidate = len.to_string().len() + base;
-        if candidate == len {
-            break;
-        }
-        len = candidate;
-    }
-    let mut record = format!("{len} linkpath=").into_bytes();
-    record.extend_from_slice(target);
-    record.push(b'\n');
-    record
-}
-
 fn hardlink_archive() -> Vec<u8> {
     let target = vec![b'a'; TARGET_BYTES];
-    let record = pax_linkpath_record(&target);
+    let record = exarch_testkit::pax::record(b"linkpath", &target);
     let mut builder = tar::Builder::new(Vec::new());
     for i in 0..LINKS {
         let mut pax = tar::Header::new_ustar();

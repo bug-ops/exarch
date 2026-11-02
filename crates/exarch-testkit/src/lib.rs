@@ -4,4 +4,5 @@
 //! that archives with deliberately inconsistent bytes are written by one
 //! builder instead of by hand in every test.
 
+pub mod pax;
 pub mod raw_zip;

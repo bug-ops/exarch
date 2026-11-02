@@ -1037,18 +1037,22 @@ pub fn extract_to_sink_with_progress<S: EntrySink>(
             format: SeekableFormat::Zip,
         } => {
             let mut archive = ZipArchive::for_config(reader, &config)?;
-            let checked = archive.check_structure(&config)?;
-            let mut target = SinkTarget::new(sink, &config);
-            archive.extract_into(checked, &mut target, &config, *options, progress)
+            archive.check_structure(&config)?.extract_with(
+                |config| Ok(SinkTarget::new(sink, config)),
+                *options,
+                progress,
+            )
         }
         Source::Seekable {
             reader,
             format: SeekableFormat::SevenZ,
         } => {
             let mut archive = SevenZArchive::new(reader)?;
-            let admission = archive.admit(&config)?;
-            let mut target = SinkTarget::new(sink, &config);
-            archive.extract_into(admission, &mut target, *options, progress)
+            archive.admit(&config)?.extract_with(
+                |config| Ok(SinkTarget::new(sink, config)),
+                *options,
+                progress,
+            )
         }
     }
 }

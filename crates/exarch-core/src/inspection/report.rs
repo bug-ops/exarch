@@ -742,6 +742,9 @@ impl VerificationIssue {
                 IssueCategory::InvalidArchive,
                 format!("Invalid archive: {msg}"),
             ),
+            ArchiveError::TarAmbiguity(finding) => {
+                high_invalid_archive(format!("Invalid archive: ambiguous TAR header: {finding}"))
+            }
             ArchiveError::SecurityViolation { reason, .. } => (
                 IssueSeverity::High,
                 IssueCategory::SecurityPolicy,

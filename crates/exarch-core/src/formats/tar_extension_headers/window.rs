@@ -16,7 +16,6 @@
 use std::ops::Range;
 
 use super::CHECKSUM_FIELD;
-use super::ExtensionConflict;
 use super::PrecedingEntry;
 use super::SIZE_FIELD;
 use super::check_header_block;
@@ -24,6 +23,9 @@ use super::check_record_framing;
 use super::is_plain_base256;
 use super::is_plain_octal;
 use crate::Result;
+use crate::TarAmbiguity;
+use crate::TarExtensionKind;
+use crate::TarHeaderField;
 use crate::formats::tar_metadata_limit::MetadataWindow;
 
 const BLOCK: usize = 512;
@@ -34,36 +36,16 @@ const GNU_MAGIC: &[u8; 8] = b"ustar  \0";
 const BASE256_VALUE: Range<usize> = 4..12;
 const CHECKSUM_SPACES: u64 = 8 * b' ' as u64;
 
-/// An extension header whose body the `tar` crate merges into the next entry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum ExtensionKind {
-    Pax,
-    LongName,
-    LongLink,
-}
-
-impl std::fmt::Display for ExtensionKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::Pax => "PAX",
-            Self::LongName => "GNU long name",
-            Self::LongLink => "GNU long link",
-        })
+fn extension_kind_of(block: &[u8; BLOCK]) -> Option<TarExtensionKind> {
+    let magic = &block[MAGIC_FIELD];
+    if magic != USTAR_MAGIC && magic != GNU_MAGIC {
+        return None;
     }
-}
-
-impl ExtensionKind {
-    fn of(block: &[u8; BLOCK]) -> Option<Self> {
-        let magic = &block[MAGIC_FIELD];
-        if magic != USTAR_MAGIC && magic != GNU_MAGIC {
-            return None;
-        }
-        match block[TYPEFLAG_OFFSET] {
-            b'x' => Some(Self::Pax),
-            b'L' => Some(Self::LongName),
-            b'K' => Some(Self::LongLink),
-            _ => None,
-        }
+    match block[TYPEFLAG_OFFSET] {
+        b'x' => Some(TarExtensionKind::Pax),
+        b'L' => Some(TarExtensionKind::LongName),
+        b'K' => Some(TarExtensionKind::LongLink),
+        _ => None,
     }
 }
 
@@ -87,13 +69,21 @@ fn octal_value(field: &[u8]) -> Option<u64> {
 fn declared_size(block: &[u8; BLOCK]) -> Result<u64> {
     let field = &block[SIZE_FIELD];
     let value = if is_plain_base256(field) {
-        field[BASE256_VALUE].try_into().ok().map(u64::from_be_bytes)
+        field[BASE256_VALUE]
+            .as_array::<8>()
+            .copied()
+            .map(u64::from_be_bytes)
     } else if is_plain_octal(field) {
         octal_value(field)
     } else {
         None
     };
-    value.ok_or_else(|| ExtensionConflict::NonCanonicalNumber { field: "size" }.into())
+    value.ok_or_else(|| {
+        TarAmbiguity::NonCanonicalNumber {
+            field: TarHeaderField::Size,
+        }
+        .into()
+    })
 }
 
 fn verify_checksum(block: &[u8; BLOCK]) -> Result<()> {
@@ -101,7 +91,9 @@ fn verify_checksum(block: &[u8; BLOCK]) -> Result<()> {
     let declared = is_plain_octal(field)
         .then(|| octal_value(field))
         .flatten()
-        .ok_or(ExtensionConflict::NonCanonicalNumber { field: "checksum" })?;
+        .ok_or(TarAmbiguity::NonCanonicalNumber {
+            field: TarHeaderField::Checksum,
+        })?;
     let byte_sum = |bytes: &[u8]| bytes.iter().map(|&b| u32::from(b)).sum::<u32>();
     let actual = u64::from(byte_sum(&block[..CHECKSUM_FIELD.start]))
         + u64::from(byte_sum(&block[CHECKSUM_FIELD.end..]))
@@ -109,7 +101,7 @@ fn verify_checksum(block: &[u8; BLOCK]) -> Result<()> {
     if declared == actual {
         Ok(())
     } else {
-        Err(ExtensionConflict::ChecksumMismatch.into())
+        Err(TarAmbiguity::ChecksumMismatch.into())
     }
 }
 
@@ -118,7 +110,7 @@ fn verify_checksum(block: &[u8; BLOCK]) -> Result<()> {
 fn first_header_offset(window_start: u64) -> Result<usize> {
     let block = BLOCK as u64;
     let padding = (block - window_start % block) % block;
-    usize::try_from(padding).map_err(|_| ExtensionConflict::WindowMismatch.into())
+    usize::try_from(padding).map_err(|_| TarAmbiguity::WindowMismatch.into())
 }
 
 /// Verifies the bytes `tar` read to reach an entry.
@@ -147,16 +139,16 @@ pub(super) fn check_window(
     if preceding == PrecedingEntry::GlobalPax {
         check_zero_padding(bytes.get(..offset))?;
     }
-    let mut seen: Vec<ExtensionKind> = Vec::new();
+    let mut seen: Vec<TarExtensionKind> = Vec::new();
     loop {
-        let block = block_at(bytes, offset).ok_or(ExtensionConflict::WindowMismatch)?;
+        let block = block_at(bytes, offset).ok_or(TarAmbiguity::WindowMismatch)?;
         verify_checksum(block)?;
         let size = declared_size(block)?;
-        let Some(kind) = ExtensionKind::of(block) else {
+        let Some(kind) = extension_kind_of(block) else {
             return check_final_header(window, block, offset, header_pos, file_pos);
         };
         if seen.contains(&kind) {
-            return Err(ExtensionConflict::DuplicateExtensionHeader(kind).into());
+            return Err(TarAmbiguity::DuplicateExtensionHeader { kind }.into());
         }
         seen.push(kind);
 
@@ -164,8 +156,8 @@ pub(super) fn check_window(
         let body = usize::try_from(size)
             .ok()
             .and_then(|len| bytes.get(body_start..body_start.checked_add(len)?))
-            .ok_or(ExtensionConflict::WindowMismatch)?;
-        if kind == ExtensionKind::Pax {
+            .ok_or(TarAmbiguity::WindowMismatch)?;
+        if kind == TarExtensionKind::Pax {
             check_record_framing(body)?;
         } else {
             check_long_record(kind, body)?;
@@ -173,7 +165,7 @@ pub(super) fn check_window(
         let body_end = body_start + body.len();
         offset = body_start
             .checked_add(body.len().next_multiple_of(BLOCK))
-            .ok_or(ExtensionConflict::WindowMismatch)?;
+            .ok_or(TarAmbiguity::WindowMismatch)?;
         check_zero_padding(bytes.get(body_end..offset))?;
     }
 }
@@ -188,22 +180,22 @@ pub(super) fn check_trailing_global_padding(window: &MetadataWindow<'_>) -> Resu
 }
 
 fn check_zero_padding(padding: Option<&[u8]>) -> Result<()> {
-    let padding = padding.ok_or(ExtensionConflict::WindowMismatch)?;
+    let padding = padding.ok_or(TarAmbiguity::WindowMismatch)?;
     if padding.iter().all(|&b| b == 0) {
         Ok(())
     } else {
-        Err(ExtensionConflict::NonZeroPadding.into())
+        Err(TarAmbiguity::NonZeroPadding.into())
     }
 }
 
 /// Readers cut a GNU long name or link at the first NUL of the padded block,
 /// so a non-empty body must end in exactly one NUL. A NUL elsewhere in the
 /// text is refused later as a path or target containing null bytes.
-fn check_long_record(kind: ExtensionKind, body: &[u8]) -> Result<()> {
+fn check_long_record(kind: TarExtensionKind, body: &[u8]) -> Result<()> {
     match body.split_last() {
         None => Ok(()),
         Some((0, text)) if text.last() != Some(&0) => Ok(()),
-        _ => Err(ExtensionConflict::MalformedLongRecord(kind).into()),
+        _ => Err(TarAmbiguity::MalformedLongRecord { kind }.into()),
     }
 }
 
@@ -217,7 +209,7 @@ fn check_final_header(
     let at_end = offset + BLOCK == window.bytes().len();
     let position = window.start().saturating_add(offset as u64);
     if !at_end || position != header_pos || window.end() != file_pos {
-        return Err(ExtensionConflict::WindowMismatch.into());
+        return Err(TarAmbiguity::WindowMismatch.into());
     }
     check_header_block(block, block[MAGIC_FIELD] == *USTAR_MAGIC)
 }
@@ -249,10 +241,10 @@ mod tests {
         padded([header_block(b'x', body.len()), body.to_vec()].concat())
     }
 
-    fn assert_refused(result: Result<()>, expected: &str) {
+    fn assert_refused(result: Result<()>, expected: &TarAmbiguity) {
         assert_matches!(
             result,
-            Err(ArchiveError::InvalidArchive(reason)) if reason.contains(expected)
+            Err(ArchiveError::TarAmbiguity(found)) if found == *expected
         );
     }
 
@@ -277,7 +269,7 @@ mod tests {
         let window = MetadataWindow::new(0, &bytes);
         assert_refused(
             check_window(&window, PrecedingEntry::Other, 0, 1024),
-            "do not match",
+            &TarAmbiguity::WindowMismatch,
         );
     }
 
@@ -287,7 +279,7 @@ mod tests {
         let window = MetadataWindow::new(0, &bytes);
         assert_refused(
             check_window(&window, PrecedingEntry::Other, 512, 512),
-            "do not match",
+            &TarAmbiguity::WindowMismatch,
         );
     }
 
@@ -297,7 +289,7 @@ mod tests {
         let window = MetadataWindow::new(0, &bytes[..300]);
         assert_refused(
             check_window(&window, PrecedingEntry::Other, 0, 300),
-            "do not match",
+            &TarAmbiguity::WindowMismatch,
         );
     }
 
@@ -315,7 +307,7 @@ mod tests {
         let window = MetadataWindow::new(0, &bytes);
         assert_refused(
             check_window(&window, PrecedingEntry::Other, 512, 1024),
-            "do not match",
+            &TarAmbiguity::WindowMismatch,
         );
     }
 
@@ -331,7 +323,9 @@ mod tests {
         let window = MetadataWindow::new(0, &bytes);
         assert_refused(
             check_window(&window, PrecedingEntry::Other, 2048, 2560),
-            "duplicate",
+            &TarAmbiguity::DuplicateExtensionHeader {
+                kind: TarExtensionKind::Pax,
+            },
         );
     }
 
@@ -342,7 +336,7 @@ mod tests {
         let window = MetadataWindow::new(0, &bytes);
         assert_refused(
             check_window(&window, PrecedingEntry::Other, 1024, 1536),
-            "malformed PAX record",
+            &TarAmbiguity::MalformedRecord,
         );
     }
 
@@ -353,7 +347,7 @@ mod tests {
         let window = MetadataWindow::new(0, &block);
         assert_refused(
             check_window(&window, PrecedingEntry::Other, 0, 512),
-            "checksum",
+            &TarAmbiguity::ChecksumMismatch,
         );
     }
 
@@ -372,7 +366,9 @@ mod tests {
         let window = MetadataWindow::new(0, &bytes);
         assert_refused(
             check_window(&window, PrecedingEntry::Other, 1024, 1536),
-            "size field",
+            &TarAmbiguity::NonCanonicalNumber {
+                field: TarHeaderField::Size,
+            },
         );
     }
 }

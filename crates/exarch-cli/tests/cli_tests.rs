@@ -5729,3 +5729,301 @@ fn test_extract_refusal_into_fresh_destination_leaves_no_staging_directory() {
         .collect();
     assert!(leftovers.is_empty(), "{leftovers:?}");
 }
+
+#[derive(Clone, Copy, Debug)]
+enum AllowlistFormat {
+    Tar,
+    Zip,
+    SevenZ,
+}
+
+/// Incompressible bytes, so no format's ratio check sees a bomb.
+fn noise(len: usize) -> Vec<u8> {
+    let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+    (0..len)
+        .map(|_| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            state.to_be_bytes()[0]
+        })
+        .collect()
+}
+
+/// Builds an archive holding `a.txt` and an allowlist-disallowed `sub/big.bin`
+/// of 4 KiB, which does not fit `--max-total-size 1K`.
+fn make_allowlist_quota_archive(dir: &std::path::Path, format: AllowlistFormat) -> PathBuf {
+    const BIG: &str = "sub/big.bin";
+    let big = noise(4096);
+    match format {
+        AllowlistFormat::Tar => {
+            let path = dir.join("t.tar");
+            let mut builder = tar::Builder::new(std::fs::File::create(&path).expect("create tar"));
+            for (name, data) in [("a.txt", &b"hi"[..]), (BIG, &big[..])] {
+                let mut header = tar::Header::new_gnu();
+                header.set_size(data.len() as u64);
+                header.set_mode(0o644);
+                builder
+                    .append_data(&mut header, name, data)
+                    .expect("append entry");
+            }
+            builder.finish().expect("finish tar");
+            path
+        }
+        AllowlistFormat::Zip => {
+            let path = dir.join("t.zip");
+            let bytes = RawZip::new(vec![
+                RawEntry::stored("a.txt", b"hi"),
+                RawEntry::stored(BIG, &big),
+            ])
+            .build()
+            .bytes;
+            std::fs::write(&path, bytes).expect("write zip");
+            path
+        }
+        AllowlistFormat::SevenZ => {
+            use std::io::Cursor;
+            let path = dir.join("t.7z");
+            let mut writer = sevenz_rust2::ArchiveWriter::create(&path).expect("7z writer");
+            for (name, data) in [("a.txt", b"hi".to_vec()), (BIG, big)] {
+                let mut entry = sevenz_rust2::ArchiveEntry::new_file(name);
+                entry.has_stream = true;
+                entry.size = data.len() as u64;
+                writer
+                    .push_archive_entry(entry, Some(Cursor::new(data)))
+                    .expect("7z entry");
+            }
+            writer.finish().expect("finish 7z");
+            path
+        }
+    }
+}
+
+/// Regression test for #831: files the allowlist skips are not charged against
+/// `--max-total-size` in any format, whether the destination is fresh, already
+/// exists, or is staged with `--atomic`, and a skipped entry leaves no
+/// directory behind.
+#[test]
+fn test_extract_allowed_extensions_do_not_charge_skipped_files_to_quota() {
+    for format in [
+        AllowlistFormat::Tar,
+        AllowlistFormat::Zip,
+        AllowlistFormat::SevenZ,
+    ] {
+        for (existing_destination, atomic) in [(false, false), (true, false), (false, true)] {
+            let temp = TempDir::new().expect("failed to create temp dir");
+            let archive = make_allowlist_quota_archive(temp.path(), format);
+            let out = temp.path().join("out");
+            if existing_destination {
+                std::fs::create_dir(&out).expect("create destination");
+            }
+
+            let mut command = exarch_cmd();
+            command
+                .arg("extract")
+                .arg("--json")
+                .arg("--allowed-extensions")
+                .arg("txt")
+                .arg("--max-total-size")
+                .arg("1K");
+            if atomic {
+                command.arg("--atomic");
+            }
+            let stdout = command
+                .arg(&archive)
+                .arg(&out)
+                .assert()
+                .success()
+                .get_output()
+                .stdout
+                .clone();
+
+            let context = format!(
+                "{format:?}, existing destination: {existing_destination}, atomic: {atomic}"
+            );
+            let json: serde_json::Value = serde_json::from_slice(&stdout).expect("valid JSON");
+            assert_eq!(json["data"]["files_extracted"], 1, "{context}: {json}");
+            assert_eq!(json["data"]["files_skipped"], 1, "{context}: {json}");
+            assert!(out.join("a.txt").is_file(), "{context}");
+            assert!(
+                !out.join("sub").exists(),
+                "{context}: skipped entry left a directory"
+            );
+        }
+    }
+}
+
+/// Regression test for #831: an existing destination file whose extension the
+/// allowlist skips is not a conflict.
+#[test]
+fn test_extract_allowed_extensions_ignore_existing_disallowed_files() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = make_allowlist_quota_archive(temp.path(), AllowlistFormat::Zip);
+    let out = temp.path().join("out");
+    std::fs::create_dir_all(out.join("sub")).expect("create destination");
+    std::fs::write(out.join("sub/big.bin"), b"mine").expect("write occupant");
+
+    exarch_cmd()
+        .arg("extract")
+        .arg("--allowed-extensions")
+        .arg("txt")
+        .arg("--max-total-size")
+        .arg("1K")
+        .arg(&archive)
+        .arg(&out)
+        .assert()
+        .success();
+
+    assert_eq!(
+        std::fs::read(out.join("sub/big.bin")).expect("occupant"),
+        b"mine"
+    );
+}
+
+/// A disallowed file whose path is a traversal is refused, not skipped.
+#[test]
+fn test_extract_allowed_extensions_still_refuse_traversal_in_skipped_entries() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("t.zip");
+    let bytes = RawZip::new(vec![
+        RawEntry::stored("a.txt", b"hi"),
+        RawEntry::stored("../x.bin", b"x"),
+    ])
+    .build()
+    .bytes;
+    std::fs::write(&archive, bytes).expect("write zip");
+    let out = temp.path().join("out");
+
+    exarch_cmd()
+        .arg("extract")
+        .arg("--json")
+        .arg("--allowed-extensions")
+        .arg("txt")
+        .arg(&archive)
+        .arg(&out)
+        .assert()
+        .code(1);
+
+    assert!(!temp.path().join("x.bin").exists());
+}
+
+/// Regression test for #835: an existing destination symlink that is dangling
+/// or points at a file cannot be admitted by `--allow-symlinks`, so neither the
+/// HINT nor the JSON `relaxable_by` offers the flag.
+#[cfg(unix)]
+#[test]
+fn test_extract_under_unadmittable_existing_symlink_does_not_suggest_allow_symlinks() {
+    for (link, target_is_file) in [("sf", true), ("dangling", false)] {
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let dest = temp.path().join("d");
+        std::fs::create_dir(&dest).expect("create destination");
+        if target_is_file {
+            std::fs::write(dest.join("f"), b"f").expect("write target");
+            std::os::unix::fs::symlink("f", dest.join(link)).expect("symlink");
+        } else {
+            std::os::unix::fs::symlink("nowhere", dest.join(link)).expect("symlink");
+        }
+        let archive = temp.path().join("bad.tar");
+        let mut builder = tar::Builder::new(std::fs::File::create(&archive).expect("create tar"));
+        let mut header = tar::Header::new_gnu();
+        header.set_size(1);
+        header.set_mode(0o644);
+        builder
+            .append_data(&mut header, format!("{link}/x"), &b"x"[..])
+            .expect("append entry");
+        builder.finish().expect("finish tar");
+
+        let stderr = exarch_cmd()
+            .arg("extract")
+            .arg(&archive)
+            .arg(&dest)
+            .assert()
+            .failure()
+            .get_output()
+            .stderr
+            .clone();
+        let stderr = String::from_utf8(stderr).expect("UTF-8 stderr");
+        assert!(!stderr.contains("--allow-symlinks"), "{link}: {stderr}");
+
+        let stdout = exarch_cmd()
+            .arg("extract")
+            .arg("--json")
+            .arg(&archive)
+            .arg(&dest)
+            .assert()
+            .failure()
+            .get_output()
+            .stdout
+            .clone();
+        let json: serde_json::Value = serde_json::from_slice(&stdout).expect("valid JSON");
+        assert_eq!(json["error"]["kind"], "SecurityViolation", "{link}: {json}");
+        assert!(
+            json["error"].get("relaxable_by").is_none(),
+            "{link}: {json}"
+        );
+
+        exarch_cmd()
+            .arg("extract")
+            .arg("--allow-symlinks")
+            .arg(&archive)
+            .arg(&dest)
+            .assert()
+            .failure();
+        assert!(!dest.join("f").is_dir());
+    }
+}
+
+/// Positive control for #835: a pre-existing destination symlink to a
+/// directory inside the destination is the one case `--allow-symlinks`
+/// admits, so the HINT and `relaxable_by` still offer it.
+#[cfg(unix)]
+#[test]
+fn test_extract_under_admittable_existing_symlink_still_suggests_allow_symlinks() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let dest = temp.path().join("d");
+    std::fs::create_dir_all(dest.join("real")).expect("create destination");
+    std::os::unix::fs::symlink("real", dest.join("lnk")).expect("symlink");
+    let archive = temp.path().join("t.tar");
+    let mut builder = tar::Builder::new(std::fs::File::create(&archive).expect("create tar"));
+    let mut header = tar::Header::new_gnu();
+    header.set_size(1);
+    header.set_mode(0o644);
+    builder
+        .append_data(&mut header, "lnk/x", &b"x"[..])
+        .expect("append entry");
+    builder.finish().expect("finish tar");
+
+    let stderr = exarch_cmd()
+        .arg("extract")
+        .arg(&archive)
+        .arg(&dest)
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    let stderr = String::from_utf8(stderr).expect("UTF-8 stderr");
+    assert!(stderr.contains("--allow-symlinks"), "{stderr}");
+
+    let stdout = exarch_cmd()
+        .arg("extract")
+        .arg("--json")
+        .arg(&archive)
+        .arg(&dest)
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&stdout).expect("valid JSON");
+    assert_eq!(json["error"]["relaxable_by"], "symlinks", "{json}");
+
+    exarch_cmd()
+        .arg("extract")
+        .arg("--allow-symlinks")
+        .arg(&archive)
+        .arg(&dest)
+        .assert()
+        .success();
+    assert!(dest.join("real/x").is_file());
+}

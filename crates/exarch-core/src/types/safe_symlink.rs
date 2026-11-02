@@ -55,7 +55,7 @@ use crate::security::fs_view::ModelRoot as _;
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SafeSymlink {
-    link_path: PathBuf,
+    link: SafePath,
     target_path: PathBuf,
 }
 
@@ -222,7 +222,7 @@ impl SafeSymlink {
         resolve_through_symlinks_in(&link_parent_full, target, root, link.as_path(), view)?;
 
         Ok(Self {
-            link_path: link.as_path().to_path_buf(),
+            link: link.clone(),
             target_path: target.to_path_buf(),
         })
     }
@@ -231,7 +231,15 @@ impl SafeSymlink {
     #[inline]
     #[must_use]
     pub fn link_path(&self) -> &Path {
-        &self.link_path
+        self.link.as_path()
+    }
+
+    /// Returns the validated link path.
+    #[cfg(unix)]
+    #[inline]
+    #[must_use]
+    pub(crate) fn link(&self) -> &SafePath {
+        &self.link
     }
 
     /// Returns the target path.

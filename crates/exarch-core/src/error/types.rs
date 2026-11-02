@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 use thiserror::Error;
 
+use super::tar_ambiguity::TarAmbiguity;
 use super::zip_inconsistency::ZipInconsistency;
 use crate::closed_enum::closed_enum;
 
@@ -321,6 +322,13 @@ pub enum ArchiveError {
     #[error("invalid archive: {0}")]
     InvalidArchive(String),
 
+    /// A TAR header is read differently by different TAR readers.
+    ///
+    /// [`Self::error_code`] and the binding kind are those of
+    /// [`Self::InvalidArchive`].
+    #[error("invalid archive: ambiguous TAR header: {0}")]
+    TarAmbiguity(TarAmbiguity),
+
     /// Path traversal attempt detected.
     #[error("path traversal detected: {path}")]
     PathTraversal {
@@ -483,6 +491,12 @@ closed_enum! {
 impl From<std::io::Error> for ArchiveError {
     fn from(e: std::io::Error) -> Self {
         crate::formats::tar_metadata_limit::budget_violation(&e).unwrap_or(Self::Io(e))
+    }
+}
+
+impl From<TarAmbiguity> for ArchiveError {
+    fn from(ambiguity: TarAmbiguity) -> Self {
+        Self::TarAmbiguity(ambiguity)
     }
 }
 

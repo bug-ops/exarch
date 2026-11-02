@@ -31,6 +31,7 @@ use exarch_core::NoopProgress;
 use exarch_core::SecurityConfig;
 use exarch_core::formats::ArchiveFormat;
 use exarch_core::formats::TarArchive;
+use exarch_testkit::pax::record as pax_record;
 use proptest::prelude::*;
 use proptest::strategy::ValueTree;
 use proptest::test_runner::TestRunner;
@@ -79,24 +80,6 @@ fn pad_to_block(out: &mut Vec<u8>, data: &[u8]) {
     if rem != 0 {
         out.extend(std::iter::repeat_n(0u8, BLOCK - rem));
     }
-}
-
-fn pax_record(key: &[u8], value: &[u8]) -> Vec<u8> {
-    let base = key.len() + value.len() + 3;
-    let mut len = base + 1;
-    loop {
-        let candidate_len = len.to_string().len() + base;
-        if candidate_len == len {
-            break;
-        }
-        len = candidate_len;
-    }
-    let mut record = format!("{len} ").into_bytes();
-    record.extend_from_slice(key);
-    record.push(b'=');
-    record.extend_from_slice(value);
-    record.push(b'\n');
-    record
 }
 
 #[derive(Clone, Copy)]

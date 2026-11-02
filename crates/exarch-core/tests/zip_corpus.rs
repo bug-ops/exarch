@@ -407,6 +407,19 @@ fn explorer_script(src: &Path, zip: &Path) -> String {
     )
 }
 
+/// Temporary phase-1 hook: copies a producer-built archive into the directory
+/// named by `EXARCH_EXPORT_PRODUCER_FIXTURES` so CI can upload it as an
+/// artifact.
+#[cfg(windows)]
+fn export_producer_fixture(archive: &Path, name: &str) {
+    let Some(dir) = std::env::var_os("EXARCH_EXPORT_PRODUCER_FIXTURES") else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::copy(archive, dir.join(name)).unwrap();
+}
+
 #[cfg(windows)]
 fn windows_producers(src: &Path, out: &Path) -> usize {
     let shell = ["pwsh", "powershell"]
@@ -436,6 +449,7 @@ fn windows_producers(src: &Path, out: &Path) -> usize {
     for script in &scripts {
         run(Command::new(shell).args(["-NoProfile", "-Command", script]));
     }
+    export_producer_fixture(&out.join("explorer.zip"), "explorer-windows.zip");
     scripts.len()
 }
 

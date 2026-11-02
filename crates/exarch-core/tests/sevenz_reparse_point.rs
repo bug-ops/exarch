@@ -127,6 +127,19 @@ fn regular_mode_and_missing_extension_flag_extract_as_files() {
     }
 }
 
+/// Temporary phase-1 hook: copies a producer-built archive into the directory
+/// named by `EXARCH_EXPORT_PRODUCER_FIXTURES` so CI can upload it as an
+/// artifact.
+#[cfg(windows)]
+fn export_producer_fixture(archive: &std::path::Path, name: &str) {
+    let Some(dir) = std::env::var_os("EXARCH_EXPORT_PRODUCER_FIXTURES") else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::copy(archive, dir.join(name)).unwrap();
+}
+
 #[cfg(windows)]
 fn seven_zip() -> Option<PathBuf> {
     let program_files = std::env::var_os("ProgramFiles").map(PathBuf::from);
@@ -166,6 +179,7 @@ fn real_7zip_symlink_archive_is_listed_as_symlinks_and_refused() {
         .status()
         .unwrap();
     assert!(status.success());
+    export_producer_fixture(&archive, "symlink-7zip-windows-snl.7z");
 
     let config = SecurityConfig::default().with_allow_solid_archives(true);
     let manifest = list_archive(&archive, &config).unwrap();

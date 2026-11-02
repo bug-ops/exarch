@@ -1,12 +1,20 @@
 //! The proofs a [`ValidatorCore`](super::validator::ValidatorCore) hands to an
 //! extraction target, one per entry kind.
 //!
-//! The types are only constructed by the validator and consumed inside the
-//! crate; the fields are public so the module's visibility is the only seal.
+//! A [`ValidatedFile`] is only built by [`PendingFile::admit`], which is only
+//! built by the validator from a validated path, so no target can assemble a
+//! proof by hand. The other proofs keep public fields; the module's visibility
+//! is their only seal.
 
+use crate::Result;
+use crate::SecurityConfig;
+use crate::config::Validated;
 use crate::security::permissions::SanitizedMode;
+use crate::security::permissions::sanitize_permissions;
 use crate::security::quota::EntryCount;
 use crate::security::quota::QuotaPermit;
+use crate::security::quota::QuotaTracker;
+use crate::security::zipbomb::validate_compression_ratio;
 use crate::types::SafePath;
 use crate::types::SafeSymlink;
 
@@ -19,15 +27,71 @@ pub struct EntrySize {
     pub compressed: Option<u64>,
 }
 
+impl EntrySize {
+    /// Checks the declared sizes against the configured compression-ratio
+    /// limit; a no-op when the format records no compressed size.
+    pub(crate) fn check_ratio(self, config: &SecurityConfig<Validated>) -> Result<()> {
+        if let Some(compressed) = self.compressed {
+            validate_compression_ratio(compressed, self.uncompressed, config)?;
+        }
+        Ok(())
+    }
+}
+
+/// A regular file whose path passed validation and the extension allowlist,
+/// and whose quota is not yet reserved.
+#[derive(Debug)]
+pub struct PendingFile {
+    path: SafePath,
+    size: EntrySize,
+    mode: Option<u32>,
+}
+
+impl PendingFile {
+    pub(super) const fn new(path: SafePath, size: EntrySize, mode: Option<u32>) -> Self {
+        Self { path, size, mode }
+    }
+
+    /// The validated destination-relative path.
+    pub(crate) const fn path(&self) -> &SafePath {
+        &self.path
+    }
+
+    /// Reserves the file's size against `quota`, checks the ratio and
+    /// sanitizes the mode.
+    ///
+    /// # Errors
+    ///
+    /// Returns the quota or ratio refusal.
+    pub(super) fn admit(
+        self,
+        quota: &mut QuotaTracker,
+        config: &SecurityConfig<Validated>,
+    ) -> Result<ValidatedFile> {
+        let permit = quota.reserve(self.size.uncompressed, config)?;
+        self.size.check_ratio(config)?;
+        Ok(ValidatedFile {
+            path: self.path,
+            permit,
+            mode: self.mode.map(|m| sanitize_permissions(m, config)),
+        })
+    }
+}
+
 /// A regular file that passed path, quota and ratio validation.
 #[derive(Debug)]
 pub struct ValidatedFile {
-    /// Validated destination-relative path.
-    pub path: SafePath,
-    /// Proof the file's size was reserved against the quota.
-    pub permit: QuotaPermit,
-    /// Sanitized permissions, when the format records them.
-    pub mode: Option<SanitizedMode>,
+    path: SafePath,
+    permit: QuotaPermit,
+    mode: Option<SanitizedMode>,
+}
+
+impl ValidatedFile {
+    /// Splits the proof into its path, the quota permit for the file's size
+    /// and the sanitized permissions, when the format records them.
+    pub(crate) fn into_parts(self) -> (SafePath, QuotaPermit, Option<SanitizedMode>) {
+        (self.path, self.permit, self.mode)
+    }
 }
 
 /// A symlink entry that passed validation, with its own location.
@@ -91,12 +155,9 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(file.path.as_path(), Path::new("a.txt"));
-        assert_eq!(
-            file.mode.unwrap().as_u32() & 0o6000,
-            0,
-            "setuid is stripped"
-        );
+        let (path, _permit, mode) = file.into_parts();
+        assert_eq!(path.as_path(), Path::new("a.txt"));
+        assert_eq!(mode.unwrap().as_u32() & 0o6000, 0, "setuid is stripped");
     }
 
     #[test]

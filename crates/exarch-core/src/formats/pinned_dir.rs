@@ -171,6 +171,29 @@ impl PinnedRoot {
     }
 }
 
+/// Proof that every path validated with it is written through [`DirWalker`]
+/// from a [`PinnedRoot`]'s descriptor, so the walker's per-component vetting
+/// at write time stands in for the validator's path-based parent probe.
+///
+/// Only [`PinnedRoot::backs_parent_probe`] mints it.
+///
+/// [`DirWalker`]: crate::formats::dir_walker::DirWalker
+#[cfg(any(unix, target_os = "wasi"))]
+#[derive(Debug, Clone, Copy)]
+pub struct WalkerBacked(());
+
+#[cfg(any(unix, target_os = "wasi"))]
+impl PinnedRoot {
+    /// The proof that this root's writes are vetted by the walker.
+    ///
+    /// The holder must write every path it validates with the proof through
+    /// `DirWalker::ensure_parent` or `ensure_dir` on this root.
+    #[expect(clippy::unused_self, reason = "binds the proof to a root by signature")]
+    pub(crate) const fn backs_parent_probe(&self) -> WalkerBacked {
+        WalkerBacked(())
+    }
+}
+
 #[cfg(any(unix, target_os = "wasi"))]
 mod imp {
     use std::fs::File;

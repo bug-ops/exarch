@@ -9,7 +9,9 @@ use crate::ArchiveError;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::config::Validated;
+use crate::formats::common::is_extension_allowed;
 use crate::security::admitted::EntrySize;
+use crate::security::admitted::PendingFile;
 use crate::security::admitted::ValidatedFile;
 use crate::security::admitted::ValidatedHardlink;
 use crate::security::admitted::ValidatedSymlink;
@@ -19,11 +21,9 @@ use crate::security::fs_view::HostFs;
 use crate::security::hardlink::HardlinkTracker;
 use crate::security::hardlink::require_hardlinks_allowed;
 use crate::security::permissions::SanitizedMode;
-use crate::security::permissions::sanitize_permissions;
 use crate::security::quota::EntryCount;
 use crate::security::quota::QuotaPermit;
 use crate::security::quota::QuotaTracker;
-use crate::security::zipbomb::validate_compression_ratio;
 use crate::types::DestDir;
 use crate::types::EntryType;
 use crate::types::SafePath;
@@ -228,6 +228,15 @@ pub enum ValidatedEntryType {
     },
 }
 
+/// What path validation and the extension allowlist decide about a file, before
+/// any quota is charged.
+pub(crate) enum FileScreen {
+    /// The file is to be extracted once its quota is reserved.
+    Pending(PendingFile),
+    /// The extension allowlist excludes the file; extraction skips it.
+    DisallowedExtension,
+}
+
 /// The validation state and rules shared by every extraction target: quota,
 /// hardlink and symlink tracking plus the per-entry checks.
 ///
@@ -284,10 +293,11 @@ impl<'a> ValidatorCore<'a> {
         match entry_type {
             EntryType::File => {
                 let file = self.validate_file_in(path, size, mode, root, view, ctx)?;
+                let (safe_path, permit, mode) = file.into_parts();
                 Ok(ValidatedEntry::new(
-                    file.path,
-                    ValidatedEntryType::File(file.permit),
-                    file.mode,
+                    safe_path,
+                    ValidatedEntryType::File(permit),
+                    mode,
                 ))
             }
             EntryType::Directory => {
@@ -330,16 +340,52 @@ impl<'a> ValidatorCore<'a> {
         view: &V,
         ctx: &ValidationContext<V>,
     ) -> Result<ValidatedFile> {
+        let pending = self.pending_file_in(path, size, mode, root, view, ctx)?;
+        self.admit_file(pending)
+    }
+
+    /// Validates a file's path, then applies the extension allowlist, ahead of
+    /// any quota.
+    ///
+    /// The path comes first, so a disallowed entry named `../x.bin` is
+    /// refused rather than skipped. This is the one place the allowlist rule
+    /// is applied to extraction.
+    pub(crate) fn screen_file_path_in<V: FsView>(
+        &self,
+        path: &Path,
+        size: EntrySize,
+        mode: Option<u32>,
+        root: &V::Root,
+        view: &V,
+        ctx: &ValidationContext<V>,
+    ) -> Result<FileScreen> {
+        let pending = self.pending_file_in(path, size, mode, root, view, ctx)?;
+        if is_extension_allowed(path, self.config) {
+            Ok(FileScreen::Pending(pending))
+        } else {
+            Ok(FileScreen::DisallowedExtension)
+        }
+    }
+
+    /// Reserves the quota of a screened file, checks its ratio and sanitizes
+    /// its mode.
+    pub(crate) fn admit_file(&mut self, pending: PendingFile) -> Result<ValidatedFile> {
+        pending.admit(&mut self.quota_tracker, self.config)
+    }
+
+    fn pending_file_in<V: FsView>(
+        &self,
+        path: &Path,
+        size: EntrySize,
+        mode: Option<u32>,
+        root: &V::Root,
+        view: &V,
+        ctx: &ValidationContext<V>,
+    ) -> Result<PendingFile> {
         let safe_path = self
             .validate_entry_path_in(path, NodeKind::NonDirectory, root, view, ctx)?
             .into_inner();
-        let permit = self.quota_tracker.reserve(size.uncompressed, self.config)?;
-        self.check_ratio(size.compressed, size.uncompressed)?;
-        Ok(ValidatedFile {
-            path: safe_path,
-            permit,
-            mode: mode.map(|m| sanitize_permissions(m, self.config)),
-        })
+        Ok(PendingFile::new(safe_path, size, mode))
     }
 
     /// Validates a directory entry: path and ratio.
@@ -354,7 +400,7 @@ impl<'a> ValidatorCore<'a> {
         let safe_path = self
             .validate_entry_path_in(path, NodeKind::Directory, root, view, ctx)?
             .into_inner();
-        self.check_ratio(size.compressed, size.uncompressed)?;
+        size.check_ratio(self.config)?;
         Ok(safe_path)
     }
 
@@ -371,7 +417,7 @@ impl<'a> ValidatorCore<'a> {
         let safe_path = self
             .validate_entry_path_in(path, NodeKind::NonDirectory, root, view, ctx)?
             .into_inner();
-        self.check_ratio(size.compressed, size.uncompressed)?;
+        size.check_ratio(self.config)?;
         require_symlinks_allowed(self.config)?;
         self.reserve_symlink(size.uncompressed)?;
         let symlink = SafeSymlink::validate_in(&safe_path, target, root, self.config, view)?;
@@ -395,7 +441,7 @@ impl<'a> ValidatorCore<'a> {
         let safe_path = self
             .validate_entry_path_in(path, NodeKind::NonDirectory, root, view, ctx)?
             .into_inner();
-        self.check_ratio(size.compressed, size.uncompressed)?;
+        size.check_ratio(self.config)?;
         require_hardlinks_allowed(self.config)?;
         let counted = self.quota_tracker.reserve_count(self.config)?;
 
@@ -432,17 +478,6 @@ impl<'a> ValidatorCore<'a> {
 
     pub(crate) fn reserve_file(&mut self, size: u64) -> Result<QuotaPermit> {
         self.quota_tracker.reserve(size, self.config)
-    }
-
-    pub(crate) fn check_ratio(
-        &self,
-        compressed_size: Option<u64>,
-        uncompressed_size: u64,
-    ) -> Result<()> {
-        if let Some(compressed) = compressed_size {
-            validate_compression_ratio(compressed, uncompressed_size, self.config)?;
-        }
-        Ok(())
     }
 
     pub(crate) fn reserve_symlink(&mut self, size: u64) -> Result<()> {

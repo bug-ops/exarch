@@ -266,60 +266,13 @@ pub fn checked_increment_files_skipped(report: &mut ExtractionReport) -> Result<
     Ok(())
 }
 
-/// Whether the extension allowlist admits `path`, without recording a skip.
+/// Whether the extension allowlist admits `path`.
 ///
-/// The predicate behind [`check_extension_allowed`], for pre-validation passes
-/// that must agree with delivery on which files are skipped.
+/// The one definition of the rule, applied by the validator's file screen and
+/// by the passes that must agree with it on which files are skipped.
 #[must_use]
 pub fn is_extension_allowed(path: &Path, config: &SecurityConfig<Validated>) -> bool {
     config.is_path_extension_allowed(path.extension().and_then(|e| e.to_str()))
-}
-
-/// Returns `true` if `path`'s extension passes `config`'s allowlist.
-///
-/// If the extension is not allowed, records the skip (increments
-/// `report.files_skipped` and `disallowed_extension_skips`) and returns
-/// `false`. Shared by the TAR, ZIP, and 7z extractors, which all reject
-/// entries with disallowed extensions before further validation.
-///
-/// This is the single source of truth for the extension-allowlist skip
-/// check: do not re-inline this pattern at a new call site (this helper
-/// exists because the pattern already drifted once for the FFI boundary
-/// path check in #406 — see #413).
-///
-/// # Aggregated Warning (issue #495)
-///
-/// `path` is deliberately not recorded anywhere: earlier versions pushed one
-/// path-bearing warning string per rejected entry, which grew
-/// `report.warnings` without bound for archives with many disallowed
-/// entries. The caller instead increments `disallowed_extension_skips` and
-/// aggregates it into a single [`push_disallowed_extension_warning`] once
-/// extraction completes, mirroring the `duplicate_skips` pattern used by
-/// [`push_duplicate_skip_warning`].
-///
-/// # Examples
-///
-/// ```ignore
-/// # use exarch_core::formats::common::check_extension_allowed;
-/// if !check_extension_allowed(&path, config, report, &mut disallowed_extension_skips) {
-///     return Ok(None);
-/// }
-/// ```
-#[must_use]
-#[inline]
-pub fn check_extension_allowed(
-    path: &Path,
-    config: &SecurityConfig<Validated>,
-    report: &mut ExtractionReport,
-    disallowed_extension_skips: &mut u64,
-) -> bool {
-    if is_extension_allowed(path, config) {
-        return true;
-    }
-
-    report.files_skipped = report.files_skipped.saturating_add(1);
-    *disallowed_extension_skips = disallowed_extension_skips.saturating_add(1);
-    false
 }
 
 /// Generic file extraction implementation used by all format adapters.
@@ -425,7 +378,7 @@ pub fn extract_file_with_permit<R: Read>(
 ) -> Result<()> {
     let skip_duplicates = options.skip_duplicates;
 
-    let (parent, leaf) = dirs.ensure_parent(root, safe_path.as_path())?;
+    let (parent, leaf) = dirs.ensure_parent(root, safe_path)?;
 
     // The size was already reserved against QuotaTracker during
     // validate_entry (proven by the QuotaPermit consumed above); this only
@@ -456,13 +409,27 @@ pub fn extract_file_with_permit<R: Read>(
     commit_output(&parent, &written_at, leaf, safe_path.as_path())?;
     guard.persist();
 
-    if bytes_written > 0 {
-        progress.on_bytes_written(bytes_written);
+    record_file_written(report, progress, bytes_written)
+}
+
+/// Counts one written file and its bytes, and reports the bytes to `progress`
+/// when there were any.
+///
+/// The single success bookkeeping for every target that writes a file.
+///
+/// # Errors
+///
+/// Returns `QuotaExceeded` when a counter would overflow.
+pub fn record_file_written(
+    report: &mut ExtractionReport,
+    progress: &mut dyn ProgressCallback,
+    written: u64,
+) -> Result<()> {
+    report.files_extracted = checked_add_count(report.files_extracted, 1)?;
+    report.bytes_written = checked_add_bytes(report.bytes_written, written)?;
+    if written > 0 {
+        progress.on_bytes_written(written);
     }
-
-    report.files_extracted += 1;
-    report.bytes_written = checked_add_bytes(report.bytes_written, bytes_written)?;
-
     Ok(())
 }
 
@@ -640,7 +607,7 @@ pub fn create_directory(
         safe_path.as_path(),
         root.dest(),
     )?;
-    dirs.ensure_dir(root, safe_path.as_path())?;
+    dirs.ensure_dir(root, safe_path)?;
 
     report.directories_created += 1;
 
@@ -734,7 +701,7 @@ pub fn create_symlink(
     {
         let target_path = safe_symlink.target_path();
 
-        let (parent, leaf) = dirs.ensure_parent(root, safe_symlink.link_path())?;
+        let (parent, leaf) = dirs.ensure_parent(root, safe_symlink.link())?;
 
         if let Some(existing) = parent.probe(leaf)? {
             if skip_duplicates {
@@ -1849,47 +1816,46 @@ mod tests {
         assert!(temp.path().join("link.txt").is_symlink());
     }
 
-    /// Pins the aggregation behavior of `check_extension_allowed`: a rejected
-    /// entry increments `disallowed_extension_skips` instead of pushing a
-    /// per-entry warning, so `report.warnings`'s growth stays independent of
-    /// how many disallowed entries an archive contains (issue #495).
     #[test]
-    fn test_check_extension_allowed_increments_counter_not_warnings() {
-        let config = SecurityConfig::default()
-            .with_allowed_extensions(vec!["txt".to_string()])
-            .validate()
-            .expect("valid config");
+    fn test_record_file_written_counts_bytes_and_reports_progress_once() {
+        struct Bytes(Vec<u64>);
+        impl ProgressCallback for Bytes {
+            fn on_entry_start(&mut self, _: &Path, _: usize, _: usize) {}
+
+            fn on_bytes_written(&mut self, bytes: u64) {
+                self.0.push(bytes);
+            }
+
+            fn on_entry_complete(&mut self, _: &Path) {}
+
+            fn on_complete(&mut self) {}
+        }
         let mut report = ExtractionReport::default();
-        let path = PathBuf::from("skip.exe");
-        let mut disallowed_extension_skips = 0u64;
+        let mut progress = Bytes(Vec::new());
 
-        let allowed =
-            check_extension_allowed(&path, &config, &mut report, &mut disallowed_extension_skips);
+        record_file_written(&mut report, &mut progress, 7).unwrap();
+        record_file_written(&mut report, &mut progress, 0).unwrap();
 
-        assert!(!allowed, "disallowed extension must be rejected");
-        assert_eq!(report.files_skipped, 1);
-        assert_eq!(disallowed_extension_skips, 1);
-        assert!(report.warnings.is_empty());
+        assert_eq!(report.files_extracted, 2);
+        assert_eq!(report.bytes_written, 7);
+        assert_eq!(progress.0, vec![7], "an empty file reports no bytes");
     }
 
-    /// Verifies the happy path leaves `report` and the counter untouched.
     #[test]
-    fn test_check_extension_allowed_allowed_extension() {
-        let config = SecurityConfig::default()
-            .with_allowed_extensions(vec!["txt".to_string()])
-            .validate()
-            .expect("valid config");
-        let mut report = ExtractionReport::default();
-        let path = PathBuf::from("keep.txt");
-        let mut disallowed_extension_skips = 0u64;
+    fn test_record_file_written_refuses_a_counter_overflow() {
+        let mut report = ExtractionReport {
+            bytes_written: u64::MAX,
+            ..ExtractionReport::default()
+        };
 
-        let allowed =
-            check_extension_allowed(&path, &config, &mut report, &mut disallowed_extension_skips);
+        let result = record_file_written(&mut report, &mut crate::NoopProgress, 1);
 
-        assert!(allowed, "allowed extension must pass");
-        assert_eq!(report.files_skipped, 0);
-        assert_eq!(disallowed_extension_skips, 0);
-        assert!(report.warnings.is_empty());
+        assert_matches!(
+            result,
+            Err(ArchiveError::QuotaExceeded {
+                resource: QuotaResource::IntegerOverflow
+            })
+        );
     }
 
     /// Pins the exact aggregated warning message text produced by

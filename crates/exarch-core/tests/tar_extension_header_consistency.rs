@@ -8,12 +8,17 @@
 
 #![allow(clippy::unwrap_used)]
 
+use std::assert_matches;
 use std::path::Path;
 
 use exarch_core::ArchiveError;
 use exarch_core::ErrorCode;
 use exarch_core::ManifestEntryKind;
 use exarch_core::SecurityConfig;
+use exarch_core::TarAmbiguity;
+use exarch_core::TarExtensionKind;
+use exarch_core::TarHeaderField;
+use exarch_core::TarPathKey;
 use exarch_core::extract_archive;
 use exarch_core::list_archive;
 use exarch_core::verify_archive;
@@ -54,12 +59,8 @@ fn link(name: &str, typeflag: u8, linkname: &str) -> Vec<u8> {
 }
 
 fn pax_record(key: &str, value: &str) -> String {
-    let base = key.len() + value.len() + 3;
-    let mut len = base + 1;
-    while len.to_string().len() + base != len {
-        len = len.to_string().len() + base;
-    }
-    format!("{len} {key}={value}\n")
+    let record = exarch_testkit::pax::record(key.as_bytes(), value.as_bytes());
+    String::from_utf8_lossy(&record).into_owned()
 }
 
 fn extension(typeflag: u8, records: &[(&str, &str)]) -> Vec<u8> {
@@ -91,28 +92,59 @@ fn write_archive(dir: &TempDir, bytes: &[u8]) -> std::path::PathBuf {
     path
 }
 
-fn assert_ambiguous(error: &ArchiveError, expected: &str) {
+enum Expected {
+    Ambiguity(TarAmbiguity),
+    Payload,
+}
+
+impl From<TarAmbiguity> for Expected {
+    fn from(ambiguity: TarAmbiguity) -> Self {
+        Self::Ambiguity(ambiguity)
+    }
+}
+
+fn key_error(make: fn(String) -> TarAmbiguity, key: &str) -> Expected {
+    make(key.to_owned()).into()
+}
+
+fn number_error(field: TarHeaderField) -> Expected {
+    TarAmbiguity::NonCanonicalNumber { field }.into()
+}
+
+fn assert_ambiguous(error: &ArchiveError, expected: &Expected) {
     let source = match error {
         ArchiveError::PartialExtraction { source, .. } => source,
         other => other,
     };
     assert_eq!(source.error_code(), ErrorCode::InvalidArchive, "{source}");
-    assert!(source.to_string().contains(expected), "{source}");
+    match expected {
+        Expected::Ambiguity(want) => {
+            assert_matches!(source, ArchiveError::TarAmbiguity(found) if found == want, "{source}");
+        }
+        Expected::Payload => {
+            assert_matches!(
+                source,
+                ArchiveError::InvalidArchive(reason) if reason.contains("payload"),
+                "{source}"
+            );
+        }
+    }
 }
 
-fn assert_refused_everywhere(bytes: &[u8], expected: &str) {
+fn assert_refused_everywhere(bytes: &[u8], expected: impl Into<Expected>) {
+    let expected = expected.into();
     let dir = TempDir::new().unwrap();
     let archive = write_archive(&dir, bytes);
     let config = config();
 
-    assert_ambiguous(&list_archive(&archive, &config).unwrap_err(), expected);
-    assert_ambiguous(&verify_archive(&archive, &config).unwrap_err(), expected);
+    assert_ambiguous(&list_archive(&archive, &config).unwrap_err(), &expected);
+    assert_ambiguous(&verify_archive(&archive, &config).unwrap_err(), &expected);
 
     let root = TempDir::new().unwrap();
     let out = root.path().join("out");
     assert_ambiguous(
         &extract_archive(&archive, &out, &config).unwrap_err(),
-        expected,
+        &expected,
     );
     let leftovers = list_tree(root.path());
     assert!(
@@ -152,7 +184,7 @@ fn directory_with_payload_is_refused() {
         pad([header("x/", DIRECTORY, 1024, ""), hidden_member_payload()].concat()),
         entry("y.txt", REGULAR, b"y\n"),
     ]);
-    assert_refused_everywhere(&bytes, "payload");
+    assert_refused_everywhere(&bytes, Expected::Payload);
 }
 
 #[test]
@@ -167,7 +199,7 @@ fn symlink_and_hardlink_with_payload_are_refused() {
             .concat()),
             entry("y.txt", REGULAR, b"y\n"),
         ]);
-        assert_refused_everywhere(&bytes, "payload");
+        assert_refused_everywhere(&bytes, Expected::Payload);
     }
 }
 
@@ -178,7 +210,7 @@ fn directory_with_pax_size_payload_is_refused() {
         pad([header("x/", DIRECTORY, 0, ""), hidden_member_payload()].concat()),
         entry("y.txt", REGULAR, b"y\n"),
     ]);
-    assert_refused_everywhere(&bytes, "payload");
+    assert_refused_everywhere(&bytes, Expected::Payload);
 }
 
 #[test]
@@ -207,7 +239,7 @@ fn duplicate_size_records_are_refused() {
         entry("benign.txt", REGULAR, b""),
         hidden_member_payload(),
     ]);
-    assert_refused_everywhere(&bytes, "duplicate PAX record \"size\"");
+    assert_refused_everywhere(&bytes, TarAmbiguity::DuplicateRecord { key: "size".into() });
 }
 
 #[test]
@@ -219,7 +251,7 @@ fn duplicate_path_records_are_refused() {
         ),
         entry("placeholder.txt", REGULAR, b"data\n"),
     ]);
-    assert_refused_everywhere(&bytes, "duplicate PAX record \"path\"");
+    assert_refused_everywhere(&bytes, TarAmbiguity::DuplicateRecord { key: "path".into() });
 }
 
 #[test]
@@ -232,7 +264,12 @@ fn duplicate_linkpath_records_are_refused() {
         ),
         link("lnk", SYMLINK, "inside.txt"),
     ]);
-    assert_refused_everywhere(&bytes, "duplicate PAX record \"linkpath\"");
+    assert_refused_everywhere(
+        &bytes,
+        TarAmbiguity::DuplicateRecord {
+            key: "linkpath".into(),
+        },
+    );
 }
 
 #[test]
@@ -241,7 +278,7 @@ fn non_numeric_pax_size_is_refused() {
         extension(PAX_LOCAL, &[("size", "12x")]),
         entry("a.txt", REGULAR, b"a"),
     ]);
-    assert_refused_everywhere(&bytes, "`size`");
+    assert_refused_everywhere(&bytes, TarAmbiguity::InvalidSize);
 }
 
 #[test]
@@ -251,7 +288,10 @@ fn gnu_sparse_records_are_refused() {
             extension(PAX_LOCAL, &[(key, "../escaped.txt")]),
             entry("safe.txt", REGULAR, b"data\n"),
         ]);
-        assert_refused_everywhere(&bytes, key);
+        assert_refused_everywhere(
+            &bytes,
+            key_error(|key| TarAmbiguity::UnsupportedRecord { key }, key),
+        );
     }
 }
 
@@ -262,7 +302,12 @@ fn pax_path_with_gnu_long_name_is_refused_in_either_order() {
     let file = entry("placeholder.txt", REGULAR, b"data\n");
     for headers in [[pax.clone(), long.clone()], [long, pax]] {
         let bytes = tar_of(&[headers.concat(), file.clone()]);
-        assert_refused_everywhere(&bytes, "GNU long name");
+        assert_refused_everywhere(
+            &bytes,
+            TarAmbiguity::StackedLongRecord {
+                key: TarPathKey::Path,
+            },
+        );
     }
 }
 
@@ -274,7 +319,12 @@ fn pax_linkpath_with_gnu_long_link_is_refused() {
         gnu_long(GNU_LONG_LINK, "inside.txt"),
         link("lnk", SYMLINK, "inside.txt"),
     ]);
-    assert_refused_everywhere(&bytes, "GNU long link");
+    assert_refused_everywhere(
+        &bytes,
+        TarAmbiguity::StackedLongRecord {
+            key: TarPathKey::LinkPath,
+        },
+    );
 }
 
 #[test]
@@ -284,7 +334,10 @@ fn global_header_overriding_entry_fields_is_refused() {
             extension(PAX_GLOBAL, &[(key, value)]),
             entry("benign.txt", REGULAR, b"b\n"),
         ]);
-        assert_refused_everywhere(&bytes, &format!("global PAX record \"{key}\""));
+        assert_refused_everywhere(
+            &bytes,
+            key_error(|key| TarAmbiguity::GlobalOverride { key }, key),
+        );
     }
 }
 
@@ -295,7 +348,33 @@ fn global_header_after_local_header_is_refused() {
         extension(PAX_GLOBAL, &[("comment", "c")]),
         entry("benign.txt", REGULAR, b"b\n"),
     ]);
-    assert_refused_everywhere(&bytes, "follows a local PAX header");
+    assert_refused_everywhere(&bytes, TarAmbiguity::LocalBeforeGlobal);
+}
+
+#[test]
+fn global_header_over_the_metadata_limit_is_refused() {
+    const LIMIT: u64 = 1024;
+    let comment = "c".repeat(2048);
+    let body_len = pax_record("comment", &comment).len() as u64;
+    let bytes = tar_of(&[
+        extension(PAX_GLOBAL, &[("comment", &comment)]),
+        entry("benign.txt", REGULAR, b"b\n"),
+    ]);
+    let dir = TempDir::new().unwrap();
+    let archive = write_archive(&dir, &bytes);
+    let config = config().with_max_tar_metadata_bytes(LIMIT);
+    let expected = Expected::from(TarAmbiguity::GlobalTooLarge {
+        size: body_len,
+        limit: LIMIT,
+    });
+
+    assert_ambiguous(&list_archive(&archive, &config).unwrap_err(), &expected);
+    assert_ambiguous(&verify_archive(&archive, &config).unwrap_err(), &expected);
+    let out = dir.path().join("out");
+    assert_ambiguous(
+        &extract_archive(&archive, &out, &config).unwrap_err(),
+        &expected,
+    );
 }
 
 #[test]
@@ -309,7 +388,12 @@ fn extension_header_without_magic_is_refused() {
         pad(unmarked.as_bytes().to_vec()),
         entry("benign.txt", REGULAR, b"b\n"),
     ]);
-    assert_refused_everywhere(&bytes, "lacks a ustar or GNU magic");
+    assert_refused_everywhere(
+        &bytes,
+        TarAmbiguity::UnrecognizedHeader {
+            kind: TarExtensionKind::Pax,
+        },
+    );
 }
 
 #[test]
@@ -418,7 +502,7 @@ fn non_canonical_size_fields_are_refused() {
         b"\n0000002000\0",
         b"\x0c0000002000\0",
     ] {
-        assert_refused_everywhere(&with_size_field(field), "size field");
+        assert_refused_everywhere(&with_size_field(field), number_error(TarHeaderField::Size));
     }
 }
 
@@ -432,7 +516,7 @@ fn base256_size_with_a_sign_or_high_bytes_is_refused() {
     wide[3] = 1;
     wide[11] = 0x80;
     for field in [signed, wide] {
-        assert_refused_everywhere(&with_size_field(&field), "size field");
+        assert_refused_everywhere(&with_size_field(&field), number_error(TarHeaderField::Size));
     }
 }
 
@@ -443,7 +527,10 @@ fn non_canonical_checksum_fields_are_refused() {
         let mut field = [0u8; 8];
         field[0] = lead;
         field[1..7].copy_from_slice(format!("{sum:06o}").as_bytes());
-        assert_refused_everywhere(&with_checksum_field(field), "checksum field");
+        assert_refused_everywhere(
+            &with_checksum_field(field),
+            number_error(TarHeaderField::Checksum),
+        );
     }
 }
 
@@ -473,7 +560,7 @@ fn gnu_sparse_entries_are_refused() {
             &[(483, b"00000000000\0")],
         )),
     ]);
-    assert_refused_everywhere(&plain, "GNU sparse entries are not supported");
+    assert_refused_everywhere(&plain, TarAmbiguity::SparseEntry);
 
     let mut sparse = patched(
         header("sparse.bin", b'S', 512, ""),
@@ -486,7 +573,7 @@ fn gnu_sparse_entries_are_refused() {
     );
     sparse.extend(vec![0u8; 512]);
     let desync = tar_of(&[sparse, pad(header("benign.txt", REGULAR, 512, ""))]);
-    assert_refused_everywhere(&desync, "GNU sparse entries are not supported");
+    assert_refused_everywhere(&desync, TarAmbiguity::SparseEntry);
 }
 
 #[test]
@@ -511,7 +598,7 @@ fn global_header_after_gnu_long_record_is_refused() {
         ]),
     ];
     for bytes in cases {
-        assert_refused_everywhere(&bytes, "follows a GNU long name or link record");
+        assert_refused_everywhere(&bytes, TarAmbiguity::LongRecordBeforeGlobal);
     }
 }
 
@@ -532,7 +619,7 @@ fn pax_records_with_an_empty_key_are_refused() {
             raw_extension(typeflag, &body),
             entry("u.txt", REGULAR, b"d"),
         ]);
-        assert_refused_everywhere(&bytes, "empty key");
+        assert_refused_everywhere(&bytes, TarAmbiguity::EmptyKey);
     }
 }
 
@@ -545,7 +632,12 @@ fn pax_records_longer_than_the_reference_limit_are_refused() {
             extension(typeflag, &[("comment", &big), ("mtime", "0")]),
             entry("u.txt", REGULAR, b"d"),
         ]);
-        assert_refused_everywhere(&bytes, "longer than 999999 bytes");
+        assert_refused_everywhere(
+            &bytes,
+            TarAmbiguity::OversizedRecord {
+                key: "comment".into(),
+            },
+        );
     }
 }
 
@@ -563,7 +655,7 @@ fn global_pax_header_framing_must_be_canonical() {
             raw_extension(PAX_GLOBAL, &body),
             entry("u.txt", REGULAR, b"d"),
         ]);
-        assert_refused_everywhere(&bytes, "malformed PAX record");
+        assert_refused_everywhere(&bytes, TarAmbiguity::MalformedRecord);
     }
 }
 
@@ -576,7 +668,7 @@ fn prefix_field_without_a_ustar_magic_is_refused() {
         ))])
     };
     for magic in [b"ustar  \0", b"\0\0\0\0\0\0\0\0", b"ustar\0  "] {
-        assert_refused_everywhere(&with_prefix(magic), "prefix field");
+        assert_refused_everywhere(&with_prefix(magic), TarAmbiguity::PrefixWithoutUstar);
     }
 }
 
@@ -695,14 +787,14 @@ fn plus_checksum_extension(typeflag: u8, body: &[u8]) -> Vec<u8> {
 struct Refusal {
     name: &'static str,
     bytes: Vec<u8>,
-    expected: &'static str,
+    expected: Expected,
 }
 
-fn refusal(name: &'static str, entries: &[Vec<u8>], expected: &'static str) -> Refusal {
+fn refusal(name: &'static str, entries: &[Vec<u8>], expected: impl Into<Expected>) -> Refusal {
     Refusal {
         name,
         bytes: tar_of(entries),
-        expected,
+        expected: expected.into(),
     }
 }
 
@@ -723,7 +815,7 @@ fn non_canonical_extension_number_archives() -> Vec<Refusal> {
                 plus_size_extension(PAX_LOCAL, &pax_body(&[("path", "from_pax.txt")])),
                 entry("ustar.txt", REGULAR, b"d"),
             ],
-            "size field",
+            number_error(TarHeaderField::Size),
         ),
         refusal(
             "x2",
@@ -732,7 +824,7 @@ fn non_canonical_extension_number_archives() -> Vec<Refusal> {
                 plus_size_extension(GNU_LONG_NAME, b"from_L.txt\0"),
                 entry("ustar.txt", REGULAR, b"d"),
             ],
-            "size field",
+            number_error(TarHeaderField::Size),
         ),
         refusal(
             "x3",
@@ -741,7 +833,7 @@ fn non_canonical_extension_number_archives() -> Vec<Refusal> {
                 plus_checksum_extension(PAX_LOCAL, &size_body),
                 swallowing_member("a.txt", 0),
             ],
-            "checksum field",
+            number_error(TarHeaderField::Checksum),
         ),
         refusal(
             "p1",
@@ -750,7 +842,7 @@ fn non_canonical_extension_number_archives() -> Vec<Refusal> {
                 plus_checksum_extension(GNU_LONG_NAME, b"long_name.txt\0"),
                 swallowing_member("a.txt", hidden_len),
             ],
-            "checksum field",
+            number_error(TarHeaderField::Checksum),
         ),
         refusal(
             "p2",
@@ -759,7 +851,7 @@ fn non_canonical_extension_number_archives() -> Vec<Refusal> {
                 plus_checksum_extension(GNU_LONG_LINK, b"benign_target\0"),
                 link("lnk", SYMLINK, "/etc/passwd"),
             ],
-            "checksum field",
+            number_error(TarHeaderField::Checksum),
         ),
         refusal(
             "p3",
@@ -768,7 +860,7 @@ fn non_canonical_extension_number_archives() -> Vec<Refusal> {
                 plus_checksum_extension(PAX_LOCAL, &pax_body(&[("linkpath", "benign_target")])),
                 link("lnk", SYMLINK, "/etc/passwd"),
             ],
-            "checksum field",
+            number_error(TarHeaderField::Checksum),
         ),
         refusal(
             "p10",
@@ -777,7 +869,7 @@ fn non_canonical_extension_number_archives() -> Vec<Refusal> {
                 plus_checksum_extension(PAX_LOCAL, &pax_body(&[("path", "from_pax.txt")])),
                 entry("ustar.txt", REGULAR, b"d"),
             ],
-            "checksum field",
+            number_error(TarHeaderField::Checksum),
         ),
     ]
 }
@@ -797,7 +889,7 @@ fn non_canonical_pax_framing_archives() -> Vec<Refusal> {
                 local_pax_with_plus_length("size", &hidden_len.to_string()),
                 swallowing_member("a.txt", 0),
             ],
-            "malformed PAX record",
+            TarAmbiguity::MalformedRecord,
         ),
         refusal(
             "e2",
@@ -806,7 +898,7 @@ fn non_canonical_pax_framing_archives() -> Vec<Refusal> {
                 local_pax_with_plus_length("path", "pax_name.txt"),
                 entry("ustar_name.txt", REGULAR, b"d"),
             ],
-            "malformed PAX record",
+            TarAmbiguity::MalformedRecord,
         ),
         refusal(
             "l",
@@ -814,7 +906,7 @@ fn non_canonical_pax_framing_archives() -> Vec<Refusal> {
                 raw_extension(PAX_LOCAL, blank_line.as_bytes()),
                 swallowing_member("a.txt", hidden_len),
             ],
-            "malformed PAX record",
+            TarAmbiguity::MalformedRecord,
         ),
         refusal(
             "p4",
@@ -823,7 +915,7 @@ fn non_canonical_pax_framing_archives() -> Vec<Refusal> {
                 local_pax_with_plus_length("linkpath", "benign_target"),
                 link("lnk", SYMLINK, "/etc/passwd"),
             ],
-            "malformed PAX record",
+            TarAmbiguity::MalformedRecord,
         ),
     ]
 }
@@ -851,15 +943,18 @@ fn non_canonical_extension_header_is_refused_through_gzip() {
     let archive = dir.path().join("a.tar.gz");
     std::fs::write(&archive, encoder.finish().unwrap()).unwrap();
     let config = config();
-    assert_ambiguous(&list_archive(&archive, &config).unwrap_err(), case.expected);
+    assert_ambiguous(
+        &list_archive(&archive, &config).unwrap_err(),
+        &case.expected,
+    );
     assert_ambiguous(
         &verify_archive(&archive, &config).unwrap_err(),
-        case.expected,
+        &case.expected,
     );
     let out = TempDir::new().unwrap();
     assert_ambiguous(
         &extract_archive(&archive, out.path().join("out"), &config).unwrap_err(),
-        case.expected,
+        &case.expected,
     );
 }
 
@@ -869,7 +964,12 @@ fn schily_realsize_record_is_refused() {
         extension(PAX_LOCAL, &[("SCHILY.realsize", "1073741824")]),
         entry("big.txt", REGULAR, b"x"),
     ]);
-    assert_refused_everywhere(&bytes, "SCHILY.realsize");
+    assert_refused_everywhere(
+        &bytes,
+        TarAmbiguity::UnsupportedRecord {
+            key: "SCHILY.realsize".into(),
+        },
+    );
 }
 
 fn builder_archive(build: impl FnOnce(&mut tar::Builder<Vec<u8>>)) -> Vec<u8> {
@@ -1107,9 +1207,6 @@ fn long_path(len: usize) -> String {
     path
 }
 
-const NON_ZERO_PADDING: &str = "non-zero padding";
-const NOT_ONE_STRING: &str = "not a single NUL-terminated string";
-
 #[test]
 fn local_pax_header_with_records_in_the_padding_is_refused() {
     let body = pax_body(&[("mtime", "1700000000")]);
@@ -1118,7 +1215,7 @@ fn local_pax_header_with_records_in_the_padding_is_refused() {
         with_padding_bytes(PAX_LOCAL, &body, size_record.as_bytes()),
         entry("a.txt", REGULAR, b"a"),
     ]);
-    assert_refused_everywhere(&bytes, NON_ZERO_PADDING);
+    assert_refused_everywhere(&bytes, TarAmbiguity::NonZeroPadding);
 }
 
 #[test]
@@ -1129,7 +1226,7 @@ fn local_pax_header_with_a_path_record_in_the_padding_is_refused() {
         with_padding_bytes(PAX_LOCAL, &body, path_record.as_bytes()),
         entry("a.txt", REGULAR, b"a"),
     ]);
-    assert_refused_everywhere(&bytes, NON_ZERO_PADDING);
+    assert_refused_everywhere(&bytes, TarAmbiguity::NonZeroPadding);
 }
 
 #[test]
@@ -1141,7 +1238,7 @@ fn local_pax_header_with_a_linkpath_record_in_the_padding_is_refused() {
         with_padding_bytes(PAX_LOCAL, &body, record.as_bytes()),
         link("lnk", SYMLINK, "t.txt"),
     ]);
-    assert_refused_everywhere(&bytes, NON_ZERO_PADDING);
+    assert_refused_everywhere(&bytes, TarAmbiguity::NonZeroPadding);
 }
 
 #[test]
@@ -1152,7 +1249,7 @@ fn global_pax_header_with_a_path_record_in_the_padding_is_refused() {
         with_padding_bytes(PAX_GLOBAL, &body, record.as_bytes()),
         entry("a.txt", REGULAR, b"a"),
     ]);
-    assert_refused_everywhere(&bytes, NON_ZERO_PADDING);
+    assert_refused_everywhere(&bytes, TarAmbiguity::NonZeroPadding);
 }
 
 #[test]
@@ -1165,7 +1262,7 @@ fn global_pax_header_with_a_last_padding_byte_set_is_refused() {
         entry("a.txt", REGULAR, b"a"),
         entry("b.txt", REGULAR, b"b"),
     ]);
-    assert_refused_everywhere(&bytes, NON_ZERO_PADDING);
+    assert_refused_everywhere(&bytes, TarAmbiguity::NonZeroPadding);
 }
 
 #[test]
@@ -1182,7 +1279,7 @@ fn gnu_long_records_with_non_zero_padding_are_refused() {
             with_padding_bytes(typeflag, body, b"other.txt\0"),
             target,
         ]);
-        assert_refused_everywhere(&bytes, NON_ZERO_PADDING);
+        assert_refused_everywhere(&bytes, TarAmbiguity::NonZeroPadding);
     }
 }
 
@@ -1199,7 +1296,12 @@ fn gnu_long_records_without_a_terminating_nul_are_refused() {
             raw_extension(typeflag, b"long/name.txt"),
             target,
         ]);
-        assert_refused_everywhere(&bytes, NOT_ONE_STRING);
+        let kind = if typeflag == GNU_LONG_NAME {
+            TarExtensionKind::LongName
+        } else {
+            TarExtensionKind::LongLink
+        };
+        assert_refused_everywhere(&bytes, TarAmbiguity::MalformedLongRecord { kind });
     }
 }
 
@@ -1209,7 +1311,12 @@ fn gnu_long_records_with_a_doubled_nul_are_refused() {
         raw_extension(GNU_LONG_NAME, b"long/name.txt\0\0"),
         entry("placeholder.txt", REGULAR, b"a"),
     ]);
-    assert_refused_everywhere(&bytes, NOT_ONE_STRING);
+    assert_refused_everywhere(
+        &bytes,
+        TarAmbiguity::MalformedLongRecord {
+            kind: TarExtensionKind::LongName,
+        },
+    );
 }
 
 #[test]
@@ -1270,7 +1377,7 @@ fn trailing_global_pax_header_with_records_in_the_padding_is_refused() {
         entry("a.txt", REGULAR, b"a"),
         with_padding_bytes(PAX_GLOBAL, &body, record.as_bytes()),
     ]);
-    assert_refused_everywhere(&bytes, NON_ZERO_PADDING);
+    assert_refused_everywhere(&bytes, TarAmbiguity::NonZeroPadding);
 }
 
 #[test]

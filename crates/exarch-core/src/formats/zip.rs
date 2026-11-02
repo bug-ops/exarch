@@ -184,11 +184,6 @@ pub(crate) const ZIP_INVALID_CHECKSUM: &str = "Invalid checksum";
 struct ZipExtractionContext<'a> {
     tally: Tally<'a>,
     config: &'a SecurityConfig<Validated>,
-    /// Count of file entries skipped by `common::check_extension_allowed`
-    /// because their extension is not in the allowlist. Aggregated into a
-    /// single warning after extraction completes instead of one warning
-    /// per entry (issue #495).
-    disallowed_extension_skips: &'a mut u64,
 }
 
 /// How a raw ZIP entry name starts, as far as absolute-path policy cares.
@@ -412,16 +407,48 @@ pub(crate) fn is_password_required(error: &zip::result::ZipError) -> bool {
 fn push_duplicate_skip_warnings(
     report: &mut ExtractionReport,
     duplicate_skips: u64,
-    disallowed_extension_skips: u64,
+    extension_skips: u64,
 ) {
     common::push_duplicate_skip_warning(report, duplicate_skips, "entry", "entries");
-    common::push_disallowed_extension_warning(report, disallowed_extension_skips);
+    common::push_disallowed_extension_warning(report, extension_skips);
 }
 
-/// Proof that [`ZipArchive::check_structure`] passed, which every extraction
-/// needs before it creates a destination or hands entries to a sink.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct StructureChecked(());
+/// A ZIP archive that passed [`ZipArchive::check_structure`] under `config`.
+///
+/// Extraction goes through [`Self::extract_with`], which builds the target
+/// from the same `config` the structure was checked under, so the target, and
+/// any destination it creates, cannot exist before the check passed and cannot
+/// disagree with it on configuration. The token owns the archive borrow, so it
+/// cannot be redeemed against another archive.
+pub(crate) struct CheckedZip<'a, R: Read + Seek> {
+    archive: &'a mut ZipArchive<R>,
+    config: &'a SecurityConfig<Validated>,
+}
+
+impl<R: Read + Seek> std::fmt::Debug for CheckedZip<'_, R> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CheckedZip").finish_non_exhaustive()
+    }
+}
+
+impl<'a, R: Read + Seek> CheckedZip<'a, R> {
+    /// Extracts into the target `make_target` builds from the checked config.
+    ///
+    /// # Errors
+    ///
+    /// Returns the target's construction error, or the first extraction
+    /// refusal.
+    pub(crate) fn extract_with<T: ExtractTarget>(
+        self,
+        make_target: impl FnOnce(&'a SecurityConfig<Validated>) -> Result<T>,
+        options: SinkOptions,
+        progress: &mut dyn ProgressCallback,
+    ) -> Result<ExtractionReport> {
+        let mut target = make_target(self.config)?;
+        self.archive
+            .extract_entries(&mut target, self.config, options, progress)
+    }
+}
 
 /// ZIP archive handler with random-access extraction.
 ///
@@ -560,7 +587,7 @@ impl<R: Read + Seek> ZipArchive<R> {
         config: &SecurityConfig<Validated>,
         listing: &mut crate::inspection::list::ListPass<'_, '_>,
     ) -> Result<crate::inspection::ArchiveManifest> {
-        self.check_structure(config)?;
+        self.verify_structure(config)?;
         crate::inspection::list::list_zip_reader(self, config, listing)
     }
 
@@ -577,10 +604,7 @@ impl<R: Read + Seek> ZipArchive<R> {
         Ok(())
     }
 
-    pub(crate) fn check_structure(
-        &self,
-        config: &SecurityConfig<Validated>,
-    ) -> Result<StructureChecked> {
+    fn verify_structure(&self, config: &SecurityConfig<Validated>) -> Result<()> {
         self.check_count(config)?;
         self.check_stream_checks(config)?;
         if config.zip_consistency == ZipConsistencyPolicy::Enforce
@@ -588,7 +612,20 @@ impl<R: Read + Seek> ZipArchive<R> {
         {
             return Err(ArchiveError::ZipInconsistency(finding.clone()));
         }
-        Ok(StructureChecked(()))
+        Ok(())
+    }
+
+    /// Checks the structural policy and returns the archive bound to `config`
+    /// for extraction.
+    pub(crate) fn check_structure<'a>(
+        &'a mut self,
+        config: &'a SecurityConfig<Validated>,
+    ) -> Result<CheckedZip<'a, R>> {
+        self.verify_structure(config)?;
+        Ok(CheckedZip {
+            archive: self,
+            config,
+        })
     }
 
     /// Resolves the entry path from a ZIP file via [`resolve_zip_entry_path`].
@@ -652,14 +689,6 @@ impl<R: Read + Seek> ZipArchive<R> {
             let safe_symlink = target.validate_symlink(&path, &link_target, size)?;
             target.symlink(&safe_symlink, &mut ctx.tally)?;
         } else {
-            if !common::check_extension_allowed(
-                &path,
-                ctx.config,
-                ctx.tally.report,
-                ctx.disallowed_extension_skips,
-            ) {
-                return Ok(());
-            }
             // File: validate BEFORE writing (security invariant preserved),
             // then extract with the same zip_file (stream still at position 0)
             let request = FileRequest {
@@ -696,12 +725,8 @@ impl<R: Read + Seek> ZipArchive<R> {
 impl<R: Read + Seek> ZipArchive<R> {
     /// Runs the extraction loop against `target`: the validation gates are the
     /// same whether it writes to the filesystem or to an entry sink.
-    ///
-    /// `_checked` proves the structural policy ran before the target, and so
-    /// any destination, existed.
-    pub(crate) fn extract_into<T: ExtractTarget>(
+    fn extract_entries<T: ExtractTarget>(
         &mut self,
-        _checked: StructureChecked,
         target: &mut T,
         config: &SecurityConfig<Validated>,
         options: SinkOptions,
@@ -718,7 +743,7 @@ impl<R: Read + Seek> ZipArchive<R> {
 
         // Same aggregation, for entries rejected by the extension allowlist
         // (issue #495).
-        let mut disallowed_extension_skips: u64 = 0;
+        let mut extension_skips: u64 = 0;
 
         let entry_count = self.inner.len();
 
@@ -731,11 +756,7 @@ impl<R: Read + Seek> ZipArchive<R> {
                     } else {
                         ArchiveError::InvalidArchive(format!("failed to open zip entry {i}: {e}"))
                     };
-                    push_duplicate_skip_warnings(
-                        &mut report,
-                        duplicate_skips,
-                        disallowed_extension_skips,
-                    );
+                    push_duplicate_skip_warnings(&mut report, duplicate_skips, extension_skips);
                     return Err(ArchiveError::partial_or(std::mem::take(&mut report), err));
                 }
             };
@@ -744,11 +765,7 @@ impl<R: Read + Seek> ZipArchive<R> {
                 Err(e) => {
                     let err =
                         ArchiveError::InvalidArchive(format!("invalid entry name at {i}: {e}"));
-                    push_duplicate_skip_warnings(
-                        &mut report,
-                        duplicate_skips,
-                        disallowed_extension_skips,
-                    );
+                    push_duplicate_skip_warnings(&mut report, duplicate_skips, extension_skips);
                     return Err(ArchiveError::partial_or(std::mem::take(&mut report), err));
                 }
             };
@@ -760,27 +777,23 @@ impl<R: Read + Seek> ZipArchive<R> {
                     report: &mut report,
                     options,
                     duplicate_skips: &mut duplicate_skips,
+                    extension_skips: &mut extension_skips,
                     progress: guard.progress_mut(),
                 },
                 config,
-                disallowed_extension_skips: &mut disallowed_extension_skips,
             };
 
             let result = Self::process_entry(zip_file, i, target, &mut ctx);
 
             if let Err(e) = result {
                 drop(guard);
-                push_duplicate_skip_warnings(
-                    &mut report,
-                    duplicate_skips,
-                    disallowed_extension_skips,
-                );
+                push_duplicate_skip_warnings(&mut report, duplicate_skips, extension_skips);
                 return Err(ArchiveError::partial_or(std::mem::take(&mut report), e));
             }
             guard.complete();
         }
 
-        push_duplicate_skip_warnings(&mut report, duplicate_skips, disallowed_extension_skips);
+        push_duplicate_skip_warnings(&mut report, duplicate_skips, extension_skips);
         progress.on_complete();
         report.duration = start.elapsed();
 
@@ -796,12 +809,8 @@ impl<R: Read + Seek> ArchiveFormat for ZipArchive<R> {
         options: &ExtractionOptions,
         progress: &mut dyn ProgressCallback,
     ) -> Result<ExtractionReport> {
-        let checked = self.check_structure(config)?;
-        let mut target = HostTarget::create(output_dir, config)?;
-        self.extract_into(
-            checked,
-            &mut target,
-            config,
+        self.check_structure(config)?.extract_with(
+            |config| HostTarget::create(output_dir, config),
             SinkOptions::duplicates_of(options),
             progress,
         )

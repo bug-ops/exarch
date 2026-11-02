@@ -71,13 +71,13 @@ def test_return_value_of_the_callback_is_ignored():
     assert seen == ["a", "b"]
 
 
-class _Boom(Exception):
+class _BoomError(Exception):
     pass
 
 
 def test_a_raising_callback_is_reraised_unchanged_and_stops_extraction():
     calls = []
-    error = _Boom("stop here")
+    error = _BoomError("stop here")
 
     def on_entry(entry):
         calls.append(entry.path)
@@ -85,7 +85,7 @@ def test_a_raising_callback_is_reraised_unchanged_and_stops_extraction():
 
     data = _tar([_file("a", b"1"), _file("b", b"2"), _file("c", b"3")])
 
-    with pytest.raises(_Boom) as info:
+    with pytest.raises(_BoomError) as info:
         exarch.extract_archive_to_callback(data, on_entry)
 
     assert info.value is error
@@ -100,11 +100,11 @@ def test_raise_on_a_later_entry_aborts_the_rest():
     def on_entry(entry):
         calls.append(entry.path)
         if entry.path == "b":
-            raise _Boom
+            raise _BoomError
 
     data = _tar([_file("a", b"1"), _file("b", b"2"), _file("c", b"3")])
 
-    with pytest.raises(_Boom):
+    with pytest.raises(_BoomError):
         exarch.extract_archive_to_callback(data, on_entry)
 
     assert calls == ["a", "b"]
@@ -148,9 +148,7 @@ def test_oversized_file_is_refused_before_delivery():
     seen = []
 
     with pytest.raises(exarch.QuotaExceededError):
-        exarch.extract_archive_to_callback(
-            _tar([_file("big", b"x" * 100)]), seen.append, config
-        )
+        exarch.extract_archive_to_callback(_tar([_file("big", b"x" * 100)]), seen.append, config)
 
     assert seen == []
 

@@ -330,16 +330,29 @@ fn legitimate_extension_headers_are_accepted() {
             gnu_long(GNU_LONG_NAME, &long_name),
             entry("placeholder.txt", REGULAR, b"a"),
         ]),
-        tar_of(&[
-            entry("t.txt", REGULAR, b"t"),
-            gnu_long(GNU_LONG_LINK, &long_name),
-            link("lnk", SYMLINK, "t.txt"),
-        ]),
     ];
     for bytes in archives {
         let dir = TempDir::new().unwrap();
         let archive = write_archive(&dir, &bytes);
         verify_archive(&archive, &config()).unwrap();
+        let out = TempDir::new().unwrap();
+        extract_archive(&archive, out.path(), &config()).unwrap();
+    }
+}
+
+#[test]
+fn legitimate_gnu_long_link_is_accepted() {
+    let long_name = format!("{}/file.txt", "d".repeat(150));
+    let bytes = tar_of(&[
+        entry("t.txt", REGULAR, b"t"),
+        gnu_long(GNU_LONG_LINK, &long_name),
+        link("lnk", SYMLINK, "t.txt"),
+    ]);
+    let dir = TempDir::new().unwrap();
+    let archive = write_archive(&dir, &bytes);
+    verify_archive(&archive, &config()).unwrap();
+    #[cfg(unix)]
+    {
         let out = TempDir::new().unwrap();
         extract_archive(&archive, out.path(), &config()).unwrap();
     }

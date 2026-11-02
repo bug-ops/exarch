@@ -731,28 +731,8 @@ impl ArchiveError {
     /// Marks a [`Self::PartialExtraction`] as never written to a destination,
     /// for an in-memory extraction that drops its entries on failure; any
     /// other error is returned unchanged.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use exarch_core::ArchiveError;
-    /// use exarch_core::ExtractionReport;
-    /// use exarch_core::PartialWrites;
-    ///
-    /// let err = ArchiveError::PartialExtraction {
-    ///     source: Box::new(ArchiveError::violation("x".into())),
-    ///     report: ExtractionReport::default(),
-    ///     writes: PartialWrites::Kept,
-    /// };
-    /// match err.discarded() {
-    ///     ArchiveError::PartialExtraction { writes, .. } => {
-    ///         assert_eq!(writes, PartialWrites::Discarded);
-    ///     }
-    ///     other => panic!("unexpected: {other:?}"),
-    /// }
-    /// ```
     #[must_use]
-    pub fn discarded(self) -> Self {
+    pub(crate) fn discarded(self) -> Self {
         match self {
             Self::PartialExtraction { source, report, .. } => Self::PartialExtraction {
                 source,
@@ -768,6 +748,26 @@ impl ArchiveError {
 mod tests {
     use super::*;
     use std::assert_matches;
+
+    #[test]
+    fn test_discarded_marks_only_partial_extractions() {
+        let partial = ArchiveError::PartialExtraction {
+            source: Box::new(ArchiveError::violation("x".into())),
+            report: crate::ExtractionReport::default(),
+            writes: PartialWrites::Kept,
+        };
+        assert_matches!(
+            partial.discarded(),
+            ArchiveError::PartialExtraction {
+                writes: PartialWrites::Discarded,
+                ..
+            }
+        );
+        assert_matches!(
+            ArchiveError::violation("x".into()).discarded(),
+            ArchiveError::SecurityViolation { .. }
+        );
+    }
 
     #[test]
     fn test_error_display() {

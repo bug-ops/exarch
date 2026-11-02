@@ -193,16 +193,13 @@ impl ExtractTarget for SevenZHostTarget<'_> {
                 self.inner.copy_buffer_mut(),
                 file.permit,
             )?,
-            WriteMode::ReplaceRegular => {
-                std::fs::remove_file(&dest_path)?;
-                write_file_with_permit(
-                    reader,
-                    &dest_path,
-                    size,
-                    self.inner.copy_buffer_mut(),
-                    file.permit,
-                )?
-            }
+            WriteMode::ReplaceRegular => write_file_with_permit(
+                reader,
+                &dest_path,
+                size,
+                self.inner.copy_buffer_mut(),
+                file.permit,
+            )?,
         };
         tally.report.bytes_written =
             common::checked_add_bytes(tally.report.bytes_written, written)?;

@@ -11,6 +11,7 @@ use crate::security::fs_view::FsView;
 use crate::security::fs_view::HostFs;
 use crate::security::fs_view::ModelRoot as _;
 use crate::security::fs_view::PathModel;
+use crate::security::fs_view::blocked_parent_error;
 use crate::security::fs_view::paths_start_with;
 use std::borrow::Cow;
 use std::ffi::OsStr;
@@ -300,10 +301,14 @@ impl SafePath {
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => {
-                    return Err(ArchiveError::Io(std::io::Error::new(
-                        e.kind(),
-                        format!("failed to canonicalize parent: {e}"),
-                    )));
+                    return Err(
+                        blocked_parent_error(view, root, &final_path).unwrap_or_else(|| {
+                            ArchiveError::Io(std::io::Error::new(
+                                e.kind(),
+                                format!("failed to canonicalize parent: {e}"),
+                            ))
+                        }),
+                    );
                 }
             }
         }
@@ -325,10 +330,14 @@ impl SafePath {
                     }
                 }
                 Err(e) => {
-                    return Err(ArchiveError::Io(std::io::Error::new(
-                        e.kind(),
-                        format!("failed to canonicalize path: {e}"),
-                    )));
+                    return Err(
+                        blocked_parent_error(view, root, &final_path).unwrap_or_else(|| {
+                            ArchiveError::Io(std::io::Error::new(
+                                e.kind(),
+                                format!("failed to canonicalize path: {e}"),
+                            ))
+                        }),
+                    );
                 }
             }
         } else {

@@ -14,7 +14,6 @@ use crate::ProgressCallback;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::closed_enum::closed_enum;
-use crate::formats::detect::ArchiveType;
 use crate::security::fs_view::PathModel;
 use crate::security::permissions::SanitizedMode;
 use crate::sink::EntrySink;
@@ -147,54 +146,87 @@ impl MemoryEntry {
     }
 }
 
-/// The text of an entry path, or [`ArchiveError::InvalidArchive`] when it is
-/// not valid UTF-8: a lossy conversion could merge two distinct entries into
-/// one name.
+/// How [`extract_reader_to_memory`] validates and stores an archive.
 ///
-/// # Errors
-///
-/// Returns [`ArchiveError::InvalidArchive`] for a path that is not UTF-8.
+/// Every field has a default: the default [`SecurityConfig`] and
+/// [`SinkOptions`], the host path model, and a limit equal to the config's
+/// `max_total_size` (see [`MemoryLimit::from_config`]).
 ///
 /// # Examples
 ///
 /// ```
-/// use std::path::Path;
+/// use std::num::NonZeroU64;
 ///
-/// use exarch_core::utf8_entry_path;
+/// use exarch_core::MemoryExtractRequest;
+/// use exarch_core::MemoryLimit;
+/// use exarch_core::PathModel;
 ///
-/// assert_eq!(utf8_entry_path(Path::new("a/b.txt")).unwrap(), "a/b.txt");
+/// let request = MemoryExtractRequest::default()
+///     .with_limit(MemoryLimit::new(NonZeroU64::MIN))
+///     .with_path_model(PathModel::Portable);
+/// # let _ = request;
 /// ```
-pub fn utf8_entry_path(path: &Path) -> Result<&str> {
-    path.to_str().ok_or_else(|| {
-        ArchiveError::InvalidArchive(format!("entry path is not valid UTF-8: {}", path.display()))
-    })
+#[derive(Debug, Clone, Default)]
+pub struct MemoryExtractRequest {
+    config: SecurityConfig,
+    options: SinkOptions,
+    limit: Option<MemoryLimit>,
+    model: PathModel,
 }
 
-/// Extracts an archive held in memory into a [`MemorySink`].
+impl MemoryExtractRequest {
+    /// Validates against `config`.
+    #[must_use]
+    pub fn with_config(mut self, config: SecurityConfig) -> Self {
+        self.config = config;
+        self
+    }
+
+    /// Applies `options` to the extraction.
+    #[must_use]
+    pub const fn with_options(mut self, options: SinkOptions) -> Self {
+        self.options = options;
+        self
+    }
+
+    /// Caps the sink at `limit` instead of [`MemoryLimit::from_config`].
+    #[must_use]
+    pub const fn with_limit(mut self, limit: MemoryLimit) -> Self {
+        self.limit = Some(limit);
+        self
+    }
+
+    /// Validates against `model` instead of the host's path rules.
+    #[must_use]
+    pub const fn with_path_model(mut self, model: PathModel) -> Self {
+        self.model = model;
+        self
+    }
+}
+
+/// Extracts the archive in `reader` into a [`MemorySink`].
 ///
-/// The format is detected from the leading bytes unless `format` is given;
-/// `limit` defaults to [`MemoryLimit::from_config`]. A failure after entries
-/// were delivered reports [`PartialWrites::Discarded`](crate::PartialWrites):
-/// nothing is written to disk and the entries are dropped with the error.
+/// Build the reader with [`ArchiveReader::from_bytes`] for bytes in memory, or
+/// with [`ArchiveReader::detect`] and friends for a stream. A failure after
+/// entries were delivered reports
+/// [`PartialWrites::Discarded`](crate::PartialWrites): nothing is written to
+/// disk and the entries are dropped with the error.
 ///
 /// # Errors
 ///
 /// Returns the errors of
-/// [`extract_to_sink_with_progress`](crate::extract_to_sink_with_progress), and
-/// [`ArchiveError::UnknownFormat`] or a reader-format error when the
-/// format cannot be determined.
+/// [`extract_to_sink_with_progress`](crate::extract_to_sink_with_progress).
 ///
 /// # Examples
 ///
 /// ```
 /// use std::assert_matches;
 ///
+/// use exarch_core::ArchiveReader;
 /// use exarch_core::MemoryEntry;
+/// use exarch_core::MemoryExtractRequest;
 /// use exarch_core::NoopProgress;
-/// use exarch_core::PathModel;
-/// use exarch_core::SecurityConfig;
-/// use exarch_core::SinkOptions;
-/// use exarch_core::extract_bytes_to_memory;
+/// use exarch_core::extract_reader_to_memory;
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let mut builder = tar::Builder::new(Vec::new());
@@ -203,35 +235,32 @@ pub fn utf8_entry_path(path: &Path) -> Result<&str> {
 /// header.set_mode(0o644);
 /// builder.append_data(&mut header, "a.txt", &b"hi"[..])?;
 ///
-/// let (report, sink) = extract_bytes_to_memory(
-///     builder.into_inner()?,
-///     None,
-///     &SecurityConfig::default(),
-///     &SinkOptions::default(),
-///     None,
-///     PathModel::Host,
-///     &mut NoopProgress,
-/// )?;
+/// let reader = ArchiveReader::from_bytes(builder.into_inner()?, None)?;
+/// let (report, sink) =
+///     extract_reader_to_memory(reader, &MemoryExtractRequest::default(), &mut NoopProgress)?;
 /// assert_eq!(report.files_extracted, 1);
 /// let entries = sink.into_entries();
 /// assert_matches!(entries.values().next(), Some(MemoryEntry::File { .. }));
 /// # Ok(())
 /// # }
 /// ```
-pub fn extract_bytes_to_memory<B: AsRef<[u8]> + Send>(
-    bytes: B,
-    format: Option<ArchiveType>,
-    config: &SecurityConfig,
-    options: &SinkOptions,
-    limit: Option<MemoryLimit>,
-    model: PathModel,
+pub fn extract_reader_to_memory(
+    reader: ArchiveReader<'_>,
+    request: &MemoryExtractRequest,
     progress: &mut dyn ProgressCallback,
 ) -> Result<(ExtractionReport, MemorySink)> {
-    let reader = ArchiveReader::from_bytes(bytes, format)?;
-    let limit = limit.unwrap_or_else(|| MemoryLimit::from_config(config));
-    let mut sink = MemorySink::new(limit).with_path_model(model);
-    let report = crate::extract_to_sink_with_progress(reader, &mut sink, config, options, progress)
-        .map_err(ArchiveError::discarded)?;
+    let limit = request
+        .limit
+        .unwrap_or_else(|| MemoryLimit::from_config(&request.config));
+    let mut sink = MemorySink::new(limit).with_path_model(request.model);
+    let report = crate::extract_to_sink_with_progress(
+        reader,
+        &mut sink,
+        &request.config,
+        &request.options,
+        progress,
+    )
+    .map_err(ArchiveError::discarded)?;
     Ok((report, sink))
 }
 

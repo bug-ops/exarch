@@ -30,6 +30,7 @@ pub mod creation;
 pub mod error;
 pub mod formats;
 pub mod inspection;
+mod listed;
 #[cfg(test)]
 use exarch_testkit::raw_zip;
 pub mod reader;
@@ -141,6 +142,8 @@ pub use inspection::VerificationStatus;
 pub use security::fs_view::LinkKind;
 
 // Re-export security types
+pub use listed::ListedArchive;
+pub use listed::list_archive_for_extraction;
 pub use security::SanitizedMode;
 /// Summary statistics produced by the validation pipeline; see
 /// [`security::ValidationReport`].
@@ -162,13 +165,13 @@ pub use security::fs_view::PathModel;
 pub use sink::EntrySink;
 pub use sink::MemoryEntry;
 pub use sink::MemoryEntryKind;
+pub use sink::MemoryExtractRequest;
 pub use sink::MemoryFile;
 pub use sink::MemoryLimit;
 pub use sink::MemorySink;
 pub use sink::SinkFull;
 pub use sink::SinkOptions;
-pub use sink::extract_bytes_to_memory;
-pub use sink::utf8_entry_path;
+pub use sink::extract_reader_to_memory;
 
 // Re-export types module for easier access
 pub use types::DestDir;

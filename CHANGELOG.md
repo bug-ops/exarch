@@ -7,12 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Core: `list_archive_for_extraction` and `ListedArchive` reuse the list pass's decode for gz, bz2 and xz TAR up to 256 MiB, and `ArchiveReader::of_stream` opens a non-seekable TAR stream (#PRNUM).
+- Python: the in-memory functions accept binary file objects as well as bytes (#PRNUM).
+- Tests: the ZIP corpus builds a Windows Explorer archive on Windows CI, and a Windows 7-Zip reparse-point symlink test covers 7z (#PRNUM).
+
 ### Changed
 
 - Core: TAR and ZIP overwrite (`--force`) replaces the destination file through a sibling temp file and rename instead of writing through the existing inode (#819).
 - Core: ZIP verification of data-descriptor entries covers deflate and every scanned method without `--check-integrity`, and a descriptor must carry the entry's CRC-32 to end a scanned entry (#821).
 - Core: an overwritten file is now replaced even when read-only, needs a writable parent directory, loses its previous owner, ACLs and extended attributes, and takes `0666 & ~umask` when no mode is passed (#822).
 - **BREAKING:** `list`, `verify` and `extract` refuse TAR constructs that readers parse differently, with `InvalidArchive`: a directory, symlink or hardlink with a payload, GNU sparse entries, signed or control-character size and checksum fields, a `prefix` field without a ustar magic, duplicate, empty-key, over-long or `GNU.sparse.*` PAX records, PAX `path`/`linkpath` stacked with GNU long name/link records, and global PAX headers that override `path`, `linkpath` or `size`, are malformed, or follow a local header or a GNU long record (#820).
+- **BREAKING:** `extract_bytes_to_memory` is replaced by `MemoryExtractRequest` and `extract_reader_to_memory`; `utf8_entry_path` is removed and `ArchiveError::discarded` is crate-private (#PRNUM).
+- **BREAKING (bindings):** an entry below a dangling or looping symlink raises `SecurityViolation` instead of an I/O error, and below a contained non-directory link `SecurityViolation` instead of `SymlinkEscape` (#PRNUM).
+- `exarch extract` into an existing destination decodes a gz, bz2 or xz TAR once instead of twice (#PRNUM).
+
+### Fixed
+
+- `extract` and `verify` name the entry and the blocking file or symlink, with the same category, for an entry below a file, a dangling symlink or a looping symlink (#PRNUM).
+- 7z `--force` no longer deletes the existing file before the replacement is decoded (#PRNUM).
 
 ## [0.8.0] - 2026-11-02
 

@@ -2507,6 +2507,149 @@ fn test_extract_with_force_overwrites_conflicts() {
         .stdout(predicate::str::contains("Extraction complete"));
 }
 
+fn gzipped_tar(payload: &[u8]) -> Vec<u8> {
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
+
+    let mut builder = tar::Builder::new(Vec::new());
+    let mut header = tar::Header::new_gnu();
+    header.set_size(payload.len() as u64);
+    header.set_mode(0o644);
+    builder
+        .append_data(&mut header, "big.bin", payload)
+        .expect("append entry");
+    let tar_bytes = builder.into_inner().expect("finish tar");
+    let mut gz = GzEncoder::new(Vec::new(), Compression::default());
+    std::io::Write::write_all(&mut gz, &tar_bytes).expect("compress");
+    gz.finish().expect("finish gzip")
+}
+
+/// An entry under a file from the same archive names the entry and the file
+/// in `extract` and in `verify` alike (#804).
+#[test]
+fn test_extract_and_verify_name_an_entry_under_a_file() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let mut builder = tar::Builder::new(Vec::new());
+    for (name, kind) in [
+        ("x", tar::EntryType::Regular),
+        ("x/y/", tar::EntryType::Directory),
+    ] {
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(kind);
+        header.set_size(0);
+        header.set_mode(0o644);
+        builder
+            .append_data(&mut header, name, std::io::empty())
+            .expect("append entry");
+    }
+    let archive = temp.path().join("blocked.tar");
+    std::fs::write(&archive, builder.into_inner().expect("finish tar")).expect("write archive");
+    let text = "refusing to create x/y under the existing file at x";
+
+    exarch_cmd()
+        .arg("extract")
+        .arg(&archive)
+        .arg(temp.path().join("out"))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(text));
+    let verify = exarch_cmd().arg("verify").arg(&archive).assert().failure();
+    let output = verify.get_output();
+    let combined = [output.stdout.as_slice(), output.stderr.as_slice()].concat();
+    assert!(String::from_utf8_lossy(&combined).contains(text));
+}
+
+fn names_in(dir: &std::path::Path) -> Vec<std::ffi::OsString> {
+    let mut names: Vec<_> = std::fs::read_dir(dir)
+        .expect("read destination")
+        .map(|e| e.expect("dir entry").file_name())
+        .collect();
+    names.sort();
+    names
+}
+
+/// Corrupt deflate data inside an entry payload is refused by the list pass
+/// of an extraction into an existing destination, which must then hold
+/// nothing new (#807).
+#[test]
+fn test_extract_existing_dest_corrupt_payload_leaves_nothing_new() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let mut bytes = gzipped_tar(&vec![b'q'; 64 * 1024]);
+    let middle = bytes.len() / 2;
+    bytes[middle] ^= 0xff;
+    let archive = temp.path().join("corrupt.tar.gz");
+    std::fs::write(&archive, bytes).expect("write archive");
+    let out = temp.path().join("out");
+    std::fs::create_dir(&out).expect("create destination");
+
+    exarch_cmd()
+        .arg("extract")
+        .arg(&archive)
+        .arg(&out)
+        .assert()
+        .failure();
+
+    assert!(names_in(&out).is_empty());
+}
+
+/// A gzip trailer that fails its CRC after the TAR data is accepted by a
+/// fresh destination, so an existing one must agree (#807).
+#[test]
+fn test_extract_existing_dest_matches_fresh_for_a_bad_gzip_trailer() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let mut bytes = gzipped_tar(b"payload");
+    let crc_at = bytes.len() - 8;
+    bytes[crc_at] ^= 0xff;
+    let archive = temp.path().join("badcrc.tar.gz");
+    std::fs::write(&archive, bytes).expect("write archive");
+    let existing = temp.path().join("existing");
+    std::fs::create_dir(&existing).expect("create destination");
+
+    let run = |dest: &std::path::Path| {
+        exarch_cmd()
+            .arg("extract")
+            .arg(&archive)
+            .arg(dest)
+            .assert()
+            .get_output()
+            .status
+            .success()
+    };
+
+    let existing_ok = run(&existing);
+    let fresh_ok = run(&temp.path().join("fresh"));
+
+    assert_eq!(existing_ok, fresh_ok);
+}
+
+/// Extraction into an existing destination replays the list pass's decode and
+/// still extracts every entry, with and without a progress-driving listing.
+#[test]
+fn test_extract_existing_dest_extracts_a_compressed_tar() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("ok.tar.gz");
+    std::fs::write(&archive, gzipped_tar(b"payload")).expect("write archive");
+    let out = temp.path().join("out");
+    std::fs::create_dir(&out).expect("create destination");
+
+    exarch_cmd()
+        .arg("extract")
+        .arg(&archive)
+        .arg(&out)
+        .assert()
+        .success();
+
+    assert_eq!(std::fs::read(out.join("big.bin")).unwrap(), b"payload");
+
+    exarch_cmd()
+        .arg("extract")
+        .arg(&archive)
+        .arg(&out)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("already exist"));
+}
+
 /// Regression test for #500: the pre-flight destination-conflict error must
 /// cap the number of individually listed paths rather than dumping one line
 /// per conflicting file.

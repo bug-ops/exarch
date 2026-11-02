@@ -386,6 +386,27 @@ fn java_producers(src: &Path, out: &Path) -> usize {
     made
 }
 
+/// Shell.Application `CopyHere` is what Windows Explorer's "Send to compressed
+/// folder" uses; it copies asynchronously, so wait for the archive to settle.
+#[cfg(windows)]
+fn explorer_script(src: &Path, zip: &Path) -> String {
+    format!(
+        "$zip = '{zip}'; \
+         [System.IO.File]::WriteAllBytes($zip, [byte[]](80,75,5,6 + (,0 * 18))); \
+         $shell = New-Object -ComObject Shell.Application; \
+         $shell.NameSpace($zip).CopyHere($shell.NameSpace('{src}').Items(), 20); \
+         $last = -1; $stable = 0; \
+         for ($i = 0; $i -lt 120 -and $stable -lt 4; $i++) {{ \
+           Start-Sleep -Milliseconds 500; \
+           $len = (Get-Item $zip).Length; \
+           if ($len -eq $last -and $len -gt 22) {{ $stable++ }} else {{ $stable = 0; $last = $len }} \
+         }}; \
+         if ($stable -lt 4) {{ throw 'Explorer zip did not settle' }}",
+        zip = zip.display(),
+        src = src.display()
+    )
+}
+
 #[cfg(windows)]
 fn windows_producers(src: &Path, out: &Path) -> usize {
     let shell = ["pwsh", "powershell"]
@@ -410,6 +431,7 @@ fn windows_producers(src: &Path, out: &Path) -> usize {
             src.display(),
             out.join("dotnet.zip").display()
         ),
+        explorer_script(src, &out.join("explorer.zip")),
     ];
     for script in &scripts {
         run(Command::new(shell).args(["-NoProfile", "-Command", script]));

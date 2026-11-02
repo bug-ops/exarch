@@ -44,6 +44,7 @@ use crate::security::fs_view::Containment;
 use crate::security::fs_view::FsView;
 use crate::security::fs_view::HostFs;
 use crate::security::fs_view::Occupant;
+use crate::security::fs_view::blocked_parent_error;
 use crate::security::permissions::SanitizedMode;
 use crate::security::quota::QuotaPermit;
 use crate::types::DestDir;
@@ -751,7 +752,9 @@ fn check_directory_occupant(dir_path: &Path, rel: &Path, dest: &DestDir) -> Resu
     let file_type = match std::fs::symlink_metadata(&dir_path) {
         Ok(metadata) => metadata.file_type(),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e.into()),
+        Err(e) => {
+            return Err(blocked_parent_error(&HostFs, dest, rel).unwrap_or_else(|| e.into()));
+        }
     };
     if file_type.is_dir() {
         return Ok(());

@@ -10,6 +10,7 @@ mod buffer;
 mod config;
 mod error;
 mod report;
+mod stream;
 
 use config::PyCreationConfig;
 use config::PyExtractionOptions;

@@ -24,6 +24,7 @@ use crate::PolicySetting;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::config::Validated;
+use crate::security::fs_view::ParentBlocker;
 use crate::types::DestDir;
 
 /// What an existing symlink among the parent components may be.
@@ -64,25 +65,14 @@ impl DirWalker {
     ///
     /// # Errors
     ///
-    /// Returns `SecurityViolation` for a symlink component the policy refuses,
-    /// `SymlinkEscape` for one that leaves `dest`, `PathTraversal` for a
-    /// non-relative `rel`, and an I/O error when a component is not a
-    /// directory or cannot be created.
+    /// Returns `SecurityViolation` for a symlink component the policy refuses
+    /// or one that dangles or does not resolve to a directory, `SymlinkEscape`
+    /// for one that leaves `dest`, `PathTraversal` for a non-relative `rel`,
+    /// and an I/O error when a component is a file or cannot be created. A
+    /// blocking component is reported against `rel` with the same text and
+    /// category as `verify`.
     pub fn ensure_dir(self, dest: &DestDir, rel: &Path) -> Result<()> {
-        let mut current = dest.as_path().to_path_buf();
-        for component in rel.components() {
-            match component {
-                Component::Normal(name) => current.push(name),
-                Component::CurDir => continue,
-                Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
-                    return Err(ArchiveError::PathTraversal {
-                        path: rel.to_path_buf(),
-                    });
-                }
-            }
-            self.vet_or_create(dest, &current)?;
-        }
-        Ok(())
+        self.walk(dest, rel, rel)
     }
 
     /// Creates the parent directory of `dest/rel` like [`Self::ensure_dir`].
@@ -92,16 +82,33 @@ impl DirWalker {
     /// Same as [`Self::ensure_dir`].
     pub fn ensure_parent(self, dest: &DestDir, rel: &Path) -> Result<()> {
         rel.parent()
-            .map_or(Ok(()), |parent| self.ensure_dir(dest, parent))
+            .map_or(Ok(()), |parent| self.walk(dest, parent, rel))
     }
 
-    fn vet_or_create(self, dest: &DestDir, dir: &Path) -> Result<()> {
+    fn walk(self, dest: &DestDir, dir: &Path, entry: &Path) -> Result<()> {
+        let mut current = dest.as_path().to_path_buf();
+        for component in dir.components() {
+            match component {
+                Component::Normal(name) => current.push(name),
+                Component::CurDir => continue,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                    return Err(ArchiveError::PathTraversal {
+                        path: dir.to_path_buf(),
+                    });
+                }
+            }
+            self.vet_or_create(dest, &current, entry)?;
+        }
+        Ok(())
+    }
+
+    fn vet_or_create(self, dest: &DestDir, dir: &Path, entry: &Path) -> Result<()> {
         match fs::symlink_metadata(dir) {
-            Ok(meta) => self.vet(dest, dir, meta.file_type()),
+            Ok(meta) => self.vet(dest, dir, entry, meta.file_type()),
             Err(e) if e.kind() == io::ErrorKind::NotFound => match fs::create_dir(dir) {
                 Ok(()) => Ok(()),
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-                    self.vet(dest, dir, fs::symlink_metadata(dir)?.file_type())
+                    self.vet(dest, dir, entry, fs::symlink_metadata(dir)?.file_type())
                 }
                 Err(e) => Err(e.into()),
             },
@@ -109,35 +116,26 @@ impl DirWalker {
         }
     }
 
-    fn vet(self, dest: &DestDir, dir: &Path, file_type: fs::FileType) -> Result<()> {
+    fn vet(self, dest: &DestDir, dir: &Path, entry: &Path, file_type: fs::FileType) -> Result<()> {
+        let parent = relative_to(dest, dir);
         if file_type.is_dir() {
             return Ok(());
         }
         if !file_type.is_symlink() {
-            return Err(io::Error::new(
-                io::ErrorKind::NotADirectory,
-                format!("not a directory: {}", relative_to(dest, dir).display()),
-            )
-            .into());
+            return Err(ParentBlocker::File.error(entry, &parent));
         }
         match self.links {
             LinkPolicy::Refuse => Err(ArchiveError::relaxable_violation(
                 PolicySetting::Symlinks,
-                format!(
-                    "path component is a symlink: {}",
-                    relative_to(dest, dir).display()
-                ),
+                format!("path component is a symlink: {}", parent.display()),
             )),
-            LinkPolicy::ContainedOnly => {
-                let resolved = fs::canonicalize(dir)?;
-                if resolved.starts_with(dest.as_path()) && resolved.is_dir() {
-                    Ok(())
-                } else {
-                    Err(ArchiveError::SymlinkEscape {
-                        path: relative_to(dest, dir),
-                    })
+            LinkPolicy::ContainedOnly => match fs::canonicalize(dir) {
+                Ok(resolved) if !resolved.starts_with(dest.as_path()) => {
+                    Err(ParentBlocker::Escape.error(entry, &parent))
                 }
-            }
+                Ok(resolved) if resolved.is_dir() => Ok(()),
+                Ok(_) | Err(_) => Err(ParentBlocker::Symlink.error(entry, &parent)),
+            },
         }
     }
 }

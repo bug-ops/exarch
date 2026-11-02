@@ -540,6 +540,95 @@ impl Occupant {
     }
 }
 
+/// What stops an entry's parent chain from being a directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParentBlocker {
+    /// A parent component is a file.
+    File,
+    /// A parent component is a symlink that dangles, loops or does not resolve
+    /// to a directory.
+    Symlink,
+    /// A parent component is a symlink that resolves outside the root.
+    Escape,
+}
+
+impl ParentBlocker {
+    /// The error for creating `entry` under the blocking component `parent`;
+    /// the single source of text and category for extraction and `verify`.
+    pub(crate) fn error(self, entry: &Path, parent: &Path) -> ArchiveError {
+        let parent: PathBuf = parent.components().collect();
+        let refusal = |noun: &str| {
+            format!(
+                "refusing to create {} under the existing {noun} at {}",
+                entry.components().collect::<PathBuf>().display(),
+                parent.display()
+            )
+        };
+        match self {
+            Self::File => ArchiveError::Io(io::Error::new(
+                io::ErrorKind::NotADirectory,
+                refusal(Occupant::File.noun()),
+            )),
+            Self::Symlink => ArchiveError::violation(refusal(Occupant::Symlink.noun())),
+            Self::Escape => ArchiveError::SymlinkEscape { path: parent },
+        }
+    }
+}
+
+/// A parent component that stopped an entry from being placed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockedParent {
+    entry: PathBuf,
+    parent: PathBuf,
+    blocker: ParentBlocker,
+}
+
+impl BlockedParent {
+    pub(crate) fn error(&self) -> ArchiveError {
+        self.blocker.error(&self.entry, &self.parent)
+    }
+}
+
+/// The first parent of `rel` that is not a directory `rel` can be created in,
+/// looked up through `view`. `None` when no parent is to blame, including a
+/// parent that cannot be inspected.
+pub fn first_blocking_ancestor<V: FsView>(
+    view: &V,
+    root: &V::Root,
+    rel: &Path,
+) -> Option<(PathBuf, ParentBlocker)> {
+    let mut prefix = PathBuf::new();
+    for component in rel.parent()?.components() {
+        prefix.push(component);
+        let full = root.as_path().join(&prefix);
+        let blocker = if view.is_symlink(&full).ok()? {
+            match view.canonicalize(&full, root) {
+                Ok(Containment::Within(resolved)) if view.is_dir(&resolved) => continue,
+                Ok(Containment::Escapes) => ParentBlocker::Escape,
+                Ok(Containment::Within(_)) | Err(_) => ParentBlocker::Symlink,
+            }
+        } else if view.is_dir(&full) {
+            continue;
+        } else if view.exists(&full) {
+            ParentBlocker::File
+        } else {
+            return None;
+        };
+        return Some((prefix, blocker));
+    }
+    None
+}
+
+/// The refusal for `rel` when [`first_blocking_ancestor`] finds a parent to
+/// blame for a failed probe of `rel`.
+pub fn blocked_parent_error<V: FsView>(
+    view: &V,
+    root: &V::Root,
+    rel: &Path,
+) -> Option<ArchiveError> {
+    first_blocking_ancestor(view, root, rel).map(|(parent, blocker)| blocker.error(rel, &parent))
+}
+
 /// A failed [`VirtualTree::try_insert`].
 #[derive(Debug)]
 pub struct Conflict {
@@ -547,6 +636,8 @@ pub struct Conflict {
     pub(crate) error: io::Error,
     /// `None` when the failure is in the parent chain, not at the path itself.
     pub(crate) occupant: Option<Occupant>,
+    /// Set when a parent component blocks the entry.
+    pub(crate) blocked: Option<BlockedParent>,
 }
 
 impl Conflict {
@@ -554,6 +645,7 @@ impl Conflict {
         Self {
             error: io::Error::from(io::ErrorKind::AlreadyExists),
             occupant: Some(occupant),
+            blocked: None,
         }
     }
 
@@ -563,6 +655,33 @@ impl Conflict {
         Self {
             error: io::Error::new(io::ErrorKind::AlreadyExists, occupant.refusal(rel)),
             occupant: Some(occupant),
+            blocked: None,
+        }
+    }
+
+    fn blocked_parent(
+        error: io::Error,
+        entry: &Path,
+        parent: &Path,
+        blocker: ParentBlocker,
+    ) -> Self {
+        Self {
+            error,
+            occupant: None,
+            blocked: Some(BlockedParent {
+                entry: entry.to_path_buf(),
+                parent: parent.to_path_buf(),
+                blocker,
+            }),
+        }
+    }
+
+    /// The error extraction reports: the entry-naming refusal for a blocked
+    /// parent, the plain I/O error otherwise.
+    pub(crate) fn into_archive_error(self) -> ArchiveError {
+        match self.blocked {
+            Some(blocked) => blocked.error(),
+            None => ArchiveError::Io(self.error),
         }
     }
 }
@@ -572,6 +691,7 @@ impl From<io::Error> for Conflict {
         Self {
             error,
             occupant: None,
+            blocked: None,
         }
     }
 }
@@ -900,7 +1020,7 @@ impl VirtualTree {
         let Some(name) = rel.file_name() else {
             return Ok(None);
         };
-        let parent = self.ensure_dir(rel.parent().unwrap_or_else(|| Path::new("")))?;
+        let parent = self.ensure_dir(rel.parent().unwrap_or_else(|| Path::new("")), rel)?;
         let existing = self.lookup(parent, name);
         if let Some(found) = existing {
             self.settle_alias(parent, found, name, &node, rel, false)?;
@@ -943,6 +1063,7 @@ impl VirtualTree {
                 Node::Dir => Err(Conflict {
                     error: io::Error::from(io::ErrorKind::IsADirectory),
                     occupant: Some(Occupant::Directory),
+                    blocked: None,
                 }),
                 Node::Symlink(_) | Node::OpaqueSymlink => {
                     Err(Conflict::already_exists(Occupant::Symlink))
@@ -1109,16 +1230,24 @@ impl VirtualTree {
         Ok(id)
     }
 
-    fn ensure_dir(&mut self, rel: &Path) -> Result<usize, PlaceError> {
+    fn ensure_dir(&mut self, dir: &Path, entry: &Path) -> Result<usize, PlaceError> {
         let mut current = ROOT;
         let mut walked = PathBuf::new();
-        for component in rel.components() {
+        for component in dir.components() {
             let name = match component {
                 Component::Normal(name) => name,
                 Component::CurDir => continue,
                 _ => return Err(io::Error::from(io::ErrorKind::InvalidInput).into()),
             };
             walked.push(name);
+            let blocked = |kind: io::ErrorKind, blocker: ParentBlocker| {
+                PlaceError::Conflict(Conflict::blocked_parent(
+                    io::Error::from(kind),
+                    entry,
+                    &walked,
+                    blocker,
+                ))
+            };
             current = match self.lookup(current, name) {
                 None => self.add_child(current, name, Node::Dir)?,
                 Some(found) => {
@@ -1126,15 +1255,21 @@ impl VirtualTree {
                     match self.node(found.id).kind {
                         Node::Dir => found.id,
                         Node::File => {
-                            return Err(io::Error::from(io::ErrorKind::NotADirectory).into());
+                            return Err(blocked(io::ErrorKind::NotADirectory, ParentBlocker::File));
                         }
                         Node::OpaqueSymlink => return Err(unread_target_error().into()),
-                        Node::Symlink(_) => match self.resolve(&self.root.join(&walked))? {
-                            Resolved::Inside { id, .. } if self.node(id).kind == Node::Dir => id,
-                            Resolved::Inside { .. } => {
-                                return Err(io::Error::from(io::ErrorKind::NotADirectory).into());
+                        Node::Symlink(_) => match self.resolve(&self.root.join(&walked)) {
+                            Ok(Resolved::Inside { id, .. }) if self.node(id).kind == Node::Dir => {
+                                id
                             }
-                            Resolved::Outside => {
+                            Ok(Resolved::Inside { .. }) => {
+                                return Err(blocked(
+                                    io::ErrorKind::NotADirectory,
+                                    ParentBlocker::Symlink,
+                                ));
+                            }
+                            Err(e) => return Err(blocked(e.kind(), ParentBlocker::Symlink)),
+                            Ok(Resolved::Outside) => {
                                 return Err(
                                     io::Error::other("path leaves the extraction root").into()
                                 );
@@ -2176,5 +2311,169 @@ mod tests {
                 .canonicalize(&temp.path().join("nope"), &root)
                 .is_err()
         );
+    }
+
+    fn classified(err: ArchiveError) -> (&'static str, String) {
+        match err {
+            ArchiveError::Io(e) => ("io", e.to_string()),
+            ArchiveError::SecurityViolation { reason, .. } => ("violation", reason),
+            ArchiveError::SymlinkEscape { path } => ("escape", path.display().to_string()),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn blocker_text_and_category_are_shared() {
+        let entry = Path::new("x/./y/z");
+        let parent = Path::new("x");
+
+        let (kind, text) = classified(ParentBlocker::File.error(entry, parent));
+        assert_eq!(kind, "io");
+        assert!(text.ends_with("refusing to create x/y/z under the existing file at x"));
+        let (kind, text) = classified(ParentBlocker::Symlink.error(entry, parent));
+        assert_eq!(kind, "violation");
+        assert!(text.contains("refusing to create x/y/z under the existing symlink at x"));
+        assert_eq!(
+            classified(ParentBlocker::Escape.error(entry, parent)),
+            ("escape", "x".to_owned())
+        );
+    }
+
+    fn blocked_conflict(t: &mut VirtualTree, path: &str) -> Conflict {
+        t.try_insert(Path::new(path), Node::File)
+            .unwrap_err()
+            .into_conflict()
+    }
+
+    #[test]
+    fn tree_names_a_file_parent() {
+        let mut t = tree();
+        put(&mut t, "x", Node::File);
+
+        let conflict = blocked_conflict(&mut t, "x/a/f");
+
+        assert_eq!(conflict.occupant, None);
+        let (kind, text) = classified(conflict.into_archive_error());
+        assert_eq!(kind, "io");
+        assert!(text.ends_with("refusing to create x/a/f under the existing file at x"));
+    }
+
+    #[test]
+    fn tree_names_a_symlink_parent_that_dangles_loops_or_hits_a_file() {
+        for (target, file) in [("t", None), ("x", None), ("t", Some("t"))] {
+            let mut t = tree();
+            if let Some(file) = file {
+                put(&mut t, file, Node::File);
+            }
+            put(&mut t, "x", sym(target));
+
+            let conflict = blocked_conflict(&mut t, "x/f");
+
+            let (kind, text) = classified(conflict.into_archive_error());
+            assert_eq!(kind, "violation", "{target}");
+            assert!(text.contains("refusing to create x/f under the existing symlink at x"));
+        }
+    }
+
+    #[test]
+    fn tree_keeps_a_parent_that_leaves_the_root_out_of_the_blocker() {
+        let mut t = tree();
+        put(&mut t, "up", sym(".."));
+
+        assert!(blocked_conflict(&mut t, "up/f").blocked.is_none());
+    }
+
+    #[test]
+    fn plain_conflict_converts_to_its_io_error() {
+        let conflict = Conflict::already_exists(Occupant::File);
+
+        assert_eq!(classified(conflict.into_archive_error()).0, "io");
+    }
+
+    #[cfg(unix)]
+    mod host_ancestors {
+        use super::*;
+        use std::os::unix::fs::symlink;
+
+        fn host() -> (tempfile::TempDir, DestDir, PathBuf) {
+            let temp = tempfile::TempDir::new().unwrap();
+            let dest = temp.path().join("dest");
+            let outside = temp.path().join("outside");
+            std::fs::create_dir(&dest).unwrap();
+            std::fs::create_dir(&outside).unwrap();
+            std::fs::write(outside.join("f"), b"x").unwrap();
+            let root = DestDir::new(dest).unwrap();
+            (temp, root, outside.canonicalize().unwrap())
+        }
+
+        fn blocker(root: &DestDir, rel: &str) -> Option<(PathBuf, ParentBlocker)> {
+            first_blocking_ancestor(&HostFs, root, Path::new(rel))
+        }
+
+        fn found(name: &str, blocker: ParentBlocker) -> (PathBuf, ParentBlocker) {
+            (PathBuf::from(name), blocker)
+        }
+
+        #[test]
+        fn finds_each_kind_of_blocker() {
+            let (_temp, root, outside) = host();
+            let dest = root.as_path();
+            std::fs::write(dest.join("file"), b"x").unwrap();
+            std::fs::create_dir(dest.join("real")).unwrap();
+            symlink("missing", dest.join("dangling")).unwrap();
+            symlink("loop", dest.join("loop")).unwrap();
+            symlink("file", dest.join("to_file")).unwrap();
+            symlink("real", dest.join("ok")).unwrap();
+            symlink(outside.join("f"), dest.join("out_file")).unwrap();
+            symlink(&outside, dest.join("out_dir")).unwrap();
+
+            assert_eq!(
+                blocker(&root, "file/a/b"),
+                Some(found("file", ParentBlocker::File))
+            );
+            assert_eq!(
+                blocker(&root, "dangling/a"),
+                Some(found("dangling", ParentBlocker::Symlink))
+            );
+            assert_eq!(
+                blocker(&root, "loop/a/b"),
+                Some(found("loop", ParentBlocker::Symlink))
+            );
+            assert_eq!(
+                blocker(&root, "to_file/a"),
+                Some(found("to_file", ParentBlocker::Symlink))
+            );
+            assert_eq!(
+                blocker(&root, "out_file/a/b"),
+                Some(found("out_file", ParentBlocker::Escape))
+            );
+            assert_eq!(
+                blocker(&root, "out_dir/a/b"),
+                Some(found("out_dir", ParentBlocker::Escape))
+            );
+            assert_eq!(blocker(&root, "ok/a/b"), None);
+            assert_eq!(blocker(&root, "real/missing/b"), None);
+            assert_eq!(blocker(&root, "missing/a/b"), None);
+            assert_eq!(blocker(&root, "top"), None);
+        }
+
+        #[test]
+        fn an_uninspectable_prefix_blames_nobody() {
+            use std::os::unix::fs::PermissionsExt;
+
+            let (_temp, root, _) = host();
+            let locked = root.as_path().join("locked");
+            std::fs::create_dir(&locked).unwrap();
+            std::fs::write(locked.join("f"), b"x").unwrap();
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+            let readable = std::fs::metadata(locked.join("f")).is_ok();
+
+            let result = blocker(&root, "locked/f/x");
+
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+            if !readable {
+                assert_eq!(result, None);
+            }
+        }
     }
 }

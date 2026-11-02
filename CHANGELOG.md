@@ -23,13 +23,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **BREAKING:** `extract_bytes_to_memory` is replaced by `MemoryExtractRequest` and `extract_reader_to_memory`; `utf8_entry_path` is removed and `ArchiveError::discarded` is crate-private (#828).
 - **BREAKING (bindings):** an entry below a dangling or looping symlink raises `SecurityViolation` instead of an I/O error, and below a contained non-directory link `SecurityViolation` instead of `SymlinkEscape` (#828).
 - `exarch extract` into an existing destination decodes a gz, bz2 or xz TAR once instead of twice (#828).
+- **BREAKING:** `list`, `verify` and `extract` refuse non-canonical checksum or size fields in TAR `x`, `L` and `K` headers, non-canonical local PAX record framing and the PAX `SCHILY.realsize` record, with `InvalidArchive` (#829).
 
 ### Fixed
 
 - `extract` and `verify` name the entry and the blocking file or symlink, with the same category, for an entry below a file, a dangling symlink or a looping symlink (#828).
 - 7z `--force` no longer deletes the existing file before the replacement is decoded (#828).
-- **BREAKING:** `list`, `verify` and `extract` refuse non-canonical checksum or size fields in TAR `x`, `L` and `K` headers, non-canonical local PAX record framing and the PAX `SCHILY.realsize` record, with `InvalidArchive`.
-- **BREAKING:** `list`, `verify` and `extract` refuse non-canonical checksum or size fields in TAR `x`, `L` and `K` headers, non-canonical local PAX record framing and the PAX `SCHILY.realsize` record, with `InvalidArchive` (#829).
 
 ## [0.8.0] - 2026-11-02
 

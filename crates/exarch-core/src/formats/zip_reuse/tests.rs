@@ -377,3 +377,44 @@ fn an_archive_opened_for_another_policy_is_not_served() {
     assert!(skipped.serves(&ignoring));
     assert!(!skipped.serves(&config));
 }
+
+struct FailsAfter {
+    inner: Cursor<Vec<u8>>,
+    reads_left: usize,
+}
+
+impl Read for FailsAfter {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.reads_left == 0 {
+            return Err(io::Error::from_raw_os_error(5));
+        }
+        self.reads_left -= 1;
+        self.inner.read(buf)
+    }
+}
+
+impl Seek for FailsAfter {
+    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        self.inner.seek(pos)
+    }
+}
+
+#[test]
+fn a_source_fault_while_opening_keeps_its_errno() {
+    let bytes = deflated_zip(4);
+    let config = SecurityConfig::default().validate().unwrap();
+    let mut seen = false;
+    for reads_left in 0..40 {
+        let reader = FailsAfter {
+            inner: Cursor::new(bytes.clone()),
+            reads_left,
+        };
+        if let Err(crate::ArchiveError::Io(error)) =
+            ZipArchive::for_extraction(reader, &config, DecodeReuse::Off)
+        {
+            assert_eq!(error.raw_os_error(), Some(5), "after {reads_left} reads");
+            seen = true;
+        }
+    }
+    assert!(seen, "no read fault surfaced as an I/O error");
+}

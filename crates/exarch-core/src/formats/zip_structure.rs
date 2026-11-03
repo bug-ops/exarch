@@ -110,6 +110,7 @@ use super::chunk_search::ChunkSource;
 use super::chunk_search::Flow;
 use super::chunk_search::search_chunks;
 use super::common;
+use super::source_fault::FaultSlot;
 use super::zip::ZipMethod;
 use super::zip::admit_zip_entry;
 use super::zip::is_password_required;
@@ -352,7 +353,7 @@ fn slot_of(finding: &ZipInconsistency) -> Slot {
 #[derive(Debug)]
 pub struct Shared<R> {
     reader: Arc<Mutex<Windowed<R>>>,
-    fault: Arc<Mutex<Option<(std::io::ErrorKind, String)>>>,
+    fault: FaultSlot,
 }
 
 impl<R> Shared<R> {
@@ -360,7 +361,7 @@ impl<R> Shared<R> {
     pub fn new(reader: R) -> Self {
         Self {
             reader: Arc::new(Mutex::new(Windowed::new(reader))),
-            fault: Arc::new(Mutex::new(None)),
+            fault: FaultSlot::default(),
         }
     }
 
@@ -369,17 +370,15 @@ impl<R> Shared<R> {
     }
 
     fn note(&self, error: std::io::Error) -> std::io::Error {
-        let mut fault = self.fault.lock().unwrap_or_else(PoisonError::into_inner);
-        fault.get_or_insert_with(|| (error.kind(), error.to_string()));
+        self.fault.record(&error);
         error
     }
 
     /// The first error the reader raised, if any.
     fn take_fault(&self) -> Option<std::io::Error> {
-        let mut fault = self.fault.lock().unwrap_or_else(PoisonError::into_inner);
+        let fault = self.fault.get();
+        self.fault.clear();
         fault
-            .take()
-            .map(|(kind, message)| std::io::Error::new(kind, message))
     }
 }
 
@@ -387,7 +386,7 @@ impl<R> Clone for Shared<R> {
     fn clone(&self) -> Self {
         Self {
             reader: Arc::clone(&self.reader),
-            fault: Arc::clone(&self.fault),
+            fault: self.fault.clone(),
         }
     }
 }

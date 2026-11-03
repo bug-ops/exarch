@@ -36,21 +36,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Core: a file created with a mode is created owner-only and then set to the exact mode (#842).
 - Node: `index.d.ts` uses `AsyncIterable`, which needs the `es2018` lib (#842).
 - `exarch extract --atomic` decodes a TAR once, so a refusal now arrives as a `rolled_back` partial report instead of a pre-write error, and its progress bar has no total (#842).
-- **BREAKING:** `ArchiveError::TarAmbiguity(TarAmbiguity)` (`#[non_exhaustive]`) replaces the `InvalidArchive` string for TAR header ambiguities; its `code` and FFI kind stay `InvalidArchive`, `context()` is `None` and the message text is unchanged (#PR).
-- Core: the extension allowlist is applied after path validation and before quota in TAR, ZIP, 7z and list; skipped entries no longer count against `max_total_size`, the list pass charges them to `max_file_count` only, and TAR and ZIP now validate the path of a skipped entry like 7z, so a disallowed `../x.bin` or an entry below an existing file or dangling symlink is refused instead of skipped; ZIP still skips a disallowed high-ratio entry, which 7z refuses (#PR).
-- Core: the ZIP and 7z extraction proof tokens are bound to their archive and the validated-file proof is built only by the validator (internal) (#PR).
-- Core: an entry below a planted symlink that leaves the destination fails with `SymlinkEscape` instead of `PathTraversal` during extraction, as `verify` already reports (#PR).
-- Dependencies: `half` is pinned to 2.4.1 with a Dependabot ignore, which drops the duplicate `syn` 2, `zerocopy` and `zerocopy-derive` (#PR).
+- **BREAKING:** `ArchiveError::TarAmbiguity(TarAmbiguity)` (`#[non_exhaustive]`) replaces the `InvalidArchive` string for TAR header ambiguities; its `code` and FFI kind stay `InvalidArchive`, `context()` is `None` and the message text is unchanged (#846).
+- Core: the extension allowlist is applied after path validation and before quota in TAR, ZIP, 7z and list; skipped entries no longer count against `max_total_size`, the list pass charges them to `max_file_count` only, and TAR and ZIP now validate the path of a skipped entry like 7z, so a disallowed `../x.bin` or an entry below an existing file or dangling symlink is refused instead of skipped; ZIP still skips a disallowed high-ratio entry, which 7z refuses (#846).
+- Core: the ZIP and 7z extraction proof tokens are bound to their archive and the validated-file proof is built only by the validator (internal) (#846).
+- Core: an entry below a planted symlink that leaves the destination fails with `SymlinkEscape` instead of `PathTraversal` during extraction, as `verify` already reports (#846).
+- Dependencies: `half` is pinned to 2.4.1 with a Dependabot ignore, which drops the duplicate `syn` 2, `zerocopy` and `zerocopy-derive` (#846).
 
 ### Fixed
 
 - `extract` and `verify` name the entry and the blocking file or symlink, with the same category, for an entry below a file, a dangling symlink or a looping symlink (#828).
 - 7z `--force` no longer deletes the existing file before the replacement is decoded (#828).
 - A hardlink copy takes the sanitized mode of its target, so a pre-existing setuid, setgid or world-writable target no longer yields a wider copy (#842).
-- Core: small-file extraction no longer resolves every parent path with `realpath` on Unix and WASI, because the pinned directory walk already checks each component at write time; the 11-15% slowdown on archives with many small files drops to about 3% (#836, #PR).
-- Core: path containment is compared case-sensitively on macOS, so a planted symlink to a case-variant sibling of the destination is refused (#PR).
-- Core and CLI: `extract --allowed-extensions` extracts the same files from 7z, ZIP and TAR whatever the destination state, and entries it skips leave no directories behind (#831, #PR).
-- Core and CLI: a pre-existing dangling or file-pointing symlink in the destination is refused as not relaxable instead of suggesting `--allow-symlinks` (#835, #PR).
+- Core: small-file extraction no longer resolves every parent path with `realpath` on Unix and WASI, because the pinned directory walk already checks each component at write time; the 11-15% slowdown on archives with many small files drops to about 3% (#836, #846).
+- Core: path containment is compared case-sensitively on macOS, so a planted symlink to a case-variant sibling of the destination is refused (#846).
+- Core and CLI: `extract --allowed-extensions` extracts the same files from 7z, ZIP and TAR whatever the destination state, and entries it skips leave no directories behind (#831, #846).
+- Core and CLI: a pre-existing dangling or file-pointing symlink in the destination is refused as not relaxable instead of suggesting `--allow-symlinks` (#835, #846).
 
 ## [0.8.0] - 2026-11-02
 

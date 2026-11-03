@@ -448,6 +448,10 @@ mod imp {
 
         /// Opens `path`, which the caller has canonicalized. A reparse point at
         /// `path` is not followed and is refused.
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "opens the destination root itself; no directory handle exists yet"
+        )]
         pub(super) fn open_path(path: &Path) -> io::Result<Self> {
             let file = std::fs::OpenOptions::new()
                 .access_mode(DIR_ACCESS)

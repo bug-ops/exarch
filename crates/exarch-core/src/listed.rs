@@ -115,6 +115,7 @@ struct Spool {
 /// # Examples
 ///
 /// ```
+/// use exarch_core::DecodeReuse;
 /// use exarch_core::ExtractionOptions;
 /// use exarch_core::ListOptions;
 /// use exarch_core::NoopProgress;
@@ -133,7 +134,12 @@ struct Spool {
 /// # std::io::Write::write_all(&mut gz, &tar.into_inner()?)?;
 /// # std::fs::write(&archive, gz.finish()?)?;
 /// let config = SecurityConfig::default();
-/// let listed = list_archive_for_extraction(&archive, &config, &ListOptions::default())?;
+/// let listed = list_archive_for_extraction(
+///     &archive,
+///     &config,
+///     &ListOptions::default(),
+///     DecodeReuse::default(),
+/// )?;
 /// assert_eq!(listed.manifest().total_entries(), 1);
 ///
 /// let out = dir.path().join("out");

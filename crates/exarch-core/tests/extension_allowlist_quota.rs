@@ -7,6 +7,7 @@
 mod common;
 mod sink_support;
 
+use std::assert_matches;
 use std::io::Cursor;
 use std::io::Write as _;
 use std::path::Path;
@@ -141,9 +142,10 @@ fn a_disallowed_file_with_a_traversal_path_is_refused_not_skipped() {
 
         let error = extract_archive(&archive, &dest, &config()).unwrap_err();
 
-        assert!(
-            matches!(root(&error), ArchiveError::PathTraversal { .. }),
-            "{format:?}: {error:?}"
+        assert_matches!(
+            root(&error),
+            ArchiveError::PathTraversal { .. },
+            "{format:?}"
         );
         assert!(!work.path().join("x.bin").exists(), "{format:?}");
     }
@@ -160,14 +162,12 @@ fn list_counts_a_disallowed_file_toward_the_file_limit_only() {
 
         let tight = config().with_max_file_count(2);
         let error = list_archive(&archive, &tight).unwrap_err();
-        assert!(
-            matches!(
-                error,
-                ArchiveError::QuotaExceeded {
-                    resource: QuotaResource::FileCount { .. }
-                }
-            ),
-            "{format:?}: {error:?}"
+        assert_matches!(
+            error,
+            ArchiveError::QuotaExceeded {
+                resource: QuotaResource::FileCount { .. }
+            },
+            "{format:?}"
         );
     }
 }
@@ -207,10 +207,7 @@ fn a_disallowed_high_ratio_file_is_skipped_in_zip_and_refused_in_7z() {
 
     let sevenz = Format::SevenZ.write(work.path(), &sevenz_with_zeros("bomb.bin"));
     let error = extract_archive(&sevenz, work.path().join("7z-out"), &relaxed).unwrap_err();
-    assert!(
-        matches!(root(&error), ArchiveError::ZipBomb(_)),
-        "{error:?}"
-    );
+    assert_matches!(root(&error), ArchiveError::ZipBomb(_));
 }
 
 #[test]

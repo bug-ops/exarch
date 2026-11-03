@@ -51,7 +51,6 @@ use crate::formats::tar::tar_node;
 use crate::formats::tar_metadata_limit::CheckedTarEntry;
 use crate::formats::tar_metadata_limit::SkipLimits;
 use crate::formats::tar_metadata_limit::TarReadBudget;
-use crate::formats::tar_metadata_limit::budget_violation;
 use crate::formats::tar_metadata_limit::budgeted_reader_with;
 use crate::formats::tar_metadata_limit::budgeted_tar_entries;
 use crate::formats::zip::AdmittedZip;
@@ -497,13 +496,7 @@ fn list_tar_entries<R: std::io::Read>(
         .map_err(|e| ArchiveError::InvalidArchive(format!("failed to read TAR entries: {e}")))?;
 
     while let Some(entry_result) = entries.next_entry() {
-        let mut entry = entry_result
-            .map_err(|e| {
-                budget_violation(&e).unwrap_or_else(|| {
-                    ArchiveError::InvalidArchive(format!("failed to read TAR entry: {e}"))
-                })
-            })?
-            .check(config.max_tar_metadata_bytes)?;
+        let mut entry = entry_result?.check(config.max_tar_metadata_bytes)?;
 
         entry.settle(|entry| -> Result<()> {
             // Skip TAR metadata entries (PAX headers, GNU long names/links)

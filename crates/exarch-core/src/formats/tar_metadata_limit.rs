@@ -339,6 +339,28 @@ impl TarReadBudget {
         self.0.total_read.load(Ordering::Relaxed)
     }
 
+    /// Classifies an error `tar` raised while reading toward the next entry.
+    fn classify(&self, e: &io::Error) -> crate::ArchiveError {
+        budget_violation(e).unwrap_or_else(|| {
+            self.prefer_fault(crate::ArchiveError::InvalidArchive(format!(
+                "failed to read TAR entry: {e}"
+            )))
+        })
+    }
+
+    /// Reports a read fault the source raised as [`crate::ArchiveError::Io`],
+    /// in place of the format verdict `error` draws from it.
+    ///
+    /// Only [`crate::ArchiveError::InvalidArchive`] is replaced: a budget,
+    /// security or ambiguity refusal is about the bytes `tar` did read, and
+    /// stays as it is.
+    pub(crate) fn prefer_fault(&self, error: crate::ArchiveError) -> crate::ArchiveError {
+        match (&error, self.0.source.fault()) {
+            (crate::ArchiveError::InvalidArchive(_), Some(fault)) => crate::ArchiveError::Io(fault),
+            _ => error,
+        }
+    }
+
     /// Raw archive bytes consumed so far; under an [`TapSource::Opaque`]
     /// source this is the decoded byte count, so a decoded/consumed ratio is
     /// about one and never exceeds any ratio limit.
@@ -778,7 +800,7 @@ impl<'a, 's, R: Read> TarEntryGuard<'a, 's, R> {
             }
             Err(e) => {
                 self.abandon();
-                Err(e)
+                Err(self.budget.prefer_fault(e))
             }
         }
     }
@@ -986,20 +1008,23 @@ impl<'a, R: Read> BudgetedEntries<'a, R> {
     ///
     /// Once this has returned `Some(Err(_))` once, every subsequent call
     /// returns `None` rather than repeating (or re-deriving) the error.
-    pub fn next_entry(&mut self) -> Option<io::Result<TarEntryGuard<'a, '_, R>>> {
+    ///
+    /// An error is classified here: a budget violation as such, a read fault
+    /// the source itself raised as [`crate::ArchiveError::Io`], anything else
+    /// as [`crate::ArchiveError::InvalidArchive`].
+    pub fn next_entry(&mut self) -> Option<Result<TarEntryGuard<'a, '_, R>>> {
         if self.poisoned {
             return None;
         }
         if self.budget.0.abandoned.load(Ordering::Relaxed) {
             self.poisoned = true;
-            return Some(Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "TAR read continued after an abandoned entry",
+            return Some(Err(crate::ArchiveError::InvalidArchive(
+                "TAR read continued after an abandoned entry".into(),
             )));
         }
         if let Some(err) = self.budget.cumulative_synthetic_violation() {
             self.poisoned = true;
-            return Some(Err(err));
+            return Some(Err(self.budget.classify(&err)));
         }
         let start = self.budget.total_read() - self.origin;
         self.budget.arm();
@@ -1013,7 +1038,7 @@ impl<'a, R: Read> BudgetedEntries<'a, R> {
             }
             Some(Err(e)) => {
                 self.poisoned = true;
-                Some(Err(e))
+                Some(Err(self.budget.classify(&e)))
             }
             Some(Ok(entry)) => Some(Ok(TarEntryGuard {
                 entry,
@@ -1269,6 +1294,49 @@ mod tests {
     }
 
     #[test]
+    fn a_fault_replaces_only_a_format_verdict_and_not_after_a_recovered_read() {
+        use crate::ArchiveError;
+        use crate::TarAmbiguity;
+        use crate::formats::source_fault::SourceRead;
+        use crate::formats::source_fault::SourceTap;
+        use std::assert_matches;
+
+        struct EioThenData(bool);
+        impl Read for EioThenData {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                if std::mem::replace(&mut self.0, true) {
+                    buf[0] = 0;
+                    Ok(1)
+                } else {
+                    Err(io::Error::from_raw_os_error(5))
+                }
+            }
+        }
+
+        let tap = SourceTap::default();
+        let mut source = SourceRead::new(EioThenData(false), tap.clone());
+        let (_reader, budget) =
+            budgeted_reader_with(Cursor::new(Vec::new()), 16, TapSource::Tapped(tap));
+        let verdict = || ArchiveError::InvalidArchive("bad header".into());
+
+        source.read(&mut [0u8; 4]).unwrap_err();
+        assert_matches!(
+            budget.prefer_fault(verdict()),
+            ArchiveError::Io(e) if e.raw_os_error() == Some(5)
+        );
+        assert_matches!(
+            budget.prefer_fault(ArchiveError::TarAmbiguity(TarAmbiguity::LocalBeforeGlobal)),
+            ArchiveError::TarAmbiguity(_)
+        );
+
+        assert_eq!(source.read(&mut [0u8; 4]).unwrap(), 1);
+        assert_matches!(
+            budget.prefer_fault(verdict()),
+            ArchiveError::InvalidArchive(_)
+        );
+    }
+
+    #[test]
     fn oversized_metadata_record_trips_the_budget() {
         // A GNU long-name record whose real (delivered) bytes exceed the
         // configured budget must trip before `tar` finishes buffering it.
@@ -1296,7 +1364,10 @@ mod tests {
         let err = result
             .err()
             .expect("the long-name record exceeds the 512-byte budget");
-        assert!(budget_violation(&err).is_some(), "got: {err:?}");
+        assert!(
+            matches!(err, crate::ArchiveError::SecurityViolation { .. }),
+            "got: {err:?}"
+        );
     }
 
     /// Reader that counts total bytes yielded by `inner`, used below to
@@ -1462,7 +1533,7 @@ mod tests {
     /// of entries yielded before either running out or hitting an error.
     fn drain_all_entries<R: Read>(
         entries: &mut BudgetedEntries<'_, R>,
-    ) -> (usize, Option<io::Error>) {
+    ) -> (usize, Option<crate::ArchiveError>) {
         let mut yielded = 0usize;
         while let Some(result) = entries.next_entry() {
             match result {
@@ -1517,7 +1588,7 @@ mod tests {
              silently allow all of them",
         );
         assert!(
-            budget_violation(&err).is_some(),
+            matches!(err, crate::ArchiveError::SecurityViolation { .. }),
             "must be recognizable as a budget violation, got: {err:?}"
         );
         assert!(
@@ -1572,7 +1643,7 @@ mod tests {
              not silently drain in full",
         );
         assert!(
-            budget_violation(&err).is_some(),
+            matches!(err, crate::ArchiveError::SecurityViolation { .. }),
             "must be recognizable as a budget violation, got: {err:?}"
         );
         assert!(

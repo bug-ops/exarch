@@ -151,7 +151,6 @@ use super::compression::CompressionCodec;
 use super::source_fault::TapSource;
 use super::tar_metadata_limit::CheckedTarEntry;
 use super::tar_metadata_limit::SkipLimits;
-use super::tar_metadata_limit::budget_violation;
 use super::tar_metadata_limit::budgeted_reader_with;
 use super::tar_metadata_limit::budgeted_tar_entries;
 use super::target::ExtractTarget;
@@ -439,10 +438,7 @@ impl<R: Read> TarArchive<R> {
         };
 
         while let Some(entry_result) = entries.next_entry() {
-            let guard = entry_result.map_err(|e| {
-                let raw = budget_violation(&e).unwrap_or_else(|| {
-                    ArchiveError::InvalidArchive(format!("failed to read entry: {e}"))
-                });
+            let guard = entry_result.map_err(|raw| {
                 ctx.push_skip_warnings();
                 ArchiveError::partial_or(std::mem::take(ctx.tally.report), raw)
             })?;

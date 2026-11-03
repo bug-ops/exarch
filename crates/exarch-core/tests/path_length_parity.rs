@@ -4,7 +4,6 @@
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::disallowed_methods)]
 
-use std::assert_matches;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -151,7 +150,7 @@ fn a_path_above_every_unix_limit_is_refused_everywhere() {
     let out = TempDir::new().unwrap();
 
     let err = extract_archive(&archive, out.path(), &config).unwrap_err();
-    assert_matches!(err, exarch_core::ArchiveError::Io(_), "{err}");
+    std::assert_matches!(err, exarch_core::ArchiveError::Io(_), "{err}");
     assert_eq!(std::fs::read_dir(out.path()).unwrap().count(), 0);
     assert!(list_archive(&archive, &config).is_err());
     assert!(
@@ -159,19 +158,14 @@ fn a_path_above_every_unix_limit_is_refused_everywhere() {
     );
 }
 
-#[cfg(unix)]
+// Linux resolves a symlink chain through `openat` without a total length
+// limit, so only macOS refuses a landing above the limit (see #885).
+#[cfg(target_os = "macos")]
 mod landing {
     use super::*;
 
-    #[cfg(target_os = "macos")]
     const CHAIN: (usize, usize) = (3, 255);
-    #[cfg(not(target_os = "macos"))]
-    const CHAIN: (usize, usize) = (14, 255);
-
-    #[cfg(target_os = "macos")]
     const REST: (usize, usize) = (3, 100);
-    #[cfg(not(target_os = "macos"))]
-    const REST: (usize, usize) = (3, 200);
 
     fn join(components: (usize, usize)) -> String {
         vec!["c".repeat(components.1); components.0].join("/")

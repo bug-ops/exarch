@@ -360,6 +360,9 @@ impl Write for Capture<'_> {
 }
 
 /// Where kept bytes are read from.
+///
+/// Replays from the temporary file share its one cursor, so only one reader
+/// may be live at a time (extraction reads one entry at a time).
 pub enum Stored<'s> {
     Memory(&'s [u8]),
     Spool(Take<&'s File>),

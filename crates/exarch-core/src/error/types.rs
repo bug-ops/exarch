@@ -31,6 +31,10 @@ closed_enum! {
         Entry => "entry",
         /// A whole solid block, checked against `max_solid_compression_ratio`.
         SolidBlock => "solid block",
+        /// The entries of a compressed TAR that were decoded only to be
+        /// skipped, checked against `max_compression_ratio` over the input
+        /// read so far.
+        SkippedEntries => "skipped entries",
     }
 }
 

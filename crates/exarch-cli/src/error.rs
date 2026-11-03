@@ -28,6 +28,10 @@ fn zip_bomb_hint(details: &ZipBombDetails) -> &'static str {
         (CompressionRatio::Finite(_), ZipBombScope::SolidBlock) => {
             "Solid 7z blocks use a fixed 1000x limit that the CLI cannot change."
         }
+        (CompressionRatio::Finite(_), ZipBombScope::SkippedEntries) => {
+            "Skipped entries of a compressed TAR decoded more than --max-compression-ratio x the \
+             compressed input read so far (all entries); raise the ratio if legitimate."
+        }
         (CompressionRatio::Finite(_), _) => {
             "--max-compression-ratio allows higher ratios for ZIP and non-solid 7z if legitimate."
         }
@@ -398,6 +402,13 @@ mod tests {
         let msg = zip_bomb_message(ZipBombScope::SolidBlock, 1024, 1024 * 1024 * 150);
         assert!(msg.contains("fixed 1000x limit"));
         assert!(!msg.contains("--max-compression-ratio"));
+    }
+
+    #[test]
+    fn test_zip_bomb_skipped_entries_hint() {
+        let msg = zip_bomb_message(ZipBombScope::SkippedEntries, 1024, 1024 * 1024 * 150);
+        assert!(msg.contains("Skipped entries of a compressed TAR"));
+        assert!(msg.contains("--max-compression-ratio"));
     }
 
     #[test]

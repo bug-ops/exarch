@@ -49,6 +49,7 @@ use crate::formats::compression::CompressionCodec;
 use crate::formats::compression::DecoderLimits;
 use crate::formats::detect::FormatFamily;
 use crate::formats::detect::detect_format;
+use crate::formats::source_fault::TapSource;
 use crate::formats::tar::open_tar_stream;
 use crate::inspection::ArchiveManifest;
 use crate::inspection::integrity::TarTrailer;
@@ -176,6 +177,7 @@ impl ListedArchive {
             let stream = BufReader::with_capacity(SPOOL_BUFFER, spool.file);
             extract_tar_stream(
                 stream,
+                TapSource::Opaque,
                 TarTrailer::DrainToDecoderEof,
                 dir,
                 &config,
@@ -246,9 +248,11 @@ fn list_with_limit(
     let mut pass = ListPass::strict_with(options.stored_targets);
     let (manifest, spool) = match format.family() {
         FormatFamily::Tar(Some(codec)) if replays(codec) && fits(archive, codec, limit) => {
-            let stream = open_tar_stream(archive, Some(codec), DecoderLimits::of(&config))?;
-            let mut tee = SpoolTee::new(stream, limit);
-            let manifest = list_tar_stream(&mut tee, Some(codec), format, &config, &mut pass)?;
+            let decoded = open_tar_stream(archive, Some(codec), DecoderLimits::of(&config))?;
+            let source = decoded.source();
+            let mut tee = SpoolTee::new(decoded.stream, limit);
+            let manifest =
+                list_tar_stream(&mut tee, source, Some(codec), format, &config, &mut pass)?;
             (manifest, tee.finish_spool(&config))
         }
         _ => (list_detected(archive, format, &config, &mut pass)?, None),

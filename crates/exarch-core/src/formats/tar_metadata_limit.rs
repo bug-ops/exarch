@@ -146,6 +146,7 @@
 //! an entry is already fully framed by `tar` itself), not as a reason to add
 //! a peek here.
 
+use std::convert::Infallible;
 use std::io;
 use std::io::Read;
 use std::marker::PhantomData;
@@ -156,10 +157,15 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
+use super::source_fault::TapSource;
 use super::tar_extension_headers::PrecedingEntry;
 use super::tar_extension_headers::check_entry_headers;
 use super::tar_extension_headers::check_trailing_headers;
 use crate::Result;
+use crate::SecurityConfig;
+use crate::ZipBombDetails;
+use crate::ZipBombScope;
+use crate::config::Validated;
 
 /// Hard, non-configurable ceiling on how many *synthesized* bytes (drained
 /// output with no corresponding read from the underlying reader)
@@ -225,6 +231,16 @@ const DISARMED: u64 = u64::MAX;
 struct BudgetState {
     /// The configured per-window byte limit; re-applied on every `arm()`.
     limit: u64,
+    /// The raw input behind the reader, when core metered it.
+    source: TapSource,
+    /// Sum of the declared sizes of every entry drained without a quota
+    /// charge (see [`CheckedTarEntry::drain_skipped`]).
+    skipped_declared: AtomicU64,
+    /// Decoded bytes drained from skipped entries under the ratio bound.
+    skipped_decoded: AtomicU64,
+    /// Set once an entry guard was abandoned: the stream may be mid-entry, so
+    /// no further entry may be read.
+    abandoned: AtomicBool,
     /// Bytes delivered through this reader since the most recent `arm()`.
     consumed: AtomicU64,
     /// `DISARMED`, or the number of bytes still allowed before the next
@@ -266,8 +282,8 @@ impl BudgetState {
 /// Cheap, cloneable handle used to arm/disarm the budget around the gap
 /// between two yielded TAR entries.
 ///
-/// Obtained together with a [`BudgetedReader`] from [`budgeted_reader`]; both
-/// must wrap the *same* underlying reader passed to the *same*
+/// Obtained together with a [`BudgetedReader`] from [`budgeted_reader_with`];
+/// both must wrap the *same* underlying reader passed to the *same*
 /// [`BudgetedEntries`] for the invariant to hold.
 #[derive(Clone)]
 pub struct TarReadBudget(Arc<BudgetState>);
@@ -323,6 +339,28 @@ impl TarReadBudget {
         self.0.total_read.load(Ordering::Relaxed)
     }
 
+    /// Raw archive bytes consumed so far; under an [`TapSource::Opaque`]
+    /// source this is the decoded byte count, so a decoded/consumed ratio is
+    /// about one and never exceeds any ratio limit.
+    fn source_consumed(&self) -> u64 {
+        match &self.0.source {
+            TapSource::Tapped(tap) => tap.consumed(),
+            TapSource::Opaque => self.total_read(),
+        }
+    }
+
+    /// Adds `declared` to the sum of skipped entries' declared sizes and
+    /// returns the new sum, saturating.
+    fn charge_skipped_declared(&self, declared: u64) -> u64 {
+        saturating_add_counter(&self.0.skipped_declared, declared)
+    }
+
+    /// Adds `decoded` to the skipped-entry decoded-byte sum and returns the new
+    /// sum, saturating.
+    fn charge_skipped_decoded(&self, decoded: u64) -> u64 {
+        saturating_add_counter(&self.0.skipped_decoded, decoded)
+    }
+
     /// Adds `synthetic` to the running cross-entry synthetic-byte sum.
     /// Called once per [`TarEntryGuard::drop`], with that guard's own final
     /// `synthetic` count.
@@ -348,6 +386,16 @@ impl TarReadBudget {
             )
         })
     }
+}
+
+/// Adds `by` to `counter`, saturating at `u64::MAX`, and returns the new value.
+fn saturating_add_counter(counter: &AtomicU64, by: u64) -> u64 {
+    let previous = counter
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+            Some(v.saturating_add(by))
+        })
+        .unwrap_or_else(|v| v);
+    previous.saturating_add(by)
 }
 
 /// Marker error surfaced when more than the configured limit is read from a
@@ -538,20 +586,39 @@ impl<R: Read> Read for BudgetedReader<R> {
     }
 }
 
+/// [`budgeted_reader_with`] over a stream whose raw input is not metered.
+#[cfg(test)]
+#[must_use]
+pub fn budgeted_reader<R: Read>(inner: R, limit: u64) -> (BudgetedReader<R>, TarReadBudget) {
+    budgeted_reader_with(inner, limit, TapSource::Opaque)
+}
+
 /// Wraps `inner` in a [`BudgetedReader`] and returns it alongside the
 /// [`TarReadBudget`] handle used to arm/disarm it.
 ///
 /// The budget starts **armed** with `limit` (fail-closed): any read before
 /// the first explicit `arm()`/`disarm()` cycle — e.g. a call site that never
 /// wires up [`BudgetedEntries`] — is metered, not silently unlimited.
+///
+/// `source` meters the raw input behind `inner`, which lets the budget judge
+/// skipped entries against the input that produced them (see
+/// [`CheckedTarEntry::drain_skipped`]).
 // No runnable `# Examples` here: this module is `pub(crate)` (an
 // implementation detail of the `tar`/`inspection::list` wiring, not public
 // API), so a doctest importing it via `exarch_core::formats::...` would not
 // link — doctests only see the crate's public surface.
 #[must_use]
-pub fn budgeted_reader<R: Read>(inner: R, limit: u64) -> (BudgetedReader<R>, TarReadBudget) {
+pub fn budgeted_reader_with<R: Read>(
+    inner: R,
+    limit: u64,
+    source: TapSource,
+) -> (BudgetedReader<R>, TarReadBudget) {
     let state = Arc::new(BudgetState {
         limit,
+        source,
+        skipped_declared: AtomicU64::new(0),
+        skipped_decoded: AtomicU64::new(0),
+        abandoned: AtomicBool::new(false),
         consumed: AtomicU64::new(0),
         allowance: AtomicU64::new(limit),
         total_read: AtomicU64::new(0),
@@ -628,8 +695,61 @@ impl<'a, 's, R: Read> TarEntryGuard<'a, 's, R> {
     /// error and never calling `next_entry()` again) — draining is then
     /// pointless I/O, not a correctness requirement, since the bounded drain
     /// is safe to skip precisely because no further reads will happen.
+    ///
+    /// The stream may then sit mid-entry, so the shared budget is marked and
+    /// a later [`BudgetedEntries::next_entry`] refuses to read on.
     pub fn abandon(&mut self) {
         self.abandoned = true;
+        self.budget.0.abandoned.store(true, Ordering::Relaxed);
+    }
+
+    /// Reads the rest of the entry, calling `on_chunk` with each chunk's
+    /// length; an error from it stops the read and is returned.
+    ///
+    /// Bounded by *synthesized* bytes, not total output (see module docs): a
+    /// legitimate entry's `synthetic` stays ~0 regardless of size, so it
+    /// drains to completion, while a run of GNU sparse zero-padding pushes
+    /// `synthetic` up by a full chunk on every iteration and trips
+    /// `SYNTHETIC_PAD_CAP_BYTES` almost immediately. A partial drain leaves
+    /// the stream in a well-defined position: the shortfall is read on the
+    /// *next* header search, either misaligning into a checksum error or
+    /// exceeding the metadata budget, both loud failures, never silent. A read
+    /// error ends the drain the same way.
+    fn drain<E>(
+        &mut self,
+        mut on_chunk: impl FnMut(u64) -> std::result::Result<(), E>,
+    ) -> std::result::Result<(), E> {
+        let total_read_at_start = self.budget.total_read();
+        let mut output_so_far: u64 = 0;
+        let mut synthetic: u64 = 0;
+        let mut outcome = Ok(());
+        let mut buf = [0u8; DRAIN_CHUNK_BYTES];
+        loop {
+            let n = match self.entry.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => n as u64,
+            };
+            output_so_far += n;
+            let read_since_start = self.budget.total_read() - total_read_at_start;
+            synthetic = output_so_far.saturating_sub(read_since_start);
+            if let Err(e) = on_chunk(n) {
+                outcome = Err(e);
+                break;
+            }
+            if synthetic > SYNTHETIC_PAD_CAP_BYTES {
+                break;
+            }
+        }
+        // Feeds the cross-entry cumulative budget (issue #422): this
+        // entry's own synthesized-byte count, summed with every other
+        // entry's over the lifetime of this `TarReadBudget`, is what
+        // `BudgetedEntries::next_entry` checks before yielding the next
+        // entry — bounding total drain work across many small
+        // synthetic-heavy entries, not just any single one.
+        self.budget.add_cumulative_synthetic(synthetic);
+        // The drain is done; `Drop` has nothing left to read.
+        self.abandoned = true;
+        outcome
     }
 
     /// Verifies the entry's headers and the bytes `tar` consumed to reach
@@ -657,10 +777,49 @@ impl<'a, 's, R: Read> TarEntryGuard<'a, 's, R> {
                 Ok(CheckedTarEntry(self))
             }
             Err(e) => {
-                self.abandoned = true;
+                self.abandon();
                 Err(e)
             }
         }
+    }
+}
+
+/// The limits that bound decoding an entry whose data is read only to reach
+/// the next header (an entry the extension allowlist or a duplicate skipped).
+///
+/// See [`CheckedTarEntry::drain_skipped`].
+#[derive(Debug, Clone, Copy)]
+pub struct SkipLimits {
+    per_file: u64,
+    total: u64,
+    ratio: f64,
+}
+
+impl SkipLimits {
+    /// Extra decoded bytes admitted on top of the ratio bound, so tiny
+    /// archives with a few small skipped entries never trip it.
+    const SLACK_BYTES: u64 = 1024 * 1024;
+
+    /// Takes the limits from a validated config.
+    pub(crate) fn of(config: &SecurityConfig<Validated>) -> Self {
+        Self {
+            per_file: config.max_file_size,
+            total: config.max_total_size,
+            ratio: config.max_compression_ratio,
+        }
+    }
+
+    /// Decoded bytes a skipped entry may yield once `consumed` raw bytes were
+    /// read.
+    #[expect(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the allowance is an approximate bound; a validated ratio is finite and positive, and the float-to-int cast saturates"
+    )]
+    fn allowance(&self, consumed: u64) -> u64 {
+        let by_ratio = (consumed as f64 * self.ratio) as u64;
+        by_ratio.saturating_add(Self::SLACK_BYTES)
     }
 }
 
@@ -674,6 +833,56 @@ impl<R: Read> CheckedTarEntry<'_, '_, R> {
     /// Suppresses the bounded drain on drop; see [`TarEntryGuard::abandon`].
     pub fn abandon(&mut self) {
         self.0.abandon();
+    }
+
+    /// Runs `step` on the entry and abandons it when `step` fails, so a
+    /// refused entry is never decoded to its end on the way out.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error `step` returned.
+    pub fn settle<T>(&mut self, step: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        step(self).inspect_err(|_| self.abandon())
+    }
+
+    /// Reads the entry to its end without charging it to the extraction quota,
+    /// so the next header can be reached.
+    ///
+    /// The entry's declared size is charged to a cumulative skipped total. An
+    /// entry the quota would have admitted anyway (`max_file_size` per entry,
+    /// `max_total_size` over all skipped entries) drains with no further check,
+    /// so filtering an archive never refuses what extracting it whole would
+    /// accept. Any other entry is read under
+    /// `skipped decoded <= max_compression_ratio x raw input consumed + 1 MiB`,
+    /// checked per chunk, which bounds the decode work by the input that
+    /// produced it. The input counted is everything read so far, extracted
+    /// entries included. Plain TAR decodes at a ratio of one and always
+    /// passes; a stream the caller already decoded (`TarArchive::new`) is
+    /// never refused, because core cannot see its compression.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::ArchiveError::ZipBomb`] with
+    /// [`ZipBombScope::SkippedEntries`] when the bound is exceeded.
+    pub fn drain_skipped(&mut self, limits: &SkipLimits) -> Result<()> {
+        let declared = self.0.entry.size();
+        let budget = self.0.budget.clone();
+        let skipped_declared = budget.charge_skipped_declared(declared);
+        if declared <= limits.per_file && skipped_declared <= limits.total {
+            return Ok(());
+        }
+        self.0.drain(|chunk| {
+            let decoded = budget.charge_skipped_decoded(chunk);
+            let consumed = budget.source_consumed();
+            if decoded > limits.allowance(consumed) {
+                return Err(crate::ArchiveError::ZipBomb(ZipBombDetails::new(
+                    ZipBombScope::SkippedEntries,
+                    consumed,
+                    decoded,
+                )));
+            }
+            Ok(())
+        })
     }
 }
 
@@ -696,38 +905,7 @@ impl<R: Read> Drop for TarEntryGuard<'_, '_, R> {
         if self.abandoned {
             return;
         }
-        // Bounded by *synthesized* bytes, not total output (see module
-        // docs): a legitimate entry's `synthetic` stays ~0 regardless of
-        // size, so it always drains to completion here, while a run of GNU
-        // sparse zero-padding pushes `synthetic` up by a full chunk on every
-        // iteration and trips `SYNTHETIC_PAD_CAP_BYTES` almost immediately.
-        // A partial drain (the loop bails before true EOF) still leaves the
-        // stream in a well-defined position — the shortfall is read on the
-        // *next* header search, either misaligning into a checksum error or
-        // exceeding the metadata budget, both loud failures, never silent.
-        let total_read_at_start = self.budget.total_read();
-        let mut output_so_far: u64 = 0;
-        let mut synthetic: u64 = 0;
-        let mut buf = [0u8; DRAIN_CHUNK_BYTES];
-        loop {
-            let n = match self.entry.read(&mut buf) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => n,
-            };
-            output_so_far += n as u64;
-            let read_since_start = self.budget.total_read() - total_read_at_start;
-            synthetic = output_so_far.saturating_sub(read_since_start);
-            if synthetic > SYNTHETIC_PAD_CAP_BYTES {
-                break;
-            }
-        }
-        // Feeds the cross-entry cumulative budget (issue #422): this
-        // entry's own synthesized-byte count, summed with every other
-        // entry's over the lifetime of this `TarReadBudget`, is what
-        // `BudgetedEntries::next_entry` checks before yielding the next
-        // entry — bounding total drain work across many small
-        // synthetic-heavy entries, not just any single one.
-        self.budget.add_cumulative_synthetic(synthetic);
+        let Ok(()) = self.drain::<Infallible>(|_| Ok(()));
     }
 }
 
@@ -811,6 +989,13 @@ impl<'a, R: Read> BudgetedEntries<'a, R> {
     pub fn next_entry(&mut self) -> Option<io::Result<TarEntryGuard<'a, '_, R>>> {
         if self.poisoned {
             return None;
+        }
+        if self.budget.0.abandoned.load(Ordering::Relaxed) {
+            self.poisoned = true;
+            return Some(Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "TAR read continued after an abandoned entry",
+            )));
         }
         if let Some(err) = self.budget.cumulative_synthetic_violation() {
             self.poisoned = true;
@@ -1048,6 +1233,39 @@ mod tests {
         // only affects whether Drop performs I/O, which has no externally
         // observable effect once the whole `BudgetedEntries` is discarded.
         drop(guard);
+    }
+
+    #[test]
+    fn reading_on_after_an_abandoned_entry_is_refused() {
+        let mut data = one_entry_tar("first.txt", b"unread content");
+        data.truncate(data.len() - 1024);
+        data.extend_from_slice(&one_entry_tar("second.txt", b"hello"));
+        let (reader, budget) = budgeted_reader(Cursor::new(data), 4096);
+        let mut archive = tar::Archive::new(reader);
+        let mut entries = budgeted_tar_entries(&mut archive, budget).unwrap();
+
+        let mut guard = entries.next_entry().unwrap().unwrap();
+        guard.abandon();
+        drop(guard);
+
+        let refused = entries.next_entry().unwrap().err().unwrap();
+        assert!(refused.to_string().contains("abandoned entry"), "{refused}");
+        assert!(entries.next_entry().is_none(), "the error latches");
+    }
+
+    #[test]
+    fn settle_abandons_the_entry_when_the_step_fails() {
+        let data = one_entry_tar("file.txt", b"hello");
+        let (reader, budget) = budgeted_reader(Cursor::new(data), 4096);
+        let mut archive = tar::Archive::new(reader);
+        let mut entries = budgeted_tar_entries(&mut archive, budget).unwrap();
+
+        let mut entry = entries.next_entry().unwrap().unwrap().check(4096).unwrap();
+        let failed = entry.settle(|_| Err::<(), _>(crate::ArchiveError::violation("no".into())));
+        assert!(failed.is_err());
+        drop(entry);
+
+        assert!(entries.next_entry().unwrap().is_err());
     }
 
     #[test]

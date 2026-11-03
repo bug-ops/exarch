@@ -32,6 +32,9 @@ use crate::formats::detect::ArchiveType;
 use crate::formats::detect::FormatFamily;
 use crate::formats::detect::match_signature;
 use crate::formats::detect::peek_header;
+use crate::formats::source_fault::SourceRead;
+use crate::formats::source_fault::SourceTap;
+use crate::formats::source_fault::TapSource;
 use crate::inspection::ArchiveManifest;
 use crate::inspection::VerificationReport;
 use crate::inspection::integrity::TarTrailer;
@@ -350,7 +353,8 @@ impl<'a> ArchiveReader<'a> {
         match self.source {
             Source::Tar { stream, codec } => {
                 let decoded = decode_tar_stream(stream, codec, DecoderLimits::of(config))?;
-                list_tar_stream(decoded, codec, format, config, listing)
+                let source = decoded.source();
+                list_tar_stream(decoded.stream, source, codec, format, config, listing)
             }
             Source::Seekable {
                 reader,
@@ -373,8 +377,9 @@ impl<'a> ArchiveReader<'a> {
         match self.source {
             Source::Tar { stream, codec } => {
                 let decoded = decode_tar_stream(stream, codec, DecoderLimits::of(config))?;
+                let source = decoded.source();
                 verify_with(config, options, progress, |listing| {
-                    list_tar_stream(decoded, codec, format, config, listing)
+                    list_tar_stream(decoded.stream, source, codec, format, config, listing)
                 })
             }
             Source::Seekable {
@@ -390,7 +395,20 @@ impl<'a> ArchiveReader<'a> {
     }
 }
 
-/// Wraps a TAR byte stream in its decoder.
+/// A decoded TAR byte stream together with the meter on its raw input.
+pub(crate) struct TarStream<'r> {
+    pub(crate) stream: Box<dyn Read + Send + 'r>,
+    tap: SourceTap,
+}
+
+impl TarStream<'_> {
+    /// The metered source behind the stream.
+    pub(crate) fn source(&self) -> TapSource {
+        TapSource::Tapped(self.tap.clone())
+    }
+}
+
+/// Wraps a TAR byte stream in its decoder, metering the raw input.
 ///
 /// # Errors
 ///
@@ -399,12 +417,14 @@ pub(crate) fn decode_tar_stream<'r, R: Read + Send + 'r>(
     reader: R,
     codec: Option<CompressionCodec>,
     limits: DecoderLimits,
-) -> Result<Box<dyn Read + Send + 'r>> {
-    let buffered = BufReader::new(reader);
-    match codec {
-        Some(codec) => codec.decoder(buffered, limits),
-        None => Ok(Box::new(buffered)),
-    }
+) -> Result<TarStream<'r>> {
+    let tap = SourceTap::default();
+    let buffered = BufReader::new(SourceRead::new(reader, tap.clone()));
+    let stream = match codec {
+        Some(codec) => codec.decoder(buffered, limits)?,
+        None => Box::new(buffered),
+    };
+    Ok(TarStream { stream, tap })
 }
 
 /// Opens a TAR stream on `reader`; the owner of the stream reads archive
@@ -415,7 +435,8 @@ pub(crate) fn tar_archive<'r, R: Read + Send + 'r>(
     limits: DecoderLimits,
 ) -> Result<TarArchive<Box<dyn Read + Send + 'r>>> {
     let trailer = TarTrailer::for_codec(codec);
-    decode_tar_stream(reader, codec, limits).map(|stream| TarArchive::with_trailer(stream, trailer))
+    decode_tar_stream(reader, codec, limits)
+        .map(|decoded| TarArchive::from_stream(decoded, trailer))
 }
 
 #[cfg(test)]

@@ -19,6 +19,7 @@ use crate::creation::CreationReport;
 use crate::formats::SevenZArchive;
 use crate::formats::ZipArchive;
 use crate::formats::compression::CompressionCodec;
+use crate::formats::compression::DecoderLimits;
 use crate::formats::detect::CreatableFormat;
 use crate::formats::detect::CreationFamily;
 use crate::formats::detect::FormatFamily;
@@ -130,8 +131,17 @@ fn extract_impl<P: AsRef<Path>, Q: AsRef<Path>>(
     progress: &mut dyn ProgressCallback,
 ) -> Result<ExtractionReport> {
     let config = config.clone().validate()?;
-    let config = &config;
+    extract_validated(archive_path, output_dir, &config, options, progress)
+}
 
+/// Extracts `archive_path` under a config that is already validated.
+pub(crate) fn extract_validated<P: AsRef<Path>, Q: AsRef<Path>>(
+    archive_path: P,
+    output_dir: Q,
+    config: &SecurityConfig<Validated>,
+    options: &ExtractionOptions,
+    progress: &mut dyn ProgressCallback,
+) -> Result<ExtractionReport> {
     let archive_path = archive_path.as_ref();
     let output_dir = output_dir.as_ref();
 
@@ -343,7 +353,7 @@ fn extract_tar(
 ) -> Result<ExtractionReport> {
     use crate::formats::tar::open_tar_stream;
 
-    let stream = open_tar_stream(archive_path, codec, config.max_decoder_memory)?;
+    let stream = open_tar_stream(archive_path, codec, DecoderLimits::of(config))?;
     let trailer = TarTrailer::for_codec(codec);
     extract_tar_stream(stream, trailer, output_dir, config, options, progress)
 }
@@ -1032,7 +1042,7 @@ pub fn extract_to_sink_with_progress<S: EntrySink>(
     let config = config.clone().validate()?;
     match reader.into_source() {
         Source::Tar { stream, codec } => {
-            let mut archive = tar_archive(stream, codec, config.max_decoder_memory)?;
+            let mut archive = tar_archive(stream, codec, DecoderLimits::of(&config))?;
             let mut target = SinkTarget::new(sink, &config);
             archive.extract_into(&mut target, &config, *options, progress)
         }

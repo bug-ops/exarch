@@ -13,3 +13,54 @@ same bytes. Source tree for the ZIP: `a.txt` ("hello\n"), `empty`,
 
 Used by `crates/exarch-core/tests/zip_corpus.rs` and
 `crates/exarch-core/tests/sevenz_reparse_point.rs`.
+
+# WinRAR producer fixtures
+
+Archives made by WinRAR, taken unmodified from the Go standard library test
+data (`src/archive/zip/testdata`). They cover header shape only: each holds a
+single empty stored entry (no compressed payload), so they say nothing about
+WinRAR's deflate output or data descriptors. Common WinRAR traits: version
+made by `0x001F`, and an NTFS (`0x000a`) extra field in the central directory
+only.
+
+| File | Source (pinned) | sha256 | Notes |
+|------|-----------------|--------|-------|
+| `zip-family/utf8-winrar.zip` | `https://raw.githubusercontent.com/golang/go/4fcc835971ad63cf913ebe074ef6191e35a44ab9/src/archive/zip/testdata/utf8-winrar.zip` | `f41036f0d011ae1c98de383360b1e26eb41f216cea17ab909f8fcf027ba20791` | 146 bytes; one empty entry named `世界` with the UTF-8 flag set |
+| `zip-family/time-winrar.zip` | `https://raw.githubusercontent.com/golang/go/6e8894d5ffca9acc635e0d7298167122ed52ce55/src/archive/zip/testdata/time-winrar.zip` | `058b9c059e88fcd17d8e8bee4239f31073969c8affa4993498dbb7e5c1508518` | 150 bytes; one empty entry named `test.txt` |
+
+Used by `crates/exarch-core/tests/zip_corpus.rs`.
+
+## License of the Go test data
+
+The two files above are distributed under the Go project's BSD-3-Clause
+license (text verbatim from the `LICENSE` file at the first pinned commit):
+
+```
+Copyright (c) 2009 The Go Authors. All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are
+met:
+
+   * Redistributions of source code must retain the above copyright
+notice, this list of conditions and the following disclaimer.
+   * Redistributions in binary form must reproduce the above
+copyright notice, this list of conditions and the following disclaimer
+in the documentation and/or other materials provided with the
+distribution.
+   * Neither the name of Google Inc. nor the names of its
+contributors may be used to endorse or promote products derived from
+this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```

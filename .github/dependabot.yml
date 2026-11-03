@@ -13,6 +13,8 @@ updates:
     ignore:
       - dependency-name: "half"
         versions: [">=2.5"]
+      - dependency-name: "lzma-rust2"
+        versions: [">=0.24"]
     labels:
       - "dependencies"
       - "rust"
@@ -39,6 +41,9 @@ updates:
       day: "monday"
       time: "09:00"
     open-pull-requests-limit: 10
+    ignore:
+      - dependency-name: "lzma-rust2"
+        versions: [">=0.24"]
     labels:
       - "dependencies"
       - "rust"

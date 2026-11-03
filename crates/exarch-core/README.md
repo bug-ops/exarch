@@ -53,7 +53,7 @@ let config = SecurityConfig::default()
     .with_allowed_extensions(vec![".tar".into(), ".gz".into()]); // optional allowlist
 ```
 
-Available builders on `SecurityConfig`: `with_max_file_size`, `with_max_total_size`, `with_max_compression_ratio`, `with_max_file_count`, `with_max_path_depth`, `with_allowed`, `with_allow_symlinks`, `with_allow_hardlinks`, `with_allow_absolute_paths`, `with_allow_world_writable`, `with_preserve_permissions`, `with_allowed_extensions`, `with_banned_path_components`, `with_allow_solid_archives`, `with_max_solid_block_memory`, `with_max_tar_metadata_bytes`, `with_max_decoder_memory`, `with_max_solid_compression_ratio`, `with_allow_windows_reserved_names`, `with_zip_consistency`, `with_parallel_decode`. On `ExtractionOptions`: `with_atomic`, `with_skip_duplicates`.
+Available builders on `SecurityConfig`: `with_max_file_size`, `with_max_total_size`, `with_max_compression_ratio`, `with_max_file_count`, `with_max_path_depth`, `with_allowed`, `with_allow_symlinks`, `with_allow_hardlinks`, `with_allow_absolute_paths`, `with_allow_world_writable`, `with_preserve_permissions`, `with_allowed_extensions`, `with_banned_path_components`, `with_allow_solid_archives`, `with_max_solid_block_memory`, `with_max_tar_metadata_bytes`, `with_max_decoder_memory`, `with_compressed_member_allowance`, `with_max_solid_compression_ratio`, `with_allow_windows_reserved_names`, `with_zip_consistency`, `with_parallel_decode`. On `ExtractionOptions`: `with_atomic`, `with_skip_duplicates`.
 
 ### Builder Pattern
 
@@ -79,6 +79,11 @@ exarch-core provides defense-in-depth protection against common archive vulnerab
 | TAR metadata bombs | Bounds GNU long-name/long-link and PAX header record reads | Enabled (4 MiB, 16 MiB for `permissive()`) |
 | Permission sanitization | Strips setuid/setgid bits | Enabled |
 | Size limits | Configurable file and total size limits | 50 MB / 10 GB |
+| Decoder memory | Bounds the xz dictionary and the zstd window (TAR and ZIP) by `max_decoder_memory` | Enabled (256 MiB) |
+| Compressed members | Bounds gzip members and bzip2 streams by `compressed_member_allowance` plus one per 16 KiB of output | Enabled (10,000) |
+
+> [!NOTE]
+> The zstd window bound relies on the `zstd` crate being built without its `legacy` feature (the workspace sets `default-features = false`): libzstd decodes pre-v0.8 frames with no window check. The ZIP frame walk refuses such frames as a second line of defense, but a downstream build should keep the feature off.
 
 > [!CAUTION]
 > Default configuration blocks symlinks and hardlinks. Enable only when you trust the archive source.

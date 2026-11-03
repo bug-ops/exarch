@@ -12,7 +12,9 @@
 //! `ZipFile`) archives are generated at test time. A missing tool skips its
 //! producers locally; with `EXARCH_REQUIRE_PRODUCERS=1` (set in CI) it fails.
 //! Windows Explorer archives cannot be produced headless in-process, so a
-//! committed archive stands in for them on every host.
+//! committed archive stands in for them on every host. Two `WinRAR` archives
+//! (from the Go test data) are committed as well; they cover header shape
+//! only, since each holds one empty stored entry.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -488,4 +490,34 @@ fn windows_explorer_fixture_has_no_structural_findings_and_extracts() {
         std::fs::read(out.path().join("sub/rand.bin")).unwrap(),
         (0..=255u8).cycle().take(200_000).collect::<Vec<_>>()
     );
+}
+
+/// Made by `WinRAR` (version made by `0x001F`, NTFS extra in the central
+/// directory only); taken from the Go test data, see
+/// `tests/fixtures/PROVENANCE.md`. One empty stored entry, so this covers
+/// header shape only.
+#[test]
+fn winrar_fixtures_have_no_structural_findings_and_extract() {
+    for (fixture, name) in [
+        ("utf8-winrar.zip", "\u{4e16}\u{754c}"),
+        ("time-winrar.zip", "test.txt"),
+    ] {
+        let archive = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/zip-family")
+            .join(fixture);
+        assert_no_structural_finding(&archive, fixture);
+
+        let out = TempDir::new().unwrap();
+        extract_archive(&archive, out.path(), &SecurityConfig::default()).unwrap();
+        assert_eq!(
+            std::fs::read(out.path().join(name)).unwrap(),
+            b"",
+            "{fixture}"
+        );
+        assert_eq!(
+            std::fs::read_dir(out.path()).unwrap().count(),
+            1,
+            "{fixture}"
+        );
+    }
 }

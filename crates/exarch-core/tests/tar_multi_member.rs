@@ -13,6 +13,7 @@ use exarch_core::DecompressionBudget;
 use exarch_core::IntegrityCheck;
 use exarch_core::IntegrityStatus;
 use exarch_core::IssueCategory;
+use exarch_core::QuotaResource;
 use exarch_core::SecurityConfig;
 use exarch_core::VerificationOptions;
 use exarch_core::extract_archive;
@@ -230,5 +231,131 @@ fn quotas_span_every_member() {
             };
             assert_matches!(source, ArchiveError::QuotaExceeded { .. }, "{name}");
         }
+    }
+}
+
+fn with_base(base: u64) -> SecurityConfig {
+    SecurityConfig::default().with_compressed_member_allowance(base)
+}
+
+/// The tar stream cut into `chunk`-byte compressed members.
+fn chunked_members(tar: &[u8], chunk: usize, encode: Encode) -> Vec<u8> {
+    tar.chunks(chunk).flat_map(encode).collect()
+}
+
+fn assert_member_cap(err: ArchiveError, members: u64, allowance: u64, label: &str) {
+    let source = match err {
+        ArchiveError::PartialExtraction { source, .. } => *source,
+        other => other,
+    };
+    assert_matches!(
+        source,
+        ArchiveError::QuotaExceeded {
+            resource: QuotaResource::CompressedMembers { members: m, allowance: a }
+        } if m == members && a == allowance,
+        "{label}"
+    );
+}
+
+#[test]
+fn empty_members_after_the_end_marker_stop_at_the_base_allowance() {
+    for (name, encode) in [("a.tar.gz", gzip as Encode), ("a.tar.bz2", bzip2)] {
+        for (empty, refused) in [(4usize, false), (5, true)] {
+            let temp = TempDir::new().unwrap();
+            let mut bytes = encode(&tar_stream(&["one.txt"]));
+            for _ in 0..empty {
+                bytes.extend_from_slice(&encode(b""));
+            }
+            let archive = write(&temp, name, &bytes);
+            let config = with_base(5);
+            let label = format!("{name} +{empty} empty");
+            let out = TempDir::new().unwrap();
+            let listed = list_archive(&archive, &config);
+            let extracted = extract_archive(&archive, out.path(), &config);
+            let verified = verify_archive_with_options(&archive, &config, &integrity_options());
+            if refused {
+                assert_member_cap(listed.unwrap_err(), 6, 5, &label);
+                assert_member_cap(extracted.unwrap_err(), 6, 5, &label);
+                let report = verified.expect(&label);
+                assert!(
+                    report
+                        .issues()
+                        .iter()
+                        .any(|i| i.category == IssueCategory::QuotaExceeded
+                            && i.message.contains("compressed members (6 > allowance 5")),
+                    "{label}"
+                );
+            } else {
+                listed.expect(&label);
+                extracted.expect(&label);
+                verified.expect(&label);
+            }
+        }
+    }
+}
+
+#[test]
+fn many_members_before_the_end_marker_are_refused_too() {
+    for (name, encode) in BLOCK_CODECS.iter().take(2) {
+        let temp = TempDir::new().unwrap();
+        let names: Vec<String> = (0..8).map(|i| format!("f{i}.txt")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let archive = write(&temp, name, &split_members(&refs, *encode));
+        let err = list_archive(&archive, &with_base(3)).unwrap_err();
+        assert_member_cap(err, 4, 3, name);
+    }
+}
+
+#[test]
+fn a_writer_flushing_every_16_kib_passes_at_any_size() {
+    let tar = single_entry_stream("big.bin", &vec![7u8; 640 * 1024]);
+    for (name, encode) in [("a.tar.gz", gzip as Encode), ("a.tar.bz2", bzip2)] {
+        let temp = TempDir::new().unwrap();
+        let archive = write(&temp, name, &chunked_members(&tar, 16 * 1024, encode));
+        let config = with_base(3);
+        let out = TempDir::new().unwrap();
+        list_archive(&archive, &config).expect(name);
+        extract_archive(&archive, out.path(), &config).expect(name);
+        verify_archive(&archive, &config).expect(name);
+    }
+}
+
+#[test]
+fn a_writer_flushing_every_8_kib_runs_into_the_allowance() {
+    let tar = single_entry_stream("big.bin", &vec![7u8; 640 * 1024]);
+    let temp = TempDir::new().unwrap();
+    let archive = write(&temp, "a.tar.gz", &chunked_members(&tar, 8 * 1024, gzip));
+    let err = list_archive(&archive, &with_base(3)).unwrap_err();
+    assert_member_cap(err, 6, 5, "8 KiB members");
+    list_archive(&archive, &with_base(100)).unwrap();
+}
+
+#[test]
+fn the_largest_base_admits_every_member_without_overflow() {
+    for (name, encode) in [("a.tar.gz", gzip as Encode), ("a.tar.bz2", bzip2)] {
+        let temp = TempDir::new().unwrap();
+        let mut bytes = encode(&tar_stream(&["one.txt"]));
+        for _ in 0..50 {
+            bytes.extend_from_slice(&encode(b""));
+        }
+        let archive = write(&temp, name, &bytes);
+        list_archive(&archive, &with_base(u64::MAX)).expect(name);
+    }
+}
+
+#[test]
+fn xz_and_zstd_are_not_governed_by_the_member_allowance() {
+    for (name, encode) in [("a.tar.xz", xz as Encode), ("a.tar.zst", zstd)] {
+        let temp = TempDir::new().unwrap();
+        let names: Vec<String> = (0..8).map(|i| format!("f{i}.txt")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let archive = write(&temp, name, &split_members(&refs, encode));
+        assert_eq!(
+            list_archive(&archive, &with_base(1))
+                .unwrap()
+                .entries()
+                .len(),
+            8
+        );
     }
 }

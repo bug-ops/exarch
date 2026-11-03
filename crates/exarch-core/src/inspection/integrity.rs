@@ -20,12 +20,15 @@ use crate::ArchiveError;
 use crate::DecompressionBudget;
 use crate::Result;
 use crate::SecurityConfig;
+use crate::TarTrailerRefusal;
 use crate::config::Validated;
 use crate::copy::CopyBuffer;
 use crate::copy::CopyError;
 use crate::copy::copy_bounded;
 use crate::copy::declared_size_exceeded;
+use crate::error::TrailerCorruption;
 use crate::formats::compression::CompressionCodec;
+use crate::formats::compression::is_trailing_data;
 use crate::formats::tar_metadata_limit::budget_violation;
 use crate::formats::zip::ZIP_DECLARED_SIZE_EXCEEDED;
 use crate::formats::zip::ZIP_INVALID_CHECKSUM;
@@ -145,7 +148,22 @@ impl DecodeFailure {
     /// Error returned when the stream fails after the TAR end-of-archive
     /// marker (a gzip CRC or ISIZE mismatch, a corrupt or truncated tail).
     pub fn into_trailer_error(self) -> ArchiveError {
-        self.into_error("after the TAR end-of-archive marker")
+        match self {
+            Self::Checksum | Self::Malformed(_) => {
+                let cause = match &self {
+                    Self::Malformed(e) if is_trailing_data(e) => TrailerCorruption::TrailingData,
+                    _ => TrailerCorruption::Decoder,
+                };
+                ArchiveError::TarTrailer(TarTrailerRefusal::Corrupt {
+                    cause,
+                    detail: self.to_string(),
+                })
+            }
+            Self::Truncated { .. } => ArchiveError::TarTrailer(TarTrailerRefusal::Truncated),
+            Self::DeclaredSizeOverrun { declared } => declared_size_exceeded(declared),
+            Self::ResourceLimit(e) | Self::NotDecodable(e) => e,
+            Self::Io(e) => ArchiveError::Io(e),
+        }
     }
 
     fn into_error(self, location: &str) -> ArchiveError {
@@ -218,14 +236,9 @@ impl TrailerFault {
     /// `max_tar_metadata_bytes` and names the effective cap.
     pub fn into_error(self) -> ArchiveError {
         match self {
-            Self::OverCap(cap) => ArchiveError::relaxable_violation(
-                crate::PolicySetting::MaxTarMetadataBytes,
-                format!(
-                    "more than {} bytes follow the TAR end-of-archive marker \
-                     (at least {MIN_TRAILER_CAP} bytes are always allowed)",
-                    cap.get()
-                ),
-            ),
+            Self::OverCap(cap) => {
+                ArchiveError::TarTrailer(TarTrailerRefusal::OverCap { cap: cap.get() })
+            }
             Self::Failed(failure) => failure.into_trailer_error(),
         }
     }

@@ -22,6 +22,8 @@ use exarch_core::MemoryExtractRequest;
 use exarch_core::NoopProgress;
 use exarch_core::PolicySetting;
 use exarch_core::SecurityConfig;
+use exarch_core::TarTrailerRefusal;
+use exarch_core::TrailerCorruption;
 use exarch_core::VerificationOptions;
 use exarch_core::extract_archive;
 use exarch_core::extract_archive_with_options;
@@ -100,12 +102,36 @@ fn source(error: &ArchiveError) -> &ArchiveError {
 fn assert_trailer_failure(error: &ArchiveError) {
     assert_matches!(
         source(error),
-        ArchiveError::InvalidArchive(reason) if reason.contains("after the TAR end-of-archive marker"),
+        ArchiveError::TarTrailer(TarTrailerRefusal::Corrupt { .. } | TarTrailerRefusal::Truncated),
+        "{error}"
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("after the TAR end-of-archive marker"),
+        "{error}"
+    );
+    assert!(!source(error).is_security_violation(), "{error}");
+    assert_eq!(source(error).relaxable_by(), None, "{error}");
+    assert_eq!(source(error).context(), None, "{error}");
+}
+
+fn assert_corrupt(error: &ArchiveError, expected: TrailerCorruption) {
+    assert_matches!(
+        source(error),
+        ArchiveError::TarTrailer(TarTrailerRefusal::Corrupt { cause, .. }) if *cause == expected,
         "{error}"
     );
 }
 
 fn assert_over_cap(error: &ArchiveError) {
+    assert_matches!(
+        source(error),
+        ArchiveError::TarTrailer(TarTrailerRefusal::OverCap { .. }),
+        "{error}"
+    );
+    assert!(source(error).is_security_violation(), "{error}");
+    assert!(source(error).is_recoverable(), "{error}");
     assert_eq!(
         source(error).relaxable_by(),
         Some(PolicySetting::MaxTarMetadataBytes),
@@ -139,6 +165,52 @@ fn corrupt_later_gzip_member_is_refused() {
     let archive = write(&dir, "a.tar.gz", &bytes);
 
     assert_trailer_failure(&extract(&archive, &SecurityConfig::default()).unwrap_err());
+}
+
+#[test]
+fn a_corrupt_checksum_is_a_decoder_corruption() {
+    let dir = TempDir::new().unwrap();
+    let archive = write(&dir, "a.tar.gz", &flip_crc(gzip(&tar_bytes())));
+
+    let error = extract(&archive, &SecurityConfig::default()).unwrap_err();
+
+    assert_corrupt(&error, TrailerCorruption::Decoder);
+}
+
+#[test]
+fn bytes_that_are_not_a_member_after_zero_padding_are_trailing_data() {
+    let dir = TempDir::new().unwrap();
+    let mut bytes = gzip(&tar_bytes());
+    bytes.extend_from_slice(b"\0\0\0garbage");
+    let archive = write(&dir, "a.tar.gz", &bytes);
+    let config = SecurityConfig::default();
+
+    assert_corrupt(
+        &extract(&archive, &config).unwrap_err(),
+        TrailerCorruption::TrailingData,
+    );
+    assert_corrupt(
+        &list_archive(&archive, &config).unwrap_err(),
+        TrailerCorruption::TrailingData,
+    );
+}
+
+#[test]
+fn a_later_member_cut_short_is_truncated() {
+    let dir = TempDir::new().unwrap();
+    let mut second = gzip(&[7u8; 4096]);
+    second.truncate(second.len() / 2);
+    let mut bytes = gzip(&tar_bytes());
+    bytes.extend(second);
+    let archive = write(&dir, "a.tar.gz", &bytes);
+
+    let error = extract(&archive, &SecurityConfig::default()).unwrap_err();
+
+    assert_matches!(
+        source(&error),
+        ArchiveError::TarTrailer(TarTrailerRefusal::Truncated),
+        "{error}"
+    );
 }
 
 #[test]

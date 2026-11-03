@@ -15,13 +15,18 @@ use std::io;
 use std::io::BufRead;
 use std::io::Read;
 use std::io::Write;
+use std::num::NonZeroU64;
 
 use crate::Result;
+use crate::Validated;
+use crate::config::SecurityConfig;
 use crate::creation::compression::compression_level_to_bzip2;
 use crate::creation::compression::compression_level_to_flate2;
 use crate::creation::compression::compression_level_to_xz;
 use crate::creation::compression::compression_level_to_zstd;
+use crate::formats::tar_metadata_limit::CompressedMembersExceeded;
 use crate::formats::tar_metadata_limit::DecoderMemoryExceeded;
+use crate::formats::zstd_window::ZstdWindowLog;
 
 /// Compression codec for archive files.
 ///
@@ -79,6 +84,87 @@ pub enum CompressionCodec {
     Zstd,
 }
 
+/// Bytes of decoded output that each earn a gzip or bzip2 stream one more
+/// member beyond the base allowance.
+///
+/// Writers that flush per record (bgzf, at most 64 KiB per block) stay under
+/// the allowance at any output size when they average this much per member;
+/// an empty member adds nothing to the output, so a flood of them stays near
+/// the base.
+const MEMBER_OUTPUT_BYTES: u64 = 16 * 1024;
+
+/// How many gzip or bzip2 members a stream may hold: a configured base, plus
+/// one per [`MEMBER_OUTPUT_BYTES`] of output decoded so far.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct MemberAllowance(NonZeroU64);
+
+impl MemberAllowance {
+    pub(crate) const UNBOUNDED: Self = Self(NonZeroU64::MAX);
+
+    pub(crate) fn of(config: &SecurityConfig<Validated>) -> Self {
+        Self::of_base(config.compressed_member_allowance)
+    }
+
+    // `validate()` rejects a zero base, so the fallback is unreachable.
+    const fn of_base(base: u64) -> Self {
+        match NonZeroU64::new(base) {
+            Some(base) => Self(base),
+            None => Self(NonZeroU64::MIN),
+        }
+    }
+
+    /// The most members a stream may have started once it produced `produced`
+    /// bytes.
+    fn at(self, produced: u64) -> u64 {
+        self.0.get().saturating_add(produced / MEMBER_OUTPUT_BYTES)
+    }
+}
+
+/// What the decoders of one operation may use, taken once from the config the
+/// operation runs under so every codec reads the same limits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DecoderLimits {
+    /// Memory the xz decoder may use, in bytes.
+    pub(crate) memory: u64,
+    /// Largest window a zstd frame may declare.
+    pub(crate) zstd_window: ZstdWindowLog,
+    /// How many gzip or bzip2 members a stream may hold.
+    pub(crate) members: MemberAllowance,
+}
+
+impl DecoderLimits {
+    /// No limit beyond what the formats themselves impose.
+    pub(crate) const UNBOUNDED: Self = Self {
+        memory: u64::MAX,
+        zstd_window: ZstdWindowLog::LIBZSTD_DEFAULT,
+        members: MemberAllowance::UNBOUNDED,
+    };
+
+    pub(crate) fn of(config: &SecurityConfig<Validated>) -> Self {
+        Self {
+            memory: config.max_decoder_memory,
+            zstd_window: ZstdWindowLog::of(config),
+            members: MemberAllowance::of(config),
+        }
+    }
+
+    /// Whether a stream decoded under `other` would also decode under `self`.
+    pub(crate) const fn covers(self, other: Self) -> bool {
+        self.memory >= other.memory
+            && self.zstd_window.get() >= other.zstd_window.get()
+            && self.members.0.get() >= other.members.0.get()
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn for_tests() -> Self {
+        Self {
+            memory: 256 * 1024 * 1024,
+            zstd_window: ZstdWindowLog::LIBZSTD_DEFAULT,
+            members: MemberAllowance::of_base(10_000),
+        }
+    }
+}
+
 impl CompressionCodec {
     /// Returns the typical file extension for this codec when used with TAR.
     ///
@@ -107,8 +193,8 @@ impl CompressionCodec {
     /// This is the only codec-to-decoder mapping used for reading TAR
     /// streams. The `bufread` decoders take the caller's buffer as-is, so
     /// the caller decides the buffering once instead of each decoder adding
-    /// its own. `max_decoder_memory` bounds the xz decoder only; the other
-    /// codecs are bounded by their format.
+    /// its own. `limits.memory` bounds the xz decoder and `limits.zstd_window`
+    /// the zstd window; the other codecs are bounded by their format.
     ///
     /// Every gzip member, bzip2 stream and xz stream is decoded, and at least
     /// one is required. After the last one an all-zero tail is accepted (xz:
@@ -121,26 +207,39 @@ impl CompressionCodec {
     pub(crate) fn decoder<'r, R>(
         self,
         input: R,
-        max_decoder_memory: u64,
+        limits: DecoderLimits,
     ) -> Result<Box<dyn Read + Send + 'r>>
     where
         R: BufRead + Send + 'r,
     {
         Ok(match self {
-            Self::Gzip => Box::new(MultiMember::<_, flate2::bufread::GzDecoder<R>>::new(input)),
-            Self::Bzip2 => Box::new(MultiMember::<_, bzip2::bufread::BzDecoder<R>>::new(input)),
+            Self::Gzip => Box::new(MultiMember::<_, flate2::bufread::GzDecoder<R>>::new(
+                input,
+                limits.members,
+            )),
+            Self::Bzip2 => Box::new(MultiMember::<_, bzip2::bufread::BzDecoder<R>>::new(
+                input,
+                limits.members,
+            )),
             Self::Xz => {
                 let stream = liblzma::stream::Stream::new_stream_decoder(
-                    max_decoder_memory,
+                    limits.memory,
                     liblzma::stream::CONCATENATED,
                 )
                 .map_err(io::Error::from)?;
                 Box::new(XzLimited {
                     inner: liblzma::bufread::XzDecoder::new_stream(input, stream),
-                    max: max_decoder_memory,
+                    max: limits.memory,
                 })
             }
-            Self::Zstd => Box::new(zstd::Decoder::with_buffer(input)?),
+            Self::Zstd => {
+                let mut decoder = zstd::Decoder::with_buffer(input)?;
+                decoder.window_log_max(limits.zstd_window.get())?;
+                Box::new(ZstdLimited {
+                    inner: decoder,
+                    max: limits.memory,
+                })
+            }
         })
     }
 
@@ -228,7 +327,57 @@ enum MemberState<R, D> {
     Done,
     /// A non-transient error; replayed on every later read so a retry can
     /// never look like a clean end of stream.
-    Failed(io::ErrorKind, String),
+    Failed(Replay),
+}
+
+/// A failure kept so every later read repeats it with the same type.
+enum Replay {
+    MemberCap(CompressedMembersExceeded),
+    TrailingData,
+    Other(io::ErrorKind, String),
+}
+
+impl Replay {
+    fn of(error: &io::Error) -> Self {
+        if let Some(cap) = error
+            .get_ref()
+            .and_then(|e| e.downcast_ref::<CompressedMembersExceeded>())
+        {
+            return Self::MemberCap(*cap);
+        }
+        if is_trailing_data(error) {
+            return Self::TrailingData;
+        }
+        Self::Other(error.kind(), error.to_string())
+    }
+
+    fn error(&self) -> io::Error {
+        match self {
+            Self::MemberCap(cap) => io::Error::other(*cap),
+            Self::TrailingData => io::Error::new(io::ErrorKind::InvalidData, TrailingData),
+            Self::Other(kind, message) => io::Error::new(*kind, message.clone()),
+        }
+    }
+}
+
+/// Marker error for bytes after the last compressed member that are neither
+/// another member nor zero padding.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct TrailingData;
+
+impl std::fmt::Display for TrailingData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("trailing data after the last compressed member")
+    }
+}
+
+impl std::error::Error for TrailingData {}
+
+/// Whether `error` is the [`TrailingData`] marker.
+pub(crate) fn is_trailing_data(error: &io::Error) -> bool {
+    error
+        .get_ref()
+        .is_some_and(<dyn std::error::Error + Send + Sync>::is::<TrailingData>)
 }
 
 enum Step {
@@ -244,16 +393,24 @@ enum Step {
 /// compressed stream. After the last member an all-zero tail (tape padding) is
 /// accepted; any other trailing bytes are an error. xz is stricter about the
 /// padding: the format only allows multiples of four zero bytes.
+///
+/// Member `n` may start only while `n` is within the allowance for the bytes
+/// decoded so far, so a stream cannot be made of members that each cost a
+/// decoder setup but earn no output.
 struct MultiMember<R, D> {
     state: MemberState<R, D>,
-    seen_member: bool,
+    allowance: MemberAllowance,
+    members: u64,
+    produced: u64,
 }
 
 impl<R, D> MultiMember<R, D> {
-    const fn new(input: R) -> Self {
+    const fn new(input: R, allowance: MemberAllowance) -> Self {
         Self {
             state: MemberState::Between(input),
-            seen_member: false,
+            allowance,
+            members: 0,
+            produced: 0,
         }
     }
 }
@@ -265,10 +422,7 @@ fn consume_zero_tail<R: BufRead>(input: &mut R) -> io::Result<()> {
             return Ok(());
         }
         if buf.iter().any(|&b| b != 0) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "trailing data after the last compressed member",
-            ));
+            return Err(io::Error::new(io::ErrorKind::InvalidData, TrailingData));
         }
         let n = buf.len();
         input.consume(n);
@@ -279,11 +433,11 @@ impl<R: BufRead, D: Member<R>> MultiMember<R, D> {
     fn step(&mut self, out: &mut [u8]) -> io::Result<Step> {
         match &mut self.state {
             MemberState::Done => Ok(Step::Eof),
-            MemberState::Failed(kind, message) => Err(io::Error::new(*kind, message.clone())),
+            MemberState::Failed(replay) => Err(replay.error()),
             MemberState::Between(input) => {
                 let first = input.fill_buf()?.first().copied();
                 match first {
-                    None | Some(0) if !self.seen_member => Err(io::Error::new(
+                    None | Some(0) if self.members == 0 => Err(io::Error::new(
                         io::ErrorKind::InvalidData,
                         "no compressed member found",
                     )),
@@ -297,7 +451,15 @@ impl<R: BufRead, D: Member<R>> MultiMember<R, D> {
                         Ok(Step::Eof)
                     }
                     Some(_) => {
-                        self.seen_member = true;
+                        let members = self.members.saturating_add(1);
+                        let allowance = self.allowance.at(self.produced);
+                        if members > allowance {
+                            return Err(io::Error::other(CompressedMembersExceeded {
+                                members,
+                                allowance,
+                            }));
+                        }
+                        self.members = members;
                         if let MemberState::Between(input) =
                             std::mem::replace(&mut self.state, MemberState::Done)
                         {
@@ -310,6 +472,9 @@ impl<R: BufRead, D: Member<R>> MultiMember<R, D> {
             MemberState::Active(decoder) => {
                 let n = decoder.read(out)?;
                 if n > 0 {
+                    self.produced = self
+                        .produced
+                        .saturating_add(u64::try_from(n).unwrap_or(u64::MAX));
                     return Ok(Step::Data(n));
                 }
                 if let MemberState::Active(decoder) =
@@ -339,7 +504,7 @@ impl<R: BufRead, D: Member<R>> Read for MultiMember<R, D> {
                     if e.kind() != io::ErrorKind::Interrupted
                         && !matches!(self.state, MemberState::Failed(..))
                     {
-                        self.state = MemberState::Failed(e.kind(), e.to_string());
+                        self.state = MemberState::Failed(Replay::of(&e));
                     }
                     return Err(e);
                 }
@@ -369,6 +534,37 @@ impl<R: BufRead> Read for XzLimited<R> {
             }
         })
     }
+}
+
+/// zstd decoder that reports a frame whose window exceeds the limit as a typed
+/// [`DecoderMemoryExceeded`] so `budget_violation` can classify it.
+struct ZstdLimited<'a, R: BufRead> {
+    inner: zstd::Decoder<'a, R>,
+    max: u64,
+}
+
+impl<R: BufRead> Read for ZstdLimited<'_, R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.inner.read(buf).map_err(|e| {
+            if is_window_too_large(&e) {
+                io::Error::other(DecoderMemoryExceeded { max: self.max })
+            } else {
+                e
+            }
+        })
+    }
+}
+
+/// Whether `e` is libzstd's `frameParameter_windowTooLarge` error.
+///
+/// The `zstd` crate flattens libzstd error codes into a message, so the
+/// message of that one code is the only handle on it.
+fn is_window_too_large(e: &io::Error) -> bool {
+    let code = zstd::zstd_safe::zstd_sys::ZSTD_ErrorCode::ZSTD_error_frameParameter_windowTooLarge
+        as usize;
+    let expected = zstd::zstd_safe::get_error_name(code.wrapping_neg());
+    e.get_ref()
+        .is_some_and(|inner| inner.to_string() == expected)
 }
 
 /// A compressing writer for one of the [`CompressionCodec`]s.
@@ -459,7 +655,7 @@ mod tests {
         }
     }
 
-    const TEST_MEM: u64 = 256 * 1024 * 1024;
+    const TEST_MEM: DecoderLimits = DecoderLimits::for_tests();
 
     const ALL_CODECS: [CompressionCodec; 4] = [
         CompressionCodec::Gzip,
@@ -501,7 +697,11 @@ mod tests {
         }
     }
 
-    fn decode_all(codec: CompressionCodec, bytes: Vec<u8>, mem: u64) -> io::Result<Vec<u8>> {
+    fn decode_all(
+        codec: CompressionCodec,
+        bytes: Vec<u8>,
+        mem: DecoderLimits,
+    ) -> io::Result<Vec<u8>> {
         let mut out = Vec::new();
         codec
             .decoder(std::io::Cursor::new(bytes), mem)
@@ -648,11 +848,181 @@ mod tests {
         };
         let mut encoded = encode_at(0, b"first");
         encoded.extend_from_slice(&encode_at(9, b"second"));
-        let err = decode_all(CompressionCodec::Xz, encoded, 16 * 1024 * 1024).unwrap_err();
+        let err = decode_all(
+            CompressionCodec::Xz,
+            encoded,
+            DecoderLimits {
+                memory: 16 * 1024 * 1024,
+                ..TEST_MEM
+            },
+        )
+        .unwrap_err();
         assert!(
             err.get_ref()
                 .is_some_and(<dyn std::error::Error + Send + Sync>::is::<DecoderMemoryExceeded>)
         );
+    }
+
+    fn zstd_with_window_log(log: u32) -> Vec<u8> {
+        let mut enc = zstd::Encoder::new(Vec::new(), 1).unwrap();
+        enc.include_contentsize(false).unwrap();
+        enc.set_parameter(zstd::zstd_safe::CParameter::WindowLog(log))
+            .unwrap();
+        enc.write_all(b"payload").unwrap();
+        enc.finish().unwrap()
+    }
+
+    fn zstd_limits(memory: u64) -> DecoderLimits {
+        DecoderLimits {
+            memory,
+            zstd_window: ZstdWindowLog::for_memory(memory),
+            ..TEST_MEM
+        }
+    }
+
+    #[test]
+    fn test_zstd_window_above_the_limit_is_a_typed_memory_refusal() {
+        let encoded = zstd_with_window_log(20);
+        for (memory, accepted) in [(1 << 20, true), ((1 << 20) - 1, false)] {
+            let result = decode_all(CompressionCodec::Zstd, encoded.clone(), zstd_limits(memory));
+            if accepted {
+                assert_eq!(result.unwrap(), b"payload");
+            } else {
+                let err = result.unwrap_err();
+                let exceeded = err
+                    .get_ref()
+                    .and_then(|inner| inner.downcast_ref::<DecoderMemoryExceeded>())
+                    .unwrap();
+                assert_eq!(exceeded.max, memory);
+            }
+        }
+    }
+
+    #[test]
+    fn test_zstd_corruption_is_not_reported_as_a_memory_refusal() {
+        let mut encoded = zstd_with_window_log(16);
+        let last = encoded.len() - 1;
+        encoded.truncate(last / 2);
+        let err = decode_all(CompressionCodec::Zstd, encoded, TEST_MEM).unwrap_err();
+        assert!(
+            err.get_ref()
+                .is_none_or(|inner| !inner.is::<DecoderMemoryExceeded>())
+        );
+    }
+
+    fn gzip_members(count: usize) -> Vec<u8> {
+        (0..count)
+            .flat_map(|_| encode(CompressionCodec::Gzip, b""))
+            .collect()
+    }
+
+    fn limits_with_base(base: u64) -> DecoderLimits {
+        DecoderLimits {
+            members: MemberAllowance::of_base(base),
+            ..TEST_MEM
+        }
+    }
+
+    fn member_cap(err: &io::Error) -> Option<CompressedMembersExceeded> {
+        err.get_ref()
+            .and_then(|inner| inner.downcast_ref::<CompressedMembersExceeded>())
+            .copied()
+    }
+
+    #[test]
+    fn test_empty_members_stop_at_the_base_allowance() {
+        for codec in [CompressionCodec::Gzip, CompressionCodec::Bzip2] {
+            let members =
+                |n: usize| -> Vec<u8> { (0..n).flat_map(|_| encode(codec, b"")).collect() };
+            assert!(decode_all(codec, members(5), limits_with_base(5)).is_ok());
+            let err = decode_all(codec, members(6), limits_with_base(5)).unwrap_err();
+            assert_eq!(
+                member_cap(&err),
+                Some(CompressedMembersExceeded {
+                    members: 6,
+                    allowance: 5
+                }),
+                "{}",
+                codec.name()
+            );
+        }
+    }
+
+    #[test]
+    fn test_member_failure_keeps_its_type_when_read_again() {
+        let mut decoder = CompressionCodec::Gzip
+            .decoder(std::io::Cursor::new(gzip_members(4)), limits_with_base(2))
+            .unwrap();
+        let mut buf = [0u8; 16];
+        let first = decoder.read(&mut buf).unwrap_err();
+        let second = decoder.read(&mut buf).unwrap_err();
+        assert_eq!(member_cap(&first), member_cap(&second));
+        assert!(member_cap(&second).is_some());
+    }
+
+    #[test]
+    fn test_trailing_data_failure_keeps_its_type_when_read_again() {
+        let mut encoded = encode(CompressionCodec::Gzip, b"x");
+        encoded.extend_from_slice(b"\0\0\0garbage");
+        let mut decoder = CompressionCodec::Gzip
+            .decoder(std::io::Cursor::new(encoded), TEST_MEM)
+            .unwrap();
+        let mut sink = Vec::new();
+        let first = decoder.read_to_end(&mut sink).unwrap_err();
+        let second = decoder.read_to_end(&mut sink).unwrap_err();
+        for err in [first, second] {
+            assert!(is_trailing_data(&err));
+        }
+    }
+
+    #[test]
+    fn test_the_allowance_gains_one_member_per_16_kib_exactly() {
+        let base = MemberAllowance::of_base(5);
+        assert_eq!(base.at(16 * 1024 - 1), 5);
+        assert_eq!(base.at(16 * 1024), 6);
+        assert_eq!(base.at(32 * 1024 - 1), 6);
+        assert_eq!(base.at(32 * 1024), 7);
+    }
+
+    #[test]
+    fn test_a_legacy_zstd_frame_is_refused_by_the_decoder() {
+        for magic in [0xFD2F_B51Eu32, 0xFD2F_B522, 0xFD2F_B527] {
+            let mut bytes = magic.to_le_bytes().to_vec();
+            bytes.extend_from_slice(&[0u8; 32]);
+            let code =
+                zstd::zstd_safe::zstd_sys::ZSTD_ErrorCode::ZSTD_error_prefix_unknown as usize;
+            let expected = zstd::zstd_safe::get_error_name(code.wrapping_neg());
+            let err = decode_all(CompressionCodec::Zstd, bytes, TEST_MEM).unwrap_err();
+            assert_eq!(err.to_string(), expected, "{magic:#x}");
+        }
+    }
+
+    #[test]
+    fn test_the_allowance_grows_with_output_and_never_overflows() {
+        let base = MemberAllowance::of_base(3);
+        assert_eq!(base.at(0), 3);
+        assert_eq!(base.at(MEMBER_OUTPUT_BYTES - 1), 3);
+        assert_eq!(base.at(MEMBER_OUTPUT_BYTES), 4);
+        assert_eq!(base.at(10 * MEMBER_OUTPUT_BYTES), 13);
+        assert_eq!(MemberAllowance::UNBOUNDED.at(u64::MAX), u64::MAX);
+        let huge = limits_with_base(u64::MAX);
+        assert!(decode_all(CompressionCodec::Gzip, gzip_members(50), huge).is_ok());
+    }
+
+    #[test]
+    fn test_limits_cover_componentwise() {
+        let low = zstd_limits(1 << 20);
+        let high = zstd_limits(1 << 24);
+        assert!(high.covers(low) && high.covers(high));
+        assert!(!low.covers(high));
+        let mixed = DecoderLimits {
+            memory: high.memory,
+            zstd_window: low.zstd_window,
+            ..high
+        };
+        assert!(!mixed.covers(high) && high.covers(mixed));
+        assert!(!limits_with_base(5).covers(limits_with_base(6)));
+        assert!(limits_with_base(6).covers(limits_with_base(5)));
     }
 
     #[test]

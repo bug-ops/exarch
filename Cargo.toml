@@ -38,7 +38,7 @@ flate2 = "1.1"
 indicatif = "0.18"
 libc = "0.2"
 liblzma = { version = "0.4.9", features = ["static"] }
-lzma-rust2 = { version = "0.24", default-features = false, features = ["std"] }
+lzma-rust2 = { version = "0.23", default-features = false, features = ["std"] }
 napi = "3.16"
 napi-build = "2.6"
 napi-derive = "3.7"
@@ -60,7 +60,7 @@ typed-path = { version = "0.13", default-features = false }
 unicode-normalization = "0.1.26"
 walkdir = "2.5"
 zip = { version = "9.2", default-features = false }
-zstd = "0.14"
+zstd = { version = "0.14", default-features = false }
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }

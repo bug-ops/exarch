@@ -6,10 +6,16 @@
 //! wakes whatever the worker is awaiting, which is a pull of the archive
 //! stream, an `onEntry` promise or the close of the stream.
 //!
-//! An abort is noticed only at those points and when the worker starts.
-//! Parsing or extracting bytes that are already in memory is not interrupted.
+//! An abort is noticed when the worker starts, at those waits, at every read of
+//! the archive (an in-memory `Uint8Array` is read through [`AbortingRead`]) and
+//! at every progress callback. A step that touches no archive byte, such as
+//! the work on an already-buffered block, is not interrupted.
 
 use std::future::Future;
+use std::io;
+use std::io::Read;
+use std::io::Seek;
+use std::io::SeekFrom;
 use std::pin::pin;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -67,6 +73,46 @@ const BIND_SIGNAL_JS: &str = r#"(signal, onAbort) => {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Aborted;
 
+impl std::fmt::Display for Aborted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("archive read aborted")
+    }
+}
+
+impl std::error::Error for Aborted {}
+
+/// A reader that fails once the signal has fired.
+///
+/// The failure is `io::Error::other(Aborted)`, never `ErrorKind::Interrupted`,
+/// which `Read::read_exact` and `io::copy` retry. Seeking passes through: only
+/// reading consumes archive bytes.
+#[derive(Debug)]
+pub struct AbortingRead<R> {
+    inner: R,
+    abort: AbortHandle,
+}
+
+impl<R> AbortingRead<R> {
+    /// Wraps `inner`; every read first consults `abort`.
+    #[must_use]
+    pub const fn new(inner: R, abort: AbortHandle) -> Self {
+        Self { inner, abort }
+    }
+}
+
+impl<R: Read> Read for AbortingRead<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.abort.check().map_err(io::Error::other)?;
+        self.inner.read(buf)
+    }
+}
+
+impl<R: Seek> Seek for AbortingRead<R> {
+    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        self.inner.seek(pos)
+    }
+}
+
 /// State shared between the JS listener and the blocking worker.
 #[derive(Debug)]
 struct AbortWatch {
@@ -109,6 +155,14 @@ pub struct AbortHandle(Option<Arc<AbortWatch>>);
 impl AbortHandle {
     /// A handle that never aborts.
     pub const NONE: Self = Self(None);
+
+    /// A handle whose signal has already fired.
+    #[cfg(test)]
+    pub fn fired() -> Self {
+        let watch = Arc::new(AbortWatch::new());
+        watch.fire(Error::from_reason("test abort"));
+        Self(Some(watch))
+    }
 
     /// Records and reports whether the signal already fired.
     ///
@@ -250,5 +304,49 @@ impl FromNapiValue for AbortBinding {
             handle: AbortHandle(Some(watch)),
             unsubscribe,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+
+    use super::*;
+
+    #[test]
+    fn reads_pass_through_without_a_signal() {
+        let mut reader = AbortingRead::new(Cursor::new(b"abcd".to_vec()), AbortHandle::NONE);
+        let mut out = [0u8; 4];
+        reader
+            .read_exact(&mut out)
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(&out, b"abcd");
+    }
+
+    #[test]
+    fn fired_signal_fails_read_exact_without_retry() {
+        let abort = AbortHandle::fired();
+        let mut reader = AbortingRead::new(Cursor::new(vec![0u8; 8]), abort.clone());
+        let mut out = [0u8; 4];
+        let Err(err) = reader.read_exact(&mut out) else {
+            panic!("read must fail");
+        };
+        assert_ne!(err.kind(), io::ErrorKind::Interrupted);
+        assert!(
+            err.get_ref()
+                .is_some_and(<dyn std::error::Error + Send + Sync>::is::<Aborted>)
+        );
+        assert!(abort.is_observed());
+    }
+
+    #[test]
+    fn seek_passes_through_after_abort() {
+        let mut reader = AbortingRead::new(Cursor::new(vec![0u8; 8]), AbortHandle::fired());
+        assert_eq!(
+            reader
+                .seek(SeekFrom::End(0))
+                .unwrap_or_else(|e| panic!("{e}")),
+            8
+        );
     }
 }

@@ -12,6 +12,7 @@ use exarch_core::ExtractionReport;
 use exarch_core::PartialWrites;
 use exarch_core::PolicySetting;
 use exarch_core::SecurityConfig;
+use exarch_core::TarTrailerRefusal;
 use exarch_core::ZipBombDetails;
 use exarch_core::ZipBombScope;
 use exarch_core::formats::detect::ArchiveType;
@@ -223,16 +224,22 @@ fn quota_exceeded_context(
     resource: &exarch_core::QuotaResource,
     archive: TerminalPath<'_>,
 ) -> String {
-    if matches!(resource, exarch_core::QuotaResource::DecoderMemory { .. }) {
-        format!(
+    match resource {
+        exarch_core::QuotaResource::DecoderMemory { .. } => format!(
             "Decoder memory limit exceeded for '{archive}'\n\
-             The archive declares a decompression dictionary larger than the allowed limit."
-        )
-    } else {
-        format!(
+             The archive declares a decompression dictionary or window larger than the allowed \
+             limit. No CLI flag relaxes this. Rust API only: \
+             SecurityConfig::with_max_decoder_memory."
+        ),
+        exarch_core::QuotaResource::CompressedMembers { .. } => format!(
+            "Compressed member limit exceeded for '{archive}'\n\
+             The stream holds more gzip or bzip2 members than its output allows. No CLI flag \
+             relaxes this. Rust API only: SecurityConfig::with_compressed_member_allowance."
+        ),
+        _ => format!(
             "Extraction limit exceeded for '{archive}'\n\
              HINT: Use --max-files, --max-total-size, or --max-file-size to increase limits."
-        )
+        ),
     }
 }
 
@@ -301,7 +308,14 @@ pub fn convert_extraction_error(err: ArchiveError, archive: &Path) -> anyhow::Er
             TerminalPath::new(path),
             supported_formats(),
         ),
-        ArchiveError::InvalidArchive(_) | ArchiveError::TarAmbiguity(_) => format!(
+        ArchiveError::SecurityViolation { .. }
+        | ArchiveError::TarTrailer(TarTrailerRefusal::OverCap { .. }) => format!(
+            "Security violation while processing '{archive}'\nHINT: {}",
+            relaxation_hint(err.relaxable_by())
+        ),
+        ArchiveError::InvalidArchive(_)
+        | ArchiveError::TarAmbiguity(_)
+        | ArchiveError::TarTrailer(_) => format!(
             "Invalid archive '{archive}'\n\
              HINT: The archive may be corrupted or malformed."
         ),
@@ -330,10 +344,7 @@ pub fn convert_extraction_error(err: ArchiveError, archive: &Path) -> anyhow::Er
         ArchiveError::InvalidCompressionLevel { level } => {
             format!("Invalid compression level {level}: must be between 1 and 9.")
         }
-        ArchiveError::SecurityViolation { relaxable_by, .. } => format!(
-            "Security violation while processing '{archive}'\nHINT: {}",
-            relaxation_hint(*relaxable_by)
-        ),
+
         // Forward-compat: a variant added to ArchiveError after this match was
         // written. #[non_exhaustive] requires this arm to compile against a
         // newer exarch-core; there is no more specific context to add.

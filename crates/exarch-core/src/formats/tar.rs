@@ -157,6 +157,7 @@ use super::target::FileRequest;
 use super::target::HostTarget;
 use super::target::Tally;
 use super::traits::ArchiveFormat;
+use crate::formats::compression::DecoderLimits;
 use crate::reader::decode_tar_stream;
 
 /// TAR archive handler with streaming extraction.
@@ -749,9 +750,6 @@ pub(crate) fn tar_permission_bits(header: &tar::Header) -> Option<u32> {
     header.mode().ok().map(|mode| mode & 0o7777)
 }
 
-/// Decoder memory limit for codecs that ignore it (only xz is bounded).
-const UNBOUNDED_DECODER_MEMORY: u64 = u64::MAX;
-
 /// Opens `path` as a TAR byte stream, decoding it with `codec` when one is
 /// given.
 ///
@@ -766,9 +764,9 @@ const UNBOUNDED_DECODER_MEMORY: u64 = u64::MAX;
 pub(crate) fn open_tar_stream(
     path: &Path,
     codec: Option<CompressionCodec>,
-    max_decoder_memory: u64,
+    limits: DecoderLimits,
 ) -> Result<Box<dyn Read + Send>> {
-    decode_tar_stream(File::open(path)?, codec, max_decoder_memory)
+    decode_tar_stream(File::open(path)?, codec, limits)
 }
 
 /// Opens a gzip-compressed TAR archive (.tar.gz).
@@ -802,7 +800,7 @@ pub fn open_tar_gz<P: AsRef<Path>>(path: P) -> Result<TarArchive<Box<dyn Read + 
     open_tar_stream(
         path.as_ref(),
         Some(CompressionCodec::Gzip),
-        UNBOUNDED_DECODER_MEMORY,
+        DecoderLimits::UNBOUNDED,
     )
     .map(TarArchive::new)
 }
@@ -838,7 +836,7 @@ pub fn open_tar_bz2<P: AsRef<Path>>(path: P) -> Result<TarArchive<Box<dyn Read +
     open_tar_stream(
         path.as_ref(),
         Some(CompressionCodec::Bzip2),
-        UNBOUNDED_DECODER_MEMORY,
+        DecoderLimits::UNBOUNDED,
     )
     .map(TarArchive::new)
 }
@@ -884,7 +882,7 @@ pub fn open_tar_xz<P: AsRef<Path>>(
     open_tar_stream(
         path.as_ref(),
         Some(CompressionCodec::Xz),
-        config.max_decoder_memory,
+        DecoderLimits::of(config),
     )
     .map(TarArchive::new)
 }
@@ -921,7 +919,7 @@ pub fn open_tar_zst<P: AsRef<Path>>(path: P) -> Result<TarArchive<Box<dyn Read +
     open_tar_stream(
         path.as_ref(),
         Some(CompressionCodec::Zstd),
-        UNBOUNDED_DECODER_MEMORY,
+        DecoderLimits::UNBOUNDED,
     )
     .map(TarArchive::new)
 }

@@ -166,6 +166,8 @@ use super::traits::ArchiveFormat;
 use super::zip_structure;
 use super::zip_structure::Shared;
 use super::zip_structure::ZipStructure;
+use super::zstd_window::ZstdWindowLog;
+use super::zstd_window::ZstdWindows;
 
 /// Message of the `io::Error` the `zip` crate (>= 9.0.1) raises when an entry
 /// decompresses past its declared size.
@@ -413,6 +415,35 @@ fn push_duplicate_skip_warnings(
     common::push_disallowed_extension_warning(report, extension_skips);
 }
 
+/// A ZIP archive that passed [`ZipArchive::check_admission`] under a config:
+/// the entry count, the stream checks the policy needs and the zstd windows the
+/// entries declare are within that config's limits.
+///
+/// Listing and verification take this token rather than the archive, so no
+/// path can read entries the config refused. The token owns the archive
+/// borrow, so it cannot be redeemed against another archive.
+pub(crate) struct AdmittedZip<'a, R: Read + Seek> {
+    archive: &'a mut ZipArchive<R>,
+}
+
+impl<R: Read + Seek> std::fmt::Debug for AdmittedZip<'_, R> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AdmittedZip").finish_non_exhaustive()
+    }
+}
+
+impl<R: Read + Seek> AdmittedZip<'_, R> {
+    /// The underlying reader, for listing.
+    pub(crate) fn reader_mut(&mut self) -> &mut ZipReader<Shared<R>> {
+        &mut self.archive.inner
+    }
+
+    /// What the structural census found when the archive was opened.
+    pub(crate) const fn structure(&self) -> &ZipStructure {
+        &self.archive.structure
+    }
+}
+
 /// A ZIP archive that passed [`ZipArchive::check_structure`] under `config`.
 ///
 /// Extraction goes through [`Self::extract_with`], which builds the target
@@ -421,7 +452,7 @@ fn push_duplicate_skip_warnings(
 /// disagree with it on configuration. The token owns the archive borrow, so it
 /// cannot be redeemed against another archive.
 pub(crate) struct CheckedZip<'a, R: Read + Seek> {
-    archive: &'a mut ZipArchive<R>,
+    admitted: AdmittedZip<'a, R>,
     config: &'a SecurityConfig<Validated>,
 }
 
@@ -445,7 +476,8 @@ impl<'a, R: Read + Seek> CheckedZip<'a, R> {
         progress: &mut dyn ProgressCallback,
     ) -> Result<ExtractionReport> {
         let mut target = make_target(self.config)?;
-        self.archive
+        self.admitted
+            .archive
             .extract_entries(&mut target, self.config, options, progress)
     }
 }
@@ -515,6 +547,13 @@ impl<R: Read + Seek> ZipArchive<R> {
     /// operation uses; the structural census adds one sequential pass over
     /// the raw directory and a second read of each local header.
     ///
+    /// The structural census decodes zstd entries under libzstd's default
+    /// window limit (128 MiB), because no config is known yet; the
+    /// `max_decoder_memory` of the config an operation runs under only decides
+    /// afterwards whether the archive is refused. Open with a config in mind
+    /// through `extract_archive` and the other path-based functions to have the
+    /// census itself run under that limit.
+    ///
     /// # Errors
     ///
     /// Returns an error if:
@@ -547,16 +586,23 @@ impl<R: Read + Seek> ZipArchive<R> {
     /// Same as [`ZipArchive::new`].
     pub(crate) fn for_config(reader: R, config: &SecurityConfig<Validated>) -> Result<Self> {
         let checks = zip_structure::StreamChecks::of(config.zip_consistency);
-        let (inner, structure) = zip_structure::open_with(reader, checks, config.max_total_size)?;
+        let (inner, structure) = zip_structure::open_with(
+            reader,
+            checks,
+            config.max_total_size,
+            ZstdWindowLog::of(config),
+        )?;
         Ok(Self { inner, structure })
     }
 
-    /// The underlying reader, for listing.
+    /// The underlying reader, for tests that read the entries directly.
+    #[cfg(test)]
     pub(crate) fn reader_mut(&mut self) -> &mut ZipReader<Shared<R>> {
         &mut self.inner
     }
 
     /// What the structural census found when the archive was opened.
+    #[cfg(test)]
     pub(crate) const fn structure(&self) -> &ZipStructure {
         &self.structure
     }
@@ -587,8 +633,8 @@ impl<R: Read + Seek> ZipArchive<R> {
         config: &SecurityConfig<Validated>,
         listing: &mut crate::inspection::list::ListPass<'_, '_>,
     ) -> Result<crate::inspection::ArchiveManifest> {
-        self.verify_structure(config)?;
-        crate::inspection::list::list_zip_reader(self, config, listing)
+        let mut admitted = self.admit_structure(config)?;
+        crate::inspection::list::list_zip_reader(&mut admitted, config, listing)
     }
 
     /// Fails closed when the archive was opened without the checks that read
@@ -604,15 +650,68 @@ impl<R: Read + Seek> ZipArchive<R> {
         Ok(())
     }
 
-    fn verify_structure(&self, config: &SecurityConfig<Validated>) -> Result<()> {
+    /// Refuses an archive whose zstd entries `config` cannot decode.
+    ///
+    /// The `zip` crate builds its own zstd decoders, so the windows the
+    /// entries declare (read from their frame headers when the archive was
+    /// opened) are compared with the limit `max_decoder_memory` implies
+    /// before any entry is listed or extracted. An archive the open-time census
+    /// skipped decoding for, because its windows exceeded the limit the census
+    /// ran under, cannot be admitted by a looser config: the findings of those
+    /// decodes are missing.
+    fn check_zstd_windows(&self, config: &SecurityConfig<Validated>) -> Result<()> {
+        // ASSUMPTION: a refused window is `QuotaExceeded` even if the census
+        // skipped it.
+        let limit = ZstdWindowLog::of(config);
+        match self.structure.zstd_windows() {
+            ZstdWindows::OverBudget => Err(ArchiveError::InvalidArchive(
+                "ZIP zstd entries could not be walked within the archive extent".into(),
+            )),
+            ZstdWindows::Largest(window) if !limit.admits(window) => {
+                Err(ArchiveError::QuotaExceeded {
+                    resource: crate::QuotaResource::DecoderMemory {
+                        max: config.max_decoder_memory,
+                    },
+                })
+            }
+            ZstdWindows::Largest(window)
+                if config.zip_consistency == ZipConsistencyPolicy::Enforce
+                    && !self.structure.census_window().admits(window) =>
+            {
+                Err(ArchiveError::InvalidConfiguration {
+                    reason: "ZIP archive was opened under a smaller zstd window limit than its \
+                             config allows"
+                        .into(),
+                })
+            }
+            ZstdWindows::NoZstdEntries | ZstdWindows::Largest(_) => Ok(()),
+        }
+    }
+
+    /// Applies the limits that do not depend on the structural findings and
+    /// returns the token that lets the entries be read.
+    pub(crate) fn check_admission(
+        &mut self,
+        config: &SecurityConfig<Validated>,
+    ) -> Result<AdmittedZip<'_, R>> {
         self.check_count(config)?;
         self.check_stream_checks(config)?;
+        self.check_zstd_windows(config)?;
+        Ok(AdmittedZip { archive: self })
+    }
+
+    /// Admits the archive and applies the structural policy.
+    fn admit_structure(
+        &mut self,
+        config: &SecurityConfig<Validated>,
+    ) -> Result<AdmittedZip<'_, R>> {
+        let admitted = self.check_admission(config)?;
         if config.zip_consistency == ZipConsistencyPolicy::Enforce
-            && let Some(finding) = self.structure.findings().first()
+            && let Some(finding) = admitted.archive.structure.findings().first()
         {
             return Err(ArchiveError::ZipInconsistency(finding.clone()));
         }
-        Ok(())
+        Ok(admitted)
     }
 
     /// Checks the structural policy and returns the archive bound to `config`
@@ -621,11 +720,8 @@ impl<R: Read + Seek> ZipArchive<R> {
         &'a mut self,
         config: &'a SecurityConfig<Validated>,
     ) -> Result<CheckedZip<'a, R>> {
-        self.verify_structure(config)?;
-        Ok(CheckedZip {
-            archive: self,
-            config,
-        })
+        let admitted = self.admit_structure(config)?;
+        Ok(CheckedZip { admitted, config })
     }
 
     /// Resolves the entry path from a ZIP file via [`resolve_zip_entry_path`].
@@ -850,10 +946,9 @@ impl<R: Read + Seek> ZipArchive<R> {
         use crate::inspection::verify::list_for_verify;
         use crate::inspection::verify::verify_manifest_with_structure;
 
-        self.check_count(config)?;
-        self.check_stream_checks(config)?;
+        let mut admitted = self.check_admission(config)?;
         let listed = list_for_verify(config, options, progress, |listing| {
-            list_zip_reader(self, config, listing)
+            list_zip_reader(&mut admitted, config, listing)
         })?;
         let (findings, omitted) = match config.zip_consistency {
             ZipConsistencyPolicy::Enforce => {

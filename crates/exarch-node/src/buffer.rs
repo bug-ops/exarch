@@ -59,6 +59,7 @@ fn list_with_progress_core(
     run_with_optional_progress(
         progress,
         dispatch,
+        data.abort_handle(),
         |progress| {
             data.run(format, |reader| {
                 Ok(exarch_core::list_reader_with_progress(
@@ -84,6 +85,7 @@ fn verify_with_progress_core(
     run_with_optional_progress(
         progress,
         dispatch,
+        data.abort_handle(),
         |progress| {
             data.run(format, |reader| {
                 Ok(exarch_core::verify_reader_with_progress(
@@ -106,9 +108,9 @@ fn verify_with_progress_core(
 /// * `format` - The archive format; detected from the leading bytes if omitted
 /// * `signal` - Optional `AbortSignal`. Aborting rejects with `ABORT_ERR` (an
 ///   `AbortError`, `cause` is `signal.reason`) and frees the worker. The abort
-///   is noticed when the job starts and while it waits for JavaScript (an
-///   `AsyncIterable` chunk or its close); a `Uint8Array` archive is processed
-///   to completion once started and then resolves normally
+///   is noticed when the job starts, while it waits for JavaScript (an
+///   `AsyncIterable` chunk or its close), at every read of a `Uint8Array`
+///   archive and, for the `WithProgress` variants, at every progress callback
 ///
 /// # Returns
 ///

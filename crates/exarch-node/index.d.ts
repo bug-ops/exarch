@@ -1058,9 +1058,9 @@ export declare function extractArchiveSync(archivePath: string, outputDir: strin
  *   `AbortError`, `cause` is `signal.reason`) and frees the worker, even if
  *   `onEntry` returned a promise that never settles or the iterable stalls.
  *   The abort is noticed when the job starts and while it waits for JavaScript
- *   (an `AsyncIterable` chunk or its close, the promise `onEntry` returned); a
- *   `Uint8Array` archive is otherwise processed without interruption. A
- *   pending `onEntry` call is abandoned, not cancelled
+ *   (an `AsyncIterable` chunk or its close, the promise `onEntry` returned)
+ *   and at every read of a `Uint8Array` archive. A pending `onEntry` call is
+ *   abandoned, not cancelled
  *
  * # Returns
  *
@@ -1138,9 +1138,9 @@ export declare function extractArchiveToCallbackSync(data: Uint8Array, onEntry: 
  * * `format` - The archive format; detected from the leading bytes if omitted
  * * `signal` - Optional `AbortSignal`. Aborting rejects with `ABORT_ERR` (an
  *   `AbortError`, `cause` is `signal.reason`) and frees the worker. The abort
- *   is noticed when the job starts and while it waits for JavaScript (an
- *   `AsyncIterable` chunk or its close); a `Uint8Array` archive is processed
- *   to completion once started and then resolves normally
+ *   is noticed when the job starts, while it waits for JavaScript (an
+ *   `AsyncIterable` chunk or its close), at every read of a `Uint8Array`
+ *   archive and, for the `WithProgress` variants, at every progress callback
  *
  * # Returns
  *
@@ -1444,9 +1444,9 @@ export declare function listArchive(archivePath: string, config?: SecurityConfig
  * * `format` - The archive format; detected from the leading bytes if omitted
  * * `signal` - Optional `AbortSignal`. Aborting rejects with `ABORT_ERR` (an
  *   `AbortError`, `cause` is `signal.reason`) and frees the worker. The abort
- *   is noticed when the job starts and while it waits for JavaScript (an
- *   `AsyncIterable` chunk or its close); a `Uint8Array` archive is processed
- *   to completion once started and then resolves normally
+ *   is noticed when the job starts, while it waits for JavaScript (an
+ *   `AsyncIterable` chunk or its close), at every read of a `Uint8Array`
+ *   archive and, for the `WithProgress` variants, at every progress callback
  *
  * # Returns
  *

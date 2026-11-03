@@ -13,10 +13,13 @@
 
 pub mod dest_dir;
 pub mod entry_type;
+mod parent_check;
 pub mod safe_path;
 pub mod safe_symlink;
 
 pub use dest_dir::DestDir;
 pub use entry_type::EntryType;
+#[cfg(all(feature = "testing", any(unix, target_os = "wasi")))]
+pub use parent_check::Walked;
 pub use safe_path::SafePath;
 pub use safe_symlink::SafeSymlink;

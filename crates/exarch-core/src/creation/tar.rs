@@ -98,6 +98,10 @@ use tar::Header;
 /// - Output file cannot be created
 /// - I/O error during archive creation
 /// - File metadata cannot be read
+#[expect(
+    clippy::disallowed_methods,
+    reason = "creates the caller-named output archive, not an extraction destination"
+)]
 pub fn create_tar_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
     output: P,
     codec: Option<CompressionCodec>,

@@ -136,6 +136,10 @@ pub fn create_zip_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
     config: &CreationConfig<Validated>,
     progress: &mut dyn ProgressCallback,
 ) -> Result<CreationReport> {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "creates the caller-named output archive, not an extraction destination"
+    )]
     let (file, readable) = match OpenOptions::new()
         .read(true)
         .write(true)

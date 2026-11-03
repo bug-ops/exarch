@@ -461,6 +461,48 @@ describe('AsyncIterable input', () => {
     assert.strictEqual(closed, true);
   });
 
+  it('reports the onEntry error, not a later stream error, when the callback fails first', async () => {
+    const boom = new Error('callback first');
+    let pulls = 0;
+    async function* source() {
+      yield archive.subarray(0, 1100);
+      pulls += 1;
+      throw new Error('stream later');
+    }
+    await assert.rejects(
+      extractArchiveToCallback(source(), () => {
+        throw boom;
+      }),
+      (err) => {
+        assert.strictEqual(err.code, 'ENTRY_CALLBACK_ERROR');
+        assert.strictEqual(err.cause, boom);
+        return true;
+      }
+    );
+    assert.strictEqual(pulls, 0, 'the stream must not be read on after the callback failed');
+  });
+
+  it('reports the stream error, not an onEntry error, when the stream fails first', async () => {
+    const boom = new Error('stream first');
+    let calls = 0;
+    async function* source() {
+      yield archive.subarray(0, 515);
+      throw boom;
+    }
+    await assert.rejects(
+      extractArchiveToCallback(source(), () => {
+        calls += 1;
+        throw new Error('callback later');
+      }),
+      (err) => {
+        assert.strictEqual(err.code, 'STREAM_ERROR');
+        assert.strictEqual(err.cause, boom);
+        return true;
+      }
+    );
+    assert.strictEqual(calls, 0);
+  });
+
   it('closes a stream that was never read', async () => {
     let closed = false;
     const source = {

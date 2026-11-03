@@ -2,7 +2,7 @@
 //!
 //! Compares TAR and ZIP creation performance with and without progress
 //! callbacks to measure overhead.
-
+#![allow(clippy::disallowed_methods)]
 #![allow(clippy::unwrap_used)] // Allow unwrap in benchmarks for brevity
 
 use criterion::Criterion;

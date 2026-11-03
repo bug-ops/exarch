@@ -2,6 +2,7 @@
 //! interact with earlier entries (symlink chains, dangling hardlinks).
 
 #![cfg(unix)]
+#![allow(clippy::disallowed_methods)]
 
 use exarch_core::IssueCategory;
 use exarch_core::SecurityConfig;

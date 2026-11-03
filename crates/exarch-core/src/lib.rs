@@ -20,6 +20,7 @@
 
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
 
 pub mod api;
 pub mod archive;
@@ -61,11 +62,13 @@ pub use api::verify_reader;
 pub use api::verify_reader_with_progress;
 pub use archive::Archive;
 pub use archive::ArchiveBuilder;
+pub use config::DecodeReuse;
 pub use config::DecompressionBudget;
 pub use config::ExtractionOptions;
 pub use config::IntegrityCheck;
 pub use config::ListOptions;
 pub use config::ParallelDecode;
+pub use config::ReuseLimit;
 pub use config::SecurityConfig;
 pub use config::StoredTargets;
 pub use config::Unvalidated;
@@ -173,6 +176,8 @@ pub use security::boundary::validate_config_entry;
 /// archive pipeline. Shared by `exarch-python` and `exarch-node`.
 pub use security::boundary::validate_raw_path_str;
 pub use security::fs_view::PathModel;
+pub use sink::CallbackEntry;
+pub use sink::CallbackError;
 pub use sink::CallbackSink;
 pub use sink::EntrySink;
 pub use sink::MemoryEntry;
@@ -183,6 +188,7 @@ pub use sink::MemoryLimit;
 pub use sink::MemorySink;
 pub use sink::SinkFull;
 pub use sink::SinkOptions;
+pub use sink::extract_reader_to_callback;
 pub use sink::extract_reader_to_memory;
 
 // Re-export types module for easier access

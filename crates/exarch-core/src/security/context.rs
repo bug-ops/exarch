@@ -4,17 +4,11 @@
 use crate::formats::pinned_dir::WalkerBacked;
 use crate::security::fs_view::FsView;
 use crate::security::fs_view::HostFs;
+use crate::types::safe_path::ParentCheck;
+use crate::types::safe_path::Resolved;
+#[cfg(any(unix, target_os = "wasi"))]
+use crate::types::safe_path::Walked;
 use std::marker::PhantomData;
-
-/// Where the containment of an entry's parent directory is established.
-#[derive(Debug, Clone, Copy)]
-enum ParentProbe {
-    /// The validator resolves the parent itself.
-    Here,
-    /// The directory walker vets the parent right before the write.
-    #[cfg(any(unix, target_os = "wasi"))]
-    AtWrite,
-}
 
 /// Carries state that enables skipping the full-path `canonicalize()` syscall
 /// when safety can be proven through other means.
@@ -23,15 +17,17 @@ enum ParentProbe {
 /// path chains. When the archive contains no symlinks AND config disallows
 /// them, no symlinks can exist in the extraction tree created by this run.
 ///
-/// `V` is the view the context is used against.
-pub struct ValidationContext<V: FsView = HostFs> {
+/// `V` is the view the context is used against. `P` is how validated paths
+/// have their parent directory vetted: [`Resolved`] by the validator itself,
+/// or by a directory walker whose proof the context holds for `'r`.
+pub struct ValidationContext<'r, V: FsView = HostFs, P: ParentCheck = Resolved> {
     symlink_seen: bool,
     symlinks_allowed: bool,
-    parent_probe: ParentProbe,
+    _proof: P::Proof<'r>,
     view: PhantomData<fn() -> V>,
 }
 
-impl<V: FsView> ValidationContext<V> {
+impl<V: FsView> ValidationContext<'_, V, Resolved> {
     /// Creates a context with no symlink seen yet.
     ///
     /// `symlinks_allowed` is the config's symlink policy.
@@ -40,31 +36,26 @@ impl<V: FsView> ValidationContext<V> {
         Self {
             symlink_seen: false,
             symlinks_allowed,
-            parent_probe: ParentProbe::Here,
+            _proof: (),
             view: PhantomData,
         }
     }
 
     /// Defers the parent-directory probe to the directory walker that the
-    /// proof came from.
+    /// proof came from; paths validated with the result are `Walked`.
     #[cfg(any(unix, target_os = "wasi"))]
     #[must_use]
-    pub(crate) fn with_walker(mut self, _proof: WalkerBacked) -> Self {
-        self.parent_probe = ParentProbe::AtWrite;
-        self
-    }
-
-    /// Returns true if the walker vets the parent at write time, so the
-    /// validator need not resolve it.
-    #[inline]
-    pub(crate) fn defers_parent_probe(&self) -> bool {
-        match self.parent_probe {
-            ParentProbe::Here => false,
-            #[cfg(any(unix, target_os = "wasi"))]
-            ParentProbe::AtWrite => true,
+    pub(crate) fn with_walker(self, proof: WalkerBacked<'_>) -> ValidationContext<'_, V, Walked> {
+        ValidationContext {
+            symlink_seen: self.symlink_seen,
+            symlinks_allowed: self.symlinks_allowed,
+            _proof: proof,
+            view: PhantomData,
         }
     }
+}
 
+impl<V: FsView, P: ParentCheck> ValidationContext<'_, V, P> {
     /// Records that the archive contains a symlink, which re-enables the full
     /// `canonicalize()` even when the config disallows them.
     pub fn mark_symlink_seen(&mut self) {
@@ -88,15 +79,24 @@ mod tests {
     #[cfg(unix)]
     #[test]
     #[allow(clippy::unwrap_used)]
-    fn test_walker_proof_defers_the_parent_probe() {
+    fn test_walker_proof_keeps_the_symlink_state() {
         let temp = tempfile::TempDir::new().unwrap();
         let root = crate::formats::pinned_dir::PinnedRoot::open_for_test(temp.path()).unwrap();
-        let ctx = ValidationContext::<HostFs>::new(false);
-        assert!(!ctx.defers_parent_probe());
-        assert!(
-            ctx.with_walker(root.backs_parent_probe())
-                .defers_parent_probe()
-        );
+        let mut ctx = ValidationContext::<HostFs>::new(false);
+        ctx.mark_symlink_seen();
+        let walked = ctx.with_walker(root.backs_parent_probe());
+        assert!(walked.needs_full_canonicalize());
+    }
+
+    #[test]
+    fn test_parent_probe_is_a_property_of_the_state() {
+        const {
+            assert!(Resolved::PROBES_PARENT);
+        }
+        #[cfg(unix)]
+        const {
+            assert!(!Walked::PROBES_PARENT);
+        }
     }
 
     #[test]

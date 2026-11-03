@@ -9,7 +9,7 @@
 //! - TAR extraction: 500 MB/s
 //! - ZIP extraction: 300 MB/s
 //! - Path validation: < 1 us
-
+#![allow(clippy::disallowed_methods)]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

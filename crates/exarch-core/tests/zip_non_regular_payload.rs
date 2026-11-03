@@ -2,6 +2,7 @@
 //! entry point, including the in-memory one.
 
 #![allow(clippy::unwrap_used)]
+#![allow(clippy::disallowed_methods)]
 
 use std::assert_matches;
 

@@ -1,6 +1,7 @@
 //! Integration tests for 7z format extraction
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(clippy::disallowed_methods)]
 
 use exarch_core::ArchiveError;
 use exarch_core::ExtractionOptions;

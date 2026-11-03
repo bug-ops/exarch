@@ -15,6 +15,7 @@
 //! become unused-import errors under `-D warnings` on non-Unix targets.
 #![cfg(unix)]
 #![allow(clippy::unwrap_used)]
+#![allow(clippy::disallowed_methods)]
 
 use exarch_core::ArchiveError;
 use exarch_core::DestDir;

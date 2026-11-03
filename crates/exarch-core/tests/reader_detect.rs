@@ -2,6 +2,7 @@
 //! path-based detection, and fail with a typed reason where they cannot.
 
 #![allow(clippy::unwrap_used)]
+#![allow(clippy::disallowed_methods)]
 
 mod sink_support;
 

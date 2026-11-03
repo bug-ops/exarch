@@ -3,6 +3,7 @@
 //! one entry-naming message and category in extraction and in `verify` (#804).
 
 #![allow(clippy::unwrap_used)]
+#![allow(clippy::disallowed_methods)]
 
 use std::path::PathBuf;
 

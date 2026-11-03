@@ -323,6 +323,51 @@ describe('abort while waiting for JavaScript', () => {
     await assert.rejects(settles(pending), (err) => assertAborted(err, 'callback stuck'));
   });
 
+  it('rejects with the abort when the signal fires before onEntry fails', async () => {
+    const controller = new AbortController();
+    let entered = false;
+    const pending = extractArchiveToCallback(
+      ARCHIVE,
+      () => {
+        entered = true;
+        return new Promise((_, reject) => setTimeout(() => reject(new Error('too late')), 300));
+      },
+      null,
+      null,
+      null,
+      null,
+      controller.signal
+    );
+    await eventually(() => entered);
+    controller.abort(new Error('first'));
+    await assert.rejects(settles(pending), (err) => assertAborted(err, 'first'));
+  });
+
+  it('rejects with the onEntry error when it fails before any abort', async () => {
+    const controller = new AbortController();
+    const boom = new Error('callback first');
+    await assert.rejects(
+      settles(
+        extractArchiveToCallback(
+          ARCHIVE,
+          () => {
+            throw boom;
+          },
+          null,
+          null,
+          null,
+          null,
+          controller.signal
+        )
+      ),
+      (err) => {
+        assert.strictEqual(err.code, 'ENTRY_CALLBACK_ERROR');
+        assert.strictEqual(err.cause, boom);
+        return true;
+      }
+    );
+  });
+
   it('frees a worker stalled closing the iterable after a complete read', async () => {
     const closing = { started: false };
     const source = {

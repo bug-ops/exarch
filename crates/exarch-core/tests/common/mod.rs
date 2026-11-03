@@ -12,6 +12,77 @@ pub fn flip_first(bytes: &mut [u8], marker: &[u8]) {
     bytes[at] ^= 0x01;
 }
 
+/// Text of `len` bytes drawn from a small vocabulary by a seeded xorshift, so
+/// it deflates to a quarter of its size, far below the default ratio limit.
+pub fn wordy(seed: usize, len: usize) -> Vec<u8> {
+    const WORDS: [&str; 16] = [
+        "alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta", "iota", "kappa",
+        "lambda", "mu", "nu", "xi", "omicron", "pi",
+    ];
+    let mut state = 0x9E37_79B9_u32.wrapping_add(u32::try_from(seed).expect("small seed"));
+    let mut out = Vec::with_capacity(len + 8);
+    while out.len() < len {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        out.extend_from_slice(WORDS[state as usize % WORDS.len()].as_bytes());
+        out.push(b' ');
+    }
+    out.truncate(len);
+    out
+}
+
+/// A ZIP of `entries` deflated files named `dir/file{i}.txt`, each holding
+/// `wordy(i, entry_len)`.
+pub fn deflated_zip(entries: usize, entry_len: usize) -> Vec<u8> {
+    use std::io::Write;
+
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated)
+        .unix_permissions(0o644);
+    for index in 0..entries {
+        zip.start_file(format!("dir/file{index}.txt"), options)
+            .expect("start entry");
+        zip.write_all(&wordy(index, entry_len))
+            .expect("write entry");
+    }
+    zip.finish().expect("finish archive").into_inner()
+}
+
+/// The files of [`mixed_zip`] with their contents.
+pub fn mixed_zip_files() -> Vec<(&'static str, Vec<u8>)> {
+    vec![
+        ("stored.txt", wordy(1, 5000)),
+        ("deflated.txt", wordy(2, 30_000)),
+        ("empty-deflated.txt", Vec::new()),
+        ("empty-stored.txt", Vec::new()),
+        ("bzip2.txt", wordy(3, 20_000)),
+        ("deflated-again.txt", wordy(4, 7000)),
+    ]
+}
+
+/// A ZIP mixing stored, deflated, bzip2 and zero-length entries.
+pub fn mixed_zip() -> Vec<u8> {
+    use std::io::Write;
+    use zip::CompressionMethod;
+
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    for (name, data) in mixed_zip_files() {
+        let method = match name {
+            "stored.txt" | "empty-stored.txt" => CompressionMethod::Stored,
+            "bzip2.txt" => CompressionMethod::Bzip2,
+            _ => CompressionMethod::Deflated,
+        };
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(method)
+            .unix_permissions(0o644);
+        zip.start_file(name, options).expect("start entry");
+        zip.write_all(&data).expect("write entry");
+    }
+    zip.finish().expect("finish archive").into_inner()
+}
+
 /// An entry of [`solid_copy_7z`].
 #[derive(Clone, Copy)]
 pub enum RawEntry<'a> {

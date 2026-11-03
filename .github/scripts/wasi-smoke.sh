@@ -73,6 +73,11 @@ echo "== zip"
 exarch extract basic.zip out-zip
 expect_content out-zip/dir/file.txt zip-payload
 
+# A temporary file would panic on WASI (std has no temp_dir), so the mode must be a no-op there.
+echo "== zip with --decode-reuse temp-file"
+exarch extract --decode-reuse temp-file basic.zip out-zip-temp
+expect_content out-zip-temp/dir/file.txt zip-payload
+
 for ext in tar.xz tar.zst; do
   echo "== create then extract .$ext"
   mkdir -p "src-$ext/nested"

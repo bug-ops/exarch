@@ -145,11 +145,14 @@ use crate::security::validator::check_root_entry_is_directory;
 use crate::security::validator::require_non_empty_name;
 use crate::types::EntryType;
 use crate::types::SafePath;
+use crate::types::safe_path::ParentCheck;
 
 use super::common;
 use super::compression::CompressionCodec;
-use super::tar_metadata_limit::budget_violation;
-use super::tar_metadata_limit::budgeted_reader;
+use super::source_fault::TapSource;
+use super::tar_metadata_limit::CheckedTarEntry;
+use super::tar_metadata_limit::SkipLimits;
+use super::tar_metadata_limit::budgeted_reader_with;
 use super::tar_metadata_limit::budgeted_tar_entries;
 use super::target::ExtractTarget;
 use super::target::FileAdmission;
@@ -158,6 +161,7 @@ use super::target::HostTarget;
 use super::target::Tally;
 use super::traits::ArchiveFormat;
 use crate::formats::compression::DecoderLimits;
+use crate::reader::TarStream;
 use crate::reader::decode_tar_stream;
 
 /// TAR archive handler with streaming extraction.
@@ -197,8 +201,18 @@ pub struct TarArchive<R: Read> {
     /// to `extract()`/`list()`) and only then handed to `tar::Archive`, so the
     /// cap is applied fresh with whatever `SecurityConfig` each call uses.
     inner: Option<R>,
+    /// The raw input behind `inner`, when core metered it.
+    source: TapSource,
     /// How the bytes after the end-of-archive marker are checked.
     trailer: TarTrailer,
+}
+
+impl<'r> TarArchive<Box<dyn Read + Send + 'r>> {
+    /// Creates a handler over a stream core decoded and metered itself.
+    pub(crate) fn from_stream(decoded: TarStream<'r>, trailer: TarTrailer) -> Self {
+        let source = decoded.source();
+        Self::with_source(decoded.stream, source, trailer)
+    }
 }
 
 impl<R: Read> TarArchive<R> {
@@ -215,6 +229,11 @@ impl<R: Read> TarArchive<R> {
     /// refused even for a plain TAR. The path-based APIs and
     /// [`ArchiveReader`](crate::ArchiveReader) know the codec and leave a
     /// plain TAR's tail alone.
+    ///
+    /// Core cannot see how much input a decoder behind `reader` consumed, so
+    /// entries skipped by the extension allowlist are not bounded by
+    /// `max_compression_ratio` here, as they are for the path-based APIs and
+    /// [`ArchiveReader`](crate::ArchiveReader).
     ///
     /// # Performance Notes
     ///
@@ -241,9 +260,15 @@ impl<R: Read> TarArchive<R> {
     }
 
     /// Creates a handler that checks the tail of the stream as `trailer` says.
-    pub(crate) const fn with_trailer(reader: R, trailer: TarTrailer) -> Self {
+    pub(crate) fn with_trailer(reader: R, trailer: TarTrailer) -> Self {
+        Self::with_source(reader, TapSource::Opaque, trailer)
+    }
+
+    /// Creates a handler over `reader`, whose raw input `source` meters.
+    pub(crate) fn with_source(reader: R, source: TapSource, trailer: TarTrailer) -> Self {
         Self {
             inner: Some(reader),
+            source,
             trailer,
         }
     }
@@ -262,7 +287,8 @@ impl<R: Read> TarArchive<R> {
         let reader = self.inner.take().ok_or_else(|| {
             crate::ArchiveError::InvalidArchive("archive reader already consumed by list()".into())
         })?;
-        let (budgeted, budget) = budgeted_reader(reader, config.max_tar_metadata_bytes);
+        let (budgeted, budget) =
+            budgeted_reader_with(reader, config.max_tar_metadata_bytes, self.source.clone());
         list_tar_reader(
             budgeted,
             budget,
@@ -278,10 +304,10 @@ impl<R: Read> TarArchive<R> {
         entry: &mut tar::Entry<'_, ER>,
         target: &mut T,
         ctx: &mut ExtractionContext<'_>,
-    ) -> Result<Option<HardlinkInfo>> {
+    ) -> Result<EntryOutcome<T::Parent>> {
         // Skip TAR metadata entries (PAX headers, GNU long names/links, sparse)
         if TarEntryAdapter::is_metadata_entry(entry) {
-            return Ok(None);
+            return Ok(EntryOutcome::Done);
         }
 
         let path = entry
@@ -311,18 +337,19 @@ impl<R: Read> TarArchive<R> {
                     size: entry_size,
                     mode,
                 };
-                if let FileAdmission::Write(admitted) =
-                    target.validate_file(request, &mut ctx.tally)?
-                {
-                    target.file(entry, admitted, entry.size(), &mut ctx.tally)?;
+                match target.validate_file(request, &mut ctx.tally)? {
+                    FileAdmission::Write(admitted) => {
+                        target.file(entry, admitted, entry.size(), &mut ctx.tally)?;
+                        Ok(EntryOutcome::Done)
+                    }
+                    FileAdmission::Skipped(_) => Ok(EntryOutcome::Skipped),
                 }
-                Ok(None)
             }
 
             EntryType::Directory => {
                 let safe_path = target.validate_directory(&path, entry_size)?;
                 target.directory(&safe_path, &mut ctx.tally)?;
-                Ok(None)
+                Ok(EntryOutcome::Done)
             }
 
             EntryType::Symlink {
@@ -330,7 +357,7 @@ impl<R: Read> TarArchive<R> {
             } => {
                 let safe_symlink = target.validate_symlink(&path, link_target, entry_size)?;
                 target.symlink(&safe_symlink, &mut ctx.tally)?;
-                Ok(None)
+                Ok(EntryOutcome::Done)
             }
 
             EntryType::Hardlink {
@@ -338,13 +365,27 @@ impl<R: Read> TarArchive<R> {
             } => {
                 let link = target.validate_hardlink(&path, link_target, entry_size)?;
                 // Two-pass: defer hardlink creation until target files exist
-                Ok(Some(HardlinkInfo {
+                Ok(EntryOutcome::Hardlink(HardlinkInfo {
                     link_path: link.link,
                     target_path: link.target,
                     counted: link.counted,
                 }))
             }
         }
+    }
+
+    /// Processes `entry`, then reads past its data when the entry was skipped.
+    fn process_and_skip<ER: Read, T: ExtractTarget>(
+        entry: &mut CheckedTarEntry<'_, '_, ER>,
+        target: &mut T,
+        ctx: &mut ExtractionContext<'_>,
+        skip_limits: &SkipLimits,
+    ) -> Result<EntryOutcome<T::Parent>> {
+        let outcome = Self::process_entry(entry, target, ctx)?;
+        if matches!(outcome, EntryOutcome::Skipped) {
+            entry.drain_skipped(skip_limits)?;
+        }
+        Ok(outcome)
     }
 
     /// Runs the extraction loop against `target`: the validation gates are the
@@ -360,7 +401,7 @@ impl<R: Read> TarArchive<R> {
 
         let mut report = ExtractionReport::new();
 
-        let mut hardlinks: SmallVec<[HardlinkInfo; 8]> = SmallVec::new();
+        let mut hardlinks: SmallVec<[HardlinkInfo<T::Parent>; 8]> = SmallVec::new();
 
         let mut current_entry: usize = 0;
 
@@ -379,11 +420,13 @@ impl<R: Read> TarArchive<R> {
         let reader = self.inner.take().ok_or_else(|| {
             ArchiveError::InvalidArchive("archive reader already consumed by list()".into())
         })?;
-        let (budgeted, budget) = budgeted_reader(reader, config.max_tar_metadata_bytes);
+        let (budgeted, budget) =
+            budgeted_reader_with(reader, config.max_tar_metadata_bytes, self.source.clone());
         let mut inner_archive = Archive::new(budgeted);
         let mut entries = budgeted_tar_entries(&mut inner_archive, budget)
             .map_err(|e| ArchiveError::InvalidArchive(format!("failed to read entries: {e}")))?;
 
+        let skip_limits = SkipLimits::of(config);
         let mut ctx = ExtractionContext {
             tally: Tally {
                 report: &mut report,
@@ -396,10 +439,7 @@ impl<R: Read> TarArchive<R> {
         };
 
         while let Some(entry_result) = entries.next_entry() {
-            let guard = entry_result.map_err(|e| {
-                let raw = budget_violation(&e).unwrap_or_else(|| {
-                    ArchiveError::InvalidArchive(format!("failed to read entry: {e}"))
-                });
+            let guard = entry_result.map_err(|raw| {
                 ctx.push_skip_warnings();
                 ArchiveError::partial_or(std::mem::take(ctx.tally.report), raw)
             })?;
@@ -421,20 +461,21 @@ impl<R: Read> TarArchive<R> {
 
             // INVARIANT: every branch below must call on_entry_complete exactly
             // once.
-            match Self::process_entry(&mut guard, target, &mut ctx) {
-                Ok(Some(hardlink_info)) => {
+            // `settle` abandons the entry on failure: no further
+            // `next_entry()` calls follow, so the guard's usual drain is
+            // pointless I/O (see `TarEntryGuard::abandon`).
+            let settled =
+                guard.settle(|guard| Self::process_and_skip(guard, target, &mut ctx, &skip_limits));
+            match settled {
+                Ok(EntryOutcome::Hardlink(hardlink_info)) => {
                     ctx.tally.progress.on_entry_complete(&entry_path);
                     hardlinks.push(hardlink_info);
                 }
-                Ok(None) => {
+                Ok(EntryOutcome::Done | EntryOutcome::Skipped) => {
                     ctx.tally.progress.on_entry_complete(&entry_path);
                 }
                 Err(e) => {
                     ctx.tally.progress.on_entry_complete(&entry_path);
-                    // Abandoning: no further `next_entry()` calls follow, so
-                    // the guard's usual bounded drain is pointless I/O, not a
-                    // correctness requirement (see `TarEntryGuard::abandon`).
-                    guard.abandon();
                     ctx.push_skip_warnings();
                     return Err(ArchiveError::partial_or(
                         std::mem::take(ctx.tally.report),
@@ -590,10 +631,21 @@ fn push_duplicate_skip_warnings(
     common::push_disallowed_extension_warning(report, disallowed_extension_skips);
 }
 
+/// What `process_entry` did with an entry.
+enum EntryOutcome<P: ParentCheck> {
+    /// The entry was written or needed nothing.
+    Done,
+    /// A file was skipped (a duplicate or a disallowed extension); its data
+    /// is still to be read past, see `CheckedTarEntry::drain_skipped`.
+    Skipped,
+    /// A hardlink to create once every file exists.
+    Hardlink(HardlinkInfo<P>),
+}
+
 #[allow(dead_code)] // Fields used only on Unix
-struct HardlinkInfo {
-    link_path: SafePath,
-    target_path: SafePath,
+struct HardlinkInfo<P: ParentCheck> {
+    link_path: SafePath<P>,
+    target_path: SafePath<P>,
     counted: EntryCount,
 }
 
@@ -765,8 +817,19 @@ pub(crate) fn open_tar_stream(
     path: &Path,
     codec: Option<CompressionCodec>,
     limits: DecoderLimits,
-) -> Result<Box<dyn Read + Send>> {
+) -> Result<TarStream<'static>> {
     decode_tar_stream(File::open(path)?, codec, limits)
+}
+
+/// Opens `path` as a TAR archive whose trailer is read to decoder EOF, the
+/// shape every public `open_tar_*` function returns.
+fn open_tar_archive(
+    path: &Path,
+    codec: CompressionCodec,
+    limits: DecoderLimits,
+) -> Result<TarArchive<Box<dyn Read + Send>>> {
+    open_tar_stream(path, Some(codec), limits)
+        .map(|decoded| TarArchive::from_stream(decoded, TarTrailer::DrainToDecoderEof))
 }
 
 /// Opens a gzip-compressed TAR archive (.tar.gz).
@@ -797,12 +860,11 @@ pub(crate) fn open_tar_stream(
 /// # Ok::<(), exarch_core::ArchiveError>(())
 /// ```
 pub fn open_tar_gz<P: AsRef<Path>>(path: P) -> Result<TarArchive<Box<dyn Read + Send>>> {
-    open_tar_stream(
+    open_tar_archive(
         path.as_ref(),
-        Some(CompressionCodec::Gzip),
+        CompressionCodec::Gzip,
         DecoderLimits::UNBOUNDED,
     )
-    .map(TarArchive::new)
 }
 
 /// Opens a bzip2-compressed TAR archive (.tar.bz2).
@@ -833,12 +895,11 @@ pub fn open_tar_gz<P: AsRef<Path>>(path: P) -> Result<TarArchive<Box<dyn Read + 
 /// # Ok::<(), exarch_core::ArchiveError>(())
 /// ```
 pub fn open_tar_bz2<P: AsRef<Path>>(path: P) -> Result<TarArchive<Box<dyn Read + Send>>> {
-    open_tar_stream(
+    open_tar_archive(
         path.as_ref(),
-        Some(CompressionCodec::Bzip2),
+        CompressionCodec::Bzip2,
         DecoderLimits::UNBOUNDED,
     )
-    .map(TarArchive::new)
 }
 
 /// Opens an xz-compressed TAR archive (.tar.xz).
@@ -879,12 +940,11 @@ pub fn open_tar_xz<P: AsRef<Path>>(
     path: P,
     config: &SecurityConfig<Validated>,
 ) -> Result<TarArchive<Box<dyn Read + Send>>> {
-    open_tar_stream(
+    open_tar_archive(
         path.as_ref(),
-        Some(CompressionCodec::Xz),
+        CompressionCodec::Xz,
         DecoderLimits::of(config),
     )
-    .map(TarArchive::new)
 }
 
 /// Opens a zstd-compressed TAR archive (.tar.zst).
@@ -916,12 +976,11 @@ pub fn open_tar_xz<P: AsRef<Path>>(
 /// # Ok::<(), exarch_core::ArchiveError>(())
 /// ```
 pub fn open_tar_zst<P: AsRef<Path>>(path: P) -> Result<TarArchive<Box<dyn Read + Send>>> {
-    open_tar_stream(
+    open_tar_archive(
         path.as_ref(),
-        Some(CompressionCodec::Zstd),
+        CompressionCodec::Zstd,
         DecoderLimits::UNBOUNDED,
     )
-    .map(TarArchive::new)
 }
 
 #[cfg(test)]
@@ -2409,6 +2468,7 @@ mod tests {
         let options = ExtractionOptions {
             atomic: false,
             skip_duplicates: false,
+            ..ExtractionOptions::default()
         };
 
         let result = archive.extract(temp.path(), &config, &options, &mut crate::NoopProgress);
@@ -2944,6 +3004,7 @@ mod tests {
         let options = ExtractionOptions {
             atomic: false,
             skip_duplicates: false,
+            ..ExtractionOptions::default()
         };
 
         let report = archive

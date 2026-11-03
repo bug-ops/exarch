@@ -10,6 +10,8 @@ use std::path::PathBuf;
 
 use super::DestDir;
 use super::SafePath;
+use super::safe_path::ParentCheck;
+use super::safe_path::Resolved;
 use super::safe_path::check_component_for;
 use crate::security::fs_view::Containment;
 use crate::security::fs_view::FsView;
@@ -54,8 +56,8 @@ use crate::security::fs_view::ModelRoot as _;
 /// # }
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SafeSymlink {
-    link: SafePath,
+pub struct SafeSymlink<P: ParentCheck = Resolved> {
+    link: SafePath<P>,
     target_path: PathBuf,
 }
 
@@ -122,10 +124,12 @@ impl SafeSymlink {
     ) -> Result<Self> {
         Self::validate_in(link, target, dest, config, &HostFs)
     }
+}
 
+impl<P: ParentCheck> SafeSymlink<P> {
     /// Validates against `view` instead of the real filesystem.
     pub(crate) fn validate_in<V: FsView>(
-        link: &SafePath,
+        link: &SafePath<P>,
         target: &Path,
         root: &V::Root,
         config: &SecurityConfig<Validated>,
@@ -238,7 +242,7 @@ impl SafeSymlink {
     #[cfg(unix)]
     #[inline]
     #[must_use]
-    pub(crate) fn link(&self) -> &SafePath {
+    pub(crate) fn link(&self) -> &SafePath<P> {
         &self.link
     }
 

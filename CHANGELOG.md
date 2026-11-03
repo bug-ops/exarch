@@ -9,15 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Core: `list_archive_for_extraction` and `ListedArchive` reuse the list pass's decode for gz, bz2 and xz TAR up to 256 MiB, and `ArchiveReader::of_stream` opens a non-seekable TAR stream (#828).
+- Core: `list_archive_for_extraction` and `ListedArchive` reuse the list pass's decode for gz, bz2 and xz TAR up to 256 MiB and keep a listed ZIP open for extraction, and `ArchiveReader::of_stream` opens a non-seekable TAR stream (#828, #884).
 - Python: the in-memory functions accept binary file objects as well as bytes (#828).
 - Tests: the ZIP corpus builds a Windows Explorer archive on Windows CI, and a Windows 7-Zip reparse-point symlink test covers 7z (#828).
-- Core: `CallbackSink` hands each verified in-memory entry to a closure, and `MemoryEntry::Hardlink` reports a hardlink by reference (#842).
+- Core: `CallbackSink` hands each verified in-memory entry to a closure as a `CallbackEntry`, and a hardlink carries its validated `SafePath` target (#842, #884).
 - Python: `extract_archive_to_callback` delivers each entry to a callable and re-raises its exception unchanged (#842).
 - Node: `extractArchiveToCallback` (async and sync), `AsyncIterable` input for TAR in the async in-memory functions, three sync `WithProgress` variants, and the `STREAM_ERROR` and `ENTRY_CALLBACK_ERROR` codes (#842).
 - Node: the seven async in-memory functions that take an `AsyncIterable` accept an optional trailing `signal` (`AbortSignalLike`); aborting rejects with the new `ABORT_ERR` code and frees the blocking worker (#848).
 - Core: `ArchiveError::ffi_kind()` is public, with `InvalidArchiveSubCode` and `SecurityViolationSubCode` naming the TAR ambiguity and TAR trailer refusals (#865).
 - Python: `sub_code` attribute on `InvalidArchiveError` and `SecurityViolationError`; Node: `subCode` property with typings; CLI `--json`: `error.sub_code` (#865).
+- Core: `DecodeReuse`, `ReuseLimit` and `ExtractionOptions::decode_reuse` keep the deflate output of the ZIP structure check so extraction decodes an entry once (#857, #884).
+- CLI: `extract --decode-reuse <off|memory|temp-file>`, default `memory` up to 256 MiB (#857, #884).
+- Core: `extract_reader_to_callback` and the typed `CallbackError<E>`; the Python and Node callback extractions use them (#860, #884).
+- Core: `ZipBombScope::SkippedEntries` (#863, #884).
 
 ### Changed
 
@@ -52,7 +56,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Core: extraction lends the pinned destination root to top-level entries instead of reopening it per entry (#848).
 - Node: docs no longer say the gzip CRC is unchecked (#848).
 - **BREAKING:** `max_decoder_memory` bounds the zstd window of TAR and ZIP (largest power of two at or below the limit, at most 128 MiB), and `list`, `verify` and `extract` refuse a ZIP whose zstd entry declares a larger window with `QuotaExceeded`; legacy (pre-v0.8) zstd frames are no longer decoded (#856).
-- **BREAKING:** gzip members and bzip2 streams beyond `SecurityConfig::with_compressed_member_allowance` plus one per 16 KiB of output are refused with `QuotaExceeded { CompressedMembers }`; `SecurityConfigFields` gains `compressed_member_allowance` (#856).
+- **BREAKING:** gzip members and bzip2 streams beyond `SecurityConfig::with_compressed_member_allowance` plus one per 16 KiB of output are refused with `QuotaExceeded { CompressedMembers }`; `SecurityConfigFields` gains `compressed_member_allowance`, a `NonZeroU64` (#856, #884).
 - **BREAKING:** `ArchiveError::TarTrailer(TarTrailerRefusal)` replaces `InvalidArchive` and `SecurityViolation` for over-cap, corrupt and truncated compressed TAR tails; binding and JSON kinds are unchanged, `context()` is `None` (#856).
 - Node: `signal` also aborts `Uint8Array` calls at the next archive read and at each progress callback (#856).
 - Tests: WinRAR-produced ZIPs (header shape only) in the ZIP corpus (#856).
@@ -61,6 +65,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **BREAKING (Windows):** extraction writes, renames and deletes below the destination go through a pinned directory handle, and a target other than Unix, WASI or Windows no longer compiles (#865).
 - Dependencies: `windows-sys` 0.61 is a direct dependency of `exarch-core` on Windows, with a Dependabot ignore for 0.62 and later (#865).
 - CI: the clippy job runs on `windows-latest` as well, and `EXARCH_REQUIRE_PRIVILEGED_TESTS` makes the mount-point test mandatory there (#865).
+- **BREAKING:** `list_archive_for_extraction` takes a `DecodeReuse`, and the library default `Memory(32 MiB)` keeps deflate output only up to that size (#857, #884).
+- Core: kept ZIP output is clamped to `max_decoder_memory` and `max_total_size`, and entries over `max_file_size` or `max_compression_ratio` are not kept (#857, #884).
+- Core: ZIP extraction decodes deflate entries once; bzip2/zstd, in-memory extraction and the library default above 32 MiB still decode twice (#857, #866, #884).
+- **BREAKING:** `MemoryEntry::Hardlink` is removed: callback closures receive `CallbackEntry`, so `MemorySink::into_entries` can no longer hold a hardlink (#859, #884).
+- **BREAKING:** `SafePath`, `SafeSymlink`, `ValidatedFile`, `PendingFile`, `ValidatedSymlink`, `ValidatedHardlink` and `ValidationContext` gain a defaulted type parameter, `ExtractTarget` gains `type Parent`, and `DestDir::join_path` is removed (breaking against v0.8.0) (#861, #884).
+- **BREAKING:** `TarNonRegularKind` displays lowercase and `with_compressed_member_allowance` takes a `NonZeroU64` (#862, #884).
+- **BREAKING:** a compressed TAR whose entries skipped by the allowlist or as duplicates decode beyond `max_compression_ratio` times the input read is refused with `ZipBomb` (`SkippedEntries`) (#863, #884).
 
 ### Fixed
 
@@ -73,6 +84,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Core and CLI: a pre-existing dangling or file-pointing symlink in the destination is refused as not relaxable instead of suggesting `--allow-symlinks` (#835, #846).
 - Tests: a real Windows Explorer ZIP and a Windows 7-Zip reparse-point symlink 7z are committed as fixtures with host-independent tests (#824, #825, #846).
 - Tests: property tests skip Windows reserved device names in generated path components (#848).
+- Core: a ZIP or TAR source read error keeps its errno and is reported as `Io` instead of `InvalidArchive` (#858, #884).
+- Core: `extract` refuses an entry name above the host limit as `list` and `verify` do (#864, #884).
+- Core: compressed TAR entries refused by quota are no longer decoded to their end (#863, #884).
+- Node: `extractArchiveToCallback` keeps the `AbortSignal` reason when the abort is raised from `onEntry` (#860, #884).
 
 ## [0.8.0] - 2026-11-02
 

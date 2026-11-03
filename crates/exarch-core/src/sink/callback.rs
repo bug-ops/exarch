@@ -1,18 +1,73 @@
 //! An [`EntrySink`] that hands every verified entry to a closure.
 
+use std::error::Error;
+use std::fmt;
 use std::io;
 use std::path::Path;
 
+use crate::ArchiveError;
+use crate::ArchiveReader;
+use crate::ExtractionReport;
+use crate::ProgressCallback;
 use crate::security::fs_view::PathModel;
 use crate::security::permissions::SanitizedMode;
 use crate::sink::EntrySink;
 use crate::sink::MemoryEntry;
+use crate::sink::MemoryEntryKind;
+use crate::sink::MemoryExtractRequest;
 use crate::sink::MemoryFile;
 use crate::types::SafePath;
 
+/// An entry delivered by a [`CallbackSink`].
+///
+/// Everything a [`MemorySink`](crate::MemorySink) can hold is
+/// [`Stored`](Self::Stored); a hardlink is delivered by reference instead,
+/// because the sink keeps no bytes to copy.
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::CallbackEntry;
+/// use exarch_core::MemoryEntry;
+/// use exarch_core::MemoryEntryKind;
+///
+/// let entry = CallbackEntry::from(MemoryEntry::Directory);
+/// assert_eq!(entry.kind(), MemoryEntryKind::Directory);
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CallbackEntry {
+    /// A file, directory or symlink, as a [`MemorySink`](crate::MemorySink)
+    /// would store it.
+    Stored(MemoryEntry),
+    /// A hard link to an entry that was already delivered, by reference.
+    Hardlink {
+        /// The validated, root-relative path of an already delivered entry: a
+        /// file, or an earlier hardlink (a chain is delivered link by link).
+        target: SafePath,
+    },
+}
+
+impl CallbackEntry {
+    /// What the entry holds.
+    #[must_use]
+    pub const fn kind(&self) -> MemoryEntryKind {
+        match self {
+            Self::Stored(entry) => entry.kind(),
+            Self::Hardlink { .. } => MemoryEntryKind::Hardlink,
+        }
+    }
+}
+
+impl From<MemoryEntry> for CallbackEntry {
+    fn from(entry: MemoryEntry) -> Self {
+        Self::Stored(entry)
+    }
+}
+
 /// An [`EntrySink`] that delivers each entry to a closure as it is verified.
 ///
-/// The closure receives the entry's validated path and a [`MemoryEntry`]. A
+/// The closure receives the entry's validated path and a [`CallbackEntry`]. A
 /// file is delivered whole, after all of its bytes were written and the stream
 /// delivered exactly the size the archive declares. The memory held at any
 /// moment is one file, bounded by the configuration's `max_file_size`; the sink
@@ -35,10 +90,11 @@ use crate::types::SafePath;
 ///
 /// - A [`MemoryEntry::Symlink`] target is spelled as the archive stores it and
 ///   is relative to the directory of the link.
-/// - A [`MemoryEntry::Hardlink`] target is the root-relative, resolved path of
-///   an entry that was already delivered: a file, or an earlier hardlink, so a
-///   chain of links is delivered link by link. The sink holds no bytes, so the
-///   closure resolves the reference against what it kept.
+/// - A [`CallbackEntry::Hardlink`] target is the validated, root-relative,
+///   resolved [`SafePath`] of an entry that was already delivered: a file, or
+///   an earlier hardlink, so a chain of links is delivered link by link. The
+///   sink holds no bytes, so the closure resolves the reference against what it
+///   kept.
 ///
 /// # Delivery rules
 ///
@@ -56,6 +112,7 @@ use crate::types::SafePath;
 /// use std::io;
 ///
 /// use exarch_core::ArchiveReader;
+/// use exarch_core::CallbackEntry;
 /// use exarch_core::CallbackSink;
 /// use exarch_core::MemoryEntry;
 /// use exarch_core::SecurityConfig;
@@ -72,7 +129,7 @@ use crate::types::SafePath;
 ///
 /// let mut seen = Vec::new();
 /// let mut sink = CallbackSink::new(|path, entry| {
-///     if let MemoryEntry::File { data, .. } = entry {
+///     if let CallbackEntry::Stored(MemoryEntry::File { data, .. }) = entry {
 ///         seen.push((path.as_path().to_path_buf(), data));
 ///     }
 ///     Ok(())
@@ -97,7 +154,7 @@ pub struct CallbackSink<F> {
 
 impl<F> CallbackSink<F>
 where
-    F: FnMut(&SafePath, MemoryEntry) -> io::Result<()>,
+    F: FnMut(&SafePath, CallbackEntry) -> io::Result<()>,
 {
     /// A sink that calls `callback` for every entry, validating against the
     /// host's path rules.
@@ -132,7 +189,7 @@ where
 
 impl<F> EntrySink for CallbackSink<F>
 where
-    F: FnMut(&SafePath, MemoryEntry) -> io::Result<()>,
+    F: FnMut(&SafePath, CallbackEntry) -> io::Result<()>,
 {
     type File = MemoryFile;
 
@@ -141,7 +198,7 @@ where
     }
 
     fn create_directory(&mut self, path: &SafePath) -> io::Result<()> {
-        (self.callback)(path, MemoryEntry::Directory)
+        (self.callback)(path, MemoryEntry::Directory.into())
     }
 
     fn create_file(
@@ -154,7 +211,7 @@ where
     }
 
     fn finish_file(&mut self, path: &SafePath, file: MemoryFile) -> io::Result<()> {
-        (self.callback)(path, file.into_entry())
+        (self.callback)(path, file.into_entry().into())
     }
 
     fn create_symlink(&mut self, link: &SafePath, target: &Path) -> io::Result<()> {
@@ -162,16 +219,163 @@ where
             link,
             MemoryEntry::Symlink {
                 target: target.to_path_buf(),
-            },
+            }
+            .into(),
         )
     }
 
     fn create_hardlink(&mut self, link: &SafePath, target: &SafePath) -> io::Result<()> {
         (self.callback)(
             link,
-            MemoryEntry::Hardlink {
-                target: target.as_path().to_path_buf(),
+            CallbackEntry::Hardlink {
+                target: target.clone(),
             },
         )
+    }
+}
+
+/// Why [`extract_reader_to_callback`] failed.
+///
+/// The first error the callback returned is kept as `E`, so the caller keeps
+/// its own error type instead of recovering it from a side slot.
+///
+/// # Examples
+///
+/// ```
+/// use std::error::Error as _;
+///
+/// use exarch_core::CallbackError;
+///
+/// let err = CallbackError::Callback(std::io::Error::other("stop"));
+/// assert_eq!(err.to_string(), "entry callback failed");
+/// assert_eq!(
+///     err.source().map(ToString::to_string).as_deref(),
+///     Some("stop")
+/// );
+/// ```
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum CallbackError<E> {
+    /// The callback returned this error for an entry, which ended the
+    /// extraction. It takes precedence over the archive error the aborted
+    /// extraction reports.
+    Callback(E),
+    /// The archive was refused or could not be read.
+    Archive(ArchiveError),
+}
+
+/// `Callback` names the failure and chains to the callback's error through
+/// `source()`; `Archive` is transparent, so an error chain shows each message
+/// once.
+impl<E> fmt::Display for CallbackError<E> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Callback(_) => f.write_str("entry callback failed"),
+            Self::Archive(err) => err.fmt(f),
+        }
+    }
+}
+
+impl<E: Error + 'static> Error for CallbackError<E> {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Callback(err) => Some(err),
+            Self::Archive(err) => err.source(),
+        }
+    }
+}
+
+impl<E> From<ArchiveError> for CallbackError<E> {
+    fn from(err: ArchiveError) -> Self {
+        Self::Archive(err)
+    }
+}
+
+/// Extracts the archive in `reader`, handing every verified entry to
+/// `on_entry`.
+///
+/// Validates with the config, options and path model of `request`; its memory
+/// limit is ignored, since nothing is kept. Entries are provisional and
+/// delivered as described at [`CallbackSink`]. The first error `on_entry`
+/// returns ends the extraction and is returned as
+/// [`CallbackError::Callback`], ahead of any archive error.
+///
+/// # Errors
+///
+/// [`CallbackError::Callback`] with the first error of `on_entry`, else
+/// [`CallbackError::Archive`] with the errors of
+/// [`extract_to_sink_with_progress`](crate::extract_to_sink_with_progress).
+///
+/// # Examples
+///
+/// ```
+/// use std::assert_matches;
+///
+/// use exarch_core::ArchiveReader;
+/// use exarch_core::CallbackError;
+/// use exarch_core::MemoryExtractRequest;
+/// use exarch_core::NoopProgress;
+/// use exarch_core::extract_reader_to_callback;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let mut builder = tar::Builder::new(Vec::new());
+/// let mut header = tar::Header::new_gnu();
+/// header.set_size(2);
+/// header.set_mode(0o644);
+/// builder.append_data(&mut header, "a.txt", &b"hi"[..])?;
+/// let archive = builder.into_inner()?;
+///
+/// let mut paths = Vec::new();
+/// let reader = ArchiveReader::from_bytes(archive.clone(), None)?;
+/// extract_reader_to_callback(
+///     reader,
+///     &MemoryExtractRequest::default(),
+///     |path, _entry| {
+///         paths.push(path.as_path().to_path_buf());
+///         Ok::<(), std::io::Error>(())
+///     },
+///     &mut NoopProgress,
+/// )?;
+/// assert_eq!(paths.len(), 1);
+///
+/// let reader = ArchiveReader::from_bytes(archive, None)?;
+/// let failed = extract_reader_to_callback(
+///     reader,
+///     &MemoryExtractRequest::default(),
+///     |_, _| Err(std::io::Error::other("stop")),
+///     &mut NoopProgress,
+/// );
+/// assert_matches!(failed, Err(CallbackError::Callback(err)) if err.to_string() == "stop");
+/// # Ok(())
+/// # }
+/// ```
+pub fn extract_reader_to_callback<F, E>(
+    reader: ArchiveReader<'_>,
+    request: &MemoryExtractRequest,
+    mut on_entry: F,
+    progress: &mut dyn ProgressCallback,
+) -> Result<ExtractionReport, CallbackError<E>>
+where
+    F: FnMut(&SafePath, CallbackEntry) -> Result<(), E>,
+{
+    let mut failure = None;
+    let mut sink = CallbackSink::new(|path: &SafePath, entry| {
+        on_entry(path, entry).map_err(|err| {
+            failure.get_or_insert(err);
+            io::Error::other("entry callback failed")
+        })
+    })
+    .with_path_model(request.model);
+    let result = crate::extract_to_sink_with_progress(
+        reader,
+        &mut sink,
+        &request.config,
+        &request.options,
+        progress,
+    );
+    match (failure, result) {
+        (Some(err), _) => Err(CallbackError::Callback(err)),
+        (None, Ok(report)) => Ok(report),
+        (None, Err(err)) => Err(CallbackError::Archive(err)),
     }
 }

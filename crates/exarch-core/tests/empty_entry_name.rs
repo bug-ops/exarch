@@ -2,6 +2,7 @@
 //! `verify` alike, with the same error as 7z. It is not the root entry (`.`).
 
 #![allow(clippy::unwrap_used)]
+#![allow(clippy::disallowed_methods)]
 
 use std::io::Cursor;
 use std::io::Write;

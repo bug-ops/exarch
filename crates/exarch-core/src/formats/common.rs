@@ -46,16 +46,17 @@ use crate::formats::pinned_dir::PinnedRoot;
 use crate::formats::pinned_dir::TempFileGuard;
 use crate::formats::pinned_dir::TempLeaf;
 use crate::formats::pinned_dir::VettedDir;
-use crate::security::fs_view::Containment;
-use crate::security::fs_view::FsView;
 use crate::security::fs_view::HostFs;
 use crate::security::fs_view::Occupant;
+use crate::security::fs_view::PathModel;
 use crate::security::fs_view::blocked_parent_error;
 use crate::security::permissions::SanitizedMode;
 use crate::security::quota::QuotaPermit;
 use crate::types::DestDir;
 use crate::types::SafePath;
 use crate::types::SafeSymlink;
+use crate::types::dest_dir::ProbePath;
+use crate::types::safe_path::ParentCheck;
 
 /// RAII guard that calls `on_entry_complete` when dropped.
 ///
@@ -275,6 +276,28 @@ pub fn is_extension_allowed(path: &Path, config: &SecurityConfig<Validated>) -> 
     config.is_path_extension_allowed(path.extension().and_then(|e| e.to_str()))
 }
 
+/// Refuses an entry name `model` cannot hold.
+///
+/// A regular file the extension allowlist skips is never created, so it is
+/// exempt. The one definition of that rule, shared by extraction, `list` and
+/// `verify` so their verdicts cannot drift.
+///
+/// # Errors
+///
+/// Returns the name-too-long error when the path or a component exceeds the
+/// model's limits.
+pub fn check_entry_name_limits(
+    model: PathModel,
+    path: &Path,
+    regular_file: bool,
+    config: &SecurityConfig<Validated>,
+) -> std::io::Result<()> {
+    if regular_file && !is_extension_allowed(path, config) {
+        return Ok(());
+    }
+    model.check_name_lengths(path)
+}
+
 /// Generic file extraction implementation used by all format adapters.
 ///
 /// This function consolidates file extraction logic to ensure consistent:
@@ -362,9 +385,9 @@ pub fn is_extension_allowed(path: &Path, config: &SecurityConfig<Validated>) -> 
     reason = "arguments are threaded through from the caller; a parameter struct adds indirection"
 )]
 #[inline]
-pub fn extract_file_with_permit<R: Read>(
+pub fn extract_file_with_permit<R: Read, P: ParentCheck>(
     reader: &mut R,
-    safe_path: &SafePath,
+    safe_path: &SafePath<P>,
     mode: Option<SanitizedMode>,
     _permit: QuotaPermit,
     root: &PinnedRoot,
@@ -596,14 +619,14 @@ fn refuse_non_file_occupant(dir: &VettedDir, leaf: Leaf<'_>, rel: &Path) -> Resu
 ///
 /// Returns an error if directory creation fails due to I/O errors or a
 /// component is a symlink the policy refuses.
-pub fn create_directory(
-    safe_path: &SafePath,
+pub fn create_directory<P: ParentCheck>(
+    safe_path: &SafePath<P>,
     root: &PinnedRoot,
     report: &mut ExtractionReport,
     dirs: DirWalker,
 ) -> Result<()> {
     check_directory_occupant(
-        &root.dest().join(safe_path),
+        &root.dest().probe(safe_path.as_path()),
         safe_path.as_path(),
         root.dest(),
     )?;
@@ -621,11 +644,8 @@ pub fn create_directory(
 ///
 /// The path-based `lstat` here only chooses the error message; the fd-relative
 /// walk in [`DirWalker::ensure_dir`] enforces the same refusals again.
-fn check_directory_occupant(dir_path: &Path, rel: &Path, dest: &DestDir) -> Result<()> {
-    // A trailing separator makes the probe follow a symlink, or fail with
-    // `ENOTDIR` on a file, instead of describing the occupant itself.
-    let dir_path: PathBuf = dir_path.components().collect();
-    let file_type = match std::fs::symlink_metadata(&dir_path) {
+fn check_directory_occupant(probe: &ProbePath, rel: &Path, dest: &DestDir) -> Result<()> {
+    let file_type = match probe.lstat() {
         Ok(metadata) => metadata.file_type(),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(e) => {
@@ -636,11 +656,7 @@ fn check_directory_occupant(dir_path: &Path, rel: &Path, dest: &DestDir) -> Resu
         return Ok(());
     }
     if file_type.is_symlink() {
-        let lands_in_dest_dir = matches!(
-            HostFs.canonicalize(&dir_path, dest),
-            Ok(Containment::Within(resolved)) if resolved.is_dir()
-        );
-        return if lands_in_dest_dir {
+        return if probe.lands_in_dir(dest) {
             Ok(())
         } else {
             Err(ArchiveError::violation(Occupant::Symlink.refusal(rel)))
@@ -695,8 +711,8 @@ fn check_directory_occupant(dir_path: &Path, rel: &Path, dest: &DestDir) -> Resu
         reason = "only the Unix path updates the counters; the signature is shared"
     )
 )]
-pub fn create_symlink(
-    safe_symlink: &SafeSymlink,
+pub fn create_symlink<P: ParentCheck>(
+    safe_symlink: &SafeSymlink<P>,
     root: &PinnedRoot,
     report: &mut ExtractionReport,
     dirs: DirWalker,

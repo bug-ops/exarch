@@ -4,7 +4,8 @@ use std::num::NonZeroU64;
 use std::path::Path;
 
 use exarch_core::ArchiveError;
-use exarch_core::CallbackSink;
+use exarch_core::CallbackEntry;
+use exarch_core::CallbackError;
 use exarch_core::MemoryEntry;
 use exarch_core::MemoryEntryKind;
 use exarch_core::MemoryExtractRequest;
@@ -12,8 +13,8 @@ use exarch_core::MemoryLimit;
 use exarch_core::MemorySink;
 use exarch_core::PartialWrites;
 use exarch_core::PathModel;
-use exarch_core::SafePath;
 use exarch_core::SanitizedMode;
+use exarch_core::extract_reader_to_callback;
 use exarch_core::extract_reader_to_memory;
 use exarch_core::formats::detect::ArchiveType;
 use exarch_core::formats::detect::CreatableFormat;
@@ -140,19 +141,20 @@ impl PyMemoryEntry {
 }
 
 impl PyMemoryEntry {
-    fn new(py: Python<'_>, path: &Path, entry: MemoryEntry) -> PyResult<Self> {
+    fn new(py: Python<'_>, path: &Path, entry: CallbackEntry) -> PyResult<Self> {
         let path = utf8(path)?;
         let kind = entry.kind();
         let (data, mode, target) = match entry {
-            MemoryEntry::File { data, mode } => (
+            CallbackEntry::Stored(MemoryEntry::File { data, mode }) => (
                 Some(PyBytes::new(py, &data).unbind()),
                 mode.map(SanitizedMode::as_u32),
                 None,
             ),
-            MemoryEntry::Symlink { target } | MemoryEntry::Hardlink { target } => {
+            CallbackEntry::Stored(MemoryEntry::Symlink { target }) => {
                 (None, None, Some(utf8(&target)?))
             }
-            MemoryEntry::Directory => (None, None, None),
+            CallbackEntry::Hardlink { target } => (None, None, Some(utf8(target.as_path())?)),
+            CallbackEntry::Stored(MemoryEntry::Directory) => (None, None, None),
             _ => {
                 return Err(PyRuntimeError::new_err(
                     "exarch-python is older than exarch-core: unknown memory entry kind",
@@ -640,36 +642,43 @@ pub fn extract_archive_to_callback(
     )?;
 
     let slot = data.failure_slot();
-    let result = catch_panic_as_py_err("archive extraction to a callback", || {
+    // Outer `Err`: an archive or file-object failure; inner `Err`: the
+    // callback's own exception, which the file-object slot must never replace.
+    let outcome = catch_panic_as_py_result("archive extraction to a callback", || {
         py.detach(|| {
-            let mut sink = CallbackSink::new(|path: &SafePath, entry| {
-                Python::attach(|py| {
-                    let entry = PyMemoryEntry::new(py, path.as_path(), entry)
-                        .and_then(|entry| Py::new(py, entry))?;
-                    on_entry.call1(py, (entry,)).map(drop)
-                })
-                .map_err(|err| slot.record(err))
-            })
-            .with_path_model(request.path_model);
-            let reader = data.into_reader(request.format)?;
-            exarch_core::extract_to_sink_with_progress(
+            let reader = data.into_reader(request.format).map_err(convert_error)?;
+            match extract_reader_to_callback(
                 reader,
-                &mut sink,
-                &request.config,
-                &request.options,
+                &request.request,
+                |path, entry| {
+                    Python::attach(|py| {
+                        let entry = PyMemoryEntry::new(py, path.as_path(), entry)
+                            .and_then(|entry| Py::new(py, entry))?;
+                        on_entry.call1(py, (entry,)).map(drop)
+                    })
+                },
                 &mut exarch_core::NoopProgress,
-            )
+            ) {
+                Ok(report) => Ok(Ok(report)),
+                Err(CallbackError::Callback(err)) => Ok(Err(err)),
+                Err(CallbackError::Archive(err)) => Err(convert_error(err)),
+                Err(_) => Err(PyRuntimeError::new_err(
+                    "exarch-python is older than exarch-core: unknown callback error",
+                )),
+            }
         })
     });
+    let result = match outcome {
+        Ok(Err(callback_error)) => return Err(callback_error),
+        Ok(Ok(report)) => Ok(report),
+        Err(err) => Err(err),
+    };
     slot.surface(result).map(PyExtractionReport::from)
 }
 
 /// The validated arguments shared by the in-memory extraction functions.
 struct MemoryRequest {
     request: MemoryExtractRequest,
-    config: exarch_core::SecurityConfig,
-    options: exarch_core::SinkOptions,
-    path_model: PathModel,
     format: Option<ArchiveType>,
 }
 
@@ -694,19 +703,13 @@ impl MemoryRequest {
             )
             .map_err(convert_error)?;
         let mut request = MemoryExtractRequest::default()
-            .with_config(config.clone())
+            .with_config(config)
             .with_options(options)
             .with_path_model(path_model);
         if let Some(bytes) = max_bytes {
             request = request.with_limit(MemoryLimit::new(bytes));
         }
-        Ok(Self {
-            request,
-            config,
-            options,
-            path_model,
-            format,
-        })
+        Ok(Self { request, format })
     }
 
     fn run(
@@ -727,7 +730,7 @@ fn into_py_extraction(
     let entries = sink
         .into_entries()
         .into_iter()
-        .map(|(path, entry)| Py::new(py, PyMemoryEntry::new(py, &path, entry)?))
+        .map(|(path, entry)| Py::new(py, PyMemoryEntry::new(py, &path, entry.into())?))
         .collect::<PyResult<_>>()?;
     Ok(PyMemoryExtraction {
         report: PyExtractionReport::from(report),

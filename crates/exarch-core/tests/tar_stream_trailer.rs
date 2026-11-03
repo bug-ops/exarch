@@ -4,6 +4,7 @@
 //! under one cap (#838).
 
 #![allow(clippy::unwrap_used)]
+#![allow(clippy::disallowed_methods)]
 
 use std::assert_matches;
 use std::io::Cursor;
@@ -368,6 +369,7 @@ fn replay_enforces_the_extract_configs_trailer_limit() {
         &archive,
         &SecurityConfig::default(),
         &ListOptions::default(),
+        exarch_core::DecodeReuse::default(),
     )
     .unwrap();
     let out = TempDir::new().unwrap();

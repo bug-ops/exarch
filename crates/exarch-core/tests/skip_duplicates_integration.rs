@@ -11,6 +11,7 @@
 //! cover this boundary.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(clippy::disallowed_methods)]
 
 use exarch_core::ExtractionOptions;
 use exarch_core::SecurityConfig;

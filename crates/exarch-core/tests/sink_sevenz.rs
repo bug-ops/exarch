@@ -2,6 +2,7 @@
 //! sink errors and the shapes unique to a sink.
 
 #![allow(clippy::unwrap_used)]
+#![allow(clippy::disallowed_methods)]
 
 mod common;
 mod sink_support;

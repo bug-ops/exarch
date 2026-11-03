@@ -1,6 +1,7 @@
 //! Progress events of `list` and `verify`, through the path and reader APIs.
 
 #![allow(clippy::unwrap_used)]
+#![allow(clippy::disallowed_methods)]
 
 mod sink_support;
 

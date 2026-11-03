@@ -140,14 +140,32 @@ impl TempLeaf {
     }
 }
 
-/// What a path-based `lstat` found, as an [`Occupant`].
-pub fn occupant_of(file_type: std::fs::FileType) -> Occupant {
-    if file_type.is_dir() {
+/// The one rule that maps a file type onto an [`Occupant`].
+const fn occupant(is_dir: bool, is_symlink: bool) -> Occupant {
+    if is_dir {
         Occupant::Directory
-    } else if file_type.is_symlink() {
+    } else if is_symlink {
         Occupant::Symlink
     } else {
         Occupant::File
+    }
+}
+
+/// What a path-based `lstat` found.
+impl From<std::fs::FileType> for Occupant {
+    fn from(file_type: std::fs::FileType) -> Self {
+        occupant(file_type.is_dir(), file_type.is_symlink())
+    }
+}
+
+/// What a descriptor-relative `fstatat` found.
+#[cfg(any(unix, target_os = "wasi"))]
+impl From<rustix::fs::FileType> for Occupant {
+    fn from(file_type: rustix::fs::FileType) -> Self {
+        occupant(
+            file_type == rustix::fs::FileType::Directory,
+            file_type == rustix::fs::FileType::Symlink,
+        )
     }
 }
 
@@ -189,12 +207,15 @@ impl PinnedRoot {
 /// from a [`PinnedRoot`]'s descriptor, so the walker's per-component vetting
 /// at write time stands in for the validator's path-based parent probe.
 ///
-/// Only [`PinnedRoot::backs_parent_probe`] mints it.
+/// Only [`PinnedRoot::backs_parent_probe`] mints it. It borrows the root, so a
+/// proof cannot outlive or be reused for another root, and it is not `Copy`.
 ///
 /// [`DirWalker`]: crate::formats::dir_walker::DirWalker
 #[cfg(any(unix, target_os = "wasi"))]
-#[derive(Debug, Clone, Copy)]
-pub struct WalkerBacked(());
+#[derive(Debug)]
+pub struct WalkerBacked<'r>(
+    #[expect(dead_code, reason = "ties the proof to its root")] &'r PinnedRoot,
+);
 
 #[cfg(any(unix, target_os = "wasi"))]
 impl PinnedRoot {
@@ -202,9 +223,8 @@ impl PinnedRoot {
     ///
     /// The holder must write every path it validates with the proof through
     /// `DirWalker::ensure_parent` or `ensure_dir` on this root.
-    #[expect(clippy::unused_self, reason = "binds the proof to a root by signature")]
-    pub(crate) const fn backs_parent_probe(&self) -> WalkerBacked {
-        WalkerBacked(())
+    pub(crate) const fn backs_parent_probe(&self) -> WalkerBacked<'_> {
+        WalkerBacked(self)
     }
 }
 
@@ -292,11 +312,7 @@ mod imp {
         /// What `name` is, without following a symlink; `None` if it is absent.
         pub(crate) fn probe(&self, name: Leaf<'_>) -> io::Result<Option<Occupant>> {
             match rustix::fs::statat(&self.0, name.as_os_str(), AtFlags::SYMLINK_NOFOLLOW) {
-                Ok(stat) => Ok(Some(match FileType::from_raw_mode(stat.st_mode) {
-                    FileType::Directory => Occupant::Directory,
-                    FileType::Symlink => Occupant::Symlink,
-                    _ => Occupant::File,
-                })),
+                Ok(stat) => Ok(Some(FileType::from_raw_mode(stat.st_mode).into())),
                 Err(e) if e == Errno::NOENT => Ok(None),
                 Err(e) => Err(e.into()),
             }
@@ -409,7 +425,6 @@ mod imp {
     use super::nt::Disposition;
     use super::nt::Kind;
     use super::nt::Request;
-    use super::occupant_of;
     use crate::security::fs_view::Occupant;
     use crate::security::permissions::SanitizedMode;
 
@@ -433,6 +448,10 @@ mod imp {
 
         /// Opens `path`, which the caller has canonicalized. A reparse point at
         /// `path` is not followed and is refused.
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "opens the destination root itself; no directory handle exists yet"
+        )]
         pub(super) fn open_path(path: &Path) -> io::Result<Self> {
             let file = std::fs::OpenOptions::new()
                 .access_mode(DIR_ACCESS)
@@ -492,7 +511,7 @@ mod imp {
             match nt::create_at(self.0.as_handle(), name, request) {
                 Ok(handle) => {
                     let meta = File::from(handle).metadata()?;
-                    Ok(Some(occupant_of(meta.file_type())))
+                    Ok(Some(meta.file_type().into()))
                 }
                 Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
                 Err(e) => Err(e),
@@ -624,6 +643,28 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::fs::symlink;
     use tempfile::TempDir;
+
+    #[test]
+    fn both_file_type_mappings_agree_on_the_occupant() {
+        use rustix::fs::FileType;
+        assert_eq!(Occupant::from(FileType::Directory), Occupant::Directory);
+        assert_eq!(Occupant::from(FileType::Symlink), Occupant::Symlink);
+        assert_eq!(Occupant::from(FileType::RegularFile), Occupant::File);
+        assert_eq!(Occupant::from(FileType::Fifo), Occupant::File);
+
+        let temp = TempDir::new().unwrap();
+        let std_type = |name: &str| {
+            fs::symlink_metadata(temp.path().join(name))
+                .unwrap()
+                .file_type()
+        };
+        fs::create_dir(temp.path().join("d")).unwrap();
+        fs::write(temp.path().join("f"), b"x").unwrap();
+        symlink("f", temp.path().join("l")).unwrap();
+        assert_eq!(Occupant::from(std_type("d")), Occupant::Directory);
+        assert_eq!(Occupant::from(std_type("l")), Occupant::Symlink);
+        assert_eq!(Occupant::from(std_type("f")), Occupant::File);
+    }
 
     /// Returns a handle on `base/a` after `a` was moved to `a_moved` and a
     /// symlink `a -> outside` was planted in its place.

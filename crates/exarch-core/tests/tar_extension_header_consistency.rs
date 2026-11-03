@@ -7,6 +7,7 @@
 //! `extract` must all refuse them with a typed `InvalidArchive`.
 
 #![allow(clippy::unwrap_used)]
+#![allow(clippy::disallowed_methods)]
 
 use std::assert_matches;
 use std::path::Path;

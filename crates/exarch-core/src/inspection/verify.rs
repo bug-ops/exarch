@@ -12,6 +12,7 @@ use crate::VerificationOptions;
 use crate::config::Validated;
 use crate::formats::SevenZArchive;
 use crate::formats::ZipArchive;
+use crate::formats::common::check_entry_name_limits;
 use crate::formats::detect::FormatFamily;
 use crate::formats::detect::detect_format;
 use crate::inspection::integrity::IntegrityOutcome;
@@ -46,7 +47,6 @@ use crate::security::fs_view::PlaceError;
 use crate::security::fs_view::VirtualRoot;
 use crate::security::fs_view::VirtualTree;
 use crate::security::fs_view::check_link_target_length;
-use crate::security::fs_view::check_name_lengths;
 use crate::security::fs_view::name_too_long;
 use crate::security::hardlink::HardlinkTracker;
 use crate::security::hardlink::hardlink_target_missing;
@@ -496,9 +496,14 @@ fn verify_entry(
 
     // Path validation — result cached to avoid repeated syscalls for
     // symlink/hardlink checks
-    let path_result = check_name_lengths(&entry.path)
-        .map_err(ArchiveError::Io)
-        .and_then(|()| SafePath::validate_in(&entry.path, dest, config, tree));
+    let path_result = check_entry_name_limits(
+        PathModel::Host,
+        &entry.path,
+        matches!(entry.kind, ManifestEntryKind::File),
+        config,
+    )
+    .map_err(ArchiveError::Io)
+    .and_then(|()| SafePath::validate_in(&entry.path, dest, config, tree));
     if let Err(ref e) = path_result {
         issues.push(VerificationIssue::from_error(e, Some(entry.path.clone())));
     }

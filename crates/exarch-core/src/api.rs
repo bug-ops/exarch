@@ -26,6 +26,7 @@ use crate::formats::detect::FormatFamily;
 use crate::formats::detect::detect_format;
 use crate::formats::detect::detect_format_from_extension;
 use crate::formats::detect::is_zip_family_alias;
+use crate::formats::source_fault::TapSource;
 use crate::inspection::ArchiveManifest;
 use crate::inspection::VerificationReport;
 use crate::inspection::integrity::TarTrailer;
@@ -276,6 +277,10 @@ pub fn extract_archive_with_options<P: AsRef<Path>, Q: AsRef<Path>>(
     extract_archive_with_options_and_progress(archive_path, output_dir, config, options, &mut noop)
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "stages the whole extraction in a private sibling directory, then renames it into place"
+)]
 fn extract_atomic(
     output_dir: &Path,
     extract: impl FnOnce(&Path) -> Result<ExtractionReport>,
@@ -353,15 +358,26 @@ fn extract_tar(
 ) -> Result<ExtractionReport> {
     use crate::formats::tar::open_tar_stream;
 
-    let stream = open_tar_stream(archive_path, codec, DecoderLimits::of(config))?;
+    let decoded = open_tar_stream(archive_path, codec, DecoderLimits::of(config))?;
     let trailer = TarTrailer::for_codec(codec);
-    extract_tar_stream(stream, trailer, output_dir, config, options, progress)
+    let source = decoded.source();
+    extract_tar_stream(
+        decoded.stream,
+        source,
+        trailer,
+        output_dir,
+        config,
+        options,
+        progress,
+    )
 }
 
-/// Extracts a TAR stream that is already decoded; `trailer` says how the
-/// bytes after the end-of-archive marker are checked.
+/// Extracts a TAR stream that is already decoded; `source` meters its raw
+/// input and `trailer` says how the bytes after the end-of-archive marker are
+/// checked.
 pub(crate) fn extract_tar_stream<R: std::io::Read>(
     stream: R,
+    source: TapSource,
     trailer: TarTrailer,
     output_dir: &Path,
     config: &SecurityConfig<Validated>,
@@ -371,7 +387,7 @@ pub(crate) fn extract_tar_stream<R: std::io::Read>(
     use crate::formats::TarArchive;
     use crate::formats::traits::ArchiveFormat;
 
-    TarArchive::with_trailer(stream, trailer).extract(output_dir, config, options, progress)
+    TarArchive::with_source(stream, source, trailer).extract(output_dir, config, options, progress)
 }
 
 fn extract_zip(
@@ -386,7 +402,7 @@ fn extract_zip(
     use std::fs::File;
 
     let file = File::open(archive_path)?;
-    let mut archive = ZipArchive::for_config(file, config)?;
+    let mut archive = ZipArchive::for_extraction(file, config, options.decode_reuse)?;
     archive.extract(output_dir, config, options, progress)
 }
 
@@ -1302,6 +1318,7 @@ mod tests {
         let options = ExtractionOptions {
             atomic: false,
             skip_duplicates: true,
+            ..ExtractionOptions::default()
         };
         let result = extract_archive_with_options_and_progress(
             PathBuf::from("nonexistent.tar.gz"),
@@ -1319,6 +1336,7 @@ mod tests {
         let options = ExtractionOptions {
             atomic: false,
             skip_duplicates: true,
+            ..ExtractionOptions::default()
         };
         let result = extract_archive_with_options(
             PathBuf::from("nonexistent.tar.gz"),
@@ -1349,6 +1367,7 @@ mod tests {
         let options = ExtractionOptions {
             atomic: true,
             skip_duplicates: true,
+            ..ExtractionOptions::default()
         };
         let result = extract_archive_with_options(
             &archive_path,
@@ -1376,6 +1395,7 @@ mod tests {
         let options = ExtractionOptions {
             atomic: true,
             skip_duplicates: true,
+            ..ExtractionOptions::default()
         };
         let result = extract_archive_with_options(
             PathBuf::from("nonexistent_archive.tar.gz"),
@@ -1416,6 +1436,7 @@ mod tests {
         let options = ExtractionOptions {
             atomic: true,
             skip_duplicates: true,
+            ..ExtractionOptions::default()
         };
         let result = extract_archive_with_options(
             &archive_path,

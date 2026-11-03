@@ -35,6 +35,11 @@ use crate::security::validator::ValidatorCore;
 use crate::types::DestDir;
 use crate::types::SafePath;
 use crate::types::SafeSymlink;
+use crate::types::safe_path::ParentCheck;
+#[cfg(not(any(unix, target_os = "wasi")))]
+use crate::types::safe_path::Resolved;
+#[cfg(any(unix, target_os = "wasi"))]
+use crate::types::safe_path::Walked;
 use crate::types::safe_symlink::resolve_through_symlinks;
 
 use super::common;
@@ -112,8 +117,21 @@ pub enum FileAdmission<A> {
     Skipped(SkipRecorded),
 }
 
+/// How a [`HostTarget`] has the parent directory of every path it validates
+/// vetted: by the directory walker at write time where the root is pinned.
+#[cfg(any(unix, target_os = "wasi"))]
+pub type HostParent = Walked;
+/// How a [`HostTarget`] has the parent directory of every path it validates
+/// vetted: by the validator, where no pinned root exists.
+#[cfg(not(any(unix, target_os = "wasi")))]
+pub type HostParent = Resolved;
+
 /// The validation and write half of an extraction.
 pub trait ExtractTarget {
+    /// How the parent directory of every path this target validates is vetted,
+    /// which decides how the target may write it.
+    type Parent: ParentCheck;
+
     /// What a target needs to write a file it admitted.
     type AdmittedFile;
 
@@ -127,7 +145,11 @@ pub trait ExtractTarget {
     ) -> Result<FileAdmission<Self::AdmittedFile>>;
 
     /// Validates a directory entry.
-    fn validate_directory(&mut self, path: &Path, size: EntrySize) -> Result<SafePath>;
+    fn validate_directory(
+        &mut self,
+        path: &Path,
+        size: EntrySize,
+    ) -> Result<SafePath<Self::Parent>>;
 
     /// Validates a symlink entry and its target.
     fn validate_symlink(
@@ -135,7 +157,7 @@ pub trait ExtractTarget {
         path: &Path,
         target: &Path,
         size: EntrySize,
-    ) -> Result<SafeSymlink>;
+    ) -> Result<SafeSymlink<Self::Parent>>;
 
     /// Validates a hardlink entry for the second pass.
     fn validate_hardlink(
@@ -143,10 +165,10 @@ pub trait ExtractTarget {
         path: &Path,
         target: &Path,
         size: EntrySize,
-    ) -> Result<ValidatedHardlink>;
+    ) -> Result<ValidatedHardlink<Self::Parent>>;
 
     /// Creates a validated directory.
-    fn directory(&mut self, path: &SafePath, tally: &mut Tally<'_>) -> Result<()>;
+    fn directory(&mut self, path: &SafePath<Self::Parent>, tally: &mut Tally<'_>) -> Result<()>;
 
     /// Streams an admitted file from `reader`, enforcing the declared `size`.
     fn file<R: Read>(
@@ -158,17 +180,43 @@ pub trait ExtractTarget {
     ) -> Result<()>;
 
     /// Creates a validated symlink.
-    fn symlink(&mut self, symlink: &SafeSymlink, tally: &mut Tally<'_>) -> Result<()>;
+    fn symlink(&mut self, symlink: &SafeSymlink<Self::Parent>, tally: &mut Tally<'_>)
+    -> Result<()>;
 
     /// Materializes a hardlink in the second pass, once every target exists.
     fn hardlink(
         &mut self,
-        link: &SafePath,
-        target: &SafePath,
+        link: &SafePath<Self::Parent>,
+        target: &SafePath<Self::Parent>,
         counted: EntryCount,
         tally: &mut Tally<'_>,
         hardlink_duplicate_skips: &mut u64,
     ) -> Result<()>;
+}
+
+/// A validation context whose parent probe the directory walker takes over
+/// where the root is pinned: every path validated with it is written through
+/// `DirWalker` on `root`, which vets each parent at write time.
+///
+/// Takes the core and root as separate borrows, so a caller can validate
+/// through `&mut` core while the context holds the root.
+#[cfg(any(unix, target_os = "wasi"))]
+pub(super) fn host_context<'r>(
+    core: &ValidatorCore<'_>,
+    root: &'r PinnedRoot,
+) -> ValidationContext<'r, HostFs, HostParent> {
+    core.context::<HostFs>()
+        .with_walker(root.backs_parent_probe())
+}
+
+/// A validation context for a target without a pinned root: the validator
+/// resolves each parent itself.
+#[cfg(not(any(unix, target_os = "wasi")))]
+pub(super) fn host_context<'r>(
+    core: &ValidatorCore<'_>,
+    _root: &'r PinnedRoot,
+) -> ValidationContext<'r, HostFs, HostParent> {
+    core.context::<HostFs>()
 }
 
 /// Extraction onto the real filesystem.
@@ -208,20 +256,10 @@ impl<'a> HostTarget<'a> {
         self.dirs
     }
 
-    /// A validation context whose parent probe the directory walker takes over
-    /// where the root is pinned: every path validated here is written through
-    /// `DirWalker` on this root, which vets each parent at write time.
-    fn context(&self) -> ValidationContext<HostFs> {
-        let ctx = self.core.context::<HostFs>();
-        #[cfg(any(unix, target_os = "wasi"))]
-        let ctx = ctx.with_walker(self.root.backs_parent_probe());
-        ctx
-    }
-
     /// Validates a file's path and applies the extension allowlist, leaving
     /// quota to the caller.
-    pub(super) fn screen_file(&self, request: FileRequest<'_>) -> Result<FileScreen> {
-        let ctx = self.context();
+    pub(super) fn screen_file(&self, request: FileRequest<'_>) -> Result<FileScreen<HostParent>> {
+        let ctx = host_context(&self.core, &self.root);
         self.core.screen_file_path_in(
             request.path,
             request.size,
@@ -233,19 +271,23 @@ impl<'a> HostTarget<'a> {
     }
 
     /// Reserves the quota of a screened file.
-    pub(super) fn admit_file(&mut self, pending: PendingFile) -> Result<ValidatedFile> {
+    pub(super) fn admit_file(
+        &mut self,
+        pending: PendingFile<HostParent>,
+    ) -> Result<ValidatedFile<HostParent>> {
         self.core.admit_file(pending)
     }
 }
 
 impl ExtractTarget for HostTarget<'_> {
-    type AdmittedFile = ValidatedFile;
+    type AdmittedFile = ValidatedFile<HostParent>;
+    type Parent = HostParent;
 
     fn validate_file(
         &mut self,
         request: FileRequest<'_>,
         tally: &mut Tally<'_>,
-    ) -> Result<FileAdmission<ValidatedFile>> {
+    ) -> Result<FileAdmission<ValidatedFile<HostParent>>> {
         match self.screen_file(request)? {
             FileScreen::DisallowedExtension => {
                 tally.record_extension_skip().map(FileAdmission::Skipped)
@@ -254,8 +296,8 @@ impl ExtractTarget for HostTarget<'_> {
         }
     }
 
-    fn validate_directory(&mut self, path: &Path, size: EntrySize) -> Result<SafePath> {
-        let ctx = self.context();
+    fn validate_directory(&mut self, path: &Path, size: EntrySize) -> Result<SafePath<HostParent>> {
+        let ctx = host_context(&self.core, &self.root);
         self.core
             .validate_directory_in(path, size, self.root.dest(), &HostFs, &ctx)
     }
@@ -265,8 +307,8 @@ impl ExtractTarget for HostTarget<'_> {
         path: &Path,
         target: &Path,
         size: EntrySize,
-    ) -> Result<SafeSymlink> {
-        let ctx = self.context();
+    ) -> Result<SafeSymlink<HostParent>> {
+        let ctx = host_context(&self.core, &self.root);
         self.core
             .validate_symlink_in(path, target, size, self.root.dest(), &HostFs, &ctx)
             .map(|validated| validated.symlink)
@@ -277,20 +319,20 @@ impl ExtractTarget for HostTarget<'_> {
         path: &Path,
         target: &Path,
         size: EntrySize,
-    ) -> Result<ValidatedHardlink> {
-        let ctx = self.context();
+    ) -> Result<ValidatedHardlink<HostParent>> {
+        let ctx = host_context(&self.core, &self.root);
         self.core
             .validate_hardlink_in(path, target, size, self.root.dest(), &HostFs, &ctx)
     }
 
-    fn directory(&mut self, path: &SafePath, tally: &mut Tally<'_>) -> Result<()> {
+    fn directory(&mut self, path: &SafePath<HostParent>, tally: &mut Tally<'_>) -> Result<()> {
         common::create_directory(path, &self.root, tally.report, self.dirs)
     }
 
     fn file<R: Read>(
         &mut self,
         reader: &mut R,
-        admitted: ValidatedFile,
+        admitted: ValidatedFile<HostParent>,
         size: u64,
         tally: &mut Tally<'_>,
     ) -> Result<()> {
@@ -311,7 +353,7 @@ impl ExtractTarget for HostTarget<'_> {
         )
     }
 
-    fn symlink(&mut self, symlink: &SafeSymlink, tally: &mut Tally<'_>) -> Result<()> {
+    fn symlink(&mut self, symlink: &SafeSymlink<HostParent>, tally: &mut Tally<'_>) -> Result<()> {
         common::create_symlink(
             symlink,
             &self.root,
@@ -363,8 +405,8 @@ impl ExtractTarget for HostTarget<'_> {
     /// `HardlinkEscape`.
     fn hardlink(
         &mut self,
-        link: &SafePath,
-        target: &SafePath,
+        link: &SafePath<HostParent>,
+        target: &SafePath<HostParent>,
         counted: EntryCount,
         tally: &mut Tally<'_>,
         hardlink_duplicate_skips: &mut u64,
@@ -426,7 +468,11 @@ impl ExtractTarget for HostTarget<'_> {
 impl HostTarget<'_> {
     /// Opens the content source of a hardlink and returns it with its `fstat`
     /// size and permission bits.
-    fn open_hardlink_target(&self, link: &SafePath, target: &SafePath) -> Result<OpenedTarget> {
+    fn open_hardlink_target(
+        &self,
+        link: &SafePath<HostParent>,
+        target: &SafePath<HostParent>,
+    ) -> Result<OpenedTarget> {
         let file = if target
             .as_path()
             .components()
@@ -461,7 +507,11 @@ impl HostTarget<'_> {
 
     /// Opens a hardlink target by name, falling back to its resolved location
     /// when the final component is a symlink.
-    fn open_direct(&self, link: &SafePath, target: &SafePath) -> Result<File> {
+    fn open_direct(
+        &self,
+        link: &SafePath<HostParent>,
+        target: &SafePath<HostParent>,
+    ) -> Result<File> {
         let missing = || hardlink_target_missing(target.as_path());
         let (dir, leaf) = match self.dirs.open_parent(&self.root, target) {
             Ok(opened) => opened,
@@ -493,18 +543,25 @@ impl HostTarget<'_> {
             .flat_map(Path::components)
             .any(|c| {
                 prefix.push(c);
-                std::fs::symlink_metadata(self.root.dest().join_path(&prefix))
+                self.root
+                    .dest()
+                    .probe(&prefix)
+                    .lstat()
                     .is_ok_and(|meta| meta.file_type().is_symlink())
             })
     }
 
     /// Opens a hardlink target through its resolved, symlink-free location:
     /// a symlink created earlier in this extraction, or a path with `..`.
-    fn open_through_symlink(&self, link: &SafePath, target: &SafePath) -> Result<File> {
+    fn open_through_symlink(
+        &self,
+        link: &SafePath<HostParent>,
+        target: &SafePath<HostParent>,
+    ) -> Result<File> {
         let missing = || hardlink_target_missing(target.as_path());
         // The path-based `exists` only picks the error: a dangling link is a
         // missing target, not an escape.
-        if !self.root.dest().join(target).exists() {
+        if !self.root.dest().probe(target.as_path()).exists() {
             return Err(missing());
         }
         let escape = || ArchiveError::HardlinkEscape {

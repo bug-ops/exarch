@@ -20,6 +20,7 @@ use crate::config::Validated;
 use crate::error::QuotaResource;
 use crate::formats::ZipArchive;
 use crate::formats::common::EntryCompleteGuard;
+use crate::formats::common::check_entry_name_limits;
 use crate::formats::common::encrypted_archive_error;
 use crate::formats::common::is_extension_allowed;
 use crate::formats::common::normalize_entry_name;
@@ -42,15 +43,16 @@ use crate::formats::sevenz::read_sevenz_header;
 use crate::formats::sevenz::sevenz_entry_compression;
 use crate::formats::sevenz::verify_sevenz_blocks;
 use crate::formats::sevenz::walk_sevenz_links;
+use crate::formats::source_fault::TapSource;
 use crate::formats::tar::TarNode;
 use crate::formats::tar::effective_entry_type;
 use crate::formats::tar::is_metadata_type;
 use crate::formats::tar::open_tar_stream;
 use crate::formats::tar::tar_node;
 use crate::formats::tar_metadata_limit::CheckedTarEntry;
+use crate::formats::tar_metadata_limit::SkipLimits;
 use crate::formats::tar_metadata_limit::TarReadBudget;
-use crate::formats::tar_metadata_limit::budget_violation;
-use crate::formats::tar_metadata_limit::budgeted_reader;
+use crate::formats::tar_metadata_limit::budgeted_reader_with;
 use crate::formats::tar_metadata_limit::budgeted_tar_entries;
 use crate::formats::zip::AdmittedZip;
 use crate::formats::zip::ZipEntryKind;
@@ -78,7 +80,7 @@ use crate::inspection::report::UnverifiedReason;
 use crate::reader::SeekableFormat;
 use crate::security::fs_view::LinkKind;
 use crate::security::fs_view::MAX_SYMLINK_TARGET_BYTES;
-use crate::security::fs_view::check_name_lengths;
+use crate::security::fs_view::PathModel;
 use crate::security::fs_view::name_too_long;
 use crate::security::quota::QuotaTracker;
 use crate::security::validator::EntryPath;
@@ -393,15 +395,24 @@ fn reserve_entry(
     config: &SecurityConfig<Validated>,
     mode: ListMode,
     file_at: Option<&Path>,
-) -> Result<()> {
+) -> Result<Reservation> {
     let skipped = file_at.is_some_and(|path| !is_extension_allowed(path, config));
     match (skipped, mode) {
-        (true, _) => quota.reserve_count(config).map(drop),
-        (false, ListMode::Strict) => quota.reserve(size, config).map(drop),
-        (false, ListMode::VerifyPreflight) => {
-            quota.reserve_without_file_limit(size, config).map(drop)
-        }
+        (true, _) => quota.reserve_count(config).map(|_| Reservation::Skipped),
+        (false, ListMode::Strict) => quota.reserve(size, config).map(|_| Reservation::Charged),
+        (false, ListMode::VerifyPreflight) => quota
+            .reserve_without_file_limit(size, config)
+            .map(|_| Reservation::Charged),
     }
+}
+
+/// What [`reserve_entry`] charged an entry to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reservation {
+    /// Count and size were charged to the quota.
+    Charged,
+    /// The extension allowlist skips the file: only its count was charged.
+    Skipped,
 }
 
 /// Lists an archive with an already validated config, decoding payloads when
@@ -437,19 +448,21 @@ fn list_tar(
     config: &SecurityConfig<Validated>,
     listing: &mut ListPass<'_, '_>,
 ) -> Result<ArchiveManifest> {
-    let stream = open_tar_stream(archive_path, codec, DecoderLimits::of(config))?;
-    list_tar_stream(stream, codec, format, config, listing)
+    let decoded = open_tar_stream(archive_path, codec, DecoderLimits::of(config))?;
+    let source = decoded.source();
+    list_tar_stream(decoded.stream, source, codec, format, config, listing)
 }
 
 /// Lists a TAR stream already wrapped in its `codec`'s decoder.
 pub(crate) fn list_tar_stream<R: Read>(
     stream: R,
+    source: TapSource,
     codec: Option<CompressionCodec>,
     format: ArchiveType,
     config: &SecurityConfig<Validated>,
     listing: &mut ListPass<'_, '_>,
 ) -> Result<ArchiveManifest> {
-    let (budgeted, budget) = budgeted_reader(stream, config.max_tar_metadata_bytes);
+    let (budgeted, budget) = budgeted_reader_with(stream, config.max_tar_metadata_bytes, source);
     let archive = tar::Archive::new(budgeted);
     list_tar_entries(
         archive,
@@ -461,7 +474,8 @@ pub(crate) fn list_tar_stream<R: Read>(
     )
 }
 
-/// Lists entries from a TAR archive already wrapped in a [`budgeted_reader`].
+/// Lists entries from a TAR archive already wrapped in a
+/// [`budgeted_reader_with`].
 ///
 /// `budget` must be the handle returned alongside the reader that `archive`
 /// wraps — passed explicitly (rather than re-derived) so the reader and the
@@ -477,128 +491,103 @@ fn list_tar_entries<R: std::io::Read>(
     let list_mode = listing.mode();
     let mut manifest = ArchiveManifest::new(format);
     let mut quota = QuotaTracker::new();
+    let skip_limits = SkipLimits::of(config);
 
     let mut entries = budgeted_tar_entries(&mut archive, budget)
         .map_err(|e| ArchiveError::InvalidArchive(format!("failed to read TAR entries: {e}")))?;
 
     while let Some(entry_result) = entries.next_entry() {
-        let mut entry = entry_result
-            .map_err(|e| {
-                budget_violation(&e).unwrap_or_else(|| {
-                    ArchiveError::InvalidArchive(format!("failed to read TAR entry: {e}"))
-                })
-            })?
-            .check(config.max_tar_metadata_bytes)?;
+        let mut entry = entry_result?.check(config.max_tar_metadata_bytes)?;
 
-        // Skip TAR metadata entries (PAX headers, GNU long names/links)
-        if is_metadata_type(entry.header().entry_type()) {
-            continue;
-        }
+        entry.settle(|entry| -> Result<()> {
+            // Skip TAR metadata entries (PAX headers, GNU long names/links)
+            if is_metadata_type(entry.header().entry_type()) {
+                return Ok(());
+            }
 
-        let size = entry.size();
+            let size = entry.size();
 
-        let path = entry
-            .path()
-            .map_err(|e| ArchiveError::InvalidArchive(format!("invalid path: {e}")))?
-            .into_owned();
+            let path = entry
+                .path()
+                .map_err(|e| ArchiveError::InvalidArchive(format!("invalid path: {e}")))?
+                .into_owned();
 
-        // Route through the same QuotaTracker used by extraction: per-file
-        // size, file count, and total size (with checked arithmetic) are all
-        // enforced here using the same logic. Note this doesn't make listing
-        // and extraction fully equivalent — extraction's QuotaTracker does not
-        // record directories, while listing records every entry type, a
-        // pre-existing divergence.
-        //
-        // A quota rejection here (the `?`) aborts the loop without an
-        // explicit `entry.abandon()`; harmless — the guard's bounded drain
-        // on drop is pointless I/O in that case, not a correctness
-        // requirement (see `TarEntryGuard::abandon`).
-        let file_at = matches!(tar_node(entry.header().entry_type()), Ok(TarNode::File))
-            .then_some(path.as_path());
-        reserve_entry(&mut quota, size, config, list_mode, file_at)?;
+            // Route through the same QuotaTracker used by extraction: per-file
+            // size, file count, and total size (with checked arithmetic) are
+            // all enforced here using the same logic. Note this doesn't make
+            // listing and extraction fully equivalent — extraction's
+            // QuotaTracker does not record directories, while listing records
+            // every entry type, a pre-existing divergence.
+            //
+            // A rejection anywhere in this body abandons the entry (`settle`),
+            // so the guard never decodes a refused entry to its end on the way
+            // out.
+            let file_at = matches!(tar_node(entry.header().entry_type()), Ok(TarNode::File))
+                .then_some(path.as_path());
+            let reservation = reserve_entry(&mut quota, size, config, list_mode, file_at)?;
+            // An integrity pass decodes the payload itself, below.
+            if reservation == Reservation::Skipped && listing.integrity().is_none() {
+                entry.drain_skipped(&skip_limits)?;
+            }
 
-        if list_mode == ListMode::Strict && has_null_bytes(&path) {
-            return Err(ArchiveError::violation(format!(
-                "path contains null bytes: {}",
-                path.display()
-            )));
-        }
+            if list_mode == ListMode::Strict && has_null_bytes(&path) {
+                return Err(ArchiveError::violation(format!(
+                    "path contains null bytes: {}",
+                    path.display()
+                )));
+            }
 
-        if contains_traversal(&path, config) {
-            return Err(ArchiveError::PathTraversal { path });
-        }
+            if contains_traversal(&path, config) {
+                return Err(ArchiveError::PathTraversal { path });
+            }
 
-        require_non_empty_name(&path)?;
-        let tar_type = effective_entry_type(&entry)?;
-        let kind = NodeKind::directory_if(tar_type == tar::EntryType::Directory);
-        if !admit_path(&path, kind, &mut manifest, listing)? {
-            continue;
-        }
+            require_non_empty_name(&path)?;
+            let tar_type = effective_entry_type(entry)?;
+            let kind = NodeKind::directory_if(tar_type == tar::EntryType::Directory);
+            if !admit_path(
+                &path,
+                kind,
+                file_at.is_some(),
+                config,
+                &mut manifest,
+                listing,
+            )? {
+                return Ok(());
+            }
 
-        let entry_type = convert_tar_entry_type(tar_type)?;
-        let mode = crate::formats::tar::tar_permission_bits(entry.header());
-        let modified =
-            entry.header().mtime().ok().and_then(|t| {
+            let entry_type = convert_tar_entry_type(tar_type)?;
+            let mode = crate::formats::tar::tar_permission_bits(entry.header());
+            let modified = entry.header().mtime().ok().and_then(|t| {
                 SystemTime::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(t))
             });
 
-        let target = match entry.header().entry_type() {
-            tar::EntryType::Symlink | tar::EntryType::Link => {
-                let target = entry
-                    .link_name()
-                    .map_err(|e| ArchiveError::InvalidArchive(format!("invalid link target: {e}")))?
-                    .map(std::borrow::Cow::into_owned);
-                let is_symlink = entry.header().entry_type() == tar::EntryType::Symlink;
-                let kind = if is_symlink {
-                    LinkKind::Symlink
-                } else {
-                    LinkKind::Hardlink
-                };
+            let target = tar_link_target(entry, list_mode)?;
 
-                match target {
-                    Some(t) => classify_link_target(t, kind, list_mode)?,
-                    // `link_name()` returns `None` when neither the ustar
-                    // linkname field nor a PAX `linkpath` override is
-                    // present — a structurally different case from an
-                    // empty-string target (see `validate_link_target`).
-                    // `extract` rejects this via `to_entry_type`
-                    // (formats/tar.rs) with the same message; mirrored here
-                    // for list/extract parity; skipped in verify's pre-flight
-                    // since `verify_entry` reports a missing target.
-                    None if list_mode == ListMode::Strict => {
-                        return Err(ArchiveError::InvalidArchive(format!(
-                            "{kind} missing target"
-                        )));
-                    }
-                    None => LinkTarget::Missing,
+            let archive_entry = ArchiveEntry {
+                path,
+                kind: manifest_entry_kind(entry_type, target),
+                size,
+                compression: EntryCompression::Unknown,
+                mode,
+                modified,
+            };
+
+            let ListPass {
+                mode: pass_mode,
+                progress,
+            } = &mut *listing;
+            let in_flight = progress.begin(&archive_entry.path);
+            if let Some(pass) = pass_mode.integrity() {
+                let slot = pass.begin_entry(size, &archive_entry.compression);
+                if entry_type == ManifestEntryType::File && size > 0 {
+                    verify_tar_payload(pass, slot, entry, &archive_entry.path)?;
                 }
             }
-            _ => LinkTarget::Missing,
-        };
+            in_flight.complete();
 
-        let archive_entry = ArchiveEntry {
-            path,
-            kind: manifest_entry_kind(entry_type, target),
-            size,
-            compression: EntryCompression::Unknown,
-            mode,
-            modified,
-        };
-
-        let ListPass {
-            mode: pass_mode,
-            progress,
-        } = &mut *listing;
-        let in_flight = progress.begin(&archive_entry.path);
-        if let Some(pass) = pass_mode.integrity() {
-            let slot = pass.begin_entry(size, &archive_entry.compression);
-            if entry_type == ManifestEntryType::File && size > 0 {
-                verify_tar_payload(pass, slot, &mut entry, &archive_entry.path)?;
-            }
-        }
-        in_flight.complete();
-
-        manifest.add_entry(archive_entry)?;
+            manifest.add_entry(archive_entry)?;
+            Ok(())
+        })?;
     }
 
     entries.finish()?;
@@ -611,6 +600,33 @@ fn list_tar_entries<R: std::io::Read>(
     }
 
     Ok(manifest)
+}
+
+/// Classifies the target of a TAR symlink or hardlink entry; any other entry
+/// has none.
+fn tar_link_target<R: Read>(entry: &tar::Entry<'_, R>, list_mode: ListMode) -> Result<LinkTarget> {
+    let kind = match entry.header().entry_type() {
+        tar::EntryType::Symlink => LinkKind::Symlink,
+        tar::EntryType::Link => LinkKind::Hardlink,
+        _ => return Ok(LinkTarget::Missing),
+    };
+    let target = entry
+        .link_name()
+        .map_err(|e| ArchiveError::InvalidArchive(format!("invalid link target: {e}")))?
+        .map(std::borrow::Cow::into_owned);
+    match target {
+        Some(t) => classify_link_target(t, kind, list_mode),
+        // `link_name()` returns `None` when neither the ustar linkname field
+        // nor a PAX `linkpath` override is present — a structurally different
+        // case from an empty-string target (see `validate_link_target`).
+        // `extract` rejects this via `to_entry_type` (formats/tar.rs) with the
+        // same message; mirrored here for list/extract parity; skipped in
+        // verify's pre-flight since `verify_entry` reports a missing target.
+        None if list_mode == ListMode::Strict => Err(ArchiveError::InvalidArchive(format!(
+            "{kind} missing target"
+        ))),
+        None => Ok(LinkTarget::Missing),
+    }
 }
 
 /// Reads one TAR entry's content to its end so the codec and the tar framing
@@ -629,10 +645,7 @@ fn verify_tar_payload<R: Read>(
 ) -> Result<()> {
     let declared = entry.size();
     match pass.decode(slot, &mut **entry, declared, Charge::Free) {
-        DecodeOutcome::Failed(failure) => {
-            entry.abandon();
-            Err(failure.into_tar_error(path))
-        }
+        DecodeOutcome::Failed(failure) => Err(failure.into_tar_error(path)),
         outcome => pass.record(slot, path, outcome),
     }
 }
@@ -670,6 +683,10 @@ pub(crate) fn list_tar_reader<R: Read>(
 /// handler rather than the raw reader proves that opening already ran the
 /// admission checks (encryption, method, declared sizes) and the structural
 /// census, so listing does not repeat them.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one pass over the central directory; splitting it would obscure the order of checks"
+)]
 pub(crate) fn list_zip_reader<R: Read + Seek>(
     archive: &mut AdmittedZip<'_, R>,
     config: &SecurityConfig<Validated>,
@@ -710,7 +727,14 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
         let entry_type = convert_zip_entry_type(&entry, kind);
         let file_at = (entry_type == ManifestEntryType::File).then_some(path.as_path());
         reserve_entry(&mut quota, entry.size(), config, list_mode, file_at)?;
-        if !admit_path(&path, kind, &mut manifest, listing)? {
+        if !admit_path(
+            &path,
+            kind,
+            file_at.is_some(),
+            config,
+            &mut manifest,
+            listing,
+        )? {
             continue;
         }
 
@@ -986,7 +1010,14 @@ fn list_sevenz_archive(
         }
 
         require_non_empty_name(&path)?;
-        if !admit_path(&path, kind.node_kind(), &mut manifest, listing)? {
+        if !admit_path(
+            &path,
+            kind.node_kind(),
+            file_at.is_some(),
+            config,
+            &mut manifest,
+            listing,
+        )? {
             slots.push(None);
             continue;
         }
@@ -1069,14 +1100,19 @@ fn list_sevenz(
 ///
 /// A root entry (`.`) whose `kind` is not a directory fails the listing in
 /// either mode, so no list handler can skip the root-entry rule.
+///
+/// A file the extension allowlist skips is never created, so its length is
+/// not checked, as in extraction.
 fn admit_path(
     path: &Path,
     kind: NodeKind,
+    regular_file: bool,
+    config: &SecurityConfig<Validated>,
     manifest: &mut ArchiveManifest,
     listing: &mut ListPass<'_, '_>,
 ) -> Result<bool> {
     EntryPath::of(path).require_directory_root(kind)?;
-    if check_name_lengths(path).is_ok() {
+    if check_entry_name_limits(PathModel::Host, path, regular_file, config).is_ok() {
         return Ok(true);
     }
     if listing.mode() == ListMode::Strict {

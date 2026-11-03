@@ -17,6 +17,7 @@
 //! `crates/exarch-core/src/formats/sevenz/tests.rs`.
 
 #![allow(clippy::unwrap_used)]
+#![allow(clippy::disallowed_methods)]
 
 use exarch_core::ArchiveError;
 use exarch_core::ExtractionOptions;

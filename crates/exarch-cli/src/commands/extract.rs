@@ -1,5 +1,6 @@
 //! Extract command implementation.
 
+use crate::cli::DecodeReuseArg;
 use crate::cli::ExtractArgs;
 use crate::commands::apply_size_limits;
 use crate::commands::atomic_swap;
@@ -17,6 +18,7 @@ use anyhow::Context;
 use anyhow::Result;
 use exarch_core::ArchiveEntry;
 use exarch_core::ArchiveManifest;
+use exarch_core::DecodeReuse;
 use exarch_core::ExtractionOptions;
 use exarch_core::ExtractionReport;
 use exarch_core::ListOptions;
@@ -768,9 +770,13 @@ fn filter_banned_components(raw: &[String]) -> Vec<String> {
 ///
 /// Every failure keeps the category message and hint extraction would give the
 /// same error, since that is the error the user has to act on.
-fn list_for_extract(archive: &Path, config: &SecurityConfig) -> Result<ListedArchive> {
+fn list_for_extract(
+    archive: &Path,
+    config: &SecurityConfig,
+    reuse: DecodeReuse,
+) -> Result<ListedArchive> {
     let options = ListOptions::default().with_stored_targets(StoredTargets::Skip);
-    list_archive_for_extraction(archive, config, &options)
+    list_archive_for_extraction(archive, config, &options, reuse)
         .map_err(|err| convert_extraction_error(err, archive))
 }
 
@@ -876,6 +882,7 @@ pub fn execute(
     };
 
     let list_config = list_config_for(&config);
+    let reuse = DecodeReuseArg::resolve(args.decode_reuse);
 
     // Under `--atomic` the list pass would only size the progress bar: no
     // conflict check runs and the staged extraction refuses on its own.
@@ -884,7 +891,7 @@ pub fn execute(
     let listed = if single_pass {
         None
     } else {
-        Some(list_for_extract(&args.archive, &list_config)?)
+        Some(list_for_extract(&args.archive, &list_config, reuse)?)
     };
     let manifest = listed.as_ref().map(ListedArchive::manifest);
 
@@ -919,7 +926,8 @@ pub fn execute(
 
     let options = ExtractionOptions::default()
         .with_atomic((args.atomic || single_pass) && atomic_force_target.is_none())
-        .with_skip_duplicates(!args.force);
+        .with_skip_duplicates(!args.force)
+        .with_decode_reuse(reuse);
 
     let mut progress: Box<dyn ProgressCallback> = match verbosity {
         Verbosity::Verbose => Box::new(VerboseProgress::new()),

@@ -22,6 +22,7 @@
 //! process-per-test isolation.
 
 #![allow(clippy::unwrap_used, clippy::cast_possible_truncation)]
+#![allow(clippy::disallowed_methods)]
 
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;

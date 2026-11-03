@@ -1,0 +1,15 @@
+error[E0308]: mismatched types
+ --> tests/ui_testing/dest_join_walked.rs:7:15
+  |
+7 |     dest.join(path)
+  |          ---- ^^^^ expected `&SafePath`, found `&SafePath<Walked>`
+  |          |
+  |          arguments to this method are incorrect
+  |
+  = note: expected reference `&SafePath<exarch_core::types::parent_check::Resolved>`
+             found reference `&SafePath<Walked>`
+note: method defined here
+ --> src/types/dest_dir.rs
+  |
+  |     pub fn join(&self, safe_path: &super::SafePath) -> PathBuf {
+  |            ^^^^

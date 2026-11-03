@@ -3,6 +3,7 @@
 //! `extract`, `list` and `verify` alike.
 
 #![allow(clippy::unwrap_used)]
+#![allow(clippy::disallowed_methods)]
 
 use exarch_core::ErrorCode;
 use exarch_core::SecurityConfig;

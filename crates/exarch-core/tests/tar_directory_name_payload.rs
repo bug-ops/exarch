@@ -3,6 +3,7 @@
 //! the same entry without a payload stays a directory.
 
 #![allow(clippy::unwrap_used)]
+#![allow(clippy::disallowed_methods)]
 
 use std::assert_matches;
 use std::io::Write;

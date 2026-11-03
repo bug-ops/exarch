@@ -257,6 +257,7 @@ fn findings_of_ignoring_streams(built: &BuiltZip) -> Vec<ZipInconsistency> {
         StreamChecks::Skip,
         u64::MAX,
         ZstdWindowLog::LIBZSTD_DEFAULT,
+        crate::formats::zip_reuse::ReusePlan::OFF,
     )
     .unwrap()
     .1

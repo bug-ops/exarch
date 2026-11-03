@@ -148,7 +148,10 @@
 mod callback;
 mod memory;
 
+pub use callback::CallbackEntry;
+pub use callback::CallbackError;
 pub use callback::CallbackSink;
+pub use callback::extract_reader_to_callback;
 pub use memory::MemoryEntry;
 pub use memory::MemoryEntryKind;
 pub use memory::MemoryExtractRequest;
@@ -200,6 +203,7 @@ use crate::security::validator::FileScreen;
 use crate::security::validator::ValidatorCore;
 use crate::types::SafePath;
 use crate::types::SafeSymlink;
+use crate::types::safe_path::Resolved;
 
 /// What a sink extraction honours of [`ExtractionOptions`].
 ///
@@ -525,6 +529,7 @@ impl<S: EntrySink> SinkTarget<'_, S> {
 
 impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
     type AdmittedFile = ValidatedFile;
+    type Parent = Resolved;
 
     fn validate_file(
         &mut self,

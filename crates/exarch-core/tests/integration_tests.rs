@@ -1,7 +1,7 @@
 //! Integration tests for exarch-core.
 //!
 //! These tests verify end-to-end workflows with real filesystem operations.
-
+#![allow(clippy::disallowed_methods)]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

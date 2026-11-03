@@ -2,7 +2,7 @@
 //!
 //! Measures creation throughput across different formats, compression levels,
 //! and directory structures.
-
+#![allow(clippy::disallowed_methods)]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

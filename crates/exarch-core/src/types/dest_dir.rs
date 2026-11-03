@@ -2,6 +2,9 @@
 
 use crate::ArchiveError;
 use crate::Result;
+use crate::security::fs_view::Containment;
+use crate::security::fs_view::FsView as _;
+use crate::security::fs_view::HostFs;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -177,6 +180,10 @@ impl DestDir {
     ///
     /// Returns an error if the directory cannot be created or if validation
     /// fails.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "creates the destination root itself, before any handle on it exists"
+    )]
     pub fn new_or_create(path: impl Into<PathBuf>) -> Result<Self> {
         let path = path.into();
         std::fs::create_dir_all(&path).map_err(|e| {
@@ -202,7 +209,10 @@ impl DestDir {
     /// Joins a `SafePath` to this destination directory.
     ///
     /// This method combines the destination directory with a validated safe
-    /// path to produce the final extraction path.
+    /// path to produce the final extraction path. It accepts only a
+    /// `Resolved` path, whose parent was
+    /// resolved during validation; a path whose parent is vetted at write
+    /// time is refused at compile time.
     ///
     /// # Examples
     ///
@@ -227,30 +237,15 @@ impl DestDir {
         self.0.join(safe_path.as_path())
     }
 
-    /// Joins a `Path` to this destination directory.
+    /// Names `rel` below this destination for a read-only probe.
     ///
-    /// This is a convenience method for joining arbitrary paths that
-    /// have already been validated (e.g., from `SafeSymlink.link_path()`).
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// use exarch_core::types::DestDir;
-    /// use std::path::Path;
-    /// use std::path::PathBuf;
-    ///
-    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// let dest = DestDir::new(PathBuf::from("/tmp"))?;
-    /// let path = Path::new("foo/bar.txt");
-    ///
-    /// let final_path = dest.join_path(path);
-    /// # Ok(())
-    /// # }
-    /// ```
+    /// The result offers `lstat` and `exists` only, so a path whose parent is
+    /// vetted at write time can be inspected without being turned into a path
+    /// a caller could write by name.
     #[inline]
     #[must_use]
-    pub fn join_path(&self, path: &Path) -> PathBuf {
-        self.0.join(path)
+    pub(crate) fn probe(&self, rel: &Path) -> ProbePath {
+        ProbePath(self.0.join(rel).components().collect())
     }
 
     /// Converts into the inner `PathBuf`.
@@ -258,6 +253,37 @@ impl DestDir {
     #[must_use]
     pub fn into_path_buf(self) -> PathBuf {
         self.0
+    }
+}
+
+/// A path below a [`DestDir`] that can be inspected but not written by name.
+///
+/// Obtained from `DestDir::probe`; the typed counterpart of joining a path
+/// whose parent is vetted at write time, where only a read-only probe is
+/// sound.
+#[derive(Debug)]
+pub(crate) struct ProbePath(PathBuf);
+
+impl ProbePath {
+    /// Reads the metadata of the path itself, not of what a final symlink
+    /// points to.
+    pub(crate) fn lstat(&self) -> std::io::Result<std::fs::Metadata> {
+        std::fs::symlink_metadata(&self.0)
+    }
+
+    /// Returns whether the path resolves to an existing entry, following
+    /// symlinks.
+    pub(crate) fn exists(&self) -> bool {
+        self.0.exists()
+    }
+
+    /// Returns whether the path resolves, through symlinks, to a directory
+    /// inside `dest`.
+    pub(crate) fn lands_in_dir(&self, dest: &DestDir) -> bool {
+        matches!(
+            HostFs.canonicalize(&self.0, dest),
+            Ok(Containment::Within(resolved)) if resolved.is_dir()
+        )
     }
 }
 
@@ -548,5 +574,39 @@ mod tests {
         fs::set_permissions(&readonly_parent, perms).expect("failed to restore permissions");
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn probe_describes_the_entry_without_following_a_final_symlink() {
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let dest = DestDir::new(temp.path().to_path_buf()).expect("dest");
+        fs::create_dir(temp.path().join("d")).expect("setup");
+        assert!(dest.probe(Path::new("d")).exists());
+        assert!(!dest.probe(Path::new("missing")).exists());
+        assert!(dest.probe(Path::new("d")).lstat().expect("lstat").is_dir());
+        assert!(dest.probe(Path::new("d/")).lstat().expect("lstat").is_dir());
+        assert_matches!(
+            dest.probe(Path::new("missing")).lstat(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_reports_whether_a_symlink_lands_in_a_destination_directory() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let base = temp.path().canonicalize().expect("setup");
+        fs::create_dir(base.join("dest")).expect("setup");
+        fs::create_dir(base.join("dest/real")).expect("setup");
+        fs::create_dir(base.join("outside")).expect("setup");
+        symlink("real", base.join("dest/inside")).expect("setup");
+        symlink(base.join("outside"), base.join("dest/escape")).expect("setup");
+        let dest = DestDir::new(base.join("dest")).expect("dest");
+
+        assert!(dest.probe(Path::new("inside")).lands_in_dir(&dest));
+        assert!(!dest.probe(Path::new("escape")).lands_in_dir(&dest));
+        assert!(!dest.probe(Path::new("real/missing")).lands_in_dir(&dest));
     }
 }

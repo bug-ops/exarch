@@ -4,7 +4,7 @@
 //! `tests/fixtures/generate_zip_family_fixtures.sh` at the workspace root.
 //! Each format shares the ZIP container but has its own shape quirks - the
 //! tests below pick the bits that are actually load-bearing for extraction.
-
+#![allow(clippy::disallowed_methods)]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

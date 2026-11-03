@@ -1,6 +1,7 @@
 //! Opt-in payload integrity check of `verify` (#623).
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(clippy::disallowed_methods)]
 
 mod common;
 

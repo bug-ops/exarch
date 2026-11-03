@@ -288,6 +288,7 @@ fn name_len(name: &OsStr) -> usize {
 /// # Errors
 ///
 /// Returns an error if the path or any of its components is too long.
+#[cfg(test)]
 pub fn check_name_lengths(path: &Path) -> io::Result<()> {
     PathModel::Host.check_name_lengths(path)
 }

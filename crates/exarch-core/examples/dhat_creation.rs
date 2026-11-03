@@ -12,6 +12,7 @@
 //! ```
 
 #![allow(unsafe_code, clippy::unwrap_used)]
+#![allow(clippy::disallowed_methods)]
 
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;

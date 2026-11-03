@@ -17,6 +17,8 @@ use crate::security::quota::QuotaTracker;
 use crate::security::zipbomb::validate_compression_ratio;
 use crate::types::SafePath;
 use crate::types::SafeSymlink;
+use crate::types::safe_path::ParentCheck;
+use crate::types::safe_path::Resolved;
 
 /// The declared sizes of one entry, as the validators consume them.
 #[derive(Debug, Clone, Copy)]
@@ -41,19 +43,19 @@ impl EntrySize {
 /// A regular file whose path passed validation and the extension allowlist,
 /// and whose quota is not yet reserved.
 #[derive(Debug)]
-pub struct PendingFile {
-    path: SafePath,
+pub struct PendingFile<P: ParentCheck = Resolved> {
+    path: SafePath<P>,
     size: EntrySize,
     mode: Option<u32>,
 }
 
-impl PendingFile {
-    pub(super) const fn new(path: SafePath, size: EntrySize, mode: Option<u32>) -> Self {
+impl<P: ParentCheck> PendingFile<P> {
+    pub(super) const fn new(path: SafePath<P>, size: EntrySize, mode: Option<u32>) -> Self {
         Self { path, size, mode }
     }
 
     /// The validated destination-relative path.
-    pub(crate) const fn path(&self) -> &SafePath {
+    pub(crate) const fn path(&self) -> &SafePath<P> {
         &self.path
     }
 
@@ -67,7 +69,7 @@ impl PendingFile {
         self,
         quota: &mut QuotaTracker,
         config: &SecurityConfig<Validated>,
-    ) -> Result<ValidatedFile> {
+    ) -> Result<ValidatedFile<P>> {
         let permit = quota.reserve(self.size.uncompressed, config)?;
         self.size.check_ratio(config)?;
         Ok(ValidatedFile {
@@ -80,36 +82,36 @@ impl PendingFile {
 
 /// A regular file that passed path, quota and ratio validation.
 #[derive(Debug)]
-pub struct ValidatedFile {
-    path: SafePath,
+pub struct ValidatedFile<P: ParentCheck = Resolved> {
+    path: SafePath<P>,
     permit: QuotaPermit,
     mode: Option<SanitizedMode>,
 }
 
-impl ValidatedFile {
+impl<P: ParentCheck> ValidatedFile<P> {
     /// Splits the proof into its path, the quota permit for the file's size
     /// and the sanitized permissions, when the format records them.
-    pub(crate) fn into_parts(self) -> (SafePath, QuotaPermit, Option<SanitizedMode>) {
+    pub(crate) fn into_parts(self) -> (SafePath<P>, QuotaPermit, Option<SanitizedMode>) {
         (self.path, self.permit, self.mode)
     }
 }
 
 /// A symlink entry that passed validation, with its own location.
 #[derive(Debug)]
-pub struct ValidatedSymlink {
+pub struct ValidatedSymlink<P: ParentCheck = Resolved> {
     /// Validated location of the link.
-    pub link: SafePath,
+    pub link: SafePath<P>,
     /// The validated link and target.
-    pub symlink: SafeSymlink,
+    pub symlink: SafeSymlink<P>,
 }
 
 /// A hardlink entry that passed first-pass validation.
 #[derive(Debug)]
-pub struct ValidatedHardlink {
+pub struct ValidatedHardlink<P: ParentCheck = Resolved> {
     /// Validated location of the link.
-    pub link: SafePath,
+    pub link: SafePath<P>,
     /// Validated target of the link.
-    pub target: SafePath,
+    pub target: SafePath<P>,
     /// Proof the hardlink was counted against `max_file_count`.
     pub counted: EntryCount,
 }

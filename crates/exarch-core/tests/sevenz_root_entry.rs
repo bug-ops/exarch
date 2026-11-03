@@ -2,6 +2,7 @@
 //! no-op, a file is rejected by `extract`, `list` and `verify` alike.
 
 #![allow(clippy::unwrap_used)]
+#![allow(clippy::disallowed_methods)]
 
 use std::io::Cursor;
 use std::path::PathBuf;

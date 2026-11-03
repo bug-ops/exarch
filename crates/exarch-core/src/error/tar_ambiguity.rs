@@ -32,17 +32,17 @@ closed_enum! {
     /// ```
     /// use exarch_core::TarNonRegularKind;
     ///
-    /// assert_eq!(TarNonRegularKind::Hardlink.to_string(), "Hardlink");
+    /// assert_eq!(TarNonRegularKind::Hardlink.to_string(), "hardlink");
     /// ```
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     #[non_exhaustive]
     pub enum TarNonRegularKind {
         /// A directory entry (`5`).
-        Directory => "Directory",
+        Directory => "directory",
         /// A symbolic link entry (`2`).
-        Symlink => "Symlink",
+        Symlink => "symlink",
         /// A hard link entry (`1`).
-        Hardlink => "Hardlink",
+        Hardlink => "hardlink",
     }
 }
 
@@ -380,7 +380,7 @@ mod tests {
         };
         assert_eq!(
             directory.to_string(),
-            "Directory entry declares a 1024 byte payload: x/"
+            "directory entry declares a 1024 byte payload: x/"
         );
         let named = TarAmbiguity::DirectoryNamedPayload {
             size: 3,
@@ -393,11 +393,43 @@ mod tests {
         };
         assert_eq!(
             hardlink.to_string(),
-            "Hardlink entry declares a 2 byte payload: l"
+            "hardlink entry declares a 2 byte payload: l"
         );
         assert_eq!(
             named.to_string(),
             "file entry with a directory name carries 3 bytes: d/"
+        );
+    }
+
+    #[test]
+    fn non_regular_kinds_display_in_lower_case_like_their_siblings() {
+        use crate::error::zip_inconsistency::ZipNonRegularKind;
+
+        let spellings: Vec<_> = TarNonRegularKind::ALL
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(spellings, ["directory", "symlink", "hardlink"]);
+        for kind in TarNonRegularKind::ALL {
+            assert_eq!(kind.as_str(), kind.to_string());
+            assert_eq!(kind.to_string(), kind.to_string().to_lowercase());
+        }
+        assert_eq!(
+            TarNonRegularKind::Directory.to_string(),
+            ZipNonRegularKind::Directory.to_string()
+        );
+    }
+
+    #[test]
+    fn a_symlink_payload_message_uses_the_lower_case_kind() {
+        let symlink = TarAmbiguity::NonRegularPayload {
+            kind: TarNonRegularKind::Symlink,
+            size: 9,
+            path: "s".into(),
+        };
+        assert_eq!(
+            symlink.to_string(),
+            "symlink entry declares a 9 byte payload: s"
         );
     }
 

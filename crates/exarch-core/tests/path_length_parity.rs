@@ -65,15 +65,80 @@ fn verdicts_agree_for_every_component_count() {
     }
 }
 
-#[test]
-fn an_overlong_name_of_a_skipped_extension_is_not_refused_by_extract() {
-    let dir = TempDir::new().unwrap();
-    let archive = write_archive(&dir, &format!("{}.bin", entry_name(25)));
-    let config = SecurityConfig::default().with_allowed_extensions(vec!["txt".to_string()]);
-    let out = TempDir::new().unwrap();
+fn write_archive_of(dir: &TempDir, entries: &[(&str, &[u8])]) -> PathBuf {
+    let mut builder = tar::Builder::new(Vec::new());
+    for (name, data) in entries {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(data.len() as u64);
+        header.set_mode(0o644);
+        header.set_entry_type(tar::EntryType::Regular);
+        builder.append_data(&mut header, name, *data).unwrap();
+    }
+    let path = dir.path().join("mixed.tar");
+    std::fs::write(&path, builder.into_inner().unwrap()).unwrap();
+    path
+}
 
-    let report = extract_archive(&archive, out.path(), &config).unwrap();
+#[test]
+fn an_overlong_name_of_a_skipped_extension_is_not_refused_in_any_destination_state() {
+    let long = format!("{}.bin", entry_name(25));
+    let dir = TempDir::new().unwrap();
+    let archive = write_archive_of(&dir, &[("ok.txt", b"hi"), (&long, b"x")]);
+    let config = SecurityConfig::default().with_allowed_extensions(vec!["txt".to_string()]);
+
+    assert!(list_archive(&archive, &config).is_ok());
+    assert!(
+        verify_archive(&archive, &config).is_ok_and(|r| r.status() == VerificationStatus::Pass)
+    );
+
+    let fresh = TempDir::new().unwrap();
+    let report = extract_archive(&archive, fresh.path().join("new"), &config).unwrap();
     assert_eq!(report.files_skipped, 1);
+
+    let existing = TempDir::new().unwrap();
+    let report = extract_archive(&archive, existing.path(), &config).unwrap();
+    assert_eq!(report.files_skipped, 1);
+    assert!(existing.path().join("ok.txt").is_file());
+}
+
+#[cfg(target_os = "macos")]
+const HOST_PATH_LIMIT: usize = 1023;
+#[cfg(all(unix, not(target_os = "macos")))]
+const HOST_PATH_LIMIT: usize = 4095;
+
+/// A name of exactly `len` bytes made of components of at most `COMPONENT`.
+#[cfg(unix)]
+fn name_of_len(len: usize) -> String {
+    let mut name = String::new();
+    while name.len() < len {
+        if !name.is_empty() {
+            name.push('/');
+        }
+        let room = len - name.len();
+        name.push_str(&"n".repeat(room.min(COMPONENT)));
+    }
+    assert_eq!(name.len(), len);
+    name
+}
+
+#[cfg(unix)]
+#[test]
+fn the_host_path_limit_is_the_exact_boundary_in_every_command() {
+    let config = SecurityConfig::default();
+    for (len, accepted) in [
+        (HOST_PATH_LIMIT - 1, true),
+        (HOST_PATH_LIMIT, true),
+        (HOST_PATH_LIMIT + 1, false),
+    ] {
+        let dir = TempDir::new().unwrap();
+        let archive = write_archive(&dir, &name_of_len(len));
+        let v = verdicts(&archive, &config);
+        assert_eq!(
+            (v.list, v.verify, v.extract),
+            (accepted, accepted, accepted),
+            "{len} bytes"
+        );
+    }
 }
 
 #[cfg(not(windows))]

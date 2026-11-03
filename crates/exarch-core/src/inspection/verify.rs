@@ -12,6 +12,7 @@ use crate::VerificationOptions;
 use crate::config::Validated;
 use crate::formats::SevenZArchive;
 use crate::formats::ZipArchive;
+use crate::formats::common::is_extension_allowed;
 use crate::formats::detect::FormatFamily;
 use crate::formats::detect::detect_format;
 use crate::inspection::integrity::IntegrityOutcome;
@@ -496,9 +497,15 @@ fn verify_entry(
 
     // Path validation — result cached to avoid repeated syscalls for
     // symlink/hardlink checks
-    let path_result = check_name_lengths(&entry.path)
-        .map_err(ArchiveError::Io)
-        .and_then(|()| SafePath::validate_in(&entry.path, dest, config, tree));
+    let skipped_by_allowlist =
+        matches!(entry.kind, ManifestEntryKind::File) && !is_extension_allowed(&entry.path, config);
+    let path_result = if skipped_by_allowlist {
+        Ok(())
+    } else {
+        check_name_lengths(&entry.path)
+    }
+    .map_err(ArchiveError::Io)
+    .and_then(|()| SafePath::validate_in(&entry.path, dest, config, tree));
     if let Err(ref e) = path_result {
         issues.push(VerificationIssue::from_error(e, Some(entry.path.clone())));
     }

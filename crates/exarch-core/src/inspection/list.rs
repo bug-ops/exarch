@@ -543,7 +543,7 @@ fn list_tar_entries<R: std::io::Read>(
             require_non_empty_name(&path)?;
             let tar_type = effective_entry_type(entry)?;
             let kind = NodeKind::directory_if(tar_type == tar::EntryType::Directory);
-            if !admit_path(&path, kind, &mut manifest, listing)? {
+            if !admit_path(&path, kind, reservation, &mut manifest, listing)? {
                 return Ok(());
             }
 
@@ -714,8 +714,8 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
         let kind = zip_node_kind(&path, &entry)?;
         let entry_type = convert_zip_entry_type(&entry, kind);
         let file_at = (entry_type == ManifestEntryType::File).then_some(path.as_path());
-        reserve_entry(&mut quota, entry.size(), config, list_mode, file_at)?;
-        if !admit_path(&path, kind, &mut manifest, listing)? {
+        let reservation = reserve_entry(&mut quota, entry.size(), config, list_mode, file_at)?;
+        if !admit_path(&path, kind, reservation, &mut manifest, listing)? {
             continue;
         }
 
@@ -984,14 +984,14 @@ fn list_sevenz_archive(
         let path = PathBuf::from(normalize_entry_name(&entry.name));
         let entry_type = kind.manifest_type();
         let file_at = (entry_type == ManifestEntryType::File).then_some(path.as_path());
-        reserve_entry(&mut quota, entry.size, config, list_mode, file_at)?;
+        let reservation = reserve_entry(&mut quota, entry.size, config, list_mode, file_at)?;
 
         if contains_traversal(&path, config) {
             return Err(ArchiveError::PathTraversal { path });
         }
 
         require_non_empty_name(&path)?;
-        if !admit_path(&path, kind.node_kind(), &mut manifest, listing)? {
+        if !admit_path(&path, kind.node_kind(), reservation, &mut manifest, listing)? {
             slots.push(None);
             continue;
         }
@@ -1074,14 +1074,18 @@ fn list_sevenz(
 ///
 /// A root entry (`.`) whose `kind` is not a directory fails the listing in
 /// either mode, so no list handler can skip the root-entry rule.
+///
+/// A file the extension allowlist skips is never created, so its length is
+/// not checked, as in extraction.
 fn admit_path(
     path: &Path,
     kind: NodeKind,
+    reservation: Reservation,
     manifest: &mut ArchiveManifest,
     listing: &mut ListPass<'_, '_>,
 ) -> Result<bool> {
     EntryPath::of(path).require_directory_root(kind)?;
-    if check_name_lengths(path).is_ok() {
+    if reservation == Reservation::Skipped || check_name_lengths(path).is_ok() {
         return Ok(true);
     }
     if listing.mode() == ListMode::Strict {

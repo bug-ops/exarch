@@ -198,7 +198,9 @@ pub struct ExtractArgs {
     pub parallel: ParallelDecodeArgs,
 
     /// Where to keep what the ZIP structure check decodes, so deflate entries
-    /// are not decoded a second time (default: memory, up to 256 MiB). With
+    /// are not decoded a second time (default: memory, up to 256 MiB, never
+    /// more than --max-total-size or the 256 MiB decoder memory limit). It has
+    /// no effect under --zip-consistency ignore, which skips that decode. With
     /// temp-file the decoded plaintext sits in an unnamed file in the
     /// temporary directory until extraction ends; on a tmpfs that is memory
     /// too, and on a disk it is often no faster than memory or off. Entries
@@ -460,6 +462,33 @@ mod tests {
         assert_eq!(parse_byte_size("1T").unwrap(), 1024_u64.pow(4));
         assert!(parse_byte_size("invalid").is_err());
         assert!(parse_byte_size("").is_err());
+    }
+
+    fn reuse_of(args: &[&str]) -> DecodeReuse {
+        let cli = Cli::try_parse_from(args).unwrap();
+        let Commands::Extract(args) = cli.command else {
+            panic!("expected Extract command");
+        };
+        DecodeReuseArg::resolve(args.decode_reuse)
+    }
+
+    #[test]
+    fn decode_reuse_defaults_to_256_mib_in_memory() {
+        assert_eq!(
+            reuse_of(&["exarch", "extract", "a.zip"]),
+            DecodeReuse::Memory(ReuseLimit::MAX)
+        );
+    }
+
+    #[test]
+    fn decode_reuse_flag_selects_each_mode() {
+        let with = |mode| reuse_of(&["exarch", "extract", "a.zip", "--decode-reuse", mode]);
+        assert_eq!(with("off"), DecodeReuse::Off);
+        assert_eq!(with("memory"), DecodeReuse::Memory(ReuseLimit::MAX));
+        assert_eq!(with("temp-file"), DecodeReuse::TempFile(ReuseLimit::MAX));
+        assert!(
+            Cli::try_parse_from(["exarch", "extract", "a.zip", "--decode-reuse", "disk"]).is_err()
+        );
     }
 
     #[test]

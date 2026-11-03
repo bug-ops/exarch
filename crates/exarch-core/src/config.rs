@@ -1321,6 +1321,11 @@ impl ReuseLimit {
 /// damaged archive, and an entry that was not kept is decoded from the archive
 /// as before.
 ///
+/// The bytes kept never exceed the smallest of the mode's [`ReuseLimit`], the
+/// config's `max_decoder_memory` and its `max_total_size`, and an entry that
+/// `max_file_size` or `max_compression_ratio` would refuse is not kept, so a
+/// memory-capped container can lower `max_decoder_memory` to bound the cost.
+///
 /// Reuse applies to extractions that write into a directory
 /// ([`extract_archive`](crate::extract_archive) and
 /// [`ListedArchive::extract`](crate::ListedArchive::extract)); sink, callback

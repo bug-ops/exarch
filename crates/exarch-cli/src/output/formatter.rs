@@ -4,8 +4,11 @@ use anyhow::Result;
 use exarch_core::ArchiveManifest;
 use exarch_core::CreationReport;
 use exarch_core::ExtractionReport;
+use exarch_core::FfiKind;
+use exarch_core::InvalidArchiveSubCode;
 use exarch_core::PartialWrites;
 use exarch_core::PolicySetting;
+use exarch_core::SecurityViolationSubCode;
 use exarch_core::VerificationReport;
 use serde::Serialize;
 use std::path::Path;
@@ -53,6 +56,8 @@ mod sealed {
     impl Sealed for exarch_core::ErrorCode {}
     impl Sealed for exarch_core::PartialWrites {}
     impl Sealed for exarch_core::PolicySetting {}
+    impl Sealed for exarch_core::InvalidArchiveSubCode {}
+    impl Sealed for exarch_core::SecurityViolationSubCode {}
 }
 
 /// A closed core enum whose `Display` is its stable identifier (`as_str`).
@@ -63,6 +68,8 @@ pub trait StableId: sealed::Sealed + std::fmt::Display {}
 impl StableId for exarch_core::ErrorCode {}
 impl StableId for exarch_core::PartialWrites {}
 impl StableId for exarch_core::PolicySetting {}
+impl StableId for exarch_core::InvalidArchiveSubCode {}
+impl StableId for exarch_core::SecurityViolationSubCode {}
 
 /// Serializes a closed core enum as its stable identifier.
 #[derive(Debug, Clone, Copy)]
@@ -72,6 +79,15 @@ impl<T: StableId> Serialize for JsonId<T> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.collect_str(&self.0)
     }
+}
+
+/// The finer classification of an error; the variant is the error class, so a
+/// pair core never produces cannot be built.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(untagged)]
+pub enum JsonSubCode {
+    InvalidArchive(JsonId<InvalidArchiveSubCode>),
+    SecurityViolation(JsonId<SecurityViolationSubCode>),
 }
 
 /// Partial extraction report included in error JSON when extraction was stopped
@@ -98,6 +114,10 @@ pub struct JsonError {
     /// the entry; present only for a `SecurityViolation` a setting relaxes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub relaxable_by: Option<JsonId<PolicySetting>>,
+    /// Stable id of the finer classification of an `InvalidArchive` or
+    /// `SecurityViolation` (a TAR refusal); absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sub_code: Option<JsonSubCode>,
 }
 
 #[derive(Debug, Serialize)]
@@ -132,6 +152,7 @@ impl<T: Serialize> JsonOutput<T> {
                 message: message.into(),
                 partial_report: None,
                 relaxable_by: None,
+                sub_code: None,
             }),
         }
     }
@@ -151,17 +172,35 @@ impl<T: Serialize> JsonOutput<T> {
                 message: message.into(),
                 partial_report: Some(partial_report),
                 relaxable_by: None,
+                sub_code: None,
             }),
         }
     }
 }
 
 impl JsonOutput<()> {
-    /// Records the setting that refused the entry on an error envelope.
+    /// Records the setting that refused the entry and the sub-code of the
+    /// failure on an error envelope.
     #[must_use]
-    pub fn with_relaxable_by(mut self, setting: Option<PolicySetting>) -> Self {
+    pub fn with_ffi_kind(mut self, kind: &FfiKind) -> Self {
+        let (relaxable_by, sub_code) = match kind {
+            FfiKind::SecurityViolation {
+                relaxable_by,
+                sub_code,
+                ..
+            } => (
+                *relaxable_by,
+                sub_code.map(|code| JsonSubCode::SecurityViolation(JsonId(code))),
+            ),
+            FfiKind::InvalidArchive { sub_code, .. } => (
+                None,
+                sub_code.map(|code| JsonSubCode::InvalidArchive(JsonId(code))),
+            ),
+            _ => (None, None),
+        };
         if let Some(error) = self.error.as_mut() {
-            error.relaxable_by = setting.map(JsonId);
+            error.relaxable_by = relaxable_by.map(JsonId);
+            error.sub_code = sub_code;
         }
         self
     }

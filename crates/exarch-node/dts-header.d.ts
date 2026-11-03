@@ -27,6 +27,14 @@ export interface ExarchErrorBase extends Error {
   /** The `SecurityConfig` setting that relaxes this refusal, when one does. */
   relaxableBy?: PolicySetting
   /**
+   * Finer classification of an `INVALID_ARCHIVE` (`InvalidArchiveSubCode`) or
+   * `SECURITY_VIOLATION` (`SecurityViolationSubCode`) refusal, when it has one.
+   * The interfaces are discriminated by `writes`, not `code`, so the pairing is
+   * not narrowed per code: `INVALID_ARCHIVE` carries `'TAR_AMBIGUITY'` or
+   * `'TAR_TRAILER'`, `SECURITY_VIOLATION` carries `'TAR_TRAILER'`.
+   */
+  subCode?: InvalidArchiveSubCode | SecurityViolationSubCode
+  /**
    * The exception thrown by a progress callback, an `onEntry` callback or an
    * `AsyncIterable` archive. A thrown primitive is wrapped in an `Error` whose
    * `cause` is the primitive.
@@ -106,6 +114,7 @@ export interface ExarchErrorCreationCallback extends ExarchErrorBase {
 export interface ExarchNativeError extends Error {
   code: string
   relaxableBy?: undefined
+  subCode?: undefined
   writes?: undefined
   filesExtracted?: undefined
   bytesWritten?: undefined

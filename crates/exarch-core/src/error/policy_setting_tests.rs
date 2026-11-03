@@ -133,7 +133,8 @@ fn partial_extraction_delegates_relaxable_by() {
     assert_eq!(
         err.into_ffi_message().kind,
         super::FfiKind::SecurityViolation {
-            relaxable_by: Some(PolicySetting::Hardlinks)
+            relaxable_by: Some(PolicySetting::Hardlinks),
+            sub_code: None,
         }
     );
 }

@@ -38,13 +38,11 @@ use crate::copy::CopyBuffer;
 #[cfg(unix)]
 use crate::formats::common::MAX_TEMP_FILE_CREATE_ATTEMPTS;
 #[cfg(unix)]
-use crate::formats::pinned_dir::Leaf;
-#[cfg(unix)]
-use crate::formats::pinned_dir::PinnedRoot;
-#[cfg(unix)]
 use crate::formats::pinned_dir::TempLeaf;
 #[cfg(unix)]
-use crate::formats::pinned_dir::VettedDir;
+use crate::formats::pinned_dir::support::leaf;
+#[cfg(unix)]
+use crate::formats::pinned_dir::support::pinned_at;
 use crate::formats::target::Tally;
 use crate::inspection::integrity::IntegrityPass;
 #[cfg(unix)]
@@ -416,21 +414,6 @@ fn test_load_fixture_helper() {
     assert_eq!(&data[0..6], &SEVENZ_MAGIC);
 }
 
-/// A handle on `dir` for tests that call the write primitives directly.
-#[cfg(unix)]
-fn parent_of(dir: &std::path::Path) -> VettedDir {
-    PinnedRoot::open_for_test(dir)
-        .unwrap()
-        .dir()
-        .reopen()
-        .unwrap()
-}
-
-#[cfg(unix)]
-fn leaf(name: &str) -> Leaf<'_> {
-    Leaf::split(std::path::Path::new(name)).unwrap().1
-}
-
 /// Reserves a throwaway [`QuotaPermit`] for use in tests that call
 /// `write_file_with_permit` directly, bypassing the normal validation
 /// pipeline that would otherwise produce one.
@@ -481,7 +464,7 @@ fn test_write_file_with_permit_skips_planted_symlinks() {
     let mut next_candidate = 0u32;
     let mut reader = Cursor::new(b"legit content".to_vec());
     let mut copy_buffer = CopyBuffer::new();
-    let parent = parent_of(temp.path());
+    let parent = pinned_at(temp.path());
     let bytes_written = write_file_with_permit_using(
         &mut reader,
         &parent,
@@ -540,7 +523,7 @@ fn test_write_file_with_permit_gives_up_after_max_attempts() {
     let mut next_candidate = 0u32;
     let mut reader = Cursor::new(b"legit content".to_vec());
     let mut copy_buffer = CopyBuffer::new();
-    let parent = parent_of(temp.path());
+    let parent = pinned_at(temp.path());
     let result = write_file_with_permit_using(
         &mut reader,
         &parent,
@@ -583,7 +566,7 @@ fn test_write_file_direct_forged_size_aborts_and_cleans_up() {
 
     let result = write_file_direct(
         &mut reader,
-        &parent_of(temp.path()),
+        &pinned_at(temp.path()),
         leaf("bomb.bin"),
         50,
         &mut copy_buffer,
@@ -628,7 +611,7 @@ fn test_write_file_with_permit_forged_size_aborts_and_leaves_original_untouched(
 
     let result = write_file_with_permit(
         &mut reader,
-        &parent_of(temp.path()),
+        &pinned_at(temp.path()),
         leaf("existing.bin"),
         50,
         &mut copy_buffer,

@@ -29,6 +29,8 @@ _UnverifiedReason = Literal["over_budget", "resource_limit", "solid_policy", "si
 _IssueSeverity = Literal["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
 _IssueCategory = Literal["Path Traversal", "Symlink Escape", "Hardlink Escape", "Zip Bomb", "Invalid Permissions", "Quota Exceeded", "Security Policy", "Invalid Archive", "Suspicious Path", "Executable File", "Corrupt Data", "Integrity Incomplete", "Header Mismatch", "Duplicate Entry", "Overlapping Entries", "Hidden Entry", "Name Collision", "Archive Note"]  # noqa: E501  # fmt: skip
 _ZipConsistency = Literal["enforce", "ignore"]
+_InvalidArchiveSubCode = Literal["TAR_AMBIGUITY", "TAR_TRAILER"]
+_SecurityViolationSubCode = Literal["TAR_TRAILER"]
 _PartialWrites = Literal["kept", "rolled_back", "discarded"]
 _PathModel = Literal["host", "portable"]
 _MemoryEntryKind = Literal["file", "directory", "symlink", "hardlink"]
@@ -1483,6 +1485,8 @@ class SecurityViolationError(ArchiveError):
             later check. ``"windows_reserved_names"`` and
             ``"max_tar_metadata_bytes"`` have no setter in this binding (Rust
             API only).
+        sub_code: ``"TAR_TRAILER"`` when the bytes after the TAR end-of-archive
+            marker exceed ``max_tar_metadata_bytes``; ``None`` otherwise.
     """
 
     files_extracted: int
@@ -1490,6 +1494,7 @@ class SecurityViolationError(ArchiveError):
     files_skipped: int
     warnings: list[str]
     relaxable_by: _PolicySetting | None
+    sub_code: _SecurityViolationSubCode | None
 
 class UnsupportedFormatError(ArchiveError):
     """Archive format not supported."""
@@ -1509,6 +1514,13 @@ class UnknownFormatError(UnsupportedFormatError):
     ...
 
 class InvalidArchiveError(ArchiveError):
-    """Archive is corrupted."""
+    """
+    Archive is corrupted.
 
-    ...
+    Attributes:
+        sub_code: ``"TAR_AMBIGUITY"`` when a TAR header is read differently by
+            different tools, ``"TAR_TRAILER"`` when the stream after the TAR
+            end-of-archive marker is corrupt or truncated; ``None`` otherwise.
+    """
+
+    sub_code: _InvalidArchiveSubCode | None

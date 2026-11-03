@@ -1,14 +1,16 @@
 //! Parent-directory creation that never walks through a link it did not vet.
 //!
 //! The walk starts at the destination's pinned directory handle and descends
-//! one component at a time with `openat(NOFOLLOW)`, creating missing
-//! components with `mkdirat`. Every step operates on the handle the previous
-//! step returned, so a symlink swapped in for an already vetted component
-//! cannot redirect what follows, and nothing is remembered between entries.
+//! one component at a time with a handle-relative, no-follow open (`openat`
+//! with `O_NOFOLLOW` on Unix, `NtCreateFile` on Windows), creating missing
+//! components with `mkdirat` or its Windows equivalent. Every step operates on
+//! the handle the previous step returned, so a link swapped in for an already
+//! vetted component cannot redirect what follows, and nothing is remembered
+//! between entries.
 //! The returned [`VettedDir`] is the handle the caller writes through.
 //!
-//! The walk holds at most two descriptors: the current directory and the one
-//! being opened.
+//! The walk holds at most two handles: the current directory and the one being
+//! opened.
 //!
 //! # Failure handling
 //!

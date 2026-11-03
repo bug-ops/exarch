@@ -16,6 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Python: `extract_archive_to_callback` delivers each entry to a callable and re-raises its exception unchanged (#842).
 - Node: `extractArchiveToCallback` (async and sync), `AsyncIterable` input for TAR in the async in-memory functions, three sync `WithProgress` variants, and the `STREAM_ERROR` and `ENTRY_CALLBACK_ERROR` codes (#842).
 - Node: the seven async in-memory functions that take an `AsyncIterable` accept an optional trailing `signal` (`AbortSignalLike`); aborting rejects with the new `ABORT_ERR` code and frees the blocking worker (#848).
+- Core: `ArchiveError::ffi_kind()` is public, with `InvalidArchiveSubCode` and `SecurityViolationSubCode` naming the TAR ambiguity and TAR trailer refusals (#TBD).
+- Python: `sub_code` attribute on `InvalidArchiveError` and `SecurityViolationError`; Node: `subCode` property with typings; CLI `--json`: `error.sub_code` (#TBD).
 
 ### Changed
 
@@ -55,6 +57,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Node: `signal` also aborts `Uint8Array` calls at the next archive read and at each progress callback (#856).
 - Tests: WinRAR-produced ZIPs (header shape only) in the ZIP corpus (#856).
 - Build: `lzma-rust2` is held at 0.23 so one LZMA2 decoder is linked; dependabot ignores 0.24 until the next `sevenz-rust2` release (#856).
+- **BREAKING:** `FfiKind::InvalidArchive` is a struct variant and `FfiKind::SecurityViolation` gains `sub_code`; both are `#[non_exhaustive]` (#TBD).
+- **BREAKING (Windows):** extraction writes, renames and deletes below the destination go through a pinned directory handle, and a target other than Unix, WASI or Windows no longer compiles (#TBD).
+- Dependencies: `windows-sys` 0.61 is a direct dependency of `exarch-core` on Windows, with a Dependabot ignore for 0.62 and later (#TBD).
+- CI: the clippy job runs on `windows-latest` as well, and `EXARCH_REQUIRE_PRIVILEGED_TESTS` makes the mount-point test mandatory there (#TBD).
 
 ### Fixed
 

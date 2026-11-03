@@ -12,6 +12,9 @@
 //!   `ABORT_ERR` (an `AbortError`) are Node-only.
 //! - `relaxableBy`: the [`PolicySetting`] that relaxes a refusal, when one
 //!   does.
+//! - `subCode`: an [`InvalidArchiveSubCode`] on an `INVALID_ARCHIVE` or a
+//!   [`SecurityViolationSubCode`] on a `SECURITY_VIOLATION`, when the refusal
+//!   has a finer classification.
 //! - `writes`, `filesExtracted`, `bytesWritten`, `filesSkipped`, `warnings`:
 //!   the fate of a partial extraction.
 //! - `cause`: the exception thrown by a JS progress callback.
@@ -28,8 +31,10 @@ use exarch_core::ErrorCode as CoreErrorCode;
 use exarch_core::ExtractionReport as CoreExtractionReport;
 use exarch_core::FfiErrorMessage;
 use exarch_core::FfiKind;
+use exarch_core::InvalidArchiveSubCode as CoreInvalidArchiveSubCode;
 use exarch_core::PartialOutcome;
 use exarch_core::PolicySetting as CorePolicySetting;
+use exarch_core::SecurityViolationSubCode as CoreSecurityViolationSubCode;
 use exarch_core::creation::CreationReport as CoreCreationReport;
 use napi::Env;
 use napi::Error;
@@ -158,6 +163,31 @@ pub enum PolicySetting {
     /// Rust API only: no setter in this binding.
     #[napi(value = "max_tar_metadata_bytes")]
     MaxTarMetadataBytes,
+}
+
+/// Value of the `subCode` property of an `INVALID_ARCHIVE` error.
+// Generates the TypeScript union only; runtime values come from core's
+// `as_str`, guarded by a unit test.
+#[napi(string_enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InvalidArchiveSubCode {
+    /// A TAR header is read differently by different tools.
+    #[napi(value = "TAR_AMBIGUITY")]
+    TarAmbiguity,
+    /// The stream after the TAR end-of-archive marker is corrupt or truncated.
+    #[napi(value = "TAR_TRAILER")]
+    TarTrailer,
+}
+
+/// Value of the `subCode` property of a `SECURITY_VIOLATION` error.
+// Generates the TypeScript union only; runtime values come from core's
+// `as_str`, guarded by a unit test.
+#[napi(string_enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SecurityViolationSubCode {
+    /// More bytes follow the TAR end-of-archive marker than the cap allows.
+    #[napi(value = "TAR_TRAILER")]
+    TarTrailer,
 }
 
 /// Value of the `writes` property: whether a failed extraction left files on
@@ -299,6 +329,23 @@ impl JsCode {
     }
 }
 
+/// The `subCode` an error carries; the variant is the error class, so a pair
+/// of class and sub-code that core never produces cannot be built.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SubCode {
+    InvalidArchive(CoreInvalidArchiveSubCode),
+    SecurityViolation(CoreSecurityViolationSubCode),
+}
+
+impl SubCode {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidArchive(code) => code.as_str(),
+            Self::SecurityViolation(code) => code.as_str(),
+        }
+    }
+}
+
 /// Counters of a failed or call-back-interrupted operation.
 #[derive(Debug)]
 enum Details {
@@ -316,6 +363,7 @@ enum Details {
 struct ErrorProps {
     code: JsCode,
     relaxable_by: Option<CorePolicySetting>,
+    sub_code: Option<SubCode>,
     details: Details,
     cause: Option<Error>,
 }
@@ -334,15 +382,21 @@ fn describe_core(err: CoreError, cause: Option<Error>) -> Described {
         partial,
         ..
     } = err.into_ffi_message();
-    let relaxable_by = match &kind {
-        FfiKind::SecurityViolation { relaxable_by } => *relaxable_by,
-        _ => None,
+    let (relaxable_by, sub_code) = match &kind {
+        FfiKind::SecurityViolation {
+            relaxable_by,
+            sub_code,
+            ..
+        } => (*relaxable_by, sub_code.map(SubCode::SecurityViolation)),
+        FfiKind::InvalidArchive { sub_code, .. } => (None, sub_code.map(SubCode::InvalidArchive)),
+        _ => (None, None),
     };
     Described {
         description,
         props: ErrorProps {
             code: JsCode::Core(kind.code()),
             relaxable_by,
+            sub_code,
             details: partial.map_or(Details::None, Details::Extraction),
             cause,
         },
@@ -355,6 +409,7 @@ fn describe_callback_over_success(operation: &str, details: Details, source: Err
         props: ErrorProps {
             code: JsCode::ProgressCallback,
             relaxable_by: None,
+            sub_code: None,
             details,
             cause: Some(source),
         },
@@ -367,6 +422,7 @@ fn describe_js_failure(code: JsCode, description: &str, source: Error) -> Descri
         props: ErrorProps {
             code,
             relaxable_by: None,
+            sub_code: None,
             details: Details::None,
             cause: Some(source),
         },
@@ -419,6 +475,7 @@ fn describe(failure: Failure) -> Result<Described, Error> {
                 props: ErrorProps {
                     code: JsCode::Abort,
                     relaxable_by: None,
+                    sub_code: None,
                     details: Details::None,
                     cause: reason,
                 },
@@ -437,6 +494,9 @@ fn apply(env: Env, described: Described) -> napi::Result<Error> {
     }
     if let Some(setting) = props.relaxable_by {
         obj.set("relaxableBy", setting.as_str())?;
+    }
+    if let Some(sub_code) = props.sub_code {
+        obj.set("subCode", sub_code.as_str())?;
     }
     match props.details {
         Details::None => {}
@@ -733,6 +793,24 @@ mod tests {
         assert_eq!(dts_union("PartialWrites"), expected);
     }
 
+    #[test]
+    fn test_invalid_archive_sub_code_union_matches_core() {
+        let expected: BTreeSet<String> = CoreInvalidArchiveSubCode::ALL
+            .iter()
+            .map(|code| code.as_str().to_string())
+            .collect();
+        assert_eq!(dts_union("InvalidArchiveSubCode"), expected);
+    }
+
+    #[test]
+    fn test_security_violation_sub_code_union_matches_core() {
+        let expected: BTreeSet<String> = CoreSecurityViolationSubCode::ALL
+            .iter()
+            .map(|code| code.as_str().to_string())
+            .collect();
+        assert_eq!(dts_union("SecurityViolationSubCode"), expected);
+    }
+
     fn described(err: CoreError) -> Described {
         describe(Failure::Core(err)).expect("core errors are always described")
     }
@@ -781,6 +859,26 @@ mod tests {
         assert_eq!(d.props.code.as_str(), "SECURITY_VIOLATION");
         assert_eq!(d.props.relaxable_by, Some(CorePolicySetting::Symlinks));
         assert!(!d.description.contains("relaxableBy"), "{d:?}");
+    }
+
+    #[test]
+    fn test_tar_ambiguity_sets_invalid_archive_sub_code() {
+        let d = described(CoreError::TarAmbiguity(
+            exarch_core::TarAmbiguity::MalformedRecord,
+        ));
+        assert_eq!(d.props.code.as_str(), "INVALID_ARCHIVE");
+        assert_eq!(
+            d.props.sub_code,
+            Some(SubCode::InvalidArchive(
+                CoreInvalidArchiveSubCode::TarAmbiguity
+            ))
+        );
+    }
+
+    #[test]
+    fn test_plain_violation_has_no_sub_code() {
+        let d = described(CoreError::violation("x".to_string()));
+        assert_eq!(d.props.sub_code, None);
     }
 
     #[test]

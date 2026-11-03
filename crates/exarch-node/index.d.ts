@@ -27,6 +27,14 @@ export interface ExarchErrorBase extends Error {
   /** The `SecurityConfig` setting that relaxes this refusal, when one does. */
   relaxableBy?: PolicySetting
   /**
+   * Finer classification of an `INVALID_ARCHIVE` (`InvalidArchiveSubCode`) or
+   * `SECURITY_VIOLATION` (`SecurityViolationSubCode`) refusal, when it has one.
+   * The interfaces are discriminated by `writes`, not `code`, so the pairing is
+   * not narrowed per code: `INVALID_ARCHIVE` carries `'TAR_AMBIGUITY'` or
+   * `'TAR_TRAILER'`, `SECURITY_VIOLATION` carries `'TAR_TRAILER'`.
+   */
+  subCode?: InvalidArchiveSubCode | SecurityViolationSubCode
+  /**
    * The exception thrown by a progress callback, an `onEntry` callback or an
    * `AsyncIterable` archive. A thrown primitive is wrapped in an `Error` whose
    * `cause` is the primitive.
@@ -106,6 +114,7 @@ export interface ExarchErrorCreationCallback extends ExarchErrorBase {
 export interface ExarchNativeError extends Error {
   code: string
   relaxableBy?: undefined
+  subCode?: undefined
   writes?: undefined
   filesExtracted?: undefined
   bytesWritten?: undefined
@@ -1398,6 +1407,9 @@ export interface IntegrityGaps {
 /** Result of the payload integrity check. */
 export type IntegrityStatus = 'OK' | 'FAILED' | 'INCOMPLETE' | 'SKIPPED'
 
+/** Value of the `subCode` property of an `INVALID_ARCHIVE` error. */
+export type InvalidArchiveSubCode = 'TAR_AMBIGUITY' | 'TAR_TRAILER'
+
 /** Issue category. */
 export type IssueCategory = 'Path Traversal' | 'Symlink Escape' | 'Hardlink Escape' | 'Zip Bomb' | 'Invalid Permissions' | 'Quota Exceeded' | 'Security Policy' | 'Invalid Archive' | 'Suspicious Path' | 'Executable File' | 'Corrupt Data' | 'Integrity Incomplete' | 'Header Mismatch' | 'Duplicate Entry' | 'Overlapping Entries' | 'Hidden Entry' | 'Name Collision' | 'Archive Note'
 
@@ -1654,6 +1666,9 @@ export type PathModel = 'host' | 'portable'
  * current value refused the entry.
  */
 export type PolicySetting = 'symlinks' | 'hardlinks' | 'solid_archives' | 'banned_components' | 'max_path_depth' | 'windows_reserved_names' | 'max_tar_metadata_bytes'
+
+/** Value of the `subCode` property of a `SECURITY_VIOLATION` error. */
+export type SecurityViolationSubCode = 'TAR_TRAILER'
 
 /** Number of items left unverified for one reason. */
 export interface UnverifiedCount {

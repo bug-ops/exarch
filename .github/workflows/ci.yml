@@ -124,10 +124,19 @@ jobs:
           git ls-files -z '*.rs' | xargs -0 perl -0777 -ne 'while (/(?<![A-Za-z_])assert!\(\s*matches!\(/g) { print "$ARGV\n"; $f = 1 } END { exit($f ? 1 : 0) }'
 
   clippy:
-    name: Clippy
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+    name: Clippy (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     needs: changes
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            package-filter: ""
+          # The bindings need Python/napi toolchains and have no Windows-only code.
+          - os: windows-latest
+            package-filter: "--exclude exarch-python --exclude exarch-node"
     if: |
       needs.changes.outputs.rust == 'true' ||
       github.ref == 'refs/heads/main' ||
@@ -144,11 +153,11 @@ jobs:
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
-          shared-key: "clippy"
+          shared-key: "clippy-${{ matrix.os }}"
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Run Clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features ${{ matrix.package-filter }} -- -D warnings
 
   documentation:
     name: Documentation
@@ -336,6 +345,7 @@ jobs:
       - name: Run tests
         env:
           EXARCH_REQUIRE_PRODUCERS: "1"
+          EXARCH_REQUIRE_PRIVILEGED_TESTS: "1"
         run: cargo nextest run --workspace --all-features --no-fail-fast --exclude exarch-python --exclude exarch-node
 
       - name: Run doctests

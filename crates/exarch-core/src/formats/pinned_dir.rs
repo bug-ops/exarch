@@ -5,16 +5,17 @@
 //! vetted component for a symlink between the check and the act. A
 //! [`VettedDir`] closes that window: it is an open directory descriptor, and
 //! every open, create, rename, unlink, symlink and readlink below the
-//! destination is relative to such a descriptor. Moving a vetted directory
-//! aside or replacing its name with a symlink cannot redirect an operation that
-//! already holds the descriptor.
+//! destination is relative to such a descriptor (a directory handle on
+//! Windows). Moving a vetted directory aside or replacing its name with a
+//! symlink or junction cannot redirect an operation that already holds the
+//! descriptor.
 //!
 //! A [`VettedDir`] has no public constructor. It comes from [`PinnedRoot`]
 //! (the destination, opened once per extraction) or from the
 //! [`DirWalker`](super::dir_walker::DirWalker), which descends one component at
-//! a time with `NOFOLLOW` and never keeps more than two descriptors open. A
-//! [`Leaf`] is exactly one normal path component, so no separator reaches an
-//! `*at` call.
+//! a time without following links and never keeps more than two descriptors
+//! open. A [`Leaf`] is exactly one normal path component, so no separator
+//! reaches an `*at` call.
 //!
 //! # Directory handles
 //!
@@ -26,6 +27,16 @@
 //! read-only, so there a directory without read permission fails with
 //! `EACCES` where path-based code worked. None of them is a shipped target for
 //! the bindings or the CLI release builds.
+//!
+//! On Windows a [`VettedDir`] is a directory handle. Below the root, a junction
+//! or symlink is opened as itself and refused. The root is opened the same
+//! way, so a destination that is itself a reparse point (for example a volume
+//! mounted at a folder) is refused rather than followed.
+//! Names below it are opened with `NtCreateFile` and a `RootDirectory` handle,
+//! and renames and deletes go through `NtSetInformationFile`, so no
+//! operation resolves the directory's path again. The `nt` module holds the
+//! only `unsafe` code. Every share mode is granted, so, as on Unix, a held
+//! directory can be renamed and writes follow the handle.
 //!
 //! # Residual risks
 //!
@@ -40,8 +51,11 @@
 //!   descriptor's device and inode with a stat taken at canonicalize time (the
 //!   CLI's `verify_destination_unchanged` does this) or verify the descriptor's
 //!   path; both are left to the follow-up that covers the CLI as well.
-//! - Windows has no descriptor backend here: [`VettedDir`] stores the path and
-//!   joins names onto it, which is the previous behaviour.
+//! - Over SMB the redirector rebuilds a relative open as a full path, so the
+//!   server resolves the names. Third-party filesystem drivers are unverified.
+//! - Only NTFS is exercised in CI; `ReFS` and Dev Drive are untested.
+//! - Following a pre-existing symlink under `ContainedOnly` stays path-based
+//!   through `classify_link`, as on Unix.
 
 use std::ffi::OsStr;
 use std::ffi::OsString;
@@ -165,7 +179,7 @@ impl PinnedRoot {
 
     /// Wraps the directory at `path` for tests that exercise a write primitive
     /// without an extraction.
-    #[cfg(all(test, unix))]
+    #[cfg(test)]
     pub(crate) fn open_for_test(path: &Path) -> Result<Self> {
         Self::open(DestDir::new(path.to_path_buf())?)
     }
@@ -366,78 +380,143 @@ mod imp {
     }
 }
 
-#[cfg(not(any(unix, target_os = "wasi")))]
+#[cfg(windows)]
+#[allow(unsafe_code)] // the only unsafe code on Windows: NT directory-relative calls
+mod nt;
+
+#[cfg(windows)]
 mod imp {
-    use std::fs;
     use std::fs::File;
     use std::io;
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsHandle;
     use std::path::Path;
-    use std::path::PathBuf;
+
+    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL;
+    use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS;
+    use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+    use windows_sys::Win32::Storage::FileSystem::FILE_GENERIC_READ;
+    use windows_sys::Win32::Storage::FileSystem::FILE_GENERIC_WRITE;
+    use windows_sys::Win32::Storage::FileSystem::FILE_READ_ATTRIBUTES;
+    use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_DELETE;
+    use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
+    use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_WRITE;
+    use windows_sys::Win32::Storage::FileSystem::FILE_TRAVERSE;
+    use windows_sys::Win32::Storage::FileSystem::SYNCHRONIZE;
 
     use super::Leaf;
+    use super::nt;
+    use super::nt::Disposition;
+    use super::nt::Kind;
+    use super::nt::Request;
     use super::occupant_of;
     use crate::security::fs_view::Occupant;
     use crate::security::permissions::SanitizedMode;
 
-    /// A directory below the destination, by path.
-    // TODO(#839): path-based on Windows; residual component-swap TOCTOU.
+    const DIR_ACCESS: u32 = FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE;
+
+    /// An open directory below the destination.
+    ///
+    /// Every operation is relative to this handle, so replacing or converting
+    /// the directory's path cannot redirect it.
     #[derive(Debug)]
-    pub struct VettedDir(PathBuf);
+    pub struct VettedDir(File);
 
     impl VettedDir {
-        pub(super) fn open_path(path: &Path) -> io::Result<Self> {
-            Ok(Self(path.to_path_buf()))
-        }
-
-        pub(crate) fn reopen(&self) -> io::Result<Self> {
-            Ok(Self(self.0.clone()))
-        }
-
-        pub(crate) fn open_dir(&self, name: Leaf<'_>) -> io::Result<Self> {
-            let path = self.0.join(name.as_os_str());
-            if fs::symlink_metadata(&path)?.is_dir() {
-                Ok(Self(path))
+        fn into_dir(file: File) -> io::Result<Self> {
+            if file.metadata()?.is_dir() {
+                Ok(Self(file))
             } else {
                 Err(io::Error::from(io::ErrorKind::NotADirectory))
             }
         }
 
-        pub(crate) fn make_dir(&self, name: Leaf<'_>) -> io::Result<()> {
-            fs::create_dir(self.0.join(name.as_os_str()))
+        /// Opens `path`, which the caller has canonicalized. A reparse point at
+        /// `path` is not followed and is refused.
+        pub(super) fn open_path(path: &Path) -> io::Result<Self> {
+            let file = std::fs::OpenOptions::new()
+                .access_mode(DIR_ACCESS)
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+                .open(path)?;
+            Self::into_dir(file)
         }
 
+        /// Another handle to the same directory.
+        pub(crate) fn reopen(&self) -> io::Result<Self> {
+            self.0.try_clone().map(Self)
+        }
+
+        /// Opens the subdirectory `name`; a link or a file there is an error.
+        pub(crate) fn open_dir(&self, name: Leaf<'_>) -> io::Result<Self> {
+            let request = Request {
+                kind: Kind::Directory,
+                ..Request::open(DIR_ACCESS)
+            };
+            let handle = nt::create_at(self.0.as_handle(), name, request)?;
+            Self::into_dir(File::from(handle))
+        }
+
+        /// Creates the subdirectory `name`, inheriting the parent's ACL.
+        pub(crate) fn make_dir(&self, name: Leaf<'_>) -> io::Result<()> {
+            let request = Request {
+                access: SYNCHRONIZE | FILE_READ_ATTRIBUTES,
+                disposition: Disposition::Create,
+                kind: Kind::Directory,
+                attributes: 0,
+            };
+            nt::create_at(self.0.as_handle(), name, request).map(drop)
+        }
+
+        /// What `name` is, without following a link; `None` if it is absent.
         pub(crate) fn probe(&self, name: Leaf<'_>) -> io::Result<Option<Occupant>> {
-            match fs::symlink_metadata(self.0.join(name.as_os_str())) {
-                Ok(meta) => Ok(Some(occupant_of(meta.file_type()))),
+            let request = Request::open(FILE_READ_ATTRIBUTES);
+            match nt::create_at(self.0.as_handle(), name, request) {
+                Ok(handle) => {
+                    let meta = File::from(handle).metadata()?;
+                    Ok(Some(occupant_of(meta.file_type())))
+                }
                 Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
                 Err(e) => Err(e),
             }
         }
 
+        /// Creates the file `name` exclusively, never following a link at it.
         pub(crate) fn create_new(
             &self,
             name: Leaf<'_>,
             _mode: Option<SanitizedMode>,
         ) -> io::Result<File> {
-            fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(self.0.join(name.as_os_str()))
+            let request = Request {
+                access: FILE_GENERIC_WRITE,
+                disposition: Disposition::Create,
+                kind: Kind::NonDirectory,
+                attributes: FILE_ATTRIBUTE_NORMAL,
+            };
+            nt::create_at(self.0.as_handle(), name, request).map(File::from)
         }
 
+        /// Opens `name` for reading without following a link; the caller
+        /// checks the file type through the returned handle.
         pub(crate) fn open_read(&self, name: Leaf<'_>) -> io::Result<File> {
-            File::open(self.0.join(name.as_os_str()))
+            nt::create_at(self.0.as_handle(), name, Request::open(FILE_GENERIC_READ))
+                .map(File::from)
         }
 
+        /// Renames `from` over `to`, both in this directory.
         pub(crate) fn rename_within(&self, from: Leaf<'_>, to: Leaf<'_>) -> io::Result<()> {
-            fs::rename(self.0.join(from.as_os_str()), self.0.join(to.as_os_str()))
+            nt::rename_within(self.0.as_handle(), from, to)
         }
 
+        /// Deletes the non-directory `name`.
         pub(crate) fn remove_file(&self, name: Leaf<'_>) -> io::Result<()> {
-            fs::remove_file(self.0.join(name.as_os_str()))
+            nt::remove_file(self.0.as_handle(), name)
         }
     }
 }
+
+#[cfg(not(any(unix, target_os = "wasi", windows)))]
+compile_error!("exarch-core has no directory-handle backend for this target");
 
 /// RAII guard that removes a file from its directory when dropped, unless
 /// [`persist`](Self::persist) was called first.
@@ -485,9 +564,38 @@ impl Drop for TempFileGuard<'_> {
     }
 }
 
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+pub mod support {
+    use std::path::Path;
+
+    use super::Leaf;
+    use super::PinnedRoot;
+    use super::VettedDir;
+
+    pub fn leaf(name: &str) -> Leaf<'_> {
+        Leaf::from_component(Path::new(name).components().next().unwrap()).unwrap()
+    }
+
+    pub fn pinned_at(path: &Path) -> VettedDir {
+        PinnedRoot::open_for_test(path)
+            .unwrap()
+            .dir()
+            .reopen()
+            .unwrap()
+    }
+
+    pub(super) fn pinned(temp: &tempfile::TempDir) -> VettedDir {
+        pinned_at(temp.path())
+    }
+}
+
 #[cfg(all(test, unix))]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    use super::support::leaf;
+    use super::support::pinned;
+    use super::support::pinned_at;
     use super::*;
     use std::assert_matches;
     use std::fs;
@@ -496,18 +604,6 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::fs::symlink;
     use tempfile::TempDir;
-
-    fn leaf(name: &str) -> Leaf<'_> {
-        Leaf::from_component(Path::new(name).components().next().unwrap()).unwrap()
-    }
-
-    fn pinned(temp: &TempDir) -> VettedDir {
-        PinnedRoot::open_for_test(temp.path())
-            .unwrap()
-            .dir()
-            .reopen()
-            .unwrap()
-    }
 
     /// Returns a handle on `base/a` after `a` was moved to `a_moved` and a
     /// symlink `a -> outside` was planted in its place.
@@ -521,14 +617,6 @@ mod tests {
         fs::rename(base.join("a"), base.join("a_moved")).unwrap();
         symlink(&outside, base.join("a")).unwrap();
         (a, outside)
-    }
-
-    fn pinned_at(path: &Path) -> VettedDir {
-        PinnedRoot::open_for_test(path)
-            .unwrap()
-            .dir()
-            .reopen()
-            .unwrap()
     }
 
     #[test]
@@ -669,6 +757,229 @@ mod tests {
             fs::set_permissions(&dest, fs::Permissions::from_mode(0o755)).unwrap();
             result.unwrap();
             assert!(dest.join("d").is_dir() && dest.join("f").is_file());
+        }
+    }
+}
+
+#[cfg(all(test, windows))]
+#[allow(clippy::unwrap_used)]
+mod windows_tests {
+    use super::support::leaf;
+    use super::support::pinned;
+    use super::support::pinned_at;
+    use super::*;
+    use std::fs;
+    use std::io;
+    use std::io::Write;
+    use std::path::PathBuf;
+    use std::process::Command;
+    use tempfile::TempDir;
+
+    fn run(program: &str, args: &[&std::ffi::OsStr]) -> bool {
+        Command::new(program)
+            .args(args)
+            .output()
+            .is_ok_and(|out| out.status.success())
+    }
+
+    fn junction(link: &Path, target: &Path) -> bool {
+        run(
+            "cmd",
+            &[
+                "/C".as_ref(),
+                "mklink".as_ref(),
+                "/J".as_ref(),
+                link.as_ref(),
+                target.as_ref(),
+            ],
+        )
+    }
+
+    fn entries(dir: &Path) -> usize {
+        fs::read_dir(dir).unwrap().count()
+    }
+
+    #[test]
+    fn basic_operations_stay_relative_to_the_handle() {
+        let temp = TempDir::new().unwrap();
+        let dir = pinned(&temp);
+
+        dir.make_dir(leaf("sub")).unwrap();
+        assert_eq!(dir.probe(leaf("sub")).unwrap(), Some(Occupant::Directory));
+        assert_eq!(dir.probe(leaf("absent")).unwrap(), None);
+
+        let mut file = dir.create_new(leaf("a"), None).unwrap();
+        file.write_all(b"one").unwrap();
+        drop(file);
+        let err = dir.create_new(leaf("a"), None).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(dir.probe(leaf("a")).unwrap(), Some(Occupant::File));
+        assert!(
+            dir.open_read(leaf("a"))
+                .unwrap()
+                .metadata()
+                .unwrap()
+                .is_file()
+        );
+
+        fs::write(temp.path().join("b"), b"old").unwrap();
+        dir.rename_within(leaf("a"), leaf("b")).unwrap();
+        assert_eq!(fs::read(temp.path().join("b")).unwrap(), b"one");
+        assert!(!temp.path().join("a").exists());
+
+        assert!(dir.remove_file(leaf("sub")).is_err());
+        assert!(temp.path().join("sub").is_dir());
+        dir.remove_file(leaf("b")).unwrap();
+        assert_eq!(dir.probe(leaf("b")).unwrap(), None);
+
+        dir.reopen().unwrap().create_new(leaf("c"), None).unwrap();
+        assert!(temp.path().join("c").is_file());
+        assert!(dir.open_dir(leaf("c")).is_err());
+        assert!(dir.open_dir(leaf("sub")).is_ok());
+    }
+
+    #[test]
+    fn a_preexisting_junction_is_never_followed() {
+        let temp = TempDir::new().unwrap();
+        let outside = temp.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("keep"), b"k").unwrap();
+        let link = temp.path().join("j");
+        assert!(junction(&link, &outside), "mklink /J failed");
+        let dir = pinned(&temp);
+
+        let err = dir.open_dir(leaf("j")).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotADirectory);
+        assert_eq!(dir.probe(leaf("j")).unwrap(), Some(Occupant::Symlink));
+        let err = dir.create_new(leaf("j"), None).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        assert!(
+            !dir.open_read(leaf("j"))
+                .unwrap()
+                .metadata()
+                .unwrap()
+                .is_file()
+        );
+
+        dir.remove_file(leaf("j")).unwrap();
+        assert!(fs::symlink_metadata(&link).is_err());
+        assert_eq!(fs::read(outside.join("keep")).unwrap(), b"k");
+    }
+
+    #[test]
+    fn a_grandparent_of_held_handles_cannot_be_renamed_away() {
+        let temp = TempDir::new().unwrap();
+        let base = temp.path().join("base");
+        fs::create_dir_all(base.join("a/b/c")).unwrap();
+        let root = pinned_at(&base);
+        let b = {
+            let a = root.open_dir(leaf("a")).unwrap();
+            a.open_dir(leaf("b")).unwrap()
+        };
+        let c = b.open_dir(leaf("c")).unwrap();
+
+        let renamed = fs::rename(base.join("a"), base.join("a_moved"));
+        assert!(
+            renamed.is_err(),
+            "NTFS is expected to refuse renaming an ancestor of an open handle"
+        );
+
+        c.create_new(leaf("tmp"), None).unwrap();
+        c.rename_within(leaf("tmp"), leaf("final")).unwrap();
+        assert!(base.join("a/b/c/final").is_file());
+    }
+
+    #[test]
+    fn a_deleted_and_replaced_directory_receives_nothing() {
+        let temp = TempDir::new().unwrap();
+        let base = temp.path().join("base");
+        let outside = temp.path().join("outside");
+        fs::create_dir_all(base.join("c")).unwrap();
+        fs::create_dir(&outside).unwrap();
+        let c = pinned_at(&base).open_dir(leaf("c")).unwrap();
+
+        fs::remove_dir(base.join("c")).unwrap();
+        assert!(junction(&base.join("c"), &outside), "mklink /J failed");
+
+        assert!(c.create_new(leaf("f"), None).is_err());
+        assert!(c.make_dir(leaf("d")).is_err());
+        assert_eq!(entries(&outside), 0);
+    }
+
+    struct MountGuard {
+        mount_dir: PathBuf,
+        escaped: Vec<PathBuf>,
+    }
+
+    impl Drop for MountGuard {
+        fn drop(&mut self) {
+            run("mountvol", &[self.mount_dir.as_ref(), "/D".as_ref()]);
+            for path in &self.escaped {
+                let _ = fs::remove_file(path);
+                let _ = fs::remove_dir(path);
+            }
+        }
+    }
+
+    fn volume_guid(drive_root: &Path) -> Option<String> {
+        let out = Command::new("mountvol")
+            .arg(drive_root)
+            .arg("/L")
+            .output()
+            .ok()?;
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).trim().to_owned())
+    }
+
+    #[test]
+    fn a_directory_converted_in_place_into_a_mount_point_receives_nothing() {
+        let temp = TempDir::new().unwrap();
+        let drive_root = temp
+            .path()
+            .ancestors()
+            .last()
+            .map(Path::to_path_buf)
+            .unwrap();
+        let c_path = temp.path().join("c");
+        fs::create_dir(&c_path).unwrap();
+        let held = pinned(&temp).open_dir(leaf("c")).unwrap();
+
+        let mount_dir = c_path.join("");
+        let mounted = volume_guid(&drive_root)
+            .is_some_and(|guid| run("mountvol", &[mount_dir.as_ref(), guid.as_ref()]));
+        if !mounted {
+            assert!(
+                std::env::var_os("EXARCH_REQUIRE_PRIVILEGED_TESTS").is_none(),
+                "mountvol failed but EXARCH_REQUIRE_PRIVILEGED_TESTS is set"
+            );
+            eprintln!("skipped: mountvol needs administrator rights");
+            return;
+        }
+        let pid = std::process::id();
+        let names = [
+            format!(".exarch-escape-tmp-{pid}"),
+            format!(".exarch-escape-final-{pid}"),
+            format!(".exarch-escape-dir-{pid}"),
+        ];
+        let _guard = MountGuard {
+            mount_dir,
+            escaped: names.iter().map(|name| drive_root.join(name)).collect(),
+        };
+        let [first, second, third] = &names;
+
+        let created = held.create_new(leaf(first), None);
+        let renamed = created
+            .is_ok()
+            .then(|| held.rename_within(leaf(first), leaf(second)));
+        let made = held.make_dir(leaf(third));
+        let opened = made.is_ok().then(|| held.open_dir(leaf(third)).map(drop));
+
+        for name in &names {
+            assert!(
+                !drive_root.join(name).exists(),
+                "{name} escaped: create={created:?} rename={renamed:?} make={made:?} open={opened:?}"
+            );
         }
     }
 }

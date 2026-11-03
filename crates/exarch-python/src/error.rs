@@ -3,7 +3,10 @@
 use exarch_core::ArchiveError as CoreError;
 use exarch_core::FfiErrorMessage;
 use exarch_core::FfiKind;
+use exarch_core::InvalidArchiveSubCode;
 use exarch_core::PartialOutcome;
+use exarch_core::PolicySetting;
+use exarch_core::SecurityViolationSubCode;
 use pyo3::create_exception;
 use pyo3::exceptions::PyException;
 use pyo3::exceptions::PyIOError;
@@ -55,18 +58,33 @@ pub fn convert_error(err: CoreError) -> PyErr {
         FfiKind::ZipInconsistency => ZipInconsistencyError::new_err(description),
         FfiKind::InvalidPermissions => InvalidPermissionsError::new_err(description),
         FfiKind::QuotaExceeded => QuotaExceededError::new_err(description),
-        FfiKind::SecurityViolation { relaxable_by } => {
+        FfiKind::SecurityViolation {
+            relaxable_by,
+            sub_code,
+            ..
+        } => {
             let err = SecurityViolationError::new_err(description);
-            if let Some(setting) = relaxable_by {
-                Python::attach(|py| {
-                    // setattr failures are silenced to preserve the `PyErr`
-                    // signature; the class default stays `None`.
-                    let _ = err.value(py).setattr("relaxable_by", setting.as_str());
-                });
-            }
+            set_optional_str(
+                &err,
+                "relaxable_by",
+                relaxable_by.map(PolicySetting::as_str),
+            );
+            set_optional_str(
+                &err,
+                "sub_code",
+                sub_code.map(SecurityViolationSubCode::as_str),
+            );
             err
         }
-        FfiKind::InvalidArchive => InvalidArchiveError::new_err(description),
+        FfiKind::InvalidArchive { sub_code, .. } => {
+            let err = InvalidArchiveError::new_err(description);
+            set_optional_str(
+                &err,
+                "sub_code",
+                sub_code.map(InvalidArchiveSubCode::as_str),
+            );
+            err
+        }
         FfiKind::Io(kind) => PyErr::from(std::io::Error::new(kind, description)),
         FfiKind::SourceNotFound | FfiKind::SourceNotAccessible | FfiKind::OutputExists => {
             PyIOError::new_err(description)
@@ -84,6 +102,17 @@ pub fn convert_error(err: CoreError) -> PyErr {
         attach_partial(&py_err, outcome);
     }
     py_err
+}
+
+/// Sets `name` on the exception when `value` is present; otherwise the class
+/// default (`None`) stays visible.
+fn set_optional_str(err: &PyErr, name: &str, value: Option<&'static str>) {
+    if let Some(value) = value {
+        Python::attach(|py| {
+            // setattr failures are silenced to preserve the `PyErr` signature.
+            let _ = err.value(py).setattr(name, value);
+        });
+    }
 }
 
 /// Attaches `writes`, and while the writes remain on disk the report counters
@@ -129,7 +158,6 @@ pub fn register_exceptions(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?;
     let security_violation = m.py().get_type::<SecurityViolationError>();
     security_violation.setattr("relaxable_by", m.py().None())?;
-    m.add("SecurityViolationError", security_violation)?;
     m.add(
         "ZipInconsistencyError",
         m.py().get_type::<ZipInconsistencyError>(),
@@ -142,10 +170,11 @@ pub fn register_exceptions(m: &Bound<'_, PyModule>) -> PyResult<()> {
         "UnknownFormatError",
         m.py().get_type::<UnknownFormatError>(),
     )?;
-    m.add(
-        "InvalidArchiveError",
-        m.py().get_type::<InvalidArchiveError>(),
-    )?;
+    security_violation.setattr("sub_code", m.py().None())?;
+    m.add("SecurityViolationError", security_violation)?;
+    let invalid_archive = m.py().get_type::<InvalidArchiveError>();
+    invalid_archive.setattr("sub_code", m.py().None())?;
+    m.add("InvalidArchiveError", invalid_archive)?;
     Ok(())
 }
 

@@ -163,3 +163,84 @@ describe('extraction error properties', () => {
     });
   });
 });
+
+describe('subCode', () => {
+  const zlib = require('node:zlib');
+  let tempDir;
+
+  beforeEach(() => {
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'exarch-subcode-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  function tarBytes(sizeField) {
+    const header = Buffer.alloc(512);
+    header.write('a.txt', 0);
+    header.write('0000644\0', 100);
+    header.write('0000000\0', 108);
+    header.write('0000000\0', 116);
+    header.write(sizeField, 124, 'latin1');
+    header.write('00000000000\0', 136);
+    header.write('0', 156);
+    header.write('ustar\0', 257);
+    header.write('00', 263);
+    header.fill(0x20, 148, 156);
+    const sum = header.reduce((acc, byte) => acc + byte, 0);
+    header.write(`${sum.toString(8).padStart(6, '0')}\0 `, 148, 'latin1');
+    const data = Buffer.alloc(512);
+    data.write('alpha');
+    return Buffer.concat([header, data, Buffer.alloc(1024)]);
+  }
+
+  const cleanTar = () => tarBytes('00000000005\0');
+
+  function write(name, bytes) {
+    const file = path.join(tempDir, name);
+    fs.writeFileSync(file, bytes);
+    return file;
+  }
+
+  async function failureOf(file) {
+    try {
+      await extractArchive(file, path.join(tempDir, 'out'));
+    } catch (err) {
+      return err;
+    }
+    return assert.fail('extraction unexpectedly succeeded');
+  }
+
+  it('a non-canonical TAR header is INVALID_ARCHIVE / TAR_AMBIGUITY', async () => {
+    const err = await failureOf(write('a.tar', tarBytes('+0000000005\0')));
+    assert.strictEqual(err.code, 'INVALID_ARCHIVE');
+    assert.strictEqual(err.subCode, 'TAR_AMBIGUITY');
+  });
+
+  it('junk after the gzip member is INVALID_ARCHIVE / TAR_TRAILER', async () => {
+    const gz = Buffer.concat([zlib.gzipSync(cleanTar()), Buffer.from('\0\0\0garbage')]);
+    const err = await failureOf(write('a.tar.gz', gz));
+    assert.strictEqual(err.code, 'INVALID_ARCHIVE');
+    assert.strictEqual(err.subCode, 'TAR_TRAILER');
+  });
+
+  it('an over-cap tail is SECURITY_VIOLATION / TAR_TRAILER and names its setting', async () => {
+    const gz = Buffer.concat([
+      zlib.gzipSync(cleanTar()),
+      zlib.gzipSync(Buffer.alloc(5 * 1024 * 1024)),
+    ]);
+    const err = await failureOf(write('big.tar.gz', gz));
+    assert.strictEqual(err.code, 'SECURITY_VIOLATION');
+    assert.strictEqual(err.subCode, 'TAR_TRAILER');
+    assert.strictEqual(err.relaxableBy, 'max_tar_metadata_bytes');
+  });
+
+  it('other failures carry no subCode', async () => {
+    const err = await failureOf(write('junk.tar', Buffer.alloc(2048, 0x41)));
+    assert.strictEqual(err.subCode, undefined);
+    const violation = await extractArchive('/tmp/a\0.tar', '/tmp/out').catch((e) => e);
+    assert.strictEqual(violation.code, 'SECURITY_VIOLATION');
+    assert.strictEqual(violation.subCode, undefined);
+  });
+});

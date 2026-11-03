@@ -65,6 +65,47 @@ closed_enum! {
     }
 }
 
+closed_enum! {
+    /// Finer classification of an [`ErrorCode::InvalidArchive`] error.
+    ///
+    /// Bindings expose it so callers can tell a TAR refusal from any other
+    /// malformed archive without parsing the message.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::InvalidArchiveSubCode;
+    ///
+    /// assert_eq!(InvalidArchiveSubCode::TarTrailer.as_str(), "TAR_TRAILER");
+    /// ```
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    #[non_exhaustive]
+    pub enum InvalidArchiveSubCode {
+        /// [`ArchiveError::TarAmbiguity`].
+        TarAmbiguity => "TAR_AMBIGUITY",
+        /// A corrupt or truncated stream after the TAR end-of-archive marker.
+        TarTrailer => "TAR_TRAILER",
+    }
+}
+
+closed_enum! {
+    /// Finer classification of an [`ErrorCode::SecurityViolation`] error.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::SecurityViolationSubCode;
+    ///
+    /// assert_eq!(SecurityViolationSubCode::TarTrailer.as_str(), "TAR_TRAILER");
+    /// ```
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    #[non_exhaustive]
+    pub enum SecurityViolationSubCode {
+        /// An over-cap tail after the TAR end-of-archive marker.
+        TarTrailer => "TAR_TRAILER",
+    }
+}
+
 /// The error class of an [`FfiErrorMessage`], with the payload that class
 /// carries.
 ///
@@ -81,7 +122,14 @@ closed_enum! {
 /// use std::assert_matches;
 ///
 /// let msg = ArchiveError::violation("nope".into()).into_ffi_message();
-/// assert_matches!(msg.kind, FfiKind::SecurityViolation { relaxable_by: None });
+/// assert_matches!(
+///     msg.kind,
+///     FfiKind::SecurityViolation {
+///         relaxable_by: None,
+///         sub_code: None,
+///         ..
+///     }
+/// );
 /// assert_eq!(msg.kind.code(), ErrorCode::SecurityViolation);
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,13 +148,20 @@ pub enum FfiKind {
     /// A quota was exceeded.
     QuotaExceeded,
     /// Denied by security policy.
+    #[non_exhaustive]
     SecurityViolation {
         /// The `SecurityConfig` setting whose current value refused the
         /// entry; see [`ArchiveError::relaxable_by`].
         relaxable_by: Option<PolicySetting>,
+        /// Finer classification, when the refusal has one.
+        sub_code: Option<SecurityViolationSubCode>,
     },
     /// Archive is corrupted or malformed.
-    InvalidArchive,
+    #[non_exhaustive]
+    InvalidArchive {
+        /// Finer classification, when the failure has one.
+        sub_code: Option<InvalidArchiveSubCode>,
+    },
     /// I/O failure of the given kind.
     Io(std::io::ErrorKind),
     /// Invalid permission bits.
@@ -137,7 +192,7 @@ impl FfiKind {
             Self::ZipInconsistency => ErrorCode::ZipInconsistency,
             Self::QuotaExceeded => ErrorCode::QuotaExceeded,
             Self::SecurityViolation { .. } => ErrorCode::SecurityViolation,
-            Self::InvalidArchive => ErrorCode::InvalidArchive,
+            Self::InvalidArchive { .. } => ErrorCode::InvalidArchive,
             Self::Io(_) => ErrorCode::IoError,
             Self::InvalidPermissions => ErrorCode::InvalidPermissions,
             Self::SourceNotFound => ErrorCode::SourceNotFound,
@@ -258,9 +313,23 @@ impl ArchiveError {
         FfiErrorMessage::new(self.ffi_kind(), self.ffi_description())
     }
 
-    /// The only variant-to-[`FfiKind`] table; [`Self::error_code`] derives
-    /// from it.
-    fn ffi_kind(&self) -> FfiKind {
+    /// The binding-facing class of this error, without consuming it.
+    ///
+    /// The only variant-to-[`FfiKind`] table: [`Self::error_code`] and
+    /// [`Self::into_ffi_message`] derive from it. A
+    /// [`Self::PartialExtraction`] reports its source's kind.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::ArchiveError;
+    /// use exarch_core::ErrorCode;
+    ///
+    /// let err = ArchiveError::InvalidArchive("bad".into());
+    /// assert_eq!(err.ffi_kind().code(), ErrorCode::InvalidArchive);
+    /// ```
+    #[must_use]
+    pub fn ffi_kind(&self) -> FfiKind {
         match self {
             Self::PathTraversal { .. } => FfiKind::PathTraversal,
             Self::SymlinkEscape { .. } => FfiKind::SymlinkEscape,
@@ -270,15 +339,22 @@ impl ArchiveError {
             Self::QuotaExceeded { .. } => FfiKind::QuotaExceeded,
             Self::SecurityViolation { relaxable_by, .. } => FfiKind::SecurityViolation {
                 relaxable_by: *relaxable_by,
+                sub_code: None,
             },
-            Self::InvalidArchive(_) | Self::TarAmbiguity(_) => FfiKind::InvalidArchive,
+            Self::InvalidArchive(_) => FfiKind::InvalidArchive { sub_code: None },
+            Self::TarAmbiguity(_) => FfiKind::InvalidArchive {
+                sub_code: Some(InvalidArchiveSubCode::TarAmbiguity),
+            },
             Self::TarTrailer(refusal) => {
                 if refusal.is_policy_refusal() {
                     FfiKind::SecurityViolation {
                         relaxable_by: refusal.relaxable_by(),
+                        sub_code: Some(SecurityViolationSubCode::TarTrailer),
                     }
                 } else {
-                    FfiKind::InvalidArchive
+                    FfiKind::InvalidArchive {
+                        sub_code: Some(InvalidArchiveSubCode::TarTrailer),
+                    }
                 }
             }
             Self::Io(io_err) => FfiKind::Io(io_err.kind()),
@@ -501,6 +577,105 @@ mod tests {
         let mut expected = ErrorCode::ALL.to_vec();
         expected.sort_by_key(|c| c.as_str());
         assert_eq!(seen, expected);
+    }
+
+    fn every_tar_ambiguity() -> Vec<super::super::tar_ambiguity::TarAmbiguity> {
+        use super::super::tar_ambiguity::TarAmbiguity as A;
+        use super::super::tar_ambiguity::TarExtensionKind as Ext;
+        use super::super::tar_ambiguity::TarHeaderField as Field;
+        use super::super::tar_ambiguity::TarNonRegularKind as NonRegular;
+        use super::super::tar_ambiguity::TarPathKey as Key;
+        let key = || "k".to_string();
+        vec![
+            A::MalformedRecord,
+            A::EmptyKey,
+            A::OversizedRecord { key: key() },
+            A::DuplicateRecord { key: key() },
+            A::UnsupportedRecord { key: key() },
+            A::InvalidSize,
+            A::GlobalOverride { key: key() },
+            A::GlobalTooLarge { size: 2, limit: 1 },
+            A::LocalBeforeGlobal,
+            A::LongRecordBeforeGlobal,
+            A::StackedLongRecord { key: Key::Path },
+            A::UnrecognizedHeader { kind: Ext::Pax },
+            A::SparseEntry,
+            A::NonCanonicalNumber { field: Field::Size },
+            A::PrefixWithoutUstar,
+            A::ChecksumMismatch,
+            A::DuplicateExtensionHeader { kind: Ext::Pax },
+            A::WindowMismatch,
+            A::NonZeroPadding,
+            A::MalformedLongRecord {
+                kind: Ext::LongName,
+            },
+            A::NonRegularPayload {
+                kind: NonRegular::Directory,
+                size: 1,
+                path: "d".into(),
+            },
+            A::DirectoryNamedPayload {
+                size: 1,
+                path: "d/".into(),
+            },
+        ]
+    }
+
+    #[test]
+    fn test_ffi_kind_sub_code_table() {
+        use super::super::tar_trailer::TarTrailerRefusal as R;
+        use super::super::tar_trailer::TrailerCorruption;
+
+        let ambiguity = Some(InvalidArchiveSubCode::TarAmbiguity);
+        let trailer = Some(InvalidArchiveSubCode::TarTrailer);
+        let invalid = |sub_code| FfiKind::InvalidArchive { sub_code };
+
+        for variant in every_tar_ambiguity() {
+            let error = ArchiveError::TarAmbiguity(variant);
+            assert_eq!(error.ffi_kind(), invalid(ambiguity), "{error:?}");
+        }
+
+        for refusal in [
+            R::Truncated,
+            R::Corrupt {
+                cause: TrailerCorruption::Decoder,
+                detail: "d".into(),
+            },
+            R::Corrupt {
+                cause: TrailerCorruption::TrailingData,
+                detail: "d".into(),
+            },
+        ] {
+            let error = ArchiveError::TarTrailer(refusal);
+            assert_eq!(error.ffi_kind(), invalid(trailer), "{error:?}");
+        }
+        assert_eq!(
+            ArchiveError::TarTrailer(R::OverCap { cap: 1 }).ffi_kind(),
+            FfiKind::SecurityViolation {
+                relaxable_by: Some(PolicySetting::MaxTarMetadataBytes),
+                sub_code: Some(SecurityViolationSubCode::TarTrailer),
+            }
+        );
+
+        assert_eq!(
+            ArchiveError::InvalidArchive("x".into()).ffi_kind(),
+            invalid(None)
+        );
+        assert_eq!(
+            ArchiveError::violation("x".into()).ffi_kind(),
+            FfiKind::SecurityViolation {
+                relaxable_by: None,
+                sub_code: None,
+            }
+        );
+        let wrapped = ArchiveError::PartialExtraction {
+            source: Box::new(ArchiveError::TarAmbiguity(
+                super::super::tar_ambiguity::TarAmbiguity::SparseEntry,
+            )),
+            report: ExtractionReport::default(),
+            writes: PartialWrites::Kept,
+        };
+        assert_eq!(wrapped.ffi_kind(), invalid(ambiguity));
     }
 
     #[test]

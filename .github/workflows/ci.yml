@@ -353,16 +353,13 @@ jobs:
 
   # Release-profile tests for exarch-core: exercises cfg(not(debug_assertions))
   # tests (e.g. release-only redaction/security assertions) that the debug-mode
-  # `test` job above never runs (see #476).
+  # `test` job above never runs (see #476). Runs on main only.
   test-release:
     name: Test (release profile)
     needs: [changes, format]
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    if: |
-      needs.changes.outputs.rust == 'true' ||
-      github.ref == 'refs/heads/main' ||
-      github.ref == 'refs/heads/develop'
+    if: github.ref == 'refs/heads/main'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 

@@ -17,7 +17,6 @@ use crate::Result;
 use crate::SecurityConfig;
 use crate::SinkOptions;
 use crate::config::Validated;
-use crate::formats::common;
 use crate::security::fs_view::CollisionRecording;
 use crate::security::fs_view::NodeBudget;
 use crate::security::fs_view::VirtualRoot;
@@ -31,10 +30,10 @@ use crate::types::SafePath;
 
 /// The sink's pre-pass: paths against an empty tree.
 ///
-/// Name lengths are checked for the entries delivery would validate (files
-/// with a disallowed extension are skipped there). The length of the path an
-/// entry lands at after earlier symlinks resolve stays a delivery-time check,
-/// because 7z link targets are undecoded here.
+/// Name lengths are checked for the entries delivery would validate (the
+/// pre-pass hands it no file with a disallowed extension). The length of the
+/// path an entry lands at after earlier symlinks resolve stays a delivery-time
+/// check, because 7z link targets are undecoded here.
 struct SinkPrePass<'a> {
     core: ValidatorCore<'a>,
     root: &'a VirtualRoot,
@@ -73,9 +72,7 @@ impl PrePass for SinkPrePass<'_> {
     }
 
     fn file(&mut self, _safe_path: &SafePath, path: &Path) -> Result<FilePlan> {
-        if common::is_extension_allowed(path, self.config) {
-            self.check_name_lengths(path)?;
-        }
+        self.check_name_lengths(path)?;
         Ok(FilePlan::Reserve)
     }
 

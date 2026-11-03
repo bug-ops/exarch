@@ -178,7 +178,7 @@ fn destination_symlink_to_a_file_is_refused_with_a_category() {
     for allow_symlinks in [true, false] {
         for (name, code) in [
             ("l/a/b.txt", ErrorCode::SymlinkEscape),
-            ("l/b.txt", ErrorCode::PathTraversal),
+            ("l/b.txt", ErrorCode::SymlinkEscape),
         ] {
             let archive = write_tar(&work, &[file(name)]);
             let config = SecurityConfig::default().with_allow_symlinks(allow_symlinks);

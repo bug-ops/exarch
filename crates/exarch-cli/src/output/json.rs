@@ -21,7 +21,7 @@ use std::path::Path;
 fn extraction_error_kind(err: &ArchiveError) -> String {
     match err {
         ArchiveError::Io(_) => "IoError",
-        ArchiveError::InvalidArchive(_) => "InvalidArchive",
+        ArchiveError::InvalidArchive(_) | ArchiveError::TarAmbiguity(_) => "InvalidArchive",
         ArchiveError::PathTraversal { .. } => "PathTraversal",
         ArchiveError::SymlinkEscape { .. } => "SymlinkEscape",
         ArchiveError::HardlinkEscape { .. } => "HardlinkEscape",
@@ -431,6 +431,12 @@ mod tests {
     #[test]
     fn test_extraction_error_kind_invalid_archive() {
         let err = ArchiveError::InvalidArchive("corrupted header".to_string());
+        assert_eq!(error_kind(&err), "InvalidArchive");
+    }
+
+    #[test]
+    fn test_extraction_error_kind_tar_ambiguity_is_invalid_archive() {
+        let err = ArchiveError::TarAmbiguity(exarch_core::TarAmbiguity::ChecksumMismatch);
         assert_eq!(error_kind(&err), "InvalidArchive");
     }
 

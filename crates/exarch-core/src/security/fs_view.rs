@@ -460,12 +460,26 @@ impl FsView for HostFs {
     }
 
     fn canonicalize(&self, path: &Path, root: &DestDir) -> io::Result<Containment> {
-        let canonical = std::fs::canonicalize(path)?;
-        Ok(if paths_start_with(&canonical, root.as_path()) {
-            Containment::Within(canonical)
-        } else {
-            Containment::Escapes
-        })
+        std::fs::canonicalize(path).map(|canonical| contain(canonical, root.as_path()))
+    }
+}
+
+/// Classifies a canonical path against the canonical `root` by exact,
+/// case-sensitive components.
+///
+/// Both come from `realpath`, which reports the on-disk case, so a
+/// case-insensitive comparison is never needed and would let a sibling that
+/// differs only in case (`out` and `OUT` on a case-sensitive volume) pass as
+/// inside.
+fn contain(canonical: PathBuf, root: &Path) -> Containment {
+    #[cfg(unix)]
+    let inside = canonical.starts_with(root);
+    #[cfg(not(unix))]
+    let inside = paths_start_with(&canonical, root);
+    if inside {
+        Containment::Within(canonical)
+    } else {
+        Containment::Escapes
     }
 }
 
@@ -589,6 +603,29 @@ impl BlockedParent {
     }
 }
 
+/// What a symlink at some path turns out to be.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LinkClass {
+    /// A link to a directory inside the root, at this canonical path.
+    InsideDir(PathBuf),
+    /// A link nothing may be written through.
+    Blocked(ParentBlocker),
+}
+
+/// Classifies the symlink at `link` by resolving it.
+///
+/// Resolving the link can trigger an automount lookup, so callers apply it
+/// only to a path already known to be a symlink.
+pub fn classify_link<V: FsView>(view: &V, link: &Path, root: &V::Root) -> LinkClass {
+    match view.canonicalize(link, root) {
+        Ok(Containment::Within(resolved)) if view.is_dir(&resolved) => {
+            LinkClass::InsideDir(resolved)
+        }
+        Ok(Containment::Escapes) => LinkClass::Blocked(ParentBlocker::Escape),
+        Ok(Containment::Within(_)) | Err(_) => LinkClass::Blocked(ParentBlocker::Symlink),
+    }
+}
+
 /// The first parent of `rel` that is not a directory `rel` can be created in,
 /// looked up through `view`. `None` when no parent is to blame, including a
 /// parent that cannot be inspected.
@@ -602,10 +639,9 @@ pub fn first_blocking_ancestor<V: FsView>(
         prefix.push(component);
         let full = root.as_path().join(&prefix);
         let blocker = if view.is_symlink(&full).ok()? {
-            match view.canonicalize(&full, root) {
-                Ok(Containment::Within(resolved)) if view.is_dir(&resolved) => continue,
-                Ok(Containment::Escapes) => ParentBlocker::Escape,
-                Ok(Containment::Within(_)) | Err(_) => ParentBlocker::Symlink,
+            match classify_link(view, &full, root) {
+                LinkClass::InsideDir(_) => continue,
+                LinkClass::Blocked(blocker) => blocker,
             }
         } else if view.is_dir(&full) {
             continue;
@@ -2487,5 +2523,51 @@ mod tests {
                 assert_eq!(result, None);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod host_fs_tests {
+    use super::*;
+    use std::assert_matches;
+
+    #[test]
+    fn containment_is_by_whole_components() {
+        let root = Path::new("/mnt/out");
+
+        assert_matches!(
+            contain(PathBuf::from("/mnt/out/a"), root),
+            Containment::Within(_)
+        );
+        assert_matches!(
+            contain(PathBuf::from("/mnt/outx"), root),
+            Containment::Escapes
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn containment_is_case_sensitive_on_unix() {
+        let root = Path::new("/mnt/out");
+
+        assert_matches!(
+            contain(PathBuf::from("/mnt/OUT"), root),
+            Containment::Escapes
+        );
+        assert_matches!(
+            contain(PathBuf::from("/mnt/OUT/a"), root),
+            Containment::Escapes
+        );
+    }
+
+    #[test]
+    #[cfg(not(unix))]
+    fn containment_folds_case_off_unix() {
+        let root = Path::new("/mnt/out");
+
+        assert_matches!(
+            contain(PathBuf::from("/mnt/OUT/a"), root),
+            Containment::Within(_)
+        );
     }
 }

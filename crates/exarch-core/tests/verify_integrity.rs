@@ -18,6 +18,7 @@ use exarch_core::IntegrityStatus;
 use exarch_core::IssueCategory;
 use exarch_core::QuotaResource;
 use exarch_core::SecurityConfig;
+use exarch_core::TarAmbiguity;
 use exarch_core::UnverifiedReason;
 use exarch_core::VerificationOptions;
 use exarch_core::VerificationReport;
@@ -701,7 +702,7 @@ fn tar_gnu_sparse_entry_is_refused() {
     let path = write(&dir, "sparse.tar", &gnu_sparse_tar());
 
     let error = verify_err(&path, integrity(2_000_000));
-    assert_matches!(error, ArchiveError::InvalidArchive(_));
+    assert_matches!(error, ArchiveError::TarAmbiguity(TarAmbiguity::SparseEntry));
 }
 
 #[test]

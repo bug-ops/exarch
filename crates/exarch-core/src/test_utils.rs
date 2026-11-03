@@ -281,19 +281,7 @@ pub fn tar_with_pax_record(
     typeflag: u8,
     data: &[u8],
 ) -> Vec<u8> {
-    // Self-referential PAX record length: "<len> <key>=<value>\n".
-    let base = pax_key.len() + pax_value.len() + 3;
-    let mut len = base + 1;
-    loop {
-        let candidate = len.to_string().len() + base;
-        if candidate == len {
-            break;
-        }
-        len = candidate;
-    }
-    let mut record = format!("{len} {pax_key}=").into_bytes();
-    record.extend_from_slice(pax_value);
-    record.push(b'\n');
+    let record = exarch_testkit::pax::record(pax_key.as_bytes(), pax_value);
 
     let mut tar = Vec::new();
     tar.extend_from_slice(&raw_tar_header(b"PaxHeaders/entry", record.len(), b'x'));

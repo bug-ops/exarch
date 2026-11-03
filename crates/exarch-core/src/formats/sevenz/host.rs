@@ -34,6 +34,7 @@ use crate::security::context::ValidationContext;
 use crate::security::fs_view::HostFs;
 use crate::security::fs_view::Occupant;
 use crate::security::validator::EntryPath;
+use crate::security::validator::FileScreen;
 use crate::security::validator::NodeKind;
 use crate::security::validator::ValidatorCore;
 use crate::types::DestDir;
@@ -139,14 +140,17 @@ impl ExtractTarget for SevenZHostTarget<'_> {
         request: FileRequest<'_>,
         tally: &mut Tally<'_>,
     ) -> Result<FileAdmission<SevenZAdmittedFile>> {
-        let safe_path = self
-            .inner
-            .validate_path(request.path, NodeKind::NonDirectory)?
-            .into_inner();
+        let pending = match self.inner.screen_file(request)? {
+            FileScreen::DisallowedExtension => {
+                return tally.record_extension_skip().map(FileAdmission::Skipped);
+            }
+            FileScreen::Pending(pending) => pending,
+        };
+        let safe_path = pending.path().clone();
         let (parent, leaf) = self
             .inner
             .dirs()
-            .ensure_parent(self.inner.root(), safe_path.as_path())?;
+            .ensure_parent(self.inner.root(), &safe_path)?;
 
         let occupancy = DestOccupancy::probe(&parent, leaf)?;
         if occupancy.is_occupied() && tally.options.skip_duplicates {
@@ -156,13 +160,9 @@ impl ExtractTarget for SevenZHostTarget<'_> {
 
         // Quota is reserved before anything is removed, so a refusal never
         // destroys a destination it could not replace.
-        let permit = self.inner.reserve_file(request.size.uncompressed)?;
+        let file = self.inner.admit_file(pending)?;
         Ok(FileAdmission::Write(SevenZAdmittedFile {
-            file: ValidatedFile {
-                path: safe_path,
-                permit,
-                mode: None,
-            },
+            file,
             write_mode,
             parent,
         }))
@@ -206,7 +206,8 @@ impl ExtractTarget for SevenZHostTarget<'_> {
             write_mode,
             parent,
         } = admitted;
-        let (_, leaf) = Leaf::split(file.path.as_path())?;
+        let (path, permit, _mode) = file.into_parts();
+        let (_, leaf) = Leaf::split(path.as_path())?;
         let written = match write_mode {
             WriteMode::CreateNew => write_file_direct(
                 reader,
@@ -214,7 +215,7 @@ impl ExtractTarget for SevenZHostTarget<'_> {
                 leaf,
                 size,
                 self.inner.copy_buffer_mut(),
-                file.permit,
+                permit,
             )?,
             WriteMode::ReplaceRegular => write_file_with_permit(
                 reader,
@@ -222,16 +223,10 @@ impl ExtractTarget for SevenZHostTarget<'_> {
                 leaf,
                 size,
                 self.inner.copy_buffer_mut(),
-                file.permit,
+                permit,
             )?,
         };
-        tally.report.bytes_written =
-            common::checked_add_bytes(tally.report.bytes_written, written)?;
-        tally.report.files_extracted += 1;
-        if written > 0 {
-            tally.progress.on_bytes_written(written);
-        }
-        Ok(())
+        tally.record_file(written)
     }
 
     fn symlink(&mut self, symlink: &SafeSymlink, tally: &mut Tally<'_>) -> Result<()> {

@@ -15,6 +15,7 @@ use crate::progress::CliProgress;
 use crate::progress::VerboseProgress;
 use anyhow::Context;
 use anyhow::Result;
+use exarch_core::ArchiveEntry;
 use exarch_core::ArchiveManifest;
 use exarch_core::ExtractionOptions;
 use exarch_core::ExtractionReport;
@@ -807,6 +808,25 @@ fn is_tar_archive(archive: &Path) -> bool {
     )
 }
 
+/// The extraction config for the list pass: the same quota, path, allowlist
+/// and decoder limits, with the flags that only matter once bytes are written
+/// reset to their deny-by-default values.
+fn list_config_for(config: &SecurityConfig) -> SecurityConfig {
+    let mut list_config = config.clone();
+    list_config.allowed.symlinks = false;
+    list_config.allowed.hardlinks = false;
+    list_config.allowed.world_writable = false;
+    list_config.preserve_permissions = false;
+    list_config
+}
+
+/// Whether extraction will write `entry` as a file: a file whose extension the
+/// allowlist admits is written, any other is skipped.
+fn is_extracted_file(entry: &ArchiveEntry, config: &SecurityConfig) -> bool {
+    entry.kind == ManifestEntryKind::File
+        && config.is_path_extension_allowed(entry.path.extension().and_then(|s| s.to_str()))
+}
+
 /// Number of entries the progress bar counts: every listed entry, or only the
 /// files with an allowed extension when an extension filter is active.
 fn listed_entry_count(manifest: &ArchiveManifest, config: &SecurityConfig) -> usize {
@@ -817,10 +837,7 @@ fn listed_entry_count(manifest: &ArchiveManifest, config: &SecurityConfig) -> us
             .entries()
             .iter()
             .filter(|e| e.kind == ManifestEntryKind::File)
-            .filter(|e| {
-                let ext = e.path.extension().and_then(|s| s.to_str());
-                config.is_path_extension_allowed(ext)
-            })
+            .filter(|e| is_extracted_file(e, config))
             .count()
     }
 }
@@ -858,22 +875,7 @@ pub fn execute(
         config.with_banned_path_components(filter_banned_components(&args.banned_components))
     };
 
-    // list_config shares quota and path-filtering params with config but uses
-    // safe defaults for flags that only apply during extraction (symlinks,
-    // hardlinks, world-writable, permissions). allow_absolute_paths,
-    // max_path_depth, and banned_path_components are propagated so listing
-    // rejects paths that extraction would also reject on traversal grounds.
-    let list_config = SecurityConfig::default()
-        .with_max_file_count(config.max_file_count)
-        .with_max_total_size(config.max_total_size)
-        .with_max_file_size(config.max_file_size)
-        .with_max_compression_ratio(config.max_compression_ratio)
-        .with_allow_solid_archives(config.allow_solid_archives)
-        .with_zip_consistency(config.zip_consistency)
-        .with_allow_absolute_paths(config.allowed.absolute_paths)
-        .with_max_path_depth(config.max_path_depth)
-        .with_max_decoder_memory(config.max_decoder_memory)
-        .with_banned_path_components(config.banned_path_components.clone());
+    let list_config = list_config_for(&config);
 
     // Under `--atomic` the list pass would only size the progress bar: no
     // conflict check runs and the staged extraction refuses on its own.
@@ -890,7 +892,7 @@ pub fn execute(
         let conflicts: Vec<_> = manifest
             .entries()
             .iter()
-            .filter(|e| e.kind == ManifestEntryKind::File)
+            .filter(|e| is_extracted_file(e, &config))
             .map(|e| {
                 let relative = if args.allow_absolute_paths && e.path.is_absolute() {
                     e.path.strip_prefix("/").unwrap_or(&e.path)

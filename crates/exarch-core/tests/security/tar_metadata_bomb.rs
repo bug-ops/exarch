@@ -35,8 +35,11 @@ use exarch_core::ArchiveError;
 use exarch_core::ExtractionOptions;
 use exarch_core::NoopProgress;
 use exarch_core::SecurityConfig;
+use exarch_core::TarAmbiguity;
 use exarch_core::formats::ArchiveFormat;
 use exarch_core::formats::TarArchive;
+use exarch_testkit::pax::record as pax_record;
+use std::assert_matches;
 use std::io::Cursor;
 use std::io::Write;
 use tempfile::TempDir;
@@ -94,27 +97,6 @@ fn pad_to_block(out: &mut Vec<u8>, data: &[u8]) {
     }
 }
 
-/// Encodes one PAX extended-header record: `"LEN key=value\n"`, where `LEN`
-/// includes its own decimal digit count (the standard self-referential PAX
-/// length format).
-fn pax_record(key: &[u8], value: &[u8]) -> Vec<u8> {
-    let base = key.len() + value.len() + 3; // ' ', '=', '\n'
-    let mut len = base + 1;
-    loop {
-        let candidate_len = len.to_string().len() + base;
-        if candidate_len == len {
-            break;
-        }
-        len = candidate_len;
-    }
-    let mut record = format!("{len} ").into_bytes();
-    record.extend_from_slice(key);
-    record.push(b'=');
-    record.extend_from_slice(value);
-    record.push(b'\n');
-    record
-}
-
 /// Builds a single metadata record (`'L'`/`'K'`/`'x'`) whose declared size
 /// matches `real_bytes` exactly (a real, readable stream of that length, not
 /// a huge declared size behind a tiny one) — the shape the read-budget
@@ -157,13 +139,11 @@ fn assert_is_budget_violation(result: &exarch_core::Result<impl std::fmt::Debug>
 }
 
 fn assert_is_ambiguous_header(result: &exarch_core::Result<impl std::fmt::Debug>) {
-    match result {
-        Err(ArchiveError::InvalidArchive(reason)) => assert!(
-            reason.contains("ambiguous TAR header"),
-            "reason should name the ambiguous extension header: {reason}"
-        ),
-        other => panic!("expected an ambiguous-header InvalidArchive, got: {other:?}"),
-    }
+    assert_matches!(
+        result,
+        Err(ArchiveError::TarAmbiguity(_)),
+        "expected a TAR ambiguity refusal"
+    );
 }
 
 /// What a historical-shape archive is refused for.
@@ -720,13 +700,11 @@ fn list_and_extract_archive_also_stay_bounded_against_gnu_sparse_realsize_bomb()
 }
 
 fn assert_is_sparse_refusal(result: &exarch_core::Result<impl std::fmt::Debug>) {
-    match result {
-        Err(ArchiveError::InvalidArchive(reason)) => assert!(
-            reason.contains("GNU sparse entries are not supported"),
-            "reason should name the refused sparse entry: {reason}"
-        ),
-        other => panic!("expected a sparse-entry InvalidArchive, got: {other:?}"),
-    }
+    assert_matches!(
+        result,
+        Err(ArchiveError::TarAmbiguity(TarAmbiguity::SparseEntry)),
+        "expected a sparse-entry refusal"
+    );
 }
 
 #[test]

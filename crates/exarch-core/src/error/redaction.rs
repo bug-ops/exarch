@@ -227,6 +227,7 @@ impl ArchiveError {
             | Self::InvalidArchive(_)
             | Self::ZipBomb(_)
             | Self::ZipInconsistency(_)
+            | Self::TarAmbiguity(_)
             | Self::QuotaExceeded { .. }
             | Self::SecurityViolation { .. }
             | Self::InvalidCompressionLevel { .. }

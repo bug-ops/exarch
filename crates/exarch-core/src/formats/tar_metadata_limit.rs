@@ -84,7 +84,7 @@
 //! so *every* entry hits this), and affects `extract_archive`/
 //! `TarArchive::extract` whenever any pre-read skip causes the entry not to
 //! be read at all — currently two such paths: a `SecurityConfig` extension
-//! allowlist rejecting the entry (`common::check_extension_allowed`, see the
+//! allowlist rejecting the entry (`ValidatorCore::screen_file_path_in`, see the
 //! "Cumulative synthetic-byte budget" section below) and `skip_duplicates`
 //! finding the destination path already exists
 //! (`common::extract_file_with_permit`, `formats/common.rs`) — both return
@@ -100,7 +100,7 @@
 //!
 //! [`SYNTHETIC_PAD_CAP_BYTES`] bounds the drain cost of any *single* unread
 //! entry, but a caller with an extension allowlist configured
-//! (`common::check_extension_allowed`) skips disallowed entries *before*
+//! (`ValidatorCore::screen_file_path_in`) skips disallowed entries *before*
 //! `QuotaTracker` ever sees them (intentional — see PR #421, which moved the
 //! check there specifically to stop quota from double-counting files that
 //! end up skipped); `skip_duplicates` skips an already-extracted path after

@@ -21,6 +21,7 @@ use crate::error::QuotaResource;
 use crate::formats::ZipArchive;
 use crate::formats::common::EntryCompleteGuard;
 use crate::formats::common::encrypted_archive_error;
+use crate::formats::common::is_extension_allowed;
 use crate::formats::common::normalize_entry_name;
 use crate::formats::common::symlink_target_too_large;
 use crate::formats::compression::CompressionCodec;
@@ -77,7 +78,6 @@ use crate::security::fs_view::LinkKind;
 use crate::security::fs_view::MAX_SYMLINK_TARGET_BYTES;
 use crate::security::fs_view::check_name_lengths;
 use crate::security::fs_view::name_too_long;
-use crate::security::quota::QuotaPermit;
 use crate::security::quota::QuotaTracker;
 use crate::security::validator::EntryPath;
 use crate::security::validator::NodeKind;
@@ -381,15 +381,24 @@ enum ListMode {
 
 /// Reserves quota for a listed entry; the pre-flight lifts only the per-file
 /// size limit.
+///
+/// A regular file the extension allowlist excludes is skipped by extraction
+/// before it charges any bytes, so it is charged to `max_file_count` alone:
+/// the manifest stays bounded without counting bytes never written.
 fn reserve_entry(
     quota: &mut QuotaTracker,
     size: u64,
     config: &SecurityConfig<Validated>,
     mode: ListMode,
-) -> Result<QuotaPermit> {
-    match mode {
-        ListMode::Strict => quota.reserve(size, config),
-        ListMode::VerifyPreflight => quota.reserve_without_file_limit(size, config),
+    file_at: Option<&Path>,
+) -> Result<()> {
+    let skipped = file_at.is_some_and(|path| !is_extension_allowed(path, config));
+    match (skipped, mode) {
+        (true, _) => quota.reserve_count(config).map(drop),
+        (false, ListMode::Strict) => quota.reserve(size, config).map(drop),
+        (false, ListMode::VerifyPreflight) => {
+            quota.reserve_without_file_limit(size, config).map(drop)
+        }
     }
 }
 
@@ -484,6 +493,11 @@ fn list_tar_entries<R: std::io::Read>(
 
         let size = entry.size();
 
+        let path = entry
+            .path()
+            .map_err(|e| ArchiveError::InvalidArchive(format!("invalid path: {e}")))?
+            .into_owned();
+
         // Route through the same QuotaTracker used by extraction: per-file
         // size, file count, and total size (with checked arithmetic) are all
         // enforced here using the same logic. Note this doesn't make listing
@@ -495,12 +509,9 @@ fn list_tar_entries<R: std::io::Read>(
         // explicit `entry.abandon()`; harmless — the guard's bounded drain
         // on drop is pointless I/O in that case, not a correctness
         // requirement (see `TarEntryGuard::abandon`).
-        let _permit = reserve_entry(&mut quota, size, config, list_mode)?;
-
-        let path = entry
-            .path()
-            .map_err(|e| ArchiveError::InvalidArchive(format!("invalid path: {e}")))?
-            .into_owned();
+        let file_at = matches!(tar_node(entry.header().entry_type()), Ok(TarNode::File))
+            .then_some(path.as_path());
+        reserve_entry(&mut quota, size, config, list_mode, file_at)?;
 
         if list_mode == ListMode::Strict && has_null_bytes(&path) {
             return Err(ArchiveError::violation(format!(
@@ -678,8 +689,6 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
         // and extraction fully equivalent — extraction's QuotaTracker does not
         // record directories, while listing records every entry type, a
         // pre-existing divergence.
-        let _permit = reserve_entry(&mut quota, entry.size(), config, list_mode)?;
-
         let raw_name = entry
             .name()
             .map_err(|e| ArchiveError::InvalidArchive(format!("invalid entry name: {e}")))?
@@ -691,11 +700,13 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
             }
         };
         let kind = zip_node_kind(&path, &entry)?;
+        let entry_type = convert_zip_entry_type(&entry, kind);
+        let file_at = (entry_type == ManifestEntryType::File).then_some(path.as_path());
+        reserve_entry(&mut quota, entry.size(), config, list_mode, file_at)?;
         if !admit_path(&path, kind, &mut manifest, listing)? {
             continue;
         }
 
-        let entry_type = convert_zip_entry_type(&entry, kind);
         let size = entry.size();
         let compression = EntryCompression::Entry(entry.compressed_size());
         let mode = entry.unix_mode().map(|m| m & 0o7777);
@@ -958,16 +969,16 @@ fn list_sevenz_archive(
         // and extraction fully equivalent — extraction's QuotaTracker does not
         // record directories, while listing records every entry type, a
         // pre-existing divergence.
-        let _permit = reserve_entry(&mut quota, entry.size, config, list_mode)?;
-
         let path = PathBuf::from(normalize_entry_name(&entry.name));
+        let entry_type = kind.manifest_type();
+        let file_at = (entry_type == ManifestEntryType::File).then_some(path.as_path());
+        reserve_entry(&mut quota, entry.size, config, list_mode, file_at)?;
 
         if contains_traversal(&path, config) {
             return Err(ArchiveError::PathTraversal { path });
         }
 
         require_non_empty_name(&path)?;
-        let entry_type = kind.manifest_type();
         if !admit_path(&path, kind.node_kind(), &mut manifest, listing)? {
             slots.push(None);
             continue;

@@ -271,7 +271,7 @@ impl ArchiveError {
             Self::SecurityViolation { relaxable_by, .. } => FfiKind::SecurityViolation {
                 relaxable_by: *relaxable_by,
             },
-            Self::InvalidArchive(_) => FfiKind::InvalidArchive,
+            Self::InvalidArchive(_) | Self::TarAmbiguity(_) => FfiKind::InvalidArchive,
             Self::Io(io_err) => FfiKind::Io(io_err.kind()),
             Self::InvalidPermissions { .. } => FfiKind::InvalidPermissions,
             Self::SourceNotFound { .. } => FfiKind::SourceNotFound,
@@ -301,7 +301,9 @@ impl ArchiveError {
             Self::HardlinkEscape { .. } => {
                 format!("hardlink target outside extraction directory: {path}")
             }
-            Self::ZipBomb(_) | Self::ZipInconsistency(_) => self.to_string(),
+            Self::ZipBomb(_) | Self::ZipInconsistency(_) | Self::TarAmbiguity(_) => {
+                self.to_string()
+            }
             Self::QuotaExceeded { resource } => resource.to_string(),
             Self::SecurityViolation { reason, .. } => {
                 format!("operation denied by security policy: {reason}")

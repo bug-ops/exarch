@@ -257,7 +257,7 @@ impl<R: Read> TarArchive<R> {
     fn process_entry<ER: Read, T: ExtractTarget>(
         entry: &mut tar::Entry<'_, ER>,
         target: &mut T,
-        ctx: &mut ExtractionContext<'_, '_>,
+        ctx: &mut ExtractionContext<'_>,
     ) -> Result<Option<HardlinkInfo>> {
         // Skip TAR metadata entries (PAX headers, GNU long names/links, sparse)
         if TarEntryAdapter::is_metadata_entry(entry) {
@@ -278,17 +278,6 @@ impl<R: Read> TarArchive<R> {
         let entry_type = TarEntryAdapter::to_entry_type(entry)?;
         let size = TarEntryAdapter::get_uncompressed_size(entry);
         let mode = tar_permission_bits(entry.header());
-
-        if matches!(entry_type, EntryType::File)
-            && !common::check_extension_allowed(
-                &path,
-                ctx.config,
-                ctx.tally.report,
-                ctx.disallowed_extension_skips,
-            )
-        {
-            return Ok(None);
-        }
 
         let entry_size = EntrySize {
             uncompressed: size,
@@ -365,7 +354,7 @@ impl<R: Read> TarArchive<R> {
         let mut hardlink_duplicate_skips: u64 = 0;
         // Same aggregation, for entries rejected by the extension allowlist
         // (issue #495).
-        let mut disallowed_extension_skips: u64 = 0;
+        let mut extension_skips: u64 = 0;
 
         let reader = self.inner.take().ok_or_else(|| {
             ArchiveError::InvalidArchive("archive reader already consumed by list()".into())
@@ -380,11 +369,10 @@ impl<R: Read> TarArchive<R> {
                 report: &mut report,
                 options,
                 duplicate_skips: &mut duplicate_skips,
+                extension_skips: &mut extension_skips,
                 progress,
             },
             hardlink_duplicate_skips: &mut hardlink_duplicate_skips,
-            disallowed_extension_skips: &mut disallowed_extension_skips,
-            config,
         };
 
         while let Some(entry_result) = entries.next_entry() {
@@ -544,27 +532,21 @@ impl<R: Read> ArchiveFormat for TarArchive<R> {
     }
 }
 
-struct ExtractionContext<'a, 'v> {
+struct ExtractionContext<'a> {
     tally: Tally<'a>,
     /// Count of hardlinks skipped as pre-existing duplicates. Tracked
     /// separately from the tally's `duplicate_skips` because hardlinks are
     /// TAR-specific (ZIP has no hardlink entry type).
     hardlink_duplicate_skips: &'a mut u64,
-    /// Count of file entries skipped by `common::check_extension_allowed`
-    /// because their extension is not in the allowlist. Aggregated into a
-    /// single warning by [`push_duplicate_skip_warnings`] instead of one
-    /// warning per entry (issue #495).
-    disallowed_extension_skips: &'a mut u64,
-    config: &'v SecurityConfig<Validated>,
 }
 
-impl ExtractionContext<'_, '_> {
+impl ExtractionContext<'_> {
     fn push_skip_warnings(&mut self) {
         push_duplicate_skip_warnings(
             self.tally.report,
             *self.tally.duplicate_skips,
             *self.hardlink_duplicate_skips,
-            *self.disallowed_extension_skips,
+            *self.tally.extension_skips,
         );
     }
 }
@@ -2105,11 +2087,12 @@ mod tests {
                 }
                 let mut report = ExtractionReport::new();
                 let mut progress = crate::NoopProgress;
-                let (mut skips, mut link_skips) = (0u64, 0u64);
+                let (mut skips, mut link_skips, mut extension_skips) = (0u64, 0u64, 0u64);
                 let mut tally = Tally {
                     report: &mut report,
                     options: SinkOptions::default(),
                     duplicate_skips: &mut skips,
+                    extension_skips: &mut extension_skips,
                     progress: &mut progress,
                 };
                 Ok(target.hardlink(
@@ -2487,10 +2470,12 @@ mod tests {
         let mut progress = crate::NoopProgress;
         let mut duplicate_skips = 0u64;
         let mut hardlink_duplicate_skips = 0u64;
+        let mut extension_skips = 0u64;
         let mut tally = Tally {
             report: &mut report,
             options: SinkOptions::default(),
             duplicate_skips: &mut duplicate_skips,
+            extension_skips: &mut extension_skips,
             progress: &mut progress,
         };
 
@@ -2741,20 +2726,7 @@ mod tests {
     fn create_tar_with_pax_size_override(filename: &str, pax_size: u64, data: &[u8]) -> Vec<u8> {
         let mut out = Vec::new();
 
-        // PAX key-value: "<len> size=<N>\n" where len equals the total record
-        // byte count.
-        let kv_suffix = format!(" size={pax_size}\n");
-        let mut total = 1 + kv_suffix.len(); // start with 1 digit
-        loop {
-            let digits = total.to_string().len();
-            let candidate = digits + kv_suffix.len();
-            if candidate == total {
-                break;
-            }
-            total = candidate;
-        }
-        let pax_data = format!("{total}{kv_suffix}");
-        let pax_bytes = pax_data.as_bytes();
+        let pax_bytes = &exarch_testkit::pax::record(b"size", pax_size.to_string().as_bytes());
 
         // PAX extended header (type 'x') with the computed size
         let mut pax_header = tar::Header::new_ustar();

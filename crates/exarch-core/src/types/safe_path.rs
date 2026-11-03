@@ -290,8 +290,11 @@ impl SafePath {
         let resolved = dest.join(final_path.as_ref());
 
         // The root is already canonical, so a direct child needs no parent
-        // probe.
-        if let Some(parent) = resolved.parent().filter(|parent| *parent != dest) {
+        // probe; a walker-backed target vets the parent at write time instead.
+        if let Some(parent) = resolved
+            .parent()
+            .filter(|parent| *parent != dest && !ctx.defers_parent_probe())
+        {
             match view.canonicalize(parent, root) {
                 Ok(Containment::Within(_)) => {}
                 Ok(Containment::Escapes) => {
@@ -1806,5 +1809,36 @@ mod tests {
             Err(ArchiveError::PathTraversal { .. }),
             "{result:?}"
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn walker_backed_context_defers_the_parent_probe_to_the_write() {
+        use crate::formats::pinned_dir::PinnedRoot;
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().expect("setup");
+        let base = temp.path().canonicalize().expect("setup");
+        let outside = base.join("outside");
+        std::fs::create_dir(base.join("dest")).expect("setup");
+        std::fs::create_dir(&outside).expect("setup");
+        symlink(&outside, base.join("dest/link")).expect("setup");
+        let dest = DestDir::new(base.join("dest")).expect("setup");
+        let config = SecurityConfig::default().validate().expect("setup");
+        let path = Path::new("link/x.txt");
+
+        let probed = SafePath::validate_with_context(
+            path,
+            &dest,
+            &config,
+            &ValidationContext::<HostFs>::new(false),
+        );
+        assert_matches!(probed, Err(ArchiveError::PathTraversal { .. }));
+
+        let root = PinnedRoot::open_for_test(&base.join("dest")).expect("setup");
+        let deferred =
+            ValidationContext::<HostFs>::new(false).with_walker(root.backs_parent_probe());
+        SafePath::validate_with_context(path, &dest, &config, &deferred)
+            .expect("the walker vets the parent at write time");
     }
 }

@@ -315,7 +315,7 @@ fn the_ignore_policy_decodes_nothing_and_finds_nothing_in_entry_data() {
 #[test]
 fn an_archive_opened_without_stream_checks_is_refused_under_enforce() {
     let built = RawZip::new(vec![known_size_entry("a.bin", 8, PAYLOAD, &[])]).build();
-    let archive = ZipArchive::for_config(
+    let mut archive = ZipArchive::for_config(
         Cursor::new(built.bytes),
         &config(ZipConsistencyPolicy::Ignore),
     )

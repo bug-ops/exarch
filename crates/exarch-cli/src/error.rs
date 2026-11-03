@@ -301,7 +301,7 @@ pub fn convert_extraction_error(err: ArchiveError, archive: &Path) -> anyhow::Er
             TerminalPath::new(path),
             supported_formats(),
         ),
-        ArchiveError::InvalidArchive(_) => format!(
+        ArchiveError::InvalidArchive(_) | ArchiveError::TarAmbiguity(_) => format!(
             "Invalid archive '{archive}'\n\
              HINT: The archive may be corrupted or malformed."
         ),

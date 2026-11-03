@@ -28,6 +28,10 @@ use tar::PaxExtensions;
 
 use crate::ArchiveError;
 use crate::Result;
+use crate::TarAmbiguity;
+use crate::TarExtensionKind;
+use crate::TarHeaderField;
+use crate::TarPathKey;
 use crate::formats::tar_metadata_limit::MetadataWindow;
 
 const PAX_PATH: &[u8] = b"path";
@@ -37,7 +41,7 @@ const PAX_SPARSE_PREFIX: &[u8] = b"GNU.sparse.";
 const PAX_REALSIZE: &[u8] = b"SCHILY.realsize";
 
 /// Longest PAX record `libarchive` accepts, in bytes.
-const MAX_PAX_RECORD_BYTES: usize = 999_999;
+pub const MAX_PAX_RECORD_BYTES: usize = 999_999;
 
 /// Longest key or name echoed in an error message.
 const MAX_ECHOED_BYTES: usize = 256;
@@ -46,61 +50,6 @@ const SIZE_FIELD: std::ops::Range<usize> = 124..136;
 const CHECKSUM_FIELD: std::ops::Range<usize> = 148..156;
 const PREFIX_OFFSET: usize = 345;
 const BASE256_MARKER: u8 = 0x80;
-
-/// A TAR header or extension-header construct that readers resolve
-/// differently.
-#[derive(Debug, thiserror::Error)]
-enum ExtensionConflict {
-    #[error("malformed PAX record")]
-    MalformedRecord,
-    #[error("PAX record with an empty key")]
-    EmptyKey,
-    #[error("PAX record {0:?} is longer than {MAX_PAX_RECORD_BYTES} bytes")]
-    OversizedRecord(String),
-    #[error("duplicate PAX record {0:?}")]
-    DuplicateRecord(String),
-    #[error("PAX record {0:?} is not supported")]
-    UnsupportedRecord(String),
-    #[error("PAX `size` record is not a decimal number")]
-    InvalidSize,
-    #[error("global PAX record {0:?} would apply to later entries")]
-    GlobalOverride(String),
-    #[error("global PAX header ({size} bytes) exceeds the metadata limit of {limit} bytes")]
-    GlobalTooLarge { size: u64, limit: u64 },
-    #[error("global PAX header follows a local PAX header")]
-    LocalBeforeGlobal,
-    #[error("global PAX header follows a GNU long name or link record")]
-    LongRecordBeforeGlobal,
-    #[error("PAX `{key}` record and a GNU long {what} record both describe the same entry")]
-    StackedLongRecord {
-        key: &'static str,
-        what: &'static str,
-    },
-    #[error("extension header {0:?} lacks a ustar or GNU magic")]
-    UnrecognizedHeader(EntryType),
-    #[error("GNU sparse entries are not supported")]
-    SparseEntry,
-    #[error("header {field} field is not a plain octal or base-256 number")]
-    NonCanonicalNumber { field: &'static str },
-    #[error("header carries a prefix field without a ustar magic")]
-    PrefixWithoutUstar,
-    #[error("header checksum does not match the header bytes")]
-    ChecksumMismatch,
-    #[error("duplicate {0} extension header")]
-    DuplicateExtensionHeader(window::ExtensionKind),
-    #[error("bytes read before the entry do not match the position of its header")]
-    WindowMismatch,
-    #[error("extension header body is followed by non-zero padding")]
-    NonZeroPadding,
-    #[error("{0} extension header is not a single NUL-terminated string")]
-    MalformedLongRecord(window::ExtensionKind),
-}
-
-impl From<ExtensionConflict> for ArchiveError {
-    fn from(conflict: ExtensionConflict) -> Self {
-        Self::InvalidArchive(format!("ambiguous TAR header: {conflict}"))
-    }
-}
 
 /// Whether a PAX header describes the next entry or every later entry.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -143,7 +92,7 @@ fn record_len(key: &[u8], value: &[u8]) -> usize {
     let mut digits = 1;
     loop {
         let total = base.saturating_add(digits);
-        let needed = total.to_string().len();
+        let needed = total.checked_ilog10().map_or(1, |d| d as usize + 1);
         if needed <= digits {
             return total;
         }
@@ -155,30 +104,30 @@ fn scan_records(records: PaxExtensions<'_>, scope: PaxScope) -> Result<PathOverr
     let mut seen: HashSet<&[u8]> = HashSet::new();
     let mut overrides = PathOverrides::default();
     for record in records {
-        let record = record.map_err(|_| ExtensionConflict::MalformedRecord)?;
+        let record = record.map_err(|_| TarAmbiguity::MalformedRecord)?;
         let key = record.key_bytes();
         let value = record.value_bytes();
         if key.is_empty() {
-            return Err(ExtensionConflict::EmptyKey.into());
+            return Err(TarAmbiguity::EmptyKey.into());
         }
         if record_len(key, value) > MAX_PAX_RECORD_BYTES {
-            return Err(ExtensionConflict::OversizedRecord(lossy(key)).into());
+            return Err(TarAmbiguity::OversizedRecord { key: lossy(key) }.into());
         }
         if !seen.insert(key) {
-            return Err(ExtensionConflict::DuplicateRecord(lossy(key)).into());
+            return Err(TarAmbiguity::DuplicateRecord { key: lossy(key) }.into());
         }
         if key.starts_with(PAX_SPARSE_PREFIX) || key == PAX_REALSIZE {
-            return Err(ExtensionConflict::UnsupportedRecord(lossy(key)).into());
+            return Err(TarAmbiguity::UnsupportedRecord { key: lossy(key) }.into());
         }
         let overrides_entry = [PAX_PATH, PAX_LINKPATH, PAX_SIZE].contains(&key);
         if scope == PaxScope::Global && overrides_entry {
-            return Err(ExtensionConflict::GlobalOverride(lossy(key)).into());
+            return Err(TarAmbiguity::GlobalOverride { key: lossy(key) }.into());
         }
         match key {
             PAX_PATH => overrides.path = Some(value.to_vec()),
             PAX_LINKPATH => overrides.linkpath = Some(value.to_vec()),
             PAX_SIZE if !is_decimal(value) => {
-                return Err(ExtensionConflict::InvalidSize.into());
+                return Err(TarAmbiguity::InvalidSize.into());
             }
             _ => {}
         }
@@ -200,7 +149,7 @@ fn check_record_framing(body: &[u8]) -> Result<()> {
         let space = rest
             .iter()
             .position(|&b| b == b' ')
-            .ok_or(ExtensionConflict::MalformedRecord)?;
+            .ok_or(TarAmbiguity::MalformedRecord)?;
         let digits = &rest[..space];
         let canonical = !digits.is_empty()
             && digits.iter().all(u8::is_ascii_digit)
@@ -209,10 +158,10 @@ fn check_record_framing(body: &[u8]) -> Result<()> {
             .then(|| std::str::from_utf8(digits).ok()?.parse::<usize>().ok())
             .flatten()
             .filter(|len| (1..=MAX_PAX_RECORD_BYTES).contains(len))
-            .ok_or(ExtensionConflict::MalformedRecord)?;
-        let record = rest.get(..len).ok_or(ExtensionConflict::MalformedRecord)?;
+            .ok_or(TarAmbiguity::MalformedRecord)?;
+        let record = rest.get(..len).ok_or(TarAmbiguity::MalformedRecord)?;
         if record.last() != Some(&b'\n') {
-            return Err(ExtensionConflict::MalformedRecord.into());
+            return Err(TarAmbiguity::MalformedRecord.into());
         }
         rest = &rest[len..];
     }
@@ -242,13 +191,19 @@ fn check_header_fields(header: &Header) -> Result<()> {
 
 fn check_header_block(bytes: &[u8; 512], has_ustar_magic: bool) -> Result<()> {
     if !is_plain_octal(&bytes[SIZE_FIELD]) && !is_plain_base256(&bytes[SIZE_FIELD]) {
-        return Err(ExtensionConflict::NonCanonicalNumber { field: "size" }.into());
+        return Err(TarAmbiguity::NonCanonicalNumber {
+            field: TarHeaderField::Size,
+        }
+        .into());
     }
     if !is_plain_octal(&bytes[CHECKSUM_FIELD]) {
-        return Err(ExtensionConflict::NonCanonicalNumber { field: "checksum" }.into());
+        return Err(TarAmbiguity::NonCanonicalNumber {
+            field: TarHeaderField::Checksum,
+        }
+        .into());
     }
     if !has_ustar_magic && bytes[PREFIX_OFFSET] != 0 {
-        return Err(ExtensionConflict::PrefixWithoutUstar.into());
+        return Err(TarAmbiguity::PrefixWithoutUstar.into());
     }
     Ok(())
 }
@@ -322,13 +277,17 @@ pub fn check_entry_headers<R: Read>(
 fn check_parsed_headers<R: Read>(entry: &mut Entry<'_, R>, metadata_limit: u64) -> Result<()> {
     check_header_fields(entry.header())?;
     match entry.header().entry_type() {
-        kind @ (EntryType::XHeader | EntryType::GNULongName | EntryType::GNULongLink) => {
-            Err(ExtensionConflict::UnrecognizedHeader(kind).into())
-        }
-        EntryType::GNUSparse => Err(ExtensionConflict::SparseEntry.into()),
+        EntryType::XHeader => Err(unrecognized(TarExtensionKind::Pax)),
+        EntryType::GNULongName => Err(unrecognized(TarExtensionKind::LongName)),
+        EntryType::GNULongLink => Err(unrecognized(TarExtensionKind::LongLink)),
+        EntryType::GNUSparse => Err(TarAmbiguity::SparseEntry.into()),
         EntryType::XGlobalHeader => check_global_header(entry, metadata_limit),
         _ => check_local_headers(entry),
     }
+}
+
+fn unrecognized(kind: TarExtensionKind) -> ArchiveError {
+    TarAmbiguity::UnrecognizedHeader { kind }.into()
 }
 
 fn check_local_headers<R: Read>(entry: &mut Entry<'_, R>) -> Result<()> {
@@ -343,18 +302,16 @@ fn check_local_headers<R: Read>(entry: &mut Entry<'_, R>) -> Result<()> {
     if let Some(pax_path) = overrides.path
         && *entry.path_bytes() != *pax_path
     {
-        return Err(ExtensionConflict::StackedLongRecord {
-            key: "path",
-            what: "name",
+        return Err(TarAmbiguity::StackedLongRecord {
+            key: TarPathKey::Path,
         }
         .into());
     }
     if let Some(pax_linkpath) = overrides.linkpath
         && entry.link_name_bytes().as_deref() != Some(pax_linkpath.as_slice())
     {
-        return Err(ExtensionConflict::StackedLongRecord {
-            key: "linkpath",
-            what: "link",
+        return Err(TarAmbiguity::StackedLongRecord {
+            key: TarPathKey::LinkPath,
         }
         .into());
     }
@@ -364,7 +321,7 @@ fn check_local_headers<R: Read>(entry: &mut Entry<'_, R>) -> Result<()> {
 fn check_global_header<R: Read>(entry: &mut Entry<'_, R>, metadata_limit: u64) -> Result<()> {
     let size = entry.size();
     if size > metadata_limit {
-        return Err(ExtensionConflict::GlobalTooLarge {
+        return Err(TarAmbiguity::GlobalTooLarge {
             size,
             limit: metadata_limit,
         }
@@ -385,14 +342,14 @@ fn check_global_header<R: Read>(entry: &mut Entry<'_, R>, metadata_limit: u64) -
         .map_err(|e| ArchiveError::InvalidArchive(format!("failed to read PAX header: {e}")))?
         .is_some_and(|mut records| records.next().is_some());
     if follows_local {
-        return Err(ExtensionConflict::LocalBeforeGlobal.into());
+        return Err(TarAmbiguity::LocalBeforeGlobal.into());
     }
 
     let header = entry.header();
     if *entry.path_bytes() != *header.path_bytes()
         || entry.link_name_bytes() != header.link_name_bytes()
     {
-        return Err(ExtensionConflict::LongRecordBeforeGlobal.into());
+        return Err(TarAmbiguity::LongRecordBeforeGlobal.into());
     }
 
     scan_records(PaxExtensions::new(&body), PaxScope::Global)?;

@@ -44,22 +44,35 @@ use crate::security::zipbomb::validate_entry_compression;
 use crate::types::SafePath;
 use crate::types::safe_symlink::require_symlinks_allowed;
 
-/// The configuration under which an archive passed admission: solid policy,
-/// decoder memory, coders and block layout.
+/// A 7z archive that passed [`SevenZArchive::admit`] under `config`: solid
+/// policy, decoder memory, coders and block layout.
 ///
-/// Extraction reads its configuration from the token, so the checks of the
-/// pre-pass and the decode use the one `config` admission used. The token is
-/// made by [`SevenZArchive::admit`] and does not borrow the archive; pass it
-/// back to the same archive.
-#[derive(Debug, Clone, Copy)]
-pub struct SevenZAdmission<'c> {
-    config: &'c SecurityConfig<Validated>,
+/// Extraction goes through [`Self::extract_with`], which builds the target
+/// from the admission's `config`, so the pre-pass, the decode and the target
+/// use the one configuration. The token owns the archive borrow, so it cannot
+/// be redeemed against another archive.
+pub struct AdmittedSevenZ<'a, R: Read + Seek> {
+    archive: &'a mut SevenZArchive<R>,
+    config: &'a SecurityConfig<Validated>,
 }
 
-impl<'c> SevenZAdmission<'c> {
-    /// The configuration the archive was admitted under.
-    pub const fn config(self) -> &'c SecurityConfig<Validated> {
-        self.config
+impl<'a, R: Read + Seek> AdmittedSevenZ<'a, R> {
+    /// Extracts into the target `make_target` builds from the admission's
+    /// config.
+    ///
+    /// # Errors
+    ///
+    /// Returns the target's construction error, or the first extraction
+    /// refusal.
+    pub(crate) fn extract_with<T: SevenZTarget>(
+        self,
+        make_target: impl FnOnce(&'a SecurityConfig<Validated>) -> Result<T>,
+        options: SinkOptions,
+        progress: &mut dyn ProgressCallback,
+    ) -> Result<ExtractionReport> {
+        let mut target = make_target(self.config)?;
+        self.archive
+            .extract_admitted(self.config, &mut target, options, progress)
     }
 }
 
@@ -122,28 +135,30 @@ impl<R: Read + Seek> SevenZArchive<R> {
     /// # Errors
     ///
     /// Returns the first admission refusal.
-    pub(crate) fn admit<'c>(
-        &self,
-        config: &'c SecurityConfig<Validated>,
-    ) -> Result<SevenZAdmission<'c>> {
+    pub(crate) fn admit<'a>(
+        &'a mut self,
+        config: &'a SecurityConfig<Validated>,
+    ) -> Result<AdmittedSevenZ<'a, R>> {
         if let Some(refusal) = iter_sevenz_refusals(&self.header, config).next() {
             return Err(refusal.into_error());
         }
-        Ok(SevenZAdmission { config })
+        Ok(AdmittedSevenZ {
+            archive: self,
+            config,
+        })
     }
 
     /// Extracts into `target`.
     ///
     /// Everything that can be refused from the file table alone (ratios,
     /// quotas, link policy, paths) is refused before the target sees an entry.
-    pub(crate) fn extract_into<T: SevenZTarget>(
+    fn extract_admitted<T: SevenZTarget>(
         &mut self,
-        admission: SevenZAdmission<'_>,
+        config: &SecurityConfig<Validated>,
         target: &mut T,
         options: SinkOptions,
         progress: &mut dyn ProgressCallback,
     ) -> Result<ExtractionReport> {
-        let config = admission.config();
         target.with_pre_pass(config, options, &mut |pre| self.run_pre_pass(config, pre))?;
 
         let total = self
@@ -193,6 +208,9 @@ impl<R: Read + Seek> SevenZArchive<R> {
                     // destination, so it is checked before the duplicate skip,
                     // matching what `verify` reports.
                     validate_entry_compression(&entry.compression, entry.size, config)?;
+                    if !common::is_extension_allowed(&path, config) {
+                        continue;
+                    }
                     if pre.file(&safe_path, &path)? == FilePlan::Reserve {
                         pre.reserve_file(entry.size)?;
                     }
@@ -213,7 +231,7 @@ impl<R: Read + Seek> SevenZArchive<R> {
     ) -> Result<ExtractionReport> {
         let mut report = ExtractionReport::new();
         let mut duplicate_skips = 0_u64;
-        let mut disallowed_extension_skips = 0_u64;
+        let mut extension_skips = 0_u64;
         let mut pending_error: Option<ArchiveError> = None;
         let mut index = 0_usize;
         let is_solid = self.header.is_solid();
@@ -236,18 +254,10 @@ impl<R: Read + Seek> SevenZArchive<R> {
                     report: &mut report,
                     options,
                     duplicate_skips: &mut duplicate_skips,
+                    extension_skips: &mut extension_skips,
                     progress: guard.progress_mut(),
                 };
-                process_entry(
-                    target,
-                    entry,
-                    kind,
-                    &mut *reader,
-                    &path,
-                    config,
-                    &mut disallowed_extension_skips,
-                    &mut tally,
-                )
+                process_entry(target, entry, kind, &mut *reader, &path, &mut tally)
             };
             // Entries of a solid block share one decoder stream: bytes a
             // skipped entry left unread would be served to the next entry.
@@ -276,11 +286,7 @@ impl<R: Read + Seek> SevenZArchive<R> {
             DecodeKnobs::production(),
             &mut each,
         );
-        push_skip_warnings(
-            &mut report,
-            (duplicate_skips, disallowed_extension_skips),
-            anti_items,
-        );
+        push_skip_warnings(&mut report, (duplicate_skips, extension_skips), anti_items);
         match result {
             Ok(()) => Ok(report),
             Err(error) => Err(ArchiveError::partial_or(
@@ -293,18 +299,12 @@ impl<R: Read + Seek> SevenZArchive<R> {
     }
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "arguments are threaded through from the decode loop; a parameter struct adds indirection"
-)]
 pub(super) fn process_entry<T: ExtractTarget>(
     target: &mut T,
     entry: &sevenz_rust2::ArchiveEntry,
     kind: SevenZKind,
     reader: &mut dyn Read,
     path: &Path,
-    config: &SecurityConfig<Validated>,
-    disallowed_extension_skips: &mut u64,
     tally: &mut Tally<'_>,
 ) -> Result<()> {
     let size = EntrySize {
@@ -329,14 +329,6 @@ pub(super) fn process_entry<T: ExtractTarget>(
             target.directory(&safe_path, tally)
         }
         SevenZKind::File => {
-            if !common::check_extension_allowed(
-                path,
-                config,
-                tally.report,
-                disallowed_extension_skips,
-            ) {
-                return Ok(());
-            }
             let request = FileRequest {
                 path,
                 size,

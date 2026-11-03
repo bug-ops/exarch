@@ -196,6 +196,7 @@ use crate::security::hardlink::HardlinkTracker;
 use crate::security::hardlink::hardlink_target_missing;
 use crate::security::permissions::SanitizedMode;
 use crate::security::quota::EntryCount;
+use crate::security::validator::FileScreen;
 use crate::security::validator::ValidatorCore;
 use crate::types::SafePath;
 use crate::types::SafeSymlink;
@@ -528,10 +529,10 @@ impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
     fn validate_file(
         &mut self,
         request: FileRequest<'_>,
-        _tally: &mut Tally<'_>,
+        tally: &mut Tally<'_>,
     ) -> Result<FileAdmission<ValidatedFile>> {
         let ctx = self.core.context();
-        let file = self.core.validate_file_in(
+        let screen = self.core.screen_file_path_in(
             request.path,
             request.size,
             request.mode,
@@ -539,8 +540,16 @@ impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
             &self.tree,
             &ctx,
         )?;
-        self.check_limits(request.path, None)?;
-        Ok(FileAdmission::Write(file))
+        match screen {
+            FileScreen::DisallowedExtension => {
+                tally.record_extension_skip().map(FileAdmission::Skipped)
+            }
+            FileScreen::Pending(pending) => {
+                let file = self.core.admit_file(pending)?;
+                self.check_limits(request.path, None)?;
+                Ok(FileAdmission::Write(file))
+            }
+        }
     }
 
     fn validate_directory(&mut self, path: &Path, size: EntrySize) -> Result<SafePath> {
@@ -601,7 +610,7 @@ impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
         // Overflow guard only, as on the host: the sum is not stored.
         common::checked_add_bytes(tally.report.bytes_written, size)?;
 
-        let ValidatedFile { path, mode, .. } = admitted;
+        let (path, _permit, mode) = admitted.into_parts();
         let rel = path.as_path();
         match (self.tree.occupant(rel), tally.options.skip_duplicates) {
             (Some(_), true) => return tally.record_duplicate_skip().map(drop),
@@ -620,13 +629,7 @@ impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
         self.sink.finish_file(&resolved, file).map_err(sink_error)?;
         self.sizes.insert(resolved.into_path_buf(), written);
 
-        if written > 0 {
-            tally.progress.on_bytes_written(written);
-        }
-        tally.report.files_extracted += 1;
-        tally.report.bytes_written =
-            common::checked_add_bytes(tally.report.bytes_written, written)?;
-        Ok(())
+        tally.record_file(written)
     }
 
     fn symlink(&mut self, symlink: &SafeSymlink, tally: &mut Tally<'_>) -> Result<()> {
@@ -725,9 +728,6 @@ impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
             .map_err(sink_error)?;
         self.sizes.insert(resolved.into_path_buf(), size);
 
-        tally.report.files_extracted = common::checked_add_count(tally.report.files_extracted, 1)?;
-        tally.report.bytes_written = common::checked_add_bytes(tally.report.bytes_written, size)?;
-        tally.progress.on_bytes_written(size);
-        Ok(())
+        tally.record_file(size)
     }
 }

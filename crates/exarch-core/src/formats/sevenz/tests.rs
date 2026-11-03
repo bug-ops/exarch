@@ -1965,12 +1965,13 @@ fn test_process_entry_rejects_traversal_independently() {
     let mut target = SevenZHostTarget::create(temp.path(), &config).unwrap();
     let mut report = ExtractionReport::new();
     let mut duplicate_skips = 0u64;
-    let mut disallowed_extension_skips = 0u64;
+    let mut extension_skips = 0u64;
     let mut progress = crate::NoopProgress;
     let mut tally = Tally {
         report: &mut report,
         options: SinkOptions::default().with_skip_duplicates(false),
         duplicate_skips: &mut duplicate_skips,
+        extension_skips: &mut extension_skips,
         progress: &mut progress,
     };
 
@@ -1985,8 +1986,6 @@ fn test_process_entry_rejects_traversal_independently() {
         SevenZKind::File,
         &mut std::io::empty(),
         &entry_path,
-        &config,
-        &mut disallowed_extension_skips,
         &mut tally,
     );
 
@@ -2011,7 +2010,7 @@ fn test_process_entry_duplicate_skips_saturates_at_max() {
     let mut target = SevenZHostTarget::create(temp.path(), &config).unwrap();
     let mut report = ExtractionReport::new();
     let mut duplicate_skips = u64::MAX;
-    let mut disallowed_extension_skips = 0u64;
+    let mut extension_skips = 0u64;
     let mut progress = crate::NoopProgress;
 
     let mut entry = sevenz_rust2::ArchiveEntry::new_file("existing.txt");
@@ -2024,6 +2023,7 @@ fn test_process_entry_duplicate_skips_saturates_at_max() {
             report: &mut report,
             options: SinkOptions::default(),
             duplicate_skips: &mut duplicate_skips,
+            extension_skips: &mut extension_skips,
             progress: &mut progress,
         };
         process_entry(
@@ -2032,8 +2032,6 @@ fn test_process_entry_duplicate_skips_saturates_at_max() {
             SevenZKind::File,
             &mut std::io::empty(),
             &entry_path,
-            &config,
-            &mut disallowed_extension_skips,
             &mut tally,
         )
     };

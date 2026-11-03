@@ -19,8 +19,11 @@ use exarch_core::ArchiveError;
 use exarch_core::ExtractionOptions;
 use exarch_core::NoopProgress;
 use exarch_core::SecurityConfig;
+use exarch_core::TarAmbiguity;
+use exarch_core::TarPathKey;
 use exarch_core::formats::ArchiveFormat;
 use exarch_core::formats::TarArchive;
+use exarch_testkit::pax::record as pax_record;
 use std::assert_matches;
 use std::io::Cursor;
 use tempfile::TempDir;
@@ -69,27 +72,6 @@ fn pad(out: &mut Vec<u8>, data: &[u8]) {
     if rem != 0 {
         out.extend(std::iter::repeat_n(0u8, BLOCK - rem));
     }
-}
-
-/// Encodes one PAX extended-header record: `"LEN key=value\n"`, where `LEN`
-/// includes its own decimal digit count (the standard PAX self-referential
-/// length format).
-fn pax_record(key: &[u8], value: &[u8]) -> Vec<u8> {
-    let base = key.len() + value.len() + 3; // ' ', '=', '\n'
-    let mut len = base + 1;
-    loop {
-        let candidate_len = len.to_string().len() + base;
-        if candidate_len == len {
-            break;
-        }
-        len = candidate_len;
-    }
-    let mut record = format!("{len} ").into_bytes();
-    record.extend_from_slice(key);
-    record.push(b'=');
-    record.extend_from_slice(value);
-    record.push(b'\n');
-    record
 }
 
 /// Appends two all-zero blocks: the standard TAR end-of-archive marker.
@@ -173,7 +155,11 @@ fn stacked_gnu_longname_and_pax_path_with_benign_gnu_name_is_refused() {
     let (result, temp) = extract(&t);
     assert_matches!(
         result,
-        Err(ArchiveError::InvalidArchive(_)),
+        Err(ArchiveError::TarAmbiguity(
+            TarAmbiguity::StackedLongRecord {
+                key: TarPathKey::Path
+            }
+        )),
         "stacked GNU long name and PAX path must be refused, got: {result:?}"
     );
     assert!(!temp.path().join("benign_from_gnu.txt").exists());
@@ -195,7 +181,11 @@ fn stacked_gnu_longname_and_pax_path_with_traversal_gnu_name_is_refused() {
     let (result, _temp) = extract(&t);
     assert_matches!(
         result,
-        Err(ArchiveError::InvalidArchive(_)),
+        Err(ArchiveError::TarAmbiguity(
+            TarAmbiguity::StackedLongRecord {
+                key: TarPathKey::Path
+            }
+        )),
         "stacked GNU long name and PAX path must be refused, got: {result:?}"
     );
 }

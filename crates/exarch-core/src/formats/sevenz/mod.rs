@@ -340,11 +340,8 @@ impl<R: Read + Seek> ArchiveFormat for SevenZArchive<R> {
         options: &ExtractionOptions,
         progress: &mut dyn ProgressCallback,
     ) -> Result<ExtractionReport> {
-        let admission = self.admit(config)?;
-        let mut target = SevenZHostTarget::create(output_dir, admission.config())?;
-        self.extract_into(
-            admission,
-            &mut target,
+        self.admit(config)?.extract_with(
+            |config| SevenZHostTarget::create(output_dir, config),
             SinkOptions::duplicates_of(options),
             progress,
         )

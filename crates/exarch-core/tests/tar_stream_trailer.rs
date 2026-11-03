@@ -368,6 +368,7 @@ fn replay_enforces_the_extract_configs_trailer_limit() {
         &archive,
         &SecurityConfig::default(),
         &ListOptions::default(),
+        exarch_core::DecodeReuse::default(),
     )
     .unwrap();
     let out = TempDir::new().unwrap();

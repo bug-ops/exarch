@@ -3,8 +3,10 @@
 use clap::Parser;
 use clap::Subcommand;
 use clap_complete::Shell;
+use exarch_core::DecodeReuse;
 use exarch_core::DecompressionBudget;
 use exarch_core::ParallelDecode;
+use exarch_core::ReuseLimit;
 use exarch_core::SecurityConfig;
 use exarch_core::ZipConsistencyPolicy;
 use std::num::NonZeroU64;
@@ -98,6 +100,37 @@ impl From<ZipConsistencyArg> for ZipConsistencyPolicy {
     }
 }
 
+/// Where `extract` keeps the output of the ZIP structure check so deflate
+/// entries are decoded once.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DecodeReuseArg {
+    /// Keep nothing; deflate entries are decoded twice
+    Off,
+    /// Keep up to 32 MiB in memory
+    Memory,
+    /// Keep up to 256 MiB in an unnamed temporary file
+    TempFile,
+}
+
+impl DecodeReuseArg {
+    /// The mode of the flag, or the platform default when it is omitted:
+    /// a temporary file where there is one, memory on WASI.
+    pub const fn resolve(arg: Option<Self>) -> DecodeReuse {
+        match arg {
+            Some(Self::Off) => DecodeReuse::Off,
+            Some(Self::Memory) => DecodeReuse::Memory(ReuseLimit::DEFAULT),
+            Some(Self::TempFile) => DecodeReuse::TempFile(ReuseLimit::MAX),
+            None => {
+                if cfg!(target_os = "wasi") {
+                    DecodeReuse::Memory(ReuseLimit::DEFAULT)
+                } else {
+                    DecodeReuse::TempFile(ReuseLimit::MAX)
+                }
+            }
+        }
+    }
+}
+
 /// ZIP structure policy flag shared by `extract`, `list` and `verify`, so all
 /// three accept and reject the same archives.
 #[derive(clap::Args, Clone, Copy)]
@@ -171,6 +204,15 @@ pub struct ExtractArgs {
 
     #[command(flatten)]
     pub parallel: ParallelDecodeArgs,
+
+    /// Where to keep what the ZIP structure check decodes, so deflate entries
+    /// are not decoded a second time (default: temp-file, memory on WASI). A
+    /// temp file lives in the temporary directory, which is memory on a tmpfs,
+    /// and holds the plaintext of the archive until extraction ends; it is
+    /// unnamed and removed on close. Entries that do not fit, bzip2 and zstd
+    /// entries are decoded again.
+    #[arg(long, value_enum, value_name = "MODE")]
+    pub decode_reuse: Option<DecodeReuseArg>,
 
     /// Maximum path depth allowed (default: 32, minimum: 1)
     #[arg(long, default_value = "32")]

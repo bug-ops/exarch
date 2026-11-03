@@ -21,6 +21,10 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use super::DestDir;
+pub(crate) use super::parent_check::ParentCheck;
+pub(crate) use super::parent_check::Resolved;
+#[cfg(any(unix, target_os = "wasi"))]
+pub(crate) use super::parent_check::Walked;
 
 /// A validated path that is safe for extraction.
 ///
@@ -42,7 +46,7 @@ use super::DestDir;
 /// # Parent state
 ///
 /// The type parameter records how the parent directory was vetted:
-/// [`Resolved`] (the default, and the only state outside this crate) means
+/// `Resolved` (the default) means
 /// validation resolved it, so the path can be joined to the destination and
 /// used by name. An extraction onto a pinned directory handle vets each
 /// parent when it writes instead, and its paths cannot be joined by name.
@@ -70,58 +74,6 @@ use super::DestDir;
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SafePath<P: ParentCheck = Resolved>(PathBuf, PhantomData<fn() -> P>);
-
-mod sealed {
-    pub trait Sealed: std::fmt::Debug + Clone + PartialEq + Eq + std::hash::Hash {}
-}
-
-/// How the parent directory of a validated [`SafePath`] was vetted.
-///
-/// Sealed: [`Resolved`] is the only state outside this crate. The typed
-/// path-based APIs (`DestDir::join`, and the crate-internal read-only probe)
-/// refuse a path whose parent is vetted at write time at compile time, so such
-/// a path reaches the filesystem only through a directory-handle writer.
-/// [`SafePath::as_path`] stays a raw read-only escape, and path-based
-/// mutators inside `exarch-core` are linted with
-/// `clippy::disallowed_methods`.
-pub trait ParentCheck: sealed::Sealed {
-    /// What validation needs to skip the parent probe.
-    #[doc(hidden)]
-    type Proof<'r>;
-
-    /// Whether validation resolves the parent directory itself.
-    #[doc(hidden)]
-    const PROBES_PARENT: bool;
-}
-
-/// The parent directory was resolved during validation, so the path is safe
-/// to join to the destination and use by name.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Resolved;
-
-impl sealed::Sealed for Resolved {}
-
-impl ParentCheck for Resolved {
-    type Proof<'r> = ();
-
-    const PROBES_PARENT: bool = true;
-}
-
-/// The parent directory is vetted at write time by a directory walker on a
-/// pinned root, so the path must be written through that walker.
-#[cfg(any(unix, target_os = "wasi"))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Walked;
-
-#[cfg(any(unix, target_os = "wasi"))]
-impl sealed::Sealed for Walked {}
-
-#[cfg(any(unix, target_os = "wasi"))]
-impl ParentCheck for Walked {
-    type Proof<'r> = crate::formats::pinned_dir::WalkerBacked<'r>;
-
-    const PROBES_PARENT: bool = false;
-}
 
 /// Reason carried by the violation raised for an empty entry name.
 pub(crate) const EMPTY_PATH_REASON: &str = "empty path not allowed";

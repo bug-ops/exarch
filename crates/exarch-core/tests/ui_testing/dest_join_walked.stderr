@@ -6,7 +6,7 @@ error[E0308]: mismatched types
   |          |
   |          arguments to this method are incorrect
   |
-  = note: expected reference `&SafePath<Resolved>`
+  = note: expected reference `&SafePath<exarch_core::types::parent_check::Resolved>`
              found reference `&SafePath<Walked>`
 note: method defined here
  --> src/types/dest_dir.rs

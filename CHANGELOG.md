@@ -47,7 +47,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `extract` and `verify` name the entry and the blocking file or symlink, with the same category, for an entry below a file, a dangling symlink or a looping symlink (#828).
 - 7z `--force` no longer deletes the existing file before the replacement is decoded (#828).
 - A hardlink copy takes the sanitized mode of its target, so a pre-existing setuid, setgid or world-writable target no longer yields a wider copy (#842).
-- Core: small-file extraction no longer resolves every parent path with `realpath` on Unix and WASI, because the pinned directory walk already checks each component at write time; the 11-15% slowdown on archives with many small files drops to about 4% (#836, #PR).
+- Core: small-file extraction no longer resolves every parent path with `realpath` on Unix and WASI, because the pinned directory walk already checks each component at write time; the 11-15% slowdown on archives with many small files drops to about 3% (#836, #PR).
 - Core: path containment is compared case-sensitively on macOS, so a planted symlink to a case-variant sibling of the destination is refused (#PR).
 - Core and CLI: `extract --allowed-extensions` extracts the same files from 7z, ZIP and TAR whatever the destination state, and entries it skips leave no directories behind (#831, #PR).
 - Core and CLI: a pre-existing dangling or file-pointing symlink in the destination is refused as not relaxable instead of suggesting `--allow-symlinks` (#835, #PR).

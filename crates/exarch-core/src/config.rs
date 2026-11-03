@@ -1563,10 +1563,10 @@ mod tests {
     #[test]
     fn test_validate_rejects_a_maximal_tar_metadata_limit() {
         let cfg = SecurityConfig::default().with_max_tar_metadata_bytes(u64::MAX);
-        assert!(matches!(
+        std::assert_matches!(
             cfg.validate(),
             Err(crate::ArchiveError::InvalidConfiguration { .. })
-        ));
+        );
         let cfg = SecurityConfig::default().with_max_tar_metadata_bytes(u64::MAX - 1);
         assert!(cfg.validate().is_ok());
     }

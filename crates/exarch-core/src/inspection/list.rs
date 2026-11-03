@@ -20,6 +20,7 @@ use crate::config::Validated;
 use crate::error::QuotaResource;
 use crate::formats::ZipArchive;
 use crate::formats::common::EntryCompleteGuard;
+use crate::formats::common::check_entry_name_limits;
 use crate::formats::common::encrypted_archive_error;
 use crate::formats::common::is_extension_allowed;
 use crate::formats::common::normalize_entry_name;
@@ -79,7 +80,7 @@ use crate::inspection::report::UnverifiedReason;
 use crate::reader::SeekableFormat;
 use crate::security::fs_view::LinkKind;
 use crate::security::fs_view::MAX_SYMLINK_TARGET_BYTES;
-use crate::security::fs_view::check_name_lengths;
+use crate::security::fs_view::PathModel;
 use crate::security::fs_view::name_too_long;
 use crate::security::quota::QuotaTracker;
 use crate::security::validator::EntryPath;
@@ -543,7 +544,14 @@ fn list_tar_entries<R: std::io::Read>(
             require_non_empty_name(&path)?;
             let tar_type = effective_entry_type(entry)?;
             let kind = NodeKind::directory_if(tar_type == tar::EntryType::Directory);
-            if !admit_path(&path, kind, reservation, &mut manifest, listing)? {
+            if !admit_path(
+                &path,
+                kind,
+                file_at.is_some(),
+                config,
+                &mut manifest,
+                listing,
+            )? {
                 return Ok(());
             }
 
@@ -675,6 +683,10 @@ pub(crate) fn list_tar_reader<R: Read>(
 /// handler rather than the raw reader proves that opening already ran the
 /// admission checks (encryption, method, declared sizes) and the structural
 /// census, so listing does not repeat them.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one pass over the central directory; splitting it would obscure the order of checks"
+)]
 pub(crate) fn list_zip_reader<R: Read + Seek>(
     archive: &mut AdmittedZip<'_, R>,
     config: &SecurityConfig<Validated>,
@@ -714,8 +726,15 @@ pub(crate) fn list_zip_reader<R: Read + Seek>(
         let kind = zip_node_kind(&path, &entry)?;
         let entry_type = convert_zip_entry_type(&entry, kind);
         let file_at = (entry_type == ManifestEntryType::File).then_some(path.as_path());
-        let reservation = reserve_entry(&mut quota, entry.size(), config, list_mode, file_at)?;
-        if !admit_path(&path, kind, reservation, &mut manifest, listing)? {
+        reserve_entry(&mut quota, entry.size(), config, list_mode, file_at)?;
+        if !admit_path(
+            &path,
+            kind,
+            file_at.is_some(),
+            config,
+            &mut manifest,
+            listing,
+        )? {
             continue;
         }
 
@@ -984,14 +1003,21 @@ fn list_sevenz_archive(
         let path = PathBuf::from(normalize_entry_name(&entry.name));
         let entry_type = kind.manifest_type();
         let file_at = (entry_type == ManifestEntryType::File).then_some(path.as_path());
-        let reservation = reserve_entry(&mut quota, entry.size, config, list_mode, file_at)?;
+        reserve_entry(&mut quota, entry.size, config, list_mode, file_at)?;
 
         if contains_traversal(&path, config) {
             return Err(ArchiveError::PathTraversal { path });
         }
 
         require_non_empty_name(&path)?;
-        if !admit_path(&path, kind.node_kind(), reservation, &mut manifest, listing)? {
+        if !admit_path(
+            &path,
+            kind.node_kind(),
+            file_at.is_some(),
+            config,
+            &mut manifest,
+            listing,
+        )? {
             slots.push(None);
             continue;
         }
@@ -1080,12 +1106,13 @@ fn list_sevenz(
 fn admit_path(
     path: &Path,
     kind: NodeKind,
-    reservation: Reservation,
+    regular_file: bool,
+    config: &SecurityConfig<Validated>,
     manifest: &mut ArchiveManifest,
     listing: &mut ListPass<'_, '_>,
 ) -> Result<bool> {
     EntryPath::of(path).require_directory_root(kind)?;
-    if reservation == Reservation::Skipped || check_name_lengths(path).is_ok() {
+    if check_entry_name_limits(PathModel::Host, path, regular_file, config).is_ok() {
         return Ok(true);
     }
     if listing.mode() == ListMode::Strict {

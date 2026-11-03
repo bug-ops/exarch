@@ -48,6 +48,7 @@ use crate::formats::pinned_dir::TempLeaf;
 use crate::formats::pinned_dir::VettedDir;
 use crate::security::fs_view::HostFs;
 use crate::security::fs_view::Occupant;
+use crate::security::fs_view::PathModel;
 use crate::security::fs_view::blocked_parent_error;
 use crate::security::permissions::SanitizedMode;
 use crate::security::quota::QuotaPermit;
@@ -273,6 +274,28 @@ pub fn checked_increment_files_skipped(report: &mut ExtractionReport) -> Result<
 #[must_use]
 pub fn is_extension_allowed(path: &Path, config: &SecurityConfig<Validated>) -> bool {
     config.is_path_extension_allowed(path.extension().and_then(|e| e.to_str()))
+}
+
+/// Refuses an entry name `model` cannot hold.
+///
+/// A regular file the extension allowlist skips is never created, so it is
+/// exempt. The one definition of that rule, shared by extraction, `list` and
+/// `verify` so their verdicts cannot drift.
+///
+/// # Errors
+///
+/// Returns the name-too-long error when the path or a component exceeds the
+/// model's limits.
+pub fn check_entry_name_limits(
+    model: PathModel,
+    path: &Path,
+    regular_file: bool,
+    config: &SecurityConfig<Validated>,
+) -> std::io::Result<()> {
+    if regular_file && !is_extension_allowed(path, config) {
+        return Ok(());
+    }
+    model.check_name_lengths(path)
 }
 
 /// Generic file extraction implementation used by all format adapters.

@@ -9,6 +9,7 @@ use crate::ArchiveError;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::config::Validated;
+use crate::formats::common::check_entry_name_limits;
 use crate::formats::common::is_extension_allowed;
 use crate::security::admitted::EntrySize;
 use crate::security::admitted::PendingFile;
@@ -34,11 +35,14 @@ use crate::types::safe_path::Resolved;
 use crate::types::safe_symlink::require_symlinks_allowed;
 
 /// Refuses an entry name `view`'s path model cannot hold, so `extract` agrees
-/// with `list` and `verify` on an overlong path. An entry the extension
-/// allowlist skips is never created and is not checked.
-fn check_name_limits<V: FsView, P: ParentCheck>(view: &V, path: &SafePath<P>) -> Result<()> {
-    view.path_model()
-        .check_name_lengths(path.as_path())
+/// with `list` and `verify` on an overlong path.
+fn check_name_limits<V: FsView, P: ParentCheck>(
+    view: &V,
+    path: &SafePath<P>,
+    regular_file: bool,
+    config: &SecurityConfig<Validated>,
+) -> Result<()> {
+    check_entry_name_limits(view.path_model(), path.as_path(), regular_file, config)
         .map_err(ArchiveError::Io)
 }
 
@@ -352,7 +356,7 @@ impl<'a> ValidatorCore<'a> {
         ctx: &ValidationContext<'_, V, P>,
     ) -> Result<ValidatedFile<P>> {
         let pending = self.pending_file_in(path, size, mode, root, view, ctx)?;
-        check_name_limits(view, pending.path())?;
+        check_name_limits(view, pending.path(), true, self.config)?;
         self.admit_file(pending)
     }
 
@@ -373,7 +377,7 @@ impl<'a> ValidatorCore<'a> {
     ) -> Result<FileScreen<P>> {
         let pending = self.pending_file_in(path, size, mode, root, view, ctx)?;
         if is_extension_allowed(path, self.config) {
-            check_name_limits(view, pending.path())?;
+            check_name_limits(view, pending.path(), true, self.config)?;
             Ok(FileScreen::Pending(pending))
         } else {
             Ok(FileScreen::DisallowedExtension)
@@ -416,7 +420,7 @@ impl<'a> ValidatorCore<'a> {
         let safe_path = self
             .validate_entry_path_in(path, NodeKind::Directory, root, view, ctx)?
             .into_inner();
-        check_name_limits(view, &safe_path)?;
+        check_name_limits(view, &safe_path, false, self.config)?;
         size.check_ratio(self.config)?;
         Ok(safe_path)
     }
@@ -434,7 +438,7 @@ impl<'a> ValidatorCore<'a> {
         let safe_path = self
             .validate_entry_path_in(path, NodeKind::NonDirectory, root, view, ctx)?
             .into_inner();
-        check_name_limits(view, &safe_path)?;
+        check_name_limits(view, &safe_path, false, self.config)?;
         size.check_ratio(self.config)?;
         require_symlinks_allowed(self.config)?;
         self.reserve_symlink(size.uncompressed)?;
@@ -459,7 +463,7 @@ impl<'a> ValidatorCore<'a> {
         let safe_path = self
             .validate_entry_path_in(path, NodeKind::NonDirectory, root, view, ctx)?
             .into_inner();
-        check_name_limits(view, &safe_path)?;
+        check_name_limits(view, &safe_path, false, self.config)?;
         size.check_ratio(self.config)?;
         require_hardlinks_allowed(self.config)?;
         let counted = self.quota_tracker.reserve_count(self.config)?;

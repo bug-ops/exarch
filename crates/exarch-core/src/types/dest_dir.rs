@@ -210,7 +210,7 @@ impl DestDir {
     ///
     /// This method combines the destination directory with a validated safe
     /// path to produce the final extraction path. It accepts only a
-    /// [`Resolved`](super::safe_path::Resolved) path, whose parent was
+    /// `Resolved` path, whose parent was
     /// resolved during validation; a path whose parent is vetted at write
     /// time is refused at compile time.
     ///

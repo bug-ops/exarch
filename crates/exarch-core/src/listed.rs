@@ -50,6 +50,7 @@ use crate::formats::detect::FormatFamily;
 use crate::formats::detect::detect_format;
 use crate::formats::tar::open_tar_stream;
 use crate::inspection::ArchiveManifest;
+use crate::inspection::integrity::TarTrailer;
 use crate::inspection::list::ListPass;
 use crate::inspection::list::list_detected;
 use crate::inspection::list::list_tar_stream;
@@ -57,8 +58,10 @@ use crate::inspection::list::list_tar_stream;
 /// The most decoded TAR bytes a list pass keeps for extraction (256 MiB).
 ///
 /// Beyond it the spool is dropped and extraction decodes again. Data after the
-/// TAR end marker is decoded into the spool up to this limit before the
-/// listing returns, without progress output (about 4 s for bzip2 at the cap).
+/// TAR end marker is decoded into the spool before the listing returns, without
+/// progress output. The list pass refuses a tail longer than the trailer cap
+/// (`max_tar_metadata_bytes`, at least 1 MiB), so the tail is bounded by that
+/// cap and by this limit, whichever is smaller.
 ///
 /// Decoded streams over the limit decode twice. That cost is accepted: a larger
 /// spool would be an unbounded temporary file (RAM on a tmpfs). A caller that
@@ -165,7 +168,14 @@ impl ListedArchive {
         let config = config.clone().validate()?;
         extract_staged(output_dir.as_ref(), options, |dir| {
             let stream = BufReader::with_capacity(SPOOL_BUFFER, spool.file);
-            extract_tar_stream(stream, dir, &config, options, progress)
+            extract_tar_stream(
+                stream,
+                TarTrailer::DrainToDecoderEof,
+                dir,
+                &config,
+                options,
+                progress,
+            )
         })
     }
 }
@@ -178,8 +188,9 @@ impl ListedArchive {
 /// decoder output is also written to an unnamed temporary file
 /// (in the platform's temporary directory, which on Linux is often memory
 /// backed) so that [`ListedArchive::extract`] does not decode the archive a
-/// second time. Trailing members after the TAR data are decoded, within the
-/// same bound, before the listing returns.
+/// second time. Trailing members after the TAR data are decoded before the
+/// listing returns; a tail longer than `max_tar_metadata_bytes` (at least
+/// 1 MiB) is refused.
 ///
 /// # Errors
 ///
@@ -546,7 +557,7 @@ mod tests {
     }
 
     #[test]
-    fn a_trailer_failure_keeps_no_spool_and_extraction_matches_a_fresh_one() {
+    fn a_trailer_failure_fails_the_list_pass_like_a_fresh_extraction() {
         let dir = TempDir::new().unwrap();
         let mut bytes = encoded(CompressionCodec::Gzip, &small_tar());
         let crc_at = bytes.len() - 8;
@@ -562,13 +573,10 @@ mod tests {
             &mut NoopProgress,
         );
 
-        let listed = list(&archive, REPLAY_LIMIT);
+        let listed = list_with_limit(&archive, &config, ListOptions::default(), REPLAY_LIMIT);
 
-        assert!(listed.spool.is_none());
-        assert_eq!(
-            extract_into(listed, &dir, &config).is_ok(),
-            fresh_result.is_ok()
-        );
+        assert!(listed.is_err());
+        assert!(fresh_result.is_err());
     }
 
     #[test]

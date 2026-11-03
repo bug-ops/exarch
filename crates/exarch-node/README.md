@@ -186,20 +186,38 @@ time, and closed (`return()`) however the call ends, so a refused archive does
 not leave the stream open. A throwing or rejecting stream rejects with
 `STREAM_ERROR` and the thrown value as `cause`. The sync functions take bytes
 only. A stream that never yields keeps the call pending, and an `onEntry`
-promise that never settles does the same; there is no timeout yet. Each
-in-flight stream or `onEntry` call pins a thread of the blocking pool for the
-whole call, so many slow streams (for example HTTP bodies) can exhaust the pool
-and stall every other async exarch call in the process.
+promise that never settles does the same, unless the call is given an
+`AbortSignal` (below); there is no timeout. Each in-flight stream or `onEntry`
+call pins a thread of the blocking pool for the whole call, so many slow
+streams (for example HTTP bodies) can exhaust the pool and stall every other
+async exarch call in the process.
 
-`extractArchiveToCallback(data, onEntry, config?, options?, pathModel?, format?)`
+These seven async functions (`listArchiveBytes`, `verifyArchiveBytes`,
+`extractArchiveToMemory`, `extractArchiveToCallback` and the `WithProgress`
+variants of the first three) take an optional `signal?: AbortSignal` as their
+last argument. Aborting rejects the promise with `code === 'ABORT_ERR'`,
+`name === 'AbortError'` and `cause` set to `signal.reason`, frees the worker
+thread and queues the close of the stream without waiting for it. A signal that
+is already aborted rejects without opening the archive. The abort is noticed
+only at the start of the job and while it waits for JavaScript: the next chunk
+of an `AsyncIterable`, the close of the iterable, and the promise an `onEntry`
+call returned (which is abandoned, not cancelled). A `Uint8Array` archive is
+parsed without interruption once started, so for `listArchiveBytes`,
+`verifyArchiveBytes` and `extractArchiveToMemory` an abort after the start has
+no effect and the promise resolves normally. A value that is not an
+`AbortSignal` (any object with `aborted` and `addEventListener` is accepted,
+including a signal from another realm) throws a `TypeError` synchronously.
+
+`extractArchiveToCallback(data, onEntry, config?, options?, pathModel?, format?, signal?)`
 hands each verified entry to `onEntry(entry)` instead of collecting them, so
 memory use is one file at a time (bounded by `maxFileSize`). A file arrives
 whole, after its size was verified. Entries are provisional: each is
 delivered as soon as it is verified, so a later failure refuses the archive
 after earlier entries were already delivered; treat the results as final only
-once the promise resolved. The gzip CRC of a `.tar.gz` is never checked on
-extraction, so a corrupt compressed stream can deliver altered data without an
-error. The extraction waits for the promise
+once the promise resolved. The gzip trailer (CRC and length) of a `.tar.gz`
+is checked once the archive has been read to its end, so a corrupt compressed
+stream is refused, but only after the entries before it were delivered. The
+extraction waits for the promise
 `onEntry` returns before it reads on, so a slow consumer applies backpressure.
 A throw or rejection stops the extraction and rejects with
 `ENTRY_CALLBACK_ERROR` and the thrown value as `cause`; a thrown primitive is
@@ -269,7 +287,7 @@ try {
 | `filesExtracted`, `bytesWritten`, `filesSkipped`, `warnings` | `writes === 'kept'` | Counters and a `string[]` |
 | `cause` | a progress callback, an `onEntry` callback or an `AsyncIterable` archive threw | The exception it threw (a thrown primitive is wrapped in an `Error` whose `cause` is the primitive) |
 
-`code === 'ENTRY_CALLBACK_ERROR'` means an `onEntry` callback threw or rejected and `code === 'STREAM_ERROR'` that an `AsyncIterable` archive did; both carry no counters and take priority over the core error they caused.
+`code === 'ENTRY_CALLBACK_ERROR'` means an `onEntry` callback threw or rejected and `code === 'STREAM_ERROR'` that an `AsyncIterable` archive did; both carry no counters and take priority over the core error they caused. `code === 'ABORT_ERR'` (with `name === 'AbortError'` and `cause` set to the signal's `reason`) means the call's `AbortSignal` fired; it takes priority over the errors the abort caused.
 
 If a progress callback throws while the operation itself succeeds, the rejection has `code === 'PROGRESS_CALLBACK_ERROR'` and the counters of what was written (`filesExtracted`... for extraction, `filesAdded` and `bytesWritten` for creation). The in-memory extraction functions write nothing, so their rejection carries `writes === 'discarded'` and no counters.
 

@@ -15,6 +15,7 @@ pub use messages::PartialOutcome;
 pub use tar_ambiguity::TarAmbiguity;
 pub use tar_ambiguity::TarExtensionKind;
 pub use tar_ambiguity::TarHeaderField;
+pub use tar_ambiguity::TarNonRegularKind;
 pub use tar_ambiguity::TarPathKey;
 pub use types::ArchiveError;
 pub use types::CompressionRatio;

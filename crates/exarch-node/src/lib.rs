@@ -73,6 +73,7 @@ macro_rules! js_with_normalizer {
     };
 }
 
+mod abort;
 #[cfg_attr(
     test,
     allow(dead_code, reason = "napi registers its functions outside test builds")

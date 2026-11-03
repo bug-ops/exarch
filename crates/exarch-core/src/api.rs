@@ -27,6 +27,7 @@ use crate::formats::detect::detect_format_from_extension;
 use crate::formats::detect::is_zip_family_alias;
 use crate::inspection::ArchiveManifest;
 use crate::inspection::VerificationReport;
+use crate::inspection::integrity::TarTrailer;
 use crate::inspection::list::ListPass;
 use crate::reader::SeekableFormat;
 use crate::reader::Source;
@@ -343,12 +344,15 @@ fn extract_tar(
     use crate::formats::tar::open_tar_stream;
 
     let stream = open_tar_stream(archive_path, codec, config.max_decoder_memory)?;
-    extract_tar_stream(stream, output_dir, config, options, progress)
+    let trailer = TarTrailer::for_codec(codec);
+    extract_tar_stream(stream, trailer, output_dir, config, options, progress)
 }
 
-/// Extracts a TAR stream that is already decoded.
+/// Extracts a TAR stream that is already decoded; `trailer` says how the
+/// bytes after the end-of-archive marker are checked.
 pub(crate) fn extract_tar_stream<R: std::io::Read>(
     stream: R,
+    trailer: TarTrailer,
     output_dir: &Path,
     config: &SecurityConfig<Validated>,
     options: &ExtractionOptions,
@@ -357,7 +361,7 @@ pub(crate) fn extract_tar_stream<R: std::io::Read>(
     use crate::formats::TarArchive;
     use crate::formats::traits::ArchiveFormat;
 
-    TarArchive::new(stream).extract(output_dir, config, options, progress)
+    TarArchive::with_trailer(stream, trailer).extract(output_dir, config, options, progress)
 }
 
 fn extract_zip(

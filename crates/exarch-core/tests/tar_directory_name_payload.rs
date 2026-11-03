@@ -4,6 +4,7 @@
 
 #![allow(clippy::unwrap_used)]
 
+use std::assert_matches;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
@@ -12,6 +13,7 @@ use exarch_core::ArchiveError;
 use exarch_core::ErrorCode;
 use exarch_core::ManifestEntryKind;
 use exarch_core::SecurityConfig;
+use exarch_core::TarAmbiguity;
 use exarch_core::extract_archive;
 use exarch_core::list_archive;
 use exarch_core::verify_archive;
@@ -66,7 +68,12 @@ fn smuggling_tar(typeflag: u8) -> Vec<u8> {
 
 fn assert_invalid_archive(error: &ArchiveError) {
     assert_eq!(error.error_code(), ErrorCode::InvalidArchive, "{error}");
-    assert!(error.to_string().contains("a/b/"), "{error}");
+    assert_matches!(
+        error,
+        ArchiveError::TarAmbiguity(TarAmbiguity::DirectoryNamedPayload { size: 7, path })
+            if path == "a/b/",
+        "{error}"
+    );
 }
 
 fn assert_refused_everywhere(archive: &Path) {

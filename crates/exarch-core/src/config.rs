@@ -347,6 +347,12 @@ pub struct SecurityConfigFields {
     ///   per block before the growth is charged against this budget), not an
     ///   exact multiple — treat it as an order-of-magnitude ceiling, not a
     ///   tight bound
+    /// - Also caps the decoded bytes that follow the end-of-archive marker of a
+    ///   compressed TAR, which extraction, listing and `verify` with integrity
+    ///   read to the end of the stream so the codec's trailer (a gzip CRC) is
+    ///   checked. That cap never falls below 1 MiB (it covers `tar -b 2048`
+    ///   record padding), so lowering this value under 1 MiB does not tighten
+    ///   it; a longer tail is refused naming the effective cap
     ///
     /// Default: 4 MiB (4,194,304 bytes)
     pub max_tar_metadata_bytes: u64,
@@ -575,7 +581,8 @@ impl SecurityConfig<Unvalidated> {
     /// - `max_path_depth` is zero
     /// - `max_file_count` is zero
     /// - `max_solid_block_memory` is zero
-    /// - `max_tar_metadata_bytes` is zero
+    /// - `max_tar_metadata_bytes` is zero or `u64::MAX` (the metadata budget
+    ///   uses it as its disarmed marker)
     /// - `max_decoder_memory` is zero
     /// - any entry in `allowed_extensions` or `banned_path_components` is
     ///   empty, contains a null byte, or exceeds
@@ -632,6 +639,11 @@ impl SecurityConfig<Unvalidated> {
         if self.max_tar_metadata_bytes == 0 {
             return Err(crate::ArchiveError::InvalidConfiguration {
                 reason: "max_tar_metadata_bytes must not be zero".into(),
+            });
+        }
+        if self.max_tar_metadata_bytes == u64::MAX {
+            return Err(crate::ArchiveError::InvalidConfiguration {
+                reason: "max_tar_metadata_bytes must be below u64::MAX".into(),
             });
         }
         if self.max_decoder_memory == 0 {
@@ -1162,9 +1174,10 @@ impl ExtractionOptions {
 ///
 /// The budget bounds the work done **beyond what listing already does**: ZIP
 /// entries and 7z blocks are charged their declared uncompressed size before
-/// they are decoded, and for compressed TAR it bounds the read from the end
-/// marker to decoder EOF. TAR entry content is never charged because listing
-/// decodes it anyway. The default is a fixed 500 MiB, equal to the default
+/// they are decoded. TAR entry content is never charged because listing
+/// decodes it anyway, and neither is the compressed TAR tail after the end
+/// marker: that read is bounded by `max_tar_metadata_bytes` (at least 1 MiB)
+/// instead. The default is a fixed 500 MiB, equal to the default
 /// `max_total_size`; it does not follow a raised `max_total_size`.
 ///
 /// # Examples
@@ -1545,6 +1558,17 @@ mod tests {
         let mut cfg = SecurityConfig::default();
         cfg.max_compression_ratio = -1.0;
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_a_maximal_tar_metadata_limit() {
+        let cfg = SecurityConfig::default().with_max_tar_metadata_bytes(u64::MAX);
+        assert!(matches!(
+            cfg.validate(),
+            Err(crate::ArchiveError::InvalidConfiguration { .. })
+        ));
+        let cfg = SecurityConfig::default().with_max_tar_metadata_bytes(u64::MAX - 1);
+        assert!(cfg.validate().is_ok());
     }
 
     #[test]

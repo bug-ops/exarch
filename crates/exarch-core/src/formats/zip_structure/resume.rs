@@ -24,6 +24,8 @@
 //! the reader resumes earlier (see `GapChecker::check_scanned_resume`), and
 //! that of a compressed entry, with a descriptor or without, is decoded to
 //! find where its stream ends (see `GapChecker::check_inflated_resume`).
+//! Readers differ on bzip2 and zstd, which some decode and others scan, so
+//! those entries get both treatments and the further resume position wins.
 //!
 //! Where the two modes disagree the further resume position wins, since either
 //! reader can be the one that skips an entry. The sizes are those of the
@@ -51,12 +53,16 @@ pub(super) enum DescriptorExit {
     Inflate,
     /// The reader cannot decode the data and scans for the descriptor.
     Scan,
+    /// Readers differ: one decodes the stream, another scans for the
+    /// descriptor, and either can be the one that reads the archive.
+    Either,
 }
 
 impl DescriptorExit {
     pub(super) const fn of(method: CompressionMethod) -> Self {
         match method {
             CompressionMethod::Deflated => Self::Inflate,
+            CompressionMethod::Bzip2 | CompressionMethod::Zstd => Self::Either,
             _ => Self::Scan,
         }
     }
@@ -242,6 +248,13 @@ pub(super) fn streaming_resume(
     local: LocalFacts,
     at_end: &[u8],
 ) -> Resume {
+    if exit == DescriptorExit::Either {
+        return [DescriptorExit::Inflate, DescriptorExit::Scan]
+            .map(|exit| streaming_resume(layout, exit, local, at_end))
+            .into_iter()
+            .reduce(|a, b| a.furthest(b, layout.end))
+            .unwrap_or(Resume::Unbounded);
+    }
     let signed = at_end.starts_with(&DATA_DESCRIPTOR_SIGNATURE);
     let extraction = match exit {
         DescriptorExit::Inflate => {
@@ -250,7 +263,7 @@ pub(super) fn streaming_resume(
         DescriptorExit::Scan if signed => {
             find_width(at_end, layout, CrcCheck::Compared).map_or(Resume::Unbounded, Resume::After)
         }
-        DescriptorExit::Scan => Resume::Unbounded,
+        DescriptorExit::Scan | DescriptorExit::Either => Resume::Unbounded,
     };
     let listing = if local.compressed > 0 {
         Resume::At(layout.data_start.saturating_add(local.compressed))
@@ -261,7 +274,7 @@ pub(super) fn streaming_resume(
             } else {
                 DescriptorWidth::Sixteen
             }),
-            DescriptorExit::Scan => Resume::Unbounded,
+            DescriptorExit::Scan | DescriptorExit::Either => Resume::Unbounded,
             DescriptorExit::Inflate => Resume::AtEnd,
         }
     };
@@ -422,6 +435,21 @@ mod tests {
                 &nothing
             ),
             Resume::At(113)
+        );
+    }
+
+    #[test]
+    fn readers_that_differ_resume_at_the_furthest_position() {
+        let either = layout(DescriptorExit::Either);
+        let signed = followed_by_header(descriptor(true, false, CRC, COMPRESSED, SIZE));
+        assert_eq!(
+            streaming_resume(&either, DescriptorExit::Either, local(false, 0), &signed),
+            Resume::After(DescriptorWidth::Sixteen)
+        );
+        let unsigned = followed_by_header(descriptor(false, false, CRC, COMPRESSED, SIZE));
+        assert_eq!(
+            streaming_resume(&either, DescriptorExit::Either, local(false, 0), &unsigned),
+            Resume::Unbounded
         );
     }
 

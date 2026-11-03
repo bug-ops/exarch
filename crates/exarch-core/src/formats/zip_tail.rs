@@ -8,9 +8,10 @@
 //! stream ends takes decoding, so the check runs with an integrity pass, after
 //! the entry has decoded cleanly through the `zip` crate. The census also
 //! decodes deflated entries itself within a fixed budget (see [`stream_end`]),
-//! which the integrity pass completes. A streaming reader scans stored
-//! descriptor entries, and the descriptor entries of every method but deflate,
-//! for a descriptor signature instead, which the census searches for (see
+//! which the integrity pass completes; bzip2 and zstd descriptor entries are
+//! decoded by the census the same way. A streaming reader scans stored
+//! descriptor entries, and some readers the bzip2 and zstd ones, for a
+//! descriptor signature instead, which the census searches for too (see
 //! [`judge_first_signature`]).
 
 use std::cell::Cell;
@@ -340,15 +341,17 @@ pub(super) fn holds_reader_record<R: Read + Seek>(
         } else {
             filled.saturating_sub(LFH_FIXED_LEN)
         };
-        for at in 0..judged {
-            if base + at as u64 >= compressed {
-                return Ok(false);
-            }
-            if buf[at] == b'P' && starts_reader_record(&buf[at..filled]) {
+        let in_range = usize::try_from(compressed.saturating_sub(base)).unwrap_or(usize::MAX);
+        let limit = judged.min(in_range);
+        let mut at = 0;
+        while let Some(found) = buf[at..limit].iter().position(|&b| b == b'P') {
+            at += found;
+            if starts_reader_record(&buf[at..filled]) {
                 return Ok(true);
             }
+            at += 1;
         }
-        if at_end {
+        if limit < judged || at_end {
             return Ok(false);
         }
         buf.copy_within(judged..filled, 0);

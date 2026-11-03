@@ -449,12 +449,14 @@ pub(crate) fn list_tar_stream<R: Read>(
 ) -> Result<ArchiveManifest> {
     let (budgeted, budget) = budgeted_reader(stream, config.max_tar_metadata_bytes);
     let archive = tar::Archive::new(budgeted);
-    let trailer = if codec.is_some() {
-        TarTrailer::DrainToDecoderEof
-    } else {
-        TarTrailer::Probe
-    };
-    list_tar_entries(archive, budget, format, config, listing, trailer)
+    list_tar_entries(
+        archive,
+        budget,
+        format,
+        config,
+        listing,
+        TarTrailer::for_codec(codec),
+    )
 }
 
 /// Lists entries from a TAR archive already wrapped in a [`budgeted_reader`].
@@ -599,8 +601,11 @@ fn list_tar_entries<R: std::io::Read>(
 
     entries.finish()?;
     drop(entries);
-    if let Some(pass) = listing.integrity() {
-        pass.check_tar_trailer(&mut archive.into_inner(), trailer)?;
+    let mut tail = archive.into_inner();
+    match (listing.integrity(), list_mode) {
+        (Some(pass), _) => pass.check_tar_trailer(&mut tail, trailer)?,
+        (None, ListMode::Strict) => trailer.enforce(&mut tail, config)?,
+        (None, ListMode::VerifyPreflight) => {}
     }
 
     Ok(manifest)

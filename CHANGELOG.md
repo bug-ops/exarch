@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Core: `CallbackSink` hands each verified in-memory entry to a closure, and `MemoryEntry::Hardlink` reports a hardlink by reference (#842).
 - Python: `extract_archive_to_callback` delivers each entry to a callable and re-raises its exception unchanged (#842).
 - Node: `extractArchiveToCallback` (async and sync), `AsyncIterable` input for TAR in the async in-memory functions, three sync `WithProgress` variants, and the `STREAM_ERROR` and `ENTRY_CALLBACK_ERROR` codes (#842).
+- Node: the seven async in-memory functions that take an `AsyncIterable` accept an optional trailing `signal` (`AbortSignalLike`); aborting rejects with the new `ABORT_ERR` code and frees the blocking worker (#PRNUM).
 
 ### Changed
 
@@ -42,6 +43,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Core: an entry below a planted symlink that leaves the destination fails with `SymlinkEscape` instead of `PathTraversal` during extraction, as `verify` already reports (#846).
 - Dependencies: `half` is pinned to 2.4.1 with a Dependabot ignore, which drops the duplicate `syn` 2, `zerocopy` and `zerocopy-derive` (#846).
 
+- **BREAKING:** extract, list and the in-memory APIs read a compressed TAR to the end of its stream and refuse a bad gzip CRC or ISIZE, a corrupt later member and a tail over `max_tar_metadata_bytes` (at least 1 MiB, relaxable); `verify --check-integrity` applies the same cap, `.tar.zst` zero tails are refused, and `TarArchive::new` drains the reader (#PRNUM).
+- **BREAKING:** `SecurityConfig::validate()` rejects `max_tar_metadata_bytes = u64::MAX` (#PRNUM).
+- **BREAKING:** a TAR directory, symlink or hardlink payload refusal is `TarAmbiguity::{NonRegularPayload, DirectoryNamedPayload}` with the new `TarNonRegularKind`, and its message gains the `ambiguous TAR header: ` prefix (#PRNUM).
+- **BREAKING:** ZIP plain verify, list and extract refuse an entry hidden behind the stream end of a bzip2 or zstd data-descriptor entry (#PRNUM).
+- Core: extraction lends the pinned destination root to top-level entries instead of reopening it per entry (#PRNUM).
+- Node: docs no longer say the gzip CRC is unchecked (#PRNUM).
+
 ### Fixed
 
 - `extract` and `verify` name the entry and the blocking file or symlink, with the same category, for an entry below a file, a dangling symlink or a looping symlink (#828).
@@ -52,6 +60,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Core and CLI: `extract --allowed-extensions` extracts the same files from 7z, ZIP and TAR whatever the destination state, and entries it skips leave no directories behind (#831, #846).
 - Core and CLI: a pre-existing dangling or file-pointing symlink in the destination is refused as not relaxable instead of suggesting `--allow-symlinks` (#835, #846).
 - Tests: a real Windows Explorer ZIP and a Windows 7-Zip reparse-point symlink 7z are committed as fixtures with host-independent tests (#824, #825, #846).
+- Tests: property tests skip Windows reserved device names in generated path components (#PRNUM).
 
 ## [0.8.0] - 2026-11-02
 

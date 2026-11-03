@@ -90,6 +90,7 @@ pub use error::Result;
 pub use error::TarAmbiguity;
 pub use error::TarExtensionKind;
 pub use error::TarHeaderField;
+pub use error::TarNonRegularKind;
 pub use error::TarPathKey;
 pub use error::ZipBombDetails;
 pub use error::ZipBombScope;

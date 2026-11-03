@@ -10,6 +10,7 @@ use std::io;
 use std::io::Read;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::sync::PoisonError;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -33,6 +34,10 @@ use napi::threadsafe_function::ThreadsafeFunctionCallMode;
 use tokio::runtime::Handle;
 
 use crate::CoreResult;
+use crate::abort::AbortBinding;
+use crate::abort::AbortHandle;
+use crate::abort::Aborted;
+use crate::abort::Detach;
 use crate::error::Failure;
 use crate::error::ProgressCallbackError;
 use crate::report::ArchiveType;
@@ -88,23 +93,39 @@ const CLASSIFY_SOURCE_JS: &str = js_with_normalizer!(
 type NextFn = ThreadsafeFunction<(), Promise<Option<Uint8Array>>, (), Status, false>;
 type CloseFn = ThreadsafeFunction<(), Promise<()>, (), Status, false>;
 
+/// Why a pull produced no chunk.
+enum PullStop {
+    Aborted,
+    Failed(napi::Error),
+}
+
 /// The two functions that drive an `AsyncIterable`, and what went wrong.
-// TODO(#840): a stalled AsyncIterable or a never-settling `onEntry` promise
-// hangs the op, keeps the loop alive and pins a blocking-pool thread; add
-// AbortSignal/timeout.
+///
+/// Every wait on JavaScript races the operation's `AbortSignal`, so a stalled
+/// iterable cannot pin the worker once the signal fires.
 struct StreamShared {
     next: NextFn,
     close: CloseFn,
     failure: Mutex<Option<napi::Error>>,
     closed: AtomicBool,
+    abort: OnceLock<AbortHandle>,
 }
 
 impl StreamShared {
-    fn pull(&self) -> Result<Option<Vec<u8>>> {
-        Handle::current().block_on(async {
+    fn abort(&self) -> &AbortHandle {
+        self.abort.get().unwrap_or(&AbortHandle::NONE)
+    }
+
+    fn pull(&self) -> std::result::Result<Option<Vec<u8>>, PullStop> {
+        let pulled = Handle::current().block_on(self.abort().race(async {
             let promise = self.next.call_async_catch(()).await?;
-            Ok(promise.await?.map(|chunk| chunk.to_vec()))
-        })
+            Ok::<_, napi::Error>(promise.await?.map(|chunk| chunk.to_vec()))
+        }));
+        match pulled {
+            Ok(Ok(chunk)) => Ok(chunk),
+            Ok(Err(err)) => Err(PullStop::Failed(err)),
+            Err(Aborted) => Err(PullStop::Aborted),
+        }
     }
 
     fn record(&self, err: napi::Error) {
@@ -121,12 +142,23 @@ impl StreamShared {
             .take()
     }
 
-    /// Closes the iterator once and waits for it. An error from `return()` is
-    /// swallowed by the JavaScript side.
+    /// Closes the iterator once and waits for it, unless the signal fires
+    /// first: a generator whose `finally` never settles must not pin the
+    /// worker. An error from `return()` is swallowed by the JavaScript side.
     fn close_blocking(&self) {
         if !self.closed.swap(true, Ordering::AcqRel) {
-            let _ =
-                Handle::current().block_on(async { self.close.call_async_catch(()).await?.await });
+            let _ = Handle::current().block_on(
+                self.abort()
+                    .race(async { self.close.call_async_catch(()).await?.await }),
+            );
+        }
+    }
+
+    /// Queues the close without waiting: after an abort `return()` would sit
+    /// behind the `next()` that is still pending.
+    fn abort_close(&self) {
+        if !self.closed.swap(true, Ordering::AcqRel) {
+            self.close.call((), ThreadsafeFunctionCallMode::NonBlocking);
         }
     }
 }
@@ -135,9 +167,7 @@ impl Drop for StreamShared {
     /// Fallback for a job that never reached its own close, such as a panic:
     /// queue the close without waiting.
     fn drop(&mut self) {
-        if !self.closed.swap(true, Ordering::AcqRel) {
-            self.close.call((), ThreadsafeFunctionCallMode::NonBlocking);
-        }
+        self.abort_close();
     }
 }
 
@@ -164,10 +194,14 @@ impl Read for NodeStreamReader {
                     self.done = true;
                     return Ok(0);
                 }
-                Err(err) => {
+                Err(PullStop::Failed(err)) => {
                     self.done = true;
                     self.shared.record(err);
                     return Err(io::Error::other("archive stream failed"));
+                }
+                Err(PullStop::Aborted) => {
+                    self.done = true;
+                    return Err(io::Error::other("archive read aborted"));
                 }
             }
         }
@@ -238,6 +272,7 @@ impl FromNapiValue for ArchiveSource {
                 close,
                 failure: Mutex::new(None),
                 closed: AtomicBool::new(false),
+                abort: OnceLock::new(),
             }),
         }))
     }
@@ -272,6 +307,22 @@ impl<B: AsRef<[u8]> + Send> IntoSource for B {
     }
 }
 
+impl ArchiveSource {
+    /// Queues the close of a stream without waiting, for a job the signal
+    /// stopped.
+    fn abort_abandon(self) {
+        if let Self::Stream(StreamSource { shared }) = self {
+            shared.abort_close();
+        }
+    }
+
+    fn bind_abort(&self, abort: &AbortHandle) {
+        if let Self::Stream(StreamSource { shared }) = self {
+            shared.abort.get_or_init(|| abort.clone());
+        }
+    }
+}
+
 impl IntoSource for ArchiveSource {
     fn abandon(self) {
         if let Self::Stream(StreamSource { shared }) = self {
@@ -298,11 +349,68 @@ impl IntoSource for ArchiveSource {
                     None => ArchiveReader::detect_stream(reader),
                 };
                 let result = opened.map_err(Failure::from).and_then(f);
-                shared.close_blocking();
+                if shared.abort().is_observed() {
+                    shared.abort_close();
+                } else {
+                    shared.close_blocking();
+                }
                 shared.take_failure().map_or(result, |source| {
                     Err(ProgressCallbackError::Stream { source }.into())
                 })
             }
         }
+    }
+}
+
+/// An [`ArchiveSource`] tied to the operation's `AbortSignal`.
+///
+/// The signal is checked before anything is opened. When it stopped the job
+/// at any point, the stream is closed without waiting and the result is the
+/// abort, whatever error the stopped read caused downstream.
+pub struct AbortableSource {
+    source: ArchiveSource,
+    abort: AbortHandle,
+}
+
+impl AbortableSource {
+    /// Binds `source` to the optional `signal`; also returns the cleanup to run
+    /// on the JS thread once the operation settled.
+    #[must_use]
+    pub fn bind(source: ArchiveSource, signal: Option<AbortBinding>) -> (Self, Detach) {
+        let (abort, detach) = AbortBinding::split(signal);
+        source.bind_abort(&abort);
+        (Self { source, abort }, detach)
+    }
+
+    /// The handle for waits that happen outside the source, such as `onEntry`.
+    #[must_use]
+    pub fn abort(&self) -> AbortHandle {
+        self.abort.clone()
+    }
+}
+
+impl IntoSource for AbortableSource {
+    fn abandon(self) {
+        if self.abort.is_observed() {
+            self.source.abort_abandon();
+        } else {
+            self.source.abandon();
+        }
+    }
+
+    fn run<T>(
+        self,
+        format: Option<ArchiveType>,
+        f: impl FnOnce(ArchiveReader<'_>) -> CoreResult<T>,
+    ) -> CoreResult<T> {
+        if self.abort.check().is_err() {
+            self.source.abort_abandon();
+            return Err(self.abort.failure());
+        }
+        let result = self.source.run(format, f);
+        if self.abort.is_observed() {
+            return Err(self.abort.failure());
+        }
+        result
     }
 }

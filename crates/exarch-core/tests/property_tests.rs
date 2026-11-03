@@ -9,6 +9,7 @@
     clippy::unwrap_used
 )]
 
+use std::ffi::OsStr;
 use std::path::PathBuf;
 
 use exarch_core::ArchiveError;
@@ -22,6 +23,7 @@ use exarch_core::security::QuotaTracker;
 use exarch_core::types::DestDir;
 use exarch_core::types::SafePath;
 use exarch_core::types::SafeSymlink;
+use exarch_core::types::safe_path::is_windows_reserved_component;
 use proptest::prelude::*;
 use tempfile::TempDir;
 
@@ -113,6 +115,14 @@ fn create_test_dest() -> (TempDir, DestDir) {
     (temp, dest)
 }
 
+/// A path component matching `pattern` that is not a Windows device name, so
+/// the generated path is valid on every platform.
+fn path_component(pattern: &'static str) -> impl Strategy<Value = String> {
+    pattern.prop_filter("Windows reserved device name", |component| {
+        !is_windows_reserved_component(OsStr::new(component))
+    })
+}
+
 proptest! {
     /// Any path with .. should be rejected.
     #[test]
@@ -136,7 +146,7 @@ proptest! {
     /// Valid relative paths without special components should be accepted.
     #[test]
     fn prop_valid_relative_paths_accepted(
-        components in prop::collection::vec("[a-zA-Z0-9_-]{1,20}", 1..5)
+        components in prop::collection::vec(path_component("[a-zA-Z0-9_-]{1,20}"), 1..5)
     ) {
         let (_temp, dest) = create_test_dest();
         let config = SecurityConfig::default().validate().unwrap();
@@ -462,7 +472,7 @@ proptest! {
     /// Hardlink tracker should accept safe relative paths.
     #[test]
     fn prop_hardlink_safe_relative_paths(
-        components in prop::collection::vec("[a-z]{1,10}", 1..5)
+        components in prop::collection::vec(path_component("[a-z]{1,10}"), 1..5)
     ) {
         let (_temp, dest) = create_test_dest();
         let mut config = SecurityConfig::default();
@@ -557,7 +567,7 @@ proptest! {
     /// Safe symlink targets within bounds should be accepted.
     #[test]
     fn prop_symlink_safe_relative_targets(
-        components in prop::collection::vec("[a-z]{1,10}", 1..8)
+        components in prop::collection::vec(path_component("[a-z]{1,10}"), 1..8)
     ) {
         let (_temp, dest) = create_test_dest();
         let mut config = SecurityConfig::default();

@@ -583,9 +583,10 @@ pub fn verify_archive_bytes_with_progress(
 /// An entry is delivered as soon as it is verified, before the rest of the
 /// archive is read. A later failure refuses the archive after earlier entries
 /// were already delivered, so treat the results as final only once the call
-/// returned. The size of a file is checked, but a stream-level checksum is not:
-/// the gzip CRC of a `.tar.gz` is never checked on extraction, so a corrupt
-/// compressed stream can deliver altered data without an error.
+/// returned. The size of a file is checked, and so is the stream-level
+/// checksum, but last: the gzip CRC of a `.tar.gz` is verified after the
+/// end-of-archive marker, so a corrupt compressed stream refuses the archive
+/// only after its entries were delivered.
 ///
 /// # Entry kinds
 ///

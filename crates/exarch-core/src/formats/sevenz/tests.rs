@@ -2129,6 +2129,35 @@ fn test_duplicate_rejects_dangling_symlink_when_not_skipping() {
     );
 }
 
+#[test]
+fn top_level_and_nested_files_are_written_through_the_owned_parent() {
+    let data = make_sevenz_archive(&[("top.txt", b"top"), ("a/b/deep.txt", b"deep")]);
+    let out = TempDir::new().unwrap();
+
+    let report = extract_forced(data, out.path()).unwrap();
+
+    assert_eq!(report.files_extracted, 2);
+    assert_eq!(std::fs::read(out.path().join("top.txt")).unwrap(), b"top");
+    assert_eq!(
+        std::fs::read(out.path().join("a/b/deep.txt")).unwrap(),
+        b"deep"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn planted_parent_symlink_is_refused_for_a_top_level_file_sibling() {
+    let data = make_sevenz_archive(&[("top.txt", b"top"), ("planted/pwn.txt", b"x")]);
+    let out = TempDir::new().unwrap();
+    let outside = TempDir::new().unwrap();
+    std::os::unix::fs::symlink(outside.path(), out.path().join("planted")).unwrap();
+
+    let result = extract_forced(data, out.path());
+
+    assert!(result.is_err(), "{result:?}");
+    assert!(directory_entry_names(outside.path()).is_empty());
+}
+
 fn extract_forced(data: Vec<u8>, out: &std::path::Path) -> Result<ExtractionReport> {
     let mut archive = SevenZArchive::new(Cursor::new(data)).unwrap();
     let config = SecurityConfig::default().validate().expect("valid config");

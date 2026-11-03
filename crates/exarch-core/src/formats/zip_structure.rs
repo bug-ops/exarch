@@ -1279,6 +1279,10 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
                     (DescriptorExit::Inflate, StreamChecks::Run) => {
                         self.check_inflated_resume(layout, findings)?;
                     }
+                    (DescriptorExit::Either, StreamChecks::Run) => {
+                        self.check_scanned_resume(layout, findings)?;
+                        self.check_inflated_resume(layout, findings)?;
+                    }
                 }
                 self.check_descriptor(layout, exit, next, findings)?;
             } else if layout.compressed > 0 && self.chunks.stream_checks == StreamChecks::Run {
@@ -1482,14 +1486,14 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
     /// reader finds by scanning, from its first descriptor signature on, as a
     /// gap.
     ///
-    /// A streaming reader cannot decode such data (stored, or any method but
-    /// deflate), so it ends the entry at the first descriptor signature in it
-    /// (some of its modes whatever the descriptor states, which is why no
-    /// later signature is waited for), which can lie before the declared end
-    /// the central directory gives, and reads on from there like from any gap.
-    /// The signature scan is bounded by the entry's declared size, which the
-    /// archive-wide budget caps, keeps one chunk in memory and is not counted
-    /// in `reads`; the gap search that follows is.
+    /// A streaming reader that does not decode such data (stored, or bzip2 and
+    /// zstd for readers that scan them) ends the entry at the first
+    /// descriptor signature in it (some of its modes whatever the descriptor
+    /// states, which is why no later signature is waited for), which can lie
+    /// before the declared end the central directory gives, and reads on from
+    /// there like from any gap. The signature scan is bounded by the entry's
+    /// declared size, which the archive-wide budget caps, keeps one chunk in
+    /// memory and is not counted in `reads`; the gap search that follows is.
     fn check_scanned_resume(
         &mut self,
         layout: &EntryLayout,
@@ -1541,6 +1545,12 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
     /// Checks the declared range of a compressed entry against where its
     /// stream ends.
     ///
+    /// A bzip2 or zstd descriptor entry (`DescriptorExit::Either`) is never
+    /// decoded up front: a record behind its stream end is plain file bytes
+    /// inside the declared range, so the search for a record signature finds
+    /// it, and only a hit pays for the decode (from the recheck allowance,
+    /// failing closed when that is spent). An honest entry costs one read.
+    ///
     /// A streaming reader ends such an entry where its stream ends, whether
     /// or not a descriptor follows, so the bytes from there to the declared
     /// end are read as records, and a stream that does not end inside the
@@ -1572,14 +1582,19 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
         } else {
             u64::MAX
         };
-        let undecided = match stream_end(
-            &mut *self.reader,
-            method,
-            layout.data_start,
-            layout.compressed,
-            decoded_up_to,
-            &mut self.decode_budget,
-        )? {
+        let first = if layout.descriptor == Some(DescriptorExit::Either) {
+            StreamEnd::OverBudget
+        } else {
+            stream_end(
+                &mut *self.reader,
+                method,
+                layout.data_start,
+                layout.compressed,
+                decoded_up_to,
+                &mut self.decode_budget,
+            )?
+        };
+        let undecided = match first {
             StreamEnd::At(end) => return self.search_slack(layout, end, region, findings),
             StreamEnd::Undecided => Some(ZipStreamUndecided::Rejected),
             StreamEnd::OverBudget => {

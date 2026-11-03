@@ -33,6 +33,7 @@ use crate::formats::detect::match_signature;
 use crate::formats::detect::peek_header;
 use crate::inspection::ArchiveManifest;
 use crate::inspection::VerificationReport;
+use crate::inspection::integrity::TarTrailer;
 use crate::inspection::list::ListPass;
 use crate::inspection::list::list_tar_stream;
 use crate::inspection::verify::verify_with;
@@ -412,7 +413,9 @@ pub(crate) fn tar_archive<'r, R: Read + Send + 'r>(
     codec: Option<CompressionCodec>,
     max_decoder_memory: u64,
 ) -> Result<TarArchive<Box<dyn Read + Send + 'r>>> {
-    decode_tar_stream(reader, codec, max_decoder_memory).map(TarArchive::new)
+    let trailer = TarTrailer::for_codec(codec);
+    decode_tar_stream(reader, codec, max_decoder_memory)
+        .map(|stream| TarArchive::with_trailer(stream, trailer))
 }
 
 #[cfg(test)]

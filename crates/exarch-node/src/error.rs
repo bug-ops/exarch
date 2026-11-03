@@ -8,7 +8,8 @@
 //! - `code`: an [`ErrorCode`] string. Core errors keep their core code
 //!   (`SECURITY_VIOLATION` for a rejected boundary path,
 //!   `INVALID_CONFIGURATION` for a rejected setter value);
-//!   `PROGRESS_CALLBACK_ERROR` is Node-only.
+//!   `PROGRESS_CALLBACK_ERROR`, `STREAM_ERROR`, `ENTRY_CALLBACK_ERROR` and
+//!   `ABORT_ERR` (an `AbortError`) are Node-only.
 //! - `relaxableBy`: the [`PolicySetting`] that relaxes a refusal, when one
 //!   does.
 //! - `writes`, `filesExtracted`, `bytesWritten`, `filesSkipped`, `warnings`:
@@ -52,6 +53,10 @@ pub const STREAM_ERROR: &str = "STREAM_ERROR";
 /// `code` of a throwing or rejecting `onEntry` callback. Node-only: core has
 /// no such error.
 pub const ENTRY_CALLBACK_ERROR: &str = "ENTRY_CALLBACK_ERROR";
+
+/// `code` of an operation stopped by its `AbortSignal`; the `name` is
+/// `AbortError`, as for Node's own aborted operations.
+pub const ABORT_ERR: &str = "ABORT_ERR";
 
 /// Value of the `code` property on errors surfaced to JavaScript.
 ///
@@ -120,6 +125,9 @@ pub enum ErrorCode {
     /// An `onEntry` callback threw or rejected; extraction stopped there.
     #[napi(value = "ENTRY_CALLBACK_ERROR")]
     EntryCallbackError,
+    /// The operation's `AbortSignal` fired; `cause` is the signal's `reason`.
+    #[napi(value = "ABORT_ERR")]
+    AbortErr,
 }
 
 /// Value of the `relaxableBy` property: the `SecurityConfig` setting whose
@@ -251,6 +259,12 @@ pub enum ProgressCallbackError {
         /// The normalized JS throw, attached as `cause`.
         source: Error,
     },
+    /// The operation's `AbortSignal` fired. Primary over any error the abort
+    /// caused downstream.
+    Aborted {
+        /// The signal's `reason`, attached as `cause`.
+        reason: Option<Error>,
+    },
 }
 
 /// Builds the JS `Error` for a failure on the JS thread.
@@ -270,6 +284,7 @@ enum JsCode {
     ProgressCallback,
     Stream,
     EntryCallback,
+    Abort,
 }
 
 impl JsCode {
@@ -279,6 +294,7 @@ impl JsCode {
             Self::ProgressCallback => PROGRESS_CALLBACK_ERROR,
             Self::Stream => STREAM_ERROR,
             Self::EntryCallback => ENTRY_CALLBACK_ERROR,
+            Self::Abort => ABORT_ERR,
         }
     }
 }
@@ -398,6 +414,15 @@ fn describe(failure: Failure) -> Result<Described, Error> {
             ProgressCallbackError::EntryCallback { source } => {
                 describe_js_failure(JsCode::EntryCallback, "entry callback threw", source)
             }
+            ProgressCallbackError::Aborted { reason } => Described {
+                description: "The operation was aborted".to_owned(),
+                props: ErrorProps {
+                    code: JsCode::Abort,
+                    relaxable_by: None,
+                    details: Details::None,
+                    cause: reason,
+                },
+            },
         }),
         Failure::Native(err) => Err(err),
     }
@@ -407,6 +432,9 @@ fn apply(env: Env, described: Described) -> napi::Result<Error> {
     let Described { description, props } = described;
     let mut obj = env.create_error(Error::new(Status::GenericFailure, description))?;
     obj.set("code", props.code.as_str())?;
+    if props.code == JsCode::Abort {
+        obj.set("name", "AbortError")?;
+    }
     if let Some(setting) = props.relaxable_by {
         obj.set("relaxableBy", setting.as_str())?;
     }
@@ -506,6 +534,28 @@ where
     T: Send + 'static,
     U: ToNapiValue,
 {
+    spawn_blocking_promise_with(env, context, work, finish, |_env| Ok(()))
+}
+
+/// [`spawn_blocking_promise`] plus `settle`, which runs on the JS thread when
+/// the work ended, before `finish` or the error conversion, so it runs whether
+/// the promise resolves or rejects and even when `finish` fails. A failing
+/// `settle` fails the promise only if it would otherwise resolve.
+///
+/// # Errors
+///
+/// Returns an error only if the promise itself cannot be created.
+pub fn spawn_blocking_promise_with<'env, T, U>(
+    env: &'env Env,
+    context: &'static str,
+    work: impl FnOnce() -> Result<T, Failure> + Send + 'static,
+    finish: impl FnOnce(T) -> napi::Result<U> + 'static,
+    settle: impl FnOnce(Env) -> napi::Result<()> + 'static,
+) -> napi::Result<PromiseRaw<'env, U>>
+where
+    T: Send + 'static,
+    U: ToNapiValue,
+{
     env.spawn_future_with_callback(
         async move {
             let outcome = tokio::task::spawn_blocking(move || catch_panic(context, work))
@@ -517,11 +567,33 @@ where
                 });
             Ok::<_, Error>(outcome)
         },
-        move |env, outcome| match outcome {
-            Ok(value) => finish(value),
-            Err(failure) => Err(failure.into_js_error(*env)),
+        move |env, outcome| {
+            settle_then_convert(
+                || settle(*env),
+                outcome,
+                finish,
+                |failure| failure.into_js_error(*env),
+            )
         },
     )
+}
+
+/// Runs `settle` before anything that can fail, so it runs on every outcome:
+/// a resolved value whose conversion fails, and a rejection, included.
+fn settle_then_convert<T, U>(
+    settle: impl FnOnce() -> napi::Result<()>,
+    outcome: Result<T, Failure>,
+    finish: impl FnOnce(T) -> napi::Result<U>,
+    reject: impl FnOnce(Failure) -> Error,
+) -> napi::Result<U> {
+    let settled = settle();
+    match outcome {
+        Ok(value) => {
+            let converted = finish(value);
+            settled.and(converted)
+        }
+        Err(failure) => Err(reject(failure)),
+    }
 }
 
 impl fmt::Display for Failure {
@@ -545,6 +617,7 @@ impl fmt::Display for Failure {
                 }
                 ProgressCallbackError::Stream { .. } => f.write_str("archive stream failed"),
                 ProgressCallbackError::EntryCallback { .. } => f.write_str("entry callback threw"),
+                ProgressCallbackError::Aborted { .. } => f.write_str("The operation was aborted"),
             },
             Self::Native(err) => write!(f, "{}", err.reason),
         }
@@ -587,7 +660,59 @@ mod tests {
         expected.insert(PROGRESS_CALLBACK_ERROR.to_string());
         expected.insert(STREAM_ERROR.to_string());
         expected.insert(ENTRY_CALLBACK_ERROR.to_string());
+        expected.insert(ABORT_ERR.to_string());
         assert_eq!(dts_union("ErrorCode"), expected);
+    }
+
+    fn settle_probe(
+        outcome: Result<u8, Failure>,
+        finish: impl FnOnce(u8) -> napi::Result<u8>,
+        settle_result: napi::Result<()>,
+    ) -> (bool, napi::Result<u8>) {
+        let ran = std::cell::Cell::new(false);
+        let result = settle_then_convert(
+            || {
+                ran.set(true);
+                settle_result
+            },
+            outcome,
+            finish,
+            |failure| Error::from_reason(failure.to_string()),
+        );
+        (ran.get(), result)
+    }
+
+    #[test]
+    fn test_settle_runs_when_the_value_conversion_fails() {
+        let (ran, result) = settle_probe(Ok(1), |_| Err(Error::from_reason("convert")), Ok(()));
+        assert!(ran);
+        assert_eq!(result.unwrap_err().reason, "convert");
+    }
+
+    #[test]
+    fn test_settle_runs_when_the_work_failed() {
+        let failure = Failure::Native(Error::from_reason("work"));
+        let (ran, result) = settle_probe(Err(failure), Ok, Ok(()));
+        assert!(ran);
+        assert_eq!(result.unwrap_err().reason, "work");
+    }
+
+    #[test]
+    fn test_failing_settle_fails_only_a_resolved_promise() {
+        let (ran, result) = settle_probe(Ok(1), Ok, Err(Error::from_reason("settle")));
+        assert!(ran);
+        assert_eq!(result.unwrap_err().reason, "settle");
+
+        let failure = Failure::Native(Error::from_reason("work"));
+        let (_, result) = settle_probe(Err(failure), Ok, Err(Error::from_reason("settle")));
+        assert_eq!(result.unwrap_err().reason, "work");
+    }
+
+    #[test]
+    fn test_settle_then_convert_returns_the_converted_value() {
+        let (ran, result) = settle_probe(Ok(1), |v| Ok(v + 1), Ok(()));
+        assert!(ran);
+        assert_eq!(result.unwrap(), 2);
     }
 
     #[test]

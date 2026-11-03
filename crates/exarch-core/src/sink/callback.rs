@@ -24,10 +24,9 @@ use crate::types::SafePath;
 /// archive is read. A later failure (a corrupt or refused member further on)
 /// ends the extraction after earlier entries were delivered, so treat what the
 /// closure received as final only once the extraction returned `Ok`. A
-/// stream-level checksum is not verified: the gzip trailer CRC of a `.tar.gz`
-/// is never checked on extraction, so a corrupt compressed stream can deliver
-/// altered data without an error. Only verification with integrity checking
-/// reports it.
+/// stream-level checksum is checked last: the gzip trailer CRC of a `.tar.gz`
+/// is verified after the end-of-archive marker, so a corrupt compressed stream
+/// ends the extraction with an error only after its entries were delivered.
 ///
 /// An error from the closure ends the extraction like any other sink error
 /// (see [`EntrySink`]).

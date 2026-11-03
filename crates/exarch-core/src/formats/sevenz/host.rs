@@ -151,6 +151,8 @@ impl ExtractTarget for SevenZHostTarget<'_> {
             .inner
             .dirs()
             .ensure_parent(self.inner.root(), &safe_path)?;
+        // Owned because `admit_file` borrows the extractor mutably.
+        let parent = parent.into_owned()?;
 
         let occupancy = DestOccupancy::probe(&parent, leaf)?;
         if occupancy.is_occupied() && tally.options.skip_duplicates {

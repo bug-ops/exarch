@@ -6027,3 +6027,29 @@ fn test_extract_under_admittable_existing_symlink_still_suggests_allow_symlinks(
         .success();
     assert!(dest.join("real/x").is_file());
 }
+
+#[test]
+fn test_extract_refuses_a_corrupt_gzip_trailer() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("corrupt.tar.gz");
+    let dest = temp.path().join("out");
+    exarch_cmd()
+        .arg("create")
+        .arg(&archive)
+        .arg(fixture_path("sample.txt"))
+        .assert()
+        .success();
+    let mut bytes = std::fs::read(&archive).expect("read archive");
+    let crc_at = bytes.len() - 8;
+    bytes[crc_at] ^= 0xFF;
+    std::fs::write(&archive, bytes).expect("write archive");
+
+    exarch_cmd()
+        .arg("extract")
+        .arg(&archive)
+        .arg(&dest)
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("TAR end-of-archive marker"));
+    assert!(!dest.exists());
+}

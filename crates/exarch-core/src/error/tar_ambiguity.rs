@@ -24,6 +24,40 @@ closed_enum! {
     }
 }
 
+closed_enum! {
+    /// A TAR entry type that has no data and must not declare a payload.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::TarNonRegularKind;
+    ///
+    /// assert_eq!(TarNonRegularKind::Hardlink.to_string(), "Hardlink");
+    /// ```
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[non_exhaustive]
+    pub enum TarNonRegularKind {
+        /// A directory entry (`5`).
+        Directory => "Directory",
+        /// A symbolic link entry (`2`).
+        Symlink => "Symlink",
+        /// A hard link entry (`1`).
+        Hardlink => "Hardlink",
+    }
+}
+
+impl TarNonRegularKind {
+    /// The kind of `entry_type`, or `None` for a type that may carry data.
+    pub(crate) const fn of(entry_type: tar::EntryType) -> Option<Self> {
+        match entry_type {
+            tar::EntryType::Directory => Some(Self::Directory),
+            tar::EntryType::Symlink => Some(Self::Symlink),
+            tar::EntryType::Link => Some(Self::Hardlink),
+            _ => None,
+        }
+    }
+}
+
 /// An extension header whose body the `tar` crate merges into the next entry.
 ///
 /// # Examples
@@ -124,9 +158,10 @@ impl std::fmt::Display for TarPathKey {
 /// A TAR header or extension-header construct that readers such as `bsdtar`
 /// and Python `tarfile` resolve differently from the `tar` crate.
 ///
-/// The `String` payloads (`key`) are the record key decoded lossily and
-/// truncated to 256 bytes. They exist for display only: never compare them
-/// with a real key.
+/// The `String` payloads named `key` are the record key decoded lossily and
+/// truncated to 256 bytes. The `path` payloads are the entry path decoded
+/// lossily and not truncated. Both exist for display only: never compare them
+/// with a real key or path.
 ///
 /// # Examples
 ///
@@ -238,6 +273,26 @@ pub enum TarAmbiguity {
         /// The kind of extension header.
         kind: TarExtensionKind,
     },
+
+    /// A directory, symbolic link or hard link entry declares a payload, which
+    /// some readers skip as data and others parse as further headers.
+    NonRegularPayload {
+        /// The entry type.
+        kind: TarNonRegularKind,
+        /// Declared payload size in bytes.
+        size: u64,
+        /// Lossy entry path; for display only.
+        path: String,
+    },
+
+    /// A regular entry whose name ends in `/` declares a payload, so it is a
+    /// directory to some readers and a file to others.
+    DirectoryNamedPayload {
+        /// Declared payload size in bytes.
+        size: u64,
+        /// Lossy entry path; for display only.
+        path: String,
+    },
 }
 
 impl std::fmt::Display for TarAmbiguity {
@@ -299,6 +354,15 @@ impl std::fmt::Display for TarAmbiguity {
             Self::WindowMismatch => {
                 f.write_str("bytes read before the entry do not match the position of its header")
             }
+            Self::NonRegularPayload { kind, size, path } => {
+                write!(f, "{kind} entry declares a {size} byte payload: {path}")
+            }
+            Self::DirectoryNamedPayload { size, path } => {
+                write!(
+                    f,
+                    "file entry with a directory name carries {size} bytes: {path}"
+                )
+            }
         }
     }
 }
@@ -306,6 +370,36 @@ impl std::fmt::Display for TarAmbiguity {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn payload_messages_are_pinned() {
+        let directory = TarAmbiguity::NonRegularPayload {
+            kind: TarNonRegularKind::Directory,
+            size: 1024,
+            path: "x/".into(),
+        };
+        assert_eq!(
+            directory.to_string(),
+            "Directory entry declares a 1024 byte payload: x/"
+        );
+        let named = TarAmbiguity::DirectoryNamedPayload {
+            size: 3,
+            path: "d/".into(),
+        };
+        let hardlink = TarAmbiguity::NonRegularPayload {
+            kind: TarNonRegularKind::Hardlink,
+            size: 2,
+            path: "l".into(),
+        };
+        assert_eq!(
+            hardlink.to_string(),
+            "Hardlink entry declares a 2 byte payload: l"
+        );
+        assert_eq!(
+            named.to_string(),
+            "file entry with a directory name carries 3 bytes: d/"
+        );
+    }
 
     #[test]
     fn extension_kind_messages_are_pinned() {

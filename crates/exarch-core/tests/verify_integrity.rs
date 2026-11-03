@@ -422,18 +422,24 @@ fn tar_gz_split_into_two_members_at_a_header_boundary_is_fully_verified() {
 }
 
 #[test]
-fn tar_zst_trailing_frames_beyond_the_budget_are_incomplete() {
+fn tar_zst_trailing_frames_are_bounded_by_the_trailer_cap_not_the_budget() {
     let dir = TempDir::new().unwrap();
     let mut zst = tar_fixtures::zst(&three_entries());
     zst.extend(zstd::encode_all(vec![0u8; 64 * 1024].as_slice(), 1).unwrap());
     let path = write(&dir, "a.tar.zst", &zst);
 
     let report = verify(&path, integrity(1024));
-    assert_eq!(report.integrity_status(), IntegrityStatus::Incomplete);
-    assert_eq!(report.status(), VerificationStatus::Warning);
+    assert_eq!(report.integrity_status(), IntegrityStatus::Pass);
 
-    let roomy = verify(&path, default_integrity());
-    assert_eq!(roomy.integrity_status(), IntegrityStatus::Pass);
+    let cap = usize::try_from(SecurityConfig::default().max_tar_metadata_bytes).unwrap();
+    let mut huge = tar_fixtures::zst(&three_entries());
+    huge.extend(zstd::encode_all(vec![0u8; cap + 1].as_slice(), 1).unwrap());
+    let path = write(&dir, "b.tar.zst", &huge);
+    let refused = verify_err(&path, default_integrity());
+    assert_eq!(
+        refused.relaxable_by(),
+        Some(exarch_core::PolicySetting::MaxTarMetadataBytes)
+    );
 }
 
 #[test]
@@ -706,18 +712,23 @@ fn tar_gnu_sparse_entry_is_refused() {
 }
 
 #[test]
-fn tar_archive_trait_verify_reads_the_trailer_within_the_budget() {
+fn tar_archive_trait_verify_reads_the_trailer_within_the_cap() {
+    let config = SecurityConfig::default().validate().unwrap();
+    let cap = usize::try_from(config.max_tar_metadata_bytes).unwrap();
     let mut tar = three_entries();
     tar.extend(std::iter::repeat_n(0x55u8, 4096));
-    let config = SecurityConfig::default().validate().unwrap();
 
     let mut archive = TarArchive::new(Cursor::new(tar.clone()));
     let report = archive.verify(&config, &integrity(1024)).unwrap();
-    assert_eq!(report.integrity_status(), IntegrityStatus::Incomplete);
-
-    let mut archive = TarArchive::new(Cursor::new(tar));
-    let report = archive.verify(&config, &default_integrity()).unwrap();
     assert_eq!(report.integrity_status(), IntegrityStatus::Pass);
+
+    tar.extend(std::iter::repeat_n(0x55u8, cap));
+    let mut archive = TarArchive::new(Cursor::new(tar));
+    let refused = archive.verify(&config, &default_integrity()).unwrap_err();
+    assert_eq!(
+        refused.relaxable_by(),
+        Some(exarch_core::PolicySetting::MaxTarMetadataBytes)
+    );
 }
 
 #[test]

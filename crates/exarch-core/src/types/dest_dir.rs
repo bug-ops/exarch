@@ -81,7 +81,8 @@ impl DestDir {
     /// - Validating all extracted paths against the canonical destination
     ///
     /// Extraction narrows this further: the destination is opened once and
-    /// every write below it is relative to that directory handle (see the
+    /// every write below it is relative to that directory handle (a descriptor
+    /// on Unix, an NT handle on Windows; see the
     /// `pinned_dir` module). The gap between `canonicalize` and that open
     /// remains, and needs write access to the destination's parent to use.
     ///

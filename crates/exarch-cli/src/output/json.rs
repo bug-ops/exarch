@@ -10,7 +10,7 @@ use exarch_core::ArchiveError;
 use exarch_core::ArchiveManifest;
 use exarch_core::CreationReport;
 use exarch_core::ExtractionReport;
-use exarch_core::TarTrailerRefusal;
+use exarch_core::FfiKind;
 use exarch_core::VerificationReport;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -19,35 +19,29 @@ use std::io::Write;
 use std::io::{self};
 use std::path::Path;
 
-fn extraction_error_kind(err: &ArchiveError) -> String {
-    match err {
-        ArchiveError::Io(_) => "IoError",
-        ArchiveError::SecurityViolation { .. }
-        | ArchiveError::TarTrailer(TarTrailerRefusal::OverCap { .. }) => "SecurityViolation",
-        ArchiveError::InvalidArchive(_)
-        | ArchiveError::TarAmbiguity(_)
-        | ArchiveError::TarTrailer(_) => "InvalidArchive",
-        ArchiveError::PathTraversal { .. } => "PathTraversal",
-        ArchiveError::SymlinkEscape { .. } => "SymlinkEscape",
-        ArchiveError::HardlinkEscape { .. } => "HardlinkEscape",
-        ArchiveError::ZipBomb(_) => "ZipBomb",
-        ArchiveError::ZipInconsistency(_) => "ZipInconsistency",
-        ArchiveError::InvalidPermissions { .. } => "InvalidPermissions",
-        ArchiveError::QuotaExceeded { .. } => "QuotaExceeded",
-        ArchiveError::SourceNotFound { .. } => "SourceNotFound",
-        ArchiveError::SourceNotAccessible { .. } => "SourceNotAccessible",
-        ArchiveError::OutputExists { .. } => "OutputExists",
-        ArchiveError::InvalidCompressionLevel { .. } => "InvalidCompressionLevel",
-        ArchiveError::UnknownFormat { .. } => "UnknownFormat",
-        ArchiveError::InvalidConfiguration { .. } => "InvalidConfiguration",
-        ArchiveError::PartialExtraction { source, .. } => return extraction_error_kind(source),
-        // Forward-compat: a variant added to ArchiveError after this match was
-        // written. #[non_exhaustive] requires this arm to compile against a
-        // newer exarch-core. "Error" matches the generic fallback documented
-        // for kinds that don't map to a known archive validation failure.
+fn kind_name(kind: &FfiKind) -> &'static str {
+    match kind {
+        FfiKind::Io(_) => "IoError",
+        FfiKind::SecurityViolation { .. } => "SecurityViolation",
+        FfiKind::InvalidArchive { .. } => "InvalidArchive",
+        FfiKind::PathTraversal => "PathTraversal",
+        FfiKind::SymlinkEscape => "SymlinkEscape",
+        FfiKind::HardlinkEscape => "HardlinkEscape",
+        FfiKind::ZipBomb => "ZipBomb",
+        FfiKind::ZipInconsistency => "ZipInconsistency",
+        FfiKind::InvalidPermissions => "InvalidPermissions",
+        FfiKind::QuotaExceeded => "QuotaExceeded",
+        FfiKind::SourceNotFound => "SourceNotFound",
+        FfiKind::SourceNotAccessible => "SourceNotAccessible",
+        FfiKind::OutputExists => "OutputExists",
+        FfiKind::InvalidCompressionLevel => "InvalidCompressionLevel",
+        FfiKind::UnknownFormat => "UnknownFormat",
+        FfiKind::InvalidConfiguration => "InvalidConfiguration",
+        // Forward-compat: a class added to FfiKind after this match was
+        // written. "Error" matches the generic fallback documented for kinds
+        // that don't map to a known archive validation failure.
         _ => "Error",
     }
-    .to_string()
 }
 
 /// JSON formatter writing envelopes to `W`. Defaults to process stdout;
@@ -154,7 +148,8 @@ impl<W: Write> OutputFormatter for JsonFormatter<W> {
     fn format_error(&mut self, operation: &str, error: &anyhow::Error) {
         let extraction_err = error.chain().find_map(|e| e.downcast_ref::<ArchiveError>());
 
-        let kind = extraction_err.map_or_else(|| "Error".to_string(), extraction_error_kind);
+        let ffi_kind = extraction_err.map(ArchiveError::ffi_kind);
+        let kind = ffi_kind.as_ref().map_or("Error", kind_name).to_string();
         let message = format!("{error:#}");
 
         // PartialExtraction is converted by convert_extraction_error into a
@@ -181,7 +176,10 @@ impl<W: Write> OutputFormatter for JsonFormatter<W> {
         } else {
             JsonOutput::<()>::error(operation, kind, message)
         };
-        let output = output.with_relaxable_by(extraction_err.and_then(ArchiveError::relaxable_by));
+        let output = match &ffi_kind {
+            Some(kind) => output.with_ffi_kind(kind),
+            None => output,
+        };
         let _ = self.output(&output);
     }
 
@@ -362,6 +360,10 @@ mod tests {
     use exarch_core::QuotaResource;
     use std::path::PathBuf;
 
+    fn extraction_error_kind(err: &ArchiveError) -> String {
+        kind_name(&err.ffi_kind()).to_string()
+    }
+
     fn error_kind(err: &ArchiveError) -> String {
         extraction_error_kind(err)
     }
@@ -446,6 +448,7 @@ mod tests {
 
     #[test]
     fn test_extraction_error_kind_tar_trailer_follows_the_old_kinds() {
+        use exarch_core::TarTrailerRefusal;
         let over = ArchiveError::TarTrailer(TarTrailerRefusal::OverCap { cap: 1 << 20 });
         assert_eq!(error_kind(&over), "SecurityViolation");
         for refusal in [
@@ -479,17 +482,49 @@ mod tests {
         assert_eq!(error_kind(&err), "UnknownFormat");
     }
 
+    fn envelope_for(err: &ArchiveError) -> serde_json::Value {
+        let kind = err.ffi_kind();
+        let output =
+            JsonOutput::<()>::error("extract", kind_name(&kind), "denied").with_ffi_kind(&kind);
+        serde_json::to_value(&output).unwrap()
+    }
+
     #[test]
     fn test_error_envelope_reports_relaxable_by_only_when_set() {
-        let relaxable = JsonOutput::<()>::error("extract", "SecurityViolation", "denied")
-            .with_relaxable_by(Some(exarch_core::PolicySetting::Symlinks));
-        let json = serde_json::to_value(&relaxable).unwrap();
-        assert_eq!(json["error"]["relaxable_by"], "symlinks");
+        let relaxable = envelope_for(&ArchiveError::relaxable_violation(
+            exarch_core::PolicySetting::Symlinks,
+            "denied".to_string(),
+        ));
+        assert_eq!(relaxable["error"]["relaxable_by"], "symlinks");
+        assert!(relaxable["error"].get("sub_code").is_none());
 
-        let fixed = JsonOutput::<()>::error("extract", "SecurityViolation", "denied")
-            .with_relaxable_by(None);
-        let json = serde_json::to_value(&fixed).unwrap();
-        assert!(json["error"].get("relaxable_by").is_none());
+        let fixed = envelope_for(&ArchiveError::violation("denied".to_string()));
+        assert!(fixed["error"].get("relaxable_by").is_none());
+    }
+
+    #[test]
+    fn test_error_envelope_reports_tar_sub_codes() {
+        use exarch_core::TarTrailerRefusal;
+
+        let ambiguity = envelope_for(&ArchiveError::TarAmbiguity(
+            exarch_core::TarAmbiguity::ChecksumMismatch,
+        ));
+        assert_eq!(ambiguity["error"]["kind"], "InvalidArchive");
+        assert_eq!(ambiguity["error"]["sub_code"], "TAR_AMBIGUITY");
+
+        let truncated = envelope_for(&ArchiveError::TarTrailer(TarTrailerRefusal::Truncated));
+        assert_eq!(truncated["error"]["kind"], "InvalidArchive");
+        assert_eq!(truncated["error"]["sub_code"], "TAR_TRAILER");
+
+        let over = envelope_for(&ArchiveError::TarTrailer(TarTrailerRefusal::OverCap {
+            cap: 1 << 20,
+        }));
+        assert_eq!(over["error"]["kind"], "SecurityViolation");
+        assert_eq!(over["error"]["sub_code"], "TAR_TRAILER");
+        assert_eq!(over["error"]["relaxable_by"], "max_tar_metadata_bytes");
+
+        let plain = envelope_for(&ArchiveError::InvalidArchive("x".to_string()));
+        assert!(plain["error"].get("sub_code").is_none());
     }
 
     #[test]

@@ -441,12 +441,28 @@ Every subcommand's `--json` output uses the same envelope:
   "error": {
     "kind": "PathTraversal",   // see full enum below
     "message": "...",
-    "relaxable_by": "symlinks" // only on some SecurityViolation errors, see below
+    "relaxable_by": "symlinks", // only on some SecurityViolation errors, see below
+    "sub_code": "TAR_TRAILER"  // only on some InvalidArchive / SecurityViolation errors, see below
   }
 }
 ```
 
 `data` is absent on error, `error` is absent on success.
+
+`error.sub_code` is present only on a TAR refusal, and is absent on every other error, so branch on
+it instead of parsing `message`. `TAR_AMBIGUITY` (with `error.kind` `InvalidArchive`) marks a TAR
+header that readers parse differently (a size or checksum field that is not plain octal, a PAX
+record problem, a payload declared on a directory or link, and the other cases listed under the TAR
+consistency checks). `TAR_TRAILER` marks the stream after the end-of-archive marker of a compressed
+TAR: with `error.kind` `InvalidArchive` when it is corrupt or truncated (a bad gzip CRC or ISIZE,
+trailing junk, a cut-short later member), with `error.kind` `SecurityViolation` and `relaxable_by`
+`max_tar_metadata_bytes` when more than the cap of decoded bytes follows. The value is derived from
+the same classification the Python (`sub_code`) and Node (`subCode`) bindings expose. Verified live
+with the debug binary on four TARs: a size field `+0000000005` gives `kind` `InvalidArchive`,
+`sub_code` `TAR_AMBIGUITY`; a gzip member followed by `\0\0\0garbage` gives `InvalidArchive`,
+`TAR_TRAILER`; a gzip member followed by a second member of 5 MiB of zeros gives `SecurityViolation`,
+`TAR_TRAILER` and `relaxable_by` `max_tar_metadata_bytes`; a file of `A` bytes gives `InvalidArchive`
+and no `sub_code`.
 
 `error.relaxable_by` is present only on a `SecurityViolation` that a core `SecurityConfig` setting
 relaxes, and names the setting whose current value refused the entry: `symlinks`, `hardlinks`,

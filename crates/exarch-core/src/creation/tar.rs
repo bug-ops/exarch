@@ -305,6 +305,10 @@ fn add_symlink_to_tar<W: Write>(
 }
 
 #[cfg(not(unix))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "signature must match the Unix variant"
+)]
 fn add_symlink_to_tar<W: Write>(
     _builder: &mut Builder<W>,
     _link_path: &Path,
@@ -344,10 +348,10 @@ fn set_permissions(header: &mut Header, metadata: &std::fs::Metadata) {
     header.set_mode(mode);
 
     // Set modification time
-    if let Ok(modified) = metadata.modified() {
-        if let Ok(duration) = modified.duration_since(std::time::UNIX_EPOCH) {
-            header.set_mtime(duration.as_secs());
-        }
+    if let Ok(modified) = metadata.modified()
+        && let Ok(duration) = modified.duration_since(std::time::UNIX_EPOCH)
+    {
+        header.set_mtime(duration.as_secs());
     }
 }
 

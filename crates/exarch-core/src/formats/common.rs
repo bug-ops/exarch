@@ -688,6 +688,13 @@ fn check_directory_occupant(dir_path: &Path, rel: &Path, dest: &DestDir) -> Resu
 /// - A symlink with a different target occupies the path and `skip_duplicates`
 ///   is false (one with the same target is skipped as unchanged)
 #[allow(unused_variables)]
+#[cfg_attr(
+    not(unix),
+    expect(
+        clippy::needless_pass_by_ref_mut,
+        reason = "only the Unix path updates the counters; the signature is shared"
+    )
+)]
 pub fn create_symlink(
     safe_symlink: &SafeSymlink,
     root: &PinnedRoot,

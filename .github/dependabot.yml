@@ -15,6 +15,10 @@ updates:
         versions: [">=2.5"]
       - dependency-name: "lzma-rust2"
         versions: [">=0.24"]
+      # #854: a lone direct bump leaves two windows-sys versions and fails
+      # cargo-deny `multiple-versions`; move it together with the transitive users.
+      - dependency-name: "windows-sys"
+        versions: [">=0.62"]
     labels:
       - "dependencies"
       - "rust"

@@ -153,6 +153,8 @@ mod tests {
         use crate::ArchiveError;
         use crate::ErrorCode;
         use crate::FfiKind;
+        use crate::InvalidArchiveSubCode;
+        use crate::SecurityViolationSubCode;
         use crate::inspection::report::IssueCategory;
         use crate::inspection::report::IssueSeverity;
         use crate::inspection::report::VerificationIssue;
@@ -168,7 +170,8 @@ mod tests {
         assert_eq!(
             over.into_ffi_message().kind,
             FfiKind::SecurityViolation {
-                relaxable_by: Some(PolicySetting::MaxTarMetadataBytes)
+                relaxable_by: Some(PolicySetting::MaxTarMetadataBytes),
+                sub_code: Some(SecurityViolationSubCode::TarTrailer),
             }
         );
         let issue = VerificationIssue::from_error(
@@ -184,7 +187,12 @@ mod tests {
             assert_eq!(error.relaxable_by(), None);
             assert_eq!(error.context(), None);
             assert_eq!(error.error_code(), ErrorCode::InvalidArchive);
-            assert_eq!(error.into_ffi_message().kind, FfiKind::InvalidArchive);
+            assert_eq!(
+                error.into_ffi_message().kind,
+                FfiKind::InvalidArchive {
+                    sub_code: Some(InvalidArchiveSubCode::TarTrailer)
+                }
+            );
             let issue = VerificationIssue::from_error(&ArchiveError::TarTrailer(refusal), None);
             assert_eq!(issue.category, IssueCategory::InvalidArchive);
             assert_eq!(issue.severity, IssueSeverity::High);

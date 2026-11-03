@@ -5,6 +5,8 @@ import type {
   ExarchError,
   ExarchErrorPlain,
   ExarchErrorRolledBack,
+  InvalidArchiveSubCode,
+  SecurityViolationSubCode,
 } from '../../index'
 
 export function describeFailure(caught: unknown): string {
@@ -22,8 +24,16 @@ export function describeFailure(caught: unknown): string {
   if (err.relaxableBy !== undefined) {
     return err.relaxableBy
   }
+  if (err.subCode !== undefined) {
+    return err.subCode
+  }
   return err.code
 }
+
+// @ts-expect-error subCode only has the core spellings
+export const badSubCode: InvalidArchiveSubCode = 'TAR_OTHER'
+
+export const trailerSubCode: SecurityViolationSubCode = 'TAR_TRAILER'
 
 export function isCoreCode(err: ExarchError, wanted: ErrorCode): boolean {
   return err.code === wanted

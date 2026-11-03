@@ -389,6 +389,8 @@ impl<R: Read> Read for SpoolTee<R> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    use std::assert_matches;
+
     use super::*;
     use crate::ErrorCode;
     use crate::NoopProgress;
@@ -620,14 +622,11 @@ mod tests {
             other => other,
         };
 
-        assert!(
-            matches!(
-                error,
-                crate::ArchiveError::QuotaExceeded {
-                    resource: crate::QuotaResource::CompressedMembers { .. }
-                }
-            ),
-            "{error:?}"
+        assert_matches!(
+            error,
+            crate::ArchiveError::QuotaExceeded {
+                resource: crate::QuotaResource::CompressedMembers { .. }
+            }
         );
     }
 

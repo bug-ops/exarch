@@ -262,6 +262,25 @@ struct Opened {
     config: SecurityConfig<Validated>,
 }
 
+fn mixed_zip() -> Vec<u8> {
+    use zip::CompressionMethod;
+    use zip::write::SimpleFileOptions;
+
+    let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    let entries = [
+        ("stored.txt", CompressionMethod::Stored, payload(0)),
+        ("deflated.txt", CompressionMethod::Deflated, payload(1)),
+        ("empty.txt", CompressionMethod::Deflated, Vec::new()),
+        ("bzip2.txt", CompressionMethod::Bzip2, payload(2)),
+    ];
+    for (name, method, data) in entries {
+        let options = SimpleFileOptions::default().compression_method(method);
+        zip.start_file(name, options).unwrap();
+        zip.write_all(&data).unwrap();
+    }
+    zip.finish().unwrap().into_inner()
+}
+
 fn open(bytes: &[u8], reuse: DecodeReuse) -> Opened {
     let read = Arc::new(AtomicU64::new(0));
     let config = SecurityConfig::default().validate().unwrap();
@@ -469,4 +488,46 @@ fn the_limit_follows_the_decoder_memory_of_the_config() {
     assert!(store.capture(key_of(&data)).is_none());
     let fits = b"y".repeat(512);
     assert!(store.capture(key_of(&fits)).is_some());
+}
+
+#[test]
+fn only_non_empty_deflate_entries_are_kept_and_replayed() {
+    let bytes = mixed_zip();
+    for mode in [
+        DecodeReuse::Memory(ReuseLimit::DEFAULT),
+        DecodeReuse::TempFile(ReuseLimit::DEFAULT),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut opened = open(&bytes, mode);
+        extract(&mut opened, dir.path()).unwrap();
+        let store = opened.archive.structure_mut().reuse_mut().unwrap();
+        assert_eq!(store.replays(), 1, "{mode:?}");
+        assert_eq!(store.used(), payload(1).len() as u64, "{mode:?}");
+        assert_eq!(std::fs::read(dir.path().join("empty.txt")).unwrap(), b"");
+        assert_eq!(
+            std::fs::read(dir.path().join("bzip2.txt")).unwrap(),
+            payload(2)
+        );
+    }
+}
+
+#[cfg(target_os = "wasi")]
+#[test]
+fn a_temp_file_store_is_never_made_on_wasi() {
+    assert!(ReuseStore::new(plan(DecodeReuse::TempFile(ReuseLimit::DEFAULT))).is_none());
+}
+
+#[test]
+fn nothing_is_kept_when_the_policy_skips_the_stream_checks() {
+    let config = SecurityConfig::default()
+        .with_zip_consistency(crate::ZipConsistencyPolicy::Ignore)
+        .validate()
+        .unwrap();
+    let mut archive = ZipArchive::for_extraction(
+        Cursor::new(deflated_zip(3)),
+        &config,
+        DecodeReuse::Memory(ReuseLimit::DEFAULT),
+    )
+    .unwrap();
+    assert!(archive.structure_mut().reuse_mut().is_none());
 }

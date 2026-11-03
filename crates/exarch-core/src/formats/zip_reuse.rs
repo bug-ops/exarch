@@ -43,7 +43,7 @@ const SPOOL_BUFFER: usize = 64 * 1024;
 /// `max_decoder_memory` and `max_total_size`, and an entry that the size or
 /// ratio limits would refuse at extraction is not kept at all.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct ReusePlan {
+pub struct ReusePlan {
     mode: DecodeReuse,
     limit: u64,
     max_entry: u64,

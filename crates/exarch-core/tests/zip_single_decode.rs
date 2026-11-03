@@ -67,6 +67,41 @@ fn every_mode_extracts_the_same_files_and_report() {
 }
 
 #[test]
+fn mixed_methods_and_empty_entries_extract_the_same_in_every_mode() {
+    let dir = TempDir::new().unwrap();
+    let archive = write_archive(&dir, &common::mixed_zip());
+    let config = SecurityConfig::default();
+
+    for mode in MODES {
+        let direct = TempDir::new().unwrap();
+        let options = ExtractionOptions::default().with_decode_reuse(mode);
+        extract_archive_with_options(&archive, direct.path(), &config, &options).unwrap();
+
+        let listed =
+            list_archive_for_extraction(&archive, &config, &ListOptions::default(), mode).unwrap();
+        let via_list = TempDir::new().unwrap();
+        listed
+            .extract(
+                via_list.path(),
+                &config,
+                &ExtractionOptions::default(),
+                &mut NoopProgress,
+            )
+            .unwrap();
+
+        for root in [direct.path(), via_list.path()] {
+            for (name, data) in common::mixed_zip_files() {
+                assert_eq!(
+                    std::fs::read(root.join(name)).unwrap(),
+                    data,
+                    "{mode:?} {name}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn a_listed_zip_extracts_the_same_files_in_every_mode() {
     let dir = TempDir::new().unwrap();
     let archive = write_archive(&dir, &common::deflated_zip(ENTRIES, ENTRY_LEN));

@@ -50,6 +50,39 @@ pub fn deflated_zip(entries: usize, entry_len: usize) -> Vec<u8> {
     zip.finish().expect("finish archive").into_inner()
 }
 
+/// The files of [`mixed_zip`] with their contents.
+pub fn mixed_zip_files() -> Vec<(&'static str, Vec<u8>)> {
+    vec![
+        ("stored.txt", wordy(1, 5000)),
+        ("deflated.txt", wordy(2, 30_000)),
+        ("empty-deflated.txt", Vec::new()),
+        ("empty-stored.txt", Vec::new()),
+        ("bzip2.txt", wordy(3, 20_000)),
+        ("deflated-again.txt", wordy(4, 7000)),
+    ]
+}
+
+/// A ZIP mixing stored, deflated, bzip2 and zero-length entries.
+pub fn mixed_zip() -> Vec<u8> {
+    use std::io::Write;
+    use zip::CompressionMethod;
+
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    for (name, data) in mixed_zip_files() {
+        let method = match name {
+            "stored.txt" | "empty-stored.txt" => CompressionMethod::Stored,
+            "bzip2.txt" => CompressionMethod::Bzip2,
+            _ => CompressionMethod::Deflated,
+        };
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(method)
+            .unix_permissions(0o644);
+        zip.start_file(name, options).expect("start entry");
+        zip.write_all(&data).expect("write entry");
+    }
+    zip.finish().expect("finish archive").into_inner()
+}
+
 /// An entry of [`solid_copy_7z`].
 #[derive(Clone, Copy)]
 pub enum RawEntry<'a> {

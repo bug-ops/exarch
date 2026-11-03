@@ -7,6 +7,7 @@
 
 #![cfg(unix)]
 #![allow(clippy::unwrap_used)]
+#![allow(clippy::disallowed_methods)]
 
 use std::assert_matches;
 use std::io::Cursor;

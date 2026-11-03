@@ -4,6 +4,7 @@
 
 #![cfg(unix)]
 #![allow(clippy::unwrap_used)]
+#![allow(clippy::disallowed_methods)]
 
 use std::io::Cursor;
 use std::io::Write as _;

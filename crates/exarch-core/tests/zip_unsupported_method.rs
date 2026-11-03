@@ -2,6 +2,7 @@
 //! extract, list and verify, before anything is written.
 
 #![allow(clippy::unwrap_used)]
+#![allow(clippy::disallowed_methods)]
 
 use std::assert_matches;
 use std::path::PathBuf;

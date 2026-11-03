@@ -2,6 +2,7 @@
 //! longer than the host path limit, whatever its component count.
 
 #![allow(clippy::unwrap_used)]
+#![allow(clippy::disallowed_methods)]
 
 use std::path::Path;
 use std::path::PathBuf;
@@ -87,7 +88,9 @@ fn a_path_above_every_unix_limit_is_refused_everywhere() {
     assert!(matches!(err, exarch_core::ArchiveError::Io(_)), "{err}");
     assert_eq!(std::fs::read_dir(out.path()).unwrap().count(), 0);
     assert!(list_archive(&archive, &config).is_err());
-    assert!(verify_archive(&archive, &config).is_ok_and(|r| r.status() != VerificationStatus::Pass));
+    assert!(
+        verify_archive(&archive, &config).is_ok_and(|r| r.status() != VerificationStatus::Pass)
+    );
 }
 
 #[cfg(unix)]

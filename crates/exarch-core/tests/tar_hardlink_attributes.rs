@@ -8,6 +8,7 @@
 //! attribute on the link path afterwards; these tests pin that.
 
 #![allow(clippy::unwrap_used)]
+#![allow(clippy::disallowed_methods)]
 
 mod sink_support;
 

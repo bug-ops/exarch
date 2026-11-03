@@ -189,12 +189,15 @@ impl PinnedRoot {
 /// from a [`PinnedRoot`]'s descriptor, so the walker's per-component vetting
 /// at write time stands in for the validator's path-based parent probe.
 ///
-/// Only [`PinnedRoot::backs_parent_probe`] mints it.
+/// Only [`PinnedRoot::backs_parent_probe`] mints it. It borrows the root, so a
+/// proof cannot outlive or be reused for another root, and it is not `Copy`.
 ///
 /// [`DirWalker`]: crate::formats::dir_walker::DirWalker
 #[cfg(any(unix, target_os = "wasi"))]
-#[derive(Debug, Clone, Copy)]
-pub struct WalkerBacked(());
+#[derive(Debug)]
+pub struct WalkerBacked<'r>(
+    #[expect(dead_code, reason = "ties the proof to its root")] &'r PinnedRoot,
+);
 
 #[cfg(any(unix, target_os = "wasi"))]
 impl PinnedRoot {
@@ -202,9 +205,8 @@ impl PinnedRoot {
     ///
     /// The holder must write every path it validates with the proof through
     /// `DirWalker::ensure_parent` or `ensure_dir` on this root.
-    #[expect(clippy::unused_self, reason = "binds the proof to a root by signature")]
-    pub(crate) const fn backs_parent_probe(&self) -> WalkerBacked {
-        WalkerBacked(())
+    pub(crate) const fn backs_parent_probe(&self) -> WalkerBacked<'_> {
+        WalkerBacked(self)
     }
 }
 

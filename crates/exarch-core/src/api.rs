@@ -277,6 +277,10 @@ pub fn extract_archive_with_options<P: AsRef<Path>, Q: AsRef<Path>>(
     extract_archive_with_options_and_progress(archive_path, output_dir, config, options, &mut noop)
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "stages the whole extraction in a private sibling directory, then renames it into place"
+)]
 fn extract_atomic(
     output_dir: &Path,
     extract: impl FnOnce(&Path) -> Result<ExtractionReport>,

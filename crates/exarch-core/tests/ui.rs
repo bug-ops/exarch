@@ -15,3 +15,13 @@ fn ui() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/ui/*.rs");
 }
+
+/// A path whose parent is vetted at write time (`SafePath<Walked>`) must not
+/// reach the path-based join. `Walked` is nameable only with the `testing`
+/// feature, so this suite is gated on it.
+#[cfg(all(feature = "testing", any(unix, target_os = "wasi")))]
+#[test]
+fn ui_walked_paths() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/ui_testing/*.rs");
+}

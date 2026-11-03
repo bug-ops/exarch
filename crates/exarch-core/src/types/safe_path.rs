@@ -15,6 +15,7 @@ use crate::security::fs_view::blocked_parent_error;
 use crate::security::fs_view::paths_start_with;
 use std::borrow::Cow;
 use std::ffi::OsStr;
+use std::marker::PhantomData;
 use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
@@ -38,6 +39,14 @@ use super::DestDir;
 /// - Always resolves within the destination directory
 /// - Normalized to remove redundant components (`.`, root prefix)
 ///
+/// # Parent state
+///
+/// The type parameter records how the parent directory was vetted:
+/// [`Resolved`] (the default, and the only state outside this crate) means
+/// validation resolved it, so the path can be joined to the destination and
+/// used by name. An extraction onto a pinned directory handle vets each
+/// parent when it writes instead, and its paths cannot be joined by name.
+///
 /// # Examples
 ///
 /// ```no_run
@@ -60,7 +69,59 @@ use super::DestDir;
 /// # }
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct SafePath(PathBuf);
+pub struct SafePath<P: ParentCheck = Resolved>(PathBuf, PhantomData<fn() -> P>);
+
+mod sealed {
+    pub trait Sealed: std::fmt::Debug + Clone + PartialEq + Eq + std::hash::Hash {}
+}
+
+/// How the parent directory of a validated [`SafePath`] was vetted.
+///
+/// Sealed: [`Resolved`] is the only state outside this crate. The typed
+/// path-based APIs (`DestDir::join`, and the crate-internal read-only probe)
+/// refuse a path whose parent is vetted at write time at compile time, so such
+/// a path reaches the filesystem only through a directory-handle writer.
+/// [`SafePath::as_path`] stays a raw read-only escape, and path-based
+/// mutators inside `exarch-core` are linted with
+/// `clippy::disallowed_methods`.
+pub trait ParentCheck: sealed::Sealed {
+    /// What validation needs to skip the parent probe.
+    #[doc(hidden)]
+    type Proof<'r>;
+
+    /// Whether validation resolves the parent directory itself.
+    #[doc(hidden)]
+    const PROBES_PARENT: bool;
+}
+
+/// The parent directory was resolved during validation, so the path is safe
+/// to join to the destination and use by name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Resolved;
+
+impl sealed::Sealed for Resolved {}
+
+impl ParentCheck for Resolved {
+    type Proof<'r> = ();
+
+    const PROBES_PARENT: bool = true;
+}
+
+/// The parent directory is vetted at write time by a directory walker on a
+/// pinned root, so the path must be written through that walker.
+#[cfg(any(unix, target_os = "wasi"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Walked;
+
+#[cfg(any(unix, target_os = "wasi"))]
+impl sealed::Sealed for Walked {}
+
+#[cfg(any(unix, target_os = "wasi"))]
+impl ParentCheck for Walked {
+    type Proof<'r> = crate::formats::pinned_dir::WalkerBacked<'r>;
+
+    const PROBES_PARENT: bool = false;
+}
 
 /// Reason carried by the violation raised for an empty entry name.
 pub(crate) const EMPTY_PATH_REASON: &str = "empty path not allowed";
@@ -148,7 +209,9 @@ impl SafePath {
         let ctx = ValidationContext::<V>::new(config.allowed.symlinks);
         Self::validate_with_context_in(path, root, config, &ctx, view)
     }
+}
 
+impl<P: ParentCheck> SafePath<P> {
     /// Validates with optimization context that can skip `canonicalize()`.
     ///
     /// The parent directory is canonicalized unless it is the root itself. When
@@ -163,7 +226,7 @@ impl SafePath {
         path: &Path,
         dest: &DestDir,
         config: &SecurityConfig<Validated>,
-        ctx: &ValidationContext<HostFs>,
+        ctx: &ValidationContext<'_, HostFs, P>,
     ) -> Result<Self> {
         Self::validate_with_context_in(path, dest, config, ctx, &HostFs)
     }
@@ -176,7 +239,7 @@ impl SafePath {
         path: &Path,
         root: &V::Root,
         config: &SecurityConfig<Validated>,
-        ctx: &ValidationContext<V>,
+        ctx: &ValidationContext<'_, V, P>,
         view: &V,
     ) -> Result<Self> {
         let dest = root.as_path();
@@ -189,7 +252,7 @@ impl SafePath {
         // itself. They are produced by `tar -C /dir .` and are always safe.
         // Return immediately — no further validation needed.
         if path == Path::new(".") || path == Path::new("./") {
-            return Ok(Self(PathBuf::new()));
+            return Ok(Self::new_unchecked(PathBuf::new()));
         }
 
         // 1. Check for null bytes
@@ -293,7 +356,7 @@ impl SafePath {
         // probe; a walker-backed target vets the parent at write time instead.
         if let Some(parent) = resolved
             .parent()
-            .filter(|parent| *parent != dest && !ctx.defers_parent_probe())
+            .filter(|parent| *parent != dest && P::PROBES_PARENT)
         {
             match view.canonicalize(parent, root) {
                 Ok(Containment::Within(_)) => {}
@@ -352,7 +415,7 @@ impl SafePath {
             }
         }
 
-        Ok(Self(final_path.into_owned()))
+        Ok(Self::new_unchecked(final_path.into_owned()))
     }
 
     /// Creates a `SafePath` without validation (INTERNAL USE ONLY).
@@ -367,8 +430,8 @@ impl SafePath {
     ///
     /// This is only used internally when path has already been validated
     /// through a different mechanism (e.g., hardlink validation).
-    pub(crate) fn new_unchecked(path: PathBuf) -> Self {
-        Self(path)
+    pub(crate) const fn new_unchecked(path: PathBuf) -> Self {
+        Self(path, PhantomData)
     }
 
     /// Returns the path as a `&Path`.

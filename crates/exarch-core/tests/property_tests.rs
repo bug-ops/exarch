@@ -2,7 +2,7 @@
 //!
 //! These tests use proptest to generate arbitrary inputs and verify
 //! security properties hold across a wide range of cases.
-
+#![allow(clippy::disallowed_methods)]
 #![allow(
     clippy::expect_used,
     clippy::field_reassign_with_default,

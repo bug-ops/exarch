@@ -1,6 +1,7 @@
 //! Declared ZIP compressed sizes are validated against the archive length.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(clippy::disallowed_methods)]
 
 use std::assert_matches;
 use std::io::Cursor;

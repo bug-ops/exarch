@@ -16,6 +16,7 @@ use crate::security::fs_view::ModelRoot as _;
 #[cfg(any(test, feature = "testing"))]
 use crate::types::DestDir;
 use crate::types::SafePath;
+use crate::types::safe_path::ParentCheck;
 use crate::types::safe_path::check_component_for;
 use crate::types::safe_symlink::has_root_or_prefix;
 use crate::types::safe_symlink::resolve_through_symlinks_in;
@@ -153,9 +154,9 @@ impl HardlinkTracker {
         clippy::items_after_statements,
         reason = "the import is placed next to its only use"
     )]
-    pub(crate) fn validate_hardlink_in<V: FsView>(
+    pub(crate) fn validate_hardlink_in<V: FsView, P: ParentCheck>(
         &mut self,
-        link_path: &SafePath,
+        link_path: &SafePath<P>,
         target: &Path,
         root: &V::Root,
         config: &SecurityConfig<Validated>,

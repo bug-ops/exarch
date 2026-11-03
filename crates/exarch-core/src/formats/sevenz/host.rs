@@ -25,6 +25,7 @@ use crate::formats::pinned_dir::occupant_of;
 use crate::formats::target::ExtractTarget;
 use crate::formats::target::FileAdmission;
 use crate::formats::target::FileRequest;
+use crate::formats::target::HostParent;
 use crate::formats::target::HostTarget;
 use crate::formats::target::Tally;
 use crate::security::admitted::EntrySize;
@@ -113,7 +114,7 @@ enum WriteMode {
 /// A file the 7z host admitted, with the way to write it.
 #[derive(Debug)]
 pub(super) struct SevenZAdmittedFile {
-    file: ValidatedFile,
+    file: ValidatedFile<HostParent>,
     write_mode: WriteMode,
     parent: VettedDir,
 }
@@ -134,6 +135,7 @@ impl<'a> SevenZHostTarget<'a> {
 
 impl ExtractTarget for SevenZHostTarget<'_> {
     type AdmittedFile = SevenZAdmittedFile;
+    type Parent = HostParent;
 
     fn validate_file(
         &mut self,
@@ -170,7 +172,7 @@ impl ExtractTarget for SevenZHostTarget<'_> {
         }))
     }
 
-    fn validate_directory(&mut self, path: &Path, size: EntrySize) -> Result<SafePath> {
+    fn validate_directory(&mut self, path: &Path, size: EntrySize) -> Result<SafePath<HostParent>> {
         self.inner.validate_directory(path, size)
     }
 
@@ -179,7 +181,7 @@ impl ExtractTarget for SevenZHostTarget<'_> {
         path: &Path,
         target: &Path,
         size: EntrySize,
-    ) -> Result<SafeSymlink> {
+    ) -> Result<SafeSymlink<HostParent>> {
         self.inner.validate_symlink(path, target, size)
     }
 
@@ -188,11 +190,11 @@ impl ExtractTarget for SevenZHostTarget<'_> {
         path: &Path,
         target: &Path,
         size: EntrySize,
-    ) -> Result<ValidatedHardlink> {
+    ) -> Result<ValidatedHardlink<HostParent>> {
         self.inner.validate_hardlink(path, target, size)
     }
 
-    fn directory(&mut self, path: &SafePath, tally: &mut Tally<'_>) -> Result<()> {
+    fn directory(&mut self, path: &SafePath<HostParent>, tally: &mut Tally<'_>) -> Result<()> {
         self.inner.directory(path, tally)
     }
 
@@ -231,14 +233,14 @@ impl ExtractTarget for SevenZHostTarget<'_> {
         tally.record_file(written)
     }
 
-    fn symlink(&mut self, symlink: &SafeSymlink, tally: &mut Tally<'_>) -> Result<()> {
+    fn symlink(&mut self, symlink: &SafeSymlink<HostParent>, tally: &mut Tally<'_>) -> Result<()> {
         self.inner.symlink(symlink, tally)
     }
 
     fn hardlink(
         &mut self,
-        link: &SafePath,
-        target: &SafePath,
+        link: &SafePath<HostParent>,
+        target: &SafePath<HostParent>,
         counted: crate::security::quota::EntryCount,
         tally: &mut Tally<'_>,
         hardlink_duplicate_skips: &mut u64,
@@ -278,7 +280,7 @@ impl PrePass for HostPrePass<'_> {
     }
 
     fn file(&mut self, safe_path: &SafePath, _path: &Path) -> Result<FilePlan> {
-        let dest_path = self.dest.join_path(safe_path.as_path());
+        let dest_path = self.dest.join(safe_path);
         let occupancy = DestOccupancy::probe_path(&dest_path)?;
         if occupancy.is_occupied() && self.options.skip_duplicates {
             return Ok(FilePlan::Skip);

@@ -29,12 +29,14 @@ use crate::types::EntryType;
 use crate::types::SafePath;
 use crate::types::SafeSymlink;
 use crate::types::safe_path::EMPTY_PATH_REASON;
+use crate::types::safe_path::ParentCheck;
+use crate::types::safe_path::Resolved;
 use crate::types::safe_symlink::require_symlinks_allowed;
 
 /// Refuses an entry name `view`'s path model cannot hold, so `extract` agrees
 /// with `list` and `verify` on an overlong path. An entry the extension
 /// allowlist skips is never created and is not checked.
-fn check_name_limits<V: FsView>(view: &V, path: &SafePath) -> Result<()> {
+fn check_name_limits<V: FsView, P: ParentCheck>(view: &V, path: &SafePath<P>) -> Result<()> {
     view.path_model()
         .check_name_lengths(path.as_path())
         .map_err(ArchiveError::Io)
@@ -239,9 +241,9 @@ pub enum ValidatedEntryType {
 
 /// What path validation and the extension allowlist decide about a file, before
 /// any quota is charged.
-pub(crate) enum FileScreen {
+pub(crate) enum FileScreen<P: ParentCheck = Resolved> {
     /// The file is to be extracted once its quota is reserved.
-    Pending(PendingFile),
+    Pending(PendingFile<P>),
     /// The extension allowlist excludes the file; extraction skips it.
     DisallowedExtension,
 }
@@ -271,7 +273,7 @@ impl<'a> ValidatorCore<'a> {
 
     /// A context reflecting the symlinks seen so far; build a fresh one for
     /// every entry.
-    pub(crate) fn context<V: FsView>(&self) -> ValidationContext<V> {
+    pub(crate) fn context<'r, V: FsView>(&self) -> ValidationContext<'r, V> {
         let mut ctx = ValidationContext::new(self.config.allowed.symlinks);
         if self.symlink_seen {
             ctx.mark_symlink_seen();
@@ -293,7 +295,7 @@ impl<'a> ValidatorCore<'a> {
         mode: Option<u32>,
         root: &V::Root,
         view: &V,
-        ctx: &ValidationContext<V>,
+        ctx: &ValidationContext<'_, V>,
     ) -> Result<ValidatedEntry> {
         let size = EntrySize {
             uncompressed: uncompressed_size,
@@ -340,15 +342,15 @@ impl<'a> ValidatorCore<'a> {
     }
 
     /// Validates a regular file: path, quota reservation, ratio and mode.
-    pub(crate) fn validate_file_in<V: FsView>(
+    pub(crate) fn validate_file_in<V: FsView, P: ParentCheck>(
         &mut self,
         path: &Path,
         size: EntrySize,
         mode: Option<u32>,
         root: &V::Root,
         view: &V,
-        ctx: &ValidationContext<V>,
-    ) -> Result<ValidatedFile> {
+        ctx: &ValidationContext<'_, V, P>,
+    ) -> Result<ValidatedFile<P>> {
         let pending = self.pending_file_in(path, size, mode, root, view, ctx)?;
         check_name_limits(view, pending.path())?;
         self.admit_file(pending)
@@ -360,15 +362,15 @@ impl<'a> ValidatorCore<'a> {
     /// The path comes first, so a disallowed entry named `../x.bin` is
     /// refused rather than skipped. This is the one place the allowlist rule
     /// is applied to extraction.
-    pub(crate) fn screen_file_path_in<V: FsView>(
+    pub(crate) fn screen_file_path_in<V: FsView, P: ParentCheck>(
         &self,
         path: &Path,
         size: EntrySize,
         mode: Option<u32>,
         root: &V::Root,
         view: &V,
-        ctx: &ValidationContext<V>,
-    ) -> Result<FileScreen> {
+        ctx: &ValidationContext<'_, V, P>,
+    ) -> Result<FileScreen<P>> {
         let pending = self.pending_file_in(path, size, mode, root, view, ctx)?;
         if is_extension_allowed(path, self.config) {
             check_name_limits(view, pending.path())?;
@@ -380,19 +382,22 @@ impl<'a> ValidatorCore<'a> {
 
     /// Reserves the quota of a screened file, checks its ratio and sanitizes
     /// its mode.
-    pub(crate) fn admit_file(&mut self, pending: PendingFile) -> Result<ValidatedFile> {
+    pub(crate) fn admit_file<P: ParentCheck>(
+        &mut self,
+        pending: PendingFile<P>,
+    ) -> Result<ValidatedFile<P>> {
         pending.admit(&mut self.quota_tracker, self.config)
     }
 
-    fn pending_file_in<V: FsView>(
+    fn pending_file_in<V: FsView, P: ParentCheck>(
         &self,
         path: &Path,
         size: EntrySize,
         mode: Option<u32>,
         root: &V::Root,
         view: &V,
-        ctx: &ValidationContext<V>,
-    ) -> Result<PendingFile> {
+        ctx: &ValidationContext<'_, V, P>,
+    ) -> Result<PendingFile<P>> {
         let safe_path = self
             .validate_entry_path_in(path, NodeKind::NonDirectory, root, view, ctx)?
             .into_inner();
@@ -400,14 +405,14 @@ impl<'a> ValidatorCore<'a> {
     }
 
     /// Validates a directory entry: path and ratio.
-    pub(crate) fn validate_directory_in<V: FsView>(
+    pub(crate) fn validate_directory_in<V: FsView, P: ParentCheck>(
         &self,
         path: &Path,
         size: EntrySize,
         root: &V::Root,
         view: &V,
-        ctx: &ValidationContext<V>,
-    ) -> Result<SafePath> {
+        ctx: &ValidationContext<'_, V, P>,
+    ) -> Result<SafePath<P>> {
         let safe_path = self
             .validate_entry_path_in(path, NodeKind::Directory, root, view, ctx)?
             .into_inner();
@@ -417,15 +422,15 @@ impl<'a> ValidatorCore<'a> {
     }
 
     /// Validates a symlink entry: path, ratio, policy, quota and target.
-    pub(crate) fn validate_symlink_in<V: FsView>(
+    pub(crate) fn validate_symlink_in<V: FsView, P: ParentCheck>(
         &mut self,
         path: &Path,
         target: &Path,
         size: EntrySize,
         root: &V::Root,
         view: &V,
-        ctx: &ValidationContext<V>,
-    ) -> Result<ValidatedSymlink> {
+        ctx: &ValidationContext<'_, V, P>,
+    ) -> Result<ValidatedSymlink<P>> {
         let safe_path = self
             .validate_entry_path_in(path, NodeKind::NonDirectory, root, view, ctx)?
             .into_inner();
@@ -442,15 +447,15 @@ impl<'a> ValidatorCore<'a> {
     }
 
     /// Validates a hardlink entry: path, ratio, policy, count and target.
-    pub(crate) fn validate_hardlink_in<V: FsView>(
+    pub(crate) fn validate_hardlink_in<V: FsView, P: ParentCheck>(
         &mut self,
         path: &Path,
         target: &Path,
         size: EntrySize,
         root: &V::Root,
         view: &V,
-        ctx: &ValidationContext<V>,
-    ) -> Result<ValidatedHardlink> {
+        ctx: &ValidationContext<'_, V, P>,
+    ) -> Result<ValidatedHardlink<P>> {
         let safe_path = self
             .validate_entry_path_in(path, NodeKind::NonDirectory, root, view, ctx)?
             .into_inner();
@@ -464,7 +469,7 @@ impl<'a> ValidatorCore<'a> {
 
         // SAFETY: validate_hardlink_in verified target is relative, normalized,
         // within the root
-        let target_safe = SafePath::new_unchecked(target.to_path_buf());
+        let target_safe = SafePath::<P>::new_unchecked(target.to_path_buf());
         Ok(ValidatedHardlink {
             link: safe_path,
             target: target_safe,
@@ -473,14 +478,14 @@ impl<'a> ValidatorCore<'a> {
     }
 
     /// See [`EntryValidator::validate_entry_path`].
-    pub(crate) fn validate_entry_path_in<V: FsView>(
+    pub(crate) fn validate_entry_path_in<V: FsView, P: ParentCheck>(
         &self,
         path: &Path,
         kind: NodeKind,
         root: &V::Root,
         view: &V,
-        ctx: &ValidationContext<V>,
-    ) -> Result<EntryPath<SafePath>> {
+        ctx: &ValidationContext<'_, V, P>,
+    ) -> Result<EntryPath<SafePath<P>>> {
         let entry_path = EntryPath::of(path).require_directory_root(kind)?;
         let validate =
             |path| SafePath::validate_with_context_in(path, root, self.config, ctx, view);

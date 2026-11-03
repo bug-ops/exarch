@@ -20,6 +20,7 @@
 
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
 
 pub mod api;
 pub mod archive;

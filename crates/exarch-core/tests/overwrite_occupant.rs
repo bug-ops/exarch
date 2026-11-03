@@ -2,6 +2,7 @@
 //! error that names the entry and the occupant, not a bare errno (#765).
 
 #![allow(clippy::unwrap_used)]
+#![allow(clippy::disallowed_methods)]
 
 use std::io::Cursor;
 use std::path::Path;

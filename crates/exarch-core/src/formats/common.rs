@@ -46,8 +46,6 @@ use crate::formats::pinned_dir::PinnedRoot;
 use crate::formats::pinned_dir::TempFileGuard;
 use crate::formats::pinned_dir::TempLeaf;
 use crate::formats::pinned_dir::VettedDir;
-use crate::security::fs_view::Containment;
-use crate::security::fs_view::FsView;
 use crate::security::fs_view::HostFs;
 use crate::security::fs_view::Occupant;
 use crate::security::fs_view::blocked_parent_error;
@@ -56,6 +54,8 @@ use crate::security::quota::QuotaPermit;
 use crate::types::DestDir;
 use crate::types::SafePath;
 use crate::types::SafeSymlink;
+use crate::types::dest_dir::ProbePath;
+use crate::types::safe_path::ParentCheck;
 
 /// RAII guard that calls `on_entry_complete` when dropped.
 ///
@@ -362,9 +362,9 @@ pub fn is_extension_allowed(path: &Path, config: &SecurityConfig<Validated>) -> 
     reason = "arguments are threaded through from the caller; a parameter struct adds indirection"
 )]
 #[inline]
-pub fn extract_file_with_permit<R: Read>(
+pub fn extract_file_with_permit<R: Read, P: ParentCheck>(
     reader: &mut R,
-    safe_path: &SafePath,
+    safe_path: &SafePath<P>,
     mode: Option<SanitizedMode>,
     _permit: QuotaPermit,
     root: &PinnedRoot,
@@ -596,14 +596,14 @@ fn refuse_non_file_occupant(dir: &VettedDir, leaf: Leaf<'_>, rel: &Path) -> Resu
 ///
 /// Returns an error if directory creation fails due to I/O errors or a
 /// component is a symlink the policy refuses.
-pub fn create_directory(
-    safe_path: &SafePath,
+pub fn create_directory<P: ParentCheck>(
+    safe_path: &SafePath<P>,
     root: &PinnedRoot,
     report: &mut ExtractionReport,
     dirs: DirWalker,
 ) -> Result<()> {
     check_directory_occupant(
-        &root.dest().join(safe_path),
+        &root.dest().probe(safe_path.as_path()),
         safe_path.as_path(),
         root.dest(),
     )?;
@@ -621,11 +621,8 @@ pub fn create_directory(
 ///
 /// The path-based `lstat` here only chooses the error message; the fd-relative
 /// walk in [`DirWalker::ensure_dir`] enforces the same refusals again.
-fn check_directory_occupant(dir_path: &Path, rel: &Path, dest: &DestDir) -> Result<()> {
-    // A trailing separator makes the probe follow a symlink, or fail with
-    // `ENOTDIR` on a file, instead of describing the occupant itself.
-    let dir_path: PathBuf = dir_path.components().collect();
-    let file_type = match std::fs::symlink_metadata(&dir_path) {
+fn check_directory_occupant(probe: &ProbePath, rel: &Path, dest: &DestDir) -> Result<()> {
+    let file_type = match probe.lstat() {
         Ok(metadata) => metadata.file_type(),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(e) => {
@@ -636,11 +633,7 @@ fn check_directory_occupant(dir_path: &Path, rel: &Path, dest: &DestDir) -> Resu
         return Ok(());
     }
     if file_type.is_symlink() {
-        let lands_in_dest_dir = matches!(
-            HostFs.canonicalize(&dir_path, dest),
-            Ok(Containment::Within(resolved)) if resolved.is_dir()
-        );
-        return if lands_in_dest_dir {
+        return if probe.lands_in_dir(dest) {
             Ok(())
         } else {
             Err(ArchiveError::violation(Occupant::Symlink.refusal(rel)))
@@ -695,8 +688,8 @@ fn check_directory_occupant(dir_path: &Path, rel: &Path, dest: &DestDir) -> Resu
         reason = "only the Unix path updates the counters; the signature is shared"
     )
 )]
-pub fn create_symlink(
-    safe_symlink: &SafeSymlink,
+pub fn create_symlink<P: ParentCheck>(
+    safe_symlink: &SafeSymlink<P>,
     root: &PinnedRoot,
     report: &mut ExtractionReport,
     dirs: DirWalker,

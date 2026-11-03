@@ -1,0 +1,20 @@
+msrv = "1.98.0"
+cognitive-complexity-threshold = 15
+
+# Path-based mutators of the destination: a path whose parent is vetted at
+# write time must be written through a directory handle, never by name.
+disallowed-methods = [
+    { path = "std::fs::write", reason = "writes by path; extraction writes through a directory handle" },
+    { path = "std::fs::create_dir", reason = "creates by path; extraction creates through a directory handle" },
+    { path = "std::fs::create_dir_all", reason = "creates by path; extraction creates through a directory handle" },
+    { path = "std::fs::remove_file", reason = "removes by path; extraction removes through a directory handle" },
+    { path = "std::fs::remove_dir", reason = "removes by path; extraction removes through a directory handle" },
+    { path = "std::fs::remove_dir_all", reason = "removes by path; extraction removes through a directory handle" },
+    { path = "std::fs::rename", reason = "renames by path; extraction renames through a directory handle" },
+    { path = "std::fs::hard_link", reason = "links by path; extraction links through a directory handle" },
+    { path = "std::fs::copy", reason = "copies by path; extraction copies through a directory handle" },
+    { path = "std::fs::set_permissions", reason = "changes a mode by path; extraction uses the open descriptor" },
+    { path = "std::fs::File::create", reason = "creates by path; extraction creates through a directory handle" },
+    { path = "std::fs::OpenOptions::open", reason = "opens by path; extraction opens through a directory handle" },
+    { path = "std::os::unix::fs::symlink", reason = "creates a link by path; extraction links through a directory handle" },
+]

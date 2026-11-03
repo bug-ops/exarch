@@ -3,6 +3,7 @@
 //! everywhere, and an empty name is rejected by all three.
 
 #![allow(clippy::unwrap_used)]
+#![allow(clippy::disallowed_methods)]
 
 use std::assert_matches;
 use std::io::Cursor;

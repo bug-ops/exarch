@@ -3,6 +3,7 @@
 //! succeed with the same files, symlinks and report counters.
 
 #![allow(clippy::unwrap_used, clippy::needless_pass_by_value)]
+#![allow(clippy::disallowed_methods)]
 
 mod sink_support;
 

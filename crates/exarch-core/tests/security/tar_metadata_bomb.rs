@@ -30,6 +30,7 @@
 //! verified without allocating large amounts of memory in CI.
 
 #![allow(clippy::unwrap_used, clippy::cast_possible_truncation)]
+#![allow(clippy::disallowed_methods)]
 
 use exarch_core::ArchiveError;
 use exarch_core::ExtractionOptions;

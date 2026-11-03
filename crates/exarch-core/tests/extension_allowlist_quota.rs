@@ -3,6 +3,7 @@
 //! no bytes, creates nothing, and `list` counts it toward the file limit only.
 
 #![allow(clippy::unwrap_used)]
+#![allow(clippy::disallowed_methods)]
 
 mod common;
 mod sink_support;

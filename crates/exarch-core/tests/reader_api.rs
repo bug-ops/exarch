@@ -2,6 +2,7 @@
 //! API for every format, and work on a source that cannot seek.
 
 #![allow(clippy::unwrap_used)]
+#![allow(clippy::disallowed_methods)]
 
 mod sink_support;
 

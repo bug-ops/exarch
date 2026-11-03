@@ -9,6 +9,7 @@
 //! is process-wide, and one test function owns the profiler.
 
 #![allow(clippy::unwrap_used)]
+#![allow(clippy::disallowed_methods)]
 
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;

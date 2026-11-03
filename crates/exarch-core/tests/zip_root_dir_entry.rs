@@ -3,6 +3,7 @@
 //! as in TAR. A root entry that is a symlink or carries data is rejected.
 
 #![allow(clippy::unwrap_used)]
+#![allow(clippy::disallowed_methods)]
 
 use std::io::Cursor;
 use std::io::Write;

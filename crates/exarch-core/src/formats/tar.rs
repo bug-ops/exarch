@@ -145,6 +145,7 @@ use crate::security::validator::check_root_entry_is_directory;
 use crate::security::validator::require_non_empty_name;
 use crate::types::EntryType;
 use crate::types::SafePath;
+use crate::types::safe_path::ParentCheck;
 
 use super::common;
 use super::compression::CompressionCodec;
@@ -303,7 +304,7 @@ impl<R: Read> TarArchive<R> {
         entry: &mut tar::Entry<'_, ER>,
         target: &mut T,
         ctx: &mut ExtractionContext<'_>,
-    ) -> Result<EntryOutcome> {
+    ) -> Result<EntryOutcome<T::Parent>> {
         // Skip TAR metadata entries (PAX headers, GNU long names/links, sparse)
         if TarEntryAdapter::is_metadata_entry(entry) {
             return Ok(EntryOutcome::Done);
@@ -379,7 +380,7 @@ impl<R: Read> TarArchive<R> {
         target: &mut T,
         ctx: &mut ExtractionContext<'_>,
         skip_limits: &SkipLimits,
-    ) -> Result<EntryOutcome> {
+    ) -> Result<EntryOutcome<T::Parent>> {
         let outcome = Self::process_entry(entry, target, ctx)?;
         if matches!(outcome, EntryOutcome::Skipped) {
             entry.drain_skipped(skip_limits)?;
@@ -400,7 +401,7 @@ impl<R: Read> TarArchive<R> {
 
         let mut report = ExtractionReport::new();
 
-        let mut hardlinks: SmallVec<[HardlinkInfo; 8]> = SmallVec::new();
+        let mut hardlinks: SmallVec<[HardlinkInfo<T::Parent>; 8]> = SmallVec::new();
 
         let mut current_entry: usize = 0;
 
@@ -631,20 +632,20 @@ fn push_duplicate_skip_warnings(
 }
 
 /// What `process_entry` did with an entry.
-enum EntryOutcome {
+enum EntryOutcome<P: ParentCheck> {
     /// The entry was written or needed nothing.
     Done,
     /// A file was skipped (a duplicate or a disallowed extension); its data
     /// is still to be read past, see `CheckedTarEntry::drain_skipped`.
     Skipped,
     /// A hardlink to create once every file exists.
-    Hardlink(HardlinkInfo),
+    Hardlink(HardlinkInfo<P>),
 }
 
 #[allow(dead_code)] // Fields used only on Unix
-struct HardlinkInfo {
-    link_path: SafePath,
-    target_path: SafePath,
+struct HardlinkInfo<P: ParentCheck> {
+    link_path: SafePath<P>,
+    target_path: SafePath<P>,
     counted: EntryCount,
 }
 

@@ -38,6 +38,7 @@ use crate::security::fs_view::Occupant;
 use crate::security::fs_view::ParentBlocker;
 use crate::security::fs_view::classify_link;
 use crate::types::SafePath;
+use crate::types::safe_path::ParentCheck;
 
 /// A directory handle that is either the pinned destination root, borrowed, or
 /// a handle the walk opened below it.
@@ -137,7 +138,11 @@ impl DirWalker {
     /// and an I/O error when a component is a file or cannot be created. A
     /// blocking component is reported against `rel` with the same text and
     /// category as `verify`.
-    pub(crate) fn ensure_dir<'r>(self, root: &'r PinnedRoot, rel: &SafePath) -> Result<DirRef<'r>> {
+    pub(crate) fn ensure_dir<'r, P: ParentCheck>(
+        self,
+        root: &'r PinnedRoot,
+        rel: &SafePath<P>,
+    ) -> Result<DirRef<'r>> {
         let rel = rel.as_path();
         self.descend(root, rel, rel, Missing::Create, Links::Policy)
     }
@@ -149,10 +154,10 @@ impl DirWalker {
     ///
     /// Same as [`Self::ensure_dir`], plus `PathTraversal` when `rel` does not
     /// end in a normal name.
-    pub(crate) fn ensure_parent<'r, 'p>(
+    pub(crate) fn ensure_parent<'r, 'p, P: ParentCheck>(
         self,
         root: &'r PinnedRoot,
-        rel: &'p SafePath,
+        rel: &'p SafePath<P>,
     ) -> Result<(DirRef<'r>, Leaf<'p>)> {
         let rel = rel.as_path();
         let (parent, leaf) = Leaf::split(rel)?;
@@ -166,10 +171,10 @@ impl DirWalker {
     ///
     /// Same as [`Self::ensure_parent`]; a missing component is an I/O error of
     /// kind `NotFound`.
-    pub(crate) fn open_parent<'r, 'p>(
+    pub(crate) fn open_parent<'r, 'p, P: ParentCheck>(
         self,
         root: &'r PinnedRoot,
-        rel: &'p SafePath,
+        rel: &'p SafePath<P>,
     ) -> Result<(DirRef<'r>, Leaf<'p>)> {
         let rel = rel.as_path();
         let (parent, leaf) = Leaf::split(rel)?;
@@ -297,6 +302,7 @@ impl DirWalker {
 mod tests {
     use super::*;
     use crate::types::DestDir;
+    use crate::types::safe_path::Resolved;
     use std::assert_matches;
     use std::fs;
     use std::os::unix::fs::symlink;
@@ -311,7 +317,7 @@ mod tests {
     }
 
     fn sp(path: &str) -> SafePath {
-        SafePath::new_unchecked(PathBuf::from(path))
+        SafePath::<Resolved>::new_unchecked(PathBuf::from(path))
     }
 
     fn dest_with_outside() -> (TempDir, PinnedRoot, PathBuf) {

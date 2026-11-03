@@ -21,7 +21,6 @@ use crate::config::Validated;
 use crate::formats::common;
 use crate::formats::pinned_dir::Leaf;
 use crate::formats::pinned_dir::VettedDir;
-use crate::formats::pinned_dir::occupant_of;
 use crate::formats::target::ExtractTarget;
 use crate::formats::target::FileAdmission;
 use crate::formats::target::FileRequest;
@@ -72,7 +71,7 @@ impl DestOccupancy {
     /// re-probes relative to its pinned parent.
     fn probe_path(dest_path: &Path) -> std::io::Result<Self> {
         Ok(Self::of(
-            lstat_dest(dest_path)?.map(|meta| occupant_of(meta.file_type())),
+            lstat_dest(dest_path)?.map(|meta| meta.file_type().into()),
         ))
     }
 

@@ -72,6 +72,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **BREAKING:** `SafePath`, `SafeSymlink`, `ValidatedFile`, `PendingFile`, `ValidatedSymlink`, `ValidatedHardlink` and `ValidationContext` gain a defaulted type parameter, `ExtractTarget` gains `type Parent`, and `DestDir::join_path` is removed (breaking against v0.8.0) (#861, #884).
 - **BREAKING:** `TarNonRegularKind` displays lowercase and `with_compressed_member_allowance` takes a `NonZeroU64` (#862, #884).
 - **BREAKING:** a compressed TAR whose entries skipped by the allowlist or as duplicates decode beyond `max_compression_ratio` times the input read is refused with `ZipBomb` (`SkippedEntries`) (#863, #884).
+- CI: the release-profile test job runs on `main` only (#886).
 
 ### Fixed
 

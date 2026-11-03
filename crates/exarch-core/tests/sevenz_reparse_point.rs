@@ -4,8 +4,9 @@
 //! agree. Unix-mode symlinks are read and validated instead, see
 //! `sevenz_unix_symlink`.
 //!
-//! On Windows the same is checked against an archive made by real 7-Zip with
-//! `-snl` over a file symlink and a directory symlink, generated at test time.
+//! The same is checked on every host against a committed archive made by real
+//! 7-Zip with `-snl` over a file symlink and a directory symlink, and on
+//! Windows against one generated at test time.
 //! Set `EXARCH_REQUIRE_PRODUCERS` to fail instead of skip when 7-Zip is
 //! missing.
 
@@ -13,6 +14,7 @@
 
 use std::assert_matches;
 use std::io::Cursor;
+use std::path::Path;
 use std::path::PathBuf;
 
 use exarch_core::ArchiveError;
@@ -127,17 +129,32 @@ fn regular_mode_and_missing_extension_flag_extract_as_files() {
     }
 }
 
-/// Temporary phase-1 hook: copies a producer-built archive into the directory
-/// named by `EXARCH_EXPORT_PRODUCER_FIXTURES` so CI can upload it as an
-/// artifact.
-#[cfg(windows)]
-fn export_producer_fixture(archive: &std::path::Path, name: &str) {
-    let Some(dir) = std::env::var_os("EXARCH_EXPORT_PRODUCER_FIXTURES") else {
-        return;
-    };
-    let dir = std::path::PathBuf::from(dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::copy(archive, dir.join(name)).unwrap();
+fn assert_listed_as_symlinks_and_refused(archive: &Path) {
+    let config = SecurityConfig::default().with_allow_solid_archives(true);
+    let manifest = list_archive(archive, &config).unwrap();
+    let symlinks = manifest
+        .entries()
+        .iter()
+        .filter(|e| matches!(e.kind, ManifestEntryKind::Symlink { .. }))
+        .count();
+    assert_eq!(symlinks, 2);
+    let report = verify_archive(archive, &config).unwrap();
+    assert_eq!(report.status(), VerificationStatus::Fail);
+    let out = TempDir::new().unwrap();
+    assert_matches!(
+        extract_archive(archive, out.path(), &config),
+        Err(ArchiveError::SecurityViolation { reason, .. }) if reason.contains("reparse point")
+    );
+    assert_eq!(std::fs::read_dir(out.path()).unwrap().count(), 0);
+}
+
+/// Made by 7-Zip `a -snl` on a Windows runner over a file symlink and a
+/// directory symlink; see `tests/fixtures/PROVENANCE.md`.
+#[test]
+fn windows_7zip_snl_fixture_is_listed_as_symlinks_and_refused() {
+    let archive = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/symlink-7zip-windows-snl.7z");
+    assert_listed_as_symlinks_and_refused(&archive);
 }
 
 #[cfg(windows)]
@@ -179,22 +196,6 @@ fn real_7zip_symlink_archive_is_listed_as_symlinks_and_refused() {
         .status()
         .unwrap();
     assert!(status.success());
-    export_producer_fixture(&archive, "symlink-7zip-windows-snl.7z");
 
-    let config = SecurityConfig::default().with_allow_solid_archives(true);
-    let manifest = list_archive(&archive, &config).unwrap();
-    let symlinks = manifest
-        .entries()
-        .iter()
-        .filter(|e| matches!(e.kind, ManifestEntryKind::Symlink { .. }))
-        .count();
-    assert_eq!(symlinks, 2);
-    let report = verify_archive(&archive, &config).unwrap();
-    assert_eq!(report.status(), VerificationStatus::Fail);
-    let out = TempDir::new().unwrap();
-    assert_matches!(
-        extract_archive(&archive, out.path(), &config),
-        Err(ArchiveError::SecurityViolation { reason, .. }) if reason.contains("reparse point")
-    );
-    assert_eq!(std::fs::read_dir(out.path()).unwrap().count(), 0);
+    assert_listed_as_symlinks_and_refused(&archive);
 }

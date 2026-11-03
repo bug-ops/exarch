@@ -51,6 +51,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Core: path containment is compared case-sensitively on macOS, so a planted symlink to a case-variant sibling of the destination is refused (#846).
 - Core and CLI: `extract --allowed-extensions` extracts the same files from 7z, ZIP and TAR whatever the destination state, and entries it skips leave no directories behind (#831, #846).
 - Core and CLI: a pre-existing dangling or file-pointing symlink in the destination is refused as not relaxable instead of suggesting `--allow-symlinks` (#835, #846).
+- Tests: a real Windows Explorer ZIP and a Windows 7-Zip reparse-point symlink 7z are committed as fixtures with host-independent tests (#824, #825, #846).
 
 ## [0.8.0] - 2026-11-02
 

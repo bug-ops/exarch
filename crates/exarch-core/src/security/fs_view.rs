@@ -2532,13 +2532,24 @@ mod host_fs_tests {
     use std::assert_matches;
 
     #[test]
-    fn containment_is_case_sensitive() {
+    fn containment_is_by_whole_components() {
         let root = Path::new("/mnt/out");
 
         assert_matches!(
             contain(PathBuf::from("/mnt/out/a"), root),
             Containment::Within(_)
         );
+        assert_matches!(
+            contain(PathBuf::from("/mnt/outx"), root),
+            Containment::Escapes
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn containment_is_case_sensitive_on_unix() {
+        let root = Path::new("/mnt/out");
+
         assert_matches!(
             contain(PathBuf::from("/mnt/OUT"), root),
             Containment::Escapes
@@ -2547,9 +2558,16 @@ mod host_fs_tests {
             contain(PathBuf::from("/mnt/OUT/a"), root),
             Containment::Escapes
         );
+    }
+
+    #[test]
+    #[cfg(not(unix))]
+    fn containment_folds_case_off_unix() {
+        let root = Path::new("/mnt/out");
+
         assert_matches!(
-            contain(PathBuf::from("/mnt/outx"), root),
-            Containment::Escapes
+            contain(PathBuf::from("/mnt/OUT/a"), root),
+            Containment::Within(_)
         );
     }
 }

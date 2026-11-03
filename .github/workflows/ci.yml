@@ -336,17 +336,7 @@ jobs:
       - name: Run tests
         env:
           EXARCH_REQUIRE_PRODUCERS: "1"
-          EXARCH_EXPORT_PRODUCER_FIXTURES: ${{ runner.temp }}/producer-fixtures
         run: cargo nextest run --workspace --all-features --no-fail-fast --exclude exarch-python --exclude exarch-node
-
-      - name: Upload Windows producer fixtures
-        if: ${{ always() && runner.os == 'Windows' }}
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: windows-producer-fixtures
-          path: ${{ runner.temp }}/producer-fixtures
-          if-no-files-found: warn
-          retention-days: 7
 
       - name: Run doctests
         run: cargo test --doc --workspace --all-features --exclude exarch-python --exclude exarch-node

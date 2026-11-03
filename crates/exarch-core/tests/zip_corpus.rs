@@ -11,8 +11,8 @@
 //! Java (`java.util.zip`, `jar`) and Windows (`Compress-Archive`, .NET
 //! `ZipFile`) archives are generated at test time. A missing tool skips its
 //! producers locally; with `EXARCH_REQUIRE_PRODUCERS=1` (set in CI) it fails.
-//! Windows Explorer archives are not covered: they cannot be produced
-//! headless.
+//! Windows Explorer archives cannot be produced headless in-process, so a
+//! committed archive stands in for them on every host.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -407,19 +407,6 @@ fn explorer_script(src: &Path, zip: &Path) -> String {
     )
 }
 
-/// Temporary phase-1 hook: copies a producer-built archive into the directory
-/// named by `EXARCH_EXPORT_PRODUCER_FIXTURES` so CI can upload it as an
-/// artifact.
-#[cfg(windows)]
-fn export_producer_fixture(archive: &Path, name: &str) {
-    let Some(dir) = std::env::var_os("EXARCH_EXPORT_PRODUCER_FIXTURES") else {
-        return;
-    };
-    let dir = std::path::PathBuf::from(dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::copy(archive, dir.join(name)).unwrap();
-}
-
 #[cfg(windows)]
 fn windows_producers(src: &Path, out: &Path) -> usize {
     let shell = ["pwsh", "powershell"]
@@ -449,7 +436,6 @@ fn windows_producers(src: &Path, out: &Path) -> usize {
     for script in &scripts {
         run(Command::new(shell).args(["-NoProfile", "-Command", script]));
     }
-    export_producer_fixture(&out.join("explorer.zip"), "explorer-windows.zip");
     scripts.len()
 }
 
@@ -474,4 +460,32 @@ fn java_and_windows_producers_have_no_structural_findings() {
         checked += 1;
     }
     assert_eq!(checked, expected);
+}
+
+/// Made by Windows Explorer's `Shell.Application` `CopyHere` on a Windows
+/// runner; see `tests/fixtures/PROVENANCE.md`. Its names are CP437 without the
+/// UTF-8 flag.
+#[test]
+fn windows_explorer_fixture_has_no_structural_findings_and_extracts() {
+    let archive = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/zip-family/explorer-windows.zip");
+    assert_no_structural_finding(&archive, "explorer-windows.zip");
+
+    let out = TempDir::new().unwrap();
+    let config = SecurityConfig::default().with_max_compression_ratio(1000.0);
+    extract_archive(&archive, out.path(), &config).unwrap();
+    assert_eq!(std::fs::read(out.path().join("a.txt")).unwrap(), b"hello\n");
+    assert_eq!(std::fs::read(out.path().join("empty")).unwrap(), b"");
+    assert_eq!(
+        std::fs::read(out.path().join("sub/caf\u{e9}.txt")).unwrap(),
+        b"unicode\n"
+    );
+    assert_eq!(
+        std::fs::read(out.path().join("sub/rep.txt")).unwrap(),
+        "x".repeat(5000).into_bytes()
+    );
+    assert_eq!(
+        std::fs::read(out.path().join("sub/rand.bin")).unwrap(),
+        (0..=255u8).cycle().take(200_000).collect::<Vec<_>>()
+    );
 }

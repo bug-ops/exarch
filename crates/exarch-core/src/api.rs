@@ -398,7 +398,7 @@ fn extract_zip(
     use std::fs::File;
 
     let file = File::open(archive_path)?;
-    let mut archive = ZipArchive::for_config(file, config)?;
+    let mut archive = ZipArchive::for_extraction(file, config, options.decode_reuse)?;
     archive.extract(output_dir, config, options, progress)
 }
 
@@ -1314,6 +1314,7 @@ mod tests {
         let options = ExtractionOptions {
             atomic: false,
             skip_duplicates: true,
+            ..ExtractionOptions::default()
         };
         let result = extract_archive_with_options_and_progress(
             PathBuf::from("nonexistent.tar.gz"),
@@ -1331,6 +1332,7 @@ mod tests {
         let options = ExtractionOptions {
             atomic: false,
             skip_duplicates: true,
+            ..ExtractionOptions::default()
         };
         let result = extract_archive_with_options(
             PathBuf::from("nonexistent.tar.gz"),
@@ -1361,6 +1363,7 @@ mod tests {
         let options = ExtractionOptions {
             atomic: true,
             skip_duplicates: true,
+            ..ExtractionOptions::default()
         };
         let result = extract_archive_with_options(
             &archive_path,
@@ -1388,6 +1391,7 @@ mod tests {
         let options = ExtractionOptions {
             atomic: true,
             skip_duplicates: true,
+            ..ExtractionOptions::default()
         };
         let result = extract_archive_with_options(
             PathBuf::from("nonexistent_archive.tar.gz"),
@@ -1428,6 +1432,7 @@ mod tests {
         let options = ExtractionOptions {
             atomic: true,
             skip_duplicates: true,
+            ..ExtractionOptions::default()
         };
         let result = extract_archive_with_options(
             &archive_path,

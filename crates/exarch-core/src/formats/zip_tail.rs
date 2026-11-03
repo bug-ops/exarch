@@ -31,6 +31,7 @@ use super::chunk_search::ChunkSource;
 use super::chunk_search::Flow;
 use super::chunk_search::search_chunks;
 use super::zip::ZipMethod;
+use super::zip_reuse::Capture;
 use super::zip_structure::CDFH_SIGNATURE;
 use super::zip_structure::EOCD_SIGNATURE;
 use super::zip_structure::LFH_FIXED_LEN;
@@ -151,7 +152,11 @@ impl DescriptorTail {
         Ok(())
     }
 
-    fn decode_stream<R: Read>(self, raw: R) -> Result<Decoded<R>> {
+    fn decode_stream<R: Read>(
+        self,
+        raw: R,
+        capture: Option<&mut Capture<'_>>,
+    ) -> Result<Decoded<R>> {
         let source = Rc::new(Source::default());
         let raw = BufReader::new(Counted {
             inner: raw,
@@ -160,19 +165,19 @@ impl DescriptorTail {
         let (drained, rest) = match self.method {
             Compressed::Deflate => {
                 let mut decoder = flate2::bufread::DeflateDecoder::new(raw);
-                let drained = drain(&mut decoder, self.size, &source)?;
+                let drained = drain(&mut decoder, self.size, &source, capture)?;
                 (drained, decoder.into_inner())
             }
             Compressed::Bzip2 => {
                 let mut decoder = bzip2::bufread::BzDecoder::new(raw);
-                let drained = drain(&mut decoder, self.size, &source)?;
+                let drained = drain(&mut decoder, self.size, &source, capture)?;
                 (drained, decoder.into_inner())
             }
             Compressed::Zstd => {
                 let mut decoder = zstd::stream::read::Decoder::with_buffer(raw)
                     .map_err(ArchiveError::Io)?
                     .single_frame();
-                let drained = drain(&mut decoder, self.size, &source)?;
+                let drained = drain(&mut decoder, self.size, &source, capture)?;
                 (drained, decoder.finish())
             }
         };
@@ -195,7 +200,7 @@ impl DescriptorTail {
             mut rest,
             stream_end,
             ..
-        } = self.decode_stream(raw)?
+        } = self.decode_stream(raw, None)?
         else {
             return Ok(Tail::Undecided);
         };
@@ -223,6 +228,9 @@ pub(super) enum StreamEnd {
 /// ends. The bytes produced are taken from `budget` whatever the outcome, and
 /// an entry that finds the budget spent is not decoded at all.
 ///
+/// A `capture` receives the bytes produced and keeps them when the stream
+/// ends within the declared range.
+///
 /// # Errors
 ///
 /// Returns the I/O error of a failing read.
@@ -233,6 +241,7 @@ pub(super) fn stream_end<R: Read + Seek>(
     compressed: u64,
     size: u64,
     budget: &mut u64,
+    mut capture: Option<Capture<'_>>,
 ) -> Result<StreamEnd> {
     if *budget == 0 && size > 0 {
         return Ok(StreamEnd::OverBudget);
@@ -246,13 +255,16 @@ pub(super) fn stream_end<R: Read + Seek>(
         size: cap,
     };
     let raw = Read::take(&mut *reader, compressed);
-    Ok(match tail.decode_stream(raw)? {
+    Ok(match tail.decode_stream(raw, capture.as_mut())? {
         Decoded::Ended {
             stream_end,
             produced,
             ..
         } => {
             *budget = budget.saturating_sub(produced);
+            if let Some(capture) = capture {
+                capture.finish(produced);
+            }
             StreamEnd::At(data_start.saturating_add(stream_end))
         }
         Decoded::OverCap { produced } => {
@@ -377,14 +389,19 @@ enum Tail {
 /// the first stream of a multi-stream entry (zstd frames, bzip2 streams) ends
 /// short while the rest of the declared range is still data to search.
 /// An error the underlying reader raised is returned as such.
-fn drain(decoder: &mut impl Read, declared: u64, source: &Source) -> Result<Drained> {
+fn drain(
+    decoder: &mut impl Read,
+    declared: u64,
+    source: &Source,
+    capture: Option<&mut Capture<'_>>,
+) -> Result<Drained> {
     let mut limited = decoder.take(declared.saturating_add(1));
-    let mut produced = Produced(0);
+    let mut produced = Produced { count: 0, capture };
     let copied = std::io::copy(&mut limited, &mut produced);
     if let Some(failure) = source.failure.take() {
         return Err(ArchiveError::Io(failure));
     }
-    let produced = produced.0;
+    let produced = produced.count;
     Ok(match copied {
         Ok(_) if produced <= declared => Drained::Within(produced),
         Ok(_) => Drained::OverCap(produced),
@@ -392,9 +409,12 @@ fn drain(decoder: &mut impl Read, declared: u64, source: &Source) -> Result<Drai
     })
 }
 
-/// A sink that only counts, so the bytes a failing decoder produced are known
-/// as well.
-struct Produced(u64);
+/// A sink that counts, so the bytes a failing decoder produced are known as
+/// well, and hands the bytes to a capture when there is one.
+struct Produced<'c, 's> {
+    count: u64,
+    capture: Option<&'c mut Capture<'s>>,
+}
 
 #[cfg(test)]
 thread_local! {
@@ -403,9 +423,12 @@ thread_local! {
     pub(super) static DECODED: Cell<u64> = const { Cell::new(0) };
 }
 
-impl std::io::Write for Produced {
+impl std::io::Write for Produced<'_, '_> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0 = self.0.saturating_add(buf.len() as u64);
+        self.count = self.count.saturating_add(buf.len() as u64);
+        if let Some(capture) = self.capture.as_deref_mut() {
+            capture.write_all(buf)?;
+        }
         #[cfg(test)]
         DECODED.with(|total| total.set(total.get() + buf.len() as u64));
         Ok(buf.len())
@@ -579,7 +602,7 @@ mod tests {
             state: Rc::clone(&source),
         });
         let mut decoder = flate2::bufread::DeflateDecoder::new(raw);
-        Ok(match drain(&mut decoder, declared, &source)? {
+        Ok(match drain(&mut decoder, declared, &source, None)? {
             Drained::Within(_) => Some(()),
             Drained::OverCap(_) | Drained::Failed(_) => None,
         })

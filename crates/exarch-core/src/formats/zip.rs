@@ -133,6 +133,7 @@ use typed_path::Utf8WindowsPath;
 use zip::ZipArchive as ZipReader;
 
 use crate::ArchiveError;
+use crate::DecodeReuse;
 use crate::ExtractionOptions;
 use crate::ExtractionReport;
 use crate::ProgressCallback;
@@ -163,6 +164,8 @@ use super::target::FileRequest;
 use super::target::HostTarget;
 use super::target::Tally;
 use super::traits::ArchiveFormat;
+use super::zip_reuse::RetainKey;
+use super::zip_reuse::ReuseStore;
 use super::zip_structure;
 use super::zip_structure::Shared;
 use super::zip_structure::ZipStructure;
@@ -585,14 +588,55 @@ impl<R: Read + Seek> ZipArchive<R> {
     ///
     /// Same as [`ZipArchive::new`].
     pub(crate) fn for_config(reader: R, config: &SecurityConfig<Validated>) -> Result<Self> {
+        Self::open_for(reader, config, DecodeReuse::Off)
+    }
+
+    /// Opens `reader` for an extraction into a directory, keeping the output
+    /// of the structural check per `reuse` so extraction does not decode
+    /// deflate entries a second time.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`ZipArchive::new`].
+    pub(crate) fn for_extraction(
+        reader: R,
+        config: &SecurityConfig<Validated>,
+        reuse: DecodeReuse,
+    ) -> Result<Self> {
+        Self::open_for(reader, config, reuse)
+    }
+
+    fn open_for(reader: R, config: &SecurityConfig<Validated>, reuse: DecodeReuse) -> Result<Self> {
         let checks = zip_structure::StreamChecks::of(config.zip_consistency);
         let (inner, structure) = zip_structure::open_with(
             reader,
             checks,
             config.max_total_size,
             ZstdWindowLog::of(config),
+            reuse,
         )?;
         Ok(Self { inner, structure })
+    }
+
+    /// Whether an extraction under `config` may use this archive as opened,
+    /// that is whether opening it again under `config` would give the census
+    /// the same inputs: the stream checks the policy needs ran, the zstd
+    /// entries were decoded under a window the config admits, and the
+    /// allowance for checking entries again was not smaller than the
+    /// config's.
+    pub(crate) fn serves(&self, config: &SecurityConfig<Validated>) -> bool {
+        let streams = config.zip_consistency != ZipConsistencyPolicy::Enforce
+            || self.structure.checks() == zip_structure::StreamChecks::Run;
+        let window = match self.structure.zstd_windows() {
+            ZstdWindows::NoZstdEntries | ZstdWindows::OverBudget => true,
+            ZstdWindows::Largest(window) => {
+                self.structure.census_window().admits(window)
+                    || !ZstdWindowLog::of(config).admits(window)
+            }
+        };
+        let allowance = self.structure.recheck_allowance()
+            >= zip_structure::recheck_allowance_for(config.max_total_size);
+        streams && window && allowance
     }
 
     /// The underlying reader, for tests that read the entries directly.
@@ -605,6 +649,13 @@ impl<R: Read + Seek> ZipArchive<R> {
     #[cfg(test)]
     pub(crate) const fn structure(&self) -> &ZipStructure {
         &self.structure
+    }
+
+    /// Mutable access to the census result, for tests that damage the kept
+    /// output.
+    #[cfg(test)]
+    pub(crate) const fn structure_mut(&mut self) -> &mut ZipStructure {
+        &mut self.structure
     }
 
     /// Applies the policy-independent entry count limit, then the structural
@@ -749,6 +800,7 @@ impl<R: Read + Seek> ZipArchive<R> {
         index: usize,
         target: &mut T,
         ctx: &mut ZipExtractionContext<'_>,
+        reuse: Option<&ReuseStore>,
     ) -> Result<()> {
         if zip_file.encrypted() {
             let name = zip_file
@@ -793,9 +845,14 @@ impl<R: Read + Seek> ZipArchive<R> {
                 mode,
             };
             if let FileAdmission::Write(admitted) = target.validate_file(request, &mut ctx.tally)? {
-                target
-                    .file(&mut zip_file, admitted, uncompressed_size, &mut ctx.tally)
-                    .map_err(|e| Self::classify_declared_size_overrun(e, uncompressed_size))?;
+                let key = reuse.and_then(|store| replay_key(&zip_file).map(|key| (store, key)));
+                let written = match key.and_then(|(store, key)| store.open(&key)) {
+                    Some(mut replay) => {
+                        target.file(&mut replay, admitted, uncompressed_size, &mut ctx.tally)
+                    }
+                    None => target.file(&mut zip_file, admitted, uncompressed_size, &mut ctx.tally),
+                };
+                written.map_err(|e| Self::classify_declared_size_overrun(e, uncompressed_size))?;
             }
         }
 
@@ -879,7 +936,7 @@ impl<R: Read + Seek> ZipArchive<R> {
                 config,
             };
 
-            let result = Self::process_entry(zip_file, i, target, &mut ctx);
+            let result = Self::process_entry(zip_file, i, target, &mut ctx, self.structure.reuse());
 
             if let Err(e) = result {
                 drop(guard);
@@ -964,6 +1021,23 @@ impl<R: Read + Seek> ZipArchive<R> {
             listed.integrity,
         ))
     }
+}
+
+/// What identifies a deflate entry's kept census output, when the entry is
+/// one the census can have kept.
+fn replay_key<R: Read>(zip_file: &zip::read::ZipFile<'_, R>) -> Option<RetainKey> {
+    if !matches!(
+        ZipMethod::try_from(zip_file.compression()),
+        Ok(ZipMethod::Deflate)
+    ) {
+        return None;
+    }
+    Some(RetainKey {
+        data_start: zip_file.data_start()?,
+        compressed: zip_file.compressed_size(),
+        size: zip_file.size(),
+        crc32: zip_file.crc32(),
+    })
 }
 
 /// Adapter to convert `zip::ZipFile` metadata to internal types.

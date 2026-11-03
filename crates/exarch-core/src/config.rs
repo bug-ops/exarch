@@ -1179,6 +1179,13 @@ pub struct ExtractionOptions {
     /// destination path, the second entry is skipped and a warning is recorded
     /// in `ExtractionReport`. When `false`, duplicate entries cause an error.
     pub skip_duplicates: bool,
+
+    /// Where a ZIP extraction keeps the output its structural check already
+    /// decoded, so deflate entries are decoded once instead of twice.
+    ///
+    /// Defaults to [`DecodeReuse::Memory`] with [`ReuseLimit::DEFAULT`]. Only
+    /// extractions that write into a directory use it; see [`DecodeReuse`].
+    pub decode_reuse: DecodeReuse,
 }
 
 impl Default for ExtractionOptions {
@@ -1186,6 +1193,7 @@ impl Default for ExtractionOptions {
         Self {
             atomic: false,
             skip_duplicates: true,
+            decode_reuse: DecodeReuse::default(),
         }
     }
 }
@@ -1226,6 +1234,131 @@ impl ExtractionOptions {
     pub fn with_skip_duplicates(mut self, skip: bool) -> Self {
         self.skip_duplicates = skip;
         self
+    }
+
+    /// Chooses where ZIP extraction keeps the census output for reuse.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::DecodeReuse;
+    /// use exarch_core::ExtractionOptions;
+    ///
+    /// let opts = ExtractionOptions::default().with_decode_reuse(DecodeReuse::Off);
+    /// assert_eq!(opts.decode_reuse, DecodeReuse::Off);
+    /// ```
+    #[must_use]
+    #[inline]
+    pub const fn with_decode_reuse(mut self, reuse: DecodeReuse) -> Self {
+        self.decode_reuse = reuse;
+        self
+    }
+}
+
+/// The most decoded bytes a ZIP extraction keeps for reuse.
+///
+/// The structural check of a ZIP archive decodes deflate entries to find where
+/// their streams end, and extraction would decode them again. With a
+/// [`DecodeReuse`] mode other than `Off`, the check keeps what it decoded, up
+/// to this limit, and extraction writes the kept bytes instead.
+///
+/// # Examples
+///
+/// ```
+/// use std::num::NonZeroU64;
+///
+/// use exarch_core::ReuseLimit;
+///
+/// let limit = ReuseLimit::new(NonZeroU64::MIN);
+/// assert_eq!(limit.get(), 1);
+/// assert_eq!(
+///     ReuseLimit::new(NonZeroU64::MAX).get(),
+///     ReuseLimit::MAX.get()
+/// );
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReuseLimit(NonZeroU64);
+
+impl ReuseLimit {
+    /// 32 MiB: covers a typical source archive and stays below the
+    /// per-extraction decoder ceilings.
+    pub const DEFAULT: Self = Self(Self::nonzero(Self::DEFAULT_BYTES));
+    const DEFAULT_BYTES: u64 = 32 * 1024 * 1024;
+    /// 256 MiB, the most the structural check decodes in its first pass.
+    pub const MAX: Self = Self(Self::nonzero(Self::MAX_BYTES));
+    pub(crate) const MAX_BYTES: u64 = 256 * 1024 * 1024;
+
+    const fn nonzero(bytes: u64) -> NonZeroU64 {
+        match NonZeroU64::new(bytes) {
+            Some(n) => n,
+            None => NonZeroU64::MIN,
+        }
+    }
+
+    /// A limit of `bytes`, clamped to [`ReuseLimit::MAX`].
+    #[must_use]
+    pub const fn new(bytes: NonZeroU64) -> Self {
+        if bytes.get() > Self::MAX_BYTES {
+            Self::MAX
+        } else {
+            Self(bytes)
+        }
+    }
+
+    /// The limit in bytes.
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0.get()
+    }
+}
+
+/// Where a ZIP extraction keeps decoded output between the structural check and
+/// the write, so a deflate entry is decoded once.
+///
+/// The check that refuses entry data past a stream end decodes each deflate
+/// entry, and extraction decodes it again. A kept entry is checked against its
+/// CRC-32 again when it is read back, so a damaged store is refused like a
+/// damaged archive, and an entry that was not kept is decoded from the archive
+/// as before.
+///
+/// Reuse applies to extractions that write into a directory
+/// ([`extract_archive`](crate::extract_archive) and
+/// [`ListedArchive::extract`](crate::ListedArchive::extract)); sink, callback
+/// and reader paths, listing and verification never keep output. Bzip2 and zstd
+/// entries are always decoded twice.
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::DecodeReuse;
+/// use exarch_core::ReuseLimit;
+///
+/// assert_eq!(
+///     DecodeReuse::default(),
+///     DecodeReuse::Memory(ReuseLimit::DEFAULT)
+/// );
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DecodeReuse {
+    /// Keep nothing; every entry is decoded twice.
+    Off,
+    /// Keep decoded entries in memory, up to the limit.
+    ///
+    /// Works on every target and writes nothing outside the destination.
+    Memory(ReuseLimit),
+    /// Keep decoded entries in an unnamed temporary file, up to the limit.
+    ///
+    /// The file lives in the platform's temporary directory (memory on a
+    /// tmpfs, so it is RAM there) and holds the plaintext of the archive until
+    /// the extraction ends. When no temporary file can be created, or on WASI,
+    /// nothing is kept.
+    TempFile(ReuseLimit),
+}
+
+impl Default for DecodeReuse {
+    fn default() -> Self {
+        Self::Memory(ReuseLimit::DEFAULT)
     }
 }
 

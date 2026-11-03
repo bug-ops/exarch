@@ -208,6 +208,7 @@ fn a_zstd_window_log_of_27_is_accepted_and_28_refused_with_a_typed_error_everywh
                 compressed,
                 PAYLOAD.len() as u64,
                 &mut budget,
+                None,
             )
             .unwrap();
             assert_eq!(matches!(end, StreamEnd::At(_)), accepted, "{label}");

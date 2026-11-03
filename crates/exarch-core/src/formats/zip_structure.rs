@@ -113,6 +113,8 @@ use super::common;
 use super::zip::ZipMethod;
 use super::zip::admit_zip_entry;
 use super::zip::is_password_required;
+use super::zip_reuse::RetainKey;
+use super::zip_reuse::ReuseStore;
 use super::zip_tail::Compressed;
 use super::zip_tail::StreamEnd;
 use super::zip_tail::holds_reader_record;
@@ -125,6 +127,7 @@ use super::zstd_window::ZstdWindowLog;
 use super::zstd_window::ZstdWindows;
 use super::zstd_window::walk as walk_zstd_windows;
 use crate::ArchiveError;
+use crate::DecodeReuse;
 use crate::Result;
 use crate::ZipConsistencyPolicy;
 use crate::error::CentralRecordOrdinal;
@@ -528,6 +531,8 @@ pub struct ZipStructure {
     checks: StreamChecks,
     zstd_windows: ZstdWindows,
     census_window: ZstdWindowLog,
+    recheck_allowance: u64,
+    reuse: Option<ReuseStore>,
     #[cfg(test)]
     gap_reads: usize,
     #[cfg(test)]
@@ -544,6 +549,8 @@ impl ZipStructure {
             checks: StreamChecks::Run,
             zstd_windows: ZstdWindows::NoZstdEntries,
             census_window: ZstdWindowLog::LIBZSTD_DEFAULT,
+            recheck_allowance: CENSUS_DECODE_BUDGET,
+            reuse: None,
             gap_reads: 0,
             zstd_census_decodes: 0,
         }
@@ -589,6 +596,23 @@ impl ZipStructure {
         self.gap_reads
     }
 
+    /// The per-archive allowance the census had for checking again entries
+    /// whose bytes spell a record signature.
+    pub(crate) const fn recheck_allowance(&self) -> u64 {
+        self.recheck_allowance
+    }
+
+    /// The decoded output the census kept for extraction, when it kept any.
+    pub(crate) const fn reuse(&self) -> Option<&ReuseStore> {
+        self.reuse.as_ref()
+    }
+
+    /// Like [`Self::reuse`], for tests that damage the kept output.
+    #[cfg(test)]
+    pub(crate) const fn reuse_mut(&mut self) -> Option<&mut ReuseStore> {
+        self.reuse.as_mut()
+    }
+
     /// Zstd streams the census decoded.
     #[cfg(test)]
     pub(crate) const fn zstd_census_decodes(&self) -> usize {
@@ -618,6 +642,27 @@ struct EntryLayout {
     reader_kind: EntryKind,
     /// How the entry's stream is decoded, for the methods that have one.
     stream: Option<Compressed>,
+}
+
+fn retain_key(layout: &EntryLayout) -> RetainKey {
+    RetainKey {
+        data_start: layout.data_start,
+        compressed: layout.compressed,
+        size: layout.size,
+        crc32: layout.crc32,
+    }
+}
+
+/// The store for the output of the census, when the mode keeps any, the
+/// census decodes streams and some entry is a deflate stream it can keep.
+fn reuse_store(chunks: ChunkSizes, layouts: &[EntryLayout]) -> Option<ReuseStore> {
+    let keeps_deflate = layouts
+        .iter()
+        .any(|l| l.size > 0 && matches!(l.stream, Some(Compressed::Deflate)));
+    if chunks.stream_checks == StreamChecks::Skip || !keeps_deflate {
+        return None;
+    }
+    ReuseStore::new(chunks.reuse)
 }
 
 /// The central directory as the `zip` crate maps it.
@@ -679,6 +724,9 @@ pub(super) fn open<R: Read + Seek>(reader: R) -> Result<(ZipReader<Shared<R>>, Z
 /// nested archives that extraction admits is not refused for its size. The
 /// census then decodes at most the budget plus that allowance.
 ///
+/// `reuse` says whether the census keeps what it decodes of deflate entries,
+/// for extraction to write instead of decoding them again.
+///
 /// # Errors
 ///
 /// Same as [`open`].
@@ -687,16 +735,28 @@ pub(super) fn open_with<R: Read + Seek>(
     checks: StreamChecks,
     quota: u64,
     census_window: ZstdWindowLog,
+    reuse: DecodeReuse,
 ) -> Result<(ZipReader<Shared<R>>, ZipStructure)> {
     open_chunked(
         reader,
         ChunkSizes {
             stream_checks: checks,
-            recheck: CENSUS_DECODE_BUDGET.max(quota),
+            recheck: recheck_allowance_for(quota),
             census_window,
+            reuse,
             ..ChunkSizes::PRODUCTION
         },
     )
+}
+
+/// The per-archive allowance for checking entries again, for a `quota` of
+/// total output.
+pub(super) const fn recheck_allowance_for(quota: u64) -> u64 {
+    if quota > CENSUS_DECODE_BUDGET {
+        quota
+    } else {
+        CENSUS_DECODE_BUDGET
+    }
 }
 
 /// Whether the census reads entry data to find where streaming readers
@@ -744,7 +804,7 @@ fn open_chunked<R: Read + Seek>(
     };
 
     let mut census_reader = shared.clone();
-    let census = Census::run(&mut census_reader, &map, &scan, chunks)
+    let mut census = Census::run(&mut census_reader, &map, &scan, chunks)
         .map_err(|e| reader_fault(&shared, e))?;
 
     if let Some(fault) = shared.take_fault() {
@@ -761,6 +821,8 @@ fn open_chunked<R: Read + Seek>(
             checks: chunks.stream_checks,
             zstd_windows,
             census_window: chunks.census_window,
+            recheck_allowance: chunks.recheck,
+            reuse: census.reuse.take(),
             #[cfg(test)]
             gap_reads: census.gap_reads,
             #[cfg(test)]
@@ -985,6 +1047,7 @@ pub fn classify(error: &ZipError) -> HeaderFault {
 struct Census {
     central_entries: usize,
     findings: Findings,
+    reuse: Option<ReuseStore>,
     #[cfg(test)]
     gap_reads: usize,
     #[cfg(test)]
@@ -1046,17 +1109,30 @@ impl Census {
             });
         }
 
-        let mut gaps = GapChecker::new(reader, map, &scan.layouts, &walk, file_len, chunks);
+        let mut reuse = reuse_store(chunks, &scan.layouts);
+        let mut gaps = GapChecker::new(
+            reader,
+            map,
+            &scan.layouts,
+            &walk,
+            file_len,
+            chunks,
+            reuse.as_mut(),
+        );
         gaps.run(&mut findings)?;
         #[cfg(test)]
         let (reads, zstd_decodes) = (gaps.reads, gaps.zstd_decodes);
         drop(gaps);
+        if let Some(store) = reuse.as_mut() {
+            store.seal();
+        }
 
         find_ignored_end_records(reader, file_len, map, &mut findings)?;
 
         Ok(Self {
             central_entries: walk.counted.saturating_add(walk.uncounted),
             findings,
+            reuse,
             #[cfg(test)]
             gap_reads: reads,
             #[cfg(test)]
@@ -1175,6 +1251,8 @@ struct ChunkSizes {
     /// Whether the census decodes zstd streams, fixed from the windows the
     /// archive declares and `census_window` once they are known.
     zstd_census: CensusZstd,
+    /// Whether the census keeps the output it decodes of deflate entries.
+    reuse: DecodeReuse,
 }
 
 /// Whether the census decodes the zstd entries of an archive.
@@ -1209,6 +1287,7 @@ impl ChunkSizes {
         stream_checks: StreamChecks::Run,
         census_window: ZstdWindowLog::LIBZSTD_DEFAULT,
         zstd_census: CensusZstd::Decode,
+        reuse: DecodeReuse::Off,
     };
 }
 
@@ -1227,6 +1306,8 @@ const STRADDLE_LOOKAHEAD: u64 = 3;
 /// Output the census decodes per archive to find where deflate streams end; the
 /// integrity pass, which has a budget of its own, covers what exceeds it.
 const CENSUS_DECODE_BUDGET: u64 = 256 * 1024 * 1024;
+
+const _: () = assert!(crate::config::ReuseLimit::MAX_BYTES == CENSUS_DECODE_BUDGET);
 
 /// Compression methods assigned to a format the ecosystem uses.
 const KNOWN_METHODS: [u16; 9] = [0, 8, 9, 12, 14, 93, 95, 98, 99];
@@ -1272,6 +1353,8 @@ struct GapChecker<'a, R> {
     /// Per-archive output the census may decode to check again entries whose
     /// bytes spell a record signature after the budget is spent.
     recheck_budget: u64,
+    /// Where the output of deflate decodes is kept for extraction.
+    reuse: Option<&'a mut ReuseStore>,
     /// Reads of the gap search, for the tests that bound them.
     #[cfg(test)]
     reads: usize,
@@ -1291,6 +1374,7 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
         walk: &Walk,
         file_len: u64,
         chunks: ChunkSizes,
+        reuse: Option<&'a mut ReuseStore>,
     ) -> Self {
         Self {
             reader,
@@ -1308,6 +1392,7 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
             exhausted: false,
             decode_budget: chunks.decode,
             recheck_budget: chunks.recheck,
+            reuse,
             #[cfg(test)]
             reads: 0,
             #[cfg(test)]
@@ -1686,6 +1771,12 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
             {
                 self.zstd_decodes += usize::from(zstd);
             }
+            // TODO(review): follow-up issue pending, bzip2 and zstd entries,
+            // and sink extraction, still decode twice.
+            let capture = match (method, self.reuse.as_deref_mut()) {
+                (Compressed::Deflate, Some(store)) => store.capture(retain_key(layout)),
+                _ => None,
+            };
             stream_end(
                 &mut *self.reader,
                 method,
@@ -1693,6 +1784,7 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
                 layout.compressed,
                 decoded_up_to,
                 &mut self.decode_budget,
+                capture,
             )?
         };
         let undecided = match first {
@@ -1711,6 +1803,7 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
                         layout.compressed,
                         layout.size,
                         &mut self.recheck_budget,
+                        None,
                     )? {
                         StreamEnd::At(end) => {
                             return self.search_slack(layout, end, region, findings);

@@ -2467,6 +2467,7 @@ mod tests {
         let options = ExtractionOptions {
             atomic: false,
             skip_duplicates: false,
+            ..ExtractionOptions::default()
         };
 
         let result = archive.extract(temp.path(), &config, &options, &mut crate::NoopProgress);
@@ -3002,6 +3003,7 @@ mod tests {
         let options = ExtractionOptions {
             atomic: false,
             skip_duplicates: false,
+            ..ExtractionOptions::default()
         };
 
         let report = archive

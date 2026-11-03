@@ -300,6 +300,21 @@ fn a_callback_error_exposes_its_source() {
 
     let err: CallbackError<io::Error> = CallbackError::Callback(io::Error::other("boom"));
 
-    assert_eq!(err.to_string(), "entry callback failed: boom");
-    assert!(err.source().is_some());
+    assert_eq!(err.to_string(), "entry callback failed");
+    assert_eq!(
+        err.source().map(ToString::to_string).as_deref(),
+        Some("boom")
+    );
+}
+
+#[test]
+fn an_archive_error_is_transparent_in_the_chain() {
+    use std::error::Error as _;
+
+    let inner = ArchiveError::InvalidArchive("bad".to_owned());
+    let expected = inner.to_string();
+    let err: CallbackError<io::Error> = CallbackError::Archive(inner);
+
+    assert_eq!(err.to_string(), expected);
+    assert!(err.source().is_none());
 }

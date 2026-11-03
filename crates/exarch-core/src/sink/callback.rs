@@ -242,10 +242,16 @@ where
 /// # Examples
 ///
 /// ```
+/// use std::error::Error as _;
+///
 /// use exarch_core::CallbackError;
 ///
-/// let err: CallbackError<&str> = CallbackError::Callback("stop");
-/// assert_eq!(err.to_string(), "entry callback failed: stop");
+/// let err = CallbackError::Callback(std::io::Error::other("stop"));
+/// assert_eq!(err.to_string(), "entry callback failed");
+/// assert_eq!(
+///     err.source().map(ToString::to_string).as_deref(),
+///     Some("stop")
+/// );
 /// ```
 #[derive(Debug)]
 #[non_exhaustive]
@@ -258,10 +264,13 @@ pub enum CallbackError<E> {
     Archive(ArchiveError),
 }
 
-impl<E: fmt::Display> fmt::Display for CallbackError<E> {
+/// `Callback` names the failure and chains to the callback's error through
+/// `source()`; `Archive` is transparent, so an error chain shows each message
+/// once.
+impl<E> fmt::Display for CallbackError<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Callback(err) => write!(f, "entry callback failed: {err}"),
+            Self::Callback(_) => f.write_str("entry callback failed"),
             Self::Archive(err) => err.fmt(f),
         }
     }
@@ -271,7 +280,7 @@ impl<E: Error + 'static> Error for CallbackError<E> {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Callback(err) => Some(err),
-            Self::Archive(err) => Some(err),
+            Self::Archive(err) => err.source(),
         }
     }
 }

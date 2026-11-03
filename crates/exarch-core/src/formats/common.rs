@@ -13,7 +13,7 @@
 //!   open produces
 //! - [`copy_file_content_with_permit`]: Hardlink content copy between
 //!   already-open source/destination handles
-//! - [`check_extension_allowed`]: Extension allowlist filtering
+//! - [`is_extension_allowed`]: Extension allowlist predicate
 //! - [`push_disallowed_extension_warning`]: Aggregated disallowed-extension
 //!   skip warning
 //!

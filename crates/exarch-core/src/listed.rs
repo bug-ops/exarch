@@ -40,12 +40,13 @@ use crate::ListOptions;
 use crate::ProgressCallback;
 use crate::Result;
 use crate::SecurityConfig;
-use crate::api::extract_archive_with_options_and_progress;
 use crate::api::extract_staged;
 use crate::api::extract_tar_stream;
+use crate::api::extract_validated;
 use crate::config::ExtractionOptions;
 use crate::config::Validated;
 use crate::formats::compression::CompressionCodec;
+use crate::formats::compression::DecoderLimits;
 use crate::formats::detect::FormatFamily;
 use crate::formats::detect::detect_format;
 use crate::formats::tar::open_tar_stream;
@@ -83,15 +84,16 @@ const fn replays(codec: CompressionCodec) -> bool {
 #[derive(Debug)]
 struct Spool {
     file: File,
-    decoded_with: u64,
+    decoded_with: DecoderLimits,
 }
 
 /// An archive that was listed and is ready to extract without decoding it
 /// again where that is possible.
 ///
 /// Created by [`list_archive_for_extraction`]. Extracting from it gives the
-/// same result as [`extract_archive_with_options_and_progress`] on the
-/// archive; only the cost differs.
+/// same result as
+/// [`extract_archive_with_options_and_progress`](crate::api::extract_archive_with_options_and_progress)
+/// on the archive; only the cost differs.
 ///
 /// # Examples
 ///
@@ -144,14 +146,16 @@ impl ListedArchive {
 
     /// Extracts the archive into `output_dir`.
     ///
-    /// Behaves as [`extract_archive_with_options_and_progress`] does for the
-    /// listed archive, reading the decoded stream kept by the list pass when
-    /// it is available and `config.max_decoder_memory` is at least the limit
-    /// the list pass decoded under.
+    /// Behaves as
+    /// [`extract_archive_with_options_and_progress`](crate::api::extract_archive_with_options_and_progress)
+    /// does for the listed archive, reading the decoded stream kept by the list
+    /// pass when it is available and `config.max_decoder_memory` is at least
+    /// the limit the list pass decoded under (which also fixes the zstd window
+    /// limit).
     ///
     /// # Errors
     ///
-    /// Same as [`extract_archive_with_options_and_progress`].
+    /// Same as [`extract_archive_with_options_and_progress`](crate::api::extract_archive_with_options_and_progress).
     pub fn extract<P: AsRef<Path>>(
         self,
         output_dir: P,
@@ -160,12 +164,14 @@ impl ListedArchive {
         progress: &mut dyn ProgressCallback,
     ) -> Result<ExtractionReport> {
         let Self { archive, spool, .. } = self;
-        let Some(spool) = spool.filter(|s| config.max_decoder_memory >= s.decoded_with) else {
-            return extract_archive_with_options_and_progress(
-                archive, output_dir, config, options, progress,
-            );
+        let validated = config.clone().validate()?;
+        let Some(spool) = spool.filter(|s| DecoderLimits::of(&validated).covers(s.decoded_with))
+        else {
+            return extract_staged(output_dir.as_ref(), options, |dir| {
+                extract_validated(&archive, dir, &validated, options, progress)
+            });
         };
-        let config = config.clone().validate()?;
+        let config = validated;
         extract_staged(output_dir.as_ref(), options, |dir| {
             let stream = BufReader::with_capacity(SPOOL_BUFFER, spool.file);
             extract_tar_stream(
@@ -240,7 +246,7 @@ fn list_with_limit(
     let mut pass = ListPass::strict_with(options.stored_targets);
     let (manifest, spool) = match format.family() {
         FormatFamily::Tar(Some(codec)) if replays(codec) && fits(archive, codec, limit) => {
-            let stream = open_tar_stream(archive, Some(codec), config.max_decoder_memory)?;
+            let stream = open_tar_stream(archive, Some(codec), DecoderLimits::of(&config))?;
             let mut tee = SpoolTee::new(stream, limit);
             let manifest = list_tar_stream(&mut tee, Some(codec), format, &config, &mut pass)?;
             (manifest, tee.finish_spool(&config))
@@ -350,7 +356,7 @@ impl<R: Read> SpoolTee<R> {
         file.rewind().ok()?;
         Some(Spool {
             file,
-            decoded_with: config.max_decoder_memory,
+            decoded_with: DecoderLimits::of(config),
         })
     }
 }
@@ -383,9 +389,12 @@ impl<R: Read> Read for SpoolTee<R> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    use std::assert_matches;
+
     use super::*;
     use crate::ErrorCode;
     use crate::NoopProgress;
+    use crate::api::extract_archive_with_options_and_progress;
     use crate::test_utils::create_test_tar;
     use tempfile::TempDir;
 
@@ -593,6 +602,32 @@ mod tests {
         let stricter = SecurityConfig::default().with_max_decoder_memory(1024 * 1024);
 
         assert!(extract_into(listed, &dir, &stricter).is_err());
+    }
+
+    #[test]
+    fn a_smaller_member_allowance_decodes_again() {
+        let dir = TempDir::new().unwrap();
+        let tar = small_tar();
+        let bytes: Vec<u8> = tar
+            .chunks(512)
+            .flat_map(|chunk| encoded(CompressionCodec::Gzip, chunk))
+            .collect();
+        let archive = write_archive(&dir, CompressionCodec::Gzip, &bytes);
+        let listed = list(&archive, REPLAY_LIMIT);
+        assert!(listed.spool.is_some());
+        let stricter = SecurityConfig::default().with_compressed_member_allowance(2);
+
+        let error = match extract_into(listed, &dir, &stricter).unwrap_err() {
+            crate::ArchiveError::PartialExtraction { source, .. } => *source,
+            other => other,
+        };
+
+        assert_matches!(
+            error,
+            crate::ArchiveError::QuotaExceeded {
+                resource: crate::QuotaResource::CompressedMembers { .. }
+            }
+        );
     }
 
     #[test]

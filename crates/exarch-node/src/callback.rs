@@ -216,9 +216,9 @@ impl CallbackJob {
 ///   `AbortError`, `cause` is `signal.reason`) and frees the worker, even if
 ///   `onEntry` returned a promise that never settles or the iterable stalls.
 ///   The abort is noticed when the job starts and while it waits for JavaScript
-///   (an `AsyncIterable` chunk or its close, the promise `onEntry` returned); a
-///   `Uint8Array` archive is otherwise processed without interruption. A
-///   pending `onEntry` call is abandoned, not cancelled
+///   (an `AsyncIterable` chunk or its close, the promise `onEntry` returned)
+///   and at every read of a `Uint8Array` archive. A pending `onEntry` call is
+///   abandoned, not cancelled
 ///
 /// # Returns
 ///

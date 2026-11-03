@@ -199,12 +199,13 @@ last argument. Aborting rejects the promise with `code === 'ABORT_ERR'`,
 `name === 'AbortError'` and `cause` set to `signal.reason`, frees the worker
 thread and queues the close of the stream without waiting for it. A signal that
 is already aborted rejects without opening the archive. The abort is noticed
-only at the start of the job and while it waits for JavaScript: the next chunk
-of an `AsyncIterable`, the close of the iterable, and the promise an `onEntry`
-call returned (which is abandoned, not cancelled). A `Uint8Array` archive is
-parsed without interruption once started, so for `listArchiveBytes`,
-`verifyArchiveBytes` and `extractArchiveToMemory` an abort after the start has
-no effect and the promise resolves normally. A value that is not an
+at the start of the job, while it waits for JavaScript (the next chunk of an
+`AsyncIterable`, the close of the iterable, and the promise an `onEntry` call
+returned, which is abandoned, not cancelled), at every read of a `Uint8Array`
+archive, and at every progress callback of the `WithProgress` variants, which
+stop being called once the signal fired. The work between two reads of a
+`Uint8Array` is not interrupted, and a call whose last read has happened
+resolves normally. A value that is not an
 `AbortSignal` (any object with `aborted` and `addEventListener` is accepted,
 including a signal from another realm) throws a `TypeError` synchronously.
 

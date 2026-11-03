@@ -27,6 +27,7 @@ use crate::formats::SevenZArchive;
 use crate::formats::TarArchive;
 use crate::formats::ZipArchive;
 use crate::formats::compression::CompressionCodec;
+use crate::formats::compression::DecoderLimits;
 use crate::formats::detect::ArchiveType;
 use crate::formats::detect::FormatFamily;
 use crate::formats::detect::match_signature;
@@ -348,7 +349,7 @@ impl<'a> ArchiveReader<'a> {
         let format = self.format();
         match self.source {
             Source::Tar { stream, codec } => {
-                let decoded = decode_tar_stream(stream, codec, config.max_decoder_memory)?;
+                let decoded = decode_tar_stream(stream, codec, DecoderLimits::of(config))?;
                 list_tar_stream(decoded, codec, format, config, listing)
             }
             Source::Seekable {
@@ -371,7 +372,7 @@ impl<'a> ArchiveReader<'a> {
         let format = self.format();
         match self.source {
             Source::Tar { stream, codec } => {
-                let decoded = decode_tar_stream(stream, codec, config.max_decoder_memory)?;
+                let decoded = decode_tar_stream(stream, codec, DecoderLimits::of(config))?;
                 verify_with(config, options, progress, |listing| {
                     list_tar_stream(decoded, codec, format, config, listing)
                 })
@@ -397,11 +398,11 @@ impl<'a> ArchiveReader<'a> {
 pub(crate) fn decode_tar_stream<'r, R: Read + Send + 'r>(
     reader: R,
     codec: Option<CompressionCodec>,
-    max_decoder_memory: u64,
+    limits: DecoderLimits,
 ) -> Result<Box<dyn Read + Send + 'r>> {
     let buffered = BufReader::new(reader);
     match codec {
-        Some(codec) => codec.decoder(buffered, max_decoder_memory),
+        Some(codec) => codec.decoder(buffered, limits),
         None => Ok(Box::new(buffered)),
     }
 }
@@ -411,11 +412,10 @@ pub(crate) fn decode_tar_stream<'r, R: Read + Send + 'r>(
 pub(crate) fn tar_archive<'r, R: Read + Send + 'r>(
     reader: R,
     codec: Option<CompressionCodec>,
-    max_decoder_memory: u64,
+    limits: DecoderLimits,
 ) -> Result<TarArchive<Box<dyn Read + Send + 'r>>> {
     let trailer = TarTrailer::for_codec(codec);
-    decode_tar_stream(reader, codec, max_decoder_memory)
-        .map(|stream| TarArchive::with_trailer(stream, trailer))
+    decode_tar_stream(reader, codec, limits).map(|stream| TarArchive::with_trailer(stream, trailer))
 }
 
 #[cfg(test)]

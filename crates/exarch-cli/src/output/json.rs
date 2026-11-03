@@ -10,6 +10,7 @@ use exarch_core::ArchiveError;
 use exarch_core::ArchiveManifest;
 use exarch_core::CreationReport;
 use exarch_core::ExtractionReport;
+use exarch_core::TarTrailerRefusal;
 use exarch_core::VerificationReport;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -21,7 +22,11 @@ use std::path::Path;
 fn extraction_error_kind(err: &ArchiveError) -> String {
     match err {
         ArchiveError::Io(_) => "IoError",
-        ArchiveError::InvalidArchive(_) | ArchiveError::TarAmbiguity(_) => "InvalidArchive",
+        ArchiveError::SecurityViolation { .. }
+        | ArchiveError::TarTrailer(TarTrailerRefusal::OverCap { .. }) => "SecurityViolation",
+        ArchiveError::InvalidArchive(_)
+        | ArchiveError::TarAmbiguity(_)
+        | ArchiveError::TarTrailer(_) => "InvalidArchive",
         ArchiveError::PathTraversal { .. } => "PathTraversal",
         ArchiveError::SymlinkEscape { .. } => "SymlinkEscape",
         ArchiveError::HardlinkEscape { .. } => "HardlinkEscape",
@@ -29,7 +34,6 @@ fn extraction_error_kind(err: &ArchiveError) -> String {
         ArchiveError::ZipInconsistency(_) => "ZipInconsistency",
         ArchiveError::InvalidPermissions { .. } => "InvalidPermissions",
         ArchiveError::QuotaExceeded { .. } => "QuotaExceeded",
-        ArchiveError::SecurityViolation { .. } => "SecurityViolation",
         ArchiveError::SourceNotFound { .. } => "SourceNotFound",
         ArchiveError::SourceNotAccessible { .. } => "SourceNotAccessible",
         ArchiveError::OutputExists { .. } => "OutputExists",
@@ -438,6 +442,24 @@ mod tests {
     fn test_extraction_error_kind_tar_ambiguity_is_invalid_archive() {
         let err = ArchiveError::TarAmbiguity(exarch_core::TarAmbiguity::ChecksumMismatch);
         assert_eq!(error_kind(&err), "InvalidArchive");
+    }
+
+    #[test]
+    fn test_extraction_error_kind_tar_trailer_follows_the_old_kinds() {
+        let over = ArchiveError::TarTrailer(TarTrailerRefusal::OverCap { cap: 1 << 20 });
+        assert_eq!(error_kind(&over), "SecurityViolation");
+        for refusal in [
+            TarTrailerRefusal::Truncated,
+            TarTrailerRefusal::Corrupt {
+                cause: exarch_core::TrailerCorruption::Decoder,
+                detail: "checksum mismatch".into(),
+            },
+        ] {
+            assert_eq!(
+                error_kind(&ArchiveError::TarTrailer(refusal)),
+                "InvalidArchive"
+            );
+        }
     }
 
     #[test]

@@ -7,6 +7,7 @@
 //! refusal that never reads the whole archive.
 
 use std::io;
+use std::io::Cursor;
 use std::io::Read;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -37,6 +38,7 @@ use crate::CoreResult;
 use crate::abort::AbortBinding;
 use crate::abort::AbortHandle;
 use crate::abort::Aborted;
+use crate::abort::AbortingRead;
 use crate::abort::Detach;
 use crate::error::Failure;
 use crate::error::ProgressCallbackError;
@@ -295,6 +297,12 @@ pub trait IntoSource: Send + Sized {
         format: Option<ArchiveType>,
         f: impl FnOnce(ArchiveReader<'_>) -> CoreResult<T>,
     ) -> CoreResult<T>;
+
+    /// The handle of the `AbortSignal` this source is bound to; progress
+    /// reporters poll it. Without a signal it never aborts.
+    fn abort_handle(&self) -> AbortHandle {
+        AbortHandle::NONE
+    }
 }
 
 impl<B: AsRef<[u8]> + Send> IntoSource for B {
@@ -390,6 +398,10 @@ impl AbortableSource {
 }
 
 impl IntoSource for AbortableSource {
+    fn abort_handle(&self) -> AbortHandle {
+        self.abort.clone()
+    }
+
     fn abandon(self) {
         if self.abort.is_observed() {
             self.source.abort_abandon();
@@ -407,7 +419,17 @@ impl IntoSource for AbortableSource {
             self.source.abort_abandon();
             return Err(self.abort.failure());
         }
-        let result = self.source.run(format, f);
+        let result = match self.source {
+            ArchiveSource::Bytes(bytes) => {
+                let reader = AbortingRead::new(Cursor::new(bytes), self.abort.clone());
+                let opened = match format {
+                    Some(format) => Ok(ArchiveReader::of_type(reader, format.into())),
+                    None => ArchiveReader::detect(reader),
+                };
+                opened.map_err(Failure::from).and_then(f)
+            }
+            stream @ ArchiveSource::Stream(_) => stream.run(format, f),
+        };
         if self.abort.is_observed() {
             return Err(self.abort.failure());
         }

@@ -15,6 +15,7 @@ pub mod traits;
 pub mod zip;
 pub(crate) mod zip_structure;
 pub(crate) mod zip_tail;
+pub(crate) mod zstd_window;
 
 // Re-export main types for convenience
 pub use compression::CompressionCodec;

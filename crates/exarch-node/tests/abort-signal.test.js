@@ -381,6 +381,53 @@ describe('abort while waiting for JavaScript', () => {
   });
 });
 
+describe('abort of an in-memory Uint8Array call', () => {
+  const manyEntries = Buffer.concat([
+    ...Array.from({ length: 30 }, (_, i) => tarEntry(`dir/file-${i}.txt`, Buffer.from('x'))),
+    Buffer.alloc(1024),
+  ]);
+
+  const PROGRESS_CALLS = [
+    [
+      'listArchiveBytesWithProgress',
+      (progress, signal) => listArchiveBytesWithProgress(manyEntries, null, null, progress, signal),
+    ],
+    [
+      'verifyArchiveBytesWithProgress',
+      (progress, signal) =>
+        verifyArchiveBytesWithProgress(manyEntries, null, null, null, progress, signal),
+    ],
+    [
+      'extractArchiveToMemoryWithProgress',
+      (progress, signal) =>
+        extractArchiveToMemoryWithProgress(
+          manyEntries,
+          null,
+          null,
+          null,
+          null,
+          null,
+          progress,
+          signal
+        ),
+    ],
+  ];
+
+  for (const [name, call] of PROGRESS_CALLS) {
+    it(`${name} stops after the progress callback that aborted`, async () => {
+      const controller = new AbortController();
+      const reason = new Error('from progress');
+      let calls = 0;
+      const pending = call(() => {
+        calls += 1;
+        controller.abort(reason);
+      }, controller.signal);
+      await assert.rejects(settles(pending), (err) => assertAborted(err, 'from progress'));
+      assert.strictEqual(calls, 1);
+    });
+  }
+});
+
 describe('ABORT_ERR in the ErrorCode declarations', () => {
   const declared = () => {
     const dts = fs.readFileSync(path.join(__dirname, '..', 'index.d.ts'), 'utf8');

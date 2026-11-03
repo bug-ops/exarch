@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use thiserror::Error;
 
 use super::tar_ambiguity::TarAmbiguity;
+use super::tar_trailer::TarTrailerRefusal;
 use super::zip_inconsistency::ZipInconsistency;
 use crate::closed_enum::closed_enum;
 
@@ -221,6 +222,14 @@ pub enum QuotaResource {
         /// Maximum allowed decoder memory in bytes.
         max: u64,
     },
+    /// A gzip or bzip2 stream holds more members than its allowance admits.
+    CompressedMembers {
+        /// The member that was refused, counting from one.
+        members: u64,
+        /// The most members the stream could have started at that point: the
+        /// configured base plus one per 16 KiB of output so far.
+        allowance: u64,
+    },
     /// Node budget of the in-memory destination model exceeded.
     TreeNodes {
         /// Maximum allowed number of distinct names.
@@ -250,6 +259,13 @@ impl std::fmt::Display for QuotaResource {
             }
             Self::DecoderMemory { max } => {
                 write!(f, "quota exceeded: decoder memory (> {max} bytes)")
+            }
+            Self::CompressedMembers { members, allowance } => {
+                write!(
+                    f,
+                    "quota exceeded: compressed members ({members} > allowance {allowance} = \
+                     base + 1 per 16 KiB decoded)"
+                )
             }
             Self::TreeNodes { max } => {
                 write!(
@@ -328,6 +344,16 @@ pub enum ArchiveError {
     /// [`Self::InvalidArchive`].
     #[error("invalid archive: ambiguous TAR header: {0}")]
     TarAmbiguity(TarAmbiguity),
+
+    /// The bytes after the end-of-archive marker of a compressed TAR were
+    /// refused: more than the cap, corrupt or truncated.
+    ///
+    /// [`Self::error_code`] and the binding kind are those of
+    /// [`Self::SecurityViolation`] for an over-cap tail (relaxable by
+    /// [`PolicySetting::MaxTarMetadataBytes`]) and of [`Self::InvalidArchive`]
+    /// otherwise.
+    #[error("{0}")]
+    TarTrailer(TarTrailerRefusal),
 
     /// Path traversal attempt detected.
     #[error("path traversal detected: {path}")]
@@ -494,6 +520,12 @@ impl From<std::io::Error> for ArchiveError {
     }
 }
 
+impl From<TarTrailerRefusal> for ArchiveError {
+    fn from(refusal: TarTrailerRefusal) -> Self {
+        Self::TarTrailer(refusal)
+    }
+}
+
 impl From<TarAmbiguity> for ArchiveError {
     fn from(ambiguity: TarAmbiguity) -> Self {
         Self::TarAmbiguity(ambiguity)
@@ -555,6 +587,7 @@ impl ArchiveError {
     pub fn relaxable_by(&self) -> Option<PolicySetting> {
         match self {
             Self::SecurityViolation { relaxable_by, .. } => *relaxable_by,
+            Self::TarTrailer(refusal) => refusal.relaxable_by(),
             Self::PartialExtraction { source, .. } => source.relaxable_by(),
             _ => None,
         }
@@ -590,6 +623,7 @@ impl ArchiveError {
     pub fn is_security_violation(&self) -> bool {
         match self {
             Self::PartialExtraction { source, .. } => source.is_security_violation(),
+            Self::TarTrailer(refusal) => refusal.is_policy_refusal(),
             _ => matches!(
                 self,
                 Self::PathTraversal { .. }
@@ -628,6 +662,7 @@ impl ArchiveError {
     pub fn is_recoverable(&self) -> bool {
         match self {
             Self::PartialExtraction { source, .. } => source.is_recoverable(),
+            Self::TarTrailer(refusal) => refusal.is_policy_refusal(),
             _ => matches!(
                 self,
                 Self::PathTraversal { .. }

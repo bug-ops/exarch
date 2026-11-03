@@ -357,21 +357,50 @@ pub struct SecurityConfigFields {
     /// Default: 4 MiB (4,194,304 bytes)
     pub max_tar_metadata_bytes: u64,
 
-    /// Maximum memory in bytes an xz decoder may use (dictionary and state).
+    /// Maximum memory in bytes a decoder may use for its dictionary or window.
     ///
-    /// The xz block header declares the LZMA2 dictionary size (up to 4 GiB),
-    /// so without a limit a tiny archive can drive resident memory far beyond
+    /// The xz block header declares the LZMA2 dictionary size (up to 4 GiB)
+    /// and a zstd frame header declares its window (up to 2^41 bytes), so
+    /// without a limit a tiny archive can drive resident memory far beyond
     /// what the output quotas allow. Archives that need more fail with
-    /// `QuotaExceeded { DecoderMemory }`. Applies to `extract`, `list` and
-    /// `verify` of `.tar.xz`. Other codecs are bounded by their format
-    /// (bzip2 blocks of at most 900 KB; zstd windows above 128 MiB are
-    /// rejected) and are not governed by this value. Not exposed through the
-    /// CLI or language bindings. Also admits the 7z decoder window; the
-    /// lookahead of parallel 7z decoding is budgeted separately by
-    /// [`parallel_decode`](Self::parallel_decode).
+    /// `QuotaExceeded { DecoderMemory }`.
+    ///
+    /// - xz: bounds the decoder's dictionary and state; applies to `extract`,
+    ///   `list` and `verify` of `.tar.xz`.
+    /// - zstd: bounds the window to the largest power of two at or below this
+    ///   value, at most 128 MiB (libzstd's own ceiling), so a limit of 3 MiB
+    ///   admits windows up to 2 MiB. It applies to `.tar.zst` and to ZIP
+    ///   entries, which are checked from their frame headers: a ZIP archive
+    ///   with a larger window is refused by `extract`, `list` and `verify`
+    ///   before any entry is listed or extracted. Windows of 1 KiB or less are
+    ///   always admitted, and the decoder's fixed state is not counted.
+    /// - 7z: also admits the 7z decoder window; the lookahead of parallel 7z
+    ///   decoding is budgeted separately by
+    ///   [`parallel_decode`](Self::parallel_decode).
+    ///
+    /// Other codecs are bounded by their format (bzip2 blocks of at most
+    /// 900 KB). Not exposed through the CLI or language bindings.
     ///
     /// Default: 256 MiB (268,435,456 bytes)
     pub max_decoder_memory: u64,
+
+    /// Base number of gzip members or bzip2 streams a compressed TAR may hold.
+    ///
+    /// `gzip -dc` and `bzip2 -dc` decode every member, and each costs a decoder
+    /// setup, so a stream of empty members would burn time without producing
+    /// output the size quotas could count. Member `n` may start only while
+    /// `n <= allowance`, where `allowance = compressed_member_allowance +
+    /// decoded_bytes / 16 KiB`; a stream that starts a member beyond that
+    /// fails with `QuotaExceeded { CompressedMembers }`. The output term lets
+    /// writers that flush a member per record (bgzf blocks are at most 64 KiB)
+    /// pass at any output size, provided they average 16 KiB or more per
+    /// member. A gzip or bzip2 stream averaging less than that over large
+    /// outputs must raise this value. Applies to `extract`, `list` and
+    /// `verify` of `.tar.gz` and `.tar.bz2`; xz and zstd are not governed by
+    /// it. Not exposed through the CLI or language bindings.
+    ///
+    /// Default: 10,000 (100,000 for [`SecurityConfig::permissive`])
+    pub compressed_member_allowance: u64,
 
     /// Lookahead memory for decoding independent LZMA2 runs of a 7z block on
     /// worker threads.
@@ -418,6 +447,7 @@ impl Default for SecurityConfigFields {
             max_solid_block_memory: 512 * 1024 * 1024, // 512 MB
             max_tar_metadata_bytes: 4 * 1024 * 1024,   // 4 MiB
             max_decoder_memory: 256 * 1024 * 1024,     // 256 MiB
+            compressed_member_allowance: 10_000,
             parallel_decode: ParallelDecode::Bounded(ParallelDecode::DEFAULT_BYTES),
             zip_consistency: ZipConsistencyPolicy::Enforce,
         }
@@ -516,6 +546,7 @@ impl Default for SecurityConfig<Unvalidated> {
     /// - `max_solid_block_memory`: 512 MB
     /// - `max_tar_metadata_bytes`: 4 MiB
     /// - `max_decoder_memory`: 256 MiB
+    /// - `compressed_member_allowance`: 10,000
     /// - `parallel_decode`: `Bounded` at 128 MiB
     /// - `zip_consistency`: `Enforce`
     fn default() -> Self {
@@ -553,6 +584,7 @@ impl SecurityConfig<Unvalidated> {
                 max_solid_block_memory: 1024 * 1024 * 1024, // 1 GB for permissive
                 max_tar_metadata_bytes: 16 * 1024 * 1024,   // 16 MiB for permissive
                 max_decoder_memory: 1024 * 1024 * 1024,     // 1 GiB for permissive
+                compressed_member_allowance: 100_000,
                 parallel_decode: ParallelDecode::Bounded(PERMISSIVE_PARALLEL_DECODE),
                 ..SecurityConfigFields::default()
             },
@@ -584,6 +616,7 @@ impl SecurityConfig<Unvalidated> {
     /// - `max_tar_metadata_bytes` is zero or `u64::MAX` (the metadata budget
     ///   uses it as its disarmed marker)
     /// - `max_decoder_memory` is zero
+    /// - `compressed_member_allowance` is zero
     /// - any entry in `allowed_extensions` or `banned_path_components` is
     ///   empty, contains a null byte, or exceeds
     ///   [`crate::MAX_CONFIG_ENTRY_LENGTH`] bytes
@@ -649,6 +682,11 @@ impl SecurityConfig<Unvalidated> {
         if self.max_decoder_memory == 0 {
             return Err(crate::ArchiveError::InvalidConfiguration {
                 reason: "max_decoder_memory must not be zero".into(),
+            });
+        }
+        if self.compressed_member_allowance == 0 {
+            return Err(crate::ArchiveError::InvalidConfiguration {
+                reason: "compressed_member_allowance must not be zero".into(),
             });
         }
         for extension in &self.fields.allowed_extensions {
@@ -983,7 +1021,8 @@ impl SecurityConfig<Unvalidated> {
         self
     }
 
-    /// Sets the maximum memory an xz decoder may use, in bytes.
+    /// Sets the maximum memory a decoder may use, in bytes: the xz
+    /// dictionary, and the zstd window as the largest power of two within it.
     ///
     /// # Examples
     ///
@@ -997,6 +1036,32 @@ impl SecurityConfig<Unvalidated> {
     #[inline]
     pub fn with_max_decoder_memory(mut self, size: u64) -> Self {
         self.fields.max_decoder_memory = size;
+        self
+    }
+
+    /// Sets the base number of gzip members or bzip2 streams a compressed TAR
+    /// may hold, before the allowance of one more per 16 KiB of output.
+    ///
+    /// See [`compressed_member_allowance`](SecurityConfigFields::compressed_member_allowance).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::SecurityConfig;
+    ///
+    /// let config = SecurityConfig::default().with_compressed_member_allowance(50_000);
+    /// assert_eq!(config.compressed_member_allowance, 50_000);
+    /// assert!(
+    ///     SecurityConfig::default()
+    ///         .with_compressed_member_allowance(0)
+    ///         .validate()
+    ///         .is_err()
+    /// );
+    /// ```
+    #[must_use]
+    #[inline]
+    pub fn with_compressed_member_allowance(mut self, base: u64) -> Self {
+        self.fields.compressed_member_allowance = base;
         self
     }
 
@@ -1660,6 +1725,25 @@ mod tests {
         let mut cfg = SecurityConfig::default();
         cfg.max_decoder_memory = 0;
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_zero_compressed_member_allowance() {
+        let mut cfg = SecurityConfig::default();
+        cfg.compressed_member_allowance = 0;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_compressed_member_allowance_defaults() {
+        assert_eq!(
+            SecurityConfig::default().compressed_member_allowance,
+            10_000
+        );
+        assert_eq!(
+            SecurityConfig::permissive().compressed_member_allowance,
+            100_000
+        );
     }
 
     #[test]

@@ -120,6 +120,10 @@ use super::zip_tail::is_reachable_header;
 use super::zip_tail::judge_first_signature;
 use super::zip_tail::scan;
 use super::zip_tail::stream_end;
+use super::zstd_window::ZstdRange;
+use super::zstd_window::ZstdWindowLog;
+use super::zstd_window::ZstdWindows;
+use super::zstd_window::walk as walk_zstd_windows;
 use crate::ArchiveError;
 use crate::Result;
 use crate::ZipConsistencyPolicy;
@@ -522,8 +526,12 @@ pub struct ZipStructure {
     central_entries: usize,
     findings: Findings,
     checks: StreamChecks,
+    zstd_windows: ZstdWindows,
+    census_window: ZstdWindowLog,
     #[cfg(test)]
     gap_reads: usize,
+    #[cfg(test)]
+    zstd_census_decodes: usize,
 }
 
 impl ZipStructure {
@@ -534,7 +542,10 @@ impl ZipStructure {
             central_entries,
             findings: Findings::default(),
             checks: StreamChecks::Run,
+            zstd_windows: ZstdWindows::NoZstdEntries,
+            census_window: ZstdWindowLog::LIBZSTD_DEFAULT,
             gap_reads: 0,
+            zstd_census_decodes: 0,
         }
     }
 
@@ -555,6 +566,18 @@ impl ZipStructure {
         self.checks
     }
 
+    /// The largest zstd window the entries declare, read from their frame
+    /// headers when the archive was opened.
+    pub(crate) const fn zstd_windows(&self) -> ZstdWindows {
+        self.zstd_windows
+    }
+
+    /// The zstd window limit the census decoded under; entries above it were
+    /// not decoded by the census.
+    pub(crate) const fn census_window(&self) -> ZstdWindowLog {
+        self.census_window
+    }
+
     /// Findings beyond the per-kind retention limits, which were only counted.
     pub(crate) const fn omitted_findings(&self) -> usize {
         self.findings.omitted
@@ -564,6 +587,12 @@ impl ZipStructure {
     #[cfg(test)]
     pub(crate) const fn gap_reads(&self) -> usize {
         self.gap_reads
+    }
+
+    /// Zstd streams the census decoded.
+    #[cfg(test)]
+    pub(crate) const fn zstd_census_decodes(&self) -> usize {
+        self.zstd_census_decodes
     }
 }
 
@@ -629,7 +658,7 @@ impl DirectoryMap {
 ///
 /// Fails on unparseable, encrypted or unsupported archives, and when the
 /// raw central directory and the `zip` crate's map of it disagree.
-pub fn open<R: Read + Seek>(reader: R) -> Result<(ZipReader<Shared<R>>, ZipStructure)> {
+pub(super) fn open<R: Read + Seek>(reader: R) -> Result<(ZipReader<Shared<R>>, ZipStructure)> {
     open_chunked(reader, ChunkSizes::PRODUCTION)
 }
 
@@ -640,6 +669,10 @@ pub fn open<R: Read + Seek>(reader: R) -> Result<(ZipReader<Shared<R>>, ZipStruc
 /// [`ZipConsistencyPolicy::Ignore`](crate::ZipConsistencyPolicy), so an
 /// archive opened for that policy skips their cost.
 ///
+/// `census_window` is the zstd window limit of the census: entries that
+/// declare a larger window are not decoded by it, and the operations refuse
+/// them (see `ZipArchive::check_admission`).
+///
 /// `quota` is the total output the caller lets an extraction produce. The
 /// allowance for checking again entries whose bytes spell a record signature
 /// is the larger of that and the default census budget, so an archive full of
@@ -649,16 +682,18 @@ pub fn open<R: Read + Seek>(reader: R) -> Result<(ZipReader<Shared<R>>, ZipStruc
 /// # Errors
 ///
 /// Same as [`open`].
-pub fn open_with<R: Read + Seek>(
+pub(super) fn open_with<R: Read + Seek>(
     reader: R,
     checks: StreamChecks,
     quota: u64,
+    census_window: ZstdWindowLog,
 ) -> Result<(ZipReader<Shared<R>>, ZipStructure)> {
     open_chunked(
         reader,
         ChunkSizes {
             stream_checks: checks,
             recheck: CENSUS_DECODE_BUDGET.max(quota),
+            census_window,
             ..ChunkSizes::PRODUCTION
         },
     )
@@ -693,6 +728,21 @@ fn open_chunked<R: Read + Seek>(
     let scan = scan_entries(&mut archive, &shared).map_err(|e| reader_fault(&shared, e))?;
     let map = DirectoryMap::of(&archive).map_err(|e| reader_fault(&shared, e))?;
 
+    let zstd_ranges = scan
+        .layouts
+        .iter()
+        .filter(|l| matches!(l.stream, Some(Compressed::Zstd)))
+        .map(|l| ZstdRange {
+            data_start: l.data_start,
+            end: l.end,
+        });
+    let zstd_windows = walk_zstd_windows(&mut shared.clone(), zstd_ranges, map.directory_start)
+        .map_err(|e| reader_fault(&shared, ArchiveError::Io(e)))?;
+    let chunks = ChunkSizes {
+        zstd_census: CensusZstd::of(zstd_windows, chunks.census_window),
+        ..chunks
+    };
+
     let mut census_reader = shared.clone();
     let census = Census::run(&mut census_reader, &map, &scan, chunks)
         .map_err(|e| reader_fault(&shared, e))?;
@@ -709,8 +759,12 @@ fn open_chunked<R: Read + Seek>(
             central_entries: census.central_entries,
             findings,
             checks: chunks.stream_checks,
+            zstd_windows,
+            census_window: chunks.census_window,
             #[cfg(test)]
             gap_reads: census.gap_reads,
+            #[cfg(test)]
+            zstd_census_decodes: census.zstd_census_decodes,
         },
     ))
 }
@@ -933,6 +987,8 @@ struct Census {
     findings: Findings,
     #[cfg(test)]
     gap_reads: usize,
+    #[cfg(test)]
+    zstd_census_decodes: usize,
 }
 
 /// Lengths of the variable part of a central directory record.
@@ -993,7 +1049,7 @@ impl Census {
         let mut gaps = GapChecker::new(reader, map, &scan.layouts, &walk, file_len, chunks);
         gaps.run(&mut findings)?;
         #[cfg(test)]
-        let reads = gaps.reads;
+        let (reads, zstd_decodes) = (gaps.reads, gaps.zstd_decodes);
         drop(gaps);
 
         find_ignored_end_records(reader, file_len, map, &mut findings)?;
@@ -1003,6 +1059,8 @@ impl Census {
             findings,
             #[cfg(test)]
             gap_reads: reads,
+            #[cfg(test)]
+            zstd_census_decodes: zstd_decodes,
         })
     }
 }
@@ -1112,6 +1170,34 @@ struct ChunkSizes {
     decode: u64,
     recheck: u64,
     stream_checks: StreamChecks,
+    /// The zstd window limit the census may decode under.
+    census_window: ZstdWindowLog,
+    /// Whether the census decodes zstd streams, fixed from the windows the
+    /// archive declares and `census_window` once they are known.
+    zstd_census: CensusZstd,
+}
+
+/// Whether the census decodes the zstd entries of an archive.
+///
+/// libzstd allocates the window a frame declares before decoding, so the
+/// census decodes a zstd stream only when the window limit it runs under
+/// admits every window the archive declares. Otherwise the operations refuse
+/// the archive anyway and decoding would only spend the memory the limit was
+/// meant to protect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CensusZstd {
+    Decode,
+    Skip,
+}
+
+impl CensusZstd {
+    const fn of(windows: ZstdWindows, limit: ZstdWindowLog) -> Self {
+        match windows {
+            ZstdWindows::NoZstdEntries => Self::Decode,
+            ZstdWindows::Largest(window) if limit.admits(window) => Self::Decode,
+            ZstdWindows::Largest(_) | ZstdWindows::OverBudget => Self::Skip,
+        }
+    }
 }
 
 impl ChunkSizes {
@@ -1121,6 +1207,8 @@ impl ChunkSizes {
         decode: CENSUS_DECODE_BUDGET,
         recheck: CENSUS_DECODE_BUDGET,
         stream_checks: StreamChecks::Run,
+        census_window: ZstdWindowLog::LIBZSTD_DEFAULT,
+        zstd_census: CensusZstd::Decode,
     };
 }
 
@@ -1187,6 +1275,9 @@ struct GapChecker<'a, R> {
     /// Reads of the gap search, for the tests that bound them.
     #[cfg(test)]
     reads: usize,
+    /// Zstd streams decoded, for the tests that bound the census.
+    #[cfg(test)]
+    zstd_decodes: usize,
 }
 
 impl<'a, R: Read + Seek> GapChecker<'a, R> {
@@ -1219,6 +1310,8 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
             recheck_budget: chunks.recheck,
             #[cfg(test)]
             reads: 0,
+            #[cfg(test)]
+            zstd_decodes: 0,
         }
     }
 
@@ -1572,6 +1665,10 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
         let Some(method) = layout.stream else {
             return Ok(());
         };
+        let zstd = matches!(method, Compressed::Zstd);
+        if zstd && self.chunks.zstd_census == CensusZstd::Skip {
+            return Ok(());
+        }
         let region = if layout.descriptor.is_some() {
             HiddenRegion::DescriptorTail
         } else {
@@ -1585,6 +1682,10 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
         let first = if layout.descriptor == Some(DescriptorExit::Either) {
             StreamEnd::OverBudget
         } else {
+            #[cfg(test)]
+            {
+                self.zstd_decodes += usize::from(zstd);
+            }
             stream_end(
                 &mut *self.reader,
                 method,
@@ -1599,6 +1700,10 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
             StreamEnd::Undecided => Some(ZipStreamUndecided::Rejected),
             StreamEnd::OverBudget => {
                 if holds_reader_record(&mut *self.reader, layout.data_start, layout.compressed)? {
+                    #[cfg(test)]
+                    {
+                        self.zstd_decodes += usize::from(zstd);
+                    }
                     match stream_end(
                         &mut *self.reader,
                         method,

@@ -25,6 +25,7 @@ use crate::formats::common::is_extension_allowed;
 use crate::formats::common::normalize_entry_name;
 use crate::formats::common::symlink_target_too_large;
 use crate::formats::compression::CompressionCodec;
+use crate::formats::compression::DecoderLimits;
 use crate::formats::detect::ArchiveType;
 use crate::formats::detect::FormatFamily;
 use crate::formats::detect::detect_format;
@@ -51,6 +52,7 @@ use crate::formats::tar_metadata_limit::TarReadBudget;
 use crate::formats::tar_metadata_limit::budget_violation;
 use crate::formats::tar_metadata_limit::budgeted_reader;
 use crate::formats::tar_metadata_limit::budgeted_tar_entries;
+use crate::formats::zip::AdmittedZip;
 use crate::formats::zip::ZipEntryKind;
 use crate::formats::zip::is_password_required;
 use crate::formats::zip::parse_zip_entry_name;
@@ -435,7 +437,7 @@ fn list_tar(
     config: &SecurityConfig<Validated>,
     listing: &mut ListPass<'_, '_>,
 ) -> Result<ArchiveManifest> {
-    let stream = open_tar_stream(archive_path, codec, config.max_decoder_memory)?;
+    let stream = open_tar_stream(archive_path, codec, DecoderLimits::of(config))?;
     list_tar_stream(stream, codec, format, config, listing)
 }
 
@@ -669,7 +671,7 @@ pub(crate) fn list_tar_reader<R: Read>(
 /// admission checks (encryption, method, declared sizes) and the structural
 /// census, so listing does not repeat them.
 pub(crate) fn list_zip_reader<R: Read + Seek>(
-    archive: &mut ZipArchive<R>,
+    archive: &mut AdmittedZip<'_, R>,
     config: &SecurityConfig<Validated>,
     listing: &mut ListPass<'_, '_>,
 ) -> Result<ArchiveManifest> {
@@ -1407,7 +1409,12 @@ mod tests {
         let zip_bytes = create_zip_with_symlink("link", "target.txt");
         let mut archive = ZipArchive::new(Cursor::new(zip_bytes)).unwrap();
         let config = SecurityConfig::default().validate().expect("valid config");
-        let manifest = list_zip_reader(&mut archive, &config, &mut ListPass::strict()).unwrap();
+        let manifest = list_zip_reader(
+            &mut archive.check_admission(&config).unwrap(),
+            &config,
+            &mut ListPass::strict(),
+        )
+        .unwrap();
 
         assert_eq!(manifest.total_entries(), 1);
         assert_eq!(
@@ -2675,7 +2682,11 @@ mod tests {
         let zip_bytes = create_zip_with_symlink("link", "foo\0bar");
         let mut archive = ZipArchive::new(Cursor::new(zip_bytes)).unwrap();
         let config = SecurityConfig::default().validate().expect("valid config");
-        let result = list_zip_reader(&mut archive, &config, &mut ListPass::strict());
+        let result = list_zip_reader(
+            &mut archive.check_admission(&config).unwrap(),
+            &config,
+            &mut ListPass::strict(),
+        );
         match result {
             Err(ArchiveError::SecurityViolation { reason, .. }) => {
                 assert_eq!(reason, "symlink target contains null bytes");
@@ -2695,7 +2706,11 @@ mod tests {
         let zip_bytes = create_zip_with_symlink("link", "");
         let mut archive = ZipArchive::new(Cursor::new(zip_bytes)).unwrap();
         let config = SecurityConfig::default().validate().expect("valid config");
-        let result = list_zip_reader(&mut archive, &config, &mut ListPass::strict());
+        let result = list_zip_reader(
+            &mut archive.check_admission(&config).unwrap(),
+            &config,
+            &mut ListPass::strict(),
+        );
         match result {
             Err(ArchiveError::SecurityViolation { reason, .. }) => {
                 assert_eq!(reason, "symlink target is empty");
@@ -3026,8 +3041,12 @@ mod tests {
             .with_allow_absolute_paths(true)
             .validate()
             .unwrap();
-        let manifest = list_zip_reader(&mut archive, &config, &mut ListPass::preflight(None))
-            .expect("the pre-flight must let a NUL-byte ZIP entry path through");
+        let manifest = list_zip_reader(
+            &mut archive.check_admission(&config).unwrap(),
+            &config,
+            &mut ListPass::preflight(None),
+        )
+        .expect("the pre-flight must let a NUL-byte ZIP entry path through");
 
         assert_eq!(manifest.total_entries(), 1);
         assert!(
@@ -3166,7 +3185,11 @@ mod tests {
             .with_max_total_size(u64::MAX)
             .validate()
             .expect("valid config");
-        let result = list_zip_reader(&mut archive, &config, &mut ListPass::strict());
+        let result = list_zip_reader(
+            &mut archive.check_admission(&config).unwrap(),
+            &config,
+            &mut ListPass::strict(),
+        );
         assert_matches!(
             result,
             Err(ArchiveError::QuotaExceeded {
@@ -3310,13 +3333,21 @@ mod tests {
         let mut archive = ZipArchive::new(Cursor::new(zip_bytes.clone())).unwrap();
         let strict = SecurityConfig::default().validate().unwrap();
         assert_matches!(
-            list_zip_reader(&mut archive, &strict, &mut ListPass::strict()),
+            list_zip_reader(
+                &mut archive.check_admission(&strict).unwrap(),
+                &strict,
+                &mut ListPass::strict()
+            ),
             Err(ArchiveError::SecurityViolation { .. })
         );
 
         let mut archive = ZipArchive::new(Cursor::new(zip_bytes)).unwrap();
-        let manifest =
-            list_zip_reader(&mut archive, &strict, &mut ListPass::preflight(None)).unwrap();
+        let manifest = list_zip_reader(
+            &mut archive.check_admission(&strict).unwrap(),
+            &strict,
+            &mut ListPass::preflight(None),
+        )
+        .unwrap();
         assert_matches!(
             &manifest.entries()[0].kind,
             ManifestEntryKind::Symlink {
@@ -3342,8 +3373,12 @@ mod tests {
 
         let mut archive = ZipArchive::new(Cursor::new(bytes)).unwrap();
         let config = SecurityConfig::default().validate().unwrap();
-        let manifest =
-            list_zip_reader(&mut archive, &config, &mut ListPass::preflight(None)).unwrap();
+        let manifest = list_zip_reader(
+            &mut archive.check_admission(&config).unwrap(),
+            &config,
+            &mut ListPass::preflight(None),
+        )
+        .unwrap();
         assert_matches!(
             &manifest.entries()[0].kind,
             ManifestEntryKind::Symlink {

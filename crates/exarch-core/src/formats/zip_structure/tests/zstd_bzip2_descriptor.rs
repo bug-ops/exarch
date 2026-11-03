@@ -182,8 +182,18 @@ fn honest_bzip2_and_zstd_descriptor_entries_pass_every_operation() {
     }
 }
 
+fn assert_decoder_memory_refusal<T: std::fmt::Debug>(result: &crate::Result<T>, label: &str) {
+    assert_matches!(
+        result,
+        Err(ArchiveError::QuotaExceeded {
+            resource: QuotaResource::DecoderMemory { .. }
+        }),
+        "{label}"
+    );
+}
+
 #[test]
-fn a_zstd_window_log_of_27_is_accepted_and_28_refused_by_census_and_extraction() {
+fn a_zstd_window_log_of_27_is_accepted_and_28_refused_with_a_typed_error_everywhere() {
     for layout in LAYOUTS {
         for (log, accepted) in [(27, true), (28, false)] {
             let data = zstd_frame(PAYLOAD, Some(log));
@@ -201,21 +211,26 @@ fn a_zstd_window_log_of_27_is_accepted_and_28_refused_by_census_and_extraction()
             )
             .unwrap();
             assert_eq!(matches!(end, StreamEnd::At(_)), accepted, "{label}");
-            assert_eq!(
-                extract_to_temp(built.bytes.clone(), ZipConsistencyPolicy::Ignore).is_ok(),
-                accepted,
-                "extraction alone, {label}"
-            );
-            assert_eq!(
-                extract_to_temp(built.bytes.clone(), ZipConsistencyPolicy::Enforce).is_ok(),
-                accepted,
-                "{label}"
-            );
-            if matches!(layout, Layout::KnownSize) {
-                assert_eq!(findings_of(&built).is_empty(), accepted, "{label}");
+            for policy in [ZipConsistencyPolicy::Ignore, ZipConsistencyPolicy::Enforce] {
+                let extracted = extract_to_temp(built.bytes.clone(), policy);
+                let listed = open_bytes(built.bytes.clone()).list(&config(policy));
+                let verified = open_bytes(built.bytes.clone())
+                    .verify(&config(policy), &VerificationOptions::default());
+                if accepted {
+                    extracted.unwrap();
+                    listed.unwrap();
+                    assert!(verified.is_ok(), "{label}");
+                } else {
+                    assert_decoder_memory_refusal(&extracted, &label);
+                    assert_decoder_memory_refusal(&listed, &label);
+                    assert_decoder_memory_refusal(&verified, &label);
+                }
+            }
+            if accepted {
+                assert!(findings_of(&built).is_empty(), "{label}");
                 assert_eq!(
-                    plain_verify_status(built.bytes) == VerificationStatus::Pass,
-                    accepted,
+                    plain_verify_status(built.bytes),
+                    VerificationStatus::Pass,
                     "{label}"
                 );
             }
@@ -277,5 +292,108 @@ fn a_hidden_header_is_refused_when_the_recheck_allowance_is_spent() {
                 .any(|f| matches!(f, ZipInconsistency::DescriptorOverrun { .. })),
             "method {method}: {found:?}"
         );
+    }
+}
+
+fn config_with_memory(policy: ZipConsistencyPolicy, memory: u64) -> SecurityConfig<Validated> {
+    SecurityConfig::default()
+        .with_zip_consistency(policy)
+        .with_max_decoder_memory(memory)
+        .validate()
+        .unwrap()
+}
+
+fn zstd_entry_with_window(log: u32) -> BuiltZip {
+    let data = zstd_frame(PAYLOAD, Some(log));
+    RawZip::new(vec![entry(Layout::KnownSize, ZSTD, PAYLOAD, data)]).build()
+}
+
+fn extract_with(
+    archive: &mut ZipArchive<Cursor<Vec<u8>>>,
+    config: &SecurityConfig<Validated>,
+) -> crate::Result<()> {
+    let temp = TempDir::new().unwrap();
+    archive
+        .extract(
+            temp.path(),
+            config,
+            &ExtractionOptions::default(),
+            &mut NoopProgress,
+        )
+        .map(|_| ())
+}
+
+const MIB: u64 = 1 << 20;
+
+#[test]
+fn the_census_does_not_decode_a_zstd_window_above_the_limit_it_runs_under() {
+    let built = zstd_entry_with_window(27);
+
+    let permissive = open_bytes(built.bytes.clone());
+    assert_eq!(permissive.structure().zstd_census_decodes(), 1);
+
+    let strict = config_with_memory(ZipConsistencyPolicy::Enforce, MIB);
+    let mut archive = ZipArchive::for_config(Cursor::new(built.bytes), &strict).unwrap();
+    assert_eq!(archive.structure().zstd_census_decodes(), 0);
+    assert!(archive.structure().findings().is_empty());
+    assert_decoder_memory_refusal(&extract_with(&mut archive, &strict), "extract");
+    assert_decoder_memory_refusal(&archive.list(&strict), "list");
+    assert_decoder_memory_refusal(
+        &archive.verify(&strict, &VerificationOptions::default()),
+        "verify",
+    );
+}
+
+#[test]
+fn a_window_the_census_skipped_is_not_admitted_by_a_looser_config_under_enforce() {
+    let built = zstd_entry_with_window(21);
+    let strict = config_with_memory(ZipConsistencyPolicy::Enforce, MIB);
+    let looser = config_with_memory(ZipConsistencyPolicy::Enforce, 4 * MIB);
+
+    let mut archive = ZipArchive::for_config(Cursor::new(built.bytes), &strict).unwrap();
+    assert_eq!(archive.structure().zstd_census_decodes(), 0);
+    assert_matches!(
+        extract_with(&mut archive, &looser),
+        Err(ArchiveError::InvalidConfiguration { .. })
+    );
+    assert_matches!(
+        archive.list(&looser),
+        Err(ArchiveError::InvalidConfiguration { .. })
+    );
+    assert_decoder_memory_refusal(&extract_with(&mut archive, &strict), "strict");
+}
+
+#[test]
+fn a_looser_config_after_new_or_under_ignore_admits_the_window() {
+    let built = zstd_entry_with_window(21);
+    let looser = config_with_memory(ZipConsistencyPolicy::Enforce, 4 * MIB);
+    let mut opened_default = open_bytes(built.bytes.clone());
+    extract_with(&mut opened_default, &looser).unwrap();
+
+    let ignore = config_with_memory(ZipConsistencyPolicy::Ignore, MIB);
+    let mut opened_strict = ZipArchive::for_config(Cursor::new(built.bytes), &ignore).unwrap();
+    let looser_ignore = config_with_memory(ZipConsistencyPolicy::Ignore, 4 * MIB);
+    extract_with(&mut opened_strict, &looser_ignore).unwrap();
+}
+
+#[test]
+fn the_windows_are_judged_at_the_power_of_two_boundary_of_the_limit() {
+    for log in [12u32, 16, 20] {
+        let built = zstd_entry_with_window(log);
+        let at = 1u64 << log;
+        for (memory, accepted) in [(at, true), (at - 1, false), (at + at / 2, true)] {
+            for policy in [ZipConsistencyPolicy::Ignore, ZipConsistencyPolicy::Enforce] {
+                let config = config_with_memory(policy, memory);
+                let mut archive =
+                    ZipArchive::for_config(Cursor::new(built.bytes.clone()), &config).unwrap();
+                let label = format!("log {log} memory {memory} {policy:?}");
+                let extracted = extract_with(&mut archive, &config);
+                if accepted {
+                    extracted.expect(&label);
+                } else {
+                    assert_decoder_memory_refusal(&extracted, &label);
+                }
+            }
+        }
     }
 }

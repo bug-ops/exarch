@@ -49,6 +49,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **BREAKING:** ZIP plain verify, list and extract refuse an entry hidden behind the stream end of a bzip2 or zstd data-descriptor entry (#848).
 - Core: extraction lends the pinned destination root to top-level entries instead of reopening it per entry (#848).
 - Node: docs no longer say the gzip CRC is unchecked (#848).
+- **BREAKING:** `max_decoder_memory` bounds the zstd window of TAR and ZIP (largest power of two at or below the limit, at most 128 MiB), and `list`, `verify` and `extract` refuse a ZIP whose zstd entry declares a larger window with `QuotaExceeded`; legacy (pre-v0.8) zstd frames are no longer decoded (#856).
+- **BREAKING:** gzip members and bzip2 streams beyond `SecurityConfig::with_compressed_member_allowance` plus one per 16 KiB of output are refused with `QuotaExceeded { CompressedMembers }`; `SecurityConfigFields` gains `compressed_member_allowance` (#856).
+- **BREAKING:** `ArchiveError::TarTrailer(TarTrailerRefusal)` replaces `InvalidArchive` and `SecurityViolation` for over-cap, corrupt and truncated compressed TAR tails; binding and JSON kinds are unchanged, `context()` is `None` (#856).
+- Node: `signal` also aborts `Uint8Array` calls at the next archive read and at each progress callback (#856).
+- Tests: WinRAR-produced ZIPs (header shape only) in the ZIP corpus (#856).
+- Build: `lzma-rust2` is held at 0.23 so one LZMA2 decoder is linked; dependabot ignores 0.24 until the next `sevenz-rust2` release (#856).
 
 ### Fixed
 

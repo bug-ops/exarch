@@ -4,6 +4,7 @@ pub mod io_context;
 pub mod messages;
 pub mod redaction;
 pub mod tar_ambiguity;
+pub mod tar_trailer;
 pub mod types;
 pub mod zip_inconsistency;
 
@@ -17,6 +18,8 @@ pub use tar_ambiguity::TarExtensionKind;
 pub use tar_ambiguity::TarHeaderField;
 pub use tar_ambiguity::TarNonRegularKind;
 pub use tar_ambiguity::TarPathKey;
+pub use tar_trailer::TarTrailerRefusal;
+pub use tar_trailer::TrailerCorruption;
 pub use types::ArchiveError;
 pub use types::CompressionRatio;
 pub use types::PartialWrites;

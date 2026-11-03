@@ -411,6 +411,29 @@ impl std::fmt::Display for DecoderMemoryExceeded {
 
 impl std::error::Error for DecoderMemoryExceeded {}
 
+/// Marker error raised when a gzip or bzip2 stream starts more members than
+/// its allowance admits. Recovered via [`budget_violation`] and converted into
+/// `QuotaExceeded { CompressedMembers }`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompressedMembersExceeded {
+    /// The member that was refused, counting from one.
+    pub members: u64,
+    /// The most members the stream could have started at that point.
+    pub allowance: u64,
+}
+
+impl std::fmt::Display for CompressedMembersExceeded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "compressed member {} exceeds the allowance of {}",
+            self.members, self.allowance
+        )
+    }
+}
+
+impl std::error::Error for CompressedMembersExceeded {}
+
 /// Classifies a stream error raised while decoding or reading an archive.
 ///
 /// Walks the error chain (`get_ref()` through each `io::Error`, `source()`
@@ -435,6 +458,14 @@ pub fn budget_violation(e: &io::Error) -> Option<crate::ArchiveError> {
         if let Some(exceeded) = err.downcast_ref::<DecoderMemoryExceeded>() {
             return Some(crate::ArchiveError::QuotaExceeded {
                 resource: crate::QuotaResource::DecoderMemory { max: exceeded.max },
+            });
+        }
+        if let Some(exceeded) = err.downcast_ref::<CompressedMembersExceeded>() {
+            return Some(crate::ArchiveError::QuotaExceeded {
+                resource: crate::QuotaResource::CompressedMembers {
+                    members: exceeded.members,
+                    allowance: exceeded.allowance,
+                },
             });
         }
         current = err.downcast_ref::<io::Error>().map_or_else(

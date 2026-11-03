@@ -215,6 +215,7 @@ impl<S: IntoSource> MemoryJob<S> {
         let (report, sink) = run_with_optional_progress(
             progress,
             dispatch,
+            self.data.abort_handle(),
             |progress| self.extract(progress),
             |source, _| ProgressCallbackError::MemoryExtractionCallback { source },
         )?;
@@ -463,9 +464,9 @@ pub fn create_archive_to_bytes_sync(
 /// * `format` - The archive format; detected from the leading bytes if omitted
 /// * `signal` - Optional `AbortSignal`. Aborting rejects with `ABORT_ERR` (an
 ///   `AbortError`, `cause` is `signal.reason`) and frees the worker. The abort
-///   is noticed when the job starts and while it waits for JavaScript (an
-///   `AsyncIterable` chunk or its close); a `Uint8Array` archive is processed
-///   to completion once started and then resolves normally
+///   is noticed when the job starts, while it waits for JavaScript (an
+///   `AsyncIterable` chunk or its close), at every read of a `Uint8Array`
+///   archive and, for the `WithProgress` variants, at every progress callback
 ///
 /// # Returns
 ///

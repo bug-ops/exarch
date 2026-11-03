@@ -243,7 +243,7 @@ SO THAT link escapes, entries under files and overwrite conflicts are found with
 | `Cafe.txt` and `cafe.txt` on macOS or Windows host | `NameCollision` Medium (two files) |
 | Two empty directories folding equal | Low `NameCollision`, not counted by `security_status()`; if either later gains an entry it is reported at its real severity |
 | TAR stream without an end-of-archive marker, integrity requested | Gap reason `NoEndMarker`, integrity `Incomplete` |
-| Compressed TAR with more than the trailer cap after the end marker, integrity requested | `SecurityViolation` relaxable by `max_tar_metadata_bytes`, not a gap; plain `verify` does not read the tail |
+| Compressed TAR with more than the trailer cap after the end marker, integrity requested | `ArchiveError::TarTrailer(OverCap)` (reported as `SecurityViolation`, relaxable by `max_tar_metadata_bytes`), not a gap; plain `verify` does not read the tail |
 | Solid 7z with `allow_solid_archives` off, integrity requested | Gap reason `SolidPolicy`, integrity `Incomplete` |
 
 ## 7. Success Criteria

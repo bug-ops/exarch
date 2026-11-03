@@ -95,6 +95,7 @@ mod report;
 mod stream;
 mod utils;
 
+use abort::AbortHandle;
 use config::CreationConfig;
 use config::ExtractionOptions;
 use config::SecurityConfig;
@@ -757,7 +758,7 @@ fn run_create_with_optional_progress(
                 })
         },
         |tsfn| {
-            let mut callback = NodeProgressAdapter::new(tsfn, dispatch);
+            let mut callback = NodeProgressAdapter::new(tsfn, dispatch, AbortHandle::NONE);
             let result = exarch_core::create_archive_with_progress(
                 output_path,
                 sources,
@@ -1147,7 +1148,8 @@ fn run_extract_with_optional_progress(
             })
         },
         |tsfn| {
-            let mut callback = NodeProgressAdapter::new(tsfn, ProgressDispatch::Awaited);
+            let mut callback =
+                NodeProgressAdapter::new(tsfn, ProgressDispatch::Awaited, AbortHandle::NONE);
             let result = exarch_core::extract_archive_with_options_and_progress(
                 archive_path,
                 output_dir,
@@ -1193,6 +1195,7 @@ struct NodeProgressAdapter {
     current_entry_bytes: i64,
     total: usize,
     callback_error: Option<Error>,
+    abort: AbortHandle,
 }
 
 /// Runs `run` with the JS callback `progress` (or a no-op reporter when absent)
@@ -1205,13 +1208,14 @@ struct NodeProgressAdapter {
 fn run_with_optional_progress<T>(
     progress: Option<ThreadsafeFunction<(String, i64, i64, i64)>>,
     dispatch: ProgressDispatch,
+    abort: AbortHandle,
     run: impl FnOnce(&mut dyn exarch_core::ProgressCallback) -> CoreResult<T>,
     over_success: impl FnOnce(Error, T) -> ProgressCallbackError,
 ) -> CoreResult<T> {
     let Some(tsfn) = progress else {
         return run(&mut exarch_core::NoopProgress);
     };
-    let mut adapter = NodeProgressAdapter::new(tsfn, dispatch);
+    let mut adapter = NodeProgressAdapter::new(tsfn, dispatch, abort);
     let result = run(&mut adapter);
     match (result, adapter.into_callback_error()) {
         (Ok(value), None) => Ok(value),
@@ -1242,8 +1246,13 @@ enum ProgressDispatch {
 }
 
 impl NodeProgressAdapter {
-    fn new(tsfn: ThreadsafeFunction<(String, i64, i64, i64)>, dispatch: ProgressDispatch) -> Self {
+    fn new(
+        tsfn: ThreadsafeFunction<(String, i64, i64, i64)>,
+        dispatch: ProgressDispatch,
+        abort: AbortHandle,
+    ) -> Self {
         Self {
+            abort,
             tsfn,
             dispatch,
             current_entry_bytes: 0,
@@ -1261,7 +1270,7 @@ impl NodeProgressAdapter {
 
 impl exarch_core::ProgressCallback for NodeProgressAdapter {
     fn on_entry_start(&mut self, path: &std::path::Path, total: usize, current: usize) {
-        if self.callback_error.is_some() {
+        if self.callback_error.is_some() || self.abort.check().is_err() {
             return;
         }
         self.current_entry_bytes = 0;

@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 use crate::closed_enum::closed_enum;
 use crate::error::ArchiveError;
+use crate::error::TarTrailerRefusal;
 use crate::error::ZipInconsistency;
 use crate::formats::detect::ArchiveType;
 use crate::inspection::manifest::ArchiveEntry;
@@ -670,6 +671,24 @@ fn high_invalid_archive(message: String) -> (IssueSeverity, IssueCategory, Strin
     (IssueSeverity::High, IssueCategory::InvalidArchive, message)
 }
 
+/// The issue of a TAR header or stream-tail refusal.
+fn tar_framing_issue(error: &ArchiveError) -> (IssueSeverity, IssueCategory, String) {
+    match error {
+        ArchiveError::TarAmbiguity(finding) => {
+            high_invalid_archive(format!("Invalid archive: ambiguous TAR header: {finding}"))
+        }
+        ArchiveError::TarTrailer(refusal @ TarTrailerRefusal::OverCap { .. }) => (
+            IssueSeverity::High,
+            IssueCategory::SecurityPolicy,
+            format!("Security violation: {}", refusal.reason()),
+        ),
+        ArchiveError::TarTrailer(refusal) => {
+            high_invalid_archive(format!("Invalid archive: {}", refusal.reason()))
+        }
+        other => high_invalid_archive(other.to_string()),
+    }
+}
+
 impl VerificationIssue {
     /// The one Low-severity security finding: two directories that merge
     /// without either holding an entry, which changes nothing on disk.
@@ -742,9 +761,7 @@ impl VerificationIssue {
                 IssueCategory::InvalidArchive,
                 format!("Invalid archive: {msg}"),
             ),
-            ArchiveError::TarAmbiguity(finding) => {
-                high_invalid_archive(format!("Invalid archive: ambiguous TAR header: {finding}"))
-            }
+            ArchiveError::TarAmbiguity(_) | ArchiveError::TarTrailer(_) => tar_framing_issue(error),
             ArchiveError::SecurityViolation { reason, .. } => (
                 IssueSeverity::High,
                 IssueCategory::SecurityPolicy,

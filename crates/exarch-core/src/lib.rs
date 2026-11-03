@@ -92,6 +92,8 @@ pub use error::TarExtensionKind;
 pub use error::TarHeaderField;
 pub use error::TarNonRegularKind;
 pub use error::TarPathKey;
+pub use error::TarTrailerRefusal;
+pub use error::TrailerCorruption;
 pub use error::ZipBombDetails;
 pub use error::ZipBombScope;
 pub use error::ZipEntryIndex;

@@ -19,7 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Core: `ArchiveError::ffi_kind()` is public, with `InvalidArchiveSubCode` and `SecurityViolationSubCode` naming the TAR ambiguity and TAR trailer refusals (#865).
 - Python: `sub_code` attribute on `InvalidArchiveError` and `SecurityViolationError`; Node: `subCode` property with typings; CLI `--json`: `error.sub_code` (#865).
 - Core: `DecodeReuse`, `ReuseLimit` and `ExtractionOptions::decode_reuse` keep the deflate output of the ZIP structure check so extraction decodes an entry once (#857, #PR).
-- CLI: `extract --decode-reuse <off|memory|temp-file>`, default `memory` (256 MiB; peak RSS 265 MiB on a 300 MiB deflate ZIP against 5 MiB with `off` or `temp-file`) (#857, #PR).
+- CLI: `extract --decode-reuse <off|memory|temp-file>`, default `memory` up to 256 MiB (#857, #PR).
 - Core: `extract_reader_to_callback` and the typed `CallbackError<E>`; the Python and Node callback extractions use them (#860, #PR).
 - Core: `ZipBombScope::SkippedEntries` (#863, #PR).
 
@@ -66,8 +66,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Dependencies: `windows-sys` 0.61 is a direct dependency of `exarch-core` on Windows, with a Dependabot ignore for 0.62 and later (#865).
 - CI: the clippy job runs on `windows-latest` as well, and `EXARCH_REQUIRE_PRIVILEGED_TESTS` makes the mount-point test mandatory there (#865).
 - **BREAKING:** `list_archive_for_extraction` takes a `DecodeReuse`, and the library default `Memory(32 MiB)` keeps deflate output only up to that size (#857, #PR).
-- Core: kept ZIP output is clamped to the smallest of the limit, `max_decoder_memory` and `max_total_size`, and entries over `max_file_size` or `max_compression_ratio` are never kept (#857, #PR).
-- Core: CLI ZIP extraction with the default `--decode-reuse` is within 10% of the pre-#837 baseline (11/100/300 MB fixtures 0.93x/1.07x/1.08x); bzip2/zstd entries, in-memory extraction and the library default above 32 MiB still decode twice (#866); ZIP list and verify keep the decode cost of the #837 check (#857, #PR).
+- Core: kept ZIP output is clamped to `max_decoder_memory` and `max_total_size`, and entries over `max_file_size` or `max_compression_ratio` are not kept (#857, #PR).
+- Core: ZIP extraction decodes deflate entries once; bzip2/zstd, in-memory extraction and the library default above 32 MiB still decode twice (#857, #866, #PR).
 - **BREAKING:** `MemoryEntry::Hardlink` is removed: callback closures receive `CallbackEntry`, so `MemorySink::into_entries` can no longer hold a hardlink (#859, #PR).
 - **BREAKING:** `SafePath`, `SafeSymlink`, `ValidatedFile`, `PendingFile`, `ValidatedSymlink`, `ValidatedHardlink` and `ValidationContext` gain a defaulted type parameter, `ExtractTarget` gains `type Parent`, and `DestDir::join_path` is removed (breaking against v0.8.0) (#861, #PR).
 - **BREAKING:** `TarNonRegularKind` displays lowercase and `with_compressed_member_allowance` takes a `NonZeroU64` (#862, #PR).

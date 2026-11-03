@@ -1076,6 +1076,7 @@ pub fn budgeted_tar_entries<R: Read>(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use std::assert_matches;
     use std::io::Cursor;
 
     #[test]
@@ -1364,8 +1365,9 @@ mod tests {
         let err = result
             .err()
             .expect("the long-name record exceeds the 512-byte budget");
-        assert!(
-            matches!(err, crate::ArchiveError::SecurityViolation { .. }),
+        assert_matches!(
+            err,
+            crate::ArchiveError::SecurityViolation { .. },
             "got: {err:?}"
         );
     }
@@ -1587,8 +1589,9 @@ mod tests {
             "the cumulative synthetic budget must trip before every entry is drained, not \
              silently allow all of them",
         );
-        assert!(
-            matches!(err, crate::ArchiveError::SecurityViolation { .. }),
+        assert_matches!(
+            err,
+            crate::ArchiveError::SecurityViolation { .. },
             "must be recognizable as a budget violation, got: {err:?}"
         );
         assert!(
@@ -1642,8 +1645,9 @@ mod tests {
             "many sub-cap synthetic contributions must still sum past the cumulative budget, \
              not silently drain in full",
         );
-        assert!(
-            matches!(err, crate::ArchiveError::SecurityViolation { .. }),
+        assert_matches!(
+            err,
+            crate::ArchiveError::SecurityViolation { .. },
             "must be recognizable as a budget violation, got: {err:?}"
         );
         assert!(

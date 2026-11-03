@@ -72,6 +72,18 @@ pub fn validate_entry_compression(
     }
 }
 
+/// Whether an entry of `uncompressed_size` bytes from `compressed_size` bytes
+/// is within `max_ratio`, by the same rule as [`validate_compression_ratio`].
+pub(crate) fn ratio_admitted(compressed_size: u64, uncompressed_size: u64, max_ratio: f64) -> bool {
+    check_ratio(
+        ZipBombScope::Entry,
+        compressed_size,
+        uncompressed_size,
+        max_ratio,
+    )
+    .is_ok()
+}
+
 fn check_ratio(
     scope: ZipBombScope,
     compressed_size: u64,

@@ -115,6 +115,7 @@ use super::zip::ZipMethod;
 use super::zip::admit_zip_entry;
 use super::zip::is_password_required;
 use super::zip_reuse::RetainKey;
+use super::zip_reuse::ReusePlan;
 use super::zip_reuse::ReuseStore;
 use super::zip_tail::Compressed;
 use super::zip_tail::StreamEnd;
@@ -128,7 +129,6 @@ use super::zstd_window::ZstdWindowLog;
 use super::zstd_window::ZstdWindows;
 use super::zstd_window::walk as walk_zstd_windows;
 use crate::ArchiveError;
-use crate::DecodeReuse;
 use crate::Result;
 use crate::ZipConsistencyPolicy;
 use crate::error::CentralRecordOrdinal;
@@ -734,7 +734,7 @@ pub(super) fn open_with<R: Read + Seek>(
     checks: StreamChecks,
     quota: u64,
     census_window: ZstdWindowLog,
-    reuse: DecodeReuse,
+    reuse: ReusePlan,
 ) -> Result<(ZipReader<Shared<R>>, ZipStructure)> {
     open_chunked(
         reader,
@@ -1251,7 +1251,7 @@ struct ChunkSizes {
     /// archive declares and `census_window` once they are known.
     zstd_census: CensusZstd,
     /// Whether the census keeps the output it decodes of deflate entries.
-    reuse: DecodeReuse,
+    reuse: ReusePlan,
 }
 
 /// Whether the census decodes the zstd entries of an archive.
@@ -1286,7 +1286,7 @@ impl ChunkSizes {
         stream_checks: StreamChecks::Run,
         census_window: ZstdWindowLog::LIBZSTD_DEFAULT,
         zstd_census: CensusZstd::Decode,
-        reuse: DecodeReuse::Off,
+        reuse: ReusePlan::OFF,
     };
 }
 

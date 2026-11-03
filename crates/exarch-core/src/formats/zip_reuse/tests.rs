@@ -23,12 +23,16 @@ fn limit(bytes: u64) -> ReuseLimit {
     ReuseLimit::new(NonZeroU64::new(bytes).unwrap())
 }
 
+fn plan(mode: DecodeReuse) -> ReusePlan {
+    ReusePlan::of(mode, &SecurityConfig::default().validate().unwrap())
+}
+
 fn key_of(data: &[u8]) -> RetainKey {
     let mut crc = Crc::new();
     crc.update(data);
     RetainKey {
         data_start: 30,
-        compressed: 10,
+        compressed: data.len() as u64,
         size: data.len() as u64,
         crc32: crc.sum(),
     }
@@ -41,7 +45,7 @@ fn capture_all(store: &mut ReuseStore, key: RetainKey, data: &[u8]) {
 }
 
 fn spooled(max: u64) -> ReuseStore {
-    ReuseStore::new(DecodeReuse::TempFile(limit(max))).unwrap()
+    ReuseStore::new(plan(DecodeReuse::TempFile(limit(max)))).unwrap()
 }
 
 fn replayed(store: &ReuseStore, key: &RetainKey) -> io::Result<Vec<u8>> {
@@ -52,7 +56,7 @@ fn replayed(store: &ReuseStore, key: &RetainKey) -> io::Result<Vec<u8>> {
 
 fn stores() -> [ReuseStore; 2] {
     [
-        ReuseStore::new(DecodeReuse::Memory(limit(1 << 20))).unwrap(),
+        ReuseStore::new(plan(DecodeReuse::Memory(limit(1 << 20)))).unwrap(),
         spooled(1 << 20),
     ]
 }
@@ -121,7 +125,7 @@ fn an_entry_that_decoded_to_another_size_is_not_kept() {
 #[test]
 fn an_entry_over_the_limit_is_dropped_and_releases_its_bytes() {
     for mut store in [
-        ReuseStore::new(DecodeReuse::Memory(limit(64))).unwrap(),
+        ReuseStore::new(plan(DecodeReuse::Memory(limit(64)))).unwrap(),
         spooled(64),
     ] {
         let data = vec![7u8; 200];
@@ -197,7 +201,7 @@ fn replay_of_short_bytes_fails_with_an_unexpected_end() {
 
 #[test]
 fn a_store_that_cannot_be_made_keeps_nothing() {
-    assert!(ReuseStore::new(DecodeReuse::Off).is_none());
+    assert!(ReuseStore::new(plan(DecodeReuse::Off)).is_none());
 }
 
 struct Counting<R> {
@@ -417,4 +421,52 @@ fn a_source_fault_while_opening_keeps_its_errno() {
         }
     }
     assert!(seen, "no read fault surfaced as an I/O error");
+}
+
+#[test]
+fn an_entry_the_limits_would_refuse_is_not_captured() {
+    for mut store in stores() {
+        let data = vec![0u8; 4096];
+        let bomb = RetainKey {
+            compressed: 4,
+            ..key_of(&data)
+        };
+        assert!(store.capture(bomb).is_none(), "ratio");
+
+        let config = SecurityConfig::default()
+            .with_max_file_size(1024)
+            .validate()
+            .unwrap();
+        let mut small =
+            ReuseStore::new(ReusePlan::of(DecodeReuse::Memory(limit(1 << 20)), &config)).unwrap();
+        assert!(small.capture(key_of(&data)).is_none(), "max_file_size");
+    }
+}
+
+#[test]
+fn a_capture_stops_once_it_passes_the_declared_size() {
+    for mut store in stores() {
+        let data = b"x".repeat(100);
+        let key = key_of(&data);
+        let mut capture = store.capture(key).unwrap();
+        capture.write_all(&data).unwrap();
+        capture.write_all(&data).unwrap();
+        capture.finish(200);
+        assert!(store.open(&key).is_none());
+        assert_eq!(store.used(), 0);
+    }
+}
+
+#[test]
+fn the_limit_follows_the_decoder_memory_of_the_config() {
+    let config = SecurityConfig::default()
+        .with_max_decoder_memory(1024)
+        .validate()
+        .unwrap();
+    let plan = ReusePlan::of(DecodeReuse::Memory(ReuseLimit::MAX), &config);
+    let mut store = ReuseStore::new(plan).unwrap();
+    let data = b"y".repeat(2048);
+    assert!(store.capture(key_of(&data)).is_none());
+    let fits = b"y".repeat(512);
+    assert!(store.capture(key_of(&fits)).is_some());
 }

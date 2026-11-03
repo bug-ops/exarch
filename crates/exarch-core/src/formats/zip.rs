@@ -165,6 +165,7 @@ use super::target::HostTarget;
 use super::target::Tally;
 use super::traits::ArchiveFormat;
 use super::zip_reuse::RetainKey;
+use super::zip_reuse::ReusePlan;
 use super::zip_reuse::ReuseStore;
 use super::zip_structure;
 use super::zip_structure::Shared;
@@ -613,7 +614,7 @@ impl<R: Read + Seek> ZipArchive<R> {
             checks,
             config.max_total_size,
             ZstdWindowLog::of(config),
-            reuse,
+            ReusePlan::of(reuse, config),
         )?;
         Ok(Self { inner, structure })
     }

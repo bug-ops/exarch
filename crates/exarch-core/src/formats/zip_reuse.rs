@@ -31,8 +31,54 @@ use flate2::Crc;
 
 use super::zip::ZIP_INVALID_CHECKSUM;
 use crate::DecodeReuse;
+use crate::SecurityConfig;
+use crate::config::Validated;
+use crate::security::zipbomb::ratio_admitted;
 
 const SPOOL_BUFFER: usize = 64 * 1024;
+
+/// A [`DecodeReuse`] mode with the limits of the config it runs under.
+///
+/// The kept bytes never exceed the smallest of the mode's limit,
+/// `max_decoder_memory` and `max_total_size`, and an entry that the size or
+/// ratio limits would refuse at extraction is not kept at all.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ReusePlan {
+    mode: DecodeReuse,
+    limit: u64,
+    max_entry: u64,
+    max_ratio: f64,
+}
+
+impl ReusePlan {
+    /// Keep nothing.
+    pub(crate) const OFF: Self = Self {
+        mode: DecodeReuse::Off,
+        limit: 0,
+        max_entry: 0,
+        max_ratio: 0.0,
+    };
+
+    /// `mode` under the limits of `config`.
+    pub(crate) fn of(mode: DecodeReuse, config: &SecurityConfig<Validated>) -> Self {
+        let configured = match mode {
+            DecodeReuse::Off => 0,
+            DecodeReuse::Memory(limit) | DecodeReuse::TempFile(limit) => limit.get(),
+        };
+        Self {
+            mode,
+            limit: configured
+                .min(config.max_decoder_memory)
+                .min(config.max_total_size),
+            max_entry: config.max_file_size,
+            max_ratio: config.max_compression_ratio,
+        }
+    }
+
+    fn admits(&self, key: &RetainKey) -> bool {
+        key.size <= self.max_entry && ratio_admitted(key.compressed, key.size, self.max_ratio)
+    }
+}
 
 /// What identifies an entry's decoded output: where its compressed data is,
 /// what the central directory declares for it, and its checksum.
@@ -73,6 +119,7 @@ enum Backend {
 
 /// Decoded deflate output of a census, by entry.
 pub struct ReuseStore {
+    plan: ReusePlan,
     limit: u64,
     used: u64,
     backend: Backend,
@@ -105,17 +152,18 @@ const fn open_spool() -> Option<File> {
 impl ReuseStore {
     /// A store for `mode`, or `None` when nothing is to be kept (`Off`, or a
     /// temporary file that cannot be had).
-    pub(crate) fn new(mode: DecodeReuse) -> Option<Self> {
-        let (limit, backend) = match mode {
-            DecodeReuse::Memory(limit) => (limit.get(), Backend::Memory),
-            DecodeReuse::TempFile(limit) => {
+    pub(crate) fn new(plan: ReusePlan) -> Option<Self> {
+        let backend = match plan.mode {
+            DecodeReuse::Memory(_) => Backend::Memory,
+            DecodeReuse::TempFile(_) => {
                 let writer = BufWriter::with_capacity(SPOOL_BUFFER, open_spool()?);
-                (limit.get(), Backend::Spool(SpoolFile { writer, len: 0 }))
+                Backend::Spool(SpoolFile { writer, len: 0 })
             }
             DecodeReuse::Off => return None,
         };
         Some(Self {
-            limit,
+            plan,
+            limit: plan.limit,
             used: 0,
             backend,
             index: HashMap::new(),
@@ -134,6 +182,7 @@ impl ReuseStore {
     /// cannot be kept: no store left, nothing to keep, or no room for it.
     pub(crate) fn capture(&mut self, key: RetainKey) -> Option<Capture<'_>> {
         if key.size == 0
+            || !self.plan.admits(&key)
             || self.index.contains_key(&key)
             || self.used.checked_add(key.size)? > self.limit
         {
@@ -274,7 +323,9 @@ impl Write for Capture<'_> {
             return Ok(buf.len());
         }
         let n = buf.len() as u64;
-        if self.store.used.saturating_add(n) > self.store.limit {
+        if self.written.saturating_add(n) > self.key.size
+            || self.store.used.saturating_add(n) > self.store.limit
+        {
             self.release();
             return Ok(buf.len());
         }

@@ -1182,8 +1182,9 @@ def extract_archive_to_callback(
     Entries are provisional: each is delivered as soon as it is verified, so a
     later failure refuses the archive after earlier entries were already
     delivered. Treat the results as final only once the call returned. The
-    gzip CRC of a .tar.gz is never checked on extraction, so a corrupt
-    compressed stream can deliver altered data without an error.
+    gzip CRC of a .tar.gz is verified after the end-of-archive marker, so a
+    corrupt compressed stream refuses the archive only after its entries were
+    delivered.
 
     A "symlink" entry's target is spelled as the archive stores it, relative
     to the link. A "hardlink" entry is delivered by reference after every other

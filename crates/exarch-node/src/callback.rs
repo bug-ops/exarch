@@ -25,16 +25,19 @@ use napi_derive::napi;
 use tokio::runtime::Handle;
 
 use crate::CoreResult;
+use crate::abort::AbortBinding;
+use crate::abort::Aborted;
 use crate::config::ExtractionOptions;
 use crate::config::SecurityConfig;
 use crate::error::Failure;
 use crate::error::ProgressCallbackError;
 use crate::error::run_sync;
-use crate::error::spawn_blocking_promise;
+use crate::error::spawn_blocking_promise_with;
 use crate::memory::MemoryEntry;
 use crate::memory::PathModel;
 use crate::report::ArchiveType;
 use crate::report::ExtractionReport;
+use crate::stream::AbortableSource;
 use crate::stream::ArchiveSource;
 use crate::stream::IntoSource;
 
@@ -187,8 +190,9 @@ impl CallbackJob {
 /// Entries are provisional: each is delivered as soon as it is verified, so a
 /// later failure refuses the archive after earlier entries were already
 /// delivered. Treat the results as final only once the promise resolved. The
-/// gzip CRC of a `.tar.gz` is never checked on extraction, so a corrupt
-/// compressed stream can deliver altered data without an error.
+/// gzip trailer (CRC and length) of a `.tar.gz` is checked once the archive has
+/// been read to its end, so a corrupt compressed stream is refused, but only
+/// after the entries before it were delivered.
 ///
 /// A `'symlink'` entry's `target` is spelled as the archive stores it,
 /// relative to the link. A `'hardlink'` entry is delivered by reference after
@@ -208,6 +212,13 @@ impl CallbackJob {
 /// * `options` - Optional `ExtractionOptions` (`atomic` is not supported)
 /// * `pathModel` - `'host'` (default) or `'portable'`
 /// * `format` - The archive format; detected from the leading bytes if omitted
+/// * `signal` - Optional `AbortSignal`. Aborting rejects with `ABORT_ERR` (an
+///   `AbortError`, `cause` is `signal.reason`) and frees the worker, even if
+///   `onEntry` returned a promise that never settles or the iterable stalls.
+///   The abort is noticed when the job starts and while it waits for JavaScript
+///   (an `AsyncIterable` chunk or its close, the promise `onEntry` returned); a
+///   `Uint8Array` archive is otherwise processed without interruption. A
+///   pending `onEntry` call is abandoned, not cancelled
 ///
 /// # Returns
 ///
@@ -218,7 +229,9 @@ impl CallbackJob {
 /// Rejects with `ENTRY_CALLBACK_ERROR` and the thrown value as `cause` when
 /// `onEntry` throws or rejects (a non-object is wrapped in an `Error` whose
 /// `cause` is the primitive), with `STREAM_ERROR` when the iterable throws,
-/// and with the errors of `extractArchive` otherwise.
+/// with `ABORT_ERR` if `signal` fired, and with the errors of `extractArchive`
+/// otherwise. A `signal` that is not an `AbortSignal` throws a `TypeError`
+/// synchronously.
 ///
 /// # Examples
 ///
@@ -229,7 +242,11 @@ impl CallbackJob {
 /// });
 /// ```
 #[napi]
-#[allow(clippy::needless_pass_by_value)]
+#[allow(
+    clippy::needless_pass_by_value,
+    clippy::too_many_arguments,
+    reason = "napi arguments are owned and the JS signature is positional, `signal` last"
+)]
 pub fn extract_archive_to_callback<'env>(
     env: &'env Env,
     #[napi(ts_arg_type = "Uint8Array | AsyncIterable<Uint8Array>")] data: ArchiveSource,
@@ -238,21 +255,29 @@ pub fn extract_archive_to_callback<'env>(
     options: Option<&ExtractionOptions>,
     path_model: Option<PathModel>,
     format: Option<ArchiveType>,
+    #[napi(ts_arg_type = "AbortSignalLike | undefined | null")] signal: Option<AbortBinding>,
 ) -> Result<PromiseRaw<'env, ExtractionReport>> {
     let job = CallbackJob::new(config, options, path_model, format);
     let EntryCallback(tsfn) = on_entry;
+    let (data, detach) = AbortableSource::bind(data, signal);
+    let abort = data.abort();
 
-    spawn_blocking_promise(
+    spawn_blocking_promise_with(
         env,
         "archive extraction to a callback",
         move || {
             job.run(data, |entry| {
-                Handle::current()
-                    .block_on(async { tsfn.call_async_catch(entry).await?.await })
-                    .map_err(|source| ProgressCallbackError::EntryCallback { source }.into())
+                let delivered = Handle::current()
+                    .block_on(abort.race(async { tsfn.call_async_catch(entry).await?.await }));
+                match delivered {
+                    Ok(Ok(())) => Ok(()),
+                    Ok(Err(source)) => Err(ProgressCallbackError::EntryCallback { source }.into()),
+                    Err(Aborted) => Err(abort.failure()),
+                }
             })
         },
         |report| Ok(ExtractionReport::from(report)),
+        move |env| detach.run(env),
     )
 }
 

@@ -4,14 +4,17 @@
 
 #![allow(clippy::unwrap_used)]
 
+use std::assert_matches;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 
+use exarch_core::ArchiveError;
 use exarch_core::ErrorCode;
 use exarch_core::ExtractionOptions;
 use exarch_core::ManifestEntryKind;
 use exarch_core::SecurityConfig;
+use exarch_core::TarAmbiguity;
 use exarch_core::extract_archive;
 use exarch_core::extract_archive_with_options;
 use exarch_core::list_archive;
@@ -237,6 +240,10 @@ fn trailing_slash_regular_entry_with_payload_is_refused_everywhere() {
         "{extracted}"
     );
     assert_eq!(listed.error_code(), ErrorCode::InvalidArchive, "{listed}");
+    assert_matches!(
+        listed,
+        ArchiveError::TarAmbiguity(TarAmbiguity::DirectoryNamedPayload { size: 5, .. })
+    );
     assert_eq!(
         verified.error_code(),
         ErrorCode::InvalidArchive,

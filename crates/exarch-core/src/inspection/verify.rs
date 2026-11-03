@@ -351,7 +351,10 @@ pub fn verify_archive<P: AsRef<Path>>(
 /// CRC, zstd frames without a content checksum) report the weaker guarantee
 /// that the data was complete and decodable. "Decode to EOF" means the
 /// decoder's EOF: every gzip member, bzip2 stream and xz stream is decoded, and
-/// a non-zero tail after the last one is an error.
+/// a non-zero tail after the last one is an error. The tail after a TAR
+/// end-of-archive marker is bounded by `max_tar_metadata_bytes` (at least
+/// 1 MiB), not by the decompression budget; a longer one is refused. Without
+/// integrity, verification stops at the marker and never reads the tail.
 ///
 /// `INCOMPLETE` means part of the payload was not verified (decompression
 /// budget, a resource limit, a solid 7z archive while `allow_solid_archives`

@@ -132,6 +132,8 @@ use crate::ProgressCallback;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::SinkOptions;
+use crate::TarAmbiguity;
+use crate::TarNonRegularKind;
 use crate::VerificationOptions;
 use crate::config::Validated;
 use crate::inspection::integrity::TarTrailer;
@@ -194,6 +196,8 @@ pub struct TarArchive<R: Read> {
     /// to `extract()`/`list()`) and only then handed to `tar::Archive`, so the
     /// cap is applied fresh with whatever `SecurityConfig` each call uses.
     inner: Option<R>,
+    /// How the bytes after the end-of-archive marker are checked.
+    trailer: TarTrailer,
 }
 
 impl<R: Read> TarArchive<R> {
@@ -201,6 +205,15 @@ impl<R: Read> TarArchive<R> {
     ///
     /// The reader will be consumed during extraction. For file-based
     /// archives, wrap in `BufReader` for optimal performance.
+    ///
+    /// The codec behind `reader` is unknown, so extraction, listing and
+    /// verification read it to its end after the end-of-archive marker. That
+    /// surfaces a decoder's trailer check (a gzip CRC mismatch) as an error,
+    /// but a reader that never ends blocks, and more than the trailer cap
+    /// (`max_tar_metadata_bytes`, at least 1 MiB) of bytes after the marker is
+    /// refused even for a plain TAR. The path-based APIs and
+    /// [`ArchiveReader`](crate::ArchiveReader) know the codec and leave a
+    /// plain TAR's tail alone.
     ///
     /// # Performance Notes
     ///
@@ -223,8 +236,14 @@ impl<R: Read> TarArchive<R> {
     /// ```
     #[must_use]
     pub fn new(reader: R) -> Self {
+        Self::with_trailer(reader, TarTrailer::DrainToDecoderEof)
+    }
+
+    /// Creates a handler that checks the tail of the stream as `trailer` says.
+    pub(crate) const fn with_trailer(reader: R, trailer: TarTrailer) -> Self {
         Self {
             inner: Some(reader),
+            trailer,
         }
     }
 
@@ -249,7 +268,7 @@ impl<R: Read> TarArchive<R> {
             ArchiveType::Tar,
             config,
             listing,
-            TarTrailer::DrainToDecoderEof,
+            self.trailer,
         )
     }
 
@@ -424,9 +443,13 @@ impl<R: Read> TarArchive<R> {
             }
         }
 
-        // TODO(#838): the compressed stream's trailer (gzip CRC/ISIZE) is never
-        // read after the end marker, so corrupt data extracts silently.
-        if let Err(e) = entries.finish() {
+        let finished = entries.finish();
+        drop(entries);
+        let finished = finished.and_then(|()| {
+            self.trailer
+                .enforce(&mut inner_archive.into_inner(), config)
+        });
+        if let Err(e) = finished {
             ctx.push_skip_warnings();
             return Err(ArchiveError::partial_or(
                 std::mem::take(ctx.tally.report),
@@ -686,25 +709,23 @@ pub(crate) fn tar_node(kind: tar::EntryType) -> Result<TarNode> {
 ///
 /// # Errors
 ///
-/// Returns [`ArchiveError::InvalidArchive`] for a file-typed entry with a
-/// directory name that carries a payload: reading it as a directory would drop
-/// its data without a trace, and reading it as a file would create a name the
-/// archive declares to be a directory. A directory, symbolic link or hard link
-/// that declares a payload is refused for the same reason: readers disagree on
-/// whether the payload blocks are data or further headers.
+/// Returns [`TarAmbiguity::DirectoryNamedPayload`] for a file-typed entry with
+/// a directory name that carries a payload: reading it as a directory would
+/// drop its data without a trace, and reading it as a file would create a name
+/// the archive declares to be a directory. A directory, symbolic link or hard
+/// link that declares a payload is refused as
+/// [`TarAmbiguity::NonRegularPayload`] for the same reason: readers disagree
+/// on whether the payload blocks are data or further headers.
 pub(crate) fn effective_entry_type<R: Read>(entry: &tar::Entry<'_, R>) -> Result<tar::EntryType> {
     let kind = entry.header().entry_type();
-    if entry.size() != 0
-        && matches!(
-            kind,
-            tar::EntryType::Directory | tar::EntryType::Symlink | tar::EntryType::Link
-        )
-    {
-        return Err(ArchiveError::InvalidArchive(format!(
-            "{kind:?} entry declares a {} byte payload: {}",
-            entry.size(),
-            String::from_utf8_lossy(&entry.path_bytes())
-        )));
+    if let (Some(kind), size @ 1..) = (TarNonRegularKind::of(kind), entry.size()) {
+        return Err(ArchiveError::TarAmbiguity(
+            TarAmbiguity::NonRegularPayload {
+                kind,
+                size,
+                path: String::from_utf8_lossy(&entry.path_bytes()).into_owned(),
+            },
+        ));
     }
     let is_file_typed = matches!(kind, tar::EntryType::Regular | tar::EntryType::Continuous);
     if !is_file_typed || !entry.path_bytes().ends_with(b"/") {
@@ -712,10 +733,12 @@ pub(crate) fn effective_entry_type<R: Read>(entry: &tar::Entry<'_, R>) -> Result
     }
     match entry.size() {
         0 => Ok(tar::EntryType::Directory),
-        size => Err(ArchiveError::InvalidArchive(format!(
-            "file entry with a directory name carries {size} bytes: {}",
-            String::from_utf8_lossy(&entry.path_bytes())
-        ))),
+        size => Err(ArchiveError::TarAmbiguity(
+            TarAmbiguity::DirectoryNamedPayload {
+                size,
+                path: String::from_utf8_lossy(&entry.path_bytes()).into_owned(),
+            },
+        )),
     }
 }
 

@@ -3,6 +3,18 @@
 /// <reference lib="es2018.asynciterable" />
 
 /**
+ * The part of an `AbortSignal` exarch uses. Declared structurally so it
+ * compiles with or without `lib.dom`; a real `AbortSignal` is assignable, and
+ * so is a signal from another realm, matching the runtime duck-type check.
+ */
+export interface AbortSignalLike {
+  readonly aborted: boolean
+  readonly reason?: unknown
+  addEventListener(type: 'abort', listener: () => void, options?: { once?: boolean }): void
+  removeEventListener(type: 'abort', listener: () => void): void
+}
+
+/**
  * Properties of an error raised by exarch-core.
  *
  * `message` is the human-readable description only; everything

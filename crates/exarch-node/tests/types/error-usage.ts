@@ -1,4 +1,6 @@
+import { listArchiveBytes } from '../../index'
 import type {
+  AbortSignalLike,
   ErrorCode,
   ExarchError,
   ExarchErrorPlain,
@@ -34,3 +36,17 @@ export const plainCode: ExarchErrorPlain['code'] = 'PROGRESS_CALLBACK_ERROR'
 export const rolledBackCode: ExarchErrorRolledBack['code'] = 'PROGRESS_CALLBACK_ERROR'
 
 export const quotaCode: ExarchErrorPlain['code'] = 'QUOTA_EXCEEDED'
+
+export function abortableCalls(data: Uint8Array): Promise<unknown>[] {
+  const controller = new AbortController()
+  const structural: AbortSignalLike = {
+    aborted: false,
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  }
+  return [
+    listArchiveBytes(data, null, null, controller.signal),
+    listArchiveBytes(data, null, null, structural),
+    listArchiveBytes(data, null, null, undefined),
+  ]
+}

@@ -3,6 +3,18 @@
 /// <reference lib="es2018.asynciterable" />
 
 /**
+ * The part of an `AbortSignal` exarch uses. Declared structurally so it
+ * compiles with or without `lib.dom`; a real `AbortSignal` is assignable, and
+ * so is a signal from another realm, matching the runtime duck-type check.
+ */
+export interface AbortSignalLike {
+  readonly aborted: boolean
+  readonly reason?: unknown
+  addEventListener(type: 'abort', listener: () => void, options?: { once?: boolean }): void
+  removeEventListener(type: 'abort', listener: () => void): void
+}
+
+/**
  * Properties of an error raised by exarch-core.
  *
  * `message` is the human-readable description only; everything
@@ -888,7 +900,7 @@ export interface CreationReport {
  * Every core error code, plus `PROGRESS_CALLBACK_ERROR` for a progress
  * callback that threw over a successful operation.
  */
-export type ErrorCode = 'PATH_TRAVERSAL' | 'SYMLINK_ESCAPE' | 'HARDLINK_ESCAPE' | 'ZIP_BOMB' | 'ZIP_INCONSISTENCY' | 'QUOTA_EXCEEDED' | 'SECURITY_VIOLATION' | 'INVALID_ARCHIVE' | 'IO_ERROR' | 'INVALID_PERMISSIONS' | 'SOURCE_NOT_FOUND' | 'SOURCE_NOT_ACCESSIBLE' | 'OUTPUT_EXISTS' | 'INVALID_COMPRESSION_LEVEL' | 'UNKNOWN_FORMAT' | 'INVALID_CONFIGURATION' | 'PROGRESS_CALLBACK_ERROR' | 'STREAM_ERROR' | 'ENTRY_CALLBACK_ERROR'
+export type ErrorCode = 'PATH_TRAVERSAL' | 'SYMLINK_ESCAPE' | 'HARDLINK_ESCAPE' | 'ZIP_BOMB' | 'ZIP_INCONSISTENCY' | 'QUOTA_EXCEEDED' | 'SECURITY_VIOLATION' | 'INVALID_ARCHIVE' | 'IO_ERROR' | 'INVALID_PERMISSIONS' | 'SOURCE_NOT_FOUND' | 'SOURCE_NOT_ACCESSIBLE' | 'OUTPUT_EXISTS' | 'INVALID_COMPRESSION_LEVEL' | 'UNKNOWN_FORMAT' | 'INVALID_CONFIGURATION' | 'PROGRESS_CALLBACK_ERROR' | 'STREAM_ERROR' | 'ENTRY_CALLBACK_ERROR' | 'ABORT_ERR'
 
 /**
  * Extract an archive to the specified directory (async).
@@ -1020,8 +1032,9 @@ export declare function extractArchiveSync(archivePath: string, outputDir: strin
  * Entries are provisional: each is delivered as soon as it is verified, so a
  * later failure refuses the archive after earlier entries were already
  * delivered. Treat the results as final only once the promise resolved. The
- * gzip CRC of a `.tar.gz` is never checked on extraction, so a corrupt
- * compressed stream can deliver altered data without an error.
+ * gzip trailer (CRC and length) of a `.tar.gz` is checked once the archive has
+ * been read to its end, so a corrupt compressed stream is refused, but only
+ * after the entries before it were delivered.
  *
  * A `'symlink'` entry's `target` is spelled as the archive stores it,
  * relative to the link. A `'hardlink'` entry is delivered by reference after
@@ -1041,6 +1054,13 @@ export declare function extractArchiveSync(archivePath: string, outputDir: strin
  * * `options` - Optional `ExtractionOptions` (`atomic` is not supported)
  * * `pathModel` - `'host'` (default) or `'portable'`
  * * `format` - The archive format; detected from the leading bytes if omitted
+ * * `signal` - Optional `AbortSignal`. Aborting rejects with `ABORT_ERR` (an
+ *   `AbortError`, `cause` is `signal.reason`) and frees the worker, even if
+ *   `onEntry` returned a promise that never settles or the iterable stalls.
+ *   The abort is noticed when the job starts and while it waits for JavaScript
+ *   (an `AsyncIterable` chunk or its close, the promise `onEntry` returned); a
+ *   `Uint8Array` archive is otherwise processed without interruption. A
+ *   pending `onEntry` call is abandoned, not cancelled
  *
  * # Returns
  *
@@ -1051,7 +1071,9 @@ export declare function extractArchiveSync(archivePath: string, outputDir: strin
  * Rejects with `ENTRY_CALLBACK_ERROR` and the thrown value as `cause` when
  * `onEntry` throws or rejects (a non-object is wrapped in an `Error` whose
  * `cause` is the primitive), with `STREAM_ERROR` when the iterable throws,
- * and with the errors of `extractArchive` otherwise.
+ * with `ABORT_ERR` if `signal` fired, and with the errors of `extractArchive`
+ * otherwise. A `signal` that is not an `AbortSignal` throws a `TypeError`
+ * synchronously.
  *
  * # Examples
  *
@@ -1062,7 +1084,7 @@ export declare function extractArchiveSync(archivePath: string, outputDir: strin
  * });
  * ```
  */
-export declare function extractArchiveToCallback(data: Uint8Array | AsyncIterable<Uint8Array>, onEntry: (entry: MemoryEntry) => void | Promise<void>, config?: SecurityConfig | undefined | null, options?: ExtractionOptions | undefined | null, pathModel?: PathModel | undefined | null, format?: ArchiveType | undefined | null): Promise<ExtractionReport>
+export declare function extractArchiveToCallback(data: Uint8Array | AsyncIterable<Uint8Array>, onEntry: (entry: MemoryEntry) => void | Promise<void>, config?: SecurityConfig | undefined | null, options?: ExtractionOptions | undefined | null, pathModel?: PathModel | undefined | null, format?: ArchiveType | undefined | null, signal?: AbortSignalLike | undefined | null): Promise<ExtractionReport>
 
 /**
  * Extract an archive held in memory, handing every verified entry to a
@@ -1114,6 +1136,11 @@ export declare function extractArchiveToCallbackSync(data: Uint8Array, onEntry: 
  *   config's `maxTotalSize`
  * * `pathModel` - `'host'` (default) or `'portable'`
  * * `format` - The archive format; detected from the leading bytes if omitted
+ * * `signal` - Optional `AbortSignal`. Aborting rejects with `ABORT_ERR` (an
+ *   `AbortError`, `cause` is `signal.reason`) and frees the worker. The abort
+ *   is noticed when the job starts and while it waits for JavaScript (an
+ *   `AsyncIterable` chunk or its close); a `Uint8Array` archive is processed
+ *   to completion once started and then resolves normally
  *
  * # Returns
  *
@@ -1122,8 +1149,10 @@ export declare function extractArchiveToCallbackSync(data: Uint8Array, onEntry: 
  * # Errors
  *
  * Rejects with `INVALID_CONFIGURATION` for a `maxBytes` that is not a positive
- * whole number, `QUOTA_EXCEEDED` when a quota or `maxBytes` is exceeded, and
- * the errors of `extractArchive` otherwise.
+ * whole number, `QUOTA_EXCEEDED` when a quota or `maxBytes` is exceeded,
+ * `ABORT_ERR` if `signal` fired, and the errors of `extractArchive`
+ * otherwise. A `signal` that is not an `AbortSignal` throws a `TypeError`
+ * synchronously.
  *
  * # Examples
  *
@@ -1131,7 +1160,7 @@ export declare function extractArchiveToCallbackSync(data: Uint8Array, onEntry: 
  * const { entries } = await extractArchiveToMemory(fs.readFileSync('a.tar.gz'));
  * ```
  */
-export declare function extractArchiveToMemory(data: Uint8Array | AsyncIterable<Uint8Array>, config?: SecurityConfig | undefined | null, options?: ExtractionOptions | undefined | null, maxBytes?: number | undefined | null, pathModel?: PathModel | undefined | null, format?: ArchiveType | undefined | null): Promise<MemoryExtraction>
+export declare function extractArchiveToMemory(data: Uint8Array | AsyncIterable<Uint8Array>, config?: SecurityConfig | undefined | null, options?: ExtractionOptions | undefined | null, maxBytes?: number | undefined | null, pathModel?: PathModel | undefined | null, format?: ArchiveType | undefined | null, signal?: AbortSignalLike | undefined | null): Promise<MemoryExtraction>
 
 /**
  * Extract an archive held in memory into memory (sync).
@@ -1169,9 +1198,10 @@ export declare function extractArchiveToMemorySync(data: Uint8Array, config?: Se
  *
  * # Arguments
  *
- * The arguments of `extractArchiveToMemory`, then:
+ * The arguments of `extractArchiveToMemory` up to `format`, then:
  *
  * * `progress` - Optional progress callback
+ * * `signal` - Optional `AbortSignal`, as in `extractArchiveToMemory`
  *
  * # Returns
  *
@@ -1198,7 +1228,7 @@ export declare function extractArchiveToMemorySync(data: Uint8Array, config?: Se
  * );
  * ```
  */
-export declare function extractArchiveToMemoryWithProgress(data: Uint8Array | AsyncIterable<Uint8Array>, config?: SecurityConfig | undefined | null, options?: ExtractionOptions | undefined | null, maxBytes?: number | undefined | null, pathModel?: PathModel | undefined | null, format?: ArchiveType | undefined | null, progress?: (((err: Error | null, arg: [string, number, number, number]) => any)) | undefined | null): Promise<MemoryExtraction>
+export declare function extractArchiveToMemoryWithProgress(data: Uint8Array | AsyncIterable<Uint8Array>, config?: SecurityConfig | undefined | null, options?: ExtractionOptions | undefined | null, maxBytes?: number | undefined | null, pathModel?: PathModel | undefined | null, format?: ArchiveType | undefined | null, progress?: (((err: Error | null, arg: [string, number, number, number]) => any)) | undefined | null, signal?: AbortSignalLike | undefined | null): Promise<MemoryExtraction>
 
 /**
  * Extract an archive held in memory into memory with a progress callback
@@ -1412,6 +1442,11 @@ export declare function listArchive(archivePath: string, config?: SecurityConfig
  *   from a worker thread and closed (`return()`) however the call ends
  * * `config` - Optional `SecurityConfig` (uses secure defaults if omitted)
  * * `format` - The archive format; detected from the leading bytes if omitted
+ * * `signal` - Optional `AbortSignal`. Aborting rejects with `ABORT_ERR` (an
+ *   `AbortError`, `cause` is `signal.reason`) and frees the worker. The abort
+ *   is noticed when the job starts and while it waits for JavaScript (an
+ *   `AsyncIterable` chunk or its close); a `Uint8Array` archive is processed
+ *   to completion once started and then resolves normally
  *
  * # Returns
  *
@@ -1419,8 +1454,10 @@ export declare function listArchive(archivePath: string, config?: SecurityConfig
  *
  * # Errors
  *
- * Rejects with `UNKNOWN_FORMAT` if the format cannot be detected, and with
- * the errors of `listArchive` otherwise.
+ * Rejects with `UNKNOWN_FORMAT` if the format cannot be detected, with
+ * `ABORT_ERR` if `signal` fired, and with the errors of `listArchive`
+ * otherwise. A `signal` that is not an `AbortSignal` throws a `TypeError`
+ * synchronously.
  *
  * # Examples
  *
@@ -1428,7 +1465,7 @@ export declare function listArchive(archivePath: string, config?: SecurityConfig
  * const manifest = await listArchiveBytes(fs.readFileSync('archive.tar.gz'));
  * ```
  */
-export declare function listArchiveBytes(data: Uint8Array | AsyncIterable<Uint8Array>, config?: SecurityConfig | undefined | null, format?: ArchiveType | undefined | null): Promise<ArchiveManifest>
+export declare function listArchiveBytes(data: Uint8Array | AsyncIterable<Uint8Array>, config?: SecurityConfig | undefined | null, format?: ArchiveType | undefined | null, signal?: AbortSignalLike | undefined | null): Promise<ArchiveManifest>
 
 /**
  * List the contents of an archive held in memory, without extracting (sync).
@@ -1467,9 +1504,10 @@ export declare function listArchiveBytesSync(data: Uint8Array, config?: Security
  *
  * # Arguments
  *
- * The arguments of `listArchiveBytes`, then:
+ * The arguments of `listArchiveBytes` up to `format`, then:
  *
  * * `progress` - Optional progress callback
+ * * `signal` - Optional `AbortSignal`, as in `listArchiveBytes`
  *
  * # Returns
  *
@@ -1494,7 +1532,7 @@ export declare function listArchiveBytesSync(data: Uint8Array, config?: Security
  * );
  * ```
  */
-export declare function listArchiveBytesWithProgress(data: Uint8Array | AsyncIterable<Uint8Array>, config?: SecurityConfig | undefined | null, format?: ArchiveType | undefined | null, progress?: (((err: Error | null, arg: [string, number, number, number]) => any)) | undefined | null): Promise<ArchiveManifest>
+export declare function listArchiveBytesWithProgress(data: Uint8Array | AsyncIterable<Uint8Array>, config?: SecurityConfig | undefined | null, format?: ArchiveType | undefined | null, progress?: (((err: Error | null, arg: [string, number, number, number]) => any)) | undefined | null, signal?: AbortSignalLike | undefined | null): Promise<ArchiveManifest>
 
 /**
  * List the contents of an archive held in memory with a progress callback
@@ -1729,6 +1767,7 @@ export declare function verifyArchive(archivePath: string, config?: SecurityConf
  * * `config` - Optional `SecurityConfig` (uses secure defaults if omitted)
  * * `options` - Optional `VerificationOptions`
  * * `format` - The archive format; detected from the leading bytes if omitted
+ * * `signal` - Optional `AbortSignal`, observed as in `listArchiveBytes`
  *
  * # Returns
  *
@@ -1744,7 +1783,7 @@ export declare function verifyArchive(archivePath: string, config?: SecurityConf
  * const report = await verifyArchiveBytes(fs.readFileSync('archive.zip'));
  * ```
  */
-export declare function verifyArchiveBytes(data: Uint8Array | AsyncIterable<Uint8Array>, config?: SecurityConfig | undefined | null, options?: VerificationOptions | undefined | null, format?: ArchiveType | undefined | null): Promise<VerificationReport>
+export declare function verifyArchiveBytes(data: Uint8Array | AsyncIterable<Uint8Array>, config?: SecurityConfig | undefined | null, options?: VerificationOptions | undefined | null, format?: ArchiveType | undefined | null, signal?: AbortSignalLike | undefined | null): Promise<VerificationReport>
 
 /**
  * Verify the security of an archive held in memory (sync).
@@ -1785,9 +1824,10 @@ export declare function verifyArchiveBytesSync(data: Uint8Array, config?: Securi
  *
  * # Arguments
  *
- * The arguments of `verifyArchiveBytes`, then:
+ * The arguments of `verifyArchiveBytes` up to `format`, then:
  *
  * * `progress` - Optional progress callback
+ * * `signal` - Optional `AbortSignal`, as in `listArchiveBytes`
  *
  * # Returns
  *
@@ -1813,7 +1853,7 @@ export declare function verifyArchiveBytesSync(data: Uint8Array, config?: Securi
  * );
  * ```
  */
-export declare function verifyArchiveBytesWithProgress(data: Uint8Array | AsyncIterable<Uint8Array>, config?: SecurityConfig | undefined | null, options?: VerificationOptions | undefined | null, format?: ArchiveType | undefined | null, progress?: (((err: Error | null, arg: [string, number, number, number]) => any)) | undefined | null): Promise<VerificationReport>
+export declare function verifyArchiveBytesWithProgress(data: Uint8Array | AsyncIterable<Uint8Array>, config?: SecurityConfig | undefined | null, options?: VerificationOptions | undefined | null, format?: ArchiveType | undefined | null, progress?: (((err: Error | null, arg: [string, number, number, number]) => any)) | undefined | null, signal?: AbortSignalLike | undefined | null): Promise<VerificationReport>
 
 /**
  * Verify the security of an archive held in memory with a progress callback

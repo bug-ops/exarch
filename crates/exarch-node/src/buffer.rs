@@ -9,15 +9,17 @@ use napi_derive::napi;
 use crate::CoreResult;
 use crate::ProgressCallback;
 use crate::ProgressDispatch;
+use crate::abort::AbortBinding;
 use crate::config::SecurityConfig;
 use crate::config::VerificationOptions;
 use crate::error::ProgressCallbackError;
 use crate::error::run_sync;
-use crate::error::spawn_blocking_promise;
+use crate::error::spawn_blocking_promise_with;
 use crate::report::ArchiveManifest;
 use crate::report::ArchiveType;
 use crate::report::VerificationReport;
 use crate::run_with_optional_progress;
+use crate::stream::AbortableSource;
 use crate::stream::ArchiveSource;
 use crate::stream::IntoSource;
 use napi::threadsafe_function::ThreadsafeFunction;
@@ -102,6 +104,11 @@ fn verify_with_progress_core(
 ///   from a worker thread and closed (`return()`) however the call ends
 /// * `config` - Optional `SecurityConfig` (uses secure defaults if omitted)
 /// * `format` - The archive format; detected from the leading bytes if omitted
+/// * `signal` - Optional `AbortSignal`. Aborting rejects with `ABORT_ERR` (an
+///   `AbortError`, `cause` is `signal.reason`) and frees the worker. The abort
+///   is noticed when the job starts and while it waits for JavaScript (an
+///   `AsyncIterable` chunk or its close); a `Uint8Array` archive is processed
+///   to completion once started and then resolves normally
 ///
 /// # Returns
 ///
@@ -109,8 +116,10 @@ fn verify_with_progress_core(
 ///
 /// # Errors
 ///
-/// Rejects with `UNKNOWN_FORMAT` if the format cannot be detected, and with
-/// the errors of `listArchive` otherwise.
+/// Rejects with `UNKNOWN_FORMAT` if the format cannot be detected, with
+/// `ABORT_ERR` if `signal` fired, and with the errors of `listArchive`
+/// otherwise. A `signal` that is not an `AbortSignal` throws a `TypeError`
+/// synchronously.
 ///
 /// # Examples
 ///
@@ -124,14 +133,17 @@ pub fn list_archive_bytes<'env>(
     #[napi(ts_arg_type = "Uint8Array | AsyncIterable<Uint8Array>")] data: ArchiveSource,
     config: Option<&SecurityConfig>,
     format: Option<ArchiveType>,
+    #[napi(ts_arg_type = "AbortSignalLike | undefined | null")] signal: Option<AbortBinding>,
 ) -> Result<PromiseRaw<'env, ArchiveManifest>> {
     let config_owned: exarch_core::SecurityConfig = config.map_or_default(|c| c.as_core().clone());
+    let (data, detach) = AbortableSource::bind(data, signal);
 
-    spawn_blocking_promise(
+    spawn_blocking_promise_with(
         env,
         "archive listing",
         move || list_core(data, &config_owned, format),
         ArchiveManifest::try_from,
+        move |env| detach.run(env),
     )
 }
 
@@ -184,6 +196,7 @@ pub fn list_archive_bytes_sync(
 /// * `config` - Optional `SecurityConfig` (uses secure defaults if omitted)
 /// * `options` - Optional `VerificationOptions`
 /// * `format` - The archive format; detected from the leading bytes if omitted
+/// * `signal` - Optional `AbortSignal`, observed as in `listArchiveBytes`
 ///
 /// # Returns
 ///
@@ -206,15 +219,18 @@ pub fn verify_archive_bytes<'env>(
     config: Option<&SecurityConfig>,
     options: Option<&VerificationOptions>,
     format: Option<ArchiveType>,
+    #[napi(ts_arg_type = "AbortSignalLike | undefined | null")] signal: Option<AbortBinding>,
 ) -> Result<PromiseRaw<'env, VerificationReport>> {
     let config_owned: exarch_core::SecurityConfig = config.map_or_default(|c| c.as_core().clone());
     let options_owned: exarch_core::VerificationOptions = options.map_or_default(|o| *o.as_core());
+    let (data, detach) = AbortableSource::bind(data, signal);
 
-    spawn_blocking_promise(
+    spawn_blocking_promise_with(
         env,
         "archive verification",
         move || verify_core(data, &config_owned, options_owned, format),
         VerificationReport::try_from,
+        move |env| detach.run(env),
     )
 }
 
@@ -273,9 +289,10 @@ pub fn verify_archive_bytes_sync(
 ///
 /// # Arguments
 ///
-/// The arguments of `listArchiveBytes`, then:
+/// The arguments of `listArchiveBytes` up to `format`, then:
 ///
 /// * `progress` - Optional progress callback
+/// * `signal` - Optional `AbortSignal`, as in `listArchiveBytes`
 ///
 /// # Returns
 ///
@@ -310,11 +327,13 @@ pub fn list_archive_bytes_with_progress<'env>(
         ts_arg_type = "(((err: Error | null, arg: [string, number, number, number]) => any)) | undefined | null"
     )]
     progress: Option<ProgressCallback>,
+    #[napi(ts_arg_type = "AbortSignalLike | undefined | null")] signal: Option<AbortBinding>,
 ) -> Result<PromiseRaw<'env, ArchiveManifest>> {
     let config_owned: exarch_core::SecurityConfig = config.map_or_default(|c| c.as_core().clone());
     let progress = progress.map(|ProgressCallback(tsfn)| tsfn);
+    let (data, detach) = AbortableSource::bind(data, signal);
 
-    spawn_blocking_promise(
+    spawn_blocking_promise_with(
         env,
         "archive listing with progress",
         move || {
@@ -327,6 +346,7 @@ pub fn list_archive_bytes_with_progress<'env>(
             )
         },
         ArchiveManifest::try_from,
+        move |env| detach.run(env),
     )
 }
 
@@ -339,9 +359,10 @@ pub fn list_archive_bytes_with_progress<'env>(
 ///
 /// # Arguments
 ///
-/// The arguments of `verifyArchiveBytes`, then:
+/// The arguments of `verifyArchiveBytes` up to `format`, then:
 ///
 /// * `progress` - Optional progress callback
+/// * `signal` - Optional `AbortSignal`, as in `listArchiveBytes`
 ///
 /// # Returns
 ///
@@ -378,12 +399,14 @@ pub fn verify_archive_bytes_with_progress<'env>(
         ts_arg_type = "(((err: Error | null, arg: [string, number, number, number]) => any)) | undefined | null"
     )]
     progress: Option<ProgressCallback>,
+    #[napi(ts_arg_type = "AbortSignalLike | undefined | null")] signal: Option<AbortBinding>,
 ) -> Result<PromiseRaw<'env, VerificationReport>> {
     let config_owned: exarch_core::SecurityConfig = config.map_or_default(|c| c.as_core().clone());
     let options_owned: exarch_core::VerificationOptions = options.map_or_default(|o| *o.as_core());
     let progress = progress.map(|ProgressCallback(tsfn)| tsfn);
+    let (data, detach) = AbortableSource::bind(data, signal);
 
-    spawn_blocking_promise(
+    spawn_blocking_promise_with(
         env,
         "archive verification with progress",
         move || {
@@ -397,6 +420,7 @@ pub fn verify_archive_bytes_with_progress<'env>(
             )
         },
         VerificationReport::try_from,
+        move |env| detach.run(env),
     )
 }
 

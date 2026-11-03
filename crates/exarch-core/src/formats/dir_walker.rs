@@ -37,6 +37,42 @@ use crate::security::fs_view::ParentBlocker;
 use crate::security::fs_view::classify_link;
 use crate::types::SafePath;
 
+/// A directory handle that is either the pinned destination root, borrowed, or
+/// a handle the walk opened below it.
+///
+/// An entry directly in the destination needs no new descriptor: the root
+/// handle is already pinned, so lending it saves an `openat` and a `close` per
+/// top-level entry.
+#[derive(Debug)]
+pub enum DirRef<'r> {
+    /// The destination's pinned root handle, lent by the [`PinnedRoot`].
+    Root(&'r VettedDir),
+    /// A handle the walk opened below the root, owned by the caller.
+    Opened(VettedDir),
+}
+
+impl DirRef<'_> {
+    /// Returns an owned handle, reopening the root when this one is borrowed,
+    /// for callers that keep the directory beyond the borrow of the root.
+    pub(crate) fn into_owned(self) -> Result<VettedDir> {
+        match self {
+            Self::Root(root) => Ok(root.reopen()?),
+            Self::Opened(dir) => Ok(dir),
+        }
+    }
+}
+
+impl std::ops::Deref for DirRef<'_> {
+    type Target = VettedDir;
+
+    fn deref(&self) -> &VettedDir {
+        match self {
+            Self::Root(root) => root,
+            Self::Opened(dir) => dir,
+        }
+    }
+}
+
 /// What an existing symlink among the parent components may be.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LinkPolicy {
@@ -99,7 +135,7 @@ impl DirWalker {
     /// and an I/O error when a component is a file or cannot be created. A
     /// blocking component is reported against `rel` with the same text and
     /// category as `verify`.
-    pub(crate) fn ensure_dir(self, root: &PinnedRoot, rel: &SafePath) -> Result<VettedDir> {
+    pub(crate) fn ensure_dir<'r>(self, root: &'r PinnedRoot, rel: &SafePath) -> Result<DirRef<'r>> {
         let rel = rel.as_path();
         self.descend(root, rel, rel, Missing::Create, Links::Policy)
     }
@@ -111,11 +147,11 @@ impl DirWalker {
     ///
     /// Same as [`Self::ensure_dir`], plus `PathTraversal` when `rel` does not
     /// end in a normal name.
-    pub(crate) fn ensure_parent<'p>(
+    pub(crate) fn ensure_parent<'r, 'p>(
         self,
-        root: &PinnedRoot,
+        root: &'r PinnedRoot,
         rel: &'p SafePath,
-    ) -> Result<(VettedDir, Leaf<'p>)> {
+    ) -> Result<(DirRef<'r>, Leaf<'p>)> {
         let rel = rel.as_path();
         let (parent, leaf) = Leaf::split(rel)?;
         let dir = self.descend(root, parent, rel, Missing::Create, Links::Policy)?;
@@ -128,11 +164,11 @@ impl DirWalker {
     ///
     /// Same as [`Self::ensure_parent`]; a missing component is an I/O error of
     /// kind `NotFound`.
-    pub(crate) fn open_parent<'p>(
+    pub(crate) fn open_parent<'r, 'p>(
         self,
-        root: &PinnedRoot,
+        root: &'r PinnedRoot,
         rel: &'p SafePath,
-    ) -> Result<(VettedDir, Leaf<'p>)> {
+    ) -> Result<(DirRef<'r>, Leaf<'p>)> {
         let rel = rel.as_path();
         let (parent, leaf) = Leaf::split(rel)?;
         let dir = self.descend(root, parent, rel, Missing::Fail, Links::Policy)?;
@@ -146,26 +182,26 @@ impl DirWalker {
     /// # Errors
     ///
     /// Same as [`Self::open_parent`].
-    pub(crate) fn open_resolved_parent<'p>(
+    pub(crate) fn open_resolved_parent<'r, 'p>(
         self,
-        root: &PinnedRoot,
+        root: &'r PinnedRoot,
         rel: &'p Path,
-    ) -> Result<(VettedDir, Leaf<'p>)> {
+    ) -> Result<(DirRef<'r>, Leaf<'p>)> {
         let (parent, leaf) = Leaf::split(rel)?;
         let dir = self.descend(root, parent, rel, Missing::Fail, Links::Strict)?;
         Ok((dir, leaf))
     }
 
-    fn descend(
+    fn descend<'r>(
         self,
-        root: &PinnedRoot,
+        root: &'r PinnedRoot,
         dir: &Path,
         entry: &Path,
         missing: Missing,
         links: Links,
-    ) -> Result<VettedDir> {
+    ) -> Result<DirRef<'r>> {
         let mut walked = PathBuf::new();
-        let mut current: Option<VettedDir> = None;
+        let mut current: Option<DirRef<'r>> = None;
         for component in dir.components() {
             let Some(leaf) = Leaf::from_component(component) else {
                 if matches!(component, std::path::Component::CurDir) {
@@ -176,32 +212,29 @@ impl DirWalker {
                 });
             };
             walked.push(leaf.as_os_str());
-            let parent = current.as_ref().unwrap_or_else(|| root.dir());
+            let parent = current.as_deref().unwrap_or_else(|| root.dir());
             let next = self.step(root, parent, leaf, &walked, entry, missing, links)?;
             current = Some(next);
         }
-        match current {
-            Some(dir) => Ok(dir),
-            None => Ok(root.dir().reopen()?),
-        }
+        Ok(current.unwrap_or_else(|| DirRef::Root(root.dir())))
     }
 
     #[expect(
         clippy::too_many_arguments,
         reason = "the walk state is threaded through unchanged; a parameter struct adds indirection"
     )]
-    fn step(
+    fn step<'r>(
         self,
-        root: &PinnedRoot,
+        root: &'r PinnedRoot,
         parent: &VettedDir,
         leaf: Leaf<'_>,
         walked: &Path,
         entry: &Path,
         missing: Missing,
         links: Links,
-    ) -> Result<VettedDir> {
+    ) -> Result<DirRef<'r>> {
         let mut err = match parent.open_dir(leaf) {
-            Ok(dir) => return Ok(dir),
+            Ok(dir) => return Ok(DirRef::Opened(dir)),
             Err(e) => e,
         };
         if err.kind() == std::io::ErrorKind::NotFound && missing == Missing::Create {
@@ -211,7 +244,7 @@ impl DirWalker {
                 Err(e) => return Err(e.into()),
             }
             err = match parent.open_dir(leaf) {
-                Ok(dir) => return Ok(dir),
+                Ok(dir) => return Ok(DirRef::Opened(dir)),
                 Err(e) => e,
             };
         }
@@ -227,13 +260,13 @@ impl DirWalker {
     /// The link is resolved even under `Refuse`, to tell a link no policy
     /// admits from one `--allow-symlinks` would; resolving can trigger an
     /// automount lookup.
-    fn follow(
+    fn follow<'r>(
         self,
-        root: &PinnedRoot,
+        root: &'r PinnedRoot,
         walked: &Path,
         entry: &Path,
         links: Links,
-    ) -> Result<VettedDir> {
+    ) -> Result<DirRef<'r>> {
         if links == Links::Strict {
             return Err(ParentBlocker::Symlink.error(entry, walked));
         }
@@ -313,6 +346,65 @@ mod tests {
         dir.create_new(leaf, None).unwrap();
 
         assert!(dest.dest().as_path().join("f.txt").is_file());
+    }
+
+    #[test]
+    fn top_level_parent_borrows_the_root_and_nested_parent_opens_one() {
+        let (_root, dest, _) = dest_with_outside();
+        let walker = walker(false);
+
+        let (top, _) = walker.ensure_parent(&dest, &sp("f.txt")).unwrap();
+        let (nested, _) = walker.ensure_parent(&dest, &sp("d/f.txt")).unwrap();
+
+        assert_matches!(top, DirRef::Root(_));
+        assert_matches!(nested, DirRef::Opened(_));
+    }
+
+    #[test]
+    fn borrowed_root_stays_pinned_when_the_destination_path_is_swapped() {
+        let (root, dest, outside) = dest_with_outside();
+        let rel = sp("f.txt");
+        let (dir, leaf) = walker(false).ensure_parent(&dest, &rel).unwrap();
+        assert_matches!(dir, DirRef::Root(_));
+
+        let moved = root.path().join("moved");
+        fs::rename(dest.dest().as_path(), &moved).unwrap();
+        symlink(&outside, dest.dest().as_path()).unwrap();
+        dir.create_new(leaf, None).unwrap();
+
+        assert!(moved.join("f.txt").is_file());
+        assert!(!outside.join("f.txt").exists());
+    }
+
+    #[test]
+    fn planted_symlink_is_refused_with_the_borrowed_root() {
+        let (_root, dest, outside) = dest_with_outside();
+        symlink(&outside, dest.dest().as_path().join("planted")).unwrap();
+
+        let err = walker(true)
+            .ensure_parent(&dest, &sp("planted/f.txt"))
+            .map(|_| ())
+            .unwrap_err();
+
+        assert_matches!(err, ArchiveError::SymlinkEscape { .. }, "{err}");
+        assert!(!outside.join("f.txt").exists());
+    }
+
+    #[test]
+    fn into_owned_gives_a_usable_handle_for_both_variants() {
+        let (_root, dest, _) = dest_with_outside();
+        let walker = walker(false);
+
+        let (top_rel, nested_rel) = (sp("top.txt"), sp("d/n.txt"));
+        let (top, top_leaf) = walker.ensure_parent(&dest, &top_rel).unwrap();
+        let (nested, nested_leaf) = walker.ensure_parent(&dest, &nested_rel).unwrap();
+        let top = top.into_owned().unwrap();
+        let nested = nested.into_owned().unwrap();
+        top.create_new(top_leaf, None).unwrap();
+        nested.create_new(nested_leaf, None).unwrap();
+
+        assert!(dest.dest().as_path().join("top.txt").is_file());
+        assert!(dest.dest().as_path().join("d/n.txt").is_file());
     }
 
     #[test]

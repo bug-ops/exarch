@@ -34,6 +34,7 @@ mod non_regular_payload;
 mod stored_resume;
 mod streaming;
 mod xl_type;
+mod zstd_bzip2_descriptor;
 
 fn config(policy: ZipConsistencyPolicy) -> SecurityConfig<Validated> {
     SecurityConfig::default()

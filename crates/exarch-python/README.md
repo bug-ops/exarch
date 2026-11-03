@@ -167,8 +167,9 @@ file or an earlier hardlink (a chain is delivered link by link). With
 refers to the latest delivery; implicit parent directories are not delivered.
 Entries are provisional: each is delivered as soon as it is verified, so a later
 failure refuses the archive after earlier entries were already delivered. The
-gzip CRC of a `.tar.gz` is never checked on extraction, so a corrupt compressed
-stream can deliver altered data without an error.
+gzip CRC of a `.tar.gz` is verified after the end-of-archive marker, so a
+corrupt compressed stream refuses the archive only after its entries were
+delivered.
 
 ```python
 sizes = {}

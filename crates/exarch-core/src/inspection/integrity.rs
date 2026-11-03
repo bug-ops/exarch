@@ -25,6 +25,7 @@ use crate::copy::CopyBuffer;
 use crate::copy::CopyError;
 use crate::copy::copy_bounded;
 use crate::copy::declared_size_exceeded;
+use crate::formats::compression::CompressionCodec;
 use crate::formats::tar_metadata_limit::budget_violation;
 use crate::formats::zip::ZIP_DECLARED_SIZE_EXCEEDED;
 use crate::formats::zip::ZIP_INVALID_CHECKSUM;
@@ -138,12 +139,19 @@ impl DecodeFailure {
     /// Error returned when TAR entry content fails to decode: the scan stops,
     /// so no report can claim the uninspected entries are fine.
     pub fn into_tar_error(self, path: &Path) -> ArchiveError {
+        self.into_error(&format!("at {}", path.display()))
+    }
+
+    /// Error returned when the stream fails after the TAR end-of-archive
+    /// marker (a gzip CRC or ISIZE mismatch, a corrupt or truncated tail).
+    pub fn into_trailer_error(self) -> ArchiveError {
+        self.into_error("after the TAR end-of-archive marker")
+    }
+
+    fn into_error(self, location: &str) -> ArchiveError {
         match self {
             Self::Checksum | Self::Malformed(_) | Self::Truncated { .. } => {
-                ArchiveError::InvalidArchive(format!(
-                    "integrity check failed at {}: {self}",
-                    path.display()
-                ))
+                ArchiveError::InvalidArchive(format!("integrity check failed {location}: {self}"))
             }
             Self::DeclaredSizeOverrun { declared } => declared_size_exceeded(declared),
             Self::ResourceLimit(e) | Self::NotDecodable(e) => e,
@@ -169,13 +177,130 @@ pub enum Charge {
     Free,
 }
 
+/// Smallest number of bytes allowed after the TAR end-of-archive marker.
+///
+/// Covers the record padding of `tar -b 2048` (1 MiB), so an honest archive
+/// passes under a small `max_tar_metadata_bytes`.
+pub const MIN_TRAILER_CAP: u64 = 1024 * 1024;
+
+/// How many decoded bytes may follow the TAR end-of-archive marker.
+///
+/// Zeros count: they are decode work all the same. Built only from the
+/// validated config, so every mode applies the same rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TrailerCap(u64);
+
+impl TrailerCap {
+    /// `max_tar_metadata_bytes`, raised to [`MIN_TRAILER_CAP`].
+    #[must_use]
+    pub fn of(config: &SecurityConfig<Validated>) -> Self {
+        Self(config.max_tar_metadata_bytes.max(MIN_TRAILER_CAP))
+    }
+
+    /// The cap in bytes.
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+/// Why the bytes after the end-of-archive marker were refused.
+#[derive(Debug)]
+pub enum TrailerFault {
+    /// More than the cap followed the marker.
+    OverCap(TrailerCap),
+    /// The decoder failed while reading the tail.
+    Failed(DecodeFailure),
+}
+
+impl TrailerFault {
+    /// The refusal as an error; an over-cap tail is relaxable through
+    /// `max_tar_metadata_bytes` and names the effective cap.
+    pub fn into_error(self) -> ArchiveError {
+        match self {
+            Self::OverCap(cap) => ArchiveError::relaxable_violation(
+                crate::PolicySetting::MaxTarMetadataBytes,
+                format!(
+                    "more than {} bytes follow the TAR end-of-archive marker \
+                     (at least {MIN_TRAILER_CAP} bytes are always allowed)",
+                    cap.get()
+                ),
+            ),
+            Self::Failed(failure) => failure.into_trailer_error(),
+        }
+    }
+}
+
 /// How a TAR stream is checked after the entry loop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TarTrailer {
     /// Plain TAR: require one more byte, ignore anything after it.
     Probe,
-    /// Compressed (or unknown) stream: read to decoder EOF within the budget.
+    /// Compressed (or unknown) stream: read to decoder EOF within the
+    /// [`TrailerCap`], so the codec's own trailer (gzip CRC and ISIZE, xz
+    /// index, zstd checksum) is verified.
     DrainToDecoderEof,
+}
+
+impl TarTrailer {
+    /// The check for a stream decoded with `codec`; `None` is a plain TAR.
+    #[must_use]
+    pub const fn for_codec(codec: Option<CompressionCodec>) -> Self {
+        match codec {
+            Some(_) => Self::DrainToDecoderEof,
+            None => Self::Probe,
+        }
+    }
+
+    /// Reads the tail and returns how many bytes it held.
+    ///
+    /// # Errors
+    ///
+    /// [`TrailerFault::OverCap`] when more than `cap` bytes follow,
+    /// [`TrailerFault::Failed`] when the decoder fails.
+    pub fn drain<R: Read>(
+        self,
+        reader: &mut R,
+        cap: TrailerCap,
+        buffer: &mut CopyBuffer,
+    ) -> std::result::Result<u64, TrailerFault> {
+        match self {
+            Self::Probe => probe_one_byte(reader).map_err(TrailerFault::Failed),
+            Self::DrainToDecoderEof => {
+                let drained = copy_bounded(
+                    &mut reader.take(cap.get().saturating_add(1)),
+                    &mut io::sink(),
+                    buffer,
+                    None,
+                )
+                .map_err(|e| TrailerFault::Failed(DecodeFailure::from_copy(e, 0)))?;
+                if drained > cap.get() {
+                    return Err(TrailerFault::OverCap(cap));
+                }
+                Ok(drained)
+            }
+        }
+    }
+
+    /// Applies the check for extraction and strict listing: a plain TAR is
+    /// left alone, a compressed stream must read to its end within the cap.
+    ///
+    /// # Errors
+    ///
+    /// The refusal from [`TrailerFault::into_error`].
+    pub fn enforce<R: Read>(
+        self,
+        reader: &mut R,
+        config: &SecurityConfig<Validated>,
+    ) -> Result<()> {
+        if self == Self::Probe {
+            return Ok(());
+        }
+        let mut buffer = Box::new(CopyBuffer::new());
+        self.drain(reader, TrailerCap::of(config), &mut buffer)
+            .map(drop)
+            .map_err(TrailerFault::into_error)
+    }
 }
 
 /// Handle to one manifest entry's issue slot; only
@@ -363,43 +488,21 @@ impl<'c> IntegrityPass<'c> {
     ///
     /// A conforming archive always has bytes after the loop (the tar reader
     /// stops at the first zero block), so none left means the end marker is
-    /// missing. Failures inside the trailer are archive-level.
+    /// missing. A decoder failure inside the trailer is an archive-level
+    /// issue; a trailer longer than the [`TrailerCap`] refuses the archive.
     ///
     /// # Errors
     ///
-    /// Returns the I/O error of a failing disk read.
+    /// Returns the I/O error of a failing disk read, or the over-cap refusal.
     pub fn check_tar_trailer<R: Read>(&mut self, reader: &mut R, mode: TarTrailer) -> Result<()> {
-        let outcome = match mode {
-            TarTrailer::Probe => probe_one_byte(reader),
-            TarTrailer::DrainToDecoderEof => self.drain_to_decoder_eof(reader),
-        };
-        match outcome {
+        let cap = TrailerCap::of(self.config);
+        match mode.drain(reader, cap, &mut self.buffer) {
             Ok(0) => self.count_unverified(UnverifiedReason::NoEndMarker, 1),
             Ok(_) => {}
-            Err(TrailerError::OverBudget) => self.count_unverified(UnverifiedReason::OverBudget, 1),
-            Err(TrailerError::Failed(failure)) => self.record_failure(None, failure)?,
+            Err(fault @ TrailerFault::OverCap(_)) => return Err(fault.into_error()),
+            Err(TrailerFault::Failed(failure)) => self.record_failure(None, failure)?,
         }
         Ok(())
-    }
-
-    fn drain_to_decoder_eof<R: Read>(
-        &mut self,
-        reader: &mut R,
-    ) -> std::result::Result<u64, TrailerError> {
-        let allowance = self.budget_remaining.saturating_add(1);
-        let drained = copy_bounded(
-            &mut reader.take(allowance),
-            &mut io::sink(),
-            &mut self.buffer,
-            None,
-        )
-        .map_err(|e| TrailerError::Failed(DecodeFailure::from_copy(e, 0)))?;
-        if drained > self.budget_remaining {
-            self.budget_remaining = 0;
-            return Err(TrailerError::OverBudget);
-        }
-        self.budget_remaining -= drained;
-        Ok(drained)
     }
 
     /// Adds the single archive-level `IntegrityIncomplete` issue when anything
@@ -420,18 +523,13 @@ impl<'c> IntegrityPass<'c> {
     }
 }
 
-enum TrailerError {
-    OverBudget,
-    Failed(DecodeFailure),
-}
-
-fn probe_one_byte<R: Read>(reader: &mut R) -> std::result::Result<u64, TrailerError> {
+fn probe_one_byte<R: Read>(reader: &mut R) -> std::result::Result<u64, DecodeFailure> {
     let mut byte = [0u8; 1];
     loop {
         match reader.read(&mut byte) {
             Ok(n) => return Ok(n as u64),
             Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-            Err(e) => return Err(TrailerError::Failed(DecodeFailure::from_read_error(e, 0))),
+            Err(e) => return Err(DecodeFailure::from_read_error(e, 0)),
         }
     }
 }
@@ -705,26 +803,70 @@ mod tests {
     }
 
     #[test]
-    fn test_trailer_drain_is_bounded_by_the_remaining_budget() {
+    fn test_trailer_drain_is_bounded_by_the_trailer_cap() {
         let config = SecurityConfig::default().validate().unwrap();
+        let cap = usize::try_from(TrailerCap::of(&config).get()).unwrap();
 
         let mut pass = pass_with_budget(&config, 10);
         pass.check_tar_trailer(
-            &mut io::Cursor::new(vec![0u8; 10]),
+            &mut io::Cursor::new(vec![0u8; cap]),
             TarTrailer::DrainToDecoderEof,
         )
         .unwrap();
         assert!(pass.finish().archive_issues.is_empty());
 
         let mut pass = pass_with_budget(&config, 10);
-        pass.check_tar_trailer(
-            &mut io::Cursor::new(vec![0u8; 11]),
+        let refused = pass.check_tar_trailer(
+            &mut io::Cursor::new(vec![0u8; cap + 1]),
             TarTrailer::DrainToDecoderEof,
-        )
-        .unwrap();
-        let outcome = pass.finish();
-        assert_eq!(outcome.archive_issues.len(), 1);
-        assert!(outcome.archive_issues[0].message.contains("over budget"));
+        );
+        assert_eq!(
+            refused.unwrap_err().relaxable_by(),
+            Some(crate::PolicySetting::MaxTarMetadataBytes)
+        );
+    }
+
+    #[test]
+    fn test_trailer_cap_has_a_floor_and_follows_a_larger_limit() {
+        let small = SecurityConfig::default()
+            .with_max_tar_metadata_bytes(512)
+            .validate()
+            .unwrap();
+        assert_eq!(TrailerCap::of(&small).get(), MIN_TRAILER_CAP);
+
+        let large = SecurityConfig::default()
+            .with_max_tar_metadata_bytes(u64::MAX - 1)
+            .validate()
+            .unwrap();
+        assert_eq!(TrailerCap::of(&large).get(), u64::MAX - 1);
+    }
+
+    #[test]
+    fn test_trailer_drain_with_a_maximal_cap_does_not_overflow() {
+        let config = SecurityConfig::default()
+            .with_max_tar_metadata_bytes(u64::MAX - 1)
+            .validate()
+            .unwrap();
+        let mut buffer = Box::new(CopyBuffer::new());
+
+        let drained = TarTrailer::DrainToDecoderEof.drain(
+            &mut io::Cursor::new(vec![0u8; 8]),
+            TrailerCap::of(&config),
+            &mut buffer,
+        );
+        assert_matches!(drained, Ok(8));
+    }
+
+    #[test]
+    fn test_over_cap_trailer_is_a_relaxable_violation_naming_the_cap() {
+        let config = SecurityConfig::default().validate().unwrap();
+        let error = TrailerFault::OverCap(TrailerCap::of(&config)).into_error();
+
+        assert_eq!(
+            error.relaxable_by(),
+            Some(crate::PolicySetting::MaxTarMetadataBytes)
+        );
+        assert!(error.to_string().contains("4194304"), "{error}");
     }
 
     #[test]

@@ -124,7 +124,7 @@ fn assert_ambiguous(error: &ArchiveError, expected: &Expected) {
         Expected::Payload => {
             assert_matches!(
                 source,
-                ArchiveError::InvalidArchive(reason) if reason.contains("payload"),
+                ArchiveError::TarAmbiguity(TarAmbiguity::NonRegularPayload { size: 1.., .. }),
                 "{source}"
             );
         }

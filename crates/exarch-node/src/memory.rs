@@ -23,6 +23,7 @@ use napi_derive::napi;
 use crate::CoreResult;
 use crate::ProgressCallback;
 use crate::ProgressDispatch;
+use crate::abort::AbortBinding;
 use crate::config::CreationConfig;
 use crate::config::ExtractionOptions;
 use crate::config::SecurityConfig;
@@ -31,11 +32,13 @@ use crate::error::Failure;
 use crate::error::ProgressCallbackError;
 use crate::error::run_sync;
 use crate::error::spawn_blocking_promise;
+use crate::error::spawn_blocking_promise_with;
 use crate::report::ArchiveType;
 use crate::report::CreationReport;
 use crate::report::ExtractionReport;
 use crate::report::unknown_variant;
 use crate::run_with_optional_progress;
+use crate::stream::AbortableSource;
 use crate::stream::ArchiveSource;
 use crate::stream::IntoSource;
 use crate::utils::validate_path;
@@ -274,9 +277,10 @@ fn into_memory_extraction(
 ///
 /// # Arguments
 ///
-/// The arguments of `extractArchiveToMemory`, then:
+/// The arguments of `extractArchiveToMemory` up to `format`, then:
 ///
 /// * `progress` - Optional progress callback
+/// * `signal` - Optional `AbortSignal`, as in `extractArchiveToMemory`
 ///
 /// # Returns
 ///
@@ -317,15 +321,18 @@ pub fn extract_archive_to_memory_with_progress<'env>(
         ts_arg_type = "(((err: Error | null, arg: [string, number, number, number]) => any)) | undefined | null"
     )]
     progress: Option<ProgressCallback>,
+    #[napi(ts_arg_type = "AbortSignalLike | undefined | null")] signal: Option<AbortBinding>,
 ) -> Result<PromiseRaw<'env, MemoryExtraction>> {
+    let (data, detach) = AbortableSource::bind(data, signal);
     let job = MemoryJob::new(data, config, options, max_bytes, path_model, format);
     let progress = progress.map(|ProgressCallback(tsfn)| tsfn);
 
-    spawn_blocking_promise(
+    spawn_blocking_promise_with(
         env,
         "archive extraction with progress",
         move || job.run_with_progress(progress, ProgressDispatch::Awaited),
         Ok,
+        move |env| detach.run(env),
     )
 }
 
@@ -454,6 +461,11 @@ pub fn create_archive_to_bytes_sync(
 ///   config's `maxTotalSize`
 /// * `pathModel` - `'host'` (default) or `'portable'`
 /// * `format` - The archive format; detected from the leading bytes if omitted
+/// * `signal` - Optional `AbortSignal`. Aborting rejects with `ABORT_ERR` (an
+///   `AbortError`, `cause` is `signal.reason`) and frees the worker. The abort
+///   is noticed when the job starts and while it waits for JavaScript (an
+///   `AsyncIterable` chunk or its close); a `Uint8Array` archive is processed
+///   to completion once started and then resolves normally
 ///
 /// # Returns
 ///
@@ -462,8 +474,10 @@ pub fn create_archive_to_bytes_sync(
 /// # Errors
 ///
 /// Rejects with `INVALID_CONFIGURATION` for a `maxBytes` that is not a positive
-/// whole number, `QUOTA_EXCEEDED` when a quota or `maxBytes` is exceeded, and
-/// the errors of `extractArchive` otherwise.
+/// whole number, `QUOTA_EXCEEDED` when a quota or `maxBytes` is exceeded,
+/// `ABORT_ERR` if `signal` fired, and the errors of `extractArchive`
+/// otherwise. A `signal` that is not an `AbortSignal` throws a `TypeError`
+/// synchronously.
 ///
 /// # Examples
 ///
@@ -471,7 +485,11 @@ pub fn create_archive_to_bytes_sync(
 /// const { entries } = await extractArchiveToMemory(fs.readFileSync('a.tar.gz'));
 /// ```
 #[napi]
-#[allow(clippy::needless_pass_by_value)]
+#[allow(
+    clippy::needless_pass_by_value,
+    clippy::too_many_arguments,
+    reason = "napi arguments are owned and the JS signature is positional, `signal` last"
+)]
 pub fn extract_archive_to_memory<'env>(
     env: &'env Env,
     #[napi(ts_arg_type = "Uint8Array | AsyncIterable<Uint8Array>")] data: ArchiveSource,
@@ -480,10 +498,18 @@ pub fn extract_archive_to_memory<'env>(
     max_bytes: Option<f64>,
     path_model: Option<PathModel>,
     format: Option<ArchiveType>,
+    #[napi(ts_arg_type = "AbortSignalLike | undefined | null")] signal: Option<AbortBinding>,
 ) -> Result<PromiseRaw<'env, MemoryExtraction>> {
+    let (data, detach) = AbortableSource::bind(data, signal);
     let job = MemoryJob::new(data, config, options, max_bytes, path_model, format);
 
-    spawn_blocking_promise(env, "archive extraction", move || job.run(), Ok)
+    spawn_blocking_promise_with(
+        env,
+        "archive extraction",
+        move || job.run(),
+        Ok,
+        move |env| detach.run(env),
+    )
 }
 
 /// Extract an archive held in memory into memory (sync).

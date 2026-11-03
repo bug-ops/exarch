@@ -155,7 +155,7 @@ SO THAT link escapes, entries under files and overwrite conflicts are found with
 |----|------------|----------|
 | FR-020 | `verify_archive(path, config)` SHALL equal `verify_archive_with_options` with `VerificationOptions::default()`, whose `integrity` is `IntegrityCheck::Skip` | must |
 | FR-021 | `IntegrityCheck` SHALL be `#[non_exhaustive]` with `Skip` (default) and `DecodeToEof(DecompressionBudget)`, so a budget without a check is unrepresentable; `VerificationOptions` SHALL be `#[non_exhaustive]` with `with_integrity()` | must |
-| FR-022 | `DecompressionBudget` SHALL wrap a `NonZeroU64` (`try_from_bytes(0)` is `InvalidConfiguration`) with `DEFAULT` of 500 MiB, independent of `max_total_size`; it bounds decoding beyond what listing already does (ZIP entries and 7z blocks charged their declared size, compressed TAR charged from the end marker to decoder EOF, TAR entry content not charged) | must |
+| FR-022 | `DecompressionBudget` SHALL wrap a `NonZeroU64` (`try_from_bytes(0)` is `InvalidConfiguration`) with `DEFAULT` of 500 MiB, independent of `max_total_size`; it bounds decoding beyond what listing already does (ZIP entries and 7z blocks charged their declared size, TAR entry content and the compressed TAR tail after the end marker not charged; that tail is bounded by `max_tar_metadata_bytes`, at least 1 MiB, and a longer one fails the call) | must |
 | FR-023 | `IntegrityStatus` SHALL be `#[non_exhaustive]` with `Pass` ("OK"), `Fail` ("FAILED"), `Incomplete` ("INCOMPLETE"), `Skipped` ("SKIPPED"); derivation: any `CorruptData` issue gives `Fail`; otherwise no integrity request gives `Skipped`; otherwise any `IntegrityIncomplete` issue gives `Incomplete`; otherwise `Pass` | must |
 | FR-024 | `Pass` SHALL mean every payload byte was decoded and every checksum the format has matched; for formats without payload checksums (plain TAR, 7z entries without CRC, zstd frames without a content checksum) it means the data was complete and decodable | must |
 | FR-025 | A checksum or decoder failure SHALL be a High `CorruptData` issue; everything not verified SHALL be counted per `UnverifiedReason` and reported as one archive-level Medium `IntegrityIncomplete` issue, so overall status is at least `Warning` | must |
@@ -243,6 +243,7 @@ SO THAT link escapes, entries under files and overwrite conflicts are found with
 | `Cafe.txt` and `cafe.txt` on macOS or Windows host | `NameCollision` Medium (two files) |
 | Two empty directories folding equal | Low `NameCollision`, not counted by `security_status()`; if either later gains an entry it is reported at its real severity |
 | TAR stream without an end-of-archive marker, integrity requested | Gap reason `NoEndMarker`, integrity `Incomplete` |
+| Compressed TAR with more than the trailer cap after the end marker, integrity requested | `SecurityViolation` relaxable by `max_tar_metadata_bytes`, not a gap; plain `verify` does not read the tail |
 | Solid 7z with `allow_solid_archives` off, integrity requested | Gap reason `SolidPolicy`, integrity `Incomplete` |
 
 ## 7. Success Criteria

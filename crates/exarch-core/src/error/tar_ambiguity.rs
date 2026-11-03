@@ -402,6 +402,38 @@ mod tests {
     }
 
     #[test]
+    fn non_regular_kinds_display_in_lower_case_like_their_siblings() {
+        use crate::error::zip_inconsistency::ZipNonRegularKind;
+
+        let spellings: Vec<_> = TarNonRegularKind::ALL
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(spellings, ["directory", "symlink", "hardlink"]);
+        for kind in TarNonRegularKind::ALL {
+            assert_eq!(kind.as_str(), kind.to_string());
+            assert_eq!(kind.to_string(), kind.to_string().to_lowercase());
+        }
+        assert_eq!(
+            TarNonRegularKind::Directory.to_string(),
+            ZipNonRegularKind::Directory.to_string()
+        );
+    }
+
+    #[test]
+    fn a_symlink_payload_message_uses_the_lower_case_kind() {
+        let symlink = TarAmbiguity::NonRegularPayload {
+            kind: TarNonRegularKind::Symlink,
+            size: 9,
+            path: "s".into(),
+        };
+        assert_eq!(
+            symlink.to_string(),
+            "symlink entry declares a 9 byte payload: s"
+        );
+    }
+
+    #[test]
     fn extension_kind_messages_are_pinned() {
         let cases = [
             (TarExtensionKind::Pax, "PAX", "XHeader"),

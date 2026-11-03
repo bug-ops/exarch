@@ -994,6 +994,24 @@ mod tests {
     }
 
     #[test]
+    fn test_the_allowance_follows_the_configured_base() {
+        let base = NonZeroU64::new(7).unwrap();
+        let config = SecurityConfig::default()
+            .with_compressed_member_allowance(base)
+            .validate()
+            .unwrap();
+        assert_eq!(config.compressed_member_allowance, base);
+        assert_eq!(MemberAllowance::of(&config), MemberAllowance::of_base(base));
+        assert_eq!(DecoderLimits::of(&config).members.at(0), 7);
+        assert_eq!(
+            DecoderLimits::of(&SecurityConfig::default().validate().unwrap())
+                .members
+                .at(0),
+            10_000
+        );
+    }
+
+    #[test]
     fn test_the_allowance_grows_with_output_and_never_overflows() {
         let base = MemberAllowance::of_base(NonZeroU64::new(3).unwrap());
         assert_eq!(base.at(0), 3);

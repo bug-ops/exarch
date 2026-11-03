@@ -29,7 +29,6 @@ use flate2::Compression;
 use flate2::write::GzEncoder;
 
 const EIO: i32 = 5;
-const STEP: usize = 31;
 
 /// Serves `inner` until `remaining` bytes were read, then fails every read.
 struct FailAfter {
@@ -128,43 +127,85 @@ const RUNS: [(&str, Run); 3] = [
     ("verify", run_verify),
 ];
 
-/// Sweeps the failure point over `bytes` and returns how many positions failed.
+/// Runs every operation with the source failing after each `step`-th byte and
+/// checks the outcome shape exactly:
+///
+/// - every error is `Io` carrying the injected errno, whatever the position;
+/// - outcomes flip once: all positions before the first success fail, all after
+///   it succeed (a fault never turns into a later success);
+/// - every position before `must_fail_below` fails, because the operation needs
+///   those bytes;
+/// - a source that fails only after the archive's end (`len + 1`) succeeds.
+///
+/// Returns the number of failing positions per operation.
 fn sweep(
     bytes: &[u8],
     codec: Option<CompressionCodec>,
     config: &SecurityConfig,
     step: usize,
-) -> usize {
-    let mut failed = 0;
+    must_fail_below: usize,
+) -> Vec<(&'static str, usize)> {
+    let mut failures = Vec::new();
     for (name, run) in RUNS {
-        for budget in (0..bytes.len()).step_by(step) {
-            let reader = ArchiveReader::tar(faulty(bytes, budget), codec);
-            if let Err(error) = run(reader, config) {
-                assert_is_the_injected_fault(&error, &format!("{name} at {budget}"));
-                failed += 1;
-            }
-        }
+        let budgets: Vec<usize> = (0..bytes.len()).step_by(step).collect();
+        let failed: Vec<bool> = budgets
+            .iter()
+            .map(|&budget| {
+                let reader = ArchiveReader::tar(faulty(bytes, budget), codec);
+                run(reader, config).err().is_some_and(|error| {
+                    assert_is_the_injected_fault(&error, &format!("{name} at {budget}"));
+                    true
+                })
+            })
+            .collect();
+
+        let first_ok = failed.iter().position(|f| !f).unwrap_or(failed.len());
+        assert!(
+            failed[first_ok..].iter().all(|f| !f),
+            "{name}: a success is followed by a failure: {failed:?}"
+        );
+        let first_ok_budget = budgets.get(first_ok).copied().unwrap_or(bytes.len());
+        assert!(
+            first_ok_budget >= must_fail_below,
+            "{name}: succeeded at {first_ok_budget} < {must_fail_below}"
+        );
+
+        let reader = ArchiveReader::tar(faulty(bytes, bytes.len() + 1), codec);
+        run(reader, config).unwrap_or_else(|e| panic!("{name} at len + 1: {e:?}"));
+        failures.push((name, first_ok));
     }
-    failed
+    failures
 }
 
 #[test]
 fn a_plain_tar_reports_every_reader_fault_as_io() {
     let bytes = plain_tar();
-    let failed = sweep(&bytes, None, &SecurityConfig::default(), STEP);
-    assert!(failed > RUNS.len() * bytes.len() / STEP / 2, "{failed}");
+    // The operations stop at the end-of-archive marker (two zero blocks).
+    let marker = bytes.len() - 1024;
+    let failures = sweep(&bytes, None, &SecurityConfig::default(), 7, marker);
+    for (name, failed) in failures {
+        assert!(
+            failed >= marker / 7,
+            "{name}: only {failed} positions failed"
+        );
+    }
 }
 
 #[test]
 fn a_gzip_tar_reports_every_reader_fault_as_io() {
     let gz = gzip(&plain_tar());
-    let failed = sweep(
+    // The trailer drain reads a gzip stream to its end, so no position short
+    // of the whole file succeeds.
+    let failures = sweep(
         &gz,
         Some(CompressionCodec::Gzip),
         &SecurityConfig::default(),
-        7,
+        3,
+        gz.len(),
     );
-    assert!(failed > 0);
+    for (name, failed) in failures {
+        assert_eq!(failed, gz.len().div_ceil(3), "{name}");
+    }
 }
 
 #[test]
@@ -187,6 +228,13 @@ fn a_fault_inside_a_skipped_drain_is_io() {
     let bytes = builder.into_inner().unwrap();
     let config = SecurityConfig::default().with_allowed_extensions(vec!["txt".into()]);
 
-    let failed = sweep(&bytes, None, &config, 997);
-    assert!(failed > 0);
+    // Every position inside the 100 000 skipped bytes is covered by the step.
+    let marker = bytes.len() - 1024;
+    let failures = sweep(&bytes, None, &config, 61, marker);
+    for (name, failed) in failures {
+        assert!(
+            failed >= 100_000 / 61,
+            "{name}: only {failed} positions failed"
+        );
+    }
 }

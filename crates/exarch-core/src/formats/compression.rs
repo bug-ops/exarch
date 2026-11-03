@@ -105,12 +105,8 @@ impl MemberAllowance {
         Self::of_base(config.compressed_member_allowance)
     }
 
-    // `validate()` rejects a zero base, so the fallback is unreachable.
-    const fn of_base(base: u64) -> Self {
-        match NonZeroU64::new(base) {
-            Some(base) => Self(base),
-            None => Self(NonZeroU64::MIN),
-        }
+    const fn of_base(base: NonZeroU64) -> Self {
+        Self(base)
     }
 
     /// The most members a stream may have started once it produced `produced`
@@ -160,7 +156,7 @@ impl DecoderLimits {
         Self {
             memory: 256 * 1024 * 1024,
             zstd_window: ZstdWindowLog::LIBZSTD_DEFAULT,
-            members: MemberAllowance::of_base(10_000),
+            members: MemberAllowance::of_base(crate::config::DEFAULT_MEMBER_ALLOWANCE),
         }
     }
 }
@@ -918,7 +914,7 @@ mod tests {
 
     fn limits_with_base(base: u64) -> DecoderLimits {
         DecoderLimits {
-            members: MemberAllowance::of_base(base),
+            members: MemberAllowance::of_base(NonZeroU64::new(base).unwrap()),
             ..TEST_MEM
         }
     }
@@ -977,7 +973,7 @@ mod tests {
 
     #[test]
     fn test_the_allowance_gains_one_member_per_16_kib_exactly() {
-        let base = MemberAllowance::of_base(5);
+        let base = MemberAllowance::of_base(NonZeroU64::new(5).unwrap());
         assert_eq!(base.at(16 * 1024 - 1), 5);
         assert_eq!(base.at(16 * 1024), 6);
         assert_eq!(base.at(32 * 1024 - 1), 6);
@@ -999,7 +995,7 @@ mod tests {
 
     #[test]
     fn test_the_allowance_grows_with_output_and_never_overflows() {
-        let base = MemberAllowance::of_base(3);
+        let base = MemberAllowance::of_base(NonZeroU64::new(3).unwrap());
         assert_eq!(base.at(0), 3);
         assert_eq!(base.at(MEMBER_OUTPUT_BYTES - 1), 3);
         assert_eq!(base.at(MEMBER_OUTPUT_BYTES), 4);

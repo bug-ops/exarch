@@ -619,7 +619,8 @@ mod tests {
         let archive = write_archive(&dir, CompressionCodec::Gzip, &bytes);
         let listed = list(&archive, REPLAY_LIMIT);
         assert!(listed.spool.is_some());
-        let stricter = SecurityConfig::default().with_compressed_member_allowance(2);
+        let stricter = SecurityConfig::default()
+            .with_compressed_member_allowance(std::num::NonZeroU64::MIN.saturating_add(1));
 
         let error = match extract_into(listed, &dir, &stricter).unwrap_err() {
             crate::ArchiveError::PartialExtraction { source, .. } => *source,

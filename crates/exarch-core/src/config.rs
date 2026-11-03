@@ -167,6 +167,9 @@ const fn non_zero(n: u64) -> NonZeroU64 {
     }
 }
 
+/// Default base of the compressed member allowance.
+pub(crate) const DEFAULT_MEMBER_ALLOWANCE: NonZeroU64 = non_zero(10_000);
+
 impl ParallelDecode {
     /// Default lookahead: 128 MiB.
     pub const DEFAULT_BYTES: NonZeroU64 = non_zero(128 * 1024 * 1024);
@@ -400,7 +403,7 @@ pub struct SecurityConfigFields {
     /// it. Not exposed through the CLI or language bindings.
     ///
     /// Default: 10,000 (100,000 for [`SecurityConfig::permissive`])
-    pub compressed_member_allowance: u64,
+    pub compressed_member_allowance: NonZeroU64,
 
     /// Lookahead memory for decoding independent LZMA2 runs of a 7z block on
     /// worker threads.
@@ -447,7 +450,7 @@ impl Default for SecurityConfigFields {
             max_solid_block_memory: 512 * 1024 * 1024, // 512 MB
             max_tar_metadata_bytes: 4 * 1024 * 1024,   // 4 MiB
             max_decoder_memory: 256 * 1024 * 1024,     // 256 MiB
-            compressed_member_allowance: 10_000,
+            compressed_member_allowance: DEFAULT_MEMBER_ALLOWANCE,
             parallel_decode: ParallelDecode::Bounded(ParallelDecode::DEFAULT_BYTES),
             zip_consistency: ZipConsistencyPolicy::Enforce,
         }
@@ -584,7 +587,7 @@ impl SecurityConfig<Unvalidated> {
                 max_solid_block_memory: 1024 * 1024 * 1024, // 1 GB for permissive
                 max_tar_metadata_bytes: 16 * 1024 * 1024,   // 16 MiB for permissive
                 max_decoder_memory: 1024 * 1024 * 1024,     // 1 GiB for permissive
-                compressed_member_allowance: 100_000,
+                compressed_member_allowance: non_zero(100_000),
                 parallel_decode: ParallelDecode::Bounded(PERMISSIVE_PARALLEL_DECODE),
                 ..SecurityConfigFields::default()
             },
@@ -616,7 +619,6 @@ impl SecurityConfig<Unvalidated> {
     /// - `max_tar_metadata_bytes` is zero or `u64::MAX` (the metadata budget
     ///   uses it as its disarmed marker)
     /// - `max_decoder_memory` is zero
-    /// - `compressed_member_allowance` is zero
     /// - any entry in `allowed_extensions` or `banned_path_components` is
     ///   empty, contains a null byte, or exceeds
     ///   [`crate::MAX_CONFIG_ENTRY_LENGTH`] bytes
@@ -682,11 +684,6 @@ impl SecurityConfig<Unvalidated> {
         if self.max_decoder_memory == 0 {
             return Err(crate::ArchiveError::InvalidConfiguration {
                 reason: "max_decoder_memory must not be zero".into(),
-            });
-        }
-        if self.compressed_member_allowance == 0 {
-            return Err(crate::ArchiveError::InvalidConfiguration {
-                reason: "compressed_member_allowance must not be zero".into(),
             });
         }
         for extension in &self.fields.allowed_extensions {
@@ -1049,18 +1046,15 @@ impl SecurityConfig<Unvalidated> {
     /// ```
     /// use exarch_core::SecurityConfig;
     ///
-    /// let config = SecurityConfig::default().with_compressed_member_allowance(50_000);
-    /// assert_eq!(config.compressed_member_allowance, 50_000);
-    /// assert!(
-    ///     SecurityConfig::default()
-    ///         .with_compressed_member_allowance(0)
-    ///         .validate()
-    ///         .is_err()
-    /// );
+    /// use std::num::NonZeroU64;
+    ///
+    /// let base = NonZeroU64::new(50_000).unwrap();
+    /// let config = SecurityConfig::default().with_compressed_member_allowance(base);
+    /// assert_eq!(config.compressed_member_allowance, base);
     /// ```
     #[must_use]
     #[inline]
-    pub fn with_compressed_member_allowance(mut self, base: u64) -> Self {
+    pub fn with_compressed_member_allowance(mut self, base: NonZeroU64) -> Self {
         self.fields.compressed_member_allowance = base;
         self
     }
@@ -1728,20 +1722,15 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_rejects_zero_compressed_member_allowance() {
-        let mut cfg = SecurityConfig::default();
-        cfg.compressed_member_allowance = 0;
-        assert!(cfg.validate().is_err());
-    }
-
-    #[test]
     fn test_compressed_member_allowance_defaults() {
         assert_eq!(
-            SecurityConfig::default().compressed_member_allowance,
+            SecurityConfig::default().compressed_member_allowance.get(),
             10_000
         );
         assert_eq!(
-            SecurityConfig::permissive().compressed_member_allowance,
+            SecurityConfig::permissive()
+                .compressed_member_allowance
+                .get(),
             100_000
         );
     }

@@ -235,6 +235,7 @@ fn quotas_span_every_member() {
 }
 
 fn with_base(base: u64) -> SecurityConfig {
+    let base = std::num::NonZeroU64::new(base).unwrap();
     SecurityConfig::default().with_compressed_member_allowance(base)
 }
 

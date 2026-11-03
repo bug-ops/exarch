@@ -32,17 +32,17 @@ closed_enum! {
     /// ```
     /// use exarch_core::TarNonRegularKind;
     ///
-    /// assert_eq!(TarNonRegularKind::Hardlink.to_string(), "Hardlink");
+    /// assert_eq!(TarNonRegularKind::Hardlink.to_string(), "hardlink");
     /// ```
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     #[non_exhaustive]
     pub enum TarNonRegularKind {
         /// A directory entry (`5`).
-        Directory => "Directory",
+        Directory => "directory",
         /// A symbolic link entry (`2`).
-        Symlink => "Symlink",
+        Symlink => "symlink",
         /// A hard link entry (`1`).
-        Hardlink => "Hardlink",
+        Hardlink => "hardlink",
     }
 }
 
@@ -380,7 +380,7 @@ mod tests {
         };
         assert_eq!(
             directory.to_string(),
-            "Directory entry declares a 1024 byte payload: x/"
+            "directory entry declares a 1024 byte payload: x/"
         );
         let named = TarAmbiguity::DirectoryNamedPayload {
             size: 3,
@@ -393,7 +393,7 @@ mod tests {
         };
         assert_eq!(
             hardlink.to_string(),
-            "Hardlink entry declares a 2 byte payload: l"
+            "hardlink entry declares a 2 byte payload: l"
         );
         assert_eq!(
             named.to_string(),

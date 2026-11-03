@@ -1,4 +1,4 @@
-"""Tests for the ``sub_code`` attribute of ``InvalidArchiveError`` and ``SecurityViolationError``."""
+"""Tests for ``sub_code`` on ``InvalidArchiveError`` and ``SecurityViolationError``."""
 
 import gzip
 import tarfile

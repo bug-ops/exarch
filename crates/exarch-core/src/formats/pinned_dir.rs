@@ -457,6 +457,22 @@ mod imp {
             Self::into_dir(File::from(handle))
         }
 
+        /// Reports an occupied `name` as `AlreadyExists`.
+        ///
+        /// NT answers a create that meets an existing directory or junction
+        /// with `STATUS_ACCESS_DENIED`, which callers cannot tell from a real
+        /// permission failure. The probe opens the name as itself and never
+        /// follows a link.
+        fn occupied_as_exists(&self, name: Leaf<'_>, err: io::Error) -> io::Error {
+            if err.kind() == io::ErrorKind::PermissionDenied
+                && matches!(self.probe(name), Ok(Some(_)))
+            {
+                io::Error::from(io::ErrorKind::AlreadyExists)
+            } else {
+                err
+            }
+        }
+
         /// Creates the subdirectory `name`, inheriting the parent's ACL.
         pub(crate) fn make_dir(&self, name: Leaf<'_>) -> io::Result<()> {
             let request = Request {
@@ -465,7 +481,9 @@ mod imp {
                 kind: Kind::Directory,
                 attributes: 0,
             };
-            nt::create_at(self.0.as_handle(), name, request).map(drop)
+            nt::create_at(self.0.as_handle(), name, request)
+                .map(drop)
+                .map_err(|err| self.occupied_as_exists(name, err))
         }
 
         /// What `name` is, without following a link; `None` if it is absent.
@@ -493,7 +511,9 @@ mod imp {
                 kind: Kind::NonDirectory,
                 attributes: FILE_ATTRIBUTE_NORMAL,
             };
-            nt::create_at(self.0.as_handle(), name, request).map(File::from)
+            nt::create_at(self.0.as_handle(), name, request)
+                .map(File::from)
+                .map_err(|err| self.occupied_as_exists(name, err))
         }
 
         /// Opens `name` for reading without following a link; the caller
@@ -836,6 +856,21 @@ mod windows_tests {
         assert!(temp.path().join("c").is_file());
         assert!(dir.open_dir(leaf("c")).is_err());
         assert!(dir.open_dir(leaf("sub")).is_ok());
+    }
+
+    #[test]
+    fn an_occupied_name_of_any_kind_is_already_exists() {
+        let temp = TempDir::new().unwrap();
+        fs::create_dir(temp.path().join("d")).unwrap();
+        fs::write(temp.path().join("f"), b"x").unwrap();
+        let dir = pinned(&temp);
+
+        let err = dir.create_new(leaf("d"), None).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        let err = dir.create_new(leaf("f"), None).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        let err = dir.make_dir(leaf("d")).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
     }
 
     #[test]

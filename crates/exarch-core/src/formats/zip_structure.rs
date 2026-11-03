@@ -1770,8 +1770,8 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
             {
                 self.zstd_decodes += usize::from(zstd);
             }
-            // TODO(review): follow-up issue pending, bzip2 and zstd entries,
-            // and sink extraction, still decode twice.
+            // TODO(#866): bzip2 and zstd entries, sink extraction and entries
+            // past the reuse limit still decode twice.
             let capture = match (method, self.reuse.as_deref_mut()) {
                 (Compressed::Deflate, Some(store)) => store.capture(retain_key(layout)),
                 _ => None,

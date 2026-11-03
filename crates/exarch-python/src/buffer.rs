@@ -5,7 +5,7 @@ use std::path::Path;
 
 use exarch_core::ArchiveError;
 use exarch_core::CallbackEntry;
-use exarch_core::CallbackSink;
+use exarch_core::CallbackError;
 use exarch_core::MemoryEntry;
 use exarch_core::MemoryEntryKind;
 use exarch_core::MemoryExtractRequest;
@@ -13,8 +13,8 @@ use exarch_core::MemoryLimit;
 use exarch_core::MemorySink;
 use exarch_core::PartialWrites;
 use exarch_core::PathModel;
-use exarch_core::SafePath;
 use exarch_core::SanitizedMode;
+use exarch_core::extract_reader_to_callback;
 use exarch_core::extract_reader_to_memory;
 use exarch_core::formats::detect::ArchiveType;
 use exarch_core::formats::detect::CreatableFormat;
@@ -642,25 +642,28 @@ pub fn extract_archive_to_callback(
     )?;
 
     let slot = data.failure_slot();
-    let result = catch_panic_as_py_err("archive extraction to a callback", || {
+    let result = catch_panic_as_py_result("archive extraction to a callback", || {
         py.detach(|| {
-            let mut sink = CallbackSink::new(|path: &SafePath, entry| {
-                Python::attach(|py| {
-                    let entry = PyMemoryEntry::new(py, path.as_path(), entry)
-                        .and_then(|entry| Py::new(py, entry))?;
-                    on_entry.call1(py, (entry,)).map(drop)
-                })
-                .map_err(|err| slot.record(err))
-            })
-            .with_path_model(request.path_model);
-            let reader = data.into_reader(request.format)?;
-            exarch_core::extract_to_sink_with_progress(
+            let reader = data.into_reader(request.format).map_err(convert_error)?;
+            extract_reader_to_callback(
                 reader,
-                &mut sink,
-                &request.config,
-                &request.options,
+                &request.request,
+                |path, entry| {
+                    Python::attach(|py| {
+                        let entry = PyMemoryEntry::new(py, path.as_path(), entry)
+                            .and_then(|entry| Py::new(py, entry))?;
+                        on_entry.call1(py, (entry,)).map(drop)
+                    })
+                },
                 &mut exarch_core::NoopProgress,
             )
+            .map_err(|err| match err {
+                CallbackError::Callback(err) => err,
+                CallbackError::Archive(err) => convert_error(err),
+                _ => PyRuntimeError::new_err(
+                    "exarch-python is older than exarch-core: unknown callback error",
+                ),
+            })
         })
     });
     slot.surface(result).map(PyExtractionReport::from)
@@ -669,9 +672,6 @@ pub fn extract_archive_to_callback(
 /// The validated arguments shared by the in-memory extraction functions.
 struct MemoryRequest {
     request: MemoryExtractRequest,
-    config: exarch_core::SecurityConfig,
-    options: exarch_core::SinkOptions,
-    path_model: PathModel,
     format: Option<ArchiveType>,
 }
 
@@ -696,19 +696,13 @@ impl MemoryRequest {
             )
             .map_err(convert_error)?;
         let mut request = MemoryExtractRequest::default()
-            .with_config(config.clone())
+            .with_config(config)
             .with_options(options)
             .with_path_model(path_model);
         if let Some(bytes) = max_bytes {
             request = request.with_limit(MemoryLimit::new(bytes));
         }
-        Ok(Self {
-            request,
-            config,
-            options,
-            path_model,
-            format,
-        })
+        Ok(Self { request, format })
     }
 
     fn run(

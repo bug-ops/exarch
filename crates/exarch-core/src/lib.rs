@@ -177,6 +177,7 @@ pub use security::boundary::validate_config_entry;
 pub use security::boundary::validate_raw_path_str;
 pub use security::fs_view::PathModel;
 pub use sink::CallbackEntry;
+pub use sink::CallbackError;
 pub use sink::CallbackSink;
 pub use sink::EntrySink;
 pub use sink::MemoryEntry;
@@ -187,6 +188,7 @@ pub use sink::MemoryLimit;
 pub use sink::MemorySink;
 pub use sink::SinkFull;
 pub use sink::SinkOptions;
+pub use sink::extract_reader_to_callback;
 pub use sink::extract_reader_to_memory;
 
 // Re-export types module for easier access

@@ -1,12 +1,11 @@
 //! Extraction of an archive into an `onEntry` callback.
 
-use std::io;
-
-use exarch_core::CallbackEntry;
-use exarch_core::CallbackSink;
+use exarch_core::CallbackError;
+use exarch_core::MemoryExtractRequest;
+use exarch_core::NoopProgress;
 use exarch_core::PathModel as CorePathModel;
-use exarch_core::SafePath;
 use exarch_core::SinkOptions;
+use exarch_core::extract_reader_to_callback;
 use napi::Env;
 use napi::JsValue;
 use napi::Status;
@@ -37,6 +36,7 @@ use crate::memory::MemoryEntry;
 use crate::memory::PathModel;
 use crate::report::ArchiveType;
 use crate::report::ExtractionReport;
+use crate::report::unknown_variant;
 use crate::stream::AbortableSource;
 use crate::stream::ArchiveSource;
 use crate::stream::IntoSource;
@@ -156,25 +156,26 @@ impl CallbackJob {
                 return Err(err.into());
             }
         };
-        let mut failure: Option<Failure> = None;
-        let result = source.run(self.format, |reader| {
-            let mut sink = CallbackSink::new(|path: &SafePath, entry: CallbackEntry| {
-                let delivered = MemoryEntry::try_from((path.as_path().to_path_buf(), entry))
-                    .and_then(&mut deliver);
-                delivered.map_err(|err| {
-                    failure.get_or_insert(err);
-                    io::Error::other("entry callback failed")
-                })
-            })
+        let request = MemoryExtractRequest::default()
+            .with_config(self.config)
+            .with_options(options)
             .with_path_model(self.path_model);
-            Ok(exarch_core::extract_to_sink(
+        source.run(self.format, |reader| {
+            extract_reader_to_callback(
                 reader,
-                &mut sink,
-                &self.config,
-                &options,
-            )?)
-        });
-        failure.map_or(result, Err)
+                &request,
+                |path, entry| {
+                    MemoryEntry::try_from((path.as_path().to_path_buf(), entry))
+                        .and_then(&mut deliver)
+                },
+                &mut NoopProgress,
+            )
+            .map_err(|err| match err {
+                CallbackError::Callback(failure) => failure,
+                CallbackError::Archive(err) => err.into(),
+                _ => Failure::Native(unknown_variant("callback error", "unknown")),
+            })
+        })
     }
 }
 

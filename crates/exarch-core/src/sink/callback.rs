@@ -1,13 +1,20 @@
 //! An [`EntrySink`] that hands every verified entry to a closure.
 
+use std::error::Error;
+use std::fmt;
 use std::io;
 use std::path::Path;
 
+use crate::ArchiveError;
+use crate::ArchiveReader;
+use crate::ExtractionReport;
+use crate::ProgressCallback;
 use crate::security::fs_view::PathModel;
 use crate::security::permissions::SanitizedMode;
 use crate::sink::EntrySink;
 use crate::sink::MemoryEntry;
 use crate::sink::MemoryEntryKind;
+use crate::sink::MemoryExtractRequest;
 use crate::sink::MemoryFile;
 use crate::types::SafePath;
 
@@ -224,5 +231,142 @@ where
                 target: target.clone(),
             },
         )
+    }
+}
+
+/// Why [`extract_reader_to_callback`] failed.
+///
+/// The first error the callback returned is kept as `E`, so the caller keeps
+/// its own error type instead of recovering it from a side slot.
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::CallbackError;
+///
+/// let err: CallbackError<&str> = CallbackError::Callback("stop");
+/// assert_eq!(err.to_string(), "entry callback failed: stop");
+/// ```
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum CallbackError<E> {
+    /// The callback returned this error for an entry, which ended the
+    /// extraction. It takes precedence over the archive error the aborted
+    /// extraction reports.
+    Callback(E),
+    /// The archive was refused or could not be read.
+    Archive(ArchiveError),
+}
+
+impl<E: fmt::Display> fmt::Display for CallbackError<E> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Callback(err) => write!(f, "entry callback failed: {err}"),
+            Self::Archive(err) => err.fmt(f),
+        }
+    }
+}
+
+impl<E: Error + 'static> Error for CallbackError<E> {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Callback(err) => Some(err),
+            Self::Archive(err) => Some(err),
+        }
+    }
+}
+
+impl<E> From<ArchiveError> for CallbackError<E> {
+    fn from(err: ArchiveError) -> Self {
+        Self::Archive(err)
+    }
+}
+
+/// Extracts the archive in `reader`, handing every verified entry to
+/// `on_entry`.
+///
+/// Validates with the config, options and path model of `request`; its memory
+/// limit is ignored, since nothing is kept. Entries are provisional and
+/// delivered as described at [`CallbackSink`]. The first error `on_entry`
+/// returns ends the extraction and is returned as
+/// [`CallbackError::Callback`], ahead of any archive error.
+///
+/// # Errors
+///
+/// [`CallbackError::Callback`] with the first error of `on_entry`, else
+/// [`CallbackError::Archive`] with the errors of
+/// [`extract_to_sink_with_progress`](crate::extract_to_sink_with_progress).
+///
+/// # Examples
+///
+/// ```
+/// use std::assert_matches;
+///
+/// use exarch_core::ArchiveReader;
+/// use exarch_core::CallbackError;
+/// use exarch_core::MemoryExtractRequest;
+/// use exarch_core::NoopProgress;
+/// use exarch_core::extract_reader_to_callback;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let mut builder = tar::Builder::new(Vec::new());
+/// let mut header = tar::Header::new_gnu();
+/// header.set_size(2);
+/// header.set_mode(0o644);
+/// builder.append_data(&mut header, "a.txt", &b"hi"[..])?;
+/// let archive = builder.into_inner()?;
+///
+/// let mut paths = Vec::new();
+/// let reader = ArchiveReader::from_bytes(archive.clone(), None)?;
+/// extract_reader_to_callback(
+///     reader,
+///     &MemoryExtractRequest::default(),
+///     |path, _entry| {
+///         paths.push(path.as_path().to_path_buf());
+///         Ok::<(), std::io::Error>(())
+///     },
+///     &mut NoopProgress,
+/// )?;
+/// assert_eq!(paths.len(), 1);
+///
+/// let reader = ArchiveReader::from_bytes(archive, None)?;
+/// let failed = extract_reader_to_callback(
+///     reader,
+///     &MemoryExtractRequest::default(),
+///     |_, _| Err(std::io::Error::other("stop")),
+///     &mut NoopProgress,
+/// );
+/// assert_matches!(failed, Err(CallbackError::Callback(err)) if err.to_string() == "stop");
+/// # Ok(())
+/// # }
+/// ```
+pub fn extract_reader_to_callback<F, E>(
+    reader: ArchiveReader<'_>,
+    request: &MemoryExtractRequest,
+    mut on_entry: F,
+    progress: &mut dyn ProgressCallback,
+) -> Result<ExtractionReport, CallbackError<E>>
+where
+    F: FnMut(&SafePath, CallbackEntry) -> Result<(), E>,
+{
+    let mut failure = None;
+    let mut sink = CallbackSink::new(|path: &SafePath, entry| {
+        on_entry(path, entry).map_err(|err| {
+            failure.get_or_insert(err);
+            io::Error::other("entry callback failed")
+        })
+    })
+    .with_path_model(request.model);
+    let result = crate::extract_to_sink_with_progress(
+        reader,
+        &mut sink,
+        &request.config,
+        &request.options,
+        progress,
+    );
+    match (failure, result) {
+        (Some(err), _) => Err(CallbackError::Callback(err)),
+        (None, Ok(report)) => Ok(report),
+        (None, Err(err)) => Err(CallbackError::Archive(err)),
     }
 }

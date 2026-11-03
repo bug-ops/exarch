@@ -149,7 +149,9 @@ mod callback;
 mod memory;
 
 pub use callback::CallbackEntry;
+pub use callback::CallbackError;
 pub use callback::CallbackSink;
+pub use callback::extract_reader_to_callback;
 pub use memory::MemoryEntry;
 pub use memory::MemoryEntryKind;
 pub use memory::MemoryExtractRequest;

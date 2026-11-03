@@ -430,9 +430,18 @@ impl IntoSource for AbortableSource {
             }
             stream @ ArchiveSource::Stream(_) => stream.run(format, f),
         };
-        if self.abort.is_observed() {
+        // The reason is handed out once: keep the abort failure `f` already
+        // took.
+        if self.abort.is_observed() && !already_aborted(&result) {
             return Err(self.abort.failure());
         }
         result
     }
+}
+
+fn already_aborted<T>(result: &CoreResult<T>) -> bool {
+    matches!(
+        result,
+        Err(Failure::Callback(failure)) if matches!(**failure, ProgressCallbackError::Aborted { .. })
+    )
 }

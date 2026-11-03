@@ -175,10 +175,10 @@ impl MemoryEntry {
 /// ```
 #[derive(Debug, Clone, Default)]
 pub struct MemoryExtractRequest {
-    config: SecurityConfig,
-    options: SinkOptions,
+    pub(super) config: SecurityConfig,
+    pub(super) options: SinkOptions,
     limit: Option<MemoryLimit>,
-    model: PathModel,
+    pub(super) model: PathModel,
 }
 
 impl MemoryExtractRequest {
@@ -197,6 +197,10 @@ impl MemoryExtractRequest {
     }
 
     /// Caps the sink at `limit` instead of [`MemoryLimit::from_config`].
+    ///
+    /// Only [`extract_reader_to_memory`] has a sink to cap;
+    /// [`extract_reader_to_callback`](crate::extract_reader_to_callback) keeps
+    /// nothing and ignores it.
     #[must_use]
     pub const fn with_limit(mut self, limit: MemoryLimit) -> Self {
         self.limit = Some(limit);

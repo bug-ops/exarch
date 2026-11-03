@@ -51,7 +51,7 @@ jobs:
               - '**/Cargo.toml'
               - '**/Cargo.lock'
               - 'deny.toml'
-              - 'clippy.toml'
+              - '**/clippy.toml'
               - 'rustfmt.toml'
               - '.github/scripts/wasi-smoke.sh'
             python:

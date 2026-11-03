@@ -397,16 +397,41 @@ fn drain(
 ) -> Result<Drained> {
     let mut limited = decoder.take(declared.saturating_add(1));
     let mut produced = Produced { count: 0, capture };
-    let copied = std::io::copy(&mut limited, &mut produced);
+    let copied = copy_chunked(&mut limited, &mut produced, declared);
     if let Some(failure) = source.failure.take() {
         return Err(ArchiveError::Io(failure));
     }
     let produced = produced.count;
     Ok(match copied {
-        Ok(_) if produced <= declared => Drained::Within(produced),
-        Ok(_) => Drained::OverCap(produced),
+        Ok(()) if produced <= declared => Drained::Within(produced),
+        Ok(()) => Drained::OverCap(produced),
         Err(_) => Drained::Failed(produced),
     })
+}
+
+/// Largest chunk the census decodes into at once; the 8 KiB of `io::copy`
+/// costs a quarter of the decode time on large entries in call overhead.
+const DECODE_CHUNK: usize = 256 * 1024;
+
+/// Copies `reader` into `sink` in chunks sized for an entry of up to `declared`
+/// bytes, so a small entry does not pay for a large buffer.
+fn copy_chunked(
+    reader: &mut impl Read,
+    sink: &mut impl std::io::Write,
+    declared: u64,
+) -> std::io::Result<()> {
+    let len = usize::try_from(declared.saturating_add(1))
+        .unwrap_or(DECODE_CHUNK)
+        .clamp(8 * 1024, DECODE_CHUNK);
+    let mut chunk = vec![0u8; len];
+    loop {
+        match reader.read(&mut chunk) {
+            Ok(0) => return Ok(()),
+            Ok(n) => sink.write_all(&chunk[..n])?,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 /// A sink that counts, so the bytes a failing decoder produced are known as

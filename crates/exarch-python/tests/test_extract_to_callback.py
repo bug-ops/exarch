@@ -119,6 +119,39 @@ def test_a_file_object_exception_propagates_unchanged():
         exarch.extract_archive_to_callback(Failing(b"x"), lambda entry: None)
 
 
+def test_a_callback_exception_wins_over_a_later_file_object_failure():
+    data = _tar([_file("a", b"1"), _file("b", b"2")])
+    error = _BoomError("callback first")
+
+    class FailsAfterTheArchive(io.BytesIO):
+        def read(self, size=-1):
+            chunk = super().read(size)
+            if not chunk:
+                raise OSError("stream later")
+            return chunk
+
+    def on_entry(entry):
+        raise error
+
+    with pytest.raises(_BoomError) as info:
+        exarch.extract_archive_to_callback(FailsAfterTheArchive(data), on_entry)
+
+    assert info.value is error
+
+
+def test_a_file_object_failure_before_any_entry_wins_over_the_callback():
+    calls = []
+
+    class FailsEarly(io.BytesIO):
+        def read(self, size=-1):
+            raise OSError("stream first")
+
+    with pytest.raises(OSError, match="stream first"):
+        exarch.extract_archive_to_callback(FailsEarly(b"x"), calls.append)
+
+    assert calls == []
+
+
 def test_file_object_input_with_a_callback():
     data = _tar([_file("a", b"1")])
     seen = []

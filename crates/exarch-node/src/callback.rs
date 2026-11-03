@@ -231,8 +231,9 @@ impl CallbackJob {
 /// `onEntry` throws or rejects (a non-object is wrapped in an `Error` whose
 /// `cause` is the primitive), with `STREAM_ERROR` when the iterable throws,
 /// with `ABORT_ERR` if `signal` fired, and with the errors of `extractArchive`
-/// otherwise. A `signal` that is not an `AbortSignal` throws a `TypeError`
-/// synchronously.
+/// otherwise. When several apply, the one that happened first wins; an abort
+/// the worker observed always wins. A `signal` that is not an `AbortSignal`
+/// throws a `TypeError` synchronously.
 ///
 /// # Examples
 ///

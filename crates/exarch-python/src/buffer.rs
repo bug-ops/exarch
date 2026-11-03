@@ -642,10 +642,12 @@ pub fn extract_archive_to_callback(
     )?;
 
     let slot = data.failure_slot();
-    let result = catch_panic_as_py_result("archive extraction to a callback", || {
+    // Outer `Err`: an archive or file-object failure; inner `Err`: the
+    // callback's own exception, which the file-object slot must never replace.
+    let outcome = catch_panic_as_py_result("archive extraction to a callback", || {
         py.detach(|| {
             let reader = data.into_reader(request.format).map_err(convert_error)?;
-            extract_reader_to_callback(
+            match extract_reader_to_callback(
                 reader,
                 &request.request,
                 |path, entry| {
@@ -656,16 +658,21 @@ pub fn extract_archive_to_callback(
                     })
                 },
                 &mut exarch_core::NoopProgress,
-            )
-            .map_err(|err| match err {
-                CallbackError::Callback(err) => err,
-                CallbackError::Archive(err) => convert_error(err),
-                _ => PyRuntimeError::new_err(
+            ) {
+                Ok(report) => Ok(Ok(report)),
+                Err(CallbackError::Callback(err)) => Ok(Err(err)),
+                Err(CallbackError::Archive(err)) => Err(convert_error(err)),
+                Err(_) => Err(PyRuntimeError::new_err(
                     "exarch-python is older than exarch-core: unknown callback error",
-                ),
-            })
+                )),
+            }
         })
     });
+    let result = match outcome {
+        Ok(Err(callback_error)) => return Err(callback_error),
+        Ok(Ok(report)) => Ok(report),
+        Err(err) => Err(err),
+    };
     slot.surface(result).map(PyExtractionReport::from)
 }
 

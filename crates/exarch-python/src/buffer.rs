@@ -4,6 +4,7 @@ use std::num::NonZeroU64;
 use std::path::Path;
 
 use exarch_core::ArchiveError;
+use exarch_core::CallbackEntry;
 use exarch_core::CallbackSink;
 use exarch_core::MemoryEntry;
 use exarch_core::MemoryEntryKind;
@@ -140,19 +141,20 @@ impl PyMemoryEntry {
 }
 
 impl PyMemoryEntry {
-    fn new(py: Python<'_>, path: &Path, entry: MemoryEntry) -> PyResult<Self> {
+    fn new(py: Python<'_>, path: &Path, entry: CallbackEntry) -> PyResult<Self> {
         let path = utf8(path)?;
         let kind = entry.kind();
         let (data, mode, target) = match entry {
-            MemoryEntry::File { data, mode } => (
+            CallbackEntry::Stored(MemoryEntry::File { data, mode }) => (
                 Some(PyBytes::new(py, &data).unbind()),
                 mode.map(SanitizedMode::as_u32),
                 None,
             ),
-            MemoryEntry::Symlink { target } | MemoryEntry::Hardlink { target } => {
+            CallbackEntry::Stored(MemoryEntry::Symlink { target }) => {
                 (None, None, Some(utf8(&target)?))
             }
-            MemoryEntry::Directory => (None, None, None),
+            CallbackEntry::Hardlink { target } => (None, None, Some(utf8(target.as_path())?)),
+            CallbackEntry::Stored(MemoryEntry::Directory) => (None, None, None),
             _ => {
                 return Err(PyRuntimeError::new_err(
                     "exarch-python is older than exarch-core: unknown memory entry kind",
@@ -727,7 +729,7 @@ fn into_py_extraction(
     let entries = sink
         .into_entries()
         .into_iter()
-        .map(|(path, entry)| Py::new(py, PyMemoryEntry::new(py, &path, entry)?))
+        .map(|(path, entry)| Py::new(py, PyMemoryEntry::new(py, &path, entry.into())?))
         .collect::<PyResult<_>>()?;
     Ok(PyMemoryExtraction {
         report: PyExtractionReport::from(report),

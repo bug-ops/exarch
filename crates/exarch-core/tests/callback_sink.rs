@@ -12,6 +12,7 @@ use std::path::PathBuf;
 
 use exarch_core::ArchiveError;
 use exarch_core::ArchiveReader;
+use exarch_core::CallbackEntry;
 use exarch_core::CallbackSink;
 use exarch_core::MemoryEntry;
 use exarch_core::MemoryEntryKind;
@@ -24,7 +25,7 @@ use sink_support::tar_file;
 use sink_support::tar_hardlink;
 use sink_support::tar_symlink;
 
-type Delivered = Vec<(PathBuf, MemoryEntry)>;
+type Delivered = Vec<(PathBuf, CallbackEntry)>;
 
 fn links() -> SecurityConfig {
     SecurityConfig::default()
@@ -71,16 +72,16 @@ fn every_kind_is_delivered_and_a_hardlink_comes_last_by_reference() {
     );
     assert_matches!(
         &delivered[1].1,
-        MemoryEntry::File { data, .. } if data == b"hello"
+        CallbackEntry::Stored(MemoryEntry::File { data, .. }) if data == b"hello"
     );
     assert_matches!(
         &delivered[2].1,
-        MemoryEntry::Symlink { target } if target == Path::new("d/a.txt")
+        CallbackEntry::Stored(MemoryEntry::Symlink { target }) if target == Path::new("d/a.txt")
     );
     assert_eq!(delivered[3].0, Path::new("h"));
     assert_matches!(
         &delivered[3].1,
-        MemoryEntry::Hardlink { target } if target == Path::new("d/a.txt")
+        CallbackEntry::Hardlink { target } if target.as_path() == Path::new("d/a.txt")
     );
     assert_eq!(MemoryEntryKind::Hardlink.as_str(), "hardlink");
 }
@@ -98,7 +99,7 @@ fn a_hardlink_target_is_the_resolved_path() {
     result.unwrap();
     assert_matches!(
         &delivered.last().unwrap().1,
-        MemoryEntry::Hardlink { target } if target == Path::new("d/a.txt")
+        CallbackEntry::Hardlink { target } if target.as_path() == Path::new("d/a.txt")
     );
 }
 
@@ -116,7 +117,9 @@ fn a_hardlink_chain_is_delivered_link_by_link() {
     let targets: Vec<_> = delivered
         .iter()
         .filter_map(|(path, entry)| match entry {
-            MemoryEntry::Hardlink { target } => Some((path.clone(), target.clone())),
+            CallbackEntry::Hardlink { target } => {
+                Some((path.clone(), target.as_path().to_path_buf()))
+            }
             _ => None,
         })
         .collect();
@@ -143,7 +146,7 @@ fn under_overwrite_a_path_is_delivered_again() {
     let data: Vec<_> = delivered
         .iter()
         .filter_map(|(_, e)| match e {
-            MemoryEntry::File { data, .. } => Some(data.clone()),
+            CallbackEntry::Stored(MemoryEntry::File { data, .. }) => Some(data.clone()),
             _ => None,
         })
         .collect();

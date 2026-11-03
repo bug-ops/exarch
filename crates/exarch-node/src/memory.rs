@@ -3,6 +3,7 @@
 use std::path::Path;
 use std::path::PathBuf;
 
+use exarch_core::CallbackEntry;
 use exarch_core::MemoryEntry as CoreMemoryEntry;
 use exarch_core::MemoryExtractRequest;
 use exarch_core::MemoryLimit;
@@ -115,34 +116,34 @@ fn utf8(path: &Path) -> CoreResult<String> {
     })
 }
 
-impl TryFrom<(PathBuf, CoreMemoryEntry)> for MemoryEntry {
+impl TryFrom<(PathBuf, CallbackEntry)> for MemoryEntry {
     type Error = Failure;
 
-    fn try_from((path, entry): (PathBuf, CoreMemoryEntry)) -> CoreResult<Self> {
+    fn try_from((path, entry): (PathBuf, CallbackEntry)) -> CoreResult<Self> {
         let path = utf8(&path)?;
         Ok(match entry {
-            CoreMemoryEntry::File { data, mode } => Self {
+            CallbackEntry::Stored(CoreMemoryEntry::File { data, mode }) => Self {
                 path,
                 kind: MemoryEntryKind::File,
                 data: Some(Uint8Array::from(data)),
                 mode: mode.map(SanitizedMode::as_u32),
                 target: None,
             },
-            CoreMemoryEntry::Symlink { target } => Self {
+            CallbackEntry::Stored(CoreMemoryEntry::Symlink { target }) => Self {
                 path,
                 kind: MemoryEntryKind::Symlink,
                 data: None,
                 mode: None,
                 target: Some(utf8(&target)?),
             },
-            CoreMemoryEntry::Hardlink { target } => Self {
+            CallbackEntry::Hardlink { target } => Self {
                 path,
                 kind: MemoryEntryKind::Hardlink,
                 data: None,
                 mode: None,
-                target: Some(utf8(&target)?),
+                target: Some(utf8(target.as_path())?),
             },
-            CoreMemoryEntry::Directory => Self {
+            CallbackEntry::Stored(CoreMemoryEntry::Directory) => Self {
                 path,
                 kind: MemoryEntryKind::Directory,
                 data: None,
@@ -264,7 +265,7 @@ fn into_memory_extraction(
         entries: sink
             .into_entries()
             .into_iter()
-            .map(MemoryEntry::try_from)
+            .map(|(path, entry)| MemoryEntry::try_from((path, CallbackEntry::from(entry))))
             .collect::<CoreResult<_>>()?,
     })
 }

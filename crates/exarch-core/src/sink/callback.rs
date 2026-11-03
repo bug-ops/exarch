@@ -7,12 +7,60 @@ use crate::security::fs_view::PathModel;
 use crate::security::permissions::SanitizedMode;
 use crate::sink::EntrySink;
 use crate::sink::MemoryEntry;
+use crate::sink::MemoryEntryKind;
 use crate::sink::MemoryFile;
 use crate::types::SafePath;
 
+/// An entry delivered by a [`CallbackSink`].
+///
+/// Everything a [`MemorySink`](crate::MemorySink) can hold is
+/// [`Stored`](Self::Stored); a hardlink is delivered by reference instead,
+/// because the sink keeps no bytes to copy.
+///
+/// # Examples
+///
+/// ```
+/// use exarch_core::CallbackEntry;
+/// use exarch_core::MemoryEntry;
+/// use exarch_core::MemoryEntryKind;
+///
+/// let entry = CallbackEntry::from(MemoryEntry::Directory);
+/// assert_eq!(entry.kind(), MemoryEntryKind::Directory);
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CallbackEntry {
+    /// A file, directory or symlink, as a [`MemorySink`](crate::MemorySink)
+    /// would store it.
+    Stored(MemoryEntry),
+    /// A hard link to an entry that was already delivered, by reference.
+    Hardlink {
+        /// The validated, root-relative path of an already delivered entry: a
+        /// file, or an earlier hardlink (a chain is delivered link by link).
+        target: SafePath,
+    },
+}
+
+impl CallbackEntry {
+    /// What the entry holds.
+    #[must_use]
+    pub const fn kind(&self) -> MemoryEntryKind {
+        match self {
+            Self::Stored(entry) => entry.kind(),
+            Self::Hardlink { .. } => MemoryEntryKind::Hardlink,
+        }
+    }
+}
+
+impl From<MemoryEntry> for CallbackEntry {
+    fn from(entry: MemoryEntry) -> Self {
+        Self::Stored(entry)
+    }
+}
+
 /// An [`EntrySink`] that delivers each entry to a closure as it is verified.
 ///
-/// The closure receives the entry's validated path and a [`MemoryEntry`]. A
+/// The closure receives the entry's validated path and a [`CallbackEntry`]. A
 /// file is delivered whole, after all of its bytes were written and the stream
 /// delivered exactly the size the archive declares. The memory held at any
 /// moment is one file, bounded by the configuration's `max_file_size`; the sink
@@ -35,10 +83,11 @@ use crate::types::SafePath;
 ///
 /// - A [`MemoryEntry::Symlink`] target is spelled as the archive stores it and
 ///   is relative to the directory of the link.
-/// - A [`MemoryEntry::Hardlink`] target is the root-relative, resolved path of
-///   an entry that was already delivered: a file, or an earlier hardlink, so a
-///   chain of links is delivered link by link. The sink holds no bytes, so the
-///   closure resolves the reference against what it kept.
+/// - A [`CallbackEntry::Hardlink`] target is the validated, root-relative,
+///   resolved [`SafePath`] of an entry that was already delivered: a file, or
+///   an earlier hardlink, so a chain of links is delivered link by link. The
+///   sink holds no bytes, so the closure resolves the reference against what it
+///   kept.
 ///
 /// # Delivery rules
 ///
@@ -56,6 +105,7 @@ use crate::types::SafePath;
 /// use std::io;
 ///
 /// use exarch_core::ArchiveReader;
+/// use exarch_core::CallbackEntry;
 /// use exarch_core::CallbackSink;
 /// use exarch_core::MemoryEntry;
 /// use exarch_core::SecurityConfig;
@@ -72,7 +122,7 @@ use crate::types::SafePath;
 ///
 /// let mut seen = Vec::new();
 /// let mut sink = CallbackSink::new(|path, entry| {
-///     if let MemoryEntry::File { data, .. } = entry {
+///     if let CallbackEntry::Stored(MemoryEntry::File { data, .. }) = entry {
 ///         seen.push((path.as_path().to_path_buf(), data));
 ///     }
 ///     Ok(())
@@ -97,7 +147,7 @@ pub struct CallbackSink<F> {
 
 impl<F> CallbackSink<F>
 where
-    F: FnMut(&SafePath, MemoryEntry) -> io::Result<()>,
+    F: FnMut(&SafePath, CallbackEntry) -> io::Result<()>,
 {
     /// A sink that calls `callback` for every entry, validating against the
     /// host's path rules.
@@ -132,7 +182,7 @@ where
 
 impl<F> EntrySink for CallbackSink<F>
 where
-    F: FnMut(&SafePath, MemoryEntry) -> io::Result<()>,
+    F: FnMut(&SafePath, CallbackEntry) -> io::Result<()>,
 {
     type File = MemoryFile;
 
@@ -141,7 +191,7 @@ where
     }
 
     fn create_directory(&mut self, path: &SafePath) -> io::Result<()> {
-        (self.callback)(path, MemoryEntry::Directory)
+        (self.callback)(path, MemoryEntry::Directory.into())
     }
 
     fn create_file(
@@ -154,7 +204,7 @@ where
     }
 
     fn finish_file(&mut self, path: &SafePath, file: MemoryFile) -> io::Result<()> {
-        (self.callback)(path, file.into_entry())
+        (self.callback)(path, file.into_entry().into())
     }
 
     fn create_symlink(&mut self, link: &SafePath, target: &Path) -> io::Result<()> {
@@ -162,15 +212,16 @@ where
             link,
             MemoryEntry::Symlink {
                 target: target.to_path_buf(),
-            },
+            }
+            .into(),
         )
     }
 
     fn create_hardlink(&mut self, link: &SafePath, target: &SafePath) -> io::Result<()> {
         (self.callback)(
             link,
-            MemoryEntry::Hardlink {
-                target: target.as_path().to_path_buf(),
+            CallbackEntry::Hardlink {
+                target: target.clone(),
             },
         )
     }

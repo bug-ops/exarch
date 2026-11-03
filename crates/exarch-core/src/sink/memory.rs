@@ -79,6 +79,10 @@ impl MemoryLimit {
 }
 
 /// An entry held by a [`MemorySink`].
+///
+/// A [`MemorySink`] stores a hardlink as a copy of the file, so this type has
+/// no hardlink variant. A [`CallbackSink`](crate::CallbackSink) delivers a
+/// hardlink by reference as a [`CallbackEntry`](crate::CallbackEntry).
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum MemoryEntry {
@@ -97,21 +101,13 @@ pub enum MemoryEntry {
         /// The target as the archive spells it, relative to the link.
         target: PathBuf,
     },
-    /// A hard link to an entry that was already delivered, by reference.
-    ///
-    /// Only a [`CallbackSink`](crate::CallbackSink) delivers it; a
-    /// [`MemorySink`] stores a hardlink as a copy of the file.
-    Hardlink {
-        /// The root-relative, resolved path of an already delivered entry: a
-        /// file, or an earlier hardlink (a chain is delivered link by link).
-        target: PathBuf,
-    },
 }
 
 closed_enum! {
-    /// What a [`MemoryEntry`] holds.
+    /// What a [`MemoryEntry`] or a [`CallbackEntry`](crate::CallbackEntry) holds.
     ///
-    /// The string form is the one every language binding reports.
+    /// The string form is the one every language binding reports. Only a
+    /// [`CallbackEntry`](crate::CallbackEntry) can be a [`Hardlink`](Self::Hardlink).
     ///
     /// # Examples
     ///
@@ -144,7 +140,6 @@ impl MemoryEntry {
             Self::File { .. } => MemoryEntryKind::File,
             Self::Directory => MemoryEntryKind::Directory,
             Self::Symlink { .. } => MemoryEntryKind::Symlink,
-            Self::Hardlink { .. } => MemoryEntryKind::Hardlink,
         }
     }
 
@@ -152,7 +147,7 @@ impl MemoryEntry {
     fn payload_bytes(&self) -> u64 {
         match self {
             Self::File { data, .. } => data.len() as u64,
-            Self::Symlink { target } | Self::Hardlink { target } => target.as_os_str().len() as u64,
+            Self::Symlink { target } => target.as_os_str().len() as u64,
             Self::Directory => 0,
         }
     }

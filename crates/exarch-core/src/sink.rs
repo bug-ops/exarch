@@ -148,6 +148,7 @@
 mod callback;
 mod memory;
 
+pub use callback::CallbackEntry;
 pub use callback::CallbackSink;
 pub use memory::MemoryEntry;
 pub use memory::MemoryEntryKind;

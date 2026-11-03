@@ -2,8 +2,8 @@
 
 use std::io;
 
+use exarch_core::CallbackEntry;
 use exarch_core::CallbackSink;
-use exarch_core::MemoryEntry as CoreMemoryEntry;
 use exarch_core::PathModel as CorePathModel;
 use exarch_core::SafePath;
 use exarch_core::SinkOptions;
@@ -158,7 +158,7 @@ impl CallbackJob {
         };
         let mut failure: Option<Failure> = None;
         let result = source.run(self.format, |reader| {
-            let mut sink = CallbackSink::new(|path: &SafePath, entry: CoreMemoryEntry| {
+            let mut sink = CallbackSink::new(|path: &SafePath, entry: CallbackEntry| {
                 let delivered = MemoryEntry::try_from((path.as_path().to_path_buf(), entry))
                     .and_then(&mut deliver);
                 delivered.map_err(|err| {

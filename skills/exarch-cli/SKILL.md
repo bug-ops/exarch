@@ -140,10 +140,12 @@ exarch create out.tar.gz src/ --json
 | `--max-file-size <BYTES>` | none | Skip source files larger than this (`K`/`M`/`G`/`T` suffixes). `0` is refused with `InvalidConfiguration` (setting `max_file_size`), exit `1`, and no archive is written (verified live with the debug binary). |
 | `--preserve-permissions[=true\|false]` | `true` | Preserve platform permission bits. Pass `--preserve-permissions=false` for a portable, permission-agnostic archive. |
 
+**Overwrite defaults differ between front ends.** The CLI refuses an existing `OUTPUT` unless `--force` is passed (`OutputExists`, exit `1`). The Node and Python bindings take an `overwrite` option that defaults to `true`, so `createArchive` / `create_archive` replace an existing file unless the caller passes `overwrite: false` (`overwrite=False`). Every front end writes through the same staged temporary file and renames it into place, so a failed run keeps the previous archive.
+
 > [!NOTE]
 > With `--follow-symlinks` off (default), a symlink passed directly as a source (file or
 > directory) is archived as a link in TAR; ZIP has no symlink entry type, so it is skipped
-> instead (warning + `files_skipped`). With `--follow-symlinks` on, both TAR and ZIP dereference
+> instead (counted as a `symlink_unsupported` skip). With `--follow-symlinks` on, both TAR and ZIP dereference
 > the symlink and store the target's content — for a directory symlink, this means walking and
 > archiving the entire target tree.
 
@@ -565,8 +567,8 @@ extraction with the entries before it kept. A failed `extract --atomic` reports
 
 The conflict check asks the library every path extraction creates, the implied parent directories of an entry included (`first.txt` and `a/b.txt` with a file at `out/a`), probes each with `lstat` and names the conflict at the path that holds it, before anything is written (verified live: `out/a` is named, `first.txt` is not written). A destination symlink at an implied parent is a conflict too, unless it points at a directory inside the destination, which extraction then accepts under `--allow-symlinks` or refuses with that hint. A failure to inspect a path other than its absence is an error, not a pass. The check asks the library where each entry would land (absolute and Windows-prefixed names, `./` components and paths through earlier links resolved as extraction resolves them, entries extraction would not create left out). Anything already at the landing of a file, link or hardlink is a conflict, and so is a non-directory at the landing of a directory; an existing directory under a directory entry is not. Verified live on a `./a.txt` entry, a symlink entry over a file, a file entry over a dangling symlink and a directory over a directory. `list -l` sizes now count regular files only (a link or directory shows size `0`).
 
-Note: `extract` lists the archive first (`list_archive()`, sharing `--max-file-count`,
-`--max-total-size`, and `--max-file-size` with the extraction config) to detect output
+Note: `extract` lists the archive first (a listing under the extraction config, sharing
+`--max-files`, `--max-total-size`, and `--max-file-size`) to detect output
 conflicts and size the progress bar, except for a TAR (any codec) extracted with `--atomic`
 (including `--atomic --force` over an existing destination), or whose destination does not
 exist yet and whose parent directory does. `--atomic` decodes a TAR once: the list pass would
@@ -620,7 +622,7 @@ backup). `create` reports the same three skip fields. In text mode the total is 
 `kind: N` line per reason. Verified live: `extract --allowed-extensions md` of a one-file archive prints
 `Files skipped: 1` / `extension_not_allowed: 1`, and `create -x a.txt` prints `excluded: 1`. A skip no
 longer appears as a free-text warning — e.g. `--allowed-extensions` rejecting entries by extension, or duplicate destination
-files skipped under `--skip-duplicates` semantics (the default when `--force` is absent).
+files skipped as duplicates (the default; `--force` overwrites them instead).
 Verified live with a mixed-extension archive extracted via `--allowed-extensions txt`:
 
 ```json

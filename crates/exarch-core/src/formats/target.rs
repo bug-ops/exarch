@@ -10,6 +10,8 @@ use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 
+use super::zip_reuse::Retained;
+
 use crate::ArchiveError;
 use crate::ExtractionReport;
 use crate::ProgressCallback;
@@ -179,6 +181,22 @@ pub trait ExtractTarget {
         admitted: Self::AdmittedFile,
         tally: &mut Tally<'_>,
     ) -> Result<()>;
+
+    /// Writes an admitted file from output the ZIP census kept, which was
+    /// checked against the entry's length and CRC-32. The default streams it
+    /// through [`Self::file`]; a target that can take the buffer as it is
+    /// overrides it.
+    fn file_retained(
+        &mut self,
+        retained: Retained<'_>,
+        admitted: Self::AdmittedFile,
+        tally: &mut Tally<'_>,
+    ) -> Result<()> {
+        match retained {
+            Retained::Bytes(bytes) => self.file(&mut bytes.as_slice(), admitted, tally),
+            Retained::Spooled(mut reader) => self.file(&mut reader, admitted, tally),
+        }
+    }
 
     /// Creates a validated symlink.
     fn symlink(&mut self, symlink: &SafeSymlink<Self::Parent>, tally: &mut Tally<'_>)

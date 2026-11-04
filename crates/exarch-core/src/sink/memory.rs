@@ -6,6 +6,9 @@ use std::io::Write;
 use std::num::NonZeroU64;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 
 use crate::ArchiveError;
 use crate::ArchiveReader;
@@ -76,6 +79,29 @@ impl MemoryLimit {
     pub fn from_config<State>(config: &SecurityConfig<State>) -> Self {
         Self(NonZeroU64::new(config.max_total_size).unwrap_or(NonZeroU64::MIN))
     }
+}
+
+/// The bytes a [`MemorySink`] has charged, readable while the sink is borrowed
+/// by an extraction, so the ZIP decode store can share the sink's limit.
+#[derive(Debug, Clone, Default)]
+pub struct SinkUsage(Arc<AtomicU64>);
+
+impl SinkUsage {
+    pub(crate) fn get(&self) -> u64 {
+        self.0.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn set(&self, bytes: u64) {
+        self.0.store(bytes, Ordering::Relaxed);
+    }
+}
+
+/// What an extraction into a [`MemorySink`] shares with the ZIP decode store:
+/// the sink's charged bytes and its limit.
+#[derive(Debug)]
+pub struct SinkReuse {
+    pub(crate) usage: SinkUsage,
+    pub(crate) limit: MemoryLimit,
 }
 
 /// An entry held by a [`MemorySink`].
@@ -264,12 +290,17 @@ pub fn extract_reader_to_memory(
         .limit
         .unwrap_or_else(|| MemoryLimit::from_config(&request.config));
     let mut sink = MemorySink::new(limit).with_path_model(request.model);
-    let report = crate::extract_to_sink_with_progress(
+    let reuse = SinkReuse {
+        usage: sink.usage(),
+        limit,
+    };
+    let report = crate::api::extract_to_sink_reusing(
         reader,
         &mut sink,
         &request.config,
-        &request.options,
+        request.options,
         progress,
+        Some(reuse),
     )
     .map_err(ArchiveError::discarded)?;
     Ok((report, sink))
@@ -285,6 +316,11 @@ pub struct MemoryFile {
 }
 
 impl MemoryFile {
+    /// A writer that holds `data` already, for a file received whole.
+    pub(crate) const fn from_vec(data: Vec<u8>, mode: Option<SanitizedMode>) -> Self {
+        Self { data, mode }
+    }
+
     /// A writer for a file of `size` bytes, pre-allocating at most 64 KiB so a
     /// forged size cannot reserve memory before any byte arrives.
     pub(crate) fn with_size(size: u64, mode: Option<SanitizedMode>) -> Self {
@@ -370,6 +406,7 @@ pub struct MemorySink {
     limit: MemoryLimit,
     path_model: PathModel,
     stored: u64,
+    usage: SinkUsage,
     entries: BTreeMap<PathBuf, MemoryEntry>,
 }
 
@@ -386,11 +423,12 @@ impl MemorySink {
 
     /// An empty sink that accepts at most `limit` bytes.
     #[must_use]
-    pub const fn new(limit: MemoryLimit) -> Self {
+    pub fn new(limit: MemoryLimit) -> Self {
         Self {
             limit,
             path_model: PathModel::Host,
             stored: 0,
+            usage: SinkUsage(Arc::new(AtomicU64::new(0))),
             entries: BTreeMap::new(),
         }
     }
@@ -452,7 +490,11 @@ impl MemorySink {
         )
     }
 
-    fn charge_of(path: &Path, payload: u64) -> u64 {
+    pub(crate) fn usage(&self) -> SinkUsage {
+        self.usage.clone()
+    }
+
+    pub(crate) fn charge_of(path: &Path, payload: u64) -> u64 {
         Self::ENTRY_OVERHEAD
             .saturating_add(path.as_os_str().len() as u64)
             .saturating_add(payload)
@@ -479,7 +521,18 @@ impl MemorySink {
     fn store(&mut self, path: &SafePath, entry: MemoryEntry) -> io::Result<()> {
         let key = path.as_path();
         self.stored = self.charged_with(key, entry.payload_bytes())?;
+        self.usage.set(self.stored);
         self.entries.insert(key.to_path_buf(), entry);
+        Ok(())
+    }
+
+    /// Drops the entry at `path` to make room for a file of `size` bytes, or
+    /// refuses a file that would pass the limit.
+    fn reserve_file(&mut self, path: &SafePath, size: u64) -> io::Result<()> {
+        self.charged_with(path.as_path(), size)?;
+        self.stored = self.stored.saturating_sub(self.held_at(path.as_path()));
+        self.usage.set(self.stored);
+        self.entries.remove(path.as_path());
         Ok(())
     }
 }
@@ -501,10 +554,18 @@ impl EntrySink for MemorySink {
         mode: Option<SanitizedMode>,
         size: u64,
     ) -> io::Result<MemoryFile> {
-        self.charged_with(path.as_path(), size)?;
-        self.stored = self.stored.saturating_sub(self.held_at(path.as_path()));
-        self.entries.remove(path.as_path());
+        self.reserve_file(path, size)?;
         Ok(MemoryFile::with_size(size, mode))
+    }
+
+    fn create_file_from(
+        &mut self,
+        path: &SafePath,
+        mode: Option<SanitizedMode>,
+        bytes: Vec<u8>,
+    ) -> io::Result<MemoryFile> {
+        self.reserve_file(path, bytes.len() as u64)?;
+        Ok(MemoryFile::from_vec(bytes, mode))
     }
 
     fn finish_file(&mut self, path: &SafePath, file: MemoryFile) -> io::Result<()> {

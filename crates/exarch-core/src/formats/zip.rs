@@ -136,8 +136,10 @@ use crate::ArchiveError;
 use crate::DecodeReuse;
 use crate::ExtractionOptions;
 use crate::ExtractionReport;
+use crate::MemorySink;
 use crate::ProgressCallback;
 use crate::Result;
+use crate::ReuseLimit;
 use crate::SecurityConfig;
 use crate::SinkOptions;
 use crate::VerificationOptions;
@@ -147,6 +149,7 @@ use crate::config::Validated;
 use crate::security::Compressed;
 use crate::security::RawMode;
 use crate::security::Uncompressed;
+use crate::sink::SinkReuse;
 
 use crate::copy::declared_size_exceeded;
 use crate::inspection::integrity::DecodeFailure;
@@ -171,9 +174,11 @@ use super::traits::ArchiveFormat;
 use super::zip_reuse::RetainKey;
 use super::zip_reuse::ReusePlan;
 use super::zip_reuse::ReuseStore;
+use super::zip_reuse::Taken;
 use super::zip_structure;
 use super::zip_structure::Shared;
 use super::zip_structure::ZipStructure;
+use super::zip_tail::Compressed as StreamMethod;
 use super::zstd_window::ZstdWindowLog;
 use super::zstd_window::ZstdWindows;
 
@@ -609,6 +614,26 @@ impl<R: Read + Seek> ZipArchive<R> {
         Self::open_for(reader, config, reuse)
     }
 
+    /// Opens `reader` for an extraction into a sink that shares its memory
+    /// limit, keeping the output of the structural check within that limit
+    /// together with what the sink holds.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`ZipArchive::new`].
+    pub(crate) fn for_sink(
+        reader: R,
+        config: &SecurityConfig<Validated>,
+        reuse: &SinkReuse,
+    ) -> Result<Self> {
+        let limit = ReuseLimit::new(reuse.limit.bytes());
+        let mut archive = Self::open_for(reader, config, DecodeReuse::Memory(limit))?;
+        if let Some(store) = archive.structure.reuse_mut() {
+            store.share_limit_with_sink(reuse.usage.clone(), reuse.limit.bytes().get());
+        }
+        Ok(archive)
+    }
+
     fn open_for(reader: R, config: &SecurityConfig<Validated>, reuse: DecodeReuse) -> Result<Self> {
         let checks = zip_structure::StreamChecks::of(config.zip_consistency);
         let (inner, structure) = zip_structure::open_with(
@@ -804,6 +829,7 @@ impl<R: Read + Seek> ZipArchive<R> {
         target: &mut T,
         ctx: &mut ZipExtractionContext<'_>,
         reuse: Option<&ReuseStore>,
+        claimed: Option<(Taken, RetainKey)>,
     ) -> Result<()> {
         if zip_file.encrypted() {
             let name = zip_file
@@ -843,10 +869,12 @@ impl<R: Read + Seek> ZipArchive<R> {
                 mode: mode.map(RawMode::new),
             };
             if let FileAdmission::Write(admitted) = target.validate_file(request, &mut ctx.tally)? {
-                let key = reuse.and_then(|store| replay_key(&zip_file).map(|key| (store, key)));
-                let written = match key.and_then(|(store, key)| store.open(&key)) {
-                    Some(mut replay) => target.file(&mut replay, admitted, &mut ctx.tally),
-                    None => target.file(&mut zip_file, admitted, &mut ctx.tally),
+                let written = match (reuse, claimed) {
+                    (Some(store), Some((taken, key))) => match store.retained(taken, &key) {
+                        Ok(retained) => target.file_retained(retained, admitted, &mut ctx.tally),
+                        Err(e) => Err(ArchiveError::Io(e)),
+                    },
+                    _ => target.file(&mut zip_file, admitted, &mut ctx.tally),
                 };
                 written
                     .map_err(|e| Self::classify_declared_size_overrun(e, uncompressed_size.0))?;
@@ -933,7 +961,15 @@ impl<R: Read + Seek> ZipArchive<R> {
                 config,
             };
 
-            let result = Self::process_entry(zip_file, i, target, &mut ctx, self.structure.reuse());
+            let claimed = claim_kept(&zip_file, &entry_path, self.structure.reuse_mut());
+            let result = Self::process_entry(
+                zip_file,
+                i,
+                target,
+                &mut ctx,
+                self.structure.reuse(),
+                claimed,
+            );
 
             if let Err(e) = result {
                 drop(guard);
@@ -1034,15 +1070,26 @@ impl<R: Read + Seek> ZipArchive<R> {
     }
 }
 
-/// What identifies a deflate entry's kept census output, when the entry is
-/// one the census can have kept.
+/// Takes the census output kept for the entry out of the store, then evicts
+/// kept output of later entries until the entry fits beside what a sharing
+/// sink holds.
+fn claim_kept<R: Read>(
+    zip_file: &zip::read::ZipFile<'_, R>,
+    entry_path: &Path,
+    store: Option<&mut ReuseStore>,
+) -> Option<(Taken, RetainKey)> {
+    let store = store?;
+    let claimed = replay_key(zip_file).and_then(|key| store.take(&key).map(|taken| (taken, key)));
+    store.make_room(MemorySink::charge_of(entry_path, zip_file.size()));
+    claimed
+}
+
+/// What identifies an entry's kept census output, when the entry is a
+/// compressed stream the census can have kept.
 fn replay_key<R: Read>(zip_file: &zip::read::ZipFile<'_, R>) -> Option<RetainKey> {
-    if !matches!(
-        ZipMethod::try_from(zip_file.compression()),
-        Ok(ZipMethod::Deflate)
-    ) {
-        return None;
-    }
+    ZipMethod::try_from(zip_file.compression())
+        .ok()
+        .and_then(StreamMethod::of)?;
     Some(RetainKey {
         data_start: zip_file.data_start()?,
         compressed: crate::security::zipbomb::Compressed(zip_file.compressed_size()),

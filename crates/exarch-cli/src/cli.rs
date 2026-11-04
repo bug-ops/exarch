@@ -105,7 +105,7 @@ impl From<ZipConsistencyArg> for ZipConsistencyPolicy {
 /// entries are decoded once.
 #[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DecodeReuseArg {
-    /// Keep nothing; deflate entries are decoded twice
+    /// Keep nothing; compressed entries are decoded twice
     Off,
     /// Keep up to 256 MiB in memory
     Memory,
@@ -198,14 +198,14 @@ pub struct ExtractArgs {
     #[command(flatten)]
     pub parallel: ParallelDecodeArgs,
 
-    /// Where to keep what the ZIP structure check decodes, so deflate entries
-    /// are not decoded a second time (default: memory, up to 256 MiB, never
-    /// more than --max-total-size or the 256 MiB decoder memory limit). It has
-    /// no effect under --zip-consistency ignore, which skips that decode. With
-    /// temp-file the decoded plaintext sits in an unnamed file in the
-    /// temporary directory until extraction ends; on a tmpfs that is memory
+    /// Where to keep what the ZIP structure check decodes, so compressed
+    /// entries are not decoded a second time (default: memory, up to 256 MiB,
+    /// never more than --max-total-size or the 256 MiB decoder memory limit).
+    /// It has no effect under --zip-consistency ignore, which skips that
+    /// decode. With temp-file the decoded plaintext sits in an unnamed file in
+    /// the temporary directory until extraction ends; on a tmpfs that is memory
     /// too, and on a disk it is often no faster than memory or off. Entries
-    /// that do not fit, bzip2 and zstd entries are decoded again.
+    /// that do not fit are decoded again.
     #[arg(long, value_enum, value_name = "MODE")]
     pub decode_reuse: Option<DecodeReuseArg>,
 

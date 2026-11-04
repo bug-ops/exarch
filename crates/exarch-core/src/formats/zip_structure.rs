@@ -607,8 +607,7 @@ impl ZipStructure {
         self.reuse.as_ref()
     }
 
-    /// Like [`Self::reuse`], for tests that damage the kept output.
-    #[cfg(test)]
+    /// Like [`Self::reuse`], to take kept output out as extraction reaches it.
     pub(crate) const fn reuse_mut(&mut self) -> Option<&mut ReuseStore> {
         self.reuse.as_mut()
     }
@@ -654,12 +653,10 @@ fn retain_key(layout: &EntryLayout) -> RetainKey {
 }
 
 /// The store for the output of the census, when the mode keeps any, the
-/// census decodes streams and some entry is a deflate stream it can keep.
+/// census decodes streams and some entry is a compressed stream it can keep.
 fn reuse_store(chunks: ChunkSizes, layouts: &[EntryLayout]) -> Option<ReuseStore> {
-    let keeps_deflate = layouts
-        .iter()
-        .any(|l| l.size > 0 && matches!(l.stream, Some(Compressed::Deflate)));
-    if chunks.stream_checks == StreamChecks::Skip || !keeps_deflate {
+    let keeps_stream = layouts.iter().any(|l| l.size > 0 && l.stream.is_some());
+    if chunks.stream_checks == StreamChecks::Skip || !keeps_stream {
         return None;
     }
     ReuseStore::new(chunks.reuse)
@@ -1771,12 +1768,10 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
             {
                 self.zstd_decodes += usize::from(zstd);
             }
-            // TODO(#866): bzip2 and zstd entries, sink extraction and entries
-            // past the reuse limit still decode twice.
-            let capture = match (method, self.reuse.as_deref_mut()) {
-                (Compressed::Deflate, Some(store)) => store.capture(retain_key(layout)),
-                _ => None,
-            };
+            let capture = self
+                .reuse
+                .as_deref_mut()
+                .and_then(|store| store.capture(retain_key(layout)));
             stream_end(
                 &mut *self.reader,
                 method,

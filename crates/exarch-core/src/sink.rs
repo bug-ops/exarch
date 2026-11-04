@@ -158,6 +158,8 @@ pub use memory::MemoryExtractRequest;
 pub use memory::MemoryFile;
 pub use memory::MemoryLimit;
 pub use memory::MemorySink;
+pub(crate) use memory::SinkReuse;
+pub(crate) use memory::SinkUsage;
 pub use memory::extract_reader_to_memory;
 
 use std::collections::HashMap;
@@ -180,6 +182,7 @@ use crate::formats::target::ExtractTarget;
 use crate::formats::target::FileAdmission;
 use crate::formats::target::FileRequest;
 use crate::formats::target::Tally;
+use crate::formats::zip_reuse::Retained;
 use crate::security::admitted::EntrySize;
 use crate::security::admitted::ValidatedFile;
 use crate::security::admitted::ValidatedHardlink;
@@ -402,6 +405,81 @@ pub trait EntrySink {
         size: u64,
     ) -> io::Result<Self::File>;
 
+    /// Starts a file whose `bytes` are already complete and verified.
+    ///
+    /// The result is then passed to [`finish_file`](Self::finish_file) like one
+    /// from [`create_file`](Self::create_file), and `bytes.len()` is the size
+    /// the archive declares. The default writes `bytes` through
+    /// [`create_file`](Self::create_file); a sink that keeps its files in
+    /// memory can override it to take the buffer without copying it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be started or written.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::io;
+    /// use std::path::Path;
+    ///
+    /// use exarch_core::EntrySink;
+    /// use exarch_core::SafePath;
+    /// use exarch_core::SanitizedMode;
+    ///
+    /// struct VecSink;
+    ///
+    /// impl EntrySink for VecSink {
+    ///     type File = Vec<u8>;
+    ///
+    ///     fn create_directory(&mut self, _: &SafePath) -> io::Result<()> {
+    ///         Ok(())
+    ///     }
+    ///
+    ///     fn create_file(
+    ///         &mut self,
+    ///         _: &SafePath,
+    ///         _: Option<SanitizedMode>,
+    ///         size: u64,
+    ///     ) -> io::Result<Vec<u8>> {
+    ///         Ok(Vec::with_capacity(
+    ///             usize::try_from(size.min(1 << 16)).unwrap_or(0),
+    ///         ))
+    ///     }
+    ///
+    ///     fn create_file_from(
+    ///         &mut self,
+    ///         _: &SafePath,
+    ///         _: Option<SanitizedMode>,
+    ///         bytes: Vec<u8>,
+    ///     ) -> io::Result<Vec<u8>> {
+    ///         Ok(bytes)
+    ///     }
+    ///
+    ///     fn finish_file(&mut self, _: &SafePath, _: Vec<u8>) -> io::Result<()> {
+    ///         Ok(())
+    ///     }
+    ///
+    ///     fn create_symlink(&mut self, _: &SafePath, _: &Path) -> io::Result<()> {
+    ///         Ok(())
+    ///     }
+    ///
+    ///     fn create_hardlink(&mut self, _: &SafePath, _: &SafePath) -> io::Result<()> {
+    ///         Ok(())
+    ///     }
+    /// }
+    /// ```
+    fn create_file_from(
+        &mut self,
+        path: &SafePath,
+        mode: Option<SanitizedMode>,
+        bytes: Vec<u8>,
+    ) -> io::Result<Self::File> {
+        let mut file = self.create_file(path, mode, bytes.len() as u64)?;
+        file.write_all(&bytes)?;
+        Ok(file)
+    }
+
     /// Completes a file after all of its bytes were written and verified.
     ///
     /// # Errors
@@ -427,6 +505,13 @@ pub trait EntrySink {
     ///
     /// Returns an error if the link cannot be created.
     fn create_hardlink(&mut self, link: &SafePath, target: &SafePath) -> io::Result<()>;
+}
+
+/// A file admitted and placed in the virtual tree, not yet written.
+struct StagedFile {
+    path: SafePath,
+    mode: Option<SanitizedMode>,
+    size: u64,
 }
 
 /// An [`ExtractTarget`] that validates against an in-memory model of the
@@ -463,6 +548,65 @@ impl<'a, S: EntrySink> SinkTarget<'a, S> {
             sizes: HashMap::new(),
             copy_buffer: CopyBuffer::new(),
         }
+    }
+
+    /// Validates the placement of an admitted file, or records it as a skipped
+    /// duplicate and returns `None`.
+    fn stage_file(
+        &mut self,
+        admitted: ValidatedFile,
+        tally: &mut Tally<'_>,
+    ) -> Result<Option<StagedFile>> {
+        let (path, permit, mode) = admitted.into_parts();
+        let size = permit.into_bytes();
+        // Overflow guard only, as on the host: the sum is not stored.
+        common::checked_add_bytes(tally.report.bytes_written, size)?;
+
+        let rel = path.as_path();
+        match (self.tree.occupant(rel), tally.options.duplicate_policy()) {
+            (Some(_), DuplicatePolicy::Skip) => {
+                tally.record_duplicate_skip()?;
+                return Ok(None);
+            }
+            (
+                Some(occupant @ (Occupant::Directory | Occupant::Symlink)),
+                DuplicatePolicy::Overwrite,
+            ) => {
+                return Err(common::occupant_at_dest_error(rel, occupant).into());
+            }
+            (Some(Occupant::File) | None, _) => {}
+        }
+
+        let path = self.place(rel, Node::File)?;
+        Ok(Some(StagedFile { path, mode, size }))
+    }
+
+    /// Streams `reader` into a new sink file for `staged`, capped at its size.
+    fn write_staged<R: Read>(
+        &mut self,
+        staged: StagedFile,
+        reader: &mut R,
+        tally: &mut Tally<'_>,
+    ) -> Result<()> {
+        let mut file = self
+            .sink
+            .create_file(&staged.path, staged.mode, staged.size)
+            .map_err(sink_error)?;
+        let written =
+            copy_with_buffer(reader, &mut file, &mut self.copy_buffer, Some(staged.size))?;
+        self.finish_staged(staged.path, file, written, tally)
+    }
+
+    fn finish_staged(
+        &mut self,
+        path: SafePath,
+        file: S::File,
+        written: u64,
+        tally: &mut Tally<'_>,
+    ) -> Result<()> {
+        self.sink.finish_file(&path, file).map_err(sink_error)?;
+        self.sizes.insert(path.into_path_buf(), written);
+        tally.record_file(written)
     }
 
     /// Places `node` at `rel`, returning where it landed.
@@ -631,33 +775,33 @@ impl<S: EntrySink> ExtractTarget for SinkTarget<'_, S> {
         admitted: ValidatedFile,
         tally: &mut Tally<'_>,
     ) -> Result<()> {
-        let (path, permit, mode) = admitted.into_parts();
-        let size = permit.into_bytes();
-        // Overflow guard only, as on the host: the sum is not stored.
-        common::checked_add_bytes(tally.report.bytes_written, size)?;
+        let Some(staged) = self.stage_file(admitted, tally)? else {
+            return Ok(());
+        };
+        self.write_staged(staged, reader, tally)
+    }
 
-        let rel = path.as_path();
-        match (self.tree.occupant(rel), tally.options.duplicate_policy()) {
-            (Some(_), DuplicatePolicy::Skip) => return tally.record_duplicate_skip().map(drop),
-            (
-                Some(occupant @ (Occupant::Directory | Occupant::Symlink)),
-                DuplicatePolicy::Overwrite,
-            ) => {
-                return Err(common::occupant_at_dest_error(rel, occupant).into());
+    fn file_retained(
+        &mut self,
+        retained: Retained<'_>,
+        admitted: ValidatedFile,
+        tally: &mut Tally<'_>,
+    ) -> Result<()> {
+        let Some(staged) = self.stage_file(admitted, tally)? else {
+            return Ok(());
+        };
+        match retained {
+            Retained::Bytes(bytes) if bytes.len() as u64 == staged.size => {
+                let written = bytes.len() as u64;
+                let file = self
+                    .sink
+                    .create_file_from(&staged.path, staged.mode, bytes)
+                    .map_err(sink_error)?;
+                self.finish_staged(staged.path, file, written, tally)
             }
-            (Some(Occupant::File) | None, _) => {}
+            Retained::Bytes(bytes) => self.write_staged(staged, &mut bytes.as_slice(), tally),
+            Retained::Spooled(mut reader) => self.write_staged(staged, &mut reader, tally),
         }
-
-        let resolved = self.place(rel, Node::File)?;
-        let mut file = self
-            .sink
-            .create_file(&resolved, mode, size)
-            .map_err(sink_error)?;
-        let written = copy_with_buffer(reader, &mut file, &mut self.copy_buffer, Some(size))?;
-        self.sink.finish_file(&resolved, file).map_err(sink_error)?;
-        self.sizes.insert(resolved.into_path_buf(), written);
-
-        tally.record_file(written)
     }
 
     fn symlink(&mut self, symlink: &SafeSymlink, tally: &mut Tally<'_>) -> Result<()> {

@@ -140,6 +140,13 @@ describe('InvalidArchive families', () => {
     assert.strictEqual(err.subCode, 'DECLARED_SIZE');
   });
 
+  it('a ZIP without an end record is ZIP_READER', async () => {
+    const bytes = Buffer.concat([Buffer.from('PK\x03\x04', 'latin1'), Buffer.alloc(60)]);
+    const err = await extractFailure('no_eocd.zip', bytes);
+    assert.strictEqual(err.code, 'INVALID_ARCHIVE');
+    assert.strictEqual(err.subCode, 'ZIP_READER');
+  });
+
   it('an invalid deflate block under an integrity check is INTEGRITY', async () => {
     const tar = tarOf({ name: 'a', data: Buffer.alloc(30000, 0x71) });
     const file = path.join(tempDir, 'bad.tar.gz');

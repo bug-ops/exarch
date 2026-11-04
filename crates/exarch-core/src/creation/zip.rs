@@ -335,9 +335,7 @@ fn add_file_to_zip_with_progress_and_buffer<W: Write + Seek>(
     let size = metadata.len();
 
     // Check file size limit
-    if let Some(max_size) = config.max_file_size
-        && size > max_size
-    {
+    if !config.max_file_size.admits(size) {
         report.files_skipped = report.files_skipped.saturating_add(1);
         report.add_warning(format!(
             "Skipped file (too large): {} ({} bytes)",
@@ -846,7 +844,7 @@ mod tests {
         // Set max file size to 100 bytes
         let config = CreationConfig::default()
             .with_exclude_patterns(vec![])
-            .with_max_file_size(Some(100))
+            .with_max_file_size(crate::non_zero!(100))
             .validate()
             .unwrap();
 

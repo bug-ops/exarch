@@ -750,9 +750,7 @@ impl<R: Read + Seek> ZipArchive<R> {
         // skipped it.
         let limit = ZstdWindowLog::of(config);
         match self.structure.zstd_windows() {
-            ZstdWindows::OverBudget => Err(ArchiveError::unclassified(
-                "ZIP zstd entries could not be walked within the archive extent",
-            )),
+            ZstdWindows::OverBudget => Err(ArchiveError::from(Malformation::ZipZstdWalkIncomplete)),
             ZstdWindows::Largest(window) if !limit.admits(window) => {
                 Err(ArchiveError::QuotaExceeded {
                     resource: crate::QuotaResource::DecoderMemory {
@@ -941,7 +939,10 @@ impl<R: Read + Seek> ZipArchive<R> {
                     let err = if is_password_required(&e) {
                         common::encrypted_archive_error()
                     } else {
-                        ArchiveError::unclassified(format!("failed to open zip entry {i}: {e}"))
+                        ArchiveError::from(Malformation::ZipEntryOpenFailed {
+                            index: i,
+                            detail: e.to_string().into(),
+                        })
                     };
                     push_duplicate_skip_warnings(&mut report, duplicate_skips, extension_skips);
                     return Err(ArchiveError::partial_or(std::mem::take(&mut report), err));

@@ -37,6 +37,7 @@ _InvalidArchiveSubCode = Literal[
     "ENTRY_NAME",
     "DECLARED_SIZE",
     "INTEGRITY",
+    "ZIP_READER",
 ]
 _SecurityViolationSubCode = Literal["PATH_NAME", "PATH_DEPTH", "LINK_TARGET", "LINK_POLICY", "EXISTING_SYMLINK", "ENTRY_TYPE", "ROOT_ENTRY", "ENCRYPTED", "COMPRESSION_METHOD", "SOLID_ARCHIVE", "DECLARED_SIZE", "CONCURRENT_CHANGE", "TAR_METADATA", "TAR_TRAILER", "PLATFORM", "OUTPUT_CONFLICT", "SOURCE_PATH"]  # noqa: E501  # fmt: skip
 _PartialWrites = Literal["kept", "rolled_back", "discarded"]
@@ -485,7 +486,23 @@ class CreationConfig:
         ...
 
     def with_max_file_size(self, size: int | None) -> CreationConfig:
-        """Sets maximum file size in bytes."""
+        """Sets maximum file size in bytes, or None for no limit (default).
+
+        Raises ValueError naming ``max_file_size`` when the size is zero.
+        """
+        ...
+
+    @property
+    def max_file_size(self) -> int | None:
+        """Maximum size for a single file in bytes; ``None`` means no limit (default)."""
+        ...
+
+    @max_file_size.setter
+    def max_file_size(self, value: int | None) -> None:
+        """Sets the limit; ``None`` removes it.
+
+        Raises ``ValueError`` naming ``max_file_size`` for zero.
+        """
         ...
 
     def build(self) -> CreationConfig:
@@ -1585,8 +1602,10 @@ class InvalidArchiveError(ArchiveError):
         sub_code: ``"TAR_AMBIGUITY"`` when a TAR header is read differently by
             different tools, ``"TAR_TRAILER"`` when the stream after the TAR
             end-of-archive marker is corrupt or truncated, ``"LINK_TARGET"``,
-            ``"DUPLICATE_ENTRY"``, ``"ENTRY_NAME"``, ``"DECLARED_SIZE"`` or
-            ``"INTEGRITY"`` for the refusal of that family; ``None`` otherwise.
+            ``"DUPLICATE_ENTRY"``, ``"ENTRY_NAME"``, ``"DECLARED_SIZE"``,
+            ``"INTEGRITY"`` or ``"ZIP_READER"`` (a failure of the ZIP reader
+            or of the structural check built on it) for the refusal of that
+            family; ``None`` otherwise.
     """
 
     sub_code: _InvalidArchiveSubCode | None

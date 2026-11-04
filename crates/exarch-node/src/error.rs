@@ -190,6 +190,9 @@ pub enum InvalidArchiveSubCode {
     /// An entry whose integrity decode failed.
     #[napi(value = "INTEGRITY")]
     Integrity,
+    /// A failure of the ZIP reader or of the structural check built on it.
+    #[napi(value = "ZIP_READER")]
+    ZipReader,
 }
 
 /// Value of the `setting` property of an `INVALID_CONFIGURATION` error.

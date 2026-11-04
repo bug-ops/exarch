@@ -137,7 +137,7 @@ exarch create out.tar.gz src/ --json
 | `--strip-prefix <PREFIX>` | none | Strip a path prefix from entry names. |
 | `--include-hidden` | off | Include dotfiles/hidden entries. |
 | `--follow-symlinks` | off | Follow symlinks when walking source trees (stores target contents, not the link). |
-| `--max-file-size <BYTES>` | none | Skip source files larger than this (`K`/`M`/`G`/`T` suffixes). |
+| `--max-file-size <BYTES>` | none | Skip source files larger than this (`K`/`M`/`G`/`T` suffixes). `0` is refused with `InvalidConfiguration` (setting `max_file_size`), exit `1`, and no archive is written (verified live with the debug binary). |
 | `--preserve-permissions[=true\|false]` | `true` | Preserve platform permission bits. Pass `--preserve-permissions=false` for a portable, permission-agnostic archive. |
 
 > [!NOTE]
@@ -466,7 +466,7 @@ binary: a TAR entry named `.git/config` gives `SecurityViolation`, `PATH_NAME` a
 `banned_components`; a symlink entry gives `LINK_POLICY` and `symlinks`; a FIFO entry gives
 `ENTRY_TYPE` and no `relaxable_by`.
 
-On an `InvalidArchive`, five more families mark refusals that were once plain text: `LINK_TARGET` (a link
+On an `InvalidArchive`, six more families mark refusals that were once plain text: `ZIP_READER` (a failure of the ZIP reader or of the structural check built on it; verified live: a ZIP without an end-of-central-directory record gives `error.sub_code` `ZIP_READER`), `LINK_TARGET` (a link
 entry whose target is missing, unreadable, too long or, for a hardlink, absent, a directory or not a
 regular file), `DUPLICATE_ENTRY`, `ENTRY_NAME` (an entry path or name that cannot be read), `DECLARED_SIZE` (a
 declared size that contradicts the archive) and `INTEGRITY` (an integrity decode that failed). `TAR_AMBIGUITY` marks a TAR

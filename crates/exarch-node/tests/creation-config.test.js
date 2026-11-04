@@ -126,6 +126,32 @@ describe('CreationConfig', () => {
 
       assert.strictEqual(config.maxFileSize, 100 * 1024 * 1024);
     });
+
+    it('should default to no max file size and accept null to remove it', () => {
+      const config = new CreationConfig();
+      assert.strictEqual(config.maxFileSize, null);
+
+      config.setMaxFileSize(1024);
+      config.setMaxFileSize(null);
+      assert.strictEqual(config.maxFileSize, null);
+    });
+
+    it('should refuse a zero or negative max file size as INVALID_CONFIGURATION', () => {
+      const config = new CreationConfig();
+      config.setMaxFileSize(1024);
+
+      for (const bad of [0, -1]) {
+        assert.throws(
+          () => config.setMaxFileSize(bad),
+          (err) => {
+            assert.strictEqual(err.code, 'INVALID_CONFIGURATION');
+            assert.strictEqual(err.setting, 'max_file_size');
+            return true;
+          }
+        );
+      }
+      assert.strictEqual(config.maxFileSize, 1024);
+    });
   });
 
   describe('exclude patterns', () => {

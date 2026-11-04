@@ -166,7 +166,7 @@ export declare const __napiBindingTarget: 'native' | 'wasm32-wasi' | 'wasm32-was
  * | `preserve_permissions` | true |
  * | `follow_symlinks` | false (secure) |
  * | `include_hidden` | false |
- * | `max_file_size` | None (no limit) |
+ * | `max_file_size` | `null` (no limit) |
  * | `exclude_patterns` | `[".git", ".DS_Store", "*.tmp"]` |
  */
 export declare class CreationConfig {
@@ -211,16 +211,16 @@ export declare class CreationConfig {
    */
   setIncludeHidden(include: boolean): this
   /**
-   * Sets maximum size for a single file in bytes.
+   * Sets maximum size for a single file in bytes, or `null` for no limit.
    *
    * Files larger than this limit will be skipped.
    *
    * # Errors
    *
-   * Returns a plain argument error if size is negative. Unlike the
-   * `SecurityConfig` limits, zero is accepted here and removes the limit.
+   * Throws `INVALID_CONFIGURATION` (`setting` is `max_file_size`) if size is
+   * negative or zero. Pass `null` to remove the limit.
    */
-  setMaxFileSize(size: number): this
+  setMaxFileSize(size: number | null): this
   /**
    * Adds an exclude pattern.
    *
@@ -241,7 +241,7 @@ export declare class CreationConfig {
   get followSymlinks(): boolean
   /** Whether to include hidden files. */
   get includeHidden(): boolean
-  /** Maximum file size in bytes. */
+  /** Maximum file size in bytes, or `null` when unbounded. */
   get maxFileSize(): number | null
   /** List of exclude patterns. */
   get excludePatterns(): Array<string>
@@ -1439,7 +1439,7 @@ export interface IntegrityGaps {
 export type IntegrityStatus = 'OK' | 'FAILED' | 'INCOMPLETE' | 'SKIPPED'
 
 /** Value of the `subCode` property of an `INVALID_ARCHIVE` error. */
-export type InvalidArchiveSubCode = 'TAR_AMBIGUITY' | 'TAR_TRAILER' | 'LINK_TARGET' | 'DUPLICATE_ENTRY' | 'ENTRY_NAME' | 'DECLARED_SIZE' | 'INTEGRITY'
+export type InvalidArchiveSubCode = 'TAR_AMBIGUITY' | 'TAR_TRAILER' | 'LINK_TARGET' | 'DUPLICATE_ENTRY' | 'ENTRY_NAME' | 'DECLARED_SIZE' | 'INTEGRITY' | 'ZIP_READER'
 
 /** Issue category. */
 export type IssueCategory = 'Path Traversal' | 'Symlink Escape' | 'Hardlink Escape' | 'Zip Bomb' | 'Invalid Permissions' | 'Quota Exceeded' | 'Security Policy' | 'Invalid Archive' | 'Suspicious Path' | 'Executable File' | 'Corrupt Data' | 'Integrity Incomplete' | 'Header Mismatch' | 'Duplicate Entry' | 'Overlapping Entries' | 'Hidden Entry' | 'Name Collision' | 'Archive Note'

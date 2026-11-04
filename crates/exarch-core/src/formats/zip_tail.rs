@@ -41,6 +41,7 @@ use super::zip_structure::le16;
 use super::zip_structure::le32;
 use crate::ArchiveError;
 use crate::HiddenRegion;
+use crate::Malformation;
 use crate::Result;
 use crate::ZipConsistencyPolicy;
 use crate::ZipInconsistency;
@@ -127,7 +128,10 @@ impl DescriptorTail {
             return Ok(());
         }
         let raw = archive.by_index_raw(index).map_err(|e| {
-            ArchiveError::unclassified(format!("failed to re-read ZIP entry {index}: {e}"))
+            ArchiveError::from(Malformation::ZipEntryRereadFailed {
+                index,
+                detail: e.to_string().into(),
+            })
         })?;
         let found = match self.find_hidden(raw)? {
             Tail::Clean => return Ok(()),

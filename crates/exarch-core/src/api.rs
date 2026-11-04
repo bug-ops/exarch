@@ -1083,7 +1083,7 @@ pub(crate) fn extract_to_sink_reusing<S: EntrySink>(
         } => {
             let mut archive = match reuse {
                 Some(reuse) => ZipArchive::for_sink(reader, &config, &reuse)?,
-                None => ZipArchive::for_config(reader, &config)?,
+                None => ZipArchive::for_extraction(reader, &config, options.decode_reuse)?,
             };
             archive.check_structure(&config)?.extract_with(
                 |config| Ok(SinkTarget::new(sink, config)),

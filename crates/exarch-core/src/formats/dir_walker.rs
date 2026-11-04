@@ -227,7 +227,7 @@ impl DirWalker {
         let (dir_ref, landing) = self.walk(root, dir, entry, missing, links)?;
         if let Some(landing) = landing {
             let tail = entry.strip_prefix(dir).unwrap_or_else(|_| Path::new(""));
-            PathModel::Host.check_name_lengths(&landing.join(tail))?;
+            PathModel::Host.check_name_lengths(&joined(&landing, tail))?;
         }
         Ok(dir_ref)
     }
@@ -279,7 +279,7 @@ impl DirWalker {
     /// The rest of the path may still cross another symlink, which resets the
     /// landing; only when it provably ends here is the projected length final.
     fn ensure_fits(at: &VettedDir, landing: &Path, rest: &Path, tail: &Path) -> Result<()> {
-        let projected = landing.join(rest).join(tail);
+        let projected = joined(&joined(landing, rest), tail);
         if PathModel::Host.check_name_lengths(&projected).is_ok() || !Self::ends_here(at, rest) {
             return Ok(());
         }
@@ -359,6 +359,8 @@ impl DirWalker {
             return Err(ParentBlocker::Symlink.error(entry, walked));
         }
         let dest = root.dest();
+        // TODO(#895): resolve handle-relatively; realpath makes acceptance
+        // depend on absolute length
         match (
             classify_link(&HostFs, &dest.as_path().join(walked), dest),
             self.links,
@@ -378,6 +380,16 @@ impl DirWalker {
                 })
             }
         }
+    }
+}
+
+/// `base` extended by `tail`; an empty `tail` adds no trailing separator, which
+/// would count one byte against the host path limit.
+fn joined(base: &Path, tail: &Path) -> PathBuf {
+    if tail.as_os_str().is_empty() {
+        base.to_path_buf()
+    } else {
+        base.join(tail)
     }
 }
 

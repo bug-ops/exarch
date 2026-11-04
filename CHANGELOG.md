@@ -22,9 +22,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CLI: `extract --decode-reuse <off|memory|temp-file>`, default `memory` up to 256 MiB (#857, #884).
 - Core: `extract_reader_to_callback` and the typed `CallbackError<E>`; the Python and Node callback extractions use them (#860, #884).
 - Core: `ZipBombScope::SkippedEntries` (#863, #884).
+- Core: `SinkOptions::decode_reuse` (off by default) lets callback and custom sinks reuse the ZIP census decode (#890, #946).
+- Core: `ZIP_READER` sub-code for ZIP reader failures in Python, Node and CLI `--json`; messages unchanged (#889, #946).
 
 ### Changed
 
+- **Breaking**: `CreationConfig::max_file_size` is `Limit<NonZeroU64>`; zero is refused in core, CLI, Node and Python, and Node takes `null` and Python `None` for no limit (#893, #902, #946).
+- **Breaking**: `SinkOptions` gains the `decode_reuse` field (#890, #946).
 - Core: TAR and ZIP overwrite (`--force`) replaces the destination file through a sibling temp file and rename instead of writing through the existing inode (#819).
 - Core: ZIP verification of data-descriptor entries covers deflate and every scanned method without `--check-integrity`, and a descriptor must carry the entry's CRC-32 to end a scanned entry (#821).
 - Core: an overwritten file is now replaced even when read-only, needs a writable parent directory, loses its previous owner, ACLs and extended attributes, and takes `0666 & ~umask` when no mode is passed (#822).
@@ -96,6 +100,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Core: a landing through an archive symlink is accepted or refused by its relative length on every platform, not by the host realpath of the destination, and a directory entry at the limit is no longer refused one byte early (#892, #946).
 - `extract` and `verify` name the entry and the blocking file or symlink, with the same category, for an entry below a file, a dangling symlink or a looping symlink (#828).
 - 7z `--force` no longer deletes the existing file before the replacement is decoded (#828).
 - A hardlink copy takes the sanitized mode of its target, so a pre-existing setuid, setgid or world-writable target no longer yields a wider copy (#842).

@@ -1,14 +1,18 @@
 //! Create command implementation.
 
 use crate::cli::CreateArgs;
+use crate::error::convert_extraction_error;
 use crate::output::OutputFormatter;
 use crate::output::Verbosity;
 use crate::progress::CliProgress;
 use anyhow::Context;
 use anyhow::Result;
+use exarch_core::ConfigSetting;
 use exarch_core::CreationConfig;
+use exarch_core::Limit;
 use exarch_core::NoopProgress;
 use exarch_core::create_archive_with_progress;
+use std::num::NonZeroU64;
 
 pub fn execute(
     args: &CreateArgs,
@@ -30,12 +34,18 @@ pub fn execute(
         })?;
     }
 
+    let max_file_size = match args.max_file_size {
+        Some(size) => Limit::<NonZeroU64>::parse(ConfigSetting::MaxFileSize, size)
+            .map_err(|err| convert_extraction_error(err, &args.output))?,
+        None => Limit::Unbounded,
+    };
+
     // Build config
     let mut config = CreationConfig::default()
         .with_follow_symlinks(args.follow_symlinks)
         .with_include_hidden(args.include_hidden)
         .with_strip_prefix(args.strip_prefix.clone())
-        .with_max_file_size(args.max_file_size)
+        .with_max_file_size(max_file_size)
         .with_preserve_permissions(args.preserve_permissions);
     if let Some(level) = args.compression_level {
         config = config.with_compression_level(level);
@@ -175,6 +185,27 @@ mod tests {
             preserve_permissions: true,
             force: false,
         }
+    }
+
+    #[test]
+    fn zero_max_file_size_is_refused_as_invalid_configuration() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("hello.txt");
+        std::fs::write(&src, b"hello").unwrap();
+        let out = tmp.path().join("out.tar.gz");
+
+        let mut args = make_args(out.clone(), src);
+        args.max_file_size = Some(0);
+        let mut formatter = SpyFormatter::new(false);
+
+        let err = execute(&args, &mut formatter, Verbosity::Quiet).unwrap_err();
+
+        assert!(
+            format!("{err:#}").contains("max_file_size must not be zero"),
+            "unexpected error: {err:#}"
+        );
+        assert!(!out.exists(), "no archive may be created");
+        assert!(!formatter.was_called());
     }
 
     // Regression test for issue #357: JSON formatter must emit output even when

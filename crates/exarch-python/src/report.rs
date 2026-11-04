@@ -1448,6 +1448,7 @@ mod tests {
         use exarch_core::ZipBombScope;
         use exarch_core::ZipConsistencyPolicy;
         use exarch_core::formats::detect::ArchiveType;
+        use exarch_core::formats::detect::CreatableFormat;
         use exarch_core::inspection::CheckStatus;
         use exarch_core::inspection::IssueCategory;
         use exarch_core::inspection::IssueSeverity;
@@ -1498,6 +1499,11 @@ mod tests {
                 InvalidArchiveSubCode::as_str,
             ),
             literal_line("_PathModel", PathModel::ALL, PathModel::as_str),
+            literal_line(
+                "_CreatableFormat",
+                CreatableFormat::ALL,
+                CreatableFormat::as_str,
+            ),
             literal_line("_SkipKind", SkipKind::ALL, SkipKind::as_str),
             literal_line("_LinkState", LinkState::ALL, LinkState::as_str),
             literal_line("_ErrorCode", ErrorCode::ALL, ErrorCode::as_str),

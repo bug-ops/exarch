@@ -5,6 +5,7 @@
 //! and other common vulnerabilities.
 
 use pyo3::prelude::*;
+use std::path::Path;
 
 mod buffer;
 mod config;
@@ -18,6 +19,7 @@ use config::PySecurityConfig;
 use config::PyVerificationOptions;
 use error::convert_error;
 use error::register_exceptions;
+use exarch_core::BoundaryPath;
 use exarch_core::CreateRequest;
 use exarch_core::ExtractRequest;
 use exarch_core::ListRequest;
@@ -125,8 +127,8 @@ fn extract_archive(
     options: Option<&PyExtractionOptions>,
 ) -> PyResult<PyExtractionReport> {
     // Convert Path-like objects to strings
-    let archive_path = path_to_string(py, archive_path)?;
-    let output_dir = path_to_string(py, output_dir)?;
+    let archive_path = path_to_boundary(py, archive_path)?;
+    let output_dir = path_to_boundary(py, output_dir)?;
 
     let default_config = exarch_core::SecurityConfig::default();
     let config_ref = config.map_or(&default_config, |c| c.as_core());
@@ -160,7 +162,7 @@ fn extract_archive(
 /// maximum length). Errors are routed through [`convert_error`] so they
 /// surface as `SecurityViolationError`, the same exception type used for
 /// every other security-policy rejection raised by this module.
-fn path_to_string(py: Python<'_>, path: &Bound<'_, PyAny>) -> PyResult<String> {
+fn path_to_boundary(py: Python<'_>, path: &Bound<'_, PyAny>) -> PyResult<BoundaryPath> {
     // Try direct string extraction first
     let path_str = if let Ok(s) = path.extract::<String>() {
         s
@@ -172,9 +174,7 @@ fn path_to_string(py: Python<'_>, path: &Bound<'_, PyAny>) -> PyResult<String> {
         result.extract()?
     };
 
-    exarch_core::BoundaryPath::parse(path_str)
-        .map(exarch_core::BoundaryPath::into_string)
-        .map_err(convert_error)
+    BoundaryPath::parse(path_str).map_err(convert_error)
 }
 
 /// Runs `f`, converting a Rust panic into a `PyRuntimeError` instead of
@@ -232,6 +232,15 @@ fn _trigger_panic_for_testing() -> PyResult<()> {
 /// * `sources` - List of source files/directories to include (str or
 ///   pathlib.Path)
 /// * `config` - Optional `CreationConfig` (uses defaults if None)
+/// * `format` - The format to write whatever the extension is (for example
+///   `"Zip"` for a `.whl`); `None` detects it from the extension
+/// * `overwrite` - Replace an existing regular file or symlink, keeping its
+///   permission bits (default); `False` refuses any existing output
+///
+/// The archive is written to a temporary file next to `output_path` (whose
+/// directory must be writable) and renamed into place when complete, so a
+/// failed creation leaves `output_path` as it was. The output and its
+/// temporary file are never archived, even inside a source directory.
 ///
 /// # Returns
 ///
@@ -239,6 +248,8 @@ fn _trigger_panic_for_testing() -> PyResult<()> {
 ///
 /// # Raises
 ///
+/// * `OutputExistsError` - `overwrite` is `False` and `output_path` exists
+/// * `InvalidConfigurationError` - `output_path` is a directory, FIFO or device
 /// * `ValueError` - Invalid arguments
 /// * `IOError` - I/O operation failed
 /// * `UnsupportedFormatError` - Archive format not supported
@@ -270,18 +281,18 @@ fn create_archive(
     format: Option<String>,
     overwrite: bool,
 ) -> PyResult<PyCreationReport> {
-    let output_path = path_to_string(py, output_path)?;
+    let output_path = path_to_boundary(py, output_path)?;
 
     // Convert sources to Vec<String>
     let sources_list: Vec<Bound<'_, PyAny>> = sources.extract()?;
-    let source_paths: Vec<String> = sources_list
+    let source_paths: Vec<BoundaryPath> = sources_list
         .iter()
-        .map(|s| path_to_string(py, s))
+        .map(|s| path_to_boundary(py, s))
         .collect::<PyResult<_>>()?;
 
     let default_config = exarch_core::creation::CreationConfig::default();
     let config_ref = config.map_or(&default_config, |c| c.as_core());
-    let output = output_file(output_path, overwrite, format.as_deref())?;
+    let output = output_file(&output_path, overwrite, format.as_deref())?;
 
     let report = catch_panic_as_py_err("archive creation", || {
         py.detach(|| CreateRequest::new(config_ref).create(&output, &source_paths))
@@ -292,7 +303,8 @@ fn create_archive(
 
 /// The output file of a creation: replaced or refused when it exists, in the
 /// stated format or the one its extension names.
-fn output_file(path: String, overwrite: bool, format: Option<&str>) -> PyResult<OutputFile> {
+fn output_file(path: &BoundaryPath, overwrite: bool, format: Option<&str>) -> PyResult<OutputFile> {
+    let path = AsRef::<Path>::as_ref(path).to_path_buf();
     let output = if overwrite {
         OutputFile::replace(path)
     } else {
@@ -337,7 +349,7 @@ fn list_archive(
     archive_path: &Bound<'_, PyAny>,
     config: Option<&PySecurityConfig>,
 ) -> PyResult<PyArchiveManifest> {
-    let archive_path = path_to_string(py, archive_path)?;
+    let archive_path = path_to_boundary(py, archive_path)?;
 
     let default_config = exarch_core::SecurityConfig::default();
     let config_ref = config.map_or(&default_config, |c| c.as_core());
@@ -393,7 +405,7 @@ fn verify_archive(
     config: Option<&PySecurityConfig>,
     options: Option<&PyVerificationOptions>,
 ) -> PyResult<PyVerificationReport> {
-    let archive_path = path_to_string(py, archive_path)?;
+    let archive_path = path_to_boundary(py, archive_path)?;
 
     let default_config = exarch_core::SecurityConfig::default();
     let config_ref = config.map_or(&default_config, |c| c.as_core());
@@ -420,9 +432,12 @@ fn verify_archive(
 ///   pathlib.Path)
 /// * `config` - Optional `CreationConfig` (uses defaults if None)
 /// * `progress` - Optional progress callback function
+/// * `format` - As in `create_archive`
+/// * `overwrite` - As in `create_archive`
 ///
-/// Progress callback signature: `(path: str, total: int, current: int,
-/// bytes_written: int) -> None`
+/// Progress callback signature: `(path: str, total: int | None, current: int,
+/// bytes_written: int) -> None`; `current` counts from 1 and `total` is `None`
+/// when the entry count is not known up front (TAR streams)
 ///
 /// # Returns
 ///
@@ -464,7 +479,7 @@ fn verify_archive(
 /// ```python
 /// from exarch import create_archive_with_progress
 ///
-/// def progress(path: str, total: int, current: int, bytes: int):
+/// def progress(path: str, total: int | None, current: int, bytes: int):
 ///     print(f"{current}/{total}: {path} ({bytes} bytes)")
 ///
 /// report = create_archive_with_progress(
@@ -486,19 +501,19 @@ fn create_archive_with_progress(
     format: Option<String>,
     overwrite: bool,
 ) -> PyResult<PyCreationReport> {
-    let output_path = path_to_string(py, output_path)?;
+    let output_path = path_to_boundary(py, output_path)?;
 
     // Convert sources to Vec<String>
     let sources_list: Vec<Bound<'_, PyAny>> = sources.extract()?;
-    let source_paths: Vec<String> = sources_list
+    let source_paths: Vec<BoundaryPath> = sources_list
         .iter()
-        .map(|s| path_to_string(py, s))
+        .map(|s| path_to_boundary(py, s))
         .collect::<PyResult<_>>()?;
 
     let default_config = exarch_core::creation::CreationConfig::default();
     let config_ref = config.map_or(&default_config, |c| c.as_core());
 
-    let output = output_file(output_path, overwrite, format.as_deref())?;
+    let output = output_file(&output_path, overwrite, format.as_deref())?;
 
     let report = catch_panic_as_py_result("archive creation with progress", || {
         run_create_with_optional_progress(py, &output, &source_paths, config_ref, progress)
@@ -512,7 +527,7 @@ fn create_archive_with_progress(
 fn run_create_with_optional_progress(
     py: Python<'_>,
     output: &OutputFile,
-    source_paths: &[String],
+    source_paths: &[BoundaryPath],
     config: &exarch_core::creation::CreationConfig,
     progress: Option<Py<PyAny>>,
 ) -> PyResult<exarch_core::creation::CreationReport> {
@@ -596,8 +611,9 @@ fn merge_progress_result<T>(
 /// * `config` - Optional `SecurityConfig` (uses secure defaults if None)
 /// * `progress` - Optional progress callback function
 ///
-/// Progress callback signature: `(path: str, total: int, current: int,
-/// bytes_written: int) -> None`
+/// Progress callback signature: `(path: str, total: int | None, current: int,
+/// bytes_written: int) -> None`; `current` counts from 1 and `total` is `None`
+/// when the entry count is not known up front (TAR streams)
 ///
 /// # Returns
 ///
@@ -656,7 +672,7 @@ fn merge_progress_result<T>(
 /// ```python
 /// from exarch import extract_archive_with_progress
 ///
-/// def progress(path: str, total: int, current: int, bytes: int):
+/// def progress(path: str, total: int | None, current: int, bytes: int):
 ///     print(f"{current}/{total}: {path} ({bytes} bytes)")
 ///
 /// report = extract_archive_with_progress(
@@ -673,8 +689,8 @@ fn extract_archive_with_progress(
     progress: Option<Py<PyAny>>,
     options: Option<&PyExtractionOptions>,
 ) -> PyResult<PyExtractionReport> {
-    let archive_path = path_to_string(py, archive_path)?;
-    let output_dir = path_to_string(py, output_dir)?;
+    let archive_path = path_to_boundary(py, archive_path)?;
+    let output_dir = path_to_boundary(py, output_dir)?;
 
     let default_config = exarch_core::SecurityConfig::default();
     let config_ref = config.map_or(&default_config, |c| c.as_core());
@@ -701,8 +717,8 @@ fn extract_archive_with_progress(
 /// absent.
 fn run_extract_with_optional_progress(
     py: Python<'_>,
-    archive_path: &str,
-    output_dir: &str,
+    archive_path: &BoundaryPath,
+    output_dir: &BoundaryPath,
     config: &exarch_core::SecurityConfig,
     options: &exarch_core::ExtractionOptions,
     progress: Option<Py<PyAny>>,
@@ -737,10 +753,11 @@ fn run_extract_with_optional_progress(
 
 /// Adapter that calls Python callback from Rust.
 ///
-/// The Python callback receives `(path: str, total: int, current: int,
-/// bytes_written: int)` where `bytes_written` is the number of bytes written
-/// **for the current entry so far** (starts at 0 when the entry begins, grows
-/// as chunks are flushed to disk).
+/// The Python callback receives `(path: str, total: int | None, current: int,
+/// bytes_written: int)` (`total` is `None` for an unknown count) where
+/// `bytes_written` is the number of bytes written **for the current entry so
+/// far** (starts at 0 when the entry begins, grows as chunks are flushed to
+/// disk).
 ///
 /// If the callback raises, the exception is captured into `callback_error`
 /// instead of being discarded (see issue #489). The
@@ -881,6 +898,71 @@ fn exarch(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Exception types
     register_exceptions(m)?;
 
+    register_type_aliases(m)?;
+
+    Ok(())
+}
+
+/// Exports the typing aliases the stub declares, so `from exarch import
+/// AnyMemoryEntry` works at runtime as it does for a type checker.
+fn register_type_aliases(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    let py = m.py();
+    let typing = py.import("typing")?;
+    let union = typing.getattr("Union")?;
+    let union_of = |names: &[&str]| -> PyResult<Bound<'_, PyAny>> {
+        let members = names
+            .iter()
+            .map(|name| m.getattr(*name))
+            .collect::<PyResult<Vec<_>>>()?;
+        union.get_item(pyo3::types::PyTuple::new(py, members)?)
+    };
+    m.add(
+        "AnyMemoryEntry",
+        union_of(&[
+            "MemoryFile",
+            "MemoryDirectory",
+            "MemorySymlink",
+            "MemoryHardlink",
+        ])?,
+    )?;
+    m.add(
+        "AnyArchiveEntry",
+        union_of(&[
+            "ArchiveFile",
+            "ArchiveDirectory",
+            "ArchiveSymlink",
+            "ArchiveHardlink",
+        ])?,
+    )?;
+    m.add(
+        "AnyLinkTarget",
+        union_of(&[
+            "RecordedLinkTarget",
+            "MissingLinkTarget",
+            "UnreadLinkTarget",
+            "UnreadableLinkTarget",
+            "OversizedLinkTarget",
+        ])?,
+    )?;
+
+    let optional_int = typing
+        .getattr("Optional")?
+        .get_item(py.get_type::<pyo3::types::PyInt>())?;
+    let parameters = pyo3::types::PyList::new(
+        py,
+        [
+            py.get_type::<pyo3::types::PyString>().into_any(),
+            optional_int,
+            py.get_type::<pyo3::types::PyInt>().into_any(),
+            py.get_type::<pyo3::types::PyInt>().into_any(),
+        ],
+    )?;
+    m.add(
+        "ProgressCallbackFn",
+        typing
+            .getattr("Callable")?
+            .get_item((parameters, py.None()))?,
+    )?;
     Ok(())
 }
 
@@ -936,11 +1018,11 @@ mod tests {
     }
 
     #[test]
-    fn test_path_to_string_with_string() {
+    fn test_path_to_boundary_with_string() {
         pyo3::Python::initialize();
         Python::attach(|py| {
             let path = PyString::new(py, "/tmp/test.tar.gz").into_any();
-            let result = path_to_string(py, &path.as_borrowed());
+            let result = path_to_boundary(py, &path.as_borrowed()).map(BoundaryPath::into_string);
             assert!(
                 result.is_ok(),
                 "Failed to convert string path: {:?}",
@@ -951,11 +1033,11 @@ mod tests {
     }
 
     #[test]
-    fn test_path_to_string_empty() {
+    fn test_path_to_boundary_empty() {
         pyo3::Python::initialize();
         Python::attach(|py| {
             let path = PyString::new(py, "").into_any();
-            let result = path_to_string(py, &path.as_borrowed());
+            let result = path_to_boundary(py, &path.as_borrowed()).map(BoundaryPath::into_string);
             assert!(
                 result.is_ok(),
                 "Failed to convert empty path: {:?}",
@@ -966,7 +1048,7 @@ mod tests {
     }
 
     #[test]
-    fn test_path_to_string_with_path_object() {
+    fn test_path_to_boundary_with_path_object() {
         pyo3::Python::initialize();
         Python::attach(|py| {
             let pathlib = py.import("pathlib").expect("Failed to import pathlib");
@@ -974,7 +1056,7 @@ mod tests {
             let path = path_class
                 .call1(("/tmp/test.tar.gz",))
                 .expect("Failed to create Path object");
-            let result = path_to_string(py, &path.as_borrowed());
+            let result = path_to_boundary(py, &path.as_borrowed()).map(BoundaryPath::into_string);
             assert!(
                 result.is_ok(),
                 "Failed to convert Path object: {:?}",
@@ -985,11 +1067,11 @@ mod tests {
     }
 
     #[test]
-    fn test_path_to_string_rejects_null_bytes() {
+    fn test_path_to_boundary_rejects_null_bytes() {
         pyo3::Python::initialize();
         Python::attach(|py| {
             let path = PyString::new(py, "/tmp/test\0malicious.tar.gz").into_any();
-            let result = path_to_string(py, &path.as_borrowed());
+            let result = path_to_boundary(py, &path.as_borrowed()).map(BoundaryPath::into_string);
             assert!(result.is_err(), "Should reject path with null bytes");
             let err_str = result.unwrap_err().to_string();
             assert!(
@@ -1001,12 +1083,12 @@ mod tests {
     }
 
     #[test]
-    fn test_path_to_string_rejects_too_long() {
+    fn test_path_to_boundary_rejects_too_long() {
         pyo3::Python::initialize();
         Python::attach(|py| {
             let long_path = "x".repeat(MAX_PATH_LENGTH + 1);
             let path = PyString::new(py, &long_path).into_any();
-            let result = path_to_string(py, &path.as_borrowed());
+            let result = path_to_boundary(py, &path.as_borrowed()).map(BoundaryPath::into_string);
             assert!(result.is_err(), "Should reject excessively long path");
             let err_str = result.unwrap_err().to_string();
             assert!(
@@ -1018,12 +1100,12 @@ mod tests {
     }
 
     #[test]
-    fn test_path_to_string_accepts_max_length() {
+    fn test_path_to_boundary_accepts_max_length() {
         pyo3::Python::initialize();
         Python::attach(|py| {
             let max_path = "x".repeat(MAX_PATH_LENGTH);
             let path = PyString::new(py, &max_path).into_any();
-            let result = path_to_string(py, &path.as_borrowed());
+            let result = path_to_boundary(py, &path.as_borrowed()).map(BoundaryPath::into_string);
             assert!(
                 result.is_ok(),
                 "Should accept path at maximum length: {:?}",

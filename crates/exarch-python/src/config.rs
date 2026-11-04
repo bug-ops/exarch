@@ -22,6 +22,7 @@ use pyo3::exceptions::PyOverflowError;
 use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
 use pyo3::types::PyBool;
+use pyo3::types::PyInt;
 use std::num::NonZeroU64;
 use std::num::NonZeroUsize;
 
@@ -51,13 +52,56 @@ impl<'a, 'py> FromPyObject<'a, 'py> for PyInteger {
         if obj.is_instance_of::<PyBool>() {
             return Err(PyTypeError::new_err("expected an int, not bool"));
         }
-        match obj.extract::<i128>() {
+        let py = obj.py();
+        let index = if obj.is_instance_of::<PyInt>() {
+            obj.to_owned().into_any()
+        } else if obj.hasattr("__index__")? {
+            obj.call_method0("__index__")?
+        } else {
+            return Err(PyTypeError::new_err(format!(
+                "expected an int, got {}",
+                obj.get_type().name()?
+            )));
+        };
+        match index.extract::<i128>() {
             Ok(value) => Ok(Self::Fits(value)),
-            Err(err) if err.is_instance_of::<PyOverflowError>(obj.py()) => Ok(Self::Beyond {
-                negative: obj.lt(0)?,
+            Err(err) if err.is_instance_of::<PyOverflowError>(py) => Ok(Self::Beyond {
+                negative: index.lt(0)?,
             }),
             Err(err) => Err(err),
         }
+    }
+}
+
+/// A Python number for a ratio limit: `bool` is refused, and an integer too
+/// large for a float is read as infinite so core refuses it as not finite.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PyRatio(f64);
+
+impl<'a, 'py> FromPyObject<'a, 'py> for PyRatio {
+    type Error = PyErr;
+
+    fn extract(obj: Borrowed<'a, 'py, PyAny>) -> PyResult<Self> {
+        if obj.is_instance_of::<PyBool>() {
+            return Err(PyTypeError::new_err("expected a number, not bool"));
+        }
+        match obj.extract::<f64>() {
+            Ok(value) => Ok(Self(value)),
+            Err(err) if err.is_instance_of::<PyOverflowError>(obj.py()) => Ok(Self(f64::INFINITY)),
+            Err(err) => Err(err),
+        }
+    }
+}
+
+impl From<f64> for PyRatio {
+    fn from(value: f64) -> Self {
+        Self(value)
+    }
+}
+
+impl PyRatio {
+    fn limit(self) -> PyResult<RatioLimit> {
+        RatioLimit::parse(ConfigSetting::MaxCompressionRatio, self.0).map_err(convert_error)
     }
 }
 
@@ -245,10 +289,9 @@ impl PySecurityConfig {
     /// Returns `ValueError` if ratio is not a positive finite number.
     fn with_max_compression_ratio(
         mut slf: PyRefMut<'_, Self>,
-        ratio: f64,
+        ratio: PyRatio,
     ) -> PyResult<PyRefMut<'_, Self>> {
-        slf.inner.max_compression_ratio =
-            RatioLimit::parse(ConfigSetting::MaxCompressionRatio, ratio).map_err(convert_error)?;
+        slf.inner.max_compression_ratio = ratio.limit()?;
         Ok(slf)
     }
 
@@ -303,6 +346,10 @@ impl PySecurityConfig {
     /// Solid archives require reading all preceding entries to decompress any
     /// entry, which may allow a crafted archive to consume excessive
     /// memory. Disabled by default.
+    ///
+    /// Allowing keeps solid limits that are already set. `allow=False` drops
+    /// them, so allowing again afterwards starts from the defaults (512 MiB
+    /// per block, ratio 1000), not from a limit set earlier.
     #[pyo3(signature = (allow=true))]
     fn with_allow_solid_archives(mut slf: PyRefMut<'_, Self>, allow: bool) -> PyRefMut<'_, Self> {
         slf.inner.solid_archives = slf.inner.solid_archives.with_allowed(allow);
@@ -456,9 +503,8 @@ impl PySecurityConfig {
     }
 
     #[setter]
-    fn set_max_compression_ratio(&mut self, value: f64) -> PyResult<()> {
-        self.inner.max_compression_ratio =
-            RatioLimit::parse(ConfigSetting::MaxCompressionRatio, value).map_err(convert_error)?;
+    fn set_max_compression_ratio(&mut self, value: PyRatio) -> PyResult<()> {
+        self.inner.max_compression_ratio = value.limit()?;
         Ok(())
     }
 
@@ -951,8 +997,12 @@ impl PyExtractionOptions {
     /// the temp dir is removed, leaving the output directory untouched.
     /// Default: `False`.
     ///
-    /// **Important:** atomic mode requires that the output directory does not
-    /// already exist. If it does, extraction raises ``OutputExistsError``.
+    /// **Important:** atomic mode requires that the output directory is absent
+    /// or empty: an empty directory is replaced. Into a non-empty directory
+    /// the final rename fails and extraction raises ``OSError`` with
+    /// ``code == "IO_ERROR"`` (not ``OutputExistsError``, which
+    /// ``create_archive`` raises with ``overwrite=False``); the staged tree is
+    /// removed and the directory is left as it was.
     /// Non-atomic mode extracts into an existing directory without error.
     ///
     /// # Examples
@@ -1325,7 +1375,7 @@ mod tests {
     #[test]
     fn test_property_setter_compression_ratio_valid() {
         let mut config = PySecurityConfig::new();
-        let result = config.set_max_compression_ratio(150.0);
+        let result = config.set_max_compression_ratio(PyRatio::from(150.0));
         assert!(
             result.is_ok(),
             "Should accept valid compression ratio: {:?}",
@@ -1338,15 +1388,21 @@ mod tests {
     fn test_property_setter_compression_ratio_rejects_invalid() {
         let mut config = PySecurityConfig::new();
         assert!(
-            config.set_max_compression_ratio(f64::NAN).is_err(),
+            config
+                .set_max_compression_ratio(PyRatio::from(f64::NAN))
+                .is_err(),
             "Should reject NaN"
         );
         assert!(
-            config.set_max_compression_ratio(f64::INFINITY).is_err(),
+            config
+                .set_max_compression_ratio(PyRatio::from(f64::INFINITY))
+                .is_err(),
             "Should reject Infinity"
         );
         assert!(
-            config.set_max_compression_ratio(-5.0).is_err(),
+            config
+                .set_max_compression_ratio(PyRatio::from(-5.0))
+                .is_err(),
             "Should reject negative"
         );
     }

@@ -445,7 +445,12 @@ jobs:
           cd crates/exarch-python
           ruff check .
 
-      - name: Type check with mypy
+      - name: Type check the stubs with mypy
+        run: |
+          cd crates/exarch-python
+          mypy exarch.pyi --ignore-missing-imports
+
+      - name: Type check the tests with mypy (not blocking: the tests are untyped)
         run: |
           cd crates/exarch-python
           mypy . --ignore-missing-imports || true

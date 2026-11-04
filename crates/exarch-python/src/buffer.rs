@@ -38,7 +38,7 @@ use crate::config::PySecurityConfig;
 use crate::config::PyVerificationOptions;
 use crate::error::convert_error;
 use crate::merge_progress_result;
-use crate::path_to_string;
+use crate::path_to_boundary;
 use crate::report::PyArchiveManifest;
 use crate::report::PyCreationReport;
 use crate::report::PyExtractionReport;
@@ -381,6 +381,7 @@ impl PySinkOptions {
         reason = "pyo3 cannot extract `&str` under abi3-py39"
     )]
     #[pyo3(signature = (skip_duplicates=true, decode_reuse="off".to_owned(), decode_reuse_limit=None))]
+    #[pyo3(text_signature = "(skip_duplicates=True, decode_reuse='off', decode_reuse_limit=None)")]
     fn new(
         skip_duplicates: bool,
         decode_reuse: String,
@@ -654,8 +655,9 @@ fn run_with_optional_progress<T: Send>(
 /// List the contents of an archive held in memory, with a progress callback.
 ///
 /// Same as `list_archive_bytes`, plus `progress`, called once per entry with
-/// `(path: str, total: int, current: int, bytes_written: int)`. `total` is 0
-/// for TAR, and `bytes_written` is always 0.
+/// `(path: str, total: int | None, current: int, bytes_written: int)`. `total`
+/// is `None` for TAR (the count is not known up front), and `bytes_written` is
+/// always 0.
 ///
 /// # Arguments
 ///
@@ -725,8 +727,9 @@ pub fn list_archive_bytes_with_progress(
 /// Verify the security of an archive held in memory, with a progress callback.
 ///
 /// Same as `verify_archive_bytes`, plus `progress`, called once per entry with
-/// `(path: str, total: int, current: int, bytes_written: int)`. `total` is 0
-/// for TAR, and `bytes_written` is always 0.
+/// `(path: str, total: int | None, current: int, bytes_written: int)`. `total`
+/// is `None` for TAR (the count is not known up front), and `bytes_written` is
+/// always 0.
 ///
 /// # Arguments
 ///
@@ -1048,9 +1051,9 @@ pub fn create_archive_to_bytes(
 ) -> PyResult<PyCreatedArchive> {
     let format = parse_creatable_format(&format)?;
     let sources_list: Vec<Bound<'_, PyAny>> = sources.extract()?;
-    let source_paths: Vec<String> = sources_list
+    let source_paths: Vec<exarch_core::BoundaryPath> = sources_list
         .iter()
-        .map(|source| path_to_string(py, source))
+        .map(|source| path_to_boundary(py, source))
         .collect::<PyResult<_>>()?;
     let default_config = exarch_core::creation::CreationConfig::default();
     let config_ref = config.map_or(&default_config, |c| c.as_core());

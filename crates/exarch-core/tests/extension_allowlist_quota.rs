@@ -81,7 +81,7 @@ fn config() -> SecurityConfig {
         .with_allow_solid_archives(true)
         .try_add_allowed_extension("txt")
         .unwrap()
-        .with_max_total_size(LIMIT)
+        .with_max_total_size(exarch_core::non_zero!(LIMIT))
 }
 
 fn root(error: &ArchiveError) -> &ArchiveError {
@@ -162,7 +162,7 @@ fn list_counts_a_disallowed_file_toward_the_file_limit_only() {
         let manifest = list_archive(&archive, &config()).unwrap();
         assert_eq!(manifest.entries().len(), 3, "{format:?}");
 
-        let tight = config().with_max_file_count(2);
+        let tight = config().with_max_file_count(exarch_core::non_zero!(2));
         let error = list_archive(&archive, &tight).unwrap_err();
         assert_matches!(
             error,
@@ -217,7 +217,7 @@ fn a_disallowed_high_ratio_file_is_skipped_in_zip_and_refused_in_7z() {
 fn verify_enforces_the_file_limit_equally_for_allowed_and_skipped_files() {
     for format in FORMATS {
         let work = TempDir::new().unwrap();
-        let tight = config().with_max_file_count(2);
+        let tight = config().with_max_file_count(exarch_core::non_zero!(2));
         let outcome = |names: [&str; 3]| {
             let bytes = format.build(&names.map(|name| (name, &b"x"[..])));
             let archive = format.write(work.path(), &bytes);

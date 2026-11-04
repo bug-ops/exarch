@@ -2,14 +2,20 @@
 //! `VerificationOptions`.
 
 use std::num::NonZeroU64;
+use std::num::NonZeroUsize;
 
 use exarch_core::ArchiveError as CoreError;
+use exarch_core::ConfigProblem;
+use exarch_core::ConfigSetting;
 use exarch_core::Extension;
+use exarch_core::Limit;
 use exarch_core::ParallelDecode;
 use exarch_core::PathComponentName;
+use exarch_core::RatioLimit;
 use exarch_core::SecurityConfig as CoreConfig;
 use exarch_core::ZipConsistencyPolicy as CorePolicy;
 use exarch_core::creation::CompressionLevel;
+use exarch_core::non_zero_usize;
 use napi::Env;
 use napi::bindgen_prelude::Error;
 use napi::bindgen_prelude::Result;
@@ -18,6 +24,19 @@ use napi_derive::napi;
 use crate::error::IntoJsError;
 use crate::report::saturating_i64;
 use crate::report::unknown_variant;
+
+/// Parses a JavaScript byte count into a bounded limit: a negative value and
+/// zero are refusals naming `setting`.
+fn byte_limit(
+    setting: ConfigSetting,
+    size: i64,
+) -> std::result::Result<Limit<NonZeroU64>, CoreError> {
+    let bytes = u64::try_from(size).map_err(|_| CoreError::InvalidConfiguration {
+        setting,
+        problem: ConfigProblem::Negative,
+    })?;
+    Limit::<NonZeroU64>::parse(setting, bytes)
+}
 
 /// Largest integer a JavaScript number holds exactly (2^53 - 1).
 const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
@@ -139,17 +158,9 @@ impl SecurityConfig {
     ///
     /// Returns error if size is negative.
     #[napi(js_name = "setMaxFileSize")]
-    pub fn set_max_file_size(&mut self, size: i64) -> Result<&Self> {
-        if size < 0 {
-            return Err(Error::from_reason("max file size cannot be negative"));
-        }
-        #[expect(
-            clippy::cast_sign_loss,
-            reason = "the value is non-negative at this point"
-        )]
-        {
-            self.inner.max_file_size = size as u64;
-        }
+    pub fn set_max_file_size(&mut self, env: Env, size: i64) -> Result<&Self> {
+        self.try_set_max_file_size(size)
+            .map_err(|err| err.into_js_error(env))?;
         Ok(self)
     }
 
@@ -159,17 +170,9 @@ impl SecurityConfig {
     ///
     /// Returns error if size is negative.
     #[napi(js_name = "setMaxTotalSize")]
-    pub fn set_max_total_size(&mut self, size: i64) -> Result<&Self> {
-        if size < 0 {
-            return Err(Error::from_reason("max total size cannot be negative"));
-        }
-        #[expect(
-            clippy::cast_sign_loss,
-            reason = "the value is non-negative at this point"
-        )]
-        {
-            self.inner.max_total_size = size as u64;
-        }
+    pub fn set_max_total_size(&mut self, env: Env, size: i64) -> Result<&Self> {
+        self.try_set_max_total_size(size)
+            .map_err(|err| err.into_js_error(env))?;
         Ok(self)
     }
 
@@ -182,13 +185,9 @@ impl SecurityConfig {
     ///
     /// Returns error if ratio is not a positive finite number.
     #[napi(js_name = "setMaxCompressionRatio")]
-    pub fn set_max_compression_ratio(&mut self, ratio: f64) -> Result<&Self> {
-        if !ratio.is_finite() || ratio <= 0.0 {
-            return Err(Error::from_reason(
-                "compression ratio must be a positive finite number",
-            ));
-        }
-        self.inner.max_compression_ratio = ratio;
+    pub fn set_max_compression_ratio(&mut self, env: Env, ratio: f64) -> Result<&Self> {
+        self.try_set_max_compression_ratio(ratio)
+            .map_err(|err| err.into_js_error(env))?;
         Ok(self)
     }
 
@@ -197,16 +196,18 @@ impl SecurityConfig {
     /// `extractArchive` counts files, symlinks and hardlinks, not directories;
     /// `listArchive` and `verifyArchive` count every entry.
     #[napi(js_name = "setMaxFileCount")]
-    pub fn set_max_file_count(&mut self, count: u32) -> &Self {
-        self.inner.max_file_count = count as usize;
-        self
+    pub fn set_max_file_count(&mut self, env: Env, count: u32) -> Result<&Self> {
+        self.try_set_max_file_count(count)
+            .map_err(|err| err.into_js_error(env))?;
+        Ok(self)
     }
 
     /// Sets the maximum path depth.
     #[napi(js_name = "setMaxPathDepth")]
-    pub fn set_max_path_depth(&mut self, depth: u32) -> &Self {
-        self.inner.max_path_depth = depth as usize;
-        self
+    pub fn set_max_path_depth(&mut self, env: Env, depth: u32) -> Result<&Self> {
+        self.try_set_max_path_depth(depth)
+            .map_err(|err| err.into_js_error(env))?;
+        Ok(self)
     }
 
     /// Allows or denies symlinks.
@@ -292,19 +293,9 @@ impl SecurityConfig {
     ///
     /// Returns error if size is negative or zero.
     #[napi(js_name = "setMaxSolidBlockMemory")]
-    pub fn set_max_solid_block_memory(&mut self, size: i64) -> Result<&Self> {
-        if size <= 0 {
-            return Err(Error::from_reason(
-                "max solid block memory must be a positive number",
-            ));
-        }
-        #[expect(
-            clippy::cast_sign_loss,
-            reason = "the value is non-negative at this point"
-        )]
-        {
-            self.inner.max_solid_block_memory = size as u64;
-        }
+    pub fn set_max_solid_block_memory(&mut self, env: Env, size: i64) -> Result<&Self> {
+        self.try_set_max_solid_block_memory(size)
+            .map_err(|err| err.into_js_error(env))?;
         Ok(self)
     }
 
@@ -381,33 +372,33 @@ impl SecurityConfig {
     /// Maximum file size in bytes.
     #[napi(getter)]
     pub fn get_max_file_size(&self) -> i64 {
-        saturating_i64(self.inner.max_file_size)
+        saturating_i64(self.inner.max_file_size.ceiling())
     }
 
     /// Maximum total size in bytes.
     #[napi(getter)]
     pub fn get_max_total_size(&self) -> i64 {
-        saturating_i64(self.inner.max_total_size)
+        saturating_i64(self.inner.max_total_size.ceiling())
     }
 
     /// Maximum compression ratio.
     #[napi(getter)]
     pub fn get_max_compression_ratio(&self) -> f64 {
-        self.inner.max_compression_ratio
+        self.inner.max_compression_ratio.get()
     }
 
     /// Maximum file count.
     #[napi(getter)]
     #[allow(clippy::cast_possible_truncation)]
     pub fn get_max_file_count(&self) -> u32 {
-        self.inner.max_file_count as u32
+        self.inner.max_file_count.ceiling() as u32
     }
 
     /// Maximum path depth.
     #[napi(getter)]
     #[allow(clippy::cast_possible_truncation)]
     pub fn get_max_path_depth(&self) -> u32 {
-        self.inner.max_path_depth as u32
+        self.inner.max_path_depth.get() as u32
     }
 
     /// Whether to preserve permissions from archive.
@@ -470,7 +461,7 @@ impl SecurityConfig {
     /// Maximum memory in bytes for decompressing a solid 7z block.
     #[napi(getter)]
     pub fn get_max_solid_block_memory(&self) -> i64 {
-        saturating_i64(self.inner.max_solid_block_memory)
+        saturating_i64(self.inner.max_solid_block_memory.get())
     }
 
     /// List of allowed file extensions.
@@ -541,6 +532,48 @@ impl SecurityConfig {
     /// API.
     pub fn as_core(&self) -> &CoreConfig {
         &self.inner
+    }
+
+    /// Env-free core of `setMaxFileSize`.
+    fn try_set_max_file_size(&mut self, size: i64) -> std::result::Result<(), CoreError> {
+        self.inner.max_file_size = byte_limit(ConfigSetting::MaxFileSize, size)?;
+        Ok(())
+    }
+
+    /// Env-free core of `setMaxTotalSize`.
+    fn try_set_max_total_size(&mut self, size: i64) -> std::result::Result<(), CoreError> {
+        self.inner.max_total_size = byte_limit(ConfigSetting::MaxTotalSize, size)?;
+        Ok(())
+    }
+
+    /// Env-free core of `setMaxCompressionRatio`.
+    fn try_set_max_compression_ratio(&mut self, ratio: f64) -> std::result::Result<(), CoreError> {
+        self.inner.max_compression_ratio =
+            RatioLimit::parse(ConfigSetting::MaxCompressionRatio, ratio)?;
+        Ok(())
+    }
+
+    /// Env-free core of `setMaxFileCount`.
+    fn try_set_max_file_count(&mut self, count: u32) -> std::result::Result<(), CoreError> {
+        self.inner.max_file_count =
+            Limit::<NonZeroUsize>::parse(ConfigSetting::MaxFileCount, count as usize)?;
+        Ok(())
+    }
+
+    /// Env-free core of `setMaxPathDepth`.
+    fn try_set_max_path_depth(&mut self, depth: u32) -> std::result::Result<(), CoreError> {
+        self.inner.max_path_depth = non_zero_usize(ConfigSetting::MaxPathDepth, depth as usize)?;
+        Ok(())
+    }
+
+    /// Env-free core of `setMaxSolidBlockMemory`.
+    fn try_set_max_solid_block_memory(&mut self, size: i64) -> std::result::Result<(), CoreError> {
+        self.inner.max_solid_block_memory =
+            match byte_limit(ConfigSetting::MaxSolidBlockMemory, size)? {
+                Limit::Bounded(bytes) => bytes,
+                Limit::Unbounded => NonZeroU64::MAX,
+            };
+        Ok(())
     }
 
     /// Env-free core of `addAllowedExtension`, so the validation is testable
@@ -947,9 +980,9 @@ mod tests {
     #[test]
     fn test_size_getters_clamp_values_above_i64_max() {
         let mut config = SecurityConfig::new();
-        config.inner.max_file_size = u64::MAX;
-        config.inner.max_total_size = u64::MAX;
-        config.inner.max_solid_block_memory = u64::MAX;
+        config.inner.max_file_size = exarch_core::Limit::Unbounded;
+        config.inner.max_total_size = exarch_core::Limit::Unbounded;
+        config.inner.max_solid_block_memory = NonZeroU64::MAX;
         assert_eq!(config.get_max_file_size(), i64::MAX);
         assert_eq!(config.get_max_total_size(), i64::MAX);
         assert_eq!(config.get_max_solid_block_memory(), i64::MAX);
@@ -977,9 +1010,9 @@ mod tests {
     #[test]
     fn test_builder_pattern_method_chaining() {
         let mut config = SecurityConfig::new();
-        config.set_max_file_size(100_000_000).unwrap();
-        config.set_max_total_size(1_000_000_000).unwrap();
-        config.set_max_file_count(50_000);
+        config.try_set_max_file_size(100_000_000).unwrap();
+        config.try_set_max_total_size(1_000_000_000).unwrap();
+        config.try_set_max_file_count(50_000).unwrap();
 
         assert_eq!(config.get_max_file_size(), 100_000_000);
         assert_eq!(config.get_max_total_size(), 1_000_000_000);
@@ -989,7 +1022,7 @@ mod tests {
     #[test]
     fn test_builder_compression_ratio_valid() {
         let mut config = SecurityConfig::new();
-        let result = config.set_max_compression_ratio(200.0);
+        let result = config.try_set_max_compression_ratio(200.0);
         assert!(result.is_ok());
         assert_eq!(config.get_max_compression_ratio(), 200.0);
     }
@@ -997,28 +1030,28 @@ mod tests {
     #[test]
     fn test_builder_compression_ratio_rejects_nan() {
         let mut config = SecurityConfig::new();
-        let result = config.set_max_compression_ratio(f64::NAN);
+        let result = config.try_set_max_compression_ratio(f64::NAN);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_builder_compression_ratio_rejects_infinity() {
         let mut config = SecurityConfig::new();
-        let result = config.set_max_compression_ratio(f64::INFINITY);
+        let result = config.try_set_max_compression_ratio(f64::INFINITY);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_builder_compression_ratio_rejects_negative() {
         let mut config = SecurityConfig::new();
-        let result = config.set_max_compression_ratio(-10.0);
+        let result = config.try_set_max_compression_ratio(-10.0);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_builder_compression_ratio_rejects_zero() {
         let mut config = SecurityConfig::new();
-        let result = config.set_max_compression_ratio(0.0);
+        let result = config.try_set_max_compression_ratio(0.0);
         assert!(result.is_err());
     }
 
@@ -1121,14 +1154,14 @@ mod tests {
     fn test_as_core() {
         let config = SecurityConfig::new();
         let core_config = config.as_core();
-        assert_eq!(core_config.max_file_size, 50 * 1024 * 1024);
+        assert_eq!(core_config.max_file_size.ceiling(), 50 * 1024 * 1024);
     }
 
     // Integer boundary tests
     #[test]
     fn test_max_file_size_negative_value() {
         let mut config = SecurityConfig::new();
-        let result = config.set_max_file_size(-1);
+        let result = config.try_set_max_file_size(-1);
         assert!(result.is_err(), "negative file size should be rejected");
         assert!(
             result.unwrap_err().to_string().contains("negative"),
@@ -1139,7 +1172,7 @@ mod tests {
     #[test]
     fn test_max_file_size_i64_max() {
         let mut config = SecurityConfig::new();
-        let result = config.set_max_file_size(i64::MAX);
+        let result = config.try_set_max_file_size(i64::MAX);
         assert!(result.is_ok(), "i64::MAX should be accepted");
         assert_eq!(
             config.get_max_file_size(),
@@ -1151,7 +1184,7 @@ mod tests {
     #[test]
     fn test_max_total_size_negative_value() {
         let mut config = SecurityConfig::new();
-        let result = config.set_max_total_size(-1);
+        let result = config.try_set_max_total_size(-1);
         assert!(result.is_err(), "negative total size should be rejected");
         assert!(
             result.unwrap_err().to_string().contains("negative"),
@@ -1162,7 +1195,7 @@ mod tests {
     #[test]
     fn test_max_total_size_i64_max() {
         let mut config = SecurityConfig::new();
-        let result = config.set_max_total_size(i64::MAX);
+        let result = config.try_set_max_total_size(i64::MAX);
         assert!(result.is_ok(), "i64::MAX should be accepted");
         assert_eq!(
             config.get_max_total_size(),
@@ -1174,7 +1207,7 @@ mod tests {
     #[test]
     fn test_max_file_count_u32_max() {
         let mut config = SecurityConfig::new();
-        config.set_max_file_count(u32::MAX);
+        config.try_set_max_file_count(u32::MAX).unwrap();
         assert_eq!(
             config.get_max_file_count(),
             u32::MAX,
@@ -1185,7 +1218,7 @@ mod tests {
     #[test]
     fn test_max_path_depth_u32_max() {
         let mut config = SecurityConfig::new();
-        config.set_max_path_depth(u32::MAX);
+        config.try_set_max_path_depth(u32::MAX).unwrap();
         assert_eq!(
             config.get_max_path_depth(),
             u32::MAX,
@@ -1196,20 +1229,23 @@ mod tests {
     #[test]
     fn test_max_file_size_zero() {
         let mut config = SecurityConfig::new();
-        let result = config.set_max_file_size(0);
-        assert!(result.is_ok(), "zero file size should be accepted");
-        assert_eq!(config.get_max_file_size(), 0);
+        let err = config.try_set_max_file_size(0).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "invalid configuration: max_file_size must not be zero"
+        );
+        assert_eq!(config.get_max_file_size(), 50 * 1024 * 1024);
     }
 
     // Property getter tests
     #[test]
     fn test_property_getters_return_correct_values() {
         let mut config = SecurityConfig::new();
-        config.set_max_file_size(100_000_000).unwrap();
-        config.set_max_total_size(1_000_000_000).unwrap();
-        config.set_max_compression_ratio(250.0).unwrap();
-        config.set_max_file_count(50_000);
-        config.set_max_path_depth(64);
+        config.try_set_max_file_size(100_000_000).unwrap();
+        config.try_set_max_total_size(1_000_000_000).unwrap();
+        config.try_set_max_compression_ratio(250.0).unwrap();
+        config.try_set_max_file_count(50_000).unwrap();
+        config.try_set_max_path_depth(64).unwrap();
         config.set_preserve_permissions(true);
 
         assert_eq!(
@@ -1272,7 +1308,7 @@ mod tests {
     #[test]
     fn test_max_solid_block_memory_round_trip() {
         let mut config = SecurityConfig::new();
-        let result = config.set_max_solid_block_memory(256 * 1024 * 1024);
+        let result = config.try_set_max_solid_block_memory(256 * 1024 * 1024);
         assert!(result.is_ok());
         assert_eq!(
             config.get_max_solid_block_memory(),
@@ -1284,25 +1320,25 @@ mod tests {
     #[test]
     fn test_max_solid_block_memory_rejects_negative() {
         let mut config = SecurityConfig::new();
-        let result = config.set_max_solid_block_memory(-1);
+        let result = config.try_set_max_solid_block_memory(-1);
         assert!(result.is_err(), "negative value should be rejected");
         assert!(
-            result.unwrap_err().to_string().contains("positive"),
-            "error should mention positive requirement"
+            result.unwrap_err().to_string().contains("negative"),
+            "error should mention the negative value"
         );
     }
 
     #[test]
     fn test_max_solid_block_memory_rejects_zero() {
         let mut config = SecurityConfig::new();
-        let result = config.set_max_solid_block_memory(0);
+        let result = config.try_set_max_solid_block_memory(0);
         assert!(result.is_err(), "zero should be rejected");
     }
 
     #[test]
     fn test_max_solid_block_memory_accepts_one_byte() {
         let mut config = SecurityConfig::new();
-        let result = config.set_max_solid_block_memory(1);
+        let result = config.try_set_max_solid_block_memory(1);
         assert!(result.is_ok(), "1 byte should be accepted");
         assert_eq!(config.get_max_solid_block_memory(), 1);
     }
@@ -1449,8 +1485,8 @@ mod tests {
     #[test]
     fn test_builder_pattern_with_build() {
         let mut config = SecurityConfig::new();
-        config.set_max_file_size(100_000_000).unwrap();
-        config.set_max_total_size(1_000_000_000).unwrap();
+        config.try_set_max_file_size(100_000_000).unwrap();
+        config.try_set_max_total_size(1_000_000_000).unwrap();
         let result = config.build();
 
         assert_eq!(
@@ -1465,14 +1501,14 @@ mod tests {
     #[test]
     fn test_builder_compression_ratio_rejects_negative_infinity() {
         let mut config = SecurityConfig::new();
-        let result = config.set_max_compression_ratio(f64::NEG_INFINITY);
+        let result = config.try_set_max_compression_ratio(f64::NEG_INFINITY);
         assert!(result.is_err(), "negative infinity should be rejected");
     }
 
     #[test]
     fn test_builder_compression_ratio_accepts_very_small_positive() {
         let mut config = SecurityConfig::new();
-        let result = config.set_max_compression_ratio(0.000001);
+        let result = config.try_set_max_compression_ratio(0.000001);
         assert!(
             result.is_ok(),
             "very small positive values should be accepted"
@@ -1483,7 +1519,7 @@ mod tests {
     #[test]
     fn test_builder_compression_ratio_accepts_very_large() {
         let mut config = SecurityConfig::new();
-        let result = config.set_max_compression_ratio(1_000_000.0);
+        let result = config.try_set_max_compression_ratio(1_000_000.0);
         assert!(result.is_ok(), "very large values should be accepted");
         assert_eq!(config.get_max_compression_ratio(), 1_000_000.0);
     }
@@ -1492,7 +1528,7 @@ mod tests {
     #[test]
     fn test_security_config_clone() {
         let mut config = SecurityConfig::new();
-        let _ = config.set_max_file_size(100_000_000).unwrap();
+        config.try_set_max_file_size(100_000_000).unwrap();
 
         let cloned = config.clone();
         assert_eq!(

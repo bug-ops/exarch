@@ -500,7 +500,7 @@ fn list_tar_entries<R: std::io::Read>(
         .map_err(|e| ArchiveError::unclassified(format!("failed to read TAR entries: {e}")))?;
 
     while let Some(entry_result) = entries.next_entry() {
-        let mut entry = entry_result?.check(config.max_tar_metadata_bytes)?;
+        let mut entry = entry_result?.check(config.max_tar_metadata_bytes.get())?;
 
         entry.settle(|entry| -> Result<()> {
             // Skip TAR metadata entries (PAX headers, GNU long names/links)
@@ -1545,7 +1545,7 @@ mod tests {
         temp_file.flush().unwrap();
 
         // Set quota to 1 file
-        let config = SecurityConfig::default().with_max_file_count(1);
+        let config = SecurityConfig::default().with_max_file_count(crate::non_zero!(1));
 
         let result = list_archive(temp_file.path(), &config);
         match result {
@@ -1570,7 +1570,7 @@ mod tests {
         zip.start_file("b.txt", options).unwrap();
         zip.finish().unwrap();
 
-        let config = SecurityConfig::default().with_max_file_count(1);
+        let config = SecurityConfig::default().with_max_file_count(crate::non_zero!(1));
 
         let result = list_archive(temp_file.path(), &config);
         match result {
@@ -1811,7 +1811,7 @@ mod tests {
         zip.write_all(&vec![0u8; 600]).unwrap();
         zip.finish().unwrap();
 
-        let config = SecurityConfig::default().with_max_total_size(100);
+        let config = SecurityConfig::default().with_max_total_size(crate::non_zero!(100));
         let result = list_archive(temp_file.path(), &config);
         assert_matches!(
             result,
@@ -1838,7 +1838,7 @@ mod tests {
         temp_file.write_all(&archive_data).unwrap();
         temp_file.flush().unwrap();
 
-        let config = SecurityConfig::default().with_max_total_size(100);
+        let config = SecurityConfig::default().with_max_total_size(crate::non_zero!(100));
         let result = list_archive(temp_file.path(), &config);
         assert_matches!(
             result,
@@ -2270,7 +2270,7 @@ mod tests {
         temp_file.write_all(&archive_bytes).unwrap();
         temp_file.flush().unwrap();
 
-        let config = SecurityConfig::default().with_max_file_count(2);
+        let config = SecurityConfig::default().with_max_file_count(crate::non_zero!(2));
         let result = list_archive(temp_file.path(), &config);
         assert_matches!(
             result,
@@ -2290,7 +2290,7 @@ mod tests {
         temp_file.write_all(&archive_bytes).unwrap();
         temp_file.flush().unwrap();
 
-        let config = SecurityConfig::default().with_max_total_size(50);
+        let config = SecurityConfig::default().with_max_total_size(crate::non_zero!(50));
         let result = list_archive(temp_file.path(), &config);
         assert_matches!(
             result,
@@ -2358,7 +2358,7 @@ mod tests {
         temp_file.flush().unwrap();
 
         // Small limit — must reject.
-        let small = SecurityConfig::default().with_max_total_size(100);
+        let small = SecurityConfig::default().with_max_total_size(crate::non_zero!(100));
         assert_matches!(
             list_archive(temp_file.path(), &small),
             Err(ArchiveError::QuotaExceeded {
@@ -2368,7 +2368,8 @@ mod tests {
         );
 
         // Large limit (simulates --max-total-size 1G) — must succeed.
-        let large = SecurityConfig::default().with_max_total_size(1024 * 1024 * 1024);
+        let large =
+            SecurityConfig::default().with_max_total_size(crate::non_zero!(1024 * 1024 * 1024));
         assert!(
             list_archive(temp_file.path(), &large).is_ok(),
             "list_archive must succeed when caller supplies a large max_total_size (regression #166)"
@@ -2388,7 +2389,7 @@ mod tests {
             zip.finish().unwrap();
         }
 
-        let small = SecurityConfig::default().with_max_total_size(100);
+        let small = SecurityConfig::default().with_max_total_size(crate::non_zero!(100));
         assert_matches!(
             list_archive(temp_file.path(), &small),
             Err(ArchiveError::QuotaExceeded {
@@ -2397,7 +2398,8 @@ mod tests {
             "expected TotalSize quota error with limit=100"
         );
 
-        let large = SecurityConfig::default().with_max_total_size(1024 * 1024 * 1024);
+        let large =
+            SecurityConfig::default().with_max_total_size(crate::non_zero!(1024 * 1024 * 1024));
         assert!(
             list_archive(temp_file.path(), &large).is_ok(),
             "list_archive must succeed when caller supplies a large max_total_size (regression #166)"
@@ -2412,7 +2414,7 @@ mod tests {
         temp_file.write_all(&archive_bytes).unwrap();
         temp_file.flush().unwrap();
 
-        let small = SecurityConfig::default().with_max_total_size(100);
+        let small = SecurityConfig::default().with_max_total_size(crate::non_zero!(100));
         assert_matches!(
             list_archive(temp_file.path(), &small),
             Err(ArchiveError::QuotaExceeded {
@@ -2421,7 +2423,8 @@ mod tests {
             "expected TotalSize quota error with limit=100"
         );
 
-        let large = SecurityConfig::default().with_max_total_size(1024 * 1024 * 1024);
+        let large =
+            SecurityConfig::default().with_max_total_size(crate::non_zero!(1024 * 1024 * 1024));
         assert!(
             list_archive(temp_file.path(), &large).is_ok(),
             "list_archive must succeed when caller supplies a large max_total_size (regression #166)"
@@ -2470,17 +2473,6 @@ mod tests {
         assert!(
             !has_false_positive,
             "solid.7z verification should not produce High-severity compressed_size issue"
-        );
-    }
-
-    #[test]
-    fn list_archive_rejects_invalid_security_config() {
-        let config = SecurityConfig::default().with_max_file_size(0);
-        let result = crate::list_archive("any.tar.gz", &config);
-        assert_matches!(
-            result,
-            Err(crate::ArchiveError::InvalidConfiguration { .. }),
-            "list_archive must return InvalidConfiguration for zero max_file_size"
         );
     }
 
@@ -3144,7 +3136,7 @@ mod tests {
         temp_file.write_all(&archive_data).unwrap();
         temp_file.flush().unwrap();
 
-        let config = SecurityConfig::default().with_max_file_size(500);
+        let config = SecurityConfig::default().with_max_file_size(crate::non_zero!(500));
         let result = list_archive(temp_file.path(), &config);
         assert_matches!(
             result,
@@ -3169,7 +3161,7 @@ mod tests {
         zip.write_all(&vec![0u8; 1000]).unwrap();
         zip.finish().unwrap();
 
-        let config = SecurityConfig::default().with_max_file_size(500);
+        let config = SecurityConfig::default().with_max_file_size(crate::non_zero!(500));
         let result = list_archive(temp_file.path(), &config);
         assert_matches!(
             result,
@@ -3191,7 +3183,7 @@ mod tests {
         temp_file.write_all(&archive_bytes).unwrap();
         temp_file.flush().unwrap();
 
-        let config = SecurityConfig::default().with_max_file_size(500);
+        let config = SecurityConfig::default().with_max_file_size(crate::non_zero!(500));
         let result = list_archive(temp_file.path(), &config);
         assert_matches!(
             result,
@@ -3247,9 +3239,9 @@ mod tests {
         let mut archive = ZipArchive::new(Cursor::new(zip_bytes)).unwrap();
 
         let config = SecurityConfig::default()
-            .with_max_file_size(u64::MAX)
-            .with_max_file_count(usize::MAX)
-            .with_max_total_size(u64::MAX)
+            .with_max_file_size(crate::Limit::Unbounded)
+            .with_max_file_count(crate::Limit::Unbounded)
+            .with_max_total_size(crate::Limit::Unbounded)
             .validate()
             .expect("valid config");
         let result = list_zip_reader(
@@ -3325,7 +3317,7 @@ mod tests {
     #[test]
     fn test_list_preflight_lifts_only_file_size_limit() {
         let file = tar_with_sizes(&[100, 10]);
-        let config = SecurityConfig::default().with_max_file_size(50);
+        let config = SecurityConfig::default().with_max_file_size(crate::non_zero!(50));
 
         assert_matches!(
             list_archive(file.path(), &config),
@@ -3337,13 +3329,19 @@ mod tests {
         assert_eq!(manifest.total_entries(), 2);
 
         assert_matches!(
-            list_preflight(file.path(), config.clone().with_max_file_count(1)),
+            list_preflight(
+                file.path(),
+                config.clone().with_max_file_count(crate::non_zero!(1))
+            ),
             Err(ArchiveError::QuotaExceeded {
                 resource: QuotaResource::FileCount { current: 2, max: 1 }
             })
         );
         assert_matches!(
-            list_preflight(file.path(), config.with_max_total_size(105)),
+            list_preflight(
+                file.path(),
+                config.with_max_total_size(crate::non_zero!(105))
+            ),
             Err(ArchiveError::QuotaExceeded {
                 resource: QuotaResource::TotalSize {
                     current: 110,
@@ -3354,7 +3352,7 @@ mod tests {
     }
 
     fn assert_verify_reports_oversized_file(path: &Path) {
-        let config = SecurityConfig::default().with_max_file_size(500);
+        let config = SecurityConfig::default().with_max_file_size(crate::non_zero!(500));
         let report = crate::verify_archive(path, &config)
             .expect("verify must report an oversized entry, not error out");
 

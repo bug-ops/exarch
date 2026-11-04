@@ -20,6 +20,7 @@ use anyhow::Context;
 use anyhow::Result;
 use exarch_core::ArchiveEntry;
 use exarch_core::ArchiveManifest;
+use exarch_core::ConfigSetting;
 use exarch_core::DecodeReuse;
 use exarch_core::Extension;
 use exarch_core::ExtractionOptions;
@@ -30,12 +31,14 @@ use exarch_core::ManifestEntryKind;
 use exarch_core::NoopProgress;
 use exarch_core::PathComponentName;
 use exarch_core::ProgressCallback;
+use exarch_core::RatioLimit;
 use exarch_core::SecurityConfig;
 use exarch_core::StoredTargets;
 use exarch_core::extract_archive_with_options_and_progress;
 use exarch_core::formats::detect::ArchiveType;
 use exarch_core::formats::detect::detect_format;
 use exarch_core::list_archive_for_extraction;
+use exarch_core::non_zero_usize;
 use std::env;
 use std::ffi::OsStr;
 use std::ffi::OsString;
@@ -924,12 +927,18 @@ pub fn execute(
     let config = args
         .parallel
         .apply(args.zip.apply(args.links.apply(apply_size_limits(
-            SecurityConfig::default().with_max_file_count(args.max_files),
+            args.max_files,
             args.max_total_size,
             args.max_file_size,
-        ))))
-        .with_max_compression_ratio(f64::from(args.max_compression_ratio))
-        .with_max_path_depth(args.max_path_depth)
+        )?)))
+        .with_max_compression_ratio(RatioLimit::parse(
+            ConfigSetting::MaxCompressionRatio,
+            f64::from(args.max_compression_ratio),
+        )?)
+        .with_max_path_depth(non_zero_usize(
+            ConfigSetting::MaxPathDepth,
+            args.max_path_depth,
+        )?)
         .with_allow_absolute_paths(args.allow_absolute_paths)
         .with_allow_world_writable(args.allow_world_writable)
         .with_preserve_permissions(args.preserve_permissions)

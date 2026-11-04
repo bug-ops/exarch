@@ -148,7 +148,7 @@ fn link_config(max_file_count: usize) -> SecurityConfig {
         .with_allow_symlinks(true)
         .with_allow_hardlinks(true)
         .with_allow_solid_archives(true)
-        .with_max_file_count(max_file_count)
+        .with_max_file_count(std::num::NonZeroUsize::new(max_file_count).unwrap())
 }
 
 fn root_cause(error: ArchiveError) -> ArchiveError {
@@ -330,7 +330,7 @@ fn sevenz_policy_and_target_errors_win_over_the_file_count() {
     let dir = TempDir::new().unwrap();
     let out = TempDir::new().unwrap();
     let archive = write_archive(&dir, "a.7z", &sevenz_with_symlinks(3, false));
-    let disallowed = SecurityConfig::default().with_max_file_count(1);
+    let disallowed = SecurityConfig::default().with_max_file_count(exarch_core::non_zero!(1));
     assert_matches!(
         extract_archive(&archive, out.path(), &disallowed),
         Err(ArchiveError::SecurityViolation { kind, .. }) if kind.to_string().contains("symlinks not allowed")
@@ -352,7 +352,7 @@ fn sevenz_policy_and_target_errors_win_over_the_file_count() {
         let error = extract_archive(
             &archive,
             out.path(),
-            &link_config(1).with_max_compression_ratio(10_000.0),
+            &link_config(1).with_max_compression_ratio(exarch_core::RatioLimit::constant(10_000.0)),
         )
         .unwrap_err();
 

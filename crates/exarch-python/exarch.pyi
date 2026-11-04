@@ -63,11 +63,19 @@ class SecurityConfig:
         ...
 
     def with_max_file_size(self, size: int) -> SecurityConfig:
-        """Sets the maximum file size in bytes."""
+        """Sets the maximum file size in bytes.
+
+        Raises ``ValueError`` for zero; its ``setting`` attribute names the
+        refused setting (``"max_file_size"``).
+        """
         ...
 
     def with_max_total_size(self, size: int) -> SecurityConfig:
-        """Sets the maximum total size in bytes."""
+        """Sets the maximum total size in bytes.
+
+        Raises ``ValueError`` for zero; its ``setting`` attribute is
+        ``"max_total_size"``.
+        """
         ...
 
     def with_max_compression_ratio(self, ratio: float) -> SecurityConfig:
@@ -84,11 +92,18 @@ class SecurityConfig:
 
         `extract_archive` counts files, symlinks and hardlinks, not
         directories; `list_archive` and `verify_archive` count every entry.
+
+        Raises ``ValueError`` for zero; its ``setting`` attribute is
+        ``"max_file_count"``.
         """
         ...
 
     def with_max_path_depth(self, depth: int) -> SecurityConfig:
-        """Sets the maximum path depth."""
+        """Sets the maximum path depth.
+
+        Raises ``ValueError`` for zero; its ``setting`` attribute is
+        ``"max_path_depth"``.
+        """
         ...
 
     def with_allow_symlinks(self, allow: bool = True) -> SecurityConfig:

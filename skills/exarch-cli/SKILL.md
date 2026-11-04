@@ -443,7 +443,8 @@ Every subcommand's `--json` output uses the same envelope:
     "kind": "PathTraversal",   // see full enum below
     "message": "...",
     "relaxable_by": "symlinks", // only on some SecurityViolation errors, see below
-    "sub_code": "PATH_NAME"  // always on SecurityViolation; on some InvalidArchive errors, see below
+    "sub_code": "PATH_NAME",  // always on SecurityViolation; on some InvalidArchive errors, see below
+    "setting": "max_file_count"  // only on an InvalidConfiguration error that names a setting, see below
   }
 }
 ```
@@ -482,6 +483,13 @@ with the debug binary on four TARs: a size field `+0000000005` gives `kind` `Inv
 `TAR_TRAILER` and `relaxable_by` `max_tar_metadata_bytes`; a file of `A` bytes gives `InvalidArchive`
 and no `sub_code`. A hardlink to a missing target gives `InvalidArchive` and
 `LINK_TARGET`, and a symlink entry with an empty link name gives `InvalidArchive` and `LINK_TARGET` (both verified live with the debug binary).
+
+`error.setting` is present only on an `InvalidConfiguration` error and names the refused setting by its
+stable snake_case id (`max_file_size`, `max_total_size`, `max_file_count`, `max_path_depth`,
+`max_compression_ratio`, `decompression_budget`, `allowed_extension`, `banned_path_component`, `output_path`,
+`source_paths`, ...). A zero limit is refused when the flag is applied, so `list --max-files 0 --json` gives
+`kind` `InvalidConfiguration`, `setting` `max_file_count` and message
+`invalid configuration: max_file_count must not be zero` (verified live with the debug binary).
 
 `error.relaxable_by` is present only on a `SecurityViolation` that a core `SecurityConfig` setting
 relaxes, and names the setting whose current value refused the entry: `symlinks`, `hardlinks`,

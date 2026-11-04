@@ -73,10 +73,10 @@ impl ReusePlan {
         Self {
             mode,
             limit: configured
-                .min(config.max_decoder_memory)
-                .min(config.max_total_size),
-            max_entry: config.max_file_size,
-            max_ratio: config.max_compression_ratio,
+                .min(config.max_decoder_memory.get())
+                .min(config.max_total_size.ceiling()),
+            max_entry: config.max_file_size.ceiling(),
+            max_ratio: config.max_compression_ratio.get(),
         }
     }
 

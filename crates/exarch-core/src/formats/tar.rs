@@ -449,10 +449,12 @@ impl<R: Read> TarArchive<R> {
                 ctx.push_skip_warnings();
                 ArchiveError::partial_or(std::mem::take(ctx.tally.report), raw)
             })?;
-            let mut guard = guard.check(config.max_tar_metadata_bytes).map_err(|e| {
-                ctx.push_skip_warnings();
-                ArchiveError::partial_or(std::mem::take(ctx.tally.report), e)
-            })?;
+            let mut guard = guard
+                .check(config.max_tar_metadata_bytes.get())
+                .map_err(|e| {
+                    ctx.push_skip_warnings();
+                    ArchiveError::partial_or(std::mem::take(ctx.tally.report), e)
+                })?;
 
             // TAR is streaming: total entry count is not known upfront, so pass
             // 0.
@@ -1155,7 +1157,7 @@ mod tests {
 
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default()
-            .with_max_file_size(100)
+            .with_max_file_size(crate::non_zero!(100))
             .validate()
             .unwrap();
 
@@ -1692,7 +1694,7 @@ mod tests {
 
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default()
-            .with_max_file_count(2)
+            .with_max_file_count(crate::non_zero!(2))
             .validate()
             .unwrap();
 
@@ -1716,7 +1718,7 @@ mod tests {
 
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default()
-            .with_max_total_size(1000)
+            .with_max_total_size(crate::non_zero!(1000))
             .validate()
             .unwrap();
 
@@ -2562,7 +2564,7 @@ mod tests {
         config.allowed.hardlinks = true;
         // Enough room for target.txt (100 bytes) but not for the hardlink's
         // own independent 100-byte copy on top of it.
-        config.max_total_size = 150;
+        config.max_total_size = crate::Limit::Bounded(crate::non_zero!(150));
         let config = config.validate().expect("valid config");
 
         let result = archive.extract(
@@ -2820,7 +2822,7 @@ mod tests {
         let archive = TarArchive::new(Cursor::new(tar_data));
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default()
-            .with_max_file_size(1024 * 1024)
+            .with_max_file_size(crate::non_zero!(1024 * 1024))
             .validate()
             .unwrap();
 
@@ -2848,7 +2850,7 @@ mod tests {
         let archive = TarArchive::new(Cursor::new(tar_data));
         let temp = TempDir::new().unwrap();
         let config = SecurityConfig::default()
-            .with_max_total_size(500 * 1024)
+            .with_max_total_size(crate::non_zero!(500 * 1024))
             .validate()
             .unwrap();
 

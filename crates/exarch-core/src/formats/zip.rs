@@ -112,12 +112,15 @@
 //!
 //! ```no_run
 //! use exarch_core::ExtractionOptions;
+//! use exarch_core::Limit;
+//! use exarch_core::RatioLimit;
 //! use exarch_core::SecurityConfig;
+//! use exarch_core::non_zero;
 //!
 //! let mut config = SecurityConfig::default();
 //! config.allowed.symlinks = true; // Allow symlinks
-//! config.max_file_size = 100 * 1024 * 1024; // 100 MB per file
-//! config.max_compression_ratio = 100.0; // Allow 100:1 compression
+//! config.max_file_size = Limit::Bounded(non_zero!(100 * 1024 * 1024)); // 100 MB per file
+//! config.max_compression_ratio = RatioLimit::constant(100.0); // Allow 100:1 compression
 //! // ... extract with config
 //! ```
 
@@ -695,11 +698,11 @@ impl<R: Read + Seek> ZipArchive<R> {
     /// `max_file_count`.
     fn check_count(&self, config: &SecurityConfig<Validated>) -> Result<()> {
         let found = self.structure.central_entries();
-        if found > config.max_file_count {
+        if !config.max_file_count.admits(found) {
             return Err(ArchiveError::QuotaExceeded {
                 resource: crate::QuotaResource::FileCount {
                     current: found,
-                    max: config.max_file_count,
+                    max: config.max_file_count.ceiling(),
                 },
             });
         }
@@ -751,7 +754,7 @@ impl<R: Read + Seek> ZipArchive<R> {
             ZstdWindows::Largest(window) if !limit.admits(window) => {
                 Err(ArchiveError::QuotaExceeded {
                     resource: crate::QuotaResource::DecoderMemory {
-                        max: config.max_decoder_memory,
+                        max: config.max_decoder_memory.get(),
                     },
                 })
             }
@@ -1546,7 +1549,7 @@ mod tests {
 
         let temp = TempDir::new().unwrap();
         let mut config = SecurityConfig::default();
-        config.max_file_size = 100; // Only allow 100 bytes
+        config.max_file_size = crate::Limit::Bounded(crate::non_zero!(100)); // Only allow 100 bytes
         let config = config.validate().expect("valid config");
 
         let result = archive.extract(
@@ -1571,7 +1574,7 @@ mod tests {
 
         let temp = TempDir::new().unwrap();
         let mut config = SecurityConfig::default();
-        config.max_file_count = 2; // Only allow 2 files
+        config.max_file_count = crate::Limit::Bounded(crate::non_zero!(2)); // Only allow 2 files
         let config = config.validate().expect("valid config");
 
         let result = archive.extract(
@@ -1669,7 +1672,7 @@ mod tests {
 
         let temp = TempDir::new().unwrap();
         let mut config = SecurityConfig::default();
-        config.max_compression_ratio = 10.0; // Low threshold for testing
+        config.max_compression_ratio = crate::RatioLimit::constant(10.0); // Low threshold for testing
         let config = config.validate().expect("valid config");
 
         let result = archive.extract(
@@ -2147,7 +2150,7 @@ mod tests {
 
         let temp = TempDir::new().unwrap();
         let mut config = SecurityConfig::default();
-        config.max_total_size = 1000; // Total limit 1000 bytes
+        config.max_total_size = crate::Limit::Bounded(crate::non_zero!(1000)); // Total limit 1000 bytes
         let config = config.validate().expect("valid config");
 
         let result = archive.extract(

@@ -172,7 +172,7 @@ fn extract_rejects_oversized_gnu_longname_metadata_entry() {
     let bomb = metadata_bomb(b'L', 8192);
     let temp = TempDir::new().unwrap();
     let config = SecurityConfig::default()
-        .with_max_tar_metadata_bytes(4096)
+        .with_max_tar_metadata_bytes(exarch_core::non_zero!(4096))
         .validate()
         .unwrap();
 
@@ -191,7 +191,7 @@ fn extract_rejects_oversized_gnu_longlink_metadata_entry() {
     let bomb = metadata_bomb(b'K', 8192);
     let temp = TempDir::new().unwrap();
     let config = SecurityConfig::default()
-        .with_max_tar_metadata_bytes(4096)
+        .with_max_tar_metadata_bytes(exarch_core::non_zero!(4096))
         .validate()
         .unwrap();
 
@@ -210,7 +210,7 @@ fn extract_rejects_oversized_pax_metadata_entry() {
     let bomb = metadata_bomb(b'x', 8192);
     let temp = TempDir::new().unwrap();
     let config = SecurityConfig::default()
-        .with_max_tar_metadata_bytes(4096)
+        .with_max_tar_metadata_bytes(exarch_core::non_zero!(4096))
         .validate()
         .unwrap();
 
@@ -243,7 +243,7 @@ fn extract_accepts_metadata_entry_within_the_configured_budget() {
 
     let temp = TempDir::new().unwrap();
     let config = SecurityConfig::default()
-        .with_max_tar_metadata_bytes(4096)
+        .with_max_tar_metadata_bytes(exarch_core::non_zero!(4096))
         .validate()
         .unwrap();
     let archive = TarArchive::new(Cursor::new(t));
@@ -269,7 +269,8 @@ fn list_archive_rejects_oversized_metadata_entry() {
     let bomb = metadata_bomb(b'L', 8192);
     let temp = TempDir::new().unwrap();
     let path = write_tar_file(&temp, "bomb.tar", &bomb);
-    let config = SecurityConfig::default().with_max_tar_metadata_bytes(4096);
+    let config =
+        SecurityConfig::default().with_max_tar_metadata_bytes(exarch_core::non_zero!(4096));
 
     let result = exarch_core::list_archive(&path, &config);
     assert_is_budget_violation(&result);
@@ -280,7 +281,8 @@ fn verify_archive_rejects_oversized_metadata_entry() {
     let bomb = metadata_bomb(b'x', 8192);
     let temp = TempDir::new().unwrap();
     let path = write_tar_file(&temp, "bomb.tar", &bomb);
-    let config = SecurityConfig::default().with_max_tar_metadata_bytes(4096);
+    let config =
+        SecurityConfig::default().with_max_tar_metadata_bytes(exarch_core::non_zero!(4096));
 
     let result = exarch_core::verify_archive(&path, &config);
     assert_is_budget_violation(&result);
@@ -292,7 +294,8 @@ fn extract_archive_rejects_oversized_metadata_entry_via_public_api() {
     let temp = TempDir::new().unwrap();
     let path = write_tar_file(&temp, "bomb.tar", &bomb);
     let out = temp.path().join("out");
-    let config = SecurityConfig::default().with_max_tar_metadata_bytes(4096);
+    let config =
+        SecurityConfig::default().with_max_tar_metadata_bytes(exarch_core::non_zero!(4096));
 
     let result = exarch_core::extract_archive(&path, &out, &config);
     assert_is_budget_violation(&result);
@@ -440,7 +443,8 @@ fn s3_shape_global_only_bomb(bomb_real_bytes: usize) -> Vec<u8> {
 }
 
 fn assert_all_entry_points_reject(bomb: &[u8], file_name: &str, refusal: Refusal) {
-    let config = SecurityConfig::default().with_max_tar_metadata_bytes(4096);
+    let config =
+        SecurityConfig::default().with_max_tar_metadata_bytes(exarch_core::non_zero!(4096));
     let validated_config = config.clone().validate().unwrap();
 
     let temp = TempDir::new().unwrap();
@@ -508,7 +512,7 @@ fn legitimate_pax_global_header_does_not_false_positive() {
 
     let temp = TempDir::new().unwrap();
     let config = SecurityConfig::default()
-        .with_max_tar_metadata_bytes(4096)
+        .with_max_tar_metadata_bytes(exarch_core::non_zero!(4096))
         .validate()
         .unwrap();
     let archive = TarArchive::new(Cursor::new(t));
@@ -907,9 +911,9 @@ fn many_sparse_bombs_tar(n: usize, gap: u64) -> Vec<u8> {
 fn many_sparse_entries_are_refused_by_every_entry_point_without_draining() {
     let bomb = many_sparse_bombs_tar(300, 1u64 << 40);
     let config = SecurityConfig::default()
-        .with_max_file_size(u64::MAX)
-        .with_max_total_size(u64::MAX)
-        .with_max_file_count(usize::MAX)
+        .with_max_file_size(exarch_core::Limit::Unbounded)
+        .with_max_total_size(exarch_core::Limit::Unbounded)
+        .with_max_file_count(exarch_core::Limit::Unbounded)
         .try_add_allowed_extension("txt")
         .unwrap();
 

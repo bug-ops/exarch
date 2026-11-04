@@ -72,12 +72,15 @@ impl MemoryLimit {
     /// use exarch_core::MemoryLimit;
     /// use exarch_core::SecurityConfig;
     ///
-    /// let config = SecurityConfig::default().with_max_total_size(4096);
+    /// let config = SecurityConfig::default().with_max_total_size(exarch_core::non_zero!(4096));
     /// assert_eq!(MemoryLimit::from_config(&config).bytes().get(), 4096);
     /// ```
     #[must_use]
     pub fn from_config<State>(config: &SecurityConfig<State>) -> Self {
-        Self(NonZeroU64::new(config.max_total_size).unwrap_or(NonZeroU64::MIN))
+        Self(match config.max_total_size {
+            crate::Limit::Bounded(bytes) => bytes,
+            crate::Limit::Unbounded => NonZeroU64::MAX,
+        })
     }
 }
 

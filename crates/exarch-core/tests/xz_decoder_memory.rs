@@ -50,7 +50,7 @@ fn write_lzma_alone_named_tar_xz(dir: &Path) -> PathBuf {
 }
 
 fn config_with_limit(limit: u64) -> SecurityConfig {
-    SecurityConfig::default().with_max_decoder_memory(limit)
+    SecurityConfig::default().with_max_decoder_memory(std::num::NonZeroU64::new(limit).unwrap())
 }
 
 fn assert_decoder_memory(err: &ArchiveError, max: u64) {

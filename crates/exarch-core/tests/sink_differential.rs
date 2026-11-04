@@ -325,7 +325,7 @@ fn tar_hardlink_to_missing_target_is_rejected() {
 #[test]
 fn tar_hardlink_amplification_hits_the_total_quota() {
     let mut config = links_config();
-    config.max_total_size = 250;
+    config.max_total_size = exarch_core::Limit::Bounded(exarch_core::non_zero!(250));
     rejected(
         Kind::Tar,
         tar_archive(&[
@@ -340,14 +340,14 @@ fn tar_hardlink_amplification_hits_the_total_quota() {
 #[test]
 fn tar_quotas_are_enforced() {
     let mut config = default_config();
-    config.max_file_size = 4;
+    config.max_file_size = exarch_core::Limit::Bounded(exarch_core::non_zero!(4));
     rejected(
         Kind::Tar,
         tar_archive(&[tar_file("big", b"12345")]),
         &config,
     );
     let mut config = default_config();
-    config.max_file_count = 1;
+    config.max_file_count = exarch_core::Limit::Bounded(exarch_core::non_zero!(1));
     rejected(
         Kind::Tar,
         tar_archive(&[tar_file("a", b"1"), tar_file("b", b"2")]),
@@ -358,7 +358,7 @@ fn tar_quotas_are_enforced() {
 #[test]
 fn tar_metadata_bomb_is_rejected() {
     let mut config = default_config();
-    config.max_tar_metadata_bytes = 1024;
+    config.max_tar_metadata_bytes = exarch_core::non_zero!(1024);
     let long_name = vec![b'a'; 4096];
     rejected(
         Kind::Tar,
@@ -673,7 +673,7 @@ fn sevenz_configs() -> Vec<SecurityConfig> {
         links_config().with_allow_solid_archives(true),
         default_config()
             .with_allow_solid_archives(true)
-            .with_max_total_size(16),
+            .with_max_total_size(exarch_core::non_zero!(16)),
     ]
 }
 
@@ -784,7 +784,7 @@ fn sevenz_quota_bomb_leaves_the_sink_untouched() {
         .find(|(name, _)| name == "simple.7z")
         .unwrap();
     {
-        let config = default_config().with_max_total_size(1);
+        let config = default_config().with_max_total_size(exarch_core::non_zero!(1));
         let (result, sink) = via_sink(Kind::SevenZ, &bytes, &config, &ExtractionOptions::default());
         assert_matches!(result.unwrap_err(), ArchiveError::QuotaExceeded { .. });
         assert!(sink.tree.files.is_empty() && sink.tree.dirs.is_empty());

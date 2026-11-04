@@ -42,7 +42,7 @@ fn portable(archive: Vec<u8>) -> (Result<ExtractionReport, ArchiveError>, Memory
 fn links() -> SecurityConfig {
     SecurityConfig::default()
         .with_allow_symlinks(true)
-        .with_max_path_depth(4000)
+        .with_max_path_depth(exarch_core::non_zero!(4000))
 }
 
 fn long_file(name: &str) -> Vec<u8> {
@@ -238,8 +238,8 @@ fn portable_case_variant_directories_charge_the_node_budget() {
     .map(sink_support::tar_dir)
     .collect();
     let config = SecurityConfig::default()
-        .with_max_file_count(2)
-        .with_max_path_depth(2);
+        .with_max_file_count(exarch_core::non_zero!(2))
+        .with_max_path_depth(exarch_core::non_zero!(2));
     let (result, _) = run(tar_archive(&entries), PathModel::Portable, &config);
     let mut error = &result.unwrap_err();
     while let ArchiveError::PartialExtraction { source, .. } = error {

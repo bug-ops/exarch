@@ -31,11 +31,11 @@ use exarch_core::ZipConsistencyPolicy;
 
 fn base_config() -> SecurityConfig<Unvalidated> {
     SecurityConfig::default()
-        .with_max_file_size(1024 * 1024)
-        .with_max_total_size(4 * 1024 * 1024)
-        .with_max_file_count(64)
-        .with_max_tar_metadata_bytes(64 * 1024)
-        .with_max_solid_block_memory(1024 * 1024)
+        .with_max_file_size(exarch_core::non_zero!(1024 * 1024))
+        .with_max_total_size(exarch_core::non_zero!(4 * 1024 * 1024))
+        .with_max_file_count(exarch_core::non_zero!(64))
+        .with_max_tar_metadata_bytes(exarch_core::non_zero!(64 * 1024))
+        .with_max_solid_block_memory(exarch_core::non_zero!(1024 * 1024))
         .with_allow_symlinks(true)
         .with_allow_hardlinks(true)
         .with_allow_solid_archives(true)

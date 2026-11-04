@@ -191,13 +191,13 @@ pub(super) fn check_solid_policy(
                 },
             )
         })?;
-    if total_uncompressed > config.max_solid_block_memory {
+    if total_uncompressed > config.max_solid_block_memory.get() {
         return Err(Refused::new(
             UnverifiedReason::ResourceLimit,
             ArchiveError::QuotaExceeded {
                 resource: QuotaResource::TotalSize {
                     current: total_uncompressed,
-                    max: config.max_solid_block_memory,
+                    max: config.max_solid_block_memory.get(),
                 },
             },
         ));
@@ -331,12 +331,12 @@ pub(super) fn admit_sevenz_block(
         })?;
         memory = memory.saturating_add(needed);
     }
-    if memory > config.max_decoder_memory {
+    if memory > config.max_decoder_memory.get() {
         return Err(Refused::new(
             UnverifiedReason::ResourceLimit,
             ArchiveError::QuotaExceeded {
                 resource: QuotaResource::DecoderMemory {
-                    max: config.max_decoder_memory,
+                    max: config.max_decoder_memory.get(),
                 },
             },
         ));
@@ -459,7 +459,7 @@ mod tests {
     fn config(allow_solid: bool, max_solid_memory: u64) -> SecurityConfig<Validated> {
         SecurityConfig::default()
             .with_allow_solid_archives(allow_solid)
-            .with_max_solid_block_memory(max_solid_memory)
+            .with_max_solid_block_memory(std::num::NonZeroU64::new(max_solid_memory).unwrap())
             .validate()
             .unwrap()
     }

@@ -701,7 +701,8 @@ mod tests {
         let listed = list(&archive, REPLAY_LIMIT);
         assert!(listed.has_spool());
         std::fs::remove_file(&archive).unwrap();
-        let stricter = SecurityConfig::default().with_max_decoder_memory(1024 * 1024);
+        let stricter =
+            SecurityConfig::default().with_max_decoder_memory(crate::non_zero!(1024 * 1024));
 
         assert!(extract_into(listed, &dir, &stricter).is_err());
     }
@@ -743,7 +744,8 @@ mod tests {
         );
         let listed = list(&archive, REPLAY_LIMIT);
         std::fs::remove_file(&archive).unwrap();
-        let looser = SecurityConfig::default().with_max_decoder_memory(512 * 1024 * 1024);
+        let looser =
+            SecurityConfig::default().with_max_decoder_memory(crate::non_zero!(512 * 1024 * 1024));
 
         extract_into(listed, &dir, &looser).unwrap();
     }
@@ -758,8 +760,8 @@ mod tests {
             &encoded(CompressionCodec::Gzip, &tar),
         );
         for strict in [
-            SecurityConfig::default().with_max_file_count(1),
-            SecurityConfig::default().with_max_file_size(5),
+            SecurityConfig::default().with_max_file_count(crate::non_zero!(1)),
+            SecurityConfig::default().with_max_file_size(crate::non_zero!(5)),
         ] {
             let listed = list(&archive, REPLAY_LIMIT);
             assert!(listed.has_spool());
@@ -788,7 +790,7 @@ mod tests {
         );
         let listed = list(&archive, REPLAY_LIMIT);
         assert!(listed.has_spool());
-        let strict = SecurityConfig::default().with_max_tar_metadata_bytes(512);
+        let strict = SecurityConfig::default().with_max_tar_metadata_bytes(crate::non_zero!(512));
 
         let error = extract_into(listed, &dir, &strict).unwrap_err();
 

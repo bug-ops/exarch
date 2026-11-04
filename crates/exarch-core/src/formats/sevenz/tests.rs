@@ -946,7 +946,7 @@ fn test_multiple_files_quota_not_double_counted() {
     let temp = TempDir::new().unwrap();
     // Should allow 2 files
     let config = SecurityConfig::default()
-        .with_max_file_count(3)
+        .with_max_file_count(crate::non_zero!(3))
         .validate()
         .unwrap();
 
@@ -992,7 +992,7 @@ fn test_solid_archive_allowed_with_config() {
     let temp = TempDir::new().unwrap();
     let config = SecurityConfig::default()
         .with_allow_solid_archives(true)
-        .with_max_solid_block_memory(100 * 1024 * 1024)
+        .with_max_solid_block_memory(crate::non_zero!(100 * 1024 * 1024))
         .validate()
         .unwrap(); // 100 MB
 
@@ -1036,7 +1036,7 @@ fn test_solid_archive_memory_limit_exceeded() {
     let temp = TempDir::new().unwrap();
     let config = SecurityConfig::default()
         .with_allow_solid_archives(true)
-        .with_max_solid_block_memory(1)
+        .with_max_solid_block_memory(crate::non_zero!(1))
         .validate()
         .unwrap(); // 1 byte (too small)
 
@@ -1109,7 +1109,7 @@ fn test_solid_archive_memory_limit_exact_boundary() {
     let temp = TempDir::new().unwrap();
     let config = SecurityConfig::default()
         .with_allow_solid_archives(true)
-        .with_max_solid_block_memory(total_size)
+        .with_max_solid_block_memory(std::num::NonZeroU64::new(total_size).unwrap())
         .validate()
         .unwrap(); // Exact match
 
@@ -1144,7 +1144,7 @@ fn test_solid_archive_memory_limit_one_under_boundary() {
     let temp = TempDir::new().unwrap();
     let config = SecurityConfig::default()
         .with_allow_solid_archives(true)
-        .with_max_solid_block_memory(total_size - 1)
+        .with_max_solid_block_memory(std::num::NonZeroU64::new(total_size - 1).unwrap())
         .validate()
         .unwrap(); // One byte under
 
@@ -1656,7 +1656,7 @@ pub(super) fn build_solid_sevenz_archive(entries: &[(&str, &[u8])], copy_method:
 fn solid_config(allowed_extensions: Vec<Extension>) -> SecurityConfig<Validated> {
     SecurityConfig::default()
         .with_allow_solid_archives(true)
-        .with_max_solid_block_memory(100 * 1024 * 1024)
+        .with_max_solid_block_memory(crate::non_zero!(100 * 1024 * 1024))
         .with_allowed_extensions(allowed_extensions)
         .validate()
         .unwrap()
@@ -1734,7 +1734,7 @@ fn test_solid_block_over_limit_rejected_by_extract_and_verify() {
     std::fs::write(&path, &data).unwrap();
     let config = SecurityConfig::default()
         .with_allow_solid_archives(true)
-        .with_max_solid_compression_ratio(50.0);
+        .with_max_solid_compression_ratio(crate::RatioLimit::constant(50.0));
 
     let report = crate::verify_archive(&path, &config).unwrap();
     assert!(
@@ -2569,7 +2569,7 @@ fn test_decoder_memory_bound_uses_declared_file_sizes_beyond_the_unpack_size() {
     let mut archive = Archive::read(&mut Cursor::new(bytes), &Password::empty()).unwrap();
     let config = SecurityConfig::default()
         .with_allow_solid_archives(true)
-        .with_max_decoder_memory(1024 * 1024)
+        .with_max_decoder_memory(crate::non_zero!(1024 * 1024))
         .validate()
         .unwrap();
 

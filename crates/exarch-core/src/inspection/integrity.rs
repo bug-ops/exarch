@@ -217,7 +217,7 @@ impl TrailerCap {
     /// `max_tar_metadata_bytes`, raised to [`MIN_TRAILER_CAP`].
     #[must_use]
     pub fn of(config: &SecurityConfig<Validated>) -> Self {
-        Self(config.max_tar_metadata_bytes.max(MIN_TRAILER_CAP))
+        Self(config.max_tar_metadata_bytes.get().max(MIN_TRAILER_CAP))
     }
 
     /// The cap in bytes.
@@ -848,13 +848,13 @@ mod tests {
     #[test]
     fn test_trailer_cap_has_a_floor_and_follows_a_larger_limit() {
         let small = SecurityConfig::default()
-            .with_max_tar_metadata_bytes(512)
+            .with_max_tar_metadata_bytes(crate::non_zero!(512))
             .validate()
             .unwrap();
         assert_eq!(TrailerCap::of(&small).get(), MIN_TRAILER_CAP);
 
         let large = SecurityConfig::default()
-            .with_max_tar_metadata_bytes(u64::MAX - 1)
+            .with_max_tar_metadata_bytes(crate::non_zero!(u64::MAX - 1))
             .validate()
             .unwrap();
         assert_eq!(TrailerCap::of(&large).get(), u64::MAX - 1);
@@ -863,7 +863,7 @@ mod tests {
     #[test]
     fn test_trailer_drain_with_a_maximal_cap_does_not_overflow() {
         let config = SecurityConfig::default()
-            .with_max_tar_metadata_bytes(u64::MAX - 1)
+            .with_max_tar_metadata_bytes(crate::non_zero!(u64::MAX - 1))
             .validate()
             .unwrap();
         let mut buffer = Box::new(CopyBuffer::new());
@@ -909,7 +909,7 @@ mod tests {
     #[test]
     fn test_rejected_entry_is_not_decoded() {
         let config = SecurityConfig::default()
-            .with_max_file_size(4)
+            .with_max_file_size(crate::non_zero!(4))
             .validate()
             .unwrap();
         let mut pass = IntegrityPass::new(&config, DecompressionBudget::DEFAULT);

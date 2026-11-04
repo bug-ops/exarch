@@ -150,6 +150,7 @@ use std::convert::Infallible;
 use std::io;
 use std::io::Read;
 use std::marker::PhantomData;
+use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::OnceLock;
@@ -162,6 +163,7 @@ use super::source_fault::TapSource;
 use super::tar_extension_headers::PrecedingEntry;
 use super::tar_extension_headers::check_entry_headers;
 use super::tar_extension_headers::check_trailing_headers;
+use crate::Limit;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::Violation;
@@ -227,7 +229,7 @@ const CUMULATIVE_SYNTHETIC_CAP_BYTES: u64 = 1024 * 1024 * 1024;
 const DRAIN_CHUNK_BYTES: usize = 8192;
 
 /// Sentinel `allowance` value meaning "disarmed" (no cap on reads).
-const DISARMED: u64 = u64::MAX;
+const DISARMED: u64 = 0;
 
 /// Shared, atomics-only state behind [`TarReadBudget`] and [`BudgetedReader`].
 ///
@@ -236,7 +238,7 @@ const DISARMED: u64 = u64::MAX;
 /// required by the Node.js binding's blocking-thread-pool usage.
 struct BudgetState {
     /// The configured per-window byte limit; re-applied on every `arm()`.
-    limit: u64,
+    limit: NonZeroU64,
     /// The raw input behind the reader, when core metered it.
     source: TapSource,
     /// Sum of the declared sizes of every entry drained without a quota
@@ -349,7 +351,9 @@ impl TarReadBudget {
             .unwrap_or_else(PoisonError::into_inner)
             .clear();
         self.0.consumed.store(0, Ordering::Relaxed);
-        self.0.allowance.store(self.0.limit, Ordering::Relaxed);
+        self.0
+            .allowance
+            .store(self.0.limit.get(), Ordering::Relaxed);
     }
 
     /// Stops counting: subsequent reads pass through unmetered until the next
@@ -665,9 +669,12 @@ impl<R: Read> Read for BudgetedReader<R> {
 }
 
 /// [`budgeted_reader_with`] over a stream whose raw input is not metered.
+// A test helper: a zero budget is a bug in the test itself.
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 #[must_use]
 pub fn budgeted_reader<R: Read>(inner: R, limit: u64) -> (BudgetedReader<R>, TarReadBudget) {
+    let limit = NonZeroU64::new(limit).expect("a test budget is non-zero");
     budgeted_reader_with(inner, limit, TapSource::Opaque)
 }
 
@@ -688,7 +695,7 @@ pub fn budgeted_reader<R: Read>(inner: R, limit: u64) -> (BudgetedReader<R>, Tar
 #[must_use]
 pub fn budgeted_reader_with<R: Read>(
     inner: R,
-    limit: u64,
+    limit: NonZeroU64,
     source: TapSource,
 ) -> (BudgetedReader<R>, TarReadBudget) {
     let state = Arc::new(BudgetState {
@@ -701,7 +708,7 @@ pub fn budgeted_reader_with<R: Read>(
         skip_trip: OnceLock::new(),
         abandoned: AtomicBool::new(false),
         consumed: AtomicU64::new(0),
-        allowance: AtomicU64::new(limit),
+        allowance: AtomicU64::new(limit.get()),
         total_read: AtomicU64::new(0),
         cumulative_synthetic: AtomicU64::new(0),
         window: Mutex::new(Vec::new()),
@@ -872,8 +879,8 @@ impl<'a, 's, R: Read> TarEntryGuard<'a, 's, R> {
 /// See [`CheckedTarEntry::drain_skipped`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SkipLimits {
-    per_file: u64,
-    total: u64,
+    per_file: Limit<NonZeroU64>,
+    total: Limit<NonZeroU64>,
     ratio: f64,
 }
 
@@ -887,7 +894,7 @@ impl SkipLimits {
         Self {
             per_file: config.max_file_size,
             total: config.max_total_size,
-            ratio: config.max_compression_ratio,
+            ratio: config.max_compression_ratio.get(),
         }
     }
 
@@ -980,7 +987,7 @@ impl<R: Read> CheckedTarEntry<'_, '_, R> {
         self.0.skip_marked = true;
         let declared = self.0.entry.size();
         let skipped_declared = budget.charge_skipped_declared(declared);
-        if declared <= limits.per_file && skipped_declared <= limits.total {
+        if limits.per_file.admits(declared) && limits.total.admits(skipped_declared) {
             return SkipAdmission::Admitted;
         }
         let first = budget.0.skip_limits.get_or_init(|| *limits);
@@ -1390,12 +1397,13 @@ mod tests {
 
         let tap = SourceTap::default();
         let decoder = flate2::read::GzDecoder::new(SourceRead::new(Cursor::new(gz), tap.clone()));
-        let (reader, budget) = budgeted_reader_with(decoder, 4096, TapSource::Tapped(tap));
+        let (reader, budget) =
+            budgeted_reader_with(decoder, crate::non_zero!(4096), TapSource::Tapped(tap));
         let mut archive = tar::Archive::new(reader);
         let mut entries = budgeted_tar_entries(&mut archive, budget).unwrap();
         let limits = SkipLimits {
-            per_file: 1024,
-            total: 1024,
+            per_file: crate::non_zero!(1024).into(),
+            total: crate::non_zero!(1024).into(),
             ratio: 10.0,
         };
 
@@ -1449,8 +1457,11 @@ mod tests {
 
         let tap = SourceTap::default();
         let mut source = SourceRead::new(EioThenData(false), tap.clone());
-        let (_reader, budget) =
-            budgeted_reader_with(Cursor::new(Vec::new()), 16, TapSource::Tapped(tap));
+        let (_reader, budget) = budgeted_reader_with(
+            Cursor::new(Vec::new()),
+            crate::non_zero!(16),
+            TapSource::Tapped(tap),
+        );
         let verdict = || ArchiveError::unclassified("bad header");
 
         source.read(&mut [0u8; 4]).unwrap_err();

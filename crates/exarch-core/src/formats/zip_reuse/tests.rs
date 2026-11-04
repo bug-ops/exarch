@@ -466,7 +466,7 @@ fn an_entry_the_limits_would_refuse_is_not_captured() {
         assert!(store.capture(bomb).is_none(), "ratio");
 
         let config = SecurityConfig::default()
-            .with_max_file_size(1024)
+            .with_max_file_size(crate::non_zero!(1024))
             .validate()
             .unwrap();
         let mut small =
@@ -492,7 +492,7 @@ fn a_capture_stops_once_it_passes_the_declared_size() {
 #[test]
 fn the_limit_follows_the_decoder_memory_of_the_config() {
     let config = SecurityConfig::default()
-        .with_max_decoder_memory(1024)
+        .with_max_decoder_memory(crate::non_zero!(1024))
         .validate()
         .unwrap();
     let plan = ReusePlan::of(DecodeReuse::Memory(ReuseLimit::MAX), &config);

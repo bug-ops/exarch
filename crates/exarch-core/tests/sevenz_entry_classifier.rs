@@ -396,7 +396,7 @@ fn anti_items_do_not_count_against_the_file_quota() {
         ],
     );
     let out = TempDir::new().unwrap();
-    let config = SecurityConfig::default().with_max_file_count(2);
+    let config = SecurityConfig::default().with_max_file_count(exarch_core::non_zero!(2));
 
     list_archive(&archive, &config).unwrap();
     extract_archive(&archive, out.path(), &config).unwrap();

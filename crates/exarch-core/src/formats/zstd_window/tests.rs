@@ -109,7 +109,6 @@ fn skippable(body: &[u8]) -> Vec<u8> {
 #[test]
 fn the_log_follows_the_largest_power_of_two_within_memory() {
     for (memory, log) in [
-        (0, 10),
         (1, 10),
         (1023, 10),
         (1024, 10),
@@ -121,7 +120,11 @@ fn the_log_follows_the_largest_power_of_two_within_memory() {
         ((256 << 20) - 1, 27),
         (u64::MAX, 27),
     ] {
-        assert_eq!(ZstdWindowLog::for_memory(memory).get(), log, "{memory}");
+        assert_eq!(
+            ZstdWindowLog::for_memory(std::num::NonZeroU64::new(memory).unwrap()).get(),
+            log,
+            "{memory}"
+        );
     }
 }
 

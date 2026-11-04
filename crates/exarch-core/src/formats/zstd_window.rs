@@ -11,6 +11,7 @@
 use std::io;
 use std::io::Read;
 use std::io::Seek;
+use std::num::NonZeroU64;
 
 use crate::Validated;
 use crate::config::SecurityConfig;
@@ -47,8 +48,8 @@ impl ZstdWindowLog {
 
     /// The largest power of two at or below `memory`, clamped to the range the
     /// decoder supports.
-    pub fn for_memory(memory: u64) -> Self {
-        Self(memory.max(1).ilog2().clamp(Self::MIN, Self::MAX))
+    pub fn for_memory(memory: NonZeroU64) -> Self {
+        Self(memory.ilog2().clamp(Self::MIN, Self::MAX))
     }
 
     /// The base-2 logarithm of the limit.

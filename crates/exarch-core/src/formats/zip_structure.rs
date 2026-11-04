@@ -94,6 +94,7 @@ use std::io::BufReader;
 use std::io::Read;
 use std::io::Seek;
 use std::io::SeekFrom;
+use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
@@ -129,6 +130,7 @@ use super::zstd_window::ZstdWindowLog;
 use super::zstd_window::ZstdWindows;
 use super::zstd_window::walk as walk_zstd_windows;
 use crate::ArchiveError;
+use crate::Limit;
 use crate::Result;
 use crate::ZipConsistencyPolicy;
 use crate::error::CentralRecordOrdinal;
@@ -730,7 +732,7 @@ pub(super) fn open<R: Read + Seek>(reader: R) -> Result<(ZipReader<Shared<R>>, Z
 pub(super) fn open_with<R: Read + Seek>(
     reader: R,
     checks: StreamChecks,
-    quota: u64,
+    quota: Limit<NonZeroU64>,
     census_window: ZstdWindowLog,
     reuse: ReusePlan,
 ) -> Result<(ZipReader<Shared<R>>, ZipStructure)> {
@@ -748,9 +750,9 @@ pub(super) fn open_with<R: Read + Seek>(
 
 /// The per-archive allowance for checking entries again, for a `quota` of
 /// total output.
-pub(super) const fn recheck_allowance_for(quota: u64) -> u64 {
-    if quota > CENSUS_DECODE_BUDGET {
-        quota
+pub(super) const fn recheck_allowance_for(quota: Limit<NonZeroU64>) -> u64 {
+    if quota.ceiling() > CENSUS_DECODE_BUDGET {
+        quota.ceiling()
     } else {
         CENSUS_DECODE_BUDGET
     }

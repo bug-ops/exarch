@@ -299,7 +299,7 @@ fn a_hidden_header_is_refused_when_the_recheck_allowance_is_spent() {
 fn config_with_memory(policy: ZipConsistencyPolicy, memory: u64) -> SecurityConfig<Validated> {
     SecurityConfig::default()
         .with_zip_consistency(policy)
-        .with_max_decoder_memory(memory)
+        .with_max_decoder_memory(std::num::NonZeroU64::new(memory).unwrap())
         .validate()
         .unwrap()
 }

@@ -207,8 +207,8 @@ fn a_declared_size_over_the_limit_is_refused_before_any_allocation() {
     header.as_old_mut().name[..4].copy_from_slice(b"huge");
     header.set_cksum();
     let config = SecurityConfig::default()
-        .with_max_file_size(8 * GIB)
-        .with_max_total_size(8 * GIB);
+        .with_max_file_size(exarch_core::non_zero!(8 * GIB))
+        .with_max_total_size(exarch_core::non_zero!(8 * GIB));
     let mut sink = MemorySink::new(limit(KIB));
     let error = run_tar(
         &[header.as_bytes().to_vec()],
@@ -368,7 +368,7 @@ fn setuid_and_setgid_are_stripped_from_the_stored_mode() {
 
 #[test]
 fn the_limit_follows_the_config_quota() {
-    let config = SecurityConfig::default().with_max_total_size(2048);
+    let config = SecurityConfig::default().with_max_total_size(exarch_core::non_zero!(2048));
     assert_eq!(MemoryLimit::from_config(&config).bytes().get(), 2048);
     let mut sink = MemorySink::new(MemoryLimit::from_config(&config));
     run_tar(
@@ -382,9 +382,9 @@ fn the_limit_follows_the_config_quota() {
 }
 
 #[test]
-fn a_zero_quota_gives_a_one_byte_limit() {
-    let config = SecurityConfig::default().with_max_total_size(0);
-    assert_eq!(MemoryLimit::from_config(&config).bytes().get(), 1);
+fn an_unbounded_quota_gives_the_largest_limit() {
+    let config = SecurityConfig::default().with_max_total_size(exarch_core::Limit::Unbounded);
+    assert_eq!(MemoryLimit::from_config(&config).bytes().get(), u64::MAX);
 }
 
 #[test]
@@ -472,7 +472,7 @@ fn extract_reader_to_memory_honours_an_explicit_limit() {
 #[test]
 fn extract_reader_to_memory_derives_the_default_limit_from_the_request_config() {
     let request = MemoryExtractRequest::default()
-        .with_config(SecurityConfig::default().with_max_total_size(4096))
+        .with_config(SecurityConfig::default().with_max_total_size(exarch_core::non_zero!(4096)))
         .with_path_model(PathModel::Portable);
 
     let (_, sink) = extract_reader_to_memory(

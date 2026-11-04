@@ -282,7 +282,7 @@ pub(crate) fn warn_on_extraction_ratio<R: Read + Seek>(archive: R, report: &mut 
 fn extraction_ratio_warning<R: Read + Seek>(
     archive: R,
 ) -> std::result::Result<Option<String>, zip::result::ZipError> {
-    let limit = SecurityConfig::default().max_compression_ratio;
+    let limit = SecurityConfig::default().max_compression_ratio.get();
     let mut zip = zip::ZipArchive::new(archive)?;
 
     let mut over_limit = 0usize;
@@ -498,7 +498,9 @@ mod tests {
         let needed = needed_ratio(&report.warnings[0]);
 
         let dest = temp.path().join("dest");
-        let admitting = crate::SecurityConfig::default().with_max_compression_ratio(needed);
+        let admitting = crate::SecurityConfig::default().with_max_compression_ratio(
+            crate::RatioLimit::parse(crate::ConfigSetting::MaxCompressionRatio, needed).unwrap(),
+        );
         crate::api::extract_archive(&output, &dest, &admitting).unwrap();
         assert!(dest.join("data").exists());
     }

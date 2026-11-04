@@ -50,7 +50,7 @@ fn oversized_link_targets_are_not_retained() {
     std::fs::write(&path, hardlink_archive()).unwrap();
     let config = SecurityConfig::default()
         .with_allow_hardlinks(true)
-        .with_max_tar_metadata_bytes(8 * 1024 * 1024);
+        .with_max_tar_metadata_bytes(exarch_core::non_zero!(8 * 1024 * 1024));
 
     let _profiler = dhat::Profiler::builder().testing().build();
     let report = verify_archive(&path, &config).unwrap();

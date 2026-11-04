@@ -31,6 +31,7 @@ pub mod creation;
 pub mod error;
 pub mod formats;
 pub mod inspection;
+mod limit;
 mod listed;
 #[cfg(test)]
 use exarch_testkit::raw_zip;
@@ -129,6 +130,10 @@ pub use error::redaction::sanitize_io_error_for_error;
 pub use error::redaction::sanitize_path_for_error;
 pub use inspection::list_archive_with_progress;
 pub use inspection::verify_archive_with_progress;
+pub use limit::Limit;
+pub use limit::RatioLimit;
+pub use limit::non_zero_u64;
+pub use limit::non_zero_usize;
 pub use reader::ArchiveReader;
 pub use reader::SeekableFormat;
 pub use report::ExtractionReport;

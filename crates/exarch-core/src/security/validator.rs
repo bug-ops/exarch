@@ -780,7 +780,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
         let mut config = SecurityConfig::default();
-        config.max_file_size = 100;
+        config.max_file_size = crate::Limit::Bounded(crate::non_zero!(100));
         let config = config.validate().expect("valid config");
         let mut validator = EntryValidator::new(&config, &dest);
 
@@ -799,7 +799,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
         let mut config = SecurityConfig::default();
-        config.max_file_count = 2;
+        config.max_file_count = crate::Limit::Bounded(crate::non_zero!(2));
         let config = config.validate().expect("valid config");
         let mut validator = EntryValidator::new(&config, &dest);
 
@@ -1169,7 +1169,7 @@ mod tests {
         let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
         let mut config = SecurityConfig::default();
         config.allowed.hardlinks = true;
-        config.max_file_size = 100;
+        config.max_file_size = crate::Limit::Bounded(crate::non_zero!(100));
         let config = config.validate().expect("valid config");
         let mut validator = EntryValidator::new(&config, &dest);
 
@@ -1191,7 +1191,7 @@ mod tests {
         let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
         let mut config = SecurityConfig::default();
         config.allowed.hardlinks = true;
-        config.max_total_size = 250;
+        config.max_total_size = crate::Limit::Bounded(crate::non_zero!(250));
         let config = config.validate().expect("valid config");
         let mut validator = EntryValidator::new(&config, &dest);
 
@@ -1225,7 +1225,7 @@ mod tests {
         let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
         let mut config = SecurityConfig::default();
         config.allowed.hardlinks = true;
-        config.max_file_count = 2;
+        config.max_file_count = crate::Limit::Bounded(crate::non_zero!(2));
         let config = config.validate().expect("valid config");
         let mut validator = EntryValidator::new(&config, &dest);
 
@@ -1252,7 +1252,7 @@ mod tests {
         let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
         let mut config = SecurityConfig::default();
         config.allowed.symlinks = true;
-        config.max_file_count = 2;
+        config.max_file_count = crate::Limit::Bounded(crate::non_zero!(2));
         let config = config.validate().expect("valid config");
         let mut validator = EntryValidator::new(&config, &dest);
 
@@ -1274,7 +1274,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
         let mut config = SecurityConfig::default();
-        config.max_file_count = 1;
+        config.max_file_count = crate::Limit::Bounded(crate::non_zero!(1));
         let config = config.validate().expect("valid config");
         let mut validator = EntryValidator::new(&config, &dest);
         validator
@@ -1300,7 +1300,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
         let mut config = SecurityConfig::default();
-        config.max_file_count = 1;
+        config.max_file_count = crate::Limit::Bounded(crate::non_zero!(1));
         let config = config.validate().expect("valid config");
         let mut validator = EntryValidator::new(&config, &dest);
         validator

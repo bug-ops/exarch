@@ -114,8 +114,8 @@ fn root(error: &ArchiveError) -> &ArchiveError {
 
 fn tight_config() -> SecurityConfig {
     SecurityConfig::default()
-        .with_max_file_size(FILE_LIMIT as u64)
-        .with_max_compression_ratio(RATIO)
+        .with_max_file_size(exarch_core::non_zero!(FILE_LIMIT as u64))
+        .with_max_compression_ratio(exarch_core::RatioLimit::constant(RATIO))
         .try_add_allowed_extension("txt")
         .unwrap()
 }
@@ -154,7 +154,7 @@ fn list_refuses_an_over_quota_entry_without_decoding_it() {
 
     let error = list_reader(
         ArchiveReader::tar(reader, Some(CompressionCodec::Gzip)),
-        &SecurityConfig::default().with_max_file_size(MIB as u64),
+        &SecurityConfig::default().with_max_file_size(exarch_core::non_zero!(MIB as u64)),
         &ListOptions::default(),
     )
     .unwrap_err();
@@ -170,7 +170,7 @@ fn verify_refuses_an_over_quota_entry_without_decoding_it() {
 
     let error = verify_reader(
         ArchiveReader::tar(reader, Some(CompressionCodec::Gzip)),
-        &SecurityConfig::default().with_max_total_size(MIB as u64),
+        &SecurityConfig::default().with_max_total_size(exarch_core::non_zero!(MIB as u64)),
         &VerificationOptions::default(),
     )
     .unwrap_err();
@@ -252,7 +252,7 @@ fn the_skip_bound_is_monotone_around_both_of_its_parts() {
     // they pass `max_total_size`, so the entry that crosses it falls to the
     // ratio bound.
     let total = (FILE_LIMIT + FILE_LIMIT / 2) as u64;
-    let config = config.with_max_total_size(total);
+    let config = config.with_max_total_size(std::num::NonZeroU64::new(total).unwrap());
     let outcome = extract_gz(&tar_of(&[("a.img", &zeros(FILE_LIMIT))]), &config);
     assert!(
         outcome.is_ok(),
@@ -272,7 +272,8 @@ fn the_skip_bound_is_monotone_around_both_of_its_parts() {
     );
 
     // Raising the ratio removes the refusal, as the CLI hint says.
-    let relaxed = tight_config().with_max_compression_ratio(1000.0);
+    let relaxed =
+        tight_config().with_max_compression_ratio(exarch_core::RatioLimit::constant(1000.0));
     let outcome = extract_gz(&zeros_tar("x.img", over), &relaxed);
     assert!(outcome.is_ok(), "{outcome:?}");
 }
@@ -283,8 +284,8 @@ fn filtering_never_refuses_what_extracting_whole_would_accept() {
     let archive = work.path().join("a.tar.gz");
     std::fs::write(&archive, gzip(&zeros_tar("x.img", FILE_LIMIT))).unwrap();
     let whole = SecurityConfig::default()
-        .with_max_file_size(FILE_LIMIT as u64)
-        .with_max_compression_ratio(RATIO);
+        .with_max_file_size(exarch_core::non_zero!(FILE_LIMIT as u64))
+        .with_max_compression_ratio(exarch_core::RatioLimit::constant(RATIO));
 
     for (name, config) in [("whole", whole), ("filtered", tight_config())] {
         let existing = TempDir::new().unwrap();
@@ -333,7 +334,7 @@ fn an_integrity_decode_of_a_skipped_bomb_is_refused_early() {
 #[test]
 fn the_same_bytes_pass_an_integrity_decode_when_the_entry_is_allowed() {
     let config = tight_config()
-        .with_max_file_size(16 * MIB as u64)
+        .with_max_file_size(exarch_core::non_zero!(16 * MIB as u64))
         .try_add_allowed_extension("bin")
         .unwrap();
 

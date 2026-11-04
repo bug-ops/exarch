@@ -52,7 +52,7 @@ pub fn validate_compression_ratio(
         ZipBombScope::Entry,
         compressed,
         uncompressed,
-        config.max_compression_ratio,
+        config.max_compression_ratio.get(),
     )
 }
 
@@ -73,7 +73,7 @@ pub fn validate_solid_block_ratio(
         ZipBombScope::SolidBlock,
         block.compressed,
         block.uncompressed,
-        config.max_solid_compression_ratio,
+        config.max_solid_compression_ratio.get(),
     )
 }
 

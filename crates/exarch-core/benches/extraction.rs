@@ -68,10 +68,10 @@ fn test_fixtures_dir() -> PathBuf {
 /// and increases size/depth limits for stress testing benchmarks.
 fn benchmark_config() -> SecurityConfig {
     SecurityConfig::default()
-        .with_max_compression_ratio(f64::MAX)
-        .with_max_file_size(500 * 1024 * 1024)
-        .with_max_total_size(1024 * 1024 * 1024)
-        .with_max_path_depth(100)
+        .with_max_compression_ratio(exarch_core::RatioLimit::constant(f64::MAX))
+        .with_max_file_size(exarch_core::non_zero!(500 * 1024 * 1024))
+        .with_max_total_size(exarch_core::non_zero!(1024 * 1024 * 1024))
+        .with_max_path_depth(exarch_core::non_zero!(100))
 }
 
 /// Validated variant of [`benchmark_config`] for direct
@@ -293,7 +293,7 @@ fn benchmark_zip_inspection(c: &mut Criterion) {
     let mut group = c.benchmark_group("zip_inspection");
     let data = create_many_small_files_zip(ENTRIES);
     let config = SecurityConfig::default()
-        .with_max_file_count(ENTRIES * 2)
+        .with_max_file_count(exarch_core::non_zero!(ENTRIES * 2))
         .validate()
         .unwrap();
     group.throughput(Throughput::Elements(ENTRIES as u64));
@@ -366,8 +366,8 @@ fn benchmark_large_files(c: &mut Criterion) {
 
                     // Use config with increased limits for benchmarks
                     let config = SecurityConfig::default()
-                        .with_max_file_size(200 * 1024 * 1024)
-                        .with_max_total_size(500 * 1024 * 1024)
+                        .with_max_file_size(exarch_core::non_zero!(200 * 1024 * 1024))
+                        .with_max_total_size(exarch_core::non_zero!(500 * 1024 * 1024))
                         .validate()
                         .unwrap();
 
@@ -779,7 +779,7 @@ fn benchmark_sevenz_vs_reference(c: &mut Criterion) {
     // generate_fixtures.sh's `7z a` defaults to solid compression.
     let config = benchmark_config()
         .with_allow_solid_archives(true)
-        .with_max_solid_block_memory(256 * 1024 * 1024);
+        .with_max_solid_block_memory(exarch_core::non_zero!(256 * 1024 * 1024));
 
     for fixture_name in ["small_files.7z", "medium_files.7z"] {
         let Some(fixture) = get_fixture(fixture_name) else {
@@ -829,7 +829,7 @@ fn benchmark_sevenz_overwrite(c: &mut Criterion) {
     let mut group = c.benchmark_group("sevenz_overwrite");
     let config = benchmark_config()
         .with_allow_solid_archives(true)
-        .with_max_solid_block_memory(256 * 1024 * 1024)
+        .with_max_solid_block_memory(exarch_core::non_zero!(256 * 1024 * 1024))
         .validate()
         .unwrap();
     let overwrite_options = ExtractionOptions::default().with_skip_duplicates(false);

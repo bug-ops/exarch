@@ -432,7 +432,7 @@ fn tar_zst_trailing_frames_are_bounded_by_the_trailer_cap_not_the_budget() {
     let report = verify(&path, integrity(1024));
     assert_eq!(report.integrity_status(), IntegrityStatus::Pass);
 
-    let cap = usize::try_from(SecurityConfig::default().max_tar_metadata_bytes).unwrap();
+    let cap = usize::try_from(SecurityConfig::default().max_tar_metadata_bytes.get()).unwrap();
     let mut huge = tar_fixtures::zst(&three_entries());
     huge.extend(zstd::encode_all(vec![0u8; cap + 1].as_slice(), 1).unwrap());
     let path = write(&dir, "b.tar.zst", &huge);
@@ -482,7 +482,7 @@ fn tar_bz2_and_xz_trailer_corruption_is_a_failed_report() {
 fn tar_xz_over_decoder_memory_is_a_quota_error_not_corruption() {
     let dir = TempDir::new().unwrap();
     let path = write(&dir, "a.tar.xz", &tar_fixtures::xz(&three_entries()));
-    let config = SecurityConfig::default().with_max_decoder_memory(1024);
+    let config = SecurityConfig::default().with_max_decoder_memory(exarch_core::non_zero!(1024));
 
     let err = verify_archive_with_options(&path, &config, &default_integrity()).unwrap_err();
     assert_matches!(
@@ -543,7 +543,7 @@ fn fixture(name: &str) -> PathBuf {
 fn solid_config() -> SecurityConfig {
     SecurityConfig::default()
         .with_allow_solid_archives(true)
-        .with_max_solid_block_memory(100 * 1024 * 1024)
+        .with_max_solid_block_memory(exarch_core::non_zero!(100 * 1024 * 1024))
 }
 
 #[test]
@@ -599,7 +599,8 @@ fn sevenz_ppmd_over_decoder_memory_is_not_decoded() {
     let dir = TempDir::new().unwrap();
     let bytes = sevenz_fixtures::solid(&[("a", GOOD)], vec![PpmdOptions::from_level(4).into()]);
     let path = write(&dir, "a.7z", &bytes);
-    let config = SecurityConfig::default().with_max_decoder_memory(1024 * 1024);
+    let config =
+        SecurityConfig::default().with_max_decoder_memory(exarch_core::non_zero!(1024 * 1024));
 
     let report = verify_archive_with_options(&path, &config, &default_integrity()).unwrap();
     assert_eq!(report.integrity_status(), IntegrityStatus::Incomplete);
@@ -628,7 +629,8 @@ fn sevenz_lzma2_over_decoder_memory_is_not_decoded() {
         "a.7z",
         &sevenz_fixtures::solid(&[("a", data.as_slice())], vec![lzma2]),
     );
-    let config = SecurityConfig::default().with_max_decoder_memory(256 * 1024);
+    let config =
+        SecurityConfig::default().with_max_decoder_memory(exarch_core::non_zero!(256 * 1024));
 
     let report = verify_archive_with_options(&path, &config, &default_integrity()).unwrap();
     assert_eq!(report.integrity_status(), IntegrityStatus::Incomplete);
@@ -715,7 +717,7 @@ fn tar_gnu_sparse_entry_is_refused() {
 #[test]
 fn tar_archive_trait_verify_reads_the_trailer_within_the_cap() {
     let config = SecurityConfig::default().validate().unwrap();
-    let cap = usize::try_from(config.max_tar_metadata_bytes).unwrap();
+    let cap = usize::try_from(config.max_tar_metadata_bytes.get()).unwrap();
     let mut tar = three_entries();
     tar.extend(std::iter::repeat_n(0x55u8, 4096));
 
@@ -882,7 +884,8 @@ fn sevenz_extract_refuses_ppmd_over_decoder_memory() {
     let dir = TempDir::new().unwrap();
     let bytes = sevenz_fixtures::solid(&[("a", GOOD)], vec![PpmdOptions::from_level(4).into()]);
     let path = write(&dir, "a.7z", &bytes);
-    let config = SecurityConfig::default().with_max_decoder_memory(1024 * 1024);
+    let config =
+        SecurityConfig::default().with_max_decoder_memory(exarch_core::non_zero!(1024 * 1024));
 
     assert_matches!(
         extract_refusal(&path, &config),
@@ -902,7 +905,8 @@ fn sevenz_extract_refuses_lzma2_over_decoder_memory() {
         "a.7z",
         &sevenz_fixtures::solid(&[("a", data.as_slice())], vec![lzma2]),
     );
-    let config = SecurityConfig::default().with_max_decoder_memory(256 * 1024);
+    let config =
+        SecurityConfig::default().with_max_decoder_memory(exarch_core::non_zero!(256 * 1024));
 
     assert_matches!(
         extract_refusal(&path, &config),

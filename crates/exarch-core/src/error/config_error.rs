@@ -132,9 +132,8 @@ pub enum ConfigProblem {
     Zero,
     /// A ratio is not a positive, finite number.
     NotPositive,
-    /// A limit is at `u64::MAX`, which the metadata budget uses as its disarmed
-    /// marker.
-    AtOrAboveU64Max,
+    /// A byte count is negative.
+    Negative,
     /// A budget is not greater than zero.
     NotGreaterThanZero,
     /// A byte count is not a positive whole number.
@@ -188,7 +187,7 @@ impl fmt::Display for ConfigProblem {
         match self {
             Self::Zero => f.write_str("must not be zero"),
             Self::NotPositive => f.write_str("must be positive"),
-            Self::AtOrAboveU64Max => f.write_str("must be below u64::MAX"),
+            Self::Negative => f.write_str("must not be negative"),
             Self::NotGreaterThanZero => f.write_str("must be greater than zero"),
             Self::NotPositiveWholeNumber => f.write_str("must be a positive whole number of bytes"),
             Self::NotSet => f.write_str("not set"),
@@ -233,6 +232,21 @@ pub(crate) fn message(setting: ConfigSetting, problem: &ConfigProblem) -> String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_ffi_kind_names_the_setting() {
+        let err = crate::ArchiveError::InvalidConfiguration {
+            setting: ConfigSetting::MaxFileCount,
+            problem: ConfigProblem::Zero,
+        };
+        assert_eq!(err.ffi_kind().setting(), Some(ConfigSetting::MaxFileCount));
+        assert_eq!(
+            crate::ArchiveError::from(crate::Malformation::PackSizesOverflow)
+                .ffi_kind()
+                .setting(),
+            None
+        );
+    }
 
     #[test]
     fn messages_keep_their_established_text() {

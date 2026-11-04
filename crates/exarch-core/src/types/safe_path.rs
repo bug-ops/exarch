@@ -286,10 +286,10 @@ impl<P: ParentCheck> SafePath<P> {
         }
 
         // Check path depth
-        if depth > config.max_path_depth {
+        if depth > config.max_path_depth.get() {
             return Err(Violation::PathDepth {
                 depth,
-                max: config.max_path_depth,
+                max: config.max_path_depth.get(),
             }
             .into());
         }
@@ -725,7 +725,7 @@ mod tests {
     fn test_safe_path_reject_excessive_depth() {
         let (_temp, dest) = create_test_dest();
         let mut config = SecurityConfig::default();
-        config.max_path_depth = 3;
+        config.max_path_depth = crate::non_zero!(3);
         let config = config.validate().expect("valid config");
 
         // 4 components - should be rejected
@@ -892,7 +892,7 @@ mod tests {
     fn test_safe_path_at_max_depth() {
         let (_temp, dest) = create_test_dest();
         let mut config = SecurityConfig::default();
-        config.max_path_depth = 5;
+        config.max_path_depth = crate::non_zero!(5);
         let config = config.validate().expect("valid config");
 
         // Exactly at limit

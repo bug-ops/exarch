@@ -99,3 +99,49 @@ def test_seven_z_cannot_be_created():
 
 def test_class_level_code_is_absent():
     assert not hasattr(exarch.ArchiveError, "code")
+
+
+def _tar_bytes() -> bytes:
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as tar:
+        info = tarfile.TarInfo("a")
+        info.size = 1
+        tar.addfile(info, io.BytesIO(b"x"))
+    return buffer.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("call", "setting"),
+    [
+        (lambda: exarch.SecurityConfig().with_zip_consistency("lax"), "zip_consistency"),
+        (lambda: setattr(exarch.SecurityConfig(), "zip_consistency", "lax"), "zip_consistency"),
+        (lambda: exarch.list_archive_bytes(_tar_bytes(), format="rar"), "archive_format"),
+        (lambda: exarch.extract_archive_to_memory(_tar_bytes(), path_model="x"), "path_model"),
+        (lambda: exarch.create_archive_to_bytes([], "bogus"), "creation_format"),
+        (lambda: exarch.create_archive_to_bytes([], "SevenZ"), "creation_format"),
+    ],
+)
+def test_enumerated_arguments_raise_typed_errors(call, setting):
+    with pytest.raises(exarch.InvalidConfigurationError) as info:
+        call()
+
+    assert info.value.setting == setting
+    assert info.value.code == "INVALID_CONFIGURATION"
+    assert isinstance(info.value, ValueError)
+
+
+def test_skipped_count_refuses_an_unknown_kind(tmp_path):
+    (tmp_path / "src").mkdir()
+    report = exarch.create_archive(tmp_path / "o.tar", [tmp_path / "src"])
+
+    with pytest.raises(exarch.InvalidConfigurationError) as info:
+        report.skipped.count("nope")
+
+    assert info.value.setting == "skip_kind"
+
+
+def test_create_archive_unknown_format_names_creation_format(tmp_path):
+    with pytest.raises(exarch.InvalidConfigurationError) as info:
+        exarch.create_archive(tmp_path / "o.tar", [], format="bogus")
+
+    assert info.value.setting == "creation_format"

@@ -72,7 +72,7 @@ def test_explicit_format_must_match_the_bytes():
 
 
 def test_unknown_format_name_is_a_value_error():
-    with pytest.raises(ValueError, match="format must be one of"):
+    with pytest.raises(exarch.InvalidConfigurationError, match="not one of the allowed values"):
         exarch.list_archive_bytes(_tar(), format="tar.gz")
 
 
@@ -116,7 +116,7 @@ def test_verify_accepts_options_and_format():
 
 
 def test_verify_rejects_an_unknown_format_name():
-    with pytest.raises(ValueError, match="format must be one of"):
+    with pytest.raises(exarch.InvalidConfigurationError, match="not one of the allowed values"):
         exarch.verify_archive_bytes(_zip(), format="rar")
 
 

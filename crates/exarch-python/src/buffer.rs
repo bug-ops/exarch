@@ -6,6 +6,8 @@ use std::path::Path;
 use exarch_core::ArchiveError;
 use exarch_core::CallbackEntry;
 use exarch_core::CallbackError;
+use exarch_core::ConfigProblem;
+use exarch_core::ConfigSetting;
 use exarch_core::CreateRequest;
 use exarch_core::DecodeReuse;
 use exarch_core::ListRequest;
@@ -25,7 +27,6 @@ use exarch_core::formats::detect::ArchiveType;
 use exarch_core::formats::detect::CreatableFormat;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::exceptions::PyTypeError;
-use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
@@ -46,8 +47,13 @@ use crate::report::PyVerificationReport;
 use crate::stream::ArchiveInput;
 
 /// Parses the string form of a closed core enum (`ALL` and `as_str`).
+///
+/// # Errors
+///
+/// `InvalidConfigurationError` naming `setting` with `NotOneOf` for any other
+/// string.
 pub fn parse_one<T: Copy>(
-    what: &str,
+    setting: ConfigSetting,
     all: &[T],
     as_str: fn(T) -> &'static str,
     value: &str,
@@ -56,40 +62,54 @@ pub fn parse_one<T: Copy>(
         .copied()
         .find(|variant| as_str(*variant) == value)
         .ok_or_else(|| {
-            let allowed: Vec<_> = all.iter().map(|variant| as_str(*variant)).collect();
-            PyValueError::new_err(format!(
-                "{what} must be one of {}, got {value:?}",
-                allowed.join(", ")
-            ))
+            convert_error(ArchiveError::InvalidConfiguration {
+                setting,
+                problem: ConfigProblem::NotOneOf,
+            })
         })
 }
 
 /// Parses an optional string form of a closed core enum.
 fn parse_variant<T: Copy>(
-    what: &str,
+    setting: ConfigSetting,
     all: &[T],
     as_str: fn(T) -> &'static str,
     value: Option<&str>,
 ) -> PyResult<Option<T>> {
     value
-        .map(|value| parse_one(what, all, as_str, value))
+        .map(|value| parse_one(setting, all, as_str, value))
         .transpose()
 }
 
 /// Parses the string form of a format that can be created.
 pub fn parse_creatable_format(format: &str) -> PyResult<CreatableFormat> {
-    let format = parse_one("format", ArchiveType::ALL, ArchiveType::as_str, format)?;
+    let format = parse_one(
+        ConfigSetting::CreationFormat,
+        ArchiveType::ALL,
+        ArchiveType::as_str,
+        format,
+    )?;
     CreatableFormat::try_from(format).map_err(convert_error)
 }
 
 /// Parses the string form shared with `ArchiveType::as_str`.
 fn parse_format(format: Option<&str>) -> PyResult<Option<ArchiveType>> {
-    parse_variant("format", ArchiveType::ALL, ArchiveType::as_str, format)
+    parse_variant(
+        ConfigSetting::ArchiveFormat,
+        ArchiveType::ALL,
+        ArchiveType::as_str,
+        format,
+    )
 }
 
 /// Parses the string form shared with `PathModel::as_str`.
 fn parse_path_model(path_model: Option<&str>) -> PyResult<Option<PathModel>> {
-    parse_variant("path_model", PathModel::ALL, PathModel::as_str, path_model)
+    parse_variant(
+        ConfigSetting::PathModel,
+        PathModel::ALL,
+        PathModel::as_str,
+        path_model,
+    )
 }
 
 /// An entry extracted into memory.
@@ -272,7 +292,8 @@ fn utf8(path: &Path) -> PyResult<String> {
     })
 }
 
-/// The string form of [`ReuseSetting`]'s mode.
+/// The string form of [`ReuseSetting`]'s mode, as
+/// `SinkOptions(decode_reuse=...)` spells it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReuseKind {
     Off,
@@ -302,23 +323,20 @@ enum ReuseSetting {
 }
 
 impl ReuseSetting {
-    fn new(kind: ReuseKind, limit: Option<i128>) -> PyResult<Self> {
+    fn new(kind: ReuseKind, limit: Option<PyInteger>) -> PyResult<Self> {
         let limit = limit
             .map(|bytes| {
-                u64::try_from(bytes)
-                    .ok()
-                    .and_then(NonZeroU64::new)
+                bytes
+                    .positive(ConfigSetting::DecodeReuseLimit)
                     .map(ReuseLimit::new)
-                    .ok_or_else(|| {
-                        PyValueError::new_err("decode_reuse_limit must be a positive integer")
-                    })
             })
             .transpose()?;
         match (kind, limit) {
             (ReuseKind::Off, None) => Ok(Self::Off),
-            (ReuseKind::Off, Some(_)) => Err(PyValueError::new_err(
-                "decode_reuse_limit needs decode_reuse \"memory\" or \"temp_file\"",
-            )),
+            (ReuseKind::Off, Some(_)) => Err(convert_error(ArchiveError::InvalidConfiguration {
+                setting: ConfigSetting::DecodeReuseLimit,
+                problem: ConfigProblem::NotSupported,
+            })),
             (ReuseKind::Memory, limit) => Ok(Self::Memory(limit.unwrap_or(ReuseLimit::DEFAULT))),
             (ReuseKind::TempFile, limit) => {
                 Ok(Self::TempFile(limit.unwrap_or(ReuseLimit::DEFAULT)))
@@ -385,10 +403,10 @@ impl PySinkOptions {
     fn new(
         skip_duplicates: bool,
         decode_reuse: String,
-        decode_reuse_limit: Option<i128>,
+        decode_reuse_limit: Option<PyInteger>,
     ) -> PyResult<Self> {
         let kind = parse_one(
-            "decode_reuse",
+            ConfigSetting::DecodeReuse,
             ReuseKind::ALL,
             ReuseKind::as_str,
             &decode_reuse,

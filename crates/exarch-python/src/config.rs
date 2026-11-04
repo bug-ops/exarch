@@ -35,8 +35,13 @@ use crate::error::convert_error;
 /// the core parsers instead of becoming pyo3's `OverflowError`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PyInteger {
+    /// An integer that fits in 128 bits.
     Fits(i128),
-    Beyond { negative: bool },
+    /// An integer beyond 128 bits, kept as its sign.
+    Beyond {
+        /// Whether it is below zero.
+        negative: bool,
+    },
 }
 
 impl From<i64> for PyInteger {
@@ -699,7 +704,7 @@ fn parse_parallel_decode_memory(value: Option<PyInteger>) -> PyResult<ParallelDe
 /// Parses the string form shared with `ZipConsistencyPolicy::as_str`.
 fn parse_zip_consistency(value: &str) -> PyResult<ZipConsistencyPolicy> {
     parse_one(
-        "zip_consistency",
+        ConfigSetting::ZipConsistency,
         ZipConsistencyPolicy::ALL,
         ZipConsistencyPolicy::as_str,
         value,

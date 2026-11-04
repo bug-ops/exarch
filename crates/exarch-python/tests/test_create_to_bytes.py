@@ -58,7 +58,7 @@ def test_seven_z_cannot_be_created(source_tree):
 
 
 def test_unknown_format_is_a_value_error(source_tree):
-    with pytest.raises(ValueError, match="format must be one of"):
+    with pytest.raises(exarch.InvalidConfigurationError, match="not one of the allowed values"):
         exarch.create_archive_to_bytes([source_tree], "Rar")
 
 

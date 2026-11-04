@@ -39,7 +39,7 @@ def test_hidden_entries_are_counted(tmp_path, source):
 def test_unknown_kind_is_a_value_error(tmp_path, source):
     report = exarch.create_archive(tmp_path / "o.tar", [source])
 
-    with pytest.raises(ValueError, match="kind must be one of"):
+    with pytest.raises(exarch.InvalidConfigurationError, match="not one of the allowed values"):
         report.skipped.count("nope")
 
 

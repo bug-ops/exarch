@@ -86,7 +86,7 @@ def test_explicit_format_overrides_the_extension(tmp_path, source):
 
 
 def test_unknown_format_is_a_value_error(tmp_path, source):
-    with pytest.raises(ValueError, match="format must be one of"):
+    with pytest.raises(exarch.InvalidConfigurationError, match="not one of the allowed values"):
         exarch.create_archive(tmp_path / "o.tar", [source], format="rar")
 
 

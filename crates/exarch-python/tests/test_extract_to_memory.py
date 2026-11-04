@@ -139,7 +139,7 @@ def test_non_positive_or_oversized_max_bytes_is_a_value_error(max_bytes):
 
 @pytest.mark.parametrize("name", ["", "Host", "windows"])
 def test_unknown_path_model_is_a_value_error(name):
-    with pytest.raises(ValueError, match="path_model must be one of"):
+    with pytest.raises(exarch.InvalidConfigurationError, match="not one of the allowed values"):
         exarch.extract_archive_to_memory(_tar([_file("a", b"x")]), path_model=name)
 
 
@@ -177,7 +177,7 @@ def test_failure_after_delivered_entries_reports_discarded_writes():
 
 
 def test_unknown_format_name_and_undetectable_bytes():
-    with pytest.raises(ValueError, match="format must be one of"):
+    with pytest.raises(exarch.InvalidConfigurationError, match="not one of the allowed values"):
         exarch.extract_archive_to_memory(b"", format="rar")
     with pytest.raises(exarch.UnknownFormatError):
         exarch.extract_archive_to_memory(b"not an archive")
@@ -229,14 +229,23 @@ def test_sink_options_decode_reuse_modes():
 
 
 @pytest.mark.parametrize(
-    "kwargs",
+    ("kwargs", "setting", "problem"),
     [
-        {"decode_reuse": "disk"},
-        {"decode_reuse_limit": 1024},
-        {"decode_reuse": "memory", "decode_reuse_limit": 0},
-        {"decode_reuse": "memory", "decode_reuse_limit": -1},
+        ({"decode_reuse": "disk"}, "decode_reuse", "not one of the allowed values"),
+        ({"decode_reuse_limit": 1024}, "decode_reuse_limit", "is not supported"),
+        ({"decode_reuse": "memory", "decode_reuse_limit": 0}, "decode_reuse_limit", "zero"),
+        ({"decode_reuse": "memory", "decode_reuse_limit": -1}, "decode_reuse_limit", "negative"),
+        ({"decode_reuse": "memory", "decode_reuse_limit": 2**200}, "decode_reuse_limit", "exceed"),
     ],
 )
-def test_sink_options_refuse_invalid_combinations(kwargs):
-    with pytest.raises(ValueError):
+def test_sink_options_refuse_invalid_combinations(kwargs, setting, problem):
+    with pytest.raises(exarch.InvalidConfigurationError) as info:
         exarch.SinkOptions(**kwargs)
+
+    assert info.value.setting == setting
+    assert problem in str(info.value)
+
+
+def test_sink_options_limit_refuses_bool():
+    with pytest.raises(TypeError):
+        exarch.SinkOptions(decode_reuse="memory", decode_reuse_limit=True)

@@ -5,7 +5,10 @@ use std::path::Path;
 
 /// Renders a path as text so that two distinct paths never render alike.
 ///
-/// Valid text is kept as it is, except that a backslash is written `\x5C`.
+/// Valid text is kept as it is, except that a backslash is written `\x5C` on
+/// Unix, where it is an ordinary character of a name. On Windows a backslash
+/// is a separator, so the components of the path are joined with `/` and the
+/// same entry name reads alike on every host (`x\y` renders as `x/y`).
 /// Each byte of a Unix path that is not part of valid UTF-8 is written
 /// `\xNN` (upper-case hex), and each unpaired UTF-16 unit of a Windows path is
 /// written `\uNNNN`. Because the escape character is itself escaped, the
@@ -28,9 +31,9 @@ use std::path::Path;
 ///     path_text(Path::new("dir/caf\u{e9}.txt")),
 ///     "dir/caf\u{e9}.txt"
 /// );
-/// assert_eq!(path_text(Path::new("a\\b")), "a\\x5Cb");
 /// # #[cfg(unix)]
 /// # {
+/// assert_eq!(path_text(Path::new("a\\b")), "a\\x5Cb");
 /// use std::ffi::OsStr;
 /// use std::os::unix::ffi::OsStrExt;
 ///
@@ -145,7 +148,19 @@ mod tests {
     #[test]
     fn valid_text_is_unchanged_but_for_backslashes() {
         assert_eq!(path_text(Path::new("a/b é.txt")), "a/b é.txt");
+        #[cfg(unix)]
         assert_eq!(path_text(Path::new("x\\y")), "x\\x5Cy");
+        #[cfg(windows)]
+        assert_eq!(path_text(Path::new("x\\y")), "x/y");
+    }
+
+    #[test]
+    fn bytes_are_escaped_the_same_on_every_platform() {
+        assert_eq!(bytes_text(b"x\\y"), "x\\x5Cy");
+        assert_eq!(bytes_text(b"a/b"), "a/b");
+        assert_eq!(bytes_text(b"caf\xe9"), "caf\\xE9");
+        assert_ne!(bytes_text(b"caf\xe9"), bytes_text(b"caf\xe8"));
+        assert_ne!(bytes_text(b"\xff"), bytes_text(b"\\xFF"));
     }
 
     #[cfg(windows)]

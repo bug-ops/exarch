@@ -10,6 +10,7 @@
 
 use crate::operation::Flag;
 use crate::operation::Operation;
+use crate::output::terminal::TerminalEntry;
 use crate::output::terminal::TerminalPath;
 use crate::output::terminal::TerminalText;
 use anyhow::Result;
@@ -37,9 +38,12 @@ use std::path::PathBuf;
 pub enum Part {
     /// Text written in the source: trusted, may span lines.
     Lit(&'static str),
-    /// A path, possibly from an archive: escaped for the terminal, exact in
-    /// `--json`.
+    /// A path of the host (an archive, a destination, an output), in its
+    /// native spelling: escaped for the terminal, exact in `--json`.
     Path(PathBuf),
+    /// The name of an archive entry: rendered injectively with `path_text`
+    /// and escaped for the terminal.
+    Entry(PathBuf),
     /// Single-line text, possibly derived from an archive: escaped for the
     /// terminal, exact in `--json`.
     Text(String),
@@ -49,7 +53,8 @@ impl Part {
     fn write_raw(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Lit(text) => f.write_str(text),
-            Self::Path(path) => f.write_str(&path_text(path)),
+            Self::Path(path) => write!(f, "{}", path.display()),
+            Self::Entry(path) => f.write_str(&path_text(path)),
             Self::Text(text) => f.write_str(text),
         }
     }
@@ -58,6 +63,7 @@ impl Part {
         match self {
             Self::Lit(text) => f.write_str(text),
             Self::Path(path) => write!(f, "{}", TerminalPath::new(path)),
+            Self::Entry(path) => write!(f, "{}", TerminalEntry::new(path)),
             Self::Text(text) => write!(f, "{}", TerminalText::new(text)),
         }
     }
@@ -130,9 +136,16 @@ impl Message {
         self
     }
 
-    /// Appends a path, escaped for a terminal and exact in `--json`.
+    /// Appends a host path (an archive, a destination), escaped for a terminal
+    /// and exact in `--json`.
     pub fn path(mut self, path: &Path) -> Self {
         self.0.push(Part::Path(path.to_path_buf()));
+        self
+    }
+
+    /// Appends the name of an archive entry, rendered injectively.
+    pub fn entry(mut self, path: &Path) -> Self {
+        self.0.push(Part::Entry(path.to_path_buf()));
         self
     }
 

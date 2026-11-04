@@ -860,7 +860,7 @@ const MAX_LISTED_CONFLICTS: usize = 10;
 /// conflict. `conflicts` is sorted before truncation so "first N shown" is a
 /// deterministic, reproducible subset rather than whatever order the archive
 /// manifest happened to yield.
-fn conflict_message(conflicts: &[PathBuf], mode: WriteMode) -> Message {
+fn conflict_message(conflicts: &[PathBuf], mode: WriteMode, output_dir: &Path) -> Message {
     let count = conflicts.len();
     let noun = if count == 1 { "file" } else { "files" };
     let verb = if count == 1 { "exists" } else { "exist" };
@@ -885,8 +885,11 @@ fn conflict_message(conflicts: &[PathBuf], mode: WriteMode) -> Message {
              {MAX_LISTED_CONFLICTS} shown:"
         ))
     };
+    // The destination keeps its native spelling; the entry part is rendered
+    // the way the archive names it.
+    let destination = output_dir.join("");
     for path in sorted.into_iter().take(MAX_LISTED_CONFLICTS) {
-        message = message.lit("\n  ").path(path);
+        message = message.lit("\n  ").path(&destination).entry(path);
     }
     if remaining > 0 {
         message = message
@@ -897,9 +900,9 @@ fn conflict_message(conflicts: &[PathBuf], mode: WriteMode) -> Message {
     message
 }
 
-fn conflict_error(conflicts: &[PathBuf], mode: WriteMode) -> anyhow::Error {
+fn conflict_error(conflicts: &[PathBuf], mode: WriteMode, output_dir: &Path) -> anyhow::Error {
     anyhow::Error::new(CliContext::new(
-        conflict_message(conflicts, mode).into_parts(),
+        conflict_message(conflicts, mode, output_dir).into_parts(),
     ))
 }
 
@@ -1133,7 +1136,7 @@ impl ConflictsChecked {
                 }
                 Err(err) => {
                     return Err(err)
-                        .with_context(|| format!("failed to inspect {}", path_text(&target)));
+                        .with_context(|| format!("failed to inspect {}", target.display()));
                 }
             };
             if occupant.file_type().is_symlink() {
@@ -1152,14 +1155,14 @@ impl ConflictsChecked {
                     return Err(convert_error(Operation::Extract, refusal, archive));
                 }
             } else if !(must_be_directory && occupant.is_dir()) {
-                conflicts.push(target);
+                conflicts.push(landing.path().as_path().to_path_buf());
             }
         }
 
         if conflicts.is_empty() {
             Ok(Self(()))
         } else {
-            Err(conflict_error(&conflicts, mode))
+            Err(conflict_error(&conflicts, mode, output_dir))
         }
     }
 }
@@ -1943,7 +1946,9 @@ mod tests {
     }
 
     fn conflict_error_message(conflicts: &[PathBuf]) -> String {
-        crate::error::terminal(&conflict_message(conflicts, WriteMode::Safe).into_parts())
+        crate::error::terminal(
+            &conflict_message(conflicts, WriteMode::Safe, Path::new("")).into_parts(),
+        )
     }
 
     #[test]

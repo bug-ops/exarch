@@ -5,6 +5,7 @@ use super::formatter::ManifestView;
 use super::formatter::OutputFormatter;
 use super::formatter::SizeUnits;
 use super::humanize_bytes;
+use super::terminal::TerminalEntry;
 use super::terminal::TerminalPath;
 use super::terminal::TerminalText;
 use crate::error::cli_message;
@@ -121,7 +122,7 @@ impl Styler {
 /// `every_link_target_state_has_dedicated_text` rejects.
 fn dedicated_link_suffix(target: &LinkTarget) -> Option<String> {
     Some(match target {
-        LinkTarget::Recorded(path) => format!(" -> {}", TerminalPath::new(path)),
+        LinkTarget::Recorded(path) => format!(" -> {}", TerminalEntry::new(path)),
         LinkTarget::Missing => "  (target missing)".to_owned(),
         LinkTarget::Unread => "  (target not read)".to_owned(),
         LinkTarget::Unreadable => "  (target unreadable)".to_owned(),
@@ -233,7 +234,7 @@ impl<O: Write, E: Write> HumanFormatter<O, E> {
         for entry in manifest.entries() {
             emit_line(
                 &mut self.out,
-                format_args!("{}", TerminalPath::new(&entry.path)),
+                format_args!("{}", TerminalEntry::new(&entry.path)),
             );
         }
     }
@@ -263,7 +264,7 @@ impl<O: Write, E: Write> HumanFormatter<O, E> {
                     type_char,
                     mode_str,
                     size_str,
-                    TerminalPath::new(&entry.path),
+                    TerminalEntry::new(&entry.path),
                     link_suffix(&entry.kind)
                 ),
             );
@@ -482,7 +483,7 @@ impl<O: Write, E: Write> OutputFormatter for HumanFormatter<O, E> {
                             format_args!(
                                 "  {} {}: {}",
                                 severity,
-                                TerminalPath::new(path),
+                                TerminalEntry::new(path),
                                 TerminalText::new(&message)
                             ),
                         );

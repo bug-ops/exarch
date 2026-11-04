@@ -6733,7 +6733,10 @@ fn test_extract_directory_over_preexisting_file_names_the_entry() {
         .code(1)
         .stderr(
             predicate::str::contains("already exists")
-                .and(predicate::str::contains("out/x"))
+                .and(predicate::str::contains(format!(
+                    "out{}x",
+                    std::path::MAIN_SEPARATOR
+                )))
                 .and(predicate::str::contains("os error").not()),
         );
 }

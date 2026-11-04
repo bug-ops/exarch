@@ -4,7 +4,7 @@ use crate::operation::Operation;
 use crate::output::OutputMode;
 use crate::output::Verbosity;
 use crate::output::humanize_bytes;
-use crate::output::terminal::TerminalPath;
+use crate::output::terminal::TerminalEntry;
 use console::Term;
 use exarch_core::EntryPosition;
 use exarch_core::EntryTotal;
@@ -210,7 +210,7 @@ impl VerboseProgress {
 
 impl ProgressCallback for VerboseProgress {
     fn on_entry_start(&mut self, path: &Path, _position: EntryPosition) {
-        eprintln!("  {}  {}", self.operation.name(), TerminalPath::new(path));
+        eprintln!("  {}  {}", self.operation.name(), TerminalEntry::new(path));
     }
 
     fn on_bytes_written(&mut self, _bytes: u64) {}

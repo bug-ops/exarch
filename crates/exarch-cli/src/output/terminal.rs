@@ -384,8 +384,8 @@ impl fmt::Display for TerminalText<'_> {
     }
 }
 
-/// A path rendered like [`Path::display`] with control and invisible
-/// characters escaped.
+/// A path of the host (an archive, a destination, an output) rendered in its
+/// native spelling with control and invisible characters escaped.
 #[derive(Debug, Clone, Copy)]
 pub struct TerminalPath<'a>(&'a Path);
 
@@ -398,6 +398,25 @@ impl<'a> TerminalPath<'a> {
 }
 
 impl fmt::Display for TerminalPath<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write_escaped(f, &self.0.to_string_lossy())
+    }
+}
+
+/// The name of an archive entry rendered with [`path_text`], so two distinct
+/// names never print alike, with control and invisible characters escaped.
+#[derive(Debug, Clone, Copy)]
+pub struct TerminalEntry<'a>(&'a Path);
+
+impl<'a> TerminalEntry<'a> {
+    /// Wraps the entry name `path` for display.
+    #[must_use]
+    pub const fn new(path: &'a Path) -> Self {
+        Self(path)
+    }
+}
+
+impl fmt::Display for TerminalEntry<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write_escaped(f, &path_text(self.0))
     }
@@ -644,17 +663,17 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn path_renders_non_utf8_injectively() {
+    fn entry_renders_non_utf8_injectively() {
         use std::ffi::OsStr;
         use std::os::unix::ffi::OsStrExt;
 
         let path = Path::new(OsStr::from_bytes(b"a\xffb"));
-        assert_eq!(TerminalPath::new(path).to_string(), "a\\xFFb");
+        assert_eq!(TerminalEntry::new(path).to_string(), "a\\xFFb");
         let other = Path::new(OsStr::from_bytes(b"a\xfeb"));
         assert_ne!(
-            TerminalPath::new(path).to_string(),
-            TerminalPath::new(other).to_string()
+            TerminalEntry::new(path).to_string(),
+            TerminalEntry::new(other).to_string()
         );
-        assert!(!TerminalPath::new(path).to_string().contains('\u{fffd}'));
+        assert!(!TerminalEntry::new(path).to_string().contains('\u{fffd}'));
     }
 }

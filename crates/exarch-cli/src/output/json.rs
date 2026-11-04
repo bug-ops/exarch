@@ -229,7 +229,7 @@ impl<W: Write> OutputFormatter for JsonFormatter<W> {
         self.success(
             Operation::Create,
             CreationOutput {
-                output_path: path_text(output_path),
+                output_path: output_path.display().to_string(),
                 files_added: report.files_added,
                 directories_added: report.directories_added,
                 symlinks_added: report.symlinks_added,

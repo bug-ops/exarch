@@ -605,7 +605,10 @@ class CreationConfig:
 
         Raises ``InvalidConfigurationError`` (``setting == "exclude_pattern"``)
         for an empty pattern, ``.``, ``..``, an absolute path, a bare ``*``,
-        an inner or repeated ``*``, or ``*`` combined with a separator.
+        an inner or repeated ``*``, ``*`` combined with a separator, a glob
+        look-alike (``?``, ``[``, ``]``, ``{``, ``}``, ``!``), a comma, or leading
+        or trailing whitespace. Only the shapes above are matched, so a refused
+        pattern would otherwise be read literally.
         """
         ...
 

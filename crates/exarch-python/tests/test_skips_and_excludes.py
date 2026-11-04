@@ -74,7 +74,22 @@ def test_tar_progress_total_is_none_and_zip_total_is_known(tmp_path, source):
 
 @pytest.mark.parametrize(
     "pattern",
-    ["", ".", "..", "/abs", "*", "a*b", "**x", "build/*"],
+    [
+        "",
+        ".",
+        "..",
+        "/abs",
+        "*",
+        "a*b",
+        "**x",
+        "build/*",
+        "?.txt",
+        "[a",
+        "{a,b}",
+        "!a.txt",
+        " .env",
+        "a,b",
+    ],
 )
 def test_unsupported_exclude_patterns_are_refused(pattern):
     with pytest.raises(exarch.InvalidConfigurationError) as info:

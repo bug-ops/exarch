@@ -816,7 +816,17 @@ impl PyCreationConfig {
         slf
     }
 
-    /// Sets exclude patterns.
+    /// Sets exclude patterns, matched against the archive entry path.
+    ///
+    /// A name, `name*` or `*name` matches one path component at any depth; a
+    /// pattern with a separator matches that path from the archive root and its
+    /// subtree.
+    ///
+    /// # Errors
+    ///
+    /// `InvalidConfigurationError` (`setting == "exclude_pattern"`) for any
+    /// other shape, including glob look-alikes (`?`, `[`, `]`, `{`, `}`, `!`),
+    /// commas and edge whitespace.
     #[allow(clippy::needless_pass_by_value)]
     fn with_exclude_patterns(
         mut slf: PyRefMut<'_, Self>,

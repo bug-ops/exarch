@@ -43,6 +43,51 @@ _SecurityViolationSubCode = Literal["PATH_NAME", "PATH_DEPTH", "LINK_TARGET", "L
 _PartialWrites = Literal["kept", "rolled_back", "discarded"]
 _PathModel = Literal["host", "portable"]
 _MemoryEntryKind = Literal["file", "directory", "symlink", "hardlink"]
+_DecodeReuse = Literal["off", "memory", "temp_file"]
+_ErrorCode = Literal[
+    "PATH_TRAVERSAL",
+    "SYMLINK_ESCAPE",
+    "HARDLINK_ESCAPE",
+    "ZIP_BOMB",
+    "ZIP_INCONSISTENCY",
+    "QUOTA_EXCEEDED",
+    "SECURITY_VIOLATION",
+    "INVALID_ARCHIVE",
+    "IO_ERROR",
+    "INVALID_PERMISSIONS",
+    "SOURCE_NOT_FOUND",
+    "SOURCE_NOT_ACCESSIBLE",
+    "OUTPUT_EXISTS",
+    "INVALID_COMPRESSION_LEVEL",
+    "UNKNOWN_FORMAT",
+    "INVALID_CONFIGURATION",
+]
+_ConfigSetting = Literal[
+    "max_file_size",
+    "max_total_size",
+    "max_file_count",
+    "max_path_depth",
+    "max_compression_ratio",
+    "max_solid_compression_ratio",
+    "max_solid_block_memory",
+    "max_tar_metadata_bytes",
+    "max_decoder_memory",
+    "decompression_budget",
+    "allowed_extension",
+    "banned_path_component",
+    "archive_path",
+    "output_directory",
+    "output_path",
+    "source_paths",
+    "strip_prefix",
+    "creation_format",
+    "atomic_extraction",
+    "zip_archive",
+    "zip_output_writer",
+    "max_bytes",
+    "parallel_decode_memory",
+    "exclude_pattern",
+]
 _PolicySetting = Literal["symlinks", "hardlinks", "solid_archives", "banned_components", "max_path_depth", "windows_reserved_names", "max_tar_metadata_bytes"]  # noqa: E501  # fmt: skip
 
 class SecurityConfig:
@@ -1164,7 +1209,12 @@ def verify_archive_bytes(
     ...
 
 class MemoryEntry:
-    """An entry extracted into memory."""
+    """
+    An entry extracted into memory.
+
+    The concrete class tells what the entry holds; narrow with ``isinstance``
+    or on ``kind``. Each class carries only the attributes of its kind.
+    """
 
     @property
     def path(self) -> str:
@@ -1176,23 +1226,86 @@ class MemoryEntry:
         """What the entry is."""
         ...
 
+class MemoryFile(MemoryEntry):
+    """A regular file."""
+
     @property
-    def data(self) -> bytes | None:
-        """The file's bytes; None unless kind is "file"."""
+    def kind(self) -> Literal["file"]: ...
+    @property
+    def data(self) -> bytes:
+        """The file's bytes."""
         ...
 
     @property
     def mode(self) -> int | None:
-        """Permission bits after setuid and setgid were stripped."""
+        """Permission bits after setuid and setgid were stripped, if the archive carries a mode."""
         ...
 
+class MemoryDirectory(MemoryEntry):
+    """A directory the archive names explicitly."""
+
     @property
-    def target(self) -> str | None:
-        """
-        For "symlink", the target as the archive spells it, relative to the
-        link; for "hardlink", the root-relative resolved path of an already
-        delivered entry, a file or an earlier hardlink. None for other kinds.
-        """
+    def kind(self) -> Literal["directory"]: ...
+
+class MemorySymlink(MemoryEntry):
+    """A symbolic link, stored as data."""
+
+    @property
+    def kind(self) -> Literal["symlink"]: ...
+    @property
+    def target(self) -> str:
+        """The target as the archive spells it, relative to the link."""
+        ...
+
+class MemoryHardlink(MemoryEntry):
+    """A hard link to an already delivered entry; only from extract_archive_to_callback."""
+
+    @property
+    def kind(self) -> Literal["hardlink"]: ...
+    @property
+    def target(self) -> str:
+        """The root-relative resolved path of an already delivered entry, a file or an earlier hardlink."""
+        ...
+
+AnyMemoryEntry = MemoryFile | MemoryDirectory | MemorySymlink | MemoryHardlink
+
+class SinkOptions:
+    """
+    What the in-memory and callback extraction functions honour of the options
+    of path-based extraction.
+
+    Atomic extraction renames a directory, which an in-memory extraction does
+    not have, so only the duplicate policy and the ZIP decode reuse remain.
+
+    Args:
+        skip_duplicates: Skip an entry whose path an earlier entry already holds
+            instead of replacing it (default: True).
+        decode_reuse: Where a ZIP extraction keeps the output of its structural
+            check so deflate entries are decoded once instead of twice:
+            ``"off"`` (default), ``"memory"`` or ``"temp_file"``.
+            ``"temp_file"`` writes the plaintext of the archive to the
+            temporary directory until the extraction ends.
+        decode_reuse_limit: The most bytes kept, at most 256 MiB (default
+            32 MiB). Only with ``"memory"`` or ``"temp_file"``.
+
+    Raises:
+        ValueError: Unknown ``decode_reuse``, a non-positive limit, or a limit
+            with ``"off"``.
+    """
+
+    def __init__(
+        self,
+        skip_duplicates: bool = True,
+        decode_reuse: _DecodeReuse = "off",
+        decode_reuse_limit: int | None = None,
+    ) -> None: ...
+    @property
+    def skip_duplicates(self) -> bool: ...
+    @property
+    def decode_reuse(self) -> _DecodeReuse: ...
+    @property
+    def decode_reuse_limit(self) -> int | None:
+        """The limit in bytes; None for ``"off"``."""
         ...
 
 class MemoryExtraction:
@@ -1204,14 +1317,14 @@ class MemoryExtraction:
         ...
 
     @property
-    def entries(self) -> list[MemoryEntry]:
+    def entries(self) -> list[AnyMemoryEntry]:
         """The extracted entries in path order."""
         ...
 
 def extract_archive_to_memory(
     data: _ArchiveData,
     config: SecurityConfig | None = None,
-    options: ExtractionOptions | None = None,
+    options: SinkOptions | None = None,
     max_bytes: int | None = None,
     path_model: _PathModel | None = None,
     format: _ArchiveType | None = None,
@@ -1227,7 +1340,7 @@ def extract_archive_to_memory(
             its current position; if it is seekable any format works, otherwise only
             the TAR family. An exception it raises propagates unchanged.
         config: Optional SecurityConfig (uses secure defaults if None)
-        options: Optional ExtractionOptions (atomic is not supported)
+        options: Optional SinkOptions
         max_bytes: The most bytes to keep: payload (file data, hardlink copies
             and symlink targets) plus path bytes plus 256 per entry; defaults
             to the config's max_total_size
@@ -1247,9 +1360,9 @@ def extract_archive_to_memory(
 
 def extract_archive_to_callback(
     data: _ArchiveData,
-    on_entry: Callable[[MemoryEntry], object],
+    on_entry: Callable[[AnyMemoryEntry], object],
     config: SecurityConfig | None = None,
-    options: ExtractionOptions | None = None,
+    options: SinkOptions | None = None,
     path_model: _PathModel | None = None,
     format: _ArchiveType | None = None,
 ) -> ExtractionReport:
@@ -1282,7 +1395,7 @@ def extract_archive_to_callback(
             extract_archive_to_memory)
         on_entry: Called with each MemoryEntry
         config: Optional SecurityConfig (uses secure defaults if None)
-        options: Optional ExtractionOptions (atomic is not supported)
+        options: Optional SinkOptions
         path_model: "host" (default) or "portable"
         format: The archive format; detected from the leading bytes if None
 
@@ -1298,7 +1411,7 @@ def extract_archive_to_memory_with_progress(
     data: _ArchiveData,
     config: SecurityConfig | None = None,
     progress: ProgressCallbackFn | None = None,
-    options: ExtractionOptions | None = None,
+    options: SinkOptions | None = None,
     max_bytes: int | None = None,
     path_model: _PathModel | None = None,
     format: _ArchiveType | None = None,
@@ -1406,13 +1519,47 @@ class ArchiveError(Exception):
     Base exception for all extraction errors.
 
     Attributes:
+        code: The stable error code, the same on every exarch exception,
+            including the builtin ``OSError`` subclasses raised for I/O
+            failures.
         writes: Set only when extraction failed after recording progress:
             ``"kept"`` if the written files remain on disk, ``"rolled_back"``
             if atomic extraction discarded them, ``"discarded"`` if an
             in-memory extraction dropped the entries it had collected.
     """
 
+    code: _ErrorCode
     writes: _PartialWrites
+
+class OutputExistsError(ArchiveError, FileExistsError):
+    """The output path already exists (``code == "OUTPUT_EXISTS"``)."""
+
+    ...
+
+class SourceNotFoundError(ArchiveError, FileNotFoundError):
+    """A source path does not exist (``code == "SOURCE_NOT_FOUND"``)."""
+
+    ...
+
+class SourceNotAccessibleError(ArchiveError, PermissionError):
+    """A source path cannot be read (``code == "SOURCE_NOT_ACCESSIBLE"``)."""
+
+    ...
+
+class InvalidConfigurationError(ArchiveError, ValueError):
+    """
+    A setting or argument was refused (``code == "INVALID_CONFIGURATION"``).
+
+    Attributes:
+        setting: The refused setting, or ``None`` when the refusal names none.
+    """
+
+    setting: _ConfigSetting | None
+
+class InvalidCompressionLevelError(ArchiveError, ValueError):
+    """A compression level is out of range (``code == "INVALID_COMPRESSION_LEVEL"``)."""
+
+    ...
 
 class PathTraversalError(ArchiveError):
     """

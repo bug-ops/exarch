@@ -1032,8 +1032,11 @@ mod tests {
 
     #[test]
     fn test_pyi_literal_aliases_match_core_enums() {
+        use exarch_core::ConfigSetting;
+        use exarch_core::ErrorCode;
         use exarch_core::IntegrityStatus;
         use exarch_core::InvalidArchiveSubCode;
+        use exarch_core::MemoryEntryKind;
         use exarch_core::PartialWrites;
         use exarch_core::PathModel;
         use exarch_core::PolicySetting;
@@ -1090,12 +1093,39 @@ mod tests {
                 InvalidArchiveSubCode::as_str,
             ),
             literal_line("_PathModel", PathModel::ALL, PathModel::as_str),
+            literal_line("_ErrorCode", ErrorCode::ALL, ErrorCode::as_str),
+            literal_line("_ConfigSetting", ConfigSetting::ALL, ConfigSetting::as_str),
+            literal_line(
+                "_MemoryEntryKind",
+                MemoryEntryKind::ALL,
+                MemoryEntryKind::as_str,
+            ),
+            literal_line(
+                "_DecodeReuse",
+                crate::buffer::ReuseKind::ALL,
+                crate::buffer::ReuseKind::as_str,
+            ),
         ];
         let flat = flatten_literals(pyi);
         for line in expected {
             assert!(
                 flat.lines().any(|l| l == flatten_literals(&line).trim()),
                 "exarch.pyi is out of sync with exarch-core, expected alias:\n{line}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_pyi_has_one_memory_entry_class_per_kind() {
+        use exarch_core::MemoryEntryKind;
+
+        let pyi = include_str!("../exarch.pyi");
+        for kind in MemoryEntryKind::ALL {
+            let narrowed = format!("def kind(self) -> Literal[\"{}\"]", kind.as_str());
+            assert_eq!(
+                pyi.matches(&narrowed).count(),
+                1,
+                "exarch.pyi needs exactly one MemoryEntry subclass narrowing kind to {kind:?}"
             );
         }
     }

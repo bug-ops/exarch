@@ -837,7 +837,12 @@ fn exarch(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyVerificationIssue>()?;
     m.add_class::<PyIntegrityGaps>()?;
     m.add_class::<PyUnverifiedEntry>()?;
+    m.add_class::<buffer::PySinkOptions>()?;
     m.add_class::<buffer::PyMemoryEntry>()?;
+    m.add_class::<buffer::PyMemoryFile>()?;
+    m.add_class::<buffer::PyMemoryDirectory>()?;
+    m.add_class::<buffer::PyMemorySymlink>()?;
+    m.add_class::<buffer::PyMemoryHardlink>()?;
     m.add_class::<buffer::PyMemoryExtraction>()?;
     m.add_class::<buffer::PyCreatedArchive>()?;
 

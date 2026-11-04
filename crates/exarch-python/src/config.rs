@@ -22,6 +22,7 @@ use pyo3::prelude::*;
 use std::num::NonZeroU64;
 use std::num::NonZeroUsize;
 
+use crate::buffer::parse_one;
 use crate::error::convert_error;
 
 fn bytes_limit(setting: ConfigSetting, value: u64) -> PyResult<Limit<NonZeroU64>> {
@@ -569,20 +570,12 @@ fn parse_parallel_decode_memory(value: Option<i128>) -> PyResult<ParallelDecode>
 
 /// Parses the string form shared with `ZipConsistencyPolicy::as_str`.
 fn parse_zip_consistency(value: &str) -> PyResult<ZipConsistencyPolicy> {
-    ZipConsistencyPolicy::ALL
-        .iter()
-        .copied()
-        .find(|policy| policy.as_str() == value)
-        .ok_or_else(|| {
-            let allowed: Vec<_> = ZipConsistencyPolicy::ALL
-                .iter()
-                .map(|policy| policy.as_str())
-                .collect();
-            PyValueError::new_err(format!(
-                "zip_consistency must be one of {}, got {value:?}",
-                allowed.join(", ")
-            ))
-        })
+    parse_one(
+        "zip_consistency",
+        ZipConsistencyPolicy::ALL,
+        ZipConsistencyPolicy::as_str,
+        value,
+    )
 }
 
 impl PySecurityConfig {

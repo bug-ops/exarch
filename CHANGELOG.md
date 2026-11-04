@@ -24,15 +24,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Core: `ZipBombScope::SkippedEntries` (#863, #884).
 - Core: `SinkOptions::decode_reuse` (off by default) lets callback and custom sinks reuse the ZIP census decode (#890, #946).
 - Core: `ZIP_READER` sub-code for ZIP reader failures in Python, Node and CLI `--json`; messages unchanged (#889, #946).
-- Core: `ExtractRequest`, `ListRequest`, `VerifyRequest`, `SinkExtractRequest` and `CreateRequest` carry options and progress as setters (#912, #PR).
-- Core: `OutputFile`, `OutputPolicy`, `OutputFormat` and `ListedExtractOptions` (#931, #915, #901, #PR).
-- Core: `ArchiveManifest::landings` (entries and implied parent directories) and `landing_paths` with `LandingPath` (#933, #PR).
-- Core: `path_text` and `bytes_text` render paths and archive names injectively, plus `VerificationIssue::mode`, `ProgressCallback::is_cancelled` and `ArchiveEntry::utf8_path` (#925, #899, #931, #PR).
-- Core: `positive_from_i128`, `positive_from_f64`, `ParallelDecode::from_bytes`, `ArchiveType::is_tar` and `IntegrityCheck::budget` (#921, #941, #922, #PR).
-- Core: `SubCode::{Quota, ZipBomb}`, the `TAR_READER` and `SEVENZ_READER` sub-codes, `SolidMemoryScope`, and new `ConfigSetting` variants with `ConfigProblem::NotOneOf` (#918, #930, #911, #919, #PR).
-- Python: `code` on every exception with real `OutputExistsError` and `SourceNotFoundError` classes, `create_archive(format=, overwrite=)` and `skipped` on reports (#919, #915, #906, #PR).
-- Node: `ioKind`, typed `subCode`, `skipped` on reports, `createArchive*` options `{ format, overwrite }` and `nonUtf8EntryPath` (#920, #918, #906, #915, #925, #PR).
-- CLI: skipped entries are reported by reason in text and `--json` (#906, #PR).
+- Core: `ExtractRequest`, `ListRequest`, `VerifyRequest`, `SinkExtractRequest` and `CreateRequest` carry options and progress as setters (#912, #954).
+- Core: `OutputFile`, `OutputPolicy`, `OutputFormat` and `ListedExtractOptions` (#931, #915, #901, #954).
+- Core: `ArchiveManifest::landings` (entries and implied parent directories) and `landing_paths` with `LandingPath` (#933, #954).
+- Core: `path_text` and `bytes_text` render paths and archive names injectively, plus `VerificationIssue::mode`, `ProgressCallback::is_cancelled` and `ArchiveEntry::utf8_path` (#925, #899, #931, #954).
+- Core: `positive_from_i128`, `positive_from_f64`, `ParallelDecode::from_bytes`, `ArchiveType::is_tar` and `IntegrityCheck::budget` (#921, #941, #922, #954).
+- Core: `SubCode::{Quota, ZipBomb}`, the `TAR_READER` and `SEVENZ_READER` sub-codes, `SolidMemoryScope`, and new `ConfigSetting` variants with `ConfigProblem::NotOneOf` (#918, #930, #911, #919, #954).
+- Python: `code` on every exception with real `OutputExistsError` and `SourceNotFoundError` classes, `create_archive(format=, overwrite=)` and `skipped` on reports (#919, #915, #906, #954).
+- Node: `ioKind`, typed `subCode`, `skipped` on reports, `createArchive*` options `{ format, overwrite }` and `nonUtf8EntryPath` (#920, #918, #906, #915, #925, #954).
+- CLI: skipped entries are reported by reason in text and `--json` (#906, #954).
 
 ### Changed
 
@@ -106,37 +106,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Core: `verify` with the integrity check bounds the decode of allowlist-skipped compressed TAR entries as `extract` and `list` do (#868, #894).
 - Docs and benches: the documented `validation` bench commands name `--features testing` (#883, #894).
 - Docs: specifications in `specs/` synced with the changes since v0.8.0, covering sub-codes, TAR ambiguity and ZIP descriptor refusals, pinned directory descriptors, callback and listing-for-extraction APIs, typed limits and config errors, and the binding surfaces (#948).
-- **Breaking**: `SecurityConfig` and `CreationConfig` are plain structs; the `Validated` typestate and `validate()` are removed (#898, #PR).
-- **Breaking**: `AllowedFeatures` fields are `Admit`, and the solid settings are one `SolidArchives::{Refuse, Allow(SolidLimits)}` (#911, #PR).
-- **Breaking (security relaxation)**: the solid memory limit is checked per block; a multi-block solid archive passes when `max_total_size` is raised above `max_block_memory`, and the archive-wide sum still applies while it is unbounded (#911, #PR).
-- **Breaking**: the option and progress function variants, `Archive`, `ArchiveBuilder` and the creator traits are removed; use the request types, and `ArchiveFormat` is sealed (#912, #897, #908, #901, #PR).
-- **Breaking**: `CreationConfig::format` is removed; state it on `OutputFile::with_format` (#915, #PR).
-- **Breaking**: creation stages its output and renames it into place, replacing an existing file atomically with its mode, refusing non-regular outputs and never archiving its own output; it adds about 4-10 ms of fsync per archive (#931, #PR).
-- **Breaking**: a raising or throwing creation progress callback cancels creation and keeps the previous archive; in Node only the async variant can (#931, #953, #PR).
-- **Breaking**: `ListedArchive` carries its extraction policy (`ListRequest::for_extraction`) and `extract` takes `ListedExtractOptions` (#901, #PR).
-- **Breaking**: `ProgressCallback::on_entry_start` takes an `EntryPosition`, and reports are `#[non_exhaustive]` with typed `Skips` and warnings (#904, #905, #906, #PR).
-- **Breaking**: `ExcludePattern` refuses `?[]{}!`, commas, edge whitespace and unsupported shapes, matches the entry path and compares raw bytes (#916, #PR).
-- **Breaking**: the public `EntryValidator` pipeline is removed, sinks take `AdmittedSize` and `CheckedLinkTarget`, and `CallbackError` is exhaustive (#900, #909, #922, #PR).
-- **Breaking (security, fail-closed)**: pre-existing symlinks in the destination resolve handle-relatively on Unix; an absolute target is accepted through the written or canonical root only, and other aliases and re-entering targets are refused (#895, #PR).
-- Changed (performance): a chain of links with many nested components and `..` costs about 1.2x on a 30-link x 31-component stress shape; a single link is as fast or faster, and no link result is cached (#895, #952, #PR).
-- **Breaking**: `ArchiveEntry::size()` exists for regular files only, `mode` is `Option<RawMode>`, and `VerificationIssue` has private fields with `finding()`, `ffi_kind()` and `sub_code()` instead of `context` (#910, #899, #PR).
-- **Breaking**: `PartialExtraction` wraps a never-nested `Partial`, `InvalidPermissions::mode` is a `RawMode`, `validate_raw_path_str` is `BoundaryPath::parse`, and several `ConfigProblem` and `ConfigSetting` variants are removed (#907, #910, #927, #913, #901, #PR).
-- **Breaking**: entry names in verify findings and error messages render through `path_text`, so a backslash prints as `\x5C` and an invalid byte as `\xNN` (#925, #PR).
-- Core: TAR and 7z reader refusals are typed and `is_extension_allowed` takes `Option<&str>` (#930, #913, #PR).
-- **Breaking (security)**: archive creation with `include_hidden = false` no longer enters hidden directories, so `.ssh/id_rsa`, `.aws/credentials` and `.gnupg/*` are not archived; a hidden directory counts once as a hidden skip (#PR).
-- **Breaking (Python)**: limit setters raise `InvalidConfigurationError`, entries are per-kind classes, `VerificationIssue.context` is replaced by typed fields, and non-UTF-8 paths decode with `os.fsdecode` (#921, #923, #910, #899, #925, #926, #PR).
-- **Breaking (Node)**: setters refuse out-of-range numbers instead of wrapping, `ExarchError` pairs `code` with its properties, listing entries are unions by kind, and a non-UTF-8 entry name fails listing with `ENTRY_NAME` (#917, #924, #923, #910, #925, #926, #PR).
-- **Breaking (CLI)**: `verify --strict` exits 3, zero or non-finite limits exit 1 with the JSON envelope, `list -H` needs `-l`, `-x` refuses unsupported patterns, and `verify --json` issues carry typed fields instead of `context` (#932, #938, #940, #943, #899, #916, #PR).
-- CLI: `create` keeps the previous archive on failure, `--force` swaps atomically, listed extraction honors the permission and link flags, and the conflict pre-check uses `landings` (#931, #936, #901, #933, #PR).
+- **Breaking**: `SecurityConfig` and `CreationConfig` are plain structs; the `Validated` typestate and `validate()` are removed (#898, #954).
+- **Breaking**: `AllowedFeatures` fields are `Admit`, and the solid settings are one `SolidArchives::{Refuse, Allow(SolidLimits)}` (#911, #954).
+- **Breaking (security relaxation)**: the solid memory limit is checked per block; a multi-block solid archive passes when `max_total_size` is raised above `max_block_memory`, and the archive-wide sum still applies while it is unbounded (#911, #954).
+- **Breaking**: the option and progress function variants, `Archive`, `ArchiveBuilder` and the creator traits are removed; use the request types, and `ArchiveFormat` is sealed (#912, #897, #908, #901, #954).
+- **Breaking**: `CreationConfig::format` is removed; state it on `OutputFile::with_format` (#915, #954).
+- **Breaking**: creation stages its output and renames it into place, replacing an existing file atomically with its mode, refusing non-regular outputs and never archiving its own output; it adds about 4-10 ms of fsync per archive (#931, #954).
+- **Breaking**: a raising or throwing creation progress callback cancels creation and keeps the previous archive; in Node only the async variant can (#931, #953, #954).
+- **Breaking**: `ListedArchive` carries its extraction policy (`ListRequest::for_extraction`) and `extract` takes `ListedExtractOptions` (#901, #954).
+- **Breaking**: `ProgressCallback::on_entry_start` takes an `EntryPosition`, and reports are `#[non_exhaustive]` with typed `Skips` and warnings (#904, #905, #906, #954).
+- **Breaking**: `ExcludePattern` refuses `?[]{}!`, commas, edge whitespace and unsupported shapes, matches the entry path and compares raw bytes (#916, #954).
+- **Breaking**: the public `EntryValidator` pipeline is removed, sinks take `AdmittedSize` and `CheckedLinkTarget`, and `CallbackError` is exhaustive (#900, #909, #922, #954).
+- **Breaking (security, fail-closed)**: pre-existing symlinks in the destination resolve handle-relatively on Unix; an absolute target is accepted through the written or canonical root only, and other aliases and re-entering targets are refused (#895, #954).
+- Changed (performance): a chain of links with many nested components and `..` costs about 1.2x on a 30-link x 31-component stress shape; a single link is as fast or faster, and no link result is cached (#895, #952, #954).
+- **Breaking**: `ArchiveEntry::size()` exists for regular files only, `mode` is `Option<RawMode>`, and `VerificationIssue` has private fields with `finding()`, `ffi_kind()` and `sub_code()` instead of `context` (#910, #899, #954).
+- **Breaking**: `PartialExtraction` wraps a never-nested `Partial`, `InvalidPermissions::mode` is a `RawMode`, `validate_raw_path_str` is `BoundaryPath::parse`, and several `ConfigProblem` and `ConfigSetting` variants are removed (#907, #910, #927, #913, #901, #954).
+- **Breaking**: entry names in verify findings and error messages render through `path_text`, so a backslash prints as `\x5C` and an invalid byte as `\xNN` (#925, #954).
+- Core: TAR and 7z reader refusals are typed and `is_extension_allowed` takes `Option<&str>` (#930, #913, #954).
+- **Breaking (security)**: archive creation with `include_hidden = false` no longer enters hidden directories, so `.ssh/id_rsa`, `.aws/credentials` and `.gnupg/*` are not archived; a hidden directory counts once as a hidden skip (#954).
+- **Breaking (Python)**: limit setters raise `InvalidConfigurationError`, entries are per-kind classes, `VerificationIssue.context` is replaced by typed fields, and non-UTF-8 paths decode with `os.fsdecode` (#921, #923, #910, #899, #925, #926, #954).
+- **Breaking (Node)**: setters refuse out-of-range numbers instead of wrapping, `ExarchError` pairs `code` with its properties, listing entries are unions by kind, and a non-UTF-8 entry name fails listing with `ENTRY_NAME` (#917, #924, #923, #910, #925, #926, #954).
+- **Breaking (CLI)**: `verify --strict` exits 3, zero or non-finite limits exit 1 with the JSON envelope, `list -H` needs `-l`, `-x` refuses unsupported patterns, and `verify --json` issues carry typed fields instead of `context` (#932, #938, #940, #943, #899, #916, #954).
+- CLI: `create` keeps the previous archive on failure, `--force` swaps atomically, listed extraction honors the permission and link flags, and the conflict pre-check uses `landings` (#931, #936, #901, #933, #954).
 
 
 ### Fixed
 
-- Core: `verify` judged only an entry's own name length and passed a landing through an in-archive symlink that `extract` refused as too long; verify, sinks and the directory walker share one landing projection (#945, #903, #PR).
-- Core and CLI: a failed `create` leaves no empty archive at the output path and `create --force` no longer deletes the previous archive before the new one succeeds (#931, #PR).
-- Core and CLI: `create` with an exclude pattern such as `*.tmp` no longer produces an empty archive when the source sits under a matching directory (#916, #PR).
-- Node: `setMaxFileCount(-1)` and other out-of-range setter values no longer wrap into an unlimited quota (#917, #PR).
-- CLI: the create progress bar follows the entry total core reports, and `--json` error messages keep archive text exact (#942, #934, #PR).
+- Core: `verify` judged only an entry's own name length and passed a landing through an in-archive symlink that `extract` refused as too long; verify, sinks and the directory walker share one landing projection (#945, #903, #954).
+- Core and CLI: a failed `create` leaves no empty archive at the output path and `create --force` no longer deletes the previous archive before the new one succeeds (#931, #954).
+- Core and CLI: `create` with an exclude pattern such as `*.tmp` no longer produces an empty archive when the source sits under a matching directory (#916, #954).
+- Node: `setMaxFileCount(-1)` and other out-of-range setter values no longer wrap into an unlimited quota (#917, #954).
+- CLI: the create progress bar follows the entry total core reports, and `--json` error messages keep archive text exact (#942, #934, #954).
 - Core: a landing through an archive symlink is accepted or refused by its relative length on every platform, not by the host realpath of the destination, and a directory entry at the limit is no longer refused one byte early (#892, #946).
 - `extract` and `verify` name the entry and the blocking file or symlink, with the same category, for an entry below a file, a dangling symlink or a looping symlink (#828).
 - 7z `--force` no longer deletes the existing file before the replacement is decoded (#828).

@@ -714,6 +714,9 @@ pub enum Finding {
         kind: FfiKind,
         /// Human-readable description.
         message: String,
+        /// The permission bits of an [`IssueCategory::InvalidPermissions`]
+        /// refusal, as the archive stores them.
+        mode: Option<RawMode>,
     },
     /// An observation `verify` makes that extraction does not refuse.
     Heuristic(Heuristic),
@@ -862,13 +865,27 @@ impl Heuristic {
     }
 }
 
-/// Spells a path with combining marks and control characters escaped, so two
-/// canonically equivalent names do not read as the same text.
+/// The permission bits an invalid-permissions refusal is about.
+const fn refused_mode(error: &ArchiveError) -> Option<RawMode> {
+    match error {
+        ArchiveError::InvalidPermissions { mode, .. } => Some(*mode),
+        _ => None,
+    }
+}
+
+/// Spells a path injectively ([`crate::path_text`]) and escapes combining
+/// marks and control characters too, so two canonically equivalent names do
+/// not read as the same text.
 fn escaped_path(path: &Path) -> String {
-    path.to_string_lossy()
-        .chars()
-        .flat_map(char::escape_debug)
-        .collect()
+    let mut out = String::new();
+    for ch in crate::path_text(path).chars() {
+        if ch == '\\' {
+            out.push(ch);
+        } else {
+            out.extend(ch.escape_debug());
+        }
+    }
+    out
 }
 
 fn high_invalid_archive(message: String) -> (IssueSeverity, IssueCategory, String) {
@@ -963,6 +980,18 @@ impl VerificationIssue {
     #[must_use]
     pub fn sub_code(&self) -> Option<crate::SubCode> {
         self.ffi_kind().and_then(FfiKind::sub_code)
+    }
+
+    /// Returns the permission bits the finding is about: the mode of an
+    /// invalid-permissions refusal or of an executable file, as the archive
+    /// stores it.
+    #[must_use]
+    pub const fn mode(&self) -> Option<RawMode> {
+        match &self.finding {
+            Finding::Refusal { mode, .. } => *mode,
+            Finding::Heuristic(Heuristic::ExecutableFile { mode }) => Some(*mode),
+            Finding::Heuristic(_) => None,
+        }
     }
 
     /// Returns the typed discriminants of the refusing error, or `None` for a
@@ -1081,6 +1110,7 @@ impl VerificationIssue {
                 category,
                 kind: error.ffi_kind(),
                 message,
+                mode: refused_mode(error),
             },
         }
     }
@@ -1437,6 +1467,29 @@ mod tests {
     }
 
     #[test]
+    fn test_mode_is_exposed_for_permission_findings() {
+        let error = ArchiveError::InvalidPermissions {
+            path: "f".into(),
+            mode: RawMode::new(0o4755),
+        };
+        let issue = VerificationIssue::from_error(&error, None);
+        assert_eq!(issue.mode(), Some(RawMode::new(0o4755)));
+
+        let exe = VerificationIssue::new(
+            IssueSeverity::Low,
+            Finding::Heuristic(Heuristic::ExecutableFile {
+                mode: RawMode::new(0o755),
+            }),
+        );
+        assert_eq!(exe.mode(), Some(RawMode::new(0o755)));
+        assert_eq!(issue_of_other_kind().mode(), None);
+    }
+
+    fn issue_of_other_kind() -> VerificationIssue {
+        VerificationIssue::from_error(&ArchiveError::from(Violation::EncryptedArchive), None)
+    }
+
+    #[test]
     fn test_heuristic_has_no_ffi_kind_and_derives_its_text() {
         let exe = VerificationIssue::new(
             IssueSeverity::Low,
@@ -1544,6 +1597,7 @@ mod tests {
                 category,
                 kind: FfiKind::InvalidArchive { sub_code: None },
                 message: "Test".to_string(),
+                mode: None,
             },
         )
     }

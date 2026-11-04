@@ -1212,6 +1212,42 @@ mod tests {
         )
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn names_differing_in_invalid_bytes_are_not_a_collision() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let mut manifest = ArchiveManifest::new(crate::formats::detect::ArchiveType::Tar);
+        for name in [&b"a\xffb"[..], &b"a\xfeb"[..]] {
+            let path = PathBuf::from(OsStr::from_bytes(name));
+            manifest.add_entry(ArchiveEntry::new(path, file())).unwrap();
+        }
+        let config = link_config();
+        let report = verify_with_tree(
+            &manifest,
+            &config,
+            &ArchiveStructure::of_manifest(&manifest),
+            None,
+            |root| {
+                VirtualTree::new(
+                    root,
+                    PathModel::Portable,
+                    NodeBudget::from_config(&config),
+                    CollisionRecording::Record,
+                )
+            },
+        );
+        assert!(
+            report
+                .issues()
+                .iter()
+                .all(|i| i.category() != IssueCategory::NameCollision),
+            "{:?}",
+            report.issues()
+        );
+    }
+
     fn collisions(report: &VerificationReport) -> Vec<IssueSeverity> {
         report
             .issues()

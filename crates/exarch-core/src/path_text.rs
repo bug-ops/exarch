@@ -1,0 +1,113 @@
+//! Injective text for paths.
+
+use std::fmt::Write as _;
+use std::path::Path;
+
+/// Renders a path as text so that two distinct paths never render alike.
+///
+/// Valid text is kept as it is, except that a backslash is written `\x5C`.
+/// Each byte of a Unix path that is not part of valid UTF-8 is written
+/// `\xNN` (upper-case hex), and each unpaired UTF-16 unit of a Windows path is
+/// written `\uNNNN`. Because the escape character is itself escaped, the
+/// rendering is injective: a literal `a\xFFb` renders as `a\x5CxFFb`, never as
+/// the path `a<0xFF>b`.
+///
+/// Use this wherever a path is shown or serialized as text and refusing it
+/// would hide the finding that reports it (listings, verification issues,
+/// progress callbacks). A front end that can hold raw paths keeps them
+/// lossless instead, as Python does with `os.fsdecode`.
+///
+/// # Examples
+///
+/// ```
+/// use std::path::Path;
+///
+/// use exarch_core::path_text;
+///
+/// assert_eq!(
+///     path_text(Path::new("dir/caf\u{e9}.txt")),
+///     "dir/caf\u{e9}.txt"
+/// );
+/// assert_eq!(path_text(Path::new("a\\b")), "a\\x5Cb");
+/// # #[cfg(unix)]
+/// # {
+/// use std::ffi::OsStr;
+/// use std::os::unix::ffi::OsStrExt;
+///
+/// let raw = Path::new(OsStr::from_bytes(b"a\xffb"));
+/// assert_eq!(path_text(raw), "a\\xFFb");
+/// assert_ne!(path_text(raw), path_text(Path::new("a\\xFFb")));
+/// # }
+/// ```
+#[must_use]
+pub fn path_text(path: &Path) -> String {
+    let mut out = String::new();
+    push_path(&mut out, path);
+    out
+}
+
+fn push_text(out: &mut String, text: &str) {
+    for ch in text.chars() {
+        if ch == '\\' {
+            out.push_str("\\x5C");
+        } else {
+            out.push(ch);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn push_path(out: &mut String, path: &Path) {
+    use std::os::unix::ffi::OsStrExt;
+
+    for chunk in path.as_os_str().as_bytes().utf8_chunks() {
+        push_text(out, chunk.valid());
+        for byte in chunk.invalid() {
+            // Writing to a String cannot fail.
+            let _ = write!(out, "\\x{byte:02X}");
+        }
+    }
+}
+
+#[cfg(windows)]
+fn push_path(out: &mut String, path: &Path) {
+    use std::os::windows::ffi::OsStrExt;
+
+    for unit in char::decode_utf16(path.as_os_str().encode_wide()) {
+        match unit {
+            Ok(ch) => push_text(out, ch.encode_utf8(&mut [0; 4])),
+            Err(unpaired) => {
+                // Writing to a String cannot fail.
+                let _ = write!(out, "\\u{:04X}", unpaired.unpaired_surrogate());
+            }
+        }
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn push_path(out: &mut String, path: &Path) {
+    push_text(out, &path.to_string_lossy());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn valid_text_is_unchanged_but_for_backslashes() {
+        assert_eq!(path_text(Path::new("a/b é.txt")), "a/b é.txt");
+        assert_eq!(path_text(Path::new("x\\y")), "x\\x5Cy");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn distinct_invalid_bytes_render_distinctly() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let render = |bytes: &[u8]| path_text(Path::new(OsStr::from_bytes(bytes)));
+        assert_eq!(render(b"a\xffb"), "a\\xFFb");
+        assert_eq!(render(b"a\xfeb"), "a\\xFEb");
+        assert_ne!(render(b"a\xffb"), render(b"a\\xFFb"));
+    }
+}

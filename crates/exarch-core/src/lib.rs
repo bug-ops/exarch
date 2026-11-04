@@ -32,6 +32,7 @@ pub mod formats;
 pub mod inspection;
 mod limit;
 mod listed;
+mod path_text;
 #[cfg(test)]
 use exarch_testkit::raw_zip;
 pub mod reader;
@@ -161,6 +162,8 @@ pub use inspection::IntegrityGaps;
 pub use inspection::IntegrityStatus;
 pub use inspection::IssueCategory;
 pub use inspection::IssueSeverity;
+pub use inspection::Landing;
+pub use inspection::LandingKind;
 pub use inspection::LandingPath;
 pub use inspection::LinkTarget;
 pub use inspection::ManifestEntryKind;
@@ -174,6 +177,7 @@ pub use inspection::UnverifiedReason;
 pub use inspection::VerificationIssue;
 pub use inspection::VerificationReport;
 pub use inspection::VerificationStatus;
+pub use path_text::path_text;
 pub use security::fs_view::LinkKind;
 
 // Re-export security types

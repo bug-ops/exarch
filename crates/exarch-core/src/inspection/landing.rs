@@ -7,6 +7,7 @@
 //! module derives the landing from the same validation and projection that
 //! `verify` and the sink use.
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -80,6 +81,38 @@ impl AsRef<Path> for LandingPath {
     }
 }
 
+/// What put a path in the landing set.
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub enum LandingKind<'a> {
+    /// An archive entry lands here.
+    Entry(&'a ArchiveEntry),
+    /// No entry names this path, but extraction creates it as a parent
+    /// directory of one that lands below it.
+    ImplicitParent,
+}
+
+/// A path extraction creates, with what put it there.
+#[derive(Debug, Clone)]
+pub struct Landing<'a> {
+    path: LandingPath,
+    kind: LandingKind<'a>,
+}
+
+impl<'a> Landing<'a> {
+    /// Where the path lands.
+    #[must_use]
+    pub const fn path(&self) -> &LandingPath {
+        &self.path
+    }
+
+    /// Whether an entry or an implied parent directory lands here.
+    #[must_use]
+    pub const fn kind(&self) -> LandingKind<'a> {
+        self.kind
+    }
+}
+
 impl ArchiveManifest {
     /// The entries extraction would create, each with where it lands.
     ///
@@ -132,6 +165,76 @@ impl ArchiveManifest {
             })
             .collect();
         landed.into_iter()
+    }
+
+    /// Everything extraction would create, entries and the directories it
+    /// creates for them on its own, in the order they land.
+    ///
+    /// An archive can hold `a/b.txt` without an `a/` entry; extraction then
+    /// creates `a`. Each such parent is reported once, as
+    /// [`LandingKind::ImplicitParent`], before the first entry that needs it,
+    /// outermost first. A front end that probes the destination for conflicts
+    /// probes every landing, so a parent that is a file (or a symlink) in the
+    /// destination is found at that parent and not below it.
+    ///
+    /// The parents are those of the resolved landing, so a path through an
+    /// earlier symlink reports the directories it really lands in.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::ArchiveEntry;
+    /// use exarch_core::ArchiveManifest;
+    /// use exarch_core::LandingKind;
+    /// use exarch_core::ManifestEntryKind;
+    /// use exarch_core::SecurityConfig;
+    /// use exarch_core::Uncompressed;
+    /// use exarch_core::formats::detect::ArchiveType;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut manifest = ArchiveManifest::new(ArchiveType::Tar);
+    /// let file = ManifestEntryKind::File {
+    ///     size: Uncompressed(1),
+    /// };
+    /// manifest.add_entry(ArchiveEntry::new("a/b.txt".into(), file))?;
+    /// let config = SecurityConfig::default();
+    /// let landings: Vec<_> = manifest.landings(&config).collect();
+    /// assert_eq!(landings.len(), 2);
+    /// assert!(matches!(landings[0].kind(), LandingKind::ImplicitParent));
+    /// assert_eq!(landings[0].path().as_path(), std::path::Path::new("a"));
+    /// assert!(matches!(landings[1].kind(), LandingKind::Entry(_)));
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn landings<'a>(
+        &'a self,
+        config: &SecurityConfig,
+    ) -> impl Iterator<Item = Landing<'a>> + use<'a> {
+        let mut seen = HashSet::new();
+        let mut out = Vec::new();
+        for (entry, landing) in self.landing_paths(config) {
+            let ancestors: Vec<_> = landing
+                .as_path()
+                .ancestors()
+                .skip(1)
+                .filter(|p| !p.as_os_str().is_empty())
+                .map(Path::to_path_buf)
+                .collect();
+            for parent in ancestors.into_iter().rev() {
+                if seen.insert(parent.clone()) {
+                    out.push(Landing {
+                        path: LandingPath(parent),
+                        kind: LandingKind::ImplicitParent,
+                    });
+                }
+            }
+            seen.insert(landing.as_path().to_path_buf());
+            out.push(Landing {
+                path: landing,
+                kind: LandingKind::Entry(entry),
+            });
+        }
+        out.into_iter()
     }
 }
 
@@ -236,6 +339,21 @@ mod tests {
         found
     }
 
+    fn every_path(root: &Path) -> BTreeSet<PathBuf> {
+        let mut found = BTreeSet::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            for item in std::fs::read_dir(&dir).unwrap() {
+                let path = item.unwrap().path();
+                if std::fs::symlink_metadata(&path).unwrap().is_dir() {
+                    stack.push(path.clone());
+                }
+                found.insert(path.strip_prefix(root).unwrap().to_path_buf());
+            }
+        }
+        found
+    }
+
     /// The landing set of the non-directory entries must be the set of
     /// non-directories extraction really created.
     fn assert_landing_matches_extraction(file_name: &str, bytes: &[u8]) {
@@ -255,6 +373,16 @@ mod tests {
         extract_archive(&archive, &dest, &config).unwrap();
 
         assert_eq!(landed, non_directories(&dest), "{file_name}");
+        let every: BTreeSet<PathBuf> = manifest
+            .landings(&config)
+            .map(|landing| landing.path().as_path().to_path_buf())
+            .collect();
+        assert_eq!(every, every_path(&dest), "{file_name}: implicit parents");
+        let implicit = manifest
+            .landings(&config)
+            .filter(|l| matches!(l.kind(), LandingKind::ImplicitParent))
+            .count();
+        assert!(implicit > 0, "{file_name}: the fixture implies a parent");
         assert!(!landed.is_empty(), "{file_name}");
     }
 
@@ -272,6 +400,7 @@ mod tests {
             tar::EntryType::Regular,
             "",
         );
+        tar_entry(&mut builder, b"x/y/z.txt", tar::EntryType::Regular, "");
         assert_landing_matches_extraction("a.tar", &builder.into_inner().unwrap());
     }
 
@@ -303,10 +432,17 @@ mod tests {
 
     #[test]
     fn zip_landing_matches_extraction_for_backslashes_and_drive_prefixes() {
-        let entries = ["a\\b.txt", "C:\\win.txt", "/abs.txt", "plain.txt", "dir/"]
-            .iter()
-            .map(|name| RawEntry::stored(name, if name.ends_with('/') { b"" } else { b"x" }))
-            .collect();
+        let entries = [
+            "a\\b.txt",
+            "C:\\win.txt",
+            "/abs.txt",
+            "plain.txt",
+            "dir/",
+            "p/q/r.txt",
+        ]
+        .iter()
+        .map(|name| RawEntry::stored(name, if name.ends_with('/') { b"" } else { b"x" }))
+        .collect();
         let bytes = RawZip::new(entries).build().bytes;
         assert_landing_matches_extraction("a.zip", &bytes);
     }
@@ -364,5 +500,38 @@ mod tests {
         let manifest = list_archive(&archive, &config).unwrap();
         let strict = SecurityConfig::default();
         assert_eq!(manifest.landing_paths(&strict).count(), 0);
+    }
+
+    #[test]
+    fn implicit_parents_are_reported_once_outermost_first() {
+        let mut builder = tar::Builder::new(Vec::new());
+        tar_entry(&mut builder, b"first.txt", tar::EntryType::Regular, "");
+        tar_entry(&mut builder, b"a/b/c.txt", tar::EntryType::Regular, "");
+        tar_entry(&mut builder, b"a/d.txt", tar::EntryType::Regular, "");
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("a.tar");
+        std::fs::write(&archive, builder.into_inner().unwrap()).unwrap();
+        let config = config();
+
+        let manifest = list_archive(&archive, &config).unwrap();
+        let shape: Vec<_> = manifest
+            .landings(&config)
+            .map(|l| {
+                (
+                    l.path().as_path().to_path_buf(),
+                    matches!(l.kind(), LandingKind::ImplicitParent),
+                )
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                (PathBuf::from("first.txt"), false),
+                (PathBuf::from("a"), true),
+                (PathBuf::from("a/b"), true),
+                (PathBuf::from("a/b/c.txt"), false),
+                (PathBuf::from("a/d.txt"), false),
+            ]
+        );
     }
 }

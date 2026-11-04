@@ -33,6 +33,8 @@ pub mod manifest;
 pub mod report;
 pub mod verify;
 
+pub use landing::Landing;
+pub use landing::LandingKind;
 pub use landing::LandingPath;
 pub use list::list_archive;
 pub(crate) use list::list_archive_with_progress;

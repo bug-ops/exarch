@@ -496,12 +496,18 @@ pub(crate) fn check_component_on(
     check_windows_component(comp, config)
 }
 
-/// Spells `comp` with control characters escaped, for error messages.
+/// Spells `comp` injectively ([`crate::path_text`]) with control characters
+/// escaped, for error messages.
 fn escaped_component(comp: &OsStr) -> String {
-    comp.to_string_lossy()
-        .chars()
-        .flat_map(char::escape_debug)
-        .collect()
+    let mut out = String::new();
+    for ch in crate::path_text(std::path::Path::new(comp)).chars() {
+        if ch == '\\' {
+            out.push(ch);
+        } else {
+            out.extend(ch.escape_debug());
+        }
+    }
+    out
 }
 
 /// Classifies `comp`, reporting never-allowed hazards before the

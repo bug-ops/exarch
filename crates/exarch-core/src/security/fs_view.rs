@@ -1527,8 +1527,8 @@ fn is_prefix(component: Component<'_>) -> bool {
 
 /// Compares names the way the host does, as far as it can be modelled.
 ///
-/// Non-UTF-8 names are folded lossily, which can only merge more names, and a
-/// merge of differently spelled names is always reported.
+/// A name that is not valid UTF-8 is kept as it is: a lossy fold would give two
+/// different byte strings one key and report a collision that is not one.
 #[cfg(target_os = "macos")]
 fn fold(name: &OsStr) -> Cow<'_, OsStr> {
     portable_fold(name)
@@ -1536,7 +1536,9 @@ fn fold(name: &OsStr) -> Cow<'_, OsStr> {
 
 #[cfg(target_os = "windows")]
 fn fold(name: &OsStr) -> Cow<'_, OsStr> {
-    let text = name.to_string_lossy();
+    let Some(text) = name.to_str() else {
+        return Cow::Borrowed(name);
+    };
     let folded = if text.is_ascii() {
         text.to_ascii_uppercase()
     } else {
@@ -1553,11 +1555,13 @@ fn fold(name: &OsStr) -> Cow<'_, OsStr> {
 /// The fold of [`PathModel::Portable`], the same on every host: the key
 /// macOS uses.
 fn portable_fold(name: &OsStr) -> Cow<'_, OsStr> {
-    let text = name.to_string_lossy();
+    let Some(text) = name.to_str() else {
+        return Cow::Borrowed(name);
+    };
     let folded = if text.is_ascii() {
         text.to_ascii_uppercase()
     } else {
-        decomposed_fold(&text)
+        decomposed_fold(text)
     };
     Cow::Owned(OsString::from(folded))
 }
@@ -1727,6 +1731,17 @@ mod tests {
 
     fn ascii_upper(name: &OsStr) -> Cow<'_, OsStr> {
         Cow::Owned(OsString::from(name.to_string_lossy().to_ascii_uppercase()))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn names_that_are_not_utf8_keep_distinct_fold_keys() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let a = OsStr::from_bytes(b"a\xffb");
+        let b = OsStr::from_bytes(b"a\xfeb");
+        assert_ne!(portable_fold(a), portable_fold(b));
+        assert_eq!(portable_fold(a), portable_fold(a));
     }
 
     fn folding_tree() -> VirtualTree {

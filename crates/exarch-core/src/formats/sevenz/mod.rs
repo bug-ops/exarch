@@ -302,14 +302,6 @@ fn push_anti_item_warning(report: &mut ExtractionReport, count: u64) {
     }
 }
 
-const fn anti_item_noun(count: u64) -> &'static str {
-    if count == 1 {
-        "anti-item"
-    } else {
-        "anti-items"
-    }
-}
-
 /// The informational finding `verify` reports for skipped anti-items, or
 /// `None` when the archive has none.
 fn anti_item_issue(count: u64) -> Option<VerificationIssue> {

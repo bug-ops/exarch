@@ -18,6 +18,8 @@ export interface AbortSignalLike {
  * The value a progress callback receives for each entry: its path, the number
  * of entries (`null` while it is not known, as for a TAR stream), its 1-based
  * position and the bytes written for it so far (always `0` at entry start).
+ * The path renders injectively: a backslash is `\x5C` and each byte that is not
+ * valid UTF-8 is `\xNN`, so two distinct entries never share a rendered name.
  */
 export type ProgressArgs = [
   path: string,

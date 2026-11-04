@@ -18,6 +18,8 @@ export interface AbortSignalLike {
  * The value a progress callback receives for each entry: its path, the number
  * of entries (`null` while it is not known, as for a TAR stream), its 1-based
  * position and the bytes written for it so far (always `0` at entry start).
+ * The path renders injectively: a backslash is `\x5C` and each byte that is not
+ * valid UTF-8 is `\xNN`, so two distinct entries never share a rendered name.
  */
 export type ProgressArgs = [
   path: string,
@@ -2027,7 +2029,10 @@ export type SkipKind = 'duplicate' | 'extension_not_allowed' | 'excluded' | 'hid
 
 /** One skipped entry. */
 export interface SkippedEntry {
-  /** The entry path as the operation names it. */
+  /**
+   * The entry path as the operation names it, rendered injectively: a
+   * backslash is `\x5C` and each invalid byte is `\xNN`.
+   */
   path: string
   /** Why the entry was skipped. */
   kind: SkipKind
@@ -2095,7 +2100,8 @@ export interface VerificationIssueFields {
   category: IssueCategory
   /**
    * Entry path that triggered issue (if applicable); a path that is not
-   * valid UTF-8 has each invalid byte written as `\xNN`.
+   * valid UTF-8 or contains a backslash is rendered injectively: a backslash
+   * is `\x5C` and each invalid byte is `\xNN`.
    */
   entryPath?: string
   /** Human-readable description. */

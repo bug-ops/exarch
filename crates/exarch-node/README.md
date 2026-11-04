@@ -332,7 +332,7 @@ Synchronous version. Blocks the event loop until extraction completes.
 and a `'Directory'` has neither. `mode` is the raw archive mode. An entry whose
 name is not valid UTF-8 makes the listing fail with `INVALID_ARCHIVE` and
 `subCode: 'ENTRY_NAME'` rather than being rendered lossily; verification
-issues and skip samples write each invalid byte of such a path as `\xNN`.
+issues, integrity gaps, skip samples and progress callbacks render a path with an injective encoding instead: a backslash is `\x5C` and each invalid byte is `\xNN`, so two distinct entries never share a rendered name (the literal name `a\xFFb` renders as `a\x5CxFFb`, the name `a` + byte `0xFF` + `b` as `a\xFFb`). Names without backslashes and invalid bytes are unchanged.
 
 `verifyArchive` issues carry the typed refusal behind a finding: `code`,
 `subCode`, `relaxableBy`, `setting` and `ioKind`, paired as on an error

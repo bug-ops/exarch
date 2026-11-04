@@ -496,7 +496,8 @@ pub struct SkipCount {
 #[napi(object)]
 #[derive(Debug, Clone)]
 pub struct SkippedEntry {
-    /// The entry path as the operation names it.
+    /// The entry path as the operation names it, rendered injectively: a
+    /// backslash is `\x5C` and each invalid byte is `\xNN`.
     pub path: String,
     /// Why the entry was skipped.
     #[napi(ts_type = "SkipKind")]
@@ -1019,7 +1020,8 @@ pub struct VerificationIssue {
     /// Issue category.
     pub category: IssueCategory,
     /// Entry path that triggered issue (if applicable); a path that is not
-    /// valid UTF-8 has each invalid byte written as `\xNN`.
+    /// valid UTF-8 or contains a backslash is rendered injectively: a backslash
+    /// is `\x5C` and each invalid byte is `\xNN`.
     pub entry_path: Option<String>,
     /// Human-readable description.
     pub message: String,

@@ -107,9 +107,16 @@ pub struct CreationConfig {
     /// from outside the source directory.
     pub follow_symlinks: bool,
 
-    /// Include hidden files (files starting with '.').
+    /// Include hidden entries (names starting with '.').
     ///
-    /// Default: `false` (skip hidden files).
+    /// When `false`, a hidden file is skipped and a hidden directory below a
+    /// source directory is skipped whole: it is never entered, so nothing
+    /// inside it (`.ssh/id_rsa`, `.aws/credentials`) is archived, even under a
+    /// visible name. The skipped directory is counted once as a hidden skip.
+    /// A hidden source directory named by the caller, and a source file named
+    /// directly, are archived regardless.
+    ///
+    /// Default: `false` (skip hidden entries).
     pub include_hidden: bool,
 
     /// Maximum size for a single file in bytes.

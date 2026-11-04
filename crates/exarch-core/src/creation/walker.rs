@@ -87,6 +87,9 @@ impl<'a> FilteredWalker<'a> {
     ///
     /// The iterator:
     /// - Skips entries based on configuration (hidden files, patterns, size)
+    /// - Never enters a hidden directory below the root unless hidden entries
+    ///   are included: it is reported once as a skipped entry, so nothing
+    ///   inside it (even a visible name) reaches the archive
     /// - Handles symlinks according to `follow_symlinks` setting
     /// - Computes archive paths using `strip_prefix` if configured
     /// - Returns errors for inaccessible files/directories
@@ -98,19 +101,43 @@ impl<'a> FilteredWalker<'a> {
     /// - Path is not valid UTF-8 (platform-specific)
     /// - Symlink target cannot be read
     pub fn walk(&self) -> impl Iterator<Item = Result<WalkItem>> + '_ {
-        let walker = WalkDir::new(self.root)
+        let mut walker = WalkDir::new(self.root)
             .follow_links(self.config.follow_symlinks)
             .into_iter();
 
-        walker.filter_map(move |entry| match entry {
-            Ok(entry) => self.visit(&entry).transpose(),
-            Err(e) => {
-                // Convert walkdir error to ArchiveError
-                Some(Err(ArchiveError::Io(std::io::Error::other(
-                    IoContext::new("directory walk failed", e.to_string()),
-                ))))
+        std::iter::from_fn(move || {
+            loop {
+                let entry = match walker.next()? {
+                    Ok(entry) => entry,
+                    Err(e) => {
+                        // Convert walkdir error to ArchiveError
+                        return Some(Err(ArchiveError::Io(std::io::Error::other(
+                            IoContext::new("directory walk failed", e.to_string()),
+                        ))));
+                    }
+                };
+                if self.is_hidden_directory(&entry) {
+                    walker.skip_current_dir();
+                    let shown = entry
+                        .path()
+                        .strip_prefix(self.root)
+                        .unwrap_or_else(|_| entry.path());
+                    return Some(Ok(WalkItem::Skipped(Skip::new(SkipKind::Hidden, shown))));
+                }
+                if let Some(item) = self.visit(&entry).transpose() {
+                    return Some(item);
+                }
             }
         })
+    }
+
+    /// Whether `entry` is a hidden directory below the walk root that is to be
+    /// left out whole. The root itself is named by the caller, so it is walked.
+    fn is_hidden_directory(&self, entry: &walkdir::DirEntry) -> bool {
+        !self.config.include_hidden
+            && entry.depth() > 0
+            && entry.file_type().is_dir()
+            && filters::is_hidden(entry.path())
     }
 
     /// Applies the filter rules to one walked entry.

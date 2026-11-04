@@ -38,7 +38,21 @@ _InvalidArchiveSubCode = Literal[
     "DECLARED_SIZE",
     "INTEGRITY",
     "ZIP_READER",
+    "TAR_READER",
+    "SEVENZ_READER",
 ]
+_QuotaSubCode = Literal[
+    "FILE_COUNT",
+    "TOTAL_SIZE",
+    "FILE_SIZE",
+    "INTEGER_OVERFLOW",
+    "DECODER_MEMORY",
+    "COMPRESSED_MEMBERS",
+    "TREE_NODES",
+    "SINK_CAPACITY",
+    "SOLID_BLOCK_MEMORY",
+]
+_ZipBombSubCode = Literal["ENTRY", "SOLID_BLOCK", "SKIPPED_ENTRIES"]
 _SecurityViolationSubCode = Literal["PATH_NAME", "PATH_DEPTH", "LINK_TARGET", "LINK_POLICY", "EXISTING_SYMLINK", "ENTRY_TYPE", "ROOT_ENTRY", "ENCRYPTED", "COMPRESSION_METHOD", "SOLID_ARCHIVE", "DECLARED_SIZE", "CONCURRENT_CHANGE", "TAR_METADATA", "TAR_TRAILER", "PLATFORM", "OUTPUT_CONFLICT", "SOURCE_PATH"]  # noqa: E501  # fmt: skip
 _PartialWrites = Literal["kept", "rolled_back", "discarded"]
 _PathModel = Literal["host", "portable"]
@@ -98,9 +112,12 @@ class SecurityConfig:
 
     Every limit (file size, total size, file count, path depth, compression
     ratio, solid block memory) is refused at assignment: a builder method or a
-    property setter raises ``ValueError`` for zero, and for a ratio that is not
-    a positive finite number. The exception's ``setting`` attribute names the
-    refused setting (``"max_file_size"``, ``"max_compression_ratio"``, ...).
+    property setter raises ``InvalidConfigurationError`` (a ``ValueError``) for
+    zero, a negative or oversized integer, and for a ratio that is not a
+    positive finite number; ``bool`` raises ``TypeError``. The exception's
+    ``setting`` attribute names the refused setting (``"max_file_size"``,
+    ``"max_compression_ratio"``, ...). A limit reads ``None`` when it is
+    unbounded, as in ``permissive()`` presets.
     """
 
     def __init__(self) -> None:
@@ -125,7 +142,7 @@ class SecurityConfig:
     def with_max_file_size(self, size: int) -> SecurityConfig:
         """Sets the maximum file size in bytes.
 
-        Raises ``ValueError`` for zero; its ``setting`` attribute names the
+        Raises ``InvalidConfigurationError`` for zero, a negative or oversized integer; its ``setting`` attribute names the
         refused setting (``"max_file_size"``).
         """
         ...
@@ -133,7 +150,7 @@ class SecurityConfig:
     def with_max_total_size(self, size: int) -> SecurityConfig:
         """Sets the maximum total size in bytes.
 
-        Raises ``ValueError`` for zero; its ``setting`` attribute is
+        Raises ``InvalidConfigurationError`` for zero, a negative or oversized integer; its ``setting`` attribute is
         ``"max_total_size"``.
         """
         ...
@@ -156,7 +173,7 @@ class SecurityConfig:
         `extract_archive` counts files, symlinks and hardlinks, not
         directories; `list_archive` and `verify_archive` count every entry.
 
-        Raises ``ValueError`` for zero; its ``setting`` attribute is
+        Raises ``InvalidConfigurationError`` for zero, a negative or oversized integer; its ``setting`` attribute is
         ``"max_file_count"``.
         """
         ...
@@ -164,7 +181,7 @@ class SecurityConfig:
     def with_max_path_depth(self, depth: int) -> SecurityConfig:
         """Sets the maximum path depth.
 
-        Raises ``ValueError`` for zero; its ``setting`` attribute is
+        Raises ``InvalidConfigurationError`` for zero, a negative or oversized integer; its ``setting`` attribute is
         ``"max_path_depth"``.
         """
         ...
@@ -201,7 +218,8 @@ class SecurityConfig:
         both.
 
         Raises:
-            ValueError: If ``size`` is zero, negative or above 2**64 - 1.
+            InvalidConfigurationError: If ``size`` is zero, negative or above 2**64 - 1
+                (``setting == "parallel_decode_memory"``).
         """
         ...
 
@@ -261,15 +279,15 @@ class SecurityConfig:
         ...
 
     @property
-    def max_file_size(self) -> int:
-        """Maximum size for a single file in bytes (default: 50 MB)."""
+    def max_file_size(self) -> int | None:
+        """Maximum size for a single file in bytes (default: 50 MB); None if unbounded."""
         ...
 
     @max_file_size.setter
     def max_file_size(self, value: int) -> None: ...
     @property
-    def max_total_size(self) -> int:
-        """Maximum total size for all files in bytes (default: 500 MB)."""
+    def max_total_size(self) -> int | None:
+        """Maximum total size for all files in bytes (default: 500 MB); None if unbounded."""
         ...
 
     @max_total_size.setter
@@ -285,9 +303,9 @@ class SecurityConfig:
     @max_compression_ratio.setter
     def max_compression_ratio(self, value: float) -> None: ...
     @property
-    def max_file_count(self) -> int:
+    def max_file_count(self) -> int | None:
         """
-        Maximum number of entries (default: 10,000).
+        Maximum number of entries (default: 10,000); None if unbounded.
 
         `extract_archive` counts files, symlinks and hardlinks, not
         directories; `list_archive` and `verify_archive` count every entry.
@@ -408,7 +426,8 @@ class VerificationOptions:
                 ``max_total_size``.
 
         Raises:
-            ValueError: ``budget`` is zero or negative.
+            InvalidConfigurationError: ``budget`` is zero, negative or above 2**64 - 1
+                (``setting == "decompression_budget"``).
         """
         ...
 
@@ -501,7 +520,7 @@ class CreationConfig:
     def with_compression_level(self, level: int) -> CreationConfig:
         """Sets the compression level (1-9).
 
-        Raises ``ValueError`` for a level outside 1-9.
+        Raises ``InvalidCompressionLevelError`` for a level outside 1-9.
         """
         ...
 
@@ -512,7 +531,7 @@ class CreationConfig:
 
     @compression_level.setter
     def compression_level(self, value: int | None) -> None:
-        """Sets the level; ``None`` resets it to 6. Raises ``ValueError`` outside 1-9."""
+        """Sets the level; ``None`` resets it to 6. Raises ``InvalidCompressionLevelError`` outside 1-9."""
         ...
 
     def with_preserve_permissions(self, preserve: bool = True) -> CreationConfig:
@@ -1630,11 +1649,13 @@ class ZipBombError(ArchiveError):
         bytes_written: Total bytes written to disk before the error.
         files_skipped: Number of entries skipped due to security checks before the error.
         warnings: Warning messages generated before the error.
+        sub_code: What the ratio was measured over: one entry, a solid block or the skipped entries.
     """
 
     files_extracted: int
     bytes_written: int
     files_skipped: int
+    sub_code: _ZipBombSubCode
     warnings: list[str]
 
 class InvalidPermissionsError(ArchiveError):
@@ -1668,11 +1689,13 @@ class QuotaExceededError(ArchiveError):
         bytes_written: Total bytes written to disk before the error.
         files_skipped: Number of entries skipped due to security checks before the error.
         warnings: Warning messages generated before the error.
+        sub_code: Which quota was exceeded.
     """
 
     files_extracted: int
     bytes_written: int
     files_skipped: int
+    sub_code: _QuotaSubCode
     warnings: list[str]
 
 class ZipInconsistencyError(SecurityViolationError):
@@ -1751,9 +1774,10 @@ class InvalidArchiveError(ArchiveError):
             different tools, ``"TAR_TRAILER"`` when the stream after the TAR
             end-of-archive marker is corrupt or truncated, ``"LINK_TARGET"``,
             ``"DUPLICATE_ENTRY"``, ``"ENTRY_NAME"``, ``"DECLARED_SIZE"``,
-            ``"INTEGRITY"`` or ``"ZIP_READER"`` (a failure of the ZIP reader
-            or of the structural check built on it) for the refusal of that
-            family; ``None`` otherwise.
+            ``"INTEGRITY"``, ``"ZIP_READER"`` (a failure of the ZIP reader or
+            of the structural check built on it), ``"TAR_READER"`` or
+            ``"SEVENZ_READER"`` (a failure of the TAR or 7z reader) for the
+            refusal of that family; ``None`` otherwise.
     """
 
     sub_code: _InvalidArchiveSubCode | None

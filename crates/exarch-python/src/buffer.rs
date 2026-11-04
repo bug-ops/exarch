@@ -30,6 +30,7 @@ use crate::PyProgressAdapter;
 use crate::catch_panic_as_py_err;
 use crate::catch_panic_as_py_result;
 use crate::config::PyCreationConfig;
+use crate::config::PyInteger;
 use crate::config::PySecurityConfig;
 use crate::config::PyVerificationOptions;
 use crate::error::convert_error;
@@ -426,12 +427,9 @@ impl PySinkOptions {
 }
 
 /// Validates `max_bytes`: a positive count that fits in 64 bits.
-fn parse_max_bytes(max_bytes: Option<i128>) -> PyResult<Option<NonZeroU64>> {
+fn parse_max_bytes(max_bytes: Option<PyInteger>) -> PyResult<Option<NonZeroU64>> {
     max_bytes
-        .map(|bytes| {
-            exarch_core::positive_from_i128(exarch_core::ConfigSetting::MaxBytes, bytes)
-                .map_err(convert_error)
-        })
+        .map(|bytes| bytes.positive(exarch_core::ConfigSetting::MaxBytes))
         .transpose()
 }
 
@@ -511,7 +509,7 @@ pub fn extract_archive_to_memory(
     data: ArchiveInput,
     config: Option<&PySecurityConfig>,
     options: Option<&PySinkOptions>,
-    max_bytes: Option<i128>,
+    max_bytes: Option<PyInteger>,
     path_model: Option<String>,
     format: Option<String>,
 ) -> PyResult<PyMemoryExtraction> {
@@ -593,7 +591,7 @@ pub fn extract_archive_to_memory_with_progress(
     config: Option<&PySecurityConfig>,
     progress: Option<Py<PyAny>>,
     options: Option<&PySinkOptions>,
-    max_bytes: Option<i128>,
+    max_bytes: Option<PyInteger>,
     path_model: Option<String>,
     format: Option<String>,
 ) -> PyResult<PyMemoryExtraction> {
@@ -919,7 +917,7 @@ impl MemoryRequest {
     fn parse(
         config: Option<&PySecurityConfig>,
         options: Option<&PySinkOptions>,
-        max_bytes: Option<i128>,
+        max_bytes: Option<PyInteger>,
         path_model: Option<&str>,
         format: Option<&str>,
     ) -> PyResult<Self> {

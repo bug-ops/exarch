@@ -1,6 +1,8 @@
 //! Python bindings for `SecurityConfig`, `CreationConfig`,
 //! `ExtractionOptions`, and `VerificationOptions`.
 
+use exarch_core::ArchiveError;
+use exarch_core::ConfigProblem;
 use exarch_core::ConfigSetting;
 use exarch_core::DecompressionBudget;
 use exarch_core::Extension;
@@ -15,26 +17,109 @@ use exarch_core::VerificationOptions as CoreVerificationOptions;
 use exarch_core::ZipConsistencyPolicy;
 use exarch_core::creation::CompressionLevel;
 use exarch_core::creation::CreationConfig as CoreCreationConfig;
-use exarch_core::non_zero_u64;
-use exarch_core::non_zero_usize;
-use pyo3::exceptions::PyValueError;
+use exarch_core::positive_from_i128;
+use pyo3::exceptions::PyOverflowError;
+use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
+use pyo3::types::PyBool;
 use std::num::NonZeroU64;
 use std::num::NonZeroUsize;
 
 use crate::buffer::parse_one;
+use crate::error::compression_level_error;
 use crate::error::convert_error;
 
-fn bytes_limit(setting: ConfigSetting, value: u64) -> PyResult<Limit<NonZeroU64>> {
-    Limit::<NonZeroU64>::parse(setting, value).map_err(convert_error)
+/// A Python `int` as a setter receives it: `bool` is refused, and an integer
+/// beyond 128 bits is kept as its sign, so every out-of-range value reaches
+/// the core parsers instead of becoming pyo3's `OverflowError`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PyInteger {
+    Fits(i128),
+    Beyond { negative: bool },
 }
 
-fn optional_bytes_limit(setting: ConfigSetting, value: Option<u64>) -> PyResult<Limit<NonZeroU64>> {
+impl From<i64> for PyInteger {
+    fn from(value: i64) -> Self {
+        Self::Fits(i128::from(value))
+    }
+}
+
+impl<'a, 'py> FromPyObject<'a, 'py> for PyInteger {
+    type Error = PyErr;
+
+    fn extract(obj: Borrowed<'a, 'py, PyAny>) -> PyResult<Self> {
+        if obj.is_instance_of::<PyBool>() {
+            return Err(PyTypeError::new_err("expected an int, not bool"));
+        }
+        match obj.extract::<i128>() {
+            Ok(value) => Ok(Self::Fits(value)),
+            Err(err) if err.is_instance_of::<PyOverflowError>(obj.py()) => Ok(Self::Beyond {
+                negative: obj.lt(0)?,
+            }),
+            Err(err) => Err(err),
+        }
+    }
+}
+
+impl PyInteger {
+    fn refuse(setting: ConfigSetting, problem: ConfigProblem) -> PyErr {
+        convert_error(ArchiveError::InvalidConfiguration { setting, problem })
+    }
+
+    /// The value as a positive 64-bit count of `setting`.
+    pub fn positive(self, setting: ConfigSetting) -> PyResult<NonZeroU64> {
+        match self {
+            Self::Fits(value) => positive_from_i128(setting, value).map_err(convert_error),
+            Self::Beyond { negative: true } => Err(Self::refuse(setting, ConfigProblem::Negative)),
+            Self::Beyond { negative: false } => Err(Self::refuse(
+                setting,
+                ConfigProblem::TooLarge { max: u64::MAX },
+            )),
+        }
+    }
+
+    /// The value as a positive count of `setting` that fits in `usize`.
+    pub fn positive_usize(self, setting: ConfigSetting) -> PyResult<NonZeroUsize> {
+        NonZeroUsize::try_from(self.positive(setting)?).map_err(|_| {
+            Self::refuse(
+                setting,
+                ConfigProblem::TooLarge {
+                    max: u64::try_from(usize::MAX).unwrap_or(u64::MAX),
+                },
+            )
+        })
+    }
+}
+
+fn bytes_limit(setting: ConfigSetting, value: PyInteger) -> PyResult<Limit<NonZeroU64>> {
+    value.positive(setting).map(Limit::Bounded)
+}
+
+fn optional_bytes_limit(
+    setting: ConfigSetting,
+    value: Option<PyInteger>,
+) -> PyResult<Limit<NonZeroU64>> {
     value.map_or(Ok(Limit::Unbounded), |bytes| bytes_limit(setting, bytes))
 }
 
-fn count_limit(setting: ConfigSetting, value: usize) -> PyResult<Limit<NonZeroUsize>> {
-    Limit::<NonZeroUsize>::parse(setting, value).map_err(convert_error)
+fn count_limit(setting: ConfigSetting, value: PyInteger) -> PyResult<Limit<NonZeroUsize>> {
+    value.positive_usize(setting).map(Limit::Bounded)
+}
+
+/// The bound of a byte limit, or `None` when it is unbounded.
+const fn bytes_bound(limit: Limit<NonZeroU64>) -> Option<u64> {
+    match limit {
+        Limit::Bounded(bound) => Some(bound.get()),
+        Limit::Unbounded => None,
+    }
+}
+
+/// The bound of a count limit, or `None` when it is unbounded.
+const fn count_bound(limit: Limit<NonZeroUsize>) -> Option<usize> {
+    match limit {
+        Limit::Bounded(bound) => Some(bound.get()),
+        Limit::Unbounded => None,
+    }
 }
 
 fn parse_exclude_patterns(patterns: &[String]) -> PyResult<Vec<exarch_core::ExcludePattern>> {
@@ -47,13 +132,18 @@ fn parse_exclude_patterns(patterns: &[String]) -> PyResult<Vec<exarch_core::Excl
 }
 
 /// Parses a Python integer of any size into a [`CompressionLevel`], so every
-/// out-of-range value is a `ValueError` rather than an `OverflowError`.
-fn compression_level(level: i64) -> PyResult<CompressionLevel> {
-    u32::try_from(level)
-        .map_err(|_| {
-            PyValueError::new_err(format!("invalid compression level {level}, must be 1-9"))
-        })
-        .and_then(|level| CompressionLevel::try_from(level).map_err(convert_error))
+/// out-of-range value is an `InvalidCompressionLevelError` rather than an
+/// `OverflowError`.
+fn compression_level(level: PyInteger) -> PyResult<CompressionLevel> {
+    let out_of_range = |shown: String| {
+        compression_level_error(format!("invalid compression level {shown}, must be 1-9"))
+    };
+    match level {
+        PyInteger::Fits(level) => u32::try_from(level)
+            .map_err(|_| out_of_range(level.to_string()))
+            .and_then(|level| CompressionLevel::try_from(level).map_err(convert_error)),
+        PyInteger::Beyond { .. } => Err(out_of_range("(out of range)".to_owned())),
+    }
 }
 
 /// Security configuration for archive extraction.
@@ -128,13 +218,19 @@ impl PySecurityConfig {
     // Builder pattern methods - return Self for chaining
 
     /// Sets the maximum file size in bytes.
-    fn with_max_file_size(mut slf: PyRefMut<'_, Self>, size: u64) -> PyResult<PyRefMut<'_, Self>> {
+    fn with_max_file_size(
+        mut slf: PyRefMut<'_, Self>,
+        size: PyInteger,
+    ) -> PyResult<PyRefMut<'_, Self>> {
         slf.inner.max_file_size = bytes_limit(ConfigSetting::MaxFileSize, size)?;
         Ok(slf)
     }
 
     /// Sets the maximum total size in bytes.
-    fn with_max_total_size(mut slf: PyRefMut<'_, Self>, size: u64) -> PyResult<PyRefMut<'_, Self>> {
+    fn with_max_total_size(
+        mut slf: PyRefMut<'_, Self>,
+        size: PyInteger,
+    ) -> PyResult<PyRefMut<'_, Self>> {
         slf.inner.max_total_size = bytes_limit(ConfigSetting::MaxTotalSize, size)?;
         Ok(slf)
     }
@@ -159,7 +255,7 @@ impl PySecurityConfig {
     /// Sets the maximum file count.
     fn with_max_file_count(
         mut slf: PyRefMut<'_, Self>,
-        count: usize,
+        count: PyInteger,
     ) -> PyResult<PyRefMut<'_, Self>> {
         slf.inner.max_file_count = count_limit(ConfigSetting::MaxFileCount, count)?;
         Ok(slf)
@@ -168,10 +264,9 @@ impl PySecurityConfig {
     /// Sets the maximum path depth.
     fn with_max_path_depth(
         mut slf: PyRefMut<'_, Self>,
-        depth: usize,
+        depth: PyInteger,
     ) -> PyResult<PyRefMut<'_, Self>> {
-        slf.inner.max_path_depth =
-            non_zero_usize(ConfigSetting::MaxPathDepth, depth).map_err(convert_error)?;
+        slf.inner.max_path_depth = depth.positive_usize(ConfigSetting::MaxPathDepth)?;
         Ok(slf)
     }
 
@@ -247,7 +342,7 @@ impl PySecurityConfig {
     #[pyo3(signature = (size))]
     fn with_parallel_decode_memory(
         mut slf: PyRefMut<'_, Self>,
-        size: Option<i128>,
+        size: Option<PyInteger>,
     ) -> PyResult<PyRefMut<'_, Self>> {
         slf.inner.parallel_decode = parse_parallel_decode_memory(size)?;
         Ok(slf)
@@ -264,7 +359,7 @@ impl PySecurityConfig {
     /// allowed.
     fn with_max_solid_block_memory(
         mut slf: PyRefMut<'_, Self>,
-        size: u64,
+        size: PyInteger,
     ) -> PyResult<PyRefMut<'_, Self>> {
         slf.try_set_max_solid_block_memory(size)?;
         Ok(slf)
@@ -334,23 +429,23 @@ impl PySecurityConfig {
     // Property getters and setters
 
     #[getter]
-    fn get_max_file_size(&self) -> u64 {
-        self.inner.max_file_size.ceiling()
+    fn get_max_file_size(&self) -> Option<u64> {
+        bytes_bound(self.inner.max_file_size)
     }
 
     #[setter]
-    fn set_max_file_size(&mut self, value: u64) -> PyResult<()> {
+    fn set_max_file_size(&mut self, value: PyInteger) -> PyResult<()> {
         self.inner.max_file_size = bytes_limit(ConfigSetting::MaxFileSize, value)?;
         Ok(())
     }
 
     #[getter]
-    fn get_max_total_size(&self) -> u64 {
-        self.inner.max_total_size.ceiling()
+    fn get_max_total_size(&self) -> Option<u64> {
+        bytes_bound(self.inner.max_total_size)
     }
 
     #[setter]
-    fn set_max_total_size(&mut self, value: u64) -> PyResult<()> {
+    fn set_max_total_size(&mut self, value: PyInteger) -> PyResult<()> {
         self.inner.max_total_size = bytes_limit(ConfigSetting::MaxTotalSize, value)?;
         Ok(())
     }
@@ -368,12 +463,12 @@ impl PySecurityConfig {
     }
 
     #[getter]
-    fn get_max_file_count(&self) -> usize {
-        self.inner.max_file_count.ceiling()
+    fn get_max_file_count(&self) -> Option<usize> {
+        count_bound(self.inner.max_file_count)
     }
 
     #[setter]
-    fn set_max_file_count(&mut self, value: usize) -> PyResult<()> {
+    fn set_max_file_count(&mut self, value: PyInteger) -> PyResult<()> {
         self.inner.max_file_count = count_limit(ConfigSetting::MaxFileCount, value)?;
         Ok(())
     }
@@ -384,9 +479,8 @@ impl PySecurityConfig {
     }
 
     #[setter]
-    fn set_max_path_depth(&mut self, value: usize) -> PyResult<()> {
-        self.inner.max_path_depth =
-            non_zero_usize(ConfigSetting::MaxPathDepth, value).map_err(convert_error)?;
+    fn set_max_path_depth(&mut self, value: PyInteger) -> PyResult<()> {
+        self.inner.max_path_depth = value.positive_usize(ConfigSetting::MaxPathDepth)?;
         Ok(())
     }
 
@@ -451,7 +545,7 @@ impl PySecurityConfig {
     }
 
     #[setter]
-    fn set_parallel_decode_memory(&mut self, value: Option<i128>) -> PyResult<()> {
+    fn set_parallel_decode_memory(&mut self, value: Option<PyInteger>) -> PyResult<()> {
         self.inner.parallel_decode = parse_parallel_decode_memory(value)?;
         Ok(())
     }
@@ -467,7 +561,7 @@ impl PySecurityConfig {
     }
 
     #[setter]
-    fn set_max_solid_block_memory(&mut self, value: u64) -> PyResult<()> {
+    fn set_max_solid_block_memory(&mut self, value: PyInteger) -> PyResult<()> {
         self.try_set_max_solid_block_memory(value)
     }
 
@@ -549,23 +643,11 @@ impl PySecurityConfig {
 
 /// Maps the Python value of `parallel_decode_memory` (`None` or a positive
 /// byte count) to the core mode.
-///
-/// The count arrives as `i128` so that negative and oversized integers reach
-/// the `ValueError` below instead of pyo3's `OverflowError`.
-fn parse_parallel_decode_memory(value: Option<i128>) -> PyResult<ParallelDecode> {
+fn parse_parallel_decode_memory(value: Option<PyInteger>) -> PyResult<ParallelDecode> {
     value
-        .map(|bytes| {
-            u64::try_from(bytes)
-                .ok()
-                .and_then(NonZeroU64::new)
-                .ok_or_else(|| {
-                    PyValueError::new_err(
-                        "parallel_decode_memory must be positive (use None to disable)",
-                    )
-                })
-        })
+        .map(|bytes| bytes.positive(ConfigSetting::ParallelDecodeMemory))
         .transpose()
-        .map(ParallelDecode::from)
+        .map(ParallelDecode::from_bytes)
 }
 
 /// Parses the string form shared with `ZipConsistencyPolicy::as_str`.
@@ -589,9 +671,8 @@ impl PySecurityConfig {
 
     /// Shared by the builder and the property setter of
     /// `max_solid_block_memory`.
-    fn try_set_max_solid_block_memory(&mut self, size: u64) -> PyResult<()> {
-        let max_block_memory =
-            non_zero_u64(ConfigSetting::MaxSolidBlockMemory, size).map_err(convert_error)?;
+    fn try_set_max_solid_block_memory(&mut self, size: PyInteger) -> PyResult<()> {
+        let max_block_memory = size.positive(ConfigSetting::MaxSolidBlockMemory)?;
         self.inner.solid_archives = self
             .inner
             .solid_archives
@@ -654,7 +735,7 @@ impl PyCreationConfig {
     /// Returns `ValueError` if level is not in range 1-9.
     fn with_compression_level(
         mut slf: PyRefMut<'_, Self>,
-        level: i64,
+        level: PyInteger,
     ) -> PyResult<PyRefMut<'_, Self>> {
         slf.inner.compression_level = compression_level(level)?;
         Ok(slf)
@@ -701,7 +782,7 @@ impl PyCreationConfig {
     /// Raises the configuration error if `size` is zero.
     fn with_max_file_size(
         mut slf: PyRefMut<'_, Self>,
-        size: Option<u64>,
+        size: Option<PyInteger>,
     ) -> PyResult<PyRefMut<'_, Self>> {
         slf.inner.max_file_size = optional_bytes_limit(ConfigSetting::MaxFileSize, size)?;
         Ok(slf)
@@ -721,7 +802,7 @@ impl PyCreationConfig {
 
     /// Sets the level; `None` resets it to the default, 6.
     #[setter]
-    fn set_compression_level(&mut self, value: Option<i64>) -> PyResult<()> {
+    fn set_compression_level(&mut self, value: Option<PyInteger>) -> PyResult<()> {
         self.inner.compression_level = value
             .map(compression_level)
             .transpose()?
@@ -777,14 +858,11 @@ impl PyCreationConfig {
 
     #[getter]
     fn get_max_file_size(&self) -> Option<u64> {
-        match self.inner.max_file_size {
-            Limit::Bounded(bound) => Some(bound.get()),
-            Limit::Unbounded => None,
-        }
+        bytes_bound(self.inner.max_file_size)
     }
 
     #[setter]
-    fn set_max_file_size(&mut self, value: Option<u64>) -> PyResult<()> {
+    fn set_max_file_size(&mut self, value: Option<PyInteger>) -> PyResult<()> {
         self.inner.max_file_size = optional_bytes_limit(ConfigSetting::MaxFileSize, value)?;
         Ok(())
     }
@@ -989,14 +1067,12 @@ impl PyVerificationOptions {
     #[pyo3(signature = (budget=None))]
     fn with_integrity_check(
         mut slf: PyRefMut<'_, Self>,
-        budget: Option<i64>,
+        budget: Option<PyInteger>,
     ) -> PyResult<PyRefMut<'_, Self>> {
         let budget = match budget {
             Some(bytes) => {
-                let bytes = u64::try_from(bytes).map_err(|_| {
-                    PyValueError::new_err("decompression budget must be greater than zero")
-                })?;
-                DecompressionBudget::try_from_bytes(bytes).map_err(convert_error)?
+                let bytes = bytes.positive(ConfigSetting::DecompressionBudget)?;
+                DecompressionBudget::try_from_bytes(bytes.get()).map_err(convert_error)?
             }
             None => DecompressionBudget::DEFAULT,
         };
@@ -1007,16 +1083,13 @@ impl PyVerificationOptions {
     /// Whether the payload integrity check is enabled.
     #[getter]
     fn get_integrity_check(&self) -> bool {
-        !matches!(self.inner.integrity, IntegrityCheck::Skip)
+        self.inner.integrity.budget().is_some()
     }
 
     /// Budget in bytes when the integrity check is enabled, else `None`.
     #[getter]
     fn get_decompression_budget(&self) -> Option<u64> {
-        match self.inner.integrity {
-            IntegrityCheck::DecodeToEof(budget) => Some(budget.get()),
-            _ => None,
-        }
+        self.inner.integrity.budget().map(DecompressionBudget::get)
     }
 
     /// Returns a debug string representation.
@@ -1057,17 +1130,17 @@ mod tests {
         let config = PySecurityConfig::new();
         assert_eq!(
             config.get_max_file_size(),
-            50 * 1024 * 1024,
+            Some(50 * 1024 * 1024),
             "Default max_file_size should be 50 MB"
         );
         assert_eq!(
             config.get_max_total_size(),
-            500 * 1024 * 1024,
+            Some(500 * 1024 * 1024),
             "Default max_total_size should be 500 MB"
         );
         assert_eq!(
             config.get_max_file_count(),
-            10_000,
+            Some(10_000),
             "Default max_file_count should be 10,000"
         );
         assert!(
@@ -1081,7 +1154,7 @@ mod tests {
         let config = PySecurityConfig::default();
         assert_eq!(
             config.get_max_file_size(),
-            50 * 1024 * 1024,
+            Some(50 * 1024 * 1024),
             "Static default() should have same values as new()"
         );
     }
@@ -1126,17 +1199,17 @@ mod tests {
             let result = py_config.borrow(py);
             assert_eq!(
                 result.get_max_file_size(),
-                100_000_000,
+                Some(100_000_000),
                 "Builder pattern should set max_file_size"
             );
             assert_eq!(
                 result.get_max_total_size(),
-                1_000_000_000,
+                Some(1_000_000_000),
                 "Builder pattern should set max_total_size"
             );
             assert_eq!(
                 result.get_max_file_count(),
-                50_000,
+                Some(50_000),
                 "Builder pattern should set max_file_count"
             );
         });
@@ -1216,28 +1289,32 @@ mod tests {
     fn test_property_setters_all_numeric() {
         let mut config = PySecurityConfig::new();
 
-        config.set_max_file_size(100_000_000).unwrap();
+        config
+            .set_max_file_size(PyInteger::from(100_000_000))
+            .unwrap();
         assert_eq!(
             config.get_max_file_size(),
-            100_000_000,
+            Some(100_000_000),
             "Property setter should update max_file_size"
         );
 
-        config.set_max_total_size(2_000_000_000).unwrap();
+        config
+            .set_max_total_size(PyInteger::from(2_000_000_000))
+            .unwrap();
         assert_eq!(
             config.get_max_total_size(),
-            2_000_000_000,
+            Some(2_000_000_000),
             "Property setter should update max_total_size"
         );
 
-        config.set_max_file_count(20_000).unwrap();
+        config.set_max_file_count(PyInteger::from(20_000)).unwrap();
         assert_eq!(
             config.get_max_file_count(),
-            20_000,
+            Some(20_000),
             "Property setter should update max_file_count"
         );
 
-        config.set_max_path_depth(64).unwrap();
+        config.set_max_path_depth(PyInteger::from(64)).unwrap();
         assert_eq!(
             config.get_max_path_depth(),
             64,
@@ -1511,7 +1588,9 @@ mod tests {
     fn test_max_solid_block_memory_refused_while_solid_archives_are_refused() {
         let mut config = PySecurityConfig::new();
         assert!(
-            config.set_max_solid_block_memory(1024).is_err(),
+            config
+                .set_max_solid_block_memory(PyInteger::from(1024))
+                .is_err(),
             "Should refuse a limit that would be ignored"
         );
         assert_eq!(config.get_max_solid_block_memory(), None);
@@ -1553,7 +1632,7 @@ mod tests {
     fn test_property_setter_max_solid_block_memory_valid() {
         let mut config = PySecurityConfig::new();
         config.inner.solid_archives = config.inner.solid_archives.with_allowed(true);
-        let result = config.set_max_solid_block_memory(128 * 1024 * 1024);
+        let result = config.set_max_solid_block_memory(PyInteger::from(128 * 1024 * 1024));
         assert!(result.is_ok(), "Should accept valid memory size");
         assert_eq!(
             config.get_max_solid_block_memory(),
@@ -1566,7 +1645,9 @@ mod tests {
     fn test_property_setter_max_solid_block_memory_rejects_zero() {
         let mut config = PySecurityConfig::new();
         assert!(
-            config.set_max_solid_block_memory(0).is_err(),
+            config
+                .set_max_solid_block_memory(PyInteger::from(0))
+                .is_err(),
             "Should reject zero"
         );
     }
@@ -1582,14 +1663,26 @@ mod tests {
         );
 
         config
-            .set_parallel_decode_memory(Some(i128::from(64 * MIB)))
+            .set_parallel_decode_memory(Some(PyInteger::Fits(i128::from(64 * MIB))))
             .unwrap();
         assert_eq!(config.get_parallel_decode_memory(), Some(64 * MIB));
         config.set_parallel_decode_memory(None).unwrap();
         assert_eq!(config.get_parallel_decode_memory(), None);
-        assert!(config.set_parallel_decode_memory(Some(0)).is_err());
-        assert!(config.set_parallel_decode_memory(Some(-1)).is_err());
-        assert!(config.set_parallel_decode_memory(Some(1 << 70)).is_err());
+        assert!(
+            config
+                .set_parallel_decode_memory(Some(PyInteger::from(0)))
+                .is_err()
+        );
+        assert!(
+            config
+                .set_parallel_decode_memory(Some(PyInteger::from(-1)))
+                .is_err()
+        );
+        assert!(
+            config
+                .set_parallel_decode_memory(Some(PyInteger::Fits(1 << 70)))
+                .is_err()
+        );
         assert_eq!(config.get_parallel_decode_memory(), None);
     }
 }

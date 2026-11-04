@@ -200,6 +200,18 @@ pub fn convert_error(err: CoreError) -> PyErr {
     py_err
 }
 
+/// The `InvalidCompressionLevelError` for a level a binding refused before
+/// the core saw it, with the same `code` the core error would carry.
+pub fn compression_level_error(description: String) -> PyErr {
+    let err = INVALID_COMPRESSION_LEVEL.error(description);
+    set_optional_str(
+        &err,
+        "code",
+        Some(ErrorCode::InvalidCompressionLevel.as_str()),
+    );
+    err
+}
+
 /// Sets `name` on the exception when `value` is present; otherwise the class
 /// default (`None`) stays visible.
 fn set_optional_str(err: &PyErr, name: &str, value: Option<&'static str>) {
@@ -340,7 +352,7 @@ mod tests {
             (
                 CoreError::InvalidConfiguration {
                     setting: exarch_core::ConfigSetting::MaxBytes,
-                    problem: exarch_core::ConfigProblem::NotPositiveWholeNumber,
+                    problem: exarch_core::ConfigProblem::Zero,
                 },
                 &INVALID_CONFIGURATION,
                 "INVALID_CONFIGURATION",

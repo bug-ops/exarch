@@ -1040,8 +1040,11 @@ mod tests {
         use exarch_core::PartialWrites;
         use exarch_core::PathModel;
         use exarch_core::PolicySetting;
+        use exarch_core::QuotaKind;
         use exarch_core::SecurityViolationSubCode;
+        use exarch_core::SubCode;
         use exarch_core::UnverifiedReason;
+        use exarch_core::ZipBombScope;
         use exarch_core::ZipConsistencyPolicy;
         use exarch_core::formats::detect::ArchiveType;
         use exarch_core::inspection::CheckStatus;
@@ -1094,6 +1097,12 @@ mod tests {
             ),
             literal_line("_PathModel", PathModel::ALL, PathModel::as_str),
             literal_line("_ErrorCode", ErrorCode::ALL, ErrorCode::as_str),
+            literal_line("_QuotaSubCode", QuotaKind::ALL, |kind| {
+                SubCode::Quota(kind).as_str()
+            }),
+            literal_line("_ZipBombSubCode", ZipBombScope::ALL, |scope| {
+                SubCode::ZipBomb(scope).as_str()
+            }),
             literal_line("_ConfigSetting", ConfigSetting::ALL, ConfigSetting::as_str),
             literal_line(
                 "_MemoryEntryKind",

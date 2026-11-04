@@ -2110,16 +2110,8 @@ fn test_non_utf8_names_render_injectively_everywhere() {
             };
             assert!(text.contains(first), "{command} json={json_mode}: {text}");
             assert!(text.contains(second), "{command} json={json_mode}: {text}");
-            // The core's own "not valid UTF-8" finding text still carries a
-            // lossy rendering of the name (reported to the lead); every
-            // path field and line is checked.
-            let paths_only: String = text
-                .lines()
-                .filter(|line| !line.contains("not valid UTF-8"))
-                .collect::<Vec<_>>()
-                .join("\n");
             assert!(
-                !paths_only.contains('\u{fffd}'),
+                !text.contains('\u{fffd}'),
                 "{command} json={json_mode}: {text}"
             );
         }

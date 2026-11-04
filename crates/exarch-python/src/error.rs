@@ -131,8 +131,15 @@ fn attach_partial(err: &PyErr, outcome: PartialOutcome) {
         if let PartialOutcome::Kept(report) = outcome {
             let _ = exc_value.setattr("files_extracted", report.files_extracted);
             let _ = exc_value.setattr("bytes_written", report.bytes_written);
-            let _ = exc_value.setattr("files_skipped", report.files_skipped);
-            let _ = exc_value.setattr("warnings", report.warnings);
+            let _ = exc_value.setattr("files_skipped", report.files_skipped());
+            let _ = exc_value.setattr(
+                "warnings",
+                report
+                    .warnings
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<String>>(),
+            );
         }
     });
 }
@@ -191,6 +198,15 @@ pub fn register_exceptions(m: &Bound<'_, PyModule>) -> PyResult<()> {
 )]
 mod tests {
     use super::*;
+
+    fn skipped(count: usize) -> exarch_core::Skips {
+        let mut skips = exarch_core::Skips::default();
+        for i in 0..count {
+            let skip = exarch_core::Skip::new(exarch_core::SkipKind::Duplicate, format!("f{i}"));
+            assert!(skips.record(skip).is_ok());
+        }
+        skips
+    }
 
     #[test]
     fn test_every_error_code_has_an_exception_class() {
@@ -680,10 +696,11 @@ mod tests {
         use exarch_core::ExtractionReport;
         use exarch_core::QuotaResource;
 
-        let report = ExtractionReport {
-            files_extracted: 3,
-            bytes_written: 1024,
-            ..ExtractionReport::default()
+        let report = {
+            let mut r = ExtractionReport::new();
+            r.files_extracted = 3;
+            r.bytes_written = 1024;
+            r
         };
         let source = CoreError::QuotaExceeded {
             resource: QuotaResource::FileCount { current: 4, max: 3 },
@@ -724,21 +741,20 @@ mod tests {
     /// alongside the pre-existing `files_extracted`/`bytes_written`. Uses a
     /// skip-only report (`files_extracted: 0, bytes_written: 0`) matching
     /// #505's original trigger — a failure that skipped entries without
-    /// extracting anything — and a realistic aggregated warning string (see
-    /// `formats::common`'s `"skipped N entries with disallowed extensions"`
-    /// convention) rather than an invented one, so the test documents why
+    /// extracting anything — and a typed warning, so the test documents why
     /// the fix exists, not just that the fields are forwarded.
     #[test]
     fn test_partial_extraction_includes_files_skipped_and_warnings() {
         use exarch_core::ExtractionReport;
         use exarch_core::QuotaResource;
 
-        let report = ExtractionReport {
-            files_extracted: 0,
-            bytes_written: 0,
-            files_skipped: 2,
-            warnings: vec!["skipped 2 entries with disallowed extensions".to_string()],
-            ..ExtractionReport::default()
+        let report = {
+            let mut r = ExtractionReport::new();
+            r.files_extracted = 0;
+            r.bytes_written = 0;
+            r.skipped = skipped(2);
+            r.warnings = vec![exarch_core::ExtractionWarning::AntiItemsSkipped { count: 2 }];
+            r
         };
         let source = CoreError::QuotaExceeded {
             resource: QuotaResource::FileCount { current: 4, max: 3 },
@@ -765,7 +781,7 @@ mod tests {
             assert_eq!(files_skipped, 2);
             assert_eq!(
                 warnings,
-                vec!["skipped 2 entries with disallowed extensions"]
+                vec!["skipped 2 7z anti-items (deletion markers are not applied)"]
             );
         });
     }
@@ -776,10 +792,11 @@ mod tests {
     fn test_partial_extraction_rolled_back_omits_counters() {
         use exarch_core::ExtractionReport;
 
-        let report = ExtractionReport {
-            files_extracted: 2,
-            bytes_written: 2,
-            ..ExtractionReport::default()
+        let report = {
+            let mut r = ExtractionReport::new();
+            r.files_extracted = 2;
+            r.bytes_written = 2;
+            r
         };
         let err = CoreError::PartialExtraction(exarch_core::Partial::new(
             CoreError::SymlinkEscape {
@@ -871,10 +888,11 @@ mod tests {
     fn test_partial_extraction_symlink_escape_preserves_type_and_report() {
         use exarch_core::ExtractionReport;
 
-        let report = ExtractionReport {
-            files_extracted: 2,
-            bytes_written: 512,
-            ..ExtractionReport::default()
+        let report = {
+            let mut r = ExtractionReport::new();
+            r.files_extracted = 2;
+            r.bytes_written = 512;
+            r
         };
         let source = CoreError::SymlinkEscape {
             path: PathBuf::from("/etc/passwd"),
@@ -893,10 +911,11 @@ mod tests {
     fn test_partial_extraction_hardlink_escape_preserves_type_and_report() {
         use exarch_core::ExtractionReport;
 
-        let report = ExtractionReport {
-            files_extracted: 2,
-            bytes_written: 512,
-            ..ExtractionReport::default()
+        let report = {
+            let mut r = ExtractionReport::new();
+            r.files_extracted = 2;
+            r.bytes_written = 512;
+            r
         };
         let source = CoreError::HardlinkEscape {
             path: PathBuf::from("/etc/shadow"),
@@ -915,10 +934,11 @@ mod tests {
     fn test_partial_extraction_security_violation_preserves_type_and_report() {
         use exarch_core::ExtractionReport;
 
-        let report = ExtractionReport {
-            files_extracted: 2,
-            bytes_written: 512,
-            ..ExtractionReport::default()
+        let report = {
+            let mut r = ExtractionReport::new();
+            r.files_extracted = 2;
+            r.bytes_written = 512;
+            r
         };
         let source = CoreError::from(exarch_core::Violation::EncryptedArchive);
         let err = CoreError::PartialExtraction(exarch_core::Partial::new(

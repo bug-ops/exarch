@@ -478,8 +478,8 @@ impl From<CoreReport> for ExtractionReport {
             symlinks_created: saturating_u32(report.symlinks_created),
             bytes_written: saturating_i64(report.bytes_written),
             duration_ms: report.duration.as_millis().min(i64::MAX as u128) as i64,
-            files_skipped: saturating_u32(report.files_skipped),
-            warnings: report.warnings,
+            files_skipped: saturating_u32(report.files_skipped()),
+            warnings: report.warnings.iter().map(ToString::to_string).collect(),
         }
     }
 }
@@ -518,8 +518,8 @@ impl From<exarch_core::creation::CreationReport> for CreationReport {
             bytes_written: saturating_i64(report.bytes_written),
             bytes_compressed: saturating_i64(report.bytes_compressed),
             duration_ms: report.duration.as_millis().min(i64::MAX as u128) as i64,
-            files_skipped: saturating_u32(report.files_skipped),
-            warnings: report.warnings,
+            files_skipped: saturating_u32(report.files_skipped()),
+            warnings: report.warnings.iter().map(ToString::to_string).collect(),
         }
     }
 }
@@ -708,6 +708,19 @@ impl TryFrom<exarch_core::inspection::VerificationIssue> for VerificationIssue {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    fn skipped(count: usize) -> exarch_core::Skips {
+        let mut skips = exarch_core::Skips::default();
+        for i in 0..count {
+            let skip = exarch_core::Skip::new(exarch_core::SkipKind::Duplicate, format!("f{i}"));
+            assert!(skips.record(skip).is_ok());
+        }
+        skips
+    }
+
+    fn anti(count: u64) -> exarch_core::ExtractionWarning {
+        exarch_core::ExtractionWarning::AntiItemsSkipped { count }
+    }
     use exarch_core::Compressed;
     use std::time::Duration;
 
@@ -719,8 +732,8 @@ mod tests {
         core_report.symlinks_created = 2;
         core_report.bytes_written = 1024;
         core_report.duration = Duration::from_millis(500);
-        core_report.files_skipped = 1;
-        core_report.add_warning("Test warning".to_string());
+        core_report.skipped = skipped(1);
+        core_report.add_warning(anti(1));
 
         let report = ExtractionReport::from(core_report);
 
@@ -731,7 +744,7 @@ mod tests {
         assert_eq!(report.duration_ms, 500);
         assert_eq!(report.files_skipped, 1);
         assert_eq!(report.warnings.len(), 1);
-        assert_eq!(report.warnings[0], "Test warning");
+        assert_eq!(report.warnings[0], anti(1).to_string());
     }
 
     #[test]
@@ -765,16 +778,16 @@ mod tests {
     #[test]
     fn test_extraction_report_multiple_warnings() {
         let mut core_report = CoreReport::new();
-        core_report.add_warning("Warning 1".to_string());
-        core_report.add_warning("Warning 2".to_string());
-        core_report.add_warning("Warning 3".to_string());
+        core_report.add_warning(anti(1));
+        core_report.add_warning(anti(2));
+        core_report.add_warning(anti(3));
 
         let report = ExtractionReport::from(core_report);
 
         assert_eq!(report.warnings.len(), 3);
-        assert_eq!(report.warnings[0], "Warning 1");
-        assert_eq!(report.warnings[1], "Warning 2");
-        assert_eq!(report.warnings[2], "Warning 3");
+        assert_eq!(report.warnings[0], anti(1).to_string());
+        assert_eq!(report.warnings[1], anti(2).to_string());
+        assert_eq!(report.warnings[2], anti(3).to_string());
     }
 
     #[test]
@@ -816,23 +829,26 @@ mod tests {
     #[test]
     fn test_extraction_report_warnings_order_preserved() {
         let mut core_report = CoreReport::new();
-        core_report.add_warning("First warning".to_string());
-        core_report.add_warning("Second warning".to_string());
-        core_report.add_warning("Third warning".to_string());
+        core_report.add_warning(anti(1));
+        core_report.add_warning(anti(2));
+        core_report.add_warning(anti(3));
 
         let report = ExtractionReport::from(core_report);
 
         assert_eq!(report.warnings.len(), 3, "should have 3 warnings");
         assert_eq!(
-            report.warnings[0], "First warning",
+            report.warnings[0],
+            anti(1).to_string(),
             "first warning should be at index 0"
         );
         assert_eq!(
-            report.warnings[1], "Second warning",
+            report.warnings[1],
+            anti(2).to_string(),
             "second warning should be at index 1"
         );
         assert_eq!(
-            report.warnings[2], "Third warning",
+            report.warnings[2],
+            anti(3).to_string(),
             "third warning should be at index 2"
         );
     }
@@ -847,8 +863,12 @@ mod tests {
         core_report.bytes_written = 1024;
         core_report.bytes_compressed = 512;
         core_report.duration = std::time::Duration::from_millis(500);
-        core_report.files_skipped = 1;
-        core_report.add_warning("Test warning".to_string());
+        core_report.skipped = skipped(1);
+        let warning = exarch_core::creation::CreationWarning::ZipRatioCheckFailed {
+            reason: "Test warning".to_string(),
+        };
+        let expected = warning.to_string();
+        core_report.add_warning(warning);
 
         let report = CreationReport::from(core_report);
 
@@ -860,7 +880,7 @@ mod tests {
         assert_eq!(report.duration_ms, 500);
         assert_eq!(report.files_skipped, 1);
         assert_eq!(report.warnings.len(), 1);
-        assert_eq!(report.warnings[0], "Test warning");
+        assert_eq!(report.warnings[0], expected);
     }
 
     fn sized_entry(name: &str, size: u64) -> exarch_core::inspection::ArchiveEntry {

@@ -36,6 +36,15 @@ fn count_limit(setting: ConfigSetting, value: usize) -> PyResult<Limit<NonZeroUs
     Limit::<NonZeroUsize>::parse(setting, value).map_err(convert_error)
 }
 
+fn parse_exclude_patterns(patterns: &[String]) -> PyResult<Vec<exarch_core::ExcludePattern>> {
+    patterns
+        .iter()
+        .map(|pattern| {
+            exarch_core::ExcludePattern::try_from(pattern.as_str()).map_err(convert_error)
+        })
+        .collect()
+}
+
 /// Parses a Python integer of any size into a [`CompressionLevel`], so every
 /// out-of-range value is a `ValueError` rather than an `OverflowError`.
 fn compression_level(level: i64) -> PyResult<CompressionLevel> {
@@ -683,12 +692,13 @@ impl PyCreationConfig {
     }
 
     /// Sets exclude patterns.
+    #[allow(clippy::needless_pass_by_value)]
     fn with_exclude_patterns(
         mut slf: PyRefMut<'_, Self>,
         patterns: Vec<String>,
-    ) -> PyRefMut<'_, Self> {
-        slf.inner.exclude_patterns = patterns;
-        slf
+    ) -> PyResult<PyRefMut<'_, Self>> {
+        slf.inner.exclude_patterns = parse_exclude_patterns(&patterns)?;
+        Ok(slf)
     }
 
     /// Sets maximum file size in bytes; `None` removes the limit.
@@ -758,12 +768,18 @@ impl PyCreationConfig {
 
     #[getter]
     fn get_exclude_patterns(&self) -> Vec<String> {
-        self.inner.exclude_patterns.clone()
+        self.inner
+            .exclude_patterns
+            .iter()
+            .map(ToString::to_string)
+            .collect()
     }
 
     #[setter]
-    fn set_exclude_patterns(&mut self, value: Vec<String>) {
-        self.inner.exclude_patterns = value;
+    #[allow(clippy::needless_pass_by_value)]
+    fn set_exclude_patterns(&mut self, value: Vec<String>) -> PyResult<()> {
+        self.inner.exclude_patterns = parse_exclude_patterns(&value)?;
+        Ok(())
     }
 
     #[getter]

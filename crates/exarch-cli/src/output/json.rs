@@ -99,9 +99,9 @@ impl<W: Write> OutputFormatter for JsonFormatter<W> {
             directories_created: report.directories_created,
             symlinks_created: report.symlinks_created,
             bytes_written: report.bytes_written,
-            files_skipped: report.files_skipped,
+            files_skipped: report.files_skipped(),
             duration_ms: report.duration.as_millis(),
-            warnings: report.warnings.clone(),
+            warnings: report.warnings.iter().map(ToString::to_string).collect(),
         };
 
         let output = JsonOutput::success("extract", data);
@@ -137,9 +137,9 @@ impl<W: Write> OutputFormatter for JsonFormatter<W> {
             bytes_compressed: report.bytes_compressed,
             compression_ratio: report.compression_ratio(),
             compression_percentage: report.compression_percentage(),
-            files_skipped: report.files_skipped,
+            files_skipped: report.files_skipped(),
             duration_ms: report.duration.as_millis(),
-            warnings: report.warnings.clone(),
+            warnings: report.warnings.iter().map(ToString::to_string).collect(),
         };
 
         let output = JsonOutput::success("create", data);
@@ -170,8 +170,13 @@ impl<W: Write> OutputFormatter for JsonFormatter<W> {
                     directories_created: ctx.report.directories_created,
                     symlinks_created: ctx.report.symlinks_created,
                     bytes_written: ctx.report.bytes_written,
-                    files_skipped: ctx.report.files_skipped,
-                    warnings: ctx.report.warnings.clone(),
+                    files_skipped: ctx.report.files_skipped(),
+                    warnings: ctx
+                        .report
+                        .warnings
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect(),
                     writes: JsonId(ctx.writes),
                 });
 
@@ -361,6 +366,15 @@ impl<W: Write> OutputFormatter for JsonFormatter<W> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    fn skipped(count: usize) -> exarch_core::Skips {
+        let mut skips = exarch_core::Skips::default();
+        for i in 0..count {
+            let skip = exarch_core::Skip::new(exarch_core::SkipKind::Duplicate, format!("f{i}"));
+            assert!(skips.record(skip).is_ok());
+        }
+        skips
+    }
     use exarch_core::Compressed;
     use exarch_core::QuotaResource;
     use exarch_core::Uncompressed;
@@ -643,13 +657,14 @@ mod tests {
     #[test]
     fn format_extraction_result_writes_success_envelope() {
         let mut f = JsonFormatter::with_writer(Vec::new());
-        let report = ExtractionReport {
-            files_extracted: 3,
-            directories_created: 1,
-            symlinks_created: 0,
-            bytes_written: 2048,
-            duration: std::time::Duration::from_secs(1),
-            ..Default::default()
+        let report = {
+            let mut r = ExtractionReport::new();
+            r.files_extracted = 3;
+            r.directories_created = 1;
+            r.symlinks_created = 0;
+            r.bytes_written = 2048;
+            r.duration = std::time::Duration::from_secs(1);
+            r
         };
         f.format_extraction_result(&report).unwrap();
         let v = parsed(&f);
@@ -662,35 +677,38 @@ mod tests {
     #[test]
     fn format_extraction_result_includes_warnings_and_files_skipped() {
         let mut f = JsonFormatter::with_writer(Vec::new());
-        let report = ExtractionReport {
-            files_extracted: 3,
-            directories_created: 1,
-            symlinks_created: 0,
-            bytes_written: 2048,
-            files_skipped: 2,
-            duration: std::time::Duration::from_secs(1),
-            warnings: vec!["skipped 2 entries with disallowed extensions".to_string()],
+        let report = {
+            let mut r = ExtractionReport::new();
+            r.files_extracted = 3;
+            r.directories_created = 1;
+            r.symlinks_created = 0;
+            r.bytes_written = 2048;
+            r.skipped = skipped(2);
+            r.duration = std::time::Duration::from_secs(1);
+            r.warnings = vec![exarch_core::ExtractionWarning::AntiItemsSkipped { count: 2 }];
+            r
         };
         f.format_extraction_result(&report).unwrap();
         let v = parsed(&f);
         assert_eq!(v["data"]["files_skipped"], 2);
         assert_eq!(
             v["data"]["warnings"][0],
-            "skipped 2 entries with disallowed extensions"
+            "skipped 2 7z anti-items (deletion markers are not applied)"
         );
     }
 
     #[test]
     fn format_creation_result_writes_success_envelope() {
         let mut f = JsonFormatter::with_writer(Vec::new());
-        let report = CreationReport {
-            files_added: 2,
-            directories_added: 1,
-            symlinks_added: 0,
-            bytes_written: 1024,
-            bytes_compressed: 0,
-            duration: std::time::Duration::from_secs(1),
-            ..Default::default()
+        let report = {
+            let mut r = CreationReport::new();
+            r.files_added = 2;
+            r.directories_added = 1;
+            r.symlinks_added = 0;
+            r.bytes_written = 1024;
+            r.bytes_compressed = 0;
+            r.duration = std::time::Duration::from_secs(1);
+            r
         };
         f.format_creation_result(Path::new("out.tar.gz"), &report)
             .unwrap();
@@ -727,14 +745,16 @@ mod tests {
         let inner = ArchiveError::HardlinkEscape {
             path: PathBuf::from("escaped"),
         };
-        let report = ExtractionReport {
-            files_extracted: 2,
-            directories_created: 1,
-            symlinks_created: 0,
-            bytes_written: 512,
-            duration: std::time::Duration::from_millis(0),
-            files_skipped: 3,
-            warnings: vec!["skipped disallowed extension".to_string()],
+        let report = {
+            let mut r = ExtractionReport::new();
+            r.files_extracted = 2;
+            r.directories_created = 1;
+            r.symlinks_created = 0;
+            r.bytes_written = 512;
+            r.duration = std::time::Duration::from_millis(0);
+            r.skipped = skipped(3);
+            r.warnings = vec![exarch_core::ExtractionWarning::AntiItemsSkipped { count: 1 }];
+            r
         };
         let err = ArchiveError::PartialExtraction(exarch_core::Partial::new(
             inner,
@@ -748,7 +768,7 @@ mod tests {
         assert_eq!(v["error"]["partial_report"]["writes"], "kept");
         assert_eq!(
             v["error"]["partial_report"]["warnings"][0],
-            "skipped disallowed extension"
+            "skipped 1 7z anti-item (deletion markers are not applied)"
         );
     }
 

@@ -145,13 +145,13 @@ impl fmt::Display for PartialExtractionContext {
                      were written to disk before the error.",
                     r.files_extracted, r.directories_created, r.symlinks_created,
                 )?;
-                if r.files_skipped > 0 {
-                    write!(f, "\nFiles skipped: {}", r.files_skipped)?;
+                if r.files_skipped() > 0 {
+                    write!(f, "\nFiles skipped: {}", r.files_skipped())?;
                 }
                 if !r.warnings.is_empty() {
                     write!(f, "\nWarnings:")?;
                     for warning in &r.warnings {
-                        write!(f, "\n  - {}", TerminalText::new(warning))?;
+                        write!(f, "\n  - {}", TerminalText::new(&warning.to_string()))?;
                     }
                 }
                 write!(
@@ -411,6 +411,23 @@ mod tests {
     use std::io;
     use std::path::PathBuf;
 
+    fn skipped(count: usize) -> exarch_core::Skips {
+        let mut skips = exarch_core::Skips::default();
+        for i in 0..count {
+            let skip = exarch_core::Skip::new(exarch_core::SkipKind::Duplicate, format!("f{i}"));
+            assert!(skips.record(skip).is_ok());
+        }
+        skips
+    }
+
+    fn warning(text: &str) -> exarch_core::ExtractionWarning {
+        exarch_core::ExtractionWarning::BackupCleanupFailed {
+            path: PathBuf::from("backup"),
+            identity_unverified: false,
+            error: text.to_string(),
+        }
+    }
+
     #[test]
     fn test_convert_path_traversal_error() {
         let err = ArchiveError::PathTraversal {
@@ -563,14 +580,16 @@ mod tests {
         let inner = ArchiveError::HardlinkEscape {
             path: PathBuf::from("hardlink_escape_path"),
         };
-        let report = ExtractionReport {
-            files_extracted: 1,
-            directories_created: 0,
-            symlinks_created: 0,
-            bytes_written: 0,
-            duration: Duration::from_millis(0),
-            files_skipped: 0,
-            warnings: vec![],
+        let report = {
+            let mut r = ExtractionReport::new();
+            r.files_extracted = 1;
+            r.directories_created = 0;
+            r.symlinks_created = 0;
+            r.bytes_written = 0;
+            r.duration = Duration::from_millis(0);
+            r.skipped = skipped(0);
+            r.warnings = vec![];
+            r
         };
         let err = ArchiveError::PartialExtraction(exarch_core::Partial::new(
             inner,
@@ -793,14 +812,16 @@ mod tests {
         let inner = ArchiveError::SymlinkEscape {
             path: PathBuf::from("symlink_escape_path"),
         };
-        let report = ExtractionReport {
-            files_extracted: 2,
-            directories_created: 1,
-            symlinks_created: 0,
-            bytes_written: 100,
-            duration: Duration::from_millis(0),
-            files_skipped: 0,
-            warnings: vec![],
+        let report = {
+            let mut r = ExtractionReport::new();
+            r.files_extracted = 2;
+            r.directories_created = 1;
+            r.symlinks_created = 0;
+            r.bytes_written = 100;
+            r.duration = Duration::from_millis(0);
+            r.skipped = skipped(0);
+            r.warnings = vec![];
+            r
         };
         let err = ArchiveError::PartialExtraction(exarch_core::Partial::new(
             inner,
@@ -828,14 +849,16 @@ mod tests {
         let inner = ArchiveError::HardlinkEscape {
             path: PathBuf::from("hardlink_escape_path"),
         };
-        let report = ExtractionReport {
-            files_extracted: 1,
-            directories_created: 0,
-            symlinks_created: 0,
-            bytes_written: 0,
-            duration: Duration::from_millis(0),
-            files_skipped: 2,
-            warnings: vec!["skipped a broken symlink".to_string()],
+        let report = {
+            let mut r = ExtractionReport::new();
+            r.files_extracted = 1;
+            r.directories_created = 0;
+            r.symlinks_created = 0;
+            r.bytes_written = 0;
+            r.duration = Duration::from_millis(0);
+            r.skipped = skipped(2);
+            r.warnings = vec![warning("skipped a broken symlink")];
+            r
         };
         let err = ArchiveError::PartialExtraction(exarch_core::Partial::new(
             inner,
@@ -858,14 +881,16 @@ mod tests {
         use std::time::Duration;
 
         let inner = ArchiveError::from(Violation::LinksNotAllowed(LinkKind::Symlink));
-        let report = ExtractionReport {
-            files_extracted: 3,
-            directories_created: 1,
-            symlinks_created: 0,
-            bytes_written: 42,
-            duration: Duration::from_millis(0),
-            files_skipped: 0,
-            warnings: vec![],
+        let report = {
+            let mut r = ExtractionReport::new();
+            r.files_extracted = 3;
+            r.directories_created = 1;
+            r.symlinks_created = 0;
+            r.bytes_written = 42;
+            r.duration = Duration::from_millis(0);
+            r.skipped = skipped(0);
+            r.warnings = vec![];
+            r
         };
         let err = ArchiveError::PartialExtraction(exarch_core::Partial::new(
             inner,
@@ -894,14 +919,16 @@ mod tests {
         use exarch_core::ExtractionReport;
         use std::time::Duration;
 
-        let report = ExtractionReport {
-            files_extracted: 1,
-            directories_created: 0,
-            symlinks_created: 0,
-            bytes_written: 0,
-            duration: Duration::from_millis(0),
-            files_skipped: 0,
-            warnings: vec![],
+        let report = {
+            let mut r = ExtractionReport::new();
+            r.files_extracted = 1;
+            r.directories_created = 0;
+            r.symlinks_created = 0;
+            r.bytes_written = 0;
+            r.duration = Duration::from_millis(0);
+            r.skipped = skipped(0);
+            r.warnings = vec![];
+            r
         };
         let err = ArchiveError::PartialExtraction(exarch_core::Partial::new(
             ArchiveError::HardlinkEscape {
@@ -923,14 +950,16 @@ mod tests {
         use exarch_core::ExtractionReport;
         use std::time::Duration;
 
-        let report = ExtractionReport {
-            files_extracted: 1,
-            directories_created: 0,
-            symlinks_created: 0,
-            bytes_written: 0,
-            duration: Duration::from_millis(0),
-            files_skipped: 3,
-            warnings: vec!["skipped 3 entries".to_string()],
+        let report = {
+            let mut r = ExtractionReport::new();
+            r.files_extracted = 1;
+            r.directories_created = 0;
+            r.symlinks_created = 0;
+            r.bytes_written = 0;
+            r.duration = Duration::from_millis(0);
+            r.skipped = skipped(3);
+            r.warnings = vec![warning("skipped 3 entries")];
+            r
         };
         let err = ArchiveError::PartialExtraction(exarch_core::Partial::new(
             ArchiveError::HardlinkEscape {
@@ -955,14 +984,16 @@ mod tests {
         let inner = ArchiveError::HardlinkEscape {
             path: PathBuf::from("hardlink_escape_path"),
         };
-        let report = ExtractionReport {
-            files_extracted: 1,
-            directories_created: 0,
-            symlinks_created: 0,
-            bytes_written: 0,
-            duration: Duration::from_millis(0),
-            files_skipped: 0,
-            warnings: vec![],
+        let report = {
+            let mut r = ExtractionReport::new();
+            r.files_extracted = 1;
+            r.directories_created = 0;
+            r.symlinks_created = 0;
+            r.bytes_written = 0;
+            r.duration = Duration::from_millis(0);
+            r.skipped = skipped(0);
+            r.warnings = vec![];
+            r
         };
         let err = ArchiveError::PartialExtraction(exarch_core::Partial::new(
             inner,
@@ -1029,10 +1060,8 @@ mod tests {
 
     #[test]
     fn test_partial_display_escapes_warnings() {
-        let report = ExtractionReport {
-            warnings: vec!["w\x1b[31m\nforged".to_string()],
-            ..ExtractionReport::default()
-        };
+        let mut report = ExtractionReport::new();
+        report.warnings = vec![warning("w\x1b[31m\nforged")];
         let err = ArchiveError::PartialExtraction(exarch_core::Partial::new(
             ArchiveError::PathTraversal {
                 path: PathBuf::from("../x"),

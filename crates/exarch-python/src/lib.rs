@@ -754,7 +754,9 @@ impl PyProgressAdapter {
 }
 
 impl exarch_core::ProgressCallback for PyProgressAdapter {
-    fn on_entry_start(&mut self, path: &std::path::Path, total: usize, current: usize) {
+    fn on_entry_start(&mut self, path: &std::path::Path, position: exarch_core::EntryPosition) {
+        let total = position.total.known().unwrap_or(0);
+        let current = position.current.get();
         if self.callback_error.is_some() {
             return;
         }
@@ -1013,8 +1015,7 @@ mod tests {
             exarch_core::ProgressCallback::on_entry_start(
                 &mut adapter,
                 std::path::Path::new("first.txt"),
-                2,
-                1,
+                exarch_core::EntryPosition::at_index(0, exarch_core::EntryTotal::Known(2)),
             );
             assert!(
                 adapter.callback_error.is_some(),
@@ -1028,8 +1029,7 @@ mod tests {
             exarch_core::ProgressCallback::on_entry_start(
                 &mut adapter,
                 std::path::Path::new("second.txt"),
-                2,
-                2,
+                exarch_core::EntryPosition::at_index(1, exarch_core::EntryTotal::Known(2)),
             );
 
             let err = adapter
@@ -1072,10 +1072,11 @@ mod tests {
     fn test_merge_extraction_progress_result_callback_error_over_success() {
         pyo3::Python::initialize();
         Python::attach(|py| {
-            let report = exarch_core::ExtractionReport {
-                files_extracted: 3,
-                bytes_written: 42,
-                ..exarch_core::ExtractionReport::default()
+            let report = {
+                let mut r = exarch_core::ExtractionReport::new();
+                r.files_extracted = 3;
+                r.bytes_written = 42;
+                r
             };
             let cb_err = PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("callback boom");
 
@@ -1147,9 +1148,10 @@ mod tests {
     fn test_merge_extraction_progress_result_success_passthrough() {
         pyo3::Python::initialize();
         Python::attach(|py| {
-            let report = exarch_core::ExtractionReport {
-                files_extracted: 1,
-                ..exarch_core::ExtractionReport::default()
+            let report = {
+                let mut r = exarch_core::ExtractionReport::new();
+                r.files_extracted = 1;
+                r
             };
             let result = merge_progress_result(py, Ok(report), None, attach_extraction_attrs);
             assert_eq!(
@@ -1171,10 +1173,11 @@ mod tests {
     fn test_merge_creation_progress_result_callback_error_over_success() {
         pyo3::Python::initialize();
         Python::attach(|py| {
-            let report = exarch_core::creation::CreationReport {
-                files_added: 2,
-                bytes_written: 17,
-                ..exarch_core::creation::CreationReport::default()
+            let report = {
+                let mut r = exarch_core::creation::CreationReport::new();
+                r.files_added = 2;
+                r.bytes_written = 17;
+                r
             };
             let cb_err = PyErr::new::<pyo3::exceptions::PyValueError, _>("callback boom");
 
@@ -1233,9 +1236,10 @@ mod tests {
     fn test_merge_creation_progress_result_success_passthrough() {
         pyo3::Python::initialize();
         Python::attach(|py| {
-            let report = exarch_core::creation::CreationReport {
-                files_added: 1,
-                ..exarch_core::creation::CreationReport::default()
+            let report = {
+                let mut r = exarch_core::creation::CreationReport::new();
+                r.files_added = 1;
+                r
             };
             let result = merge_progress_result(py, Ok(report), None, attach_creation_attrs);
             assert_eq!(

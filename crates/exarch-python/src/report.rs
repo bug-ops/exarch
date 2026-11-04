@@ -65,7 +65,7 @@ impl PyExtractionReport {
     /// Number of files skipped due to security checks.
     #[getter]
     fn files_skipped(&self) -> usize {
-        self.inner.files_skipped
+        self.inner.files_skipped()
     }
 
     /// Returns a copy of the warning messages list.
@@ -76,7 +76,11 @@ impl PyExtractionReport {
     /// the warnings multiple times, cache the result in a local variable.
     #[getter]
     fn warnings(&self) -> Vec<String> {
-        self.inner.warnings.clone()
+        self.inner
+            .warnings
+            .iter()
+            .map(ToString::to_string)
+            .collect()
     }
 
     /// Returns total number of items processed.
@@ -103,7 +107,7 @@ impl PyExtractionReport {
             self.inner.symlinks_created,
             self.inner.bytes_written,
             self.inner.duration.as_millis(),
-            self.inner.files_skipped,
+            self.inner.files_skipped(),
             self.inner.warnings.len()
         )
     }
@@ -177,12 +181,16 @@ impl PyCreationReport {
 
     #[getter]
     fn files_skipped(&self) -> usize {
-        self.inner.files_skipped
+        self.inner.files_skipped()
     }
 
     #[getter]
     fn warnings(&self) -> Vec<String> {
-        self.inner.warnings.clone()
+        self.inner
+            .warnings
+            .iter()
+            .map(ToString::to_string)
+            .collect()
     }
 
     fn total_items(&self) -> usize {
@@ -210,7 +218,7 @@ impl PyCreationReport {
             self.inner.bytes_written,
             self.inner.bytes_compressed,
             self.inner.duration.as_millis(),
-            self.inner.files_skipped,
+            self.inner.files_skipped(),
             self.inner.warnings.len()
         )
     }
@@ -594,6 +602,15 @@ impl From<VerificationReport> for PyVerificationReport {
 )]
 mod tests {
     use super::*;
+
+    fn skipped(count: usize) -> exarch_core::Skips {
+        let mut skips = exarch_core::Skips::default();
+        for i in 0..count {
+            let skip = exarch_core::Skip::new(exarch_core::SkipKind::Duplicate, format!("f{i}"));
+            assert!(skips.record(skip).is_ok());
+        }
+        skips
+    }
     use exarch_core::Compressed;
     use exarch_core::inspection::manifest::ManifestEntryKind;
     use std::time::Duration;
@@ -606,8 +623,8 @@ mod tests {
         core_report.symlinks_created = 2;
         core_report.bytes_written = 1024;
         core_report.duration = Duration::from_millis(500);
-        core_report.files_skipped = 1;
-        core_report.add_warning("Test warning".to_string());
+        core_report.skipped = skipped(1);
+        core_report.add_warning(exarch_core::ExtractionWarning::AntiItemsSkipped { count: 1 });
 
         let py_report = PyExtractionReport::from(core_report);
 
@@ -744,8 +761,8 @@ mod tests {
     #[test]
     fn test_warnings_clone_behavior() {
         let mut core_report = CoreExtractionReport::new();
-        core_report.add_warning("Warning 1".to_string());
-        core_report.add_warning("Warning 2".to_string());
+        core_report.add_warning(exarch_core::ExtractionWarning::AntiItemsSkipped { count: 1 });
+        core_report.add_warning(exarch_core::ExtractionWarning::AntiItemsSkipped { count: 2 });
 
         let py_report = PyExtractionReport::from(core_report);
 
@@ -773,8 +790,12 @@ mod tests {
         core_report.bytes_written = 2048;
         core_report.bytes_compressed = 1024;
         core_report.duration = Duration::from_millis(750);
-        core_report.files_skipped = 2;
-        core_report.add_warning("Skipped file".to_string());
+        core_report.skipped = skipped(2);
+        core_report.add_warning(
+            exarch_core::creation::CreationWarning::ZipRatioCheckFailed {
+                reason: "Skipped file".to_string(),
+            },
+        );
 
         let py_report = PyCreationReport::from(core_report);
 

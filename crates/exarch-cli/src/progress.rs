@@ -3,6 +3,7 @@
 use crate::output::humanize_bytes;
 use crate::output::terminal::TerminalPath;
 use console::Term;
+use exarch_core::EntryPosition;
 use exarch_core::ProgressCallback;
 use indicatif::ProgressBar;
 use indicatif::ProgressStyle;
@@ -93,8 +94,10 @@ impl Drop for CliProgress {
 }
 
 impl ProgressCallback for CliProgress {
-    fn on_entry_start(&mut self, _path: &Path, total: usize, _current: usize) {
-        if !self.sized && total > 0 {
+    fn on_entry_start(&mut self, _path: &Path, position: EntryPosition) {
+        if !self.sized
+            && let Some(total) = position.total.known().filter(|total| *total > 0)
+        {
             self.sized = true;
             self.bar.set_length(total as u64);
             self.bar.set_style(Self::sized_style());
@@ -132,7 +135,10 @@ impl ProgressCallback for CliProgress {
 /// use std::path::Path;
 ///
 /// let mut p = VerboseProgress::new();
-/// p.on_entry_start(Path::new("data/file.txt"), 10, 0);
+/// p.on_entry_start(
+///     Path::new("data/file.txt"),
+///     EntryPosition::at_index(0, EntryTotal::Known(10)),
+/// );
 /// p.on_entry_complete(Path::new("data/file.txt"));
 /// p.on_complete();
 /// ```
@@ -148,7 +154,7 @@ impl VerboseProgress {
 }
 
 impl ProgressCallback for VerboseProgress {
-    fn on_entry_start(&mut self, path: &Path, _total: usize, _current: usize) {
+    fn on_entry_start(&mut self, path: &Path, _position: EntryPosition) {
         eprintln!("  extract  {}", TerminalPath::new(path));
     }
 
@@ -162,11 +168,15 @@ impl ProgressCallback for VerboseProgress {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use exarch_core::EntryTotal;
 
     #[test]
     fn test_verbose_progress_no_panic() {
         let mut p = VerboseProgress::new();
-        p.on_entry_start(Path::new("data/file.txt"), 10, 0);
+        p.on_entry_start(
+            Path::new("data/file.txt"),
+            EntryPosition::at_index(0, EntryTotal::Known(10)),
+        );
         p.on_bytes_written(512);
         p.on_entry_complete(Path::new("data/file.txt"));
         p.on_complete();
@@ -177,7 +187,10 @@ mod tests {
         let mut progress = CliProgress::new(100, "Testing");
 
         // Simulate processing entries
-        progress.on_entry_start(Path::new("test.txt"), 100, 1);
+        progress.on_entry_start(
+            Path::new("test.txt"),
+            EntryPosition::at_index(0, EntryTotal::Known(100)),
+        );
         progress.on_bytes_written(1024);
         progress.on_entry_complete(Path::new("test.txt"));
 
@@ -189,10 +202,16 @@ mod tests {
         let mut progress = CliProgress::counting("Testing");
         assert!(!progress.sized);
 
-        progress.on_entry_start(Path::new("a"), 0, 1);
+        progress.on_entry_start(
+            Path::new("a"),
+            EntryPosition::at_index(0, EntryTotal::Unknown),
+        );
         assert!(!progress.sized);
 
-        progress.on_entry_start(Path::new("b"), 7, 2);
+        progress.on_entry_start(
+            Path::new("b"),
+            EntryPosition::at_index(1, EntryTotal::Known(7)),
+        );
         assert!(progress.sized);
         assert_eq!(progress.bar.length(), Some(7));
     }

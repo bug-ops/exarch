@@ -180,10 +180,10 @@ impl<O: Write, E: Write> OutputFormatter for HumanFormatter<O, E> {
             format_args!("  Total size: {}", humanize_bytes(report.bytes_written)),
         );
 
-        if report.files_skipped > 0 {
+        if report.files_skipped() > 0 {
             emit_line(
                 &mut self.out,
-                format_args!("  Files skipped: {}", report.files_skipped),
+                format_args!("  Files skipped: {}", report.files_skipped()),
             );
         }
 
@@ -211,7 +211,7 @@ impl<O: Write, E: Write> OutputFormatter for HumanFormatter<O, E> {
             for warning in &report.warnings {
                 emit_line(
                     &mut self.out,
-                    format_args!("  - {}", TerminalText::new(warning)),
+                    format_args!("  - {}", TerminalText::new(&warning.to_string())),
                 );
             }
         }
@@ -284,10 +284,10 @@ impl<O: Write, E: Write> OutputFormatter for HumanFormatter<O, E> {
             );
         }
 
-        if report.files_skipped > 0 {
+        if report.files_skipped() > 0 {
             emit_line(
                 &mut self.out,
-                format_args!("  Files skipped:    {}", report.files_skipped),
+                format_args!("  Files skipped:    {}", report.files_skipped()),
             );
         }
 
@@ -304,7 +304,7 @@ impl<O: Write, E: Write> OutputFormatter for HumanFormatter<O, E> {
             for warning in &report.warnings {
                 emit_line(
                     &mut self.out,
-                    format_args!("  - {}", TerminalText::new(warning)),
+                    format_args!("  - {}", TerminalText::new(&warning.to_string())),
                 );
             }
         }
@@ -485,6 +485,15 @@ impl<O: Write, E: Write> OutputFormatter for HumanFormatter<O, E> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    fn skipped(count: usize) -> exarch_core::Skips {
+        let mut skips = exarch_core::Skips::default();
+        for i in 0..count {
+            let skip = exarch_core::Skip::new(exarch_core::SkipKind::Duplicate, format!("f{i}"));
+            assert!(skips.record(skip).is_ok());
+        }
+        skips
+    }
     use exarch_core::Compressed;
     use exarch_core::Uncompressed;
 
@@ -548,26 +557,29 @@ mod tests {
     }
 
     fn sample_extraction_report() -> ExtractionReport {
-        ExtractionReport {
-            files_extracted: 3,
-            directories_created: 1,
-            symlinks_created: 0,
-            bytes_written: 2048,
-            duration: std::time::Duration::from_secs(1),
-            ..Default::default()
+        {
+            let mut r = ExtractionReport::new();
+            r.files_extracted = 3;
+            r.directories_created = 1;
+            r.symlinks_created = 0;
+            r.bytes_written = 2048;
+            r.duration = std::time::Duration::from_secs(1);
+            r
         }
     }
 
     fn sample_creation_report() -> CreationReport {
-        CreationReport {
-            files_added: 2,
-            directories_added: 1,
-            symlinks_added: 0,
-            bytes_written: 1024,
-            bytes_compressed: 0,
-            files_skipped: 0,
-            duration: std::time::Duration::from_secs(1),
-            warnings: vec![],
+        {
+            let mut r = CreationReport::new();
+            r.files_added = 2;
+            r.directories_added = 1;
+            r.symlinks_added = 0;
+            r.bytes_written = 1024;
+            r.bytes_compressed = 0;
+            r.skipped = skipped(0);
+            r.duration = std::time::Duration::from_secs(1);
+            r.warnings = vec![];
+            r
         }
     }
 
@@ -592,15 +604,13 @@ mod tests {
     fn format_extraction_result_with_warnings_and_files_skipped() {
         let mut f = formatter(Verbosity::Normal, false);
         let mut report = sample_extraction_report();
-        report.files_skipped = 2;
-        report
-            .warnings
-            .push("skipped 2 entries with disallowed extensions".to_string());
+        report.skipped = skipped(2);
+        report.add_warning(exarch_core::ExtractionWarning::AntiItemsSkipped { count: 2 });
         f.format_extraction_result(&report).unwrap();
         let text = out_text(&f);
         assert!(text.contains("Files skipped: 2"));
         assert!(text.contains("Warnings:"));
-        assert!(text.contains("skipped 2 entries with disallowed extensions"));
+        assert!(text.contains("skipped 2 7z anti-items"));
     }
 
     #[test]
@@ -666,8 +676,10 @@ mod tests {
         let mut f = formatter(Verbosity::Normal, false);
         let mut report = sample_creation_report();
         report.bytes_compressed = 512;
-        report.files_skipped = 1;
-        report.warnings.push("skipped a broken symlink".to_string());
+        report.skipped = skipped(1);
+        report.add_warning(exarch_core::CreationWarning::ZipRatioCheckFailed {
+            reason: "skipped a broken symlink".to_string(),
+        });
         f.format_creation_result(Path::new("out.tar.gz"), &report)
             .unwrap();
         let text = out_text(&f);
@@ -989,10 +1001,16 @@ mod tests {
     fn format_extraction_and_creation_warnings_escape_control_characters() {
         let mut f = formatter(Verbosity::Normal, false);
         let mut report = sample_extraction_report();
-        report.warnings.push(HOSTILE.to_string());
+        report.add_warning(exarch_core::ExtractionWarning::BackupCleanupFailed {
+            path: std::path::PathBuf::from("backup"),
+            identity_unverified: false,
+            error: HOSTILE.to_string(),
+        });
         f.format_extraction_result(&report).unwrap();
         let mut creation = sample_creation_report();
-        creation.warnings.push(HOSTILE.to_string());
+        creation.add_warning(exarch_core::CreationWarning::ZipRatioCheckFailed {
+            reason: HOSTILE.to_string(),
+        });
         f.format_creation_result(Path::new(HOSTILE), &creation)
             .unwrap();
         let text = out_text(&f);

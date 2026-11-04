@@ -1273,7 +1273,9 @@ impl NodeProgressAdapter {
 }
 
 impl exarch_core::ProgressCallback for NodeProgressAdapter {
-    fn on_entry_start(&mut self, path: &std::path::Path, total: usize, current: usize) {
+    fn on_entry_start(&mut self, path: &std::path::Path, position: exarch_core::EntryPosition) {
+        let total = position.total.known().unwrap_or(0);
+        let current = position.current.get();
         if self.callback_error.is_some() || self.abort.check().is_err() {
             return;
         }

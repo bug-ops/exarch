@@ -175,7 +175,20 @@ impl Skips {
     ///
     /// Returns [`ArchiveError::QuotaExceeded`] with
     /// [`QuotaResource::IntegerOverflow`] when the counter would overflow.
-    pub(crate) fn record(&mut self, skip: Skip) -> Result<()> {
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::Skip;
+    /// use exarch_core::SkipKind;
+    /// use exarch_core::Skips;
+    ///
+    /// let mut skips = Skips::default();
+    /// skips.record(Skip::new(SkipKind::Excluded, "a.tmp"))?;
+    /// assert_eq!(skips.count(SkipKind::Excluded), 1);
+    /// # Ok::<(), exarch_core::ArchiveError>(())
+    /// ```
+    pub fn record(&mut self, skip: Skip) -> Result<()> {
         let detail = self.detail.get_or_insert_default();
         let count = detail.counts.entry(skip.kind).or_insert(0);
         *count = count.checked_add(1).ok_or(ArchiveError::QuotaExceeded {
@@ -220,11 +233,39 @@ pub enum ExtractionWarning {
         /// How many anti-items the archive holds.
         count: u64,
     },
+
+    /// The backup of the original destination, kept for an atomic
+    /// replacement, could not be removed and must be cleaned up manually.
+    BackupCleanupFailed {
+        /// Where the backup remains.
+        path: PathBuf,
+        /// Whether the backup's identity could not be verified before removal.
+        identity_unverified: bool,
+        /// Why the removal failed.
+        error: String,
+    },
 }
 
 impl fmt::Display for ExtractionWarning {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::BackupCleanupFailed {
+                path,
+                identity_unverified,
+                error,
+            } => {
+                let qualifier = if *identity_unverified {
+                    " (its identity could not be verified on this platform)"
+                } else {
+                    ""
+                };
+                write!(
+                    f,
+                    "failed to remove backup of the original destination at {}{qualifier} \
+                     ({error}); it must be cleaned up manually",
+                    path.display()
+                )
+            }
             Self::AntiItemsSkipped { count } => {
                 let noun = if *count == 1 {
                     "anti-item"

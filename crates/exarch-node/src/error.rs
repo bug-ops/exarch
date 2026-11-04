@@ -625,8 +625,15 @@ fn apply(env: Env, described: Described) -> napi::Result<Error> {
             if let PartialOutcome::Kept(report) = outcome {
                 obj.set("filesExtracted", saturating_u32(report.files_extracted))?;
                 obj.set("bytesWritten", saturating_i64(report.bytes_written))?;
-                obj.set("filesSkipped", saturating_u32(report.files_skipped))?;
-                obj.set("warnings", report.warnings)?;
+                obj.set("filesSkipped", saturating_u32(report.files_skipped()))?;
+                obj.set(
+                    "warnings",
+                    report
+                        .warnings
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<String>>(),
+                )?;
             }
         }
         Details::Creation {
@@ -1103,12 +1110,14 @@ mod tests {
         let source = CoreError::SymlinkEscape {
             path: PathBuf::from("ln"),
         };
-        let report = CoreExtractionReport {
-            files_extracted: 2,
-            bytes_written: 512,
-            files_skipped: 1,
-            warnings: vec!["skipped 1 entries with disallowed extensions".to_string()],
-            ..CoreExtractionReport::default()
+        let report = {
+            let mut r = CoreExtractionReport::new();
+            r.files_extracted = 2;
+            r.bytes_written = 512;
+            let skip = exarch_core::Skip::new(exarch_core::SkipKind::Duplicate, "f");
+            assert!(r.skipped.record(skip).is_ok());
+            r.add_warning(exarch_core::ExtractionWarning::AntiItemsSkipped { count: 1 });
+            r
         };
         CoreError::PartialExtraction(exarch_core::Partial::new(source, report, writes))
     }
@@ -1124,7 +1133,7 @@ mod tests {
         };
         assert_eq!(report.files_extracted, 2);
         assert_eq!(report.bytes_written, 512);
-        assert_eq!(report.files_skipped, 1);
+        assert_eq!(report.files_skipped(), 1);
         assert_eq!(report.warnings.len(), 1);
     }
 
@@ -1143,10 +1152,11 @@ mod tests {
     fn test_callback_over_extraction_success_describes_counters() {
         let d = describe(Failure::from(ProgressCallbackError::ExtractionCallback {
             source: Error::from_reason("boom"),
-            report: CoreExtractionReport {
-                files_extracted: 3,
-                bytes_written: 9,
-                ..CoreExtractionReport::default()
+            report: {
+                let mut r = CoreExtractionReport::new();
+                r.files_extracted = 3;
+                r.bytes_written = 9;
+                r
             },
         }))
         .expect("callback errors are described");

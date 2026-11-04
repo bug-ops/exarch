@@ -109,10 +109,7 @@ describe('extractArchive (async)', () => {
         assert.strictEqual(err.code, 'QUOTA_EXCEEDED');
         assert.strictEqual(err.writes, 'kept');
         assert.strictEqual(err.filesSkipped, 1);
-        assert.ok(
-          err.warnings.some((w) => /disallowed extension/.test(w)),
-          String(err.warnings)
-        );
+        assert.deepStrictEqual(err.warnings, []);
         return true;
       }
     );
@@ -179,10 +176,7 @@ describe('extractArchive (async)', () => {
         assert.strictEqual(err.filesExtracted, 0);
         assert.strictEqual(err.bytesWritten, 0);
         assert.strictEqual(err.filesSkipped, 1);
-        assert.ok(
-          err.warnings.some((w) => /disallowed extension/.test(w)),
-          String(err.warnings)
-        );
+        assert.deepStrictEqual(err.warnings, []);
         return true;
       }
     );

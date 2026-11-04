@@ -2777,10 +2777,7 @@ fn test_extract_reports_files_skipped_and_warnings_for_disallowed_extensions() {
         .success()
         .stdout(
             predicate::str::contains("Files skipped: 2")
-                .and(predicate::str::contains("Warnings:"))
-                .and(predicate::str::contains(
-                    "skipped 2 entries with disallowed extensions",
-                )),
+                .and(predicate::str::contains("Warnings:").not()),
         );
 }
 
@@ -2812,10 +2809,7 @@ fn test_extract_json_reports_files_skipped_and_warnings_for_disallowed_extension
 
     let json: serde_json::Value = serde_json::from_slice(&output).expect("valid JSON output");
     assert_eq!(json["data"]["files_skipped"], 2);
-    assert_eq!(
-        json["data"]["warnings"][0],
-        "skipped 2 entries with disallowed extensions"
-    );
+    assert_eq!(json["data"]["warnings"], serde_json::json!([]));
 }
 
 fn make_sevenz_with_anti_item(archive: &std::path::Path) {

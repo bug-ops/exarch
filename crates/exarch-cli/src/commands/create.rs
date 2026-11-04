@@ -9,6 +9,7 @@ use anyhow::Context;
 use anyhow::Result;
 use exarch_core::ConfigSetting;
 use exarch_core::CreationConfig;
+use exarch_core::ExcludePattern;
 use exarch_core::Limit;
 use exarch_core::NoopProgress;
 use exarch_core::create_archive_with_progress;
@@ -52,7 +53,11 @@ pub fn execute(
     }
 
     // Add user exclude patterns to defaults
-    config.exclude_patterns.extend(args.exclude.iter().cloned());
+    for pattern in &args.exclude {
+        let pattern = ExcludePattern::try_from(pattern.as_str())
+            .map_err(|err| convert_extraction_error(err, &args.output))?;
+        config.exclude_patterns.push(pattern);
+    }
 
     // Create archive with progress if TTY is detected
     let report = if verbosity != Verbosity::Quiet && CliProgress::should_show() {

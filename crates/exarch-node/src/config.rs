@@ -729,12 +729,15 @@ impl CreationConfig {
     ///
     /// Returns error if pattern contains null bytes.
     #[napi]
+    #[allow(clippy::needless_pass_by_value)]
     pub fn add_exclude_pattern(&mut self, pattern: String) -> Result<&Self> {
         if pattern.contains('\0') {
             return Err(Error::from_reason(
                 "pattern contains null bytes - potential security issue",
             ));
         }
+        let pattern = exarch_core::ExcludePattern::try_from(pattern.as_str())
+            .map_err(|err| Error::from_reason(err.to_string()))?;
         self.inner.exclude_patterns.push(pattern);
         Ok(self)
     }
@@ -783,7 +786,11 @@ impl CreationConfig {
     /// List of exclude patterns.
     #[napi(getter)]
     pub fn get_exclude_patterns(&self) -> Vec<String> {
-        self.inner.exclude_patterns.clone()
+        self.inner
+            .exclude_patterns
+            .iter()
+            .map(ToString::to_string)
+            .collect()
     }
 }
 

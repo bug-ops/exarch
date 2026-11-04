@@ -25,6 +25,7 @@ use exarch_core::DecodeReuse;
 use exarch_core::Extension;
 use exarch_core::ExtractionOptions;
 use exarch_core::ExtractionReport;
+use exarch_core::ExtractionWarning;
 use exarch_core::ListOptions;
 use exarch_core::ListedArchive;
 use exarch_core::ManifestEntryKind;
@@ -322,16 +323,16 @@ fn cleanup_backup_or_warn(
     let Ok((_, observed)) = pin.entry_status(backup_name) else {
         return;
     };
-    let qualifier = match observed.check(backup_id) {
-        IdentityCheck::Same => "",
-        IdentityCheck::Unknown => " (its identity could not be verified on this platform)",
+    let identity_unverified = match observed.check(backup_id) {
+        IdentityCheck::Same => false,
+        IdentityCheck::Unknown => true,
         IdentityCheck::Different => return,
     };
-    report.warnings.push(format!(
-        "failed to remove backup of the original destination at {}{qualifier} ({cleanup_err}); \
-         it must be cleaned up manually",
-        backup_path.display()
-    ));
+    report.add_warning(ExtractionWarning::BackupCleanupFailed {
+        path: backup_path.to_path_buf(),
+        identity_unverified,
+        error: cleanup_err.to_string(),
+    });
 }
 
 /// Returns a disclosure clause naming where surviving content can be found,

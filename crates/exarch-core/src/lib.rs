@@ -46,21 +46,9 @@ pub mod writer;
 
 // Re-export main API types
 pub use api::create_archive;
-pub use api::create_archive_with_progress;
 pub use api::extract_archive;
-pub use api::extract_archive_with_options;
-pub use api::extract_archive_with_options_and_progress;
-pub use api::extract_archive_with_progress;
-pub use api::extract_to_sink;
-pub use api::extract_to_sink_with_progress;
 pub use api::list_archive;
-pub use api::list_archive_with_options;
-pub use api::list_reader;
-pub use api::list_reader_with_progress;
 pub use api::verify_archive;
-pub use api::verify_archive_with_options;
-pub use api::verify_reader;
-pub use api::verify_reader_with_progress;
 pub use config::Admit;
 pub use config::DecodeReuse;
 pub use config::DecompressionBudget;
@@ -128,8 +116,6 @@ pub use error::redaction::sanitize_io_error_for_error;
 /// Redacts a host-derived filesystem path for an FFI error message in
 /// release builds. Shared by `exarch-python` and `exarch-node`.
 pub use error::redaction::sanitize_path_for_error;
-pub use inspection::list_archive_with_progress;
-pub use inspection::verify_archive_with_progress;
 pub use limit::Limit;
 pub use limit::RatioLimit;
 pub use limit::non_zero_u64;
@@ -162,9 +148,6 @@ pub use creation::CreationReport;
 pub use creation::CreationWarning;
 pub use creation::ExcludePattern;
 pub use writer::ArchiveWriter;
-pub use writer::create_to_bytes;
-pub use writer::create_to_writer;
-pub use writer::create_to_writer_with_progress;
 
 // Re-export inspection types
 pub use inspection::ArchiveEntry;
@@ -195,7 +178,6 @@ pub use security::fs_view::LinkKind;
 // Re-export security types
 pub use listed::ListedArchive;
 pub use listed::ListedExtractOptions;
-pub use listed::list_archive_for_extraction;
 pub use security::AdmittedSize;
 pub use security::Compressed;
 pub use security::EntrySize;

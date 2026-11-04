@@ -14,11 +14,11 @@ fuzz_target!(|data: &[u8]| {
         common::config(),
         common::config_ignoring_zip_structure(),
     ] {
-        if let Ok(mut archive) = ZipArchive::new(Cursor::new(data)) {
-            let _ = archive.list(config);
+        if let Ok(archive) = ZipArchive::new(Cursor::new(data), config) {
+            let _ = archive.list();
         }
-        if let Ok(mut archive) = ZipArchive::new(Cursor::new(data)) {
-            let _ = archive.verify(config, &common::verification_options());
+        if let Ok(archive) = ZipArchive::new(Cursor::new(data), config) {
+            let _ = archive.verify(&common::verification_options());
         }
     }
 });

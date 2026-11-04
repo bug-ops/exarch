@@ -231,7 +231,8 @@ where
 /// Payload integrity (checksums, decode-to-end) is not verified: the report's
 /// `integrity_status` is
 /// [`IntegrityStatus::Skipped`](crate::IntegrityStatus::Skipped).
-/// Use [`verify_archive_with_options`] to request it.
+/// Use [`VerifyRequest`](crate::VerifyRequest) with `VerificationOptions` to
+/// request it.
 ///
 /// # Arguments
 ///
@@ -334,85 +335,20 @@ pub fn verify_archive<P: AsRef<Path>>(
     archive_path: P,
     config: &SecurityConfig,
 ) -> Result<VerificationReport> {
-    verify_archive_with_options(archive_path, config, &VerificationOptions::default())
+    verify_archive_with_progress(
+        archive_path,
+        config,
+        VerificationOptions::default(),
+        &mut NoopProgress,
+    )
 }
 
-/// Verifies archive security, optionally checking payload integrity.
+/// Verifies `archive_path`, reporting progress; the body of
+/// [`VerifyRequest::verify`](crate::VerifyRequest::verify).
 ///
-/// With [`IntegrityCheck::Skip`] this is [`verify_archive`]. With
-/// [`IntegrityCheck::DecodeToEof`] the payload is decoded to the decoder's EOF
-/// during listing, so codec framing and checksums are verified, and
-/// `integrity_status` becomes `OK`, `FAILED` or `INCOMPLETE`.
-///
-/// # What a status means
-///
-/// | Format | Verified |
-/// |---|---|
-/// | ZIP | per-entry CRC-32 and exact declared size; entries are independent, so a corrupt entry does not stop the scan |
-/// | TAR | header checksums and that every declared data byte is present; no payload checksum |
-/// | tar.gz, tar.bz2, tar.xz, tar.zst | the above plus the codec's own framing and checksums (zstd only if the frame carries one) |
-/// | 7z | per-entry CRC-32 where the archive stores one, else the block CRC |
-///
-/// `OK` means every payload byte was decoded and every checksum the format has
-/// matched. Formats without payload checksums (plain TAR, 7z entries without
-/// CRC, zstd frames without a content checksum) report the weaker guarantee
-/// that the data was complete and decodable. "Decode to EOF" means the
-/// decoder's EOF: every gzip member, bzip2 stream and xz stream is decoded, and
-/// a non-zero tail after the last one is an error. The tail after a TAR
-/// end-of-archive marker is bounded by `max_tar_metadata_bytes` (at least
-/// 1 MiB), not by the decompression budget; a longer one is refused. Without
-/// integrity, verification stops at the marker and never reads the tail.
-///
-/// `INCOMPLETE` means part of the payload was not verified (decompression
-/// budget, a resource limit, a solid 7z archive while `allow_solid_archives`
-/// is off, or a TAR stream without an end-of-archive marker). It comes with a
-/// Medium issue, so the overall status is at least `WARNING`; exit code 0 does
-/// not mean integrity `OK`.
-///
-/// # Errors
-///
-/// As [`verify_archive`]. With integrity requested, a TAR entry whose content
-/// fails to decode, or whose data is cut short, is an
-/// [`ArchiveError::InvalidArchive`]: the
-/// scan cannot continue past it, and a report over the entries read so far
-/// would let security look fine for entries never inspected. Corruption in a
-/// TAR trailer (a gzip CRC, an xz index) is a `FAILED` report instead.
-///
-/// # Examples
-///
-/// ```no_run
-/// use exarch_core::DecompressionBudget;
-/// use exarch_core::IntegrityCheck;
-/// use exarch_core::IntegrityStatus;
-/// use exarch_core::SecurityConfig;
-/// use exarch_core::VerificationOptions;
-/// use exarch_core::verify_archive_with_options;
-///
-/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// let options = VerificationOptions::default()
-///     .with_integrity(IntegrityCheck::DecodeToEof(DecompressionBudget::DEFAULT));
-/// let report = verify_archive_with_options("archive.zip", &SecurityConfig::default(), &options)?;
-/// if report.integrity_status() == IntegrityStatus::Fail {
-///     eprintln!("archive is corrupt");
-/// }
-/// # Ok(())
-/// # }
-/// ```
-pub fn verify_archive_with_options<P: AsRef<Path>>(
-    archive_path: P,
-    config: &SecurityConfig,
-    options: &VerificationOptions,
-) -> Result<VerificationReport> {
-    verify_archive_with_progress(archive_path, config, options, &mut NoopProgress)
-}
-
-/// Verifies archive security, optionally checking payload integrity, reporting
-/// progress.
-///
-/// [`verify_archive_with_options`] with a [`ProgressCallback`]: every entry of
-/// the verification scan is announced with `on_entry_start` and closed with
-/// `on_entry_complete`, and `on_complete` fires once when a report is
-/// returned. A report whose status is `Fail` is still a report.
+/// Every entry of the verification scan is announced with `on_entry_start` and
+/// closed with `on_entry_complete`, and `on_complete` fires once when a report
+/// is returned. A report whose status is `Fail` is still a report.
 ///
 /// With [`IntegrityCheck::DecodeToEof`] the events fire while each payload is
 /// decoded, so they track the work; without it the scan reads metadata only
@@ -421,43 +357,12 @@ pub fn verify_archive_with_options<P: AsRef<Path>>(
 /// archive the entries that carry no payload are announced first, then the
 /// payloads in decode order.
 ///
-/// # Errors
-///
-/// As [`verify_archive_with_options`]. `on_complete` is not called on failure;
-/// every `on_entry_start` is still paired with an `on_entry_complete`.
-///
-/// # Examples
-///
-/// ```
-/// use exarch_core::NoopProgress;
-/// use exarch_core::SecurityConfig;
-/// use exarch_core::VerificationOptions;
-/// use exarch_core::VerificationStatus;
-/// use exarch_core::verify_archive_with_progress;
-///
-/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// # let dir = tempfile::tempdir()?;
-/// # let archive = dir.path().join("a.tar");
-/// # let mut builder = tar::Builder::new(Vec::new());
-/// # let mut header = tar::Header::new_gnu();
-/// # header.set_size(2);
-/// # header.set_mode(0o644);
-/// # builder.append_data(&mut header, "a.txt", &b"hi"[..])?;
-/// # std::fs::write(&archive, builder.into_inner()?)?;
-/// let report = verify_archive_with_progress(
-///     &archive,
-///     &SecurityConfig::default(),
-///     &VerificationOptions::default(),
-///     &mut NoopProgress,
-/// )?;
-/// assert_eq!(report.status(), VerificationStatus::Pass);
-/// # Ok(())
-/// # }
-/// ```
-pub fn verify_archive_with_progress<P: AsRef<Path>>(
+/// `on_complete` is not called on failure; every `on_entry_start` is still
+/// paired with an `on_entry_complete`.
+pub(crate) fn verify_archive_with_progress<P: AsRef<Path>>(
     archive_path: P,
     config: &SecurityConfig,
-    options: &VerificationOptions,
+    options: VerificationOptions,
     progress: &mut dyn ProgressCallback,
 ) -> Result<VerificationReport> {
     let archive_path = archive_path.as_ref();
@@ -465,13 +370,13 @@ pub fn verify_archive_with_progress<P: AsRef<Path>>(
     let report = match format.family() {
         FormatFamily::Seekable(SeekableFormat::Zip) => {
             let file = std::fs::File::open(archive_path)?;
-            ZipArchive::new(file, config)?.verify_with_progress(config, *options, progress)?
+            ZipArchive::new(file, config)?.verify_with_progress(config, options, progress)?
         }
         FormatFamily::Seekable(SeekableFormat::SevenZ) => {
             let file = std::fs::File::open(archive_path)?;
-            SevenZArchive::new(file, config)?.verify_with_progress(config, *options, progress)?
+            SevenZArchive::new(file, config)?.verify_with_progress(config, options, progress)?
         }
-        FormatFamily::Tar(_) => verify_with(config, *options, progress, |listing| {
+        FormatFamily::Tar(_) => verify_with(config, options, progress, |listing| {
             list_detected(archive_path, format, config, listing)
         })?,
     };

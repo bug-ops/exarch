@@ -12,9 +12,9 @@ mod common;
 fuzz_target!(|data: &[u8]| {
     let config = common::config();
 
-    let mut archive = TarArchive::new(Cursor::new(data));
-    let _ = archive.list(config);
+    let archive = TarArchive::new(Cursor::new(data), config);
+    let _ = archive.list();
 
-    let mut archive = TarArchive::new(Cursor::new(data));
-    let _ = archive.verify(config, &common::verification_options());
+    let archive = TarArchive::new(Cursor::new(data), config);
+    let _ = archive.verify(&common::verification_options());
 });

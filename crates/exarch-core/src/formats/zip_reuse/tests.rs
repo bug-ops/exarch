@@ -599,13 +599,10 @@ fn extraction_into_memory_decodes_each_entry_once_and_keeps_the_same_files() {
 
         let (reader, plain_reads) = counted_zip_reader(&bytes);
         let mut plain = crate::MemorySink::default();
-        crate::extract_to_sink(
-            reader,
-            &mut plain,
-            &SecurityConfig::default(),
-            &crate::SinkOptions::default(),
-        )
-        .unwrap();
+        crate::SinkExtractRequest::new(&SecurityConfig::default())
+            .with_options(crate::SinkOptions::default())
+            .extract(reader, &mut plain)
+            .unwrap();
 
         let (reader, reads) = counted_zip_reader(&bytes);
         let (report, memory) = crate::extract_reader_to_memory(
@@ -655,12 +652,9 @@ fn a_replayed_entry_meets_the_sink_limit_at_the_same_byte_as_a_decoded_one() {
 
         let mut plain = crate::MemorySink::new(limit);
         let (reader, _) = counted_zip_reader(&bytes);
-        let decoded = crate::extract_to_sink(
-            reader,
-            &mut plain,
-            &SecurityConfig::default(),
-            &crate::SinkOptions::default(),
-        );
+        let decoded = crate::SinkExtractRequest::new(&SecurityConfig::default())
+            .with_options(crate::SinkOptions::default())
+            .extract(reader, &mut plain);
 
         assert_eq!(reused.is_ok(), fits);
         assert_eq!(decoded.is_ok(), fits);

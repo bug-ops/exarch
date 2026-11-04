@@ -265,7 +265,7 @@ impl MemoryExtractRequest {
 /// # Errors
 ///
 /// Returns the errors of
-/// [`extract_to_sink_with_progress`](crate::extract_to_sink_with_progress).
+/// [`SinkExtractRequest::extract`](crate::SinkExtractRequest::extract).
 ///
 /// # Examples
 ///
@@ -381,11 +381,11 @@ impl Write for MemoryFile {
 /// use std::path::Path;
 ///
 /// use exarch_core::ArchiveReader;
+/// use exarch_core::SinkExtractRequest;
 /// use exarch_core::SinkOptions;
 /// use exarch_core::MemoryEntry;
 /// use exarch_core::MemorySink;
 /// use exarch_core::SecurityConfig;
-/// use exarch_core::extract_to_sink;
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let mut builder = tar::Builder::new(Vec::new());
@@ -397,12 +397,10 @@ impl Write for MemoryFile {
 ///
 /// let mut sink = MemorySink::default();
 /// let reader = ArchiveReader::tar(io::Cursor::new(archive), None);
-/// extract_to_sink(
-///     reader,
-///     &mut sink,
-///     &SecurityConfig::default(),
-///     &SinkOptions::default(),
-/// )?;
+/// let config = SecurityConfig::default();
+/// SinkExtractRequest::new(&config)
+///     .with_options(SinkOptions::default())
+///     .extract(reader, &mut sink)?;
 /// assert_matches!(
 ///     sink.get(Path::new("docs/hello.txt")),
 ///     Some(MemoryEntry::File { data, .. }) if data == b"hello"

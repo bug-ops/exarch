@@ -117,8 +117,8 @@ impl From<MemoryEntry> for CallbackEntry {
 /// use exarch_core::CallbackSink;
 /// use exarch_core::MemoryEntry;
 /// use exarch_core::SecurityConfig;
+/// use exarch_core::SinkExtractRequest;
 /// use exarch_core::SinkOptions;
-/// use exarch_core::extract_to_sink;
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let mut builder = tar::Builder::new(Vec::new());
@@ -136,12 +136,10 @@ impl From<MemoryEntry> for CallbackEntry {
 ///     Ok(())
 /// });
 /// let reader = ArchiveReader::tar(io::Cursor::new(archive), None);
-/// extract_to_sink(
-///     reader,
-///     &mut sink,
-///     &SecurityConfig::default(),
-///     &SinkOptions::default(),
-/// )?;
+/// let config = SecurityConfig::default();
+/// SinkExtractRequest::new(&config)
+///     .with_options(SinkOptions::default())
+///     .extract(reader, &mut sink)?;
 /// assert_eq!(seen.len(), 1);
 /// assert_eq!(seen[0].1, b"hello");
 /// # Ok(())
@@ -308,7 +306,7 @@ impl<E> From<ArchiveError> for CallbackError<E> {
 ///
 /// [`CallbackError::Callback`] with the first error of `on_entry`, else
 /// [`CallbackError::Archive`] with the errors of
-/// [`extract_to_sink_with_progress`](crate::extract_to_sink_with_progress).
+/// [`SinkExtractRequest::extract`](crate::SinkExtractRequest::extract).
 ///
 /// # Examples
 ///
@@ -370,13 +368,10 @@ where
         })
     })
     .with_path_model(request.model);
-    let result = crate::extract_to_sink_with_progress(
-        reader,
-        &mut sink,
-        &request.config,
-        &request.options,
-        progress,
-    );
+    let result = crate::SinkExtractRequest::new(&request.config)
+        .with_options(request.options)
+        .with_progress(progress)
+        .extract(reader, &mut sink);
     match (failure, result) {
         (Some(err), _) => Err(CallbackError::Callback(err)),
         (None, Ok(report)) => Ok(report),

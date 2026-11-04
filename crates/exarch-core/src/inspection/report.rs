@@ -480,12 +480,15 @@ impl UnverifiedEntry {
 /// use exarch_core::IntegrityCheck;
 /// use exarch_core::SecurityConfig;
 /// use exarch_core::VerificationOptions;
-/// use exarch_core::verify_archive_with_options;
+/// use exarch_core::VerifyRequest;
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let options = VerificationOptions::default()
 ///     .with_integrity(IntegrityCheck::DecodeToEof(DecompressionBudget::DEFAULT));
-/// let report = verify_archive_with_options("a.7z", &SecurityConfig::default(), &options)?;
+/// let config = SecurityConfig::default();
+/// let report = VerifyRequest::new(&config)
+///     .with_options(options)
+///     .verify("a.7z")?;
 /// if let Some(gaps) = report.integrity_gaps() {
 ///     for (reason, count) in gaps.counts() {
 ///         println!("{reason}: {count}");

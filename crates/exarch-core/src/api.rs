@@ -8,16 +8,11 @@ use crate::CreateRequest;
 use crate::EntrySink;
 use crate::ExtractRequest;
 use crate::ExtractionReport;
-use crate::ListOptions;
-use crate::ListRequest;
 use crate::OutputFile;
 use crate::OutputFormat;
 use crate::ProgressCallback;
 use crate::Result;
 use crate::SecurityConfig;
-use crate::SinkExtractRequest;
-use crate::VerificationOptions;
-use crate::VerifyRequest;
 use crate::config::ExtractionOptions;
 use crate::creation::CreationConfig;
 use crate::creation::CreationReport;
@@ -81,53 +76,6 @@ pub fn extract_archive<P: AsRef<Path>, Q: AsRef<Path>>(
     ExtractRequest::new(config).extract(archive_path, output_dir)
 }
 
-/// Extracts an archive with progress reporting.
-///
-/// Same as `extract_archive` but accepts a `ProgressCallback` for
-/// real-time progress updates during extraction.
-///
-/// # Arguments
-///
-/// * `archive_path` - Path to the archive file
-/// * `output_dir` - Directory where files will be extracted
-/// * `config` - Security configuration for the extraction
-/// * `progress` - Callback for progress updates
-///
-/// # Errors
-///
-/// Returns an error if:
-/// - Archive file cannot be opened
-/// - Archive format is unsupported
-/// - Security validation fails
-/// - I/O operations fail
-///
-/// # Examples
-///
-/// ```no_run
-/// use exarch_core::NoopProgress;
-/// use exarch_core::SecurityConfig;
-/// use exarch_core::extract_archive_with_progress;
-///
-/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// let config = SecurityConfig::default();
-/// let mut progress = NoopProgress;
-/// let report =
-///     extract_archive_with_progress("archive.tar.gz", "/tmp/output", &config, &mut progress)?;
-/// println!("Extracted {} files", report.files_extracted);
-/// # Ok(())
-/// # }
-/// ```
-pub fn extract_archive_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
-    archive_path: P,
-    output_dir: Q,
-    config: &SecurityConfig,
-    progress: &mut dyn ProgressCallback,
-) -> Result<ExtractionReport> {
-    ExtractRequest::new(config)
-        .with_progress(progress)
-        .extract(archive_path, output_dir)
-}
-
 /// Extracts `archive_path` under a config that is already validated.
 pub(crate) fn extract_validated<P: AsRef<Path>, Q: AsRef<Path>>(
     archive_path: P,
@@ -156,64 +104,6 @@ pub(crate) fn extract_validated<P: AsRef<Path>, Q: AsRef<Path>>(
     }
 }
 
-/// Extracts an archive with extraction options and optional progress reporting.
-///
-/// Equivalent to [`ExtractRequest`] with the options and the progress callback
-/// set.
-///
-/// # Arguments
-///
-/// * `archive_path` - Path to the archive file
-/// * `output_dir` - Directory where files will be extracted
-/// * `config` - Security configuration for the extraction
-/// * `options` - Extraction behavior options (e.g., atomic mode)
-/// * `progress` - Callback for progress updates
-///
-/// # Errors
-///
-/// Returns an error if:
-/// - Archive file cannot be opened
-/// - Archive format is unsupported
-/// - Security validation fails
-/// - I/O operations fail
-/// - Atomic temp dir creation or rename fails
-///
-/// # Examples
-///
-/// ```no_run
-/// use exarch_core::ExtractionOptions;
-/// use exarch_core::NoopProgress;
-/// use exarch_core::SecurityConfig;
-/// use exarch_core::extract_archive_with_options_and_progress;
-///
-/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// let config = SecurityConfig::default();
-/// let options = ExtractionOptions::default().with_atomic(true);
-/// let mut progress = NoopProgress;
-/// let report = extract_archive_with_options_and_progress(
-///     "archive.tar.gz",
-///     "/tmp/output",
-///     &config,
-///     &options,
-///     &mut progress,
-/// )?;
-/// println!("Extracted {} files", report.files_extracted);
-/// # Ok(())
-/// # }
-/// ```
-pub fn extract_archive_with_options_and_progress<P: AsRef<Path>, Q: AsRef<Path>>(
-    archive_path: P,
-    output_dir: Q,
-    config: &SecurityConfig,
-    options: &ExtractionOptions,
-    progress: &mut dyn ProgressCallback,
-) -> Result<ExtractionReport> {
-    ExtractRequest::new(config)
-        .with_options(options.clone())
-        .with_progress(progress)
-        .extract(archive_path, output_dir)
-}
-
 /// Runs `extract` into `output_dir`, or into a staging directory that is
 /// renamed over `output_dir` on success when `options` ask for atomic
 /// extraction.
@@ -227,47 +117,6 @@ pub(crate) fn extract_staged(
     } else {
         extract(output_dir)
     }
-}
-
-/// Extracts an archive with extraction options (no progress reporting).
-///
-/// Convenience wrapper around [`extract_archive_with_options_and_progress`]
-/// that passes a no-op progress callback. Use this when you need
-/// [`ExtractionOptions`] but do not require progress updates.
-///
-/// # Errors
-///
-/// Returns an error if:
-/// - Archive file cannot be opened
-/// - Archive format is unsupported
-/// - Security validation fails
-/// - I/O operations fail
-/// - Atomic temp dir creation or rename fails
-///
-/// # Examples
-///
-/// ```no_run
-/// use exarch_core::ExtractionOptions;
-/// use exarch_core::SecurityConfig;
-/// use exarch_core::extract_archive_with_options;
-///
-/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// let config = SecurityConfig::default();
-/// let options = ExtractionOptions::default().with_atomic(true);
-/// let report = extract_archive_with_options("archive.tar.gz", "/tmp/output", &config, &options)?;
-/// println!("Extracted {} files", report.files_extracted);
-/// # Ok(())
-/// # }
-/// ```
-pub fn extract_archive_with_options<P: AsRef<Path>, Q: AsRef<Path>>(
-    archive_path: P,
-    output_dir: Q,
-    config: &SecurityConfig,
-    options: &ExtractionOptions,
-) -> Result<ExtractionReport> {
-    ExtractRequest::new(config)
-        .with_options(options.clone())
-        .extract(archive_path, output_dir)
 }
 
 #[expect(
@@ -458,57 +307,6 @@ pub fn create_archive<P: AsRef<Path>, Q: AsRef<Path>>(
     CreateRequest::new(config).create(&OutputFile::replace(output_path.as_ref()), sources)
 }
 
-/// Creates an archive with progress reporting.
-///
-/// Same as `create_archive` but accepts a `ProgressCallback` for
-/// real-time progress updates during creation.
-///
-/// # Arguments
-///
-/// * `output_path` - Path to the output archive file
-/// * `sources` - Source files and directories to include
-/// * `config` - Creation configuration
-/// * `progress` - Callback for progress updates
-///
-/// # Errors
-///
-/// Returns an error if:
-/// - Cannot determine archive format
-/// - Source files don't exist
-/// - I/O operations fail
-/// - Configuration is invalid
-///
-/// # Examples
-///
-/// ```no_run
-/// use exarch_core::NoopProgress;
-/// use exarch_core::create_archive_with_progress;
-/// use exarch_core::creation::CreationConfig;
-///
-/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// let config = CreationConfig::default();
-/// let mut progress = NoopProgress;
-/// let report = create_archive_with_progress(
-///     "output.tar.gz",
-///     &["src/", "Cargo.toml"],
-///     &config,
-///     &mut progress,
-/// )?;
-/// println!("Created archive with {} files", report.files_added);
-/// # Ok(())
-/// # }
-/// ```
-pub fn create_archive_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
-    output_path: P,
-    sources: &[Q],
-    config: &CreationConfig,
-    progress: &mut dyn ProgressCallback,
-) -> Result<CreationReport> {
-    CreateRequest::new(config)
-        .with_progress(progress)
-        .create(&OutputFile::replace(output_path.as_ref()), sources)
-}
-
 /// Lists archive contents without extracting.
 ///
 /// Returns a manifest containing metadata for all entries in the archive.
@@ -551,43 +349,6 @@ pub fn list_archive<P: AsRef<Path>>(
     crate::inspection::list_archive(archive_path, config)
 }
 
-/// Lists archive contents without extracting, with
-/// [`ListOptions`].
-///
-/// [`ListOptions::stored_targets`](crate::ListOptions::stored_targets) set to
-/// [`StoredTargets::Read`](crate::StoredTargets::Read) reads 7z symlink
-/// targets, which decodes the blocks that hold them; by default they are left
-/// unread, so listing decodes no entry data. This is a Rust API option only:
-/// the Python and Node `list_archive` leave 7z targets unread.
-///
-/// # Errors
-///
-/// Same as [`list_archive`].
-///
-/// # Examples
-///
-/// ```no_run
-/// use exarch_core::ListOptions;
-/// use exarch_core::SecurityConfig;
-/// use exarch_core::StoredTargets;
-/// use exarch_core::list_archive_with_options;
-///
-/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// let config = SecurityConfig::default();
-/// let options = ListOptions::default().with_stored_targets(StoredTargets::Read);
-/// let manifest = list_archive_with_options("archive.7z", &config, &options)?;
-/// println!("Archive contains {} entries", manifest.total_entries());
-/// # Ok(())
-/// # }
-/// ```
-pub fn list_archive_with_options<P: AsRef<Path>>(
-    archive_path: P,
-    config: &SecurityConfig,
-    options: &crate::ListOptions,
-) -> Result<ArchiveManifest> {
-    crate::inspection::list_archive_with_options(archive_path, config, options)
-}
-
 /// Verifies archive security without extracting.
 ///
 /// Performs metadata-only validation:
@@ -597,7 +358,8 @@ pub fn list_archive_with_options<P: AsRef<Path>>(
 /// Payload integrity (checksums, decode-to-end) is not verified: the report's
 /// `integrity_status` is
 /// [`IntegrityStatus::Skipped`](crate::IntegrityStatus::Skipped);
-/// use [`verify_archive_with_options`] to request it.
+/// use [`VerifyRequest`](crate::VerifyRequest) with `VerificationOptions` to
+/// request it.
 ///
 /// # Arguments
 ///
@@ -646,392 +408,6 @@ pub fn verify_archive<P: AsRef<Path>>(
     config: &SecurityConfig,
 ) -> Result<VerificationReport> {
     crate::inspection::verify_archive(archive_path, config)
-}
-
-/// Verifies archive security, optionally checking payload integrity.
-///
-/// See [`crate::inspection::verify_archive_with_options`] for what each
-/// integrity status means per format.
-///
-/// # Errors
-///
-/// Returns the errors of [`verify_archive`]; with integrity requested, a TAR
-/// entry whose content fails to decode is also an error.
-///
-/// # Examples
-///
-/// ```no_run
-/// use exarch_core::SecurityConfig;
-/// use exarch_core::VerificationOptions;
-/// use exarch_core::verify_archive_with_options;
-///
-/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// let report = verify_archive_with_options(
-///     "archive.zip",
-///     &SecurityConfig::default(),
-///     &VerificationOptions::default(),
-/// )?;
-/// println!("{}", report.integrity_status());
-/// # Ok(())
-/// # }
-/// ```
-pub fn verify_archive_with_options<P: AsRef<Path>>(
-    archive_path: P,
-    config: &SecurityConfig,
-    options: &crate::VerificationOptions,
-) -> Result<VerificationReport> {
-    crate::inspection::verify_archive_with_options(archive_path, config, options)
-}
-
-/// Lists the contents of an archive read from a reader.
-///
-/// The reader counterpart of [`list_archive_with_options`]: the same listing,
-/// limits and failures, for an archive that is not a file on disk.
-///
-/// # Errors
-///
-/// Same as [`list_archive`], except that nothing is opened or detected: a
-/// malformed archive fails as it would from a file.
-///
-/// # Examples
-///
-/// ```
-/// use exarch_core::ArchiveReader;
-/// use exarch_core::ListOptions;
-/// use exarch_core::SecurityConfig;
-/// use exarch_core::list_reader;
-///
-/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// let mut builder = tar::Builder::new(Vec::new());
-/// let mut header = tar::Header::new_gnu();
-/// header.set_size(2);
-/// header.set_mode(0o644);
-/// builder.append_data(&mut header, "a.txt", &b"hi"[..])?;
-/// let bytes = builder.into_inner()?;
-///
-/// let reader = ArchiveReader::tar(std::io::Cursor::new(bytes), None);
-/// let manifest = list_reader(reader, &SecurityConfig::default(), &ListOptions::default())?;
-/// assert_eq!(manifest.total_entries(), 1);
-/// # Ok(())
-/// # }
-/// ```
-pub fn list_reader(
-    reader: ArchiveReader<'_>,
-    config: &SecurityConfig,
-    options: &ListOptions,
-) -> Result<ArchiveManifest> {
-    ListRequest::new(config)
-        .with_options(*options)
-        .list_reader(reader)
-}
-
-/// Lists the contents of an archive read from a reader, reporting progress.
-///
-/// [`list_reader`] with a [`ProgressCallback`], which sees the events of
-/// [`list_archive_with_progress`](crate::list_archive_with_progress): one
-/// `on_entry_start` / `on_entry_complete` pair per listed entry, `total` 0 for
-/// TAR, and `on_complete` once after the manifest was built.
-///
-/// # Errors
-///
-/// Same as [`list_reader`]. `on_complete` is not called on failure.
-///
-/// # Examples
-///
-/// ```
-/// use exarch_core::ArchiveReader;
-/// use exarch_core::ListOptions;
-/// use exarch_core::NoopProgress;
-/// use exarch_core::SecurityConfig;
-/// use exarch_core::list_reader_with_progress;
-///
-/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// let mut builder = tar::Builder::new(Vec::new());
-/// let mut header = tar::Header::new_gnu();
-/// header.set_size(2);
-/// header.set_mode(0o644);
-/// builder.append_data(&mut header, "a.txt", &b"hi"[..])?;
-/// let bytes = builder.into_inner()?;
-///
-/// let reader = ArchiveReader::tar(std::io::Cursor::new(bytes), None);
-/// let manifest = list_reader_with_progress(
-///     reader,
-///     &SecurityConfig::default(),
-///     &ListOptions::default(),
-///     &mut NoopProgress,
-/// )?;
-/// assert_eq!(manifest.total_entries(), 1);
-/// # Ok(())
-/// # }
-/// ```
-pub fn list_reader_with_progress(
-    reader: ArchiveReader<'_>,
-    config: &SecurityConfig,
-    options: &ListOptions,
-    progress: &mut dyn ProgressCallback,
-) -> Result<ArchiveManifest> {
-    ListRequest::new(config)
-        .with_options(*options)
-        .with_progress(progress)
-        .list_reader(reader)
-}
-
-/// Verifies an archive read from a reader, optionally checking payload
-/// integrity.
-///
-/// The reader counterpart of [`verify_archive_with_options`]; nothing is
-/// written and no filesystem path is needed.
-///
-/// # Errors
-///
-/// Same as [`verify_archive_with_options`].
-///
-/// # Examples
-///
-/// ```
-/// use exarch_core::ArchiveReader;
-/// use exarch_core::SecurityConfig;
-/// use exarch_core::VerificationOptions;
-/// use exarch_core::VerificationStatus;
-/// use exarch_core::verify_reader;
-///
-/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// let mut builder = tar::Builder::new(Vec::new());
-/// let mut header = tar::Header::new_gnu();
-/// header.set_size(2);
-/// header.set_mode(0o644);
-/// builder.append_data(&mut header, "a.txt", &b"hi"[..])?;
-/// let bytes = builder.into_inner()?;
-///
-/// let reader = ArchiveReader::tar(std::io::Cursor::new(bytes), None);
-/// let report = verify_reader(
-///     reader,
-///     &SecurityConfig::default(),
-///     &VerificationOptions::default(),
-/// )?;
-/// assert_eq!(report.status(), VerificationStatus::Pass);
-/// # Ok(())
-/// # }
-/// ```
-pub fn verify_reader(
-    reader: ArchiveReader<'_>,
-    config: &SecurityConfig,
-    options: &VerificationOptions,
-) -> Result<VerificationReport> {
-    VerifyRequest::new(config)
-        .with_options(*options)
-        .verify_reader(reader)
-}
-
-/// Verifies an archive read from a reader, reporting progress.
-///
-/// [`verify_reader`] with a [`ProgressCallback`], which sees the events of
-/// [`verify_archive_with_progress`](crate::verify_archive_with_progress): one
-/// `on_entry_start` / `on_entry_complete` pair per scanned entry, and
-/// `on_complete` once when a report is returned, including one whose status
-/// is `Fail`.
-///
-/// # Errors
-///
-/// Same as [`verify_reader`]. `on_complete` is not called on failure.
-///
-/// # Examples
-///
-/// ```
-/// use exarch_core::ArchiveReader;
-/// use exarch_core::NoopProgress;
-/// use exarch_core::SecurityConfig;
-/// use exarch_core::VerificationOptions;
-/// use exarch_core::VerificationStatus;
-/// use exarch_core::verify_reader_with_progress;
-///
-/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// let mut builder = tar::Builder::new(Vec::new());
-/// let mut header = tar::Header::new_gnu();
-/// header.set_size(2);
-/// header.set_mode(0o644);
-/// builder.append_data(&mut header, "a.txt", &b"hi"[..])?;
-/// let bytes = builder.into_inner()?;
-///
-/// let reader = ArchiveReader::tar(std::io::Cursor::new(bytes), None);
-/// let report = verify_reader_with_progress(
-///     reader,
-///     &SecurityConfig::default(),
-///     &VerificationOptions::default(),
-///     &mut NoopProgress,
-/// )?;
-/// assert_eq!(report.status(), VerificationStatus::Pass);
-/// # Ok(())
-/// # }
-/// ```
-pub fn verify_reader_with_progress(
-    reader: ArchiveReader<'_>,
-    config: &SecurityConfig,
-    options: &VerificationOptions,
-    progress: &mut dyn ProgressCallback,
-) -> Result<VerificationReport> {
-    VerifyRequest::new(config)
-        .with_options(*options)
-        .with_progress(progress)
-        .verify_reader(reader)
-}
-
-/// Extracts an archive read from a reader into an [`EntrySink`].
-///
-/// Equivalent to [`extract_to_sink_with_progress`] with a
-/// [`NoopProgress`](crate::NoopProgress).
-///
-/// Every entry passes the validation pipeline of [`extract_archive`] and is
-/// then delivered to `sink` instead of being written under a directory. See the
-/// [`sink`](crate::sink) module for what the sink may rely on and what it must
-/// do.
-///
-/// # Errors
-///
-/// Returns the errors of [`extract_archive`], plus any error the sink returns:
-/// [`ArchiveError::Io`] if no entry was delivered yet,
-/// [`ArchiveError::PartialExtraction`] wrapping it afterwards. A sink that
-/// reports [`SinkFull`](crate::SinkFull) ends the extraction with a
-/// [`QuotaResource::SinkCapacity`](crate::QuotaResource::SinkCapacity) quota
-/// error.
-///
-/// A 7z source is read in two phases: everything the file table can refuse
-/// (admission, ratios, quotas, link policy, paths, name lengths) is refused
-/// before the sink sees an entry, then the entries are decoded and delivered in
-/// archive order.
-///
-/// # Examples
-///
-/// ```
-/// use std::io;
-///
-/// use exarch_core::AdmittedSize;
-/// use exarch_core::ArchiveReader;
-/// use exarch_core::CheckedLinkTarget;
-/// use exarch_core::EntrySink;
-/// use exarch_core::SafePath;
-/// use exarch_core::SanitizedMode;
-/// use exarch_core::SecurityConfig;
-/// use exarch_core::SinkOptions;
-/// use exarch_core::extract_to_sink;
-///
-/// #[derive(Default)]
-/// struct Count(usize);
-///
-/// impl EntrySink for Count {
-///     type File = io::Sink;
-///
-///     fn create_directory(&mut self, _: &SafePath) -> io::Result<()> {
-///         Ok(())
-///     }
-///
-///     fn create_file(
-///         &mut self,
-///         _: &SafePath,
-///         _: Option<SanitizedMode>,
-///         _: AdmittedSize,
-///     ) -> io::Result<io::Sink> {
-///         Ok(io::sink())
-///     }
-///
-///     fn finish_file(&mut self, _: &SafePath, _: io::Sink) -> io::Result<()> {
-///         self.0 += 1;
-///         Ok(())
-///     }
-///
-///     fn create_symlink(&mut self, _: &SafePath, _: CheckedLinkTarget<'_>) -> io::Result<()> {
-///         Ok(())
-///     }
-///
-///     fn create_hardlink(&mut self, _: &SafePath, _: &SafePath) -> io::Result<()> {
-///         Ok(())
-///     }
-/// }
-///
-/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// let mut builder = tar::Builder::new(Vec::new());
-/// let mut header = tar::Header::new_gnu();
-/// header.set_size(2);
-/// header.set_mode(0o644);
-/// builder.append_data(&mut header, "a.txt", &b"hi"[..])?;
-/// let bytes = builder.into_inner()?;
-///
-/// let mut sink = Count::default();
-/// let reader = ArchiveReader::tar(io::Cursor::new(bytes), None);
-/// extract_to_sink(
-///     reader,
-///     &mut sink,
-///     &SecurityConfig::default(),
-///     &SinkOptions::default(),
-/// )?;
-/// assert_eq!(sink.0, 1);
-/// # Ok(())
-/// # }
-/// ```
-pub fn extract_to_sink<S: EntrySink>(
-    reader: ArchiveReader<'_>,
-    sink: &mut S,
-    config: &SecurityConfig,
-    options: &SinkOptions,
-) -> Result<ExtractionReport> {
-    SinkExtractRequest::new(config)
-        .with_options(*options)
-        .extract(reader, sink)
-}
-
-/// Extracts an archive read from a reader into an [`EntrySink`], reporting
-/// progress.
-///
-/// Behaves as [`extract_to_sink`]; `progress` receives the same events as the
-/// path-based [`extract_archive_with_progress`].
-///
-/// # Errors
-///
-/// Returns the errors of [`extract_to_sink`].
-///
-/// # Examples
-///
-/// ```
-/// use std::io;
-///
-/// use exarch_core::ArchiveReader;
-/// use exarch_core::MemorySink;
-/// use exarch_core::NoopProgress;
-/// use exarch_core::SecurityConfig;
-/// use exarch_core::SinkOptions;
-/// use exarch_core::extract_to_sink_with_progress;
-///
-/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// let mut builder = tar::Builder::new(Vec::new());
-/// let mut header = tar::Header::new_gnu();
-/// header.set_size(2);
-/// header.set_mode(0o644);
-/// builder.append_data(&mut header, "a.txt", &b"hi"[..])?;
-/// let bytes = builder.into_inner()?;
-///
-/// let mut sink = MemorySink::default();
-/// let report = extract_to_sink_with_progress(
-///     ArchiveReader::tar(io::Cursor::new(bytes), None),
-///     &mut sink,
-///     &SecurityConfig::default(),
-///     &SinkOptions::default(),
-///     &mut NoopProgress,
-/// )?;
-/// assert_eq!(report.files_extracted, 1);
-/// # Ok(())
-/// # }
-/// ```
-pub fn extract_to_sink_with_progress<S: EntrySink>(
-    reader: ArchiveReader<'_>,
-    sink: &mut S,
-    config: &SecurityConfig,
-    options: &SinkOptions,
-    progress: &mut dyn ProgressCallback,
-) -> Result<ExtractionReport> {
-    SinkExtractRequest::new(config)
-        .with_options(*options)
-        .with_progress(progress)
-        .extract(reader, sink)
 }
 
 /// [`extract_to_sink_with_progress`], with a ZIP archive's census output kept
@@ -1289,13 +665,10 @@ mod tests {
             skip_duplicates: true,
             ..ExtractionOptions::default()
         };
-        let result = extract_archive_with_options_and_progress(
-            PathBuf::from("nonexistent.tar.gz"),
-            dest.path(),
-            &SecurityConfig::default(),
-            &options,
-            &mut NoopProgress,
-        );
+        let result = ExtractRequest::new(&SecurityConfig::default())
+            .with_options(options)
+            .with_progress(&mut NoopProgress)
+            .extract(PathBuf::from("nonexistent.tar.gz"), dest.path());
         assert!(result.is_err());
     }
 
@@ -1307,12 +680,9 @@ mod tests {
             skip_duplicates: true,
             ..ExtractionOptions::default()
         };
-        let result = extract_archive_with_options(
-            PathBuf::from("nonexistent.tar.gz"),
-            dest.path(),
-            &SecurityConfig::default(),
-            &options,
-        );
+        let result = ExtractRequest::new(&SecurityConfig::default())
+            .with_options(options)
+            .extract(PathBuf::from("nonexistent.tar.gz"), dest.path());
         assert!(result.is_err());
     }
 
@@ -1338,12 +708,9 @@ mod tests {
             skip_duplicates: true,
             ..ExtractionOptions::default()
         };
-        let result = extract_archive_with_options(
-            &archive_path,
-            &output_dir,
-            &SecurityConfig::default(),
-            &options,
-        );
+        let result = ExtractRequest::new(&SecurityConfig::default())
+            .with_options(options)
+            .extract(&archive_path, &output_dir);
 
         assert!(result.is_ok());
         assert!(output_dir.exists());
@@ -1366,12 +733,9 @@ mod tests {
             skip_duplicates: true,
             ..ExtractionOptions::default()
         };
-        let result = extract_archive_with_options(
-            PathBuf::from("nonexistent_archive.tar.gz"),
-            &output_dir,
-            &SecurityConfig::default(),
-            &options,
-        );
+        let result = ExtractRequest::new(&SecurityConfig::default())
+            .with_options(options)
+            .extract(PathBuf::from("nonexistent_archive.tar.gz"), &output_dir);
 
         assert!(result.is_err());
         // Output dir must not exist
@@ -1407,12 +771,9 @@ mod tests {
             skip_duplicates: true,
             ..ExtractionOptions::default()
         };
-        let result = extract_archive_with_options(
-            &archive_path,
-            &output_dir,
-            &SecurityConfig::default(),
-            &options,
-        );
+        let result = ExtractRequest::new(&SecurityConfig::default())
+            .with_options(options)
+            .extract(&archive_path, &output_dir);
 
         // Should fail with OutputExists or Io (platform dependent rename
         // semantics)
@@ -1463,13 +824,10 @@ mod tests {
             finished: false,
         };
 
-        let report = extract_archive_with_progress(
-            &archive_path,
-            dest.path(),
-            &SecurityConfig::default(),
-            &mut progress,
-        )
-        .unwrap();
+        let report = ExtractRequest::new(&SecurityConfig::default())
+            .with_progress(&mut progress)
+            .extract(&archive_path, dest.path())
+            .unwrap();
 
         assert!(report.files_extracted >= 2, "expected at least 2 files");
         assert!(progress.started >= 2, "on_entry_start not called");
@@ -1518,13 +876,10 @@ mod tests {
             completed: 0,
             finished: false,
         };
-        let report = extract_archive_with_progress(
-            &archive_path,
-            dest.path(),
-            &SecurityConfig::default(),
-            &mut progress,
-        )
-        .unwrap();
+        let report = ExtractRequest::new(&SecurityConfig::default())
+            .with_progress(&mut progress)
+            .extract(&archive_path, dest.path())
+            .unwrap();
 
         assert!(report.files_extracted >= 2, "expected at least 2 files");
         assert!(progress.started >= 2, "on_entry_start not called for ZIP");
@@ -1572,13 +927,10 @@ mod tests {
             completed: 0,
             finished: false,
         };
-        let report = extract_archive_with_progress(
-            &fixture,
-            dest.path(),
-            &SecurityConfig::default(),
-            &mut progress,
-        )
-        .unwrap();
+        let report = ExtractRequest::new(&SecurityConfig::default())
+            .with_progress(&mut progress)
+            .extract(&fixture, dest.path())
+            .unwrap();
 
         assert!(
             report.files_extracted >= 1,
@@ -1623,13 +975,10 @@ mod tests {
 
         let dest = tempfile::TempDir::new().unwrap();
         let mut progress = ByteTracker { total: 0 };
-        let report = extract_archive_with_progress(
-            &archive_path,
-            dest.path(),
-            &SecurityConfig::default(),
-            &mut progress,
-        )
-        .unwrap();
+        let report = ExtractRequest::new(&SecurityConfig::default())
+            .with_progress(&mut progress)
+            .extract(&archive_path, dest.path())
+            .unwrap();
 
         assert!(
             report.bytes_written > 0,
@@ -1674,13 +1023,10 @@ mod tests {
 
         let dest = tempfile::TempDir::new().unwrap();
         let mut progress = ByteTracker { total: 0 };
-        let report = extract_archive_with_progress(
-            &archive_path,
-            dest.path(),
-            &SecurityConfig::default(),
-            &mut progress,
-        )
-        .unwrap();
+        let report = ExtractRequest::new(&SecurityConfig::default())
+            .with_progress(&mut progress)
+            .extract(&archive_path, dest.path())
+            .unwrap();
 
         assert!(
             report.bytes_written > 0,
@@ -1722,13 +1068,10 @@ mod tests {
 
         let dest = tempfile::TempDir::new().unwrap();
         let mut progress = ByteTracker { total: 0 };
-        let report = extract_archive_with_progress(
-            &fixture,
-            dest.path(),
-            &SecurityConfig::default(),
-            &mut progress,
-        )
-        .unwrap();
+        let report = ExtractRequest::new(&SecurityConfig::default())
+            .with_progress(&mut progress)
+            .extract(&fixture, dest.path())
+            .unwrap();
 
         assert!(
             report.bytes_written > 0,

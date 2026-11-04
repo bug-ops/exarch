@@ -1,7 +1,7 @@
 # exarch-core fuzzing harness
 
 `cargo-fuzz` (libFuzzer) targets for the untrusted archive parsers in
-`exarch-core`, the in-memory path model behind `extract_to_sink`, and reader
+`exarch-core`, the in-memory path model behind `SinkExtractRequest`, and reader
 format detection. This narrows the verification gap tracked in #577 — it does
 not close it. Seven targets, 300 seconds each, run weekly on a corpus that
 persists across runs via CI cache; that is a real but narrow
@@ -32,7 +32,7 @@ code. It has its own `Cargo.toml`, `[workspace]` table, and committed
 | `zip` | `ZipArchive` parsing (central directory, per-entry headers) |
 | `sevenz` | `SevenZArchive` parsing (header, solid-block decode + memory cap — reachable since `allow_solid_archives` is enabled) |
 | `safe_path` | `SafePath::validate` directly, on raw entry-name bytes, with symlinks/hardlinks allowed so escape-detection logic is reachable |
-| `sink` | `extract_to_sink` into a `MemorySink` under both path models and both duplicate policies, with a check after every run (success or error) that no stored path sits below a stored symlink, that every stored symlink target stays inside the root when resolved through the other stored links, and that no stored path has a `..`, root or prefix component |
+| `sink` | `SinkExtractRequest` into a `MemorySink` under both path models and both duplicate policies, with a check after every run (success or error) that no stored path sits below a stored symlink, that every stored symlink target stays inside the root when resolved through the other stored links, and that no stored path has a `..`, root or prefix component |
 | `detect` | `ArchiveReader::detect` restores the stream position from any offset; `detect_stream` replays the bytes it consumed, so the detected reader lists the same archive as one given the detected format explicitly |
 | `extract_archive` | The full pipeline: format detection (magic-byte path only, see below), decompression, all three handlers, real file writes (atomic extraction), with a containment check after every call so a successful path-traversal/symlink escape crashes the target instead of passing silently |
 

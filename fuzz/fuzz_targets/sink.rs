@@ -26,7 +26,6 @@ use exarch_core::MemorySink;
 use exarch_core::PathModel;
 use exarch_core::SinkExtractRequest;
 use exarch_core::SinkOptions;
-use exarch_core::extract_to_sink;
 use libfuzzer_sys::fuzz_target;
 use unicode_normalization::UnicodeNormalization;
 

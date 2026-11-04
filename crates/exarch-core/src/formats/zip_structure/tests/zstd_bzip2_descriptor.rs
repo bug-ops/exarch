@@ -334,14 +334,14 @@ fn the_census_does_not_decode_a_zstd_window_above_the_limit_it_runs_under() {
 }
 
 #[test]
-fn a_window_the_census_skipped_cannot_be_rebound_to_a_looser_config() {
+fn a_window_the_census_skipped_does_not_serve_a_looser_config() {
     let built = zstd_entry_with_window(21);
     let strict = config_with_memory(ZipConsistencyPolicy::Enforce, MIB);
     let looser = config_with_memory(ZipConsistencyPolicy::Enforce, 4 * MIB);
 
     let open = || ZipArchive::new(Cursor::new(built.bytes.clone()), &strict).unwrap();
     assert_eq!(open().structure().zstd_census_decodes(), 0);
-    assert!(open().rebind(&looser).is_none());
+    assert!(!open().serves(&looser));
     assert_decoder_memory_refusal(&extract_with(open()), "strict");
 
     let reopened = ZipArchive::new(Cursor::new(built.bytes), &looser).unwrap();
@@ -353,7 +353,8 @@ fn a_census_that_decoded_the_window_serves_a_looser_config() {
     let built = zstd_entry_with_window(21);
     let looser = config_with_memory(ZipConsistencyPolicy::Enforce, 4 * MIB);
     let opened_default = open_bytes(built.bytes, &SecurityConfig::default());
-    extract_with(opened_default.rebind(&looser).unwrap()).unwrap();
+    assert!(opened_default.serves(&looser));
+    extract_with(opened_default.rebind(&looser)).unwrap();
 }
 
 #[test]

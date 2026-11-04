@@ -953,7 +953,7 @@ impl ArchiveError {
     /// Marks a [`Self::PartialExtraction`] as discarded by atomic rollback;
     /// any other error is returned unchanged.
     ///
-    /// [`extract_archive_with_options`](crate::extract_archive_with_options)
+    /// [`ExtractRequest`](crate::ExtractRequest)
     /// applies this itself for atomic extraction. Callers that stage and
     /// discard output on their own can use it to keep the reported
     /// [`PartialWrites`] truthful.

@@ -620,15 +620,15 @@ impl<R: Read + Seek> ZipArchive<R> {
     /// Re-binds the opened archive to `config` for the extraction that follows
     /// a list pass run under a narrowed policy.
     ///
-    /// Returns `None` when what the census kept cannot serve `config` (see
-    /// [`serves`](Self::serves)); the caller then opens the archive again under
-    /// `config`.
-    pub(crate) fn rebind(mut self, config: &SecurityConfig) -> Option<Self> {
-        if !self.serves(config) {
-            return None;
-        }
+    /// The two policies differ only in flags that are not inputs of the census
+    /// (see [`serves`](Self::serves)); debug builds assert it.
+    pub(crate) fn rebind(mut self, config: &SecurityConfig) -> Self {
+        debug_assert!(
+            self.serves(config),
+            "what the census kept must serve the config it is rebound to"
+        );
         self.config = Arc::new(config.clone());
-        Some(self)
+        self
     }
 
     /// Whether an extraction under `config` may use this archive as opened,

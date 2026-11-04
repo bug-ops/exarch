@@ -22,9 +22,9 @@ pub(crate) mod sealed {
 /// [`SevenZArchive`]) and sealed: a new format is added in the crate, where its
 /// detection, creation family and bindings are wired together.
 ///
-/// A handle is opened under the [`SecurityConfig`] whose limits and policy
-/// every operation enforces, so the policy a ZIP census ran under and the
-/// policy of the operation cannot differ.
+/// A handle is opened under the [`SecurityConfig`](crate::SecurityConfig) whose
+/// limits and policy every operation enforces, so the policy a ZIP census ran
+/// under and the policy of the operation cannot differ.
 ///
 /// Every operation consumes the handler: a forward-only reader (TAR) is valid
 /// for exactly one pass, and the type system rejects a second one. The trait is

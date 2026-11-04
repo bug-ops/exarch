@@ -1,6 +1,6 @@
 //! Extraction into caller-owned storage instead of a directory.
 //!
-//! [`extract_to_sink`](crate::extract_to_sink) runs the same validation
+//! [`SinkExtractRequest`](crate::SinkExtractRequest) runs the same validation
 //! pipeline as [`extract_archive`](crate::extract_archive) (quotas, ratio
 //! limits, path and link checks, the per-format gates) but hands each entry to
 //! an [`EntrySink`], so an archive can be unpacked into memory, an object
@@ -85,8 +85,8 @@
 //! use exarch_core::SafePath;
 //! use exarch_core::SanitizedMode;
 //! use exarch_core::SecurityConfig;
+//! use exarch_core::SinkExtractRequest;
 //! use exarch_core::SinkOptions;
-//! use exarch_core::extract_to_sink;
 //!
 //! #[derive(Default)]
 //! struct MapSink(BTreeMap<PathBuf, Vec<u8>>);
@@ -135,12 +135,10 @@
 //!
 //! let mut sink = MapSink::default();
 //! let reader = ArchiveReader::tar(io::Cursor::new(archive), None);
-//! let report = extract_to_sink(
-//!     reader,
-//!     &mut sink,
-//!     &SecurityConfig::default(),
-//!     &SinkOptions::default(),
-//! )?;
+//! let config = SecurityConfig::default();
+//! let report = SinkExtractRequest::new(&config)
+//!     .with_options(SinkOptions::default())
+//!     .extract(reader, &mut sink)?;
 //! assert_eq!(report.files_extracted, 1);
 //! assert_eq!(sink.0[Path::new("docs/hello.txt")], b"hello");
 //! # Ok(())

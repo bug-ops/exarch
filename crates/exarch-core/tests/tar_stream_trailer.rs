@@ -19,7 +19,7 @@ use exarch_core::ExtractRequest;
 use exarch_core::ExtractionOptions;
 use exarch_core::IntegrityCheck;
 use exarch_core::IntegrityStatus;
-use exarch_core::ListOptions;
+use exarch_core::ListRequest;
 use exarch_core::MemoryExtractRequest;
 use exarch_core::NoopProgress;
 use exarch_core::PolicySetting;
@@ -33,7 +33,6 @@ use exarch_core::extract_reader_to_memory;
 use exarch_core::formats::TarArchive;
 use exarch_core::formats::traits::ArchiveFormat;
 use exarch_core::list_archive;
-use exarch_core::list_archive_for_extraction;
 use exarch_core::verify_archive;
 use tempfile::TempDir;
 
@@ -365,25 +364,12 @@ fn integrity_check_refuses_an_over_cap_tail_and_fails_a_bad_crc() {
 }
 
 #[test]
-fn replay_enforces_the_extract_configs_trailer_limit() {
+fn the_list_pass_enforces_the_extract_configs_trailer_limit() {
     let dir = TempDir::new().unwrap();
     let archive = write(&dir, "a.tar.gz", &gzip_with_zero_member(2 * MIB));
-    let listed = list_archive_for_extraction(
-        &archive,
-        &SecurityConfig::default(),
-        &ListOptions::default(),
-        exarch_core::DecodeReuse::default(),
-    )
-    .unwrap();
-    let out = TempDir::new().unwrap();
 
-    let error = listed
-        .extract_under(
-            out.path(),
-            &config_with_tail_limit(SMALL_LIMIT),
-            &ExtractionOptions::default(),
-            &mut NoopProgress,
-        )
+    let error = ListRequest::new(&config_with_tail_limit(SMALL_LIMIT))
+        .for_extraction(&archive, exarch_core::DecodeReuse::default())
         .unwrap_err();
 
     assert_over_cap(&error);

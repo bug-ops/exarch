@@ -1,8 +1,9 @@
 //! Archive creation into a caller-supplied writer instead of a path.
 //!
-//! [`ArchiveWriter`] is the destination of [`create_to_writer`]. The
-//! constructors encode what each format needs: a TAR stream is forward-only, so
-//! any `Write` will do, while ZIP patches earlier records and needs `Seek`. The
+//! [`ArchiveWriter`] is the destination of
+//! [`CreateRequest::write`](crate::CreateRequest::write). The constructors
+//! encode what each format needs: a TAR stream is forward-only, so any `Write`
+//! will do, while ZIP patches earlier records and needs `Seek`. The
 //! format is stated by the caller; nothing is derived from a file name.
 //!
 //! On error the writer may already hold a partial archive; the caller owns it
@@ -13,7 +14,6 @@ use std::io::Write;
 use std::path::Path;
 
 use crate::ArchiveError;
-use crate::CreateRequest;
 use crate::CreationConfig;
 use crate::CreationReport;
 use crate::ProgressCallback;
@@ -185,136 +185,11 @@ impl<'a> ArchiveWriter<'a> {
     }
 }
 
-/// Creates an archive from `sources` into `writer`.
-///
-/// Same as [`create_archive`](crate::create_archive) with the output in a
-/// writer. The writer fixes the format.
-/// `CreationReport::bytes_compressed` is the number of bytes written to it.
-///
-/// # Errors
-///
-/// Returns an error if:
-/// - the configuration is invalid
-/// - a source does not exist or cannot be read
-/// - writing to the writer fails
-///
-/// # Examples
-///
-/// ```
-/// use exarch_core::ArchiveWriter;
-/// use exarch_core::CreationConfig;
-/// use exarch_core::create_to_writer;
-/// use exarch_core::formats::CompressionCodec;
-///
-/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// let src = tempfile::tempdir()?;
-/// std::fs::write(src.path().join("a.txt"), b"hello")?;
-///
-/// let mut buf = Vec::new();
-/// let report = create_to_writer(
-///     ArchiveWriter::tar(&mut buf, Some(CompressionCodec::Gzip)),
-///     &[src.path()],
-///     &CreationConfig::default(),
-/// )?;
-/// assert_eq!(report.bytes_compressed, buf.len() as u64);
-/// # Ok(())
-/// # }
-/// ```
-pub fn create_to_writer<P: AsRef<Path>>(
-    writer: ArchiveWriter<'_>,
-    sources: &[P],
-    config: &CreationConfig,
-) -> Result<CreationReport> {
-    CreateRequest::new(config).write(writer, sources)
-}
-
-/// Creates an archive from `sources` into `writer`, reporting progress.
-///
-/// Same as [`create_to_writer`] with a [`ProgressCallback`].
-///
-/// # Errors
-///
-/// Same as [`create_to_writer`].
-///
-/// # Examples
-///
-/// ```
-/// use exarch_core::ArchiveWriter;
-/// use exarch_core::CreationConfig;
-/// use exarch_core::NoopProgress;
-/// use exarch_core::create_to_writer_with_progress;
-/// use std::io::Cursor;
-///
-/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// let src = tempfile::tempdir()?;
-/// std::fs::write(src.path().join("a.txt"), b"hello")?;
-///
-/// let mut out = Cursor::new(Vec::new());
-/// let report = create_to_writer_with_progress(
-///     ArchiveWriter::zip(&mut out),
-///     &[src.path()],
-///     &CreationConfig::default(),
-///     &mut NoopProgress,
-/// )?;
-/// assert_eq!(report.files_added, 1);
-/// # Ok(())
-/// # }
-/// ```
-pub fn create_to_writer_with_progress<P: AsRef<Path>>(
-    writer: ArchiveWriter<'_>,
-    sources: &[P],
-    config: &CreationConfig,
-    progress: &mut dyn ProgressCallback,
-) -> Result<CreationReport> {
-    CreateRequest::new(config)
-        .with_progress(progress)
-        .write(writer, sources)
-}
-
-/// Creates an archive of `format` from `sources` and returns its bytes.
-///
-/// The whole archive is held in memory, so use
-/// [`create_archive`](crate::create_archive) for large ones. Because the
-/// finished ZIP can be read back, a ZIP result carries the same warning as
-/// [`create_archive`](crate::create_archive) when default extraction would
-/// refuse an entry as a zip bomb.
-///
-/// # Errors
-///
-/// Returns the errors of [`create_to_writer`].
-///
-/// # Examples
-///
-/// ```
-/// use exarch_core::CreationConfig;
-/// use exarch_core::create_to_bytes;
-/// use exarch_core::formats::detect::CreatableFormat;
-///
-/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// let src = tempfile::tempdir()?;
-/// std::fs::write(src.path().join("a.txt"), b"hello")?;
-///
-/// let (bytes, report) = create_to_bytes(
-///     &[src.path()],
-///     CreatableFormat::TarGz,
-///     &CreationConfig::default(),
-/// )?;
-/// assert_eq!(report.bytes_compressed, bytes.len() as u64);
-/// # Ok(())
-/// # }
-/// ```
-pub fn create_to_bytes<P: AsRef<Path>>(
-    sources: &[P],
-    format: CreatableFormat,
-    config: &CreationConfig,
-) -> Result<(Vec<u8>, CreationReport)> {
-    CreateRequest::new(config).to_bytes(format, sources)
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::CreateRequest;
     use crate::SecurityConfig;
     use crate::api::create_archive;
     use crate::api::extract_archive;
@@ -361,12 +236,9 @@ mod tests {
         let src = source_tree();
         for (codec, ext) in TAR_FORMATS {
             let mut buf = Vec::new();
-            let report = create_to_writer(
-                ArchiveWriter::tar(&mut buf, codec),
-                &[src.path()],
-                &config(),
-            )
-            .unwrap();
+            let report = CreateRequest::new(&config())
+                .write(ArchiveWriter::tar(&mut buf, codec), &[src.path()])
+                .unwrap();
             assert_eq!(report.bytes_compressed, buf.len() as u64, "{ext}");
             assert_eq!(report.files_added, 2, "{ext}");
 
@@ -381,8 +253,9 @@ mod tests {
     fn test_zip_round_trip() {
         let src = source_tree();
         let mut out = Cursor::new(Vec::new());
-        let report =
-            create_to_writer(ArchiveWriter::zip(&mut out), &[src.path()], &config()).unwrap();
+        let report = CreateRequest::new(&config())
+            .write(ArchiveWriter::zip(&mut out), &[src.path()])
+            .unwrap();
         let buf = out.into_inner();
         assert_eq!(report.bytes_compressed, buf.len() as u64);
 
@@ -400,12 +273,9 @@ mod tests {
             let path = dir.path().join(format!("p.{ext}"));
             let path_report = create_archive(&path, &[src.path()], &config()).unwrap();
             let mut buf = Vec::new();
-            let report = create_to_writer(
-                ArchiveWriter::tar(&mut buf, codec),
-                &[src.path()],
-                &config(),
-            )
-            .unwrap();
+            let report = CreateRequest::new(&config())
+                .write(ArchiveWriter::tar(&mut buf, codec), &[src.path()])
+                .unwrap();
             assert_eq!(fs::read(&path).unwrap(), buf, "{ext}");
             assert_eq!(
                 path_report.bytes_compressed,
@@ -431,7 +301,9 @@ mod tests {
     fn test_create_to_bytes_round_trips_every_creatable_format() {
         let src = source_tree();
         for &format in CreatableFormat::ALL {
-            let (bytes, report) = create_to_bytes(&[src.path()], format, &config()).unwrap();
+            let (bytes, report) = CreateRequest::new(&config())
+                .to_bytes(format, &[src.path()])
+                .unwrap();
             assert_eq!(report.bytes_compressed, bytes.len() as u64, "{format}");
             let reader = crate::ArchiveReader::from_bytes(bytes, None).unwrap();
             assert_eq!(
@@ -445,7 +317,9 @@ mod tests {
     fn test_create_to_bytes_zip_warns_about_extraction_ratio() {
         let src = TempDir::new().unwrap();
         fs::write(src.path().join("zeros"), vec![0u8; 100_000]).unwrap();
-        let (_, report) = create_to_bytes(&[src.path()], CreatableFormat::Zip, &config()).unwrap();
+        let (_, report) = CreateRequest::new(&config())
+            .to_bytes(CreatableFormat::Zip, &[src.path()])
+            .unwrap();
         assert!(
             report
                 .warnings
@@ -454,8 +328,9 @@ mod tests {
             "{:?}",
             report.warnings
         );
-        let (_, report) =
-            create_to_bytes(&[src.path()], CreatableFormat::TarGz, &config()).unwrap();
+        let (_, report) = CreateRequest::new(&config())
+            .to_bytes(CreatableFormat::TarGz, &[src.path()])
+            .unwrap();
         assert!(report.warnings.is_empty(), "{:?}", report.warnings);
     }
 
@@ -466,7 +341,9 @@ mod tests {
             let mut out = Cursor::new(Vec::new());
             let writer = ArchiveWriter::of_type(&mut out, format);
             assert_eq!(writer.format(), format);
-            create_to_writer(writer, &[src.path()], &config()).unwrap();
+            CreateRequest::new(&config())
+                .write(writer, &[src.path()])
+                .unwrap();
             assert!(!out.get_ref().is_empty());
         }
     }
@@ -476,16 +353,15 @@ mod tests {
         let src = source_tree();
         let mut out = Cursor::new(vec![0u8; 4]);
         out.set_position(4);
-        let result = create_to_writer(ArchiveWriter::zip(out), &[src.path()], &config());
+        let result = CreateRequest::new(&config()).write(ArchiveWriter::zip(out), &[src.path()]);
         assert_matches!(result, Err(ArchiveError::InvalidConfiguration { .. }));
     }
 
     #[test]
     fn test_missing_source_is_an_error() {
-        let result = create_to_writer(
+        let result = CreateRequest::new(&config()).write(
             ArchiveWriter::tar(Vec::new(), None),
             &[Path::new("/nonexistent/exarch-source")],
-            &config(),
         );
         assert!(result.is_err());
     }
@@ -517,21 +393,18 @@ mod tests {
         let src = source_tree();
         let dir = TempDir::new().unwrap();
         let mut by_path = Recorder::default();
-        crate::create_archive_with_progress(
-            dir.path().join("p.tar"),
-            &[src.path()],
-            &config(),
-            &mut by_path,
-        )
-        .unwrap();
+        crate::CreateRequest::new(&config())
+            .with_progress(&mut by_path)
+            .create(
+                &crate::OutputFile::replace(dir.path().join("p.tar")),
+                &[src.path()],
+            )
+            .unwrap();
         let mut by_writer = Recorder::default();
-        create_to_writer_with_progress(
-            ArchiveWriter::tar(Vec::new(), None),
-            &[src.path()],
-            &config(),
-            &mut by_writer,
-        )
-        .unwrap();
+        CreateRequest::new(&config())
+            .with_progress(&mut by_writer)
+            .write(ArchiveWriter::tar(Vec::new(), None), &[src.path()])
+            .unwrap();
         assert_eq!(by_path.starts, by_writer.starts);
         assert_eq!(by_path.completes, by_writer.completes);
         assert_eq!((by_path.done, by_writer.done), (1, 1));
@@ -541,18 +414,19 @@ mod tests {
     fn test_created_archive_lists_through_reader() {
         let src = source_tree();
         let mut buf = Vec::new();
-        create_to_writer(
-            ArchiveWriter::tar(&mut buf, Some(CompressionCodec::Zstd)),
-            &[src.path()],
-            &config(),
-        )
-        .unwrap();
-        let manifest = crate::list_reader(
-            crate::ArchiveReader::tar(Cursor::new(buf), Some(CompressionCodec::Zstd)),
-            &SecurityConfig::default(),
-            &crate::ListOptions::default(),
-        )
-        .unwrap();
+        CreateRequest::new(&config())
+            .write(
+                ArchiveWriter::tar(&mut buf, Some(CompressionCodec::Zstd)),
+                &[src.path()],
+            )
+            .unwrap();
+        let manifest = crate::ListRequest::new(&SecurityConfig::default())
+            .with_options(crate::ListOptions::default())
+            .list_reader(crate::ArchiveReader::tar(
+                Cursor::new(buf),
+                Some(CompressionCodec::Zstd),
+            ))
+            .unwrap();
         assert!(manifest.total_entries() >= 2);
     }
 }

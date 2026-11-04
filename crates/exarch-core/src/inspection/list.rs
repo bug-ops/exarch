@@ -134,79 +134,18 @@ pub fn list_archive<P: AsRef<Path>>(
     archive_path: P,
     config: &SecurityConfig,
 ) -> Result<ArchiveManifest> {
-    list_archive_with_options(archive_path, config, &ListOptions::default())
+    list_archive_with_progress(
+        archive_path,
+        config,
+        ListOptions::default(),
+        &mut NoopProgress,
+    )
 }
 
-/// Lists archive contents without extracting, with [`ListOptions`].
+/// Lists `archive_path`, reporting progress; the body of
+/// [`ListRequest::list`](crate::ListRequest::list).
 ///
-/// See [`list_archive`] for the manifest and the failures listing reports.
-/// [`ListOptions::stored_targets`] set to [`StoredTargets::Read`] reads 7z
-/// symlink targets, which decodes the blocks that hold them; by default they
-/// stay unread, so listing decodes no entry data. Other formats always report
-/// their targets.
-///
-/// # Errors
-///
-/// Same as [`list_archive`].
-///
-/// # Examples
-///
-/// ```
-/// use std::assert_matches;
-///
-/// use exarch_core::LinkTarget;
-/// use exarch_core::ListOptions;
-/// use exarch_core::ManifestEntryKind;
-/// use exarch_core::SecurityConfig;
-/// use exarch_core::StoredTargets;
-/// use exarch_core::list_archive_with_options;
-/// use sevenz_rust2::ArchiveEntry;
-/// use sevenz_rust2::ArchiveWriter;
-///
-/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// # let dir = tempfile::tempdir()?;
-/// # let archive = dir.path().join("links.7z");
-/// # let mut writer = ArchiveWriter::new(std::io::Cursor::new(Vec::new()))?;
-/// # let mut link = ArchiveEntry::new_file("link");
-/// # link.has_stream = true;
-/// # link.size = 6;
-/// # link.has_windows_attributes = true;
-/// # link.windows_attributes = 0x8000 | (0o120_777 << 16);
-/// # writer.push_archive_entry(link, Some(std::io::Cursor::new(b"target".to_vec())))?;
-/// # std::fs::write(&archive, writer.finish()?.into_inner())?;
-/// let config = SecurityConfig::default();
-///
-/// let manifest = list_archive_with_options(&archive, &config, &ListOptions::default())?;
-/// assert_matches!(
-///     &manifest.entries()[0].kind,
-///     ManifestEntryKind::Symlink {
-///         target: LinkTarget::Unread
-///     }
-/// );
-///
-/// let options = ListOptions::default().with_stored_targets(StoredTargets::Read);
-/// let manifest = list_archive_with_options(&archive, &config, &options)?;
-/// assert_matches!(
-///     &manifest.entries()[0].kind,
-///     ManifestEntryKind::Symlink {
-///         target: LinkTarget::Recorded(_)
-///     }
-/// );
-/// # Ok(())
-/// # }
-/// ```
-pub fn list_archive_with_options<P: AsRef<Path>>(
-    archive_path: P,
-    config: &SecurityConfig,
-    options: &ListOptions,
-) -> Result<ArchiveManifest> {
-    list_archive_with_progress(archive_path, config, options, &mut NoopProgress)
-}
-
-/// Lists archive contents without extracting, reporting progress.
-///
-/// [`list_archive_with_options`] with a [`ProgressCallback`]: every listed
-/// entry is announced with `on_entry_start` and closed with
+/// Every listed entry is announced with `on_entry_start` and closed with
 /// `on_entry_complete`, and `on_complete` fires once after the manifest was
 /// built.
 ///
@@ -218,42 +157,12 @@ pub fn list_archive_with_options<P: AsRef<Path>>(
 /// targets ([`StoredTargets::Read`]) decodes afterwards without further
 /// events.
 ///
-/// # Errors
-///
-/// Same as [`list_archive`]. `on_complete` is not called on failure; every
-/// `on_entry_start` is still paired with an `on_entry_complete`.
-///
-/// # Examples
-///
-/// ```
-/// use exarch_core::ListOptions;
-/// use exarch_core::NoopProgress;
-/// use exarch_core::SecurityConfig;
-/// use exarch_core::list_archive_with_progress;
-///
-/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// # let dir = tempfile::tempdir()?;
-/// # let archive = dir.path().join("a.tar");
-/// # let mut builder = tar::Builder::new(Vec::new());
-/// # let mut header = tar::Header::new_gnu();
-/// # header.set_size(2);
-/// # header.set_mode(0o644);
-/// # builder.append_data(&mut header, "a.txt", &b"hi"[..])?;
-/// # std::fs::write(&archive, builder.into_inner()?)?;
-/// let manifest = list_archive_with_progress(
-///     &archive,
-///     &SecurityConfig::default(),
-///     &ListOptions::default(),
-///     &mut NoopProgress,
-/// )?;
-/// assert_eq!(manifest.total_entries(), 1);
-/// # Ok(())
-/// # }
-/// ```
-pub fn list_archive_with_progress<P: AsRef<Path>>(
+/// `on_complete` is not called on failure; every `on_entry_start` is still
+/// paired with an `on_entry_complete`.
+pub(crate) fn list_archive_with_progress<P: AsRef<Path>>(
     archive_path: P,
     config: &SecurityConfig,
-    options: &ListOptions,
+    options: ListOptions,
     progress: &mut dyn ProgressCallback,
 ) -> Result<ArchiveManifest> {
     let config = config.clone();

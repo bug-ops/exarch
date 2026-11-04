@@ -15,12 +15,11 @@ use std::process::Command;
 use exarch_core::DecodeReuse;
 use exarch_core::ExtractRequest;
 use exarch_core::ExtractionOptions;
-use exarch_core::ListOptions;
+use exarch_core::ListRequest;
+use exarch_core::ListedExtractOptions;
 use exarch_core::NoopProgress;
 use exarch_core::ReuseLimit;
 use exarch_core::SecurityConfig;
-use exarch_core::ZipConsistencyPolicy;
-use exarch_core::list_archive_for_extraction;
 use tempfile::TempDir;
 
 const ENTRIES: usize = 24;
@@ -83,14 +82,14 @@ fn mixed_methods_and_empty_entries_extract_the_same_in_every_mode() {
             .extract(&archive, direct.path())
             .unwrap();
 
-        let listed =
-            list_archive_for_extraction(&archive, &config, &ListOptions::default(), mode).unwrap();
+        let listed = ListRequest::new(&config)
+            .for_extraction(&archive, mode)
+            .unwrap();
         let via_list = TempDir::new().unwrap();
         listed
-            .extract_under(
+            .extract(
                 via_list.path(),
-                &config,
-                &ExtractionOptions::default(),
+                &ListedExtractOptions::default(),
                 &mut NoopProgress,
             )
             .unwrap();
@@ -114,48 +113,20 @@ fn a_listed_zip_extracts_the_same_files_in_every_mode() {
     let config = SecurityConfig::default();
 
     for mode in MODES {
-        let listed =
-            list_archive_for_extraction(&archive, &config, &ListOptions::default(), mode).unwrap();
+        let listed = ListRequest::new(&config)
+            .for_extraction(&archive, mode)
+            .unwrap();
         assert_eq!(listed.manifest().total_entries(), ENTRIES, "{mode:?}");
         let out = TempDir::new().unwrap();
         let report = listed
-            .extract_under(
+            .extract(
                 out.path(),
-                &config,
-                &ExtractionOptions::default(),
+                &ListedExtractOptions::default(),
                 &mut NoopProgress,
             )
             .unwrap();
         assert_eq!(report.files_extracted, ENTRIES, "{mode:?}");
         assert_tree(out.path());
-    }
-}
-
-#[test]
-fn a_listed_zip_opened_without_stream_checks_extracts_under_the_enforcing_policy() {
-    let dir = TempDir::new().unwrap();
-    let archive = write_archive(&dir, &common::deflated_zip(3, ENTRY_LEN));
-    let lenient = SecurityConfig::default().with_zip_consistency(ZipConsistencyPolicy::Ignore);
-    let listed = list_archive_for_extraction(
-        &archive,
-        &lenient,
-        &ListOptions::default(),
-        DecodeReuse::default(),
-    )
-    .unwrap();
-
-    let out = TempDir::new().unwrap();
-    listed
-        .extract_under(
-            out.path(),
-            &SecurityConfig::default(),
-            &ExtractionOptions::default(),
-            &mut NoopProgress,
-        )
-        .unwrap();
-    for index in 0..3 {
-        let written = std::fs::read(out.path().join(format!("dir/file{index}.txt"))).unwrap();
-        assert_eq!(written, common::wordy(index, ENTRY_LEN));
     }
 }
 

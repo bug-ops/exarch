@@ -229,7 +229,7 @@ impl<'a> ListRequest<'a> {
             progress,
         } = self;
         progress.run(|progress| {
-            crate::inspection::list_archive_with_progress(archive, config, &options, progress)
+            crate::inspection::list_archive_with_progress(archive, config, options, progress)
         })
     }
 
@@ -395,7 +395,7 @@ impl<'a> VerifyRequest<'a> {
             progress,
         } = self;
         progress.run(|progress| {
-            crate::inspection::verify_archive_with_progress(archive, config, &options, progress)
+            crate::inspection::verify_archive_with_progress(archive, config, options, progress)
         })
     }
 

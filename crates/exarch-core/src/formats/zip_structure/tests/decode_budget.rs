@@ -320,7 +320,7 @@ fn the_ignore_policy_decodes_nothing_and_finds_nothing_in_entry_data() {
 }
 
 #[test]
-fn an_archive_opened_without_stream_checks_cannot_be_rebound_to_enforce() {
+fn an_archive_opened_without_stream_checks_does_not_serve_enforce() {
     let built = RawZip::new(vec![known_size_entry("a.bin", 8, PAYLOAD, &[])]).build();
     let open = || {
         ZipArchive::new(
@@ -329,14 +329,6 @@ fn an_archive_opened_without_stream_checks_cannot_be_rebound_to_enforce() {
         )
         .unwrap()
     };
-    assert!(
-        open()
-            .rebind(&config(ZipConsistencyPolicy::Enforce))
-            .is_none()
-    );
-    assert!(
-        open()
-            .rebind(&config(ZipConsistencyPolicy::Ignore))
-            .is_some()
-    );
+    assert!(!open().serves(&config(ZipConsistencyPolicy::Enforce)));
+    assert!(open().serves(&config(ZipConsistencyPolicy::Ignore)));
 }

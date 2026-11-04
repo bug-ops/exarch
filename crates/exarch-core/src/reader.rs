@@ -1,14 +1,15 @@
 //! Archives read from a caller-supplied reader instead of a path.
 //!
-//! [`ArchiveReader`] is the input of [`list_reader`](crate::list_reader),
-//! [`verify_reader`](crate::verify_reader) and
-//! [`extract_to_sink`](crate::extract_to_sink). The constructors encode what
-//! each format needs: a TAR stream is forward-only, so any `Read` will do,
-//! while ZIP and 7z read a directory at the end of the archive and need `Seek`.
-//! The caller states the format with [`ArchiveReader::tar`],
-//! [`ArchiveReader::seekable`] or [`ArchiveReader::of_type`], or has it
-//! sniffed from the leading bytes by [`ArchiveReader::detect`] and
-//! [`ArchiveReader::detect_stream`].
+//! [`ArchiveReader`] is the input of
+//! [`ListRequest::list_reader`](crate::ListRequest::list_reader),
+//! [`VerifyRequest::verify_reader`](crate::VerifyRequest::verify_reader) and
+//! [`SinkExtractRequest::extract`](crate::SinkExtractRequest::extract). The
+//! constructors encode what each format needs: a TAR stream is forward-only, so
+//! any `Read` will do, while ZIP and 7z read a directory at the end of the
+//! archive and need `Seek`. The caller states the format with
+//! [`ArchiveReader::tar`], [`ArchiveReader::seekable`] or
+//! [`ArchiveReader::of_type`], or has it sniffed from the leading bytes by
+//! [`ArchiveReader::detect`] and [`ArchiveReader::detect_stream`].
 
 use std::io::BufReader;
 use std::io::Cursor;

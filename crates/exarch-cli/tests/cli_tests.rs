@@ -1143,6 +1143,38 @@ fn test_verify_archive_safe() {
         .stdout(predicates::str::contains("Archive verification"));
 }
 
+/// `list` and `verify` give a core refusal the archive name and a hint naming
+/// only flags those subcommands accept (#937).
+#[test]
+fn test_list_and_verify_errors_carry_archive_context_and_valid_hints() {
+    for subcommand in ["list", "verify"] {
+        exarch_cmd()
+            .arg(subcommand)
+            .arg("--max-total-size")
+            .arg("1")
+            .arg(fixture_path("sample.tar.gz"))
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains("Extraction limit exceeded for"))
+            .stderr(predicates::str::contains("sample.tar.gz"))
+            .stderr(predicates::str::contains(
+                "HINT: Use --max-files, --max-total-size, or --max-file-size to increase limits.",
+            ));
+    }
+}
+
+#[test]
+fn test_verify_missing_archive_names_it_in_the_error() {
+    exarch_cmd()
+        .arg("verify")
+        .arg("does-not-exist.tar.gz")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "Failed to process 'does-not-exist.tar.gz'",
+        ));
+}
+
 #[test]
 fn test_verify_strict_passes_on_clean_archive() {
     exarch_cmd()
@@ -1177,11 +1209,11 @@ fn create_setuid_tar_gz(path: &std::path::Path) {
 }
 
 /// On Unix, an archive containing a setuid file produces a Warning-severity
-/// verification report. With --strict, the CLI must exit with code 2 and
+/// verification report. With --strict, the CLI must exit with code 3 and
 /// must not write any unstructured text to stderr.
 #[test]
 #[cfg(unix)]
-fn test_verify_strict_exits_2_on_warning() {
+fn test_verify_strict_exits_3_on_warning() {
     let temp = TempDir::new().expect("failed to create temp dir");
     let archive_path = temp.path().join("setuid.tar.gz");
     create_setuid_tar_gz(&archive_path);
@@ -1191,7 +1223,7 @@ fn test_verify_strict_exits_2_on_warning() {
         .arg("--strict")
         .arg(&archive_path)
         .assert()
-        .code(2)
+        .code(3)
         .stderr(predicate::str::is_empty());
 }
 
@@ -1225,7 +1257,7 @@ fn test_verify_strict_quiet_produces_no_stderr() {
         .arg("--strict")
         .arg(&archive_path)
         .assert()
-        .code(2)
+        .code(3)
         .stderr(predicate::str::is_empty());
 }
 
@@ -1244,7 +1276,7 @@ fn test_verify_strict_json_produces_no_stderr() {
         .arg("--strict")
         .arg(&archive_path)
         .assert()
-        .code(2)
+        .code(3)
         .stderr(predicate::str::is_empty());
 }
 
@@ -1365,7 +1397,7 @@ fn test_verify_check_integrity_corrupt_zip_fails_with_exit_1_even_under_strict()
 }
 
 #[test]
-fn test_verify_check_integrity_solid_7z_fails_like_extract_and_strict_exits_2_when_incomplete() {
+fn test_verify_check_integrity_solid_7z_fails_like_extract_and_strict_exits_3_when_incomplete() {
     let archive = workspace_fixture("solid.7z");
 
     exarch_cmd()
@@ -1395,7 +1427,7 @@ fn test_verify_check_integrity_solid_7z_fails_like_extract_and_strict_exits_2_wh
         .arg("--strict")
         .arg(&budgeted)
         .assert()
-        .code(2);
+        .code(3);
 
     exarch_cmd()
         .arg("verify")
@@ -1481,8 +1513,331 @@ fn test_verify_decompression_budget_zero_is_rejected() {
         .arg("0")
         .arg(fixture_path("sample.tar.gz"))
         .assert()
+        .code(1)
+        .stderr(predicates::str::contains("must not be zero"));
+}
+
+/// Value refusals are one boundary: exit 1 with the JSON envelope naming the
+/// setting, never a clap usage error (#938).
+#[test]
+fn test_limit_value_refusals_are_json_safe_with_exit_1() {
+    for (subcommand, flag, value, setting) in [
+        ("extract", "--max-files", "0", "max_file_count"),
+        ("list", "--max-total-size", "0", "max_total_size"),
+        ("verify", "--max-file-size", "0", "max_file_size"),
+        (
+            "extract",
+            "--max-compression-ratio",
+            "0",
+            "max_compression_ratio",
+        ),
+        (
+            "list",
+            "--max-compression-ratio",
+            "0",
+            "max_compression_ratio",
+        ),
+        (
+            "verify",
+            "--max-compression-ratio",
+            "0",
+            "max_compression_ratio",
+        ),
+    ] {
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let mut cmd = exarch_cmd();
+        cmd.arg("--json").arg(subcommand).arg(flag).arg(value);
+        cmd.arg(fixture_path("sample.tar.gz"));
+        if subcommand == "extract" {
+            cmd.arg(temp.path().join("out"));
+        }
+        let output = cmd.assert().code(1).get_output().stdout.clone();
+        let json: serde_json::Value = serde_json::from_slice(&output).expect("one JSON document");
+        assert_eq!(json["status"], "error", "{subcommand} {flag}");
+        assert_eq!(json["error"]["kind"], "InvalidConfiguration");
+        assert_eq!(json["error"]["setting"], setting, "{subcommand} {flag}");
+    }
+}
+
+/// `-H` only changes the long listing, so it requires `-l` instead of being
+/// silently ignored (#943).
+#[test]
+fn test_list_human_readable_requires_long() {
+    exarch_cmd()
+        .arg("list")
+        .arg("-H")
+        .arg(fixture_path("sample.tar.gz"))
+        .assert()
         .code(2)
-        .stderr(predicates::str::contains("greater than zero"));
+        .stderr(predicates::str::contains("--long"));
+
+    exarch_cmd()
+        .arg("list")
+        .arg("-lH")
+        .arg(fixture_path("sample.tar.gz"))
+        .assert()
+        .success();
+}
+
+/// A listed extraction (ZIP, 7z, non-fresh TAR) runs under the policy the user
+/// passed, not the narrowed one the list pass uses (#901).
+#[cfg(unix)]
+#[test]
+fn test_listed_extraction_honors_the_policy_flags() {
+    let entries = vec![
+        RawEntry::stored("a.txt", b"hi"),
+        RawEntry {
+            date: 0,
+            external_attributes: SYMLINK_MODE << 16,
+            ..RawEntry::stored("link", b"a.txt")
+        },
+    ];
+    let bytes = RawZip::new(entries).build().bytes;
+
+    for flags in [
+        vec!["--allow-symlinks"],
+        vec!["--allow-symlinks", "--preserve-permissions"],
+        vec!["--allow-symlinks", "--allow-hardlinks"],
+        vec!["--allow-symlinks", "--allow-world-writable"],
+    ] {
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let archive = temp.path().join("l.zip");
+        std::fs::write(&archive, &bytes).expect("write zip");
+        let out = temp.path().join("out");
+        std::fs::create_dir(&out).expect("existing destination");
+
+        exarch_cmd()
+            .arg("extract")
+            .args(&flags)
+            .arg(&archive)
+            .arg(&out)
+            .assert()
+            .success();
+
+        let link = std::fs::symlink_metadata(out.join("link")).expect("link extracted");
+        assert!(link.file_type().is_symlink(), "{flags:?}");
+        assert_eq!(std::fs::read(out.join("a.txt")).expect("file"), b"hi");
+    }
+
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let archive = temp.path().join("l.zip");
+    std::fs::write(&archive, &bytes).expect("write zip");
+    exarch_cmd()
+        .arg("extract")
+        .arg(&archive)
+        .arg(temp.path().join("denied"))
+        .assert()
+        .failure();
+}
+
+/// `create` stages the archive and renames it into place: without `--force` an
+/// existing output is refused untouched, with it the file is replaced, and a
+/// failed run leaves the previous archive as it was (#931).
+#[test]
+fn test_create_output_policy_and_failure_keep_the_previous_archive() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let out = temp.path().join("out.tar.gz");
+    std::fs::write(&out, b"previous").expect("existing output");
+
+    exarch_cmd()
+        .arg("create")
+        .arg(&out)
+        .arg(fixture_path("sample.txt"))
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains("already exists"))
+        .stderr(predicates::str::contains("--force"));
+    assert_eq!(std::fs::read(&out).expect("untouched"), b"previous");
+
+    exarch_cmd()
+        .arg("create")
+        .arg("--force")
+        .arg(&out)
+        .arg(temp.path().join("missing-source"))
+        .assert()
+        .failure();
+    assert_eq!(std::fs::read(&out).expect("kept on failure"), b"previous");
+    let leftovers: Vec<_> = std::fs::read_dir(temp.path())
+        .expect("read dir")
+        .map(|e| e.expect("entry").file_name())
+        .collect();
+    assert_eq!(leftovers, vec![std::ffi::OsString::from("out.tar.gz")]);
+
+    exarch_cmd()
+        .arg("create")
+        .arg("--force")
+        .arg(&out)
+        .arg(fixture_path("sample.txt"))
+        .assert()
+        .success();
+    assert_ne!(std::fs::read(&out).expect("replaced"), b"previous");
+}
+
+#[test]
+fn test_create_refuses_a_directory_output_and_reports_a_json_kind() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    let dir = temp.path().join("d.tar.gz");
+    std::fs::create_dir(&dir).expect("directory output");
+
+    for force in [false, true] {
+        let mut cmd = exarch_cmd();
+        cmd.arg("--json").arg("create");
+        if force {
+            cmd.arg("--force");
+        }
+        let output = cmd
+            .arg(&dir)
+            .arg(fixture_path("sample.txt"))
+            .assert()
+            .code(1)
+            .get_output()
+            .stdout
+            .clone();
+        let json: serde_json::Value = serde_json::from_slice(&output).expect("one JSON document");
+        assert_eq!(json["operation"], "create");
+        assert!(dir.is_dir(), "the directory must survive");
+    }
+
+    let file = temp.path().join("f.tar.gz");
+    std::fs::write(&file, b"x").expect("existing");
+    let output = exarch_cmd()
+        .arg("--json")
+        .arg("create")
+        .arg(&file)
+        .arg(fixture_path("sample.txt"))
+        .assert()
+        .code(1)
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).expect("one JSON document");
+    assert_eq!(json["error"]["kind"], "OutputExists");
+}
+
+/// A quota refusal carries the finer sub-code core derives from the limit that
+/// was hit (#918).
+#[test]
+fn test_quota_and_ratio_refusals_report_their_sub_code() {
+    let output = exarch_cmd()
+        .arg("--json")
+        .arg("list")
+        .arg("--max-total-size")
+        .arg("1")
+        .arg(fixture_path("sample.tar.gz"))
+        .assert()
+        .code(1)
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).expect("one JSON document");
+    assert_eq!(json["error"]["kind"], "QuotaExceeded");
+    assert_eq!(json["error"]["sub_code"], "TOTAL_SIZE");
+}
+
+#[cfg(target_os = "macos")]
+const HOST_PATH_LIMIT: usize = 1023;
+#[cfg(all(unix, not(target_os = "macos")))]
+const HOST_PATH_LIMIT: usize = 4095;
+
+/// A tail of exactly `len` bytes made of components of at most 200 bytes.
+#[cfg(unix)]
+fn tail_of_len(len: usize) -> String {
+    let mut name = String::new();
+    while name.len() < len {
+        if !name.is_empty() {
+            name.push('/');
+        }
+        let room = len - name.len();
+        name.push_str(&"n".repeat(room.min(200)));
+    }
+    name
+}
+
+/// `verify` and `extract` agree on the projected landing of an entry written
+/// through an in-archive symlink: `d -> cc` plus a tail lands at `cc/<tail>`,
+/// and the host path limit applies to that, not to the entry's own name (#945).
+#[cfg(unix)]
+#[test]
+fn test_verify_and_extract_agree_at_the_projected_landing_limit() {
+    let landing_prefix = "cc/".len();
+    for (tail_len, accepted) in [
+        (HOST_PATH_LIMIT - landing_prefix, true),
+        (HOST_PATH_LIMIT - landing_prefix + 1, false),
+    ] {
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let archive = temp.path().join("landing.tar");
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut dir = tar::Header::new_gnu();
+        dir.set_entry_type(tar::EntryType::Directory);
+        dir.set_mode(0o755);
+        dir.set_size(0);
+        builder
+            .append_data(&mut dir, "cc/", std::io::empty())
+            .expect("dir entry");
+        let mut link = tar::Header::new_gnu();
+        link.set_entry_type(tar::EntryType::Symlink);
+        link.set_mode(0o777);
+        link.set_size(0);
+        builder
+            .append_link(&mut link, "d", "cc")
+            .expect("link entry");
+        let mut file = tar::Header::new_gnu();
+        file.set_entry_type(tar::EntryType::Regular);
+        file.set_mode(0o644);
+        file.set_size(1);
+        let name = format!("d/{}", tail_of_len(tail_len));
+        builder
+            .append_data(&mut file, &name, &b"x"[..])
+            .expect("file entry");
+        std::fs::write(&archive, builder.into_inner().expect("tar bytes")).expect("write tar");
+
+        let mut verify = exarch_cmd();
+        verify.arg("verify").arg("--allow-symlinks").arg(&archive);
+        let mut extract = exarch_cmd();
+        extract
+            .arg("extract")
+            .arg("--allow-symlinks")
+            .arg(&archive)
+            .arg(temp.path().join("out"));
+        if accepted {
+            verify.assert().success();
+            extract.assert().success();
+        } else {
+            verify
+                .assert()
+                .code(1)
+                .stdout(predicates::str::contains("file name too long"));
+            extract
+                .assert()
+                .code(1)
+                .stderr(predicates::str::contains("file name too long"));
+        }
+    }
+}
+
+#[test]
+fn test_fractional_compression_ratio_is_accepted() {
+    exarch_cmd()
+        .arg("list")
+        .arg("--max-compression-ratio")
+        .arg("2.5")
+        .arg(fixture_path("sample.tar.gz"))
+        .assert()
+        .success();
+}
+
+#[test]
+fn test_create_compression_level_refusal_is_exit_1() {
+    let temp = TempDir::new().expect("failed to create temp dir");
+    exarch_cmd()
+        .arg("create")
+        .arg("-l")
+        .arg("0")
+        .arg(temp.path().join("t.tar.gz"))
+        .arg(fixture_path("sample.txt"))
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains("between 1 and 9"));
 }
 
 #[test]
@@ -2928,9 +3283,13 @@ fn test_list_json_long_symlink_target() {
         .expect("expected a Symlink entry in the listing");
 
     assert_eq!(
-        symlink["symlink_target"].as_str(),
-        Some("target.txt"),
-        "symlink_target must equal the link target stored in the archive"
+        symlink["link_target"],
+        serde_json::json!({"state": "recorded", "path": "target.txt"}),
+        "link_target must equal the link target stored in the archive"
+    );
+    assert!(
+        symlink.get("symlink_target").is_none(),
+        "the old symlink_target field is gone"
     );
 }
 
@@ -2969,12 +3328,8 @@ fn test_list_json_long_regular_file_omits_link_fields() {
         .expect("expected a File entry in the listing");
 
     assert!(
-        file_entry.get("symlink_target").is_none(),
-        "regular file entry must not contain symlink_target key"
-    );
-    assert!(
-        file_entry.get("hardlink_target").is_none(),
-        "regular file entry must not contain hardlink_target key"
+        file_entry.get("link_target").is_none(),
+        "regular file entry must not contain a link_target key"
     );
 }
 
@@ -4736,11 +5091,14 @@ fn test_sevenz_unix_symlink_needs_allow_symlinks() {
             .expect("entries")
             .iter()
             .find(|e| e["entry_type"] == "Symlink")
-            .expect("symlink entry")["symlink_target"]
+            .expect("symlink entry")["link_target"]
             .clone()
     };
-    assert_eq!(listed_target(&[]), serde_json::Value::Null);
-    assert_eq!(listed_target(&["--read-link-targets"]), "a.txt");
+    assert_eq!(listed_target(&[]), serde_json::json!({"state": "unread"}));
+    assert_eq!(
+        listed_target(&["--read-link-targets"]),
+        serde_json::json!({"state": "recorded", "path": "a.txt"})
+    );
 }
 
 /// `list -l` shows a 7z link target only on request and marks a link whose
@@ -4867,7 +5225,7 @@ fn test_sevenz_unix_symlink_escape_is_blocked() {
         .arg("--strict")
         .arg(&archive)
         .assert()
-        .code(2);
+        .code(3);
 }
 
 /// A 7z archive with a file followed by a symlink whose target escapes the

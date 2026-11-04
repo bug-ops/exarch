@@ -1,13 +1,56 @@
 //! Progress bar implementation for CLI operations.
 
+use crate::operation::Operation;
+use crate::output::OutputMode;
+use crate::output::Verbosity;
 use crate::output::humanize_bytes;
 use crate::output::terminal::TerminalPath;
 use console::Term;
-use exarch_core::EntryPosition;
+use exarch_core::NoopProgress;
 use exarch_core::ProgressCallback;
 use indicatif::ProgressBar;
 use indicatif::ProgressStyle;
 use std::path::Path;
+
+/// How many entries a progress bar counts to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BarLength {
+    /// The total is known before the run starts.
+    Known(usize),
+    /// The total is not known up front: the bar counts entries until core
+    /// reports one.
+    Discover,
+}
+
+/// The progress reporter `operation` runs with under `mode`: per-entry lines
+/// when verbose, a bar on a terminal, and nothing when quiet, in `--json`
+/// mode or when stdout is not a terminal.
+pub fn progress_for(
+    mode: OutputMode,
+    length: BarLength,
+    operation: Operation,
+) -> Box<dyn ProgressCallback> {
+    match mode {
+        OutputMode::Json | OutputMode::Human(Verbosity::Quiet) => Box::new(NoopProgress),
+        OutputMode::Human(Verbosity::Verbose) => Box::new(VerboseProgress::new(operation)),
+        OutputMode::Human(Verbosity::Normal) => {
+            if CliProgress::should_show() {
+                Box::new(CliProgress::new(length, operation_label(operation)))
+            } else {
+                Box::new(NoopProgress)
+            }
+        }
+    }
+}
+
+const fn operation_label(operation: Operation) -> &'static str {
+    match operation {
+        Operation::Extract => "Extracting",
+        Operation::Create => "Creating",
+        Operation::List => "Listing",
+        Operation::Verify => "Verifying",
+    }
+}
 
 /// CLI progress bar wrapper implementing `ProgressCallback`.
 ///
@@ -23,14 +66,21 @@ pub struct CliProgress {
 }
 
 impl CliProgress {
-    /// Creates a new CLI progress bar.
+    /// Creates a CLI progress bar.
     ///
     /// # Arguments
     ///
-    /// * `total` - Total number of entries to process
+    /// * `length` - How many entries the bar counts to
     /// * `message` - Label displayed before the bar (e.g., "Extracting")
     #[must_use]
-    pub fn new(total: usize, message: &str) -> Self {
+    pub fn new(length: BarLength, message: &str) -> Self {
+        match length {
+            BarLength::Known(total) => Self::sized(total, message),
+            BarLength::Discover => Self::counting(message),
+        }
+    }
+
+    fn sized(total: usize, message: &str) -> Self {
         let bar = ProgressBar::new(total as u64);
         bar.set_style(Self::sized_style());
         bar.set_message(message.to_string());
@@ -53,8 +103,7 @@ impl CliProgress {
     /// # Arguments
     ///
     /// * `message` - Label displayed before the count (e.g., "Extracting")
-    #[must_use]
-    pub fn counting(message: &str) -> Self {
+    fn counting(message: &str) -> Self {
         let bar = ProgressBar::new_spinner();
         bar.set_style(
             ProgressStyle::default_spinner()
@@ -81,8 +130,7 @@ impl CliProgress {
     }
 
     /// Checks if we should show progress (TTY detection).
-    #[must_use]
-    pub fn should_show() -> bool {
+    fn should_show() -> bool {
         Term::stdout().is_term()
     }
 }
@@ -94,10 +142,8 @@ impl Drop for CliProgress {
 }
 
 impl ProgressCallback for CliProgress {
-    fn on_entry_start(&mut self, _path: &Path, position: EntryPosition) {
-        if !self.sized
-            && let Some(total) = position.total.known().filter(|total| *total > 0)
-        {
+    fn on_entry_start(&mut self, _path: &Path, total: usize, _current: usize) {
+        if !self.sized && total > 0 {
             self.sized = true;
             self.bar.set_length(total as u64);
             self.bar.set_style(Self::sized_style());
@@ -134,28 +180,27 @@ impl ProgressCallback for CliProgress {
 /// use exarch_core::ProgressCallback;
 /// use std::path::Path;
 ///
-/// let mut p = VerboseProgress::new();
-/// p.on_entry_start(
-///     Path::new("data/file.txt"),
-///     EntryPosition::at_index(0, EntryTotal::Known(10)),
-/// );
+/// let mut p = VerboseProgress::new(Operation::Extract);
+/// p.on_entry_start(Path::new("data/file.txt"), 10, 0);
 /// p.on_entry_complete(Path::new("data/file.txt"));
 /// p.on_complete();
 /// ```
-#[derive(Debug, Default)]
-pub struct VerboseProgress;
+#[derive(Debug)]
+pub struct VerboseProgress {
+    operation: Operation,
+}
 
 impl VerboseProgress {
-    /// Creates a new `VerboseProgress` instance.
+    /// Creates a reporter that prefixes each entry line with the operation.
     #[must_use]
-    pub fn new() -> Self {
-        Self
+    pub const fn new(operation: Operation) -> Self {
+        Self { operation }
     }
 }
 
 impl ProgressCallback for VerboseProgress {
-    fn on_entry_start(&mut self, path: &Path, _position: EntryPosition) {
-        eprintln!("  extract  {}", TerminalPath::new(path));
+    fn on_entry_start(&mut self, path: &Path, _total: usize, _current: usize) {
+        eprintln!("  {}  {}", self.operation.name(), TerminalPath::new(path));
     }
 
     fn on_bytes_written(&mut self, _bytes: u64) {}
@@ -168,15 +213,11 @@ impl ProgressCallback for VerboseProgress {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use exarch_core::EntryTotal;
 
     #[test]
     fn test_verbose_progress_no_panic() {
-        let mut p = VerboseProgress::new();
-        p.on_entry_start(
-            Path::new("data/file.txt"),
-            EntryPosition::at_index(0, EntryTotal::Known(10)),
-        );
+        let mut p = VerboseProgress::new(Operation::Extract);
+        p.on_entry_start(Path::new("data/file.txt"), 10, 0);
         p.on_bytes_written(512);
         p.on_entry_complete(Path::new("data/file.txt"));
         p.on_complete();
@@ -184,13 +225,10 @@ mod tests {
 
     #[test]
     fn test_progress_callback() {
-        let mut progress = CliProgress::new(100, "Testing");
+        let mut progress = CliProgress::new(BarLength::Known(100), "Testing");
 
         // Simulate processing entries
-        progress.on_entry_start(
-            Path::new("test.txt"),
-            EntryPosition::at_index(0, EntryTotal::Known(100)),
-        );
+        progress.on_entry_start(Path::new("test.txt"), 100, 1);
         progress.on_bytes_written(1024);
         progress.on_entry_complete(Path::new("test.txt"));
 
@@ -199,19 +237,13 @@ mod tests {
 
     #[test]
     fn test_counting_progress_becomes_sized_once_total_is_known() {
-        let mut progress = CliProgress::counting("Testing");
+        let mut progress = CliProgress::new(BarLength::Discover, "Testing");
         assert!(!progress.sized);
 
-        progress.on_entry_start(
-            Path::new("a"),
-            EntryPosition::at_index(0, EntryTotal::Unknown),
-        );
+        progress.on_entry_start(Path::new("a"), 0, 1);
         assert!(!progress.sized);
 
-        progress.on_entry_start(
-            Path::new("b"),
-            EntryPosition::at_index(1, EntryTotal::Known(7)),
-        );
+        progress.on_entry_start(Path::new("b"), 7, 2);
         assert!(progress.sized);
         assert_eq!(progress.bar.length(), Some(7));
     }

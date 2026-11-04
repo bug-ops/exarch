@@ -17,8 +17,45 @@
 //! being a symlink or junction is rejected rather than followed.
 
 use std::ffi::OsStr;
+use std::ffi::OsString;
 use std::io;
+use std::path::Component;
 use std::path::Path;
+
+/// One normal path component: no separator, never `.`, `..` or empty.
+///
+/// Every [`PinnedDir`] operation resolves its names relative to the pinned
+/// directory descriptor, which is only sound for a single component: a name
+/// with a separator or equal to `..` would make `renameat` leave the pinned
+/// directory and silently defeat the TOCTOU fix (#526). The only constructor
+/// refuses anything else.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct EntryName(OsString);
+
+impl EntryName {
+    /// The final component of `path`, or `None` when `path` ends in `.`, `..`
+    /// or a root (those have no usable final name).
+    pub(super) fn of(path: &Path) -> Option<Self> {
+        let name = path.file_name()?;
+        let mut components = Path::new(name).components();
+        match (components.next(), components.next()) {
+            (Some(Component::Normal(only)), None) if only == name => {
+                Some(Self(name.to_os_string()))
+            }
+            _ => None,
+        }
+    }
+
+    pub(super) fn as_os_str(&self) -> &OsStr {
+        &self.0
+    }
+}
+
+impl AsRef<Path> for EntryName {
+    fn as_ref(&self) -> &Path {
+        Path::new(&self.0)
+    }
+}
 
 /// Classification of a directory entry inspected by
 /// [`PinnedDir::entry_status`].
@@ -152,8 +189,15 @@ impl PinnedDir {
     // unrepresentable values compare equal to each other, silently
     // defeating the identity check this feeds.
     #[allow(clippy::useless_conversion)]
-    pub(super) fn entry_status(&self, name: &OsStr) -> io::Result<(DestEntryKind, FileIdentity)> {
-        let stat = rustix::fs::statat(&self.0, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)?;
+    pub(super) fn entry_status(
+        &self,
+        name: &EntryName,
+    ) -> io::Result<(DestEntryKind, FileIdentity)> {
+        let stat = rustix::fs::statat(
+            &self.0,
+            name.as_os_str(),
+            rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+        )?;
         let kind = match rustix::fs::FileType::from_raw_mode(stat.st_mode) {
             rustix::fs::FileType::Directory => DestEntryKind::Directory,
             rustix::fs::FileType::Symlink => DestEntryKind::Symlink,
@@ -168,15 +212,15 @@ impl PinnedDir {
 
     /// Renames `from` to `to`, both resolved relative to the pinned
     /// directory.
-    pub(super) fn rename(&self, from: &OsStr, to: &OsStr) -> io::Result<()> {
-        rustix::fs::renameat(&self.0, from, &self.0, to)?;
+    pub(super) fn rename(&self, from: &EntryName, to: &EntryName) -> io::Result<()> {
+        rustix::fs::renameat(&self.0, from.as_os_str(), &self.0, to.as_os_str())?;
         Ok(())
     }
 
     /// Removes the empty directory `name`, resolved relative to the pinned
     /// directory.
-    pub(super) fn remove_dir(&self, name: &OsStr) -> io::Result<()> {
-        rustix::fs::unlinkat(&self.0, name, rustix::fs::AtFlags::REMOVEDIR)?;
+    pub(super) fn remove_dir(&self, name: &EntryName) -> io::Result<()> {
+        rustix::fs::unlinkat(&self.0, name.as_os_str(), rustix::fs::AtFlags::REMOVEDIR)?;
         Ok(())
     }
 
@@ -188,10 +232,10 @@ impl PinnedDir {
     /// filesystem namespace, not `parent`'s — rather than anything this type
     /// exposes about `name` itself. `NOFOLLOW` matches every other lookup in
     /// this type: a symlink at `name` is rejected, not followed.
-    pub(super) fn open_entry(&self, name: &OsStr) -> io::Result<std::fs::File> {
+    pub(super) fn open_entry(&self, name: &EntryName) -> io::Result<std::fs::File> {
         let fd = rustix::fs::openat(
             &self.0,
-            name,
+            name.as_os_str(),
             rustix::fs::OFlags::RDONLY
                 | rustix::fs::OFlags::DIRECTORY
                 | rustix::fs::OFlags::CLOEXEC
@@ -276,7 +320,10 @@ impl PinnedDir {
     // `&self` is part of the shared signature with the Unix impl, which
     // does need it; this stub simply doesn't.
     #[allow(clippy::unused_self)]
-    pub(super) fn entry_status(&self, name: &OsStr) -> io::Result<(DestEntryKind, FileIdentity)> {
+    pub(super) fn entry_status(
+        &self,
+        name: &EntryName,
+    ) -> io::Result<(DestEntryKind, FileIdentity)> {
         let metadata = std::fs::symlink_metadata(self.parent.join(name))?;
         let kind = if is_reparse_point(&metadata) {
             DestEntryKind::Symlink
@@ -288,11 +335,11 @@ impl PinnedDir {
         Ok((kind, FileIdentity::Unknown))
     }
 
-    pub(super) fn rename(&self, from: &OsStr, to: &OsStr) -> io::Result<()> {
+    pub(super) fn rename(&self, from: &EntryName, to: &EntryName) -> io::Result<()> {
         std::fs::rename(self.parent.join(from), self.parent.join(to))
     }
 
-    pub(super) fn remove_dir(&self, name: &OsStr) -> io::Result<()> {
+    pub(super) fn remove_dir(&self, name: &EntryName) -> io::Result<()> {
         std::fs::remove_dir(self.parent.join(name))
     }
 
@@ -303,7 +350,7 @@ impl PinnedDir {
     /// never need to branch on platform; its result feeds into
     /// [`current_path`], which always returns `None` on this platform
     /// regardless of whether this call succeeds.
-    pub(super) fn open_entry(&self, name: &OsStr) -> io::Result<std::fs::File> {
+    pub(super) fn open_entry(&self, name: &EntryName) -> io::Result<std::fs::File> {
         std::fs::File::open(self.parent.join(name))
     }
 }
@@ -343,14 +390,35 @@ fn is_reparse_point(metadata: &std::fs::Metadata) -> bool {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::DestEntryKind;
+    use super::EntryName;
     use super::FileIdentity;
     use super::IdentityCheck;
     use super::PinnedDir;
     use super::current_path;
     use std::assert_matches;
-    use std::ffi::OsStr;
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::fs::symlink;
+    use std::path::Path;
+
+    fn entry(name: &str) -> EntryName {
+        EntryName::of(Path::new(name)).expect("single component")
+    }
+
+    #[test]
+    fn entry_name_accepts_only_one_normal_component() {
+        assert_eq!(entry("dest").as_os_str(), "dest");
+        assert_eq!(
+            EntryName::of(Path::new("a/dest")).unwrap().as_os_str(),
+            "dest"
+        );
+        assert_eq!(
+            EntryName::of(Path::new("a/dest/")).unwrap().as_os_str(),
+            "dest"
+        );
+        for refused in ["..", ".", "/", "a/..", ""] {
+            assert!(EntryName::of(Path::new(refused)).is_none(), "{refused:?}");
+        }
+    }
 
     #[test]
     fn rename_follows_the_pinned_inode_not_a_planted_symlink() {
@@ -369,7 +437,7 @@ mod tests {
         std::fs::rename(&real_parent, &moved_real).expect("move real parent aside");
         symlink(&decoy, &real_parent).expect("plant symlink at the old path");
 
-        pin.rename(OsStr::new("payload"), OsStr::new("payload_renamed"))
+        pin.rename(&entry("payload"), &entry("payload_renamed"))
             .expect("rename via pinned fd");
 
         assert!(
@@ -391,7 +459,7 @@ mod tests {
         std::fs::create_dir(&dest).expect("create dest");
 
         let pin = PinnedDir::open(&parent).expect("pin parent");
-        let name = OsStr::new("dest");
+        let name = &entry("dest");
         let (kind, snapshot) = pin.entry_status(name).expect("snapshot identity");
         assert_eq!(kind, DestEntryKind::Directory);
 
@@ -416,8 +484,8 @@ mod tests {
         std::fs::create_dir(parent.join("dest")).expect("create dest");
 
         let pin = PinnedDir::open(&parent).expect("pin parent");
-        let (_, first) = pin.entry_status(OsStr::new("dest")).expect("first");
-        let (_, second) = pin.entry_status(OsStr::new("dest")).expect("second");
+        let (_, first) = pin.entry_status(&entry("dest")).expect("first");
+        let (_, second) = pin.entry_status(&entry("dest")).expect("second");
         assert_matches!(first, FileIdentity::Known { .. });
         assert_eq!(second.check(first), IdentityCheck::Same);
     }
@@ -452,7 +520,7 @@ mod tests {
 
         let pin = PinnedDir::open(&parent).expect("pin parent");
         let (kind, _) = pin
-            .entry_status(OsStr::new("link"))
+            .entry_status(&entry("link"))
             .expect("a symlink entry must be classified, not rejected as an error");
         assert_eq!(
             kind,
@@ -473,7 +541,7 @@ mod tests {
 
         let pin = PinnedDir::open(&parent).expect("pin parent");
         let err = pin
-            .entry_status(OsStr::new("does_not_exist"))
+            .entry_status(&entry("does_not_exist"))
             .expect_err("a missing entry must be an error, not a classified value");
         assert_eq!(
             err.kind(),
@@ -499,7 +567,7 @@ mod tests {
 
         let pin = PinnedDir::open(&parent).expect("pin parent");
         let (kind, _) = pin
-            .entry_status(OsStr::new("not_a_dir"))
+            .entry_status(&entry("not_a_dir"))
             .expect("a regular file must be classified, not rejected as an error");
         assert_eq!(
             kind,
@@ -525,7 +593,7 @@ mod tests {
             .expect("restrict dest permissions");
 
         let pin = PinnedDir::open(&parent).expect("pin parent");
-        let result = pin.entry_status(OsStr::new("dest"));
+        let result = pin.entry_status(&entry("dest"));
 
         // Restore permissions before any panic-driven cleanup runs.
         std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))
@@ -595,7 +663,7 @@ mod tests {
 
         let pin = PinnedDir::open(&real_parent).expect("pin real_parent");
         let fd = pin
-            .open_entry(OsStr::new("entry"))
+            .open_entry(&entry("entry"))
             .expect("open entry via pinned fd");
 
         // Redirect the path `real_parent` used to name: move the real
@@ -642,7 +710,7 @@ mod tests {
 
         let pin = PinnedDir::open(&parent).expect("pin parent");
         let err = pin
-            .open_entry(OsStr::new("link"))
+            .open_entry(&entry("link"))
             .expect_err("a symlink entry must be rejected, not followed");
         // The specific errno is platform-dependent: combined with
         // `O_DIRECTORY`, Linux's `open(2)` still reports `ELOOP` for a

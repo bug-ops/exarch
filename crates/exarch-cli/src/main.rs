@@ -4,61 +4,123 @@
 mod cli;
 mod commands;
 mod error;
+mod operation;
 mod output;
 mod progress;
 
 use clap::Parser;
-use error::StrictWarning;
-use error::VerificationFailed;
+use commands::CommandResult;
+use commands::Outcome;
+use operation::Operation;
 use output::OutputFormatter;
-use output::Verbosity;
-use std::process;
+use output::OutputMode;
+use std::path::Path;
+use std::process::ExitCode;
+
+/// The process exit status, one value per documented meaning.
+///
+/// Code 2 is clap's usage-error status and is deliberately not used here, so a
+/// script can tell "your flags are wrong" from "the archive has warnings".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+enum ExitStatus {
+    Success = 0,
+    Failure = 1,
+    StrictWarning = 3,
+}
+
+impl From<ExitStatus> for ExitCode {
+    fn from(status: ExitStatus) -> Self {
+        Self::from(status as u8)
+    }
+}
+
+/// A command that failed, with the operation the formatter reports it under.
+struct Failure {
+    operation: Operation,
+    error: anyhow::Error,
+}
+
+/// Runs `command`, giving a failure the archive name and hints of its
+/// operation.
+fn attempt(
+    operation: Operation,
+    archive: &Path,
+    result: CommandResult,
+) -> Result<Outcome, Failure> {
+    result.map_err(|error| Failure {
+        operation,
+        error: error.contextualize(operation, archive),
+    })
+}
 
 fn run(
     cli: &cli::Cli,
-    verbosity: Verbosity,
+    mode: OutputMode,
     formatter: &mut dyn OutputFormatter,
-) -> (anyhow::Result<()>, &'static str) {
+) -> Result<Outcome, Failure> {
     match &cli.command {
-        cli::Commands::Extract(args) => (
-            commands::extract::execute(args, formatter, verbosity),
-            "extract",
+        cli::Commands::Extract(args) => attempt(
+            Operation::Extract,
+            &args.archive,
+            commands::extract::execute(args, formatter, mode),
         ),
-        cli::Commands::Create(args) => (
-            commands::create::execute(args, formatter, verbosity),
-            "create",
+        cli::Commands::Create(args) => attempt(
+            Operation::Create,
+            &args.output,
+            commands::create::execute(args, formatter, mode),
         ),
-        cli::Commands::List(args) => (commands::list::execute(args, formatter), "list"),
-        cli::Commands::Verify(args) => (commands::verify::execute(args, formatter), "verify"),
+        cli::Commands::List(args) => attempt(
+            Operation::List,
+            &args.archive,
+            commands::list::execute(args, formatter),
+        ),
+        cli::Commands::Verify(args) => attempt(
+            Operation::Verify,
+            &args.archive,
+            commands::verify::execute(args, formatter),
+        ),
         cli::Commands::Completion(args) => {
             commands::completion::execute(args.shell);
-            (Ok(()), "completion")
+            Ok(Outcome::Ok)
         }
     }
 }
 
-fn main() {
+fn main() -> ExitCode {
     let cli = cli::Cli::parse();
-    let verbosity = Verbosity::from(&cli);
-    let mut formatter = output::create_formatter(cli.json, verbosity);
+    let mode = OutputMode::from(&cli);
+    let mut formatter = output::create_formatter(mode);
 
-    let (result, operation) = run(&cli, verbosity, formatter.as_mut());
-    if let Err(err) = result {
-        if err.is::<StrictWarning>() {
-            process::exit(2);
+    let status = match run(&cli, mode, formatter.as_mut()) {
+        Ok(Outcome::Ok) => ExitStatus::Success,
+        Ok(Outcome::VerifyFailed) => {
+            formatter.format_verification_failed();
+            ExitStatus::Failure
         }
-        // The verification report (already emitted by the formatter) fully
-        // describes a Fail status. In --json mode, printing a second error
-        // envelope here would produce two concatenated top-level JSON
-        // documents on stdout, so it's skipped; human-readable output still
-        // gets the error message on stderr.
-        if err.is::<VerificationFailed>() {
-            if !cli.json {
-                formatter.format_error(operation, &err);
-            }
-            process::exit(1);
+        Ok(Outcome::StrictWarning) => ExitStatus::StrictWarning,
+        Err(failure) => {
+            formatter.format_error(failure.operation, &failure.error);
+            ExitStatus::Failure
         }
-        formatter.format_error(operation, &err);
-        process::exit(1);
+    };
+    status.into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ExitStatus;
+
+    #[test]
+    fn strict_warning_does_not_share_clap_usage_error_code() {
+        const CLAP_USAGE_ERROR: u8 = 2;
+        for status in [
+            ExitStatus::Success,
+            ExitStatus::Failure,
+            ExitStatus::StrictWarning,
+        ] {
+            assert_ne!(status as u8, CLAP_USAGE_ERROR, "{status:?}");
+        }
+        assert_eq!(ExitStatus::StrictWarning as u8, 3);
     }
 }

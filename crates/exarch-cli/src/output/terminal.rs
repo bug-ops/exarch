@@ -329,10 +329,7 @@ fn is_attached_selector(c: char, prev: Option<char>, rest: &str) -> bool {
     }
 }
 
-fn needs_escape(c: char, prev: Option<char>, rest: &str, keep_newline: bool) -> bool {
-    if keep_newline && c == '\n' {
-        return false;
-    }
+fn needs_escape(c: char, prev: Option<char>, rest: &str) -> bool {
     c.is_control() || (contains(INVISIBLE_RANGES, c) && !is_attached_selector(c, prev, rest))
 }
 
@@ -345,11 +342,11 @@ fn write_escape(f: &mut fmt::Formatter<'_>, c: char) -> fmt::Result {
     }
 }
 
-fn write_escaped(f: &mut fmt::Formatter<'_>, text: &str, keep_newline: bool) -> fmt::Result {
+fn write_escaped(f: &mut fmt::Formatter<'_>, text: &str) -> fmt::Result {
     let mut prev = None;
     let mut chars = text.chars();
     while let Some(c) = chars.next() {
-        if needs_escape(c, prev, chars.as_str(), keep_newline) {
+        if needs_escape(c, prev, chars.as_str()) {
             write_escape(f, c)?;
             prev = None;
         } else {
@@ -382,31 +379,7 @@ impl<'a> TerminalText<'a> {
 
 impl fmt::Display for TerminalText<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write_escaped(f, self.0, false)
-    }
-}
-
-/// Multi-line text authored by the CLI with every other control character
-/// escaped.
-///
-/// Like [`TerminalText`] but keeps `\n`, for CLI-written messages that span
-/// lines (hints, partial-extraction summaries). Only text whose line
-/// structure the CLI itself controls may use it; archive-derived values inside
-/// it must already be escaped with [`TerminalText`] or [`TerminalPath`].
-#[derive(Debug, Clone, Copy)]
-pub struct TerminalBlock<'a>(&'a str);
-
-impl<'a> TerminalBlock<'a> {
-    /// Wraps `text` for display.
-    #[must_use]
-    pub const fn new(text: &'a str) -> Self {
-        Self(text)
-    }
-}
-
-impl fmt::Display for TerminalBlock<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write_escaped(f, self.0, true)
+        write_escaped(f, self.0)
     }
 }
 
@@ -425,7 +398,7 @@ impl<'a> TerminalPath<'a> {
 
 impl fmt::Display for TerminalPath<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write_escaped(f, &self.0.to_string_lossy(), false)
+        write_escaped(f, &self.0.to_string_lossy())
     }
 }
 
@@ -642,14 +615,6 @@ mod tests {
             assert!(is_keycap_base(c));
             assert!(!contains(EMOJI_VARIATION_BASES, c));
         }
-    }
-
-    #[test]
-    fn block_keeps_only_newline() {
-        assert_eq!(
-            TerminalBlock::new("a\nb\x1b\tc\u{202e}").to_string(),
-            "a\nb\\x1b\\x09c\\u{202e}"
-        );
     }
 
     #[test]

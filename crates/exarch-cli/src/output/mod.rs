@@ -5,7 +5,9 @@ mod human;
 mod json;
 pub mod terminal;
 
+pub use formatter::ManifestView;
 pub use formatter::OutputFormatter;
+pub use formatter::SizeUnits;
 
 use human::HumanFormatter;
 use json::JsonFormatter;
@@ -71,12 +73,33 @@ impl From<&crate::cli::Cli> for Verbosity {
     }
 }
 
-/// Creates an output formatter based on CLI flags
-pub fn create_formatter(json: bool, verbosity: Verbosity) -> Box<dyn OutputFormatter> {
-    if json {
-        Box::new(JsonFormatter::stdout())
-    } else {
-        Box::new(HumanFormatter::new(verbosity))
+/// How results are written, resolved once from the command line.
+///
+/// `--json` has no verbosity: its envelope is always written and its progress
+/// is silent, so nothing downstream can mix the two modes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputMode {
+    /// Text for a person, at the given verbosity.
+    Human(Verbosity),
+    /// One JSON document per command on stdout.
+    Json,
+}
+
+impl From<&crate::cli::Cli> for OutputMode {
+    fn from(cli: &crate::cli::Cli) -> Self {
+        if cli.json {
+            Self::Json
+        } else {
+            Self::Human(Verbosity::from(cli))
+        }
+    }
+}
+
+/// Creates the output formatter for `mode`.
+pub fn create_formatter(mode: OutputMode) -> Box<dyn OutputFormatter> {
+    match mode {
+        OutputMode::Json => Box::new(JsonFormatter::stdout()),
+        OutputMode::Human(verbosity) => Box::new(HumanFormatter::new(verbosity)),
     }
 }
 
@@ -103,6 +126,7 @@ pub fn humanize_bytes(bytes: u64) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::OutputMode;
     use super::Verbosity;
     use super::humanize_bytes;
     use clap::Parser;
@@ -147,6 +171,14 @@ mod tests {
         ]);
         assert!(cli.verbose && cli.quiet, "both flags must parse as true");
         assert_eq!(Verbosity::from(&cli), Verbosity::Quiet);
+    }
+
+    #[test]
+    fn output_mode_is_json_whatever_the_verbosity_flags() {
+        let cli = crate::cli::Cli::parse_from(["exarch", "--json", "--verbose", "list", "a.zip"]);
+        assert_eq!(OutputMode::from(&cli), OutputMode::Json);
+        let cli = crate::cli::Cli::parse_from(["exarch", "-q", "list", "a.zip"]);
+        assert_eq!(OutputMode::from(&cli), OutputMode::Human(Verbosity::Quiet));
     }
 
     #[test]

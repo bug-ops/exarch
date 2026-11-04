@@ -36,7 +36,9 @@ use crate::security::fs_view::HostFs;
 use crate::security::fs_view::LinkClass;
 use crate::security::fs_view::Occupant;
 use crate::security::fs_view::ParentBlocker;
+use crate::security::fs_view::PathModel;
 use crate::security::fs_view::classify_link;
+use crate::security::fs_view::name_too_long;
 use crate::types::SafePath;
 use crate::types::safe_path::ParentCheck;
 
@@ -111,6 +113,22 @@ enum Links {
     /// Any symlink is a blocker; used to re-walk a path that was already
     /// resolved to a symlink-free form.
     Strict,
+}
+
+/// One opened component, with the symlink-free location it resolved to when
+/// the component was a symlink.
+struct Hop<'r> {
+    dir: DirRef<'r>,
+    resolved: Option<PathBuf>,
+}
+
+impl Hop<'_> {
+    fn plain(dir: VettedDir) -> Self {
+        Self {
+            dir: DirRef::Opened(dir),
+            resolved: None,
+        }
+    }
 }
 
 /// Creates and vets the directories that archive entries are written into.
@@ -206,9 +224,30 @@ impl DirWalker {
         missing: Missing,
         links: Links,
     ) -> Result<DirRef<'r>> {
+        let (dir_ref, landing) = self.walk(root, dir, entry, missing, links)?;
+        if let Some(landing) = landing {
+            let tail = entry.strip_prefix(dir).unwrap_or_else(|_| Path::new(""));
+            PathModel::Host.check_name_lengths(&landing.join(tail))?;
+        }
+        Ok(dir_ref)
+    }
+
+    /// Walks `dir` and also returns where the walk ended, relative to the
+    /// destination, when a symlink on the way redirected it.
+    fn walk<'r>(
+        self,
+        root: &'r PinnedRoot,
+        dir: &Path,
+        entry: &Path,
+        missing: Missing,
+        links: Links,
+    ) -> Result<(DirRef<'r>, Option<PathBuf>)> {
         let mut walked = PathBuf::new();
+        let mut landing: Option<PathBuf> = None;
         let mut current: Option<DirRef<'r>> = None;
-        for component in dir.components() {
+        let tail = entry.strip_prefix(dir).unwrap_or_else(|_| Path::new(""));
+        let mut components = dir.components();
+        while let Some(component) = components.next() {
             let Some(leaf) = Leaf::from_component(component) else {
                 if matches!(component, std::path::Component::CurDir) {
                     continue;
@@ -219,10 +258,53 @@ impl DirWalker {
             };
             walked.push(leaf.as_os_str());
             let parent = current.as_deref().unwrap_or_else(|| root.dir());
-            let next = self.step(root, parent, leaf, &walked, entry, missing, links)?;
-            current = Some(next);
+            let hop = self.step(root, parent, leaf, &walked, entry, missing, links)?;
+            let redirected = hop.resolved.is_some();
+            match (hop.resolved, landing.as_mut()) {
+                (Some(resolved), _) => landing = Some(resolved),
+                (None, Some(landing)) => landing.push(leaf.as_os_str()),
+                (None, None) => {}
+            }
+            if let (true, Some(landing)) = (redirected, landing.as_deref()) {
+                Self::ensure_fits(&hop.dir, landing, components.as_path(), tail)?;
+            }
+            current = Some(hop.dir);
         }
-        Ok(current.unwrap_or_else(|| DirRef::Root(root.dir())))
+        Ok((current.unwrap_or_else(|| DirRef::Root(root.dir())), landing))
+    }
+
+    /// Refuses, before anything is created below a symlink target, a landing
+    /// that no later component can bring under the host path limit.
+    ///
+    /// The rest of the path may still cross another symlink, which resets the
+    /// landing; only when it provably ends here is the projected length final.
+    fn ensure_fits(at: &VettedDir, landing: &Path, rest: &Path, tail: &Path) -> Result<()> {
+        let projected = landing.join(rest).join(tail);
+        if PathModel::Host.check_name_lengths(&projected).is_ok() || !Self::ends_here(at, rest) {
+            return Ok(());
+        }
+        Err(ArchiveError::Io(name_too_long()))
+    }
+
+    /// Whether `rest` below `at` holds no symlink, file or unreadable entry, so
+    /// no later component can change where the walk lands.
+    fn ends_here(at: &VettedDir, rest: &Path) -> bool {
+        let mut opened: Option<VettedDir> = None;
+        for component in rest.components() {
+            let Some(leaf) = Leaf::from_component(component) else {
+                continue;
+            };
+            let parent = opened.as_ref().unwrap_or(at);
+            match parent.probe(leaf) {
+                Ok(None) => return true,
+                Ok(Some(Occupant::Directory)) => match parent.open_dir(leaf) {
+                    Ok(next) => opened = Some(next),
+                    Err(_) => return false,
+                },
+                Ok(Some(_)) | Err(_) => return false,
+            }
+        }
+        true
     }
 
     #[expect(
@@ -238,9 +320,9 @@ impl DirWalker {
         entry: &Path,
         missing: Missing,
         links: Links,
-    ) -> Result<DirRef<'r>> {
+    ) -> Result<Hop<'r>> {
         let mut err = match parent.open_dir(leaf) {
-            Ok(dir) => return Ok(DirRef::Opened(dir)),
+            Ok(dir) => return Ok(Hop::plain(dir)),
             Err(e) => e,
         };
         if err.kind() == std::io::ErrorKind::NotFound && missing == Missing::Create {
@@ -250,7 +332,7 @@ impl DirWalker {
                 Err(e) => return Err(e.into()),
             }
             err = match parent.open_dir(leaf) {
-                Ok(dir) => return Ok(DirRef::Opened(dir)),
+                Ok(dir) => return Ok(Hop::plain(dir)),
                 Err(e) => e,
             };
         }
@@ -272,7 +354,7 @@ impl DirWalker {
         walked: &Path,
         entry: &Path,
         links: Links,
-    ) -> Result<DirRef<'r>> {
+    ) -> Result<Hop<'r>> {
         if links == Links::Strict {
             return Err(ParentBlocker::Symlink.error(entry, walked));
         }
@@ -289,7 +371,11 @@ impl DirWalker {
             }
             (LinkClass::InsideDir(resolved), LinkPolicy::ContainedOnly) => {
                 let inside = resolved.strip_prefix(dest.as_path()).unwrap_or(&resolved);
-                self.descend(root, inside, entry, Missing::Fail, Links::Strict)
+                let (dir, _) = self.walk(root, inside, entry, Missing::Fail, Links::Strict)?;
+                Ok(Hop {
+                    dir,
+                    resolved: Some(inside.to_path_buf()),
+                })
             }
         }
     }
@@ -300,6 +386,7 @@ impl DirWalker {
 mod tests {
     use super::*;
     use crate::PolicySetting;
+    use crate::security::fs_view::MAX_PATH_LEN;
     use crate::types::DestDir;
     use crate::types::safe_path::Resolved;
     use std::assert_matches;
@@ -494,6 +581,75 @@ mod tests {
         walker(true).ensure_dir(&dest, &sp("alias/sub")).unwrap();
 
         assert!(dest.dest().as_path().join("real/sub").is_dir());
+    }
+
+    fn name_of_len(len: usize) -> String {
+        let mut name = String::new();
+        while name.len() < len {
+            if !name.is_empty() {
+                name.push('/');
+            }
+            let room = len - name.len();
+            name.push_str(&"n".repeat(room.min(200)));
+        }
+        assert_eq!(name.len(), len);
+        name
+    }
+
+    /// Builds `dest/d -> chain` and returns a relative entry `d/<rest>` whose
+    /// landing is `landing_len` bytes long. The chain is sized from the
+    /// destination so the link itself resolves on every platform.
+    fn long_landing(dest: &PinnedRoot, landing_len: usize) -> SafePath {
+        let base = dest.dest().as_path();
+        let chain_len = MAX_PATH_LEN - base.as_os_str().len() - 64;
+        let chain = name_of_len(chain_len);
+        walker(false).ensure_dir(dest, &sp(&chain)).unwrap();
+        symlink(&chain, base.join("d")).unwrap();
+        let rest = name_of_len(landing_len - chain_len - 1);
+        sp(&format!("d/{rest}/f"))
+    }
+
+    #[test]
+    fn contained_policy_accepts_a_landing_exactly_at_the_path_limit() {
+        let (_root, dest, _) = dest_with_outside();
+        let landing_len = MAX_PATH_LEN - "/f".len();
+        let rel = long_landing(&dest, landing_len);
+
+        walker(true).ensure_parent(&dest, &rel).unwrap();
+    }
+
+    #[test]
+    fn contained_policy_refuses_a_landing_one_byte_over_the_path_limit() {
+        let (_root, dest, _) = dest_with_outside();
+        let landing_len = MAX_PATH_LEN - "/f".len() + 1;
+        let rel = long_landing(&dest, landing_len);
+
+        let err = walker(true)
+            .ensure_parent(&dest, &rel)
+            .map(|_| ())
+            .unwrap_err();
+
+        assert_matches!(&err, ArchiveError::Io(e) if e.kind() == std::io::ErrorKind::InvalidFilename, "{err}");
+        assert_eq!(
+            fs::read_dir(dest.dest().as_path().join("d"))
+                .unwrap()
+                .count(),
+            0,
+            "nothing is created below the link target"
+        );
+    }
+
+    #[test]
+    fn contained_policy_judges_the_final_landing_not_the_first_hop() {
+        let (_root, dest, _) = dest_with_outside();
+        let base = dest.dest().as_path().to_path_buf();
+        let chain = name_of_len(MAX_PATH_LEN - base.as_os_str().len() - 64);
+        walker(false).ensure_dir(&dest, &sp(&chain)).unwrap();
+        fs::create_dir(base.join("short")).unwrap();
+        symlink(&chain, base.join("d")).unwrap();
+        symlink(base.join("short"), base.join(&chain).join("x")).unwrap();
+
+        walker(true).ensure_parent(&dest, &sp("d/x/f")).unwrap();
     }
 
     #[test]

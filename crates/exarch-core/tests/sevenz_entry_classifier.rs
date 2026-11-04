@@ -396,7 +396,7 @@ fn anti_items_do_not_count_against_the_file_quota() {
         ],
     );
     let out = TempDir::new().unwrap();
-    let config = SecurityConfig::default().with_max_file_count(2);
+    let config = SecurityConfig::default().with_max_file_count(exarch_core::non_zero!(2));
 
     list_archive(&archive, &config).unwrap();
     extract_archive(&archive, out.path(), &config).unwrap();
@@ -450,7 +450,7 @@ fn anti_item_inside_a_solid_block_fails_closed_before_any_write() {
 
         let err = extract_archive(&archive, out.path(), &config).unwrap_err();
 
-        assert_matches!(&err, ArchiveError::InvalidArchive(m) if m.contains(refusal),
+        assert_matches!(&err, ArchiveError::InvalidArchive(m) if m.to_string().contains(refusal),
             "anti item at {anti_at}: {err:?}"
         );
         assert!(dir_names(&out).is_empty(), "anti item at {anti_at}");

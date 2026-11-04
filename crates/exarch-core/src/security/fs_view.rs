@@ -759,17 +759,17 @@ impl NodeBudget {
     /// shared. Explicit directory entries and aliases spend it too although
     /// `max_file_count` does not count directories, so an archive of many
     /// directories can exhaust it while within the file limit; raise
-    /// `max_file_count` or `max_path_depth` to allow more. Unbounded if either
-    /// is `usize::MAX`.
+    /// `max_file_count` or `max_path_depth` to allow more. Unbounded when
+    /// `max_file_count` is [`Limit::Unbounded`](crate::Limit::Unbounded); a
+    /// product that overflows saturates at `usize::MAX`.
     #[must_use]
     pub fn from_config<State>(config: &SecurityConfig<State>) -> Self {
-        let max = if config.max_file_count == usize::MAX || config.max_path_depth == usize::MAX {
-            usize::MAX
-        } else {
-            config
-                .max_file_count
-                .saturating_mul(config.max_path_depth)
-                .saturating_add(1)
+        let max = match config.max_file_count {
+            crate::Limit::Bounded(count) => count
+                .get()
+                .saturating_mul(config.max_path_depth.get())
+                .saturating_add(1),
+            crate::Limit::Unbounded => usize::MAX,
         };
         Self { max, used: 0 }
     }
@@ -1752,8 +1752,8 @@ mod tests {
     #[test]
     fn unbounded_config_budget_never_trips() {
         let config = crate::SecurityConfig::default()
-            .with_max_file_count(usize::MAX)
-            .with_max_path_depth(8);
+            .with_max_file_count(crate::Limit::Unbounded)
+            .with_max_path_depth(crate::non_zero!(8));
         let mut t = VirtualTree::build(
             &VirtualRoot::at("/dest"),
             PathModel::Host,
@@ -1769,8 +1769,8 @@ mod tests {
     #[test]
     fn config_budget_is_files_times_depth_plus_one() {
         let config = crate::SecurityConfig::default()
-            .with_max_file_count(10)
-            .with_max_path_depth(4);
+            .with_max_file_count(crate::non_zero!(10))
+            .with_max_path_depth(crate::non_zero!(4));
         assert_eq!(NodeBudget::from_config(&config).max, 41);
     }
 

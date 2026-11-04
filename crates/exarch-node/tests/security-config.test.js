@@ -335,7 +335,7 @@ describe('SecurityConfig', () => {
 
       assert.throws(() => {
         config.setMaxCompressionRatio(Infinity);
-      }, /finite/i);
+      }, /positive/i);
     });
 
     it('should throw on negative file size', () => {

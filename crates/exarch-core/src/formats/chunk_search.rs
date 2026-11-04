@@ -250,9 +250,7 @@ mod tests {
         struct Never;
         impl ChunkSource for Never {
             fn read_chunk(&mut self, _: u64, _: &mut [u8]) -> Result<usize> {
-                Err(crate::ArchiveError::InvalidArchive(
-                    "unexpected read".into(),
-                ))
+                Err(crate::ArchiveError::unclassified("unexpected read"))
             }
         }
         let plan = ChunkPlan {

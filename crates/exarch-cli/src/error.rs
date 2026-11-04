@@ -354,9 +354,10 @@ pub fn convert_extraction_error(err: ArchiveError, archive: &Path) -> anyhow::Er
             "Invalid archive '{archive}'\n\
              HINT: The archive may be corrupted or malformed."
         ),
-        ArchiveError::InvalidConfiguration { reason } => format!(
-            "Invalid configuration: {reason}\n\
+        ArchiveError::InvalidConfiguration { setting, problem } => format!(
+            "Invalid configuration: {}\n\
              HINT: Check the flags you passed and their allowed value ranges.",
+            setting.describe(problem),
         ),
         ArchiveError::SourceNotFound { path } => format!(
             "Source path not found: {}\n\
@@ -1011,7 +1012,9 @@ mod tests {
 
     #[test]
     fn test_invalid_archive_reason_appears_once() {
-        let err = ArchiveError::InvalidArchive("distinctive-reason".to_string());
+        let err = ArchiveError::from(exarch_core::Malformation::SymlinkTargetUnreadable {
+            detail: "distinctive-reason".into(),
+        });
         let converted = convert_extraction_error(err, Path::new("a.tar"));
         let msg = format!("{converted:#}");
         assert_eq!(msg.matches("distinctive-reason").count(), 1, "got: {msg}");

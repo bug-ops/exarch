@@ -792,9 +792,9 @@ impl VerificationIssue {
                 IssueCategory::InvalidArchive,
                 format!("Unknown format: {}", path.display()),
             ),
-            ArchiveError::InvalidConfiguration { reason } => {
-                high_invalid_archive(format!("Invalid configuration: {reason}"))
-            }
+            ArchiveError::InvalidConfiguration { setting, problem } => high_invalid_archive(
+                format!("Invalid configuration: {}", setting.describe(problem)),
+            ),
             ArchiveError::ReaderFormat(reason) => {
                 high_invalid_archive(format!("Reader format: {reason}"))
             }
@@ -1333,7 +1333,7 @@ mod tests {
 
     #[test]
     fn test_verification_issue_from_invalid_archive() {
-        let error = ArchiveError::InvalidArchive("bad header".into());
+        let error = ArchiveError::unclassified("bad header");
         let issue = VerificationIssue::from_error(&error, None);
         assert_eq!(issue.severity, IssueSeverity::High);
         assert_eq!(issue.category, IssueCategory::InvalidArchive);
@@ -1602,7 +1602,8 @@ mod tests {
     #[test]
     fn test_verification_issue_from_invalid_configuration() {
         let error = ArchiveError::InvalidConfiguration {
-            reason: "bad config".into(),
+            setting: crate::ConfigSetting::OutputPath,
+            problem: crate::ConfigProblem::NotSet,
         };
         let issue = VerificationIssue::from_error(&error, None);
         assert_eq!(issue.severity, IssueSeverity::High);

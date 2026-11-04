@@ -259,9 +259,9 @@ proptest! {
     ) {
         let mut tracker = QuotaTracker::new();
         let mut config = SecurityConfig::default();
-        config.max_file_count = max_files;
-        config.max_total_size = u64::MAX;
-        config.max_file_size = u64::MAX;
+        config.max_file_count = exarch_core::Limit::Bounded(std::num::NonZeroUsize::new(max_files).unwrap());
+        config.max_total_size = exarch_core::Limit::Unbounded;
+        config.max_file_size = exarch_core::Limit::Unbounded;
         let config = config.validate().unwrap();
 
         let mut success_count = 0;
@@ -301,9 +301,9 @@ proptest! {
     ) {
         let mut tracker = QuotaTracker::new();
         let mut config = SecurityConfig::default();
-        config.max_total_size = max_size;
-        config.max_file_count = usize::MAX;
-        config.max_file_size = u64::MAX;
+        config.max_total_size = exarch_core::Limit::Bounded(std::num::NonZeroU64::new(max_size).unwrap());
+        config.max_file_count = exarch_core::Limit::Unbounded;
+        config.max_file_size = exarch_core::Limit::Unbounded;
         let config = config.validate().unwrap();
 
         for size in file_sizes {
@@ -335,9 +335,9 @@ proptest! {
     ) {
         let mut tracker = QuotaTracker::new();
         let mut config = SecurityConfig::default();
-        config.max_file_size = max_file_size;
-        config.max_total_size = u64::MAX;
-        config.max_file_count = usize::MAX;
+        config.max_file_size = exarch_core::Limit::Bounded(std::num::NonZeroU64::new(max_file_size).unwrap());
+        config.max_total_size = exarch_core::Limit::Unbounded;
+        config.max_file_count = exarch_core::Limit::Unbounded;
         let config = config.validate().unwrap();
 
         let result = tracker.reserve(file_size, &config);
@@ -366,9 +366,9 @@ proptest! {
     ) {
         let mut tracker = QuotaTracker::new();
         let mut config = SecurityConfig::default();
-        config.max_file_size = u64::MAX;
-        config.max_file_count = usize::MAX;
-        config.max_total_size = u64::MAX;
+        config.max_file_size = exarch_core::Limit::Unbounded;
+        config.max_file_count = exarch_core::Limit::Unbounded;
+        config.max_total_size = exarch_core::Limit::Unbounded;
         let config = config.validate().unwrap();
 
         let mut expected_total = 0u64;
@@ -410,7 +410,7 @@ proptest! {
 
         let result = validate_compression_ratio(Compressed(compressed), Uncompressed(uncompressed), &config);
 
-        if ratio <= config.max_compression_ratio {
+        if ratio <= config.max_compression_ratio.get() {
             prop_assert!(result.is_ok(), "ratio {} should be safe", ratio);
         } else {
             prop_assert!(result.is_err(), "ratio {} should exceed limit", ratio);

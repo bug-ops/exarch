@@ -94,9 +94,10 @@ describe('setter errors', () => {
 
   it('binding-native errors keep napi status and carry no typed properties', () => {
     assert.throws(
-      () => new SecurityConfig().setMaxFileSize(-1),
+      () => new SecurityConfig().setMaxFileSize('not a number'),
       (err) => {
-        assert.strictEqual(err.code, 'GenericFailure');
+        assert.strictEqual(err.code, 'NumberExpected');
+        assert.strictEqual(err.setting, undefined);
         assert.strictEqual(err.relaxableBy, undefined);
         assert.strictEqual(err.writes, undefined);
         return true;

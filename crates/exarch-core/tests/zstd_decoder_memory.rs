@@ -78,7 +78,7 @@ fn write_zip(dir: &Path, window_log: u32, mantissa: u8) -> PathBuf {
 
 fn config(memory: u64, policy: ZipConsistencyPolicy) -> SecurityConfig {
     SecurityConfig::default()
-        .with_max_decoder_memory(memory)
+        .with_max_decoder_memory(std::num::NonZeroU64::new(memory).unwrap())
         .with_zip_consistency(policy)
 }
 
@@ -154,7 +154,7 @@ fn tar_zst_windows_are_judged_at_the_power_of_two_of_the_limit() {
 fn tar_zst_window_27_is_accepted_by_default_and_28_refused() {
     let dir = TempDir::new().unwrap();
     let default = SecurityConfig::default();
-    let max = default.max_decoder_memory;
+    let max = default.max_decoder_memory.get();
     let ok = write_tar_zst(dir.path(), 27, 0);
     assert_path_operations(&ok, &default, None, "2^27");
     let too_wide = write_tar_zst(dir.path(), 28, 0);
@@ -185,7 +185,7 @@ fn zip_windows_are_judged_at_the_power_of_two_of_the_limit_under_both_policies()
 fn zip_window_27_is_accepted_by_default_and_28_refused() {
     let dir = TempDir::new().unwrap();
     let default = SecurityConfig::default();
-    let max = default.max_decoder_memory;
+    let max = default.max_decoder_memory.get();
     assert_path_operations(&write_zip(dir.path(), 27, 0), &default, None, "2^27");
     assert_path_operations(&write_zip(dir.path(), 28, 0), &default, Some(max), "2^28");
 }

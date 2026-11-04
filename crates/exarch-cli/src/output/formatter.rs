@@ -2,6 +2,7 @@
 
 use anyhow::Result;
 use exarch_core::ArchiveManifest;
+use exarch_core::ConfigSetting;
 use exarch_core::CreationReport;
 use exarch_core::ExtractionReport;
 use exarch_core::FfiKind;
@@ -56,6 +57,7 @@ mod sealed {
     impl Sealed for exarch_core::PartialWrites {}
     impl Sealed for exarch_core::PolicySetting {}
     impl Sealed for exarch_core::SubCode {}
+    impl Sealed for exarch_core::ConfigSetting {}
 }
 
 /// A closed core enum whose `Display` is its stable identifier (`as_str`).
@@ -67,6 +69,7 @@ impl StableId for exarch_core::ErrorCode {}
 impl StableId for exarch_core::PartialWrites {}
 impl StableId for exarch_core::PolicySetting {}
 impl StableId for exarch_core::SubCode {}
+impl StableId for exarch_core::ConfigSetting {}
 
 /// Serializes a closed core enum as its stable identifier.
 #[derive(Debug, Clone, Copy)]
@@ -107,6 +110,10 @@ pub struct JsonError {
     /// otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sub_code: Option<JsonId<SubCode>>,
+    /// Stable id of the configuration setting or input that was refused;
+    /// present only for an `InvalidConfiguration` that names one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub setting: Option<JsonId<ConfigSetting>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -142,6 +149,7 @@ impl<T: Serialize> JsonOutput<T> {
                 partial_report: None,
                 relaxable_by: None,
                 sub_code: None,
+                setting: None,
             }),
         }
     }
@@ -162,6 +170,7 @@ impl<T: Serialize> JsonOutput<T> {
                 partial_report: Some(partial_report),
                 relaxable_by: None,
                 sub_code: None,
+                setting: None,
             }),
         }
     }
@@ -175,6 +184,7 @@ impl JsonOutput<()> {
         if let Some(error) = self.error.as_mut() {
             error.relaxable_by = kind.relaxable_by().map(JsonId);
             error.sub_code = kind.sub_code().map(JsonId);
+            error.setting = kind.setting().map(JsonId);
         }
         self
     }

@@ -8,30 +8,27 @@
 use std::fmt;
 
 use crate::ArchiveError;
+use crate::ConfigProblem;
+use crate::ConfigSetting;
 use crate::Result;
 use crate::security::boundary::MAX_CONFIG_ENTRY_LENGTH;
 
-fn invalid(field: &str, problem: &str) -> ArchiveError {
-    ArchiveError::InvalidConfiguration {
-        reason: format!("{field} {problem}"),
-    }
+fn invalid(setting: ConfigSetting, problem: ConfigProblem) -> ArchiveError {
+    ArchiveError::InvalidConfiguration { setting, problem }
 }
 
-fn check_length_and_nul(value: &str, field: &str) -> Result<()> {
+fn check_length_and_nul(value: &str, setting: ConfigSetting) -> Result<()> {
     if value.len() > MAX_CONFIG_ENTRY_LENGTH {
         return Err(invalid(
-            field,
-            &format!(
-                "exceeds maximum length of {MAX_CONFIG_ENTRY_LENGTH} bytes (got {} bytes)",
-                value.len()
-            ),
+            setting,
+            ConfigProblem::TooLong {
+                max: MAX_CONFIG_ENTRY_LENGTH,
+                got: value.len(),
+            },
         ));
     }
     if value.contains('\0') {
-        return Err(invalid(
-            field,
-            "contains null bytes - potential security issue",
-        ));
+        return Err(invalid(setting, ConfigProblem::ContainsNul));
     }
     Ok(())
 }
@@ -62,7 +59,7 @@ fn has_separator(value: &str) -> bool {
 pub struct Extension(Box<str>);
 
 impl Extension {
-    const FIELD: &'static str = "allowed extension";
+    const SETTING: ConfigSetting = ConfigSetting::AllowedExtension;
 
     /// The normalized extension, without a leading dot.
     #[must_use]
@@ -88,28 +85,22 @@ impl TryFrom<&str> for Extension {
     /// path separator, inner `.`, or a value over [`MAX_CONFIG_ENTRY_LENGTH`]
     /// bytes.
     fn try_from(value: &str) -> Result<Self> {
-        check_length_and_nul(value, Self::FIELD)?;
+        check_length_and_nul(value, Self::SETTING)?;
         let name = value.strip_prefix('.').unwrap_or(value);
         if name.is_empty() {
-            return Err(invalid(Self::FIELD, "must not be empty"));
+            return Err(invalid(Self::SETTING, ConfigProblem::Empty));
         }
         if name
             .chars()
             .any(|c| c.is_ascii_whitespace() || c.is_ascii_control())
         {
-            return Err(invalid(
-                Self::FIELD,
-                "must not contain whitespace or control characters",
-            ));
+            return Err(invalid(Self::SETTING, ConfigProblem::BlankOrControl));
         }
         if has_separator(name) {
-            return Err(invalid(Self::FIELD, "must not contain a path separator"));
+            return Err(invalid(Self::SETTING, ConfigProblem::ContainsSeparator));
         }
         if name.contains('.') {
-            return Err(invalid(
-                Self::FIELD,
-                "must be a single extension without an inner dot (use `gz`, not `tar.gz`)",
-            ));
+            return Err(invalid(Self::SETTING, ConfigProblem::InnerDot));
         }
         Ok(Self(name.to_ascii_lowercase().into_boxed_str()))
     }
@@ -145,7 +136,7 @@ impl fmt::Display for Extension {
 pub struct PathComponentName(Box<str>);
 
 impl PathComponentName {
-    const FIELD: &'static str = "banned path component";
+    const SETTING: ConfigSetting = ConfigSetting::BannedPathComponent;
 
     /// The component name as given.
     #[must_use]
@@ -171,22 +162,19 @@ impl TryFrom<&str> for PathComponentName {
     /// byte, a path separator, `.`, `..`, or a value over
     /// [`MAX_CONFIG_ENTRY_LENGTH`] bytes.
     fn try_from(value: &str) -> Result<Self> {
-        check_length_and_nul(value, Self::FIELD)?;
+        check_length_and_nul(value, Self::SETTING)?;
         if value.is_empty() {
-            return Err(invalid(Self::FIELD, "must not be empty"));
+            return Err(invalid(Self::SETTING, ConfigProblem::Empty));
         }
         let is_blank = |c: char| c.is_ascii_whitespace() || c.is_ascii_control();
         if value.starts_with(is_blank) || value.ends_with(is_blank) {
-            return Err(invalid(
-                Self::FIELD,
-                "must not start or end with whitespace or control characters",
-            ));
+            return Err(invalid(Self::SETTING, ConfigProblem::PaddedWithBlank));
         }
         if has_separator(value) {
-            return Err(invalid(Self::FIELD, "must not contain a path separator"));
+            return Err(invalid(Self::SETTING, ConfigProblem::ContainsSeparator));
         }
         if value == "." || value == ".." {
-            return Err(invalid(Self::FIELD, "must not be `.` or `..`"));
+            return Err(invalid(Self::SETTING, ConfigProblem::DotEntry));
         }
         Ok(Self(value.into()))
     }

@@ -2,6 +2,7 @@
 
 use crate::ArchiveError;
 use crate::CompressionRatio;
+use crate::Malformation;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::ZipBombDetails;
@@ -51,7 +52,7 @@ pub fn validate_compression_ratio(
         ZipBombScope::Entry,
         compressed,
         uncompressed,
-        config.max_compression_ratio,
+        config.max_compression_ratio.get(),
     )
 }
 
@@ -72,7 +73,7 @@ pub fn validate_solid_block_ratio(
         ZipBombScope::SolidBlock,
         block.compressed,
         block.uncompressed,
-        config.max_solid_compression_ratio,
+        config.max_solid_compression_ratio.get(),
     )
 }
 
@@ -149,9 +150,10 @@ impl DeclaredCompressedBudget {
     /// Returns [`ArchiveError::InvalidArchive`] when `declared` exceeds what
     /// is left of the budget.
     pub fn charge(&mut self, declared: u64) -> Result<()> {
-        self.remaining = self.remaining.checked_sub(declared).ok_or_else(|| {
-            ArchiveError::InvalidArchive("declared compressed size exceeds archive length".into())
-        })?;
+        self.remaining = self
+            .remaining
+            .checked_sub(declared)
+            .ok_or_else(|| ArchiveError::from(Malformation::DeclaredCompressedExceedsArchive))?;
         Ok(())
     }
 }

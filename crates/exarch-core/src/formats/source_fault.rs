@@ -143,6 +143,10 @@ impl<R: Read> Read for SourceRead<R> {
 pub enum TapSource {
     /// Core built the stream and metered its input.
     Tapped(SourceTap),
+    /// Core replays the decoded stream a list pass spooled to a file: the
+    /// spool's read faults are recorded, but its bytes are already decoded, so
+    /// they say nothing about the input that produced them.
+    Replay(SourceTap),
     /// The caller supplied an already-decoded reader; core cannot see how much
     /// input produced it or which errors came from its source, so it records
     /// no faults and its I/O errors keep their existing classification.
@@ -154,7 +158,7 @@ impl TapSource {
     #[must_use]
     pub fn fault(&self) -> Option<io::Error> {
         match self {
-            Self::Tapped(tap) => tap.fault(),
+            Self::Tapped(tap) | Self::Replay(tap) => tap.fault(),
             Self::Opaque => None,
         }
     }

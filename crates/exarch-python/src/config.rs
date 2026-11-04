@@ -1,22 +1,36 @@
 //! Python bindings for `SecurityConfig`, `CreationConfig`,
 //! `ExtractionOptions`, and `VerificationOptions`.
 
+use exarch_core::ConfigSetting;
 use exarch_core::DecompressionBudget;
 use exarch_core::Extension;
 use exarch_core::ExtractionOptions as CoreExtractionOptions;
 use exarch_core::IntegrityCheck;
+use exarch_core::Limit;
 use exarch_core::ParallelDecode;
 use exarch_core::PathComponentName;
+use exarch_core::RatioLimit;
 use exarch_core::SecurityConfig as CoreSecurityConfig;
 use exarch_core::VerificationOptions as CoreVerificationOptions;
 use exarch_core::ZipConsistencyPolicy;
 use exarch_core::creation::CompressionLevel;
 use exarch_core::creation::CreationConfig as CoreCreationConfig;
+use exarch_core::non_zero_u64;
+use exarch_core::non_zero_usize;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use std::num::NonZeroU64;
+use std::num::NonZeroUsize;
 
 use crate::error::convert_error;
+
+fn bytes_limit(setting: ConfigSetting, value: u64) -> PyResult<Limit<NonZeroU64>> {
+    Limit::<NonZeroU64>::parse(setting, value).map_err(convert_error)
+}
+
+fn count_limit(setting: ConfigSetting, value: usize) -> PyResult<Limit<NonZeroUsize>> {
+    Limit::<NonZeroUsize>::parse(setting, value).map_err(convert_error)
+}
 
 /// Parses a Python integer of any size into a [`CompressionLevel`], so every
 /// out-of-range value is a `ValueError` rather than an `OverflowError`.
@@ -100,15 +114,15 @@ impl PySecurityConfig {
     // Builder pattern methods - return Self for chaining
 
     /// Sets the maximum file size in bytes.
-    fn with_max_file_size(mut slf: PyRefMut<'_, Self>, size: u64) -> PyRefMut<'_, Self> {
-        slf.inner.max_file_size = size;
-        slf
+    fn with_max_file_size(mut slf: PyRefMut<'_, Self>, size: u64) -> PyResult<PyRefMut<'_, Self>> {
+        slf.inner.max_file_size = bytes_limit(ConfigSetting::MaxFileSize, size)?;
+        Ok(slf)
     }
 
     /// Sets the maximum total size in bytes.
-    fn with_max_total_size(mut slf: PyRefMut<'_, Self>, size: u64) -> PyRefMut<'_, Self> {
-        slf.inner.max_total_size = size;
-        slf
+    fn with_max_total_size(mut slf: PyRefMut<'_, Self>, size: u64) -> PyResult<PyRefMut<'_, Self>> {
+        slf.inner.max_total_size = bytes_limit(ConfigSetting::MaxTotalSize, size)?;
+        Ok(slf)
     }
 
     /// Sets the maximum compression ratio.
@@ -123,25 +137,28 @@ impl PySecurityConfig {
         mut slf: PyRefMut<'_, Self>,
         ratio: f64,
     ) -> PyResult<PyRefMut<'_, Self>> {
-        if !ratio.is_finite() || ratio <= 0.0 {
-            return Err(PyValueError::new_err(
-                "compression ratio must be a positive finite number",
-            ));
-        }
-        slf.inner.max_compression_ratio = ratio;
+        slf.inner.max_compression_ratio =
+            RatioLimit::parse(ConfigSetting::MaxCompressionRatio, ratio).map_err(convert_error)?;
         Ok(slf)
     }
 
     /// Sets the maximum file count.
-    fn with_max_file_count(mut slf: PyRefMut<'_, Self>, count: usize) -> PyRefMut<'_, Self> {
-        slf.inner.max_file_count = count;
-        slf
+    fn with_max_file_count(
+        mut slf: PyRefMut<'_, Self>,
+        count: usize,
+    ) -> PyResult<PyRefMut<'_, Self>> {
+        slf.inner.max_file_count = count_limit(ConfigSetting::MaxFileCount, count)?;
+        Ok(slf)
     }
 
     /// Sets the maximum path depth.
-    fn with_max_path_depth(mut slf: PyRefMut<'_, Self>, depth: usize) -> PyRefMut<'_, Self> {
-        slf.inner.max_path_depth = depth;
-        slf
+    fn with_max_path_depth(
+        mut slf: PyRefMut<'_, Self>,
+        depth: usize,
+    ) -> PyResult<PyRefMut<'_, Self>> {
+        slf.inner.max_path_depth =
+            non_zero_usize(ConfigSetting::MaxPathDepth, depth).map_err(convert_error)?;
+        Ok(slf)
     }
 
     /// Allows or denies symlinks.
@@ -236,12 +253,8 @@ impl PySecurityConfig {
         mut slf: PyRefMut<'_, Self>,
         size: u64,
     ) -> PyResult<PyRefMut<'_, Self>> {
-        if size == 0 {
-            return Err(PyValueError::new_err(
-                "max_solid_block_memory must not be zero",
-            ));
-        }
-        slf.inner.max_solid_block_memory = size;
+        slf.inner.max_solid_block_memory =
+            non_zero_u64(ConfigSetting::MaxSolidBlockMemory, size).map_err(convert_error)?;
         Ok(slf)
     }
 
@@ -310,58 +323,59 @@ impl PySecurityConfig {
 
     #[getter]
     fn get_max_file_size(&self) -> u64 {
-        self.inner.max_file_size
+        self.inner.max_file_size.ceiling()
     }
 
     #[setter]
-    fn set_max_file_size(&mut self, value: u64) {
-        self.inner.max_file_size = value;
+    fn set_max_file_size(&mut self, value: u64) -> PyResult<()> {
+        self.inner.max_file_size = bytes_limit(ConfigSetting::MaxFileSize, value)?;
+        Ok(())
     }
 
     #[getter]
     fn get_max_total_size(&self) -> u64 {
-        self.inner.max_total_size
+        self.inner.max_total_size.ceiling()
     }
 
     #[setter]
-    fn set_max_total_size(&mut self, value: u64) {
-        self.inner.max_total_size = value;
+    fn set_max_total_size(&mut self, value: u64) -> PyResult<()> {
+        self.inner.max_total_size = bytes_limit(ConfigSetting::MaxTotalSize, value)?;
+        Ok(())
     }
 
     #[getter]
     fn get_max_compression_ratio(&self) -> f64 {
-        self.inner.max_compression_ratio
+        self.inner.max_compression_ratio.get()
     }
 
     #[setter]
     fn set_max_compression_ratio(&mut self, value: f64) -> PyResult<()> {
-        if !value.is_finite() || value <= 0.0 {
-            return Err(PyValueError::new_err(
-                "compression ratio must be a positive finite number",
-            ));
-        }
-        self.inner.max_compression_ratio = value;
+        self.inner.max_compression_ratio =
+            RatioLimit::parse(ConfigSetting::MaxCompressionRatio, value).map_err(convert_error)?;
         Ok(())
     }
 
     #[getter]
     fn get_max_file_count(&self) -> usize {
-        self.inner.max_file_count
+        self.inner.max_file_count.ceiling()
     }
 
     #[setter]
-    fn set_max_file_count(&mut self, value: usize) {
-        self.inner.max_file_count = value;
+    fn set_max_file_count(&mut self, value: usize) -> PyResult<()> {
+        self.inner.max_file_count = count_limit(ConfigSetting::MaxFileCount, value)?;
+        Ok(())
     }
 
     #[getter]
     fn get_max_path_depth(&self) -> usize {
-        self.inner.max_path_depth
+        self.inner.max_path_depth.get()
     }
 
     #[setter]
-    fn set_max_path_depth(&mut self, value: usize) {
-        self.inner.max_path_depth = value;
+    fn set_max_path_depth(&mut self, value: usize) -> PyResult<()> {
+        self.inner.max_path_depth =
+            non_zero_usize(ConfigSetting::MaxPathDepth, value).map_err(convert_error)?;
+        Ok(())
     }
 
     #[getter]
@@ -432,17 +446,13 @@ impl PySecurityConfig {
 
     #[getter]
     fn get_max_solid_block_memory(&self) -> u64 {
-        self.inner.max_solid_block_memory
+        self.inner.max_solid_block_memory.get()
     }
 
     #[setter]
     fn set_max_solid_block_memory(&mut self, value: u64) -> PyResult<()> {
-        if value == 0 {
-            return Err(PyValueError::new_err(
-                "max_solid_block_memory must not be zero",
-            ));
-        }
-        self.inner.max_solid_block_memory = value;
+        self.inner.max_solid_block_memory =
+            non_zero_u64(ConfigSetting::MaxSolidBlockMemory, value).map_err(convert_error)?;
         Ok(())
     }
 
@@ -513,10 +523,10 @@ impl PySecurityConfig {
     fn __repr__(&self) -> String {
         format!(
             "SecurityConfig(max_file_size={}, max_total_size={}, max_compression_ratio={:.1}, max_file_count={}, max_path_depth={})",
-            self.inner.max_file_size,
-            self.inner.max_total_size,
-            self.inner.max_compression_ratio,
-            self.inner.max_file_count,
+            self.inner.max_file_size.ceiling(),
+            self.inner.max_total_size.ceiling(),
+            self.inner.max_compression_ratio.get(),
+            self.inner.max_file_count.ceiling(),
             self.inner.max_path_depth
         )
     }
@@ -1168,28 +1178,28 @@ mod tests {
     fn test_property_setters_all_numeric() {
         let mut config = PySecurityConfig::new();
 
-        config.set_max_file_size(100_000_000);
+        config.set_max_file_size(100_000_000).unwrap();
         assert_eq!(
             config.get_max_file_size(),
             100_000_000,
             "Property setter should update max_file_size"
         );
 
-        config.set_max_total_size(2_000_000_000);
+        config.set_max_total_size(2_000_000_000).unwrap();
         assert_eq!(
             config.get_max_total_size(),
             2_000_000_000,
             "Property setter should update max_total_size"
         );
 
-        config.set_max_file_count(20_000);
+        config.set_max_file_count(20_000).unwrap();
         assert_eq!(
             config.get_max_file_count(),
             20_000,
             "Property setter should update max_file_count"
         );
 
-        config.set_max_path_depth(64);
+        config.set_max_path_depth(64).unwrap();
         assert_eq!(
             config.get_max_path_depth(),
             64,
@@ -1437,7 +1447,7 @@ mod tests {
         let config = PySecurityConfig::new();
         let core_config = config.as_core();
         assert_eq!(
-            core_config.max_file_size,
+            core_config.max_file_size.ceiling(),
             50 * 1024 * 1024,
             "as_core() should return reference to inner config"
         );

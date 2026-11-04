@@ -171,7 +171,7 @@ fn implicit_parent_directories_are_not_delivered() {
 
 #[test]
 fn a_file_over_the_size_limit_is_refused_before_delivery() {
-    let config = SecurityConfig::default().with_max_file_size(10);
+    let config = SecurityConfig::default().with_max_file_size(exarch_core::non_zero!(10));
 
     let (result, delivered) = collect(
         &[tar_file("big", &[7; 100])],
@@ -262,7 +262,7 @@ fn the_first_callback_error_is_returned_typed_and_ends_the_extraction() {
 
 #[test]
 fn an_archive_refusal_is_not_a_callback_error() {
-    let config = SecurityConfig::default().with_max_file_size(10);
+    let config = SecurityConfig::default().with_max_file_size(exarch_core::non_zero!(10));
 
     let result = extract_reader_to_callback(
         tar_reader(&[tar_file("big", &[7; 100])]),
@@ -311,7 +311,7 @@ fn a_callback_error_exposes_its_source() {
 fn an_archive_error_is_transparent_in_the_chain() {
     use std::error::Error as _;
 
-    let inner = ArchiveError::InvalidArchive("bad".to_owned());
+    let inner = ArchiveError::from(exarch_core::Malformation::PackSizesOverflow);
     let expected = inner.to_string();
     let err: CallbackError<io::Error> = CallbackError::Archive(inner);
 

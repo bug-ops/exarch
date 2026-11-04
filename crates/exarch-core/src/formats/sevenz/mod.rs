@@ -131,10 +131,11 @@
 //! ```no_run
 //! use exarch_core::ExtractionOptions;
 //! use exarch_core::SecurityConfig;
+//! use exarch_core::non_zero;
 //!
 //! let mut config = SecurityConfig::default();
 //! config.allow_solid_archives = true;
-//! config.max_solid_block_memory = 512 * 1024 * 1024; // 512 MB
+//! config.max_solid_block_memory = non_zero!(512 * 1024 * 1024); // 512 MB
 //! // ... extract with config
 //! ```
 
@@ -424,7 +425,7 @@ impl From<sevenz_rust2::Error> for ArchiveError {
                 io_err.kind(),
                 format!("{path}: {io_err}"),
             )),
-            other => Self::InvalidArchive(format!("7z error: {other}")),
+            other => Self::unclassified(format!("7z error: {other}")),
         }
     }
 }

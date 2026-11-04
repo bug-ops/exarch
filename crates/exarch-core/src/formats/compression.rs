@@ -135,7 +135,7 @@ impl DecoderLimits {
 
     pub(crate) fn of(config: &SecurityConfig<Validated>) -> Self {
         Self {
-            memory: config.max_decoder_memory,
+            memory: config.max_decoder_memory.get(),
             zstd_window: ZstdWindowLog::of(config),
             members: MemberAllowance::of(config),
         }
@@ -868,7 +868,7 @@ mod tests {
     fn zstd_limits(memory: u64) -> DecoderLimits {
         DecoderLimits {
             memory,
-            zstd_window: ZstdWindowLog::for_memory(memory),
+            zstd_window: ZstdWindowLog::for_memory(std::num::NonZeroU64::new(memory).unwrap()),
             ..TEST_MEM
         }
     }

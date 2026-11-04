@@ -63,8 +63,8 @@ fn test_42_zip_bomb_simulation() {
     let temp = TempDir::new().unwrap();
     let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
     let config = SecurityConfig::default()
-        .with_max_file_size(u64::MAX)
-        .with_max_total_size(u64::MAX)
+        .with_max_file_size(exarch_core::Limit::Unbounded)
+        .with_max_total_size(exarch_core::Limit::Unbounded)
         .validate()
         .unwrap();
 
@@ -234,7 +234,7 @@ fn test_permissive_compression_ratio() {
     let temp = TempDir::new().unwrap();
     let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
     let config = SecurityConfig::permissive()
-        .with_max_compression_ratio(1000.0)
+        .with_max_compression_ratio(exarch_core::ratio_limit!(1000.0))
         .validate()
         .unwrap();
 

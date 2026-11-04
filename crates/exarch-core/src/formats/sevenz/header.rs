@@ -62,7 +62,7 @@ impl SevenZHeader {
         let offsets = archive.stream_map.pack_stream_offsets().len();
         let pack_streams = archive.pack_sizes().len();
         if offsets != pack_streams {
-            return Err(ArchiveError::InvalidArchive(format!(
+            return Err(ArchiveError::unclassified(format!(
                 "failed to open 7z archive: the pack stream offsets have {offsets} entries for \
                  {pack_streams} pack streams"
             )));
@@ -166,7 +166,7 @@ pub fn read_sevenz_header<R: Read + Seek>(source: &mut R) -> Result<SevenZHeader
         Ok(archive) => SevenZHeader::check(archive),
         Err(e) if super::is_password_error(&e) => Err(common::encrypted_archive_error()),
         Err(e) if is_empty_sevenz_archive(&e, source) => Ok(SevenZHeader::empty()),
-        Err(e) => Err(ArchiveError::InvalidArchive(format!(
+        Err(e) => Err(ArchiveError::unclassified(format!(
             "failed to open 7z archive: {e}"
         ))),
     }
@@ -251,7 +251,7 @@ mod tests {
     fn check_rejects_pack_streams_without_blocks() {
         let bytes = archive_with_pack_stream_and_no_blocks();
         let err = read_sevenz_header(&mut Cursor::new(bytes)).unwrap_err();
-        assert_matches!(&err, ArchiveError::InvalidArchive(m) if m.starts_with("failed to open 7z archive: "),
+        assert_matches!(&err, ArchiveError::InvalidArchive(m) if m.to_string().starts_with("failed to open 7z archive: "),
             "{err:?}"
         );
     }
@@ -283,7 +283,7 @@ mod tests {
     #[test]
     fn read_header_rejects_the_vector_as_invalid_archive() {
         let err = read_sevenz_header(&mut Cursor::new(NO_FILES_INFO)).unwrap_err();
-        assert_matches!(&err, ArchiveError::InvalidArchive(m) if m.starts_with("failed to open 7z archive: "),
+        assert_matches!(&err, ArchiveError::InvalidArchive(m) if m.to_string().starts_with("failed to open 7z archive: "),
             "{err:?}"
         );
     }

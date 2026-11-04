@@ -127,7 +127,7 @@ impl DescriptorTail {
             return Ok(());
         }
         let raw = archive.by_index_raw(index).map_err(|e| {
-            ArchiveError::InvalidArchive(format!("failed to re-read ZIP entry {index}: {e}"))
+            ArchiveError::unclassified(format!("failed to re-read ZIP entry {index}: {e}"))
         })?;
         let found = match self.find_hidden(raw)? {
             Tail::Clean => return Ok(()),

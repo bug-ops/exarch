@@ -5,6 +5,7 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use crate::ArchiveError;
+use crate::Malformation;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::Violation;
@@ -25,10 +26,9 @@ use crate::types::safe_symlink::resolve_through_symlinks_in;
 
 /// Error for a hardlink whose target is absent when the link is created.
 pub fn hardlink_target_missing(target: &Path) -> ArchiveError {
-    ArchiveError::InvalidArchive(format!(
-        "hardlink target does not exist: {}",
-        target.display()
-    ))
+    ArchiveError::from(Malformation::HardlinkTargetAbsent {
+        target: target.to_path_buf(),
+    })
 }
 
 /// Fails with the hardlink-policy refusal unless `config` allows hardlinks.

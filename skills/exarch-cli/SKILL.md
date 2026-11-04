@@ -97,11 +97,11 @@ Key flags (all optional):
 | `--force` | off | Overwrite existing files at the destination. A regular file is replaced by a new file (content written to a sibling temp file, then renamed over it, like `mv -f`), so other hardlinks to the old file keep their content (verified live on TAR and ZIP). The destination's parent directory must be writable; a read-only existing file is replaced; owner, ACLs and extended attributes of the old file are not preserved. The new file gets the archive entry's mode, never the old file's (a ZIP entry without Unix attributes gets `0664`, verified live); where no mode is passed at all it is `0666 & ~umask`. |
 | `--atomic` | off | Extract to a temp dir, rename into place on success, clean up on failure. With `--force` and a pre-existing destination, the swap is a backup-then-replace: the existing destination is renamed aside first, the new content is renamed into its place second, and only once that swap succeeds is the old destination removed — never before, so a failure at any point still leaves either the old or the new content in place under the destination name. On Unix, `--force` also requires read permission on the destination's parent directory (used to pin it by file descriptor for the swap); the destination itself does not need to be readable. With `--force`, a destination that is itself a symlink is now rejected — pass the resolved target path instead. Without `--force`, a symlinked destination isn't rejected as such, but the final rename onto it fails (`ENOTDIR` on Unix, `OutputExists` on Windows), since `rename` doesn't follow a symlink at the target — pass the resolved target path here too. Plain (non-atomic) `extract` is unaffected: it resolves a symlinked destination via `canonicalize()` and writes through it, matching `tar -C`/`unzip -d` (see #533). If a failed `--atomic --force` run leaves temp/backup content behind (e.g. an intermediate parent-path component was redirected mid-extraction), the error message discloses that content's actual location — see #530. |
 | `--preserve-permissions` | off | Preserve file permissions from the archive (setuid/setgid are still stripped regardless). |
-| `--max-files` | 10000 | Max number of entries (files, symlinks, hardlinks and directories); extraction fails with `QuotaExceeded` past it. |
-| `--max-total-size` | 500 MB | Max cumulative extracted size. Accepts `K`/`M`/`G`/`T` suffixes, e.g. `2G`. |
-| `--max-file-size` | 50 MB | Max size of any single extracted file. Same suffix syntax. |
+| `--max-files` | 10000 | Max number of entries (files, symlinks, hardlinks and directories); extraction fails with `QuotaExceeded` past it. A value of `0` is refused (see below). |
+| `--max-total-size` | 500 MB | Max cumulative extracted size. Accepts `K`/`M`/`G`/`T` suffixes, e.g. `2G`. `0` is refused. |
+| `--max-file-size` | 50 MB | Max size of any single extracted file. Same suffix syntax. `0` is refused. |
 | `--max-compression-ratio` | 100 | Max uncompressed/compressed ratio before an entry is treated as a zip bomb. Applies to ZIP and non-solid 7z; it does **not** apply to solid 7z blocks. With `--allow-solid-archives`, each solid block is checked as a whole against a fixed 1000x limit (`max_solid_compression_ratio`, Rust API only, not configurable from the CLI). An entry that declares data but zero compressed bytes is always a zip bomb with ratio `unbounded` and no ratio limit admits it; its `HINT` says the size metadata is inconsistent rather than suggesting this flag. The ratio of a 7z block counts only the pack streams its coders consume (derived from the coder method IDs, as the stream counts are not public in `sevenz-rust2`); a crafted header that declares a coder with a BCJ2 ID but never decodes it can still add up to three unreferenced pack streams to the last block's total, so that ratio stays an upper bound for such archives (the padding must be real bytes of the file and the other quotas still apply). For a compressed TAR it also bounds entries that `--allowed-extensions` or duplicate skipping leave undecoded to their end: past `--max-file-size` and `--max-total-size`, skipped data may decode to at most this ratio times the compressed input read so far (all entries, extracted ones included), else `extract` stops with `ZipBomb`, scope `skipped entries`, exit `1`, `error.kind` `ZipBomb`; an archive that extracts without the filter is never refused because of it. Verified live: a `.tar.gz` of 200 MiB of zeros with `--allowed-extensions txt` fails with `HINT: Skipped entries of a compressed TAR decoded more than --max-compression-ratio x the compressed input read so far`, and passes with `--max-compression-ratio 100000`. |
-| `--max-path-depth` | 32 | Max path component depth allowed per entry. `extract` also refuses an entry name or path above the host's length limit with `I/O error: file name too long`, as `list` and `verify` do (verified live on ZIP). |
+| `--max-path-depth` | 32 | Max path component depth allowed per entry. `0` is refused. `extract` also refuses an entry name or path above the host's length limit with `I/O error: file name too long`, as `list` and `verify` do (verified live on ZIP). |
 | `--allowed-extensions <EXT>` | all allowed | Restrict extraction to matching extensions. Repeatable or comma-separated (`txt,pdf`); leading dot optional, case-insensitive, padding spaces and empty tokens ignored. An entry that can never match (`tar.gz`, `a/b`) is an error, and so is a value with no extension at all (`,`, `""`), which would otherwise allow everything. Applies to regular files only. TAR, ZIP and 7z check an entry's path first, then the allowlist, then the quotas: a skipped file is not charged to `--max-total-size` or `--max-file-size`, creates no directories, and is counted in `files_skipped`, whatever the destination state; but a skipped entry with an unsafe path (`../x.bin`, or one below an existing file or dangling symlink) is refused, not skipped (verified live on TAR and ZIP). |
 | `--allow-symlinks` | off | Allow symlinks that resolve within the extraction directory. `extract` and `verify` reject symlink and hardlink targets whose `..` components cannot be resolved against the extracted tree (TAR, ZIP and 7z). `extract` never writes through a symlink that already sits below the destination: by default it fails with `path component is a symlink: <path>` (`SecurityViolation`, `relaxable_by` `symlinks`); with this flag a pre-existing link is accepted only if it resolves to a directory inside the destination; one that leaves the destination fails with `SymlinkEscape`, and a dangling, looping or file-pointing one fails with `Security violation: refusing to create <entry> under the existing symlink at <parent>` (not relaxable, also by default for a looping link). A symlinked destination root is still accepted (#533). Verified live on TAR, ZIP and 7z. |
 | `--allow-hardlinks` | off | Allow hardlinks that resolve within the extraction directory. |
@@ -110,7 +110,7 @@ Key flags (all optional):
 | `--allow-solid-archives` | off | Allow solid 7z archives (see Security model below). |
 | `--parallel-decode-memory <SIZE\|off>` | 128M | 7z only. Memory for decoding independent LZMA2 runs ahead on worker threads (K, M, G, T suffixes); `off` decodes on one thread; `0` exits 2 ("greater than zero"). |
 | `--zip-consistency <enforce\|ignore>` | enforce | ZIP only. `enforce` rejects an archive whose structure different ZIP readers interpret differently (see "ZIP structure" under `verify`); `ignore` keeps the central-directory interpretation and raises no structural finding. Relax it only for archives from a producer you trust. |
-| `--decode-reuse <off\|memory\|temp-file>` | memory | ZIP only. Where the structural check keeps the deflate output it decodes, so extraction writes it instead of decoding the entry a second time. `memory` keeps up to 256 MiB in RAM (peak RSS about 265 MiB on a 300 MiB deflate ZIP against 5 MiB with `off`); `temp-file` keeps up to 256 MiB in an unnamed temporary file (plaintext in the temp directory until extraction ends; RAM on a tmpfs, often no faster than `off` on a disk); `off` keeps nothing. The kept size never exceeds `--max-total-size` or the decoder memory limit, and entries over `--max-file-size` or `--max-compression-ratio` are never kept. No effect under `--zip-consistency ignore`; bzip2 and zstd entries are decoded twice. A kept entry is checked against its CRC-32 again when written. Invalid value: exit `2`. Verified live on the release binary: each of the three values extracts the same ZIP, and `--decode-reuse disk` lists the possible values `off, memory, temp-file`. |
+| `--decode-reuse <off\|memory\|temp-file>` | memory | ZIP only. Where the structural check keeps the deflate, bzip2 and zstd output it decodes, so extraction writes it instead of decoding the entry a second time. `memory` keeps up to 256 MiB in RAM (peak RSS about 265 MiB on a 300 MiB deflate ZIP against 5 MiB with `off`); `temp-file` keeps up to 256 MiB in an unnamed temporary file (plaintext in the temp directory until extraction ends; RAM on a tmpfs, often no faster than `off` on a disk); `off` keeps nothing. The kept size never exceeds `--max-total-size` or the decoder memory limit, and entries over `--max-file-size` or `--max-compression-ratio` are never kept. No effect under `--zip-consistency ignore`; entries that do not fit are decoded twice. A kept entry is checked against its CRC-32 again when written. Invalid value: exit `2`. Verified live on the debug binary: a deflate, a bzip2 and a zstd ZIP each extract to identical files under all three values, and `--decode-reuse disk` lists the possible values `off, memory, temp-file`; that the kept output is replayed instead of decoded again is covered by unit tests, not by the binary. |
 | `--banned-component <COMPONENT>` | see below | Block entries whose path contains this component. **Replaces** the default list — see warning below. Repeatable, and a value may be comma-separated (`.git,.ssh`); tokens are trimmed. A token containing `/` or `\`, or equal to `.` or `..` is an error, and so is a non-empty value with no token (`,`, a blank). |
 
 > [!WARNING]
@@ -443,14 +443,15 @@ Every subcommand's `--json` output uses the same envelope:
     "kind": "PathTraversal",   // see full enum below
     "message": "...",
     "relaxable_by": "symlinks", // only on some SecurityViolation errors, see below
-    "sub_code": "PATH_NAME"  // always on SecurityViolation; on some InvalidArchive errors, see below
+    "sub_code": "PATH_NAME",  // always on SecurityViolation; on some InvalidArchive errors, see below
+    "setting": "max_file_count"  // only on an InvalidConfiguration error that names a setting, see below
   }
 }
 ```
 
 `data` is absent on error, `error` is absent on success.
 
-`error.sub_code` is present on every `SecurityViolation` and on a TAR `InvalidArchive`, and is
+`error.sub_code` is present on every `SecurityViolation` and on an `InvalidArchive` that has a family, and is
 absent on every other error, so branch on it instead of parsing `message`. On a `SecurityViolation`
 it names the family of the refusal: `PATH_NAME` (an entry path refused by name rules: banned
 component, NUL byte, empty path, reserved or unsafe name), `PATH_DEPTH`, `LINK_TARGET` (an empty,
@@ -465,7 +466,10 @@ binary: a TAR entry named `.git/config` gives `SecurityViolation`, `PATH_NAME` a
 `banned_components`; a symlink entry gives `LINK_POLICY` and `symlinks`; a FIFO entry gives
 `ENTRY_TYPE` and no `relaxable_by`.
 
-On an `InvalidArchive`, `TAR_AMBIGUITY` marks a TAR
+On an `InvalidArchive`, five more families mark refusals that were once plain text: `LINK_TARGET` (a link
+entry whose target is missing, unreadable, too long or, for a hardlink, absent, a directory or not a
+regular file), `DUPLICATE_ENTRY`, `ENTRY_NAME` (an entry path or name that cannot be read), `DECLARED_SIZE` (a
+declared size that contradicts the archive) and `INTEGRITY` (an integrity decode that failed). `TAR_AMBIGUITY` marks a TAR
 header that readers parse differently (a size or checksum field that is not plain octal, a PAX
 record problem, a payload declared on a directory or link, and the other cases listed under the TAR
 consistency checks). `TAR_TRAILER` marks the stream after the end-of-archive marker of a compressed
@@ -477,7 +481,15 @@ with the debug binary on four TARs: a size field `+0000000005` gives `kind` `Inv
 `sub_code` `TAR_AMBIGUITY`; a gzip member followed by `\0\0\0garbage` gives `InvalidArchive`,
 `TAR_TRAILER`; a gzip member followed by a second member of 5 MiB of zeros gives `SecurityViolation`,
 `TAR_TRAILER` and `relaxable_by` `max_tar_metadata_bytes`; a file of `A` bytes gives `InvalidArchive`
-and no `sub_code`.
+and no `sub_code`. A hardlink to a missing target gives `InvalidArchive` and
+`LINK_TARGET`, and a symlink entry with an empty link name gives `InvalidArchive` and `LINK_TARGET` (both verified live with the debug binary).
+
+`error.setting` is present only on an `InvalidConfiguration` error and names the refused setting by its
+stable snake_case id (`max_file_size`, `max_total_size`, `max_file_count`, `max_path_depth`,
+`max_compression_ratio`, `decompression_budget`, `allowed_extension`, `banned_path_component`, `output_path`,
+`source_paths`, ...). A zero limit is refused when the flag is applied, so `list --max-files 0 --json` gives
+`kind` `InvalidConfiguration`, `setting` `max_file_count` and message
+`invalid configuration: max_file_count must not be zero` (verified live with the debug binary). A zero `--max-files`, `--max-total-size`, `--max-file-size` or `--max-path-depth` is refused when the flag is applied and exits `1`; `extract` prints `Error: Invalid configuration: <setting> must not be zero` followed by `HINT: Check the flags you passed and their allowed value ranges.`, while `list` and `verify` print the plain `Error: invalid configuration: ...` line without a `HINT`. `--max-compression-ratio 0` never reaches the library: clap refuses it as out of the range `1..=4294967295` with exit `2`. Verified live with the debug binary built from the branch HEAD.
 
 `error.relaxable_by` is present only on a `SecurityViolation` that a core `SecurityConfig` setting
 relaxes, and names the setting whose current value refused the entry: `symlinks`, `hardlinks`,

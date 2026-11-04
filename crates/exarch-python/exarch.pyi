@@ -29,7 +29,15 @@ _UnverifiedReason = Literal["over_budget", "resource_limit", "solid_policy", "si
 _IssueSeverity = Literal["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
 _IssueCategory = Literal["Path Traversal", "Symlink Escape", "Hardlink Escape", "Zip Bomb", "Invalid Permissions", "Quota Exceeded", "Security Policy", "Invalid Archive", "Suspicious Path", "Executable File", "Corrupt Data", "Integrity Incomplete", "Header Mismatch", "Duplicate Entry", "Overlapping Entries", "Hidden Entry", "Name Collision", "Archive Note"]  # noqa: E501  # fmt: skip
 _ZipConsistency = Literal["enforce", "ignore"]
-_InvalidArchiveSubCode = Literal["TAR_AMBIGUITY", "TAR_TRAILER"]
+_InvalidArchiveSubCode = Literal[
+    "TAR_AMBIGUITY",
+    "TAR_TRAILER",
+    "LINK_TARGET",
+    "DUPLICATE_ENTRY",
+    "ENTRY_NAME",
+    "DECLARED_SIZE",
+    "INTEGRITY",
+]
 _SecurityViolationSubCode = Literal["PATH_NAME", "PATH_DEPTH", "LINK_TARGET", "LINK_POLICY", "EXISTING_SYMLINK", "ENTRY_TYPE", "ROOT_ENTRY", "ENCRYPTED", "COMPRESSION_METHOD", "SOLID_ARCHIVE", "DECLARED_SIZE", "CONCURRENT_CHANGE", "TAR_METADATA", "TAR_TRAILER", "PLATFORM", "OUTPUT_CONFLICT", "SOURCE_PATH"]  # noqa: E501  # fmt: skip
 _PartialWrites = Literal["kept", "rolled_back", "discarded"]
 _PathModel = Literal["host", "portable"]
@@ -41,6 +49,12 @@ class SecurityConfig:
     Security configuration for archive extraction.
 
     All security features default to deny (secure-by-default policy).
+
+    Every limit (file size, total size, file count, path depth, compression
+    ratio, solid block memory) is refused at assignment: a builder method or a
+    property setter raises ``ValueError`` for zero, and for a ratio that is not
+    a positive finite number. The exception's ``setting`` attribute names the
+    refused setting (``"max_file_size"``, ``"max_compression_ratio"``, ...).
     """
 
     def __init__(self) -> None:
@@ -63,11 +77,19 @@ class SecurityConfig:
         ...
 
     def with_max_file_size(self, size: int) -> SecurityConfig:
-        """Sets the maximum file size in bytes."""
+        """Sets the maximum file size in bytes.
+
+        Raises ``ValueError`` for zero; its ``setting`` attribute names the
+        refused setting (``"max_file_size"``).
+        """
         ...
 
     def with_max_total_size(self, size: int) -> SecurityConfig:
-        """Sets the maximum total size in bytes."""
+        """Sets the maximum total size in bytes.
+
+        Raises ``ValueError`` for zero; its ``setting`` attribute is
+        ``"max_total_size"``.
+        """
         ...
 
     def with_max_compression_ratio(self, ratio: float) -> SecurityConfig:
@@ -75,6 +97,9 @@ class SecurityConfig:
 
         Solid 7z blocks are exempt: each block is checked as a whole against a
         fixed 1000x limit that is configurable only from the Rust API.
+
+        Raises ``ValueError`` for a ratio that is not a positive finite number;
+        its ``setting`` attribute is ``"max_compression_ratio"``.
         """
         ...
 
@@ -84,11 +109,18 @@ class SecurityConfig:
 
         `extract_archive` counts files, symlinks and hardlinks, not
         directories; `list_archive` and `verify_archive` count every entry.
+
+        Raises ``ValueError`` for zero; its ``setting`` attribute is
+        ``"max_file_count"``.
         """
         ...
 
     def with_max_path_depth(self, depth: int) -> SecurityConfig:
-        """Sets the maximum path depth."""
+        """Sets the maximum path depth.
+
+        Raises ``ValueError`` for zero; its ``setting`` attribute is
+        ``"max_path_depth"``.
+        """
         ...
 
     def with_allow_symlinks(self, allow: bool = True) -> SecurityConfig:
@@ -143,7 +175,8 @@ class SecurityConfig:
         Sets the maximum memory budget in bytes for decompressing a solid 7z block.
 
         Only enforced when ``with_allow_solid_archives`` is called with ``True``. Raises
-        ``ValueError`` if *size* is zero.
+        ``ValueError`` if *size* is zero. Its ``setting`` attribute
+        is ``"max_solid_block_memory"``.
         """
         ...
 
@@ -1551,7 +1584,9 @@ class InvalidArchiveError(ArchiveError):
     Attributes:
         sub_code: ``"TAR_AMBIGUITY"`` when a TAR header is read differently by
             different tools, ``"TAR_TRAILER"`` when the stream after the TAR
-            end-of-archive marker is corrupt or truncated; ``None`` otherwise.
+            end-of-archive marker is corrupt or truncated, ``"LINK_TARGET"``,
+            ``"DUPLICATE_ENTRY"``, ``"ENTRY_NAME"``, ``"DECLARED_SIZE"`` or
+            ``"INTEGRITY"`` for the refusal of that family; ``None`` otherwise.
     """
 
     sub_code: _InvalidArchiveSubCode | None

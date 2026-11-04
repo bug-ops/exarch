@@ -105,10 +105,10 @@ fn extract_via_budgeted_pipeline(bytes: &[u8]) -> BTreeMap<String, Vec<u8>> {
     // legitimate archives, not about the cap itself, which has its own
     // dedicated coverage in `tar_metadata_bomb.rs`.
     let config = SecurityConfig::default()
-        .with_max_tar_metadata_bytes(1024 * 1024)
-        .with_max_file_count(10_000)
-        .with_max_total_size(u64::MAX)
-        .with_max_file_size(u64::MAX)
+        .with_max_tar_metadata_bytes(exarch_core::non_zero!(1024 * 1024))
+        .with_max_file_count(exarch_core::non_zero!(10_000))
+        .with_max_total_size(exarch_core::Limit::Unbounded)
+        .with_max_file_size(exarch_core::Limit::Unbounded)
         .validate()
         .unwrap();
     let archive = TarArchive::new(Cursor::new(bytes.to_vec()));

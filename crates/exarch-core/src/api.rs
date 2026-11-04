@@ -35,6 +35,7 @@ use crate::reader::SeekableFormat;
 use crate::reader::Source;
 use crate::reader::tar_archive;
 use crate::sink::SinkOptions;
+use crate::sink::SinkReuse;
 use crate::sink::SinkTarget;
 
 /// Extracts an archive to the specified output directory.
@@ -296,8 +297,9 @@ fn extract_atomic(
 
     let parent = canonical_output
         .parent()
-        .ok_or_else(|| ArchiveError::InvalidConfiguration {
-            reason: "output directory has no parent".into(),
+        .ok_or(ArchiveError::InvalidConfiguration {
+            setting: crate::ConfigSetting::OutputDirectory,
+            problem: crate::ConfigProblem::NoParent,
         })?;
 
     std::fs::create_dir_all(parent).map_err(ArchiveError::Io)?;
@@ -1055,21 +1057,37 @@ pub fn extract_to_sink_with_progress<S: EntrySink>(
     options: &SinkOptions,
     progress: &mut dyn ProgressCallback,
 ) -> Result<ExtractionReport> {
+    extract_to_sink_reusing(reader, sink, config, *options, progress, None)
+}
+
+/// [`extract_to_sink_with_progress`], with a ZIP archive's census output kept
+/// within `reuse` when the sink is one that shares its memory limit.
+pub(crate) fn extract_to_sink_reusing<S: EntrySink>(
+    reader: ArchiveReader<'_>,
+    sink: &mut S,
+    config: &SecurityConfig,
+    options: SinkOptions,
+    progress: &mut dyn ProgressCallback,
+    reuse: Option<SinkReuse>,
+) -> Result<ExtractionReport> {
     let config = config.clone().validate()?;
     match reader.into_source() {
         Source::Tar { stream, codec } => {
             let archive = tar_archive(stream, codec, DecoderLimits::of(&config))?;
             let mut target = SinkTarget::new(sink, &config);
-            archive.extract_into(&mut target, &config, *options, progress)
+            archive.extract_into(&mut target, &config, options, progress)
         }
         Source::Seekable {
             reader,
             format: SeekableFormat::Zip,
         } => {
-            let mut archive = ZipArchive::for_config(reader, &config)?;
+            let mut archive = match reuse {
+                Some(reuse) => ZipArchive::for_sink(reader, &config, &reuse)?,
+                None => ZipArchive::for_config(reader, &config)?,
+            };
             archive.check_structure(&config)?.extract_with(
                 |config| Ok(SinkTarget::new(sink, config)),
-                *options,
+                options,
                 progress,
             )
         }
@@ -1080,7 +1098,7 @@ pub fn extract_to_sink_with_progress<S: EntrySink>(
             let mut archive = SevenZArchive::new(reader)?;
             archive.admit(&config)?.extract_with(
                 |config| Ok(SinkTarget::new(sink, config)),
-                *options,
+                options,
                 progress,
             )
         }
@@ -1098,7 +1116,7 @@ fn reject_zip_family_creation(output: &Path) -> Result<()> {
     };
     if is_zip_family_alias(ext) {
         let ext_lower = ext.to_ascii_lowercase();
-        return Err(ArchiveError::InvalidArchive(format!(
+        return Err(ArchiveError::unclassified(format!(
             "creation for .{ext_lower} isn't supported: the format is ZIP-based but \
              requires extra structure (signing, manifests, ordering) that exarch \
              doesn't produce. Use .zip, or set CreationConfig::format = Some(\

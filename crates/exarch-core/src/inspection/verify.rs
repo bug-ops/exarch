@@ -4,6 +4,7 @@ use std::path::Path;
 
 use crate::ArchiveError;
 use crate::IntegrityCheck;
+use crate::Malformation;
 use crate::NoopProgress;
 use crate::ProgressCallback;
 use crate::Result;
@@ -721,10 +722,11 @@ fn verify_deferred_hardlink(
         return Err(issue(hardlink_target_missing(target)));
     }
     if tree.resolves_to_dir(&target_full) {
-        return Err(issue(ArchiveError::InvalidArchive(format!(
-            "hardlink target is a directory: {}",
-            target.display()
-        ))));
+        return Err(issue(ArchiveError::from(
+            Malformation::HardlinkTargetDirectory {
+                target: target.clone(),
+            },
+        )));
     }
     // A file over a file is accepted by the tree, but a hardlink cannot
     // replace one: it is created exclusively.
@@ -952,7 +954,6 @@ mod tests {
     use crate::inspection::report::CheckStatus;
     use crate::inspection::report::VerificationStatus;
     use crate::test_utils::tar_with_pax_nul_path;
-    use std::assert_matches;
     use std::io::Write;
     use std::path::PathBuf;
     use tempfile::NamedTempFile;
@@ -1704,7 +1705,7 @@ mod tests {
         temp_file.write_all(&archive_data).unwrap();
         temp_file.flush().unwrap();
 
-        let config = SecurityConfig::default().with_max_file_size(500);
+        let config = SecurityConfig::default().with_max_file_size(crate::non_zero!(500));
         let report = verify_archive(temp_file.path(), &config)
             .expect("verify_archive must report oversized entries, not error out");
 
@@ -2156,17 +2157,6 @@ mod tests {
                     && i.message.contains("file name too long")),
             "{:?}",
             report.issues()
-        );
-    }
-
-    #[test]
-    fn verify_archive_rejects_invalid_security_config() {
-        let config = SecurityConfig::default().with_max_path_depth(0);
-        let result = crate::verify_archive("any.tar.gz", &config);
-        assert_matches!(
-            result,
-            Err(crate::ArchiveError::InvalidConfiguration { .. }),
-            "verify_archive must return InvalidConfiguration for zero max_path_depth"
         );
     }
 }

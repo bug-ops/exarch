@@ -356,8 +356,8 @@ fn tree_node_quota(error: &ArchiveError) -> Option<usize> {
 
 fn small_tree_config() -> SecurityConfig {
     SecurityConfig::default()
-        .with_max_file_count(2)
-        .with_max_path_depth(2)
+        .with_max_file_count(exarch_core::non_zero!(2))
+        .with_max_path_depth(exarch_core::non_zero!(2))
 }
 
 #[test]
@@ -405,8 +405,8 @@ fn case_variant_directories_do_not_alias_on_a_case_sensitive_host() {
         .map(sink_support::tar_dir)
         .collect();
     let config = SecurityConfig::default()
-        .with_max_file_count(2)
-        .with_max_path_depth(2);
+        .with_max_file_count(exarch_core::non_zero!(2))
+        .with_max_path_depth(exarch_core::non_zero!(2));
     extract_to_sink(
         tar_reader(&entries),
         &mut sink,

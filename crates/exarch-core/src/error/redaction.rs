@@ -394,11 +394,12 @@ mod tests {
                 Compressed(100),
                 Uncompressed(100_000),
             )),
-            ArchiveError::InvalidArchive("bad header".to_string()),
+            ArchiveError::unclassified("bad header"),
             ArchiveError::from(Violation::EncryptedArchive),
             ArchiveError::InvalidCompressionLevel { level: 0 },
             ArchiveError::InvalidConfiguration {
-                reason: "test".to_string(),
+                setting: crate::ConfigSetting::OutputPath,
+                problem: crate::ConfigProblem::NotSet,
             },
             ArchiveError::Io(std::io::Error::other("test")),
         ];

@@ -385,7 +385,7 @@ fn census_fails_closed_when_it_disagrees_with_the_reader() {
         comment: Vec::new(),
     };
     let result = Census::run(&mut cursor, &map, &Scan::default(), ChunkSizes::PRODUCTION);
-    assert_matches!(result, Err(ArchiveError::InvalidArchive(msg)) if msg.contains("census"));
+    assert_matches!(result, Err(ArchiveError::InvalidArchive(msg)) if msg.to_string().contains("census"));
 
     let map = DirectoryMap {
         directory_start: built.directory_start as u64,

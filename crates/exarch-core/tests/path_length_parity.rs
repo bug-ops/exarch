@@ -107,9 +107,10 @@ fn an_overlong_name_of_a_skipped_extension_is_not_refused_in_any_destination_sta
 const HOST_PATH_LIMIT: usize = 1023;
 #[cfg(all(unix, not(target_os = "macos")))]
 const HOST_PATH_LIMIT: usize = 4095;
+#[cfg(windows)]
+const HOST_PATH_LIMIT: usize = 32767;
 
 /// A name of exactly `len` bytes made of components of at most `COMPONENT`.
-#[cfg(unix)]
 fn name_of_len(len: usize) -> String {
     let mut name = String::new();
     while name.len() < len {
@@ -160,17 +161,37 @@ fn a_path_above_every_unix_limit_is_refused_everywhere() {
     );
 }
 
-// Linux resolves a symlink chain through `openat` without a total length
-// limit, so only macOS refuses a landing above the limit (see #885).
-#[cfg(target_os = "macos")]
+// A short entry that lands above the host path limit through a symlink is
+// refused on every platform (see #885).
 mod landing {
     use super::*;
 
-    const CHAIN: (usize, usize) = (3, 255);
-    const REST: (usize, usize) = (3, 100);
+    const REST_BYTES: usize = 302;
 
-    fn join(components: (usize, usize)) -> String {
-        vec!["c".repeat(components.1); components.0].join("/")
+    fn rest() -> String {
+        vec!["r".repeat(100); 3].join("/")
+    }
+
+    fn archive_with_chain(chain_len: usize) -> (TempDir, PathBuf) {
+        let chain = name_of_len(chain_len);
+        let mut builder = tar::Builder::new(Vec::new());
+        builder
+            .append_data(&mut header(tar::EntryType::Directory, 0), &chain, &b""[..])
+            .unwrap();
+        builder
+            .append_link(&mut header(tar::EntryType::Symlink, 0), "d", &chain)
+            .unwrap();
+        builder
+            .append_data(
+                &mut header(tar::EntryType::Regular, 1),
+                format!("d/{}/f", rest()),
+                &b"x"[..],
+            )
+            .unwrap();
+        let dir = TempDir::new().unwrap();
+        let archive = dir.path().join("landing.tar");
+        std::fs::write(&archive, builder.into_inner().unwrap()).unwrap();
+        (dir, archive)
     }
 
     fn header(kind: tar::EntryType, size: u64) -> tar::Header {
@@ -183,28 +204,45 @@ mod landing {
 
     #[test]
     fn a_short_entry_landing_above_the_limit_through_a_symlink_is_refused() {
-        let chain = join(CHAIN);
-        let mut builder = tar::Builder::new(Vec::new());
-        builder
-            .append_data(&mut header(tar::EntryType::Directory, 0), &chain, &b""[..])
-            .unwrap();
-        builder
-            .append_link(&mut header(tar::EntryType::Symlink, 0), "d", &chain)
-            .unwrap();
-        builder
-            .append_data(
-                &mut header(tar::EntryType::Regular, 1),
-                format!("d/{}", join(REST)),
-                &b"x"[..],
-            )
-            .unwrap();
-        let dir = TempDir::new().unwrap();
-        let archive = dir.path().join("landing.tar");
-        std::fs::write(&archive, builder.into_inner().unwrap()).unwrap();
+        // Windows refuses the symlink itself, so a short chain suffices there.
+        let chain_len = if cfg!(windows) {
+            20
+        } else {
+            HOST_PATH_LIMIT - REST_BYTES + 1
+        };
+        let (_dir, archive) = archive_with_chain(chain_len);
 
         let config = SecurityConfig::default().with_allow_symlinks(true);
         let out = TempDir::new().unwrap();
-        assert!(extract_archive(&archive, out.path(), &config).is_err());
-        assert!(!out.path().join("d").join(join(REST)).exists());
+        let err = extract_archive(&archive, out.path(), &config).unwrap_err();
+
+        #[cfg(unix)]
+        assert_eq!(
+            err.ffi_kind(),
+            exarch_core::FfiKind::Io(std::io::ErrorKind::InvalidFilename),
+            "{err}"
+        );
+        #[cfg(windows)]
+        let _ = err;
+        assert!(!out.path().join("d").join(rest()).join("f").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_landing_inside_the_limit_through_a_symlink_is_extracted() {
+        let out = TempDir::new().unwrap();
+        let dest_len = out.path().canonicalize().unwrap().as_os_str().len();
+        let reserved = 64 + dest_len + 1 + REST_BYTES + 1;
+        assert!(
+            HOST_PATH_LIMIT > reserved,
+            "destination of {dest_len} bytes leaves no room under the host path limit"
+        );
+        let chain_len = HOST_PATH_LIMIT - reserved;
+        let (_dir, archive) = archive_with_chain(chain_len);
+
+        let config = SecurityConfig::default().with_allow_symlinks(true);
+        extract_archive(&archive, out.path(), &config).unwrap();
+
+        assert!(out.path().join("d").join(rest()).join("f").is_file());
     }
 }

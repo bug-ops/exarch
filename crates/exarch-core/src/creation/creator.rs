@@ -3,6 +3,8 @@
 use std::path::Path;
 use std::path::PathBuf;
 
+use crate::ConfigProblem;
+use crate::ConfigSetting;
 use crate::creation::config::CompressionLevel;
 use crate::creation::config::CreationConfig;
 use crate::creation::report::CreationReport;
@@ -252,15 +254,15 @@ impl ArchiveCreator {
     /// # Ok::<(), exarch_core::ArchiveError>(())
     /// ```
     pub fn create(self) -> Result<CreationReport> {
-        let output_path = self
-            .output_path
-            .ok_or_else(|| ArchiveError::InvalidConfiguration {
-                reason: "output path not set".to_string(),
-            })?;
+        let output_path = self.output_path.ok_or(ArchiveError::InvalidConfiguration {
+            setting: ConfigSetting::OutputPath,
+            problem: ConfigProblem::NotSet,
+        })?;
 
         if self.sources.is_empty() {
             return Err(ArchiveError::InvalidConfiguration {
-                reason: "no source paths provided".to_string(),
+                setting: ConfigSetting::SourcePaths,
+                problem: ConfigProblem::NoneProvided,
             });
         }
 

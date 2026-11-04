@@ -177,7 +177,8 @@ pub(crate) fn write_zip<W: Write + Seek, P: AsRef<Path>>(
 ) -> Result<(CreationReport, W)> {
     if out.stream_position()? != 0 {
         return Err(ArchiveError::InvalidConfiguration {
-            reason: "ZIP output writer must be positioned at offset 0".into(),
+            setting: crate::ConfigSetting::ZipOutputWriter,
+            problem: crate::ConfigProblem::NotAtStart,
         });
     }
     let mut zip = ZipWriter::new(out);
@@ -281,7 +282,7 @@ pub(crate) fn warn_on_extraction_ratio<R: Read + Seek>(archive: R, report: &mut 
 fn extraction_ratio_warning<R: Read + Seek>(
     archive: R,
 ) -> std::result::Result<Option<String>, zip::result::ZipError> {
-    let limit = SecurityConfig::default().max_compression_ratio;
+    let limit = SecurityConfig::default().max_compression_ratio.get();
     let mut zip = zip::ZipArchive::new(archive)?;
 
     let mut over_limit = 0usize;
@@ -497,7 +498,9 @@ mod tests {
         let needed = needed_ratio(&report.warnings[0]);
 
         let dest = temp.path().join("dest");
-        let admitting = crate::SecurityConfig::default().with_max_compression_ratio(needed);
+        let admitting = crate::SecurityConfig::default().with_max_compression_ratio(
+            crate::RatioLimit::parse(crate::ConfigSetting::MaxCompressionRatio, needed).unwrap(),
+        );
         crate::api::extract_archive(&output, &dest, &admitting).unwrap();
         assert!(dest.join("data").exists());
     }

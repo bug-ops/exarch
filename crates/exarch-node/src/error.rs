@@ -19,7 +19,7 @@
 //!   the fate of a partial extraction.
 //! - `cause`: the exception thrown by a JS progress callback.
 //!
-//! Errors raised by the binding itself (negative sizes, a Rust panic, a join
+//! Errors raised by the binding itself (a Rust panic, a join
 //! failure) are not core errors and keep their napi `Status` as `code`.
 
 use std::fmt;
@@ -175,6 +175,95 @@ pub enum InvalidArchiveSubCode {
     /// The stream after the TAR end-of-archive marker is corrupt or truncated.
     #[napi(value = "TAR_TRAILER")]
     TarTrailer,
+    /// A link entry whose target is missing, unreadable or unusable.
+    #[napi(value = "LINK_TARGET")]
+    LinkTarget,
+    /// An entry path that is already taken.
+    #[napi(value = "DUPLICATE_ENTRY")]
+    DuplicateEntry,
+    /// An entry path or name that cannot be read.
+    #[napi(value = "ENTRY_NAME")]
+    EntryName,
+    /// A declared size that contradicts the archive.
+    #[napi(value = "DECLARED_SIZE")]
+    DeclaredSize,
+    /// An entry whose integrity decode failed.
+    #[napi(value = "INTEGRITY")]
+    Integrity,
+}
+
+/// Value of the `setting` property of an `INVALID_CONFIGURATION` error.
+// Generates the TypeScript union only; runtime values come from core's
+// `as_str`, guarded by a unit test.
+#[napi(string_enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigSetting {
+    /// `max_file_size`.
+    #[napi(value = "max_file_size")]
+    MaxFileSize,
+    /// `max_total_size`.
+    #[napi(value = "max_total_size")]
+    MaxTotalSize,
+    /// `max_file_count`.
+    #[napi(value = "max_file_count")]
+    MaxFileCount,
+    /// `max_path_depth`.
+    #[napi(value = "max_path_depth")]
+    MaxPathDepth,
+    /// `max_compression_ratio`.
+    #[napi(value = "max_compression_ratio")]
+    MaxCompressionRatio,
+    /// `max_solid_compression_ratio`.
+    #[napi(value = "max_solid_compression_ratio")]
+    MaxSolidCompressionRatio,
+    /// `max_solid_block_memory`.
+    #[napi(value = "max_solid_block_memory")]
+    MaxSolidBlockMemory,
+    /// `max_tar_metadata_bytes`.
+    #[napi(value = "max_tar_metadata_bytes")]
+    MaxTarMetadataBytes,
+    /// `max_decoder_memory`.
+    #[napi(value = "max_decoder_memory")]
+    MaxDecoderMemory,
+    /// `decompression_budget`.
+    #[napi(value = "decompression_budget")]
+    DecompressionBudget,
+    /// `allowed_extension`.
+    #[napi(value = "allowed_extension")]
+    AllowedExtension,
+    /// `banned_path_component`.
+    #[napi(value = "banned_path_component")]
+    BannedPathComponent,
+    /// `archive_path`.
+    #[napi(value = "archive_path")]
+    ArchivePath,
+    /// `output_directory`.
+    #[napi(value = "output_directory")]
+    OutputDirectory,
+    /// `output_path`.
+    #[napi(value = "output_path")]
+    OutputPath,
+    /// `source_paths`.
+    #[napi(value = "source_paths")]
+    SourcePaths,
+    /// `strip_prefix`.
+    #[napi(value = "strip_prefix")]
+    StripPrefix,
+    /// `creation_format`.
+    #[napi(value = "creation_format")]
+    CreationFormat,
+    /// `atomic_extraction`.
+    #[napi(value = "atomic_extraction")]
+    AtomicExtraction,
+    /// `zip_archive`.
+    #[napi(value = "zip_archive")]
+    ZipArchive,
+    /// `zip_output_writer`.
+    #[napi(value = "zip_output_writer")]
+    ZipOutputWriter,
+    /// `max_bytes`.
+    #[napi(value = "max_bytes")]
+    MaxBytes,
 }
 
 /// Value of the `subCode` property of a `SECURITY_VIOLATION` error.
@@ -393,6 +482,7 @@ struct ErrorProps {
     code: JsCode,
     relaxable_by: Option<CorePolicySetting>,
     sub_code: Option<SubCode>,
+    setting: Option<exarch_core::ConfigSetting>,
     details: Details,
     cause: Option<Error>,
 }
@@ -417,6 +507,7 @@ fn describe_core(err: CoreError, cause: Option<Error>) -> Described {
             code: JsCode::Core(kind.code()),
             relaxable_by: kind.relaxable_by(),
             sub_code: kind.sub_code(),
+            setting: kind.setting(),
             details: partial.map_or(Details::None, Details::Extraction),
             cause,
         },
@@ -430,6 +521,7 @@ fn describe_callback_over_success(operation: &str, details: Details, source: Err
             code: JsCode::ProgressCallback,
             relaxable_by: None,
             sub_code: None,
+            setting: None,
             details,
             cause: Some(source),
         },
@@ -443,6 +535,7 @@ fn describe_js_failure(code: JsCode, description: &str, source: Error) -> Descri
             code,
             relaxable_by: None,
             sub_code: None,
+            setting: None,
             details: Details::None,
             cause: Some(source),
         },
@@ -496,6 +589,7 @@ fn describe(failure: Failure) -> Result<Described, Error> {
                     code: JsCode::Abort,
                     relaxable_by: None,
                     sub_code: None,
+                    setting: None,
                     details: Details::None,
                     cause: reason,
                 },
@@ -517,6 +611,9 @@ fn apply(env: Env, described: Described) -> napi::Result<Error> {
     }
     if let Some(sub_code) = props.sub_code {
         obj.set("subCode", sub_code.as_str())?;
+    }
+    if let Some(setting) = props.setting {
+        obj.set("setting", setting.as_str())?;
     }
     match props.details {
         Details::None => {}
@@ -819,6 +916,15 @@ mod tests {
     }
 
     #[test]
+    fn test_config_setting_union_matches_core() {
+        let expected: BTreeSet<String> = exarch_core::ConfigSetting::ALL
+            .iter()
+            .map(|setting| setting.as_str().to_string())
+            .collect();
+        assert_eq!(dts_union("ConfigSetting"), expected);
+    }
+
+    #[test]
     fn test_invalid_archive_sub_code_union_matches_core() {
         let expected: BTreeSet<String> = CoreInvalidArchiveSubCode::ALL
             .iter()
@@ -921,7 +1027,8 @@ mod tests {
     #[test]
     fn test_invalid_configuration_keeps_core_code() {
         let d = described(CoreError::InvalidConfiguration {
-            reason: "bad".to_string(),
+            setting: exarch_core::ConfigSetting::OutputPath,
+            problem: exarch_core::ConfigProblem::NotSet,
         });
         assert_eq!(d.props.code.as_str(), "INVALID_CONFIGURATION");
     }

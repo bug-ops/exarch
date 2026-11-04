@@ -205,7 +205,7 @@ fn test_depth_limit_enforced() {
     let temp = TempDir::new().unwrap();
     let dest = DestDir::new(temp.path().to_path_buf()).unwrap();
     let mut config = SecurityConfig::default();
-    config.max_path_depth = 5;
+    config.max_path_depth = exarch_core::non_zero!(5);
     let config = config.validate().unwrap();
 
     // Path with 5 components should be allowed

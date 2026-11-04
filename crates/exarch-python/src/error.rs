@@ -96,6 +96,11 @@ pub fn convert_error(err: CoreError) -> PyErr {
             kind.relaxable_by().map(PolicySetting::as_str),
         );
         set_optional_str(&err, "sub_code", kind.sub_code().map(SubCode::as_str));
+        set_optional_str(
+            &err,
+            "setting",
+            kind.setting().map(exarch_core::ConfigSetting::as_str),
+        );
         err
     };
     if let Some(outcome) = partial {
@@ -476,7 +481,10 @@ mod tests {
 
     #[test]
     fn test_invalid_archive_conversion() {
-        let err = CoreError::InvalidArchive("corrupted header".to_string());
+        let err = CoreError::from(exarch_core::Malformation::EntryNameUnreadable {
+            index: None,
+            detail: "corrupted header".into(),
+        });
         let py_err = convert_error(err);
         let err_str = py_err.to_string();
         assert!(

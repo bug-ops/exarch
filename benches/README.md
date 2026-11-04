@@ -93,11 +93,11 @@ cd crates/exarch-core
 cargo bench --bench extraction
 
 # Run specific benchmark group
-cargo bench --bench validation -- path_validation
+cargo bench --bench validation --features testing -- path_validation
 
 # Run with baseline comparison
-cargo bench -- --save-baseline main
-cargo bench -- --baseline main
+cargo bench --features testing -- --save-baseline main
+cargo bench --features testing -- --baseline main
 ```
 
 ## Benchmark Fixtures
@@ -151,10 +151,10 @@ tar_extraction/large_100mb:
 
 ```bash
 # Save baseline
-cargo bench -- --save-baseline before-change
+cargo bench --features testing -- --save-baseline before-change
 
 # Make changes, then compare
-cargo bench -- --baseline before-change
+cargo bench --features testing -- --baseline before-change
 
 # Look for "Performance has regressed" warnings
 ```
@@ -167,12 +167,12 @@ Add to CI workflow:
 - name: Run benchmarks
   run: |
     ./benches/fixtures/generate_fixtures.sh
-    cargo bench -- --noplot
+    cargo bench --features testing -- --noplot
 
 - name: Check for regressions
   run: |
     # Fail if any benchmark regressed by >10%
-    cargo bench -- --baseline main | grep -q "regressed" && exit 1 || exit 0
+    cargo bench --features testing -- --baseline main | grep -q "regressed" && exit 1 || exit 0
 ```
 
 ## Adding New Benchmarks

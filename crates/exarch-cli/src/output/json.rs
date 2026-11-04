@@ -450,7 +450,7 @@ mod tests {
 
     #[test]
     fn test_extraction_error_kind_invalid_archive() {
-        let err = ArchiveError::InvalidArchive("corrupted header".to_string());
+        let err = ArchiveError::from(exarch_core::Malformation::SymlinkTargetNotUtf8);
         assert_eq!(error_kind(&err), "InvalidArchive");
     }
 
@@ -537,8 +537,13 @@ mod tests {
         assert_eq!(over["error"]["sub_code"], "TAR_TRAILER");
         assert_eq!(over["error"]["relaxable_by"], "max_tar_metadata_bytes");
 
-        let plain = envelope_for(&ArchiveError::InvalidArchive("x".to_string()));
-        assert!(plain["error"].get("sub_code").is_none());
+        let typed = envelope_for(&ArchiveError::from(
+            exarch_core::Malformation::DuplicateEntry {
+                path: PathBuf::from("a/b"),
+            },
+        ));
+        assert_eq!(typed["error"]["kind"], "InvalidArchive");
+        assert_eq!(typed["error"]["sub_code"], "DUPLICATE_ENTRY");
     }
 
     #[test]

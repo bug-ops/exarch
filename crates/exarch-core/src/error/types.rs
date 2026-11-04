@@ -4,6 +4,9 @@ use std::borrow::Cow;
 use std::path::PathBuf;
 use thiserror::Error;
 
+use super::config_error::ConfigProblem;
+use super::config_error::ConfigSetting;
+use super::malformation::Malformation;
 use super::tar_ambiguity::TarAmbiguity;
 use super::tar_trailer::TarTrailerRefusal;
 use super::violation::Violation;
@@ -410,7 +413,7 @@ pub enum ArchiveError {
 
     /// Archive is corrupted or invalid.
     #[error("invalid archive: {0}")]
-    InvalidArchive(String),
+    InvalidArchive(Malformation),
 
     /// A TAR header is read differently by different TAR readers.
     ///
@@ -525,10 +528,12 @@ pub enum ArchiveError {
     ReaderFormat(ReaderFormatError),
 
     /// Invalid configuration provided.
-    #[error("invalid configuration: {reason}")]
+    #[error("invalid configuration: {}", super::config_error::message(*setting, problem))]
     InvalidConfiguration {
-        /// Reason for the configuration error.
-        reason: String,
+        /// The setting or input that was refused.
+        setting: ConfigSetting,
+        /// Why it was refused.
+        problem: ConfigProblem,
     },
 
     /// Extraction stopped mid-archive after recording progress.
@@ -587,6 +592,40 @@ closed_enum! {
 impl From<std::io::Error> for ArchiveError {
     fn from(e: std::io::Error) -> Self {
         crate::formats::tar_metadata_limit::budget_violation(&e).unwrap_or(Self::Io(e))
+    }
+}
+
+impl From<Malformation> for ArchiveError {
+    fn from(malformation: Malformation) -> Self {
+        Self::InvalidArchive(malformation)
+    }
+}
+
+impl ArchiveError {
+    /// A malformed-archive refusal that has no family of its own.
+    pub(crate) fn unclassified(reason: impl Into<Box<str>>) -> Self {
+        Self::InvalidArchive(Malformation::unclassified(reason))
+    }
+
+    /// Returns the typed refusal of an [`Self::InvalidArchive`], looking
+    /// through [`Self::PartialExtraction`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exarch_core::ArchiveError;
+    /// use exarch_core::Malformation;
+    ///
+    /// let err = ArchiveError::from(Malformation::PackSizesOverflow);
+    /// assert_eq!(err.malformation(), Some(&Malformation::PackSizesOverflow));
+    /// ```
+    #[must_use]
+    pub fn malformation(&self) -> Option<&Malformation> {
+        match self {
+            Self::InvalidArchive(malformation) => Some(malformation),
+            Self::PartialExtraction { source, .. } => source.malformation(),
+            _ => None,
+        }
     }
 }
 
@@ -670,6 +709,7 @@ impl ArchiveError {
     ///
     /// ```
     /// use exarch_core::ArchiveError;
+    /// use exarch_core::Malformation;
     /// use std::path::PathBuf;
     ///
     /// let err = ArchiveError::PathTraversal {
@@ -677,7 +717,7 @@ impl ArchiveError {
     /// };
     /// assert!(err.is_security_violation());
     ///
-    /// let err = ArchiveError::InvalidArchive("corrupted header".to_string());
+    /// let err = ArchiveError::from(Malformation::SymlinkTargetNotUtf8);
     /// assert!(!err.is_security_violation());
     /// ```
     #[must_use]
@@ -709,6 +749,7 @@ impl ArchiveError {
     ///
     /// ```
     /// use exarch_core::ArchiveError;
+    /// use exarch_core::Malformation;
     /// use std::path::PathBuf;
     ///
     /// let err = ArchiveError::PathTraversal {
@@ -716,7 +757,7 @@ impl ArchiveError {
     /// };
     /// assert!(err.is_recoverable()); // Could skip this entry
     ///
-    /// let err = ArchiveError::InvalidArchive("corrupted header".to_string());
+    /// let err = ArchiveError::from(Malformation::SymlinkTargetNotUtf8);
     /// assert!(!err.is_recoverable()); // Cannot continue
     /// ```
     #[must_use]
@@ -744,10 +785,14 @@ impl ArchiveError {
     ///
     /// ```
     /// use exarch_core::ArchiveError;
+    /// use exarch_core::Malformation;
     /// use std::path::PathBuf;
     ///
-    /// let err = ArchiveError::InvalidArchive("bad header".to_string());
-    /// assert_eq!(err.context().as_deref(), Some("bad header"));
+    /// let err = ArchiveError::from(Malformation::SymlinkTargetNotUtf8);
+    /// assert_eq!(
+    ///     err.context().as_deref(),
+    ///     Some("symlink target is not valid UTF-8")
+    /// );
     ///
     /// let err = ArchiveError::UnknownFormat {
     ///     path: PathBuf::from("archive.rar"),
@@ -757,7 +802,7 @@ impl ArchiveError {
     #[must_use]
     pub fn context(&self) -> Option<Cow<'_, str>> {
         match self {
-            Self::InvalidArchive(msg) => Some(Cow::Borrowed(msg)),
+            Self::InvalidArchive(m) => Some(Cow::Owned(m.to_string())),
             Self::SecurityViolation { kind } => Some(Cow::Owned(kind.to_string())),
             Self::PartialExtraction { source, .. } => source.context(),
             _ => None,
@@ -947,7 +992,7 @@ mod tests {
         };
         assert!(!err.is_security_violation());
 
-        let err = ArchiveError::InvalidArchive("bad".into());
+        let err = ArchiveError::unclassified("bad");
         assert!(!err.is_security_violation());
     }
 
@@ -963,7 +1008,7 @@ mod tests {
         assert!(err.is_recoverable());
 
         // Non-recoverable errors
-        let err = ArchiveError::InvalidArchive("corrupted".into());
+        let err = ArchiveError::unclassified("corrupted");
         assert!(!err.is_recoverable());
 
         let err = ArchiveError::UnknownFormat {
@@ -981,7 +1026,7 @@ mod tests {
 
     #[test]
     fn test_context() {
-        let err = ArchiveError::InvalidArchive("bad header".into());
+        let err = ArchiveError::unclassified("bad header");
         assert_eq!(err.context().as_deref(), Some("bad header"));
 
         let err = ArchiveError::from(Violation::SymlinksUnsupported);
@@ -1211,7 +1256,8 @@ mod tests {
     #[test]
     fn test_invalid_configuration_error() {
         let err = ArchiveError::InvalidConfiguration {
-            reason: "output path not set".to_string(),
+            setting: ConfigSetting::OutputPath,
+            problem: ConfigProblem::NotSet,
         };
         let display = err.to_string();
         assert!(display.contains("invalid configuration"));
@@ -1250,7 +1296,7 @@ mod tests {
         };
         assert!(err.is_security_violation());
 
-        let non_security_err = ArchiveError::InvalidArchive("bad".into());
+        let non_security_err = ArchiveError::unclassified("bad");
         let err2 = ArchiveError::PartialExtraction {
             source: Box::new(non_security_err),
             report: ExtractionReport::new(),
@@ -1279,7 +1325,7 @@ mod tests {
 
         let mut report = ExtractionReport::new();
         report.files_extracted = 1;
-        let err = ArchiveError::InvalidArchive("bad entry".into());
+        let err = ArchiveError::unclassified("bad entry");
 
         let result = ArchiveError::partial_or(report, err);
         assert_matches!(
@@ -1294,7 +1340,7 @@ mod tests {
         use crate::ExtractionReport;
 
         let report = ExtractionReport::new();
-        let err = ArchiveError::InvalidArchive("bad entry".into());
+        let err = ArchiveError::unclassified("bad entry");
 
         let result = ArchiveError::partial_or(report, err);
         assert_matches!(
@@ -1310,7 +1356,7 @@ mod tests {
 
         let mut report = ExtractionReport::new();
         report.files_skipped = 2;
-        let err = ArchiveError::InvalidArchive("bad entry".into());
+        let err = ArchiveError::unclassified("bad entry");
 
         let result = ArchiveError::partial_or(report, err);
         assert_matches!(
@@ -1327,7 +1373,7 @@ mod tests {
 
         let mut report = ExtractionReport::new();
         report.add_warning("skipped disallowed extension".into());
-        let err = ArchiveError::InvalidArchive("bad entry".into());
+        let err = ArchiveError::unclassified("bad entry");
 
         let result = ArchiveError::partial_or(report, err);
         assert_matches!(

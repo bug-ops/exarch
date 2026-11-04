@@ -110,9 +110,9 @@ fn test_hardlink_bomb_exceeds_total_size() {
     let temp = TempDir::new().unwrap();
     let config = SecurityConfig::default()
         .with_allow_hardlinks(true)
-        .with_max_file_size(target_size as u64 + 1)
-        .with_max_total_size(20_000) // room for target + 3 links, not 4
-        .with_max_file_count(1_000)
+        .with_max_file_size(std::num::NonZeroU64::new(target_size as u64 + 1).unwrap())
+        .with_max_total_size(exarch_core::non_zero!(20_000)) // room for target + 3 links, not 4
+        .with_max_file_count(exarch_core::non_zero!(1_000))
         .validate()
         .unwrap();
 
@@ -162,9 +162,9 @@ fn test_hardlink_bomb_exceeds_file_count() {
     let temp = TempDir::new().unwrap();
     let config = SecurityConfig::default()
         .with_allow_hardlinks(true)
-        .with_max_file_size(1_000_000)
-        .with_max_total_size(1_000_000)
-        .with_max_file_count(3)
+        .with_max_file_size(exarch_core::non_zero!(1_000_000))
+        .with_max_total_size(exarch_core::non_zero!(1_000_000))
+        .with_max_file_count(exarch_core::non_zero!(3))
         .validate()
         .unwrap(); // target.txt + 2 hardlinks allowed, 3rd rejected
 

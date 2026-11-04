@@ -60,9 +60,9 @@ fn bounded(bytes: u64) -> ParallelDecode {
 fn peak_heap(archive: &Path, parallel: ParallelDecode) -> u64 {
     let dest = TempDir::new().unwrap();
     let config = SecurityConfig::default()
-        .with_max_file_size(1 << 30)
-        .with_max_total_size(1 << 30)
-        .with_max_compression_ratio(1_000_000.0)
+        .with_max_file_size(exarch_core::non_zero!(1 << 30))
+        .with_max_total_size(exarch_core::non_zero!(1 << 30))
+        .with_max_compression_ratio(exarch_core::ratio_limit!(1_000_000.0))
         .with_parallel_decode(parallel);
 
     let _profiler = dhat::Profiler::builder().testing().build();

@@ -363,7 +363,7 @@ fn global_header_over_the_metadata_limit_is_refused() {
     ]);
     let dir = TempDir::new().unwrap();
     let archive = write_archive(&dir, &bytes);
-    let config = config().with_max_tar_metadata_bytes(LIMIT);
+    let config = config().with_max_tar_metadata_bytes(exarch_core::non_zero!(LIMIT));
     let expected = Expected::from(TarAmbiguity::GlobalTooLarge {
         size: body_len,
         limit: LIMIT,

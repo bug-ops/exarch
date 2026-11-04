@@ -17,13 +17,16 @@ use std::sync::atomic::Ordering;
 
 use exarch_core::ArchiveError;
 use exarch_core::ArchiveReader;
+use exarch_core::DecompressionBudget;
 use exarch_core::ExtractionOptions;
+use exarch_core::IntegrityCheck;
 use exarch_core::ListOptions;
 use exarch_core::MemoryLimit;
 use exarch_core::MemorySink;
 use exarch_core::SecurityConfig;
 use exarch_core::SinkOptions;
 use exarch_core::VerificationOptions;
+use exarch_core::VerificationStatus;
 use exarch_core::ZipBombScope;
 use exarch_core::extract_archive_with_options;
 use exarch_core::extract_to_sink;
@@ -111,8 +114,8 @@ fn root(error: &ArchiveError) -> &ArchiveError {
 
 fn tight_config() -> SecurityConfig {
     SecurityConfig::default()
-        .with_max_file_size(FILE_LIMIT as u64)
-        .with_max_compression_ratio(RATIO)
+        .with_max_file_size(exarch_core::non_zero!(FILE_LIMIT as u64))
+        .with_max_compression_ratio(exarch_core::ratio_limit!(RATIO))
         .try_add_allowed_extension("txt")
         .unwrap()
 }
@@ -151,7 +154,7 @@ fn list_refuses_an_over_quota_entry_without_decoding_it() {
 
     let error = list_reader(
         ArchiveReader::tar(reader, Some(CompressionCodec::Gzip)),
-        &SecurityConfig::default().with_max_file_size(MIB as u64),
+        &SecurityConfig::default().with_max_file_size(exarch_core::non_zero!(MIB as u64)),
         &ListOptions::default(),
     )
     .unwrap_err();
@@ -167,7 +170,7 @@ fn verify_refuses_an_over_quota_entry_without_decoding_it() {
 
     let error = verify_reader(
         ArchiveReader::tar(reader, Some(CompressionCodec::Gzip)),
-        &SecurityConfig::default().with_max_total_size(MIB as u64),
+        &SecurityConfig::default().with_max_total_size(exarch_core::non_zero!(MIB as u64)),
         &VerificationOptions::default(),
     )
     .unwrap_err();
@@ -249,7 +252,7 @@ fn the_skip_bound_is_monotone_around_both_of_its_parts() {
     // they pass `max_total_size`, so the entry that crosses it falls to the
     // ratio bound.
     let total = (FILE_LIMIT + FILE_LIMIT / 2) as u64;
-    let config = config.with_max_total_size(total);
+    let config = config.with_max_total_size(std::num::NonZeroU64::new(total).unwrap());
     let outcome = extract_gz(&tar_of(&[("a.img", &zeros(FILE_LIMIT))]), &config);
     assert!(
         outcome.is_ok(),
@@ -269,7 +272,7 @@ fn the_skip_bound_is_monotone_around_both_of_its_parts() {
     );
 
     // Raising the ratio removes the refusal, as the CLI hint says.
-    let relaxed = tight_config().with_max_compression_ratio(1000.0);
+    let relaxed = tight_config().with_max_compression_ratio(exarch_core::ratio_limit!(1000.0));
     let outcome = extract_gz(&zeros_tar("x.img", over), &relaxed);
     assert!(outcome.is_ok(), "{outcome:?}");
 }
@@ -280,8 +283,8 @@ fn filtering_never_refuses_what_extracting_whole_would_accept() {
     let archive = work.path().join("a.tar.gz");
     std::fs::write(&archive, gzip(&zeros_tar("x.img", FILE_LIMIT))).unwrap();
     let whole = SecurityConfig::default()
-        .with_max_file_size(FILE_LIMIT as u64)
-        .with_max_compression_ratio(RATIO);
+        .with_max_file_size(exarch_core::non_zero!(FILE_LIMIT as u64))
+        .with_max_compression_ratio(exarch_core::ratio_limit!(RATIO));
 
     for (name, config) in [("whole", whole), ("filtered", tight_config())] {
         let existing = TempDir::new().unwrap();
@@ -294,6 +297,72 @@ fn filtering_never_refuses_what_extracting_whole_would_accept() {
         )
         .unwrap_or_else(|e| panic!("{name}: {e}"));
     }
+}
+
+fn verify_gz_decoding(tar: &[u8], config: &SecurityConfig) {
+    let report = verify_reader(
+        ArchiveReader::tar(Cursor::new(gzip(tar)), Some(CompressionCodec::Gzip)),
+        config,
+        &decode_to_eof(),
+    )
+    .unwrap();
+    assert_eq!(report.status(), VerificationStatus::Pass, "{report:?}");
+}
+
+fn decode_to_eof() -> VerificationOptions {
+    VerificationOptions::default()
+        .with_integrity(IntegrityCheck::DecodeToEof(DecompressionBudget::DEFAULT))
+}
+
+#[test]
+fn an_integrity_decode_of_a_skipped_bomb_is_refused_early() {
+    let gz = gzip(&zeros_tar("big.bin", 8 * MIB));
+    let (reader, consumed) = counted(gz.clone());
+
+    let error = verify_reader(
+        ArchiveReader::tar(reader, Some(CompressionCodec::Gzip)),
+        &tight_config(),
+        &decode_to_eof(),
+    )
+    .unwrap_err();
+
+    assert!(is_skip_bomb(&error), "{error:?}");
+    assert_stopped_early(&consumed, gz.len());
+}
+
+#[test]
+fn the_same_bytes_pass_an_integrity_decode_when_the_entry_is_allowed() {
+    let config = tight_config()
+        .with_max_file_size(exarch_core::non_zero!(16 * MIB as u64))
+        .try_add_allowed_extension("bin")
+        .unwrap();
+
+    verify_gz_decoding(&zeros_tar("big.bin", 8 * MIB), &config);
+}
+
+#[test]
+fn a_small_skipped_entry_passes_an_integrity_decode() {
+    verify_gz_decoding(&zeros_tar("x.img", FILE_LIMIT), &tight_config());
+}
+
+/// A metered entry must not leave its meter on for the entries after it.
+#[test]
+fn a_metered_skipped_entry_does_not_meter_the_allowed_entries_after_it() {
+    let noise = incompressible(FILE_LIMIT + FILE_LIMIT / 4);
+    let zeros = vec![0u8; FILE_LIMIT];
+    let names: Vec<String> = (0..20).map(|i| format!("a{i}.txt")).collect();
+    let mut entries: Vec<(&str, &[u8])> = vec![("big.bin", &noise)];
+    entries.extend(names.iter().map(|name| (name.as_str(), &zeros[..])));
+    let tar = tar_of(&entries);
+    let config = tight_config();
+
+    extract_gz(&tar, &config).unwrap();
+    list_reader(
+        ArchiveReader::tar(Cursor::new(gzip(&tar)), Some(CompressionCodec::Gzip)),
+        &config,
+        &ListOptions::default(),
+    )
+    .unwrap();
 }
 
 #[test]

@@ -333,7 +333,7 @@ fn list_marks_a_target_with_a_corrupt_checksum_unreadable() {
     );
     assert_matches!(
         extract_archive(&path, TempDir::new().unwrap().path(), &allow_symlinks()),
-        Err(ArchiveError::InvalidArchive(reason)) if reason.contains("failed to read 7z symlink target")
+        Err(ArchiveError::InvalidArchive(reason)) if reason.to_string().contains("failed to read 7z symlink target")
     );
 }
 
@@ -812,7 +812,7 @@ fn solid_block_with_a_link_follows_the_solid_policy() {
 
     let allowed = allow_symlinks()
         .with_allow_solid_archives(true)
-        .with_max_solid_block_memory(100 * 1024 * 1024);
+        .with_max_solid_block_memory(exarch_core::non_zero!(100 * 1024 * 1024));
     assert_eq!(
         link_target(&path, &allowed),
         LinkTarget::Recorded(PathBuf::from("a.txt"))
@@ -887,7 +887,7 @@ fn a_link_over_the_ratio_limit_is_a_zip_bomb_before_any_write() {
         &dir,
         &[Item::File("a.txt", b"hi"), Item::Link("l", &target)],
     );
-    let config = allow_symlinks().with_max_compression_ratio(2.0);
+    let config = allow_symlinks().with_max_compression_ratio(exarch_core::ratio_limit!(2.0));
     let out = TempDir::new().unwrap();
 
     let err = extract_archive(&path, out.path(), &config).unwrap_err();
@@ -937,7 +937,7 @@ fn symlink_policy_is_refused_before_link_data_is_read() {
 fn links_count_against_the_entry_limit_in_list_and_verify() {
     let dir = TempDir::new().unwrap();
     let path = archive_of(&dir, &[Item::Link("l1", b"a"), Item::Link("l2", b"b")]);
-    let config = allow_symlinks().with_max_file_count(1);
+    let config = allow_symlinks().with_max_file_count(exarch_core::non_zero!(1));
 
     assert_matches!(
         list_archive(&path, &config),
@@ -952,7 +952,7 @@ fn links_count_against_the_entry_limit_in_list_and_verify() {
 fn solid_config() -> SecurityConfig {
     allow_symlinks()
         .with_allow_solid_archives(true)
-        .with_max_solid_block_memory(100 * 1024 * 1024)
+        .with_max_solid_block_memory(exarch_core::non_zero!(100 * 1024 * 1024))
 }
 
 #[cfg(unix)]
@@ -1006,7 +1006,7 @@ fn a_corrupt_link_inside_a_solid_block_fails_extract() {
 
     assert_matches!(
         partial_source(err),
-        ArchiveError::InvalidArchive(reason) if reason.contains("failed to read 7z symlink target")
+        ArchiveError::InvalidArchive(reason) if reason.to_string().contains("failed to read 7z symlink target")
     );
     assert!(out.join("a.txt").exists());
     assert!(std::fs::symlink_metadata(out.join("l1")).is_err());
@@ -1151,7 +1151,7 @@ fn assert_orphan_block_refused(path: &Path, mapping: [Option<usize>; 2]) {
     let err = extract_archive(path, out.path(), &SecurityConfig::default()).unwrap_err();
     assert_matches!(
         err,
-        ArchiveError::InvalidArchive(reason) if reason.contains("do not account for")
+        ArchiveError::InvalidArchive(reason) if reason.to_string().contains("do not account for")
     );
     for name in ["a", "b"] {
         assert_eq!(std::fs::read(out.path().join(name)).unwrap(), b"sentinel");

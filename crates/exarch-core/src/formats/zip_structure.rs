@@ -94,6 +94,7 @@ use std::io::BufReader;
 use std::io::Read;
 use std::io::Seek;
 use std::io::SeekFrom;
+use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
@@ -129,6 +130,7 @@ use super::zstd_window::ZstdWindowLog;
 use super::zstd_window::ZstdWindows;
 use super::zstd_window::walk as walk_zstd_windows;
 use crate::ArchiveError;
+use crate::Limit;
 use crate::Result;
 use crate::ZipConsistencyPolicy;
 use crate::error::CentralRecordOrdinal;
@@ -607,8 +609,7 @@ impl ZipStructure {
         self.reuse.as_ref()
     }
 
-    /// Like [`Self::reuse`], for tests that damage the kept output.
-    #[cfg(test)]
+    /// Like [`Self::reuse`], to take kept output out as extraction reaches it.
     pub(crate) const fn reuse_mut(&mut self) -> Option<&mut ReuseStore> {
         self.reuse.as_mut()
     }
@@ -644,22 +645,21 @@ struct EntryLayout {
     stream: Option<Compressed>,
 }
 
-fn retain_key(layout: &EntryLayout) -> RetainKey {
-    RetainKey {
+fn retain_key(layout: &EntryLayout) -> Option<RetainKey> {
+    Some(RetainKey {
+        method: ZipMethod::try_from(layout.method).ok()?,
         data_start: layout.data_start,
         compressed: crate::security::zipbomb::Compressed(layout.compressed),
         size: Uncompressed(layout.size),
         crc32: layout.crc32,
-    }
+    })
 }
 
 /// The store for the output of the census, when the mode keeps any, the
-/// census decodes streams and some entry is a deflate stream it can keep.
+/// census decodes streams and some entry is a compressed stream it can keep.
 fn reuse_store(chunks: ChunkSizes, layouts: &[EntryLayout]) -> Option<ReuseStore> {
-    let keeps_deflate = layouts
-        .iter()
-        .any(|l| l.size > 0 && matches!(l.stream, Some(Compressed::Deflate)));
-    if chunks.stream_checks == StreamChecks::Skip || !keeps_deflate {
+    let keeps_stream = layouts.iter().any(|l| l.size > 0 && l.stream.is_some());
+    if chunks.stream_checks == StreamChecks::Skip || !keeps_stream {
         return None;
     }
     ReuseStore::new(chunks.reuse)
@@ -682,7 +682,7 @@ impl DirectoryMap {
                     .by_index_data(index)
                     .map(|entry| entry.central_header_start())
                     .map_err(|e| {
-                        ArchiveError::InvalidArchive(format!("failed to read entry {index}: {e}"))
+                        ArchiveError::unclassified(format!("failed to read entry {index}: {e}"))
                     })
             })
             .collect::<Result<_>>()?;
@@ -733,7 +733,7 @@ pub(super) fn open<R: Read + Seek>(reader: R) -> Result<(ZipReader<Shared<R>>, Z
 pub(super) fn open_with<R: Read + Seek>(
     reader: R,
     checks: StreamChecks,
-    quota: u64,
+    quota: Limit<NonZeroU64>,
     census_window: ZstdWindowLog,
     reuse: ReusePlan,
 ) -> Result<(ZipReader<Shared<R>>, ZipStructure)> {
@@ -751,9 +751,9 @@ pub(super) fn open_with<R: Read + Seek>(
 
 /// The per-archive allowance for checking entries again, for a `quota` of
 /// total output.
-pub(super) const fn recheck_allowance_for(quota: u64) -> u64 {
-    if quota > CENSUS_DECODE_BUDGET {
-        quota
+pub(super) const fn recheck_allowance_for(quota: Limit<NonZeroU64>) -> u64 {
+    if quota.ceiling() > CENSUS_DECODE_BUDGET {
+        quota.ceiling()
     } else {
         CENSUS_DECODE_BUDGET
     }
@@ -839,11 +839,11 @@ fn reader_fault<R>(shared: &Shared<R>, error: ArchiveError) -> ArchiveError {
 
 fn open_reader<R: Read + Seek>(reader: R) -> Result<ZipReader<R>> {
     ZipReader::new(reader)
-        .map_err(|e| ArchiveError::InvalidArchive(format!("failed to open ZIP archive: {e}")))
+        .map_err(|e| ArchiveError::unclassified(format!("failed to open ZIP archive: {e}")))
 }
 
 fn census_disagreement() -> ArchiveError {
-    ArchiveError::InvalidArchive("ZIP central directory census disagrees with reader".into())
+    ArchiveError::unclassified("ZIP central directory census disagrees with reader")
 }
 
 /// Result of opening every entry.
@@ -878,7 +878,7 @@ fn scan_entries<R: Read + Seek>(
     for index in 0..archive.len() {
         if consistent {
             let file = archive.by_index_raw(index).map_err(|e| {
-                ArchiveError::InvalidArchive(format!("failed to read entry {index}: {e}"))
+                ArchiveError::unclassified(format!("failed to read entry {index}: {e}"))
             })?;
             admit_zip_entry(&file, &mut budget)?;
             scan.layouts.push(layout_of(&file, index)?);
@@ -907,7 +907,7 @@ fn scan_entries<R: Read + Seek>(
             if is_password_required(&e) {
                 common::encrypted_archive_error()
             } else {
-                ArchiveError::InvalidArchive(format!("failed to read entry {index}: {e}"))
+                ArchiveError::unclassified(format!("failed to read entry {index}: {e}"))
             }
         })?;
         admit_zip_entry(&file, &mut budget)?;
@@ -931,8 +931,7 @@ fn scan_entries<R: Read + Seek>(
 }
 
 fn layout_of<R: Read>(file: &zip::read::ZipFile<'_, R>, index: usize) -> Result<EntryLayout> {
-    let invalid =
-        || ArchiveError::InvalidArchive("ZIP entry data range is not representable".into());
+    let invalid = || ArchiveError::unclassified("ZIP entry data range is not representable");
     let data_start = file.data_start().ok_or_else(invalid)?;
     Ok(EntryLayout {
         entry: ZipEntryIndex::new(index),
@@ -1771,12 +1770,10 @@ impl<'a, R: Read + Seek> GapChecker<'a, R> {
             {
                 self.zstd_decodes += usize::from(zstd);
             }
-            // TODO(#866): bzip2 and zstd entries, sink extraction and entries
-            // past the reuse limit still decode twice.
-            let capture = match (method, self.reuse.as_deref_mut()) {
-                (Compressed::Deflate, Some(store)) => store.capture(retain_key(layout)),
-                _ => None,
-            };
+            let capture = self
+                .reuse
+                .as_deref_mut()
+                .and_then(|store| retain_key(layout).and_then(|key| store.capture(key)));
             stream_end(
                 &mut *self.reader,
                 method,

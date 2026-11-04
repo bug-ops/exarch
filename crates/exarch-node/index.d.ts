@@ -31,10 +31,12 @@ export interface ExarchErrorBase extends Error {
    * failure, when it has one, and of every core `SECURITY_VIOLATION`
    * (`SecurityViolationSubCode`). The interfaces are discriminated by `writes`,
    * not `code`, so the pairing is not narrowed per code: `INVALID_ARCHIVE`
-   * carries `'TAR_AMBIGUITY'` or `'TAR_TRAILER'`, `SECURITY_VIOLATION` carries
+   * carries one of the `InvalidArchiveSubCode` values, `SECURITY_VIOLATION` carries
    * one of the `SecurityViolationSubCode` values.
    */
   subCode?: InvalidArchiveSubCode | SecurityViolationSubCode
+  /** The configuration setting or input an `INVALID_CONFIGURATION` error refused. */
+  setting?: ConfigSetting
   /**
    * The exception thrown by a progress callback, an `onEntry` callback or an
    * `AsyncIterable` archive. A thrown primitive is wrapped in an `Error` whose
@@ -107,8 +109,8 @@ export interface ExarchErrorCreationCallback extends ExarchErrorBase {
 }
 
 /**
- * An error raised by the binding itself rather than by exarch-core: a
- * negative size, an internal panic, a failed argument conversion. `code` is
+ * An error raised by the binding itself rather than by exarch-core: an
+ * internal panic, a failed argument conversion. `code` is
  * napi's status string (`GenericFailure`, `InvalidArg`, `StringExpected`, ...),
  * not an `ErrorCode`, and none of the other properties are set.
  */
@@ -116,6 +118,7 @@ export interface ExarchNativeError extends Error {
   code: string
   relaxableBy?: undefined
   subCode?: undefined
+  setting?: undefined
   writes?: undefined
   filesExtracted?: undefined
   bytesWritten?: undefined
@@ -214,7 +217,8 @@ export declare class CreationConfig {
    *
    * # Errors
    *
-   * Returns error if size is negative.
+   * Returns a plain argument error if size is negative. Unlike the
+   * `SecurityConfig` limits, zero is accepted here and removes the limit.
    */
   setMaxFileSize(size: number): this
   /**
@@ -337,7 +341,8 @@ export declare class SecurityConfig {
    *
    * # Errors
    *
-   * Returns error if size is negative.
+   * Throws `INVALID_CONFIGURATION` (`setting` is `max_file_size`) if size is
+   * negative or zero.
    */
   setMaxFileSize(size: number): this
   /**
@@ -345,7 +350,8 @@ export declare class SecurityConfig {
    *
    * # Errors
    *
-   * Returns error if size is negative.
+   * Throws `INVALID_CONFIGURATION` (`setting` is `max_total_size`) if size
+   * is negative or zero.
    */
   setMaxTotalSize(size: number): this
   /**
@@ -356,7 +362,8 @@ export declare class SecurityConfig {
    *
    * # Errors
    *
-   * Returns error if ratio is not a positive finite number.
+   * Throws `INVALID_CONFIGURATION` (`setting` is `max_compression_ratio`) if
+   * ratio is not a positive finite number.
    */
   setMaxCompressionRatio(ratio: number): this
   /**
@@ -364,9 +371,21 @@ export declare class SecurityConfig {
    *
    * `extractArchive` counts files, symlinks and hardlinks, not directories;
    * `listArchive` and `verifyArchive` count every entry.
+   *
+   * # Errors
+   *
+   * Throws `INVALID_CONFIGURATION` (`setting` is `max_file_count`) if count
+   * is zero.
    */
   setMaxFileCount(count: number): this
-  /** Sets the maximum path depth. */
+  /**
+   * Sets the maximum path depth.
+   *
+   * # Errors
+   *
+   * Throws `INVALID_CONFIGURATION` (`setting` is `max_path_depth`) if depth
+   * is zero.
+   */
   setMaxPathDepth(depth: number): this
   /** Allows or denies symlinks. */
   setAllowSymlinks(allow: boolean): this
@@ -410,7 +429,8 @@ export declare class SecurityConfig {
    *
    * # Errors
    *
-   * Returns error if size is negative or zero.
+   * Throws `INVALID_CONFIGURATION` (`setting` is `max_solid_block_memory`)
+   * if size is negative or zero.
    */
   setMaxSolidBlockMemory(size: number): this
   /** Sets whether to preserve permissions from archive. */
@@ -600,6 +620,9 @@ export type ArchiveType = 'Tar' | 'TarGz' | 'TarBz2' | 'TarXz' | 'TarZst' | 'Zip
 
 /** Status of a single check category. */
 export type CheckStatus = 'OK' | 'FAILED' | 'WARNING' | 'SKIPPED'
+
+/** Value of the `setting` property of an `INVALID_CONFIGURATION` error. */
+export type ConfigSetting = 'max_file_size' | 'max_total_size' | 'max_file_count' | 'max_path_depth' | 'max_compression_ratio' | 'max_solid_compression_ratio' | 'max_solid_block_memory' | 'max_tar_metadata_bytes' | 'max_decoder_memory' | 'decompression_budget' | 'allowed_extension' | 'banned_path_component' | 'archive_path' | 'output_directory' | 'output_path' | 'source_paths' | 'strip_prefix' | 'creation_format' | 'atomic_extraction' | 'zip_archive' | 'zip_output_writer' | 'max_bytes'
 
 /**
  * Create an archive from source files and directories (async).
@@ -963,8 +986,8 @@ export type ErrorCode = 'PATH_TRAVERSAL' | 'SYMLINK_ESCAPE' | 'HARDLINK_ESCAPE' 
  *   `INVALID_CONFIGURATION` or `PROGRESS_CALLBACK_ERROR`. A path rejected at
  *   the boundary (null byte, too long) is a `SECURITY_VIOLATION` and a
  *   rejected setter value an `INVALID_CONFIGURATION`. Errors raised by the
- *   binding itself (a negative size, an internal panic) keep napi's status
- *   (`GenericFailure`) as `code`.
+ *   binding itself (an internal panic, a failed argument conversion) keep
+ *   napi's status (`GenericFailure`) as `code`.
  * - `relaxableBy`: set on a `SECURITY_VIOLATION` that a `SecurityConfig`
  *   setting relaxes, one of `symlinks`, `hardlinks`, `solid_archives`,
  *   `banned_components`, `max_path_depth`, `windows_reserved_names` or
@@ -972,6 +995,10 @@ export type ErrorCode = 'PATH_TRAVERSAL' | 'SYMLINK_ESCAPE' | 'HARDLINK_ESCAPE' 
  *   Changing the setting removes that refusal only; the entry can still fail a
  *   later check. `windows_reserved_names` and `max_tar_metadata_bytes` have no
  *   setter in this binding (Rust API only).
+ * - `subCode`: the family of an `INVALID_ARCHIVE` or `SECURITY_VIOLATION`
+ *   refusal, when it has one.
+ * - `setting`: set on an `INVALID_CONFIGURATION` that names the refused
+ *   setting or input, as a `snake_case` id such as `max_file_count`.
  * - `writes`, `filesExtracted`, `bytesWritten`, `filesSkipped`, `warnings`:
  *   set when extraction fails after some files were already written. `writes`
  *   is `'kept'` (files remain; the counters and the `warnings` string array
@@ -1412,7 +1439,7 @@ export interface IntegrityGaps {
 export type IntegrityStatus = 'OK' | 'FAILED' | 'INCOMPLETE' | 'SKIPPED'
 
 /** Value of the `subCode` property of an `INVALID_ARCHIVE` error. */
-export type InvalidArchiveSubCode = 'TAR_AMBIGUITY' | 'TAR_TRAILER'
+export type InvalidArchiveSubCode = 'TAR_AMBIGUITY' | 'TAR_TRAILER' | 'LINK_TARGET' | 'DUPLICATE_ENTRY' | 'ENTRY_NAME' | 'DECLARED_SIZE' | 'INTEGRITY'
 
 /** Issue category. */
 export type IssueCategory = 'Path Traversal' | 'Symlink Escape' | 'Hardlink Escape' | 'Zip Bomb' | 'Invalid Permissions' | 'Quota Exceeded' | 'Security Policy' | 'Invalid Archive' | 'Suspicious Path' | 'Executable File' | 'Corrupt Data' | 'Integrity Incomplete' | 'Header Mismatch' | 'Duplicate Entry' | 'Overlapping Entries' | 'Hidden Entry' | 'Name Collision' | 'Archive Note'

@@ -987,6 +987,27 @@ mod tests {
         assert!(py_issue.context().is_some(), "context should be Some");
     }
 
+    /// One alias per line: drops trailing comments, joins the lines of a
+    /// multi-line `Literal[..]` and ignores the formatter's trailing comma and
+    /// spacing, so the check holds for `ruff format` output.
+    fn flatten_literals(text: &str) -> String {
+        let mut out = String::new();
+        let mut open = false;
+        for raw in text.lines() {
+            let line = raw.split("  # ").next().unwrap_or(raw).trim();
+            if line.is_empty() {
+                continue;
+            }
+            if !open {
+                out.push('\n');
+            }
+            out.push_str(line);
+            open =
+                line.contains("Literal[") && !line.ends_with(']') || (open && !line.ends_with(']'));
+        }
+        out.replace(", ", ",").replace(",]", "]")
+    }
+
     fn literal_line<T: Copy>(alias: &str, all: &[T], as_str: fn(T) -> &'static str) -> String {
         let values: Vec<String> = all.iter().map(|v| format!("\"{}\"", as_str(*v))).collect();
         format!("{alias} = Literal[{}]", values.join(", "))
@@ -1053,11 +1074,11 @@ mod tests {
             ),
             literal_line("_PathModel", PathModel::ALL, PathModel::as_str),
         ];
+        let flat = flatten_literals(pyi);
         for line in expected {
             assert!(
-                pyi.lines()
-                    .any(|l| l.split("  # ").next() == Some(line.as_str())),
-                "exarch.pyi is out of sync with exarch-core, expected line:\n{line}"
+                flat.lines().any(|l| l == flatten_literals(&line).trim()),
+                "exarch.pyi is out of sync with exarch-core, expected alias:\n{line}"
             );
         }
     }

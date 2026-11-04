@@ -90,7 +90,7 @@ fn extract(archive: &Path, config: &SecurityConfig) -> Result<(), ArchiveError> 
 }
 
 fn config_with_tail_limit(bytes: u64) -> SecurityConfig {
-    SecurityConfig::default().with_max_tar_metadata_bytes(bytes)
+    SecurityConfig::default().with_max_tar_metadata_bytes(std::num::NonZeroU64::new(bytes).unwrap())
 }
 
 fn source(error: &ArchiveError) -> &ArchiveError {
@@ -261,7 +261,7 @@ fn corrupt_gzip_crc_is_refused_by_tar_archive_over_a_decoder() {
 fn tail_over_the_cap_is_a_relaxable_violation_and_just_under_it_passes() {
     let dir = TempDir::new().unwrap();
     let config = SecurityConfig::default();
-    let cap = usize::try_from(config.max_tar_metadata_bytes).unwrap();
+    let cap = usize::try_from(config.max_tar_metadata_bytes.get()).unwrap();
 
     let over = write(&dir, "over.tar.gz", &gzip_with_zero_member(cap + 1));
     let error = extract(&over, &config).unwrap_err();
@@ -351,7 +351,7 @@ fn integrity_check_refuses_an_over_cap_tail_and_fails_a_bad_crc() {
     let options = VerificationOptions::default()
         .with_integrity(IntegrityCheck::DecodeToEof(DecompressionBudget::DEFAULT));
     let config = SecurityConfig::default();
-    let cap = usize::try_from(config.max_tar_metadata_bytes).unwrap();
+    let cap = usize::try_from(config.max_tar_metadata_bytes.get()).unwrap();
 
     let over = write(&dir, "over.tar.gz", &gzip_with_zero_member(cap + 1));
     assert_over_cap(&verify_archive_with_options(&over, &config, &options).unwrap_err());

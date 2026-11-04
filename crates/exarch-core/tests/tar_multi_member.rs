@@ -221,8 +221,8 @@ fn quotas_span_every_member() {
         )));
         let archive = write(&temp, name, &bytes);
 
-        let per_file = SecurityConfig::default().with_max_file_size(1024);
-        let total = SecurityConfig::default().with_max_total_size(100_000);
+        let per_file = SecurityConfig::default().with_max_file_size(exarch_core::non_zero!(1024));
+        let total = SecurityConfig::default().with_max_total_size(exarch_core::non_zero!(100_000));
         for config in [per_file, total] {
             let out = TempDir::new().unwrap();
             let err = extract_archive(&archive, out.path(), &config).unwrap_err();

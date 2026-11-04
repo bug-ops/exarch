@@ -30,6 +30,7 @@ use std::path::PathBuf;
 
 use crate::ArchiveError;
 use crate::ExtractionReport;
+use crate::Malformation;
 use crate::ProgressCallback;
 use crate::Result;
 use crate::SecurityConfig;
@@ -931,7 +932,7 @@ pub fn symlink_target_too_large(size: u64) -> ArchiveError {
 /// Returns `InvalidArchive` when the bytes are not UTF-8.
 pub fn symlink_target_from_bytes(target_bytes: &[u8]) -> Result<PathBuf> {
     let target_str = std::str::from_utf8(target_bytes)
-        .map_err(|_| ArchiveError::InvalidArchive("symlink target is not valid UTF-8".into()))?;
+        .map_err(|_| ArchiveError::from(Malformation::SymlinkTargetNotUtf8))?;
 
     Ok(PathBuf::from(target_str))
 }

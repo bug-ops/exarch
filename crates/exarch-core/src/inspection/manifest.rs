@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 
 use crate::ArchiveError;
+use crate::Malformation;
 use crate::Result;
 use crate::ZipEntryIndex;
 use crate::closed_enum::closed_enum;
@@ -154,9 +155,10 @@ impl ArchiveManifest {
     /// # Ok::<(), exarch_core::ArchiveError>(())
     /// ```
     pub fn add_entry(&mut self, entry: ArchiveEntry) -> Result<()> {
-        self.total_size = self.total_size.checked_add(entry.size).ok_or_else(|| {
-            ArchiveError::InvalidArchive("archive total size overflows u64".to_string())
-        })?;
+        self.total_size = self
+            .total_size
+            .checked_add(entry.size)
+            .ok_or_else(|| ArchiveError::from(Malformation::TotalSizeOverflow))?;
         self.entries.push(entry);
         Ok(())
     }

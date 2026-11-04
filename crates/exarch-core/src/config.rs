@@ -2,10 +2,16 @@
 
 use std::marker::PhantomData;
 use std::num::NonZeroU64;
+use std::num::NonZeroUsize;
 use std::ops::Deref;
 use std::ops::DerefMut;
 
+use crate::ConfigProblem;
+use crate::ConfigSetting;
+use crate::Limit;
+use crate::RatioLimit;
 use crate::closed_enum::closed_enum;
+use crate::non_zero;
 use crate::types::Extension;
 use crate::types::PathComponentName;
 
@@ -242,13 +248,13 @@ impl Default for ParallelDecode {
 #[non_exhaustive]
 pub struct SecurityConfigFields {
     /// Maximum size for a single file in bytes.
-    pub max_file_size: u64,
+    pub max_file_size: Limit<NonZeroU64>,
 
     /// Maximum total size for all extracted files in bytes.
-    pub max_total_size: u64,
+    pub max_total_size: Limit<NonZeroU64>,
 
     /// Maximum compression ratio allowed (uncompressed / compressed).
-    pub max_compression_ratio: f64,
+    pub max_compression_ratio: RatioLimit,
 
     /// Maximum compression ratio of a whole solid 7z block (summed
     /// uncompressed size of its files / compressed size of its pack streams).
@@ -256,17 +262,17 @@ pub struct SecurityConfigFields {
     /// Solid members share one compressed stream, so no per-file ratio exists;
     /// this limit replaces `max_compression_ratio` for them. It is not exposed
     /// by the CLI or the Python/Node bindings.
-    pub max_solid_compression_ratio: f64,
+    pub max_solid_compression_ratio: RatioLimit,
 
     /// Maximum number of entries that can be extracted.
     ///
     /// The extraction API counts files, symlinks and hardlinks, not
     /// directories. `list` and `verify`, and the CLI's `extract` (which lists
     /// the archive first), count every entry.
-    pub max_file_count: usize,
+    pub max_file_count: Limit<NonZeroUsize>,
 
     /// Maximum path depth allowed.
-    pub max_path_depth: usize,
+    pub max_path_depth: NonZeroUsize,
 
     /// Feature flags controlling what archive features are allowed.
     ///
@@ -327,7 +333,7 @@ pub struct SecurityConfigFields {
     /// Default: 512 MB (536,870,912 bytes)
     ///
     /// **Recommendation:** Set to 1-2x available RAM for trusted archives only.
-    pub max_solid_block_memory: u64,
+    pub max_solid_block_memory: NonZeroU64,
 
     /// Maximum bytes the TAR reader may consume for headers and metadata
     /// records in the gap between two consecutive entries.
@@ -372,7 +378,7 @@ pub struct SecurityConfigFields {
     ///   it; a longer tail is refused naming the effective cap
     ///
     /// Default: 4 MiB (4,194,304 bytes)
-    pub max_tar_metadata_bytes: u64,
+    pub max_tar_metadata_bytes: NonZeroU64,
 
     /// Maximum memory in bytes a decoder may use for its dictionary or window.
     ///
@@ -399,7 +405,7 @@ pub struct SecurityConfigFields {
     /// 900 KB). Not exposed through the CLI or language bindings.
     ///
     /// Default: 256 MiB (268,435,456 bytes)
-    pub max_decoder_memory: u64,
+    pub max_decoder_memory: NonZeroU64,
 
     /// Base number of gzip members or bzip2 streams a compressed TAR may hold.
     ///
@@ -442,20 +448,20 @@ pub struct SecurityConfigFields {
 impl Default for SecurityConfigFields {
     fn default() -> Self {
         Self {
-            max_file_size: 50 * 1024 * 1024,   // 50 MB
-            max_total_size: 500 * 1024 * 1024, // 500 MB
-            max_compression_ratio: 100.0,
-            max_solid_compression_ratio: 1000.0,
-            max_file_count: 10_000,
-            max_path_depth: 32,
+            max_file_size: Limit::Bounded(non_zero!(50 * 1024 * 1024)), // 50 MB
+            max_total_size: Limit::Bounded(non_zero!(500 * 1024 * 1024)), // 500 MB
+            max_compression_ratio: crate::ratio_limit!(100.0),
+            max_solid_compression_ratio: crate::ratio_limit!(1000.0),
+            max_file_count: Limit::Bounded(non_zero!(10_000)),
+            max_path_depth: non_zero!(32),
             allowed: AllowedFeatures::default(), // All false
             preserve_permissions: false,
             allowed_extensions: Vec::new(),
             banned_path_components: default_banned_path_components(),
             allow_solid_archives: false,
-            max_solid_block_memory: 512 * 1024 * 1024, // 512 MB
-            max_tar_metadata_bytes: 4 * 1024 * 1024,   // 4 MiB
-            max_decoder_memory: 256 * 1024 * 1024,     // 256 MiB
+            max_solid_block_memory: non_zero!(512 * 1024 * 1024), // 512 MB
+            max_tar_metadata_bytes: non_zero!(4 * 1024 * 1024),   // 4 MiB
+            max_decoder_memory: non_zero!(256 * 1024 * 1024),     // 256 MiB
             compressed_member_allowance: DEFAULT_MEMBER_ALLOWANCE,
             parallel_decode: ParallelDecode::Bounded(ParallelDecode::DEFAULT_BYTES),
             zip_consistency: ZipConsistencyPolicy::Enforce,
@@ -485,8 +491,8 @@ impl Default for SecurityConfigFields {
 ///
 /// // Customize via fluent builder
 /// let custom = SecurityConfig::default()
-///     .with_max_file_size(100 * 1024 * 1024)
-///     .with_max_total_size(1024 * 1024 * 1024)
+///     .with_max_file_size(exarch_core::non_zero!(100 * 1024 * 1024))
+///     .with_max_total_size(exarch_core::non_zero!(1024 * 1024 * 1024))
 ///     .with_allow_symlinks(true);
 /// ```
 ///
@@ -586,13 +592,13 @@ impl SecurityConfig<Unvalidated> {
                     windows_reserved_names: false,
                 },
                 preserve_permissions: true,
-                max_compression_ratio: 1000.0,
-                max_solid_compression_ratio: 10_000.0,
+                max_compression_ratio: crate::ratio_limit!(1000.0),
+                max_solid_compression_ratio: crate::ratio_limit!(10_000.0),
                 banned_path_components: Vec::new(),
                 allow_solid_archives: true,
-                max_solid_block_memory: 1024 * 1024 * 1024, // 1 GB for permissive
-                max_tar_metadata_bytes: 16 * 1024 * 1024,   // 16 MiB for permissive
-                max_decoder_memory: 1024 * 1024 * 1024,     // 1 GiB for permissive
+                max_solid_block_memory: non_zero!(1024 * 1024 * 1024), // 1 GB for permissive
+                max_tar_metadata_bytes: non_zero!(16 * 1024 * 1024),   // 16 MiB for permissive
+                max_decoder_memory: non_zero!(1024 * 1024 * 1024),     // 1 GiB for permissive
                 compressed_member_allowance: non_zero(100_000),
                 parallel_decode: ParallelDecode::Bounded(PERMISSIVE_PARALLEL_DECODE),
                 ..SecurityConfigFields::default()
@@ -604,91 +610,27 @@ impl SecurityConfig<Unvalidated> {
     /// Validates that the configuration values are logically consistent,
     /// transitioning to the [`Validated`] typestate on success.
     ///
-    /// Returns an error if any field has a value that would make security
-    /// enforcement impossible (zero limits or non-positive ratio). Consumes
-    /// `self`: the only way to obtain a `SecurityConfig<Validated>`, which is
-    /// what every security-sensitive API in this crate requires. Once
-    /// returned, the `Validated` config's fields can no longer be reassigned
-    /// (see the "Sealing" section on the type-level docs), so this check can
-    /// never be silently invalidated afterward.
+    /// Every limit is already a positive typed value, so nothing is left to
+    /// refuse today; the check stays the single gate to the `Validated` state
+    /// for list and cross-field rules. Consumes `self`: the only way to obtain
+    /// a `SecurityConfig<Validated>`, which is what every security-sensitive
+    /// API in this crate requires. Once returned, the `Validated` config's
+    /// fields can no longer be reassigned (see the "Sealing" section on the
+    /// type-level docs), so this check can never be silently invalidated
+    /// afterward.
     ///
     /// # Errors
     ///
-    /// Returns `ArchiveError::InvalidConfiguration` if:
-    /// - `max_compression_ratio` or `max_solid_compression_ratio` is not
-    ///   positive and finite
-    /// - `max_file_size` is zero
-    /// - `max_total_size` is zero
-    /// - `max_path_depth` is zero
-    /// - `max_file_count` is zero
-    /// - `max_solid_block_memory` is zero
-    /// - `max_tar_metadata_bytes` is zero or `u64::MAX` (the metadata budget
-    ///   uses it as its disarmed marker)
-    /// - `max_decoder_memory` is zero
+    /// Currently never fails.
     ///
     /// # Examples
     ///
     /// ```
     /// use exarch_core::SecurityConfig;
     ///
-    /// let config = SecurityConfig::default();
-    /// assert!(config.validate().is_ok());
-    ///
-    /// let bad = SecurityConfig::default().with_max_file_size(0);
-    /// assert!(bad.validate().is_err());
+    /// assert!(SecurityConfig::default().validate().is_ok());
     /// ```
     pub fn validate(self) -> crate::Result<SecurityConfig<Validated>> {
-        if !self.max_compression_ratio.is_finite() || self.max_compression_ratio <= 0.0 {
-            return Err(crate::ArchiveError::InvalidConfiguration {
-                reason: "max_compression_ratio must be positive".into(),
-            });
-        }
-        if !self.max_solid_compression_ratio.is_finite() || self.max_solid_compression_ratio <= 0.0
-        {
-            return Err(crate::ArchiveError::InvalidConfiguration {
-                reason: "max_solid_compression_ratio must be positive".into(),
-            });
-        }
-        if self.max_file_size == 0 {
-            return Err(crate::ArchiveError::InvalidConfiguration {
-                reason: "max_file_size must not be zero".into(),
-            });
-        }
-        if self.max_total_size == 0 {
-            return Err(crate::ArchiveError::InvalidConfiguration {
-                reason: "max_total_size must not be zero".into(),
-            });
-        }
-        if self.max_path_depth == 0 {
-            return Err(crate::ArchiveError::InvalidConfiguration {
-                reason: "max_path_depth must not be zero".into(),
-            });
-        }
-        if self.max_file_count == 0 {
-            return Err(crate::ArchiveError::InvalidConfiguration {
-                reason: "max_file_count must not be zero".into(),
-            });
-        }
-        if self.max_solid_block_memory == 0 {
-            return Err(crate::ArchiveError::InvalidConfiguration {
-                reason: "max_solid_block_memory must not be zero".into(),
-            });
-        }
-        if self.max_tar_metadata_bytes == 0 {
-            return Err(crate::ArchiveError::InvalidConfiguration {
-                reason: "max_tar_metadata_bytes must not be zero".into(),
-            });
-        }
-        if self.max_tar_metadata_bytes == u64::MAX {
-            return Err(crate::ArchiveError::InvalidConfiguration {
-                reason: "max_tar_metadata_bytes must be below u64::MAX".into(),
-            });
-        }
-        if self.max_decoder_memory == 0 {
-            return Err(crate::ArchiveError::InvalidConfiguration {
-                reason: "max_decoder_memory must not be zero".into(),
-            });
-        }
         Ok(SecurityConfig {
             fields: self.fields,
             _marker: PhantomData,
@@ -702,13 +644,14 @@ impl SecurityConfig<Unvalidated> {
     /// ```
     /// use exarch_core::SecurityConfig;
     ///
-    /// let config = SecurityConfig::default().with_max_file_size(100 * 1024 * 1024);
-    /// assert_eq!(config.max_file_size, 100 * 1024 * 1024);
+    /// let config =
+    ///     SecurityConfig::default().with_max_file_size(exarch_core::non_zero!(100 * 1024 * 1024));
+    /// assert!(config.max_file_size.admits(100 * 1024 * 1024));
     /// ```
     #[must_use]
     #[inline]
-    pub fn with_max_file_size(mut self, size: u64) -> Self {
-        self.fields.max_file_size = size;
+    pub fn with_max_file_size(mut self, size: impl Into<Limit<NonZeroU64>>) -> Self {
+        self.fields.max_file_size = size.into();
         self
     }
 
@@ -719,13 +662,14 @@ impl SecurityConfig<Unvalidated> {
     /// ```
     /// use exarch_core::SecurityConfig;
     ///
-    /// let config = SecurityConfig::default().with_max_total_size(1024 * 1024 * 1024);
-    /// assert_eq!(config.max_total_size, 1024 * 1024 * 1024);
+    /// let config =
+    ///     SecurityConfig::default().with_max_total_size(exarch_core::non_zero!(1024 * 1024 * 1024));
+    /// assert_eq!(config.max_total_size.ceiling(), 1024 * 1024 * 1024);
     /// ```
     #[must_use]
     #[inline]
-    pub fn with_max_total_size(mut self, size: u64) -> Self {
-        self.fields.max_total_size = size;
+    pub fn with_max_total_size(mut self, size: impl Into<Limit<NonZeroU64>>) -> Self {
+        self.fields.max_total_size = size.into();
         self
     }
 
@@ -736,12 +680,13 @@ impl SecurityConfig<Unvalidated> {
     /// ```
     /// use exarch_core::SecurityConfig;
     ///
-    /// let config = SecurityConfig::default().with_max_compression_ratio(50.0);
-    /// assert_eq!(config.max_compression_ratio, 50.0);
+    /// let config =
+    ///     SecurityConfig::default().with_max_compression_ratio(exarch_core::ratio_limit!(50.0));
+    /// assert_eq!(config.max_compression_ratio.get(), 50.0);
     /// ```
     #[must_use]
     #[inline]
-    pub fn with_max_compression_ratio(mut self, ratio: f64) -> Self {
+    pub fn with_max_compression_ratio(mut self, ratio: RatioLimit) -> Self {
         self.fields.max_compression_ratio = ratio;
         self
     }
@@ -753,12 +698,13 @@ impl SecurityConfig<Unvalidated> {
     /// ```
     /// use exarch_core::SecurityConfig;
     ///
-    /// let config = SecurityConfig::default().with_max_solid_compression_ratio(5000.0);
-    /// assert_eq!(config.max_solid_compression_ratio, 5000.0);
+    /// let config = SecurityConfig::default()
+    ///     .with_max_solid_compression_ratio(exarch_core::ratio_limit!(5000.0));
+    /// assert_eq!(config.max_solid_compression_ratio.get(), 5000.0);
     /// ```
     #[must_use]
     #[inline]
-    pub fn with_max_solid_compression_ratio(mut self, ratio: f64) -> Self {
+    pub fn with_max_solid_compression_ratio(mut self, ratio: RatioLimit) -> Self {
         self.fields.max_solid_compression_ratio = ratio;
         self
     }
@@ -770,13 +716,13 @@ impl SecurityConfig<Unvalidated> {
     /// ```
     /// use exarch_core::SecurityConfig;
     ///
-    /// let config = SecurityConfig::default().with_max_file_count(500);
-    /// assert_eq!(config.max_file_count, 500);
+    /// let config = SecurityConfig::default().with_max_file_count(exarch_core::non_zero!(500));
+    /// assert_eq!(config.max_file_count.ceiling(), 500);
     /// ```
     #[must_use]
     #[inline]
-    pub fn with_max_file_count(mut self, count: usize) -> Self {
-        self.fields.max_file_count = count;
+    pub fn with_max_file_count(mut self, count: impl Into<Limit<NonZeroUsize>>) -> Self {
+        self.fields.max_file_count = count.into();
         self
     }
 
@@ -787,12 +733,12 @@ impl SecurityConfig<Unvalidated> {
     /// ```
     /// use exarch_core::SecurityConfig;
     ///
-    /// let config = SecurityConfig::default().with_max_path_depth(16);
-    /// assert_eq!(config.max_path_depth, 16);
+    /// let config = SecurityConfig::default().with_max_path_depth(exarch_core::non_zero!(16));
+    /// assert_eq!(config.max_path_depth.get(), 16);
     /// ```
     #[must_use]
     #[inline]
-    pub fn with_max_path_depth(mut self, depth: usize) -> Self {
+    pub fn with_max_path_depth(mut self, depth: NonZeroUsize) -> Self {
         self.fields.max_path_depth = depth;
         self
     }
@@ -1017,12 +963,12 @@ impl SecurityConfig<Unvalidated> {
     ///
     /// let config = SecurityConfig::default()
     ///     .with_allow_solid_archives(true)
-    ///     .with_max_solid_block_memory(1024 * 1024 * 1024);
-    /// assert_eq!(config.max_solid_block_memory, 1024 * 1024 * 1024);
+    ///     .with_max_solid_block_memory(exarch_core::non_zero!(1024 * 1024 * 1024));
+    /// assert_eq!(config.max_solid_block_memory.get(), 1024 * 1024 * 1024);
     /// ```
     #[must_use]
     #[inline]
-    pub fn with_max_solid_block_memory(mut self, size: u64) -> Self {
+    pub fn with_max_solid_block_memory(mut self, size: NonZeroU64) -> Self {
         self.fields.max_solid_block_memory = size;
         self
     }
@@ -1036,12 +982,13 @@ impl SecurityConfig<Unvalidated> {
     /// ```
     /// use exarch_core::SecurityConfig;
     ///
-    /// let config = SecurityConfig::default().with_max_tar_metadata_bytes(64 * 1024);
-    /// assert_eq!(config.max_tar_metadata_bytes, 64 * 1024);
+    /// let config =
+    ///     SecurityConfig::default().with_max_tar_metadata_bytes(exarch_core::non_zero!(64 * 1024));
+    /// assert_eq!(config.max_tar_metadata_bytes.get(), 64 * 1024);
     /// ```
     #[must_use]
     #[inline]
-    pub fn with_max_tar_metadata_bytes(mut self, size: u64) -> Self {
+    pub fn with_max_tar_metadata_bytes(mut self, size: NonZeroU64) -> Self {
         self.fields.max_tar_metadata_bytes = size;
         self
     }
@@ -1054,12 +1001,13 @@ impl SecurityConfig<Unvalidated> {
     /// ```
     /// use exarch_core::SecurityConfig;
     ///
-    /// let config = SecurityConfig::default().with_max_decoder_memory(64 * 1024 * 1024);
-    /// assert_eq!(config.max_decoder_memory, 64 * 1024 * 1024);
+    /// let config =
+    ///     SecurityConfig::default().with_max_decoder_memory(exarch_core::non_zero!(64 * 1024 * 1024));
+    /// assert_eq!(config.max_decoder_memory.get(), 64 * 1024 * 1024);
     /// ```
     #[must_use]
     #[inline]
-    pub fn with_max_decoder_memory(mut self, size: u64) -> Self {
+    pub fn with_max_decoder_memory(mut self, size: NonZeroU64) -> Self {
         self.fields.max_decoder_memory = size;
         self
     }
@@ -1440,11 +1388,12 @@ impl DecompressionBudget {
     /// Returns [`ArchiveError::InvalidConfiguration`](crate::ArchiveError) when
     /// `bytes` is zero.
     pub fn try_from_bytes(bytes: u64) -> crate::Result<Self> {
-        std::num::NonZeroU64::new(bytes).map(Self).ok_or_else(|| {
+        std::num::NonZeroU64::new(bytes).map(Self).ok_or(
             crate::ArchiveError::InvalidConfiguration {
-                reason: "decompression budget must be greater than zero".into(),
-            }
-        })
+                setting: ConfigSetting::DecompressionBudget,
+                problem: ConfigProblem::NotGreaterThanZero,
+            },
+        )
     }
 
     /// Returns the budget in bytes.
@@ -1581,7 +1530,7 @@ mod tests {
         assert!(!config.allowed.symlinks);
         assert!(!config.allowed.hardlinks);
         assert!(!config.allowed.absolute_paths);
-        assert_eq!(config.max_file_size, 50 * 1024 * 1024);
+        assert_eq!(config.max_file_size.ceiling(), 50 * 1024 * 1024);
     }
 
     #[test]
@@ -1680,18 +1629,27 @@ mod tests {
         let config = SecurityConfig::default();
 
         // Verify default quota values are sensible
-        assert_eq!(config.max_file_size, 50 * 1024 * 1024, "50 MB file limit");
         assert_eq!(
-            config.max_total_size,
+            config.max_file_size.ceiling(),
+            50 * 1024 * 1024,
+            "50 MB file limit"
+        );
+        assert_eq!(
+            config.max_total_size.ceiling(),
             500 * 1024 * 1024,
             "500 MB total limit"
         );
-        assert_eq!(config.max_file_count, 10_000, "10k file count limit");
-        assert_eq!(config.max_path_depth, 32, "32 level depth limit");
+        assert_eq!(
+            config.max_file_count.ceiling(),
+            10_000,
+            "10k file count limit"
+        );
+        assert_eq!(config.max_path_depth.get(), 32, "32 level depth limit");
         #[allow(clippy::float_cmp)]
         {
             assert_eq!(
-                config.max_compression_ratio, 100.0,
+                config.max_compression_ratio.get(),
+                100.0,
                 "100x compression ratio limit"
             );
         }
@@ -1730,7 +1688,7 @@ mod tests {
             "solid archives should be denied by default"
         );
         assert_eq!(
-            config.max_solid_block_memory,
+            config.max_solid_block_memory.get(),
             512 * 1024 * 1024,
             "max solid block memory should be 512 MB"
         );
@@ -1746,7 +1704,7 @@ mod tests {
             "permissive config should allow solid archives"
         );
         assert_eq!(
-            config.max_solid_block_memory,
+            config.max_solid_block_memory.get(),
             1024 * 1024 * 1024,
             "permissive should have 1 GB solid block limit"
         );
@@ -1756,7 +1714,7 @@ mod tests {
     fn test_config_tar_metadata_bytes_default() {
         let config = SecurityConfig::default();
         assert_eq!(
-            config.max_tar_metadata_bytes,
+            config.max_tar_metadata_bytes.get(),
             4 * 1024 * 1024,
             "max TAR metadata bytes should be 4 MiB by default"
         );
@@ -1766,7 +1724,7 @@ mod tests {
     fn test_config_permissive_tar_metadata_bytes() {
         let config = SecurityConfig::permissive();
         assert_eq!(
-            config.max_tar_metadata_bytes,
+            config.max_tar_metadata_bytes.get(),
             16 * 1024 * 1024,
             "permissive should have 16 MiB TAR metadata budget"
         );
@@ -1774,12 +1732,9 @@ mod tests {
 
     #[test]
     fn test_with_max_tar_metadata_bytes_builder() {
-        let config = SecurityConfig::default().with_max_tar_metadata_bytes(2048);
-        assert_eq!(config.max_tar_metadata_bytes, 2048);
+        let config = SecurityConfig::default().with_max_tar_metadata_bytes(crate::non_zero!(2048));
+        assert_eq!(config.max_tar_metadata_bytes.get(), 2048);
     }
-
-    // Regression tests for #172: SecurityConfig::validate() must reject configs
-    // that would make security enforcement impossible.
 
     #[test]
     fn test_validate_default_is_ok() {
@@ -1787,112 +1742,17 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_rejects_negative_compression_ratio() {
-        let mut cfg = SecurityConfig::default();
-        cfg.max_compression_ratio = -1.0;
-        assert!(cfg.validate().is_err());
-    }
-
-    #[test]
-    fn test_validate_rejects_a_maximal_tar_metadata_limit() {
-        let cfg = SecurityConfig::default().with_max_tar_metadata_bytes(u64::MAX);
-        std::assert_matches!(
-            cfg.validate(),
-            Err(crate::ArchiveError::InvalidConfiguration { .. })
-        );
-        let cfg = SecurityConfig::default().with_max_tar_metadata_bytes(u64::MAX - 1);
-        assert!(cfg.validate().is_ok());
-    }
-
-    #[test]
-    fn test_validate_rejects_zero_compression_ratio() {
-        let mut cfg = SecurityConfig::default();
-        cfg.max_compression_ratio = 0.0;
-        assert!(cfg.validate().is_err());
-    }
-
-    #[test]
-    fn test_validate_rejects_invalid_solid_compression_ratio() {
-        for ratio in [0.0, -1.0, f64::NAN, f64::INFINITY] {
-            let mut cfg = SecurityConfig::default();
-            cfg.max_solid_compression_ratio = ratio;
-            assert!(cfg.validate().is_err(), "{ratio} must be rejected");
-        }
-    }
-
-    #[test]
     fn test_solid_compression_ratio_defaults() {
         assert_eq!(
-            SecurityConfig::default().max_solid_compression_ratio,
+            SecurityConfig::default().max_solid_compression_ratio.get(),
             1000.0
         );
         assert_eq!(
-            SecurityConfig::permissive().max_solid_compression_ratio,
+            SecurityConfig::permissive()
+                .max_solid_compression_ratio
+                .get(),
             10_000.0
         );
-    }
-
-    #[test]
-    fn test_validate_rejects_zero_max_file_size() {
-        let mut cfg = SecurityConfig::default();
-        cfg.max_file_size = 0;
-        assert!(cfg.validate().is_err());
-    }
-
-    #[test]
-    fn test_validate_rejects_zero_max_total_size() {
-        let mut cfg = SecurityConfig::default();
-        cfg.max_total_size = 0;
-        assert!(cfg.validate().is_err());
-    }
-
-    #[test]
-    fn test_validate_rejects_zero_max_path_depth() {
-        let mut cfg = SecurityConfig::default();
-        cfg.max_path_depth = 0;
-        assert!(cfg.validate().is_err());
-    }
-
-    #[test]
-    fn test_validate_rejects_nan_compression_ratio() {
-        let mut cfg = SecurityConfig::default();
-        cfg.max_compression_ratio = f64::NAN;
-        assert!(cfg.validate().is_err());
-    }
-
-    #[test]
-    fn test_validate_rejects_infinite_compression_ratio() {
-        let mut cfg = SecurityConfig::default();
-        cfg.max_compression_ratio = f64::INFINITY;
-        assert!(cfg.validate().is_err());
-    }
-
-    #[test]
-    fn test_validate_rejects_zero_max_file_count() {
-        let mut cfg = SecurityConfig::default();
-        cfg.max_file_count = 0;
-        assert!(cfg.validate().is_err());
-    }
-
-    #[test]
-    fn test_validate_rejects_zero_max_solid_block_memory() {
-        let mut cfg = SecurityConfig::default();
-        cfg.max_solid_block_memory = 0;
-        assert!(cfg.validate().is_err());
-    }
-
-    #[test]
-    fn test_validate_rejects_zero_max_tar_metadata_bytes() {
-        let mut cfg = SecurityConfig::default();
-        cfg.max_tar_metadata_bytes = 0;
-        assert!(cfg.validate().is_err());
-    }
-
-    #[test]
-    fn test_validate_rejects_zero_max_decoder_memory() {
-        let mut cfg = SecurityConfig::default();
-        cfg.max_decoder_memory = 0;
-        assert!(cfg.validate().is_err());
     }
 
     #[test]
@@ -1922,11 +1782,11 @@ mod tests {
     #[test]
     fn test_max_decoder_memory_defaults() {
         assert_eq!(
-            SecurityConfig::default().max_decoder_memory,
+            SecurityConfig::default().max_decoder_memory.get(),
             256 * 1024 * 1024
         );
         assert_eq!(
-            SecurityConfig::permissive().max_decoder_memory,
+            SecurityConfig::permissive().max_decoder_memory.get(),
             1024 * 1024 * 1024
         );
     }
@@ -2000,9 +1860,9 @@ mod tests {
     #[test]
     fn test_validated_config_fields_remain_readable() {
         let validated = SecurityConfig::default()
-            .with_max_file_size(123)
+            .with_max_file_size(crate::non_zero!(123))
             .validate()
             .expect("valid config");
-        assert_eq!(validated.max_file_size, 123);
+        assert_eq!(validated.max_file_size.ceiling(), 123);
     }
 }

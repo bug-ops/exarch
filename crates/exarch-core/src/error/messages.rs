@@ -5,6 +5,7 @@
 //! description and the fate of partial output. Python, Node.js and the CLI
 //! consume [`FfiErrorMessage`] instead of re-matching [`ArchiveError`].
 
+use super::config_error::ConfigSetting;
 use super::redaction::sanitize_io_error_for_error;
 use super::types::ArchiveError;
 use super::types::PartialWrites;
@@ -85,6 +86,16 @@ closed_enum! {
         TarAmbiguity => "TAR_AMBIGUITY",
         /// A corrupt or truncated stream after the TAR end-of-archive marker.
         TarTrailer => "TAR_TRAILER",
+        /// A link entry whose target is missing, unreadable or unusable.
+        LinkTarget => "LINK_TARGET",
+        /// An entry path that is already taken.
+        DuplicateEntry => "DUPLICATE_ENTRY",
+        /// An entry path or name that cannot be read.
+        EntryName => "ENTRY_NAME",
+        /// A declared size that contradicts the archive.
+        DeclaredSize => "DECLARED_SIZE",
+        /// An entry whose integrity decode failed.
+        Integrity => "INTEGRITY",
     }
 }
 
@@ -252,7 +263,12 @@ pub enum FfiKind {
     /// Archive format could not be determined.
     UnknownFormat,
     /// Configuration is invalid.
-    InvalidConfiguration,
+    #[non_exhaustive]
+    InvalidConfiguration {
+        /// The setting or input that was refused; `None` for a reader format
+        /// that cannot be used.
+        setting: Option<ConfigSetting>,
+    },
 }
 
 impl FfiKind {
@@ -276,7 +292,17 @@ impl FfiKind {
             | Self::OutputExists
             | Self::InvalidCompressionLevel
             | Self::UnknownFormat
-            | Self::InvalidConfiguration => None,
+            | Self::InvalidConfiguration { .. } => None,
+        }
+    }
+
+    /// The configuration setting or input that was refused, if this is a
+    /// [`FfiKind::InvalidConfiguration`] that names one.
+    #[must_use]
+    pub const fn setting(&self) -> Option<ConfigSetting> {
+        match self {
+            Self::InvalidConfiguration { setting } => *setting,
+            _ => None,
         }
     }
 
@@ -302,7 +328,7 @@ impl FfiKind {
             | Self::OutputExists
             | Self::InvalidCompressionLevel
             | Self::UnknownFormat
-            | Self::InvalidConfiguration => None,
+            | Self::InvalidConfiguration { .. } => None,
         }
     }
 
@@ -325,7 +351,7 @@ impl FfiKind {
             Self::OutputExists => ErrorCode::OutputExists,
             Self::InvalidCompressionLevel => ErrorCode::InvalidCompressionLevel,
             Self::UnknownFormat => ErrorCode::UnknownFormat,
-            Self::InvalidConfiguration => ErrorCode::InvalidConfiguration,
+            Self::InvalidConfiguration { .. } => ErrorCode::InvalidConfiguration,
         }
     }
 }
@@ -449,8 +475,9 @@ impl ArchiveError {
     /// ```
     /// use exarch_core::ArchiveError;
     /// use exarch_core::ErrorCode;
+    /// use exarch_core::Malformation;
     ///
-    /// let err = ArchiveError::InvalidArchive("bad".into());
+    /// let err = ArchiveError::from(Malformation::PackSizesOverflow);
     /// assert_eq!(err.ffi_kind().code(), ErrorCode::InvalidArchive);
     /// ```
     #[must_use]
@@ -466,7 +493,9 @@ impl ArchiveError {
                 relaxable_by: kind.relaxable_by(),
                 sub_code: kind.sub_code(),
             },
-            Self::InvalidArchive(_) => FfiKind::InvalidArchive { sub_code: None },
+            Self::InvalidArchive(m) => FfiKind::InvalidArchive {
+                sub_code: m.sub_code(),
+            },
             Self::TarAmbiguity(_) => FfiKind::InvalidArchive {
                 sub_code: Some(InvalidArchiveSubCode::TarAmbiguity),
             },
@@ -491,9 +520,10 @@ impl ArchiveError {
             Self::UnknownFormat { .. } | Self::ReaderFormat(ReaderFormatError::Unrecognized) => {
                 FfiKind::UnknownFormat
             }
-            Self::InvalidConfiguration { .. } | Self::ReaderFormat(_) => {
-                FfiKind::InvalidConfiguration
-            }
+            Self::InvalidConfiguration { setting, .. } => FfiKind::InvalidConfiguration {
+                setting: Some(*setting),
+            },
+            Self::ReaderFormat(_) => FfiKind::InvalidConfiguration { setting: None },
             Self::PartialExtraction { source, .. } => source.ffi_kind(),
         }
     }
@@ -533,7 +563,10 @@ impl ArchiveError {
             Self::UnknownFormat { .. } => {
                 format!("cannot determine archive format from: {path}")
             }
-            Self::InvalidConfiguration { reason } => format!("invalid configuration: {reason}"),
+            Self::InvalidConfiguration { setting, problem } => format!(
+                "invalid configuration: {}",
+                super::config_error::message(*setting, problem)
+            ),
             Self::ReaderFormat(reason) => reason.to_string(),
             Self::PartialExtraction { source, .. } => source.ffi_description(),
         }
@@ -562,6 +595,7 @@ impl ArchiveError {
 
 #[cfg(test)]
 mod tests {
+    use super::super::config_error::ConfigProblem;
     use super::super::types::QuotaResource;
     use super::super::types::ZipBombDetails;
     use super::super::types::ZipBombScope;
@@ -687,7 +721,7 @@ mod tests {
                 resource: QuotaResource::IntegerOverflow,
             },
             ArchiveError::from(Violation::EncryptedArchive),
-            ArchiveError::InvalidArchive("test".into()),
+            ArchiveError::unclassified("test"),
             ArchiveError::Io(std::io::Error::other("test")),
             ArchiveError::InvalidPermissions {
                 path: PathBuf::from("test"),
@@ -707,7 +741,8 @@ mod tests {
                 path: PathBuf::from("test"),
             },
             ArchiveError::InvalidConfiguration {
-                reason: "test".into(),
+                setting: ConfigSetting::OutputPath,
+                problem: ConfigProblem::NotSet,
             },
         ]
     }
@@ -813,10 +848,7 @@ mod tests {
             }
         );
 
-        assert_eq!(
-            ArchiveError::InvalidArchive("x".into()).ffi_kind(),
-            invalid(None)
-        );
+        assert_eq!(ArchiveError::unclassified("x").ffi_kind(), invalid(None));
         assert_eq!(
             ArchiveError::from(Violation::EncryptedArchive).ffi_kind(),
             FfiKind::SecurityViolation {

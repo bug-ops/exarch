@@ -1,5 +1,6 @@
 #![allow(clippy::unwrap_used)]
 
+use std::assert_matches;
 use std::io::Cursor;
 use std::io::Read;
 use std::io::Seek;
@@ -17,6 +18,8 @@ use crate::ReuseLimit;
 use crate::SecurityConfig;
 use crate::config::Validated;
 use crate::formats::zip::ZipArchive;
+use crate::formats::zip::ZipMethod;
+use crate::sink::SinkUsage;
 
 fn limit(bytes: u64) -> ReuseLimit {
     ReuseLimit::new(NonZeroU64::new(bytes).unwrap())
@@ -30,6 +33,7 @@ fn key_of(data: &[u8]) -> RetainKey {
     let mut crc = Crc::new();
     crc.update(data);
     RetainKey {
+        method: ZipMethod::Deflate,
         data_start: 30,
         compressed: Compressed(data.len() as u64),
         size: Uncompressed(data.len() as u64),
@@ -47,10 +51,16 @@ fn spooled(max: u64) -> ReuseStore {
     ReuseStore::new(plan(DecodeReuse::TempFile(limit(max)))).unwrap()
 }
 
-fn replayed(store: &ReuseStore, key: &RetainKey) -> io::Result<Vec<u8>> {
-    let mut out = Vec::new();
-    store.open(key).unwrap().read_to_end(&mut out)?;
-    Ok(out)
+fn replayed(store: &mut ReuseStore, key: &RetainKey) -> io::Result<Vec<u8>> {
+    let taken = store.take(key).unwrap();
+    match store.retained(taken, key)? {
+        Retained::Bytes(bytes) => Ok(bytes),
+        Retained::Spooled(mut reader) => {
+            let mut out = Vec::new();
+            reader.read_to_end(&mut out)?;
+            Ok(out)
+        }
+    }
 }
 
 fn stores() -> [ReuseStore; 2] {
@@ -67,7 +77,7 @@ fn a_captured_entry_reads_back_as_written() {
         let key = key_of(&data);
         capture_all(&mut store, key, &data);
         store.seal();
-        assert_eq!(replayed(&store, &key).unwrap(), data);
+        assert_eq!(replayed(&mut store, &key).unwrap(), data);
     }
 }
 
@@ -78,10 +88,12 @@ fn entries_of_a_spool_read_back_at_their_own_offsets() {
     let second = b"second one!".repeat(70);
     let (a, b) = (
         RetainKey {
+            method: ZipMethod::Deflate,
             data_start: 1,
             ..key_of(&first)
         },
         RetainKey {
+            method: ZipMethod::Deflate,
             data_start: 2,
             ..key_of(&second)
         },
@@ -89,8 +101,8 @@ fn entries_of_a_spool_read_back_at_their_own_offsets() {
     capture_all(&mut store, a, &first);
     capture_all(&mut store, b, &second);
     store.seal();
-    assert_eq!(replayed(&store, &b).unwrap(), second);
-    assert_eq!(replayed(&store, &a).unwrap(), first);
+    assert_eq!(replayed(&mut store, &b).unwrap(), second);
+    assert_eq!(replayed(&mut store, &a).unwrap(), first);
 }
 
 #[test]
@@ -103,7 +115,7 @@ fn an_entry_whose_checksum_differs_is_not_kept() {
         };
         capture_all(&mut store, key, &data);
         store.seal();
-        assert!(store.open(&key).is_none());
+        assert!(!store.holds(&key));
         assert_eq!(store.used(), 0);
     }
 }
@@ -116,7 +128,7 @@ fn an_entry_that_decoded_to_another_size_is_not_kept() {
         let mut capture = store.capture(key).unwrap();
         capture.write_all(&data).unwrap();
         capture.finish(data.len() as u64 + 1);
-        assert!(store.open(&key).is_none());
+        assert!(!store.holds(&key));
         assert_eq!(store.used(), 0);
     }
 }
@@ -141,7 +153,7 @@ fn an_entry_over_the_limit_is_dropped_and_releases_its_bytes() {
         let mut capture = store.capture(forged).unwrap();
         capture.write_all(&data).unwrap();
         capture.finish(40);
-        assert!(store.open(&forged).is_none());
+        assert!(!store.holds(&forged));
         assert_eq!(store.used(), 0);
     }
 }
@@ -154,14 +166,17 @@ fn a_dropped_capture_rolls_the_spool_back() {
     let third = b"after".repeat(30);
     let keys = [
         RetainKey {
+            method: ZipMethod::Deflate,
             data_start: 1,
             ..key_of(&first)
         },
         RetainKey {
+            method: ZipMethod::Deflate,
             data_start: 2,
             ..key_of(&dropped)
         },
         RetainKey {
+            method: ZipMethod::Deflate,
             data_start: 3,
             ..key_of(&third)
         },
@@ -171,9 +186,9 @@ fn a_dropped_capture_rolls_the_spool_back() {
     capture_all(&mut store, keys[2], &third);
     store.seal();
     assert_eq!(store.used(), (first.len() + third.len()) as u64);
-    assert_eq!(replayed(&store, &keys[0]).unwrap(), first);
-    assert_eq!(replayed(&store, &keys[2]).unwrap(), third);
-    assert!(store.open(&keys[1]).is_none());
+    assert_eq!(replayed(&mut store, &keys[0]).unwrap(), first);
+    assert_eq!(replayed(&mut store, &keys[2]).unwrap(), third);
+    assert!(!store.holds(&keys[1]));
 }
 
 #[test]
@@ -244,11 +259,15 @@ fn payload(index: usize) -> Vec<u8> {
 }
 
 fn deflated_zip(entries: usize) -> Vec<u8> {
+    zip_of(entries, zip::CompressionMethod::Deflated)
+}
+
+fn zip_of(entries: usize, method: zip::CompressionMethod) -> Vec<u8> {
     use zip::write::SimpleFileOptions;
 
     let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
     let options = SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Deflated)
+        .compression_method(method)
         .unix_permissions(0o644);
     for index in 0..entries {
         zip.start_file(format!("dir/file{index}.txt"), options)
@@ -274,6 +293,7 @@ fn mixed_zip() -> Vec<u8> {
         ("deflated.txt", CompressionMethod::Deflated, payload(1)),
         ("empty.txt", CompressionMethod::Deflated, Vec::new()),
         ("bzip2.txt", CompressionMethod::Bzip2, payload(2)),
+        ("zstd.txt", CompressionMethod::Zstd, payload(3)),
     ];
     for (name, method, data) in entries {
         let options = SimpleFileOptions::default().compression_method(method);
@@ -455,7 +475,7 @@ fn an_entry_the_limits_would_refuse_is_not_captured() {
         assert!(store.capture(bomb).is_none(), "ratio");
 
         let config = SecurityConfig::default()
-            .with_max_file_size(1024)
+            .with_max_file_size(crate::non_zero!(1024))
             .validate()
             .unwrap();
         let mut small =
@@ -473,7 +493,7 @@ fn a_capture_stops_once_it_passes_the_declared_size() {
         capture.write_all(&data).unwrap();
         capture.write_all(&data).unwrap();
         capture.finish(200);
-        assert!(store.open(&key).is_none());
+        assert!(!store.holds(&key));
         assert_eq!(store.used(), 0);
     }
 }
@@ -481,7 +501,7 @@ fn a_capture_stops_once_it_passes_the_declared_size() {
 #[test]
 fn the_limit_follows_the_decoder_memory_of_the_config() {
     let config = SecurityConfig::default()
-        .with_max_decoder_memory(1024)
+        .with_max_decoder_memory(crate::non_zero!(1024))
         .validate()
         .unwrap();
     let plan = ReusePlan::of(DecodeReuse::Memory(ReuseLimit::MAX), &config);
@@ -493,7 +513,7 @@ fn the_limit_follows_the_decoder_memory_of_the_config() {
 }
 
 #[test]
-fn only_non_empty_deflate_entries_are_kept_and_replayed() {
+fn only_non_empty_compressed_entries_are_kept_and_replayed() {
     let bytes = mixed_zip();
     for mode in [
         DecodeReuse::Memory(ReuseLimit::DEFAULT),
@@ -503,12 +523,22 @@ fn only_non_empty_deflate_entries_are_kept_and_replayed() {
         let mut opened = open(&bytes, mode);
         extract(&mut opened, dir.path()).unwrap();
         let store = opened.archive.structure_mut().reuse_mut().unwrap();
-        assert_eq!(store.replays(), 1, "{mode:?}");
-        assert_eq!(store.used(), payload(1).len() as u64, "{mode:?}");
+        assert_eq!(store.replays(), 3, "{mode:?}");
+        let on_disk = match mode {
+            DecodeReuse::TempFile(_) => {
+                (payload(1).len() + payload(2).len() + payload(3).len()) as u64
+            }
+            _ => 0,
+        };
+        assert_eq!(store.used(), on_disk, "{mode:?}");
         assert_eq!(std::fs::read(dir.path().join("empty.txt")).unwrap(), b"");
         assert_eq!(
             std::fs::read(dir.path().join("bzip2.txt")).unwrap(),
             payload(2)
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join("zstd.txt")).unwrap(),
+            payload(3)
         );
     }
 }
@@ -532,4 +562,165 @@ fn nothing_is_kept_when_the_policy_skips_the_stream_checks() {
     )
     .unwrap();
     assert!(archive.structure_mut().reuse_mut().is_none());
+}
+
+#[test]
+fn bzip2_entries_are_decoded_once() {
+    const ENTRIES: usize = 40;
+    let bytes = zip_of(ENTRIES, zip::CompressionMethod::Bzip2);
+    let expected: Vec<_> = (0..ENTRIES).map(payload).collect();
+
+    let off_dir = tempfile::tempdir().unwrap();
+    let mut off = open(&bytes, DecodeReuse::Off);
+    extract(&mut off, off_dir.path()).unwrap();
+    let off_reads = off.read.load(Ordering::Relaxed);
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut opened = open(&bytes, DecodeReuse::Memory(ReuseLimit::DEFAULT));
+    extract(&mut opened, dir.path()).unwrap();
+    assert_eq!(tree(dir.path(), ENTRIES), expected);
+    let store = opened.archive.structure_mut().reuse_mut().unwrap();
+    assert_eq!(store.replays(), ENTRIES);
+    let reads = opened.read.load(Ordering::Relaxed);
+    assert!(
+        reads + bytes.len() as u64 / 2 < off_reads,
+        "{reads} bytes read with reuse, {off_reads} without"
+    );
+}
+
+fn counted_zip_reader(bytes: &[u8]) -> (crate::ArchiveReader<'static>, Arc<AtomicU64>) {
+    let read = Arc::new(AtomicU64::new(0));
+    let reader = Counting {
+        inner: Cursor::new(bytes.to_vec()),
+        read: Arc::clone(&read),
+    };
+    let reader = crate::ArchiveReader::seekable(reader, crate::SeekableFormat::Zip);
+    (reader, read)
+}
+
+#[test]
+fn extraction_into_memory_decodes_each_entry_once_and_keeps_the_same_files() {
+    const ENTRIES: usize = 40;
+    for method in [
+        zip::CompressionMethod::Deflated,
+        zip::CompressionMethod::Bzip2,
+        zip::CompressionMethod::Zstd,
+    ] {
+        let bytes = zip_of(ENTRIES, method);
+
+        let (reader, plain_reads) = counted_zip_reader(&bytes);
+        let mut plain = crate::MemorySink::default();
+        crate::extract_to_sink(
+            reader,
+            &mut plain,
+            &SecurityConfig::default(),
+            &crate::SinkOptions::default(),
+        )
+        .unwrap();
+
+        let (reader, reads) = counted_zip_reader(&bytes);
+        let (report, memory) = crate::extract_reader_to_memory(
+            reader,
+            &crate::MemoryExtractRequest::default(),
+            &mut NoopProgress,
+        )
+        .unwrap();
+        assert_eq!(report.files_extracted, ENTRIES);
+        assert_eq!(memory.into_entries(), plain.into_entries(), "{method:?}");
+        let reads = reads.load(Ordering::Relaxed);
+        let plain_reads = plain_reads.load(Ordering::Relaxed);
+        assert!(
+            reads + bytes.len() as u64 / 2 < plain_reads,
+            "{method:?}: {reads} bytes read with reuse, {plain_reads} without"
+        );
+    }
+}
+
+fn sink_capacity_of(error: &crate::ArchiveError) -> Option<u64> {
+    match error {
+        crate::ArchiveError::PartialExtraction { source, .. } => sink_capacity_of(source),
+        crate::ArchiveError::QuotaExceeded {
+            resource: crate::QuotaResource::SinkCapacity { max },
+        } => Some(*max),
+        _ => None,
+    }
+}
+
+#[test]
+fn a_replayed_entry_meets_the_sink_limit_at_the_same_byte_as_a_decoded_one() {
+    const ENTRIES: usize = 4;
+    let bytes = deflated_zip(ENTRIES);
+    let exact: u64 = (0..ENTRIES)
+        .map(|i| {
+            crate::MemorySink::charge_of(
+                std::path::Path::new(&format!("dir/file{i}.txt")),
+                payload(i).len() as u64,
+            )
+        })
+        .sum();
+    for (bytes_allowed, fits) in [(exact, true), (exact - 1, false)] {
+        let limit = crate::MemoryLimit::new(NonZeroU64::new(bytes_allowed).unwrap());
+        let request = crate::MemoryExtractRequest::default().with_limit(limit);
+        let (reader, _) = counted_zip_reader(&bytes);
+        let reused = crate::extract_reader_to_memory(reader, &request, &mut NoopProgress);
+
+        let mut plain = crate::MemorySink::new(limit);
+        let (reader, _) = counted_zip_reader(&bytes);
+        let decoded = crate::extract_to_sink(
+            reader,
+            &mut plain,
+            &SecurityConfig::default(),
+            &crate::SinkOptions::default(),
+        );
+
+        assert_eq!(reused.is_ok(), fits);
+        assert_eq!(decoded.is_ok(), fits);
+        if !fits {
+            assert_eq!(
+                sink_capacity_of(&reused.unwrap_err()),
+                sink_capacity_of(&decoded.unwrap_err())
+            );
+        }
+    }
+}
+
+#[test]
+fn kept_output_and_sink_stay_within_the_shared_limit_before_every_entry() {
+    let usage = SinkUsage::default();
+    let mut store = ReuseStore::new(plan(DecodeReuse::Memory(limit(1 << 20)))).unwrap();
+    store.share_limit_with_sink(usage.clone(), 100);
+
+    let entries: Vec<Vec<u8>> = [40_u8, 30, 20]
+        .iter()
+        .map(|n| vec![*n; usize::from(*n)])
+        .collect();
+    let keys: Vec<_> = entries
+        .iter()
+        .enumerate()
+        .map(|(i, data)| RetainKey {
+            method: ZipMethod::Deflate,
+            data_start: i as u64,
+            ..key_of(data)
+        })
+        .collect();
+    for (key, data) in keys.iter().zip(&entries) {
+        capture_all(&mut store, *key, data);
+    }
+    assert_eq!(store.used(), 90);
+
+    // The sink holds 50 bytes and the entry at hand charges 10, so the latest
+    // kept entries go until at most 40 bytes are kept.
+    usage.set(50);
+    store.make_room(10);
+    assert!(store.used() + 50 + 10 <= 100, "{}", store.used());
+    assert!(store.holds(&keys[0]));
+    assert!(!store.holds(&keys[1]));
+    assert!(!store.holds(&keys[2]));
+
+    let taken = store.take(&keys[0]).unwrap();
+    assert_eq!(store.used(), 0);
+    assert_matches!(
+        store.retained(taken, &keys[0]).unwrap(),
+        Retained::Bytes(bytes) if bytes == entries[0]
+    );
 }

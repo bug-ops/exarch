@@ -105,7 +105,7 @@ if [[ "$COMPARE_ONLY" != true ]]; then
         cargo bench --bench creation -- --quick
         echo ""
         echo "Running validation benchmarks (quick)..."
-        cargo bench --bench validation -- --quick
+        cargo bench --bench validation --features testing -- --quick
         echo ""
         echo "Running progress benchmarks (quick)..."
         cargo bench --bench progress -- --quick
@@ -117,7 +117,7 @@ if [[ "$COMPARE_ONLY" != true ]]; then
         cargo bench --bench creation
         echo ""
         echo "Running validation benchmarks..."
-        cargo bench --bench validation
+        cargo bench --bench validation --features testing
         echo ""
         echo "Running progress benchmarks..."
         cargo bench --bench progress

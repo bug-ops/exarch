@@ -452,7 +452,7 @@ fn ghsa_23hp_declared_size_respects_small_quota_despite_large_payload() {
     eof(&mut t);
 
     let config = SecurityConfig::default()
-        .with_max_file_size(64)
+        .with_max_file_size(exarch_core::non_zero!(64))
         .validate()
         .unwrap();
     let (result, temp) = extract_with_config(&t, &config);

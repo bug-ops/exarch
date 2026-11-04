@@ -161,7 +161,7 @@ fn measure_extract_peak_bytes(bytes: &[u8], budget: u64) -> usize {
     {
         let temp = tempfile::tempdir().unwrap();
         let config = SecurityConfig::default()
-            .with_max_tar_metadata_bytes(budget)
+            .with_max_tar_metadata_bytes(std::num::NonZeroU64::new(budget).unwrap())
             .validate()
             .unwrap();
         let archive = TarArchive::new(Cursor::new(bytes));
@@ -195,7 +195,8 @@ fn measure_list_peak_bytes(bytes: &[u8], budget: u64) -> usize {
             .unwrap()
             .write_all(bytes)
             .unwrap();
-        let config = SecurityConfig::default().with_max_tar_metadata_bytes(budget);
+        let config = SecurityConfig::default()
+            .with_max_tar_metadata_bytes(std::num::NonZeroU64::new(budget).unwrap());
         let _ = exarch_core::list_archive(&path, &config);
     }
     let stats = dhat::HeapStats::get();
@@ -215,7 +216,8 @@ fn measure_verify_peak_bytes(bytes: &[u8], budget: u64) -> usize {
             .unwrap()
             .write_all(bytes)
             .unwrap();
-        let config = SecurityConfig::default().with_max_tar_metadata_bytes(budget);
+        let config = SecurityConfig::default()
+            .with_max_tar_metadata_bytes(std::num::NonZeroU64::new(budget).unwrap());
         let _ = exarch_core::verify_archive(&path, &config);
     }
     let stats = dhat::HeapStats::get();

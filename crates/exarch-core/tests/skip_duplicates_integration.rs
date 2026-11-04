@@ -435,7 +435,7 @@ fn sevenz_dangling_symlink_at_destination_quota_not_consumed_when_skipped() {
     );
 
     let archive = make_sevenz_two_entries("link.txt", b"payload", "other.txt", b"second-file");
-    let config = SecurityConfig::default().with_max_file_count(1);
+    let config = SecurityConfig::default().with_max_file_count(exarch_core::non_zero!(1));
     let options = ExtractionOptions::default(); // skip_duplicates = true (default)
 
     let report = extract_archive_with_options(archive.path(), dest.path(), &config, &options)

@@ -195,10 +195,10 @@ impl<P: ParentCheck> SafeSymlink<P> {
         }
 
         // Validate target depth against max_path_depth
-        if target_depth > config.max_path_depth {
+        if target_depth > config.max_path_depth.get() {
             return Err(Violation::SymlinkTargetDepth {
                 depth: target_depth,
-                max: config.max_path_depth,
+                max: config.max_path_depth.get(),
             }
             .into());
         }

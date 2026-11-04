@@ -1,21 +1,23 @@
-//! Output of the structural census, kept so a deflate entry is decoded once.
+//! Output of the structural census, kept so a compressed entry is decoded once.
 //!
-//! The census decodes every deflate entry to find where its stream ends, and
-//! extraction used to decode it again. A [`ReuseStore`] keeps what the census
-//! decoded, in memory or in an unnamed temporary file, and extraction writes
-//! those bytes instead.
+//! The census decodes every deflate, bzip2 and zstd entry to find where its
+//! stream ends, and extraction used to decode it again. A [`ReuseStore`] keeps
+//! what the census decoded, in memory or in an unnamed temporary file, and
+//! extraction writes those bytes instead. Each kept entry is handed over once,
+//! when extraction reaches it, so the store shrinks as extraction proceeds.
 //!
 //! Keeping the output is an optimisation only:
 //!
 //! - an entry is kept only when the census decoded exactly its declared size
 //!   and the CRC-32 of the bytes equals the one the central directory states;
-//! - the bytes are checked against that CRC-32 and the length again when read
-//!   back, and a mismatch fails the read like the `zip` crate does for a
-//!   damaged entry;
-//! - whether an entry is replayed is decided once, in [`ReuseStore::open`],
+//! - the bytes are checked against that CRC-32 and the length again when they
+//!   are handed over, and a mismatch fails the entry like the `zip` crate does
+//!   for a damaged one;
+//! - whether an entry is replayed is decided once, in [`ReuseStore::take`],
 //!   before extraction reads a byte. Without a kept entry, extraction decodes
 //!   from the archive as it always did.
 
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::fmt;
 use std::fs::File;
@@ -33,9 +35,11 @@ use super::zip::ZIP_INVALID_CHECKSUM;
 use crate::DecodeReuse;
 use crate::SecurityConfig;
 use crate::config::Validated;
+use crate::formats::zip::ZipMethod;
 use crate::security::zipbomb::Compressed;
 use crate::security::zipbomb::Uncompressed;
 use crate::security::zipbomb::ratio_admitted;
+use crate::sink::SinkUsage;
 
 const SPOOL_BUFFER: usize = 64 * 1024;
 
@@ -70,10 +74,10 @@ impl ReusePlan {
         Self {
             mode,
             limit: configured
-                .min(config.max_decoder_memory)
-                .min(config.max_total_size),
-            max_entry: config.max_file_size,
-            max_ratio: config.max_compression_ratio,
+                .min(config.max_decoder_memory.get())
+                .min(config.max_total_size.ceiling()),
+            max_entry: config.max_file_size.ceiling(),
+            max_ratio: config.max_compression_ratio.get(),
         }
     }
 
@@ -86,16 +90,45 @@ impl ReusePlan {
 /// what the central directory declares for it, and its checksum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RetainKey {
+    pub(crate) method: ZipMethod,
     pub(crate) data_start: u64,
     pub(crate) compressed: Compressed,
     pub(crate) size: Uncompressed,
     pub(crate) crc32: u32,
 }
 
+/// An entry's kept output where the store holds it.
 #[derive(Debug)]
 enum Kept {
     Memory(Box<[u8]>),
     Spooled { offset: u64, len: u64 },
+}
+
+#[derive(Debug)]
+struct Slot {
+    sequence: u64,
+    kept: Kept,
+}
+
+/// The kept output of one entry, taken out of the store.
+#[derive(Debug)]
+pub struct Taken(Kept);
+
+/// Kept output ready to be written: owned bytes, or a reader over the spool.
+#[derive(Debug)]
+pub enum Retained<'s> {
+    /// Bytes checked against the entry's length and CRC-32.
+    Bytes(Vec<u8>),
+    /// A reader that checks them at its end.
+    Spooled(ReplayReader<Take<&'s File>>),
+}
+
+/// The memory an extraction into a sink holds, which the store shares the
+/// limit with.
+#[derive(Debug)]
+struct SinkBudget {
+    usage: SinkUsage,
+    limit: u64,
 }
 
 struct SpoolFile {
@@ -125,7 +158,10 @@ pub struct ReuseStore {
     limit: u64,
     used: u64,
     backend: Backend,
-    index: HashMap<RetainKey, Kept>,
+    index: HashMap<RetainKey, Slot>,
+    order: BTreeMap<u64, RetainKey>,
+    next_sequence: u64,
+    sink: Option<SinkBudget>,
     #[cfg(test)]
     replays: std::sync::atomic::AtomicUsize,
 }
@@ -158,6 +194,9 @@ impl ReuseStore {
             used: 0,
             backend,
             index: HashMap::new(),
+            order: BTreeMap::new(),
+            next_sequence: 0,
+            sink: None,
             #[cfg(test)]
             replays: std::sync::atomic::AtomicUsize::new(0),
         })
@@ -166,7 +205,49 @@ impl ReuseStore {
     fn disable(&mut self) {
         self.backend = Backend::Dead;
         self.index.clear();
+        self.order.clear();
         self.used = 0;
+    }
+
+    /// Shares `limit` with the sink behind `usage`: before each entry,
+    /// [`Self::make_room`] evicts kept output until what is kept plus what the
+    /// sink holds fits.
+    pub(crate) fn share_limit_with_sink(&mut self, usage: SinkUsage, limit: u64) {
+        self.sink = Some(SinkBudget { usage, limit });
+    }
+
+    /// Evicts the most recently kept entries, which extraction reaches last,
+    /// until at most `room` bytes are kept in memory. An evicted entry is
+    /// decoded again from the archive.
+    fn fit(&mut self, room: u64) {
+        if !matches!(self.backend, Backend::Memory) {
+            return;
+        }
+        while self.used > room {
+            let Some((_, key)) = self.order.pop_last() else {
+                return;
+            };
+            if let Some(Slot {
+                kept: Kept::Memory(bytes),
+                ..
+            }) = self.index.remove(&key)
+            {
+                self.used = self.used.saturating_sub(bytes.len() as u64);
+            }
+        }
+    }
+
+    /// Makes room for an entry of `charge` bytes in the sink: what is kept
+    /// plus what the sink holds plus `charge` stays within the shared limit.
+    /// Does nothing when no sink shares the limit.
+    pub(crate) fn make_room(&mut self, charge: u64) {
+        let Some(budget) = &self.sink else {
+            return;
+        };
+        let room = budget
+            .limit
+            .saturating_sub(budget.usage.get().saturating_add(charge));
+        self.fit(room);
     }
 
     /// Starts keeping the output of the entry `key` names, or `None` when it
@@ -184,11 +265,20 @@ impl ReuseStore {
             Backend::Spool(spool) => spool.len,
             Backend::Dead => return None,
         };
+        let buffer = if matches!(self.backend, Backend::Memory) {
+            let mut buffer = Vec::new();
+            buffer
+                .try_reserve_exact(usize::try_from(key.size.0).ok()?)
+                .ok()?;
+            buffer
+        } else {
+            Vec::new()
+        };
         Some(Capture {
             store: self,
             key,
             crc: Crc::new(),
-            buffer: Vec::new(),
+            buffer,
             start,
             written: 0,
             open: true,
@@ -206,28 +296,54 @@ impl ReuseStore {
         }
     }
 
-    /// The kept output of the entry `key` names, ready to read from its first
-    /// byte, or `None` when extraction must decode from the archive.
-    pub(crate) fn open(&self, key: &RetainKey) -> Option<ReplayReader<Stored<'_>>> {
-        let source = match (self.index.get(key)?, &self.backend) {
-            (Kept::Memory(bytes), _) => Stored::Memory(bytes),
-            (Kept::Spooled { offset, len }, Backend::Spool(spool)) => {
-                let mut file = spool.writer.get_ref();
-                file.seek(SeekFrom::Start(*offset)).ok()?;
-                Stored::Spool(file.take(*len))
-            }
-            (Kept::Spooled { .. }, Backend::Memory | Backend::Dead) => return None,
-        };
+    /// Hands over the kept output of the entry `key` names, or `None` when
+    /// extraction must decode from the archive. A memory-kept entry leaves the
+    /// store, which frees its bytes from the shared limit.
+    pub(crate) fn take(&mut self, key: &RetainKey) -> Option<Taken> {
+        let slot = self.index.remove(key)?;
+        self.order.remove(&slot.sequence);
+        if let Kept::Memory(bytes) = &slot.kept {
+            self.used = self.used.saturating_sub(bytes.len() as u64);
+        }
         #[cfg(test)]
         self.replays
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        Some(ReplayReader::new(source, *key))
+        Some(Taken(slot.kept))
+    }
+
+    /// Prepares what [`Self::take`] handed over for writing.
+    ///
+    /// # Errors
+    ///
+    /// Returns the checksum or length mismatch of damaged kept bytes, or the
+    /// I/O error of reaching the spool.
+    pub(crate) fn retained(&self, taken: Taken, key: &RetainKey) -> io::Result<Retained<'_>> {
+        match (taken.0, &self.backend) {
+            (Kept::Memory(bytes), _) => {
+                check_kept(&bytes, key)?;
+                Ok(Retained::Bytes(bytes.into_vec()))
+            }
+            (Kept::Spooled { offset, len }, Backend::Spool(spool)) => {
+                let mut file = spool.writer.get_ref();
+                file.seek(SeekFrom::Start(offset))?;
+                Ok(Retained::Spooled(ReplayReader::new(file.take(len), *key)))
+            }
+            (Kept::Spooled { .. }, Backend::Memory | Backend::Dead) => {
+                Err(io::ErrorKind::NotFound.into())
+            }
+        }
     }
 
     /// Entries opened for replay, for the tests that prove a single decode.
     #[cfg(test)]
     pub(crate) fn replays(&self) -> usize {
         self.replays.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Whether the entry `key` names is kept, for the tests.
+    #[cfg(test)]
+    pub(crate) fn holds(&self, key: &RetainKey) -> bool {
+        self.index.contains_key(key)
     }
 
     /// Bytes kept, for the tests that bound the store.
@@ -240,8 +356,8 @@ impl ReuseStore {
     /// it.
     #[cfg(test)]
     pub(crate) fn corrupt(&mut self) {
-        for kept in self.index.values_mut() {
-            if let Kept::Memory(bytes) = kept {
+        for slot in self.index.values_mut() {
+            if let Kept::Memory(bytes) = &mut slot.kept {
                 bytes[0] ^= 1;
                 return;
             }
@@ -289,16 +405,17 @@ impl Capture<'_> {
         }
         self.open = false;
         let kept = if matches!(self.store.backend, Backend::Memory) {
-            let mut bytes = std::mem::take(&mut self.buffer);
-            bytes.shrink_to_fit();
-            Kept::Memory(bytes.into_boxed_slice())
+            Kept::Memory(std::mem::take(&mut self.buffer).into_boxed_slice())
         } else {
             Kept::Spooled {
                 offset: self.start,
                 len: self.written,
             }
         };
-        self.store.index.insert(self.key, kept);
+        let sequence = self.store.next_sequence;
+        self.store.next_sequence += 1;
+        self.store.order.insert(sequence, self.key);
+        self.store.index.insert(self.key, Slot { sequence, kept });
     }
 }
 
@@ -350,26 +467,25 @@ impl Write for Capture<'_> {
     }
 }
 
-/// Where kept bytes are read from.
-///
-/// Replays from the temporary file share its one cursor, so only one reader
-/// may be live at a time (extraction reads one entry at a time).
-pub enum Stored<'s> {
-    Memory(&'s [u8]),
-    Spool(Take<&'s File>),
-}
-
-impl Read for Stored<'_> {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        match self {
-            Self::Memory(bytes) => bytes.read(buf),
-            Self::Spool(file) => file.read(buf),
-        }
+/// Checks kept bytes against the entry's declared length and CRC-32.
+fn check_kept(bytes: &[u8], key: &RetainKey) -> io::Result<()> {
+    if bytes.len() as u64 != key.size.0 {
+        return Err(io::ErrorKind::UnexpectedEof.into());
     }
+    let mut crc = Crc::new();
+    crc.update(bytes);
+    if crc.sum() != key.crc32 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            ZIP_INVALID_CHECKSUM,
+        ));
+    }
+    Ok(())
 }
 
 /// Reads kept bytes and checks them against the entry's declared length and
 /// CRC-32 at the end, failing as the `zip` crate does for a damaged entry.
+#[derive(Debug)]
 pub struct ReplayReader<S> {
     inner: S,
     crc: Crc,

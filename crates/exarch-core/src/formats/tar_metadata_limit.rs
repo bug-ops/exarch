@@ -150,8 +150,10 @@ use std::convert::Infallible;
 use std::io;
 use std::io::Read;
 use std::marker::PhantomData;
+use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::sync::PoisonError;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
@@ -161,6 +163,7 @@ use super::source_fault::TapSource;
 use super::tar_extension_headers::PrecedingEntry;
 use super::tar_extension_headers::check_entry_headers;
 use super::tar_extension_headers::check_trailing_headers;
+use crate::Limit;
 use crate::Result;
 use crate::SecurityConfig;
 use crate::Violation;
@@ -226,7 +229,7 @@ const CUMULATIVE_SYNTHETIC_CAP_BYTES: u64 = 1024 * 1024 * 1024;
 const DRAIN_CHUNK_BYTES: usize = 8192;
 
 /// Sentinel `allowance` value meaning "disarmed" (no cap on reads).
-const DISARMED: u64 = u64::MAX;
+const DISARMED: u64 = 0;
 
 /// Shared, atomics-only state behind [`TarReadBudget`] and [`BudgetedReader`].
 ///
@@ -235,14 +238,23 @@ const DISARMED: u64 = u64::MAX;
 /// required by the Node.js binding's blocking-thread-pool usage.
 struct BudgetState {
     /// The configured per-window byte limit; re-applied on every `arm()`.
-    limit: u64,
+    limit: NonZeroU64,
     /// The raw input behind the reader, when core metered it.
     source: TapSource,
     /// Sum of the declared sizes of every entry drained without a quota
     /// charge (see [`CheckedTarEntry::drain_skipped`]).
     skipped_declared: AtomicU64,
-    /// Decoded bytes drained from skipped entries under the ratio bound.
+    /// Decoded bytes read from skipped entries under the ratio bound.
     skipped_decoded: AtomicU64,
+    /// Whether the reader currently meters the payload of a skipped entry
+    /// against `skip_limits`. Set by [`CheckedTarEntry::mark_skipped`], cleared
+    /// by [`BudgetedEntries::next_entry`], the single reset point.
+    metering: AtomicBool,
+    /// The limits of the skipped-entry meter; identical for the whole archive.
+    skip_limits: OnceLock<SkipLimits>,
+    /// The bound the meter tripped on. Sticky: once set, `next_entry` refuses
+    /// to go on.
+    skip_trip: OnceLock<ZipBombDetails>,
     /// Set once an entry guard was abandoned: the stream may be mid-entry, so
     /// no further entry may be read.
     abandoned: AtomicBool,
@@ -282,6 +294,43 @@ impl BudgetState {
             .unwrap_or_else(PoisonError::into_inner)
             .extend_from_slice(bytes);
     }
+
+    /// Raw archive bytes consumed so far; under an [`TapSource::Opaque`] or
+    /// [`TapSource::Replay`] source this is the decoded byte count, so a
+    /// decoded/consumed ratio is about one and never exceeds any ratio limit.
+    fn source_consumed(&self) -> u64 {
+        match &self.source {
+            TapSource::Tapped(tap) => tap.consumed(),
+            TapSource::Opaque | TapSource::Replay(_) => self.total_read.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Charges the `n` bytes just read to the skipped-entry meter while it is
+    /// on, failing the read that crosses the bound.
+    fn meter_skipped(&self, n: usize) -> io::Result<()> {
+        if !self.metering.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        let Some(limits) = self.skip_limits.get() else {
+            return Ok(());
+        };
+        let decoded = saturating_add_counter(&self.skipped_decoded, n as u64);
+        let consumed = self.source_consumed();
+        if decoded <= limits.allowance(consumed) {
+            return Ok(());
+        }
+        let details = ZipBombDetails::new(
+            ZipBombScope::SkippedEntries,
+            Compressed(consumed),
+            Uncompressed(decoded),
+        );
+        self.metering.store(false, Ordering::Relaxed);
+        let _ = self.skip_trip.set(details);
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            SkippedEntriesExceeded(details),
+        ))
+    }
 }
 
 /// Cheap, cloneable handle used to arm/disarm the budget around the gap
@@ -302,7 +351,9 @@ impl TarReadBudget {
             .unwrap_or_else(PoisonError::into_inner)
             .clear();
         self.0.consumed.store(0, Ordering::Relaxed);
-        self.0.allowance.store(self.0.limit, Ordering::Relaxed);
+        self.0
+            .allowance
+            .store(self.0.limit.get(), Ordering::Relaxed);
     }
 
     /// Stops counting: subsequent reads pass through unmetered until the next
@@ -344,10 +395,15 @@ impl TarReadBudget {
         self.0.total_read.load(Ordering::Relaxed)
     }
 
+    /// The bound the skipped-entry meter tripped on, if it did.
+    fn skip_trip(&self) -> Option<ZipBombDetails> {
+        self.0.skip_trip.get().copied()
+    }
+
     /// Classifies an error `tar` raised while reading toward the next entry.
     fn classify(&self, e: &io::Error) -> crate::ArchiveError {
         budget_violation(e).unwrap_or_else(|| {
-            self.prefer_fault(crate::ArchiveError::InvalidArchive(format!(
+            self.prefer_fault(crate::ArchiveError::unclassified(format!(
                 "failed to read TAR entry: {e}"
             )))
         })
@@ -366,26 +422,10 @@ impl TarReadBudget {
         }
     }
 
-    /// Raw archive bytes consumed so far; under an [`TapSource::Opaque`]
-    /// source this is the decoded byte count, so a decoded/consumed ratio is
-    /// about one and never exceeds any ratio limit.
-    fn source_consumed(&self) -> u64 {
-        match &self.0.source {
-            TapSource::Tapped(tap) => tap.consumed(),
-            TapSource::Opaque => self.total_read(),
-        }
-    }
-
     /// Adds `declared` to the sum of skipped entries' declared sizes and
     /// returns the new sum, saturating.
     fn charge_skipped_declared(&self, declared: u64) -> u64 {
         saturating_add_counter(&self.0.skipped_declared, declared)
-    }
-
-    /// Adds `decoded` to the skipped-entry decoded-byte sum and returns the new
-    /// sum, saturating.
-    fn charge_skipped_decoded(&self, decoded: u64) -> u64 {
-        saturating_add_counter(&self.0.skipped_decoded, decoded)
     }
 
     /// Adds `synthetic` to the running cross-entry synthetic-byte sum.
@@ -459,6 +499,20 @@ impl std::fmt::Display for TarCumulativeSyntheticBudgetExceeded {
 
 impl std::error::Error for TarCumulativeSyntheticBudgetExceeded {}
 
+/// Marker error surfaced when the payload of a skipped entry decodes past the
+/// ratio bound. Recovered via [`budget_violation`] and converted into
+/// `ZipBomb { SkippedEntries }`.
+#[derive(Debug)]
+struct SkippedEntriesExceeded(ZipBombDetails);
+
+impl std::fmt::Display for SkippedEntriesExceeded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "skipped entries decode past the compression ratio bound")
+    }
+}
+
+impl std::error::Error for SkippedEntriesExceeded {}
+
 /// Marker error raised by the xz decoder wrapper when the stream needs more
 /// memory than `max_decoder_memory` allows. Recovered via [`budget_violation`]
 /// and converted into `QuotaExceeded { DecoderMemory }`.
@@ -526,6 +580,9 @@ pub fn budget_violation(e: &io::Error) -> Option<crate::ArchiveError> {
                 .into(),
             );
         }
+        if let Some(exceeded) = err.downcast_ref::<SkippedEntriesExceeded>() {
+            return Some(crate::ArchiveError::ZipBomb(exceeded.0));
+        }
         if let Some(exceeded) = err.downcast_ref::<DecoderMemoryExceeded>() {
             return Some(crate::ArchiveError::QuotaExceeded {
                 resource: crate::QuotaResource::DecoderMemory { max: exceeded.max },
@@ -572,6 +629,7 @@ impl<R: Read> Read for BudgetedReader<R> {
         if allowance == DISARMED {
             let n = self.inner.read(buf)?;
             self.state.total_read.fetch_add(n as u64, Ordering::Relaxed);
+            self.state.meter_skipped(n)?;
             return Ok(n);
         }
 
@@ -605,14 +663,18 @@ impl<R: Read> Read for BudgetedReader<R> {
         self.state.record(&buf[..n]);
         self.state.consumed.fetch_add(n as u64, Ordering::Relaxed);
         self.state.total_read.fetch_add(n as u64, Ordering::Relaxed);
+        self.state.meter_skipped(n)?;
         Ok(n)
     }
 }
 
 /// [`budgeted_reader_with`] over a stream whose raw input is not metered.
+// A test helper: a zero budget is a bug in the test itself.
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 #[must_use]
 pub fn budgeted_reader<R: Read>(inner: R, limit: u64) -> (BudgetedReader<R>, TarReadBudget) {
+    let limit = NonZeroU64::new(limit).expect("a test budget is non-zero");
     budgeted_reader_with(inner, limit, TapSource::Opaque)
 }
 
@@ -633,7 +695,7 @@ pub fn budgeted_reader<R: Read>(inner: R, limit: u64) -> (BudgetedReader<R>, Tar
 #[must_use]
 pub fn budgeted_reader_with<R: Read>(
     inner: R,
-    limit: u64,
+    limit: NonZeroU64,
     source: TapSource,
 ) -> (BudgetedReader<R>, TarReadBudget) {
     let state = Arc::new(BudgetState {
@@ -641,9 +703,12 @@ pub fn budgeted_reader_with<R: Read>(
         source,
         skipped_declared: AtomicU64::new(0),
         skipped_decoded: AtomicU64::new(0),
+        metering: AtomicBool::new(false),
+        skip_limits: OnceLock::new(),
+        skip_trip: OnceLock::new(),
         abandoned: AtomicBool::new(false),
         consumed: AtomicU64::new(0),
-        allowance: AtomicU64::new(limit),
+        allowance: AtomicU64::new(limit.get()),
         total_read: AtomicU64::new(0),
         cumulative_synthetic: AtomicU64::new(0),
         window: Mutex::new(Vec::new()),
@@ -707,6 +772,7 @@ pub struct TarEntryGuard<'a, 's, R: Read> {
     window_start: u64,
     budget: TarReadBudget,
     abandoned: bool,
+    skip_marked: bool,
     _borrow: PhantomData<&'s mut ()>,
 }
 
@@ -811,10 +877,10 @@ impl<'a, 's, R: Read> TarEntryGuard<'a, 's, R> {
 /// the next header (an entry the extension allowlist or a duplicate skipped).
 ///
 /// See [`CheckedTarEntry::drain_skipped`].
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SkipLimits {
-    per_file: u64,
-    total: u64,
+    per_file: Limit<NonZeroU64>,
+    total: Limit<NonZeroU64>,
     ratio: f64,
 }
 
@@ -828,7 +894,7 @@ impl SkipLimits {
         Self {
             per_file: config.max_file_size,
             total: config.max_total_size,
-            ratio: config.max_compression_ratio,
+            ratio: config.max_compression_ratio.get(),
         }
     }
 
@@ -888,25 +954,57 @@ impl<R: Read> CheckedTarEntry<'_, '_, R> {
     /// Returns [`crate::ArchiveError::ZipBomb`] with
     /// [`ZipBombScope::SkippedEntries`] when the bound is exceeded.
     pub fn drain_skipped(&mut self, limits: &SkipLimits) -> Result<()> {
-        let declared = self.0.entry.size();
-        let budget = self.0.budget.clone();
-        let skipped_declared = budget.charge_skipped_declared(declared);
-        if declared <= limits.per_file && skipped_declared <= limits.total {
+        if self.mark_skipped(limits) == SkipAdmission::Admitted {
             return Ok(());
         }
-        self.0.drain(|chunk| {
-            let decoded = budget.charge_skipped_decoded(chunk);
-            let consumed = budget.source_consumed();
-            if decoded > limits.allowance(consumed) {
-                return Err(crate::ArchiveError::ZipBomb(ZipBombDetails::new(
-                    ZipBombScope::SkippedEntries,
-                    Compressed(consumed),
-                    Uncompressed(decoded),
-                )));
-            }
-            Ok(())
-        })
+        let Ok(()) = self.0.drain::<Infallible>(|_| Ok(()));
+        self.0
+            .budget
+            .skip_trip()
+            .map_or(Ok(()), |details| Err(crate::ArchiveError::ZipBomb(details)))
     }
+
+    /// Declares the entry skipped without reading it, for a caller that reads
+    /// its payload itself (an integrity decode).
+    ///
+    /// Charges the declared size once, however often it is called. An entry
+    /// the quota would have admitted is left alone; any other has its payload
+    /// metered by the reader, under the bound [`drain_skipped`] documents,
+    /// until the next [`BudgetedEntries::next_entry`]. A read that crosses the
+    /// bound fails with an error [`budget_violation`] maps to
+    /// [`ZipBombScope::SkippedEntries`].
+    ///
+    /// [`drain_skipped`]: Self::drain_skipped
+    pub fn mark_skipped(&mut self, limits: &SkipLimits) -> SkipAdmission {
+        let budget = &self.0.budget;
+        if self.0.skip_marked {
+            return if budget.0.metering.load(Ordering::Relaxed) {
+                SkipAdmission::Metered
+            } else {
+                SkipAdmission::Admitted
+            };
+        }
+        self.0.skip_marked = true;
+        let declared = self.0.entry.size();
+        let skipped_declared = budget.charge_skipped_declared(declared);
+        if limits.per_file.admits(declared) && limits.total.admits(skipped_declared) {
+            return SkipAdmission::Admitted;
+        }
+        let first = budget.0.skip_limits.get_or_init(|| *limits);
+        debug_assert_eq!(first, limits);
+        budget.0.metering.store(true, Ordering::Relaxed);
+        SkipAdmission::Metered
+    }
+}
+
+/// How [`CheckedTarEntry::mark_skipped`] treats the payload of a skipped
+/// entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkipAdmission {
+    /// The quota admits the entry anyway; its payload is not metered.
+    Admitted,
+    /// The reader meters the payload against the skipped-entry bound.
+    Metered,
 }
 
 impl<'a, R: Read> std::ops::Deref for CheckedTarEntry<'a, '_, R> {
@@ -1019,10 +1117,15 @@ impl<'a, R: Read> BudgetedEntries<'a, R> {
         }
         if self.budget.0.abandoned.load(Ordering::Relaxed) {
             self.poisoned = true;
-            return Some(Err(crate::ArchiveError::InvalidArchive(
-                "TAR read continued after an abandoned entry".into(),
+            return Some(Err(crate::ArchiveError::unclassified(
+                "TAR read continued after an abandoned entry",
             )));
         }
+        if let Some(details) = self.budget.skip_trip() {
+            self.poisoned = true;
+            return Some(Err(crate::ArchiveError::ZipBomb(details)));
+        }
+        self.budget.0.metering.store(false, Ordering::Relaxed);
         if let Some(err) = self.budget.cumulative_synthetic_violation() {
             self.poisoned = true;
             return Some(Err(self.budget.classify(&err)));
@@ -1046,6 +1149,7 @@ impl<'a, R: Read> BudgetedEntries<'a, R> {
                 window_start: start,
                 budget: self.budget.clone(),
                 abandoned: false,
+                skip_marked: false,
                 _borrow: PhantomData,
             })),
         }
@@ -1281,6 +1385,41 @@ mod tests {
     }
 
     #[test]
+    fn a_drop_drain_trip_makes_the_next_entry_a_skipped_entries_bomb() {
+        use crate::formats::source_fault::SourceRead;
+        use crate::formats::source_fault::SourceTap;
+        use std::io::Write as _;
+
+        let tar = one_entry_tar("big.bin", &vec![0u8; 4 << 20]);
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        encoder.write_all(&tar).unwrap();
+        let gz = encoder.finish().unwrap();
+
+        let tap = SourceTap::default();
+        let decoder = flate2::read::GzDecoder::new(SourceRead::new(Cursor::new(gz), tap.clone()));
+        let (reader, budget) =
+            budgeted_reader_with(decoder, crate::non_zero!(4096), TapSource::Tapped(tap));
+        let mut archive = tar::Archive::new(reader);
+        let mut entries = budgeted_tar_entries(&mut archive, budget).unwrap();
+        let limits = SkipLimits {
+            per_file: crate::non_zero!(1024).into(),
+            total: crate::non_zero!(1024).into(),
+            ratio: 10.0,
+        };
+
+        let mut entry = entries.next_entry().unwrap().unwrap().check(4096).unwrap();
+        assert_eq!(entry.mark_skipped(&limits), SkipAdmission::Metered);
+        drop(entry);
+
+        let refused = entries.next_entry().unwrap().err().unwrap();
+        assert_matches!(
+            refused,
+            crate::ArchiveError::ZipBomb(d) if d.scope() == ZipBombScope::SkippedEntries
+        );
+        assert!(entries.next_entry().is_none(), "the error latches");
+    }
+
+    #[test]
     fn settle_abandons_the_entry_when_the_step_fails() {
         let data = one_entry_tar("file.txt", b"hello");
         let (reader, budget) = budgeted_reader(Cursor::new(data), 4096);
@@ -1318,9 +1457,12 @@ mod tests {
 
         let tap = SourceTap::default();
         let mut source = SourceRead::new(EioThenData(false), tap.clone());
-        let (_reader, budget) =
-            budgeted_reader_with(Cursor::new(Vec::new()), 16, TapSource::Tapped(tap));
-        let verdict = || ArchiveError::InvalidArchive("bad header".into());
+        let (_reader, budget) = budgeted_reader_with(
+            Cursor::new(Vec::new()),
+            crate::non_zero!(16),
+            TapSource::Tapped(tap),
+        );
+        let verdict = || ArchiveError::unclassified("bad header");
 
         source.read(&mut [0u8; 4]).unwrap_err();
         assert_matches!(

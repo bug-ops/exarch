@@ -31,10 +31,12 @@ export interface ExarchErrorBase extends Error {
    * failure, when it has one, and of every core `SECURITY_VIOLATION`
    * (`SecurityViolationSubCode`). The interfaces are discriminated by `writes`,
    * not `code`, so the pairing is not narrowed per code: `INVALID_ARCHIVE`
-   * carries `'TAR_AMBIGUITY'` or `'TAR_TRAILER'`, `SECURITY_VIOLATION` carries
+   * carries one of the `InvalidArchiveSubCode` values, `SECURITY_VIOLATION` carries
    * one of the `SecurityViolationSubCode` values.
    */
   subCode?: InvalidArchiveSubCode | SecurityViolationSubCode
+  /** The configuration setting or input an `INVALID_CONFIGURATION` error refused. */
+  setting?: ConfigSetting
   /**
    * The exception thrown by a progress callback, an `onEntry` callback or an
    * `AsyncIterable` archive. A thrown primitive is wrapped in an `Error` whose
@@ -107,8 +109,8 @@ export interface ExarchErrorCreationCallback extends ExarchErrorBase {
 }
 
 /**
- * An error raised by the binding itself rather than by exarch-core: a
- * negative size, an internal panic, a failed argument conversion. `code` is
+ * An error raised by the binding itself rather than by exarch-core: an
+ * internal panic, a failed argument conversion. `code` is
  * napi's status string (`GenericFailure`, `InvalidArg`, `StringExpected`, ...),
  * not an `ErrorCode`, and none of the other properties are set.
  */
@@ -116,6 +118,7 @@ export interface ExarchNativeError extends Error {
   code: string
   relaxableBy?: undefined
   subCode?: undefined
+  setting?: undefined
   writes?: undefined
   filesExtracted?: undefined
   bytesWritten?: undefined

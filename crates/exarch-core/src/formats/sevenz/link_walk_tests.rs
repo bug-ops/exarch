@@ -78,7 +78,7 @@ fn parse(bytes: &[u8]) -> Parsed {
 fn config(solid: bool) -> SecurityConfig<Validated> {
     SecurityConfig::default()
         .with_allow_solid_archives(solid)
-        .with_max_solid_block_memory(100 * 1024 * 1024)
+        .with_max_solid_block_memory(crate::non_zero!(100 * 1024 * 1024))
         .validate()
         .unwrap()
 }
@@ -204,8 +204,8 @@ fn a_block_over_the_ratio_limit_is_not_decoded() {
     let parsed = parse(&bytes);
     let strict = SecurityConfig::default()
         .with_allow_solid_archives(true)
-        .with_max_solid_block_memory(100 * 1024 * 1024)
-        .with_max_solid_compression_ratio(10.0)
+        .with_max_solid_block_memory(crate::non_zero!(100 * 1024 * 1024))
+        .with_max_solid_compression_ratio(crate::ratio_limit!(10.0))
         .validate()
         .unwrap();
 
@@ -252,7 +252,7 @@ fn an_error_from_the_receiver_ends_the_walk() {
         &table(&[0, 1]),
         &mut |_, _| {
             calls += 1;
-            Err(ArchiveError::InvalidArchive("stop".into()))
+            Err(ArchiveError::unclassified("stop"))
         },
     );
 
@@ -274,7 +274,7 @@ fn a_target_that_is_not_utf8_is_a_hard_error() {
         &mut |_, _| Ok(()),
     );
 
-    assert_matches!(result, Err(ArchiveError::InvalidArchive(reason)) if reason.contains("UTF-8"));
+    assert_matches!(result, Err(ArchiveError::InvalidArchive(reason)) if reason.to_string().contains("UTF-8"));
 }
 
 mod bytes_read {
@@ -367,7 +367,7 @@ mod bytes_read {
         let config = SecurityConfig::default()
             .with_allow_symlinks(true)
             .with_allow_solid_archives(true)
-            .with_max_solid_block_memory(100 * 1024 * 1024)
+            .with_max_solid_block_memory(crate::non_zero!(100 * 1024 * 1024))
             .validate()
             .unwrap();
         let out = tempfile::TempDir::new().unwrap();

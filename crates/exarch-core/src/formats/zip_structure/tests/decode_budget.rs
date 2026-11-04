@@ -260,7 +260,7 @@ fn findings_of_ignoring_streams(built: &BuiltZip) -> Vec<ZipInconsistency> {
     open_with(
         Cursor::new(built.bytes.clone()),
         StreamChecks::Skip,
-        u64::MAX,
+        crate::Limit::Unbounded,
         ZstdWindowLog::LIBZSTD_DEFAULT,
         crate::formats::zip_reuse::ReusePlan::OFF,
     )

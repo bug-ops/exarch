@@ -62,8 +62,8 @@ fn test_7z_security_config_integration() {
 
     let temp = TempDir::new().unwrap();
     let config = SecurityConfig::default()
-        .with_max_file_size(1024)
-        .with_max_compression_ratio(10_000.0)
+        .with_max_file_size(exarch_core::non_zero!(1024))
+        .with_max_compression_ratio(exarch_core::ratio_limit!(10_000.0))
         .validate()
         .unwrap();
 
@@ -172,7 +172,7 @@ fn test_7z_quota_file_count() {
 
     let temp = TempDir::new().unwrap();
     let config = SecurityConfig::default()
-        .with_max_file_count(1)
+        .with_max_file_count(exarch_core::non_zero!(1))
         .validate()
         .unwrap();
 
@@ -193,7 +193,7 @@ fn test_7z_quota_total_size() {
 
     let temp = TempDir::new().unwrap();
     let config = SecurityConfig::default()
-        .with_max_total_size(10)
+        .with_max_total_size(exarch_core::non_zero!(10))
         .validate()
         .unwrap();
 
@@ -220,7 +220,7 @@ fn test_7z_solid_archive_extraction_success() {
     let temp = TempDir::new().unwrap();
     let config = SecurityConfig::default()
         .with_allow_solid_archives(true)
-        .with_max_solid_block_memory(100 * 1024 * 1024)
+        .with_max_solid_block_memory(exarch_core::non_zero!(100 * 1024 * 1024))
         .validate()
         .unwrap();
 
@@ -249,8 +249,8 @@ fn test_7z_solid_archive_with_file_count_quota() {
     let temp = TempDir::new().unwrap();
     let config = SecurityConfig::default()
         .with_allow_solid_archives(true)
-        .with_max_solid_block_memory(100 * 1024 * 1024)
-        .with_max_file_count(1)
+        .with_max_solid_block_memory(exarch_core::non_zero!(100 * 1024 * 1024))
+        .with_max_file_count(exarch_core::non_zero!(1))
         .validate()
         .unwrap();
 
@@ -502,7 +502,7 @@ fn test_7z_partial_extraction_accurate_report() {
     let out_temp = TempDir::new().unwrap();
 
     let config = SecurityConfig::default()
-        .with_max_total_size(20)
+        .with_max_total_size(exarch_core::non_zero!(20))
         .validate()
         .unwrap();
     let result = archive.extract(

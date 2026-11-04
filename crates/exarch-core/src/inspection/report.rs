@@ -865,11 +865,19 @@ impl Heuristic {
     }
 }
 
-/// The permission bits an invalid-permissions refusal is about.
-const fn refused_mode(error: &ArchiveError) -> Option<RawMode> {
-    match error {
-        ArchiveError::InvalidPermissions { mode, .. } => Some(*mode),
-        _ => None,
+impl Finding {
+    /// The refusal of `error`, reported under `category`.
+    fn refusal(category: IssueCategory, error: &ArchiveError, message: String) -> Self {
+        let mode = match error {
+            ArchiveError::InvalidPermissions { mode, .. } => Some(*mode),
+            _ => None,
+        };
+        Self::Refusal {
+            category,
+            kind: error.ffi_kind(),
+            message,
+            mode,
+        }
     }
 }
 
@@ -1106,12 +1114,7 @@ impl VerificationIssue {
         Self {
             severity,
             entry_path,
-            finding: Finding::Refusal {
-                category,
-                kind: error.ffi_kind(),
-                message,
-                mode: refused_mode(error),
-            },
+            finding: Finding::refusal(category, error, message),
         }
     }
 }

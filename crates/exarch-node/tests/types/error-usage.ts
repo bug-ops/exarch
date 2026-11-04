@@ -77,6 +77,18 @@ export function pairedSubCode(err: ExarchCoreError): string | undefined {
   return undefined
 }
 
+export function entryNamePath(err: ExarchCoreError): string | undefined {
+  if (err.code === 'INVALID_ARCHIVE') {
+    return err.nonUtf8EntryPath
+  }
+  if (err.code === 'PATH_TRAVERSAL') {
+    // @ts-expect-error only an INVALID_ARCHIVE carries an entry path
+    const path: string = err.nonUtf8EntryPath
+    return path
+  }
+  return undefined
+}
+
 export function ioKindOf(err: ExarchCoreError): IoKind | undefined {
   if (err.code === 'IO_ERROR') {
     const kind: IoKind = err.ioKind

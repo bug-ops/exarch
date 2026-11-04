@@ -1041,6 +1041,9 @@ pub struct VerificationIssue {
     pub setting: Option<String>,
     /// The kind of an `IO_ERROR` refusal.
     pub io_kind: Option<IoKind>,
+    /// The permission bits (raw archive mode) of an `'Invalid Permissions'`
+    /// refusal or of an `'Executable File'` finding.
+    pub mode: Option<u32>,
 }
 
 impl TryFrom<exarch_core::inspection::VerificationIssue> for VerificationIssue {
@@ -1065,6 +1068,7 @@ impl TryFrom<exarch_core::inspection::VerificationIssue> for VerificationIssue {
                 Some(exarch_core::FfiKind::Io(io_kind)) => Some(IoKind::from(*io_kind)),
                 _ => None,
             },
+            mode: issue.mode().map(exarch_core::RawMode::get),
         })
     }
 }
@@ -1471,6 +1475,33 @@ mod tests {
         assert_eq!(issue.code.as_deref(), Some("SECURITY_VIOLATION"));
         assert_eq!(issue.sub_code.as_deref(), Some("ENCRYPTED"));
         assert_eq!(issue.relaxable_by, None);
+    }
+
+    #[test]
+    fn test_invalid_permissions_issue_carries_the_raw_mode() {
+        let error = exarch_core::ArchiveError::InvalidPermissions {
+            path: std::path::PathBuf::from("a"),
+            mode: exarch_core::RawMode::new(0o4755),
+        };
+        let core_issue = exarch_core::inspection::VerificationIssue::from_error(&error, None);
+
+        let issue = VerificationIssue::try_from(core_issue).unwrap();
+
+        assert_eq!(issue.mode, Some(0o4755));
+    }
+
+    #[test]
+    fn test_executable_heuristic_carries_the_raw_mode() {
+        let issue = VerificationIssue::try_from(exarch_core::inspection::VerificationIssue::new(
+            exarch_core::inspection::IssueSeverity::Low,
+            exarch_core::Finding::Heuristic(exarch_core::Heuristic::ExecutableFile {
+                mode: exarch_core::RawMode::new(0o755),
+            }),
+        ))
+        .unwrap();
+
+        assert_eq!(issue.mode, Some(0o755));
+        assert_eq!(issue.code, None);
     }
 
     #[test]

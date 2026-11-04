@@ -142,6 +142,7 @@ export interface ExarchNativeError extends Error {
   subCode?: undefined
   setting?: undefined
   ioKind?: undefined
+  nonUtf8EntryPath?: undefined
   writes?: undefined
   filesExtracted?: undefined
   bytesWritten?: undefined
@@ -155,6 +156,12 @@ export interface ExarchNativeError extends Error {
 export interface ExarchInvalidArchiveDetail {
   code: 'INVALID_ARCHIVE'
   subCode?: InvalidArchiveSubCode
+  /**
+   * The path of an `'ENTRY_NAME'` refusal for an entry name that is not valid
+   * UTF-8, written injectively: a backslash is `\x5C` and each invalid byte
+   * `\xNN`, so two distinct names never render alike.
+   */
+  nonUtf8EntryPath?: string
   relaxableBy?: undefined
   setting?: undefined
   ioKind?: undefined
@@ -167,6 +174,7 @@ export interface ExarchSecurityViolationDetail {
   relaxableBy?: PolicySetting
   setting?: undefined
   ioKind?: undefined
+  nonUtf8EntryPath?: undefined
 }
 
 /** A rejected setting or input. */
@@ -176,6 +184,7 @@ export interface ExarchInvalidConfigurationDetail {
   subCode?: undefined
   relaxableBy?: undefined
   ioKind?: undefined
+  nonUtf8EntryPath?: undefined
 }
 
 /** An I/O failure, with the kind core reported. */
@@ -194,6 +203,7 @@ export interface ExarchQuotaDetail {
   relaxableBy?: undefined
   setting?: undefined
   ioKind?: undefined
+  nonUtf8EntryPath?: undefined
 }
 
 /** A compression ratio refusal; `subCode` names what the ratio was measured over. */
@@ -203,6 +213,7 @@ export interface ExarchZipBombDetail {
   relaxableBy?: undefined
   setting?: undefined
   ioKind?: undefined
+  nonUtf8EntryPath?: undefined
 }
 
 /** Every other code carries no detail property. */
@@ -220,6 +231,7 @@ export interface ExarchPlainCodeDetail {
   relaxableBy?: undefined
   setting?: undefined
   ioKind?: undefined
+  nonUtf8EntryPath?: undefined
 }
 
 /** The pairing of a `code` with the properties it can carry. */
@@ -313,6 +325,7 @@ export interface HeuristicIssueDetail {
   relaxableBy?: undefined
   setting?: undefined
   ioKind?: undefined
+  nonUtf8EntryPath?: undefined
 }
 
 /**
@@ -2166,6 +2179,11 @@ export interface VerificationIssueFields {
   setting?: ConfigSetting
   /** The kind of an `IO_ERROR` refusal. */
   ioKind?: IoKind
+  /**
+   * The permission bits (raw archive mode) of an `'Invalid Permissions'`
+   * refusal or of an `'Executable File'` finding.
+   */
+  mode?: number
 }
 
 /**

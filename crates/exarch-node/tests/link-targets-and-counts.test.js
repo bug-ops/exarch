@@ -84,6 +84,7 @@ describe('7z symlink targets and link counting', () => {
     assert.throws(() => listArchiveSync(archive), {
       code: 'INVALID_ARCHIVE',
       subCode: 'ENTRY_NAME',
+      nonUtf8EntryPath: '\\xFFink0',
     });
   });
 

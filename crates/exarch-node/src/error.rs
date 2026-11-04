@@ -18,6 +18,8 @@
 //!   `QUOTA_EXCEEDED` and a [`ZipBombSubCode`] on every `ZIP_BOMB`.
 //! - `setting`: the [`ConfigSetting`] an `INVALID_CONFIGURATION` refused.
 //! - `ioKind`: the [`IoKind`] of an `IO_ERROR`.
+//! - `nonUtf8EntryPath`: the injectively escaped path of an `INVALID_ARCHIVE`
+//!   (`ENTRY_NAME`) refusal of an entry name that is not valid UTF-8.
 //! - `writes`, `filesExtracted`, `bytesWritten`, `filesSkipped`, `skipped`,
 //!   `warnings`: the fate of a partial extraction.
 //! - `cause`: the exception thrown by a JS progress callback.
@@ -788,6 +790,7 @@ struct ErrorProps {
     sub_code: Option<SubCode>,
     setting: Option<exarch_core::ConfigSetting>,
     io_kind: Option<IoKind>,
+    non_utf8_entry_path: Option<String>,
     details: Details,
     cause: Option<Error>,
 }
@@ -799,7 +802,20 @@ struct Described {
     props: ErrorProps,
 }
 
+/// The injective rendering of the entry path a listing or in-memory extraction
+/// refused for not being valid UTF-8.
+fn non_utf8_entry_path(err: &CoreError) -> Option<String> {
+    match err {
+        CoreError::InvalidArchive(exarch_core::Malformation::EntryPathNotUtf8 { path }) => {
+            Some(crate::utils::path_text(path))
+        }
+        CoreError::PartialExtraction(partial) => non_utf8_entry_path(partial.cause()),
+        _ => None,
+    }
+}
+
 fn describe_core(err: CoreError, cause: Option<Error>) -> Described {
+    let non_utf8_entry_path = non_utf8_entry_path(&err);
     let FfiErrorMessage {
         kind,
         description,
@@ -817,6 +833,7 @@ fn describe_core(err: CoreError, cause: Option<Error>) -> Described {
                 FfiKind::Io(io_kind) => Some(IoKind::from(io_kind)),
                 _ => None,
             },
+            non_utf8_entry_path,
             details: partial.map_or(Details::None, Details::Extraction),
             cause,
         },
@@ -832,6 +849,7 @@ fn describe_callback_over_success(operation: &str, details: Details, source: Err
             sub_code: None,
             setting: None,
             io_kind: None,
+            non_utf8_entry_path: None,
             details,
             cause: Some(source),
         },
@@ -847,6 +865,7 @@ fn describe_js_failure(code: JsCode, description: &str, source: Error) -> Descri
             sub_code: None,
             setting: None,
             io_kind: None,
+            non_utf8_entry_path: None,
             details: Details::None,
             cause: Some(source),
         },
@@ -892,6 +911,7 @@ fn describe(failure: Failure) -> Result<Described, Error> {
                     sub_code: None,
                     setting: None,
                     io_kind: None,
+                    non_utf8_entry_path: None,
                     details: Details::None,
                     cause: Some(source),
                 },
@@ -916,6 +936,7 @@ fn describe(failure: Failure) -> Result<Described, Error> {
                     sub_code: None,
                     setting: None,
                     io_kind: None,
+                    non_utf8_entry_path: None,
                     details: Details::None,
                     cause: reason,
                 },
@@ -943,6 +964,9 @@ fn apply(env: Env, described: Described) -> napi::Result<Error> {
     }
     if let Some(io_kind) = props.io_kind {
         obj.set("ioKind", io_kind.as_str())?;
+    }
+    if let Some(path) = props.non_utf8_entry_path {
+        obj.set("nonUtf8EntryPath", path)?;
     }
     match props.details {
         Details::None => {}
@@ -1603,6 +1627,25 @@ mod tests {
             problem: exarch_core::ConfigProblem::NotSet,
         });
         assert_eq!(d.props.code.as_str(), "INVALID_CONFIGURATION");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_non_utf8_entry_name_refusal_carries_the_escaped_path() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let path = PathBuf::from(std::ffi::OsStr::from_bytes(b"a\xFFb\\c"));
+        let d = described(CoreError::from(
+            exarch_core::Malformation::EntryPathNotUtf8 { path },
+        ));
+        assert_eq!(
+            d.props.non_utf8_entry_path.as_deref(),
+            Some("a\\xFFb\\x5Cc")
+        );
+        let d = described(CoreError::PathTraversal {
+            path: PathBuf::from("../x"),
+        });
+        assert_eq!(d.props.non_utf8_entry_path, None);
     }
 
     #[test]

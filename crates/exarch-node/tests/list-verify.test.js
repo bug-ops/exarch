@@ -247,6 +247,8 @@ describe('typed report enums wire values', () => {
     const issue = report.issues.find((i) => i.category === 'Executable File');
     assert.ok(issue, JSON.stringify(report.issues));
     assert.strictEqual(issue.severity, 'LOW');
+    assert.strictEqual(typeof issue.mode, 'number');
+    assert.ok((issue.mode & 0o111) !== 0, `mode ${issue.mode.toString(8)} has an execute bit`);
   });
 });
 
